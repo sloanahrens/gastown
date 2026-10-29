@@ -11,10 +11,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 )
+
+// DockerfilePath is the image's Dockerfile in the gt checkout, relative to the
+// repo root. BuildImage takes it as an absolute path; this is the one it names
+// for a caller reading the tree.
+const DockerfilePath = "deploy/daemon/Dockerfile"
+
+// DockerContext is the Docker CLI context every image build runs in: Docker
+// Desktop's VM on this Mac. The flag is explicit so the operator's shell cannot
+// swap the engine a build reaches by changing the global context.
+const DockerContext = "desktop-linux"
 
 // The package each binary is built from, inside its source tree. gt and bd are
 // pinned to the polecat image flow's own sources: a test keeps GTPackage equal
@@ -67,7 +78,15 @@ type Builder struct {
 	// rebuild_om job keeps at <town>/.runtime/om-src. om is built from its HEAD,
 	// in a clean worktree of it.
 	OMSrc string
+	// Dockerfile is the file BuildImage builds the image from: DockerfilePath in
+	// the gt checkout, as an absolute path. It must be absolute for the same
+	// reason Out must: docker resolves -f against the directory it runs in.
+	Dockerfile string
 }
+
+// ImageTag is the tag the daemon image for rev is built with: gt-daemon:<rev>.
+// It is a local tag only; nothing pulls this image by name.
+func ImageTag(rev string) string { return "gt-daemon:" + rev }
 
 // binary is one of the three builds: the checkout it is built from, the commit
 // of that checkout it is built at, and the package and stamp it is built with.
@@ -192,4 +211,108 @@ func isCommit(s string) bool {
 		}
 	}
 	return true
+}
+
+// BuildImage builds the daemon image from the binaries in b.Out and returns its
+// tag, ImageTag(rev). The build context is b.Out itself, so each COPY in
+// b.Dockerfile reads the binary BuildBinaries wrote there, and the image runs
+// exactly the code rev names.
+//
+// Every refusal comes before docker runs, so a refused call starts no build. A
+// build that fails returns an empty tag: a caller that logs and goes on never
+// deploys an image this call did not make.
+func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (string, error) {
+	if b.Run == nil {
+		return "", errors.New("daemonimage: no runner to build the image with")
+	}
+	rev = strings.TrimSpace(rev)
+	if rev == "" {
+		return "", errors.New("daemonimage: no rev to tag the image with")
+	}
+	if !isCommit(rev) {
+		return "", fmt.Errorf("daemonimage: rev %q is not a 7+ character hex commit", rev)
+	}
+	if b.Out == "" {
+		return "", errors.New("daemonimage: no build context for the image; Out is the directory the binaries are in")
+	}
+	if !filepath.IsAbs(b.Out) {
+		return "", fmt.Errorf("daemonimage: build context %q is not absolute; docker resolves the context and -f against the directory it runs in", b.Out)
+	}
+	if b.Dockerfile == "" {
+		return "", fmt.Errorf("daemonimage: no Dockerfile named; set Dockerfile to %s in the gt checkout", DockerfilePath)
+	}
+	if !filepath.IsAbs(b.Dockerfile) {
+		return "", fmt.Errorf("daemonimage: Dockerfile %q is not absolute; docker resolves -f against the directory it runs in, not the caller's", b.Dockerfile)
+	}
+	if info, err := os.Stat(b.Dockerfile); err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("daemonimage: Dockerfile %s is not a file; docker would report it only after the base image pulled", b.Dockerfile)
+	}
+	if err := b.checkImageBinaries(bins); err != nil {
+		return "", err
+	}
+	tag := ImageTag(rev)
+	argv := []string{"docker", "--context", DockerContext, "build", "-f", b.Dockerfile, "-t", tag, b.Out}
+	if err := b.Run(ctx, b.Out, dockerEnv(b.Environ), argv); err != nil {
+		return "", fmt.Errorf("daemonimage: building image %s failed: %w", tag, err)
+	}
+	return tag, nil
+}
+
+// checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
+// not read: gt, bd and om once each, as files in the build context. Docker would
+// report a missing or misplaced one only after the package install ran, so it is
+// caught here first, against what the caller passed.
+func (b Builder) checkImageBinaries(bins []string) error {
+	want := []string{"gt", "bd", "om"}
+	seen := make(map[string]bool, len(want))
+	for _, p := range bins {
+		name := filepath.Base(p)
+		if !slices.Contains(want, name) {
+			return fmt.Errorf("daemonimage: %q is not one of the image's binaries gt, bd and om", p)
+		}
+		if filepath.Dir(filepath.Clean(p)) != filepath.Clean(b.Out) {
+			return fmt.Errorf("daemonimage: %q is outside the build context %s, so the Dockerfile's COPY %s reads nothing", p, b.Out, name)
+		}
+		if seen[name] {
+			return fmt.Errorf("daemonimage: %s is listed twice among the binaries", name)
+		}
+		if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("daemonimage: %s is not a file in %s; build the binaries there first", p, b.Out)
+		}
+		seen[name] = true
+	}
+	for _, name := range want {
+		if !seen[name] {
+			return fmt.Errorf("daemonimage: no %s binary among the %d given; the image copies gt, bd and om", name, len(bins))
+		}
+	}
+	return nil
+}
+
+// dockerEnvKeys names the host variables the image build runs with: those that
+// find the docker CLI and read its config (DOCKER_CONFIG holds the registry
+// logins a base-image pull needs), plus the proxy and CA settings a pull through
+// a proxy needs. bdbuild.Env's compile settings stay out, and so do
+// DOCKER_CONTEXT and DOCKER_HOST: the build names its context in argv, so a
+// shell's choice of engine cannot reach it.
+var dockerEnvKeys = map[string]bool{
+	"PATH": true, "HOME": true, "TMPDIR": true, "DOCKER_CONFIG": true,
+	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
+	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
+	"http_proxy": true, "https_proxy": true, "no_proxy": true,
+}
+
+// dockerEnv is the environment the image build runs with, taken from environ in
+// its own order. A nil environ reads the host's.
+func dockerEnv(environ []string) []string {
+	if environ == nil {
+		environ = os.Environ()
+	}
+	env := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		if key, _, ok := strings.Cut(kv, "="); ok && dockerEnvKeys[key] {
+			env = append(env, kv)
+		}
+	}
+	return env
 }

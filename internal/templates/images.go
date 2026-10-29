@@ -14,6 +14,13 @@ const (
 	// same version the town's Dolt server runs.
 	DoltVersion = "2.3.2"
 
+	// DoltImageDigest pins the official Dolt image the daemon image copies its
+	// client from: the OCI index digest of dolthub/dolt:2.3.2 (linux/amd64 and
+	// linux/arm64), read with `crane digest dolthub/dolt:2.3.2` on 2026-10-29. A
+	// tag can move; the digest cannot, so the client the image carries is the one
+	// that was read. Moving DoltVersion means reading the new tag's digest.
+	DoltImageDigest = "sha256:9a077bc9c8cb6604a6d458c734096b482735f640144e5665b36161d560f14861"
+
 	// DaemonBaseImage is the base image the daemon image builds on, the same
 	// one deploy/polecat/Dockerfile uses.
 	DaemonBaseImage = "ubuntu:24.04"

@@ -192,6 +192,7 @@ var guardTriggers = []struct {
 	{"internal/cmdtree", "M\x00internal/templates/roles/polecat.md.tmpl\x00"},
 	{"internal/cmd", "M\x00Makefile\x00"},
 	{"internal/daemonimage", "M\x00Makefile\x00"},
+	{"internal/daemonimage", "M\x00deploy/daemon/Dockerfile\x00"},
 	{"internal/bdgate", "M\x00internal/session/lifecycle.go\x00"},
 	{"internal/polecat", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/beads", "M\x00internal/plugin/dispatch.go\x00"},
