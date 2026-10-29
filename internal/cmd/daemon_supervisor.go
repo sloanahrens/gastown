@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -24,36 +26,65 @@ import (
 // runDaemonEnableSupervisor refuses to provision in that state for the same
 // reason, and start has to honor the same rule from the other side.
 type daemonSupervisor struct {
-	name  string   // "launchd" / "systemd", for messages
-	start []string // argv that (re)starts the daemon through it
-	// stop is argv that stops the daemon through it and leaves the job
-	// unloaded, so the daemon stays down: signaling the process alone leaves
-	// a KeepAlive job to respawn it (gt-sq9e).
-	stop []string
-	// bootstrap is argv that loads the job when the service manager does not
-	// know it — the state a stop leaves behind on macOS, where bootout
-	// unloads and kickstart then cannot reach the job.
-	bootstrap []string
+	name string // "launchd" / "systemd" / "container", for messages
+	// start, stop and bootstrap build their argv when used, so the container
+	// kind's settings refusal (containerComposeProject) comes before any
+	// command runs rather than after an argv built on the live town's default.
+	start func() ([]string, error)
+	// stop leaves the job unloaded, so the daemon stays down: signaling the
+	// process alone leaves a KeepAlive job to respawn it (gt-sq9e).
+	stop func() ([]string, error)
+	// bootstrap loads the job when the service manager does not know it — the
+	// state a stop leaves behind on macOS, where bootout unloads and
+	// kickstart then cannot reach the job.
+	bootstrap func() ([]string, error)
 	load      string // how to load the job when start says it is not loaded
+	// fallback ends the start and restart errors, after load: how the
+	// operator gets back to a hand-run daemon. A file kind has a file to
+	// remove; the container kind has a town setting to unset.
+	fallback string
 
 	ctl *daemonControl // what runs the commands above and reads the job
 }
 
+// errSupervisorRefused marks a builder's refusal, in which no command ran.
+// The start and restart waits and loadJob's retry special-case it: waiting on
+// or retrying something that never ran can only misreport what happened.
+var errSupervisorRefused = errors.New("supervisor refused to run")
+
+// runArgv builds one of the supervisor's argv and runs it.
+func (s *daemonSupervisor) runArgv(build func() ([]string, error)) error {
+	argv, err := build()
+	if err != nil {
+		return fmt.Errorf("%w: %w", errSupervisorRefused, err)
+	}
+	return s.ctl.run(argv)
+}
+
 // daemonControl is what the daemon's start, stop, restart and status paths
-// take from the host: supervisor detection (GOOS and file paths), running
-// the supervisor's command, reading the job's live state, the direct spawn,
-// the stop, the running check and the waits between polls. realDaemonControl
-// wires the real ones; unit tests build their own.
+// take from the host: supervisor detection (the town's daemon.supervisor
+// setting first, then GOOS and the file paths), running the supervisor's
+// command, reading the job's live state, the direct spawn, the stop, the
+// running check and the waits between polls. realDaemonControl wires the real
+// ones; unit tests build their own.
 type daemonControl struct {
-	goos       string
-	plistPath  func() (string, error)
-	unitPath   func() (string, error)
-	uid        int
-	run        func(argv []string) error
-	stateFor   templates.SupervisorReader
-	spawn      func(townRoot string) (int, error)
-	stopDirect func(townRoot string) error
-	isRunning  func(townRoot string) (bool, int, error)
+	goos      string
+	plistPath func() (string, error)
+	unitPath  func() (string, error)
+	uid       int
+	// patrolConfig reads the town's daemon settings, of which the supervisor
+	// kind is what picks the container supervisor: GOOS cannot. A nil seam
+	// (the host-detection unit tests) reads as a town that sets none.
+	patrolConfig func(townRoot string) (*config.DaemonPatrolConfig, error)
+	// dockerContext is the --context every container argv carries. Empty
+	// means defaultDockerContext: the Docker Desktop context the live town
+	// runs in, never the global one, which nothing here may change.
+	dockerContext string
+	run           func(argv []string) error
+	stateFor      templates.SupervisorReader
+	spawn         func(townRoot string) (int, error)
+	stopDirect    func(townRoot string) error
+	isRunning     func(townRoot string) (bool, int, error)
 	// install writes a repaired supervisor file (installSupervisorFile).
 	install func(path, content string) error
 	// statusLine renders the Supervised: line of gt daemon status
@@ -69,10 +100,11 @@ type daemonControl struct {
 // realDaemonControl is the daemonControl of this host.
 func realDaemonControl() *daemonControl {
 	c := &daemonControl{
-		goos:      runtime.GOOS,
-		plistPath: templates.LaunchdPlistPath,
-		unitPath:  templates.SystemdUnitPath,
-		uid:       os.Getuid(),
+		goos:         runtime.GOOS,
+		plistPath:    templates.LaunchdPlistPath,
+		unitPath:     templates.SystemdUnitPath,
+		uid:          os.Getuid(),
+		patrolConfig: daemon.ReadPatrolConfig,
 		run: func(argv []string) error {
 			out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from detectDaemonSupervisor
 			if err != nil {
@@ -80,7 +112,7 @@ func realDaemonControl() *daemonControl {
 			}
 			return nil
 		},
-		stateFor:          templates.SupervisorJobState,
+		stateFor:          supervisorJobState,
 		stopDirect:        daemon.StopDaemon,
 		isRunning:         daemon.IsRunning,
 		install:           installSupervisorFile,
@@ -95,23 +127,87 @@ func realDaemonControl() *daemonControl {
 	return c
 }
 
-// supervisorFilePath returns the path of the supervisor file this host would
-// use for a daemon and the kind it belongs to ("launchd" / "systemd"), or
-// ("", "") on a host with no supported supervisor. The file need not exist.
-// Both the detection below and the file reconciliation use it, so the two
-// never disagree about which file they are talking about.
-func (c *daemonControl) supervisorFilePath() (path, kind string) {
+// supervisorJobState is the live job read of this host. The container kind has
+// no reader yet, so its state is unknown rather than "not loaded": a failed
+// start that read "not loaded" would go on to a bootstrap, and a failed restart
+// to a hand stop of the running daemon.
+func supervisorJobState(kind string) templates.SupervisorState {
+	if kind == config.SupervisorContainer {
+		return templates.SupervisorState{Kind: kind, LastExit: -1, Err: errContainerStateUnread}
+	}
+	return templates.SupervisorJobState(kind)
+}
+
+// errContainerStateUnread is the state read of a container town until the
+// container state reader exists.
+var errContainerStateUnread = errors.New("the container kind's state is not read yet")
+
+// defaultDockerContext is the Docker context the container supervisor's argv
+// carry unless the control names another: Docker Desktop's Linux engine, the
+// one the live town runs in. Nothing here reads or changes the global context.
+const defaultDockerContext = "desktop-linux"
+
+// townDaemonConfig reads the town's daemon settings, the document that holds
+// daemon.supervisor, container_name and compose_project. It is read for every
+// supervisor decision because only it says a town is a container town, and an
+// unreadable file is refused for every kind rather than guessed at. A nil seam
+// (the unit tests of host detection) reads as a town that sets none.
+func (c *daemonControl) townDaemonConfig(townRoot string) (*config.DaemonPatrolConfig, error) {
+	if c.patrolConfig == nil {
+		return nil, nil
+	}
+	return c.patrolConfig(townRoot)
+}
+
+// supervisorFilePath returns the file this town's supervisor is described by
+// and the kind it belongs to ("launchd" / "systemd" / "container"), or
+// ("", "") on a host with no supported supervisor. The plist or unit need not
+// exist — whether it does is what the detection reads — but the compose file
+// of a container town is checked when that supervisor is built, because a
+// missing one there is an error rather than "no supervisor". Both the
+// detection below and the file reconciliation use this, so the two never
+// disagree about which file they are talking about.
+//
+// A town that sets daemon.supervisor names the kind, which is the only way a
+// container town gets one: GOOS cannot tell it apart from the Mac it runs on.
+// A setting this host has no manager for is an error rather than a silent
+// fallback to the host's own, which would drive a manager the operator did
+// not ask for.
+func (c *daemonControl) supervisorFilePath(townRoot string, cfg *config.DaemonPatrolConfig) (path, kind string, err error) {
+	configured, err := cfg.SupervisorKind()
+	if err != nil {
+		return "", "", err
+	}
+	if configured == config.SupervisorContainer {
+		return composeFilePath(townRoot), config.SupervisorContainer, nil
+	}
+	hostPath, hostKind := c.hostSupervisorFile()
+	if configured != "" && configured != hostKind {
+		return "", "", fmt.Errorf("daemon.supervisor is %q, but this host has no %s: leave it unset to detect the host's service manager", configured, configured)
+	}
+	return hostPath, hostKind, nil
+}
+
+// hostSupervisorFile returns the supervisor file this host would use for a
+// daemon and the kind it belongs to, from GOOS alone.
+func (c *daemonControl) hostSupervisorFile() (path, kind string) {
 	switch c.goos {
 	case "darwin":
 		if p, err := c.plistPath(); err == nil {
-			return p, "launchd"
+			return p, config.SupervisorLaunchd
 		}
 	case "linux":
 		if p, err := c.unitPath(); err == nil {
-			return p, "systemd"
+			return p, config.SupervisorSystemd
 		}
 	}
 	return "", ""
+}
+
+// composeFilePath is where a container town's compose file lives: rendered
+// when the town is set up, read by the container supervisor's argv.
+func composeFilePath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", "container", "compose.yml")
 }
 
 // detectDaemonSupervisor reports the supervisor provisioned FOR townRoot, or
@@ -122,38 +218,190 @@ func (c *daemonControl) supervisorFilePath() (path, kind string) {
 // and then wait for this town's lock in vain. A file that exists but cannot
 // be read is an error, never "no supervisor": the whole point of the check
 // is to never hand-spawn beside a provisioned one.
+//
+// A town that sets daemon.supervisor to container gets the container
+// supervisor and never the host's: the setting is the one fact GOOS cannot
+// supply, so a launchd job the host still carries is not what this town runs
+// under.
 func (c *daemonControl) detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
-	p, kind := c.supervisorFilePath()
-	if kind == "" {
-		// No resolvable home means nowhere a plist could have been
-		// provisioned; same reading as templates.SupervisorStatus.
-		return nil, nil
+	cfg, err := c.townDaemonConfig(townRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading the town's daemon settings: %w", err)
 	}
-	isFor, err := templates.SupervisorFileIsFor(p, townRoot)
-	if err != nil || !isFor {
+	p, kind, err := c.supervisorFilePath(townRoot, cfg)
+	if err != nil {
 		return nil, err
 	}
 	switch kind {
-	case "launchd":
-		return &daemonSupervisor{
-			name:      "launchd",
-			start:     []string{"launchctl", "kickstart", "-k", fmt.Sprintf("gui/%d/%s", c.uid, templates.LaunchdLabel)},
-			stop:      []string{"launchctl", "bootout", fmt.Sprintf("gui/%d/%s", c.uid, templates.LaunchdLabel)},
-			bootstrap: []string{"launchctl", "bootstrap", fmt.Sprintf("gui/%d", c.uid), p},
-			load:      fmt.Sprintf("launchctl bootstrap gui/%d %s", c.uid, p),
-			ctl:       c,
-		}, nil
-	case "systemd":
-		return &daemonSupervisor{
-			name:      "systemd",
-			start:     []string{"systemctl", "--user", "restart", templates.SystemdUnit},
-			stop:      []string{"systemctl", "--user", "stop", templates.SystemdUnit},
-			bootstrap: []string{"systemctl", "--user", "enable", "--now", templates.SystemdUnit},
-			load:      "systemctl --user daemon-reload && systemctl --user enable --now " + templates.SystemdUnit,
-			ctl:       c,
-		}, nil
+	case "":
+		// No resolvable home means nowhere a plist could have been
+		// provisioned; same reading as templates.SupervisorStatus.
+		return nil, nil
+	case config.SupervisorContainer:
+		return c.containerSupervisor(p, cfg)
+	case config.SupervisorLaunchd, config.SupervisorSystemd:
+		isFor, err := templates.SupervisorFileIsFor(p, townRoot)
+		if err != nil || !isFor {
+			return nil, err
+		}
+		return c.fileSupervisor(p, kind), nil
 	}
 	return nil, nil
+}
+
+// containerSupervisor is the supervisor a town with daemon.supervisor
+// "container" runs its daemon under: docker compose, against the compose file
+// at <townRoot>/daemon/container/compose.yml.
+func (c *daemonControl) containerSupervisor(composeFile string, cfg *config.DaemonPatrolConfig) (*daemonSupervisor, error) {
+	// A missing compose file is an error, not "no supervisor": the town asked
+	// for the container kind, and a nil supervisor would hand-spawn a daemon
+	// beside the container the file describes.
+	if _, err := os.Stat(composeFile); err != nil {
+		return nil, fmt.Errorf("daemon.supervisor is container, so its compose file is required: %w", err)
+	}
+	compose := func(service ...string) func() ([]string, error) {
+		return func() ([]string, error) { return c.composeArgv(composeFile, cfg, service...) }
+	}
+	// The load hint is printed to the operator, so a refused town gets a
+	// placeholder for its project rather than the live default.
+	project, err := containerComposeProject(cfg)
+	if err != nil {
+		project = "<compose_project>"
+	}
+	return &daemonSupervisor{
+		name:      config.SupervisorContainer,
+		start:     compose("up", "-d", "daemon"),
+		stop:      compose("stop", "daemon"),
+		bootstrap: compose("up", "-d"),
+		load:      fmt.Sprintf("docker --context %s compose -p %s -f %s up -d daemon", c.dockerCLIContext(), project, composeFile),
+		fallback:  "or unset daemon.supervisor to run the daemon by hand",
+		ctl:       c,
+	}, nil
+}
+
+// composeArgv builds one container-supervisor argv: the explicit context, the
+// town's compose project and file, then the compose subcommand.
+func (c *daemonControl) composeArgv(composeFile string, cfg *config.DaemonPatrolConfig, service ...string) ([]string, error) {
+	project, err := containerComposeProject(cfg)
+	if err != nil {
+		return nil, err
+	}
+	argv := []string{"docker", "--context", c.dockerCLIContext(), "compose", "-p", project, "-f", composeFile}
+	return append(argv, service...), nil
+}
+
+// dockerCLIContext is the --context the container argv carry: the field, or
+// the default when a control does not set one.
+func (c *daemonControl) dockerCLIContext() string {
+	if c.dockerContext == "" {
+		return defaultDockerContext
+	}
+	return c.dockerContext
+}
+
+// townDaemonKind reads the town's daemon settings and reports whether they name
+// the container supervisor, whether or not that supervisor could be built: a
+// stop needs the kind even when detection failed (a missing compose file is a
+// detection error). The settings come back with it for the caller that has to
+// build the compose command detection could not. An unreadable read or a kind
+// this package does not know answers "cannot tell" as an error, and the caller
+// refuses rather than guesses.
+func (c *daemonControl) townDaemonKind(townRoot string) (*config.DaemonPatrolConfig, bool, error) {
+	cfg, err := c.townDaemonConfig(townRoot)
+	if err != nil {
+		return nil, false, err
+	}
+	kind, err := cfg.SupervisorKind()
+	if err != nil {
+		return cfg, false, err
+	}
+	return cfg, kind == config.SupervisorContainer, nil
+}
+
+// containerStopError is what a stop reports instead of signaling a container
+// town's lock-file PID. cause is why the supervisor did not settle the daemon
+// (an unknown job state, a stopped command that failed), or nil when the
+// supervisor ran and something else still holds the lock.
+//
+// The signal is the one thing that must not happen here: daemon.lock's PID
+// comes from the container's namespace, so on this host it names nothing — or,
+// once the number is reused, an unrelated process. The error carries the
+// compose command that does stop the container, built from the town's settings
+// when detection could not supply the supervisor.
+func (c *daemonControl) containerStopError(townRoot string, cfg *config.DaemonPatrolConfig, sup *daemonSupervisor, cause error) error {
+	lines := []string{"the daemon is still running, and a container town's daemon is stopped through its supervisor, never by a signal: daemon.lock's PID comes from the container's namespace and names no process on this host"}
+	if cause != nil {
+		lines = append(lines, cause.Error())
+	}
+	if argv, err := c.containerStopArgv(townRoot, cfg, sup); err != nil {
+		lines = append(lines, err.Error())
+	} else {
+		lines = append(lines, "stop it with: "+strings.Join(argv, " "))
+	}
+	return errors.New(strings.Join(lines, "\n  "))
+}
+
+// containerStopArgv builds the compose command that stops a container town's
+// daemon: the detected supervisor's own argv, or the same argv from the
+// settings townDaemonKind read when detection failed and left no supervisor.
+func (c *daemonControl) containerStopArgv(townRoot string, cfg *config.DaemonPatrolConfig, sup *daemonSupervisor) ([]string, error) {
+	if sup != nil {
+		return sup.stop()
+	}
+	return c.composeArgv(composeFilePath(townRoot), cfg, "stop", "daemon")
+}
+
+// containerComposeProject returns the compose project the container supervisor
+// runs under, and is where that supervisor refuses a town whose settings it
+// cannot act on. The project is the field the argv carry, so the refusal keys
+// on it: a town that left it unset would run under the live project's default
+// and could stop or replace the live container (gt-ix1kz). Both fields must
+// then be set, in the shapes ValidateContainerNames accepts.
+func containerComposeProject(cfg *config.DaemonPatrolConfig) (string, error) {
+	if cfg == nil || cfg.ComposeProjectSetting == "" {
+		return "", errContainerSettingsUnset
+	}
+	if err := cfg.ValidateContainerNames(); err != nil {
+		return "", err
+	}
+	return cfg.ComposeProject(), nil
+}
+
+// errContainerSettingsUnset is the refusal of a container town that does not
+// set both fields. It names both, since either one left out inherits the live
+// default.
+var errContainerSettingsUnset = errors.New("daemon.supervisor is container, but the town does not set both daemon.container_name and daemon.compose_project: set both, so a scratch town cannot act on the live daemon's container")
+
+// fileSupervisor is the launchd or systemd supervisor, whose argv are fixed
+// once the file path is known.
+func (c *daemonControl) fileSupervisor(p, kind string) *daemonSupervisor {
+	argv := func(a ...string) func() ([]string, error) {
+		return func() ([]string, error) { return a, nil }
+	}
+	switch kind {
+	case config.SupervisorLaunchd:
+		job := fmt.Sprintf("gui/%d/%s", c.uid, templates.LaunchdLabel)
+		return &daemonSupervisor{
+			name:      config.SupervisorLaunchd,
+			start:     argv("launchctl", "kickstart", "-k", job),
+			stop:      argv("launchctl", "bootout", job),
+			bootstrap: argv("launchctl", "bootstrap", fmt.Sprintf("gui/%d", c.uid), p),
+			load:      fmt.Sprintf("launchctl bootstrap gui/%d %s", c.uid, p),
+			fallback:  "or remove its file to run the daemon by hand",
+			ctl:       c,
+		}
+	case config.SupervisorSystemd:
+		return &daemonSupervisor{
+			name:      config.SupervisorSystemd,
+			start:     argv("systemctl", "--user", "restart", templates.SystemdUnit),
+			stop:      argv("systemctl", "--user", "stop", templates.SystemdUnit),
+			bootstrap: argv("systemctl", "--user", "enable", "--now", templates.SystemdUnit),
+			load:      "systemctl --user daemon-reload && systemctl --user enable --now " + templates.SystemdUnit,
+			fallback:  "or remove its file to run the daemon by hand",
+			ctl:       c,
+		}
+	}
+	return nil
 }
 
 // syncSupervisorFile brings an installed supervisor file up to date with the
@@ -176,8 +424,22 @@ func (c *daemonControl) detectDaemonSupervisor(townRoot string) (*daemonSupervis
 // separate and deliberate: both managers cache a job definition at load time,
 // so a changed file reaches the running job only through the unload and load
 // that startFromFile does, never through an in-place restart.
+//
+// A container town is left out of this: its supervisor file is the compose
+// file, and templates.SupervisorFileRepair repairs launchd's ExitTimeOut only,
+// so there is nothing here to rewrite. A launchd plist the host still carries is
+// not this town's supervisor, and is left as it is.
 func (c *daemonControl) syncSupervisorFile(townRoot string) (rewritten bool) {
-	path, kind := c.supervisorFilePath()
+	cfg, err := c.townDaemonConfig(townRoot)
+	if err != nil {
+		style.PrintWarning("could not read the town's daemon settings: %v", err)
+		return false
+	}
+	path, kind, err := c.supervisorFilePath(townRoot, cfg)
+	if err != nil {
+		style.PrintWarning("could not tell which supervisor file this town uses: %v", err)
+		return false
+	}
 	if kind == "" {
 		return false
 	}
@@ -278,7 +540,7 @@ func (s *daemonSupervisor) startFromFile() error {
 	// fails, and startFromFile is also reached from start, where "not loaded"
 	// (the state `gt daemon stop` leaves) is ordinary.
 	if st := s.ctl.stateFor(s.name); st.Err == nil && st.Loaded {
-		if err := s.ctl.run(s.stop); err != nil {
+		if err := s.runArgv(s.stop); err != nil {
 			// Only a job that is still loaded means the unload did not
 			// happen, and then that job is still supervising the daemon.
 			if st := s.ctl.stateFor(s.name); st.Err != nil || st.Loaded {
@@ -320,8 +582,12 @@ func (s *daemonSupervisor) loadJob() error {
 		if attempt > 0 {
 			s.ctl.sleep(s.ctl.loadRetryInterval)
 		}
-		if err = s.ctl.run(s.bootstrap); err == nil {
+		if err = s.runArgv(s.bootstrap); err == nil {
 			return nil
+		}
+		if errors.Is(err, errSupervisorRefused) {
+			// Nothing ran, so another attempt would refuse identically.
+			return err
 		}
 		if st := s.ctl.stateFor(s.name); st.Err == nil && st.Loaded {
 			return nil
@@ -362,23 +628,26 @@ func (c *daemonControl) startDaemon(townRoot string) (via string, pid int, err e
 			// the job has to be loaded from it rather than restarted in place.
 			runErr = sup.startFromFile()
 		} else {
-			runErr = c.run(sup.start)
+			runErr = sup.runArgv(sup.start)
 			if runErr != nil {
 				// kickstart / restart reach only a job the service manager knows.
 				// One that gt daemon stop unloaded is bootstrapped instead, so that
 				// a stop-then-start pair leaves a supervised daemon rather than the
 				// hand spawn that recreates the crash loop (gt-3jrm).
 				if st := c.stateFor(sup.name); st.Err == nil && !st.Loaded {
-					runErr = c.run(sup.bootstrap)
+					runErr = sup.runArgv(sup.bootstrap)
 				}
 			}
 		}
 		if runErr != nil {
-			// The command may have failed after starting the daemon.
-			if pid, err := c.waitForDaemon(townRoot); err == nil {
-				return sup.name, pid, nil
+			// The command may have failed after starting the daemon. A refusal
+			// is not that: nothing ran.
+			if !errors.Is(runErr, errSupervisorRefused) {
+				if pid, err := c.waitForDaemon(townRoot); err == nil {
+					return sup.name, pid, nil
+				}
 			}
-			return sup.name, 0, fmt.Errorf("%s is provisioned for this town but could not start the daemon: %v\n  load it with: %s\n  or remove its file to run the daemon by hand", sup.name, runErr, sup.load)
+			return sup.name, 0, fmt.Errorf("%s is provisioned for this town but could not start the daemon: %v\n  load it with: %s\n  %s", sup.name, runErr, sup.load, sup.fallback)
 		}
 		pid, err = c.waitForDaemon(townRoot)
 		if err != nil {
@@ -511,7 +780,7 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 		// next stop this restart causes — and for every one after it.
 		runErr = sup.startFromFile()
 	} else {
-		runErr = c.run(sup.start)
+		runErr = sup.runArgv(sup.start)
 		if runErr != nil {
 			// kickstart reaches only a job the manager knows. The daemon that
 			// is up is then running outside its supervisor (the job was
@@ -526,11 +795,14 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 	}
 	if runErr != nil {
 		// The command may have failed after the job came up; a live daemon
-		// that is not the old one is what the caller asked for either way.
-		if pid, waitErr := c.waitForRestart(townRoot, oldPID); waitErr == nil {
-			return sup.name, pid, nil
+		// that is not the old one is what the caller asked for either way. A
+		// refusal is not that: nothing ran.
+		if !errors.Is(runErr, errSupervisorRefused) {
+			if pid, waitErr := c.waitForRestart(townRoot, oldPID); waitErr == nil {
+				return sup.name, pid, nil
+			}
 		}
-		return sup.name, 0, fmt.Errorf("%s is provisioned for this town but could not restart the daemon: %v\n  load it with: %s\n  or remove its file to run the daemon by hand", sup.name, runErr, sup.load)
+		return sup.name, 0, fmt.Errorf("%s is provisioned for this town but could not restart the daemon: %v\n  load it with: %s\n  %s", sup.name, runErr, sup.load, sup.fallback)
 	}
 	pid, err = c.waitForRestart(townRoot, oldPID)
 	if err != nil {
