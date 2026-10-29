@@ -265,7 +265,7 @@ func (t *Target) runInVolume(ctx context.Context, volume, command string, args .
 // failed and left the volume as it was.
 func commandError(ctx context.Context, command string, err error) error {
 	if ctx.Err() != nil {
-		return fmt.Errorf("%s: cancelled; its outcome is unknown", command)
+		return fmt.Errorf("%s: canceled; its outcome is unknown", command)
 	}
 	return fmt.Errorf("%s: %w", command, err)
 }

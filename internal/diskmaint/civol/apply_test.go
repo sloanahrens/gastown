@@ -594,10 +594,10 @@ func TestApplyCanceledDuringARemove(t *testing.T) {
 	if len(result.Done) != 0 || len(result.Failed) == 0 {
 		t.Fatalf("done = %v, failed = %v, want the cut-short volume recorded as failed", doneRefs(result), result.Failed)
 	}
-	// A cancelled rm may have removed part of its paths, so the record says the
+	// A canceled rm may have removed part of its paths, so the record says the
 	// outcome is unknown rather than claiming the volume is as it was.
 	for _, f := range result.Failed {
-		if !strings.Contains(f.Err, "cancelled") || !strings.Contains(f.Err, "unknown") {
+		if !strings.Contains(f.Err, "canceled") || !strings.Contains(f.Err, "unknown") {
 			t.Fatalf("failure = %q, want it to say the outcome is unknown", f.Err)
 		}
 	}
@@ -622,8 +622,8 @@ func TestApplyCanceledDuringAPrune(t *testing.T) {
 	if len(result.Failed) != 1 || result.Failed[0].Action.Kind != pruneKind {
 		t.Fatalf("failed = %v, want the builder prune only", result.Failed)
 	}
-	if got := result.Failed[0].Err; !strings.Contains(got, "cancelled") || !strings.Contains(got, "unknown") {
-		t.Fatalf("failure = %q, want it to say the cancelled prune's outcome is unknown", got)
+	if got := result.Failed[0].Err; !strings.Contains(got, "canceled") || !strings.Contains(got, "unknown") {
+		t.Fatalf("failure = %q, want it to say the canceled prune's outcome is unknown", got)
 	}
 }
 
