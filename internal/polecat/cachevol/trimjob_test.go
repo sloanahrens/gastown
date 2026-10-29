@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -414,7 +415,7 @@ func TestBuildTrimManifestCarriesAListPastTheShardCeilingInTheClaim(t *testing.T
 
 	// The cleanup selector has to reach the Job a claim-carried trim applies, as it reaches a shard
 	// trim's.
-	if sel := TrimSelector(); !labelSelectorMatches(sel, job.Metadata.Labels) || !labelSelectorMatches(sel, job.Spec.Template.Metadata.Labels) {
+	if sel := TrimSelector(); !mustSelect(t, sel, job.Metadata.Labels) || !mustSelect(t, sel, job.Spec.Template.Metadata.Labels) {
 		t.Errorf("selector %q misses the claim-carried Job or its pods", sel)
 	}
 
@@ -676,19 +677,122 @@ func TestTrimManifestExportsNoJobAccessor(t *testing.T) {
 	}
 }
 
-// labelSelectorMatches reports whether sel, a comma-joined list of key=value terms that must all
-// hold, selects an object carrying labels. An empty selector matches nothing.
-func labelSelectorMatches(sel string, labels map[string]string) bool {
-	if sel == "" {
-		return false
-	}
+// Label names, values and prefixes follow the Kubernetes label grammar: a name and a value are at
+// most 63 characters, each starting and ending with a letter or digit (a value may be empty), and a
+// key may carry a DNS-subdomain prefix before a slash.
+var (
+	labelNameRE   = regexp.MustCompile(`^([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]$`)
+	labelValueRE  = regexp.MustCompile(`^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$`)
+	labelPrefixRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+)
+
+// selects reports whether sel, a Kubernetes label selector, selects an object carrying labels. sel is
+// a comma-joined list of requirements that must all hold: key=value and key==value need the key to
+// carry that value, and key!=value holds when the key is absent or carries another value. It returns
+// an error for a selector the API server refuses, so a malformed selector is never read as a
+// non-match.
+func selects(sel string, labels map[string]string) (bool, error) {
+	matched := true
 	for _, term := range strings.Split(sel, ",") {
-		key, value, ok := strings.Cut(term, "=")
-		if !ok || labels[key] != value {
-			return false
+		key, value, negated, err := parseRequirement(term)
+		if err != nil {
+			return false, err
+		}
+		if got, present := labels[key]; (present && got == value) == negated {
+			matched = false
 		}
 	}
-	return true
+	return matched, nil
+}
+
+// parseRequirement splits one requirement of a selector into its key, value and operator, and checks
+// the key and the value against the label grammar.
+func parseRequirement(term string) (key, value string, negated bool, err error) {
+	key, value, found := strings.Cut(term, "!=")
+	negated = found
+	if !found {
+		key, value, found = strings.Cut(term, "=")
+		value = strings.TrimPrefix(value, "=")
+	}
+	if !found || !validLabelKey(key) || !validLabelValue(value) {
+		return "", "", false, fmt.Errorf("requirement %q is not key=value, key==value or key!=value over label names and values", term)
+	}
+	return key, value, negated, nil
+}
+
+func validLabelKey(key string) bool {
+	prefix, name, prefixed := strings.Cut(key, "/")
+	if !prefixed {
+		name = key
+	} else if len(prefix) > 253 || !labelPrefixRE.MatchString(prefix) {
+		return false
+	}
+	return len(name) <= 63 && labelNameRE.MatchString(name)
+}
+
+func validLabelValue(value string) bool {
+	return len(value) <= 63 && labelValueRE.MatchString(value)
+}
+
+// mustSelect is selects for a selector the test takes as valid: one the server would refuse fails the test.
+func mustSelect(t *testing.T, sel string, labels map[string]string) bool {
+	t.Helper()
+	got, err := selects(sel, labels)
+	if err != nil {
+		t.Fatalf("selector %q: %v", sel, err)
+	}
+	return got
+}
+
+// TestSelectsFollowsTheServerGrammar pins the evaluator the selector tests rely on: the operators, and
+// the AND across requirements, behave as the API server's label selectors do.
+func TestSelectsFollowsTheServerGrammar(t *testing.T) {
+	t.Parallel()
+	labels := map[string]string{"app.kubernetes.io/name": "polecat-cache-trim", "app.kubernetes.io/managed-by": "gt"}
+	for _, tc := range []struct {
+		sel  string
+		want bool
+	}{
+		{"app.kubernetes.io/name=polecat-cache-trim", true},
+		{"app.kubernetes.io/name==polecat-cache-trim", true},
+		{"app.kubernetes.io/name=other", false},
+		{"app.kubernetes.io/name!=other", true},
+		{"app.kubernetes.io/name!=polecat-cache-trim", false},
+		{"app.kubernetes.io/owner!=gt", true},
+		{"app.kubernetes.io/owner=gt", false},
+		{"app.kubernetes.io/name=polecat-cache-trim,app.kubernetes.io/managed-by=gt", true},
+		{"app.kubernetes.io/name=polecat-cache-trim,app.kubernetes.io/managed-by=other", false},
+	} {
+		got, err := selects(tc.sel, labels)
+		if err != nil {
+			t.Fatalf("selects(%q): %v", tc.sel, err)
+		}
+		if got != tc.want {
+			t.Errorf("selects(%q) = %v, want %v", tc.sel, got, tc.want)
+		}
+	}
+}
+
+// TestSelectsRefusesWhatTheServerRefuses pins the refusal branch: a selector outside the label grammar
+// is an error, never a non-match a deletion would read as selecting nothing.
+func TestSelectsRefusesWhatTheServerRefuses(t *testing.T) {
+	t.Parallel()
+	labels := map[string]string{"name": "x"}
+	for _, sel := range []string{
+		"",
+		"name",
+		"name=x,",
+		"name=two words",
+		"name=a=b",
+		"-name=x",
+		"name=-x",
+		"/name=x",
+		"name=" + strings.Repeat("a", 64),
+	} {
+		if got, err := selects(sel, labels); err == nil {
+			t.Errorf("selects(%q) = %v with no error, want a refusal", sel, got)
+		}
+	}
 }
 
 // TestTrimSelectorMatchesEveryShardAndTheJobs pins the cleanup's selector across both routes: it finds
@@ -710,15 +814,15 @@ func TestTrimSelectorMatchesEveryShardAndTheJobs(t *testing.T) {
 			t.Fatalf("the shard trim applies %d shards, want the several the fixture makes", len(m.Shards()))
 		}
 		for _, shard := range m.Shards() {
-			if !labelSelectorMatches(sel, shard.Metadata.Labels) {
+			if !mustSelect(t, sel, shard.Metadata.Labels) {
 				t.Errorf("selector %q misses shard %s, labelled %v", sel, shard.Metadata.Name, shard.Metadata.Labels)
 			}
 		}
 		for _, job := range m.jobs() {
-			if !labelSelectorMatches(sel, job.Metadata.Labels) {
+			if !mustSelect(t, sel, job.Metadata.Labels) {
 				t.Errorf("selector %q misses Job %s, labelled %v", sel, job.Metadata.Name, job.Metadata.Labels)
 			}
-			if !labelSelectorMatches(sel, job.Spec.Template.Metadata.Labels) {
+			if !mustSelect(t, sel, job.Spec.Template.Metadata.Labels) {
 				t.Errorf("selector %q misses the pods of Job %s, labelled %v", sel, job.Metadata.Name, job.Spec.Template.Metadata.Labels)
 			}
 		}
@@ -737,10 +841,10 @@ func TestTrimSelectorLeavesTheSeedJobAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildSeedJob: %v", err)
 	}
-	if labelSelectorMatches(TrimSelector(), seed.Metadata.Labels) {
+	if mustSelect(t, TrimSelector(), seed.Metadata.Labels) {
 		t.Errorf("selector %q selects the seed Job, labelled %v", TrimSelector(), seed.Metadata.Labels)
 	}
-	if labelSelectorMatches(TrimSelector(), seed.Spec.Template.Metadata.Labels) {
+	if mustSelect(t, TrimSelector(), seed.Spec.Template.Metadata.Labels) {
 		t.Errorf("selector %q selects the seed Job's pods, labelled %v", TrimSelector(), seed.Spec.Template.Metadata.Labels)
 	}
 }

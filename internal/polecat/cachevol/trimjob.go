@@ -293,8 +293,8 @@ func trimLabels() map[string]string {
 }
 
 // TrimSelector is the label selector matching every object a trim applies, its shard ConfigMaps
-// included. A cleanup deletes by it once the Jobs finish, not by name: a rerun overwrites the shards
-// of the same Job by name, but a longer earlier run leaves shards a rerun does not name.
+// included. Deleting by it reaches the shards a rerun does not overwrite, where deleting by name
+// leaves them; nothing in the tree deletes by it yet (gt-rm4am).
 func TrimSelector() string {
 	labels := trimLabels()
 	keys := make([]string, 0, len(labels))
