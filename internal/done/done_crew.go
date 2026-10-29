@@ -151,7 +151,7 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		name, _ := g.ConfigGet("user.name")
 		actor = strings.TrimSpace(name)
 		if actor == "" {
-			return fmt.Errorf("gt done needs BD_ACTOR, BEADS_ACTOR, GT_ROLE or git user.name to attribute the submission")
+			return fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
 		}
 	}
 
