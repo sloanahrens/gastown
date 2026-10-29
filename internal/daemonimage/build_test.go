@@ -91,7 +91,11 @@ func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
 			t.Errorf("%s build ran in %q, want %q", names[i], call.dir, srcs[i])
 		}
 		wantArgv := []string{"go", "build", "-trimpath", "-o", filepath.Join(b.Out, names[i]), pkgs[i]}
-		if got := withoutGTLdflags(call.argv); !reflect.DeepEqual(got, wantArgv) {
+		got := call.argv
+		if i == 0 {
+			got = withoutGTLdflags(got)
+		}
+		if !reflect.DeepEqual(got, wantArgv) {
 			t.Errorf("%s build argv = %q, want %q", names[i], call.argv, wantArgv)
 		}
 	}
