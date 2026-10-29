@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -184,28 +186,45 @@ func TestJudgeContainerDaemon_HostKindIsNotAContainerTown(t *testing.T) {
 	}
 }
 
-// The container repair goes through the supervisor: a fix never spawns `gt
-// daemon run` on this host beside the container's own daemon.
-func TestDaemonCheck_Fix_ContainerStartsThroughSupervisor(t *testing.T) {
+// The container repair starts nothing on this host: the daemon begins only
+// through its container supervisor, and the fix names that command instead of
+// spawning `gt daemon run` beside the container's own daemon.
+func TestDaemonCheck_Fix_ContainerStartsNothingHere(t *testing.T) {
 	t.Parallel()
 	townRoot, read := containerDaemonTown(t, containerOwnedState(time.Now().Add(-time.Minute)), containerRunning())
 
 	check := NewDaemonCheck()
 	check.containerReading = read
-	var verbs []string
-	check.gtCommand = func(town string, verb string) error {
-		if town != townRoot {
-			t.Errorf("ran gt daemon %s in %s, want %s", verb, town, townRoot)
-		}
-		verbs = append(verbs, verb)
-		return nil
+
+	err := check.Fix(&CheckContext{TownRoot: townRoot})
+	if err == nil {
+		t.Fatal("Fix = nil, want a refusal naming the supervisor's command")
+	}
+	if !strings.Contains(err.Error(), "gt daemon restart") {
+		t.Errorf("Fix = %v, want it to name 'gt daemon restart'", err)
+	}
+}
+
+// A settings file that will not read is reported as unknown, not as a town
+// under the host's supervisor: the setting is what puts a town on the
+// container path, and an unreadable one must not choose the pid path.
+func TestJudgeContainerDaemon_UnreadableSettingsIsUnknown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := config.TownSettingsPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"daemon": {"type": "daemon-patrol-config", "version": 99}}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := check.Fix(&CheckContext{TownRoot: townRoot}); err != nil {
-		t.Fatalf("Fix: %v", err)
+	v := judgeContainerDaemon("daemon", townRoot, nil)
+	if !v.isContainer || v.result == nil {
+		t.Fatalf("judgeContainerDaemon = %+v, want a container verdict with a result", v)
 	}
-	if len(verbs) != 1 || verbs[0] != "restart" {
-		t.Errorf("Fix ran %v, want [restart] through the container supervisor", verbs)
+	if v.result.Status == StatusOK || !strings.Contains(v.result.Message, "unknown") {
+		t.Errorf("result = (%v, %q), want an unknown failure", v.result.Status, v.result.Message)
 	}
 }
 
