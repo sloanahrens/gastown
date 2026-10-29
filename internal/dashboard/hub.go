@@ -58,6 +58,13 @@ type Hub struct {
 	// costProviders builds the Cost panel's provider rows, in order. Nil is the
 	// default list (BuildCostProviders); a test injects its own list here.
 	costProviders []costProviderBuilder
+
+	// costRows is the Cost panel's rows as last built, nil once a cost input has
+	// changed since (the spend, the plan, the charts or the Jev value clear it).
+	// costMark is the Jev mark they were built with. The rows are rebuilt when
+	// either is out of date, so State() does not rebuild them on every call.
+	costRows []CostProvider
+	costMark jevRowMark
 }
 
 // Sub is one open page.
@@ -856,17 +863,29 @@ func (h *Hub) pollSpend() {
 func (h *Hub) rebuildCostChartsLocked() {
 	charts := BuildCostCharts(h.cfg.Now(), SpendPerDay(h.state.Spend), h.state.SpendHours, h.state.SpendSkipped, h.state.ClaudePlan, h.state.PlanSamples)
 	h.state.CostCharts = &charts
+	h.costRows = nil
 }
 
 // costProviderRowsLocked builds the panel's rows from the state the charts are
 // built from: the default list through BuildCostProviders, or the list a test
 // handed the hub so it can add a provider without touching the town's. A
-// provider whose reader this hub was not given has no row. The rows are built
-// with each snapshot rather than when a read lands, so the Jev row says its
-// figures are stale as the read ages, with no read of its own to trigger it.
-// The caller holds h.mu.
+// provider whose reader this hub was not given has no row. The Jev row says its
+// figures are stale as the read ages, with no read of its own to trigger it, so
+// the rows are checked against each snapshot: they are kept, and rebuilt only
+// when a cost input has changed (costRows is cleared) or the Jev row's mark has
+// moved, which is the one way the clock reaches that row. The caller holds h.mu.
 func (h *Hub) costProviderRowsLocked(now time.Time, reads map[string]ReadStatus) []CostProvider {
 	jev := jevSpendForRows(h.state.JevSpend, reads[SourceJevSpend])
+	if mark := jevRowMarkOf(jev); h.costRows == nil || mark != h.costMark {
+		h.costRows = h.buildCostRowsLocked(now, jev)
+		h.costMark = mark
+	}
+	return h.costRows
+}
+
+// buildCostRowsLocked builds the panel's rows from the state the charts are
+// built from, with jev as the Jev row's value. The caller holds h.mu.
+func (h *Hub) buildCostRowsLocked(now time.Time, jev *JevSpend) []CostProvider {
 	unwired := map[string]bool{
 		costProviderDeepSeek: h.cfg.Spend == nil,
 		costProviderClaude:   h.cfg.ClaudePlan == nil,
@@ -889,12 +908,30 @@ func (h *Hub) costProviderRowsLocked(now time.Time, reads map[string]ReadStatus)
 	return rows
 }
 
+// jevRowMark is what the Jev row says about its read: whether the read failed
+// and whether the figures are the last good ones. It is the only part of the
+// Cost rows that changes with the clock, so a change in it rebuilds the rows.
+type jevRowMark struct {
+	failed, stale bool
+}
+
+// jevRowMarkOf is the mark a Jev value carries into the rows: none when the
+// value is absent or current.
+func jevRowMarkOf(jev *JevSpend) jevRowMark {
+	if jev == nil {
+		return jevRowMark{}
+	}
+	return jevRowMark{failed: jev.ReadFailed, stale: jev.Stale}
+}
+
 // jevSpendForRows is the Jev value the Cost rows are built from, marked when
 // the stamped read is not current so the row says why instead of drawing the
 // last good figures as today's. The state's own value stays as the last good
 // read wrote it: the mark is the row's, not the ledger's.
 func jevSpendForRows(jev *JevSpend, r ReadStatus) *JevSpend {
-	if jev == nil || !r.Stale {
+	// A failed read is marked whether or not its stamp has aged yet: the mark
+	// rests on the read's own error, not only on the stale flag.
+	if jev == nil || !(r.Error || r.Stale) {
 		return jev
 	}
 	marked := *jev
@@ -916,6 +953,7 @@ func (h *Hub) pollJevSpend() {
 		return
 	}
 	h.state.JevSpend = j
+	h.costRows = nil
 	h.readOKLocked(SourceJevSpend, h.cfg.JevSpendEvery)
 	h.publishLocked()
 }

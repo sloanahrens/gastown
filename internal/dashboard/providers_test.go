@@ -557,6 +557,78 @@ func TestCostProvidersJevRow(t *testing.T) {
 	}
 }
 
+// The Cost rows are kept between snapshots: a State() with no cost input moved
+// hands back the rows already built, and a spend read rebuilds them once.
+func TestCostProviderRowsAreKeptUntilACostInputChanges(t *testing.T) {
+	t.Parallel()
+
+	now := costProvidersNow
+	raw := deepSeekFixture(t, 9)
+	h := NewHub(Config{
+		Now:      func() time.Time { return now },
+		Spend:    func() json.RawMessage { return raw },
+		JevSpend: func() *JevSpend { return &JevSpend{Calls: 1, USD: 1} },
+	})
+	built := 0
+	h.costProviders = []costProviderBuilder{
+		func(time.Time, json.RawMessage, *ClaudePlan, *CostCharts, *JevSpend) CostProvider {
+			built++
+			return CostProvider{ID: "counted"}
+		},
+	}
+
+	h.State()
+	kept := built
+	h.State()
+	h.State()
+	if built != kept {
+		t.Errorf("State() rebuilt the Cost rows %d times with no cost input moved, want 0", built-kept)
+	}
+
+	h.pollSpend()
+	if built == kept {
+		t.Fatalf("a spend read did not rebuild the Cost rows")
+	}
+	kept = built
+	h.State()
+	if built != kept {
+		t.Errorf("State() after the spend read rebuilt the Cost rows %d times, want 0", built-kept)
+	}
+
+	h.pollJevSpend()
+	if built == kept {
+		t.Errorf("a Jev read did not rebuild the Cost rows")
+	}
+}
+
+// A failed Jev read is marked on the row's copy even before its stamp has aged
+// past the stale line, so the row never draws the last good figures as current.
+func TestJevSpendForRowsMarksTheReadsOwnFailure(t *testing.T) {
+	t.Parallel()
+
+	jev := &JevSpend{Calls: 1, USD: 1}
+	for _, tc := range []struct {
+		name       string
+		r          ReadStatus
+		wantFailed bool
+		wantStale  bool
+	}{
+		{name: "current", r: ReadStatus{At: costProvidersNow}},
+		{name: "failed before its stamp ages", r: ReadStatus{At: costProvidersNow, Error: true}, wantFailed: true, wantStale: true},
+		{name: "aged", r: ReadStatus{At: costProvidersNow, Stale: true}, wantStale: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := jevSpendForRows(jev, tc.r)
+			if got.ReadFailed != tc.wantFailed || got.Stale != tc.wantStale {
+				t.Errorf("row copy marks = failed %v stale %v, want failed %v stale %v",
+					got.ReadFailed, got.Stale, tc.wantFailed, tc.wantStale)
+			}
+		})
+	}
+}
+
 // costProviderRow is the row with id in a built list, which a test names rather
 // than counting rows.
 func costProviderRow(t *testing.T, rows []CostProvider, id string) CostProvider {

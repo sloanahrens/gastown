@@ -27,9 +27,11 @@ type JevSpend struct {
 	// ReadFailed and Stale say the figures are the last good ones rather than
 	// current: the hub sets them on the value it hands the Cost rows, so the row
 	// can say why instead of drawing them as today's. Both are false on the
-	// report the reader parses, so a figure from it reads current.
-	ReadFailed bool `json:"read_failed,omitempty"`
-	Stale      bool `json:"stale,omitempty"`
+	// report the reader parses, so a figure from it reads current. They are
+	// never sent or read as JSON: the marked copy only feeds the rows, and a
+	// report or a state value cannot set them.
+	ReadFailed bool `json:"-"`
+	Stale      bool `json:"-"`
 }
 
 // ParseJevSpend folds the JSON `gt jev spend --json` prints into the row.
