@@ -671,6 +671,7 @@ func TestDaemonPatrolConfig_ValidateContainerNames(t *testing.T) {
 		{"name leads with a dash", `{"container_name":"-rm","compose_project":"gt-scratch"}`, `daemon.container_name "-rm"`},
 		{"name has a space", `{"container_name":"gt scratch","compose_project":"gt-scratch"}`, `daemon.container_name "gt scratch"`},
 		{"name has a slash", `{"container_name":"gt/scratch","compose_project":"gt-scratch"}`, `daemon.container_name "gt/scratch"`},
+		{"name is one character", `{"container_name":"g","compose_project":"gt-scratch"}`, `daemon.container_name "g"`},
 		{"project is uppercase", `{"container_name":"gt-scratch-daemon-1","compose_project":"Gt-Scratch"}`, `daemon.compose_project "Gt-Scratch"`},
 		{"project has a dot", `{"container_name":"gt-scratch-daemon-1","compose_project":"gt.scratch"}`, `daemon.compose_project "gt.scratch"`},
 	} {
