@@ -3,6 +3,8 @@ package seattoken
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/tracker/client"
 )
 
 // fakeRevoker records the actors it was asked to revoke, and fails as set.
@@ -167,5 +170,71 @@ func TestStoreRevokeRemovesTheFileWhenTheRevokeFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("token file stat = %v, want it gone", statErr)
+	}
+}
+
+// The tracker's refusal of a revoke is reported with the tracker's answer, so
+// the warning a removal prints says why the token may still be live.
+func TestTrackerRevokerReportsARefusal(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	tc, err := client.New(client.Config{BaseURL: srv.URL, Token: "admin-token-value"})
+	if err != nil {
+		t.Fatalf("tracker client: %v", err)
+	}
+
+	_, err = NewTrackerRevoker(tc).Revoke(context.Background(), "gastown/crew/max")
+	if err == nil || !strings.Contains(err.Error(), "tracker answered 500") {
+		t.Fatalf("Revoke = %v, want the tracker's 500 reported", err)
+	}
+}
+
+// A tracker rig whose town has no admin credential fails the revoke, naming
+// the seat rather than reading as a seat with nothing to revoke.
+func TestRevokeSeatReportsAMissingAdminCredential(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeRouteTable(t, town, trackerRoute)
+
+	err := RevokeSeat(context.Background(), town, testSeat(), nil)
+	if err == nil || !strings.Contains(err.Error(), "gastown/polecats/cheedo") {
+		t.Fatalf("RevokeSeat = %v, want a failure naming the seat", err)
+	}
+}
+
+// A revoke through a nil revoker is refused, and the token file is left for
+// the caller to retry.
+func TestStoreRevokeNeedsARevoker(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir())
+	path, err := store.Ensure(context.Background(), testSeat(), &fakeIssuer{token: seatToken})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	if err := store.Revoke(context.Background(), testSeat(), nil); err == nil {
+		t.Fatal("Revoke with no revoker = nil, want a refusal")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("token file stat = %v, want it kept for the retry", err)
+	}
+}
+
+// A seat that names a file outside the runtime directory is refused before
+// anything is revoked.
+func TestStoreRevokeRefusesASeatOutsideTheRuntime(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir())
+	seat := intent.Seat{Rig: "../etc", Role: "polecats", Name: "cheedo"}
+	revoker := &fakeRevoker{}
+
+	if err := store.Revoke(context.Background(), seat, revoker); err == nil {
+		t.Fatal("Revoke accepted a seat that climbs out of the runtime directory")
+	}
+	if len(revoker.actors) != 0 {
+		t.Errorf("revoked %v, want nothing for a refused seat", revoker.actors)
 	}
 }

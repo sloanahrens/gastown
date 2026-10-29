@@ -181,6 +181,31 @@ func TestOpenShellPrepareRollbackRevokesTheSeatToken(t *testing.T) {
 	}
 }
 
+// A rollback whose sandbox delete fails reports the failure with its cause and
+// revokes nothing: the sandbox may still exist.
+func TestOpenShellPrepareRollbackReportsAFailedDelete(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{
+		Reply:  map[string]string{"get": openshellReadyReply, "exec": "gt version 1.2.1 (dev: main@" + openshellTestDriftedGT + ")\n"},
+		Err:    map[string]error{"delete": errors.New("exit status 1")},
+		Stderr: map[string]string{"delete": "connection refused"},
+	}
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	writeTrackerRoute(t, town, openshellTestRig)
+	seedSeatToken(t, town, openshellTestRig, openshellTestPolecat)
+	revoker := &revokeFake{}
+	b.revoker = revoker
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), "rolling back sandbox") {
+		t.Fatalf("Prepare = %v, want the failed rollback reported with its cause", err)
+	}
+	if len(revoker.actors) != 0 {
+		t.Errorf("revoked %v although the sandbox may still exist", revoker.actors)
+	}
+}
+
 // A delete that failed leaves the sandbox in place, so its seat's token stays
 // live for the retry.
 func TestOpenShellOpsDeleteFailureRevokesNothing(t *testing.T) {
