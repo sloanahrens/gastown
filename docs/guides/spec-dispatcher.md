@@ -141,12 +141,15 @@ decides and reports without slinging, labeling or commenting.
 
 Every real tick records each candidate it passed over, and why, in
 `<town>/.runtime/spec_dispatch/verdicts.json` (gt-8thox). One entry per bead:
-the class — `skipped`, `refused`, `planning`, `failed` or `deferred`, the
-tick's own report lists folded least specific first, so a bead in two of them
-keeps the later — the reason line the tick printed for it, `first_at` and
-`last_at`, and `ticks`, the number of consecutive ticks the verdict has stood.
-A bead the next tick does not pass over is dropped, because the file states
-what the last tick saw.
+the class — `skipped`, `refused`, `planning`, `failed` or `deferred` — the
+reason line the tick printed for it, `first_at` and `last_at`, and `ticks`,
+the number of consecutive ticks the verdict has stood. A tick can pass over a
+bead for more than one reason and list it under several of those classes; the
+ledger keeps a single entry, under the class named last in that list, so a bead
+both `skipped` and `deferred` is recorded as `deferred`. Before changing which
+class wins, read `specTickVerdicts` (`internal/cmd/spec.go`), which fixes that
+order. A bead the next tick does not pass over is dropped, because the file
+states what the last tick saw.
 
 A `--dry-run` records nothing: it decides without acting, and its reasons
 would overwrite a real tick's. A ledger the tick cannot read is left as it is
