@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
 // SchemaVersion is the version of the probe file this binary writes and reads.
@@ -59,20 +58,122 @@ type Probes struct {
 	ExecTaxMS    Field[float64]    `json:"exec_tax_ms"`
 }
 
+// probeFileMode is the permissions the probe file is published with: the host
+// agent writes it and the daemon, which in container mode is another user,
+// reads it.
+const probeFileMode = 0o644
+
+// tempFile is the one temp file a write creates before it is renamed into
+// place. *os.File is the production value; a test supplies its own.
+type tempFile interface {
+	Name() string
+	Write(p []byte) (int, error)
+	Chmod(mode os.FileMode) error
+	Sync() error
+	Close() error
+}
+
+// probeFS is the filesystem one write touches. Every field is a seam with the
+// real operation behind a nil one, so a test sets only the call it scripts.
+// The rename needs one: a real filesystem publishes the temp file or leaves
+// it, and no test can make it fail on demand without staging a directory in
+// the target's place. That is also why the write below runs atomicfile's
+// sequence itself instead of calling it: atomicfile has no such seam.
+type probeFS struct {
+	// createTemp makes the temp file in the directory the rename happens in;
+	// nil is os.CreateTemp.
+	createTemp func(dir, pattern string) (tempFile, error)
+	// rename publishes the temp file over the target; nil is os.Rename.
+	rename func(oldpath, newpath string) error
+	// remove deletes the temp file; nil is os.Remove.
+	remove func(name string) error
+}
+
+// withDefaults fills the fields the caller left nil, so the zero value is
+// production.
+func (fs probeFS) withDefaults() probeFS {
+	if fs.createTemp == nil {
+		fs.createTemp = func(dir, pattern string) (tempFile, error) {
+			return os.CreateTemp(dir, pattern)
+		}
+	}
+	if fs.rename == nil {
+		fs.rename = os.Rename
+	}
+	if fs.remove == nil {
+		fs.remove = os.Remove
+	}
+	return fs
+}
+
 // Write writes p to path atomically, stamping the schema version, so a reader
-// never sees a half file and a crash mid-write leaves the previous probes in
-// place. A value JSON cannot hold, such as a NaN reading, fails here instead of
-// writing a file no reader can decode.
+// sees the whole new file or the previous one and never a half file.
+//
+// A write whose rename fails removes its temp file and leaves the target as it
+// found it. A value JSON cannot hold, such as a NaN reading, and a zero At — a
+// stamp every reader computes as older than any maxAge — fail here instead of
+// writing a file no reader can use.
 func Write(path string, p Probes) error {
+	return write(path, p, probeFS{})
+}
+
+// write is Write with its filesystem injected: probeFS is the seam a test
+// scripts a failing step on. The round-trip test goes through Write, so a
+// wrapper that stopped passing the real operations fails there.
+func write(path string, p Probes, fs probeFS) error {
+	if p.At.IsZero() {
+		return fmt.Errorf("write probes to %s: no At stamp, so every reader would refuse the file as stale", path)
+	}
 	p.V = SchemaVersion
 	data, err := json.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("encode probes for %s: %w", path, err)
 	}
-	// atomicfile writes a temp file in path's own directory and renames it
-	// over path, removing the temp file when either step fails.
-	if err := atomicfile.WriteFile(path, data, 0o644); err != nil {
+	fs = fs.withDefaults()
+
+	// The temp file goes in the target's directory: a rename is atomic only
+	// within a filesystem.
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	f, err := fs.createTemp(dir, base+".tmp.*")
+	if err != nil {
 		return fmt.Errorf("write probes to %s: %w", path, err)
+	}
+	tmp := f.Name()
+
+	// Every failure after the temp file exists removes it, so the directory is
+	// left holding the target the write found and nothing else.
+	discard := func(cause error) error {
+		// The write has already failed; the close is a release, and its error
+		// says nothing the caller can act on.
+		f.Close()
+		if rmErr := fs.remove(tmp); rmErr != nil {
+			return fmt.Errorf("write probes to %s: %w (and removing the temp file %s: %v)",
+				path, cause, tmp, rmErr)
+		}
+		return fmt.Errorf("write probes to %s: %w", path, cause)
+	}
+
+	if _, err := f.Write(data); err != nil {
+		return discard(err)
+	}
+	// CreateTemp makes the file 0600; the daemon reads it as another user.
+	if err := f.Chmod(probeFileMode); err != nil {
+		return discard(err)
+	}
+	// The bytes reach the disk before the rename publishes them, so the
+	// destination never names a file whose contents are still only in the page
+	// cache. The directory is not synced: a crash between the rename and its
+	// directory write loses the newest probes and leaves the previous file in
+	// place, which Read reports as stale once maxAge passes and the agent
+	// replaces within the minute.
+	if err := f.Sync(); err != nil {
+		return discard(err)
+	}
+	if err := f.Close(); err != nil {
+		return discard(err)
+	}
+	if err := fs.rename(tmp, path); err != nil {
+		return discard(err)
 	}
 	return nil
 }
