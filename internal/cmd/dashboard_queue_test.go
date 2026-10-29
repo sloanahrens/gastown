@@ -563,20 +563,24 @@ func TestDashQueueIgnoresAnOldVerdictLedger(t *testing.T) {
 	}
 }
 
-// A ledger with no tick in it, and one this read cannot load, both leave the
-// queue's verdict fields unset, so the page can tell no verdict from a fresh
-// one (gt-ckncx, gt-7t1im).
+// A ledger with no tick in it sets neither verdict field, so the page can tell
+// "no verdict yet" from a fresh one; a ledger this read cannot load overlays
+// nothing and is marked stale, so the page never offers the lint's shape as the
+// dispatcher's truth on the strength of a record it could not read (gt-ckncx).
 func TestDashQueueIgnoresAVerdictLedgerItCannotRead(t *testing.T) {
 	t.Parallel()
 	st := &fakeQueueStore{ready: []*beads.Issue{{ID: "gt-1", Title: "shaped", Type: "task", Description: dashesShape}}}
-	for name, load := range map[string]func() (*specdispatch.Ledger, error){
-		"missing": func() (*specdispatch.Ledger, error) {
+	for name, c := range map[string]struct {
+		load      func() (*specdispatch.Ledger, error)
+		wantStale bool
+	}{
+		"missing": {func() (*specdispatch.Ledger, error) {
 			return specdispatch.LoadLedger(filepath.Join(t.TempDir(), "verdicts.json"))
-		},
-		"unreadable": func() (*specdispatch.Ledger, error) { return nil, errors.New("dolt down") },
+		}, false},
+		"unreadable": {func() (*specdispatch.Ledger, error) { return nil, errors.New("dolt down") }, true},
 	} {
 		r := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown")
-		r.verdicts = load
+		r.verdicts = c.load
 		q := r.read(time.Now())
 		if q == nil || len(q.Ready) != 1 {
 			t.Fatalf("%s: ready = %+v", name, q)
@@ -584,8 +588,8 @@ func TestDashQueueIgnoresAVerdictLedgerItCannotRead(t *testing.T) {
 		if row := q.Ready[0]; row.Shape != "ok" || row.SkipClass != "" {
 			t.Errorf("%s: shape = %q skip class = %q, want the lint's ok and no verdict", name, row.Shape, row.SkipClass)
 		}
-		if !q.VerdictsAt.IsZero() || q.VerdictsStale {
-			t.Errorf("%s: verdicts at %v stale=%v, want neither set", name, q.VerdictsAt, q.VerdictsStale)
+		if !q.VerdictsAt.IsZero() || q.VerdictsStale != c.wantStale {
+			t.Errorf("%s: verdicts at %v stale=%v, want no time and stale=%v", name, q.VerdictsAt, q.VerdictsStale, c.wantStale)
 		}
 	}
 }

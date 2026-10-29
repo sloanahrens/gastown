@@ -100,11 +100,12 @@ type Queue struct {
 	// that is down does not read as an empty queue.
 	Unreadable []string `json:"unreadable,omitempty"`
 	// VerdictsAt is when the dispatch tick that wrote the rows' Skip fields
-	// finished, and VerdictsStale is true when that is older than the
-	// freshness window: a held or stopped dispatcher stops writing, so its
-	// verdicts cannot be presented as current. A stale ledger changes no row's
-	// Shape and fills no Skip field; both fields are unset when no ledger was
-	// readable.
+	// finished, and VerdictsStale is true when the verdicts cannot be
+	// presented as current: the tick is older than the freshness window (a
+	// held or stopped dispatcher stops writing), or the ledger could not be
+	// read at all, in which case VerdictsAt is unset. Stale verdicts change no
+	// row's Shape and fill no Skip field. Both fields are unset when there is
+	// no ledger yet to have verdicts from.
 	VerdictsAt    time.Time `json:"verdicts_at,omitzero"`
 	VerdictsStale bool      `json:"verdicts_stale,omitempty"`
 	// ParkedRigs names the stores whose rigs are parked.

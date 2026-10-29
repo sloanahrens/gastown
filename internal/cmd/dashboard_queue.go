@@ -152,8 +152,10 @@ func dashShape(t specdispatch.Template, i *beads.Issue) (shape, note string) {
 const dashVerdictTTL = 5 * time.Minute
 
 // dashVerdicts is one queue read's view of the dispatch ledger: the verdicts to
-// overlay and when they were taken. An empty view (no ledger, no tick in it, or
-// one this read could not load) has a zero at and overlays nothing.
+// overlay and when they were taken. An empty view (no ledger, or one with no
+// tick in it) has a zero at and overlays nothing; an unreadable one overlays
+// nothing either and is stale, because its verdicts are not ones the page can
+// present as current.
 type dashVerdicts struct {
 	byBead map[string]specdispatch.LedgerVerdict
 	at     time.Time
@@ -161,15 +163,19 @@ type dashVerdicts struct {
 }
 
 // readVerdicts loads the dispatcher's last published verdicts for one queue
-// read. A ledger with no tick in it, and one this read cannot load, are both no
-// overlay: the page then shows the lint's shape, as it did before the ledger
-// existed, rather than fields derived from verdicts it did not see (gt-7t1im).
+// read. A ledger this read cannot load overlays nothing and is reported stale:
+// with the dispatcher's own record unread, the page must not offer the lint's
+// shape as the dispatcher's truth. A ledger with no tick in it (no file yet, so
+// nothing to report) overlays nothing and sets no field.
 func (r *dashQueueReader) readVerdicts(now time.Time) dashVerdicts {
 	if r.verdicts == nil {
 		return dashVerdicts{}
 	}
 	l, err := r.verdicts()
-	if err != nil || l == nil || l.SavedAt.IsZero() {
+	if err != nil || l == nil {
+		return dashVerdicts{stale: true}
+	}
+	if l.SavedAt.IsZero() {
 		return dashVerdicts{}
 	}
 	return dashVerdicts{byBead: l.Verdicts, at: l.SavedAt, stale: now.Sub(l.SavedAt) > dashVerdictTTL}
