@@ -23,6 +23,10 @@ const MatchLimit = 5
 type ContentRefs struct {
 	Tests []string
 	Files []string
+	// Text is the bead's own words every ref above was extracted from. The
+	// overlap hold reads it for the (read-only) marker: a path counts as read
+	// only when every mention in this text carries the marker (gt-5v13p).
+	Text string
 }
 
 // Empty reports whether the bead named neither a test nor a file.
