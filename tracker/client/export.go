@@ -28,9 +28,11 @@ import (
 // reads as complete.
 func (c *Client) Export(ctx context.Context, req api.ExportRequest, emit func(api.ExportRecord) error) error {
 	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.exportTime)
-		defer cancel()
+		var cancel context.CancelCauseFunc
+		ctx, cancel = context.WithCancelCause(ctx)
+		defer cancel(nil)
+		stop := c.after(c.exportTime, func() { cancel(context.DeadlineExceeded) })
+		defer stop()
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -38,7 +40,7 @@ func (c *Client) Export(ctx context.Context, req api.ExportRequest, emit func(ap
 	}
 	resp, err := c.send(ctx, ctx, http.MethodPost, "/v1/export", body)
 	if err != nil {
-		return err
+		return endedBy(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
@@ -70,11 +72,21 @@ func (c *Client) readExport(ctx context.Context, r *bufio.Reader, emit func(api.
 		}
 		if err != nil {
 			if cerr := ctx.Err(); cerr != nil {
-				return cerr
+				return context.Cause(ctx)
 			}
 			return api.Unavailable("tracker export stream broke: %v", urlErrorOnly(err))
 		}
 	}
+}
+
+// endedBy is err, unless ctx ended first: then it is the cause that ended it,
+// so the export's own deadline reads as context.DeadlineExceeded whichever
+// read was in flight when it passed.
+func endedBy(ctx context.Context, err error) error {
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return context.Cause(ctx)
+	}
+	return err
 }
 
 // exportError is the error an error record carries, its message cleaned as

@@ -79,6 +79,7 @@ type Client struct {
 	exportTime time.Duration
 	maxRetries int
 	sleep      func(ctx context.Context, d time.Duration) error
+	after      func(d time.Duration, f func()) (stop func() bool)
 	http       *http.Client
 }
 
@@ -110,6 +111,7 @@ func New(cfg Config) (*Client, error) {
 		schema:  fmt.Sprint(orInt(cfg.SchemaLevel, api.SchemaLevel)),
 		timeout: orDuration(cfg.Timeout, defaultTimeout), sleep: cfg.Sleep, http: cfg.HTTP,
 		exportTime: orDuration(cfg.ExportTimeout, defaultExportTimeout),
+		after:      afterFunc,
 	}
 	switch {
 	case cfg.MaxRetries < 0:
@@ -140,6 +142,12 @@ func orDuration(v, d time.Duration) time.Duration {
 		return d
 	}
 	return v
+}
+
+// afterFunc runs f once d has passed, unless the returned stop is called first.
+// It is a field on Client so a test can fire an export's deadline itself.
+func afterFunc(d time.Duration, f func()) func() bool {
+	return time.AfterFunc(d, f).Stop
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
