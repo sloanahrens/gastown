@@ -7,15 +7,10 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/bumpversion"
-	"github.com/steveyegge/gastown/internal/testutil"
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
-// The command runs in this test process; the hermetic harness keeps the live
-// town's HOME and GT_* environment out of reach of the git steps the later
-// slices add.
-func TestMain(m *testing.M) {
-	os.Exit(testutil.HermeticMain(m))
-}
+func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 
 // runCapture runs the command and returns its exit code and everything it
 // wrote to the error stream.
