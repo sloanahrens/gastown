@@ -129,9 +129,10 @@ decides and reports without slinging, labeling or commenting.
    already has in flight, and the tick says nothing about a hold for it
    (gt-e1ufo). Landings are serial per rig and rebase, so a conflict costs a
    bounce, which is cheaper than an idle seat. The sling-time guard still runs
-   for a dispatch and still prints its warning, but it admits the overlap
-   rather than refusing it (`sling.Options.AdmitOverlap`). A manual `gt sling`
-   keeps the refusal, and `--force` overrides it.
+   for a dispatch, and the overlap it would refuse is dropped from the report
+   rather than refusing the sling (`sling.Options.AdmitOverlap`), so the
+   dispatch says nothing about that overlap. A manual `gt sling` keeps the
+   refusal, and `--force` overrides it.
 6. A bead that takes a seat and matches the overrun-stop box is slung anyway
    and wears one comment saying so (see below).
 
