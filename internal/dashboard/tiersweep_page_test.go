@@ -8,34 +8,24 @@ import (
 // The Tier sweeps pane is kept collapsed, so the one thing it must say without
 // being opened is the verdict of the last run. The icon therefore lives in the
 // section's own title row — a collapsed section hides everything but its h2 —
-// and in markup it is the h2's first child, which puts it right after the caret
-// that setupCollapse prepends. It must stay ahead of the "Tier sweeps" label so
-// the caret, the icon and the label read in that order (gt-5qk83).
+// right after the caret the fold puts first and ahead of the "Tier sweeps"
+// label, so the caret, the icon and the label read in that order (gt-5qk83).
+// The order is read off the page's heading, not off its source text.
 func TestTierSweepIconSitsInTheTitleRow(t *testing.T) {
 	t.Parallel()
 
-	page := string(indexHTML)
-	ico := strings.Index(page, `id="tiersweepico"`)
-	if ico < 0 {
-		t.Fatal("index.html has no Tier sweeps icon (#tiersweepico)")
-	}
-	if !strings.Contains(page, `<h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps`) {
-		t.Error("the icon is not the title row's first child, right after the caret and ahead of the label")
-	}
-
-	// The title row, not the body: everything from the icon to the h2's close
-	// tag, which comes before the pane's body div.
-	row := page[ico:]
-	close := strings.Index(row, "</h2>")
-	if close < 0 {
-		t.Fatal("the Tier sweeps icon is not inside an h2")
-	}
-	body := strings.Index(row, `id="tiersweep"`)
-	if body >= 0 && body < close {
-		t.Error("the icon is in the pane's body, which a collapsed section hides")
-	}
-	if !strings.Contains(page, "head.prepend(caret)") {
-		t.Error("the caret is no longer prepended to the title row, so the row's order is not the one read here")
+	dom := newPageDOM(t)
+	row := pageExpr(t, dom, `(function () {
+		var h = __find(__fold("tiersweep"), ":scope > h2");
+		var kids = h ? h.children : [];
+		return [
+			kids[0] && __cls(kids[0], "caret") ? "caret" : "-",
+			kids[1] && kids[1] === __byId["tiersweepico"] ? "tiersweepico" : "-",
+			h && h.textContent.indexOf("Tier sweeps") >= 0 ? "label" : "-"
+		].join(",");
+	})()`)
+	if want := "caret,tiersweepico,label"; row != want {
+		t.Errorf("the Tier sweeps title row reads %q, want %q: the caret, then the icon, then the label", row, want)
 	}
 }
 

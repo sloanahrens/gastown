@@ -162,7 +162,7 @@ func TestTheStripAccountsForEveryStateTheReaderSends(t *testing.T) {
 	// second copy of the vocabulary is how the page and the reader drift.
 	body := pageFunc(t, "renderStrip")
 	for _, want := range []string{
-		`Object.keys(POLE_WORKING).reduce(`,
+		`polecatsWorking(pcs)`,
 		`Object.keys(POLE_WORD).filter(k => n(k)).map(k => n(k) + " " + POLE_WORD[k])`,
 		// A state in no table at all is named rather than dropped.
 		`const strangers = live.filter(p => !(p.state in POLE_WORKING)).length;`,
@@ -173,6 +173,11 @@ func TestTheStripAccountsForEveryStateTheReaderSends(t *testing.T) {
 	}
 	if m := regexp.MustCompile(`n\("[a-z-]+"\)`).FindString(body); m != "" {
 		t.Errorf("renderStrip looks a state up by %s, which is the vocabulary held twice", m)
+	}
+	// The working number comes from the one helper the Work section's summary
+	// also reads, so the strip and the section cannot count different polecats.
+	if !strings.Contains(pageFunc(t, "polecatsWorking"), `Object.keys(POLE_WORKING).reduce(`) {
+		t.Error("polecatsWorking no longer counts the states POLE_WORKING marks as work in progress")
 	}
 }
 

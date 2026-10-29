@@ -3,6 +3,7 @@ package dashboard
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -81,8 +82,8 @@ func (p *pageDOM) foldKeys(t *testing.T) []string {
 	return keys
 }
 
-// press is the reader's input on a section's header: how is "click", "enter" or
-// "space".
+// press is one reader input on a section's header: how is "click", "enter" or
+// "space", and the page hears the click or the key the browser would deliver.
 func (p *pageDOM) press(t *testing.T, key, how string) {
 	t.Helper()
 
@@ -344,7 +345,8 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 			{rig: "gastown", name: "angharad", state: "working"},
 			{rig: "gastown", name: "capable", state: "working"},
 			{rig: "gastown", name: "ivy", state: "parked", rig_parked: true},
-			{rig: "gastown", name: "merlin", state: "queued"}
+			{rig: "gastown", name: "merlin", state: "queued"},
+			{rig: "gastown", name: "wren", state: "working", rig_parked: true}
 		],
 		queue: {at: "2026-10-29T00:00:00Z"},
 		attention: {rows: []}
@@ -354,6 +356,11 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 
 	if got, want := dom.fold(t, "work").Summary, "2 working · 1 waiting to land"; got != want {
 		t.Errorf("the closed work section reads %q, want %q", got, want)
+	}
+	// The summary's working count is the top strip's: both leave out the polecat
+	// on a parked rig, so the strip and the section agree on the same number.
+	if strip := dom.element(t, "strip").Text; !strings.Contains(strip, "2 working") {
+		t.Errorf("the top strip reads %q, want its working count to be the summary's 2", strip)
 	}
 	// Attention's own note is the summary when it has rows; with none it says
 	// so rather than leaving the header blank of a figure.
@@ -382,6 +389,7 @@ func TestFoldClosedSectionKeepsUpWithTheReading(t *testing.T) {
 		}
 	}
 	dom := newPageDOM(t)
+	requests := pageNumber(t, dom, "__fetches.length")
 	dom.press(t, "work", "click") // closed by the reader
 	dom.call(t, "renderWork", read("angharad"))
 	first := dom.element(t, "work")
@@ -400,5 +408,52 @@ func TestFoldClosedSectionKeepsUpWithTheReading(t *testing.T) {
 	}
 	if got := dom.fold(t, "work").Summary; got != "" {
 		t.Errorf("the opened work section still shows the summary %q", got)
+	}
+	// Closing, drawing and opening the section asked the server for nothing: the
+	// last reading is what it shows.
+	if got := pageNumber(t, dom, "__fetches.length") - requests; got != 0 {
+		t.Errorf("closing, drawing and opening the work section sent %d request(s), want none", got)
+	}
+}
+
+// Setup that runs twice must not fold a section twice: a second caret or a
+// second click handler on the same header would make one click fold and open
+// it again, so the reader could never close it.
+func TestFoldSetupRunTwiceFoldsOnce(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	if _, err := dom.vm.RunString("setupCollapse(); setupCollapse();"); err != nil {
+		t.Fatalf("running the page's setup a second time: %v", err)
+	}
+	carets := pageExpr(t, dom, `(function () {
+		var h = __find(__fold("work"), ":scope > h2"), n = 0;
+		__walk(h, function (c) { if (__cls(c, "caret")) n++; });
+		return String(n);
+	})()`)
+	if carets != "1" {
+		t.Fatalf("the work header holds %s carets after setup ran twice, want 1", carets)
+	}
+
+	dom.press(t, "work", "click")
+	wantFold(t, dom.fold(t, "work"), "work", true)
+}
+
+// With every owner chip switched off the Attention panel says so, and so does
+// the closed section's summary: a blank line would read as nothing waiting.
+func TestFoldAttentionSummaryWhenEveryOwnerChipIsOff(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOMStoring(t, map[string]string{"gt-attention-owners": "[]"})
+	dom.press(t, "attention", "click")
+	if _, err := dom.vm.RunString(`state = {
+		summary_at: "2026-10-29T00:00:00Z",
+		attention: {rows: [{owner: "operator", kind: "question", class: "needs"}]}
+	}; renderAll();`); err != nil {
+		t.Fatalf("rendering a reading with every owner chip off: %v", err)
+	}
+
+	if got, want := dom.fold(t, "attention").Summary, "every owner chip is off"; got != want {
+		t.Errorf("the closed attention section reads %q, want %q", got, want)
 	}
 }

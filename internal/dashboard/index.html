@@ -516,6 +516,13 @@ let state = null;
 // know, and which of them alarm is the reader's own verdict (StripAlarms).
 const POLE_WORKING = {working: 1, quiet: 1, gating: 1, queued: 0, spawning: 0, stalled: 0, "review-needed": 0, recovery: 0, "needs-human": 0, parked: 0, idle: 0, unknown: 0};
 const POLE_WORD = {queued: "queued", spawning: "spawning", stalled: "stalled", "review-needed": "need review", recovery: "recovering", "needs-human": "need a human", parked: "parked", unknown: "unknown (tmux unreadable)", quiet: "quiet"};
+// polecatsWorking is the strip's working count and the Work section's summary:
+// the live polecats whose state is work in progress. A parked rig holds nothing
+// and is counted nowhere, so both readers take their number from here.
+function polecatsWorking(polecats) {
+  const live = (polecats || []).filter(p => !p.rig_parked);
+  return Object.keys(POLE_WORKING).reduce((sum, k) => sum + (POLE_WORKING[k] ? live.filter(p => p.state === k).length : 0), 0);
+}
 
 // factBox opens one reading of the strip, joined to the one before it by the
 // page's middot.
@@ -642,7 +649,7 @@ function renderStrip(s) {
   const pcs = s.polecats || [];
   const live = pcs.filter(p => !p.rig_parked);
   const n = k => live.filter(p => p.state === k).length;
-  const active = Object.keys(POLE_WORKING).reduce((sum, k) => sum + (POLE_WORKING[k] ? n(k) : 0), 0);
+  const active = polecatsWorking(pcs);
   const worst = s.polecats ? (a.working || "") : "";
   const rest = Object.keys(POLE_WORD).filter(k => n(k)).map(k => n(k) + " " + POLE_WORD[k]);
   const strangers = live.filter(p => !(p.state in POLE_WORKING)).length;
@@ -4582,21 +4589,19 @@ const FOLD_SUMMARY = {
   // what is submitted and waiting for the landing worker.
   work: s => {
     const out = [];
-    if (s && s.polecats) {
-      const live = s.polecats.filter(p => !p.rig_parked);
-      out.push(live.filter(p => POLE_WORKING[p.state]).length + " working");
-    }
+    if (s && s.polecats) out.push(polecatsWorking(s.polecats) + " working");
     const q = s && s.summary ? s.summary.ready_to_land : null;
     if (q != null) out.push(q + " waiting to land");
     return out.length ? out.join(" · ") : null;
   },
   // The one attention list's split, exactly as the panel's own note counts it:
   // the rows that need a person, then the rows only waiting on work in flight.
+  // With every owner chip off the panel says so, and the summary says it too.
   attention: s => {
     const at = s && s.attention;
     if (!at) return null;
     const shown = (at.rows || []).filter(ownerShown);
-    if (!shown.length) return shownOwners.size ? "nothing needs you" : null;
+    if (!shown.length) return shownOwners.size ? "nothing needs you" : "every owner chip is off";
     const needs = shown.filter(needsYou).length, pipeline = shown.length - needs;
     return needs + " need you" + (pipeline ? " · " + pipeline + " in the pipeline" : "");
   },
@@ -4648,6 +4653,10 @@ function foldable(root, opts) {
   const head = opts.head || root.querySelector(":scope > h2");
   const key = opts.key || root.dataset.fold;
   if (!head || !key) return null;
+  // A section folds once: a second call hands back the fold it already has
+  // rather than a second caret and a second click handler on the same header.
+  const existing = folds.find(f => f.el === root);
+  if (existing) return existing;
   // The note sits in the header already; while the section is closed its place
   // is taken by the summary, so the header says something worth reading
   // instead of how long ago the pane was drawn.
@@ -4665,6 +4674,7 @@ function foldable(root, opts) {
   // default list says, until the reader opens it.
   const defaultOpen = !!opts.defaultOpen && !root.hasAttribute("data-default-collapsed");
   const fold = {
+    el: root,
     key: key,
     closed: remembered !== undefined ? !!remembered : !defaultOpen,
     summaryOf: opts.summary,

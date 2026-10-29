@@ -301,6 +301,12 @@ function __fire(s, type, data) {
   for (var i = 0; i < ls.length; i++) ls[i]({ type: type, data: JSON.stringify(data) });
 }
 var location = { href: "http://localhost/", reload: function () { __reloads++; } };
+// __fetches is every request the page has sent with fetch, in order. The page
+// asks the server only when the reader asks for something (a report, a bead),
+// so a fold that re-requested a section would show here. The request never
+// answers: a test reads what was asked, not what came back.
+var __fetches = [];
+function fetch(url) { __fetches.push(String(url)); return new Promise(function () {}); }
 var navigator = {};
 var history = { pushState: function () {}, replaceState: function () {} };
 function alert() {}
