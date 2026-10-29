@@ -261,13 +261,15 @@ func TestCostProvidersClaudeFigures(t *testing.T) {
 func TestCostProvidersClaudeDetailCarriesTheFiveHourLimit(t *testing.T) {
 	t.Parallel()
 
-	reset := costProvidersNow.Add(3 * time.Hour).Unix()
+	// Built in local zone so the wall clock the hover shows is 15:04 wherever
+	// the test runs; 29 October 2026 is a Thursday.
+	reset := time.Date(2026, time.October, 29, 15, 4, 0, 0, time.Local).Unix()
 	for _, tc := range []struct {
 		name  string
 		reset int64
 		want  string
 	}{
-		{"with a reset", reset, "5-hour limit 30% used, resets " + time.Unix(reset, 0).Format("Mon 15:04")},
+		{"with a reset", reset, "5-hour limit 30% used, resets Thu 15:04"},
 		{"without a reset", 0, "5-hour limit 30% used, no reset instant in the newest sample"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -355,6 +357,14 @@ func TestCostProvidersClaudeDetailCarriesTheHoursRead(t *testing.T) {
 
 	if !slices.Contains(p.Detail, "18 of 24 hours read") {
 		t.Errorf("detail %q does not state the hours read", p.Detail)
+	}
+
+	// No hour read at all is the emptiest headline, and must say so too.
+	charts.Headline.HoursRead = 0
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+
+	if !slices.Contains(p.Detail, "0 of 24 hours read") {
+		t.Errorf("detail %q does not state that no hours were read", p.Detail)
 	}
 
 	charts.Headline.HoursRead = 24

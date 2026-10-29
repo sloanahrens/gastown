@@ -306,7 +306,7 @@ func claudeCostProvider(now time.Time, _ json.RawMessage, plan *ClaudePlan, char
 	p.PerHour1h = &h1
 	p.Detail = append(p.Detail, claudeFiveHourLine(plan), "plan pace last 24h "+money(perHour(plan.PacePerDay24h))+"/h, approximate")
 	if charts != nil && charts.Headline != nil {
-		if h := charts.Headline; h.HoursRead > 0 && h.HoursRead < h.WindowHours {
+		if h := charts.Headline; h.WindowHours > 0 && h.HoursRead < h.WindowHours {
 			p.Detail = append(p.Detail, fmt.Sprintf("%d of %d hours read", h.HoursRead, h.WindowHours))
 		}
 	}
