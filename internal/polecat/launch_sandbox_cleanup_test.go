@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/steveyegge/gastown/internal/beads"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -252,12 +252,17 @@ func (c envCapturingTmux) NewSessionWithCommandAndEnv(_, _, _ string, env map[st
 //testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
 func TestLaunchSandboxSessionEnvNamesNoHostTownRoot(t *testing.T) {
 	town, rigPath, workDir, w := sandboxLaunchTown(t)
+	// The town routes the rig to the tracker, so a launch that gave a sandbox
+	// seat the host token path would show it below.
+	writeRigRoute(t, town, beads.BackendTracker)
+	issuer := &fakeSeatIssuer{token: trackerSeatToken}
 	var got map[string]string
 	m := &SessionManager{
-		tmux:           envCapturingTmux{newFakeSessionTmux(), &got},
-		rig:            &rig.Rig{Name: "gastown", Path: rigPath},
-		gits:           w.opener(),
-		sandboxDeleter: func(string, session.SandboxRecord) error { return nil },
+		tmux:            envCapturingTmux{newFakeSessionTmux(), &got},
+		rig:             &rig.Rig{Name: "gastown", Path: rigPath},
+		gits:            w.opener(),
+		sandboxDeleter:  func(string, session.SandboxRecord) error { return nil },
+		seatTokenIssuer: issuer,
 	}
 	sessionID := m.SessionName("box")
 	const sandboxTown = "/sandbox/gt"
@@ -282,6 +287,16 @@ func TestLaunchSandboxSessionEnvNamesNoHostTownRoot(t *testing.T) {
 	}
 	if g := got["GIT_CEILING_DIRECTORIES"]; g != sandboxTown {
 		t.Errorf("GIT_CEILING_DIRECTORIES = %q, want the sandbox town root %q", g, sandboxTown)
+	}
+	// A sandbox seat gets no tracker name: the token file's path is a host path
+	// the sandbox cannot open, and no token is issued for it here.
+	for _, name := range []string{envTrackerURL, envTrackerTokenFile} {
+		if v, ok := got[name]; ok {
+			t.Errorf("a sandbox seat's session env has %s = %q", name, v)
+		}
+	}
+	if len(issuer.actors) != 0 {
+		t.Errorf("a sandbox launch asked for a seat token for %v", issuer.actors)
 	}
 }
 

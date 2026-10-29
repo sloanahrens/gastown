@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jonboulle/clockwork"
@@ -749,8 +750,13 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	// in envVars with the rest, so the tmux -e environment and the export
 	// prefix carry them. A Dolt rig gets nothing here and its environment is
 	// what it was.
-	if err := m.addTrackerSeatEnv(envVars, townRoot, polecat); err != nil {
-		return err
+	// A sandbox seat is skipped: the token file's path is a host path the
+	// sandbox cannot open, and how a sandbox seat reaches the tracker is its own
+	// delivery.
+	if b := opts.Backend; b == nil || b.Name() == session.BackendTmux {
+		if err := m.addTrackerSeatEnv(envVars, townRoot, polecat); err != nil {
+			return err
+		}
 	}
 
 	// Create session with command and env vars via -e flags so the initial
@@ -987,23 +993,26 @@ func (m *SessionManager) addTrackerSeatEnv(envVars map[string]string, townRoot, 
 	if err != nil {
 		return fmt.Errorf("the tracker environment of seat %s: %w", seat, err)
 	}
+	// The seat's name becomes part of a file name under the town's runtime
+	// directory, so it must be one safe path segment before anything is written.
+	if err := CheckSandboxSeatNames(seat.Rig, polecat); err != nil {
+		return fmt.Errorf("the tracker token of seat %s: %w", seat, err)
+	}
 	issuer := m.seatTokenIssuer
 	if issuer == nil {
-		build := m.hostSeatIssuer
-		if build == nil {
-			build = func(root string) (seattoken.Issuer, error) {
-				host, err := seattoken.NewHostIssuer(root)
-				if err != nil {
-					return nil, err
-				}
-				return host, nil
+		// The host issuer needs the town's admin credential, which a restart that
+		// finds the seat's token file never uses: it is built only when the
+		// token is actually issued.
+		issuer = &lazySeatIssuer{build: func() (seattoken.Issuer, error) {
+			if m.hostSeatIssuer != nil {
+				return m.hostSeatIssuer(townRoot)
 			}
-		}
-		host, err := build(townRoot)
-		if err != nil {
-			return fmt.Errorf("the tracker token of seat %s: %w", seat, err)
-		}
-		issuer = host
+			host, err := seattoken.NewHostIssuer(townRoot)
+			if err != nil {
+				return nil, err
+			}
+			return host, nil
+		}}
 	}
 	timeout := m.seatTokenTimeout
 	if timeout <= 0 {
@@ -1020,6 +1029,23 @@ func (m *SessionManager) addTrackerSeatEnv(envVars map[string]string, townRoot, 
 	envVars[envTrackerURL] = endpoint.URL()
 	envVars[envTrackerTokenFile] = path
 	return nil
+}
+
+// lazySeatIssuer builds its issuer on the first Issue, so Ensure, which asks for
+// a token only when the seat has none, needs the issuer's credential only then.
+type lazySeatIssuer struct {
+	build  func() (seattoken.Issuer, error)
+	once   sync.Once
+	issuer seattoken.Issuer
+	err    error
+}
+
+func (l *lazySeatIssuer) Issue(ctx context.Context, actor string) (string, error) {
+	l.once.Do(func() { l.issuer, l.err = l.build() })
+	if l.err != nil {
+		return "", l.err
+	}
+	return l.issuer.Issue(ctx, actor)
 }
 
 // rigBackend reports the backend the route table names for rig: every route

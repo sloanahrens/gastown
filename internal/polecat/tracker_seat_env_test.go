@@ -43,10 +43,21 @@ func (f *fakeSeatIssuer) Issue(_ context.Context, actor string) (string, error) 
 // the launch bounds the issue it waits on.
 type waitingSeatIssuer struct{}
 
+// It also carries a bound of its own, so a launch that stops bounding the issue
+// fails this test with a clear error instead of hanging it.
 func (*waitingSeatIssuer) Issue(ctx context.Context, _ string) (string, error) {
-	<-ctx.Done()
-	return "", ctx.Err()
+	bounded, cancel := context.WithTimeout(ctx, waitingSeatIssuerBackstop)
+	defer cancel()
+	<-bounded.Done()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("the issuer was never given a bounded context: %w", bounded.Err())
 }
+
+// waitingSeatIssuerBackstop is how long waitingSeatIssuer waits for a context
+// that never ends before it fails the test's launch.
+const waitingSeatIssuerBackstop = 30 * time.Second
 
 // trackerSeatManager is a session manager for the rig gastown that mints seat
 // tokens through issuer.
@@ -268,6 +279,62 @@ func TestAddTrackerSeatEnvRefusals(t *testing.T) {
 			}
 			if len(env) != 0 {
 				t.Errorf("a refused seat was handed environment %v", env)
+			}
+		})
+	}
+}
+
+// A restart finds the seat's token file and needs no admin credential: the host
+// issuer is built only when a token is issued, so a town whose credential is
+// gone (rotated, or the daemon env unreadable) still restarts a seat that has
+// its token.
+func TestAddTrackerSeatEnvRestartNeedsNoAdminCredential(t *testing.T) {
+	t.Parallel()
+	town := trackerSeatTownDir(t, beads.BackendTracker)
+	first := map[string]string{}
+	if err := trackerSeatManager(&fakeSeatIssuer{token: trackerSeatToken}).addTrackerSeatEnv(first, town, "box"); err != nil {
+		t.Fatalf("first launch: %v", err)
+	}
+
+	restart := trackerSeatManager(nil)
+	built := 0
+	restart.hostSeatIssuer = func(string) (seattoken.Issuer, error) {
+		built++
+		return nil, errors.New("TRACKER_ADMIN_TOKEN is not set in the town's daemon env")
+	}
+	again := map[string]string{}
+	if err := restart.addTrackerSeatEnv(again, town, "box"); err != nil {
+		t.Fatalf("a restart with the token file in place failed: %v", err)
+	}
+	if built != 0 {
+		t.Errorf("the host issuer was built %d time(s) for a seat that already had its token", built)
+	}
+	if again[envTrackerTokenFile] == "" || again[envTrackerTokenFile] != first[envTrackerTokenFile] {
+		t.Errorf("restart named the token file %q, want the first launch's %q", again[envTrackerTokenFile], first[envTrackerTokenFile])
+	}
+}
+
+// A seat name that is not one safe path segment is refused before the issuer is
+// asked or a file is written: the name becomes part of a file name under the
+// town's runtime directory.
+func TestAddTrackerSeatEnvRefusesAnUnsafeSeatName(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"../escape", "a/b", ".hidden", "has space", ""} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			town := trackerSeatTownDir(t, beads.BackendTracker)
+			issuer := &fakeSeatIssuer{token: trackerSeatToken}
+			env := map[string]string{}
+
+			err := trackerSeatManager(issuer).addTrackerSeatEnv(env, town, name)
+			if err == nil {
+				t.Fatalf("addTrackerSeatEnv(%q) succeeded", name)
+			}
+			if len(issuer.actors) != 0 || len(env) != 0 {
+				t.Errorf("a refused seat name reached the issuer (%v) or the environment (%v)", issuer.actors, env)
+			}
+			if _, statErr := os.Stat(filepath.Join(town, ".runtime")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("a refused seat name wrote under the town's runtime directory (stat: %v)", statErr)
 			}
 		})
 	}
