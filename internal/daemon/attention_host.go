@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/util"
@@ -100,6 +101,17 @@ type hostProbes interface {
 	// RigParked reports whether the rig is parked. An error means the state
 	// could not be read.
 	RigParked(rig string) (bool, error)
+}
+
+// attentionHostProbes picks the host reads: in container mode the probe file a
+// host agent publishes, because the container cannot measure the host; in
+// every other mode the machine the daemon runs on. getenv is a seam so a test
+// sets the mode without touching the process environment.
+func attentionHostProbes(townRoot string, getenv func(string) string) hostProbes {
+	if getenv(config.ContainerModeEnv) == config.SupervisorContainer {
+		return newFileHostProbes(townRoot)
+	}
+	return systemHostProbes{townRoot: townRoot}
 }
 
 // systemHostProbes reads the machine the daemon runs on.
