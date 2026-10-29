@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/client"
 	"github.com/steveyegge/gastown/tracker/store"
+	"github.com/steveyegge/gastown/tracker/store/storetest"
 )
 
 // tokenStub answers the token methods; any other method panics on the nil
@@ -255,5 +257,74 @@ func TestClientTokenMethodsAgreeWithTheRoutes(t *testing.T) {
 	}
 	if err := admin.RevokeTokenID(ctx, "tok-live"); err != nil {
 		t.Errorf("RevokeTokenID of a live token = %v, want no error", err)
+	}
+}
+
+// The token routes sit behind the same token check as the rest of /v1: a call
+// with no token, or with one the server does not know, is a 401 and never
+// reaches the store.
+func TestTokenRoutesRefuseACallerWithNoKnownTokenBeforeTheStore(t *testing.T) {
+	t.Parallel()
+	called := false
+	st := tokenStub{
+		issue: func(context.Context, string, api.Scope, *time.Time) (string, error) {
+			called = true
+			return "trk_x", nil
+		},
+		revokeActor: func(context.Context, string) (int, error) {
+			called = true
+			return 1, nil
+		},
+		revokeID: func(context.Context, string) (bool, error) {
+			called = true
+			return true, nil
+		},
+	}
+	ts := adminServer(t, st)
+	for _, tok := range []string{"", "nope"} {
+		for name, r := range map[string]struct{ path, body string }{
+			"issue":        {"/v1/tokens", `{"actor":"gastown/polecats/bullet"}`},
+			"revoke actor": {"/v1/tokens:revoke", `{"actor":"gastown/polecats/bullet"}`},
+			"revoke id":    {"/v1/tokens:revoke", `{"token_id":"7f8d3c1e-0000-0000-0000-000000000000"}`},
+		} {
+			code, body := adminCallAs(t, "POST", ts.URL+r.path, r.body, tok)
+			if code != http.StatusUnauthorized {
+				t.Errorf("%s with token %q = %d %q, want 401", name, tok, code, body)
+			}
+		}
+	}
+	if called {
+		t.Error("an unauthenticated caller reached the store on a token route")
+	}
+}
+
+// An issued token is a credential the server then honours. The store that
+// issues the token is also the one that identifies it, so a seat token issued
+// over the route authenticates on a seat route as the actor it was issued for.
+func TestAnIssuedTokenAuthenticatesOnASeatRoute(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st := storetest.NewFake()
+	admin, err := st.IssueTokenScoped(ctx, "town/daemon", api.ScopeAdmin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{Auth: st, Health: fakeHealth{}, SchemaLevel: 3, Store: st})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	code, body := adminCallAs(t, "POST", ts.URL+"/v1/tokens", `{"actor":"gastown/polecats/bullet"}`, admin)
+	if code != http.StatusCreated {
+		t.Fatalf("issue = %d %q, want 201", code, body)
+	}
+	var issued struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(body), &issued); err != nil || issued.Token == "" {
+		t.Fatalf("the issue answer %q carries no token: %v", body, err)
+	}
+	code, body = adminCallAs(t, "GET", ts.URL+"/v1/whoami", "", issued.Token)
+	if code != http.StatusOK || !strings.Contains(body, `"actor":"gastown/polecats/bullet"`) {
+		t.Errorf("whoami with the issued token = %d %q, want 200 as the actor it was issued for", code, body)
 	}
 }
