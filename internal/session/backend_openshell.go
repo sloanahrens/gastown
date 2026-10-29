@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path"
@@ -22,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/buildpaths"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/sandbox"
@@ -134,10 +137,11 @@ type openshellBackend struct {
 	// imageGT reads the gt commit an image was built from, and installedGT is
 	// the commit of the gt running Prepare. Tests set both.
 	imageGT func(ctx context.Context, image string) (string, error)
-	// imageRef resolves image to the reference the label check and the create
-	// both name, for a gateway that pulls its images from a registry or one that
-	// runs them from the host's docker (gt-16oj9). Tests set it.
-	imageRef func(ctx context.Context, image string, pull bool) (string, error)
+	// imageRef resolves image to the reference the create names and the local
+	// image the label check reads, for a gateway that pulls its images from a
+	// registry or one that runs them from the host's docker (gt-16oj9, gt-jbuow).
+	// Tests set it.
+	imageRef func(ctx context.Context, image string, pull bool) (resolvedImage, error)
 	// docker runs the docker CLI for the profile's cache volume. Tests set it.
 	docker dockerRun
 	// git compares the image's gt commit with the installed one. Tests set it.
@@ -221,13 +225,14 @@ func imageGTFrom(ctx context.Context, run dockerRun, image string) (string, erro
 // reference.
 const imageIDFormat = `{{.Id}}`
 
-// imageRepoDigestsFormat prints the repository digests docker holds for an
-// image: the name@sha256:... references its registry published.
-const imageRepoDigestsFormat = `{{json .RepoDigests}}`
-
 // imageIDPattern is a digest an image id can be: sha256 and 64 lowercase hex
 // digits.
 var imageIDPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// registryHostPattern matches the registry host a pulled reference names: a host
+// name or IPv4 address, or a bracketed IPv6 address, with an optional port. It
+// keeps userinfo, spaces and a query out of the URL the registry is read from.
+var registryHostPattern = regexp.MustCompile(`^(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?$`)
 
 // digestRefPattern matches a reference that already names its digest.
 var digestRefPattern = regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)
@@ -237,48 +242,145 @@ var digestRefPattern = regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)
 // driver is the docker one (SandboxProfile.WithDefaults).
 func driverPullsImage(driver string) bool { return driver == DriverKubernetes }
 
-// dockerImageRef resolves an image through the host's docker: imageRefFor.
-func dockerImageRef(ctx context.Context, image string, pull bool) (string, error) {
-	return imageRefFor(ctx, runDocker, image, pull)
+// resolvedImage is the image a Prepare checks and creates. Local is the id the
+// host's docker holds for the profile's reference, which the gt label check
+// reads. Create is the reference the sandbox create names: Local for a gateway
+// that runs images from the host's daemon, the registry's manifest digest for
+// one that pulls them (gt-jbuow).
+type resolvedImage struct {
+	Local, Create string
 }
 
-// imageRefFor resolves image to the reference Prepare names to both the label
-// check and the create, so a rebuild that retags the profile's image between
-// them cannot put an image nothing checked under the sandbox (gt-16oj9).
+// manifestDigester reads the manifest digest the registry at host holds for
+// repo:tag.
+type manifestDigester func(ctx context.Context, host, repo, tag string) (string, error)
+
+// registryHTTPTimeout bounds one registry request the spawn makes: a registry
+// that stops answering ends the spawn with an error instead of holding it.
+const registryHTTPTimeout = 30 * time.Second
+
+// registryHTTPClient is client, or when none is given a client with an explicit
+// timeout (the registry client's own default carries none).
+func registryHTTPClient(client *http.Client) *http.Client {
+	if client != nil {
+		return client
+	}
+	return &http.Client{Timeout: registryHTTPTimeout}
+}
+
+// registryDigester is the manifestDigester for the registry client, at the host
+// the profile's reference names. The digest is the sha256 of the manifest bytes
+// the registry answered, so the create names what was read. A nil client is
+// registryHTTPClient's bounded default; tests inject one whose transport is a
+// fake.
+func registryDigester(client *http.Client) manifestDigester {
+	client = registryHTTPClient(client)
+	return func(ctx context.Context, host, repo, tag string) (string, error) {
+		c := &registry.Client{Base: registryBase(host), HTTP: client}
+		return c.ManifestDigest(ctx, repo, tag)
+	}
+}
+
+// registryBase is the base URL of the registry at host: https, except for a
+// loopback host (localhost, 127.0.0.0/8, ::1), which docker also reads as a
+// local registry and which is reached over plain HTTP. A registry on any other
+// host is never reached over plaintext, so a pulled spawn cannot take its digest
+// from a man in the middle.
+func registryBase(host string) string {
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "["), "]")
+	if name == "localhost" {
+		return "http://" + host
+	}
+	if ip := net.ParseIP(name); ip != nil && ip.IsLoopback() {
+		return "http://" + host
+	}
+	return "https://" + host
+}
+
+// dockerImageRef resolves an image through the host's docker and, for a pulling
+// gateway, the registry the image names: imageRefFor.
+func dockerImageRef(ctx context.Context, image string, pull bool) (resolvedImage, error) {
+	return imageRefFor(ctx, runDocker, registryDigester(nil), image, pull)
+}
+
+// imageRefFor resolves image to the references Prepare names: the local image
+// the label check reads and the reference the create names. Both are read here,
+// before the push and the create, so a rebuild between Prepare's check and its
+// create leaves the sandbox on the reference that was read (gt-16oj9). A rebuild
+// that lands between the two reads here, or before the pod pulls, is caught
+// after the create by checkSandboxGT, which refuses and deletes the sandbox
+// (gt-zdilt).
 //
 // Docker is asked about image on every path, so a reference the host does not
 // have fails here rather than after the push.
 //
 // A gateway running images from the host's daemon (pull false) is given the
 // local image id: the content, which a retag cannot move. A gateway that pulls
-// from a registry cannot use an id, so it is given the image's repository
-// digest, which a pod resolves to one manifest. Docker records that digest only
-// for an image it pulled or pushed; an image built here and published with
-// crane has none, so the profile's reference is named and the pod reads its tag
-// at pull time. Refusing instead would stop every spawn on a seat the plugin
-// publishes with crane, so the window is accepted: a rebuild that republishes
-// the tag before the pod starts leaves the pod on another image, which
-// checkSandboxGT refuses and deletes after the create (gt-zdilt), so the cost
-// is a refused spawn (gt-16oj9).
-func imageRefFor(ctx context.Context, run dockerRun, image string, pull bool) (string, error) {
+// from a registry cannot use an id, so it is given the manifest digest the
+// registry holds for the image's tag, read from the registry the reference names
+// (gt-jbuow). A tag that moves after that read leaves the sandbox on the checked
+// digest, the sha256 of the manifest bytes read. A registry that does not answer,
+// answers with no digest, answers with a digest its body does not hash to, or
+// answers with one that is not a sha256 manifest digest refuses the spawn; the
+// tag is never passed on in its place.
+func imageRefFor(ctx context.Context, run dockerRun, digest manifestDigester, image string, pull bool) (resolvedImage, error) {
 	id, err := imageIDFrom(ctx, run, image)
 	if err != nil {
-		return "", err
+		return resolvedImage{}, err
 	}
 	if digestRefPattern.MatchString(image) {
-		return image, nil
+		return resolvedImage{Local: id, Create: image}, nil
 	}
 	if !pull {
-		return id, nil
+		return resolvedImage{Local: id, Create: id}, nil
 	}
-	digests, err := imageRepoDigestsFrom(ctx, run, image)
+	ref, err := pulledImageRef(ctx, digest, image)
+	if err != nil {
+		return resolvedImage{}, err
+	}
+	return resolvedImage{Local: id, Create: ref}, nil
+}
+
+// pulledImageRef names image by the manifest digest its registry holds for its
+// tag: repository@sha256:..., the reference a pod pulls by content.
+func pulledImageRef(ctx context.Context, digest manifestDigester, image string) (string, error) {
+	host, repo, tag, err := splitImage(image)
 	if err != nil {
 		return "", err
 	}
-	if ref := repoDigestFor(image, digests); ref != "" {
-		return ref, nil
+	d, err := digest(ctx, host, repo, tag)
+	if err != nil {
+		return "", fmt.Errorf("pinning %s by its registry digest: %w", image, err)
 	}
-	return image, nil
+	if !registry.ValidDigest(d) {
+		return "", fmt.Errorf("registry %s answered %q for %s, not a manifest digest", host, d, image)
+	}
+	return host + "/" + repo + "@" + d, nil
+}
+
+// splitImage splits a pulled reference into the registry host it names and the
+// repository and tag inside that registry. The first path element is a host
+// when it holds a dot or a colon or is localhost, docker's own rule; a reference
+// without one names no registry to ask, and is refused, as is a host that is not
+// a host name. A reference with no tag
+// names latest, as docker reads it.
+func splitImage(image string) (host, repo, tag string, err error) {
+	first, rest, ok := strings.Cut(image, "/")
+	if !ok || !(strings.ContainsAny(first, ".:") || first == "localhost") {
+		return "", "", "", fmt.Errorf("%s names no registry host to pin it by", image)
+	}
+	if !registryHostPattern.MatchString(first) {
+		return "", "", "", fmt.Errorf("registry host %q of %s is not a host name", first, image)
+	}
+	repo, tag = rest, "latest"
+	if i := strings.LastIndex(rest, ":"); i > strings.LastIndex(rest, "/") {
+		repo, tag = rest[:i], rest[i+1:]
+	}
+	return first, repo, tag, nil
 }
 
 // imageIDFrom reads the content digest docker holds for image, refusing a reply
@@ -293,52 +395,6 @@ func imageIDFrom(ctx context.Context, run dockerRun, image string) (string, erro
 		return "", fmt.Errorf("docker image inspect %s printed %q, not an image digest", image, id)
 	}
 	return id, nil
-}
-
-// imageRepoDigestsFrom reads the repository digests docker holds for image. An
-// image with none reads as none: docker records one only for an image it pulled
-// or pushed, so a locally built image reads as none. Every entry must be a
-// reference that names its digest: the create names one of them, so a reply
-// docker cannot offer one from is refused rather than passed on.
-func imageRepoDigestsFrom(ctx context.Context, run dockerRun, image string) ([]string, error) {
-	out, stderr, err := run(ctx, "image", "inspect", "--format", imageRepoDigestsFormat, image)
-	if err != nil {
-		return nil, fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(string(stderr)))
-	}
-	var digests []string
-	if err := json.Unmarshal(bytes.TrimSpace(out), &digests); err != nil {
-		return nil, fmt.Errorf("docker image inspect %s printed %q, not a list of repository digests", image, strings.TrimSpace(string(out)))
-	}
-	for _, d := range digests {
-		if !digestRefPattern.MatchString(d) {
-			return nil, fmt.Errorf("docker image inspect %s listed %q, which is not a repository digest", image, d)
-		}
-	}
-	return digests, nil
-}
-
-// repoDigestFor returns the repository digest digests holds for image's own
-// repository, "" when it holds none.
-func repoDigestFor(image string, digests []string) string {
-	repo := imageRepo(image)
-	for _, d := range digests {
-		if r, _, ok := strings.Cut(d, "@"); ok && r == repo {
-			return d
-		}
-	}
-	return ""
-}
-
-// imageRepo is image without its tag or digest: the name a repository digest
-// carries. A colon before the last slash is the registry's port, not a tag.
-func imageRepo(image string) string {
-	if r, _, ok := strings.Cut(image, "@"); ok {
-		return r
-	}
-	if i := strings.LastIndex(image, ":"); i > strings.LastIndex(image, "/") {
-		return image[:i]
-	}
-	return image
 }
 
 // gitRun runs the git CLI in dir and returns its stdout. Tests supply their
@@ -649,18 +705,25 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 		return nil, err
 	}
 	// Resolved once, so the label check and the create name the same image even
-	// if a rebuild retags the profile's reference between them (gt-16oj9).
+	// if a rebuild retags the profile's reference between them (gt-16oj9). A
+	// pulling gateway's create names the registry digest read here (gt-jbuow).
 	image, err := b.imageRef(ctx, b.profile.Image, driverPullsImage(b.profile.Driver))
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
-	create.Image = image
+	create.Image = image.Create
 	// The image's gt must be the installed gt's commit. Checked before the push
 	// and the create, so a drifted image leaves nothing behind (gt-pmxo9). This
-	// reads the host docker's image for that reference; the sandbox's own gt is
-	// checked again once it is Ready, because the gateway may run a different
-	// image for that reference (gt-zdilt).
-	imageCommit, err := b.imageGT(ctx, image)
+	// reads the host docker's image for that reference, which for a pulling
+	// gateway is not the artifact the create names (the registry digest, gt-jbuow).
+	// For a pulling gateway the authority is the second check, once the sandbox
+	// is Ready, because the gateway pulls and runs its own image (gt-zdilt): it
+	// reads the pulled artifact and rolls the sandbox back on a drift, at the cost
+	// of one sandbox created and deleted. The two images differ only when the
+	// registry's tag moved after the host built it, the window the polecat-image
+	// sling deferral covers while a publish is in flight; an accepted risk of the
+	// overseer (gt-jbuow, 2026-10-29), not an unchecked one.
+	imageCommit, err := b.imageGT(ctx, image.Local)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}

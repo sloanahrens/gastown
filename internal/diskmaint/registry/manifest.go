@@ -3,6 +3,8 @@ package registry
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -228,40 +230,75 @@ func (c *Client) blobCreated(ctx context.Context, repo, digest string, walk *man
 	return created.UTC(), nil
 }
 
-// getJSON sends one GET carrying accept and decodes the body into out, reading
-// at most maxDocumentBytes of it. It returns the response headers so the caller
-// can read Docker-Content-Digest.
+// ManifestDigest reads the manifest ref names in repo and returns the digest of
+// the bytes it read: the sha256 of the body, which is the digest a pull by digest
+// verifies the manifest against. The registry's Docker-Content-Digest must name
+// those same bytes, so a reply whose header names another digest, or none, is
+// refused. A repo or ref that fails validation returns ErrBadName and sends no
+// request.
+func (c *Client) ManifestDigest(ctx context.Context, repo, ref string) (string, error) {
+	if !ValidRepo(repo) {
+		return "", fmt.Errorf("manifest %q: %w", repo, ErrBadName)
+	}
+	if !ValidTag(ref) && !ValidDigest(ref) {
+		return "", fmt.Errorf("manifest %q: %w", ref, ErrBadName)
+	}
+	path := "/v2/" + repo + "/manifests/" + ref
+	header, body, err := c.getBody(ctx, path, manifestAccept, &manifestWalk{})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	if header.Get("Docker-Content-Digest") != digest {
+		return "", fmt.Errorf("GET %s: the Docker-Content-Digest does not name the body, which hashes to %s", path, digest)
+	}
+	return digest, nil
+}
+
+// getJSON sends one GET carrying accept and decodes the body into out. It
+// returns the response headers so the caller can read Docker-Content-Digest.
 func (c *Client) getJSON(ctx context.Context, path, accept string, out any, walk *manifestWalk) (http.Header, error) {
+	header, body, err := c.getBody(ctx, path, accept, walk)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(out); err != nil {
+		return nil, fmt.Errorf("%s %s: decode: %w", http.MethodGet, path, err)
+	}
+	return header, nil
+}
+
+// getBody sends one GET carrying accept and returns the response headers and the
+// body, reading at most maxDocumentBytes of it.
+func (c *Client) getBody(ctx context.Context, path, accept string, walk *manifestWalk) (http.Header, []byte, error) {
 	if err := walk.spend(); err != nil {
-		return nil, fmt.Errorf("%s %s: %w", http.MethodGet, path, err)
+		return nil, nil, fmt.Errorf("%s %s: %w", http.MethodGet, path, err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+path, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, fmt.Errorf("%s %s: %w", http.MethodGet, path, ErrNotFound)
+		return nil, nil, fmt.Errorf("%s %s: %w", http.MethodGet, path, ErrNotFound)
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return nil, &statusError{code: resp.StatusCode, method: http.MethodGet, path: path}
+		return nil, nil, &statusError{code: resp.StatusCode, method: http.MethodGet, path: path}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDocumentBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("%s %s: read: %w", http.MethodGet, path, err)
+		return nil, nil, fmt.Errorf("%s %s: read: %w", http.MethodGet, path, err)
 	}
 	if len(body) > maxDocumentBytes {
-		return nil, fmt.Errorf("%s %s: the body is larger than %d bytes", http.MethodGet, path, maxDocumentBytes)
+		return nil, nil, fmt.Errorf("%s %s: the body is larger than %d bytes", http.MethodGet, path, maxDocumentBytes)
 	}
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(out); err != nil {
-		return nil, fmt.Errorf("%s %s: decode: %w", http.MethodGet, path, err)
-	}
-	return resp.Header, nil
+	return resp.Header, body, nil
 }
