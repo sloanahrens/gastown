@@ -3687,3 +3687,134 @@ func TestSpecHoldFilesHonorsTheReadOnlyMarkerThroughTheRealExtraction(t *testing
 		})
 	}
 }
+
+// TestSpecHoldReadOnlyMarkerReadsEveryTextField drives the marker through the
+// three production hold sites — heldBeadFrom for the tick's held set,
+// specPendingRefs for a pending bead's sling and specPeerHeldBySeat for the
+// guard's peer question — with a path marked (read-only) in each text field the
+// refs are extracted from. A site that stops passing its text, or an extraction
+// that stops reading a field, leaves the path held and turns that subtest red;
+// its unmarked twin shows the pair would otherwise hold (gt-dilzl, gt-5v13p).
+func TestSpecHoldReadOnlyMarkerReadsEveryTextField(t *testing.T) {
+	t.Parallel()
+	const shared = "internal/cmd/spec.go"
+	const seat = "gastown/polecats/capable"
+
+	type fields struct{ title, description, design, notes string }
+	// named is a bead that names shared in field, with the marker when marked
+	// is set. The description keeps a parsed, non-empty Constraints section:
+	// specHoldFiles reads the marker only where one exists (gt-zs8fq).
+	named := func(field string, marked bool) fields {
+		f := fields{
+			title:       "Work on the thing",
+			description: "## Goal\nChange the thing.\n\n## Constraints\nTouch nothing else.\n",
+			design:      "Root cause: a stale read.",
+			notes:       "No notes yet.",
+		}
+		mention := "Read " + shared
+		if marked {
+			mention += " (read-only)"
+		}
+		mention += " first."
+		switch field {
+		case "title":
+			f.title += "; " + mention
+		case "description":
+			f.description += "\n" + mention + "\n"
+		case "design":
+			f.design += " " + mention
+		case "notes":
+			f.notes += " " + mention
+		}
+		return f
+	}
+	// twoBeads reduces both beads through the production pool builder, so the
+	// refs and the text each site reads come from the extraction the
+	// dispatcher's own reads use, not from fields this test fills in.
+	twoBeads := func(t *testing.T, held, peer fields) []duplicateCandidate {
+		t.Helper()
+		db := beadsfake.New()
+		db.Seed(beads.Issue{ID: "gt-held", Status: beads.StatusHooked, Assignee: seat, Priority: 2,
+			Title: held.title, Description: held.description, Design: held.design, Notes: held.notes})
+		db.Seed(beads.Issue{ID: "gt-peer", Status: beads.StatusHooked, Priority: 2,
+			Title: peer.title, Description: peer.description, Design: peer.design, Notes: peer.notes})
+		got, err := listDuplicateCandidates(db, func(string, error) {}, t.TempDir(), []string{beads.StatusHooked}, time.Time{})
+		if err != nil {
+			t.Fatalf("listDuplicateCandidates: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("pool = %+v, want both beads", got)
+		}
+		return got
+	}
+	fromPool := func(t *testing.T, pool []duplicateCandidate, id string) duplicateCandidate {
+		t.Helper()
+		for _, c := range pool {
+			if c.ID == id {
+				return c
+			}
+		}
+		t.Fatalf("pool %+v has no %s", pool, id)
+		return duplicateCandidate{}
+	}
+	holds := func(paths []string) bool { return slices.Contains(paths, shared) }
+
+	sites := []struct {
+		name  string
+		stays func(t *testing.T, field string, marked bool) bool
+	}{
+		{
+			name: "heldBeadFrom",
+			stays: func(t *testing.T, field string, marked bool) bool {
+				t.Helper()
+				held, ok := heldBeadFrom(fromPool(t, twoBeads(t, named(field, marked), named(field, false)), "gt-held"))
+				if !ok {
+					t.Fatal("heldBeadFrom refused a bead a polecat seat holds")
+				}
+				return holds(held.Paths)
+			},
+		},
+		{
+			name: "specPendingRefs",
+			stays: func(t *testing.T, field string, marked bool) bool {
+				t.Helper()
+				f := named(field, marked)
+				paths, _ := specPendingRefs(specdispatch.Spec{ID: "gt-peer", Title: f.title,
+					Description: f.description, Design: f.design, Notes: f.notes})
+				return holds(paths)
+			},
+		},
+		{
+			name: "specPeerHeldBySeat/peer marks",
+			stays: func(t *testing.T, field string, marked bool) bool {
+				t.Helper()
+				pool := twoBeads(t, named(field, false), named(field, marked))
+				return specPeerHeldBySeat(fromPool(t, pool, "gt-peer"), pool) != ""
+			},
+		},
+		{
+			name: "specPeerHeldBySeat/held marks",
+			stays: func(t *testing.T, field string, marked bool) bool {
+				t.Helper()
+				pool := twoBeads(t, named(field, marked), named(field, false))
+				return specPeerHeldBySeat(fromPool(t, pool, "gt-peer"), pool) != ""
+			},
+		},
+	}
+	for _, site := range sites {
+		for _, field := range []string{"title", "description", "design", "notes"} {
+			t.Run(site.name+"/"+field+"/marked", func(t *testing.T) {
+				t.Parallel()
+				if site.stays(t, field, true) {
+					t.Errorf("%s marked (read-only) in the %s still holds at %s", shared, field, site.name)
+				}
+			})
+			t.Run(site.name+"/"+field+"/unmarked", func(t *testing.T) {
+				t.Parallel()
+				if !site.stays(t, field, false) {
+					t.Errorf("%s named without the marker does not hold at %s, so the marked case proves nothing", shared, site.name)
+				}
+			})
+		}
+	}
+}
