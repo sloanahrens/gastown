@@ -20,6 +20,10 @@ const (
 	// TrimShardBytes is the most encoded list one shard holds, a quarter of the 1 MiB a ConfigMap's
 	// data is capped at.
 	TrimShardBytes = 256 << 10
+	// TrimMaxShards is the most shards one trim Job mounts, so the most list it carries is this many
+	// TrimShardBytes. A list past it is refused rather than given a Job with more mounts than the
+	// route was sized for; gt-284u5 tracks the claims that need a route past it.
+	TrimMaxShards = 64
 	// TrimListRoot is where the trim container mounts the shards: shard i is the directory
 	// <TrimListRoot>/<i>, holding the file TrimShardKey.
 	TrimListRoot = "/trim"
@@ -66,16 +70,13 @@ type TrimManifest struct {
 	job    *TrimJob
 }
 
-// Job returns the trim Job whose pod mounts every shard.
-func (m *TrimManifest) Job() *TrimJob { return m.job }
-
 // Shards returns the shard ConfigMaps in mount order.
 func (m *TrimManifest) Shards() []TrimShard { return m.shards }
 
 // Documents returns the manifest encoded for kubectl apply, shards first and the Job last: a Job
 // applied before its shards leaves a pod waiting on a volume it cannot mount, and an omitted shard
-// trims part of the list. It is the manifest's only encoded form, so no caller can apply the Job
-// without them.
+// trims part of the list. It is the manifest's only route to the Job, so no caller can apply the
+// Job without them.
 func (m *TrimManifest) Documents() [][]byte {
 	docs := make([][]byte, 0, len(m.shards)+1)
 	for i := range m.shards {
@@ -140,6 +141,9 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 		return nil, err
 	}
 	shards := trimShards(name, in.Namespace, paths)
+	if len(shards) > TrimMaxShards {
+		return nil, fmt.Errorf("the trim Job on %s needs %d shards, past the %d one Job mounts: want a trim that removes fewer paths", in.ClaimName, len(shards), TrimMaxShards)
+	}
 
 	// The caller raises the alarm from the same plan; the annotation puts the fact on the object,
 	// where an operator reading the Job later finds it.
@@ -193,8 +197,9 @@ func trimJob(in TrimJobInput, name string, annotations map[string]string, shards
 	}
 }
 
-// trimLabels are the labels on the Job, its pods and its shards: what a selector matches and what a
-// cleanup removes.
+// trimLabels are the labels on the Job, its pods and its shards, so a selector matches all of them.
+// Nothing in the tree deletes the shards yet: a rerun of the same trim overwrites them by name, and
+// the most a stale set can leave behind is the shards of a longer earlier run.
 func trimLabels() map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "polecat-cache-trim",

@@ -56,7 +56,8 @@ func manifestPaths(t *testing.T, m *TrimManifest) []string {
 // a sandbox could write, and the claim is mounted at SeedCacheRoot beside the list.
 func TestBuildTrimManifestRunsAsTheCacheUserWithTheClaimAtCache(t *testing.T) {
 	t.Parallel()
-	job := buildTrim(t, trimInput()).Job()
+	m := buildTrim(t, trimInput())
+	job := m.job
 	if job.APIVersion != "batch/v1" || job.Kind != "Job" {
 		t.Errorf("apiVersion/kind = %q/%q, want batch/v1 and Job", job.APIVersion, job.Kind)
 	}
@@ -86,15 +87,16 @@ func TestBuildTrimManifestRunsAsTheCacheUserWithTheClaimAtCache(t *testing.T) {
 	if len(pod.Containers) != 1 {
 		t.Fatalf("containers = %d, want the trim container alone", len(pod.Containers))
 	}
-	if len(pod.Volumes) < 1 || pod.Volumes[0].PersistentVolumeClaim == nil ||
+	// One input shard: the claim and that shard are the whole of the pod's volumes and mounts.
+	if len(pod.Volumes) != 1+len(m.Shards()) || pod.Volumes[0].PersistentVolumeClaim == nil ||
 		pod.Volumes[0].PersistentVolumeClaim.ClaimName != "gt-cache" {
-		t.Fatalf("volumes = %+v, want the gt-cache claim alone", pod.Volumes)
+		t.Fatalf("volumes = %+v, want the gt-cache claim and %d shard", pod.Volumes, len(m.Shards()))
 	}
 	trim := pod.Containers[0]
 	if trim.Image != "gastown-polecat:dev" {
 		t.Errorf("image = %q, want the polecat image", trim.Image)
 	}
-	if len(trim.VolumeMounts) < 1 || trim.VolumeMounts[0].MountPath != SeedCacheRoot ||
+	if len(trim.VolumeMounts) != 1+len(m.Shards()) || trim.VolumeMounts[0].MountPath != SeedCacheRoot ||
 		trim.VolumeMounts[0].Name != "cache" {
 		t.Errorf("mounts = %+v, want the cache volume at %s", trim.VolumeMounts, SeedCacheRoot)
 	}
@@ -126,7 +128,7 @@ func TestBuildTrimManifestCarriesTheRemovalsInTheMountedShards(t *testing.T) {
 		t.Errorf("the shards list %v, want PlanTrim's removals %v", got, want)
 	}
 
-	trim := m.Job().Spec.Template.Spec.Containers[0]
+	trim := m.job.Spec.Template.Spec.Containers[0]
 	if want := []string{HelperPath, "trim-paths"}; !reflect.DeepEqual(trim.Command, want) {
 		t.Errorf("command = %v, want the image's trim-paths helper", trim.Command)
 	}
@@ -144,7 +146,7 @@ func TestBuildTrimManifestCarriesTheRemovalsInTheMountedShards(t *testing.T) {
 		if want := TrimListRoot + "/" + strconv.Itoa(i); mount.MountPath != want || !mount.ReadOnly {
 			t.Errorf("mount %d = %+v, want the shard read-only at %s", i, mount, want)
 		}
-		if got := m.Job().Spec.Template.Spec.Volumes[i+1].ConfigMap; got == nil || got.Name != shard.Metadata.Name {
+		if got := m.job.Spec.Template.Spec.Volumes[i+1].ConfigMap; got == nil || got.Name != shard.Metadata.Name {
 			t.Errorf("volume %d mounts %+v, want the shard %s", i, got, shard.Metadata.Name)
 		}
 	}
@@ -181,15 +183,15 @@ func TestBuildTrimManifestCarriesAListTooLongForOneArgv(t *testing.T) {
 	}
 
 	// The Job document carries the list nowhere: not a path, not an rm argv.
-	doc := string(m.Job().JSON())
+	doc := string(m.job.JSON())
 	if strings.Contains(doc, "gocache/") {
 		t.Errorf("the Job document names a planned path")
 	}
 	argv := 0
-	for _, arg := range m.Job().Spec.Template.Spec.Containers[0].Command {
+	for _, arg := range m.job.Spec.Template.Spec.Containers[0].Command {
 		argv += len(arg)
 	}
-	for _, arg := range m.Job().Spec.Template.Spec.Containers[0].Args {
+	for _, arg := range m.job.Spec.Template.Spec.Containers[0].Args {
 		argv += len(arg)
 	}
 	if argv > 4096 {
@@ -202,12 +204,19 @@ func TestBuildTrimManifestCarriesAListTooLongForOneArgv(t *testing.T) {
 // cap it is there to stay under.
 func TestTrimShardsBoundTheEncodedList(t *testing.T) {
 	t.Parallel()
-	// Each path is 104 characters but 626 bytes of encoded list, so 436 of them are 45 KiB of path
-	// text and 273 KiB of encoded list: under the bound by the text, over it by the list.
+	// Each path is 111 characters but 613 bytes once encoded, since each '<' escapes to six bytes. So
+	// 436 of them are 48,396 bytes of path text, under the bound, and 267,705 bytes of encoded list,
+	// over it. The setup is checked below, so it cannot drift to a case that does not exercise the bound.
 	const count = 436
 	paths := make([]string, count)
 	for i := range paths {
 		paths[i] = fmt.Sprintf("gocache/%03d%s", i, strings.Repeat("<", 100))
+	}
+	if raw := len(strings.Join(paths, "")); raw > TrimShardBytes {
+		t.Fatalf("the paths are %d bytes of text, want under the %d-byte bound", raw, TrimShardBytes)
+	}
+	if enc, err := json.Marshal(paths); err != nil || len(enc) <= TrimShardBytes {
+		t.Fatalf("the paths encode to %d bytes (%v), want over the %d-byte bound", len(enc), err, TrimShardBytes)
 	}
 	shards := trimShards(DefaultTrimJobName, "gt", paths)
 	if len(shards) < 2 {
@@ -231,6 +240,38 @@ func TestTrimShardsGiveAnOversizedEntryItsOwnShard(t *testing.T) {
 	}
 	if got := shardPaths(t, shards[1]); !reflect.DeepEqual(got, []string{long}) {
 		t.Errorf("the middle shard lists %d paths, want the oversized entry alone", len(got))
+	}
+}
+
+// TestBuildTrimManifestRefusesAListPastTheShardCeiling pins the ceiling on mounts: a list that fits the
+// most shards one Job mounts is built, and one more shard is refused rather than given a Job the route
+// was not sized for. Each path encodes to just over half a shard, so every shard holds one path and
+// the shard count is the path count.
+func TestBuildTrimManifestRefusesAListPastTheShardCeiling(t *testing.T) {
+	t.Parallel()
+	listing := func(n int) []Entry {
+		out := make([]Entry, 0, n)
+		for i := 0; i < n; i++ {
+			p := fmt.Sprintf("gocache/%03d", i) + strings.Repeat("a", TrimShardBytes/2-len("gocache/000"))
+			out = append(out, file(p, BuildCache, 1, 0, i))
+		}
+		return out
+	}
+	in := trimInput()
+	in.CapBytes = 0
+
+	in.Listing = listing(TrimMaxShards)
+	m, err := BuildTrimManifest(in)
+	if err != nil {
+		t.Fatalf("BuildTrimManifest over %d shards: %v, want the most one Job mounts", TrimMaxShards, err)
+	}
+	if len(m.Shards()) != TrimMaxShards {
+		t.Errorf("the manifest has %d shards, want %d", len(m.Shards()), TrimMaxShards)
+	}
+
+	in.Listing = listing(TrimMaxShards + 1)
+	if m, err := BuildTrimManifest(in); err == nil {
+		t.Errorf("BuildTrimManifest over %d shards = %+v, want a refusal past the %d one Job mounts", TrimMaxShards+1, m, TrimMaxShards)
 	}
 }
 
@@ -322,7 +363,7 @@ func TestBuildTrimManifestTakesTheSandboxCountFromItsCaller(t *testing.T) {
 			if got := hasModulePath(manifestPaths(t, m)); got != tc.wantMod {
 				t.Errorf("the list names the module cache = %v, want %v", got, tc.wantMod)
 			}
-			_, annotated := m.Job().Metadata.Annotations[TrimOverflowAnnotation]
+			_, annotated := m.job.Metadata.Annotations[TrimOverflowAnnotation]
 			if annotated != tc.wantOver {
 				t.Errorf("overflow annotation present = %v, want %v", annotated, tc.wantOver)
 			}
@@ -343,18 +384,18 @@ func TestBuildTrimManifestAnnotatesTheOverflow(t *testing.T) {
 	in.CapBytes = 50
 	in.SandboxesRunning = 1
 	m := buildTrim(t, in)
-	if got := m.Job().Metadata.Annotations[TrimOverflowAnnotation]; got != "50" {
+	if got := m.job.Metadata.Annotations[TrimOverflowAnnotation]; got != "50" {
 		t.Errorf("%s = %q, want 50 bytes over the cap", TrimOverflowAnnotation, got)
 	}
-	if doc := string(m.Job().JSON()); !strings.Contains(doc, `"`+TrimOverflowAnnotation+`": "50"`) {
+	if doc := string(m.job.JSON()); !strings.Contains(doc, `"`+TrimOverflowAnnotation+`": "50"`) {
 		t.Errorf("the document does not carry the overflow annotation: %s", doc)
 	}
 
 	// The same listing with no sandbox running loses the module cache too, so nothing overflows.
 	in.SandboxesRunning = 0
 	m = buildTrim(t, in)
-	if _, ok := m.Job().Metadata.Annotations[TrimOverflowAnnotation]; ok {
-		t.Errorf("annotations = %v, want none when the trim reaches the cap", m.Job().Metadata.Annotations)
+	if _, ok := m.job.Metadata.Annotations[TrimOverflowAnnotation]; ok {
+		t.Errorf("annotations = %v, want none when the trim reaches the cap", m.job.Metadata.Annotations)
 	}
 }
 

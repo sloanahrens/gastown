@@ -197,14 +197,19 @@ func trimCacheMain(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// trimPathsMain runs the trim Job's container: it removes every path the mounted
-// shards list, relative to --root.
-//
-// stdout carries "removed N absent M", which is what the caller logs, and exit 3
-// with a reason on stderr means the list could not be read whole or a removal
-// failed: a trim the helper cannot vouch for is reported rather than passed off
-// as a partial success.
+// trimPathsMain runs the trim Job's container over the disk.
 func trimPathsMain(args []string, stdout, stderr io.Writer) int {
+	return trimPathsRun(args, stdout, stderr, diskTrimPathsFS())
+}
+
+// trimPathsRun is trimPathsMain over the filesystem w, so a test answers the calls.
+//
+// Once the run reaches the list, stdout carries "removed N absent M", the counts of
+// what it did, so a run that fails part way still says how much it removed. Exit 3
+// with a reason on stderr means the list could not be read whole or a removal
+// failed: a trim the helper cannot vouch for is reported rather than passed off as a
+// partial success.
+func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 	flags := flag.NewFlagSet("trim-paths", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	root := flags.String("root", cachevol.SeedCacheRoot, "the claim the listed paths are relative to")
@@ -218,12 +223,12 @@ func trimPathsMain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "trim-paths: --shards needs a whole number of shards, at least 1")
 		return 3
 	}
-	res, err := RemoveTrimPaths(*root, *list, shards, diskTrimPathsFS())
+	res, err := RemoveTrimPaths(*root, *list, shards, w)
+	fmt.Fprintf(stdout, "removed %d absent %d\n", res.Removed, res.Absent)
 	if err != nil {
 		fmt.Fprintf(stderr, "trim-paths: %v\n", err)
 		return 3
 	}
-	fmt.Fprintf(stdout, "removed %d absent %d\n", res.Removed, res.Absent)
 	return 0
 }
 

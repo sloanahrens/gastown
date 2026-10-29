@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -206,19 +205,21 @@ func TestRemoveTrimPathsRefusesAShardFileItCannotRead(t *testing.T) {
 	}
 }
 
-// TestTrimPathsMainRefusesAListDirectoryThatIsNotThere is the same refusal over the real
-// filesystem: the Job mounts the shards under --list, and a run given a directory that is not there
-// has no list to act on.
-func TestTrimPathsMainRefusesAListDirectoryThatIsNotThere(t *testing.T) {
+// TestTrimPathsRunRefusesAListDirectoryThatIsNotThere is the same refusal at the flag: the Job mounts
+// the shards under --list, and a run given a directory that is not there has no list to act on.
+func TestTrimPathsRunRefusesAListDirectoryThatIsNotThere(t *testing.T) {
 	t.Parallel()
+	f := newFakeTrimFS()
 	var out, errOut bytes.Buffer
-	list := filepath.Join(t.TempDir(), "absent")
-	code := trimPathsMain([]string{"--root", t.TempDir(), "--list", list, "--shards", "1"}, &out, &errOut)
+	code := trimPathsRun([]string{"--root", "/cache", "--list", "/absent", "--shards", "1"}, &out, &errOut, f.fs())
 	if code != 3 {
-		t.Fatalf("trimPathsMain = %d, want 3 (%s)", code, errOut.String())
+		t.Fatalf("trimPathsRun = %d, want 3 (%s)", code, errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "reading the shard") {
 		t.Errorf("stderr = %q, want the shard it could not read", errOut.String())
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
 	}
 }
 
@@ -311,60 +312,79 @@ func TestRemoveTrimPathsRefusesAShardItCannotReadWhole(t *testing.T) {
 	}
 }
 
-// TestTrimPathsMainRemovesTheMountedList is the helper as the Job runs it, over a real filesystem:
-// the run deletes the listed file under the claim and prints the counts the caller logs.
-func TestTrimPathsMainRemovesTheMountedList(t *testing.T) {
+// TestTrimPathsRunRemovesTheMountedList is the helper as the Job runs it: the run deletes the listed
+// file under the claim and prints the counts the caller logs.
+func TestTrimPathsRunRemovesTheMountedList(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	list := t.TempDir()
-	victim := plantCacheFile(t, filepath.Join(root, "gocache", "ab", "one"), 10, testNow)
-	writeShard(t, list, 0, "gocache/ab/one")
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/ab/one")
 	var out, errOut bytes.Buffer
-	code := runProgram([]string{"trim-paths", "--root", root, "--list", list, "--shards", "1"}, &out, &errOut, envMap(map[string]string{}))
+	code := trimPathsRun([]string{"--root", "/cache", "--list", "/trim", "--shards", "1"}, &out, &errOut, f.fs())
 	if code != 0 {
-		t.Fatalf("runProgram(trim-paths) = %d, want 0 (%s)", code, errOut.String())
+		t.Fatalf("trimPathsRun = %d, want 0 (%s)", code, errOut.String())
 	}
-	if existsFile(victim) {
-		t.Errorf("%s is still there, want the listed file removed", victim)
+	if want := []string{"/cache/gocache/ab/one"}; !reflect.DeepEqual(f.removed, want) {
+		t.Errorf("removed %v, want %v", f.removed, want)
 	}
 	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 0" {
-		t.Errorf("runProgram(trim-paths) printed %q, want %q", got, "removed 1 absent 0")
+		t.Errorf("trimPathsRun printed %q, want %q", got, "removed 1 absent 0")
 	}
 }
 
-// TestTrimPathsMainFollowsNoSymlinkOutOfTheClaim is the refusal a run must make: a shard listing a
-// file through a symlinked directory names a file outside the claim, and the helper leaves it.
-func TestTrimPathsMainFollowsNoSymlinkOutOfTheClaim(t *testing.T) {
+// TestTrimPathsRunFollowsNoSymlinkOutOfTheClaim is the refusal a run must make: a shard listing a file
+// through a symlinked directory names a file outside the claim, and the helper leaves it.
+func TestTrimPathsRunFollowsNoSymlinkOutOfTheClaim(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	list := t.TempDir()
-	outside := t.TempDir()
-	victim := plantCacheFile(t, filepath.Join(outside, "one"), 10, testNow)
-	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
-		t.Fatal(err)
-	}
-	writeShard(t, list, 0, "escape/one")
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "escape/one")
+	f.resolves["/cache/escape"] = "/outside"
 	var out, errOut bytes.Buffer
-	code := runProgram([]string{"trim-paths", "--root", root, "--list", list, "--shards", "1"}, &out, &errOut, envMap(map[string]string{}))
+	code := trimPathsRun([]string{"--root", "/cache", "--list", "/trim", "--shards", "1"}, &out, &errOut, f.fs())
 	if code != 3 {
-		t.Fatalf("runProgram(trim-paths) = %d, want 3 (%s)", code, errOut.String())
+		t.Fatalf("trimPathsRun = %d, want 3 (%s)", code, errOut.String())
 	}
-	if !existsFile(victim) {
-		t.Errorf("%s was removed through a symlink out of the claim", victim)
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v through a symlink out of the claim, want nothing removed", f.removed)
 	}
 	if !strings.Contains(errOut.String(), "outside the claim") {
 		t.Errorf("stderr = %q, want the reason the path is refused", errOut.String())
 	}
 }
 
-// TestTrimPathsMainRefusesAShardCountThatIsNotOne pins the flag: the Job passes the count of mounts
-// it made, and a run given none of them has no list to trust.
-func TestTrimPathsMainRefusesAShardCountThatIsNotOne(t *testing.T) {
+// TestTrimPathsRunReportsTheCountsOfAFailedRun pins what a run that fails part way still says: the
+// caller logs the counts, so a trim that removed some of its list reports how many it removed and how
+// many were already gone before it exits 3.
+func TestTrimPathsRunReportsTheCountsOfAFailedRun(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/one", "gocache/two", "gocache/gone")
+	f.removeErr["/cache/gocache/two"] = errors.New("device or resource busy")
+	f.removeErr["/cache/gocache/gone"] = fs.ErrNotExist
+	var out, errOut bytes.Buffer
+	code := trimPathsRun([]string{"--root", "/cache", "--list", "/trim", "--shards", "1"}, &out, &errOut, f.fs())
+	if code != 3 {
+		t.Fatalf("trimPathsRun = %d, want 3 (%s)", code, errOut.String())
+	}
+	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 1" {
+		t.Errorf("trimPathsRun printed %q, want the counts %q", got, "removed 1 absent 1")
+	}
+	if !strings.Contains(errOut.String(), "1 of 3") {
+		t.Errorf("stderr = %q, want the one failed removal of three", errOut.String())
+	}
+}
+
+// TestTrimPathsRunRefusesAShardCountThatIsNotOne pins the flag: the Job passes the count of mounts it
+// made, and a run given none of them has no list to trust.
+func TestTrimPathsRunRefusesAShardCountThatIsNotOne(t *testing.T) {
 	t.Parallel()
 	for _, count := range []string{"", "0", "-1", "two"} {
+		f := newFakeTrimFS()
 		var out, errOut bytes.Buffer
-		if code := trimPathsMain([]string{"--shards", count}, &out, &errOut); code != 3 {
-			t.Errorf("trimPathsMain(--shards %q) = %d, want 3", count, code)
+		if code := trimPathsRun([]string{"--shards", count}, &out, &errOut, f.fs()); code != 3 {
+			t.Errorf("trimPathsRun(--shards %q) = %d, want 3", count, code)
+		}
+		if len(f.removed) != 0 {
+			t.Errorf("--shards %q removed %v, want nothing removed", count, f.removed)
 		}
 	}
 }
@@ -381,29 +401,5 @@ func TestRemoveTrimPathsRefusesAShardCountOfNone(t *testing.T) {
 	}
 	if len(f.removed) != 0 || len(f.dirs) != 1 {
 		t.Errorf("removed %v, want nothing removed", f.removed)
-	}
-}
-
-// writeShard plants one shard directory as the kubelet mounts it: the ConfigMap's key as a file,
-// beside the ..data symlink the atomic writer leaves and the directory it points at.
-func writeShard(t *testing.T, listDir string, index int, paths ...string) {
-	t.Helper()
-	data, err := json.Marshal(paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(listDir, strconv.Itoa(index))
-	stamp := "..2026_10_29_00_00_00.000000000"
-	if err := os.MkdirAll(filepath.Join(dir, stamp), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, stamp, cachevol.TrimShardKey), data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(stamp, filepath.Join(dir, "..data")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join("..data", cachevol.TrimShardKey), filepath.Join(dir, cachevol.TrimShardKey)); err != nil {
-		t.Fatal(err)
 	}
 }
