@@ -618,9 +618,11 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		var out []*beads.Issue
 		// No status filter: a candidate is anything IsActionable, so a bead
 		// parked on a blocker or claimed for the rework still counts, and a
-		// closed one is dropped by the collector (healthSources.countOpen
+		// closed one is dropped by the collector (healthSources.actionableBeads
 		// reads the same way, gt-tk2xd).
-		for _, label := range []string{land.LabelRework, land.LabelNeedsHuman} {
+		// A landing left for a person carries whichever person label the
+		// writer or the operator set; the count reads all of them (gt-zjel5).
+		for _, label := range []string{land.LabelRework, land.LabelNeedsHuman, land.LabelNeedsOverseer, land.LabelNeedsOperator} {
 			issues, err := d.rigWorkBeads(rig).List(beads.ListOptions{
 				Label: label, Priority: -1, Limit: 0,
 			})

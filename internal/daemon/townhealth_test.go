@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/promote"
@@ -455,6 +456,51 @@ func TestWriteTownHealth_NeedsHumanCountsOnlyPendingBeads(t *testing.T) {
 			got := healthField(t, r, "needs-human")
 			if got.Value != tc.want || got.Verdict != tc.verdict {
 				t.Errorf("needs-human = %s %q, want %s %q", got.Verdict, got.Value, tc.verdict, tc.want)
+			}
+		})
+	}
+}
+
+// A landing held for a person counts under whichever person label holds it,
+// and a bead carrying two of them counts once (gt-zjel5).
+func TestWriteTownHealth_NeedsHumanCountsEveryPersonLabel(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	at := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	bead := func(id string) *beads.Issue {
+		return &beads.Issue{ID: id, Status: "open", CreatedAt: at}
+	}
+	for _, tc := range []struct {
+		name   string
+		labels map[string][]*beads.Issue
+		want   string
+	}{
+		{"an overseer hold", map[string][]*beads.Issue{land.LabelNeedsOverseer: {bead("gt-3")}}, "1"},
+		{"an operator hold", map[string][]*beads.Issue{land.LabelNeedsOperator: {bead("gt-4")}}, "1"},
+		{"a bead under two person labels", map[string][]*beads.Issue{
+			land.LabelNeedsHuman:    {bead("gt-5")},
+			land.LabelNeedsOverseer: {bead("gt-5")},
+		}, "1"},
+		{"one bead under each label", map[string][]*beads.Issue{
+			land.LabelNeedsHuman:    {bead("gt-6")},
+			land.LabelNeedsOverseer: {bead("gt-7")},
+			land.LabelNeedsOperator: {bead("gt-8")},
+		}, "3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, bd := healthTown(t, now)
+			// healthTown seeds a gt:needs-human bead of its own; the cases
+			// hold only the labels they name.
+			bd.issuesByLabel = tc.labels
+			d.writeTownHealth()
+
+			r, err := townhealth.Read(d.config.TownRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := healthField(t, r, "needs-human"); got.Value != tc.want {
+				t.Errorf("needs-human = %q, want %q", got.Value, tc.want)
 			}
 		})
 	}

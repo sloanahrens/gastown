@@ -38,6 +38,8 @@ func TestDashPolecatStateFollowsTheInventory(t *testing.T) {
 		"stalled":     {dashItem(polecat.StateStalled, polecat.WorkstateDisposition{}), true, false, nil, dashboard.StateStalled},
 		"review":      {dashItem(polecat.StateReviewNeeded, polecat.WorkstateDisposition{}), false, false, nil, dashboard.StateReviewNeeded},
 		"human":       {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, []string{"gt:needs-human"}, dashboard.StateNeedsHuman},
+		"overseer":    {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, []string{"gt:needs-overseer"}, dashboard.StateNeedsHuman},
+		"operator":    {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, []string{"gt:needs-operator"}, dashboard.StateNeedsHuman},
 		"parked":      {dashItem(polecat.StateIdle, parked), false, false, nil, dashboard.StateParked},
 		"recovery":    {dashItem(polecat.StateIdle, recovery), false, false, nil, dashboard.StateRecovery},
 		"idle":        {dashItem(polecat.StateIdle, polecat.WorkstateDisposition{Reusable: true}), false, false, nil, dashboard.StateIdle},

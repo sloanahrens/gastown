@@ -422,8 +422,12 @@ func TestPassHumanRejectionEscalates(t *testing.T) {
 	}
 	h.w.Pass(context.Background())
 	// Bounded by the test binary's timeout: a missing escalation hangs here.
-	if msg := <-got; !strings.HasPrefix(msg, "gt-abc: ") || !strings.Contains(msg, "no verdict") || !strings.Contains(msg, "review") {
+	msg := <-got
+	if !strings.HasPrefix(msg, "gt-abc: ") || !strings.Contains(msg, "no verdict") || !strings.Contains(msg, "review") {
 		t.Fatalf("escalation %q; want the bead, the kind and the reason", msg)
+	}
+	if !strings.Contains(msg, "left for the overseer") {
+		t.Fatalf("escalation %q; want it to say the landing is left for the overseer, as the log line does", msg)
 	}
 }
 

@@ -377,25 +377,6 @@ func (s *healthSources) actionableBeads(rig, label string) ([]*beads.Issue, erro
 	return out, nil
 }
 
-// countOpen counts rig's pending beads carrying label, and reports each one's
-// creation time to seen when it is set.
-func (s *healthSources) countOpen(rig, label string, seen func(created time.Time)) (int, error) {
-	issues, err := s.actionableBeads(rig, label)
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, is := range issues {
-		n++
-		if seen != nil {
-			if t, err := time.Parse(time.RFC3339, is.CreatedAt); err == nil {
-				seen(t)
-			}
-		}
-	}
-	return n, nil
-}
-
 // OldestEscalation reads the town's open escalations the way `gt escalate list`
 // reads them: both bead planes, minus the mail carriers routed for each
 // escalation. A carrier carries gt:escalation and outlives the escalation it
@@ -576,7 +557,8 @@ func (s *healthSources) Validate() error {
 }
 
 // NeedsHuman counts the landing rigs' beads Land refused on a policy only
-// the operator can lift (gt:needs-human).
+// the person behind them can lift: gt:needs-human, gt:needs-overseer or
+// gt:needs-operator. A bead carrying two of those labels counts once.
 func (s *healthSources) NeedsHuman(ctx context.Context) (int, time.Time, error) {
 	total := 0
 	var oldest time.Time
@@ -584,15 +566,23 @@ func (s *healthSources) NeedsHuman(ctx context.Context) (int, time.Time, error) 
 		if err := ctx.Err(); err != nil {
 			return 0, time.Time{}, err
 		}
-		n, err := s.countOpen(rig, land.LabelNeedsHuman, func(t time.Time) {
-			if oldest.IsZero() || t.Before(oldest) {
-				oldest = t
+		counted := map[string]bool{}
+		for _, label := range []string{land.LabelNeedsHuman, land.LabelNeedsOverseer, land.LabelNeedsOperator} {
+			issues, err := s.actionableBeads(rig, label)
+			if err != nil {
+				return 0, time.Time{}, fmt.Errorf("%s: %w", rig, err)
 			}
-		})
-		if err != nil {
-			return 0, time.Time{}, fmt.Errorf("%s: %w", rig, err)
+			for _, is := range issues {
+				if counted[is.ID] {
+					continue
+				}
+				counted[is.ID] = true
+				total++
+				if t, err := time.Parse(time.RFC3339, is.CreatedAt); err == nil && (oldest.IsZero() || t.Before(oldest)) {
+					oldest = t
+				}
+			}
 		}
-		total += n
 	}
 	return total, oldest, nil
 }
