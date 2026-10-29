@@ -37,6 +37,12 @@ func TestCloneArgsAndIsolation(t *testing.T) {
 		{"CloneWithReference", func(g *Git, u, d string) error { return g.CloneWithReference(u, d, "/srv/ref") }, "clone --single-branch --depth 1 --reference-if-able /srv/ref"},
 		{"CloneBranch", func(g *Git, u, d string) error { return g.CloneBranch(u, d, "dev") }, "clone --single-branch --depth 1 --branch dev"},
 		{"CloneBranchPartial", func(g *Git, u, d string) error { return g.CloneBranchPartial(u, d, "dev", "blob:none") }, "clone --single-branch --filter=blob:none --branch dev"},
+		// A crew clone reads merge bases and other agents' branches, so it
+		// takes neither --depth nor --single-branch (gt-zyow0).
+		{"CloneFull", func(g *Git, u, d string) error { return g.CloneFull(u, d) }, "clone"},
+		{"CloneFullWithReference", func(g *Git, u, d string) error { return g.CloneFullWithReference(u, d, "/srv/ref") }, "clone --reference-if-able /srv/ref"},
+		{"CloneBranchFull", func(g *Git, u, d string) error { return g.CloneBranchFull(u, d, "dev") }, "clone --branch dev"},
+		{"CloneBranchFullWithReference", func(g *Git, u, d string) error { return g.CloneBranchFullWithReference(u, d, "dev", "/srv/ref") }, "clone --branch dev --reference-if-able /srv/ref"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

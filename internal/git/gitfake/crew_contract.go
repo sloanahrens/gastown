@@ -183,3 +183,57 @@ func RunCrewContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 }
+
+// CrewCloneKeepsHistoryAndBranches checks the crew full-clone methods against
+// an origin of three commits and a second branch: the clone keeps every
+// commit below its tip and tracks the branch it did not check out. It returns
+// the path of the plain CloneBranchFull clone, which the real-git tier reads
+// with git itself.
+//
+// Mutation evidence: putting --single-branch back into a method makes the
+// origin/other check fail for both implementations; putting --depth 1 back
+// makes it fail for real git, which git also reads as --single-branch, and
+// leaves the merge-base check to catch a truncation that keeps the branches.
+// The fake does not model depth: its commits always carry their ancestry.
+func CrewCloneKeepsHistoryAndBranches(t *testing.T, newEnv func(t *testing.T) Env) string {
+	t.Helper()
+	env := newEnv(t)
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	env.InitBare(t, origin)
+	first := env.Commit(t, origin, "main", "main: one", map[string]string{"a.txt": "one\n"})
+	second := env.Commit(t, origin, "main", "main: two", map[string]string{"b.txt": "two\n"})
+	third := env.Commit(t, origin, "main", "main: three", map[string]string{"c.txt": "three\n"})
+	env.SetRef(t, origin, "refs/heads/other", second)
+	reference := filepath.Join(root, "reference")
+	env.Clone(t, origin, reference)
+
+	g := env.Open(root)
+	for _, tt := range []struct {
+		name  string
+		clone func(dest string) error
+	}{
+		{"CloneBranchFull", func(dest string) error { return g.CloneBranchFull(origin, dest, "main") }},
+		{"CloneBranchFullWithReference", func(dest string) error {
+			return g.CloneBranchFullWithReference(origin, dest, "main", reference)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dest := filepath.Join(root, tt.name)
+			if err := tt.clone(dest); err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			c := env.Open(dest)
+			if head, err := c.Rev("HEAD"); err != nil || head != third {
+				t.Errorf("clone HEAD = %q, %v; want main's tip %s", head, err, third)
+			}
+			if base, err := c.MergeBase(first, third); err != nil || base != first {
+				t.Errorf("merge base of %s and %s = %q, %v; want %s, so the whole history is present", first, third, base, err, first)
+			}
+			if other, err := c.Rev("origin/other"); err != nil || other != second {
+				t.Errorf("origin/other = %q, %v; want %s", other, err, second)
+			}
+		})
+	}
+	return filepath.Join(root, "CloneBranchFull")
+}
