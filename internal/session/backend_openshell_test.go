@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -291,33 +290,38 @@ func (r *fakeImageRegistry) run(_ context.Context, args ...string) ([]byte, []by
 }
 
 // useFakeDocker points a backend's image resolution at the fake host docker, as
-// dockerImageRef and imageGTFrom do in production.
-func useFakeDocker(b *openshellBackend, docker *fakeImageRegistry) {
+// dockerImageRef and imageGTFrom do in production, and at digest for the
+// registry read a pulling gateway makes.
+func useFakeDocker(b *openshellBackend, docker *fakeImageRegistry, digest manifestDigester) {
 	b.docker = docker.run
 	b.imageRef = func(ctx context.Context, image string, pull bool) (resolvedImage, error) {
-		return imageRefFor(ctx, docker.run, registryManifestDigest, image, pull)
+		return imageRefFor(ctx, docker.run, digest, image, pull)
 	}
 	b.imageGT = func(ctx context.Context, image string) (string, error) { return imageGTFrom(ctx, docker.run, image) }
 }
 
-// The names and digests the test registry serves. The checked digest is what a
-// tag names when Prepare reads it; the rebuilt digest is what a rebuild moves it
-// to before the create.
+// The digests the pin's tests use. The checked digest is what a tag names when
+// Prepare reads it; the rebuilt digest is what a rebuild moves the tag to before
+// the create.
+var (
+	pinDigestChecked = "sha256:" + strings.Repeat("1", 64)
+	pinDigestRebuilt = "sha256:" + strings.Repeat("2", 64)
+	pinConfigDigest  = "sha256:" + strings.Repeat("c", 64)
+)
+
+// pinHost is the registry host the pulled profile's image names. The host is
+// never dialled: the registry is the transport below.
 const (
+	pinHost = "registry.test:5000"
 	pinRepo = "gastown-polecat"
 	pinTag  = "dev"
 )
 
-var (
-	pinDigestChecked = "sha256:" + strings.Repeat("1", 64)
-	pinDigestRebuilt = "sha256:" + strings.Repeat("2", 64)
-	pinConfig        = "sha256:" + strings.Repeat("c", 64)
-)
-
-// pinRegistry is the registry a pulling gateway's image comes from, served over
-// httptest: one repository tag, the digest the tag names, and the config blob
-// its manifest carries. The fields make the registry misbehave the ways a
-// refusal test needs. retagTo moves the tag after the first manifest read, the
+// pinRegistry is the registry a pulling gateway's image comes from, served in
+// process as an http.RoundTripper, so the registry client reaches a fake and no
+// socket opens. It holds one repository tag, the digest the tag names, and the
+// config blob the tag's manifest carries. The fields make it misbehave the ways
+// a refusal test needs. retagTo moves the tag after the first manifest read: the
 // rebuild that lands between Prepare's check and its create.
 type pinRegistry struct {
 	mu         sync.Mutex
@@ -326,34 +330,48 @@ type pinRegistry struct {
 	status     int    // when set, the manifest read answers with this status
 	omitDigest bool   // the manifest reply carries no Docker-Content-Digest
 	badDigest  string // when set, the manifest reply carries this digest instead
+	down       bool   // the registry does not answer: every request fails to connect
 }
 
-func (r *pinRegistry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+func (r *pinRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.down {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+	reply := func(status int, header http.Header, body string) (*http.Response, error) {
+		if header == nil {
+			header = http.Header{}
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	}
 	switch req.URL.Path {
 	case "/v2/" + pinRepo + "/manifests/" + pinTag:
 		if r.status != 0 {
-			w.WriteHeader(r.status)
-			return
+			return reply(r.status, nil, "")
 		}
+		header := http.Header{"Content-Type": {"application/vnd.oci.image.manifest.v1+json"}}
 		switch {
 		case r.omitDigest:
 		case r.badDigest != "":
-			w.Header().Set("Docker-Content-Digest", r.badDigest)
+			header.Set("Docker-Content-Digest", r.badDigest)
 		default:
-			w.Header().Set("Docker-Content-Digest", r.digest)
+			header.Set("Docker-Content-Digest", r.digest)
 		}
-		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-		fmt.Fprintf(w, `{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":%q,"size":2},"layers":[]}`, pinConfig)
+		body := fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":%q,"size":2},"layers":[]}`, pinConfigDigest)
 		if r.retagTo != "" {
 			r.digest, r.retagTo = r.retagTo, ""
 		}
-	case "/v2/" + pinRepo + "/blobs/" + pinConfig:
-		fmt.Fprint(w, `{"created":"2026-10-28T00:00:00Z"}`)
-	default:
-		w.WriteHeader(http.StatusNotFound)
+		return reply(http.StatusOK, header, body)
+	case "/v2/" + pinRepo + "/blobs/" + pinConfigDigest:
+		return reply(http.StatusOK, nil, `{"created":"2026-10-28T00:00:00Z"}`)
 	}
+	return reply(http.StatusNotFound, nil, "")
 }
 
 // tagDigest is the digest the tag names now.
@@ -363,26 +381,23 @@ func (r *pinRegistry) tagDigest() string {
 	return r.digest
 }
 
-// servePinRegistry serves reg on httptest and returns the server's host, which
-// is the registry host a profile's pulled image names.
-func servePinRegistry(t *testing.T, reg *pinRegistry) string {
-	t.Helper()
-	srv := httptest.NewServer(reg)
-	t.Cleanup(srv.Close)
-	return strings.TrimPrefix(srv.URL, "http://")
+// pinnedDigester is the registry digest read through reg, in process.
+func pinnedDigester(reg *pinRegistry) manifestDigester {
+	return registryDigester(&http.Client{Transport: reg})
 }
 
-// pulledProfile is a kubernetes profile whose image is the test registry's tag.
-func pulledProfile(host string) Profile {
+// pulledProfile is a kubernetes profile whose image is the pin registry's tag.
+func pulledProfile() Profile {
 	profile := openshellTestProfile
-	profile.Image = host + "/" + pinRepo + ":" + pinTag
+	profile.Image = pinHost + "/" + pinRepo + ":" + pinTag
 	profile.Driver = config.SandboxDriverKubernetes
 	return profile
 }
 
 // TestOpenShellPreparePinsTheImageDigestItChecked is gt-16oj9's case: the image
 // is retagged between the label check and the create, and the sandbox is still
-// created from the digest the check read.
+// created from the digest the check read. A docker driver never reads the
+// registry, so the registry here is one that fails any read.
 func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
@@ -396,7 +411,7 @@ func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
 		labels: map[string]string{pinDigestChecked: openshellTestGTCommit, pinDigestRebuilt: openshellTestDriftedGT},
 	}
 	reg.retag = func() { reg.tags[openshellTestProfile.Image] = pinDigestRebuilt }
-	useFakeDocker(b, reg)
+	useFakeDocker(b, reg, pinnedDigester(&pinRegistry{down: true}))
 
 	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
 		t.Fatalf("Prepare: %v", err)
@@ -420,15 +435,14 @@ func TestOpenShellPreparePinsThePulledDigestItChecked(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
-	reg := &pinRegistry{digest: pinDigestChecked, retagTo: pinDigestRebuilt}
-	host := servePinRegistry(t, reg)
-	profile := pulledProfile(host)
+	profile := pulledProfile()
 	b, _ := openshellTestBackend(town, profile, fake)
+	reg := &pinRegistry{digest: pinDigestChecked, retagTo: pinDigestRebuilt}
 	docker := &fakeImageRegistry{
 		tags:   map[string]string{profile.Image: openshellTestImageDigest},
 		labels: map[string]string{openshellTestImageDigest: openshellTestGTCommit},
 	}
-	useFakeDocker(b, docker)
+	useFakeDocker(b, docker, pinnedDigester(reg))
 
 	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
 		t.Fatalf("Prepare: %v", err)
@@ -439,7 +453,7 @@ func TestOpenShellPreparePinsThePulledDigestItChecked(t *testing.T) {
 	if want := []string{openshellTestImageDigest}; !reflect.DeepEqual(docker.labelRefs, want) {
 		t.Fatalf("the gt label was read for %q, want %q: the label is read from the host's local image", docker.labelRefs, want)
 	}
-	if want := host + "/" + pinRepo + "@" + pinDigestChecked; createFrom(t, fake) != want {
+	if want := pinHost + "/" + pinRepo + "@" + pinDigestChecked; createFrom(t, fake) != want {
 		t.Fatalf("the create used --from %q, want the checked manifest digest %q", createFrom(t, fake), want)
 	}
 }
@@ -454,11 +468,10 @@ func TestOpenShellPrepareRefusesAPulledImageNoDigestPins(t *testing.T) {
 	tests := []struct {
 		name      string
 		configure func(*pinRegistry)
-		closed    bool   // the registry is shut before the spawn: it does not answer
-		image     string // a reference with no registry host, in place of the test registry's
+		image     string // a reference with no registry host, in place of the pin registry's
 		wantErr   string
 	}{
-		{name: "a registry that does not answer", closed: true, wantErr: "pinning"},
+		{name: "a registry that does not answer", configure: func(r *pinRegistry) { r.down = true }, wantErr: "pinning"},
 		{name: "a registry that answers a server error", configure: func(r *pinRegistry) { r.status = http.StatusInternalServerError }, wantErr: "pinning"},
 		{name: "a reply with no digest", configure: func(r *pinRegistry) { r.omitDigest = true }, wantErr: "pinning"},
 		{name: "a reply with a malformed digest", configure: func(r *pinRegistry) { r.badDigest = "sha256:abc" }, wantErr: "pinning"},
@@ -469,26 +482,19 @@ func TestOpenShellPrepareRefusesAPulledImageNoDigestPins(t *testing.T) {
 			t.Parallel()
 			town, work := openshellTown(t)
 			fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
-			reg := &pinRegistry{digest: pinDigestChecked}
-			if tt.configure != nil {
-				tt.configure(reg)
-			}
-			srv := httptest.NewServer(reg)
-			host := strings.TrimPrefix(srv.URL, "http://")
-			if tt.closed {
-				srv.Close()
-			} else {
-				t.Cleanup(srv.Close)
-			}
-			profile := pulledProfile(host)
+			profile := pulledProfile()
 			if tt.image != "" {
 				profile.Image = tt.image
 			}
 			b, pushes := openshellTestBackend(town, profile, fake)
+			reg := &pinRegistry{digest: pinDigestChecked}
+			if tt.configure != nil {
+				tt.configure(reg)
+			}
 			useFakeDocker(b, &fakeImageRegistry{
 				tags:   map[string]string{profile.Image: openshellTestImageDigest},
 				labels: map[string]string{openshellTestImageDigest: openshellTestGTCommit},
-			})
+			}, pinnedDigester(reg))
 
 			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("Prepare = %v, want the spawn refused naming %q", err, tt.wantErr)
@@ -1191,12 +1197,12 @@ func TestOpenShellPrepareRefusesADriftedSandboxImage(t *testing.T) {
 }
 
 // TestOpenShellPrepareRefusesAPulledSandboxThatDiffersFromTheCheckedImage
-// drives the pin's accepted gap end to end. Docker holds no repository digest
-// for the image, so the create names the profile's reference and the pod reads
-// that tag at pull time; a rebuild that republished the tag in between leaves
-// the pod running another image. The sandbox's own gt is what refuses it, and
-// the sandbox is deleted (gt-zdilt), so the gap costs a refused spawn rather
-// than an unverified sandbox (gt-16oj9).
+// drives the pin's accepted gap end to end. The label is read from the host's
+// image, and the create names the registry digest read alongside it; a rebuild
+// that republishes the tag between that read and the pod's pull leaves the pod
+// running another image. The sandbox's own gt is what refuses it, and the
+// sandbox is deleted (gt-zdilt), so the gap costs a refused spawn rather than an
+// unverified sandbox (gt-16oj9, gt-jbuow).
 func TestOpenShellPrepareRefusesAPulledSandboxThatDiffersFromTheCheckedImage(t *testing.T) {
 	t.Parallel()
 	local := openshellTestImageDigest
@@ -1207,21 +1213,20 @@ func TestOpenShellPrepareRefusesAPulledSandboxThatDiffersFromTheCheckedImage(t *
 	}}
 	// Built here and published with crane: the host's docker holds the tag and
 	// the label, and the registry the tag names holds the checked digest.
-	host := servePinRegistry(t, &pinRegistry{digest: pinDigestChecked})
-	profile := pulledProfile(host)
+	profile := pulledProfile()
 	b, _ := openshellTestBackend(town, profile, fake)
 	reg := &fakeImageRegistry{
 		tags:   map[string]string{profile.Image: local},
 		labels: map[string]string{local: openshellTestGTCommit},
 	}
-	useFakeDocker(b, reg)
+	useFakeDocker(b, reg, pinnedDigester(&pinRegistry{digest: pinDigestChecked}))
 
 	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
 	if err == nil || !strings.Contains(err.Error(), openshellTestDriftedGT) || !strings.Contains(err.Error(), openshellTestGTCommit) {
 		t.Fatalf("Prepare = %v, want the sandbox's own commit and the installed commit named", err)
 	}
 	// The create named the pinned digest, and the sandbox's own gt refused it.
-	if want := host + "/" + pinRepo + "@" + pinDigestChecked; createFrom(t, fake) != want {
+	if want := pinHost + "/" + pinRepo + "@" + pinDigestChecked; createFrom(t, fake) != want {
 		t.Fatalf("the create used --from %q, want the pinned digest %q", createFrom(t, fake), want)
 	}
 	calls := fake.Calls()

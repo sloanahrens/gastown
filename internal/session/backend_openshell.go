@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"path"
@@ -248,21 +249,24 @@ type resolvedImage struct {
 // repo:tag.
 type manifestDigester func(ctx context.Context, host, repo, tag string) (string, error)
 
-// registryManifestDigest is the production manifestDigester: the registry
-// client, reached over plain HTTP at the host the profile's reference names.
-func registryManifestDigest(ctx context.Context, host, repo, tag string) (string, error) {
-	client := &registry.Client{Base: "http://" + host}
-	m, err := client.GetManifest(ctx, repo, tag)
-	if err != nil {
-		return "", err
+// registryDigester is the manifestDigester for the registry client, reached over
+// plain HTTP at the host the profile's reference names. A nil client is the
+// registry client's default; tests inject one whose transport is a fake.
+func registryDigester(client *http.Client) manifestDigester {
+	return func(ctx context.Context, host, repo, tag string) (string, error) {
+		c := &registry.Client{Base: "http://" + host, HTTP: client}
+		m, err := c.GetManifest(ctx, repo, tag)
+		if err != nil {
+			return "", err
+		}
+		return m.Digest, nil
 	}
-	return m.Digest, nil
 }
 
 // dockerImageRef resolves an image through the host's docker and, for a pulling
 // gateway, the registry the image names: imageRefFor.
 func dockerImageRef(ctx context.Context, image string, pull bool) (resolvedImage, error) {
-	return imageRefFor(ctx, runDocker, registryManifestDigest, image, pull)
+	return imageRefFor(ctx, runDocker, registryDigester(nil), image, pull)
 }
 
 // imageRefFor resolves image to the references Prepare names: the local image
