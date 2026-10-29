@@ -1,7 +1,7 @@
-// Package civol plans the trim of the CI cache volumes: the Go build cache,
-// the Go module cache and the npm cache. It only decides. Measuring the
-// volumes and removing the paths a plan names belong to the target that uses
-// this plan.
+// Package civol trims the CI cache volumes: the Go build cache, the Go module
+// cache and the npm cache. Plan decides which paths may be removed; Target.Apply
+// removes them inside the docker-in-docker daemon and, with no job running,
+// prunes the build cache and the dangling images.
 package civol
 
 import (

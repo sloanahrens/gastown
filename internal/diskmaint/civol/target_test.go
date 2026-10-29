@@ -42,6 +42,9 @@ type fakeDocker struct {
 	listings     map[string]answer // volume name -> file or module listing
 	moduleSizes  answer            // module directory sizes from du
 	df           answer            // docker exec <runner> df -P /
+	removes      map[string]answer // volume name -> throwaway container's rm
+	modes        map[string]answer // volume name -> throwaway container's chmod
+	prunes       map[string]answer // prune name (builder, image) -> docker prune -f
 }
 
 func (f *fakeDocker) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
@@ -78,20 +81,34 @@ func (f *fakeDocker) run(_ context.Context, env []string, name string, args ...s
 			return nil, fmt.Errorf("unexpected docker command %q", strings.Join(args, " "))
 		}
 		return f.volumeList.bytes()
+	case "builder", "image":
+		if len(sub) != 3 || sub[1] != "prune" || sub[2] != "-f" {
+			return nil, fmt.Errorf("unexpected docker command %q", strings.Join(args, " "))
+		}
+		return f.prunes[sub[0]].bytes()
 	case "run":
 		return f.runAnswer(sub)
 	}
 	return nil, fmt.Errorf("unexpected docker command %q", strings.Join(args, " "))
 }
 
-// runAnswer answers one throwaway container by the script it runs, which is the
-// command's last argument.
+// runAnswer answers one throwaway container by its entrypoint, or by the script
+// it runs when the entrypoint is sh, which is the command's last argument.
 func (f *fakeDocker) runAnswer(sub []string) ([]byte, error) {
-	volume := ""
+	volume, entrypoint := "", ""
 	for i, arg := range sub {
-		if arg == "-v" && i+1 < len(sub) {
+		switch {
+		case (arg == "-v" || arg == "--volume") && i+1 < len(sub):
 			volume, _, _ = strings.Cut(sub[i+1], ":")
+		case arg == "--entrypoint" && i+1 < len(sub):
+			entrypoint = sub[i+1]
 		}
+	}
+	switch entrypoint {
+	case "rm":
+		return f.removes[volume].bytes()
+	case "chmod":
+		return f.modes[volume].bytes()
 	}
 	switch script := sub[len(sub)-1]; script {
 	case sizeScript:
@@ -171,6 +188,9 @@ func newFake() *fakeDocker {
 		sizes:      map[string]answer{gocacheVolume: {out: "1000\n"}, gomodVolume: {out: "1000\n"}, npmVolume: {out: "1000\n"}},
 		starts:     map[string]answer{},
 		listings:   map[string]answer{},
+		removes:    map[string]answer{},
+		modes:      map[string]answer{},
+		prunes:     map[string]answer{},
 		df: answer{out: "Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
 			"overlay 102400 40960 61440 40% /\n"},
 	}
@@ -673,19 +693,5 @@ func TestMeasureStopsWhenCanceled(t *testing.T) {
 	}
 	if !r.fired {
 		t.Fatalf("no call matched df: calls %v", f.calls)
-	}
-}
-
-func TestApplyIsDeferred(t *testing.T) {
-	t.Parallel()
-	res, err := target(newFake()).Apply(context.Background(), diskmaint.Plan{Target: planTarget})
-	if err != nil {
-		t.Fatalf("apply: %v", err)
-	}
-	if res.Deferred == "" {
-		t.Fatal("apply was not deferred")
-	}
-	if res.Target != planTarget || len(res.Done) > 0 {
-		t.Fatalf("apply result = %+v, want only the target and a deferral", res)
 	}
 }

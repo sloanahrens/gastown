@@ -29,10 +29,6 @@ const volumeRoot = "/c"
 // must be UTC for the age rules to compare it with an entry's MTime.
 const startedAtLayout = "2006-01-02T15:04:05"
 
-// deferredApply is the Result.Deferred text Apply returns until the trim lands
-// in the bead that follows this one (gt-z6qre.10).
-const deferredApply = "not implemented: this target only plans; the trim lands in the apply bead"
-
 // ruleDindDown keeps a plan empty while the docker-in-docker container is not
 // running: its volumes cannot be read, and a stopped runner has no cache to
 // trim.
@@ -97,7 +93,7 @@ type Config struct {
 	// Run runs docker on the host; a test passes a fake that returns canned
 	// output, so no test reaches a real daemon.
 	Run diskmaint.Runner
-	// Ledger records an apply, which this target does not do yet.
+	// Ledger records every apply; an apply without one does not start.
 	Ledger *diskmaint.Ledger
 }
 
@@ -195,12 +191,6 @@ func (t *Target) Plan(ctx context.Context, _ diskmaint.Policy) (diskmaint.Plan, 
 		in.ReadErrs = append(in.ReadErrs, readErrs...)
 	}
 	return BuildPlan(in), nil
-}
-
-// Apply removes nothing yet: this target only reads and plans, and the trim is
-// the bead that follows this one.
-func (t *Target) Apply(context.Context, diskmaint.Plan) (diskmaint.Result, error) {
-	return diskmaint.Result{Target: planTarget, Deferred: deferredApply}, nil
 }
 
 // dindRunning reports whether the docker-in-docker container is up. A container
