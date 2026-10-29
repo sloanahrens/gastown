@@ -3963,11 +3963,13 @@ function costBarChart(box, c, kind, providers) {
   // server built on other buckets would put one day's dollars over another. A
   // series not drawn says so under the chart, like one the server left out: a
   // chart never goes quiet about why a provider's dollars are missing.
-  const drawn = [], notDrawn = [];
-  for (const s of costChartSeries(c)) {
-    if (!s.why && Array.isArray(s.bars) && s.bars.length === c.bars.length) drawn.push(s);
+  // A drawn series' role is its place in the series array, so a series left out
+  // does not hand the first series' gap tick and daily amount to the next one.
+  const drawn = [], roles = [], notDrawn = [];
+  costChartSeries(c).forEach((s, at) => {
+    if (!s.why && Array.isArray(s.bars) && s.bars.length === c.bars.length) { drawn.push(s); roles.push(at); }
     else notDrawn.push({name: s.name || s.id, why: s.why || "the series does not line up with the chart's buckets: it has " + (Array.isArray(s.bars) ? s.bars.length : "no") + " where the chart has " + c.bars.length});
-  }
+  });
   const n = drawn.length;
   const W = 700, H = daily ? 150 : 120, pad = 26, base = H - (daily ? 26 : 22);
   const top = Math.max(0.01, c.limit ? c.limit.value : 0, ...drawn.flatMap(s => s.bars.map(b => b.value || 0)));
@@ -3984,7 +3986,7 @@ function costBarChart(box, c, kind, providers) {
   c.bars.forEach((b, i) => {
     const cx = pad + slot * i + slot / 2;
     drawn.forEach((s, k) => {
-      costSeriesBucket(svg, s.bars[i], k, cx - wide / 2 + k * (w + 2), w, base, y, kind, costChartColour(providers, s.id, k));
+      costSeriesBucket(svg, s.bars[i], roles[k], cx - wide / 2 + k * (w + 2), w, base, y, kind, costChartColour(providers, s.id, k));
     });
     if (daily || i % 3 === 0) {
       const lbl = svgEl("text", {x: cx, y: H - (daily ? 8 : 6), class: "day", "text-anchor": "middle"});
@@ -4030,15 +4032,16 @@ function costChartColour(providers, id, k) {
   return costSeriesColour(id, at >= 0 ? at : k);
 }
 
-// costSeriesBucket draws one bucket of a drawn series at x. A value is a bar in
-// the series' colour with its tooltip; a gap is a tick under the first series,
-// as the DeepSeek bars always marked one, and a hatched column under the others,
-// as the Claude series did. The first series also carries the daily amount above
-// its bar. The class keeps the look of the first two series; the fill is the
-// legend swatch's colour, so a bar matches its swatch whichever series comes first.
-function costSeriesBucket(svg, b, k, x, w, base, y, kind, colour) {
+// costSeriesBucket draws one bucket of a drawn series at x. role is the series'
+// place in the series array. A value is a bar in the series' colour with its
+// tooltip; a gap is a tick under the array's first series, as the DeepSeek bars
+// always marked one, and a hatched column under the others, as the Claude series
+// did. The first series also carries the daily amount above its bar. The class
+// keeps the look of the second series; the fill is the legend swatch's colour, so
+// a bar matches its swatch whichever series comes first.
+function costSeriesBucket(svg, b, role, x, w, base, y, kind, colour) {
   if (b.gap) {
-    if (k === 0) {
+    if (role === 0) {
       const mid = x + w / 2;
       svg.append(svgEl("line", {x1: mid, x2: mid, y1: base - 3, y2: base, class: "gap"}));
     } else {
@@ -4049,11 +4052,11 @@ function costSeriesBucket(svg, b, k, x, w, base, y, kind, colour) {
     }
     return;
   }
-  const bar = svgEl("rect", {x: x, y: y(b.value), width: w, height: Math.max(0, base - y(b.value)), class: k === 1 ? "cbar" : "bar", style: "fill:" + colour});
+  const bar = svgEl("rect", {x: x, y: y(b.value), width: w, height: Math.max(0, base - y(b.value)), class: role === 1 ? "cbar" : "bar", style: "fill:" + colour});
   const t = svgEl("title", {}); t.textContent = b.title;
   bar.append(t);
   svg.append(bar);
-  if (k === 0 && kind === "daily") {
+  if (role === 0 && kind === "daily") {
     const amt = svgEl("text", {x: x + w / 2, y: y(b.value) - 4, class: "amt", "text-anchor": "middle"});
     amt.textContent = money(b.value);
     svg.append(amt);
@@ -4071,10 +4074,11 @@ function costHatch(kind) {
   return defs;
 }
 
-// COST_SERIES_COLOURS pins the two chart series to the colours their bars are
-// drawn in (.bar is blue, .cbar violet), so a legend swatch always matches its
-// bar, whatever order the providers come in. A provider with no pinned colour
-// takes the palette by its place in the providers array.
+// COST_SERIES_COLOURS pins the DeepSeek and Claude series to the colours their
+// bars have always been drawn in (blue and violet), so a legend swatch matches
+// its bar, whatever order the providers come in. A bar takes this colour as its
+// inline fill, not from its class. A provider with no pinned colour takes the
+// palette by its place in the providers array.
 const COST_SERIES_COLOURS = {deepseek: "var(--blue)", claude: "var(--violet)"};
 const COST_PALETTE = ["var(--amber)", "var(--green)", "var(--red)"];
 const COST_SERIES_NAMES = {deepseek: "DeepSeek", claude: "Claude"};

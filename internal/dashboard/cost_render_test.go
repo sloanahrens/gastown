@@ -556,6 +556,31 @@ func TestCostBarChartDropsASeriesNotDrawnAndSaysWhy(t *testing.T) {
 	}
 }
 
+// The first series' role (its bar class, gap tick and daily amount) belongs to the
+// series at the front of the array. A series left out does not pass it on: the
+// drawn series after it keeps the second series' look (gt-xzdna).
+func TestCostBarChartRoleFollowsTheArrayNotTheDrawnSeries(t *testing.T) {
+	t.Parallel()
+
+	ds := []map[string]any{costBarFix("09:00", 2), costGapFix("10:00")}
+	got := costDailyDrawn(t, costDailyFix(ds,
+		map[string]any{"id": "claude", "name": claudePlanSeriesName, "why": "the samples could not be read"},
+		costSeriesFix("deepseek", "DeepSeek", ds...)), nil)
+
+	var classes []string
+	for _, b := range got.Bars {
+		classes = append(classes, b.Class)
+	}
+	// The DeepSeek series is second in the array, so its bar takes the second series'
+	// class and its gap is hatched, not the first series' tick.
+	if want := []string{"cbar", "cgap"}; !reflect.DeepEqual(classes, want) {
+		t.Errorf("marks drawn = %q, want %q", classes, want)
+	}
+	if len(got.Amounts) != 0 {
+		t.Errorf("daily amounts drawn = %q, want none: the first series in the array is not drawn", got.Amounts)
+	}
+}
+
 // A server older than the series array sends the DeepSeek bars and the Claude
 // fields: the page draws them as it always did, and a Claude series it cannot draw
 // says why.
