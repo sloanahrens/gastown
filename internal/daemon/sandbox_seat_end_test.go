@@ -537,6 +537,8 @@ func TestSandboxSeatEndKeepReasons(t *testing.T) {
 		{"push failed", func(e *sandboxSeatEnd) { e.PushFailed = true }, "push_failed=true", false},
 		{"hook set", func(e *sandboxSeatEnd) { e.HookBead = endBead }, "hook_bead=" + endBead, false},
 		{"another branch", func(e *sandboxSeatEnd) { e.Branch = "polecat/agate/gt-other+x1" }, "not the landed", false},
+		{"seat branch unrecorded", func(e *sandboxSeatEnd) { e.Branch = "" }, "branch=<missing>", false},
+		{"landed branch unrecorded", func(e *sandboxSeatEnd) { e.LandedBranch = "  " }, "landed_branch=<missing>", false},
 		{"still wanted", func(e *sandboxSeatEnd) { e.Retired = false }, "does not say stop", false},
 	}
 	for _, tt := range tests {
@@ -637,7 +639,7 @@ func TestLandingWorkerAfterLandedEndsTheSeat(t *testing.T) {
 	work := land.Work{BeadID: endBead, Head: head, Branch: endBranch, Worker: endPolecat}
 
 	w.AfterLanded(work)
-	d.sandboxSeatEndCycles.Wait()
+	waitSeatEndCycles(t, d)
 	if len(ended) != 1 || ended[0].Landed {
 		t.Fatalf("with no landing record: ended %+v; want one end that is unlanded", ended)
 	}
@@ -650,7 +652,7 @@ func TestLandingWorkerAfterLandedEndsTheSeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.AfterLanded(work)
-	d.sandboxSeatEndCycles.Wait()
+	waitSeatEndCycles(t, d)
 	if len(ended) != 2 || !ended[1].Landed || ended[1].BeadID != endBead {
 		t.Fatalf("with the landing record: ended %+v; want a second end that is landed", ended)
 	}
@@ -670,7 +672,7 @@ func TestStartSandboxSeatEndDoesNotStartWhileStopping(t *testing.T) {
 		return true
 	}
 	d.startSandboxSeatEnd(endRig, nil, land.Work{BeadID: endBead, Head: "h", Worker: endPolecat})
-	d.sandboxSeatEndCycles.Wait()
+	waitSeatEndCycles(t, d)
 	if asked {
 		t.Error("a seat end started while the daemon was stopping")
 	}
@@ -696,7 +698,7 @@ func TestStopSandboxSeatEndsRefusesNewEndsAndWaitsForTheOnesInFlight(t *testing.
 	}
 	work := land.Work{BeadID: endBead, Head: "h", Worker: endPolecat}
 	d.startSandboxSeatEnd(endRig, landings, work)
-	<-started
+	waitClosed(t, started, "the seat end to start")
 
 	d.beginSandboxSeatEndStop()
 	asked := make(chan struct{}, 1)
@@ -717,7 +719,7 @@ func TestStopSandboxSeatEndsRefusesNewEndsAndWaitsForTheOnesInFlight(t *testing.
 	default:
 	}
 	close(release)
-	<-waited
+	waitClosed(t, waited, "the stop wait to return")
 	select {
 	case <-finished:
 	default:
@@ -728,4 +730,32 @@ func TestStopSandboxSeatEndsRefusesNewEndsAndWaitsForTheOnesInFlight(t *testing.
 		t.Error("a seat end started after the stop had closed the door")
 	default:
 	}
+}
+
+// seatEndTestBound is how long a test waits on a seat end before it fails. It is
+// a backstop that turns a hang into a failure with a message, never a delay a
+// test relies on: every wait below returns the moment the thing it waits for
+// happens.
+const seatEndTestBound = 30 * time.Second
+
+// waitClosed fails the test, instead of hanging it, when ch is not closed
+// within seatEndTestBound.
+func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(seatEndTestBound):
+		t.Fatalf("waiting for %s: still blocked after %s", what, seatEndTestBound)
+	}
+}
+
+// waitSeatEndCycles waits for the seat ends d started, bounded the same way.
+func waitSeatEndCycles(t *testing.T, d *Daemon) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		d.sandboxSeatEndCycles.Wait()
+		close(done)
+	}()
+	waitClosed(t, done, "the seat-end cycles")
 }

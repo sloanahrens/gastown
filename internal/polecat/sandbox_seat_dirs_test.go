@@ -407,7 +407,13 @@ func TestWithSandboxSeatLockReportsLockFailures(t *testing.T) {
 		t.Parallel()
 		rigPath := t.TempDir()
 		lockPath := filepath.Join(rigPath, ".runtime", "locks", "polecat-agate.lock")
-		if err := os.MkdirAll(lockPath, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// A dangling symlink whose target directory does not exist cannot be
+		// opened for locking on any OS; a directory at the lock path can be
+		// locked on macOS, so it would pass there and fail in Linux CI.
+		if err := os.Symlink(filepath.Join(rigPath, "missing", "polecat-agate.lock"), lockPath); err != nil {
 			t.Fatal(err)
 		}
 		err := WithSandboxSeatLock(rigPath, "agate", func() error {

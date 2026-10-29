@@ -79,12 +79,22 @@ func (e sandboxSeatEnd) keepReason() string {
 		return "push_failed=true: the seat's branch never reached origin"
 	case strings.TrimSpace(e.HookBead) != "":
 		return "hook_bead=" + e.HookBead + " is still set"
-	case e.Branch != "" && e.LandedBranch != "" && e.Branch != e.LandedBranch:
+	case strings.TrimSpace(e.Branch) == "" || strings.TrimSpace(e.LandedBranch) == "":
+		return "branch=" + orMissingText(e.Branch) + " landed_branch=" + orMissingText(e.LandedBranch) + ": a branch nothing recorded cannot show this seat's work is the landed work"
+	case e.Branch != e.LandedBranch:
 		return "the seat works " + e.Branch + ", not the landed " + e.LandedBranch
 	case !e.Retired:
 		return "the seat's record does not say stop: something still wants it"
 	}
 	return ""
+}
+
+// orMissingText names a branch nothing recorded, as orMissing does a status.
+func orMissingText(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return "<missing>"
+	}
+	return text
 }
 
 // orMissing names a cleanup status nothing recorded, so a keep reason never
@@ -101,7 +111,8 @@ func orMissing(status polecat.CleanupStatus) string {
 // nothing of its work is at risk. It reports whether the directories were
 // removed; a kept seat and a failed removal are both logged with their reason.
 //
-// Every fact is measured under the polecat's directory lock, the one a sling
+// Every fact but the landing record (read once by the caller, before the lock)
+// is measured under the polecat's directory lock, the one a sling
 // takes before it builds the worktree, and the removal runs under the same
 // hold. A sling that starts while the seat is ending either waits for the
 // removal and then builds afresh, or has already written the facts that keep
