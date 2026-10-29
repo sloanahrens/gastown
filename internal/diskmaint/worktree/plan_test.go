@@ -115,6 +115,29 @@ func TestBuildPlanKeptRulesReadReportOnly(t *testing.T) {
 	}
 }
 
+// A kept worktree whose state could not be read says so in its rule, clone or
+// not, so the plan shows why it was kept.
+func TestBuildPlanShowsTheReadErrorOfAKeptWorktree(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct {
+		dir, path, want string
+	}{
+		"a worktree": {"overseer-a", "/town/repo-a/crew/overseer-a", "report-only: owner overseer, unreadable: git status failed"},
+		"the clone":  {"overseer", "/town/repo-a/crew/overseer", "report-only: owner overseer, unreadable: git status failed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			w := cleanWorktree()
+			w.Dir, w.Path = c.dir, c.path
+			w.Err = "git status failed"
+			p := BuildPlan([]Worktree{w}, testNow, nil)
+			if len(p.Actions) != 0 || len(p.Kept) != 1 || p.Kept[0].Rule != c.want {
+				t.Fatalf("plan = %+v, want it kept with rule %q", p, c.want)
+			}
+		})
+	}
+}
+
 func TestBuildPlanNamesCloneRule(t *testing.T) {
 	t.Parallel()
 	w := cleanWorktree()
