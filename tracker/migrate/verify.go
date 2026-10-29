@@ -90,6 +90,11 @@ func Verify(ctx context.Context, q Querier, ds *Dataset) (Diff, error) {
 	// The rows Import wrote, synthesized links included: the same function
 	// decides both, so a repaired import verifies.
 	deps, _ := repairedDeps(ds)
+	// The expectation above is repairedDeps's output, so the repair is also
+	// checked against the rule: a wrong link would otherwise be expected and pass.
+	for _, msg := range repairProblems(ds, deps) {
+		p.add("repair", "%s", msg)
+	}
 	parents := parentsOf(deps)
 	labelsBy := map[string][]string{}
 	seenLabel := map[[2]string]bool{}
