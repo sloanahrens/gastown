@@ -340,13 +340,13 @@ func WithSlot(g CommandGate, townRoot, role string) CommandGate {
 // declares itself container-free, in which case g is returned as it is and no
 // step takes a slot.
 //
-// The declaration is GT_TEST_DOCKER=0 as the leading assignment on every
-// segment of the command (`GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh`),
-// so each command the line runs sets the variable for itself. A segment
-// without one keeps the slot even when another segment declares it: in `make
-// lint; GT_TEST_DOCKER=0 make test` the `make lint` run, and in
-// `GT_TEST_DOCKER=0 bash x.sh; make test` the `make test` run, carries
-// whatever GT_TEST_DOCKER the ambient environment holds, which may be 1.
+// A command declares itself container-free when every segment of its line
+// leads with GT_TEST_DOCKER=0 (`GT_TEST_DOCKER=0 bash
+// scripts/post-land-shell.sh`) and no segment mentions the variable again. A
+// segment that stays silent keeps the slot, since its run inherits whatever
+// GT_TEST_DOCKER the ambient environment holds, which may be 1: `make lint;
+// GT_TEST_DOCKER=0 make test` and `GT_TEST_DOCKER=0 bash x.sh; make test` both
+// take it.
 //
 // The declaration is the whole evidence: a rig whose command is `make test`
 // may or may not start containers, and that is not visible in its text, so a
@@ -358,34 +358,75 @@ func WithSlotForCommand(g CommandGate, townRoot, role, command string) CommandGa
 	return WithSlot(g, townRoot, role)
 }
 
-// containerFreeDeclarationRE matches a segment that leads with the
-// declaration: GT_TEST_DOCKER=0 as the segment's first word, followed by
-// whitespace or the segment's end. A longer name or value (MY_GT_TEST_DOCKER=0,
-// GT_TEST_DOCKER=00) and a quoted value (GT_TEST_DOCKER="0") are not
-// declarations.
-var containerFreeDeclarationRE = regexp.MustCompile(`^GT_TEST_DOCKER=0(?:\s|$)`)
+// containerFreeDeclaration is the leading assignment that declares a segment
+// starts no containers.
+const containerFreeDeclaration = "GT_TEST_DOCKER=0"
 
 // declaresContainerFree reports whether command sets GT_TEST_DOCKER=0 for
-// every command its line runs.
-//
-// The split ignores quoting, so a `;`, `&` or `|` inside a quoted string cuts
-// its segment in two. That can only add segments to check, never pass one
-// unexamined, so it keeps the slot where a shell would not have split.
+// every command its line runs. A line with no segment at all declares
+// nothing.
 func declaresContainerFree(command string) bool {
-	segments := strings.FieldsFunc(command, isCommandSeparator)
-	if len(segments) == 0 {
-		return false
-	}
-	for _, segment := range segments {
+	sawSegment := false
+	for _, segment := range splitCommandSegments(command) {
 		segment = strings.TrimSpace(segment)
 		if segment == "" {
 			continue
 		}
-		if !containerFreeDeclarationRE.MatchString(segment) {
+		sawSegment = true
+		if !declaresContainerFreeSegment(segment) {
+			return false
+		}
+	}
+	return sawSegment
+}
+
+// declaresContainerFreeSegment reports whether one shell segment leads with
+// GT_TEST_DOCKER=0 and leaves the variable alone after it.
+//
+// The leading assignment covers the whole segment, but a later one wins:
+// `GT_TEST_DOCKER=0 FOO=1 GT_TEST_DOCKER=1 bash x.sh` runs with 1, and
+// `GT_TEST_DOCKER=0 env -u GT_TEST_DOCKER bash x.sh` runs without it, so any
+// second mention takes the slot. A quoted value (GT_TEST_DOCKER="0"), a longer
+// name (MY_GT_TEST_DOCKER=0) and another value (GT_TEST_DOCKER=01) set
+// something else and are no declaration.
+func declaresContainerFreeSegment(segment string) bool {
+	words := strings.Fields(segment)
+	if len(words) == 0 || words[0] != containerFreeDeclaration {
+		return false
+	}
+	for _, word := range words[1:] {
+		if strings.Contains(word, "GT_TEST_DOCKER") && word != containerFreeDeclaration {
 			return false
 		}
 	}
 	return true
+}
+
+// splitCommandSegments splits command at the operators that start another
+// command in a shell line: `;`, `&`, `|`, a newline. A `&` or `|` that follows
+// `>` or `<` belongs to a redirection (`2>&1`, `>&2`, `>|`), so `GT_TEST_DOCKER=0
+// bash x.sh 2>&1` stays one segment.
+//
+// The split ignores quoting, so a separator inside a quoted string cuts its
+// segment in two. That can only add segments to check, never drop one, so it
+// keeps the slot where a shell would not have split.
+func splitCommandSegments(command string) []string {
+	var (
+		segments []string
+		current  strings.Builder
+		prev     rune
+	)
+	for _, r := range command {
+		if isCommandSeparator(r) && prev != '>' && prev != '<' {
+			segments = append(segments, current.String())
+			current.Reset()
+			prev = ' '
+			continue
+		}
+		current.WriteRune(r)
+		prev = r
+	}
+	return append(segments, current.String())
 }
 
 // isCommandSeparator reports whether r starts another command in a shell
