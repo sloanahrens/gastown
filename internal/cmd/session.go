@@ -745,6 +745,16 @@ func runSessionInject(cmd *cobra.Command, args []string) error {
 }
 
 func runSessionRestart(cmd *cobra.Command, args []string) error {
+	// Cobra has validated the arguments by the time RunE runs, so a failure
+	// from here on is this restart's runtime, not a mistyped invocation: the
+	// error's own line carries the reason, and cobra's usage block would bury
+	// it under flag descriptions for a caller that keeps only the last line
+	// (gt-6hhp8). A bad argument still fails cobra's Args check before this
+	// point, so it still prints usage.
+	if cmd != nil {
+		cmd.SilenceUsage = true
+	}
+
 	// Resolve the seat before anything else: restart must refuse exactly the
 	// addresses start refuses, and refuse them before it prints a "Starting
 	// session for …" line that reads as a restart in progress (gt-pud2g).

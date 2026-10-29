@@ -254,6 +254,13 @@ type Daemon struct {
 	// in tests that cannot run the role managers against a fake tmux.
 	restartSeatFn func(supervisor.Seat) error
 
+	// patrolRestartFails holds each seat's run of consecutive failed
+	// patrol-scan restarts under its alert key, so a seat whose restart
+	// keeps failing the same way is escalated once instead of retried
+	// silently (gt-6hhp8). Created on first write; guarded by the mutex.
+	patrolRestartFailsMu sync.Mutex
+	patrolRestartFails   map[string]patrolRestartFailure
+
 	// jsonlPushFailures tracks consecutive git push failures for JSONL backup.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	jsonlPushFailures int
