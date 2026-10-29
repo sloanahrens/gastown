@@ -352,30 +352,49 @@ func TestTargetPlanRefusesWithoutDirectories(t *testing.T) {
 	}
 }
 
-func TestTargetPlanStopsWhenTheContextIsCancelled(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writeBackup(t, dir, "app.toml.bak-01", 40*24*time.Hour, 10)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+// oneDirConfig is one Config per directory kind, so a test covers the config
+// loop and the binary loop without repeating the fixture.
+var oneDirConfig = map[string]func(dir string) Config{
+	"config directory": func(dir string) Config { return Config{ConfigDirs: []string{dir}} },
+	"binary directory": func(dir string) Config { return Config{BinaryDirs: []string{dir}} },
+}
 
-	if _, err := NewTarget(Config{ConfigDirs: []string{dir}, Run: newFakeLsof(t).run}).
-		Plan(ctx, diskmaint.Policy{Now: testNow}); !errors.Is(err, context.Canceled) {
-		t.Errorf("Plan with a cancelled context = %v, want context.Canceled", err)
+func TestTargetPlanStopsWhenTheContextIsCanceled(t *testing.T) {
+	t.Parallel()
+	for name, config := range oneDirConfig {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeBackup(t, dir, "app.toml.bak-01", 40*24*time.Hour, 10)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			cfg := config(dir)
+			cfg.Run = newFakeLsof(t).run
+			if _, err := NewTarget(cfg).Plan(ctx, diskmaint.Policy{Now: testNow}); !errors.Is(err, context.Canceled) {
+				t.Errorf("Plan with a canceled context = %v, want context.Canceled", err)
+			}
+		})
 	}
 }
 
-func TestTargetPlanStopsWhenTheOpenCheckIsCancelled(t *testing.T) {
+func TestTargetPlanStopsWhenTheOpenCheckIsCanceled(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	cand := writeBackup(t, dir, "app.toml.bak-01", 40*24*time.Hour, 10)
-	ctx, cancel := context.WithCancel(context.Background())
-	lsof := newFakeLsof(t)
-	lsof.cancel = cancel
-	lsof.failed(cand, 2)
+	for name, config := range oneDirConfig {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			cand := writeBackup(t, dir, "app.toml.bak-01", 40*24*time.Hour, 10)
+			ctx, cancel := context.WithCancel(context.Background())
+			lsof := newFakeLsof(t)
+			lsof.cancel = cancel
+			lsof.failed(cand, 2)
 
-	if _, err := NewTarget(Config{ConfigDirs: []string{dir}, Run: lsof.run}).
-		Plan(ctx, diskmaint.Policy{Now: testNow}); !errors.Is(err, context.Canceled) {
-		t.Errorf("Plan over a cancelled lsof = %v, want context.Canceled", err)
+			cfg := config(dir)
+			cfg.Run = lsof.run
+			if _, err := NewTarget(cfg).Plan(ctx, diskmaint.Policy{Now: testNow}); !errors.Is(err, context.Canceled) {
+				t.Errorf("Plan over a canceled lsof = %v, want context.Canceled", err)
+			}
+		})
 	}
 }
