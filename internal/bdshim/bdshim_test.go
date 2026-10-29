@@ -335,7 +335,6 @@ func TestDecideRoutesABeadValueFlagToItsStore(t *testing.T) {
 		{"dep with a short --blocks", []string{"dep", "bt-def", "-b", "bt-abc"}},
 		{"dep add --depends-on", []string{"dep", "add", "bt-def", "--depends-on", "bt-abc"}},
 		{"dep add --blocked-by", []string{"dep", "add", "--blocked-by", "bt-abc", "bt-def"}},
-		{"gate create --blocks", []string{"gate", "create", "--blocks", "bt-abc"}},
 		{"duplicate --of", []string{"duplicate", "bt-abc", "--of", "bt-def"}},
 		{"supersede --with", []string{"supersede", "bt-abc", "--with", "bt-def"}},
 		{"provenance record --issue", []string{"provenance", "record", "--issue", "bt-abc"}},
@@ -356,8 +355,9 @@ func TestDecideRoutesABeadValueFlagToItsStore(t *testing.T) {
 }
 
 // A command that writes its bead in the store its working directory names is
-// not routed by the issues its flags point at: create, create-form and q set
-// the parent of the bead they write, and a run id in --await-id names no bead.
+// not routed by the issues its flags point at: create, create-form, q and gate
+// create set the parent, dependency or block of the bead they write, and a run
+// id in --await-id names no bead.
 func TestDecideWritesInTheWorkingDirectorysStore(t *testing.T) {
 	t.Parallel()
 	town := newTown(t, routeTown, routeAlpha, routeBeta)
@@ -373,6 +373,7 @@ func TestDecideWritesInTheWorkingDirectorysStore(t *testing.T) {
 		{"create-form --parent", []string{"create-form", "--parent", "bt-abc"}},
 		{"q --parent", []string{"q", "T", "--parent", "bt-abc"}},
 		{"gate create --await-id", []string{"gate", "create", "--await-id", "bt-abc"}},
+		{"gate create --blocks", []string{"gate", "create", "--blocks", "bt-abc"}},
 		{"update --await-id", []string{"update", "al-abc", "--await-id", "bt-abc"}},
 	}
 	for _, tc := range cases {
@@ -700,10 +701,34 @@ func TestFlagTablesCoverWhatBdDocuments(t *testing.T) {
 	}
 }
 
+// beadNamingFlags are the long value flags bd documents as taking a bead id.
+// Each one must be a row of beadValueFlags, or listed in unroutedBeadFlags.
+var beadNamingFlags = map[string]bool{
+	"--blocked-by": true, "--blocks": true, "--depends-on": true, "--deps": true,
+	"--id": true, "--issue": true, "--of": true, "--parent": true, "--waits-for": true,
+	"--with": true,
+}
+
+// unroutedBeadFlags are the bead-naming flags bd documents on a command that
+// the shim reads as data rather than a bead: the command writes its bead in the
+// store its working directory names (see beadValueFlags), or a flag picks the
+// store for it (migrate issues, the admin verbs).
+var unroutedBeadFlags = map[string]map[string]bool{
+	"admin compact":  {"--id": true},
+	"create":         {"--deps": true, "--id": true, "--parent": true, "--waits-for": true},
+	"create-form":    {"--parent": true},
+	"gate create":    {"--blocks": true},
+	"migrate issues": {"--id": true},
+	"q":              {"--parent": true},
+}
+
 // TestBeadValueFlagsCoverWhatBdDocuments checks that every flag the shim reads
 // as naming a bead is a value flag bd documents for that command: a typo or a
 // flag bd dropped would leave the row reading a token the command never takes a
-// value for, and the bead it names would route by the working directory.
+// value for, and the bead it names would route by the working directory. It
+// also checks the other way: a bead-naming flag bd documents on a command must
+// be a row, or listed as unrouted with its reason, so a new flag cannot be left
+// out of both.
 func TestBeadValueFlagsCoverWhatBdDocuments(t *testing.T) {
 	t.Parallel()
 	value, _, _, _ := bdDocumented(t)
@@ -717,6 +742,23 @@ func TestBeadValueFlagsCoverWhatBdDocuments(t *testing.T) {
 			}
 			if !takesValue(command, flag) {
 				t.Errorf("the table reads %s %s as naming a bead, and treats the flag as a boolean", command, flag)
+			}
+		}
+	}
+	for command, flags := range value {
+		for flag := range flags {
+			if beadNamingFlags[flag] && !beadValueFlags[command][flag] && !unroutedBeadFlags[command][flag] {
+				t.Errorf("bd documents %s %s as naming a bead, and the table neither reads it as one nor lists it as unrouted", command, flag)
+			}
+		}
+	}
+	for command, flags := range unroutedBeadFlags {
+		for flag := range flags {
+			if !value[command][flag] {
+				t.Errorf("unroutedBeadFlags lists %s %s, and bd documents no such value flag", command, flag)
+			}
+			if beadValueFlags[command][flag] {
+				t.Errorf("unroutedBeadFlags and beadValueFlags both list %s %s", command, flag)
 			}
 		}
 	}
