@@ -3,6 +3,7 @@ package rigbootstrap
 import (
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -60,6 +61,43 @@ func TestMergeRoleAgentsEmptyPolecatKeepsRoleAgents(t *testing.T) {
 	}
 }
 
+func TestMergeRoleAgentsEmptyPolecatAddsNoRoleAgents(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		existing string
+		want     string
+	}{
+		{
+			name: "empty input",
+			want: "{\n" +
+				"  \"type\": \"rig-settings\",\n" +
+				"  \"version\": 1\n" +
+				"}\n",
+		},
+		{
+			name:     "existing without role_agents",
+			existing: `{"owner": "me"}`,
+			want: "{\n" +
+				"  \"owner\": \"me\",\n" +
+				"  \"type\": \"rig-settings\",\n" +
+				"  \"version\": 1\n" +
+				"}\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := MergeRoleAgents([]byte(tt.existing), "")
+			if err != nil {
+				t.Fatalf("MergeRoleAgents(%q, \"\") error = %v", tt.existing, err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("MergeRoleAgents(%q, \"\") =\n%s\nwant\n%s", tt.existing, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMergeRoleAgentsBadJSON(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -80,6 +118,9 @@ func TestMergeRoleAgentsBadJSON(t *testing.T) {
 			got, err := MergeRoleAgents([]byte(tt.existing), "claude")
 			if err == nil {
 				t.Fatalf("MergeRoleAgents(%q) = %s, want an error", tt.existing, got)
+			}
+			if !strings.Contains(err.Error(), SettingsRelPath) {
+				t.Fatalf("MergeRoleAgents(%q) error = %v, want it to name %s", tt.existing, err, SettingsRelPath)
 			}
 			if got != nil {
 				t.Fatalf("MergeRoleAgents(%q) returned bytes with its error: %s", tt.existing, got)
