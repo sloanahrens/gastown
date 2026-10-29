@@ -38,7 +38,7 @@ const jobGuard = 65 * time.Minute
 const (
 	ruleMissing     = "volume missing"
 	ruleNoLimit     = "no limit configured"
-	ruleJobWaits    = "job running; waits for a quiet run"
+	ruleJobWaits    = "a job is running; waits for a quiet run"
 	ruleJobUnknown  = "job running and oldest job start unknown; waits"
 	ruleJobNewer    = "job running; newer than the job guard before oldest job start"
 	ruleModuleCache = "go download cache; re-extracted from, never removed"
@@ -48,7 +48,7 @@ const (
 
 // Entry is one file or directory a volume holds.
 type Entry struct {
-	Path  string // relative to the volume root, no ".." and no newline
+	Path  string // relative to the volume root, no ".." segment and no newline
 	MTime time.Time
 	Bytes int64
 }
@@ -58,7 +58,7 @@ type VolumeInput struct {
 	Name    string // ci-gocache, ci-gomod, ci-npm
 	Exists  bool
 	SizeKB  int64
-	Entries []Entry // files for ci-gocache and ci-npm; whole "<module> @<version>" directories under pkg/mod for ci-gomod
+	Entries []Entry // files for ci-gocache and ci-npm; whole "<module>@<version>" directories under pkg/mod for ci-gomod
 }
 
 // Limit is the cap a volume may not exceed and the size a trim brings it to, in GB.
@@ -87,8 +87,8 @@ type Input struct {
 // cap loses its oldest entries until the bytes removed reach what brings it to
 // its target. A missing volume, one under its cap, and one a running job holds
 // lose nothing. A non-empty ReadErrs, or any path that is empty, absolute, has
-// a "..", or spans lines, refuses the whole plan, because the plan cannot be
-// trusted to name only paths inside its volumes.
+// a ".." segment, or spans lines, refuses the whole plan, because the plan
+// cannot be trusted to name only paths inside its volumes.
 func BuildPlan(in Input) diskmaint.Plan {
 	if len(in.ReadErrs) > 0 {
 		return refused("unreadable CI volume state: " + strings.Join(in.ReadErrs, "; "))
@@ -166,6 +166,9 @@ func planVolume(plan *diskmaint.Plan, v VolumeInput, limits map[string]Limit, in
 			remove(plan, ref, e.Bytes, why)
 		}
 	}
+	if removed < need {
+		keep(plan, v.Name, fmt.Sprintf("over %d GB cap at %s; the removable entries do not reach the %d GB target", lim.CapGB, sizeText(v.SizeKB), lim.TargetGB))
+	}
 }
 
 // refused is the empty plan that says why nothing may be removed.
@@ -173,9 +176,10 @@ func refused(why string) diskmaint.Plan {
 	return diskmaint.Plan{Target: planTarget, Refused: why}
 }
 
-// unsafePath reports a path that could name something outside its volume.
+// unsafePath reports a path that could name something outside its volume. Only
+// a ".." segment escapes, so a name that merely contains two dots is fine.
 func unsafePath(p string) bool {
-	return p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "..") || strings.ContainsAny(p, "\r\n")
+	return p == "" || strings.HasPrefix(p, "/") || slices.Contains(strings.Split(p, "/"), "..") || strings.ContainsAny(p, "\r\n")
 }
 
 // isModuleCache reports a path in the module cache's download area, which Go
