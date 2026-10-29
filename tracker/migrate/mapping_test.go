@@ -222,3 +222,94 @@ func TestValidateRefusesTheZeroTimesOfAConnectionThatDidNotParseDatetimes(t *tes
 		t.Errorf("Validate = %v, want the count and the first issue", err)
 	}
 }
+
+func TestDottedParentIsTheIdBeforeTheLastDot(t *testing.T) {
+	t.Parallel()
+	for id, want := range map[string]string{"gt-p.1": "gt-p", "gt-p.1.2": "gt-p.1", "be-1r0.16": "be-1r0"} {
+		if got, ok := dottedParent(id); !ok || got != want {
+			t.Errorf("dottedParent(%q) = %q, %v; want %q", id, got, ok, want)
+		}
+	}
+	for _, id := range []string{"gt-p", ".1", "gt-p.", ""} {
+		if got, ok := dottedParent(id); ok {
+			t.Errorf("dottedParent(%q) = %q; want no parent", id, got)
+		}
+	}
+}
+
+func TestRepairedDepsLinksADottedChildWithNoParentRowToItsPrefix(t *testing.T) {
+	t.Parallel()
+	ds := &Dataset{Issues: []IssueRow{{ID: "be-1r0"}, {ID: "be-1r0.16"}}}
+	deps, synth := repairedDeps(ds)
+	want := DepRow{IssueID: "be-1r0.16", DependsOn: "be-1r0", Type: "parent-child"}
+	if len(synth) != 1 || synth[0] != want {
+		t.Fatalf("synthesized = %+v, want exactly %+v", synth, want)
+	}
+	if len(deps) != 1 || deps[0] != want {
+		t.Errorf("deps = %+v, want the synthesized row alone", deps)
+	}
+	if len(ds.Deps) != 0 {
+		t.Errorf("the dataset's own deps changed: %+v", ds.Deps)
+	}
+}
+
+func TestRepairedDepsSynthesizesOnlyWhereTheRulePlainlyApplies(t *testing.T) {
+	t.Parallel()
+	gtP := IssueRow{ID: "gt-p"}
+	child := IssueRow{ID: "gt-p.1"}
+	for name, tc := range map[string]struct {
+		issues []IssueRow
+		deps   []DepRow
+		want   int
+	}{
+		"a parent-child row already holds the link": {
+			issues: []IssueRow{gtP, child},
+			deps:   []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-p", Type: "parent-child"}},
+		},
+		"a parent-child row to another parent is left alone": {
+			issues: []IssueRow{gtP, {ID: "gt-q"}, child},
+			deps:   []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-q", Type: "parent-child"}},
+		},
+		"a row of another type to the prefix is never replaced": {
+			issues: []IssueRow{gtP, child},
+			deps:   []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-p", Type: "blocks"}},
+		},
+		"a row of another type to another target keeps its own rows": {
+			issues: []IssueRow{gtP, child, {ID: "gt-q"}},
+			deps:   []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-q", Type: "blocks"}},
+		},
+		"a parent-child row with no target is no link": {
+			issues: []IssueRow{gtP, child},
+			deps:   []DepRow{{IssueID: "gt-p.1", DependsOn: "", Type: "parent-child"}},
+			want:   1,
+		},
+		"a prefix that is not an issue of the dataset gets nothing": {
+			issues: []IssueRow{child},
+		},
+		"an id with no dot gets nothing": {
+			issues: []IssueRow{gtP},
+		},
+		"a wisp child with a wisp parent is repaired": {
+			issues: []IssueRow{{ID: "gt-wisp-m", Wisp: true}, {ID: "gt-wisp-m.1", Wisp: true}},
+			want:   1,
+		},
+		"a wisp child whose parent is not a wisp is left alone": {
+			issues: []IssueRow{gtP, {ID: "gt-p.1", Wisp: true}},
+		},
+		"a non-wisp child whose parent is a wisp is repaired": {
+			issues: []IssueRow{{ID: "gt-wisp-m", Wisp: true}, {ID: "gt-wisp-m.1"}},
+			want:   1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			deps, synth := repairedDeps(&Dataset{Issues: tc.issues, Deps: tc.deps})
+			if len(synth) != tc.want {
+				t.Errorf("synthesized %d rows %+v, want %d", len(synth), synth, tc.want)
+			}
+			if len(deps) != len(tc.deps)+len(synth) {
+				t.Errorf("deps = %d rows, want the dataset's %d plus %d synthesized", len(deps), len(tc.deps), len(synth))
+			}
+		})
+	}
+}

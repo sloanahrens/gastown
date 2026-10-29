@@ -87,7 +87,10 @@ func datasetFingerprint(is IssueRow, parent string, labels []string) string {
 // an error, never a count of zero.
 func Verify(ctx context.Context, q Querier, ds *Dataset) (Diff, error) {
 	var p problems
-	parents := parentsOf(ds.Deps)
+	// The rows Import wrote, synthesized links included: the same function
+	// decides both, so a repaired import verifies.
+	deps, _ := repairedDeps(ds)
+	parents := parentsOf(deps)
 	labelsBy := map[string][]string{}
 	seenLabel := map[[2]string]bool{}
 	for _, l := range ds.Labels {
@@ -152,7 +155,7 @@ FROM tracker.issues i WHERE i.rig = ANY($1)`, rigs)
 
 	// Links: the same set of (issue, target, type).
 	wantDeps := map[string]bool{}
-	for _, d := range ds.Deps {
+	for _, d := range deps {
 		if _, ok := want[d.IssueID]; ok && d.DependsOn != "" {
 			wantDeps[d.IssueID+"\x1f"+d.DependsOn+"\x1f"+d.Type] = true
 		}
