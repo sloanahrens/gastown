@@ -58,8 +58,8 @@ func TestFlockTryAcquireExistingNeverCreatesTheFile(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "gate.lock")
 
-	if _, ok, err := FlockTryAcquireExisting(path); !errors.Is(err, fs.ErrNotExist) || ok {
-		t.Fatalf("probing an absent lock file = (%v, %v); want fs.ErrNotExist", ok, err)
+	if _, err := FlockTryAcquireExisting(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("probing an absent lock file = %v; want fs.ErrNotExist", err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the read-only probe left %s behind (stat err %v)", path, err)
@@ -70,17 +70,17 @@ func TestFlockTryAcquireExistingNeverCreatesTheFile(t *testing.T) {
 		t.Fatalf("holding the lock = (%v, %v); want it taken", took, err)
 	}
 
-	if unlock, ok, err := FlockTryAcquireExisting(path); err != nil || ok {
-		t.Fatalf("probing a held lock = (%v, %v); want it read as held", ok, err)
+	if unlock, err := FlockTryAcquireExisting(path); !errors.Is(err, ErrFlockHeld) {
+		t.Fatalf("probing a held lock = %v; want ErrFlockHeld", err)
 	} else if unlock != nil {
 		t.Errorf("probing a held lock returned a cleanup; nothing was taken")
 	}
 
 	held()
 
-	unlock, ok, err := FlockTryAcquireExisting(path)
-	if err != nil || !ok {
-		t.Fatalf("probing a released lock = (%v, %v); want it read as free", ok, err)
+	unlock, err := FlockTryAcquireExisting(path)
+	if err != nil {
+		t.Fatalf("probing a released lock = %v; want the lock", err)
 	}
 	unlock()
 }

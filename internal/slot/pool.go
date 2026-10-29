@@ -1009,6 +1009,11 @@ func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
 // left out: Busy does not count them, and sweeping them is the one thing a
 // read-only reader cannot do.
 //
+// A `docker ps` that cannot run is an error here, where Report.Busy folds it
+// into DockerUnknown=true: a caller that has to say why the town is not quiet
+// needs to name the check that failed, not a busy slot it cannot vouch for.
+// Both answers stop the wait, so neither reads an unchecked host as free.
+//
 // The daemon cutover's quiet gate (internal/cmd/daemon_quiet.go) is the
 // caller: it must be able to give up having changed nothing (gt-qpeei.22).
 func PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
@@ -1033,12 +1038,12 @@ func (g *Gate) PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
 		}
 	}
 	if held == 0 {
-		// Containers up with no slot held are either an unwrapped suite or,
-		// when docker cannot be reached, unknowable. Busy counts both, so this
-		// does too: a cross-check that could not run must never read as free.
+		// Containers up with no slot held are an unwrapped suite; a check that
+		// could not run is neither free nor provably busy, so it travels to the
+		// caller instead of passing for a reading.
 		containers, err := g.gateContainers()
 		if err != nil {
-			return true, nil
+			return false, fmt.Errorf("listing the gate's containers: %w", err)
 		}
 		for _, verdict := range g.owner.classify(containers, g.clock.Now(), StaleContainerWindow) {
 			if verdict.Blocks() {
@@ -1166,13 +1171,18 @@ func (g *Gate) StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 // a hold behind in a town that had none: a status read, and the daemon
 // cutover's quiet gate above all, must be able to look and change nothing.
 func probeSlotLock(townRoot string, i int) (unlock func(), free bool, err error) {
-	unlock, free, err = lock.FlockTryAcquireExisting(SlotLockPath(townRoot, i))
-	if errors.Is(err, fs.ErrNotExist) {
+	unlock, err = lock.FlockTryAcquireExisting(SlotLockPath(townRoot, i))
+	switch {
+	case errors.Is(err, lock.ErrFlockHeld):
+		return nil, false, nil
+	case errors.Is(err, fs.ErrNotExist):
 		// No lock file: nothing has ever taken this slot, which is as free as
 		// an unlocked file.
 		return nil, true, nil
+	case err != nil:
+		return nil, false, err
 	}
-	return unlock, free, err
+	return unlock, true, nil
 }
 
 // readSlotOwner reads slot i's display-only owner file, tagging it with the

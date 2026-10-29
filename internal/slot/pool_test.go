@@ -355,9 +355,10 @@ func TestPoolBusyReadOnlyCreatesNoLockFile(t *testing.T) {
 	}
 }
 
-// The read-only verdict is Report.Busy's: every slot held, an unwrapped suite,
-// or a docker check that could not run. A slot read that cannot be taken at all
-// is an error, never a silent free.
+// The read-only verdict is Report.Busy's — every slot held, or an unwrapped
+// suite — and the two checks that cannot be taken, the slot read and the docker
+// listing, are errors rather than a silent free or a busy the gate cannot
+// vouch for.
 func TestPoolBusyReadOnly(t *testing.T) {
 	t.Parallel()
 	looking := errors.New("docker is not answering")
@@ -374,7 +375,7 @@ func TestPoolBusyReadOnly(t *testing.T) {
 		{name: "the only slot is held", slots: 1, held: []int{0}, want: true},
 		{name: "one of two slots is held", slots: 2, held: []int{1}},
 		{name: "an unwrapped suite holds the docker VM", slots: 1, lines: []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite"}, want: true},
-		{name: "docker cannot be read", slots: 1, listErr: looking, want: true},
+		{name: "docker cannot be read", slots: 1, listErr: looking, wantErr: true},
 		{name: "the lock cannot be opened", slots: 1, wantErr: true},
 	}
 	for _, tc := range cases {

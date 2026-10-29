@@ -63,31 +63,27 @@ func FlockTryAcquire(path string) (func(), bool, error) {
 	return cleanup, true, nil
 }
 
-// FlockTryAcquireExisting is FlockTryAcquire for a lock file the caller only
-// reads: it opens without O_CREATE, so the probe can never leave a lock file
-// behind, and an absent file is reported as the open failed (an error matching
-// fs.ErrNotExist) rather than being created and taken. Returns (cleanup, true,
-// nil) if the lock was acquired, or (nil, false, nil) if another process holds
-// it.
-func FlockTryAcquireExisting(path string) (func(), bool, error) {
+// FlockTryAcquireExisting is FlockTryAcquireStable for a lock file the caller
+// only reads: it opens without O_CREATE, so the probe can never leave a lock
+// file behind, and an absent file is reported as the open failed (an error
+// matching fs.ErrNotExist) rather than being created and taken. It returns the
+// cleanup when it takes the lock, ErrFlockHeld when another process holds it,
+// and any other error as itself.
+func FlockTryAcquireExisting(path string) (func(), error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0) //nolint:gosec // G304: lock files are internal operational data
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := flockFileTry(f); err != nil {
 		f.Close()
-		if err == syscall.EWOULDBLOCK {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("acquiring flock: %w", err)
+		return nil, err
 	}
 
-	cleanup := func() {
+	return func() {
 		syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck
 		f.Close()
-	}
-	return cleanup, true, nil
+	}, nil
 }
 
 // ErrFlockHeld reports that another process holds the flock. FlockTryAcquireStable
