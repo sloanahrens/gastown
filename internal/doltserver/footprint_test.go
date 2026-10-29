@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // recordedVMMapSummary is `vmmap -summary <pid>` output as macOS prints it for
@@ -235,15 +236,18 @@ func TestGetHealthMetrics_Footprint(t *testing.T) {
 	}
 }
 
-// A vmmap that never answers must not hold the status path: its probe gives up
-// at the deadline, the footprint reads as unavailable, and GetHealthMetrics
-// still returns.
+// A vmmap that never answers must not hold the status path. The test runs
+// through the real machine's probe deadlines (std.probeTimeout), so the hung
+// probe gives up at the footprint deadline, not the default every other probe
+// keeps: the footprint reads as unavailable and GetHealthMetrics still returns.
+// The test waits the real footprint deadline, so it costs about 2s.
 func TestGetHealthMetrics_HungVMMapReadsAsUnavailable(t *testing.T) {
 	t.Parallel()
 	const port = 4600
 	f := newFakeHost().townPort(port).on("dolt *", fakeReply{})
 	h := f.host()
 	h.goos = func() string { return "darwin" }
+	h.probeTimeout = std.probeTimeout
 	townRoot := testTown(t)
 	pid := f.doltServer(townRoot, port)
 	writePIDFile(t, h, townRoot, pid)
@@ -251,28 +255,21 @@ func TestGetHealthMetrics_HungVMMapReadsAsUnavailable(t *testing.T) {
 	release := f.hangOn(key)
 	defer close(release)
 
+	start := time.Now()
 	metrics := h.GetHealthMetrics(townRoot)
+	elapsed := time.Since(start)
 	f.awaitHung(t, key)
 
 	if metrics.FootprintBytes != 0 || metrics.FootprintPeakBytes != 0 {
 		t.Errorf("hung vmmap reported footprint %d / peak %d, want both zero",
 			metrics.FootprintBytes, metrics.FootprintPeakBytes)
 	}
-}
-
-// The real machine gives the footprint probe a deadline of its own, under the
-// default every other probe keeps, so a slow vmmap cannot hold `gt dolt status`
-// for the full default deadline.
-func TestStdHost_FootprintProbeHasItsOwnDeadline(t *testing.T) {
-	t.Parallel()
-	if got := std.probeTimeout([]string{"vmmap", "-summary", "4711"}); got != footprintProbeTimeout {
-		t.Errorf("vmmap deadline = %v, want %v", got, footprintProbeTimeout)
+	if elapsed < footprintProbeTimeout {
+		t.Errorf("status returned after %v, before the %v footprint deadline", elapsed, footprintProbeTimeout)
 	}
-	if footprintProbeTimeout >= probeTimeoutDefault {
-		t.Errorf("footprint deadline %v is not under the default %v", footprintProbeTimeout, probeTimeoutDefault)
-	}
-	if got := std.probeTimeout([]string{"lsof", "-i"}); got != 0 {
-		t.Errorf("lsof deadline = %v, want 0 so the default applies", got)
+	if elapsed >= probeTimeoutDefault {
+		t.Errorf("hung vmmap held the status for %v, which is the default %v, not the %v footprint deadline",
+			elapsed, probeTimeoutDefault, footprintProbeTimeout)
 	}
 }
 

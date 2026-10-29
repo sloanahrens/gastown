@@ -194,7 +194,8 @@ const probeTimeoutDefault = 5 * time.Second
 const footprintProbeTimeout = 2 * time.Second
 
 // productionProbeTimeout is the deadline the real machine gives each probe: the
-// footprint probe its own, every other probe probeTimeoutDefault.
+// footprint probe its own, and zero for every other probe, which probe reads
+// as probeTimeoutDefault.
 func productionProbeTimeout(argv []string) time.Duration {
 	if argv[0] == "vmmap" {
 		return footprintProbeTimeout

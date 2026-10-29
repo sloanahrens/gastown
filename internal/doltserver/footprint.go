@@ -66,6 +66,7 @@ var vmmapUnits = map[byte]float64{
 // into bytes. Anything without a recognized unit, or with a value that is not
 // a non-negative number, reads as zero — which the caller reports as
 // unavailable.
+// NaN, Inf and a size that int64 cannot hold also read as zero.
 func parseVMMapBytes(s string) int64 {
 	if s == "" {
 		return 0
