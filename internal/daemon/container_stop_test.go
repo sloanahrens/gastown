@@ -192,6 +192,12 @@ func TestStopDaemonUnknownSettingsWithComposeFileRefusesWithoutSignaling(t *test
 			if !errors.Is(err, errContainerStopDaemon) {
 				t.Fatalf("StopDaemon = %v, want the container town's refusal", err)
 			}
+			// The setting here is unreadable, so the refusal must not claim it says
+			// container: it names the compose file as the reason the town is
+			// treated as one.
+			if !strings.Contains(err.Error(), "cannot be read") || !strings.Contains(err.Error(), "compose file") {
+				t.Errorf("refusal = %v, want it to say the setting cannot be read and the compose file is why", err)
+			}
 			if sigs.terms != 0 || sigs.kills != 0 {
 				t.Errorf("sent %d SIGTERM and %d SIGKILL for a town that may be a container town", sigs.terms, sigs.kills)
 			}

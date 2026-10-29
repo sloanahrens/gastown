@@ -3012,7 +3012,7 @@ func (w *daemonStopWait) awaitExit(grace time.Duration) bool {
 // errContainerStopDaemon is StopDaemon's refusal for a container town. The
 // daemon it would signal runs in the container's namespace, where a pid names
 // nothing on this host, so the stop is the supervisor's and never a signal.
-var errContainerStopDaemon = errors.New("refusing to stop the daemon with a signal: daemon.supervisor is container, so the daemon runs under the container supervisor and no PID on this host is it; stop it through that supervisor instead")
+var errContainerStopDaemon = errors.New("refusing to stop the daemon with a signal: this town's daemon runs, or may run, under the container supervisor (daemon.supervisor is container, or the setting cannot be read and the town has a container compose file), so no PID on this host is known to be it; stop it through that supervisor instead")
 
 // daemonStopSignals is the pair of signals StopDaemon sends the daemon's
 // process. It is a field set so a test can supply a fake and prove a refusal
