@@ -18,7 +18,7 @@ All three run the same `registry` target and share the plugin's lock.
 |---|---|
 | the `polecat-image` plugin | plans after its own image, cache and volume trims, and applies in `apply` mode, in the run that holds the lock |
 | `gt maint` | plans by hand, or applies the plan it just printed because it was typed; a target name it does not know is listed back |
-| the `disk_maintenance` patrol | plans every target in a quiet daily window, and applies in `apply` mode |
+| the `disk_maintenance` patrol | plans every target in a quiet daily window, and any target with an interval of its own on that interval; applies in `apply` mode |
 
 `registry` is the only target in slice 1. `plan` is the dry run, so it creates
 neither the ledger directory nor anything else; both `plan` and `apply` exit

@@ -538,7 +538,7 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	t.Parallel()
 
 	var cfg PatrolsConfig
-	design := `{"disk_maintenance": {"enabled": true, "interval": "daily", "window": "04:30", "mode": "apply"}}`
+	design := `{"disk_maintenance": {"enabled": true, "interval": "daily", "window": "04:30", "mode": "apply", "targets": {"civol": {"interval": "2h"}}}}`
 	if err := json.Unmarshal([]byte(design), &cfg); err != nil {
 		t.Fatalf("the design's block does not decode: %v", err)
 	}
@@ -546,13 +546,19 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	if dm == nil || !dm.Enabled || dm.Interval != "daily" || dm.Window != "04:30" || dm.Mode != "apply" {
 		t.Fatalf("decoded %+v, want the block as written", dm)
 	}
+	if got := dm.Targets[DiskMaintenanceTargetCivol].Interval; got != "2h" {
+		t.Errorf("civol interval decoded as %q, want 2h", got)
+	}
 
 	bad := map[string]string{
-		"not an object":    `{"disk_maintenance": "on"}`,
-		"unknown mode":     `{"disk_maintenance": {"mode": "applyy"}}`,
-		"unknown interval": `{"disk_maintenance": {"interval": "hourly"}}`,
-		"malformed window": `{"disk_maintenance": {"window": "4:30pm"}}`,
-		"unknown key":      `{"disk_maintenance": {"enable": true}}`,
+		"not an object":      `{"disk_maintenance": "on"}`,
+		"unknown mode":       `{"disk_maintenance": {"mode": "applyy"}}`,
+		"unknown interval":   `{"disk_maintenance": {"interval": "hourly"}}`,
+		"malformed window":   `{"disk_maintenance": {"window": "4:30pm"}}`,
+		"unknown key":        `{"disk_maintenance": {"enable": true}}`,
+		"unknown target":     `{"disk_maintenance": {"targets": {"go-build": {"interval": "2h"}}}}`,
+		"malformed cadence":  `{"disk_maintenance": {"targets": {"civol": {"interval": "soon"}}}}`,
+		"sub-minute cadence": `{"disk_maintenance": {"targets": {"civol": {"interval": "30s"}}}}`,
 	}
 	for name, doc := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -560,6 +566,44 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 			var p PatrolsConfig
 			if err := json.Unmarshal([]byte(doc), &p); err == nil {
 				t.Fatalf("%s decoded without an error: %+v", name, p.DiskMaintenance)
+			}
+		})
+	}
+}
+
+// TestDiskMaintenanceTargetEvery: a cadence is a Go duration of at least a
+// minute, and an empty one keeps the daily window.
+func TestDiskMaintenanceTargetEvery(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		interval string
+		want     time.Duration
+		wantErr  string
+	}{
+		{name: "empty keeps the daily window"},
+		{name: "hours", interval: "2h", want: 2 * time.Hour},
+		{name: "the minimum", interval: "1m", want: time.Minute},
+		{name: "not a duration", interval: "soon", wantErr: "not a Go duration"},
+		{name: "zero", interval: "0s", wantErr: "one-minute minimum"},
+		{name: "negative", interval: "-2h", wantErr: "one-minute minimum"},
+		{name: "sub-minute", interval: "30s", wantErr: "one-minute minimum"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := DiskMaintenanceTarget{Interval: tt.interval}.Every()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Every(%q) = %v, %v; want an error naming %q", tt.interval, got, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Every(%q) = %v", tt.interval, err)
+			}
+			if got != tt.want {
+				t.Errorf("Every(%q) = %v, want %v", tt.interval, got, tt.want)
 			}
 		})
 	}

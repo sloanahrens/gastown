@@ -241,6 +241,10 @@ type Daemon struct {
 	// pass runs off the loop goroutine, so the marker it writes is atomic and
 	// the loop only reads it.
 	diskMaintSettled atomic.Int64
+	// diskMaintSchedule is when each target with a cadence of its own last
+	// concluded a run, and the settings the patrol refused to schedule
+	// (gt-z6qre.17).
+	diskMaintSchedule diskMaintSchedule
 	// diskMaintAlerts is the set of disk alert keys the patrol has open: it
 	// alerts a disk once, and a clear needs a reading that says so.
 	diskMaintAlerts diskMaintAlerts
@@ -1554,8 +1558,9 @@ func (d *Daemon) Run() (err error) {
 	}
 
 	// Start the disk_maintenance ticker if configured. It plans the town's
-	// registry in its own quiet window, once a day, and prunes nothing unless
-	// the mode is apply (disk_maintenance.go, gt-dl4nv.15).
+	// registry in its own quiet window, once a day, and any target with a
+	// cadence of its own on that cadence; it prunes nothing unless the mode is
+	// apply (disk_maintenance.go, gt-dl4nv.15, gt-z6qre.17).
 	var diskMaintTicker *time.Ticker
 	var diskMaintChan <-chan time.Time
 	if d.isPatrolActive("disk_maintenance") {
@@ -1763,8 +1768,9 @@ func (d *Daemon) Run() (err error) {
 			}
 
 		case <-diskMaintChan:
-			// Disk maintenance — in its own quiet window, once a day, plans the
-			// town's registry and applies the plan only in apply mode.
+			// Disk maintenance — plans the due targets: the registry in its own
+			// quiet window, once a day, and any target with a cadence of its
+			// own on that cadence; it applies a plan only in apply mode.
 			if !d.isShutdownInProgress() {
 				d.runDiskMaintenance()
 			}

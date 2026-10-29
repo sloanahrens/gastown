@@ -136,6 +136,7 @@ type (
 	OverrunGuardConfig         = agentconfig.OverrunGuardConfig
 	ScheduledMaintenanceConfig = agentconfig.ScheduledMaintenanceConfig
 	DiskMaintenanceConfig      = agentconfig.DiskMaintenanceConfig
+	DiskMaintenanceTarget      = agentconfig.DiskMaintenanceTarget
 	HMSyncConfig               = agentconfig.HMSyncConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	OverseerReportConfig       = agentconfig.OverseerReportConfig
