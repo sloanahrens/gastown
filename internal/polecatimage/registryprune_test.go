@@ -11,13 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
-	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 )
 
 // roundTrip serves registry requests from handler in process: no listener, no
@@ -257,7 +257,25 @@ func TestPruneRegistryApplyDeletes(t *testing.T) {
 	if got := reg.deleted(); !slices.Equal(got, want) {
 		t.Fatalf("deleted %v, want the two oldest digests %v", got, want)
 	}
-	tr.wantCall(t, "docker", "exec", registryContainer, "timeout", registry.CollectTimeoutSeconds, "registry", "garbage-collect", "--delete-untagged", "/etc/docker/registry/config.yml")
+	// The collect's container timeout follows the deadline the retention runs under
+	// (registryPruneBudget), less the grace, so the argv is pinned in shape and the
+	// timeout as a bound: just under the budget, never the registry package's ceiling.
+	var gc []string
+	for _, c := range tr.callsTo("docker") {
+		if len(c.args) == 8 && c.args[0] == "exec" && c.args[4] == "registry" && c.args[5] == "garbage-collect" {
+			gc = c.args
+		}
+	}
+	if gc == nil {
+		t.Fatalf("no docker garbage-collect call; calls: %v", callLines(tr, "docker"))
+	}
+	if gc[1] != registryContainer || gc[2] != "timeout" || gc[6] != "--delete-untagged" || gc[7] != "/etc/docker/registry/config.yml" {
+		t.Errorf("garbage-collect argv = %q, want the registry container, timeout, and the fixed collect command", gc)
+	}
+	budget := int(registryPruneBudget / time.Second)
+	if secs, err := strconv.Atoi(gc[3]); err != nil || secs < budget-60 || secs >= budget {
+		t.Errorf("garbage-collect timeout = %q, want a number of seconds just under the %d-second budget", gc[3], budget)
+	}
 	tr.wantLogged(t, "deleted 2 of 2 manifest(s)")
 
 	entries, err := diskmaint.NewLedger(tr.Cfg.RegistryLedger, registryLedgerMax).Tail(1)
