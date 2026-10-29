@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -265,8 +264,8 @@ func rejectionGroups(verdicts, rejections map[[2]string]int) []RejectionWeekGrou
 
 // MangoRejectionsSection renders the digest's rejection tables, reading the
 // town's review log and the notes of the beads it refused through env: one
-// review-log read, then one bd show per store a refusal names, asking for the
-// refused beads alone.
+// review-log read, then one store read per rig a refusal names, asking the
+// store for the refused beads alone.
 //
 // A town with a log but no verdicts yet says so; a missing or unreadable log
 // is an error naming its path, and so is a bead whose notes the store does not
@@ -278,8 +277,8 @@ func MangoRejectionsSection(ctx context.Context, env Env) (string, error) {
 		return "", errors.New("rejections section: Env.Town is unset")
 	case env.ReadFile == nil:
 		return "", errors.New("rejections section: Env.ReadFile is unset")
-	case env.Run == nil:
-		return "", errors.New("rejections section: Env.Run is unset")
+	case env.Beads == nil:
+		return "", errors.New("rejections section: Env.Beads is unset")
 	}
 	records, skipped, err := townReviewRecords(env)
 	if err != nil {
@@ -365,11 +364,11 @@ type rejectionStore struct {
 // rejectionStores is the bead stores the join reads, with the beads each one
 // holds: one store per rig a refused record names, and the town's own store
 // for a record that names none. Only refusals need notes, so an approval alone
-// costs no bd call.
+// costs no store read.
 //
 // A rig that is not one path element is an error: the record comes from a
-// file, and a rig name reaching filepath.Join unchecked could point bd at a
-// directory the town never named.
+// file, and a rig name reaching filepath.Join unchecked could point the store
+// at a directory the town never named.
 func rejectionStores(town string, records []land.ReviewRecord) ([]rejectionStore, error) {
 	beads := map[string]map[string]bool{}
 	for _, rec := range records {
@@ -378,6 +377,13 @@ func rejectionStores(town string, records []land.ReviewRecord) ([]rejectionStore
 		}
 		if rec.Rig != "" && (rec.Rig != filepath.Base(rec.Rig) || rec.Rig == "." || rec.Rig == "..") {
 			return nil, fmt.Errorf("review of %s names rig %q, which is not one path element", rec.BeadID, rec.Rig)
+		}
+		// A store reads an id as an argument, and bd reads an argument beginning
+		// with a dash as a flag, so an id the log names that is not a bead id
+		// refuses the log rather than reaching a store. The empty id is one too:
+		// no answer a store could give for it would be a bead.
+		if !isBeadID(rec.BeadID) {
+			return nil, fmt.Errorf("review names bead id %q, which is not a bead id", rec.BeadID)
 		}
 		if beads[rec.Rig] == nil {
 			beads[rec.Rig] = map[string]bool{}
@@ -401,45 +407,29 @@ func rejectionStores(town string, records []land.ReviewRecord) ([]rejectionStore
 	return stores, nil
 }
 
-// loadRejectionNotes reads the refused beads' notes, one bd show per store,
-// keyed by the store and the bead. A call that fails, that is not a bead list,
-// or that does not return every bead asked for fails the section: a join
-// missing one bead's notes would report its refusals as note-less rather than
-// say the read broke.
+// loadRejectionNotes reads the refused beads' notes, one store read per rig,
+// keyed by the store and the bead. The read goes through the bead store seam
+// (showBeads), so the section runs no bd of its own and an id reaches the store
+// as its own argument rather than as an --id= flag. A read that fails, or one
+// that does not return every bead asked for, fails the section: a join missing
+// one bead's notes would report its refusals as note-less rather than say the
+// read broke. The error keeps "bd show in <dir>", the wording the pre-seam
+// reader's failure carried.
 func loadRejectionNotes(ctx context.Context, env Env, stores []rejectionStore) (map[RejectionNoteKey]string, error) {
 	notes := map[RejectionNoteKey]string{}
 	for _, store := range stores {
-		argv := []string{"bd", "-C", store.Dir, "show", "--json"}
-		for _, bead := range store.Beads {
-			// --id keeps a bead id from being read as a flag: the ids come
-			// from the review log, which this section does not write.
-			argv = append(argv, "--id="+bead)
-		}
-		out, err := env.Run(ctx, argv)
+		found, err := showBeads(ctx, env, store.Dir, store.Beads)
 		if err != nil {
 			return nil, fmt.Errorf("bd show in %s: %w", store.Dir, err)
 		}
-		// A JSON null decodes into a nil slice without an error, which would
-		// report the store's refusals as note-less rather than say the read
-		// broke; only an array is a bead list.
-		trimmed := bytes.TrimSpace(out)
-		if len(trimmed) == 0 || trimmed[0] != '[' {
-			return nil, fmt.Errorf("bd show in %s: the output is not a bead list", store.Dir)
-		}
-		var rows []bdListBead
-		if err := json.Unmarshal(trimmed, &rows); err != nil {
-			return nil, fmt.Errorf("bd show in %s: the output is not a bead list", store.Dir)
-		}
-		found := make(map[string]bool, len(rows))
-		for _, row := range rows {
-			if row.ID == "" {
+		for bead, issue := range found {
+			if issue == nil || issue.ID == "" {
 				continue
 			}
-			found[row.ID] = true
-			notes[RejectionNoteKey{Rig: store.Rig, Bead: row.ID}] = row.Notes
+			notes[RejectionNoteKey{Rig: store.Rig, Bead: bead}] = issue.Notes
 		}
 		for _, bead := range store.Beads {
-			if !found[bead] {
+			if issue := found[bead]; issue == nil || issue.ID == "" {
 				return nil, fmt.Errorf("bd show in %s: %s is not in the store the review log names", store.Dir, bead)
 			}
 		}

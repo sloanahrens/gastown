@@ -191,7 +191,13 @@ func runDoltContainer(ctx context.Context) (ctr testcontainers.Container, err er
 // published, then probe it. A probe failure wraps errDoltReadinessProbe, which
 // is what makes the start retriable (gt-f6msc).
 func awaitDoltReady(ctx context.Context, lookup portLookup, probe func(ctx context.Context, port string) error) error {
-	port, err := waitForMappedPort(ctx, lookup)
+	return awaitDoltReadySleeping(ctx, lookup, probe, time.Sleep)
+}
+
+// awaitDoltReadySleeping is awaitDoltReady sleeping through sleep, so a test
+// that walks the whole poll budget does not spend it in real time.
+func awaitDoltReadySleeping(ctx context.Context, lookup portLookup, probe func(ctx context.Context, port string) error, sleep func(time.Duration)) error {
+	port, err := waitForMappedPortSleeping(ctx, lookup, sleep)
 	if err != nil {
 		return err
 	}
