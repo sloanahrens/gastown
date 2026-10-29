@@ -57,13 +57,11 @@ func loadTrackerAdminToken(townRoot string, getenv func(string) string) (Tracker
 		return TrackerAdminToken{}, fmt.Errorf("%s is not set in %s", trackerAdminTokenKey, path)
 	}
 
+	// raw is non-empty, so an empty result means a reference it names is unset.
 	value := strings.TrimSpace(resolveTrackerAdminRef(raw, env, getenv))
 	if value == "" {
-		if refs := envRefNames(raw); len(refs) > 0 {
-			return TrackerAdminToken{}, fmt.Errorf("%s in %s refers to %s, which is not set",
-				trackerAdminTokenKey, path, strings.Join(refs, ", "))
-		}
-		return TrackerAdminToken{}, fmt.Errorf("%s in %s is empty", trackerAdminTokenKey, path)
+		return TrackerAdminToken{}, fmt.Errorf("%s in %s refers to %s, which is not set",
+			trackerAdminTokenKey, path, strings.Join(envRefNames(raw), ", "))
 	}
 	// A name still braced after one expansion is a reference cycle or a
 	// reference chain this loader does not follow. Handing it on would give a
