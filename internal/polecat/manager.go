@@ -32,6 +32,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -213,6 +214,13 @@ type Manager struct {
 	// recoverReadOnly restarts a read-only Dolt server; nil means
 	// doltserver.RecoverReadOnly. A test sets it so no real server is touched.
 	recoverReadOnly func(townRoot string) error
+	// seatRevoker ends a removed seat's tracker tokens; nil means
+	// hostSeatRevoker, which holds the town's admin credential. A test sets a
+	// fake so no tracker is asked.
+	seatRevoker func(ctx context.Context, townRoot, actor string) error
+	// warn reports a credential that outlived its seat; nil is
+	// style.PrintWarning. A test records what a removal said.
+	warn func(format string, args ...any)
 	// diskSpace reports the free space at a path; nil means
 	// util.CheckDiskSpace, which runs diskutil on macOS.
 	diskSpace func(path string) (util.DiskSpaceLevel, string, error)
@@ -1729,7 +1737,7 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 		if rmErr := os.RemoveAll(polecatDir); rmErr != nil {
 			return rmErr
 		}
-		m.clearIntentRecord(name)
+		m.releaseSeat(name)
 		return nil
 	}
 
@@ -1769,26 +1777,140 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 	m.namePool.Release(name)
 	_ = m.namePool.Save()
 
-	m.clearIntentRecord(name)
+	m.releaseSeat(name)
 
 	return nil
 }
 
-// clearIntentRecord deletes the removed polecat's intent record, which would
-// otherwise keep townhealth reporting the seat as dead forever with no session
-// left to revive (gt-u7voe). It is a no-op while the polecat directory is
-// still on disk: a removal that failed part way left a seat that still needs
-// its record.
-func (m *Manager) clearIntentRecord(name string) {
+// releaseSeat clears what outlives a removed polecat's directory: its intent
+// record and its tracker credentials. It is a no-op while the polecat
+// directory is still on disk, since a removal that failed part way left a seat
+// that may still be restarted with both.
+func (m *Manager) releaseSeat(name string) {
 	if _, err := os.Stat(m.polecatDir(name)); err == nil {
 		return
 	}
-	seat := intent.Seat{Rig: m.rig.Name, Role: constants.RolePolecat, Name: name}
-	if err := intent.Remove(m.townRoot, seat); err != nil {
+	m.clearIntentRecord(name)
+	m.revokeSeatTokens(name)
+}
+
+// intentSeat is a polecat's seat as the intent record knows it: the agent role,
+// <rig>/polecat.<name>.
+func intentSeat(rigName, name string) intent.Seat {
+	return intent.Seat{Rig: rigName, Role: constants.RolePolecat, Name: name}
+}
+
+// trackerSeat is the same seat as the tracker and bd's BD_ACTOR know it: the
+// worktree's directory, <rig>/polecats/<name> (config.AgentEnvConfig builds the
+// same address). The two spellings are one polecat, never one seat seen twice.
+func trackerSeat(rigName, name string) intent.Seat {
+	return intent.Seat{Rig: rigName, Role: constants.DirPolecats, Name: name}
+}
+
+// clearIntentRecord deletes the removed polecat's intent record, which would
+// otherwise keep townhealth reporting the seat as dead forever with no session
+// left to revive (gt-u7voe).
+func (m *Manager) clearIntentRecord(name string) {
+	if err := intent.Remove(m.townRoot, intentSeat(m.rig.Name, name)); err != nil {
 		// The seat itself is already gone; a record that could not be deleted
 		// is worth saying out loud, but not worth failing the removal for.
-		style.PrintWarning("could not remove intent record for %s: %v", name, err)
+		m.warnf("could not remove intent record for %s: %v", name, err)
 	}
+}
+
+// seatRevokeTimeout bounds the tracker call a removal makes once the worktree
+// is gone. The client retries a failed call, and a tracker that never answers
+// must not hold gt polecat nuke, gt shutdown or a spawn rollback open
+// (gt-p85pw.85).
+const seatRevokeTimeout = 10 * time.Second
+
+// revokeSeatTokens takes away what let the polecat authenticate as a tracker
+// actor: its token file, then its live tokens. Both failures are reported and
+// neither refuses the removal — the seat is already gone, and a credential
+// that outlived it is not a reason to keep the worktree (gt-p85pw.85). A rig
+// on Dolt has issued no token, so there is nothing to revoke.
+func (m *Manager) revokeSeatTokens(name string) {
+	seat := trackerSeat(m.rig.Name, name)
+	if err := seattoken.New(m.townRoot).Remove(seat); err != nil {
+		m.warnf("could not remove the token file of seat %s: %v", seat, err)
+	}
+	backend, err := m.rigBackend()
+	if err != nil {
+		m.warnf("could not tell which store holds the beads of rig %s, so the tracker tokens of seat %s were not revoked: %v", m.rig.Name, seat, err)
+		return
+	}
+	if backend != beads.BackendTracker {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), seatRevokeTimeout)
+	defer cancel()
+	revoke := m.seatRevoker
+	if revoke == nil {
+		revoke = hostSeatRevoker
+	}
+	if err := revoke(ctx, m.townRoot, seat.String()); err != nil {
+		m.warnf("could not revoke the tracker tokens of seat %s: %v", seat, err)
+	}
+}
+
+// hostSeatRevoker ends actor's tracker tokens on the town's admin credential,
+// the one a seat never holds.
+func hostSeatRevoker(ctx context.Context, townRoot, actor string) error {
+	revoker, err := seattoken.NewHostRevoker(townRoot)
+	if err != nil {
+		return err
+	}
+	return revoker.Revoke(ctx, actor)
+}
+
+// rigBackend reports the store this rig's beads live in, from the town's route
+// table. It mirrors the lookup internal/beads/backend makes when it opens the
+// rig, and fails closed wherever that lookup could not place the rig: an
+// unreadable table, a route naming an unknown backend, and a beads directory no
+// route names are all errors. The caller then says it could not tell instead of
+// leaving a tracker seat's live token in place in silence (gt-p85pw.85). A
+// route that names no backend is on Dolt, the default backend.Open applies.
+func (m *Manager) rigBackend() (string, error) {
+	beadsDir := filepath.Join(m.townRoot, ".beads")
+	routes, err := beads.LoadRoutes(beadsDir)
+	if err != nil {
+		return "", err
+	}
+	want := beads.ResolveBeadsDir(m.rig.Path)
+	for _, r := range routes {
+		if !sameBeadsDir(filepath.Join(m.townRoot, r.Path, ".beads"), want) {
+			continue
+		}
+		switch name := r.BackendName(); name {
+		case beads.BackendDolt, beads.BackendTracker:
+			return name, nil
+		default:
+			return "", fmt.Errorf("the route for %s names the backend %q, which is neither %q nor %q",
+				r.Prefix, name, beads.BackendDolt, beads.BackendTracker)
+		}
+	}
+	return "", fmt.Errorf("no route in %s names the beads of rig %s", filepath.Join(beadsDir, beads.RoutesFileName), m.rig.Name)
+}
+
+// sameBeadsDir reports whether a and b name the same beads directory. Symlinks
+// are resolved as well as cleaned, so a town reached through a symlinked root
+// (a macOS temp dir, for one) still matches the route's own path.
+func sameBeadsDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, ea := filepath.EvalSymlinks(a)
+	rb, eb := filepath.EvalSymlinks(b)
+	return ea == nil && eb == nil && ra == rb
+}
+
+// warnf reports a cleanup that could not finish; nil warn is style.PrintWarning.
+func (m *Manager) warnf(format string, args ...any) {
+	if m.warn != nil {
+		m.warn(format, args...)
+		return
+	}
+	style.PrintWarning(format, args...)
 }
 
 // ActiveMRRemovalBlocker returns the pending active-MR reason that should block

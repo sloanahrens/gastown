@@ -93,6 +93,107 @@ func TestTrackerIssuerIssueRefused(t *testing.T) {
 	}
 }
 
+// A revoke ends the tokens of the actor the seat address names, over the admin
+// route and the admin credential; an actor holding no live token is a success.
+func TestTrackerRevokerRevoke(t *testing.T) {
+	t.Parallel()
+	for _, revoked := range []string{"2", "0"} {
+		t.Run("revoked_"+revoked, func(t *testing.T) {
+			t.Parallel()
+			var (
+				method, path, auth string
+				asked              api.RevokeTokensRequest
+			)
+			tc := testClient(t, func(r *http.Request) (*http.Response, error) {
+				method, path, auth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+				if err := json.NewDecoder(r.Body).Decode(&asked); err != nil {
+					t.Errorf("request body: %v", err)
+				}
+				return answer(http.StatusOK, `{"revoked":`+revoked+`}`), nil
+			})
+
+			if err := NewTrackerRevoker(tc).Revoke(context.Background(), "gastown/polecats/cheedo"); err != nil {
+				t.Fatalf("Revoke: %v", err)
+			}
+			if method != http.MethodPost || path != "/v1/tokens:revoke" {
+				t.Errorf("Revoke asked %s %s, want POST /v1/tokens:revoke", method, path)
+			}
+			if auth != "Bearer "+adminToken {
+				t.Errorf("Revoke sent Authorization %q, want the admin credential", auth)
+			}
+			if asked.Actor != "gastown/polecats/cheedo" || asked.TokenID != "" {
+				t.Errorf("Revoke asked for %+v, want the actor's tokens and no token id", asked)
+			}
+		})
+	}
+}
+
+// A revoke the tracker refuses is an error: a removal that read it as done
+// would leave a live token for a seat that no longer exists.
+func TestTrackerRevokerRevokeRefused(t *testing.T) {
+	t.Parallel()
+	tc := testClient(t, func(*http.Request) (*http.Response, error) {
+		return answer(http.StatusForbidden, `{"kind":"forbidden","message":"the token is not admin"}`), nil
+	})
+
+	err := NewTrackerRevoker(tc).Revoke(context.Background(), "gastown/polecats/cheedo")
+	if err == nil {
+		t.Fatal("Revoke succeeded against a refusal; the seat's token would outlive the seat")
+	}
+	if !strings.Contains(err.Error(), "gastown/polecats/cheedo") {
+		t.Errorf("Revoke error = %v, want it to name the actor", err)
+	}
+}
+
+func TestNewHostRevoker(t *testing.T) {
+	t.Parallel()
+	const townBase = `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z"`
+	cases := []struct {
+		name    string
+		town    string
+		daemon  string
+		wantErr string
+	}{
+		{
+			name:   "a town with an endpoint and a credential",
+			town:   townBase + `,"tracker":{"port":7600}}`,
+			daemon: "TRACKER_ADMIN_TOKEN=" + adminToken + "\n",
+		},
+		{
+			name:    "no admin credential",
+			town:    townBase + `}`,
+			wantErr: "TRACKER_ADMIN_TOKEN",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			writeFile(t, filepath.Join(townRoot, "mayor", "town.json"), tc.town)
+			if tc.daemon != "" {
+				writeFile(t, filepath.Join(townRoot, "settings", "daemon.env"), tc.daemon)
+			}
+
+			revoker, err := NewHostRevoker(townRoot)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("NewHostRevoker error = %v, want it to name %q", err, tc.wantErr)
+				}
+				if revoker != nil {
+					t.Error("NewHostRevoker returned a revoker with an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewHostRevoker: %v", err)
+			}
+			if revoker == nil || revoker.tc == nil {
+				t.Fatal("NewHostRevoker returned no client to revoke with")
+			}
+		})
+	}
+}
+
 // TestHostClientConfig checks the config hostClientConfig builds for client.New:
 // the town's endpoint and the credential daemon.env holds.
 func TestHostClientConfig(t *testing.T) {

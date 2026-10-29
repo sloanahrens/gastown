@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 )
@@ -231,6 +233,59 @@ func TestStopNotFound(t *testing.T) {
 	err := m.Stop("Toast", false)
 	if err != ErrSessionNotFound {
 		t.Errorf("Stop = %v, want ErrSessionNotFound", err)
+	}
+}
+
+// countingIssuer mints one token and counts the asks, so a test can tell a
+// seat token that was reused from one that was issued again.
+type countingIssuer struct {
+	token string
+	asks  int
+}
+
+func (c *countingIssuer) Issue(context.Context, string) (string, error) {
+	c.asks++
+	return c.token, nil
+}
+
+// Stopping a polecat revokes nothing: its worktree survives and the seat
+// restarts with the token it was given, so only a removal ends that token
+// (gt-p85pw.85). A SessionManager holds no tracker credential and no revoker —
+// revocation lives on Manager alone — so the stop has no path to one; the token
+// file surviving the stop and being handed back untouched is what this test can
+// observe, and TestReuseOfAnIdlePolecatRevokesNothing drives the Manager's own
+// session end past an injected revoker to show the other half.
+func TestStopKeepsTheSeatToken(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tm := newFakeSessionTmux()
+	m := &SessionManager{tmux: tm, rig: &rig.Rig{Name: "test-rig", Path: filepath.Join(town, "test-rig"), Polecats: []string{"Toast"}}, gits: newWorld().opener()}
+	sess := m.SessionName("Toast")
+	if err := tm.NewSession(sess, ""); err != nil {
+		t.Fatal(err)
+	}
+	store := seattoken.New(town)
+	seat := trackerSeat("test-rig", "Toast")
+	issuer := &countingIssuer{token: "trk_toast-secret"}
+	path, err := store.Ensure(context.Background(), seat, issuer)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	if err := m.Stop("Toast", true); err != nil {
+		t.Fatalf("Stop = %v", err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("token file gone after Stop: %v", err)
+	}
+	again, err := store.Ensure(context.Background(), seat, issuer)
+	if err != nil {
+		t.Fatalf("Ensure after Stop: %v", err)
+	}
+	if again != path || issuer.asks != 1 {
+		t.Fatalf("Ensure after Stop = %q after %d issues, want the token file %q the seat already had",
+			again, issuer.asks, path)
 	}
 }
 

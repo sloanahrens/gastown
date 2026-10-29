@@ -31,6 +31,44 @@ func (i *TrackerIssuer) Issue(ctx context.Context, actor string) (string, error)
 // from settings/daemon.env, over the endpoint mayor/town.json names. Neither
 // reaches a seat (gt-p85pw.79).
 func NewHostIssuer(townRoot string) (*TrackerIssuer, error) {
+	tc, err := newHostClient(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return NewTrackerIssuer(tc), nil
+}
+
+// TrackerRevoker ends a seat's tracker tokens over the admin route, so a seat
+// that is gone can no longer authenticate with a token it was given
+// (gt-p85pw.85).
+type TrackerRevoker struct{ tc *client.Client }
+
+// NewTrackerRevoker returns a revoker whose client carries the admin credential.
+func NewTrackerRevoker(tc *client.Client) *TrackerRevoker { return &TrackerRevoker{tc: tc} }
+
+// Revoke ends every live token of actor; an actor holding none is a success.
+func (r *TrackerRevoker) Revoke(ctx context.Context, actor string) error {
+	if _, err := r.tc.RevokeActorTokens(ctx, actor); err != nil {
+		// The failure may be a refusal or a call that never reached the tracker,
+		// so the error names the ask and not an outcome neither side can vouch
+		// for.
+		return fmt.Errorf("revoking the tracker tokens of %s: %w", actor, err)
+	}
+	return nil
+}
+
+// NewHostRevoker returns the revoker a host process uses, on the same admin
+// credential and endpoint as NewHostIssuer (gt-p85pw.79).
+func NewHostRevoker(townRoot string) (*TrackerRevoker, error) {
+	tc, err := newHostClient(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return NewTrackerRevoker(tc), nil
+}
+
+// newHostClient is the admin client the host issuer and the host revoker share.
+func newHostClient(townRoot string) (*client.Client, error) {
 	cfg, err := hostClientConfig(townRoot)
 	if err != nil {
 		return nil, err
@@ -39,7 +77,7 @@ func NewHostIssuer(townRoot string) (*TrackerIssuer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("seattoken: tracker client: %w", err)
 	}
-	return NewTrackerIssuer(tc), nil
+	return tc, nil
 }
 
 // hostClientConfig assembles the admin client's config: the endpoint from
