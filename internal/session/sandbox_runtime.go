@@ -40,12 +40,18 @@ func requireRuntimeSegment(what, name string) error {
 }
 
 // runtimeFile is one entry of the runtime archive: a path under /sandbox and
-// its mode.
+// its mode. dir makes it a directory entry, for a directory the archive is the
+// first to create.
 type runtimeFile struct {
 	name string
 	data []byte
 	mode int64
+	dir  bool
 }
+
+// runtimeTrackerToken is the token file's name in the runtime archive, which
+// extracts under /sandbox: the path TRACKER_TOKEN_FILE names.
+const runtimeTrackerToken = ".tracker/token"
 
 // promptCommentStore is the bd surface a spawn's prompt stamp writes through;
 // *beads.Beads is the production store, a test passes a fake.
@@ -61,13 +67,14 @@ type promptCommentStore interface {
 // The settings are rendered for the sandbox; the system prompt has the host
 // town root rewritten. The agent command names settings.json and the system
 // prompt, so a missing one is an error. A rig or polecat name that is not one
-// path segment is an error too.
+// path segment is an error too. A tracker-routed seat's archive also carries
+// its token as .tracker/token, 0600.
 //
 // The spawn log, the renderer and the comment store are seams: the production
 // caller passes its own, and a test captures the uploaded prompt's hash line
 // and the stamp the spawn posts (gt-uoo5j, gt-2lu00). A nil commenter posts
 // nothing.
-func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Writer, render config.SystemPromptRender, comments promptCommentStore) ([]byte, error) {
+func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Writer, render config.SystemPromptRender, comments promptCommentStore, tracker sandboxTracker) ([]byte, error) {
 	if err := requireRuntimeSegment("rig", spec.Rig); err != nil {
 		return nil, err
 	}
@@ -97,10 +104,10 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 		return nil, err
 	}
 	files := []runtimeFile{
-		{".claude.json", claudeJSON, 0o600},
-		{path.Join(claudeDir, "settings.json"), settings, 0o644},
-		{gitHelperName, []byte(gitHelperScript(forgejoHost)), 0o755},
-		{".gitconfig", []byte(sandboxGitConfig(spec.Polecat, gitEmail)), 0o644},
+		{".claude.json", claudeJSON, 0o600, false},
+		{path.Join(claudeDir, "settings.json"), settings, 0o644, false},
+		{gitHelperName, []byte(gitHelperScript(forgejoHost)), 0o755, false},
+		{".gitconfig", []byte(sandboxGitConfig(spec.Polecat, gitEmail)), 0o644, false},
 	}
 
 	// The host renders the sandbox's final prompt bytes once, into a sandbox/ directory of its own, and
@@ -126,8 +133,18 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	if err != nil {
 		return nil, fmt.Errorf("polecat system prompt %s: %w", promptName, err)
 	}
-	files = append(files, runtimeFile{path.Join(claudeDir, promptName), promptBytes, 0o644})
+	files = append(files, runtimeFile{path.Join(claudeDir, promptName), promptBytes, 0o644, false})
 	logSystemPrompt(promptLog, spec.Polecat, promptBytes)
+
+	// A tracker-routed seat's token travels as a file: the directory is 0700 and
+	// the file 0600, as the seat's file on the host is, and no other entry of the
+	// archive, no environment value and no settings file holds it (gt-p85pw.84).
+	if tracker.on() {
+		files = append(files,
+			runtimeFile{path.Dir(runtimeTrackerToken), nil, 0o700, true},
+			runtimeFile{runtimeTrackerToken, tracker.token, 0o600, false},
+		)
+	}
 	// The bytes are kept by hash so a rejection can be joined to the prompt its
 	// author had (gt-js6di). A store failure is logged and never fails the spawn.
 	stored, _, storeErr := storePolecatPrompt(spec.TownRoot, promptBytes)
@@ -144,7 +161,11 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	for _, f := range files {
-		if err := tw.WriteHeader(&tar.Header{Name: f.name, Mode: f.mode, Size: int64(len(f.data)), Typeflag: tar.TypeReg}); err != nil {
+		hdr := &tar.Header{Name: f.name, Mode: f.mode, Size: int64(len(f.data)), Typeflag: tar.TypeReg}
+		if f.dir {
+			hdr.Name, hdr.Size, hdr.Typeflag = f.name+"/", 0, tar.TypeDir
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
 			return nil, err
 		}
 		if _, err := tw.Write(f.data); err != nil {

@@ -57,7 +57,7 @@ func untarRuntime(t *testing.T, data []byte) map[string]runtimeEntry {
 func TestBuildRuntimeArchiveAppendsTheSandboxNoteToThePrompt(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{})
 	if err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestBuildRuntimeArchiveAppendsTheSandboxNoteToThePrompt(t *testing.T) {
 func TestBuildRuntimeArchiveHoldsTheRenderedSettingsAndPrompt(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{})
 	if err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestBuildRuntimeArchiveFailsWithoutAPromptNamingTheFile(t *testing.T) {
 	if err := os.Remove(filepath.Join(claudeDir, promptName)); err != nil {
 		t.Fatal(err)
 	}
-	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil)
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{})
 	if err == nil {
 		t.Fatal("buildRuntimeArchiveLogging without a system prompt = nil error; the polecat would start with none of its policy")
 	}
@@ -125,7 +125,7 @@ func TestBuildRuntimeArchiveLogsTheHashOfTheUploadedPrompt(t *testing.T) {
 	// The real build, with its spawn log captured: the line it writes must be
 	// the hash of the entry it put in the archive, read back from the archive.
 	var logged bytes.Buffer
-	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged, openshellPromptRender, nil)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged, openshellPromptRender, nil, sandboxTracker{})
 	if err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestBuildRuntimeArchiveFailsWithoutSettings(t *testing.T) {
 	if err := os.Remove(filepath.Join(claudeDir, "settings.json")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil); err == nil {
+	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{}); err == nil {
 		t.Fatal("buildRuntimeArchiveLogging without settings.json = nil error; the agent command names that file")
 	}
 }
@@ -165,7 +165,7 @@ func TestBuildRuntimeArchiveReportsAnUnreadablePrompt(t *testing.T) {
 	if err := os.Mkdir(prompt, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil); err == nil {
+	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{}); err == nil {
 		t.Fatal("buildRuntimeArchiveLogging with a directory for the system prompt = nil error")
 	}
 }
@@ -176,7 +176,7 @@ func TestBuildRuntimeArchiveReportsSettingsThatDoNotRender(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	writeOpenshellFile(t, filepath.Join(town, openshellTestRig, "polecats", ".claude", "settings.json"), "{not json")
-	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil); err == nil {
+	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{}); err == nil {
 		t.Fatal("buildRuntimeArchiveLogging with invalid settings JSON = nil error")
 	}
 }
@@ -203,7 +203,7 @@ func TestBuildRuntimeArchiveRefusesTraversalInRigOrPolecat(t *testing.T) {
 			town, work := openshellTown(t)
 			spec := openshellSpawn(town, work)
 			spec.Rig, spec.Polecat = tc.rig, tc.polecat
-			_, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil)
+			_, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{})
 			if err == nil || !strings.Contains(err.Error(), "not a single path segment") {
 				t.Fatalf("buildRuntimeArchiveLogging with rig=%q polecat=%q: err=%v, want a path-segment refusal", tc.rig, tc.polecat, err)
 			}
@@ -236,7 +236,7 @@ func TestBuildRuntimeArchiveSeedsClaudeJSONForTheSandboxWorktree(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	spec := openshellSpawn(town, work)
-	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil)
+	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{})
 	if err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestBuildRuntimeArchiveSeedsClaudeJSONForTheSandboxWorktree(t *testing.T) {
 func TestBuildRuntimeArchiveGivesGitACredentialHelperAndNoSecret(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil, sandboxTracker{})
 	if err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestBuildRuntimeArchiveUploadsTheRenderedPromptVerbatim(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	var logged bytes.Buffer
-	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged, openshellPromptRender, nil)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged, openshellPromptRender, nil, sandboxTracker{})
 	if err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestBuildRuntimeArchiveUploadsTheRenderedPromptVerbatim(t *testing.T) {
 func TestBuildRuntimeArchiveRefusesWithoutAPromptRendererNamingTheFile(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, nil, nil)
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, nil, nil, sandboxTracker{})
 	if err == nil {
 		t.Fatal("buildRuntimeArchiveLogging with no renderer = nil error; the polecat would start with none of its policy")
 	}
@@ -449,7 +449,7 @@ func TestBuildRuntimeArchiveFailsWhenThePromptWillNotRenderNamingTheFile(t *test
 	town, work := openshellTown(t)
 	cause := errors.New("template unavailable")
 	fail := func(_, _, _, _, _ string, _ config.SystemPromptTarget) error { return cause }
-	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, fail, nil)
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, fail, nil, sandboxTracker{})
 	if !errors.Is(err, cause) {
 		t.Fatalf("error = %v, want the render failure wrapped", err)
 	}
@@ -464,7 +464,7 @@ func TestBuildRuntimeArchiveRefusesARenderThatWritesNoFileNamingTheFile(t *testi
 	t.Parallel()
 	town, work := openshellTown(t)
 	silent := func(_, _, _, _, _ string, _ config.SystemPromptTarget) error { return nil }
-	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, silent, nil)
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, silent, nil, sandboxTracker{})
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("error = %v, want the missing rendered file wrapped", err)
 	}
@@ -484,7 +484,7 @@ func TestBuildRuntimeArchiveRefusesWhenTheRenderDirectoryCannotBeMade(t *testing
 	}
 	rendered := false
 	render := func(_, _, _, _, _ string, _ config.SystemPromptTarget) error { rendered = true; return nil }
-	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, render, nil)
+	_, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, render, nil, sandboxTracker{})
 	if err == nil {
 		t.Fatal("buildRuntimeArchiveLogging with no render directory = nil error")
 	}
@@ -509,7 +509,7 @@ func TestBuildRuntimeArchiveSurvivesAStoreFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logged bytes.Buffer
-	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged, openshellPromptRender, nil); err != nil {
+	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, &logged, openshellPromptRender, nil, sandboxTracker{}); err != nil {
 		t.Fatalf("a store failure failed the spawn: %v", err)
 	}
 	if !strings.Contains(logged.String(), "system prompt store "+openshellTestPolecat+":") {
@@ -539,7 +539,7 @@ func TestBuildRuntimeArchiveStampsTheStoredPromptOnTheWorkBead(t *testing.T) {
 	spec := openshellSpawn(town, work)
 	spec.WorkBeadID = "gt-2lu00"
 	comments := &fakePromptComments{}
-	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, comments)
+	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, comments, sandboxTracker{})
 	if err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
@@ -568,7 +568,7 @@ func TestBuildRuntimeArchiveStampsNothingWithoutAWorkBead(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	comments := &fakePromptComments{}
-	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, comments); err != nil {
+	if _, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, comments, sandboxTracker{}); err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
 	if len(comments.calls) != 0 {
@@ -588,7 +588,7 @@ func TestBuildRuntimeArchiveStampsNothingWithoutACommenter(t *testing.T) {
 	spec := openshellSpawn(town, work)
 	spec.WorkBeadID = "gt-2lu00"
 	var logged bytes.Buffer
-	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, &logged, openshellPromptRender, nil)
+	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, &logged, openshellPromptRender, nil, sandboxTracker{})
 	if err != nil || len(data) == 0 {
 		t.Fatalf("buildRuntimeArchiveLogging with no commenter: %v", err)
 	}
@@ -609,7 +609,7 @@ func TestBuildRuntimeArchiveLogsACommentFailureAndStillBuilds(t *testing.T) {
 	spec.WorkBeadID = "gt-2lu00"
 	comments := &fakePromptComments{err: errors.New("dolt unreachable")}
 	var logged bytes.Buffer
-	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, &logged, openshellPromptRender, comments)
+	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, &logged, openshellPromptRender, comments, sandboxTracker{})
 	if err != nil || len(data) == 0 {
 		t.Fatalf("a comment failure failed the spawn: %v", err)
 	}
@@ -633,7 +633,7 @@ func TestBuildRuntimeArchiveStampsNothingWhenThePromptStoreFails(t *testing.T) {
 	spec := openshellSpawn(town, work)
 	spec.WorkBeadID = "gt-2lu00"
 	comments := &fakePromptComments{}
-	if _, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, comments); err != nil {
+	if _, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, comments, sandboxTracker{}); err != nil {
 		t.Fatalf("a store failure failed the spawn: %v", err)
 	}
 	if len(comments.calls) != 0 {
