@@ -258,10 +258,9 @@ func mangoCreateFile(path string) (io.WriteCloser, error) {
 }
 
 // writeMangoSummary writes the per-target counts backtest reads, with a
-// skipped or failed target absent rather than present as a zero result, as
-// summary gets an entry only for the targets whose search ran. It is written
-// after every target, so a failed weekly profile still leaves the targets'
-// counts on
+// skipped or failed target absent rather than present as a zero result: summary
+// gets an entry only for the targets whose search ran. It is written after
+// every target, so a failed weekly profile still leaves the targets' counts on
 // disk beside the section that reports the failure.
 func writeMangoSummary(path string, summary map[string]MangoSummary) error {
 	data, err := json.Marshal(summary)

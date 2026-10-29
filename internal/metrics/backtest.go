@@ -72,8 +72,7 @@ type Answer = *bool
 
 // WeeklyRow is one week of one rig's metrics as weekly.csv carries them, with
 // the extract's ALL row beside each rig's. Values holds the numeric columns; a
-// column the week has no value for is absent from the map, which reads as
-// nil.
+// column the week has no value for is absent from the map, which reads as nil.
 type WeeklyRow struct {
 	Week   string
 	Rig    string

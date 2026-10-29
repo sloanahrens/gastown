@@ -23,8 +23,8 @@ var WeeklyColumns = []string{
 	"unknown_share", "mode_shift", "om_threshold", "dominant_model",
 }
 
-// shiftColumns are the columns ModeShift measures between weeks; they are read
-// in sorted order.
+// shiftColumns are the columns ModeShift measures between weeks, read in sorted
+// order.
 var shiftColumns = []string{"size_median", "file_entropy_mean", "rejected_share"}
 
 // Bead is a bead record the weekly metrics read: the loader's JSON object, not
@@ -87,7 +87,7 @@ type WeeklyMetrics struct {
 // FormatFloat, so a float typed as 2.0 is still 2.0. The shared
 // median is a float64, so an odd count's integer median is 20.0 here, where the
 // weekly.csv cell holds 20. The second result is false when column is not one
-// weekly.csv carries.
+// that weekly.csv carries.
 func (r WeeklyMetrics) Cell(column string) (string, bool) {
 	switch column {
 	case "week":
@@ -254,8 +254,8 @@ func Rho(landings []Row, handoffClosed int) RhoFigure {
 	return f
 }
 
-// HandoffSizeFigure is HandoffSize's answer; a nil pointer means the id is not
-// in that map.
+// HandoffSizeFigure is HandoffSize's answer; a nil pointer means the id is
+// absent from that map.
 type HandoffSizeFigure struct {
 	HandoffBytesTotal  int
 	HandoffBytesMedian *float64

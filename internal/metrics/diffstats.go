@@ -145,8 +145,8 @@ func (w *weights) values() []float64 {
 }
 
 // commitHash is what a ledger commit value must look like before it reaches
-// git. Its "$" also admits one trailing newline, so a value ending in one
-// still matches.
+// git. Its "$" also admits one trailing newline, so a value ending in one still
+// matches.
 var commitHash = regexp.MustCompile(`^[0-9a-f]{7,64}\n?$`)
 
 // DiffKey names one landing in a DiffCache.

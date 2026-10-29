@@ -134,8 +134,7 @@ func boolCell(v bool) string {
 }
 
 // WriteLandingSidecar writes landings.sidecar.json: the explain-only columns,
-// which the mango stage drops from its predictors, in the sidecar's
-// indent=1 JSON bytes.
+// which the mango stage drops from its predictors, in indent=1 JSON bytes.
 func WriteLandingSidecar(w io.Writer) error {
 	sidecar := struct {
 		ExplainOnly []string `json:"explain_only"`

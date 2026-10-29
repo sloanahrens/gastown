@@ -12,8 +12,8 @@ import (
 
 // ParseTS parses an ISO 8601 timestamp with these rules:
 // a trailing Z is UTC, a fractional second and a numeric offset are read,
-// and a timestamp with no zone (or only a date) is taken as UTC, so the result
-// is never naive.
+// and a timestamp with no zone (or only a date) is taken as UTC, which keeps
+// every result a zoned time.
 func ParseTS(ts string) (time.Time, error) {
 	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999", "2006-01-02"} {
 		if t, err := time.Parse(layout, ts); err == nil {
