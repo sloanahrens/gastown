@@ -45,7 +45,14 @@ var adminHTTP = &http.Client{
 
 func adminServer(t *testing.T, st store.Store) *httptest.Server {
 	t.Helper()
-	s := New(Config{Auth: fakeAuth{"good-token": "town/crew/dipper", "admin-token": "town/daemon"}, Health: fakeHealth{}, SchemaLevel: 3, Store: st})
+	return adminServerAs(t, st, nil)
+}
+
+// adminServerAs is adminServer with a logger, so a test can read the lines a
+// route wrote.
+func adminServerAs(t *testing.T, st store.Store, log Logger) *httptest.Server {
+	t.Helper()
+	s := New(Config{Auth: fakeAuth{"good-token": "town/crew/dipper", "admin-token": "town/daemon"}, Health: fakeHealth{}, SchemaLevel: 3, Store: st, Log: log})
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return ts

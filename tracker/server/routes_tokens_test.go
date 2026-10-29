@@ -191,8 +191,8 @@ func TestTokenRouteFailuresHideTheirCause(t *testing.T) {
 
 // An issued token is a bearer credential: it may appear in the answer that
 // carries it and nowhere else the server records. The metrics count the actor
-// and the route, never the body; the log holds failures, which name the rule
-// and not the value.
+// and the route, never the body; the log holds the audit line and failures,
+// neither of which carries the value.
 func TestAnIssuedTokenReachesNeitherTheLogNorTheMetrics(t *testing.T) {
 	t.Parallel()
 	const token = "trk_5ecretvalue5ecretvalue5ecretvalue5e"
@@ -223,6 +223,144 @@ func TestAnIssuedTokenReachesNeitherTheLogNorTheMetrics(t *testing.T) {
 	}
 	if !strings.Contains(body, "town/daemon") {
 		t.Errorf("the metrics do not count the actor of the request: %q", body)
+	}
+}
+
+// tokenAuditLines is the token audit lines a server logged, in order. The log
+// also takes a slow-request line under load, so a test reads these rather than
+// the whole log.
+func tokenAuditLines(log *recLog) []string {
+	var out []string
+	for _, line := range strings.Split(log.all(), "\n") {
+		if strings.HasPrefix(line, "token issue:") || strings.HasPrefix(line, "token revoke:") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// Who issued a seat its token, to whom and with what scope, and who ended it:
+// that is what the audit line answers afterwards.
+func TestATokenIssueAndARevokeEachLeaveOneAuditLine(t *testing.T) {
+	t.Parallel()
+	const token = "trk_audit_5ecretvalue"
+	st := okTokens()
+	st.issue = func(context.Context, string, api.Scope, *time.Time) (string, error) { return token, nil }
+	st.revokeActor = func(context.Context, string) (int, error) { return 2, nil }
+	log := &recLog{}
+	ts := adminServerAs(t, st, log)
+
+	if code, body := adminCall(t, "POST", ts.URL+"/v1/tokens", `{"actor":"gastown/polecats/bullet","scope":"admin"}`, true); code != http.StatusCreated {
+		t.Fatalf("issue = %d %q, want 201", code, body)
+	}
+	if code, body := adminCall(t, "POST", ts.URL+"/v1/tokens:revoke", `{"actor":"gastown/polecats/bullet"}`, true); code != http.StatusOK {
+		t.Fatalf("revoke by actor = %d %q, want 200", code, body)
+	}
+
+	got := tokenAuditLines(log)
+	if len(got) != 2 {
+		t.Fatalf("token audit lines = %q, want one for the issue and one for the revoke", got)
+	}
+	if want := `token issue: admin="town/daemon" target="gastown/polecats/bullet" scope="admin"`; got[0] != want {
+		t.Errorf("the issue line = %q, want %q", got[0], want)
+	}
+	if want := `token revoke: admin="town/daemon" target="gastown/polecats/bullet" revoked=2`; got[1] != want {
+		t.Errorf("the revoke line = %q, want %q", got[1], want)
+	}
+	if logged := log.all(); strings.Contains(logged, token) || strings.Contains(logged, "trk_") {
+		t.Errorf("the log holds the issued token: %q", logged)
+	}
+}
+
+// A revoke names its target by id or by actor; the id form logs the id.
+func TestATokenRevokeByIDLogsTheID(t *testing.T) {
+	t.Parallel()
+	st := okTokens()
+	st.revokeID = func(context.Context, string) (bool, error) { return true, nil }
+	log := &recLog{}
+	ts := adminServerAs(t, st, log)
+
+	if code, body := adminCall(t, "POST", ts.URL+"/v1/tokens:revoke", `{"token_id":"7f8d3c1e-0000-0000-0000-000000000000"}`, true); code != http.StatusOK {
+		t.Fatalf("revoke by id = %d %q, want 200", code, body)
+	}
+	got := tokenAuditLines(log)
+	if len(got) != 1 {
+		t.Fatalf("token audit lines = %q, want one naming the id", got)
+	}
+	if want := `token revoke: admin="town/daemon" token_id="7f8d3c1e-0000-0000-0000-000000000000"`; got[0] != want {
+		t.Errorf("the revoke line = %q, want %q", got[0], want)
+	}
+}
+
+// A token route that ends no token earns no audit line: a failed call and an
+// id that names nothing keep the log to the error they write.
+func TestAFailedTokenRouteLeavesNoAuditLine(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("store: revoke: dial tcp 10.1.2.3:5432: password authentication failed")
+	for _, tc := range []struct {
+		name  string
+		path  string
+		body  string
+		want  int
+		store func() tokenStub
+	}{
+		{
+			name: "a failed issue", path: "/v1/tokens", body: `{"actor":"gastown/polecats/bullet"}`, want: http.StatusServiceUnavailable,
+			store: func() tokenStub {
+				st := okTokens()
+				st.issue = func(context.Context, string, api.Scope, *time.Time) (string, error) { return "", cause }
+				return st
+			},
+		},
+		{
+			name: "a failed revoke by actor", path: "/v1/tokens:revoke", body: `{"actor":"gastown/polecats/bullet"}`, want: http.StatusServiceUnavailable,
+			store: func() tokenStub {
+				st := okTokens()
+				st.revokeActor = func(context.Context, string) (int, error) { return 0, cause }
+				return st
+			},
+		},
+		{
+			name: "a failed revoke by id", path: "/v1/tokens:revoke", body: `{"token_id":"tok-1"}`, want: http.StatusServiceUnavailable,
+			store: func() tokenStub {
+				st := okTokens()
+				st.revokeID = func(context.Context, string) (bool, error) { return false, cause }
+				return st
+			},
+		},
+		{
+			name: "a revoke of an id that names nothing", path: "/v1/tokens:revoke", body: `{"token_id":"tok-gone"}`, want: http.StatusNotFound,
+			store: okTokens,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			log := &recLog{}
+			ts := adminServerAs(t, tc.store(), log)
+			if code, body := adminCall(t, "POST", ts.URL+tc.path, tc.body, true); code != tc.want {
+				t.Fatalf("%s = %d %q, want %d", tc.name, code, body, tc.want)
+			}
+			if got := tokenAuditLines(log); len(got) != 0 {
+				t.Errorf("%s wrote an audit line for a token it did not touch: %q", tc.name, got)
+			}
+		})
+	}
+}
+
+// A token id is request text the route puts in a log line. %q keeps a newline
+// in one from forging a second line that reads as another revoke.
+func TestATokenIDHoldingANewlineStaysOnOneLine(t *testing.T) {
+	t.Parallel()
+	st := okTokens()
+	st.revokeID = func(context.Context, string) (bool, error) { return true, nil }
+	log := &recLog{}
+	ts := adminServerAs(t, st, log)
+
+	if code, body := adminCall(t, "POST", ts.URL+"/v1/tokens:revoke", `{"token_id":"tok\nforged line"}`, true); code != http.StatusOK {
+		t.Fatalf("revoke by id = %d %q, want 200", code, body)
+	}
+	if got := log.all(); !strings.Contains(got, `token_id="tok\nforged line"`) {
+		t.Errorf("the revoke line = %q, want the newline escaped so the id stays on its own line", got)
 	}
 }
 
