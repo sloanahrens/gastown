@@ -557,9 +557,11 @@ func (s *healthSources) Validate() error {
 }
 
 // NeedsHuman counts the landing rigs' beads Land refused on a policy only the
-// person behind them can lift, one entry per person label, so the health line
-// names the person who must act (gt-slmaz). A bead carrying two of the labels
-// counts once, under the first one, so the counts sum to the beads waiting.
+// person behind them can lift, one entry per person label (gt:needs-overseer,
+// gt:needs-operator, and the old gt:needs-human until it is retired), so the
+// health line names the person who must act (gt-slmaz). A bead carrying two of
+// the labels counts once, under the first one, so the counts sum to the beads
+// waiting.
 func (s *healthSources) NeedsHuman(ctx context.Context) ([]townhealth.PersonWait, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

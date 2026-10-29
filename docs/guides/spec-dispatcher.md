@@ -81,12 +81,13 @@ decides and reports without slinging, labeling or commenting.
    the non-work types (`chore`, `docs`, ...) are never candidates, and the
    retired label `spec` and type `feature` are not required — the candidate
    filter does not read them (gt-mmsr2). A bead held off the dispatch path is
-   skipped: labeled `gt:ready-to-land`, `spec-dispatch-failed`, `crew-only` or
-   `human-only` (a person hand-labels a bead only they land),
-   or carrying a dispatch hold. Before writing or reading a hold marker, read
+   skipped: labeled `gt:ready-to-land`, `spec-dispatch-failed`, `crew-only`,
+   `overseer-only` (the overseer vets or releases it first) or `operator-only`
+   (only the operator can settle it), or carrying a dispatch hold. The old
+   `human-only` label still holds the same way until it is retired. Before writing or reading a hold marker, read
    [Dispatch holds](../concepts/dispatch-holds.md): it lists them and where each
-   is written. The beads the `spec-dispatch-failed`, `crew-only` and
-   `human-only` labels hold ride the board so the tick names them in its skip
+   is written. The beads the `spec-dispatch-failed`, `crew-only`,
+   `overseer-only` and `operator-only` labels hold ride the board so the tick names them in its skip
    line. Order is priority, then created_at, then id.
 3. A candidate with an unresolved blocking dependency is skipped with the
    reason `blocked by <blocker> (<status>)`, even when the ready board listed

@@ -2,7 +2,7 @@
 
 # The shell tier in Go: implementation plan
 
-> **For agentic workers:** the executor here is the Gas Town dispatcher. Each task below becomes one shaped bead (Goal, Constraints, Out of scope, Gate, Size, Acceptance) filed human-only and assigned to the overseer, who releases them. A task's "Acceptance" lines are the bead's checkbox items; the polecat writes the code test-first.
+> **For agentic workers:** the executor here is the Gas Town dispatcher. Each task below becomes one shaped bead (Goal, Constraints, Out of scope, Gate, Size, Acceptance) filed overseer-only and assigned to the overseer, who releases them. A task's "Acceptance" lines are the bead's checkbox items; the polecat writes the code test-first.
 
 **Goal:** replace the post-land shell tier's three orchestrating scripts with one Go runner that runs each shell test only when its inputs changed, and port `scripts/makefile-gate_test.sh` to Go.
 
@@ -134,7 +134,7 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 - [ ] a test of the sweep bead's acceptance text shows it names the runner command, not `scripts/test-makefile.sh`. Mutation: restore the old text.
 - [ ] `go test ./internal/daemon -run 'TierSweep' -count=1` (narrow filter only) passes.
 
-**Depends on:** A4. Filed human-only, assigned to the overseer. Gate owed by the overseer: one live sweep whose shell result line parses (`passed=28`).
+**Depends on:** A4. Filed overseer-only, assigned to the overseer. Gate owed by the overseer: one live sweep whose shell result line parses (`passed=28`).
 
 ### Task A5b: Cutover of the make targets (for the overseer)
 

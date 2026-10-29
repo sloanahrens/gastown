@@ -152,10 +152,15 @@ operational rig, numbered at or above polecat_pool.max_priority's ceiling
 (default 2) and ordered by priority, then created_at, then id. Epics, agent
 beads, wisps and the other runtime families are never candidates; the retired
 label spec and type feature are accepted and ignored (gt-mmsr2). Beads labeled
-gt:ready-to-land, needs-human, or deferred, are never
-taken, and neither is a bead submitted for landing whose READY TO LAND block
-has reached the read before the label (gt-kr5xv). Each candidate is linted (see
-gt spec lint), and
+gt:ready-to-land, overseer-only, operator-only, gt:needs-overseer,
+gt:needs-operator, or deferred are never taken, and neither is a bead submitted
+for landing whose READY TO LAND block has reached the read before the label
+(gt-kr5xv). overseer-only means the overseer acts or vets first and the
+dispatcher skips the bead; operator-only means only the operator can settle it,
+and the overseer sets it after trying. gt:needs-overseer and gt:needs-operator
+are the escalation labels for those two. The old human-only, needs-human and
+gt:needs-human labels still hold the same way until they are retired. Each
+candidate is linted (see gt spec lint), and
 polecat_pool.shape_gate says what the verdict does:
 
   - off: no lint runs; the bead is dispatched like any other

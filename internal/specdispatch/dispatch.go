@@ -25,8 +25,9 @@ const CrewOnlyLabel = "crew-only"
 // queue. It is not the dispatcher's verdict: the verdict is Eligible's, on the
 // full bead, and it reads every routing decision through the shared hold rule
 // (dispatch.DispatchHoldFields). A hold this list does not name — the operator
-// label, gt:needs-human, a ruling in prose — still stops the dispatcher there,
-// and every label it does name Eligible would have refused anyway (gt-lxxo4).
+// label, the old gt:needs-human spelling, a ruling in prose — still stops the
+// dispatcher there, and every label it does name Eligible would have refused
+// anyway (gt-lxxo4).
 //
 // dispatch.HumanOnlyLabel is named here for the skip line rather than for the
 // verdict: the shared rule holds it already, and a name in this list is what
@@ -167,9 +168,10 @@ func Eligible(s Spec, maxPriority int) (bool, string) {
 		return false, "submitted for landing"
 	}
 	// The shared hold rule, over the bead's own fields. A decision recorded
-	// there — a routing label, gt:needs-human (the spelling internal/land
-	// writes, and the one excludedLabels never carried), the operator's
-	// reservation, or a do-not-redispatch ruling in design or notes — takes
+	// there — a routing label, gt:needs-human (the old spelling of
+	// gt:needs-overseer, which internal/land now writes; excludedLabels never
+	// carried it), the operator's reservation, or a do-not-redispatch ruling in
+	// design or notes — takes
 	// the bead off every automatic dispatch path, so the dispatcher must not
 	// re-sling it (gt-lxxo4). Reading the rule here is what keeps the
 	// dispatcher's draw and the sling guard's the same line.

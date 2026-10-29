@@ -3248,6 +3248,25 @@ func TestSpecLintHelpNamesTheDaemonSection(t *testing.T) {
 	}
 }
 
+// TestSpecDispatchHelpNamesTheOverseerLabels: the dispatch help names the
+// overseer-first labels with their meaning, and says the old names still hold.
+func TestSpecDispatchHelpNamesTheOverseerLabels(t *testing.T) {
+	t.Parallel()
+	for _, want := range []string{
+		"overseer-only",
+		"operator-only",
+		"gt:needs-overseer",
+		"gt:needs-operator",
+		"overseer acts or vets first",
+		"only the operator can settle it",
+		"still hold the same way until they are retired",
+	} {
+		if !strings.Contains(specDispatchCmd.Long, want) {
+			t.Errorf("gt spec dispatch help does not name %q:\n%s", want, specDispatchCmd.Long)
+		}
+	}
+}
+
 // childrenFailBD is a store whose child read fails.
 type childrenFailBD struct {
 	beads.Client
