@@ -98,7 +98,6 @@ type firstPassStore struct {
 }
 
 func (s firstPassStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {
-	s.t.Helper()
 	if s.lists != nil {
 		*s.lists = append(*s.lists, opts)
 	}
@@ -122,7 +121,6 @@ func (s firstPassStore) Blocked() ([]*beads.Issue, error) {
 }
 
 func (s firstPassStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
-	s.t.Helper()
 	if s.calls != nil {
 		*s.calls = append(*s.calls, append([]string(nil), ids...))
 	}
