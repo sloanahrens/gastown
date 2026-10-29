@@ -138,6 +138,25 @@ func newFake() *fakeDocker {
 	}
 }
 
+// canceling answers the fake's canned output, but cancels ctx at the call
+// numbered at: before it, so that call fails as canceled, or after it, so the
+// caller's next check sees the cancellation. Everything the target asks for
+// after that is refused the way a canceled run is.
+func canceling(cancel context.CancelFunc, f *fakeDocker, at int, after bool) diskmaint.Runner {
+	return func(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
+		n := len(f.calls) + 1
+		if n == at && !after {
+			cancel()
+			return nil, context.Canceled
+		}
+		out, err := f.run(ctx, env, name, args...)
+		if n == at && after {
+			cancel()
+		}
+		return out, err
+	}
+}
+
 // target plans against the fake's canned docker.
 func target(f *fakeDocker) *Target {
 	return NewTarget(Config{Dind: f.dind, Runner: f.runner, Image: testImage, Run: f.run})
@@ -474,6 +493,59 @@ func TestMeasureFailsClosed(t *testing.T) {
 			t.Fatal("measure with unparseable df did not error")
 		}
 	})
+}
+
+// TestPlanStopsWhenCanceled drives every read of a plan, cancelling the
+// caller's context at each in turn. A canceled run is the caller's to answer
+// for: the plan says so as an error instead of refusing for a read that looked
+// broken.
+func TestPlanStopsWhenCanceled(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		at    int    // the call the cancellation lands on
+		after bool   // cancel after the call answers, not before
+		ps    string // the job list the call sequence starts from
+	}{
+		{"dind state", 1, false, ""},
+		{"job list", 2, false, ""},
+		{"job start", 3, false, "aaa\n"},
+		{"after the job list", 2, true, ""},
+		{"volume state", 3, false, ""},
+		{"volume size", 4, false, ""},
+		{"file listing", 5, false, ""},
+		{"module listing", 8, false, ""},
+		{"module sizes", 9, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFake()
+			f.ps = answer{out: c.ps}
+			f.starts["aaa"] = answer{out: "2026-10-29T09:00:00Z\n"}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			tgt := NewTarget(Config{Dind: f.dind, Runner: f.runner, Image: testImage,
+				Run: canceling(cancel, f, c.at, c.after)})
+
+			if _, err := tgt.Plan(ctx, diskmaint.Policy{}); !errors.Is(err, context.Canceled) {
+				t.Fatalf("plan error = %v, want the caller's cancellation", err)
+			}
+		})
+	}
+}
+
+func TestMeasureStopsWhenCanceled(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tgt := NewTarget(Config{Image: testImage, Runner: f.runner,
+		Run: canceling(cancel, f, 1, false)})
+
+	if _, err := tgt.Measure(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("measure error = %v, want the caller's cancellation", err)
+	}
 }
 
 func TestApplyIsDeferred(t *testing.T) {
