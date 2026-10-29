@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
 
 // Program runs one plugin run and then the trims that follow it: the old image
@@ -128,13 +130,15 @@ func Main(args []string) int {
 }
 
 // runProgram answers Main: no arguments runs one plugin run, and "trim-cache",
-// "seed-clone" and "seed-cache" are the helpers a container of the image runs in
-// the seed and trim Jobs.
+// "trim-paths", "seed-clone" and "seed-cache" are the helpers a container of the
+// image runs in the seed and trim Jobs.
 func runProgram(args []string, stdout, stderr io.Writer, get func(string) string) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "trim-cache":
 			return trimCacheMain(args[1:], stdout, stderr)
+		case "trim-paths":
+			return trimPathsMain(args[1:], stdout, stderr)
 		case "seed-clone":
 			return seedCloneMain(args[1:], stdout, stderr)
 		case "seed-cache":
@@ -190,6 +194,36 @@ func trimCacheMain(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	fmt.Fprintf(stdout, "trimmed %d %d\n", res.Before, res.After)
+	return 0
+}
+
+// trimPathsMain runs the trim Job's container: it removes every path the mounted
+// shards list, relative to --root.
+//
+// stdout carries "removed N absent M", which is what the caller logs, and exit 3
+// with a reason on stderr means the list could not be read whole or a removal
+// failed: a trim the helper cannot vouch for is reported rather than passed off
+// as a partial success.
+func trimPathsMain(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("trim-paths", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	root := flags.String("root", cachevol.SeedCacheRoot, "the claim the listed paths are relative to")
+	list := flags.String("list", cachevol.TrimListRoot, "the directory the shard volumes are mounted under")
+	shardsText := flags.String("shards", "", "the number of shards the Job mounted")
+	if err := flags.Parse(args); err != nil {
+		return 3
+	}
+	shards, err := strconv.Atoi(*shardsText)
+	if err != nil || shards <= 0 {
+		fmt.Fprintln(stderr, "trim-paths: --shards needs a whole number of shards, at least 1")
+		return 3
+	}
+	res, err := RemoveTrimPaths(*root, *list, shards, diskTrimPathsFS())
+	if err != nil {
+		fmt.Fprintf(stderr, "trim-paths: %v\n", err)
+		return 3
+	}
+	fmt.Fprintf(stdout, "removed %d absent %d\n", res.Removed, res.Absent)
 	return 0
 }
 
