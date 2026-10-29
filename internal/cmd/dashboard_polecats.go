@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -402,14 +403,16 @@ func (c *dashSeatCache) put(id, key string, item polecatInventoryItem) {
 // on, and shows the same age the guard judges it by (gt-chd44). A bead the
 // event log does not date falls back to agentUpdated, the seat's agent bead.
 // The clock is the one dispatches.Starts read for this poll, so an unreadable
-// log has already failed the poll.
-func dashHookTime(agentUpdated time.Time, bead *beads.Issue, dispatched map[string]time.Time, dispatches *events.DispatchReader) time.Time {
+// log has already failed the poll. A seat the guard restarted on the run is
+// dated from the restart the guard adopted for it (daemon.OverrunRestartClock),
+// the same clock the guard stops it on (gt-y9lkx).
+func dashHookTime(townRoot string, agentUpdated time.Time, bead *beads.Issue, dispatched map[string]time.Time, dispatches *events.DispatchReader) time.Time {
 	at, ok := dispatched[bead.ID]
 	if sub := land.ReadyBlockTime(bead.Notes); !sub.IsZero() {
 		at, ok = dispatches.StartSince(bead.ID, sub)
 	}
 	if ok {
-		return at
+		return daemon.OverrunRestartClock(townRoot, bead.ID, at)
 	}
 	return agentUpdated
 }
@@ -483,7 +486,7 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 			updatedAt := polecat.AgentBeadUpdatedAt(agentBead)
 			var hookedAt time.Time
 			if activeID != "" {
-				hookedAt = dashHookTime(updatedAt, active[name], dispatched, dispatches)
+				hookedAt = dashHookTime(townRoot, updatedAt, active[name], dispatched, dispatches)
 			}
 			key := dashSeatKey(updatedAt, now, spawnWindow, activeID, running)
 			id := rig + "/" + name
