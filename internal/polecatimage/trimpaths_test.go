@@ -389,6 +389,17 @@ func TestTrimPathsRunRefusesAShardCountThatIsNotOne(t *testing.T) {
 	}
 }
 
+// TestDiskTrimPathsFSReportsAShardDirectoryThatIsNotThere drives the one failure the disk adapter has:
+// a shard directory the Job did not mount is an error the run refuses, not an empty list. The directory
+// is absent under a temporary parent, so nothing is read or written beyond the lookup itself.
+func TestDiskTrimPathsFSReportsAShardDirectoryThatIsNotThere(t *testing.T) {
+	t.Parallel()
+	_, err := diskTrimPathsFS().names(filepath.Join(t.TempDir(), "absent"))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("names of a missing shard directory = %v, want fs.ErrNotExist", err)
+	}
+}
+
 // TestRemoveTrimPathsRefusesAShardCountOfNone pins the same refusal one level down, where a future
 // caller reaches it without the flag: a run with no shard has no list, and trimming nothing is not
 // a trim.
