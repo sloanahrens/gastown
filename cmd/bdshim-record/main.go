@@ -23,6 +23,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/gastown/internal/bdshim/flagrecord"
 )
 
 func main() {
@@ -56,7 +58,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if opts.out == "" {
 			opts.out = filepath.Join("internal", "bdshim", "testdata", "bd-flags.txt")
 		}
-		return recordFlags(opts, execBD(opts.bd), stderr)
+		return recordFlags(opts, flagrecord.ExecRunner(opts.bd), stderr)
 	}
 	if opts.out == "" {
 		opts.out = filepath.Join("cmd", "bdshim", "testdata", "golden")
@@ -74,7 +76,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	rc := Recorder{
-		Run:  execBD(opts.bd),
+		Run:  flagrecord.ExecRunner(opts.bd),
 		Copy: copyFixture(opts.fixture, opts.scratch),
 	}
 	return execute(opts, rc, Table(), stdout, stderr)
