@@ -742,11 +742,15 @@ func patrolRestartKey(rig, name string) string {
 // neither starts nor ends a run, and the supervisor escalates its own
 // refusals under their own keys.
 //
-// A success clears the seat's key whether or not this process remembers
-// raising the alert: the alert lives in the town, so one raised before a
-// daemon restart is still open while the memory of it is gone (gt-eu4ij).
-// The key names the seat, and `gt escalate clear` with nothing open under it
-// is a success, so the clear is idempotent and closes no other seat's alert.
+// A success clears the seat's key unless this process has already cleared it
+// and has seen no failed restart of the seat since. The alert lives in the
+// town, so one raised before a daemon restart is still open while the memory
+// of it is gone: the first success of a new process clears it whether or not
+// this process raised it (gt-eu4ij). A failure is the only way this process
+// raises an alert, so a failure forgets the clear. The key names the seat, so
+// the clear closes no other seat's alert, and notify.Clear documents that a key
+// with nothing open under it clears with no error. A clear the town refuses is
+// not remembered, so the next success tries it again (gt-7tz5f).
 func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 	key := patrolRestartKey(rig, name)
 	d.patrolRestartFailsMu.Lock()
@@ -756,8 +760,17 @@ func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 	d.patrolRestartTried[key] = true
 	if err == nil {
 		delete(d.patrolRestartFails, key)
+		owed := !d.patrolRestartCleared[key]
 		d.patrolRestartFailsMu.Unlock()
-		d.clearAlerts("restarting "+rig+"/"+name+" succeeded again", key)
+		if !owed || d.clearAlertsErr("restarting "+rig+"/"+name+" succeeded again", key) != nil {
+			return
+		}
+		d.patrolRestartFailsMu.Lock()
+		if d.patrolRestartCleared == nil {
+			d.patrolRestartCleared = map[string]bool{}
+		}
+		d.patrolRestartCleared[key] = true
+		d.patrolRestartFailsMu.Unlock()
 		return
 	}
 	if errors.Is(err, supervisor.ErrRefused) {
@@ -777,6 +790,7 @@ func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 	}
 	d.patrolRestartFails[key] = last
 	escalate := last.scans == 2
+	delete(d.patrolRestartCleared, key)
 	d.patrolRestartFailsMu.Unlock()
 
 	if escalate {

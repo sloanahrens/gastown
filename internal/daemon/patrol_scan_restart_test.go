@@ -353,10 +353,9 @@ func TestPatrolScanRestartClearsAnAlertRaisedBeforeADaemonRestart(t *testing.T) 
 	}
 }
 
-// A successful restart with no alert open under the seat's key clears that key
-// and nothing else, files no escalation and reports no error, so every
-// successful restart can clear without first asking whether an alert exists
-// (gt-eu4ij).
+// A successful restart with no alert open under the seat's key closes nothing
+// but that key, files no escalation and reports no error, so a restart can
+// clear without first asking whether an alert exists (gt-eu4ij).
 func TestPatrolScanRestartSuccessWithNoAlertOpenClearsOnlyItsKey(t *testing.T) {
 	t.Parallel()
 	const key = "patrol-restart:gastown/goose"
@@ -371,12 +370,86 @@ func TestPatrolScanRestartSuccessWithNoAlertOpenClearsOnlyItsKey(t *testing.T) {
 	if got := rec.OpenEscalations(key); len(got) != 0 {
 		t.Errorf("open escalations under %q = %+v, want none", key, got)
 	}
-	clears := rec.Clears()
-	if len(clears) != 1 {
-		t.Fatalf("clears = %+v, want one naming %q", clears, key)
+	for _, c := range rec.Clears() {
+		if fp := c.Fingerprints; len(fp) != 1 || fp[0] != key {
+			t.Errorf("clear named %v, want only %q", fp, key)
+		}
 	}
-	if fp := clears[0].Fingerprints; len(fp) != 1 || fp[0] != key {
-		t.Errorf("clear named %v, want only %q", fp, key)
+}
+
+// Once this process has cleared a seat's alert, a later successful restart
+// with no failure in between has nothing to close, so it does not ask the
+// town again: a seat restarted every scan costs no clear per restart (gt-7tz5f).
+func TestPatrolScanRestartSteadySuccessAsksTheTownNoClear(t *testing.T) {
+	t.Parallel()
+	d, rec := newPatrolRestartDaemon(t, 10, func(supervisor.Seat) error { return nil })
+	h := &patrolScanHost{d: d}
+
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	first := len(rec.Clears())
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	if got := len(rec.Clears()); got != first {
+		t.Errorf("clears after two more successes = %d, want %d: a steady success asked the town again", got, first)
+	}
+}
+
+// A failure after a clean run can raise an alert this process owns, so the
+// next successful restart clears it (gt-7tz5f).
+func TestPatrolScanRestartClearsAnAlertRaisedAfterACleanRun(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("restarting gastown/goose: exit status 1: push refused")
+	var restart error
+	d, rec := newPatrolRestartDaemon(t, 10, func(supervisor.Seat) error { return restart })
+	h := &patrolScanHost{d: d}
+	const key = "patrol-restart:gastown/goose"
+
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	restart = failure
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	d.endPatrolRestartScan("gastown")
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	if got := rec.OpenEscalations(key); len(got) != 1 {
+		t.Fatalf("open escalations under %q = %+v, want one", key, got)
+	}
+
+	restart = nil
+	if err := h.Restart("gastown", "goose", "patrol scan: dead"); err != nil {
+		t.Fatalf("restart answered %v, want success", err)
+	}
+	if got := rec.OpenEscalations(key); len(got) != 0 {
+		t.Errorf("open escalations under %q after the recovery = %+v, want none", key, got)
+	}
+}
+
+// A clear the town refuses leaves the alert open, so the next successful
+// restart tries the clear again instead of trusting the refused one (gt-7tz5f).
+func TestPatrolScanRestartRetriesARefusedClear(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("restarting gastown/goose: exit status 1: push refused")
+	var restart error = failure
+	d, rec := newPatrolRestartDaemon(t, 10, func(supervisor.Seat) error { return restart })
+	h := &patrolScanHost{d: d}
+	const key = "patrol-restart:gastown/goose"
+
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	d.endPatrolRestartScan("gastown")
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	if got := rec.OpenEscalations(key); len(got) != 1 {
+		t.Fatalf("open escalations under %q = %+v, want one", key, got)
+	}
+
+	restart = nil
+	rec.Fail(notifyfake.KindClear, errors.New("gt escalate clear: exit status 1"))
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	rec.Fail(notifyfake.KindClear, nil)
+	if got := rec.OpenEscalations(key); len(got) != 1 {
+		t.Fatalf("open escalations under %q after the refused clear = %+v, want one", key, got)
+	}
+
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	if got := rec.OpenEscalations(key); len(got) != 0 {
+		t.Errorf("open escalations under %q after the retried clear = %+v, want none", key, got)
 	}
 }
 
