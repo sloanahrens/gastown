@@ -1,7 +1,10 @@
 package templates
 
 import (
+	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -433,12 +436,16 @@ func SupervisorFileIsFor(path, townRoot string) (bool, error) {
 // supervisorWorkingDirectory pulls the WorkingDirectory out of a rendered
 // plist ("<key>WorkingDirectory</key>\n<string>X</string>") or unit
 // ("WorkingDirectory=X"); "" when neither form is present.
+//
+// A plist carries its value XML-escaped, so what is read back is decoded
+// before it is compared with a town root: a town whose path holds & is
+// written as &amp; and must still match the town it names.
 func supervisorWorkingDirectory(body string) string {
 	if i := strings.Index(body, "<key>WorkingDirectory</key>"); i >= 0 {
 		rest := body[i:]
 		if a := strings.Index(rest, "<string>"); a >= 0 {
 			if b := strings.Index(rest[a:], "</string>"); b >= 0 {
-				return strings.TrimSpace(rest[a+len("<string>") : a+b])
+				return decodeXMLEntities(strings.TrimSpace(rest[a+len("<string>") : a+b]))
 			}
 		}
 		return ""
@@ -449,6 +456,28 @@ func supervisorWorkingDirectory(body string) string {
 		}
 	}
 	return ""
+}
+
+// decodeXMLEntities decodes the entity references an XML text node may carry,
+// so a value read back out of a plist equals the one that was written into
+// it. Text that is not well-formed is returned as it was read: the caller
+// compares it with a town root, and a value this cannot decode cannot have
+// been written by a renderer either.
+func decodeXMLEntities(s string) string {
+	dec := xml.NewDecoder(strings.NewReader("<x>" + s + "</x>"))
+	var out strings.Builder
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return out.String()
+			}
+			return s
+		}
+		if cd, ok := tok.(xml.CharData); ok {
+			out.Write(cd)
+		}
+	}
 }
 
 // samePath reports whether two paths name the same directory once cleaned and
