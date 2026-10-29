@@ -347,27 +347,26 @@ func TestPlainHTTPReachesOnlyLoopbackAndTheAllowedHost(t *testing.T) {
 }
 
 // https reaches any host whatever the allowed host is, so the allowed host
-// adds nothing to a TLS base URL.
+// adds nothing to a TLS base URL and not even a malformed one refuses it.
 func TestHTTPSIsUnchangedByTheAllowedHost(t *testing.T) {
 	t.Parallel()
-	for _, allowed := range []string{"", "tracker.internal", "other.internal"} {
+	for _, allowed := range []string{"", "tracker.internal", "other.internal", "*", "*.tracker.internal", "tracker.internal:7433", "http://tracker.internal", "tracker.internal/x"} {
 		for _, base := range []string{"https://tracker.internal:443", "https://elsewhere.example:443"} {
 			if _, err := New(Config{BaseURL: base, Token: "t", AllowHTTPHost: allowed}); err != nil {
-				t.Errorf("New(BaseURL=%q, AllowHTTPHost=%q) = %v, want https accepted", base, allowed, err)
+				t.Errorf("New(BaseURL=%q, AllowHTTPHost=%q) = %v, want https accepted: only plain http reads the allowed host", base, allowed, err)
 			}
 		}
 	}
 }
 
 // A wildcard, port, scheme or path in the allowed value is a configuration
-// error for any base URL, so a misconfiguration is seen, not silently matched.
-func TestAMalformedAllowedHostIsRefusedWhateverTheScheme(t *testing.T) {
+// error when plain http would read it, so a misconfiguration is seen, not
+// silently matched.
+func TestAMalformedAllowedHostIsRefusedForPlainHTTP(t *testing.T) {
 	t.Parallel()
 	for _, allowed := range []string{"*", "*.tracker.internal", "tracker.internal:7433", "http://tracker.internal", "tracker.internal/x"} {
-		for _, base := range []string{"http://tracker.internal:7433", "https://tracker.internal:443"} {
-			if _, err := New(Config{BaseURL: base, Token: "t", AllowHTTPHost: allowed}); err == nil {
-				t.Errorf("New(BaseURL=%q, AllowHTTPHost=%q) succeeded, want the malformed allowed host refused", base, allowed)
-			}
+		if _, err := New(Config{BaseURL: "http://tracker.internal:7433", Token: "t", AllowHTTPHost: allowed}); err == nil {
+			t.Errorf("New(AllowHTTPHost=%q) with plain http succeeded, want the malformed allowed host refused", allowed)
 		}
 	}
 }
