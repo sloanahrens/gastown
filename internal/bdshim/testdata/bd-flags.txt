@@ -1,12 +1,30 @@
-# What bd 1.2.2 reads a value for, per command: recorded 2026-10-29 from
-# the help of every command `bd --help` lists, three levels deep (the
-# subsections of `bd <command> --help`, then theirs). Persistent flags are
-# left out because every command has them.
+# What bd 1.2.2 reads a value for, per command: recorded from the help of
+# every command `bd --help` lists, three levels deep (the subsections of
+# `bd <command> --help`, then theirs). Refresh it after a bd upgrade with
+#     go run ./cmd/bdshim-record -flags
+# which walks bd's help and writes this file; add -check to report drift
+# without writing, and update internal/bdshim/flags.go to match.
 #
+# persistent<TAB>the value flags bd puts on every command (bd --help, Flags:),
+#     left out of each command row because every command has them
+# alias<TAB><name><TAB>the command path bd reads that name as ("new" is create)
 # value<TAB><command><TAB>the flags bd reads a value for, space separated
 # bool<TAB><command><TAB>the flags bd reads as a boolean or an optional value
 #     here (--deps takes its value only after an =) although another command
 #     reads a value for the same flag
+persistent	--actor --database --db --directory --dolt-auto-commit --mem-profile -C
+alias	backup add	backup init
+alias	backup rm	backup remove
+alias	dep rm	dep remove
+alias	done	close
+alias	find-dups	find-duplicates
+alias	formula primitives	formula schema
+alias	hb	heartbeat
+alias	mol fart	mol bond
+alias	new	create
+alias	protomolecule	mol
+alias	stats	status
+alias	view	show
 value	admin cleanup	--older-than
 value	admin compact	--batch-size --id --limit --summary --tier --workers
 value	audit label	--label --reason

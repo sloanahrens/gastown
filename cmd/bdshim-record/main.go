@@ -4,6 +4,10 @@
 // way bd really does (gt-p85pw.87).
 //
 //	bdshim-record -fixture <dir holding .beads> [-bd bd] [-out cmd/bdshim/testdata/golden] [-scratch scratch] [-check]
+//	bdshim-record -flags [-bd bd] [-out internal/bdshim/testdata/bd-flags.txt] [-check]
+//
+// With -flags it records the value flags bd's help documents for each command, which the shim's
+// tables are checked against, instead of the golden rows.
 //
 // Every row runs in a copy of the fixture made under -scratch, which must be outside the fixture:
 // the read rows share one copy and each mutating row gets one of its own, and all are removed before
@@ -32,6 +36,7 @@ type options struct {
 	out     string
 	scratch string
 	check   bool
+	flags   bool
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -40,11 +45,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	flags.StringVar(&opts.bd, "bd", "bd", "the bd binary to run")
 	flags.StringVar(&opts.fixture, "fixture", "", "the fixture directory bd runs in; it holds a .beads directory")
-	flags.StringVar(&opts.out, "out", filepath.Join("cmd", "bdshim", "testdata", "golden"), "the directory the goldens are written to")
+	flags.StringVar(&opts.out, "out", "", "what the recording is written to: the goldens' directory, or the flags file with -flags (defaults are per mode)")
 	flags.StringVar(&opts.scratch, "scratch", "scratch", "the directory fresh fixture copies are made in; it must be outside -fixture")
-	flags.BoolVar(&opts.check, "check", false, "re-run the table and list the goldens that differ, writing nothing")
+	flags.BoolVar(&opts.check, "check", false, "re-run the recording and report the goldens or flag rows that differ, writing nothing")
+	flags.BoolVar(&opts.flags, "flags", false, "record the value flags bd documents per command, not the goldens")
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+	if opts.flags {
+		if opts.out == "" {
+			opts.out = filepath.Join("internal", "bdshim", "testdata", "bd-flags.txt")
+		}
+		return recordFlags(opts, execBD(opts.bd), stderr)
+	}
+	if opts.out == "" {
+		opts.out = filepath.Join("cmd", "bdshim", "testdata", "golden")
 	}
 	if opts.fixture == "" {
 		fmt.Fprintln(stderr, "bdshim-record: -fixture is required")
