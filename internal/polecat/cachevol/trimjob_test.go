@@ -777,3 +777,177 @@ func TestBuildTrimManifestTakesTheClaimForAListPastTheShardBytesCeiling(t *testi
 		t.Errorf("the claim route applies %d shards and %d Jobs, want no shards and one Job", len(m.Shards()), len(m.jobs()))
 	}
 }
+
+// jobObject and shardObject are the Job and the shard as a caller lists them by TrimSelector after a
+// trim applied them, carrying the labels the objects were applied with.
+func jobObject(job *TrimJob) TrimObject {
+	return TrimObject{Kind: "Job", Name: job.Metadata.Name, Labels: job.Metadata.Labels}
+}
+
+func shardObject(shard TrimShard) TrimObject {
+	return TrimObject{Kind: "ConfigMap", Name: shard.Metadata.Name, Labels: shard.Metadata.Labels}
+}
+
+// strayShard is a shard ConfigMap an earlier run applied at index, which a shorter rerun leaves out.
+func strayShard(index int) TrimShard {
+	return TrimShard{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+		Metadata: ObjectMeta{
+			Name:   TrimShardName(DefaultTrimJobName, index),
+			Labels: trimLabels(),
+		},
+		Data: map[string]string{TrimShardKey: "[]"},
+	}
+}
+
+// trimObjects is everything a caller lists in the namespace after a trim applied m.
+func trimObjects(m *TrimManifest) []TrimObject {
+	var objs []TrimObject
+	for _, job := range m.jobs() {
+		objs = append(objs, jobObject(job))
+	}
+	for _, shard := range m.Shards() {
+		objs = append(objs, shardObject(shard))
+	}
+	return objs
+}
+
+// TestTrimStaleNamesTheTrailingShardsAndTheJobALongerRunLeft is the bead's case: a trim that applied
+// three shards is followed by one that needs one, so the rerun deletes the Job it cannot apply over
+// and the two shards it leaves behind, the shared shard staying for the apply to update.
+func TestTrimStaleNamesTheTrailingShardsAndTheJobALongerRunLeft(t *testing.T) {
+	t.Parallel()
+	in := trimInput()
+	in.CapBytes = 0
+	in.Listing = shardPerPathListing(3)
+	longer := buildTrim(t, in)
+	if got := len(longer.Shards()); got != 3 {
+		t.Fatalf("the longer trim applies %d shards, want the 3 the case is about", got)
+	}
+
+	rerun := buildTrim(t, trimInput())
+	if got := len(rerun.Shards()); got != 1 {
+		t.Fatalf("the rerun applies %d shards, want one", got)
+	}
+	if got, want := shardObject(rerun.Shards()[0]), shardObject(longer.Shards()[0]); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the rerun's shard is %v, want the earlier run's %v, so the case is the shard the apply updates", got, want)
+	}
+
+	want := []TrimObject{jobObject(longer.jobs()[0]), shardObject(longer.Shards()[1]), shardObject(longer.Shards()[2])}
+	if got := TrimStale(rerun, trimObjects(longer)); !reflect.DeepEqual(got, want) {
+		t.Errorf("TrimStale = %v, want the earlier run's Job and its 2 trailing shards %v, the Job first", got, want)
+	}
+}
+
+// TestTrimStaleNamesEveryShardWhenTheRerunTakesTheClaim pins the route change: a list past one set of
+// shards is carried in the claim, so the rerun names no shard at all and every ConfigMap the earlier
+// shard run applied has to go.
+func TestTrimStaleNamesEveryShardWhenTheRerunTakesTheClaim(t *testing.T) {
+	t.Parallel()
+	in := trimInput()
+	in.CapBytes = 0
+	in.Listing = shardPerPathListing(2)
+	sharded := buildTrim(t, in)
+	if len(sharded.Shards()) != 2 {
+		t.Fatalf("the shard trim applies %d shards, want 2", len(sharded.Shards()))
+	}
+
+	in = trimInput()
+	in.CapBytes = 0
+	in.Listing = shardPerPathListing(TrimMaxShards + 1)
+	claim := buildTrim(t, in)
+	if claim.Route() != TrimRouteClaim || len(claim.Shards()) != 0 {
+		t.Fatalf("the rerun = route %v with %d shards, want the claim with none", claim.Route(), len(claim.Shards()))
+	}
+
+	want := append([]TrimObject{jobObject(sharded.jobs()[0])}, shardObject(sharded.Shards()[0]), shardObject(sharded.Shards()[1]))
+	if got := TrimStale(claim, trimObjects(sharded)); !reflect.DeepEqual(got, want) {
+		t.Errorf("TrimStale = %v, want the earlier run's Job and both shards %v", got, want)
+	}
+}
+
+// TestTrimStaleLeavesWhatTheSelectorDoesNotReach pins the boundary on what a rerun deletes: a caller
+// that lists the whole namespace hands over the seed Job and other applications' objects, and none of
+// them may go, so the shared namespace survives a trim's rerun (gt-tjhfe).
+func TestTrimStaleLeavesWhatTheSelectorDoesNotReach(t *testing.T) {
+	t.Parallel()
+	m := buildTrim(t, trimInput())
+	own := jobObject(m.jobs()[0])
+	seed := TrimObject{Kind: "Job", Name: "gt-cache-seed", Labels: map[string]string{
+		"app.kubernetes.io/name":       "polecat-cache-seed",
+		"app.kubernetes.io/managed-by": "gt",
+	}}
+	halfLabelled := TrimObject{Kind: "Job", Name: DefaultTrimJobName, Labels: map[string]string{
+		"app.kubernetes.io/name": trimLabels()["app.kubernetes.io/name"],
+	}}
+	tests := []struct {
+		name     string
+		existing []TrimObject
+		want     []TrimObject
+	}{
+		{name: "the seed Job", existing: []TrimObject{seed}},
+		{name: "a Job missing one of the trim's labels", existing: []TrimObject{halfLabelled}},
+		{name: "an unlabelled ConfigMap", existing: []TrimObject{{Kind: "ConfigMap", Name: TrimShardName(DefaultTrimJobName, 9)}}},
+		{name: "the seed Job beside the trim's own", existing: []TrimObject{seed, own}, want: []TrimObject{own}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := TrimStale(m, tc.existing); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("TrimStale = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTrimStaleDeletesOnlyTheKindsATrimApplies pins that the labels alone cannot widen the prune: a
+// trim applies Jobs and shard ConfigMaps, so an object of another kind that carries the same labels
+// is another application's and a rerun leaves it alone.
+func TestTrimStaleDeletesOnlyTheKindsATrimApplies(t *testing.T) {
+	t.Parallel()
+	m := buildTrim(t, trimInput())
+	foreign := []TrimObject{
+		{Kind: "Deployment", Name: "trim-labelled", Labels: trimLabels()},
+		{Kind: "Service", Name: TrimShardName(DefaultTrimJobName, 9), Labels: trimLabels()},
+		{Kind: "Pod", Name: DefaultTrimJobName + "-abcde", Labels: trimLabels()},
+	}
+	if got := TrimStale(m, foreign); len(got) != 0 {
+		t.Errorf("TrimStale = %v, want nothing: the trim applies no %v", got, []string{"Deployment", "Service", "Pod"})
+	}
+}
+
+// TestTrimStaleTable covers the shapes a rerun's listing takes: nothing applied yet, the manifest's own
+// objects listed shards first, and a Job listed after the shards.
+func TestTrimStaleTable(t *testing.T) {
+	t.Parallel()
+	m := buildTrim(t, trimInput())
+	job := jobObject(m.jobs()[0])
+	shard := shardObject(m.Shards()[0])
+	tests := []struct {
+		name     string
+		existing []TrimObject
+		want     []TrimObject
+	}{
+		{name: "nothing applied yet"},
+		{name: "the manifest's own objects, shards first", existing: []TrimObject{shard, job}, want: []TrimObject{job}},
+		{
+			name:     "a shard from a longer run",
+			existing: []TrimObject{shard, job, shardObject(strayShard(9))},
+			want:     []TrimObject{job, shardObject(strayShard(9))},
+		},
+		{
+			name:     "a Job listed after the shards",
+			existing: []TrimObject{shardObject(strayShard(9)), job},
+			want:     []TrimObject{job, shardObject(strayShard(9))},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := TrimStale(m, tt.existing); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("TrimStale = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
