@@ -37,6 +37,10 @@ type Plan struct {
 	Actions []Action
 	Kept    []Kept
 	Refused string // non-empty: the plan is empty on purpose, and why
+	// Policy is the policy Plan was called with. A target that gates Apply on
+	// the dry-run flag reads it here, so the gate follows the plan it is handed
+	// rather than a setting the target keeps between runs.
+	Policy Policy
 }
 
 // Failure is an action that did not complete.

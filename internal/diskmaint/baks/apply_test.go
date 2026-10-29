@@ -20,18 +20,19 @@ func applyLedger(t *testing.T) *diskmaint.Ledger {
 	return diskmaint.NewLedger(filepath.Join(t.TempDir(), "maint.jsonl"), 0)
 }
 
-// applyTarget returns a target that reads cfgDir and binDir, records to l and
-// removes only when apply is true, as if it had planned with that policy.
-func applyTarget(cfgDir, binDir string, l *diskmaint.Ledger, apply bool) *Target {
-	t := NewTarget(Config{
+// applyTarget returns a target that reads cfgDir and binDir and records to l.
+func applyTarget(cfgDir, binDir string, l *diskmaint.Ledger) *Target {
+	return NewTarget(Config{
 		ConfigDirs: []string{cfgDir},
 		BinaryDirs: []string{binDir},
 		Ledger:     l,
 		Run:        notOpen,
 	})
-	t.policy = diskmaint.Policy{Apply: apply, Now: testNow}
-	return t
 }
+
+// applyPolicy is the policy a test hands an apply plan: a run allowed to remove.
+// The policy travels with the plan, so a test about Apply states it there.
+var applyPolicy = diskmaint.Policy{Apply: true, Now: testNow}
 
 // notOpen answers lsof's "nothing holds this file" for every path, so a test
 // about something else does not have to name each file it removes.
@@ -79,8 +80,9 @@ func TestApplyDryRunRemovesNothing(t *testing.T) {
 	l := applyLedger(t)
 	old := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
 
-	res, err := applyTarget(cfgDir, binDir, l, false).Apply(context.Background(), diskmaint.Plan{
+	res, err := applyTarget(cfgDir, binDir, l).Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  diskmaint.Policy{Now: testNow},
 		Actions: []diskmaint.Action{fileAction(old, 10)},
 	})
 	if !errors.Is(err, errDryRun) {
@@ -107,8 +109,9 @@ func TestApplyDeletesPlannedFiles(t *testing.T) {
 	sha := writeBackup(t, binDir, "bd.abcdef1", 10*24*time.Hour, 7)
 	live := writeBackup(t, cfgDir, "app.toml", 42*24*time.Hour, 5)
 
-	res, err := applyTarget(cfgDir, binDir, l, true).Apply(context.Background(), diskmaint.Plan{
+	res, err := applyTarget(cfgDir, binDir, l).Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 20), fileAction(sha, 7)},
 	})
 	if err != nil {
@@ -150,8 +153,9 @@ func TestApplyRefusesSymlinkDirAndOutsidePaths(t *testing.T) {
 	dotdot := cfgDir + string(filepath.Separator) + ".." + string(filepath.Separator) +
 		filepath.Base(cfgDir) + string(filepath.Separator) + "via.bak"
 
-	res, err := applyTarget(cfgDir, binDir, l, true).Apply(context.Background(), diskmaint.Plan{
+	res, err := applyTarget(cfgDir, binDir, l).Apply(context.Background(), diskmaint.Plan{
 		Target: planTarget,
+		Policy: applyPolicy,
 		Actions: []diskmaint.Action{
 			fileAction(link, 10),
 			fileAction(emptyDir, 0),
@@ -182,8 +186,9 @@ func TestApplyRefusesNonBackupName(t *testing.T) {
 	notes := writeBackup(t, cfgDir, "notes.txt", 42*24*time.Hour, 5)
 	badSha := writeBackup(t, binDir, "bd.zz", 42*24*time.Hour, 5)
 
-	res, err := applyTarget(cfgDir, binDir, l, true).Apply(context.Background(), diskmaint.Plan{
+	res, err := applyTarget(cfgDir, binDir, l).Apply(context.Background(), diskmaint.Plan{
 		Target: planTarget,
+		Policy: applyPolicy,
 		Actions: []diskmaint.Action{
 			fileAction(live, 5),
 			fileAction(notes, 5),
@@ -208,8 +213,9 @@ func TestApplyRefusesAnotherKind(t *testing.T) {
 	cfgDir, binDir := t.TempDir(), t.TempDir()
 	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
 
-	res, err := applyTarget(cfgDir, binDir, applyLedger(t), true).Apply(context.Background(), diskmaint.Plan{
+	res, err := applyTarget(cfgDir, binDir, applyLedger(t)).Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{{Kind: "delete-manifest", Ref: bak, Bytes: 10}},
 	})
 	if err != nil {
@@ -231,7 +237,7 @@ func TestApplyContinuesAfterFailure(t *testing.T) {
 	middle := writeBackup(t, cfgDir, "b.toml.bak-01", 40*24*time.Hour, 10)
 	last := writeBackup(t, cfgDir, "c.toml.bak-01", 40*24*time.Hour, 10)
 
-	target := applyTarget(cfgDir, binDir, l, true)
+	target := applyTarget(cfgDir, binDir, l)
 	target.remove = func(path string) error {
 		if path == middle {
 			return errors.New("device busy")
@@ -240,6 +246,7 @@ func TestApplyContinuesAfterFailure(t *testing.T) {
 	}
 	res, err := target.Apply(context.Background(), diskmaint.Plan{
 		Target: planTarget,
+		Policy: applyPolicy,
 		Actions: []diskmaint.Action{
 			fileAction(first, 10),
 			fileAction(middle, 10),
@@ -268,10 +275,11 @@ func TestApplyAppendsOneLedgerEntry(t *testing.T) {
 	l := applyLedger(t)
 	a := writeBackup(t, cfgDir, "a.toml.bak-01", 40*24*time.Hour, 10)
 	b := writeBackup(t, cfgDir, "b.toml.bak-01", 40*24*time.Hour, 15)
-	target := applyTarget(cfgDir, binDir, l, true)
+	target := applyTarget(cfgDir, binDir, l)
 
 	if _, err := target.Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(a, 10), fileAction(b, 15)},
 	}); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -285,7 +293,7 @@ func TestApplyAppendsOneLedgerEntry(t *testing.T) {
 		t.Errorf("ledger line = %+v, want an apply of two planned and two done, 25 bytes freed", got)
 	}
 
-	if _, err := target.Apply(context.Background(), diskmaint.Plan{Target: planTarget}); err != nil {
+	if _, err := target.Apply(context.Background(), diskmaint.Plan{Target: planTarget, Policy: applyPolicy}); err != nil {
 		t.Fatalf("empty Apply: %v", err)
 	}
 	entries = lastEntries(t, l, 5)
@@ -302,8 +310,9 @@ func TestApplyRefusedPlanRemovesNothing(t *testing.T) {
 	l := applyLedger(t)
 	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
 
-	res, err := applyTarget(cfgDir, binDir, l, true).Apply(context.Background(), diskmaint.Plan{
+	res, err := applyTarget(cfgDir, binDir, l).Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 10)},
 		Refused: "unreadable backup state: " + cfgDir + ": cannot be read",
 	})
@@ -327,8 +336,9 @@ func TestApplyNeedsALedger(t *testing.T) {
 	cfgDir, binDir := t.TempDir(), t.TempDir()
 	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
 
-	_, err := applyTarget(cfgDir, binDir, nil, true).Apply(context.Background(), diskmaint.Plan{
+	_, err := applyTarget(cfgDir, binDir, nil).Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 10)},
 	})
 	if !errors.Is(err, errNoLedger) {
@@ -346,8 +356,9 @@ func TestApplyStopsOnACancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := applyTarget(cfgDir, binDir, applyLedger(t), true).Apply(ctx, diskmaint.Plan{
+	_, err := applyTarget(cfgDir, binDir, applyLedger(t)).Apply(ctx, diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 10)},
 	})
 	if !errors.Is(err, context.Canceled) {
@@ -365,8 +376,9 @@ func TestApplyReportsAFileThatIsGone(t *testing.T) {
 	gone := filepath.Join(cfgDir, "gone.toml.bak-01")
 	kept := writeBackup(t, cfgDir, "kept.toml.bak-01", 40*24*time.Hour, 10)
 
-	res, err := applyTarget(cfgDir, binDir, applyLedger(t), true).Apply(context.Background(), diskmaint.Plan{
+	res, err := applyTarget(cfgDir, binDir, applyLedger(t)).Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(gone, 0), fileAction(kept, 10)},
 	})
 	if err != nil {
@@ -389,7 +401,7 @@ func TestApplyRefusesADirectorySwappedForTheFile(t *testing.T) {
 	cfgDir, binDir := t.TempDir(), t.TempDir()
 	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
 
-	target := applyTarget(cfgDir, binDir, applyLedger(t), true)
+	target := applyTarget(cfgDir, binDir, applyLedger(t))
 	// The handle check runs between the Lstat and the removal, so it is where
 	// the swap is modelled: the regular file Lstat read is gone and an empty
 	// directory holds its name when the removal runs.
@@ -404,6 +416,7 @@ func TestApplyRefusesADirectorySwappedForTheFile(t *testing.T) {
 	}
 	res, err := target.Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 10)},
 	})
 	if err != nil {
@@ -429,10 +442,11 @@ func TestApplyRefusesAFileAProcessHeldOpen(t *testing.T) {
 	lsof := newFakeLsof(t)
 	lsof.open(bak, "4242")
 
-	target := applyTarget(cfgDir, binDir, l, true)
+	target := applyTarget(cfgDir, binDir, l)
 	target.cfg.Run = lsof.run
 	res, err := target.Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 10)},
 	})
 	if err != nil {
@@ -461,10 +475,11 @@ func TestApplyKeepsAFileTheHandleCheckCannotAnswer(t *testing.T) {
 	lsof := newFakeLsof(t)
 	lsof.failed(bak, 2)
 
-	target := applyTarget(cfgDir, binDir, applyLedger(t), true)
+	target := applyTarget(cfgDir, binDir, applyLedger(t))
 	target.cfg.Run = lsof.run
 	res, err := target.Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 10)},
 	})
 	if err != nil {
@@ -486,10 +501,11 @@ func TestApplyNeedsAHandleCheck(t *testing.T) {
 	cfgDir, binDir := t.TempDir(), t.TempDir()
 	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
 
-	target := applyTarget(cfgDir, binDir, applyLedger(t), true)
+	target := applyTarget(cfgDir, binDir, applyLedger(t))
 	target.cfg.Run = nil
 	_, err := target.Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 10)},
 	})
 	if !errors.Is(err, errNoRunner) {
@@ -511,10 +527,11 @@ func TestApplyStopsWhenTheHandleCheckIsCutShort(t *testing.T) {
 	lsof.closed(bak)
 	lsof.cancel = cancel
 
-	target := applyTarget(cfgDir, binDir, applyLedger(t), true)
+	target := applyTarget(cfgDir, binDir, applyLedger(t))
 	target.cfg.Run = lsof.run
 	res, err := target.Apply(ctx, diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 10)},
 	})
 	if !errors.Is(err, context.Canceled) {
@@ -583,6 +600,40 @@ func TestApplyRefusesAPlanBuiltAsADryRun(t *testing.T) {
 	assertKept(t, bak)
 }
 
+// TestApplyGatesOnThePlanNotTheTargetsLastPlan: a dry-run plan stays a dry run
+// after a later Plan on the same target ran with Apply true, because the policy
+// travels with the plan and not on the target (om d3a492b3cdfb).
+func TestApplyGatesOnThePlanNotTheTargetsLastPlan(t *testing.T) {
+	t.Parallel()
+	cfgDir, binDir := t.TempDir(), t.TempDir()
+	l := applyLedger(t)
+	writeBackup(t, binDir, "gt.bak-01", 1*time.Hour, 10)
+	writeBackup(t, binDir, "gt.bak-02", 2*time.Hour, 10)
+	bak := writeBackup(t, binDir, "gt.bak-03", 3*time.Hour, 10)
+	lsof := newFakeLsof(t)
+	for _, path := range []string{bak, filepath.Join(binDir, "gt.bak-01"), filepath.Join(binDir, "gt.bak-02")} {
+		lsof.closed(path)
+	}
+	target := NewTarget(Config{ConfigDirs: []string{cfgDir}, BinaryDirs: []string{binDir}, Ledger: l, Run: lsof.run})
+
+	dry, err := target.Plan(context.Background(), diskmaint.Policy{Now: testNow})
+	if err != nil {
+		t.Fatalf("dry Plan: %v", err)
+	}
+	apply, err := target.Plan(context.Background(), diskmaint.Policy{Apply: true, Now: testNow})
+	if err != nil {
+		t.Fatalf("apply Plan: %v", err)
+	}
+	if _, err := target.Apply(context.Background(), dry); !errors.Is(err, errDryRun) {
+		t.Fatalf("Apply(dry plan) error = %v, want errDryRun", err)
+	}
+	assertKept(t, bak)
+	if _, err := target.Apply(context.Background(), apply); err != nil {
+		t.Fatalf("Apply(apply plan): %v", err)
+	}
+	assertGone(t, bak)
+}
+
 // TestApplyStampsTheRunWithTheInjectedClock: the ledger line carries the
 // target's clock, not the wall clock (om b495be3394fe).
 func TestApplyStampsTheRunWithTheInjectedClock(t *testing.T) {
@@ -590,10 +641,10 @@ func TestApplyStampsTheRunWithTheInjectedClock(t *testing.T) {
 	cfgDir, binDir := t.TempDir(), t.TempDir()
 	l := applyLedger(t)
 	when := time.Date(2026, 3, 4, 5, 6, 7, 0, time.FixedZone("test", -3600))
-	target := applyTarget(cfgDir, binDir, l, true)
+	target := applyTarget(cfgDir, binDir, l)
 	target.cfg.Now = func() time.Time { return when }
 
-	if _, err := target.Apply(context.Background(), diskmaint.Plan{Target: planTarget}); err != nil {
+	if _, err := target.Apply(context.Background(), diskmaint.Plan{Target: planTarget, Policy: applyPolicy}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	entries := lastEntries(t, l, 2)
@@ -611,8 +662,9 @@ func TestApplyDoesNotQuoteTheRef(t *testing.T) {
 	l := applyLedger(t)
 	gone := filepath.Join(cfgDir, "gone.toml.bak-01")
 
-	res, err := applyTarget(cfgDir, binDir, l, true).Apply(context.Background(), diskmaint.Plan{
+	res, err := applyTarget(cfgDir, binDir, l).Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(gone, 0)},
 	})
 	if err != nil {
@@ -640,8 +692,9 @@ func TestApplyReportsALedgerThatCannotBeWritten(t *testing.T) {
 	l := diskmaint.NewLedger(filepath.Join(notADir, "maint.jsonl"), 0)
 	bak := writeBackup(t, cfgDir, "app.toml.bak-01", 40*24*time.Hour, 10)
 
-	res, err := applyTarget(cfgDir, binDir, l, true).Apply(context.Background(), diskmaint.Plan{
+	res, err := applyTarget(cfgDir, binDir, l).Apply(context.Background(), diskmaint.Plan{
 		Target:  planTarget,
+		Policy:  applyPolicy,
 		Actions: []diskmaint.Action{fileAction(bak, 10)},
 	})
 	if err == nil || !strings.Contains(err.Error(), "record the apply") {

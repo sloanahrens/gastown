@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
-	"golang.org/x/sys/unix"
 )
 
 var (
@@ -54,11 +53,12 @@ var (
 // that fails a check or a removal is recorded as a Failure while the rest still
 // run. The run is recorded as one ledger line.
 //
-// The dry-run gate reads the policy the plan was built with, so a caller that
-// planned a dry run cannot remove anything by applying that plan. A dry run, a
-// refused plan and a run with no handle check remove nothing and report that as
-// an error, so an unapplied plan cannot read as a clean run. An empty plan
-// removes nothing and reads as clean. A canceled context stops the run.
+// The dry-run gate reads the policy the plan carries, so a caller that planned
+// a dry run cannot remove anything by applying that plan, even after another
+// Plan on the same target ran with Apply true. A dry run, a refused plan and a
+// run with no handle check remove nothing and report that as an error, so an
+// unapplied plan cannot read as a clean run. An empty plan removes nothing and
+// reads as clean. A canceled context stops the run.
 func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Result, error) {
 	result := diskmaint.Result{Target: planTarget}
 	if t.cfg.Ledger == nil {
@@ -67,7 +67,7 @@ func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Resu
 	var errs []string
 	var err error
 	switch {
-	case !t.policy.Apply:
+	case !plan.Policy.Apply:
 		err = errDryRun
 		errs = append(errs, err.Error())
 	case plan.Refused != "":
@@ -148,7 +148,9 @@ func (t *Target) removeOne(ctx context.Context, action diskmaint.Action) error {
 func (t *Target) checkClosed(ctx context.Context, path string) error {
 	holder, err := t.openBy(ctx, path)
 	if err != nil {
-		return err
+		// openBy reports a context cut short, and a wrapped error keeps the ref
+		// out of the text; Apply turns the cancellation into its own error.
+		return fmt.Errorf("%w: %v", errHandleUnknown, cause(err))
 	}
 	switch holder {
 	case "":
@@ -158,13 +160,6 @@ func (t *Target) checkClosed(ctx context.Context, path string) error {
 	default:
 		return fmt.Errorf("%w: %s", errInUse, holder)
 	}
-}
-
-// unlinkFile removes path as a file and never as a directory. os.Remove falls
-// back to rmdir when unlink fails, so a directory that replaced the file between
-// the check and the removal would be deleted; an unlink fails on it instead.
-func unlinkFile(path string) error {
-	return unix.Unlink(path)
 }
 
 // cause is the error under a path error, which carries the ref in its text.

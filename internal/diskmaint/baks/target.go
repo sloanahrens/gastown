@@ -67,11 +67,6 @@ type Config struct {
 // Target discovers config and binary backups and plans their removal.
 type Target struct {
 	cfg Config
-	// policy is the policy the last Plan ran with. Apply reads its Apply flag as
-	// the dry-run gate, so the gate follows the caller's run rather than a
-	// setting the target was built with. One caller plans and then applies, so
-	// the last plan is the one an apply belongs to.
-	policy diskmaint.Policy
 	// remove deletes one file. NewTarget sets it to unlinkFile, which refuses a
 	// directory; a test swaps in a fake to make a removal fail, which a real
 	// directory cannot do without depending on who runs the test.
@@ -177,11 +172,10 @@ func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 // installed binaries' times and returns BuildPlan's decision for them. A
 // directory or file that cannot be read refuses the whole plan, because it
 // could hide a backup that must stay; a candidate lsof cannot answer for is
-// kept as if it were open. Plan changes no file, and records p as the policy
-// Apply gates on.
+// kept as if it were open. Plan changes no file, and records p on the plan so
+// Apply gates on the policy that plan was built with.
 func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, error) {
-	t.policy = p
-	plan := diskmaint.Plan{Target: planTarget}
+	plan := diskmaint.Plan{Target: planTarget, Policy: p}
 	if t.cfg.Run == nil {
 		plan.Refused = errNoRunner.Error()
 		return plan, nil
@@ -207,7 +201,9 @@ func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, 
 		}
 		in.InstalledMod = t.installedMods()
 	}
-	return BuildPlan(in), nil
+	built := BuildPlan(in)
+	built.Policy = p
+	return built, nil
 }
 
 // scan reads the configured directories into the config and binary entries
