@@ -347,7 +347,9 @@ func TestHMSyncProductionRunSeam(t *testing.T) {
 
 // TestHMSyncConfigDecodes: the block decodes as written, and an interval or
 // key the patrol cannot act on is refused at decode rather than read as a
-// default.
+// default. The decoder lives in internal/config, so its refusals are driven
+// there (TestHMSyncConfigRefusesWhatThePatrolCannotActOn); this reads the
+// daemon's alias of the same type.
 func TestHMSyncConfigDecodes(t *testing.T) {
 	t.Parallel()
 
@@ -362,22 +364,5 @@ func TestHMSyncConfigDecodes(t *testing.T) {
 	}
 	if !hc.Enabled || hc.Interval != "15m" || hc.Command != "hm" {
 		t.Errorf("decoded %+v, want the block as written", hc)
-	}
-
-	bad := map[string]string{
-		"not an object":     `{"hm_sync": "on"}`,
-		"unknown key":       `{"hm_sync": {"enable": true}}`,
-		"not a duration":    `{"hm_sync": {"interval": "every half hour"}}`,
-		"zero interval":     `{"hm_sync": {"interval": "0s"}}`,
-		"negative interval": `{"hm_sync": {"interval": "-5m"}}`,
-	}
-	for name, doc := range bad {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			var p PatrolsConfig
-			if err := json.Unmarshal([]byte(doc), &p); err == nil {
-				t.Fatalf("%s decoded without an error: %+v", name, p.HMSync)
-			}
-		})
 	}
 }

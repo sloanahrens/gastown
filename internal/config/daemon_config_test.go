@@ -495,6 +495,41 @@ func TestForgejoTokenDirDefault(t *testing.T) {
 	}
 }
 
+// TestHMSyncConfigRefusesWhatThePatrolCannotActOn: the block decodes as
+// written, and an interval or key the patrol cannot schedule is an error when
+// the document is decoded rather than the default later. A mistyped interval
+// must not read as 30m.
+func TestHMSyncConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
+	t.Parallel()
+
+	var cfg PatrolsConfig
+	design := `{"hm_sync": {"enabled": true, "interval": "15m", "command": "hm"}}`
+	if err := json.Unmarshal([]byte(design), &cfg); err != nil {
+		t.Fatalf("the block does not decode: %v", err)
+	}
+	hc := cfg.HMSync
+	if hc == nil || !hc.Enabled || hc.Interval != "15m" || hc.Command != "hm" {
+		t.Fatalf("decoded %+v, want the block as written", hc)
+	}
+
+	bad := map[string]string{
+		"not an object":     `{"hm_sync": "on"}`,
+		"unknown key":       `{"hm_sync": {"enable": true}}`,
+		"not a duration":    `{"hm_sync": {"interval": "every half hour"}}`,
+		"zero interval":     `{"hm_sync": {"interval": "0s"}}`,
+		"negative interval": `{"hm_sync": {"interval": "-5m"}}`,
+	}
+	for name, doc := range bad {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil {
+				t.Fatalf("%s decoded without an error: %+v", name, p.HMSync)
+			}
+		})
+	}
+}
+
 // TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn: the design's block
 // decodes as written, and a value the patrol cannot act on is an error when the
 // document is decoded rather than a default later. A mistyped mode must not
