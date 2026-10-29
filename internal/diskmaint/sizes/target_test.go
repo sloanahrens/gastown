@@ -224,6 +224,44 @@ func TestApplyDeletesNothingAndAppendsOneLedgerEntry(t *testing.T) {
 	}
 }
 
+func TestPlanAndMeasureRefuseATownPathGlobCannotMatch(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, true)
+	// An unclosed bracket is a malformed pattern, so listing the town fails.
+	bad := f.target(f.du(), nil)
+	bad.cfg.Town = filepath.Join(f.town, "[")
+	if _, err := bad.Plan(context.Background(), diskmaint.Policy{}); err == nil {
+		t.Fatal("Plan returned nil for a town path Glob cannot match, want an error")
+	}
+	if _, err := bad.Measure(context.Background()); err == nil {
+		t.Fatal("Measure returned nil for a town path Glob cannot match, want an error")
+	}
+}
+
+func TestPlanAndMeasureStopWhenTheContextIsCanceled(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tgt := f.target(f.du(), nil)
+	if _, err := tgt.Plan(ctx, diskmaint.Policy{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Plan error = %v, want context.Canceled", err)
+	}
+	if _, err := tgt.Measure(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Measure error = %v, want context.Canceled", err)
+	}
+}
+
+func TestApplyReportsALedgerThatCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, true)
+	// A ledger path that is a directory cannot be read, so the append fails.
+	tgt := f.target(f.du(), diskmaint.NewLedger(t.TempDir(), 0))
+	if _, err := tgt.Apply(context.Background(), diskmaint.Plan{Target: "sizes"}); err == nil {
+		t.Fatal("Apply returned nil with an unwritable ledger, want the record error")
+	}
+}
+
 func TestApplyRefusesWithoutALedger(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, true)
