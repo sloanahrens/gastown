@@ -330,10 +330,12 @@ func (*Fake) ConfigGet(context.Context, string) (string, bool, error) {
 func (*Fake) ConfigSet(context.Context, string, string) error { return unimplemented("ConfigSet") }
 
 // IssueTokenScoped stores a token for actor with scope and returns it. The
-// token is random like the Postgres store's, so two issues never collide.
+// token is random like the Postgres store's, so two issues never collide, and
+// an actor the token routes refuse is refused here, so a unit test cannot issue
+// for an identity the API never mints.
 func (f *Fake) IssueTokenScoped(_ context.Context, actor string, scope api.Scope, expires *time.Time) (string, error) {
-	if actor == "" {
-		return "", api.Invalid("a token needs an actor")
+	if err := api.ValidateTokenActor(actor); err != nil {
+		return "", err
 	}
 	if !scope.Valid() {
 		return "", api.Invalid("scope %q is not seat or admin", scope)
@@ -378,10 +380,12 @@ func (f *Fake) liveLocked(t fakeToken) bool {
 }
 
 // RevokeActorTokens revokes every live token of actor and reports how many it
-// ended; an actor with none is a success that ended zero.
+// ended; an actor with none is a success that ended zero. An actor the token
+// routes refuse is refused here too, so a unit test cannot revoke for an
+// identity the API never names.
 func (f *Fake) RevokeActorTokens(_ context.Context, actor string) (int, error) {
-	if actor == "" {
-		return 0, api.Invalid("a token needs an actor")
+	if err := api.ValidateTokenActor(actor); err != nil {
+		return 0, err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -33,7 +33,7 @@ func (r IssueTokenRequest) ScopeOrSeat() Scope {
 // Validate refuses a request that names no usable actor or a scope no token
 // can have.
 func (r IssueTokenRequest) Validate() error {
-	if err := validateTokenActor(r.Actor); err != nil {
+	if err := ValidateTokenActor(r.Actor); err != nil {
 		return err
 	}
 	if !r.ScopeOrSeat().Valid() {
@@ -64,7 +64,7 @@ func (r RevokeTokensRequest) Validate() error {
 	case r.Actor != "" && r.TokenID != "":
 		return Invalid("revoke names an actor or a token_id, not both")
 	case r.Actor != "":
-		return validateTokenActor(r.Actor)
+		return ValidateTokenActor(r.Actor)
 	case r.TokenID == "":
 		return Invalid("revoke needs an actor or a token_id")
 	}
@@ -77,10 +77,11 @@ type RevokeTokensResult struct {
 	Revoked int `json:"revoked"`
 }
 
-// validateTokenActor refuses an actor no token may be issued to: blank or
-// padded, over MaxTokenActorLen, or holding whitespace or a control character
-// (so not one address).
-func validateTokenActor(actor string) error {
+// ValidateTokenActor refuses an actor no token may be issued to or revoked for:
+// blank or padded, over MaxTokenActorLen, or holding whitespace or a control
+// character, so not one seat address. The token routes and the store fake share
+// it, so a unit test cannot plant an identity the routes refuse.
+func ValidateTokenActor(actor string) error {
 	switch {
 	case strings.TrimSpace(actor) == "":
 		return Invalid("a token needs an actor")
