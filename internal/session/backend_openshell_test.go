@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -302,12 +304,25 @@ func useFakeDocker(b *openshellBackend, docker *fakeImageRegistry, digest manife
 
 // The digests the pin's tests use. The checked digest is what a tag names when
 // Prepare reads it; the rebuilt digest is what a rebuild moves the tag to before
-// the create.
+// the create. Each is the sha256 of the manifest body the registry serves for
+// it, as a registry names a manifest, so the digest and the body agree.
 var (
-	pinDigestChecked = "sha256:" + strings.Repeat("1", 64)
-	pinDigestRebuilt = "sha256:" + strings.Repeat("2", 64)
+	pinDigestChecked = pinDigestOf(pinManifest("checked"))
+	pinDigestRebuilt = pinDigestOf(pinManifest("rebuilt"))
 	pinConfigDigest  = "sha256:" + strings.Repeat("c", 64)
 )
+
+// pinManifest is the manifest body the pin registry serves for one build. build
+// names the build, so each build has a body of its own and a digest of its own.
+func pinManifest(build string) string {
+	return fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":%q,"size":2},"layers":[],"annotations":{"build":%q}}`, pinConfigDigest, build)
+}
+
+// pinDigestOf is the digest a registry names for body: the sha256 of its bytes.
+func pinDigestOf(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
 
 // pinHost is the registry host the pulled profile's image names. The host is
 // never dialled: the registry is the transport below.
@@ -325,8 +340,8 @@ const (
 // rebuild that lands between Prepare's check and its create.
 type pinRegistry struct {
 	mu         sync.Mutex
-	digest     string // what the tag names now
-	retagTo    string // the digest the tag moves to after the first manifest read
+	manifest   string // the manifest body the tag names now; its digest is the body's sha256
+	retagTo    string // the manifest body the tag moves to after the first manifest read
 	status     int    // when set, the manifest read answers with this status
 	omitDigest bool   // the manifest reply carries no Docker-Content-Digest
 	badDigest  string // when set, the manifest reply carries this digest instead
@@ -356,16 +371,16 @@ func (r *pinRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
 			return reply(r.status, nil, "")
 		}
 		header := http.Header{"Content-Type": {"application/vnd.oci.image.manifest.v1+json"}}
+		body := r.manifest
 		switch {
 		case r.omitDigest:
 		case r.badDigest != "":
 			header.Set("Docker-Content-Digest", r.badDigest)
 		default:
-			header.Set("Docker-Content-Digest", r.digest)
+			header.Set("Docker-Content-Digest", pinDigestOf(body))
 		}
-		body := fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":%q,"size":2},"layers":[]}`, pinConfigDigest)
 		if r.retagTo != "" {
-			r.digest, r.retagTo = r.retagTo, ""
+			r.manifest, r.retagTo = r.retagTo, ""
 		}
 		return reply(http.StatusOK, header, body)
 	case "/v2/" + pinRepo + "/blobs/" + pinConfigDigest:
@@ -378,7 +393,7 @@ func (r *pinRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
 func (r *pinRegistry) tagDigest() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.digest
+	return pinDigestOf(r.manifest)
 }
 
 // pinnedDigester is the registry digest read through reg, in process.
@@ -437,7 +452,7 @@ func TestOpenShellPreparePinsThePulledDigestItChecked(t *testing.T) {
 	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	profile := pulledProfile()
 	b, _ := openshellTestBackend(town, profile, fake)
-	reg := &pinRegistry{digest: pinDigestChecked, retagTo: pinDigestRebuilt}
+	reg := &pinRegistry{manifest: pinManifest("checked"), retagTo: pinManifest("rebuilt")}
 	docker := &fakeImageRegistry{
 		tags:   map[string]string{profile.Image: openshellTestImageDigest},
 		labels: map[string]string{openshellTestImageDigest: openshellTestGTCommit},
@@ -458,12 +473,13 @@ func TestOpenShellPreparePinsThePulledDigestItChecked(t *testing.T) {
 	}
 }
 
-// TestOpenShellPrepareRefusesAPulledImageNoDigestPins is the fail-closed half of
-// the pin (gt-jbuow): a registry that does not answer, answers with an error,
-// answers with no digest or with a malformed one, or a reference that names no
-// registry, refuses the spawn before anything is pushed or created. Each case is
-// its own, so a refusal cannot pass for another.
-func TestOpenShellPrepareRefusesAPulledImageNoDigestPins(t *testing.T) {
+// TestOpenShellPrepareRefusesAPulledImageWithoutAVerifiedPin is the fail-closed
+// half of the pin (gt-jbuow): a registry that does not answer, answers with an
+// error, answers with no digest, a malformed one, or a well-formed one its body
+// does not hash to, or a reference that names no registry, refuses the spawn
+// before anything is pushed or created. Each case is its own, so a refusal cannot
+// pass for another.
+func TestOpenShellPrepareRefusesAPulledImageWithoutAVerifiedPin(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
@@ -475,6 +491,7 @@ func TestOpenShellPrepareRefusesAPulledImageNoDigestPins(t *testing.T) {
 		{name: "a registry that answers a server error", configure: func(r *pinRegistry) { r.status = http.StatusInternalServerError }, wantErr: "pinning"},
 		{name: "a reply with no digest", configure: func(r *pinRegistry) { r.omitDigest = true }, wantErr: "pinning"},
 		{name: "a reply with a malformed digest", configure: func(r *pinRegistry) { r.badDigest = "sha256:abc" }, wantErr: "pinning"},
+		{name: "a reply with a digest its body does not hash to", configure: func(r *pinRegistry) { r.badDigest = pinDigestOf(pinManifest("other")) }, wantErr: "pinning"},
 		{name: "a reference with no registry host", image: pinRepo + ":" + pinTag, wantErr: "names no registry host"},
 	}
 	for _, tt := range tests {
@@ -487,7 +504,7 @@ func TestOpenShellPrepareRefusesAPulledImageNoDigestPins(t *testing.T) {
 				profile.Image = tt.image
 			}
 			b, pushes := openshellTestBackend(town, profile, fake)
-			reg := &pinRegistry{digest: pinDigestChecked}
+			reg := &pinRegistry{manifest: pinManifest("checked")}
 			if tt.configure != nil {
 				tt.configure(reg)
 			}
@@ -781,6 +798,49 @@ func TestImageRefFor(t *testing.T) {
 			}
 			if !reflect.DeepEqual(lookups, tt.wantLookup) {
 				t.Errorf("registry lookups = %q, want %q", lookups, tt.wantLookup)
+			}
+		})
+	}
+}
+
+// schemeTransport is an http.RoundTripper that runs f, so a test sees each
+// request the registry client sends.
+type schemeTransport func(*http.Request) (*http.Response, error)
+
+func (f schemeTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// TestRegistryDigesterReachesARegistryOverTLSUnlessLoopback is the scheme the
+// pulled digest is read over (gt-jbuow): a registry on any other host is reached
+// over https, and only a loopback host, which docker also reads as a local
+// registry, over plain HTTP.
+func TestRegistryDigesterReachesARegistryOverTLSUnlessLoopback(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ host, wantScheme string }{
+		{"registry.example.com:5000", "https"},
+		{"registry.test:5000", "https"},
+		{"localhost:5001", "http"},
+		{"127.0.0.1:5000", "http"},
+		{"[::1]:5000", "http"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			t.Parallel()
+			var sent []string
+			client := &http.Client{Transport: schemeTransport(func(req *http.Request) (*http.Response, error) {
+				sent = append(sent, req.URL.Scheme+"://"+req.URL.Host)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Docker-Content-Digest": {pinDigestOf("{}")}},
+					Body:       io.NopCloser(strings.NewReader("{}")),
+					Request:    req,
+				}, nil
+			})}
+
+			if _, err := registryDigester(client)(context.Background(), tt.host, pinRepo, pinTag); err != nil {
+				t.Fatalf("registryDigester: %v", err)
+			}
+			if want := []string{tt.wantScheme + "://" + tt.host}; !reflect.DeepEqual(sent, want) {
+				t.Errorf("requests went to %q, want %q", sent, want)
 			}
 		})
 	}
@@ -1219,7 +1279,7 @@ func TestOpenShellPrepareRefusesAPulledSandboxThatDiffersFromTheCheckedImage(t *
 		tags:   map[string]string{profile.Image: local},
 		labels: map[string]string{local: openshellTestGTCommit},
 	}
-	useFakeDocker(b, reg, pinnedDigester(&pinRegistry{digest: pinDigestChecked}))
+	useFakeDocker(b, reg, pinnedDigester(&pinRegistry{manifest: pinManifest("checked")}))
 
 	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
 	if err == nil || !strings.Contains(err.Error(), openshellTestDriftedGT) || !strings.Contains(err.Error(), openshellTestGTCommit) {

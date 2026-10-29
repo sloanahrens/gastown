@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -249,18 +250,34 @@ type resolvedImage struct {
 // repo:tag.
 type manifestDigester func(ctx context.Context, host, repo, tag string) (string, error)
 
-// registryDigester is the manifestDigester for the registry client, reached over
-// plain HTTP at the host the profile's reference names. A nil client is the
+// registryDigester is the manifestDigester for the registry client, at the host
+// the profile's reference names. The digest is the sha256 of the manifest bytes
+// the registry answered, so the create names what was read. A nil client is the
 // registry client's default; tests inject one whose transport is a fake.
 func registryDigester(client *http.Client) manifestDigester {
 	return func(ctx context.Context, host, repo, tag string) (string, error) {
-		c := &registry.Client{Base: "http://" + host, HTTP: client}
-		m, err := c.GetManifest(ctx, repo, tag)
-		if err != nil {
-			return "", err
-		}
-		return m.Digest, nil
+		c := &registry.Client{Base: registryBase(host), HTTP: client}
+		return c.ManifestDigest(ctx, repo, tag)
 	}
+}
+
+// registryBase is the base URL of the registry at host: https, except for a
+// loopback host (localhost, 127.0.0.0/8, ::1), which docker also reads as a
+// local registry and which is reached over plain HTTP. A registry on any other
+// host is never reached over plaintext, so a pulled spawn cannot take its digest
+// from a man in the middle.
+func registryBase(host string) string {
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	if name == "localhost" {
+		return "http://" + host
+	}
+	if ip := net.ParseIP(name); ip != nil && ip.IsLoopback() {
+		return "http://" + host
+	}
+	return "https://" + host
 }
 
 // dockerImageRef resolves an image through the host's docker and, for a pulling
@@ -285,9 +302,10 @@ func dockerImageRef(ctx context.Context, image string, pull bool) (resolvedImage
 // from a registry cannot use an id, so it is given the manifest digest the
 // registry holds for the image's tag, read from the registry the reference names
 // (gt-jbuow). A tag that moves after that read leaves the sandbox on the checked
-// digest. A registry that does not answer, answers with no digest, or answers
-// with one that is not a sha256 manifest digest refuses the spawn; the tag is
-// never passed on in its place.
+// digest, the sha256 of the manifest bytes read. A registry that does not answer,
+// answers with no digest, answers with a digest its body does not hash to, or
+// answers with one that is not a sha256 manifest digest refuses the spawn; the
+// tag is never passed on in its place.
 func imageRefFor(ctx context.Context, run dockerRun, digest manifestDigester, image string, pull bool) (resolvedImage, error) {
 	id, err := imageIDFrom(ctx, run, image)
 	if err != nil {
@@ -671,9 +689,11 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	create.Image = image.Create
 	// The image's gt must be the installed gt's commit. Checked before the push
 	// and the create, so a drifted image leaves nothing behind (gt-pmxo9). This
-	// reads the host docker's image for that reference; the sandbox's own gt is
-	// checked again once it is Ready, because the gateway may run a different
-	// image for that reference (gt-zdilt).
+	// reads the host docker's image for that reference, which for a pulling
+	// gateway is not the artifact the create names (the registry digest, gt-jbuow).
+	// The sandbox's own gt is checked again once it is Ready, because the gateway
+	// pulls and runs its own image for that reference (gt-zdilt): that check reads
+	// the pulled artifact and rolls the sandbox back on a drift.
 	imageCommit, err := b.imageGT(ctx, image.Local)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
