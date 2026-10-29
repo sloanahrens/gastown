@@ -16,15 +16,16 @@ const collectConfigPath = "/etc/docker/registry/config.yml"
 
 // collectCeilingSeconds is the longest the collect may run inside the registry
 // container, whatever the caller's deadline leaves, so a caller that sets no
-// deadline still gets a bounded collect. Eight minutes fits inside the ten the
-// disk-maintenance retention budgets for planning, deletes and collect, so a
-// collect the retention starts is ended by the budget it runs under (gt-dl4nv.13).
-const collectCeilingSeconds = 8 * 60
+// deadline still gets a bounded collect. It is the timeout the collect has always
+// carried (thirty minutes): a caller whose deadline is shorter gets the shorter
+// value (see collectTimeout), and internal/polecatimage reads the constant
+// below, so lowering it would change the retention's behavior there (gt-a5gan).
+const collectCeilingSeconds = 30 * 60
 
 // CollectTimeoutSeconds is collectCeilingSeconds as the number the command
 // carries. A caller reads it to know the longest a collect can run when its own
 // deadline does not bind first; the command always carries this value or less.
-const CollectTimeoutSeconds = "480"
+const CollectTimeoutSeconds = "1800"
 
 // collectGrace is the margin between the container's timeout ending the collect
 // and the caller's deadline: the time docker exec has to start the collect, have
@@ -48,10 +49,13 @@ const collectSkipped = "collect skipped: "
 // on an unknown, so it is recorded and does not fail the apply.
 //
 // The caller's deadline is what ends a collect that never returns: it sets the
-// container's timeout (see collectTimeout), so the collect is over before the
-// deadline and docker exec returns on its own. A docker client that still has
-// not answered at the deadline is abandoned and recorded a failure, so the
-// retention returns and releases the plugin lock.
+// container's timeout (see collectTimeout), so the collect is normally over
+// before the deadline and docker exec returns on its own. The limit is the exec
+// start: the container's timeout starts only once docker exec has started the
+// command, so a start slower than collectGrace lets a hung collect outlive the
+// deadline by the excess (an accepted risk, see collectTimeout). A docker client
+// that still has not answered at the deadline is abandoned and recorded a
+// failure, so the retention returns and releases the plugin lock.
 func (t *Target) gc(ctx context.Context, result *diskmaint.Result) []string {
 	if len(result.Done) == 0 {
 		return nil
