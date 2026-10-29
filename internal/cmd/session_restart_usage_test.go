@@ -57,3 +57,15 @@ func TestSessionRestartFailurePrintsNoUsage(t *testing.T) {
 		}
 	})
 }
+
+// A verb run with no command (the integration test's verb.run(nil, args)) must
+// not crash the restart, and a real command is silenced (gt-5apwi).
+func TestSilenceUsageToleratesANilCommandAndSilencesARealOne(t *testing.T) {
+	t.Parallel()
+	silenceUsage(nil)
+	c := &cobra.Command{Use: "restart"}
+	silenceUsage(c)
+	if !c.SilenceUsage {
+		t.Error("silenceUsage left a real command printing its usage block")
+	}
+}
