@@ -770,35 +770,61 @@ func actionFor(p diskmaint.Plan, ref string) (diskmaint.Action, bool) {
 	return diskmaint.Action{}, false
 }
 
+// strayIndexWithFailingChild seeds a stray tag whose index answers and hashes
+// to its digest, while its one child fails to read: GetManifest fails on the
+// child, and ManifestDigest still names the index.
+func strayIndexWithFailingChild(reg *fakeRegistry) TagInfo {
+	child := digestOf('7')
+	body := indexBody(child)
+	ti := fakeTag(straySeed, "x2", bodyDigest(body), planTime(0), 0)
+	reg.bodies[ti.Digest] = body
+	reg.status["/v2/"+straySeed+"/manifests/"+child] = http.StatusInternalServerError
+	return ti
+}
+
 func TestPlanDeletesAnUnreadableStrayManifest(t *testing.T) {
 	t.Parallel()
-	reg := newFakeRegistry(map[string][]TagInfo{RepoMain: {
-		fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
-		fakeTag(RepoMain, "c000001", dg("a1"), planTime(1), 200),
-	}})
-	bad := unreadableTag(reg, straySeed, "x1", planTime(0))
-	reg.repos[straySeed] = []TagInfo{bad}
+	cases := []struct {
+		name string
+		seed func(reg *fakeRegistry) TagInfo
+	}{
+		{"config blob missing", func(reg *fakeRegistry) TagInfo {
+			return unreadableTag(reg, straySeed, "x1", planTime(0))
+		}},
+		{"index child fails", strayIndexWithFailingChild},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := newFakeRegistry(map[string][]TagInfo{RepoMain: {
+				fakeTag(RepoMain, TagDev, dg("d0"), planTime(0), 100),
+				fakeTag(RepoMain, "c000001", dg("a1"), planTime(1), 200),
+			}})
+			bad := tc.seed(reg)
+			reg.repos[straySeed] = []TagInfo{bad}
 
-	plan, err := NewTarget(testConfig(t, reg)).Plan(context.Background(), diskmaint.Policy{Keep: 2})
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
-	}
-	if plan.Refused != "" {
-		t.Fatalf("plan refused: %s: an unreadable stray manifest must not refuse the registry plan", plan.Refused)
-	}
-	ref := straySeed + "@" + bad.Digest
-	a, ok := actionFor(plan, ref)
-	if !ok {
-		t.Fatalf("actions = %v, want a delete of %s", actionRefs(plan), ref)
-	}
-	if a.Kind != "delete-manifest" {
-		t.Errorf("kind = %q, want delete-manifest", a.Kind)
-	}
-	if a.Bytes != 0 {
-		t.Errorf("bytes = %d, want 0: the size of an unreadable manifest is unknown", a.Bytes)
-	}
-	if !strings.Contains(a.Why, "unreadable") {
-		t.Errorf("why = %q, want it to say the manifest was unreadable", a.Why)
+			plan, err := NewTarget(testConfig(t, reg)).Plan(context.Background(), diskmaint.Policy{Keep: 2})
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			if plan.Refused != "" {
+				t.Fatalf("plan refused: %s: an unreadable stray manifest must not refuse the registry plan", plan.Refused)
+			}
+			ref := straySeed + "@" + bad.Digest
+			a, ok := actionFor(plan, ref)
+			if !ok {
+				t.Fatalf("actions = %v, want a delete of %s", actionRefs(plan), ref)
+			}
+			if a.Kind != "delete-manifest" {
+				t.Errorf("kind = %q, want delete-manifest", a.Kind)
+			}
+			if a.Bytes != 0 {
+				t.Errorf("bytes = %d, want 0: the size of an unreadable manifest is unknown", a.Bytes)
+			}
+			if !strings.Contains(a.Why, "GetManifest failed") {
+				t.Errorf("why = %q, want it to say GetManifest failed", a.Why)
+			}
+		})
 	}
 }
 

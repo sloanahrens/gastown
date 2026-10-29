@@ -14,9 +14,10 @@ const ruleSandboxRecord = "named by a sandbox record"
 // strayWhy is the Action.Why a stray repository's manifests carry.
 const strayWhy = "stray repo"
 
-// strayUnreadableWhy is the Action.Why of a stray manifest that could not be
-// read in full and is deleted by digest alone.
-const strayUnreadableWhy = "stray repo; manifest unreadable, deleted by digest"
+// strayUnreadableWhy is the Action.Why of a stray manifest whose GetManifest
+// failed and which is deleted by digest alone. Any GetManifest failure takes
+// the fallback, so the text names only that failure, not a cause.
+const strayUnreadableWhy = "stray repo; GetManifest failed, deleted by digest"
 
 // nameRefusal returns the first name in in.Repos that fails validation, naming
 // the offender, or "" when every name validates. Repos come from the registry
