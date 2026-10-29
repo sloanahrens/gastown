@@ -31,13 +31,17 @@ Run the `docker` commands from any directory. Run the `gt` commands inside the l
 gt dolt status
 lsof -nP -iTCP:3307 -sTCP:LISTEN
 docker --context desktop-linux info --format '{{.Name}} {{.ServerVersion}} {{.OperatingSystem}}'
+docker --context desktop-linux image ls --format '{{.Repository}}:{{.Tag}}' mysql:8.4
 ```
 
-**PASS:** `gt dolt status` reports the server running; `lsof` prints one `LISTEN` row on `127.0.0.1:3307`; the `docker info` line exits 0 and prints a VM name and a server version. Write down the Dolt pid and the exact listen address; step 5 compares against them.
+**PASS:** `gt dolt status` reports the server running, `lsof` prints one `LISTEN` row on `127.0.0.1:3307`, the `docker info` line exits 0 and prints a VM name and a server version, and the `docker image ls` line exits 0. Write down two things for the later steps:
 
-**FAIL:** `gt dolt status` says the server is not running, `lsof` prints no listener, or `docker info` exits non-zero. Stop and escalate with that text: the probe cannot answer its question without a running loopback Dolt and a reachable Docker Desktop.
+- whether `mysql:8.4` is already in the VM, written as `present` (the `image ls` line exited 0 and printed the tag) or `absent` (it exited 0 and printed nothing). Either answer passes this step; step 1's cleanup reads this record. Write `absent` only after an exit status of 0: a listing that failed is not an empty one.
+- the Dolt pid and the exact listen address; step 5 compares against them.
 
-**Record and stop if the listener is not loopback:** an `lsof` row on `*:3307` or `0.0.0.0:3307` means Dolt is already reachable off-host, so the question this probe answers is a different one. Record the row and tell the overseer before running step 1.
+**FAIL:** `gt dolt status` says the server is not running, `lsof` prints no listener, `docker info` exits non-zero, or the `docker image ls` line exits non-zero (write neither `present` nor `absent`, and do not pull). Stop and escalate with that text: the probe cannot answer its question without a running loopback Dolt and a reachable Docker Desktop.
+
+**STOP — neither PASS nor FAIL:** an `lsof` row on `*:3307` or `0.0.0.0:3307` means Dolt is already reachable off-host, so the question this probe answers is a different one. Record the row, write neither `R4 PASS` nor `R4 FAIL` for this run, and tell the overseer before running step 1: whether the probe still applies is the overseer's call, and the verdict is theirs to give.
 
 ## Step 1 — pull the client once
 
@@ -45,15 +49,17 @@ docker --context desktop-linux info --format '{{.Name}} {{.ServerVersion}} {{.Op
 docker --context desktop-linux pull mysql:8.4
 ```
 
-**PASS:** exits 0 and prints the image digest. Copy the digest into the bead record: `mysql:8.4` is a series tag, and the client is a probe tool rather than an image in a rendered compose file, so the plan's image table does not classify it — the digest-pinning bead later takes its pin from this line.
+**PASS:** exits 0 and prints a `Digest: sha256:…` line. Docker prints that line whether it downloaded the image or found it already local and reports `Status: Image is up to date`, so this line is where the digest comes from. Copy it into the bead record: `mysql:8.4` is a series tag, and the client is a probe tool rather than an image in a rendered compose file, so the plan's image table does not classify it — the digest-pinning bead later takes its pin from this line. An exit 0 with no `Digest:` line means the digest is unrecorded: record the exit status and say so rather than substitute another hash.
 
 **FAIL:** non-zero exit. Record the error text. Without the client the probe cannot run; escalate rather than change the Mac's networking to get it.
 
-The pull adds one image to the Docker Desktop VM and is the probe's only write. If this run pulled it — it was not already in `docker --context desktop-linux images` before step 1 — remove it after step 5:
+The pull adds one image to the Docker Desktop VM and is the probe's only write. Remove it when the run ends — after step 5 on a run that reaches it, or after the step that ends a run early, before you escalate — but only when both hold: step 0 recorded `absent` (the `image ls` line exited 0 and printed no tag), and this pull exited 0. A step 0 record that is missing or reads anything but `absent` means leave the image alone.
 
 ```bash
 docker --context desktop-linux image rm mysql:8.4
 ```
+
+Every other case leaves the VM's image store as it was: an image step 0 already found is left alone, and a run that stopped before step 1 or whose pull failed added none.
 
 ## Step 2 — name resolution inside the VM
 
@@ -63,7 +69,9 @@ time docker --context desktop-linux run --rm --pull=never mysql:8.4 getent hosts
 
 **PASS:** prints one address for `host.docker.internal` (on Docker Desktop it is the VM's gateway, typically `192.168.65.254`) and exits 0. Record the address and the wall time.
 
-**FAIL:** prints nothing, or exits non-zero — the name does not resolve inside this VM, and no later step can succeed. Record the exit status and move to [the diagnostics](#read-only-diagnostics-on-a-fail); answer step 3 as FAIL-on-resolution rather than running it against a name that does not resolve. One non-zero exit is not a resolution fault: an `executable file not found` message means `getent` is not in this image, so record the image digest and answer step 2 from step 3's result instead.
+**FAIL:** prints nothing, or exits non-zero without `executable file not found` in its message — the name does not resolve inside this VM, and no later step can succeed. Record the exit status and move to [the diagnostics](#read-only-diagnostics-on-a-fail); answer step 3 as FAIL-on-resolution rather than running it against a name that does not resolve.
+
+**Neither PASS nor FAIL — answer step 2 from step 3:** `executable file not found` in the message means `getent` is not in this image, so the name was never looked up and the exit status says nothing about resolution. Record the image digest, run step 3, and give step 2 step 3's verdict, noting that the client image lacks `getent`.
 
 ## Step 3 — reach Dolt and run `SELECT 1`
 
@@ -111,7 +119,7 @@ lsof -nP -iTCP:3307 -sTCP:LISTEN
 On bead `gt-qpeei.4`, in one comment:
 
 - the three walls: step 2, step 3, step 4;
-- the address step 2 printed, and the image digest step 1 pulled;
+- the address step 2 printed, and the image digest from step 1's `Digest:` line;
 - the Docker Desktop version and OS line from step 0;
 - `R4 PASS` or `R4 FAIL` with the date, the step, and the exact error text;
 - on a FAIL, the diagnostic file named in [Read-only diagnostics on a fail](#read-only-diagnostics-on-a-fail), attached rather than pasted.
