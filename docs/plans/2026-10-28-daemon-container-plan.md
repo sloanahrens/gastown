@@ -21,7 +21,7 @@
 - The Docker CLI is always called with an explicit `--context` or `DOCKER_HOST`; nothing changes the global Docker or kubectl context.
 - The takeover window is 12 minutes (more than twice the 5-minute `HeartbeatInterval`); the compose `stop_grace_period` is at least `daemon.ShutdownBudget`.
 - No acceptance box asks for `make gate`, a running daemon, Docker, a cluster or a live measurement. Live proofs are owed by the overseer in each task's Gate line.
-- Beads are filed overseer-only and assigned to `gastown/crew/overseer` by the overseer; released after the disk-maintenance, install-protocol, sling-admission, seat-lifecycle and Dolt beads, as before.
+- Beads are filed human-only and assigned to `gastown/crew/overseer` by the overseer; released after the disk-maintenance, install-protocol, sling-admission, seat-lifecycle and Dolt beads, as before.
 - Size: about twenty minutes of one polecat's work per task, one deliverable. A task that grows past that is split, not extended.
 
 ## Waves

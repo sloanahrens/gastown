@@ -18,9 +18,10 @@ which automatic path reads which marker.
 
 The markers are machine-read, so write one exactly as listed. A label matches
 however it is typed (case-insensitive). The old `human-only`, `gt:needs-human`
-and `needs-human` labels still hold the same way until they are retired. A prose marker holds only where it is
-asserted — at the start of a line, past any `#`, `>`, `-`, `*`, `+` or backtick
-in front of it — with case, hyphens, underscores and spaces folded, so
+and `needs-human` labels still hold the same way until they are retired. A prose
+marker holds only where it is asserted — at the start of a line, past any `#`,
+`>`, `-`, `*`, `+` or backtick in front of it — with case, hyphens, underscores
+and spaces folded, so
 `- do not redispatch` and `do not re-dispatch` both hold while a note that only
 quotes the wording does not.
 

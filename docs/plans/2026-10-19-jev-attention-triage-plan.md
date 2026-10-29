@@ -4,7 +4,7 @@
 
 Design: docs/plans/2026-10-19-jev-attention-triage-design.md (bead gt-sxg5u).
 
-Task beads were held with `needs-human` (now `needs-overseer`) until approval, then released in dependency order.
+Task beads were held with `needs-human` until approval, then released in dependency order.
 
 ## Tasks
 

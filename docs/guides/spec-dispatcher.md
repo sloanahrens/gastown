@@ -84,11 +84,12 @@ decides and reports without slinging, labeling or commenting.
    skipped: labeled `gt:ready-to-land`, `spec-dispatch-failed`, `crew-only`,
    `overseer-only` (the overseer vets or releases it first) or `operator-only`
    (only the operator can settle it), or carrying a dispatch hold. The old
-   `human-only` label still holds the same way until it is retired. Before writing or reading a hold marker, read
+   `human-only` label still holds the same way until it is retired. Before
+   writing or reading a hold marker, read
    [Dispatch holds](../concepts/dispatch-holds.md): it lists them and where each
    is written. The beads the `spec-dispatch-failed`, `crew-only`,
-   `overseer-only` and `operator-only` labels hold ride the board so the tick names them in its skip
-   line. Order is priority, then created_at, then id.
+   `overseer-only` and `operator-only` labels hold ride the board so the tick
+   names them in its skip line. Order is priority, then created_at, then id.
 3. A candidate with an unresolved blocking dependency is skipped with the
    reason `blocked by <blocker> (<status>)`, even when the ready board listed
    it: bd's ready query reads a deferred blocker as resolved and the dispatcher

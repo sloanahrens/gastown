@@ -476,9 +476,9 @@ func revertPastQueueing(is *beads.Issue) bool {
 // requeueStranded finishes filing an open revert bead a failed write left
 // unqueued (fileRevert), so red main gets its revert instead of an "already
 // open" bead the landing worker never sees. A bead a rejection or a landing
-// has moved on (rework, gt:needs-overseer or gt:needs-operator, or the old
-// needs-human label, a landing record) is left alone,
-// since its missing label is the worker's doing.
+// has moved on (rework, one of the gt:needs-human, gt:needs-overseer or
+// gt:needs-operator labels, or a landing record) is left alone, since its
+// missing label is the worker's doing.
 func (r *RedMain) requeueStranded(id string) strandedOutcome {
 	is, err := r.Beads.Show(id)
 	if err != nil || is == nil {
@@ -566,11 +566,11 @@ func (r *RedMain) RevertLanded(_ context.Context, work land.Work, res land.Resul
 		AddLabels: []string{land.LabelRework},
 		Force:     true,
 	}
-	// A human-only culprit (the old name, still held until it is retired;
-	// overseer-only and operator-only replace it) keeps its holder, as a
-	// rejection does: only a person can produce its branch (gt-me800). An
-	// unreadable culprit keeps its assignee too, since the holder is not known
-	// to be wrong.
+	// A human-only culprit keeps its holder, as a rejection does: only a
+	// person can produce its branch (gt-me800). This check reads only the old
+	// human-only name, so an overseer-only or operator-only culprit is not kept
+	// with its holder here. An unreadable culprit keeps its assignee too, since
+	// the holder is not known to be wrong.
 	if cul, err := r.Beads.Show(culprit); err != nil {
 		r.logf("reading %s for its holder: %v", culprit, err)
 	} else if cul != nil && !beads.HasLabel(cul, dispatch.HumanOnlyLabel) {

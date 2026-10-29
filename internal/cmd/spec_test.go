@@ -3248,21 +3248,27 @@ func TestSpecLintHelpNamesTheDaemonSection(t *testing.T) {
 	}
 }
 
-// TestSpecDispatchHelpNamesTheOverseerLabels: the dispatch help names the
-// overseer-first labels with their meaning, and says the old names still hold.
+// TestSpecDispatchHelpNamesTheOverseerLabels: the dispatch help names each
+// overseer-first label the dispatcher skips, in both spellings it reads.
 func TestSpecDispatchHelpNamesTheOverseerLabels(t *testing.T) {
 	t.Parallel()
+	// Match whole words, so the plain needs-overseer is not satisfied by
+	// gt:needs-overseer.
+	words := make(map[string]bool)
+	punct := strings.NewReplacer(",", " ", ".", " ", "(", " ", ")", " ", ";", " ")
+	for _, w := range strings.Fields(punct.Replace(specDispatchCmd.Long)) {
+		words[w] = true
+	}
 	for _, want := range []string{
 		"overseer-only",
 		"operator-only",
+		"needs-overseer",
 		"gt:needs-overseer",
+		"needs-operator",
 		"gt:needs-operator",
-		"overseer acts or vets first",
-		"only the operator can settle it",
-		"still hold the same way until they are retired",
 	} {
-		if !strings.Contains(specDispatchCmd.Long, want) {
-			t.Errorf("gt spec dispatch help does not name %q:\n%s", want, specDispatchCmd.Long)
+		if !words[want] {
+			t.Errorf("gt spec dispatch help does not name the label %q:\n%s", want, specDispatchCmd.Long)
 		}
 	}
 }
