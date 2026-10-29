@@ -29,11 +29,15 @@ type DispatchReader struct {
 	clock  *DispatchClock
 	offset int64
 	file   os.FileInfo // the file offset counts bytes of; nil before the first read
+	// ends are run ends the log does not hold, by bead (StartSince). They are
+	// kept here, not only in clock, so a clock rebuilt from a replaced or
+	// truncated log learns them again.
+	ends map[string]time.Time
 }
 
 // NewDispatchReader returns a reader of the town's events log.
 func NewDispatchReader(townRoot string) *DispatchReader {
-	return &DispatchReader{path: filepath.Join(townRoot, EventsFile)}
+	return &DispatchReader{path: filepath.Join(townRoot, EventsFile), ends: map[string]time.Time{}}
 }
 
 // Starts returns each dispatched bead's clock: when its current run went out
@@ -60,6 +64,7 @@ func (r *DispatchReader) Starts() (map[string]time.Time, error) {
 			// No log: no dispatch to date, and a log that appears later is read
 			// from its start.
 			r.clock, r.offset, r.file = NewDispatchClock(), 0, nil
+			r.applyEnds()
 			return map[string]time.Time{}, nil
 		}
 		return nil, fmt.Errorf("reading %s: %w", r.path, err)
@@ -88,7 +93,36 @@ func (r *DispatchReader) Starts() (map[string]time.Time, error) {
 		offset += int64(end + 1)
 	}
 	r.clock, r.offset, r.file = clock, offset, fi
+	r.applyEnds()
 	return clock.Starts(), nil
+}
+
+// StartSince returns bead's dispatch with end taken as a run end the log does
+// not hold (DispatchClock.StartSince): the submission the bead's notes record,
+// whose done event can be lost (gt-chd44). It answers from the clock the last
+// Starts built, so a caller reads Starts first (the dashboard's poll does) and
+// an unreadable log is that call's error. The end is recorded and kept across
+// the log's re-reads, so the clock never falls back to the dispatch the
+// submission ended.
+func (r *DispatchReader) StartSince(bead string, end time.Time) (time.Time, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	utc := end.UTC()
+	if !end.IsZero() && utc.After(r.ends[bead]) {
+		r.ends[bead] = utc
+	}
+	if r.clock == nil {
+		return time.Time{}, false
+	}
+	return r.clock.StartSince(bead, end)
+}
+
+// applyEnds folds the ends recorded outside the log into a clock just built or
+// extended from it.
+func (r *DispatchReader) applyEnds() {
+	for bead, at := range r.ends {
+		r.clock.EndRun(bead, at)
+	}
 }
 
 // decodeEventLines reads every complete line of b as an event, skipping the

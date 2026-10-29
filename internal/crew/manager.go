@@ -150,6 +150,10 @@ type crewRepo interface {
 	CloneWithReference(url, dest, reference string) error
 	CloneBranch(url, dest, branch string) error
 	CloneBranchWithReference(url, dest, branch, reference string) error
+	CloneFull(url, dest string) error
+	CloneFullWithReference(url, dest, reference string) error
+	CloneBranchFull(url, dest, branch string) error
+	CloneBranchFullWithReference(url, dest, branch, reference string) error
 	Remotes() ([]string, error)
 	RemoteURL(remote string) (string, error)
 	AddRemote(name, url string) (string, error)
@@ -272,28 +276,30 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 		return nil, fmt.Errorf("rig %q has no git URL configured — crew workspaces require a clonable repository (set git_url in rigs.json or re-add the rig with a remote URL)", m.rig.Name)
 	}
 
-	// Clone the rig repo on the configured default branch.
-	// CloneBranch ensures the crew lands on the rig's default_branch even when
+	// Clone the rig repo on the configured default branch, with full history
+	// and every branch: a crew session reads merge bases and other agents'
+	// branches, which a shallow single-branch clone cannot (gt-zyow0).
+	// CloneBranchFull ensures the crew lands on the rig's default_branch even when
 	// it differs from the remote's HEAD. Falls back gracefully for new/empty repos.
 	defaultBranch := m.rig.DefaultBranch()
 	if m.rig.LocalRepo != "" {
-		if err := m.git.CloneBranchWithReference(m.rig.GitURL, crewPath, defaultBranch, m.rig.LocalRepo); err != nil {
+		if err := m.git.CloneBranchFullWithReference(m.rig.GitURL, crewPath, defaultBranch, m.rig.LocalRepo); err != nil {
 			style.PrintWarning("could not clone branch %s with reference: %v", defaultBranch, err)
 			// Try branch without reference (network fetch), then reference without branch
-			if err := m.git.CloneBranch(m.rig.GitURL, crewPath, defaultBranch); err != nil {
+			if err := m.git.CloneBranchFull(m.rig.GitURL, crewPath, defaultBranch); err != nil {
 				style.PrintWarning("could not clone branch %s: %v", defaultBranch, err)
-				if err := m.git.CloneWithReference(m.rig.GitURL, crewPath, m.rig.LocalRepo); err != nil {
+				if err := m.git.CloneFullWithReference(m.rig.GitURL, crewPath, m.rig.LocalRepo); err != nil {
 					style.PrintWarning("could not clone with reference: %v", err)
-					if err := m.git.Clone(m.rig.GitURL, crewPath); err != nil {
+					if err := m.git.CloneFull(m.rig.GitURL, crewPath); err != nil {
 						return nil, fmt.Errorf("cloning rig: %w", err)
 					}
 				}
 			}
 		}
 	} else {
-		if err := m.git.CloneBranch(m.rig.GitURL, crewPath, defaultBranch); err != nil {
+		if err := m.git.CloneBranchFull(m.rig.GitURL, crewPath, defaultBranch); err != nil {
 			style.PrintWarning("could not clone branch %s, falling back to default: %v", defaultBranch, err)
-			if err := m.git.Clone(m.rig.GitURL, crewPath); err != nil {
+			if err := m.git.CloneFull(m.rig.GitURL, crewPath); err != nil {
 				return nil, fmt.Errorf("cloning rig: %w", err)
 			}
 		}

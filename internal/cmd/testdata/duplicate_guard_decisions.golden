@@ -17,7 +17,7 @@ Refusing to sling gt-c1: 1 overlapping bead(s) share the test(s) above; re-sling
 == gt-c2
 blocked: true
 match: gt-p4 open tests=[TestBeta] files=[] held=""
-match: gt-p3 open tests=[TestBeta] files=[] held="blocked by gt-b1"
+match: gt-p3 open tests=[TestBeta] files=[] held="peer blocked by gt-b1"
 ✗ Refusing to sling gt-c2: its content overlaps 1 existing bead(s).
   Two beads describing one defect from different vantage points share no
   keywords, but they do name the same failing tests (gt-mcq).

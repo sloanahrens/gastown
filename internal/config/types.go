@@ -163,7 +163,7 @@ type TownSettings struct {
 	// one). Patrol names match the keys used in that config's patrols
 	// section (e.g., "deacon", "witness", "refinery",
 	// "doctor_dog", "compactor_dog", "checkpoint_dog", "overrun_guard", "wisp_reaper",
-	// "jsonl_git_backup", "scheduled_maintenance",
+	// "jsonl_git_backup", "scheduled_maintenance", "disk_maintenance",
 	// "landing_worker", "events_prune", "handler").
 	// Example: ["doctor_dog", "compactor_dog"]
 	DisabledPatrols []string `json:"disabled_patrols,omitempty"`

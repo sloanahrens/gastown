@@ -25,6 +25,34 @@ func TestReadyNoteRoundTrip(t *testing.T) {
 	}
 }
 
+// ReadyBlockTime is the time the bead was submitted for landing, as the
+// overrun guard dates a rework from it. It reads the block and nothing else: a
+// bead with no block has no submission time, and an unreadable one is zero, not
+// the bead's last write, which moves with every comment (gt-chd44).
+func TestReadyBlockTimeReadsTheBlockAndNothingElse(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 1, 13, 45, 0, 0, time.UTC)
+	w := sampleWork()
+	w.Submitted = at
+	for _, tt := range []struct {
+		name  string
+		notes string
+		want  time.Time
+	}{
+		{name: "the last block's submission", notes: FormatReadyNote(w), want: at},
+		{name: "no block", notes: "just notes\n"},
+		{name: "a block with no submission time", notes: FormatReadyNote(sampleWork())},
+		{name: "an unreadable submission time", notes: "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nSubmitted: yesterday\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ReadyBlockTime(tt.notes); !got.Equal(tt.want) {
+				t.Errorf("ReadyBlockTime = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestReadyNoteLastBlockWins(t *testing.T) {
 	t.Parallel()
 	old := sampleWork()

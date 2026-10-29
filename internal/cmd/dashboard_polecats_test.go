@@ -358,6 +358,49 @@ func TestDashDispatchesReadTheBeadsFirstDispatch(t *testing.T) {
 	}
 }
 
+// The Age column shows the clock the overrun guard judges: a bead whose READY
+// TO LAND block records a submission that ended its run is dated from the
+// dispatch after it, so a rework re-slung after a landing rejection reads its
+// own age and not the submitted run's (gt-chd44). A bead the log does not date
+// falls back to the agent bead's last write, as it did before (gt-tzbtf).
+func TestDashHookTimeDatesASubmittedBeadFromItsRework(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	line := func(ts, typ, bead string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":%q}}`, ts, typ, bead)
+	}
+	body := strings.Join([]string{
+		line("2026-10-27T09:00:00Z", "sling", "gt-a"),
+		line("2026-10-27T11:00:00Z", "sling", "gt-a"),
+		line("2026-10-27T09:00:00Z", "sling", "gt-b"),
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(town, gtevents.EventsFile), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dispatches := gtevents.NewDispatchReader(town)
+	dispatched, err := dispatches.Starts()
+	if err != nil {
+		t.Fatalf("dispatch reader: %v", err)
+	}
+	agentUpdated := time.Date(2026, 10, 27, 9, 5, 0, 0, time.UTC)
+
+	ready := &beads.Issue{ID: "gt-a", Notes: "READY TO LAND\nBranch: polecat/capable/gt-a+x\nHead: " +
+		strings.Repeat("a", 40) + "\nTarget: main\nWorker: capable\nSubmitted: 2026-10-27T10:00:00Z\n"}
+	if got, want := dashHookTime(agentUpdated, ready, dispatched, dispatches), time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("hook time = %v, want the dispatch after the submission, %v", got, want)
+	}
+
+	unsubmitted := &beads.Issue{ID: "gt-b"}
+	if got, want := dashHookTime(agentUpdated, unsubmitted, dispatched, dispatches), time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("hook time = %v, want the bead's first dispatch, %v", got, want)
+	}
+
+	undated := &beads.Issue{ID: "gt-undated"}
+	if got := dashHookTime(agentUpdated, undated, dispatched, dispatches); !got.Equal(agentUpdated) {
+		t.Errorf("hook time = %v, want the agent bead's last write %v", got, agentUpdated)
+	}
+}
+
 func TestDashDispatchesReportAnUnreadableLog(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()

@@ -155,6 +155,7 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 			DoctorDog:            &DoctorDogConfig{Enabled: false},
 			JsonlGitBackup:       &JsonlGitBackupConfig{Enabled: false},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: false, Window: "05:30"},
+			DiskMaintenance:      &DiskMaintenanceConfig{Enabled: false, Window: "06:15"},
 			Handler:              &PatrolConfig{Enabled: false},
 		},
 	}
@@ -171,6 +172,9 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 	}
 	if config.Patrols.ScheduledMaintenance.Window != "05:30" {
 		t.Error("expected window to remain 05:30")
+	}
+	if config.Patrols.DiskMaintenance.Window != "06:15" {
+		t.Error("expected the disk_maintenance window to remain 06:15")
 	}
 }
 
@@ -404,7 +408,7 @@ func TestMissingLifecyclePatrols_MatchesWhatEnsureFills(t *testing.T) {
 		{
 			name:    "empty section",
 			patrols: func() *PatrolsConfig { return &PatrolsConfig{} },
-			want:    []string{"wisp_reaper", "compactor_dog", "checkpoint_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "handler"},
+			want:    []string{"wisp_reaper", "compactor_dog", "checkpoint_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "disk_maintenance", "handler"},
 			changed: true,
 		},
 		{
@@ -415,7 +419,7 @@ func TestMissingLifecyclePatrols_MatchesWhatEnsureFills(t *testing.T) {
 					Handler:       &PatrolConfig{Enabled: false},
 				}
 			},
-			want:    []string{"wisp_reaper", "compactor_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance"},
+			want:    []string{"wisp_reaper", "compactor_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "disk_maintenance"},
 			changed: true,
 			kept: func(t *testing.T, p *PatrolsConfig) {
 				t.Helper()

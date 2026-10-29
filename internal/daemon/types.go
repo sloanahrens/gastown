@@ -122,6 +122,7 @@ type (
 	CheckpointDogConfig        = agentconfig.CheckpointDogConfig
 	OverrunGuardConfig         = agentconfig.OverrunGuardConfig
 	ScheduledMaintenanceConfig = agentconfig.ScheduledMaintenanceConfig
+	DiskMaintenanceConfig      = agentconfig.DiskMaintenanceConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	OverseerReportConfig       = agentconfig.OverseerReportConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
@@ -254,6 +255,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.ScheduledMaintenance.Enabled
+	}
+	// disk_maintenance is opt-in: it deletes registry images, so only an
+	// explicit enabled:true turns it on (gt-dl4nv.15).
+	if patrol == "disk_maintenance" {
+		if config == nil || config.Patrols == nil || config.Patrols.DiskMaintenance == nil {
+			return false
+		}
+		return config.Patrols.DiskMaintenance.Enabled
 	}
 	// landing_worker is opt-in: it pushes main, so only an explicit
 	// enabled:true turns it on (gt-v4ssj.2).

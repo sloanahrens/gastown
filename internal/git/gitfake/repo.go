@@ -60,6 +60,10 @@ type Repo interface {
 	CloneBarePartialWithReferenceAndBranch(url, dest, filter, reference, branch string) error
 	CloneBranch(url, dest, branch string) error
 	CloneBranchWithReference(url, dest, branch, reference string) error
+	CloneFull(url, dest string) error
+	CloneFullWithReference(url, dest, reference string) error
+	CloneBranchFull(url, dest, branch string) error
+	CloneBranchFullWithReference(url, dest, branch, reference string) error
 	CloneBranchPartial(url, dest, branch, filter string) error
 	CloneBranchPartialWithReference(url, dest, branch, filter, reference string) error
 	RemoteHasRefs(remote string) (bool, error)
