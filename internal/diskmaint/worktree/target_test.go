@@ -27,6 +27,7 @@ type fakeGit struct {
 	t     *testing.T
 	reply map[string]fakeReply
 	calls []string
+	envs  [][]string // the environment each command received
 }
 
 type fakeReply struct {
@@ -48,9 +49,10 @@ func (f *fakeGit) answer(line, out string, err error) {
 // answerErr sets the command line to fail, as a git that exited non-zero does.
 func (f *fakeGit) answerErr(line string, err error) { f.answer(line, "", err) }
 
-func (f *fakeGit) run(_ context.Context, _ []string, name string, args ...string) ([]byte, error) {
+func (f *fakeGit) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
 	line := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	f.calls = append(f.calls, line)
+	f.envs = append(f.envs, env)
 	r, ok := f.reply[line]
 	if !ok {
 		f.t.Errorf("unexpected command: %s", line)
@@ -773,21 +775,5 @@ func TestTargetPlanRefusesARedirectedGit(t *testing.T) {
 				t.Fatalf("calls %v, want none: git must not run in a redirected environment", f.calls)
 			}
 		})
-	}
-}
-
-// An apply refuses and leaves the tree alone.
-func TestTargetApplyRefusesAndRunsNoCommand(t *testing.T) {
-	t.Parallel()
-	f := newFakeGit(t)
-	got, err := NewTarget(Config{Town: townRoot(t), Rigs: []string{"rig-a"}, Run: f.run, Environ: noRedirect}).Apply(context.Background(), diskmaint.Plan{Target: "worktree"})
-	if !errors.Is(err, errNotWired) {
-		t.Fatalf("Apply error = %v, want errNotWired", err)
-	}
-	if len(f.calls) != 0 {
-		t.Fatalf("Apply ran commands %v, want none", f.calls)
-	}
-	if got.Target != "worktree" {
-		t.Fatalf("Result.Target = %q, want %q", got.Target, "worktree")
 	}
 }

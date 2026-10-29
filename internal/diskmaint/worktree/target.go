@@ -27,9 +27,6 @@ var (
 	// crew directory is skipped, but no rigs at all is a configuration mistake,
 	// not an empty town.
 	errNoRigs = errors.New("no rigs configured")
-	// errNotWired reports an apply to a target that only reads: it plans, and it
-	// runs no command that changes a repository.
-	errNotWired = errors.New("worktree apply: this target removes nothing; the plan is a dry run")
 	// errRedirected reports a git repository location variable in the
 	// environment. The runner passes the process environment to git, so git
 	// would read another repository than the crew checkout it was asked about.
@@ -91,8 +88,12 @@ type Config struct {
 	Run diskmaint.Runner
 	// Environ returns the environment as NAME=value entries; nil reads the
 	// process environment. A test passes a fixed list so the result does not
-	// depend on the host.
+	// depend on the host. It is also the environment every git run receives, so
+	// the list that is checked is the list that is used.
 	Environ func() []string
+	// Policy is the run's limits. Its Apply flag is the dry-run gate: the zero
+	// value is a dry run, so a target built without one removes nothing.
+	Policy diskmaint.Policy
 	// Ledger records an apply. The planner never writes to it.
 	Ledger *diskmaint.Ledger
 }
@@ -147,13 +148,6 @@ func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, 
 		ws = append(ws, t.read(ctx, c))
 	}
 	return BuildPlan(ws, p.Now, readErrs), nil
-}
-
-// Apply refuses the plan and runs no command: this target reads worktree state,
-// it does not change a worktree, so a caller that ignored a dry run cannot lose
-// one.
-func (t *Target) Apply(context.Context, diskmaint.Plan) (diskmaint.Result, error) {
-	return diskmaint.Result{Target: planTarget}, errNotWired
 }
 
 // checkout is one worktree as `git worktree list --porcelain` reported it.
@@ -400,8 +394,14 @@ func countLines(out []byte) int {
 
 // git runs git with -C dir and args, and returns its stdout.
 func (t *Target) git(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return t.gitEnv(ctx, t.environ(), dir, args...)
+}
+
+// gitEnv runs git with -C dir and args under env, which the caller checked for
+// redirecting variables.
+func (t *Target) gitEnv(ctx context.Context, env []string, dir string, args ...string) ([]byte, error) {
 	argv := make([]string, 0, 2+len(args))
 	argv = append(argv, "-C", dir)
 	argv = append(argv, args...)
-	return t.cfg.Run(ctx, nil, "git", argv...)
+	return t.cfg.Run(ctx, env, "git", argv...)
 }
