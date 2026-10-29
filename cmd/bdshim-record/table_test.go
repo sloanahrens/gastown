@@ -60,6 +60,25 @@ func TestRowArgsPutsVerbBeforeFlagsBeforeOperands(t *testing.T) {
 	}
 }
 
+// TestTheTableNamesEveryFixtureBead: the beads the preflight asks bd for are the ones the rows use, so
+// the fixture a recording is made from is checked against the table that names it.
+func TestTheTableNamesEveryFixtureBead(t *testing.T) {
+	t.Parallel()
+	for _, id := range fixtureIDs {
+		named := false
+		for _, row := range Table() {
+			for _, arg := range row.Args() {
+				if arg == id {
+					named = true
+				}
+			}
+		}
+		if !named {
+			t.Errorf("fixture bead %s is named by no row, so checking for it proves nothing", id)
+		}
+	}
+}
+
 // TestTableGoldenNamesAreUniqueAndPathSafe: the shipped table writes distinct goldens, each with a
 // safe name, so a recording run never overwrites one row with another.
 func TestTableGoldenNamesAreUniqueAndPathSafe(t *testing.T) {

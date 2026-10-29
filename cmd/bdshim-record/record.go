@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -15,13 +16,13 @@ import (
 // exit is a result the golden records; an error means bd did not run to an exit.
 type Runner func(dir string, args []string) (stdout []byte, exit int, err error)
 
-// Copier makes a fresh copy of the fixture for one mutating row. It returns the copy's directory
-// and the function that removes it.
+// Copier makes a fresh copy of the fixture. It returns the copy's directory and the function that
+// removes it.
 type Copier func() (dir string, remove func() error, err error)
 
 // Recorder runs rows against bd.
 type Recorder struct {
-	Fixture string // the directory read rows run in
+	Fixture string // the fixture every row's copy is made from; no row runs in it
 	Run     Runner
 	Copy    Copier
 }
@@ -33,16 +34,39 @@ type Golden struct {
 	Exit   int
 }
 
-// Capture runs every row in table order and returns one golden per row. A mutating row runs in a
-// copy that is removed before the next row. A table whose golden names collide is refused before
-// bd runs, since two rows would write the same files.
+// Capture runs every row and returns one golden per row, in table order. Nothing runs in the fixture
+// itself: the read rows share one copy of it and each mutating row gets a copy of its own, so a row
+// that writes cannot reach the operator's fixture or another row, and every copy is removed before
+// Capture returns. A table whose golden names collide is refused before anything is copied, since
+// two rows would write the same files. The fixture and the table are checked before any row runs
+// (checkPreflight).
 func (rc Recorder) Capture(rows []Row) ([]Golden, error) {
 	if err := checkUnique(rows); err != nil {
 		return nil, err
 	}
+	sharedDir, removeShared, err := rc.Copy()
+	if err != nil {
+		return nil, fmt.Errorf("copy fixture: %w", err)
+	}
+	goldens, err := rc.captureRows(rows, sharedDir)
+	if rmErr := removeShared(); rmErr != nil {
+		err = errors.Join(err, fmt.Errorf("remove fixture copy: %w", rmErr))
+	}
+	if err != nil {
+		return nil, err
+	}
+	return goldens, nil
+}
+
+// captureRows checks the preflight and runs every row in the copy it belongs to. The caller removes
+// the shared copy afterwards.
+func (rc Recorder) captureRows(rows []Row, sharedDir string) ([]Golden, error) {
+	if err := checkPreflight(rc.Run, sharedDir, rows); err != nil {
+		return nil, err
+	}
 	goldens := make([]Golden, 0, len(rows))
 	for _, row := range rows {
-		g, err := rc.runRow(row)
+		g, err := rc.runRow(row, sharedDir)
 		if err != nil {
 			return nil, err
 		}
@@ -51,10 +75,52 @@ func (rc Recorder) Capture(rows []Row) ([]Golden, error) {
 	return goldens, nil
 }
 
-// runRow runs one row where it belongs and removes any copy it made, even when bd fails.
-func (rc Recorder) runRow(row Row) (Golden, error) {
+// checkPreflight refuses a fixture or a table bd cannot answer: the fixture must hold every bead the
+// rows name, and bd must know every verb they name. Otherwise the recording succeeds while recording
+// bd's "not found" or "unknown command" as its answer.
+func checkPreflight(run Runner, dir string, rows []Row) error {
+	for _, id := range fixtureIDs {
+		if err := expectExit(run, dir, []string{"show", id, "--json"}, "check the fixture bead "+id); err != nil {
+			return err
+		}
+	}
+	for _, verb := range distinctVerbs(rows) {
+		if err := expectExit(run, dir, append(strings.Fields(verb), "--help"), "check the verb "+verb); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// expectExit runs one bd call whose answer must be exit 0, and names check when it is not.
+func expectExit(run Runner, dir string, args []string, check string) error {
+	_, exit, err := run(dir, args)
+	if err != nil {
+		return fmt.Errorf("%s: %w", check, err)
+	}
+	if exit != 0 {
+		return fmt.Errorf("%s: bd exited %d", check, exit)
+	}
+	return nil
+}
+
+// distinctVerbs returns each verb the rows name once, in table order.
+func distinctVerbs(rows []Row) []string {
+	seen := make(map[string]bool, len(rows))
+	var verbs []string
+	for _, row := range rows {
+		if !seen[row.Verb] {
+			seen[row.Verb] = true
+			verbs = append(verbs, row.Verb)
+		}
+	}
+	return verbs
+}
+
+// runRow runs one row in the copy it belongs to and removes the copy it made, even when bd fails.
+func (rc Recorder) runRow(row Row, sharedDir string) (Golden, error) {
 	name := GoldenName(row)
-	dir, remove := rc.Fixture, func() error { return nil }
+	dir, remove := sharedDir, func() error { return nil }
 	if row.Mutates {
 		var err error
 		if dir, remove, err = rc.Copy(); err != nil {
@@ -89,20 +155,88 @@ func checkUnique(rows []Row) error {
 // bit, so owner-only costs nothing in the repo (gosec G306).
 const goldenMode = 0o600
 
-// Write writes each golden as <name>.json, bd's stdout, and <name>.exit, bd's exit code on one line.
-func Write(dir string, goldens []Golden) error {
+// goldenExts are the extensions of the two files one golden is made of.
+var goldenExts = []string{".json", ".exit"}
+
+// Write writes each golden as <name>.json, bd's stdout, and <name>.exit, bd's exit code on one
+// line, and removes the goldens of rows the table no longer has; it returns the names it removed.
+func Write(dir string, goldens []Golden) (removed []string, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return nil, err
 	}
 	for _, g := range goldens {
 		if err := os.WriteFile(filepath.Join(dir, g.Name+".json"), g.Stdout, goldenMode); err != nil {
-			return err
+			return nil, err
 		}
 		if err := os.WriteFile(filepath.Join(dir, g.Name+".exit"), exitFile(g.Exit), goldenMode); err != nil {
-			return err
+			return nil, err
+		}
+	}
+	removed, err = Orphans(dir, goldens)
+	if err != nil {
+		return nil, err
+	}
+	if err := removeGoldens(dir, removed); err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+// removeGoldens deletes both files of each named golden. A file that is already gone is not an error,
+// since a golden whose row was dropped may have been written with only one of its two files.
+func removeGoldens(dir string, names []string) error {
+	for _, name := range names {
+		for _, ext := range goldenExts {
+			path := filepath.Join(dir, name+ext)
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("remove golden %s: %w", path, err)
+			}
 		}
 	}
 	return nil
+}
+
+// Orphans returns the goldens in dir whose row the table no longer holds, sorted, so a row that was
+// renamed or dropped is reported rather than left looking like a recorded answer. A directory that
+// is not there holds no orphans; a failure to list one is an error.
+func Orphans(dir string, goldens []Golden) ([]string, error) {
+	keep := make(map[string]bool, len(goldens))
+	for _, g := range goldens {
+		keep[g.Name] = true
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list goldens directory %s: %w", dir, err)
+	}
+	seen := make(map[string]bool, len(entries))
+	var orphans []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name, ok := goldenStem(e.Name())
+		if !ok || keep[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		orphans = append(orphans, name)
+	}
+	sort.Strings(orphans)
+	return orphans, nil
+}
+
+// goldenStem returns the golden a file in the goldens directory belongs to, and whether the file is
+// part of a golden at all.
+func goldenStem(file string) (string, bool) {
+	for _, ext := range goldenExts {
+		if stem, ok := strings.CutSuffix(file, ext); ok && stem != "" {
+			return stem, true
+		}
+	}
+	return "", false
 }
 
 // Differ returns the names of the goldens in dir whose stdout or exit code differs from the

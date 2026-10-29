@@ -2,20 +2,24 @@ package main
 
 import "strings"
 
-// The fixture database holds these beads; the recording run builds it with them, and the table
-// names them in its rows.
+// The beads the fixture database must hold, since the table's rows name them. bd is asked for each
+// one before any row runs, so a fixture that is missing one fails the recording instead of being
+// recorded as bd's "not found".
 const (
 	fixtureID     = "fx-1"
 	fixtureDepID  = "fx-2"
 	fixtureParent = "fx-parent"
 )
 
+// fixtureIDs is every bead the preflight asks bd for.
+var fixtureIDs = []string{fixtureID, fixtureDepID, fixtureParent}
+
 // Row is one verb and flag set that bd is recorded for.
 type Row struct {
 	Verb     string   // the command words before any flag, e.g. "dep add"
 	Flags    []string // flag tokens in the order bd takes them, e.g. "--status", "open"
 	Operands []string // positional arguments after the flags
-	Mutates  bool     // a mutating row runs in a fresh copy of the fixture
+	Mutates  bool     // whether the row changes state; a mutating row gets a copy of the fixture of its own
 }
 
 // Args is the argument vector bd is run with: the verb words, the flags, then the operands.
@@ -61,7 +65,7 @@ func sanitize(tok string) string {
 // and the core verbs in docs/plans/2026-10-25-town-tracker-design.md section 6.
 func Table() []Row {
 	return []Row{
-		// Read rows: run in the fixture itself.
+		// Read rows: share one copy of the fixture.
 		{Verb: "show", Flags: []string{"--json"}, Operands: []string{fixtureID}},
 		{Verb: "list", Flags: []string{"--json"}},
 		{Verb: "list", Flags: []string{"--json", "--status", "open"}},
@@ -90,7 +94,7 @@ func Table() []Row {
 		{Verb: "label list", Flags: []string{"--json"}, Operands: []string{fixtureID}},
 		{Verb: "events tail", Operands: []string{"0"}},
 
-		// Mutating rows: each runs in a fresh copy of the fixture.
+		// Mutating rows: each runs in a copy of the fixture of its own.
 		{Verb: "create", Flags: []string{"--title", "fixture-created", "--type", "task", "--priority", "3", "--json"}, Mutates: true},
 		{Verb: "update", Flags: []string{"--status", "in_progress"}, Operands: []string{fixtureID}, Mutates: true},
 		{Verb: "close", Flags: []string{"--reason", "fixture-close"}, Operands: []string{fixtureID}, Mutates: true},

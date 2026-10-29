@@ -39,17 +39,18 @@ func execBD(bin string) Runner {
 
 // interpretRun turns how a bd run ended into a golden's stdout and exit code. A non-zero exit is a
 // result; a run that timed out or was killed, or that never started, is an error, so its partial
-// output is never recorded as bd's answer.
+// output is never recorded as bd's answer. Any error carrying an exit code counts as bd's exit, as
+// *exec.ExitError does in production and as a test's fake error does (gt-p85pw.87).
 func interpretRun(stdout []byte, runErr error, timedOut bool) ([]byte, int, error) {
 	if timedOut {
 		return nil, 0, fmt.Errorf("bd ran past %s", runLimit)
 	}
-	var ee *exec.ExitError
-	if errors.As(runErr, &ee) {
-		if ee.ExitCode() < 0 {
+	var exitErr interface{ ExitCode() int }
+	if errors.As(runErr, &exitErr) {
+		if exitErr.ExitCode() < 0 {
 			return nil, 0, errors.New("bd was killed by a signal")
 		}
-		return stdout, ee.ExitCode(), nil
+		return stdout, exitErr.ExitCode(), nil
 	}
 	if runErr != nil {
 		return nil, 0, runErr
@@ -57,10 +58,16 @@ func interpretRun(stdout []byte, runErr error, timedOut bool) ([]byte, int, erro
 	return stdout, 0, nil
 }
 
-// copyFixture returns a Copier that makes a fresh directory under scratch, which must exist, and
-// copies the fixture tree into it. The function it returns removes the copy.
+// copyFixture returns a Copier that makes a fresh directory under scratch, making scratch if it is
+// not there, and copies the fixture tree into it. The function it returns removes the copy.
 func copyFixture(src, scratch string) Copier {
 	return func() (string, func() error, error) {
+		if err := refuseScratchInsideFixture(src, scratch); err != nil {
+			return "", nil, err
+		}
+		if err := os.MkdirAll(scratch, 0o755); err != nil {
+			return "", nil, err
+		}
 		dir, err := os.MkdirTemp(scratch, "fixture-")
 		if err != nil {
 			return "", nil, err
@@ -71,6 +78,29 @@ func copyFixture(src, scratch string) Copier {
 		}
 		return dir, remove, nil
 	}
+}
+
+// refuseScratchInsideFixture refuses a scratch directory at or under the fixture: a copy made there
+// sits inside the tree the next copy walks, so that walk copies the copy into itself and never ends.
+// The paths are compared as named, before anything is created, so a refused run leaves the fixture
+// as it was.
+func refuseScratchInsideFixture(src, scratch string) error {
+	srcAbs, err := filepath.Abs(src)
+	if err != nil {
+		return fmt.Errorf("resolve fixture %s: %w", src, err)
+	}
+	scratchAbs, err := filepath.Abs(scratch)
+	if err != nil {
+		return fmt.Errorf("resolve scratch %s: %w", scratch, err)
+	}
+	rel, err := filepath.Rel(srcAbs, scratchAbs)
+	if err != nil {
+		return fmt.Errorf("compare scratch %s with fixture %s: %w", scratch, src, err)
+	}
+	if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		return fmt.Errorf("scratch directory %s is inside the fixture %s", scratch, src)
+	}
+	return nil
 }
 
 // copyTree copies the directories and regular files under src into dst. Any other kind of entry is

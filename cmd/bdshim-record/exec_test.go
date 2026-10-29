@@ -2,12 +2,20 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+// exitError is a bd exit status, matched the way *exec.ExitError is. Only a real process makes an
+// *exec.ExitError, and a unit test runs none, so a fake carries the code instead.
+type exitError int
+
+func (e exitError) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e exitError) ExitCode() int { return int(e) }
 
 // TestCopyFixtureMakesAnIndependentCopy: a mutating row changes only its copy; the fixture keeps its
 // files, and removing the copy leaves the fixture in place.
@@ -60,14 +68,85 @@ func TestCopyFixtureRefusesASymlinkAndLeavesNoCopy(t *testing.T) {
 	}
 }
 
-// TestCopyFixtureFailsWhenScratchIsMissing: a copy cannot be made in a scratch directory that does
-// not exist; run creates it before the recording starts.
-func TestCopyFixtureFailsWhenScratchIsMissing(t *testing.T) {
+// TestCopyFixtureMakesAMissingScratch: copies are made in a scratch directory that need not exist
+// yet, since the copier makes it.
+func TestCopyFixtureMakesAMissingScratch(t *testing.T) {
 	t.Parallel()
 	fixture := t.TempDir()
 	mustWrite(t, filepath.Join(fixture, "a.txt"), "x\n")
-	if _, _, err := copyFixture(fixture, filepath.Join(t.TempDir(), "missing"))(); err == nil {
-		t.Error("copyFixture into a missing scratch = nil error, want an error")
+	scratch := filepath.Join(t.TempDir(), "missing")
+
+	dir, remove, err := copyFixture(fixture, scratch)()
+	if err != nil {
+		t.Fatalf("copyFixture into a missing scratch: %v", err)
+	}
+	defer func() {
+		if err := remove(); err != nil {
+			t.Errorf("remove: %v", err)
+		}
+	}()
+	if got := filepath.Dir(dir); got != scratch {
+		t.Errorf("copy made in %s, want the scratch directory %s", got, scratch)
+	}
+}
+
+// TestCopyFixtureRefusesAScratchAtOrInsideTheFixture: a copy made inside the fixture sits in the tree
+// the next copy walks, so that walk would copy the copy into itself and never finish. The refusal
+// comes before anything is created, so the fixture is left as it was.
+func TestCopyFixtureRefusesAScratchAtOrInsideTheFixture(t *testing.T) {
+	t.Parallel()
+	fixture := t.TempDir()
+	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
+	tests := []struct {
+		name    string
+		scratch string
+	}{
+		{"scratch is the fixture", fixture},
+		{"scratch under the fixture", filepath.Join(fixture, "scratch")},
+		{"scratch deep under the fixture", filepath.Join(fixture, ".beads", "tmp")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			before := fileNames(t, fixture)
+			if _, _, err := copyFixture(fixture, tc.scratch)(); err == nil {
+				t.Fatalf("copyFixture with %s = nil error, want the refusal", tc.name)
+			}
+			if after := fileNames(t, fixture); !reflect.DeepEqual(before, after) {
+				t.Errorf("fixture holds %v after a refused copy, want it untouched at %v", after, before)
+			}
+		})
+	}
+}
+
+// TestCopyFixtureAcceptsAScratchBesideOrAboveTheFixture: the refusal covers the tree the walk covers,
+// not the fixture's neighbours, so a sibling or a parent directory is a valid scratch.
+func TestCopyFixtureAcceptsAScratchBesideOrAboveTheFixture(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	fixture := filepath.Join(parent, "fixture")
+	mustWrite(t, filepath.Join(fixture, "a.txt"), "x\n")
+	tests := []struct {
+		name    string
+		scratch string
+	}{
+		{"sibling of the fixture", filepath.Join(parent, "scratch")},
+		{"parent of the fixture", parent},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, remove, err := copyFixture(fixture, tc.scratch)()
+			if err != nil {
+				t.Fatalf("copyFixture with %s: %v", tc.name, err)
+			}
+			if got := readFile(t, filepath.Join(dir, "a.txt")); got != "x\n" {
+				t.Errorf("copied a.txt = %q, want the fixture's contents", got)
+			}
+			if err := remove(); err != nil {
+				t.Errorf("remove: %v", err)
+			}
+		})
 	}
 }
 
@@ -123,8 +202,8 @@ func TestCopyFileRefusesWhatItCannotCopy(t *testing.T) {
 	}
 }
 
-// TestInterpretRunTurnsHowBDEndedIntoAGolden: a clean run and a non-zero exit are results; a run
-// that timed out, was killed, or never started is an error and records no output.
+// TestInterpretRunTurnsHowBDEndedIntoAGolden: a clean run and a non-zero exit are results the golden
+// keeps; a run that timed out, was killed, or never started is an error and records no output.
 func TestInterpretRunTurnsHowBDEndedIntoAGolden(t *testing.T) {
 	t.Parallel()
 	out := []byte("partial\n")
@@ -132,20 +211,22 @@ func TestInterpretRunTurnsHowBDEndedIntoAGolden(t *testing.T) {
 		name     string
 		runErr   error
 		timedOut bool
+		wantExit int
 		wantErr  string
 	}{
-		{"clean run", nil, false, ""},
-		{"timed out", &exec.ExitError{}, true, "ran past"},
-		{"killed by a signal", &exec.ExitError{}, false, "killed by a signal"},
-		{"never started", errors.New(`exec: "bd": executable file not found in $PATH`), false, "not found"},
+		{"clean run", nil, false, 0, ""},
+		{"non-zero exit", exitError(3), false, 3, ""},
+		{"timed out", exitError(0), true, 0, "ran past"},
+		{"killed by a signal", exitError(-1), false, 0, "killed by a signal"},
+		{"never started", errors.New(`exec: "bd": executable file not found in $PATH`), false, 0, "not found"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			stdout, exit, err := interpretRun(out, tc.runErr, tc.timedOut)
 			if tc.wantErr == "" {
-				if err != nil || exit != 0 || string(stdout) != string(out) {
-					t.Errorf("interpretRun = (%q, %d, %v), want bd's output and exit 0", stdout, exit, err)
+				if err != nil || exit != tc.wantExit || string(stdout) != string(out) {
+					t.Errorf("interpretRun = (%q, %d, %v), want bd's output and exit %d", stdout, exit, err, tc.wantExit)
 				}
 				return
 			}

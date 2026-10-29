@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -24,13 +25,35 @@ func (f *fakeBD) Run(dir string, args []string) ([]byte, int, error) {
 	return f.out(args)
 }
 
-// echoBD answers each call with its own arguments, and exits 1 for list so a non-zero exit is kept.
+// echoBD answers each call with its own arguments. A list row exits 1, so a non-zero exit is kept in
+// a golden; the preflight's --help calls exit 0, as bd's do for a verb it knows.
 func echoBD(args []string) ([]byte, int, error) {
 	exit := 0
-	if len(args) > 0 && args[0] == "list" {
+	if len(args) > 0 && args[0] == "list" && !wantsHelp(args) {
 		exit = 1
 	}
 	return []byte("out: " + strings.Join(args, " ") + "\n"), exit, nil
+}
+
+// wantsHelp reports whether a call is the preflight's question whether bd knows a verb.
+func wantsHelp(args []string) bool {
+	return len(args) > 1 && args[len(args)-1] == "--help"
+}
+
+// preflightLen is how many bd calls the preflight makes for rows, one per fixture bead and one per
+// distinct verb, before the first row runs.
+func preflightLen(rows []Row) int {
+	return len(fixtureIDs) + len(distinctVerbs(rows))
+}
+
+// rowDirs returns the directories the rows themselves ran in, after the preflight's calls.
+func rowDirs(t *testing.T, bd *fakeBD, rows []Row) []string {
+	t.Helper()
+	if pre := preflightLen(rows); len(bd.dirs) >= pre {
+		return bd.dirs[pre:]
+	}
+	t.Fatalf("bd ran %d times, want at least the %d preflight calls", len(bd.dirs), preflightLen(rows))
+	return nil
 }
 
 // fakeCopies makes fixture copies as empty directories under base, and records which were made and
@@ -51,6 +74,16 @@ func (c *fakeCopies) Copy() (string, func() error, error) {
 		c.removed = append(c.removed, dir)
 		return os.RemoveAll(dir)
 	}, nil
+}
+
+// sameCopies reports whether made and removed name the same copies, in any order: the shared copy is
+// made first and removed last.
+func sameCopies(made, removed []string) bool {
+	a := append([]string(nil), made...)
+	b := append([]string(nil), removed...)
+	sort.Strings(a)
+	sort.Strings(b)
+	return reflect.DeepEqual(a, b)
 }
 
 // sampleRows has two read rows and two mutating rows.
@@ -88,23 +121,30 @@ func TestCaptureRefusesCollidingGoldenNames(t *testing.T) {
 	}
 }
 
-// TestCaptureRunsReadRowsInTheFixtureAndMutatingRowsInFreshCopies: a read row runs where the fixture
-// is; each mutating row runs in its own copy, and every copy is removed.
-func TestCaptureRunsReadRowsInTheFixtureAndMutatingRowsInFreshCopies(t *testing.T) {
+// TestCaptureRunsNoRowInTheFixture: the read rows share one copy of the fixture and each mutating row
+// runs in a copy of its own, so no row can reach the fixture; every copy is removed afterwards.
+func TestCaptureRunsNoRowInTheFixture(t *testing.T) {
 	t.Parallel()
 	bd := &fakeBD{out: echoBD}
 	rc, copies := newRecorder(t, bd)
-	if _, err := rc.Capture(sampleRows()); err != nil {
+	rows := sampleRows()
+	if _, err := rc.Capture(rows); err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
-	want := []string{rc.Fixture, rc.Fixture, copies.made[0], copies.made[1]}
-	if !reflect.DeepEqual(bd.dirs, want) {
-		t.Errorf("bd ran in %v, want the fixture for read rows and a copy for mutating rows: %v", bd.dirs, want)
+	if len(copies.made) != 3 {
+		t.Fatalf("copies made = %v, want the shared copy and one per mutating row", copies.made)
 	}
-	if len(copies.made) != 2 || copies.made[0] == copies.made[1] {
-		t.Errorf("copies made = %v, want two distinct copies", copies.made)
+	want := []string{copies.made[0], copies.made[0], copies.made[1], copies.made[2]}
+	got := rowDirs(t, bd, rows)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rows ran in %v, want the shared copy for read rows and a copy of its own for each mutating row: %v", got, want)
 	}
-	if !reflect.DeepEqual(copies.removed, copies.made) {
+	for _, dir := range got {
+		if dir == rc.Fixture {
+			t.Errorf("a row ran in the fixture itself (%s), want only copies of it", dir)
+		}
+	}
+	if !sameCopies(copies.made, copies.removed) {
 		t.Errorf("copies removed = %v, want every copy made (%v) removed", copies.removed, copies.made)
 	}
 }
@@ -127,7 +167,7 @@ func TestCaptureFailsWhenBDDoesNotRunAndRemovesItsCopy(t *testing.T) {
 	if goldens != nil {
 		t.Errorf("Capture returned %d goldens on failure, want none", len(goldens))
 	}
-	if !reflect.DeepEqual(copies.removed, copies.made) {
+	if !sameCopies(copies.made, copies.removed) {
 		t.Errorf("copies removed = %v, want every copy made (%v) removed on failure", copies.removed, copies.made)
 	}
 }
@@ -140,8 +180,111 @@ func TestCaptureReportsACopyThatWillNotRemove(t *testing.T) {
 	rc.Copy = func() (string, func() error, error) {
 		return t.TempDir(), func() error { return errors.New("device busy") }, nil
 	}
+	_, err := rc.Capture(sampleRows())
+	if err == nil || !strings.Contains(err.Error(), "device busy") {
+		t.Fatalf("Capture with a copy that will not remove = %v, want the removal failure reported", err)
+	}
+}
+
+// TestCaptureChecksTheFixtureAndTheVerbsBeforeAnyRow: before the first row, bd is asked for each bead
+// the fixture must hold and for each verb the table names, in the shared copy.
+func TestCaptureChecksTheFixtureAndTheVerbsBeforeAnyRow(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: echoBD}
+	rc, copies := newRecorder(t, bd)
+	rows := []Row{
+		{Verb: "show", Operands: []string{fixtureID}},
+		{Verb: "show", Flags: []string{"--json"}},
+		{Verb: "close", Operands: []string{fixtureID}, Mutates: true},
+	}
+	if _, err := rc.Capture(rows); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	want := [][]string{
+		{"show", fixtureID, "--json"},
+		{"show", fixtureDepID, "--json"},
+		{"show", fixtureParent, "--json"},
+		{"show", "--help"},
+		{"close", "--help"},
+	}
+	if len(bd.args) != len(want)+len(rows) {
+		t.Fatalf("bd ran %d times, want %d preflight calls and %d rows", len(bd.args), len(want), len(rows))
+	}
+	if got := bd.args[:len(want)]; !reflect.DeepEqual(got, want) {
+		t.Errorf("preflight ran %v, want %v", got, want)
+	}
+	for _, dir := range bd.dirs[:len(want)] {
+		if dir != copies.made[0] {
+			t.Errorf("preflight ran in %s, want the shared copy %s", dir, copies.made[0])
+		}
+	}
+}
+
+// TestCaptureRefusesAFixtureMissingABead: a fixture that does not hold a bead the rows name fails the
+// recording, since the row would otherwise record bd's "not found" as its answer.
+func TestCaptureRefusesAFixtureMissingABead(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: func(args []string) ([]byte, int, error) {
+		if len(args) == 3 && args[0] == "show" && args[2] == "--json" && args[1] == fixtureDepID {
+			return nil, 1, nil
+		}
+		return echoBD(args)
+	}}
+	rc, copies := newRecorder(t, bd)
+	_, err := rc.Capture(sampleRows())
+	if err == nil || !strings.Contains(err.Error(), fixtureDepID) {
+		t.Fatalf("Capture on a fixture missing %s = %v, want an error naming it", fixtureDepID, err)
+	}
+	checked := 0
+	for _, id := range fixtureIDs {
+		checked++
+		if id == fixtureDepID {
+			break
+		}
+	}
+	if len(bd.args) != checked {
+		t.Errorf("bd ran %d times, want the check of the fixture to stop at the missing bead (%d checks)", len(bd.args), checked)
+	}
+	if !sameCopies(copies.made, copies.removed) {
+		t.Errorf("copies removed = %v, want every copy made (%v) removed after the refusal", copies.removed, copies.made)
+	}
+}
+
+// TestCaptureRefusesAVerbBDDoesNotKnow: a row whose verb bd refuses fails the recording, naming the
+// verb, before any row is recorded.
+func TestCaptureRefusesAVerbBDDoesNotKnow(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: func(args []string) ([]byte, int, error) {
+		if args[len(args)-1] == "--help" && args[0] == "frobnicate" {
+			return nil, 1, nil
+		}
+		return echoBD(args)
+	}}
+	rc, _ := newRecorder(t, bd)
+	rows := []Row{
+		{Verb: "show", Operands: []string{fixtureID}},
+		{Verb: "frobnicate", Operands: []string{fixtureID}},
+	}
+	if _, err := rc.Capture(rows); err == nil || !strings.Contains(err.Error(), "frobnicate") {
+		t.Fatalf("Capture with a verb bd does not know = %v, want an error naming the verb", err)
+	}
+	for _, args := range bd.args {
+		if args[0] == "frobnicate" && !wantsHelp(args) {
+			t.Errorf("bd ran the row %v, want the recording refused at the preflight", args)
+		}
+	}
+}
+
+// TestCaptureReportsABeadCheckThatDoesNotRun: a check that cannot run at all is an error, not a
+// fixture that passed.
+func TestCaptureReportsABeadCheckThatDoesNotRun(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: func(args []string) ([]byte, int, error) {
+		return nil, 0, errors.New("exec: bd not found")
+	}}
+	rc, _ := newRecorder(t, bd)
 	if _, err := rc.Capture(sampleRows()); err == nil {
-		t.Fatal("Capture with a copy that will not remove = nil error, want an error")
+		t.Fatal("Capture with a preflight that cannot run = nil error, want an error")
 	}
 }
 
@@ -156,7 +299,7 @@ func TestWriteOneGoldenAndExitFilePerRow(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 	out := t.TempDir()
-	if err := Write(out, goldens); err != nil {
+	if _, err := Write(out, goldens); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	wantFiles := []string{
@@ -179,6 +322,87 @@ func TestWriteOneGoldenAndExitFilePerRow(t *testing.T) {
 	}
 }
 
+// TestWriteRemovesTheGoldensOfRowsTheTableNoLongerHas: a dropped row leaves its two files behind, and
+// Write deletes them and names them, so the directory holds only what this table recorded.
+func TestWriteRemovesTheGoldensOfRowsTheTableNoLongerHas(t *testing.T) {
+	t.Parallel()
+	rc, _ := newRecorder(t, &fakeBD{out: echoBD})
+	dropped := Row{Verb: "count", Flags: []string{"--by-status"}}
+	wider, err := rc.Capture(append(sampleRows(), dropped))
+	if err != nil {
+		t.Fatalf("Capture of the wider table: %v", err)
+	}
+	out := t.TempDir()
+	if _, err := Write(out, wider); err != nil {
+		t.Fatalf("Write of the wider table: %v", err)
+	}
+	if err := os.Remove(filepath.Join(out, GoldenName(dropped)+".json")); err != nil {
+		t.Fatalf("remove one file of the dropped golden: %v", err)
+	}
+
+	narrower, err := rc.Capture(sampleRows())
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	removed, err := Write(out, narrower)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if want := []string{GoldenName(dropped)}; !reflect.DeepEqual(removed, want) {
+		t.Errorf("Write removed %v, want the dropped row's golden %v", removed, want)
+	}
+	wantFiles := []string{
+		"close-reason-done.exit", "close-reason-done.json",
+		"list-status-open.exit", "list-status-open.json",
+		"reopen.exit", "reopen.json",
+		"show-json.exit", "show-json.json",
+	}
+	if got := fileNames(t, out); !reflect.DeepEqual(got, wantFiles) {
+		t.Errorf("files left = %v, want only this table's %v", got, wantFiles)
+	}
+}
+
+// TestOrphansReportsEachDroppedRowOnce: a golden whose row is gone is one golden whether one or both
+// of its files are left, and a file that is not part of a golden is not one.
+func TestOrphansReportsEachDroppedRowOnce(t *testing.T) {
+	t.Parallel()
+	out := t.TempDir()
+	mustWrite(t, filepath.Join(out, "gone.json"), "{}\n")
+	mustWrite(t, filepath.Join(out, "gone.exit"), "0\n")
+	mustWrite(t, filepath.Join(out, "README.md"), "how the goldens are recorded\n")
+	mustMkdir(t, filepath.Join(out, ".git"))
+	kept := []Golden{{Name: "kept", Stdout: []byte("{}\n"), Exit: 0}}
+	mustWrite(t, filepath.Join(out, "kept.json"), "{}\n")
+
+	orphans, err := Orphans(out, kept)
+	if err != nil {
+		t.Fatalf("Orphans: %v", err)
+	}
+	if want := []string{"gone"}; !reflect.DeepEqual(orphans, want) {
+		t.Errorf("Orphans = %v, want %v", orphans, want)
+	}
+}
+
+// TestOrphansFailsClosedOnADirectoryItCannotList: a goldens directory that cannot be listed is an
+// error, not an empty set of orphans that a clean report would hide.
+func TestOrphansFailsClosedOnADirectoryItCannotList(t *testing.T) {
+	t.Parallel()
+	out := filepath.Join(t.TempDir(), "golden")
+	mustWrite(t, out, "a file where the directory goes\n")
+	if _, err := Orphans(out, nil); err == nil {
+		t.Error("Orphans of a directory that is a file = nil error, want an error")
+	}
+}
+
+// TestOrphansOfAMissingDirectoryIsNone: nothing has been recorded yet, so there is nothing to report.
+func TestOrphansOfAMissingDirectoryIsNone(t *testing.T) {
+	t.Parallel()
+	orphans, err := Orphans(filepath.Join(t.TempDir(), "missing"), nil)
+	if err != nil || len(orphans) != 0 {
+		t.Errorf("Orphans of a missing directory = (%v, %v), want nothing and no error", orphans, err)
+	}
+}
+
 // TestCheckListsOnlyTheGoldensThatChanged: with -check, a golden whose stdout changed and a golden
 // whose file is gone are listed in table order, the unchanged ones are not, and nothing is written.
 func TestCheckListsOnlyTheGoldensThatChanged(t *testing.T) {
@@ -189,7 +413,7 @@ func TestCheckListsOnlyTheGoldensThatChanged(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 	out := t.TempDir()
-	if err := Write(out, goldens); err != nil {
+	if _, err := Write(out, goldens); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if err := os.Remove(filepath.Join(out, "reopen.json")); err != nil {
@@ -230,7 +454,7 @@ func TestExecuteCheckPrintsDriftAndExitsNonZero(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 	out := t.TempDir()
-	if err := Write(out, goldens); err != nil {
+	if _, err := Write(out, goldens); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	opts := options{out: out, check: true}
@@ -256,17 +480,54 @@ func TestExecuteCheckPrintsDriftAndExitsNonZero(t *testing.T) {
 	}
 }
 
-// TestExecuteRecordWritesTheGoldens: without -check the goldens are written and the command exits 0.
+// TestExecuteCheckReportsTheGoldensOfRowsTheTableNoLongerHas: -check lists the golden of a dropped
+// row, says so, exits 1, and leaves the directory as it was.
+func TestExecuteCheckReportsTheGoldensOfRowsTheTableNoLongerHas(t *testing.T) {
+	t.Parallel()
+	rc, _ := newRecorder(t, &fakeBD{out: echoBD})
+	out := t.TempDir()
+	dropped := Row{Verb: "count", Flags: []string{"--by-status"}}
+	wider, err := rc.Capture(append(sampleRows(), dropped))
+	if err != nil {
+		t.Fatalf("Capture of the wider table: %v", err)
+	}
+	if _, err := Write(out, wider); err != nil {
+		t.Fatalf("Write of the wider table: %v", err)
+	}
+	before := snapshot(t, out)
+
+	var stdout, stderr bytes.Buffer
+	if code := execute(options{out: out, check: true}, rc, sampleRows(), &stdout, &stderr); code != 1 {
+		t.Errorf("-check with a dropped row = %d, want 1", code)
+	}
+	if got, want := stdout.String(), GoldenName(dropped)+"\n"; got != want {
+		t.Errorf("-check printed %q, want the dropped row's golden %q", got, want)
+	}
+	if !strings.Contains(stderr.String(), "no longer has") {
+		t.Errorf("stderr = %q, want the dropped golden reported", stderr.String())
+	}
+	if after := snapshot(t, out); !reflect.DeepEqual(before, after) {
+		t.Errorf("-check changed the goldens directory: before %v, after %v", before, after)
+	}
+}
+
+// TestExecuteRecordWritesTheGoldens: without -check the goldens are written, the golden of a row the
+// table no longer has is removed and reported, and the command exits 0.
 func TestExecuteRecordWritesTheGoldens(t *testing.T) {
 	t.Parallel()
 	rc, _ := newRecorder(t, &fakeBD{out: echoBD})
 	out := t.TempDir()
+	mustWrite(t, filepath.Join(out, "dropped-row.json"), "{}\n")
+	mustWrite(t, filepath.Join(out, "dropped-row.exit"), "0\n")
 	var stdout, stderr bytes.Buffer
 	if code := execute(options{out: out}, rc, sampleRows(), &stdout, &stderr); code != 0 {
 		t.Fatalf("record = %d, stderr %q; want 0", code, stderr.String())
 	}
 	if got := len(fileNames(t, out)); got != 2*len(sampleRows()) {
 		t.Errorf("files written = %d, want two per row (%d)", got, 2*len(sampleRows()))
+	}
+	if !strings.Contains(stderr.String(), "no longer has") {
+		t.Errorf("stderr = %q, want the removed golden reported", stderr.String())
 	}
 }
 
@@ -289,8 +550,8 @@ func TestDifferFailsClosedOnAGoldenItCannotRead(t *testing.T) {
 	}
 }
 
-// TestCaptureReportsACopyThatCannotBeMade: a mutating row that has no copy to run in fails the
-// recording, and bd is not run for it.
+// TestCaptureReportsACopyThatCannotBeMade: with no copy of the fixture there is nowhere for a row to
+// run, so the recording fails before bd runs at all.
 func TestCaptureReportsACopyThatCannotBeMade(t *testing.T) {
 	t.Parallel()
 	bd := &fakeBD{out: echoBD}
@@ -301,8 +562,8 @@ func TestCaptureReportsACopyThatCannotBeMade(t *testing.T) {
 	if _, err := rc.Capture(sampleRows()); err == nil {
 		t.Fatal("Capture with no fixture copy = nil error, want an error")
 	}
-	if len(bd.args) != 2 {
-		t.Errorf("bd ran %d times, want only the 2 read rows before the copy failed", len(bd.args))
+	if len(bd.args) != 0 {
+		t.Errorf("bd ran %d times with no copy to run in, want 0", len(bd.args))
 	}
 }
 
@@ -336,7 +597,7 @@ func TestWriteFailsWhenAGoldenCannotBeWritten(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := tc.setup(t, t.TempDir())
-			if err := Write(dir, goldens); err == nil {
+			if _, err := Write(dir, goldens); err == nil {
 				t.Errorf("Write(%s) = nil error, want an error", tc.name)
 			}
 		})
