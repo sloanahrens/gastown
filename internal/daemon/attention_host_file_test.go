@@ -37,12 +37,12 @@ func TestFileHostProbesServeAFreshFile(t *testing.T) {
 
 	p := newFileHostProbes(townRoot)
 	writeFileProbes(t, p, hostprobe.Probes{
-		At:           now,
-		MemFreePct:   hostprobe.Field[float64]{Value: 42.5},
-		Disk:         hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 71.5, FreeGB: 22.25}},
-		Containers:   hostprobe.Field[[]string]{Value: []string{"forgejo-forgejo-1", "forgejo-db-1"}},
-		CPUIdlePct:   hostprobe.Field[float64]{Value: 80},
-		ExecTaxMS:    hostprobe.Field[float64]{Value: 5},
+		At:         now,
+		MemFreePct: hostprobe.Field[float64]{Value: 42.5},
+		Disk:       hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 71.5, FreeGB: 22.25}},
+		Containers: hostprobe.Field[[]string]{Value: []string{"forgejo-forgejo-1", "forgejo-db-1"}},
+		CPUIdlePct: hostprobe.Field[float64]{Value: 80},
+		ExecTaxMS:  hostprobe.Field[float64]{Value: 5},
 	})
 	p.now = func() time.Time { return now.Add(time.Second) }
 
