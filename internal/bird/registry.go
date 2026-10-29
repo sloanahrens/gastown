@@ -419,8 +419,8 @@ type PickResult struct {
 
 // Pick returns a random free name from the pool and reserves it under the
 // lock, so two launches never receive the same name before either binds it. The
-// result names the name it took and every name it passed over; a reservation
-// nothing binds expires after ReservationTTL.
+// result says which name it took and which it passed over, and why; a
+// reservation nothing binds expires after ReservationTTL.
 func (r *Registry) Pick() (PickResult, error) {
 	var picked PickResult
 	err := r.mutate(func(st *State) (bool, error) {
