@@ -245,7 +245,7 @@ func (h *patrolScanHost) removeSeatDirs(rigPath, rig, name string) (bool, error)
 }
 
 // sandboxSeatEndJoinBudget bounds how long stopSandboxSeatEnds waits for the
-// seat ends in flight. The gateway question a seat end asks is cancelled by
+// seat ends in flight. The gateway question a seat end asks is canceled by
 // shutdown, so the wait is short in practice; the bound is what keeps
 // shutdown's ceiling a fact when one end is wedged.
 const sandboxSeatEndJoinBudget = 2 * time.Second
