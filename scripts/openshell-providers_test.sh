@@ -259,7 +259,8 @@ assert_rc() {
 echo "fresh run: nothing in the gateway"
 run
 assert_rc 0 "exits 0"
-check "imports both profiles" [ "$(calls '^profile import')" -eq 2 ]
+# The script imports three profiles: anthropic-oauth (sbx-haiku), deepseek-claude and forgejo-polecat.
+check "imports all three profiles" [ "$(calls '^profile import')" -eq 3 ]
 check "creates both providers" [ "$(calls '^provider create')" -eq 2 ]
 check "led the user to the imported profiles" contains "imported profile deepseek-claude" "$OUT"
 check "never printed the deepseek key" lacks "$DEEPSEEK_KEY" "$OUT"
@@ -274,20 +275,20 @@ echo "rerun: both profiles and both providers already present"
 run
 assert_rc 0 "exits 0 on a rerun"
 check "reported the existing profiles" contains "profile deepseek-claude exists" "$OUT"
-check "did not call profile import again" [ "$(calls '^profile import')" -eq 2 ]
+check "did not call profile import again" [ "$(calls '^profile import')" -eq 3 ]
 check "did not call provider create again" [ "$(calls '^provider create')" -eq 2 ]
 
 echo "third run in a row is also clean"
 run
 assert_rc 0 "exits 0 the third time"
-check "still no new import" [ "$(calls '^profile import')" -eq 2 ]
+check "still no new import" [ "$(calls '^profile import')" -eq 3 ]
 check "still no new provider create" [ "$(calls '^provider create')" -eq 2 ]
 
 echo "partial state: profiles imported, providers missing"
 : >"$TMP/state/providers"
 run
 assert_rc 0 "exits 0"
-check "left the profiles alone" [ "$(calls '^profile import')" -eq 2 ]
+check "left the profiles alone" [ "$(calls '^profile import')" -eq 3 ]
 check "created the two missing providers" [ "$(calls '^provider create')" -eq 4 ]
 
 echo "quoted ids: a profile whose yaml quotes its id is still recognised"
