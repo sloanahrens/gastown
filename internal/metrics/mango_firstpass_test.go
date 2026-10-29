@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -74,51 +75,68 @@ func firstPassVerdict(bead string, attempt int, verdict string) land.ReviewRecor
 	}
 }
 
-// firstPassBd answers a bd show with the Branch line each bead's notes carry,
-// as the attribution reads it, and records the ids each call asked for. A bead
-// the case names no branch for is a fixture bug, so the case fails rather than
+// firstPassStores is the seam the first-pass section reads its beads through:
+// the store's ShowMultiple answers the Branch line each bead's notes carry, as
+// the attribution reads it, and records the ids each read asked for. A bead the
+// case names no branch for is a fixture bug, so the case fails rather than
 // answering a listing that would hide it.
-func firstPassBd(t *testing.T, branches map[string]string, calls *[][]string) Runner {
+func firstPassStores(t *testing.T, branches map[string]string, calls *[][]string) BeadStores {
 	t.Helper()
-	return func(_ context.Context, argv []string) ([]byte, error) {
-		if len(argv) < 4 || argv[0] != "bd" || argv[1] != "-C" || argv[3] != "show" {
-			t.Fatalf("argv = %v, want a bd show in -C", argv)
-		}
-		var asked []string
-		for _, arg := range argv[4:] {
-			if id, ok := strings.CutPrefix(arg, "--id="); ok {
-				asked = append(asked, id)
-			}
-		}
-		if calls != nil {
-			*calls = append(*calls, asked)
-		}
-		var rows []bdListBead
-		for _, arg := range argv[4:] {
-			id, ok := strings.CutPrefix(arg, "--id=")
-			if !ok {
-				continue
-			}
-			branch, known := branches[id]
-			if !known {
-				t.Fatalf("bd show asked for %q, which the case names no branch for", id)
-			}
-			notes := ""
-			if branch != "" {
-				notes = "Branch: " + branch
-			}
-			rows = append(rows, bdListBead{ID: id, Notes: notes})
-		}
-		return json.Marshal(rows)
+	return func(context.Context, string) BeadStore {
+		return firstPassStore{t: t, branches: branches, calls: calls}
 	}
 }
 
-// firstPassSection runs the section over town with a bd answering branches.
+// firstPassStore is one rig's store over the fixture's branches.
+type firstPassStore struct {
+	t        *testing.T
+	branches map[string]string
+	calls    *[][]string
+}
+
+func (s firstPassStore) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("the first-pass section read the board")
+}
+
+func (s firstPassStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("the first-pass section read the ready board")
+}
+
+func (s firstPassStore) Blocked() ([]*beads.Issue, error) {
+	return nil, errors.New("the first-pass section read the blocked board")
+}
+
+func (s firstPassStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	s.t.Helper()
+	if s.calls != nil {
+		*s.calls = append(*s.calls, append([]string(nil), ids...))
+	}
+	found := make(map[string]*beads.Issue, len(ids))
+	if s.branches == nil {
+		// A store holding no bead at all: every id asked for is left out, the
+		// way a store that no longer has the bead answers.
+		return found, nil
+	}
+	for _, id := range ids {
+		branch, known := s.branches[id]
+		if !known {
+			s.t.Fatalf("the store was asked for %q, which the case names no branch for", id)
+		}
+		notes := ""
+		if branch != "" {
+			notes = "Branch: " + branch
+		}
+		found[id] = &beads.Issue{ID: id, Notes: notes}
+	}
+	return found, nil
+}
+
+// firstPassSection runs the section over town with a store answering branches.
 func firstPassSection(t *testing.T, town string, since time.Time, branches map[string]string) string {
 	t.Helper()
 	text, err := MangoFirstPassSection(context.Background(), Env{
 		Town: town, ReadFile: os.ReadFile, ReadDir: listDir,
-		Run: firstPassBd(t, branches, nil),
+		Beads: firstPassStores(t, branches, nil),
 	}, since)
 	if err != nil {
 		t.Fatalf("MangoFirstPassSection: %v", err)
@@ -279,7 +297,7 @@ func TestMangoFirstPassSectionCountsADroppedBeadAsUnknown(t *testing.T) {
 	)
 	text, err := MangoFirstPassSection(context.Background(), Env{
 		Town: town, ReadFile: os.ReadFile, ReadDir: listDir,
-		Run: func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil },
+		Beads: firstPassStores(t, nil, nil),
 	}, time.Time{})
 	if err != nil {
 		t.Fatalf("MangoFirstPassSection: %v", err)
@@ -334,16 +352,16 @@ func TestMangoFirstPassSectionSaysWhenNothingMerged(t *testing.T) {
 
 func TestMangoFirstPassSectionNeedsItsSeams(t *testing.T) {
 	t.Parallel()
-	run := func(context.Context, []string) ([]byte, error) { return []byte(`[]`), nil }
+	stores := firstPassStores(t, nil, nil)
 	cases := []struct {
 		name string
 		env  Env
 		want string
 	}{
-		{"no town", Env{ReadFile: os.ReadFile, ReadDir: listDir, Run: run}, "Env.Town is unset"},
-		{"no reader", Env{Town: t.TempDir(), ReadDir: listDir, Run: run}, "Env.ReadFile is unset"},
-		{"no directory listing", Env{Town: t.TempDir(), ReadFile: os.ReadFile, Run: run}, "Env.ReadDir is unset"},
-		{"no runner", Env{Town: t.TempDir(), ReadFile: os.ReadFile, ReadDir: listDir}, "Env.Run is unset"},
+		{"no town", Env{ReadFile: os.ReadFile, ReadDir: listDir, Beads: stores}, "Env.Town is unset"},
+		{"no reader", Env{Town: t.TempDir(), ReadDir: listDir, Beads: stores}, "Env.ReadFile is unset"},
+		{"no directory listing", Env{Town: t.TempDir(), ReadFile: os.ReadFile, Beads: stores}, "Env.ReadDir is unset"},
+		{"no store", Env{Town: t.TempDir(), ReadFile: os.ReadFile, ReadDir: listDir}, "Env.Beads is unset"},
 	}
 	for _, c := range cases {
 		c := c
@@ -366,7 +384,7 @@ func TestMangoFirstPassSectionFailsOnUnreadableReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bd := firstPassBd(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil)
+	stores := firstPassStores(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil)
 	cases := []struct {
 		name string
 		env  Env
@@ -374,21 +392,21 @@ func TestMangoFirstPassSectionFailsOnUnreadableReads(t *testing.T) {
 	}{
 		{
 			name: "the review log",
-			env: Env{Town: town, ReadDir: listDir, Run: bd, ReadFile: func(string) ([]byte, error) {
+			env: Env{Town: town, ReadDir: listDir, Beads: stores, ReadFile: func(string) ([]byte, error) {
 				return nil, errors.New("permission denied")
 			}},
 			want: "reviews.jsonl",
 		},
 		{
 			name: "the landings directory",
-			env: Env{Town: town, ReadFile: os.ReadFile, Run: bd, ReadDir: func(string) ([]DirEntry, error) {
+			env: Env{Town: town, ReadFile: os.ReadFile, Beads: stores, ReadDir: func(string) ([]DirEntry, error) {
 				return nil, errors.New("permission denied")
 			}},
 			want: "landings directory",
 		},
 		{
 			name: "a landing log",
-			env: Env{Town: town, ReadDir: listDir, Run: bd, ReadFile: func(path string) ([]byte, error) {
+			env: Env{Town: town, ReadDir: listDir, Beads: stores, ReadFile: func(path string) ([]byte, error) {
 				if path == file.Path {
 					return nil, errors.New("permission denied")
 				}
@@ -397,18 +415,11 @@ func TestMangoFirstPassSectionFailsOnUnreadableReads(t *testing.T) {
 			want: "landings file",
 		},
 		{
-			name: "a bd read that failed",
-			env: Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: func(context.Context, []string) ([]byte, error) {
-				return nil, errors.New("dolt is down")
+			name: "a bead read that failed",
+			env: Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Beads: func(context.Context, string) BeadStore {
+				return failingStore{err: errors.New("dolt is down")}
 			}},
 			want: "bd show",
-		},
-		{
-			name: "a bd read that is not a bead list",
-			env: Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: func(context.Context, []string) ([]byte, error) {
-				return []byte(`null`), nil
-			}},
-			want: "not a bead list",
 		},
 	}
 	for _, c := range cases {
@@ -431,7 +442,7 @@ func TestMangoFirstPassSectionRefusesAFileThatNamesNoRig(t *testing.T) {
 	town := firstPassTown(t, nil)
 	writeTownFile(t, filepath.Join(constants.TownRuntimePath(town), "landings", ".jsonl"), "")
 	_, err := MangoFirstPassSection(context.Background(), Env{
-		Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: firstPassBd(t, nil, nil),
+		Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Beads: firstPassStores(t, nil, nil),
 	}, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "landings file") {
 		t.Fatalf("err = %v, want a refusal naming the landings file", err)
@@ -439,11 +450,11 @@ func TestMangoFirstPassSectionRefusesAFileThatNamesNoRig(t *testing.T) {
 }
 
 // TestMangoFirstPassSectionReadsBeadsInChunks holds the store read to bounded
-// command lines: a town whose merged beads outnumber reviewBeadChunk is one bd
-// call per chunk, never one call carrying every id.
+// reads: 130 distinct bead ids in one store are three store calls of 64, 64 and
+// 2, never one call carrying every id.
 func TestMangoFirstPassSectionReadsBeadsInChunks(t *testing.T) {
 	t.Parallel()
-	const beads = 2*reviewBeadChunk + 2
+	const beads = 2*storeShowChunk + 2
 	landings := make([]land.LandingRecord, 0, beads)
 	reviews := make([]land.ReviewRecord, 0, beads)
 	branches := make(map[string]string, beads)
@@ -457,17 +468,18 @@ func TestMangoFirstPassSectionReadsBeadsInChunks(t *testing.T) {
 	var calls [][]string
 	text, err := MangoFirstPassSection(context.Background(), Env{
 		Town: town, ReadFile: os.ReadFile, ReadDir: listDir,
-		Run: firstPassBd(t, branches, &calls),
+		Beads: firstPassStores(t, branches, &calls),
 	}, time.Time{})
 	if err != nil {
 		t.Fatalf("MangoFirstPassSection: %v", err)
 	}
-	if want := (beads + reviewBeadChunk - 1) / reviewBeadChunk; len(calls) != want {
-		t.Errorf("bd show ran %d time(s), want one read per chunk of %d ids (%d)", len(calls), reviewBeadChunk, want)
+	wantSizes := []int{64, 64, 2}
+	if len(calls) != len(wantSizes) {
+		t.Fatalf("the store was read %d time(s), want %d reads of %v", len(calls), len(wantSizes), wantSizes)
 	}
 	for i, asked := range calls {
-		if len(asked) > reviewBeadChunk {
-			t.Errorf("call %d asked for %d ids, want at most %d", i, len(asked), reviewBeadChunk)
+		if len(asked) != wantSizes[i] {
+			t.Errorf("read %d asked for %d ids, want %d", i, len(asked), wantSizes[i])
 		}
 	}
 	want := fmt.Sprintf("| polecat | %d | %d | 100.0%% | %d | 1.0 |", beads, beads, beads)
@@ -482,7 +494,7 @@ func TestMangoFirstPassSectionReadsBeadsInChunks(t *testing.T) {
 func TestMangoFirstPassSectionRefusesAMissingLandingsDirectory(t *testing.T) {
 	t.Parallel()
 	_, err := mangoFirstPassSection(context.Background(), Env{
-		Town: t.TempDir(), ReadFile: os.ReadFile, Run: firstPassBd(t, nil, nil),
+		Town: t.TempDir(), ReadFile: os.ReadFile, Beads: firstPassStores(t, nil, nil),
 		ReadDir: func(string) ([]DirEntry, error) { return nil, fs.ErrNotExist },
 	}, time.Time{}, nil, 0)
 	if err == nil || !strings.Contains(err.Error(), "landings directory") {
@@ -499,7 +511,7 @@ func TestFirstPassReviewsRefusesARigThatIsNotOnePathElement(t *testing.T) {
 	review.Rig = "../evil"
 	_, err := firstPassReviews(context.Background(), Env{
 		Town: t.TempDir(), ReadFile: os.ReadFile, ReadDir: listDir,
-		Run: firstPassBd(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil),
+		Beads: firstPassStores(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil),
 	}, []land.ReviewRecord{review}, []MergedBead{{Rig: "../evil", Bead: "gt-a"}})
 	if err == nil || !strings.Contains(err.Error(), "not one path element") {
 		t.Fatalf("err = %v, want a refusal naming the rig", err)
@@ -546,8 +558,9 @@ func TestMangoSectionCarriesTheFirstPassTable(t *testing.T) {
 	town := firstPassTown(t, map[string][]land.LandingRecord{
 		"gastown": {firstPassLanded("gt-a", firstPassAt)},
 	}, firstPassVerdict("gt-a", 1, land.VerdictApprove))
-	run := rejectionDigestRunner(t, firstPassBd(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil), mango)
-	text, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: run},
+	env := Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: mango,
+		Beads: firstPassStores(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil)}
+	text, err := MangoSection(context.Background(), env,
 		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
 	if err != nil {
 		t.Fatalf("MangoSection: %v", err)
@@ -560,7 +573,7 @@ func TestMangoSectionCarriesTheFirstPassTable(t *testing.T) {
 			t.Errorf("text = %q, want it to hold %q", text, want)
 		}
 	}
-	windowed, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: run},
+	windowed, err := MangoSection(context.Background(), env,
 		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1, Since: firstPassAt.Add(time.Hour)})
 	if err != nil {
 		t.Fatalf("MangoSection: %v", err)
@@ -622,10 +635,11 @@ func TestMangoSectionReportsARejectionTableFailure(t *testing.T) {
 	dir := mangoSectionTown(t, mangoSectionRows())
 	mango, _ := mangoSectionRun(t, mangoSectionResult)
 	town := rejectionTown(t, rejectionRecord("gt-a", 1, "opus"))
-	run := rejectionDigestRunner(t, func(context.Context, []string) ([]byte, error) {
-		return nil, errors.New("dolt is down")
-	}, mango)
-	_, err := MangoSection(context.Background(), Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: run},
+	env := Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir, Run: mango,
+		Beads: func(context.Context, string) BeadStore {
+			return failingStore{err: errors.New("dolt is down")}
+		}}
+	_, err := MangoSection(context.Background(), env,
 		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1})
 	if err == nil || !strings.Contains(err.Error(), "bd show") {
 		t.Fatalf("err = %v, want a refusal naming the bd read", err)
@@ -657,7 +671,6 @@ func TestMangoSectionReadsTheReviewLogOnce(t *testing.T) {
 	town := firstPassTown(t, map[string][]land.LandingRecord{
 		"gastown": {firstPassLanded("gt-a", firstPassAt)},
 	}, firstPassVerdict("gt-a", 1, land.VerdictApprove))
-	run := rejectionDigestRunner(t, firstPassBd(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil), mango)
 	reviewLog := land.TownReviewsFile(town).Path
 	reads := 0
 	readFile := func(path string) ([]byte, error) {
@@ -666,7 +679,9 @@ func TestMangoSectionReadsTheReviewLogOnce(t *testing.T) {
 		}
 		return os.ReadFile(path)
 	}
-	if _, err := MangoSection(context.Background(), Env{Town: town, ReadFile: readFile, ReadDir: listDir, Run: run},
+	env := Env{Town: town, ReadFile: readFile, ReadDir: listDir, Run: mango,
+		Beads: firstPassStores(t, map[string]string{"gt-a": "polecat/alfa/gt-a"}, nil)}
+	if _, err := MangoSection(context.Background(), env,
 		dir, "/opt/mango", MangoSectionOptions{MinPositives: 1}); err != nil {
 		t.Fatalf("MangoSection: %v", err)
 	}
