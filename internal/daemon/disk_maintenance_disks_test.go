@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -289,6 +291,59 @@ func TestDiskMaintenanceFailedClearStaysOpen(t *testing.T) {
 	d.runDiskMaintenance()
 	if diskMaintAlertIsOpen(f.notify, "diskmaint:mac") {
 		t.Error("the alert is still open after a readable pass under the clear threshold")
+	}
+}
+
+// TestDiskMaintenanceFailedClearIsLogged: a clear the notifier refused is
+// named in the patrol's log, so a key the town still holds is not dropped in
+// silence. The raise half logs its own refusals, and the clear half does too.
+func TestDiskMaintenanceFailedClearIsLogged(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	f.readings = []disks.Reading{{Name: "mac", UsedPct: 85}}
+	d.runDiskMaintenance()
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:mac") {
+		t.Fatal("no alert open after a disk read at 85%, want diskmaint:mac")
+	}
+
+	f.notify.Fail(notifyfake.KindClear, errors.New("gt clear: exit status 1"))
+	diskMaintNextDay(d, 1)
+	f.readings = []disks.Reading{{Name: "mac", UsedPct: 65}}
+	d.runDiskMaintenance()
+
+	if !strings.Contains(logs.String(), "disk_maintenance: alert diskmaint:mac was not cleared") {
+		t.Errorf("log = %q, want the refused clear named with its key", logs.String())
+	}
+}
+
+// TestDiskMaintenanceProductionDFVectors: the patrol measures each watched
+// disk with its production command line, so a renamed container, profile or
+// mount point fails here rather than in a pass that reads the wrong filesystem
+// or none.
+func TestDiskMaintenanceProductionDFVectors(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	d.diskMaint.readDisks = nil // the production read, with these df commands
+	var ran [][]string
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		ran = append(ran, cmd.Args)
+		return []byte(diskMaintHealthyDF), nil, nil
+	}
+
+	d.runDiskMaintenance()
+
+	want := [][]string{
+		{"df", "-P", "/"},
+		{"colima", "ssh", "-p", "gt-sbx", "--", "df", "-P", "/mnt/lima-colima-gt-sbx"},
+		{"docker", "exec", "forgejo-runner-daemon-1", "df", "-P", "/"},
+	}
+	if len(ran) != len(want) {
+		t.Fatalf("ran %v, want the %d disks' df commands", ran, len(want))
+	}
+	for i := range want {
+		if !slices.Equal(ran[i], want[i]) {
+			t.Errorf("disk %d ran %v, want %v", i, ran[i], want[i])
+		}
 	}
 }
 
