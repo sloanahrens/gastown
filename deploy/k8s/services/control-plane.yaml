@@ -2,9 +2,10 @@
 # from the kind node (host.lima.internal). They are ExternalName Services, so
 # the cluster DNS answers with the Mac's address and the sandbox policy pins
 # that address (see render-policy.sh). `control-plane` serves a profile with a
-# single control_plane_host; `dolt`, `forgejo` and `tracker` are the names to use
-# once the profile can name each service separately. Moving a service into the cluster later
-# replaces its ExternalName with a selector Service of the same name.
+# single control_plane_host; `dolt`, `forgejo` and `tracker` are the names to
+# use once the profile can name each service separately. Moving a service into
+# the cluster later replaces its ExternalName with a selector Service of the
+# same name.
 apiVersion: v1
 kind: Service
 metadata: {name: control-plane, namespace: openshell}
