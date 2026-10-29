@@ -64,11 +64,7 @@ detached, escalating a failure under `install-gt:image-build-failed`.
    built there, and retries a publish that did not complete for an image that is
    already current.
 
-The build's worktree is a detached one on the rig repo's shared `.repo.git`. No
-cleanup path treats it as a stray: the reaper and `heldByOtherWorktree` only
-`git worktree prune` registrations whose directory is gone (the directory exists
-for the whole build), they match worktrees by branch name (a detached HEAD has
-none), and the local-branch prune reads the list only to protect branches.
+Before adding a cleanup path that could touch the build's worktree, read `docs/polecat-image-notes.md`.
 
 ## Publishing to a registry
 
