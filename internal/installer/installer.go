@@ -4,8 +4,8 @@
 //
 // A run names one result in its last line (Result) and ends with one of the
 // four statuses its callers map (Exit). A run that ends without naming a result
-// is reported as failed/unexpected by OnExit, the counterpart of the script's
-// EXIT trap.
+// is reported as failed/unexpected by OnExit, which the program's main defers so
+// it runs on every way out.
 package installer
 
 import (
@@ -46,7 +46,7 @@ type Result struct {
 	Reason string
 }
 
-// Line renders r as the script's igt_result does: four fields, "-" for one it
+// Line renders r as one RESULT line: four fields, "-" for one it
 // has nothing to say about, which is how the daemon reads it as absent.
 func (r Result) Line() string {
 	return fmt.Sprintf("install-gt: RESULT %s %s %s %s",
@@ -60,7 +60,7 @@ func orDash(s string) string {
 	return s
 }
 
-// Log writes one [install-gt] line, the script's log().
+// Log writes one [install-gt] line.
 func (c *Contract) Log(parts ...string) {
 	fmt.Fprintln(c.stdout(), "[install-gt] "+strings.Join(parts, " "))
 }
@@ -71,7 +71,8 @@ func (c *Contract) Report(r Result) {
 	c.reported = true
 }
 
-// Finish reports r and returns code: the script's `result_line ...; exit N`.
+// Finish reports r and returns code: one call site states both, so the status
+// cannot drift from the line.
 func (c *Contract) Finish(r Result, code Exit) Exit {
 	c.Report(r)
 	return code

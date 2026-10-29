@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// The four result lines below are the ones the deleted shell installer's test
-// pinned for the same situations, so a field that stops being written shows up
+// The four result lines below pin the line the daemon parses for the four
+// situations an install ends in, so a field that stops being written shows up
 // here.
 func TestResultLine(t *testing.T) {
 	t.Parallel()
@@ -73,8 +73,8 @@ func TestLog(t *testing.T) {
 	}
 }
 
-// Finish is the script's `result_line ...; exit N`: one call site states both,
-// so the status cannot drift from the line.
+// Finish reports the line and returns the status from one call site, so the
+// status cannot drift from the line.
 func TestFinish(t *testing.T) {
 	t.Parallel()
 	var out strings.Builder
