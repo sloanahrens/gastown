@@ -193,6 +193,71 @@ func TestVerdictLedgerSave(t *testing.T) {
 		}
 	})
 
+	t.Run("publishes through a rename, so the file it replaces keeps its bytes", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "verdicts.json")
+		previous := filepath.Join(dir, "previous.json")
+		// The second name for the target's inode stands in for a reader that
+		// opened the ledger before the save. A writer that truncates the target
+		// in place rewrites that inode, so the reader's copy would change too.
+		before := []byte(`{"saved_at":"2026-10-29T12:00:00Z","verdicts":{}}`)
+		if err := os.WriteFile(previous, before, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(previous, path); err != nil {
+			t.Fatalf("hard link the old ledger into place: %v", err)
+		}
+
+		l := &Ledger{}
+		l.Record(at, []Entry{{Bead: "gt-a", Rig: "gastown", Class: "skipped", Reason: "held: needs human"}})
+		if err := l.Save(path); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+
+		if raw, err := os.ReadFile(previous); err != nil || string(raw) != string(before) {
+			t.Fatalf("the pre-save reader's bytes = %q, %v, want them untouched", raw, err)
+		}
+		got, err := LoadLedger(path)
+		if err != nil {
+			t.Fatalf("LoadLedger: %v", err)
+		}
+		if v, ok := got.Verdicts["gt-a"]; !ok || v.Class != "skipped" {
+			t.Fatalf("loaded verdicts = %v, want the record the save published", got.Verdicts)
+		}
+	})
+
+	t.Run("a rename the filesystem refuses leaves no temp file and the target as it was", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// A directory in the target's place is a rename the kernel refuses once
+		// the temp file is already written, so the failure lands between the two
+		// steps a reader must never see split.
+		path := filepath.Join(dir, "verdicts.json")
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(path, "marker")
+		if err := os.WriteFile(marker, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := (&Ledger{}).Save(path); err == nil {
+			t.Fatal("Save renamed over a directory, want an error")
+		}
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != "verdicts.json" {
+			t.Fatalf("directory holds %v, want only the target the rename could not replace", names(entries))
+		}
+		if raw, err := os.ReadFile(marker); err != nil || string(raw) != "x" {
+			t.Fatalf("marker = %q, %v, want the target untouched", raw, err)
+		}
+	})
+
 	t.Run("writes verdicts as an object, never null", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "verdicts.json")
