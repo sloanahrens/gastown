@@ -53,6 +53,7 @@ Infrastructure checks:
   - dolt-remote-leftovers    Warn on Dolt remotes, git-remote-cache dirs and sync.remote (report only)
   - dolt-commit-rate         Warn when a Dolt database made more commits in 24h than the configured limit
   - dolt-pause-marker        Warn on a stale or unreadable daemon/dolt.pause marker
+  - tracker                  Check the town tracker answers ready (database ping and write probe)
 
 Cleanup checks (fixable):
   - orphan-sessions          Detect orphaned tmux sessions
@@ -348,6 +349,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewStaleAgentBeadsCheck())
 	d.Register(doctor.NewAgentBeadsShadowCheck())
 	d.Register(doctor.NewTrackerKVCheck())
+	d.Register(doctor.NewTrackerCheck())
 	d.Register(doctor.NewRigBeadsCheck())
 	d.Register(doctor.NewOrphanedRoleOverridesCheck())
 

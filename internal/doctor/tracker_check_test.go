@@ -1,0 +1,181 @@
+package doctor
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+)
+
+// trackerEnv answers the tracker settings from a map, so the check under test
+// never reads the host's environment.
+func trackerEnv(env map[string]string) func(string) string {
+	return func(k string) string { return env[k] }
+}
+
+// trackerReadyServer is a tracker whose /readyz answers the given status code
+// and body; every other path is a 404, so a check that asks the wrong route
+// fails loudly.
+func trackerReadyServer(t *testing.T, code int, body string) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/readyz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// trackerTown is a town whose route table puts one rig on the tracker.
+func trackerTown(t *testing.T) string {
+	t.Helper()
+	return writeTownRoutes(t, `{"prefix":"tr-","path":"trackerrig","backend":"tracker"}`+"\n")
+}
+
+// A ready tracker is OK, with the schema level the server reported.
+func TestTrackerCheckReadyIsOK(t *testing.T) {
+	t.Parallel()
+	ts := trackerReadyServer(t, http.StatusOK, `{"status":"ready","schema_level":3}`)
+	c := NewTrackerCheck()
+	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": ts.URL, "TRACKER_TOKEN": "trk_test"})
+
+	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v (%s), want OK", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "schema level 3") {
+		t.Errorf("message = %q, want the schema level the server reported", res.Message)
+	}
+}
+
+// A tracker that answers not ready is ERROR, carrying the server's reason.
+func TestTrackerCheckNotReadyIsError(t *testing.T) {
+	t.Parallel()
+	ts := trackerReadyServer(t, http.StatusServiceUnavailable,
+		`{"kind":"unavailable","message":"database does not accept writes"}`)
+	c := NewTrackerCheck()
+	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": ts.URL, "TRACKER_TOKEN": "trk_test"})
+
+	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
+	if res.Status != StatusError {
+		t.Fatalf("status = %v (%s), want ERROR for a not-ready tracker", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "database does not accept writes") {
+		t.Errorf("message = %q, want the server's reason", res.Message)
+	}
+}
+
+// A 200 that does not say ready is ERROR too: the check reads the answer, not
+// just the status code.
+func TestTrackerCheckStatusThatIsNotReadyIsError(t *testing.T) {
+	t.Parallel()
+	ts := trackerReadyServer(t, http.StatusOK, `{"status":"starting","schema_level":3}`)
+	c := NewTrackerCheck()
+	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": ts.URL, "TRACKER_TOKEN": "trk_test"})
+
+	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
+	if res.Status != StatusError {
+		t.Fatalf("status = %v (%s), want ERROR for an answer that is not ready", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "starting") {
+		t.Errorf("message = %q, want the status the server answered", res.Message)
+	}
+}
+
+// A tracker nothing listens on is ERROR, not a pass.
+func TestTrackerCheckUnreachableIsError(t *testing.T) {
+	t.Parallel()
+	ts := trackerReadyServer(t, http.StatusOK, `{"status":"ready","schema_level":3}`)
+	url := ts.URL
+	ts.Close()
+
+	c := NewTrackerCheck()
+	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": url, "TRACKER_TOKEN": "trk_test"})
+
+	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
+	if res.Status != StatusError {
+		t.Fatalf("status = %v (%s), want ERROR for an unreachable tracker", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "not ready") {
+		t.Errorf("message = %q, want it to say the tracker is not ready", res.Message)
+	}
+}
+
+// A town with no tracker-backed rig is not applicable: skipped, not OK (the
+// check proved nothing) and not an error, and the tracker is never probed.
+func TestTrackerCheckNotApplicableWithoutTrackerRigs(t *testing.T) {
+	t.Parallel()
+	town := writeTownRoutes(t, `{"prefix":"dl-","path":"doltrig"}`+"\n")
+	c := NewTrackerCheck()
+	c.getenv = func(k string) string {
+		t.Errorf("read %s with no rig on the tracker; the check must not probe", k)
+		return ""
+	}
+
+	res := c.Run(&CheckContext{TownRoot: town})
+	if res.Status != StatusSkipped {
+		t.Fatalf("status = %v (%s), want skipped when no rig is on the tracker", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "not applicable") {
+		t.Errorf("message = %q, want it to say the check is not applicable", res.Message)
+	}
+}
+
+// A tracker rig with no endpoint configured is ERROR: the rig has nowhere to
+// read or write, which is what the check exists to surface.
+func TestTrackerCheckMissingURLIsError(t *testing.T) {
+	t.Parallel()
+	c := NewTrackerCheck()
+	c.getenv = trackerEnv(map[string]string{"TRACKER_TOKEN": "trk_test"})
+
+	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
+	if res.Status != StatusError {
+		t.Fatalf("status = %v (%s), want ERROR without TRACKER_URL", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "TRACKER_URL") {
+		t.Errorf("message = %q, want it to name the missing setting", res.Message)
+	}
+}
+
+// A tracker rig with no token is ERROR too: no rig on the tracker could be
+// opened without one, so an OK here would hide a broken town.
+func TestTrackerCheckMissingTokenIsError(t *testing.T) {
+	t.Parallel()
+	c := NewTrackerCheck()
+	c.getenv = trackerEnv(map[string]string{"TRACKER_URL": "http://127.0.0.1:1"})
+
+	res := c.Run(&CheckContext{TownRoot: trackerTown(t)})
+	if res.Status != StatusError {
+		t.Fatalf("status = %v (%s), want ERROR without a token", res.Status, res.Message)
+	}
+}
+
+// An unreadable route table leaves the check unable to say any rig is on the
+// tracker, so it reports skipped with the reason rather than not-applicable.
+func TestTrackerCheckUnreadableRoutesIsSkipped(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the routes file belongs cannot be read as one.
+	if err := os.MkdirAll(filepath.Join(town, ".beads", beads.RoutesFileName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := NewTrackerCheck()
+	c.getenv = trackerEnv(nil)
+
+	res := c.Run(&CheckContext{TownRoot: town})
+	if res.Status != StatusSkipped {
+		t.Fatalf("status = %v (%s), want skipped with an unreadable routes file", res.Status, res.Message)
+	}
+	if len(res.Details) == 0 {
+		t.Error("details are empty, want the read error")
+	}
+}
