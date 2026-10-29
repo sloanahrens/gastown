@@ -1,10 +1,11 @@
-package flagrecord
+package bdshim
 
 import (
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // exitError is a bd exit status, matched the way *exec.ExitError is. Only a
@@ -37,7 +38,7 @@ func TestExitResultTurnsHowBDEndedIntoARecording(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			stdout, exit, err := exitResult(out, tc.runErr, tc.timedOut)
+			stdout, exit, err := exitResult(out, tc.runErr, tc.timedOut, runLimit)
 			if tc.wantErr == "" {
 				if err != nil || exit != tc.wantExit || string(stdout) != string(out) {
 					t.Errorf("exitResult = (%q, %d, %v), want bd's output and exit %d", stdout, exit, err, tc.wantExit)
@@ -51,5 +52,19 @@ func TestExitResultTurnsHowBDEndedIntoARecording(t *testing.T) {
 				t.Errorf("exitResult returned %q on failure, want no output recorded", stdout)
 			}
 		})
+	}
+}
+
+// TestExecRunnerStopsOnceTheBudgetIsSpent: the walk's whole budget, not only
+// each run, bounds a recording, so a bd that answers each help slowly cannot
+// hold a doctor run command after command. The run is refused before the
+// binary is exec'd, which the unfindable path proves.
+func TestExecRunnerStopsOnceTheBudgetIsSpent(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	run := execRunner("/nonexistent/bd", func() time.Time { return now })
+	now = now.Add(recordBudget)
+	if _, _, err := run("", []string{"version"}); err == nil || !strings.Contains(err.Error(), "took longer than") {
+		t.Fatalf("run after the budget = %v, want the budget named", err)
 	}
 }

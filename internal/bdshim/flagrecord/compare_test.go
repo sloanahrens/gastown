@@ -104,6 +104,35 @@ func TestCompareNamesAReorderedOperand(t *testing.T) {
 	}
 }
 
+// TestCompareNamesARepeatedOperand: rows that hold the same tokens but a
+// different number of them meet only past the end of the shorter one, which
+// the comparison reads as a difference rather than indexing off the row.
+func TestCompareNamesARepeatedOperand(t *testing.T) {
+	t.Parallel()
+	repeated := strings.Replace(recordedFile, "operand\tcreate\t[title]\n", "operand\tcreate\t[title] [title]\n", 1)
+	tests := []struct {
+		name      string
+		recorded  string
+		installed string
+		wantInRec bool
+	}{
+		{"the recorded row repeats the token", repeated, recordedFile, true},
+		{"bd's row repeats the token", recordedFile, repeated, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			drift, err := Compare([]byte(tc.recorded), []byte(tc.installed))
+			if err != nil {
+				t.Fatalf("Compare = %v, want no error", err)
+			}
+			if drift == nil || drift.Kind != rowOperand || drift.Flag != "[title]" || drift.InRecorded != tc.wantInRec {
+				t.Fatalf("drift = %+v, want the extra [title] named on the side that repeats it", drift)
+			}
+		})
+	}
+}
+
 // TestCompareNamesAnAlias: an alias row holds a command path rather than a
 // flag, and the report reads it as one.
 func TestCompareNamesAnAlias(t *testing.T) {

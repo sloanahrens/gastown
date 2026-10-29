@@ -1,7 +1,9 @@
 package doctor
 
 import (
+	"bytes"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
@@ -122,6 +124,177 @@ func TestBdShimFlags_ComparesAgainstTheEmbeddedTable(t *testing.T) {
 	}
 	if !strings.Contains(result.Message, want.String()) {
 		t.Errorf("message %q lacks %q, the difference from the embedded table", result.Message, want.String())
+	}
+}
+
+// TestBdShimFlags_EmbeddedTableIsBDsRecording: the table compiled into gt is
+// what bd's help records, not a copy someone edited. A fake bd answering with
+// the help the embedded rows describe records the same bytes.
+func TestBdShimFlags_EmbeddedTableIsBDsRecording(t *testing.T) {
+	t.Parallel()
+	recorded, err := flagrecord.RecordFlagFile(recordedHelp(t, bdshim.RecordedFlagFile).run)
+	if err != nil {
+		t.Fatalf("recording the fake bd's help: %v", err)
+	}
+	if !bytes.Equal(recorded, bdshim.RecordedFlagFile) {
+		t.Errorf("the embedded table is not what its help records:\n--- recorded ---\n%s\n--- embedded ---\n%s", recorded, bdshim.RecordedFlagFile)
+	}
+}
+
+// recordedHelp turns a recorded flag table back into the bd help it was
+// recorded from: one page per command the table names, holding that command's
+// flags, aliases, operands and subcommands, so a test drives the check with a
+// fake bd whose help records exactly the table it was built from.
+func recordedHelp(t *testing.T, table []byte) helpBD {
+	t.Helper()
+	type command struct {
+		value, boolean, operands, aliases []string
+	}
+	commands := map[string]*command{}
+	get := func(path string) *command {
+		if commands[path] == nil {
+			commands[path] = &command{}
+		}
+		return commands[path]
+	}
+	var persistent []string
+	version := ""
+	for _, line := range strings.Split(string(table), "\n") {
+		if strings.HasPrefix(line, "#") {
+			if fields := strings.Fields(line); len(fields) > 3 && fields[2] == "bd" {
+				version = fields[3]
+			}
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		switch fields[0] {
+		case "persistent":
+			persistent = strings.Fields(fields[1])
+		case "alias":
+			words := strings.Fields(fields[1])
+			canonical := get(fields[2])
+			canonical.aliases = append(canonical.aliases, words[len(words)-1])
+		case "operand":
+			get(fields[1]).operands = strings.Fields(fields[2])
+		case "value":
+			get(fields[1]).value = strings.Fields(fields[2])
+		case "bool":
+			get(fields[1]).boolean = strings.Fields(fields[2])
+		default:
+			t.Fatalf("%q is not a recorded flag row", line)
+		}
+	}
+	if version == "" {
+		t.Fatal("the table's heading names no bd version")
+	}
+	// pages are every command with a row, plus the ancestors the walk reaches
+	// them through.
+	pages := map[string]bool{}
+	for path := range commands {
+		pages[path] = true
+		words := strings.Fields(path)
+		for n := 1; n < len(words); n++ {
+			pages[strings.Join(words[:n], " ")] = true
+		}
+	}
+	children := map[string][]string{}
+	for path := range pages {
+		words := strings.Fields(path)
+		parent := strings.Join(words[:len(words)-1], " ")
+		children[parent] = append(children[parent], words[len(words)-1])
+	}
+	for parent := range children {
+		sort.Strings(children[parent])
+	}
+
+	// A shorthand whose long name the row leaves out is written beside filler:
+	// a persistent flag when there is one, since the recording drops it.
+	filler := "--shim-unlisted"
+	if len(persistent) > 0 {
+		filler = persistent[0]
+	}
+	help := helpBD{"version": "bd version " + version + " (dev) schema<=66\n"}
+	root := "Usage:\n  bd [flags]\n\nAvailable Commands:\n"
+	for _, child := range children[""] {
+		root += "  " + child + "   commands\n"
+	}
+	root += "\nFlags:\n" + strings.Join(helpFlagLines(persistent, "string", filler), "\n") + "\n"
+	help["--help"] = root
+	for path := range pages {
+		words := strings.Fields(path)
+		own := commands[path]
+		var page strings.Builder
+		page.WriteString(strings.Join(words, " ") + " commands\n\nUsage:\n  bd " + path)
+		if own != nil && len(own.operands) > 0 {
+			page.WriteString(" " + strings.Join(own.operands, " "))
+		}
+		page.WriteString(" [flags]\n")
+		if own != nil && len(own.aliases) > 0 {
+			page.WriteString("\nAliases:\n  " + words[len(words)-1] + ", " + strings.Join(own.aliases, ", ") + "\n")
+		}
+		page.WriteString("\nFlags:\n")
+		if own != nil {
+			for _, line := range helpFlagLines(own.value, "string", filler) {
+				page.WriteString(line + "\n")
+			}
+			for _, line := range helpFlagLines(own.boolean, "", filler) {
+				page.WriteString(line + "\n")
+			}
+		}
+		if len(children[path]) > 0 {
+			page.WriteString("\nAvailable Commands:\n")
+			for _, child := range children[path] {
+				page.WriteString("  " + child + "   commands\n")
+			}
+		}
+		help[path+" --help"] = page.String()
+	}
+	return help
+}
+
+// helpFlagLines writes one cobra flag line per long flag, with a shorthand on
+// the flags that have one, and every other shorthand paired with filler. Which
+// long a shorthand is written beside does not change the row the walker
+// records: a row holds both spellings either way, minus the filler's, which
+// the recording drops as persistent or undocumented.
+func helpFlagLines(tokens []string, typ, filler string) []string {
+	var longs, shorthands []string
+	for _, tok := range tokens {
+		if strings.HasPrefix(tok, "--") {
+			longs = append(longs, tok)
+		} else {
+			shorthands = append(shorthands, tok)
+		}
+	}
+	lines := make([]string, 0, len(longs)+len(shorthands))
+	for n, long := range longs {
+		name := long
+		if n < len(shorthands) {
+			name = shorthands[n] + ", " + long
+		}
+		lines = append(lines, strings.TrimRight("  "+name+" "+typ, " "))
+	}
+	for _, short := range shorthands[min(len(shorthands), len(longs)):] {
+		lines = append(lines, strings.TrimRight("  "+short+", "+filler+" "+typ, " "))
+	}
+	return lines
+}
+
+// TestBdShimFlags_ReportsADifferenceOutsideTheRows: when only the file's own
+// wording differs, the report says every row agrees, so the operator is not
+// sent looking for a flag that is already right.
+func TestBdShimFlags_ReportsADifferenceOutsideTheRows(t *testing.T) {
+	t.Parallel()
+	edited := strings.Replace(string(recordHelpBD(t)), "# which walks bd's help", "# which walks the installed bd's help", 1)
+	result := (&BdShimFlagsCheck{run: fakeHelp.run, recorded: []byte(edited)}).Run(&CheckContext{})
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want a warning: %s %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "every recorded row agrees") {
+		t.Errorf("details lack the rows' agreement: %v", result.Details)
 	}
 }
 

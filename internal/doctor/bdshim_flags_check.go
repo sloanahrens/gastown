@@ -59,7 +59,7 @@ func (c *BdShimFlagsCheck) Run(ctx *CheckContext) *CheckResult {
 				Message: "bd is not on PATH, so its help cannot be compared with the shim's flag table",
 			}
 		}
-		run = flagrecord.ExecRunner(path)
+		run = bdshim.ExecRunner(path)
 	}
 	installed, err := flagrecord.RecordFlagFile(run)
 	if err != nil {
@@ -104,6 +104,10 @@ func (c *BdShimFlagsCheck) drift(recorded, installed []byte) *CheckResult {
 		result.Message = fmt.Sprintf("%s: %s", result.Message, drift)
 		result.Details = append(result.Details, fmt.Sprintf("recorded: %s", driftRow(drift.Recorded)),
 			fmt.Sprintf("bd's help: %s", driftRow(drift.Installed)))
+	} else {
+		// Every row agrees, so the bytes differ outside them: the operator
+		// needs to know the table itself is not what a recording changes.
+		result.Details = append(result.Details, "every recorded row agrees with bd's help; the difference is in the file's heading or comments")
 	}
 	if recordedVersion != installedVersion {
 		result.Details = append(result.Details, fmt.Sprintf(

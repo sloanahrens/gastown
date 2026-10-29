@@ -135,12 +135,20 @@ func rowDrift(recorded, installed []string) (flag string, inRecorded, differs bo
 		sort.Strings(dropped)
 		return dropped[0], true, true
 	}
-	// The same tokens in another order: only an operand row can hold those,
-	// since the flag rows are sorted.
-	for i := range recorded {
+	// The same tokens in another order, or a token one row repeats: only an
+	// operand row can hold those, since the flag rows are sorted and hold no
+	// repeats. Rows of different lengths meet only at a repeated token, so the
+	// comparison stops at the shorter row and reports what follows it.
+	for i := 0; i < len(recorded) && i < len(installed); i++ {
 		if recorded[i] != installed[i] {
 			return installed[i], false, true
 		}
+	}
+	if len(installed) > len(recorded) {
+		return installed[len(recorded)], false, true
+	}
+	if len(recorded) > len(installed) {
+		return recorded[len(installed)], true, true
 	}
 	return "", false, false
 }
