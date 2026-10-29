@@ -1066,6 +1066,98 @@ func TestHeldBeadsFromSkipsEpics(t *testing.T) {
 	}
 }
 
+// Only a polecat seat holds a candidate: the held read leaves out a handoff
+// bead, the crew session's other beads, and a handoff note any session holds
+// (gt-asvow). Their notes name every file the run touched; the files they
+// change are the polecat's.
+func TestHeldBeadsFromSkipsHandoffAndCrewHeldBeads(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-seat", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
+			Description: "The fix lands in a.go."},
+		beads.Issue{ID: "gt-overseer", Status: string(beads.StatusInProgress), Assignee: "town/crew/overseer",
+			Labels: []string{"handoff"}, Description: "Read a.go today; the log names every file the run touched."},
+		beads.Issue{ID: "gt-crew", Status: beads.StatusHooked, Assignee: "town/crew/dipper",
+			Labels: []string{"gt:task"}, Description: "The crew notes land in a.go."},
+		beads.Issue{ID: "gt-note", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/capable",
+			Labels: []string{"gt:handoff"}, Description: "a.go is where the last session left off."},
+	)
+	got, err := heldBeadsFrom(db, func(string, error) {}, t.TempDir())
+	if err != nil {
+		t.Fatalf("heldBeadsFrom: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gt-seat" {
+		t.Fatalf("held = %+v, want only the polecat seat's work bead", got)
+	}
+}
+
+// The candidate gt-overseer held on 2026-10-28 18:53: a crew session's handoff
+// log named the files the candidate changes, and the tick held it. It
+// dispatches now, while a polecat seat's bead on the same file still holds with
+// the same line (gt-asvow).
+func TestSpecDispatchHoldSkipsHandoffAndCrewHeldBeads(t *testing.T) {
+	t.Parallel()
+	const guard = "internal/daemon/overrun_guard.go"
+	const seat = "gastown/polecats/capable"
+	filing := func(id, created string) specdispatch.Spec {
+		s := cleanSpec(id, 2, created)
+		s.Description = specTestDescription + "\n\nToday " + guard + " (~254) calls Nudge with a 30 s context."
+		return s
+	}
+	// holdingEnv is the tick reading the one rig's held set from a store, the
+	// path production takes.
+	holdingEnv := func(t *testing.T, f *fakeSpecTown, issue beads.Issue) specDispatchEnv {
+		db := beadsfake.New()
+		db.Seed(issue)
+		dir := t.TempDir()
+		env := f.env()
+		env.Held = func(string) ([]specdispatch.HeldBead, error) {
+			return heldBeadsFrom(db, func(string, error) {}, dir)
+		}
+		return env
+	}
+
+	t.Run("a crew session's handoff bead does not hold", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(filing("gt-second", "2026-10-28T18:53:00Z"))
+		env := holdingEnv(t, f, beads.Issue{ID: "gt-overseer", Status: string(beads.StatusInProgress),
+			Assignee: "town/crew/overseer", Labels: []string{"handoff"},
+			Description: "Read " + guard + " today; the log names every file the run touched."})
+		r := runSpecDispatchCycle(env)
+		if got := strings.Join(f.slung, " "); got != "gt-second" {
+			t.Fatalf("slung %q, want the candidate a handoff log only names a file of; report %+v", got, r)
+		}
+	})
+
+	t.Run("a crew session's other bead does not hold", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(filing("gt-second", "2026-10-28T18:53:00Z"))
+		env := holdingEnv(t, f, beads.Issue{ID: "gt-crew", Status: beads.StatusHooked,
+			Assignee: "town/crew/dipper", Labels: []string{"gt:task"},
+			Description: "The crew's own notes land in " + guard + "."})
+		r := runSpecDispatchCycle(env)
+		if got := strings.Join(f.slung, " "); got != "gt-second" {
+			t.Fatalf("slung %q, want the candidate a crew session's bead does not hold; report %+v", got, r)
+		}
+	})
+
+	t.Run("a polecat seat's bead still holds", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(filing("gt-second", "2026-10-28T18:53:00Z"))
+		env := holdingEnv(t, f, beads.Issue{ID: "gt-first", Status: beads.StatusHooked,
+			Assignee: seat, Description: "The fix lands in " + guard + "."})
+		r := runSpecDispatchCycle(env)
+		if len(f.slung) != 0 {
+			t.Fatalf("slung a second filing of a polecat seat's work: %v", f.slung)
+		}
+		want := "gt-second: held: gt-first (held by " + seat + ") is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes"
+		if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
+			t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
+		}
+	})
+}
+
 // specHoldFiles drops a cited claude/docs standard once the bead's Constraints
 // section parses, listed or not: the standards tree lives in ~/.claude and no
 // polecat edits it (gt-kr17g). A section that is missing, empty or unparsed

@@ -312,3 +312,37 @@ func TestHeldOverlapConstrainedDocsPathHolds(t *testing.T) {
 		t.Errorf("HeldOverlap = %q, want %q", got, want)
 	}
 }
+
+// A seat the hold protects is a polecat's, and its bead is not a handoff note:
+// a crew session's bead and a 45 KB handoff log otherwise hold every candidate
+// naming a file they mention (gt-asvow).
+func TestWorksSeat(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		assignee string
+		labels   []string
+		want     bool
+	}{
+		{name: "a polecat seat", assignee: "gastown/polecats/capable", want: true},
+		{name: "a polecat seat's work label", assignee: "gastown/polecats/capable", labels: []string{"rework", "gt:task"}, want: true},
+		{name: "a crew session", assignee: "town/crew/overseer", labels: []string{"gt:task"}, want: false},
+		{name: "a crew handoff bead", assignee: "town/crew/overseer", labels: []string{"handoff"}, want: false},
+		{name: "a polecat's handoff-labeled bead is a handoff note too", assignee: "gastown/polecats/capable", labels: []string{"gt:handoff"}, want: false},
+		{name: "the label's spelling does not matter", assignee: "gastown/polecats/capable", labels: []string{" HANDOFF "}, want: false},
+		{name: "an operator session", assignee: "operator", want: false},
+		{name: "no assignee", assignee: "", want: false},
+		{name: "a polecats path that is not a seat", assignee: "gastown/polecat/capable", want: false},
+		{name: "a seat path inside another directory", assignee: "gastown/crew/polecats/capable", want: false},
+		{name: "a seat with no name", assignee: "gastown/polecats/", want: false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := WorksSeat(c.assignee, c.labels); got != c.want {
+				t.Errorf("WorksSeat(%q, %v) = %v, want %v", c.assignee, c.labels, got, c.want)
+			}
+		})
+	}
+}

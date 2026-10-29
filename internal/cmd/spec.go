@@ -643,15 +643,12 @@ func specPeerHeldBySeat(peer sling.Duplicate, pool []sling.Duplicate) string {
 	}
 	held := make([]specdispatch.HeldBead, 0, len(pool))
 	for _, other := range pool {
-		if other.ID == peer.ID || other.IsEpic() || other.Ready.Assignee == "" || !specSeatHolds(other.Status) {
+		if other.ID == peer.ID || !specSeatHolds(other.Status) {
 			continue
 		}
-		held = append(held, specdispatch.HeldBead{
-			ID:       other.ID,
-			Assignee: other.Ready.Assignee,
-			Paths:    specHoldFiles(other.Refs.Files, other.Ready.Description),
-			Tests:    other.Refs.Tests,
-		})
+		if h, ok := heldBeadFrom(other); ok {
+			held = append(held, h)
+		}
 	}
 	if len(held) == 0 {
 		return ""
@@ -1771,19 +1768,36 @@ func specHoldFiles(files []string, description string) []string {
 // the sling hooks it, and the polecat's claim makes it in_progress.
 var specHeldStatuses = []string{beads.StatusHooked, string(beads.StatusInProgress)}
 
+// heldBeadFrom reduces one compared bead to the fields the overlap hold reads,
+// or reports false when no working seat holds it. An epic is not held: its
+// prose enumerates its children's files, so a claimed epic or wayfinder map
+// would otherwise hold every ready child that names one (the sling-time guard
+// skips epics for the same reason, findDuplicateMatches). Nor is a bead a crew
+// or operator session holds, or a handoff note: only a polecat changes the
+// files it names (specdispatch.WorksSeat, gt-xrog0, gt-asvow).
+//
+// The tick's held read and the guard's peer-hold question both reduce through
+// here, so the two cannot disagree about which beads hold a candidate.
+func heldBeadFrom(c duplicateCandidate) (specdispatch.HeldBead, bool) {
+	if c.IsEpic() || !specdispatch.WorksSeat(c.Ready.Assignee, c.Ready.Labels) {
+		return specdispatch.HeldBead{}, false
+	}
+	return specdispatch.HeldBead{
+		ID:       c.ID,
+		Assignee: c.Ready.Assignee,
+		Paths:    specHoldFiles(c.Refs.Files, c.Ready.Description),
+		Tests:    c.Refs.Tests,
+	}, true
+}
+
 // heldBeadsFrom reduces the beads one store holds to the fields the overlap
 // rule reads. It reads the same refs the sling-time duplicate guard compares
 // (listDuplicateCandidates), so the dispatcher and the guard cannot disagree
 // about what a bead's text names (gt-z80p9).
 //
-// An epic is not held: its prose enumerates its children's files, so a claimed
-// epic or wayfinder map would otherwise hold every ready child that names one.
-// The sling-time guard skips epics for the same reason (findDuplicateMatches).
-//
-// An unassigned bead is not held: hooked or in_progress means a seat only when
-// an assignee names one, and one stray handoff bead would otherwise hold every
-// ready bead naming the same file until an operator closed it by hand
-// (gt-xrog0).
+// Which of those beads holds a candidate is heldBeadFrom's rule: an epic, and
+// any bead no polecat seat holds, is not work on the candidate's files
+// (gt-xrog0, gt-asvow).
 //
 // The read is fresh, not the guard's cached pool: that pool is a snapshot of
 // the database at fetch time, while the seat this hold protects is the bead's
@@ -1795,15 +1809,9 @@ func heldBeadsFrom(store beads.Client, warn func(beadsDir string, err error), be
 	}
 	out := make([]specdispatch.HeldBead, 0, len(cands))
 	for _, c := range cands {
-		if c.IsEpic() || c.Ready.Assignee == "" {
-			continue
+		if h, ok := heldBeadFrom(c); ok {
+			out = append(out, h)
 		}
-		out = append(out, specdispatch.HeldBead{
-			ID:       c.ID,
-			Assignee: c.Ready.Assignee,
-			Paths:    specHoldFiles(c.Refs.Files, c.Ready.Description),
-			Tests:    c.Refs.Tests,
-		})
 	}
 	return out, nil
 }

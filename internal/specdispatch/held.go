@@ -25,6 +25,40 @@ type HeldBead struct {
 	Tests []string
 }
 
+// WorksSeat reports whether a bead with this assignee and these labels is work
+// on a seat the overlap hold protects: a polecat's, never a crew or operator
+// session's, and never a handoff note's (gt-asvow).
+//
+// A caller reads most of the held set from a store, where a bead in flight can
+// belong to any session in town. Only a polecat changes the files a candidate
+// names; a crew or operator session holds its own bead for reasons of its own,
+// and a handoff bead's notes are a session log that names every file the run
+// touched without changing any of them, so letting one through would block
+// every candidate naming a file its session has read.
+func WorksSeat(assignee string, labels []string) bool {
+	parts := strings.Split(strings.TrimSpace(assignee), "/")
+	if len(parts) != 3 || parts[0] == "" || parts[1] != "polecats" || parts[2] == "" {
+		return false
+	}
+	for _, label := range labels {
+		if isHandoffLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// isHandoffLabel reports whether one label marks a bead as a handoff note. The
+// town spells a handoff bead's label both ways — a crew session's bead wears
+// "handoff", the runtime families in constants carry "gt:handoff" (gt-asvow).
+func isHandoffLabel(label string) bool {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "handoff", "gt:handoff":
+		return true
+	}
+	return false
+}
+
 // maxNamedHeldSignals bounds the shared paths, and separately the shared
 // tests, that the hold line names, so a pair of beads describing an area
 // rather than a defect does not turn a skip line into a wall
