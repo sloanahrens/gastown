@@ -220,27 +220,56 @@ button.jvfold:hover{color:var(--text)}
 .mgnot.jvstale .mgnotlabel{color:var(--dim)}
 .mgnotpos{margin-right:8px}
 .mgnotwhy{overflow-wrap:anywhere}
-/* The Mango table takes its column widths from the shares below rather than
-   from what its cells hold, so a long target label or condition breaks inside
-   its own column instead of widening the row and squeezing the best box to a
-   sliver. The box carries the panel's longest prose — a condition runs to 240
-   characters — so it takes the widest column, and every prose cell breaks
-   anywhere so no word crosses the panel's right edge (gt-6q7zj). The rate
-   takes a share as wide as the evidence's, enough for "vs 24.3% across all
-   recent landings" to read in two lines, and the interval takes the narrowest
-   share — it draws a bar and no text, and that bar is capped at its column's
-   width rather than holding the column open at 120px (gt-g4vif). */
+/* The Mango table takes its column widths from the shares below, not from what
+   its cells hold, so a long target label or condition wraps inside its own
+   column and the row never widens past the panel. The box carries the panel's
+   longest prose — a condition runs to 240 characters — so it takes the widest
+   column, and a prose cell wraps so no word crosses the panel's right edge
+   (gt-6q7zj). The rate takes a share as wide as the evidence's, enough for
+   "vs 24.3% across all recent landings" to read in two lines, and the interval
+   takes the narrowest, since it draws a bar and no text (gt-g4vif). A chip is
+   one token and keeps to one line, and the verdict column also keeps a floor
+   in em as wide as its chip; a target name wraps between words and inside a
+   word only when that word is longer than its column. The interval header
+   draws in a column narrower than its word, so it clips inside its own cell
+   and the whole word rides in the cell's title (gt-c6ge9). */
 .mgtable{table-layout:fixed;width:100%}
-.mgtable .mgc-target{width:12%}
-.mgtable .mgc-verdict{width:12%}
-.mgtable .mgc-rate{width:23%}
+.mgtable .mgc-target{width:11%}
+.mgtable .mgc-verdict{width:14%}
+.mgtable .mgc-rate{width:22%}
 .mgtable .mgc-interval{width:6%}
 .mgtable .mgc-evidence{width:23%}
 .mgtable .mgc-box{width:24%}
 .mgtable td:last-child{padding-right:0}
-.mgtable td.jvname,.mgtable .jvchip,.mgtable .mgbox,.mgtable .mgvs,.mgtable .mglift,.mgtable .mggroup,.mgtable .mgcondtext,.mgtable .mgcondshare,.mgtable .mgcondtag,.mgtable td.badc,.mgtable td.empty{overflow-wrap:anywhere}
+.mgtable th.mgc-interval{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mgtable .jvchip,.mgtable .mgbox,.mgtable .mgvs,.mgtable .mglift,.mgtable .mggroup,.mgtable .mgcondtext,.mgtable .mgcondshare,.mgtable .mgcondtag,.mgtable td.badc,.mgtable td.empty{overflow-wrap:anywhere}
+.mgtable td.jvname{overflow-wrap:break-word}
+.mgtable td.mgverdict .jvchip{white-space:nowrap;overflow-wrap:normal}
 .mgtable td.jvname,.mgtable .jvchip,.mgtable .mgcondtext,.mgtable .mgcondshare,.mgtable .mgcondtag,.mgtable .mgbig{white-space:normal}
 .mgtable .mgcond{flex-wrap:wrap}
+/* The panel draws in the dashboard's left column, a few hundred pixels wide,
+   where six columns of prose are too narrow to hold their words. At or below
+   760px each target row draws as a block of lines: the name beside its verdict,
+   the rate beside its interval bar, the evidence fold beside the best box. The
+   header row is clipped off the page rather than removed, so assistive
+   technology still reads each cell's column through its role and data-label,
+   and each stacked line shows that name as its small label (gt-c6ge9). */
+#mangosec{container-type:inline-size}
+@container (max-width: 760px) {
+  .mgtable,.mgtable tbody{display:block;width:auto}
+  .mgtable thead{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .mgtable tbody tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:10px;row-gap:2px;padding:8px 0;border-top:1px solid var(--line)}
+  .mgtable tbody tr:first-child{padding-top:0;border-top:0}
+  .mgtable tbody td{display:block;width:auto;padding:0;border-top:0}
+  .mgtable tbody td:empty{display:none}
+  .mgtable tbody td.jvname{grid-area:1/1}
+  .mgtable tbody td.mgverdict{grid-area:1/2}
+  .mgtable tbody td.mgrates{grid-area:2/1}
+  .mgtable tbody td.mginterval{grid-area:2/2}
+  .mgtable tbody td.mgevidence{grid-area:3/1}
+  .mgtable tbody td.mgbox{grid-area:3/2}
+  .mgtable tbody td.mgrates::before,.mgtable tbody td.mginterval::before,.mgtable tbody td.mgevidence::before,.mgtable tbody td.mgbox::before{content:attr(data-label);display:block;font-size:11px;line-height:1.2;color:var(--dim)}
+}
 /* The Mango panel's weekly trend. The chart is an inline SVG on a fixed
    viewBox, so it scales with the panel instead of redrawing at each width. */
 .mgt{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
@@ -3757,10 +3786,17 @@ function renderMango(s) {
   }
 
   const table = el("table", "jvtable mgtable");
+  // The stacked layout sets display on the table's parts, which some browsers
+  // read as dropping their table roles, so the roles are stated (gt-c6ge9).
+  table.setAttribute("role", "table");
   const head = el("tr");
   // The header row names each column so the stylesheet can give that column a
-  // share of the row; a fixed-layout table reads its widths from this row.
-  head.append(el("th", "mgc-target", "target"), el("th", "mgc-verdict", "verdict"), el("th", "mgc-rate", "rate"), el("th", "mgc-interval", "interval"), el("th", "mgc-evidence", "evidence"), el("th", "mgc-box", "best box"));
+  // share of the row; a fixed-layout table reads its widths from this row. The
+  // interval column is narrower than the word it heads, so the cell clips what
+  // it cannot draw and the word rides in a title (gt-c6ge9).
+  const intervalHead = el("th", "mgc-interval", "interval");
+  intervalHead.setAttribute("title", "interval");
+  head.append(el("th", "mgc-target", "target"), el("th", "mgc-verdict", "verdict"), el("th", "mgc-rate", "rate"), intervalHead, el("th", "mgc-evidence", "evidence"), el("th", "mgc-box", "best box"));
   const thead = document.createElement("thead"); thead.append(head); table.append(thead);
   const body = document.createElement("tbody"); table.append(body);
   box.append(table);
@@ -3917,9 +3953,10 @@ function mangoTrend(m, stale) {
 // cells stay under the columns the collection row sets.
 function mangoRow(t, stale) {
   const tr = el("tr", stale ? "jvstale" : "");
+  tr.setAttribute("role", "row");
   // The label is the panel's plain-words title; a target it has no title for
   // shows its id, so a target added to the analysis still draws a row.
-  tr.append(el("td", "jvname", t.label || t.target));
+  tr.append(mgCell(el("td", "jvname", t.label || t.target), "target"));
 
   const verdict = el("td", "mgverdict");
   // A verdict this page does not know keeps the panel's word and stays dim, so
@@ -3928,13 +3965,22 @@ function mangoRow(t, stale) {
   // A thin box's rate rests on too few positives to read as a measurement; the
   // chip names the count it rests on.
   if (t.thin) verdict.append(el("span", "jvchip jvthin", "thin n=" + t.holdout_n));
-  tr.append(verdict);
+  tr.append(mgCell(verdict, "verdict"));
 
-  tr.append(mangoRates(t));
-  tr.append(mangoInterval(t));
-  tr.append(mangoEvidence(t));
-  tr.append(el("td", "mgbox", t.best_box || "-"));
+  tr.append(mgCell(mangoRates(t), "rate"));
+  tr.append(mgCell(mangoInterval(t), "interval"));
+  tr.append(mgCell(mangoEvidence(t), "evidence"));
+  tr.append(mgCell(el("td", "mgbox", t.best_box || "-"), "best box"));
   return tr;
+}
+
+// mgCell names a body cell's column on the cell itself, so the stacked layout
+// can print the name above a line whose column is no longer visible above it
+// (gt-c6ge9).
+function mgCell(td, label) {
+  td.setAttribute("data-label", label);
+  td.setAttribute("role", "cell");
+  return td;
 }
 
 // mangoRates draws the rate beside the baseline it is measured against. A rate
