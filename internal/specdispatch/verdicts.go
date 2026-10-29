@@ -87,9 +87,26 @@ func LedgerPath(townRoot string) string {
 	return filepath.Join(constants.TownRuntimePath(townRoot), "spec_dispatch", "verdicts.json")
 }
 
+// CorruptLedgerError reports a ledger file that exists and was read but does
+// not parse. The file can never be read again, so a caller may replace it with
+// a fresh ledger; a read that failed is not this error, because the file may
+// hold verdicts the caller can see again once the fault clears (gt-tcsnr).
+type CorruptLedgerError struct {
+	Path string
+	Err  error
+}
+
+func (e *CorruptLedgerError) Error() string {
+	return fmt.Sprintf("parse verdict ledger %s: %v", e.Path, e.Err)
+}
+
+func (e *CorruptLedgerError) Unwrap() error { return e.Err }
+
 // LoadLedger reads the ledger at path: a missing file is an empty ledger and no
 // error, and one it cannot read or parse is an empty ledger with the error, so
-// a caller never records onto verdicts it failed to see.
+// a caller never records onto verdicts it failed to see. A file that does not
+// parse comes back as a CorruptLedgerError, which tells the caller the file is
+// worth replacing rather than leaving in place.
 func LoadLedger(path string) (*Ledger, error) {
 	empty := func() *Ledger { return &Ledger{Verdicts: map[string]LedgerVerdict{}} }
 	raw, err := os.ReadFile(path)
@@ -101,7 +118,7 @@ func LoadLedger(path string) (*Ledger, error) {
 	}
 	var l Ledger
 	if err := json.Unmarshal(raw, &l); err != nil {
-		return empty(), fmt.Errorf("parse verdict ledger %s: %w", path, err)
+		return empty(), &CorruptLedgerError{Path: path, Err: err}
 	}
 	if l.Verdicts == nil {
 		l.Verdicts = map[string]LedgerVerdict{}

@@ -2,6 +2,7 @@ package specdispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,10 +129,14 @@ func TestVerdictLedgerLoad(t *testing.T) {
 		name    string
 		path    string
 		wantErr bool
+		// wantCorrupt is a file that was read and did not parse, which a
+		// caller may replace; every other error is a file it must leave alone
+		// (gt-tcsnr).
+		wantCorrupt bool
 	}{
 		{name: "a missing file is an empty ledger", path: filepath.Join(dir, "verdicts.json")},
 		{name: "a missing directory is an empty ledger", path: filepath.Join(dir, "no-such-dir", "verdicts.json")},
-		{name: "a corrupt file is an empty ledger and an error", path: corrupt, wantErr: true},
+		{name: "a corrupt file is an empty ledger and a corrupt-file error", path: corrupt, wantErr: true, wantCorrupt: true},
 		{name: "an unreadable path is an empty ledger and an error", path: notAFile, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,6 +144,10 @@ func TestVerdictLedgerLoad(t *testing.T) {
 			l, err := LoadLedger(tc.path)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadLedger(%s) err = %v, want error=%v", tc.path, err, tc.wantErr)
+			}
+			var corruptErr *CorruptLedgerError
+			if got := errors.As(err, &corruptErr); got != tc.wantCorrupt {
+				t.Fatalf("LoadLedger(%s) error = %v, want a corrupt-file error=%v", tc.path, err, tc.wantCorrupt)
 			}
 			if l == nil {
 				t.Fatal("LoadLedger returned a nil ledger, want an empty one")
