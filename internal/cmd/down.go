@@ -119,6 +119,12 @@ type downServices struct {
 	findIdleMonitors func(townRoot string) []int
 	findOrphans      func(townRoot string) []int
 
+	// supervisor is how the town's daemon is supervised: it says whether the
+	// town runs its daemon in a container and runs that container's stop.
+	// nil reads the town's own daemon.supervisor setting through
+	// realDaemonControl, so every other kind takes the pid path below.
+	supervisor *daemonControl
+
 	// sessions replaces the per-rig session stops, which need a live tmux
 	// server. Nil means the real ones. When set, runDownWith opens no tmux, so
 	// the phases that read it (the legacy-socket sweep, --all's verification
@@ -440,6 +446,52 @@ func reportRigSessionsSkipped(rigNames []string, rigsErr error) {
 		fmt.Sprintf("%s not stopped: %v", rigAgentsNotStopped(rigNames), rigsErr))
 }
 
+// stopContainerDaemon is gt down's daemon phase for a town whose daemon runs
+// in a container: the container stops through its supervisor's own compose
+// command, and no pid from daemon.lock or daemon.pid is signalled, because
+// that number comes from the container's namespace and names nothing — or an
+// unrelated process — on this host (gt-qpeei.20). handled is false for every
+// other kind, which keeps the pid path gt down has always taken.
+func stopContainerDaemon(townRoot string, svc downServices, dryRun bool) (handled, ok bool) {
+	ctl := svc.supervisor
+	if ctl == nil {
+		ctl = realDaemonControl()
+	}
+	// An unreadable setting is reported, never read as a host supervisor: the
+	// town may be a container town whose settings the operator has to fix.
+	cfg, container, err := ctl.townDaemonKind(townRoot)
+	if err != nil {
+		printDownStatus("Daemon", false, fmt.Sprintf("cannot tell how this town's daemon is supervised: %v", err))
+		return true, false
+	}
+	if !container {
+		return false, true
+	}
+
+	name := "container " + cfg.ContainerName()
+	if dryRun {
+		printDownStatus("Daemon", true, fmt.Sprintf("would stop through the container supervisor (%s)", name))
+		return true, true
+	}
+
+	sup, err := ctl.detectDaemonSupervisor(townRoot)
+	if err != nil {
+		printDownStatus("Daemon", false, fmt.Sprintf("cannot reach the %s supervisor: %v", name, err))
+		return true, false
+	}
+	argv, err := ctl.containerStopArgv(townRoot, cfg, sup)
+	if err != nil {
+		printDownStatus("Daemon", false, err.Error())
+		return true, false
+	}
+	if err := ctl.run(argv); err != nil {
+		printDownStatus("Daemon", false, fmt.Sprintf("the container supervisor did not stop %s: %v", name, err))
+		return true, false
+	}
+	printDownStatus("Daemon", true, fmt.Sprintf("stopped through the container supervisor (%s)", name))
+	return true, true
+}
+
 // stopTownServices stops the services that need neither the rig registry nor
 // tmux: the daemon, Dolt, and the stray Dolt servers around them, plus the
 // .beads/dolt directories that would respawn one. It reports each phase as it
@@ -450,27 +502,28 @@ func stopTownServices(townRoot string, svc downServices, dryRun bool) bool {
 	ok := true
 
 	// Phase 4: Stop Daemon
-	running, pid, daemonErr := svc.daemonRunning(townRoot)
-	if daemonErr != nil {
+	if handled, stopOK := stopContainerDaemon(townRoot, svc, dryRun); handled {
+		if !stopOK {
+			ok = false
+		}
+	} else if running, pid, daemonErr := svc.daemonRunning(townRoot); daemonErr != nil {
 		printDownStatus("Daemon", false, fmt.Sprintf("status check failed: %v", daemonErr))
 		ok = false
 	} else if dryRun {
 		if running {
 			printDownStatus("Daemon", true, fmt.Sprintf("would stop (PID %d)", pid))
 		}
-	} else {
-		if running {
-			if err := svc.stopDaemon(townRoot); err != nil {
-				printDownStatus("Daemon", false, err.Error())
-				ok = false
-			} else if pid > 0 {
-				printDownStatus("Daemon", true, fmt.Sprintf("stopped (was PID %d)", pid))
-			} else {
-				printDownStatus("Daemon", true, "stopped (stale lock cleaned)")
-			}
+	} else if running {
+		if err := svc.stopDaemon(townRoot); err != nil {
+			printDownStatus("Daemon", false, err.Error())
+			ok = false
+		} else if pid > 0 {
+			printDownStatus("Daemon", true, fmt.Sprintf("stopped (was PID %d)", pid))
 		} else {
-			printDownStatus("Daemon", true, "not running")
+			printDownStatus("Daemon", true, "stopped (stale lock cleaned)")
 		}
+	} else {
+		printDownStatus("Daemon", true, "not running")
 	}
 
 	// Phase 4b-i: Stop bd dolt idle-monitor processes.

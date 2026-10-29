@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -20,6 +19,41 @@ type DaemonCheck struct {
 	// daemon's job; nil is hostSupervisor, which reads the plist / unit file
 	// and asks launchctl / systemctl.
 	supervisor daemonSupervisor
+
+	// running reports whether a daemon holds the lock, with its pid; nil is
+	// daemon.IsRunning. A container town never reaches it, and the container
+	// tests replace it with one that fails the test, so a pid read coming
+	// back on that path is red (gt-qpeei.20).
+	running func(townRoot string) (bool, int, error)
+	// containerReading is the container-town reading; nil is
+	// readContainerDaemon.
+	containerReading func(townRoot string) containerDaemonReading
+	// gtCommand runs `gt daemon <verb>` for the repairs that go through a
+	// supervisor instead of spawning a process here; nil execs the binary.
+	gtCommand func(townRoot, verb string) error
+}
+
+// gtDaemon runs `gt daemon <verb>` in townRoot. Its error names the verb and
+// not the command's output, which can carry a token (gt-qpeei.20).
+func gtDaemon(townRoot, verb string) error {
+	gtPath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(gtPath, "daemon", verb)
+	cmd.Dir = townRoot
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("gt daemon %s: %w", verb, err)
+	}
+	return nil
+}
+
+// fix runs a repair verb through gtCommand, or the binary when no seam is set.
+func (c *DaemonCheck) fix(ctx *CheckContext, verb string) error {
+	if c.gtCommand != nil {
+		return c.gtCommand(ctx.TownRoot, verb)
+	}
+	return gtDaemon(ctx.TownRoot, verb)
 }
 
 // daemonSupervisor is what DaemonCheck needs from the host's supervisor.
@@ -72,7 +106,20 @@ func pidIfRunning(running bool, pid int) int {
 
 // Run checks if the daemon is running.
 func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
-	running, pid, err := daemon.IsRunning(ctx.TownRoot)
+	// A container town's daemon is judged by its container and its own state,
+	// never by the pid the lock file names (gt-qpeei.20).
+	if v := judgeContainerDaemon(c.Name(), ctx.TownRoot, c.containerReading); v.isContainer {
+		if v.result != nil {
+			return v.result
+		}
+		return v.reading.okResult(c.Name())
+	}
+
+	isRunning := c.running
+	if isRunning == nil {
+		isRunning = daemon.IsRunning
+	}
+	running, pid, err := isRunning(ctx.TownRoot)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -141,10 +188,16 @@ func (c *DaemonCheck) Fix(ctx *CheckContext) error {
 		return ErrSkippedNoStart
 	}
 
-	// Find gt executable
-	gtPath, err := os.Executable()
-	if err != nil {
-		return err
+	// A container town's daemon starts only through the container supervisor:
+	// `gt daemon run` here would be a second daemon on this host, reading the
+	// town beside the container's own (gt-qpeei.20). The daemon's own state
+	// picks the verb without a pid read.
+	if v := judgeContainerDaemon(c.Name(), ctx.TownRoot, c.containerReading); v.isContainer {
+		verb := "start"
+		if v.reading.state != nil && v.reading.state.Running {
+			verb = "restart"
+		}
+		return c.fix(ctx, verb)
 	}
 
 	// With a supervisor job provisioned, the daemon is brought up through it
@@ -156,12 +209,13 @@ func (c *DaemonCheck) Fix(ctx *CheckContext) error {
 		if running, _, err := daemon.IsRunning(ctx.TownRoot); err == nil && running {
 			verb = "restart"
 		}
-		cmd := exec.Command(gtPath, "daemon", verb)
-		cmd.Dir = ctx.TownRoot
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("gt daemon %s: %w: %s", verb, err, strings.TrimSpace(string(out)))
-		}
-		return nil
+		return c.fix(ctx, verb)
+	}
+
+	// Find gt executable
+	gtPath, err := os.Executable()
+	if err != nil {
+		return err
 	}
 
 	// Start daemon in background (detach from parent I/O - daemon uses its own logging)
