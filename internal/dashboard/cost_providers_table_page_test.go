@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The Cost panel draws its providers from the cost_providers array the server
@@ -362,18 +363,27 @@ func TestCostProvidersTableDrawsWithoutASpendReport(t *testing.T) {
 	}
 }
 
-// The server omits cost_providers when it has no providers, so a reading with no
-// key draws no table and says there are none, under the Cost heading.
-func TestCostProvidersTableSaysNoProvidersWhenTheKeyIsAbsent(t *testing.T) {
+// The server always sends cost_providers, so a reading with no key did not arrive:
+// it draws no table and says the provider list is unavailable, not that there are
+// none. A null is the same reading as a missing key.
+func TestCostProvidersTableSaysUnavailableWhenTheKeyIsAbsent(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOM(t)
-	dom.call(t, "renderCost", map[string]any{"spend": spendReading()})
-	if costTableDrawn(t, dom) {
-		t.Error("the panel drew a providers table with no providers sent")
-	}
-	if got := panelTexts(t, dom, "empty"); !containsText(got, "no providers") {
-		t.Errorf("the panel does not say there are no providers; it drew %q", got)
+	for name, reading := range map[string]map[string]any{
+		"absent": {"spend": spendReading()},
+		"null":   {"spend": spendReading(), "cost_providers": nil},
+	} {
+		dom := newPageDOM(t)
+		dom.call(t, "renderCost", reading)
+		if costTableDrawn(t, dom) {
+			t.Errorf("%s: the panel drew a providers table from a reading with no list", name)
+		}
+		if got := panelTexts(t, dom, "empty warnc"); !containsText(got, "unavailable — the reading has no provider list") {
+			t.Errorf("%s: the panel does not say the provider list is unavailable; it drew %q", name, got)
+		}
+		if got := panelTexts(t, dom, "empty"); containsText(got, "no providers") {
+			t.Errorf("%s: the panel says there are no providers for a list that did not arrive; it drew %q", name, got)
+		}
 	}
 }
 
@@ -417,10 +427,10 @@ func TestCostProvidersTableDrawsAZeroSevenDayAverageAsAFigure(t *testing.T) {
 	}
 }
 
-// A stale spend read greys the spend part the charts are drawn in, and the
-// providers table is not in it: the Claude and Jev rows are not the spend read's,
-// so no row greys with a read it does not come from.
-func TestCostProvidersTableStaysClearOfAStaleSpendRead(t *testing.T) {
+// A stale spend read greys the DeepSeek row of the table, whose balance and rates
+// are the spend read's, and the Claude and Jev rows stay clear: they are read
+// elsewhere. The charts sit in the greyed spend part; the table is not in it.
+func TestCostProvidersTableGreysOnlyTheDeepSeekRowForAStaleSpendRead(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
@@ -428,6 +438,19 @@ func TestCostProvidersTableStaysClearOfAStaleSpendRead(t *testing.T) {
 		"spend": spendReading(),
 		"reads": map[string]any{"spend": map[string]any{"stale": true}},
 	}))
+	rows := costTable(t, dom)
+	if len(rows) != 4 {
+		t.Fatalf("the table drew %d rows, want the header and three providers", len(rows))
+	}
+	for _, c := range []struct {
+		name string
+		row  costTableRow
+		grey bool
+	}{{"DeepSeek", rows[1], true}, {"Claude", rows[2], false}, {"Jev", rows[3], false}} {
+		if got := strings.Contains(c.row.Class, "jvstale"); got != c.grey {
+			t.Errorf("%s row greyed = %v for a stale spend read, want %v (row class %q)", c.name, got, c.grey, c.row.Class)
+		}
+	}
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const cost = __byId["cost"];
 		const spend = cost.children.filter(c => c.className.split(" ").indexOf("spendpart") >= 0)[0];
@@ -453,6 +476,54 @@ func TestCostProvidersTableStaysClearOfAStaleSpendRead(t *testing.T) {
 	}
 	if !got.TableOnPanel || got.TableInSpend {
 		t.Errorf("the providers table is on the panel %v and in the greyed part %v, want on the panel and not greyed", got.TableOnPanel, got.TableInSpend)
+	}
+}
+
+// A fresh spend read greys no row: the DeepSeek figures are current.
+func TestCostProvidersTableGreysNoRowForAFreshSpendRead(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", costPanelState([]map[string]any{deepSeekProvider(), claudeProvider()}, map[string]any{
+		"spend": spendReading(),
+		"reads": map[string]any{"spend": map[string]any{"at": time.Now().UTC().Format(time.RFC3339), "every_sec": 900}},
+	}))
+	for _, row := range costTable(t, dom)[1:] {
+		if strings.Contains(row.Class, "jvstale") {
+			t.Errorf("a fresh spend read greys the row %q", row.Cells[0].Text)
+		}
+	}
+}
+
+// A failed Jev read keeps the Jev row, dim, with the reason in its status cell and
+// its figures as dashes, so the failure reads as a failure in the table.
+func TestCostProvidersTableDrawsAFailedJevReadAsADimRowWithItsReason(t *testing.T) {
+	t.Parallel()
+
+	jev := jevProvider()
+	jev["today"] = nil
+	jev["per_hour_24h"] = nil
+	jev["why"] = "the Jev spend could not be read"
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", costPanelState([]map[string]any{deepSeekProvider(), jev}, map[string]any{"spend": spendReading()}))
+	rows := costTable(t, dom)
+	if len(rows) != 3 {
+		t.Fatalf("the table drew %d rows, want the header and two providers", len(rows))
+	}
+	row := rows[2]
+	if got := row.Cells[0].Text; got != "Jev" {
+		t.Fatalf("the second provider row is %q, want Jev", got)
+	}
+	if !strings.Contains(row.Class, "dimrow") {
+		t.Errorf("the failed Jev row class is %q, want dim", row.Class)
+	}
+	if got := row.Cells[8].Text; got != "the Jev spend could not be read" {
+		t.Errorf("the failed Jev row's status is %q, want the reason", got)
+	}
+	for _, c := range row.Cells[2:8] {
+		if c.Text != "–" {
+			t.Errorf("a figure of the failed Jev row draws %q, want a dash", c.Text)
+		}
 	}
 }
 
@@ -652,10 +723,19 @@ func TestCostHourlyChartDrawsNoTextOverItsBars(t *testing.T) {
 		"spend":       spendReading(),
 		"cost_charts": map[string]any{"hourly": costChartFixture(6, false, false)},
 	}))
+	// Six hours, every third one labelled: the labels 0 and 3 are the only text.
+	var texts []string
 	for _, c := range costSVGChildren(t, dom, "cost.hourly") {
-		if c.Tag == "TEXT" && c.Class != "day" {
+		if c.Tag != "TEXT" {
+			continue
+		}
+		if c.Class != "day" {
 			t.Errorf("the hourly chart draws %q with class %q over its bars; only the axis labels belong there", c.Text, c.Class)
 		}
+		texts = append(texts, c.Text)
+	}
+	if got := strings.Join(texts, ","); got != "0,3" {
+		t.Errorf("the hourly chart's text is %q, want only its axis labels 0,3", got)
 	}
 }
 
@@ -680,6 +760,23 @@ func TestCostHeaderSummaryIsBuiltFromTheProvidersArray(t *testing.T) {
 	}
 	if want := "DeepSeek $27.45 3.0d runway · Claude 6% of week limit in 5.7d"; v.String() != want {
 		t.Errorf("the header summary is %q, want %q", v.String(), want)
+	}
+}
+
+// With no providers, or no list, the closed Cost header has no summary to show: it
+// is null, not an empty line that reads as a figure.
+func TestCostHeaderSummaryIsEmptyWithoutProviders(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	for name, s := range map[string]string{"absent": `{}`, "empty": `{"cost_providers": []}`, "null": `{"cost_providers": null}`} {
+		v, err := dom.vm.RunString("JSON.stringify(FOLD_SUMMARY.cost(" + s + "))")
+		if err != nil {
+			t.Fatalf("%s: the header summary: %v", name, err)
+		}
+		if got := v.String(); got != "null" {
+			t.Errorf("%s: the header summary is %s, want null", name, got)
+		}
 	}
 }
 

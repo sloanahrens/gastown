@@ -464,6 +464,34 @@ func TestCostProvidersStateCarriesTheRowsInOrder(t *testing.T) {
 	}
 }
 
+// A town with no provider reader still sends cost_providers, as an empty list:
+// the page reads a missing key as a reading that did not arrive, not as none.
+func TestCostProvidersSendsAnEmptyListWhenNoReaderIsConfigured(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{Now: func() time.Time { return costProvidersNow }})
+	h.mu.Lock()
+	h.rebuildCostProvidersLocked()
+	h.mu.Unlock()
+
+	body, err := json.Marshal(h.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		CostProviders *[]json.RawMessage `json:"cost_providers"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.CostProviders == nil {
+		t.Fatal("cost_providers is missing from the wire, want an empty list")
+	}
+	if n := len(*wire.CostProviders); n != 0 {
+		t.Errorf("cost_providers on the wire has %d rows, want none", n)
+	}
+}
+
 func TestCostProvidersOmitsAReaderThatIsNotConfigured(t *testing.T) {
 	t.Parallel()
 

@@ -2517,12 +2517,14 @@ const COST_STATUS_CLASS = {ok: "good", warn: "warnc", bad: "badc"};
 // costProviders draws one row per provider, all with the same columns, so a
 // provider the server adds needs no change here. A provider that could not be
 // read keeps its row, dim, since dropping it would read as no provider at all.
-function costProviders(box, list) {
-  // The server omits cost_providers when it has no providers, so an absent list
-  // is none and says so. A value that is not a list is a reading that failed, and
-  // says that instead of passing as clean.
-  if (list != null && !Array.isArray(list)) { box.append(el("div", "empty warnc", "unavailable — the reading has no provider list")); return; }
-  const rows = (Array.isArray(list) ? list : []).filter(p => p && typeof p === "object");
+// spendStale greys the DeepSeek row only: its money is the spend read's, and the
+// Claude and Jev rows are read elsewhere.
+function costProviders(box, list, spendStale) {
+  // The server always sends cost_providers, an empty list when there are none, so
+  // a missing key or a value that is not a list is a reading that did not arrive.
+  // It says so instead of passing as none.
+  if (!Array.isArray(list)) { box.append(el("div", "empty warnc", "unavailable — the reading has no provider list")); return; }
+  const rows = list.filter(p => p && typeof p === "object");
   if (!rows.length) { box.append(el("div", "empty", "no providers")); return; }
   const t = el("table", "costprov");
   const head = el("tr");
@@ -2532,6 +2534,7 @@ function costProviders(box, list) {
   t.append(head);
   for (const p of rows) {
     const tr = el("tr", p.why ? "dimrow" : "");
+    if (spendStale && p.id === "deepseek") tr.classList.add("jvstale");
     if (p.detail && p.detail.length) tr.title = p.detail.join(" · ");
     const cell = (text, cls) => tr.append(el("td", cls || "", text));
     cell(p.label || p.id || "–");
@@ -4010,15 +4013,15 @@ function costChartFold(box, kind, chart, providers) {
 
 // renderCost draws the Cost panel. The table draws even without a spend report,
 // since its rows come from the other readers too. It sits outside the part a
-// stale spend read greys: the Claude and Jev rows are not the spend read's, and
-// the page cannot tell which row a stale spend read feeds, so no row greys with
-// it; the note carries that read's state. The charts stay in the greyed part.
+// stale spend read greys, so only the DeepSeek row, whose money that read feeds,
+// greys inside the table; the Claude and Jev rows stay clear. The charts stay in
+// the greyed part.
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
   note.className = "r"; note.textContent = ""; note.title = "";
   const d = s.spend, u = s.usage, r = readOf(s, "spend");
-  costProviders(box, s.cost_providers);
+  costProviders(box, s.cost_providers, !!(r && r.stale));
   const spendBox = el("div", "spendpart");
   box.append(spendBox);
   paintsRead(spendBox, note, r);

@@ -149,8 +149,9 @@ func TestCostPanelEmptyStateAndCaption(t *testing.T) {
 	t.Parallel()
 
 	// No spend command configured, usage not scanned yet, no providers: the
-	// providers line and one honest line about the spend report.
-	lines, note := drawCost(t, map[string]any{})
+	// providers line and one honest line about the spend report. The server sends
+	// an empty provider list, not a missing one, when there are none.
+	lines, note := drawCost(t, map[string]any{"cost_providers": []any{}})
 	if len(lines) != 2 || lines[0].Text != "no providers" || !strings.Contains(lines[1].Text, "no spend report") || !strings.Contains(lines[1].Text, "usage still reading") {
 		t.Errorf("empty panel = %+v, want the no-providers line, then one line naming the spend report and the usage read", lines)
 	}
