@@ -258,6 +258,8 @@ Reading index.html as a string — what every page test did before this harness 
 
 The stub is the browser the page runs in, and it is small on purpose: the render functions build elements, so `createElement`, `append`, `textContent`, `className`, `classList`, `hidden` and `title` carry them. Two limits keep it honest. `getElementById` answers only for the ids index.html's markup carries, read from the file, so a render into an id the markup dropped fails instead of passing against a stub that invents elements. And time is the test's: `Date.now` reads a fake clock that moves only when a test calls `__advance`, which runs the timers that come due in order, so nothing redraws or reconnects behind a test that only reads. A test that needs more DOM adds it to the stub in the same change.
 
+The page's grid is built the same way: `pageSections` reads every `<section>` in index.html's `.grid`, so `document.querySelectorAll` hands the page real sections and the fold tests drive the folds the page makes (`fold_page_test.go`). `newPageDOMStoring` prefills storage with what a previous load left; `newPageDOMNoStorage` loads over a browser that refuses it.
+
 The engine is a library, not a tool: nothing here starts a process, sleeps, reads a clock or opens a socket, so the unit tier stays hermetic and no rule in [The rules](#the-rules) needs an exemption for a page test.
 
 ### The clock

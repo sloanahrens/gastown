@@ -25,7 +25,7 @@ func TestDeploysBlockSitsInsideTheCloudSectionUnderTheFindings(t *testing.T) {
 	body := strings.Index(page, `id="deploys"`)
 	// The Forgejo section is the next one over; nothing of the block may spill
 	// past it.
-	after := strings.Index(page, `<section><h2>Forgejo`)
+	after := strings.Index(page, `<section data-fold="forgejo"><h2>Forgejo`)
 	if cloud < 0 || head < 0 || body < 0 || after < 0 {
 		t.Fatalf("the Cloud section is missing one of #cloud, #deploysnote, #deploys or Forgejo (cloud=%d head=%d body=%d forgejo=%d)",
 			cloud, head, body, after)
@@ -39,7 +39,7 @@ func TestDeploysBlockSitsInsideTheCloudSectionUnderTheFindings(t *testing.T) {
 
 	// The section is one element of the same shape as its neighbours, with the
 	// block's own heading and body inside it.
-	if !strings.Contains(page, `<section><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div><h3 class="sub">Deploys <span class="r" id="deploysnote"></span></h3><div class="body" id="deploys"></div></section>`) {
+	if !strings.Contains(page, `<section data-fold="cloud"><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div><h3 class="sub">Deploys <span class="r" id="deploysnote"></span></h3><div class="body" id="deploys"></div></section>`) {
 		t.Error("the Cloud section is not the markup its neighbours are")
 	}
 }

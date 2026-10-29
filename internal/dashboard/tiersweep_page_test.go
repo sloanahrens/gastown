@@ -34,7 +34,7 @@ func TestTierSweepIconSitsInTheTitleRow(t *testing.T) {
 	if body >= 0 && body < close {
 		t.Error("the icon is in the pane's body, which a collapsed section hides")
 	}
-	if !strings.Contains(page, "h.prepend(caret)") {
+	if !strings.Contains(page, "head.prepend(caret)") {
 		t.Error("the caret is no longer prepended to the title row, so the row's order is not the one read here")
 	}
 }

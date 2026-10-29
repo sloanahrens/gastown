@@ -19,7 +19,7 @@ func TestCostPanelReplacesTheDeepSeekAndUsagePanels(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
-	if !strings.Contains(page, `<section><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>`) {
+	if !strings.Contains(page, `<section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>`) {
 		t.Error("the Cost section is not a section whose h2 holds the title and a span.r")
 	}
 	for _, gone := range []string{`<h2>DeepSeek `, `<h2>Usage `, `id="spendnote"`, `id="usagenote"`, `function renderSpend(`, `function renderUsage(`} {

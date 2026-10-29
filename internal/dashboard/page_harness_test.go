@@ -39,6 +39,65 @@ import (
 const pageStubJS = `
 var __byId = {};
 __ids.forEach(function (id) { __byId[id] = __el("div"); });
+// __sections is the page's own grid, built from the markup: one element per
+// section, each carrying the heading the page's fold reads and the note span
+// the page draws into. The elements are the same objects getElementById hands
+// back, so a test that sets a note through the page reads it back inside the
+// heading it sits in.
+var __sections = [];
+__sectionSpec.forEach(function (sp) {
+  var sec = __el("section");
+  if (sp.id) { sec.id = sp.id; __byId[sp.id] = sec; }
+  sec.dataset.fold = sp.key;
+  if (sp.defaultCollapsed) sec.setAttribute("data-default-collapsed", "");
+  sec.hidden = !!sp.hidden;
+  var h = __el("h2");
+  sp.head.forEach(function (part) {
+    if (part.id) {
+      var s = __byId[part.id] || __el("span");
+      if (part.class) s.className = part.class;
+      __byId[part.id] = s;
+      h.append(s);
+    } else if (part.text) {
+      h.append(__textNode(part.text));
+    }
+  });
+  sec.append(h);
+  __sections.push(sec);
+});
+function __cls(e, c) { return (" " + (e.className || "") + " ").indexOf(" " + c + " ") >= 0; }
+function __walk(e, fn) {
+  for (var i = 0; i < (e.children || []).length; i++) { fn(e.children[i]); __walk(e.children[i], fn); }
+}
+// __find answers the two selectors the page's fold asks of an element: a direct
+// child by tag (":scope > h2") and the first descendant with a class (".r",
+// ".caret", ".foldsum"). Anything else is null, so a selector the stub does not
+// model fails the test that needed it instead of answering wrongly.
+function __find(e, sel) {
+  sel = String(sel).trim();
+  if (sel.indexOf(":scope > ") === 0) {
+    var tag = sel.slice(9).trim().toLowerCase();
+    for (var i = 0; i < (e.children || []).length; i++) {
+      var c = e.children[i];
+      if (c.tagName && c.tagName.toLowerCase() === tag) return c;
+    }
+    return null;
+  }
+  if (sel.charAt(0) === ".") {
+    var cls = sel.slice(1), out = null;
+    __walk(e, function (c) { if (!out && __cls(c, cls)) out = c; });
+    return out;
+  }
+  return null;
+}
+function __findAll(e, sel) { var one = __find(e, sel); return one ? [one] : []; }
+// __fireOn is the browser delivering one of its own events to an element — a
+// click, a keydown — to the listeners addEventListener collected. __fire below
+// is the server's events on a stream, which carry JSON in their data field.
+function __fireOn(e, type, ev) {
+  var ls = (e._listeners && e._listeners[type]) || [];
+  for (var i = 0; i < ls.length; i++) ls[i](ev || { type: type, target: e });
+}
 function __el(tag) {
   var e = {
     tagName: String(tag).toUpperCase(), children: [], _text: "",
@@ -48,6 +107,9 @@ function __el(tag) {
     // stub keeps what the page writes there.
     style: null,
     scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+    // parentNode is what closest walks: the browser fills it in on append, and
+    // the fold is the one handler that asks what a click landed on.
+    parentNode: null,
     get childElementCount() { return this.children.length; },
     get firstChild() { return this.children.length ? this.children[0] : null; },
     get textContent() {
@@ -59,23 +121,47 @@ function __el(tag) {
       return this._text;
     },
     set textContent(v) { this.children = []; this._text = v == null ? "" : String(v); },
-    append: function () { for (var i = 0; i < arguments.length; i++) this.children.push(arguments[i]); },
-    appendChild: function (n) { this.children.push(n); return n; },
-    prepend: function () { for (var i = arguments.length - 1; i >= 0; i--) this.children.unshift(arguments[i]); },
+    append: function () { for (var i = 0; i < arguments.length; i++) { arguments[i].parentNode = this; this.children.push(arguments[i]); } },
+    appendChild: function (n) { n.parentNode = this; this.children.push(n); return n; },
+    prepend: function () { for (var i = arguments.length - 1; i >= 0; i--) { arguments[i].parentNode = this; this.children.unshift(arguments[i]); } },
     replaceChildren: function () {
       this.children = [];
       this._text = "";
-      for (var i = 0; i < arguments.length; i++) this.children.push(arguments[i]);
+      for (var i = 0; i < arguments.length; i++) { arguments[i].parentNode = this; this.children.push(arguments[i]); }
     },
     remove: function () {},
     focus: function () { document.activeElement = this; },
     setAttribute: function (k, v) { this["attr_" + k] = v; },
     getAttribute: function (k) { return this["attr_" + k]; },
-    addEventListener: function () {},
-    removeEventListener: function () {},
-    querySelector: function () { return null; },
-    querySelectorAll: function () { return []; },
-    closest: function () { return null; },
+    // An attribute the page set, or the markup declared on a section the stub
+    // built; hasAttribute is how a pane opts out of the fold's default list.
+    hasAttribute: function (k) { return Object.prototype.hasOwnProperty.call(this, "attr_" + k); },
+    addEventListener: function (type, fn) {
+      if (!this._listeners) this._listeners = {};
+      (this._listeners[type] = this._listeners[type] || []).push(fn);
+    },
+    removeEventListener: function (type, fn) {
+      if (!this._listeners || !this._listeners[type]) return;
+      this._listeners[type] = this._listeners[type].filter(function (f) { return f !== fn; });
+    },
+    querySelector: function (sel) { return __find(this, sel); },
+    querySelectorAll: function (sel) { return __findAll(this, sel); },
+    // closest answers a comma-separated list of tag names and classes, which is
+    // the shape the fold's "did this click land on a control" question takes.
+    // Any other selector is null, so a test that needs one fails rather than
+    // matching an ancestor it should not.
+    closest: function (sel) {
+      var parts = String(sel).split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+      var n = this;
+      while (n) {
+        for (var i = 0; i < parts.length; i++) {
+          var p = parts[i];
+          if (p.charAt(0) === "." ? __cls(n, p.slice(1)) : n.tagName && n.tagName.toLowerCase() === p.toLowerCase()) return n;
+        }
+        n = n.parentNode || null;
+      }
+      return null;
+    },
     contains: function () { return false; },
     classList: null
   };
@@ -116,19 +202,74 @@ var document = {
   createTextNode: function (t) { return __textNode(t); },
   getElementById: function (id) { return __byId[id] || null; },
   querySelector: function () { return null; },
-  querySelectorAll: function () { return []; },
+  // The page asks the document for its sections once, when it folds them
+  // ("main section, .grid section"), and for nodes carrying a data attribute as
+  // the feed's ages move; the stub answers the first from the markup and the
+  // second with nothing, which is the truth for a page no render has drawn.
+  querySelectorAll: function (sel) {
+    return String(sel).indexOf("section") >= 0 ? __sections.slice() : [];
+  },
   addEventListener: function () {},
   title: "", hidden: false, activeElement: null,
   body: __el("body"),
   hasFocus: function () { return true; },
   execCommand: function () { return true; }
 };
+// __storageThrows is a browser that refuses storage outright — private mode, a
+// locked-down policy. A test sets it before the page runs, so the page meets the
+// refusal where it reads its first choice.
+var __storageThrows = false;
 var localStorage = {
   _v: {},
-  getItem: function (k) { return Object.prototype.hasOwnProperty.call(this._v, k) ? this._v[k] : null; },
-  setItem: function (k, v) { this._v[k] = String(v); },
-  removeItem: function (k) { delete this._v[k]; }
+  getItem: function (k) {
+    if (__storageThrows) throw new Error("storage is disabled");
+    return Object.prototype.hasOwnProperty.call(this._v, k) ? this._v[k] : null;
+  },
+  setItem: function (k, v) {
+    if (__storageThrows) throw new Error("storage is disabled");
+    this._v[k] = String(v);
+  },
+  removeItem: function (k) {
+    if (__storageThrows) throw new Error("storage is disabled");
+    delete this._v[k];
+  }
 };
+// __fold, __foldKeys, __foldRead and __pressFold are how a test reads and drives
+// a section's fold: the section by its key, the header's caret, aria-expanded
+// and summary line, and the click or the keydown the browser would deliver.
+function __fold(key) {
+  for (var i = 0; i < __sections.length; i++) if (__sections[i].dataset.fold === key) return __sections[i];
+  return null;
+}
+function __foldKeys() { return __sections.map(function (s) { return s.dataset.fold; }); }
+function __foldRead(key) {
+  var sec = __fold(key);
+  if (!sec) return null;
+  var h = __find(sec, ":scope > h2");
+  var caret = h ? __find(h, ".caret") : null;
+  var sum = h ? __find(h, ".foldsum") : null;
+  var note = h ? __find(h, ".r") : null;
+  return {
+    collapsed: __cls(sec, "collapsed"),
+    aria: h ? String(h.getAttribute("aria-expanded")) : "",
+    role: h ? String(h.getAttribute("role") || "") : "",
+    caret: caret ? caret.textContent : "",
+    summary: sum ? sum.textContent : "",
+    summaryHidden: sum ? !!sum.hidden : true,
+    noteHidden: note ? !!note.hidden : null,
+    title: h ? h.textContent : ""
+  };
+}
+function __pressFold(key, how) {
+  var sec = __fold(key), h = sec && __find(sec, ":scope > h2");
+  if (!h) throw new Error("no section folds under " + key);
+  if (how === "click") { __fireOn(h, "click", { type: "click", target: h }); return; }
+  __fireOn(h, "keydown", {
+    type: "keydown", target: h,
+    key: how === "space" ? " " : "Enter",
+    preventDefault: function () {}
+  });
+}
 // __sources is every stream the page has opened, in order: the page replaces a
 // stream by closing it and opening a new EventSource, so the list is how many
 // streams the page has run through.
@@ -238,6 +379,123 @@ func pageScript(t *testing.T) string {
 	return page[start+len("<script>") : end]
 }
 
+// foldSectionSpec is one section of index.html's grid as the stub builds it:
+// the key its fold is saved under, its id, the attributes the markup carries,
+// and the heading's text and spans in order. It is read from the markup, so a
+// section added to the page without a key shows up in the fold tests as one
+// that cannot fold rather than being left out.
+type foldSectionSpec struct {
+	Key              string         `json:"key"`
+	ID               string         `json:"id,omitempty"`
+	DefaultCollapsed bool           `json:"defaultCollapsed,omitempty"`
+	Hidden           bool           `json:"hidden,omitempty"`
+	Head             []foldHeadPart `json:"head"`
+}
+
+// foldHeadPart is one run of a section heading: the text between its spans, or
+// a span with the class and id the markup gives it.
+type foldHeadPart struct {
+	Text  string `json:"text,omitempty"`
+	ID    string `json:"id,omitempty"`
+	Class string `json:"class,omitempty"`
+}
+
+var (
+	pageAttrRE    = regexp.MustCompile(`([A-Za-z_:][-A-Za-z0-9_:.]*)="([^"]*)"`)
+	pageSpanRE    = regexp.MustCompile(`<span([^>]*)>([^<]*)</span>`)
+	pageBareHidRE = regexp.MustCompile(`(^|\s)hidden(\s|>|$)`)
+)
+
+// pageSections is the page's grid as the stub builds it: every section in
+// index.html's .grid, with the heading it folds under.
+func pageSections(t *testing.T) []foldSectionSpec {
+	t.Helper()
+
+	page := string(indexHTML)
+	start := strings.Index(page, `<div class="grid">`)
+	if start < 0 {
+		t.Fatal("index.html has no .grid holding the sections")
+	}
+	grid := page[start:]
+	if end := strings.Index(grid, "<script>"); end >= 0 {
+		grid = grid[:end]
+	}
+	var out []foldSectionSpec
+	for i := 0; ; {
+		at := strings.Index(grid[i:], "<section")
+		if at < 0 {
+			break
+		}
+		at += i
+		open := strings.Index(grid[at:], ">")
+		if open < 0 {
+			t.Fatalf("index.html's section at offset %d has no end of tag", at)
+		}
+		tag := grid[at : at+open+1]
+		body := grid[at+open+1:]
+		next := strings.Index(body, "<section")
+		if next < 0 {
+			next = len(body)
+		}
+		var sp foldSectionSpec
+		for _, m := range pageAttrRE.FindAllStringSubmatch(tag, -1) {
+			switch m[1] {
+			case "id":
+				sp.ID = m[2]
+			case "data-fold":
+				sp.Key = m[2]
+			}
+		}
+		sp.DefaultCollapsed = strings.Contains(tag, "data-default-collapsed")
+		sp.Hidden = pageBareHidRE.MatchString(tag)
+		sp.Head = pageHeadParts(t, body[:next])
+		out = append(out, sp)
+		i = at + open + 1 + next
+	}
+	return out
+}
+
+// pageHeadParts is one section's heading as the stub lays it out: the text
+// between its spans and each span with its class and id, which is where the
+// page finds the note it copies into a closed section's summary.
+func pageHeadParts(t *testing.T, body string) []foldHeadPart {
+	t.Helper()
+
+	open := strings.Index(body, "<h2>")
+	if open < 0 {
+		return nil
+	}
+	inner := body[open+len("<h2>"):]
+	end := strings.Index(inner, "</h2>")
+	if end < 0 {
+		t.Fatalf("index.html's section heading has no end: %q", body)
+	}
+	inner = inner[:end]
+	var out []foldHeadPart
+	for inner != "" {
+		loc := pageSpanRE.FindStringSubmatchIndex(inner)
+		if loc == nil {
+			out = append(out, foldHeadPart{Text: inner})
+			break
+		}
+		if text := inner[:loc[0]]; text != "" {
+			out = append(out, foldHeadPart{Text: text})
+		}
+		p := foldHeadPart{Text: inner[loc[4]:loc[5]]}
+		for _, m := range pageAttrRE.FindAllStringSubmatch(inner[loc[2]:loc[3]], -1) {
+			switch m[1] {
+			case "id":
+				p.ID = m[2]
+			case "class":
+				p.Class = m[2]
+			}
+		}
+		out = append(out, p)
+		inner = inner[loc[1]:]
+	}
+	return out
+}
+
 // pageIDs is every element id index.html's markup declares, in the order the
 // file declares them.
 func pageIDs() []string {
@@ -272,9 +530,34 @@ func newPageDOM(t *testing.T) *pageDOM {
 func newPageDOMStoring(t *testing.T, stored map[string]string) *pageDOM {
 	t.Helper()
 
+	return newPage(t, stored, "")
+}
+
+// newPageDOMNoStorage loads the page over a browser that refuses storage — what
+// private mode and a locked-down policy do — before the page reads its first
+// choice, so a page that cannot survive the refusal fails here.
+func newPageDOMNoStorage(t *testing.T) *pageDOM {
+	t.Helper()
+
+	return newPage(t, nil, "__storageThrows = true;")
+}
+
+// newPage runs one page: the stub browser with the markup's ids and sections,
+// whatever storage the caller says the browser holds, anything the caller needs
+// true before the page starts (setUp), then the page's own script.
+func newPage(t *testing.T, stored map[string]string, setUp string) *pageDOM {
+	t.Helper()
+
 	vm := goja.New()
 	if err := vm.Set("__ids", pageIDs()); err != nil {
 		t.Fatalf("handing the page's ids to the stub: %v", err)
+	}
+	specs, err := json.Marshal(pageSections(t))
+	if err != nil {
+		t.Fatalf("reading the page's sections: %v", err)
+	}
+	if _, err := vm.RunString("var __sectionSpec = " + string(specs) + ";"); err != nil {
+		t.Fatalf("handing the page's sections to the stub: %v", err)
 	}
 	if _, err := vm.RunString(pageStubJS); err != nil {
 		t.Fatalf("the DOM stub did not load: %v", err)
@@ -282,6 +565,11 @@ func newPageDOMStoring(t *testing.T, stored map[string]string) *pageDOM {
 	for k, v := range stored {
 		if _, err := vm.RunString("localStorage.setItem(" + strconv.Quote(k) + ", " + strconv.Quote(v) + ")"); err != nil {
 			t.Fatalf("handing the page its %s: %v", k, err)
+		}
+	}
+	if setUp != "" {
+		if _, err := vm.RunString(setUp); err != nil {
+			t.Fatalf("setting the page's browser up: %v", err)
 		}
 	}
 	if _, err := vm.RunString(pageScript(t)); err != nil {

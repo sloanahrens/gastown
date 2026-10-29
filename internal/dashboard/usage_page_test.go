@@ -40,7 +40,7 @@ func TestUsagePanelDrawsThePayload(t *testing.T) {
 	if all := pageFunc(t, "renderAll"); !strings.Contains(all, "renderCost(state)") {
 		t.Error("renderAll does not draw the Cost panel")
 	}
-	if !strings.Contains(string(indexHTML), `<section><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>`) {
+	if !strings.Contains(string(indexHTML), `<section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>`) {
 		t.Error("the Cost section is not the markup its neighbours are")
 	}
 }

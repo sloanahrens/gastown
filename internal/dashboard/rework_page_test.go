@@ -191,7 +191,7 @@ func TestCostPanelNamesTheReworkStates(t *testing.T) {
 	}
 
 	page := string(indexHTML)
-	if !strings.Contains(page, `<section><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>`) {
+	if !strings.Contains(page, `<section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>`) {
 		t.Error("the Cost section is no longer a section whose h2 holds the title and a span.r")
 	}
 	cost := pageFunc(t, "renderCost")

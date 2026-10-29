@@ -132,7 +132,7 @@ func TestDeepReviewBlockIsDrawnInThePanelAndSetsNoMarkup(t *testing.T) {
 			t.Errorf("drawDeepReview uses %s", bad)
 		}
 	}
-	if !strings.Contains(string(indexHTML), `<section><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>`) {
+	if !strings.Contains(string(indexHTML), `<section data-fold="overseer"><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>`) {
 		t.Error("the Overseer section is not the markup its neighbours are")
 	}
 	// The four panels this one replaces are gone from the markup, and with them

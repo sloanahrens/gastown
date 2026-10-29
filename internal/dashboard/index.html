@@ -132,6 +132,10 @@ section>h2:hover{color:var(--text)}
 section>h2 .caret{display:inline-block;width:10px;color:var(--dim)}
 section.collapsed>:not(h2){display:none}
 section.collapsed>h2{border-bottom:0}
+/* The one line a closed section says about itself, in the note's place: the
+   header keeps the title and the caret, and the figures the operator would
+   otherwise open the section to read (foldable, index.html's script). */
+section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-space:normal;text-align:right;color:var(--text)}
 /* The News pane: one line per story, the title taking what the comments link
    leaves. Both tracks may shrink, so a long title is ellipsed rather than
    widening the panel. */
@@ -403,26 +407,26 @@ a.hrow:hover{background:#19212b}
 
 <div class="grid">
   <div class="col">
-    <section><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
-    <section><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
-    <section><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
-    <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
-    <section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
-    <section id="jevsec" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>
-    <section id="mangosec" data-default-collapsed hidden><h2>Mango · <span class="r" id="mangonote"></span></h2><div class="body" id="mango"></div></section>
-    <section><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>
-    <section>
+    <section data-fold="attention"><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
+    <section data-fold="overseer"><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
+    <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
+    <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
+    <section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
+    <section id="jevsec" data-fold="jev" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>
+    <section id="mangosec" data-fold="mango" data-default-collapsed hidden><h2>Mango · <span class="r" id="mangonote"></span></h2><div class="body" id="mango"></div></section>
+    <section data-fold="work"><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>
+    <section data-fold="feed">
       <h2>Feed <span class="chips" id="chips"></span></h2>
       <div id="feed"></div>
     </section>
   </div>
   <div class="col">
-    <section id="newssec" hidden><h2>Hacker News <span class="r" id="newsnote"></span></h2><div class="body" id="news"></div></section>
-    <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
-    <section><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div><h3 class="sub">Deploys <span class="r" id="deploysnote"></span></h3><div class="body" id="deploys"></div></section>
-    <section><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body"><div id="forgejoacts"></div><button id="forgejofeedhead" type="button" class="feedhead" aria-controls="forgejo"></button><div id="forgejo"></div></div></section>
-    <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
-    <section id="trendsec" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
+    <section id="newssec" data-fold="news" hidden><h2>Hacker News <span class="r" id="newsnote"></span></h2><div class="body" id="news"></div></section>
+    <section data-fold="machine"><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
+    <section data-fold="cloud"><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div><h3 class="sub">Deploys <span class="r" id="deploysnote"></span></h3><div class="body" id="deploys"></div></section>
+    <section data-fold="forgejo"><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body"><div id="forgejoacts"></div><button id="forgejofeedhead" type="button" class="feedhead" aria-controls="forgejo"></button><div id="forgejo"></div></div></section>
+    <section data-fold="om"><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
+    <section id="trendsec" data-fold="landings" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
   </div>
 </div>
 
@@ -3033,7 +3037,10 @@ function ownerShown(r) { return OWNERS.indexOf(r.owner) < 0 || shownOwners.has(r
 // tag a row with, carrying the count of the rows it holds. The choice survives
 // reloads the way the feed's class chips do, and a chip is drawn at zero rather
 // than dropped, so an owner never disappears from the page.
-const shownOwners = new Set(JSON.parse(localStorage.getItem("gt-attention-owners") || "null") || [PANEL_OPENS_ON]);
+// Storage that throws — a locked-down browser, private mode — leaves the chips
+// on their default rather than taking the page down.
+let shownOwners = new Set([PANEL_OPENS_ON]);
+try { shownOwners = new Set(JSON.parse(localStorage.getItem("gt-attention-owners") || "null") || [PANEL_OPENS_ON]); } catch (e) {}
 let attentionState = null;
 function renderOwnerChips(rows) {
   const counts = {};
@@ -4451,10 +4458,15 @@ function drawQueueList(box, s) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); paintFolds(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
-const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
+// The feed's class chips: every class but "plain" is on until the reader turns
+// it off, and storage that throws leaves that default rather than taking the
+// page down.
+const defaultChips = () => CLASSES.filter(c => c !== "plain");
+let shown = new Set(defaultChips());
+try { shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || defaultChips()); } catch (e) {}
 const counts = {};
 function renderChips() {
   const box = $("chips");
@@ -4544,38 +4556,173 @@ function reconnectStream(failed) {
   setTimeout(connect, retryMs);
 }
 initAlerts();
-// Every panel folds when its title bar is clicked; the choice survives reloads.
+// FOLD_KEY is where each section's fold is remembered: one map of the section's
+// own key to true when it is closed, so a retitled panel keeps the operator's
+// choice and every section folds the same way (gt-5de3i).
+const FOLD_KEY = "gt-fold";
+// FOLD_DEFAULT_OPEN is the sections a reader with no saved choice sees open;
+// every other section starts closed. A pane that opts out with
+// data-default-collapsed starts closed whatever this holds. This list is the
+// operator's to edit.
+const FOLD_DEFAULT_OPEN = ["attention", "overseer", "cost", "work", "landings"];
+// FOLD_AGE_RE matches one part of a note that says only how long ago its pane
+// was read — "read 51s ago", "seats read 3m ago". A note that is only ages
+// tells a closed section nothing, which is what the summary line is for.
+const FOLD_AGE_RE = /(^|\s)read\s+\S+\s+ago$/;
+function foldNoteIsAge(text) {
+  const parts = String(text || "").split(" · ").map(p => p.trim()).filter(Boolean);
+  return parts.length > 0 && parts.every(p => FOLD_AGE_RE.test(p));
+}
+// FOLD_SUMMARY is what a closed section says about itself when its note is only
+// a read age: the figures the operator would otherwise open it to read, taken
+// from the same fields the panel and the top strip draw. A section with nothing
+// to add there returns null and shows only its title.
+const FOLD_SUMMARY = {
+  // The top strip's two counts: polecats holding work with a live session, and
+  // what is submitted and waiting for the landing worker.
+  work: s => {
+    const out = [];
+    if (s && s.polecats) {
+      const live = s.polecats.filter(p => !p.rig_parked);
+      out.push(live.filter(p => POLE_WORKING[p.state]).length + " working");
+    }
+    const q = s && s.summary ? s.summary.ready_to_land : null;
+    if (q != null) out.push(q + " waiting to land");
+    return out.length ? out.join(" · ") : null;
+  },
+  // The one attention list's split, exactly as the panel's own note counts it:
+  // the rows that need a person, then the rows only waiting on work in flight.
+  attention: s => {
+    const at = s && s.attention;
+    if (!at) return null;
+    const shown = (at.rows || []).filter(ownerShown);
+    if (!shown.length) return shownOwners.size ? "nothing needs you" : null;
+    const needs = shown.filter(needsYou).length, pipeline = shown.length - needs;
+    return needs + " need you" + (pipeline ? " · " + pipeline + " in the pipeline" : "");
+  },
+  // The Cost panel's summary arrives with the bead that rebuilds its rows.
+  cost: () => null,
+};
+// foldStore is the saved choices, keyed as FOLD_KEY holds them. Storage that
+// throws — a locked-down browser, private mode — reads as no choice at all, so
+// the defaults apply and folding still works for the session.
+function foldStore() {
+  try { return JSON.parse(localStorage.getItem(FOLD_KEY) || "{}") || {}; } catch (e) { return {}; }
+}
+function foldSave(key, closed) {
+  const saved = foldStore();
+  saved[key] = !!closed;
+  try { localStorage.setItem(FOLD_KEY, JSON.stringify(saved)); } catch (e) {}
+}
+// foldLegacyTitle is the name a section's choice was saved under before it had
+// a key: the heading's first text run, or the whole heading where the first
+// child is an element with no text of its own (the tier sweep's icon).
+function foldLegacyTitle(head) {
+  return String(((head.firstChild && head.firstChild.textContent) || head.textContent) || "").trim();
+}
+function foldLegacySaved(title) {
+  try { return (JSON.parse(localStorage.getItem("gt-collapsed") || "{}") || {})[title]; } catch (e) { return undefined; }
+}
+// folds is every section the page made foldable, so a reading that arrives
+// after the page loaded repaints each section's summary line without reopening
+// it. A closed section keeps its body and its render function keeps drawing
+// into it, so opening it shows what the page last knew with no extra fetch.
+const folds = [];
+function paintFolds(s) { for (const f of folds) f.paint(s); }
+// foldable is what makes an element fold under its own heading, and the only
+// fold the page's sections use: it owns the caret, aria-expanded, Enter and
+// Space, the saved choice and the one line a closed section shows. Options:
+//
+//   key         the section's stable key, which its choice is saved under
+//   head        the heading element that carries the caret and acts as a
+//               button (default: the element's own first h2 child)
+//   summary     a function of the last reading returning the summary line, or
+//               null when the section has nothing to add there
+//   defaultOpen whether a reader with no saved choice sees it open
+//   legacy      the title its choice was saved under before keys existed, so
+//               an entry written then still applies
+//
+// A section with no heading or no key is left unfolded rather than given a fold
+// nothing can remember.
+function foldable(root, opts) {
+  const head = opts.head || root.querySelector(":scope > h2");
+  const key = opts.key || root.dataset.fold;
+  if (!head || !key) return null;
+  // The note sits in the header already; while the section is closed its place
+  // is taken by the summary, so the header says something worth reading
+  // instead of how long ago the pane was drawn.
+  const note = head.querySelector(".r");
+  const caret = el("span", "caret");
+  head.prepend(caret);
+  const summary = el("span", "foldsum");
+  head.append(summary);
+  head.setAttribute("role", "button");
+  head.tabIndex = 0;
+  const saved = foldStore();
+  const remembered = saved[key] !== undefined ? saved[key]
+    : (opts.legacy ? foldLegacySaved(opts.legacy) : undefined);
+  // A pane that opts out with data-default-collapsed starts closed whatever the
+  // default list says, until the reader opens it.
+  const defaultOpen = !!opts.defaultOpen && !root.hasAttribute("data-default-collapsed");
+  const fold = {
+    key: key,
+    closed: remembered !== undefined ? !!remembered : !defaultOpen,
+    summaryOf: opts.summary,
+  };
+  fold.paint = s => {
+    const text = fold.closed ? foldSummaryLine(fold, s, note) : "";
+    root.classList.toggle("collapsed", fold.closed);
+    caret.textContent = fold.closed ? "▸" : "▾";
+    head.setAttribute("aria-expanded", fold.closed ? "false" : "true");
+    if (note) note.hidden = fold.closed;
+    summary.textContent = text;
+    summary.hidden = !fold.closed || !text;
+  };
+  const toggle = () => {
+    fold.closed = !fold.closed;
+    fold.paint(state);
+    foldSave(key, fold.closed);
+  };
+  head.addEventListener("click", ev => {
+    if (ev && ev.target && ev.target.closest && ev.target.closest("button, .chips, a")) return;
+    toggle();
+  });
+  head.addEventListener("keydown", ev => {
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); }
+  });
+  folds.push(fold);
+  fold.paint(state);
+  return fold;
+}
+// foldSummaryLine is the one line a closed section shows: the note's own text
+// when it says something a reader can use, and otherwise the summary its
+// section supplies from the last reading.
+function foldSummaryLine(fold, s, note) {
+  const text = note ? String(note.textContent || "").trim() : "";
+  if (text && !foldNoteIsAge(text)) return text;
+  const own = fold.summaryOf ? fold.summaryOf(s || {}) : null;
+  return own || "";
+}
+// setupCollapse makes every section of the page foldable, with the key its
+// markup declares.
 function setupCollapse() {
-  let saved = {};
-  try { saved = JSON.parse(localStorage.getItem("gt-collapsed") || "{}") || {}; } catch (e) {}
   document.querySelectorAll("main section, .grid section").forEach(sec => {
-    const h = sec.querySelector(":scope > h2");
-    if (!h || h.dataset.fold) return;
-    h.dataset.fold = "1";
-    const name = (h.firstChild && h.firstChild.textContent || h.textContent).trim();
-    const caret = el("span", "caret");
-    h.prepend(caret);
-    h.setAttribute("role", "button");
-    h.tabIndex = 0;
-    const apply = collapsed => { sec.classList.toggle("collapsed", collapsed); caret.textContent = collapsed ? "▸" : "▾"; h.setAttribute("aria-expanded", collapsed ? "false" : "true"); };
-    // A pane that opts in with data-default-collapsed starts folded until the
-    // viewer first toggles it; the saved fold wins once there is one.
-    apply(saved[name] === undefined ? sec.hasAttribute("data-default-collapsed") : !!saved[name]);
-    const toggle = ev => {
-      if (ev && ev.target && ev.target.closest && ev.target.closest("button, .chips, a")) return;
-      const now = !sec.classList.contains("collapsed");
-      apply(now);
-      saved[name] = now;
-      try { localStorage.setItem("gt-collapsed", JSON.stringify(saved)); } catch (e) {}
-    };
-    h.addEventListener("click", toggle);
-    h.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(ev); } });
+    const head = sec.querySelector(":scope > h2");
+    if (!head) return;
+    const key = sec.dataset.fold;
+    foldable(sec, {
+      key: key,
+      head: head,
+      summary: FOLD_SUMMARY[key],
+      defaultOpen: FOLD_DEFAULT_OPEN.indexOf(key) >= 0,
+      legacy: foldLegacyTitle(head),
+    });
   });
 }
 setupCollapse();
-// Painted only after setupCollapse has read each pane's name: the icon is the
-// tier title's first child, so a glyph already in it would become the pane's
-// fold key and drop the remembered one.
+// Painted only after setupCollapse has read each pane's heading: the icon is
+// the tier title's first child, so a glyph already in it would become the
+// pane's legacy fold name and drop a remembered one.
 paintTierIcon(null);
 // A running action's elapsed and a finished one's age drift between pushes, so
 // each of those cells carries the stamp it counts from and one ticker a second

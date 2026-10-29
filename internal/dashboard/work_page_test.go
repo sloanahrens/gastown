@@ -995,7 +995,7 @@ func TestTheWorkPanelIsTheOnlyPanelForSeatsAndQueue(t *testing.T) {
 			t.Errorf("index.html still carries %q", gone)
 		}
 	}
-	if !strings.Contains(page, `<section><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>`) {
+	if !strings.Contains(page, `<section data-fold="work"><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>`) {
 		t.Error("the left column has no Work section in the shape the page's panels take")
 	}
 	// The pane draws both readings it is joined from, and redraws on the tick
