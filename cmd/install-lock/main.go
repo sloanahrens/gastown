@@ -1,4 +1,4 @@
-// Command install-lock is scripts/install-gt.sh's install lock: it takes an
+// Command install-lock is the installer's install lock: it takes an
 // exclusive flock, then becomes the install (gt-1jgci).
 //
 //	install-lock --lock FILE --wait SECONDS [--marker FILE] -- COMMAND [ARG...]

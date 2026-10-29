@@ -4,7 +4,7 @@ The OpenShell gateway is the long-lived service behind the `openshell` session b
 
 ## Install
 
-The agent is installed by `scripts/install-gt.sh`, the same run that installs `gt` (`make install`, the rebuild-gt plugin). The install writes `~/Library/LaunchAgents/com.gastown.openshell-gateway.plist` from `scripts/launchd/com.gastown.openshell-gateway.plist.tmpl`, with `$HOME` filled in, and loads it with `launchctl bootstrap gui/$(id -u)` when launchd has not loaded it yet.
+The agent is installed by the Go installer (`cmd/gt-installer`), the same run that installs `gt` (`make install`, and the daemon's rebuild_gt job). The install writes `~/Library/LaunchAgents/com.gastown.openshell-gateway.plist` from `scripts/launchd/com.gastown.openshell-gateway.plist.tmpl`, with `$HOME` filled in, and loads it with `launchctl bootstrap gui/$(id -u)` when launchd has not loaded it yet.
 
 Two things must exist first; the install does not create either:
 
@@ -14,7 +14,7 @@ Two things must exist first; the install does not create either:
 To see what an install would do without building or changing anything:
 
 ```bash
-scripts/install-gt.sh --dry-run
+make gt-installer && ./gt-installer --dry-run
 ```
 
 It prints `gateway: skipped, no <gateway.toml>` when the file is missing. Otherwise it prints `would write <plist>` when the unit differs from the template, and `would run: launchctl bootstrap gui/<uid> <plist>` when launchd has not loaded the unit.

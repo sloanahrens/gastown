@@ -1,17 +1,13 @@
-// Command gt-installer is scripts/install-gt.sh in Go (gt-tpg0p, decision Q3:
-// make install builds and runs this program). Nothing calls it yet; the
-// Makefile switch is the last bead (gt-tpg0p.14).
+// Command gt-installer is the town's install path. `make install` builds this
+// program and runs it, and the daemon's rebuild_gt job builds it with the same
+// Makefile target and runs it with --source rebuild-gt.
 //
 //	gt-installer [--sha REF] [--source manual|rebuild-gt|post-land]
 //	             [--slot-role ROLE] [--slot-timeout SECONDS] [--dry-run]
 //	             [--no-image-first]
 //
-// The install sections land one bead at a time: the OpenShell gateway step
-// (gt-tpg0p.9), target resolution, the no-op path and the refusals
-// (gt-tpg0p.10), the build, install, signing, smoke and syncs (gt-tpg0p.11),
-// and the sandbox image step (gt-tpg0p.12), whose detached rebuild is this same
-// program under --image-build-worker. The Makefile switch (gt-tpg0p.14) is
-// still to land.
+// A sandbox image build the install detaches is this same program run under
+// --image-build-worker.
 package main
 
 import (

@@ -62,7 +62,7 @@ func (m *Marker) Note() string {
 type Store struct{ path string }
 
 // StoreFor resolves the marker under the process environment, honoring the same
-// INSTALL_GT_DAEMON_DIR override the install lock and scripts/install-gt.sh do.
+// INSTALL_GT_DAEMON_DIR override the install lock and the Go installer do.
 func StoreFor(townRoot string) Store { return storeFor(townRoot, os.Getenv) }
 
 // StoreForEnv is StoreFor over the caller's own environment, for a reader that
@@ -81,7 +81,7 @@ func storeFor(townRoot string, getenv func(string) string) Store {
 func StoreIn(path string) Store { return Store{path: path} }
 
 // Dir is the daemon runtime dir for townRoot, honoring the same override the
-// install lock and scripts/install-gt.sh do.
+// install lock and the Go installer do.
 func Dir(townRoot string) string { return dirFor(townRoot, os.Getenv) }
 
 func dirFor(townRoot string, getenv func(string) string) string {

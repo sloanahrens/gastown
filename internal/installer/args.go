@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Config is one run's arguments, as scripts/install-gt.sh documents them.
+// Config is one run's arguments, as cmd/gt-installer documents them.
 type Config struct {
 	// SHA is --sha: the commit to install, "origin/main" (resolved after the
 	// fetch) when the caller names none.
@@ -31,7 +31,7 @@ type Config struct {
 	WorkerArgs []string
 }
 
-// Parse reads the arguments install-gt.sh accepts. On a bad argument it returns
+// Parse reads the arguments an install accepts. On a bad argument it returns
 // the config read so far, because that is the commit the run's result line
 // still names: the script's trap reports the SHA it had reached.
 func Parse(args []string) (Config, error) {

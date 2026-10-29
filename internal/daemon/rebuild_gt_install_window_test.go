@@ -21,7 +21,7 @@ func rebuildGTWindowCli(t *testing.T, d *Daemon, reply func(c cliCall) cliReply)
 			return cliReply{stdout: "abc1234567890\n"}
 		case gitSub(c, "log"):
 			return cliReply{stdout: "abc1234 the commit that was inert\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return reply(c)
 		}
 		return cliReply{}
@@ -54,7 +54,7 @@ func TestRebuildGTNoopDoesNotStartTheInstallWindow(t *testing.T) {
 	})
 
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 1 {
+	if got := len(gtInstallerCalls(cli)); got != 1 {
 		t.Fatalf("installs after the first request = %d, want 1", got)
 	}
 	if _, recorded := d.rebuildGTInstallAge(d.clk().Now()); recorded {
@@ -63,7 +63,7 @@ func TestRebuildGTNoopDoesNotStartTheInstallWindow(t *testing.T) {
 
 	// The next heartbeat, with no time passed: the noop must not hold it.
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 2 {
+	if got := len(gtInstallerCalls(cli)); got != 2 {
 		t.Fatalf("installs after a noop = %d, want 2: the noop started the install window", got)
 	}
 }
@@ -81,12 +81,12 @@ func TestRebuildGTFailedInstallDoesNotStartTheInstallWindow(t *testing.T) {
 	d.rebuildGTGateFn = func() (string, bool) { return "", false }
 	cli := rebuildGTWindowCli(t, d, func(cliCall) cliReply {
 		// The image step failing under POLECAT_IMAGE_FAIL_CLOSED=1 is the shape
-		// the 10-28 cycle reached (scripts/install-gt.sh).
+		// the 10-28 cycle reached (the installer's image step).
 		return cliReply{stdout: "install-gt: RESULT failed - - build-failed\n", code: 1}
 	})
 
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 1 {
+	if got := len(gtInstallerCalls(cli)); got != 1 {
 		t.Fatalf("installs after the failed install = %d, want 1", got)
 	}
 	if _, found, err := loadPatrolLastRun(d.config.TownRoot, "rebuild_gt"); err != nil || !found {
@@ -97,7 +97,7 @@ func TestRebuildGTFailedInstallDoesNotStartTheInstallWindow(t *testing.T) {
 	}
 
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 2 {
+	if got := len(gtInstallerCalls(cli)); got != 2 {
 		t.Fatalf("installs after a failed install = %d, want 2: the failed cycle started the install window", got)
 	}
 }
@@ -119,14 +119,14 @@ func TestRebuildGTDeferralDoesNotStartTheInstallWindow(t *testing.T) {
 	var cli *fakeCLI
 	cli = rebuildGTWindowCli(t, d, func(cliCall) cliReply {
 		// The current call is already recorded, so one is this first install.
-		if len(installCalls(cli)) == 1 {
+		if len(gtInstallerCalls(cli)) == 1 {
 			return cliReply{stdout: "install-gt: RESULT refused - - slot-busy\n", code: 3}
 		}
 		return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
 	})
 
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 1 {
+	if got := len(gtInstallerCalls(cli)); got != 1 {
 		t.Fatalf("installs during the deferral = %d, want 1", got)
 	}
 	if !d.rebuildGTRequested.Load() {
@@ -138,7 +138,7 @@ func TestRebuildGTDeferralDoesNotStartTheInstallWindow(t *testing.T) {
 
 	// The retry the put-back request asks for, with no time passed.
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 2 {
+	if got := len(gtInstallerCalls(cli)); got != 2 {
 		t.Fatalf("installs after the retry = %d, want 2: the deferral started the install window", got)
 	}
 }
@@ -158,7 +158,7 @@ func TestRebuildGTAccomplishedInstallStartsTheWindow(t *testing.T) {
 	})
 
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 1 {
+	if got := len(gtInstallerCalls(cli)); got != 1 {
 		t.Fatalf("installs after the first request = %d, want 1", got)
 	}
 	age, recorded := d.rebuildGTInstallAge(d.clk().Now())
@@ -167,7 +167,7 @@ func TestRebuildGTAccomplishedInstallStartsTheWindow(t *testing.T) {
 	}
 
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 1 {
+	if got := len(gtInstallerCalls(cli)); got != 1 {
 		t.Fatalf("installs inside the window = %d, want 1: an accomplished install must hold the next request", got)
 	}
 	if !d.rebuildGTRequested.Load() {
@@ -177,7 +177,7 @@ func TestRebuildGTAccomplishedInstallStartsTheWindow(t *testing.T) {
 	// Past the window the held request installs.
 	clk.Advance(defaultRebuildGTMinInterval)
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 2 {
+	if got := len(gtInstallerCalls(cli)); got != 2 {
 		t.Fatalf("installs past the window = %d, want 2", got)
 	}
 }
@@ -210,7 +210,7 @@ func TestRebuildGT_EscalatesAnInstallRecordItCannotWrite(t *testing.T) {
 	blockPatrolLastRunPath(t, d)
 
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 1 {
+	if got := len(gtInstallerCalls(cli)); got != 1 {
 		t.Fatalf("installs = %d, want the one the unusable record must not block", got)
 	}
 	if open := rec.OpenEscalations(alertKeyRebuildGTInstallRec); len(open) != 1 {
@@ -241,7 +241,7 @@ func TestRebuildGT_ClearsTheInstallRecordAlertOnceTheRecordIsWritten(t *testing.
 		t.Fatal(err)
 	}
 	triggerInstallOnce(t, d)
-	if got := len(installCalls(cli)); got != 2 {
+	if got := len(gtInstallerCalls(cli)); got != 2 {
 		t.Fatalf("installs = %d, want the second one the unrecorded window leaves unheld", got)
 	}
 	if _, recorded := d.rebuildGTInstallAge(d.clk().Now()); !recorded {

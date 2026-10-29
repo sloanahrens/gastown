@@ -385,7 +385,7 @@ func TestRebuildGTRequestedInstallRetriesPastTheInterval(t *testing.T) {
 		switch {
 		case gitSub(c, "branch"):
 			return cliReply{stdout: "main\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
 		}
 		return cliReply{}
@@ -407,7 +407,7 @@ func TestRebuildGTRequestedInstallRetriesPastTheInterval(t *testing.T) {
 	if !d.rebuildGTRequested.Load() {
 		t.Fatal("a not-quiet deferral dropped the install request")
 	}
-	if got := installCalls(cli); len(got) != 0 {
+	if got := gtInstallerCalls(cli); len(got) != 0 {
 		t.Fatalf("built while a gate held the slot: %v", got)
 	}
 
@@ -417,7 +417,7 @@ func TestRebuildGTRequestedInstallRetriesPastTheInterval(t *testing.T) {
 	if d.rebuildGTRequested.Load() {
 		t.Fatal("a cycle that reached a verdict left the request armed")
 	}
-	if got := installCalls(cli); len(got) != 1 {
+	if got := gtInstallerCalls(cli); len(got) != 1 {
 		t.Fatalf("installs = %v, want the one the surviving request ran", got)
 	}
 }

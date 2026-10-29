@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// The four result lines below are the ones scripts/install-gt_test.sh pins for
-// the same situations, so a field that stops being written shows up here.
+// The four result lines below are the ones the deleted shell installer's test
+// pinned for the same situations, so a field that stops being written shows up
+// here.
 func TestResultLine(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

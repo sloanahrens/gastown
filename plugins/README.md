@@ -104,7 +104,7 @@ there is a silent park (gt-o1z7).
 One caller pushes this directory to the runtime copy, and it is not a
 guarantee that the runtime copy is current:
 
-- `make install` (`scripts/install-gt.sh`) runs `gt plugin sync` from
+- `make install` (the Go installer, `cmd/gt-installer`) runs `gt plugin sync` from
   `<town>/gastown/mayor/rig` after every successful install. The step is
   fail-open: a failed sync does not fail the install, and it is logged as
   "non-fatal" rather than discarded.

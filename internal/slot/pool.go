@@ -148,7 +148,7 @@ func IsPostLandRole(role string) bool {
 	return hasRoleSuffix(role, postLandRoleSuffixes)
 }
 
-// InstallRole is what install-gt.sh's --slot-role names the install's own build
+// InstallRole is what the installer's --slot-role names the install's own build
 // under (the daemon passes it when the build takes a gate slot). A post-landing
 // suite stops yielding to a marker once this role holds a slot: the install's
 // reservation is in place and a long build behind it is no reason to park the

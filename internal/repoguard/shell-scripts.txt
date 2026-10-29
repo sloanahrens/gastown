@@ -52,13 +52,11 @@ scripts/guards/context-budget-guard.sh	port: gt-tpg0p
 scripts/guards/context-budget-guard_test.sh	port: gt-tpg0p
 scripts/install-binary.sh	port: gt-tpg0p
 scripts/install-binary_test.sh	port: gt-tpg0p
-scripts/install-gt.sh	port: gt-tpg0p.14
-scripts/install-gt_test.sh	port: gt-tpg0p.14
 scripts/install-local_test.sh	port: gt-tpg0p
 scripts/install-om.sh	port: gt-tpg0p.16
 scripts/install-om_test.sh	port: gt-tpg0p.16
 scripts/lib/common.sh	port: gt-tpg0p
-scripts/lib/install-gt-lib.sh	port: gt-tpg0p.14
+scripts/lib/install-gt-lib.sh	port: gt-tpg0p
 scripts/lint-lock-wait.sh	port: gt-tpg0p
 scripts/makefile-gate_test.sh	port: gt-tpg0p
 scripts/openshell-providers.sh	port: gt-tpg0p

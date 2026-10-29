@@ -1,5 +1,5 @@
-// Package installlock is the install lock scripts/install-gt.sh takes: an
-// exclusive flock that lives exactly as long as the install (gt-1jgci).
+// Package installlock is the install lock the installer takes: an exclusive
+// flock that lives exactly as long as the install (gt-1jgci).
 //
 // Run takes the lock and then replaces the calling process with the install
 // command (syscall.Exec), with the lock fd inherited. The process holding the
@@ -9,14 +9,14 @@
 //
 // Because the fd is inherited, every descendant of the install inherits it too,
 // not only the install itself. A descendant that outlives the install would
-// hold the lock past it. scripts/install-gt.sh closes that where it can happen:
-// git runs with auto maintenance off, and the image-build supervisor closes
-// every inherited fd, so a detached build never holds the lock.
+// hold the lock past it. The installer closes that where it can happen: git
+// runs with auto maintenance off, and the image-build supervisor closes every
+// inherited fd, so a detached build never holds the lock.
 //
 // Because Run replaces the process, the install's own exit status is the
 // process's. The status Run itself returns that the caller treats specially is
 // ExitLockBusy, and only when the wait ran out. Which statuses the install can
-// exit with is stated in the header of scripts/install-gt.sh.
+// exit with is stated in cmd/gt-installer's documentation.
 //
 // Acquire takes the same lock for a caller that keeps running: the Go installer
 // holds it from the binary swap to the end of the run (gt-tpg0p.13). Its lock
@@ -42,7 +42,7 @@ import (
 )
 
 // ExitLockBusy is the status Run returns when the lock did not free within the
-// wait. scripts/install-gt.sh maps it to its busy exit 3.
+// wait. The installer maps it to its busy exit 3.
 const ExitLockBusy = 75
 
 // ErrBusy reports that the lock did not free within the wait.
@@ -117,8 +117,8 @@ type Config struct {
 	// Command is the argv that replaces the process while the lock is held.
 	Command []string
 	// Env is the environment Command starts with; nil means the process's.
-	// INSTALL_GT_LOCKED=1 is always set, so a re-exec'd scripts/install-gt.sh
-	// knows the lock is held and does not wait on itself.
+	// INSTALL_GT_LOCKED=1 is always set, so a re-exec'd installer knows the
+	// lock is held and does not wait on itself.
 	Env []string
 	// Stderr receives Run's own messages; nil means os.Stderr.
 	Stderr io.Writer

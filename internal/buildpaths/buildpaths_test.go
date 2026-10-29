@@ -32,7 +32,7 @@ func TestAffectsBuild(t *testing.T) {
 		// trees is still markdown.
 		{"internal/version/stale.go", true},
 		{"main.go", true},
-		{"scripts/install-gt.sh", true},
+		{"scripts/install-binary.sh", true},
 		{"plugins/README.md", false},
 	}
 	for _, tc := range tests {

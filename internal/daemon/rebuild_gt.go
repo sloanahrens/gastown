@@ -26,7 +26,8 @@ import (
 // The daemon's own upgrade path does not cover this: checkUpgradeRestart only
 // restarts the daemon onto a binary something else already installed, so
 // without this job a merged commit stays inert until an operator runs `make
-// install` (gt-oqbw). This job decides; scripts/install-gt.sh installs.
+// install` (gt-oqbw). This job decides; the Go installer (cmd/gt-installer)
+// installs.
 //
 // Three things the plugin carried are not here. Its gt plugin record-run
 // receipts: a daemon job records a dog_cycle line instead (gt-4k3fj.8.1). Its
@@ -62,19 +63,19 @@ const (
 	// together with the acquire that follows it.
 	rebuildGTReserveWait = 10 * time.Minute
 
-	// rebuildGTMinReserve is the floor on the slot wait handed to install-gt.sh
+	// rebuildGTMinReserve is the floor on the slot wait handed to the installer
 	// once the reserve budget is spent; a zero would disable its own wait.
 	rebuildGTMinReserve = time.Minute
 
 	// rebuildGTGatePoll is how often the reserve wait re-reads the slot.
 	rebuildGTGatePoll = 15 * time.Second
 
-	// rebuildGTLockWait is how long the sync waits for install-gt.sh's lock
+	// rebuildGTLockWait is how long the sync waits for the install lock
 	// before deferring to the next heartbeat: a lock still held means an
 	// install is running right now.
 	rebuildGTLockWait = 30 * time.Second
 
-	// rebuildGTInstallLockWait is what install-gt.sh waits for the same lock.
+	// rebuildGTInstallLockWait is what the installer waits for the same lock.
 	// A minute, not its own five: a longer wait only keeps this job running,
 	// which keeps the daemon non-idle and delays its upgrade restart.
 	rebuildGTInstallLockWait = 60 * time.Second
@@ -89,7 +90,7 @@ const (
 	// rebuildGTSubjectLimit caps the commit subjects the install records.
 	rebuildGTSubjectLimit = 20
 
-	// rebuildGTLogTailLines is how much of install-gt.sh's output the daemon
+	// rebuildGTLogTailLines is how much of the installer's output the daemon
 	// log keeps. The whole build log is unbounded and unread; what a failure is
 	// read back from is its end.
 	rebuildGTLogTailLines = 20
@@ -587,7 +588,7 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 		d.rebuildGTMarkPending(d.clk().Now())
 	}
 
-	d.logger.Printf("rebuild_gt: installing %s (%s commits behind) through scripts/install-gt.sh", repoRoot, behind)
+	d.logger.Printf("rebuild_gt: installing %s (%s commits behind) through cmd/gt-installer", repoRoot, behind)
 	return d.rebuildGTInstall(ctx, cycle, repoRoot, reserveTimeout)
 }
 
@@ -675,7 +676,7 @@ const (
 )
 
 // rebuildGTSync fast-forwards the source checkout to origin/main under
-// install-gt.sh's lock. Every write to that tree happens under this lock, so
+// the install lock. Every write to that tree happens under this lock, so
 // the sync cannot move it under a build a `make install` is running
 // (claude-7fc).
 func (d *Daemon) rebuildGTSync(ctx context.Context, repoRoot string) (rebuildGTSyncOutcome, string) {
@@ -726,13 +727,17 @@ func (d *Daemon) rebuildGTSync(ctx context.Context, repoRoot string) (rebuildGTS
 	return rebuildGTSyncOK, ""
 }
 
-// rebuildGTInstall runs the town's one install path and maps its result.
-// reserveTimeout is the seconds the install may wait for a container-gate
-// slot; zero takes no slot.
+// rebuildGTInstall builds the Go installer from the synced checkout, runs it
+// and maps its result. reserveTimeout is the seconds the install may wait for
+// a container-gate slot; zero takes no slot.
+//
+// The installer is built and then started, never run through `go run`: go run
+// ends with its own status whatever the program exited with, and the mapping
+// below reads the installer's 0-3.
 func (d *Daemon) rebuildGTInstall(ctx context.Context, cycle *dogCycle, repoRoot string, reserveTimeout int) bool {
-	installer := filepath.Join(repoRoot, "scripts", "install-gt.sh")
+	installer := filepath.Join(repoRoot, "cmd", "gt-installer")
 	if _, err := os.Stat(installer); err != nil {
-		cycle.failStep("installer", "scripts/install-gt.sh is missing")
+		cycle.failStep("installer", "cmd/gt-installer is missing")
 		_ = d.rebuildGTAlert(alertKeyRebuildGTNoInstaller,
 			fmt.Sprintf("rebuild_gt: %s is missing, so nothing can install gt", installer))
 		return true
@@ -746,16 +751,36 @@ func (d *Daemon) rebuildGTInstall(ctx context.Context, cycle *dogCycle, repoRoot
 	}
 	head = strings.TrimSpace(head)
 
-	args := []string{installer, "--sha", head, "--source", rebuildGTSource}
+	// The Makefile's target is the build `make install` does, so a human's
+	// installer and this job's are one program built one way (gt-tpg0p.14).
+	buildOut := &rebuildGTInstallLog{}
+	buildCmd := exec.CommandContext(ctx, "make", "gt-installer")
+	buildCmd.Dir = repoRoot
+	buildCmd.Stdout = buildOut
+	buildCmd.Stderr = buildOut
+	if _, _, buildErr := d.runCmd(buildCmd); buildErr != nil {
+		if ctx.Err() != nil {
+			d.logger.Printf("rebuild_gt: the installer build was killed with the cycle (%v); retrying next heartbeat", ctx.Err())
+			d.rebuildGTNoteBlocked(cycle, true, "the installer build was killed with the cycle")
+			return false
+		}
+		cycle.failStep("installer", "make gt-installer failed")
+		d.logger.Printf("rebuild_gt: make gt-installer failed (%v); last lines:\n%s", buildErr, buildOut.tail(rebuildGTLogTailLines))
+		_ = d.rebuildGTAlert(alertKeyRebuildGTInstallFail,
+			fmt.Sprintf("rebuild_gt: cannot build the installer in %s", repoRoot))
+		return true
+	}
+	program := filepath.Join(repoRoot, "gt-installer")
+
+	args := []string{"--sha", head, "--source", rebuildGTSource}
 	if reserveTimeout > 0 {
 		args = append(args, "--slot-role", slot.InstallRole, "--slot-timeout", strconv.Itoa(reserveTimeout))
 	}
 
 	out := &rebuildGTInstallLog{}
-	cmd := exec.CommandContext(ctx, "bash", args...)
+	cmd := exec.CommandContext(ctx, program, args...)
 	cmd.Dir = repoRoot
-	// SKIP_UPDATE_CHECK stays inside install-gt.sh; the environment carries
-	// only the two knobs the plugin set (gt-9jax).
+	// The environment carries only the two knobs the plugin set (gt-9jax).
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("INSTALL_GT_LOCK_WAIT=%d", int(rebuildGTInstallLockWait.Seconds())),
 		"INSTALL_GT_RIG_DIR="+repoRoot,
@@ -763,10 +788,22 @@ func (d *Daemon) rebuildGTInstall(ctx context.Context, cycle *dogCycle, repoRoot
 	cmd.Stdout = out
 	cmd.Stderr = out
 
-	d.logger.Printf("rebuild_gt: running %s --sha %s --source %s (this builds and can take minutes)", installer, shortSHA(head), rebuildGTSource)
+	d.logger.Printf("rebuild_gt: running %s --sha %s --source %s (this builds and can take minutes)", program, shortSHA(head), rebuildGTSource)
 	_, _, runErr := d.runCmd(cmd)
 	res := out.result()
-	d.logger.Printf("rebuild_gt: install-gt finished (%s); last lines:\n%s", res.event, out.tail(rebuildGTLogTailLines))
+	d.logger.Printf("rebuild_gt: the installer finished (%s); last lines:\n%s", res.event, out.tail(rebuildGTLogTailLines))
+
+	// A program that could not be started never ran, so it was not killed and
+	// it reported nothing. The next heartbeat would fail the same way, so this
+	// escalates rather than deferring.
+	var execErr *exec.Error
+	var pathErr *os.PathError
+	if runErr != nil && ctx.Err() == nil && (errors.As(runErr, &execErr) || errors.As(runErr, &pathErr)) {
+		cycle.failStep("installer", "the installer did not start")
+		_ = d.rebuildGTAlert(alertKeyRebuildGTInstallFail,
+			fmt.Sprintf("rebuild_gt: cannot start the installer %s: %v", program, runErr))
+		return true
+	}
 
 	code := 0
 	if runErr != nil {
@@ -783,12 +820,12 @@ func (d *Daemon) rebuildGTInstall(ctx context.Context, cycle *dogCycle, repoRoot
 	// taking them as a verdict would hold the hour over work that never
 	// happened. Deferring returns the request this cycle consumed (see the
 	// cycle goroutine in triggerRebuildGT) and the next heartbeat retries. This
-	// is not an install-gt failure to escalate:
-	// the kill is the daemon's own clock, and the starvation block below is what
-	// escalates a binary that stays uninstalled (gt-oyrav).
+	// is not an installer failure to escalate: the kill is the daemon's own
+	// clock, and the starvation block below is what escalates a binary that
+	// stays uninstalled (gt-oyrav).
 	if ctx.Err() != nil || code < 0 {
-		d.logger.Printf("rebuild_gt: install-gt was killed before it reported a result (ctx %v, exit %d); retrying next heartbeat", ctx.Err(), code)
-		d.rebuildGTNoteBlocked(cycle, true, "install-gt was killed before it reported a result")
+		d.logger.Printf("rebuild_gt: the installer was killed before it reported a result (ctx %v, exit %d); retrying next heartbeat", ctx.Err(), code)
+		d.rebuildGTNoteBlocked(cycle, true, "the installer was killed before it reported a result")
 		return false
 	}
 
@@ -864,7 +901,7 @@ func (w *rebuildGTInstallLog) tail(n int) string {
 	return strings.Join(lines, "\n")
 }
 
-// rebuildGTInstallResult is install-gt.sh's one machine-readable line,
+// rebuildGTInstallResult is the installer's one machine-readable line,
 // `install-gt: RESULT <event> <commit> <prev> <reason>`, where a field it has
 // nothing to say about is "-".
 type rebuildGTInstallResult struct {

@@ -1,11 +1,11 @@
-// Package installer is scripts/install-gt.sh in Go (gt-tpg0p, decision Q3).
+// Package installer is the town's install path in Go (gt-tpg0p, decision Q3),
+// the shell script gt-tpg0p.14 deleted. `make install` builds and runs
+// cmd/gt-installer, and the daemon's rebuild_gt job runs the same program.
 //
-// The script's sections move here one bead at a time; what is here now is the
-// exit contract they all report through and the install lock the swap takes
-// (gt-tpg0p.13). A run names one result in its last line (Result) and ends with
-// one of the four statuses its callers map (Exit). A run that ends without
-// naming a result is reported as failed/unexpected by OnExit, the counterpart
-// of the script's EXIT trap.
+// A run names one result in its last line (Result) and ends with one of the
+// four statuses its callers map (Exit). A run that ends without naming a result
+// is reported as failed/unexpected by OnExit, the counterpart of the script's
+// EXIT trap.
 package installer
 
 import (

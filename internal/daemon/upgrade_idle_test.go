@@ -83,7 +83,7 @@ func writeInstallLock(t *testing.T, d *Daemon) string {
 	return path
 }
 
-// holdInstallLock takes an exclusive flock on path (as install-gt.sh's
+// holdInstallLock takes an exclusive flock on path (as the installer's
 // install-lock helper does) through a separate open file, released when the
 // test ends.
 func holdInstallLock(t *testing.T, path string) {
@@ -98,7 +98,7 @@ func holdInstallLock(t *testing.T, path string) {
 
 func TestInstallLockPathMatchesInstallGt(t *testing.T) {
 	t.Parallel()
-	// scripts/install-gt.sh: ${INSTALL_GT_DAEMON_DIR:-$TOWN_ROOT/daemon}/install-gt.lock
+	// the installer: ${INSTALL_GT_DAEMON_DIR:-$TOWN_ROOT/daemon}/install-gt.lock
 	if got, want := installLockPath("/town"), filepath.Join("/town", "daemon", "install-gt.lock"); got != want {
 		t.Fatalf("installLockPath = %q, want %q", got, want)
 	}

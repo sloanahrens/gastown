@@ -1,5 +1,5 @@
-// Package imagebuild supervises the sandbox image build that
-// scripts/install-gt.sh starts (gt-k6v12): it runs the build in a process group
+// Package imagebuild supervises the sandbox image build that the installer
+// starts (gt-k6v12): it runs the build in a process group
 // of its own under an alarm, stops the whole group when the alarm goes off, and
 // reports a build that did not finish.
 //
@@ -38,8 +38,9 @@ const ExitStart = 127
 // flags it refuses, since the directory arrives as a flag.
 const ExitRefused = 2
 
-// ownedPrefix is the name scripts/install-gt.sh gives the temp directory it
-// makes for this binary: mktemp -d "$TMPDIR/install-gt-image.XXXXXX".
+// ownedPrefix is the name the retired install-gt.sh gave the temp directory it
+// made for this binary: mktemp -d "$TMPDIR/install-gt-image.XXXXXX". Nothing
+// makes that directory now, but --owned still refuses a path not named so.
 const ownedPrefix = "install-gt-image."
 
 const (

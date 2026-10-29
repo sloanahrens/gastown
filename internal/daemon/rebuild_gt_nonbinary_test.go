@@ -56,7 +56,7 @@ func TestRebuildGTCycle_SkipsADocsOnlyLanding(t *testing.T) {
 	if settled := d.runRebuildGT(); !settled {
 		t.Fatal("a docs-only skip reached a verdict and must hold the interval")
 	}
-	if installs := installCalls(cli); len(installs) != 0 {
+	if installs := gtInstallerCalls(cli); len(installs) != 0 {
 		t.Errorf("a docs-only landing was installed: %v", installs)
 	}
 	if _, open := d.rebuildGTBlock.openFor(d.clk().Now()); open {
@@ -90,7 +90,7 @@ func TestRebuildGTCycle_InstallsWhenAMixedLandingChangesTheBinary(t *testing.T) 
 		case gitSub(c, "log"):
 			return cliReply{stdout: "abc1234 the commit that was inert\n"}
 		}
-		if c.name == "bash" {
+		if c.name == "gt-installer" {
 			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 cafecafe -\n"}
 		}
 		return cliReply{}
@@ -99,7 +99,7 @@ func TestRebuildGTCycle_InstallsWhenAMixedLandingChangesTheBinary(t *testing.T) 
 	if settled := d.runRebuildGT(); !settled {
 		t.Fatal("a completed install holds the interval")
 	}
-	if installs := installCalls(cli); len(installs) != 1 {
+	if installs := gtInstallerCalls(cli); len(installs) != 1 {
 		t.Errorf("a landing that changed the binary was not installed: %v", installs)
 	}
 }
@@ -116,7 +116,7 @@ func TestRebuildGTCycle_InstallsWhenAnEmbedSourceChanged(t *testing.T) {
 		"internal/cmdtree/bd-command-tree.json",
 		"internal/config/roles/worker.toml",
 		"internal/formula/formulas/polecat.formula.toml",
-		"scripts/install-gt.sh",
+		"scripts/install-binary.sh",
 		"plugins/tool-updater/run.sh",
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -133,14 +133,14 @@ func TestRebuildGTCycle_InstallsWhenAnEmbedSourceChanged(t *testing.T) {
 				case gitSub(c, "rev-parse"):
 					return cliReply{stdout: "abc1234567890\n"}
 				}
-				if c.name == "bash" {
+				if c.name == "gt-installer" {
 					return cliReply{stdout: "install-gt: RESULT installed abc1234567890 cafecafe -\n"}
 				}
 				return cliReply{}
 			})
 
 			d.runRebuildGT()
-			if installs := installCalls(cli); len(installs) != 1 {
+			if installs := gtInstallerCalls(cli); len(installs) != 1 {
 				t.Errorf("a change to %s did not install: %v", path, installs)
 			}
 		})
@@ -164,14 +164,14 @@ func TestRebuildGTCycle_InstallsWhenTheDiffIsUnreadable(t *testing.T) {
 		case gitSub(c, "rev-parse"):
 			return cliReply{stdout: "abc1234567890\n"}
 		}
-		if c.name == "bash" {
+		if c.name == "gt-installer" {
 			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 cafecafe -\n"}
 		}
 		return cliReply{}
 	})
 
 	d.runRebuildGT()
-	if installs := installCalls(cli); len(installs) != 1 {
+	if installs := gtInstallerCalls(cli); len(installs) != 1 {
 		t.Errorf("an unreadable diff did not install: %v", installs)
 	}
 }
@@ -203,7 +203,7 @@ func TestRebuildGTNonBinaryPath(t *testing.T) {
 		// Ordinary source, scripts and plugins. A markdown file in one of those
 		// trees is still markdown: it is not compiled into the binary.
 		{"internal/daemon/rebuild_gt.go", false},
-		{"scripts/install-gt.sh", false},
+		{"scripts/install-binary.sh", false},
 		{"plugins/tool-updater/run.sh", false},
 		{"plugins/README.md", true},
 		{"main.go", false},

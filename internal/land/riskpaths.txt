@@ -25,7 +25,8 @@ internal/liveness/**
 internal/intent/**
 internal/reaper/**
 internal/estop/**
-scripts/install-gt.sh
+cmd/gt-installer/**
+internal/installer/**
 scripts/lib/install-gt-lib.sh
 scripts/install-binary.sh
 scripts/uninstall-gt.sh
