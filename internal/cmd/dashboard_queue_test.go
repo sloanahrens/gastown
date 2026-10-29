@@ -455,7 +455,7 @@ func TestStorePrefixesReadsTheTownRoutes(t *testing.T) {
 	}
 }
 
-// dashedShape is a description that passes the dispatcher's shape lint, so a
+// dashesShape is a description that passes the dispatcher's shape lint, so a
 // test's bead reads "ok" from the lint alone and the verdict overlay is the
 // only thing that can change it.
 const dashesShape = "## Goal\n\ng\n\n## Constraints\n\nc\n\n## Out of scope\n\no\n\n## Gate\n\nmake gate\n\n## Size\n\none worker, one landing\n\n## Acceptance\n\n- [ ] done\n"
@@ -537,6 +537,32 @@ func TestDashQueueKeepsAHeldOrParkedShapeWithTheVerdict(t *testing.T) {
 	}
 }
 
+// A planning verdict fills the row's skip fields and changes no shape: the bead
+// lints clean, so it stays "ok" with the dispatcher's reason beside it, and the
+// page can say why the dispatcher will not take it yet (gt-ckncx).
+func TestDashQueueFillsThePlanningVerdictWithoutChangingTheShape(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	st := &fakeQueueStore{ready: []*beads.Issue{{ID: "gt-1", Title: "needs planning", Type: "task", Description: dashesShape}}}
+	r := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown")
+	r.verdicts = func() (*specdispatch.Ledger, error) {
+		return &specdispatch.Ledger{SavedAt: at, Verdicts: map[string]specdispatch.LedgerVerdict{
+			"gt-1": {Bead: "gt-1", Class: specVerdictPlanning, Reason: "label needs-planning", FirstAt: at, Ticks: 2},
+		}}, nil
+	}
+	q := r.read(at.Add(time.Minute))
+	if q == nil || len(q.Ready) != 1 {
+		t.Fatalf("ready = %+v", q)
+	}
+	row := q.Ready[0]
+	if row.Shape != "ok" || row.ShapeNote != "" {
+		t.Errorf("shape = %q note = %q, want the lint's ok unchanged", row.Shape, row.ShapeNote)
+	}
+	if row.SkipClass != specVerdictPlanning || row.SkipReason != "label needs-planning" || row.SkipTicks != 2 || !row.SkippedSince.Equal(at) {
+		t.Errorf("skip fields = %+v, want planning over 2 ticks from %v", row, at)
+	}
+}
+
 // A dispatcher that is held or stopped stops writing, so its last tick's
 // verdicts read as current would be a claim nothing backs: older than the
 // window, the ledger changes no shape and fills no field, and the queue says
@@ -577,6 +603,7 @@ func TestDashQueueIgnoresAVerdictLedgerItCannotRead(t *testing.T) {
 		"missing": {func() (*specdispatch.Ledger, error) {
 			return specdispatch.LoadLedger(filepath.Join(t.TempDir(), "verdicts.json"))
 		}, false},
+		"nil":        {func() (*specdispatch.Ledger, error) { return nil, nil }, false},
 		"unreadable": {func() (*specdispatch.Ledger, error) { return nil, errors.New("dolt down") }, true},
 	} {
 		r := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown")
