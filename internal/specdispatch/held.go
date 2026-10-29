@@ -2,6 +2,7 @@ package specdispatch
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -233,28 +234,94 @@ func TestNamesOverlap(a, b string) bool {
 }
 
 // HoldFiles is the set of paths the overlap hold reads from a bead's text: the
-// paths it names, minus the documents it only reads. A bead cites the
-// standards and research it must follow (every test bead cites the
-// test-engineering standard) without changing them, so two such beads do not
-// hold each other. A reference document under docs/ that the bead's Constraints
-// section lists is a file the bead changes, so it stays; a path in the town's
-// claude/docs standards tree never stays, listed or not, because that tree
-// lives in ~/.claude and no polecat edits it (gt-6t44f, gt-kr17g).
+// paths it names, minus the paths it only reads. A bead cites the standards and
+// research it must follow (every test bead cites the test-engineering standard)
+// without changing them, so two such beads do not hold each other. A reference
+// document under docs/ that the bead's Constraints section lists is a file the
+// bead changes, so it stays; a path in the town's claude/docs standards tree
+// never stays, listed or not, because that tree lives in ~/.claude and no
+// polecat edits it (gt-6t44f, gt-kr17g).
 //
-// named is the bead's paths; listed is the paths its Constraints section names.
-func HoldFiles(named, listed []string) []string {
+// A bead can also mark a path read-only: a path its text follows with
+// "(read-only)" is not a named path, so two beads that cite one document that
+// way do not hold each other (gt-5v13p). The marker is exact, and it must
+// follow every mention in text to count, so a bead that also names the path as
+// work is still held on it.
+//
+// named is the bead's paths; listed is the paths its Constraints section names;
+// text is the bead's own words, every field named was extracted from: a mention
+// in a field left out is unmarked and keeps the path held.
+func HoldFiles(named, listed []string, text ...string) []string {
 	constrained := make(map[string]bool, len(listed))
 	for _, p := range listed {
 		constrained[p] = true
 	}
+	whole := strings.Join(text, "\n")
 	out := make([]string, 0, len(named))
 	for _, p := range named {
-		if isStandardDoc(p) || (IsReferenceDoc(p) && !constrained[p]) {
+		if markedReadOnly(whole, p) || isStandardDoc(p) || (IsReferenceDoc(p) && !constrained[p]) {
 			continue
 		}
 		out = append(out, p)
 	}
 	return out
+}
+
+// readOnlyMarker is the marker a bead's text places directly after a path it
+// only reads: "docs/testing.md (read-only)" (gt-5v13p). A closing backtick or
+// quote between the two is allowed, because a path is often wrapped in one.
+var readOnlyMarker = regexp.MustCompile("^[`\"']?\\s*\\(read-only\\)")
+
+// markedReadOnly reports whether text mentions path and marks every one of its
+// mentions (read-only), so the path is one the bead reads and does not change.
+//
+// A mention counts only where a path token starts: the same characters inside a
+// longer path ("xdocs/testing.md") are not a mention of the shorter one, and
+// text that never mentions the path marks nothing — a path no mention marks is
+// not a path the bead reads only.
+func markedReadOnly(text, path string) bool {
+	if path == "" {
+		return false
+	}
+	mentions, marked := 0, 0
+	for _, line := range strings.Split(text, "\n") {
+		for off := 0; off < len(line); {
+			i := strings.Index(line[off:], path)
+			if i < 0 {
+				break
+			}
+			at := off + i
+			end := at + len(path)
+			off = end
+			if !startsPathToken(line[:at]) {
+				continue
+			}
+			mentions++
+			if readOnlyMarker.MatchString(line[end:]) {
+				marked++
+			}
+		}
+	}
+	return mentions > 0 && mentions == marked
+}
+
+// startsPathToken reports whether prefix ends where a path token starts: at the
+// line's start, after a character no path carries, or after the "./" or "../"
+// that spells the same repo-relative path.
+func startsPathToken(prefix string) bool {
+	if prefix == "" {
+		return true
+	}
+	for _, up := range []string{"./", "../"} {
+		if trimmed, ok := strings.CutSuffix(prefix, up); ok {
+			return startsPathToken(trimmed)
+		}
+	}
+	last := prefix[len(prefix)-1]
+	if last >= 'a' && last <= 'z' || last >= 'A' && last <= 'Z' || last >= '0' && last <= '9' {
+		return false
+	}
+	return last != '_' && last != '.' && last != '/' && last != '-'
 }
 
 // IsReferenceDoc reports whether a normalized path names a read-only reference

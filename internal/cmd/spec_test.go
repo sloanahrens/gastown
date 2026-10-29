@@ -1230,10 +1230,15 @@ func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
 	t.Parallel()
 	const standard = "claude/docs/standards/test-engineering.md"
 	const source = "internal/notify/cli.go"
+	const doc = "docs/testing.md"
 	cite := func(desc, path string) string { return desc + "\nRead " + path + " before you start.\n" }
 	reads := func(path string) string { return cite(specTestDescription, path) }
 	changes := func(path string) string {
 		body := "Update " + path + "."
+		return specConstraints(&body)
+	}
+	readsMarked := func(path string) string {
+		body := "Read " + path + " (read-only)."
 		return specConstraints(&body)
 	}
 	unparsed := strings.Replace(specTestDescription, "## Constraints", "## Constraint", 1)
@@ -1249,6 +1254,8 @@ func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
 		{"two beads listing the standard under Constraints do not hold", changes(standard), changes(standard), false},
 		{"beads with no Constraints section keep the standard and hold", cite(noConstraints, standard), cite(noConstraints, standard), true},
 		{"beads whose Constraints heading did not parse hold", cite(unparsed, standard), cite(unparsed, standard), true},
+		{"two beads marking the doc read-only do not hold", readsMarked(doc), readsMarked(doc), false},
+		{"the same doc listed as work still holds", changes(doc), changes(doc), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

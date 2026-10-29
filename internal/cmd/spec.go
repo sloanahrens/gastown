@@ -681,7 +681,9 @@ func specPeerHeldBySeat(peer sling.Duplicate, pool []sling.Duplicate) string {
 	// The peer's own priority decides whether the hold takes it: an urgent peer
 	// the tick would sling despite an overlap is next, so the guard refuses the
 	// candidate behind it exactly as it does for an unheld peer (gt-iydx1).
-	return specdispatch.HeldOverlap(specHoldFiles(peer.Refs.Files, peer.Ready.Description), peer.Refs.Tests, peer.Priority, held).Reason
+	paths := specHoldFiles(peer.Refs.Files, peer.Ready.Description,
+		peer.Title, peer.Ready.Description, peer.Ready.Design, peer.Ready.Notes)
+	return specdispatch.HeldOverlap(paths, peer.Refs.Tests, peer.Priority, held).Reason
 }
 
 // specSeatHolds reports whether a bead in status is one a working seat has in
@@ -1856,11 +1858,13 @@ func specNotePendingHeld(reads map[string]heldRead, rig, id, holder string, path
 
 // specPendingRefs is the overlap signal a bead holds while its sling is
 // pending or running, the signal specHeldHold compares a candidate's against:
-// the files its text names (with the hold's reference-document rule) and the
-// test names it cites.
+// the files its text names (with the hold's reference-document and (read-only)
+// rules) and the test names it cites.
 func specPendingRefs(full specdispatch.Spec) (paths, tests []string) {
 	refs := extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes)
-	return specHoldFiles(refs.Files, full.Description), refs.Tests
+	paths = specHoldFiles(refs.Files, full.Description,
+		full.Title, full.Description, full.Design, full.Notes)
+	return paths, refs.Tests
 }
 
 // specHeldHold is the pre-dispatch overlap hold: the hold a candidate takes as
@@ -1900,15 +1904,18 @@ func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads
 
 // specHoldFiles is the file set the overlap hold reads for one bead: the paths
 // its text names, minus the reference documents its Constraints section does
-// not list as work (gt-6t44f). A bead whose Constraints section is missing,
-// empty or unparsed keeps every path: it has not said which cited documents it
-// changes, and an unknown set is not an empty one (gt-zs8fq). The sling-time
-// guard keeps every named path either way. A Constraints section that names no
-// path (a follow-up's fixed text) counts the documents its Goal names as the
-// work instead (gt-1e5s8).
-// A missing or empty Goal leaves that work unknown too, so it keeps every path
-// as well (gt-zs8fq).
-func specHoldFiles(files []string, description string) []string {
+// not list as work (gt-6t44f) and minus the paths its text marks (read-only)
+// (gt-5v13p). A bead whose Constraints section is missing, empty or unparsed
+// keeps every path: it has not said which cited documents it changes, and an
+// unknown set is not an empty one (gt-zs8fq). The sling-time guard keeps every
+// named path either way. A Constraints section that names no path (a
+// follow-up's fixed text) counts the documents its Goal names as the work
+// instead (gt-1e5s8). A missing or empty Goal leaves that work unknown too, so
+// it keeps every path as well (gt-zs8fq).
+//
+// text is the bead's own words, every field the files were extracted from, so
+// a (read-only) marker is read from the same text it was written in.
+func specHoldFiles(files []string, description string, text ...string) []string {
 	sections := specdispatch.Sections(description)
 	constraints, ok := sections["constraints"]
 	if !ok || constraints == "" {
@@ -1921,7 +1928,7 @@ func specHoldFiles(files []string, description string) []string {
 		}
 		listed = extractContentRefs(sections["goal"]).Files
 	}
-	return specdispatch.HoldFiles(files, listed)
+	return specdispatch.HoldFiles(files, listed, text...)
 }
 
 // specHeldStatuses are the statuses that mean a working seat holds the bead:
@@ -1944,8 +1951,9 @@ func heldBeadFrom(c duplicateCandidate) (specdispatch.HeldBead, bool) {
 	return specdispatch.HeldBead{
 		ID:       c.ID,
 		Assignee: c.Ready.Assignee,
-		Paths:    specHoldFiles(c.Refs.Files, c.Ready.Description),
-		Tests:    c.Refs.Tests,
+		Paths: specHoldFiles(c.Refs.Files, c.Ready.Description,
+			c.Title, c.Ready.Description, c.Ready.Design, c.Ready.Notes),
+		Tests: c.Refs.Tests,
 	}, true
 }
 

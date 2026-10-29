@@ -299,6 +299,148 @@ func TestHeldOverlapStandardUnderConstraintsDoesNotHold(t *testing.T) {
 	}
 }
 
+// A path the bead's text marks (read-only) is one it reads, not one it changes:
+// it leaves the hold's set, and the marker beats a Constraints listing, which
+// otherwise makes a docs path work (gt-5v13p). A mention without the marker
+// keeps the path named, and only the exact marker counts.
+func TestHoldFilesReadOnlyMarker(t *testing.T) {
+	t.Parallel()
+	const doc = "docs/testing.md"
+	const code = "internal/cmd/spec.go"
+	const other = "internal/cmd/sling.go"
+	cases := []struct {
+		name   string
+		named  []string
+		listed []string
+		text   []string
+		want   []string
+	}{
+		{
+			name:  "a path the text marks read-only is not a named path",
+			named: []string{code, other},
+			text:  []string{"Read " + code + " (read-only) first, then change " + other + "."},
+			want:  []string{other},
+		},
+		{
+			name:  "the same path without the marker is still named",
+			named: []string{code},
+			text:  []string{"Change " + code + "."},
+			want:  []string{code},
+		},
+		{
+			name:   "the marker drops a docs path the Constraints section lists",
+			named:  []string{doc},
+			listed: []string{doc},
+			text:   []string{"## Constraints\nRead " + doc + " (read-only)."},
+			want:   nil,
+		},
+		{
+			name:  "one unmarked mention keeps the path named",
+			named: []string{code},
+			text:  []string{"Read " + code + " (read-only), then change " + code + "."},
+			want:  []string{code},
+		},
+		{
+			name:  "a marker in another field counts too",
+			named: []string{code},
+			text:  []string{"Read it first.", "## Constraints\nFollow " + code + " (read-only)."},
+			want:  nil,
+		},
+		{
+			name:  "a path embedded in a longer path is not a marked mention",
+			named: []string{code},
+			text:  []string{"Read x" + code + " (read-only)."},
+			want:  []string{code},
+		},
+		{
+			name:  "the words read-only without parentheses are not the marker",
+			named: []string{code},
+			text:  []string{code + " is read-only."},
+			want:  []string{code},
+		},
+		{
+			name:  "a path wrapped in backticks takes the marker",
+			named: []string{code},
+			text:  []string{"Peek at `" + code + "` (read-only)."},
+			want:  nil,
+		},
+		{
+			name:  "a path spelled with a leading ./ takes the marker",
+			named: []string{code},
+			text:  []string{"Peek at ./" + code + " (read-only)."},
+			want:  nil,
+		},
+		{
+			name:  "no text marks nothing",
+			named: []string{code},
+			want:  []string{code},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := HoldFiles(c.named, c.listed, c.text...)
+			if fmt.Sprint(got) != fmt.Sprint(c.want) {
+				t.Errorf("HoldFiles(%v, %v, %v) = %v, want %v", c.named, c.listed, c.text, got, c.want)
+			}
+		})
+	}
+}
+
+// Two beads that both cite one file with the (read-only) marker are not held
+// against each other, and the same two beads without the marker are: the
+// marker, not the citation, decides the hold (gt-5v13p).
+func TestHeldOverlapReadOnlyMarkerDecidesTheHold(t *testing.T) {
+	t.Parallel()
+	const code = "internal/cmd/spec.go"
+	const seat = "gastown/polecats/capable"
+	names := func(text string) []string { return HoldFiles([]string{code}, nil, text) }
+	cases := []struct {
+		name      string
+		held      string
+		candidate string
+		want      string
+	}{
+		{
+			name:      "both beads read the file only",
+			held:      "Read " + code + " (read-only).",
+			candidate: "Consult " + code + " (read-only) before you start.",
+			want:      "",
+		},
+		{
+			name:      "neither bead marks the file",
+			held:      "Change " + code + ".",
+			candidate: "Change " + code + ".",
+			want:      "gt-first (held by " + seat + ") is already hooked to a working seat and names " + code + "; the hold lifts when that bead closes",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			held := []HeldBead{{ID: "gt-first", Assignee: seat, Paths: names(c.held)}}
+			if got := HeldOverlap(names(c.candidate), nil, 2, held).Reason; got != c.want {
+				t.Errorf("HeldOverlap = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// A bead that marks one path read-only and names another is held on the other:
+// the marker drops only the path it follows (gt-5v13p).
+func TestHeldOverlapHoldsOnTheUnmarkedPath(t *testing.T) {
+	t.Parallel()
+	const doc = "docs/testing.md"
+	const code = "internal/specdispatch/held.go"
+	const seat = "gastown/polecats/capable"
+	paths := func(text string) []string { return HoldFiles([]string{code, doc}, nil, text) }
+	held := []HeldBead{{ID: "gt-first", Assignee: seat, Paths: paths("Change " + doc + " and " + code + ".")}}
+	candidate := paths("Read " + doc + " (read-only), then change " + code + ".")
+	want := "gt-first (held by " + seat + ") is already hooked to a working seat and names " + code + "; the hold lifts when that bead closes"
+	if got := HeldOverlap(candidate, nil, 2, held).Reason; got != want {
+		t.Errorf("HeldOverlap = %q, want %q", got, want)
+	}
+}
+
 // A docs/ path the Constraints section lists is work, so two beads changing
 // the same repo doc still hold (gt-kr17g).
 func TestHeldOverlapConstrainedDocsPathHolds(t *testing.T) {
