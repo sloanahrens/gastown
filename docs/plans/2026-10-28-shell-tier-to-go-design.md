@@ -1,4 +1,4 @@
-> Status: approved by the operator in sections (grilling round 1 and the design sections, 2026-10-28). Implemented by the beads of epic gt-u560q; landed by gt-h0b6y.
+> Status: historical (2026-10). Merged in: gt-h0b6y (design and plan; the implementation beads are filed from the plan, epic gt-u560q). Not maintained.
 
 # The shell tier in Go: one runner, a trigger per script, then the ports
 
@@ -71,7 +71,7 @@ Independence evidence so far (grep over the 28 scripts, not proof): no listeners
 
 ### 3.4 Compatibility with the daemon and settings
 
-- The runner prints the existing summary line byte for byte, `tier-sweep: shell GREEN|RED passed=N failed=N skipped=N [failed: <names>] (logs <dir>) in <duration>`, with the same exit codes. `land.shellTierSummaryRE` and `tier_sweep.go` keep parsing it unchanged.
+- The runner prints the existing summary line byte for byte, `tier-sweep: shell GREEN|RED passed=N failed=N skipped=N [failed: <names>] (logs <dir>) in <duration>`, with the same exit codes. `land.shellTierSummaryRE` (task A3 of the plan exports it as `land.ShellTierSummaryRE`) and `tier_sweep.go` keep parsing it unchanged.
 - Cutover is two one-line changes in the overseer's area, each its own bead: the sweep's shell stage command in `tier_sweep.go`, and gastown's `post_land_command`, which becomes `GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --since-green`. The `GT_TEST_DOCKER=0` text is what `gt-7k0hz` keys on to take no container slot.
 - During the transition `tier-sweep.sh`'s shell branch is a one-line `exec` of the runner (a thin wrapper, allowed by the scripts policy), and `make test-slow` and `make test-makefile` call the runner.
 
@@ -83,7 +83,7 @@ Independence evidence so far (grep over the 28 scripts, not proof): no listeners
 
 ### 3.6 Testing and risks
 
-Tests use fakes for exec, clock, filesystem and the history reader, so no test starts a process or waits in real time. They cover ordering, the cap of 3, the serial barrier, the per-script timeout, the summary-line golden, a trigger-decision table, and the fail-open cases. One integration-tier test runs the real runner on a two-script fixture.
+Tests of the runner use fakes for exec, clock, filesystem and the history reader, so no unit test starts a process or waits in real time. The ported `makefile-gate_test.sh` cases (plan Part B) run real `make`, so they are integration tier: `//go:build integration`, named `TestIntegration<Case>`, run by the hourly sweep. They cover ordering, the cap of 3, the serial barrier, the per-script timeout, the summary-line golden, a trigger-decision table, and the fail-open cases. One integration-tier test runs the real runner on a two-script fixture.
 
 | Risk | Mitigation |
 |---|---|
@@ -104,6 +104,7 @@ Tests use fakes for exec, clock, filesystem and the history reader, so no test s
 1. Confirm approach C and the order above (already approved in chat; recorded here).
 2. When the classification of the 73 scripts is delivered, choose for each script: port, delete, or keep as platform.
 3. Whether the hourly sweep should keep running the whole shell tier once the post-land trigger is per script (this document assumes yes, as the safety net).
+4. The 101 `makefile-gate_test.sh` cases move to the integration tier, so a Makefile-recipe regression is caught by the hourly sweep instead of within minutes of a landing (the landing gate and the post-land run stop running them). Accept that latency?
 
 ## 6. Not verified
 

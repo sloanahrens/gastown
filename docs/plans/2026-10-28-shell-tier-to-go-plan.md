@@ -1,4 +1,4 @@
-> Status: approved by the operator (2026-10-28). Filed as epic gt-u560q with 28 beads; landed by gt-h0b6y.
+> Status: historical (2026-10). Merged in: gt-h0b6y (design and plan; the implementation beads are filed from the plan, epic gt-u560q). Not maintained.
 
 # The shell tier in Go: implementation plan
 
@@ -8,7 +8,7 @@
 
 **Architecture:** package `internal/shelltier` (manifest, runner, summary line, trigger via `internal/tiertrigger`), run as `go run ./internal/shelltier/cmd/shelltier` from the worktree under test. Package `internal/makegate` holds the Go port of `makefile-gate_test.sh`, one recipe family at a time.
 
-**Tech stack:** Go; `internal/tiertrigger` (`Due`, `State`, `Store`, `Git`, `Files`); `internal/land` (`ShellTierInputs`, `shellTierSummaryRE`); `make -n` for recipe-text checks.
+**Tech stack:** Go; `internal/tiertrigger` (`Due`, `State`, `Store`, `Git`, `Files`); `internal/land` (`ShellTierInputs`, `shellTierSummaryRE`, exported by task A3 as `ShellTierSummaryRE`); `make -n` for recipe-text checks.
 
 **Spec:** `docs/plans/2026-10-28-shell-tier-to-go-design.md`.
 
@@ -37,7 +37,7 @@ Not in this plan, each with its reason:
 | Fact | Source |
 |---|---|
 | The summary line is `tier-sweep: shell <GREEN\|RED> passed=N failed=N skipped=N[ failed: <names>] (logs <dir>) in <dur>`; verdict is RED when failed > 0 or when passed+failed+skipped is 0; `<dur>` is `Ns`, `NmNs` or `NhNmNs` | `scripts/tier-sweep.sh` `summary()` (line 79) and `fmt_duration()` (line 60) |
-| The daemon and the post-land revert parse the RED line with `shellTierSummaryRE` | `internal/land/gate.go` |
+| The daemon and the post-land revert parse the RED line with `shellTierSummaryRE` (unexported today; task A3 exports it as `ShellTierSummaryRE`) | `internal/land/gate.go` |
 | `tiertrigger.Due(st State, pkgs []Package, g Git, now time.Time, loc *time.Location) (due []string, unreadable map[string]error)`; `Package{Name string; Triggers []string}`; `State map[string]Record{Commit string; At time.Time}`; `State.Ran(pkg, commit string, when time.Time)`; `Store{Path string; Files Files}` with `Load() (State, error)` and `Save(State) error`; `Git` has `DiffNameOnly(base, head string) ([]string, error)` and `Worktree() ([]string, error)`; `Files` has `ReadFile`, `WriteFile`, `RemoveFile`; `OSFiles{}`; `DailyZoneLocation()` | `internal/tiertrigger/state.go`, `daily.go` |
 | `land.ShellTierInputs` is an ERE constant, pinned to the INPUTS line of `scripts/post-land-shell.sh` by `TestShellTierInputsMatchPostLandScript` | `internal/land/gate.go`, `gate_test.go:526` |
 | The sweep's shell stage budget is `tierSweepShellBudget` = 20 minutes; only the integration stage sets `slot: true` | `internal/daemon/tier_sweep.go` (line 932) |
@@ -105,7 +105,7 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 
 ### Task A4: The command and the end-to-end test
 
-**Files:** create `internal/shelltier/cmd/shelltier/main.go`, `main_test.go`, `internal/shelltier/osexec.go`, `osexec_test.go`, `internal/shelltier/e2e_integration_test.go` (`//go:build integration`).
+**Files:** create `internal/shelltier/cmd/shelltier/main.go`, `main_test.go`, `internal/shelltier/osexec.go`, `internal/shelltier/e2e_integration_test.go` (`//go:build integration`).
 
 **Interfaces:**
 - Consumes: `Run`, `Summary`, `Result.Exit`, `Manifest`.
@@ -116,9 +116,9 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 - [ ] `TestMainRunsEveryEntryWithAll`: with a fake `Exec`, `--all` runs every manifest entry once in order. Mutation: skip the last entry.
 - [ ] `TestMainPrintsTheScriptLinesAndTheSummary`: the error stream carries one `tier-sweep: shell <path> ...` line per script and then the summary. Mutation: omit the per-script lines.
 - [ ] `TestMainRejectsAnUnknownFlag`: exit 2 with the usage line.
-- [ ] `TestOSExecReportsTheExitCode` (a real `true` and `false` through `os/exec`, in the integration-tagged file): exit 0 and exit 1.
-- [ ] `TestRunnerEndToEndOnATwoScriptFixture` (integration tag): a temp directory with one passing and one failing `*_test.sh`, a fixture manifest, and the real runner prints a RED summary naming the failing one and exits 1.
-- [ ] `go test ./internal/shelltier/... -run 'TestMain|TestOSExec' -count=1` and `go test -tags integration ./internal/shelltier -run 'TestRunnerEndToEnd|TestOSExec' -count=1` pass.
+- [ ] `TestIntegrationOSExecReportsTheExitCode` (a real `true` and `false` through `os/exec`, in the integration-tagged file): exit 0 and exit 1.
+- [ ] `TestIntegrationRunnerEndToEndOnATwoScriptFixture` (integration tag): a temp directory with one passing and one failing `*_test.sh`, a fixture manifest, and the real runner prints a RED summary naming the failing one and exits 1.
+- [ ] `go test ./internal/shelltier/... -run 'TestMain' -count=1` and `go test -tags integration ./internal/shelltier -run 'TestIntegration' -count=1` pass.
 
 **Depends on:** A3.
 
@@ -230,11 +230,24 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 **Behaviour:** `scripts/forgejo-cutover_test.sh` (13.4 s), `forgejo-probe_test.sh` (11.9 s), `forgejo-provision_test.sh` (7.8 s) and `forgejo-resync_test.sh` (6.2 s) become `Parallel`. The proof is an integration-tagged test that runs those four through the real runner with `--jobs 3`, three times in a row, and requires three green summaries.
 
 **Acceptance:**
-- [ ] `TestForgejoTestsRunConcurrentlyThreeTimesGreen` (integration tag) passes. Mutation: make one of the four write a fixed temp path; the test fails.
+- [ ] `TestIntegrationForgejoTestsRunConcurrentlyThreeTimesGreen` (integration tag) passes. Mutation: make one of the four write a fixed temp path; the test fails.
 - [ ] `TestManifestMarksExactlyTheProvenScriptsParallel`: only these four are `Parallel`. Mutation: flip a fifth.
-- [ ] `go test -tags integration ./internal/shelltier -run 'TestForgejoTests|TestManifestMarks' -count=1` passes.
+- [ ] `go test -tags integration ./internal/shelltier -run 'TestIntegrationForgejoTests|TestManifestMarks' -count=1` passes.
 
 **Depends on:** A10. Gate owed by the overseer: the same proof on the live town (three concurrent runs on the real host).
+
+### Task A8b: The path-scan guard
+
+**Files:** create `internal/shelltier/triggers_guard_test.go`.
+
+**Behaviour:** for each manifest entry, scan the script's text for repo-relative paths it names (`scripts/…`, `deploy/…`, `plugins/…`, `.githooks/…`, `Makefile`, `internal/…`), and fail when a named path is not at or under one of the entry's triggers (`tiertrigger.Runs`). Entries with the default triggers (`scripts/`, `Makefile`) are checked the same way, so `deploy/…` and `plugins/…` references force their triggers to be declared.
+
+**Acceptance:**
+- [ ] `TestEveryReferencedRepoPathIsATrigger` passes on the manifest as filed, which means A1's default triggers are widened in this task wherever the scan finds an uncovered path. Mutation: remove one trigger; the test fails and names the script and path.
+- [ ] `TestScanFindsPathsInQuotesAndVariables` (a fixture script text).
+- [ ] `go test ./internal/shelltier -run 'TestEveryReferenced|TestScanFinds' -count=1` passes.
+
+**Depends on:** A11 (chained after it so the dispatcher runs one task at a time in `internal/shelltier`).
 
 ### Task A12: Delete the three orchestration scripts
 
@@ -253,65 +266,65 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 
 101 cases in nine families. Every case below is accounted for by line number in `scripts/makefile-gate_test.sh` at `eec0ced3`. Tasks B1 to B13 share one package and run in order.
 
-**The form of the tests (decided by B1, with a number):** a seam `type Make func(args ...string) (stdout string, err error)` whose real value runs `make -C <root> --no-print-directory -n <args>`, and for the stub-driven families a `Sandbox` that stages the Makefile and stub tools in a temp directory. B1 measures the cost of its nine `make -n` cases. If they take under 2 s together, they are unit-tier tests with a real `make -n`; if not, they carry the integration tag and run in the hourly sweep. B1 records the measured number in its comment and registers the package in whichever `internal/testpolicy` list the guard names.
+**Tier and naming (decided here, not by a measurement):** every test in `internal/makegate` runs real `make` (a process), so it is integration tier by the test standard (rule 2: unit tier is in-process; the standard's own answer for process-based checks is an integration tag, plus a trigger and a sweep). Every test file is `*_integration_test.go`, starts with `//go:build integration`, and every test is named `TestIntegration<Case>` (the repo's pattern, as in `internal/testutil`). Every `go test` command here carries `-tags integration`; an untagged `go test ./internal/makegate` runs nothing and would pass vacuously. The seam is `type Make func(args ...string) (stdout string, err error)` whose real value runs `make -C <root> --no-print-directory -n <args>`; stub-driven families add a `Sandbox` (in a tagged test file) that stages the Makefile and stub tools in a temp directory. The hourly tier sweep runs every package that has an integration-tagged test file (`scripts/tier-sweep.sh` `tagged_dirs`), so these cases run there. Consequence for the operator: the landing gate and the post-land run stop running these 101 cases; a Makefile-recipe regression is caught by the hourly sweep instead of within minutes after a landing (decision 4 of the design).
 
 ### Task B1: The seam and the first nine gate-shape cases
 
-**Files:** create `internal/makegate/make.go`, `gate_shape_test.go`, `main_test.go`.
+**Files:** create `internal/makegate/doc.go` (package clause and doc comment only, so `go build ./...` has a non-test file), `make_integration_test.go` (the `Make` seam, `lineOf` and the shared helpers; tagged, so no production code has only a test caller), `gate_shape_integration_test.go`.
 
 **Cases ported (lines 35 to 89):** `make -n gate exits 0`; gate, test-slow, test-integration and test recipes do not recurse through `$(MAKE)`; gate runs lint, then `go build ./...`, then the cached unit tier; gate leaves the shell tests to test-slow; gate runs the unit tier over every package through the test cache (no budget `-exec`, no `-count=1`); gate only warns on wall time; gate prints its wall time; gate's lint waits on the lint lock; gate never takes the container-gate slot.
 
-**Interfaces:** produces `type Make func(args ...string) (string, error)`, `func RealMake(root string) Make`, `func lineOf(out, needle string) int` (the shell `line_of`).
+**Interfaces:** produces, in `make_integration_test.go`: `type Make func(args ...string) (string, error)`, `func RealMake(root string) Make`, `func lineOf(out, needle string) int` (the shell `line_of`).
 
-**Acceptance:** [ ] one Go test per case above, named after it (`TestGateExitsZero`, `TestRecipesDoNotRecurseThroughMake`, `TestGateOrder`, `TestGateLeavesShellTestsToTestSlow`, `TestGateUnitTierThroughTheCache`, `TestGateOnlyWarnsOnWall`, `TestGatePrintsItsWall`, `TestGateLintWaitsOnTheLock`, `TestGateNeverTakesTheSlot`), each failing when its recipe fact is reversed in the Makefile text it reads (the mutation named in each test's comment). [ ] the measured wall of the nine cases is in the bead comment. [ ] `go test ./internal/makegate -run 'TestGate' -count=1` passes. **Depends on:** nothing in Part A; chained after A12 only for the dispatcher's single-package rule if both are open.
+**Acceptance:** [ ] one integration test per case above, named with the `TestIntegration` prefix (for example `TestIntegrationGateExitsZero`, `TestIntegrationGateNeverTakesTheSlot`), each failing when its recipe fact is reversed (the mutation is named in each test's comment). [ ] every file of the package except `doc.go` starts with `//go:build integration`, and `go vet -tags integration ./internal/makegate` is clean. [ ] `go test -tags integration ./internal/makegate -run 'TestIntegrationGate' -count=1` passes; the bead notes that an untagged run reports no test files and is not a pass. **Depends on:** nothing in Part A.
 
 ### Task B2: Gate shape, second nine (lines 93 to 145)
 
-Cases: gate writes the container opt-in off where the unit tier starts; gate never turns the container opt-in on or defaults it; an inherited `GT_TEST_DOCKER=1` does not change the gate; gate carries one `-timeout`, on the unit tier's `go test`; `make $t is gone` (the retired targets); make test only chains test-slow and test-integration; the slow tier is gone (no `slow.txt`); no `PKGS` default for a changed-package gate; no recipe defaults the container opt-in from the environment. Test names `TestGateOptInOffWhereTheUnitTierStarts` and so on, one per case, each with its mutation. **Depends on:** B1. File `internal/makegate/gate_shape2_test.go`.
+Cases: gate writes the container opt-in off where the unit tier starts; gate never turns the container opt-in on or defaults it; an inherited `GT_TEST_DOCKER=1` does not change the gate; gate carries one `-timeout`, on the unit tier's `go test`; `make $t is gone` (the retired targets); make test only chains test-slow and test-integration; the slow tier is gone (no `slow.txt`); no `PKGS` default for a changed-package gate; no recipe defaults the container opt-in from the environment. Test names `TestGateOptInOffWhereTheUnitTierStarts` and so on, one per case, each with its mutation. **Depends on:** B1. File `internal/makegate/gate_shape2_integration_test.go`.
 
 ### Task B3: test-slow, test-makefile, polecat-image and the dry-run targets (lines 150 to 242, 12 cases)
 
-Cases: `make -n test-slow exits 0`; test-slow runs the gate then the shell tests, containers off, no slot; `make -n test-makefile exits 0`; test-makefile runs the script alone; the shell-test list runs the scripts the old hand list skipped; `make -n polecat-image exits 0`; polecat-image cross-compiles gt and the cache-trim helper; builds the Dockerfile tagged with the short sha and `:dev`; takes `BD_SRC`; labels the image with the bd commit; `make -n polecat-caches`; `make -n openshell-providers`. Note: after A5b the first five assert the runner command; this task ports whatever the file holds at the time (the bead names the lines). File `internal/makegate/targets_test.go`. **Depends on:** B2.
+Cases: `make -n test-slow exits 0`; test-slow runs the gate then the shell tests, containers off, no slot; `make -n test-makefile exits 0`; test-makefile runs the script alone; the shell-test list runs the scripts the old hand list skipped; `make -n polecat-image exits 0`; polecat-image cross-compiles gt and the cache-trim helper; builds the Dockerfile tagged with the short sha and `:dev`; takes `BD_SRC`; labels the image with the bd commit; `make -n polecat-caches`; `make -n openshell-providers`. Note: after A5b the first five assert the runner command; this task ports whatever the file holds at the time (the bead names the lines). File `internal/makegate/targets_integration_test.go`. **Depends on:** B2.
 
 ### Task B4: The seed stage and pins (lines 277 to 363, 9 cases)
 
-Cases: polecat-seed-stage stages the build rig at the build commit and every other rig at its pin; stops on a pin or build commit the checkout does not hold, naming rig and sha; refuses a build commit it cannot read; refuses an empty pins file; polecat-seed-pins pins each seeded rig to its HEAD; polecat-image runs the seed stage with the pin-drift guard before docker build; a stale committed pin stops the seed stage before anything is staged. Needs the `Sandbox` helper (temp git repos, `mkrig`/`seedmk` in the shell); the bead ports those two helpers first. File `internal/makegate/seed_test.go`, `sandbox.go`. **Depends on:** B3.
+Cases: polecat-seed-stage stages the build rig at the build commit and every other rig at its pin; stops on a pin or build commit the checkout does not hold, naming rig and sha; refuses a build commit it cannot read; refuses an empty pins file; polecat-seed-pins pins each seeded rig to its HEAD; polecat-image runs the seed stage with the pin-drift guard before docker build; a stale committed pin stops the seed stage before anything is staged. Needs the `Sandbox` helper (temp git repos, `mkrig`/`seedmk` in the shell); the bead ports those two helpers first. File `internal/makegate/seed_integration_test.go`, `sandbox.go`. **Depends on:** B3.
 
 ### Task B5a: Node prune, first five (lines 378 to 431)
 
-Cases: polecat-image does not call polecat-node-prune by default; calls it after docker build with `POLE_NODE_PRUNE=1`; polecat-node-prune removes the old polecat image from a node with keep 0; leaves a node it cannot list alone and names the failure; the polecat sandbox targets are declared and phony. File `internal/makegate/nodeprune_test.go`. **Depends on:** B4.
+Cases: polecat-image does not call polecat-node-prune by default; calls it after docker build with `POLE_NODE_PRUNE=1`; polecat-node-prune removes the old polecat image from a node with keep 0; leaves a node it cannot list alone and names the failure; the polecat sandbox targets are declared and phony. File `internal/makegate/nodeprune_integration_test.go`. **Depends on:** B4.
 
 ### Task B5b: polecat-image guards (lines 441 to 600, 8 cases)
 
-Cases: refuses to run without `BD_SRC`, before building; refuses a tree with an untracked file; lets a clean tree past its guard; labels the image with the commit the bd build helper printed; a default polecat-image leaves the sandbox nodes alone; prunes after the build with `POLE_NODE_PRUNE=1`; stops before docker when the bd build fails; refuses an empty bd commit. File `internal/makegate/polecatimage_test.go`. **Depends on:** B5a.
+Cases: refuses to run without `BD_SRC`, before building; refuses a tree with an untracked file; lets a clean tree past its guard; labels the image with the commit the bd build helper printed; a default polecat-image leaves the sandbox nodes alone; prunes after the build with `POLE_NODE_PRUNE=1`; stops before docker when the bd build fails; refuses an empty bd commit. File `internal/makegate/polecatimage_integration_test.go`. **Depends on:** B5a.
 
 ### Task B6: test-integration (lines 605 to 651, 7 cases)
 
-Cases: `make -n test-integration exits 0`; runs the integration tag with containers on; passes no `-run` name filter; the no-filter check rejects the pre-`gt-ik4a1.2` recipe; runs every package in `internal/testpolicy/docker.txt`; also vets and tests the tracker module with the integration tag; sets the test-Dolt init pool to the town slot count on both commands. File `internal/makegate/integration_test.go`. **Depends on:** B5b.
+Cases: `make -n test-integration exits 0`; runs the integration tag with containers on; passes no `-run` name filter; the no-filter check rejects the pre-`gt-ik4a1.2` recipe; runs every package in `internal/testpolicy/docker.txt`; also vets and tests the tracker module with the integration tag; sets the test-Dolt init pool to the town slot count on both commands. File `internal/makegate/integration_integration_test.go`. **Depends on:** B5b.
 
 ### Task B7: test-integration-wall (lines 658 to 719, 8 cases)
 
-Cases: `make -n test-integration-wall exits 0`; runs test-integration's two `go test` commands each `-json -count=1`; is an uncached run; the `-count=1` check rejects the pre-`gt-gq4gl` recipe; `INTEGRATION_GO_TEST` still swaps the runner with `-count=1` after it; the runner default carries no `-count=1`; pipes both commands through one `tierwall` run under pipefail; sets the test-Dolt init pool to the town slot count. File `internal/makegate/wall_test.go`. **Depends on:** B6.
+Cases: `make -n test-integration-wall exits 0`; runs test-integration's two `go test` commands each `-json -count=1`; is an uncached run; the `-count=1` check rejects the pre-`gt-gq4gl` recipe; `INTEGRATION_GO_TEST` still swaps the runner with `-count=1` after it; the runner default carries no `-count=1`; pipes both commands through one `tierwall` run under pipefail; sets the test-Dolt init pool to the town slot count. File `internal/makegate/wall_integration_test.go`. **Depends on:** B6.
 
 ### Task B8: Gate failure paths with stubs, part 1 (lines 798 to 828, 5 cases)
 
-Cases: green stubs (exit 0, wall printed, lint waited on the lock, only the Go suite ran with the opt-in off); a taxed host (the gate warns on the exec tax and still passes); lint fails (non-zero, nothing built or tested); build fails (names the build stage, unit tier never starts); Go suite fails (names the Go half). Ports the shell `run_gate` helper (stub `go`, `golangci-lint` and preflight) into `Sandbox`. File `internal/makegate/gate_paths_test.go`. **Depends on:** B7.
+Cases: green stubs (exit 0, wall printed, lint waited on the lock, only the Go suite ran with the opt-in off); a taxed host (the gate warns on the exec tax and still passes); lint fails (non-zero, nothing built or tested); build fails (names the build stage, unit tier never starts); Go suite fails (names the Go half). Ports the shell `run_gate` helper (stub `go`, `golangci-lint` and preflight) into `Sandbox`. File `internal/makegate/gate_paths_integration_test.go`. **Depends on:** B7.
 
 ### Task B9: The tracker module (lines 840 to 871, 5 cases)
 
-Cases: green stubs vet and test the tracker module after the root suite; tracker tests fail (names the Go half, no PASSED line); root suite fails (the tracker module does not run); lint runs golangci-lint in the tracker module with the root config; a lint finding in the tracker module fails the gate and names the module. File `internal/makegate/tracker_test.go`. **Depends on:** B8.
+Cases: green stubs vet and test the tracker module after the root suite; tracker tests fail (names the Go half, no PASSED line); root suite fails (the tracker module does not run); lint runs golangci-lint in the tracker module with the root config; a lint finding in the tracker module fails the gate and names the module. File `internal/makegate/tracker_integration_test.go`. **Depends on:** B8.
 
 ### Task B10: Presubmit, interrupt and test-slow paths (lines 882 to 925, 7 cases)
 
-Cases: presubmit with a changed tracker module whose tests fail fails presubmit (needs a full-history clone for its "first commit" base: the test builds its own two-commit repo in the sandbox and does not depend on the clone's depth, which also removes the shallow-clone trap); an unchanged tracker module is not tested; a failing tracker integration test fails test-integration and names the module; an interrupted gate exits non-zero and the trap stops the suite; test-slow green stubs (Go suite and shell tests ran with the opt-in off); test-slow Go suite fails; test-slow shell tests fail (names the shell tests). File `internal/makegate/presubmit_test.go`. **Depends on:** B9.
+Cases: presubmit with a changed tracker module whose tests fail fails presubmit (needs a full-history clone for its "first commit" base: the test builds its own two-commit repo in the sandbox and does not depend on the clone's depth, which also removes the shallow-clone trap); an unchanged tracker module is not tested; a failing tracker integration test fails test-integration and names the module; an interrupted gate exits non-zero and the trap stops the suite; test-slow green stubs (Go suite and shell tests ran with the opt-in off); test-slow Go suite fails; test-slow shell tests fail (names the shell tests). File `internal/makegate/presubmit_integration_test.go`. **Depends on:** B9.
 
 ### Task B11: lint-lock-wait and the empty docker list (lines 944 to 975, 4 cases)
 
-Cases: a lint contended twice is retried and passes; still contended at the wait bound exits with the lint's code and keeps the lock line; a lint with findings is never retried; test-integration refuses an empty `docker.txt` instead of testing nothing. The `lint-lock-wait` cases run `scripts/lint-lock-wait.sh` itself, so the bead does not port that script; it ports the four assertions with the script as the thing under test. File `internal/makegate/lintlock_test.go`. **Depends on:** B10.
+Cases: a lint contended twice is retried and passes; still contended at the wait bound exits with the lint's code and keeps the lock line; a lint with findings is never retried; test-integration refuses an empty `docker.txt` instead of testing nothing. The `lint-lock-wait` cases run `scripts/lint-lock-wait.sh` itself, so the bead does not port that script; it ports the four assertions with the script as the thing under test. File `internal/makegate/lintlock_integration_test.go`. **Depends on:** B10.
 
 ### Task B12: The `openshell-providers` cases (lines 1059 to 1196, 13 cases)
 
-Cases: the openshell-providers cases run the stub gt, not the host's; the stub gt refuses a flag with no value and `--from-export` without `--render`; the Docker volume script `scripts/polecat-caches.sh` is gone; creates both providers the profiles name; puts no key in argv or on stdout and masks `provider create`'s output; names the missing profile directory and imports nothing; skips an existing provider without reading its key file; fails naming the file when a key file is missing; lints each profile before it imports it; keeps both keys out of an xtrace; masks a short credential by its value; reads a key file as data and never runs it; matches a provider by its whole name. First step: compare these with `scripts/openshell-providers_test.sh` (5.6 s) and write a table in the bead comment of which cases it already covers; port every case that is not covered, and for a duplicate say which test of the other file covers it and keep both until the other file is itself ported. No test is dropped without that table. If the table shows more than ten cases to port, the bead is split into two before it is worked. File `internal/makegate/providers_test.go`. **Depends on:** B11.
+Cases: the openshell-providers cases run the stub gt, not the host's; the stub gt refuses a flag with no value and `--from-export` without `--render`; the Docker volume script `scripts/polecat-caches.sh` is gone; creates both providers the profiles name; puts no key in argv or on stdout and masks `provider create`'s output; names the missing profile directory and imports nothing; skips an existing provider without reading its key file; fails naming the file when a key file is missing; lints each profile before it imports it; keeps both keys out of an xtrace; masks a short credential by its value; reads a key file as data and never runs it; matches a provider by its whole name. First step: compare these with `scripts/openshell-providers_test.sh` (5.6 s) and write a table in the bead comment of which cases it already covers; port every case that is not covered, and for a duplicate say which test of the other file covers it and keep both until the other file is itself ported. No test is dropped without that table. If the table shows more than ten cases to port, the bead is split into two before it is worked. File `internal/makegate/providers_integration_test.go`. **Depends on:** B11.
 
 ### Task B13: Delete `scripts/makefile-gate_test.sh`
 
@@ -328,7 +341,7 @@ Cases: the openshell-providers cases run the stub gt, not the host's; the stub g
 
 ## Dependency summary
 
-A1 → A2 → A3 → A4 → (A5a, A5b: overseer) ; A4 → A6 → A7 → A9 → A10 → A11 ; A1 → A8 ; A12 needs A5a, A5b, A7, A8 and the overseer's `post_land_command` change. B1 → B2 → B3 → B4 → B5a → B5b → B6 → B7 → B8 → B9 → B10 → B11 → B12 → B13 (B13 also needs A12). Parts A and B touch different packages (`internal/shelltier` and `internal/makegate`), so they can run side by side; within each part the dispatcher runs one task at a time.
+A1 → A2 → A3 → A4 → (A5a, A5b: overseer) ; A4 → A6 → A7 → A8 → A9 → A10 → A11 → A8b ; A12 needs A5a, A5b, A8b and the overseer's `post_land_command` change. B1 → B2 → B3 → B4 → B5a → B5b → B6 → B7 → B8 → B9 → B10 → B11 → B12 → B13 (B13 also needs A12). Parts A and B touch different packages (`internal/shelltier` and `internal/makegate`), so they can run side by side; within each part the dispatcher runs one task at a time.
 
 ## Out of this plan, and what it waits for
 
@@ -336,19 +349,6 @@ The per-script ports (the other ~22 scripts in the manifest) wait for the classi
 
 ## Self-review
 
-- Spec coverage: design 3.1 (A1), 3.2 (A6, A7, A8), 3.3 (A2, A9, A10, A11), 3.4 (A3, A5a, A5b, A12), 3.5 (A1 to A12 and B1 to B13). Section 3.6's tests are in each task's acceptance. Gap noted: the path-scan guard (each script's referenced repo paths must be covered by its triggers) is not yet a task; it belongs after A8 and is listed as a follow-up task A8b below.
+- Spec coverage: design 3.1 (A1), 3.2 (A6, A7, A8), 3.3 (A2, A9, A10, A11), 3.4 (A3, A5a, A5b, A12), 3.5 (A1 to A12 and B1 to B13). Section 3.6's tests are in each task's acceptance. The path-scan guard is task A8b, placed before A12.
 - Placeholder scan: none; every task names its files and tests. The names in Part B tasks B2 to B12 give the case titles and the file, and the polecat names the Go tests after the cases, as B1 shows.
 - Type consistency: `Entry`, `Mode`, `Config`, `Result`, `Exec`, `Exit`, `Select`, `Record`, `StatePath` are defined in A1 to A6 and used unchanged in A7 to A12.
-
-### Task A8b: The path-scan guard (follow-up)
-
-**Files:** create `internal/shelltier/triggers_guard_test.go`.
-
-**Behaviour:** for each manifest entry, scan the script's text for repo-relative paths it names (`scripts/…`, `deploy/…`, `plugins/…`, `.githooks/…`, `Makefile`, `internal/…`), and fail when a named path is not at or under one of the entry's triggers (`tiertrigger.Runs`). Entries with the default triggers (`scripts/`, `Makefile`) are checked the same way, so `deploy/…` and `plugins/…` references force their triggers to be declared.
-
-**Acceptance:**
-- [ ] `TestEveryReferencedRepoPathIsATrigger` passes on the manifest as filed, which means A1's default triggers are widened in this task wherever the scan finds an uncovered path. Mutation: remove one trigger; the test fails and names the script and path.
-- [ ] `TestScanFindsPathsInQuotesAndVariables` (a fixture script text).
-- [ ] `go test ./internal/shelltier -run 'TestEveryReferenced|TestScanFinds' -count=1` passes.
-
-**Depends on:** A8.
