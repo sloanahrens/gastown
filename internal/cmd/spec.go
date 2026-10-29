@@ -549,30 +549,31 @@ func specHoldKnobsFrom(townRoot string, warn io.Writer) (specHoldKnobs, bool) {
 // specPeerHeldFrom reports why the spec dispatcher would not sling peer, and
 // "" when the peer is a bead it would take. It asks the questions the tick asks
 // of a candidate before spending a seat: the candidate filter
-// (specdispatch.Eligible), the seat-overlap answer, the startup backoff,
-// readiness — the ready query lists only beads whose blocking dependencies have
-// all resolved, so a peer with one still open is never reached at all — the
-// formula declaration, the shape gate's verdict, and the container rule. The
-// overlap guard reads the answer on an unstarted peer, so a cluster whose head
-// is held dispatches its next eligible bead instead of none (gt-00gee,
-// gt-mknmb).
+// (specdispatch.Eligible), whether a working seat already holds the peer's
+// defect (specPeerHeldBySeat), the startup backoff, readiness — the ready query
+// lists only beads whose blocking dependencies have all resolved, so a peer
+// with one still open is never reached at all — the formula declaration, the
+// shape gate's verdict, and the container rule. The sling-time overlap guard
+// asks this of an unstarted peer, so a cluster whose head is held dispatches
+// its next eligible bead instead of none (gt-00gee, gt-mknmb).
 //
 // The questions read the peer's own pool row rather than the bead: the fields
 // they need are the ones a pool fetch already holds (sling.Readiness), so a
 // peer costs the guard no bd read. The two exceptions carry their inputs: the
 // child set, because bd's parent-child view unions the issue and wisp tables
 // which the pool's flat listing does not, so it is read here from the database
-// the pool came from; and the seat-overlap answer's held set, which is reduced from
-// the pool the guard is already weighing (specPeerHeldBySeat).
+// the pool came from; and the held set specPeerHeldBySeat weighs, which is
+// reduced from the pool the guard is already reading.
 //
-// The seat-overlap answer and the startup backoff are answered because both outlast a
-// tick: a peer resting after a failed session start is not the dispatcher's
-// next move for up to an hour (gt-mqa3r), and a peer a working seat already has
-// in hand is skipped until that seat closes. Either one read as next refuses
-// its whole cluster for as long as it holds. Answering the seat overlap is also
-// what keeps the backoff answer from lapsing into that refusal: once a rest
-// ends the peer is next again, and if live work held it all along, the hold —
-// not the rest — is why it cannot be slung (gt-36qvt).
+// Whether a working seat holds the peer, and the startup backoff, are answered
+// because both outlast a tick: a peer resting after a failed session start is
+// not the dispatcher's next move for up to an hour (gt-mqa3r), and a peer a
+// working seat already has in hand is skipped until that seat closes. Either
+// one read as next refuses its whole cluster for as long as it holds. Answering
+// whether a working seat holds the peer is also what keeps the backoff answer
+// from lapsing into that refusal: once a rest ends the peer is next again, and
+// if live work held it all along, the hold — not the rest — is why it cannot be
+// slung (gt-36qvt).
 //
 // A hold the tick decides from its own state that lifts within a tick or two —
 // seat availability, the per-tick limit, a red-main revert in flight — is not
@@ -596,8 +597,8 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplic
 	if ok, why := specdispatch.Eligible(spec, knobs.MaxPriority); !ok {
 		return why
 	}
-	// The seat-overlap answer comes before the backoff skip, so the reason
-	// reported is the first that holds the peer.
+	// Whether a working seat holds the peer comes before the backoff skip, so
+	// the reason reported is the first that holds it.
 	if why := specPeerHeldBySeat(peer, pool); why != "" {
 		return why
 	}
@@ -653,8 +654,6 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplic
 // guard's own pool by heldBeadFrom, the rule that says which beads hold, so the
 // question costs no bd read, and the peer's own text is reduced by specHoldFiles
 // and extractOverlapRefs, so the two sides cannot disagree about one defect.
-// The tick no longer holds a candidate for overlap (gt-e1ufo); the manual guard
-// still reads a seat overlap this way.
 //
 // Without this question the peer-hold answer lapses the moment a rest ends: the
 // peer stops resting, the guard reads it as next, and it refuses the whole
@@ -1016,10 +1015,12 @@ type specDispatchReport struct {
 	Skipped        []specDispatchEntry `json:"skipped"`
 	Failed         []specDispatchEntry `json:"failed"`
 	// Deferred is the sling-stage part of Skipped: the candidates the tick
-	// chose a seat for and whose sling was then deferred (content overlap, a
-	// pool backpressure refusal). The entries stay in Skipped too, so the tick
-	// line and its cap count them as before; the daemon logs each one on its
-	// own 'deferred:' line, where the cap cannot truncate it (gt-4wcqd).
+	// chose a seat for and whose sling was then deferred (a pool backpressure
+	// refusal, a serialization failure that outlasted its retries, a sandbox
+	// image or cache volume the seat lacks). The entries stay in Skipped too,
+	// so the tick line and its cap count them as before; the daemon logs each
+	// one on its own 'deferred:' line, where the cap cannot truncate it
+	// (gt-4wcqd).
 	Deferred []specDispatchEntry `json:"deferred,omitempty"`
 	// Notices are lines the tick decided on but no single candidate owns,
 	// logged once each (gt-wgyca).
@@ -1961,9 +1962,9 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 	return done(o)
 }
 
-// specHoldFiles is the file set the overlap hold reads for one bead: the paths
-// its text names, minus the reference documents its Constraints section does
-// not list as work (gt-6t44f). A bead whose Constraints section is missing,
+// specHoldFiles is the file set the peer-hold question reads for one bead: the
+// paths its text names, minus the reference documents its Constraints section
+// does not list as work (gt-6t44f). A bead whose Constraints section is missing,
 // empty or unparsed keeps every path: it has not said which cited documents it
 // changes, and an unknown set is not an empty one (gt-zs8fq). The sling-time
 // guard keeps every named path either way. A Constraints section that names no
@@ -1993,8 +1994,8 @@ func specHoldFiles(files []string, description, text string) []string {
 // the sling hooks it, and the polecat's claim makes it in_progress.
 var specHeldStatuses = []string{beads.StatusHooked, string(beads.StatusInProgress)}
 
-// heldBeadFrom reduces one compared bead to the fields the overlap hold reads,
-// or reports false when no working seat holds it. An epic is not held: its
+// heldBeadFrom reduces one compared bead to the fields the peer-hold question
+// reads, or reports false when no working seat holds it. An epic is not held: its
 // prose enumerates its children's files, so a claimed epic or wayfinder map
 // would otherwise hold every ready child that names one (the sling-time guard
 // skips epics for the same reason, findDuplicateMatches). Nor is a bead no

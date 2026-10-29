@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3214,5 +3215,61 @@ func TestSpecSlingParamsAdmitOverlap(t *testing.T) {
 	p := specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, "", specdispatch.SeatChoice{Agent: "gastown/polecats/capable"})
 	if !p.AdmitOverlap {
 		t.Fatal("the spec dispatcher's sling params do not admit a content overlap")
+	}
+}
+
+// The tick's params reach the decision through sling.Run, not a fake: the
+// overlap that refused a manual sling hooks the bead once the dispatcher's
+// params carry it (gt-rd213, gt-e1ufo). Clearing AdmitOverlap on the same
+// params brings the refusal back, so the flag is what the engine acts on.
+func TestSpecSlingParamsDriveSlingRunPastAContentOverlap(t *testing.T) {
+	t.Parallel()
+	const beadID = "gt-overlap"
+	// A bead hooked to a working seat, sharing the candidate's test: the
+	// overlap Blocking refuses whoever the candidate is.
+	overlap := func(string, string, *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
+		return &duplicateCandidate{ID: beadID, Status: "open", Priority: 2},
+			[]duplicateMatch{{
+				Bead:        duplicateCandidate{ID: "gt-seat", Status: "hooked"},
+				SharedTests: []string{"TestHostRehearsal"},
+			}}, nil
+	}
+	for _, tc := range []struct {
+		name        string
+		admit       bool
+		wantRefused bool
+	}{
+		{"the tick's params admit the overlap", true, false},
+		{"the same sling without AdmitOverlap is refused", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.addBead(beadID, beadInfo{Status: "open", Title: "the red tier sweep fails (TestHostRehearsal)"})
+			h.run.slingDeps.checkDuplicates = overlap
+
+			townRoot := t.TempDir()
+			params := specSlingParams(townRoot, filepath.Join(townRoot, "gastown", ".beads"), "mol-polecat-work",
+				specCandidate{Spec: specdispatch.Spec{ID: beadID}, Rig: "gastown"}, "",
+				specdispatch.SeatChoice{Agent: "gastown/polecats/frost"})
+			// A manual sling builds its own params and leaves the flag zero;
+			// the tick's are used as specSlingParams made them.
+			if !tc.admit {
+				params.AdmitOverlap = false
+			}
+
+			_, err := sling.Run(context.Background(), h.run.slingDeps.engineDeps(), params)
+
+			if refused := errors.Is(err, sling.ErrDuplicateContent); refused != tc.wantRefused {
+				t.Fatalf("refused = %v (err %v), want %v", refused, err, tc.wantRefused)
+			}
+			bead := h.bead(beadID)
+			if bead == nil {
+				t.Fatalf("the sling lost the bead %s", beadID)
+			}
+			if hooked := bead.Status == "hooked"; hooked == tc.wantRefused {
+				t.Fatalf("bead %s is %q after the sling, want hooked = %v", beadID, bead.Status, !tc.wantRefused)
+			}
+		})
 	}
 }
