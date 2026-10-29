@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 )
@@ -31,10 +32,28 @@ type CostChart struct {
 	Claude *CostClaudeSeries `json:"claude,omitempty"`
 	// ClaudeWhy is why the chart carries no Claude series: the samples could not
 	// be read, there are none, or none falls in the window.
-	ClaudeWhy string    `json:"claude_why,omitempty"`
-	Limit     *CostLine `json:"limit,omitempty"`
-	Skipped   int       `json:"skipped,omitempty"`
-	Aria      string    `json:"aria"`
+	ClaudeWhy string `json:"claude_why,omitempty"`
+	// Series is one entry per provider, in costSeriesBuilders' order: the
+	// DeepSeek series, then the Claude series. Each entry names its provider id,
+	// so the page can draw a series without knowing the chart's fields.
+	Series  []CostSeries `json:"series,omitempty"`
+	Limit   *CostLine    `json:"limit,omitempty"`
+	Skipped int          `json:"skipped,omitempty"`
+	Aria    string       `json:"aria"`
+}
+
+// CostSeries is one provider's bars on a chart's buckets, in the chart's bucket
+// order. A series that could not be built carries Why and no bars.
+type CostSeries struct {
+	// ID is the provider id the series belongs to, the same id the providers
+	// table carries: "deepseek" or "claude".
+	ID string `json:"id"`
+	// Name is the legend entry and the label the tooltips end with.
+	Name string `json:"name"`
+	// Bars holds one bar or gap per bucket, the same length as the chart's bars.
+	Bars []CostBar `json:"bars"`
+	// Why is set when the series could not be built; Bars is then nil.
+	Why string `json:"why,omitempty"`
 }
 
 // CostClaudeSeries is the Claude plan's plan-equivalent dollars on the chart's
@@ -65,6 +84,93 @@ type CostLine struct {
 	Label string  `json:"label"`
 }
 
+// costSeriesBuilder builds one provider's series for a chart from the chart's
+// bars and Claude series as they stand. It returns bars in the chart's bucket
+// order, or a Why when the series cannot be built.
+type costSeriesBuilder func(chart *CostChart) CostSeries
+
+// costSeriesBuilders is the charts' series in the order the page draws them. A
+// new provider's series is one more entry here.
+var costSeriesBuilders = []costSeriesBuilder{
+	deepSeekCostSeries,
+	claudePlanCostSeries,
+}
+
+// costSeriesDeepSeekName is the DeepSeek series' legend entry.
+const costSeriesDeepSeekName = "DeepSeek"
+
+// deepSeekCostSeries is the DeepSeek series: a copy of the chart's own bars.
+func deepSeekCostSeries(chart *CostChart) CostSeries {
+	return CostSeries{ID: costProviderDeepSeek, Name: costSeriesDeepSeekName, Bars: slices.Clone(chart.Bars)}
+}
+
+// costSeriesClaudeNoWhy is the reason a Claude series carries when the chart has
+// neither Claude bars nor a ClaudeWhy, so the entry still says why it is absent.
+const costSeriesClaudeNoWhy = "the chart has no Claude series"
+
+// claudePlanCostSeries is the Claude series: a copy of the chart's Claude bars,
+// or the reason there are none.
+func claudePlanCostSeries(chart *CostChart) CostSeries {
+	if chart.Claude == nil {
+		why := chart.ClaudeWhy
+		if why == "" {
+			why = costSeriesClaudeNoWhy
+		}
+		return CostSeries{ID: costProviderClaude, Name: claudePlanSeriesName, Why: why}
+	}
+	return CostSeries{ID: costProviderClaude, Name: chart.Claude.Name, Bars: slices.Clone(chart.Claude.Bars)}
+}
+
+// buildCostSeries runs the builders over one chart, in order. A series whose
+// bars are not one per bucket is replaced by an entry that says so, the check
+// the page makes on a chart's bars before it draws them.
+func buildCostSeries(builders []costSeriesBuilder, chart *CostChart) []CostSeries {
+	out := make([]CostSeries, 0, len(builders))
+	for _, build := range builders {
+		s := build(chart)
+		switch {
+		case s.Why != "":
+			s.Bars = nil
+		case len(s.Bars) != len(chart.Bars):
+			s = CostSeries{ID: s.ID, Name: s.Name, Why: fmt.Sprintf("the series does not line up with the chart's buckets: it has %d where the chart has %d", len(s.Bars), len(chart.Bars))}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// costSeriesAria is what a chart's aria-label adds for its series: each one named
+// with its total and every figure, or with why it is not drawn, and how many
+// buckets it has no sample for.
+func costSeriesAria(series []CostSeries) string {
+	var out string
+	for _, s := range series {
+		if s.Why != "" {
+			out += ". " + s.Name + " not drawn: " + s.Why
+			continue
+		}
+		var total float64
+		var words []string
+		gaps := 0
+		for _, b := range s.Bars {
+			if b.Gap {
+				gaps++
+				continue
+			}
+			total += b.Value
+			words = append(words, b.Label+" "+money(b.Value))
+		}
+		out += ". " + s.Name + " total " + money(total)
+		if len(words) > 0 {
+			out += ": " + strings.Join(words, ", ")
+		}
+		if gaps > 0 {
+			out += fmt.Sprintf("; %d %s no sample", gaps, plural(gaps, "bucket has", "buckets have"))
+		}
+	}
+	return out
+}
+
 // BuildCostCharts builds the Cost panel's charts. now is the clock the days and
 // hours end at; perDay is the spend report's per-day spend, nil when there is no
 // report; hours is the day's spend by hour from the balance ledger, and skipped
@@ -73,11 +179,16 @@ type CostLine struct {
 // the Claude dollars are folded from. A missing input leaves its chart out, or
 // its series out with the reason on the chart, rather than drawing zeros.
 func BuildCostCharts(now time.Time, perDay map[string]float64, hours []SpendHour, skipped int, plan *ClaudePlan, samples PlanSamples) CostCharts {
+	return buildCostCharts(costSeriesBuilders, now, perDay, hours, skipped, plan, samples)
+}
+
+// buildCostCharts is BuildCostCharts over the given series builders.
+func buildCostCharts(builders []costSeriesBuilder, now time.Time, perDay map[string]float64, hours []SpendHour, skipped int, plan *ClaudePlan, samples PlanSamples) CostCharts {
 	weeklyUSD := claudeWeekUSD(plan)
 	return CostCharts{
 		Headline: claudeHeadline(now, samples, weeklyUSD),
-		Daily:    buildDailyChart(now, perDay, plan, samples, weeklyUSD),
-		Hourly:   buildHourlyChart(hours, skipped, samples, weeklyUSD),
+		Daily:    buildDailyChart(builders, now, perDay, plan, samples, weeklyUSD),
+		Hourly:   buildHourlyChart(builders, hours, skipped, samples, weeklyUSD),
 	}
 }
 
@@ -99,13 +210,12 @@ func costDailyBuckets(now time.Time) []costBucket {
 // is a zero bar, since a rise is money added, not spent. The weekly limit is its
 // value spread over seven days, so it reads beside the bars in dollars, and its
 // label says where the week's percentage lands at reset.
-func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan, samples PlanSamples, weeklyUSD float64) *CostChart {
+func buildDailyChart(builders []costSeriesBuilder, now time.Time, perDay map[string]float64, plan *ClaudePlan, samples PlanSamples, weeklyUSD float64) *CostChart {
 	if len(perDay) == 0 {
 		return nil
 	}
 	chart := &CostChart{Bars: make([]CostBar, 0, costDailyDays)}
 	buckets := costDailyBuckets(now)
-	var words []string
 	for _, b := range buckets {
 		spent, ok := perDay[b.Name]
 		if !ok {
@@ -117,14 +227,8 @@ func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan,
 			bar.Title = b.Name + " +" + money(-spent) + " added"
 		}
 		chart.Bars = append(chart.Bars, bar)
-		words = append(words, bar.Title)
 	}
-	aria := fmt.Sprintf("Daily spend, last %d days: ", costDailyDays)
-	if len(words) > 0 {
-		aria += strings.Join(words, ", ")
-	} else {
-		aria += "no figures"
-	}
+	aria := fmt.Sprintf("Daily spend, last %d days", costDailyDays)
 	if plan != nil && plan.WeeklyValueUSD > 0 {
 		daily := plan.WeeklyValueUSD / costDailyDays
 		pct := pctText(plan.ProjectedPctAtReset)
@@ -133,9 +237,8 @@ func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan,
 	}
 	lastEnd := buckets[len(buckets)-1].Start.AddDate(0, 0, 1)
 	chart.Claude, chart.ClaudeWhy = claudeCostSeries(buckets, lastEnd, samples, weeklyUSD)
-	if chart.Claude != nil {
-		aria += claudeSeriesAria(chart.Claude)
-	}
+	chart.Series = buildCostSeries(builders, chart)
+	aria += costSeriesAria(chart.Series)
 	chart.Aria = aria
 	return chart
 }
@@ -143,45 +246,29 @@ func buildDailyChart(now time.Time, perDay map[string]float64, plan *ClaudePlan,
 // buildHourlyChart draws the day's spend by hour. An hour with no ledger sample
 // is a gap, labeled, not a bar of zero. Malformed ledger lines the read skipped
 // are named in the aria-label and counted on the chart.
-func buildHourlyChart(hours []SpendHour, skipped int, samples PlanSamples, weeklyUSD float64) *CostChart {
+func buildHourlyChart(builders []costSeriesBuilder, hours []SpendHour, skipped int, samples PlanSamples, weeklyUSD float64) *CostChart {
 	if len(hours) == 0 {
 		return nil
 	}
 	chart := &CostChart{Bars: make([]CostBar, 0, len(hours)), Skipped: skipped}
 	buckets := make([]costBucket, len(hours))
-	var words []string
-	gaps := 0
 	for i, h := range hours {
 		hr := h.Start.Format("15") + ":00"
 		buckets[i] = costBucket{Label: hr, Name: hr, Start: h.Start}
 		if h.Samples == 0 {
-			gaps++
 			chart.Bars = append(chart.Bars, CostBar{Label: hr, Gap: true, Title: hr + " no ledger sample"})
 			continue
 		}
-		bar := CostBar{Label: hr, Value: max(h.Spent, 0), Title: hr + " " + money(h.Spent)}
-		chart.Bars = append(chart.Bars, bar)
-		if h.Spent > 0 {
-			words = append(words, bar.Title)
-		}
+		chart.Bars = append(chart.Bars, CostBar{Label: hr, Value: max(h.Spent, 0), Title: hr + " " + money(h.Spent)})
 	}
 	aria := fmt.Sprintf("Hourly spend, last %d hours", len(hours))
-	if len(words) > 0 {
-		aria += ": " + strings.Join(words, ", ")
-	} else {
-		aria += ": no spend"
-	}
-	if gaps > 0 {
-		aria += fmt.Sprintf(". %d %s no ledger sample", gaps, plural(gaps, "hour has", "hours have"))
-	}
 	if skipped > 0 {
 		aria += fmt.Sprintf(". %d malformed ledger %s skipped", skipped, plural(skipped, "line", "lines"))
 	}
 	lastEnd := hours[len(hours)-1].Start.Add(time.Hour)
 	chart.Claude, chart.ClaudeWhy = claudeCostSeries(buckets, lastEnd, samples, weeklyUSD)
-	if chart.Claude != nil {
-		aria += claudeSeriesAria(chart.Claude)
-	}
+	chart.Series = buildCostSeries(builders, chart)
+	aria += costSeriesAria(chart.Series)
 	chart.Aria = aria
 	return chart
 }
