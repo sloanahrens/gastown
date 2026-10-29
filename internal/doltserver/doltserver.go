@@ -4594,6 +4594,17 @@ type HealthMetrics struct {
 	// DiskUsageHuman is a human-readable disk usage string.
 	DiskUsageHuman string `json:"disk_usage_human"`
 
+	// FootprintBytes is the server process's physical memory footprint in
+	// bytes, as vmmap reports it (macOS only). It is the number that matters
+	// where RSS overstates: freed C memory the kernel has not reclaimed stays
+	// in the resident size. Zero means the footprint could not be read — the
+	// platform has no vmmap, the server has no PID, or vmmap failed.
+	FootprintBytes int64 `json:"footprint_bytes"`
+
+	// FootprintPeakBytes is the highest physical footprint the server process
+	// has reached, in bytes (macOS only). Zero means it could not be read.
+	FootprintPeakBytes int64 `json:"footprint_peak_bytes"`
+
 	// QueryLatency is the time taken for a SELECT active_branch() round-trip.
 	// Note: json.Marshal emits nanoseconds for time.Duration. Consumers should use
 	// ServerHealth.LatencyMs (int64 milliseconds) for JSON output instead.
@@ -4659,7 +4670,17 @@ func (h *host) GetHealthMetrics(townRoot string) *HealthMetrics {
 	metrics.DiskUsageBytes = diskBytes
 	metrics.DiskUsageHuman = formatBytes(diskBytes)
 
-	// 4. Read-only probe: attempt a test write
+	// 4. Physical memory footprint. RSS overstates what the server holds, so
+	// the footprint vmmap reports is the number the status shows. It is
+	// reported, never acted on: a platform or a process that cannot answer
+	// leaves the fields zero and adds no warning.
+	if h.platformOS() == "darwin" {
+		if _, pid, err := h.IsRunning(townRoot); err == nil && pid > 0 {
+			metrics.FootprintBytes, metrics.FootprintPeakBytes = h.serverFootprint(pid)
+		}
+	}
+
+	// 5. Read-only probe: attempt a test write
 	probe := h.CheckReadOnly(townRoot)
 	metrics.ReadOnly = probe.IsFail()
 	if probe.IsFail() {
@@ -4673,7 +4694,7 @@ func (h *host) GetHealthMetrics(townRoot string) *HealthMetrics {
 			fmt.Sprintf("read-only probe could not run: %v", probe.Err()))
 	}
 
-	// 5. Commit freshness: check the most recent commit across all databases.
+	// 6. Commit freshness: check the most recent commit across all databases.
 	// A gap >1 hour suggests writes are failing or the server was recently down.
 	if commitAge, commitDB, err := h.GetLastCommitAge(townRoot); err == nil {
 		metrics.LastCommitAge = commitAge

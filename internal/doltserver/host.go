@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"syscall"
 	"time"
@@ -31,6 +32,8 @@ type host struct {
 	// environList is the whole environment a child inherits (os.Environ).
 	lookupEnv   func(key string) (string, bool)
 	environList func() []string
+	// goos reports the platform this machine runs (runtime.GOOS).
+	goos func() string
 	// run runs a command to completion and returns what it wrote. A failure
 	// that should read as an exit status implements interface{ ExitCode() int }.
 	run func(c hostCall) (stdout, stderr []byte, err error)
@@ -92,6 +95,15 @@ func (h *host) lookupEnvVar(key string) (string, bool) {
 		return h.lookupEnv(key)
 	}
 	return os.LookupEnv(key)
+}
+
+// platformOS is the operating system the adapter's tools run on, so a test
+// can drive a platform-specific path on any machine.
+func (h *host) platformOS() string {
+	if h.goos != nil {
+		return h.goos()
+	}
+	return runtime.GOOS
 }
 
 // environ is the environment a child process inherits.
