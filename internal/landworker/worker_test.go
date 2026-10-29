@@ -311,6 +311,42 @@ func TestPassRejectionSkipsTheAfterLandedHook(t *testing.T) {
 	}
 }
 
+// A landing whose record is left unfinished has not yet proved itself, so the
+// after-landing hook waits. The repair pass that finishes the record runs it,
+// once (gt-sefzt).
+func TestPassRecordIncompleteRunsTheAfterLandedHookOnRepair(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.lander.fn = func(n int, w land.Work) (land.Result, error) {
+		if n == 1 {
+			res := land.Result{LandedCommit: "cccccccc"}
+			return res, &land.RecordError{Result: res, Err: errors.New("close failed")}
+		}
+		return land.Result{LandedCommit: "cccccccc"}, nil
+	}
+	if rep := h.w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("first pass %v; want the landing counted", rep)
+	}
+	if len(h.afterLand) != 0 {
+		t.Fatalf("after-landing hook ran before the record was complete: %v", h.afterLand)
+	}
+	if err := h.bd.Update("gt-abc", beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}}); err != nil {
+		t.Fatal(err)
+	}
+	h.remote.tips[branch] = "3333333333333333333333333333333333333333"
+	if rep := h.w.Pass(context.Background()); rep.Repaired != 1 {
+		t.Fatalf("second pass %v; want one repair", rep)
+	}
+	if len(h.afterLand) != 1 || h.afterLand[0] != "gt-abc@opal" {
+		t.Fatalf("after-landing hooks %v; want gt-abc@opal once, after the repair", h.afterLand)
+	}
+	h.w.Pass(context.Background())
+	if len(h.afterLand) != 1 {
+		t.Fatalf("after-landing hooks %v; a finished repair ran the hook again", h.afterLand)
+	}
+}
+
 func TestPassMissingBranchAnnotatesOnceAndKeepsLabel(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

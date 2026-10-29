@@ -211,6 +211,10 @@ type Daemon struct {
 	// record the seats it was asked to end.
 	endSandboxSeat func(rig, name string, landing sandboxSeatLanding) bool
 
+	// sandboxSeatEndCycles counts the sandbox seat ends in flight (see
+	// startSandboxSeatEnd); tests wait on it.
+	sandboxSeatEndCycles sync.WaitGroup
+
 	// buildCommitFn replaces the daemon's own build commit (see buildCommit)
 	// in tests; nil reads the version package's.
 	buildCommitFn func() string

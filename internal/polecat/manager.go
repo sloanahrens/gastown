@@ -460,7 +460,7 @@ func (m *Manager) lockPolecat(name string) (*flock.Flock, error) {
 	if err := os.MkdirAll(lockDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating lock dir: %w", err)
 	}
-	lockPath := filepath.Join(lockDir, fmt.Sprintf("polecat-%s.lock", name))
+	lockPath := polecatLockPath(m.rig.Path, name)
 	fl := flock.New(lockPath)
 	if m.beforePolecatLock != nil {
 		m.beforePolecatLock(name)

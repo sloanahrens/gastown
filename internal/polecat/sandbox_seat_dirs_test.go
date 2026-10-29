@@ -199,6 +199,66 @@ func TestWithSandboxSeatLockHoldsThePolecatLock(t *testing.T) {
 	}
 }
 
+// A sling takes the polecat lock through Manager.lockPolecat before it builds
+// the worktree, and the seat's end takes it through WithSandboxSeatLock. Both
+// must name the same file, or the end does not exclude a sling. While the seat
+// holds the lock, the file the sling's lock is on is busy; once the seat is
+// done, the sling's own lock is on that same file.
+func TestWithSandboxSeatLockIsTheLockASlingTakes(t *testing.T) {
+	t.Parallel()
+	const name = "agate"
+	mgr, _, _, _ := canonicalRig(t)
+	rigPath := mgr.rig.Path
+	seatPath := polecatLockPath(rigPath, name)
+	err := WithSandboxSeatLock(rigPath, name, func() error {
+		probe := flock.New(seatPath)
+		locked, err := probe.TryLock()
+		if err != nil {
+			return err
+		}
+		if locked {
+			_ = probe.Unlock()
+			t.Error("the seat's end ran without the polecat lock a sling takes")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithSandboxSeatLock: %v", err)
+	}
+	fl, err := mgr.lockPolecat(name)
+	if err != nil {
+		t.Fatalf("lockPolecat: %v", err)
+	}
+	defer func() { _ = fl.Unlock() }()
+	if fl.Path() != seatPath {
+		t.Fatalf("a sling locks %s, the seat's end locks %s", fl.Path(), seatPath)
+	}
+}
+
+// Only the two names a seat's directories are built from are checked, and an
+// unsafe one is refused before anything is read under it.
+func TestCheckSandboxSeatNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		rig, name string
+		wantErr   bool
+	}{
+		{"gastown", "agate", false},
+		{"gastown", "../agate", true},
+		{"gastown", "", true},
+		{"gastown", ".", true},
+		{"..", "agate", true},
+		{"a/b", "agate", true},
+		{".hidden", "agate", true},
+	}
+	for _, tt := range tests {
+		err := CheckSandboxSeatNames(tt.rig, tt.name)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("CheckSandboxSeatNames(%q, %q) = %v, want error %v", tt.rig, tt.name, err, tt.wantErr)
+		}
+	}
+}
+
 // A refusal is not a callback: an unsafe name or a relative rig path runs
 // nothing at all.
 func TestWithSandboxSeatLockRefusesUnsafeInputs(t *testing.T) {

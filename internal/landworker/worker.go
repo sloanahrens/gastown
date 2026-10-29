@@ -132,10 +132,12 @@ type Worker struct {
 	// ClearIntent returns the author polecat's seat from submitted to stop
 	// once the worker has finished with its bead. nil skips it.
 	ClearIntent func(w land.Work) error
-	// AfterLanded runs once a pass has put w's bead on the target: after a
-	// new landing, never after a repaired record, a rejection or a failure.
-	// The daemon removes a sandbox seat's host directories here (gt-sefzt).
-	// nil skips it.
+	// AfterLanded runs once w's landing is on the target and its record is
+	// complete: after a new landing that finished its record, and after the
+	// repair pass that finishes a record left unfinished. Not after a rejection
+	// or a failure, nor after a landing whose record is still unfinished. The
+	// daemon removes a sandbox seat's host directories here (gt-sefzt). nil
+	// skips it.
 	AfterLanded func(w land.Work)
 	// AgentBeadID names the agent bead a polecat's seat wrote its agent on,
 	// which the worker reads to record the agent each landing ran on
@@ -792,6 +794,12 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		if !wasRepair {
 			w.afterLanding(ctx, work, res)
 		}
+		// The record is complete now, which is the proof the seat's end reads.
+		// A repair that finishes a record left unfinished reaches it here, so
+		// the seat its earlier pass kept is ended once the record can prove it.
+		if w.AfterLanded != nil {
+			w.AfterLanded(work)
+		}
 	case outRecordIncomplete:
 		// Landed: the push was read back. Only the record is unfinished.
 		w.endFailureRun(work.BeadID)
@@ -1108,11 +1116,6 @@ func (w *Worker) afterLanding(ctx context.Context, work land.Work, res land.Resu
 	}
 	if w.Reverts != nil {
 		w.Reverts.RevertLanded(ctx, work, res)
-	}
-	// Last, so the seat's end never delays or reorders the landing's own
-	// bookkeeping.
-	if w.AfterLanded != nil {
-		w.AfterLanded(work)
 	}
 }
 

@@ -31,6 +31,12 @@ func WithSandboxSeatLock(rigPath, name string, fn func() error) error {
 	return withSandboxSeatLockTimeout(rigPath, name, SandboxSeatLockTimeout, fn)
 }
 
+// polecatLockPath is the file a polecat's directory lock is taken on. Manager's
+// lockPolecat takes the same file, so the two exclude each other.
+func polecatLockPath(rigPath, name string) string {
+	return filepath.Join(rigPath, ".runtime", "locks", "polecat-"+name+".lock")
+}
+
 // withSandboxSeatLockTimeout is WithSandboxSeatLock over a wait the caller
 // chooses, so a test can prove the busy answer without waiting out the bound.
 func withSandboxSeatLockTimeout(rigPath, name string, timeout time.Duration, fn func() error) error {
@@ -40,13 +46,12 @@ func withSandboxSeatLockTimeout(rigPath, name string, timeout time.Duration, fn 
 	if err := requireSandboxSeatSegment("polecat", name); err != nil {
 		return err
 	}
-	lockDir := filepath.Join(rigPath, ".runtime", "locks")
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(polecatLockPath(rigPath, name)), 0o755); err != nil {
 		return fmt.Errorf("creating lock dir: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	fl := flock.New(filepath.Join(lockDir, "polecat-"+name+".lock"))
+	fl := flock.New(polecatLockPath(rigPath, name))
 	locked, err := fl.TryLockContext(ctx, 50*time.Millisecond)
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("acquiring the polecat lock for %s: %w", name, err)
@@ -57,12 +62,6 @@ func withSandboxSeatLockTimeout(rigPath, name string, timeout time.Duration, fn 
 	defer func() { _ = fl.Unlock() }()
 	return fn()
 }
-
-// A sandbox seat's work lives in its sandbox: its commits are made and pushed
-// from inside the sandbox, and the host worktree a sling made before the
-// sandbox started never receives them. Once the sandbox is gone and the work
-// has landed, nothing on the host reads that copy again, so the daemon removes
-// it (gt-sefzt). A tmux seat keeps its worktree: that copy is the seat's own.
 
 // sandboxSeatSegmentRe matches a rig or polecat name that is safe as one path
 // component: never empty, hidden, ".", "..", or carrying a separator. Both
@@ -75,6 +74,16 @@ func requireSandboxSeatSegment(what, name string) error {
 		return fmt.Errorf("sandbox seat directories: %s %q is not a single path segment", what, name)
 	}
 	return nil
+}
+
+// CheckSandboxSeatNames reports whether rig and name are each one safe path
+// segment. A caller checks them before it reads anything under the seat's
+// names, so an unsafe name is refused before any fact is measured.
+func CheckSandboxSeatNames(rig, name string) error {
+	if err := requireSandboxSeatSegment("rig", rig); err != nil {
+		return err
+	}
+	return requireSandboxSeatSegment("polecat", name)
 }
 
 // SandboxSeatHostDirs is the host-side state a sandbox seat leaves behind: its

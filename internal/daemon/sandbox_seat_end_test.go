@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -122,10 +124,17 @@ func (f *seatEndFake) park() {
 	}
 }
 
-// seatDirs creates the host directories a sandbox seat leaves.
+// seatDirs creates the host directories a sandbox seat leaves, at the paths
+// the spawn and teardown code give them (the layout the bead's survey lists),
+// spelled out here rather than taken from the code under test.
 func (f *seatEndFake) seatDirs() polecat.SandboxSeatHostDirs {
 	f.t.Helper()
-	dirs := polecat.SandboxSeatHostDirsFor(filepath.Join(f.town, endRig), endRig, endPolecat)
+	rigPath := filepath.Join(f.town, endRig)
+	dirs := polecat.SandboxSeatHostDirs{
+		PolecatDir: filepath.Join(rigPath, "polecats", endPolecat),
+		ClonePath:  filepath.Join(rigPath, "polecats", endPolecat, endRig),
+		PromptFile: filepath.Join(rigPath, "polecats", ".claude", "sandbox", "system-prompt-"+endPolecat+".md"),
+	}
 	for _, path := range []string{filepath.Join(dirs.ClonePath, "CLAUDE.md"), dirs.PromptFile} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			f.t.Fatal(err)
@@ -300,10 +309,12 @@ func TestEndFinishedSandboxSeatKeepsASeatWithAnUnreadableAgentBead(t *testing.T)
 }
 
 // A polecat with no agent bead is not a seat this town tracks: nothing is read
-// from the gateway and nothing is removed.
+// from the gateway, nothing is removed, and the keep is logged.
 func TestEndFinishedSandboxSeatWithoutAnAgentBead(t *testing.T) {
 	t.Parallel()
 	f := newSeatEndFake(t)
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
 	dirs := f.seatDirs()
 	if f.host.endFinishedSandboxSeat(endRig, endPolecat, sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}) {
 		t.Error("a seat with no agent bead was ended")
@@ -313,6 +324,63 @@ func TestEndFinishedSandboxSeatWithoutAnAgentBead(t *testing.T) {
 	}
 	if len(f.gwAsked) != 0 {
 		t.Errorf("gateway asked %v; want nothing asked", f.gwAsked)
+	}
+	if !strings.Contains(logs.String(), "kept: no agent bead") {
+		t.Errorf("log %q does not say the seat was kept", logs.String())
+	}
+}
+
+// An unsafe rig or polecat name is refused before anything is read under it:
+// no agent bead is read and no gateway is asked.
+func TestEndFinishedSandboxSeatRefusesUnsafeNamesBeforeReading(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.host.openRecoveryBeads = func([]string) beads.Client {
+		t.Error("an agent bead was read for an unsafe name")
+		return f.agentDB
+	}
+	f.host.sandboxExists = func(gateway, name string) (bool, error) {
+		t.Error("the gateway was asked for an unsafe name")
+		return false, nil
+	}
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	for _, name := range []string{"../agate", "a/agate", "", "."} {
+		if f.host.endFinishedSandboxSeat(endRig, name, finished) {
+			t.Errorf("a seat named %q was ended", name)
+		}
+	}
+}
+
+// The gateway's answer is measured under the seat's lock: while the question is
+// asked, a sling's lock on the polecat is held, so the answer cannot go stale
+// before the removal that acts on it.
+func TestEndFinishedSandboxSeatMeasuresTheGatewayUnderTheSeatLock(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	lockPath := filepath.Join(f.town, endRig, ".runtime", "locks", "polecat-"+endPolecat+".lock")
+	asked := 0
+	f.host.sandboxExists = func(gateway, name string) (bool, error) {
+		asked++
+		other := flock.New(lockPath)
+		locked, err := other.TryLock()
+		if err != nil {
+			t.Errorf("probing the seat lock: %v", err)
+		}
+		if locked {
+			_ = other.Unlock()
+			t.Error("the gateway was asked while the seat lock was free")
+		}
+		return false, nil
+	}
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Fatal("a finished seat was kept")
+	}
+	if asked != 1 {
+		t.Fatalf("the gateway was asked %d times, want once", asked)
 	}
 }
 
@@ -351,6 +419,29 @@ func TestRunSandboxSeatEndReadsTheLandingRecord(t *testing.T) {
 				return &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
 			},
 			wantCalled: true, wantLanded: false, wantLandedB: endBranch,
+		},
+		{
+			// The landing worker appends while the seat's end reads: a torn
+			// line beside w's record must not hide the record.
+			name: "a torn line beside the record still finds it",
+			work: land.Work{BeadID: endBead, Head: head, Branch: endBranch, Worker: endPolecat},
+			landings: func(t *testing.T) *land.LandingsFile {
+				t.Helper()
+				f := &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
+				if err := f.Append(land.LandingRecord{BeadID: endBead, Head: head, Branch: endBranch}); err != nil {
+					t.Fatal(err)
+				}
+				tail, err := os.OpenFile(f.Path, os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = tail.Close() }()
+				if _, err := tail.WriteString(`{"bead_id":"gt-other`); err != nil {
+					t.Fatal(err)
+				}
+				return f
+			},
+			wantCalled: true, wantLanded: true, wantLandedB: endBranch,
 		},
 		{
 			name: "a crew landing has no seat",
@@ -454,5 +545,71 @@ func TestSandboxSeatEndKeepReasons(t *testing.T) {
 				t.Errorf("keepReason = %q, want it to name %q", why, tt.want)
 			}
 		})
+	}
+}
+
+// The landing worker's after-landing hook is the production path to a seat's
+// end: the hook the rig's worker is built with reads the rig's landing record,
+// so a landing the record does not yet prove keeps the seat and the one it
+// proves ends it.
+func TestLandingWorkerAfterLandedEndsTheSeat(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "promote-"+endRig+".key")
+	promoteRigConfig(t, townRoot, endRig, keyFile)
+	writeRigsJSON(t, townRoot, []string{endRig})
+	d := newForgejoPromoteDaemon(t, townRoot, endRig)
+	var ended []sandboxSeatLanding
+	d.endSandboxSeat = func(rig, name string, landing sandboxSeatLanding) bool {
+		ended = append(ended, landing)
+		return true
+	}
+	w, err := d.newRigLandingWorker(endRig)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	if w.AfterLanded == nil {
+		t.Fatal("the rig's landing worker has no after-landing hook")
+	}
+	const head = "0123456789abcdef"
+	work := land.Work{BeadID: endBead, Head: head, Branch: endBranch, Worker: endPolecat}
+
+	w.AfterLanded(work)
+	d.sandboxSeatEndCycles.Wait()
+	if len(ended) != 1 || ended[0].Landed {
+		t.Fatalf("with no landing record: ended %+v; want one end that is unlanded", ended)
+	}
+
+	landings, err := land.RigLandingsFile(townRoot, endRig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := landings.Append(land.LandingRecord{BeadID: endBead, Head: head, Branch: endBranch}); err != nil {
+		t.Fatal(err)
+	}
+	w.AfterLanded(work)
+	d.sandboxSeatEndCycles.Wait()
+	if len(ended) != 2 || !ended[1].Landed || ended[1].BeadID != endBead {
+		t.Fatalf("with the landing record: ended %+v; want a second end that is landed", ended)
+	}
+}
+
+// A daemon that is stopping starts no seat end, so the seat keeps its
+// directories and no goroutine is left behind to race the shutdown.
+func TestStartSandboxSeatEndDoesNotStartWhileStopping(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.ctx = ctx
+	asked := false
+	d.endSandboxSeat = func(string, string, sandboxSeatLanding) bool {
+		asked = true
+		return true
+	}
+	d.startSandboxSeatEnd(endRig, nil, land.Work{BeadID: endBead, Head: "h", Worker: endPolecat})
+	d.sandboxSeatEndCycles.Wait()
+	if asked {
+		t.Error("a seat end started while the daemon was stopping")
 	}
 }

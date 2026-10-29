@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -99,36 +100,36 @@ func orMissing(status polecat.CleanupStatus) string {
 // nothing of its work is at risk. It reports whether the directories were
 // removed; a kept seat and a failed removal are both logged with their reason.
 //
-// The gateway question is asked before the seat's lock, and the facts a sling
-// changes — the agent bead's hook, branch and cleanup status, and the intent
-// record — are read again under it, immediately before the removal: a sling
-// that starts while the seat is ending writes those, and one that has written
-// them keeps the seat. The step is idempotent, so a seat whose directories are
-// already gone costs one stat and nothing else.
+// Every fact is measured under the polecat's directory lock, the one a sling
+// takes before it builds the worktree, and the removal runs under the same
+// hold. A sling that starts while the seat is ending either waits for the
+// removal and then builds afresh, or has already written the facts that keep
+// the seat. The step is idempotent, so a seat whose directories are already
+// gone costs one stat and nothing else.
 func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandboxSeatLanding) bool {
 	log := func(format string, args ...any) {
 		h.d.logger.Printf("sandbox seat end %s/%s: "+format, append([]any{rig, name}, args...)...)
 	}
+	if err := polecat.CheckSandboxSeatNames(rig, name); err != nil {
+		log("kept: %v", err)
+		return false
+	}
+	// A cheap read outside the lock: a polecat that is not an openshell seat
+	// takes no lock and asks nothing.
 	fields, err := h.seatAgentFields(rig, name)
 	if err != nil {
 		log("kept: cannot read its agent bead: %v", err)
 		return false
 	}
 	if fields == nil {
-		return false // no agent bead: not a seat this town tracks
+		log("kept: no agent bead, so this town does not track it as a seat")
+		return false
 	}
-	seat, ok, err := h.openshellSeatFor(fields.Agent)
-	if err != nil {
+	if _, ok, err := h.openshellSeatFor(fields.Agent); err != nil {
 		log("kept: %v", err)
 		return false
-	}
-	if !ok {
+	} else if !ok {
 		return false // a tmux seat keeps today's behavior, silently
-	}
-	exists, err := h.sandboxStillExists(seat.gateway, h.sessionName(rig, name))
-	if err != nil {
-		log("kept: cannot ask gateway %q whether the sandbox is gone: %v", seat.gateway, err)
-		return false
 	}
 	rigPath := filepath.Join(h.town(), rig)
 	var (
@@ -136,30 +137,10 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		removed bool
 	)
 	err = polecat.WithSandboxSeatLock(rigPath, name, func() error {
-		fields, err := h.seatAgentFields(rig, name)
-		if err != nil {
-			kept = "cannot read its agent bead: " + err.Error()
+		end, unmeasured := h.measureSandboxSeatEnd(rig, name, landing)
+		if unmeasured != "" {
+			kept = unmeasured
 			return nil
-		}
-		if fields == nil {
-			kept = "its agent bead is gone"
-			return nil
-		}
-		rec, err := intent.Read(h.town(), supervisor.IntentSeat(h.seat(rig, name)))
-		if err != nil {
-			kept = "cannot read its intent record: " + err.Error()
-			return nil
-		}
-		end := sandboxSeatEnd{
-			SandboxSeat:   true,
-			SandboxGone:   !exists,
-			Landed:        landing.Landed,
-			Retired:       !rec.Held() && rec.EffectiveDesired() == intent.DesiredStop,
-			HookBead:      fields.HookBead,
-			Branch:        strings.TrimSpace(fields.Branch),
-			LandedBranch:  strings.TrimSpace(landing.Branch),
-			CleanupStatus: polecat.CleanupStatus(fields.CleanupStatus),
-			PushFailed:    fields.PushFailed,
 		}
 		if why := end.keepReason(); why != "" {
 			kept = why
@@ -183,6 +164,46 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		log("removed its host directories: the seat is finished (landed %s)", landing.BeadID)
 	}
 	return removed
+}
+
+// measureSandboxSeatEnd reads the facts the seat's end decides on. It runs
+// under the seat's lock, so each fact is the one a sling that holds the lock
+// would see. A fact that cannot be read comes back as the reason the seat is
+// kept, and nothing is decided from a partial read.
+func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandboxSeatLanding) (sandboxSeatEnd, string) {
+	fields, err := h.seatAgentFields(rig, name)
+	if err != nil {
+		return sandboxSeatEnd{}, "cannot read its agent bead: " + err.Error()
+	}
+	if fields == nil {
+		return sandboxSeatEnd{}, "its agent bead is gone"
+	}
+	seat, sandboxed, err := h.openshellSeatFor(fields.Agent)
+	if err != nil {
+		return sandboxSeatEnd{}, err.Error()
+	}
+	end := sandboxSeatEnd{
+		SandboxSeat:   sandboxed,
+		Landed:        landing.Landed,
+		HookBead:      fields.HookBead,
+		Branch:        strings.TrimSpace(fields.Branch),
+		LandedBranch:  strings.TrimSpace(landing.Branch),
+		CleanupStatus: polecat.CleanupStatus(fields.CleanupStatus),
+		PushFailed:    fields.PushFailed,
+	}
+	if sandboxed {
+		exists, err := h.sandboxStillExists(seat.gateway, h.sessionName(rig, name))
+		if err != nil {
+			return sandboxSeatEnd{}, fmt.Sprintf("cannot ask gateway %q whether the sandbox is gone: %v", seat.gateway, err)
+		}
+		end.SandboxGone = !exists
+	}
+	rec, err := intent.Read(h.town(), supervisor.IntentSeat(h.seat(rig, name)))
+	if err != nil {
+		return sandboxSeatEnd{}, "cannot read its intent record: " + err.Error()
+	}
+	end.Retired = !rec.Held() && rec.EffectiveDesired() == intent.DesiredStop
+	return end, ""
 }
 
 // seatAgentFields reads the polecat's agent bead. A bead that does not exist is
@@ -212,8 +233,21 @@ func (h *patrolScanHost) removeSeatDirs(rigPath, rig, name string) error {
 // startSandboxSeatEnd is the landing worker's after-landing hook: it runs the
 // seat's end off the landing's goroutine, since the gateway question it asks is
 // bounded but slow, and a failed cleanup must never take the landing loop down.
+// A daemon that is already stopping starts no end: the seat keeps its
+// directories, which is the safe answer, and the end is not waited for at
+// shutdown (the same as the daemon's other patrol goroutines).
 func (d *Daemon) startSandboxSeatEnd(rigName string, landings *land.LandingsFile, w land.Work) {
+	name := strings.TrimSpace(w.Worker)
+	if name == "" {
+		return // a crew landing has no seat
+	}
+	if d.ctxOrBackground().Err() != nil {
+		d.logger.Printf("sandbox seat end %s/%s: kept: the daemon is stopping", rigName, name)
+		return
+	}
+	d.sandboxSeatEndCycles.Add(1)
 	go func() {
+		defer d.sandboxSeatEndCycles.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				d.logger.Printf("landing_worker: %s: sandbox seat end panicked: %v", rigName, r)
@@ -226,6 +260,11 @@ func (d *Daemon) startSandboxSeatEnd(rigName string, landings *land.LandingsFile
 // runSandboxSeatEnd reads the landing record that proves w landed and hands the
 // seat to the end step. A record that cannot be read is an unlanded answer: the
 // seat is kept, because the record is the only proof its work survived.
+//
+// The read is safe beside the landing worker's appends: w's record was written
+// before the after-landing hook ran, and the file's reader skips a torn line
+// rather than failing on it, so a record another landing is writing at this
+// moment cannot hide w's (see the torn-line case in the test).
 func (d *Daemon) runSandboxSeatEnd(rigName string, landings *land.LandingsFile, w land.Work) {
 	name := strings.TrimSpace(w.Worker)
 	if name == "" {
