@@ -888,12 +888,13 @@ func TestRunTierSweepReSweepsARedWhileASiblingRigDefers(t *testing.T) {
 	}
 }
 
-// tierSweepNoWaitClock is the sweep's clock in the test that proves no wait
+// tierSweepNoWaitClock is the sweep's clock in the tests that prove no wait
 // runs before the integration stage. It tells time from a fake clock and
 // records After and Sleep, the two primitives the daemon's waits are built
-// from: the sweep reads this clock (see Daemon.clk) for every pause, so a wait
-// put back anywhere in the cycle is caught at the call that asks for it, not
-// inferred from elapsed time.
+// from. The sweep takes every pause through Daemon.clk, and its code holds no
+// time.Sleep or time.After of its own, so a wait put back anywhere in the cycle
+// is recorded at the call that asks for it. A wait taken from the time package
+// directly would not be recorded; that is outside what this check covers.
 type tierSweepNoWaitClock struct {
 	*clockwork.FakeClock
 	waits []string
@@ -912,12 +913,13 @@ func (c *tierSweepNoWaitClock) Sleep(d time.Duration) {
 	c.waits = append(c.waits, "Sleep("+d.String()+")")
 }
 
-// gt-qpeei.8: the integration stage takes the container-gate slot with no wait
-// before it: it starts when the shell stage returns. The fixture the removed
-// keys need is the config package's (tolerated_keys_test.go); here the sweep
-// runs the town's ordinary config, and the clock proves the absence of a wait.
-func TestTierSweepIntegrationStageStartsWithoutAWait(t *testing.T) {
-	t.Parallel()
+// tierSweepNoWaitRun runs one green sweep of gastown on a clock that records
+// its waits, and returns the stages it ran, the clock and the log.
+// beforeFirstStage, when set, runs on the sweep's clock as the first stage
+// starts, so a control can put a wait exactly where the no-wait check has to
+// see it.
+func tierSweepNoWaitRun(t *testing.T, beforeFirstStage func(d *Daemon)) ([]string, *tierSweepNoWaitClock, *bytes.Buffer) {
+	t.Helper()
 	now := atHour(time.Now(), 14)
 	d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
 	clk := &tierSweepNoWaitClock{FakeClock: clockwork.NewFakeClockAt(now)}
@@ -930,6 +932,9 @@ func TestTierSweepIntegrationStageStartsWithoutAWait(t *testing.T) {
 	}
 	var ran []string
 	d.tierSweepSeams.run = func(_ context.Context, _ string, st tierSweepStage) tierSweepStageResult {
+		if beforeFirstStage != nil && len(ran) == 0 {
+			beforeFirstStage(d)
+		}
 		ran = append(ran, strings.Join(st.tiers, ","))
 		var b strings.Builder
 		for _, tier := range st.tiers {
@@ -941,12 +946,36 @@ func TestTierSweepIntegrationStageStartsWithoutAWait(t *testing.T) {
 	if !d.runTierSweep() {
 		t.Fatal("runTierSweep deferred; want a verdict")
 	}
+	return ran, clk, logs
+}
+
+// gt-qpeei.8: the integration stage takes the container-gate slot with no wait
+// before it: it starts when the shell stage returns. A settings file that still
+// carries the removed keys loads with them read as nothing. The config package
+// proves that in TestToleratedTierSweepKeysDecode
+// (internal/config/tolerated_keys_test.go). The daemon never holds those keys,
+// so there is no legacy path to cover here: the sweep runs the town's ordinary
+// config, and the clock proves no wait.
+func TestTierSweepIntegrationStageStartsWithoutAWait(t *testing.T) {
+	t.Parallel()
+	ran, clk, logs := tierSweepNoWaitRun(t, nil)
 	if got, want := strings.Join(ran, "|"), "shell|integration,race"; got != want {
 		t.Fatalf("stages ran %q, want %q", got, want)
 	}
 	if len(clk.waits) > 0 {
 		t.Errorf("the cycle waited before a stage: it asked its clock for %v, and the integration stage must take the slot with no wait; log:\n%s",
 			clk.waits, logs.String())
+	}
+}
+
+// The control for the no-wait check above: a wait the sweep takes on its clock
+// before the first stage must be recorded, or that check passes without proving
+// the absence of a wait.
+func TestTierSweepNoWaitClockRecordsAWaitBeforeTheFirstStage(t *testing.T) {
+	t.Parallel()
+	_, clk, _ := tierSweepNoWaitRun(t, func(d *Daemon) { d.clk().Sleep(time.Second) })
+	if got, want := strings.Join(clk.waits, ","), "Sleep(1s)"; got != want {
+		t.Fatalf("the clock recorded %q for a wait taken before the first stage, want %q", got, want)
 	}
 }
 
