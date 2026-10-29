@@ -265,10 +265,14 @@ func TestSpecDispatchVerdictsLedgerFailureLeavesTheTick(t *testing.T) {
 		// The ledger reads back, so the tick gets as far as saving it, and the
 		// directory takes no new file.
 		dir := filepath.Dir(specdispatch.LedgerPath(town))
+		//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
 		if err := os.Chmod(dir, 0o555); err != nil {
 			t.Fatalf("making the ledger directory read-only: %v", err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		t.Cleanup(func() {
+			//testpolicy:allow no-exec-files — the fixture directory takes its search bit back so the temp tree can be walked
+			_ = os.Chmod(dir, 0o755)
+		})
 		var warn bytes.Buffer
 		got := runSpecDispatchCycle(specVerdictEnv(newTown(), town, &warn))
 		if !reflect.DeepEqual(got, control) {
