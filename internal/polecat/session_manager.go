@@ -105,6 +105,11 @@ type SessionManager struct {
 	seatTokenIssuer seattoken.Issuer
 	// seatTokenTimeout bounds one token issue; zero is seatTokenIssueTimeout.
 	seatTokenTimeout time.Duration
+	// hostSeatIssuer builds the issuer a launch uses when seatTokenIssuer is
+	// nil; nil is seattoken.NewHostIssuer, which reads the admin credential
+	// through the process environment, so a test that must not depend on the
+	// shell supplies its own.
+	hostSeatIssuer func(townRoot string) (seattoken.Issuer, error)
 }
 
 // The two variables a seat on a tracker rig carries. The tracker client reads
@@ -984,7 +989,17 @@ func (m *SessionManager) addTrackerSeatEnv(envVars map[string]string, townRoot, 
 	}
 	issuer := m.seatTokenIssuer
 	if issuer == nil {
-		host, err := seattoken.NewHostIssuer(townRoot)
+		build := m.hostSeatIssuer
+		if build == nil {
+			build = func(root string) (seattoken.Issuer, error) {
+				host, err := seattoken.NewHostIssuer(root)
+				if err != nil {
+					return nil, err
+				}
+				return host, nil
+			}
+		}
+		host, err := build(townRoot)
 		if err != nil {
 			return fmt.Errorf("the tracker token of seat %s: %w", seat, err)
 		}

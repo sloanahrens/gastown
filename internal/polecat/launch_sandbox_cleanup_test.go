@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/beads"
 	"os"
 	"path/filepath"
 	"strings"
@@ -309,5 +310,29 @@ func TestLaunchHostSessionEnvKeepsHostTownRoot(t *testing.T) {
 	}
 	if g := got["GT_POLECAT_PATH"]; g != workDir {
 		t.Errorf("GT_POLECAT_PATH = %q, want the host worktree %q", g, workDir)
+	}
+
+	// The launch gives a seat on a Dolt rig no tracker name, and a seat on a
+	// tracker rig both: addTrackerSeatEnv is called before the session is made
+	// (its own cases are in tracker_seat_env_test.go).
+	for _, name := range []string{envTrackerURL, envTrackerTokenFile} {
+		if v, ok := got[name]; ok {
+			t.Errorf("a Dolt rig's session env has %s = %q", name, v)
+		}
+	}
+	writeRigRoute(t, town, beads.BackendTracker)
+	m.seatTokenIssuer = &fakeSeatIssuer{token: trackerSeatToken}
+	got = nil
+	err = m.launch("box", m.SessionName("box"), SessionStartOptions{
+		WorkDir:          workDir,
+		RuntimeConfigDir: t.TempDir(),
+		Command:          "claude",
+	})
+	if err == nil || !strings.Contains(err.Error(), "captured") {
+		t.Fatalf("tracker rig launch error = %v, want the capturing tmux's refusal", err)
+	}
+	if got[envTrackerURL] == "" || got[envTrackerTokenFile] == "" {
+		t.Errorf("a tracker rig's session env lacks the tracker names: %s=%q %s=%q",
+			envTrackerURL, got[envTrackerURL], envTrackerTokenFile, got[envTrackerTokenFile])
 	}
 }

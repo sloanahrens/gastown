@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,21 +16,14 @@ import (
 	"github.com/steveyegge/gastown/internal/seattoken"
 )
 
-// hostShellTrackerValue marks a tracker name this test's own process
-// environment sets, so an assertion can tell the shell's value from the
-// town's.
-const hostShellTrackerValue = "set-in-the-test-shell-"
+// These tests call addTrackerSeatEnv with an explicit town directory: the
+// function reads the town's files only (route table, town.json, the seat token
+// file) and writes the variables into the map it is handed, so they set no
+// environment, point no process-wide routing at a town and run in parallel. The
+// one launch-level assertion, that launch calls it before the session is made,
+// is in TestLaunchHostSessionEnvKeepsHostTownRoot.
 
-// isolateHostTrackerEnv makes the shell's tracker names a known, hostile
-// value: a launch that reads one of them instead of the town's files shows it
-// in these tests' assertions.
-func isolateHostTrackerEnv(t *testing.T) {
-	t.Helper()
-	for _, name := range []string{"TRACKER_URL", "TRACKER_TOKEN", "TRACKER_TOKEN_FILE", "TRACKER_ADMIN_TOKEN", "GT_TOWN_ROOT"} {
-		//testpolicy:allow no-env — the shell's tracker names are the input under test: a launch that reads one rather than the town's files must fail these assertions
-		t.Setenv(name, hostShellTrackerValue+name)
-	}
-}
+const trackerSeatToken = "trk_seat-token-value"
 
 // fakeSeatIssuer records the actors it was asked for and answers with token
 // and err together, so an issuer that fails after minting cannot have its
@@ -54,16 +48,10 @@ func (*waitingSeatIssuer) Issue(ctx context.Context, _ string) (string, error) {
 	return "", ctx.Err()
 }
 
-// trackerSeatTown is a temp town whose polecat worktree is already on a
-// session branch, so a launch keeps that branch: two launches of one seat
-// then hand the session the same environment apart from what a test varies.
-func trackerSeatTown(t *testing.T) (town, rigPath, workDir string, w *world) {
-	t.Helper()
-	town, rigPath, workDir, w = sandboxLaunchTown(t)
-	if err := w.repo(workDir).CheckoutNewBranch("polecat/box/gt-seed@seed", "main"); err != nil {
-		t.Fatal(err)
-	}
-	return town, rigPath, workDir, w
+// trackerSeatManager is a session manager for the rig gastown that mints seat
+// tokens through issuer.
+func trackerSeatManager(issuer seattoken.Issuer) *SessionManager {
+	return &SessionManager{rig: &rig.Rig{Name: "gastown"}, seatTokenIssuer: issuer}
 }
 
 // rigRoute is one route line of the test town's table.
@@ -83,65 +71,45 @@ func writeRoutes(t *testing.T, town string, lines ...string) {
 	}
 }
 
-// writeRigRoute gives the town one route for the rig, on backend.
+// writeRigRoute gives the town one route for the rig gastown, on backend.
 func writeRigRoute(t *testing.T, town, backend string) {
 	t.Helper()
 	writeRoutes(t, town, rigRoute("gastown/mayor/rig", "gt-", backend))
 }
 
-// launchCapturingEnv launches the polecat named box in the town and returns
-// the environment it handed the new session. The capturing tmux refuses the
-// session, so the launch stops at session creation with its env recorded.
-func launchCapturingEnv(t *testing.T, m *SessionManager, workDir string) (map[string]string, error) {
+// trackerSeatTownDir is a temp town whose route table puts gastown on backend.
+func trackerSeatTownDir(t *testing.T, backend string) string {
 	t.Helper()
-	var got map[string]string
-	m.tmux = envCapturingTmux{newFakeSessionTmux(), &got}
-	return got, m.launch("box", m.SessionName("box"), SessionStartOptions{WorkDir: workDir})
-}
-
-func seatEnvSessionManager(rigPath string, w *world, issuer seattoken.Issuer) *SessionManager {
-	return &SessionManager{
-		rig:             &rig.Rig{Name: "gastown", Path: rigPath},
-		gits:            w.opener(),
-		seatTokenIssuer: issuer,
-	}
+	town := t.TempDir()
+	writeRigRoute(t, town, backend)
+	return town
 }
 
 // A seat whose rig is on the tracker carries the endpoint and the path to its
 // token file, and the token itself reaches neither the environment nor argv.
-// A seat whose rig is on Dolt carries neither name: its environment is byte
-// for byte what it was. A tracker name the shell exports changes nothing.
-//
-//testpolicy:allow parallel — sets the process environment and points the process-wide sandbox routing at a temp town, which another test must not see mid-run
-func TestLaunchTrackerSeatEnv(t *testing.T) {
-	town, rigPath, workDir, w := trackerSeatTown(t)
-	isolateHostTrackerEnv(t)
-	const token = "trk_seat-token-value"
-	issuer := &fakeSeatIssuer{token: token}
-	m := seatEnvSessionManager(rigPath, w, issuer)
+// A seat whose rig is on Dolt is handed no tracker name and no token: its
+// environment is byte for byte what it was.
+func TestAddTrackerSeatEnv(t *testing.T) {
+	t.Parallel()
+	issuer := &fakeSeatIssuer{token: trackerSeatToken}
+	m := trackerSeatManager(issuer)
+	before := map[string]string{"GT_ROLE": "polecat", "BD_ACTOR": "gastown/polecats/box"}
 
-	cases := []struct {
-		name    string
-		backend string
-	}{
-		{"a Dolt rig", beads.BackendDolt},
-		{"a tracker rig", beads.BackendTracker},
+	dolt := maps.Clone(before)
+	if err := m.addTrackerSeatEnv(dolt, trackerSeatTownDir(t, beads.BackendDolt), "box"); err != nil {
+		t.Fatalf("a Dolt rig: %v", err)
 	}
-	envs := make(map[string]map[string]string, len(cases))
-	for _, tc := range cases {
-		writeRigRoute(t, town, tc.backend)
-		env, err := launchCapturingEnv(t, m, workDir)
-		if err == nil || !strings.Contains(err.Error(), "captured") {
-			t.Fatalf("%s: launch error = %v, want the capturing tmux's refusal", tc.name, err)
-		}
-		envs[tc.name] = env
+	if !maps.Equal(dolt, before) {
+		t.Errorf("a Dolt rig changed the seat environment: %v, want %v", dolt, before)
 	}
-	dolt, tracker := envs["a Dolt rig"], envs["a tracker rig"]
+	if len(issuer.actors) != 0 {
+		t.Errorf("a Dolt rig asked for a token for %v", issuer.actors)
+	}
 
-	for _, name := range []string{envTrackerURL, envTrackerTokenFile} {
-		if got, ok := dolt[name]; ok {
-			t.Errorf("a Dolt rig's seat has %s = %q; a Dolt rig gets no tracker environment", name, got)
-		}
+	town := trackerSeatTownDir(t, beads.BackendTracker)
+	tracker := maps.Clone(before)
+	if err := m.addTrackerSeatEnv(tracker, town, "box"); err != nil {
+		t.Fatalf("a tracker rig: %v", err)
 	}
 	if got, want := tracker[envTrackerURL], "http://127.0.0.1:7433"; got != want {
 		t.Errorf("TRACKER_URL = %q, want %q (the default the town's config resolves to)", got, want)
@@ -150,44 +118,41 @@ func TestLaunchTrackerSeatEnv(t *testing.T) {
 	if got := tracker[envTrackerTokenFile]; got != wantPath {
 		t.Errorf("TRACKER_TOKEN_FILE = %q, want %q", got, wantPath)
 	}
-	if got := stringOfFile(t, wantPath); got != token {
-		t.Errorf("token file holds %q, want %q", got, token)
+	if got := stringOfFile(t, wantPath); got != trackerSeatToken {
+		t.Errorf("token file holds %q, want %q", got, trackerSeatToken)
 	}
 	for name, value := range tracker {
-		if strings.Contains(value, token) {
+		if strings.Contains(value, trackerSeatToken) {
 			t.Errorf("the seat environment's %s carries the token itself", name)
 		}
-		if strings.Contains(value, hostShellTrackerValue) {
-			t.Errorf("the seat environment's %s carries the shell's value %q", name, value)
-		}
 	}
-	if len(tracker) != len(dolt)+2 {
-		t.Errorf("tracker env has %d names, want %d: Dolt's %d plus the two tracker names",
-			len(tracker), len(dolt)+2, len(dolt))
+	if len(tracker) != len(before)+2 {
+		t.Errorf("tracker env has %d names, want %d: the %d it was handed plus the two tracker names",
+			len(tracker), len(before)+2, len(before))
 	}
-	for name, value := range dolt {
+	for name, value := range before {
 		if got := tracker[name]; got != value {
-			t.Errorf("a tracker rig changed %s: %q, want %q (a Dolt rig's value)", name, got, value)
+			t.Errorf("a tracker rig changed %s: %q, want %q", name, got, value)
 		}
+	}
+	if len(issuer.actors) != 1 || issuer.actors[0] != "gastown/polecats/box" {
+		t.Errorf("issuer asked for %v, want one token for gastown/polecats/box", issuer.actors)
 	}
 }
 
 // A restart reuses the seat's token: the issuer is asked once across two
 // launches, and both sessions are given the same file.
-//
-//testpolicy:allow parallel — sets the process environment and points the process-wide sandbox routing at a temp town, which another test must not see mid-run
-func TestLaunchTrackerSeatEnvReusesTheTokenOnRestart(t *testing.T) {
-	town, rigPath, workDir, w := trackerSeatTown(t)
-	isolateHostTrackerEnv(t)
-	writeRigRoute(t, town, beads.BackendTracker)
-	issuer := &fakeSeatIssuer{token: "trk_seat-token-value"}
-	m := seatEnvSessionManager(rigPath, w, issuer)
+func TestAddTrackerSeatEnvReusesTheTokenOnRestart(t *testing.T) {
+	t.Parallel()
+	town := trackerSeatTownDir(t, beads.BackendTracker)
+	issuer := &fakeSeatIssuer{token: trackerSeatToken}
+	m := trackerSeatManager(issuer)
 
 	var paths []string
 	for i := range 2 {
-		env, err := launchCapturingEnv(t, m, workDir)
-		if err == nil || !strings.Contains(err.Error(), "captured") {
-			t.Fatalf("launch %d: error = %v, want the capturing tmux's refusal", i+1, err)
+		env := map[string]string{}
+		if err := m.addTrackerSeatEnv(env, town, "box"); err != nil {
+			t.Fatalf("launch %d: %v", i+1, err)
 		}
 		paths = append(paths, env[envTrackerTokenFile])
 	}
@@ -199,39 +164,35 @@ func TestLaunchTrackerSeatEnvReusesTheTokenOnRestart(t *testing.T) {
 	}
 }
 
-// A seat that cannot be given a token does not launch: the refusal names the
-// rig and seat, and never the token. The host shell exporting a tracker
-// credential or a route table line naming an undefined backend does not turn
-// any of these into a launch.
-//
-//testpolicy:allow parallel — sets the process environment and points the process-wide sandbox routing at a temp town, which another test must not see mid-run
-func TestLaunchTrackerSeatEnvRefusals(t *testing.T) {
-	const token = "trk_seat-token-value"
+// A seat that cannot be given a token is an error that names the rig and seat
+// and never the token, and it leaves the environment it was handed untouched:
+// a launch that failed here must not have started a session with half the
+// tracker names.
+func TestAddTrackerSeatEnvRefusals(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
-		prepare func(t *testing.T, town string) seattoken.Issuer
+		issuer  seattoken.Issuer
+		host    func(root string) (seattoken.Issuer, error)
+		prepare func(t *testing.T, town string)
 		want    string
 	}{
 		{
 			name: "no host credential to build an issuer",
-			prepare: func(t *testing.T, _ string) seattoken.Issuer {
-				// A nil issuer makes the launch build the host issuer from
-				// the town's admin credential, which this town does not have;
-				// the one the shell exports is not that credential.
-				return nil
+			host: func(string) (seattoken.Issuer, error) {
+				return nil, errors.New("TRACKER_ADMIN_TOKEN is not set in the town's daemon env")
 			},
 			want: "TRACKER_ADMIN_TOKEN",
 		},
 		{
-			name: "an issuer that fails after minting",
-			prepare: func(t *testing.T, _ string) seattoken.Issuer {
-				return &fakeSeatIssuer{token: token, err: errors.New("the tracker is down")}
-			},
-			want: "the tracker is down",
+			name:   "an issuer that fails after minting",
+			issuer: &fakeSeatIssuer{token: trackerSeatToken, err: errors.New("the tracker is down")},
+			want:   "the tracker is down",
 		},
 		{
-			name: "a route table that cannot be read",
-			prepare: func(t *testing.T, town string) seattoken.Issuer {
+			name:   "a route table that cannot be read",
+			issuer: &fakeSeatIssuer{token: trackerSeatToken},
+			prepare: func(t *testing.T, town string) {
 				t.Helper()
 				// A directory where the route table should be: opening it
 				// succeeds and reading it fails, as an unreadable file does.
@@ -242,33 +203,33 @@ func TestLaunchTrackerSeatEnvRefusals(t *testing.T) {
 				if err := os.MkdirAll(path, 0o755); err != nil {
 					t.Fatal(err)
 				}
-				return &fakeSeatIssuer{token: token}
 			},
 			want: "reading the route table",
 		},
 		{
-			name: "routes that name the rig and disagree",
-			prepare: func(t *testing.T, town string) seattoken.Issuer {
+			name:   "routes that name the rig and disagree",
+			issuer: &fakeSeatIssuer{token: trackerSeatToken},
+			prepare: func(t *testing.T, town string) {
 				t.Helper()
 				writeRoutes(t, town,
 					rigRoute("gastown/mayor/rig", "gt-", beads.BackendDolt),
 					rigRoute("gastown/polecats/box", "gt-box-", beads.BackendTracker))
-				return &fakeSeatIssuer{token: token}
 			},
 			want: "name both",
 		},
 		{
-			name: "a backend the route table does not define",
-			prepare: func(t *testing.T, town string) seattoken.Issuer {
+			name:   "a backend the route table does not define",
+			issuer: &fakeSeatIssuer{token: trackerSeatToken},
+			prepare: func(t *testing.T, town string) {
 				t.Helper()
 				writeRigRoute(t, town, "postgres")
-				return &fakeSeatIssuer{token: token}
 			},
 			want: "which is neither",
 		},
 		{
-			name: "a town config that does not resolve the endpoint",
-			prepare: func(t *testing.T, town string) seattoken.Issuer {
+			name:   "a town config that does not resolve the endpoint",
+			issuer: &fakeSeatIssuer{token: trackerSeatToken},
+			prepare: func(t *testing.T, town string) {
 				t.Helper()
 				dir := filepath.Join(town, "mayor")
 				if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -277,63 +238,65 @@ func TestLaunchTrackerSeatEnvRefusals(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "town.json"), []byte("{not json"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				return &fakeSeatIssuer{token: token}
 			},
 			want: "town.json",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			town, rigPath, workDir, w := trackerSeatTown(t)
-			isolateHostTrackerEnv(t)
-			writeRigRoute(t, town, beads.BackendTracker)
-			issuer := tc.prepare(t, town)
-			m := seatEnvSessionManager(rigPath, w, issuer)
+			t.Parallel()
+			town := trackerSeatTownDir(t, beads.BackendTracker)
+			if tc.prepare != nil {
+				tc.prepare(t, town)
+			}
+			m := trackerSeatManager(tc.issuer)
+			m.hostSeatIssuer = tc.host
+			env := map[string]string{}
 
-			env, err := launchCapturingEnv(t, m, workDir)
+			err := m.addTrackerSeatEnv(env, town, "box")
 			if err == nil {
-				t.Fatal("launch succeeded; a seat with no tracker token must not start")
+				t.Fatal("addTrackerSeatEnv succeeded; a seat with no tracker token must not start")
 			}
 			if !strings.Contains(err.Error(), "gastown/polecats/box") {
-				t.Errorf("launch error = %v, want it to name the seat gastown/polecats/box", err)
+				t.Errorf("error = %v, want it to name the seat gastown/polecats/box", err)
 			}
 			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("launch error = %v, want it to name %q", err, tc.want)
+				t.Errorf("error = %v, want it to name %q", err, tc.want)
 			}
-			if strings.Contains(err.Error(), token) {
-				t.Errorf("launch error carries the token: %v", err)
+			if strings.Contains(err.Error(), trackerSeatToken) {
+				t.Errorf("error carries the token: %v", err)
 			}
-			if env != nil {
-				t.Errorf("the launch created a session (env captured) after failing to get a token")
+			if len(env) != 0 {
+				t.Errorf("a refused seat was handed environment %v", env)
 			}
 		})
 	}
 }
 
-// A token issue that never answers fails the launch at the launch's own
-// bound: the issuer is handed a bounded context, so a tracker that accepted
-// the connection and then stalled cannot hold the launch open.
-//
-//testpolicy:allow parallel — sets the process environment and points the process-wide sandbox routing at a temp town, which another test must not see mid-run
-func TestLaunchTrackerSeatEnvBoundsTheIssue(t *testing.T) {
-	town, rigPath, workDir, w := trackerSeatTown(t)
-	isolateHostTrackerEnv(t)
-	writeRigRoute(t, town, beads.BackendTracker)
-	m := seatEnvSessionManager(rigPath, w, &waitingSeatIssuer{})
-	m.seatTokenTimeout = 100 * time.Millisecond
+// A token issue that never answers fails at the launch's own bound: the issuer
+// is handed a bounded context, so a tracker that accepted the connection and
+// then stalled cannot hold the launch open. The bound is one nanosecond, so
+// the context is expired when the issuer first reads it and the test waits on
+// nothing.
+func TestAddTrackerSeatEnvBoundsTheIssue(t *testing.T) {
+	t.Parallel()
+	town := trackerSeatTownDir(t, beads.BackendTracker)
+	m := trackerSeatManager(&waitingSeatIssuer{})
+	m.seatTokenTimeout = time.Nanosecond
+	env := map[string]string{}
 
-	env, err := launchCapturingEnv(t, m, workDir)
+	err := m.addTrackerSeatEnv(env, town, "box")
 	if err == nil {
-		t.Fatal("launch succeeded; a token issue that never answers must not")
+		t.Fatal("addTrackerSeatEnv succeeded; a token issue that never answers must not")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("launch error = %v, want the token issue's bound to have expired", err)
+		t.Errorf("error = %v, want the token issue's bound to have expired", err)
 	}
 	if !strings.Contains(err.Error(), "gastown/polecats/box") {
-		t.Errorf("launch error = %v, want it to name the seat gastown/polecats/box", err)
+		t.Errorf("error = %v, want it to name the seat gastown/polecats/box", err)
 	}
-	if env != nil {
-		t.Errorf("the launch created a session (env captured) after the token issue's bound expired")
+	if len(env) != 0 {
+		t.Errorf("a seat whose token issue timed out was handed environment %v", env)
 	}
 }
 
