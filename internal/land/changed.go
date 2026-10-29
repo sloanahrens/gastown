@@ -322,7 +322,7 @@ var treeWideGuards = []treeWideGuard{
 		pkg: "internal/daemonimage",
 		tests: []string{"TestGTPinMatchesThePolecatImageFlow", "TestDaemonDockerfileHasNoBuildStep",
 			"TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages",
-			"TestDaemonDockerfileCopiesTheThreeBinaries", "TestDaemonDockerfileMatchesTheImageTable"},
+			"TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt", "TestDaemonDockerfileMatchesTheImageTable"},
 		judges:  func(rel string) bool { return rel == "Makefile" || rel == "deploy/daemon/Dockerfile" },
 		removal: true,
 	},
