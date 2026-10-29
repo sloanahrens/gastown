@@ -1184,7 +1184,7 @@ func TestSpecHoldFilesDropsDocOnlyWhenConstraintsParse(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := specHoldFiles([]string{standard}, c.description); fmt.Sprint(got) != fmt.Sprint(c.want) {
+			if got := specHoldFiles([]string{standard}, c.description, c.description); fmt.Sprint(got) != fmt.Sprint(c.want) {
 				t.Errorf("specHoldFiles = %v, want %v", got, c.want)
 			}
 		})
@@ -1214,7 +1214,7 @@ func TestSpecHoldFilesKeepsGoalDocsWhenConstraintsNameNoPath(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := specHoldFiles([]string{doc}, c.description); !reflect.DeepEqual(got, c.want) {
+			if got := specHoldFiles([]string{doc}, c.description, c.description); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("specHoldFiles = %v, want %v", got, c.want)
 			}
 		})
@@ -3651,5 +3651,39 @@ func TestSpecRosterFrom_ParkedStaleSeatIsListedNotCounted(t *testing.T) {
 	live.parkedTotal = 0
 	if total := live.totalCount(&cap); total != "2/3" {
 		t.Errorf("total count with nothing released = %q, want %q", total, "2/3")
+	}
+}
+
+// TestSpecHoldFilesHonorsTheReadOnlyMarkerThroughTheRealExtraction drives the
+// call shape the dispatcher uses: refs extracted from the bead's fields, then
+// specHoldFiles with the text those refs carry. A path marked (read-only) at
+// every mention drops out of the hold; the same path unmarked, or marked at
+// only one of two mentions, stays held (gt-5v13p).
+func TestSpecHoldFilesHonorsTheReadOnlyMarkerThroughTheRealExtraction(t *testing.T) {
+	t.Parallel()
+	const work, shared = "internal/foo/foo.go", "internal/bar/shared.go"
+	body := func(constraints string) string {
+		return "## Goal\nChange the thing.\n\n## Constraints\n" + constraints + "\n\n## Out of scope\nNothing.\n"
+	}
+	tests := []struct {
+		name        string
+		constraints string
+		notes       string
+		want        []string
+	}{
+		{"marked path drops out", "Change " + work + ". Reads " + shared + " (read-only).", "", []string{work}},
+		{"unmarked path stays held", "Change " + work + ". Reads " + shared + ".", "", []string{shared, work}},
+		{"a second mention without the marker keeps it held", "Change " + work + ". Reads " + shared + " (read-only).", "Also edits " + shared + ".", []string{shared, work}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			description := body(tc.constraints)
+			refs := extractOverlapRefs("a bead", description, "", tc.notes)
+			got := specHoldFiles(refs.Files, description, refs.Text)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("specHoldFiles = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

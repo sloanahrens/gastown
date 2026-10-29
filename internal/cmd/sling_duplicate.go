@@ -153,7 +153,7 @@ func extractContentRefs(parts ...string) contentRefs {
 			}
 		}
 	}
-	return contentRefs{Tests: sortedKeys(tests), Files: sortedKeys(files)}
+	return contentRefs{Tests: sortedKeys(tests), Files: sortedKeys(files), Text: strings.Join(parts, "\n")}
 }
 
 // planDocPrefix is the docs tree the overlap guard reads as context, not work:
