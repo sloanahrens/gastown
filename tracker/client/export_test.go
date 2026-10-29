@@ -193,13 +193,68 @@ func TestExportWithoutADeadlineIsBoundedByExportTimeout(t *testing.T) {
 		_ = http.NewResponseController(w).Flush()
 		<-r.Context().Done()
 	}), func(cfg *Config) { cfg.ExportTimeout = 50 * time.Millisecond })
+	// The test fires the export's deadline once the one record is emitted, so
+	// whether the record beats the deadline never depends on how loaded the
+	// host is. The timer is armed with ExportTimeout, which is what is checked.
+	var armed time.Duration
+	var fire func()
+	c.after = func(d time.Duration, f func()) func() bool {
+		armed, fire = d, f
+		return func() bool { return true }
+	}
+	var emitted int
+	err := c.Export(t.Context(), api.ExportRequest{Rig: "gt"}, func(api.ExportRecord) error {
+		emitted++
+		if emitted == 1 {
+			fire()
+		}
+		return nil
+	})
+	if emitted != 1 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Export = %v after %d records, want the deadline after the one record", err, emitted)
+	}
+	if armed != 50*time.Millisecond {
+		t.Errorf("Export armed its deadline at %v, want ExportTimeout 50ms", armed)
+	}
+}
+
+// A stream that never answers ends at ExportTimeout with DeadlineExceeded and
+// no record, not with the Canceled of the request it was cut from.
+func TestExportWithoutADeadlineEndsAtExportTimeoutBeforeAnyAnswer(t *testing.T) {
+	t.Parallel()
+	reached := make(chan struct{})
+	c, _ := newClient(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// As in the test above: reading the body lets the server see the
+		// client going away, so ts.Close does not wait on this handler.
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(reached)
+		<-r.Context().Done()
+	}), nil)
+	armed := make(chan func(), 1)
+	c.after = func(_ time.Duration, f func()) func() bool {
+		armed <- f
+		return func() bool { return true }
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case fire := <-armed:
+			select {
+			case <-reached:
+				fire()
+			case <-done:
+			}
+		case <-done:
+		}
+	}()
 	var emitted int
 	err := c.Export(t.Context(), api.ExportRequest{Rig: "gt"}, func(api.ExportRecord) error {
 		emitted++
 		return nil
 	})
-	if emitted != 1 || !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("Export = %v after %d records, want the deadline after the one record", err, emitted)
+	if emitted != 0 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Export = %v after %d records, want DeadlineExceeded before any record", err, emitted)
 	}
 }
 
