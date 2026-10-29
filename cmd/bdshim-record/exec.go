@@ -73,8 +73,32 @@ func copyFixture(src, scratch string) Copier {
 		if err := copyTree(src, dir); err != nil {
 			return "", nil, errors.Join(err, remove())
 		}
+		if err := checkCopyHoldsDatabase(src, dir); err != nil {
+			return "", nil, errors.Join(err, remove())
+		}
 		return dir, remove, nil
 	}
+}
+
+// fixtureDatabase is the directory under the fixture root that bd reads its database from.
+const fixtureDatabase = ".beads"
+
+// checkCopyHoldsDatabase refuses a copy whose root lacks the fixture's database directory. bd picks
+// a database by walking up from the directory it runs in, so a copy without one would answer from a
+// database above it instead of the copy's own (gt-p85pw.87). A fixture with no database of its own
+// is left for the preflight to refuse, since bd then answers from whatever it finds above.
+func checkCopyHoldsDatabase(fixture, copy string) error {
+	if _, err := os.Stat(filepath.Join(fixture, fixtureDatabase)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat fixture database %s: %w", fixture, err)
+	}
+	if _, err := os.Stat(filepath.Join(copy, fixtureDatabase)); err != nil {
+		return fmt.Errorf("copy %s does not hold %s, so bd in it would answer from a database above it: %w",
+			copy, fixtureDatabase, err)
+	}
+	return nil
 }
 
 // refuseScratchInsideFixture refuses a scratch directory at or under the fixture: a copy made there
@@ -114,14 +138,26 @@ func scratchInsideFixture(fixture, scratch string) (bool, error) {
 	}
 }
 
-// copyTree copies the directories and regular files under src into dst. Any other kind of entry is
-// refused: a symlink could point the copy back at the live town.
+// copyTree copies the directories and regular files under src into dst. Each entry lands at the path
+// filepath.Rel names, so the fixture keeps its layout when the operator names it relatively (".",
+// "./x", "x/.") instead of as an absolute path. Any other kind of entry is refused: a symlink could
+// point the copy back at the live town.
 func copyTree(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(dst, strings.TrimPrefix(path, src))
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("fixture entry %s is outside the fixture %s", path, src)
+		}
+		target := dst
+		if rel != "." {
+			target = filepath.Join(dst, rel)
+		}
 		switch {
 		case d.IsDir():
 			return os.MkdirAll(target, 0o755)

@@ -167,7 +167,95 @@ func TestCopyFixtureFailsWhenTheFixtureIsMissing(t *testing.T) {
 	}
 }
 
-// TestCopyTreeFailsWhenTheFixtureIsMissing: a walk that cannot read the fixture at all fails the copy
+// TestCopyTreeKeepsTheLayoutOfARelativelyNamedFixture: an operator names the fixture relatively as
+// readily as absolutely, and the walk reports the entry paths with the root as it was named, so the
+// root must be stripped by filepath.Rel. A copy that misplaced .beads would leave bd in it answering
+// from a database above the copy (gt-p85pw.87).
+func TestCopyTreeKeepsTheLayoutOfARelativelyNamedFixture(t *testing.T) {
+	work := t.TempDir()
+	mustWrite(t, filepath.Join(work, "fixture", ".beads", "config.yaml"), "prefix: fx\n")
+	mustWrite(t, filepath.Join(work, "fixture", "notes.txt"), "row data\n")
+	t.Chdir(work)
+	tests := []struct {
+		name string
+		src  string
+	}{
+		{"a relative name", "fixture"},
+		{"a dotted relative name", "./fixture"},
+		{"a relative name with a trailing dot", "fixture/."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := t.TempDir()
+			if err := copyTree(tc.src, dst); err != nil {
+				t.Fatalf("copyTree(%q): %v", tc.src, err)
+			}
+			if got := readFile(t, filepath.Join(dst, ".beads", "config.yaml")); got != "prefix: fx\n" {
+				t.Errorf("copy of %q holds %q at .beads/config.yaml, want the fixture's file there", tc.src, got)
+			}
+			if got := readFile(t, filepath.Join(dst, "notes.txt")); got != "row data\n" {
+				t.Errorf("copy of %q holds %q at notes.txt, want the fixture's file there", tc.src, got)
+			}
+			if got := fileNames(t, dst); !reflect.DeepEqual(got, []string{".beads", "notes.txt"}) {
+				t.Errorf("copy of %q holds %v at its root, want only the fixture's entries", tc.src, got)
+			}
+		})
+	}
+}
+
+// TestCopyTreeCopiesTheCurrentDirectory: "." is the fixture the operator is standing in, and its
+// entries belong at the copy's root, not one level down.
+func TestCopyTreeCopiesTheCurrentDirectory(t *testing.T) {
+	fixture := t.TempDir()
+	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
+	t.Chdir(fixture)
+	dst := t.TempDir()
+	if err := copyTree(".", dst); err != nil {
+		t.Fatalf("copyTree(.): %v", err)
+	}
+	if got := readFile(t, filepath.Join(dst, ".beads", "config.yaml")); got != "prefix: fx\n" {
+		t.Errorf("copy of . holds %q at .beads/config.yaml, want the fixture's file there", got)
+	}
+	if got := fileNames(t, dst); !reflect.DeepEqual(got, []string{".beads"}) {
+		t.Errorf("copy of . holds %v at its root, want only .beads", got)
+	}
+}
+
+// TestCheckCopyHoldsDatabase: bd finds a database by walking up from where it runs, so a copy that
+// lost the fixture's .beads would answer from a database above it and be recorded as the answer. The
+// guard refuses that copy, and leaves a fixture with no database of its own to the preflight.
+func TestCheckCopyHoldsDatabase(t *testing.T) {
+	t.Parallel()
+	withDatabase := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		mustWrite(t, filepath.Join(dir, ".beads", "config.yaml"), "prefix: fx\n")
+		return dir
+	}
+	tests := []struct {
+		name           string
+		fixture, copy  string
+		wantCopyRefuse bool
+	}{
+		{"copy holds the database", withDatabase(t), withDatabase(t), false},
+		{"copy lost the database", withDatabase(t), t.TempDir(), true},
+		{"fixture has no database of its own", t.TempDir(), t.TempDir(), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkCopyHoldsDatabase(tc.fixture, tc.copy)
+			if tc.wantCopyRefuse && (err == nil || !strings.Contains(err.Error(), fixtureDatabase)) {
+				t.Errorf("checkCopyHoldsDatabase(%s) = %v, want a refusal naming %s", tc.name, err, fixtureDatabase)
+			}
+			if !tc.wantCopyRefuse && err != nil {
+				t.Errorf("checkCopyHoldsDatabase(%s) = %v, want no refusal", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestCopyFixtureFailsWhenTheFixtureIsMissing: a walk that cannot read the fixture at all fails the copy
 // instead of copying nothing and reporting success.
 func TestCopyTreeFailsWhenTheFixtureIsMissing(t *testing.T) {
 	t.Parallel()

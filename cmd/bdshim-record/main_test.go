@@ -26,8 +26,8 @@ func TestRunRefusesAScratchDirectoryItCannotMake(t *testing.T) {
 	if code := run(args, &stdout, &stderr); code != 1 {
 		t.Errorf("run with an empty -scratch = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "no such file") {
-		t.Errorf("stderr = %q, want the mkdir failure reported", stderr.String())
+	if !strings.Contains(stderr.String(), "make scratch directory") {
+		t.Errorf("stderr = %q, want the scratch directory failure reported", stderr.String())
 	}
 }
 

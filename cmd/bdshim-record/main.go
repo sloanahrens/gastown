@@ -55,13 +55,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if err := os.MkdirAll(opts.scratch, 0o755); err != nil {
-		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
+		fmt.Fprintf(stderr, "bdshim-record: make scratch directory %q: %v\n", opts.scratch, err)
 		return 1
 	}
 	rc := Recorder{
-		Fixture: opts.fixture,
-		Run:     execBD(opts.bd),
-		Copy:    copyFixture(opts.fixture, opts.scratch),
+		Run:  execBD(opts.bd),
+		Copy: copyFixture(opts.fixture, opts.scratch),
 	}
 	return execute(opts, rc, Table(), stdout, stderr)
 }

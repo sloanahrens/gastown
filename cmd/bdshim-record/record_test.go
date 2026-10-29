@@ -96,11 +96,11 @@ func sampleRows() []Row {
 	}
 }
 
-// newRecorder returns a Recorder over a fresh fixture directory, with bd and the copier faked.
+// newRecorder returns a Recorder with bd and the copier faked.
 func newRecorder(t *testing.T, bd *fakeBD) (Recorder, *fakeCopies) {
 	t.Helper()
 	copies := &fakeCopies{base: t.TempDir()}
-	return Recorder{Fixture: t.TempDir(), Run: bd.Run, Copy: copies.Copy}, copies
+	return Recorder{Run: bd.Run, Copy: copies.Copy}, copies
 }
 
 // TestCaptureRefusesCollidingGoldenNames: two rows that would write the same golden are refused
@@ -138,11 +138,6 @@ func TestCaptureRunsNoRowInTheFixture(t *testing.T) {
 	got := rowDirs(t, bd, rows)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("rows ran in %v, want the shared copy for read rows and a copy of its own for each mutating row: %v", got, want)
-	}
-	for _, dir := range got {
-		if dir == rc.Fixture {
-			t.Errorf("a row ran in the fixture itself (%s), want only copies of it", dir)
-		}
 	}
 	if !sameCopies(copies.made, copies.removed) {
 		t.Errorf("copies removed = %v, want every copy made (%v) removed", copies.removed, copies.made)
@@ -259,15 +254,12 @@ func TestCaptureRefusesAFixtureMissingABead(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), fixtureDepID) {
 		t.Fatalf("Capture on a fixture missing %s = %v, want an error naming it", fixtureDepID, err)
 	}
-	checked := 0
-	for _, id := range fixtureIDs {
-		checked++
-		if id == fixtureDepID {
-			break
-		}
+	want := [][]string{
+		{"show", fixtureID, "--json"},
+		{"show", fixtureDepID, "--json"},
 	}
-	if len(bd.args) != checked {
-		t.Errorf("bd ran %d times, want the check of the fixture to stop at the missing bead (%d checks)", len(bd.args), checked)
+	if !reflect.DeepEqual(bd.args, want) {
+		t.Errorf("bd ran %v, want the check of the fixture to stop at the missing bead: %v", bd.args, want)
 	}
 	if !sameCopies(copies.made, copies.removed) {
 		t.Errorf("copies removed = %v, want every copy made (%v) removed after the refusal", copies.removed, copies.made)

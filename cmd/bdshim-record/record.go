@@ -20,11 +20,11 @@ type Runner func(dir string, args []string) (stdout []byte, exit int, err error)
 // removes it.
 type Copier func() (dir string, remove func() error, err error)
 
-// Recorder runs rows against bd.
+// Recorder runs rows against bd. Every row runs in a directory Copy makes, so the fixture itself is
+// reached only through the Copier that copies it, never by a row (gt-p85pw.87).
 type Recorder struct {
-	Fixture string // the fixture every row's copy is made from; no row runs in it
-	Run     Runner
-	Copy    Copier
+	Run  Runner
+	Copy Copier
 }
 
 // Golden is what bd printed for one row.
