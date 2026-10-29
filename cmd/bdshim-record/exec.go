@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -65,15 +64,15 @@ func copyFixture(src, scratch string) Copier {
 		if err := refuseScratchInsideFixture(src, scratch); err != nil {
 			return "", nil, err
 		}
+		if err := refuseFixtureWithoutDatabase(src); err != nil {
+			return "", nil, err
+		}
 		dir, err := os.MkdirTemp(scratch, "fixture-")
 		if err != nil {
 			return "", nil, err
 		}
 		remove := func() error { return os.RemoveAll(dir) }
 		if err := copyTree(src, dir); err != nil {
-			return "", nil, errors.Join(err, remove())
-		}
-		if err := checkCopyHoldsDatabase(src, dir); err != nil {
 			return "", nil, errors.Join(err, remove())
 		}
 		return dir, remove, nil
@@ -83,20 +82,14 @@ func copyFixture(src, scratch string) Copier {
 // fixtureDatabase is the directory under the fixture root that bd reads its database from.
 const fixtureDatabase = ".beads"
 
-// checkCopyHoldsDatabase refuses a copy whose root lacks the fixture's database directory. bd picks
-// a database by walking up from the directory it runs in, so a copy without one would answer from a
-// database above it instead of the copy's own (gt-p85pw.87). A fixture with no database of its own
-// is left for the preflight to refuse, since bd then answers from whatever it finds above.
-func checkCopyHoldsDatabase(fixture, copy string) error {
+// refuseFixtureWithoutDatabase refuses a fixture that holds no database of its own. bd picks a
+// database by walking up from the directory it runs in, so a copy of such a fixture would answer
+// from a database above it, and the recording would capture that database's state as bd's answer
+// (gt-p85pw.87). The refusal comes before anything is copied.
+func refuseFixtureWithoutDatabase(fixture string) error {
 	if _, err := os.Stat(filepath.Join(fixture, fixtureDatabase)); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("stat fixture database %s: %w", fixture, err)
-	}
-	if _, err := os.Stat(filepath.Join(copy, fixtureDatabase)); err != nil {
-		return fmt.Errorf("copy %s does not hold %s, so bd in it would answer from a database above it: %w",
-			copy, fixtureDatabase, err)
+		return fmt.Errorf("fixture %s holds no %s of its own, so bd in a copy of it would read a database above the copy: %w",
+			fixture, fixtureDatabase, err)
 	}
 	return nil
 }
@@ -138,58 +131,39 @@ func scratchInsideFixture(fixture, scratch string) (bool, error) {
 	}
 }
 
-// copyTree copies the directories and regular files under src into dst, each at the place copyTarget
-// names. Writes go through an os.Root on dst, so no path in the copy reaches outside it. Any other
-// kind of entry is refused: a symlink could point the copy back at the live town.
+// copyTree copies the directories and regular files under src into dst, each under the name it has
+// inside the fixture. The walk runs over os.DirFS, which reports those names relative to the
+// fixture root, so the fixture's path is never part of them (gt-p85pw.87); writes go through an
+// os.Root on dst, so no entry reaches outside the copy. Any other kind of entry is refused: a
+// symlink could point the copy back at the live town.
 func copyTree(src, dst string) error {
 	root, err := os.OpenRoot(dst)
 	if err != nil {
 		return err
 	}
 	defer root.Close() //nolint:errcheck // the copy is written; a close failure leaves nothing to report that a write would not
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	fixture := os.DirFS(src)
+	return fs.WalkDir(fixture, ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		name, err := copyTarget(src, path)
-		if err != nil {
-			return err
-		}
-		if name == "" {
+		if name == "." {
 			return nil // the fixture's root is the copy's root
 		}
 		switch {
 		case d.IsDir():
 			return root.MkdirAll(name, 0o755)
 		case d.Type().IsRegular():
-			return copyFile(root, path, name)
+			return copyFile(root, fixture, name)
 		default:
-			return fmt.Errorf("fixture entry %s is neither a directory nor a regular file", path)
+			return fmt.Errorf("fixture entry %s is neither a directory nor a regular file", name)
 		}
 	})
 }
 
-// copyTarget returns the name an entry the walk reports at path takes inside the copy. The walk
-// reports the root as the operator wrote it, so the name inside the fixture comes from
-// filepath.Rel: a fixture named "." or "./x" would otherwise keep part of its own name in the copy
-// (gt-p85pw.87). The fixture's root names the copy's root, which is the empty name.
-func copyTarget(src, path string) (string, error) {
-	rel, err := filepath.Rel(src, path)
-	if err != nil {
-		return "", err
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("fixture entry %s is outside the fixture %s", path, src)
-	}
-	if rel == "." {
-		return "", nil
-	}
-	return rel, nil
-}
-
 // copyFile copies one regular file to name in the copy, which must not exist yet.
-func copyFile(root *os.Root, src, name string) error {
-	in, err := os.Open(src) //nolint:gosec // G304: src is inside the fixture the operator names
+func copyFile(root *os.Root, fixture fs.FS, name string) error {
+	in, err := fixture.Open(name)
 	if err != nil {
 		return err
 	}

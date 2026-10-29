@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -53,6 +54,7 @@ func TestCopyFixtureMakesAnIndependentCopy(t *testing.T) {
 func TestCopyFixtureRefusesASymlinkAndLeavesNoCopy(t *testing.T) {
 	t.Parallel()
 	fixture := t.TempDir()
+	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
 	mustWrite(t, filepath.Join(fixture, "real.txt"), "data\n")
 	if err := os.Symlink(filepath.Join(fixture, "real.txt"), filepath.Join(fixture, "link.txt")); err != nil {
 		t.Fatalf("symlink: %v", err)
@@ -73,7 +75,7 @@ func TestCopyFixtureRefusesASymlinkAndLeavesNoCopy(t *testing.T) {
 func TestCopyFixtureFailsWhenScratchIsMissing(t *testing.T) {
 	t.Parallel()
 	fixture := t.TempDir()
-	mustWrite(t, filepath.Join(fixture, "a.txt"), "x\n")
+	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
 	if _, _, err := copyFixture(fixture, filepath.Join(t.TempDir(), "missing"))(); err == nil {
 		t.Error("copyFixture into a missing scratch = nil error, want an error")
 	}
@@ -126,6 +128,7 @@ func TestCopyFixtureAcceptsAScratchBesideOrAboveTheFixture(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
 	fixture := filepath.Join(parent, "fixture")
+	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
 	mustWrite(t, filepath.Join(fixture, "a.txt"), "x\n")
 	tests := []struct {
 		name    string
@@ -167,53 +170,10 @@ func TestCopyFixtureFailsWhenTheFixtureIsMissing(t *testing.T) {
 	}
 }
 
-// TestCopyTargetKeepsTheFixtureLayoutForAnyRootSpelling: the walk reports each entry's path with the
-// root as the operator wrote it, so where it lands must come from filepath.Rel; trimming the root as
-// a string prefix leaves part of the fixture's own name in the copy for ".", "./x" and "x/."
-// (gt-p85pw.87).
-func TestCopyTargetKeepsTheFixtureLayoutForAnyRootSpelling(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		src  string
-		path string
-		want string
-	}{
-		{"absolute root", "/f/fixture", "/f/fixture/.beads/config.yaml", ".beads/config.yaml"},
-		{"relative root", "fixture", "fixture/.beads/config.yaml", ".beads/config.yaml"},
-		{"dotted relative root", "./fixture", "fixture/.beads/config.yaml", ".beads/config.yaml"},
-		{"root with a trailing dot", "fixture/.", "fixture/.beads/config.yaml", ".beads/config.yaml"},
-		{"the current directory", ".", ".beads/config.yaml", ".beads/config.yaml"},
-		{"the root itself", ".", ".", ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := copyTarget(tc.src, tc.path)
-			if err != nil {
-				t.Fatalf("copyTarget(%q, %q) = %v, want the entry's name in the copy", tc.src, tc.path, err)
-			}
-			if got := filepath.ToSlash(got); got != tc.want {
-				t.Errorf("copyTarget(%q, %q) = %q, want %q", tc.src, tc.path, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestCopyTargetRefusesAnEntryOutsideTheFixture: an entry filepath.Rel places outside the fixture
-// would write outside the copy, so the copy is refused instead.
-func TestCopyTargetRefusesAnEntryOutsideTheFixture(t *testing.T) {
-	t.Parallel()
-	for _, path := range []string{"elsewhere/a.txt", "/f/fixture/../a.txt"} {
-		if got, err := copyTarget("/f/fixture", path); err == nil {
-			t.Errorf("copyTarget(%q) = %q, want a refusal", path, got)
-		}
-	}
-}
-
 // TestCopyTreeCopiesARelativelyNamedFixture: an operator names the fixture relative to where they
-// stand, and the copy must still hold the fixture's .beads at its root; a copy that misplaced it
-// would leave bd in it answering from a database above the copy (gt-p85pw.87).
+// stand, and the copy must still hold the fixture's entries at its root. A copy that carried part of
+// the fixture's own path into it would leave bd answering from a database above the copy
+// (gt-p85pw.87).
 func TestCopyTreeCopiesARelativelyNamedFixture(t *testing.T) {
 	t.Parallel()
 	fixture := t.TempDir()
@@ -247,37 +207,31 @@ func TestCopyTreeCopiesARelativelyNamedFixture(t *testing.T) {
 	}
 }
 
-// TestCheckCopyHoldsDatabase: bd finds a database by walking up from where it runs, so a copy that
-// lost the fixture's .beads would answer from a database above it and be recorded as the answer. The
-// guard refuses that copy, and leaves a fixture with no database of its own to the preflight.
-func TestCheckCopyHoldsDatabase(t *testing.T) {
+// TestCopyFixtureRefusesAFixtureWithoutADatabase: bd picks a database by walking up from the copy it
+// runs in, so a fixture that holds none would have the recording answered from a database above it.
+// The fixture is refused before a copy is made, so scratch stays empty.
+func TestCopyFixtureRefusesAFixtureWithoutADatabase(t *testing.T) {
 	t.Parallel()
-	withDatabase := func(t *testing.T) string {
-		t.Helper()
-		dir := t.TempDir()
-		mustWrite(t, filepath.Join(dir, ".beads", "config.yaml"), "prefix: fx\n")
-		return dir
+	fixture := t.TempDir()
+	mustWrite(t, filepath.Join(fixture, "notes.txt"), "row data\n")
+	scratch := t.TempDir()
+	_, _, err := copyFixture(fixture, scratch)()
+	if err == nil || !strings.Contains(err.Error(), fixtureDatabase) {
+		t.Fatalf("copyFixture of a fixture without %s = %v, want a refusal naming it", fixtureDatabase, err)
 	}
-	tests := []struct {
-		name           string
-		fixture, copy  string
-		wantCopyRefuse bool
-	}{
-		{"copy holds the database", withDatabase(t), withDatabase(t), false},
-		{"copy lost the database", withDatabase(t), t.TempDir(), true},
-		{"fixture has no database of its own", t.TempDir(), t.TempDir(), false},
+	if left := fileNames(t, scratch); len(left) != 0 {
+		t.Errorf("scratch holds %v after a refused copy, want nothing left", left)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := checkCopyHoldsDatabase(tc.fixture, tc.copy)
-			if tc.wantCopyRefuse && (err == nil || !strings.Contains(err.Error(), fixtureDatabase)) {
-				t.Errorf("checkCopyHoldsDatabase(%s) = %v, want a refusal naming %s", tc.name, err, fixtureDatabase)
-			}
-			if !tc.wantCopyRefuse && err != nil {
-				t.Errorf("checkCopyHoldsDatabase(%s) = %v, want no refusal", tc.name, err)
-			}
-		})
+}
+
+// TestCopyTreeFailsWhenTheCopyCannotBeOpened: a copy directory that is not there is an error, not a
+// copy that silently holds nothing.
+func TestCopyTreeFailsWhenTheCopyCannotBeOpened(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	mustWrite(t, filepath.Join(src, "a.txt"), "x\n")
+	if err := copyTree(src, filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("copyTree into a missing copy directory = nil error, want an error")
 	}
 }
 
@@ -303,20 +257,32 @@ func TestCopyTreeFailsWhenADirectoryCannotBeMade(t *testing.T) {
 	}
 }
 
+// unreadableFS is a fixture whose file stops answering mid-copy, standing in for a disk that fails
+// the read a real fixture would finish.
+type unreadableFS struct{}
+
+func (unreadableFS) Open(string) (fs.File, error) { return unreadableFile{}, nil }
+
+type unreadableFile struct{}
+
+func (unreadableFile) Stat() (fs.FileInfo, error) { return nil, errors.New("stat: not a real file") }
+func (unreadableFile) Read([]byte) (int, error)   { return 0, errors.New("read: disk stopped answering") }
+func (unreadableFile) Close() error               { return nil }
+
 // TestCopyFileRefusesWhatItCannotCopy: a missing source, a destination that already exists, and a
-// source that cannot be read all fail the copy.
+// source that stops answering mid-copy all fail it rather than leaving half a file in the copy.
 func TestCopyFileRefusesWhatItCannotCopy(t *testing.T) {
 	t.Parallel()
-	src := filepath.Join(t.TempDir(), "a.txt")
-	mustWrite(t, src, "x\n")
+	fixture := t.TempDir()
+	mustWrite(t, filepath.Join(fixture, "b.txt"), "x\n")
 	tests := []struct {
 		name    string
-		src     string
+		fixture fs.FS
 		already string // a file the copy holds before the write, if any
 	}{
-		{"missing source", filepath.Join(t.TempDir(), "missing.txt"), ""},
-		{"destination exists", src, "b.txt"},
-		{"source cannot be read", t.TempDir(), ""},
+		{"missing source", os.DirFS(t.TempDir()), ""},
+		{"destination exists", os.DirFS(fixture), "b.txt"},
+		{"source cannot be read", unreadableFS{}, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -330,7 +296,7 @@ func TestCopyFileRefusesWhatItCannotCopy(t *testing.T) {
 				t.Fatalf("open the copy: %v", err)
 			}
 			defer root.Close() //nolint:errcheck // a test's read of the copy, not a write whose loss matters
-			if err := copyFile(root, tc.src, "b.txt"); err == nil {
+			if err := copyFile(root, tc.fixture, "b.txt"); err == nil {
 				t.Errorf("copyFile(%s) = nil error, want an error", tc.name)
 			}
 		})
