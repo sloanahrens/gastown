@@ -1610,7 +1610,7 @@ func TestOpenShellKubernetesProfileDoesNoDockerVolumeWork(t *testing.T) {
 	if len(d.calls) != 0 {
 		t.Fatalf("docker calls = %q, want none for a kubernetes profile", d.calls)
 	}
-	cs, err := b.createSpec(openshellSpawn(town, work))
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
 	if err != nil {
 		t.Fatalf("createSpec: %v", err)
 	}
@@ -1640,7 +1640,7 @@ func TestOpenShellKubernetesDriverConfig(t *testing.T) {
 	}
 	b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
 
-	cs, err := b.createSpec(openshellSpawn(town, work))
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
 	if err != nil {
 		t.Fatalf("createSpec: %v", err)
 	}
@@ -1696,7 +1696,7 @@ func TestOpenShellKubernetesDriverConfigSendsOnlyWhatIsSet(t *testing.T) {
 			c.mutate(&p)
 			b, _ := openshellTestBackend(town, p, &sandbox.Fake{})
 
-			cs, err := b.createSpec(openshellSpawn(town, work))
+			cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
 			if err != nil {
 				t.Fatalf("createSpec: %v", err)
 			}
@@ -1726,7 +1726,7 @@ func TestOpenShellUnknownDriverDoesNoDockerVolumeWork(t *testing.T) {
 	if len(d.calls) != 0 {
 		t.Fatalf("docker calls = %q, want none for an unknown driver", d.calls)
 	}
-	cs, err := b.createSpec(openshellSpawn(town, work))
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
 	if err != nil {
 		t.Fatalf("createSpec: %v", err)
 	}
@@ -1755,7 +1755,7 @@ func TestOpenShellDockerDriverKeepsTheCacheVolumeWork(t *testing.T) {
 			if want := [][]string{{"volume", "inspect", "gt-cache-gastown"}, openshellTestCacheCreate}; !reflect.DeepEqual(d.calls, want) {
 				t.Fatalf("docker calls = %q, want %q", d.calls, want)
 			}
-			cs, err := b.createSpec(openshellSpawn(town, work))
+			cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
 			if err != nil {
 				t.Fatalf("createSpec: %v", err)
 			}
@@ -1771,7 +1771,7 @@ func TestOpenShellCreateMountsTheCacheVolume(t *testing.T) {
 	town, work := openshellTown(t)
 	b, _ := openshellTestBackend(town, Profile{Name: "polecat-default", Image: "img", Policy: openshellTestProfile.Policy, CacheVolume: "gt-cache-{rig}"}, &sandbox.Fake{})
 
-	cs, err := b.createSpec(openshellSpawn(town, work))
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
 	if err != nil {
 		t.Fatalf("createSpec: %v", err)
 	}
@@ -1972,7 +1972,7 @@ func TestOpenShellPolicyComesFromTheTownCopyNotTheWorktree(t *testing.T) {
 	}
 	b, _ := openshellTestBackend(town, openshellTestProfile, &sandbox.Fake{})
 
-	cs, err := b.createSpec(openshellSpawn(town, work))
+	cs, err := b.createSpec(openshellSpawn(town, work), sandboxTracker{})
 	if err != nil {
 		t.Fatalf("createSpec: %v", err)
 	}
@@ -1990,7 +1990,7 @@ func TestOpenShellProductionPolicyRootIsTheTownCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOpenShellBackend: %v", err)
 	}
-	cs, err := b.(*openshellBackend).createSpec(openshellSpawn(town, work))
+	cs, err := b.(*openshellBackend).createSpec(openshellSpawn(town, work), sandboxTracker{})
 	if err != nil {
 		t.Fatalf("createSpec: %v", err)
 	}

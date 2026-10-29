@@ -26,8 +26,10 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -159,7 +161,10 @@ type openshellBackend struct {
 	renderPrompt config.SystemPromptRender
 	// comments posts the spawn's prompt stamp on the work bead (gt-2lu00).
 	// Tests set it.
-	comments    promptCommentStore
+	comments promptCommentStore
+	// seatToken ensures a tracker-routed seat's token file and returns its host
+	// path; the sandbox only ever reads the file (gt-p85pw.84). Tests set it.
+	seatToken   func(ctx context.Context, seat intent.Seat) (string, error)
 	installedGT func() string
 	// phaseWatch is how long this session's gateway phase has been a terminal
 	// failure. Nil is the process's watch (sandboxPhases); tests set one.
@@ -182,7 +187,22 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 		installedGT: version.BuildCommit,
 		policyRoot:  version.GetRepoRootForTown,
 		comments:    beads.New(townRoot),
+		seatToken:   hostSeatToken(townRoot),
 	}, nil
+}
+
+// hostSeatToken is the production seat-token seam: seattoken's one file per
+// seat under the town's runtime directory, issued through the admin credential
+// settings/daemon.env holds (gt-p85pw.80). Neither the credential nor the token
+// reaches a sandbox's environment; only the file's bytes go into the archive.
+func hostSeatToken(townRoot string) func(context.Context, intent.Seat) (string, error) {
+	return func(ctx context.Context, seat intent.Seat) (string, error) {
+		issuer, err := seattoken.NewHostIssuer(townRoot)
+		if err != nil {
+			return "", err
+		}
+		return seattoken.New(townRoot).Ensure(ctx, seat, issuer)
+	}
 }
 
 // gtCommitLabel is the image label `make polecat-image` sets to the commit its
@@ -699,8 +719,16 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	if spec.Rig == "" || spec.Polecat == "" || spec.Branch == "" || spec.RepoURL == "" {
 		return nil, fmt.Errorf("sandbox %s: spec needs rig, polecat, branch and repo URL", spec.Session)
 	}
+	// Resolved before anything is pushed or created: a tracker-routed rig's seat
+	// has its token file by the time the runtime archive stages it, and a route
+	// that cannot be read or a token that cannot be issued leaves nothing behind
+	// (gt-p85pw.84).
+	tracker, err := b.trackerFor(ctx, spec)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
+	}
 	// Built before anything is pushed or created, so a bad profile touches nothing.
-	create, err := b.createSpec(spec)
+	create, err := b.createSpec(spec, tracker)
 	if err != nil {
 		return nil, err
 	}
@@ -743,7 +771,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	// Also before anything is pushed or created: the agent command names these
 	// files, so a polecat whose settings are missing or cannot be rendered for
 	// the sandbox must stop here.
-	runtime, err := buildRuntimeArchiveLogging(spec, b.gitEmail(), os.Stderr, b.promptRenderer(), b.comments)
+	runtime, err := buildRuntimeArchiveLogging(spec, b.gitEmail(), os.Stderr, b.promptRenderer(), b.comments, tracker)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
@@ -801,7 +829,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	}
 
 	b.tmux = tmux.NewTmuxWithExecPrefix(SandboxTmuxSocket, SandboxExecPrefix(b.profile.Gateway, spec.Session)).Routed()
-	return &Prepared{WorkDir: workDir, Env: b.agentEnv(spec, workDir), OmitSecretPrefix: true}, nil
+	return &Prepared{WorkDir: workDir, Env: b.agentEnv(spec, workDir, tracker), OmitSecretPrefix: true}, nil
 }
 
 // stagedArchives are the host files Prepare uploads. workspace is empty when
@@ -932,7 +960,7 @@ func (b *openshellBackend) rollback(ctx context.Context, name string, cause erro
 // createSpec is the `sandbox create` for spec: the profile's image, policy,
 // providers and sizing, the identity labels, the env contract, and the
 // main process that keeps the tmux server alive.
-func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error) {
+func (b *openshellBackend) createSpec(spec SpawnSpec, tracker sandboxTracker) (sandbox.CreateSpec, error) {
 	root, err := b.policyRoot(spec.TownRoot)
 	if err != nil {
 		return sandbox.CreateSpec{}, fmt.Errorf("sandbox %s: locating the policy %q: %w", spec.Session, b.profile.Policy, err)
@@ -952,7 +980,7 @@ func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error
 		CPU:        b.profile.CPU,
 		Memory:     b.profile.Memory,
 		Labels:     map[string]string{"rig": spec.Rig, "polecat": spec.Polecat},
-		Env:        b.contract(spec),
+		Env:        b.contract(spec, tracker),
 		Command:    []string{"sh", "-c", sandboxMainScript, "sh", spec.Session},
 		NoKeep:     true,
 	}
@@ -990,10 +1018,12 @@ func (b *openshellBackend) usesDockerVolumes() bool {
 }
 
 // contract is the environment the sandbox carries for the gt and bd it runs:
-// the in-sandbox town root and the identity and Dolt endpoint of this polecat.
-func (b *openshellBackend) contract(spec SpawnSpec) map[string]string {
+// the in-sandbox town root, the identity and Dolt endpoint of this polecat,
+// and, for a rig the town routes to the tracker, that tracker's endpoint. A
+// Dolt rig's contract is unchanged.
+func (b *openshellBackend) contract(spec SpawnSpec, tracker sandboxTracker) map[string]string {
 	identity := spec.Rig + "/polecats/" + spec.Polecat
-	return map[string]string{
+	env := map[string]string{
 		"GT_TOWN_ROOT":       sandboxTownRoot,
 		"GT_ROOT":            sandboxTownRoot,
 		"GT_RIG":             spec.Rig,
@@ -1014,12 +1044,20 @@ func (b *openshellBackend) contract(spec SpawnSpec) map[string]string {
 		"DISABLE_AUTOUPDATER":                      "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
 	}
+	if tracker.on() {
+		// The token itself is a file the runtime archive stages, never a value
+		// here: the whole contract reaches the gateway's process environment.
+		env["TRACKER_URL"] = tracker.URL
+		env["TRACKER_ALLOW_HTTP_HOST"] = tracker.AllowHTTPHost
+		env["TRACKER_TOKEN_FILE"] = sandboxTrackerTokenFile
+	}
+	return env
 }
 
 // agentEnv is the environment override the agent's startup command gets
 // inside the sandbox: the host's spawn env with the sandbox contract laid
 // over it and the host-only keys dropped.
-func (b *openshellBackend) agentEnv(spec SpawnSpec, workDir string) map[string]string {
+func (b *openshellBackend) agentEnv(spec SpawnSpec, workDir string, tracker sandboxTracker) map[string]string {
 	env := maps.Clone(spec.Env)
 	if env == nil {
 		env = map[string]string{}
@@ -1027,7 +1065,7 @@ func (b *openshellBackend) agentEnv(spec SpawnSpec, workDir string) map[string]s
 	for _, k := range sandboxDroppedEnv {
 		env[k] = ""
 	}
-	maps.Copy(env, b.contract(spec))
+	maps.Copy(env, b.contract(spec, tracker))
 	env["GT_POLECAT_PATH"] = workDir
 	return env
 }
@@ -1048,6 +1086,94 @@ func (b *openshellBackend) controlPlaneHost() string {
 		return b.profile.ControlPlaneHost
 	}
 	return defaultControlPlaneHost
+}
+
+// sandboxTrackerTokenFile is where a tracker-routed sandbox reads its seat
+// token, the value TRACKER_TOKEN_FILE carries. The runtime archive stages the
+// file there 0600; nothing else in the sandbox holds the token.
+const sandboxTrackerTokenFile = sandboxHome + "/" + runtimeTrackerToken
+
+// sandboxTracker is the tracker a sandbox's rig is routed to, as the sandbox
+// reaches it: the town tracker's port on the control-plane host, that host as
+// the one host plain http may carry a seat token to, and the seat's token bytes
+// the runtime archive stages. The zero value is a Dolt rig: the contract names
+// no tracker and the archive stages no token file.
+type sandboxTracker struct {
+	URL           string
+	AllowHTTPHost string
+	token         []byte
+}
+
+// on reports whether this seat is on the tracker.
+func (t sandboxTracker) on() bool { return t.URL != "" }
+
+// trackerFor resolves the tracker a sandbox's rig is routed to and makes sure
+// the seat has a token to stage. A rig the route table does not name, or names
+// with the Dolt backend, gets the zero value and its contract is unchanged.
+//
+// It runs before anything is pushed or created, so an unreadable route table,
+// an unresolvable endpoint or an issuer failure leaves no sandbox behind. The
+// token travels as the archive's file and nowhere else: no environment value,
+// no settings file and no error carries it.
+func (b *openshellBackend) trackerFor(ctx context.Context, spec SpawnSpec) (sandboxTracker, error) {
+	on, err := b.rigOnTracker(spec.TownRoot, spec.Rig)
+	if err != nil || !on {
+		return sandboxTracker{}, err
+	}
+	endpoint, err := config.ResolveTrackerEndpoint(spec.TownRoot)
+	if err != nil {
+		return sandboxTracker{}, fmt.Errorf("resolving the tracker endpoint: %w", err)
+	}
+	if b.seatToken == nil {
+		return sandboxTracker{}, errors.New("the seat's tracker token: no issuer is installed")
+	}
+	path, err := b.seatToken(ctx, intent.Seat{Rig: spec.Rig, Role: "polecats", Name: spec.Polecat})
+	if err != nil {
+		// seattoken names the seat and never the token; the wrap adds that this
+		// is the file the sandbox would have carried.
+		return sandboxTracker{}, fmt.Errorf("the seat's tracker token: %w", err)
+	}
+	token, err := os.ReadFile(path)
+	if err != nil {
+		return sandboxTracker{}, fmt.Errorf("the seat's tracker token: %w", err)
+	}
+	if len(bytes.TrimSpace(token)) == 0 {
+		return sandboxTracker{}, fmt.Errorf("the seat's tracker token: %s holds no token", path)
+	}
+	host := b.controlPlaneHost()
+	return sandboxTracker{
+		URL:           config.TrackerEndpoint{Host: host, Port: endpoint.Port}.URL(),
+		AllowHTTPHost: host,
+		token:         token,
+	}, nil
+}
+
+// rigOnTracker reports whether the town's route table puts rig on the tracker.
+// A rig the table does not name is on Dolt, as internal/beads/backend opens it.
+// A table that cannot be read, or a route naming a backend that is neither, is
+// an error: a tracker rig must never get a Dolt contract because its route
+// could not be read.
+func (b *openshellBackend) rigOnTracker(townRoot, rig string) (bool, error) {
+	routes, err := beads.LoadRoutes(filepath.Join(townRoot, ".beads"))
+	if err != nil {
+		return false, fmt.Errorf("reading the town routes: %w", err)
+	}
+	for _, r := range routes {
+		// A route's path is the rig's store under the town root, <rig>/..., the
+		// same first segment beads.GetPrefixForRig matches the rig name on.
+		if first, _, _ := strings.Cut(r.Path, "/"); first != rig {
+			continue
+		}
+		switch name := r.BackendName(); name {
+		case beads.BackendDolt:
+			return false, nil
+		case beads.BackendTracker:
+			return true, nil
+		default:
+			return false, fmt.Errorf("route %s for rig %s names the backend %q, which is neither %q nor %q", r.Prefix, rig, name, beads.BackendDolt, beads.BackendTracker)
+		}
+	}
+	return false, nil
 }
 
 // stageDir makes a scratch directory for the archives this Prepare uploads.
