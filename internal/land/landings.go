@@ -95,7 +95,7 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 func (f *LandingsFile) AppendSubmitted(rec LandingRecord, seat string, submitted time.Time) error {
 	if rec.PolecatSecs == 0 && len(rec.PolecatAttempts) == 0 && !rec.PolecatLowerBound {
 		f.closeSubmittedSpan(rec, seat, submitted)
-		rec.PolecatSecs, rec.PolecatAttempts, rec.PolecatLowerBound = f.polecatTime(rec.BeadID)
+		rec.PolecatSecs, rec.PolecatAttempts, rec.PolecatLowerBound = f.PolecatTime(rec.BeadID, time.Time{})
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
@@ -159,13 +159,18 @@ func (f *LandingsFile) closeSubmittedSpan(rec LandingRecord, seat string, submit
 	}
 }
 
-// polecatTime is the record's polecat time: the time the bead's seats spent
-// hooked on it, or nothing for a crew landing, whose bead has no seat to log,
-// and for a bead whose log records nothing. A log that cannot be read is
-// logged and its time left out, but the record still says the total is a
-// lower bound: the log was there, so there is time the record cannot count.
-// The landing is never worth failing over the time (gt-yxl22).
-func (f *LandingsFile) polecatTime(bead string) (secs float64, attempts []PolecatAttempt, lowerBound bool) {
+// PolecatTime is a bead's polecat time: the time the bead's seats spent hooked
+// on it, or nothing for a crew landing, whose bead has no seat to log, and for
+// a bead whose log records nothing. A log that cannot be read is logged and its
+// time left out, but the total is still a lower bound: the log was there, so
+// there is time the reading cannot count. The landing is never worth failing
+// over the time (gt-yxl22).
+//
+// asOf zero is the reading a landed record carries: an attempt still open adds
+// nothing. A non-zero asOf is the reading for a landing still running: each open
+// attempt counts up to asOf, and the total stays a lower bound while one is
+// open. The Landings pane reads both, through the one reader.
+func (f *LandingsFile) PolecatTime(bead string, asOf time.Time) (secs float64, attempts []PolecatAttempt, lowerBound bool) {
 	// A record's bead id is not trusted: the store names one file per bead, so
 	// an id that is not a single path component could only be refused. Check
 	// before the id can reach a path at all (Summarize checks again).
@@ -183,10 +188,15 @@ func (f *LandingsFile) polecatTime(bead string) (secs float64, attempts []Poleca
 		return 0, nil, false
 	}
 	attempts = make([]PolecatAttempt, len(sum.Attempts))
+	secs = sum.Secs
 	for i, a := range sum.Attempts {
 		attempts[i] = PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound}
+		if a.Open && !asOf.IsZero() && asOf.After(a.StartedAt) {
+			attempts[i].Secs = asOf.Sub(a.StartedAt).Seconds()
+			secs += attempts[i].Secs
+		}
 	}
-	return sum.Secs, attempts, sum.LowerBound
+	return secs, attempts, sum.LowerBound
 }
 
 // appendJSONLine appends one newline-terminated record to the log at path with

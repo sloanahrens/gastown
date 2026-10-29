@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 )
 
 // The trend panel is the last 24 hours: landings and rejections by local hour,
@@ -268,8 +269,13 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 // (gt-yxl22) — comes with it, for the pane's Polecat column (gt-90wi1). who
 // names who submitted a row whose record carries no branch: a rejection keeps
 // its branch on the bead's rejection note, which a row does not read, so the
-// name comes from the first-sight submission log instead (gt-gclus).
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, who func(rig, bead string) string, limit int) []dashboard.LandingRow {
+// name comes from the first-sight submission log instead (gt-gclus). polecat
+// reads a bead's polecat time from the spans log: a rejected row takes the
+// reading a landed record would carry (asOf zero), and a running row takes the
+// time so far (asOf now), each only for the rows the bound keeps, so the reads
+// are bounded like the titles. A crew-branch row is marked crew, which the page
+// draws in place of a dash.
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, who func(rig, bead string) string, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
 	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
@@ -289,7 +295,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		row := dashboard.LandingRow{
 			At: rec.LandedAt, Bead: rec.Bead, Rig: rec.Rig, Polecat: polecatOfBranch(rec.Branch),
 			Outcome: "landed", Verdict: omOutcome(rec.OMVerdict), Commit: shortSHA(rec.LandedCommit),
-			Route: rec.Route, Risk: len(rec.RiskPaths) > 0,
+			Route: rec.Route, Risk: len(rec.RiskPaths) > 0, Crew: isCrewLandingBranch(rec.Branch),
 		}
 		if rec.OMScore > 0 {
 			sc := rec.OMScore
@@ -332,6 +338,18 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 	}
 	if len(live) > 0 {
 		rows = append(append([]dashboard.LandingRow(nil), live...), rows...)
+	}
+	if polecat != nil {
+		for i := range rows {
+			switch rows[i].Outcome {
+			case "rejected":
+				secs, attempts, lower := polecat(rows[i].Bead, time.Time{})
+				setPolecatReading(&rows[i], secs, attempts, lower)
+			case "running":
+				secs, attempts, lower := polecat(rows[i].Bead, now)
+				setPolecatReading(&rows[i], secs, attempts, lower)
+			}
+		}
 	}
 	if title != nil {
 		seen := map[string]string{}
@@ -434,6 +452,34 @@ func polecatOfBranch(branch string) string {
 		return parts[0]
 	}
 	return ""
+}
+
+// isCrewLandingBranch reports whether a landing's branch is a crew session's
+// build ("crew/<agent>/<bead>"), which has no polecat seat to read time from.
+func isCrewLandingBranch(branch string) bool {
+	return strings.HasPrefix(branch, "crew/")
+}
+
+// setPolecatReading draws a row's polecat time from the spans log: a reading
+// with no time reads as a dash, and each seat's share is listed as a landed
+// record's is. A row keeps the lower-bound mark the reading carries.
+func setPolecatReading(row *dashboard.LandingRow, secs float64, attempts []land.PolecatAttempt, lowerBound bool) {
+	row.PolecatSecs, row.PolecatAttempts, row.PolecatLowerBound = nil, nil, lowerBound
+	if secs > 0 {
+		s := secs
+		row.PolecatSecs = &s
+	}
+	for _, a := range attempts {
+		row.PolecatAttempts = append(row.PolecatAttempts, dashboard.PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound})
+	}
+}
+
+// spanPolecatTimes is the Landings pane's polecat-time reader: the landing
+// worker's own reader over the town's spans log, so a rejected or running row
+// and a landed record read the one way.
+func spanPolecatTimes(townRoot string) func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool) {
+	f := &land.LandingsFile{Spans: spans.New(spans.DefaultDir(townRoot), nil)}
+	return f.PolecatTime
 }
 
 func shortSHA(sha string) string {

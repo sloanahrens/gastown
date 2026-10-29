@@ -501,7 +501,10 @@ type LandingRow struct {
 	// ends. Verdict is om's reading of a landing: "approved", "skipped"
 	// (landed with no review of its own) or "error". Kind is why a rejection
 	// was refused: review, gate, conflict, policy or empty.
-	Outcome  string   `json:"outcome"`
+	Outcome string `json:"outcome"`
+	// Crew marks a landed row built on a crew session's branch: no polecat
+	// built it, so the Polecat cell reads crew rather than a dash.
+	Crew     bool     `json:"crew,omitempty"`
 	Verdict  string   `json:"verdict,omitempty"`
 	Kind     string   `json:"kind,omitempty"`
 	Score    *float64 `json:"score,omitempty"`

@@ -401,6 +401,34 @@ func TestTheLandingsPaneDrawsThePolecatTimeColumn(t *testing.T) {
 	}
 }
 
+// A landing built on a crew session's branch has no polecat, so its Polecat
+// cell reads crew rather than a dash, which would read as missing data. A
+// polecat's landing with no reading keeps the dash (gt-kmp7c).
+func TestTheLandingsPaneReadsCrewInThePolecatCellOfACrewBranchRow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 29, 14, 0, 0, 0, time.Local)
+	dom := newPageDOM(t)
+	dom.call(t, "renderTrend", map[string]any{"trend": map[string]any{
+		"hours": []map[string]any{{"hour": now.Format(time.RFC3339), "landed": 2}},
+		"recent": []map[string]any{
+			{"at": now.Add(-time.Minute).Format(time.RFC3339), "bead": "gt-crew", "outcome": "landed", "crew": true},
+			{"at": now.Add(-2 * time.Minute).Format(time.RFC3339), "bead": "gt-polecat", "outcome": "landed"},
+		},
+	}})
+
+	got := map[string]string{}
+	for _, c := range drawnPolecatColumn(t, dom) {
+		got[c.Bead] = c.Text
+	}
+	if got["gt-crew"] != "crew" {
+		t.Errorf("crew branch row's Polecat cell reads %q, want crew", got["gt-crew"])
+	}
+	if got["gt-polecat"] != "–" {
+		t.Errorf("polecat row with no reading reads %q, want the dash", got["gt-polecat"])
+	}
+}
+
 // A reading of a minute or more is still drawn in seconds while it stays under
 // a minute and a half, then rounds to whole minutes; the band is fmtDur's own,
 // so the Polecat column's format does not move it. Every value is asserted as

@@ -1470,7 +1470,9 @@ function landingTable(s, names, rows, waiting) {
     // adds no time to the record and reads "open", and an attempt that is itself
     // a floor keeps its +, which is why the total may be a lower bound
     // (gt-90wi1).
-    const pc = el("td", "n", polecatDur(r.polecat_secs, r.polecat_lower_bound));
+    // A crew session's landing has no polecat, so its cell says crew rather than
+    // reading as a dash, which would look like missing data (gt-kmp7c).
+    const pc = el("td", "n", r.crew ? "crew" : polecatDur(r.polecat_secs, r.polecat_lower_bound));
     const pa = r.polecat_attempts || [];
     if (pa.length) pc.title = pa.length + (pa.length === 1 ? " attempt: " : " attempts: ") + pa.map(a => a.secs > 0 ? polecatDur(a.secs, a.lower_bound) : "open").join(" + ");
     tr.append(pc);
