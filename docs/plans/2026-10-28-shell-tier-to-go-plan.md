@@ -30,7 +30,7 @@ Not in this plan, each with its reason:
 - No new scripts. A thin `exec` wrapper is allowed only where a task says so, with its reason.
 - A task's acceptance boxes use a narrow `go test -run` command; never a whole container-suite package (`internal/daemon`, `internal/cmd`, `internal/polecat`, `internal/beads`); never `make gate`; no live-town measurement (live before/after goes in Gate as owed by the overseer).
 - Each task is one package and about twenty minutes. Tasks that share a package are chained so the dispatcher runs one at a time.
-- My crew clones are shallow. The `makefile-gate_test.sh` tracker case (its "first commit" base) needs a full-history clone or CI.
+- My crew clones are shallow. The `makefile-gate_test.sh` tracker case (its "first commit" base) builds its own two-commit repository in the sandbox (task B10), so the clone's depth does not matter to the port or its tests.
 
 ## Verified facts the tasks rely on
 
@@ -56,15 +56,15 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 **Files:** create `internal/shelltier/manifest.go`, `manifest_test.go`, `main_test.go`.
 
 **Interfaces:**
-- Produces: `type Mode int` with `Serial` and `Parallel`; `type Entry struct { Path string; Triggers []string; Mode Mode; BuildsGo bool }`; `var DefaultTriggers = []string{"scripts/", "Makefile"}`; `var GoTriggers = []string{"go.mod", "go.sum", "cmd/", "internal/", "plugins/"}`; `func Manifest() []Entry` (today's 28 scripts in today's order, every one `Serial`, every one with `DefaultTriggers`); `func (e Entry) TriggersOrDefault() []string`.
+- Produces: `type Mode int` with `Serial` and `Parallel`; `type Entry struct { Path string; Triggers []string; Mode Mode; StubsGo string }`; `var DefaultTriggers = []string{"scripts/", "Makefile"}`; `var GoTriggers = []string{"go.mod", "go.sum", "cmd/", "internal/", "plugins/"}`; `func Manifest() []Entry` (today's 28 scripts in today's order, every one `Serial`, every one with `DefaultTriggers`); `func (e Entry) TriggersOrDefault() []string` (fail closed: `DefaultTriggers` plus every `GoTriggers` path, unless `StubsGo` is non-empty). `StubsGo` is the exemption and the reason in one field: `none: the script names no go command` or `stub: <file>:<line> defines a fake go`. An entry with no exemption runs on a Go change, so a script the guard cannot classify runs more often, never less.
 - Guard seam: `type Lister func() ([]string, error)` returning the tracked `*_test.sh` paths (production: `git ls-files '*_test.sh'`, minus any path containing `/testdata/`).
 
 **Acceptance (bead boxes):**
 - [ ] `TestManifestCoversEveryTrackedShellTest`: with a fake `Lister` returning the 28 paths the test passes; a tracked `*_test.sh` missing from the manifest fails with its path named. Mutation: delete one manifest entry; the test fails.
 - [ ] `TestManifestEntriesExist`: a manifest path the filesystem fake does not hold fails and names it. Mutation: add a bogus path; the test fails.
 - [ ] `TestManifestOrderIsToday`: the first 24 entries are the `scripts/test-makefile.sh` order, ending with `scripts/makefile-gate_test.sh`, then the four extras. Mutation: swap two entries.
-- [ ] `TestTriggersOrDefault`: an entry with no triggers returns `DefaultTriggers`; an entry with `BuildsGo` also returns every `GoTriggers` path. Mutation: ignore `BuildsGo`.
-- [ ] `TestOnlyInstallGtBuildsGo`: `scripts/install-gt_test.sh` is the one entry with `BuildsGo` (it compiles `./cmd/install-lock`, `./cmd/image-supervisor` and `./plugins/polecat-image` for real, lines 294 to 303, so a Go-only landing can change its result; every other script stubs `go`). Mutation: clear its flag.
+- [ ] `TestTriggersOrDefault`: an entry with no triggers returns `DefaultTriggers`; an entry with an empty `StubsGo` also returns every `GoTriggers` path and one with a reason does not. Mutation: ignore `StubsGo`.
+- [ ] `TestOnlyInstallGtIsNotExempt`: `scripts/install-gt_test.sh` is the one entry with an empty `StubsGo` (it compiles `./cmd/install-lock`, `./cmd/image-supervisor` and `./plugins/polecat-image` for real, lines 294 to 303, so a Go-only landing can change its result); every other entry carries a reason from the scan of the 28 scripts. Mutation: give it a reason.
 - [ ] `go test ./internal/shelltier -run 'TestManifest|TestTriggersOrDefault' -count=1` passes and `go vet ./internal/shelltier` is clean.
 
 **Depends on:** nothing.
@@ -170,7 +170,7 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 
 **Files:** modify `internal/shelltier/cmd/shelltier/main.go`, add `internal/shelltier/since.go`, `since_test.go`.
 
-**Behaviour:** `--since-green --town <dir>` loads the shell state (`Store{Path: StatePath(town), Files}`), calls `Select`, runs only the selected entries, counts the rest as `skipped`, and after the run records `Record(st, e, <HEAD commit>, now)` for each entry that passed, then saves the state. A state that cannot be loaded runs everything and says so on the error stream. `--all` ignores the state and does not write it. HEAD comes from an injected `Head func() (string, error)`.
+**Behaviour:** `--since-green --town <dir>` loads the shell state (`Store{Path: StatePath(town), Files}`), calls `Select`, runs only the selected entries, counts the rest as `skipped`, and after the run records `Record(st, e, <HEAD commit>, now)` for each entry that passed, then saves the state. A state that cannot be loaded runs everything and says so on the error stream. `--all` ignores the state and does not write it. HEAD comes from an injected `Head func() (string, error)`. A HEAD that cannot be read makes every entry due: everything runs, nothing is recorded, and the error stream says so (a test with a failing `Head` pins all three).
 
 **Acceptance:**
 - [ ] `TestSinceGreenRunsOnlyTheSelectedEntries` (summary shows `skipped=` equal to the unselected count). Mutation: run all.
@@ -185,12 +185,12 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 
 **Files:** create `internal/shelltier/triggers_guard_test.go`.
 
-**Behaviour:** for each manifest entry, scan the script's text for repo-relative paths it names (`scripts/…`, `deploy/…`, `plugins/…`, `.githooks/…`, `Makefile`, `internal/…`), and fail when a named path is not at or under one of the entry's triggers (`tiertrigger.Runs`). Entries with the default triggers (`scripts/`, `Makefile`) are checked the same way, so `deploy/…` and `plugins/…` references force their triggers to be declared. A second rule covers what a path scan cannot see: a Go change can change a test that compiles the repository's Go for real. Every script whose text names `go build`, `go run`, `go test`, `go vet`, `go install` or `make install` must either have `BuildsGo` set or appear in a stub-only list in the guard test with a one-line reason each (install-om_test.sh: a `go.log` stub; tier-sweep_test.sh: a fake `tiertrigger`; makefile-gate_test.sh: a stub `go`; and whatever else the scan finds).
+**Behaviour:** for each manifest entry, scan the script's text for repo-relative paths it names (`scripts/…`, `deploy/…`, `plugins/…`, `.githooks/…`, `Makefile`, `internal/…`), and fail when a named path is not at or under one of the entry's triggers (`tiertrigger.Runs`). Entries with the default triggers (`scripts/`, `Makefile`) are checked the same way, so `deploy/…` and `plugins/…` references force their triggers to be declared. A second rule keeps the Go exemptions honest (the path scan cannot see a script that builds Go): every manifest entry with a non-empty `StubsGo` is checked against its script text. A `none:` entry must name no `go build`, `go run`, `go test`, `go vet`, `go install` or `make install`. A `stub:` entry must cite a `file:line` that exists and holds the fake `go` definition (a `bin/go` file, a `go()` function or a PATH shim). An exemption the text does not support fails and names the script, so the failure mode of a wrong scan is a spurious run, never a missed one.
 
 **Acceptance:**
 - [ ] `TestEveryReferencedRepoPathIsATrigger` passes on the manifest as filed, which means A1's default triggers are widened in this task wherever the scan finds an uncovered path. Mutation: remove one trigger; the test fails and names the script and path.
 - [ ] `TestScanFindsPathsInQuotesAndVariables` (a fixture script text).
-- [ ] `TestEveryGoCommandScriptIsBuildsGoOrStubOnly`: a fixture script naming `go build` with neither `BuildsGo` nor a stub-only entry fails and names it; the real manifest passes. Mutation: clear `BuildsGo` on `scripts/install-gt_test.sh`.
+- [ ] `TestEveryStubsGoExemptionIsSupportedByTheScript`: a fixture script naming `go build` under a `none:` reason fails and names it; a `stub:` reason citing a line with no fake `go` fails; the real manifest passes. Mutation: give `scripts/install-gt_test.sh` a `none:` reason.
 - [ ] `go test ./internal/shelltier -run 'TestEveryReferenced|TestScanFinds' -count=1` passes.
 
 **Depends on:** A7 (chained so the dispatcher runs one task at a time in `internal/shelltier`; it comes before A8 because A8 builds the union of the triggers this task widens).
@@ -207,7 +207,7 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 - [ ] the old `TestShellTierInputsMatchPostLandScript` is gone, and `grep -n 'INPUTS' internal/land/gate_test.go` prints nothing.
 - [ ] `go test ./internal/land -run 'TestShellTierInputs' -count=1` passes and `go build ./...` succeeds.
 
-**Depends on:** A7b. The union includes `GoTriggers` while any entry has `BuildsGo`, so the post-land revert's blame rule is honest about `install-gt_test.sh` until `gt-tpg0p.14` deletes it.
+**Depends on:** A7b. The union includes `GoTriggers` while any entry has an empty `StubsGo`, so the post-land revert's blame rule is honest about `install-gt_test.sh` until `gt-tpg0p.14` deletes it.
 
 ### Task A9: The timing log
 
@@ -335,7 +335,8 @@ Cases: the openshell-providers cases run the stub gt, not the host's; the stub g
 **Acceptance:**
 - [ ] a table in the bead comment accounts for all 101 cases by original line number and the Go test that replaced each (taken from B1 to B12).
 - [ ] `git grep -n 'makefile-gate_test' -- . ':!docs'` prints nothing.
-- [ ] `go test ./internal/makegate ./internal/shelltier ./internal/repoguard -count=1` passes.
+- [ ] `go test -tags integration ./internal/makegate -count=1` passes (the untagged command would pass vacuously, because every makegate file is tagged) and `go test ./internal/shelltier ./internal/repoguard -count=1` passes.
+- [ ] `go vet -tags integration ./internal/makegate` is clean.
 
 **Depends on:** B12 and A12. Gate owed by the overseer: the hourly sweep's first shell run after this lands is green and the shell tier's wall is lower by about 44 s (the file's measured serial time).
 
