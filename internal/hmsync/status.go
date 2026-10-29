@@ -32,8 +32,8 @@ type Verdict struct {
 }
 
 // ParseStatus decodes `hm status --json`, which must be an object holding a
-// "sources" array, and fails on anything else so an unreadable status is never
-// mistaken for a healthy one.
+// "sources" array. Other top-level keys are ignored; a document without that
+// array fails, so an unreadable status is never mistaken for a healthy one.
 func ParseStatus(data []byte) ([]Source, error) {
 	var doc struct {
 		Sources json.RawMessage `json:"sources"`
@@ -54,8 +54,8 @@ func ParseStatus(data []byte) ([]Source, error) {
 // Evaluate returns the change to apply to the alert: Raise when it is inactive
 // and every configured source is stale or failing, Clear when it is active and
 // any configured source is fresh, and neither otherwise. A status naming no
-// configured source raises on the first read, since nothing is receiving
-// updates.
+// configured source raises whenever the alert is inactive, since nothing is
+// receiving updates, and never clears, since no source can be fresh.
 func Evaluate(sources []Source, active bool) Verdict {
 	var configured, stale, failing, fresh, down int
 	for _, s := range sources {
