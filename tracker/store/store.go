@@ -102,4 +102,9 @@ type Store interface {
 	// EventsAfter returns up to limit events with seq greater than after
 	// (limit 0 means the server's page size), oldest first.
 	EventsAfter(ctx context.Context, after int64, limit int) (api.EventsPage, error)
+	// Export calls emit for each record of rig's export, in stream order: its
+	// issues (wisps included) by id, then their labels, dependencies and
+	// comments. Records are read as they are emitted, never collected first.
+	// An error from emit or from the read ends the export and is returned.
+	Export(ctx context.Context, rig string, emit func(api.ExportRecord) error) error
 }

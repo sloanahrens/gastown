@@ -92,6 +92,7 @@ func New(cfg Config) *Server {
 	s.registerBoardRoutes(v1)
 	s.registerSnapshotRoutes(v1)
 	s.registerEventRoutes(v1)
+	s.registerExportRoutes(v1)
 	s.registerAdminRoutes(v1)
 	// Instrumentation sits inside authentication because it reads the actor
 	// from the resolved identity, and outside the schema gate so a refused
@@ -213,13 +214,19 @@ func writeAPIError(w http.ResponseWriter, status int, e *api.Error) { writeJSON(
 // else is an internal failure: the cause goes to the log and the client gets
 // a generic unavailable, so no connection string or SQL detail leaks.
 func writeError(w http.ResponseWriter, err error, log Logger) {
+	ae := apiErrorOf(err, log)
+	writeAPIError(w, ae.HTTPStatus(), ae)
+}
+
+// apiErrorOf is the api.Error that answers err. Anything that is not one is
+// logged and becomes the generic unavailable.
+func apiErrorOf(err error, log Logger) *api.Error {
 	var ae *api.Error
 	if errors.As(err, &ae) {
-		writeAPIError(w, ae.HTTPStatus(), ae)
-		return
+		return ae
 	}
 	log.Printf("internal error: %v", err)
-	writeAPIError(w, http.StatusServiceUnavailable, api.Unavailable("internal error; see the server log"))
+	return api.Unavailable("internal error; see the server log")
 }
 
 // requireAdmin lets only an admin-scope token through to next. A seat token

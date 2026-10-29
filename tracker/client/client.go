@@ -228,33 +228,9 @@ func backoff(n int) time.Duration {
 func (c *Client) once(parent context.Context, method, path string, body []byte, out any) error {
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
-	var rd io.Reader
-	if body != nil {
-		rd = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
+	resp, err := c.send(ctx, parent, method, path, body)
 	if err != nil {
-		return api.Invalid("client: build request: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set(api.SchemaHeader, c.schema)
-	if tag, _ := ctx.Value(tagKey{}).(string); tag != "" {
-		req.Header.Set(api.RequestTagHeader, tag)
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		// The caller gave up (canceled, or its own deadline passed): that is
-		// theirs, not a failure of the service, and never worth a retry.
-		if perr := parent.Err(); perr != nil {
-			return perr
-		}
-		// A transport failure (refused, reset, this attempt timed out) is
-		// "unavailable": a read may be repeated; a write may or may not have
-		// been applied, so it is never retried here.
-		return api.Unavailable("tracker request failed: %v", urlErrorOnly(err))
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
@@ -273,6 +249,41 @@ func (c *Client) once(parent context.Context, method, path string, body []byte, 
 		return nil
 	}
 	return c.decodeError(resp.StatusCode, data)
+}
+
+// send makes one request, bounded by ctx. parent is the caller's context: when
+// the caller gave up, that is theirs, not a failure of the service, and the
+// error says so. The response body is the caller's to read and close.
+func (c *Client) send(ctx, parent context.Context, method, path string, body []byte) (*http.Response, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
+	if err != nil {
+		return nil, api.Invalid("client: build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set(api.SchemaHeader, c.schema)
+	if tag, _ := ctx.Value(tagKey{}).(string); tag != "" {
+		req.Header.Set(api.RequestTagHeader, tag)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		// The caller gave up (canceled, or its own deadline passed): that is
+		// theirs, not a failure of the service, and never worth a retry.
+		if perr := parent.Err(); perr != nil {
+			return nil, perr
+		}
+		// A transport failure (refused, reset, this attempt timed out) is
+		// "unavailable": a read may be repeated; a write may or may not have
+		// been applied, so it is never retried here.
+		return nil, api.Unavailable("tracker request failed: %v", urlErrorOnly(err))
+	}
+	return resp, nil
 }
 
 // urlErrorOnly drops the request URL wrapper's detail down to its cause.

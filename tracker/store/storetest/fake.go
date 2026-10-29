@@ -1,7 +1,8 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
 // implements the methods its Fake-flagged contract cases cover (create and
 // get, the claim, release and transfer guards, the plain close those guards
-// refuse, and the creates a Batch applies) and nothing more: every other
+// refuse, the creates a Batch applies, and the comments and links an export
+// reads) and nothing more: every other
 // method returns store.ErrUnimplemented, so a unit test that reaches past them
 // fails loudly rather than reading a store that only looks modeled.
 package storetest
@@ -21,10 +22,12 @@ import (
 
 // Fake is an in-memory store.Store.
 type Fake struct {
-	mu     sync.Mutex
-	now    func() time.Time
-	issues map[string]api.Issue
-	next   int
+	mu       sync.Mutex
+	now      func() time.Time
+	issues   map[string]api.Issue
+	comments []api.Comment
+	links    []api.ExportDependency
+	next     int
 }
 
 var _ store.Store = (*Fake)(nil)
@@ -217,14 +220,36 @@ func (f *Fake) CloseIssues(_ context.Context, ids []string, reason string, _ boo
 	return nil
 }
 func (*Fake) DeleteIssues(context.Context, []string) error { return unimplemented("DeleteIssues") }
-func (*Fake) AddComment(context.Context, string, string, string) error {
-	return unimplemented("AddComment")
+
+// AddComment appends a comment to id. Export reads the comments; Comments
+// stays unimplemented.
+func (f *Fake) AddComment(_ context.Context, id, author, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.issues[id]; !ok {
+		return api.NotFound(id)
+	}
+	f.comments = append(f.comments, api.Comment{
+		ID: fmt.Sprintf("comment-%d", len(f.comments)+1), IssueID: id, Author: author, Text: text, CreatedAt: f.now(),
+	})
+	return nil
 }
 func (*Fake) Comments(context.Context, string) ([]api.Comment, error) {
 	return nil, unimplemented("Comments")
 }
-func (*Fake) AddDependency(context.Context, string, string, string) error {
-	return unimplemented("AddDependency")
+
+// AddDependency records a link from issue to dependsOn. Export reads the
+// links; Dependencies stays unimplemented.
+func (f *Fake) AddDependency(ctx context.Context, issue, dependsOn, depType string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.issues[issue]; !ok {
+		return api.NotFound(issue)
+	}
+	f.links = append(f.links, api.ExportDependency{
+		IssueID: issue, DependsOn: dependsOn, Type: depType, CreatedBy: api.ActorFrom(ctx), CreatedAt: f.now(),
+	})
+	return nil
 }
 func (*Fake) RemoveDependency(context.Context, string, string) error {
 	return unimplemented("RemoveDependency")
@@ -289,4 +314,53 @@ func (*Fake) ConfigGet(context.Context, string) (string, bool, error) {
 func (*Fake) ConfigSet(context.Context, string, string) error { return unimplemented("ConfigSet") }
 func (*Fake) EventsAfter(context.Context, int64, int) (api.EventsPage, error) {
 	return api.EventsPage{}, unimplemented("EventsAfter")
+}
+
+// Export emits rig's records in the Postgres store's order: its issues by id,
+// then their labels, then the dependencies and comments of those issues, each
+// in insertion order within an issue. The records are built under the lock and
+// emitted after it is released, so emit may call back into the fake.
+func (f *Fake) Export(_ context.Context, rig string, emit func(api.ExportRecord) error) error {
+	for _, rec := range f.exportRecords(rig) {
+		if err := emit(rec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *Fake) exportRecords(rig string) []api.ExportRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var issues []api.Issue
+	for _, is := range f.issues {
+		if rigOf(is.ID) == rig {
+			issues = append(issues, is)
+		}
+	}
+	slices.SortFunc(issues, func(a, b api.Issue) int { return strings.Compare(a.ID, b.ID) })
+	inRig := func(issueID string) bool { return rigOf(issueID) == rig }
+	links := slices.DeleteFunc(slices.Clone(f.links), func(d api.ExportDependency) bool { return !inRig(d.IssueID) })
+	comments := slices.DeleteFunc(slices.Clone(f.comments), func(c api.Comment) bool { return !inRig(c.IssueID) })
+	slices.SortStableFunc(links, func(a, b api.ExportDependency) int { return strings.Compare(a.IssueID, b.IssueID) })
+	slices.SortStableFunc(comments, func(a, b api.Comment) int { return strings.Compare(a.IssueID, b.IssueID) })
+
+	var out []api.ExportRecord
+	for _, is := range issues {
+		rec := is
+		rec.Labels = nil
+		out = append(out, api.ExportRecord{Type: api.RecordIssue, Issue: &rec})
+	}
+	for _, is := range issues {
+		for _, l := range is.Labels {
+			out = append(out, api.ExportRecord{Type: api.RecordLabel, Label: &api.ExportLabel{IssueID: is.ID, Label: l}})
+		}
+	}
+	for _, d := range links {
+		out = append(out, api.ExportRecord{Type: api.RecordDependency, Dependency: &d})
+	}
+	for _, c := range comments {
+		out = append(out, api.ExportRecord{Type: api.RecordComment, Comment: &c})
+	}
+	return out
 }
