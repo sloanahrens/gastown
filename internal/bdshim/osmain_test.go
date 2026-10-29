@@ -1,7 +1,9 @@
 package bdshim
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -25,6 +27,23 @@ func TestChildStatus(t *testing.T) {
 				t.Errorf("ExitCode() = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunBdRealReportsAChildThatNeverStarted(t *testing.T) {
+	t.Parallel()
+	// A path inside the test's own directory that nothing created: the run
+	// fails before any process exists, which is the branch a missing bd.real
+	// takes.
+	missing := filepath.Join(t.TempDir(), "bd.real")
+
+	err := runBdReal(missing, []string{"show", "gt-abc"})
+	if err == nil {
+		t.Fatal("runBdReal of a missing bd.real = nil, want the start failure")
+	}
+	var coded interface{ ExitCode() int }
+	if errors.As(err, &coded) {
+		t.Errorf("runBdReal of a missing bd.real = %v, want the start failure itself rather than a child status", err)
 	}
 }
 

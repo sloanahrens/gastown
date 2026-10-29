@@ -142,6 +142,15 @@ func TestDecideRefusesIDsSpanningStores(t *testing.T) {
 	}
 }
 
+func TestDecideWithoutAWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	getwd := func() (string, error) { return "", errors.New("no working directory") }
+
+	if _, err := Decide(func(string) string { return "" }, getwd, []string{"list"}); err == nil {
+		t.Fatal("Decide with no working directory = nil error, want a refusal")
+	}
+}
+
 func TestDecideWithoutRouteTableIsDolt(t *testing.T) {
 	t.Parallel()
 	empty := t.TempDir()
