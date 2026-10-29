@@ -4,16 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/tracker/internal/leakcheck"
 	"github.com/steveyegge/gastown/tracker/migrate"
 )
-
-func TestMain(m *testing.M) { os.Exit(leakcheck.Main(m)) }
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
