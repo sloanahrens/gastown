@@ -316,11 +316,14 @@ var treeWideGuards = []treeWideGuard{
 		judges: func(rel string) bool { return rel == "Makefile" || commandTreeInputs(rel) },
 	},
 	{
-		// TestGTPinMatchesThePolecatImageFlow reads the Makefile's
-		// polecat-image recipe, which is where the image's gt is built.
-		pkg:    "internal/daemonimage",
-		tests:  []string{"TestGTPinMatchesThePolecatImageFlow"},
-		judges: func(rel string) bool { return rel == "Makefile" },
+		// TestGTPinMatchesThePolecatImageFlow reads the Makefile's polecat-image
+		// recipe, which is where the image's gt is built. The Dockerfile tests
+		// read the daemon image's Dockerfile, whose deletion they fail on.
+		pkg: "internal/daemonimage",
+		tests: []string{"TestGTPinMatchesThePolecatImageFlow", "TestDaemonDockerfileHasNoBuildStep",
+			"TestDaemonDockerfileCopiesTheThreeBinaries", "TestDaemonDockerfileMatchesTheImageTable"},
+		judges:  func(rel string) bool { return rel == "Makefile" || rel == "deploy/daemon/Dockerfile" },
+		removal: true,
 	},
 	{
 		pkg:     "internal/bdgate",

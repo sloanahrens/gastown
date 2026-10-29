@@ -37,11 +37,12 @@ type worktreeAdd struct{ src, dir, commit string }
 // build that succeeds writes its -o path, as go build does. It also records the
 // worktrees the builds add and remove, through git.
 type fakeRunner struct {
-	calls   []recorded
-	adds    []worktreeAdd
-	removed []string
-	failPkg string
-	failAdd bool
+	calls      []recorded
+	adds       []worktreeAdd
+	removed    []string
+	failPkg    string
+	failAdd    bool
+	failDocker bool
 }
 
 func (f *fakeRunner) run(_ context.Context, dir string, env, argv []string) error {
@@ -52,6 +53,9 @@ func (f *fakeRunner) run(_ context.Context, dir string, env, argv []string) erro
 	})
 	if f.failPkg != "" && argv[len(argv)-1] == f.failPkg {
 		return errors.New("build failed")
+	}
+	if f.failDocker && argv[0] == "docker" {
+		return errors.New("docker build failed")
 	}
 	if out := outOf(argv); out != "" {
 		return os.WriteFile(out, []byte("binary"), 0o600)
