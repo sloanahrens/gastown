@@ -336,6 +336,95 @@ func WithSlot(g CommandGate, townRoot, role string) CommandGate {
 	return g
 }
 
+// WithSlotForCommand returns WithSlot(g, townRoot, role), except that a command
+// declaring itself container-free (GT_TEST_DOCKER=0 leading every segment, see
+// declaresContainerFree) takes no slot. A command that stays silent keeps it:
+// whether `make test` starts containers is not visible in its text (gt-7k0hz).
+func WithSlotForCommand(g CommandGate, townRoot, role, command string) CommandGate {
+	if declaresContainerFree(command) {
+		return g
+	}
+	return WithSlot(g, townRoot, role)
+}
+
+// containerFreeDeclaration is the leading assignment that declares a segment
+// starts no containers.
+const containerFreeDeclaration = "GT_TEST_DOCKER=0"
+
+// declaresContainerFree reports whether command sets GT_TEST_DOCKER=0 for
+// every command its line runs. A line with no segment at all declares
+// nothing.
+func declaresContainerFree(command string) bool {
+	sawSegment := false
+	for _, segment := range splitCommandSegments(command) {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
+		sawSegment = true
+		if !declaresContainerFreeSegment(segment) {
+			return false
+		}
+	}
+	return sawSegment
+}
+
+// declaresContainerFreeSegment reports whether one shell segment leads with
+// GT_TEST_DOCKER=0 and leaves the variable alone after it.
+//
+// The leading assignment covers the whole segment, but a later one wins:
+// `GT_TEST_DOCKER=0 FOO=1 GT_TEST_DOCKER=1 bash x.sh` runs with 1, and
+// `GT_TEST_DOCKER=0 env -u GT_TEST_DOCKER bash x.sh` runs without it, so any
+// second mention takes the slot. A quoted value (GT_TEST_DOCKER="0"), a longer
+// name (MY_GT_TEST_DOCKER=0) and another value (GT_TEST_DOCKER=01) set
+// something else and are no declaration.
+func declaresContainerFreeSegment(segment string) bool {
+	words := strings.Fields(segment)
+	if len(words) == 0 || words[0] != containerFreeDeclaration {
+		return false
+	}
+	for _, word := range words[1:] {
+		if strings.Contains(word, "GT_TEST_DOCKER") && word != containerFreeDeclaration {
+			return false
+		}
+	}
+	return true
+}
+
+// splitCommandSegments splits command at the operators that start another
+// command in a shell line: `;`, `&`, `|`, a newline. A `&` or `|` that follows
+// `>` or `<` belongs to a redirection (`2>&1`, `>&2`, `>|`), so `GT_TEST_DOCKER=0
+// bash x.sh 2>&1` stays one segment.
+//
+// The split ignores quoting, so a separator inside a quoted string cuts its
+// segment in two. That can only add segments to check, never drop one, so it
+// keeps the slot where a shell would not have split.
+func splitCommandSegments(command string) []string {
+	var (
+		segments []string
+		current  strings.Builder
+		prev     rune
+	)
+	for _, r := range command {
+		if isCommandSeparator(r) && prev != '>' && prev != '<' {
+			segments = append(segments, current.String())
+			current.Reset()
+			prev = ' '
+			continue
+		}
+		current.WriteRune(r)
+		prev = r
+	}
+	return append(segments, current.String())
+}
+
+// isCommandSeparator reports whether r starts another command in a shell
+// line: `;`, `&` (which also covers `&&`), `|` (which also covers `||`) and a
+// newline.
+func isCommandSeparator(r rune) bool {
+	return r == ';' || r == '&' || r == '|' || r == '\n'
+}
+
 // takeSlot holds the container-gate slot a step runs under, returning the
 // release to call when the step has ended. A step with no SlotRole gets a
 // no-op release, so callers call what they are handed without asking.

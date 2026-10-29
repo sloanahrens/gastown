@@ -27,7 +27,8 @@ import (
 // post-land runner against a real repository and a real container-gate hold,
 // in a temp town whose slot nobody else contends for. The hold is taken in
 // process by internal/land's CommandGate (gt-638go.12), so what this test can
-// observe of it is the town's own slot history.
+// observe of it is the town's own slot history. A command that declares
+// GT_TEST_DOCKER=0 takes no hold at all (gt-7k0hz).
 func TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -60,8 +61,15 @@ func TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *tes
 	if res.Err != nil || res.ExitCode != 0 {
 		t.Fatalf("green run: %+v", res)
 	}
-	// One hold per run, under the post-land role, either side of the
-	// container-suite gate.
+	// The declaring run is a real post-land run and reports as one, through
+	// the same runner: the rule is wired at the daemon's call site, not only
+	// in internal/land (gt-7k0hz).
+	res = run(context.Background(), "GT_TEST_DOCKER=0 cat marker", landworker.PostLand{BeadID: "gt-a", Commit: commit})
+	if res.Err != nil || res.ExitCode != 0 || !strings.Contains(res.Tail, "landed") {
+		t.Fatalf("declared container-free run: %+v", res)
+	}
+	// One hold per slotted run, under the post-land role, either side of the
+	// container-suite gate; the declaring run takes none.
 	history, err := slot.History(townRoot)
 	if err != nil {
 		t.Fatalf("reading the town's slot history: %v", err)
