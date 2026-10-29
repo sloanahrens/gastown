@@ -343,8 +343,8 @@ func RenderReport(date string, weekly []ReportRow, flags []MovedFlag, footer Foo
 }
 
 // reportWindow is rows[from:to] with negative indices counted from the end,
-// so the digest's headline takes the last four weeks and the four before them, and an empty
-// window where the run has fewer weeks.
+// so the digest's headline takes the last four weeks and the four before them,
+// and an empty window where the run has fewer weeks.
 func reportWindow(rows []ReportRow, from, to int) []ReportRow {
 	n := len(rows)
 	if from < 0 {

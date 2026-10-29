@@ -49,8 +49,8 @@ func LoadResult(env Env, outDir string) (Result, error) {
 	if err := dec.Decode(&footer); err != nil {
 		return Result{}, fmt.Errorf("%s: %w", footerName, err)
 	}
-	// Reading takes one value and refuses a tail, so a second
-	// value here means the file is corrupt rather than a footer with more in it.
+	// The footer is one JSON value with nothing after it, so a second value
+	// here means the file is corrupt rather than a footer with more in it.
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return Result{}, fmt.Errorf("%s: data after the top-level object", footerName)
 	}

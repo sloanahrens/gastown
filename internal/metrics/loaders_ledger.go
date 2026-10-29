@@ -48,9 +48,8 @@ type LedgerRow struct {
 // or that names no bead or no landed_at, is recorded in dropped instead. A line
 // that names no rig is attributed to the source rig.
 //
-// Rigs are visited in sorted order, since a Go map keeps no insertion
-// order; sorting keeps the row order stable from
-// run to run.
+// Rigs are visited in sorted order, since a Go map keeps no insertion order;
+// sorting keeps the row order stable from run to run.
 func LoadLedger(sources map[string][]string, dropped *Dropped) []LedgerRow {
 	rigs := make([]string, 0, len(sources))
 	for rig := range sources {

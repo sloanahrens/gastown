@@ -55,9 +55,8 @@ type RealFiles struct {
 	// ReadFile reads a whole file.
 	ReadFile func(path string) ([]byte, error)
 	// ReadDir lists a directory's entries in name order. A path that holds no
-	// directory lists nothing; a directory
-	// that cannot be listed is an error, because a listing that failed is not
-	// an empty one.
+	// directory lists nothing; a directory that cannot be listed is an error,
+	// because a listing that failed is not an empty one.
 	ReadDir func(dir string) ([]DirEntry, error)
 }
 
@@ -80,8 +79,8 @@ func hostFiles() RealFiles {
 }
 
 // hostDir is the host's directory listing: entries in name order, none for a
-// path that holds no directory, and an error for a
-// directory that cannot be listed.
+// path that holds no directory, and an error for a directory that cannot be
+// listed.
 func hostDir(dir string) ([]DirEntry, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -395,7 +394,7 @@ func listDirNames(files RealFiles, dir string) ([]string, error) {
 }
 
 // readCache decodes one cache file into T. A town with no cache yet reads as an
-// empty one, which is the default, so a first run costs
+// empty one, the zero T, so a first run costs
 // what it costs; a cache file that is there and does not decode is an error,
 // because a corrupt cache read as empty is a first run again on every later
 // run, silently.
@@ -414,8 +413,9 @@ func readCache[T any](files RealFiles, path string) (T, error) {
 	return value, nil
 }
 
-// readJSONTruthy decodes path into T unless the file's value is falsy (see
-// pyTruthy), and the result is not ok.
+// readJSONTruthy decodes path into T and reports true. It reports false, and
+// leaves value zero, when the file cannot be read or decoded or its value is
+// falsy (see pyTruthy).
 func readJSONTruthy[T any](files RealFiles, path string) (T, bool) {
 	var value T
 	data, err := files.ReadFile(path)

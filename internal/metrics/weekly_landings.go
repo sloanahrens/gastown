@@ -56,8 +56,8 @@ type parsedLanding struct {
 }
 
 // parseLanding reads the cells an unreadable landing leaves empty as nil,
-// and refuses a cell that is neither empty nor a number: a
-// silent zero would publish a figure the file did not hold.
+// and refuses a cell that is neither empty nor a number: a silent zero would
+// publish a figure the file did not hold.
 func parseLanding(r Row) (parsedLanding, error) {
 	l := parsedLanding{week: r["week"], rig: r["rig"]}
 	var err error

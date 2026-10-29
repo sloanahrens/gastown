@@ -84,9 +84,8 @@ func ReadCSV(r io.Reader) ([]Row, error) {
 }
 
 // FormatFloat formats v so a CSV cell written as 2.0 is still 2.0: the shortest
-// digits that round-trip, a
-// ".0" on an integer-valued float, and exponent form (1e+16, 1.5e-05) when the
-// decimal exponent is below -4 or at least 16.
+// digits that round-trip, a ".0" on an integer-valued float, and exponent form
+// (1e+16, 1.5e-05) when the decimal exponent is below -4 or at least 16.
 func FormatFloat(v float64) string {
 	switch {
 	case math.IsNaN(v):
