@@ -92,7 +92,46 @@ func init() {
 	rootCmd.AddCommand(installCmd)
 }
 
+// installOptions is what the install command's flags select. runInstall reads
+// it from the flag variables the cobra command binds; a test passes its own,
+// so it writes no process-wide flag state.
+type installOptions struct {
+	force      bool
+	name       string
+	owner      string
+	publicName string
+	noBeads    bool
+	git        bool
+	gitHub     string
+	public     bool
+	shell      bool
+	supervisor bool
+	doltPort   int
+}
+
+// installOptionsFromFlags is the options the command's flags describe.
+func installOptionsFromFlags() installOptions {
+	return installOptions{
+		force:      installForce,
+		name:       installName,
+		owner:      installOwner,
+		publicName: installPublicName,
+		noBeads:    installNoBeads,
+		git:        installGit,
+		gitHub:     installGitHub,
+		public:     installPublic,
+		shell:      installShell,
+		supervisor: installSupervisor,
+		doltPort:   installDoltPort,
+	}
+}
+
 func runInstall(cmd *cobra.Command, args []string) error {
+	return runInstallWith(installOptionsFromFlags(), args)
+}
+
+// runInstallWith is runInstall's body over explicit options.
+func runInstallWith(opts installOptions, args []string) error {
 	// Determine target path
 	targetPath := "."
 	if len(args) > 0 {
@@ -119,18 +158,18 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	// Determine town name
-	townName := installName
+	townName := opts.name
 	if townName == "" {
 		townName = filepath.Base(absPath)
 	}
 
 	// Check if already a workspace
-	if isWS, _ := workspace.IsWorkspace(absPath); isWS && !installForce {
+	if isWS, _ := workspace.IsWorkspace(absPath); isWS && !opts.force {
 		return fmt.Errorf("directory is already a Gas Town HQ (use --force to reinitialize)")
 	}
 
 	// Check if inside an existing workspace (e.g., crew worktree, rig directory)
-	if existingRoot, _ := workspace.Find(absPath); existingRoot != "" && existingRoot != absPath && !installForce {
+	if existingRoot, _ := workspace.Find(absPath); existingRoot != "" && existingRoot != absPath && !opts.force {
 		return fmt.Errorf("cannot create HQ inside existing Gas Town workspace\n"+
 			"  Current location: %s\n"+
 			"  Town root: %s\n\n"+
@@ -141,10 +180,10 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// installEndpointPort is the Dolt port this install writes to
 	// mayor/town.json; 0 when it sets up no Dolt (--no-beads without
 	// --dolt-port), which leaves the town without an endpoint.
-	installEndpointPort := installDoltPort
+	installEndpointPort := opts.doltPort
 
 	// Ensure beads (bd) is available before proceeding
-	if !installNoBeads {
+	if !opts.noBeads {
 		if err := deps.EnsureBeads(); err != nil {
 			return fmt.Errorf("beads dependency check failed: %w", err)
 		}
@@ -165,8 +204,8 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		// mayor/town.json below; nothing reads it from the environment
 		// (gt-y3pgh.3).
 		port := doltserver.DefaultPort
-		if installDoltPort != 0 {
-			port = installDoltPort
+		if opts.doltPort != 0 {
+			port = opts.doltPort
 		} else if ep, ok := config.ResolveDoltEndpoint(absPath); ok {
 			port = ep.Port
 		}
@@ -214,7 +253,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	fmt.Printf("   ✓ Created mayor/\n")
 
 	// Determine owner (defaults to git user.email)
-	owner := installOwner
+	owner := opts.owner
 	if owner == "" {
 		out, err := exec.Command("git", "config", "user.email").Output()
 		if err == nil {
@@ -223,7 +262,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	// Determine public name (defaults to town name)
-	publicName := installPublicName
+	publicName := opts.publicName
 	if publicName == "" {
 		publicName = townName
 	}
@@ -254,6 +293,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		if err := stampTownDoltPort(townPath, installEndpointPort); err != nil {
 			return fmt.Errorf("writing the Dolt endpoint to town.json: %w", err)
 		}
+	}
+	if err := stampTownTrackerPort(townPath, config.DefaultTrackerPort); err != nil {
+		return fmt.Errorf("writing the tracker endpoint to town.json: %w", err)
 	}
 
 	// Create the rig registry (only if it doesn't already exist).
@@ -318,9 +360,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 	// Initialize git BEFORE beads so that bd can compute repository fingerprint.
 	// The fingerprint is required for the daemon to start properly.
-	if installGit || installGitHub != "" {
+	if opts.git || opts.gitHub != "" {
 		fmt.Println()
-		if err := InitGitForHarness(absPath, installGitHub, !installPublic); err != nil {
+		if err := InitGitForHarness(absPath, opts.gitHub, !opts.public); err != nil {
 			return fmt.Errorf("git initialization failed: %w", err)
 		}
 	}
@@ -328,7 +370,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// Initialize town-level beads database (optional)
 	// Town beads (hq- prefix) stores town mail, cross-rig coordination, and handoffs.
 	// Rig beads are separate and have their own prefixes.
-	if !installNoBeads {
+	if !opts.noBeads {
 		port := doltserver.DefaultConfig(absPath).Port
 		externalTestDolt := useExternalTestDoltServer(port)
 
@@ -424,7 +466,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if installShell {
+	if opts.shell {
 		fmt.Println()
 		if err := shell.Install(); err != nil {
 			fmt.Printf("   %s Could not install shell integration: %v\n", style.Dim.Render("⚠"), err)
@@ -439,7 +481,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	// Configure supervisor (launchd/systemd) for daemon auto-restart
-	if installSupervisor {
+	if opts.supervisor {
 		fmt.Println()
 		if msg, err := templates.ProvisionSupervisor(absPath, daemon.ShutdownBudget); err != nil {
 			fmt.Printf("   %s Could not configure supervisor: %v\n", style.Dim.Render("⚠"), err)
@@ -452,7 +494,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Println("Next steps:")
 	step := 1
-	if !installGit && installGitHub == "" {
+	if !opts.git && opts.gitHub == "" {
 		fmt.Printf("  %d. Initialize git: %s\n", step, style.Dim.Render("gt install . --force --git"))
 		step++
 	}
@@ -460,7 +502,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	step++
 	fmt.Printf("  %d. (Optional) Configure agents: %s\n", step, style.Dim.Render("gt config agent list"))
 	fmt.Println()
-	if !installNoBeads {
+	if !opts.noBeads {
 		fmt.Printf("Note: Dolt server is running (stop with %s)\n", style.Dim.Render("gt dolt stop"))
 	}
 
@@ -636,6 +678,44 @@ func stampTownDoltPort(townPath string, port int) error {
 			town.Dolt = &config.DoltEndpoint{}
 		}
 		town.Dolt.Port = port
+		return nil
+	})
+}
+
+// stampTownTrackerPort writes port as the town's tracker endpoint when
+// town.json names none. The tracker has no install flag, so the default is
+// trackerd's listen port and a re-install leaves an operator's value alone.
+func stampTownTrackerPort(townPath string, port int) error {
+	return config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
+		if town.Tracker == nil {
+			town.Tracker = &config.TrackerEndpoint{Port: port}
+		}
+		return nil
+	})
+}
+
+// setTownTrackerPort writes port as the town's tracker endpoint port for
+// gt config set tracker.port. Unlike the install-time stamp it overwrites the
+// port town.json already names — every freshly installed town carries 7433 —
+// and keeps the host.
+func setTownTrackerPort(townPath string, port int) error {
+	return config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
+		if town.Tracker == nil {
+			town.Tracker = &config.TrackerEndpoint{}
+		}
+		town.Tracker.Port = port
+		return nil
+	})
+}
+
+// setTownTrackerHost writes host as the town's tracker endpoint host for
+// gt config set tracker.host, keeping the port town.json already names.
+func setTownTrackerHost(townPath, host string) error {
+	return config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
+		if town.Tracker == nil {
+			town.Tracker = &config.TrackerEndpoint{Port: config.DefaultTrackerPort}
+		}
+		town.Tracker.Host = host
 		return nil
 	})
 }

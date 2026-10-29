@@ -440,3 +440,59 @@ func TestRunInstallEmptyPathArgErrors(t *testing.T) {
 		t.Fatalf(`runInstall("") error = %v, want it to name the empty path`, err)
 	}
 }
+
+// A fresh install writes the tracker endpoint into town.json, and a re-install
+// over a town that names its own port keeps it (gt-p85pw.77).
+func TestRunInstallWritesTheTrackerEndpoint(t *testing.T) {
+	t.Parallel()
+	hqPath := filepath.Join(t.TempDir(), "hq")
+
+	if err := runInstallWith(installOptions{noBeads: true}, []string{hqPath}); err != nil {
+		t.Fatalf("gt install --no-beads: %v", err)
+	}
+	townPath := filepath.Join(hqPath, "mayor", "town.json")
+	town, err := config.LoadTownConfig(townPath)
+	if err != nil {
+		t.Fatalf("load town.json: %v", err)
+	}
+	if town.Tracker == nil || town.Tracker.Port != config.DefaultTrackerPort {
+		t.Fatalf("fresh install town.json tracker = %+v, want port %d", town.Tracker, config.DefaultTrackerPort)
+	}
+
+	if err := config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
+		town.Tracker = &config.TrackerEndpoint{Host: "tracker.internal", Port: 8000}
+		return nil
+	}); err != nil {
+		t.Fatalf("write the operator's tracker endpoint: %v", err)
+	}
+	if err := runInstallWith(installOptions{noBeads: true, force: true}, []string{hqPath}); err != nil {
+		t.Fatalf("gt install --force: %v", err)
+	}
+	town, err = config.LoadTownConfig(townPath)
+	if err != nil {
+		t.Fatalf("load town.json after re-install: %v", err)
+	}
+	want := config.TrackerEndpoint{Host: "tracker.internal", Port: 8000}
+	if town.Tracker == nil || *town.Tracker != want {
+		t.Errorf("re-install town.json tracker = %+v, want %+v", town.Tracker, want)
+	}
+}
+
+// An install that cannot write the tracker endpoint fails rather than
+// reporting an HQ whose endpoint is missing.
+func TestRunInstallFailsWhenItCannotWriteTheTrackerEndpoint(t *testing.T) {
+	t.Parallel()
+	hqPath := filepath.Join(t.TempDir(), "hq")
+	townPath := filepath.Join(hqPath, "mayor", "town.json")
+	if err := os.MkdirAll(filepath.Dir(townPath), 0o755); err != nil {
+		t.Fatalf("create mayor/: %v", err)
+	}
+	if err := os.WriteFile(townPath, []byte(`{"type":`), 0o600); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+
+	err := runInstallWith(installOptions{noBeads: true, force: true}, []string{hqPath})
+	if err == nil || !strings.Contains(err.Error(), "tracker endpoint") {
+		t.Fatalf("runInstall over a torn town.json = %v, want it to name the tracker endpoint", err)
+	}
+}

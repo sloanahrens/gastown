@@ -30,6 +30,10 @@ type TownConfig struct {
 	// gt config set dolt.port write it; gt dolt start writes the server's
 	// config.yaml from it. Resolve it with ResolveDoltEndpoint.
 	Dolt *DoltEndpoint `json:"dolt,omitempty"`
+	// Tracker is the town's tracker (trackerd) endpoint. gt install and
+	// gt config set tracker.port/tracker.host write it; resolve it with
+	// ResolveTrackerEndpoint.
+	Tracker *TrackerEndpoint `json:"tracker,omitempty"`
 	// Registry is the rig registry, mayor/rigs.json's whole document, once
 	// gt config migrate moved it here (layout.go, gt-y3pgh.7). Its presence
 	// marks the two-file layout. Read it with LoadRigsConfig on the
@@ -43,6 +47,13 @@ type TownConfig struct {
 // DoltEndpoint is where the town's Dolt sql-server listens. An empty Host is
 // the local machine.
 type DoltEndpoint struct {
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port"`
+}
+
+// TrackerEndpoint is where the town's tracker (trackerd) listens. An empty
+// Host is the local machine.
+type TrackerEndpoint struct {
 	Host string `json:"host,omitempty"`
 	Port int    `json:"port"`
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -678,6 +679,11 @@ Supported keys:
   dolt.port                   Dolt SQL server port (gt install writes 3307). Set
                               this when another Gas Town instance is using the
                               same port. Writes "dolt" in mayor/town.json.
+  tracker.port                Tracker (trackerd) port (gt install writes 7433).
+                              Writes "tracker" in mayor/town.json.
+  tracker.host                Host running trackerd, when it is not this machine
+                              (default: 127.0.0.1). Writes "tracker" in
+                              mayor/town.json.
   scheduler.max_polecats      Dispatch mode: -1 = direct (default), N > 0 = deferred
   scheduler.batch_size        Beads per heartbeat (default: 1)
   scheduler.spawn_delay       Delay between spawns (default: 0s)
@@ -714,6 +720,7 @@ Examples:
   gt config set cli_theme dark
   gt config set default_agent claude
   gt config set dolt.port 3308
+  gt config set tracker.port 7434
   gt config set scheduler.max_polecats 5
   gt config set maintenance.window 03:00
   gt config set lifecycle.reaper.delete_age 336h
@@ -869,6 +876,29 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	return configSet(cwdConfigCmdEnv(), args)
 }
 
+// validTrackerHost reports whether host is a host name or IP literal the
+// tracker endpoint URL can carry. The resolver composes http://<host>:<port>
+// from it, so a value that would end the URL's authority early — a user, a
+// path, a query, a fragment, whitespace — is refused. An IPv6 literal goes in
+// bare ("::1"); the resolver brackets it when it builds the URL.
+func validTrackerHost(host string) bool {
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if host == "" {
+		return false
+	}
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func configSet(e configCmdEnv, args []string) error {
 	key := args[0]
 	value := args[1]
@@ -978,13 +1008,36 @@ func configSet(e configCmdEnv, args []string) error {
 		fmt.Fprintf(e.out, "  %s\n", style.Dim.Render("Restart Dolt and the daemon for the change to take effect: gt dolt restart && gt daemon restart"))
 		return nil
 
+	case "tracker.port":
+		port, err := strconv.Atoi(value)
+		if err != nil || port < 1024 || port > 65535 {
+			return fmt.Errorf("invalid value for %s: expected port number 1024-65535", key)
+		}
+		if err := setTownTrackerPort(filepath.Join(townRoot, workspace.PrimaryMarker), port); err != nil {
+			return fmt.Errorf("saving town.json: %w", err)
+		}
+		fmt.Fprintf(e.out, "Set tracker.port = %s in mayor/town.json\n", style.Bold.Render(value))
+		fmt.Fprintf(e.out, "  %s\n", style.Dim.Render("Restart trackerd for the change to take effect"))
+		return nil
+
+	case "tracker.host":
+		host := strings.TrimSpace(value)
+		if !validTrackerHost(host) {
+			return fmt.Errorf("invalid value for %s: expected a host name or IP address", key)
+		}
+		if err := setTownTrackerHost(filepath.Join(townRoot, workspace.PrimaryMarker), host); err != nil {
+			return fmt.Errorf("saving town.json: %w", err)
+		}
+		fmt.Fprintf(e.out, "Set tracker.host = %s in mayor/town.json\n", style.Bold.Render(host))
+		return nil
+
 	default:
 		if strings.HasPrefix(key, "lifecycle.") {
 			return setLifecycleConfig(townRoot, key, value)
 		}
 		err := setPolecatPoolValue(townSettings, key, value)
 		if errors.Is(err, errNotAPolecatPoolKey) {
-			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
+			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  tracker.port\n  tracker.host\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
 		}
 		if err != nil {
 			return err
@@ -1073,13 +1126,25 @@ func configGet(e configCmdEnv, args []string) error {
 		fmt.Fprintln(e.out, ep.Port)
 		return nil
 
+	case "tracker.port", "tracker.host":
+		ep, err := config.ResolveTrackerEndpoint(townRoot)
+		if err != nil {
+			return err
+		}
+		if key == "tracker.port" {
+			fmt.Fprintln(e.out, ep.Port)
+			return nil
+		}
+		fmt.Fprintln(e.out, ep.HostOrLocal())
+		return nil
+
 	default:
 		if strings.HasPrefix(key, "lifecycle.") {
 			return getLifecycleConfig(e.out, townRoot, key)
 		}
 		poolValue, handled := polecatPoolValue(townSettings.PolecatPool, key)
 		if !handled {
-			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
+			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  tracker.port\n  tracker.host\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
 		}
 		value = poolValue
 	}
