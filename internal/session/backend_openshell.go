@@ -255,11 +255,26 @@ type resolvedImage struct {
 // repo:tag.
 type manifestDigester func(ctx context.Context, host, repo, tag string) (string, error)
 
+// registryHTTPTimeout bounds one registry request the spawn makes: a registry
+// that stops answering ends the spawn with an error instead of holding it.
+const registryHTTPTimeout = 30 * time.Second
+
+// registryHTTPClient is client, or when none is given a client with an explicit
+// timeout (the registry client's own default carries none).
+func registryHTTPClient(client *http.Client) *http.Client {
+	if client != nil {
+		return client
+	}
+	return &http.Client{Timeout: registryHTTPTimeout}
+}
+
 // registryDigester is the manifestDigester for the registry client, at the host
 // the profile's reference names. The digest is the sha256 of the manifest bytes
-// the registry answered, so the create names what was read. A nil client is the
-// registry client's default; tests inject one whose transport is a fake.
+// the registry answered, so the create names what was read. A nil client is
+// registryHTTPClient's bounded default; tests inject one whose transport is a
+// fake.
 func registryDigester(client *http.Client) manifestDigester {
+	client = registryHTTPClient(client)
 	return func(ctx context.Context, host, repo, tag string) (string, error) {
 		c := &registry.Client{Base: registryBase(host), HTTP: client}
 		return c.ManifestDigest(ctx, repo, tag)
@@ -701,9 +716,13 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	// and the create, so a drifted image leaves nothing behind (gt-pmxo9). This
 	// reads the host docker's image for that reference, which for a pulling
 	// gateway is not the artifact the create names (the registry digest, gt-jbuow).
-	// The sandbox's own gt is checked again once it is Ready, because the gateway
-	// pulls and runs its own image for that reference (gt-zdilt): that check reads
-	// the pulled artifact and rolls the sandbox back on a drift.
+	// For a pulling gateway the authority is the second check, once the sandbox
+	// is Ready, because the gateway pulls and runs its own image (gt-zdilt): it
+	// reads the pulled artifact and rolls the sandbox back on a drift, at the cost
+	// of one sandbox created and deleted. The two images differ only when the
+	// registry's tag moved after the host built it, the window the polecat-image
+	// sling deferral covers while a publish is in flight; an accepted risk of the
+	// overseer (gt-jbuow, 2026-10-29), not an unchecked one.
 	imageCommit, err := b.imageGT(ctx, image.Local)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)

@@ -2122,3 +2122,17 @@ func TestCheckImageGTClassifiesDrift(t *testing.T) {
 		t.Errorf("a matching commit = %v, want nil", err)
 	}
 }
+
+// The registry client the spawn builds when none is injected carries an explicit
+// timeout, so a registry that stops answering ends the spawn with an error, and
+// an injected client is used as given (gt-jbuow).
+func TestRegistryHTTPClientIsBoundedWhenNoneIsGiven(t *testing.T) {
+	t.Parallel()
+	if got := registryHTTPClient(nil).Timeout; got != registryHTTPTimeout || got <= 0 {
+		t.Errorf("the default registry client has timeout %v, want %v", got, registryHTTPTimeout)
+	}
+	injected := &http.Client{}
+	if registryHTTPClient(injected) != injected {
+		t.Error("an injected registry client was replaced")
+	}
+}
