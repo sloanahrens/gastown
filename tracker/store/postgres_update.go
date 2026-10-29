@@ -129,13 +129,15 @@ func updateInTx(ctx context.Context, tx pgx.Tx, id string, patch api.UpdatePatch
 		sets = append(sets, "priority = "+arg(*patch.Priority))
 		events = append(events, ev{op: "updated", old: str(strconv.Itoa(cur.priority)), new: str(strconv.Itoa(*patch.Priority)), comment: str("priority")})
 	}
+	// The whole-text fields carry their new value, so an events feed can replay
+	// them onto a Dolt rig that flipped back (gt tracker replay).
 	if patch.Description != nil && *patch.Description != cur.description {
 		sets = append(sets, "description = "+arg(*patch.Description))
-		events = append(events, ev{op: "updated", comment: str("description")})
+		events = append(events, ev{op: "updated", old: str(cur.description), new: patch.Description, comment: str("description")})
 	}
 	if patch.Acceptance != nil && *patch.Acceptance != cur.acceptance {
 		sets = append(sets, "acceptance_criteria = "+arg(*patch.Acceptance))
-		events = append(events, ev{op: "updated", comment: str("acceptance_criteria")})
+		events = append(events, ev{op: "updated", old: str(cur.acceptance), new: patch.Acceptance, comment: str("acceptance_criteria")})
 	}
 	if patch.Assignee != nil && *patch.Assignee != cur.assignee {
 		sets = append(sets, "assignee = "+arg(*patch.Assignee))
@@ -143,7 +145,9 @@ func updateInTx(ctx context.Context, tx pgx.Tx, id string, patch api.UpdatePatch
 	}
 	if patch.AppendNotes != "" {
 		sets = append(sets, "notes = "+arg(appendNote(cur.notes, patch.AppendNotes)))
-		events = append(events, ev{op: "updated", comment: str("notes")})
+		// The event carries the appended line, not the whole field: replaying
+		// it appends the same line (bd update --append-notes).
+		events = append(events, ev{op: "updated", new: str(patch.AppendNotes), comment: str("notes")})
 	}
 	if patch.DeferUntil != nil {
 		if patch.DeferUntil.IsZero() {

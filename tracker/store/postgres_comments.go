@@ -43,7 +43,9 @@ func addCommentInTx(ctx context.Context, tx pgx.Tx, id, author, text string) err
 	if _, err := tx.Exec(ctx, "UPDATE tracker.issues SET updated_at = now() WHERE id = $1", id); err != nil {
 		return fmt.Errorf("store: touch %s: %w", id, err)
 	}
-	return appendEvent(ctx, tx, "commented", id, author, nil, nil, nil)
+	// The comment text rides the event: without it an events feed cannot
+	// replay the comment onto a Dolt rig that flipped back (gt tracker replay).
+	return appendEvent(ctx, tx, "commented", id, author, nil, &text, nil)
 }
 
 // Comments returns an issue's comments, oldest first.
