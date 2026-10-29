@@ -25,8 +25,8 @@ const HumanOnlyLabel = "human-only"
 // overseer vets or releases a bead wearing OverseerOnlyLabel before any
 // dispatcher reads it; OperatorOnlyLabel marks a bead only the operator can
 // resolve; NeedsOverseerLabel and NeedsOperatorLabel are the escalation
-// spellings that take the place of gt:needs-human. The readers hold these now,
-// beside the old names; the writers move to them in a later step.
+// spellings beside gt:needs-human. The readers hold all of them beside the
+// old names, and the writers still set the old names.
 const (
 	OverseerOnlyLabel  = "overseer-only"
 	OperatorOnlyLabel  = "operator-only"
@@ -55,7 +55,7 @@ const (
 // Both are matched case-insensitively, since a label is typed by hand.
 var (
 	routingHoldLabels = []string{"needs-pro"}
-	humanHoldLabels   = []string{"gt:needs-human", "needs-human", "needs-split", HumanOnlyLabel, NeedsOverseerLabel, NeedsOperatorLabel, OverseerOnlyLabel, OperatorOnlyLabel, "needs-overseer", "needs-operator"}
+	humanHoldLabels   = []string{"gt:needs-human", "needs-human", "needs-overseer", "needs-operator", "needs-split", HumanOnlyLabel, NeedsOverseerLabel, NeedsOperatorLabel, OverseerOnlyLabel, OperatorOnlyLabel}
 	// dispatchHoldLabels is the two lists in the order the rule reports them.
 	// The operator reservation (OperatorReservation) is the third decision a
 	// label records, and the one that also reaches through the assignee; it is
