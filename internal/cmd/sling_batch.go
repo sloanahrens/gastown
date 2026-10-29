@@ -149,10 +149,12 @@ func runBatchSlingWith(opts slingOptions, beadIDs []string, rigName string, town
 
 // run is runBatchSling with this batch sling's options and collaborators.
 func (b batchSling) run(beadIDs []string, rigName string, townBeadsDir string) error {
-	// Validate all beads exist before spawning any polecats
+	// Validate all beads exist before spawning any polecats. The cause is kept:
+	// a bd that failed for another reason (Dolt down, a timeout) must not read
+	// as a plain "not found" (gt-u4x82).
 	for _, beadID := range beadIDs {
 		if err := b.verifyBead(beadID); err != nil {
-			return fmt.Errorf("bead '%s' not found", beadID)
+			return fmt.Errorf("bead '%s' not found: %w", beadID, err)
 		}
 	}
 	townRoot := filepath.Dir(townBeadsDir)
@@ -292,10 +294,13 @@ func (b batchSling) run(beadIDs []string, rigName string, townBeadsDir string) e
 
 	// Print summary
 	successCount := 0
+	failedIDs := make([]string, 0, len(beadIDs))
 	for _, r := range results {
 		if r.success {
 			successCount++
+			continue
 		}
+		failedIDs = append(failedIDs, r.beadID)
 	}
 
 	fmt.Fprintf(b.out, "\n%s Batch sling complete: %d/%d succeeded\n", style.Bold.Render("📊"), successCount, len(beadIDs))
@@ -306,8 +311,16 @@ func (b batchSling) run(beadIDs []string, rigName string, townBeadsDir string) e
 			}
 		}
 	}
-	if successCount == 0 && len(beadIDs) > 0 {
-		return fmt.Errorf("batch sling failed: 0/%d succeeded", len(beadIDs))
+	// Any refused bead fails the batch. The spawned polecats stay, but the
+	// exit status must not tell a caller reading $? that every bead was slung
+	// (gt-u4x82).
+	if successCount < len(beadIDs) {
+		if successCount == 0 {
+			return fmt.Errorf("batch sling failed: 0/%d succeeded (failed: %s)",
+				len(beadIDs), strings.Join(failedIDs, ", "))
+		}
+		return fmt.Errorf("batch sling: %d/%d succeeded (failed: %s)",
+			successCount, len(beadIDs), strings.Join(failedIDs, ", "))
 	}
 
 	return nil
