@@ -628,10 +628,10 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplic
 
 // specPeerHeldBySeat asks the tick's pre-dispatch overlap hold of a peer: why
 // a working seat already has the peer's defect, "" when none does. The held set
-// is reduced from the guard's own pool with the same filters the tick's held
-// read applies (heldBeadsFrom), so the question costs no bd read, and the
-// peer's own text is reduced the way specHeldHold reduces a candidate's, so the
-// two sides cannot disagree about what counts as one defect.
+// is reduced from the guard's own pool by heldBeadFrom, the tick's own rule for
+// which beads hold, so the question costs no bd read, and the peer's own text
+// is reduced the way specHeldHold reduces a candidate's, so the two sides
+// cannot disagree about what counts as one defect.
 //
 // Without this question the peer-hold answer lapses the moment a rest ends: the
 // peer stops resting, the guard reads it as next, and it refuses the whole

@@ -84,7 +84,13 @@ decides and reports without slinging, labeling or commenting.
      Under either gate the tick spawns no planner (gt-4rizh), so a held bead
      waits for the operator.
 5. A spec that clears the shape gate takes the first free seat and is slung
-   through the shared rig-dispatch path in-process, with no auto-convoy.
+   through the shared rig-dispatch path in-process, with no auto-convoy. A
+   candidate naming a path or a test that a polecat seat's in-flight bead names
+   too is that defect filed twice, and it is skipped as `held: <bead> ... is
+   already hooked to a working seat`; a P0 or P1 candidate takes the seat anyway
+   and the skip is reported as a bypass (gt-iydx1). Only a polecat's bead holds:
+   a crew or operator session's bead, and a handoff bead whose notes name every
+   file the run read, are not work on the candidate's files (gt-asvow).
 6. A bead that takes a seat and matches the overrun-stop box is slung anyway
    and wears one comment saying so (see below).
 
