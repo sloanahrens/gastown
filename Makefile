@@ -327,13 +327,16 @@ check-install-path:
 # kickstarts the daemon. Exit codes 0 installed or already current, 1 failed
 # (rolled back), 2 refused, 3 busy (retry later).
 install: gt-installer
-	@$(BUILD_DIR)/gt-installer $(if $(SHA),--sha $(SHA))
+	@./gt-installer $(if $(SHA),--sha $(SHA))
 
 # gt-installer: the Go installer `make install` builds and runs (gt-tpg0p.14).
-# Phony, so a binary left by an earlier checkout is never what installs; the
-# daemon's rebuild_gt job builds it with this same target and runs it.
+# The binary is always ./gt-installer, the path the daemon's rebuild_gt job
+# runs, so BUILD_DIR does not move it. Phony, so a binary left by an earlier
+# checkout is never what installs. CGO_ENABLED=0: the installer links no cgo
+# package. -buildvcs=false: nothing reads the VCS stamp, so the build needs no
+# git metadata.
 gt-installer:
-	go build -o $(BUILD_DIR)/gt-installer ./cmd/gt-installer
+	CGO_ENABLED=0 go build -buildvcs=false -o ./gt-installer ./cmd/gt-installer
 
 # install-local: build THIS checkout and swap it into $(INSTALL_DIR). No daemon
 # restart, no plugin sync, no lock. For a machine with no town yet (README,

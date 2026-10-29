@@ -27,6 +27,11 @@ internal/reaper/**
 internal/estop/**
 cmd/gt-installer/**
 internal/installer/**
+internal/installlock/**
+internal/installpending/**
+internal/imagebuild/**
+cmd/install-lock/**
+cmd/image-supervisor/**
 scripts/lib/install-gt-lib.sh
 scripts/install-binary.sh
 scripts/uninstall-gt.sh

@@ -1,6 +1,6 @@
-// Package installer is the town's install path in Go (gt-tpg0p, decision Q3),
-// the shell script gt-tpg0p.14 deleted. `make install` builds and runs
-// cmd/gt-installer, and the daemon's rebuild_gt job runs the same program.
+// Package installer is the town's install path in Go (gt-tpg0p).
+// `make install` builds and runs cmd/gt-installer, and the daemon's rebuild_gt
+// job runs the same program.
 //
 // A run names one result in its last line (Result) and ends with one of the
 // four statuses its callers map (Exit). A run that ends without naming a result

@@ -38,9 +38,8 @@ const ExitStart = 127
 // flags it refuses, since the directory arrives as a flag.
 const ExitRefused = 2
 
-// ownedPrefix is the name the retired install-gt.sh gave the temp directory it
-// made for this binary: mktemp -d "$TMPDIR/install-gt-image.XXXXXX". Nothing
-// makes that directory now, but --owned still refuses a path not named so.
+// ownedPrefix is the name every --owned directory must carry. removeAll takes
+// that directory, so a path not named this way is refused rather than removed.
 const ownedPrefix = "install-gt-image."
 
 const (
