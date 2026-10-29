@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dolt
+  namespace: openshell
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: dolt
+spec:
+  serviceName: dolt
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dolt
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: dolt
+    spec:
+      containers:
+        - name: dolt
+          image: dolthub/dolt-sql-server:2.3.2
+          ports:
+            - name: mysql
+              containerPort: 3306
+          env:
+            - name: DOLT_ROOT_HOST
+              value: '%'
+            - name: DOLT_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dolt-root
+                  key: root-password
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/dolt
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dolt
