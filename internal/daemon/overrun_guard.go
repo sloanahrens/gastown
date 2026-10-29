@@ -76,6 +76,12 @@ const overrunNudgeMessage = "This bead has run longer than expected. Write a spl
 type overrunSeat struct {
 	Rig, Polecat, Bead, Branch string
 	Submitted, Parked          bool
+	// SubmittedAt is the time on the bead's READY TO LAND block, zero when it
+	// carries none. The submission ended the run it was made in, so a rework
+	// re-slung after a landing rejection is dated from that re-sling, not from
+	// the first dispatch (gt-chd44). It comes from the bead read the seat
+	// already costs, so the guard reads no bead twice for one clock.
+	SubmittedAt time.Time
 	// Scheduled is set when the bead carries a scheduled: label, the mark of a
 	// run the daemon's scheduled_slings patrol created. Those run long by
 	// design (the deep-review is report-only), so the guard never nudges them
@@ -103,8 +109,10 @@ type overrunSeams struct {
 	now func() time.Time
 	// workingSeats lists the seats that are alive and hold a bead.
 	workingSeats func() ([]overrunSeat, error)
-	// slungAt dates the bead's dispatch, false when it is unknown.
-	slungAt func(bead, rig, polecat string) (time.Time, bool)
+	// slungAt dates the seat's bead dispatch, false when it is unknown. It takes
+	// the seat because the bead's last submission is read with it (the seat's
+	// bead read), so the clock and the run end it started after are one read.
+	slungAt func(seat overrunSeat) (time.Time, bool)
 	// nudge delivers msg to the seat's session.
 	nudge func(seat overrunSeat, msg string) error
 	// nudged is told each nudge that was delivered, and when, so the progress
@@ -378,7 +386,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			continue
 		}
 		who := seat.Rig + "/" + seat.Polecat
-		slung, ok := s.slungAt(seat.Bead, seat.Rig, seat.Polecat)
+		slung, ok := s.slungAt(seat)
 		if !ok {
 			continue
 		}
@@ -612,13 +620,23 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 	if bead == "" {
 		return seat, false
 	}
-	closed, submitted, _, labels := d.beadFinishedLabels(bead)
-	if closed {
+	// One read answers the seat's whole bead: whether its work is over, its
+	// labels, and the end of the run a submission made. A bead that cannot be
+	// read is not judged: the submission it may hold is the run end the clock
+	// has to start after, so acting on the log alone could date a rework from
+	// the dispatch its submission ended (gt-chd44).
+	st, err := d.workBeadState(bead)
+	if err != nil {
+		d.logger.Printf("overrun_guard: %s/%s: cannot read bead %s, not judging it this tick: %v", rigName, name, bead, err)
+		return seat, false
+	}
+	if st.closed {
 		return seat, false
 	}
 	seat.Bead = bead
-	seat.Submitted = submitted
-	seat.Scheduled = hasScheduledSlingLabel(labels)
+	seat.Submitted = st.submitted
+	seat.SubmittedAt = st.submittedAt
+	seat.Scheduled = hasScheduledSlingLabel(st.labels)
 
 	if workDir := resolvePolecatWorktree(polecatsDir, name, rigName); workDir != "" {
 		if branch, err := d.gitAt(workDir).CurrentBranch(); err == nil {
@@ -655,32 +673,34 @@ func hasScheduledSlingLabel(labels []string) bool {
 type overrunSlungReader struct {
 	d      *Daemon
 	loaded bool
-	evs    []events.Event
+	clock  *events.DispatchClock
 }
 
-// slungAt is the time the bead was dispatched, false when it is unknown. The
-// clock belongs to the bead, not to the seat holding it: it is the earliest
+// slungAt is the time the seat's bead was dispatched, false when it is unknown.
+// The clock belongs to the bead, not to the seat holding it: it is the earliest
 // sling event for the bead that its last run-end event does not end
 // (events.DispatchStart), so a bead handed from one seat to another keeps the
 // dispatch it first went out on, and a bead whose work was finished, closed or
-// whose seat the guard stopped starts over. With no such event it falls back to the
-// seat's agent bead update time, which can only read short, so the fallback
-// errs toward not stopping anyone.
-func (r *overrunSlungReader) slungAt(bead, rig, polecatName string) (time.Time, bool) {
+// whose seat the guard stopped starts over. The seat's SubmittedAt ends a run
+// too, for a submission whose done event the log never got (gt-chd44). With no
+// sling in the log at all it falls back to the seat's agent bead update time,
+// which can only read short, so the fallback errs toward not stopping anyone.
+func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
 	if !r.loaded {
 		r.loaded = true
+		r.clock = events.NewDispatchClock()
 		evs, err := events.Read(r.d.config.TownRoot)
 		if err != nil {
 			r.d.logger.Printf("overrun_guard: reading events: %v", err)
 		}
-		r.evs = evs
+		r.clock.Add(evs)
 	}
-	if start, ok := events.DispatchStart(r.evs, bead); ok {
+	if start, ok := r.clock.StartSince(seat.Bead, seat.SubmittedAt); ok {
 		return start, true
 	}
 
-	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(r.d.config.TownRoot, rig), rig, polecatName)
-	issue, err := r.d.workBeads(r.d.workBeadsEnv(rig), workBeadReadTimeout).Show(id)
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(r.d.config.TownRoot, seat.Rig), seat.Rig, seat.Polecat)
+	issue, err := r.d.workBeads(r.d.workBeadsEnv(seat.Rig), workBeadReadTimeout).Show(id)
 	if err != nil {
 		return time.Time{}, false
 	}

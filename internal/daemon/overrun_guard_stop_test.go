@@ -278,7 +278,7 @@ func TestEndRunSeamDatesTheDispatchAfterTheStopAfresh(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, ok := (&overrunSlungReader{d: d}).slungAt(stopSeat.Bead, stopSeat.Rig, stopSeat.Polecat)
+	got, ok := (&overrunSlungReader{d: d}).slungAt(stopSeat)
 	if !ok || !got.Equal(resling) {
 		t.Errorf("slungAt = %v (%t), want the dispatch after the stop, %v", got, ok, resling)
 	}

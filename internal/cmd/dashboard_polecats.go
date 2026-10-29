@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -393,6 +394,26 @@ func (c *dashSeatCache) put(id, key string, item polecatInventoryItem) {
 	c.m[id] = dashSeatCached{key: key, at: c.now(), item: item}
 }
 
+// dashHookTime is when the seat's held bead went out: the clock the panel's Age
+// and the overrun guard share. It is the bead's dispatch (gt-tzbtf), dated with
+// the submission the bead's last READY TO LAND block records when that
+// submission ended the run the dispatch began: a rework slung after a landing
+// rejection is dated from its re-sling, not from the dispatch it was submitted
+// on, and shows the same age the guard judges it by (gt-chd44). A bead the
+// event log does not date falls back to agentUpdated, the seat's agent bead.
+// The clock is the one dispatches.Starts read for this poll, so an unreadable
+// log has already failed the poll.
+func dashHookTime(agentUpdated time.Time, bead *beads.Issue, dispatched map[string]time.Time, dispatches *events.DispatchReader) time.Time {
+	at, ok := dispatched[bead.ID]
+	if sub := land.ReadyBlockTime(bead.Notes); !sub.IsZero() {
+		at, ok = dispatches.StartSince(bead.ID, sub)
+	}
+	if ok {
+		return at
+	}
+	return agentUpdated
+}
+
 // dashSeats classifies every polecat the town has with the same inventory and
 // environment gt polecat list uses, so the dashboard and the CLI agree on what
 // a polecat is doing. (The capacity accounting's counts-only environment
@@ -462,10 +483,7 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 			updatedAt := polecat.AgentBeadUpdatedAt(agentBead)
 			var hookedAt time.Time
 			if activeID != "" {
-				hookedAt = updatedAt
-				if at, ok := dispatched[activeID]; ok {
-					hookedAt = at
-				}
+				hookedAt = dashHookTime(updatedAt, active[name], dispatched, dispatches)
 			}
 			key := dashSeatKey(updatedAt, now, spawnWindow, activeID, running)
 			id := rig + "/" + name

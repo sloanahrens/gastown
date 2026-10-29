@@ -1,6 +1,9 @@
 package events
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // DispatchStart returns when bead's current run was dispatched: the earliest
 // sling event for the bead at or after its last run-end event. The clock
@@ -34,20 +37,23 @@ func DispatchStarts(evs []Event) map[string]time.Time {
 // read instead of re-reading the whole file (the dashboard's summary poll,
 // gt-tzbtf).
 type DispatchClock struct {
-	// ends is each bead's latest run-end event, starts the dispatch its current
-	// run began with (the earliest sling at or after ends, when there is one).
+	// ends is each bead's latest run end. starts holds the slings since it, in
+	// time order: the earliest is the clock, and a later one is what a run end
+	// recorded outside the log (StartSince) exposes once it drops the earlier
+	// dispatches. A list holds the dispatches the log still carries for a bead
+	// whose runs are not ended, which is a handful for any bead the log keeps.
 	ends   map[string]time.Time
-	starts map[string]time.Time
+	starts map[string][]time.Time
 }
 
 // NewDispatchClock returns an empty clock.
 func NewDispatchClock() *DispatchClock {
-	return &DispatchClock{ends: map[string]time.Time{}, starts: map[string]time.Time{}}
+	return &DispatchClock{ends: map[string]time.Time{}, starts: map[string][]time.Time{}}
 }
 
 // Add folds evs into the clock, in log order. Adding the same events again
-// changes nothing: an end is only a boundary, and a dispatch only wins when it
-// is earlier than the one held.
+// changes nothing: a sling already filed is not filed twice, and an end is
+// only a boundary.
 func (c *DispatchClock) Add(evs []Event) {
 	for _, ev := range evs {
 		bead := payloadBead(ev)
@@ -60,44 +66,96 @@ func (c *DispatchClock) Add(evs []Event) {
 			if err != nil {
 				continue
 			}
-			// A dispatch before the run's end belongs to the run that ended.
-			if end, ok := c.ends[bead]; ok && ts.Before(end) {
-				continue
-			}
-			if cur, ok := c.starts[bead]; !ok || ts.Before(cur) {
-				c.starts[bead] = ts
-			}
+			c.addStart(bead, ts)
 		case TypeDone, TypeBeadClosed, TypeOverrunStop:
 			at, err := runEndTime(ev)
-			if err != nil || !at.After(c.ends[bead]) {
+			if err != nil {
 				continue
 			}
-			c.ends[bead] = at
-			// The boundary is inclusive on the dispatch side: a sling dated
-			// exactly at the run end is the new run's dispatch, not the old
-			// one's, because sling and end are written in whole seconds and an
-			// end written in the same second must not leave the bead without a
-			// clock. So only a dispatch strictly before the end is dropped.
-			if start, ok := c.starts[bead]; ok && start.Before(at) {
-				delete(c.starts, bead)
-			}
+			c.EndRun(bead, at)
 		}
 	}
+}
+
+// addStart files ts among bead's dispatches since its last run end. A sling
+// before the end belongs to the run that ended and is not filed at all.
+func (c *DispatchClock) addStart(bead string, ts time.Time) {
+	if end, ok := c.ends[bead]; ok && ts.Before(end) {
+		return
+	}
+	s := c.starts[bead]
+	i := sort.Search(len(s), func(i int) bool { return !s[i].Before(ts) })
+	if i < len(s) && s[i].Equal(ts) {
+		return // the same event folded in twice
+	}
+	s = append(s, time.Time{})
+	copy(s[i+1:], s[i:])
+	s[i] = ts
+	c.starts[bead] = s
+}
+
+// EndRun records that bead's run ended at at, even when the log holds no event
+// for it: a submission for landing is written on the bead's notes, and its done
+// event can be lost (gt-chd44). A dispatch strictly before the end belongs to
+// the run it ended; one dated exactly at it is the new run's, so a bead is never
+// left without a clock, and sling and end are written in whole seconds. An end
+// not after the one held changes nothing, so replaying a log or re-reading a
+// bead cannot move a boundary backwards.
+func (c *DispatchClock) EndRun(bead string, at time.Time) {
+	if at.IsZero() || !at.After(c.ends[bead]) {
+		return
+	}
+	c.ends[bead] = at
+	s := c.starts[bead]
+	if i := sort.Search(len(s), func(i int) bool { return !s[i].Before(at) }); i > 0 {
+		s = s[i:]
+	}
+	if len(s) == 0 {
+		delete(c.starts, bead)
+		return
+	}
+	c.starts[bead] = s
+}
+
+// StartSince returns when bead's current run was dispatched, with end taken as
+// a run end the log does not hold (EndRun), so a rework that follows a landing
+// rejection is dated from its re-sling rather than the dispatch the submitted
+// run began with (gt-chd44). A bead whose only sling is before end is dated from
+// end until the re-sling it waits for is logged; one the log never dispatched
+// has no clock from this call, whatever the end.
+func (c *DispatchClock) StartSince(bead string, end time.Time) (time.Time, bool) {
+	start, ok := c.Start(bead)
+	if end.IsZero() || (ok && !start.Before(end)) {
+		return start, ok
+	}
+	if !ok {
+		return time.Time{}, false
+	}
+	c.EndRun(bead, end)
+	if rework, found := c.Start(bead); found {
+		return rework, true
+	}
+	return end, true
 }
 
 // Start returns when bead's current run was dispatched, false when no sling
 // since its last run end names it.
 func (c *DispatchClock) Start(bead string) (time.Time, bool) {
-	t, ok := c.starts[bead]
-	return t, ok
+	s := c.starts[bead]
+	if len(s) == 0 {
+		return time.Time{}, false
+	}
+	return s[0], true
 }
 
 // Starts returns a copy of every bead's dispatch, so a caller cannot change the
 // clock through the map it is handed.
 func (c *DispatchClock) Starts() map[string]time.Time {
 	out := make(map[string]time.Time, len(c.starts))
-	for bead, at := range c.starts {
-		out[bead] = at
+	for bead, s := range c.starts {
+		if len(s) > 0 {
+			out[bead] = s[0]
+		}
 	}
 	return out
 }

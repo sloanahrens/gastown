@@ -13,9 +13,51 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/supervisor"
 )
+
+// workBeadStore is the work-bead store a seat read goes to, by bead id. A bead
+// it does not hold is an open bead with no labels and no notes.
+type workBeadStore map[string]*beads.Issue
+
+func (b workBeadStore) open([]string, time.Duration) workBeadReader { return b }
+
+func (b workBeadStore) Show(id string) (*beads.Issue, error) {
+	if issue, ok := b[id]; ok {
+		return issue, nil
+	}
+	return &beads.Issue{ID: id}, nil
+}
+
+func (b workBeadStore) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
+
+// unreadableBeads is a work-bead store that cannot be read.
+type unreadableBeads struct{}
+
+func (unreadableBeads) open([]string, time.Duration) workBeadReader { return unreadableBeads{} }
+
+func (unreadableBeads) Show(string) (*beads.Issue, error) {
+	return nil, errors.New("bd show: store unavailable")
+}
+
+func (unreadableBeads) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
+
+// readyNote is the READY TO LAND block gt done writes when it submits a bead
+// for landing at submitted.
+func readyNote(submitted string) string {
+	return "READY TO LAND\n" +
+		"Branch: polecat/capable/gt-aaa11+abc123\n" +
+		"Head: b4336e1b89ea1d7fca33a726377c463282601686\n" +
+		"Target: main\n" +
+		"Worker: capable\n" +
+		"Submitted: " + submitted + "\n"
+}
 
 func TestOverrunGuardEnabled(t *testing.T) {
 	t.Parallel()
@@ -164,8 +206,8 @@ func (f *overrunFake) baseSeams() overrunSeams {
 	return overrunSeams{
 		now:          func() time.Time { return f.now },
 		workingSeats: func() ([]overrunSeat, error) { return f.seats, nil },
-		slungAt: func(bead, rig, polecat string) (time.Time, bool) {
-			t, ok := f.slung[bead]
+		slungAt: func(seat overrunSeat) (time.Time, bool) {
+			t, ok := f.slung[seat.Bead]
 			return t, ok
 		},
 		nudge: func(seat overrunSeat, msg string) error {
@@ -653,11 +695,15 @@ func TestRunOverrunGuard_JudgesTheBeadsDispatchClock(t *testing.T) {
 		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":%q,"target":%q}}`, ts, typ, bead, target)
 	}
 	for _, tt := range []struct {
-		name   string
-		events []string
-		now    time.Time
-		nudges []string
-		stops  []string
+		name string
+		// submittedAt is what the bead's last READY TO LAND block says: the end
+		// of the run that submission was made in. The seat read hands it over
+		// with the bead, so the tick reads no store (overrunSeatFor).
+		submittedAt time.Time
+		events      []string
+		now         time.Time
+		nudges      []string
+		stops       []string
 	}{
 		{
 			// The bead was slung to capable at 12:00 and re-slung to rictus at
@@ -694,6 +740,31 @@ func TestRunOverrunGuard_JudgesTheBeadsDispatchClock(t *testing.T) {
 			},
 			now: time.Date(2026, 10, 13, 12, 53, 0, 0, time.UTC),
 		},
+		{
+			// The bead was submitted at 12:05 and rejected; the rework went out at
+			// 12:50 and is three minutes old at 12:53. The first dispatch at 12:00
+			// is not the clock: the guard acts on nothing.
+			name:        "a re-sling after a rejected submission starts over",
+			submittedAt: time.Date(2026, 10, 13, 12, 5, 0, 0, time.UTC),
+			events: []string{
+				line("2026-10-13T12:00:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/capable"),
+				line("2026-10-13T12:50:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/rictus"),
+			},
+			now: time.Date(2026, 10, 13, 12, 53, 0, 0, time.UTC),
+		},
+		{
+			// The same rework runs on its own clock to the stop threshold: 20
+			// minutes after the 12:50 re-sling, at 13:12, the guard stops the seat
+			// holding it.
+			name:        "the rework stops on its own clock",
+			submittedAt: time.Date(2026, 10, 13, 12, 5, 0, 0, time.UTC),
+			events: []string{
+				line("2026-10-13T12:00:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/capable"),
+				line("2026-10-13T12:50:00Z", events.TypeSling, "gt-aaa11", "gastown/polecats/rictus"),
+			},
+			now:   time.Date(2026, 10, 13, 13, 12, 0, 0, time.UTC),
+			stops: []string{"gastown/rictus"},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -702,7 +773,7 @@ func TestRunOverrunGuard_JudgesTheBeadsDispatchClock(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(d.config.TownRoot, events.EventsFile), []byte(body), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "rictus", Bead: "gt-aaa11"})
+			f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "rictus", Bead: "gt-aaa11", SubmittedAt: tt.submittedAt})
 			f.now = tt.now
 			seams := f.seams()
 			seams.slungAt = (&overrunSlungReader{d: d}).slungAt
@@ -770,7 +841,7 @@ func TestOverrunSlungReader_DatesTheBeadsFirstDispatch(t *testing.T) {
 	// The other seat asks for the same bead's clock as the seat that was slung.
 	for _, seat := range []string{"capable", "rictus"} {
 		r := &overrunSlungReader{d: d}
-		got, ok := r.slungAt("gt-aaa11", "gastown", seat)
+		got, ok := r.slungAt(overrunSeat{Rig: "gastown", Polecat: seat, Bead: "gt-aaa11"})
 		if !ok {
 			t.Fatalf("%s: slungAt: not found", seat)
 		}
@@ -789,11 +860,117 @@ func TestOverrunSlungReader_DatesTheBeadsFirstDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &overrunSlungReader{d: d}
-	got, ok := r.slungAt("gt-aaa11", "gastown", "rictus")
+	got, ok := r.slungAt(overrunSeat{Rig: "gastown", Polecat: "rictus", Bead: "gt-aaa11"})
 	if !ok {
 		t.Fatal("slungAt: not found")
 	}
 	if want := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC); !got.Equal(want) {
 		t.Errorf("slungAt = %v, want the dispatch after the done event, %v", got, want)
+	}
+}
+
+// A submission for landing ends the run it was made in, so the bead's clock is
+// the first sling since the submission, not the dispatch the run began with
+// (gt-chd44). A bead that was never submitted keeps its first dispatch.
+func TestOverrunSlungReader_ASubmissionEndsTheRun(t *testing.T) {
+	t.Parallel()
+	line := func(ts, typ string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":"gt-aaa11","target":"gastown/polecats/capable"},"visibility":"both"}`,
+			ts, typ)
+	}
+	t10 := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
+	t12 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name        string
+		events      []string
+		submittedAt time.Time
+		want        time.Time
+		ok          bool
+	}{
+		{
+			name: "a re-sling after the submission starts the clock over",
+			events: []string{
+				line("2026-10-13T10:00:00Z", events.TypeSling),
+				line("2026-10-13T12:00:00Z", events.TypeSling),
+			},
+			submittedAt: time.Date(2026, 10, 13, 10, 30, 0, 0, time.UTC),
+			want:        t12,
+			ok:          true,
+		},
+		{
+			name:        "a submitted bead with no re-sling yet is dated from its submission",
+			events:      []string{line("2026-10-13T10:00:00Z", events.TypeSling)},
+			submittedAt: time.Date(2026, 10, 13, 10, 30, 0, 0, time.UTC),
+			want:        time.Date(2026, 10, 13, 10, 30, 0, 0, time.UTC),
+			ok:          true,
+		},
+		{
+			name: "a bead never submitted keeps its first dispatch",
+			events: []string{
+				line("2026-10-13T10:00:00Z", events.TypeSling),
+				line("2026-10-13T10:20:00Z", events.TypeSling),
+			},
+			want: t10,
+			ok:   true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			body := strings.Join(tt.events, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(town, events.EventsFile), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+
+			r := &overrunSlungReader{d: d}
+			got, ok := r.slungAt(overrunSeat{Rig: "gastown", Polecat: "rictus", Bead: "gt-aaa11", SubmittedAt: tt.submittedAt})
+			if ok != tt.ok {
+				t.Fatalf("slungAt found = %t, want %t (got %v)", ok, tt.ok, got)
+			}
+			if ok && !got.Equal(tt.want) {
+				t.Errorf("slungAt = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A seat's bead read answers the whole bead, submission end included, so the
+// guard's clock costs no second read (gt-chd44). A bead it cannot read is not
+// judged, and the drop is logged: the submission it may hold is the run end the
+// clock has to start after, so acting on the log alone could date a rework from
+// the dispatch its submission ended.
+func TestOverrunSeatFor_ReadsTheSubmissionAndDropsAnUnreadableBead(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	tm := newFakeTmux(newFixedClock())
+	d.tmux = tm
+	d.openWorkBeads = workBeadStore{
+		"gt-aaa11": {ID: "gt-aaa11", Notes: readyNote("2026-10-13T12:05:00Z")},
+	}.open
+
+	seatFor := supervisor.SeatFor("gastown", string(constants.RolePolecat), "capable")
+	if _, err := intent.Update(d.config.TownRoot, supervisor.IntentSeat(seatFor), func(r *intent.Record) error {
+		r.WorkBead = "gt-aaa11"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tm.addSession(session.PolecatSessionName(d.prefixRegistry().PrefixForRig("gastown"), "capable"), "node", time.Now())
+
+	seat, ok := d.overrunSeatFor(t.TempDir(), "gastown", "capable")
+	if !ok {
+		t.Fatalf("a readable seat was dropped:\n%s", buf.String())
+	}
+	if want := time.Date(2026, 10, 13, 12, 5, 0, 0, time.UTC); !seat.SubmittedAt.Equal(want) {
+		t.Errorf("SubmittedAt = %v, want the READY TO LAND block's time %v", seat.SubmittedAt, want)
+	}
+
+	d.openWorkBeads = unreadableBeads{}.open
+	if seat, ok := d.overrunSeatFor(t.TempDir(), "gastown", "capable"); ok {
+		t.Fatalf("judged a seat whose bead could not be read: %+v", seat)
+	}
+	if !strings.Contains(buf.String(), "cannot read bead gt-aaa11") {
+		t.Errorf("no alarm for the unreadable bead:\n%s", buf.String())
 	}
 }

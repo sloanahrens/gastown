@@ -205,6 +205,18 @@ func SubmittedAt(issue *beads.Issue) time.Time {
 	return at
 }
 
+// ReadyBlockTime returns the time on the bead's last READY TO LAND block, zero
+// when the notes hold no complete block or the block carries no readable
+// submission time. Unlike SubmittedAt it does not fall back to the bead's last
+// update: that time moves with every write to the bead, so a clock dated from
+// it would restart with each comment a seat adds (gt-chd44).
+func ReadyBlockTime(notes string) time.Time {
+	if w, ok := ParseReadyNote(notes); ok {
+		return w.Submitted
+	}
+	return time.Time{}
+}
+
 // ErrNotReady means the bead does not carry a complete landing request.
 var ErrNotReady = errors.New("work bead is not ready to land")
 
