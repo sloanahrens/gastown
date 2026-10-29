@@ -86,6 +86,110 @@ func (f *fakeTrimFS) addShard(listDir string, index int, paths ...string) string
 	return dir
 }
 
+// addClaimList plants the claim-carried list a writer puts in the claim, and returns its path inside
+// the claim.
+func (f *fakeTrimFS) addClaimList(root string, paths ...string) string {
+	name := filepath.Join(root, filepath.FromSlash(cachevol.TrimClaimListPath))
+	if paths == nil {
+		paths = []string{}
+	}
+	data, err := json.Marshal(paths)
+	if err != nil {
+		panic(err)
+	}
+	f.files[name] = string(data)
+	return cachevol.TrimClaimListPath
+}
+
+// TestRemoveTrimPathsFromClaimRemovesEveryListedPath is the claim route's success path: each path the
+// list in the claim names is removed under the claim root, and the counts say so.
+func TestRemoveTrimPathsFromClaimRemovesEveryListedPath(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	list := f.addClaimList("/cache", "gocache/ab/one", "gomodcache/three")
+	res, err := RemoveTrimPathsFromClaim("/cache", list, f.fs())
+	if err != nil {
+		t.Fatalf("RemoveTrimPathsFromClaim: %v", err)
+	}
+	if res.Removed != 2 || res.Absent != 0 {
+		t.Errorf("result = %+v, want both paths removed", res)
+	}
+	want := []string{"/cache/gocache/ab/one", "/cache/gomodcache/three"}
+	if !reflect.DeepEqual(f.removed, want) {
+		t.Errorf("removed %v, want %v", f.removed, want)
+	}
+}
+
+// TestRemoveTrimPathsFromClaimCountsAnAbsentFile pins the one failure that is not one on this route
+// too: a listed file that is already gone leaves the claim as the trim wants it.
+func TestRemoveTrimPathsFromClaimCountsAnAbsentFile(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	list := f.addClaimList("/cache", "gocache/ab/gone")
+	f.resolveErr["/cache/gocache/ab"] = fs.ErrNotExist
+	res, err := RemoveTrimPathsFromClaim("/cache", list, f.fs())
+	if err != nil {
+		t.Fatalf("RemoveTrimPathsFromClaim: %v", err)
+	}
+	if res.Absent != 1 || res.Removed != 0 {
+		t.Errorf("result = %+v, want the gone file counted absent", res)
+	}
+}
+
+// TestRemoveTrimPathsFromClaimRefusesAListItCannotUse pins the fail-closed reads: a list file that is
+// absent, is not an array of paths, or names no path leaves the claim untouched, since a run that
+// could not read its whole list would trim part of one and report a success.
+func TestRemoveTrimPathsFromClaimRefusesAListItCannotUse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		plant func(*fakeTrimFS)
+		list  string
+	}{
+		{"a list file the writer never wrote", func(f *fakeTrimFS) {}, cachevol.TrimClaimListPath},
+		{"a list file that is not a JSON array", func(f *fakeTrimFS) {
+			f.files[filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimListPath))] = `{"paths": "gocache/one"}`
+		}, cachevol.TrimClaimListPath},
+		{"a list that names no path", func(f *fakeTrimFS) { f.addClaimList("/cache") }, cachevol.TrimClaimListPath},
+		{"a list file outside the claim", func(f *fakeTrimFS) {
+			f.files[filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimListPath))] = `["gocache/one"]`
+		}, "../outside/paths.json"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeTrimFS()
+			tc.plant(f)
+			if _, err := RemoveTrimPathsFromClaim("/cache", tc.list, f.fs()); err == nil {
+				t.Fatal("RemoveTrimPathsFromClaim trimmed from a list it could not use whole")
+			}
+			if len(f.removed) != 0 {
+				t.Errorf("removed %v, want nothing removed", f.removed)
+			}
+		})
+	}
+}
+
+// TestRemoveTrimPathsFromClaimRefusesAListedPathThatIsNotBelowTheClaim pins the same lexical guard on
+// the claim route: a listed path an absolute name, a parent element or an unclean name could escape
+// with is refused before anything is removed.
+func TestRemoveTrimPathsFromClaimRefusesAListedPathThatIsNotBelowTheClaim(t *testing.T) {
+	t.Parallel()
+	for _, entry := range []string{"/etc/passwd", "../escape", "gocache/../../escape", "gocache//one"} {
+		t.Run(entry, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeTrimFS()
+			list := f.addClaimList("/cache", "gocache/fine", entry)
+			if _, err := RemoveTrimPathsFromClaim("/cache", list, f.fs()); err == nil {
+				t.Fatalf("RemoveTrimPathsFromClaim removed the list holding %q", entry)
+			}
+			if len(f.removed) != 0 {
+				t.Errorf("removed %v, want nothing removed for %q", f.removed, entry)
+			}
+		})
+	}
+}
+
 // TestRemoveTrimPathsRemovesEveryListedPath is the helper's success path over more than one shard:
 // each listed path is removed under the claim root, and the counts say so.
 func TestRemoveTrimPathsRemovesEveryListedPath(t *testing.T) {
@@ -219,6 +323,43 @@ func TestTrimPathsRunRefusesAListDirectoryThatIsNotThere(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "reading the shard") {
 		t.Errorf("stderr = %q, want the shard it could not read", errOut.String())
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+}
+
+// TestTrimPathsRunReadsAClaimCarriedList pins the flag that selects the claim route: a run given
+// --list-file reads the list the writer put in the claim and removes its paths.
+func TestTrimPathsRunReadsAClaimCarriedList(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addClaimList("/cache", "gocache/one")
+	var out, errOut bytes.Buffer
+	code := trimPathsRun([]string{"--root", "/cache", "--list-file", cachevol.TrimClaimListPath}, &out, &errOut, f.fs())
+	if code != 0 {
+		t.Fatalf("trimPathsRun = %d, want 0 (%s)", code, errOut.String())
+	}
+	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 0" {
+		t.Errorf("trimPathsRun printed %q, want %q", got, "removed 1 absent 0")
+	}
+	if want := []string{"/cache/gocache/one"}; !reflect.DeepEqual(f.removed, want) {
+		t.Errorf("removed %v, want %v", f.removed, want)
+	}
+}
+
+// TestTrimPathsRunRefusesTwoRoutes pins the flag pair: --list-file and --shards name the two routes,
+// and a run given both has no single list to trim.
+func TestTrimPathsRunRefusesTwoRoutes(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addClaimList("/cache", "gocache/one")
+	var out, errOut bytes.Buffer
+	if code := trimPathsRun([]string{"--root", "/cache", "--list-file", cachevol.TrimClaimListPath, "--shards", "1"}, &out, &errOut, f.fs()); code != 3 {
+		t.Fatalf("trimPathsRun with both routes = %d, want 3", code)
+	}
+	if !strings.Contains(errOut.String(), "two routes") {
+		t.Errorf("stderr = %q, want the two-route refusal", errOut.String())
 	}
 	if len(f.removed) != 0 {
 		t.Errorf("removed %v, want nothing removed", f.removed)

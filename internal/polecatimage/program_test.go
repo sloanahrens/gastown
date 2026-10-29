@@ -2,12 +2,17 @@ package polecatimage
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
 
 // envMap is a get function over a fixed environment, so a test reads no
@@ -451,7 +456,7 @@ func TestRunProgramDispatchesTheTrimHelper(t *testing.T) {
 	root := t.TempDir()
 	plantCacheFile(t, filepath.Join(root, "go-build", "a"), 10, testTime)
 	var out, errOut bytes.Buffer
-	code := runProgram([]string{"trim-cache", "--cap-bytes", "100", "--root", root}, &out, &errOut, envMap(map[string]string{}))
+	code := runProgram([]string{"trim-cache", "--cap-bytes", "100", "--root", root}, bytes.NewReader(nil), &out, &errOut, envMap(map[string]string{}))
 	if code != 0 {
 		t.Fatalf("runProgram(trim-cache) = %d, want 0 (%s)", code, errOut.String())
 	}
@@ -465,7 +470,7 @@ func TestRunProgramDispatchesTheTrimHelper(t *testing.T) {
 func TestRunProgramDispatchesARun(t *testing.T) {
 	t.Parallel()
 	var out, errOut bytes.Buffer
-	if code := runProgram(nil, &out, &errOut, envMap(map[string]string{})); code != 1 {
+	if code := runProgram(nil, bytes.NewReader(nil), &out, &errOut, envMap(map[string]string{})); code != 1 {
 		t.Errorf("runProgram() = %d, want 1", code)
 	}
 	if !strings.Contains(out.String(), "ERROR: cannot find the town root") {
@@ -527,5 +532,92 @@ func TestTrimCacheMainReportsATreeItCannotMeasure(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), missing) {
 		t.Errorf("trimCacheMain() said %q, want the tree it could not measure", errOut.String())
+	}
+}
+
+// TestTrimListWriteHelperWritesTheListIntoTheClaim drives the subcommand end to end over a temporary
+// claim: the JSON array on stdin lands where a claim-carried trim's container reads it.
+func TestTrimListWriteHelperWritesTheListIntoTheClaim(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	paths := []string{"gocache/ab/cdef", "gomodcache/mod/x"}
+	enc, err := json.Marshal(paths)
+	if err != nil {
+		t.Fatalf("encoding the list: %v", err)
+	}
+	var out, errOut bytes.Buffer
+	code := runProgram([]string{"trim-list-write", "--root", root}, bytes.NewReader(enc), &out, &errOut, envMap(map[string]string{}))
+	if code != 0 {
+		t.Fatalf("runProgram(trim-list-write) = %d, want 0 (%s)", code, errOut.String())
+	}
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(cachevol.TrimClaimListPath)))
+	if err != nil {
+		t.Fatalf("reading the written list: %v", err)
+	}
+	var got []string
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("the written list is not a JSON array of paths: %v", err)
+	}
+	if !reflect.DeepEqual(got, paths) {
+		t.Errorf("the written list is %v, want %v", got, paths)
+	}
+	if want := "wrote 2 paths " + cachevol.TrimClaimListPath; !strings.Contains(out.String(), want) {
+		t.Errorf("runProgram printed %q, want %q", out.String(), want)
+	}
+}
+
+// errReader answers every read with the same failure, for the helper's stdin.
+type errReader struct{ err error }
+
+func (r errReader) Read([]byte) (int, error) { return 0, r.err }
+
+// TestTrimListWriteHelperReportsAStdinItCannotRead pins the read's own failure: a list the helper
+// could not read is not written, and the run says so.
+func TestTrimListWriteHelperReportsAStdinItCannotRead(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	var out, errOut bytes.Buffer
+	code := trimListWriteMain(errReader{err: errors.New("the pipe broke")}, []string{"--root", root}, &out, &errOut)
+	if code != 3 {
+		t.Fatalf("trimListWriteMain = %d, want 3", code)
+	}
+	if !strings.Contains(errOut.String(), "reading the list from stdin") {
+		t.Errorf("stderr = %q, want the read it could not make", errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, cachevol.TrimClaimListDir)); !os.IsNotExist(err) {
+		t.Errorf("the helper created the list directory for an unread list (%v)", err)
+	}
+}
+
+// TestTrimListWriteHelperRefusesAListItCannotUse pins the helper's refusals: each exits 3, names the
+// reason, and leaves no list behind, so a Job applied after it fails on a missing list rather than
+// trimming nothing.
+func TestTrimListWriteHelperRefusesAListItCannotUse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		stdin   string
+		wantErr string
+	}{
+		{"not a JSON array", `not a list`, "not a JSON array"},
+		{"a list with no path", `[]`, "names no path"},
+		{"a path outside the claim", `["../escape"]`, "want a path a walk of the claim root gives"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			var out, errOut bytes.Buffer
+			code := runProgram([]string{"trim-list-write", "--root", root}, strings.NewReader(tc.stdin), &out, &errOut, envMap(map[string]string{}))
+			if code != 3 {
+				t.Fatalf("runProgram(trim-list-write) = %d, want 3", code)
+			}
+			if !strings.Contains(errOut.String(), tc.wantErr) {
+				t.Errorf("stderr = %q, want it to name %q", errOut.String(), tc.wantErr)
+			}
+			if _, err := os.Stat(filepath.Join(root, cachevol.TrimClaimListDir)); !os.IsNotExist(err) {
+				t.Errorf("the helper created the list directory for a refused list (%v)", err)
+			}
+		})
 	}
 }

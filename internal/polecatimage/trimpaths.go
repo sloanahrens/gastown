@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
 
 // trimPathsFS is the filesystem a trim-paths run works on. A test answers the calls, so each
@@ -87,6 +89,36 @@ func RemoveTrimPaths(root, listDir string, shards int, w trimPathsFS) (TrimPaths
 	if err != nil {
 		return TrimPathsResult{}, err
 	}
+	return removeTrimPaths(root, list, w)
+}
+
+// RemoveTrimPathsFromClaim removes every path the claim-carried list holds, relative to root.
+//
+// listPath is the claim-relative file a writer put in the claim before the Job applied, and it is
+// read and checked whole before anything is removed, as the shard route's list is. A list file that
+// is absent, unreadable, not an array of paths, or empty fails the run rather than reporting a
+// success that removed nothing.
+func RemoveTrimPathsFromClaim(root, listPath string, w trimPathsFS) (TrimPathsResult, error) {
+	if !claimRelative(listPath) {
+		return TrimPathsResult{}, fmt.Errorf("the trim list file %q: want a path inside the claim, such as %s", listPath, cachevol.TrimClaimListPath)
+	}
+	data, err := w.read(filepath.Join(root, filepath.FromSlash(listPath)))
+	if err != nil {
+		return TrimPathsResult{}, fmt.Errorf("reading the trim list %s: %w", listPath, err)
+	}
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return TrimPathsResult{}, fmt.Errorf("the trim list %s is not a JSON array of paths", listPath)
+	}
+	if len(list) == 0 {
+		return TrimPathsResult{}, fmt.Errorf("the trim list %s names no path: a claim-carried trim with nothing to remove would report a success that removed nothing", listPath)
+	}
+	return removeTrimPaths(root, list, w)
+}
+
+// removeTrimPaths removes list's claim-relative paths, resolving every target inside the claim
+// before the first removal, so a list that names a file outside it leaves the claim untouched.
+func removeTrimPaths(root string, list []string, w trimPathsFS) (TrimPathsResult, error) {
 	realRoot, err := w.resolve(root)
 	if err != nil {
 		return TrimPathsResult{}, fmt.Errorf("resolving the claim root %s: %w", root, err)

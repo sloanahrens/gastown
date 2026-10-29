@@ -1,6 +1,7 @@
 package polecatimage
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -126,19 +127,21 @@ func envOr(get func(string) string, key, def string) string {
 
 // Main is the program's entry point and answers its exit status.
 func Main(args []string) int {
-	return runProgram(args, os.Stdout, os.Stderr, os.Getenv)
+	return runProgram(args, os.Stdin, os.Stdout, os.Stderr, os.Getenv)
 }
 
 // runProgram answers Main: no arguments runs one plugin run, and "trim-cache",
-// "trim-paths", "seed-clone" and "seed-cache" are the helpers a container of the
-// image runs in the seed and trim Jobs.
-func runProgram(args []string, stdout, stderr io.Writer, get func(string) string) int {
+// "trim-paths", "trim-list-write", "seed-clone" and "seed-cache" are the helpers a
+// container of the image runs in the seed and trim Jobs.
+func runProgram(args []string, stdin io.Reader, stdout, stderr io.Writer, get func(string) string) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "trim-cache":
 			return trimCacheMain(args[1:], stdout, stderr)
 		case "trim-paths":
 			return trimPathsMain(args[1:], stdout, stderr)
+		case "trim-list-write":
+			return trimListWriteMain(stdin, args[1:], stdout, stderr)
 		case "seed-clone":
 			return seedCloneMain(args[1:], stdout, stderr)
 		case "seed-cache":
@@ -204,31 +207,78 @@ func trimPathsMain(args []string, stdout, stderr io.Writer) int {
 
 // trimPathsRun is trimPathsMain over the filesystem w, so a test answers the calls.
 //
-// Once the run reaches the list, stdout carries "removed N absent M", the counts of
-// what it did, so a run that fails part way still says how much it removed. Exit 3
-// with a reason on stderr means the list could not be read whole or a removal
-// failed: a trim the helper cannot vouch for is reported rather than passed off as a
-// partial success.
+// The list comes from the mounted shards, or from the file a caller wrote into the
+// claim when --list-file names it. Once the run reaches the list, stdout carries
+// "removed N absent M", the counts of what it did, so a run that fails part way still
+// says how much it removed. Exit 3 with a reason on stderr means the list could not be
+// read whole or a removal failed: a trim the helper cannot vouch for is reported
+// rather than passed off as a partial success.
 func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 	flags := flag.NewFlagSet("trim-paths", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	root := flags.String("root", cachevol.SeedCacheRoot, "the claim the listed paths are relative to")
 	list := flags.String("list", cachevol.TrimListRoot, "the directory the shard volumes are mounted under")
+	listFile := flags.String("list-file", "", "the claim-relative file a claim-carried trim reads its list from")
 	shardsText := flags.String("shards", "", "the number of shards the Job mounted")
 	if err := flags.Parse(args); err != nil {
 		return 3
 	}
-	shards, err := strconv.Atoi(*shardsText)
-	if err != nil || shards <= 0 {
-		fmt.Fprintln(stderr, "trim-paths: --shards needs a whole number of shards, at least 1")
-		return 3
+	var res TrimPathsResult
+	var err error
+	if *listFile != "" {
+		if *shardsText != "" {
+			fmt.Fprintln(stderr, "trim-paths: --list-file and --shards name two routes; give one")
+			return 3
+		}
+		res, err = RemoveTrimPathsFromClaim(*root, *listFile, w)
+	} else {
+		shards, aerr := strconv.Atoi(*shardsText)
+		if aerr != nil || shards <= 0 {
+			fmt.Fprintln(stderr, "trim-paths: --shards needs a whole number of shards, at least 1")
+			return 3
+		}
+		res, err = RemoveTrimPaths(*root, *list, shards, w)
 	}
-	res, err := RemoveTrimPaths(*root, *list, shards, w)
 	fmt.Fprintf(stdout, "removed %d absent %d\n", res.Removed, res.Absent)
 	if err != nil {
 		fmt.Fprintf(stderr, "trim-paths: %v\n", err)
 		return 3
 	}
+	return 0
+}
+
+// trimListWriteMain runs the writer: it reads PlanTrim's removal list as a JSON array on
+// stdin and writes it into the claim at --root, where a claim-carried trim Job reads it.
+//
+// stdin is the list because a list past one set of shards has no other channel that
+// reaches the claim whole. Exit 3 with a reason on stderr means nothing was written: the
+// list is refused whole or written whole, so a Job applied after it never reads a list
+// the writer did not vouch for.
+func trimListWriteMain(stdin io.Reader, args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("trim-list-write", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	root := flags.String("root", cachevol.SeedCacheRoot, "the shared cache claim the trim reads")
+	if err := flags.Parse(args); err != nil {
+		return 3
+	}
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		err = fmt.Errorf("reading the list from stdin: %w", err)
+	}
+	var paths []string
+	if err == nil {
+		if err = json.Unmarshal(data, &paths); err != nil {
+			err = fmt.Errorf("the list on stdin is not a JSON array of paths")
+		}
+	}
+	if err == nil {
+		err = WriteTrimList(*root, paths, osTrimListFiles{})
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "trim-list-write: %v\n", err)
+		return 3
+	}
+	fmt.Fprintf(stdout, "wrote %d paths %s\n", len(paths), cachevol.TrimClaimListPath)
 	return 0
 }
 

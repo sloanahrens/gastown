@@ -21,13 +21,24 @@ const (
 	// TrimShardBytes is the most encoded list one shard holds, a quarter of the 1 MiB a ConfigMap's
 	// data is capped at.
 	TrimShardBytes = 256 << 10
-	// TrimMaxShards is the most shards one trim Job mounts, so the most list one pod carries is this
-	// many TrimShardBytes. A longer list is split over several Jobs, each mounting at most this many
-	// shards, so no pod is given more mounts than the route was sized for (gt-284u5).
+	// TrimMaxShards is the most shards one trim Job mounts, so one set of shards carries at most
+	// TrimMaxShards*TrimShardBytes of encoded list (gt-284u5). A longer list is carried in the claim
+	// itself, so no pod is given more mounts than the route was sized for, and the Kubernetes
+	// objects a trim applies stop growing with its list (gt-2rq36). A list under that ceiling that
+	// still needs more shards than one Job mounts is split over several Jobs.
 	TrimMaxShards = 64
 	// TrimListRoot is where the trim container mounts the shards: shard i is the directory
 	// <TrimListRoot>/<i>, holding the file TrimShardKey.
 	TrimListRoot = "/trim"
+	// TrimClaimListDir is the claim-relative directory a claim-carried trim keeps its removal list
+	// in. It sits outside GOCACHE and GOMODCACHE, so a listing that walks the two cache trees never
+	// names it, and a trim removes only the paths its list names.
+	TrimClaimListDir = ".gt-trim"
+	// TrimClaimListName is the file under TrimClaimListDir that holds the encoded removal list.
+	TrimClaimListName = "paths.json"
+	// TrimClaimListPath is where a claim-carried trim writes and reads its list, relative to the
+	// claim root.
+	TrimClaimListPath = TrimClaimListDir + "/" + TrimClaimListName
 	// trimCacheVolume is the volume the claim is mounted under, and trimShardVolume the prefix of
 	// each shard's volume; a volume name is a DNS-1123 label, so it carries no shard ConfigMap's
 	// full name.
@@ -60,15 +71,43 @@ type TrimJobInput struct {
 // shape and encodes through SeedJob.JSON.
 type TrimJob = SeedJob
 
-// TrimManifest is what one trim needs applied: the ConfigMap shards carrying PlanTrim's removal
-// list, and the Jobs whose pods mount them. A list that fits TrimMaxShards is one Job; a longer one
-// is split over several, each Job mounting its own run of the shards.
+// TrimRoute says how a trim's removal list reaches its container, and so what bounds its size.
+type TrimRoute int
+
+const (
+	// TrimRouteShards carries the list in ConfigMap shards the Jobs mount. A list that needs more
+	// than one Job's mounts is split over several Jobs, each mounting at most TrimMaxShards.
+	TrimRouteShards TrimRoute = iota
+	// TrimRouteClaim carries the list in one file in the claim, and the Job mounts the claim alone,
+	// so its ceiling is the claim's free space rather than a count of Kubernetes objects. The caller
+	// writes ClaimList into the claim before it applies the documents.
+	TrimRouteClaim
+)
+
+// TrimClaimList is the list a claim-carried trim reads: where in the claim to write it, and the
+// encoded list to write.
+type TrimClaimList struct {
+	// Path is the claim-relative file the trim container reads.
+	Path string
+	// Data is the encoded JSON array of PlanTrim's claim-relative paths.
+	Data []byte
+}
+
+// TrimManifest is what one trim needs applied: the removal list in whichever route carries it, and
+// the Job or Jobs whose pods read it.
 //
-// The list leaves argv for a mounted file because the kernel caps one exec's arguments and
-// environment at about a quarter of the stack, 2 MB at the default 8 MB, and a first trim of a
-// badly overfilled claim names tens of thousands of paths (gt-cahkg).
+// The list leaves argv for a file mounted or written into the claim because the kernel caps one
+// exec's arguments and environment at about a quarter of the stack, 2 MB at the default 8 MB, and a
+// first trim of a badly overfilled claim names tens of thousands of paths (gt-cahkg).
 type TrimManifest struct {
+	route TrimRoute
+	// runs is the shard route: one Job per run of at most TrimMaxShards shards, with the shards its
+	// pod mounts, in mount order.
 	runs []trimRun
+	// list and job are the claim route: the list to write into the claim, and the one Job whose pod
+	// reads it from the claim alone.
+	list TrimClaimList
+	job  *TrimJob
 }
 
 // trimRun is one Job and the shards its pod mounts, in mount order.
@@ -77,7 +116,11 @@ type trimRun struct {
 	job    *TrimJob
 }
 
-// Shards returns every shard ConfigMap in the order the Jobs mount them.
+// Route returns the route that carries this trim's removal list.
+func (m *TrimManifest) Route() TrimRoute { return m.route }
+
+// Shards returns every shard ConfigMap in the order the Jobs mount them; a claim-carried trim
+// applies none.
 func (m *TrimManifest) Shards() []TrimShard {
 	var all []TrimShard
 	for _, run := range m.runs {
@@ -86,10 +129,13 @@ func (m *TrimManifest) Shards() []TrimShard {
 	return all
 }
 
-// jobs returns the trim Jobs in the order they are applied: one per run of at most TrimMaxShards
-// shards. It is unexported so Documents stays the manifest's only route out: an exported accessor
-// would hand a caller a Job without its shards.
+// jobs returns the trim Jobs in the order they are applied. It is unexported so Documents stays the
+// manifest's only route out: an exported accessor would hand a caller a Job before the shards or
+// list it reads.
 func (m *TrimManifest) jobs() []*TrimJob {
+	if m.route == TrimRouteClaim {
+		return []*TrimJob{m.job}
+	}
 	jobs := make([]*TrimJob, 0, len(m.runs))
 	for _, run := range m.runs {
 		jobs = append(jobs, run.job)
@@ -97,11 +143,25 @@ func (m *TrimManifest) jobs() []*TrimJob {
 	return jobs
 }
 
-// Documents returns the manifest encoded for kubectl apply, each run's shards first and then its Job:
-// a Job applied before its shards leaves a pod waiting on a volume it cannot mount, and an omitted
-// shard trims part of the list. It is the manifest's only route to the Jobs, so no caller can apply
-// a Job without its shards.
+// ClaimList returns the list a caller must write into the claim before it applies Documents, for a
+// claim-carried trim; a shard trim carries its list in the documents themselves and returns nil.
+func (m *TrimManifest) ClaimList() *TrimClaimList {
+	if m.route != TrimRouteClaim {
+		return nil
+	}
+	list := m.list
+	return &list
+}
+
+// Documents returns the manifest encoded for kubectl apply: for a shard trim, each run's shards
+// first and then its Job; for a claim-carried trim, the one Job, which the caller applies after it
+// writes ClaimList into the claim. A Job applied before its shards leaves a pod waiting on a volume
+// it cannot mount, and an omitted shard trims part of the list. Documents is the manifest's only
+// route to the Jobs, so no caller can apply a Job without what it reads.
 func (m *TrimManifest) Documents() [][]byte {
+	if m.route == TrimRouteClaim {
+		return [][]byte{m.job.JSON()}
+	}
 	docs := make([][]byte, 0, len(m.Shards())+len(m.runs))
 	for _, run := range m.runs {
 		for i := range run.shards {
@@ -171,7 +231,6 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	shards := trimShards(name, in.Namespace, paths)
 
 	// The annotation carries PlanTrim's own verdict onto the object: an operator reading the Job
 	// after the run finds from it why the claim is still over its cap, since the plan is not applied
@@ -181,11 +240,28 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 		annotations = map[string]string{TrimOverflowAnnotation: strconv.FormatInt(plan.OverBytes, 10)}
 	}
 
+	if trimListBytes(paths) > TrimMaxShards*TrimShardBytes {
+		return claimTrimManifest(in, name, annotations, paths), nil
+	}
+
+	shards := trimShards(name, in.Namespace, paths)
 	runs, err := trimRuns(in, name, annotations, shards)
 	if err != nil {
 		return nil, err
 	}
-	return &TrimManifest{runs: runs}, nil
+	return &TrimManifest{route: TrimRouteShards, runs: runs}, nil
+}
+
+// claimTrimManifest is the manifest for a list past one set of ConfigMap shards: one Job whose pod
+// mounts the claim alone, reading the list from the file the caller writes into it first.
+func claimTrimManifest(in TrimJobInput, name string, annotations map[string]string, paths []string) *TrimManifest {
+	// Encoding a slice of strings cannot fail, so the error is dropped.
+	data, _ := json.Marshal(paths)
+	return &TrimManifest{
+		route: TrimRouteClaim,
+		list:  TrimClaimList{Path: TrimClaimListPath, Data: data},
+		job:   claimTrimJob(in, name, annotations),
+	}
 }
 
 // trimRuns splits shards into runs of at most TrimMaxShards, in mount order, and renders one Job per
@@ -215,8 +291,8 @@ func trimRuns(in TrimJobInput, name string, annotations map[string]string, shard
 	return runs, nil
 }
 
-// trimJob is the Job document: the cache user trimming the claim, reading the list from the shards
-// its pod mounts.
+// trimJob is the Job document for the shard route: the cache user trimming the claim, reading the
+// list from the shards its pod mounts.
 func trimJob(in TrimJobInput, name string, annotations map[string]string, shards []TrimShard) *TrimJob {
 	volumes := []Volume{
 		{Name: trimCacheVolume, PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: in.ClaimName}},
@@ -227,7 +303,22 @@ func trimJob(in TrimJobInput, name string, annotations map[string]string, shards
 		volumes = append(volumes, Volume{Name: volume, ConfigMap: &ConfigMapVolumeSource{Name: shard.Metadata.Name}})
 		mounts = append(mounts, VolumeMount{Name: volume, MountPath: path.Join(TrimListRoot, strconv.Itoa(i)), ReadOnly: true})
 	}
+	return trimJobDocument(in, name, annotations, removeContainer(in.Image, len(shards), mounts), volumes)
+}
 
+// claimTrimJob is the Job document for the claim route: the claim alone is mounted, and the
+// container reads the list from the file a caller wrote into it.
+func claimTrimJob(in TrimJobInput, name string, annotations map[string]string) *TrimJob {
+	volumes := []Volume{
+		{Name: trimCacheVolume, PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: in.ClaimName}},
+	}
+	mounts := []VolumeMount{{Name: trimCacheVolume, MountPath: SeedCacheRoot}}
+	return trimJobDocument(in, name, annotations, claimRemoveContainer(in.Image, mounts), volumes)
+}
+
+// trimJobDocument is the Job both routes apply: the cache user's trim container, with the volumes
+// and mounts its route gives it.
+func trimJobDocument(in TrimJobInput, name string, annotations map[string]string, container Container, volumes []Volume) *TrimJob {
 	return &TrimJob{
 		APIVersion: "batch/v1",
 		Kind:       "Job",
@@ -249,7 +340,7 @@ func trimJob(in TrimJobInput, name string, annotations map[string]string, shards
 						RunAsUser:  int64Ptr(SeedUserID),
 						RunAsGroup: int64Ptr(SeedUserID),
 					},
-					Containers: []Container{removeContainer(in.Image, len(shards), mounts)},
+					Containers: []Container{container},
 					Volumes:    volumes,
 				},
 			},
@@ -293,6 +384,19 @@ func removeContainer(image string, shards int, mounts []VolumeMount) Container {
 		Args:    []string{"--root", SeedCacheRoot, "--list", TrimListRoot, "--shards", strconv.Itoa(shards)},
 		// The shards are the whole input: a mount a pod cannot make leaves it waiting rather than
 		// trimming the part of the list that did arrive.
+		VolumeMounts: mounts,
+	}
+}
+
+// claimRemoveContainer deletes the listed files with the image's trim-paths helper, which reads the
+// list from the file the caller wrote into the claim. A list that is not there fails the run rather
+// than trimming nothing.
+func claimRemoveContainer(image string, mounts []VolumeMount) Container {
+	return Container{
+		Name:         "trim",
+		Image:        image,
+		Command:      []string{HelperPath, "trim-paths"},
+		Args:         []string{"--root", SeedCacheRoot, "--list-file", TrimClaimListPath},
 		VolumeMounts: mounts,
 	}
 }
@@ -361,6 +465,22 @@ func claimRelative(p string) bool {
 	}
 	first, _, _ := strings.Cut(p, "/")
 	return first != "." && first != ".."
+}
+
+// trimListBytes is the size paths take as the encoded JSON array the shards and the claim list
+// carry: the figure the shard route's ceiling is measured on. It measures each path's encoding, as
+// trimShards does, so the two agree on what a character the encoder escapes costs.
+func trimListBytes(paths []string) int {
+	size := 2 // the array's brackets
+	for i, p := range paths {
+		// A string's JSON encoding cannot fail, so the error is dropped.
+		b, _ := json.Marshal(p)
+		size += len(b)
+		if i > 0 {
+			size++ // the separator before this entry
+		}
+	}
+	return size
 }
 
 // trimShards splits paths into the ConfigMaps the Job mounts, each holding at most TrimShardBytes
