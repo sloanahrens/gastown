@@ -6,12 +6,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/bird"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -51,8 +53,9 @@ Examples:
   gt bird start --bead gt-abc     # under the name gt-abc is bound to
   gt bird start --name robin      # under robin, if no session runs it
 
-The real claude is ~/.local/bin/claude. --help is claude's, so an alias of
-claude keeps working; 'gt help bird start' prints this help.`,
+The real claude is the town's bird_claude setting, or ~/.local/bin/claude when
+the town sets none. --help is claude's, so an alias of claude keeps working;
+'gt help bird start' prints this help.`,
 	DisableFlagParsing: true,
 	SilenceUsage:       true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -130,7 +133,7 @@ type birdSetup struct {
 	find    func() (string, error)
 	guard   func(what, dir string) error
 	isTTY   func(*os.File) bool
-	claude  func(home string) string
+	claude  func(home, townRoot string) (string, error)
 	label   func(dir, bead, label string) error
 	unlabel func(dir, bead, label string) error
 }
@@ -172,9 +175,13 @@ func (s birdSetup) runner() (*bird.Runner, error) {
 	if err != nil {
 		return nil, err
 	}
+	claude, err := s.claude(home, townRoot)
+	if err != nil {
+		return nil, err
+	}
 	return &bird.Runner{
 		Registry:    bird.New(townRoot),
-		Claude:      s.claude(home),
+		Claude:      claude,
 		Home:        home,
 		Terminal:    bird.Terminal{Stdin: s.isTTY(os.Stdin), Stdout: s.isTTY(os.Stdout)},
 		LabelBead:   s.label,
@@ -199,7 +206,23 @@ func (s birdSetup) townRoot(home string) (string, error) {
 	return root, nil
 }
 
-// birdClaudePath is the real claude a start execs (gt-qipl5).
-func birdClaudePath(home string) string {
-	return filepath.Join(home, ".local", "bin", "claude")
+// birdClaudePath is the real claude a start execs: the town's bird_claude
+// setting, with a leading "~/" read from home, else ~/.local/bin/claude
+// (gt-qipl5, gt-08chr). A settings file that cannot be read is an error, not
+// the default, so a start never execs a claude the town did not name.
+func birdClaudePath(home, townRoot string) (string, error) {
+	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return "", fmt.Errorf("gt bird: reading bird_claude from the town settings: %w", err)
+	}
+	configured := strings.TrimSpace(settings.BirdClaude)
+	switch {
+	case configured == "":
+		return filepath.Join(home, ".local", "bin", "claude"), nil
+	case configured == "~" || strings.HasPrefix(configured, "~/"):
+		return filepath.Join(home, strings.TrimPrefix(configured, "~")), nil
+	case !filepath.IsAbs(configured):
+		return "", fmt.Errorf("gt bird: bird_claude %q is neither an absolute path nor under ~/", configured)
+	}
+	return configured, nil
 }

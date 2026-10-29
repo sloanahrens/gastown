@@ -127,6 +127,10 @@ type TownSettings struct {
 	// Default: "gastown.local"
 	AgentEmailDomain string `json:"agent_email_domain,omitempty"`
 
+	// BirdClaude is the real claude `gt bird start` execs: an absolute path, or
+	// one under "~/". Unset, it is ~/.local/bin/claude.
+	BirdClaude string `json:"bird_claude,omitempty"`
+
 	// FeedCurator is retired with the daemon feed curator (gt-3vdcx): nothing
 	// reads it. It is declared so a settings file that still carries it
 	// decodes under strict decoding, and kept verbatim so a rewrite does not
