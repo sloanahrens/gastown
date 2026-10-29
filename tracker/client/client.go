@@ -169,9 +169,6 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // loopback IP or to allowHTTPHost, so a token never crosses a network in the
 // clear.
 func checkBaseURL(raw, allowHTTPHost string) error {
-	if err := checkAllowHTTPHost(allowHTTPHost); err != nil {
-		return err
-	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return fmt.Errorf("client: base URL %q is not a URL with a host", raw)
@@ -180,6 +177,11 @@ func checkBaseURL(raw, allowHTTPHost string) error {
 	case "https":
 		return nil
 	case "http":
+		// Only plain http reads the allowed host, so only plain http
+		// refuses a malformed one (gt-pscf0).
+		if err := checkAllowHTTPHost(allowHTTPHost); err != nil {
+			return err
+		}
 		if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsLoopback() {
 			return nil
 		}
