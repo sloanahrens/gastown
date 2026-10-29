@@ -99,6 +99,28 @@ func TestLoadOrCreateTownSettingsBrokenFileIsAParseError(t *testing.T) {
 	}
 }
 
+// TestLoadOrCreateTownSettingsLeavesAnAbsentFileAbsent: the name says create,
+// the function only reads, so a reader does not seed settings/config.json for
+// a town that never configured one (gt-1g7tg).
+func TestLoadOrCreateTownSettingsLeavesAnAbsentFileAbsent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings", "config.json")
+	ts, err := LoadOrCreateTownSettings(path)
+	if err != nil || ts == nil {
+		t.Fatalf("absent = %v, %v; want defaults", ts, err)
+	}
+	if ts.Type != "town-settings" {
+		t.Errorf("absent = type %q, want the compiled-in defaults", ts.Type)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("reading an absent file left %s behind: %v", path, err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("reading an absent file created %s", filepath.Dir(path))
+	}
+}
+
 // TestSaversNeverReplaceAnUnparseableFile: a writer that could not read the
 // file must not replace it with whatever it built from defaults (G3-03).
 func TestSaversNeverReplaceAnUnparseableFile(t *testing.T) {
