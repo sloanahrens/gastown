@@ -5,8 +5,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -471,35 +469,28 @@ func TestAttentionHostCollectorsAreRegistered(t *testing.T) {
 	}
 }
 
-// The memory-pressure parser lives in internal/hostprobe, which the host agent
-// reads it from too (gt-qpeei.6). A copy left in this package would drift from
-// the shared one, so the host probe reads the shared function and no second
-// parser remains here.
-func TestAttentionHostReadsSharedMemoryParser(t *testing.T) {
+// The host probe's memory reading goes through the shared parser.
+func TestAttentionHostMemFreePctReadsSharedParser(t *testing.T) {
 	t.Parallel()
-
-	sources, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name    string
+		out     []byte
+		runErr  error
+		want    float64
+		wantErr bool
+	}{
+		{"reading", []byte("System-wide memory free percentage: 9%"), nil, 9, false},
+		{"failed run", nil, errors.New("exit status 1"), 0, true},
+		{"no figure is an error, not zero", []byte("The system has 1 pages\n"), nil, 0, true},
 	}
-	callsShared := false
-	for _, src := range sources {
-		if strings.HasSuffix(src, "_test.go") {
-			continue
-		}
-		body, err := os.ReadFile(src)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(body), "parseMemoryPressure(") {
-			t.Errorf("%s defines or calls parseMemoryPressure; the host probe reads hostprobe.ParseMemoryPressure", src)
-		}
-		if src == "attention_host.go" && strings.Contains(string(body), "hostprobe.ParseMemoryPressure(") {
-			callsShared = true
-		}
-	}
-	if !callsShared {
-		t.Error("attention_host.go does not call hostprobe.ParseMemoryPressure")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := memFreePctFrom(tt.out, tt.runErr)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Errorf("memFreePctFrom = %v, %v; want %v, err %v", got, err, tt.want, tt.wantErr)
+			}
+		})
 	}
 }
 

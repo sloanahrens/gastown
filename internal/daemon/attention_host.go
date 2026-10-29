@@ -123,7 +123,12 @@ func (p systemHostProbes) RigParked(rig string) (bool, error) {
 func (systemHostProbes) MemFreePct(ctx context.Context) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "memory_pressure").Output()
+	return memFreePctFrom(exec.CommandContext(ctx, "memory_pressure").Output())
+}
+
+// memFreePctFrom reads the free-memory figure from memory_pressure's result. A
+// failed run is an error, not a reading.
+func memFreePctFrom(out []byte, err error) (float64, error) {
 	if err != nil {
 		return 0, err
 	}

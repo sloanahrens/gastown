@@ -1,5 +1,4 @@
-// Package hostprobe reads the host the daemon runs on. Its parsers are shared
-// by the daemon and by the host agent, so both read a tool's output one way.
+// Package hostprobe parses the output of the tools that report on the host.
 package hostprobe
 
 import (
