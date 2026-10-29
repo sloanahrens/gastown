@@ -1,7 +1,6 @@
 // Package worktree plans the removal of stale crew worktrees, the overseer-*
-// checkouts that pile up under ~/gt/<rig>/crew. It only decides: discovering
-// worktrees, running git and removing anything belong to the target that uses
-// this plan.
+// checkouts that pile up under ~/gt/<rig>/crew. BuildPlan only decides;
+// target.go discovers the worktrees and reads the git state it decides on.
 package worktree
 
 import (
@@ -67,7 +66,7 @@ func BuildPlan(ws []Worktree, now time.Time, readErrs []string) diskmaint.Plan {
 		days := int(age / (24 * time.Hour))
 
 		switch {
-		case w.Dir == cloneDir:
+		case w.Dir == cloneDir && w.Err == "":
 			plan.Kept = append(plan.Kept, diskmaint.Kept{Ref: w.Path, Rule: ruleClone})
 		case !removable(w, age):
 			plan.Kept = append(plan.Kept, diskmaint.Kept{Ref: w.Path, Rule: reportRule(w, days)})
@@ -107,8 +106,13 @@ func removable(w Worktree, age time.Duration) bool {
 }
 
 // reportRule is the rule a kept worktree carries: its owner, which is the part
-// of Dir before the first dash, and the facts a reader needs to judge it.
+// of Dir before the first dash, and the facts a reader needs to judge it. A
+// worktree that could not be read carries its read error in place of the facts,
+// which are unknown, so the plan shows why it was kept.
 func reportRule(w Worktree, days int) string {
 	owner, _, _ := strings.Cut(w.Dir, "-")
+	if w.Err != "" {
+		return fmt.Sprintf("report-only: owner %s, unreadable: %s", owner, w.Err)
+	}
 	return fmt.Sprintf("report-only: owner %s, age %dd, dirty %d", owner, days, w.Dirty)
 }
