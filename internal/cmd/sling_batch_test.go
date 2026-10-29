@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -167,19 +168,28 @@ func TestResolveRigFromBeadIDs_TownLevelPrefix_Errors(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // batchSlingFake is a batchSling whose guards and dispatch are recorded
-// fakes: every bead exists everywhere, and each executeSling succeeds.
+// fakes: every bead exists everywhere unless verifyErrs says otherwise, and
+// each executeSling succeeds unless failExecute names its bead.
 type batchSlingFake struct {
 	b        batchSling
 	executed []string
 	cooked   int
+	// verifyErrs is the bead id -> error b.verifyBead returns. A bead not
+	// listed exists.
+	verifyErrs map[string]error
+	// failExecute is the bead id -> reason its spawn is refused. A bead not
+	// listed spawns. No real sleep, retry or timeout: b.sleep is a no-op.
+	failExecute map[string]string
 }
 
 func newBatchSlingFake(t *testing.T) *batchSlingFake {
 	t.Helper()
 	f := &batchSlingFake{}
 	f.b = batchSling{
-		out:               io.Discard,
-		verifyBead:        func(string) error { return nil },
+		out: io.Discard,
+		verifyBead: func(beadID string) error {
+			return f.verifyErrs[beadID]
+		},
 		beadInfo:          func(string) (*beadInfo, error) { return &beadInfo{Status: "open"}, nil },
 		verifyInTargetRig: func(string, string, string) error { return nil },
 		crossRigGuard:     func(string, string, string) error { return nil },
@@ -190,6 +200,9 @@ func newBatchSlingFake(t *testing.T) *batchSlingFake {
 		},
 		execute: func(p SlingParams) (*SlingResult, error) {
 			f.executed = append(f.executed, p.BeadID)
+			if reason, refused := f.failExecute[p.BeadID]; refused {
+				return nil, errors.New(reason)
+			}
 			return &SlingResult{PolecatName: "toast"}, nil
 		},
 		wakeRig: func(string) {},
@@ -299,5 +312,90 @@ func TestBatchSling_SliceAliasingInCrossRigGuard(t *testing.T) {
 	// Verify the original args are not mutated
 	if args[2] != "gastown" {
 		t.Errorf("args[2] was mutated from 'gastown' to %q — slice aliasing bug", args[2])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Partial failure and cause preservation (gt-u4x82)
+// ---------------------------------------------------------------------------
+
+// batchSlingTownDir is a town root whose .beads dir exists, so the batch's
+// real routing lookups (only the guards are faked) have somewhere to look.
+func batchSlingTownDir(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	return beadsDir
+}
+
+// TestBatchSling_PartialFailureReturnsError: three beads where the second
+// fails to spawn. The run returns an error naming that bead, and the first
+// and third are still slung — a partial failure does not roll back the
+// successes, but it does make the command exit non-zero.
+func TestBatchSling_PartialFailureReturnsError(t *testing.T) {
+	t.Parallel()
+	f := newBatchSlingFake(t)
+	f.failExecute = map[string]string{"gt-bbb": "no free polecat slot"}
+
+	err := f.b.run([]string{"gt-aaa", "gt-bbb", "gt-ccc"}, "gastown", batchSlingTownDir(t))
+	if err == nil {
+		t.Fatal("expected an error for the refused bead, got nil")
+	}
+	if !strings.Contains(err.Error(), "gt-bbb") {
+		t.Errorf("error should name the failed bead, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "gt-aaa") || strings.Contains(err.Error(), "gt-ccc") {
+		t.Errorf("error should name only the failed bead, got: %v", err)
+	}
+	if got := strings.Join(f.executed, ","); got != "gt-aaa,gt-bbb,gt-ccc" {
+		t.Errorf("dispatched %q, want every bead attempted (gt-aaa,gt-bbb,gt-ccc)", got)
+	}
+}
+
+// TestBatchSling_AllFailedKeepsMessage: when every bead is refused the error
+// keeps the "0/N succeeded" wording, and still names the failed beads.
+func TestBatchSling_AllFailedKeepsMessage(t *testing.T) {
+	t.Parallel()
+	f := newBatchSlingFake(t)
+	f.failExecute = map[string]string{"gt-aaa": "boom", "gt-bbb": "boom"}
+
+	err := f.b.run([]string{"gt-aaa", "gt-bbb"}, "gastown", batchSlingTownDir(t))
+	if err == nil {
+		t.Fatal("expected an error when every bead failed, got nil")
+	}
+	for _, want := range []string{"batch sling failed: 0/2 succeeded", "gt-aaa", "gt-bbb"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestBatchSling_VerifyBeadCausePreserved: a verifyBead failure that is not a
+// missing bead (Dolt down, a timeout) keeps its cause, so the error says both
+// which bead was refused and why.
+func TestBatchSling_VerifyBeadCausePreserved(t *testing.T) {
+	t.Parallel()
+	f := newBatchSlingFake(t)
+	cause := errors.New("dolt: connection refused")
+	f.verifyErrs = map[string]error{"gt-bbb": cause}
+
+	err := f.b.run([]string{"gt-aaa", "gt-bbb", "gt-ccc"}, "gastown", batchSlingTownDir(t))
+	if err == nil {
+		t.Fatal("expected an error for the unreadable bead, got nil")
+	}
+	if !strings.Contains(err.Error(), "gt-bbb") {
+		t.Errorf("error should name the bead, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), cause.Error()) {
+		t.Errorf("error should keep the cause %q, got: %v", cause, err)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("cause should be wrapped, not flattened: %v", err)
+	}
+	if len(f.executed) != 0 {
+		t.Errorf("slung %v after the up-front check failed", f.executed)
 	}
 }
