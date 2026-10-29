@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -50,6 +51,12 @@ func stubSupervisor(t *testing.T, goos, file string, state templates.SupervisorS
 		run: func(a []string) error {
 			calls.argv = append(calls.argv, append([]string{}, a...))
 			return runErr
+		},
+		// The host has no docker to read a container with unless a test says
+		// otherwise; a fake that fails is never mistaken for an absent
+		// container.
+		dockerInspect: func([]string) ([]byte, error) {
+			return nil, errors.New("docker: daemon unreachable")
 		},
 		stateFor: func(kind string) templates.SupervisorState {
 			s := state
@@ -1148,6 +1155,243 @@ func stubContainerTown(t *testing.T, cfg *config.DaemonPatrolConfig) (*daemonCon
 	return c, calls
 }
 
+// inspectArgv is the one docker command the container state read runs.
+func inspectArgv(container string) []string {
+	return []string{"docker", "--context", defaultDockerContext, "inspect",
+		"-f", "{{.State.Status}} {{.Config.Image}}", container}
+}
+
+// absentContainer is the run of an inspect docker answered "No such object"
+// for: the marker on stderr with the exit, nothing on stdout.
+func absentContainer(argv []string) ([]byte, error) {
+	return nil, &dockerRunError{
+		stderr: "Error: No such object: " + argv[len(argv)-1] + "\n",
+		err:    errors.New("exit status 1"),
+	}
+}
+
+// The container state read maps what docker inspects into the supervisor
+// state, under the town's own container name and the explicit context. An
+// absent container is known and not running; a read that failed in any other
+// way is unknown, which is never the same as not running, and only stderr can
+// say the container is absent (gt-qpeei.18).
+func TestContainerJobState(t *testing.T) {
+	t.Parallel()
+	const name = "gt-town-daemon-1"
+	tests := []struct {
+		name    string
+		stdout  string // the inspect format's output
+		stderr  string // docker's diagnostics on a failed run
+		err     error  // a runner failure with no docker command behind it
+		want    templates.SupervisorState
+		wantErr string // a substring of the error, "" when the read has none
+	}{
+		{"running", "running gt-daemon:abc123\n", "", nil,
+			templates.SupervisorState{Loaded: true, Status: "running", Image: "gt-daemon:abc123"}, ""},
+		{"exited", "exited gt-daemon:abc123\n", "", nil,
+			templates.SupervisorState{Loaded: true, Status: "exited", Image: "gt-daemon:abc123"}, ""},
+		{"restarting", "restarting gt-daemon:abc123\n", "", nil,
+			templates.SupervisorState{Loaded: true, Status: "restarting", Image: "gt-daemon:abc123"}, ""},
+		{"no_such_object", "", "Error: No such object: gt-town-daemon-1\n", nil,
+			templates.SupervisorState{}, ""},
+		// The marker in stdout is not docker's verdict: a status the format
+		// printed can read "No such object" while the read itself failed.
+		{"marker_on_stdout_is_not_absent", "Error: No such object: gt-town-daemon-1\n",
+			"Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n", nil,
+			templates.SupervisorState{}, "exit status 1"},
+		{"docker_unreachable", "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n", nil,
+			templates.SupervisorState{}, "exit status 1"},
+		{"runner_cannot_exec_docker", "", "", &exec.Error{Name: "docker", Err: exec.ErrNotFound},
+			templates.SupervisorState{}, "executable file not found"},
+		{"unreadable_status", "running\n", "", nil,
+			templates.SupervisorState{}, "no status and image"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var asked []string
+			read := ContainerJobState(func(argv []string) ([]byte, error) {
+				asked = argv
+				switch {
+				case tt.stderr != "":
+					return []byte(tt.stdout), &dockerRunError{stderr: tt.stderr, err: errors.New("exit status 1")}
+				default:
+					return []byte(tt.stdout), tt.err
+				}
+			}, defaultDockerContext, name)
+
+			st := read(config.SupervisorContainer)
+			if want := inspectArgv(name); strings.Join(asked, " ") != strings.Join(want, " ") {
+				t.Errorf("ran %q, want %q", strings.Join(asked, " "), strings.Join(want, " "))
+			}
+			if st.Kind != config.SupervisorContainer || st.Container != name || st.LastExit != -1 {
+				t.Errorf("state = %+v, want kind container, container %s and LastExit -1", st, name)
+			}
+			if tt.wantErr == "" {
+				if st.Err != nil {
+					t.Fatalf("Err = %v, want none", st.Err)
+				}
+			} else if st.Err == nil || !strings.Contains(st.Err.Error(), tt.wantErr) {
+				t.Fatalf("Err = %v, want a failure naming %q", st.Err, tt.wantErr)
+			}
+			if st.Loaded != tt.want.Loaded || st.Status != tt.want.Status || st.Image != tt.want.Image {
+				t.Errorf("state = %+v, want Loaded=%v status %q image %q",
+					st, tt.want.Loaded, tt.want.Status, tt.want.Image)
+			}
+		})
+	}
+}
+
+// A container town's status reads its own container: the name from the town's
+// settings, the same one the compose file and the owner id use, under the
+// explicit context — a scratch town never inspects the live container.
+func TestDaemonStatus_ContainerTownReadsItsOwnContainer(t *testing.T) {
+	t.Parallel()
+	const image = "gt-daemon:abc123"
+	tests := []struct {
+		name  string
+		cfg   *config.DaemonPatrolConfig
+		finds string // the container the inspect must name
+	}{
+		{"town naming its own container", containerTownConfig("scratch-daemon-1", "scratch"), "scratch-daemon-1"},
+		{"town naming the default", containerTownConfig(config.DefaultContainerName, config.DefaultComposeProject), config.DefaultContainerName},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, _ := stubContainerTown(t, tt.cfg)
+			c.statusLine = c.supervisedLine
+			var asked []string
+			c.dockerInspect = func(argv []string) ([]byte, error) {
+				asked = argv
+				return []byte("running " + image + "\n"), nil
+			}
+			c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+			var out strings.Builder
+			if err := c.daemonStatus(&out, t.TempDir()); err != nil {
+				t.Fatalf("daemonStatus: %v", err)
+			}
+			if want := inspectArgv(tt.finds); strings.Join(asked, " ") != strings.Join(want, " ") {
+				t.Errorf("ran %q, want %q", strings.Join(asked, " "), strings.Join(want, " "))
+			}
+			want := "Supervised: container " + tt.finds + " running " + image + "\n"
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("status output = %q, want it to carry %q", out.String(), want)
+			}
+		})
+	}
+}
+
+// A container town whose settings do not name a container this binary may act
+// on has an unknown state and runs no docker command: the live default is
+// never the fallback for a name the town left out (gt-ix1kz).
+func TestDaemonStatus_ContainerTownWithoutNamesIsUnknown(t *testing.T) {
+	t.Parallel()
+	settings := []struct {
+		name string
+		cfg  *config.DaemonPatrolConfig
+	}{
+		{"container_name only", &config.DaemonPatrolConfig{
+			Supervisor: config.SupervisorContainer, ContainerNameSetting: "scratch-daemon-1"}},
+		{"compose_project only", &config.DaemonPatrolConfig{
+			Supervisor: config.SupervisorContainer, ComposeProjectSetting: "scratch"}},
+		{"a name docker cannot take", &config.DaemonPatrolConfig{
+			Supervisor: config.SupervisorContainer, ContainerNameSetting: "-nope", ComposeProjectSetting: "scratch"}},
+	}
+	for _, tt := range settings {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, _ := stubContainerTown(t, tt.cfg)
+			c.statusLine = c.supervisedLine
+			ran := false
+			c.dockerInspect = func([]string) ([]byte, error) {
+				ran = true
+				return []byte("running gt-daemon:abc123\n"), nil
+			}
+			c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+			var out strings.Builder
+			_ = c.daemonStatus(&out, t.TempDir())
+			if ran {
+				t.Error("inspected a container the town's settings do not name")
+			}
+			if !strings.Contains(out.String(), "Supervised: container (unverified - ") {
+				t.Errorf("status output = %q, want the container line unverified", out.String())
+			}
+			if strings.Contains(out.String(), config.DefaultContainerName) {
+				t.Errorf("status output = %q, names the live default %s", out.String(), config.DefaultContainerName)
+			}
+		})
+	}
+}
+
+// Settings that cannot be read leave the town's supervisor unknown: the file
+// reading describes the host's own manager, which a container town does not
+// run under, and "none" would claim the town has no supervisor (gt-qpeei.18).
+func TestDaemonStatus_UnreadableSettingsIsUnknown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
+		return nil, errors.New("daemon.json: unexpected end of JSON input")
+	}
+	c.statusLine = c.supervisedLine
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	var out strings.Builder
+	if err := c.daemonStatus(&out, town); err != nil {
+		t.Fatalf("daemonStatus: %v", err)
+	}
+	if !strings.Contains(out.String(), "Supervised: unknown (unverified - ") {
+		t.Errorf("status output = %q, want the supervisor line unverified", out.String())
+	}
+	if strings.Contains(out.String(), config.SupervisorLaunchd) {
+		t.Errorf("status output = %q, reads the host's launchd for a town whose settings could not be read", out.String())
+	}
+}
+
+// A container town's restart never falls back to the hand stop: an absent
+// container runs no daemon to replace, and the lock PID of a container town is
+// not a process this host may signal (gt-qpeei.10).
+func TestRestartDaemon_ContainerAbsentContainerIsNotStoppedByHand(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeComposeFile(t, town)
+	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
+	c.dockerInspect = absentContainer
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	if _, _, err := c.restartDaemon(town); err == nil {
+		t.Fatal("restarted although docker could not start the daemon")
+	}
+	if calls.stopped {
+		t.Error("stopped the daemon by hand: a container town's lock PID names no host process")
+	}
+}
+
+// The same for a start: an absent container is not a job to bootstrap beside a
+// failed command, which would bring up the whole compose project.
+func TestStartDaemon_ContainerAbsentContainerIsNotBootstrapped(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeComposeFile(t, town)
+	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
+	c.dockerInspect = absentContainer
+	c.isRunning = func(string) (bool, int, error) { return false, 0, nil }
+
+	if _, _, err := c.startDaemon(town); err == nil {
+		t.Fatal("started although docker could not start the daemon")
+	}
+	if len(calls.argv) != 1 || !strings.HasSuffix(calls.joined(), "up -d daemon") {
+		t.Errorf("ran %v, want the start alone", calls.argv)
+	}
+	if calls.spawned {
+		t.Error("spawned a daemon by hand")
+	}
+}
+
 // A town that sets daemon.supervisor to container starts its daemon through
 // docker compose: the explicit context (never the global one), the town's
 // compose project, the compose file, and the daemon service.
@@ -1452,15 +1696,18 @@ func productionContainerControl(cfg *config.DaemonPatrolConfig) (*daemonControl,
 		calls.argv = append(calls.argv, append([]string{}, argv...))
 		return errors.New("docker: daemon unreachable")
 	}
+	c.dockerInspect = func([]string) ([]byte, error) {
+		return nil, errors.New("docker: daemon unreachable")
+	}
 	c.stopDirect = func(string) error { calls.stopped = true; return nil }
 	c.spawn = func(string) (int, error) { calls.spawned = true; return 1234, nil }
 	c.sleep = func(time.Duration) {}
 	return c, calls
 }
 
-// The container kind has no job reader yet, so its state is unknown, never
-// "not loaded": a failed start that read "not loaded" would be retried as a
-// bootstrap, which brings up the whole compose project.
+// A container whose state cannot be read is unknown, never "not loaded": a
+// failed start that read "not loaded" would be retried as a bootstrap, which
+// brings up the whole compose project.
 func TestStartDaemon_ContainerFailedStartIsNotBootstrapped(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -1500,9 +1747,9 @@ func TestRestartDaemon_ContainerFailedRestartLeavesTheDaemonAlone(t *testing.T) 
 }
 
 // A container town's daemon runs in another namespace, so daemon.lock's PID
-// is not a process this host may signal. With the container job's state still
-// unread, the stop must refuse instead of falling through to that signal, the
-// mop-up the launchd and systemd kinds may use (gt-qpeei.10).
+// is not a process this host may signal. With the container's state unreadable,
+// the stop must refuse instead of falling through to that signal, the mop-up
+// the launchd and systemd kinds may use (gt-qpeei.10).
 func TestRunDaemonStop_ContainerUnknownStateNeverSignalsTheLockPID(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -1526,6 +1773,32 @@ func TestRunDaemonStop_ContainerUnknownStateNeverSignalsTheLockPID(t *testing.T)
 	}
 }
 
+// An absent container needs no supervisor command at all: docker proved the
+// daemon runs nowhere of this town's, so the lock is stale — and its PID is
+// still not a process this host may signal (gt-qpeei.18).
+func TestRunDaemonStop_ContainerAbsentContainerNeverSignalsTheLockPID(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeComposeFile(t, town)
+	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
+	c.dockerInspect = absentContainer
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	err := c.stopDaemon(io.Discard, town)
+	if err == nil {
+		t.Fatal("reported a stop although the lock of a container that does not exist was all that was found")
+	}
+	if calls.stopped {
+		t.Fatal("signaled the stale lock PID of a container town")
+	}
+	if len(calls.argv) != 0 {
+		t.Errorf("ran %v, want no docker command for a container docker reports as absent", calls.argv)
+	}
+	if !strings.Contains(err.Error(), "scratch-daemon-1") {
+		t.Errorf("error = %v, want it to name the absent container", err)
+	}
+}
+
 // A container job that is loaded but whose stop command fails leaves the
 // daemon's fate unproven, and the lock is still not a license to signal: the
 // stop reports the failed command and the one that does stop the container.
@@ -1534,8 +1807,8 @@ func TestRunDaemonStop_ContainerFailedStopNeverSignalsTheLockPID(t *testing.T) {
 	town := t.TempDir()
 	compose := writeComposeFile(t, town)
 	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
-	c.stateFor = func(kind string) templates.SupervisorState {
-		return templates.SupervisorState{Kind: kind, Loaded: true, LastExit: -1}
+	c.dockerInspect = func([]string) ([]byte, error) {
+		return []byte("running gt-daemon:abc\n"), nil
 	}
 	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
 

@@ -151,6 +151,42 @@ func TestStatusLine(t *testing.T) {
 	}
 }
 
+// A container is rendered by its name and what docker says about it, never
+// against the lock's PID: that number belongs to the container's namespace,
+// so it is nothing to compare here (gt-qpeei.10). An unreadable state stays
+// unverified rather than reading as an absent container (gt-qpeei.18).
+func TestStatusLine_Container(t *testing.T) {
+	t.Parallel()
+	const name = "gt-town-daemon-1"
+	tests := []struct {
+		name    string
+		state   SupervisorState
+		lockPID int
+		want    string
+	}{
+		{"running", SupervisorState{Kind: "container", Loaded: true, Container: name, Status: "running", Image: "gt-daemon:abc123"},
+			4242, "container gt-town-daemon-1 running gt-daemon:abc123"},
+		{"exited", SupervisorState{Kind: "container", Loaded: true, Container: name, Status: "exited", Image: "gt-daemon:abc123"},
+			0, "container gt-town-daemon-1 exited gt-daemon:abc123"},
+		{"restarting", SupervisorState{Kind: "container", Loaded: true, Container: name, Status: "restarting", Image: "gt-daemon:abc123"},
+			0, "container gt-town-daemon-1 restarting gt-daemon:abc123"},
+		{"absent", SupervisorState{Kind: "container", Container: name}, 4242,
+			"container gt-town-daemon-1 (does not exist)"},
+		{"unreadable", SupervisorState{Kind: "container", Container: name, Err: errors.New("docker unreachable")}, 4242,
+			"container gt-town-daemon-1 (unverified - docker unreachable)"},
+		{"no container named", SupervisorState{Kind: "container", Err: errors.New("daemon.container_name and daemon.compose_project: set both or neither")}, 0,
+			"container (unverified - daemon.container_name and daemon.compose_project: set both or neither)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.state.StatusLine(tt.lockPID); got != tt.want {
+				t.Errorf("StatusLine(%d) = %q, want %q", tt.lockPID, got, tt.want)
+			}
+		})
+	}
+}
+
 // SupervisorStatusLine composes the file reading with the live one: a file
 // installed for another town leaves this town unsupervised, whatever the job
 // named in it is doing.

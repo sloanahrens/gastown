@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // LaunchdLabel is the launchd job label the rendered plist carries.
@@ -37,12 +39,19 @@ type SupervisorReader func(kind string) SupervisorState
 // daemon, losing the flock and exiting non-zero every ThrottleInterval
 // (gt-sq9e).
 type SupervisorState struct {
-	Kind     string // "launchd", "systemd", or "" where no supervisor exists
-	Loaded   bool   // the service manager knows the job
-	PID      int    // the process the job runs; 0 when it has none
+	Kind     string // "launchd", "systemd", "container", or "" where no supervisor exists
+	Loaded   bool   // the service manager knows the job, or docker knows the container
+	PID      int    // the process the job runs; 0 when it has none, and always 0 for a container
 	Runs     int    // how many times the service manager has spawned it
 	LastExit int    // exit status of its last run; -1 when unreported
 	Err      error  // the job's state could not be read; not the same as not loaded
+
+	// Container, Status and Image are what the container kind reads: the
+	// container asked about, the state docker reports for it (running, exited,
+	// restarting) and the image it runs. Empty for the file kinds.
+	Container string
+	Status    string
+	Image     string
 }
 
 // supervisorHost is what the supervisor readings take from the host: its OS,
@@ -227,8 +236,12 @@ func (h supervisorHost) respawn(townRoot string, read SupervisorReader) (Supervi
 
 // StatusLine renders the "Supervised:" value for a daemon holding lockPID;
 // the bare kind means the supervisor's own process is that daemon, and every
-// other reading names what the supervisor is doing instead.
+// other reading names what the supervisor is doing instead. A container is
+// rendered by name and state, never against lockPID.
 func (s SupervisorState) StatusLine(lockPID int) string {
+	if s.Kind == config.SupervisorContainer {
+		return s.containerLine()
+	}
 	switch {
 	case s.Kind == "" || s.Kind == "none":
 		return "none"
@@ -258,6 +271,28 @@ func (s SupervisorState) StatusLine(lockPID int) string {
 		// failure to name: the evidence says the daemon is down, and whether
 		// the job brings it back is the manager's restart policy.
 		return fmt.Sprintf("%s (loaded, running no daemon%s)", s.Kind, s.evidence())
+	}
+}
+
+// containerLine renders the container kind: the container the town's settings
+// named, then what docker reports for it. A PID plays no part — the daemon's
+// process is in the container's namespace, so a host process number says
+// nothing about it (gt-qpeei.10) — and an unreadable state stays "unverified"
+// rather than reading as an absent container.
+func (s SupervisorState) containerLine() string {
+	line := config.SupervisorContainer
+	if s.Container != "" {
+		line += " " + s.Container
+	}
+	switch {
+	case s.Err != nil:
+		return fmt.Sprintf("%s (unverified - %v)", line, s.Err)
+	case !s.Loaded:
+		return line + " (does not exist)"
+	case s.Image == "":
+		return line + " " + s.Status
+	default:
+		return fmt.Sprintf("%s %s %s", line, s.Status, s.Image)
 	}
 }
 
