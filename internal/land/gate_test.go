@@ -375,6 +375,8 @@ func TestWithSlotForCommandSkipsADeclaredContainerFreeCommand(t *testing.T) {
 		"GT_TEST_DOCKER=0 make test && GT_TEST_DOCKER=0 make lint",
 		"GT_TEST_DOCKER=0 make test; GT_TEST_DOCKER=0 make lint",
 		"GT_TEST_DOCKER=0 make test\nGT_TEST_DOCKER=0 make lint",
+		"GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh 2>&1",
+		"GT_TEST_DOCKER=0 make test 2>&1; GT_TEST_DOCKER=0 make lint",
 	} {
 		t.Run(cmd, func(t *testing.T) {
 			t.Parallel()
@@ -425,6 +427,12 @@ func TestWithSlotForCommandKeepsTheSlotOtherwise(t *testing.T) {
 		"make lint; GT_TEST_DOCKER=0 make test",
 		"true | GT_TEST_DOCKER=0 make test",
 		"GT_TEST_DOCKER=0 make test | tee log",
+		"",
+		"   ",
+		"GT_TEST_DOCKER=0 FOO=1 GT_TEST_DOCKER=1 bash scripts/post-land-shell.sh",
+		"GT_TEST_DOCKER=0 GT_TEST_DOCKER=1 make test",
+		"GT_TEST_DOCKER=0 env -u GT_TEST_DOCKER bash scripts/post-land-shell.sh",
+		"GT_TEST_DOCKER=0 env GT_TEST_DOCKER=1 bash scripts/post-land-shell.sh",
 	} {
 		t.Run(cmd, func(t *testing.T) {
 			t.Parallel()
