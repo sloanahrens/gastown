@@ -150,6 +150,19 @@ func HasLabel(labels []string, want string) bool {
 	return false
 }
 
+// HumanHeld reports whether a bead wears a hold only a person can settle:
+// HumanOnlyLabel, OverseerOnlyLabel or OperatorOnlyLabel. A rejected or
+// reverted bead wearing one keeps its holder, since the holder is the one
+// who reads the refusal and can act on it (gt-me800, gt-4rivs).
+func HumanHeld(labels []string) bool {
+	for _, want := range []string{HumanOnlyLabel, OverseerOnlyLabel, OperatorOnlyLabel} {
+		if HasLabel(labels, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // withoutLabels returns labels with every entry of drop removed, matching as
 // the rule does (case- and space-insensitive). The input is never modified.
 func withoutLabels(labels, drop []string) []string {

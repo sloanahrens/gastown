@@ -220,6 +220,34 @@ func TestHasLabel(t *testing.T) {
 	}
 }
 
+// TestHumanHeld pins the holds that keep a rejected or reverted bead with its
+// holder: the human-only label and the two overseer-first labels that replace
+// it, matched as HasLabel matches. needs-human is not among them.
+func TestHumanHeld(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		labels []string
+		held   bool
+	}{
+		{"human-only", []string{HumanOnlyLabel}, true},
+		{"overseer-only", []string{OverseerOnlyLabel}, true},
+		{"operator-only", []string{OperatorOnlyLabel}, true},
+		{"overseer-only typed by hand", []string{" Overseer-Only "}, true},
+		{"among others", []string{"gt:bug", "OPERATOR-ONLY"}, true},
+		{"prefix only", []string{"overseer-only-ish"}, false},
+		{"needs-human is not a holder hold", []string{"needs-human"}, false},
+		{"no labels", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HumanHeld(tc.labels); got != tc.held {
+				t.Errorf("HumanHeld(%q) = %v, want %v", tc.labels, got, tc.held)
+			}
+		})
+	}
+}
+
 // TestOverseerFirstLabelsHold pins the overseer-first labels to the hold rule
 // the old names follow: a bead wearing one is held by the dispatch read and by
 // the sling's read, with the reason naming the label as typed. The readers learn

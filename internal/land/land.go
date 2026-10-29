@@ -2337,10 +2337,9 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		// dispatch: only a person can produce its branch, and an unassigned one
 		// is a bead the next tick slings onto a seat that cannot land it
 		// (gt-me800). The crew that holds it reads the rejection and asks the
-		// human for a new branch. This check reads only the old human-only
-		// name, so an overseer-only or operator-only bead is not kept with its
-		// holder here.
-		if !dispatch.HasLabel(now.Labels, dispatch.HumanOnlyLabel) {
+		// human for a new branch. An overseer-only or operator-only bead is
+		// kept with its holder the same way (gt-4rivs).
+		if !dispatch.HumanHeld(now.Labels) {
 			unassigned := ""
 			update.Assignee = &unassigned
 		}
