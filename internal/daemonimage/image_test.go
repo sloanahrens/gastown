@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -107,6 +108,12 @@ func TestBuildImageRefusesBeforeDockerRuns(t *testing.T) {
 		{name: "a relative build context", rev: testRev, breakIt: func(_ *testing.T, b *Builder, _ *[]string) { b.Out = filepath.Join("rel", "out") }, want: `build context "rel/out" is not absolute`},
 		{name: "no Dockerfile", rev: testRev, breakIt: func(_ *testing.T, b *Builder, _ *[]string) { b.Dockerfile = "" }, want: "no Dockerfile named"},
 		{name: "a relative Dockerfile", rev: testRev, breakIt: func(_ *testing.T, b *Builder, _ *[]string) { b.Dockerfile = DockerfilePath }, want: "is not absolute"},
+		{name: "a Dockerfile that is not on disk", rev: testRev, breakIt: func(t *testing.T, b *Builder, _ *[]string) {
+			b.Dockerfile = filepath.Join(t.TempDir(), "Dockerfile")
+		}, want: "is not a file"},
+		{name: "a Dockerfile that is a directory", rev: testRev, breakIt: func(t *testing.T, b *Builder, _ *[]string) {
+			b.Dockerfile = t.TempDir()
+		}, want: "is not a file"},
 		{name: "a binary the image does not copy", rev: testRev, breakIt: func(_ *testing.T, b *Builder, bins *[]string) {
 			(*bins)[2] = filepath.Join(b.Out, "om-extra")
 		}, want: "is not one of the image's binaries"},
@@ -170,15 +177,57 @@ func TestBuildImageRunsWithTheDockerEnvironment(t *testing.T) {
 
 // TestDaemonDockerfileHasNoBuildStep: the image is config only. A compile or a
 // build tool in it would mean the image held a build of its own rather than the
-// binaries the deployer built and proved.
+// binaries the deployer built and proved. The check reads instructions, not the
+// file's text, so a comment naming a build tool is not a failure.
 func TestDaemonDockerfileHasNoBuildStep(t *testing.T) {
 	t.Parallel()
-	body := readDockerfile(t)
-	if strings.Contains(body, "go build") {
-		t.Errorf("%s runs a go build; the binaries are COPYed in", DockerfilePath)
+	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
+		line := in.cmd + " " + strings.Join(in.args, " ")
+		if strings.Contains(line, "go build") {
+			t.Errorf("%s runs a go build in %q; the binaries are COPYed in", DockerfilePath, line)
+		}
+		for _, arg := range in.args {
+			if arg == "make" {
+				t.Errorf("%s runs make in %q; nothing is built inside the image", DockerfilePath, line)
+			}
+		}
 	}
-	if line := regexp.MustCompile(`(?m)^.*\bmake\b.*$`).FindString(body); line != "" {
-		t.Errorf("%s runs %q; nothing is built inside the image", DockerfilePath, strings.TrimSpace(line))
+}
+
+// TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages: the image is
+// config, so no instruction downloads or installs anything over the network and
+// the one RUN is the apt install of ca-certificates, git and tmux. The Dolt
+// client arrives by COPY from the official Dolt image, whose registry layers the
+// daemon verifies by digest, rather than by a download inside a RUN that no
+// checksum would guard.
+func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) {
+	t.Parallel()
+	var runs []string
+	copiedDolt := false
+	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
+		line := in.cmd + " " + strings.Join(in.args, " ")
+		for _, banned := range []string{"curl", "wget", "http://", "https://", "git clone", "tar -", "install -m"} {
+			if strings.Contains(line, banned) {
+				t.Errorf("%s has %q in %q; the image fetches and installs nothing but the three packages", DockerfilePath, banned, line)
+			}
+		}
+		switch in.cmd {
+		case "RUN":
+			runs = append(runs, line)
+		case "COPY":
+			if src := withoutFlags(in.args); len(src) > 0 && filepath.Base(src[0]) == "dolt" {
+				copiedDolt = true
+			}
+		}
+	}
+	if len(runs) != 1 {
+		t.Fatalf("%s has %d RUN instructions, want the one package install: %q", DockerfilePath, len(runs), runs)
+	}
+	if got, want := installedPackages(runs[0]), []string{"ca-certificates", "git", "tmux"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("%s installs %q, want %q", DockerfilePath, got, want)
+	}
+	if !copiedDolt {
+		t.Errorf("%s does not COPY the Dolt client in; it has no other source", DockerfilePath)
 	}
 }
 
@@ -190,7 +239,9 @@ func TestDaemonDockerfileCopiesTheThreeBinaries(t *testing.T) {
 	copied := map[string]bool{}
 	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
 		if in.cmd == "COPY" {
-			copied[in.args[0]] = true
+			if src := withoutFlags(in.args); len(src) > 0 {
+				copied[filepath.Base(src[0])] = true
+			}
 		}
 	}
 	for _, name := range []string{"gt", "bd", "om"} {
@@ -203,27 +254,100 @@ func TestDaemonDockerfileCopiesTheThreeBinaries(t *testing.T) {
 // TestDaemonDockerfileMatchesTheImageTable: the base image and the Dolt version
 // this file names are internal/templates/images.go's, so the table a caller
 // reads and the image built here can never name different versions.
+//
+// The file has two stages: the Dolt client comes from the official Dolt image at
+// DoltVersion, and the image the daemon runs (the last stage) is built FROM
+// DaemonBaseImage.
 func TestDaemonDockerfileMatchesTheImageTable(t *testing.T) {
 	t.Parallel()
-	body := readDockerfile(t)
-	var from []string
+	ins := dockerfileInstructions(t, readDockerfile(t))
 	args := map[string]string{}
-	for _, in := range dockerfileInstructions(t, body) {
-		switch in.cmd {
-		case "FROM":
-			from = append(from, strings.Join(in.args, " "))
-		case "ARG":
+	for _, in := range ins {
+		if in.cmd == "ARG" {
 			if key, value, ok := strings.Cut(in.args[0], "="); ok {
 				args[key] = value
 			}
 		}
 	}
-	if want := []string{templates.DaemonBaseImage}; !reflect.DeepEqual(from, want) {
-		t.Errorf("%s builds FROM %q, want %q (templates.DaemonBaseImage)", DockerfilePath, from, want)
-	}
 	if got := args["DOLT_VERSION"]; got != templates.DoltVersion {
 		t.Errorf("%s installs Dolt %q, want %q (templates.DoltVersion)", DockerfilePath, got, templates.DoltVersion)
 	}
+	var stages []stage
+	for _, in := range ins {
+		if in.cmd == "FROM" {
+			stages = append(stages, newStage(t, in.args, args))
+		}
+	}
+	if len(stages) != 2 {
+		t.Fatalf("%s builds %d stages, want the Dolt client's and the image's", DockerfilePath, len(stages))
+	}
+	if want := "dolthub/dolt:" + templates.DoltVersion; stages[0].image != want {
+		t.Errorf("%s takes the Dolt client from %q, want %q", DockerfilePath, stages[0].image, want)
+	}
+	if stages[0].alias != "dolt" {
+		t.Errorf("the first stage is named %q, want dolt, the name the COPY reads", stages[0].alias)
+	}
+	if want := templates.DaemonBaseImage; stages[1].image != want {
+		t.Errorf("%s builds FROM %q, want %q (templates.DaemonBaseImage)", DockerfilePath, stages[1].image, want)
+	}
+}
+
+// stage is one FROM of the Dockerfile: the image it starts from and the alias a
+// COPY --from names it by.
+type stage struct {
+	image, alias string
+}
+
+// newStage reads a FROM's image and alias, resolving the ARG references the file
+// defines. It fails the test on a reference the file does not define, so an
+// image the test could not resolve is never compared as if it were.
+func newStage(t *testing.T, args []string, values map[string]string) stage {
+	t.Helper()
+	image := dockerArgRef.ReplaceAllStringFunc(args[0], func(ref string) string {
+		name := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(ref, "$"), "{"), "}")
+		if value, ok := values[name]; ok {
+			return value
+		}
+		return ref
+	})
+	if strings.Contains(image, "$") {
+		t.Fatalf("%s starts a stage from %q, an image the file defines no version of", DockerfilePath, image)
+	}
+	st := stage{image: image}
+	if len(args) > 2 && strings.EqualFold(args[1], "AS") {
+		st.alias = args[2]
+	}
+	return st
+}
+
+// dockerArgRef matches an ARG reference in an instruction operand, in either the
+// ${NAME} or the $NAME form.
+var dockerArgRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// installedPackages returns the packages an apt-get install instruction names,
+// sorted: the words after --no-install-recommends up to the next command.
+func installedPackages(line string) []string {
+	_, after, ok := strings.Cut(line, "--no-install-recommends ")
+	if !ok {
+		return nil
+	}
+	after, _, _ = strings.Cut(after, "&&")
+	pkgs := slices.Clone(strings.Fields(after))
+	slices.Sort(pkgs)
+	return pkgs
+}
+
+// withoutFlags returns an instruction's operands with its --flag entries
+// dropped, so COPY --chmod=0755 gt /usr/local/bin/gt reads as its source gt and
+// its destination.
+func withoutFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--") {
+			out = append(out, arg)
+		}
+	}
+	return out
 }
 
 // dockerfileInstruction is one parsed instruction line of a Dockerfile.
@@ -232,24 +356,39 @@ type dockerfileInstruction struct {
 	args []string
 }
 
-// dockerfileInstructions parses the Dockerfile text: comments and blank lines
-// dropped, and each instruction's command upper-cased. It fails the test on a
-// text it reads no instruction from, so a parser that silently read nothing
-// cannot pass a comparison against nothing.
+// dockerfileInstructions parses the Dockerfile text into instructions: comments
+// and blank lines dropped, backslash continuations joined, and each
+// instruction's command upper-cased. It fails the test on a text it reads no
+// instruction from, so a parser that silently read nothing cannot pass a
+// comparison against nothing.
 func dockerfileInstructions(t *testing.T, body string) []dockerfileInstruction {
 	t.Helper()
 	var out []dockerfileInstruction
+	var logical []string
+	flush := func() {
+		if len(logical) == 0 {
+			return
+		}
+		fields := strings.Fields(strings.Join(logical, " "))
+		logical = nil
+		if len(fields) == 0 {
+			return
+		}
+		out = append(out, dockerfileInstruction{cmd: strings.ToUpper(fields[0]), args: fields[1:]})
+	}
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		cmd, rest, ok := strings.Cut(line, " ")
-		if !ok {
+		if strings.HasSuffix(line, "\\") {
+			logical = append(logical, strings.TrimSpace(strings.TrimSuffix(line, "\\")))
 			continue
 		}
-		out = append(out, dockerfileInstruction{cmd: strings.ToUpper(cmd), args: strings.Fields(rest)})
+		logical = append(logical, line)
+		flush()
 	}
+	flush()
 	if len(out) == 0 {
 		t.Fatalf("%s parsed as no instructions", DockerfilePath)
 	}

@@ -321,6 +321,7 @@ var treeWideGuards = []treeWideGuard{
 		// read the daemon image's Dockerfile, whose deletion they fail on.
 		pkg: "internal/daemonimage",
 		tests: []string{"TestGTPinMatchesThePolecatImageFlow", "TestDaemonDockerfileHasNoBuildStep",
+			"TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages",
 			"TestDaemonDockerfileCopiesTheThreeBinaries", "TestDaemonDockerfileMatchesTheImageTable"},
 		judges:  func(rel string) bool { return rel == "Makefile" || rel == "deploy/daemon/Dockerfile" },
 		removal: true,

@@ -84,9 +84,8 @@ type Builder struct {
 	Dockerfile string
 }
 
-// ImageTag is the tag the daemon image for rev is built with: gt-daemon:<rev>,
-// the tag the compose spec's Image names. It is a local tag only; nothing pulls
-// this image by name.
+// ImageTag is the tag the daemon image for rev is built with: gt-daemon:<rev>.
+// It is a local tag only; nothing pulls this image by name.
 func ImageTag(rev string) string { return "gt-daemon:" + rev }
 
 // binary is one of the three builds: the checkout it is built from, the commit
@@ -244,6 +243,9 @@ func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (str
 	}
 	if !filepath.IsAbs(b.Dockerfile) {
 		return "", fmt.Errorf("daemonimage: Dockerfile %q is not absolute; docker resolves -f against the directory it runs in, not the caller's", b.Dockerfile)
+	}
+	if info, err := os.Stat(b.Dockerfile); err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("daemonimage: Dockerfile %s is not a file; docker would report it only after the base image pulled", b.Dockerfile)
 	}
 	if err := b.checkImageBinaries(bins); err != nil {
 		return "", err
