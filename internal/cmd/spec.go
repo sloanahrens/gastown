@@ -1145,6 +1145,14 @@ type specDispatchEnv struct {
 	Budget        specdispatch.Budget // agents, caps and preferences; live counts filled per tick
 	PerTick       int
 	DryRun        bool
+	// TownRoot is the town the tick runs on: its verdict ledger lives under
+	// that town's runtime directory (specdispatch.LedgerPath, gt-8thox). Empty
+	// records no ledger, which is what a test that checks only what the tick
+	// decided gets.
+	TownRoot string
+	// LedgerWarn is where a ledger the tick could not read or write says so;
+	// nil is stderr. The tick itself never fails over it.
+	LedgerWarn io.Writer
 	// Background hands the tick's slings back in the report instead of running
 	// them (specSlingJob): the daemon runs each one in the background, so the
 	// tick returns once it has planned (gt-5h70s).
@@ -1215,6 +1223,12 @@ func (e specDispatchEnv) showFresh(beadID string) (specdispatch.Spec, error) {
 // takes it, and a skip leaves it ready for the next tick.
 func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report := specDispatchReport{Template: env.Template.Source}
+	defer func() { specRecordTickVerdicts(env, report) }()
+	// The ledger states what this tick saw, so every way out of the tick
+	// records — a held tick and a tick that read no candidates record an empty
+	// set, which clears the verdicts of beads the dispatcher has since taken
+	// (gt-8thox). A dry run decides without acting, so it records nothing and
+	// leaves the last real tick's reasons in place.
 	if hold := env.Hold(); hold != "" {
 		report.Hold = hold
 		return report
@@ -1600,6 +1614,85 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	}
 	report.SlingTook = env.Now().Sub(slingAt)
 	return report
+}
+
+// The classes the verdict ledger records a bead under (gt-8thox): the tick
+// list the bead landed in. They are declared here, not in specdispatch, so the
+// package that decides which list a bead goes in is the one that names it.
+const (
+	specVerdictSkipped  = "skipped"
+	specVerdictRefused  = "refused"
+	specVerdictPlanning = "planning"
+	specVerdictFailed   = "failed"
+	specVerdictDeferred = "deferred"
+)
+
+// specTickVerdicts folds a finished tick's decisions into ledger entries: one
+// per bead the tick did not sling, carrying its class and the line it was
+// reported under as the reason. The lists are folded least specific first, so
+// a bead in two of them keeps the class that says what became of it — a
+// deferred entry stays in Skipped too, and deferred wins (gt-8thox). The order
+// is the report's, so the ledger reads back the same from run to run.
+func specTickVerdicts(report specDispatchReport) []specdispatch.Entry {
+	lists := []struct {
+		class   string
+		entries []specDispatchEntry
+	}{
+		{specVerdictSkipped, report.Skipped},
+		{specVerdictRefused, report.Refused},
+		{specVerdictPlanning, report.Planning},
+		{specVerdictFailed, report.Failed},
+		{specVerdictDeferred, report.Deferred},
+	}
+	var out []specdispatch.Entry
+	at := map[string]int{}
+	for _, l := range lists {
+		for _, e := range l.entries {
+			entry := specdispatch.Entry{Bead: e.Bead, Rig: e.Rig, Class: l.class, Reason: e.Line}
+			if i, ok := at[e.Bead]; ok {
+				out[i] = entry
+				continue
+			}
+			at[e.Bead] = len(out)
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// specRecordTickVerdicts records the tick's verdicts in its town's ledger
+// (gt-8thox). A tick with no town to record to, and a dry run, record nothing:
+// the dry run decides without acting, so its reasons would overwrite the real
+// tick's.
+func specRecordTickVerdicts(env specDispatchEnv, report specDispatchReport) {
+	if env.TownRoot == "" || env.DryRun {
+		return
+	}
+	warn := env.LedgerWarn
+	if warn == nil {
+		warn = os.Stderr
+	}
+	specRecordVerdictsTo(warn, env.TownRoot, env.Now(), specTickVerdicts(report))
+}
+
+// specRecordVerdictsTo folds one tick's entries into the verdict ledger at
+// townRoot and saves it. A ledger it cannot read or write is one warning line
+// on warn and nothing more: the ledger reports on the tick, and a tick that
+// decided and slung correctly is not failed by the file it could not write.
+// A ledger that could not be read is left as it is rather than recorded onto
+// empty, because that would reset the first-seen time of every verdict it
+// holds (gt-8thox).
+func specRecordVerdictsTo(warn io.Writer, townRoot string, at time.Time, entries []specdispatch.Entry) {
+	path := specdispatch.LedgerPath(townRoot)
+	ledger, err := specdispatch.LoadLedger(path)
+	if err != nil {
+		fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: %v\n", err)
+		return
+	}
+	ledger.Record(at, entries)
+	if err := ledger.Save(path); err != nil {
+		fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: %v\n", err)
+	}
 }
 
 // specOMThresholdRead is one rig's review-threshold read: the value, or the
@@ -2332,6 +2425,9 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		Budget:   budget,
 		PerTick:  perTick,
 		DryRun:   specDispatchDryRun,
+		// The verdict ledger the dashboard reads, under this town's runtime
+		// directory (gt-8thox).
+		TownRoot: townRoot,
 
 		Background: specDispatchBackground,
 		InFlight:   inFlight,
