@@ -96,6 +96,35 @@ func (p *Postgres) RevokeToken(ctx context.Context, token string) (bool, error) 
 	return tag.RowsAffected() == 1, nil
 }
 
+// RevokeActorTokens revokes every live token of actor and reports how many it
+// ended; an expired token is not live, so it is neither ended nor counted. An
+// actor with no live token is a success that ended zero: revoking a seat whose
+// token is already gone is what a removal path does.
+func (p *Postgres) RevokeActorTokens(ctx context.Context, actor string) (int, error) {
+	if actor == "" {
+		return 0, api.Invalid("a token needs an actor")
+	}
+	tag, err := p.pool.Exec(ctx, "UPDATE tracker.tokens SET revoked_at = now() WHERE actor = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())", actor)
+	if err != nil {
+		return 0, fmt.Errorf("store: revoke actor tokens: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// RevokeTokenID revokes the live token with id, reporting false when id names
+// none that is live (revoking, revoked or expired). The id is compared as
+// text, so one that is not a uuid is simply no token, not a failed statement.
+func (p *Postgres) RevokeTokenID(ctx context.Context, id string) (bool, error) {
+	if id == "" {
+		return false, api.Invalid("revoking by id needs the token id")
+	}
+	tag, err := p.pool.Exec(ctx, "UPDATE tracker.tokens SET revoked_at = now() WHERE id::text = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())", id)
+	if err != nil {
+		return false, fmt.Errorf("store: revoke token id: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // Ping reports whether the database answers.
 func (p *Postgres) Ping(ctx context.Context) error {
 	if err := p.pool.Ping(ctx); err != nil {

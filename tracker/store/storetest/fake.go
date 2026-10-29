@@ -1,14 +1,17 @@
 // Package storetest holds the in-memory store.Store for the unit tier. It
 // implements the methods its Fake-flagged contract cases cover: create and
 // get, the claim, release and transfer guards, the plain close those guards
-// refuse, the creates a Batch applies, and the comments and links an export
-// reads. Every other method returns store.ErrUnimplemented, so a unit test
+// refuse, the creates a Batch applies, the comments and links an export
+// reads, and the tokens an admin issues and revokes. Every other method
+// returns store.ErrUnimplemented, so a unit test
 // that reaches past them fails loudly rather than reading a store that only
 // looks modeled.
 package storetest
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"slices"
@@ -27,7 +30,20 @@ type Fake struct {
 	issues   map[string]api.Issue
 	comments []api.Comment
 	links    []api.ExportDependency
-	next     int
+	// tokens is keyed by the token itself; the fake keeps no hash because
+	// nothing it holds ever leaves this process.
+	tokens    map[string]fakeToken
+	next      int
+	nextToken int
+}
+
+// fakeToken is one issued token as the fake keeps it.
+type fakeToken struct {
+	id      string
+	actor   string
+	scope   api.Scope
+	expires time.Time // zero means never
+	revoked bool
 }
 
 var _ store.Store = (*Fake)(nil)
@@ -37,7 +53,7 @@ func NewFake() *Fake { return NewFakeWithClock(time.Now) }
 
 // NewFakeWithClock returns an empty Fake whose timestamps come from now.
 func NewFakeWithClock(now func() time.Time) *Fake {
-	return &Fake{now: now, issues: map[string]api.Issue{}}
+	return &Fake{now: now, issues: map[string]api.Issue{}, tokens: map[string]fakeToken{}}
 }
 
 // rigOf is the rig prefix of an id: the text before its first dash.
@@ -312,6 +328,91 @@ func (*Fake) ConfigGet(context.Context, string) (string, bool, error) {
 	return "", false, unimplemented("ConfigGet")
 }
 func (*Fake) ConfigSet(context.Context, string, string) error { return unimplemented("ConfigSet") }
+
+// IssueTokenScoped stores a token for actor with scope and returns it. The
+// token is random like the Postgres store's, so two issues never collide.
+func (f *Fake) IssueTokenScoped(_ context.Context, actor string, scope api.Scope, expires *time.Time) (string, error) {
+	if actor == "" {
+		return "", api.Invalid("a token needs an actor")
+	}
+	if !scope.Valid() {
+		return "", api.Invalid("scope %q is not seat or admin", scope)
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("storetest: generate token: %w", err)
+	}
+	token := "trk_" + hex.EncodeToString(b)
+	var exp time.Time
+	if expires != nil {
+		exp = *expires
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextToken++
+	f.tokens[token] = fakeToken{id: fmt.Sprintf("token-%05d", f.nextToken), actor: actor, scope: scope, expires: exp}
+	return token, nil
+}
+
+// Identify returns the actor and scope of a live token, or api.ErrUnknownToken
+// for one that is not known, was revoked or has expired.
+func (f *Fake) Identify(_ context.Context, token string) (api.Identity, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.tokens[token]
+	if !ok || !f.liveLocked(t) {
+		return api.Identity{}, api.ErrUnknownToken
+	}
+	return api.Identity{Actor: t.actor, Scope: t.scope}, nil
+}
+
+// liveLocked reports whether t still authorizes: not revoked and not expired.
+func (f *Fake) liveLocked(t fakeToken) bool {
+	switch {
+	case t.revoked:
+		return false
+	case t.expires.IsZero():
+		return true
+	}
+	return f.now().Before(t.expires)
+}
+
+// RevokeActorTokens revokes every live token of actor and reports how many it
+// ended; an actor with none is a success that ended zero.
+func (f *Fake) RevokeActorTokens(_ context.Context, actor string) (int, error) {
+	if actor == "" {
+		return 0, api.Invalid("a token needs an actor")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for token, t := range f.tokens {
+		if t.actor == actor && f.liveLocked(t) {
+			t.revoked = true
+			f.tokens[token] = t
+			n++
+		}
+	}
+	return n, nil
+}
+
+// RevokeTokenID revokes the live token with id, reporting false when id names
+// none that is live.
+func (f *Fake) RevokeTokenID(_ context.Context, id string) (bool, error) {
+	if id == "" {
+		return false, api.Invalid("revoking by id needs the token id")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for token, t := range f.tokens {
+		if t.id == id && f.liveLocked(t) {
+			t.revoked = true
+			f.tokens[token] = t
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (*Fake) EventsAfter(context.Context, int64, int) (api.EventsPage, error) {
 	return api.EventsPage{}, unimplemented("EventsAfter")
 }
