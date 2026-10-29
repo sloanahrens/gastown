@@ -27,9 +27,6 @@ var (
 	// crew directory is skipped, but no rigs at all is a configuration mistake,
 	// not an empty town.
 	errNoRigs = errors.New("no rigs configured")
-	// errNotWired reports an apply to a target that only reads: it plans, and it
-	// runs no command that changes a repository.
-	errNotWired = errors.New("worktree apply: this target removes nothing; the plan is a dry run")
 	// errRedirected reports a git repository location variable in the
 	// environment. The runner passes the process environment to git, so git
 	// would read another repository than the crew checkout it was asked about.
@@ -147,13 +144,6 @@ func (t *Target) Plan(ctx context.Context, p diskmaint.Policy) (diskmaint.Plan, 
 		ws = append(ws, t.read(ctx, c))
 	}
 	return BuildPlan(ws, p.Now, readErrs), nil
-}
-
-// Apply refuses the plan and runs no command: this target reads worktree state,
-// it does not change a worktree, so a caller that ignored a dry run cannot lose
-// one.
-func (t *Target) Apply(context.Context, diskmaint.Plan) (diskmaint.Result, error) {
-	return diskmaint.Result{Target: planTarget}, errNotWired
 }
 
 // checkout is one worktree as `git worktree list --porcelain` reported it.

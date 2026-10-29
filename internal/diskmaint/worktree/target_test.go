@@ -775,19 +775,3 @@ func TestTargetPlanRefusesARedirectedGit(t *testing.T) {
 		})
 	}
 }
-
-// An apply refuses and leaves the tree alone.
-func TestTargetApplyRefusesAndRunsNoCommand(t *testing.T) {
-	t.Parallel()
-	f := newFakeGit(t)
-	got, err := NewTarget(Config{Town: townRoot(t), Rigs: []string{"rig-a"}, Run: f.run, Environ: noRedirect}).Apply(context.Background(), diskmaint.Plan{Target: "worktree"})
-	if !errors.Is(err, errNotWired) {
-		t.Fatalf("Apply error = %v, want errNotWired", err)
-	}
-	if len(f.calls) != 0 {
-		t.Fatalf("Apply ran commands %v, want none", f.calls)
-	}
-	if got.Target != "worktree" {
-		t.Fatalf("Result.Target = %q, want %q", got.Target, "worktree")
-	}
-}
