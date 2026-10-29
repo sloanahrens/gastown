@@ -226,7 +226,52 @@ func TestRunTrackerReplayStopsWithTheSeqToResumeFrom(t *testing.T) {
 	if !errors.Is(err, feedErr) {
 		t.Fatalf("runTrackerReplay = %v, want the feed error", err)
 	}
-	want := "replay stopped: last applied seq 4; fix the cause, then rerun with --since-seq 4\n"
+	want := "replay stopped before applying anything (seq 4); fix the cause, then rerun with --since-seq 4\n"
+	if errOut.String() != want {
+		t.Errorf("stop hint = %q, want %q", errOut.String(), want)
+	}
+}
+
+func TestRunTrackerReplayPrintsTheSeqToResumeAfterAFailingBdCall(t *testing.T) {
+	t.Parallel()
+	events := []api.Event{
+		{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: strPtr("a")},
+		{Seq: 2, Op: "status_changed", IssueID: "gt-1", NewValue: strPtr("open")},
+		{Seq: 3, Op: "closed", IssueID: "gt-1"},
+	}
+	env := replayFixture(events)
+	bdErr := errors.New("bd: database locked")
+	env.newApply = func(string) trackerreplay.Apply {
+		ran := 0
+		return func([]string) error {
+			ran++
+			if ran == 2 {
+				return bdErr
+			}
+			return nil
+		}
+	}
+	var out, errOut bytes.Buffer
+	err := runTrackerReplay(env, &out, &errOut, "gastown", 0, false)
+	if !errors.Is(err, bdErr) {
+		t.Fatalf("runTrackerReplay = %v, want the bd failure", err)
+	}
+	want := "replay stopped: last applied seq 1; fix the cause, then rerun with --since-seq 1\n"
+	if errOut.String() != want {
+		t.Errorf("stop hint = %q, want %q", errOut.String(), want)
+	}
+}
+
+func TestRunTrackerReplaySaysSoWhenARefusalAppliedNothing(t *testing.T) {
+	t.Parallel()
+	events := []api.Event{{Seq: 7, Op: "commented", IssueID: "gt-1"}}
+	var out, errOut bytes.Buffer
+	err := runTrackerReplay(replayFixture(events), &out, &errOut, "gastown", 6, false)
+	var u *trackerreplay.UnreplayableError
+	if !errors.As(err, &u) {
+		t.Fatalf("runTrackerReplay = %v, want the refusal", err)
+	}
+	want := "replay stopped before applying anything (seq 6); fix the cause, then rerun with --since-seq 6\n"
 	if errOut.String() != want {
 		t.Errorf("stop hint = %q, want %q", errOut.String(), want)
 	}

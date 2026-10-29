@@ -112,7 +112,7 @@ func runTrackerReplay(env replayEnv, out, errOut io.Writer, rig string, since in
 	}
 	res, err := trackerreplay.Replay(context.Background(), src, env.newApply(rigDir), since, dryRun, out)
 	if err != nil {
-		fmt.Fprintf(errOut, "replay stopped: last applied seq %d; fix the cause, then rerun with --since-seq %d\n", res.Applied, res.Applied)
+		replayStopHint(errOut, res)
 		return err
 	}
 	if dryRun {
@@ -121,6 +121,17 @@ func runTrackerReplay(env replayEnv, out, errOut io.Writer, rig string, since in
 	}
 	fmt.Fprintf(out, "applied %d bd calls through seq %d\n", res.Commands, res.Applied)
 	return nil
+}
+
+// replayStopHint says how to resume a stopped replay. A run whose first call
+// failed applied nothing, so the hint says so rather than pointing at a seq it
+// never reached: rerunning from there meets the same refusal.
+func replayStopHint(w io.Writer, res trackerreplay.Result) {
+	if res.Commands == 0 {
+		fmt.Fprintf(w, "replay stopped before applying anything (seq %d); fix the cause, then rerun with --since-seq %d\n", res.Applied, res.Applied)
+		return
+	}
+	fmt.Fprintf(w, "replay stopped: last applied seq %d; fix the cause, then rerun with --since-seq %d\n", res.Applied, res.Applied)
 }
 
 // openTrackerReplay resolves the rig's directory, where bd runs, and the

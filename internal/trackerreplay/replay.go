@@ -45,7 +45,7 @@ func (e *UnreplayableError) Error() string {
 	return fmt.Sprintf("tracker event seq %d: cannot replay %s: %s", e.Seq, e.Kind, e.Reason)
 }
 
-// TruncatedError is a since below the oldest seq the feed still holds: the
+// TruncatedError is a cursor below the oldest seq the feed still holds: the
 // events in between were pruned, so a replay from there would leave a gap.
 type TruncatedError struct {
 	Since, Floor int64
@@ -70,6 +70,11 @@ func (e *ApplyError) Error() string {
 
 func (e *ApplyError) Unwrap() error { return e.Err }
 
+// maxPages bounds one replay's reads: a feed that keeps producing events would
+// otherwise hold the command forever, so the run stops and names the seq it
+// reached instead.
+const maxPages = 1000
+
 // Replay reads the feed after since and applies each event in seq order. On a
 // dry run it prints each bd call and runs none; apply is then not used and may
 // be nil. The run stops at the first event it cannot replay or the first bd
@@ -77,15 +82,23 @@ func (e *ApplyError) Unwrap() error { return e.Err }
 func Replay(ctx context.Context, src Source, apply Apply, since int64, dryRun bool, out io.Writer) (Result, error) {
 	res := Result{Applied: since}
 	after := since
-	for {
+	for pages := 0; ; pages++ {
+		if pages == maxPages {
+			return res, fmt.Errorf("tracker events feed did not end within %d pages: stopped at seq %d", maxPages, after)
+		}
 		page, err := src.Events(ctx, after, 0)
 		if err != nil {
 			return res, err
 		}
-		if after == since && page.FirstSeq > 0 && since < page.FirstSeq-1 {
-			return res, &TruncatedError{Since: since, Floor: page.FirstSeq}
+		// Checked on every page, not only the first: a feed pruned while a long
+		// replay runs opens a gap in the pages still to come.
+		if page.FirstSeq > 0 && after < page.FirstSeq-1 {
+			return res, &TruncatedError{Since: after, Floor: page.FirstSeq}
 		}
 		if len(page.Events) == 0 {
+			if page.NextAfter > after {
+				return res, fmt.Errorf("tracker events feed returned an empty page after seq %d but sends the next page to seq %d: refusing to read the feed as ended", after, page.NextAfter)
+			}
 			return res, nil
 		}
 		for _, ev := range page.Events {
@@ -114,7 +127,10 @@ func Replay(ctx context.Context, src Source, apply Apply, since int64, dryRun bo
 // description, and an update to a text field names the field without its new
 // value. Those are refused rather than filled in with bd's defaults.
 func Command(ev api.Event) ([]string, error) {
-	id := ev.IssueID
+	id, err := operand(ev, ev.IssueID, "issue id")
+	if err != nil {
+		return nil, err
+	}
 	switch ev.Op {
 	case "created":
 		title, err := value(ev, ev.NewValue, "title")
@@ -155,7 +171,7 @@ func Command(ev api.Event) ([]string, error) {
 	case "deleted":
 		return []string{"delete", id, "--force"}, nil
 	case "dependency_added":
-		dep, err := value(ev, ev.NewValue, "dependency")
+		dep, err := operandValue(ev, ev.NewValue, "dependency")
 		if err != nil {
 			return nil, err
 		}
@@ -165,7 +181,7 @@ func Command(ev api.Event) ([]string, error) {
 		}
 		return []string{"dep", "add", id, dep, "--type=" + typ}, nil
 	case "dependency_removed":
-		dep, err := value(ev, ev.OldValue, "dependency")
+		dep, err := operandValue(ev, ev.OldValue, "dependency")
 		if err != nil {
 			return nil, err
 		}
@@ -214,6 +230,42 @@ func value(ev api.Event, v *string, what string) (string, error) {
 	return *v, nil
 }
 
+// operandValue is value for an id bd takes as an operand rather than a flag.
+func operandValue(ev api.Event, v *string, what string) (string, error) {
+	s, err := value(ev, v, what)
+	if err != nil {
+		return "", err
+	}
+	return operand(ev, s, what)
+}
+
+// operand refuses an id bd would not read as an operand. The feed's ids are
+// untrusted text: one beginning with "-" becomes a bd flag, and a space or
+// control character makes the dry run's printed command ambiguous.
+func operand(ev api.Event, s, what string) (string, error) {
+	if !isBeadID(s) {
+		return "", unreplayable(ev, ev.Op, fmt.Sprintf("%s %q is not a bead id bd takes as an operand", what, s))
+	}
+	return s, nil
+}
+
+// isBeadID reports whether s is a non-empty run of letters, digits, "-", "." and
+// "_" that does not start with "-".
+func isBeadID(s string) bool {
+	if s == "" || s[0] == '-' {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '.' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func unreplayable(ev api.Event, kind, reason string) error {
 	return &UnreplayableError{Seq: ev.Seq, Kind: kind, Reason: reason}
 }
@@ -222,11 +274,19 @@ func unreplayable(ev api.Event, kind, reason string) error {
 func display(argv []string) string {
 	parts := make([]string, len(argv))
 	for i, a := range argv {
-		if strings.ContainsAny(a, " \t\"'") {
-			parts[i] = strconv.Quote(a)
-		} else {
-			parts[i] = a
-		}
+		parts[i] = quoteArg(a)
 	}
 	return strings.Join(parts, " ")
+}
+
+// quoteArg quotes an argument a shell would split or rewrite: one holding
+// whitespace, a quote, a backslash, or a non-ASCII or control rune, any of
+// which a title from the feed can carry.
+func quoteArg(a string) string {
+	for _, r := range a {
+		if r <= ' ' || r >= 0x7f || r == '"' || r == '\'' || r == '\\' {
+			return strconv.Quote(a)
+		}
+	}
+	return a
 }

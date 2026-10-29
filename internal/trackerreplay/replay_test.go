@@ -182,6 +182,18 @@ func TestCommandRefusesWhatTheFeedCannotReplayAndNamesKindAndSeq(t *testing.T) {
 			ev:   api.Event{Seq: 31, Op: "dependency_removed", IssueID: "gt-1"},
 			kind: "dependency_removed",
 		},
+		"issue id that bd would read as a flag": {
+			ev:   api.Event{Seq: 32, Op: "deleted", IssueID: "--force"},
+			kind: "deleted",
+		},
+		"issue id holding a space": {
+			ev:   api.Event{Seq: 33, Op: "status_changed", IssueID: "gt 1", NewValue: str("open")},
+			kind: "status_changed",
+		},
+		"dependency target that bd would read as a flag": {
+			ev:   api.Event{Seq: 34, Op: "dependency_added", IssueID: "gt-1", NewValue: str("-x"), Comment: str("blocks")},
+			kind: "dependency_added",
+		},
 	}
 	for name, tc := range cases {
 		argv, err := Command(tc.ev)
@@ -315,6 +327,107 @@ func TestReplayRefusesAFeedPrunedPastSince(t *testing.T) {
 	}
 	if _, err := Replay(context.Background(), src, run.apply, 4, false, nil); err != nil {
 		t.Errorf("Replay from 4 with oldest retained 5 = %v, want no error: nothing is missing", err)
+	}
+}
+
+// pageSource serves the pages it was given in order, whatever cursor it is
+// asked for, so a test can script a feed that changes shape between reads.
+type pageSource struct {
+	pages []api.EventsPage
+	asked []int64
+}
+
+func (p *pageSource) Events(_ context.Context, after int64, _ int) (api.EventsPage, error) {
+	p.asked = append(p.asked, after)
+	if len(p.asked) > len(p.pages) {
+		return api.EventsPage{}, nil
+	}
+	return p.pages[len(p.asked)-1], nil
+}
+
+func TestReplayRefusesAPrunedFeedWhoseFirstPageIsEmpty(t *testing.T) {
+	t.Parallel()
+	src := &pageSource{pages: []api.EventsPage{{FirstSeq: 5}}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 2, false, nil)
+	var tr *TruncatedError
+	if !errors.As(err, &tr) || tr.Since != 2 || tr.Floor != 5 {
+		t.Fatalf("Replay from 2 over an empty page with oldest retained 5 = %v, want *TruncatedError{Since:2, Floor:5}", err)
+	}
+	if len(run.calls) != 0 || res != (Result{Applied: 2}) {
+		t.Errorf("result %+v with %d calls, want nothing applied: events 3 and 4 were pruned", res, len(run.calls))
+	}
+}
+
+func TestReplayRefusesAFeedPrunedWhileItReads(t *testing.T) {
+	t.Parallel()
+	src := &pageSource{pages: []api.EventsPage{
+		{Events: []api.Event{{Seq: 2, Op: "deleted", IssueID: "gt-2"}}, FirstSeq: 1, NextAfter: 2},
+		{FirstSeq: 6, NextAfter: 2},
+	}}
+	run := &recorder{}
+	_, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	var tr *TruncatedError
+	if !errors.As(err, &tr) || tr.Since != 2 || tr.Floor != 6 {
+		t.Fatalf("Replay whose feed pruned past its cursor = %v, want *TruncatedError{Since:2, Floor:6}", err)
+	}
+	if len(run.calls) != 1 {
+		t.Errorf("runner was called %d times, want 1: seq 2 ran before the gap was seen", len(run.calls))
+	}
+}
+
+func TestReplayRefusesAnEmptyPageThatSaysMoreEventsFollow(t *testing.T) {
+	t.Parallel()
+	src := &pageSource{pages: []api.EventsPage{
+		{Events: []api.Event{{Seq: 1, Op: "deleted", IssueID: "gt-1"}}, FirstSeq: 1, NextAfter: 1},
+		{NextAfter: 9, FirstSeq: 1},
+	}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "empty page") || !strings.Contains(err.Error(), "9") {
+		t.Fatalf("Replay over an empty page that points at seq 9 = %v, want a refusal naming it", err)
+	}
+	if res != (Result{Applied: 1, Commands: 1}) {
+		t.Errorf("result = %+v, want seq 1 applied and the feed not read as ended", res)
+	}
+	if len(src.asked) != 2 || src.asked[1] != 1 {
+		t.Errorf("pages were asked for after %v, want the second after 1: the cursor follows the last event applied", src.asked)
+	}
+}
+
+// endlessSource hands out one new event per call, forever.
+type endlessSource struct{}
+
+func (endlessSource) Events(_ context.Context, after int64, _ int) (api.EventsPage, error) {
+	next := after + 1
+	return api.EventsPage{Events: []api.Event{{Seq: next, Op: "deleted", IssueID: "gt-x"}}, NextAfter: next}, nil
+}
+
+func TestReplayStopsAFeedThatNeverEnds(t *testing.T) {
+	t.Parallel()
+	run := &recorder{}
+	res, err := Replay(context.Background(), endlessSource{}, run.apply, 0, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "did not end") {
+		t.Fatalf("Replay over an endless feed = %v, want a refusal naming the page bound", err)
+	}
+	if res.Applied != maxPages || len(run.calls) != maxPages {
+		t.Errorf("result %+v with %d calls, want the run stopped after %d events", res, len(run.calls), maxPages)
+	}
+}
+
+func TestReplayDryRunQuotesAValueTheShellWouldRewrite(t *testing.T) {
+	t.Parallel()
+	src := &fakeSource{events: []api.Event{
+		{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: str("line one\nline two")},
+		{Seq: 2, Op: "created", IssueID: "gt-2", NewValue: str("café")},
+	}}
+	var out bytes.Buffer
+	if _, err := Replay(context.Background(), src, nil, 0, true, &out); err != nil {
+		t.Fatalf("Replay dry run: %v", err)
+	}
+	want := "bd create --id=gt-1 \"--title=line one\\nline two\"\nbd create --id=gt-2 \"--title=café\"\n"
+	if out.String() != want {
+		t.Errorf("dry run printed %q, want %q", out.String(), want)
 	}
 }
 
