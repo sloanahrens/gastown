@@ -143,7 +143,7 @@ note per line of
 gt bead note {{issue}} "finding: <fingerprint> <bead id | digest-only>"
 gt bead note {{issue}} "queued: <fingerprint> <P1|P2|P3> <file:line> <claim>"
 gt bead note {{issue}} "<one line of reviewed-lines.txt>"
-cat > /tmp/deep-review-{{issue}}/digest.md <<'EOF'
+gt bead comment {{issue}} 'digest
 landings reviewed: <bead> <commit>
 unparsed=<n>
 slice files, docs read: <one per line>
@@ -152,10 +152,7 @@ filed: 1. <fingerprint> <bead id> <file:line> <claim>
 would file: 1. <fingerprint> <file:line> <claim>
 queued: 1. <fingerprint> <P1|P2|P3> <file:line> <claim>
 refuted=<n> of <total>
-unverified=<n>
-EOF
-gt bead comment {{issue}} "digest
-$(cat /tmp/deep-review-{{issue}}/digest.md)"
+unverified=<n>'
 ```
 A finding past the cap, and every dry-run one, takes a `queued:` line
 that a later run's step 3 picks up until one names it. A P3 finding takes its `p3:`
