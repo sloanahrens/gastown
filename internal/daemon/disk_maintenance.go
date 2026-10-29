@@ -6,8 +6,9 @@ package daemon
 // (gt-dl4nv.15, docs/plans/2026-10-28-disk-maintenance-design.md).
 //
 // A target may set a cadence of its own, and the CI cache volumes do: they grow
-// faster than a daily window can hold, so civol runs every two hours in any
-// window while the rest keep the daily pass (gt-z6qre.17).
+// faster than a daily window can hold, so civol runs on its interval
+// (agentconfig.DiskMaintenanceDefaultCivolInterval by default) in any window
+// while the rest keep the daily pass (gt-z6qre.17).
 //
 // The patrol is opt-in twice over. It runs only when
 // daemon.patrols.disk_maintenance.enabled is true, and it changes nothing
@@ -320,8 +321,9 @@ func (d *Daemon) runDiskMaintenance() {
 
 	mode, err := diskMaintenanceMode(d.patrolConfig)
 	if err != nil {
-		// A mode the patrol cannot act on runs nothing, and is not retried every
-		// tick: the refusal is reported once and the schedule stands.
+		// A mode the patrol cannot act on runs nothing. The mode is checked again
+		// on every tick that has work due; the refusal is reported once rather
+		// than on each of them, and the schedule stands.
 		d.refuseDiskMaintenance(err)
 		return
 	}
@@ -407,7 +409,7 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 		if d.diskMaintSchedule.firstRefusal("absent:" + name) {
 			d.logger.Printf("disk_maintenance: %s: this build has no such target; its interval runs nothing", name)
 		}
-		d.diskMaintSchedule.record(name, now)
+		d.diskMaintSchedule.record(name, s.now())
 	}
 
 	apply := mode == agentconfig.DiskMaintenanceModeApply
@@ -419,7 +421,7 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 			continue
 		}
 		if due.scheduled[name] {
-			d.diskMaintSchedule.record(name, now)
+			d.diskMaintSchedule.record(name, s.now())
 		}
 	}
 	if deferred {
@@ -439,7 +441,7 @@ func (d *Daemon) concludeDiskMaintenance(now time.Time, due diskMaintDue) {
 		d.settleDiskMaintenanceWindow(now)
 	}
 	for _, name := range due.interval {
-		d.diskMaintSchedule.record(name, now)
+		d.diskMaintSchedule.record(name, d.diskMaintenanceSeams().now())
 	}
 }
 
