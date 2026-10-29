@@ -98,8 +98,10 @@ printed. Passwords come from the environment, one per side:
   GT_DOLT_COMPARE_SOURCE_PASSWORD   password for the source server
   GT_DOLT_COMPARE_TARGET_PASSWORD   password for the target server
 
---tls connects to both servers over TLS and verifies their certificates.
-Without it the passwords cross the network in cleartext.
+--tls connects to both servers over TLS and verifies their certificates
+against the system roots, so a server with a self-signed certificate is
+reached only once its CA is in that store. Without --tls the passwords cross
+the network in cleartext.
 
 The exit status is non-zero when any database differs or is missing on one
 side, and zero only when both servers serve the same databases with equal row
@@ -118,7 +120,7 @@ Example:
 	}
 	cmd.Flags().StringVar(&user, "user", "root", "MySQL user to connect as to both servers")
 	cmd.Flags().DurationVar(&timeout, "timeout", 2*time.Minute, "Deadline for reading each server")
-	cmd.Flags().BoolVar(&useTLS, "tls", false, "Connect to both servers over TLS, verifying each server's certificate")
+	cmd.Flags().BoolVar(&useTLS, "tls", false, "Connect to both servers over TLS, verifying each certificate against the system roots")
 	return cmd
 }
 
@@ -181,17 +183,34 @@ func parseDoltCompareEndpoint(raw, user, password string) (doltCompareEndpoint, 
 		return doltCompareEndpoint{}, fmt.Errorf("empty endpoint")
 	}
 	host, portText, err := net.SplitHostPort(raw)
-	if err != nil {
-		// A bare host has no port to split. An IPv6 literal with more than one
-		// colon and no brackets is refused: "fe80::1:3307" is a valid address
-		// with no port, so guessing which reading was meant would connect to the
-		// wrong server without a word.
-		if strings.Count(raw, ":") > 1 && !strings.HasPrefix(raw, "[") {
-			return doltCompareEndpoint{}, fmt.Errorf("IPv6 address %q must be bracketed, e.g. [::1]:3307", raw)
+	switch {
+	case err == nil:
+		if portText == "" {
+			return doltCompareEndpoint{}, fmt.Errorf("%q names no port after the colon; omit the colon to take port %d", raw, doltCompareDefaultPort)
 		}
+	case strings.HasPrefix(raw, "["):
+		// A bracket that does not close would be trimmed to a host that dials
+		// some other address, so a bracketed endpoint is either bracketed in
+		// full — [::1] takes the default port — or refused.
+		if !strings.HasSuffix(raw, "]") {
+			return doltCompareEndpoint{}, fmt.Errorf("bracketed address %q does not close its bracket; write [address]:port", raw)
+		}
+		inner := raw[1 : len(raw)-1]
+		if net.ParseIP(inner) == nil {
+			return doltCompareEndpoint{}, fmt.Errorf("%q is not an IP address in brackets", raw)
+		}
+		host, portText = inner, ""
+	case strings.ContainsAny(raw, "[]"):
+		return doltCompareEndpoint{}, fmt.Errorf("stray bracket in %q; write [address]:port", raw)
+	case strings.Count(raw, ":") > 1:
+		// An IPv6 literal with more than one colon and no brackets is refused:
+		// "fe80::1:3307" is a valid address with no port, so guessing which
+		// reading was meant would connect to the wrong server without a word.
+		return doltCompareEndpoint{}, fmt.Errorf("IPv6 address %q must be bracketed, e.g. [::1]:3307", raw)
+	default:
+		// A bare host has no port to split.
 		host, portText = raw, ""
 	}
-	host = strings.Trim(host, "[]")
 	if host == "" {
 		return doltCompareEndpoint{}, fmt.Errorf("no host in %q", raw)
 	}
