@@ -590,7 +590,8 @@ func runDaemonClearBackoff(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("checking daemon status: %w", err)
 	}
-	if running {
+	reload, note := daemonReloadPlan(running, pid)
+	if reload {
 		process, err := os.FindProcess(pid)
 		if err != nil {
 			return fmt.Errorf("finding daemon process: %w", err)
@@ -598,13 +599,25 @@ func runDaemonClearBackoff(cmd *cobra.Command, args []string) error {
 		if err := signalDaemonReload(process); err != nil {
 			return fmt.Errorf("signaling daemon to reload: %w", err)
 		}
-		fmt.Printf("%s Cleared backoff for %s (daemon reloaded)\n", style.Bold.Render("✓"), agentID)
-	} else {
-		fmt.Printf("%s Cleared backoff for %s (daemon not running, will take effect on next start)\n",
-			style.Bold.Render("✓"), agentID)
 	}
+	fmt.Printf("%s Cleared backoff for %s (%s)\n", style.Bold.Render("✓"), agentID, note)
 
 	return nil
+}
+
+// daemonReloadPlan decides whether clear-backoff signals the daemon to reload
+// and what the success line says. A container daemon reports pid 0, which
+// belongs to the container's namespace and which os.Process.Signal refuses, so
+// it is never signaled.
+func daemonReloadPlan(running bool, pid int) (reload bool, note string) {
+	switch {
+	case !running:
+		return false, "daemon not running, will take effect on next start"
+	case pid <= 0:
+		return false, "daemon runs in a container and was not signaled; the change takes effect when the container restarts"
+	default:
+		return true, "daemon reloaded"
+	}
 }
 
 func runDaemonRotateLogs(cmd *cobra.Command, args []string) error {
