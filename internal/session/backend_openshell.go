@@ -229,6 +229,11 @@ const imageIDFormat = `{{.Id}}`
 // digits.
 var imageIDPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+// registryHostPattern matches the registry host a pulled reference names: a host
+// name or IPv4 address, or a bracketed IPv6 address, with an optional port. It
+// keeps userinfo, spaces and a query out of the URL the registry is read from.
+var registryHostPattern = regexp.MustCompile(`^(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?$`)
+
 // digestRefPattern matches a reference that already names its digest.
 var digestRefPattern = regexp.MustCompile(`^[^@]+@sha256:[0-9a-f]{64}$`)
 
@@ -271,6 +276,7 @@ func registryBase(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		name = h
 	}
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "["), "]")
 	if name == "localhost" {
 		return "http://" + host
 	}
@@ -344,12 +350,16 @@ func pulledImageRef(ctx context.Context, digest manifestDigester, image string) 
 // splitImage splits a pulled reference into the registry host it names and the
 // repository and tag inside that registry. The first path element is a host
 // when it holds a dot or a colon or is localhost, docker's own rule; a reference
-// without one names no registry to ask, and is refused. A reference with no tag
+// without one names no registry to ask, and is refused, as is a host that is not
+// a host name. A reference with no tag
 // names latest, as docker reads it.
 func splitImage(image string) (host, repo, tag string, err error) {
 	first, rest, ok := strings.Cut(image, "/")
 	if !ok || !(strings.ContainsAny(first, ".:") || first == "localhost") {
 		return "", "", "", fmt.Errorf("%s names no registry host to pin it by", image)
+	}
+	if !registryHostPattern.MatchString(first) {
+		return "", "", "", fmt.Errorf("registry host %q of %s is not a host name", first, image)
 	}
 	repo, tag = rest, "latest"
 	if i := strings.LastIndex(rest, ":"); i > strings.LastIndex(rest, "/") {

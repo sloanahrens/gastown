@@ -757,6 +757,8 @@ func TestImageRefFor(t *testing.T) {
 		{name: "a nested repository keeps its path", image: "localhost:5001/team/gastown-polecat:dev", pull: true, digest: pinDigestChecked, wantLocal: localID, wantCreate: "localhost:5001/team/gastown-polecat@" + pinDigestChecked, wantLookup: []string{"localhost:5001 team/gastown-polecat dev"}},
 		{name: "a reference with no tag reads as latest", image: "localhost:5001/gastown-polecat", pull: true, digest: pinDigestChecked, wantLocal: localID, wantCreate: "localhost:5001/gastown-polecat@" + pinDigestChecked, wantLookup: []string{"localhost:5001 gastown-polecat latest"}},
 		{name: "a reference with no registry host is refused", image: "gastown-polecat:dev", pull: true, wantLocal: localID, wantErr: "names no registry host"},
+		{name: "a registry host with userinfo is refused before any lookup", image: "registry.test@evil.example/gastown-polecat:dev", pull: true, wantLocal: localID, wantErr: "is not a host name"},
+		{name: "a registry port that is not a number is refused before any lookup", image: "registry.test:port/gastown-polecat:dev", pull: true, wantLocal: localID, wantErr: "is not a host name"},
 		{name: "a registry that does not answer refuses", image: pulled, pull: true, digestErr: errors.New("dial tcp: connection refused"), wantLookup: []string{"localhost:5001 gastown-polecat dev"}, wantErr: "pinning|connection refused"},
 		{name: "a reply with no digest refuses", image: pulled, pull: true, digest: "", wantLookup: []string{"localhost:5001 gastown-polecat dev"}, wantErr: "not a manifest digest"},
 		{name: "a reply with a malformed digest refuses", image: pulled, pull: true, digest: "sha256:abc", wantLookup: []string{"localhost:5001 gastown-polecat dev"}, wantErr: "not a manifest digest"},
@@ -821,6 +823,7 @@ func TestRegistryDigesterReachesARegistryOverTLSUnlessLoopback(t *testing.T) {
 		{"localhost:5001", "http"},
 		{"127.0.0.1:5000", "http"},
 		{"[::1]:5000", "http"},
+		{"[::1]", "http"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
