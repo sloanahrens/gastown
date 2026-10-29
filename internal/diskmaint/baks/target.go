@@ -193,7 +193,7 @@ func (t *Target) Apply(context.Context, diskmaint.Plan) (diskmaint.Result, error
 // scan reads the configured directories into the config and binary entries
 // BuildPlan decides from. It returns the read errors it collected, which refuse
 // the plan, and an error of its own only for a configuration that cannot be
-// planned or a cancelled context.
+// planned or a canceled context.
 func (t *Target) scan(ctx context.Context) (config, binaries []Entry, readErrs []string, err error) {
 	if len(t.cfg.ConfigDirs) == 0 && len(t.cfg.BinaryDirs) == 0 {
 		return nil, nil, nil, errNoDirs
@@ -281,7 +281,7 @@ func (t *Target) markOpen(ctx context.Context, entries []Entry) error {
 func (t *Target) openBy(ctx context.Context, path string) (string, error) {
 	out, err := t.cfg.Run(ctx, nil, "lsof", "-t", "--", path)
 	if err != nil {
-		// A cancelled run is the caller's, not lsof's: report it instead of
+		// A canceled run is the caller's, not lsof's: report it instead of
 		// planning on a check that was cut short.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
