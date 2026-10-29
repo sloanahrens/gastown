@@ -446,14 +446,17 @@ func TestPlanRefusesFailedRead(t *testing.T) {
 		breakRead func(f *fakeDocker)
 	}{
 		{"dind state", func(f *fakeDocker) { f.running = answer{err: boom} }},
+		{"dind state unexpected", func(f *fakeDocker) { f.running = answer{out: "maybe\n"} }},
 		{"job list", func(f *fakeDocker) { f.ps = answer{err: boom} }},
 		{"job start", func(f *fakeDocker) {
 			f.ps = answer{out: "aaa\n"}
 			f.starts["aaa"] = answer{err: boom}
 		}},
 		{"volume list", func(f *fakeDocker) { f.volumeList = answer{err: boom} }},
+		{"volume list empty", func(f *fakeDocker) { f.volumeList = answer{out: "\n"} }},
 		{"volume size", func(f *fakeDocker) { f.sizes[gocacheVolume] = answer{err: boom} }},
 		{"volume listing", func(f *fakeDocker) { f.listings[gocacheVolume] = answer{err: boom} }},
+		{"module listing", func(f *fakeDocker) { f.listings[gomodVolume] = answer{err: boom} }},
 		{"module sizes", func(f *fakeDocker) { f.moduleSizes = answer{err: boom} }},
 	}
 	for _, c := range cases {
@@ -504,20 +507,13 @@ func TestPlanRefusesUnparseableListing(t *testing.T) {
 	})
 }
 
-// TestModuleListingExcludesDownloadCache pins the two guards that keep the go
-// download cache out of a plan: the listing script prunes it, and a listing
-// that names it anyway is refused rather than planned.
+// TestModuleListingExcludesDownloadCache pins the guard that keeps the go
+// download cache out of a plan: a listing that names a cache path is refused,
+// so no action can name one. The listing script also prunes the cache, which
+// saves the du over it, but a unit test cannot run find, so the refusal is the
+// behaviour these tests see.
 func TestModuleListingExcludesDownloadCache(t *testing.T) {
 	t.Parallel()
-
-	t.Run("scripts prune the cache", func(t *testing.T) {
-		t.Parallel()
-		for _, script := range []string{moduleListingScript, moduleSizesScript} {
-			if !strings.Contains(script, "-path ./cache -prune") {
-				t.Fatalf("script %q does not prune the download cache", script)
-			}
-		}
-	})
 
 	// The sizes are canned so a listing the parser let through would reach the
 	// plan as a kept row instead of refusing for a missing size.
@@ -577,17 +573,21 @@ func TestStateChanging(t *testing.T) {
 
 func TestMeasure(t *testing.T) {
 	t.Parallel()
-	m, err := target(newFake()).Measure(context.Background())
+	f := newFake()
+	// 40 GiB used of 100 GiB, in 1024-byte blocks, so the detail's GB figures
+	// are exact and not rounded down to 0.0 or 0.1.
+	f.df = answer{out: "Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
+		"overlay 104857600 41943040 62914560 40% /\n"}
+	m, err := target(f).Measure(context.Background())
 	if err != nil {
 		t.Fatalf("measure: %v", err)
 	}
-	if m.Used != 40960*1024 || m.Capacity != 102400*1024 {
-		t.Fatalf("measurement = %+v, want used %d and capacity %d", m, 40960*1024, 102400*1024)
+	if m.Used != 40*(1<<30) || m.Capacity != 100*(1<<30) {
+		t.Fatalf("measurement = %+v, want used 40 GiB and capacity 100 GiB", m)
 	}
-	for _, want := range []string{bytesText(m.Used), bytesText(m.Capacity)} {
-		if !strings.Contains(m.Detail, want) {
-			t.Fatalf("detail = %q, want it to name %q", m.Detail, want)
-		}
+	const wantDetail = "runner disk: 40.0 GB used of 100.0 GB"
+	if m.Detail != wantDetail {
+		t.Fatalf("detail = %q, want %q", m.Detail, wantDetail)
 	}
 }
 

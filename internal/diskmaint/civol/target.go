@@ -42,7 +42,7 @@ const ruleDindDown = "dind not running"
 // the output shape a Go parser reads is the same on every run; find prints
 // "<mtime>\t<bytes or KB>\t<path>" and du prints "<KB>\t<path>".
 const (
-	sizeScript        = `du -sk /c | cut -f1`
+	sizeScript        = `du -sk /c`
 	fileListingScript = `find /c -type f -printf '%T@\t%s\t%p\n'`
 	// moduleFind names the whole "<module>@<version>" directories under
 	// pkg/mod. It prunes ./cache first: the download cache's "@v" directories
@@ -71,6 +71,10 @@ var (
 	// errVolumes reports a volume list that cannot be read, so which volumes
 	// exist is unknown.
 	errVolumes = errors.New("docker volume ls in the docker-in-docker container failed; the volumes are unreadable")
+	// errNoVolumes reports a volume list that reads back empty. The CI volumes
+	// always exist, so an empty list is more likely a read that went wrong than
+	// three missing volumes, and it refuses rather than report them missing.
+	errNoVolumes = errors.New("docker volume ls in the docker-in-docker container listed no volumes; the list is refused")
 	// errVolumeSize reports a volume whose size cannot be read.
 	errVolumeSize = errors.New("measuring the volume failed; its size is unreadable")
 	// errVolumeList reports a volume whose entries cannot be listed.
@@ -271,8 +275,8 @@ func (t *Target) jobStart(ctx context.Context, id string) (time.Time, error) {
 }
 
 // volumeNames lists the volume names the docker-in-docker daemon holds. An
-// unreadable list is an error, never an empty one: every volume would otherwise
-// read as missing.
+// unreadable or empty list is an error, never a set of missing volumes: every
+// volume would otherwise read as missing on a read that went wrong.
 func (t *Target) volumeNames(ctx context.Context) (map[string]bool, error) {
 	out, err := t.dind(ctx, "volume", "ls", "--format", "{{.Name}}")
 	if err != nil {
@@ -284,6 +288,9 @@ func (t *Target) volumeNames(ctx context.Context) (map[string]bool, error) {
 	present := make(map[string]bool)
 	for _, name := range nonEmptyLines(string(out)) {
 		present[strings.TrimSpace(name)] = true
+	}
+	if len(present) == 0 {
+		return nil, errNoVolumes
 	}
 	return present, nil
 }
@@ -552,10 +559,13 @@ func parseEpoch(text string) (time.Time, error) {
 	return time.Unix(sec, nsec).UTC(), nil
 }
 
-// parseKB reads du -sk's single number, in KB.
+// parseKB reads du -sk's "<KB>\t<path>" line and returns the KB.
 func parseKB(out string) (int64, error) {
-	line := strings.TrimSpace(out)
-	kb, err := strconv.ParseInt(line, 10, 64)
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return 0, errParse
+	}
+	kb, err := strconv.ParseInt(fields[0], 10, 64)
 	if err != nil {
 		return 0, errParse
 	}
