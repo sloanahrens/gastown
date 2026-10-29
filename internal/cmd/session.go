@@ -745,13 +745,8 @@ func runSessionInject(cmd *cobra.Command, args []string) error {
 }
 
 // silenceUsage stops cobra printing the usage block after a runtime failure.
-// The verb table calls these functions with no command at all (the integration
-// test runs every session verb as verb.run(nil, args)), so a nil command is
-// nothing to silence, not a crash (gt-5apwi).
 func silenceUsage(cmd *cobra.Command) {
-	if cmd != nil {
-		cmd.SilenceUsage = true
-	}
+	cmd.SilenceUsage = true
 }
 
 func runSessionRestart(cmd *cobra.Command, args []string) error {

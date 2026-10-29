@@ -26,6 +26,8 @@ func sessionRestartRun(t *testing.T, args ...string) (string, error) {
 // line, while a mistyped invocation still prints the usage block. The block
 // after a runtime failure buried the cause, leaving a caller that keeps only
 // the last line with a flag description instead of the reason (gt-6hhp8).
+// Mutant: deleting the restart's SilenceUsage assignment fails the first case,
+// because cobra then prints the usage block after the runtime error.
 func TestSessionRestartFailurePrintsNoUsage(t *testing.T) {
 	t.Parallel()
 
@@ -58,14 +60,16 @@ func TestSessionRestartFailurePrintsNoUsage(t *testing.T) {
 	})
 }
 
-// A verb run with no command (the integration test's verb.run(nil, args)) must
-// not crash the restart, and a real command is silenced (gt-5apwi).
-func TestSilenceUsageToleratesANilCommandAndSilencesARealOne(t *testing.T) {
+// A restart run with the command cobra passes it silences that command before
+// it fails, so the usage block cannot follow the reason (gt-43ciz). Mutant:
+// dropping the SilenceUsage assignment makes it fail, leaving the flag unset.
+func TestSessionRestartSilencesTheCommandItRuns(t *testing.T) {
 	t.Parallel()
-	silenceUsage(nil)
-	c := &cobra.Command{Use: "restart"}
-	silenceUsage(c)
-	if !c.SilenceUsage {
-		t.Error("silenceUsage left a real command printing its usage block")
+	cmd := &cobra.Command{Use: "restart"}
+	if err := runSessionRestart(cmd, []string{""}); err == nil {
+		t.Fatal("restart with no address = success, want its address error")
+	}
+	if !cmd.SilenceUsage {
+		t.Error("a failed restart left its command printing the usage block")
 	}
 }
