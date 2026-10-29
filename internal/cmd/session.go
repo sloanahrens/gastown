@@ -744,6 +744,16 @@ func runSessionInject(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// silenceUsage stops cobra printing the usage block after a runtime failure.
+// The verb table calls these functions with no command at all (the integration
+// test runs every session verb as verb.run(nil, args)), so a nil command is
+// nothing to silence, not a crash (gt-5apwi).
+func silenceUsage(cmd *cobra.Command) {
+	if cmd != nil {
+		cmd.SilenceUsage = true
+	}
+}
+
 func runSessionRestart(cmd *cobra.Command, args []string) error {
 	// Cobra has validated the arguments by the time RunE runs, so a failure
 	// from here on is this restart's runtime, not a mistyped invocation: the
@@ -751,7 +761,7 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 	// it under flag descriptions for a caller that keeps only the last line
 	// (gt-6hhp8). A bad argument still fails cobra's Args check before this
 	// point, so it still prints usage.
-	cmd.SilenceUsage = true
+	silenceUsage(cmd)
 
 	// Resolve the seat before anything else: restart must refuse exactly the
 	// addresses start refuses, and refuse them before it prints a "Starting
