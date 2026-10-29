@@ -197,7 +197,11 @@ func findTown(start string) (town, error) {
 		store := filepath.Join(dir, ".beads")
 		info, err := os.Stat(store)
 		switch {
-		case err == nil && info.IsDir():
+		case err == nil && !info.IsDir():
+			// A .beads that is not a directory names no store, and walking past
+			// it could hide the rig's route table, so it is refused.
+			return town{}, fmt.Errorf("%s is not a directory", store)
+		case err == nil:
 			if found.home == "" {
 				found.home = dir
 			}
@@ -255,41 +259,67 @@ func samePath(path string) string {
 	return filepath.Clean(path)
 }
 
-// verbOf returns bd's subcommand: the first token that is not a flag. A global
-// flag written with a separate value shifts it, and the shim then refuses
-// naming that value, which is loud where a guessed verb would be silent.
+// valueFlags are the bd flags that take their value as the next token. Any
+// other flag is boolean, so the token after it stays an operand: `bd show
+// --json bt-abc` names bt-abc. A flag missing here turns a value into an id,
+// which routes or refuses it, never sends a tracker id to bd.real.
+var valueFlags = map[string]bool{
+	"--title": true, "--description": true, "--body": true, "--message": true,
+	"--notes": true, "--design": true, "--acceptance": true, "--parent": true,
+	"--assignee": true, "--status": true, "--priority": true, "--type": true,
+	"--label": true, "--labels": true, "--format": true, "--limit": true,
+	"--reason": true, "--from": true, "--deps": true, "--due": true,
+	"--defer": true, "--owner": true, "--actor": true, "--sort": true,
+	"--filter": true, "--db": true, "--directory": true, "-C": true,
+}
+
+// verbOf returns bd's subcommand: the first operand. A global value flag is
+// skipped with its value, so `bd --db hq list` names list.
 func verbOf(args []string) string {
-	for _, arg := range args {
-		if arg != "--" && !isFlag(arg) {
-			return arg
-		}
+	if ops := operands(args); len(ops) > 0 {
+		return ops[0]
 	}
 	return ""
 }
 
-// idTokens returns the arguments that can name a bead. A token right after a
+// idTokens returns the operands that can name a bead. A token after a value
 // flag is that flag's value and never an id, so `bd create --title gt-x` names
-// no bead and a `--parent gt-x` does not route its own create.
+// no bead and `--parent gt-x` does not route its own create.
 func idTokens(args []string) []string {
 	var ids []string
-	value := false // the token before this one was a flag, so this one is its value
-	for _, arg := range args {
-		switch {
-		case arg == "--": // past -- every token is positional
-			value = false
-		case isFlag(arg):
-			_, _, inline := strings.Cut(arg, "=")
-			value = !inline
-		case value:
-			value = false
-		case beads.IsBeadIDToken(arg) && beads.ExtractPrefix(arg) != "":
+	for _, arg := range operands(args) {
+		if beads.IsBeadIDToken(arg) && beads.ExtractPrefix(arg) != "" {
 			ids = append(ids, arg)
 		}
 	}
 	return ids
 }
 
-// isFlag reports whether arg is bd's flag rather than a value or a verb.
+// operands returns the arguments bd reads as operands: not a flag, not the
+// value of a value flag, and not the -- separator. Past -- every token is one.
+func operands(args []string) []string {
+	var ops []string
+	pastSeparator := false
+	valueNext := false // the token before this one is a value flag, so this one is its value
+	for _, arg := range args {
+		switch {
+		case valueNext:
+			valueNext = false
+		case pastSeparator:
+			ops = append(ops, arg)
+		case arg == "--":
+			pastSeparator = true
+		case isFlag(arg):
+			_, _, inline := strings.Cut(arg, "=")
+			valueNext = !inline && valueFlags[arg]
+		default:
+			ops = append(ops, arg)
+		}
+	}
+	return ops
+}
+
+// isFlag reports whether arg is bd's flag rather than an operand.
 func isFlag(arg string) bool {
 	return len(arg) > 1 && arg[0] == '-'
 }

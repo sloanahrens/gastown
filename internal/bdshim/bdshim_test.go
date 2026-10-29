@@ -60,10 +60,21 @@ func mkdir(t *testing.T, dir string) {
 	}
 }
 
+// beadsDirOnly is the environment a test gives: BEADS_DIR set to beadsDir and
+// no other variable set, so a lookup of any other name finds nothing.
+func beadsDirOnly(beadsDir string) func(string) string {
+	return func(name string) string {
+		if name == beadsDirEnv {
+			return beadsDir
+		}
+		return ""
+	}
+}
+
 // decide runs Decide with a fixed working directory and BEADS_DIR.
 func decide(t *testing.T, cwd, beadsDir string, args ...string) (Decision, error) {
 	t.Helper()
-	return Decide(func(string) string { return beadsDir }, func() (string, error) { return cwd, nil }, args)
+	return Decide(beadsDirOnly(beadsDir), func() (string, error) { return cwd, nil }, args)
 }
 
 func TestDecideRoutesByStore(t *testing.T) {
@@ -97,6 +108,8 @@ func TestDecideRoutesByStore(t *testing.T) {
 		{"a parent value does not route its own create", []string{"create", "--parent", "bt-abc"}, alpha, "", false, ""},
 		{"an inline flag value is not an id", []string{"list", "--format=bt-x"}, town, "", false, ""},
 		{"an id after a flag still names its rig", []string{"show", "bt-abc", "--json"}, alpha, "", true, "bt-"},
+		{"an id after a boolean flag names its tracker rig", []string{"show", "--json", "bt-abc"}, alpha, "", true, "bt-"},
+		{"an id after a value flag names its tracker rig", []string{"create", "--title", "x", "bt-abc"}, alpha, "", true, "bt-"},
 		{"two ids of one tracker rig name it", []string{"dep", "add", "bt-abc", "bt-def"}, town, "", true, "bt-"},
 		{"an explicit dolt backend is dolt", []string{"show", "gm-abc"}, beta, "", false, ""},
 	}
@@ -176,6 +189,10 @@ func TestDecideFailsClosedOnMalformedRouteTable(t *testing.T) {
 	throughFile := newTown(t, routeTown)
 	writeFile(t, filepath.Join(throughFile, "notadir"), "x")
 
+	// A .beads that is a file where a store directory belongs.
+	fileStore := newTown(t, routeTown)
+	writeFile(t, filepath.Join(fileStore, "rig", ".beads"), "x")
+
 	cases := []struct {
 		name string
 		cwd  string
@@ -183,6 +200,7 @@ func TestDecideFailsClosedOnMalformedRouteTable(t *testing.T) {
 		{"an unreadable table", unreadable},
 		{"a backend the shim cannot classify", unknownBackend},
 		{"a working directory the walk cannot read", filepath.Join(throughFile, "notadir", "below")},
+		{"a .beads entry that is a file", filepath.Join(fileStore, "rig")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -203,7 +221,9 @@ func TestDecideVerbs(t *testing.T) {
 	}{
 		{"a verb after no flag", []string{"show", "bt-abc"}, "show"},
 		{"a verb after a boolean flag", []string{"--json", "list"}, "list"},
-		{"a verb after a global with a value", []string{"--db", "hq", "list"}, "hq"},
+		{"a verb after a global with a value", []string{"--db", "hq", "list"}, "list"},
+		{"a verb after a global with an inline value", []string{"--db=hq", "list"}, "list"},
+		{"a verb after a value flag with an operand", []string{"--db", "hq", "--json", "list"}, "list"},
 		{"no args", nil, ""},
 		{"past a separator", []string{"--", "show"}, "show"},
 	}
@@ -228,8 +248,10 @@ func TestIDTokens(t *testing.T) {
 		{"an id before a flag", []string{"show", "bt-abc", "--json"}, []string{"bt-abc"}},
 		{"a flag value", []string{"create", "--title", "bt-fix"}, nil},
 		{"an inline flag value", []string{"show", "--id=bt-abc"}, nil},
-		{"an id after a boolean flag", []string{"show", "--json", "bt-abc"}, nil},
+		{"an id after a boolean flag", []string{"show", "--json", "bt-abc"}, []string{"bt-abc"}},
+		{"an id after a value flag", []string{"create", "--title", "x", "bt-abc"}, []string{"bt-abc"}},
 		{"an id past a separator", []string{"show", "--", "bt-abc"}, []string{"bt-abc"}},
+		{"a flag-like token past a separator names no bead", []string{"show", "--", "--json"}, nil},
 		{"two ids", []string{"dep", "add", "bt-abc", "bt-def"}, []string{"bt-abc", "bt-def"}},
 		{"a verb", []string{"list"}, nil},
 	}
@@ -290,7 +312,7 @@ func shimEnv(t *testing.T, cwd, beadsDir string, proc *fakeProcess, handlers map
 	shimPath := filepath.Join(t.TempDir(), "bin", "bdshim")
 	return Env{
 		Args:       args,
-		Getenv:     func(string) string { return beadsDir },
+		Getenv:     beadsDirOnly(beadsDir),
 		Getwd:      func() (string, error) { return cwd, nil },
 		Executable: func() (string, error) { return shimPath, nil },
 		Run:        proc.run,
@@ -345,6 +367,7 @@ func TestMainRefusesATrackerVerb(t *testing.T) {
 		want string
 	}{
 		{"an id names the tracker rig", []string{"show", "bt-abc"}, town, "bdshim: verb show is not implemented for tracker rig bt-\n"},
+		{"an id after a boolean flag names the tracker rig", []string{"show", "--json", "bt-abc"}, town, "bdshim: verb show is not implemented for tracker rig bt-\n"},
 		{"a verb with no id takes its cwd's rig", []string{"create", "--title", "x"}, filepath.Join(town, "beta", "mayor", "rig"), "bdshim: verb create is not implemented for tracker rig bt-\n"},
 	}
 	for _, tc := range cases {

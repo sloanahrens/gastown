@@ -3,15 +3,16 @@ package bdshim
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
 )
 
-// Handlers is the tracker verb registry. This skeleton ships none, so every
+// handlers is the tracker verb registry. This skeleton ships none, so every
 // tracker verb is refused rather than falling back to bd.real; X3-X6 of
-// gt-p85pw fill it.
-var Handlers = map[string]Handler{}
+// gt-p85pw fill it from this package.
+var handlers = map[string]Handler{}
 
 // OsMain is the production entry: this process's argv, environment and working
 // directory, and bd.real beside the running binary.
@@ -21,14 +22,21 @@ func OsMain(args []string) int {
 
 // osEnv is the process surface a real run reads.
 func osEnv(args []string) Env {
+	return processEnv(args, os.Getenv, os.Getwd, os.Executable, runBdReal, os.Stderr)
+}
+
+// processEnv wires Main to the process's reads and to the verb registry. The
+// caller passes each source: osEnv passes the real ones, and a test passes
+// fakes for the same wiring with a town of its own.
+func processEnv(args []string, getenv func(string) string, getwd func() (string, error), executable func() (string, error), run func(string, []string) error, stderr io.Writer) Env {
 	return Env{
 		Args:       args,
-		Getenv:     os.Getenv,
-		Getwd:      os.Getwd,
-		Executable: os.Executable,
-		Run:        runBdReal,
-		Handlers:   Handlers,
-		Stderr:     os.Stderr,
+		Getenv:     getenv,
+		Getwd:      getwd,
+		Executable: executable,
+		Run:        run,
+		Handlers:   handlers,
+		Stderr:     stderr,
 	}
 }
 
