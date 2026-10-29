@@ -652,3 +652,116 @@ func TestManifestDigestValidates(t *testing.T) {
 		}
 	})
 }
+
+// TestManifestReadsAcceptADigestRef pins that both readers take a ref that is
+// itself a digest rather than a tag: the ref reaches the digest path and the
+// answer is read as it is for a tag.
+func TestManifestReadsAcceptADigestRef(t *testing.T) {
+	t.Parallel()
+	body := imageBody(digestOf('c'), 1000)
+	ref, configDigest := bodyDigest(body), digestOf('c')
+	reads := []struct {
+		name string
+		read func(context.Context, *Client) error
+	}{
+		{"GetManifest", func(ctx context.Context, c *Client) error {
+			_, err := c.GetManifest(ctx, "gastown-polecat", ref)
+			return err
+		}},
+		{"ManifestDigest", func(ctx context.Context, c *Client) error {
+			_, err := c.ManifestDigest(ctx, "gastown-polecat", ref)
+			return err
+		}},
+	}
+	for _, tc := range reads {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var asked []string
+			c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+				asked = append(asked, r.URL.Path)
+				switch r.URL.Path {
+				case "/v2/gastown-polecat/manifests/" + ref:
+					served(w, ref, body)
+				case "/v2/gastown-polecat/blobs/" + configDigest:
+					_, _ = w.Write([]byte(blobBody("2026-10-27T10:00:00Z")))
+				default:
+					http.NotFound(w, r)
+				}
+			})
+
+			if err := tc.read(context.Background(), c); err != nil {
+				t.Fatalf("%s with a digest ref: %v", tc.name, err)
+			}
+			if want := "/v2/gastown-polecat/manifests/" + ref; len(asked) == 0 || asked[0] != want {
+				t.Errorf("%s asked %v, want the digest path %q first", tc.name, asked, want)
+			}
+		})
+	}
+}
+
+// TestManifestDigestSendsAcceptHeaders pins that ManifestDigest asks for every
+// media type GetManifest asks for: a registry that serves an index only when it
+// is asked for one would otherwise answer a digest read with an image.
+func TestManifestDigestSendsAcceptHeaders(t *testing.T) {
+	t.Parallel()
+	body := imageBody(digestOf('c'), 1000)
+	var accept string
+	c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+		accept = r.Header.Get("Accept")
+		served(w, bodyDigest(body), body)
+	})
+
+	if _, err := c.ManifestDigest(context.Background(), "gastown-polecat", "dev"); err != nil {
+		t.Fatalf("ManifestDigest: %v", err)
+	}
+	for _, mediaType := range []string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	} {
+		if !strings.Contains(accept, mediaType) {
+			t.Errorf("Accept = %q, missing %q", accept, mediaType)
+		}
+	}
+}
+
+// TestManifestDigestBoundsTheResponseBody pins that ManifestDigest refuses a
+// document past maxDocumentBytes instead of hashing part or all of it.
+func TestManifestDigestBoundsTheResponseBody(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{"a manifest at the limit is read", maxDocumentBytes, false},
+		{"a manifest one byte over the limit is refused", maxDocumentBytes + 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body := paddedBody(t, imageBody(digestOf('c'), 1), tc.size)
+			c := newTestClient(func(w http.ResponseWriter, r *http.Request) {
+				served(w, bodyDigest(body), body)
+			})
+
+			got, err := c.ManifestDigest(context.Background(), "gastown-polecat", "dev")
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("ManifestDigest with a %d-byte body: %v", tc.size, err)
+				}
+				if want := bodyDigest(body); got != want {
+					t.Errorf("ManifestDigest = %q, want %q", got, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ManifestDigest read a %d-byte body and returned %q, want a refusal", tc.size, got)
+			}
+			if want := fmt.Sprint(maxDocumentBytes); !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to name the %s-byte limit", err, want)
+			}
+		})
+	}
+}
