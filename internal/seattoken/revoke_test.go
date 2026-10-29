@@ -3,8 +3,8 @@ package seattoken
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -173,15 +173,26 @@ func TestStoreRevokeRemovesTheFileWhenTheRevokeFails(t *testing.T) {
 	}
 }
 
+// failingRoundTrip answers every request with status, off the network.
+type failingRoundTrip int
+
+func (f failingRoundTrip) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: int(f),
+		Body:       io.NopCloser(strings.NewReader("")),
+		Header:     http.Header{},
+	}, nil
+}
+
 // The tracker's refusal of a revoke is reported with the tracker's answer, so
 // the warning a removal prints says why the token may still be live.
 func TestTrackerRevokerReportsARefusal(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	t.Cleanup(srv.Close)
-	tc, err := client.New(client.Config{BaseURL: srv.URL, Token: "admin-token-value"})
+	tc, err := client.New(client.Config{
+		BaseURL: "http://127.0.0.1:7433",
+		Token:   "admin-token-value",
+		HTTP:    &http.Client{Transport: failingRoundTrip(http.StatusInternalServerError)},
+	})
 	if err != nil {
 		t.Fatalf("tracker client: %v", err)
 	}
