@@ -64,11 +64,7 @@ detached, escalating a failure under `install-gt:image-build-failed`.
    built there, and retries a publish that did not complete for an image that is
    already current.
 
-The build's worktree is a detached one on the rig repo's shared `.repo.git`. No
-cleanup path treats it as a stray: the reaper and `heldByOtherWorktree` only
-`git worktree prune` registrations whose directory is gone (the directory exists
-for the whole build), they match worktrees by branch name (a detached HEAD has
-none), and the local-branch prune reads the list only to protect branches.
+Before adding a cleanup path that could touch the build's worktree, read `docs/polecat-image-notes.md`.
 
 ## Publishing to a registry
 
@@ -100,6 +96,14 @@ the run.
   swap, so an install cannot swap a binary whose image is not in place
   (gt-efupr). Unset, as the daemon's own runs leave it, every path above keeps
   its exit 0.
+
+## Registry retention
+
+After the trims, a run holding the lock prunes the sandbox registry.
+`POLECAT_IMAGE_REGISTRY_KEEP` is the newest commit tags kept (default `5`);
+`POLECAT_IMAGE_REGISTRY_PRUNE` is `off`, `dry-run` (the default) or `apply`. No
+outcome fails the run. The rules are in the `BuildPlan` comment in
+`internal/diskmaint/registry/plan.go`.
 
 ## Old images
 

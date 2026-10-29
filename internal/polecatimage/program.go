@@ -22,6 +22,7 @@ func (r *Run) Program() error {
 	r.PruneOldImages()
 	r.PruneBuildCache()
 	r.TrimCacheVolumes()
+	r.PruneRegistry()
 	return nil
 }
 
@@ -74,10 +75,14 @@ func ConfigFromEnv(get func(string) string) (Config, error) {
 		Published:      envOr(get, "POLECAT_IMAGE_PUBLISHED", filepath.Join(town, ".runtime", "polecat-image.published")),
 		// Only 1 turns it on, so a stray POLECAT_IMAGE_FAIL_CLOSED=0 cannot fail
 		// a run (gt-efupr).
-		FailClosed:  get("POLECAT_IMAGE_FAIL_CLOSED") == "1",
-		Keep:        envOr(get, "POLECAT_IMAGE_KEEP", "3"),
-		BuilderKeep: envOr(get, "POLECAT_IMAGE_BUILDER_KEEP", "8GB"),
-		CacheCap:    envOr(get, "POLECAT_CACHE_CAP", "10GB"),
+		FailClosed:         get("POLECAT_IMAGE_FAIL_CLOSED") == "1",
+		Keep:               envOr(get, "POLECAT_IMAGE_KEEP", "3"),
+		BuilderKeep:        envOr(get, "POLECAT_IMAGE_BUILDER_KEEP", "8GB"),
+		CacheCap:           envOr(get, "POLECAT_CACHE_CAP", "10GB"),
+		RegistryKeep:       envOr(get, "POLECAT_IMAGE_REGISTRY_KEEP", registryKeepDefault),
+		RegistryPrune:      envOr(get, "POLECAT_IMAGE_REGISTRY_PRUNE", registryPruneDefault),
+		RegistryKubeconfig: filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig"),
+		RegistryLedger:     filepath.Join(town, ".runtime", "diskmaint", "ledger.jsonl"),
 	}, nil
 }
 

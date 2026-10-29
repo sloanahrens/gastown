@@ -7,9 +7,11 @@ package polecatimage
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"time"
@@ -57,6 +59,18 @@ type Config struct {
 	// CacheCap bounds each per-rig cache volume, as written: a value that is not
 	// a size stops the cache trim alone (POLECAT_CACHE_CAP).
 	CacheCap string
+	// RegistryKeep is how many of the newest per-commit tags the registry
+	// retention leaves, carried as the operator wrote it: a value that is not a
+	// count stops that prune alone (POLECAT_IMAGE_REGISTRY_KEEP).
+	RegistryKeep string
+	// RegistryPrune is the registry retention mode, "off", "dry-run" or
+	// "apply"; any other value stops that prune alone and deletes nothing
+	// (POLECAT_IMAGE_REGISTRY_PRUNE).
+	RegistryPrune string
+	// RegistryKubeconfig is the kubeconfig the retention reads the in-use pods
+	// through, and RegistryLedger the file its applies are recorded in. The
+	// program fills both from the town root.
+	RegistryKubeconfig, RegistryLedger string
 	// PID is the pid a claim records and Cleanup compares; 0 means this
 	// process's.
 	PID int
@@ -96,14 +110,23 @@ type Run struct {
 	unlock func()
 	// look finds a program on PATH; nil means exec.LookPath.
 	look func(name string) (string, error)
+	// web answers the registry retention's HTTP calls; nil means a client with
+	// a request timeout.
+	web *http.Client
+	// budget starts the registry retention's deadline; nil means one that ends
+	// after registryPruneBudget.
+	budget func() (context.Context, context.CancelFunc)
 }
 
 // command is one program invocation: its working directory, program and
-// arguments.
+// arguments, the environment entries it adds to this process's, and the
+// context that ends it early (nil means no deadline).
 type command struct {
 	dir  string
 	name string
 	args []string
+	env  []string
+	ctx  context.Context
 }
 
 // result is one program's exit: what it wrote to each stream and its status.
@@ -179,6 +202,17 @@ func (r *Run) looker() func(string) (string, error) {
 	return exec.LookPath
 }
 
+// registryHTTPTimeout bounds one registry request, so a registry that stops
+// answering cannot hold the plugin lock past the retention's budget.
+const registryHTTPTimeout = 30 * time.Second
+
+func (r *Run) webClient() *http.Client {
+	if r.web != nil {
+		return r.web
+	}
+	return &http.Client{Timeout: registryHTTPTimeout}
+}
+
 func (r *Run) pid() int {
 	if r.Cfg.PID != 0 {
 		return r.Cfg.PID
@@ -204,8 +238,15 @@ func (r *Run) failf(format string, args ...any) error {
 // start, or a signal killed it — so every way a probe fails to answer is
 // nonzero and defers rather than reading as "nothing there".
 func execRun(c command) result {
-	cmd := exec.Command(c.name, c.args...)
+	ctx := c.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, c.name, c.args...)
 	cmd.Dir = c.dir
+	if len(c.env) > 0 {
+		cmd.Env = append(os.Environ(), c.env...)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
