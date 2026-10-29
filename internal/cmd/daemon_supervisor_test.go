@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -55,7 +56,7 @@ func stubSupervisor(t *testing.T, goos, file string, state templates.SupervisorS
 		// The host has no docker to read a container with unless a test says
 		// otherwise; a fake that fails is never mistaken for an absent
 		// container.
-		dockerInspect: func([]string) ([]byte, error) {
+		dockerInspect: func(context.Context, []string) ([]byte, error) {
 			return nil, errors.New("docker: daemon unreachable")
 		},
 		stateFor: func(kind string) templates.SupervisorState {
@@ -1163,10 +1164,10 @@ func inspectArgv(container string) []string {
 
 // absentContainer is the run of an inspect docker answered "No such object"
 // for: the marker on stderr with the exit, nothing on stdout.
-func absentContainer(argv []string) ([]byte, error) {
-	return nil, &dockerRunError{
-		stderr: "Error: No such object: " + argv[len(argv)-1] + "\n",
-		err:    errors.New("exit status 1"),
+func absentContainer(_ context.Context, argv []string) ([]byte, error) {
+	return nil, &templates.DockerInspectError{
+		StderrText: "Error: No such object: " + argv[len(argv)-1] + "\n",
+		Err:        errors.New("exit status 1"),
 	}
 }
 
@@ -1210,11 +1211,11 @@ func TestContainerJobState(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var asked []string
-			read := ContainerJobState(func(argv []string) ([]byte, error) {
+			read := templates.ContainerJobState(func(_ context.Context, argv []string) ([]byte, error) {
 				asked = argv
 				switch {
 				case tt.stderr != "":
-					return []byte(tt.stdout), &dockerRunError{stderr: tt.stderr, err: errors.New("exit status 1")}
+					return []byte(tt.stdout), &templates.DockerInspectError{StderrText: tt.stderr, Err: errors.New("exit status 1")}
 				default:
 					return []byte(tt.stdout), tt.err
 				}
@@ -1262,7 +1263,7 @@ func TestDaemonStatus_ContainerTownReadsItsOwnContainer(t *testing.T) {
 			c, _ := stubContainerTown(t, tt.cfg)
 			c.statusLine = c.supervisedLine
 			var asked []string
-			c.dockerInspect = func(argv []string) ([]byte, error) {
+			c.dockerInspect = func(_ context.Context, argv []string) ([]byte, error) {
 				asked = argv
 				return []byte("running " + image + "\n"), nil
 			}
@@ -1305,7 +1306,7 @@ func TestDaemonStatus_ContainerTownWithoutNamesIsUnknown(t *testing.T) {
 			c, _ := stubContainerTown(t, tt.cfg)
 			c.statusLine = c.supervisedLine
 			ran := false
-			c.dockerInspect = func([]string) ([]byte, error) {
+			c.dockerInspect = func(context.Context, []string) ([]byte, error) {
 				ran = true
 				return []byte("running gt-daemon:abc123\n"), nil
 			}
@@ -1696,7 +1697,7 @@ func productionContainerControl(cfg *config.DaemonPatrolConfig) (*daemonControl,
 		calls.argv = append(calls.argv, append([]string{}, argv...))
 		return errors.New("docker: daemon unreachable")
 	}
-	c.dockerInspect = func([]string) ([]byte, error) {
+	c.dockerInspect = func(context.Context, []string) ([]byte, error) {
 		return nil, errors.New("docker: daemon unreachable")
 	}
 	c.stopDirect = func(string) error { calls.stopped = true; return nil }
@@ -1807,7 +1808,7 @@ func TestRunDaemonStop_ContainerFailedStopNeverSignalsTheLockPID(t *testing.T) {
 	town := t.TempDir()
 	compose := writeComposeFile(t, town)
 	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
-	c.dockerInspect = func([]string) ([]byte, error) {
+	c.dockerInspect = func(context.Context, []string) ([]byte, error) {
 		return []byte("running gt-daemon:abc\n"), nil
 	}
 	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }

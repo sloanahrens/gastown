@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -108,9 +107,9 @@ type daemonControl struct {
 	dockerContext string
 	run           func(argv []string) error
 	// dockerInspect runs one docker command and returns its stdout; a failure
-	// is a *dockerRunError carrying its stderr, so the container kind's state
-	// read never parses the two streams as one.
-	dockerInspect func(argv []string) ([]byte, error)
+	// is a *templates.DockerInspectError carrying its stderr, so the container
+	// kind's state read never parses the two streams as one.
+	dockerInspect templates.ContainerDocker
 	stateFor      templates.SupervisorReader
 	spawn         func(townRoot string) (int, error)
 	stopDirect    func(townRoot string) error
@@ -142,16 +141,7 @@ func realDaemonControl() *daemonControl {
 			}
 			return nil
 		},
-		dockerInspect: func(argv []string) ([]byte, error) {
-			var stdout, stderr bytes.Buffer
-			cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // fixed argv from ContainerJobState
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-			if err := cmd.Run(); err != nil {
-				return stdout.Bytes(), &dockerRunError{stderr: stderr.String(), err: err}
-			}
-			return stdout.Bytes(), nil
-		},
+		dockerInspect:     templates.RunDockerInspect,
 		stateFor:          supervisorJobState,
 		stopDirect:        daemon.StopDaemon,
 		isRunning:         daemon.IsRunning,
@@ -181,59 +171,6 @@ func supervisorJobState(kind string) templates.SupervisorState {
 // asked by kind alone and no town's settings named its container.
 var errContainerStateUntowned = errors.New("the container kind's state is read per town: no town's settings name its container here")
 
-// ContainerJobState is the state reader of the container named containerName,
-// as one docker inspect under dockerContext reports it.
-func ContainerJobState(run func(argv []string) ([]byte, error), dockerContext, containerName string) templates.SupervisorReader {
-	argv := []string{"docker", "--context", dockerContext, "inspect",
-		"-f", "{{.State.Status}} {{.Config.Image}}", containerName}
-	return func(kind string) templates.SupervisorState {
-		st := templates.SupervisorState{Kind: kind, LastExit: -1, Container: containerName}
-		out, err := run(argv)
-		if err != nil {
-			// Only stderr can say the container is absent: stdout is the
-			// inspect format's own output, and a status the command printed
-			// there is not docker's verdict on the container.
-			var runErr *dockerRunError
-			if errors.As(err, &runErr) && strings.Contains(runErr.stderr, containerAbsentMarker) {
-				return st
-			}
-			// Unknown, never "not running": the daemon may well be up. The
-			// stderr is not quoted, since captured output can hold a secret.
-			st.Err = fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
-			return st
-		}
-		// A successful run that printed no status and image is a read this
-		// reader cannot interpret, not a container that is absent.
-		fields := strings.Fields(string(out))
-		if len(fields) < 2 {
-			st.Err = fmt.Errorf("%s: docker printed no status and image for %s", strings.Join(argv, " "), containerName)
-			return st
-		}
-		st.Loaded = true
-		st.Status = fields[0]
-		st.Image = fields[1]
-		return st
-	}
-}
-
-// containerAbsentMarker is what docker writes to stderr for a container it
-// knows nothing about. That container is known and not running, so a recreate
-// that removed the old instance never leaves an owner nothing can check
-// (gt-qpeei.18).
-const containerAbsentMarker = "No such object"
-
-// dockerRunError is a failed docker command's stderr, kept apart from the
-// stdout the caller parses so a diagnostic is never read as state. Error()
-// carries the exit alone, because captured output can hold a secret.
-type dockerRunError struct {
-	stderr string
-	err    error
-}
-
-func (e *dockerRunError) Error() string { return e.err.Error() }
-
-func (e *dockerRunError) Unwrap() error { return e.err }
-
 // containerJobState is the state reader of the container town whose settings
 // are cfg: the container cfg names, inspected under this control's docker
 // context. The town's own settings are the only source of that name, so a
@@ -242,7 +179,7 @@ func (c *daemonControl) containerJobState(cfg *config.DaemonPatrolConfig) templa
 	if _, err := containerComposeProject(cfg); err != nil {
 		return unreadContainerState(err)
 	}
-	return ContainerJobState(c.dockerInspect, c.dockerCLIContext(), cfg.ContainerName())
+	return templates.ContainerJobState(c.dockerInspect, c.dockerCLIContext(), cfg.ContainerName())
 }
 
 // unreadContainerState is the reader of a container town whose settings do not

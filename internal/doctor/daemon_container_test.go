@@ -1,9 +1,11 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -109,27 +111,40 @@ func TestDaemonChecks_ContainerReportsHealthyFromState(t *testing.T) {
 }
 
 // Each of the four checks reports the failure its reading names — never OK —
-// when the container is not running, its heartbeat is stale, the supervisor's
-// state cannot be read, or the daemon that wrote state.json is not the
-// container's. The status is pinned so a refusal that is removed or quietly
-// downgraded turns the row red.
+// when the container is absent or stopped, its heartbeat is stale, the
+// supervisor's state cannot be read, or the daemon that wrote state.json is
+// not the container's. The status is pinned so a refusal that is removed or
+// quietly downgraded turns the row red, and the absent row pins that docker's
+// "no such container" is judged as absent rather than as a stopped one.
 func TestDaemonChecks_ContainerFailsWhenNotHealthy(t *testing.T) {
 	t.Parallel()
 	fresh := func() *daemon.State { return containerOwnedState(time.Now().Add(-time.Minute)) }
+	absent := func() templates.SupervisorState {
+		return templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: -1}
+	}
 	stopped := func() templates.SupervisorState {
-		return templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: 0}
+		return templates.SupervisorState{Kind: config.SupervisorContainer, Loaded: true, Status: "exited", LastExit: 0}
 	}
 	unreadable := func() templates.SupervisorState {
 		return templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: -1, Err: errors.New("docker inspect: no answer")}
 	}
+	notRunning := func() *daemon.State {
+		state := containerOwnedState(time.Now().Add(-time.Minute))
+		state.Running = false
+		return state
+	}
 
 	for _, tc := range []struct {
-		name  string
-		state *daemon.State
-		job   templates.SupervisorState
-		want  CheckStatus
+		name    string
+		state   *daemon.State
+		job     templates.SupervisorState
+		want    CheckStatus
+		wantMsg string // a substring of the message, "" when the row pins only the status
 	}{
-		{name: "container not running", state: fresh(), job: stopped(), want: StatusError},
+		{name: "container absent", state: fresh(), job: absent(), want: StatusError,
+			wantMsg: "the container does not exist"},
+		{name: "container stopped", state: notRunning(), job: stopped(), want: StatusWarning,
+			wantMsg: "the daemon is not running"},
 		{name: "heartbeat stale", state: containerOwnedState(time.Now().Add(-30 * time.Minute)), job: containerRunning(), want: StatusError},
 		{name: "supervisor state unknown", state: fresh(), job: unreadable(), want: StatusWarning},
 		{name: "no owner in state.json", state: &daemon.State{}, job: containerRunning(), want: StatusError},
@@ -149,8 +164,31 @@ func TestDaemonChecks_ContainerFailsWhenNotHealthy(t *testing.T) {
 				if result.Status != tc.want {
 					t.Errorf("%s: Status = %v (%s), want %v", c.check.Name(), result.Status, result.Message, tc.want)
 				}
+				if tc.wantMsg != "" && !strings.Contains(result.Message, tc.wantMsg) {
+					t.Errorf("%s: Message = %q, want it to say %q", c.check.Name(), result.Message, tc.wantMsg)
+				}
 			}
 		})
+	}
+}
+
+// A check with no seam runs the production reading, and a container town that
+// names no container of its own is unknown there before any docker command:
+// the production wiring is exercised, and reading through it starts no host
+// process (gt-qpeei.20).
+func TestDaemonCheck_ContainerWithoutItsOwnContainerIsUnknown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := daemon.SavePatrolConfig(townRoot, &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer}); err != nil {
+		t.Fatalf("SavePatrolConfig: %v", err)
+	}
+
+	result := NewDaemonCheck().Run(&CheckContext{TownRoot: townRoot})
+	if result.Status == StatusOK {
+		t.Fatalf("Status = StatusOK (%s), want a failure while the town names no container", result.Message)
+	}
+	if !strings.Contains(result.Message, "unknown") {
+		t.Errorf("Message = %q, want an unknown failure", result.Message)
 	}
 }
 
@@ -265,15 +303,201 @@ func TestJudgeContainerDaemon_UnreadableSettingsWithoutComposeIsAHostTown(t *tes
 	}
 }
 
-// No seam means the production reading, which reads state.json and reports the
-// container supervisor as unread until the docker reader lands: it never
-// reports a container town's daemon healthy on a reading nothing made.
-func TestDaemonCheck_ContainerWithoutAReaderIsNotHealthy(t *testing.T) {
-	t.Parallel()
-	townRoot, _ := containerDaemonTown(t, containerOwnedState(time.Now().Add(-time.Minute)), containerRunning())
+// containerTownOnDisk is a container town whose daemon/state.json holds state,
+// so a reading that loads the file — not a canned value — sees it.
+func containerTownOnDisk(t *testing.T, state *daemon.State) string {
+	t.Helper()
+	townRoot, _ := containerDaemonTown(t, state, containerRunning())
+	if err := daemon.SaveState(townRoot, state); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	return townRoot
+}
 
-	result := NewDaemonCheck().Run(&CheckContext{TownRoot: townRoot})
-	if result.Status == StatusOK {
-		t.Errorf("Status = StatusOK (%s), want a failure while the container's state cannot be read", result.Message)
+// fakeDockerInspect is a docker CLI that never runs: it answers with the given
+// stdout or error and records the argv and context each call carried.
+type fakeDockerInspect struct {
+	stdout string
+	err    error
+	argv   [][]string
+	ctxs   []context.Context
+}
+
+func (f *fakeDockerInspect) run(ctx context.Context, argv []string) ([]byte, error) {
+	f.ctxs = append(f.ctxs, ctx)
+	f.argv = append(f.argv, argv)
+	return []byte(f.stdout), f.err
+}
+
+// read is the production container reading with only the docker subprocess
+// faked: readContainerDaemonWith, the function readContainerDaemon itself calls.
+func (f *fakeDockerInspect) read(townRoot string) containerDaemonReading {
+	return readContainerDaemonWith(f.run, townRoot)
+}
+
+// Each of the four daemon checks reports a healthy container town from the
+// production reading: state.json as the container's daemon wrote it, and one
+// docker inspect of the container the town's settings name answering that it
+// runs. Nothing but the docker CLI is faked.
+func TestDaemonChecks_ContainerReadsHealthyFromDockerInspect(t *testing.T) {
+	t.Parallel()
+	townRoot := containerTownOnDisk(t, containerOwnedState(time.Now().Add(-time.Minute)))
+	docker := &fakeDockerInspect{stdout: "running sha256:abc123\n"}
+
+	for _, c := range containerChecks(t, docker.read) {
+		result := c.check.Run(&CheckContext{TownRoot: townRoot})
+		if result.Status != StatusOK {
+			t.Errorf("%s: Status = %v (%s), want StatusOK", c.check.Name(), result.Status, result.Message)
+			continue
+		}
+		if !strings.Contains(result.Message, c.ok) {
+			t.Errorf("%s: Message = %q, want it to say %q", c.check.Name(), result.Message, c.ok)
+		}
+	}
+
+	want := []string{"docker", "--context", "desktop-linux", "inspect", "-f", "{{.State.Status}} {{.Config.Image}}", "scratch-daemon-1"}
+	if len(docker.argv) == 0 {
+		t.Fatal("no docker inspect ran; a healthy verdict must come from reading the container")
+	}
+	for _, argv := range docker.argv {
+		if !slices.Equal(argv, want) {
+			t.Errorf("docker argv = %q, want %q", argv, want)
+		}
+	}
+	// A docker that hangs on a health read must fail the reading at the
+	// deadline: no bound here means the check waits as long as docker does.
+	for _, ctx := range docker.ctxs {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Error("docker inspect ran with no deadline, want one within ContainerInspectTimeout")
+			continue
+		}
+		if left := time.Until(deadline); left > templates.ContainerInspectTimeout {
+			t.Errorf("docker inspect deadline is %s away, want at most %s", left, templates.ContainerInspectTimeout)
+		}
+	}
+}
+
+// The container reading is docker's answer, field by field: a container docker
+// reports is loaded with its status and image; the container docker says it
+// does not have is absent, not unreadable; and every other failure — an
+// unreachable daemon, output this reader cannot interpret — is unknown, never
+// "not running".
+func TestContainerJobState_DockerInspectAnswers(t *testing.T) {
+	t.Parallel()
+	absent := &templates.DockerInspectError{
+		StderrText: "Error response from daemon: No such object: scratch-daemon-1",
+		Err:        errors.New("exit status 1"),
+	}
+	unreachable := &templates.DockerInspectError{
+		StderrText: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+		Err:        errors.New("exit status 1"),
+	}
+
+	for _, tc := range []struct {
+		name    string
+		docker  fakeDockerInspect
+		loaded  bool
+		status  string
+		image   string
+		wantErr bool
+	}{
+		{name: "running", docker: fakeDockerInspect{stdout: "running sha256:abc123\n"},
+			loaded: true, status: "running", image: "sha256:abc123"},
+		{name: "exited", docker: fakeDockerInspect{stdout: "exited sha256:abc123\n"},
+			loaded: true, status: "exited", image: "sha256:abc123"},
+		{name: "container absent", docker: fakeDockerInspect{err: absent}},
+		{name: "docker unreachable", docker: fakeDockerInspect{err: unreachable}, wantErr: true},
+		{name: "no status printed", docker: fakeDockerInspect{stdout: "\n"}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot, _ := containerDaemonTown(t, containerOwnedState(time.Now().Add(-time.Minute)), containerRunning())
+			docker := tc.docker
+
+			st := containerJobState(townRoot, docker.run)
+
+			if tc.wantErr != (st.Err != nil) {
+				t.Fatalf("Err = %v, wantErr %v", st.Err, tc.wantErr)
+			}
+			if st.Loaded != tc.loaded {
+				t.Errorf("Loaded = %v, want %v", st.Loaded, tc.loaded)
+			}
+			if st.Status != tc.status || st.Image != tc.image {
+				t.Errorf("Status, Image = %q, %q, want %q, %q", st.Status, st.Image, tc.status, tc.image)
+			}
+			if st.Kind != config.SupervisorContainer {
+				t.Errorf("Kind = %q, want %q", st.Kind, config.SupervisorContainer)
+			}
+			if len(docker.argv) != 1 {
+				t.Fatalf("docker ran %d times, want 1", len(docker.argv))
+			}
+		})
+	}
+}
+
+// A container town that names no container of its own, or names one outside
+// the shape docker accepts, is unknown and runs no docker command: the
+// container name an unset town inherits is the live town's, and reporting
+// another town's container healthy would be an answer made up.
+func TestContainerJobState_TownWithoutItsOwnContainerIsUnknown(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		cfg  *config.DaemonPatrolConfig
+	}{
+		{name: "no container named", cfg: &config.DaemonPatrolConfig{
+			Supervisor: config.SupervisorContainer,
+		}},
+		{name: "name outside the docker shape", cfg: &config.DaemonPatrolConfig{
+			Supervisor:            config.SupervisorContainer,
+			ContainerNameSetting:  "-rf",
+			ComposeProjectSetting: "scratch",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			if err := daemon.SavePatrolConfig(townRoot, tc.cfg); err != nil {
+				t.Fatalf("SavePatrolConfig: %v", err)
+			}
+			docker := &fakeDockerInspect{}
+
+			st := containerJobState(townRoot, docker.run)
+
+			if st.Err == nil {
+				t.Fatalf("Err = nil, want an unknown reading")
+			}
+			if !strings.Contains(st.Err.Error(), "container_name") {
+				t.Errorf("Err = %q, want it to name daemon.container_name", st.Err)
+			}
+			if len(docker.argv) != 0 {
+				t.Errorf("docker ran %d times, want none: %q", len(docker.argv), docker.argv)
+			}
+		})
+	}
+}
+
+// A town whose daemon settings will not read names no container to inspect:
+// the reading is unknown, naming the file, and no docker command runs.
+func TestContainerJobState_UnreadableSettingsIsUnknown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := config.TownSettingsPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"daemon": {"type": "daemon-patrol-config", "version": 99}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docker := &fakeDockerInspect{}
+
+	st := containerJobState(townRoot, docker.run)
+
+	if st.Err == nil || !strings.Contains(st.Err.Error(), "reading") {
+		t.Fatalf("Err = %v, want a read failure naming the settings file", st.Err)
+	}
+	if len(docker.argv) != 0 {
+		t.Errorf("docker ran %d times, want none: %q", len(docker.argv), docker.argv)
 	}
 }
