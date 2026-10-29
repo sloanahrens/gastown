@@ -190,17 +190,6 @@ func healthField(t *testing.T, r townhealth.Report, key string) townhealth.Field
 	return townhealth.Field{}
 }
 
-// hasField says whether r carries a field named key, for the readings that
-// must be absent rather than zero.
-func hasField(r townhealth.Report, key string) bool {
-	for _, f := range r.Fields {
-		if f.Key() == key {
-			return true
-		}
-	}
-	return false
-}
-
 func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
@@ -486,7 +475,7 @@ func TestWriteTownHealth_NeedsHumanCountsEveryPersonLabel(t *testing.T) {
 		name   string
 		labels map[string][]*beads.Issue
 		// want is the value of each person field the case should report; a
-		// field it does not name must be absent, not zero.
+		// field it does not name reads as a green zero, never as absent.
 		want map[string]string
 	}{
 		{"an overseer hold", map[string][]*beads.Issue{land.LabelNeedsOverseer: {bead("gt-3")}},
@@ -516,15 +505,16 @@ func TestWriteTownHealth_NeedsHumanCountsEveryPersonLabel(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, key := range []string{"needs-human", "needs-overseer", "needs-operator"} {
+				got := healthField(t, r, key)
 				want, ok := tc.want[key]
 				if !ok {
-					if hasField(r, key) {
-						t.Errorf("%s = %+v; no bead holds a second label", key, healthField(t, r, key))
-					}
-					continue
+					want = "0"
 				}
-				if got := healthField(t, r, key); got.Value != want {
+				if got.Value != want {
 					t.Errorf("%s = %q, want %q", key, got.Value, want)
+				}
+				if !ok && got.Verdict != townhealth.Green {
+					t.Errorf("%s = %+v; no bead holds it, so it reads green", key, got)
 				}
 			}
 		})
@@ -556,7 +546,7 @@ func TestWriteTownHealth_NeedsHumanFailedReadIsUnknown(t *testing.T) {
 
 // A cancelled health computation reads no label: the person waits come back as
 // the context error rather than as a report of nobody waiting (gt-slmaz).
-func TestNeedsHumanStopsOnACancelledContext(t *testing.T) {
+func TestWriteTownHealth_NeedsHumanStopsOnACancelledContext(t *testing.T) {
 	t.Parallel()
 	d, _ := healthTown(t, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC))
 	ctx, cancel := context.WithCancel(context.Background())

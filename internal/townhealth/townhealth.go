@@ -1191,26 +1191,42 @@ func config(in Inputs) Field {
 	return Field{Name: FieldConfig, Tag: Live, Verdict: Green, Value: "valid"}
 }
 
-// needsHuman renders one field per person label a bead waits under, named by
-// the label, so the line and the pill say which person must act (gt-slmaz). A
-// town with nothing waiting keeps one green needs-human field, so the field
-// count does not depend on the data.
+// personFields are the person fields in the order they render.
+var personFields = []string{FieldNeedsOverseer, FieldNeedsOperator, FieldNeedsHuman}
+
+// needsHuman renders one field per person label, every time, named by the
+// label, so the line and the pill say which person must act (gt-slmaz). A
+// label with nothing waiting is a green zero, not a missing field: a consumer
+// that reads an absent field as healthy would miss a hold under that label.
 func needsHuman(ctx context.Context, in Inputs) []Field {
 	if in.NeedsHuman == nil {
-		return []Field{unknown(FieldNeedsHuman, "", "", errNotWired)}
+		return unknownPersonFields(errNotWired)
 	}
 	waits, err := in.NeedsHuman.NeedsHuman(ctx)
 	if err != nil {
-		return []Field{unknown(FieldNeedsHuman, "", "", err)}
+		return unknownPersonFields(err)
 	}
-	out := make([]Field, 0, len(waits))
+	byLabel := make(map[string]PersonWait, len(waits))
 	for _, w := range waits {
-		if w.Count > 0 {
-			out = append(out, personWait(w, in))
-		}
+		byLabel[w.Label] = w
 	}
-	if len(out) == 0 {
-		return []Field{{Name: FieldNeedsHuman, Tag: Live, Verdict: Green, Value: "0"}}
+	out := make([]Field, 0, len(personFields))
+	for _, label := range personFields {
+		if w := byLabel[label]; w.Count > 0 {
+			out = append(out, personWait(w, in))
+			continue
+		}
+		out = append(out, Field{Name: label, Tag: Live, Verdict: Green, Value: "0"})
+	}
+	return out
+}
+
+// unknownPersonFields is every person field UNKNOWN: a failed read does not
+// say which label it failed on, so none of the three reads as nobody waiting.
+func unknownPersonFields(err error) []Field {
+	out := make([]Field, 0, len(personFields))
+	for _, label := range personFields {
+		out = append(out, unknown(label, "", "", err))
 	}
 	return out
 }

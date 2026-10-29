@@ -197,9 +197,11 @@ func TestUnwiredSourcesAreUnknownNeverGreen(t *testing.T) {
 	}
 	// One field per source, less the host: a town with no load source has no
 	// host reading to show, and an UNKNOWN would outrank every other field's
-	// verdict for a reading that was only ever corroboration (gt-auiji).
-	if len(r.Fields) != 14 {
-		t.Errorf("got %d fields, want one per source but the host (14)", len(r.Fields))
+	// verdict for a reading that was only ever corroboration (gt-auiji). The
+	// person source is the exception: it reports one field per person label,
+	// so it adds two to the count (gt-slmaz).
+	if len(r.Fields) != 16 {
+		t.Errorf("got %d fields, want one per source but the host, and three for the person source (16)", len(r.Fields))
 	}
 	for _, f := range r.Fields {
 		if f.Key() == FieldHost {
@@ -662,6 +664,37 @@ func TestAgeFields(t *testing.T) {
 				t.Errorf("%s is %s with no detail", tc.key, got.Verdict)
 			}
 		})
+	}
+}
+
+// gt-slmaz: every person label has a field, even when only one label holds
+// beads, so a missing field can never read as nobody waiting.
+func TestPersonFieldsAlwaysPresent(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.waits = []PersonWait{{Label: FieldNeedsOverseer, Count: 1, Oldest: ago(time.Hour)}}
+	r := Compute(context.Background(), inputs(f))
+	for _, key := range []string{"needs-overseer", "needs-operator", "needs-human"} {
+		if got := field(t, r, key); got.Tag != Live {
+			t.Errorf("%s = %+v, want a LIVE field", key, got)
+		}
+	}
+	if got := field(t, r, "needs-human"); got.Verdict != Green || got.Value != "0" {
+		t.Errorf("needs-human = %+v, want a green zero beside the overseer hold", got)
+	}
+}
+
+// A failed person read does not say which label it failed on, so every person
+// field is UNKNOWN rather than any one of them reading as nobody waiting.
+func TestPersonFieldsUnknownOnFailedRead(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.waitErr = errors.New("bd list: connection refused")
+	r := Compute(context.Background(), inputs(f))
+	for _, key := range []string{"needs-overseer", "needs-operator", "needs-human"} {
+		if got := field(t, r, key); got.Verdict != VerdictUnknown {
+			t.Errorf("%s = %+v, want UNKNOWN", key, got)
+		}
 	}
 }
 

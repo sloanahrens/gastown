@@ -561,6 +561,9 @@ func (s *healthSources) Validate() error {
 // names the person who must act (gt-slmaz). A bead carrying two of the labels
 // counts once, under the first one, so the counts sum to the beads waiting.
 func (s *healthSources) NeedsHuman(ctx context.Context) ([]townhealth.PersonWait, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	labels := []struct{ field, label string }{
 		{townhealth.FieldNeedsOverseer, land.LabelNeedsOverseer},
 		{townhealth.FieldNeedsOperator, land.LabelNeedsOperator},
