@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -308,6 +309,10 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 	// out of here as an error, after the mop-up has run, so the operator gets
 	// the uncertainty and the mechanism that was used instead (gt-ojbb).
 	stoppedUnder := ""
+	// absentContainer names the container docker reported as absent, if it
+	// did: nothing of this town runs there, so the lock is stale and no
+	// signal is owed to its PID (gt-qpeei.18).
+	absentContainer := ""
 	var unconfirmed error
 	sup, supErr := c.detectDaemonSupervisor(townRoot)
 	switch {
@@ -317,6 +322,8 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 		switch st := sup.jobState(); {
 		case st.Err != nil:
 			unconfirmed = fmt.Errorf("could not read the %s job's state: %w", sup.name, st.Err)
+		case sup.name == config.SupervisorContainer && !st.Loaded:
+			absentContainer = st.Container
 		case st.Loaded:
 			if runErr := sup.runArgv(sup.stop); runErr != nil {
 				unconfirmed = fmt.Errorf("could not stop the %s job: %w", sup.name, runErr)
@@ -340,6 +347,9 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 		// argv or an error (containerStopError), never the mop-up the launchd
 		// and systemd kinds may fall back on (gt-qpeei.10).
 		if containerTown {
+			if absentContainer != "" {
+				return fmt.Errorf("daemon.lock holds PID %d, but docker reports no container %s: the daemon is not running there, so the lock is stale and its PID was not signaled", pid, absentContainer)
+			}
 			return c.containerStopError(townRoot, cfg, sup, unconfirmed)
 		}
 		if settingsErr != nil {

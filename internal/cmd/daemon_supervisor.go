@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -106,9 +107,9 @@ type daemonControl struct {
 	// runs in, never the global one, which nothing here may change.
 	dockerContext string
 	run           func(argv []string) error
-	// dockerInspect runs one docker command and returns what it printed, both
-	// streams: the container kind's state read, which needs the output run
-	// discards.
+	// dockerInspect runs one docker command and returns its stdout; a failure
+	// is a *dockerRunError carrying its stderr, so the container kind's state
+	// read never parses the two streams as one.
 	dockerInspect func(argv []string) ([]byte, error)
 	stateFor      templates.SupervisorReader
 	spawn         func(townRoot string) (int, error)
@@ -142,7 +143,14 @@ func realDaemonControl() *daemonControl {
 			return nil
 		},
 		dockerInspect: func(argv []string) ([]byte, error) {
-			return exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from ContainerJobState
+			var stdout, stderr bytes.Buffer
+			cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // fixed argv from ContainerJobState
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				return stdout.Bytes(), &dockerRunError{stderr: stderr.String(), err: err}
+			}
+			return stdout.Bytes(), nil
 		},
 		stateFor:          supervisorJobState,
 		stopDirect:        daemon.StopDaemon,
@@ -173,14 +181,8 @@ func supervisorJobState(kind string) templates.SupervisorState {
 // asked by kind alone and no town's settings named its container.
 var errContainerStateUntowned = errors.New("the container kind's state is read per town: no town's settings name its container here")
 
-// ContainerJobState is the state reader of a town whose daemon runs in the
-// container named containerName: one docker inspect under dockerContext, through
-// run, mapped into a SupervisorState.
-//
-// A container docker reports as absent ("No such object") is known and not
-// running, so a recreate that replaced the old instance never leaves an owner
-// nothing can check. Any other failure is unknown, never "not running": a
-// daemon whose state could not be read may well be up (gt-qpeei.18).
+// ContainerJobState is the state reader of the container named containerName,
+// as one docker inspect under dockerContext reports it.
 func ContainerJobState(run func(argv []string) ([]byte, error), dockerContext, containerName string) templates.SupervisorReader {
 	argv := []string{"docker", "--context", dockerContext, "inspect",
 		"-f", "{{.State.Status}} {{.Config.Image}}", containerName}
@@ -188,14 +190,20 @@ func ContainerJobState(run func(argv []string) ([]byte, error), dockerContext, c
 		st := templates.SupervisorState{Kind: kind, LastExit: -1, Container: containerName}
 		out, err := run(argv)
 		if err != nil {
-			if strings.Contains(string(out), "No such object") {
+			// Only stderr can say the container is absent: stdout is the
+			// inspect format's own output, and a status the command printed
+			// there is not docker's verdict on the container.
+			var runErr *dockerRunError
+			if errors.As(err, &runErr) && strings.Contains(runErr.stderr, containerAbsentMarker) {
 				return st
 			}
-			// The command's output stays out of the error (om: "Keep secrets
-			// out of errors"): docker's stderr is not ours to quote.
+			// Unknown, never "not running": the daemon may well be up. The
+			// stderr is not quoted, since captured output can hold a secret.
 			st.Err = fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
 			return st
 		}
+		// A successful run that printed no status and image is a read this
+		// reader cannot interpret, not a container that is absent.
 		fields := strings.Fields(string(out))
 		if len(fields) < 2 {
 			st.Err = fmt.Errorf("%s: docker printed no status and image for %s", strings.Join(argv, " "), containerName)
@@ -207,6 +215,24 @@ func ContainerJobState(run func(argv []string) ([]byte, error), dockerContext, c
 		return st
 	}
 }
+
+// containerAbsentMarker is what docker writes to stderr for a container it
+// knows nothing about. That container is known and not running, so a recreate
+// that removed the old instance never leaves an owner nothing can check
+// (gt-qpeei.18).
+const containerAbsentMarker = "No such object"
+
+// dockerRunError is a failed docker command's stderr, kept apart from the
+// stdout the caller parses so a diagnostic is never read as state. Error()
+// carries the exit alone, because captured output can hold a secret.
+type dockerRunError struct {
+	stderr string
+	err    error
+}
+
+func (e *dockerRunError) Error() string { return e.err.Error() }
+
+func (e *dockerRunError) Unwrap() error { return e.err }
 
 // containerJobState is the state reader of the container town whose settings
 // are cfg: the container cfg names, inspected under this control's docker
