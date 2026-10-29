@@ -31,10 +31,13 @@ Run the `docker` commands from any directory. Run the `gt` commands inside the l
 gt dolt status
 lsof -nP -iTCP:3307 -sTCP:LISTEN
 docker --context desktop-linux info --format '{{.Name}} {{.ServerVersion}} {{.OperatingSystem}}'
-docker --context desktop-linux image inspect mysql:8.4 --format '{{json .RepoDigests}}'
+docker --context desktop-linux image ls --format '{{.Repository}}:{{.Tag}}' mysql:8.4
 ```
 
-**PASS:** `gt dolt status` reports the server running; `lsof` prints one `LISTEN` row on `127.0.0.1:3307`; the `docker info` line exits 0 and prints a VM name and a server version; and you have written down whether `mysql:8.4` is already local, and its registry digest if it is — the `image inspect` line exits 0 when the image is present and non-zero when it is absent, which is not a step 0 failure and is what step 1's cleanup reads. Its `RepoDigests` list holds the digest `docker pull` prints, written `mysql@sha256:…`; record that `sha256:…`. Do not record the image's `.Id`, which an inspect without a format prints: it is a local config id, a different hash from the registry digest and not a pin. An image present with an empty list has no registry digest, so write down that step 0 recorded none rather than a substitute. Write down the Dolt pid and the exact listen address too; step 5 compares against them.
+**PASS:** `gt dolt status` reports the server running, `lsof` prints one `LISTEN` row on `127.0.0.1:3307`, and the `docker info` line exits 0 and prints a VM name and a server version. Write down two things for the later steps:
+
+- whether `mysql:8.4` is already in the VM. The `image ls` line prints the tag when it is and nothing when it is not, and either answer passes this step; step 1's cleanup reads this record.
+- the Dolt pid and the exact listen address; step 5 compares against them.
 
 **FAIL:** `gt dolt status` says the server is not running, `lsof` prints no listener, or `docker info` exits non-zero. Stop and escalate with that text: the probe cannot answer its question without a running loopback Dolt and a reachable Docker Desktop.
 
@@ -46,17 +49,17 @@ docker --context desktop-linux image inspect mysql:8.4 --format '{{json .RepoDig
 docker --context desktop-linux pull mysql:8.4
 ```
 
-**PASS:** exits 0 and prints the image digest. An image step 0 already found local prints `Image is up to date` instead, and step 0's recorded `sha256:…` is then the digest; where step 0 recorded none, record the pull's exit status and say the digest is unrecorded rather than fill it from the image id. Copy the digest into the bead record: `mysql:8.4` is a series tag, and the client is a probe tool rather than an image in a rendered compose file, so the plan's image table does not classify it — the digest-pinning bead later takes its pin from this line.
+**PASS:** exits 0 and prints a `Digest: sha256:…` line. Docker prints that line whether it downloaded the image or found it already local and reports `Status: Image is up to date`, so this line is where the digest comes from. Copy it into the bead record: `mysql:8.4` is a series tag, and the client is a probe tool rather than an image in a rendered compose file, so the plan's image table does not classify it — the digest-pinning bead later takes its pin from this line. An exit 0 with no `Digest:` line means the digest is unrecorded: record the exit status and say so rather than substitute another hash.
 
 **FAIL:** non-zero exit. Record the error text. Without the client the probe cannot run; escalate rather than change the Mac's networking to get it.
 
-The pull adds one image to the Docker Desktop VM and is the probe's only write. If step 0's `image inspect` exited non-zero, this run added it — remove it when the run ends, whichever step ends it: after step 5 on a run that reaches it, and after the failing step of one that does not, before you escalate:
+The pull adds one image to the Docker Desktop VM and is the probe's only write. Remove it when the run ends — after step 5 on a run that reaches it, or after the step that ends a run early, before you escalate — but only when both hold: step 0 printed no `mysql:8.4` tag, and this pull exited 0.
 
 ```bash
 docker --context desktop-linux image rm mysql:8.4
 ```
 
-If step 0 found the image already local, leave it: the probe removes nothing it did not add.
+Every other case leaves the VM's image store as it was: an image step 0 already found is left alone, and a run that stopped before step 1 or whose pull failed added none.
 
 ## Step 2 — name resolution inside the VM
 
@@ -116,7 +119,7 @@ lsof -nP -iTCP:3307 -sTCP:LISTEN
 On bead `gt-qpeei.4`, in one comment:
 
 - the three walls: step 2, step 3, step 4;
-- the address step 2 printed, and the image digest — step 1's, or step 0's record when the image was already local;
+- the address step 2 printed, and the image digest from step 1's `Digest:` line;
 - the Docker Desktop version and OS line from step 0;
 - `R4 PASS` or `R4 FAIL` with the date, the step, and the exact error text;
 - on a FAIL, the diagnostic file named in [Read-only diagnostics on a fail](#read-only-diagnostics-on-a-fail), attached rather than pasted.
