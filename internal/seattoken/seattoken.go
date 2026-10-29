@@ -156,6 +156,27 @@ func (s *Store) Remove(seat intent.Seat) error {
 	return nil
 }
 
+// Revoke removes seat's token file and ends every token issued to the seat's
+// actor; a seat with no file and no live token succeeds.
+//
+// The file goes even when the revoke fails, so a seat recreated under the same
+// name is issued a fresh token rather than handed one that may still be live.
+// Both outcomes are reported together.
+func (s *Store) Revoke(ctx context.Context, seat intent.Seat, revoker Revoker) error {
+	if err := s.check(seat); err != nil {
+		return err
+	}
+	if revoker == nil {
+		return errors.New("seattoken: no revoker")
+	}
+	removeErr := s.Remove(seat)
+	err := revoker.Revoke(ctx, seat.String())
+	if err != nil {
+		err = fmt.Errorf("seattoken: revoke %s: %w", seat.String(), err)
+	}
+	return errors.Join(removeErr, err)
+}
+
 // seatDirs lists the directories from the runtime directory down to seat's,
 // outermost first.
 func (s *Store) seatDirs(seat intent.Seat) []string {

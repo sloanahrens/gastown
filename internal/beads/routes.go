@@ -211,14 +211,37 @@ func GetPrefixForRig(townRoot, rigName string) string {
 	// Look for a route where the path starts with the rig name
 	// Routes paths are like "gastown/mayor/rig" or "beads/mayor/rig"
 	for _, r := range routes {
-		parts := strings.SplitN(r.Path, "/", 2)
-		if len(parts) > 0 && parts[0] == rigName {
+		if routeNamesRig(r, rigName) {
 			// Return prefix without trailing hyphen
 			return strings.TrimSuffix(r.Prefix, "-")
 		}
 	}
 
 	return rigPrefixOrDefault(townRoot, rigName)
+}
+
+// RigOnTracker reports whether rigName has a route naming the tracker backend;
+// a rig the table does not name reads beads through bd. An unreadable route
+// table is an error, never false: a caller revoking a seat's tracker token must
+// not read a table it could not load as "this rig has no token" (gt-p85pw.86).
+func RigOnTracker(townRoot, rigName string) (bool, error) {
+	routes, err := LoadRoutes(GetTownBeadsPath(townRoot))
+	if err != nil {
+		return false, fmt.Errorf("reading the route table: %w", err)
+	}
+	for _, r := range routes {
+		if routeNamesRig(r, rigName) && r.BackendName() == BackendTracker {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// routeNamesRig reports whether r is one of rigName's routes: a route names its
+// rig as the first segment of its path ("gastown/mayor/rig").
+func routeNamesRig(r Route, rigName string) bool {
+	first, _, _ := strings.Cut(r.Path, "/")
+	return rigName != "" && first == rigName
 }
 
 // rigPrefixOrDefault returns the rig's prefix from rigs.json, or "gt" when
