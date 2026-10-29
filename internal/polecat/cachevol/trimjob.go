@@ -260,9 +260,9 @@ func trimLabels() map[string]string {
 	}
 }
 
-// removeContainer deletes the listed files with the image's trim-paths helper. The paths reach it as
-// argv with no shell between, so a name that holds a space or a glob character stays the one word
-// the shard gave; the helper decides whether a word may be removed.
+// removeContainer deletes the listed files with the image's trim-paths helper. The helper reads the
+// paths from the mounted shards, not from argv, so a name that holds a space or a glob character
+// stays the one string the shard gave; the helper decides whether a path may be removed.
 func removeContainer(image string, shards int, mounts []VolumeMount) Container {
 	return Container{
 		Name:    "trim",

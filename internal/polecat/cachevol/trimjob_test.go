@@ -313,6 +313,9 @@ func TestBuildTrimManifestSplitsAListPastTheShardCeiling(t *testing.T) {
 				listMounts = append(listMounts, mt.MountPath)
 			}
 		}
+		if len(listMounts) != shardMounts {
+			t.Errorf("Job %d has %d list mounts for %d shard volumes, want one mount per shard", i, len(listMounts), shardMounts)
+		}
 		for k := 0; k < shardMounts; k++ {
 			if k >= len(listMounts) || listMounts[k] != TrimListRoot+"/"+strconv.Itoa(k) {
 				t.Errorf("Job %d mounts its shards at %v, want %s/0 to %s/%d in order", i, listMounts, TrimListRoot, TrimListRoot, shardMounts-1)
