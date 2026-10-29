@@ -261,12 +261,36 @@ func (d *Daemon) syncJsonlGitBackup() {
 
 	d.logger.Printf("jsonl_git_backup: exporting %d database(s) to %s (scrub=%v)", len(databases), gitRepo, scrub)
 
+	// Which rigs are read through the tracker is decided once for the cycle
+	// (jsonl_tracker_export.go). A route table the backup cannot read whole
+	// fails no database it did place, and refuses the ones it did not: a rig
+	// the table could not place might be on the tracker, and backing it up from
+	// the Dolt copy it left behind would write a stale offsite copy. The cycle
+	// raises the table's failure so that refusal reaches the operator.
+	routes := d.jsonlTrackerRoutes()
+	if len(routes.problems) > 0 {
+		report := strings.Join(routes.problems, "\n")
+		d.logger.Printf("jsonl_git_backup: WARNING: the tracker routing is incomplete — a database it does not place is not exported this cycle:\n%s", report)
+		d.escalateAlert(alertKeyJSONLRoute, "jsonl_git_backup", fmt.Sprintf(
+			"the tracker routing is incomplete, so a database the table does not place is not exported this cycle — it may be on the tracker, and its Dolt copy is stale:\n%s", report))
+	} else {
+		d.clearAlerts("the tracker routing reads cleanly", alertKeyJSONLRoute)
+	}
+
 	// export is the dolt-backed per-database export, unless a test injected one
 	// (jsonlExportFn) to drive this cycle's bookkeeping without running dolt.
-	export := d.exportDatabaseToJsonl
+	export := func(db, repo, dir string, scrub bool) (int, error) {
+		return d.exportDatabaseToJsonlFor(db, repo, dir, scrub, routes)
+	}
 	if d.jsonlExportFn != nil {
 		export = d.jsonlExportFn
 	}
+
+	// A count measured through the tracker export is not comparable with one
+	// measured over the Dolt tables, so the databases this cycle read that way
+	// are remembered for the commit subject and the spike check
+	// (jsonlTrackerCountToken).
+	d.jsonlTrackerDBs = map[string]bool{}
 
 	exported := 0
 	var failed []string
@@ -283,6 +307,11 @@ func (d *Daemon) syncJsonlGitBackup() {
 			counts[db] = n
 			exported++
 			exportedDBs = append(exportedDBs, db)
+			// An injected export stands in for the Dolt path in a test, so only
+			// the real one can say a database was read through the tracker.
+			if _, onTracker := routes.rigs[db]; onTracker && d.jsonlExportFn == nil {
+				d.jsonlTrackerDBs[db] = true
+			}
 		}
 	}
 
@@ -377,7 +406,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 			// name the manual recovery rather than leave the patrol halted with
 			// no documented way back (gt-tj-he).
 			msg += fmt.Sprintf("\n\n%s has commits, but none record per-database counts ('backup <ts> m%d: <db>=<N>'), so there is no previous level to compare against.\n\n%s\n\nOr start the history over by removing %s/.git — the next run then bootstraps normally.",
-				gitRepo, countMetricVersion, spikeAcceptHint(gitRepo, databases, counts), gitRepo)
+				gitRepo, countMetricVersion, d.spikeAcceptHint(gitRepo, databases, counts), gitRepo)
 		}
 		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", msg)
 		cycle.failStep("push", baselineErr.Error())
@@ -386,7 +415,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if len(spikes) > 0 {
 		report := formatSpikeReport(spikes)
 		d.logger.Printf("jsonl_git_backup: HALTING — spike detected:\n%s", report)
-		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", report+"\n\n"+spikeAcceptHint(gitRepo, databases, counts))
+		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", report+"\n\n"+d.spikeAcceptHint(gitRepo, databases, counts))
 		cycle.failStep("push", "spike detected")
 		return // Do NOT commit — spike detected.
 	}
@@ -467,16 +496,46 @@ var supplementalTables = []string{
 //
 // Returns the total number of records exported across all tables. When a
 // supplemental table fails the others are still exported, but the call returns
-// an error: the database counts as failed for the cycle.
+// an error: the database counts as failed for the cycle. A database the town's
+// route table refuses is an error too, and so is one the table cannot place
+// while it has a problem: neither is exported as a rig the table did not
+// choose.
 func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) (int, error) {
+	return d.exportDatabaseToJsonlFor(db, gitRepo, dataDir, scrub, d.jsonlTrackerRoutes())
+}
+
+// exportDatabaseToJsonlFor is exportDatabaseToJsonl with the cycle's tracker
+// routing already read: the backup cycle reads the route table once and hands
+// every database the same answer, so one database's export is never the only
+// one to see a table that changed under it, and a table the backup cannot read
+// is reported once rather than once per database.
+func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub bool, routes trackerRoutes) (int, error) {
 	if !validDBName.MatchString(db) {
 		return 0, fmt.Errorf("invalid database name: %q", db)
+	}
+
+	// A database the route table forbids exporting is refused before anything
+	// is written to it, rather than exported as whichever route came first.
+	if why, refused := routes.refused[db]; refused {
+		return 0, fmt.Errorf("tracker routes: %s", why)
+	}
+	// A database no readable route places is refused too while the table has a
+	// problem: it may be a tracker rig whose route the backup could not read,
+	// and its Dolt copy is the stale one the rig left behind.
+	if why := routes.unplaced(db); why != "" {
+		return 0, fmt.Errorf("tracker routes: %s", why)
 	}
 
 	// Create per-database subdirectory.
 	dbDir := filepath.Join(gitRepo, db)
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		return 0, fmt.Errorf("creating dir %s: %w", dbDir, err)
+	}
+
+	// A rig whose route names the tracker is read through the tracker's export
+	// route, never from the Dolt database it left behind (jsonl_tracker_export.go).
+	if rig, ok := routes.rigs[db]; ok {
+		return d.exportTrackerDatabaseToJsonl(rig, db, dbDir)
 	}
 
 	total := 0
@@ -800,6 +859,40 @@ func writeTableShardsWith(ops jsonlShardOps, dir, table string, rows []json.RawM
 		return 0, err
 	}
 
+	return publishTableShards(ops, dir, table, shards, len(rows))
+}
+
+// shardBuilder packs newline-terminated lines into shards of about maxBytes,
+// starting a new shard before a line would take the current one past that. A
+// line larger than maxBytes gets a shard of its own.
+type shardBuilder struct {
+	full     []*bytes.Buffer // shards closed before a line would overflow them
+	cur      *bytes.Buffer
+	maxBytes int
+}
+
+func newShardBuilder(maxBytes int) *shardBuilder {
+	return &shardBuilder{cur: &bytes.Buffer{}, maxBytes: maxBytes}
+}
+
+func (b *shardBuilder) add(line []byte) {
+	if b.cur.Len() > 0 && b.cur.Len()+len(line) > b.maxBytes {
+		b.full = append(b.full, b.cur)
+		b.cur = &bytes.Buffer{}
+	}
+	b.cur.Write(line)
+}
+
+// shards returns the shards built so far. An empty table still has its (empty)
+// first shard, as it always has.
+func (b *shardBuilder) shards() []*bytes.Buffer {
+	return append(b.full[:len(b.full):len(b.full)], b.cur)
+}
+
+// publishTableShards replaces table's export in dir with shards, which hold
+// rows rows between them, and returns rows. Publishing is all or nothing; see
+// writeTableShards.
+func publishTableShards(ops jsonlShardOps, dir, table string, shards []*bytes.Buffer, rows int) (int, error) {
 	tmpPaths := make([]string, len(shards))
 	// Best effort: a temp that will not go is a .tmp nothing else reads, and
 	// the failure being reported is the one to report.
@@ -880,7 +973,7 @@ func writeTableShardsWith(ops jsonlShardOps, dir, table string, rows []json.RawM
 		tmpPaths[i] = ""
 	}
 
-	if err := ops.verify(dir, table, len(rows), jsonlShardHardLimit); err != nil {
+	if err := ops.verify(dir, table, rows, jsonlShardHardLimit); err != nil {
 		// The export on disk is not the one that was asked for, so it does not
 		// replace the last one that verified.
 		return 0, errors.Join(err, withdraw())
@@ -913,7 +1006,7 @@ func writeTableShardsWith(ops jsonlShardOps, dir, table string, rows []json.RawM
 		errs := append([]error{fmt.Errorf("removing the stale %s shards", table)}, residue...)
 		return 0, errors.Join(append(errs, withdraw())...)
 	}
-	return len(rows), nil
+	return rows, nil
 }
 
 // checkShardSizes returns an error naming the first shard over hardLimit, so a
@@ -1101,7 +1194,11 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 
 	// Build commit message with counts in deterministic order.
 	timestamp := time.Now().Format("2006-01-02 15:04")
-	msg := jsonlBackupSubject(timestamp, jsonlCountParts(databases, counts))
+	parts := jsonlCountParts(databases, counts)
+	if token := jsonlTrackerCountToken(databases, d.jsonlTrackerDBs); token != "" {
+		parts = append(parts, token)
+	}
+	msg := jsonlBackupSubject(timestamp, parts)
 	if len(failed) > 0 {
 		sort.Strings(failed)
 		msg += fmt.Sprintf(" [FAILED: %s]", strings.Join(failed, ", "))
@@ -1627,9 +1724,17 @@ const (
 	alertKeyJSONLInit   = "jsonl_git_backup:init"
 	alertKeyJSONLNoDBs  = "jsonl_git_backup:no-databases"
 	alertKeyJSONLExport = "jsonl_git_backup:export"
-	alertKeyJSONLScrub  = "jsonl_git_backup:scrub-suspicious"
-	alertKeyJSONLSpike  = "jsonl_git_backup:spike"
-	alertKeyJSONLPush   = "jsonl_git_backup:push"
+	// alertKeyJSONLRoute names a town route table the backup could not read
+	// whole. It is its own key because the cycle still exports every database:
+	// a success elsewhere in the cycle must not clear a routing failure.
+	alertKeyJSONLRoute = "jsonl_git_backup:tracker-routes"
+	alertKeyJSONLScrub = "jsonl_git_backup:scrub-suspicious"
+	alertKeyJSONLSpike = "jsonl_git_backup:spike"
+	// alertKeyJSONLStoreFlip is the prefix of the per-database alert that says a
+	// database's count changed store and its level was reset, so a short export
+	// cannot become the baseline unseen.
+	alertKeyJSONLStoreFlip = "jsonl_git_backup:store-flip:"
+	alertKeyJSONLPush      = "jsonl_git_backup:push"
 )
 
 // escalate raises an alert whose key is derived from its own title, for
@@ -1928,8 +2033,9 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 	}
 
 	type commitSubject struct {
-		date   string
-		counts map[string]int
+		date    string
+		counts  map[string]int
+		tracker map[string]bool // databases whose counts were measured through the tracker export
 	}
 	var commits []commitSubject
 	// otherVersion maps a database to the newest version it was counted under
@@ -1961,7 +2067,7 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 		if !entry.Time.IsZero() {
 			date = entry.Time.Format(time.RFC3339)
 		}
-		commits = append(commits, commitSubject{date: date, counts: counts})
+		commits = append(commits, commitSubject{date: date, counts: counts, tracker: parseCommitTracker(entry.Subject)})
 	}
 	// git log --topo-order is already newest-first by ancestry; trim to the
 	// window. (We sort topologically rather than by date: commit dates are
@@ -1984,7 +2090,7 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 			if window[db] == nil {
 				order = append(order, db)
 			}
-			window[db] = append(window[db], spikeCommit{Db: db, N: n, Age: i, Date: c.date, Source: spikeSourceCommit, Version: countMetricVersion})
+			window[db] = append(window[db], spikeCommit{Db: db, N: n, Age: i, Date: c.date, Source: spikeSourceCommit, Version: countMetricVersion, Tracker: c.tracker[db]})
 		}
 	}
 	for db := range window {
@@ -2116,14 +2222,21 @@ func dedupeSpikeAges(entries []spikeCommit) []spikeCommit {
 // baseline: the newest entry in its window. ok is false when the database is
 // absent from the window (first export) or the window is empty.
 func spikeBaselineCount(sb *spikeBaseline, db string) (n int, ok bool) {
+	level, ok := spikeBaselineLevel(sb, db)
+	return level.N, ok
+}
+
+// spikeBaselineLevel returns the newest level of a database's baseline window,
+// with the store its count was measured from, and whether there is one.
+func spikeBaselineLevel(sb *spikeBaseline, db string) (spikeCommit, bool) {
 	if sb == nil {
-		return 0, false
+		return spikeCommit{}, false
 	}
 	entries := sb.Counts[db]
 	if len(entries) == 0 {
-		return 0, false
+		return spikeCommit{}, false
 	}
-	return entries[0].N, true
+	return entries[0], true
 }
 
 // spikeHistoryDetail renders the baseline window for one database as a
@@ -2199,6 +2312,11 @@ type spikeCommit struct {
 	// countMetricVersion). A cache written before versioning omits it, which
 	// reads as version 1, like a subject without the token.
 	Version int `json:"version,omitempty"`
+	// Tracker marks a count measured by the tracker export rather than over
+	// Dolt's tables. The two count different things — the export carries four
+	// tables and no events, config or metadata — so a level of one kind is not
+	// comparable with a count of the other (jsonlTrackerCountToken).
+	Tracker bool `json:"tracker,omitempty"`
 }
 
 const (
@@ -2335,6 +2453,57 @@ func jsonlCountParts(databases []string, counts map[string]int) []string {
 	return parts
 }
 
+// jsonlTrackerCountToken marks, in a backup commit's subject, the databases
+// whose counts that commit measured through the tracker export. The two counts
+// measure different things: the export carries four tables where Dolt carried
+// seven, and it counts no events, config or metadata. A rig that moves to the
+// tracker therefore drops by however much those tables held, which is not data
+// loss, and the spike guard compares a count only with levels measured the
+// same way (see spikeCommit.Tracker). The accept hint builds its subject here
+// too, so an accepted level carries the mark the writer would have given it.
+func jsonlTrackerCountToken(databases []string, tracker map[string]bool) string {
+	var on []string
+	for _, db := range databases {
+		if tracker[db] {
+			on = append(on, db)
+		}
+	}
+	if len(on) == 0 {
+		return ""
+	}
+	return "[TRACKER: " + strings.Join(on, " ") + "]"
+}
+
+// countStoreName names the store a count was measured from, for a log line an
+// operator reads without the row they came from.
+func countStoreName(tracker bool) string {
+	if tracker {
+		return "tracker"
+	}
+	return "dolt"
+}
+
+// parseCommitTracker reads the databases jsonlTrackerCountToken marked in a
+// backup subject. A subject without the token, which is every subject written
+// before it existed, marks nothing.
+func parseCommitTracker(subject string) map[string]bool {
+	_, rest, found := strings.Cut(subject, "[TRACKER:")
+	if !found {
+		return nil
+	}
+	list, _, found := strings.Cut(rest, "]")
+	if !found {
+		return nil
+	}
+	tracker := map[string]bool{}
+	for _, db := range strings.Fields(list) {
+		if validDBName.MatchString(db) {
+			tracker[db] = true
+		}
+	}
+	return tracker
+}
+
 func parseCommitCounts(subject string) map[string]int {
 	var out map[string]int
 	for _, field := range strings.Fields(subject) {
@@ -2413,7 +2582,10 @@ func ensureGitIgnore(gitRepo, entry string) {
 // A database absent from the baseline window is a first export and is skipped;
 // there is no level to compare against. A baseline of zero is checked against
 // the small-change floor, since a ratio against zero measures nothing
-// (gt-ttqq8).
+// (gt-ttqq8). A database whose newest level was measured from another store —
+// the tracker export rather than Dolt, or back — is rebaselined the same way a
+// changed count metric is: the two count different tables, so the level this
+// run commits is the first of the new kind and no spike is possible.
 func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts map[string]int, threshold float64) ([]spikeInfo, error) {
 	const minAbsoluteDelta = 20 // ignore changes smaller than this many records
 
@@ -2436,6 +2608,12 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		return nil, fmt.Errorf("no spike baseline: %w", err)
 	}
 
+	var compared []string // databases checked against a comparable level this run
+	defer func() {
+		if len(compared) > 0 {
+			d.clearAlerts("the count compares against its own store's level again", compared...)
+		}
+	}()
 	for _, db := range databases {
 		currentCount, ok := counts[db]
 		if !ok {
@@ -2457,6 +2635,44 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 			d.logger.Printf("jsonl_git_backup: verify: %s: first export (%d records), skipping spike check", db, currentCount)
 			continue
 		}
+		// A count measured through the tracker export is not comparable with
+		// one measured over Dolt's tables: the export carries four tables and
+		// no events, config or metadata, so a rig that moved to the tracker
+		// drops by whatever those held. The drop is not data loss, and this
+		// run's count is committed as the first level of the new kind, which
+		// the next run compares against (jsonlTrackerCountToken).
+		if prev, _ := spikeBaselineLevel(spikeBase, db); prev.Tracker != d.jsonlTrackerDBs[db] {
+			from, to := countStoreName(prev.Tracker), countStoreName(d.jsonlTrackerDBs[db])
+			// Nothing is comparable across the flip, but an empty export of a
+			// database that had records is never the tables an export leaves
+			// out: it halts like any drop, for an operator to accept, instead
+			// of becoming the new level.
+			if currentCount == 0 && prevCount > 0 {
+				spikes = append(spikes, spikeInfo{
+					DB:       db,
+					File:     filepath.Join(db, "issues.jsonl"),
+					Previous: prevCount,
+					Current:  currentCount,
+					Delta:    1,
+					Baseline: spikeHistoryDetail(spikeBase, db),
+				})
+				d.logger.Printf("jsonl_git_backup: SPIKE DETECTED: %s: the count's store changed (%s to %s) and the export is empty (was %d) — baseline window: %s",
+					db, from, to, prevCount, spikeHistoryDetail(spikeBase, db))
+				continue
+			}
+			// Any other count is committed as the first level of the new kind,
+			// and the reset is raised so a short export is seen rather than
+			// only logged; it clears once the database compares normally.
+			d.logger.Printf("jsonl_git_backup: verify: %s: the count's store changed (%s to %s) — rebaselining: this run's count (%d) becomes the new baseline, spike check skipped",
+				db, from, to, currentCount)
+			// A dropped delivery has its own escalation_dropped feed line, and the
+			// level is committed either way, so there is no next action to take.
+			_ = d.escalateAlertSeverity("low", alertKeyJSONLStoreFlip+db, "jsonl_git_backup", fmt.Sprintf(
+				"%s: the backup's count changed store (%s to %s), so its spike check was skipped and %d records (was %d) become the new baseline. If %d is short of the rig's issues, run the export by hand before the next tick.",
+				db, from, to, currentCount, prevCount, currentCount))
+			continue
+		}
+		compared = append(compared, alertKeyJSONLStoreFlip+db)
 		absDelta := currentCount - prevCount
 		if absDelta < 0 {
 			absDelta = -absDelta
@@ -2536,11 +2752,16 @@ func formatSpikeReport(spikes []spikeInfo) string {
 // the newest backup commit subjects, and a halted tick commits nothing, so
 // every tick halts on the same level until a newer count-bearing commit exists
 // (gt-ttqq8). The subject is built by jsonlBackupSubject, the writer's own
-// formatter, so the command given to an operator is one the parser reads back.
-func spikeAcceptHint(gitRepo string, databases []string, counts map[string]int) string {
+// formatter, so the command given to an operator is one the parser reads back —
+// the tracker mark included, since a subject that dropped it would land the
+// accepted count as one measured over Dolt.
+func (d *Daemon) spikeAcceptHint(gitRepo string, databases []string, counts map[string]int) string {
 	parts := jsonlCountParts(databases, counts)
 	if len(parts) == 0 {
 		parts = []string{"<db>=<N>"}
+	}
+	if token := jsonlTrackerCountToken(databases, d.jsonlTrackerDBs); token != "" {
+		parts = append(parts, token)
 	}
 	subject := jsonlBackupSubject(time.Now().Format("2006-01-02 15:04"), parts)
 	return fmt.Sprintf("To accept the export and resume the backup, land its counts as the new baseline:\n  git -C %q commit --allow-empty -m %q",
