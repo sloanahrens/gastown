@@ -22,7 +22,7 @@ The flip breaks every one of them, in one of four ways, and only the first two a
 
 - **Refused.** A read that goes through `bd sql` reaches the shim. The shim routes a tracker rig to its
   handler table (`internal/bdshim/bdshim.go:71`), which registers no handlers yet
-  (`internal/bdshim/osmain.go:17`), so the command exits 1 with
+  (`internal/bdshim/osmain.go:15`), so the command exits 1 with
   `bdshim: verb sql is not implemented for tracker rig <prefix>` (`bdshim.go:188`). No task in X3-X6
   (`docs/plans/2026-10-25-town-tracker-plan.md` section 11) implements `sql`, so this refusal is
   permanent, not a placeholder: X7 keeps it.
@@ -55,7 +55,7 @@ inlined into `bd sql` argv (`(*Beads).SQLCSV`, `internal/beads/cli.go:54`).
 | `(*Beads).SQLCSV`, `internal/beads/cli.go:54` | whatever `beadsql.Query` it is handed | per call | refused by the shim, exit 1 | each caller moves off SQL (rows below); the method dies with the shim | S4, X5 |
 | `(*Beads).SchemaLevel` via the town start gate, `internal/beads/version.go:45`, `internal/deps/bd_handshake.go:187`, `internal/cmd/bd_handshake.go:104` | `schema_migrations` | once per process, for `gt up`, `gt sling`, `gt session start` and the other gated verbs | refused; the gate refuses the command, so no session starts | answer the gate from the tracker (readiness and schema), not from Dolt | B8, O4 |
 | `(*Beads).PreloadBeads`, `internal/beads/beads_preload.go:26`, called from `internal/cmd/polecat.go:675` | `wisps`, `wisp_labels`, `wisp_dependencies`, `issues`, `labels`, `dependencies` | once per rig per `gt polecat list` | warning, then every reader falls back to its own per-call query (all of them seam verbs) | port the snapshot behind `beads.Client`, or drop it when the per-call path is the only path | none, needs a bead |
-| `(*Beads).ListAgentBeadsFromWisps`, `internal/beads/beads.go:2836`, called from `internal/doctor/stale_agent_beads_check.go:158` | `wisps`, `wisp_labels` | per agent listing and per doctor run | refused; the check records a query error for the rig and leaves it out of the stale set | port to a seam method (`List` filtered on the wisp tier) | X3, V16a |
+| `(*Beads).ListAgentBeadsFromWisps`, `internal/beads/beads_agent.go:569`, called from `internal/doctor/stale_agent_beads_check.go:158` | `wisps`, `wisp_labels` | per agent listing and per doctor run | refused; the check records a query error for the rig and leaves it out of the stale set | port to a seam method (`List` filtered on the wisp tier) | X3, V16a |
 | `(*Beads).CountIssues`, `internal/beads/cli.go:73`, called from `internal/doctor/jsonl_bloat_check.go:126` | `issues` | per `gt doctor` run | refused; the jsonl-bloat check drops the error and skips the rig | compare the JSONL count against the tracker's count route, or retire the check | O4, S4 |
 
 ## 2. Daemon patrols
