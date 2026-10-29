@@ -186,6 +186,40 @@ func TestApplyDefersWhenAJobStarted(t *testing.T) {
 	}
 }
 
+// TestApplySkipsThePruneWhenAJobStartsDuringTheTrim asserts a job that starts
+// after the first job read, while the volumes are trimmed, holds the prune
+// back. The deletes the plan named still run.
+func TestApplySkipsThePruneWhenAJobStartsDuringTheTrim(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	// The job starts when the first rm runs: the job read before the deletes
+	// saw none, and the re-read before the prune sees one.
+	run := func(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "rm") {
+			f.ps = answer{out: "job1\n"}
+		}
+		return f.run(ctx, env, name, args...)
+	}
+	tgt := NewTarget(Config{Dind: f.dind, Runner: f.runner, Image: testImage, Run: run,
+		Ledger: diskmaint.NewLedger(path, 1<<20)})
+
+	result := apply(t, tgt, planOf(deletePath(gocacheVolume, "aa/old.bin", gb)))
+
+	if got, want := doneRefs(result), []string{gocacheVolume + ":aa/old.bin"}; !slices.Equal(got, want) {
+		t.Fatalf("done = %v, want %v", got, want)
+	}
+	if result.Deferred != deferredPruneJob {
+		t.Fatalf("deferred = %q, want %q", result.Deferred, deferredPruneJob)
+	}
+	if p := f.commands("prune"); len(p) > 0 {
+		t.Fatalf("prunes ran after a job started: %v", p)
+	}
+	if entry := ledgerEntries(t, path)[0]; entry.Deferred != deferredPruneJob || entry.Done != 1 {
+		t.Fatalf("ledger deferred/done = %q/%d, want %q/1", entry.Deferred, entry.Done, deferredPruneJob)
+	}
+}
+
 // TestApplyTrimsTheBuildCacheWhileAJobRuns asserts a build-cache-only plan is
 // the one a running job allows, and that it prunes nothing.
 func TestApplyTrimsTheBuildCacheWhileAJobRuns(t *testing.T) {
@@ -218,6 +252,12 @@ func TestApplyRefusesUnsafeActions(t *testing.T) {
 		{"path escaping its volume", deletePath(gocacheVolume, "a/../../etc/passwd", gb)},
 		{"path spanning lines", deletePath(gocacheVolume, "a\nb", gb)},
 		{"empty path", deletePath(gocacheVolume, "", gb)},
+		{"volume root", deletePath(gocacheVolume, ".", gb)},
+		{"volume root with a slash", deletePath(npmVolume, "./", gb)},
+		{"dot segment ending the path", deletePath(gocacheVolume, "aa/.", gb)},
+		{"empty segment", deletePath(gocacheVolume, "aa//bb", gb)},
+		{"trailing slash", deletePath(gocacheVolume, "aa/", gb)},
+		{"dot segment in a module path", deletePath(gomodVolume, "pkg/mod/./github.com/x@v1.2.3", gb)},
 		{"volume not in the limits", deletePath("ci-other", "x", gb)},
 		{"module under the download cache", deletePath(gomodVolume, "pkg/mod/cache/download/x/@v/v1.zip", gb)},
 		{"bare download cache path", deletePath(gomodVolume, "cache/download/x/@v/v1.zip", gb)},
@@ -426,7 +466,7 @@ func TestApplyCancelledRunReportsTheCancellation(t *testing.T) {
 
 // cancelledApply runs an apply whose runner cancels the run at the first call
 // containing want, and returns the result, the error and that runner.
-func cancelledApply(t *testing.T, f *fakeDocker, want string) (diskmaint.Result, error, *cancelRunner) {
+func cancelledApply(t *testing.T, f *fakeDocker, want string) (diskmaint.Result, *cancelRunner, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ledger.jsonl")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -438,7 +478,7 @@ func cancelledApply(t *testing.T, f *fakeDocker, want string) (diskmaint.Result,
 		deletePath(gocacheVolume, "aa/old.bin", gb),
 		deletePath(npmVolume, "_cacache/tmp/x", gb),
 	))
-	return result, err, r
+	return result, r, err
 }
 
 // TestApplyCanceledWhileReadingJobs asserts a cancellation during the job
@@ -446,7 +486,7 @@ func cancelledApply(t *testing.T, f *fakeDocker, want string) (diskmaint.Result,
 func TestApplyCanceledWhileReadingJobs(t *testing.T) {
 	t.Parallel()
 	f := newFake()
-	result, err, r := cancelledApply(t, f, "ps -q")
+	result, r, err := cancelledApply(t, f, "ps -q")
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
@@ -464,7 +504,7 @@ func TestApplyCanceledWhileReadingJobs(t *testing.T) {
 func TestApplyCanceledDuringARemove(t *testing.T) {
 	t.Parallel()
 	f := newFake()
-	result, err, r := cancelledApply(t, f, "--entrypoint rm")
+	result, r, err := cancelledApply(t, f, "--entrypoint rm")
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
@@ -482,7 +522,7 @@ func TestApplyCanceledDuringARemove(t *testing.T) {
 func TestApplyCanceledDuringAPrune(t *testing.T) {
 	t.Parallel()
 	f := newFake()
-	result, err, r := cancelledApply(t, f, "builder prune")
+	result, r, err := cancelledApply(t, f, "builder prune")
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)

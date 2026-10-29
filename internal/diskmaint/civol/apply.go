@@ -21,6 +21,11 @@ const pruneKind = "prune"
 // and its cutoff no longer covers the cache a new job is writing.
 const deferredJobStarted = "a job started since the plan"
 
+// deferredPruneJob is the Result.Deferred text for a prune held back because a
+// job started while the volumes were trimmed. The trim already removed what the
+// plan named, so only the prune is skipped.
+const deferredPruneJob = "a job started during the trim; prune skipped"
+
 var (
 	// errNoLedger reports a target built without a ledger. Every apply must
 	// leave a record, so a run that cannot write one does not start.
@@ -99,8 +104,19 @@ func (t *Target) trim(ctx context.Context, actions []diskmaint.Action, result *d
 	}
 
 	// A prune while a job runs would drop the cache it is using, and an apply
-	// that removed nothing has no cache to prune.
+	// that removed nothing has no cache to prune. The job list is read again
+	// because a job may have started while the volumes were trimmed.
 	if jobs > 0 || len(result.Done) == 0 {
+		return errs, nil
+	}
+	jobs, err = t.jobCount(ctx)
+	if err != nil {
+		result.Deferred = err.Error()
+		errs = append(errs, err.Error())
+		return errs, err
+	}
+	if jobs > 0 {
+		result.Deferred = deferredPruneJob
 		return errs, nil
 	}
 	lines, stop := t.prune(ctx, result)
