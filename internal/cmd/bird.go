@@ -40,10 +40,11 @@ invocation is a session.
 
 The arguments are claude's: --name names the session, --resume resumes one, and
 a prompt is what it is asked. gt reads --bead to reuse the name that bead is
-bound to, or to take a free one, and labels the bead agent:<name>. claude runs
-exactly as the caller wrote it when the invocation is not a session: a print
-run, a version, help, a resumed session that is not a bird, or input or output
-that is not a terminal.
+bound to, or to take a free one, and labels the bead agent:<name>; --bead is gt's
+own and is never passed on to claude. When the invocation is not a session (a
+print run, a version, help, a resumed session that is not a bird, or input or
+output that is not a terminal) claude runs with the caller's other arguments
+unchanged.
 
 Examples:
   gt bird start                   # a session under a free bird name

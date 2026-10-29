@@ -594,8 +594,13 @@ func TestConcurrentStartsTakeDifferentNames(t *testing.T) {
 			// Each launch waits on the registry lock against its own clock, so
 			// one launch's retries never spend another's budget. Its Sleep
 			// advances that clock and yields to the holder instead of sleeping,
-			// and the budget is counted in tries, so no wait takes wall time and
-			// a start that cannot get the lock still ends.
+			// so no wait takes wall time. The hour is fake time, not a timing
+			// claim: it is about 360000 tries at the 10 ms retry, a hang guard
+			// that is large because a yield does not promise the holder runs
+			// (the production 5 s, about 500 tries, failed this test when the
+			// package ran under load). What the test asserts is that every
+			// launch takes a different name; a start that never gets the lock
+			// ends after those tries with an error instead of hanging.
 			launchAt := at(0)
 			own := *reg
 			own.Now = func() time.Time { return launchAt }
