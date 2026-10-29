@@ -567,13 +567,12 @@ func (r *RedMain) RevertLanded(_ context.Context, work land.Work, res land.Resul
 		Force:     true,
 	}
 	// A human-only culprit keeps its holder, as a rejection does: only a
-	// person can produce its branch (gt-me800). This check reads only the old
-	// human-only name, so an overseer-only or operator-only culprit is not kept
-	// with its holder here. An unreadable culprit keeps its assignee too, since
-	// the holder is not known to be wrong.
+	// person can produce its branch (gt-me800). An overseer-only or
+	// operator-only culprit is kept the same way (gt-4rivs). An unreadable
+	// culprit keeps its assignee too, since the holder is not known to be wrong.
 	if cul, err := r.Beads.Show(culprit); err != nil {
 		r.logf("reading %s for its holder: %v", culprit, err)
-	} else if cul != nil && !beads.HasLabel(cul, dispatch.HumanOnlyLabel) {
+	} else if cul != nil && !dispatch.HumanHeld(cul.Labels) {
 		unassigned := ""
 		update.Assignee = &unassigned
 	}

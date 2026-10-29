@@ -323,6 +323,36 @@ func TestRejectKeepsTheHolderOfAHumanOnlyBead(t *testing.T) {
 	}
 }
 
+// TestRejectKeepsTheHolderOfAnOverseerOrOperatorOnlyBead: an overseer-only or
+// operator-only bead is held the way a human-only one is, so a refusal leaves
+// its assignee for the holder that reads it, and the bead is not slung onto a
+// seat (gt-4rivs).
+func TestRejectKeepsTheHolderOfAnOverseerOrOperatorOnlyBead(t *testing.T) {
+	t.Parallel()
+	for _, label := range []string{dispatch.OverseerOnlyLabel, dispatch.OperatorOnlyLabel} {
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			const crew = "fractals/crew/ops"
+			f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "land the release workflows", Status: "hooked", Type: "task",
+				Assignee: crew, Labels: []string{LabelReadyToLand, label}, Notes: FormatReadyNote(f.work)})
+			f.gate.fn = func(string) GateResult {
+				return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
+			}
+
+			_, err := f.lander().Land(context.Background(), f.work)
+			var rej *Rejection
+			if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+				t.Fatalf("Land = %T %v, want a recorded gate rejection", err, err)
+			}
+			b := f.bead()
+			if b.Status != "open" || b.Assignee != crew || !beads.HasLabel(b, LabelRework) {
+				t.Errorf("bead after rejection: status=%s assignee=%q labels=%v", b.Status, b.Assignee, b.Labels)
+			}
+		})
+	}
+}
+
 // TestRejectKeepsABirdsClaim: a bird claimed the bead it submitted, so a
 // rejection leaves the claim and the status alone, still notes the refusal,
 // and reaches the owner as one attention item keyed by the bead (gt-h4cvi).
