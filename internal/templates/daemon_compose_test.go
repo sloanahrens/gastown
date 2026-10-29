@@ -35,18 +35,32 @@ type composeNetwork struct {
 }
 
 type composeService struct {
-	Image         string            `yaml:"image"`
-	ContainerName string            `yaml:"container_name"`
-	Restart       string            `yaml:"restart"`
-	StopGrace     string            `yaml:"stop_grace_period"`
-	WorkingDir    string            `yaml:"working_dir"`
-	Privileged    bool              `yaml:"privileged"`
-	Command       []string          `yaml:"command"`
-	DependsOn     []string          `yaml:"depends_on"`
-	Environment   map[string]string `yaml:"environment"`
-	Volumes       []composeVolume   `yaml:"volumes"`
-	Networks      []string          `yaml:"networks"`
-	Ports         []string          `yaml:"ports"`
+	Image         string                       `yaml:"image"`
+	ContainerName string                       `yaml:"container_name"`
+	Restart       string                       `yaml:"restart"`
+	StopGrace     string                       `yaml:"stop_grace_period"`
+	WorkingDir    string                       `yaml:"working_dir"`
+	Privileged    bool                         `yaml:"privileged"`
+	Command       []string                     `yaml:"command"`
+	DependsOn     map[string]composeDependency `yaml:"depends_on"`
+	Healthcheck   *composeHealthcheck          `yaml:"healthcheck"`
+	Environment   map[string]string            `yaml:"environment"`
+	Volumes       []composeVolume              `yaml:"volumes"`
+	Networks      []string                     `yaml:"networks"`
+	Ports         []string                     `yaml:"ports"`
+}
+
+// composeDependency is one entry of the long-form depends_on, which carries the
+// condition compose holds the dependent service to.
+type composeDependency struct {
+	Condition string `yaml:"condition"`
+}
+
+type composeHealthcheck struct {
+	Test     []string `yaml:"test"`
+	Interval string   `yaml:"interval"`
+	Timeout  string   `yaml:"timeout"`
+	Retries  int      `yaml:"retries"`
 }
 
 type composeVolume struct {
@@ -192,8 +206,8 @@ func TestRenderDaemonCompose_ContainerNameIsTheOwnerID(t *testing.T) {
 }
 
 // The engine is what the sweep drives, so the daemon's DOCKER_HOST and the
-// engine's service name are one string (A3 wrote it, C2 adds the service), and
-// the dependency order makes compose start the engine first.
+// engine's service name are one string, and the daemon waits on the engine's
+// health before it starts (gt-qpeei.24).
 func TestRenderDaemonCompose_SweepDindService(t *testing.T) {
 	t.Parallel()
 	_, f := render(t, liveSpec())
@@ -221,8 +235,11 @@ func TestRenderDaemonCompose_SweepDindService(t *testing.T) {
 	if got := f.Services["daemon"].Environment["DOCKER_HOST"]; got != "tcp://"+engineName+":2375" {
 		t.Errorf("daemon DOCKER_HOST = %q, want it to name the %s service", got, engineName)
 	}
-	if got := f.Services["daemon"].DependsOn; !slices.Equal(got, []string{engineName}) {
-		t.Errorf("daemon depends_on = %q, want [%s]", got, engineName)
+	if deps := f.Services["daemon"].DependsOn; len(deps) != 1 {
+		t.Errorf("daemon depends_on = %v, want the %s engine alone", deps, engineName)
+	}
+	if _, ok := f.Services["daemon"].DependsOn[engineName]; !ok {
+		t.Errorf("daemon depends_on = %v, want %s among it", f.Services["daemon"].DependsOn, engineName)
 	}
 
 	vols := engine.Volumes
@@ -234,6 +251,39 @@ func TestRenderDaemonCompose_SweepDindService(t *testing.T) {
 	}
 	if _, ok := f.Volumes[engineVolume]; !ok {
 		t.Errorf("top-level volumes = %v, want %s declared so compose names it", f.Volumes, engineVolume)
+	}
+}
+
+// compose starts a dependency's container and moves on, so a plain depends_on
+// can hand the daemon a dockerd that is not listening yet, and the first sweep
+// then fails on a connection refused. The health condition holds the daemon
+// until the engine answers.
+func TestRenderDaemonCompose_WaitsForTheEngineToBeHealthy(t *testing.T) {
+	t.Parallel()
+	_, f := render(t, liveSpec())
+
+	dep, ok := f.Services["daemon"].DependsOn[engineName]
+	if !ok {
+		t.Fatalf("daemon depends_on = %v, want %s among it", f.Services["daemon"].DependsOn, engineName)
+	}
+	if dep.Condition != "service_healthy" {
+		t.Errorf("daemon depends_on %s condition = %q, want service_healthy: a started engine may not be listening yet", engineName, dep.Condition)
+	}
+
+	hc := f.Services[engineName].Healthcheck
+	if hc == nil {
+		t.Fatal("engine has no healthcheck: nothing would ever report it healthy, so the daemon's condition could never be met")
+	}
+	if !slices.Equal(hc.Test, []string{"CMD", "docker", "info"}) {
+		t.Errorf("engine healthcheck test = %q, want [CMD docker info]: that probe succeeds only once dockerd answers", hc.Test)
+	}
+	for name, d := range map[string]string{"interval": hc.Interval, "timeout": hc.Timeout} {
+		if _, err := time.ParseDuration(d); err != nil {
+			t.Errorf("engine healthcheck %s = %q, want a duration", name, d)
+		}
+	}
+	if hc.Retries < 1 {
+		t.Errorf("engine healthcheck retries = %d, want at least one attempt", hc.Retries)
 	}
 }
 
@@ -303,7 +353,7 @@ func TestRenderDaemonCompose_OnlyTheDaemonAndTheEngineJoinAnInternalNetwork(t *t
 
 	for name, svc := range f.Services {
 		if !slices.Contains(svc.Networks, engineNet[0]) {
-			t.Errorf("service %q networks = %q, want it to be off %q", name, svc.Networks, engineNet[0])
+			t.Errorf("service %q networks = %q, want it on %q: the engine's network reaches nothing else", name, svc.Networks, engineNet[0])
 		}
 	}
 	if got := len(f.Services); got != 2 {
