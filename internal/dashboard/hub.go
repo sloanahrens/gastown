@@ -54,6 +54,10 @@ type Hub struct {
 	detailMu    sync.Mutex
 	detailCache map[string]detailEntry
 	detailGate  detailGate // bead-detail reads join Run's lifecycle (gt-fekq1)
+
+	// costProviders builds the Cost panel's provider rows, in order. Nil is the
+	// default list (BuildCostProviders); a test injects its own list here.
+	costProviders []costProviderBuilder
 }
 
 // Sub is one open page.
@@ -851,6 +855,37 @@ func (h *Hub) pollSpend() {
 func (h *Hub) rebuildCostChartsLocked() {
 	charts := BuildCostCharts(h.cfg.Now(), SpendPerDay(h.state.Spend), h.state.SpendHours, h.state.SpendSkipped, h.state.ClaudePlan, h.state.PlanSamples)
 	h.state.CostCharts = &charts
+	h.rebuildCostProvidersLocked()
+}
+
+// rebuildCostProvidersLocked rebuilds the Cost panel's provider rows from the
+// state the charts are built from. A provider whose reader this hub was not
+// given has no row; a configured one that has no figures says why. The caller
+// holds h.mu.
+func (h *Hub) rebuildCostProvidersLocked() {
+	unwired := map[string]bool{
+		costProviderDeepSeek: h.cfg.Spend == nil,
+		costProviderClaude:   h.cfg.ClaudePlan == nil,
+		costProviderJev:      h.cfg.JevSpend == nil,
+	}
+	var rows []CostProvider
+	for _, p := range h.costProviderRows() {
+		if !unwired[p.ID] {
+			rows = append(rows, p)
+		}
+	}
+	h.state.CostProviders = rows
+}
+
+// costProviderRows builds the panel's rows from the state the charts are built
+// from: the default list through BuildCostProviders, or the list a test handed
+// the hub so it can add a provider without touching the town's.
+func (h *Hub) costProviderRows() []CostProvider {
+	now := h.cfg.Now()
+	if h.costProviders == nil {
+		return BuildCostProviders(now, h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, h.state.JevSpend)
+	}
+	return buildCostProviders(h.costProviders, now, h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, h.state.JevSpend)
 }
 
 // pollJevSpend keeps the last good Jev row across a failed read, like the
@@ -866,6 +901,7 @@ func (h *Hub) pollJevSpend() {
 		return
 	}
 	h.state.JevSpend = j
+	h.rebuildCostProvidersLocked()
 	h.readOKLocked(SourceJevSpend, h.cfg.JevSpendEvery)
 	h.publishLocked()
 }
