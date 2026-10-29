@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from town_metrics import metrics, render  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GOLDEN = os.path.join(HERE, "testdata", "town_metrics", "report_golden.md")
+GOLDEN = os.path.join(HERE, "..", "internal", "metrics", "testdata", "report_golden.md")
 
 
 def row(week, **kw):
