@@ -61,8 +61,9 @@ func str(s string) *string { return &s }
 func TestCommandMapsEachReplayableEventToItsBdCall(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
-		ev   api.Event
-		want []string
+		ev     api.Event
+		prefix string // "" means the rig's "gt-"
+		want   []string
 	}{
 		"created with an actor": {
 			ev:   api.Event{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: str("Add x"), Actor: "town/crew/x"},
@@ -71,6 +72,33 @@ func TestCommandMapsEachReplayableEventToItsBdCall(t *testing.T) {
 		"created without an actor": {
 			ev:   api.Event{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: str("Add x")},
 			want: []string{"create", "--id=gt-1", "--title=Add x"},
+		},
+		// A wisp creation is an ordinary created event whose id is the only
+		// mark it was a wisp; replaying it without --ephemeral would make it a
+		// persistent, versioned issue. bd 1.2.2 takes the pair: create refuses
+		// --ephemeral only with --no-history, and an explicit id passes prefix
+		// validation like any other (beads cmd/bd/create.go:183) (gt-p85pw.90).
+		"created as a wisp": {
+			ev:   api.Event{Seq: 1, Op: "created", IssueID: "gt-wisp-c3w9x1", NewValue: str("a wisp")},
+			want: []string{"create", "--id=gt-wisp-c3w9x1", "--title=a wisp", "--ephemeral"},
+		},
+		"created as a wisp with an actor": {
+			ev:   api.Event{Seq: 1, Op: "created", IssueID: "gt-wisp-c3w9x1", NewValue: str("a wisp"), Actor: "town/crew/x"},
+			want: []string{"create", "--id=gt-wisp-c3w9x1", "--title=a wisp", "--ephemeral", "--actor=town/crew/x"},
+		},
+		// "wisp" elsewhere in an id is not a wisp: only the segment right after
+		// this rig's prefix makes one, so a foreign rig's wisp stays a plain
+		// create here (gt-p85pw.90).
+		"created with a wisp-shaped id of another rig": {
+			ev:   api.Event{Seq: 1, Op: "created", IssueID: "gtx-wisp-c3w9x1", NewValue: str("another rig's wisp")},
+			want: []string{"create", "--id=gtx-wisp-c3w9x1", "--title=another rig's wisp"},
+		},
+		// A rig whose prefix ends in "-wisp" has ordinary issues shaped like a
+		// wisp; its ids go through as the plain creates they are (gt-p85pw.90).
+		"created under a prefix that ends in wisp": {
+			ev:     api.Event{Seq: 1, Op: "created", IssueID: "gt-wisp-a1b2c", NewValue: str("an ordinary issue")},
+			prefix: "gt-wisp-",
+			want:   []string{"create", "--id=gt-wisp-a1b2c", "--title=an ordinary issue"},
 		},
 		"status changed": {
 			ev:   api.Event{Seq: 2, Op: "status_changed", IssueID: "gt-1", NewValue: str("in_progress")},
@@ -150,7 +178,11 @@ func TestCommandMapsEachReplayableEventToItsBdCall(t *testing.T) {
 		},
 	}
 	for name, tc := range cases {
-		got, err := Command(tc.ev)
+		prefix := tc.prefix
+		if prefix == "" {
+			prefix = "gt-"
+		}
+		got, err := Command(tc.ev, prefix)
 		if err != nil {
 			t.Errorf("%s: Command = %v, want %v", name, err, tc.want)
 			continue
@@ -237,7 +269,7 @@ func TestCommandRefusesWhatTheFeedCannotReplayAndNamesKindAndSeq(t *testing.T) {
 		},
 	}
 	for name, tc := range cases {
-		argv, err := Command(tc.ev)
+		argv, err := Command(tc.ev, "gt-")
 		var u *UnreplayableError
 		if !errors.As(err, &u) {
 			t.Errorf("%s: Command = %q, %v; want *UnreplayableError", name, argv, err)
@@ -283,6 +315,29 @@ func TestReplayDryRunPrintsEachBdCallAndRunsNone(t *testing.T) {
 	}
 	if res != (Result{Applied: 2, Commands: 2, Defaulted: 1}) {
 		t.Errorf("dry run result = %+v, want Applied 2 Commands 2 Defaulted 1 (the one creation)", res)
+	}
+}
+
+// A dry run prints the wisp's --ephemeral, so the operator sees the replay
+// keeping it a wisp before anything runs (gt-p85pw.90).
+func TestReplayDryRunPrintsAWispCreationAsEphemeral(t *testing.T) {
+	t.Parallel()
+	src := &fakeSource{events: []api.Event{
+		{Seq: 1, Op: "created", IssueID: "gt-wisp-c3w9x1", NewValue: str("a wisp")},
+		{Seq: 2, Op: "created", IssueID: "gt-2", NewValue: str("not a wisp")},
+	}}
+	var out bytes.Buffer
+	res, err := Replay(context.Background(), src, nil, 0, "gt-", true, &out)
+	if err != nil {
+		t.Fatalf("Replay dry run: %v", err)
+	}
+	want := "bd create --id=gt-wisp-c3w9x1 '--title=a wisp' --ephemeral\n" +
+		"bd create --id=gt-2 '--title=not a wisp'\n"
+	if out.String() != want {
+		t.Errorf("dry run printed %q, want %q", out.String(), want)
+	}
+	if res != (Result{Applied: 2, Commands: 2, Defaulted: 2}) {
+		t.Errorf("dry run result = %+v, want both creations counted as defaulted", res)
 	}
 }
 
