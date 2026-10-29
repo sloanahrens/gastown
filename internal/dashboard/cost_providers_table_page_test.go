@@ -527,6 +527,57 @@ func TestCostProvidersTableDrawsAFailedJevReadAsADimRowWithItsReason(t *testing.
 	}
 }
 
+// The failed-read row is drawn from the value the SERVER builds, not from a
+// fixture written to look like it: BuildCostProviders is run with no Jev reading,
+// its array goes through JSON as the page receives it, and the page's own
+// renderCost draws it. The reason the row shows is the one the Go side set, so a
+// renamed field, a dropped omitempty or a changed reason fails here (gt-p39fq).
+func TestCostProvidersTableDrawsTheServersFailedJevRead(t *testing.T) {
+	t.Parallel()
+
+	built := BuildCostProviders(time.Date(2026, 10, 29, 3, 0, 0, 0, time.UTC), json.RawMessage(`null`), nil, nil, nil)
+	var jevWhy string
+	for _, p := range built {
+		if p.ID == costProviderJev {
+			jevWhy = p.Why
+		}
+	}
+	if jevWhy == "" {
+		t.Fatal("the server built no Jev row with a reason for a missing Jev reading")
+	}
+	raw, err := json.Marshal(built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var providers []map[string]any
+	if err := json.Unmarshal(raw, &providers); err != nil {
+		t.Fatal(err)
+	}
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", costPanelState(providers, map[string]any{"spend": spendReading()}))
+	var jev *costTableRow
+	rows := costTable(t, dom)
+	for i := range rows {
+		if len(rows[i].Cells) > 0 && rows[i].Cells[0].Text == "Jev" {
+			jev = &rows[i]
+		}
+	}
+	if jev == nil {
+		t.Fatalf("the table drew no Jev row from the server's array (%d rows)", len(rows))
+	}
+	if !strings.Contains(jev.Class, "dimrow") {
+		t.Errorf("the server's failed Jev row class is %q, want dim", jev.Class)
+	}
+	if got := jev.Cells[8].Text; got != jevWhy {
+		t.Errorf("the failed Jev row shows %q, want the server's reason %q", got, jevWhy)
+	}
+	for _, c := range jev.Cells[2:8] {
+		if c.Text != "–" {
+			t.Errorf("a figure of the server's failed Jev row draws %q, want a dash", c.Text)
+		}
+	}
+}
+
 // Each legend swatch carries the colour of the bar it names, whatever order the
 // providers come in: DeepSeek's blue and Claude's violet, not their places in
 // the array.
