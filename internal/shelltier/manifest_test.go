@@ -47,6 +47,7 @@ func TestManifestCoversEveryTrackedShellTest(t *testing.T) {
 		}, Manifest(), "scripts/new_test.sh"},
 		{"a deleted entry leaves its script uncovered", trackedLister, without(Manifest(), "scripts/install-om_test.sh"), "scripts/install-om_test.sh"},
 		{"a lister error is reported, not read as covered", failingLister, Manifest(), "boom"},
+		{"an empty listing is an error, not covered", func() ([]string, error) { return nil, nil }, Manifest(), "no tracked shell tests listed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,6 +151,21 @@ func TestTriggersOrDefault(t *testing.T) {
 			Entry{Triggers: []string{"scripts/x/"}, StubsGo: "stub: scripts/x_test.sh:3 puts a fake go on PATH"},
 			[]string{"scripts/x/"},
 		},
+		{
+			"a malformed reason is no exemption and runs on every Go change",
+			Entry{StubsGo: "bogus"},
+			append(slices.Clone(DefaultTriggers), GoTriggers...),
+		},
+		{
+			"a bare none: prefix is no exemption",
+			Entry{StubsGo: "none:"},
+			append(slices.Clone(DefaultTriggers), GoTriggers...),
+		},
+		{
+			"a stub: prefix with only spaces after it is no exemption",
+			Entry{StubsGo: "stub:   "},
+			append(slices.Clone(DefaultTriggers), GoTriggers...),
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -164,10 +180,31 @@ func TestEveryEntryCarriesAStubsGoReason(t *testing.T) {
 	t.Parallel()
 	for _, e := range Manifest() {
 		t.Run(e.Path, func(t *testing.T) {
-			if !strings.HasPrefix(e.StubsGo, "none:") && !strings.HasPrefix(e.StubsGo, "stub:") {
-				t.Fatalf("StubsGo = %q, want a reason starting none: or stub:", e.StubsGo)
+			if !hasReason(e.StubsGo) {
+				t.Fatalf("StubsGo = %q, want a reason starting none: or stub: followed by text", e.StubsGo)
 			}
 		})
+	}
+}
+
+func TestHasReasonNeedsTextAfterThePrefix(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		s    string
+		want bool
+	}{
+		{"none: names no go command", true},
+		{"stub: scripts/x_test.sh:3 puts a fake go on PATH", true},
+		{"none:", false},
+		{"stub:", false},
+		{"stub:   ", false},
+		{"bogus", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		if got := hasReason(tc.s); got != tc.want {
+			t.Errorf("hasReason(%q) = %v, want %v", tc.s, got, tc.want)
+		}
 	}
 }
 

@@ -39,7 +39,7 @@ var DefaultTriggers = []string{"scripts/", "Makefile"}
 var GoTriggers = []string{"go.mod", "go.sum", "cmd/", "internal/", "plugins/"}
 
 // TriggersOrDefault returns the paths whose change runs this test. It fails
-// closed: an entry with no StubsGo exemption also runs on every Go change,
+// closed: an entry whose StubsGo is not a reason also runs on every Go change,
 // because a script the guard cannot classify must run more often, not less.
 func (e Entry) TriggersOrDefault() []string {
 	triggers := e.Triggers
@@ -47,10 +47,21 @@ func (e Entry) TriggersOrDefault() []string {
 		triggers = DefaultTriggers
 	}
 	out := slices.Clone(triggers)
-	if strings.TrimSpace(e.StubsGo) == "" {
+	if !hasReason(e.StubsGo) {
 		out = append(out, GoTriggers...)
 	}
 	return out
+}
+
+// hasReason reports whether s is a StubsGo reason: a "none:" or "stub:" prefix
+// followed by text. A bare prefix, or any other text, is not a reason.
+func hasReason(s string) bool {
+	for _, prefix := range []string{"none:", "stub:"} {
+		if rest, ok := strings.CutPrefix(s, prefix); ok && strings.TrimSpace(rest) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Manifest lists every shell test in the order the runner runs them: the
@@ -118,6 +129,9 @@ func CheckCovered(list Lister, entries []Entry) error {
 	tracked, err := list()
 	if err != nil {
 		return fmt.Errorf("list tracked shell tests: %w", err)
+	}
+	if len(tracked) == 0 {
+		return fmt.Errorf("no tracked shell tests listed, so coverage cannot be shown")
 	}
 	listed := make(map[string]bool, len(entries))
 	for _, e := range entries {
