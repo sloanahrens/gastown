@@ -15,13 +15,16 @@ import (
 // fakeSeatIssuer answers a crew seat's token request with a fixed token and
 // error, and records the actors it was asked for.
 type fakeSeatIssuer struct {
-	token  string
-	err    error
-	actors []string
+	token   string
+	err     error
+	actors  []string
+	bounded bool
 }
 
-func (f *fakeSeatIssuer) Issue(_ context.Context, actor string) (string, error) {
+// Issue records the actor and whether the request's context has a deadline.
+func (f *fakeSeatIssuer) Issue(ctx context.Context, actor string) (string, error) {
 	f.actors = append(f.actors, actor)
+	_, f.bounded = ctx.Deadline()
 	return f.token, f.err
 }
 
@@ -29,6 +32,7 @@ const (
 	trackerRouteGastown = `{"path":"gastown/mayor/rig","prefix":"gt-","backend":"tracker"}`
 	doltRouteGastown    = `{"path":"gastown/mayor/rig","prefix":"gt-"}`
 	trackerRouteOther   = `{"path":"other/mayor/rig","prefix":"ot-","backend":"tracker"}`
+	doltRouteOther      = `{"path":"other/mayor/rig","prefix":"ot-"}`
 	// routesIsDirectory stands in for a route table that exists but cannot be
 	// read: a directory where routes.jsonl should be.
 	routesIsDirectory = "\x00directory"
@@ -84,7 +88,9 @@ func TestTrackerEnvByRouteBackend(t *testing.T) {
 	}{
 		{"tracker rig gets the URL and its token file", trackerRouteGastown, "", true, false, 1},
 		{"Dolt rig environment is unchanged", doltRouteGastown, "", false, false, 0},
-		{"rig with no route is on Dolt", trackerRouteOther, "", false, false, 0},
+		{"town with no route table is on Dolt", "", "", false, false, 0},
+		{"rig with no route in a Dolt-only town is on Dolt", doltRouteOther, "", false, false, 0},
+		{"rig with no route in a town with tracker rigs refuses", trackerRouteOther, "", false, true, 0},
 		{"unreadable route table refuses", routesIsDirectory, "", false, true, 0},
 		{"broken town config refuses before minting a token", trackerRouteGastown, "{", false, true, 0},
 	}
@@ -123,6 +129,36 @@ func TestTrackerEnvByRouteBackend(t *testing.T) {
 			}
 			if len(issuer.actors) != 1 || issuer.actors[0] != "gastown/crew/dave" {
 				t.Errorf("issuer asked for %v, want the crew seat gastown/crew/dave", issuer.actors)
+			}
+			if !issuer.bounded {
+				t.Error("token request has no deadline, want a bounded context")
+			}
+		})
+	}
+}
+
+// A crew name becomes a file name under the town's seat directory. A name that
+// is not a crew name refuses before any token is minted or any directory made,
+// even when the caller did not check it.
+func TestTrackerEnvRefusesUnsafeCrewName(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"", ".", "..", "../escape", "a/b", `a\b`, "dave.x", "dave-x", "dave x"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root := writeCrewTown(t, trackerRouteGastown, "")
+			issuer := &fakeSeatIssuer{token: "trk_seat-token-0003"}
+			env, err := crewManagerFor(issuer).trackerEnv(root, name)
+			if err == nil {
+				t.Fatalf("trackerEnv(%q) = %v, want a refusal", name, env)
+			}
+			if env != nil {
+				t.Errorf("environment = %v after a refused name, want none", env)
+			}
+			if len(issuer.actors) != 0 {
+				t.Errorf("tokens minted = %d, want none", len(issuer.actors))
+			}
+			if _, err := os.Stat(filepath.Join(root, ".runtime")); !os.IsNotExist(err) {
+				t.Errorf("runtime directory exists after a refused name (stat error %v), want none", err)
 			}
 		})
 	}
@@ -210,10 +246,18 @@ func TestStartFailsWhenTrackerRefusesToken(t *testing.T) {
 }
 
 // A tracker-backed rig with no injected issuer and no admin credential in its
-// town refuses before it mints a token: no token file is written.
+// town refuses before it mints a token: no token file is written. The town's
+// daemon.env sets the credential to nothing, so the refusal comes from the
+// town's own file and no value is read from the process environment.
 func TestTrackerEnvWithoutAdminCredentialRefuses(t *testing.T) {
 	t.Parallel()
 	root := writeCrewTown(t, trackerRouteGastown, "")
+	if err := os.MkdirAll(filepath.Join(root, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "settings", "daemon.env"), []byte("TRACKER_ADMIN_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	env, err := (&Manager{rig: &rig.Rig{Name: "gastown"}}).trackerEnv(root, "dave")
 	if err == nil || !strings.Contains(err.Error(), "tracker token issuer") {
 		t.Fatalf("trackerEnv error = %v, want the host issuer to be refused", err)

@@ -5,12 +5,17 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/seattoken"
 )
+
+// trackerIssueTimeout bounds the one token request a crew start makes, so a
+// tracker that never answers fails the start instead of hanging it.
+const trackerIssueTimeout = 10 * time.Second
 
 // trackerEnv is the environment a crew session gets when its rig is on the
 // tracker: the tracker's URL and the path of the crew member's own token file.
@@ -23,6 +28,12 @@ func (m *Manager) trackerEnv(townRoot, name string) (map[string]string, error) {
 	}
 	if !onTracker {
 		return nil, nil
+	}
+	// The name becomes a file name under the town's seat directory, so it is
+	// checked here as well as by the callers: no seat path is built from a name
+	// that is not a crew name.
+	if err := validateCrewName(name); err != nil {
+		return nil, err
 	}
 	// The endpoint is resolved before a token is minted, so a broken town
 	// config issues no token that nothing would use.
@@ -39,7 +50,9 @@ func (m *Manager) trackerEnv(townRoot, name string) (map[string]string, error) {
 		issuer = host
 	}
 	seat := intent.Seat{Rig: m.rig.Name, Role: "crew", Name: name}
-	path, err := seattoken.New(townRoot).Ensure(context.Background(), seat, issuer)
+	ctx, cancel := context.WithTimeout(context.Background(), trackerIssueTimeout)
+	defer cancel()
+	path, err := seattoken.New(townRoot).Ensure(ctx, seat, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("crew %s: tracker token: %w", name, err)
 	}
@@ -51,19 +64,28 @@ func (m *Manager) trackerEnv(townRoot, name string) (map[string]string, error) {
 
 // rigOnTracker reports whether the town's route for rigName names the tracker
 // backend. A route belongs to a rig by its first path segment, as
-// beads.GetPrefixForRig reads it. A rig with no route is on Dolt. An unreadable
-// route table is an error, never "Dolt": a tracker rig must not start on a
-// session that would then write to the wrong store.
+// beads.GetPrefixForRig reads it. A rig with no route is on Dolt, unless the
+// town routes some other rig to the tracker: then the rig's backend is not
+// known, and the start refuses rather than guess. An unreadable route table is
+// an error, never "Dolt": a tracker rig must not start on a session that would
+// then write to the wrong store.
 func rigOnTracker(townRoot, rigName string) (bool, error) {
 	routes, err := beads.LoadRoutes(filepath.Join(townRoot, ".beads"))
 	if err != nil {
 		return false, fmt.Errorf("reading the route table: %w", err)
 	}
+	townHasTracker := false
 	for _, r := range routes {
+		if r.BackendName() == beads.BackendTracker {
+			townHasTracker = true
+		}
 		first, _, _ := strings.Cut(r.Path, "/")
 		if first == rigName {
 			return r.BackendName() == beads.BackendTracker, nil
 		}
+	}
+	if townHasTracker {
+		return false, fmt.Errorf("rig %s has no route, but the town routes other rigs to the tracker, so its backend is unknown; add a route for %s in routes.jsonl", rigName, rigName)
 	}
 	return false, nil
 }
