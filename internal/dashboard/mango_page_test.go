@@ -2465,8 +2465,14 @@ func mangoBodyLabels(t *testing.T, dom *pageDOM, label string) []string {
 }
 
 // TestMangoVerdictChipStaysWhole: a verdict chip is one token, so it keeps its
-// own line rather than splitting mid-word, and the
-// verdict column keeps a floor wide enough for it (gt-c6ge9).
+// own line rather than splitting mid-word, and the verdict column's share is
+// wide enough for it everywhere the table is drawn (gt-c6ge9).
+//
+// The column carries no min-width: under table-layout:fixed a browser ignores
+// min-width on a column or cell (CSS 2.1 leaves it undefined), so the
+// declaration looked like a floor and did nothing. The share is the floor: the
+// six-column table is drawn only above the 760px stack width, where 14% is at
+// least 106px.
 func TestMangoVerdictChipStaysWhole(t *testing.T) {
 	t.Parallel()
 
@@ -2477,8 +2483,18 @@ func TestMangoVerdictChipStaysWhole(t *testing.T) {
 	if got := declOf(t, chip, "overflow-wrap"); got != "normal" {
 		t.Errorf("a verdict chip draws with overflow-wrap %q, want normal so it is never split mid-word", got)
 	}
-	if got := cssDecls(t, "mgc-verdict")["min-width"]; !strings.HasSuffix(got, "em") {
-		t.Errorf("the verdict column keeps a floor of %q, want a width in em so its chip fits whatever share the row gives it", got)
+	decls := cssDecls(t, "mgc-verdict")
+	if got, ok := decls["min-width"]; ok {
+		t.Errorf("the verdict column declares min-width %q, which a fixed-layout table ignores: size the column with its width share", got)
+	}
+	share := strings.TrimSuffix(decls["width"], "%")
+	pct, err := strconv.ParseFloat(share, 64)
+	if err != nil {
+		t.Fatalf("the verdict column's width %q is not a percentage: %v", decls["width"], err)
+	}
+	const narrowestWide, chipFloor = 760.0, 100.0 // px: the stack width, and room for the longest verdict chip
+	if got := narrowestWide * pct / 100; got < chipFloor {
+		t.Errorf("at the narrowest wide layout (%vpx) the verdict column is %.1fpx, want at least %vpx so its chip fits", narrowestWide, got, chipFloor)
 	}
 }
 
