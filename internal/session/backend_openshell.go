@@ -270,10 +270,12 @@ func dockerImageRef(ctx context.Context, image string, pull bool) (resolvedImage
 }
 
 // imageRefFor resolves image to the references Prepare names: the local image
-// the label check reads and the reference the create names. Both are read from
-// the same call, so a rebuild that retags the profile's image between Prepare's
-// check and its create cannot put an image nothing checked under the sandbox
-// (gt-16oj9).
+// the label check reads and the reference the create names. Both are read here,
+// before the push and the create, so a rebuild between Prepare's check and its
+// create leaves the sandbox on the reference that was read (gt-16oj9). A rebuild
+// that lands between the two reads here, or before the pod pulls, is caught
+// after the create by checkSandboxGT, which refuses and deletes the sandbox
+// (gt-zdilt).
 //
 // Docker is asked about image on every path, so a reference the host does not
 // have fails here rather than after the push.
