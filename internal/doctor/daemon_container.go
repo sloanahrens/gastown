@@ -1,9 +1,12 @@
 package doctor
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -17,13 +20,6 @@ import (
 // doctor's daemon checks therefore read the town's daemon settings, the
 // daemon's own daemon/state.json and the container supervisor's state, and
 // read no pid (gt-qpeei.20).
-
-// errContainerStateUnread is the container supervisor's state until a reader
-// that asks docker exists (templates.ContainerJobState has no production
-// caller yet), so a production reading is always unknown here. A check reports
-// it as unknown, which it never counts as healthy, and a test supplies the
-// reading through containerDaemonReading.
-var errContainerStateUnread = errors.New("the container supervisor's state is not read yet")
 
 // containerDaemonReading is a container town's two daemon reports: state.json,
 // the daemon's own, and what the container supervisor says about the container.
@@ -39,17 +35,118 @@ type containerDaemonReading struct {
 // readContainerDaemon is the production reading; a check's seam replaces it
 // with canned values in tests.
 func readContainerDaemon(townRoot string) containerDaemonReading {
-	state, err := daemon.LoadState(townRoot)
-	stale := 2 * config.LoadOperationalConfig(townRoot).GetDaemonConfig().RecoveryHeartbeatIntervalD()
-	return containerDaemonReading{state: state, stateErr: err, job: containerJobState(), stale: stale}
+	return readContainerDaemonWith(runDockerInspect, townRoot)
 }
 
-// containerJobState is the container supervisor's live state. Until the docker
-// reader lands it is unknown rather than "not running": the container may be
-// up, and of the two wrong answers only one reports a failure the operator can
-// see.
-func containerJobState() templates.SupervisorState {
-	return templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: -1, Err: errContainerStateUnread}
+// readContainerDaemonWith is readContainerDaemon with the docker command
+// injected, so a test reads through the same code with a fake docker and no
+// container.
+func readContainerDaemonWith(run func(argv []string) ([]byte, error), townRoot string) containerDaemonReading {
+	state, err := daemon.LoadState(townRoot)
+	stale := 2 * config.LoadOperationalConfig(townRoot).GetDaemonConfig().RecoveryHeartbeatIntervalD()
+	return containerDaemonReading{state: state, stateErr: err, job: containerJobState(townRoot, run), stale: stale}
+}
+
+// defaultDockerContext is the --context every container argv carries: the
+// Docker Desktop context a container town's daemon runs in. Never the global
+// context, which nothing here may depend on.
+const defaultDockerContext = "desktop-linux"
+
+// containerInspectFormat asks docker for the two fields the supervisor's
+// state is made of: the state it reports for the container and the image it
+// runs.
+const containerInspectFormat = "{{.State.Status}} {{.Config.Image}}"
+
+// containerAbsentMarker is what docker writes to stderr for a container it
+// knows nothing about. That container is absent, which is docker's answer and
+// not a read that failed.
+const containerAbsentMarker = "No such object"
+
+// dockerInspectError is a failed docker command's stderr, kept apart from the
+// stdout the reading parses so a diagnostic is never read as state. Error()
+// carries the exit alone, because captured output can hold a secret.
+type dockerInspectError struct {
+	stderr string
+	err    error
+}
+
+func (e *dockerInspectError) Error() string { return e.err.Error() }
+
+func (e *dockerInspectError) Unwrap() error { return e.err }
+
+// runDockerInspect runs one docker command for the container reading.
+func runDockerInspect(argv []string) ([]byte, error) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // fixed argv from inspectContainerJobState
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.Bytes(), &dockerInspectError{stderr: stderr.String(), err: err}
+	}
+	return stdout.Bytes(), nil
+}
+
+// inspectContainerJobState is the container supervisor's state as one docker
+// inspect of the container named containerName reports it. Only docker's own
+// "No such object" makes an absent container: every other failure is unknown,
+// never "not running", because the daemon may well be up and of the two wrong
+// answers only one reports a failure the operator can see. This is the read
+// internal/cmd.ContainerJobState makes for gt daemon and gt down, repeated here
+// because doctor is a package internal/cmd imports, not the other way round.
+func inspectContainerJobState(run func(argv []string) ([]byte, error), containerName string) templates.SupervisorState {
+	argv := []string{"docker", "--context", defaultDockerContext, "inspect", "-f", containerInspectFormat, containerName}
+	st := templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: -1, Container: containerName}
+	out, err := run(argv)
+	if err != nil {
+		var runErr *dockerInspectError
+		if errors.As(err, &runErr) && strings.Contains(runErr.stderr, containerAbsentMarker) {
+			return st
+		}
+		// The stderr is not quoted: captured output can hold a secret.
+		st.Err = fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+		return st
+	}
+	// A successful run that printed no status and image is a read this reader
+	// cannot interpret, not a container that is absent.
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 {
+		st.Err = fmt.Errorf("%s: docker printed no status and image for %s", strings.Join(argv, " "), containerName)
+		return st
+	}
+	st.Loaded = true
+	st.Status = fields[0]
+	st.Image = fields[1]
+	return st
+}
+
+// containerJobState is the container supervisor's live state in the town at
+// townRoot. The town's own settings are the only source of the container's
+// name, so a scratch town inspects its scratch container and never the live
+// one; a container town that names no container of its own is unknown, since
+// an inherited default would report the live daemon's container as this town's.
+// run may be nil (runDockerInspect).
+func containerJobState(townRoot string, run func(argv []string) ([]byte, error)) templates.SupervisorState {
+	if run == nil {
+		run = runDockerInspect
+	}
+	cfg, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return unreadContainerState(fmt.Errorf("reading %s: %w", daemon.PatrolConfigSource(townRoot), err))
+	}
+	if cfg == nil || cfg.ContainerNameSetting == "" {
+		return unreadContainerState(errors.New("daemon.supervisor is container, but the town sets no daemon.container_name, so no container of this town's is named"))
+	}
+	if err := cfg.ValidateContainerNames(); err != nil {
+		return unreadContainerState(err)
+	}
+	return inspectContainerJobState(run, cfg.ContainerName())
+}
+
+// unreadContainerState is the unknown reading of a container town whose
+// settings do not name a container this binary may inspect; no docker command
+// runs for it.
+func unreadContainerState(err error) templates.SupervisorState {
+	return templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: -1, Err: err}
 }
 
 // daemonSupervisorKind is the town's configured daemon.supervisor kind, "" when
