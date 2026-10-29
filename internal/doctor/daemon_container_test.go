@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -110,27 +111,40 @@ func TestDaemonChecks_ContainerReportsHealthyFromState(t *testing.T) {
 }
 
 // Each of the four checks reports the failure its reading names — never OK —
-// when the container is not running, its heartbeat is stale, the supervisor's
-// state cannot be read, or the daemon that wrote state.json is not the
-// container's. The status is pinned so a refusal that is removed or quietly
-// downgraded turns the row red.
+// when the container is absent or stopped, its heartbeat is stale, the
+// supervisor's state cannot be read, or the daemon that wrote state.json is
+// not the container's. The status is pinned so a refusal that is removed or
+// quietly downgraded turns the row red, and the absent row pins that docker's
+// "no such container" is judged as absent rather than as a stopped one.
 func TestDaemonChecks_ContainerFailsWhenNotHealthy(t *testing.T) {
 	t.Parallel()
 	fresh := func() *daemon.State { return containerOwnedState(time.Now().Add(-time.Minute)) }
+	absent := func() templates.SupervisorState {
+		return templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: -1}
+	}
 	stopped := func() templates.SupervisorState {
-		return templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: 0}
+		return templates.SupervisorState{Kind: config.SupervisorContainer, Loaded: true, Status: "exited", LastExit: 0}
 	}
 	unreadable := func() templates.SupervisorState {
 		return templates.SupervisorState{Kind: config.SupervisorContainer, LastExit: -1, Err: errors.New("docker inspect: no answer")}
 	}
+	notRunning := func() *daemon.State {
+		state := containerOwnedState(time.Now().Add(-time.Minute))
+		state.Running = false
+		return state
+	}
 
 	for _, tc := range []struct {
-		name  string
-		state *daemon.State
-		job   templates.SupervisorState
-		want  CheckStatus
+		name    string
+		state   *daemon.State
+		job     templates.SupervisorState
+		want    CheckStatus
+		wantMsg string // a substring of the message, "" when the row pins only the status
 	}{
-		{name: "container not running", state: fresh(), job: stopped(), want: StatusError},
+		{name: "container absent", state: fresh(), job: absent(), want: StatusError,
+			wantMsg: "the container does not exist"},
+		{name: "container stopped", state: notRunning(), job: stopped(), want: StatusWarning,
+			wantMsg: "the daemon is not running"},
 		{name: "heartbeat stale", state: containerOwnedState(time.Now().Add(-30 * time.Minute)), job: containerRunning(), want: StatusError},
 		{name: "supervisor state unknown", state: fresh(), job: unreadable(), want: StatusWarning},
 		{name: "no owner in state.json", state: &daemon.State{}, job: containerRunning(), want: StatusError},
@@ -150,8 +164,31 @@ func TestDaemonChecks_ContainerFailsWhenNotHealthy(t *testing.T) {
 				if result.Status != tc.want {
 					t.Errorf("%s: Status = %v (%s), want %v", c.check.Name(), result.Status, result.Message, tc.want)
 				}
+				if tc.wantMsg != "" && !strings.Contains(result.Message, tc.wantMsg) {
+					t.Errorf("%s: Message = %q, want it to say %q", c.check.Name(), result.Message, tc.wantMsg)
+				}
 			}
 		})
+	}
+}
+
+// A check with no seam runs the production reading, and a container town that
+// names no container of its own is unknown there before any docker command:
+// the production wiring is exercised, and reading through it starts no host
+// process (gt-qpeei.20).
+func TestDaemonCheck_ContainerWithoutItsOwnContainerIsUnknown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := daemon.SavePatrolConfig(townRoot, &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer}); err != nil {
+		t.Fatalf("SavePatrolConfig: %v", err)
+	}
+
+	result := NewDaemonCheck().Run(&CheckContext{TownRoot: townRoot})
+	if result.Status == StatusOK {
+		t.Fatalf("Status = StatusOK (%s), want a failure while the town names no container", result.Message)
+	}
+	if !strings.Contains(result.Message, "unknown") {
+		t.Errorf("Message = %q, want an unknown failure", result.Message)
 	}
 }
 
@@ -278,14 +315,16 @@ func containerTownOnDisk(t *testing.T, state *daemon.State) string {
 }
 
 // fakeDockerInspect is a docker CLI that never runs: it answers with the given
-// stdout or error and records the argv each call carried.
+// stdout or error and records the argv and context each call carried.
 type fakeDockerInspect struct {
 	stdout string
 	err    error
 	argv   [][]string
+	ctxs   []context.Context
 }
 
-func (f *fakeDockerInspect) run(argv []string) ([]byte, error) {
+func (f *fakeDockerInspect) run(ctx context.Context, argv []string) ([]byte, error) {
+	f.ctxs = append(f.ctxs, ctx)
 	f.argv = append(f.argv, argv)
 	return []byte(f.stdout), f.err
 }
@@ -325,6 +364,18 @@ func TestDaemonChecks_ContainerReadsHealthyFromDockerInspect(t *testing.T) {
 			t.Errorf("docker argv = %q, want %q", argv, want)
 		}
 	}
+	// A docker that hangs on a health read must fail the reading at the
+	// deadline: no bound here means the check waits as long as docker does.
+	for _, ctx := range docker.ctxs {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Error("docker inspect ran with no deadline, want one within ContainerInspectTimeout")
+			continue
+		}
+		if left := time.Until(deadline); left > templates.ContainerInspectTimeout {
+			t.Errorf("docker inspect deadline is %s away, want at most %s", left, templates.ContainerInspectTimeout)
+		}
+	}
 }
 
 // The container reading is docker's answer, field by field: a container docker
@@ -334,13 +385,13 @@ func TestDaemonChecks_ContainerReadsHealthyFromDockerInspect(t *testing.T) {
 // "not running".
 func TestContainerJobState_DockerInspectAnswers(t *testing.T) {
 	t.Parallel()
-	absent := &dockerInspectError{
-		stderr: "Error response from daemon: No such object: scratch-daemon-1",
-		err:    errors.New("exit status 1"),
+	absent := &templates.DockerInspectError{
+		StderrText: "Error response from daemon: No such object: scratch-daemon-1",
+		Err:        errors.New("exit status 1"),
 	}
-	unreachable := &dockerInspectError{
-		stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
-		err:    errors.New("exit status 1"),
+	unreachable := &templates.DockerInspectError{
+		StderrText: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+		Err:        errors.New("exit status 1"),
 	}
 
 	for _, tc := range []struct {
