@@ -25,13 +25,19 @@ func TestCheckTakeover(t *testing.T) {
 	stopped := map[Owner]probeAnswer{launchd: {known: true}, container: {known: true}}
 	ownerRunning := map[Owner]probeAnswer{launchd: {running: true, known: true}}
 	ownerUnknown := map[Owner]probeAnswer{launchd: {known: false}}
-	containerUnknown := map[Owner]probeAnswer{
-		launchd:   {known: true},
-		container: {known: false},
+	launchdUnknown := map[Owner]probeAnswer{
+		launchd:   {known: false},
+		container: {known: true},
 	}
 	launchdRunningFirst := map[Owner]probeAnswer{
 		launchd:   {running: true, known: true},
 		container: {known: true},
+	}
+	// selfContainerRunning is what a probe run from inside the starting container
+	// reports for that container: it is the process asking, so it is alive.
+	selfContainerRunning := map[Owner]probeAnswer{
+		launchd:   {known: true},
+		container: {running: true, known: true},
 	}
 
 	// state builds a recorded state naming owner, the shape a live or stopped
@@ -91,7 +97,7 @@ func TestCheckTakeover(t *testing.T) {
 			self:       container,
 			takeover:   true,
 			probe:      stopped,
-			wantProbes: []string{`launchd owner "com.gastown.daemon"`, `container owner "gt-town-daemon-1"`},
+			wantProbes: []string{`launchd owner "com.gastown.daemon"`},
 		},
 		{
 			name:       "rule 2: legacy state with takeover and every candidate stopped",
@@ -100,7 +106,25 @@ func TestCheckTakeover(t *testing.T) {
 			self:       container,
 			takeover:   true,
 			probe:      stopped,
-			wantProbes: []string{`launchd owner "com.gastown.daemon"`, `container owner "gt-town-daemon-1"`},
+			wantProbes: []string{`launchd owner "com.gastown.daemon"`},
+		},
+		{
+			name:       "rule 2: takeover does not probe the starting daemon's own owner",
+			priorRun:   true,
+			candidates: []Owner{launchd, container},
+			self:       container,
+			takeover:   true,
+			probe:      selfContainerRunning,
+			wantProbes: []string{`launchd owner "com.gastown.daemon"`},
+		},
+		{
+			name:       "rule 2: takeover whose only candidate is the starting daemon refuses",
+			priorRun:   true,
+			candidates: []Owner{container},
+			self:       container,
+			takeover:   true,
+			probe:      stopped,
+			wantErr:    []string{"every owner named is the starting daemon's own"},
 		},
 		{
 			name:       "rule 2: takeover with one candidate unknown",
@@ -108,9 +132,9 @@ func TestCheckTakeover(t *testing.T) {
 			candidates: []Owner{launchd, container},
 			self:       container,
 			takeover:   true,
-			probe:      containerUnknown,
-			wantProbes: []string{`launchd owner "com.gastown.daemon"`, `container owner "gt-town-daemon-1"`},
-			wantErr:    []string{`whether container owner "gt-town-daemon-1" is running is unknown`},
+			probe:      launchdUnknown,
+			wantProbes: []string{`launchd owner "com.gastown.daemon"`},
+			wantErr:    []string{`whether launchd owner "com.gastown.daemon" is running is unknown`},
 		},
 		{
 			name:       "rule 2: takeover with one candidate running",
@@ -145,6 +169,18 @@ func TestCheckTakeover(t *testing.T) {
 			name:  "rule 3: the recorded owner is Self",
 			state: state(named(launchd), true, fresh),
 			self:  launchd,
+		},
+		{
+			name:    "rule 3: a Self that names no owner does not match the record",
+			state:   state(named(launchd), true, fresh),
+			self:    Owner{},
+			wantErr: []string{`launchd owner "com.gastown.daemon"`, "under the 12m0s takeover window"},
+		},
+		{
+			name:    "rule 3: a blank Self and a blank recorded owner are not a match",
+			state:   state(named(Owner{}), true, fresh),
+			self:    Owner{},
+			wantErr: []string{"an owner with no kind or id", "under the 12m0s takeover window"},
 		},
 
 		// Rule 4: a clean stop, whatever the heartbeat age.
@@ -317,10 +353,12 @@ func TestCheckTakeover(t *testing.T) {
 	}
 }
 
-// TestCheckTakeoverTakesOnlyItsInput pins the guard's purity: it judges the value
-// it is handed and nothing else, so a later edit that reaches for a state file, a
-// clock or an owner reader has to add a parameter and fails here (A7).
-func TestCheckTakeoverTakesOnlyItsInput(t *testing.T) {
+// TestCheckTakeoverSignature pins the guard's interface: the whole decision
+// arrives as one TakeoverInput and the outcome is one error, so a caller cannot
+// pass a second source of truth the guard reads beside it. It reads the signature
+// only and cannot see I/O the body might add; keeping the body free of I/O is a
+// review property (A7).
+func TestCheckTakeoverSignature(t *testing.T) {
 	t.Parallel()
 	typ := reflect.TypeOf(CheckTakeover)
 	if typ.NumIn() != 1 || typ.NumOut() != 1 {

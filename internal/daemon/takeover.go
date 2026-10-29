@@ -47,7 +47,8 @@ type TakeoverInput struct {
 //
 //  1. No state file and no other sign of a prior daemon: allow.
 //  2. No state file, or a legacy state with no owner: refuse; with Takeover,
-//     allow once the probe shows every candidate not running.
+//     allow once the probe shows every candidate other than Self not running,
+//     and only when a candidate other than Self was named at all.
 //  3. The recorded owner is Self: allow, so an owner restarts itself.
 //  4. A recorded clean stop: allow only when the probe shows the recorded owner
 //     not running, whatever the heartbeat age. This is the cutover's handoff.
@@ -67,7 +68,7 @@ func CheckTakeover(in TakeoverInput) error {
 		return checkLegacyStart(in)
 	}
 	owner := *in.State.Owner
-	if owner == in.Self {
+	if sameOwner(owner, in.Self) {
 		return nil
 	}
 	if !in.State.Running {
@@ -88,7 +89,7 @@ func CheckTakeover(in TakeoverInput) error {
 // checkLegacyStart refuses a start where no usable owner was recorded. The two
 // ways in are a missing state file with a leftover lock or log, and a state file
 // written before owners existed; both leave the old owner unnameable, so only a
-// takeover that proves every candidate stopped may pass.
+// takeover that proves every candidate other than the starter stopped may pass.
 func checkLegacyStart(in TakeoverInput) error {
 	found := "state.json is missing and another sign of a prior daemon remains"
 	if in.State != nil {
@@ -103,7 +104,18 @@ func checkLegacyStart(in TakeoverInput) error {
 	if len(in.Candidates) == 0 {
 		return fmt.Errorf("%s; takeover refuses because no owner kinds were named to probe", found)
 	}
+	// A probe run from inside the starting daemon reports its own owner running or
+	// unreadable, so probing that owner would refuse every legacy takeover.
+	probeable := make([]Owner, 0, len(in.Candidates))
 	for _, candidate := range in.Candidates {
+		if !sameOwner(candidate, in.Self) {
+			probeable = append(probeable, candidate)
+		}
+	}
+	if len(probeable) == 0 {
+		return fmt.Errorf("%s; takeover refuses because every owner named is the starting daemon's own", found)
+	}
+	for _, candidate := range probeable {
 		running, known := in.Probe(candidate)
 		switch {
 		case !known:
@@ -155,6 +167,21 @@ func heartbeatPhrase(now, last time.Time) string {
 	}
 	age := now.Sub(last)
 	return fmt.Sprintf("%s old (%d minutes)", age.Round(time.Second), int(age.Minutes()))
+}
+
+// sameOwner reports whether a and b name the same supervisor. An owner with no
+// kind and no id names nothing, so it matches nothing, which keeps a zero-value
+// Self from passing an ownerless record off as a restart of itself.
+func sameOwner(a, b Owner) bool {
+	if !namesOwner(a) || !namesOwner(b) {
+		return false
+	}
+	return a == b
+}
+
+// namesOwner reports whether an owner carries a kind or an id to be identified by.
+func namesOwner(o Owner) bool {
+	return o.Kind != "" || o.ID != ""
 }
 
 // ownerName names an owner the way every refusal does: its kind and its id.
