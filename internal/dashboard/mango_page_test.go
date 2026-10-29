@@ -593,7 +593,7 @@ func TestMangoPanelDrawsTheWeeklyTrend(t *testing.T) {
 		}
 	}
 	caps := mangoTexts(t, dom, "mgtcap")
-	if len(caps) != 1 || caps[0] != "Landings per week in brackets. Four weeks is too few to say what caused the rise; the dates mark when things changed." {
+	if len(caps) != 1 || caps[0] != "Landings per week in brackets. Four weeks is too few to say what caused the rise; dashed lines mark when a regime changed." {
 		t.Errorf("the caption reads %q, want the chart's one caption", caps)
 	}
 }
@@ -908,6 +908,122 @@ func TestMangoTrendStacksThreeCollidingLabels(t *testing.T) {
 	}
 }
 
+// The trend's text is drawn at 11 units or more, which at the panel's width
+// (about 570px on a 700-unit viewBox) renders at about 9 pixels: the event
+// labels, the percentages, the week labels and the share scale.
+func TestMangoTrendDrawsItsTextAtElevenUnitsOrMore(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+		mangoPageWeek("2026-10-19", 21, 0.30),
+		mangoPageWeek("2026-10-26", 18, 0.15),
+	}
+	state["events"] = []map[string]any{
+		mangoPageEvent("2026-10-10", "flash seats replaced by Sonnet seats"),
+		mangoPageEvent("2026-10-16", "the landing gate took the exec tax"),
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	for _, class := range []string{"mgtwhat", "mgtpct", "mgtwk", "mgtytick"} {
+		sizes := mangoAttrs(t, dom, class, "font-size")
+		if len(sizes) == 0 {
+			t.Fatalf("the trend draws no %s text", class)
+		}
+		for _, s := range sizes {
+			if size := mustFloat(t, s); size < 11 {
+				t.Errorf("a %s is drawn at font-size %v, want at least 11", class, size)
+			}
+		}
+	}
+}
+
+// Event labels on two different rows are at least 14 units apart in y, so a
+// label on the row below clears the text of the row above it.
+func TestMangoTrendEventRowsAreFourteenUnitsApart(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+	}
+	state["events"] = []map[string]any{
+		mangoPageEvent("2026-10-07", "the first change that collides with the rest"),
+		mangoPageEvent("2026-10-08", "the second change a day after the first"),
+		mangoPageEvent("2026-10-09", "the third change a day after the second"),
+		mangoPageEvent("2026-10-10", "the fourth change a day after the third"),
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	y := mangoAttrs(t, dom, "mgtwhat", "y")
+	if len(y) != 4 {
+		t.Fatalf("the trend draws %d event labels, want one per event (4)", len(y))
+	}
+	rows := map[string]bool{}
+	for _, h := range y {
+		rows[h] = true
+	}
+	if len(rows) != 4 {
+		t.Fatalf("the event labels sit on %d rows at y=%v, want four rows so the spacing is checked", len(rows), y)
+	}
+	for i := 0; i < len(y); i++ {
+		for j := i + 1; j < len(y); j++ {
+			a, b := mustFloat(t, y[i]), mustFloat(t, y[j])
+			if a == b {
+				continue
+			}
+			if gap := math.Abs(a - b); gap < 14 {
+				t.Errorf("the labels at y=%.0f and y=%.0f are %.0f units apart, want at least 14 between rows", a, b, gap)
+			}
+		}
+	}
+}
+
+// Each event label and percentage is haloed in the panel's colour, so a marker
+// line or a neighbouring label does not run through the word.
+func TestMangoTrendLabelsAndPercentagesCarryAHalo(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("rejected_before_landing", 48, false, "model = opus", 96, 0.42, 0.25, MangoEarning))
+	state["weekly"] = []map[string]any{
+		mangoPageWeek("2026-10-05", 27, 0.25),
+		mangoPageWeek("2026-10-12", 34, 0.125),
+	}
+	state["events"] = []map[string]any{
+		mangoPageEvent("2026-10-07", "an early change with a halo around its text"),
+	}
+	dom.call(t, "renderMango", map[string]any{"mango": state})
+
+	halo := []struct{ name, want string }{
+		{"stroke", "var(--panel)"},
+		{"stroke-width", "3"},
+		{"paint-order", "stroke"},
+		{"stroke-linejoin", "round"},
+	}
+	for _, class := range []string{"mgtwhat", "mgtpct"} {
+		for _, h := range halo {
+			got := mangoAttrs(t, dom, class, h.name)
+			if len(got) == 0 {
+				t.Fatalf("the trend draws no %s text", class)
+			}
+			for _, g := range got {
+				if g != h.want {
+					t.Errorf("a %s is drawn with %s=%q, want %q", class, h.name, g, h.want)
+				}
+			}
+		}
+	}
+}
+
 // Fewer than two weeks is not a trend: the block says so and draws no chart. A
 // panel with no weekly key at all is an older panel, which gets no trend block
 // and still draws its table.
@@ -1048,7 +1164,7 @@ func TestMangoTrendCaptionNamesTheWeeksItHolds(t *testing.T) {
 	dom.call(t, "renderMango", map[string]any{"mango": state})
 
 	caps := mangoTexts(t, dom, "mgtcap")
-	want := "Landings per week in brackets. Six weeks is too few to say what caused the rise; the dates mark when things changed."
+	want := "Landings per week in brackets. Six weeks is too few to say what caused the rise; dashed lines mark when a regime changed."
 	if len(caps) != 1 || caps[0] != want {
 		t.Errorf("the caption reads %q, want %q", caps, want)
 	}
