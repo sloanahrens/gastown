@@ -23,6 +23,10 @@ const (
 	cgo    = "0"
 )
 
+// Package is the package the image's bd is compiled from, inside the beads
+// checkout.
+const Package = "./cmd/bd"
+
 // hostEnv names the host variables the compile passes through: those that
 // locate the toolchain, the Go caches and the module proxy, so the compile
 // reuses what the host already has. Anything else — a shell's GOFLAGS,
@@ -56,6 +60,14 @@ func buildEnv(environ []string) []string {
 		}
 	}
 	return append(env, "GOOS="+goos, "GOARCH="+goarch, "CGO_ENABLED="+cgo, "GOENV=off")
+}
+
+// Env is the environment a cross-compile of the image's binaries runs with,
+// built from environ the way Compile builds bd's: the same host variables, the
+// same drops, and GOENV=off. A nil environ reads the host's. The daemon image
+// builds gt and om with it too, so every image binary is compiled the same way.
+func Env(environ []string) []string {
+	return buildEnv(environ)
 }
 
 // Git runs git with args in dir and returns its standard output; a directory
@@ -189,7 +201,7 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	env := buildEnv(opt.Env)
 	// -X main.Commit stamps the commit `bd version --json` reports, the same
 	// variable scripts/refresh-bd-command-tree.sh stamps.
-	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", "-X main.Commit="+commit, "-o", out, "./cmd/bd"); err != nil {
+	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", "-X main.Commit="+commit, "-o", out, Package); err != nil {
 		return "", fmt.Errorf("cannot build bd at %s: %w", commit, err)
 	}
 	return commit, nil

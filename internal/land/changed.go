@@ -316,6 +316,13 @@ var treeWideGuards = []treeWideGuard{
 		judges: func(rel string) bool { return rel == "Makefile" || commandTreeInputs(rel) },
 	},
 	{
+		// TestGTPinMatchesThePolecatImageFlow reads the Makefile's
+		// polecat-image recipe, which is where the image's gt is built.
+		pkg:    "internal/daemonimage",
+		tests:  []string{"TestGTPinMatchesThePolecatImageFlow"},
+		judges: func(rel string) bool { return rel == "Makefile" },
+	},
+	{
 		pkg:     "internal/bdgate",
 		tests:   []string{"TestEverySessionStartCallsTheGate"},
 		judges:  func(rel string) bool { return sessionStartFiles[rel] },
