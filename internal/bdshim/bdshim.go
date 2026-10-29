@@ -121,11 +121,22 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 	}
 	town := filepath.Dir(found.table)
 
+	// A flag that selects the store bd opens moves the command off the store the
+	// working directory names, and nothing here follows it, so while a tracker
+	// rig exists it is refused rather than routed by the wrong directory.
+	if flag := storeFlag(args); flag != "" && hasTrackerRoute(routes) {
+		return Decision{}, fmt.Errorf("%s selects a store this shim cannot route while a tracker rig exists: run bd from the rig's own directory", flag)
+	}
+
 	ids := idTokens(args)
+	// An operand that opens with a tracker rig's prefix names that rig even
+	// when IsBeadIDToken rejects its form: a form the token check does not know
+	// must not slip through to bd.real from a Dolt directory.
+	ids = append(ids, trackerPrefixed(operands(args), ids, routes)...)
 	named := make(map[string]beads.Route, len(ids))
 	for _, id := range ids {
 		for _, r := range routes {
-			if r.Prefix == beads.ExtractPrefix(id) {
+			if r.Prefix == beads.ExtractPrefix(id) || (r.BackendName() == beads.BackendTracker && r.Prefix != "" && strings.HasPrefix(id, r.Prefix)) {
 				named[routeBeadsDir(town, r)] = r
 				break
 			}
@@ -257,6 +268,55 @@ func samePath(path string) string {
 		return resolved
 	}
 	return filepath.Clean(path)
+}
+
+// storeFlag returns the first bd flag in args that selects the store bd opens
+// (-C, --directory or --db, bare or with =value), or "" when there is none. A
+// token after the -- separator is an operand and never a flag.
+func storeFlag(args []string) string {
+	for _, arg := range args {
+		if arg == "--" {
+			return ""
+		}
+		name, _, _ := strings.Cut(arg, "=")
+		switch name {
+		case "-C", "--directory", "--db":
+			return name
+		}
+	}
+	return ""
+}
+
+// hasTrackerRoute reports whether any route in the table is a tracker rig.
+func hasTrackerRoute(routes []beads.Route) bool {
+	for _, r := range routes {
+		if r.BackendName() == beads.BackendTracker {
+			return true
+		}
+	}
+	return false
+}
+
+// trackerPrefixed returns the operands, not already ids, that open with a
+// tracker rig's prefix.
+func trackerPrefixed(ops, ids []string, routes []beads.Route) []string {
+	known := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		known[id] = true
+	}
+	var out []string
+	for _, op := range ops {
+		if known[op] {
+			continue
+		}
+		for _, r := range routes {
+			if r.BackendName() == beads.BackendTracker && r.Prefix != "" && strings.HasPrefix(op, r.Prefix) {
+				out = append(out, op)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // valueFlags are the bd flags that take their value as the next token. Any

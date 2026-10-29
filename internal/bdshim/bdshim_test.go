@@ -130,6 +130,59 @@ func TestDecideRoutesByStore(t *testing.T) {
 	}
 }
 
+// A store-selecting flag is refused while a tracker rig exists, because the
+// shim routes by the working directory and would answer from the wrong store
+// (gt-p85pw.88).
+func TestDecideRefusesAStoreSelectingFlagWhileATrackerExists(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+	for _, args := range [][]string{
+		{"-C", "elsewhere", "list"},
+		{"--directory", "elsewhere", "list"},
+		{"--directory=elsewhere", "list"},
+		{"--db", "x.db", "list"},
+		{"--db=x.db", "show", "al-abc"},
+		{"list", "-C", "elsewhere"},
+	} {
+		if _, err := decide(t, alpha, "", args...); err == nil || !strings.Contains(err.Error(), "selects a store") {
+			t.Errorf("Decide(%v) from a dolt cwd = %v, want a refusal naming the store-selecting flag", args, err)
+		}
+	}
+	// A value after the separator is an operand, not a flag.
+	if _, err := decide(t, alpha, "", "create", "--", "-C"); err != nil {
+		t.Errorf("Decide with -C after the separator = %v, want it treated as an operand", err)
+	}
+}
+
+// With no tracker rig the same flags pass: nothing is routed, bd.real answers.
+func TestDecideAllowsAStoreSelectingFlagWithoutATracker(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeGamma)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+	got, err := decide(t, alpha, "", "-C", "elsewhere", "list")
+	if err != nil || got.Tracker {
+		t.Fatalf("Decide(-C) with no tracker rig = %+v, %v, want bd.real and no error", got, err)
+	}
+}
+
+// An operand that opens with a tracker prefix names that rig even when
+// IsBeadIDToken rejects its form, so it cannot reach bd.real from a dolt cwd.
+func TestDecideRoutesAnIDFormTheTokenCheckRejects(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+	for _, id := range []string{"bt-abc/def", "bt-abc:1", "bt-abc,bt-def", "bt-ab c"} {
+		got, err := decide(t, alpha, "", "show", id)
+		if err != nil {
+			t.Fatalf("Decide(show %q) = %v", id, err)
+		}
+		if !got.Tracker || got.Route.Prefix != "bt-" {
+			t.Errorf("Decide(show %q) = %+v, want the tracker rig bt-", id, got)
+		}
+	}
+}
+
 func TestDecideReadsTheTownsOwnRouteTable(t *testing.T) {
 	t.Parallel()
 	// beads.LoadRoutes keeps the shape a town writes: comments and blank lines
