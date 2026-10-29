@@ -1638,9 +1638,10 @@ func (f fakeBeadReader) Show(id string) (*beads.Issue, error) {
 
 // A landing left for a person escalates under the label that holds the bead,
 // so the overseer's hold is its own escalation rather than reusing the old
-// label's key, which stays for a bead carrying the old label, no person label,
-// or labels nobody can read (gt-slmaz).
-func TestLandingPersonKeyNamesThePersonLabel(t *testing.T) {
+// label's key. The old key stays for a bead carrying the old label or no person
+// label; a bead nobody can read gets a key that names no label, so it cannot
+// land on another label's escalation (gt-slmaz).
+func TestNeedsOverseerLandingPersonKeyNamesThePersonLabel(t *testing.T) {
 	t.Parallel()
 	bead := func(labels ...string) *beads.Issue {
 		return &beads.Issue{ID: "gt-1", Labels: labels}
@@ -1661,8 +1662,8 @@ func TestLandingPersonKeyNamesThePersonLabel(t *testing.T) {
 			"landing-needs-overseer:gt-1"},
 		{"no person label keeps the old key", fakeBeadReader{issues: map[string]*beads.Issue{"gt-1": bead(land.LabelReadyToLand)}},
 			"landing-needs-human:gt-1"},
-		{"an unreadable bead keeps the old key", fakeBeadReader{err: errors.New("bd: connection refused")},
-			"landing-needs-human:gt-1"},
+		{"an unreadable bead names no label", fakeBeadReader{err: errors.New("bd: connection refused")},
+			"landing-needs-person:gt-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

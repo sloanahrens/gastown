@@ -49,14 +49,15 @@ type beadReader interface {
 // landingPersonKey is the escalation key for a landing left for a person, named
 // by the person label the bead carries, so an overseer hold does not upsert
 // onto an old label's escalation (gt-slmaz). A bead carrying two labels reads
-// as the overseer's, the first step; a bead with no person label, or one whose
-// labels cannot be read, keeps the landing-needs-human key, where a person
-// hold was raised before the new labels existed.
+// as the overseer's, the first step; a bead with no person label keeps the
+// landing-needs-human key, where a person hold was raised before the new labels
+// existed. A bead whose labels cannot be read gets a key that names no label:
+// the hold is still raised, and it cannot land on another label's escalation.
 func landingPersonKey(reader beadReader, beadID string) string {
 	const old = "landing-needs-human:"
 	is, err := reader.Show(beadID)
 	if err != nil || is == nil {
-		return old + beadID
+		return "landing-needs-person:" + beadID
 	}
 	for _, p := range []struct{ label, key string }{
 		{land.LabelNeedsOverseer, "landing-needs-overseer:"},
