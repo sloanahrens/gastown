@@ -754,9 +754,13 @@ func TestPruneRegistryHungCollectReturnsAtTheBudget(t *testing.T) {
 		defer close(done)
 		tr.PruneRegistry()
 	}()
+	// The bound on the wait, so a run that never returns fails the test instead
+	// of hanging it.
+	bound, cancel := context.WithTimeout(context.Background(), budget+5*time.Second)
+	defer cancel()
 	select {
 	case <-done:
-	case <-time.After(budget + 5*time.Second):
+	case <-bound.Done():
 		t.Fatal("PruneRegistry did not return at its budget; a collect that never answered held it")
 	}
 
