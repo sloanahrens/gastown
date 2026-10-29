@@ -10,7 +10,11 @@ import "strings"
 // shape the sandbox backend reads. A read that fails reads as "" rather than an
 // error, as the script's pipe to head does.
 func (r *Run) InstalledCommit() string {
-	out := r.call(r.Cfg.GT, "version").output()
+	return commitOfVersion(r.call(r.Cfg.GT, "version").output())
+}
+
+// commitOfVersion reads the commit out of the stdout of `gt version`.
+func commitOfVersion(out string) string {
 	line, _, _ := strings.Cut(out, "\n")
 	open := strings.LastIndex(line, "(")
 	if open < 0 {

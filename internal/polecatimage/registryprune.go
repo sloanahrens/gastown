@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
@@ -24,22 +25,32 @@ const (
 	registryKeepDefault = "5"
 )
 
-// registryContainer is the container the sandbox registry runs in: garbage
-// collect after a delete runs inside it, and a name failing validation runs
-// nothing (docs/plans/2026-10-28-disk-maintenance-design.md).
+// registryPruneBudget bounds the whole retention, every registry request and
+// command included, because the retention runs while this run holds the plugin
+// lock and every push waits on that lock.
+const registryPruneBudget = 10 * time.Minute
+
+// registryContainer is the container the sandbox registry runs in; garbage
+// collect runs inside it after a delete.
 const registryContainer = "gt-registry"
+
+// registryPushPattern matches a running push: pushes go through crane from a
+// docker save tarball (plugins/polecat-image/plugin.md), so that is what
+// garbage collect must not run beside.
+const registryPushPattern = `^([^ ]*/)?crane push `
 
 // registryLedgerMax bounds the maintenance ledger the plugin appends to, so a
 // town's record rotates instead of growing without end.
 const registryLedgerMax = 1 << 20
 
 // PruneRegistry applies the registry retention behind POLECAT_IMAGE_REGISTRY_PRUNE
-// — a dry run by default — after the other trims of a finished run.
+// (off, dry-run or apply; dry-run by default), after the other trims of a
+// finished run.
 //
 // It runs only while this run holds the plugin lock, the lock every push holds,
 // so a delete never races a push. Every read it cannot make refuses the plan
 // rather than guessing, and no outcome fails the run: a retention that cannot
-// run is logged and left to the next one (docs/plans/2026-10-28-disk-maintenance-design.md).
+// run is logged and left to the next one.
 func (r *Run) PruneRegistry() {
 	if r.Cfg.Registry == "" {
 		r.Logf("registry: retention skipped, no registry is configured")
@@ -75,8 +86,9 @@ func (r *Run) PruneRegistry() {
 		return
 	}
 
-	target, ledger := r.registryTarget(keep)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), registryPruneBudget)
+	defer cancel()
+	target := r.registryTarget(ctx, keep)
 	plan, err := target.Plan(ctx, diskmaint.Policy{Keep: keep, Now: r.clock()})
 	if err != nil {
 		r.Logf("registry: cannot plan retention: %v", err)
@@ -101,6 +113,7 @@ func (r *Run) PruneRegistry() {
 
 	// The target records every apply in the ledger, and the ledger's directory
 	// is the one thing it cannot make for itself.
+	ledger := r.Cfg.RegistryLedger
 	if err := os.MkdirAll(filepath.Dir(ledger), 0o755); err != nil {
 		r.Logf("registry: not applied, cannot make the ledger directory %s: %v", filepath.Dir(ledger), err)
 		return
@@ -109,57 +122,60 @@ func (r *Run) PruneRegistry() {
 	r.logRegistryApply(plan, result, err, ledger)
 }
 
-// registryTarget is the registry retention target this run prunes through, and
-// the ledger its applies are recorded in.
+// registryTarget is the registry retention target this run prunes through.
 //
 // The run holds the plugin lock, so the target applies directly instead of
-// taking it, and no push can be in flight: every push goes through this plugin
-// under that lock. Garbage collect runs this run's own docker, the daemon the
-// pushes went to.
-func (r *Run) registryTarget(keep int) (*registry.Target, string) {
-	runtime := filepath.Dir(r.Cfg.LockDir)
-	ledger := filepath.Join(runtime, "diskmaint", "ledger.jsonl")
+// taking it. PushInFlight is still asked before garbage collect, so a push that
+// got past the lock would still stop the collect. DockerHost is left empty:
+// garbage collect inherits this process's DOCKER_HOST, as the pushes do.
+func (r *Run) registryTarget(ctx context.Context, keep int) *registry.Target {
 	return registry.NewTarget(registry.Config{
 		Base:         "http://" + r.Cfg.Registry,
-		Kubeconfig:   filepath.Join(runtime, "sbx-k8s", "kubeconfig"),
+		Kubeconfig:   r.Cfg.RegistryKubeconfig,
 		RecordsDir:   r.Cfg.SandboxRecords,
 		Container:    registryContainer,
 		Keep:         keep,
-		Installed:    r.installedCommit,
-		PushInFlight: func() bool { return false },
+		Installed:    func() (string, error) { return r.registryInstalledCommit(ctx) },
+		PushInFlight: r.registryPushInFlight,
 		Run:          r.registryRunner(),
 		HTTP:         r.webClient(),
-		Ledger:       diskmaint.NewLedger(ledger, registryLedgerMax),
-	}), ledger
+		Ledger:       diskmaint.NewLedger(r.Cfg.RegistryLedger, registryLedgerMax),
+	})
 }
 
-// installedCommit is the commit the installed gt reports: gt version is the one
-// source for the tag a retention keeps, and the target refuses a plan that
-// cannot read it rather than deleting that tag
-// (docs/plans/2026-10-28-disk-maintenance-design.md).
-func (r *Run) installedCommit() (string, error) {
-	return r.InstalledCommit(), nil
+// registryPushInFlight reports whether a crane push is running on this host.
+// pgrep exits 1 when nothing matches; 0 is a match, and any other status is a
+// probe that did not answer. The last two both report true, so garbage collect
+// refuses rather than reading an unanswered probe as "no push".
+func (r *Run) registryPushInFlight() bool {
+	match := r.call(r.Cfg.Pgrep, "-f", registryPushPattern)
+	return match.exit != 1
 }
 
-// registryRunner answers the retention's command runs — kubectl for the in-use
-// read, docker for garbage collect — through this run's runner, so a test
-// answers them the way it answers every other program.
+// registryInstalledCommit is the commit the installed gt reports, read like
+// InstalledCommit but within the retention's budget. An empty commit, which is
+// what an unreadable gt version gives, makes the planner refuse, so no tag is
+// deleted on a guess.
+func (r *Run) registryInstalledCommit(ctx context.Context) (string, error) {
+	res := r.runner()(command{name: r.Cfg.GT, args: []string{"version"}, ctx: ctx})
+	return commitOfVersion(res.output()), nil
+}
+
+// registryRunner answers the retention's command runs (kubectl for the in-use
+// read, docker for garbage collect) through this run's runner, so a test answers
+// them the way it answers every other program. The context carries the
+// retention's budget into each command, so a command that hangs is ended with
+// the budget.
 //
-// This run's runner carries no environment, so an entry with a value is refused
-// rather than dropped: the command would otherwise run against a daemon other
-// than the one the caller named. An entry with an empty value sets nothing and
-// is dropped.
+// An environment entry with a value is carried to the command. An entry with an
+// empty value sets nothing, so it is dropped and the command inherits this
+// process's value for that variable.
 func (r *Run) registryRunner() diskmaint.Runner {
 	return func(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		for _, entry := range env {
-			if key, value, _ := strings.Cut(entry, "="); value != "" {
-				return nil, fmt.Errorf("%s needs environment variable %s, which this run's runner cannot carry", name, key)
-			}
-		}
-		res := r.call(name, args...)
+		res := r.runner()(command{name: name, args: args, env: setEntries(env), ctx: ctx})
 		if res.failed() {
 			return nil, fmt.Errorf("%s exited %d: %s", name, res.exit, lastLine(res.stderr))
 		}
@@ -167,8 +183,19 @@ func (r *Run) registryRunner() diskmaint.Runner {
 	}
 }
 
-// logRegistryApply writes what an apply did — each digest it kept, with the
-// registry's reason — and the ledger line that records the run.
+// setEntries is the environment entries that carry a value.
+func setEntries(env []string) []string {
+	var out []string
+	for _, entry := range env {
+		if _, value, _ := strings.Cut(entry, "="); value != "" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// logRegistryApply writes what an apply did (each digest it kept, with the
+// registry's reason) and the ledger line that records the run.
 func (r *Run) logRegistryApply(plan diskmaint.Plan, result diskmaint.Result, err error, ledger string) {
 	for _, failure := range result.Failed {
 		r.Logf("registry: kept %s (%s)", failure.Action.Ref, failure.Err)

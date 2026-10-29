@@ -35,6 +35,8 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		{cfg.LockDir, filepath.Join(town, ".runtime", "polecat-image.lock"), "lock"},
 		{cfg.SandboxRecords, filepath.Join(town, ".runtime", "sandboxes"), "sandbox records"},
 		{cfg.Published, filepath.Join(town, ".runtime", "polecat-image.published"), "publish record"},
+		{cfg.RegistryKubeconfig, filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig"), "registry kubeconfig"},
+		{cfg.RegistryLedger, filepath.Join(town, ".runtime", "diskmaint", "ledger.jsonl"), "registry ledger"},
 		{cfg.Image, "gastown-polecat:dev", "image"},
 		{cfg.Keep, "3", "keep"},
 		{cfg.BuilderKeep, "8GB", "builder keep"},

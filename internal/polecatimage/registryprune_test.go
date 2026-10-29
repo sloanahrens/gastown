@@ -172,6 +172,8 @@ func newRegistryRun(t *testing.T, reg *fakeRegistry, installed string) *testRun 
 	tr := newTestRun(t)
 	tr.Cfg.Registry = "registry.example:5000"
 	tr.Cfg.RegistryKeep = "1"
+	tr.Cfg.RegistryKubeconfig = filepath.Join(tr.root, "runtime", "sbx-k8s", "kubeconfig")
+	tr.Cfg.RegistryLedger = filepath.Join(tr.root, "runtime", "diskmaint", "ledger.jsonl")
 	tr.HaveLock = true
 	tr.web = &http.Client{Transport: roundTrip(reg.handler)}
 	tr.reply = registryReply(installed, `{"items":[]}`)
@@ -189,6 +191,9 @@ func registryReply(installed, pods string) func(command) result {
 			return result{stdout: "gt version (dev: " + installed + ")\n"}
 		case c.name == "kubectl":
 			return result{stdout: pods}
+		case c.name == "pgrep":
+			// pgrep's status 1: no crane push is running.
+			return result{exit: 1}
 		}
 		return result{}
 	}
@@ -254,8 +259,7 @@ func TestPruneRegistryApplyDeletes(t *testing.T) {
 	tr.wantCall(t, "docker", "exec", registryContainer, "registry", "garbage-collect", "--delete-untagged", "/etc/docker/registry/config.yml")
 	tr.wantLogged(t, "deleted 2 of 2 manifest(s)")
 
-	ledger := filepath.Join(filepath.Dir(tr.Cfg.LockDir), "diskmaint", "ledger.jsonl")
-	entries, err := diskmaint.NewLedger(ledger, registryLedgerMax).Tail(1)
+	entries, err := diskmaint.NewLedger(tr.Cfg.RegistryLedger, registryLedgerMax).Tail(1)
 	if err != nil {
 		t.Fatalf("read the ledger: %v", err)
 	}
@@ -505,11 +509,10 @@ func TestPruneRegistryNeverFailsTheRun(t *testing.T) {
 	tr.wantLogged(t, "connection refused")
 }
 
-// TestRegistryRunnerRefusesAnEnvironmentItCannotCarry is the retention's command
-// seam: an entry with a value is refused rather than dropped, because the
-// command would otherwise run against a daemon other than the one the caller
-// named, and an entry with no value sets nothing, so the program runs.
-func TestRegistryRunnerRefusesAnEnvironmentItCannotCarry(t *testing.T) {
+// TestRegistryRunnerCarriesAValuedEnvironment is the retention's command seam:
+// an environment entry with a value reaches the command, and an entry with no
+// value is dropped, so the command inherits this process's value for it.
+func TestRegistryRunnerCarriesAValuedEnvironment(t *testing.T) {
 	t.Parallel()
 	tr := newTestRun(t)
 	tr.reply = func(c command) result {
@@ -520,23 +523,175 @@ func TestRegistryRunnerRefusesAnEnvironmentItCannotCarry(t *testing.T) {
 	}
 	run := tr.registryRunner()
 
-	_, err := run(context.Background(), []string{"DOCKER_HOST=unix:///run/colima.sock"}, "docker", "exec", registryContainer)
-	if err == nil {
-		t.Fatal("an environment entry with a value was dropped, want a refusal")
-	}
-	if !strings.Contains(err.Error(), "DOCKER_HOST") {
-		t.Fatalf("the refusal is %q, want it to name the variable", err)
-	}
-	out, err := run(context.Background(), []string{"DOCKER_HOST="}, "kubectl", "get", "pods", "-A", "-o", "json")
+	out, err := run(context.Background(), []string{"DOCKER_HOST=unix:///run/colima.sock", "EMPTY="}, "kubectl", "get", "pods", "-A", "-o", "json")
 	if err != nil || string(out) != `{"items":[]}` {
-		t.Fatalf("run with an empty entry = %q, %v; want the program's output", out, err)
+		t.Fatalf("run = %q, %v; want the program's output", out, err)
 	}
+	calls := tr.callsTo("kubectl")
+	if len(calls) != 1 {
+		t.Fatalf("kubectl ran %d times, want 1", len(calls))
+	}
+	if want := []string{"DOCKER_HOST=unix:///run/colima.sock"}; !slices.Equal(calls[0].env, want) {
+		t.Fatalf("the command's environment is %v, want %v", calls[0].env, want)
+	}
+}
+
+// TestRegistryRunnerSkipsACancelledCommand: a context that is already done
+// never starts the program.
+func TestRegistryRunnerSkipsACancelledCommand(t *testing.T) {
+	t.Parallel()
+	tr := newTestRun(t)
+	run := tr.registryRunner()
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
+
 	if _, err := run(cancelled, nil, "kubectl", "get", "pods"); err == nil {
-		t.Fatal("a cancelled run executed the program, want the context's error")
+		t.Fatal("a cancelled run returned no error")
 	}
-	if calls := tr.callsTo("kubectl"); len(calls) != 1 {
-		t.Fatalf("the program ran %d times, want only the call the seam allowed: %v", len(calls), callLines(tr, "kubectl"))
+	if calls := tr.callsTo("kubectl"); len(calls) != 0 {
+		t.Fatalf("kubectl ran %d time(s) under a cancelled context: %v", len(calls), callLines(tr, "kubectl"))
+	}
+}
+
+// TestPruneRegistryBoundsEveryCommandWithTheBudget: every command the retention
+// runs carries a deadline, so none can hold the plugin lock past the budget.
+func TestPruneRegistryBoundsEveryCommandWithTheBudget(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(devTag(), registryTagAt(1))
+	tr := newRegistryRun(t, reg, tagName(1))
+	tr.Cfg.RegistryPrune = registryPruneDryRun
+
+	tr.PruneRegistry()
+
+	if len(tr.calls) == 0 {
+		t.Fatal("the retention ran no command, want the installed-commit and in-use reads")
+	}
+	for _, c := range tr.calls {
+		if c.ctx == nil {
+			t.Fatalf("%s ran with no context, so no budget bounds it", c.name)
+		}
+		if _, ok := c.ctx.Deadline(); !ok {
+			t.Fatalf("%s ran with a context that has no deadline", c.name)
+		}
+	}
+}
+
+// TestPruneRegistryHoldsCollectWhileAPushRuns is the push gate: a crane push on
+// this host stops garbage collect, while the deletes the plan made still apply
+// under the lock.
+func TestPruneRegistryHoldsCollectWhileAPushRuns(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(devTag(),
+		registryTagAt(1), registryTagAt(2), registryTagAt(3))
+	tr := newRegistryRun(t, reg, tagName(3))
+	tr.Cfg.RegistryPrune = registryPruneApply
+	answer := tr.reply
+	tr.reply = func(c command) result {
+		if c.name == "pgrep" {
+			return result{exit: 0}
+		}
+		return answer(c)
+	}
+
+	tr.PruneRegistry()
+
+	if got := reg.deleted(); len(got) != 2 {
+		t.Fatalf("deleted %v, want the two plan digests", got)
+	}
+	if calls := tr.callsTo("docker"); len(calls) != 0 {
+		t.Fatalf("garbage collect ran beside a push: %v", callLines(tr, "docker"))
+	}
+	entries, err := diskmaint.NewLedger(tr.Cfg.RegistryLedger, registryLedgerMax).Tail(1)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("read the ledger: %v (%d entries)", err, len(entries))
+	}
+	if !slices.ContainsFunc(entries[0].Errors, func(e string) bool { return strings.Contains(e, "a push is in flight") }) {
+		t.Fatalf("ledger errors %v, want the collect's refusal named", entries[0].Errors)
+	}
+}
+
+// TestPruneRegistryCollectSendsNoDockerHost: garbage collect's empty DOCKER_HOST
+// is the entry the target always sends, and it is dropped, so docker runs with
+// this process's own environment, the daemon the pushes went to.
+func TestPruneRegistryCollectSendsNoDockerHost(t *testing.T) {
+	t.Parallel()
+	reg := newFakeRegistry(devTag(),
+		registryTagAt(1), registryTagAt(2), registryTagAt(3))
+	tr := newRegistryRun(t, reg, tagName(3))
+	tr.Cfg.RegistryPrune = registryPruneApply
+
+	tr.PruneRegistry()
+
+	calls := tr.callsTo("docker")
+	if len(calls) != 1 {
+		t.Fatalf("docker ran %d times, want the one garbage collect: %v", len(calls), callLines(tr, "docker"))
+	}
+	if len(calls[0].env) != 0 {
+		t.Fatalf("garbage collect carried environment %v, want none", calls[0].env)
+	}
+}
+
+// TestRegistryPushInFlightFailsClosed: pgrep's status 1 means no push; 0 means a
+// push; any other status is a probe that did not answer, and reads as a push so
+// garbage collect refuses.
+func TestRegistryPushInFlightFailsClosed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		exit int
+		want bool
+	}{
+		{"nothing matched", 1, false},
+		{"a push matched", 0, true},
+		{"pgrep failed", 2, true},
+		{"pgrep did not start", 127, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			tr.reply = func(command) result { return result{exit: tc.exit} }
+
+			if got := tr.registryPushInFlight(); got != tc.want {
+				t.Fatalf("registryPushInFlight() = %v at pgrep status %d, want %v", got, tc.exit, tc.want)
+			}
+			if c := tr.calls[0]; c.name != tr.Cfg.Pgrep || !strings.Contains(strings.Join(c.args, " "), "crane push") {
+				t.Fatalf("the push check ran %s %v, want pgrep for a crane push", c.name, c.args)
+			}
+		})
+	}
+}
+
+// TestRegistryWebClientHasARequestTimeout: a registry that stops answering must
+// not hold the plugin lock, so the default client carries a timeout.
+func TestRegistryWebClientHasARequestTimeout(t *testing.T) {
+	t.Parallel()
+	if (&Run{}).webClient().Timeout <= 0 {
+		t.Fatal("the registry client has no request timeout")
+	}
+}
+
+// TestPluginDocNamesTheRetentionKnobs: the plugin contract is what an operator
+// reads to set the retention, so its section names both variables and their
+// defaults.
+func TestPluginDocNamesTheRetentionKnobs(t *testing.T) {
+	t.Parallel()
+	doc, err := os.ReadFile(filepath.Join("..", "..", "plugins", "polecat-image", "plugin.md"))
+	if err != nil {
+		t.Fatalf("read the plugin contract: %v", err)
+	}
+	_, section, found := strings.Cut(string(doc), "## Registry retention\n")
+	if !found {
+		t.Fatal("the plugin contract has no Registry retention section")
+	}
+	section, _, _ = strings.Cut(section, "\n## ")
+	for _, want := range []string{
+		"POLECAT_IMAGE_REGISTRY_KEEP",
+		"(default `5`)",
+		"POLECAT_IMAGE_REGISTRY_PRUNE",
+		"`dry-run` (the default",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("the Registry retention section does not contain %q", want)
+		}
 	}
 }
