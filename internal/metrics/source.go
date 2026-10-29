@@ -22,10 +22,11 @@ type BeadStore interface {
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
 	ReadyFiltered(opts beads.ReadyOptions) ([]*beads.Issue, error)
 	Blocked() ([]*beads.Issue, error)
-	// ShowMultiple returns the beads the store holds among ids, keyed by id. An
-	// id it does not hold is left out rather than refused: a bead that is gone
-	// is an answer. A read that holds none of its ids answers beads.ErrNotFound
-	// instead, and showBeads reads that as none found too.
+	// ShowMultiple returns the beads it found among ids, keyed by id. An id it
+	// does not hold is left out rather than refused: a bead that is gone is an
+	// answer. A read that routes ids to several stores answers beads.ErrNotFound
+	// when one group's ids were all missing, and still returns what the other
+	// groups found; showBeads reads that error as none found for that group.
 	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
 }
 
@@ -49,10 +50,11 @@ func isBeadID(id string) bool {
 	return id != "" && !strings.HasPrefix(id, "-")
 }
 
-// showBeads reads the beads the store in dir holds among ids, keyed by id, in
-// chunks of storeShowChunk: a non-bead id is not read, a bead the store does
-// not hold is absent rather than an error (a chunk that holds none of its ids
-// included), and a missing seam or a failed read is an error.
+// showBeads returns the beads the store in dir holds among ids, keyed by id.
+// It reads storeShowChunk ids per call and never sends the store an id bd would
+// read as a flag. A bead the store does not hold is absent, not an error, and a
+// chunk that holds none of its ids is absent too. A missing seam or a failed
+// read is an error.
 func showBeads(ctx context.Context, env Env, dir string, ids []string) (map[string]*beads.Issue, error) {
 	if env.Beads == nil {
 		return nil, fmt.Errorf("no bead store seam for %s", dir)
@@ -77,10 +79,11 @@ func showBeads(ctx context.Context, env Env, dir string, ids []string) (map[stri
 		if err != nil && !errors.Is(err, beads.ErrNotFound) {
 			return nil, err
 		}
-		// A not-found read is the store saying it holds none of the chunk's ids:
-		// none found, not a broken read, so the next chunk still reads. The merge
-		// keeps whatever such a read did answer, and any other error returned
-		// above, so a read that broke is never read as beads that are gone.
+		// ErrNotFound is an answer, not a broken read: those ids were not found.
+		// A routed read can report it for one group while the other groups still
+		// answered, so whatever this read returned is kept and the next chunk
+		// still reads. Any other error, returned above, is a broken read and is
+		// never read as beads that are gone.
 		for id, issue := range shown {
 			found[id] = issue
 		}

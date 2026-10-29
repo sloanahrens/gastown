@@ -2,8 +2,11 @@ package metrics
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -35,22 +38,44 @@ const showTestPartial = `{
 // its ids: data null, exit 20, the ids under the envelope's error (kind
 // not_found). It is the shape internal/beads' notFoundEnvelope captures from
 // bd, and it is what a bead-at-a-time read meets once its one bead is gone.
-func showTestNoneFor(ids []string) string {
-	entries := make([]string, 0, len(ids))
-	for _, id := range ids {
-		entries = append(entries, fmt.Sprintf(`{"id":%q,"kind":"not_found","message":"no issue found matching %q"}`, id, id))
+// The envelope is marshalled rather than formatted: the old hand-written
+// template put a quoted id inside the message string, so it emitted invalid
+// JSON that only passed because bd's not-found exit status is read before
+// stdout is (gt-omecs).
+func showTestNoneFor(t *testing.T, ids []string) string {
+	t.Helper()
+	type failedID struct {
+		ID      string `json:"id"`
+		Kind    string `json:"kind"`
+		Message string `json:"message"`
 	}
-	return fmt.Sprintf(`{
-  "schema_version": 1,
-  "contract_version": 1,
-  "data": null,
-  "pagination": null,
-  "error": {
-    "kind": "not_found",
-    "message": "%d of %d ids failed",
-    "ids": [%s]
-  }
-}`, len(ids), len(ids), strings.Join(entries, ","))
+	failed := make([]failedID, 0, len(ids))
+	for _, id := range ids {
+		failed = append(failed, failedID{
+			ID:      id,
+			Kind:    "not_found",
+			Message: fmt.Sprintf("no issue found matching %q", id),
+		})
+	}
+	envelope := struct {
+		SchemaVersion   int `json:"schema_version"`
+		ContractVersion int `json:"contract_version"`
+		Data            any `json:"data"`
+		Pagination      any `json:"pagination"`
+		Error           struct {
+			Kind    string     `json:"kind"`
+			Message string     `json:"message"`
+			IDs     []failedID `json:"ids"`
+		} `json:"error"`
+	}{SchemaVersion: 1, ContractVersion: 1}
+	envelope.Error.Kind = "not_found"
+	envelope.Error.Message = fmt.Sprintf("%d of %d ids failed", len(ids), len(ids))
+	envelope.Error.IDs = failed
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal the not-found envelope: %v", err)
+	}
+	return string(out) + "\n"
 }
 
 // showTestExit is a bd failure carrying bd's typed exit status, as
@@ -135,7 +160,7 @@ func TestShowBeadsAWhollyMissingIdIsNone(t *testing.T) {
 			return []byte("bd version 1.2.2\n"), nil, nil
 		}
 		ids := showArgsIDs(args)
-		return []byte(showTestNoneFor(ids)), nil, showTestExit(20)
+		return []byte(showTestNoneFor(t, ids)), nil, showTestExit(20)
 	}
 
 	got, err := showBeads(context.Background(), Env{Beads: showTestStore(answer)}, dir,
@@ -145,6 +170,120 @@ func TestShowBeadsAWhollyMissingIdIsNone(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("showBeads = %v, want no bead for a wholly missing id", got)
+	}
+}
+
+// TestShowBeadsReadsEveryAbsenceShapeAsNone: the seam answers beads.ErrNotFound
+// two ways — bd's not-found exit status, and bd's not-found envelope on stdout
+// at another exit status — and showBeads reads both as none found. Each shape
+// first drives the real store, so the error showBeads swallows is proved to be
+// ErrNotFound rather than assumed from the exit status (gt-omecs).
+func TestShowBeadsReadsEveryAbsenceShapeAsNone(t *testing.T) {
+	t.Parallel()
+	shapes := []struct {
+		name   string
+		answer func(t *testing.T, ids []string) (stdout, stderr []byte, err error)
+	}{
+		{
+			name: "not-found exit status",
+			answer: func(*testing.T, []string) ([]byte, []byte, error) {
+				return nil, []byte("Issue gt-missing not found\n"), showTestExit(20)
+			},
+		},
+		{
+			name: "not-found envelope at another exit status",
+			answer: func(t *testing.T, ids []string) ([]byte, []byte, error) {
+				return []byte(showTestNoneFor(t, ids)), nil, showTestExit(1)
+			},
+		},
+	}
+	for _, shape := range shapes {
+		t.Run(shape.name, func(t *testing.T) {
+			t.Parallel()
+			answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
+				if showTestVersionProbe(args) {
+					return []byte("bd version 1.2.2\n"), nil, nil
+				}
+				return shape.answer(t, showArgsIDs(args))
+			}
+			ids := []string{"gt-missing"}
+
+			store := beads.New(t.TempDir(), beads.WithRunner(answer))
+			if _, err := store.ShowMultiple(ids); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("ShowMultiple = %v, want beads.ErrNotFound from the %s shape", err, shape.name)
+			}
+
+			got, err := showBeads(context.Background(), Env{Beads: showTestStore(answer)}, t.TempDir(), ids)
+			if err != nil {
+				t.Fatalf("showBeads = %v, want no error: the %s shape is none found", err, shape.name)
+			}
+			if len(got) != 0 {
+				t.Errorf("showBeads = %v, want no bead for a wholly missing id", got)
+			}
+		})
+	}
+}
+
+// TestShowBeadsKeepsTheBeadsARoutedReadAnswered: a not-found error says one
+// routed group's ids were all missing, not that the read broke, so showBeads
+// keeps the beads the other groups answered. The store is a real *beads.Beads
+// routing two prefixes to two rigs, so the partial answer and the not-found
+// error are the seam's own, not a fake's (gt-omecs).
+func TestShowBeadsKeepsTheBeadsARoutedReadAnswered(t *testing.T) {
+	t.Parallel()
+	townRoot := filepath.Join(t.TempDir(), "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	heldRig := filepath.Join(townRoot, "rig-held")
+	goneRig := filepath.Join(townRoot, "rig-gone")
+	for _, dir := range []string{heldRig, goneRig} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := beads.WriteRoutes(filepath.Join(townRoot, ".beads"), []beads.Route{
+		{Prefix: "yy-", Path: "rig-held"},
+		{Prefix: "zz-", Path: "rig-gone"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	answer := func(_ context.Context, dir string, args []string) ([]byte, []byte, error) {
+		if showTestVersionProbe(args) {
+			return []byte("bd version 1.2.2\n"), nil, nil
+		}
+		ids := showArgsIDs(args)
+		if dir == goneRig {
+			return []byte(showTestNoneFor(t, ids)), nil, showTestExit(20)
+		}
+		return []byte(fmt.Sprintf(`[{"id":%q,"title":"held"}]`, ids[0])), nil, nil
+	}
+	store := beads.New(heldRig, beads.WithDirRunner(answer))
+
+	const held, gone = "yy-a", "zz-b"
+	answered, err := store.ShowMultiple([]string{held, gone})
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the routed ShowMultiple(%s, %s) = %v, %v, want the bead it found and beads.ErrNotFound", held, gone, answered, err)
+	}
+	if answered[held] == nil {
+		t.Fatalf("the routed ShowMultiple(%s, %s) = %v, want %q among the beads it found", held, gone, answered, held)
+	}
+
+	got, err := showBeads(context.Background(),
+		Env{Beads: func(context.Context, string) BeadStore { return store }}, heldRig,
+		[]string{held, gone})
+	if err != nil {
+		t.Fatalf("showBeads = %v, want no error: a group's not-found ids are none found, not a failed read", err)
+	}
+	if got[held] == nil {
+		t.Errorf("showBeads = %v, want the bead the other routed group found", got)
+	}
+	if len(got) != 1 {
+		t.Errorf("showBeads answered %d bead(s), want only %q", len(got), held)
 	}
 }
 
@@ -168,7 +307,7 @@ func TestShowBeadsAWhollyMissingChunkIsNone(t *testing.T) {
 				return []byte(fmt.Sprintf(`[{"id":%q,"title":"held"}]`, held)), nil, nil
 			}
 		}
-		return []byte(showTestNoneFor(ids)), nil, showTestExit(20)
+		return []byte(showTestNoneFor(t, ids)), nil, showTestExit(20)
 	}
 	ids := make([]string, 0, 130)
 	for i := 0; i < 130; i++ {
