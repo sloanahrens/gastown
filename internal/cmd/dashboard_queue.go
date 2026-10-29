@@ -121,9 +121,11 @@ func dashQueueRow(rig string, i *beads.Issue) dashboard.QueueBead {
 }
 
 // dashShape runs the dispatcher's shape lint on a bead and names the verdict.
-// The lint is a pure function of the bead's text, so it costs no subprocess.
+// It is LintShape, not Lint: the badge describes the bead's text, so it costs
+// no subprocess and asks nothing of the git tree the target-path check reads
+// (gt-7t1im).
 func dashShape(t specdispatch.Template, i *beads.Issue) (shape, note string) {
-	v := specdispatch.Lint(specdispatch.Spec{
+	v := specdispatch.LintShape(specdispatch.Spec{
 		ID: i.ID, Title: i.Title, Type: i.Type, Status: i.Status, Assignee: i.Assignee, Priority: i.Priority,
 		CreatedAt: i.CreatedAt, Labels: i.Labels, Description: i.Description, Design: i.Design, Notes: i.Notes,
 		Acceptance: i.AcceptanceCriteria, Ephemeral: i.Ephemeral,

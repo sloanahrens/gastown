@@ -26,11 +26,38 @@ in check order, so a shell caller can act on all of them at once.
 | the bead is work, not an epic, an agent bead, a wisp or another runtime family | `not a work bead` |
 | every `## ` section in the template, present and non-empty (Goal, Constraints, Out of scope, Gate, Size) | `## <section>` |
 | 1-6 acceptance items (3-6 preferred) | `acceptance` |
+| every repo file the Constraints names as a file it changes exists on the target branch | `## Constraints` |
 | Size says one worker, one MR | `size` |
 
 A non-work bead is refused before any shape is read: no sections are required
 of an epic, and the reason names what the bead is (`type epic`, `label
 gt:agent`, `type wisp`).
+
+The path check reads its paths from the Constraints section (gt-7t1im), and
+checks only the tokens that read as repo files — a slash-separated path whose
+last segment carries an extension — so a directory, a package, a command, a
+symbol, a glob and a URL are passed rather than guessed at. Two cues pass a
+path the branch need not hold, and each reads the words directly beside the
+path, on its own line, never a cue elsewhere on the line:
+
+- a path the spec adds: "new file X", "adds X", "add X", "create X", or
+  "X does not exist yet" / "X will be created" in the Goal or the Constraints;
+- a path the spec only reads: "see X", "per X", "as in X", "like X", or "X is
+  read-only", where every mention of it in the Constraints carries such a cue.
+  A path the spec also changes, without a cue, is still checked.
+
+A bead naming a file with no inventory supplied is refused, never passed: a
+check that did not run is not a check that passed.
+
+The inventory is the branch the rig's landings target, read from the rig's
+`config.json` `default_branch` and `main` when that key is unset
+(`land.RigDefaultBranch`). Of that branch, `origin/<branch>` is read when the
+rig's repo has it and the local `<branch>` only when origin has none: the local
+branch is one a worktree keeps up to date by hand, and it can lag the branch the
+landing worker targets. A branch name git would read as something other than one
+branch — a leading `-`, a `..` range — is held by name. A rig, a branch or a
+git read that fails holds a bead naming a path with the error named, never as a
+branch holding no files.
 
 Exit 0 means clean. Exit 1 means refused. Exit 2 means the spec needs planning:
 label `needs-planning`, a Size that says planning, or more than six

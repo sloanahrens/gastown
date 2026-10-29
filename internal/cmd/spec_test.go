@@ -145,6 +145,10 @@ type fakeSpecTown struct {
 	omThreshold      map[string]float64
 	omThresholdErr   map[string]error
 	omThresholdReads map[string]int
+	// targets is each rig's target inventory as the lint's path check reads it
+	// (gt-7t1im). A rig absent here asks no path question, which is what a
+	// fixture that does not care about one gets.
+	targets map[string]*specdispatch.TargetTree
 }
 
 // specTestNow is the tick clock every dispatch test runs at.
@@ -265,6 +269,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			return f.omThreshold[rig], nil
 		},
 		RevertInFlight: func(rig string) *specdispatch.Revert { return f.revert[rig] },
+		Target:         func(rig string) *specdispatch.TargetTree { return f.targets[rig] },
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			if f.originErr != nil {
 				return false, f.originErr
