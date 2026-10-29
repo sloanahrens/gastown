@@ -59,8 +59,8 @@ func rigRoute(path, prefix, backend string) string {
 	return fmt.Sprintf(`{"path":%q,"prefix":%q,"backend":%q}`, path, prefix, backend)
 }
 
-// writeRoutes gives the town the route lines it is passed, one per line.
-func writeRoutes(t *testing.T, town string, lines ...string) {
+// writeSeatRoutes gives the town the route lines it is passed, one per line.
+func writeSeatRoutes(t *testing.T, town string, lines ...string) {
 	t.Helper()
 	dir := filepath.Join(town, ".beads")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -74,7 +74,7 @@ func writeRoutes(t *testing.T, town string, lines ...string) {
 // writeRigRoute gives the town one route for the rig gastown, on backend.
 func writeRigRoute(t *testing.T, town, backend string) {
 	t.Helper()
-	writeRoutes(t, town, rigRoute("gastown/mayor/rig", "gt-", backend))
+	writeSeatRoutes(t, town, rigRoute("gastown/mayor/rig", "gt-", backend))
 }
 
 // trackerSeatTownDir is a temp town whose route table puts gastown on backend.
@@ -211,7 +211,7 @@ func TestAddTrackerSeatEnvRefusals(t *testing.T) {
 			issuer: &fakeSeatIssuer{token: trackerSeatToken},
 			prepare: func(t *testing.T, town string) {
 				t.Helper()
-				writeRoutes(t, town,
+				writeSeatRoutes(t, town,
 					rigRoute("gastown/mayor/rig", "gt-", beads.BackendDolt),
 					rigRoute("gastown/polecats/box", "gt-box-", beads.BackendTracker))
 			},
