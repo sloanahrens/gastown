@@ -162,7 +162,7 @@ func TestCostProvidersDeepSeekStatusByRunway(t *testing.T) {
 
 // The live warning fails closed: it takes a field that confirms the read to
 // keep it away, and a report that says nothing about the live read is not
-// evidence the balance was live. The page colours the balance bad on Available
+// evidence the balance was live. The page colors the balance bad on Available
 // as well as alarming on OK, so either field failing raises the line.
 func TestCostProvidersDeepSeekLiveWarningFailsClosed(t *testing.T) {
 	t.Parallel()
@@ -257,10 +257,10 @@ func TestCostProvidersClaudeFigures(t *testing.T) {
 	}
 }
 
-// The row's colour is the page's planClass, and the test takes the expectation
+// The row's color is the page's planClass, and the test takes the expectation
 // from the page itself: the harness runs index.html's planClass over the same
 // figures, so the page's ceiling and the reader's are held together by
-// behaviour rather than by a hard-coded copy of the rule. A week exactly at the
+// behavior rather than by a hard-coded copy of the rule. A week exactly at the
 // ceiling and a projection one point past it are both rows, so a ceiling that
 // drifted on either side turns this red.
 func TestCostProvidersClaudeStatusMatchesThePagesPlanClass(t *testing.T) {

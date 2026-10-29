@@ -88,7 +88,7 @@ type deepSeekSpend struct {
 	Live struct {
 		// OK is the report's own "the live read succeeded" and Available its
 		// "the balance came from it"; writers in the field have sent either,
-		// and the page colours the balance from Available alone.
+		// and the page colors the balance from Available alone.
 		OK        *bool `json:"ok"`
 		Available *bool `json:"available"`
 	} `json:"live"`
@@ -205,7 +205,7 @@ func deepSeekCostProvider(_ time.Time, spend json.RawMessage, _ *ClaudePlan, _ *
 // liveUnreachable is whether the report leaves the balance on its ledger rather
 // than a live read. It fails closed: a writer that sent neither field, or that
 // reported the read failed through either one, has not said the balance is
-// live, and the page colours the figure bad for Available as well as OK. A
+// live, and the page colors the figure bad for Available as well as OK. A
 // field that does confirm the read keeps the warning away.
 func liveUnreachable(ok, available *bool) bool {
 	if ok == nil && available == nil {
@@ -316,7 +316,7 @@ func claudeCostProvider(now time.Time, _ json.RawMessage, plan *ClaudePlan, char
 	return p
 }
 
-// planStatus is the row's colour, the page's planClass rule line for line: a
+// planStatus is the row's color, the page's planClass rule line for line: a
 // week already at the ceiling the month rollup counts, or a projection past the
 // limit, is bad; a projection past the ceiling warns; anything else is ok. It is
 // a separate function so a test can run the page's own planClass over the same
