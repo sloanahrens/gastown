@@ -32,7 +32,16 @@ func (f feedStub) Events(_ context.Context, after int64, _ int) (api.EventsPage,
 			out = append(out, e)
 		}
 	}
-	return api.EventsPage{Events: out}, nil
+	// The store's end of feed echoes the cursor; the oldest held seq says
+	// whether the log is there at all.
+	page := api.EventsPage{Events: out, NextAfter: after}
+	if len(out) > 0 {
+		page.NextAfter = out[len(out)-1].Seq
+	}
+	if len(f.events) > 0 {
+		page.FirstSeq = f.events[0].Seq
+	}
+	return page, nil
 }
 
 // replayFixture is a town with one Dolt rig, gastown, and one tracker-routed
@@ -207,7 +216,7 @@ func TestRunTrackerReplayDryRunPrintsTheCallAndRunsNone(t *testing.T) {
 	if err := runTrackerReplay(env, &out, &errOut, "gastown", 0, true); err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
-	want := "bd create --id=gt-1 \"--title=Add x\"\ndry run: 1 bd calls, none run; would apply through seq 1\n"
+	want := "bd create --id=gt-1 '--title=Add x'\ndry run: 1 bd calls, none run; would apply through seq 1\n"
 	if out.String() != want {
 		t.Errorf("dry run output = %q, want %q", out.String(), want)
 	}

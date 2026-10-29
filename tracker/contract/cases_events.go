@@ -43,7 +43,7 @@ func ops(es []api.Event) []string {
 func eventsLifecycle(t *testing.T, s store.Store) {
 	a := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "a", Labels: []string{"x", "y"}, Actor: "alice"})
 	b := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "b"})
-	mustUpdate(t, s, a.ID, api.UpdatePatch{Status: str("in_progress"), Title: str("a2"), AddLabels: []string{"z"}, Actor: "alice"}, api.Guard{})
+	mustUpdate(t, s, a.ID, api.UpdatePatch{Status: str("in_progress"), Title: str("a2"), Description: str("body"), AppendNotes: "a line", AddLabels: []string{"z"}, Actor: "alice"}, api.Guard{})
 	if err := s.AddComment(ctx(), a.ID, "bob", "hi"); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func eventsLifecycle(t *testing.T, s store.Store) {
 	mustUpdate(t, s, a.ID, api.UpdatePatch{Status: str("open"), Actor: "dave"}, api.Guard{})
 
 	got := eventsFor(t, s, a.ID)
-	want := []string{"created", "label_added", "label_added", "updated", "status_changed", "label_added", "commented", "dependency_added", "dependency_removed", "closed", "reopened"}
+	want := []string{"created", "label_added", "label_added", "updated", "updated", "updated", "status_changed", "label_added", "commented", "dependency_added", "dependency_removed", "closed", "reopened"}
 	if !slices.Equal(ops(got), want) {
 		t.Fatalf("ops = %v\nwant  %v", ops(got), want)
 	}
@@ -81,8 +81,25 @@ func eventsLifecycle(t *testing.T, s store.Store) {
 	if e := byOp("closed"); e.Actor != "carol" || e.Comment == nil || *e.Comment != "done" {
 		t.Errorf("closed = %+v, want carol with the reason as its comment", e)
 	}
-	if e := byOp("commented"); e.Actor != "bob" {
-		t.Errorf("commented actor = %q, want bob", e.Actor)
+	if e := byOp("commented"); e.Actor != "bob" || e.NewValue == nil || *e.NewValue != "hi" {
+		t.Errorf("commented = %+v, want bob with the comment text, so a rollback replay can apply it", e)
+	}
+	// A rollback replay (gt tracker replay) applies these from the feed alone,
+	// so the whole-text fields carry their new value.
+	updateFor := func(field string) api.Event {
+		for _, e := range got {
+			if e.Op == "updated" && e.Comment != nil && *e.Comment == field {
+				return e
+			}
+		}
+		t.Fatalf("no updated/%s event", field)
+		return api.Event{}
+	}
+	if e := updateFor("description"); e.NewValue == nil || *e.NewValue != "body" {
+		t.Errorf("updated/description = %+v, want the new value", e)
+	}
+	if e := updateFor("notes"); e.NewValue == nil || *e.NewValue != "a line" {
+		t.Errorf("updated/notes = %+v, want the line the store appended", e)
 	}
 	if e := byOp("reopened"); e.Actor != "dave" {
 		t.Errorf("reopened actor = %q, want dave", e.Actor)

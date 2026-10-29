@@ -96,8 +96,8 @@ func Replay(ctx context.Context, src Source, apply Apply, since int64, dryRun bo
 			return res, &TruncatedError{Since: after, Floor: page.FirstSeq}
 		}
 		if len(page.Events) == 0 {
-			if page.NextAfter > after {
-				return res, fmt.Errorf("tracker events feed returned an empty page after seq %d but sends the next page to seq %d: refusing to read the feed as ended", after, page.NextAfter)
+			if err := feedEnded(page, after); err != nil {
+				return res, err
 			}
 			return res, nil
 		}
@@ -120,12 +120,33 @@ func Replay(ctx context.Context, src Source, apply Apply, since int64, dryRun bo
 	}
 }
 
+// feedEnded reports whether an empty page is the documented end of the feed,
+// and otherwise refuses to read it as one. The store's contract says the end
+// is a page that echoes the cursor it was asked from, and past seq 0 that comes
+// from a log still holding events. A page that holds neither is a feed that
+// stalled or lost its log, and a replay that read it as the end would report
+// success having applied nothing — the loss the rollback exists to prevent.
+func feedEnded(page api.EventsPage, after int64) error {
+	if page.NextAfter > after {
+		return fmt.Errorf("tracker events feed returned an empty page after seq %d but sends the next page to seq %d: refusing to read the feed as ended", after, page.NextAfter)
+	}
+	if page.NextAfter != after {
+		return fmt.Errorf("tracker events feed returned an empty page after seq %d but holds the cursor at seq %d: refusing to read a stalled feed as ended", after, page.NextAfter)
+	}
+	if after > 0 && page.FirstSeq == 0 {
+		return fmt.Errorf("tracker events feed returned an empty page after seq %d while holding no events at all: refusing to read a feed that lost its log as ended", after)
+	}
+	return nil
+}
+
 // Command returns the bd arguments that replay ev. Every replayable event is
 // one bd call; an event the feed cannot replay is an *UnreplayableError.
 //
 // The feed carries an issue's title at creation, not its type, priority or
-// description, and an update to a text field names the field without its new
-// value. Those are refused rather than filled in with bd's defaults.
+// description, so a creation replays with bd's defaults for those. An update
+// whose field's new value the feed does not carry (defer_until, and the rows
+// written before the store recorded values) is refused rather than filled in
+// with the old one.
 func Command(ev api.Event) ([]string, error) {
 	id, err := operand(ev, ev.IssueID, "issue id")
 	if err != nil {
@@ -143,7 +164,7 @@ func Command(ev api.Event) ([]string, error) {
 		}
 		return argv, nil
 	case "updated":
-		return updated(ev)
+		return updated(ev, id)
 	case "status_changed", "reopened":
 		status, err := value(ev, ev.NewValue, "status")
 		if err != nil {
@@ -187,38 +208,65 @@ func Command(ev api.Event) ([]string, error) {
 		}
 		return []string{"dep", "remove", id, dep}, nil
 	case "commented":
-		return nil, unreplayable(ev, "commented", "the feed does not carry the comment text")
+		text, err := value(ev, ev.NewValue, "comment text")
+		if err != nil {
+			return nil, err
+		}
+		// "--" so a comment that opens with "-" reaches bd as text, not a flag.
+		return []string{"comment", id, "--", text}, nil
 	default:
 		return nil, unreplayable(ev, ev.Op, "no replay for this event kind")
 	}
 }
 
-// updated replays the fields whose new value the feed carries. The field is
-// the event's comment; the others are refused by name.
-func updated(ev api.Event) ([]string, error) {
+// updated replays the fields the feed names in the event's comment. A field
+// whose new value the event does not carry is refused by name.
+func updated(ev api.Event, id string) ([]string, error) {
 	field := ""
 	if ev.Comment != nil {
 		field = *ev.Comment
 	}
 	kind := "updated/" + field
+	switch field {
+	case "promoted to persistent":
+		// The field name is the whole change; there is no value to carry.
+		return []string{"update", id, "--persistent"}, nil
+	case "description":
+		return textUpdate(ev, field, id, "--description=", ev.NewValue)
+	case "acceptance_criteria":
+		return textUpdate(ev, field, id, "--acceptance=", ev.NewValue)
+	case "notes":
+		// The event is the line the store appended, so replaying it appends
+		// the same line rather than replacing the whole field.
+		return textUpdate(ev, field, id, "--append-notes=", ev.NewValue)
+	}
 	if ev.NewValue == nil {
 		return nil, unreplayable(ev, kind, "the feed carries no new value")
 	}
 	val := *ev.NewValue
 	switch field {
 	case "title":
-		return []string{"update", ev.IssueID, "--title=" + val}, nil
+		return []string{"update", id, "--title=" + val}, nil
 	case "assignee":
-		return []string{"update", ev.IssueID, "--assignee=" + val}, nil
+		return []string{"update", id, "--assignee=" + val}, nil
 	case "priority":
 		n, err := strconv.Atoi(val)
 		if err != nil || n < 0 || n > 4 {
 			return nil, unreplayable(ev, kind, fmt.Sprintf("priority %q is not 0-4", val))
 		}
-		return []string{"update", ev.IssueID, "--priority=" + strconv.Itoa(n)}, nil
+		return []string{"update", id, "--priority=" + strconv.Itoa(n)}, nil
 	default:
 		return nil, unreplayable(ev, kind, "the feed carries no new value for this field")
 	}
+}
+
+// textUpdate replays an update to a whole-text field. Unlike value it takes an
+// empty new value: a cleared description is a change the feed carries.
+func textUpdate(ev api.Event, field, id, flag string, v *string) ([]string, error) {
+	if v == nil {
+		return nil, unreplayable(ev, "updated/"+field, "the feed carries no new value")
+	}
+	return []string{"update", id, flag + *v}, nil
 }
 
 // value returns the event's value for what, or refuses the event when the
@@ -279,14 +327,30 @@ func display(argv []string) string {
 	return strings.Join(parts, " ")
 }
 
-// quoteArg quotes an argument a shell would split or rewrite: one holding
-// whitespace, a quote, a backslash, or a non-ASCII or control rune, any of
-// which a title from the feed can carry.
+// quoteArg returns a as a POSIX shell must see it to pass it through
+// unchanged: bare when every rune is one a shell never treats specially, and
+// otherwise in single quotes. A dry run's output is pasted into a shell, so a
+// value from the feed holding "$", "`", ";", "|", "&", a glob or a newline is
+// as unsafe as one holding a space.
 func quoteArg(a string) string {
+	if a != "" && isBareInShell(a) {
+		return a
+	}
+	return "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+}
+
+// isBareInShell reports whether every rune of a is one a shell passes through
+// as part of a word: letters, digits, and the punctuation that is never
+// special. "=" is only an assignment when it leads the command, and bd's
+// arguments never do.
+func isBareInShell(a string) bool {
 	for _, r := range a {
-		if r <= ' ' || r >= 0x7f || r == '"' || r == '\'' || r == '\\' {
-			return strconv.Quote(a)
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("-._/:@%+=,", r):
+		default:
+			return false
 		}
 	}
-	return a
+	return true
 }

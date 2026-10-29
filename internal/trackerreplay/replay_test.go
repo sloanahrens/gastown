@@ -14,7 +14,8 @@ import (
 // Unit tier: a scripted feed and a recording runner, no process and no clock.
 
 // fakeSource serves events in pages of pageSize, after the seq asked for, and
-// reports firstSeq as the oldest seq it still holds.
+// reports firstSeq as the oldest seq it still holds. Like the store, it echoes
+// the cursor on an empty page.
 type fakeSource struct {
 	events   []api.Event
 	pageSize int
@@ -28,7 +29,11 @@ func (f *fakeSource) Events(_ context.Context, after int64, _ int) (api.EventsPa
 			out = append(out, e)
 		}
 	}
-	page := api.EventsPage{Events: out, FirstSeq: f.firstSeq}
+	first := f.firstSeq
+	if first == 0 && len(f.events) > 0 {
+		first = f.events[0].Seq
+	}
+	page := api.EventsPage{Events: out, FirstSeq: first, NextAfter: after}
 	if len(out) > 0 {
 		page.NextAfter = out[len(out)-1].Seq
 	}
@@ -115,6 +120,34 @@ func TestCommandMapsEachReplayableEventToItsBdCall(t *testing.T) {
 			ev:   api.Event{Seq: 13, Op: "updated", IssueID: "gt-1", NewValue: str(""), Comment: str("assignee")},
 			want: []string{"update", "gt-1", "--assignee="},
 		},
+		"commented": {
+			ev:   api.Event{Seq: 14, Op: "commented", IssueID: "gt-1", NewValue: str("working on it")},
+			want: []string{"comment", "gt-1", "--", "working on it"},
+		},
+		"comment that opens with a dash": {
+			ev:   api.Event{Seq: 15, Op: "commented", IssueID: "gt-1", NewValue: str("-x is not a flag")},
+			want: []string{"comment", "gt-1", "--", "-x is not a flag"},
+		},
+		"description updated": {
+			ev:   api.Event{Seq: 16, Op: "updated", IssueID: "gt-1", NewValue: str("new body"), Comment: str("description")},
+			want: []string{"update", "gt-1", "--description=new body"},
+		},
+		"description cleared": {
+			ev:   api.Event{Seq: 17, Op: "updated", IssueID: "gt-1", NewValue: str(""), Comment: str("description")},
+			want: []string{"update", "gt-1", "--description="},
+		},
+		"acceptance updated": {
+			ev:   api.Event{Seq: 18, Op: "updated", IssueID: "gt-1", NewValue: str("[ ] a box"), Comment: str("acceptance_criteria")},
+			want: []string{"update", "gt-1", "--acceptance=[ ] a box"},
+		},
+		"notes appended": {
+			ev:   api.Event{Seq: 19, Op: "updated", IssueID: "gt-1", NewValue: str("a line"), Comment: str("notes")},
+			want: []string{"update", "gt-1", "--append-notes=a line"},
+		},
+		"promoted to persistent": {
+			ev:   api.Event{Seq: 20, Op: "updated", IssueID: "gt-1", Comment: str("promoted to persistent")},
+			want: []string{"update", "gt-1", "--persistent"},
+		},
 	}
 	for name, tc := range cases {
 		got, err := Command(tc.ev)
@@ -135,16 +168,24 @@ func TestCommandRefusesWhatTheFeedCannotReplayAndNamesKindAndSeq(t *testing.T) {
 		kind string
 	}{
 		"comment text is not in the feed": {
-			ev:   api.Event{Seq: 20, Op: "commented", IssueID: "gt-1"},
+			ev:   api.Event{Seq: 60, Op: "commented", IssueID: "gt-1"},
 			kind: "commented",
 		},
 		"description update has no new value": {
-			ev:   api.Event{Seq: 21, Op: "updated", IssueID: "gt-1", Comment: str("description")},
+			ev:   api.Event{Seq: 61, Op: "updated", IssueID: "gt-1", Comment: str("description")},
 			kind: "updated/description",
 		},
+		"acceptance update has no new value": {
+			ev:   api.Event{Seq: 62, Op: "updated", IssueID: "gt-1", Comment: str("acceptance_criteria")},
+			kind: "updated/acceptance_criteria",
+		},
 		"notes update has no new value": {
-			ev:   api.Event{Seq: 22, Op: "updated", IssueID: "gt-1", Comment: str("notes")},
+			ev:   api.Event{Seq: 63, Op: "updated", IssueID: "gt-1", Comment: str("notes")},
 			kind: "updated/notes",
+		},
+		"deferral update carries no replayable value": {
+			ev:   api.Event{Seq: 64, Op: "updated", IssueID: "gt-1", Comment: str("defer_until")},
+			kind: "updated/defer_until",
 		},
 		"priority outside 0-4": {
 			ev:   api.Event{Seq: 23, Op: "updated", IssueID: "gt-1", NewValue: str("9"), Comment: str("priority")},
@@ -236,7 +277,7 @@ func TestReplayDryRunPrintsEachBdCallAndRunsNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Replay dry run: %v", err)
 	}
-	want := "bd create --id=gt-1 \"--title=Title with space\"\nbd update gt-1 --status=in_progress\n"
+	want := "bd create --id=gt-1 '--title=Title with space'\nbd update gt-1 --status=in_progress\n"
 	if out.String() != want {
 		t.Errorf("dry run printed %q, want %q", out.String(), want)
 	}
@@ -395,6 +436,53 @@ func TestReplayRefusesAnEmptyPageThatSaysMoreEventsFollow(t *testing.T) {
 	}
 }
 
+func TestReplayEndsOnAnEmptyPageThatHoldsItsCursor(t *testing.T) {
+	t.Parallel()
+	src := &pageSource{pages: []api.EventsPage{
+		{Events: []api.Event{{Seq: 4, Op: "deleted", IssueID: "gt-4"}}, FirstSeq: 1, NextAfter: 4},
+		{FirstSeq: 1, NextAfter: 4},
+	}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	if err != nil {
+		t.Fatalf("Replay over an empty page that holds its cursor = %v, want no error", err)
+	}
+	if res != (Result{Applied: 4, Commands: 1}) {
+		t.Errorf("result = %+v, want seq 4 applied and the feed read as ended", res)
+	}
+}
+
+func TestReplayRefusesAnEmptyPageThatDoesNotHoldItsCursor(t *testing.T) {
+	t.Parallel()
+	src := &pageSource{pages: []api.EventsPage{
+		{Events: []api.Event{{Seq: 4, Op: "deleted", IssueID: "gt-4"}}, FirstSeq: 1, NextAfter: 4},
+		{}, // neither a cursor nor a log: a feed that stalled or lost its place
+	}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 0, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "empty page") || !strings.Contains(err.Error(), "cursor") {
+		t.Fatalf("Replay over an empty page holding no cursor = %v, want a refusal naming the stalled feed", err)
+	}
+	if res != (Result{Applied: 4, Commands: 1}) {
+		t.Errorf("result = %+v, want seq 4 applied and the feed not read as ended", res)
+	}
+}
+
+func TestReplayRefusesAnEmptyFeedThatHoldsNoEventsAtAll(t *testing.T) {
+	t.Parallel()
+	// The cursor is echoed, so the page looks like the end of the feed, but a
+	// log with no events cannot account for the seqs a replay from 3 is past.
+	src := &pageSource{pages: []api.EventsPage{{NextAfter: 3, FirstSeq: 0}}}
+	run := &recorder{}
+	res, err := Replay(context.Background(), src, run.apply, 3, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "holding no events") {
+		t.Fatalf("Replay from 3 over an empty feed = %v, want a refusal naming the missing log", err)
+	}
+	if len(run.calls) != 0 || res != (Result{Applied: 3}) {
+		t.Errorf("result %+v with %d calls, want nothing applied", res, len(run.calls))
+	}
+}
+
 // endlessSource hands out one new event per call, forever.
 type endlessSource struct{}
 
@@ -420,12 +508,21 @@ func TestReplayDryRunQuotesAValueTheShellWouldRewrite(t *testing.T) {
 	src := &fakeSource{events: []api.Event{
 		{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: str("line one\nline two")},
 		{Seq: 2, Op: "created", IssueID: "gt-2", NewValue: str("café")},
+		{Seq: 3, Op: "created", IssueID: "gt-3", NewValue: str("$(id) `id`; a|b&c >out")},
+		{Seq: 4, Op: "created", IssueID: "gt-4", NewValue: str("it's a *glob*")},
+		{Seq: 5, Op: "created", IssueID: "gt-5", NewValue: str("$HOME")},
+		{Seq: 6, Op: "created", IssueID: "gt-6", NewValue: str("a|b&c;d")},
 	}}
 	var out bytes.Buffer
 	if _, err := Replay(context.Background(), src, nil, 0, true, &out); err != nil {
 		t.Fatalf("Replay dry run: %v", err)
 	}
-	want := "bd create --id=gt-1 \"--title=line one\\nline two\"\nbd create --id=gt-2 \"--title=café\"\n"
+	want := "bd create --id=gt-1 '--title=line one\nline two'\n" +
+		"bd create --id=gt-2 '--title=café'\n" +
+		"bd create --id=gt-3 '--title=$(id) `id`; a|b&c >out'\n" +
+		"bd create --id=gt-4 '--title=it'\\''s a *glob*'\n" +
+		"bd create --id=gt-5 '--title=$HOME'\n" +
+		"bd create --id=gt-6 '--title=a|b&c;d'\n"
 	if out.String() != want {
 		t.Errorf("dry run printed %q, want %q", out.String(), want)
 	}
