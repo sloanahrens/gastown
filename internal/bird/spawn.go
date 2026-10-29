@@ -75,14 +75,7 @@ func (r *Runner) Spawn(req SpawnRequest) (SpawnResult, error) {
 	if err != nil {
 		return SpawnResult{}, err
 	}
-	result, opened, err := r.openTab(name, req.Mission)
-	if err != nil && !opened {
-		// Nothing runs under the name, so its reservation must not hold it.
-		if rbErr := r.Registry.ReleaseName(name); rbErr != nil {
-			return SpawnResult{}, fmt.Errorf("%w; releasing the reservation on %s also failed: %v", err, name, rbErr)
-		}
-	}
-	return result, err
+	return r.openTab(name, req.Mission)
 }
 
 // spawnName is the name the tab runs: the one the caller gave when nothing
@@ -109,25 +102,35 @@ func (r *Runner) spawnName(given string) (string, error) {
 	return given, nil
 }
 
-// openTab opens the tab the bird runs in and titles it with the name; opened
-// says whether a tab exists, which decides whether the name may go back to the
-// pool when the rest fails.
-func (r *Runner) openTab(name, mission string) (result SpawnResult, opened bool, err error) {
+// openTab opens the tab the bird runs in and titles it with the name. A tab
+// that was never opened gives the name back, since nothing runs under it; a
+// tab that opened keeps the name for the session inside it to claim.
+func (r *Runner) openTab(name, mission string) (SpawnResult, error) {
 	text := shellLine(startArgv(name, mission))
 	out, err := r.cmux([]string{"cmux", "new-surface", "--type", "terminal", "--command", text, "--json"})
 	if err != nil {
-		return SpawnResult{}, false, fmt.Errorf("gt bird spawn: opening the tab: %w", err)
+		return SpawnResult{}, r.noTab(name, fmt.Errorf("gt bird spawn: opening the tab: %w", err))
 	}
 	surface, err := cmuxSurface(out)
 	if err != nil {
-		return SpawnResult{}, true, fmt.Errorf("gt bird spawn: the tab for %s is open but the surface it runs in is unknown: %w", name, err)
+		return SpawnResult{}, fmt.Errorf("gt bird spawn: the tab for %s is open but the surface it runs in is unknown: %w", name, err)
 	}
 	// The tab's title is cmux's own, so the terminal titles the session sets
 	// cannot take the bird's name off it.
 	if _, err := r.cmux([]string{"cmux", "rename-tab", "--tab", surface, name}); err != nil {
-		return SpawnResult{}, true, fmt.Errorf("gt bird spawn: the tab %s runs %s but titling it failed: %w", surface, name, err)
+		return SpawnResult{}, fmt.Errorf("gt bird spawn: the tab %s runs %s but titling it failed: %w", surface, name, err)
 	}
-	return SpawnResult{Name: name, Surface: surface, Bead: spawnBead(name)}, true, nil
+	return SpawnResult{Name: name, Surface: surface, Bead: spawnBead(name)}, nil
+}
+
+// noTab reports the failure that left no tab open, after releasing the name's
+// reservation; a release that fails too is added, since the name may then stay
+// held by a session that never started.
+func (r *Runner) noTab(name string, err error) error {
+	if rbErr := r.Registry.ReleaseName(name); rbErr != nil {
+		return fmt.Errorf("%w; releasing the reservation on %s also failed: %v", err, name, rbErr)
+	}
+	return err
 }
 
 // startArgv is the gt bird start line the tab runs: the bird under name, bound
