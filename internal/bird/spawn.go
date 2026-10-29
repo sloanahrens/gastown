@@ -209,9 +209,5 @@ func cmuxSurface(out []byte) (string, error) {
 func runCmux(argv []string) ([]byte, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", argv[0], err)
-	}
-	return out, nil
+	return cmd.Output()
 }

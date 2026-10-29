@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
 // cmuxLog is a runner whose cmux is recorded rather than run: each call appends
@@ -122,6 +124,107 @@ func TestSpawnRefusesATakenName(t *testing.T) {
 				t.Errorf("cmux ran %q, want no tab for a name that is taken", log.calls)
 			}
 		})
+	}
+}
+
+// TestSpawnRefusesWhenThePoolIsExhausted: a pool with nothing free opens no tab
+// and says which command shows the live sessions.
+func TestSpawnRefusesWhenThePoolIsExhausted(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	if held, err := reg.ReserveName("wren"); err != nil || held != "" {
+		t.Fatalf("ReserveName = %q, %v, want the only name reserved", held, err)
+	}
+	log := &cmuxLog{}
+
+	_, err := spawnRunner(t, reg, inCmux(), log).Spawn(SpawnRequest{})
+	if err == nil || !strings.Contains(err.Error(), "every name in the pool is taken") {
+		t.Fatalf("Spawn = %v, want the exhausted-pool refusal", err)
+	}
+	if len(log.calls) != 0 {
+		t.Errorf("cmux ran %q, want no tab without a name", log.calls)
+	}
+}
+
+// TestSpawnReportsARegistryItCannotRead: a draw or a reservation that fails is
+// reported before any tab is opened.
+func TestSpawnReportsARegistryItCannotRead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		req  SpawnRequest
+		want string
+	}{
+		{name: "a draw that cannot be written", req: SpawnRequest{}, want: "drawing a name"},
+		{name: "a reservation that cannot be written", req: SpawnRequest{Name: "wren"}, want: "reserving wren"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := testRegistry(t, "wren")
+			reg.Write = func(string, any) error { return errors.New("disk full") }
+			log := &cmuxLog{}
+
+			_, err := spawnRunner(t, reg, inCmux(), log).Spawn(tc.req)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Spawn = %v, want an error naming %q", err, tc.want)
+			}
+			if len(log.calls) != 0 {
+				t.Errorf("cmux ran %q, want no tab for a name it could not reserve", log.calls)
+			}
+		})
+	}
+}
+
+// TestSpawnReportsAnUnreadableCmuxAnswer: an answer that is not the JSON
+// new-surface reports a surface in leaves the tab open and the name held.
+func TestSpawnReportsAnUnreadableCmuxAnswer(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	log := &cmuxLog{answers: []string{"surface:7"}}
+
+	_, err := spawnRunner(t, reg, inCmux(), log).Spawn(SpawnRequest{Name: "wren"})
+	if err == nil || !strings.Contains(err.Error(), "JSON") {
+		t.Fatalf("Spawn = %v, want an error about the answer's shape", err)
+	}
+	assertReserved(t, reg, "wren")
+}
+
+// TestSpawnReportsATitleItCannotSet: a tab that opened but could not be titled
+// keeps its name, since the session in it runs regardless.
+func TestSpawnReportsATitleItCannotSet(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	log := &cmuxLog{
+		answers: []string{`{"surface_ref":"surface:7"}`},
+		errs:    []error{nil, errors.New("no such tab")},
+	}
+
+	_, err := spawnRunner(t, reg, inCmux(), log).Spawn(SpawnRequest{Name: "wren"})
+	if err == nil || !strings.Contains(err.Error(), "titling") {
+		t.Fatalf("Spawn = %v, want an error about the tab's title", err)
+	}
+	assertReserved(t, reg, "wren")
+}
+
+// TestSpawnReportsAReleaseThatFails: a name that cannot be given back is
+// reported beside the failure that opened no tab.
+func TestSpawnReportsAReleaseThatFails(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	writes := 0
+	reg.Write = func(path string, v any) error {
+		writes++
+		if writes == 1 {
+			return atomicfile.EnsureDirAndWriteJSON(path, v) // the reservation this spawn makes
+		}
+		return errors.New("disk full")
+	}
+	log := &cmuxLog{errs: []error{errors.New("cmux refused")}}
+
+	_, err := spawnRunner(t, reg, inCmux(), log).Spawn(SpawnRequest{Name: "wren"})
+	if err == nil || !strings.Contains(err.Error(), "releasing the reservation") {
+		t.Fatalf("Spawn = %v, want the failed release reported beside the tab failure", err)
 	}
 }
 

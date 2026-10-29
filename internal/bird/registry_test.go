@@ -665,6 +665,68 @@ func TestClaimPinnedRefusesANameALiveSessionHolds(t *testing.T) {
 	}
 }
 
+// TestReserveNameRefusesANameNoSessionCouldUse: a name with a space in it
+// never reaches the state file, and the reason says why.
+func TestReserveNameRefusesANameNoSessionCouldUse(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+
+	held, err := reg.ReserveName("not a name")
+	if !errors.Is(err, ErrInvalidName) || held != SkipUnusable {
+		t.Fatalf("ReserveName = %q, %v, want the invalid-name refusal", held, err)
+	}
+}
+
+// TestReserveNameReportsWhatItCannotRead: a process table or polecat glob it
+// cannot read is an error, not a name reserved on a guess.
+func TestReserveNameReportsWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		arrange func(t *testing.T, reg *Registry)
+	}{
+		{
+			name: "a liveness it cannot read",
+			arrange: func(t *testing.T, reg *Registry) {
+				reg.ProcStart = func(int) (string, bool, error) { return "", false, errors.New("no process table") }
+				seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok", Started: at(0)})
+			},
+		},
+		{
+			name:    "a polecat glob that cannot match",
+			arrange: func(t *testing.T, reg *Registry) { reg.PolecatGlob = "[" },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := testRegistry(t, "wren")
+			tc.arrange(t, reg)
+
+			if held, err := reg.ReserveName("wren"); err == nil {
+				t.Fatalf("ReserveName = %q, nil; want the read failure", held)
+			}
+			st, err := reg.Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(st.Reservations) != 0 {
+				t.Errorf("reservations = %+v, want none for a read that failed", st.Reservations)
+			}
+		})
+	}
+}
+
+func TestReserveNameReportsAWriteFailure(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	reg.Write = func(string, any) error { return errors.New("disk full") }
+
+	if _, err := reg.ReserveName("wren"); err == nil {
+		t.Fatal("ReserveName accepted a write that failed")
+	}
+}
+
 func TestReserveNameTakesAFreeName(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren", "robin")
