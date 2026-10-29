@@ -30,7 +30,7 @@ const (
 	// trim Job run as.
 	SeedUserID = 10001
 	// HelperPath is the polecat image's own binary, which carries the containers' helper subcommands
-	// (trim-cache, seed-clone, seed-cache).
+	// (trim-cache, trim-paths, seed-clone, seed-cache).
 	HelperPath = "/usr/local/bin/polecat-image"
 	// DefaultSeedJobName is the Job's name when the input names none.
 	DefaultSeedJobName = "gt-cache-seed"
@@ -129,6 +129,7 @@ type Volume struct {
 	Name                  string                    `json:"name"`
 	PersistentVolumeClaim *PersistentVolumeClaimRef `json:"persistentVolumeClaim,omitempty"`
 	EmptyDir              *EmptyDirVolumeSource     `json:"emptyDir,omitempty"`
+	ConfigMap             *ConfigMapVolumeSource    `json:"configMap,omitempty"`
 }
 
 // PersistentVolumeClaimRef names the claim a volume mounts.
@@ -138,6 +139,11 @@ type PersistentVolumeClaimRef struct {
 
 // EmptyDirVolumeSource is a scratch directory that lives as long as the pod.
 type EmptyDirVolumeSource struct{}
+
+// ConfigMapVolumeSource mounts a ConfigMap's data as a directory of files, one file per key.
+type ConfigMapVolumeSource struct {
+	Name string `json:"name"`
+}
 
 // BuildSeedJob returns the seed Job for in, or the reason it cannot be rendered.
 //
@@ -201,15 +207,18 @@ func BuildSeedJob(in SeedJobInput) (*SeedJob, error) {
 	}, nil
 }
 
-// JSON returns the Job as the document kubectl applies: indented, and with no HTML escaping, so a
-// clone URL's query is readable where an operator checks it. It takes no error, because encoding
-// strings, integers and slices of them cannot fail.
-func (j *SeedJob) JSON() []byte {
+// JSON returns the Job as the document kubectl applies.
+func (j *SeedJob) JSON() []byte { return encodeDocument(j) }
+
+// encodeDocument renders v as the document kubectl applies: indented, and with no HTML escaping, so
+// a clone URL's query or a path's characters are readable where an operator checks them. It takes
+// no error, because encoding strings, integers and slices of them cannot fail.
+func encodeDocument(v any) []byte {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(j)
+	_ = enc.Encode(v)
 	return buf.Bytes()
 }
 
