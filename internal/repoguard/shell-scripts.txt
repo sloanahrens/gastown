@@ -22,7 +22,6 @@ deploy/k8s/kind/up.sh	port: gt-tpg0p
 deploy/k8s/render-policy.sh	port: gt-tpg0p
 deploy/k8s/render-policy_test.sh	port: gt-tpg0p
 deploy/polecat/go-floor.sh	port: gt-tpg0p
-deploy/polecat/probe-bootstrap.sh	port: gt-tpg0p
 docker-entrypoint.sh	platform: container entrypoint
 gt-model-eval/scripts/results-to-discussion.sh	port: gt-tpg0p
 plugins/app-promote/run.sh	port: gt-tpg0p
@@ -66,13 +65,10 @@ scripts/refresh-bd-command-tree.sh	port: gt-tpg0p
 scripts/repo-guards.sh	port: gt-tpg0p
 scripts/repo-guards_test.sh	port: gt-tpg0p
 scripts/resource-sampler_test.sh	port: gt-tpg0p
-scripts/run-boot-scraper-vm.sh	port: gt-tpg0p
-scripts/run-hardener.sh	port: gt-tpg0p
 scripts/test-capacity/dolt-gate-metrics.sh	port: gt-tpg0p
 scripts/test-capacity/paired-run.sh	port: gt-tpg0p
 scripts/test-capacity/run-gate.sh	port: gt-tpg0p
 scripts/test-capacity/sample-capacity.sh	port: gt-tpg0p
-scripts/test-gce-install.sh	port: gt-tpg0p
 scripts/test-makefile.sh	port: gt-tpg0p
 scripts/tier-sweep.sh	port: gt-tpg0p
 scripts/tier-sweep_test.sh	port: gt-tpg0p
