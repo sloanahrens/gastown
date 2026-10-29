@@ -95,7 +95,7 @@ func TestBirdRunnerReadsTheTownTheHomeAndTheClaude(t *testing.T) {
 	town := filepath.Join(t.TempDir(), "town")
 	setup, home := birdSetupForTest(t, town)
 
-	r, err := setup.runner()
+	r, err := setup.runner(true)
 	if err != nil {
 		t.Fatalf("runner: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestBirdRunnerFallsBackToTheHomeTown(t *testing.T) {
 	setup, home := birdSetupForTest(t, "")
 	setup.find = func() (string, error) { return "", errors.New("not in a Gas Town workspace") }
 
-	r, err := setup.runner()
+	r, err := setup.runner(false)
 	if err != nil {
 		t.Fatalf("runner: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestBirdRunnerRefusesWhatItCannotRead(t *testing.T) {
 			t.Parallel()
 			setup, _ := birdSetupForTest(t, filepath.Join(t.TempDir(), "town"))
 			tc.set(&setup)
-			r, err := setup.runner()
+			r, err := setup.runner(true)
 			if err == nil || !strings.Contains(err.Error(), tc.wants) {
 				t.Fatalf("runner = %+v, %v; want an error naming %q", r, err, tc.wants)
 			}
@@ -188,6 +188,55 @@ func TestBirdLeafCarriesASetupFailure(t *testing.T) {
 	}
 	if ran {
 		t.Error("the leaf ran without a runner")
+	}
+}
+
+// TestBirdListIgnoresABirdClaudeItCannotRead: a list never execs claude, so a
+// bird_claude setting that cannot be read must not stop it. The leaf is the one
+// gt bird list runs, with the production claude path behind it.
+func TestBirdListIgnoresABirdClaudeItCannotRead(t *testing.T) {
+	t.Parallel()
+	town := filepath.Join(t.TempDir(), "town")
+	writeBirdTownSettings(t, town, `{"type":`)
+	setup, _ := birdSetupForTest(t, town)
+	setup.claude = birdClaudePath
+	var out bytes.Buffer
+	ran := false
+
+	err := birdLeaf(setup, func(r *bird.Runner) error {
+		ran = true
+		return runBirdList(r, &out)
+	})
+	if err != nil {
+		t.Fatalf("gt bird list with an unreadable bird_claude: %v", err)
+	}
+	if !ran {
+		t.Fatal("gt bird list did not run")
+	}
+	if got := strings.TrimSpace(out.String()); got != "no live birds" {
+		t.Errorf("gt bird list printed %q, want %q", got, "no live birds")
+	}
+}
+
+// TestBirdStartLeafRefusesABirdClaudeItCannotRead: a start execs the claude the
+// town names, so a setting it cannot read stops the start before the leaf runs.
+func TestBirdStartLeafRefusesABirdClaudeItCannotRead(t *testing.T) {
+	t.Parallel()
+	town := filepath.Join(t.TempDir(), "town")
+	writeBirdTownSettings(t, town, `{"type":`)
+	setup, _ := birdSetupForTest(t, town)
+	setup.claude = birdClaudePath
+	ran := false
+
+	err := birdStartLeaf(setup, func(*bird.Runner) error {
+		ran = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "bird_claude") {
+		t.Fatalf("birdStartLeaf = %v, want an error naming bird_claude", err)
+	}
+	if ran {
+		t.Error("the start ran without a claude it could read")
 	}
 }
 
@@ -260,7 +309,7 @@ func TestBirdStartExecsTheClaudeTheTownNames(t *testing.T) {
 			writeBirdTownSettings(t, town, tc.settings)
 			setup, home := birdSetupForTest(t, town)
 			setup.claude = birdClaudePath
-			r, err := setup.runner()
+			r, err := setup.runner(true)
 			if err != nil {
 				t.Fatalf("runner: %v", err)
 			}
@@ -308,6 +357,25 @@ func TestBirdClaudePathRefusesASettingItCannotUse(t *testing.T) {
 				t.Fatalf("birdClaudePath = %q, %v; want an error naming bird_claude", got, err)
 			}
 		})
+	}
+}
+
+// TestBirdClaudePathReadsAMissingSettingsAsUnset: a town that never wrote its
+// settings execs ~/.local/bin/claude, and reading them writes nothing.
+func TestBirdClaudePathReadsAMissingSettingsAsUnset(t *testing.T) {
+	t.Parallel()
+	town := filepath.Join(t.TempDir(), "town")
+	home := filepath.Join(t.TempDir(), "home")
+
+	got, err := birdClaudePath(home, town)
+	if err != nil {
+		t.Fatalf("birdClaudePath: %v", err)
+	}
+	if want := filepath.Join(home, ".local", "bin", "claude"); got != want {
+		t.Errorf("birdClaudePath = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(town, "settings")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("reading the settings left a settings directory behind (stat err %v)", err)
 	}
 }
 

@@ -59,7 +59,7 @@ the town sets none. --help is claude's, so an alias of claude keeps working;
 	DisableFlagParsing: true,
 	SilenceUsage:       true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return birdLeaf(processBirdSetup(), func(r *bird.Runner) error { return runBirdStart(r, args) })
+		return birdStartLeaf(processBirdSetup(), func(r *bird.Runner) error { return runBirdStart(r, args) })
 	},
 }
 
@@ -155,9 +155,20 @@ func processBirdSetup() birdSetup {
 	}
 }
 
-// birdLeaf runs op with the runner the setup builds.
+// birdLeaf runs op with the runner the setup builds for a command that never
+// execs claude, so the claude path is not read and a bad bird_claude setting
+// cannot stop a list or a bind (gt-a2rs2).
 func birdLeaf(s birdSetup, op func(*bird.Runner) error) error {
-	r, err := s.runner()
+	r, err := s.runner(false)
+	if err != nil {
+		return birdFailure(err)
+	}
+	return op(r)
+}
+
+// birdStartLeaf runs op with the runner a start execs claude from.
+func birdStartLeaf(s birdSetup, op func(*bird.Runner) error) error {
+	r, err := s.runner(true)
 	if err != nil {
 		return birdFailure(err)
 	}
@@ -165,8 +176,8 @@ func birdLeaf(s birdSetup, op func(*bird.Runner) error) error {
 }
 
 // runner is the bird runner the commands drive: the town's registry, the
-// operator's home and the real claude.
-func (s birdSetup) runner() (*bird.Runner, error) {
+// operator's home and, when execsClaude is set, the real claude.
+func (s birdSetup) runner(execsClaude bool) (*bird.Runner, error) {
 	home, err := s.home()
 	if err != nil {
 		return nil, fmt.Errorf("gt bird: finding the home directory: %w", err)
@@ -175,9 +186,12 @@ func (s birdSetup) runner() (*bird.Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	claude, err := s.claude(home, townRoot)
-	if err != nil {
-		return nil, err
+	var claude string
+	if execsClaude {
+		claude, err = s.claude(home, townRoot)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &bird.Runner{
 		Registry:    bird.New(townRoot),
@@ -209,13 +223,17 @@ func (s birdSetup) townRoot(home string) (string, error) {
 // birdClaudePath is the real claude a start execs: the town's bird_claude
 // setting, with a leading "~/" read from home, else ~/.local/bin/claude
 // (gt-qipl5, gt-08chr). A settings file that cannot be read is an error, not
-// the default, so a start never execs a claude the town did not name.
+// the default, so a start never execs a claude the town did not name. A missing
+// settings file is read as unset and writes nothing.
 func birdClaudePath(home, townRoot string) (string, error) {
-	settings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	settings, err := config.LoadTownSettings(config.TownSettingsPath(townRoot))
 	if err != nil {
 		return "", fmt.Errorf("gt bird: reading bird_claude from the town settings: %w", err)
 	}
-	configured := strings.TrimSpace(settings.BirdClaude)
+	configured := ""
+	if settings != nil {
+		configured = strings.TrimSpace(settings.BirdClaude)
+	}
 	switch {
 	case configured == "":
 		return filepath.Join(home, ".local", "bin", "claude"), nil
