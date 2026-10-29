@@ -137,6 +137,20 @@ func (f *seatEndFake) seatDirs() polecat.SandboxSeatHostDirs {
 	return dirs
 }
 
+// privateLandingsDir is a directory a landings file accepts. Its writer refuses
+// one another account could write to, and t.TempDir's numbered directory is made
+// 0777 less the umask, so under the gate's permissive umask (000) it is
+// world-writable. This one is made 0700 below it, a mode the umask can only
+// take bits from; the writer's check is left as it is.
+func privateLandingsDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "landings")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func dirExists(t *testing.T, path string) bool {
 	t.Helper()
 	_, err := os.Stat(path)
@@ -321,7 +335,7 @@ func TestRunSandboxSeatEndReadsTheLandingRecord(t *testing.T) {
 			work: land.Work{BeadID: endBead, Head: head, Branch: endBranch, Worker: endPolecat},
 			landings: func(t *testing.T) *land.LandingsFile {
 				t.Helper()
-				f := &land.LandingsFile{Path: filepath.Join(t.TempDir(), "landings.jsonl")}
+				f := &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
 				if err := f.Append(land.LandingRecord{BeadID: endBead, Head: head, Branch: endBranch}); err != nil {
 					t.Fatal(err)
 				}
@@ -334,7 +348,7 @@ func TestRunSandboxSeatEndReadsTheLandingRecord(t *testing.T) {
 			work: land.Work{BeadID: endBead, Head: head, Branch: endBranch, Worker: endPolecat},
 			landings: func(t *testing.T) *land.LandingsFile {
 				t.Helper()
-				return &land.LandingsFile{Path: filepath.Join(t.TempDir(), "landings.jsonl")}
+				return &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
 			},
 			wantCalled: true, wantLanded: false, wantLandedB: endBranch,
 		},
@@ -343,7 +357,7 @@ func TestRunSandboxSeatEndReadsTheLandingRecord(t *testing.T) {
 			work: land.Work{BeadID: endBead, Head: head, Branch: endBranch},
 			landings: func(t *testing.T) *land.LandingsFile {
 				t.Helper()
-				return &land.LandingsFile{Path: filepath.Join(t.TempDir(), "landings.jsonl")}
+				return &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
 			},
 		},
 		{
@@ -355,7 +369,7 @@ func TestRunSandboxSeatEndReadsTheLandingRecord(t *testing.T) {
 			work: land.Work{BeadID: endBead, Head: head, Branch: endBranch, Worker: endPolecat},
 			landings: func(t *testing.T) *land.LandingsFile {
 				t.Helper()
-				return &land.LandingsFile{Path: t.TempDir()}
+				return &land.LandingsFile{Path: privateLandingsDir(t)}
 			},
 		},
 	}
