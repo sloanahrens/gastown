@@ -49,9 +49,13 @@ func TestIntegrationSessionVerbsAgreeOnAnUnknownPolecat(t *testing.T) {
 	var first string
 	for _, verb := range sessionAddressVerbs() {
 		t.Run(verb.name, func(t *testing.T) {
+			// A real command, as cobra passes one to RunE: a nil here would
+			// exercise a call shape production never makes, and the verb's
+			// own use of its command would then need a nil guard that only
+			// the harness justifies (gt-43ciz).
 			var err error
 			stdout, _ := captureStdio(t, func() {
-				err = verb.run(nil, []string{"gastown/ghost"})
+				err = verb.run(&cobra.Command{Use: verb.name}, []string{"gastown/ghost"})
 			})
 
 			if err == nil {
