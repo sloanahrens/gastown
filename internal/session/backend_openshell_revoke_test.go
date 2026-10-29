@@ -367,3 +367,29 @@ func TestOpenShellOpsStopKeepsTheSeatToken(t *testing.T) {
 		t.Error("record gone after a stop, want it kept")
 	}
 }
+
+// A record-path delete whose sandbox delete fails reports the failure and
+// revokes nothing: the sandbox may still run, so its seat's token stays live.
+func TestOpenShellOpsRecordDeleteFailureRevokesNothing(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"delete": errors.New("exit status 1")},
+		Stderr: map[string]string{"delete": "connection refused"},
+	}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	writeTrackerRoute(t, b.townRoot, openshellTestRig)
+	tokenPath := seedSeatToken(t, b.townRoot, openshellTestRig, openshellTestPolecat)
+	revoker := &revokeFake{}
+	b.revoker = revoker
+	rec := SandboxRecord{Session: openshellTestSession, Rig: openshellTestRig, Polecat: openshellTestPolecat}
+
+	if err := b.deleteRecorded(rec); err == nil {
+		t.Fatal("deleteRecorded = nil, want the failed delete reported")
+	}
+	if len(revoker.actors) != 0 {
+		t.Errorf("revoked %v although the sandbox may still exist", revoker.actors)
+	}
+	if _, err := os.Stat(tokenPath); err != nil {
+		t.Errorf("token file stat = %v, want it kept for the retry", err)
+	}
+}
