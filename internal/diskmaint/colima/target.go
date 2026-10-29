@@ -62,6 +62,10 @@ var (
 	errParse = errors.New("docker output line does not parse; the listing is refused")
 	// errBadRef reports a plan action whose ref is not sha256:<64 hex>.
 	errBadRef = errors.New("ref is not sha256:<64 hex>")
+	// errPlanRefused reports an apply of a refused plan. Nothing is removed. The
+	// refusal is an error here as well as a ledger line, so a direct caller does
+	// not read it as success.
+	errPlanRefused = errors.New("colima apply: the plan is refused; nothing was removed")
 )
 
 var (
@@ -116,13 +120,20 @@ func (t *Target) Measure(ctx context.Context) (diskmaint.Measurement, error) {
 	if err != nil {
 		return diskmaint.Measurement{}, fmt.Errorf("measure: %w", err)
 	}
+	// docker prints one row per repo:tag, each with the same id and size, so an
+	// image with several tags is counted once.
+	seen := make(map[string]bool, len(images))
 	var used int64
 	for _, im := range images {
+		if seen[im.ID] {
+			continue
+		}
+		seen[im.ID] = true
 		used += im.bytes()
 	}
 	return diskmaint.Measurement{
 		Used:   used,
-		Detail: fmt.Sprintf("%d images on the colima daemon", len(images)),
+		Detail: fmt.Sprintf("%d images on the colima daemon", len(seen)),
 	}, nil
 }
 
@@ -174,7 +185,7 @@ func (t *Target) Plan(ctx context.Context, _ diskmaint.Policy) (diskmaint.Plan, 
 // does not re-plan: an image the live state would now select but the plan did
 // not name is left alone. One failed removal does not stop the others. Every
 // action is validated before its command runs, and the run is recorded as one
-// ledger line.
+// ledger line. A refused plan removes nothing and returns errPlanRefused.
 func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Result, error) {
 	result := diskmaint.Result{Target: planTarget}
 	if t.cfg.Ledger == nil {
@@ -182,7 +193,9 @@ func (t *Target) Apply(ctx context.Context, plan diskmaint.Plan) (diskmaint.Resu
 	}
 	var errs []string
 	var err error
-	if plan.Refused == "" && len(plan.Actions) > 0 {
+	if plan.Refused != "" {
+		err = errPlanRefused
+	} else if len(plan.Actions) > 0 {
 		if err = t.ready(); err != nil {
 			errs = append(errs, err.Error())
 		} else {

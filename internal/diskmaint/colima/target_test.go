@@ -327,12 +327,13 @@ func TestApplyRefusesBadActionsBeforeAnyCommand(t *testing.T) {
 func TestApplyRemovesNothingForRefusedOrEmptyPlan(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		plan diskmaint.Plan
+		name    string
+		plan    diskmaint.Plan
+		wantErr error
 	}{
-		{name: "refused", plan: diskmaint.Plan{Target: "colima", Refused: errListImages.Error()}},
+		{name: "refused", plan: diskmaint.Plan{Target: "colima", Refused: errListImages.Error()}, wantErr: errPlanRefused},
 		{name: "refused with actions", plan: diskmaint.Plan{Target: "colima", Refused: errInspect.Error(),
-			Actions: []diskmaint.Action{{Kind: "remove-image", Ref: imgID('1')}}}},
+			Actions: []diskmaint.Action{{Kind: "remove-image", Ref: imgID('1')}}}, wantErr: errPlanRefused},
 		{name: "empty", plan: diskmaint.Plan{Target: "colima"}},
 	}
 	for _, tc := range cases {
@@ -341,8 +342,8 @@ func TestApplyRemovesNothingForRefusedOrEmptyPlan(t *testing.T) {
 			target, ledger := newTarget(t, f)
 
 			result, err := target.Apply(context.Background(), tc.plan)
-			if err != nil {
-				t.Fatal(err)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Apply err = %v, want %v", err, tc.wantErr)
 			}
 			if len(f.calls) != 0 || len(result.Done) != 0 {
 				t.Errorf("made %d calls and %d removals, want none", len(f.calls), len(result.Done))
@@ -386,9 +387,10 @@ func TestApplyRequiresLedger(t *testing.T) {
 func TestApplyReportsLedgerWriteFailure(t *testing.T) {
 	t.Parallel()
 	f := &fakeDocker{}
-	// The ledger's directory does not exist, so the append fails on the
-	// filesystem itself and no seam is needed.
-	ledger := diskmaint.NewLedger(filepath.Join(t.TempDir(), "missing", "ledger.jsonl"), 0)
+	// The ledger's path is a directory, so opening it for an append fails on the
+	// filesystem itself and no seam is needed. It does not depend on whether the
+	// ledger creates missing parent directories.
+	ledger := diskmaint.NewLedger(t.TempDir(), 0)
 	target := NewTarget(Config{DockerHost: dockerHost, Run: f.run, Ledger: ledger})
 
 	_, err := target.Apply(context.Background(), diskmaint.Plan{Target: "colima"})
@@ -412,6 +414,28 @@ func TestMeasureSumsEveryImage(t *testing.T) {
 	}
 	if m.Used != 1_700_000_000 {
 		t.Errorf("Used = %d, want 1700000000", m.Used)
+	}
+}
+
+func TestMeasureCountsAnImageOnceForEachTag(t *testing.T) {
+	t.Parallel()
+	// docker prints one row per tag, each carrying the image's id and size.
+	f := &fakeDocker{images: imageLines(t,
+		image{Repository: "gastown/app", Tag: "v1", ID: imgID('1'), Size: "200MB"},
+		image{Repository: "gastown/app", Tag: "latest", ID: imgID('1'), Size: "200MB"},
+		image{Repository: "<none>", Tag: "<none>", ID: imgID('2'), Size: "50MB"},
+	)}
+	target, _ := newTarget(t, f)
+
+	m, err := target.Measure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Used != 250_000_000 {
+		t.Errorf("Used = %d, want 250000000 (the shared image once, plus the dangling one)", m.Used)
+	}
+	if m.Detail != "2 images on the colima daemon" {
+		t.Errorf("Detail = %q, want the count of distinct images", m.Detail)
 	}
 }
 
