@@ -120,14 +120,19 @@ func AttributeRecords(ctx context.Context, env Env, records []land.ReviewRecord)
 // store's map. A store naming more than storeShowChunk distinct beads is listed
 // whole in one read and the rows taken from it by id, because a show of every id
 // a chunk at a time was 50 commands and most of a mango run's time (gt-kcuug). A
-// smaller store keeps the show, which asks for exactly the ids it wants. An id
-// that is not a bead id is never asked for, since bd reads an argument beginning
-// with a dash as a flag. A read that fails is an error; a bead the store leaves
-// out is not, because its branch is then unknown rather than unread.
+// smaller store keeps the show, which asks for exactly the ids it wants. A record
+// whose id is not a bead id is an error before any store is opened: bd reads an
+// argument beginning with a dash as a flag, so such a record would otherwise be
+// dropped from the read and printed as an unknown author's, as a bead nobody
+// could read. A read that fails is an error; a bead the store leaves out is not,
+// because its branch is then unknown rather than unread.
 func storeBeads(ctx context.Context, env Env, dir string, records []land.ReviewRecord) ([]BeadRow, error) {
 	seen := make(map[string]bool, len(records))
 	ids := make([]string, 0, len(records))
 	for _, rec := range records {
+		if !isBeadID(rec.BeadID) {
+			return nil, fmt.Errorf("review names bead id %q, which is not a bead id", rec.BeadID)
+		}
 		if seen[rec.BeadID] {
 			continue
 		}

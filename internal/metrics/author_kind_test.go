@@ -332,23 +332,18 @@ func TestAttributeRecordsRefusesAFailedListing(t *testing.T) {
 
 // storeBeads returns the rows the records' ids name and no other, so the
 // whole-board listing answers what a show of those ids would: a bead the
-// records do not name is left out of the rows, and an id bd would read as a
-// flag is never matched.
+// records do not name is left out of the rows.
 func TestStoreBeadsTakesOnlyTheListedRowsTheIDsName(t *testing.T) {
 	t.Parallel()
 	records, branches := authorFixture(2*storeShowChunk + 2)
 	branches["gt-extra"] = "polecat/alfa/gt-extra"
-	branches["-gt-flag"] = "polecat/alfa/-gt-flag"
-	records = append(records, land.ReviewRecord{BeadID: "-gt-flag", Rig: "gastown"})
 	rows, err := storeBeads(context.Background(), listingEnv(&listingStore{branches: branches}), "/town/gastown", records)
 	if err != nil {
 		t.Fatalf("storeBeads: %v", err)
 	}
 	want := make([]string, 0, len(records))
 	for _, rec := range records {
-		if isBeadID(rec.BeadID) {
-			want = append(want, rec.BeadID)
-		}
+		want = append(want, rec.BeadID)
 	}
 	sort.Strings(want)
 	var got []string
@@ -357,6 +352,39 @@ func TestStoreBeadsTakesOnlyTheListedRowsTheIDsName(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("rows = %v, want the %d named ids %v", got, len(want), want)
+	}
+}
+
+// A record naming an id that is not a bead id is refused before any store is
+// opened, rather than dropped from the read and attributed as an unknown
+// author's: a bead nobody could read would look like a bead that names no
+// branch. AttributeRecords is the production caller, so the refusal is what it
+// returns.
+func TestAttributeRecordsRefusesAnIDTheStoreCannotBeAskedFor(t *testing.T) {
+	t.Parallel()
+	for _, id := range []string{"-gt-flag", "--all", ""} {
+		t.Run(id, func(t *testing.T) {
+			records := []land.ReviewRecord{
+				{BeadID: "gt-a", Rig: "gastown", Verdict: land.VerdictApprove},
+				{BeadID: id, Rig: "gastown", Verdict: land.VerdictApprove},
+			}
+			store := &listingStore{branches: map[string]string{"gt-a": "polecat/opal/gt-a"}}
+			opened := false
+			env := Env{Town: "/town", Beads: func(context.Context, string) BeadStore {
+				opened = true
+				return store
+			}}
+			got, err := AttributeRecords(context.Background(), env, records)
+			if err == nil {
+				t.Fatalf("AttributeRecords = %v, nil; want a refusal naming %q as not a bead id", got, id)
+			}
+			if !strings.Contains(err.Error(), "is not a bead id") {
+				t.Errorf("err = %v, want it to say the id is not a bead id", err)
+			}
+			if opened || len(store.lists) != 0 || len(store.shows) != 0 {
+				t.Errorf("the store was opened %v, listed %d time(s), shown %d time(s); want none", opened, len(store.lists), len(store.shows))
+			}
+		})
 	}
 }
 
