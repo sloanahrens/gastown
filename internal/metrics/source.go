@@ -147,6 +147,12 @@ type Env struct {
 	// source that samples treats nil as an error, because a window it cannot
 	// take is a rate it must not invent.
 	Wait func(d time.Duration)
+	// BurstHost, when set, is where a burst sample takes its host readings
+	// from: the idle share, the busiest consumers and the exec tax. A daemon
+	// in a container sets it, because top and ps read a host the process is
+	// not on, so the readings come from the host agent's probe file. nil runs
+	// the host's own commands (burstIdle, burstConsumers, burstExecTax).
+	BurstHost func(now time.Time) BurstHostReading
 }
 
 // now is the time the snapshot is taken: Env.Now when the caller set one, the
