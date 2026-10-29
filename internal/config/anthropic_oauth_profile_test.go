@@ -17,17 +17,27 @@ import (
 
 const shippedAnthropicOAuthProfile = "../../deploy/polecat/profiles/anthropic-oauth.yaml"
 
+// claudeLauncher is the one binary that may receive the credential: the
+// placeholder is only swapped for requests this binary makes, so listing node
+// would widen the token's scope to every Node program in the sandbox.
+const claudeLauncher = "/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+
+type profileCredential struct {
+	EnvVars    []string `yaml:"env_vars"`
+	AuthStyle  string   `yaml:"auth_style"`
+	HeaderName string   `yaml:"header_name"`
+}
+
+type profileEndpoint struct {
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
+}
+
 type providerProfileFile struct {
-	ID          string `yaml:"id"`
-	Credentials []struct {
-		EnvVars    []string `yaml:"env_vars"`
-		AuthStyle  string   `yaml:"auth_style"`
-		HeaderName string   `yaml:"header_name"`
-	} `yaml:"credentials"`
-	Endpoints []struct {
-		Host string `yaml:"host"`
-		Port int    `yaml:"port"`
-	} `yaml:"endpoints"`
+	ID          string              `yaml:"id"`
+	Credentials []profileCredential `yaml:"credentials"`
+	Endpoints   []profileEndpoint   `yaml:"endpoints"`
+	Binaries    []string            `yaml:"binaries"`
 }
 
 // anthropicOAuthProfileProblems lists every way a profile breaks the contract.
@@ -48,6 +58,9 @@ func anthropicOAuthProfileProblems(p providerProfileFile) []string {
 	}
 	if len(p.Endpoints) != 1 || p.Endpoints[0].Host != "api.anthropic.com" || p.Endpoints[0].Port != 443 {
 		out = append(out, "endpoints are not exactly api.anthropic.com:443")
+	}
+	if !slices.Equal(p.Binaries, []string{claudeLauncher}) {
+		out = append(out, "binaries are "+strings.Join(p.Binaries, ",")+", want only "+claudeLauncher)
 	}
 	return out
 }
@@ -75,18 +88,12 @@ func TestShippedAnthropicOAuthProfileMeetsContract(t *testing.T) {
 func TestAnthropicOAuthProfileProblemsRefusesEachBreak(t *testing.T) {
 	t.Parallel()
 	good := func() providerProfileFile {
-		var p providerProfileFile
-		p.ID = "anthropic-oauth"
-		p.Credentials = append(p.Credentials, struct {
-			EnvVars    []string `yaml:"env_vars"`
-			AuthStyle  string   `yaml:"auth_style"`
-			HeaderName string   `yaml:"header_name"`
-		}{[]string{"CLAUDE_CODE_OAUTH_TOKEN"}, "bearer", "authorization"})
-		p.Endpoints = append(p.Endpoints, struct {
-			Host string `yaml:"host"`
-			Port int    `yaml:"port"`
-		}{"api.anthropic.com", 443})
-		return p
+		return providerProfileFile{
+			ID:          "anthropic-oauth",
+			Credentials: []profileCredential{{EnvVars: []string{"CLAUDE_CODE_OAUTH_TOKEN"}, AuthStyle: "bearer", HeaderName: "authorization"}},
+			Endpoints:   []profileEndpoint{{Host: "api.anthropic.com", Port: 443}},
+			Binaries:    []string{claudeLauncher},
+		}
 	}
 	if probs := anthropicOAuthProfileProblems(good()); len(probs) != 0 {
 		t.Fatalf("the known-good profile has problems: %v", probs)
@@ -102,6 +109,10 @@ func TestAnthropicOAuthProfileProblemsRefusesEachBreak(t *testing.T) {
 		"second endpoint":    func(p *providerProfileFile) { p.Endpoints = append(p.Endpoints, p.Endpoints[0]) },
 		"wrong port":         func(p *providerProfileFile) { p.Endpoints[0].Port = 80 },
 		"no credential left": func(p *providerProfileFile) { p.Credentials = nil },
+		"node may send the token": func(p *providerProfileFile) {
+			p.Binaries = append(p.Binaries, "/usr/bin/node")
+		},
+		"no binary listed": func(p *providerProfileFile) { p.Binaries = nil },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
