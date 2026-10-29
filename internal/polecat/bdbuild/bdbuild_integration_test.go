@@ -93,6 +93,16 @@ func initScratchRepo(t *testing.T, dir, marker string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// TestIntegrationExecGitReturnsGitsLastStderrLine pins a failure of the host's
+// git to its own last stderr line. It runs real git, so it lives in the
+// integration tier (gt-6uid9).
+func TestIntegrationExecGitReturnsGitsLastStderrLine(t *testing.T) {
+	_, err := ExecGit(t.TempDir(), "rev-parse", "HEAD")
+	if err == nil || !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("ExecGit in a directory that is not a checkout: err = %v, want git's own \"not a git repository\"", err)
+	}
+}
+
 func scratchGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	if _, err := isolatedGit(dir, args...); err != nil {
