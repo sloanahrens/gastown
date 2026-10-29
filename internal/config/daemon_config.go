@@ -97,6 +97,16 @@ const (
 	// compose_project neither.
 	DefaultContainerName  = "gt-town-daemon-1"
 	DefaultComposeProject = "gt-town"
+
+	// ScratchTownEnv is set to "1" only by the scratch compose project. It is
+	// the one way the container entrypoint may install a town that has no
+	// mayor/town.json; the live project never sets it (gt-qpeei.26).
+	ScratchTownEnv = "GT_SCRATCH_TOWN"
+
+	// ScratchTownMarker is the file the runbook creates in the scratch town
+	// root. Its presence proves the directory is the scratch town, and it is
+	// visible from the host (gt-qpeei.26).
+	ScratchTownMarker = ".gt-scratch-town"
 )
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town
