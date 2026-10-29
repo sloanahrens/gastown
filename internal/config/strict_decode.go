@@ -31,34 +31,45 @@ type keyRef struct {
 }
 
 // decodeJSONStrict decodes data into v and returns a *ParseError for a syntax
-// error, a type error, trailing data, or any undeclared key.
-func decodeJSONStrict(path string, data []byte, v any) error {
+// error, a type error, trailing data, or any undeclared key but a tolerated
+// one. It returns the tolerated keys the file held, as the walk saw them, so
+// the caller names them (tolerated_keys.go).
+func decodeJSONStrict(path string, data []byte, v any) ([]string, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(v); err != nil {
 		switch {
 		case errors.Is(err, io.EOF):
-			return &ParseError{Path: path, Err: errors.New("file is empty")}
+			return nil, &ParseError{Path: path, Err: errors.New("file is empty")}
 		case errors.Is(err, io.ErrUnexpectedEOF):
-			return newParseError(path, data, int64(len(data))+1, errors.New("unexpected end of file"))
+			return nil, newParseError(path, data, int64(len(data))+1, errors.New("unexpected end of file"))
 		}
-		return parseErrorFromJSON(path, data, err)
+		return nil, parseErrorFromJSON(path, data, err)
 	}
 	if next := skipSpace(data, dec.InputOffset()); next < int64(len(data)) {
-		return newParseError(path, data, next+1, errors.New("data after the top-level value"))
+		return nil, newParseError(path, data, next+1, errors.New("data after the top-level value"))
 	}
 
 	keys, err := unknownJSONKeys(data, reflect.TypeOf(v))
 	if err != nil {
-		return parseErrorFromJSON(path, data, err)
+		return nil, parseErrorFromJSON(path, data, err)
 	}
-	if len(keys) == 0 {
-		return nil
-	}
-	pe := newParseError(path, data, keys[0].offset, unknownKeysError(keys))
+	var tolerated []string
+	unknown := make([]keyRef, 0, len(keys))
 	for _, k := range keys {
+		if _, ok := toleratedKeyPath(k.path); ok {
+			tolerated = append(tolerated, k.path)
+			continue
+		}
+		unknown = append(unknown, k)
+	}
+	if len(unknown) == 0 {
+		return tolerated, nil
+	}
+	pe := newParseError(path, data, unknown[0].offset, unknownKeysError(unknown))
+	for _, k := range unknown {
 		pe.Keys = append(pe.Keys, k.path)
 	}
-	return pe
+	return nil, pe
 }
 
 func unknownKeysError(keys []keyRef) error {

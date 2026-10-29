@@ -17,6 +17,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -888,48 +889,58 @@ func TestRunTierSweepReSweepsARedWhileASiblingRigDefers(t *testing.T) {
 	}
 }
 
-// gt-zq1pb: a runner_idle_command that hangs is read as the busy runner it
-// stands for, so a hung probe ends the wait under load at the cap rather than
-// at the cycle's own deadline.
-func TestTierSweepAwaitRunnerIdleBoundsHungPoll(t *testing.T) {
+// gt-qpeei.8: the integration stage takes the container-gate slot with no wait
+// before it. A settings file that still carries the removed runner_idle_command
+// and runner_idle_wait loads (the config loader tolerates them) and changes
+// nothing here: the stage starts when the shell stage ends, so only the stages
+// move the clock, and no probe runs.
+func TestTierSweepIntegrationStageRunsNoWaitCommand(t *testing.T) {
 	t.Parallel()
-	d, _, _, clk := newRunnerIdleDaemon(t, "250ms", nil)
-	// The caller's context stands for the cycle's own two-hour budget: far past
-	// the cap, and short enough that a wait which ignored the cap ends the test
-	// instead of hanging it.
-	callerBound := 5 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), callerBound)
-	defer cancel()
-	dir := t.TempDir()
-	d.tierSweepSeams.runnerIdle = func(ctx context.Context, _, _ string) error {
-		// A probe that never answers on its own: it holds until the context the
-		// wait gave it ends.
-		<-ctx.Done()
-		return ctx.Err()
+	now := atHour(time.Now(), 14)
+	d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+	clk := clockwork.NewFakeClockAt(now)
+	d.clock = clk
+	// The config the live town carried before the keys came out.
+	daemonDoc := `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{` +
+		`"enabled":true,"runner_idle_command":"gt ci runner-idle","runner_idle_wait":"10m"}}}`
+	var cfg DaemonPatrolConfig
+	if err := agentconfig.DecodeJSONFile("daemon.json", []byte(daemonDoc), &cfg); err != nil {
+		t.Fatalf("a config carrying the removed keys did not load: %v", err)
 	}
-	d.tierSweepSeams.idleSleep = func(_ context.Context, pause time.Duration) error {
-		clk.Advance(pause)
-		return nil
+	d.patrolConfig = &cfg
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
+		return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil
+	}
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) {
+		return func() {}, nil
+	}
+	var ran []string
+	d.tierSweepSeams.run = func(_ context.Context, _ string, st tierSweepStage) tierSweepStageResult {
+		ran = append(ran, strings.Join(st.tiers, ","))
+		// The stage's own run time: if anything waited before a stage, the
+		// cycle would take time beyond this.
+		clk.Advance(3 * time.Second)
+		var b strings.Builder
+		for _, tier := range st.tiers {
+			fmt.Fprintf(&b, "tier-sweep: %s GREEN passed=1 failed=0 skipped=0\n", tier)
+		}
+		return tierSweepStageResult{output: b.String(), exitCode: 0, ran: true}
 	}
 
-	start := time.Now()
-	wait, err := d.tierSweepAwaitRunnerIdle(ctx, dir)
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("wait error = %v, want the cap's under-load verdict: a hung poll ends at runner_idle_wait, not at the caller's deadline", err)
+	if !d.runTierSweep() {
+		t.Fatal("runTierSweep deferred; want a verdict")
 	}
-	if !wait.underLoad {
-		t.Errorf("wait = %+v, want the under-load verdict: the cap ran out with the probe still hung", wait)
+	if got, want := strings.Join(ran, "|"), "shell|integration,race"; got != want {
+		t.Fatalf("stages ran %q, want %q", got, want)
 	}
-	if want := 250 * time.Millisecond; wait.waited > want {
-		t.Errorf("waited = %s, want no more than the %s cap", wait.waited, want)
+	out := logs.String()
+	if strings.Contains(out, "CI runner") || strings.Contains(out, "under load") {
+		t.Errorf("the sweep logged a runner-idle wait it no longer has; got:\n%s", out)
 	}
-	// Real time, not the fake clock: an unbounded poll holds until the caller's
-	// context ends, so returning well inside it is what shows the cap bounds
-	// the wait.
-	if elapsed >= callerBound/2 {
-		t.Errorf("wait took %s of real time, want the %s cap to end it well inside the caller's %s bound",
-			elapsed, 250*time.Millisecond, callerBound)
+	// Two stages of three seconds each: any wait before the integration stage
+	// would show as time the stages cannot account for.
+	if want := "in 6s"; !strings.Contains(out, want) {
+		t.Errorf("the cycle took time no stage spent (want %q in the swept line); got:\n%s", want, out)
 	}
 }
 

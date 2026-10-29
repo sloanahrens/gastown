@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -56,11 +57,20 @@ func (e *ParseError) Unwrap() error { return e.Err }
 // A retired seat key (retired_keys.go) is such an error too, and its message
 // names the key that replaced it and says to run gt pool migrate. A type that
 // declares retiredKeys reports the retired keys the key walk cannot see, so a
-// file holding one fails the same way.
+// file holding one fails the same way. A tolerated key (tolerated_keys.go) is
+// not an error: the load accepts it and names it once per process on stderr.
 func DecodeJSONFile(path string, data []byte, v any) error {
-	if err := decodeJSONStrict(path, data, v); err != nil {
+	return decodeJSONFile(path, data, v, os.Stderr)
+}
+
+// decodeJSONFile is DecodeJSONFile with the sink a tolerated key's warning goes
+// to, so a test reads the line rather than the process's stderr.
+func decodeJSONFile(path string, data []byte, v any, warn io.Writer) error {
+	tolerated, err := decodeJSONStrict(path, data, v)
+	if err != nil {
 		return err
 	}
+	warnToleratedKeys(warn, tolerated)
 	if f, ok := v.(retiredKeyFinder); ok {
 		if keys := f.retiredKeys(); len(keys) > 0 {
 			return &ParseError{Path: path, Keys: keys, Err: retiredKeysError(keys)}
