@@ -288,8 +288,9 @@ func validImage(raw string) bool {
 	return true
 }
 
-// seedLabels are the labels on the Job and its pods: what a selector matches and what a cleanup
-// removes.
+// seedLabels are the labels on the seed Job and its pods, marking them as a seed rather than a trim.
+// No selector in the tree matches them, so a cleanup deleting by TrimSelector leaves a seeded claim's
+// Job and pods alone.
 func seedLabels() map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "polecat-cache-seed",
