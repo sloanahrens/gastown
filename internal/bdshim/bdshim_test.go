@@ -309,6 +309,125 @@ func TestDecideRoutesAFlagValueByTheWorkingDirectory(t *testing.T) {
 	}
 }
 
+// A flag whose meaning on the command is an issue id names that bead, so the
+// command reaches the store that holds it even from another rig's directory:
+// show --id bt-abc and dep add --depends-on bt-def routed by the working
+// directory and answered not-found for a bead the tracker holds (gt-b00kz).
+func TestDecideRoutesABeadValueFlagToItsStore(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"show --id", []string{"show", "--id", "bt-abc"}},
+		{"show with an inline --id", []string{"show", "--id=bt-abc"}},
+		{"list --id", []string{"list", "--id", "bt-abc"}},
+		{"list --id of two ids", []string{"list", "--id", "bt-abc,bt-def"}},
+		{"list --parent", []string{"list", "--parent", "bt-abc"}},
+		{"count --id", []string{"count", "--id", "bt-abc"}},
+		{"blocked --parent", []string{"blocked", "--parent", "bt-abc"}},
+		{"ready --parent", []string{"ready", "--parent", "bt-abc"}},
+		{"reclaim --id", []string{"reclaim", "--id", "bt-abc"}},
+		{"dep --blocks", []string{"dep", "bt-def", "--blocks", "bt-abc"}},
+		{"dep with a short --blocks", []string{"dep", "bt-def", "-b", "bt-abc"}},
+		{"dep add --depends-on", []string{"dep", "add", "bt-def", "--depends-on", "bt-abc"}},
+		{"dep add --blocked-by", []string{"dep", "add", "--blocked-by", "bt-abc", "bt-def"}},
+		{"gate create --blocks", []string{"gate", "create", "--blocks", "bt-abc"}},
+		{"duplicate --of", []string{"duplicate", "bt-abc", "--of", "bt-def"}},
+		{"supersede --with", []string{"supersede", "bt-abc", "--with", "bt-def"}},
+		{"provenance record --issue", []string{"provenance", "record", "--issue", "bt-abc"}},
+		{"update --parent", []string{"update", "bt-def", "--parent", "bt-abc"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decide(t, alpha, "", tc.args...)
+			if err != nil {
+				t.Fatalf("Decide(%v) from the dolt rig = %v, want no error", tc.args, err)
+			}
+			if !got.Tracker || got.Route.Prefix != "bt-" {
+				t.Errorf("Decide(%v) from the dolt rig = %+v, want the tracker rig bt-", tc.args, got)
+			}
+		})
+	}
+}
+
+// A command that writes its bead in the store its working directory names is
+// not routed by the issues its flags point at: create, create-form and q set
+// the parent of the bead they write, and a run id in --await-id names no bead.
+func TestDecideWritesInTheWorkingDirectorysStore(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"create --parent", []string{"create", "T", "--parent", "bt-abc"}},
+		{"create with an inline --parent", []string{"create", "T", "--parent=bt-abc"}},
+		{"create --waits-for", []string{"create", "T", "--waits-for", "bt-abc"}},
+		{"create-form --parent", []string{"create-form", "--parent", "bt-abc"}},
+		{"q --parent", []string{"q", "T", "--parent", "bt-abc"}},
+		{"gate create --await-id", []string{"gate", "create", "--await-id", "bt-abc"}},
+		{"update --await-id", []string{"update", "al-abc", "--await-id", "bt-abc"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decide(t, alpha, "", tc.args...)
+			if err != nil {
+				t.Fatalf("Decide(%v) from the dolt rig = %v, want no error", tc.args, err)
+			}
+			if got.Tracker {
+				t.Errorf("Decide(%v) from the dolt rig = %+v, want bd.real", tc.args, got)
+			}
+		})
+	}
+}
+
+// A bead-naming flag value that no route names takes the working-directory
+// rule away from the command, as an operand does: list --id zz-abc from a
+// tracker rig's directory must not list the tracker's beads.
+func TestDecideRoutesAnUnknownFlagValueByTheWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	for _, args := range [][]string{
+		{"list", "--id", "zz-abc"},
+		{"show", "--id", "gm-abc"},
+	} {
+		got, err := decide(t, beta, "", args...)
+		if err != nil {
+			t.Fatalf("Decide(%v) = %v, want no error", args, err)
+		}
+		if got.Tracker {
+			t.Errorf("Decide(%v) from the tracker rig = %+v, want bd.real", args, got)
+		}
+	}
+}
+
+// An operand and a flag value that name different stores, one of them a
+// tracker, cannot be one command's target, so it is refused rather than routed
+// to the rig the operand names.
+func TestDecideRefusesAFlagValueSpanningStores(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+
+	_, err := decide(t, alpha, "", "dep", "add", "al-abc", "--depends-on", "bt-def")
+	if err == nil {
+		t.Fatal("Decide(dep add al-abc --depends-on bt-def) = nil error, want the cross-store refusal")
+	}
+	if !strings.Contains(err.Error(), "stores") {
+		t.Errorf("Decide(dep add al-abc --depends-on bt-def) = %v, want the cross-store refusal", err)
+	}
+}
+
 // A flag bd reads as a value on one command is not one it reads a value for on
 // another: -f is --file on create and --force on close. Reading it by the flat
 // flag name swallowed the id behind it, so `bd close -f bt-abc` from a Dolt
@@ -581,6 +700,28 @@ func TestFlagTablesCoverWhatBdDocuments(t *testing.T) {
 	}
 }
 
+// TestBeadValueFlagsCoverWhatBdDocuments checks that every flag the shim reads
+// as naming a bead is a value flag bd documents for that command: a typo or a
+// flag bd dropped would leave the row reading a token the command never takes a
+// value for, and the bead it names would route by the working directory.
+func TestBeadValueFlagsCoverWhatBdDocuments(t *testing.T) {
+	t.Parallel()
+	value, _, _, _ := bdDocumented(t)
+	if len(beadValueFlags) < 10 {
+		t.Fatalf("beadValueFlags has %d commands, want at least 10", len(beadValueFlags))
+	}
+	for command, flags := range beadValueFlags {
+		for flag := range flags {
+			if !value[command][flag] {
+				t.Errorf("the table reads %s %s as naming a bead, and bd documents no such value flag", command, flag)
+			}
+			if !takesValue(command, flag) {
+				t.Errorf("the table reads %s %s as naming a bead, and treats the flag as a boolean", command, flag)
+			}
+		}
+	}
+}
+
 func TestDecideVerbs(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -616,7 +757,13 @@ func TestIDTokens(t *testing.T) {
 		{"an id", []string{"show", "bt-abc"}, []string{"bt-abc"}},
 		{"an id before a flag", []string{"show", "bt-abc", "--json"}, []string{"bt-abc"}},
 		{"a flag value", []string{"create", "--title", "bt-fix"}, nil},
-		{"an inline flag value", []string{"show", "--id=bt-abc"}, nil},
+		{"a bead in a flag's value", []string{"show", "--id", "bt-abc"}, []string{"bt-abc"}},
+		{"a bead in an inline flag value", []string{"show", "--id=bt-abc"}, []string{"bt-abc"}},
+		{"each id of a comma-separated flag value", []string{"list", "--id", "bt-abc,bt-def"}, []string{"bt-abc", "bt-def"}},
+		{"a run id in a flag's value names no bead", []string{"gate", "create", "--await-id", "bt-abc"}, nil},
+		{"a parent value names no bead on create", []string{"create", "T", "--parent", "bt-abc"}, nil},
+		{"a parent value names no bead on q", []string{"q", "T", "--parent", "bt-abc"}, nil},
+		{"a bead flag value after a data operand", []string{"list", "bt-def", "--parent", "bt-abc"}, []string{"bt-def", "bt-abc"}},
 		{"an id after a boolean flag", []string{"show", "--json", "bt-abc"}, []string{"bt-abc"}},
 		{"an id after a value flag", []string{"update", "--title", "x", "bt-abc"}, []string{"bt-abc"}},
 		{"an id past a separator", []string{"show", "--", "bt-abc"}, []string{"bt-abc"}},
@@ -738,6 +885,44 @@ func TestMainPassesADoltCommandToRealBd(t *testing.T) {
 				t.Error("Main failed without a message on stderr")
 			}
 		})
+	}
+}
+
+// A bead named by a flag value reaches the tracker from a Dolt rig's directory,
+// and a create that names a tracker parent still runs in the store its
+// directory names: the two halves of gt-b00kz's acceptance criterion, through
+// the entry point rather than through Decide alone.
+func TestMainRoutesABeadValueFlag(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+
+	// show --id bt-abc from the dolt rig reaches the tracker's handler.
+	answered, ran := 0, &fakeProcess{}
+	routed := map[string]Handler{"show": func(Env, Decision) int { answered++; return 0 }}
+	e, _, _ := shimEnv(t, alpha, "", ran, routed, "show", "--id", "bt-abc")
+	if got := Main(e); got != 0 {
+		t.Errorf("Main(show --id bt-abc) = %d, want the tracker handler's 0", got)
+	}
+	if answered != 1 || ran.ran != nil {
+		t.Errorf("Main(show --id bt-abc) answered %d times and ran %v, want one handler call and no bd.real", answered, ran.ran)
+	}
+
+	// create T --parent bt-abc from the dolt rig reaches bd.real unchanged.
+	args := []string{"create", "T", "--parent", "bt-abc"}
+	proc := &fakeProcess{}
+	e, stderr, shimPath := shimEnv(t, alpha, "", proc, routed, args...)
+	if got := Main(e); got != 0 {
+		t.Errorf("Main(%v) = %d, want bd.real's 0 (stderr %q)", args, got, stderr.String())
+	}
+	if strings.Join(proc.ran, " ") != strings.Join(args, " ") {
+		t.Errorf("Main(%v) ran %v, want bd's argv unchanged", args, proc.ran)
+	}
+	if want := filepath.Join(filepath.Dir(shimPath), realName); proc.path != want {
+		t.Errorf("Main(%v) ran %q, want bd.real at %q", args, proc.path, want)
+	}
+	if answered != 1 {
+		t.Errorf("Main(%v) reached a tracker handler, want bd.real", args)
 	}
 }
 

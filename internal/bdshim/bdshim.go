@@ -129,11 +129,13 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 	}
 
 	command := commandPath(args)
-	ids := idTokens(command, args)
-	// An operand that opens with a tracker rig's prefix names that rig even
-	// when IsBeadIDToken rejects its form: a form the token check does not know
-	// must not slip through to bd.real from a Dolt directory.
-	ids = append(ids, trackerPrefixed(idOperands(command, args), ids, routes)...)
+	candidates := idCandidates(command, args)
+	ids := beadIDs(candidates)
+	// An operand or a bead-naming flag value that opens with a tracker rig's
+	// prefix names that rig even when IsBeadIDToken rejects its form: a form the
+	// token check does not know must not slip through to bd.real from a Dolt
+	// directory.
+	ids = append(ids, trackerPrefixed(candidates, ids, routes)...)
 	named := make(map[string]beads.Route, len(ids))
 	for _, id := range ids {
 		for _, r := range routes {
@@ -298,21 +300,21 @@ func hasTrackerRoute(routes []beads.Route) bool {
 	return false
 }
 
-// trackerPrefixed returns the operands, not already ids, that open with a
+// trackerPrefixed returns the candidates, not already ids, that open with a
 // tracker rig's prefix.
-func trackerPrefixed(ops, ids []string, routes []beads.Route) []string {
+func trackerPrefixed(candidates, ids []string, routes []beads.Route) []string {
 	known := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		known[id] = true
 	}
 	var out []string
-	for _, op := range ops {
-		if known[op] {
+	for _, candidate := range candidates {
+		if known[candidate] {
 			continue
 		}
 		for _, r := range routes {
-			if r.BackendName() == beads.BackendTracker && r.Prefix != "" && strings.HasPrefix(op, r.Prefix) {
-				out = append(out, op)
+			if r.BackendName() == beads.BackendTracker && r.Prefix != "" && strings.HasPrefix(candidate, r.Prefix) {
+				out = append(out, candidate)
 				break
 			}
 		}

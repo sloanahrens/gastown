@@ -127,6 +127,34 @@ var persistentValueFlags = map[string]bool{
 	"--dolt-auto-commit": true, "--mem-profile": true, "-C": true,
 }
 
+// beadValueFlags holds, per command, the value flags whose value names a bead
+// the command acts on, read from each command's `bd <command> --help`: show
+// reads the issue --id names, and dep add creates the edge --depends-on names.
+// Every other value flag carries data - a title, a label, a gate's run id - and
+// names no bead.
+//
+// A command that writes its bead in the store its working directory names has
+// no row here whatever issues its flags point at: create, create-form and q set
+// --parent on the bead they write, so routing by that value would send the
+// create to the tracker that holds the parent (gt-b00kz). A command a flag
+// picks the store for (migrate issues, the admin and audit verbs) has no row
+// either, since a bead id in its flags does not name the store it works on.
+var beadValueFlags = map[string]map[string]bool{
+	"blocked":           {"--parent": true},
+	"count":             {"--id": true},
+	"dep":               {"--blocks": true, "-b": true},
+	"dep add":           {"--blocked-by": true, "--depends-on": true},
+	"duplicate":         {"--of": true},
+	"gate create":       {"--blocks": true},
+	"list":              {"--id": true, "--parent": true},
+	"provenance record": {"--issue": true},
+	"ready":             {"--parent": true},
+	"reclaim":           {"--id": true},
+	"show":              {"--id": true},
+	"supersede":         {"--with": true},
+	"update":            {"--parent": true},
+}
+
 // boolFlags names the commands that read a flag as a boolean although another
 // command reads a value for the same one: -f is --force on close and --file on
 // create. The command, not the flag alone, decides, and a token after one of
@@ -425,18 +453,65 @@ func commandPath(args []string) string {
 	return path
 }
 
-// idTokens returns the operands that can name a bead. A token after a value
-// flag is that flag's value and never an id, so `bd create --title gt-x` names
+// idTokens returns the tokens of a command that name a bead: an operand in a
+// usage slot that names one, and the value of a flag whose meaning on the
+// command is a bead, so `bd show --id bt-abc` names bt-abc. A token after any
+// other value flag is data and never an id, so `bd create --title gt-x` names
 // no bead and `--parent gt-x` does not route its own create. An operand in a
 // data slot is not an id either, so `bd create refactor-sling` names no bead.
 func idTokens(command string, args []string) []string {
+	return beadIDs(idCandidates(command, args))
+}
+
+// idCandidates returns the tokens of a command that can name a bead, whether
+// or not their form passes beads.IsBeadIDToken.
+func idCandidates(command string, args []string) []string {
+	return append(idOperands(command, args), beadFlagValues(command, args)...)
+}
+
+// beadIDs keeps the tokens whose form names a bead.
+func beadIDs(tokens []string) []string {
 	var ids []string
-	for _, arg := range idOperands(command, args) {
-		if beads.IsBeadIDToken(arg) && beads.ExtractPrefix(arg) != "" {
-			ids = append(ids, arg)
+	for _, token := range tokens {
+		if beads.IsBeadIDToken(token) && beads.ExtractPrefix(token) != "" {
+			ids = append(ids, token)
 		}
 	}
 	return ids
+}
+
+// beadFlagValues returns the values of the args' flags that name a bead on the
+// command, each a candidate in its own right: operands() skips the token after
+// a value flag, so without this `show --id bt-abc` names nothing. A value bd
+// documents as a list of ids is split, so `list --id bt-abc,bt-def` names both.
+func beadFlagValues(command string, args []string) []string {
+	row := beadValueFlags[command]
+	if row == nil {
+		return nil
+	}
+	var values []string
+	pastSeparator, valueNext := false, false
+	for _, arg := range args {
+		switch {
+		case valueNext:
+			valueNext = false
+			values = append(values, strings.Split(arg, ",")...)
+		case pastSeparator:
+			// Past -- every token is an operand, which idOperands reads.
+		case arg == "--":
+			pastSeparator = true
+		case isFlag(arg):
+			name, value, inline := strings.Cut(arg, "=")
+			if !inline {
+				valueNext = row[name]
+				continue
+			}
+			if row[name] {
+				values = append(values, strings.Split(value, ",")...)
+			}
+		}
+	}
+	return values
 }
 
 // operands returns the arguments bd reads as operands: not a flag, not the
