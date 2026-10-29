@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -26,8 +27,8 @@ const (
 
 // The -X stamps the gt and bd binaries are built with. gt reports rev, the commit
 // its image tag names: it falls back to the VCS stamp of the tree it was built
-// in (internal/cmd.resolveCommitHash), which in the image build is the caller's
-// checkout and not that commit. bd reports its commit the way bdbuild stamps it.
+// in (internal/cmd.resolveCommitHash), so the stamp names rev outright. bd reports
+// its commit the way bdbuild stamps it.
 const (
 	gtCommitFlag = "-X github.com/steveyegge/gastown/internal/cmd.Commit="
 	bdCommitFlag = "-X main.Commit="
@@ -41,19 +42,19 @@ type Runner func(ctx context.Context, dir string, env, argv []string) error
 type Builder struct {
 	// Run runs every build.
 	Run Runner
-	// Git resolves the commits the gt and bd stamps name, in their checkouts.
+	// Git resolves the commits the binaries are built from, and makes the clean
+	// worktrees they are built in.
 	Git bdbuild.Git
 	// Environ is the host environment the builds start from; nil reads the
 	// host's. bdbuild.Env keeps the variables that locate the toolchain and drops
 	// the ones that would change what is compiled.
 	Environ []string
-	// Out is the absolute directory the three binaries are written to. A build
-	// runs in its source checkout, so a relative Out would be read against that
-	// checkout, not the caller's directory: BuildBinaries refuses one.
+	// Out is the absolute directory the three binaries are written to. git and go
+	// resolve a relative path against the worktree a build runs in, not the
+	// caller's directory, so BuildBinaries refuses a relative Out.
 	Out string
-	// GTSrc is the gt checkout, read as it stands: the caller owes one at rev
-	// with no changes, the rule `make polecat-image` refuses a dirty tree for
-	// (gt-9fz0k).
+	// GTSrc is the gt checkout gt is built from, at rev. The build runs in a clean
+	// worktree of rev, so uncommitted changes in GTSrc never reach the binary.
 	GTSrc string
 	// BDSrc is the beads checkout the image's bd is built from: the BD_SRC the
 	// polecat image takes.
@@ -62,13 +63,22 @@ type Builder struct {
 	// the commit bdbuild.Commit picks for the polecat image.
 	BDCommit string
 	// OMSrc is the om checkout the image's om is built from: the clone the
-	// rebuild_om job keeps at <town>/.runtime/om-src.
+	// rebuild_om job keeps at <town>/.runtime/om-src. om is built from its HEAD,
+	// in a clean worktree of it.
 	OMSrc string
+}
+
+// binary is one of the three builds: the checkout it is built from, the commit
+// of that checkout it is built at, and the package and stamp it is built with.
+type binary struct {
+	name, src, commit, pkg, ldflags string
 }
 
 // BuildBinaries writes gt, bd and om to b.Out and returns their paths in that
 // order. Every refusal comes before the first build runs, so a refused call
-// writes nothing; a build that fails returns its error and no paths.
+// writes nothing. Each binary is built in a clean worktree of its commit and is
+// staged under b.Out until all three have built, so a build that fails returns
+// its error and no paths, and leaves nothing in b.Out.
 func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error) {
 	if b.Run == nil {
 		return nil, errors.New("daemonimage: no runner to build with")
@@ -80,7 +90,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 		return nil, errors.New("daemonimage: no output directory for the binaries")
 	}
 	if !filepath.IsAbs(b.Out) {
-		return nil, fmt.Errorf("daemonimage: output directory %q is not absolute; a build runs in its source checkout", b.Out)
+		return nil, fmt.Errorf("daemonimage: output directory %q is not absolute; a build runs in a worktree, not in the caller's directory", b.Out)
 	}
 	if rev = strings.TrimSpace(rev); rev == "" {
 		return nil, errors.New("daemonimage: no rev to stamp gt with")
@@ -108,28 +118,58 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
+	omCommit, err := b.resolve(b.OMSrc, "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	builds := []binary{
+		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtCommitFlag + gtCommit},
+		{name: "bd", src: b.BDSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit},
+		{name: "om", src: b.OMSrc, commit: omCommit, pkg: OMPackage},
+	}
+	if err := os.MkdirAll(b.Out, 0o755); err != nil {
+		return nil, fmt.Errorf("daemonimage: cannot make the output directory %s: %w", b.Out, err)
+	}
+	stage, err := os.MkdirTemp(b.Out, ".daemonimage-")
+	if err != nil {
+		return nil, fmt.Errorf("daemonimage: cannot stage the binaries in %s: %w", b.Out, err)
+	}
+	defer os.RemoveAll(stage)
 	env := bdbuild.Env(b.Environ)
-	builds := []struct {
-		name, src, pkg, ldflags string
-	}{
-		{name: "gt", src: b.GTSrc, pkg: GTPackage, ldflags: gtCommitFlag + gtCommit},
-		{name: "bd", src: b.BDSrc, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit},
-		{name: "om", src: b.OMSrc, pkg: OMPackage},
+	for _, build := range builds {
+		if err := b.build(ctx, build, stage, env); err != nil {
+			return nil, err
+		}
 	}
 	paths := make([]string, 0, len(builds))
 	for _, build := range builds {
 		path := filepath.Join(b.Out, build.name)
-		argv := []string{"go", "build", "-trimpath"}
-		if build.ldflags != "" {
-			argv = append(argv, "-ldflags", build.ldflags)
-		}
-		argv = append(argv, "-o", path, build.pkg)
-		if err := b.Run(ctx, build.src, env, argv); err != nil {
-			return nil, fmt.Errorf("daemonimage: building %s from %s failed: %w", build.name, build.pkg, err)
+		if err := os.Rename(filepath.Join(stage, build.name), path); err != nil {
+			return nil, fmt.Errorf("daemonimage: cannot move %s into %s: %w", build.name, b.Out, err)
 		}
 		paths = append(paths, path)
 	}
 	return paths, nil
+}
+
+// build compiles one binary to stage/<name> at build.commit. The clean worktree
+// keeps uncommitted changes out of the binary, and it is removed whether or not
+// the compile succeeds.
+func (b Builder) build(ctx context.Context, build binary, stage string, env []string) error {
+	dir := filepath.Join(stage, build.name+"-src")
+	if _, err := b.Git(build.src, "worktree", "add", "--detach", dir, build.commit); err != nil {
+		return fmt.Errorf("daemonimage: cannot check commit %s out of %s: %w", build.commit, build.src, err)
+	}
+	defer func() { _, _ = b.Git(build.src, "worktree", "remove", "--force", dir) }()
+	argv := []string{"go", "build", "-trimpath"}
+	if build.ldflags != "" {
+		argv = append(argv, "-ldflags", build.ldflags)
+	}
+	argv = append(argv, "-o", filepath.Join(stage, build.name), build.pkg)
+	if err := b.Run(ctx, dir, env, argv); err != nil {
+		return fmt.Errorf("daemonimage: building %s from %s failed: %w", build.name, build.pkg, err)
+	}
+	return nil
 }
 
 // resolve returns the full sha commit names in src, and refuses one src does

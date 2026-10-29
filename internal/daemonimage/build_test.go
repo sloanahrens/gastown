@@ -15,6 +15,7 @@ import (
 const (
 	testRev      = "0123456789abcdef0123456789abcdef01234567"
 	testBDCommit = "fedcba9876543210fedcba9876543210fedcba98"
+	testOMCommit = "abcdef0123456789abcdef0123456789abcdef01"
 )
 
 // testEnv is the host environment the builds start from in tests: one that
@@ -28,9 +29,17 @@ type recorded struct {
 	argv []string
 }
 
-// fakeRunner records every call and fails the one whose package is failPkg.
+// worktreeAdd is one `git worktree add` a build ran: the checkout it ran in, the
+// directory it made and the commit it checked out there.
+type worktreeAdd struct{ src, dir, commit string }
+
+// fakeRunner records every call and fails the one whose package is failPkg. A
+// build that succeeds writes its -o path, as go build does. It also records the
+// worktrees the builds add and remove, through git.
 type fakeRunner struct {
 	calls   []recorded
+	adds    []worktreeAdd
+	removed []string
 	failPkg string
 }
 
@@ -43,13 +52,34 @@ func (f *fakeRunner) run(_ context.Context, dir string, env, argv []string) erro
 	if f.failPkg != "" && argv[len(argv)-1] == f.failPkg {
 		return errors.New("build failed")
 	}
+	if out := outOf(argv); out != "" {
+		return os.WriteFile(out, []byte("binary"), 0o755)
+	}
 	return nil
+}
+
+// git is gitHolding over known, and records every worktree a build adds to f.
+func (f *fakeRunner) git(known map[string]string) bdbuild.Git {
+	holding := gitHolding(known)
+	return func(dir string, args ...string) ([]byte, error) {
+		if len(args) == 5 && args[0] == "worktree" && args[1] == "add" {
+			f.adds = append(f.adds, worktreeAdd{src: dir, dir: args[3], commit: args[4]})
+		}
+		if len(args) == 4 && args[0] == "worktree" && args[1] == "remove" {
+			f.removed = append(f.removed, args[3])
+		}
+		return holding(dir, args...)
+	}
 }
 
 // gitHolding is a git that resolves each commit in known to the full sha it
 // names, and fails every other commit the way git does for one it does not hold.
+// Worktree commands succeed without touching a checkout.
 func gitHolding(known map[string]string) bdbuild.Git {
 	return func(_ string, args ...string) ([]byte, error) {
+		if args[0] == "worktree" {
+			return nil, nil
+		}
 		commit := strings.TrimSuffix(args[len(args)-1], "^{commit}")
 		full, ok := known[commit]
 		if !ok {
@@ -59,12 +89,12 @@ func gitHolding(known map[string]string) bdbuild.Git {
 	}
 }
 
-// validBuilder is a Builder with every source named, both commits held, and
+// validBuilder is a Builder with every source named, every commit held, and
 // the output directory out, all over run.
 func validBuilder(run *fakeRunner, out string) Builder {
 	return Builder{
 		Run:      run.run,
-		Git:      gitHolding(map[string]string{testRev: testRev, testBDCommit: testBDCommit}),
+		Git:      run.git(map[string]string{testRev: testRev, testBDCommit: testBDCommit, "HEAD": testOMCommit}),
 		Environ:  testEnv,
 		Out:      out,
 		GTSrc:    filepath.Join("src", "gt"),
@@ -96,6 +126,18 @@ func TestBuildBinariesReturnsTheThreePathsUnderOut(t *testing.T) {
 	if !reflect.DeepEqual(paths, want) {
 		t.Errorf("BuildBinaries paths = %q, want %q", paths, want)
 	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("BuildBinaries returned %s, which is not written: %v", p, err)
+		}
+	}
+	entries, err := os.ReadDir(b.Out)
+	if err != nil {
+		t.Fatalf("reading the output directory: %v", err)
+	}
+	if got := len(entries); got != len(want) {
+		t.Errorf("the output directory holds %d entries after a build, want the three binaries only", got)
+	}
 }
 
 func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
@@ -106,7 +148,6 @@ func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
 	}
 	names := []string{"gt", "bd", "om"}
 	pkgs := []string{GTPackage, BDPackage, OMPackage}
-	srcs := []string{b.GTSrc, b.BDSrc, b.OMSrc}
 	if len(run.calls) != len(names) {
 		t.Fatalf("recorded %d builds, want %d", len(run.calls), len(names))
 	}
@@ -116,13 +157,44 @@ func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
 				t.Errorf("%s build env = %q, want %s among them", names[i], call.env, want)
 			}
 		}
-		if call.dir != srcs[i] {
-			t.Errorf("%s build ran in %q, want %q", names[i], call.dir, srcs[i])
-		}
-		wantArgv := []string{"go", "build", "-trimpath", "-o", filepath.Join(b.Out, names[i]), pkgs[i]}
-		if got := withoutLdflags(call.argv); !reflect.DeepEqual(got, wantArgv) {
+		wantArgv := []string{"go", "build", "-trimpath", "-o", "OUT", pkgs[i]}
+		if got := withOut(withoutLdflags(call.argv)); !reflect.DeepEqual(got, wantArgv) {
 			t.Errorf("%s build argv = %q, want %q", names[i], call.argv, wantArgv)
 		}
+	}
+}
+
+// TestBuildBinariesBuildsEachAtItsStampedCommit: each binary is compiled in a
+// clean worktree of its own checkout at the commit it stamps, never in the
+// checkout's working tree, and the worktree is removed after the build.
+func TestBuildBinariesBuildsEachAtItsStampedCommit(t *testing.T) {
+	t.Parallel()
+	b, run := builderFor(t)
+	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	want := []worktreeAdd{
+		{src: b.GTSrc, commit: testRev},
+		{src: b.BDSrc, commit: testBDCommit},
+		{src: b.OMSrc, commit: testOMCommit},
+	}
+	if len(run.adds) != len(want) {
+		t.Fatalf("made %d worktrees, want %d", len(run.adds), len(want))
+	}
+	for i, w := range want {
+		got := run.adds[i]
+		if got.src != w.src || got.commit != w.commit {
+			t.Errorf("worktree %d = checkout %s at %s, want %s at %s", i, got.src, got.commit, w.src, w.commit)
+		}
+		if !strings.HasPrefix(got.dir, b.Out+string(filepath.Separator)) {
+			t.Errorf("worktree %d is %s, want it staged under %s", i, got.dir, b.Out)
+		}
+		if run.calls[i].dir != got.dir {
+			t.Errorf("build %d ran in %q, want its worktree %q", i, run.calls[i].dir, got.dir)
+		}
+	}
+	if !reflect.DeepEqual(run.removed, []string{run.adds[0].dir, run.adds[1].dir, run.adds[2].dir}) {
+		t.Errorf("removed worktrees %q, want every worktree the builds added", run.removed)
 	}
 }
 
@@ -151,7 +223,7 @@ func TestBuildBinariesStampsGTWithTheResolvedRev(t *testing.T) {
 	t.Parallel()
 	const short = "0123456"
 	b, run := builderFor(t)
-	b.Git = gitHolding(map[string]string{short: testRev, testBDCommit: testBDCommit})
+	b.Git = run.git(map[string]string{short: testRev, testBDCommit: testBDCommit, "HEAD": testOMCommit})
 	if _, err := b.BuildBinaries(context.Background(), short); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
@@ -174,7 +246,10 @@ func TestBuildBinariesStampsBDWithItsCommitAndLeavesOMUnstamped(t *testing.T) {
 	}
 }
 
-func TestBuildBinariesFailsWithoutListingPartialOutput(t *testing.T) {
+// TestBuildBinariesFailsWithoutLeavingPartialOutput: a build that fails returns
+// its error, no paths, and writes nothing to the output directory, even when
+// the binaries before it built.
+func TestBuildBinariesFailsWithoutLeavingPartialOutput(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ name, pkg string }{
 		{"gt", GTPackage},
@@ -194,6 +269,13 @@ func TestBuildBinariesFailsWithoutListingPartialOutput(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.pkg) {
 				t.Errorf("the error %q does not name the %s build", err, tc.name)
+			}
+			entries, err := os.ReadDir(b.Out)
+			if err != nil {
+				t.Fatalf("reading the output directory: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("a failed %s build left %d entries in the output directory, want none", tc.name, len(entries))
 			}
 		})
 	}
