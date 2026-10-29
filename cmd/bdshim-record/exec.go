@@ -58,14 +58,11 @@ func interpretRun(stdout []byte, runErr error, timedOut bool) ([]byte, int, erro
 	return stdout, 0, nil
 }
 
-// copyFixture returns a Copier that makes a fresh directory under scratch, making scratch if it is
-// not there, and copies the fixture tree into it. The function it returns removes the copy.
+// copyFixture returns a Copier that makes a fresh directory under scratch, which must exist, and
+// copies the fixture tree into it. The function it returns removes the copy.
 func copyFixture(src, scratch string) Copier {
 	return func() (string, func() error, error) {
 		if err := refuseScratchInsideFixture(src, scratch); err != nil {
-			return "", nil, err
-		}
-		if err := os.MkdirAll(scratch, 0o755); err != nil {
 			return "", nil, err
 		}
 		dir, err := os.MkdirTemp(scratch, "fixture-")
@@ -82,25 +79,39 @@ func copyFixture(src, scratch string) Copier {
 
 // refuseScratchInsideFixture refuses a scratch directory at or under the fixture: a copy made there
 // sits inside the tree the next copy walks, so that walk copies the copy into itself and never ends.
-// The paths are compared as named, before anything is created, so a refused run leaves the fixture
-// as it was.
+// The refusal comes before anything is created, so a refused run leaves the fixture as it was.
 func refuseScratchInsideFixture(src, scratch string) error {
-	srcAbs, err := filepath.Abs(src)
+	inside, err := scratchInsideFixture(src, scratch)
 	if err != nil {
-		return fmt.Errorf("resolve fixture %s: %w", src, err)
+		return err
 	}
-	scratchAbs, err := filepath.Abs(scratch)
-	if err != nil {
-		return fmt.Errorf("resolve scratch %s: %w", scratch, err)
-	}
-	rel, err := filepath.Rel(srcAbs, scratchAbs)
-	if err != nil {
-		return fmt.Errorf("compare scratch %s with fixture %s: %w", scratch, src, err)
-	}
-	if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+	if inside {
 		return fmt.Errorf("scratch directory %s is inside the fixture %s", scratch, src)
 	}
 	return nil
+}
+
+// scratchInsideFixture reports whether scratch is at or under the fixture. It compares the
+// directories the paths name by file identity, so a relative path, an absolute one and a symlinked
+// one all compare, and it walks up from the deepest part of scratch that exists, so it answers
+// before scratch is made.
+func scratchInsideFixture(fixture, scratch string) (bool, error) {
+	fixtureInfo, err := os.Stat(fixture)
+	if err != nil {
+		return false, fmt.Errorf("stat fixture %s: %w", fixture, err)
+	}
+	for dir := scratch; ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err == nil && os.SameFile(fixtureInfo, info) {
+			return true, nil
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return false, fmt.Errorf("stat scratch directory %s: %w", dir, err)
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			return false, nil
+		}
+	}
 }
 
 // copyTree copies the directories and regular files under src into dst. Any other kind of entry is

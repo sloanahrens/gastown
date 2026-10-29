@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -20,17 +21,44 @@ func TestMain(m *testing.M) {
 // cannot be made the command stops with the failure reported, before bd runs.
 func TestRunRefusesAScratchDirectoryItCannotMake(t *testing.T) {
 	t.Parallel()
-	blocker := filepath.Join(t.TempDir(), "blocker")
-	if err := os.WriteFile(blocker, []byte("a file\n"), 0o600); err != nil {
-		t.Fatalf("write blocker: %v", err)
-	}
 	var stdout, stderr bytes.Buffer
-	args := []string{"-fixture", t.TempDir(), "-scratch", filepath.Join(blocker, "scratch")}
+	args := []string{"-fixture", t.TempDir(), "-scratch", ""}
 	if code := run(args, &stdout, &stderr); code != 1 {
-		t.Errorf("run with an unmakeable -scratch = %d, want 1", code)
+		t.Errorf("run with an empty -scratch = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "not a directory") {
+	if !strings.Contains(stderr.String(), "no such file") {
 		t.Errorf("stderr = %q, want the mkdir failure reported", stderr.String())
+	}
+}
+
+// TestRunRefusesAScratchInsideTheFixture: a scratch directory the fixture tree contains would hold
+// copies the next copy walks, so the command refuses it before it makes anything.
+func TestRunRefusesAScratchInsideTheFixture(t *testing.T) {
+	t.Parallel()
+	fixture := t.TempDir()
+	tests := []struct {
+		name    string
+		scratch string
+	}{
+		{"scratch is the fixture", fixture},
+		{"scratch under the fixture", filepath.Join(fixture, "scratch")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			before := fileNames(t, fixture)
+			var stdout, stderr bytes.Buffer
+			args := []string{"-fixture", fixture, "-scratch", tc.scratch}
+			if code := run(args, &stdout, &stderr); code != 2 {
+				t.Errorf("run with -scratch %s = %d, want 2", tc.name, code)
+			}
+			if !strings.Contains(stderr.String(), "inside the fixture") {
+				t.Errorf("stderr = %q, want the refusal reported", stderr.String())
+			}
+			if after := fileNames(t, fixture); !reflect.DeepEqual(before, after) {
+				t.Errorf("fixture holds %v after the refusal, want it untouched at %v", after, before)
+			}
+		})
 	}
 }
 

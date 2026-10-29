@@ -50,6 +50,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "bdshim-record: -fixture is required")
 		return 2
 	}
+	if err := refuseScratchInsideFixture(opts.fixture, opts.scratch); err != nil {
+		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
+		return 2
+	}
+	if err := os.MkdirAll(opts.scratch, 0o755); err != nil {
+		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
+		return 1
+	}
 	rc := Recorder{
 		Fixture: opts.fixture,
 		Run:     execBD(opts.bd),
@@ -93,14 +101,18 @@ func execute(opts options, rc Recorder, rows []Row, stdout, stderr io.Writer) in
 		}
 		return 0
 	}
-	removed, err := Write(opts.out, goldens)
+	if err := Write(opts.out, goldens); err != nil {
+		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
+		return 1
+	}
+	dropped, err := RemoveDropped(opts.out, goldens)
 	if err != nil {
 		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stderr, "bdshim-record: wrote %d goldens to %s\n", len(goldens), opts.out)
-	if len(removed) > 0 {
-		fmt.Fprintf(stderr, "bdshim-record: removed the goldens of rows the table no longer has: %v\n", removed)
+	if len(dropped) > 0 {
+		fmt.Fprintf(stderr, "bdshim-record: removed the goldens of rows the table no longer has: %v\n", dropped)
 	}
 	return 0
 }

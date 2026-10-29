@@ -172,6 +172,30 @@ func TestCaptureFailsWhenBDDoesNotRunAndRemovesItsCopy(t *testing.T) {
 	}
 }
 
+// TestCaptureReportsAMutatingRowsCopyThatCannotBeMade: the shared copy is made, and then a mutating
+// row has none to run in, so the recording fails naming the row.
+func TestCaptureReportsAMutatingRowsCopyThatCannotBeMade(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: echoBD}
+	rc, _ := newRecorder(t, bd)
+	made := 0
+	sharedCopy := rc.Copy
+	rc.Copy = func() (string, func() error, error) {
+		made++
+		if made > 1 {
+			return "", nil, errors.New("no space left on device")
+		}
+		return sharedCopy()
+	}
+	_, err := rc.Capture(sampleRows())
+	if err == nil || !strings.Contains(err.Error(), "no space left on device") {
+		t.Fatalf("Capture with no copy for a mutating row = %v, want the failure reported", err)
+	}
+	if !strings.Contains(err.Error(), GoldenName(sampleRows()[2])) {
+		t.Errorf("error = %v, want the mutating row it stopped at named", err)
+	}
+}
+
 // TestCaptureReportsACopyThatWillNotRemove: a copy that cannot be removed fails the recording, so a
 // leftover fixture is never reported as a clean run.
 func TestCaptureReportsACopyThatWillNotRemove(t *testing.T) {
@@ -299,7 +323,7 @@ func TestWriteOneGoldenAndExitFilePerRow(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 	out := t.TempDir()
-	if _, err := Write(out, goldens); err != nil {
+	if err := Write(out, goldens); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	wantFiles := []string{
@@ -322,9 +346,10 @@ func TestWriteOneGoldenAndExitFilePerRow(t *testing.T) {
 	}
 }
 
-// TestWriteRemovesTheGoldensOfRowsTheTableNoLongerHas: a dropped row leaves its two files behind, and
-// Write deletes them and names them, so the directory holds only what this table recorded.
-func TestWriteRemovesTheGoldensOfRowsTheTableNoLongerHas(t *testing.T) {
+// TestRemoveDroppedDeletesTheGoldensOfRowsTheTableNoLongerHas: a dropped row leaves its two files
+// behind, and the trim deletes them and names them, so the directory holds only what this table
+// recorded.
+func TestRemoveDroppedDeletesTheGoldensOfRowsTheTableNoLongerHas(t *testing.T) {
 	t.Parallel()
 	rc, _ := newRecorder(t, &fakeBD{out: echoBD})
 	dropped := Row{Verb: "count", Flags: []string{"--by-status"}}
@@ -333,7 +358,7 @@ func TestWriteRemovesTheGoldensOfRowsTheTableNoLongerHas(t *testing.T) {
 		t.Fatalf("Capture of the wider table: %v", err)
 	}
 	out := t.TempDir()
-	if _, err := Write(out, wider); err != nil {
+	if err := Write(out, wider); err != nil {
 		t.Fatalf("Write of the wider table: %v", err)
 	}
 	if err := os.Remove(filepath.Join(out, GoldenName(dropped)+".json")); err != nil {
@@ -344,12 +369,15 @@ func TestWriteRemovesTheGoldensOfRowsTheTableNoLongerHas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
-	removed, err := Write(out, narrower)
-	if err != nil {
+	if err := Write(out, narrower); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if want := []string{GoldenName(dropped)}; !reflect.DeepEqual(removed, want) {
-		t.Errorf("Write removed %v, want the dropped row's golden %v", removed, want)
+	droppedNames, err := RemoveDropped(out, narrower)
+	if err != nil {
+		t.Fatalf("RemoveDropped: %v", err)
+	}
+	if want := []string{GoldenName(dropped)}; !reflect.DeepEqual(droppedNames, want) {
+		t.Errorf("RemoveDropped removed %v, want the dropped row's golden %v", droppedNames, want)
 	}
 	wantFiles := []string{
 		"close-reason-done.exit", "close-reason-done.json",
@@ -360,6 +388,29 @@ func TestWriteRemovesTheGoldensOfRowsTheTableNoLongerHas(t *testing.T) {
 	if got := fileNames(t, out); !reflect.DeepEqual(got, wantFiles) {
 		t.Errorf("files left = %v, want only this table's %v", got, wantFiles)
 	}
+}
+
+// TestRemoveDroppedReportsWhatItCannotRemoveOrList: a goldens directory that cannot be listed, and a
+// golden file that cannot be deleted, both fail the trim instead of leaving half a golden behind.
+func TestRemoveDroppedReportsWhatItCannotRemoveOrList(t *testing.T) {
+	t.Parallel()
+	t.Run("directory that cannot be listed", func(t *testing.T) {
+		t.Parallel()
+		out := filepath.Join(t.TempDir(), "golden")
+		mustWrite(t, out, "a file where the directory goes\n")
+		if _, err := RemoveDropped(out, nil); err == nil {
+			t.Error("RemoveDropped over a directory that is a file = nil error, want an error")
+		}
+	})
+	t.Run("golden that cannot be removed", func(t *testing.T) {
+		t.Parallel()
+		out := t.TempDir()
+		mustWrite(t, filepath.Join(out, "gone.exit"), "0\n")
+		mustWrite(t, filepath.Join(out, "gone.json", "kept.txt"), "a directory where the golden's stdout goes\n")
+		if _, err := RemoveDropped(out, nil); err == nil {
+			t.Error("RemoveDropped over a golden that cannot be removed = nil error, want an error")
+		}
+	})
 }
 
 // TestOrphansReportsEachDroppedRowOnce: a golden whose row is gone is one golden whether one or both
@@ -413,7 +464,7 @@ func TestCheckListsOnlyTheGoldensThatChanged(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 	out := t.TempDir()
-	if _, err := Write(out, goldens); err != nil {
+	if err := Write(out, goldens); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if err := os.Remove(filepath.Join(out, "reopen.json")); err != nil {
@@ -454,7 +505,7 @@ func TestExecuteCheckPrintsDriftAndExitsNonZero(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 	out := t.TempDir()
-	if _, err := Write(out, goldens); err != nil {
+	if err := Write(out, goldens); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	opts := options{out: out, check: true}
@@ -491,7 +542,7 @@ func TestExecuteCheckReportsTheGoldensOfRowsTheTableNoLongerHas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capture of the wider table: %v", err)
 	}
-	if _, err := Write(out, wider); err != nil {
+	if err := Write(out, wider); err != nil {
 		t.Fatalf("Write of the wider table: %v", err)
 	}
 	before := snapshot(t, out)
@@ -597,7 +648,7 @@ func TestWriteFailsWhenAGoldenCannotBeWritten(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := tc.setup(t, t.TempDir())
-			if _, err := Write(dir, goldens); err == nil {
+			if err := Write(dir, goldens); err == nil {
 				t.Errorf("Write(%s) = nil error, want an error", tc.name)
 			}
 		})

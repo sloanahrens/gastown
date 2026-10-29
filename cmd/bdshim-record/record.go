@@ -158,28 +158,33 @@ const goldenMode = 0o600
 // goldenExts are the extensions of the two files one golden is made of.
 var goldenExts = []string{".json", ".exit"}
 
-// Write writes each golden as <name>.json, bd's stdout, and <name>.exit, bd's exit code on one
-// line, and removes the goldens of rows the table no longer has; it returns the names it removed.
-func Write(dir string, goldens []Golden) (removed []string, err error) {
+// Write writes each golden as <name>.json, bd's stdout, and <name>.exit, bd's exit code on one line.
+func Write(dir string, goldens []Golden) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+		return err
 	}
 	for _, g := range goldens {
 		if err := os.WriteFile(filepath.Join(dir, g.Name+".json"), g.Stdout, goldenMode); err != nil {
-			return nil, err
+			return err
 		}
 		if err := os.WriteFile(filepath.Join(dir, g.Name+".exit"), exitFile(g.Exit), goldenMode); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	removed, err = Orphans(dir, goldens)
+	return nil
+}
+
+// RemoveDropped deletes the goldens in dir whose row the table no longer holds and returns their
+// names, so the directory holds only the goldens its table names.
+func RemoveDropped(dir string, goldens []Golden) ([]string, error) {
+	dropped, err := Orphans(dir, goldens)
+	if err == nil {
+		err = removeGoldens(dir, dropped)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if err := removeGoldens(dir, removed); err != nil {
-		return nil, err
-	}
-	return removed, nil
+	return dropped, nil
 }
 
 // removeGoldens deletes both files of each named golden. A file that is already gone is not an error,

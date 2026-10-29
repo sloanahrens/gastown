@@ -68,25 +68,26 @@ func TestCopyFixtureRefusesASymlinkAndLeavesNoCopy(t *testing.T) {
 	}
 }
 
-// TestCopyFixtureMakesAMissingScratch: copies are made in a scratch directory that need not exist
-// yet, since the copier makes it.
-func TestCopyFixtureMakesAMissingScratch(t *testing.T) {
+// TestCopyFixtureFailsWhenScratchIsMissing: a copy cannot be made in a scratch directory that does
+// not exist; run creates it before the recording starts.
+func TestCopyFixtureFailsWhenScratchIsMissing(t *testing.T) {
 	t.Parallel()
 	fixture := t.TempDir()
 	mustWrite(t, filepath.Join(fixture, "a.txt"), "x\n")
-	scratch := filepath.Join(t.TempDir(), "missing")
-
-	dir, remove, err := copyFixture(fixture, scratch)()
-	if err != nil {
-		t.Fatalf("copyFixture into a missing scratch: %v", err)
+	if _, _, err := copyFixture(fixture, filepath.Join(t.TempDir(), "missing"))(); err == nil {
+		t.Error("copyFixture into a missing scratch = nil error, want an error")
 	}
-	defer func() {
-		if err := remove(); err != nil {
-			t.Errorf("remove: %v", err)
-		}
-	}()
-	if got := filepath.Dir(dir); got != scratch {
-		t.Errorf("copy made in %s, want the scratch directory %s", got, scratch)
+}
+
+// TestCopyFixtureReportsAScratchItCannotStat: a scratch path the OS cannot answer for is an error,
+// not a path declared outside the fixture.
+func TestCopyFixtureReportsAScratchItCannotStat(t *testing.T) {
+	t.Parallel()
+	fixture := t.TempDir()
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	mustWrite(t, blocker, "a file\n")
+	if _, _, err := copyFixture(fixture, filepath.Join(blocker, "scratch"))(); err == nil {
+		t.Error("copyFixture with a scratch path under a file = nil error, want an error")
 	}
 }
 
@@ -136,6 +137,9 @@ func TestCopyFixtureAcceptsAScratchBesideOrAboveTheFixture(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			if err := os.MkdirAll(tc.scratch, 0o755); err != nil {
+				t.Fatalf("make the scratch directory: %v", err)
+			}
 			dir, remove, err := copyFixture(fixture, tc.scratch)()
 			if err != nil {
 				t.Fatalf("copyFixture with %s: %v", tc.name, err)
@@ -160,6 +164,15 @@ func TestCopyFixtureFailsWhenTheFixtureIsMissing(t *testing.T) {
 	}
 	if left := fileNames(t, scratch); len(left) != 0 {
 		t.Errorf("scratch holds %v after a failed copy, want nothing left", left)
+	}
+}
+
+// TestCopyTreeFailsWhenTheFixtureIsMissing: a walk that cannot read the fixture at all fails the copy
+// instead of copying nothing and reporting success.
+func TestCopyTreeFailsWhenTheFixtureIsMissing(t *testing.T) {
+	t.Parallel()
+	if err := copyTree(filepath.Join(t.TempDir(), "missing"), t.TempDir()); err == nil {
+		t.Error("copyTree of a missing fixture = nil error, want an error")
 	}
 }
 
