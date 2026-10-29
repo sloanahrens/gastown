@@ -259,6 +259,7 @@ func init() {
 	doltCmd.AddCommand(doltMigrateCmd)
 	doltCmd.AddCommand(doltFixMetadataCmd)
 	doltCmd.AddCommand(doltCleanupCmd)
+	doltCmd.AddCommand(doltLatencyCmd)
 
 	doltKillImpostersCmd.Flags().BoolVar(&doltKillImpostersDry, "dry-run", false, "Preview without killing")
 
