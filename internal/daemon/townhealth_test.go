@@ -556,30 +556,39 @@ func TestWriteTownHealth_NeedsHumanStopsOnACancelledContext(t *testing.T) {
 	}
 }
 
-// cancelFromRead is a context that reports cancellation from its nth Err read
-// on, so a test can cancel a health read part way through the rigs it walks.
-type cancelFromRead struct {
-	context.Context
-	reads, n int
+// cancelOnList is a bead reader that cancels the context the moment it is first
+// read and answers every read with one waiting bead, so a health read can be
+// cancelled while it is part way through the rigs it walks.
+type cancelOnList struct {
+	cancel func()
 }
 
-func (c *cancelFromRead) Err() error {
-	c.reads++
-	if c.reads >= c.n {
-		return context.Canceled
-	}
-	return nil
+func (c *cancelOnList) Show(string) (*beads.Issue, error) { return nil, errors.New("not used") }
+func (c *cancelOnList) List(beads.ListOptions) ([]*beads.Issue, error) {
+	c.cancel()
+	return []*beads.Issue{{ID: "gt-waiting", Status: "open"}}, nil
 }
 
 // A cancellation that lands while the rigs are being read stops the read with
-// the context error, not with the counts it had gathered so far (gt-slmaz).
-// The first read is the one before the rigs; the second is the first rig's.
+// the context error, not with the counts it had gathered so far: with two
+// landing rigs and the cancel arriving during the first one's read, the answer
+// is the error and never a count of the one rig that was read (gt-slmaz). The
+// test asserts that outcome, not how often the context is consulted.
 func TestWriteTownHealth_NeedsHumanStopsBetweenRigs(t *testing.T) {
 	t.Parallel()
 	d, _ := healthTown(t, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC))
-	ctx := &cancelFromRead{Context: context.Background(), n: 2}
-	if _, err := (&healthSources{d: d}).NeedsHuman(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled from the rig loop", err)
+	writeJSONFile(t, filepath.Join(d.config.TownRoot, "mayor", "rigs.json"),
+		map[string]any{"version": 1, "rigs": map[string]any{"gastown": map[string]any{}, "other": map[string]any{}}})
+	d.invalidateKnownRigsCache()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.openWorkBeads = func([]string, time.Duration) workBeadReader { return &cancelOnList{cancel: cancel} }
+	if rigs := (&healthSources{d: d}).landingRigs(); len(rigs) != 2 {
+		t.Fatalf("the fixture has landing rigs %v, want two so a cancel can land between them", rigs)
+	}
+	got, err := (&healthSources{d: d}).NeedsHuman(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("NeedsHuman = %+v, %v; want the context error, not the count of the rig read before the cancel", got, err)
 	}
 }
 
