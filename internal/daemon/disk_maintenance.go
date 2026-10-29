@@ -10,8 +10,9 @@ package daemon
 // unless mode is "apply": the default is a dry run that logs what a prune would
 // delete. A plan that could not read its inputs refuses rather than guessing.
 //
-// Disk readings, the 80/70 alerts and the keep tightening arrive with
-// gt-dl4nv.16 (disk_maintenance_disks.go); this file leaves the seam they fill.
+// The disk readings, the 80/70 usage alerts and the unreadable alert are in
+// disk_maintenance_disks.go; this file owns the window, the mode, and the pass
+// that plans with the keep those readings decide.
 
 import (
 	"context"
@@ -71,9 +72,12 @@ type diskMaintSeams struct {
 	// targets builds the maintenance targets a pass plans; nil is the town's
 	// registry, built the way gt maint builds it.
 	targets func(ctx context.Context, d *Daemon, mode string) (map[string]diskmaint.Target, error)
-	// readDisks reads the disks the keep tightening watches. The production
-	// readers arrive with gt-dl4nv.16, so production reads none until then.
+	// readDisks reads the disks the alerts and the keep tightening watch; nil
+	// is the production read through dfReaders.
 	readDisks func(ctx context.Context) []disks.Reading
+	// dfReaders replaces the production df command of each named disk, for a
+	// test that exercises the production read without launching a program.
+	dfReaders map[string]DFReader
 	// getenv reads the plugin settings the target is built from.
 	getenv func(string) string
 	// homeDir locates the colima docker socket's home.
@@ -96,7 +100,9 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 		}
 	}
 	if s.readDisks == nil {
-		s.readDisks = noDiskReadings
+		s.readDisks = func(ctx context.Context) []disks.Reading {
+			return d.diskMaintenanceReadings(ctx, s.dfReaders)
+		}
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
@@ -109,12 +115,6 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	return s
 }
-
-// noDiskReadings is the production disk read until gt-dl4nv.16 adds the df
-// readers: no readings means no alert and no tightening, so the pass plans with
-// its base keep. It is called on every pass, so the seam the next bead fills is
-// already wired.
-func noDiskReadings(context.Context) []disks.Reading { return nil }
 
 // diskMaintenanceSettings returns the patrol's config block, or nil when the
 // town declares none.
@@ -238,14 +238,20 @@ func (d *Daemon) diskMaintenanceSettledAt() time.Time {
 func (d *Daemon) diskMaintenancePass(now time.Time, mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
+	s := d.diskMaintenanceSeams()
 
-	keep, err := d.diskMaintenanceKeep(ctx)
+	// The disk alerts are an alarm rather than a change, so they are read and
+	// raised before anything that can refuse the plan: a disk too full to keep
+	// pruning, or a keep the patrol cannot decide, must not silence them.
+	readings := s.readDisks(ctx)
+	d.applyDiskAlerts(readings)
+
+	keep, err := diskMaintenanceKeep(s.getenv, readings)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: not running: %v", err)
 		d.settleDiskMaintenanceWindow(now)
 		return
 	}
-	s := d.diskMaintenanceSeams()
 	targets, err := s.targets(ctx, d, mode)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: the targets could not be built: %v", err)
@@ -323,14 +329,13 @@ func (d *Daemon) diskMaintenanceContext() (context.Context, context.CancelFunc) 
 // diskMaintenanceKeep returns the keep count this pass plans with: the
 // configured window, tightened when a disk is nearly full. A disk that could
 // not be read refuses the count, because a keep decided without it would be a
-// guess (disks.KeepFor).
-func (d *Daemon) diskMaintenanceKeep(ctx context.Context) (int, error) {
-	s := d.diskMaintenanceSeams()
-	base, err := diskMaintKeep(s.getenv)
+// guess (disks.KeepFor); the refusal is reported and no count is applied.
+func diskMaintenanceKeep(getenv func(string) string, readings []disks.Reading) (int, error) {
+	base, err := diskMaintKeep(getenv)
 	if err != nil {
 		return 0, err
 	}
-	keep, err := disks.KeepFor(s.readDisks(ctx), base).Count()
+	keep, err := disks.KeepFor(readings, base).Count()
 	if err != nil {
 		return 0, fmt.Errorf("refusing the plan: %w", err)
 	}
