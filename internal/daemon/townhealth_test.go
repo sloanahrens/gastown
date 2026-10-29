@@ -506,6 +506,29 @@ func TestWriteTownHealth_NeedsHumanCountsEveryPersonLabel(t *testing.T) {
 	}
 }
 
+// A failed read of any person label leaves needs-human UNKNOWN, not a count
+// that reads as no one waiting on a person (gt-zjel5).
+func TestWriteTownHealth_NeedsHumanFailedReadIsUnknown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	for _, label := range []string{land.LabelNeedsHuman, land.LabelNeedsOverseer, land.LabelNeedsOperator} {
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			d, bd := healthTown(t, now)
+			bd.failFor = label
+			d.writeTownHealth()
+
+			r, err := townhealth.Read(d.config.TownRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := healthField(t, r, "needs-human"); got.Tag != townhealth.Unknown {
+				t.Errorf("needs-human = %+v, want UNKNOWN", got)
+			}
+		})
+	}
+}
+
 // The exec-tax line the daemon logs is its field's state changing, and a
 // beat that reports the same state says nothing (gt-2ycne.1).
 func TestWriteTownHealth_LogsTheExecTaxOnlyWhenItChanges(t *testing.T) {
