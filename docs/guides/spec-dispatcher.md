@@ -137,6 +137,39 @@ decides and reports without slinging, labeling or commenting.
 6. A bead that takes a seat and matches the overrun-stop box is slung anyway
    and wears one comment saying so (see below).
 
+## The verdict ledger
+
+Every real tick records each candidate it passed over, and why, in
+`<town>/.runtime/spec_dispatch/verdicts.json` (gt-8thox). One entry per bead:
+the class — `skipped`, `refused`, `planning`, `failed` or `deferred`, the
+tick's own report lists folded least specific first, so a bead in two of them
+keeps the later — the reason line the tick printed for it, `first_at` and
+`last_at`, and `ticks`, the number of consecutive ticks the verdict has stood.
+A bead the next tick does not pass over is dropped, because the file states
+what the last tick saw.
+
+A `--dry-run` records nothing: it decides without acting, and its reasons
+would overwrite a real tick's. A ledger the tick cannot read is left as it is
+rather than recorded onto empty, which would reset the first-seen time of every
+verdict in it; a read or write that fails is one warning line on stderr and
+does not fail the tick.
+
+The dashboard's ready list reads the ledger, so an operator learns why a
+well-formed, unassigned bead is waiting without opening the daemon log. A row
+the ledger holds gains the verdict's fields: the dim line under it names the
+class, the time the verdict was first seen, how many ticks it has stood and the
+tick's reason, and the ready list's `skipped by dispatcher` chip counts those
+rows and filters to them. A row the lint called well formed, but which the
+ledger classes `skipped`, `refused` or `deferred`, stops reading ready and
+wears the `skipped by dispatcher` tag instead; a `planning` or `failed` entry
+fills the fields and leaves the row's shape as the lint gave it.
+
+A ledger older than five minutes, or one the page cannot read, is stale, and
+the page presents no verdict from it: no chip, tag or row line claims a skip,
+and one note above the rows gives the ledger's age or names the failed read.
+A held or stopped dispatcher stops writing, so its last tick's verdicts read
+as current would be a claim nothing backs (gt-ckncx).
+
 ## The overrun-stop flag
 
 Some bead shapes ran past the overrun guard more often than others on the rig
