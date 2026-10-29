@@ -211,8 +211,13 @@ type Daemon struct {
 	// record the seats it was asked to end.
 	endSandboxSeat func(rig, name string, landing sandboxSeatLanding) bool
 
+	// sandboxSeatEndMu guards sandboxSeatEndStopped together with the count
+	// below, so no seat end is added to the wait shutdown joins (see
+	// startSandboxSeatEnd, stopSandboxSeatEnds).
+	sandboxSeatEndMu      sync.Mutex
+	sandboxSeatEndStopped bool
 	// sandboxSeatEndCycles counts the sandbox seat ends in flight (see
-	// startSandboxSeatEnd); tests wait on it.
+	// startSandboxSeatEnd); shutdown joins them and tests wait on it.
 	sandboxSeatEndCycles sync.WaitGroup
 
 	// buildCommitFn replaces the daemon's own build commit (see buildCommit)
@@ -2624,6 +2629,11 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	if d.cancel != nil {
 		d.cancel()
 	}
+
+	// Join the sandbox seat ends the cancel just stopped (their remaining
+	// reads go through Dolt, so this comes before the stop) and refuse any
+	// new one. The wait is bounded; a seat end left over keeps its seat.
+	d.stopSandboxSeatEnds()
 
 	// Stop Dolt server if we're managing it. An upgrade restart leaves Dolt
 	// running: the server is detached and the next daemon adopts it via

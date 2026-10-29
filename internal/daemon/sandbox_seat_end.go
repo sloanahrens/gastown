@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -134,6 +135,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 	rigPath := filepath.Join(h.town(), rig)
 	var (
 		kept    string
+		partial string
 		removed bool
 	)
 	err = polecat.WithSandboxSeatLock(rigPath, name, func() error {
@@ -146,8 +148,16 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 			kept = why
 			return nil
 		}
-		if err := h.removeSeatDirs(rigPath, rig, name); err != nil {
-			kept = "removing its host directories: " + err.Error()
+		deleted, err := h.removeSeatDirs(rigPath, rig, name)
+		if err != nil {
+			// A removal that deleted something and then failed has not kept
+			// the seat: saying so would send an operator looking for a seat
+			// that is half gone (gt-sefzt).
+			if deleted {
+				partial = err.Error()
+			} else {
+				kept = "removing its host directories: " + err.Error()
+			}
 			return nil
 		}
 		removed = true
@@ -156,6 +166,9 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 	switch {
 	case err != nil:
 		log("kept: %v", err)
+		return false
+	case partial != "":
+		log("its host directories were partly removed, then the removal failed: %s (the seat is finished: landed %s)", partial, landing.BeadID)
 		return false
 	case kept != "":
 		log("kept: %s", kept)
@@ -222,30 +235,43 @@ func (h *patrolScanHost) seatAgentFields(rig, name string) (*beads.AgentFields, 
 
 // removeSeatDirs removes the host directories of one sandbox seat, through the
 // implementation the host was given: nil is polecat.RemoveSandboxSeatHostDirs,
-// and a test injects one that starts no git.
-func (h *patrolScanHost) removeSeatDirs(rigPath, rig, name string) error {
+// and a test injects one that starts no git. The bool reports whether anything
+// was deleted, so the caller can log a removal that failed halfway as such.
+func (h *patrolScanHost) removeSeatDirs(rigPath, rig, name string) (bool, error) {
 	if h.removeSandboxSeatDirs != nil {
 		return h.removeSandboxSeatDirs(rigPath, rig, name)
 	}
 	return polecat.RemoveSandboxSeatHostDirs(rigPath, rig, name, nil)
 }
 
+// sandboxSeatEndJoinBudget bounds how long stopSandboxSeatEnds waits for the
+// seat ends in flight. The gateway question a seat end asks is cancelled by
+// shutdown, so the wait is short in practice; the bound is what keeps
+// shutdown's ceiling a fact when one end is wedged.
+const sandboxSeatEndJoinBudget = 2 * time.Second
+
 // startSandboxSeatEnd is the landing worker's after-landing hook: it runs the
 // seat's end off the landing's goroutine, since the gateway question it asks is
 // bounded but slow, and a failed cleanup must never take the landing loop down.
 // A daemon that is already stopping starts no end: the seat keeps its
-// directories, which is the safe answer, and the end is not waited for at
-// shutdown (the same as the daemon's other patrol goroutines).
+// directories, which is the safe answer.
+//
+// The stop check and the count are one step under sandboxSeatEndMu, the lock
+// stopSandboxSeatEnds takes before it waits: an end added after that wait
+// started would be one the shutdown never joins, and the two would race.
 func (d *Daemon) startSandboxSeatEnd(rigName string, landings *land.LandingsFile, w land.Work) {
 	name := strings.TrimSpace(w.Worker)
 	if name == "" {
 		return // a crew landing has no seat
 	}
-	if d.ctxOrBackground().Err() != nil {
+	d.sandboxSeatEndMu.Lock()
+	if d.sandboxSeatEndStopped || d.ctxOrBackground().Err() != nil {
+		d.sandboxSeatEndMu.Unlock()
 		d.logger.Printf("sandbox seat end %s/%s: kept: the daemon is stopping", rigName, name)
 		return
 	}
 	d.sandboxSeatEndCycles.Add(1)
+	d.sandboxSeatEndMu.Unlock()
 	go func() {
 		defer d.sandboxSeatEndCycles.Done()
 		defer func() {
@@ -255,6 +281,41 @@ func (d *Daemon) startSandboxSeatEnd(rigName string, landings *land.LandingsFile
 		}()
 		d.runSandboxSeatEnd(rigName, landings, w)
 	}()
+}
+
+// stopSandboxSeatEnds refuses new seat ends and waits, bounded, for the ones in
+// flight. Shutdown calls it before it stops Dolt: the remaining steps of an end
+// read beads through Dolt.
+func (d *Daemon) stopSandboxSeatEnds() {
+	d.beginSandboxSeatEndStop()
+	d.waitForSandboxSeatEnds()
+}
+
+// beginSandboxSeatEndStop closes the door on new seat ends. It returns once no
+// start can add to the count the wait below joins.
+func (d *Daemon) beginSandboxSeatEndStop() {
+	d.sandboxSeatEndMu.Lock()
+	d.sandboxSeatEndStopped = true
+	d.sandboxSeatEndMu.Unlock()
+}
+
+// waitForSandboxSeatEnds joins the seat ends in flight, for at most
+// sandboxSeatEndJoinBudget. An end that outlives the bound is left to the
+// process exit: it has not finished its removal, so the seat keeps whatever it
+// had not yet deleted, which is the safe answer, and the log says so.
+func (d *Daemon) waitForSandboxSeatEnds() {
+	done := make(chan struct{})
+	go func() {
+		d.sandboxSeatEndCycles.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(sandboxSeatEndJoinBudget)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		d.logger.Printf("sandbox seat end: still running after %s; leaving it to the process exit", sandboxSeatEndJoinBudget)
+	}
 }
 
 // runSandboxSeatEnd reads the landing record that proves w landed and hands the
@@ -285,11 +346,12 @@ func (d *Daemon) runSandboxSeatEnd(rigName string, landings *land.LandingsFile, 
 }
 
 // sandboxSeatEnder is the step that ends one sandbox seat: patrolScanHost's
-// endFinishedSandboxSeat when the daemon was not given one.
+// endFinishedSandboxSeat when the daemon was not given one, over the daemon's
+// own agent-bead and gateway seams.
 func (d *Daemon) sandboxSeatEnder() func(rig, name string, landing sandboxSeatLanding) bool {
 	if d.endSandboxSeat != nil {
 		return d.endSandboxSeat
 	}
-	h := &patrolScanHost{d: d, sandboxExists: d.sandboxExists}
+	h := &patrolScanHost{d: d, sandboxExists: d.sandboxExists, openRecoveryBeads: d.openRecoveryBeads}
 	return h.endFinishedSandboxSeat
 }

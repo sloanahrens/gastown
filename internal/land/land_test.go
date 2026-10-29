@@ -713,6 +713,25 @@ func TestLandMergesGatesPushesAndRecords(t *testing.T) {
 	landsAndRecords(t, newLandFixture(t))
 }
 
+// The head a landing record carries is the Work's own head, and that is the key
+// the sandbox seat's end looks its proof up by: a record keyed on anything else
+// would read a landed seat as unlanded and keep it forever (gt-sefzt).
+func TestLandingRecordIsFoundByTheWorksBeadAndHead(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	rec, ok, err := l.Landings.Find(f.work.BeadID, f.work.Head)
+	if err != nil || !ok {
+		t.Fatalf("Find(%q, %q) = (found %v, %v), want the record Land wrote", f.work.BeadID, f.work.Head, ok, err)
+	}
+	if rec.Head != f.work.Head {
+		t.Errorf("record head = %q, want the Work's head %q", rec.Head, f.work.Head)
+	}
+}
+
 // gt-84gcp: a landing reports each stage as it enters it, so the daemon's
 // landing-stuck alarm can judge the stage the pass is running rather than the
 // pipeline as a whole. The stages before the gate are reported by nothing:

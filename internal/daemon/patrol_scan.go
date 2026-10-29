@@ -376,8 +376,9 @@ type patrolScanHost struct {
 	removeSandboxRecord func(townRoot, name string) error
 	// removeSandboxSeatDirs is polecat.RemoveSandboxSeatHostDirs when nil: the
 	// step that ends a finished sandbox seat, a seam for the unit tier, which
-	// cannot start git (gt-sefzt).
-	removeSandboxSeatDirs func(rigPath, rigName, name string) error
+	// cannot start git (gt-sefzt). It reports whether any directory was
+	// deleted, so a removal that fails halfway is logged as one.
+	removeSandboxSeatDirs func(rigPath, rigName, name string) (bool, error)
 	// sandboxRecordBudget is the records one record pass may check, each a tmux
 	// probe and, unless a live session answers, a gateway question: 20
 	// (sandboxRecordsPerTick) when zero. A seam so the bound test writes few

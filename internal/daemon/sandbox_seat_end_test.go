@@ -41,15 +41,18 @@ const endSettings = `{"type":"town-settings","version":1,
 // seatEndFake is one sandbox-seat end scenario: the town, the seat's agent
 // bead, the gateway's answers, and what the step did.
 type seatEndFake struct {
-	t          *testing.T
-	town       string
-	agentBead  string
-	agentDB    *beadsfake.Fake
-	host       *patrolScanHost
-	removals   []string
-	removeErr  error
-	gwAsked    []string
-	seatFields beads.AgentFields
+	t         *testing.T
+	town      string
+	agentBead string
+	agentDB   *beadsfake.Fake
+	host      *patrolScanHost
+	removals  []string
+	removeErr error
+	// removeDeleted is what the seam reports deleted beside removeErr: true
+	// is a removal that failed halfway and left the seat partly gone.
+	removeDeleted bool
+	gwAsked       []string
+	seatFields    beads.AgentFields
 }
 
 func newSeatEndFake(t *testing.T) *seatEndFake {
@@ -74,9 +77,9 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 			f.gwAsked = append(f.gwAsked, gateway+"|"+name)
 			return false, nil
 		},
-		removeSandboxSeatDirs: func(rigPath, rig, name string) error {
+		removeSandboxSeatDirs: func(rigPath, rig, name string) (bool, error) {
 			if f.removeErr != nil {
-				return f.removeErr
+				return f.removeDeleted, f.removeErr
 			}
 			f.removals = append(f.removals, rig+"|"+name)
 			return polecat.RemoveSandboxSeatHostDirs(rigPath, rig, name, func(_, _ string) error { return nil })
@@ -548,6 +551,65 @@ func TestSandboxSeatEndKeepReasons(t *testing.T) {
 	}
 }
 
+// A removal that deleted some of the seat's directories and then failed is not
+// a kept seat: the log says the removal was partial, so an operator is not sent
+// looking for a seat that is half gone.
+func TestEndFinishedSandboxSeatLogsAPartialRemovalAsSuch(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	f.removeErr = errors.New("removing /town/gastown/polecats/agate: permission denied")
+	f.removeDeleted = true
+
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Error("a removal that failed was reported as a finished seat")
+	}
+	got := logs.String()
+	if !strings.Contains(got, "partly removed") {
+		t.Errorf("log %q does not say the removal was partial", got)
+	}
+	if strings.Contains(got, "kept:") {
+		t.Errorf("log %q calls a seat whose directories were partly deleted kept", got)
+	}
+}
+
+// The seat's end the daemon builds for itself, with no injected end, is the
+// production path: the facts come from the seat's agent bead and the gateway
+// seam, and the removal is polecat's own. Nothing here replaces the step.
+func TestSandboxSeatEnderDefaultPathEndsTheSeat(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	const head = "0123456789abcdef"
+	landings := &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
+	if err := landings.Append(land.LandingRecord{BeadID: endBead, Head: head, Branch: endBranch}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := f.host.d
+	d.sandboxExists = f.host.sandboxExists
+	d.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+	d.endSandboxSeat = nil
+	d.runSandboxSeatEnd(endRig, landings, land.Work{BeadID: endBead, Head: head, Branch: endBranch, Worker: endPolecat})
+
+	if dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat directory the daemon's own end removes is still there")
+	}
+	if dirExists(t, dirs.PromptFile) {
+		t.Error("the prompt file the daemon's own end removes is still there")
+	}
+	if len(f.gwAsked) != 1 {
+		t.Errorf("gateway asked %v, want one question", f.gwAsked)
+	}
+}
+
 // The landing worker's after-landing hook is the production path to a seat's
 // end: the hook the rig's worker is built with reads the rig's landing record,
 // so a landing the record does not yet prove keeps the seat and the one it
@@ -611,5 +673,59 @@ func TestStartSandboxSeatEndDoesNotStartWhileStopping(t *testing.T) {
 	d.sandboxSeatEndCycles.Wait()
 	if asked {
 		t.Error("a seat end started while the daemon was stopping")
+	}
+}
+
+// A stop closes the door before it waits: a seat end started after the stop is
+// refused, and the wait does not return until the ends already in flight have.
+func TestStopSandboxSeatEndsRefusesNewEndsAndWaitsForTheOnesInFlight(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	d.endSandboxSeat = func(string, string, sandboxSeatLanding) bool {
+		close(started)
+		<-release
+		close(finished)
+		return true
+	}
+	landings := &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
+	if err := landings.Append(land.LandingRecord{BeadID: endBead, Head: "h"}); err != nil {
+		t.Fatal(err)
+	}
+	work := land.Work{BeadID: endBead, Head: "h", Worker: endPolecat}
+	d.startSandboxSeatEnd(endRig, landings, work)
+	<-started
+
+	d.beginSandboxSeatEndStop()
+	asked := make(chan struct{}, 1)
+	d.endSandboxSeat = func(string, string, sandboxSeatLanding) bool {
+		asked <- struct{}{}
+		return false
+	}
+	d.startSandboxSeatEnd(endRig, landings, work)
+
+	waited := make(chan struct{})
+	go func() {
+		d.waitForSandboxSeatEnds()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("the wait returned while a seat end was still running")
+	default:
+	}
+	close(release)
+	<-waited
+	select {
+	case <-finished:
+	default:
+		t.Error("the wait returned before the seat end in flight finished")
+	}
+	select {
+	case <-asked:
+		t.Error("a seat end started after the stop had closed the door")
+	default:
 	}
 }

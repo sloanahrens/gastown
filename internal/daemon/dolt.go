@@ -36,7 +36,9 @@ const doltServerStopPoll = 100 * time.Millisecond
 // ShutdownBudget is the real wall-clock ceiling on Daemon.shutdown(): its one
 // bounded step, the Dolt SQL server's own graceful-stop wait
 // (doltServerStopBudget) before it SIGKILLs. Everything else in shutdown is
-// in-process and returns immediately. Shutdown no longer pushes Dolt remotes
+// in-process and bounded: the one wait is the sandbox seat ends in flight,
+// capped at sandboxSeatEndJoinBudget with a seat end that outlives it left to
+// the process exit. Shutdown no longer pushes Dolt remotes
 // (ADR 0002) or flushes
 // OTel telemetry (deleted, gt-s3rec.5), so there is no other step.
 //

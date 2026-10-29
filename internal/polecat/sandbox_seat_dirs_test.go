@@ -70,8 +70,12 @@ func TestRemoveSandboxSeatHostDirsLeavesItsNeighbours(t *testing.T) {
 		detached = append(detached, clonePath)
 		return nil
 	}
-	if err := RemoveSandboxSeatHostDirs(rigPath, "rig", "agate", remover); err != nil {
+	deleted, err := RemoveSandboxSeatHostDirs(rigPath, "rig", "agate", remover)
+	if err != nil {
 		t.Fatalf("RemoveSandboxSeatHostDirs: %v", err)
+	}
+	if !deleted {
+		t.Error("deleted = false, want the seat's directories reported removed")
 	}
 
 	if exists(t, dirs.PolecatDir) {
@@ -95,10 +99,17 @@ func TestRemoveSandboxSeatHostDirsLeavesItsNeighbours(t *testing.T) {
 func TestRemoveSandboxSeatHostDirsIsIdempotent(t *testing.T) {
 	t.Parallel()
 	rigPath := t.TempDir()
+	dirs := SandboxSeatHostDirsFor(rigPath, "rig", "agate")
+	writeSeatFile(t, filepath.Join(dirs.ClonePath, "CLAUDE.md"), "seat\n")
+	writeSeatFile(t, dirs.PromptFile, "prompt\n")
 	remover := func(_, _ string) error { return nil }
 	for i := 0; i < 2; i++ {
-		if err := RemoveSandboxSeatHostDirs(rigPath, "rig", "agate", remover); err != nil {
+		deleted, err := RemoveSandboxSeatHostDirs(rigPath, "rig", "agate", remover)
+		if err != nil {
 			t.Fatalf("run %d: RemoveSandboxSeatHostDirs: %v", i+1, err)
+		}
+		if want := i == 0; deleted != want {
+			t.Errorf("run %d: deleted = %v, want %v", i+1, deleted, want)
 		}
 	}
 	if exists(t, SandboxSeatHostDirsFor(rigPath, "rig", "agate").PolecatDir) {
@@ -133,8 +144,8 @@ func TestRemoveSandboxSeatHostDirsRefusesUnsafeNames(t *testing.T) {
 				t.Error("the remover was called for a refused name")
 				return nil
 			}
-			if err := RemoveSandboxSeatHostDirs(tt.rigPath, tt.rig, tt.polecat, remover); err == nil {
-				t.Fatal("RemoveSandboxSeatHostDirs accepted an unsafe name")
+			if deleted, err := RemoveSandboxSeatHostDirs(tt.rigPath, tt.rig, tt.polecat, remover); err == nil || deleted {
+				t.Fatalf("RemoveSandboxSeatHostDirs = (deleted %v, %v), want a refusal that deleted nothing", deleted, err)
 			}
 			if !exists(t, outside) {
 				t.Error("the neighbouring polecat directory was removed")
@@ -153,9 +164,12 @@ func TestRemoveSandboxSeatHostDirsRemovesAfterAFailedDetach(t *testing.T) {
 	detachErr := errors.New("not a working tree")
 	remover := func(_, _ string) error { return detachErr }
 
-	err := RemoveSandboxSeatHostDirs(rigPath, "rig", "agate", remover)
+	deleted, err := RemoveSandboxSeatHostDirs(rigPath, "rig", "agate", remover)
 	if !errors.Is(err, detachErr) {
 		t.Fatalf("err = %v, want it to carry %v", err, detachErr)
+	}
+	if !deleted {
+		t.Error("deleted = false after the clone and its home directory went")
 	}
 	if exists(t, dirs.PolecatDir) {
 		t.Errorf("%s still exists after a failed detach", dirs.PolecatDir)
@@ -297,8 +311,12 @@ func TestRemoveSandboxSeatHostDirsWithoutARigRepository(t *testing.T) {
 	writeSeatFile(t, filepath.Join(dirs.ClonePath, "CLAUDE.md"), "seat\n")
 	writeSeatFile(t, dirs.PromptFile, "prompt\n")
 
-	if err := RemoveSandboxSeatHostDirs(rigPath, "rig", "agate", nil); err != nil {
+	deleted, err := RemoveSandboxSeatHostDirs(rigPath, "rig", "agate", nil)
+	if err != nil {
 		t.Fatalf("RemoveSandboxSeatHostDirs: %v", err)
+	}
+	if !deleted {
+		t.Error("deleted = false, want the seat's directories reported removed")
 	}
 	if exists(t, dirs.PolecatDir) {
 		t.Errorf("%s still exists", dirs.PolecatDir)
@@ -321,9 +339,12 @@ func TestRemoveSandboxSeatHostDirsReportsAFailedPrune(t *testing.T) {
 	dirs := SandboxSeatHostDirsFor(rigPath, "rig", "agate")
 	writeSeatFile(t, filepath.Join(dirs.ClonePath, "CLAUDE.md"), "seat\n")
 
-	err := removeSandboxSeatHostDirs(newWorld().opener(), rigPath, "rig", "agate", func(_, _ string) error { return nil })
+	deleted, err := removeSandboxSeatHostDirs(newWorld().opener(), rigPath, "rig", "agate", func(_, _ string) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "pruning the worktrees") {
 		t.Fatalf("err = %v, want the failed prune", err)
+	}
+	if !deleted {
+		t.Error("deleted = false, want the paths the failed prune deleted reported")
 	}
 	if exists(t, dirs.PolecatDir) {
 		t.Errorf("%s still exists after a failed prune", dirs.PolecatDir)

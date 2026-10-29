@@ -86,6 +86,36 @@ func TestShutdownCancelsContextBeforeStoppingDolt(t *testing.T) {
 	waitForSignal(t, workerReturned, "a worker blocked on d.ctx.Done() did not return when shutdown started")
 }
 
+// Shutdown closes off the sandbox seat ends in flight before it stops Dolt:
+// their remaining reads go through Dolt, and an end left running would keep
+// reading it on the way down.
+func TestShutdownStopsTheSeatEndsBeforeStoppingDolt(t *testing.T) {
+	t.Parallel()
+	d := shutdownTestDaemon(t)
+
+	stopCalled := false
+	closedBeforeStop := false
+	d.doltServer = &DoltServerManager{
+		config:   &DoltServerConfig{Enabled: true},
+		townRoot: d.config.TownRoot,
+		logger:   func(string, ...interface{}) {},
+		stopFn: func() {
+			stopCalled = true
+			closedBeforeStop = d.sandboxSeatEndStopped
+		},
+	}
+
+	if err := d.shutdown(&State{Running: true}); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if !stopCalled {
+		t.Fatal("shutdown never stopped the Dolt server it manages")
+	}
+	if !closedBeforeStop {
+		t.Error("Dolt was stopped while the seat ends could still start")
+	}
+}
+
 // The bring-up a patrol cycle calls must not start Dolt once shutdown has
 // begun; the same daemon before shutdown still starts it, so a passing test is
 // not a manager that never starts anything.
