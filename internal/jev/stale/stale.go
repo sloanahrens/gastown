@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/land"
@@ -58,8 +59,21 @@ const (
 )
 
 // skipLabels keep a bead out of the read: a bead a human owns or a handoff note
-// is not work that can be obsolete.
-var skipLabels = []string{"human-only", "overseer-only", "operator-only", "handoff", "needs-human", "needs-overseer", "needs-operator", "gt:needs-human", "gt:needs-overseer", "gt:needs-operator"}
+// is not work that can be obsolete. Each label is named by the constant that
+// owns its spelling, so a rename reaches this read too. The plain person
+// spellings have no label constant of their own; dispatch writes them by hand.
+var skipLabels = []string{
+	dispatch.HumanOnlyLabel,
+	dispatch.OverseerOnlyLabel,
+	dispatch.OperatorOnlyLabel,
+	"handoff",
+	"needs-human",
+	"needs-overseer",
+	"needs-operator",
+	land.LabelNeedsHuman,
+	land.LabelNeedsOverseer,
+	land.LabelNeedsOperator,
+}
 
 // workTypes are the issue types the pass reads. Every other type (rig,
 // molecule, agent, epic, wisp, and whatever the beads package marks
