@@ -78,5 +78,12 @@ func parseVMMapBytes(s string) int64 {
 	if err != nil || n < 0 {
 		return 0
 	}
+	if math.IsNaN(n) || math.IsInf(n, 0) {
+		return 0
+	}
+	// int64 cannot hold 2^63 bytes or more, so an overflowing size reads as zero.
+	if n*unit >= 1<<63 {
+		return 0
+	}
 	return int64(math.Round(n * unit))
 }

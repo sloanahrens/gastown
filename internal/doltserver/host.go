@@ -72,7 +72,7 @@ type host struct {
 }
 
 // std is the real machine.
-var std = &host{}
+var std = &host{probeTimeout: productionProbeTimeout}
 
 // hostCall is one command a host runs: its argv (name first), directory,
 // environment (nil inherits the process's) and stdin.
@@ -187,6 +187,20 @@ func (h *host) execCombined(cmd *exec.Cmd) ([]byte, error) {
 // ss) while it holds dolt.lock, and h.exec runs a command to completion, so a
 // hung probe would block Start — and every waiter on the lock — forever (G6).
 const probeTimeoutDefault = 5 * time.Second
+
+// footprintProbeTimeout bounds the vmmap probe behind the status footprint. The
+// footprint is a report, so a slow vmmap reads as unavailable after this long
+// instead of holding `gt dolt status` for the full probeTimeoutDefault.
+const footprintProbeTimeout = 2 * time.Second
+
+// productionProbeTimeout is the deadline the real machine gives each probe: the
+// footprint probe its own, every other probe probeTimeoutDefault.
+func productionProbeTimeout(argv []string) time.Duration {
+	if argv[0] == "vmmap" {
+		return footprintProbeTimeout
+	}
+	return 0
+}
 
 // probe runs the probe command name with args under a deadline and returns
 // what it wrote. On the real machine the process is killed when the deadline

@@ -71,6 +71,24 @@ func TestParseVMMapFootprint(t *testing.T) {
 			wantFootprint: 0,
 			wantPeak:      10952166605,
 		},
+		{
+			name:          "NaN reads as zero",
+			out:           "Physical footprint:         NaNG\nPhysical footprint (peak):  10.2G\n",
+			wantFootprint: 0,
+			wantPeak:      10952166605,
+		},
+		{
+			name:          "infinity reads as zero",
+			out:           "Physical footprint:         InfG\nPhysical footprint (peak):  10.2G\n",
+			wantFootprint: 0,
+			wantPeak:      10952166605,
+		},
+		{
+			name:          "size past int64 reads as zero",
+			out:           "Physical footprint:         1e300G\nPhysical footprint (peak):  10.2G\n",
+			wantFootprint: 0,
+			wantPeak:      10952166605,
+		},
 	}
 
 	for _, tc := range tests {
@@ -210,7 +228,51 @@ func TestGetHealthMetrics_Footprint(t *testing.T) {
 					t.Errorf("footprint warned in the status output: %q", w)
 				}
 			}
+			if !metrics.Healthy {
+				t.Errorf("footprint marked the server unhealthy: warnings %v", metrics.Warnings)
+			}
 		})
+	}
+}
+
+// A vmmap that never answers must not hold the status path: its probe gives up
+// at the deadline, the footprint reads as unavailable, and GetHealthMetrics
+// still returns.
+func TestGetHealthMetrics_HungVMMapReadsAsUnavailable(t *testing.T) {
+	t.Parallel()
+	const port = 4600
+	f := newFakeHost().townPort(port).on("dolt *", fakeReply{})
+	h := f.host()
+	h.goos = func() string { return "darwin" }
+	townRoot := testTown(t)
+	pid := f.doltServer(townRoot, port)
+	writePIDFile(t, h, townRoot, pid)
+	key := "vmmap -summary " + strconv.Itoa(pid)
+	release := f.hangOn(key)
+	defer close(release)
+
+	metrics := h.GetHealthMetrics(townRoot)
+	f.awaitHung(t, key)
+
+	if metrics.FootprintBytes != 0 || metrics.FootprintPeakBytes != 0 {
+		t.Errorf("hung vmmap reported footprint %d / peak %d, want both zero",
+			metrics.FootprintBytes, metrics.FootprintPeakBytes)
+	}
+}
+
+// The real machine gives the footprint probe a deadline of its own, under the
+// default every other probe keeps, so a slow vmmap cannot hold `gt dolt status`
+// for the full default deadline.
+func TestStdHost_FootprintProbeHasItsOwnDeadline(t *testing.T) {
+	t.Parallel()
+	if got := std.probeTimeout([]string{"vmmap", "-summary", "4711"}); got != footprintProbeTimeout {
+		t.Errorf("vmmap deadline = %v, want %v", got, footprintProbeTimeout)
+	}
+	if footprintProbeTimeout >= probeTimeoutDefault {
+		t.Errorf("footprint deadline %v is not under the default %v", footprintProbeTimeout, probeTimeoutDefault)
+	}
+	if got := std.probeTimeout([]string{"lsof", "-i"}); got != 0 {
+		t.Errorf("lsof deadline = %v, want 0 so the default applies", got)
 	}
 }
 
