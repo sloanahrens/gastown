@@ -244,3 +244,48 @@ func TestWriteLandingSidecarListsExplainOnly(t *testing.T) {
 		t.Errorf("sidecar explain_only = %v, want %v", sidecar.ExplainOnly, want)
 	}
 }
+
+// landingSidecarBytes is landings.sidecar.json's exact text: the mango stage
+// reads the file, so the bytes are the contract, not the decoded list. It is
+// tables.py's json.dump({"explain_only": sorted(EXPLAIN_ONLY)}, f, indent=1)
+// byte for byte, with no trailing newline.
+const landingSidecarBytes = `{
+ "explain_only": [
+  "attempts",
+  "file_entropy",
+  "files_touched",
+  "gate_result",
+  "lines_added",
+  "lines_deleted",
+  "lines_total",
+  "om_verdict",
+  "package_entropy",
+  "unreadable"
+ ]
+}`
+
+// TestWriteLandingSidecarExactBytes pins the sidecar's bytes, which the mango
+// stage reads off disk; a decoded comparison passes whatever the layout is.
+func TestWriteLandingSidecarExactBytes(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	if err := WriteLandingSidecar(&buf); err != nil {
+		t.Fatalf("WriteLandingSidecar: %v", err)
+	}
+	if got := buf.String(); got != landingSidecarBytes {
+		t.Errorf("sidecar bytes =\n%s\nwant\n%s", got, landingSidecarBytes)
+	}
+}
+
+// TestWriteLandingSidecarWriteErrorIsNamed checks a failed write is reported
+// as the file's, so a reader of the error knows which artifact is short.
+func TestWriteLandingSidecarWriteErrorIsNamed(t *testing.T) {
+	t.Parallel()
+	err := WriteLandingSidecar(failingWriter{})
+	if err == nil {
+		t.Fatal("WriteLandingSidecar to a failing writer returned no error")
+	}
+	if !strings.HasPrefix(err.Error(), "landings.sidecar.json:") {
+		t.Errorf("error = %q, want a landings.sidecar.json: prefix", err)
+	}
+}
