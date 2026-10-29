@@ -1,8 +1,6 @@
 package metrics
 
 import (
-	"bytes"
-	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -244,63 +242,5 @@ func TestHandoffBytesCacheSkipsCalls(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Errorf("bd calls = %d, want none for a cached bead", len(calls))
-	}
-}
-
-// ShownBeads parses `bd show --json` output into one row per bead, keeping
-// what an attribution reads: the bead's id and the last Branch line of its
-// notes. ok is false when out is not the JSON array bd show prints, so a read
-// that failed is never mistaken for a bead that names no branch.
-//
-// It is a test helper here rather than a production parser: the review
-// attribution reads its beads through the store seam (gt-uyl6d), so the package
-// has no reader of bd show's output left. The cases below keep the format's
-// parse pinned for whoever moves the last bd show read, HandoffBytes, onto the
-// seam.
-func ShownBeads(out []byte) ([]BeadRow, bool) {
-	trimmed := bytes.TrimSpace(out)
-	if len(trimmed) == 0 || trimmed[0] != '[' {
-		return nil, false
-	}
-	var shown []bdListBead
-	if err := json.Unmarshal(trimmed, &shown); err != nil {
-		return nil, false
-	}
-	rows := make([]BeadRow, 0, len(shown))
-	for _, b := range shown {
-		if b.ID == "" {
-			continue
-		}
-		rows = append(rows, BeadRow{ID: b.ID, Branch: BranchLine(b.Notes)})
-	}
-	return rows, true
-}
-
-func TestShownBeadsKeepsTheBranchAttributionReads(t *testing.T) {
-	t.Parallel()
-	shown := `[
- {"id": "gt-1", "notes": "READY TO LAND\nBranch: crew/merlin/gt-1\nHead: abc\n", "assignee": "town/crew/overseer"},
- {"id": "gt-2", "notes": "READY TO LAND\nHead: abc\n", "assignee": ""},
- {"id": "", "notes": "Branch: polecat/opal/gt-3\n"}
-]`
-	rows, ok := ShownBeads([]byte(shown))
-	if !ok {
-		t.Fatalf("ShownBeads = %v, want the array bd show prints", ok)
-	}
-	want := []BeadRow{
-		{ID: "gt-1", Branch: "crew/merlin/gt-1"},
-		{ID: "gt-2"},
-	}
-	if !reflect.DeepEqual(rows, want) {
-		t.Errorf("rows = %#v, want %#v (an entry with no id names no bead)", rows, want)
-	}
-}
-
-func TestShownBeadsRefusesAnAnswerThatIsNotTheArray(t *testing.T) {
-	t.Parallel()
-	for _, out := range []string{"", "null", `{"id":"gt-1"}`, "not json", `["gt-1"]`} {
-		if rows, ok := ShownBeads([]byte(out)); ok {
-			t.Errorf("ShownBeads(%q) = %#v, true; want a refused read, not a bead with no branch", out, rows)
-		}
 	}
 }
