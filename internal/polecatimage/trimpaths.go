@@ -166,19 +166,32 @@ func resolveClaim(root string, w trimPathsFS) (string, error) {
 	return realRoot, nil
 }
 
-// trimListFile is the claim-relative list file resolved to its real name. A file the writer never put
-// in the claim is refused as absent, and one that resolves outside the claim, through a symlink, is
-// refused rather than read.
+// trimListFile is the claim-relative list file as a name inside the claim. Its directory is resolved
+// and must lie inside the claim; the file itself must be the file a writer put there, not a link, since
+// a link would have the read and the consuming removal reach whatever it points at. A file the writer
+// never put in the claim is refused as absent.
 func trimListFile(realRoot, listPath string, w trimPathsFS) (string, error) {
-	file, err := w.resolve(filepath.Join(realRoot, filepath.FromSlash(listPath)))
+	rel := filepath.FromSlash(listPath)
+	dir, err := w.resolve(filepath.Join(realRoot, filepath.Dir(rel)))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("the trim list %s is not in the claim: a writer puts it there before the Job applies", listPath)
+		}
+		return "", fmt.Errorf("resolving the directory of the trim list %s: %w", listPath, err)
+	}
+	if !withinClaim(realRoot, dir) {
+		return "", fmt.Errorf("the trim list %s sits in %s, outside the claim at %s", listPath, dir, realRoot)
+	}
+	file := filepath.Join(dir, filepath.Base(rel))
+	resolved, err := w.resolve(file)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", fmt.Errorf("the trim list %s is not in the claim: a writer puts it there before the Job applies", listPath)
 		}
 		return "", fmt.Errorf("resolving the trim list %s: %w", listPath, err)
 	}
-	if !withinClaim(realRoot, file) {
-		return "", fmt.Errorf("the trim list %s resolves to %s, outside the claim at %s", listPath, file, realRoot)
+	if resolved != file {
+		return "", fmt.Errorf("the trim list %s is a link to %s: want the file a writer put in the claim", listPath, resolved)
 	}
 	return file, nil
 }

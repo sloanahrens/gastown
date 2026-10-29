@@ -233,6 +233,10 @@ func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 		}
 		res, err = RemoveTrimPathsFromClaim(*root, *listFile, *listSHA256, w)
 	} else {
+		if *listSHA256 != "" {
+			fmt.Fprintln(stderr, "trim-paths: --list-sha256 names a claim-carried list; give --list-file")
+			return 3
+		}
 		shards, aerr := strconv.Atoi(*shardsText)
 		if aerr != nil || shards <= 0 {
 			fmt.Fprintln(stderr, "trim-paths: --shards needs a whole number of shards, at least 1")

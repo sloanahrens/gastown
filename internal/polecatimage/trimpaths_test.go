@@ -49,6 +49,10 @@ func (f *fakeTrimFS) fs() trimPathsFS {
 			return names, nil
 		},
 		read: func(name string) ([]byte, error) {
+			// a read follows a planted link, as the disk does
+			if to, ok := f.resolves[name]; ok {
+				name = to
+			}
 			data, ok := f.files[name]
 			if !ok {
 				return nil, fs.ErrNotExist
@@ -287,6 +291,24 @@ func TestRemoveTrimPathsFromClaimRefusesAListFileOutsideTheClaim(t *testing.T) {
 	}
 }
 
+// TestRemoveTrimPathsFromClaimRefusesAListFileThatIsALink pins the case a link inside the claim is the
+// trap: the list file names a file of the claim, and consuming the list must not remove that file.
+func TestRemoveTrimPathsFromClaimRefusesAListFileThatIsALink(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	listFile := filepath.Join("/cache", filepath.FromSlash(cachevol.TrimClaimListPath))
+	victim := "/cache/gocache/ab/victim"
+	f.files[victim] = `["gocache/ab/one"]`
+	f.resolves[listFile] = victim
+	digest := digestOf([]byte(`["gocache/ab/one"]`))
+	if _, err := RemoveTrimPathsFromClaim("/cache", cachevol.TrimClaimListPath, digest, f.fs()); err == nil {
+		t.Fatal("RemoveTrimPathsFromClaim read a list file that is a link")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed: the link's target is not the list", f.removed)
+	}
+}
+
 // TestRemoveTrimPathsFromClaimRefusesADirectoryOutsideTheClaim pins the removal guard on the claim route:
 // a listed directory that resolves outside the claim through a symlink is refused, and nothing is removed.
 func TestRemoveTrimPathsFromClaimRefusesADirectoryOutsideTheClaim(t *testing.T) {
@@ -472,6 +494,22 @@ func TestTrimPathsRunRefusesAListWithAnotherDigest(t *testing.T) {
 	args := []string{"--root", "/cache", "--list-file", cachevol.TrimClaimListPath, "--list-sha256", claimListDigest("gocache/other")}
 	if code := trimPathsRun(args, &out, &errOut, f.fs()); code != 3 {
 		t.Fatalf("trimPathsRun = %d, want 3 for a list with another digest (stdout %q)", code, out.String())
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+}
+
+// TestTrimPathsRunRefusesADigestOnTheShardRoute pins that a digest names only the claim route: a run
+// given --shards and a digest has no claim list to check it against, so it trims nothing.
+func TestTrimPathsRunRefusesADigestOnTheShardRoute(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/ab/one")
+	var out, errOut bytes.Buffer
+	args := []string{"--root", "/cache", "--list", "/trim", "--shards", "1", "--list-sha256", claimListDigest("gocache/ab/one")}
+	if code := trimPathsRun(args, &out, &errOut, f.fs()); code != 3 {
+		t.Fatalf("trimPathsRun = %d, want 3 for a digest on the shard route", code)
 	}
 	if len(f.removed) != 0 {
 		t.Errorf("removed %v, want nothing removed", f.removed)
