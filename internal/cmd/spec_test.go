@@ -3249,7 +3249,7 @@ func TestSpecLintHelpNamesTheDaemonSection(t *testing.T) {
 }
 
 // TestSpecDispatchHelpNamesTheOverseerLabels: the dispatch help names each
-// overseer-first label the dispatcher skips, in both spellings it reads.
+// overseer-first label the dispatcher skips, in every spelling it reads.
 func TestSpecDispatchHelpNamesTheOverseerLabels(t *testing.T) {
 	t.Parallel()
 	// Match whole words, so the plain needs-overseer is not satisfied by
