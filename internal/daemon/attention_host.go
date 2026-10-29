@@ -89,8 +89,9 @@ type hostDisk struct {
 	FreeGB  float64
 }
 
-// hostProbes are the host reads the collectors make. Production picks between
-// the two below in attentionHostProbes; tests inject fakes.
+// hostProbes are the host reads the collectors make. attentionHostProbes
+// selects the production one: fileHostProbes (attention_host_file.go) in
+// container mode, systemHostProbes otherwise. Tests inject fakes.
 type hostProbes interface {
 	// Disk is the usage of the volume holding the town root.
 	Disk() (hostDisk, error)

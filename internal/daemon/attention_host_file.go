@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -14,14 +15,22 @@ import (
 // are refused rather than served unrefreshed.
 const fileHostProbeMaxAge = 180 * time.Second
 
+// errProbeFileRefused marks a probe file this daemon will not serve. Its cause
+// is wrapped alongside it, so the event keeps the reader's reason while a
+// caller tells a refused file from a field a probe recorded as failed without
+// matching the reader's message.
+var errProbeFileRefused = errors.New("host probe file refused")
+
 // fileHostProbes serves the attention host rules from the probe file a host
 // agent publishes, for a daemon inside a container: memory_pressure and docker
 // ps name the host, and from the container they would name its own namespace.
+// Build it with newFileHostProbes; the zero value has no path or clock.
 type fileHostProbes struct {
 	// systemHostProbes answers RigParked: the park record is a town config
 	// file, which the town root bind mount makes readable from the container.
 	systemHostProbes
-	path   string
+	path string
+	// now is the reader's clock, so a test decides what the file's age is.
 	now    func() time.Time
 	maxAge time.Duration
 }
@@ -38,14 +47,14 @@ func newFileHostProbes(townRoot string) fileHostProbes {
 }
 
 // probes reads the file as of now. A refusal — missing file, another schema,
-// a stamp too old or too far ahead — is an error, never empty readings, since
-// an empty host reads as healthy to the rules.
+// a stamp too old or too far ahead — is errProbeFileRefused, never empty
+// readings, since an empty host reads as healthy to the rules.
 func (p fileHostProbes) probes() (hostprobe.Probes, error) {
-	now := p.now
-	if now == nil {
-		now = time.Now
+	pr, err := hostprobe.Read(p.path, p.now(), p.maxAge)
+	if err != nil {
+		return hostprobe.Probes{}, fmt.Errorf("%w: %w", errProbeFileRefused, err)
 	}
-	return hostprobe.Read(p.path, now(), p.maxAge)
+	return pr, nil
 }
 
 // fieldErr turns one probe field's recorded failure into the error the rule

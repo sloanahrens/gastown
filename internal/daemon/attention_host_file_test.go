@@ -1,13 +1,18 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/townconfig"
@@ -73,29 +78,45 @@ func TestFileHostProbesRefuseAMissingOrStaleFile(t *testing.T) {
 		name  string
 		write bool
 		at    time.Time
-		want  string
+		serve bool
 	}{
-		{name: "missing file", want: "no such file"},
-		{name: "stale file", write: true, at: now.Add(-fileHostProbeMaxAge - time.Second), want: "older than the 3m0s allowed"},
+		{name: "missing file"},
+		{name: "stale file", write: true, at: now.Add(-fileHostProbeMaxAge - time.Second)},
+		// Just inside the window, so the stale row above is the age and not
+		// the file write that made it refuse.
+		{name: "file one second inside the window", write: true, at: now.Add(-fileHostProbeMaxAge + time.Second), serve: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			p := newFileHostProbes(t.TempDir())
 			if tt.write {
-				writeFileProbes(t, p, hostprobe.Probes{At: tt.at})
+				writeFileProbes(t, p, hostprobe.Probes{
+					At:         tt.at,
+					MemFreePct: hostprobe.Field[float64]{Value: 42},
+					Disk:       hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 30, FreeGB: 100}},
+					Containers: hostprobe.Field[[]string]{Value: []string{"forgejo-db-1"}},
+				})
 			}
 			p.now = func() time.Time { return now }
 			// The three probes that read the file; RigParked reads the town
 			// config, so a stopped agent costs it nothing.
-			if _, err := p.Disk(); err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("Disk error = %v; want one containing %q", err, tt.want)
+			reads := []struct {
+				probe string
+				call  func() error
+			}{
+				{hostProbeDisk, func() error { _, err := p.Disk(); return err }},
+				{hostProbeMem, func() error { _, err := p.MemFreePct(context.Background()); return err }},
+				{hostProbeDocker, func() error { _, err := p.Containers(context.Background()); return err }},
 			}
-			if _, err := p.MemFreePct(context.Background()); err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("MemFreePct error = %v; want one containing %q", err, tt.want)
-			}
-			if _, err := p.Containers(context.Background()); err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("Containers error = %v; want one containing %q", err, tt.want)
+			for _, r := range reads {
+				err := r.call()
+				switch {
+				case tt.serve && err != nil:
+					t.Errorf("%s error = %v; want the file served inside the window", r.probe, err)
+				case !tt.serve && !errors.Is(err, errProbeFileRefused):
+					t.Errorf("%s error = %v; want a refused probe file", r.probe, err)
+				}
 			}
 		})
 	}
@@ -150,6 +171,63 @@ func TestFileHostProbesReturnOneFieldsErrorOnly(t *testing.T) {
 				t.Errorf("Containers = %v, %v; want the written names, since another field failed", containers, err)
 			}
 		})
+	}
+}
+
+// A refused probe file reaches the operator: a container-mode tick with no
+// readable file raises one probe-failed item per file probe in state.json and
+// events.jsonl, through the production tick and the production selection.
+//
+// It raises no host rule. A refused file is an unknown reading, so it must not
+// read as healthy (which is why the refusal is an error) and must not read as
+// critical (which would page for a stopped agent).
+func TestAttentionHostRefusedProbeFileRaisesProbeAlarms(t *testing.T) {
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	town := t.TempDir()
+	d := &Daemon{
+		config:        &Config{TownRoot: town},
+		logger:        log.New(&bytes.Buffer{}, "", 0),
+		clock:         clockwork.NewFakeClockAt(now),
+		openWorkBeads: (&labelBeads{}).open,
+	}
+	// The mode is in the daemon's environment in production; the injected
+	// getenv selects the same branch without a process-wide setenv, which a
+	// parallel test in this package would see.
+	d.hostProbes = attentionHostProbes(town, func(string) string { return config.SupervisorContainer })
+	if _, ok := d.hostProbes.(fileHostProbes); !ok {
+		t.Fatalf("container mode selected %T, want fileHostProbes", d.hostProbes)
+	}
+
+	d.writeAttention()
+
+	st, err := attention.ReadState(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := attention.ReadEvents(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventKeys := make(map[string]bool, len(events))
+	for _, e := range events {
+		eventKeys[e.Key] = true
+	}
+	for _, probe := range []string{hostProbeDisk, hostProbeMem, hostProbeDocker} {
+		it := itemByKey(t, st, hostProbeFailedPrefix+probe)
+		if it.Kind != attention.KindHostProbe || it.Severity != attention.SeverityLow {
+			t.Errorf("%s item = %+v, want a low host-probe item", probe, it)
+		}
+		if !strings.Contains(it.Summary, errProbeFileRefused.Error()) {
+			t.Errorf("%s summary = %q, want the refusal named", probe, it.Summary)
+		}
+		if !eventKeys[it.Key] {
+			t.Errorf("no event for %q; events = %+v", it.Key, events)
+		}
+	}
+	for _, rule := range []string{hostRuleDiskWarn, hostRuleDiskCrit, hostRuleMemLow, hostRuleDockerDown} {
+		if it, ok := attention.Find(st, rule); ok {
+			t.Errorf("rule %s raised on a refused probe file: %+v", rule, it)
+		}
 	}
 }
 
