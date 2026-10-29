@@ -528,3 +528,121 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 		})
 	}
 }
+
+// The daemon.supervisor setting selects the service manager a provisioned
+// daemon runs under (docs/plans/2026-10-28-daemon-container-design.md §5): the
+// three kinds, and unset keeps the host's own detection.
+func TestDaemonPatrolConfig_SupervisorKind(t *testing.T) {
+	t.Parallel()
+
+	// The constants A3's compose file and A2's detection are built on; a
+	// rename here has to reach them.
+	if ContainerModeEnv != "GT_DAEMON_SUPERVISOR" {
+		t.Errorf("ContainerModeEnv = %q, want GT_DAEMON_SUPERVISOR", ContainerModeEnv)
+	}
+	if SupervisorContainer != "container" || SupervisorLaunchd != "launchd" || SupervisorSystemd != "systemd" {
+		t.Errorf("supervisor kinds = %q, %q, %q", SupervisorLaunchd, SupervisorSystemd, SupervisorContainer)
+	}
+
+	for _, value := range []string{SupervisorLaunchd, SupervisorSystemd, SupervisorContainer, ""} {
+		body := `{}`
+		if value != "" {
+			body = `{"supervisor":"` + value + `"}`
+		}
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+				t.Fatalf("decode %s = %v", body, err)
+			}
+			if got, err := cfg.SupervisorKind(); err != nil || got != value {
+				t.Fatalf("SupervisorKind() = %q, %v; want %q, nil", got, err, value)
+			}
+			// The rewrite carries the operator's value, so the next load reads
+			// the same kind.
+			out, err := json.Marshal(&cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hasKey := strings.Contains(string(out), `"supervisor"`)
+			if hasKey != (value != "") {
+				t.Fatalf("rewrite %s carries the key = %v, want %v", out, hasKey, value != "")
+			}
+			var reloaded DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", out, &reloaded); err != nil {
+				t.Fatalf("reload %s = %v", out, err)
+			}
+			if got, err := reloaded.SupervisorKind(); err != nil || got != value {
+				t.Errorf("after the rewrite SupervisorKind() = %q, %v; want %q, nil", got, err, value)
+			}
+		})
+	}
+}
+
+func TestDaemonPatrolConfig_SupervisorKindRefusesUnknown(t *testing.T) {
+	t.Parallel()
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"supervisor":"kube"}`), &cfg); err != nil {
+		t.Fatalf("decode = %v", err)
+	}
+	got, err := cfg.SupervisorKind()
+	if err == nil {
+		t.Fatalf("SupervisorKind() = %q, nil; want an error", got)
+	}
+	if got != "" {
+		t.Errorf("SupervisorKind() kind = %q beside the error, want empty", got)
+	}
+	for _, want := range []string{`"kube"`, SupervisorLaunchd, SupervisorSystemd, SupervisorContainer} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+}
+
+func TestDaemonPatrolConfig_ContainerNames(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name        string
+		body        string
+		wantName    string
+		wantProject string
+	}{
+		{"both unset", `{}`, "gt-town-daemon-1", "gt-town"},
+		{"both set", `{"container_name":"gt-scratch-daemon-1","compose_project":"gt-scratch"}`,
+			"gt-scratch-daemon-1", "gt-scratch"},
+		{"only the name", `{"container_name":"gt-scratch-daemon-1"}`,
+			"gt-scratch-daemon-1", "gt-town"},
+		{"only the project", `{"compose_project":"gt-scratch"}`,
+			"gt-town-daemon-1", "gt-scratch"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tt.body), &cfg); err != nil {
+				t.Fatalf("decode %s = %v", tt.body, err)
+			}
+			if got := cfg.ContainerName(); got != tt.wantName {
+				t.Errorf("ContainerName() = %q, want %q", got, tt.wantName)
+			}
+			if got := cfg.ComposeProject(); got != tt.wantProject {
+				t.Errorf("ComposeProject() = %q, want %q", got, tt.wantProject)
+			}
+		})
+	}
+}
+
+// A town whose settings omit "daemon" hands the callers a nil config; it keeps
+// the host's detection and the container defaults rather than panicking.
+func TestDaemonPatrolConfig_NilConfigKeepsDetectionAndDefaults(t *testing.T) {
+	t.Parallel()
+	var cfg *DaemonPatrolConfig
+	if got, err := cfg.SupervisorKind(); got != "" || err != nil {
+		t.Errorf("SupervisorKind() = %q, %v; want the empty kind and no error", got, err)
+	}
+	if got := cfg.ContainerName(); got != DefaultContainerName {
+		t.Errorf("ContainerName() = %q, want %q", got, DefaultContainerName)
+	}
+	if got := cfg.ComposeProject(); got != DefaultComposeProject {
+		t.Errorf("ComposeProject() = %q, want %q", got, DefaultComposeProject)
+	}
+}
