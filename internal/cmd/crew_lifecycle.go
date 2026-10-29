@@ -165,15 +165,24 @@ func runCrewRemoveWith(args []string, rigFlag string, force, purge bool, env cre
 		}
 
 		townRoot, _ := workspace.Find(r.Path)
-		if townRoot == "" {
+		townResolved := townRoot != ""
+		if !townResolved {
 			townRoot = r.Path
 		}
 
 		// The workspace is gone, so the member's tracker token ends with it; a
 		// rig on Dolt has none. The revoke is idempotent, and a failure warns
 		// rather than failing a removal that has already happened (gt-p85pw.86).
+		//
+		// It needs the town root: the route table that says which store the rig
+		// is on, and the token file, are both under it. With the root unresolved
+		// the rig path stands in for the agent-bead lookup below, but a route
+		// lookup there finds no table and reads as a rig on Dolt, which would
+		// report success without revoking; so the revoke is skipped and said so.
 		seat := seattoken.CrewSeat(r.Name, name)
-		if err := env.revokeSeat(townRoot, seat); err != nil {
+		if !townResolved {
+			env.warnf("crew remove %s: the town root of rig %s could not be resolved, so the tracker token of seat %s was not looked for or revoked", arg, r.Name, seat)
+		} else if err := env.revokeSeat(townRoot, seat); err != nil {
 			env.warnf("crew remove %s: revoking the tracker token of seat %s: %v", arg, seat, err)
 		}
 

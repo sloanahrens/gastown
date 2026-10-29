@@ -115,6 +115,37 @@ func TestCrewRemoveRevokesTheMemberSeat(t *testing.T) {
 	}
 }
 
+// A rig whose town root cannot be resolved is never read as a rig on Dolt: its
+// route lookup would find no route table and report success without revoking.
+// The revoke is skipped and the warning says why, naming the seat, and the
+// removal still succeeds because the workspace is already gone.
+func TestCrewRemoveUnresolvedTownWarnsInsteadOfReadingAsDolt(t *testing.T) {
+	t.Parallel()
+	// A rig under no town: nothing above it carries a mayor/town.json.
+	rigPath := filepath.Join(t.TempDir(), "gastown")
+	crewPath := filepath.Join(rigPath, "crew", "max")
+	if err := os.MkdirAll(crewPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	revoker := &crewRevoker{}
+	var warnings []string
+
+	err := runCrewRemoveWith([]string{"max"}, "gastown", true, false, crewRemoveEnvFor(rigPath, revoker, &warnings))
+
+	if err != nil {
+		t.Fatalf("crew remove = %v, want the removal to succeed", err)
+	}
+	if _, statErr := os.Stat(crewPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("crew workspace stat = %v, want it gone", statErr)
+	}
+	if len(revoker.actors) != 0 {
+		t.Errorf("revoked %v with no town root to read the route table or the token file from", revoker.actors)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "gastown/crew/max") || !strings.Contains(warnings[0], "town root") {
+		t.Errorf("warnings = %q, want one naming the seat and the unresolved town root", warnings)
+	}
+}
+
 // A failed revoke warns naming the seat and leaves the removal a success: the
 // workspace is already gone.
 func TestCrewRemoveRevokeFailureWarnsAndRemoves(t *testing.T) {
