@@ -5,12 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -124,11 +123,16 @@ func (p systemHostProbes) RigParked(rig string) (bool, error) {
 func (systemHostProbes) MemFreePct(ctx context.Context) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "memory_pressure").Output()
+	return memFreePctFrom(exec.CommandContext(ctx, "memory_pressure").Output())
+}
+
+// memFreePctFrom reads the free-memory figure from memory_pressure's result. A
+// failed run is an error, not a reading.
+func memFreePctFrom(out []byte, err error) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return parseMemoryPressure(string(out))
+	return hostprobe.ParseMemoryPressure(string(out))
 }
 
 func (systemHostProbes) Containers(ctx context.Context) ([]string, error) {
@@ -143,20 +147,6 @@ func (systemHostProbes) Containers(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	return parseContainerNames(string(out)), nil
-}
-
-// memFreeLine is the line of memory_pressure's output that carries the figure.
-var memFreeLine = regexp.MustCompile(`System-wide memory free percentage:\s*([0-9.]+)%`)
-
-// parseMemoryPressure reads the free-memory percentage from memory_pressure's
-// output. An output without the line is an error, never zero: a zero would read
-// as a host out of memory.
-func parseMemoryPressure(out string) (float64, error) {
-	m := memFreeLine.FindStringSubmatch(out)
-	if m == nil {
-		return 0, fmt.Errorf("no %q line in output", "System-wide memory free percentage")
-	}
-	return strconv.ParseFloat(m[1], 64)
 }
 
 // parseContainerNames splits docker ps --format {{.Names}} output into names.

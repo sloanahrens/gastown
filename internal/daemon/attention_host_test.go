@@ -469,25 +469,26 @@ func TestAttentionHostCollectorsAreRegistered(t *testing.T) {
 	}
 }
 
-func TestAttentionHostParseMemoryPressure(t *testing.T) {
+// The host probe's memory reading goes through the shared parser.
+func TestAttentionHostMemFreePctReadsSharedParser(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
-		out     string
+		out     []byte
+		runErr  error
 		want    float64
 		wantErr bool
 	}{
-		{"real output", "The system has 137438953472 (8388608 pages with a page size of 16384).\n\nStats: \nPages free: 34532 \n\nSystem-wide memory free percentage: 94%\n", 94, false},
-		{"low", "System-wide memory free percentage: 9%", 9, false},
-		{"no line is an error, not zero", "The system has 1 pages\n", 0, true},
-		{"empty", "", 0, true},
+		{"reading", []byte("System-wide memory free percentage: 9%"), nil, 9, false},
+		{"failed run", nil, errors.New("exit status 1"), 0, true},
+		{"no figure is an error, not zero", []byte("The system has 1 pages\n"), nil, 0, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseMemoryPressure(tt.out)
+			got, err := memFreePctFrom(tt.out, tt.runErr)
 			if (err != nil) != tt.wantErr || got != tt.want {
-				t.Errorf("parseMemoryPressure = %v, %v; want %v, err %v", got, err, tt.want, tt.wantErr)
+				t.Errorf("memFreePctFrom = %v, %v; want %v, err %v", got, err, tt.want, tt.wantErr)
 			}
 		})
 	}
