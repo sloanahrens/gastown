@@ -62,9 +62,10 @@ type SeedJob struct {
 
 // ObjectMeta is the subset of an object's metadata the Job sets.
 type ObjectMeta struct {
-	Name      string            `json:"name"`
-	Namespace string            `json:"namespace,omitempty"`
-	Labels    map[string]string `json:"labels,omitempty"`
+	Name        string            `json:"name"`
+	Namespace   string            `json:"namespace,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // JobSpec is the subset of a Job's spec the seed sets.
