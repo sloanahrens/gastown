@@ -51,7 +51,8 @@ func keptRule(p diskmaint.Plan, ref string) (string, bool) {
 }
 
 // checkRemoved fails unless the plan removes exactly want, in order, and keeps
-// every other entry it was given, so nothing is silently dropped.
+// every other entry it was given, so nothing is silently dropped. Volume-level
+// kept rows carry no ":" in their Ref, so only entry rows are counted.
 func checkRemoved(t *testing.T, p diskmaint.Plan, want []string, entries int) {
 	t.Helper()
 	if !slices.Equal(removed(p), want) {
@@ -60,8 +61,14 @@ func checkRemoved(t *testing.T, p diskmaint.Plan, want []string, entries int) {
 	if p.Refused != "" {
 		t.Fatalf("plan refused: %s", p.Refused)
 	}
-	if got := len(p.Kept); got != entries-len(want) {
-		t.Fatalf("kept %d rows, want %d (every entry not removed is kept)", got, entries-len(want))
+	var entryRows int
+	for _, k := range p.Kept {
+		if strings.Contains(k.Ref, ":") {
+			entryRows++
+		}
+	}
+	if entryRows != entries-len(want) {
+		t.Fatalf("kept %d entry rows, want %d (every entry not removed is kept)", entryRows, entries-len(want))
 	}
 }
 
@@ -180,9 +187,11 @@ func TestRunningJobTrimsOnlyGocacheOlderThanTheGuard(t *testing.T) {
 	if want := []string{"ci-gocache:old"}; !slices.Equal(removed(p), want) {
 		t.Fatalf("removed = %v, want %v", removed(p), want)
 	}
+	// the wording is the one the CI cache script's dry run prints.
+	const want = "a job is running; waits for a quiet run"
 	for _, ref := range []string{gomodVolume, npmVolume} {
-		if rule, ok := keptRule(p, ref); !ok || rule != ruleJobWaits {
-			t.Fatalf("%s kept under %q (kept=%v), want %q", ref, rule, ok, ruleJobWaits)
+		if rule, ok := keptRule(p, ref); !ok || rule != want {
+			t.Fatalf("%s kept under %q (kept=%v), want %q", ref, rule, ok, want)
 		}
 	}
 }
@@ -225,6 +234,48 @@ func TestUnsafePathsRefuseTheWholePlan(t *testing.T) {
 				t.Fatalf("refused plan carries rows: actions=%v kept=%v", removed(p), p.Kept)
 			}
 		})
+	}
+}
+
+func TestDotsInsideANameDoNotRefuseThePlan(t *testing.T) {
+	t.Parallel()
+	// "cache..v1" holds ".." but no ".." segment, so it is an ordinary entry.
+	// It is the oldest and covers the 4 GB need, so it is the one removal.
+	vol := volume(gocacheVolume, 9, file("cache..v1", 9*day, 4*gb), file("b", 1*day, gb))
+	p := BuildPlan(quiet(vol))
+	if p.Refused != "" {
+		t.Fatalf("plan refused for a name containing \"..\": %s", p.Refused)
+	}
+	if want := []string{"ci-gocache:cache..v1"}; !slices.Equal(removed(p), want) {
+		t.Fatalf("removed = %v, want %v", removed(p), want)
+	}
+}
+
+func TestOverCapWithoutEnoughRemovableEntriesExplainsItself(t *testing.T) {
+	t.Parallel()
+	const want = "over 8 GB cap at 9.0 GB; the removable entries do not reach the 5 GB target"
+	tests := map[string]VolumeInput{
+		"no entries": volume(gocacheVolume, 9),
+		// need is 4 GB; 2 GB exists, so every candidate goes and the volume is still over target.
+		"short of need": volume(gocacheVolume, 9, file("a", 1*day, gb), file("b", 2*day, gb)),
+	}
+	for name, vol := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			p := BuildPlan(quiet(vol))
+			if rule, ok := keptRule(p, gocacheVolume); !ok || rule != want {
+				t.Fatalf("volume kept under %q (kept=%v), want %q", rule, ok, want)
+			}
+		})
+	}
+}
+
+func TestOverCapReachingTargetHasNoVolumeRow(t *testing.T) {
+	t.Parallel()
+	// need is 4 GB; the 4 GB entry meets it, so the volume has no shortfall row.
+	p := BuildPlan(quiet(volume(gocacheVolume, 9, file("a", 1*day, 4*gb))))
+	if _, ok := keptRule(p, gocacheVolume); ok {
+		t.Fatalf("volume has a shortfall row although the target was reached")
 	}
 }
 
