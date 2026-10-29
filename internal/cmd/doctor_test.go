@@ -49,6 +49,17 @@ func TestDoctorRegistersRigBDBinaryCheck(t *testing.T) {
 	t.Fatal("expected the rig-bd-binary check in the default doctor set")
 }
 
+func TestDoctorRegistersTrackerCheck(t *testing.T) {
+	t.Parallel()
+	d := newDoctorForCommand("")
+	for _, check := range d.Checks() {
+		if check.Name() == "tracker" {
+			return
+		}
+	}
+	t.Fatal("expected the tracker check in the default doctor set")
+}
+
 func TestDoctorRegistersOpenShellGatewayCheck(t *testing.T) {
 	t.Parallel()
 	d := newDoctorForCommand("")
