@@ -162,11 +162,12 @@ func (t *Target) checkClosed(ctx context.Context, path string) error {
 	}
 }
 
-// cause is the error under a path error, which carries the ref in its text.
-// The record must not quote plan text, so a failure reports the cause alone.
+// cause is the innermost error under err, which carries the ref in its text
+// wherever a wrap put it. The record must not quote plan text, so a failure
+// reports the cause alone.
 func cause(err error) error {
-	if under := errors.Unwrap(err); under != nil {
-		return under
+	for under := errors.Unwrap(err); under != nil; under = errors.Unwrap(err) {
+		err = under
 	}
 	return err
 }

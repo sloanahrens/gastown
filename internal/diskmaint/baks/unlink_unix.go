@@ -2,11 +2,11 @@
 
 package baks
 
-import "golang.org/x/sys/unix"
+import "syscall"
 
 // unlinkFile removes path as a file and never as a directory. os.Remove falls
 // back to rmdir when unlink fails, so a directory that replaced the file between
 // the check and the removal would be deleted; an unlink fails on it instead.
 func unlinkFile(path string) error {
-	return unix.Unlink(path)
+	return syscall.Unlink(path)
 }
