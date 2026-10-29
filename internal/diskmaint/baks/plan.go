@@ -5,6 +5,7 @@ package baks
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -74,7 +75,8 @@ type Input struct {
 
 // BuildPlan decides which backups may be removed. A config copy is removed
 // only when it is outside the newest configKeep copies of its file and older
-// than configYoung. A binary copy is removed only when it is outside the newest
+// than configYoung; its file is the name in its own directory, so the same
+// name under two directories is two files with two keep counts. A binary copy is removed only when it is outside the newest
 // binaryKeep copies of its binary. A bd.<sha> is removed only when the
 // installed bd is newer than it. An entry that is open is never removed, and
 // still counts toward its group's keep count. Everything not removed is kept
@@ -95,15 +97,30 @@ func BuildPlan(in Input) diskmaint.Plan {
 	return plan
 }
 
-// planConfig decides config copies, grouped by the text before their first .bak.
+// groupKey names one file's backups: the directory they live in and the name
+// they share. Two files with the same name in different directories are
+// different files, each with its own keep count.
+type groupKey struct {
+	Dir  string
+	Stem string
+}
+
+// keyOf is the group e belongs to, its stem being the text before marker.
+func keyOf(e Entry, marker string) groupKey {
+	stem, _, _ := strings.Cut(e.Name, marker)
+	return groupKey{Dir: filepath.Dir(e.Path), Stem: stem}
+}
+
+// planConfig decides config copies, grouped by their directory and the text
+// before their first .bak.
 func planConfig(plan *diskmaint.Plan, entries []Entry, now time.Time) {
-	groups := map[string][]Entry{}
+	groups := map[groupKey][]Entry{}
 	for _, e := range entries {
 		if !strings.Contains(e.Name, configMarker) {
 			keep(plan, e, ruleLive)
 			continue
 		}
-		key, _, _ := strings.Cut(e.Name, configMarker)
+		key := keyOf(e, configMarker)
 		groups[key] = append(groups[key], e)
 	}
 
@@ -116,24 +133,24 @@ func planConfig(plan *diskmaint.Plan, entries []Entry, now time.Time) {
 			case now.Sub(e.ModTime) < configYoung:
 				keep(plan, e, fmt.Sprintf("younger than %dd", configYoungDays))
 			case i < configKeep:
-				keep(plan, e, fmt.Sprintf("newest %d of %s", configKeep, key))
+				keep(plan, e, fmt.Sprintf("newest %d of %s", configKeep, key.Stem))
 			default:
-				remove(plan, e, fmt.Sprintf("rule: older than %dd and outside the newest %d of %s", configYoungDays, configKeep, key))
+				remove(plan, e, fmt.Sprintf("rule: older than %dd and outside the newest %d of %s", configYoungDays, configKeep, key.Stem))
 			}
 		}
 	}
 }
 
-// planBinaries decides binary copies: the .bak-* backups per binary, the
-// stand-alone bd.<sha> builds, and the installed binary and anything else, which
-// are kept.
+// planBinaries decides binary copies: the .bak-* backups per directory and
+// binary, the stand-alone bd.<sha> builds, and the installed binary and anything
+// else, which are kept.
 func planBinaries(plan *diskmaint.Plan, entries []Entry, installed map[string]time.Time) {
-	groups := map[string][]Entry{}
+	groups := map[groupKey][]Entry{}
 	var shas, others []Entry
 	for _, e := range entries {
 		switch {
 		case strings.Contains(e.Name, binaryMarker):
-			key, _, _ := strings.Cut(e.Name, binaryMarker)
+			key := keyOf(e, binaryMarker)
 			groups[key] = append(groups[key], e)
 		case shaName.MatchString(e.Name):
 			shas = append(shas, e)
@@ -149,9 +166,9 @@ func planBinaries(plan *diskmaint.Plan, entries []Entry, installed map[string]ti
 			case e.OpenBy != "":
 				keep(plan, e, openRule(e))
 			case i < binaryKeep:
-				keep(plan, e, fmt.Sprintf("newest %d of %s", binaryKeep, key))
+				keep(plan, e, fmt.Sprintf("newest %d of %s", binaryKeep, key.Stem))
 			default:
-				remove(plan, e, fmt.Sprintf("rule: outside the newest %d of %s", binaryKeep, key))
+				remove(plan, e, fmt.Sprintf("rule: outside the newest %d of %s", binaryKeep, key.Stem))
 			}
 		}
 	}
