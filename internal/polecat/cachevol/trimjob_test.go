@@ -366,6 +366,31 @@ func TestBuildTrimManifestRefusesASplitJobNamePastTheLabelLimit(t *testing.T) {
 	}
 }
 
+// TestTrimRunsRefusesASplitJobNameWithATwoDigitRunIndex pins the name limit at the first run index
+// that takes two digits. The runs are rendered from the shard list, so synthetic shards reach run 10
+// without building the 80 MB of real list that many shards would take.
+func TestTrimRunsRefusesASplitJobNameWithATwoDigitRunIndex(t *testing.T) {
+	t.Parallel()
+	shards := make([]TrimShard, 10*TrimMaxShards+1)
+
+	// Run 10 takes the suffix "-10", three characters, so 60 characters is the longest name it can take.
+	if _, err := trimRuns(trimInput(), strings.Repeat("a", 60), nil, shards); err != nil {
+		t.Errorf("trimRuns with a 60-character name over 11 runs: %v, want the suffixed name to fit", err)
+	}
+	if _, err := trimRuns(trimInput(), strings.Repeat("a", 61), nil, shards); err == nil {
+		t.Errorf("trimRuns with a 61-character name over 11 runs, want a refusal at run 10")
+	}
+}
+
+// TestTrimRunsRefusesAListWithNoShard pins the refusal of a manifest with no Job: a list with no shard
+// would apply as a success that trims nothing.
+func TestTrimRunsRefusesAListWithNoShard(t *testing.T) {
+	t.Parallel()
+	if runs, err := trimRuns(trimInput(), DefaultTrimJobName, nil, nil); err == nil {
+		t.Errorf("trimRuns with no shards = %d runs, want a refusal", len(runs))
+	}
+}
+
 // TestBuildTrimManifestAppliesTheShardsBeforeTheJob pins the manifest's apply order and that the two
 // halves agree: every shard it returns is mounted by the Job it returns, so a caller applying the
 // documents in order can never leave a shard behind.

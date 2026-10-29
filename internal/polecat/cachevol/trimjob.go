@@ -190,6 +190,11 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 // run. A list that fits one run keeps the Job's name; a longer one names each Job by its run index,
 // so every Job is its own object and no pod mounts more shards than the route was sized for.
 func trimRuns(in TrimJobInput, name string, annotations map[string]string, shards []TrimShard) ([]trimRun, error) {
+	// A Job with no shard mounts nothing and trims nothing, yet would apply as a success, so an empty
+	// list is refused here rather than returned as a manifest with no Job.
+	if len(shards) == 0 {
+		return nil, fmt.Errorf("the trim Job on %s has no shard to mount: want the removal list's shards, so a Job never applies with nothing to trim", in.ClaimName)
+	}
 	var runs []trimRun
 	for start := 0; start < len(shards); start += TrimMaxShards {
 		end := start + TrimMaxShards
