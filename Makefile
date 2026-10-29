@@ -1,4 +1,4 @@
-.PHONY: build install install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches openshell-providers
+.PHONY: build install gt-installer install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches openshell-providers
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -318,19 +318,29 @@ check-install-path:
 		echo '  export PATH="$(INSTALL_DIR):$$PATH"'; \
 	fi
 
-# install: THE way to install gt into a town (gt-z0l3s). Runs
-# scripts/install-gt.sh, which installs origin/main (SHA=<ref> picks another
-# merged commit) from <town>/gastown/mayor/rig whichever clone you run it in:
-# lock, fast-forward, build, atomic swap, smoke check with rollback, formula
-# and plugin sync, then daemon/restart-pending.json — the daemon restarts
-# itself once idle. It never kickstarts the daemon. Exit codes 0 installed or
-# already current, 1 failed (rolled back), 2 refused, 3 busy (retry later).
-install:
-	@bash $(CURDIR)/scripts/install-gt.sh $(if $(SHA),--sha $(SHA))
+# install: THE way to install gt into a town (gt-z0l3s). Builds the Go
+# installer (cmd/gt-installer) from this checkout and runs it; it installs
+# origin/main (SHA=<ref> picks another merged commit) from
+# <town>/gastown/mayor/rig whichever clone you run it in: lock, fast-forward,
+# build, atomic swap, smoke check with rollback, formula and plugin sync, then
+# daemon/restart-pending.json — the daemon restarts itself once idle. It never
+# kickstarts the daemon. Exit codes 0 installed or already current, 1 failed
+# (rolled back), 2 refused, 3 busy (retry later).
+install: gt-installer
+	@./gt-installer $(if $(SHA),--sha $(SHA))
+
+# gt-installer: the Go installer `make install` builds and runs (gt-tpg0p.14).
+# The binary is always ./gt-installer, the path the daemon's rebuild_gt job
+# runs, so BUILD_DIR does not move it. Phony, so a binary left by an earlier
+# checkout is never what installs. CGO_ENABLED=0: the installer links no cgo
+# package. -buildvcs=false: nothing reads the VCS stamp, so the build needs no
+# git metadata.
+gt-installer:
+	CGO_ENABLED=0 go build -buildvcs=false -o ./gt-installer ./cmd/gt-installer
 
 # install-local: build THIS checkout and swap it into $(INSTALL_DIR). No daemon
 # restart, no plugin sync, no lock. For a machine with no town yet (README,
-# docs/INSTALLING.md); in a town it is install-gt.sh's build step, not a way
+# docs/INSTALLING.md); in a town it is the installer's build step, not a way
 # to deploy — use make install.
 install-local: check-up-to-date check-forward-only build
 	@# Atomic replace (temp + rename). Do NOT go back to `rm -f` then `cp`:

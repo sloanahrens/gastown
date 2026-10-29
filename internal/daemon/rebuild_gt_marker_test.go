@@ -36,8 +36,8 @@ func rebuildGTMarkerRun(t *testing.T, reply cliReply) (during, after *installpen
 			return cliReply{stdout: "main\n"}
 		case gitSub(c, "rev-parse"):
 			return cliReply{stdout: "abc1234567890\n"}
-		case c.name == "bash":
-			// install-gt is running now: this is the window a reader outside
+		case c.name == "gt-installer":
+			// The installer is running now: this is the window a reader outside
 			// the job must see the install in.
 			during = pendingMarker(t, d)
 			return reply
@@ -119,7 +119,7 @@ func TestRebuildGT_KeepsPendingMarkerWhenTheCycleDefers(t *testing.T) {
 	if settled := d.runRebuildGT(); settled {
 		t.Fatal("a cycle that yielded to a busy gate accomplished nothing")
 	}
-	if installs := installCalls(cli); len(installs) != 0 {
+	if installs := gtInstallerCalls(cli); len(installs) != 0 {
 		t.Fatalf("installed beside a running gate suite: %v", installs)
 	}
 	if m := pendingMarker(t, d); m == nil {
@@ -141,7 +141,7 @@ func TestRebuildGT_UnwritableMarkerDoesNotStopTheInstall(t *testing.T) {
 			return cliReply{stdout: "main\n"}
 		case gitSub(c, "rev-parse"):
 			return cliReply{stdout: "abc1234567890\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
 		}
 		return cliReply{}
@@ -151,7 +151,7 @@ func TestRebuildGT_UnwritableMarkerDoesNotStopTheInstall(t *testing.T) {
 	if settled := d.runRebuildGT(); !settled {
 		t.Fatal("an install beside an unusable marker path reached its verdict")
 	}
-	if installs := installCalls(cli); len(installs) != 1 {
+	if installs := gtInstallerCalls(cli); len(installs) != 1 {
 		t.Fatalf("installs = %v, want the one the marker path must not block", installs)
 	}
 }
@@ -171,7 +171,7 @@ func TestRebuildGT_EscalatesAMarkerItCannotWrite(t *testing.T) {
 			return cliReply{stdout: "main\n"}
 		case gitSub(c, "rev-parse"):
 			return cliReply{stdout: "abc1234567890\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
 		}
 		return cliReply{}
@@ -199,7 +199,7 @@ func TestRebuildGT_ClearsTheMarkerWriteAlertOnceTheMarkerIsWritten(t *testing.T)
 			return cliReply{stdout: "main\n"}
 		case gitSub(c, "rev-parse"):
 			return cliReply{stdout: "abc1234567890\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
 		}
 		return cliReply{}
@@ -251,7 +251,7 @@ func TestRebuildGT_RefreshesTheMarkerAcrossTheGateWait(t *testing.T) {
 			return cliReply{stdout: "main\n"}
 		case gitSub(c, "rev-parse"):
 			return cliReply{stdout: "abc1234567890\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			during = pendingMarker(t, d)
 			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
 		}
@@ -285,7 +285,7 @@ func TestRebuildGT_EscalatesAMarkerItCannotClear(t *testing.T) {
 			return cliReply{stdout: "main\n"}
 		case gitSub(c, "rev-parse"):
 			return cliReply{stdout: "abc1234567890\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			// The marker stood before install-gt ran; replace it with debris
 			// that Clear cannot remove.
 			replacePendingMarkerWithADirectory(t, d)
@@ -318,7 +318,7 @@ func TestRebuildGT_ClearsTheMarkerClearAlertOnceTheMarkerIsGone(t *testing.T) {
 			return cliReply{stdout: "main\n"}
 		case gitSub(c, "rev-parse"):
 			return cliReply{stdout: "abc1234567890\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			if cycles == 0 {
 				replacePendingMarkerWithADirectory(t, d)
 			}

@@ -688,19 +688,6 @@ func TestOwnedPathThatIsNotARealInstallerDirectoryIsRefused(t *testing.T) {
 	}
 }
 
-// ownedPrefix is the name scripts/install-gt.sh gives the helper directory; the
-// two are one fact written twice, so this keeps them from drifting (gt-p5pjs).
-func TestOwnedPrefixMatchesTheInstallersTemplate(t *testing.T) {
-	t.Parallel()
-	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "install-gt.sh"))
-	if err != nil {
-		t.Fatalf("reading the installer: %v", err)
-	}
-	if want := ownedPrefix + "XXXXXX"; !strings.Contains(string(script), want) {
-		t.Errorf("scripts/install-gt.sh has no mktemp template %q, so --owned would refuse the directory it makes", want)
-	}
-}
-
 // A detached build's escalation is its only report to the town (gt-vhn89), so
 // the alarm's stop must carry the fingerprint a stalled image is found by.
 func TestStoppedBuildEscalatesAsExit124(t *testing.T) {

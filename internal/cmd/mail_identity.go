@@ -91,7 +91,7 @@ func localBeadsWorkDir(cwd, envBeadsDir string) (string, error) {
 //
 // Step 3 exists because the town runs gt on its own behalf, not as an agent:
 // daemonGTEnv drops every identity variable and sets BD_ACTOR=daemon before
-// the daemon forks a child (gt-kyik6), and install-gt.sh does the same with
+// the daemon forks a child (gt-kyik6), and the installer does the same with
 // BD_ACTOR=installer. Without this step those children reached step 4, whose
 // "overseer" default named the human operator as the sender of mail and the
 // escalator of escalations the daemon raised — an automated alert misattributed

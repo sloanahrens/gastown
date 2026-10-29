@@ -298,7 +298,7 @@ type Daemon struct {
 	rebuildGTInstallYieldFn func() time.Duration
 	// rebuildGTPendingFn answers where the pending-install marker lives; nil is
 	// installpending.StoreFor(townRoot), which honors INSTALL_GT_DAEMON_DIR the
-	// way scripts/install-gt.sh does. Tests point it at their own temp file, so
+	// way the Go installer does. Tests point it at their own temp file, so
 	// no test can reach the operator's marker through that variable (gt-vc34c).
 	rebuildGTPendingFn func() installpending.Store
 

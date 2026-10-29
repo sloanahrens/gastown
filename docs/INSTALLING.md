@@ -462,17 +462,18 @@ gt doctor                  # Post-update health checks (read-only)
 
 If you installed from source and a town is running, `make install` is the one
 way to update `gt`, whether you are a human, a crew session or an automation.
-Run it from any gastown clone in the town, with no arguments. It runs
-`scripts/install-gt.sh`, which installs the latest `origin/main`. `SHA=<ref>`
-picks another merged commit. The script works under a lock. It fast-forwards
-`<town>/gastown/mayor/rig`, builds there, and swaps the binary atomically. A
-smoke check follows, and if it fails the script rolls back to `gt.prev`. It
-then syncs formulas and plugins; plugin sync leaves runtime-only plugin edits
-untouched. Finally it writes `daemon/restart-pending.json`, and the daemon
-restarts itself once idle. It never kills the daemon. Exit codes: 0 installed
-or already current, 1 failed and rolled back, 2 refused (mayor/rig dirty,
-diverged or not forward), 3 busy (retry). The daemon's `rebuild_gt` job calls
-the same script as a backstop, whenever the installed binary falls behind main
+Run it from any gastown clone in the town, with no arguments. It builds the
+Go installer (`cmd/gt-installer`) and runs it; it installs the latest
+`origin/main`. `SHA=<ref>` picks another merged commit. The install works under
+a lock. It fast-forwards `<town>/gastown/mayor/rig`, builds there, and swaps
+the binary atomically. A smoke check follows, and if it fails the install
+rolls back to `gt.prev`. It then syncs formulas and plugins; plugin sync
+leaves runtime-only plugin edits untouched. Finally it writes
+`daemon/restart-pending.json`, and the daemon restarts itself once idle. It
+never kills the daemon. Exit codes: 0 installed or already current, 1 failed
+and rolled back, 2 refused (mayor/rig dirty, diverged or not forward), 3 busy
+(retry). The daemon's `rebuild_gt` job builds and runs the same installer as a
+backstop, whenever the installed binary falls behind main
 and the town is quiet. A landing's install request waits until 30 minutes
 after the last install that swapped a binary — a cycle that found nothing to
 install, refused, failed or installed a noop does not start that window (set

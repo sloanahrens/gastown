@@ -249,7 +249,7 @@ fi
 unset rc
 
 # Both set: INSTALL_GT_BIN_DIR is the install binary's own variable and wins,
-# exactly as in install-gt.sh (gt-tcigd). INSTALL_DIR points at the live-style
+# exactly as in the gt installer (gt-tcigd). INSTALL_DIR points at the live-style
 # directory here, so a run that honored it would empty ~/.local/bin.
 setup
 out="$(run_uninstall "HOME=$HOME_DIR" "GT_TOWN_ROOT=$WORK_DIR/no-such-town" \

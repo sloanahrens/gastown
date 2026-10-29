@@ -1558,7 +1558,7 @@ func TestFailedRestartStampReleasesThePendingFlag(t *testing.T) {
 }
 
 // TestStampRestartAttemptDoesNotOverwriteANewerMarker pins gt-oyrav (D9):
-// install-gt.sh replaces daemon/restart-pending.json with a newer install's
+// the installer replaces daemon/restart-pending.json with a newer install's
 // marker, and this stamp reads, edits and renames the same path. A marker
 // swapped between the read and the rename must survive: renaming the older one
 // back over it would clear a request for an install the daemon has not run.
@@ -1589,7 +1589,7 @@ func TestStampRestartAttemptDoesNotOverwriteANewerMarker(t *testing.T) {
 }
 
 // clearCoveredMarker removes a marker by path after a git ancestry check.
-// install-gt.sh writing a newer marker in between must survive: removing it
+// the installer writing a newer marker in between must survive: removing it
 // would leave the daemon on the old binary with no request left to restart for.
 func TestClearCoveredMarker(t *testing.T) {
 	t.Parallel()

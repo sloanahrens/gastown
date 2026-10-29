@@ -17,7 +17,7 @@ import (
 )
 
 // openShellLaunchdLabel is the launchd agent that keeps the OpenShell gateway
-// running; scripts/install-gt.sh installs it beside the daemon unit.
+// running; the installer installs it beside the daemon unit.
 const openShellLaunchdLabel = "com.gastown.openshell-gateway"
 
 // openShellCheckTimeout bounds each command the check runs.

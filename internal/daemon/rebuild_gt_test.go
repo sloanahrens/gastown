@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"context"
+	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -24,12 +27,13 @@ func rebuildGTTown(t *testing.T) (*Daemon, *notifyfake.Recorder) {
 	t.Helper()
 	d, rec := daemonWithRecorder(t)
 	repoRoot := filepath.Join(d.config.TownRoot, "gastown")
-	mkdirs(t, filepath.Join(repoRoot, "cmd", "gt"), filepath.Join(repoRoot, "scripts"))
+	mkdirs(t, filepath.Join(repoRoot, "cmd", "gt"), filepath.Join(repoRoot, "cmd", "gt-installer"))
 	writeFile(t, filepath.Join(repoRoot, "cmd", "gt", "main.go"), "package main\n")
-	// The fake CLI answers every bash call and rebuildGTInstall only stats the
-	// path, so the installer is inert text: a shebang here would make the file
-	// look like an executable, which the test policy forbids (no-exec-files).
-	writeFile(t, filepath.Join(repoRoot, "scripts", "install-gt.sh"), "stub: the fake CLI answers this call\n")
+	// The fake CLI answers every make and installer call, and rebuildGTInstall
+	// only stats the source, so the program is never built or run. The source
+	// is inert text: a shebang here would make the file look like an executable,
+	// which the test policy forbids (no-exec-files).
+	writeFile(t, filepath.Join(repoRoot, "cmd", "gt-installer", "main.go"), "package main\n")
 	// The pending-install marker stays in the town's own temp dir: resolving it
 	// from the environment would let a test reach whatever INSTALL_GT_DAEMON_DIR
 	// names on the operator's machine (gt-vc34c).
@@ -49,12 +53,36 @@ func withRebuildGTCli(t *testing.T, d *Daemon, answer func(c cliCall) cliReply) 
 	return cli
 }
 
-// installCalls returns every install-gt.sh invocation the cycle made.
+// gtInstallerCalls returns every run of the gt installer the cycle made. The
+// build target that produces the program is a `make` call and is not one.
+func gtInstallerCalls(cli *fakeCLI) [][]string {
+	var out [][]string
+	for _, c := range cli.recorded() {
+		if c.name == "gt-installer" {
+			out = append(out, c.args)
+		}
+	}
+	return out
+}
+
+// installCalls returns every shell install invocation the cycle made; the
+// rebuild_om job runs its install script that way.
 func installCalls(cli *fakeCLI) [][]string {
 	var out [][]string
 	for _, c := range cli.recorded() {
 		if c.name == "bash" {
 			out = append(out, c.args)
+		}
+	}
+	return out
+}
+
+// buildInstallerCalls returns the `make gt-installer` invocations a cycle made.
+func buildInstallerCalls(cli *fakeCLI) []cliCall {
+	var out []cliCall
+	for _, c := range cli.recorded() {
+		if c.name == "make" && len(c.args) > 0 && c.args[0] == "gt-installer" {
+			out = append(out, c)
 		}
 	}
 	return out
@@ -104,7 +132,7 @@ func TestRebuildGTCycle_InstallsWhenDueAndQuiet(t *testing.T) {
 		case gitSub(c, "log"):
 			return cliReply{stdout: "abc1234 the commit that was inert\n"}
 		}
-		if c.name == "bash" {
+		if c.name == "gt-installer" {
 			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
 		}
 		return cliReply{}
@@ -114,7 +142,7 @@ func TestRebuildGTCycle_InstallsWhenDueAndQuiet(t *testing.T) {
 		t.Fatal("a completed install must hold the interval, not retry the next heartbeat")
 	}
 
-	installs := installCalls(cli)
+	installs := gtInstallerCalls(cli)
 	if len(installs) != 1 {
 		t.Fatalf("install calls = %v, want exactly one", installs)
 	}
@@ -126,6 +154,27 @@ func TestRebuildGTCycle_InstallsWhenDueAndQuiet(t *testing.T) {
 	}
 	if s := strings.Join(installs[0], " "); strings.Contains(s, "--slot-role") {
 		t.Errorf("a quiet town must not reserve a gate slot: %q", s)
+	}
+	// The program that runs is the one the Makefile target built, in the
+	// synced checkout, and it is built before it runs (gt-tpg0p.14).
+	builds := buildInstallerCalls(cli)
+	if len(builds) != 1 {
+		t.Fatalf("make gt-installer calls = %v, want exactly one", builds)
+	}
+	if want := filepath.Join(d.config.TownRoot, "gastown"); builds[0].dir != want {
+		t.Errorf("make gt-installer ran in %q, want the synced checkout %q", builds[0].dir, want)
+	}
+	built, ran := -1, -1
+	for i, c := range cli.recorded() {
+		if built < 0 && c.name == "make" && len(c.args) > 0 && c.args[0] == "gt-installer" {
+			built = i
+		}
+		if ran < 0 && c.name == "gt-installer" {
+			ran = i
+		}
+	}
+	if built < 0 || ran < 0 || built > ran {
+		t.Errorf("the installer ran at call %d with its build at %d; the build must come first", ran, built)
 	}
 	if esc := rec.Escalations(); len(esc) != 0 {
 		t.Errorf("a clean install escalated: %+v", esc)
@@ -149,7 +198,7 @@ func TestRebuildGTCycle_DirtyCheckoutDoesNotInstall(t *testing.T) {
 	if settled := d.runRebuildGT(); !settled {
 		t.Fatal("a refusal a retry cannot fix holds the interval")
 	}
-	if installs := installCalls(cli); len(installs) != 0 {
+	if installs := gtInstallerCalls(cli); len(installs) != 0 {
 		t.Errorf("a dirty checkout was built from: %v", installs)
 	}
 }
@@ -172,7 +221,7 @@ func TestRebuildGTCycle_DefersWhileAGateHoldsTheSlot(t *testing.T) {
 	if settled := d.runRebuildGT(); settled {
 		t.Fatal("a deferral must leave the gate open so the next heartbeat retries")
 	}
-	if installs := installCalls(cli); len(installs) != 0 {
+	if installs := gtInstallerCalls(cli); len(installs) != 0 {
 		t.Errorf("built while a gate held the slot: %v", installs)
 	}
 }
@@ -200,7 +249,7 @@ func TestRebuildGTCycle_WaitsOutAGatePastTheStarveCliff(t *testing.T) {
 		switch {
 		case gitSub(c, "branch"):
 			return cliReply{stdout: "main\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "install-gt: RESULT installed abc123 - -\n"}
 		}
 		return cliReply{}
@@ -211,7 +260,7 @@ func TestRebuildGTCycle_WaitsOutAGatePastTheStarveCliff(t *testing.T) {
 	if settled := d.runRebuildGT(); !settled {
 		t.Fatal("a completed install holds the interval")
 	}
-	installs := installCalls(cli)
+	installs := gtInstallerCalls(cli)
 	if len(installs) != 1 {
 		t.Fatalf("install calls = %v, want one", installs)
 	}
@@ -240,7 +289,7 @@ func TestRebuildGTCycle_DeferredInstallRetriesNextHeartbeat(t *testing.T) {
 		switch {
 		case gitSub(c, "branch"):
 			return cliReply{stdout: "main\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "install-gt: RESULT refused - - slot-busy\n", code: 3}
 		}
 		return cliReply{}
@@ -286,7 +335,7 @@ func TestRebuildGTCycle_FailedFetchDoesNotReadAsFresh(t *testing.T) {
 			if settled := d.runRebuildGT(); settled {
 				t.Fatal("a failed fetch accomplished nothing and must retry next heartbeat")
 			}
-			if installs := installCalls(cli); len(installs) != 0 {
+			if installs := gtInstallerCalls(cli); len(installs) != 0 {
 				t.Errorf("installed past a failed fetch, against an unverified main ref: %v", installs)
 			}
 			if clears := rec.Clears(); len(clears) != 0 {
@@ -296,6 +345,38 @@ func TestRebuildGTCycle_FailedFetchDoesNotReadAsFresh(t *testing.T) {
 				t.Errorf("a deferral escalated: %+v", esc)
 			}
 		})
+	}
+}
+
+// TestRebuildGTCycle_InstallerThatCannotStartEscalates pins the start split: a
+// program the OS refuses to start never ran, so it was not killed and it
+// reported nothing. The next heartbeat would fail the same way, so the cycle
+// escalates instead of deferring it as a kill (gt-tpg0p.14).
+func TestRebuildGTCycle_InstallerThatCannotStartEscalates(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		if gitSub(c, "branch") {
+			return cliReply{stdout: "main\n"}
+		}
+		return cliReply{}
+	})
+	answer := d.execCmd
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if filepath.Base(cmd.Path) == "gt-installer" {
+			return nil, nil, &exec.Error{Name: "gt-installer", Err: fs.ErrPermission}
+		}
+		return answer(cmd)
+	}
+
+	if settled := d.runRebuildGT(); !settled {
+		t.Fatal("an installer that cannot start was deferred as a kill; it must escalate")
+	}
+	esc := rec.Escalations()
+	if len(esc) != 1 || esc[0].Escalation.Fingerprint != alertKeyRebuildGTInstallFail {
+		t.Fatalf("escalations = %+v, want one under %s", esc, alertKeyRebuildGTInstallFail)
 	}
 }
 
@@ -312,7 +393,7 @@ func TestRebuildGTCycle_KilledInstallRetriesNextHeartbeat(t *testing.T) {
 		switch {
 		case gitSub(c, "branch"):
 			return cliReply{stdout: "main\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "building gt...\n", code: -1}
 		}
 		return cliReply{}
@@ -332,7 +413,7 @@ func TestRebuildGTCycle_KilledInstallRetriesNextHeartbeat(t *testing.T) {
 	if !d.rebuildGTRequested.Load() {
 		t.Fatal("a killed install cleared the request; the next heartbeat will not retry")
 	}
-	if installs := installCalls(cli); len(installs) != 1 {
+	if installs := gtInstallerCalls(cli); len(installs) != 1 {
 		t.Fatalf("installs = %v, want the one this cycle attempted", installs)
 	}
 	// A kill is the daemon's own clock, not an install-gt failure: escalating
@@ -354,7 +435,7 @@ func TestRebuildGTCycle_FailedInstallEscalatesForInstallGt(t *testing.T) {
 		switch {
 		case gitSub(c, "branch"):
 			return cliReply{stdout: "main\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "install-gt: RESULT failed - - unexpected\n", code: 1}
 		}
 		return cliReply{}
@@ -372,6 +453,66 @@ func TestRebuildGTCycle_FailedInstallEscalatesForInstallGt(t *testing.T) {
 	}
 }
 
+// TestRebuildGTCycle_InstallerBuildFailureDoesNotRunIt pins the build step: an
+// installer that cannot be built is an install that never starts, reported as
+// one install failure rather than as a run with no RESULT line.
+func TestRebuildGTCycle_InstallerBuildFailureDoesNotRunIt(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case c.name == "make" && len(c.args) > 0 && c.args[0] == "gt-installer":
+			return cliReply{stderr: "cmd/gt-installer/main.go: build failed\n", code: 2}
+		}
+		return cliReply{}
+	})
+
+	if settled := d.runRebuildGT(); !settled {
+		t.Fatal("a failed installer build reached a verdict and must hold the interval")
+	}
+	if installs := gtInstallerCalls(cli); len(installs) != 0 {
+		t.Errorf("the installer ran after its own build failed: %v", installs)
+	}
+	esc := rec.Escalations()
+	if len(esc) != 1 || esc[0].Escalation.Fingerprint != alertKeyRebuildGTInstallFail {
+		t.Fatalf("escalations = %+v, want one under %s", esc, alertKeyRebuildGTInstallFail)
+	}
+}
+
+// TestRebuildGTInstall_ABuildKilledWithTheCycleDefers pins the kill split for
+// the build: the cycle's own clock stopping the build accomplished nothing, so
+// the next heartbeat retries instead of paging the operator.
+func TestRebuildGTInstall_ABuildKilledWithTheCycleDefers(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case c.name == "make":
+			cancel()
+			return cliReply{code: -1}
+		}
+		return cliReply{}
+	})
+
+	if settled := d.rebuildGTInstall(ctx, &dogCycle{}, filepath.Join(d.config.TownRoot, "gastown"), 0); settled {
+		t.Error("a build killed with the cycle reached a verdict; it must retry next heartbeat")
+	}
+	if installs := gtInstallerCalls(cli); len(installs) != 0 {
+		t.Errorf("the installer ran after its build was killed: %v", installs)
+	}
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("a build killed with the cycle escalated: %+v", esc)
+	}
+}
+
 // TestRebuildGTCycle_InstallGtsOwnFailureIsNotEscalatedTwice pins the split:
 // install-gt escalates build/smoke/rollback/marker failures under install-gt:*,
 // so escalating them again from here would mint a second bead for one failure.
@@ -384,7 +525,7 @@ func TestRebuildGTCycle_InstallGtsOwnFailureIsNotEscalatedTwice(t *testing.T) {
 		switch {
 		case gitSub(c, "branch"):
 			return cliReply{stdout: "main\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "install-gt: RESULT failed - - smoke-failed\n", code: 1}
 		}
 		return cliReply{}
@@ -423,7 +564,7 @@ func TestRebuildGTCycle_FreshBinarySyncsBeforeBelievingItself(t *testing.T) {
 	if !merged {
 		t.Errorf("a fresh reading skipped the fast-forward: %v", cli.recorded())
 	}
-	if installs := installCalls(cli); len(installs) != 0 {
+	if installs := gtInstallerCalls(cli); len(installs) != 0 {
 		t.Errorf("a fresh binary was installed over: %v", installs)
 	}
 }
@@ -635,7 +776,7 @@ func TestRebuildGTRequestDuringDeferredCycleSurvives(t *testing.T) {
 	releaseCycle()
 	awaitRebuildGTIdle(t, d, cycleEnd)
 
-	if installs := installCalls(cli); len(installs) != 0 {
+	if installs := gtInstallerCalls(cli); len(installs) != 0 {
 		t.Errorf("built while a gate held the slot: %v", installs)
 	}
 	if !d.rebuildGTRequested.Load() {
@@ -664,12 +805,12 @@ func TestRebuildGTCoalescesInstallsWithinMinInterval(t *testing.T) {
 			return cliReply{stdout: "abc1234567890\n"}
 		case gitSub(c, "log"):
 			return cliReply{stdout: "abc1234 the commit that was inert\n"}
-		case c.name == "bash":
+		case c.name == "gt-installer":
 			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
 		}
 		return cliReply{}
 	})
-	installs := func() int { return len(installCalls(cli)) }
+	installs := func() int { return len(gtInstallerCalls(cli)) }
 
 	// The first landing's request installs.
 	d.requestRebuildGTInstall()
@@ -765,7 +906,7 @@ func TestRebuildGTMinIntervalEdge(t *testing.T) {
 			d.triggerRebuildGT()
 			awaitRebuildGTIdle(t, d, end)
 
-			if got := len(installCalls(cli)); got != tc.want {
+			if got := len(gtInstallerCalls(cli)); got != tc.want {
 				t.Errorf("installs = %d, want %d", got, tc.want)
 			}
 			if got := d.rebuildGTRequested.Load(); got != tc.armed {
@@ -796,7 +937,7 @@ func TestRebuildGTUnreadableLastRunInstalls(t *testing.T) {
 	d.triggerRebuildGT()
 	awaitRebuildGTIdle(t, d, end)
 
-	if got := len(installCalls(cli)); got != 1 {
+	if got := len(gtInstallerCalls(cli)); got != 1 {
 		t.Fatalf("installs = %d, want 1: an unreadable window must not hold the request", got)
 	}
 	if d.rebuildGTRequested.Load() {
@@ -864,7 +1005,7 @@ func TestRebuildGTDeferredInstallNowKeepsItsBypass(t *testing.T) {
 	d.triggerRebuildGT()
 	awaitRebuildGTIdle(t, d, end)
 
-	if got := len(installCalls(cli)); got != 0 {
+	if got := len(gtInstallerCalls(cli)); got != 0 {
 		t.Fatalf("installs while the gate held the slot = %d, want 0", got)
 	}
 	if armed, installNow := d.rebuildGTPendingRequest(); !armed || !installNow {
@@ -875,7 +1016,7 @@ func TestRebuildGTDeferredInstallNowKeepsItsBypass(t *testing.T) {
 	end = watchRebuildGTCycle(d)
 	d.triggerRebuildGT()
 	awaitRebuildGTIdle(t, d, end)
-	if got := len(installCalls(cli)); got != 1 {
+	if got := len(gtInstallerCalls(cli)); got != 1 {
 		t.Fatalf("installs after the gate cleared = %d, want 1 (bypass kept)", got)
 	}
 }

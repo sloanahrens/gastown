@@ -205,14 +205,14 @@ func landingHoldName(bead string) string {
 	return "landing pass " + bead
 }
 
-// installLockPath is scripts/install-gt.sh's lock:
+// installLockPath is the installer's lock:
 // ${INSTALL_GT_DAEMON_DIR:-$TOWN_ROOT/daemon}/install-gt.lock. The daemon
 // never sets INSTALL_GT_DAEMON_DIR, so its town's daemon dir is the one.
 func installLockPath(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", "install-gt.lock")
 }
 
-// installLockHeld reports whether an install-gt.sh run holds its lock. An
+// installLockHeld reports whether an install run holds its lock. An
 // install replaces the binary before its smoke check; restarting inside that
 // window would exec an unverified binary that a failed smoke check then rolls
 // back underneath the daemon. The probe never blocks: it opens the existing

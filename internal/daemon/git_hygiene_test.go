@@ -569,7 +569,7 @@ func TestRunGitHygiene_RefreshesABaseTheFailedFetchLeftStale(t *testing.T) {
 	}
 }
 
-// The working clone install-gt.sh merges into is left alone while the shared
+// The working clone the installer merges into is left alone while the shared
 // bare repo beside it is cleaned (gt-ckoau).
 func TestRunGitHygiene_CleansTheBareRepoWhenTheRigAlsoHasAClone(t *testing.T) {
 	t.Parallel()

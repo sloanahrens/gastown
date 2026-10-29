@@ -92,8 +92,8 @@ const maintenanceGCHoldLabel = "the maintenance gc cycle"
 // flight (gt-cbaoy).
 const specDispatchHoldLabel = "a spec dispatch tick"
 
-// restartPendingMarker is daemon/restart-pending.json, written by
-// scripts/install-gt.sh after a smoke-tested install. The daemon adds
+// restartPendingMarker is daemon/restart-pending.json, written by the installer
+// after a smoke-tested install. The daemon adds
 // attempted_from (its own commit) just before it exits for the marker.
 type restartPendingMarker struct {
 	Commit        string `json:"commit"`
@@ -103,10 +103,10 @@ type restartPendingMarker struct {
 	AttemptedFrom string `json:"attempted_from,omitempty"`
 }
 
-// installReceipt is one line of daemon/install-receipts.jsonl; the shell
-// scripts (scripts/lib/install-gt-lib.sh igt_receipt) write the same fields.
-// Absent values differ by writer: the shell writes JSON null, Go writes ""
-// for strings and omits duration_s. Consumers treat null, "" and a missing
+// installReceipt is one line of daemon/install-receipts.jsonl; the installer
+// (internal/installer.Receipt) writes the same fields. Receipts written by the
+// deleted shell installer encode an absent value as JSON null, where Go writes
+// "" for strings and omits duration_s. Consumers treat null, "" and a missing
 // duration_s as absent.
 type installReceipt struct {
 	TS         string `json:"ts"`
@@ -205,10 +205,10 @@ func stampRestartAttempt(townRoot, own string) error {
 
 // stampRestartAttemptWith is stampRestartAttempt with the window between the
 // temp file and the rename exposed: beforeRename, when non-nil, runs in it, so
-// a test can stand in for install-gt.sh replacing the marker there.
+// a test can stand in for the installer replacing the marker there.
 //
 // The commit is re-read immediately before the rename because that window is
-// real: install-gt.sh writes the same path (its own temp file and a rename,
+// real: the installer writes the same path (its own temp file and a rename,
 // under the install lock, which this writer does not take), and the daemon
 // decides to restart in it. Renaming the older marker over a newer one would
 // put the wrong commit back - a commit the daemon may already cover, so the
@@ -368,9 +368,9 @@ func (d *Daemon) clearCoveredMarker(m *restartPendingMarker, own string, now tim
 
 // clearCoveredMarkerWith is clearCoveredMarker with the window after the
 // ancestry check exposed: beforeRemove, when non-nil, runs in it, so a test
-// can stand in for install-gt.sh replacing the marker there.
+// can stand in for the installer replacing the marker there.
 //
-// markerCovered runs git subprocesses while install-gt.sh writes the same
+// markerCovered runs git subprocesses while the installer writes the same
 // path. The commit is re-read before the receipt and the removal, as
 // stampRestartAttemptWith does before its rename: removing by path alone would
 // delete a newer install's marker and leave the daemon on the old binary.

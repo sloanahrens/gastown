@@ -1,5 +1,5 @@
 // Command image-supervisor runs the sandbox image build for
-// scripts/install-gt.sh under an alarm (gt-k6v12).
+// the install under an alarm (gt-k6v12).
 //
 //	image-supervisor --alarm SECONDS [--lock DIR] [--owned DIR] [--gt PATH --fingerprint FP] -- COMMAND [ARG...]
 //

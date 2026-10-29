@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-gt-lib.sh — helpers shared by install-gt.sh and uninstall-gt.sh.
+# install-gt-lib.sh — helpers shared by install-om.sh and uninstall-gt.sh.
 # Sourced, never run. Callers set DAEMON_DIR and SOURCE before using igt_receipt.
 
 # igt_receipt EVENT COMMIT PREV REASON MERGED_AT_EPOCH START_EPOCH

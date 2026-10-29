@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install-om.sh — build om from the job-owned clone and put it in force, the way
-# install-gt.sh does for gt (gt-3imih). The rebuild_om daemon job runs it; it can
+# the gt installer does for gt (gt-3imih). The rebuild_om daemon job runs it; it can
 # also be run by hand.
 #
 #   install-om.sh [--om-path PATH] [--source manual|rebuild-om]
@@ -19,21 +19,21 @@
 # Any earlier failure leaves PATH untouched, and PATH only ever changes by an
 # atomic rename: a half-written om never exists at PATH.
 #
-# Exit codes — the daemon job maps these, as it does for install-gt.sh:
+# Exit codes — the daemon job maps these, as it does for the gt installer:
 #   0  installed, or nothing to do (the installed om already is the built sha)
 #   1  failed: build or swap failed, or the smoke check failed (rolled back)
 #   2  refused: no clone, clone dirty, or HEAD unreadable
 #   3  busy: another install held the lock for the whole wait
 # The last stdout line is always "install-om: RESULT <event> <commit> <prev> <reason>"
-# (empty fields print as "-"), the field order install-gt.sh prints, and the exit
+# (empty fields print as "-"), the field order the gt installer prints, and the exit
 # code is always 0-3: an EXIT trap reports "failed ... unexpected" and exits 1 for
 # any path nothing here anticipated.
 #
 # It never restarts anything: the landing worker execs om afresh for each review.
 #
 # Signing: before the swap, the build is signed with the town's stable identity
-# (INSTALL_OM_SIGN_DIR, default <town>/.runtime/signing, the material install-gt.sh
-# signs gt with) so a Developer Tools grant survives; without that material, or if
+# (INSTALL_OM_SIGN_DIR, default <town>/.runtime/signing, the material the gt
+# installer signs gt with) so a Developer Tools grant survives; without it, or if
 # signing fails, the install goes ahead ad-hoc with one WARNING line.
 set -euo pipefail
 
@@ -121,8 +121,8 @@ NEW_BIN=""
 # with the lock fd inherited ($^F), so the kernel drops the lock if this process
 # dies. The MARKER file tells the outer instance whether perl reached exec: perl
 # unlinks it just before, so a surviving MARKER means perl died first and this
-# instance's EXIT trap owes the fallback RESULT line. See install-gt.sh for the
-# long form.
+# instance's EXIT trap owes the fallback RESULT line. See cmd/gt-installer for
+# the long form.
 if [ -z "${INSTALL_OM_LOCKED:-}" ]; then
   mkdir -p "$DAEMON_DIR"
   MARKER="$DAEMON_DIR/.install-om.pre-exec.$$"

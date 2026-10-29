@@ -35,7 +35,7 @@
 #
 # Usage: uninstall-gt.sh [--install-dir DIR] [--force]
 #
-# Exit codes (2 and 1 keep install-gt.sh's meaning):
+# Exit codes (2 and 1 keep the gt installer's meaning):
 #   0  the binaries are gone, or were not there to begin with
 #   1  failed: rm could not remove a binary that is present
 #   2  refused: the target is this town's live install, or --install-dir names
@@ -91,7 +91,7 @@ refuse() {
 # INSTALL_DIR is honored too: the Makefile's name for this directory, and the
 # one the dispatcher's host-safety prompt tells a worker to set, so a test that
 # follows the prompt points at its temp dir instead of the real bin dir
-# (gt-8xqic). install-gt.sh resolves the same names the same way (gt-tcigd).
+# (gt-8xqic). The gt installer resolves the same names the same way (gt-tcigd).
 if [ -z "$BIN_DIR" ]; then
   if [ -n "${INSTALL_GT_BIN_DIR:-}" ]; then
     BIN_DIR="$INSTALL_GT_BIN_DIR"
@@ -124,7 +124,7 @@ if [ -e "$BIN_DIR" ] && [ ! -d "$BIN_DIR" ]; then
   refuse "--install-dir is not a directory: $BIN_DIR"
 fi
 
-# The town this clone belongs to, if any. GT_TOWN_ROOT wins (install-gt.sh
+# The town this clone belongs to, if any. GT_TOWN_ROOT wins (the gt installer
 # reads it the same way); a value that is not a town is treated as no town
 # rather than as an error, so a caller can point this at a scratch tree.
 TOWN_ROOT="${GT_TOWN_ROOT:-$(igt_town_root_above "$SCRIPT_DIR")}"

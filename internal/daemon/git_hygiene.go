@@ -88,7 +88,7 @@ func (d *Daemon) triggerGitHygiene() {
 // clone Rig.RepoPath reports ("" when it has neither).
 //
 // Cleaning the bare repo keeps the patrol's fetch out of the clone
-// install-gt.sh merges into after a landing (gt-ckoau), and it is the
+// the installer merges into after a landing (gt-ckoau), and it is the
 // repository polecat.Manager.repoBase and `gt polecat prune` already work in:
 // the refs every polecat worktree shares.
 //

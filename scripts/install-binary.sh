@@ -36,12 +36,13 @@
 #
 # gt-ykots: the installed binary is also signed with the town's stable identity
 # (com.gastown.gt) when the town's signing keychain exists, so a Developer Tools
-# grant keyed on that identity survives EVERY install path, not just install-gt.sh
-# (which signs again after this, harmlessly). The temp copy is signed before the
-# rename, so the live path only ever holds a complete, finished binary. Best
-# effort, like install-gt.sh's: no keychain, no password file, a keychain that
-# will not unlock or a failing codesign is one line on stderr and an ad-hoc
-# install, never a failed one. INSTALL_BINARY_SIGN=0 skips the step.
+# grant keyed on that identity survives EVERY install path, not just the
+# installer's (which signs again after this, harmlessly). The temp copy is
+# signed before the rename, so the live path only ever holds a complete,
+# finished binary. Best effort, like the installer's: no keychain, no password
+# file, a keychain that will not unlock or a failing codesign is one line on
+# stderr and an ad-hoc install, never a failed one. INSTALL_BINARY_SIGN=0 skips
+# the step.
 #
 # Usage: install-binary.sh <built-binary> <install-dir> [name]
 
@@ -93,7 +94,7 @@ cp "$src" "$tmp"
 chmod --reference="$src" "$tmp" 2>/dev/null || chmod 0755 "$tmp"
 
 # sign_tmp — sign $tmp with the town's identity. The same material and knobs as
-# install-gt.sh (INSTALL_GT_SIGN_*), so one setting steers both. codesign gets
+# the installer (INSTALL_GT_SIGN_*), so one setting steers both. codesign gets
 # </dev/null and an already-unlocked keychain, so it has nothing to prompt for;
 # the password reaches one `security unlock-keychain` call and nowhere else.
 sign_tmp() {

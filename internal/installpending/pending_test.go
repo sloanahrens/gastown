@@ -321,7 +321,7 @@ func TestClear_ReportsADirectoryItCannotRemove(t *testing.T) {
 }
 
 // TestDirFor_HonoursTheDaemonDirOverride pins that the marker follows the
-// same directory the install lock and scripts/install-gt.sh write to, or the
+// same directory the install lock and the Go installer write to, or the
 // writer and the reader disagree about which file is the marker.
 func TestDirFor_HonoursTheDaemonDirOverride(t *testing.T) {
 	t.Parallel()
