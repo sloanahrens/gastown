@@ -192,7 +192,7 @@ func deepSeekCostProvider(_ time.Time, spend json.RawMessage, _ *ClaudePlan, _ *
 	return p
 }
 
-// runwayStatus is the colour of a runway in days: bad under three, warn under
+// runwayStatus is the color of a runway in days: bad under three, warn under
 // seven, ok otherwise.
 func runwayStatus(days float64) string {
 	switch {
@@ -206,8 +206,15 @@ func runwayStatus(days float64) string {
 
 // creditRiseText is one balance rise as the Cost panel's hover words it.
 func creditRiseText(c deepSeekCredit) string {
-	kind := map[string]string{"credit": " credit", "top-up": " top-up", "credit+top-up": " credit + top-up"}[c.Kind]
-	if kind == "" {
+	var kind string
+	switch c.Kind {
+	case "credit":
+		kind = " credit"
+	case "top-up":
+		kind = " top-up"
+	case "credit+top-up":
+		kind = " credit + top-up"
+	default:
 		kind = " added"
 	}
 	// The stamp reads month, day and time: the year and the seconds are noise
