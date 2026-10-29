@@ -477,6 +477,13 @@ func TestSeedMarkerRoundTripsThroughTheClaimFiles(t *testing.T) {
 	if err := pass.Seed(); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
+	info, err := os.Stat(filepath.Join(root, cachevol.SeedMarkerName))
+	if err != nil {
+		t.Fatalf("the seed pass wrote no marker: %v", err)
+	}
+	if info.Mode().Perm()&0o004 == 0 {
+		t.Errorf("marker mode %v is not readable by other users", info.Mode().Perm())
+	}
 	var clones int
 	clone := func(c SeedCmd) (string, error) {
 		clones++
@@ -491,6 +498,77 @@ func TestSeedMarkerRoundTripsThroughTheClaimFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(dest); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("a claim the seed pass wrote created %s: %v", dest, err)
+	}
+}
+
+// TestSeedMarkerReseedsWhenThePinsChange: a claim seeded from one pin set is cloned and reseeded
+// from a changed one, through the real files, so the marker alone tells the two apart (gt-posdj).
+func TestSeedMarkerReseedsWhenThePinsChange(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	noChild := func(SeedCmd) (string, error) { return "", nil }
+	first := &SeedPass{Root: root, Source: t.TempDir(), Pins: twoPins(), Files: OSFiles{}, Run: noChild, Logf: func(string, ...any) {}}
+	if err := first.Seed(); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	changed := twoPins()
+	changed[1].Commit = seedOtherSH
+	var clones int
+	clone := func(c SeedCmd) (string, error) {
+		if len(c.Argv) > 1 && c.Argv[1] == "clone" {
+			clones++
+		}
+		return "", nil
+	}
+	if err := CloneSeed(filepath.Join(t.TempDir(), "seed"), root, changed, OSFiles{}, clone, func(string, ...any) {}); err != nil {
+		t.Fatalf("CloneSeed: %v", err)
+	}
+	if clones != len(changed) {
+		t.Errorf("a changed pin cloned %d of %d rigs, want all of them", clones, len(changed))
+	}
+	var children int
+	reseed := &SeedPass{Root: root, Source: t.TempDir(), Pins: changed, Files: OSFiles{}, Run: func(SeedCmd) (string, error) {
+		children++
+		return "", nil
+	}, Logf: func(string, ...any) {}}
+	if err := reseed.Seed(); err != nil {
+		t.Fatalf("Seed with changed pins: %v", err)
+	}
+	if children == 0 {
+		t.Error("a changed pin did not reseed: the seed pass ran no child")
+	}
+	got, err := os.ReadFile(filepath.Join(root, cachevol.SeedMarkerName))
+	if err != nil {
+		t.Fatalf("reading the marker: %v", err)
+	}
+	if string(got) != cachevol.SeedMarker(changed) {
+		t.Errorf("marker = %q, want the changed pins", got)
+	}
+}
+
+// TestCloneSeedRefusesAMarkerThatIsALink: the cache user owns the claim, so a marker it links to a
+// file holding the right pins is not the seed's record: the Job fails rather than read through it.
+func TestCloneSeedRefusesAMarkerThatIsALink(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(target, []byte(cachevol.SeedMarker(twoPins())), 0o644); err != nil {
+		t.Fatalf("writing the link target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, cachevol.SeedMarkerName)); err != nil {
+		t.Fatalf("linking the marker: %v", err)
+	}
+	var clones int
+	clone := func(SeedCmd) (string, error) {
+		clones++
+		return "", nil
+	}
+	err := CloneSeed(filepath.Join(t.TempDir(), "seed"), root, twoPins(), OSFiles{}, clone, func(string, ...any) {})
+	if err == nil || !strings.Contains(err.Error(), "reading the seed marker") {
+		t.Fatalf("CloneSeed() = %v, want the linked marker refused", err)
+	}
+	if clones != 0 {
+		t.Errorf("a linked marker still cloned %d times", clones)
 	}
 }
 

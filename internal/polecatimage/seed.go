@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
@@ -38,7 +40,17 @@ type SeedFiles interface {
 // OSFiles is SeedFiles on the container's filesystem.
 type OSFiles struct{}
 
-func (OSFiles) ReadFile(p string) ([]byte, error)                 { return os.ReadFile(p) }
+// ReadFile refuses a symlink: the cache user owns the claim, so it could link the marker to a file
+// the init container's root can read, and that file would be compared as the seed's own record.
+func (OSFiles) ReadFile(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
 func (OSFiles) WriteFile(p string, b []byte, m os.FileMode) error { return os.WriteFile(p, b, m) }
 func (OSFiles) MkdirAll(p string, m os.FileMode) error            { return os.MkdirAll(p, m) }
 
