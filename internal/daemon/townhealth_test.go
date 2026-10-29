@@ -556,6 +556,33 @@ func TestWriteTownHealth_NeedsHumanStopsOnACancelledContext(t *testing.T) {
 	}
 }
 
+// cancelFromRead is a context that reports cancellation from its nth Err read
+// on, so a test can cancel a health read part way through the rigs it walks.
+type cancelFromRead struct {
+	context.Context
+	reads, n int
+}
+
+func (c *cancelFromRead) Err() error {
+	c.reads++
+	if c.reads >= c.n {
+		return context.Canceled
+	}
+	return nil
+}
+
+// A cancellation that lands while the rigs are being read stops the read with
+// the context error, not with the counts it had gathered so far (gt-slmaz).
+// The first read is the one before the rigs; the second is the first rig's.
+func TestWriteTownHealth_NeedsHumanStopsBetweenRigs(t *testing.T) {
+	t.Parallel()
+	d, _ := healthTown(t, time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC))
+	ctx := &cancelFromRead{Context: context.Background(), n: 2}
+	if _, err := (&healthSources{d: d}).NeedsHuman(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled from the rig loop", err)
+	}
+}
+
 // The exec-tax line the daemon logs is its field's state changing, and a
 // beat that reports the same state says nothing (gt-2ycne.1).
 func TestWriteTownHealth_LogsTheExecTaxOnlyWhenItChanges(t *testing.T) {
