@@ -657,7 +657,7 @@ func TestSeedHelpersRefuseAnInputTheJobCannotRender(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var out, errOut strings.Builder
-			code := runProgram(tc.args, bytes.NewReader(nil), &out, &errOut, envMap(map[string]string{}))
+			code := runProgram(tc.args, &out, &errOut, envMap(map[string]string{}))
 			if code != 3 {
 				t.Fatalf("runProgram(%v) = %d, want 3 (%s)", tc.args, code, errOut.String())
 			}
@@ -673,7 +673,7 @@ func TestSeedHelpersRefuseAnInputTheJobCannotRender(t *testing.T) {
 func TestRunProgramStillRunsThePluginOnAnUnknownArgument(t *testing.T) {
 	t.Parallel()
 	var out, errOut strings.Builder
-	if code := runProgram([]string{"--some-plugin-flag"}, bytes.NewReader(nil), &out, &errOut, envMap(map[string]string{})); code != 1 {
+	if code := runProgram([]string{"--some-plugin-flag"}, &out, &errOut, envMap(map[string]string{})); code != 1 {
 		t.Errorf("runProgram(unknown argument) = %d, want the run's own status 1", code)
 	}
 }

@@ -34,5 +34,5 @@ func filesystemFree(root string) (int64, error) {
 	if err := syscall.Statfs(root, &st); err != nil {
 		return 0, err
 	}
-	return int64(uint64(st.Bavail) * uint64(st.Bsize)), nil
+	return int64(st.Bavail * uint64(st.Bsize)), nil
 }

@@ -126,13 +126,13 @@ func envOr(get func(string) string, key, def string) string {
 
 // Main is the program's entry point and answers its exit status.
 func Main(args []string) int {
-	return runProgram(args, os.Stdin, os.Stdout, os.Stderr, os.Getenv)
+	return runProgram(args, os.Stdout, os.Stderr, os.Getenv)
 }
 
 // runProgram answers Main: no arguments runs one plugin run, and "trim-cache",
 // "trim-paths", "trim-list-write", "seed-clone" and "seed-cache" are the helpers a
 // container of the image runs in the seed and trim Jobs.
-func runProgram(args []string, stdin io.Reader, stdout, stderr io.Writer, get func(string) string) int {
+func runProgram(args []string, stdout, stderr io.Writer, get func(string) string) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "trim-cache":

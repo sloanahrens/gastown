@@ -451,7 +451,7 @@ func TestRunProgramDispatchesTheTrimHelper(t *testing.T) {
 	root := t.TempDir()
 	plantCacheFile(t, filepath.Join(root, "go-build", "a"), 10, testTime)
 	var out, errOut bytes.Buffer
-	code := runProgram([]string{"trim-cache", "--cap-bytes", "100", "--root", root}, bytes.NewReader(nil), &out, &errOut, envMap(map[string]string{}))
+	code := runProgram([]string{"trim-cache", "--cap-bytes", "100", "--root", root}, &out, &errOut, envMap(map[string]string{}))
 	if code != 0 {
 		t.Fatalf("runProgram(trim-cache) = %d, want 0 (%s)", code, errOut.String())
 	}
@@ -465,7 +465,7 @@ func TestRunProgramDispatchesTheTrimHelper(t *testing.T) {
 func TestRunProgramDispatchesARun(t *testing.T) {
 	t.Parallel()
 	var out, errOut bytes.Buffer
-	if code := runProgram(nil, bytes.NewReader(nil), &out, &errOut, envMap(map[string]string{})); code != 1 {
+	if code := runProgram(nil, &out, &errOut, envMap(map[string]string{})); code != 1 {
 		t.Errorf("runProgram() = %d, want 1", code)
 	}
 	if !strings.Contains(out.String(), "ERROR: cannot find the town root") {
