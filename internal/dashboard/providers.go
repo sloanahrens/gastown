@@ -316,11 +316,10 @@ func claudeCostProvider(now time.Time, _ json.RawMessage, plan *ClaudePlan, char
 	return p
 }
 
-// planStatus is the row's color, the page's planClass rule line for line: a
-// week already at the ceiling the month rollup counts, or a projection past the
-// limit, is bad; a projection past the ceiling warns; anything else is ok. It is
-// a separate function so a test can run the page's own planClass over the same
-// figures and hold the two together.
+// planStatus is the row's color: a week already at the ceiling the month rollup
+// counts, or a projection past the limit, is bad; a projection past the ceiling
+// warns; anything else is ok. The page draws the chip from this status alone, so
+// the rule lives here and nowhere else.
 func planStatus(weeklyPct, projectedPct float64) string {
 	switch {
 	case weeklyPct >= ClaudePlanCeilingPct || projectedPct > claudePlanLimitPct:

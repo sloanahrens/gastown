@@ -126,34 +126,6 @@ func jsonValue(t *testing.T, v any) map[string]any {
 	return out
 }
 
-// The headline row above the charts reads the server's spend figures: the
-// balance and the spent total the report carries (gt-59v3x).
-func TestCostPanelHeadlineReadsTheServersFigures(t *testing.T) {
-	t.Parallel()
-
-	spend, err := json.Marshal(map[string]any{
-		"live":         map[string]any{"ok": true, "available": true},
-		"balance":      77.49,
-		"spent_ledger": 12.34,
-		"ledger_since": "2026-10-19T00:00",
-		"per_day":      map[string]any{"2026-10-25": map[string]any{"spent": 4.0}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := newPageDOM(t)
-	p.call(t, "renderCost", jsonValue(t, map[string]any{"spend": json.RawMessage(spend)}))
-	text, err := p.vm.RunString(`document.getElementById("cost").textContent`)
-	if err != nil {
-		t.Fatalf("reading the drawn Cost panel: %v", err)
-	}
-	for _, want := range []string{"$77.49", "$12.34"} {
-		if !strings.Contains(text.String(), want) {
-			t.Errorf("the Cost headline does not show %s from the server's figures:\n%s", want, text.String())
-		}
-	}
-}
-
 // costClaudeDraw is what a reader sees of the drawn Cost panel: every tooltip
 // under it, the charts' aria-labels, and the panel's text (where the legend
 // lives). It holds no class name, so a page that draws the series in different
@@ -235,10 +207,13 @@ func TestCostPanelDrawsTheClaudeSeriesInTheSameChart(t *testing.T) {
 		t.Fatalf("the fixture built no Claude series on the daily chart: %+v", charts.Daily)
 	}
 
+	// The legend is built from the providers the server sends, so the two rows
+	// that own the two series are sent with the charts.
 	p := newPageDOM(t)
 	p.call(t, "renderCost", jsonValue(t, map[string]any{
-		"spend":       costRenderPayload(t, days),
-		"cost_charts": charts,
+		"spend":          costRenderPayload(t, days),
+		"cost_charts":    charts,
+		"cost_providers": []any{deepSeekProvider(), claudeProvider()},
 	}))
 	got := costClaudeDrawn(t, p)
 

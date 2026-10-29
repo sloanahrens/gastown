@@ -868,7 +868,7 @@ func (h *Hub) rebuildCostProvidersLocked() {
 		costProviderClaude:   h.cfg.ClaudePlan == nil,
 		costProviderJev:      h.cfg.JevSpend == nil,
 	}
-	var rows []CostProvider
+	rows := []CostProvider{}
 	for _, p := range h.costProviderRows() {
 		if !unwired[p.ID] {
 			rows = append(rows, p)
