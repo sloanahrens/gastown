@@ -17,8 +17,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
+	"github.com/steveyegge/gastown/internal/diskmaint/baks"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
+	"github.com/steveyegge/gastown/internal/diskmaint/sizes"
+	"github.com/steveyegge/gastown/internal/diskmaint/worktree"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -30,6 +34,12 @@ const (
 	// maintTargetRegistry is the name the registry target answers to on the
 	// command line and in the target list.
 	maintTargetRegistry = "registry"
+
+	// maintTargetWorktree, maintTargetBaks and maintTargetSizes are the names
+	// the local targets answer to, in the same place as maintTargetRegistry.
+	maintTargetWorktree = "worktree"
+	maintTargetBaks     = "baks"
+	maintTargetSizes    = "sizes"
 
 	// maintKeepDefault is the newest-commit window a town that names none gets;
 	// it matches the plugin's default, so gt maint plans what the plugin's
@@ -54,11 +64,13 @@ var maintCmd = &cobra.Command{
 	Long: `Plan or apply the maintenance the town's disks need.
 
 plan is a dry run: it prints every action it would take and changes nothing.
-apply runs the plan it just printed. Every apply runs under the polecat-image
-lock, so a delete never races an image push; an apply that finds the lock held
-defers and says to retry.
+apply runs the plan it just printed. A registry apply runs under the
+polecat-image lock, so a delete never races an image push; one that finds the
+lock held defers and says to retry. The local targets keep no lock: they touch
+only the worktrees, backups and directories this machine owns.
 
-A target names what to maintain; the known targets are listed when a name is
+A target names what to maintain: baks, registry (only when the town configures
+a registry), sizes or worktree. The known targets are listed when a name is
 unknown, and naming none runs every target in name order. A plan that could not
 read its inputs refuses instead of guessing, and both leaves exit non-zero then.`,
 	RunE: requireSubcommand,
@@ -303,19 +315,50 @@ func maintKeep(get func(string) string) (int, error) {
 	return keep, nil
 }
 
-// maintTargets builds every target the town configures. A town that names no
-// registry publishes nothing, so it has no registry to prune and gets no
-// target; the first target that cannot be built fails the run rather than
-// leaving a half-built set.
+// maintTargets builds every target the town configures: the local targets,
+// which every town has, and the registry target, which only a town that names
+// a registry has. A target whose settings cannot be read refuses that target
+// alone (see maintLocalTargets), so the registry still plans for a town whose
+// rig registry is damaged, exactly as it did before the local targets existed.
 //
 // The ledger directory is made in apply mode alone: a plan is a dry run, so it
 // must not leave a directory behind that was not there before. An apply whose
 // directory cannot be made fails here, before it deletes anything it could not
-// record.
+// record. Every target shares the one ledger, so each apply lands in one record.
 func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, keep int, mode string, run diskmaint.Runner, home string, out io.Writer) (map[string]diskmaint.Target, error) {
-	targets := map[string]diskmaint.Target{}
+	ledgerDir := filepath.Join(town, ".runtime", "diskmaint")
+	ledger := diskmaint.NewLedger(filepath.Join(ledgerDir, "ledger.jsonl"), maintLedgerMaxBytes)
+	// The registry target is built first, so a town that configures a registry
+	// refuses on what it refused on before, with the same message.
+	registryTarget, err := maintRegistryTarget(ctx, town, cfg, keep, run, home, out, ledger)
+	if err != nil {
+		return nil, err
+	}
+	// Every local target names paths under the operator's home, and a blank
+	// HOME would join them against the working directory.
+	if home == "" {
+		return nil, errors.New("cannot read the operator's files: HOME is unset")
+	}
+	apply := mode == maintModeApply
+	if apply {
+		if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+			return nil, fmt.Errorf("creating the maintenance ledger directory: %w", err)
+		}
+	}
+	targets := maintLocalTargets(town, home, run, ledger, apply)
+	if registryTarget != nil {
+		targets[maintTargetRegistry] = registryTarget
+	}
+	return targets, nil
+}
+
+// maintRegistryTarget builds the registry target. A town that names no registry
+// publishes nothing, so it has no registry to prune and gets no target: nil and
+// no error. A registry address that is not host:port, or a town with no HOME,
+// refuses rather than building a target that would guess its docker socket.
+func maintRegistryTarget(ctx context.Context, town string, cfg polecatimage.Config, keep int, run diskmaint.Runner, home string, out io.Writer, ledger *diskmaint.Ledger) (diskmaint.Target, error) {
 	if cfg.Registry == "" {
-		return targets, nil
+		return nil, nil
 	}
 	if strings.Contains(cfg.Registry, "/") {
 		// The value once named the sandbox records directory, so a path here is
@@ -325,14 +368,8 @@ func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, kee
 	if home == "" {
 		return nil, errors.New("cannot locate the colima docker socket: HOME is unset")
 	}
-	ledgerDir := filepath.Join(town, ".runtime", "diskmaint")
-	if mode == maintModeApply {
-		if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
-			return nil, fmt.Errorf("creating the maintenance ledger directory: %w", err)
-		}
-	}
 	gate := &maintPushGate{cfg: cfg, out: out, now: time.Now}
-	targets[maintTargetRegistry] = registry.NewTarget(registry.Config{
+	return registry.NewTarget(registry.Config{
 		Base:         "http://" + cfg.Registry,
 		Kubeconfig:   filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig"),
 		RecordsDir:   cfg.SandboxRecords,
@@ -343,9 +380,110 @@ func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, kee
 		PushInFlight: gate.pushInFlight,
 		Lock:         gate.withLock,
 		Run:          run,
-		Ledger:       diskmaint.NewLedger(filepath.Join(ledgerDir, "ledger.jsonl"), maintLedgerMaxBytes),
+		Ledger:       ledger,
+	}), nil
+}
+
+// maintLocalTargets builds the targets that maintain this machine's own files:
+// the stale crew worktrees under the town's rigs, the backup files in the town
+// and the operator's config and binary directories, and the sizes of the Dolt
+// and backup paths. Each shares the run's ledger. apply is the dry-run gate the
+// two removing targets carry: a target built for a plan refuses to remove
+// anything, so only an apply can delete.
+//
+// A town whose rig registry cannot be read still gets a worktree target, one
+// that refuses the plan with the read error. Leaving the target out would hide
+// the worktrees from the run, and failing the build here would take the other
+// targets down with it.
+func maintLocalTargets(town, home string, run diskmaint.Runner, ledger *diskmaint.Ledger, apply bool) map[string]diskmaint.Target {
+	policy := diskmaint.Policy{Apply: apply}
+	configDirs, binaryDirs := baks.DefaultDirs(town, home)
+	targets := map[string]diskmaint.Target{
+		maintTargetBaks: baks.NewTarget(baks.Config{
+			ConfigDirs: configDirs,
+			BinaryDirs: binaryDirs,
+			Installed:  []string{"bd", "gt", "om"},
+			Run:        run,
+			Policy:     policy,
+			Ledger:     ledger,
+		}),
+		maintTargetSizes: sizes.NewTarget(sizes.Config{
+			Town:   town,
+			Home:   home,
+			Run:    run,
+			Ledger: ledger,
+		}),
+	}
+	rigs, err := maintRigNames(town)
+	if err != nil {
+		targets[maintTargetWorktree] = maintRefusedTarget{name: maintTargetWorktree, reason: err}
+		return targets
+	}
+	targets[maintTargetWorktree] = worktree.NewTarget(worktree.Config{
+		Town:   town,
+		Rigs:   rigs,
+		Run:    run,
+		Policy: policy,
+		Ledger: ledger,
 	})
-	return targets, nil
+	return targets
+}
+
+// maintRefusedTarget stands in for a target the town's settings would not let
+// maintTargets build. It keeps the target's name in the run's list, and every
+// call answers with the reason, so the run refuses on that target instead of
+// dropping it and planning the rest as if the work did not exist.
+type maintRefusedTarget struct {
+	name   string
+	reason error
+}
+
+// Compile-time check that the stand-in satisfies the diskmaint contract.
+var _ diskmaint.Target = maintRefusedTarget{}
+
+func (t maintRefusedTarget) Name() string { return t.name }
+
+func (t maintRefusedTarget) Measure(context.Context) (diskmaint.Measurement, error) {
+	return diskmaint.Measurement{}, t.reason
+}
+
+func (t maintRefusedTarget) Plan(context.Context, diskmaint.Policy) (diskmaint.Plan, error) {
+	return diskmaint.Plan{Target: t.name, Refused: t.reason.Error()}, nil
+}
+
+func (t maintRefusedTarget) Apply(context.Context, diskmaint.Plan) (diskmaint.Result, error) {
+	return diskmaint.Result{Target: t.name}, t.reason
+}
+
+// maintRigNames lists the rigs registered in the town, sorted so every run
+// reads them in the same order. A registry that cannot be read, or that names
+// something which is not a rig directory, is an error rather than a shorter
+// list: the names are joined into paths under the town, so a name holding a
+// separator or ".." would point the worktree target outside its rig.
+func maintRigNames(town string) ([]string, error) {
+	rc, err := config.LoadRigsConfig(filepath.Join(town, "mayor", "rigs.json"))
+	if err != nil {
+		return nil, fmt.Errorf("reading the town's rig registry: %w", err)
+	}
+	names := make([]string, 0, len(rc.Rigs))
+	for name := range rc.Rigs {
+		if !maintRigName(name) {
+			return nil, fmt.Errorf("the town's rig registry names %q, which is not a directory in the town", name)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// maintRigName reports whether name is a rig directory name: one path element
+// that is neither the town root nor its parent, so joining it under the town
+// stays inside the town.
+func maintRigName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	return !filepath.IsAbs(name) && filepath.Base(name) == name
 }
 
 // maintInstalled reads the installed gt's commit by running `gt version`, the
