@@ -182,6 +182,7 @@ func TestFileHostProbesReturnOneFieldsErrorOnly(t *testing.T) {
 // read as healthy (which is why the refusal is an error) and must not read as
 // critical (which would page for a stopped agent).
 func TestAttentionHostRefusedProbeFileRaisesProbeAlarms(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	town := t.TempDir()
 	d := &Daemon{
