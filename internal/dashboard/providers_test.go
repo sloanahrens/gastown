@@ -601,6 +601,58 @@ func TestCostProviderRowsAreKeptUntilACostInputChanges(t *testing.T) {
 	}
 }
 
+// The Claude row's reason for an unread plan reads the clock: the age of the
+// newest sample, and whether its week has reset. A State() that moves only the
+// clock must redraw it through the kept rows.
+func TestCostProviderRowsFollowTheClockForAnUnreadClaudePlan(t *testing.T) {
+	t.Parallel()
+
+	now := costProvidersNow
+	plan, _ := claudeFixture()
+	plan.Stale = true
+	plan.SampledAt = costProvidersNow.Add(-40 * time.Minute).Unix()
+	plan.WeeklyResetsAt = costProvidersNow.Add(time.Hour).Unix()
+	h := NewHub(Config{
+		Now:        func() time.Time { return now },
+		ClaudePlan: func() *ClaudePlan { return plan },
+	})
+	h.pollClaudePlan()
+
+	for _, tc := range []struct {
+		name  string
+		clock time.Duration
+		want  string
+	}{
+		{name: "the age as read", want: "the newest sample is 40m old"},
+		{name: "the age a minute later", clock: time.Minute, want: "the newest sample is 41m old"},
+		{name: "the week reset as the clock passes it", clock: time.Hour, want: "the week the newest sample measures has already reset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now = costProvidersNow.Add(tc.clock)
+			if p := costProviderRow(t, h.State().CostProviders, costProviderClaude); p.Why != tc.want {
+				t.Errorf("claude why = %q, want %q", p.Why, tc.want)
+			}
+		})
+	}
+}
+
+// A State() hands its caller its own copy of the Cost rows, so editing one
+// snapshot cannot change the rows the next one is given.
+func TestCostProviderRowsAreCopiedPerSnapshot(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{Now: func() time.Time { return costProvidersNow }})
+	h.costProviders = []costProviderBuilder{
+		func(time.Time, json.RawMessage, *ClaudePlan, *CostCharts, *JevSpend) CostProvider {
+			return CostProvider{ID: "counted", Label: "Counted"}
+		},
+	}
+	h.State().CostProviders[0].Label = "edited"
+	if got := h.State().CostProviders[0].Label; got != "Counted" {
+		t.Errorf("a later snapshot's row reads %q, want the row as built", got)
+	}
+}
+
 // A failed Jev read is marked on the row's copy even before its stamp has aged
 // past the stale line, so the row never draws the last good figures as current.
 func TestJevSpendForRowsMarksTheReadsOwnFailure(t *testing.T) {

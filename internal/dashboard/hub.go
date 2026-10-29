@@ -61,10 +61,10 @@ type Hub struct {
 
 	// costRows is the Cost panel's rows as last built, nil once a cost input has
 	// changed since (the spend, the plan, the charts or the Jev value clear it).
-	// costMark is the Jev mark they were built with. The rows are rebuilt when
-	// either is out of date, so State() does not rebuild them on every call.
+	// costKey is what the rows were built under. The rows are rebuilt when either
+	// is out of date, so State() does not rebuild them on every call.
 	costRows []CostProvider
-	costMark jevRowMark
+	costKey  costRowsKey
 }
 
 // Sub is one open page.
@@ -869,18 +869,22 @@ func (h *Hub) rebuildCostChartsLocked() {
 // costProviderRowsLocked builds the panel's rows from the state the charts are
 // built from: the default list through BuildCostProviders, or the list a test
 // handed the hub so it can add a provider without touching the town's. A
-// provider whose reader this hub was not given has no row. The Jev row says its
-// figures are stale as the read ages, with no read of its own to trigger it, so
-// the rows are checked against each snapshot: they are kept, and rebuilt only
-// when a cost input has changed (costRows is cleared) or the Jev row's mark has
-// moved, which is the one way the clock reaches that row. The caller holds h.mu.
+// provider whose reader this hub was not given has no row. The rows are kept
+// between snapshots: they are rebuilt when a cost input has changed (costRows is
+// cleared) or when the clock has moved what they say about it (costRowsKeyOf),
+// since the Jev row's age and the Claude row's unread reason both read now. The
+// caller holds h.mu.
 func (h *Hub) costProviderRowsLocked(now time.Time, reads map[string]ReadStatus) []CostProvider {
 	jev := jevSpendForRows(h.state.JevSpend, reads[SourceJevSpend])
-	if mark := jevRowMarkOf(jev); h.costRows == nil || mark != h.costMark {
+	if key := costRowsKeyOf(jev, h.state.ClaudePlan, now); h.costRows == nil || key != h.costKey {
 		h.costRows = h.buildCostRowsLocked(now, jev)
-		h.costMark = mark
+		h.costKey = key
 	}
-	return h.costRows
+	// The caller gets its own slice, so editing its snapshot cannot reach the
+	// kept rows. make, not append to nil, so an empty list still encodes as [].
+	rows := make([]CostProvider, len(h.costRows))
+	copy(rows, h.costRows)
+	return rows
 }
 
 // buildCostRowsLocked builds the panel's rows from the state the charts are
@@ -909,8 +913,8 @@ func (h *Hub) buildCostRowsLocked(now time.Time, jev *JevSpend) []CostProvider {
 }
 
 // jevRowMark is what the Jev row says about its read: whether the read failed
-// and whether the figures are the last good ones. It is the only part of the
-// Cost rows that changes with the clock, so a change in it rebuilds the rows.
+// and whether the figures are the last good ones. The read's age moves it with
+// the clock, so it is part of the key the rows are kept under.
 type jevRowMark struct {
 	failed, stale bool
 }
@@ -922,6 +926,26 @@ func jevRowMarkOf(jev *JevSpend) jevRowMark {
 		return jevRowMark{}
 	}
 	return jevRowMark{failed: jev.ReadFailed, stale: jev.Stale}
+}
+
+// costRowsKey is what the Cost rows read from the clock, besides their cost
+// inputs: the Jev row's mark, and the Claude row's reason while its plan is
+// unread (the age of the newest sample, and whether its week has reset). No
+// other part of the rows moves with now.
+type costRowsKey struct {
+	jev    jevRowMark
+	claude string
+}
+
+// costRowsKeyOf is the key the rows are built under at now. The Claude reason is
+// taken only while the plan is unread, the same test the Claude row makes before
+// it reads the clock, so a fresh plan's rows are not rebuilt as time passes.
+func costRowsKeyOf(jev *JevSpend, plan *ClaudePlan, now time.Time) costRowsKey {
+	key := costRowsKey{jev: jevRowMarkOf(jev)}
+	if plan != nil && (plan.Unavailable || plan.Stale) {
+		key.claude = claudePlanUnreadWhy(plan, now)
+	}
+	return key
 }
 
 // jevSpendForRows is the Jev value the Cost rows are built from, marked when
