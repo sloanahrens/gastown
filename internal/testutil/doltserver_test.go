@@ -47,10 +47,12 @@ func probeFailure(t *testing.T) error {
 
 // unmappedPortDeadlineErr is the startup failure of a port lookup that ran out
 // of its budget and still had Docker answering that the Dolt port was never
-// published: a port-not-mapped failure that also wraps the deadline.
+// published: a port-not-mapped failure that also wraps the deadline. It drives
+// the wait through the injected sleep, so the retry tests that call it do not
+// spend the poll budget in real time; the wait's own poll arithmetic is
+// TestWaitForMappedPortGivesUpAtBudget's to pin (gt-d8h2i).
 func unmappedPortDeadlineErr(t *testing.T) error {
 	t.Helper()
-	var sleeps []time.Duration
 	err := awaitDoltReadySleeping(context.Background(),
 		func(_ context.Context, containerPort string) (string, error) {
 			return "", fmt.Errorf("getting mapped port: port %q not found: %w", containerPort, context.DeadlineExceeded)
@@ -59,18 +61,10 @@ func unmappedPortDeadlineErr(t *testing.T) error {
 			t.Fatalf("probe ran for a container whose port was never published")
 			return nil
 		},
-		func(d time.Duration) { sleeps = append(sleeps, d) },
+		func(time.Duration) {},
 	)
 	if err == nil {
 		t.Fatalf("awaitDoltReady returned no error for an unpublished port")
-	}
-	if len(sleeps) != mappedPortPolls-1 {
-		t.Fatalf("sleeps = %v, want %d", sleeps, mappedPortPolls-1)
-	}
-	for i, d := range sleeps {
-		if d != mappedPortPollInterval {
-			t.Fatalf("sleep %d = %s, want %s", i, d, mappedPortPollInterval)
-		}
 	}
 	return err
 }
@@ -141,12 +135,13 @@ func TestWaitForMappedPortGivesUpAtBudget(t *testing.T) {
 	}
 }
 
-// The readiness step the retry tests build their failure through sleeps on an
-// injected sleep, and this pins that seam: a port that never appears walks the
-// whole poll budget at the production interval without real time passing.
-func TestAwaitDoltReadyWalksThePollBudgetWithoutRealSleeping(t *testing.T) {
+// A readiness step whose port never appears still has to wait out the whole
+// poll budget, and this pins that the budget is spent in the injected seam
+// rather than in real time (gt-d8h2i).
+func TestAwaitDoltReadyDoesNotSpendThePollBudgetInRealTime(t *testing.T) {
 	t.Parallel()
-	var sleeps []time.Duration
+	slept := false
+	start := time.Now()
 	err := awaitDoltReadySleeping(context.Background(),
 		func(_ context.Context, containerPort string) (string, error) {
 			return "", fmt.Errorf("getting mapped port: port %q not found: %w", containerPort, context.DeadlineExceeded)
@@ -155,18 +150,16 @@ func TestAwaitDoltReadyWalksThePollBudgetWithoutRealSleeping(t *testing.T) {
 			t.Fatalf("probe ran for a container whose port was never published")
 			return nil
 		},
-		func(d time.Duration) { sleeps = append(sleeps, d) },
+		func(time.Duration) { slept = true },
 	)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the lookup's deadline error", err)
 	}
-	if len(sleeps) != mappedPortPolls-1 {
-		t.Fatalf("sleeps = %d, want %d", len(sleeps), mappedPortPolls-1)
+	if !slept {
+		t.Fatalf("the wait returned without sleeping, so it never walked the poll budget")
 	}
-	for i, d := range sleeps {
-		if d != mappedPortPollInterval {
-			t.Fatalf("sleep %d = %s, want %s", i, d, mappedPortPollInterval)
-		}
+	if elapsed := time.Since(start); elapsed >= mappedPortPollInterval {
+		t.Fatalf("awaitDoltReadySleeping took %s, more than one real poll interval, so the budget was not spent in the seam", elapsed)
 	}
 }
 
