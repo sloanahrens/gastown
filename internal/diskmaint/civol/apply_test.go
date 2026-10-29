@@ -263,6 +263,46 @@ func TestApplyStopsTheRemainingVolumesWhenAJobStartsDuringTheTrim(t *testing.T) 
 	}
 }
 
+// TestApplyDefersWhenTheJobListFailsBeforeTheNextVolume asserts a job list that
+// cannot be read before a later volume holds that volume back and reports the
+// read failure; the delete already made stays recorded.
+func TestApplyDefersWhenTheJobListFailsBeforeTheNextVolume(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	// The list reads fine before the loop and fails once the build cache's rm
+	// has run, which is the read before the npm volume.
+	run := func(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "rm") {
+			f.ps = answer{err: errors.New("exit status 1")}
+		}
+		return f.run(ctx, env, name, args...)
+	}
+	tgt := NewTarget(Config{Dind: f.dind, Runner: f.runner, Image: testImage, Run: run,
+		Ledger: diskmaint.NewLedger(path, 1<<20)})
+
+	result, err := tgt.Apply(context.Background(), planOf(
+		deletePath(gocacheVolume, "aa/old.bin", gb),
+		deletePath(npmVolume, "_cacache/tmp/x", gb),
+	))
+
+	if !errors.Is(err, errJobs) {
+		t.Fatalf("error = %v, want the unreadable job list reported", err)
+	}
+	if got, want := doneRefs(result), []string{gocacheVolume + ":aa/old.bin"}; !slices.Equal(got, want) {
+		t.Fatalf("done = %v, want only the build cache's delete", got)
+	}
+	if c := f.commands(" -v " + npmVolume + ":"); len(c) > 0 {
+		t.Fatalf("the npm volume was trimmed with an unreadable job list: %v", c)
+	}
+	if result.Deferred == "" {
+		t.Fatal("deferred = \"\", want the unreadable list recorded")
+	}
+	if entry := ledgerEntries(t, path)[0]; len(entry.Errors) == 0 || entry.Done != 1 {
+		t.Fatalf("ledger errors/done = %v/%d, want the read failure with the build cache's delete", entry.Errors, entry.Done)
+	}
+}
+
 // TestApplyDefersThePruneWhenTheJobListFailsDuringTheTrim asserts a job list
 // that cannot be read before the prune holds the prune back and reports the
 // read failure, and that the deletes already made stay recorded.
