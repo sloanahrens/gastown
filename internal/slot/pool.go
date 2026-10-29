@@ -79,11 +79,21 @@ type Pool struct {
 // wedged one costs the town one wait rather than the day.
 const DefaultMaxGateYield = config.DefaultContainerGateMaxGateYield
 
-// DefaultMaxInstallYield is Pool.MaxInstallYield's default: the 30 minutes at
-// which the install job escalates a binary that stays due (rebuildGTStarveAfter
-// in internal/daemon), so the two never disagree about how long an install may
-// hold the town's post-landing work.
+// DefaultMaxInstallYield is Pool.MaxInstallYield's default: the 30 minutes a
+// post-landing acquisition yields to an install in flight when no cap is set.
+// The install job's starvation alarm fires at the pool's effective cap
+// (Pool.InstallYield), not at this constant, so the wait and the alarm that
+// reports it are one number (gt-pa4tg).
 const DefaultMaxInstallYield = 30 * time.Minute
+
+// InstallYield is Pool.MaxInstallYield with its default applied: the cap a
+// post-landing acquisition yields to an install in flight. The install job
+// reads this value from the town's pool (internal/daemon rebuildGTInstallCap)
+// and escalates a binary that stays due at the same duration, so a pool that
+// yields longer defers the alarm rather than leaving it behind (gt-pa4tg).
+func (p Pool) InstallYield() time.Duration {
+	return p.normalized().MaxInstallYield
+}
 
 // DefaultPool is the pre-pool behavior: one slot, nothing reserved. Acquire
 // and Status use it.
