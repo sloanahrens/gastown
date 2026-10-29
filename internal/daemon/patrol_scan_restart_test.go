@@ -177,8 +177,16 @@ func TestPatrolScanRestartEscalatesOnlyARepeatedCause(t *testing.T) {
 // place of the real executor, with the restart budget set by the test.
 func newPatrolRestartDaemon(t *testing.T, budget int, restart func(supervisor.Seat) error) (*Daemon, *notifyfake.Recorder) {
 	t.Helper()
-	town := t.TempDir()
 	rec := notifyfake.New()
+	return newPatrolRestartDaemonOn(t, rec, budget, restart), rec
+}
+
+// newPatrolRestartDaemonOn is newPatrolRestartDaemon delivering into an
+// existing recorder: a test that restarts the daemon runs the new process
+// against the same town, where the escalations it inherits were filed.
+func newPatrolRestartDaemonOn(t *testing.T, rec *notifyfake.Recorder, budget int, restart func(supervisor.Seat) error) *Daemon {
+	t.Helper()
+	town := t.TempDir()
 	d := &Daemon{
 		logger:           discardLogger,
 		config:           &Config{TownRoot: town},
@@ -192,7 +200,7 @@ func newPatrolRestartDaemon(t *testing.T, budget int, restart func(supervisor.Se
 		Restart:  restart,
 		Logf:     func(string, ...any) {},
 	})
-	return d, rec
+	return d
 }
 
 // patrolRestartEscalations returns the escalations filed under a seat's
@@ -314,6 +322,62 @@ func TestPatrolScanRestartQuietScanBreaksTheRun(t *testing.T) {
 			t.Errorf("escalations = %d, want 1: a scan of another rig broke the run", len(got))
 		}
 	})
+}
+
+// A patrol-restart alert is filed in the town, not in the daemon, so the
+// daemon that restarts the seat may not be the one that raised it: the alert
+// raised before a daemon restart must still be cleared by the successful
+// restart that follows (gt-eu4ij).
+func TestPatrolScanRestartClearsAnAlertRaisedBeforeADaemonRestart(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("restarting gastown/goose: exit status 1: push refused")
+	const key = "patrol-restart:gastown/goose"
+
+	rec := notifyfake.New()
+	before := newPatrolRestartDaemonOn(t, rec, 10, func(supervisor.Seat) error { return failure })
+	h := &patrolScanHost{d: before}
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	_ = h.Restart("gastown", "goose", "patrol scan: dead")
+	if got := rec.OpenEscalations(key); len(got) != 1 {
+		t.Fatalf("open escalations under %q before the daemon restart = %+v, want one", key, got)
+	}
+
+	// The daemon restarts, and the new process holds no memory of the alert
+	// its predecessor raised. Its restart succeeds.
+	after := newPatrolRestartDaemonOn(t, rec, 10, func(supervisor.Seat) error { return nil })
+	if err := (&patrolScanHost{d: after}).Restart("gastown", "goose", "patrol scan: dead"); err != nil {
+		t.Fatalf("restart answered %v, want success", err)
+	}
+	if got := rec.OpenEscalations(key); len(got) != 0 {
+		t.Errorf("open escalations under %q after the new daemon's successful restart = %+v, want none", key, got)
+	}
+}
+
+// A successful restart with no alert open under the seat's key clears that key
+// and nothing else, files no escalation and reports no error, so every
+// successful restart can clear without first asking whether an alert exists
+// (gt-eu4ij).
+func TestPatrolScanRestartSuccessWithNoAlertOpenClearsOnlyItsKey(t *testing.T) {
+	t.Parallel()
+	const key = "patrol-restart:gastown/goose"
+	d, rec := newPatrolRestartDaemon(t, 10, func(supervisor.Seat) error { return nil })
+
+	if err := (&patrolScanHost{d: d}).Restart("gastown", "goose", "patrol scan: dead"); err != nil {
+		t.Fatalf("restart answered %v, want success", err)
+	}
+	if got := rec.Escalations(); len(got) != 0 {
+		t.Errorf("escalations = %+v, want none", got)
+	}
+	if got := rec.OpenEscalations(key); len(got) != 0 {
+		t.Errorf("open escalations under %q = %+v, want none", key, got)
+	}
+	clears := rec.Clears()
+	if len(clears) != 1 {
+		t.Fatalf("clears = %+v, want one naming %q", clears, key)
+	}
+	if fp := clears[0].Fingerprints; len(fp) != 1 || fp[0] != key {
+		t.Errorf("clear named %v, want only %q", fp, key)
+	}
 }
 
 // An escalation stays open through a quiet scan, and the restart that

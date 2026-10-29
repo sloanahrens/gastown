@@ -741,6 +741,12 @@ func patrolRestartKey(rig, name string) string {
 // its own second scan. A refusal is an attempt that started nothing, so it
 // neither starts nor ends a run, and the supervisor escalates its own
 // refusals under their own keys.
+//
+// A success clears the seat's key whether or not this process remembers
+// raising the alert: the alert lives in the town, so one raised before a
+// daemon restart is still open while the memory of it is gone (gt-eu4ij).
+// The key names the seat, and `gt escalate clear` with nothing open under it
+// is a success, so the clear is idempotent and closes no other seat's alert.
 func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 	key := patrolRestartKey(rig, name)
 	d.patrolRestartFailsMu.Lock()
@@ -750,12 +756,8 @@ func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 	d.patrolRestartTried[key] = true
 	if err == nil {
 		delete(d.patrolRestartFails, key)
-		open := d.patrolRestartAlerts[key]
-		delete(d.patrolRestartAlerts, key)
 		d.patrolRestartFailsMu.Unlock()
-		if open {
-			d.clearAlerts("restarting "+rig+"/"+name+" succeeded again", key)
-		}
+		d.clearAlerts("restarting "+rig+"/"+name+" succeeded again", key)
 		return
 	}
 	if errors.Is(err, supervisor.ErrRefused) {
@@ -775,12 +777,6 @@ func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 	}
 	d.patrolRestartFails[key] = last
 	escalate := last.scans == 2
-	if escalate {
-		if d.patrolRestartAlerts == nil {
-			d.patrolRestartAlerts = map[string]bool{}
-		}
-		d.patrolRestartAlerts[key] = true
-	}
 	d.patrolRestartFailsMu.Unlock()
 
 	if escalate {
