@@ -17,6 +17,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -272,7 +273,10 @@ func realHostAgentInstallDeps() hostAgentInstallDeps {
 		tempDir:   os.TempDir,
 		plistPath: templates.HostAgentPlistPath,
 		render:    templates.HostAgentPlist,
-		writeFile: os.WriteFile,
+		// The plist is published by a rename, never written in place: launchd
+		// reads a job the moment its file appears, and a half-written one is a
+		// plist it cannot parse.
+		writeFile: atomicfile.WriteFile,
 	}
 }
 

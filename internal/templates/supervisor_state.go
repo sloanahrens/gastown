@@ -406,7 +406,8 @@ func atoiOr(s string, fallback int) int {
 // SupervisorFileIsFor reports whether the plist / unit at path names townRoot
 // as its WorkingDirectory (both templates render it as
 // "<string>{{.TownRoot}}</string>" / "WorkingDirectory={{.TownRoot}}"). An
-// absent file is (false, nil); a present but unreadable one is an error.
+// absent file is (false, nil); one this cannot read, or whose value does not
+// decode, is an error.
 func SupervisorFileIsFor(path, townRoot string) (bool, error) {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -423,7 +424,10 @@ func SupervisorFileIsFor(path, townRoot string) (bool, error) {
 	// /private/tmp on macOS), and a miss here means a hand spawn beside a
 	// loaded job. Compare the recorded WorkingDirectory as a path, symlinks
 	// resolved, not as a string.
-	recorded := supervisorWorkingDirectory(string(data))
+	recorded, err := supervisorWorkingDirectory(string(data))
+	if err != nil {
+		return false, fmt.Errorf("supervisor file %s: %w", path, err)
+	}
 	if recorded == "" {
 		// Present but not in the shape the templates render (hand-edited,
 		// older format): still a provisioned supervisor as far as launchd or
@@ -439,8 +443,9 @@ func SupervisorFileIsFor(path, townRoot string) (bool, error) {
 //
 // A plist carries its value XML-escaped, so what is read back is decoded
 // before it is compared with a town root: a town whose path holds & is
-// written as &amp; and must still match the town it names.
-func supervisorWorkingDirectory(body string) string {
+// written as &amp; and must still match the town it names. A value that does
+// not decode is an error, never the raw text.
+func supervisorWorkingDirectory(body string) (string, error) {
 	if i := strings.Index(body, "<key>WorkingDirectory</key>"); i >= 0 {
 		rest := body[i:]
 		if a := strings.Index(rest, "<string>"); a >= 0 {
@@ -448,34 +453,50 @@ func supervisorWorkingDirectory(body string) string {
 				return decodeXMLEntities(strings.TrimSpace(rest[a+len("<string>") : a+b]))
 			}
 		}
-		return ""
+		return "", nil
 	}
 	for _, line := range strings.Split(body, "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "WorkingDirectory="); ok {
-			return strings.TrimSpace(v)
+			return strings.TrimSpace(v), nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
-// decodeXMLEntities decodes the entity references an XML text node may carry,
-// so a value read back out of a plist equals the one that was written into
-// it. Text that is not well-formed is returned as it was read: the caller
-// compares it with a town root, and a value this cannot decode cannot have
-// been written by a renderer either.
-func decodeXMLEntities(s string) string {
+// decodeXMLEntities decodes the entity references a plist's text node carries,
+// so a value read back out of the file equals the one that was written into
+// it. Only text decodes: markup, an undefined entity or a truncated value is
+// an error, since no renderer writes any of them, and a caller that compared
+// the raw spelling instead would be guessing which town a file serves.
+func decodeXMLEntities(s string) (string, error) {
 	dec := xml.NewDecoder(strings.NewReader("<x>" + s + "</x>"))
 	var out strings.Builder
+	wrapper := false
 	for {
 		tok, err := dec.Token()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return out.String()
+				return out.String(), nil
 			}
-			return s
+			return "", err
 		}
-		if cd, ok := tok.(xml.CharData); ok {
-			out.Write(cd)
+		isText := true
+		switch tok := tok.(type) {
+		case xml.CharData:
+			out.Write(tok)
+		case xml.StartElement:
+			// The wrapper's own start tag, which comes once and before the
+			// text; a second one is markup inside the value.
+			isText = !wrapper
+			wrapper = true
+		case xml.EndElement:
+			// The wrapper's closing tag; the decoder refuses content after it.
+		default:
+			// A comment, processing instruction or directive: never text.
+			isText = false
+		}
+		if !isText {
+			return "", errors.New("WorkingDirectory holds markup, not the text a rendered plist carries")
 		}
 	}
 }

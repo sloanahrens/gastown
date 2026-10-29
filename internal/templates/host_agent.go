@@ -39,11 +39,9 @@ type HostAgentData struct {
 }
 
 // HostAgentPlist renders the host agent's launchd plist for the town at
-// townRoot, run by gtPath.
-//
-// The plist is the job: there is no shell wrapper and nothing else defines it,
-// so an empty gt path or town root would render a job that runs nothing in no
-// town, and both are refused rather than written.
+// townRoot, run by gtPath. An empty gt path or town root is refused rather
+// than rendered: the plist defines the whole job, so it would name a program
+// that runs nothing, in no town.
 func HostAgentPlist(gtPath, townRoot string) (string, error) {
 	if gtPath == "" {
 		return "", errors.New("render host agent plist: no gt path")
@@ -54,10 +52,7 @@ func HostAgentPlist(gtPath, townRoot string) (string, error) {
 	return renderHostAgentPlist(supervisorFS, HostAgentData{
 		GTPath:   gtPath,
 		TownRoot: townRoot,
-		// hostprobe.Path is the one place the probe file's location is
-		// written down, so the log sits beside it rather than under a second
-		// copy of the same directory in the template.
-		LogPath: filepath.Join(filepath.Dir(hostprobe.Path(townRoot)), "agent.log"),
+		LogPath:  filepath.Join(filepath.Dir(hostprobe.Path(townRoot)), "agent.log"),
 	})
 }
 

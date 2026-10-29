@@ -87,7 +87,11 @@ func TestHostAgentPlist_EscapesTheValuesItWritesIntoXML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HostAgentPlist: %v", err)
 	}
-	if got := supervisorWorkingDirectory(escaped); got != "/towns/a&b" {
+	got, err = supervisorWorkingDirectory(escaped)
+	if err != nil {
+		t.Fatalf("supervisorWorkingDirectory read back an error: %v", err)
+	}
+	if got != "/towns/a&b" {
 		t.Errorf("supervisorWorkingDirectory read back %q, want /towns/a&b", got)
 	}
 }

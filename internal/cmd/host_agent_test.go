@@ -25,30 +25,61 @@ import (
 // runs.
 var hostAgentEpoch = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 
+// hostAgentWait bounds every wait these tests make on the loop. A loop that
+// neither writes nor returns within it fails the test, so a stuck loop cannot
+// pass by running until go test's own timeout ends the package's run.
+const hostAgentWait = 10 * time.Second
+
 // startHostAgentLoop runs l in the background and returns the channel its exit
-// is reported on. A loop that never exits hangs the test rather than passing
-// it: there is no timeout to spend, and the go test timeout names the test.
+// is reported on.
 func startHostAgentLoop(l *hostAgentLoop, ctx context.Context) <-chan error {
 	done := make(chan error, 1)
 	go func() { done <- l.run(ctx) }()
 	return done
 }
 
-// waitForNextTick advances nothing and returns once the loop is blocked on its
-// clock. Advancing before that lands the advance before the wait, and the tick
-// then arrives a whole interval late; a loop that stopped instead of waiting
-// fails the test here rather than blocking it forever.
-func waitForNextTick(t *testing.T, ctx context.Context, clock *clockwork.FakeClock, done <-chan error) {
+// awaitWrite returns the next write the loop made, failing the test if none
+// arrives before hostAgentWait or if the loop stops first.
+func awaitWrite(t *testing.T, writes <-chan time.Time, done <-chan error) time.Time {
 	t.Helper()
-	blocked := make(chan error, 1)
-	go func() { blocked <- clock.BlockUntilContext(ctx, 1) }()
+	ctx, cancel := context.WithTimeout(context.Background(), hostAgentWait)
+	defer cancel()
 	select {
-	case err := <-blocked:
-		if err != nil {
-			t.Fatalf("waiting for the loop's next tick: %v", err)
-		}
+	case got := <-writes:
+		return got
 	case err := <-done:
-		t.Fatalf("loop stopped before it waited for its next tick: %v", err)
+		t.Fatalf("loop stopped before its next write: %v", err)
+	case <-ctx.Done():
+		t.Fatal("no write within the test's bound")
+	}
+	return time.Time{}
+}
+
+// awaitExit returns the loop's exit, failing the test if the loop is still
+// running when hostAgentWait ends.
+func awaitExit(t *testing.T, done <-chan error) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), hostAgentWait)
+	defer cancel()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		t.Fatal("the loop was still running at the test's bound")
+	}
+	return nil
+}
+
+// awaitNextTick advances nothing and returns once the loop has registered its
+// wait on the clock. Advancing before that lands the advance before the wait,
+// and the tick then arrives a whole interval late; a loop that stopped instead
+// fails the test here once hostAgentWait ends.
+func awaitNextTick(t *testing.T, clock *clockwork.FakeClock) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), hostAgentWait)
+	defer cancel()
+	if err := clock.BlockUntilContext(ctx, 1); err != nil {
+		t.Fatalf("the loop did not wait for its next tick within the test's bound: %v", err)
 	}
 }
 
@@ -83,22 +114,17 @@ func TestHostAgentLoop_WritesThreeTicksOneMinuteApart(t *testing.T) {
 
 	for i := range 3 {
 		want := hostAgentEpoch.Add(time.Duration(i) * hostAgentInterval)
-		select {
-		case got := <-writes:
-			if !got.Equal(want) {
-				t.Errorf("write %d stamped %s, want %s", i+1, got, want)
-			}
-		case err := <-done:
-			t.Fatalf("loop stopped after %d write(s): %v", i, err)
+		if got := awaitWrite(t, writes, done); !got.Equal(want) {
+			t.Errorf("write %d stamped %s, want %s", i+1, got, want)
 		}
 		if i < 2 {
-			waitForNextTick(t, ctx, clock, done)
+			awaitNextTick(t, clock)
 			clock.Advance(hostAgentInterval)
 		}
 	}
 
 	cancel()
-	if err := <-done; err != nil {
+	if err := awaitExit(t, done); err != nil {
 		t.Errorf("loop after cancel = %v, want nil (a clean stop)", err)
 	}
 	if n := len(writes); n != 0 {
@@ -127,16 +153,12 @@ func TestHostAgentLoop_CancelStopsWriting(t *testing.T) {
 	}
 	done := startHostAgentLoop(loop, ctx)
 
-	select {
-	case <-writes:
-	case err := <-done:
-		t.Fatalf("loop stopped before its first write: %v", err)
-	}
+	awaitWrite(t, writes, done)
 	// Cancel while the loop waits, so the test pins the wait's exit rather than
 	// racing a write that is already running.
-	waitForNextTick(t, ctx, clock, done)
+	awaitNextTick(t, clock)
 	cancel()
-	if err := <-done; err != nil {
+	if err := awaitExit(t, done); err != nil {
 		t.Errorf("loop after cancel = %v, want nil (a clean stop)", err)
 	}
 	clock.Advance(3 * hostAgentInterval)
@@ -176,15 +198,11 @@ func TestHostAgentLoop_DropsATickCancelledMidCollect(t *testing.T) {
 	}
 	done := startHostAgentLoop(loop, ctx)
 
-	select {
-	case <-writes:
-	case err := <-done:
-		t.Fatalf("loop stopped before its first write: %v", err)
-	}
-	waitForNextTick(t, ctx, clock, done)
+	awaitWrite(t, writes, done)
+	awaitNextTick(t, clock)
 	clock.Advance(hostAgentInterval)
 
-	if err := <-done; err != nil {
+	if err := awaitExit(t, done); err != nil {
 		t.Errorf("loop after a mid-tick cancel = %v, want nil (a clean stop)", err)
 	}
 	if n := len(writes); n != 0 {
@@ -231,16 +249,11 @@ func TestHostAgentLoop_LogsAFailedWriteAndKeepsGoing(t *testing.T) {
 
 	// The loop can only be waiting on the clock once the failed write is done,
 	// so this is also the point by which it was logged.
-	waitForNextTick(t, ctx, clock, done)
+	awaitNextTick(t, clock)
 	clock.Advance(hostAgentInterval)
 
-	select {
-	case got := <-writes:
-		if want := hostAgentEpoch.Add(hostAgentInterval); !got.Equal(want) {
-			t.Errorf("second tick stamped %s, want %s", got, want)
-		}
-	case err := <-done:
-		t.Fatalf("a failed write ended the loop: %v", err)
+	if got, want := awaitWrite(t, writes, done), hostAgentEpoch.Add(hostAgentInterval); !got.Equal(want) {
+		t.Errorf("second tick stamped %s, want %s", got, want)
 	}
 
 	mu.Lock()
@@ -509,6 +522,53 @@ func TestInstallHostAgent_RefusesATemporaryBinary(t *testing.T) {
 	}
 }
 
+// TestInstallHostAgent_PublishesThePlistByReplacement: a reinstall reaches the
+// plist as a new file rather than a rewrite of the one launchd may be reading,
+// and it leaves no temporary beside it. The write is production's own, so this
+// is also the test that goes red if install is wired back to a plain write.
+func TestInstallHostAgent_PublishesThePlistByReplacement(t *testing.T) {
+	t.Parallel()
+	town, dir := t.TempDir(), t.TempDir()
+	path := filepath.Join(dir, "com.gastown.host-agent.plist")
+	var first os.FileInfo
+	for i := range 2 {
+		if _, err := installHostAgent(town, hostAgentInstallDepsFor(path, "darwin", templates.HostAgentPlist)); err != nil {
+			t.Fatalf("install %d: %v", i+1, err)
+		}
+		if i == 0 {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat after the first install: %v", err)
+			}
+			first = info
+		}
+	}
+	second, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after the second install: %v", err)
+	}
+	if os.SameFile(first, second) {
+		t.Error("the second install rewrote the plist in place, so a reader during it could have seen a partial job")
+	}
+	if names := hostAgentDirNames(t, dir); len(names) != 1 || names[0] != filepath.Base(path) {
+		t.Errorf("directory after two installs holds %v, want only the plist", names)
+	}
+}
+
+// hostAgentDirNames lists a directory's entries, sorted by name.
+func hostAgentDirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	return names
+}
+
 // TestHostAgentWrite_PublishesUnderANewDirectory: the agent's first run has to
 // create .runtime/host itself, since nothing does it for a town that never ran
 // the agent.
@@ -650,14 +710,14 @@ const hostAgentTestTempDir = "/var/folders/test/T"
 
 // hostAgentInstallDepsFor is install's deps for a test: the given OS, a fixed
 // gt path and the given plist path, always under a temporary directory so no
-// test can reach the operator's LaunchAgents.
+// test can reach the operator's LaunchAgents. The write stays production's, so
+// the tests that install exercise the writer install really uses.
 func hostAgentInstallDepsFor(path, goos string, render func(gtPath, townRoot string) (string, error)) hostAgentInstallDeps {
-	return hostAgentInstallDeps{
-		goos:      goos,
-		gtPath:    func() (string, error) { return hostAgentTestGTPath, nil },
-		tempDir:   func() string { return hostAgentTestTempDir },
-		plistPath: func() (string, error) { return path, nil },
-		render:    render,
-		writeFile: os.WriteFile,
-	}
+	d := realHostAgentInstallDeps()
+	d.goos = goos
+	d.gtPath = func() (string, error) { return hostAgentTestGTPath, nil }
+	d.tempDir = func() string { return hostAgentTestTempDir }
+	d.plistPath = func() (string, error) { return path, nil }
+	d.render = render
+	return d
 }
