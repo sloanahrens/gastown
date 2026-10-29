@@ -59,7 +59,7 @@ const (
 
 // skipLabels keep a bead out of the read: a bead a human owns or a handoff note
 // is not work that can be obsolete.
-var skipLabels = []string{"human-only", "handoff", "needs-human", "gt:needs-human"}
+var skipLabels = []string{"human-only", "overseer-only", "operator-only", "handoff", "needs-human", "needs-overseer", "needs-operator", "gt:needs-human", "gt:needs-overseer", "gt:needs-operator"}
 
 // workTypes are the issue types the pass reads. Every other type (rig,
 // molecule, agent, epic, wisp, and whatever the beads package marks

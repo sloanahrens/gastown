@@ -303,6 +303,12 @@ func TestJevStaleReadsOnlyWorkBeads(t *testing.T) {
 		labeled("gt-handoff", "handoff"),
 		labeled("gt-needs", "needs-human"),
 		labeled("gt-gtneeds", "gt:needs-human"),
+		labeled("gt-overseer", "overseer-only"),
+		labeled("gt-operator", "operator-only"),
+		labeled("gt-needsov", "needs-overseer"),
+		labeled("gt-needsop", "needs-operator"),
+		labeled("gt-gtneedsov", "gt:needs-overseer"),
+		labeled("gt-gtneedsop", "gt:needs-operator"),
 	}
 	old := typed("gt-old", "task")
 	bug := typed("gt-bug", "bug")

@@ -793,3 +793,32 @@ func TestChooseSeatZeroClockDoesNotDrawAWindowedSeat(t *testing.T) {
 		t.Errorf("picture = %q, want it to name the window the zero clock cannot read", pic)
 	}
 }
+
+// The overseer-first labels keep the dispatcher off a bead the way their old
+// names do: Eligible refuses it under the label's own name, and the ready
+// query names it so the server drops the bead before it is fetched (gt-ft52x).
+func TestOverseerFirstLabelsKeepTheDispatcherOff(t *testing.T) {
+	t.Parallel()
+	labels := []string{
+		dispatch.OverseerOnlyLabel,
+		dispatch.OperatorOnlyLabel,
+		dispatch.NeedsOverseerLabel,
+		dispatch.NeedsOperatorLabel,
+		"needs-overseer",
+		"needs-operator",
+	}
+	ready := ReadyQueryLabels()
+	for _, label := range labels {
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			s := goodSpec()
+			s.Labels = []string{label}
+			if ok, why := Eligible(s, 2); ok || why != "label "+label {
+				t.Errorf("Eligible with %q = %v %q, want a refusal naming the label", label, ok, why)
+			}
+			if !hasLabel(ready, label) {
+				t.Errorf("ReadyQueryLabels = %v, want %q filtered server-side", ready, label)
+			}
+		})
+	}
+}

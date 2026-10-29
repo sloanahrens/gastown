@@ -31,7 +31,7 @@ const CrewOnlyLabel = "crew-only"
 // dispatch.HumanOnlyLabel is named here for the skip line rather than for the
 // verdict: the shared rule holds it already, and a name in this list is what
 // makes the refusal a board-carried line the tick prints (gt-me800).
-var excludedLabels = []string{"gt:ready-to-land", "needs-human", DispatchFailedLabel, CrewOnlyLabel, dispatch.HumanOnlyLabel}
+var excludedLabels = []string{"gt:ready-to-land", "needs-human", "needs-overseer", "needs-operator", DispatchFailedLabel, CrewOnlyLabel, dispatch.HumanOnlyLabel, dispatch.OverseerOnlyLabel, dispatch.OperatorOnlyLabel, dispatch.NeedsOverseerLabel, dispatch.NeedsOperatorLabel}
 
 // ExcludedLabels returns the labels that keep a bead from the dispatcher.
 func ExcludedLabels() []string { return append([]string(nil), excludedLabels...) }
