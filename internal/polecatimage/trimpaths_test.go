@@ -176,6 +176,52 @@ func TestRemoveTrimPathsRemovesThePathItResolved(t *testing.T) {
 	}
 }
 
+// TestRemoveTrimPathsRefusesAClaimRootItCannotResolve pins the check the run makes before it reads
+// any path: a claim it cannot resolve is one whose boundaries it does not know, so it trims nothing.
+func TestRemoveTrimPathsRefusesAClaimRootItCannotResolve(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/one")
+	f.resolveErr["/cache"] = errors.New("no such device")
+	if _, err := RemoveTrimPaths("/cache", "/trim", 1, f.fs()); err == nil {
+		t.Fatal("RemoveTrimPaths trimmed under a claim root it could not resolve")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+}
+
+// TestRemoveTrimPathsRefusesAShardFileItCannotRead pins a shard whose directory lists a file the
+// read then refuses: the list is unknown, so the run refuses rather than trimming what it has.
+func TestRemoveTrimPathsRefusesAShardFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	dir := f.addShard("/trim", 0, "gocache/one")
+	delete(f.files, filepath.Join(dir, cachevol.TrimShardKey))
+	if _, err := RemoveTrimPaths("/cache", "/trim", 1, f.fs()); err == nil {
+		t.Fatal("RemoveTrimPaths trimmed a list it could not read")
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+}
+
+// TestTrimPathsMainRefusesAListDirectoryThatIsNotThere is the same refusal over the real
+// filesystem: the Job mounts the shards under --list, and a run given a directory that is not there
+// has no list to act on.
+func TestTrimPathsMainRefusesAListDirectoryThatIsNotThere(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	list := filepath.Join(t.TempDir(), "absent")
+	code := trimPathsMain([]string{"--root", t.TempDir(), "--list", list, "--shards", "1"}, &out, &errOut)
+	if code != 3 {
+		t.Fatalf("trimPathsMain = %d, want 3 (%s)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "reading the shard") {
+		t.Errorf("stderr = %q, want the shard it could not read", errOut.String())
+	}
+}
+
 // TestRemoveTrimPathsRefusesADirectoryItCannotResolve pins the other answer a resolve gives: an error
 // that is not the directory being gone is a check that did not run, so the run refuses rather than
 // counting the file absent.
