@@ -551,6 +551,7 @@ type readings struct {
 	gc         bool
 	last       string
 	cloud      int
+	tracker    trackerStatus
 }
 
 func (r readings) workingCount() string {
@@ -579,6 +580,7 @@ func (e *engine) read(ctx context.Context) readings {
 	r.pending, r.pendingOK = e.pendingLandings()
 	r.working, r.workingErr = e.workingPolecats(ctx)
 	r.gc = e.gcActive()
+	r.tracker = e.readTracker()
 	return r
 }
 

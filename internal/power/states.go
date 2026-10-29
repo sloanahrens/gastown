@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -29,6 +32,20 @@ func Status(ctx context.Context, o Options) error {
 	}
 	line("state", derive(r))
 	line("dolt :3307", yesNo(r.dolt, "up", "DOWN"))
+	// The tracker prints beside Dolt only when a rig's route names it: a town
+	// with no rig on the tracker has none to report. An endpoint that does
+	// not resolve says so rather than printing a guessed port, and an
+	// unreadable route table leaves "no rig on the tracker" unknown.
+	switch tr := r.tracker; {
+	case tr.routeErr != nil:
+		line("tracker", fmt.Sprintf("? (cannot read the route table: %v)", tr.routeErr))
+	case !tr.on:
+		// No rig is on the tracker, so there is no tracker line.
+	case !tr.resolved:
+		line("tracker", "unconfigured")
+	default:
+		line(fmt.Sprintf("tracker :%d", tr.port), yesNo(tr.up, "up", "DOWN"))
+	}
 	line("docker engine", yesNo(r.docker, "up", "DOWN"))
 	line("forgejo healthz", fmt.Sprintf("%s (compose services running: %d)", compose, r.compose))
 	line(fmt.Sprintf("daemon (%s)", DaemonLabel), yesNo(r.daemon, "loaded", "NOT loaded"))
@@ -44,6 +61,62 @@ func Status(ctx context.Context, o Options) error {
 	line("cloud-deploy daemons", fmt.Sprintf("%d plist(s), outside the states; see %s",
 		r.cloud, filepath.Join(o.TownRoot, "devops", "wizard-src", "cloud-check.sh")))
 	return nil
+}
+
+// trackerStatus is the tracker's part of the report. A town with no rig on
+// the tracker has no tracker to print.
+type trackerStatus struct {
+	// routeErr is a route table that could not be read. It leaves "no rig on
+	// the tracker" unknown, so it is reported rather than read as none.
+	routeErr error
+	// on reports that some rig's route names the tracker backend.
+	on bool
+	// resolved reports that the town's endpoint was read; port and up mean
+	// something only when it is true.
+	resolved bool
+	// port is the port the town's endpoint resolves to.
+	port int
+	// up reports that GET /healthz on that endpoint answered 200.
+	up bool
+}
+
+// readTracker reads the tracker's part of the report. The endpoint is never
+// probed for a town with no rig on the tracker: nothing there would use it.
+func (e *engine) readTracker() trackerStatus {
+	on, err := e.rigOnTracker()
+	if err != nil {
+		return trackerStatus{routeErr: err}
+	}
+	if !on {
+		return trackerStatus{}
+	}
+	ep, err := config.ResolveTrackerEndpoint(e.o.TownRoot)
+	if err != nil {
+		return trackerStatus{on: true}
+	}
+	return trackerStatus{on: true, resolved: true, port: ep.Port, up: e.trackerOK(ep)}
+}
+
+// rigOnTracker reports whether some rig's route names the tracker backend. An
+// unreadable route table is an error, never "no rig on the tracker": that
+// would print a clean report for a town whose routes could not be read.
+func (e *engine) rigOnTracker() (bool, error) {
+	routes, err := beads.LoadRoutes(filepath.Join(e.o.TownRoot, ".beads"))
+	if err != nil {
+		return false, err
+	}
+	for _, r := range routes {
+		if r.BackendName() == beads.BackendTracker {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// trackerOK reports whether the tracker's health endpoint answers 200.
+func (e *engine) trackerOK(ep config.TrackerEndpoint) bool {
+	status, err := e.o.HTTPStatus(ep.URL() + "/healthz")
+	return err == nil && status == http.StatusOK
 }
 
 func yesNo(ok bool, yes, no string) string {

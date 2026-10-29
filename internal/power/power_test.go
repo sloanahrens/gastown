@@ -59,6 +59,13 @@ type fake struct {
 	failJobhost   bool
 	unexpectedRun error
 
+	// The town's tracker: trackerPort is the port its endpoint names, and
+	// trackerUp answers the health probe there. trackerProbes records every
+	// tracker health probe, so a test can show which URL was asked.
+	trackerPort   int
+	trackerUp     bool
+	trackerProbes []string
+
 	// broken parts: commands that fail or leave a part down, for the alarm
 	// and refusal branches.
 	doltStartNoop bool
@@ -101,12 +108,7 @@ func (f *fake) opts() Options {
 			}
 			return "", exec.ErrNotFound
 		},
-		HTTPStatus: func(string) (int, error) {
-			if f.forgejo {
-				return 200, nil
-			}
-			return 0, errors.New("connection refused")
-		},
+		HTTPStatus: f.httpStatus,
 		Glob: func(pattern string) ([]string, error) {
 			if f.releasebot {
 				return []string{filepath.Join(f.town, "LaunchDaemons", "local.gt-cloud.releasebot.plist")}, nil
@@ -119,6 +121,26 @@ func (f *fake) opts() Options {
 		ErrOut: &errOut,
 	}
 	return o
+}
+
+// httpStatus answers the health probes: Forgejo's, and the tracker's /healthz
+// on the port the test's town names. Any other URL is refused, so a probe of a
+// port the town does not name reads DOWN.
+func (f *fake) httpStatus(url string) (int, error) {
+	if strings.HasSuffix(url, "/api/healthz") {
+		if f.forgejo {
+			return 200, nil
+		}
+		return 0, errors.New("connection refused")
+	}
+	f.trackerProbes = append(f.trackerProbes, url)
+	if f.trackerPort == 0 || url != fmt.Sprintf("http://127.0.0.1:%d/healthz", f.trackerPort) {
+		return 0, errors.New("connection refused")
+	}
+	if f.trackerUp {
+		return 200, nil
+	}
+	return 503, nil
 }
 
 // run implements the exec seam: probes answer from the fake's state and
