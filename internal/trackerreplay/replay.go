@@ -130,7 +130,7 @@ func Replay(ctx context.Context, src Source, apply Apply, since int64, prefix st
 				after = ev.Seq
 				continue
 			}
-			argv, err := Command(ev)
+			argv, err := Command(ev, prefix)
 			if err != nil {
 				return res, err
 			}
@@ -177,16 +177,33 @@ func belongsTo(ev api.Event, prefix string) bool {
 	return strings.HasPrefix(ev.IssueID, p+"-")
 }
 
-// Command returns the bd arguments that replay ev. Every replayable event is
-// one bd call; an event the feed cannot replay is an *UnreplayableError.
+// isWispID reports whether id is a wisp of the rig whose beads prefix is
+// prefix: that prefix, "-wisp-" and the store's random characters, the form its
+// newWispID builds (gt-wisp-c3w9x1). A normal issue id is the prefix and its
+// own characters, so it never has "wisp-" after the prefix.
+func isWispID(id, prefix string) bool {
+	p := strings.TrimSuffix(prefix, "-")
+	if p == "" {
+		return false
+	}
+	rest, ok := strings.CutPrefix(id, p+"-")
+	return ok && strings.HasPrefix(rest, "wisp-") && rest != "wisp-"
+}
+
+// Command returns the bd arguments that replay ev, one of the rig whose beads
+// prefix is prefix. Every replayable event is one bd call; an event the feed
+// cannot replay is an *UnreplayableError.
 //
 // The feed carries an issue's title at creation, not its type, priority or
 // description, so a creation replays with bd's defaults for those: Result.Defaulted
-// counts them and the command says so, so the fill-in is never silent. An update
-// whose field's new value the feed does not carry (defer_until, and the rows
-// written before the store recorded values) is refused rather than filled in
-// with the old one.
-func Command(ev api.Event) ([]string, error) {
+// counts them and the command says so, so the fill-in is never silent. A
+// creation whose id is a wisp id of prefix replays with --ephemeral: the feed
+// carries no ephemeral field, so the id is the only mark it was a wisp, and
+// without the flag a rollback would leave a persistent, versioned issue the rig
+// then counts. An update whose field's new value the feed does not carry
+// (defer_until, and the rows written before the store recorded values) is
+// refused rather than filled in with the old one.
+func Command(ev api.Event, prefix string) ([]string, error) {
 	id, err := operand(ev, ev.IssueID, "issue id")
 	if err != nil {
 		return nil, err
@@ -198,6 +215,9 @@ func Command(ev api.Event) ([]string, error) {
 			return nil, err
 		}
 		argv := []string{"create", "--id=" + id, "--title=" + title}
+		if isWispID(id, prefix) {
+			argv = append(argv, "--ephemeral")
+		}
 		if ev.Actor != "" {
 			argv = append(argv, "--actor="+ev.Actor)
 		}
