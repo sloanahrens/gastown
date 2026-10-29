@@ -158,12 +158,12 @@ func TestOpenTrackerReplayRefusesWhatItCannotResolve(t *testing.T) {
 
 func TestOpenTrackerReplayResolvesTheRigDirectoryUnderTheTown(t *testing.T) {
 	t.Parallel()
-	dir, src, err := openTrackerReplay(replayFixture(nil), "gastown")
+	target, src, err := openTrackerReplay(replayFixture(nil), "gastown")
 	if err != nil || src == nil {
-		t.Fatalf("openTrackerReplay(gastown) = %q, %v, %v; want the rig directory and a feed", dir, src, err)
+		t.Fatalf("openTrackerReplay(gastown) = %+v, %v, %v; want the rig directory and a feed", target, src, err)
 	}
-	if dir != "/town/gastown" {
-		t.Errorf("rig directory = %q, want /town/gastown", dir)
+	if target.dir != "/town/gastown" || target.prefix != "gt-" {
+		t.Errorf("rig target = %+v, want dir /town/gastown with prefix gt-", target)
 	}
 }
 
@@ -298,6 +298,42 @@ func TestRunTrackerReplayIsQuietWhenNothingWasCreated(t *testing.T) {
 	}
 	if errOut.String() != "" {
 		t.Errorf("stderr = %q, want nothing", errOut.String())
+	}
+}
+
+// The feed carries every rig on the tracker, so the command says how many
+// events it skipped for other rigs, and says nothing when there were none
+// (gt-0n2s6).
+func TestRunTrackerReplayReportsSkippedEventsOnlyWhenItSkippedSome(t *testing.T) {
+	t.Parallel()
+	const defaults = "warning: 1 created issue(s) replayed with bd's defaults for priority, type and description (the feed carries only the title); review them in the rig\n"
+	cases := map[string]struct {
+		events []api.Event
+		want   string
+	}{
+		"events for another rig are counted": {
+			events: []api.Event{
+				{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: strPtr("a")},
+				{Seq: 2, Op: "created", IssueID: "dv-1", NewValue: strPtr("b")},
+			},
+			want: "note: skipped 1 event(s) for other rigs (issue ids without the \"gt-\" prefix)\n" + defaults,
+		},
+		"a feed of the rig's own events prints no count": {
+			events: []api.Event{{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: strPtr("a")}},
+			want:   defaults,
+		},
+	}
+	for name, tc := range cases {
+		env := replayFixture(tc.events)
+		env.newApply = func(string) trackerreplay.Apply { return func([]string) error { return nil } }
+		var out, errOut bytes.Buffer
+		if err := runTrackerReplay(env, &out, &errOut, "gastown", 0, false); err != nil {
+			t.Errorf("%s: replay = %v, want no error", name, err)
+			continue
+		}
+		if errOut.String() != tc.want {
+			t.Errorf("%s: stderr = %q, want %q", name, errOut.String(), tc.want)
+		}
 	}
 }
 

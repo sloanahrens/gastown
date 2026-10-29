@@ -1,4 +1,4 @@
-// Package trackerreplay is the rollback replay: it applies the tracker's
+// Package trackerreplay is the rollback replay: it applies one rig's tracker
 // events since a seq onto Dolt through bd, so a rig flipped back to Dolt after
 // a soak loses no writes. Each event becomes one bd call through an injected
 // Apply. An event the feed does not carry enough to replay stops the run and
@@ -35,6 +35,9 @@ type Result struct {
 	// type and description, because the feed carries only the title at creation.
 	// The command reports it: a replayed create is never a silent fill-in.
 	Defaulted int
+	// Skipped counts the feed's events that belong to another rig, which a
+	// replay passes over so a foreign id never reaches bd.
+	Skipped int
 }
 
 // UnreplayableError is an event the replay refuses to guess at: its kind, or
@@ -79,12 +82,20 @@ func (e *ApplyError) Unwrap() error { return e.Err }
 // reached instead.
 const maxPages = 1000
 
-// Replay reads the feed after since and applies each event in seq order. On a
-// dry run it prints each bd call and runs none; apply is then not used and may
-// be nil. The run stops at the first event it cannot replay or the first bd
-// call that fails; the Result still says how far it got.
-func Replay(ctx context.Context, src Source, apply Apply, since int64, dryRun bool, out io.Writer) (Result, error) {
+// Replay reads the feed after since and applies the events of the rig whose
+// beads prefix is prefix, in seq order. An event for another rig is skipped
+// before it is turned into a bd call, because bd run in this rig's directory
+// routes a foreign id to that rig's own Dolt or refuses it, and either would
+// apply the wrong rig's write or stop the run; a skipped event still advances
+// the cursor, and Result.Skipped counts it. On a dry run Replay prints each bd
+// call and runs none; apply is then not used and may be nil. The run stops at
+// the first event it cannot replay or the first bd call that fails; the Result
+// still says how far it got.
+func Replay(ctx context.Context, src Source, apply Apply, since int64, prefix string, dryRun bool, out io.Writer) (Result, error) {
 	res := Result{Applied: since}
+	if strings.TrimSuffix(prefix, "-") == "" {
+		return res, fmt.Errorf("replay needs a beads prefix to tell this rig's events from the others; got %q", prefix)
+	}
 	after := since
 	for pages := 0; ; pages++ {
 		if pages == maxPages {
@@ -108,6 +119,11 @@ func Replay(ctx context.Context, src Source, apply Apply, since int64, dryRun bo
 		for _, ev := range page.Events {
 			if ev.Seq <= after {
 				return res, fmt.Errorf("tracker events feed is not ascending: seq %d follows seq %d", ev.Seq, after)
+			}
+			if !belongsTo(ev, prefix) {
+				res.Skipped++
+				after = ev.Seq
+				continue
 			}
 			argv, err := Command(ev)
 			if err != nil {
@@ -144,6 +160,14 @@ func feedEnded(page api.EventsPage, after int64) error {
 		return fmt.Errorf("tracker events feed returned an empty page after seq %d while holding no events at all: refusing to read a feed that lost its log as ended", after)
 	}
 	return nil
+}
+
+// belongsTo reports whether ev is an issue of the rig whose beads prefix is
+// prefix. The prefix is compared without its trailing dash, and the id must
+// carry it as a whole segment, so a "gt" rig does not claim "gtx-1".
+func belongsTo(ev api.Event, prefix string) bool {
+	p := strings.TrimSuffix(prefix, "-")
+	return strings.HasPrefix(ev.IssueID, p+"-")
 }
 
 // Command returns the bd arguments that replay ev. Every replayable event is
