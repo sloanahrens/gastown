@@ -3812,8 +3812,11 @@ function mangoTrend(m, stale) {
     svg.append(wk);
   }
 
-  // Each label is haloed in the panel's colour, so the dashed marker it sits
-  // beside is cut under the word rather than running through it.
+  // Each label is haloed in the panel's colour, so a dashed marker that runs
+  // under its text is cut under the word rather than running through it. A
+  // label sits 4 units off its own marker, so the marker under it is usually a
+  // neighbouring event's; a long label pushed back inside the plot's right edge
+  // can start left of its own marker, and that marker is cut too.
   for (const {x, shown, anchor, at, row} of placed) {
     svg.append(svgEl("line", {x1: x.toFixed(1), x2: x.toFixed(1), y1: top, y2: bottom, class: "mgtmark", stroke: "currentColor", "stroke-dasharray": "3 3", "stroke-opacity": "0.55"}));
     const label = svgEl("text", {x: at.toFixed(1), y: String(11 + row * rowPx), "text-anchor": anchor, class: "mgtwhat", fill: "currentColor", "font-size": "11", "fill-opacity": "0.8", stroke: "var(--panel)", "stroke-width": "3", "paint-order": "stroke", "stroke-linejoin": "round"});
