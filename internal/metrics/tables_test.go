@@ -153,8 +153,8 @@ func TestBuildLandingsDiffErrorOtherThanUnavailableFails(t *testing.T) {
 	if rows != nil {
 		t.Errorf("BuildLandings rows = %v, want nil with an error", rows)
 	}
-	if !strings.Contains(err.Error(), "gt-1") {
-		t.Errorf("error = %q, want it to name the bead gt-1", err)
+	if !strings.HasPrefix(err.Error(), "landing gt-1: ") {
+		t.Errorf("error = %q, want it to name the bead gt-1 as the prefix", err)
 	}
 	if !errors.Is(err, boom) {
 		t.Errorf("error = %q, want it to wrap the cause", err)
@@ -189,8 +189,11 @@ func TestBuildLandingsBadEraStartFails(t *testing.T) {
 	if rows != nil {
 		t.Errorf("BuildLandings rows = %v, want nil with an error", rows)
 	}
-	if !strings.Contains(err.Error(), "gt-1") {
-		t.Errorf("error = %q, want it to name the bead gt-1", err)
+	// EraOf wraps the parse failure with the era's start; BuildLandings
+	// wraps that with the bead. ParseTS has no sentinel, so the text is the cause.
+	want := `landing gt-1: era at "not-a-time": invalid ISO timestamp "not-a-time"`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
 	}
 }
 
