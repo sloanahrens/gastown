@@ -30,8 +30,8 @@ const (
 	defaultReservationTTL = 5 * time.Minute
 )
 
-// ErrInvalidName is what Bind refuses a name with, since a name has to reach a
-// session name, a git identity and a bead label unchanged.
+// ErrInvalidName is what Bind and Record refuse a name with, since a name has to
+// reach a session name, a git identity and a bead label unchanged.
 var ErrInvalidName = errors.New("a bird name must match " + nameShape.String())
 
 // Registry is one state file, the pool Pick draws from and the polecat
@@ -87,6 +87,14 @@ func New(townRoot string) *Registry {
 
 // Live reports whether the agent a still has its process running, failing
 // rather than answering false when the process table cannot be read.
+//
+// A live pid whose start token one side cannot give reads as live: the record
+// may carry no token, and the kernel gives none for a pid that runs under
+// another uid. A process that is there and cannot be told from the record that
+// names it stays held until the pid exits. The other answer, pruning the record
+// because nothing matches it, would free the name for a second launch while the
+// first bird may still be running; a name held longer than it must be is the
+// smaller cost.
 func (r *Registry) Live(a Agent) (bool, error) {
 	if a.PID <= 0 {
 		return false, nil
@@ -99,10 +107,11 @@ func (r *Registry) Live(a Agent) (bool, error) {
 		return false, nil
 	}
 	if a.Start == "" || token == "" {
-		// One side has no start token to compare, so the kernel's process
-		// cannot be told from the agent that recorded it: it is a process
-		// that is there, and pruning a bird that may still be running is
-		// worse than keeping the record until it exits.
+		// One side has no start token to compare — a process under another uid
+		// is what puts the pid there without its token — so the kernel's
+		// process cannot be told from the agent that recorded it: it is a
+		// process that is there, and pruning a bird that may still be running
+		// is worse than keeping the record until it exits.
 		return true, nil
 	}
 	return token == a.Start, nil
@@ -254,8 +263,9 @@ func (r *Registry) Names() []string {
 	return slices.Clone(r.pool())
 }
 
-// Taken returns every name in use: bound names, reserved names, names of live
-// agents, and the polecat directory names the glob matches.
+// Taken returns every name in use: bound names, names reserved for less than
+// ReservationTTL, names of live agents, and the polecat directory names the
+// glob matches.
 func (r *Registry) Taken() (map[string]bool, error) {
 	st, err := r.Load()
 	if err != nil {
@@ -362,18 +372,57 @@ func expandGlobStat(root, pattern string, stat func(string) (fs.FileInfo, error)
 }
 
 // hasWildcard reports whether part holds a character filepath.Match reads as a
-// pattern. On Windows '\' separates path components, so it is never in one.
+// pattern. On unix '\' escapes the character after it, so it can only be there
+// as part of a pattern; on Windows it separates path components, so a component
+// never holds one and the extra character in the set costs nothing.
 func hasWildcard(part string) bool {
 	return strings.ContainsAny(part, "*?[\\")
 }
 
+// Skip is one pool name Pick passed over, and why.
+type Skip struct {
+	// Name is the pool entry.
+	Name string
+	// Reason is why Pick did not draw the name.
+	Reason SkipReason
+}
+
+// SkipReason is why Pick passed a pool name over.
+type SkipReason string
+
+const (
+	// SkipUnusable is a pool entry ValidName refuses, so no session could hold
+	// the name.
+	SkipUnusable SkipReason = "a name no session could use"
+	// SkipBound is a name a binding records for a bead, which holds it for good.
+	SkipBound SkipReason = "bound to a bead"
+	// SkipReserved is a name an earlier Pick handed out that nothing has bound
+	// yet; it frees itself once its reservation ages past the TTL.
+	SkipReserved SkipReason = "reserved by an earlier pick"
+	// SkipLiveProcess is a name a live process holds, and a process whose start
+	// token cannot be read counts as live (see Live), so its name is held until
+	// the process exits.
+	SkipLiveProcess SkipReason = "held by a live process"
+	// SkipPolecatDirectory is a name a polecat directory holds.
+	SkipPolecatDirectory SkipReason = "a polecat directory holds the name"
+)
+
+// PickResult is what Pick found: the name it reserved, and every pool name it
+// passed over on the way.
+type PickResult struct {
+	// Name is the name Pick reserved, empty when the pool held none free.
+	Name string
+	// Skips are the pool names Pick did not draw, in pool order, each with the
+	// reason, so a launch that gets its second choice can say why.
+	Skips []Skip
+}
+
 // Pick returns a random free name from the pool and reserves it under the
-// lock, so two launches never receive the same name before either binds it; ok
-// is false when every name is taken, and a reservation nothing binds expires
-// after ReservationTTL.
-func (r *Registry) Pick() (string, bool, error) {
-	var picked string
-	var free bool
+// lock, so two launches never receive the same name before either binds it. The
+// result says which name it took and which it passed over, and why; a
+// reservation nothing binds expires after ReservationTTL.
+func (r *Registry) Pick() (PickResult, error) {
+	var picked PickResult
 	err := r.mutate(func(st *State) (bool, error) {
 		now := r.now()
 		ttl := r.ttl()
@@ -382,31 +431,50 @@ func (r *Registry) Pick() (string, bool, error) {
 			return false, err
 		}
 		dropped += st.PruneReservations(now, ttl)
-		taken := st.Held(now, ttl)
 		polecats, err := r.PolecatNames()
 		if err != nil {
 			return false, err
 		}
+		seated := make(map[string]bool, len(polecats))
 		for _, name := range polecats {
-			taken[name] = true
+			seated[name] = true
 		}
+		picked = PickResult{Skips: []Skip{}}
 		candidates := make([]string, 0, len(r.pool()))
 		for _, name := range r.pool() {
-			if ValidName(name) && !taken[name] {
-				candidates = append(candidates, name)
+			if reason, skipped := skipReason(st, name, now, ttl, seated); skipped {
+				picked.Skips = append(picked.Skips, Skip{Name: name, Reason: reason})
+				continue
 			}
+			candidates = append(candidates, name)
 		}
 		if len(candidates) == 0 {
 			return dropped > 0, nil
 		}
-		picked, free = candidates[r.index(len(candidates))], true
-		st.Reserve(picked, now)
+		picked.Name = candidates[r.index(len(candidates))]
+		st.Reserve(picked.Name, now)
 		return true, nil
 	})
 	if err != nil {
-		return "", false, err
+		return PickResult{}, err
 	}
-	return picked, free, nil
+	return picked, nil
+}
+
+// skipReason says why Pick passes name over, and false when it may draw it. It
+// answers with the first of: a name no session could hold, an entry of the state
+// that holds it, or a polecat directory seated under it.
+func skipReason(st *State, name string, now time.Time, ttl time.Duration, seated map[string]bool) (SkipReason, bool) {
+	if !ValidName(name) {
+		return SkipUnusable, true
+	}
+	if reason := st.HoldReason(name, now, ttl); reason != "" {
+		return reason, true
+	}
+	if seated[name] {
+		return SkipPolecatDirectory, true
+	}
+	return "", false
 }
 
 func (r *Registry) pool() []string {
@@ -522,8 +590,10 @@ func (r *Registry) read() (*State, error) {
 
 // startToken reads pid's start token from the kernel. A token the kernel will
 // not give may mean the process is gone, or that it is there but its token is
-// not readable (a process under another uid); only a table that cannot be read
-// at all is an error, since the registry prunes on a gone process alone.
+// not readable (a process under another uid); the probe tells the two apart,
+// and a process that is there with no token answers live (see Live). Only a
+// table that cannot be read at all is an error, since the registry prunes on a
+// gone process alone.
 func startToken(pid int) (string, bool, error) {
 	return tokenFrom(pid, procid.StartToken, probeProcess)
 }
