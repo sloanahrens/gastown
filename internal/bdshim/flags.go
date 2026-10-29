@@ -174,6 +174,203 @@ var aliases = map[string]string{
 	"view":               "show",
 }
 
+// operandSlot is one positional placeholder of a command's usage line, as bd
+// writes it, and whether the operand that fills it names a bead.
+type operandSlot struct {
+	placeholder string
+	bead        bool
+}
+
+// operandSlots pins, per command, the positional placeholders bd's usage line
+// names (the operand rows of testdata/bd-flags.txt, refreshed by
+// `go run ./cmd/bdshim-record -flags`) and which of them name a bead. An operand
+// in a slot that names no bead is data: a title, a query, a path or a key. A
+// word such as refactor-sling in one is not a bead reference, so it routes by
+// the working directory rather than reaching bd.real as an id no route names
+// (gt-xzi9c). A variadic placeholder (`[id...]`) takes the operands up to the
+// placeholders that follow it, which fill the last operands (see slotOf). bd
+// reads `mol bond` names, proto or molecule, as ids, so those slots name a bead
+// too.
+//
+// A command with no row reads every operand as a possible id, as the shim did
+// before this table existed.
+var operandSlots = map[string][]operandSlot{
+	"assign":                 {{"<id>", true}, {"<name>", false}},
+	"audit label":            {{"<entry-id>", true}},
+	"backup init":            {{"<path>", false}},
+	"backup restore":         {{"[path]", false}},
+	"branch":                 {{"[name]", false}},
+	"children":               {{"<parent-id>", true}},
+	"close":                  {{"[id...]", true}},
+	"comment":                {{"<id>", true}, {"[text...]", false}},
+	"comments":               {{"[issue-id]", true}},
+	"comments add":           {{"[issue-id]", true}, {"[text...]", false}},
+	"config get":             {{"<key>", false}},
+	"config set":             {{"<key>", false}, {"<value>", false}},
+	"config set-many":        {{"<key=value>...", false}},
+	"config unset":           {{"<key>", false}},
+	"conflicts resolve":      {{"[<issue-id>...]", true}},
+	"conflicts show":         {{"[<issue-id>]", true}},
+	"cook":                   {{"<formula-file>", false}},
+	"create":                 {{"[title]", false}},
+	"defer":                  {{"[id...]", true}},
+	"delete":                 {{"<issue-id>", true}, {"[issue-id...]", true}},
+	"dep":                    {{"[issue-id]", true}},
+	"dep add":                {{"[issue-id]", true}, {"[depends-on-id]", true}},
+	"dep list":               {{"[issue-id...]", true}},
+	"dep relate":             {{"<id1>", true}, {"<id2>", true}},
+	"dep remove":             {{"[issue-id]", true}, {"[depends-on-id]", true}},
+	"dep tree":               {{"[issue-id]", true}},
+	"dep unrelate":           {{"<id1>", true}, {"<id2>", true}},
+	"diff":                   {{"<from-ref>", false}, {"<to-ref>", false}},
+	"doctor":                 {{"[path]", false}},
+	"dolt remote add":        {{"<name>", false}, {"<url>", false}},
+	"dolt remote remove":     {{"<name>", false}},
+	"dolt remote reset-data": {{"<name>", false}},
+	"dolt set":               {{"<key>", false}, {"<value>", false}},
+	"duplicate":              {{"<id>", true}},
+	"forget":                 {{"<key>", false}},
+	"formula convert":        {{"<formula-name|path>", false}},
+	"formula lint":           {{"<path|dir>", false}},
+	"formula schema":         {{"[primitive]", false}},
+	"formula show":           {{"<formula-name>", false}},
+	"gate add-waiter":        {{"<gate-id>", true}, {"<waiter>", false}},
+	"gate list":              {{"[issue-id]", true}},
+	"gate resolve":           {{"<gate-id>", true}},
+	"gate show":              {{"<gate-id>", true}},
+	"graph":                  {{"[issue-id]", true}},
+	"heartbeat":              {{"<id>", true}},
+	"history":                {{"<id>", true}},
+	"hooks run":              {{"<hook-name>", false}, {"[args...]", false}},
+	"human dismiss":          {{"<issue-id>", true}, {"[reason...]", false}},
+	"human respond":          {{"<issue-id>", true}, {"[response...]", false}},
+	"import":                 {{"[file|-]", false}},
+	"kv clear":               {{"<key>", false}},
+	"kv get":                 {{"<key>", false}},
+	"kv set":                 {{"<key>", false}, {"<value>", false}},
+	"label add":              {{"[issue-id...]", true}, {"[label[,label...]]", false}},
+	"label list":             {{"[issue-id]", true}},
+	"label propagate":        {{"[parent-id]", true}, {"[label]", false}},
+	"label remove":           {{"[issue-id...]", true}, {"[label[,label...]]", false}},
+	"land-record":            {{"<id>", true}},
+	"link":                   {{"<id1>", true}, {"<id2>", true}},
+	"lint":                   {{"[issue-id...]", true}},
+	"mail":                   {{"[subcommand]", false}, {"[args...]", false}},
+	"memories":               {{"[search]", false}},
+	"migrate hooks":          {{"[path]", false}},
+	"migrate sync":           {{"<branch>", false}},
+	"mol bond":               {{"<A>", true}, {"<B>", true}},
+	"mol burn":               {{"<molecule-id>", true}, {"[molecule-id...]", true}},
+	"mol current":            {{"[molecule-id]", true}},
+	"mol distill":            {{"<epic-id>", true}, {"[formula-name]", false}},
+	"mol last-activity":      {{"<molecule-id>", true}},
+	"mol pour":               {{"<proto-id>", true}},
+	"mol progress":           {{"[molecule-id]", true}},
+	"mol seed":               {{"<formula-name>", false}},
+	"mol show":               {{"<molecule-id>", true}},
+	"mol squash":             {{"<molecule-id>", true}},
+	"mol wisp":               {{"[proto-id]", true}},
+	"mol wisp create":        {{"<proto-id>", true}},
+	"note":                   {{"<id>", true}, {"[text...]", false}},
+	"priority":               {{"<id>", true}, {"<n>", false}},
+	"promote":                {{"<wisp-id>", true}},
+	"provenance by-ref":      {{"<ref>", false}},
+	"provenance log":         {{"<issue-id>", true}},
+	"q":                      {{"[title]", false}},
+	"query":                  {{"[expression]", false}},
+	"recall":                 {{"<key>", false}},
+	"remember":               {{"\"<insight>\"", false}},
+	"rename":                 {{"<old-id>", true}, {"<new-id>", true}},
+	"rename-prefix":          {{"<new-prefix>", false}},
+	"reopen":                 {{"[id...]", true}},
+	"repo add":               {{"<path>", false}},
+	"repo remove":            {{"<path>", false}},
+	"restore":                {{"<issue-id>", true}},
+	"search":                 {{"[query]", false}},
+	"set-state":              {{"<issue-id>", true}, {"<dimension>=<value>", false}},
+	"setup":                  {{"[recipe]", false}},
+	"ship":                   {{"<capability>", false}},
+	"show":                   {{"[id...]", true}},
+	"sql":                    {{"<query>", false}},
+	"state":                  {{"<issue-id>", true}, {"<dimension>", false}},
+	"state list":             {{"<issue-id>", true}},
+	"supersede":              {{"<id>", true}},
+	"swarm create":           {{"[epic-id]", true}},
+	"swarm status":           {{"[epic-or-swarm-id]", true}},
+	"swarm validate":         {{"[epic-id]", true}},
+	"tag":                    {{"<id>", true}, {"<label>", false}},
+	"todo add":               {{"<title>", false}},
+	"todo done":              {{"<id>", true}, {"[<id>...]", true}},
+	"unclaim":                {{"[id...]", true}},
+	"undefer":                {{"[id...]", true}},
+	"update":                 {{"[id...]", true}},
+	"vc merge":               {{"<branch>", false}},
+	"worktree create":        {{"<name>", false}},
+	"worktree remove":        {{"<name>", false}},
+}
+
+// isVariadic reports whether a placeholder takes any number of operands, as
+// `[id...]` and `<key=value>...` do.
+func isVariadic(placeholder string) bool {
+	return strings.HasSuffix(strings.TrimSuffix(placeholder, "]"), "...")
+}
+
+// slotOf returns the slot that fills operand i of n operands, and false when
+// bd's usage names no slot for it. Each placeholder before a variadic one fills
+// one operand. The placeholders after a variadic one fill the last operands, so
+// `label add gt-a gt-b urgent` reads urgent as the label; the variadic
+// placeholder takes the operands between them. With too few operands for the
+// placeholders after it, the variadic takes none and they fill from its own
+// position on.
+func slotOf(slots []operandSlot, n, i int) (operandSlot, bool) {
+	v := len(slots)
+	for k, slot := range slots {
+		if isVariadic(slot.placeholder) {
+			v = k
+			break
+		}
+	}
+	if v == len(slots) {
+		if i < len(slots) {
+			return slots[i], true
+		}
+		return operandSlot{}, false
+	}
+	if i < v {
+		return slots[i], true
+	}
+	after := slots[v+1:]
+	start := max(v, n-len(after))
+	if i < start {
+		return slots[v], true
+	}
+	if j := i - start; j < len(after) {
+		return after[j], true
+	}
+	return operandSlot{}, false
+}
+
+// idOperands returns the operands that can name a bead. A command with no row
+// in operandSlots reads every operand as a possible id, and so does an operand
+// past the placeholders bd's usage names: a stray id must still name its rig,
+// and only an operand in a data slot is kept from doing so. The words of the
+// command path are its verb and subverb, so they are not operands.
+func idOperands(command string, args []string) []string {
+	ops := operands(command, args)
+	ops = ops[min(len(strings.Fields(command)), len(ops)):]
+	slots, pinned := operandSlots[command]
+	if !pinned {
+		return ops
+	}
+	var ids []string
+	for i, op := range ops {
+		if slot, ok := slotOf(slots, len(ops), i); !ok || slot.bead {
+			ids = append(ids, op)
+		}
+	}
+	return ids
+}
+
 // takesValue reports whether command reads the token after flag as its value.
 func takesValue(command, flag string) bool {
 	if boolFlags[command][flag] {
@@ -185,9 +382,10 @@ func takesValue(command, flag string) bool {
 	return persistentValueFlags[flag]
 }
 
-// knownCommand reports whether bd documents flags for the command path.
+// knownCommand reports whether bd documents flags or positionals for the
+// command path, so `label add` is a command of its own and not `label`.
 func knownCommand(command string) bool {
-	return valueFlags[command] != nil || boolFlags[command] != nil
+	return valueFlags[command] != nil || boolFlags[command] != nil || operandSlots[command] != nil
 }
 
 // verbOf returns bd's subcommand: the first operand. A global value flag is
@@ -229,10 +427,11 @@ func commandPath(args []string) string {
 
 // idTokens returns the operands that can name a bead. A token after a value
 // flag is that flag's value and never an id, so `bd create --title gt-x` names
-// no bead and `--parent gt-x` does not route its own create.
+// no bead and `--parent gt-x` does not route its own create. An operand in a
+// data slot is not an id either, so `bd create refactor-sling` names no bead.
 func idTokens(command string, args []string) []string {
 	var ids []string
-	for _, arg := range operands(command, args) {
+	for _, arg := range idOperands(command, args) {
 		if beads.IsBeadIDToken(arg) && beads.ExtractPrefix(arg) != "" {
 			ids = append(ids, arg)
 		}

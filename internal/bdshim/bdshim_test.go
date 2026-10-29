@@ -109,7 +109,9 @@ func TestDecideRoutesByStore(t *testing.T) {
 		{"an inline flag value is not an id", []string{"list", "--format=bt-x"}, town, "", false, ""},
 		{"an id after a flag still names its rig", []string{"show", "bt-abc", "--json"}, alpha, "", true, "bt-"},
 		{"an id after a boolean flag names its tracker rig", []string{"show", "--json", "bt-abc"}, alpha, "", true, "bt-"},
-		{"an id after a value flag names its tracker rig", []string{"create", "--title", "x", "bt-abc"}, alpha, "", true, "bt-"},
+		{"an id after a value flag names its tracker rig", []string{"update", "--title", "x", "bt-abc"}, alpha, "", true, "bt-"},
+		{"a title names no id, so the cwd's tracker rig answers", []string{"create", "refactor-sling"}, beta, "", true, "bt-"},
+		{"a title that opens with a tracker prefix is not an id", []string{"create", "bt-fix-thing"}, alpha, "", false, ""},
 		{"two ids of one tracker rig name it", []string{"dep", "add", "bt-abc", "bt-def"}, town, "", true, "bt-"},
 		{"an explicit dolt backend is dolt", []string{"show", "gm-abc"}, beta, "", false, ""},
 	}
@@ -418,6 +420,9 @@ func bdDocumented(t *testing.T) (value, boolean map[string]map[string]bool, pers
 			aliased[name] = command
 			continue
 		}
+		if kind == "operand" {
+			continue // bdOperands reads these
+		}
 		command, flags, ok := strings.Cut(rest, "\t")
 		if !ok || strings.TrimSpace(flags) == "" {
 			t.Fatalf("testdata/bd-flags.txt: %q names no flag", line)
@@ -432,10 +437,66 @@ func bdDocumented(t *testing.T) (value, boolean map[string]map[string]bool, pers
 		case "bool":
 			boolean[command] = row
 		default:
-			t.Fatalf("testdata/bd-flags.txt: %q has kind %q, want persistent, alias, value or bool", line, kind)
+			t.Fatalf("testdata/bd-flags.txt: %q has kind %q, want persistent, alias, operand, value or bool", line, kind)
 		}
 	}
 	return value, boolean, persistent, aliased
+}
+
+// bdOperands reads the operand rows of testdata/bd-flags.txt: the positional
+// placeholders bd's usage line names for each command, in order.
+func bdOperands(t *testing.T) map[string][]string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("testdata", "bd-flags.txt"))
+	if err != nil {
+		t.Fatalf("reading the recorded bd flags: %v", err)
+	}
+	operand := map[string][]string{}
+	for _, line := range strings.Split(string(body), "\n") {
+		kind, rest, ok := strings.Cut(line, "\t")
+		if !ok || kind != "operand" {
+			continue
+		}
+		command, placeholders, ok := strings.Cut(rest, "\t")
+		if !ok || strings.TrimSpace(placeholders) == "" {
+			t.Fatalf("testdata/bd-flags.txt: %q names no placeholder", line)
+		}
+		operand[command] = strings.Fields(placeholders)
+	}
+	return operand
+}
+
+// TestOperandTableCoversWhatBdDocuments checks operandSlots against the recorded
+// usage lines both ways: a command bd documents with a positional placeholder
+// that the table lacks reads its operands with no slot, and a row the table
+// holds for a placeholder bd does not write is a typo or a moved argument.
+func TestOperandTableCoversWhatBdDocuments(t *testing.T) {
+	t.Parallel()
+	documented := bdOperands(t)
+	// The check below walks a map, so a recording that parsed to nothing would
+	// pass it and leave the table looking complete.
+	if len(documented) < 100 {
+		t.Fatalf("testdata/bd-flags.txt documents positionals for %d commands, want at least 100 (bd 1.2.2 documents 112)", len(documented))
+	}
+	for command, placeholders := range documented {
+		slots, ok := operandSlots[command]
+		if !ok {
+			t.Errorf("bd documents the positional %v for %q, and operandSlots has no row for it", placeholders, command)
+			continue
+		}
+		var got []string
+		for _, slot := range slots {
+			got = append(got, slot.placeholder)
+		}
+		if strings.Join(got, " ") != strings.Join(placeholders, " ") {
+			t.Errorf("operandSlots for %q = %v, want the placeholders bd writes %v", command, got, placeholders)
+		}
+	}
+	for command := range operandSlots {
+		if documented[command] == nil {
+			t.Errorf("operandSlots has a row for %q, and bd documents no positional for it", command)
+		}
+	}
 }
 
 // TestFlagTablesCoverWhatBdDocuments checks the shim's tables against the
@@ -557,7 +618,7 @@ func TestIDTokens(t *testing.T) {
 		{"a flag value", []string{"create", "--title", "bt-fix"}, nil},
 		{"an inline flag value", []string{"show", "--id=bt-abc"}, nil},
 		{"an id after a boolean flag", []string{"show", "--json", "bt-abc"}, []string{"bt-abc"}},
-		{"an id after a value flag", []string{"create", "--title", "x", "bt-abc"}, []string{"bt-abc"}},
+		{"an id after a value flag", []string{"update", "--title", "x", "bt-abc"}, []string{"bt-abc"}},
 		{"an id past a separator", []string{"show", "--", "bt-abc"}, []string{"bt-abc"}},
 		{"a flag-like token past a separator names no bead", []string{"show", "--", "--json"}, nil},
 		{"two ids", []string{"dep", "add", "bt-abc", "bt-def"}, []string{"bt-abc", "bt-def"}},
@@ -565,6 +626,13 @@ func TestIDTokens(t *testing.T) {
 		{"a short label value", []string{"create", "T", "-l", "review-deep"}, nil},
 		{"a short assignee value", []string{"list", "-a", "bt-abc"}, nil},
 		{"-f is a value flag on create", []string{"create", "T", "-f", "notes.md", "bt-abc"}, []string{"bt-abc"}},
+		{"a title names no bead", []string{"create", "refactor-sling"}, nil},
+		{"a title after a value flag names no bead", []string{"create", "--title", "x", "bt-abc"}, nil},
+		{"a title that opens with a prefix names no bead", []string{"create", "bt-fix-thing"}, nil},
+		{"an id before a data operand", []string{"set-state", "bt-abc", "bt-x=1"}, []string{"bt-abc"}},
+		{"each operand of a variadic id is an id", []string{"close", "bt-abc", "zz-def"}, []string{"bt-abc", "zz-def"}},
+		{"a label after a variadic id is data", []string{"label", "add", "bt-abc", "refactor-sling"}, []string{"bt-abc"}},
+		{"an id past the usage slots still names its bead", []string{"mol", "bond", "bt-a", "bt-b", "zz-c"}, []string{"bt-a", "bt-b", "zz-c"}},
 		{"-f is a boolean on close", []string{"close", "-f", "bt-abc"}, []string{"bt-abc"}},
 		{"-r is a value flag on close", []string{"close", "-r", "bt-abc"}, nil},
 		{"-r is a boolean on list", []string{"list", "-r", "bt-abc"}, []string{"bt-abc"}},

@@ -133,7 +133,7 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 	// An operand that opens with a tracker rig's prefix names that rig even
 	// when IsBeadIDToken rejects its form: a form the token check does not know
 	// must not slip through to bd.real from a Dolt directory.
-	ids = append(ids, trackerPrefixed(operands(command, args), ids, routes)...)
+	ids = append(ids, trackerPrefixed(idOperands(command, args), ids, routes)...)
 	named := make(map[string]beads.Route, len(ids))
 	for _, id := range ids {
 		for _, r := range routes {

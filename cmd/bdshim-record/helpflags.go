@@ -34,6 +34,8 @@ type helpFlags struct {
 	boolean  []string // flags it reads as a boolean, or a value only after an =
 	aliases  []string // the other names this command answers to
 	commands []string // the subcommands it lists
+	usage    []string // the words of its first Usage: line, after "bd"
+	operands []string // the positional placeholders of that line, in order
 }
 
 // RecordFlagFile walks bd's help from the root, run answering one argv with
@@ -117,7 +119,27 @@ func readHelp(run Runner, path []string) (*helpFlags, error) {
 	if exit != 0 {
 		return nil, fmt.Errorf("bd %s exited %d", strings.Join(args, " "), exit)
 	}
-	return parseHelp(string(out), len(path) == 0), nil
+	help := parseHelp(string(out), len(path) == 0)
+	if len(path) > 0 {
+		help.operands = positionals(help.usage, len(path))
+	}
+	return help, nil
+}
+
+// positionals returns the positional placeholders of a Usage: line, the words
+// after "bd" and the command's path. The placeholders stop at the first flag or
+// at [flags] and [command], which name what follows rather than an operand:
+// `bd show [id...] [--id=<id>...] [flags]` has [id...], and
+// `bd migrate legacy-sqlite --source-db PATH` has none.
+func positionals(usage []string, depth int) []string {
+	var out []string
+	for _, word := range usage[min(depth, len(usage)):] {
+		if strings.HasPrefix(word, "-") || strings.HasPrefix(word, "[-") || word == "[flags]" || word == "[command]" {
+			break
+		}
+		out = append(out, word)
+	}
+	return out
 }
 
 // parseHelp reads one help text: the flags in its own Flags: section, the
@@ -138,6 +160,11 @@ func parseHelp(text string, grouped bool) *helpFlags {
 			case "Flags:", "Global Flags:":
 				afterUsage = false
 			}
+			continue
+		}
+		if section == "Usage:" && help.usage == nil && strings.HasPrefix(strings.TrimSpace(line), "bd ") {
+			// The first usage line is the command's own; a later one is an example form.
+			help.usage = strings.Fields(line)[1:]
 			continue
 		}
 		if section == "Aliases:" && !strings.HasPrefix(line, "    ") {
@@ -243,6 +270,9 @@ func renderFlagFile(version string, global []string, table map[string]*helpFlags
 # persistent<TAB>the value flags bd puts on every command (bd --help, Flags:),
 #     left out of each command row because every command has them
 # alias<TAB><name><TAB>the command path bd reads that name as ("new" is create)
+# operand<TAB><command><TAB>the positional placeholders of the command's usage
+#     line, space separated and in order ("[id...]", "[title]"); a command
+#     whose usage names none has no row
 # value<TAB><command><TAB>the flags bd reads a value for, space separated
 # bool<TAB><command><TAB>the flags bd reads as a boolean or an optional value
 #     here (--deps takes its value only after an =) although another command
@@ -268,6 +298,11 @@ func renderFlagFile(version string, global []string, table map[string]*helpFlags
 	sort.Strings(aliases)
 	for _, path := range aliases {
 		fmt.Fprintf(&b, "alias\t%s\t%s\n", path, aliasPaths[path])
+	}
+	for _, command := range commands {
+		if operands := table[command].operands; len(operands) > 0 {
+			fmt.Fprintf(&b, "operand\t%s\t%s\n", command, strings.Join(operands, " "))
+		}
 	}
 	for _, command := range commands {
 		if flags := sortedFlags(table[command].value, persistent, nil); len(flags) > 0 {
