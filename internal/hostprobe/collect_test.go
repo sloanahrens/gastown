@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/exectax"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -121,6 +122,18 @@ func valuesOf(p Probes) map[string]any {
 	}
 }
 
+func TestCollectNamesTheMissingTownRootAsTheDiskErr(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost()
+	got := collect(context.Background(), fullCollectors(h), "", testAt())
+	if got.Disk.Err == "" {
+		t.Error("Disk.Err is empty for a collect with no town root, want it set")
+	}
+	if got.MemFreePct.Err != "" || got.Containers.Err != "" {
+		t.Errorf("a missing town root set other fields' Err: mem %q, containers %q", got.MemFreePct.Err, got.Containers.Err)
+	}
+}
+
 func TestCollectSetsOnlyTheFailedFieldsErr(t *testing.T) {
 	t.Parallel()
 	failing := []struct {
@@ -148,6 +161,9 @@ func TestCollectSetsOnlyTheFailedFieldsErr(t *testing.T) {
 		}},
 		{"disk read fails", "disk", func(h *fakeHost, c *collectors) {
 			c.disk = func(string) (*util.DiskSpaceInfo, error) { return nil, errors.New("statfs: no such file") }
+		}},
+		{"disk read returns no reading", "disk", func(h *fakeHost, c *collectors) {
+			c.disk = func(string) (*util.DiskSpaceInfo, error) { return nil, nil }
 		}},
 		{"exec tax fails", "exec", func(h *fakeHost, c *collectors) {
 			c.execTax = func(context.Context) (time.Duration, error) { return 0, errors.New("exec: permission denied") }
@@ -227,6 +243,58 @@ func TestDockerContextErrFlagsAnArgvThatOmitsTheContext(t *testing.T) {
 			t.Parallel()
 			if err := dockerContextErr(tc.argv); (err != nil) != tc.bad {
 				t.Errorf("dockerContextErr(%q) = %v, want an error: %v", tc.argv, err, tc.bad)
+			}
+		})
+	}
+}
+
+// TestProbeExecTaxRunsEachSampleThroughTheRunner stands in for exectax.Probe
+// with a probe that runs its one sample, so no program is written.
+func TestProbeExecTaxRunsEachSampleThroughTheRunner(t *testing.T) {
+	t.Parallel()
+	var ran [][]string
+	run := func(_ context.Context, argv []string) ([]byte, error) {
+		ran = append(ran, argv)
+		return nil, nil
+	}
+	probe := func(ctx context.Context, o exectax.Options) (exectax.Result, error) {
+		d, err := o.Exec(ctx, "/sample/one")
+		if err != nil {
+			return exectax.Result{}, err
+		}
+		return exectax.Result{Median: d}, nil
+	}
+	if _, err := probeExecTax(context.Background(), probe, run); err != nil {
+		t.Fatalf("probeExecTax: %v", err)
+	}
+	if want := [][]string{{"/sample/one"}}; !reflect.DeepEqual(ran, want) {
+		t.Errorf("runner was asked %q, want %q", ran, want)
+	}
+}
+
+func TestProbeExecTaxReportsAFailure(t *testing.T) {
+	t.Parallel()
+	okRun := func(context.Context, []string) ([]byte, error) { return nil, nil }
+	failRun := func(context.Context, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
+	failProbe := func(context.Context, exectax.Options) (exectax.Result, error) {
+		return exectax.Result{}, errors.New("no samples written")
+	}
+	passProbe := func(ctx context.Context, o exectax.Options) (exectax.Result, error) {
+		_, err := o.Exec(ctx, "/sample/one")
+		return exectax.Result{}, err
+	}
+	for _, tc := range []struct {
+		name  string
+		probe execProbe
+		run   Runner
+	}{
+		{"the probe fails", failProbe, okRun},
+		{"a sample fails to exec", passProbe, failRun},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := probeExecTax(context.Background(), tc.probe, tc.run); err == nil {
+				t.Error("probeExecTax returned no error, want one")
 			}
 		})
 	}

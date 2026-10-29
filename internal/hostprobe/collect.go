@@ -50,7 +50,7 @@ func Collect(ctx context.Context, run Runner, townRoot string, now time.Time) Pr
 		run:  run,
 		disk: util.GetDiskSpace,
 		execTax: func(ctx context.Context) (time.Duration, error) {
-			return probeExecTax(ctx, run)
+			return probeExecTax(ctx, exectax.Probe, run)
 		},
 	}, townRoot, now)
 }
@@ -171,18 +171,29 @@ func execTaxMS(ctx context.Context, execTax func(context.Context) (time.Duration
 	return float64(d) / float64(time.Millisecond), nil
 }
 
+// execProbe is exectax.Probe. It writes its samples to disk, so a test
+// substitutes its own and no executable is created.
+type execProbe func(context.Context, exectax.Options) (exectax.Result, error)
+
 // probeExecTax is the median cost of exec'ing a freshly written program, timed
-// through the Runner so it is the exec a run pays. exectax writes the samples
-// into a temporary directory and removes it.
-func probeExecTax(ctx context.Context, run Runner) (time.Duration, error) {
-	res, err := exectax.Probe(ctx, exectax.Options{
+// through the Runner so it is the exec a run pays.
+func probeExecTax(ctx context.Context, probe execProbe, run Runner) (time.Duration, error) {
+	res, err := probe(ctx, exectax.Options{
 		Exec: func(ctx context.Context, path string) (time.Duration, error) {
-			start := time.Now()
-			if _, err := run(ctx, []string{path}); err != nil {
-				return 0, err
-			}
-			return time.Since(start), nil
+			return timeExec(ctx, run, path)
 		},
 	})
-	return res.Median, err
+	if err != nil {
+		return 0, err
+	}
+	return res.Median, nil
+}
+
+// timeExec runs one program through the Runner and reports how long it took.
+func timeExec(ctx context.Context, run Runner, path string) (time.Duration, error) {
+	start := time.Now()
+	if _, err := run(ctx, []string{path}); err != nil {
+		return 0, err
+	}
+	return time.Since(start), nil
 }
