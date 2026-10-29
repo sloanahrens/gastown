@@ -135,7 +135,7 @@ With `{{dry_run}}` `true`, file nothing: every confirmed finding is `queued`.
 
 **7. Record the findings, before any cursor.** A `finding:` line per finding a
 bead covers (a batch covers each finding), a `queued:` line per P1 or P2 finding
-past the cap, a `queued:` line per unverified finding (below), and a `reviewed:`
+past the cap, a `queued:` line per unverified finding, and a `reviewed:`
 note per line of
 `$D/reviewed-lines.txt` (already `reviewed: <date> <path>`) and per doc in
 `$D/docs.txt` (`reviewed: <date> <doc>`):
@@ -143,23 +143,28 @@ note per line of
 gt bead note {{issue}} "finding: <fingerprint> <bead id | digest-only>"
 gt bead note {{issue}} "queued: <fingerprint> <P1|P2|P3> <file:line> <claim>"
 gt bead note {{issue}} "<one line of reviewed-lines.txt>"
-gt bead comment {{issue}} "$(cat $D/digest.md)"
+gt bead comment {{issue}} 'digest
+landings reviewed: <bead> <commit>
+unparsed=<n>
+slice files, docs read: <one per line>
+reviewers=<n> verifiers=<n>
+filed: 1. <fingerprint> <bead id> <file:line> <claim>
+would file: 1. <fingerprint> <file:line> <claim>
+queued: 1. <fingerprint> <P1|P2|P3> <file:line> <claim>
+refuted=<n> of <total>
+unverified=<n>'
 ```
-A filed bead takes a `finding:` line naming it; a P1 or P2 finding past the
-cap, and every dry-run one, takes a `queued:` line, which a later run's
-step 3 picks up until one names it. A P3 finding takes its `p3:`
+A finding past the cap, and every dry-run one, takes a `queued:` line
+that a later run's step 3 picks up until one names it. A P3 finding takes its `p3:`
 line from step 6 and a `finding:` line once a batch covers it. An older
 run's `digest-only` line makes the fingerprint `seen`.
 
-A finding the verifiers had no capacity for takes a `queued:` line with its own
+A finding past verifier capacity takes a `queued:` line with its own
 severity, whatever that is; the next run verifies it. Never leave a finding
-unrecorded because it is a P3 or cheap to find again: the 21-day file
-skip keeps later runs off its file. The digest has:
-landings reviewed (bead, commit), `unparsed=`, slice files and docs
-read, reviewers and verifiers used, then numbered `filed`, `would file` and
-`queued` lists, `refuted=<n> of <total>` and `unverified=<n>` (findings past
-capacity, 0 when none). When `total`>=5 and `refuted`=0,
-add the line `UNCHALLENGED: no finding was refuted`.
+unrecorded because it is a P3: the 21-day file skip keeps later runs off it.
+Fill each `<...>` with this run's value, one numbered line per entry.
+`unverified=<n>` (findings past capacity, 0 when none). When
+`total`>=5 and `refuted`=0, add `UNCHALLENGED: no finding was refuted`.
 
 **8. Record the reviews of the risk-path items covered** (live runs only; skip when
 `{{dry_run}}` is `true` or the mode is `slice`). Per landing: `gt bead review <bead> PASS`,
