@@ -24,6 +24,7 @@ func containerDownServices(t *testing.T, ctl *daemonControl) downServices {
 		killImposters:    func(string) error { return nil },
 		findIdleMonitors: func(string) []int { return nil },
 		findOrphans:      func(string) []int { return nil },
+		portConflict:     func(string) (int, string) { return 0, "" },
 	}
 }
 

@@ -119,6 +119,12 @@ type downServices struct {
 	findIdleMonitors func(townRoot string) []int
 	findOrphans      func(townRoot string) []int
 
+	// portConflict answers a dry run's imposter question: the pid holding the
+	// Dolt port that is not the town's server, and a description. nil reads the
+	// real lsof through doltserver.CheckPortConflict; a test sets it so the unit
+	// tier starts no external tool (gt-qpeei.20).
+	portConflict func(townRoot string) (int, string)
+
 	// supervisor is how the town's daemon is supervised: it says whether the
 	// town runs its daemon in a container and runs that container's stop.
 	// nil reads the town's own daemon.supervisor setting through
@@ -167,6 +173,7 @@ func realDownServices() downServices {
 		killImposters:    doltserver.KillImposters,
 		findIdleMonitors: doltserver.FindIdleMonitorProcesses,
 		findOrphans:      findOrphanDoltServers,
+		portConflict:     doltserver.CheckPortConflict,
 	}
 }
 
@@ -585,7 +592,11 @@ func stopTownServices(townRoot string, svc downServices, dryRun bool) bool {
 			}
 		}
 	} else {
-		conflictPID, _ := doltserver.CheckPortConflict(townRoot)
+		portConflict := svc.portConflict
+		if portConflict == nil {
+			portConflict = doltserver.CheckPortConflict
+		}
+		conflictPID, _ := portConflict(townRoot)
 		if conflictPID > 0 {
 			printDownStatus("Dolt imposters", true, fmt.Sprintf("would stop imposter (PID %d)", conflictPID))
 		}
