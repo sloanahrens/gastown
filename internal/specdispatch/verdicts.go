@@ -28,8 +28,9 @@ type Entry struct {
 
 // LedgerVerdict is what the ledger remembers of a bead the dispatcher did not
 // sling: its latest class and reason, the tick that first saw it, the tick that
-// last saw it, and how many consecutive ticks it has stood (gt-n05o0). It is
-// named apart from the lint's Verdict, which this package already declares.
+// last saw it, and how many consecutive ticks it has stood (gt-n05o0). The spec
+// named this record Verdict, the name this package's lint answer already holds,
+// so the record keeps the qualifier instead (gt-97ar6).
 type LedgerVerdict struct {
 	Bead    string    `json:"bead"`
 	Rig     string    `json:"rig"`
