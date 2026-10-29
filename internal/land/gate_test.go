@@ -363,6 +363,131 @@ func TestWithSlotReleasesOnInfraFailureAndRefusesWithoutTheSlot(t *testing.T) {
 	})
 }
 
+// A post-land command that declares GT_TEST_DOCKER=0 runs no containers, so
+// it takes no slot: a held gate-class slot blocks installs for nothing
+// (gt-7k0hz).
+func TestWithSlotForCommandSkipsADeclaredContainerFreeCommand(t *testing.T) {
+	t.Parallel()
+	const cmd = "GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh"
+	s := &scriptedRun{answers: map[string]scriptedAnswer{cmd: {output: "tier-sweep: shell GREEN\n"}}}
+	holds := 0
+	g := WithSlotForCommand(CommandGate{Steps: []Step{{Name: "test", Command: cmd}}}, "/town", "gastown/post-land", cmd)
+	g.run = s.run
+	g.holdSlot = func(context.Context, string, string) (func(*int), error) {
+		holds++
+		return func(*int) {}, nil
+	}
+	if res := g.Run(context.Background(), "/w"); !res.Passed {
+		t.Fatalf("gate = %+v", res)
+	}
+	if holds != 0 {
+		t.Errorf("holds taken = %d, want none for a container-free command", holds)
+	}
+	for _, st := range g.Steps {
+		if st.SlotRole != "" {
+			t.Errorf("step %q carries slot role %q", st.Name, st.SlotRole)
+		}
+	}
+	if len(s.calls) != 1 {
+		t.Errorf("steps run = %d, want the command once", len(s.calls))
+	}
+}
+
+// A command whose text does not declare itself container-free keeps the slot
+// exactly as WithSlot gives it: its tests may start containers, and that is
+// not visible in the command (gt-7k0hz).
+func TestWithSlotForCommandKeepsTheSlotOtherwise(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range []string{
+		"make test",
+		"GOFLAGS=-p=6 make test",
+		"bash scripts/post-land-shell.sh",
+		"GT_TEST_DOCKER=1 make test",
+		"GT_TEST_DOCKER=01 make test",
+		"MY_GT_TEST_DOCKER=0 make test",
+	} {
+		t.Run(cmd, func(t *testing.T) {
+			t.Parallel()
+			s := &scriptedRun{answers: map[string]scriptedAnswer{cmd: {}}}
+			var held []string
+			g := WithSlotForCommand(CommandGate{Steps: []Step{{Name: "test", Command: cmd}}}, "/town", "gastown/post-land", cmd)
+			g.run = s.run
+			g.holdSlot = func(_ context.Context, townRoot, role string) (func(*int), error) {
+				held = append(held, townRoot+" "+role)
+				return func(*int) {}, nil
+			}
+			if res := g.Run(context.Background(), "/w"); !res.Passed {
+				t.Fatalf("gate = %+v", res)
+			}
+			if len(held) != 1 || held[0] != "/town gastown/post-land" {
+				t.Errorf("holds taken = %v, want the post-land slot once", held)
+			}
+			want := WithSlot(CommandGate{Steps: []Step{{Name: "test", Command: cmd}}}, "/town", "gastown/post-land")
+			if !reflect.DeepEqual(g.Steps, want.Steps) || g.TownRoot != want.TownRoot {
+				t.Errorf("gate = %+v, want the steps and town WithSlot gives", g)
+			}
+		})
+	}
+}
+
+// Taking no slot changes no part of the run's verdict: for a declared and an
+// undeclared command alike, the step result and the full log read as the
+// always-slotted gate's own (gt-7k0hz).
+func TestWithSlotForCommandLeavesTheResultAlone(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		cmd           string
+		output        string
+		code          int
+		shellFailures []string
+	}{
+		{
+			name:          "declared",
+			cmd:           "GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh",
+			output:        "tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.aB12) in 2m14s\n",
+			code:          1,
+			shellFailures: []string{"scripts/x.sh"},
+		},
+		{
+			name:   "undeclared",
+			cmd:    "make test",
+			output: "--- FAIL: TestX\nFAIL\tgithub.com/x/a\t0.2s\n",
+			code:   2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runOnce := func(g CommandGate) (StepResult, string) {
+				s := &scriptedRun{answers: map[string]scriptedAnswer{tc.cmd: {output: tc.output, code: tc.code}}}
+				g.run = s.run
+				g.holdSlot = func(context.Context, string, string) (func(*int), error) { return func(*int) {}, nil }
+				g.LogDir = t.TempDir()
+				res := g.Run(context.Background(), "/w")
+				if res.Err != nil || len(res.Steps) != 1 {
+					t.Fatalf("gate = %+v, want one step result", res)
+				}
+				return res.Steps[0], filepath.Join(g.LogDir, "test.log")
+			}
+			base := CommandGate{Steps: []Step{{Name: "test", Command: tc.cmd}}}
+			slotted, slottedLog := runOnce(WithSlot(base, "/town", "gastown/post-land"))
+			free, freeLog := runOnce(WithSlotForCommand(base, "/town", "gastown/post-land", tc.cmd))
+			if !reflect.DeepEqual(free.ShellFailures, slotted.ShellFailures) || free.ExitCode != slotted.ExitCode ||
+				free.Tail != slotted.Tail || !reflect.DeepEqual(free.Packages, slotted.Packages) {
+				t.Errorf("step = %+v, want the slotted one %+v", free, slotted)
+			}
+			if free.ExitCode != tc.code || !reflect.DeepEqual(free.ShellFailures, tc.shellFailures) || free.Tail == "" {
+				t.Errorf("step = %+v, want the command's own exit %d, shell failures %v and a tail", free, tc.code, tc.shellFailures)
+			}
+			for _, p := range []string{slottedLog, freeLog} {
+				if _, err := os.Stat(p); err != nil {
+					t.Errorf("full log %s: %v", p, err)
+				}
+			}
+		})
+	}
+}
+
 // Without a deadline the lint lock is not waited on: a contended first
 // attempt is an infrastructure error, never a red verdict.
 func TestCommandGateContendedLintWithoutDeadlineIsInfra(t *testing.T) {

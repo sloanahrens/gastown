@@ -336,6 +336,31 @@ func WithSlot(g CommandGate, townRoot, role string) CommandGate {
 	return g
 }
 
+// WithSlotForCommand returns WithSlot(g, townRoot, role) unless command
+// declares itself container-free with a GT_TEST_DOCKER=0 word of its own, in
+// which case g is returned as it is and no step takes a slot.
+//
+// The declaration is the whole evidence: a rig whose command is `make test`
+// may or may not start containers, and that is not visible in its text, so a
+// command that stays silent keeps the slot (gt-7k0hz).
+func WithSlotForCommand(g CommandGate, townRoot, role, command string) CommandGate {
+	if declaresContainerFree(command) {
+		return g
+	}
+	return WithSlot(g, townRoot, role)
+}
+
+// containerFreeDeclarationRE matches GT_TEST_DOCKER=0 as a word of the
+// command: a match inside a longer name or value (MY_GT_TEST_DOCKER=0,
+// GT_TEST_DOCKER=00) is not a declaration.
+var containerFreeDeclarationRE = regexp.MustCompile(`(?:^|[\s;&|])GT_TEST_DOCKER=0(?:[\s;&|]|$)`)
+
+// declaresContainerFree reports whether command sets GT_TEST_DOCKER=0 for
+// itself.
+func declaresContainerFree(command string) bool {
+	return containerFreeDeclarationRE.MatchString(command)
+}
+
 // takeSlot holds the container-gate slot a step runs under, returning the
 // release to call when the step has ended. A step with no SlotRole gets a
 // no-op release, so callers call what they are handed without asking.

@@ -1201,7 +1201,8 @@ func (b followupBeads) ListFollowups(label string) ([]land.ExistingFollowup, err
 }
 
 // postLandRun runs the post-landing command in a throwaway worktree of repo
-// at the landed commit, under the container slot, bounded by timeout.
+// at the landed commit, under the container slot unless the command declares
+// GT_TEST_DOCKER=0, bounded by timeout.
 func postLandRun(repo, workRoot, logRoot, townRoot, rigName, remote string, timeout time.Duration) func(context.Context, string, landworker.PostLand) landworker.PostLandResult {
 	return func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult {
 		if err := os.MkdirAll(workRoot, 0o700); err != nil {
@@ -1224,10 +1225,12 @@ func postLandRun(repo, workRoot, logRoot, townRoot, rigName, remote string, time
 			_ = g.WorktreeRemove(dir, true)
 			_ = g.WorktreePrune()
 		}()
-		// Named "test" so WithSlot holds the container slot around it. The
-		// role is gate-class (slot.IsGateRole): this run is the red-main
-		// detector, so it takes reserved slots and crew yield to it.
-		cg := land.WithSlot(land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}, townRoot, rigName+"/post-land")
+		// Named "test" so the slot, when taken, is held around it. The role is
+		// gate-class (slot.IsGateRole): this run is the red-main detector, so
+		// it takes reserved slots and crew yield to it. A command that
+		// declares GT_TEST_DOCKER=0 starts no containers, so it takes no slot
+		// and an install is not blocked by the shell tier (gt-7k0hz).
+		cg := land.WithSlotForCommand(land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}, townRoot, rigName+"/post-land", cmd)
 		cg.LogDir = filepath.Join(logRoot, filepath.Base(parent))
 		rctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
