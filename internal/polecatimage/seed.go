@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
@@ -27,8 +29,8 @@ const (
 	defaultSeedSource = cachevol.SeedSourceRoot
 )
 
-// SeedFiles is the filesystem the seed pass reads and writes: the marker, and the directories it
-// creates. The seed Job's container is the only caller of the os implementation.
+// SeedFiles is the filesystem the Job's containers use: the marker both of them compare, and the
+// directories the seed pass creates. The containers are the only callers of the os implementation.
 type SeedFiles interface {
 	ReadFile(name string) ([]byte, error)
 	WriteFile(name string, data []byte, perm os.FileMode) error
@@ -38,7 +40,17 @@ type SeedFiles interface {
 // OSFiles is SeedFiles on the container's filesystem.
 type OSFiles struct{}
 
-func (OSFiles) ReadFile(p string) ([]byte, error)                 { return os.ReadFile(p) }
+// ReadFile refuses a symlink: the cache user owns the claim, so it could link the marker to a file
+// the init container's root can read, and that file would be compared as the seed's own record.
+func (OSFiles) ReadFile(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
 func (OSFiles) WriteFile(p string, b []byte, m os.FileMode) error { return os.WriteFile(p, b, m) }
 func (OSFiles) MkdirAll(p string, m os.FileMode) error            { return os.MkdirAll(p, m) }
 
@@ -89,13 +101,13 @@ func (p *SeedPass) Seed() error {
 	}
 	markerPath := path.Join(p.Root, cachevol.SeedMarkerName)
 	want := cachevol.SeedMarker(p.Pins)
-	held, err := p.Files.ReadFile(markerPath)
-	switch {
-	case err == nil && string(held) == want:
+	seeded, err := markerHoldsPins(p.Files, p.Root, p.Pins)
+	if err != nil {
+		return err
+	}
+	if seeded {
 		p.Logf("seed: %s already holds the %d pinned commit(s); nothing to do", markerPath, len(p.Pins))
 		return nil
-	case err != nil && !errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("reading the seed marker %s: %w", markerPath, err)
 	}
 
 	buildCache := path.Join(p.Root, cachevol.SeedBuildCacheDir)
@@ -159,10 +171,33 @@ func (p *SeedPass) asRoot(argv ...string) error {
 	return nil
 }
 
+// markerHoldsPins reports whether the claim at root already records exactly these pins. Both
+// containers compare through it: the init container skips its clone and the seed pass skips its
+// seed on the same evidence, so the two cannot disagree about whether a claim is seeded.
+//
+// An unreadable marker is an error, never a "no": a claim whose marker cannot be read has to fail
+// the Job instead of being cloned over or seeded again on a guess.
+func markerHoldsPins(files SeedFiles, root string, pins []cachevol.Pin) (bool, error) {
+	markerPath := path.Join(root, cachevol.SeedMarkerName)
+	held, err := files.ReadFile(markerPath)
+	switch {
+	case err == nil:
+		return string(held) == cachevol.SeedMarker(pins), nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, fmt.Errorf("reading the seed marker %s: %w", markerPath, err)
+	}
+}
+
 // CloneSeed checks each pin out under dest, one directory per rig, from the pin's clone URL. It
 // runs in the seed Job's init container, so a pin the URL cannot serve fails the Job before the
 // seed container touches the claim.
-func CloneSeed(dest string, pins []cachevol.Pin, run SeedRunner, logf func(string, ...any)) error {
+//
+// claim is the mounted cache claim, whose marker says what the claim was seeded from: when it
+// already holds these pins, a rerun clones nothing, because the seed pass will do nothing either
+// (gt-posdj). An absent or different marker still clones every pin.
+func CloneSeed(dest, claim string, pins []cachevol.Pin, files SeedFiles, run SeedRunner, logf func(string, ...any)) error {
 	if len(pins) == 0 {
 		return errors.New("the seed clone names no pin, so it would check nothing out")
 	}
@@ -172,6 +207,17 @@ func CloneSeed(dest string, pins []cachevol.Pin, run SeedRunner, logf func(strin
 	}
 	if err := cachevol.CheckCloneURLs(pins); err != nil {
 		return err
+	}
+	if claim == "" {
+		return errors.New("the seed clone names no claim, so it could not tell whether the pins are already checked out")
+	}
+	seeded, err := markerHoldsPins(files, claim, pins)
+	if err != nil {
+		return err
+	}
+	if seeded {
+		logf("seed: %s already holds the %d pinned commit(s); nothing to clone", path.Join(claim, cachevol.SeedMarkerName), len(pins))
+		return nil
 	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dest, err)

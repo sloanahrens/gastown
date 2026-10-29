@@ -107,6 +107,32 @@ func TestBuildSeedJobMountsTheClaimAndPutsTheCachesUnderIt(t *testing.T) {
 	}
 }
 
+// TestBuildSeedJobGivesTheCloneContainerTheClaimToCheck pins the rerun's evidence: the init
+// container mounts the same claim the seed container fills, read-only and at the same path, so a
+// claim whose marker already holds the pins is cloned into nothing rather than cloned again
+// (gt-posdj).
+func TestBuildSeedJobGivesTheCloneContainerTheClaimToCheck(t *testing.T) {
+	t.Parallel()
+	job, err := BuildSeedJob(seedInput())
+	if err != nil {
+		t.Fatalf("BuildSeedJob: %v", err)
+	}
+	clone := job.Spec.Template.Spec.InitContainers[0]
+	if got := argValue(clone.Args, "--root"); got != SeedCacheRoot {
+		t.Errorf("clone --root = %q, want %s: the claim's marker is the no-op's evidence", got, SeedCacheRoot)
+	}
+	mounts := map[string]VolumeMount{}
+	for _, m := range clone.VolumeMounts {
+		mounts[m.Name] = m
+	}
+	if got := mounts["cache"]; got.MountPath != SeedCacheRoot || !got.ReadOnly {
+		t.Errorf("clone cache mount = %+v, want %s read-only: the init container reads the marker and never writes the claim", got, SeedCacheRoot)
+	}
+	if got := mounts["source"]; got.MountPath != SeedSourceRoot {
+		t.Errorf("clone source mount = %+v, want %s", got, SeedSourceRoot)
+	}
+}
+
 // TestBuildSeedJobHandsBothContainersThePins pins the argv both containers read: each pin's rig,
 // commit and clone URL, in seed order.
 func TestBuildSeedJobHandsBothContainersThePins(t *testing.T) {

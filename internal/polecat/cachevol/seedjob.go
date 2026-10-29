@@ -301,16 +301,23 @@ func pinsJSON(pins []Pin) string {
 
 // cloneContainer checks each pinned commit out under SeedSourceRoot. It runs before the seed and as
 // the pod's user, so a clone a pin's URL cannot serve fails the Job before the claim is touched.
+//
+// The claim is mounted read-only so the container can read the marker: a rerun with the same pins
+// finds its pins there and clones nothing, while an absent or different marker still clones
+// (gt-posdj). Read-only because the init container's job is to observe the claim, never to write it.
 func cloneContainer(image, pins string) Container {
 	return Container{
 		Name:    "clone",
 		Image:   image,
 		Command: []string{HelperPath, "seed-clone"},
-		Args:    []string{"--pins", pins, "--dest", SeedSourceRoot},
+		Args:    []string{"--pins", pins, "--dest", SeedSourceRoot, "--root", SeedCacheRoot},
 		// A Forgejo that asks for credentials gets no prompt: the Job fails with the URL's reason
 		// instead of hanging until its deadline.
-		Env:          []EnvVar{{Name: "GIT_TERMINAL_PROMPT", Value: "0"}},
-		VolumeMounts: []VolumeMount{{Name: "source", MountPath: SeedSourceRoot}},
+		Env: []EnvVar{{Name: "GIT_TERMINAL_PROMPT", Value: "0"}},
+		VolumeMounts: []VolumeMount{
+			{Name: "source", MountPath: SeedSourceRoot},
+			{Name: "cache", MountPath: SeedCacheRoot, ReadOnly: true},
+		},
 	}
 }
 
