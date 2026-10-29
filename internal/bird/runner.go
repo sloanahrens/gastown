@@ -85,13 +85,23 @@ func (r *Runner) Start(args []string) error {
 		fmt.Fprintln(r.stderr(), d.Stderr)
 	}
 	argv, env := d.Passthrough, r.environ()
+	var bound bool
 	if d.Launch != nil {
-		if err := r.bindBead(d.Launch); err != nil {
+		bound, err = r.bindBead(d.Launch)
+		if err != nil {
 			return err
 		}
 		argv, env = d.Launch.Argv, d.Launch.Env
 	}
-	return r.exec(r.Claude, append([]string{r.Claude}, argv...), env)
+	err = r.exec(r.Claude, append([]string{r.Claude}, argv...), env)
+	if err != nil && d.Launch != nil {
+		// No session runs under the name, so the record and the binding this
+		// launch added must not hold it as though one did.
+		if rbErr := r.Registry.Unclaim(d.Launch.Name, r.pid(), d.Launch.Bead, bound); rbErr != nil {
+			return fmt.Errorf("%w; rolling the claim back also failed: %v", err, rbErr)
+		}
+	}
+	return err
 }
 
 // Bind binds the name in this session's environment to bead, in one write with
@@ -145,8 +155,8 @@ func (r *Runner) List(w io.Writer) error {
 }
 
 // launch decides claude's invocation and claims the name it runs under. Plan
-// reads the registry without writing, so the name it chose may be claimed by
-// another start before this one reaches the lock; when that happens Plan is
+// only reads the registry and never reserves a name, so the name it chose may be
+// claimed by another start before this one reaches the lock; when that happens Plan is
 // asked again, which now sees the name held and takes the next free one. A name
 // the caller pinned comes back the same every time, so a second refusal of it
 // is the answer.
@@ -176,28 +186,34 @@ func (r *Runner) launch(args []string) (Decision, error) {
 }
 
 // claim records this process as the agent holding the launch's name, with the
-// bead it runs and the directory it runs in, and fails rather than record a
-// process the kernel will not name, since such a record cannot be pruned.
+// bead it runs and the directory it runs in. It fails rather than record a
+// process the kernel does not report as running, or one it gives no start token
+// for, since such a record names no process.
 func (r *Runner) claim(l *Launch) (bool, error) {
 	pid := r.pid()
-	start, _, err := r.procStart()(pid)
+	start, live, err := r.procStart()(pid)
 	if err != nil {
 		return false, fmt.Errorf("reading the start token of pid %d: %w", pid, err)
+	}
+	if !live || start == "" {
+		return false, fmt.Errorf("reading the start token of pid %d: the kernel gives none for a running process", pid)
 	}
 	return r.Registry.Claim(Agent{Name: l.Name, PID: pid, Start: start, Bead: l.Bead, Cwd: r.cwd()})
 }
 
 // bindBead records that the launch's name ran the bead it named and labels the
-// bead agent:<name>, so bind and list can find the session later.
-func (r *Runner) bindBead(l *Launch) error {
+// bead agent:<name>, so bind and list can find the session later. It reports
+// whether the binding was new, which is what a failed exec has to undo.
+func (r *Runner) bindBead(l *Launch) (bool, error) {
 	if l.Bead == "" {
-		return nil
+		return false, nil
 	}
-	if _, err := r.Registry.Bind(l.Name, l.Bead); err != nil {
-		return fmt.Errorf("recording that %s ran %s: %w", l.Name, l.Bead, err)
+	added, err := r.Registry.Bind(l.Name, l.Bead)
+	if err != nil {
+		return false, fmt.Errorf("recording that %s ran %s: %w", l.Name, l.Bead, err)
 	}
 	r.label(l.Bead, l.Name)
-	return nil
+	return added, nil
 }
 
 // label tags bead agent:<name> in the store that holds it: ~/.claude for the

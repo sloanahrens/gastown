@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
+
 	"github.com/steveyegge/gastown/internal/atomicfile"
 )
 
@@ -53,6 +55,8 @@ type execCall struct {
 func testRunner(t *testing.T, names ...string) (*Runner, *Registry, *[]execCall) {
 	t.Helper()
 	reg := testRegistry(t, names...)
+	// The session this runner is is pid 99, a running process with a token.
+	reg.ProcStart = starts(map[int]string{99: "tok99"})
 	calls := &[]execCall{}
 	r := &Runner{
 		Registry: reg,
@@ -79,6 +83,23 @@ func lastCall(t *testing.T, calls []execCall) execCall {
 		t.Fatalf("the process was replaced %d times, want once", len(calls))
 	}
 	return calls[0]
+}
+
+// lockIsFree fails the test unless the registry lock can be taken right now. A
+// lock held by another open file, even one in this process, fails the try.
+func lockIsFree(t *testing.T, reg *Registry) {
+	t.Helper()
+	fl := flock.New(reg.lockPath())
+	locked, err := fl.TryLock()
+	if err != nil {
+		t.Fatalf("trying the registry lock: %v", err)
+	}
+	if !locked {
+		t.Fatal("the registry lock is held, so a second launch would wait on this one")
+	}
+	if err := fl.Unlock(); err != nil {
+		t.Fatalf("releasing the registry lock: %v", err)
+	}
 }
 
 // agentNamed returns the recorded agent of name, if the state holds one.
@@ -278,12 +299,10 @@ func TestStartFailsWhenTheNameCannotBeRecorded(t *testing.T) {
 func TestStartFailsWhenTheBindingCannotBeRecorded(t *testing.T) {
 	t.Parallel()
 	r, reg, calls := testRunner(t, "wren")
-	// The claim's write is the first; the binding's is the second, and only it
-	// fails, so the failure lands between the two writes.
-	writes := 0
+	// Only a write that carries a binding fails, so the claim lands and the
+	// binding does not.
 	reg.Write = func(path string, v any) error {
-		writes++
-		if writes > 1 {
+		if st, ok := v.(*State); ok && len(st.Bindings) > 0 {
 			return errors.New("the state file is not writable")
 		}
 		return atomicfile.EnsureDirAndWriteJSON(path, v)
@@ -292,11 +311,74 @@ func TestStartFailsWhenTheBindingCannotBeRecorded(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "recording that") {
 		t.Fatalf("Start = %v, want the binding's write failure", err)
 	}
-	if writes != 2 {
-		t.Errorf("the state file was written %d times, want the claim's write and then the binding's", writes)
-	}
 	if len(*calls) != 0 {
 		t.Error("claude ran without the bead it was started for")
+	}
+	st, loadErr := reg.Load()
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if _, bound := st.Bound("gt-a"); bound {
+		t.Error("gt-a reads as bound although its binding was never written")
+	}
+}
+
+func TestStartRollsTheClaimBackWhenExecFails(t *testing.T) {
+	t.Parallel()
+	r, reg, _ := testRunner(t, "wren", "robin")
+	r.Exec = func(string, []string, []string) error { return errors.New("exec format error") }
+
+	err := r.Start([]string{"--bead", "gt-a"})
+	if err == nil || !strings.Contains(err.Error(), "exec format error") {
+		t.Fatalf("Start = %v, want the exec failure", err)
+	}
+	st, loadErr := reg.Load()
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if _, bound := st.Bound("gt-a"); bound {
+		t.Error("gt-a is bound to a session that never ran")
+	}
+	if _, held := agentNamed(t, reg, "wren"); held {
+		t.Error("wren is recorded as running after its exec failed")
+	}
+}
+
+func TestStartKeepsABindingTheBeadHadBeforeExecFails(t *testing.T) {
+	t.Parallel()
+	r, reg, _ := testRunner(t, "wren", "robin")
+	if _, err := reg.Bind("robin", "gt-a"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	r.Exec = func(string, []string, []string) error { return errors.New("exec format error") }
+
+	// The bead ran as robin before; a launch that fails must not take that away.
+	if err := r.Start([]string{"--bead", "gt-a"}); err == nil {
+		t.Fatal("Start succeeded although the exec failed")
+	}
+	st, loadErr := reg.Load()
+	if loadErr != nil {
+		t.Fatalf("Load: %v", loadErr)
+	}
+	if name, bound := st.Bound("gt-a"); !bound || name != "robin" {
+		t.Errorf("gt-a is bound to %q (%t), want robin, the name it ran under before", name, bound)
+	}
+}
+
+func TestStartRefusesAPidWithoutAStartToken(t *testing.T) {
+	t.Parallel()
+	for name, procStart := range map[string]func(int) (string, bool, error){
+		"not running": func(int) (string, bool, error) { return "", false, nil },
+		"no token":    func(int) (string, bool, error) { return "", true, nil },
+	} {
+		r, reg, calls := testRunner(t, "wren")
+		reg.ProcStart = procStart
+		if err := r.Start(nil); err == nil || !strings.Contains(err.Error(), "start token") {
+			t.Errorf("%s: Start = %v, want a refusal to record a pid it cannot name", name, err)
+		}
+		if len(*calls) != 0 {
+			t.Errorf("%s: claude ran under a name no process holds", name)
+		}
 	}
 }
 
@@ -355,27 +437,21 @@ func TestStartRefusesAClaudeThatIsNotExecutable(t *testing.T) {
 
 func TestStartGivesTwoOverlappingSessionsDifferentNames(t *testing.T) {
 	t.Parallel()
-	r, reg, _ := testRunner(t, "wren", "robin")
+	r, reg, firstCalls := testRunner(t, "wren", "robin")
 	reg.ProcStart = starts(map[int]string{99: "tok99", 100: "tok100"})
 
-	// The first start blocks inside its exec, which is where its name is already
-	// recorded and the lock is already free: the second start runs while the
-	// first session is up, exactly as two launches would overlap.
-	firstExec := make(chan string, 1)
-	release := make(chan struct{})
-	r.Exec = func(_ string, argv, _ []string) error {
-		// Reading the registry here fails if the lock were still held across
-		// the exec, which is what would keep a second launch out.
-		if _, err := reg.Load(); err != nil {
-			t.Errorf("the registry is locked during the exec: %v", err)
-		}
-		firstExec <- argv[2]
-		<-release
+	// A real session's exec never returns, so the first session is up for as
+	// long as the second start runs. Its record must be in the registry and the
+	// lock must be free by then, which is what lets a second launch in at all.
+	r.Exec = func(path string, argv, env []string) error {
+		lockIsFree(t, reg)
+		*firstCalls = append(*firstCalls, execCall{path: path, argv: slices.Clone(argv), env: slices.Clone(env)})
 		return nil
 	}
-	done := make(chan error, 1)
-	go func() { done <- r.Start(nil) }()
-	firstName := <-firstExec
+	if err := r.Start(nil); err != nil {
+		t.Fatalf("the first start: %v", err)
+	}
+	firstName := lastCall(t, *firstCalls).argv[2]
 
 	second, _, secondCalls := testRunner(t, "wren", "robin")
 	second.Registry = reg
@@ -384,10 +460,6 @@ func TestStartGivesTwoOverlappingSessionsDifferentNames(t *testing.T) {
 	// first session holds.
 	if err := second.Start(nil); err != nil {
 		t.Fatalf("the second start: %v", err)
-	}
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatalf("the first start: %v", err)
 	}
 
 	secondName := lastCall(t, *secondCalls).argv[2]
@@ -474,7 +546,7 @@ func TestConcurrentStartsTakeDifferentNames(t *testing.T) {
 func TestStartRefusesANameAPinnedSessionCannotTake(t *testing.T) {
 	t.Parallel()
 	r, reg, calls := testRunner(t, "wren", "robin")
-	reg.ProcStart = starts(map[int]string{10: "tok10"})
+	reg.ProcStart = starts(map[int]string{10: "tok10", 99: "tok99"})
 	seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok10"})
 
 	err := r.Start([]string{"--name", "robin"})

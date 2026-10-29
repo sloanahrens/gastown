@@ -601,6 +601,26 @@ func TestClaimRefusesANameALiveSessionHolds(t *testing.T) {
 	}
 }
 
+// TestClaimRefusesANameAnotherLaunchReserved pins that a reservation holds its
+// name against a claim: a name Pick handed out to one launch is not free for
+// another to claim before that launch binds it.
+func TestClaimRefusesANameAnotherLaunchReserved(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	if _, err := reg.Pick(); err != nil {
+		t.Fatalf("Pick: %v", err)
+	}
+	reg.ProcStart = starts(map[int]string{11: "tok11"})
+
+	claimed, err := reg.Claim(Agent{Name: "wren", PID: 11, Start: "tok11"})
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if claimed {
+		t.Error("Claim took the name a live reservation holds")
+	}
+}
+
 func TestClaimTakesANameWhoseSessionHasExited(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren")

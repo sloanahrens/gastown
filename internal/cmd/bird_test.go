@@ -3,10 +3,13 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/steveyegge/gastown/internal/bird"
 )
@@ -181,12 +184,31 @@ func TestBirdLeafCarriesASetupFailure(t *testing.T) {
 	}
 }
 
-// TestBirdStartLeavesClaudesOwnFlagsAlone pins the wrapper's contract: an alias
-// of claude runs every argument through, so --help is claude's help and not
-// gt's, which cobra would answer by parsing the flags itself.
-func TestBirdStartLeavesClaudesOwnFlagsAlone(t *testing.T) {
+// TestBirdStartPassesClaudesOwnFlagsThrough: a run that is not a session hands
+// claude every argument as it was written, --name, --resume and --help too, so
+// an alias of claude behaves as claude does.
+func TestBirdStartPassesClaudesOwnFlagsThrough(t *testing.T) {
 	t.Parallel()
-	if !birdStartCmd.DisableFlagParsing {
-		t.Fatal("gt bird start parses flags, so claude's own --name, --resume and --help never reach it")
+	r := birdRunnerForTest(t)
+	r.Terminal = bird.Terminal{}
+	r.Stat = runnableClaude
+	var argv []string
+	r.Exec = func(_ string, a, _ []string) error {
+		argv = slices.Clone(a)
+		return nil
 	}
+	args := []string{"-p", "--name", "robin", "--resume", "abc", "--help"}
+
+	if err := runBirdStart(r, args); err != nil {
+		t.Fatalf("runBirdStart: %v", err)
+	}
+	if got := argv[1:]; !slices.Equal(got, args) {
+		t.Errorf("claude was given %q, want its own arguments %q", got, args)
+	}
+}
+
+// runnableClaude is the stat of a claude that is there and can run, read from
+// an in-memory file system so no executable is created.
+func runnableClaude(string) (fs.FileInfo, error) {
+	return fs.Stat(fstest.MapFS{"claude": {Mode: 0o755}}, "claude")
 }

@@ -79,6 +79,28 @@ func (s *State) Bind(name, bead string, at time.Time) bool {
 	return true
 }
 
+// Unbind removes the binding of name to bead, if the state holds it.
+func (s *State) Unbind(name, bead string) {
+	kept := s.Bindings[:0]
+	for _, b := range s.Bindings {
+		if b.Name != name || b.Bead != bead {
+			kept = append(kept, b)
+		}
+	}
+	s.Bindings = kept
+}
+
+// DropAgent removes the record of name when pid is the process holding it.
+func (s *State) DropAgent(name string, pid int) {
+	kept := s.Agents[:0]
+	for _, a := range s.Agents {
+		if a.Name != name || a.PID != pid {
+			kept = append(kept, a)
+		}
+	}
+	s.Agents = kept
+}
+
 // SetAgent records a as the agent of its name, replacing the earlier record
 // for that name, since one name is one process.
 func (s *State) SetAgent(a Agent) {

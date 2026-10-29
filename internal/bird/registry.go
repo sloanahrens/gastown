@@ -272,6 +272,20 @@ func (r *Registry) Claim(a Agent) (bool, error) {
 	return claimed, nil
 }
 
+// Unclaim undoes a launch whose exec failed, so the name does not read as held
+// by a session that never ran: it drops the record of name held by pid, and the
+// binding of name to bead when bound says the launch added that binding. A
+// binding that was there before stays, since a session ran the bead under it.
+func (r *Registry) Unclaim(name string, pid int, bead string, bound bool) error {
+	return r.Update(func(st *State) error {
+		st.DropAgent(name, pid)
+		if bound {
+			st.Unbind(name, bead)
+		}
+		return nil
+	})
+}
+
 // Bound returns the newest name bound to bead.
 func (r *Registry) Bound(bead string) (string, bool, error) {
 	st, err := r.Load()
