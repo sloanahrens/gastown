@@ -17,7 +17,6 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
-	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -889,25 +888,40 @@ func TestRunTierSweepReSweepsARedWhileASiblingRigDefers(t *testing.T) {
 	}
 }
 
+// tierSweepNoWaitClock is the sweep's clock in the test that proves no wait
+// runs before the integration stage. It tells time from a fake clock and
+// records After and Sleep, the two primitives the daemon's waits are built
+// from: the sweep reads this clock (see Daemon.clk) for every pause, so a wait
+// put back anywhere in the cycle is caught at the call that asks for it, not
+// inferred from elapsed time.
+type tierSweepNoWaitClock struct {
+	*clockwork.FakeClock
+	waits []string
+}
+
+func (c *tierSweepNoWaitClock) After(d time.Duration) <-chan time.Time {
+	c.waits = append(c.waits, "After("+d.String()+")")
+	// Closed, so a cycle that does wait runs past it and the test reports the
+	// wait rather than hanging on it.
+	ch := make(chan time.Time)
+	close(ch)
+	return ch
+}
+
+func (c *tierSweepNoWaitClock) Sleep(d time.Duration) {
+	c.waits = append(c.waits, "Sleep("+d.String()+")")
+}
+
 // gt-qpeei.8: the integration stage takes the container-gate slot with no wait
-// before it. A settings file that still carries the removed runner_idle_command
-// and runner_idle_wait loads (the config loader tolerates them) and changes
-// nothing here: the stage starts when the shell stage ends, so only the stages
-// move the clock, and no probe runs.
-func TestTierSweepIntegrationStageRunsNoWaitCommand(t *testing.T) {
+// before it: it starts when the shell stage returns. The fixture the removed
+// keys need is the config package's (tolerated_keys_test.go); here the sweep
+// runs the town's ordinary config, and the clock proves the absence of a wait.
+func TestTierSweepIntegrationStageStartsWithoutAWait(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 14)
 	d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
-	clk := clockwork.NewFakeClockAt(now)
+	clk := &tierSweepNoWaitClock{FakeClock: clockwork.NewFakeClockAt(now)}
 	d.clock = clk
-	// The config the live town carried before the keys came out.
-	daemonDoc := `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{` +
-		`"enabled":true,"runner_idle_command":"gt ci runner-idle","runner_idle_wait":"10m"}}}`
-	var cfg DaemonPatrolConfig
-	if err := agentconfig.DecodeJSONFile("daemon.json", []byte(daemonDoc), &cfg); err != nil {
-		t.Fatalf("a config carrying the removed keys did not load: %v", err)
-	}
-	d.patrolConfig = &cfg
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
 		return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil
 	}
@@ -917,9 +931,6 @@ func TestTierSweepIntegrationStageRunsNoWaitCommand(t *testing.T) {
 	var ran []string
 	d.tierSweepSeams.run = func(_ context.Context, _ string, st tierSweepStage) tierSweepStageResult {
 		ran = append(ran, strings.Join(st.tiers, ","))
-		// The stage's own run time: if anything waited before a stage, the
-		// cycle would take time beyond this.
-		clk.Advance(3 * time.Second)
 		var b strings.Builder
 		for _, tier := range st.tiers {
 			fmt.Fprintf(&b, "tier-sweep: %s GREEN passed=1 failed=0 skipped=0\n", tier)
@@ -933,14 +944,9 @@ func TestTierSweepIntegrationStageRunsNoWaitCommand(t *testing.T) {
 	if got, want := strings.Join(ran, "|"), "shell|integration,race"; got != want {
 		t.Fatalf("stages ran %q, want %q", got, want)
 	}
-	out := logs.String()
-	if strings.Contains(out, "CI runner") || strings.Contains(out, "under load") {
-		t.Errorf("the sweep logged a runner-idle wait it no longer has; got:\n%s", out)
-	}
-	// Two stages of three seconds each: any wait before the integration stage
-	// would show as time the stages cannot account for.
-	if want := "in 6s"; !strings.Contains(out, want) {
-		t.Errorf("the cycle took time no stage spent (want %q in the swept line); got:\n%s", want, out)
+	if len(clk.waits) > 0 {
+		t.Errorf("the cycle waited before a stage: it asked its clock for %v, and the integration stage must take the slot with no wait; log:\n%s",
+			clk.waits, logs.String())
 	}
 }
 
