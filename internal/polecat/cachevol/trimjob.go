@@ -317,8 +317,15 @@ type TrimObject struct {
 	Labels map[string]string
 }
 
+// trimKindJob and trimKindShard are the two kinds a trim applies, and so the only kinds TrimStale
+// deletes.
+const (
+	trimKindJob   = "Job"
+	trimKindShard = "ConfigMap"
+)
+
 // TrimStale returns what existing holds that a rerun must delete before it applies m: every Job it
-// finds, then every other trim object m does not name.
+// finds, then every shard ConfigMap m does not name.
 func TrimStale(m *TrimManifest, existing []TrimObject) []TrimObject {
 	// Only what TrimSelector reaches is returned, so a caller that lists wider than the trim deletes
 	// nothing a trim did not apply: the seed Job shares the namespace.
@@ -334,12 +341,15 @@ func TrimStale(m *TrimManifest, existing []TrimObject) []TrimObject {
 	// waiting on a mount the rerun does not apply.
 	var stale []TrimObject
 	for _, o := range existing {
-		if o.Kind == "Job" && trimSelects(o) {
+		if o.Kind == trimKindJob && trimSelects(o) {
 			stale = append(stale, o)
 		}
 	}
+	// Only a shard ConfigMap is left to delete: the trim applies Jobs and ConfigMaps, so an object of
+	// another kind that carries the labels is another application's, and the labels cannot make it
+	// the trim's.
 	for _, o := range existing {
-		if o.Kind != "Job" && trimSelects(o) && !named[o.Name] {
+		if o.Kind == trimKindShard && trimSelects(o) && !named[o.Name] {
 			stale = append(stale, o)
 		}
 	}

@@ -901,6 +901,22 @@ func TestTrimStaleLeavesWhatTheSelectorDoesNotReach(t *testing.T) {
 	}
 }
 
+// TestTrimStaleDeletesOnlyTheKindsATrimApplies pins that the labels alone cannot widen the prune: a
+// trim applies Jobs and shard ConfigMaps, so an object of another kind that carries the same labels
+// is another application's and a rerun leaves it alone.
+func TestTrimStaleDeletesOnlyTheKindsATrimApplies(t *testing.T) {
+	t.Parallel()
+	m := buildTrim(t, trimInput())
+	foreign := []TrimObject{
+		{Kind: "Deployment", Name: "trim-labelled", Labels: trimLabels()},
+		{Kind: "Service", Name: TrimShardName(DefaultTrimJobName, 9), Labels: trimLabels()},
+		{Kind: "Pod", Name: DefaultTrimJobName + "-abcde", Labels: trimLabels()},
+	}
+	if got := TrimStale(m, foreign); len(got) != 0 {
+		t.Errorf("TrimStale = %v, want nothing: the trim applies no %v", got, []string{"Deployment", "Service", "Pod"})
+	}
+}
+
 // TestTrimStaleTable covers the shapes a rerun's listing takes: nothing applied yet, the manifest's own
 // objects listed shards first, and a Job listed after the shards.
 func TestTrimStaleTable(t *testing.T) {
