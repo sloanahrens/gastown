@@ -9,13 +9,13 @@ import (
 // Clone clones url to dest on url's HEAD branch, as git clone does; an empty
 // repository clones to an empty checkout with no commits.
 func (h *handle) Clone(url, dest string) error {
-	return h.clone(url, dest, "", false)
+	return h.clone(url, dest, "", false, true)
 }
 
 // CloneWithReference is Clone; the fake shares no objects, so a reference
 // changes nothing it can observe.
 func (h *handle) CloneWithReference(url, dest, _ string) error {
-	return h.clone(url, dest, "", false)
+	return h.clone(url, dest, "", false, true)
 }
 
 // Remotes lists the repository's remote names, sorted as git remote prints

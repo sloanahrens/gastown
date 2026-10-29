@@ -7,15 +7,21 @@ import (
 	"time"
 )
 
-// clone is git clone --single-branch of url into dest, bare or checked out,
-// then (for a bare clone) the fetch of that branch into its remote-tracking
-// ref that *git.Git's bare clones make; a checked-out clone also records
-// what cloned does. branch "" is the remote's HEAD branch. An empty remote
-// clones to an empty repository; a named branch it lacks fails.
-func (h *handle) clone(url, dest, branch string, bare bool) error {
+// clone is git clone of url into dest, bare or checked out, then (for a bare
+// clone) the fetch of that branch into its remote-tracking ref that
+// *git.Git's bare clones make; a checked-out clone also records what cloned
+// does. branch "" is the remote's HEAD branch. A singleBranch clone tracks
+// only the checked-out branch; a full one tracks every branch, as git clone
+// without --single-branch does (the fake spends no time on depth: every clone
+// it makes already carries a commit's whole ancestry). An empty remote clones
+// to an empty repository; a named branch it lacks fails.
+func (h *handle) clone(url, dest, branch string, bare, singleBranch bool) error {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
-	args := []string{"clone", "--single-branch"}
+	args := []string{"clone"}
+	if singleBranch {
+		args = append(args, "--single-branch")
+	}
 	if bare {
 		args = append(args, "--bare")
 	}
@@ -45,8 +51,18 @@ func (h *handle) clone(url, dest, branch string, bare bool) error {
 		r.refs[head] = id
 		r.refs["refs/remotes/origin/"+strings.TrimPrefix(head, "refs/heads/")] = id
 	}
+	if !singleBranch {
+		for ref, id := range src.refs {
+			b, isBranch := strings.CutPrefix(ref, "refs/heads/")
+			if !isBranch || "refs/heads/"+b == head {
+				continue
+			}
+			h.f.copyObjects(r, id)
+			r.refs["refs/remotes/origin/"+b] = id
+		}
+	}
 	if !bare {
-		cloned(r, src) // a bare clone sets neither origin/HEAD nor an upstream
+		cloned(r, src, singleBranch) // a bare clone sets neither origin/HEAD nor an upstream
 	}
 	write := func() error { return layoutRepo(r) }
 	if !bare {
@@ -65,35 +81,51 @@ func (h *handle) clone(url, dest, branch string, bare bool) error {
 }
 
 func (h *handle) CloneBareWithBranch(url, dest, branch string) error {
-	return h.clone(url, dest, branch, true)
+	return h.clone(url, dest, branch, true, true)
 }
 
 func (h *handle) CloneBareWithReferenceAndBranch(url, dest, _, branch string) error {
-	return h.clone(url, dest, branch, true)
+	return h.clone(url, dest, branch, true, true)
 }
 
 func (h *handle) CloneBarePartialWithBranch(url, dest, _, branch string) error {
-	return h.clone(url, dest, branch, true)
+	return h.clone(url, dest, branch, true, true)
 }
 
 func (h *handle) CloneBarePartialWithReferenceAndBranch(url, dest, _, _, branch string) error {
-	return h.clone(url, dest, branch, true)
+	return h.clone(url, dest, branch, true, true)
 }
 
 func (h *handle) CloneBranch(url, dest, branch string) error {
-	return h.clone(url, dest, branch, false)
+	return h.clone(url, dest, branch, false, true)
 }
 
 func (h *handle) CloneBranchWithReference(url, dest, branch, _ string) error {
-	return h.clone(url, dest, branch, false)
+	return h.clone(url, dest, branch, false, true)
 }
 
 func (h *handle) CloneBranchPartial(url, dest, branch, _ string) error {
-	return h.clone(url, dest, branch, false)
+	return h.clone(url, dest, branch, false, true)
 }
 
 func (h *handle) CloneBranchPartialWithReference(url, dest, branch, _, _ string) error {
-	return h.clone(url, dest, branch, false)
+	return h.clone(url, dest, branch, false, true)
+}
+
+func (h *handle) CloneFull(url, dest string) error {
+	return h.clone(url, dest, "", false, false)
+}
+
+func (h *handle) CloneFullWithReference(url, dest, _ string) error {
+	return h.clone(url, dest, "", false, false)
+}
+
+func (h *handle) CloneBranchFull(url, dest, branch string) error {
+	return h.clone(url, dest, branch, false, false)
+}
+
+func (h *handle) CloneBranchFullWithReference(url, dest, branch, _ string) error {
+	return h.clone(url, dest, branch, false, false)
 }
 
 // RemoteHasRefs is ls-remote --refs: whether the remote (a configured remote
