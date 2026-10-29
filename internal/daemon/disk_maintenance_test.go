@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -511,7 +512,7 @@ func TestDiskMaintenanceBuiltTargetAppliesUnderThePluginLock(t *testing.T) {
 	getenv := func(key string) string { return env[key] }
 
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
-	targets, err := d.diskMaintenanceTargets(agentconfig.DiskMaintenanceModeApply, getenv)
+	targets, err := d.diskMaintenanceTargets(agentconfig.DiskMaintenanceModeApply, getenv, func() (string, error) { return t.TempDir(), nil })
 	if err != nil {
 		t.Fatalf("building the targets: %v", err)
 	}
@@ -553,6 +554,149 @@ func TestDiskMaintenanceBuiltTargetAppliesUnderThePluginLock(t *testing.T) {
 	}
 	if len(result.Failed) == 0 {
 		t.Errorf("with the lock free the apply did not reach the delete: result = %+v", result)
+	}
+}
+
+// TestDiskMaintenanceRefusesAnUnknownMode: a mode the patrol cannot act on runs
+// nothing, says why, and is not retried every tick — the decode refuses one,
+// and a config built in code must not read as an apply.
+func TestDiskMaintenanceRefusesAnUnknownMode(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	d.patrolConfig = diskMaintEnabled("04:30", "applyy")
+
+	for i := 0; i < 2; i++ {
+		d.runDiskMaintenance()
+	}
+
+	if f.targets != 0 {
+		t.Errorf("targets built = %d, want 0 for a mode the patrol cannot act on", f.targets)
+	}
+	if got := strings.Count(logs.String(), "applyy"); got != 1 {
+		t.Errorf("logged the mode %d times, want 1: %q", got, logs.String())
+	}
+}
+
+// TestDiskMaintenanceTargetsRefuseBadSettings: each setting the target cannot
+// be built from is an error the pass reports, never a target built from a guess.
+func TestDiskMaintenanceTargetsRefuseBadSettings(t *testing.T) {
+	t.Parallel()
+	home := func() (string, error) { return t.TempDir(), nil }
+	noHome := func() (string, error) { return "", errors.New("HOME is unset") }
+	cases := []struct {
+		name  string
+		town  string
+		mode  string
+		env   map[string]string
+		home  func() (string, error)
+		wants string
+	}{
+		{
+			name:  "the plugin settings do not parse",
+			mode:  agentconfig.DiskMaintenanceModeDryRun,
+			env:   map[string]string{"POLECAT_IMAGE_STALE_MINUTES": "soon"},
+			home:  home,
+			wants: "POLECAT_IMAGE_STALE_MINUTES",
+		},
+		{
+			name:  "a registry path is the retired setting",
+			mode:  agentconfig.DiskMaintenanceModeDryRun,
+			env:   map[string]string{"POLECAT_IMAGE_REGISTRY": "localhost:5001/x"},
+			home:  home,
+			wants: "not a host:port",
+		},
+		{
+			name:  "no home for the docker socket",
+			mode:  agentconfig.DiskMaintenanceModeDryRun,
+			env:   map[string]string{"POLECAT_IMAGE_REGISTRY": "localhost:5001"},
+			home:  noHome,
+			wants: "colima docker socket",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := tt.town
+			if town == "" {
+				town = t.TempDir()
+			}
+			d := &Daemon{config: &Config{TownRoot: town}}
+			_, err := d.diskMaintenanceTargets(tt.mode, func(k string) string { return tt.env[k] }, tt.home)
+			if err == nil {
+				t.Fatalf("%s built a target anyway", tt.name)
+			}
+			if !strings.Contains(err.Error(), tt.wants) {
+				t.Errorf("error = %v, want it to name %q", err, tt.wants)
+			}
+		})
+	}
+}
+
+// TestDiskMaintenanceApplyNeedsALedgerDirectory: an apply that cannot make its
+// ledger directory fails before anything is deleted, because an apply it could
+// not record must not run.
+func TestDiskMaintenanceApplyNeedsALedgerDirectory(t *testing.T) {
+	t.Parallel()
+	// A file where the runtime directory goes: .runtime/diskmaint cannot be
+	// made under it.
+	town := t.TempDir()
+	if err := os.WriteFile(filepath.Join(town, ".runtime"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{config: &Config{TownRoot: town}}
+
+	_, err := d.diskMaintenanceTargets(agentconfig.DiskMaintenanceModeApply,
+		func(k string) string { return map[string]string{"POLECAT_IMAGE_REGISTRY": "localhost:5001"}[k] },
+		func() (string, error) { return t.TempDir(), nil })
+	if err == nil || !strings.Contains(err.Error(), "ledger directory") {
+		t.Fatalf("apply with no ledger directory = %v, want the refusal", err)
+	}
+
+	// The same town may still plan: a dry run leaves the disk as it found it.
+	if _, err := d.diskMaintenanceTargets(agentconfig.DiskMaintenanceModeDryRun,
+		func(k string) string { return map[string]string{"POLECAT_IMAGE_REGISTRY": "localhost:5001"}[k] },
+		func() (string, error) { return t.TempDir(), nil }); err != nil {
+		t.Fatalf("dry run in the same town = %v, want a target", err)
+	}
+}
+
+// TestDiskMaintenanceInstalledCommitMustBeNamed: the plan refuses to rank tags
+// against a commit `gt version` did not name, and returns the one it did.
+func TestDiskMaintenanceInstalledCommitMustBeNamed(t *testing.T) {
+	t.Parallel()
+	if _, err := diskMaintInstalled(func() string { return "" })(); err == nil {
+		t.Fatal("an unidentified installed commit read as a commit")
+	}
+	got, err := diskMaintInstalled(func() string { return "0123456789abcdef" })()
+	if err != nil || got != "0123456789abcdef" {
+		t.Fatalf("installed commit = %q, %v; want the commit the reader named", got, err)
+	}
+}
+
+// TestDiskMaintenanceRunnerNamesTheFailure: a failed kubectl or docker is an
+// error carrying the program and its last stderr line, never the whole output.
+func TestDiskMaintenanceRunnerNamesTheFailure(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{}
+	d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) {
+		return nil, []byte("noise from a wrapper\nno such pod\n"), errors.New("exit status 1")
+	}
+
+	_, err := d.diskMaintRunner(context.Background(), nil, "kubectl", "get", "pods")
+	if err == nil {
+		t.Fatal("a failed program read as a success")
+	}
+	if !strings.Contains(err.Error(), "kubectl") || !strings.Contains(err.Error(), "no such pod") {
+		t.Errorf("error = %v, want the program and its last stderr line", err)
+	}
+	if strings.Contains(err.Error(), "noise from a wrapper") {
+		t.Errorf("error = %v, want the last stderr line only", err)
+	}
+
+	d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) { return []byte("ok"), nil, nil }
+	out, err := d.diskMaintRunner(context.Background(), []string{"A=B"}, "kubectl", "get", "pods")
+	if err != nil || string(out) != "ok" {
+		t.Errorf("runner = %q, %v; want the program's stdout", out, err)
 	}
 }
 

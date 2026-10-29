@@ -74,8 +74,10 @@ type diskMaintSeams struct {
 	// readDisks reads the disks the keep tightening watches. The production
 	// readers arrive with gt-dl4nv.16, so production reads none until then.
 	readDisks func(ctx context.Context) []disks.Reading
-	// getenv reads the keep setting.
+	// getenv reads the plugin settings the target is built from.
 	getenv func(string) string
+	// homeDir locates the colima docker socket's home.
+	homeDir func() (string, error)
 	// dispatch runs a pass off the calling goroutine, so a slow registry does
 	// not hold the heartbeat. Nil means one goroutine per pass.
 	dispatch func(fn func())
@@ -90,7 +92,7 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.targets == nil {
 		s.targets = func(_ context.Context, d *Daemon, mode string) (map[string]diskmaint.Target, error) {
-			return d.diskMaintenanceTargets(mode, s.getenv)
+			return d.diskMaintenanceTargets(mode, s.getenv, s.homeDir)
 		}
 	}
 	if s.readDisks == nil {
@@ -98,6 +100,9 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
+	}
+	if s.homeDir == nil {
+		s.homeDir = os.UserHomeDir
 	}
 	if s.dispatch == nil {
 		s.dispatch = func(fn func()) { go fn() }
@@ -358,7 +363,7 @@ func diskMaintKeep(get func(string) string) (int, error) {
 //
 // Only an apply may create the ledger directory: a dry run must leave the disk
 // as it found it.
-func (d *Daemon) diskMaintenanceTargets(mode string, getenv func(string) string) (map[string]diskmaint.Target, error) {
+func (d *Daemon) diskMaintenanceTargets(mode string, getenv func(string) string, homeDir func() (string, error)) (map[string]diskmaint.Target, error) {
 	town := d.config.TownRoot
 	cfg, err := polecatimage.ConfigFromEnv(func(key string) string {
 		if key == "POLECAT_IMAGE_TOWN_ROOT" {
@@ -377,7 +382,7 @@ func (d *Daemon) diskMaintenanceTargets(mode string, getenv func(string) string)
 		// that old setting, and a URL is a scheme this reader adds itself.
 		return nil, errors.New("POLECAT_IMAGE_REGISTRY is not a host:port; the registry address is host:port, and the sandbox records are POLECAT_IMAGE_SANDBOX_RECORDS")
 	}
-	home, err := os.UserHomeDir()
+	home, err := homeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot locate the colima docker socket: %w", err)
 	}
@@ -400,7 +405,7 @@ func (d *Daemon) diskMaintenanceTargets(mode string, getenv func(string) string)
 			DockerHost:   "unix://" + filepath.Join(home, ".colima", "gt-sbx", "docker.sock"),
 			Container:    diskMaintRegistryContainer,
 			Keep:         diskMaintDefaultKeep,
-			Installed:    diskMaintInstalled(cfg),
+			Installed:    diskMaintInstalled(func() string { return (&polecatimage.Run{Cfg: cfg}).InstalledCommit() }),
 			PushInFlight: gate.pushInFlight,
 			Lock:         gate.withLock,
 			Run:          d.diskMaintRunner,
@@ -417,12 +422,12 @@ func (d *Daemon) diskMaintenanceOut() io.Writer {
 	return d.logger.Writer()
 }
 
-// diskMaintInstalled reads the installed gt's commit from `gt version`, the
-// source the plan names for it. A build that names none is an error, so the
-// plan refuses rather than keeping tags for a commit it guessed.
-func diskMaintInstalled(cfg polecatimage.Config) func() (string, error) {
+// diskMaintInstalled turns a `gt version` reader into the target's installed
+// commit. A build that names none is an error, so the plan refuses rather than
+// keeping tags for a commit it guessed.
+func diskMaintInstalled(read func() string) func() (string, error) {
 	return func() (string, error) {
-		commit := (&polecatimage.Run{Cfg: cfg}).InstalledCommit()
+		commit := read()
 		if commit == "" {
 			return "", errors.New("gt version names no commit")
 		}
