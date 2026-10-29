@@ -27,8 +27,8 @@ const (
 	// doltCompareSourcePasswordEnv and doltCompareTargetPasswordEnv name the
 	// environment variables a password comes from. It is not a flag: a flag
 	// value is in the process list, where any local user reads it.
-	doltCompareSourcePasswordEnv = "GT_DOLT_COMPARE_SOURCE_PASSWORD"
-	doltCompareTargetPasswordEnv = "GT_DOLT_COMPARE_TARGET_PASSWORD"
+	doltCompareSourcePasswordEnv = "GT_DOLT_COMPARE_SOURCE_PASSWORD" //nolint:gosec // G101: the variable's name, not a credential
+	doltCompareTargetPasswordEnv = "GT_DOLT_COMPARE_TARGET_PASSWORD" //nolint:gosec // G101: the variable's name, not a credential
 	// doltCompareContentHashQuery is the content hash both servers answer
 	// with. DOLT_HASHOF_DB() hashes the database's working set, committed and
 	// uncommitted, so two copies of the same content hash equal even when
