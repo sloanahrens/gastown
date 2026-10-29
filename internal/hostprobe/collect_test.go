@@ -73,6 +73,7 @@ func fullCollectors(h *fakeHost) collectors {
 			return &util.DiskSpaceInfo{AvailableBytes: 12 << 30, UsedPercent: 61.5}, nil
 		},
 		execTax: func(context.Context) (time.Duration, error) { return 25 * time.Millisecond, nil },
+		timeout: readTimeout,
 	}
 }
 
@@ -195,6 +196,44 @@ func TestCollectSetsOnlyTheFailedFieldsErr(t *testing.T) {
 	}
 }
 
+// TestCollectBoundsEachReadSoAHungCommandFailsOnlyItsField holds ps until its
+// read's deadline. The exec tax is read after ps and must still be filled: a
+// read with no deadline of its own would hold it up. The fallback wait fails
+// the test, not hangs it, when no deadline ends the read.
+func TestCollectBoundsEachReadSoAHungCommandFailsOnlyItsField(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost()
+	c := fullCollectors(h)
+	c.timeout = time.Millisecond
+	c.run = func(ctx context.Context, argv []string) ([]byte, error) {
+		if strings.Join(argv, " ") != psKey {
+			return h.run(ctx, argv)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			return nil, errors.New("no deadline ended the read")
+		}
+	}
+	got := collect(context.Background(), c, "/town", testAt())
+
+	if !strings.Contains(got.TopConsumers.Err, "context deadline exceeded") {
+		t.Errorf("TopConsumers.Err = %q, want the deadline named", got.TopConsumers.Err)
+	}
+	for name, e := range errsOf(got) {
+		if name != "top" && e != "" {
+			t.Errorf("%s: Err = %q, want none: only the hung ps failed", name, e)
+		}
+	}
+	want := valuesOf(fullProbeReading())
+	for name, v := range valuesOf(got) {
+		if name != "top" && !reflect.DeepEqual(v, want[name]) {
+			t.Errorf("%s: value = %v, want %v: a hung ps must not cost it", name, v, want[name])
+		}
+	}
+}
+
 // dockerContextErr names how a Docker argv fails to name the desktop-linux
 // context, or returns nil when it does.
 func dockerContextErr(argv []string) error {
@@ -262,7 +301,7 @@ func TestProbeExecTaxRunsEachSampleThroughTheRunner(t *testing.T) {
 		if err != nil {
 			return exectax.Result{}, err
 		}
-		return exectax.Result{Median: d}, nil
+		return exectax.Result{Median: d, Samples: []time.Duration{d}}, nil
 	}
 	if _, err := probeExecTax(context.Background(), probe, run); err != nil {
 		t.Fatalf("probeExecTax: %v", err)
@@ -279,6 +318,9 @@ func TestProbeExecTaxReportsAFailure(t *testing.T) {
 	failProbe := func(context.Context, exectax.Options) (exectax.Result, error) {
 		return exectax.Result{}, errors.New("no samples written")
 	}
+	emptyProbe := func(context.Context, exectax.Options) (exectax.Result, error) {
+		return exectax.Result{}, nil
+	}
 	passProbe := func(ctx context.Context, o exectax.Options) (exectax.Result, error) {
 		_, err := o.Exec(ctx, "/sample/one")
 		return exectax.Result{}, err
@@ -289,6 +331,7 @@ func TestProbeExecTaxReportsAFailure(t *testing.T) {
 		run   Runner
 	}{
 		{"the probe fails", failProbe, okRun},
+		{"the probe takes no samples", emptyProbe, okRun},
 		{"a sample fails to exec", passProbe, failRun},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

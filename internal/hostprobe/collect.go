@@ -14,7 +14,9 @@ import (
 
 // Runner runs argv and returns its stdout; an error means the command failed.
 // It is the seam every host command goes through, so a test answers each one
-// from a fake and only the production runner starts a process.
+// from a fake and only the production runner starts a process. It must return
+// once ctx is done, so a hung command fails its field at the deadline, and its
+// error must not carry the command's output.
 type Runner func(ctx context.Context, argv []string) ([]byte, error)
 
 // dockerContext is the Docker context every Docker call names. The global
@@ -24,6 +26,10 @@ const dockerContext = "desktop-linux"
 
 // topProcs is how many busy processes a reading keeps, the number hoststat keeps.
 const topProcs = 6
+
+// readTimeout bounds each field's read. A read that runs past it fails its own
+// field, and the reads after it still run.
+const readTimeout = 30 * time.Second
 
 // The macOS commands hoststat's Sample runs for the idle share and the process
 // table. The host agent is a launchd job on the Mac, so these are the forms it
@@ -40,6 +46,7 @@ type collectors struct {
 	run     Runner
 	disk    func(path string) (*util.DiskSpaceInfo, error)
 	execTax func(ctx context.Context) (time.Duration, error)
+	timeout time.Duration
 }
 
 // Collect reads every probe field once and stamps the reading now. Each field
@@ -52,26 +59,47 @@ func Collect(ctx context.Context, run Runner, townRoot string, now time.Time) Pr
 		execTax: func(ctx context.Context) (time.Duration, error) {
 			return probeExecTax(ctx, exectax.Probe, run)
 		},
+		timeout: readTimeout,
 	}, townRoot, now)
 }
 
-// collect is Collect over its reads.
+// collect is Collect over its reads. Each read has its own deadline, so one hung
+// command cannot hold up the fields after it. The disk read takes no context
+// (statfs is a local call), so it is not bounded.
 func collect(ctx context.Context, c collectors, townRoot string, now time.Time) Probes {
 	return Probes{
-		V:            SchemaVersion,
-		At:           now,
-		MemFreePct:   fieldOf(memFree(ctx, c.run)),
-		Disk:         fieldOf(diskUse(c.disk, townRoot)),
-		Containers:   fieldOf(containers(ctx, c.run)),
-		CPUIdlePct:   fieldOf(cpuIdle(ctx, c.run)),
-		TopConsumers: fieldOf(topConsumers(ctx, c.run)),
-		ExecTaxMS:    fieldOf(execTaxMS(ctx, c.execTax)),
+		V:  SchemaVersion,
+		At: now,
+		MemFreePct: read(ctx, c.timeout, func(ctx context.Context) (float64, error) {
+			return memFree(ctx, c.run)
+		}),
+		Disk: fieldOf(diskUse(c.disk, townRoot)),
+		Containers: read(ctx, c.timeout, func(ctx context.Context) ([]string, error) {
+			return containers(ctx, c.run)
+		}),
+		CPUIdlePct: read(ctx, c.timeout, func(ctx context.Context) (float64, error) {
+			return cpuIdle(ctx, c.run)
+		}),
+		TopConsumers: read(ctx, c.timeout, func(ctx context.Context) ([]Consumer, error) {
+			return topConsumers(ctx, c.run)
+		}),
+		ExecTaxMS: read(ctx, c.timeout, func(ctx context.Context) (float64, error) {
+			return execTaxMS(ctx, c.execTax)
+		}),
 	}
 }
 
+// read is one bounded field read. The deadline ends a command still running at
+// timeout, and that command's error then sets the field's Err.
+func read[T any](ctx context.Context, timeout time.Duration, fn func(context.Context) (T, error)) Field[T] {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return fieldOf(fn(ctx))
+}
+
 // fieldOf is a reading's Field: its value when the read succeeded, its error
-// text when it did not. The error names the read and never carries command
-// output, so a secret in a command's output cannot reach the file.
+// text when it did not. The error text is the read's name and the Runner's
+// error, so the Runner must keep command output out of its error (see Runner).
 func fieldOf[T any](v T, err error) Field[T] {
 	if err != nil {
 		return Field[T]{Err: err.Error()}
@@ -185,6 +213,9 @@ func probeExecTax(ctx context.Context, probe execProbe, run Runner) (time.Durati
 	})
 	if err != nil {
 		return 0, err
+	}
+	if len(res.Samples) == 0 {
+		return 0, errors.New("the probe took no samples")
 	}
 	return res.Median, nil
 }
