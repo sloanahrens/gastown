@@ -42,6 +42,39 @@ func TestIntegrationCompileRefusesACommitTheCheckoutDoesNotHold(t *testing.T) {
 	}
 }
 
+// TestIntegrationCompileRefusesACommitStillMissingAfterTheFetch pins the
+// refusal that follows a real fetch which ran and did not bring the commit in:
+// the operator is told to stop fetching, because fetching is what just failed.
+func TestIntegrationCompileRefusesACommitStillMissingAfterTheFetch(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	initScratchRepo(t, src, "src")
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	if out, err := isolatedGit(t.TempDir(), "init", "-q", "--bare", origin); err != nil {
+		t.Fatalf("making the bare origin: %v: %s", err, out)
+	}
+	scratchGit(t, src, "remote", "add", "origin", origin)
+	other := t.TempDir()
+	otherCommit := initScratchRepo(t, other, "other")
+
+	build := &fakeGo{}
+	_, err := Compile(Options{Src: src, Out: filepath.Join(src, "bd"), Commit: otherCommit, BuildDir: t.TempDir()}, isolatedGit, build.run)
+	if err == nil {
+		t.Fatalf("Compile built %s, which neither %s nor its origin holds", otherCommit, src)
+	}
+	for _, want := range []string{otherCommit, src, "still does not hold", "after fetching all of origin"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Compile: error lacks %q: %v", want, err)
+		}
+	}
+	if fix := fixLine(err.Error()); fix == "" || strings.Contains(fix, "fetch") {
+		t.Errorf("Compile: the fix line %q still tells the operator to fetch after the fetch already ran", fix)
+	}
+	if build.dir != "" {
+		t.Errorf("Compile built in %q for a commit that is still missing", build.dir)
+	}
+}
+
 // initScratchRepo makes a git repository at dir with one commit naming marker
 // in its go.mod, and returns that commit's full sha.
 func initScratchRepo(t *testing.T, dir, marker string) string {

@@ -415,8 +415,11 @@ func TestCompileFetchesOnceWhenTheCommitIsMissingThenBuilds(t *testing.T) {
 		t.Errorf("Compile returned %q, want %q", got, fullCommit)
 	}
 	fetch := git.find("fetch")
-	if fetch == nil || strings.Join(fetch, " ") != "/beads fetch --quiet origin main" {
-		t.Errorf("fetch call = %v, want one 'fetch --quiet origin main' in the checkout", fetch)
+	if fetch == nil {
+		t.Fatalf("Compile did not fetch the missing commit; git calls: %v", git.calls)
+	}
+	if fetch[0] != "/beads" || fetch[len(fetch)-1] != "origin" {
+		t.Errorf("fetch call = %v, want it in /beads and its argument list to end at origin, with no branch named", fetch)
 	}
 	if n := countCalls(git, "fetch"); n != 1 {
 		t.Errorf("Compile fetched %d times, want once", n)
@@ -456,6 +459,10 @@ func TestCompileRefusesWhenTheFetchFails(t *testing.T) {
 			t.Errorf("Compile: error lacks %q: %v", want, err)
 		}
 	}
+	// The fetch never ran, so the operator's by-hand fetch really is the remedy.
+	if fix := fixLine(err.Error()); !strings.Contains(fix, "fetch it there by hand") {
+		t.Errorf("Compile: the fix line %q does not tell the operator to fetch a commit whose fetch failed", fix)
+	}
 	if build.dir != "" {
 		t.Errorf("Compile built in %q after a failed fetch", build.dir)
 	}
@@ -470,8 +477,15 @@ func TestCompileRefusesACommitStillMissingAfterTheFetch(t *testing.T) {
 	if err == nil {
 		t.Fatal("Compile built a commit the checkout still does not hold after the fetch")
 	}
-	if !strings.Contains(err.Error(), "does not hold") || !strings.Contains(err.Error(), fullCommit) {
-		t.Errorf("Compile: error %v does not name the missing commit", err)
+	for _, want := range []string{fullCommit, "/beads", "still does not hold", "after fetching all of origin"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Compile: error lacks %q: %v", want, err)
+		}
+	}
+	// The fetch already ran, so telling the operator to fetch by hand asks for
+	// the work that just failed to bring the commit in.
+	if fix := fixLine(err.Error()); fix == "" || strings.Contains(fix, "fetch") {
+		t.Errorf("Compile: the fix line %q still tells the operator to fetch after the fetch already ran", fix)
 	}
 	if n := countCalls(git, "fetch"); n != 1 {
 		t.Errorf("Compile fetched %d times, want once", n)
@@ -479,4 +493,15 @@ func TestCompileRefusesACommitStillMissingAfterTheFetch(t *testing.T) {
 	if build.dir != "" {
 		t.Errorf("Compile built in %q for a commit that is still missing", build.dir)
 	}
+}
+
+// fixLine returns the "fix:" line of a refusal, the one that tells the operator
+// what to do next.
+func fixLine(msg string) string {
+	for _, line := range strings.Split(msg, "\n") {
+		if strings.Contains(line, "fix:") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
 }

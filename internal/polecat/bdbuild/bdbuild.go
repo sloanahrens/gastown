@@ -152,14 +152,9 @@ type Options struct {
 
 // Compile writes opt.Out (resolved to an absolute path, so it survives the
 // worktree's removal) built from opt.Commit in a clean worktree of opt.Src,
-// and returns the commit's full sha. The commit is read from the checkout's
-// object store. A beads landing builds and installs bd at its own commit but
-// never refreshes this checkout, so the installed bd's commit is often one the
-// checkout has not fetched yet; when the object is missing Compile fetches the
-// checkout's origin once (a fetch only: the working tree and branch are not
-// touched) and looks again, and a commit still missing, or a fetch that fails,
-// is refused with a message naming it (gt-pme82). A commit already present is
-// never fetched for. The worktree is removed afterwards.
+// reaching the network for one fetch of that checkout's origin when the
+// checkout does not hold the commit, and returns the commit's full sha
+// (gt-pme82).
 func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	if opt.Src == "" {
 		return "", errors.New("no beads checkout named (make polecat-image BD_SRC=<checkout>)")
@@ -178,13 +173,19 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	}
 	rev, err := git(opt.Src, "rev-parse", "--verify", opt.Commit+"^{commit}")
 	if err != nil {
-		if _, fetchErr := git(opt.Src, "fetch", "--quiet", "origin", "main"); fetchErr != nil {
+		// A beads landing builds and installs bd at its own commit but never
+		// refreshes this checkout, so the installed bd's commit is often one
+		// the checkout has not fetched yet. Origin is fetched whole, on the
+		// refspecs it is configured with, because the commit may be on any of
+		// its branches; the fetch writes refs and objects only, and leaves the
+		// working tree and the checked-out branch alone.
+		if _, fetchErr := git(opt.Src, "fetch", "--quiet", "origin"); fetchErr != nil {
 			return "", fmt.Errorf("the beads checkout %s does not hold commit %s: %w\n  and fetching origin there failed: %v\n  fix: fetch it there by hand, or install a bd built from a commit the checkout holds", opt.Src, opt.Commit, err, fetchErr)
 		}
 		rev, err = git(opt.Src, "rev-parse", "--verify", opt.Commit+"^{commit}")
 	}
 	if err != nil {
-		return "", fmt.Errorf("the beads checkout %s does not hold commit %s: %w\n  fix: fetch it there, or install a bd built from a commit the checkout holds", opt.Src, opt.Commit, err)
+		return "", fmt.Errorf("the beads checkout %s still does not hold commit %s after fetching all of origin: %w\n  fix: install a bd built from a commit the checkout holds, or check that origin carries the commit", opt.Src, opt.Commit, err)
 	}
 	commit := strings.TrimSpace(string(rev))
 
