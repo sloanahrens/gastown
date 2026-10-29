@@ -103,8 +103,8 @@ type deepSeekCredit struct {
 // the days the report's per-day spend reads, and the runway.
 func deepSeekCostProvider(_ time.Time, spend json.RawMessage, _ *ClaudePlan, _ *CostCharts, _ *JevSpend) CostProvider {
 	p := CostProvider{ID: costProviderDeepSeek, Label: "DeepSeek", Kind: "cash", Status: "none"}
-	var d deepSeekSpend
-	if len(spend) == 0 || json.Unmarshal(spend, &d) != nil {
+	var d *deepSeekSpend
+	if len(spend) == 0 || json.Unmarshal(spend, &d) != nil || d == nil {
 		p.Why = "the spend report could not be read"
 		return p
 	}
@@ -294,7 +294,7 @@ func claudePlanUnreadWhy(plan *ClaudePlan, now time.Time) string {
 		return "the status line's samples could not be read"
 	case plan.SampledAt == 0:
 		return "the status line has written no samples yet"
-	case plan.WeeklyResetsAt != 0 && time.Unix(plan.WeeklyResetsAt, 0).Before(now):
+	case plan.WeeklyResetsAt != 0 && !time.Unix(plan.WeeklyResetsAt, 0).After(now):
 		return "the week the newest sample measures has already reset"
 	}
 	return "the newest sample is " + costDur(now.Sub(time.Unix(plan.SampledAt, 0)).Seconds()) + " old"

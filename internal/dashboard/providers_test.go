@@ -269,6 +269,7 @@ func TestCostProvidersUnavailableHasNilFiguresAndWhy(t *testing.T) {
 		claude,
 		stale,
 		deepSeekCostProvider(costProvidersNow, nil, nil, nil, nil),
+		deepSeekCostProvider(costProvidersNow, json.RawMessage("null"), nil, nil, nil),
 		jevCostProvider(costProvidersNow, nil, nil, nil, nil),
 	} {
 		if p.Why == "" {
