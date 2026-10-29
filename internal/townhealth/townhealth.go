@@ -502,8 +502,8 @@ type PersonWait struct {
 	// Label names the wait in the line and the pill: one of the person field
 	// names, FieldNeedsHuman, FieldNeedsOverseer or FieldNeedsOperator.
 	Label string
-	// Count is how many beads wait under that label. A bead carrying two
-	// person labels is reported once, so it is counted here only once.
+	// Count is how many beads wait under that label. The source reports a bead
+	// carrying two person labels once, under one of them.
 	Count int
 	// Oldest is when the oldest waiting bead was created; zero when no bead
 	// waits or its age is unknown.
