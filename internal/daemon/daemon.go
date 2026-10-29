@@ -1569,12 +1569,11 @@ func (d *Daemon) Run() (err error) {
 	var hmSyncTicker *time.Ticker
 	var hmSyncChan <-chan time.Time
 	if d.isPatrolActive("hm_sync") {
-		interval := hmSyncInterval(d.patrolConfig)
-		hmSyncTicker = time.NewTicker(shortPatrolCheckTick(interval))
-		hmSyncChan = hmSyncTicker.C
-		defer hmSyncTicker.Stop()
-		d.logger.Printf("HM sync ticker started (check every %v, run interval %v)",
-			shortPatrolCheckTick(interval), interval)
+		hmSyncTicker = d.startHMSyncTicker()
+		if hmSyncTicker != nil {
+			hmSyncChan = hmSyncTicker.C
+			defer hmSyncTicker.Stop()
+		}
 	}
 
 	// Start the scheduled_slings ticker if configured. Each tick evaluates

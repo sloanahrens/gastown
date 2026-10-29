@@ -192,8 +192,8 @@ func TestHMSyncDefaultsItsIntervalAndCommand(t *testing.T) {
 	}
 
 	d, _, f := hmSyncTestDaemon(t, hmSyncConfig(true, "", ""))
-	if got := hmSyncInterval(d.patrolConfig); got != hmSyncDefaultInterval {
-		t.Errorf("interval = %v, want the default %v", got, hmSyncDefaultInterval)
+	if got, err := hmSyncInterval(d.patrolConfig); err != nil || got != hmSyncDefaultInterval {
+		t.Errorf("interval = %v, %v, want the default %v and no error", got, err, hmSyncDefaultInterval)
 	}
 	if got := hmSyncCommand(d.patrolConfig); got != "hm" {
 		t.Errorf("command = %q, want hm", got)
@@ -202,6 +202,77 @@ func TestHMSyncDefaultsItsIntervalAndCommand(t *testing.T) {
 	d.runHMSync()
 	if len(f.calls) != 1 || f.calls[0].name != "hm" {
 		t.Fatalf("ran %v, want one hm sync", f.calls)
+	}
+}
+
+// TestHMSyncTickerStartsOnTheRunInterval: a setting the patrol can schedule
+// starts a check ticker some fraction of the run interval long, and the line it
+// logs says both.
+func TestHMSyncTickerStartsOnTheRunInterval(t *testing.T) {
+	t.Parallel()
+	d, logs, _ := hmSyncTestDaemon(t, hmSyncConfig(true, "30m", "hm"))
+
+	ticker := d.startHMSyncTicker()
+	if ticker == nil {
+		t.Fatal("no ticker for a 30m interval")
+	}
+	ticker.Stop()
+
+	if got, want := logs.String(), "HM sync ticker started (check every 5m0s, run interval 30m0s)\n"; got != want {
+		t.Errorf("logged %q, want %q", got, want)
+	}
+}
+
+// TestHMSyncTickerRefusedForAnIntervalItCannotSchedule: the config file's bad
+// interval is refused at decode, so this is the code-built one. It starts no
+// ticker and the one line it logs names the value, rather than a patrol that
+// never runs and never says why.
+func TestHMSyncTickerRefusedForAnIntervalItCannotSchedule(t *testing.T) {
+	t.Parallel()
+	d, logs, _ := hmSyncTestDaemon(t, hmSyncConfig(true, "half an hour", "hm"))
+
+	if ticker := d.startHMSyncTicker(); ticker != nil {
+		ticker.Stop()
+		t.Fatal("started a ticker for an interval the patrol cannot schedule")
+	}
+	got := logs.String()
+	if !strings.Contains(got, "not started") || !strings.Contains(got, `"half an hour"`) {
+		t.Errorf("logged %q, want one line naming the refused interval", got)
+	}
+}
+
+// TestHMSyncInvalidIntervalIsRefused: a config built in code with an interval
+// the patrol cannot schedule runs nothing and logs why, rather than reading the
+// bad value as the default and syncing on a cadence the town never asked for.
+// The config file's own refusal is the decoder's, driven in internal/config.
+func TestHMSyncInvalidIntervalIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, interval string }{
+		{"unparseable", "half an hour"},
+		{"zero", "0s"},
+		{"negative", "-5m"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs, f := hmSyncTestDaemon(t, hmSyncConfig(true, tt.interval, "hm"))
+
+			d.runHMSync()
+			if len(f.calls) != 0 {
+				t.Fatalf("ran %v, want no sync: %q is not an interval the patrol can schedule", f.calls, tt.interval)
+			}
+			got := logs.String()
+			if !strings.Contains(got, "hm_sync: not running") || !strings.Contains(got, tt.interval) {
+				t.Errorf("logged %q, want a refusal naming %q", got, tt.interval)
+			}
+
+			// A whole default interval later the setting is still refused: no
+			// tick may fall back to the default the town did not ask for.
+			f.now = f.now.Add(hmSyncDefaultInterval)
+			d.runHMSync()
+			if len(f.calls) != 0 {
+				t.Fatalf("ran %v a default interval later, want no sync", f.calls)
+			}
+		})
 	}
 }
 
@@ -341,6 +412,28 @@ func TestHMSyncProductionRunSeam(t *testing.T) {
 
 		if got := logs.String(); !strings.Contains(got, "no exit status") {
 			t.Errorf("logged %q, want a summary line saying there was no exit status", got)
+		}
+	})
+
+	// A sync the run timeout killed, or a shutdown stopped, never exits on its
+	// own: ExitCode reports -1 for it, and the summary line must say the sync
+	// was killed rather than print a status of -1.
+	t.Run("killed", func(t *testing.T) {
+		t.Parallel()
+		d, logs, _ := hmSyncTestDaemon(t, hmSyncConfig(true, "30m", "hm"))
+		d.hmSync.run = nil
+		d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) {
+			return nil, nil, exitErr(-1)
+		}
+
+		d.runHMSync()
+
+		got := logs.String()
+		if !strings.Contains(got, "hm sync: killed in ") {
+			t.Errorf("logged %q, want a summary line saying the sync was killed", got)
+		}
+		if strings.Contains(got, "exit -1") {
+			t.Errorf("logged %q: a killed sync has no exit status to report as -1", got)
 		}
 	})
 }

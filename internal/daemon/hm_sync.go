@@ -25,7 +25,8 @@ const (
 
 	// hmSyncDefaultInterval is the run interval when the town names none.
 	// config.HMSyncDefaultInterval is the same default as the config file
-	// spells it, and TestHMSyncDefaultsAgree holds the two together.
+	// spells it, and TestHMSyncDefaultsItsIntervalAndCommand holds the two
+	// together.
 	hmSyncDefaultInterval = 30 * time.Minute
 )
 
@@ -80,17 +81,24 @@ func hmSyncSettings(cfg *DaemonPatrolConfig) *HMSyncConfig {
 	return cfg.Patrols.HMSync
 }
 
-// hmSyncInterval returns how often the patrol runs. An empty setting is the
-// default rather than no schedule: a town that enabled the patrol without
-// repeating the default still gets one. Decoding refuses an interval the
-// patrol cannot use; this covers a config built in code.
-func hmSyncInterval(cfg *DaemonPatrolConfig) time.Duration {
-	if c := hmSyncSettings(cfg); c != nil && c.Interval != "" {
-		if every, err := time.ParseDuration(c.Interval); err == nil && every > 0 {
-			return every
-		}
+// hmSyncInterval returns how often the patrol runs, or the refusal for a
+// setting it cannot schedule. An empty setting is the default rather than no
+// schedule: a town that enabled the patrol without repeating the default still
+// gets one. A value that is not a positive Go duration is refused, never read
+// as the default: decoding refuses one from the config file, and this is the
+// same refusal for a config built in code, so a mistyped interval cannot put
+// the patrol on a cadence the town never asked for.
+func hmSyncInterval(cfg *DaemonPatrolConfig) (time.Duration, error) {
+	c := hmSyncSettings(cfg)
+	if c == nil || c.Interval == "" {
+		return hmSyncDefaultInterval, nil
 	}
-	return hmSyncDefaultInterval
+	every, err := time.ParseDuration(c.Interval)
+	if err != nil || every <= 0 {
+		return 0, fmt.Errorf("patrols.hm_sync.interval = %q: want a positive Go duration such as %q",
+			c.Interval, agentconfig.HMSyncDefaultInterval)
+	}
+	return every, nil
 }
 
 // hmSyncCommand returns the program the patrol runs, or the default when the
@@ -100,6 +108,24 @@ func hmSyncCommand(cfg *DaemonPatrolConfig) string {
 		return c.Command
 	}
 	return agentconfig.HMSyncDefaultCommand
+}
+
+// startHMSyncTicker starts the patrol's check ticker, or returns nil for a
+// setting it cannot schedule. The ticker only asks whether a sync is due, so
+// its cadence is a fraction of the run interval. A refused setting starts no
+// ticker and says why once, here: an interval the town cannot have is a config
+// error to read, not a patrol that quietly never runs.
+func (d *Daemon) startHMSyncTicker() *time.Ticker {
+	every, err := hmSyncInterval(d.patrolConfig)
+	if err != nil {
+		// runHMSync makes the same refusal on every tick, so a ticker that
+		// outlived this one could not start a sync either.
+		d.logger.Printf("HM sync patrol not started: %v", err)
+		return nil
+	}
+	tick := shortPatrolCheckTick(every)
+	d.logger.Printf("HM sync ticker started (check every %v, run interval %v)", tick, every)
+	return time.NewTicker(tick)
 }
 
 // runHMSync is the tick: it runs the configured program once per interval, off
@@ -112,9 +138,17 @@ func (d *Daemon) runHMSync() {
 	s := d.hmSyncSeamsOf()
 	now := s.now()
 
+	every, err := hmSyncInterval(d.patrolConfig)
+	if err != nil {
+		// A setting the patrol cannot schedule runs nothing: syncing on the
+		// default would use a cadence the town never asked for.
+		d.logger.Printf("hm_sync: not running: %v", err)
+		return
+	}
+
 	// Due-ness is measured from the end of the last sync, so a sync that takes
 	// most of an interval does not run back to back.
-	if last := d.hmSyncLastRunAt(); !last.IsZero() && now.Sub(last) < hmSyncInterval(d.patrolConfig) {
+	if last := d.hmSyncLastRunAt(); !last.IsZero() && now.Sub(last) < every {
 		return
 	}
 	if !d.hmSyncRunning.CompareAndSwap(false, true) {
@@ -158,14 +192,19 @@ func (d *Daemon) hmSyncContext() (context.Context, context.CancelFunc) {
 }
 
 // hmSyncStatus names the exit status of a sync, which is what the summary line
-// reports alongside the duration.
+// reports alongside the duration. ExitCode reports -1 for a command that never
+// exited on its own — one the run timeout killed, or one a shutdown stopped —
+// and that is a killed sync, not a status of -1.
 func hmSyncStatus(err error) string {
 	if err == nil {
 		return "exit 0"
 	}
 	var exit interface{ ExitCode() int }
 	if errors.As(err, &exit) {
-		return fmt.Sprintf("exit %d", exit.ExitCode())
+		if code := exit.ExitCode(); code >= 0 {
+			return fmt.Sprintf("exit %d", code)
+		}
+		return "killed"
 	}
 	return "no exit status"
 }
