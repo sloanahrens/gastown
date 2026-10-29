@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,10 +24,40 @@ import (
 )
 
 // Store is the seat token files under one town's runtime directory.
-type Store struct{ townRoot string }
+type Store struct {
+	townRoot string
+	files    tokenFiles
+}
 
 // New returns the store of the town rooted at townRoot.
-func New(townRoot string) *Store { return &Store{townRoot: townRoot} }
+func New(townRoot string) *Store { return &Store{townRoot: townRoot, files: osTokenFiles{}} }
+
+// tokenFiles is the file system a Store publishes a token through. New wires
+// the real one; a test substitutes one whose writes fail, to take each failure.
+type tokenFiles interface {
+	CreateTemp(dir, pattern string) (tempFile, error)
+	Link(oldname, newname string) error
+}
+
+// tempFile is the open temporary file a token is written to before it is linked.
+type tempFile interface {
+	io.StringWriter
+	io.Closer
+	Name() string
+}
+
+// osTokenFiles is the real file system.
+type osTokenFiles struct{}
+
+func (osTokenFiles) CreateTemp(dir, pattern string) (tempFile, error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func (osTokenFiles) Link(oldname, newname string) error { return os.Link(oldname, newname) }
 
 // Issuer mints a tracker token for the actor string of a seat: <rig>/<role>/<name>.
 type Issuer interface {
@@ -84,7 +115,7 @@ func (s *Store) Ensure(ctx context.Context, seat intent.Seat, issuer Issuer) (st
 	if err != nil {
 		return "", fmt.Errorf("seattoken: issue a token for %s: %w", seat.String(), err)
 	}
-	created, err := publishToken(path, value)
+	created, err := s.publishToken(path, value)
 	if err != nil {
 		return "", err
 	}
@@ -134,16 +165,11 @@ func (s *Store) seatDirs(seat intent.Seat) []string {
 }
 
 // makeSeatDirs creates each of dirs that is missing, outermost first, at 0700,
-// and requires every one to be a real directory once it is in place.
+// and requires every one to be a real directory once it is there. The create is
+// tried first, so a symlink or file already at a path is seen by the check and
+// never written through: nothing below a symlink is made.
 func makeSeatDirs(dirs []string) error {
 	for _, dir := range dirs {
-		exists, err := checkDir(dir)
-		if err != nil {
-			return err
-		}
-		if exists {
-			continue
-		}
 		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("seattoken: token directory: %w", err)
 		}
@@ -195,9 +221,9 @@ func readTokenFile(path string) (string, bool, error) {
 // fails when path already exists. A file at path is therefore never seen empty
 // or partly written. created reports whether this call published the file; the
 // temporary name is removed on every return.
-func publishToken(path, value string) (created bool, err error) {
+func (s *Store) publishToken(path, value string) (created bool, err error) {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".token-*")
+	tmp, err := s.files.CreateTemp(dir, ".token-*")
 	if err != nil {
 		return false, fmt.Errorf("seattoken: write token file in %s: %w", dir, err)
 	}
@@ -209,7 +235,7 @@ func publishToken(path, value string) (created bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("seattoken: write token file in %s: %w", dir, err)
 	}
-	switch err := os.Link(tmp.Name(), path); {
+	switch err := s.files.Link(tmp.Name(), path); {
 	case err == nil:
 		return true, nil
 	case errors.Is(err, fs.ErrExist):

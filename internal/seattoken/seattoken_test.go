@@ -429,6 +429,183 @@ func TestEnsureWithoutIssuer(t *testing.T) {
 	}
 }
 
+// A town root that does not exist cannot hold a runtime directory: Ensure
+// reports the failure and never asks the issuer.
+func TestEnsureNeedsAnExistingTownRoot(t *testing.T) {
+	t.Parallel()
+	store := New(filepath.Join(t.TempDir(), "missing"))
+	issuer := &fakeIssuer{token: seatToken}
+
+	if _, err := store.Ensure(context.Background(), testSeat(), issuer); err == nil {
+		t.Fatal("Ensure made a runtime directory under a town root that does not exist")
+	}
+	if len(issuer.actors) != 0 {
+		t.Errorf("issuer asked %d times, want none while the directory cannot be made", len(issuer.actors))
+	}
+}
+
+// A token file name the file system refuses is an error where it is read: the
+// stat fails for a reason other than absence, so Ensure neither reuses nor
+// replaces it.
+func TestEnsureRefusesANameTheFilesystemRefuses(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir())
+	seat := intent.Seat{Rig: "gastown", Role: "polecats", Name: strings.Repeat("n", 300)}
+	issuer := &fakeIssuer{token: seatToken}
+
+	if _, err := store.Ensure(context.Background(), seat, issuer); err == nil {
+		t.Fatal("Ensure succeeded with a token file name the file system refuses")
+	}
+	if len(issuer.actors) != 0 {
+		t.Errorf("issuer asked %d times, want none over a name it cannot stat", len(issuer.actors))
+	}
+}
+
+// Remove refuses a seat directory it cannot stat, rather than reporting the seat
+// as having no token while one may still be on disk.
+func TestRemoveRefusesADirectoryTheFilesystemRefuses(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir())
+	seat := intent.Seat{Rig: strings.Repeat("r", 300), Role: "polecats", Name: "cheedo"}
+	if err := os.MkdirAll(store.seatDirs(seat)[1], 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Remove(seat); err == nil {
+		t.Fatal("Remove reported success for a seat directory it could not stat")
+	}
+}
+
+// A token file that exists but cannot be read is an error, and the issuer is
+// not asked to replace it.
+func TestEnsureUnreadableTokenFile(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir())
+	path := store.Path(testSeat())
+	writeFile(t, path, seatToken+"\n")
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	issuer := &fakeIssuer{token: seatToken}
+
+	if _, err := store.Ensure(context.Background(), testSeat(), issuer); err == nil {
+		t.Fatal("Ensure read a token file it cannot read")
+	}
+	if len(issuer.actors) != 0 {
+		t.Errorf("issuer asked %d times, want none over a file it cannot read", len(issuer.actors))
+	}
+}
+
+// A seat directory the process cannot write to refuses the temporary file, so
+// no token file appears at the path.
+func TestEnsureRefusesAReadOnlySeatDirectory(t *testing.T) {
+	t.Parallel()
+	store := New(t.TempDir())
+	path := store.Path(testSeat())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	readOnly(t, filepath.Dir(path))
+
+	if _, err := store.Ensure(context.Background(), testSeat(), &fakeIssuer{token: seatToken}); err == nil {
+		t.Fatal("Ensure published a token into a directory that refuses writes")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("token file stat = %v, want no file after a refused publish", err)
+	}
+}
+
+// failingFiles is a tokenFiles whose temporary file or link fails as set.
+type failingFiles struct {
+	writeErr, closeErr, linkErr error
+}
+
+func (f failingFiles) CreateTemp(string, string) (tempFile, error) {
+	return failingTemp{writeErr: f.writeErr, closeErr: f.closeErr}, nil
+}
+
+func (f failingFiles) Link(string, string) error { return f.linkErr }
+
+// failingTemp is a temporary file whose write or close fails as set.
+type failingTemp struct {
+	writeErr, closeErr error
+}
+
+func (f failingTemp) WriteString(s string) (int, error) { return len(s), f.writeErr }
+func (f failingTemp) Close() error                      { return f.closeErr }
+func (f failingTemp) Name() string                      { return "" }
+
+// A failure while publishing refuses the launch: no token file is left at the
+// path, and the error does not carry the token.
+func TestEnsurePublishFailureLeavesNoFile(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		files   failingFiles
+		wantErr string
+	}{
+		{"the write fails", failingFiles{writeErr: errors.New("write fault")}, "write fault"},
+		{"the close fails", failingFiles{closeErr: errors.New("close fault")}, "close fault"},
+		{"the link fails", failingFiles{linkErr: errors.New("link not permitted")}, "link not permitted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := New(t.TempDir())
+			store.files = tc.files
+
+			path, err := store.Ensure(context.Background(), testSeat(), &fakeIssuer{token: seatToken})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Ensure error = %v, want it to name %q", err, tc.wantErr)
+			}
+			if path != "" {
+				t.Errorf("Ensure returned path %q with an error", path)
+			}
+			if strings.Contains(err.Error(), seatToken) {
+				t.Errorf("Ensure error = %q, want no token in it", err)
+			}
+			if _, statErr := os.Stat(store.Path(testSeat())); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Errorf("token file stat = %v, want no file after a failed publish", statErr)
+			}
+		})
+	}
+}
+
+// A rival launch that wins the publish race but leaves nothing usable at the
+// path makes this launch refuse: a file with no token, or a non-file, is not a
+// token to hand a seat.
+func TestEnsureRivalLeavesNoToken(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		rival func(path string) error
+	}{
+		{"an empty file", func(path string) error { return os.WriteFile(path, nil, 0o600) }},
+		{"a directory", func(path string) error { return os.Mkdir(path, 0o700) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := New(t.TempDir())
+			path := store.Path(testSeat())
+			issuer := issuerFunc(func(string) (string, error) {
+				if err := tc.rival(path); err != nil {
+					return "", err
+				}
+				return seatToken, nil
+			})
+
+			_, err := store.Ensure(context.Background(), testSeat(), issuer)
+			if err == nil {
+				t.Fatal("Ensure used the path a rival left without a token")
+			}
+			if strings.Contains(err.Error(), seatToken) {
+				t.Errorf("Ensure error = %q, want no token in it", err)
+			}
+		})
+	}
+}
+
 // readOnly makes dir refuse new and removed entries, and puts its mode back
 // before the test's cleanup walks the tree.
 func readOnly(t *testing.T, dir string) {
