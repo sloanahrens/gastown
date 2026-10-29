@@ -17,6 +17,14 @@ func vars(m map[string]string) func(string) string {
 	return func(key string) string { return m[key] }
 }
 
+// targetLine is the stdout a successful run prints for dir and its source; the
+// "would remove" half names what gt-tpg0p.62 removes, so a zero exit beside a
+// target line cannot read as a finished uninstall.
+func targetLine(dir, source string) string {
+	return "uninstall-gt: target " + dir + " (from " + source + "); would remove " +
+		filepath.Join(dir, "gt") + " and " + filepath.Join(dir, "bd") + "\n"
+}
+
 func TestMainUsage(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -83,19 +91,19 @@ func TestMainUsage(t *testing.T) {
 			args: []string{"--install-dir", binDir},
 			vars: map[string]string{"HOME": home, "INSTALL_DIR": home},
 			code: uninstallgt.ExitOK,
-			out:  "uninstall-gt: target " + binDir + " (from --install-dir)\n",
+			out:  targetLine(binDir, "--install-dir"),
 		},
 		{
 			name: "INSTALL_DIR is printed as the source",
 			vars: map[string]string{"HOME": home, "INSTALL_DIR": binDir},
 			code: uninstallgt.ExitOK,
-			out:  "uninstall-gt: target " + binDir + " (from $INSTALL_DIR)\n",
+			out:  targetLine(binDir, "$INSTALL_DIR"),
 		},
 		{
 			name: "the default is printed as the source",
 			vars: map[string]string{"HOME": home},
 			code: uninstallgt.ExitOK,
-			out:  "uninstall-gt: target " + filepath.Join(home, ".local", "bin") + " (from the default (HOME/.local/bin))\n",
+			out:  targetLine(filepath.Join(home, ".local", "bin"), "the default (HOME/.local/bin)"),
 		},
 	}
 	for _, tt := range tests {

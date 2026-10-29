@@ -44,9 +44,8 @@ func (r *Refusal) Error() string { return r.Reason }
 
 // Options is one run's command line.
 type Options struct {
-	// InstallDir is --install-dir: the directory gt and bd are removed from.
-	// Empty when the flag names nothing, and then Resolve reads the
-	// environment, as the flag given an empty value did.
+	// InstallDir is the directory --install-dir named, which Parse sets; empty
+	// means the flag named none, so Resolve reads the environment instead.
 	InstallDir string
 	// Force is --force: remove the live install of the town this clone belongs
 	// to anyway.
@@ -80,7 +79,8 @@ func Parse(args []string) (Options, error) {
 
 // Target is the directory a run removes from and what named it.
 type Target struct {
-	// Dir is the directory, with its trailing separators trimmed.
+	// Dir is the directory in filepath.Clean form: the spelling a run prints
+	// and removes from.
 	Dir string
 	// Source is what named Dir, one of the Source constants. A run prints it,
 	// so the directory is never implicit.
@@ -98,6 +98,11 @@ const (
 // Resolve returns the directory a run removes from and the source that named
 // it: --install-dir, else $INSTALL_GT_BIN_DIR, else $INSTALL_DIR, else
 // $HOME/.local/bin. A directory a run must not touch returns a *Refusal.
+//
+// The refusals compare canonical paths, not the spellings: "." and ".." inside
+// a path, a trailing slash and a symlink all name the same directory, and a
+// spelling that differs from the root or from HOME must be refused just the
+// same.
 //
 // $INSTALL_GT_BIN_DIR comes first because it is the gt installer's own name for
 // the directory, while $INSTALL_DIR is the Makefile's and the name a test or a
@@ -122,15 +127,20 @@ func Resolve(opts Options, getenv func(string) string) (Target, error) {
 		}
 	}
 	// The script names --install-dir in this message whichever source gave the
-	// path, and the value is the one before trimming.
+	// path, and the value is the one before any cleaning.
 	if !filepath.IsAbs(dir) {
 		return Target{}, &Refusal{Reason: "--install-dir must be an absolute path: '" + dir + "'"}
 	}
-	dir = trimTrailingSlashes(dir)
-	if dir == "/" {
+	dir = filepath.Clean(dir)
+	canonical := canonicalPath(dir)
+	if canonical == "/" {
 		return Target{}, &Refusal{Reason: "the filesystem root is not an install directory"}
 	}
-	if dir == home {
+	canonicalHome := filepath.Clean(home)
+	if filepath.IsAbs(canonicalHome) {
+		canonicalHome = canonicalPath(canonicalHome)
+	}
+	if canonical == canonicalHome {
 		return Target{}, &Refusal{Reason: "the home directory itself is not an install directory"}
 	}
 	// A path that is absent is not refused: the run reports it has nothing to
@@ -142,12 +152,16 @@ func Resolve(opts Options, getenv func(string) string) (Target, error) {
 	return Target{Dir: dir, Source: source}, nil
 }
 
-// trimTrailingSlashes drops the trailing separators of dir, leaving a lone "/"
-// alone: "//" must not become the empty string, and the live-install comparison
-// compares whole paths.
-func trimTrailingSlashes(dir string) string {
-	for len(dir) > 1 && strings.HasSuffix(dir, "/") {
-		dir = dir[:len(dir)-1]
+// canonicalPath returns the path a run compares: dir with its symlinks
+// resolved where it exists, and its cleaned form where it does not. Resolving
+// only an existing path keeps a target that is not there yet resolvable, and
+// catches a symlinked alias of the root or of HOME that would otherwise slip
+// past a refusal.
+func canonicalPath(dir string) string {
+	clean := filepath.Clean(dir)
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return clean
 	}
-	return dir
+	return resolved
 }

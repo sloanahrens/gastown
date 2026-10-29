@@ -169,6 +169,16 @@ func TestRefusalsTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	binDir := filepath.Join(base, "bin")
+	// A symlink names the same directory under another spelling, which is the
+	// alias a refusal must not miss.
+	homeLink := filepath.Join(base, "home-link")
+	if err := os.Symlink(home, homeLink); err != nil {
+		t.Fatal(err)
+	}
+	rootLink := filepath.Join(base, "root-link")
+	if err := os.Symlink("/", rootLink); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name string
@@ -196,9 +206,57 @@ func TestRefusalsTable(t *testing.T) {
 			want: "the filesystem root is not an install directory",
 		},
 		{
+			name: "the filesystem root as /.",
+			opts: Options{InstallDir: "/."},
+			vars: map[string]string{"HOME": home},
+			want: "the filesystem root is not an install directory",
+		},
+		{
+			name: "the filesystem root as /..",
+			opts: Options{InstallDir: "/.."},
+			vars: map[string]string{"HOME": home},
+			want: "the filesystem root is not an install directory",
+		},
+		{
+			name: "the filesystem root through a symlink",
+			opts: Options{InstallDir: rootLink},
+			vars: map[string]string{"HOME": home},
+			want: "the filesystem root is not an install directory",
+		},
+		{
 			name: "HOME itself",
 			opts: Options{InstallDir: home},
 			vars: map[string]string{"HOME": home},
+			want: "the home directory itself is not an install directory",
+		},
+		{
+			name: "HOME itself with a trailing slash",
+			opts: Options{InstallDir: home + "/"},
+			vars: map[string]string{"HOME": home},
+			want: "the home directory itself is not an install directory",
+		},
+		{
+			name: "HOME itself as $HOME/.",
+			opts: Options{InstallDir: home + "/."},
+			vars: map[string]string{"HOME": home},
+			want: "the home directory itself is not an install directory",
+		},
+		{
+			name: "HOME itself as $HOME/sub/..",
+			opts: Options{InstallDir: home + "/sub/.."},
+			vars: map[string]string{"HOME": home},
+			want: "the home directory itself is not an install directory",
+		},
+		{
+			name: "HOME itself through a symlink",
+			opts: Options{InstallDir: homeLink},
+			vars: map[string]string{"HOME": home},
+			want: "the home directory itself is not an install directory",
+		},
+		{
+			name: "HOME named with a trailing slash",
+			opts: Options{InstallDir: home},
+			vars: map[string]string{"HOME": home + "/"},
 			want: "the home directory itself is not an install directory",
 		},
 		{
@@ -278,6 +336,46 @@ func TestTrailingSlashesTrimmedButRootKept(t *testing.T) {
 	}
 }
 
+// TestHomeSubdirectoryPasses pins the other side of the HOME refusal: a
+// directory below HOME is an ordinary install directory, however it is spelled.
+func TestHomeSubdirectoryPasses(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	live := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range []string{live, live + "/", live + "/."} {
+		got, err := Resolve(Options{InstallDir: arg}, vars(map[string]string{"HOME": home}))
+		if err != nil {
+			t.Fatalf("Resolve(--install-dir %s) error = %v, want none", arg, err)
+		}
+		if got.Dir != live {
+			t.Errorf("Resolve(--install-dir %s) = %q, want %q", arg, got.Dir, live)
+		}
+	}
+	// A HOME spelled with a trailing slash names the same directory, so the
+	// refusal must still fire, and the default below it must still resolve.
+	slashed := map[string]string{"HOME": home + "/"}
+	if _, err := Resolve(Options{InstallDir: home}, vars(slashed)); err == nil {
+		t.Error("Resolve with HOME spelled home/ and --install-dir home = no error, want the HOME refusal")
+	}
+	got, err := Resolve(Options{}, vars(slashed))
+	if err != nil {
+		t.Fatalf("Resolve with HOME spelled home/: %v", err)
+	}
+	if got.Dir != live {
+		t.Errorf("Resolve with HOME spelled home/ = %q, want %q", got.Dir, live)
+	}
+}
+
+// TestNeverResolvesFromPATH pins the property the package exists for: no run
+// takes its target from what gt resolves to on PATH (gt-acdfp). A lookup would
+// have to ask the environment seam for PATH, so the seam records every name
+// Resolve asks for, and a PATH holding gt and bd must change neither the
+// directory nor the source. The two files are plain files, not executables: a
+// unit test may not create an executable (docs/testing.md, "The rules").
 func TestNeverResolvesFromPATH(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -289,18 +387,24 @@ func TestNeverResolvesFromPATH(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The files a PATH lookup would answer with. They are not executable
-	// because a unit test may not create an executable file (docs/testing.md,
-	// "The rules"); exec.LookPath still finds a non-executable file and
-	// reports it is not runnable, so resolving through PATH lands anywhere but
-	// the default below.
 	for _, name := range []string{"gt", "bd"} {
 		if err := os.WriteFile(filepath.Join(pathBin, name), []byte("not a program\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	got, err := Resolve(Options{}, vars(map[string]string{"HOME": home, "PATH": pathBin}))
+	var asked []string
+	getenv := func(key string) string {
+		asked = append(asked, key)
+		switch key {
+		case "HOME":
+			return home
+		case "PATH":
+			return pathBin
+		}
+		return ""
+	}
+	got, err := Resolve(Options{}, getenv)
 	if err != nil {
 		t.Fatalf("Resolve with gt and bd only on PATH: %v", err)
 	}
@@ -309,5 +413,10 @@ func TestNeverResolvesFromPATH(t *testing.T) {
 	}
 	if got.Source != SourceDefault {
 		t.Errorf("Resolve named the source %q, want %q", got.Source, SourceDefault)
+	}
+	for _, key := range asked {
+		if key == "PATH" {
+			t.Errorf("Resolve asked the environment for PATH, so a lookup is wired in; asked %q", asked)
+		}
 	}
 }
