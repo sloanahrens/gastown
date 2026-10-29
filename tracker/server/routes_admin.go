@@ -7,15 +7,76 @@ import (
 )
 
 // Authorization: any authenticated token may read configuration and statistics;
-// writing configuration needs an admin-scope token (a seat token gets a 403).
-// Admin tokens are held by the daemon and operators, never by a seat.
+// writing configuration, issuing a token and revoking one need an admin-scope
+// token (a seat token gets a 403). Admin tokens are held by the daemon and
+// operators, never by a seat.
 //
 // registerAdminRoutes registers the maintenance reads and the configuration
-// routes: GET /v1/stats?rig=, GET /v1/config/{key} and PUT /v1/config/{key}.
+// routes: GET /v1/stats?rig=, GET /v1/config/{key} and PUT /v1/config/{key};
+// and the token routes POST /v1/tokens (issue) and POST /v1/tokens:revoke, so
+// a caller can hand a seat its token without holding the database password.
 func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/stats", s.stats)
 	mux.HandleFunc("GET /v1/config/{key}", s.configGet)
 	mux.HandleFunc("PUT /v1/config/{key}", requireAdmin(s.configSet))
+	mux.HandleFunc("POST /v1/tokens", requireAdmin(s.issueToken))
+	mux.HandleFunc("POST /v1/tokens:revoke", requireAdmin(s.revokeTokens))
+}
+
+// issueToken creates a token for the actor and scope the body names and
+// answers it once: the token is in no log line and no metric, so the response
+// body is the only copy the tracker makes in the clear.
+func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
+	var req api.IssueTokenRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	scope := req.ScopeOrSeat()
+	token, err := s.cfg.Store.IssueTokenScoped(r.Context(), req.Actor, scope, nil)
+	if err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	writeJSON(w, http.StatusCreated, api.IssuedToken{Actor: req.Actor, Scope: scope, Token: token})
+}
+
+// revokeTokens ends every live token of the actor the body names, or the one
+// token it names by id: an actor with none is a success answering zero, while
+// an id that names none is a not_found, an exact reference that missed.
+func (s *Server) revokeTokens(w http.ResponseWriter, r *http.Request) {
+	var req api.RevokeTokensRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if req.Actor != "" {
+		n, err := s.cfg.Store.RevokeActorTokens(r.Context(), req.Actor)
+		if err != nil {
+			writeError(w, err, s.cfg.Log)
+			return
+		}
+		writeJSON(w, http.StatusOK, api.RevokeTokensResult{Revoked: n})
+		return
+	}
+	ok, err := s.cfg.Store.RevokeTokenID(r.Context(), req.TokenID)
+	if err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if !ok {
+		writeError(w, api.NotFound("token "+req.TokenID), s.cfg.Log)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.RevokeTokensResult{Revoked: 1})
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {

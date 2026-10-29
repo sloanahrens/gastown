@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/steveyegge/gastown/tracker/api"
 )
@@ -99,6 +100,19 @@ type Store interface {
 	ConfigGet(ctx context.Context, key string) (value string, ok bool, err error)
 	// ConfigSet sets a configuration key, replacing any earlier value.
 	ConfigSet(ctx context.Context, key, value string) error
+	// IssueTokenScoped creates a token for actor with scope, valid until
+	// expires (never, when nil), keeps its hash and returns it: this is the
+	// one time the token exists in the clear.
+	IssueTokenScoped(ctx context.Context, actor string, scope api.Scope, expires *time.Time) (string, error)
+	// Identify returns who token belongs to and its scope, or
+	// api.ErrUnknownToken when it is not known, was revoked or has expired.
+	Identify(ctx context.Context, token string) (api.Identity, error)
+	// RevokeActorTokens revokes every live token of actor and reports how many
+	// it ended; an actor with none is a success that ended zero.
+	RevokeActorTokens(ctx context.Context, actor string) (int, error)
+	// RevokeTokenID revokes the live token id names, reporting false when id
+	// names none that is live.
+	RevokeTokenID(ctx context.Context, id string) (bool, error)
 	// EventsAfter returns up to limit events with seq greater than after
 	// (limit 0 means the server's page size), oldest first.
 	EventsAfter(ctx context.Context, after int64, limit int) (api.EventsPage, error)

@@ -70,6 +70,49 @@ func TestUnknownRevokedAndExpiredTokensAreRefused(t *testing.T) {
 	}
 }
 
+// An issued token's id names exactly that row: revoking by id ends the one
+// token it names and leaves the actor's other token live, and an id that names
+// no live token is reported false rather than succeeded. The id is read from
+// the row, because no read of the API returns it.
+func TestRevokeTokenIDEndsOnlyThatToken(t *testing.T) {
+	t.Parallel()
+	pool := pgtest.New(t, "migrated")
+	pg := NewPostgres(pool)
+	ctx := context.Background()
+	revoked, err := pg.IssueToken(ctx, "town/crew/dipper", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := pg.IssueToken(ctx, "town/crew/dipper", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err := pool.QueryRow(ctx, "SELECT id::text FROM tracker.tokens WHERE token_hash = $1", HashToken(revoked)).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := pg.RevokeTokenID(ctx, id); err != nil || !ok {
+		t.Fatalf("RevokeTokenID = %v, %v; want true", ok, err)
+	}
+	if _, err := pg.ActorForToken(ctx, revoked); !errors.Is(err, api.ErrUnknownToken) {
+		t.Errorf("the token revoked by id = %v, want api.ErrUnknownToken", err)
+	}
+	if actor, err := pg.ActorForToken(ctx, kept); err != nil || actor != "town/crew/dipper" {
+		t.Errorf("the actor's other token = %q, %v; want it still live", actor, err)
+	}
+	if ok, err := pg.RevokeTokenID(ctx, id); err != nil || ok {
+		t.Errorf("revoking the same id twice = %v, %v; want false", ok, err)
+	}
+	for name, bad := range map[string]string{"not a uuid": "tok-nope", "no such uuid": "7f8d3c1e-0000-0000-0000-000000000000"} {
+		if ok, err := pg.RevokeTokenID(ctx, bad); err != nil || ok {
+			t.Errorf("RevokeTokenID(%s) = %v, %v; want false and no error", name, ok, err)
+		}
+	}
+	if _, err := pg.RevokeTokenID(ctx, ""); !errors.Is(err, api.ErrInvalid) {
+		t.Errorf("RevokeTokenID with no id = %v, want api.ErrInvalid", err)
+	}
+}
+
 func TestPingAndWriteProbeSucceedOnAPrimaryAndFailOnADeadPool(t *testing.T) {
 	t.Parallel()
 	pool := pgtest.New(t, "migrated")
