@@ -2,6 +2,8 @@ package rig
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -77,5 +79,31 @@ func TestStampRigDoltEndpoint(t *testing.T) {
 	none := &recordingConfigSetter{}
 	if w := stampRigDoltEndpoint(none, config.DoltEndpoint{}, false); len(w) != 0 || len(none.set) != 0 {
 		t.Errorf("no endpoint: set %v, warnings %v; want nothing", none.set, w)
+	}
+}
+
+// A rig's config.yaml is shared with the Mac through the town bind mount, so
+// the endpoint stamped into it ignores dolt.container_host even in a process
+// that runs in the container, where the live resolver swaps it in
+// (gt-qpeei.17). Not parallel: it sets the process environment.
+func TestPersistedDoltEndpointIgnoresTheContainerHost(t *testing.T) {
+	root := t.TempDir()
+	town := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z",` +
+		`"dolt":{"host":"127.0.0.2","container_host":"host.docker.internal","port":5507}}`
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(town), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.ContainerModeEnv, config.SupervisorContainer)
+
+	live, ok := config.ResolveDoltEndpoint(root)
+	if !ok || live.Host != "host.docker.internal" {
+		t.Fatalf("the live resolver in container mode = %+v (ok %v), want the container host: the control for this test", live, ok)
+	}
+	got, ok := persistedDoltEndpoint(root)
+	if !ok || got.Host != "127.0.0.2" || got.Port != 5507 {
+		t.Errorf("persistedDoltEndpoint = %+v (ok %v), want dolt.host 127.0.0.2 and port 5507 whatever the process mode", got, ok)
 	}
 }

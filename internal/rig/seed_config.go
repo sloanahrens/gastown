@@ -37,6 +37,16 @@ func seedRigDatabaseConfig(bd configSetter, setPrefix func(prefix string) error,
 	return warnings
 }
 
+// persistedDoltEndpoint is the endpoint a rig's untracked .beads/config.yaml
+// records. The town root is bind-mounted into the daemon's container, so a file
+// written by a process running there is read by the Mac too: it must name the
+// endpoint every non-container process uses (dolt.host), never
+// dolt.container_host, which only resolves from inside the container
+// (gt-qpeei.17).
+func persistedDoltEndpoint(townRoot string) (config.DoltEndpoint, bool) {
+	return config.ResolveDoltEndpointFor(townRoot, false)
+}
+
 // stampRigDoltEndpoint writes the town's Dolt endpoint into a new rig's
 // .beads/config.yaml through bd config set (gt-y3pgh.3, D1), so bd finds
 // the server from the rig's own config without gt's environment. A town
