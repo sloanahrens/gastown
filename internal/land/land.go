@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1439,6 +1440,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		verdict = Verdict{Verdict: VerdictOverseerPrefix + shortSHA(w.Head)}
 		l.logf("%s: %s, om skipped (overseer-reviewed)", w.BeadID, stageTimes(gateRes, 0, false))
 	} else {
+		// A landing that edits the root .om.json changes the bar om judges
+		// the head against, so its head waits for the overseer before om runs
+		// (gt-93hf4). A waived head skipped this branch above.
+		if rej := l.omConfigRejection(g, base, merged, w.Head, w.BeadID); rej != nil {
+			return Result{}, l.reject(issue, w, rej, nil)
+		}
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
 		accepted, used := l.acceptedRisks(w.BeadID)
@@ -1781,6 +1788,36 @@ func policyRejection(issue *beads.Issue) *Rejection {
 		return &Rejection{Kind: RejectPolicy, Rework: true, Reason: fmt.Sprintf("%d unchecked acceptance criteria", n)}
 	}
 	return nil
+}
+
+// omConfigRejection refuses a landing whose merge edits the root .om.json, the
+// config om reviews under: its rubric, context, depth and threshold keys set
+// the bar om judges the head against, so the head waits for the overseer's
+// review of that head (the OVERSEER REVIEWED waiver) before om runs (gt-93hf4).
+// Only the root file counts; a nested file of that name is not the review
+// config. A diff that cannot be read is refused too: a diff nobody read cannot
+// be shown to leave the config alone (fail closed). The git error is logged,
+// not written into the refusal, since git's stderr is captured command output.
+func (l *Lander) omConfigRejection(g Repo, base, merged, head, beadID string) *Rejection {
+	paths, err := g.DiffNameOnly(base, merged)
+	if err != nil {
+		l.logf("%s: reading the paths this landing changes for the %s check: %v", beadID, omConfigFile, err)
+		return omConfigRefusal("the paths this landing changes could not be read, so it cannot be shown to leave "+omConfigFile+" alone", head)
+	}
+	if !slices.Contains(paths, omConfigFile) {
+		return nil
+	}
+	return omConfigRefusal("this landing edits "+omConfigFile+", the config om reviews under", head)
+}
+
+// omConfigRefusal is the policy refusal for a head that waits on the overseer.
+// Rework is false: the author's branch is not what is wrong, so no rework
+// round is spent, and the bead goes to gt:needs-overseer for the overseer to
+// review the head and write the waiver line the reason quotes.
+func omConfigRefusal(what, head string) *Rejection {
+	return &Rejection{Kind: RejectPolicy, Rework: false, Reason: fmt.Sprintf(
+		"%s; the overseer must review head %s before om runs: to waive that review, the overseer writes the note %q and adds the %s label",
+		what, head, OverseerReviewedMarker+" "+head, LabelOverseerReviewed)}
 }
 
 // checkHeadPushed asserts <remote>/<branch> — the rig's configured landing
