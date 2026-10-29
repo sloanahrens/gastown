@@ -141,8 +141,13 @@ type Options struct {
 // Compile writes opt.Out (resolved to an absolute path, so it survives the
 // worktree's removal) built from opt.Commit in a clean worktree of opt.Src,
 // and returns the commit's full sha. The commit is read from the checkout's
-// object store and nothing is fetched, so one the checkout does not hold is
-// refused with a message naming it. The worktree is removed afterwards.
+// object store. A beads landing builds and installs bd at its own commit but
+// never refreshes this checkout, so the installed bd's commit is often one the
+// checkout has not fetched yet; when the object is missing Compile fetches the
+// checkout's origin once (a fetch only: the working tree and branch are not
+// touched) and looks again, and a commit still missing, or a fetch that fails,
+// is refused with a message naming it (gt-pme82). A commit already present is
+// never fetched for. The worktree is removed afterwards.
 func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	if opt.Src == "" {
 		return "", errors.New("no beads checkout named (make polecat-image BD_SRC=<checkout>)")
@@ -160,6 +165,12 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 		return "", fmt.Errorf("cannot resolve the bd output path %q: %w", opt.Out, err)
 	}
 	rev, err := git(opt.Src, "rev-parse", "--verify", opt.Commit+"^{commit}")
+	if err != nil {
+		if _, fetchErr := git(opt.Src, "fetch", "--quiet", "origin", "main"); fetchErr != nil {
+			return "", fmt.Errorf("the beads checkout %s does not hold commit %s: %w\n  and fetching origin there failed: %v\n  fix: fetch it there by hand, or install a bd built from a commit the checkout holds", opt.Src, opt.Commit, err, fetchErr)
+		}
+		rev, err = git(opt.Src, "rev-parse", "--verify", opt.Commit+"^{commit}")
+	}
 	if err != nil {
 		return "", fmt.Errorf("the beads checkout %s does not hold commit %s: %w\n  fix: fetch it there, or install a bd built from a commit the checkout holds", opt.Src, opt.Commit, err)
 	}
