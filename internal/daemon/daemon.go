@@ -2814,15 +2814,69 @@ func settleFreeDaemonLock(pidFile string, release func() error) {
 	_ = release()
 }
 
+// containerTown reports whether townRoot's daemon runs in a container. A
+// readable daemon.supervisor naming container says so, and one naming any other
+// kind says it does not. A town that sets no kind is not a container town and
+// takes the host path it had before this check existed (gt-qpeei.19).
+//
+// A setting that cannot be read, or names a kind this binary does not know,
+// cannot say either way, and both answers fail somewhere: reading it as a host
+// kind lets a container town's stop signal a pid from another namespace, and
+// reading it as a container refuses every host town its stop over a settings
+// file the stop never needed. The compose file a container town's supervisor
+// drives does not depend on the settings, so it decides: a town with the file
+// may be a container town and is treated as one, and a town without it is a
+// host town and keeps the host path (config.MayBeContainerTown).
+//
+// Even then a host path is not a license to signal a container's PID: the
+// signal still runs through verifyGTDaemonPID, which proves the process is this
+// town's `gt daemon run` on this host. The cmd layer reads the kind to decide
+// the direct signal itself and refuses it on an unreadable setting (gt-qpeei.10).
+func containerTown(townRoot string) bool {
+	cfg, err := ReadPatrolConfig(townRoot)
+	if err != nil {
+		return agentconfig.MayBeContainerTown(townRoot)
+	}
+	kind, err := cfg.SupervisorKind()
+	if err != nil {
+		return agentconfig.MayBeContainerTown(townRoot)
+	}
+	return kind == agentconfig.SupervisorContainer
+}
+
 // IsRunning checks if a daemon is running for the given town.
 // Uses the daemon.lock flock as the authoritative signal — if the lock is held,
 // the daemon is running. Falls back to PID file for the process ID.
 // This avoids fragile ps string matching for process identity (ZFC fix: gt-utuk).
+//
+// A town whose daemon.supervisor is container runs its daemon in another
+// namespace, where a pid means nothing here: the answer still comes from the
+// lock, but the PID is always 0 and the pid file is never consulted
+// (gt-qpeei.19).
+//
+// A running container town answers (true, 0): 0 is not a daemon PID here, and
+// as a signal target it names this process group, so a caller that gets it
+// must not signal it.
 func IsRunning(townRoot string) (bool, int, error) {
+	return isRunningOn(townRoot, containerTown(townRoot), probeDaemonLock)
+}
+
+// isRunningOn is IsRunning on the container answer and the lock probe the
+// caller supplies. The container town's pid refusal has to hold when the probe
+// fails as well, so a test drives that branch with a probe that returns an
+// error; StopDaemon passes the answer it already read, so the town's settings
+// are read once on that path.
+func isRunningOn(townRoot string, container bool, probe func(lockPath string) (bool, *flock.Flock, error)) (bool, int, error) {
 	// Primary check: is the daemon lock held?
 	lockPath := filepath.Join(townRoot, "daemon", "daemon.lock")
-	held, probeLock, err := probeDaemonLock(lockPath)
+	held, probeLock, err := probe(lockPath)
 	if err != nil {
+		if container {
+			// The pid-file fallback is the one place a pid for another
+			// namespace could come from, so a container town has none:
+			// the unreadable lock is reported instead (gt-qpeei.19).
+			return false, 0, fmt.Errorf("checking %s: %w", lockPath, err)
+		}
 		// Can't check lock — fall back to PID file + signal check
 		return isRunningFromPID(townRoot)
 	}
@@ -2836,6 +2890,14 @@ func IsRunning(townRoot string) (bool, int, error) {
 			settleFreeDaemonLock(pidFile, probeLock.Unlock)
 		}
 		return false, 0, nil
+	}
+
+	// A container town's daemon runs in another namespace and writes no pid
+	// file at all (gt-qpeei.12), so whatever daemon.pid holds is stale and
+	// names a process on this host only by accident. The lock still answers
+	// that the daemon runs; the pid stays unknown (gt-qpeei.19).
+	if container {
+		return true, 0, nil
 	}
 
 	// Lock is held — daemon is running. Read PID from file.
@@ -2946,11 +3008,47 @@ func (w *daemonStopWait) awaitExit(grace time.Duration) bool {
 	return true
 }
 
+// errContainerStopDaemon is StopDaemon's refusal for a container town. The
+// daemon it would signal runs in the container's namespace, where a pid names
+// nothing on this host, so the stop is the supervisor's and never a signal.
+var errContainerStopDaemon = errors.New("refusing to stop the daemon with a signal: this town's daemon runs, or may run, under the container supervisor (daemon.supervisor is container, or the setting cannot be read and the town has a container compose file), so no PID on this host is known to be it; stop it through that supervisor instead")
+
+// daemonStopSignals is the pair of signals StopDaemon sends the daemon's
+// process. It is a field set so a test can supply a fake and prove a refusal
+// never reaches one.
+type daemonStopSignals struct {
+	term func(*os.Process) error
+	kill func(*os.Process) error
+}
+
+// hostDaemonStopSignals is the pair the real machine sends.
+func hostDaemonStopSignals() daemonStopSignals {
+	return daemonStopSignals{term: sendTermSignal, kill: sendKillSignal}
+}
+
 // StopDaemon stops the running daemon for the given town.
 // Note: The file lock in Run() prevents multiple daemons per town, so we only
 // need to kill the process from the PID file.
 func StopDaemon(townRoot string) error {
-	running, pid, err := IsRunning(townRoot)
+	return stopDaemonWith(townRoot, hostDaemonStopSignals())
+}
+
+// stopDaemonWith is StopDaemon on the signals the caller supplies.
+func stopDaemonWith(townRoot string, sigs daemonStopSignals) error {
+	// The kind comes first, and the refusal is unconditional: a container
+	// town's daemon is not a process on this host at all, and neither file
+	// can say otherwise — daemon.lock's flock does not cross a Docker Desktop
+	// bind mount, and daemon.pid names a process in the container's
+	// namespace. Answering "not running" here would be a claim about the
+	// container this has no evidence for, and answering with the lock's PID
+	// is how a host process gets signaled in the container's place
+	// (gt-qpeei.19).
+	container := containerTown(townRoot)
+	if container {
+		return errContainerStopDaemon
+	}
+
+	running, pid, err := isRunningOn(townRoot, container, probeDaemonLock)
 	if err != nil {
 		return err
 	}
@@ -2989,7 +3087,7 @@ func StopDaemon(townRoot string) error {
 	}
 
 	// Send termination signal for graceful shutdown
-	if err := sendTermSignal(process); err != nil {
+	if err := sigs.term(process); err != nil {
 		removeStopRequested(townRoot)
 		return fmt.Errorf("sending termination signal: %w", err)
 	}
@@ -3006,7 +3104,7 @@ func StopDaemon(townRoot string) error {
 		// Re-verified: the PID may have exited and been reused during the
 		// wait (gt-p7zy0).
 		verify: func() error { return verifyGTDaemonPID(townRoot, pid) },
-		kill:   func() error { return sendKillSignal(process) },
+		kill:   func() error { return sigs.kill(process) },
 	}).run()
 
 	return finishStopDaemon(townRoot, pid, gone)
