@@ -79,7 +79,11 @@ func TestRevokeTokenIDEndsOnlyThatToken(t *testing.T) {
 	pool := pgtest.New(t, "migrated")
 	pg := NewPostgres(pool)
 	ctx := context.Background()
-	revoked, err := pg.IssueToken(ctx, "town/crew/dipper", nil)
+	// The revoked token is the only one of the actor's with an expiry, so its
+	// row is named by that rather than by its hash. The expiry is in the future,
+	// so the token is live until it is revoked.
+	future := time.Now().Add(time.Hour)
+	revoked, err := pg.IssueToken(ctx, "town/crew/dipper", &future)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +92,7 @@ func TestRevokeTokenIDEndsOnlyThatToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	var id string
-	if err := pool.QueryRow(ctx, "SELECT id::text FROM tracker.tokens WHERE token_hash = $1", HashToken(revoked)).Scan(&id); err != nil {
+	if err := pool.QueryRow(ctx, "SELECT id::text FROM tracker.tokens WHERE actor = $1 AND expires_at IS NOT NULL", "town/crew/dipper").Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := pg.RevokeTokenID(ctx, id); err != nil || !ok {
