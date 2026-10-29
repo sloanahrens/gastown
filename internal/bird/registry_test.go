@@ -577,6 +577,148 @@ func TestRecordRefusesAnAgentThatCannotHoldAName(t *testing.T) {
 	}
 }
 
+func TestClaimRefusesANameALiveSessionHolds(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	reg.ProcStart = starts(map[int]string{10: "tok10", 11: "tok11"})
+	claimed, err := reg.Claim(Agent{Name: "wren", PID: 10, Start: "tok10"})
+	if err != nil || !claimed {
+		t.Fatalf("the first Claim = %v, %v, want the name taken", claimed, err)
+	}
+	claimed, err = reg.Claim(Agent{Name: "wren", PID: 11, Start: "tok11"})
+	if err != nil {
+		t.Fatalf("the second Claim: %v", err)
+	}
+	if claimed {
+		t.Error("the second Claim took a name a live session holds")
+	}
+	st, err := reg.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(st.Agents) != 1 || st.Agents[0].PID != 10 {
+		t.Errorf("agents = %+v, want only the session that took the name", st.Agents)
+	}
+}
+
+// TestClaimRefusesANameAnotherLaunchReserved pins that a reservation holds its
+// name against a claim: a name Pick handed out to one launch is not free for
+// another to claim before that launch binds it.
+func TestClaimRefusesANameAnotherLaunchReserved(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	if _, err := reg.Pick(); err != nil {
+		t.Fatalf("Pick: %v", err)
+	}
+	reg.ProcStart = starts(map[int]string{11: "tok11"})
+
+	claimed, err := reg.Claim(Agent{Name: "wren", PID: 11, Start: "tok11"})
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if claimed {
+		t.Error("Claim took the name a live reservation holds")
+	}
+}
+
+func TestClaimTakesANameWhoseSessionHasExited(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	seedAgent(t, reg, Agent{Name: "wren", PID: 10, Start: "tok10", Started: at(0)})
+	reg.ProcStart = starts(map[int]string{11: "tok11"})
+
+	claimed, err := reg.Claim(Agent{Name: "wren", PID: 11, Start: "tok11"})
+	if err != nil || !claimed {
+		t.Fatalf("Claim = %v, %v, want the name of an exited session", claimed, err)
+	}
+	if got, _ := reg.Load(); len(got.Agents) != 1 || got.Agents[0].PID != 11 {
+		t.Errorf("agents = %+v, want the new session replacing the dead one", got.Agents)
+	}
+}
+
+// TestClaimLetsASessionResumeABoundName pins the reason a binding is not a
+// claim: the session that resumes a bead runs under the name the bead is bound
+// to, which no process holds until that session starts.
+func TestClaimLetsASessionResumeABoundName(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry(t, "wren")
+	if err := reg.Update(func(st *State) error {
+		st.Bind("wren", "gt-a", at(0))
+		return nil
+	}); err != nil {
+		t.Fatalf("seeding the binding: %v", err)
+	}
+	reg.ProcStart = starts(map[int]string{10: "tok10"})
+
+	claimed, err := reg.Claim(Agent{Name: "wren", PID: 10, Start: "tok10", Bead: "gt-a"})
+	if err != nil || !claimed {
+		t.Fatalf("Claim of the bound name = %v, %v, want it taken by the resuming session", claimed, err)
+	}
+}
+
+// TestClaimFailsWhenTheRegistryCannotBeReadOrWritten drives the two failures a
+// claim answers with rather than guessing: a process table that will not say
+// whether a name is held, and a state file that will not take the record.
+func TestClaimFailsWhenTheRegistryCannotBeReadOrWritten(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		set  func(*Registry)
+	}{
+		{name: "a process table that cannot be read", set: func(reg *Registry) {
+			seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok10"})
+			reg.ProcStart = func(int) (string, bool, error) {
+				return "", false, errors.New("the process table is unreadable")
+			}
+		}},
+		{name: "a state file that cannot be written", set: func(reg *Registry) {
+			reg.Write = func(string, any) error { return errors.New("the state file is not writable") }
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := testRegistry(t, "wren")
+			tc.set(reg)
+			claimed, err := reg.Claim(Agent{Name: "wren", PID: 11, Start: "tok11"})
+			if err == nil {
+				t.Fatalf("Claim = %v, want the registry's failure", claimed)
+			}
+			if claimed {
+				t.Error("Claim reported a name it could not record")
+			}
+		})
+	}
+}
+
+func TestClaimRefusesANameNoSessionCouldUse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		agent Agent
+		want  error
+	}{
+		{name: "a name no session could use", agent: Agent{Name: "not a name", PID: 10}, want: ErrInvalidName},
+		{name: "a record with no pid", agent: Agent{Name: "wren"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := testRegistry(t, "wren")
+			claimed, err := reg.Claim(tc.agent)
+			if err == nil {
+				t.Fatalf("Claim(%+v) = %v, want the claim refused", tc.agent, claimed)
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Errorf("Claim(%+v) = %v, want %v", tc.agent, err, tc.want)
+			}
+			if st, loadErr := reg.Load(); loadErr != nil || len(st.Agents) != 0 {
+				t.Errorf("agents = %+v, %v; want nothing written for a refused claim", st, loadErr)
+			}
+		})
+	}
+}
+
 func TestBindRefusesANameNoSessionCouldUse(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren")

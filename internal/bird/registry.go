@@ -230,6 +230,62 @@ func (r *Registry) Record(a Agent) error {
 	})
 }
 
+// Claim records a as the agent holding its name, writing it only when no
+// running process and no live reservation holds that name, and reports whether
+// it took it (gt-qipl5). The check and the write are one pass under the lock,
+// so two launches racing for a name leave one winner; the loser asks Plan again
+// for a free name. A binding does not refuse a claim: see State.HeldLive.
+//
+// A recorded agent whose process is gone is pruned first, since its name is
+// free. A zero Started is stamped from the registry's clock.
+func (r *Registry) Claim(a Agent) (bool, error) {
+	if !ValidName(a.Name) {
+		return false, fmt.Errorf("claiming %q: %w", a.Name, ErrInvalidName)
+	}
+	if a.PID <= 0 {
+		return false, fmt.Errorf("claiming the agent %q: a bird holds a name through the pid that runs it", a.Name)
+	}
+	if a.Started.IsZero() {
+		a.Started = r.now()
+	}
+	var claimed bool
+	err := r.mutate(func(st *State) (bool, error) {
+		now := r.now()
+		ttl := r.ttl()
+		dropped, err := st.PruneDead(r.Live)
+		if err != nil {
+			return false, err
+		}
+		dropped += st.PruneReservations(now, ttl)
+		if st.HeldLive(now, ttl)[a.Name] {
+			// The prune is still a write worth keeping: it drops the dead
+			// session whose name the loser may have asked for.
+			return dropped > 0, nil
+		}
+		st.SetAgent(a)
+		claimed = true
+		return true, nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return claimed, nil
+}
+
+// Unclaim undoes a launch whose exec failed, so the name does not read as held
+// by a session that never ran: it drops the record of name held by pid, and the
+// binding of name to bead when bound says the launch added that binding. A
+// binding that was there before stays, since a session ran the bead under it.
+func (r *Registry) Unclaim(name string, pid int, bead string, bound bool) error {
+	return r.Update(func(st *State) error {
+		st.DropAgent(name, pid)
+		if bound {
+			st.Unbind(name, bead)
+		}
+		return nil
+	})
+}
+
 // Bound returns the newest name bound to bead.
 func (r *Registry) Bound(bead string) (string, bool, error) {
 	st, err := r.Load()

@@ -72,6 +72,7 @@ var beadsExemptCommands = map[string]bool{
 	"tail":        true, // Read-only stream; reports an unreachable bd per rig and continues
 	"report":      true, // Read-only summary; reports an unreachable bd per section and exits 0
 	"notify":      true, // Reads escalation config only; the pager test must work when bd does not
+	"bird":        true, // Starts claude, which must work when bd is missing or outdated (gt-qipl5)
 }
 
 // Commands exempt from the town root branch warning.
@@ -87,6 +88,7 @@ var branchCheckExemptCommands = map[string]bool{
 	"kill-all":    true, // Kill-all must always work
 	"install":     true, // Initial setup
 	"scheduler":   true, // Daemon hot path; scheduler handles beads internally
+	"bird":        true, // Runs claude; a branch warning before every session is noise (gt-qipl5)
 }
 
 // persistentPreRun runs before every command.
