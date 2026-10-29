@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -129,6 +131,66 @@ func TestBuildLandingsUnreadableCommitIsFlaggedNotZeroed(t *testing.T) {
 	want := DroppedItem{Source: "git:gastown", Reason: "unreadable diff for gt-3"}
 	if dropped.Items[0] != want {
 		t.Errorf("dropped.Items[0] = %+v, want %+v", dropped.Items[0], want)
+	}
+}
+
+// failingDiffSource reads every commit as the same error, which is not
+// ErrDiffUnavailable: a diff that failed, not one that cannot be read.
+type failingDiffSource struct{ err error }
+
+func (f failingDiffSource) Stats(_ context.Context, _, _ string) (DiffStat, error) {
+	return DiffStat{}, f.err
+}
+
+func TestBuildLandingsDiffErrorOtherThanUnavailableFails(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	rows, err := BuildLandings(context.Background(), tablesLedger, tablesRework, failingDiffSource{err: boom},
+		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, &Dropped{})
+	if err == nil {
+		t.Fatal("BuildLandings: no error, want the diff's error to stop the build")
+	}
+	if rows != nil {
+		t.Errorf("BuildLandings rows = %v, want nil with an error", rows)
+	}
+	if !strings.Contains(err.Error(), "gt-1") {
+		t.Errorf("error = %q, want it to name the bead gt-1", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("error = %q, want it to wrap the cause", err)
+	}
+}
+
+func TestBuildLandingsBadLandedAtFails(t *testing.T) {
+	t.Parallel()
+	// No eras: EraOf never reads the timestamp, so only WeekOf can fail here.
+	ledger := []LedgerRow{{Bead: "gt-9", Rig: "gastown", LandedCommit: "c1", LandedAt: "not-a-time", Route: "daemon"}}
+	rows, err := BuildLandings(context.Background(), ledger, tablesRework, fakeDiffSource{},
+		tablesBeads(), tablesUsage, tablesOverrun, nil, tablesShaped, &Dropped{})
+	if err == nil {
+		t.Fatal("BuildLandings: no error for an unparsable landed_at")
+	}
+	if rows != nil {
+		t.Errorf("BuildLandings rows = %v, want nil with an error", rows)
+	}
+	if !strings.Contains(err.Error(), "gt-9") {
+		t.Errorf("error = %q, want it to name the bead gt-9", err)
+	}
+}
+
+func TestBuildLandingsBadEraStartFails(t *testing.T) {
+	t.Parallel()
+	eras := map[string][]OMEra{"gastown": {{Start: "not-a-time", Threshold: 0.7}}}
+	rows, err := BuildLandings(context.Background(), tablesLedger[:1], tablesRework, fakeDiffSource{},
+		tablesBeads(), tablesUsage, tablesOverrun, eras, tablesShaped, &Dropped{})
+	if err == nil {
+		t.Fatal("BuildLandings: no error for an unparsable era start")
+	}
+	if rows != nil {
+		t.Errorf("BuildLandings rows = %v, want nil with an error", rows)
+	}
+	if !strings.Contains(err.Error(), "gt-1") {
+		t.Errorf("error = %q, want it to name the bead gt-1", err)
 	}
 }
 
