@@ -50,7 +50,7 @@ Every check runs before the first command, so a refusal runs nothing.`,
 // runs goes through run or exec, so a test records the whole sequence and no
 // process starts. runDaemonContainerEntrypoint wires the real ones.
 type containerEntrypoint struct {
-	self      string                    // the gt binary, argv[0] of each command it runs
+	self      func() (string, error)    // the gt binary's path, argv[0] of each command it runs
 	getenv    func(key string) string   // the environment
 	run       func(argv []string) error // runs a command and waits for it
 	exec      func(argv []string) error // replaces this process; returns only on error
@@ -60,41 +60,47 @@ type containerEntrypoint struct {
 }
 
 func runDaemonContainerEntrypoint(cmd *cobra.Command, args []string) error {
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("find the gt binary to exec: %w", err)
-	}
 	return runContainerEntrypoint(containerEntrypoint{
-		self:   self,
-		getenv: os.Getenv,
-		run:    runEntrypointCommand,
-		exec:   execEntrypointArgv,
-		mountinfo: func() (string, error) {
-			b, err := os.ReadFile(containerMountinfo)
-			return string(b), err
-		},
-		dirNames: func(dir string) ([]string, error) {
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				return nil, err
-			}
-			names := make([]string, 0, len(entries))
-			for _, entry := range entries {
-				names = append(names, entry.Name())
-			}
-			return names, nil
-		},
-		exists: func(path string) (bool, error) {
-			_, err := os.Stat(path)
-			if err == nil {
-				return true, nil
-			}
-			if errors.Is(err, os.ErrNotExist) {
-				return false, nil
-			}
-			return false, err
-		},
+		self:      os.Executable,
+		getenv:    os.Getenv,
+		run:       runEntrypointCommand,
+		exec:      execEntrypointArgv,
+		mountinfo: func() (string, error) { return readTextFile(containerMountinfo) },
+		dirNames:  listDirNames,
+		exists:    entrypointPathExists,
 	})
+}
+
+// readTextFile returns the text of one file.
+func readTextFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	return string(b), err
+}
+
+// listDirNames returns the names of the entries in dir.
+func listDirNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names, nil
+}
+
+// entrypointPathExists reports whether path exists. A stat that fails for any reason
+// other than the path being absent is an error, not a "no".
+func entrypointPathExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 // runContainerEntrypoint starts the daemon, or refuses. It decides first, with
@@ -109,6 +115,10 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	if !filepath.IsAbs(townRoot) {
 		return fmt.Errorf("%s must name the town root as an absolute path; nothing was started", containerTownRootEnv)
 	}
+	self, err := e.self()
+	if err != nil {
+		return fmt.Errorf("find the gt binary to exec: %w; nothing was started", err)
+	}
 	install, err := e.decideStart(townRoot)
 	if err != nil {
 		return err
@@ -117,11 +127,11 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 		return err
 	}
 	if install {
-		if err := e.run([]string{e.self, "install", townRoot, "--git"}); err != nil {
+		if err := e.run([]string{self, "install", townRoot, "--git"}); err != nil {
 			return fmt.Errorf("install the scratch town at %s: %w", townRoot, err)
 		}
 	}
-	if err := e.exec([]string{e.self, "daemon", "run"}); err != nil {
+	if err := e.exec([]string{self, "daemon", "run"}); err != nil {
 		return fmt.Errorf("exec gt daemon run: %w", err)
 	}
 	return nil

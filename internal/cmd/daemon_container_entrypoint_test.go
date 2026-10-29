@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -29,6 +30,7 @@ type entrypointRig struct {
 	// brokenPath makes its stat fail, to test the fail-closed read.
 	brokenPath string
 	dir        []string
+	dirErr     error
 	calls      [][]string
 }
 
@@ -63,12 +65,12 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 		return nil
 	}
 	return containerEntrypoint{
-		self:      entrypointBin,
+		self:      func() (string, error) { return entrypointBin, nil },
 		getenv:    func(key string) string { return r.env[key] },
 		run:       record,
 		exec:      record,
 		mountinfo: func() (string, error) { return r.mountinfo, r.mountErr },
-		dirNames:  func(string) ([]string, error) { return r.dir, nil },
+		dirNames:  func(string) ([]string, error) { return r.dir, r.dirErr },
 		exists: func(path string) (bool, error) {
 			if path == r.brokenPath {
 				return false, errors.New("stat failed")
@@ -211,6 +213,12 @@ func TestContainerEntrypointScratchTownRefusesWhenAConditionFails(t *testing.T) 
 		{"mayor/town.json unreadable", func(r *entrypointRig) {
 			r.brokenPath = entrypointTownCfg
 		}},
+		{"marker unreadable", func(r *entrypointRig) {
+			r.brokenPath = entrypointMarker
+		}},
+		{"town root unlistable", func(r *entrypointRig) {
+			r.dirErr = errors.New("list failed")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,21 +255,95 @@ func TestContainerEntrypointScratchTownInstallsOnceBeforeDaemon(t *testing.T) {
 	}
 }
 
-func TestContainerEntrypointRunErrorStopsBeforeDaemonExec(t *testing.T) {
+func TestContainerEntrypointRunFailureStopsBeforeDaemonExec(t *testing.T) {
 	t.Parallel()
-	r := scratchRig()
+	for _, failing := range []string{"git", "install"} {
+		t.Run("fails="+failing, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			e := r.entrypoint()
+			e.run = func(argv []string) error {
+				r.calls = append(r.calls, append([]string{}, argv...))
+				if argv[0] == failing || (len(argv) > 1 && argv[1] == failing) {
+					return errors.New("command failed")
+				}
+				return nil
+			}
+			if err := runContainerEntrypoint(e); err == nil {
+				t.Fatalf("expected the %s failure to surface", failing)
+			}
+			for _, argv := range r.calls {
+				if len(argv) > 1 && argv[1] == "daemon" {
+					t.Fatalf("daemon exec ran after a failed %s command: %v", failing, r.calls)
+				}
+			}
+		})
+	}
+}
+
+func TestContainerEntrypointRefusesWhenTheGtBinaryIsUnknown(t *testing.T) {
+	t.Parallel()
+	r := townRig()
 	e := r.entrypoint()
-	e.run = func(argv []string) error {
-		r.calls = append(r.calls, append([]string{}, argv...))
-		return errors.New("install failed")
-	}
+	e.self = func() (string, error) { return "", errors.New("no executable") }
 	if err := runContainerEntrypoint(e); err == nil {
-		t.Fatal("expected the install failure to surface")
+		t.Fatal("expected a refusal when the gt binary cannot be found")
 	}
-	for _, argv := range r.calls {
-		if len(argv) > 1 && argv[1] == "daemon" {
-			t.Fatalf("daemon exec ran after a failed install: %v", r.calls)
+	if len(r.calls) != 0 {
+		t.Errorf("recorded %d commands, want none: %v", len(r.calls), r.calls)
+	}
+}
+
+func TestReadTextFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mountinfo")
+	if err := os.WriteFile(path, []byte("text\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readTextFile(path)
+	if err != nil || got != "text\n" {
+		t.Errorf("readTextFile = %q, %v; want the file's text", got, err)
+	}
+	if _, err := readTextFile(filepath.Join(dir, "missing")); err == nil {
+		t.Error("readTextFile of a missing file returned no error")
+	}
+}
+
+func TestListDirNames(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{"a", "b"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
 		}
+	}
+	got, err := listDirNames(dir)
+	if err != nil || !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Errorf("listDirNames = %v, %v; want [a b]", got, err)
+	}
+	if _, err := listDirNames(filepath.Join(dir, "missing")); err == nil {
+		t.Error("listDirNames of a missing directory returned no error")
+	}
+}
+
+func TestEntrypointPathExists(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "present")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := entrypointPathExists(file); !ok || err != nil {
+		t.Errorf("entrypointPathExists(present) = %v, %v; want true, nil", ok, err)
+	}
+	if ok, err := entrypointPathExists(filepath.Join(dir, "absent")); ok || err != nil {
+		t.Errorf("entrypointPathExists(absent) = %v, %v; want false, nil", ok, err)
+	}
+	// A path beneath a regular file fails to stat with a reason other than
+	// absence, which must come back as an error rather than as "no".
+	if _, err := entrypointPathExists(filepath.Join(file, "child")); err == nil {
+		t.Error("entrypointPathExists beneath a regular file returned no error")
 	}
 }
 
