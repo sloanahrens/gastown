@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -531,16 +532,7 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 
 		// Resource metrics
 		metrics := doltserver.GetHealthMetrics(townRoot)
-		fmt.Printf("\n  %s\n", style.Bold.Render("Resource Metrics:"))
-		fmt.Printf("    Query latency: %v\n", metrics.QueryLatency.Round(time.Millisecond))
-		fmt.Printf("    Connections:   %d / %d (%.0f%%)\n",
-			metrics.Connections, metrics.MaxConnections, metrics.ConnectionPct)
-		fmt.Printf("    Disk usage:    %s\n", metrics.DiskUsageHuman)
-		if metrics.ReadOnly {
-			fmt.Printf("\n  %s %s\n",
-				style.Bold.Render("!!!"),
-				style.Bold.Render("SERVER IS READ-ONLY — run 'gt dolt restart'"))
-		}
+		printResourceMetrics(os.Stdout, metrics)
 
 		// Verify all filesystem databases are actually served.
 		if verifyErr != nil {
@@ -599,6 +591,38 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 
 	printStrayWorkspaceServerWarning(townRoot)
 	return nil
+}
+
+// printResourceMetrics writes the Resource Metrics block of `gt dolt status`
+// for a running local server: latency, connections, disk usage and the
+// server's physical memory footprint.
+func printResourceMetrics(w io.Writer, metrics *doltserver.HealthMetrics) {
+	fmt.Fprintf(w, "\n  %s\n", style.Bold.Render("Resource Metrics:"))
+	fmt.Fprintf(w, "    Query latency: %v\n", metrics.QueryLatency.Round(time.Millisecond))
+	fmt.Fprintf(w, "    Connections:   %d / %d (%.0f%%)\n",
+		metrics.Connections, metrics.MaxConnections, metrics.ConnectionPct)
+	fmt.Fprintf(w, "    Disk usage:    %s\n", metrics.DiskUsageHuman)
+	fmt.Fprintf(w, "    Memory:        %s\n", memoryFootprintLine(metrics))
+	if metrics.ReadOnly {
+		fmt.Fprintf(w, "\n  %s %s\n",
+			style.Bold.Render("!!!"),
+			style.Bold.Render("SERVER IS READ-ONLY — run 'gt dolt restart'"))
+	}
+}
+
+// memoryFootprintLine renders the server's physical memory footprint for the
+// status output, beside the disk usage. A zero footprint reads as
+// unavailable: the platform has no vmmap, the server has no PID, or vmmap
+// could not read the process (gt-v1zyv).
+func memoryFootprintLine(metrics *doltserver.HealthMetrics) string {
+	if metrics == nil || metrics.FootprintBytes <= 0 {
+		return "unavailable"
+	}
+	if metrics.FootprintPeakBytes > 0 {
+		return fmt.Sprintf("%s (peak %s)",
+			formatBytes(metrics.FootprintBytes), formatBytes(metrics.FootprintPeakBytes))
+	}
+	return formatBytes(metrics.FootprintBytes)
 }
 
 // printStrayWorkspaceServerWarning names any running Dolt server a beads
