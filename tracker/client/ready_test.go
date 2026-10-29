@@ -32,10 +32,11 @@ func TestReadyzReadsTheAnswer(t *testing.T) {
 	}
 }
 
-// TestReadyzNotReadyIsUnavailableOnce drives the refusal branch: a service
-// that answers 503 with its reason is an unavailable error carrying that
-// reason, and readiness is asked exactly once rather than retried.
-func TestReadyzNotReadyIsUnavailableOnce(t *testing.T) {
+// TestReadyzNotReadyIsAnAnsweredUnavailableOnce drives the refusal branch: a
+// service that answers 503 with its reason is a *NotReady carrying that reason
+// and still an unavailable error, and readiness is asked exactly once rather
+// than retried.
+func TestReadyzNotReadyIsAnAnsweredUnavailableOnce(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
 	c, sleep := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -49,9 +50,9 @@ func TestReadyzNotReadyIsUnavailableOnce(t *testing.T) {
 	if !errors.Is(err, api.ErrUnavailable) {
 		t.Fatalf("Readyz error = %v, want an unavailable error", err)
 	}
-	var e *api.Error
-	if !errors.As(err, &e) || e.Message != "database does not accept writes" {
-		t.Errorf("Readyz error = %v, want the server's reason", err)
+	var nr *NotReady
+	if !errors.As(err, &nr) || nr.Reason != "database does not accept writes" {
+		t.Fatalf("Readyz error = %v, want the service's own not-ready answer", err)
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("requests = %d, want 1: readiness is a point in time, never retried", got)
@@ -62,8 +63,8 @@ func TestReadyzNotReadyIsUnavailableOnce(t *testing.T) {
 }
 
 // TestReadyzUnreachable is the transport failure branch: a service that cannot
-// be reached is an unavailable error, not a nil answer. The transport fails in
-// process, so the test opens no socket.
+// be reached is an unavailable error and carries no answer, so it is not a
+// *NotReady. The transport fails in process, so the test opens no socket.
 func TestReadyzUnreachable(t *testing.T) {
 	t.Parallel()
 	c, err := New(Config{BaseURL: "http://127.0.0.1:1", Token: "trk_secret-token-value",
@@ -73,7 +74,46 @@ func TestReadyzUnreachable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Readyz(t.Context()); !errors.Is(err, api.ErrUnavailable) {
+	_, err = c.Readyz(t.Context())
+	if !errors.Is(err, api.ErrUnavailable) {
 		t.Fatalf("Readyz to an unreachable server = %v, want an unavailable error", err)
+	}
+	var nr *NotReady
+	if errors.As(err, &nr) {
+		t.Fatalf("Readyz to an unreachable server = %v, want no answer, not a not-ready answer", err)
+	}
+}
+
+// TestReadyzNotReadyKeepsOtherAnswersApart: only the service's 503 is "not
+// ready". A wrong path or a broken proxy answer is the refusal it is, so a
+// caller is not told the tracker answered that it is unwell.
+func TestReadyzNotReadyKeepsOtherAnswersApart(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr error
+	}{
+		{name: "a 404 is a wrong endpoint", status: http.StatusNotFound, body: "<html>404 page not found</html>", wantErr: api.ErrInvalid},
+		{name: "a 500 without the API's body is unavailable", status: http.StatusInternalServerError, body: "boom", wantErr: api.ErrUnavailable},
+		{name: "a 403 is forbidden", status: http.StatusForbidden, body: `{"kind":"forbidden","message":"no"}`, wantErr: api.ErrForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, _ := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}), nil)
+			_, err := c.Readyz(t.Context())
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Readyz error = %v, want %v", err, tt.wantErr)
+			}
+			var nr *NotReady
+			if errors.As(err, &nr) {
+				t.Errorf("Readyz error = %v, want the refusal itself, not a not-ready answer", err)
+			}
+		})
 	}
 }

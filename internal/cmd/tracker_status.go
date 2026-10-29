@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -39,9 +40,10 @@ request count and slowest route from its /metrics.
 
 The exit code follows readiness: 0 when the tracker answers ready, 1 when it
 does not, with the reason on stderr. A tracker that cannot be reached gives
-nothing to show and prints no screen; one that answers not ready still prints
-its screen and then fails. A piece the tracker does not give (a missing stats or
-metrics route, a failed count) prints as unavailable and never fails the command.
+nothing to show and prints no screen; one that answers not ready (a 503 from
+/readyz) still prints its screen, with the reason on the Ready line, and then
+fails. A piece the tracker does not give (a missing stats or metrics route, a
+failed count) prints as unavailable and never fails the command.
 
 Examples:
   gt tracker status
@@ -49,7 +51,7 @@ Examples:
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		return runTrackerStatus(liveStatusEnv(), cmd.OutOrStdout(), trackerStatusJSON)
+		return runTrackerStatus(cmd.Context(), liveStatusEnv(), cmd.OutOrStdout(), trackerStatusJSON)
 	},
 }
 
@@ -99,9 +101,14 @@ func newTrackerStatusSource(cfg client.Config) (trackerStatusSource, error) {
 // value, so the two carry the same fields. A piece that did not answer is left
 // nil and its reason says why.
 type trackerStatus struct {
-	URL         string             `json:"url"`
-	Ready       bool               `json:"ready"`
-	SchemaLevel int                `json:"schema_level"`
+	URL   string `json:"url"`
+	Ready bool   `json:"ready"`
+	// SchemaLevel is the server's schema level; nil when it did not say ready,
+	// so an absent level is not read as level 0.
+	SchemaLevel *int `json:"schema_level,omitempty"`
+	// ReadyReason is why the tracker is not ready, in the tracker's own words;
+	// empty when Ready. The text prints it escaped and cut to a line.
+	ReadyReason string             `json:"ready_reason,omitempty"`
 	Rigs        []trackerRigStatus `json:"rigs"`
 	// RigsUnavailable is the reason the rig list could not be read.
 	RigsUnavailable string `json:"rigs_unavailable,omitempty"`
@@ -147,7 +154,7 @@ type trackerSlowest struct {
 // cannot be reached fails the run before there is anything to show. One that
 // answers not ready still gets its screen printed, and the run fails after it,
 // so the exit code follows readiness in both cases.
-func runTrackerStatus(env statusEnv, out io.Writer, asJSON bool) error {
+func runTrackerStatus(ctx context.Context, env statusEnv, out io.Writer, asJSON bool) error {
 	cfg := backend.FromEnv(env.getenv).Tracker
 	if cfg.BaseURL == "" {
 		return errors.New("gt tracker status: TRACKER_URL is not set, so the tracker cannot be reached")
@@ -162,15 +169,25 @@ func runTrackerStatus(env statusEnv, out io.Writer, asJSON bool) error {
 		return fmt.Errorf("gt tracker status: the tracker at %s cannot be reached: %w", terminalSafe(endpoint), err)
 	}
 
-	ready, err := withinStatus(src.Readyz)
-	if err != nil {
-		return fmt.Errorf("gt tracker status: the tracker at %s does not answer ready: %w", terminalSafe(endpoint), err)
-	}
-	rep := trackerStatus{
-		URL:         endpoint,
-		Ready:       ready.Status == "ready",
-		SchemaLevel: ready.SchemaLevel,
-		Rigs:        []trackerRigStatus{},
+	rep := trackerStatus{URL: endpoint, Rigs: []trackerRigStatus{}}
+	ready, err := withinStatus(ctx, src.Readyz)
+	switch {
+	case err != nil:
+		// Only an answer that says "not ready" leaves something to print. A
+		// transport failure, a wrong endpoint or a refused token is not a
+		// status screen, so it is one line and no screen.
+		var nr *client.NotReady
+		if !errors.As(err, &nr) {
+			return fmt.Errorf("gt tracker status: the tracker at %s does not answer: %w", terminalSafe(endpoint), err)
+		}
+		rep.ReadyReason = nr.Reason
+	case ready.Status == "ready":
+		rep.Ready = true
+		rep.SchemaLevel = &ready.SchemaLevel
+	default:
+		// A service that answers 200 without saying ready is not the tracker's
+		// own shape, but the answer is still an answer worth printing.
+		rep.ReadyReason = ready.Status
 	}
 
 	rigs, err := trackerRigNames(env)
@@ -178,10 +195,10 @@ func runTrackerStatus(env statusEnv, out io.Writer, asJSON bool) error {
 		rep.RigsUnavailable = err.Error()
 	}
 	for _, rig := range rigs {
-		rep.Rigs = append(rep.Rigs, trackerRigCounts(src, rig))
+		rep.Rigs = append(rep.Rigs, trackerRigCounts(ctx, src, rig))
 	}
 
-	page, err := withinStatus(src.Metrics)
+	page, err := withinStatus(ctx, src.Metrics)
 	if err == nil {
 		var req trackerRequests
 		if req, err = parseTrackerMetrics(page); err == nil {
@@ -202,26 +219,31 @@ func runTrackerStatus(env statusEnv, out io.Writer, asJSON bool) error {
 		writeTrackerStatusText(out, rep)
 	}
 
-	// A server that answered with a status other than ready has had its screen
+	// A tracker that answered with anything other than ready has had its screen
 	// printed; the run still fails, so the exit code follows readiness.
 	if !rep.Ready {
-		return fmt.Errorf("gt tracker status: the tracker at %s answers %q, not ready", terminalSafe(rep.URL), statusWord(ready.Status))
+		reason := statusWord(rep.ReadyReason)
+		if reason == "" {
+			reason = "it did not say why"
+		}
+		return fmt.Errorf("gt tracker status: the tracker at %s is not ready: %s", terminalSafe(rep.URL), reason)
 	}
 	return nil
 }
 
-// withinStatus runs one tracker call under the screen's per-call bound.
-func withinStatus[T any](call func(ctx context.Context) (T, error)) (T, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), trackerStatusTimeout)
+// withinStatus runs one tracker call under the screen's per-call bound, inside
+// the caller's context, so an interrupted command stops its reads.
+func withinStatus[T any](ctx context.Context, call func(ctx context.Context) (T, error)) (T, error) {
+	ctx, cancel := context.WithTimeout(ctx, trackerStatusTimeout)
 	defer cancel()
 	return call(ctx)
 }
 
 // trackerRigCounts reads one rig's issue and wisp counts. A count that did not
 // answer is marked unavailable and the other count is still read.
-func trackerRigCounts(src trackerStatusSource, rig string) trackerRigStatus {
+func trackerRigCounts(ctx context.Context, src trackerStatusSource, rig string) trackerRigStatus {
 	rs := trackerRigStatus{Rig: rig}
-	st, err := withinStatus(func(ctx context.Context) (api.Stats, error) {
+	st, err := withinStatus(ctx, func(ctx context.Context) (api.Stats, error) {
 		return src.Stats(ctx, rig)
 	})
 	if err != nil {
@@ -231,7 +253,10 @@ func trackerRigCounts(src trackerStatusSource, rig string) trackerRigStatus {
 		rs.Issues = &n
 		rs.ByStatus = st.ByStatus
 	}
-	wisps, err := withinStatus(func(ctx context.Context) ([]api.Issue, error) {
+	// The stats route counts durable issues and leaves wisps out, and no route
+	// counts them, so a rig's wisp count is the size of its listing: one call
+	// per page (gt-h1ldd).
+	wisps, err := withinStatus(ctx, func(ctx context.Context) ([]api.Issue, error) {
 		return src.ListAll(ctx, api.ListFilter{Rig: rig, Ephemeral: true, IncludeInfra: true})
 	})
 	if err != nil {
@@ -244,12 +269,13 @@ func trackerRigCounts(src trackerStatusSource, rig string) trackerRigStatus {
 }
 
 // unavailableReason is a failed read's text for a line that already says
-// "unavailable": the client puts its kind in front of every error, so an
-// unavailable kind would otherwise stutter. Any other kind is kept, since it
-// tells the operator something the label does not.
+// "unavailable". The client puts the failure's kind in front of its message, so
+// the kind is dropped: a line that says a piece is unavailable and then names
+// another kind ("invalid", "not_found") would contradict itself. What remains
+// is the message, which is what the operator can act on.
 func unavailableReason(err error) string {
 	var e *api.Error
-	if errors.As(err, &e) && e.Kind == api.KindUnavailable {
+	if errors.As(err, &e) {
 		return e.Message
 	}
 	return err.Error()
@@ -292,8 +318,13 @@ func statusEndpoint(baseURL string) string {
 func writeTrackerStatusText(w io.Writer, s trackerStatus) {
 	fmt.Fprintf(w, "%-11s%s\n", "Tracker", terminalSafe(s.URL))
 	ready := "no"
-	if s.Ready {
-		ready = fmt.Sprintf("yes (schema level %d)", s.SchemaLevel)
+	switch {
+	case s.Ready && s.SchemaLevel != nil:
+		ready = fmt.Sprintf("yes (schema level %d)", *s.SchemaLevel)
+	case s.Ready:
+		ready = "yes"
+	case s.ReadyReason != "":
+		ready = "no (" + statusWord(s.ReadyReason) + ")"
 	}
 	fmt.Fprintf(w, "%-11s%s\n", "Ready", ready)
 
@@ -312,8 +343,11 @@ func writeTrackerStatusText(w io.Writer, s trackerStatus) {
 			names[i] = terminalSafe(r.Rig)
 			issues[i] = terminalSafe(trackerIssuesText(r))
 			wisps[i] = terminalSafe(trackerWispsText(r))
-			nameW = max(nameW, len(names[i]))
-			issuesW = max(issuesW, len(issues[i]))
+			// fmt pads a column by runes, so the width it is given has to be a
+			// rune count too: a byte count would widen every column that holds
+			// a non-ASCII rig name.
+			nameW = max(nameW, utf8.RuneCountInString(names[i]))
+			issuesW = max(issuesW, utf8.RuneCountInString(issues[i]))
 		}
 		for i := range names {
 			fmt.Fprintf(w, "  %-*s  %-*s  %s\n", nameW, names[i], issuesW, issues[i], wisps[i])
@@ -329,7 +363,7 @@ func writeTrackerStatusText(w io.Writer, s trackerStatus) {
 	fmt.Fprintf(w, "%-11s%s\n", "Slowest", trackerSlowestText(s.Requests.Slowest))
 }
 
-// statusWord is the server's readiness word as a failure line carries it:
+// statusWord is a readiness reason as the screen and the failure line carry it:
 // escaped for the terminal and cut to a line's worth, since the server chose it
 // and the reason has to stay one line.
 func statusWord(s string) string {

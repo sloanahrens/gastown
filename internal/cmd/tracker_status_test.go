@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,68 +20,51 @@ import (
 
 const trackerStatusGolden = "testdata/tracker_status_healthy.golden"
 
-var updateTrackerStatusGolden = flag.Bool("update-tracker-status-golden", false, "rewrite testdata/tracker_status_healthy.golden")
-
-// compareGolden reports whether the file at path holds got, rewriting it first
-// when update is set. The comparison runs whichever way the switch is set, so a
-// rewrite that does not land is a failure rather than a pass.
-func compareGolden(path, got string, update bool) error {
-	if update {
-		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
-			return fmt.Errorf("rewriting %s: %w", path, err)
-		}
-	}
+// compareGolden reports whether the file at path holds got. The golden is the
+// expected screen, so the check only ever reads it: a test run never rewrites
+// a file in the repo, and the run's behaviour does not depend on a switch.
+func compareGolden(path, got string) error {
 	want, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	if got != string(want) {
-		return fmt.Errorf("output differs from %s (rewrite with -update-tracker-status-golden):\n%s\nwant:\n%s", path, got, want)
+		return fmt.Errorf("output differs from %s:\n--- got\n%s--- want\n%s", path, got, want)
 	}
 	return nil
 }
 
-// The golden comparison fails on a difference and passes on a match, and an
-// update is checked like any other run.
+// The golden comparison fails on a difference, passes on a match, and fails on
+// a golden it cannot read.
 func TestCompareGolden(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		before    string // the golden's content before the run; empty means no file
-		got       string
-		update    bool
-		absentDir bool // aim at a directory that does not exist
-		wantErr   string
-		wantFile  string // the golden's content after the run; empty means still absent
+		name     string
+		before   string // the golden's content; empty means no file
+		got      string
+		wantErr  string
+		wantFile string // the golden's content after the run; empty means no file
 	}{
 		{name: "a match passes", before: "screen\n", got: "screen\n", wantFile: "screen\n"},
 		{name: "a difference fails", before: "screen\n", got: "other\n", wantErr: "differs", wantFile: "screen\n"},
 		{name: "a missing golden fails", got: "screen\n", wantErr: "reading"},
-		{name: "an update rewrites the golden", before: "old\n", got: "new\n", update: true, wantFile: "new\n"},
-		{name: "an update that cannot be written fails", before: "old\n", got: "new\n", update: true, absentDir: true, wantErr: "rewriting", wantFile: "old\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "golden")
-			if tt.absentDir {
-				path = filepath.Join(t.TempDir(), "absent", "golden")
-			}
-			if tt.before != "" && !tt.absentDir {
+			if tt.before != "" {
 				if err := os.WriteFile(path, []byte(tt.before), 0o644); err != nil {
 					t.Fatalf("staging the golden: %v", err)
 				}
 			}
-			err := compareGolden(path, tt.got, tt.update)
+			err := compareGolden(path, tt.got)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("compareGolden = %v, want an error naming %q", err, tt.wantErr)
 				}
 			} else if err != nil {
 				t.Fatalf("compareGolden = %v, want a match", err)
-			}
-			if tt.absentDir {
-				return
 			}
 			after, err := os.ReadFile(path)
 			if tt.wantFile == "" {
@@ -170,6 +153,12 @@ type trackerFake struct {
 	metricsPage string
 	// ready is the /readyz status; empty means "ready".
 	ready string
+	// notReady makes /readyz answer 503 with this reason, as the tracker
+	// answers when its database does not answer or does not take writes.
+	notReady string
+	// noStatus makes /readyz answer 200 with no status at all, as a proxy in
+	// front of the tracker might.
+	noStatus bool
 	// level is the /readyz schema level; 0 means 4.
 	level int
 	// failStats and failList name a rig whose call answers 500, as a broken
@@ -203,6 +192,18 @@ func fakeTrackerdWith(t *testing.T, f trackerFake) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		// The tracker's own not-ready answer: 503 with the reason in the API's
+		// error body.
+		if f.notReady != "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeTestJSON(w, api.Unavailable("%s", f.notReady))
+			return
+		}
+		if f.noStatus {
+			writeTestJSON(w, map[string]any{"schema_level": level})
+			return
+		}
 		writeTestJSON(w, map[string]any{"status": ready, "schema_level": level})
 	})
 	mux.HandleFunc("GET /v1/stats", func(w http.ResponseWriter, r *http.Request) {
@@ -292,10 +293,10 @@ func statusTestEnv(rt http.RoundTripper) statusEnv {
 func TestTrackerStatusTextGoldenHealthyServer(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	if err := runTrackerStatus(statusTestEnv(inProcess(fakeTrackerd(t, true))), &out, false); err != nil {
+	if err := runTrackerStatus(t.Context(), statusTestEnv(inProcess(fakeTrackerd(t, true))), &out, false); err != nil {
 		t.Fatalf("runTrackerStatus = %v, want the screen", err)
 	}
-	if err := compareGolden(trackerStatusGolden, out.String(), *updateTrackerStatusGolden); err != nil {
+	if err := compareGolden(trackerStatusGolden, out.String()); err != nil {
 		t.Error(err)
 	}
 }
@@ -304,15 +305,15 @@ func TestTrackerStatusTextGoldenHealthyServer(t *testing.T) {
 func TestTrackerStatusJSONCarriesTheSameFields(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	if err := runTrackerStatus(statusTestEnv(inProcess(fakeTrackerd(t, true))), &out, true); err != nil {
+	if err := runTrackerStatus(t.Context(), statusTestEnv(inProcess(fakeTrackerd(t, true))), &out, true); err != nil {
 		t.Fatalf("runTrackerStatus --json = %v", err)
 	}
 	var got trackerStatus
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("--json output is not the status: %v\n%s", err, out.String())
 	}
-	if got.URL != trackerStatusURL || !got.Ready || got.SchemaLevel != 4 {
-		t.Errorf("readiness = %q ready %t level %d, want the server's ready at level 4", got.URL, got.Ready, got.SchemaLevel)
+	if got.URL != trackerStatusURL || !got.Ready || got.SchemaLevel == nil || *got.SchemaLevel != 4 {
+		t.Errorf("readiness = %q ready %t level %v, want the server's ready at level 4", got.URL, got.Ready, got.SchemaLevel)
 	}
 	if len(got.Rigs) != 2 || got.Rigs[0].Rig != "gt" || got.Rigs[1].Rig != "ag" {
 		t.Fatalf("rigs = %+v, want gt then ag", got.Rigs)
@@ -373,11 +374,11 @@ func TestTrackerStatusUnreachableExitsWithOneLine(t *testing.T) {
 	t.Parallel()
 	for _, asJSON := range []bool{false, true} {
 		var out bytes.Buffer
-		err := runTrackerStatus(statusTestEnv(refusing()), &out, asJSON)
+		err := runTrackerStatus(t.Context(), statusTestEnv(refusing()), &out, asJSON)
 		if err == nil {
 			t.Fatalf("runTrackerStatus(json=%t) to an unreachable tracker = nil, want a failed run", asJSON)
 		}
-		if !strings.Contains(err.Error(), "does not answer ready") {
+		if !strings.Contains(err.Error(), "does not answer") {
 			t.Errorf("error = %q, want the reason that the tracker does not answer", err)
 		}
 		if strings.Contains(err.Error(), "\n") {
@@ -389,54 +390,179 @@ func TestTrackerStatusUnreachableExitsWithOneLine(t *testing.T) {
 	}
 }
 
-// A tracker that answers 200 with a status other than ready has answered
-// enough to print its screen, and the run still fails: the exit code follows
-// readiness, not the HTTP status.
-func TestTrackerStatusNotReadyPrintsTheScreenAndExitsOne(t *testing.T) {
+// statusCtxSource is a tracker source that records the context each read was
+// handed and fails with that context's error, so a test can show which context
+// the reads run under.
+type statusCtxSource struct {
+	seen []context.Context
+}
+
+func (s *statusCtxSource) Readyz(ctx context.Context) (client.ReadyzStatus, error) {
+	s.seen = append(s.seen, ctx)
+	return client.ReadyzStatus{}, ctx.Err()
+}
+
+func (s *statusCtxSource) Stats(ctx context.Context, _ string) (api.Stats, error) {
+	s.seen = append(s.seen, ctx)
+	return api.Stats{}, ctx.Err()
+}
+
+func (s *statusCtxSource) ListAll(ctx context.Context, _ api.ListFilter) ([]api.Issue, error) {
+	s.seen = append(s.seen, ctx)
+	return nil, ctx.Err()
+}
+
+func (s *statusCtxSource) Metrics(ctx context.Context) (string, error) {
+	s.seen = append(s.seen, ctx)
+	return "", ctx.Err()
+}
+
+// The tracker reads run under the caller's context, so an interrupted command
+// stops waiting on the tracker instead of running on under a context of its
+// own.
+func TestTrackerStatusReadsRunUnderTheCallersContext(t *testing.T) {
 	t.Parallel()
-	for _, asJSON := range []bool{false, true} {
-		t.Run(fmt.Sprintf("json=%t", asJSON), func(t *testing.T) {
-			t.Parallel()
-			var out bytes.Buffer
-			err := runTrackerStatus(statusTestEnv(inProcess(fakeTrackerdWith(t, trackerFake{metrics: true, ready: "degraded"}))), &out, asJSON)
-			if err == nil {
-				t.Fatal("runTrackerStatus for a not-ready tracker = nil, want a failed run")
-			}
-			if code := exitCodeForError(err); code != 1 {
-				t.Errorf("exit code = %d, want 1 for a tracker that does not answer ready", code)
-			}
-			if !strings.Contains(err.Error(), `answers "degraded", not ready`) {
-				t.Errorf("error = %q, want the server's status named", err)
-			}
-			if strings.Contains(err.Error(), "\n") {
-				t.Errorf("error spans lines: %q", err)
-			}
-			if out.Len() == 0 {
-				t.Error("printed nothing, want the screen the tracker could still answer")
-			}
-			if !asJSON && !strings.Contains(out.String(), "Ready      no\n") {
-				t.Errorf("screen does not say not ready:\n%s", out.String())
-			}
-		})
+	src := &statusCtxSource{}
+	env := statusTestEnv(refusing())
+	env.newSource = func(client.Config) (trackerStatusSource, error) { return src, nil }
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var out bytes.Buffer
+	err := runTrackerStatus(ctx, env, &out, false)
+	if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("runTrackerStatus under a cancelled context = %v, want the cancellation", err)
+	}
+	if len(src.seen) == 0 {
+		t.Fatal("the screen read nothing, want a readiness read")
+	}
+	if err := src.seen[0].Err(); err != context.Canceled {
+		t.Errorf("the readiness read ran under a context with error %v, want the caller's cancellation", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("printed %q under a cancelled context, want nothing", out.String())
 	}
 }
 
-// A server that answers not ready with a long or hostile status still fails in
-// one short line: the server chose that text, and the reason is one line.
+// A tracker that answers not ready has answered enough to print its screen, and
+// the run still fails: the exit code follows readiness. Every answer that is
+// not ready is driven: the server's own 503 with the reason (the shape /readyz
+// really sends when the database is down), a 200 whose status is not ready, and
+// a 200 that carries no status at all.
+func TestTrackerStatusNotReadyPrintsTheScreenAndExitsOne(t *testing.T) {
+	t.Parallel()
+	shapes := []struct {
+		name string
+		fake trackerFake
+		// reason is the tracker's own text, as the JSON carries it.
+		reason string
+		// failure is the reason the failed run names; readyLine is the Ready
+		// line of the screen.
+		failure   string
+		readyLine string
+	}{
+		{
+			name:      "a 503 with the server's reason",
+			fake:      trackerFake{metrics: true, notReady: "database does not answer"},
+			reason:    "database does not answer",
+			failure:   "database does not answer",
+			readyLine: "Ready      no (database does not answer)\n",
+		},
+		{
+			name:      "a 200 whose status is not ready",
+			fake:      trackerFake{metrics: true, ready: "degraded"},
+			reason:    "degraded",
+			failure:   "degraded",
+			readyLine: "Ready      no (degraded)\n",
+		},
+		{
+			name:      "a 200 with no status at all",
+			fake:      trackerFake{metrics: true, noStatus: true},
+			failure:   "it did not say why",
+			readyLine: "Ready      no\n",
+		},
+	}
+	for _, shape := range shapes {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", shape.name, asJSON), func(t *testing.T) {
+				t.Parallel()
+				var out bytes.Buffer
+				err := runTrackerStatus(t.Context(), statusTestEnv(inProcess(fakeTrackerdWith(t, shape.fake))), &out, asJSON)
+				if err == nil {
+					t.Fatal("runTrackerStatus for a not-ready tracker = nil, want a failed run")
+				}
+				if code := exitCodeForError(err); code != 1 {
+					t.Errorf("exit code = %d, want 1 for a tracker that does not answer ready", code)
+				}
+				if !strings.Contains(err.Error(), "is not ready: "+shape.failure) {
+					t.Errorf("error = %q, want the tracker's reason for not being ready", err)
+				}
+				if strings.Contains(err.Error(), "\n") {
+					t.Errorf("error spans lines: %q", err)
+				}
+				if out.Len() == 0 {
+					t.Fatal("printed nothing, want the screen the tracker could still answer")
+				}
+				var screen strings.Builder
+				if asJSON {
+					// The JSON carries the same fact; render it as the text does.
+					var got trackerStatus
+					if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+						t.Fatalf("--json output is not the status: %v\n%s", err, out.String())
+					}
+					if got.Ready || got.ReadyReason != shape.reason {
+						t.Errorf("--json readiness = ready %t reason %q, want not ready with the tracker's reason", got.Ready, got.ReadyReason)
+					}
+					if got.SchemaLevel != nil {
+						t.Errorf("--json carries schema level %d for a tracker that never said ready, want none", *got.SchemaLevel)
+					}
+					writeTrackerStatusText(&screen, got)
+				} else {
+					screen.Write(out.Bytes())
+				}
+				if !strings.Contains(screen.String(), shape.readyLine) {
+					t.Errorf("screen lacks %q:\n%s", shape.readyLine, screen.String())
+				}
+				// The counts and the metrics are still there: a tracker whose
+				// database is down can still say what its other routes give.
+				if !strings.Contains(screen.String(), "Requests   46 since start\n") {
+					t.Errorf("screen lost the request lines:\n%s", screen.String())
+				}
+			})
+		}
+	}
+}
+
+// A server whose not-ready reason is long or hostile still fails in one short
+// line, and the screen's Ready line is one line too: the server chose that
+// text.
 func TestTrackerStatusNotReadyKeepsTheReasonToOneLine(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("x", 200)
-	for _, status := range []string{long, "not\nready\x1b[31m"} {
+	hostile := "not\nready\x1b[31m"
+	for _, shape := range []trackerFake{
+		{notReady: long},
+		{notReady: hostile},
+		{ready: long},
+		{ready: hostile},
+	} {
 		var out bytes.Buffer
-		err := runTrackerStatus(statusTestEnv(inProcess(fakeTrackerdWith(t, trackerFake{ready: status}))), &out, false)
+		err := runTrackerStatus(t.Context(), statusTestEnv(inProcess(fakeTrackerdWith(t, shape))), &out, false)
 		if err == nil {
-			t.Fatalf("runTrackerStatus with status %q = nil, want a failed run", status)
+			t.Fatalf("runTrackerStatus with reason %q = nil, want a failed run", shape.notReady+shape.ready)
 		}
 		if strings.Contains(err.Error(), "\n") {
-			t.Errorf("error spans lines for status %q: %q", status, err)
+			t.Errorf("error spans lines: %q", err)
 		}
 		if len(err.Error()) > 200 {
-			t.Errorf("error is %d bytes for a %d-byte status, want it cut to a line", len(err.Error()), len(status))
+			t.Errorf("error is %d bytes for a %q reason, want it cut to a line", len(err.Error()), shape.notReady+shape.ready)
+		}
+		if strings.Contains(out.String(), "\x1b") {
+			t.Errorf("screen carries a raw escape from the reason:\n%q", out.String())
+		}
+		// Tracker, Ready, Rigs and its two rig lines, Requests, Slowest.
+		if got, want := strings.Count(out.String(), "\n"), 7; got != want {
+			t.Errorf("screen has %d lines, want %d (one fact each):\n%q", got, want, out.String())
 		}
 	}
 }
@@ -447,7 +573,7 @@ func TestTrackerStatusRigCountsDegradeOneAtATime(t *testing.T) {
 	t.Parallel()
 	env := statusTestEnv(inProcess(fakeTrackerdWith(t, trackerFake{metrics: true, failStats: "gt", failList: "ag"})))
 	var out bytes.Buffer
-	if err := runTrackerStatus(env, &out, false); err != nil {
+	if err := runTrackerStatus(t.Context(), env, &out, false); err != nil {
 		t.Fatalf("runTrackerStatus with two failed counts = %v, want the screen", err)
 	}
 	text := out.String()
@@ -468,10 +594,12 @@ func TestTrackerStatusRigCountsDegradeOneAtATime(t *testing.T) {
 func TestTrackerStatusEscapesTrackerChosenStrings(t *testing.T) {
 	t.Parallel()
 	n := 1
+	// Ready without a schema level: a status value the screen can be handed
+	// without one, which it prints as ready rather than reading the level of a
+	// nil pointer.
 	rep := trackerStatus{
-		URL:         "https://tracker.test:7433/\x1b[2J",
-		Ready:       true,
-		SchemaLevel: 4,
+		URL:   "https://tracker.test:7433/\x1b[2J",
+		Ready: true,
 		Rigs: []trackerRigStatus{{
 			Rig:      "gt\x1b[31m",
 			Issues:   &n,
@@ -498,6 +626,7 @@ func TestTrackerStatusEscapesTrackerChosenStrings(t *testing.T) {
 		`gt\x1b[31m`,
 		`op\nen`,
 		`GET /x\nSlowest    forged`,
+		"Ready      yes\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("screen lacks the escaped form %q:\n%s", want, text)
@@ -511,7 +640,7 @@ func TestTrackerStatusEscapesTrackerChosenStrings(t *testing.T) {
 		return []beads.Route{{Prefix: "gt-\x1b[31m", Path: "gastown", Backend: beads.BackendTracker}}, nil
 	}
 	var screen bytes.Buffer
-	if err := runTrackerStatus(env, &screen, false); err != nil {
+	if err := runTrackerStatus(t.Context(), env, &screen, false); err != nil {
 		t.Fatalf("runTrackerStatus with a hostile rig name = %v, want the screen", err)
 	}
 	if strings.Contains(screen.String(), "\x1b") {
@@ -519,6 +648,29 @@ func TestTrackerStatusEscapesTrackerChosenStrings(t *testing.T) {
 	}
 	if !strings.Contains(screen.String(), `gt-\x1b[31m`) {
 		t.Errorf("screen lacks the escaped rig name:\n%s", screen.String())
+	}
+}
+
+// A rig whose name holds multi-byte runes keeps the columns where they belong:
+// the width is counted in runes, as fmt pads by, not in bytes.
+func TestTrackerStatusRigColumnsCountRunesNotBytes(t *testing.T) {
+	t.Parallel()
+	n := 1
+	rep := trackerStatus{
+		Rigs: []trackerRigStatus{
+			{Rig: "éé", Issues: &n, Wisps: &n},  // 2 runes, 4 bytes
+			{Rig: "abc", Issues: &n, Wisps: &n}, // 3 runes, 3 bytes
+		},
+	}
+	var out bytes.Buffer
+	writeTrackerStatusText(&out, rep)
+	for _, want := range []string{
+		"  éé   issues 1  wisps 1\n", // padded to the 3-rune column, plus the 2-space gap
+		"  abc  issues 1  wisps 1\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("screen lacks %q:\n%q", want, out.String())
+		}
 	}
 }
 
@@ -532,7 +684,7 @@ func TestTrackerStatusWithoutFiniteBucketsShowsUnknown(t *testing.T) {
 		"tracker_request_seconds_bucket{route=\"GET /x\",le=\"+Inf\"} 2\n"
 	env := statusTestEnv(inProcess(fakeTrackerdWith(t, trackerFake{metrics: true, metricsPage: page})))
 	var out bytes.Buffer
-	if err := runTrackerStatus(env, &out, false); err != nil {
+	if err := runTrackerStatus(t.Context(), env, &out, false); err != nil {
 		t.Fatalf("runTrackerStatus with an unbounded histogram = %v, want the screen", err)
 	}
 	for _, want := range []string{
@@ -550,12 +702,12 @@ func TestTrackerStatusWithoutFiniteBucketsShowsUnknown(t *testing.T) {
 func TestTrackerStatusWithoutMetricsRouteShowsUnavailable(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	if err := runTrackerStatus(statusTestEnv(inProcess(fakeTrackerd(t, false))), &out, false); err != nil {
+	if err := runTrackerStatus(t.Context(), statusTestEnv(inProcess(fakeTrackerd(t, false))), &out, false); err != nil {
 		t.Fatalf("runTrackerStatus without /metrics = %v, want the screen", err)
 	}
 	text := out.String()
 	for _, want := range []string{
-		"Requests   unavailable: invalid: tracker answered 404\n",
+		"Requests   unavailable: tracker answered 404\n",
 		"Slowest    unavailable\n",
 		"  gt  ",
 	} {
@@ -572,7 +724,7 @@ func TestTrackerStatusWithoutURLRefuses(t *testing.T) {
 	env := statusTestEnv(refusing())
 	env.getenv = func(string) string { return "" }
 	var out bytes.Buffer
-	err := runTrackerStatus(env, &out, false)
+	err := runTrackerStatus(t.Context(), env, &out, false)
 	if err == nil || !strings.Contains(err.Error(), "TRACKER_URL is not set") {
 		t.Fatalf("runTrackerStatus without TRACKER_URL = %v, want the unset-URL refusal", err)
 	}
@@ -588,7 +740,7 @@ func TestTrackerStatusWithoutTownKeepsTheTrackerLines(t *testing.T) {
 	env := statusTestEnv(inProcess(fakeTrackerd(t, true)))
 	env.findTown = func() (string, error) { return "", errors.New("no town here") }
 	var out bytes.Buffer
-	if err := runTrackerStatus(env, &out, false); err != nil {
+	if err := runTrackerStatus(t.Context(), env, &out, false); err != nil {
 		t.Fatalf("runTrackerStatus outside a town = %v, want the screen", err)
 	}
 	if !strings.Contains(out.String(), "Rigs       unavailable: not in a Gas Town workspace: no town here\n") {
@@ -620,7 +772,7 @@ func TestTrackerStatusRefusesAClientThatCannotBeBuilt(t *testing.T) {
 		return nil, errors.New("client: no token: set Token or TokenFile")
 	}
 	var out bytes.Buffer
-	err := runTrackerStatus(env, &out, false)
+	err := runTrackerStatus(t.Context(), env, &out, false)
 	if err == nil || !strings.Contains(err.Error(), "cannot be reached") || !strings.Contains(err.Error(), trackerStatusURL) {
 		t.Fatalf("runTrackerStatus with no client = %v, want a refusal naming the endpoint", err)
 	}
@@ -636,7 +788,7 @@ func TestTrackerStatusKeepsTheTrackerLinesWhenTheRouteTableIsUnreadable(t *testi
 	env := statusTestEnv(inProcess(fakeTrackerd(t, true)))
 	env.loadRoutes = func(string) ([]beads.Route, error) { return nil, errors.New("routes.jsonl: permission denied") }
 	var out bytes.Buffer
-	if err := runTrackerStatus(env, &out, false); err != nil {
+	if err := runTrackerStatus(t.Context(), env, &out, false); err != nil {
 		t.Fatalf("runTrackerStatus with an unreadable route table = %v, want the screen", err)
 	}
 	if !strings.Contains(out.String(), "Rigs       unavailable: routes.jsonl: permission denied\n") {
@@ -655,7 +807,7 @@ func (trackerBrokenPipe) Write([]byte) (int, error) { return 0, errors.New("brok
 // A JSON screen that cannot be written is a failed run, not a silent one.
 func TestTrackerStatusJSONRefusesAWriterThatFails(t *testing.T) {
 	t.Parallel()
-	err := runTrackerStatus(statusTestEnv(inProcess(fakeTrackerd(t, true))), trackerBrokenPipe{}, true)
+	err := runTrackerStatus(t.Context(), statusTestEnv(inProcess(fakeTrackerd(t, true))), trackerBrokenPipe{}, true)
 	if err == nil || !strings.Contains(err.Error(), "write: broken pipe") {
 		t.Fatalf("runTrackerStatus --json to a failing writer = %v, want the write error", err)
 	}
