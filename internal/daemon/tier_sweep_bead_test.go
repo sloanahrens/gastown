@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -164,6 +166,407 @@ func TestTierSweepBeadShapeFallsBackWhenThePatrolBlockIsUnreadable(t *testing.T)
 	}
 	if got := specdispatch.Sections(opts.Description)["acceptance"]; got != opts.Acceptance {
 		t.Errorf("acceptance field and description disagree:\nfield: %q\nsection: %q", opts.Acceptance, got)
+	}
+}
+
+// A finding is read on its marker alone: the line slowcheck wrote is kept
+// whole whatever its spelling, because the bead quotes it, while a -run filter
+// is named only when the token after the marker is a test's name. A line that
+// departs from the spelling the host log showed still reaches the bead, so a
+// format this daemon cannot check against slowcheck's writer never costs the
+// polecat the evidence; a token that is not a test name yields no filter, since
+// a filter that matches nothing passes without running a test (gt-j6vlz).
+func TestTierSweepSlowcheckFinding(t *testing.T) {
+	t.Parallel()
+	// The line hq-in8pg quotes from the host's sweep log.
+	const pkgLine = "slowcheck: TestHostRehearsal 42.5s in gt.local/devops/tests/host-rehearsal is over the 30s integration cap and is not in internal/testpolicy/slow.txt: the test waits on a container"
+	if got, ok := tierSweepFindingLine(pkgLine); !ok || got != pkgLine {
+		t.Fatalf("finding line = (%q, %v), want the line whole", got, ok)
+	}
+	if name, ok := tierSweepFindingTest(pkgLine); !ok || name != "TestHostRehearsal" {
+		t.Errorf("test = (%q, %v), want the test the line names", name, ok)
+	}
+	if name, ok := tierSweepFindingTest("slowcheck: TestHostRehearsal/sub 42.5s in gt.local/devops/tests/host-rehearsal: it waits"); !ok || name != "TestHostRehearsal" {
+		t.Errorf("subtest test = (%q, %v), want the top-level test", name, ok)
+	}
+	// A line in another spelling is still a finding for this daemon: it is
+	// quoted, and its test is named when the marker opens with one.
+	for _, line := range []string{
+		"slowcheck: TestHostRehearsal is over the cap",
+		"slowcheck: TestHostRehearsal 2m5.5s some other tail",
+		"  slowcheck: TestHostRehearsal built a container and gave up\n",
+	} {
+		if _, ok := tierSweepFindingLine(line); !ok {
+			t.Errorf("%q is not read as a finding, want it kept", line)
+		}
+		if name, ok := tierSweepFindingTest(line); !ok || name != "TestHostRehearsal" {
+			t.Errorf("%q test = (%q, %v), want the test", line, name, ok)
+		}
+	}
+	// A marker line whose first token names no test yields no name, so no
+	// filter is invented from it.
+	for _, line := range []string{
+		"slowcheck:",
+		"slowcheck: 42.5s in gt.local/devops/tests/host-rehearsal over the cap",
+		"slowcheck: TestMain 40s in gt.local/devops/tests/host-rehearsal",
+		"slowcheck: TESThelper does nothing",
+	} {
+		if _, ok := tierSweepFindingTest(line); ok {
+			t.Errorf("%q named a test, want no filter from a token that is no test name", line)
+		}
+	}
+	// A line without the marker is no finding.
+	for _, line := range []string{
+		"--- FAIL: TestHostRehearsal (0.1s)",
+		"",
+		"go: downloading gt.local/devops",
+	} {
+		if got, ok := tierSweepFindingLine(line); ok {
+			t.Errorf("%q read as a finding line (%q), want it ignored", line, got)
+		}
+	}
+	// The unit log is the attribution: the script writes one unit's own output
+	// per file, so every marker line in it is that unit's finding, whatever
+	// package path it spells, and repeats are quoted once.
+	log := pkgLine + "\n" + pkgLine + "\nslowcheck: TestOther 30s in some/other/pkg\n"
+	if got := tierSweepSlowcheckFindings(log); len(got) != 2 {
+		t.Errorf("findings = %v, want the two distinct lines of the log", got)
+	}
+	if got := tierSweepSlowcheckFindings(""); len(got) != 0 {
+		t.Errorf("findings = %v, want none from an empty log", got)
+	}
+}
+
+// A cap trip writes no FAIL line: slowcheck's finding in the unit's own log is
+// the only record of it. The bead names the test in a narrow -run filter and
+// quotes the finding inline, so a polecat that cannot open the host's log still
+// knows a cap trip from a real failure (gt-j6vlz).
+func TestTierSweepBead_NamesASlowcheckOnlyRed(t *testing.T) {
+	t.Parallel()
+	const finding = "slowcheck: TestIntegrationX 42.5s in gt.local/devops/tests/host-rehearsal is over the 30s integration cap and is not in internal/testpolicy/slow.txt: it waits"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "integration-tests_host-rehearsal.log"), []byte(finding+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration ./tests/host-rehearsal ...\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 9, Failed: 1, FailedNames: []string{"./tests/host-rehearsal"}, Log: stageLog, LogDir: dir},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	opts := bd.created[0]
+	if v := lintTierSweepBead(opts); !v.Clean() {
+		t.Fatalf("the slowcheck bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+	}
+	want := "`gt slot run -- env GT_TEST_DOCKER=1 go test -tags integration -run '^(TestIntegrationX)$' -count=1 ./tests/host-rehearsal` passes"
+	if !strings.Contains(opts.Acceptance, want) {
+		t.Errorf("acceptance = %q, want it to carry %q", opts.Acceptance, want)
+	}
+	if got := specdispatch.Sections(opts.Description)["acceptance"]; got != opts.Acceptance {
+		t.Errorf("acceptance field and description disagree:\nfield: %q\nsection: %q", opts.Acceptance, got)
+	}
+	if !strings.Contains(opts.Description, finding) {
+		t.Errorf("description does not quote the finding inline:\n%s", opts.Description)
+	}
+}
+
+// The bead reads a finding on slowcheck's marker alone, so the line reaches it
+// whatever spelling follows: each case below is quoted inline, and the filter
+// names the test the marker opens with. slowcheck's source is in no repo of
+// this sandbox, so a line in a spelling the daemon has not seen must still reach
+// the polecat. A line whose token is no test name is quoted without a filter,
+// because a filter over a name that does not exist passes without running
+// anything (gt-j6vlz).
+func TestTierSweepBead_QuotingDoesNotDependOnTheLineShape(t *testing.T) {
+	t.Parallel()
+	const pkg = "./tests/host-rehearsal"
+	for _, tc := range []struct {
+		name    string
+		finding string
+		filter  bool
+	}{
+		{
+			name:    "the line the host log showed",
+			finding: "slowcheck: TestIntegrationX 42.5s in gt.local/devops/tests/host-rehearsal is over the 30s integration cap and is not in internal/testpolicy/slow.txt: it waits",
+			filter:  true,
+		},
+		{
+			name:    "a shorter tail",
+			finding: "slowcheck: TestIntegrationX over the cap at 42.5s",
+			filter:  true,
+		},
+		{
+			name:    "a tail in another sentence",
+			finding: "slowcheck: TestIntegrationX took too long, so the harness gave up",
+			filter:  true,
+		},
+		{
+			name:    "no test name to read",
+			finding: "slowcheck: the harness gave up before it named one",
+			filter:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "integration-tests_host-rehearsal.log"), []byte(tc.finding+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration "+pkg+" ...\n")
+			d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+			red := map[string]tierSweepTierResult{
+				"integration": {Verdict: tierSweepRed, Passed: 9, Failed: 1, FailedNames: []string{pkg}, Log: stageLog, LogDir: dir},
+			}
+			d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+			if len(bd.created) != 1 {
+				t.Fatalf("created = %+v, want one bead", bd.created)
+			}
+			opts := bd.created[0]
+			if v := lintTierSweepBead(opts); !v.Clean() {
+				t.Fatalf("the bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+			}
+			if !strings.Contains(opts.Description, tc.finding) {
+				t.Errorf("description does not quote the finding:\n%s", opts.Description)
+			}
+			filter := "go test -tags integration -run '^(TestIntegrationX)$' -count=1 " + pkg
+			if got := strings.Contains(opts.Acceptance, filter); got != tc.filter {
+				t.Errorf("acceptance carries the filter = %v, want %v: %q", got, tc.filter, opts.Acceptance)
+			}
+			if !tc.filter && !strings.Contains(opts.Acceptance, "Read the tier log") {
+				t.Errorf("acceptance = %q, want the fallback for a finding that names no test", opts.Acceptance)
+			}
+		})
+	}
+}
+
+// A unit can fail both ways: a FAIL line in the stage log and a slowcheck
+// finding in its own log. The filter names each test once, and a test only a
+// finding names is added rather than the finding being dropped (gt-j6vlz).
+func TestTierSweepBead_FailAndFindingNameEachOnce(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/cmd"
+	dir := t.TempDir()
+	unitLog := "" +
+		"slowcheck: TestAlpha 31.0s in github.com/steveyegge/gastown/internal/cmd is over the 30s integration cap and is not in internal/testpolicy/slow.txt: the test builds a container\n" +
+		"slowcheck: TestGamma 33.0s in github.com/steveyegge/gastown/internal/cmd is over the 30s integration cap and is not in internal/testpolicy/slow.txt: the test builds a container\n"
+	if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd.log"), []byte(unitLog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageLog := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration "+pkg+" ...\n"+
+		"    --- FAIL: TestAlpha (0.12s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 9, Failed: 1, FailedNames: []string{pkg}, Log: stageLog, LogDir: dir},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	acceptance := bd.created[0].Acceptance
+	want := "`gt slot run -- env GT_TEST_DOCKER=1 go test -tags integration -run '^(TestAlpha|TestGamma)$' -count=1 " + pkg + "` passes"
+	if !strings.Contains(acceptance, want) {
+		t.Errorf("acceptance = %q, want it to carry %q", acceptance, want)
+	}
+	if got := strings.Count(acceptance, "TestAlpha"); got != 1 {
+		t.Errorf("acceptance names TestAlpha %d times, want once: %q", got, acceptance)
+	}
+}
+
+// Filing a bead never depends on the unit log still existing: a missing
+// directory, a missing unit log and a log past the read limit all leave the
+// fallback acceptance, a bounded description and a shaped bead (gt-j6vlz).
+func TestTierSweepBead_UnreadableUnitLogFallsBack(t *testing.T) {
+	t.Parallel()
+	const finding = "slowcheck: TestIntegrationX 42.5s in gt.local/devops/tests/host-rehearsal is over the 30s integration cap and is not in internal/testpolicy/slow.txt: the test waits on a container\n"
+	oversized := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		pad := strings.Repeat("# filler\n", tierSweepLogReadLimit/len("# filler\n")+1)
+		if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd.log"), []byte(pad+finding), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	for _, tc := range []struct {
+		name   string
+		logDir string
+	}{
+		{name: "missing directory", logDir: filepath.Join(t.TempDir(), "gone")},
+		{name: "missing unit log", logDir: t.TempDir()},
+		{name: "unit log past the read limit", logDir: oversized(t)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration ./internal/cmd ...\n")
+			d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+			red := map[string]tierSweepTierResult{
+				"integration": {Verdict: tierSweepRed, Passed: 1, Failed: 1, FailedNames: []string{"./internal/cmd"}, Log: stageLog, LogDir: tc.logDir},
+			}
+			d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+			if len(bd.created) != 1 {
+				t.Fatalf("created = %+v, want a bead filed with no readable unit log", bd.created)
+			}
+			opts := bd.created[0]
+			if v := lintTierSweepBead(opts); !v.Clean() {
+				t.Errorf("the fallback bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+			}
+			if !strings.Contains(opts.Acceptance, "Read the tier log") || !strings.Contains(opts.Acceptance, "narrow -run filter") {
+				t.Errorf("acceptance = %q, want the fallback item", opts.Acceptance)
+			}
+			if strings.Contains(opts.Acceptance, "go test") {
+				t.Errorf("acceptance = %q, want no invented command", opts.Acceptance)
+			}
+			if strings.Contains(opts.Description, "slowcheck:") {
+				t.Errorf("description quotes a finding no readable log holds:\n%s", opts.Description)
+			}
+		})
+	}
+}
+
+// A control character inside a finding leaves no residue when it is dropped: a
+// run of spaces around it reads as one, and a line cut short never ends on a
+// space before its "..." marker. The quoted line then reads as slowcheck's own
+// text, with nothing of this daemon's quoting in it (gt-j6vlz).
+func TestTierSweepBead_QuotedFindingLeavesNoResidue(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/cmd"
+	long := "slowcheck: TestAlpha 31.0s in github.com/steveyegge/gastown/internal/cmd is over the cap: " + strings.Repeat("the test waits on a container that never starts. ", 6)
+	dir := t.TempDir()
+	unitLog := "slowcheck: TestAlpha 31.0s in github.com/steveyegge/gastown/internal/cmd \x01\x02 is over the cap\n" +
+		"slowcheck: TestBeta 31.0s in github.com/steveyegge/gastown/internal/cmd is over the cap:  \x1b\n" +
+		long + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd.log"), []byte(unitLog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration "+pkg+" ...\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 9, Failed: 1, FailedNames: []string{pkg}, Log: stageLog, LogDir: dir},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	var quoted int
+	for _, line := range strings.Split(bd.created[0].Description, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, tierSweepSlowcheckPrefix) {
+			continue
+		}
+		quoted++
+		body := strings.TrimPrefix(line, tierSweepSlowcheckPrefix)
+		if strings.Contains(body, "  ") {
+			t.Errorf("a dropped control character left a double space: %q", line)
+		}
+		if strings.HasSuffix(body, " ...") {
+			t.Errorf("a clipped finding ends on a space before its marker: %q", line)
+		}
+	}
+	if quoted != 3 {
+		t.Errorf("quoted %d findings, want 3: %q", quoted, bd.created[0].Description)
+	}
+}
+
+// A bead quotes a bounded, sanitized sample of the findings: three lines at
+// most, each cut to tierSweepFindingLineLen and marked, with control characters
+// dropped and invalid UTF-8 replaced, because the text is slowcheck's account of
+// someone else's test run and a polecat reads the bead (gt-j6vlz).
+func TestTierSweepBead_QuotesFindingsBoundedAndSanitized(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/cmd"
+	const tail = " is over the 30s integration cap and is not in internal/testpolicy/slow.txt: "
+	finding := func(name, why string) string {
+		return "slowcheck: " + name + " 31.0s in github.com/steveyegge/gastown/internal/cmd" + tail + why + "\n"
+	}
+	longWhy := strings.Repeat("the test waits on a container that never starts. ", 10)
+	// An escape sequence and a stray invalid byte, the kind a test's own output
+	// can leave in the log slowcheck writes.
+	noisyWhy := "\x1b\xffab and terminal red"
+	dir := t.TempDir()
+	unitLog := finding("TestAlpha", longWhy) +
+		finding("TestBeta", noisyWhy) +
+		finding("TestGamma", "the test builds a container") +
+		finding("TestDelta", "the test builds a container") +
+		finding("TestEpsilon", "the test builds a container")
+	if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd.log"), []byte(unitLog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration "+pkg+" ...\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 9, Failed: 1, FailedNames: []string{pkg}, Log: stageLog, LogDir: dir},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	opts := bd.created[0]
+	if v := lintTierSweepBead(opts); !v.Clean() {
+		t.Fatalf("the bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+	}
+	if !utf8.ValidString(opts.Description) {
+		t.Errorf("description is not valid UTF-8:\n%q", opts.Description)
+	}
+	for _, r := range opts.Description {
+		if unicode.IsControl(r) && r != '\n' {
+			t.Errorf("description holds control character %q:\n%q", r, opts.Description)
+			break
+		}
+	}
+	if got := strings.Count(opts.Description, "slowcheck: "); got != tierSweepFindingLines {
+		t.Errorf("description quotes %d findings, want %d:\n%s", got, tierSweepFindingLines, opts.Description)
+	}
+	for _, want := range []string{"TestAlpha", "TestBeta", "TestGamma"} {
+		if !strings.Contains(opts.Description, "slowcheck: "+want+" ") {
+			t.Errorf("description does not quote %s:\n%s", want, opts.Description)
+		}
+	}
+	for _, unwanted := range []string{"TestDelta", "TestEpsilon"} {
+		if strings.Contains(opts.Description, "slowcheck: "+unwanted+" ") {
+			t.Errorf("description quotes %s past the cap:\n%s", unwanted, opts.Description)
+		}
+	}
+	if strings.Contains(opts.Description, longWhy) {
+		t.Errorf("description quotes the long reason whole, want it clipped:\n%s", opts.Description)
+	}
+	for _, line := range strings.Split(opts.Description, "\n") {
+		quoted, ok := strings.CutPrefix(strings.TrimSpace(line), "slowcheck: ")
+		if !ok {
+			continue
+		}
+		if len(quoted) > tierSweepFindingLineLen+len("...") {
+			t.Errorf("quoted finding is %d bytes, want at most %d: %q", len(quoted), tierSweepFindingLineLen+len("..."), quoted)
+		}
+	}
+	// The escape sequence is gone and the invalid byte is a replacement
+	// character, but the words around them stay readable.
+	if strings.ContainsRune(opts.Description, 0x1b) {
+		t.Errorf("description pastes an escape sequence into the bead:\n%q", opts.Description)
+	}
+	if !strings.Contains(opts.Description, "\uFFFDab") {
+		t.Errorf("description does not keep the readable text of the noisy finding:\n%s", opts.Description)
 	}
 }
 
@@ -478,8 +881,48 @@ func TestTierSweepBead_BoundedReadKeepsNoPartialLine(t *testing.T) {
 	pad := strings.Repeat("#", tierSweepLogReadLimit-len(prefix)-len(failLine)/2-7)
 	logPath := tierSweepWriteTestLog(t, prefix+pad+"\n"+failLine)
 
-	names, tag := tierSweepUnitFailures(logPath, "integration", "./internal/cmd")
-	if len(names) != 0 || tag != "" {
-		t.Fatalf("failures = %v (tag %q), want none from a read cut mid fail line", names, tag)
+	red := tierSweepReadUnitRed(tierSweepTierResult{Log: logPath}, "integration", "./internal/cmd")
+	if len(red.Names) != 0 || red.BuildTag != "" {
+		t.Fatalf("failures = %v (tag %q), want none from a read cut mid fail line", red.Names, red.BuildTag)
+	}
+}
+
+// A re-run filter taken from a log line can match no test, and go test then
+// passes having run nothing. The acceptance item for a Go tier says what that
+// output means, so a worker does not tick a box nothing was run for; the shell
+// tier runs a script, where the sentence would mean nothing.
+func TestTierSweepAcceptanceItemSaysAnEmptyRunProvesNothing(t *testing.T) {
+	t.Parallel()
+	red := tierSweepUnitRed{Names: []string{"TestSlow"}}
+	for _, tier := range []string{"integration", "race"} {
+		item := tierSweepAcceptanceItem(tier, "./internal/daemon", tierSweepTierResult{}, red)
+		if !strings.Contains(item, "-run '^(TestSlow)$'") {
+			t.Fatalf("%s item = %q, want the narrow command", tier, item)
+		}
+		if !strings.Contains(item, "no tests to run") || !strings.Contains(item, "instead of ticking this box") {
+			t.Errorf("%s item = %q, want it to say a run of no tests proves nothing", tier, item)
+		}
+	}
+	shell := tierSweepAcceptanceItem("shell", "scripts/example-test.sh", tierSweepTierResult{}, red)
+	if strings.Contains(shell, "no tests to run") {
+		t.Errorf("shell item = %q, want no go test wording for a script", shell)
+	}
+}
+
+// A tab or other whitespace control in a quoted finding separates words as it
+// did, so it reads as a space; any other control character is dropped.
+func TestTierSweepClipReadsWhitespaceControlsAsSpaces(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"a tab", "TestSlow\ttook\t12s", "TestSlow took 12s"},
+		{"a newline and a carriage return", "a\r\nb", "a b"},
+		{"an escape sequence is dropped", "a\x1b[31mb", "a[31mb"},
+		{"a run of mixed whitespace collapses", "a \t \n b", "a b"},
+	} {
+		if got := tierSweepClip(tc.in, 200); got != tc.want {
+			t.Errorf("%s: tierSweepClip(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
 	}
 }

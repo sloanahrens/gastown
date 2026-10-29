@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -41,6 +44,26 @@ const (
 	// so a file past this size is not the log the sweep wrote, and reading it
 	// whole would cost the daemon's memory to learn nothing.
 	tierSweepLogReadLimit = 4 << 20
+
+	// tierSweepSlowcheckPrefix is the marker every slowcheck finding line
+	// opens with: slowcheck's own name for itself, which the finding line the
+	// host log showed carries (hq-in8pg), and the marker gt-j6vlz names when it
+	// asks for "the slowcheck: finding lines". Such a run writes no FAIL line,
+	// so the stage log the sweep captures names no test for it (gt-j6vlz).
+	//
+	// Only the marker is matched: slowcheck's source is not on this host, so a
+	// rule for the rest of the line could not be checked against its writer, and
+	// a line in another spelling would be lost. The whole line is quoted, and a
+	// test name is taken only from the token after the marker when it is one.
+	tierSweepSlowcheckPrefix = "slowcheck: "
+
+	// tierSweepFindingLines caps how many findings a bead quotes: the polecat
+	// needs the shape of the overrun, not every line of it.
+	tierSweepFindingLines = 3
+
+	// tierSweepFindingLineLen caps each quoted finding. slowcheck's line ends
+	// with the reason it judged the test slow, which can run long.
+	tierSweepFindingLineLen = 160
 )
 
 // tierSweepUnitRE is what a failing unit from a summary line must look like
@@ -165,36 +188,137 @@ func tierSweepReadLog(path string) (string, error) {
 	return string(data), nil
 }
 
-// tierSweepUnitFailures reads the tier log and returns the top-level tests the
-// tier's runs of unit failed, in log order and deduplicated, with the build
-// tag those runs used. A log that cannot be read names none: filing a shaped
-// bead must not depend on the log still existing. A unit the script ran both
-// tagged and untagged has no single command that re-runs it, so it names none
-// either.
-func tierSweepUnitFailures(logPath, tier, unit string) (names []string, buildTag string) {
-	if strings.TrimSpace(logPath) == "" {
-		return nil, ""
+// tierSweepUnitLogPath is the log the script wrote one unit's own output to:
+// "<marker tier>-<package with ./ dropped and / turned into _>.log" under the
+// directory its summary line named. Empty when the sweep recorded no directory,
+// or when the unit is not a name the script could have logged.
+func tierSweepUnitLogPath(logDir, mtier, unit string) string {
+	if strings.TrimSpace(logDir) == "" || !tierSweepUnitIsName(unit) {
+		return ""
 	}
-	log, err := tierSweepReadLog(logPath)
-	if err != nil {
-		return nil, ""
+	base := strings.ReplaceAll(strings.TrimPrefix(unit, "./"), "/", "_")
+	return filepath.Join(logDir, mtier+"-"+base+".log")
+}
+
+// tierSweepFindingTestRE is the token a finding line can be read for: a
+// top-level test's name, as go test runs one. "TestMain" is no test, so a -run
+// filter naming it matches nothing and passes without running anything
+// (gt-j6vlz).
+var tierSweepFindingTestRE = regexp.MustCompile(`^Test[A-Z_0-9][A-Za-z0-9_]*$`)
+
+// tierSweepFindingLine reports whether line is a finding slowcheck wrote, and
+// returns it trimmed. Only the marker is read: the rest of the line is kept
+// exactly as slowcheck wrote it, because it is quoted into the bead and a
+// reader must be able to see the finding whether or not its spelling matches
+// any this daemon knows (gt-j6vlz).
+func tierSweepFindingLine(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, tierSweepSlowcheckPrefix) {
+		return "", false
 	}
-	units := tierSweepLogUnits(log)
-	var tag string
+	return line, true
+}
+
+// tierSweepFindingTest reads the test a finding line names, from the token the
+// marker opens with. A line whose token is not a test's name names no test:
+// the finding is still quoted, but no -run filter is invented from it, since a
+// filter that matches nothing passes without running a test (gt-j6vlz). A
+// subtest's entry repeats the parent's name with a "/" suffix; the name stops
+// there, the way a FAIL line's name is cut.
+func tierSweepFindingTest(line string) (string, bool) {
+	line, ok := tierSweepFindingLine(line)
+	if !ok {
+		return "", false
+	}
+	fields := strings.Fields(strings.TrimPrefix(line, tierSweepSlowcheckPrefix))
+	if len(fields) == 0 {
+		return "", false
+	}
+	name := fields[0]
+	if i := strings.IndexByte(name, '/'); i >= 0 {
+		name = name[:i]
+	}
+	if !tierSweepFindingTestRE.MatchString(name) || name == "TestMain" {
+		return "", false
+	}
+	return name, true
+}
+
+// tierSweepSlowcheckFindings returns the finding lines a unit log holds, in log
+// order and deduplicated. The whole line is kept, because the bead quotes it;
+// the test name a -run filter uses is the one tierSweepFindingTest names.
+//
+// Every line of the log belongs to the unit the log is named for: the script
+// writes one unit's own output to its own file
+// (scripts/tier-sweep.sh: "$TIER_SWEEP_LOGDIR/$tier-<pkg>.log"). Nothing in a
+// line's spelling of a package is parsed or compared, so a finding cannot be
+// lost to a spelling this daemon does not know, and cannot be handed to another
+// unit either (gt-j6vlz).
+func tierSweepSlowcheckFindings(log string) []string {
+	var lines []string
+	for _, line := range strings.Split(log, "\n") {
+		finding, ok := tierSweepFindingLine(line)
+		if !ok {
+			continue
+		}
+		lines = append(lines, finding)
+	}
+	return tierSweepUnique(lines)
+}
+
+// tierSweepUnitRed is what a red run of one unit left in the sweep's logs.
+type tierSweepUnitRed struct {
+	// Names are the top-level tests the stage log's FAIL lines name.
+	Names []string
+	// Findings are slowcheck's finding lines, read from the unit's own log.
+	Findings []string
+	// BuildTag is the build tag the unit's runs used, empty for the untagged
+	// docker list.
+	BuildTag string
+}
+
+// tierSweepReadUnitRed reads what a red run of one unit left in the sweep's
+// logs: the top-level tests the stage log's FAIL lines name, the slowcheck
+// findings that unit's own log holds, and the build tag the runs used. A
+// finding is evidence of its own: a cap trip writes no FAIL line, so the stage
+// log names nothing for it and only the unit log does (gt-j6vlz). Both logs are
+// read here, once, and the result is passed to everything that renders the bead.
+//
+// A log that cannot be read contributes nothing, so filing a shaped bead never
+// depends on a log surviving. A unit the script ran both tagged and untagged
+// names nothing, because no single command re-runs both.
+func tierSweepReadUnitRed(ts tierSweepTierResult, tier, unit string) tierSweepUnitRed {
+	var red tierSweepUnitRed
+	stage := ""
+	if strings.TrimSpace(ts.Log) != "" {
+		if log, err := tierSweepReadLog(ts.Log); err == nil {
+			stage = log
+		}
+	}
+	units := tierSweepLogUnits(stage)
 	tagged := false
 	for _, mtier := range tierSweepLogMarkerTiers(tier) {
-		got := units[mtier+"\x00"+unit]
-		if len(got) == 0 {
+		names := append([]string(nil), units[mtier+"\x00"+unit]...)
+		var findings []string
+		if path := tierSweepUnitLogPath(ts.LogDir, mtier, unit); path != "" {
+			if log, err := tierSweepReadLog(path); err == nil {
+				findings = tierSweepSlowcheckFindings(log)
+			}
+		}
+		if len(names) == 0 && len(findings) == 0 {
 			continue
 		}
 		mtag := tierSweepMarkerBuildTag(mtier)
-		if tagged && mtag != tag {
-			return nil, ""
+		if tagged && mtag != red.BuildTag {
+			return tierSweepUnitRed{}
 		}
-		tag, tagged = mtag, true
-		names = append(names, got...)
+		red.BuildTag, tagged = mtag, true
+		red.Names = append(red.Names, names...)
+		red.Findings = append(red.Findings, findings...)
 	}
-	return tierSweepUnique(names), tag
+	red.Names = tierSweepUnique(red.Names)
+	red.Findings = tierSweepUnique(red.Findings)
+	return red
 }
 
 // tierSweepUnique drops repeats while keeping the log's order.
@@ -222,14 +346,22 @@ func tierSweepUnique(names []string) []string {
 // tests skip and a green tick proves nothing, and gt slot run around it, or
 // the container-suite guard refuses it. Empty when no command can be named
 // from what the sweep knows, so the caller falls back to the log.
-func tierSweepCheckCommand(tier, unit string, ts tierSweepTierResult) string {
+func tierSweepCheckCommand(tier, unit string, red tierSweepUnitRed) string {
 	if !tierSweepUnitIsName(unit) {
 		return ""
 	}
 	if tier == "shell" {
 		return "GT_TEST_DOCKER=0 bash " + unit
 	}
-	names, tag := tierSweepUnitFailures(ts.Log, tier, unit)
+	// A finding names its test in its own line, so the filter it earns is the
+	// one a FAIL line earns. A test with both is named once.
+	names := append([]string(nil), red.Names...)
+	for _, line := range red.Findings {
+		if name, ok := tierSweepFindingTest(line); ok {
+			names = append(names, name)
+		}
+	}
+	names = tierSweepUnique(names)
 	if len(names) == 0 {
 		return ""
 	}
@@ -240,8 +372,8 @@ func tierSweepCheckCommand(tier, unit string, ts tierSweepTierResult) string {
 		// so its re-run keeps -race.
 		b.WriteString("-race ")
 	}
-	if tag != "" {
-		b.WriteString("-tags " + tag + " ")
+	if red.BuildTag != "" {
+		b.WriteString("-tags " + red.BuildTag + " ")
 	}
 	b.WriteString("-run '^(")
 	b.WriteString(strings.Join(names, "|"))
@@ -266,9 +398,16 @@ func tierSweepUnitSubject(tier, unit string) string {
 // log, no failing test line, a unit name it cannot trust) it asks the polecat
 // to read the log and re-run the test, which is still a check one worker can
 // do alone.
-func tierSweepAcceptanceItem(tier, unit string, ts tierSweepTierResult) string {
-	if cmd := tierSweepCheckCommand(tier, unit, ts); cmd != "" {
-		return "- [ ] `" + cmd + "` passes on a worktree rebased onto main."
+func tierSweepAcceptanceItem(tier, unit string, ts tierSweepTierResult, red tierSweepUnitRed) string {
+	if cmd := tierSweepCheckCommand(tier, unit, red); cmd != "" {
+		item := "- [ ] `" + cmd + "` passes on a worktree rebased onto main."
+		if tier != "shell" {
+			// A -run filter taken from a log line can match no test, and go test
+			// then passes having run nothing; the item says what that output means
+			// so a worker does not tick a box nothing was run for.
+			item += " Output that says `no tests to run` ran nothing: the name matched no test, so say so on this bead instead of ticking this box."
+		}
+		return item
 	}
 	log := strings.TrimSpace(ts.Log)
 	where := ""
@@ -283,6 +422,74 @@ func tierSweepAcceptanceItem(tier, unit string, ts tierSweepTierResult) string {
 func tierSweepRedDetail(tier, sha string, ts tierSweepTierResult) string {
 	return fmt.Sprintf("%s tier RED on main at %s (%d passed, %d failed). Log: %s",
 		tier, shortSHA(sha), ts.Passed, ts.Failed, ts.Log)
+}
+
+// tierSweepClip quotes line for an agent-read bead: at most n bytes, cut on a
+// rune boundary and marked with "..." so a reader can tell a clipped finding
+// from a complete one. A byte that is not valid UTF-8 becomes the replacement
+// character and a control character (an escape sequence slowcheck echoed from
+// a test's output included) is dropped, so the quoting keeps the finding's
+// printable text instead of losing the line or pasting terminal control into a
+// bead (gt-j6vlz). A tab or other whitespace control reads as a space, so it
+// separates words as it did; any other control character is dropped. A run of
+// spaces is collapsed to one, and a cut never ends on a space before the "..."
+// marker, so the quoted line reads as slowcheck's text with nothing of the
+// quoting in it.
+func tierSweepClip(line string, n int) string {
+	var b strings.Builder
+	b.Grow(n)
+	cut := false
+	var last rune = -1
+	for _, r := range line {
+		// Whitespace controls separate words, so they read as a space; any
+		// other control character is dropped.
+		switch r {
+		case '\t', '\n', '\r', '\v', '\f':
+			r = ' '
+		default:
+			if unicode.IsControl(r) {
+				continue
+			}
+		}
+		if r == ' ' && last == ' ' {
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > n {
+			cut = true
+			break
+		}
+		b.WriteRune(r)
+		last = r
+	}
+	quoted := strings.TrimRight(b.String(), " ")
+	if !cut {
+		return quoted
+	}
+	return quoted + "..."
+}
+
+// tierSweepFindingsBlock renders slowcheck's findings for the bead's own unit
+// inline, so a polecat that cannot open the host's unit log can tell a cap trip
+// from a real failure and still name the test it must re-run. Each line is
+// quoted, not trusted: it is text slowcheck wrote about someone else's test
+// run, so it is sanitized and bounded before it reaches a bead an agent reads.
+// The whole line is quoted whatever its spelling, so a finding is never lost to
+// a shape this daemon does not know. Empty when the unit has no readable
+// finding, which leaves the bead as it was (gt-j6vlz).
+func tierSweepFindingsBlock(red tierSweepUnitRed) string {
+	findings := red.Findings
+	if len(findings) == 0 {
+		return ""
+	}
+	if len(findings) > tierSweepFindingLines {
+		findings = findings[:tierSweepFindingLines]
+	}
+	var b strings.Builder
+	b.WriteString("slowcheck's findings for this unit, quoted from its log (slowcheck's own lines, not FAIL lines; read each for what it reports):\n")
+	for _, line := range findings {
+		b.WriteString("  " + tierSweepClip(line, tierSweepFindingLineLen) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // tierSweepTemplate is the spec template the dispatcher lints against: the
@@ -337,7 +544,8 @@ func tierSweepSectionBody(section, tier, subject, sha, item string) string {
 // that passes the lint (gt-uzkic). The Acceptance section always closes the
 // description unless the template names it itself.
 func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult, tmpl specdispatch.Template) (description, acceptance string) {
-	item := tierSweepAcceptanceItem(tier, unit, ts)
+	red := tierSweepReadUnitRed(ts, tier, unit)
+	item := tierSweepAcceptanceItem(tier, unit, ts, red)
 	subject := tierSweepUnitSubject(tier, unit)
 	names := append([]string(nil), tmpl.Sections...)
 	if !slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, "acceptance") }) {
@@ -348,7 +556,13 @@ func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult, tmpl spe
 		body := tierSweepSectionBody(name, tier, subject, sha, item)
 		parts = append(parts, "## "+name+"\n\n"+body)
 	}
-	return tierSweepBeadIntro + tierSweepRedDetail(tier, sha, ts) + "\n\n" + strings.Join(parts, "\n\n") + "\n", item
+	detail := tierSweepBeadIntro + tierSweepRedDetail(tier, sha, ts)
+	// The findings follow the one-line detail, so a polecat that cannot read
+	// the host's unit log still learns what tripped the cap.
+	if block := tierSweepFindingsBlock(red); block != "" {
+		detail += "\n\n" + block
+	}
+	return detail + "\n\n" + strings.Join(parts, "\n\n") + "\n", item
 }
 
 // tierSweepReshapeOpen rewrites the open sweep bead for a unit that a red run

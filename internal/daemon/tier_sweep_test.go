@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -1252,6 +1253,31 @@ func TestParseTierSweepSummaries(t *testing.T) {
 	in := got["integration"]
 	if in.Verdict != tierSweepGreen || in.Passed != 29 || len(in.FailedNames) != 0 {
 		t.Errorf("integration = %+v", in)
+	}
+}
+
+// The summary line's "(logs <dir>)" group is the directory the script wrote
+// each unit's own log into. The daemon replaces Log with the stage log it
+// writes, so without the separate field the only path to a unit log is lost and
+// a slowcheck-only red can never name its test (gt-j6vlz). A record written
+// before the field existed must still decode.
+func TestTierSweepResultKeepsTheUnitLogDir(t *testing.T) {
+	t.Parallel()
+	got := parseTierSweepSummaries("tier-sweep: integration RED passed=9 failed=1 skipped=0 failed: ./tests/host-rehearsal (logs /x/y) in 2m14s")
+	res, ok := got["integration"]
+	if !ok {
+		t.Fatalf("summaries = %+v, want the integration verdict", got)
+	}
+	if res.LogDir != "/x/y" {
+		t.Errorf("log dir = %q, want /x/y from the summary line", res.LogDir)
+	}
+
+	var st tierSweepState
+	if err := json.Unmarshal([]byte(`{"tiers":{"integration":{"verdict":"RED","passed":9,"failed":1,"failed_names":["./tests/host-rehearsal"]}}}`), &st); err != nil {
+		t.Fatalf("a record without the field does not decode: %v", err)
+	}
+	if dir := st.Tiers["integration"].LogDir; dir != "" {
+		t.Errorf("log dir = %q, want empty for a record written before the field", dir)
 	}
 }
 
