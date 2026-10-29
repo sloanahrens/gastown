@@ -368,28 +368,38 @@ func TestWithSlotReleasesOnInfraFailureAndRefusesWithoutTheSlot(t *testing.T) {
 // (gt-7k0hz).
 func TestWithSlotForCommandSkipsADeclaredContainerFreeCommand(t *testing.T) {
 	t.Parallel()
-	const cmd = "GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh"
-	s := &scriptedRun{answers: map[string]scriptedAnswer{cmd: {output: "tier-sweep: shell GREEN\n"}}}
-	holds := 0
-	g := WithSlotForCommand(CommandGate{Steps: []Step{{Name: "test", Command: cmd}}}, "/town", "gastown/post-land", cmd)
-	g.run = s.run
-	g.holdSlot = func(context.Context, string, string) (func(*int), error) {
-		holds++
-		return func(*int) {}, nil
-	}
-	if res := g.Run(context.Background(), "/w"); !res.Passed {
-		t.Fatalf("gate = %+v", res)
-	}
-	if holds != 0 {
-		t.Errorf("holds taken = %d, want none for a container-free command", holds)
-	}
-	for _, st := range g.Steps {
-		if st.SlotRole != "" {
-			t.Errorf("step %q carries slot role %q", st.Name, st.SlotRole)
-		}
-	}
-	if len(s.calls) != 1 {
-		t.Errorf("steps run = %d, want the command once", len(s.calls))
+	for _, cmd := range []string{
+		"GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh",
+		"cd /w && GT_TEST_DOCKER=0 make test",
+		"make lint; GT_TEST_DOCKER=0 make test",
+		"true | GT_TEST_DOCKER=0 make test",
+		"GT_TEST_DOCKER=0",
+	} {
+		t.Run(cmd, func(t *testing.T) {
+			t.Parallel()
+			s := &scriptedRun{answers: map[string]scriptedAnswer{cmd: {output: "tier-sweep: shell GREEN\n"}}}
+			holds := 0
+			g := WithSlotForCommand(CommandGate{Steps: []Step{{Name: "test", Command: cmd}}}, "/town", "gastown/post-land", cmd)
+			g.run = s.run
+			g.holdSlot = func(context.Context, string, string) (func(*int), error) {
+				holds++
+				return func(*int) {}, nil
+			}
+			if res := g.Run(context.Background(), "/w"); !res.Passed {
+				t.Fatalf("gate = %+v", res)
+			}
+			if holds != 0 {
+				t.Errorf("holds taken = %d, want none for a container-free command", holds)
+			}
+			for _, st := range g.Steps {
+				if st.SlotRole != "" {
+					t.Errorf("step %q carries slot role %q", st.Name, st.SlotRole)
+				}
+			}
+			if len(s.calls) != 1 {
+				t.Errorf("steps run = %d, want the command once", len(s.calls))
+			}
+		})
 	}
 }
 
