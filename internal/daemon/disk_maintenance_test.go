@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
@@ -68,6 +69,7 @@ type diskMaintFakes struct {
 	env        map[string]string
 	quiet      bool
 	quietWhy   string
+	notify     *notifyfake.Recorder
 }
 
 // diskMaintTestDaemon builds a daemon whose patrol runs inline, on a fixed
@@ -75,11 +77,12 @@ type diskMaintFakes struct {
 func diskMaintTestDaemon(t *testing.T) (*Daemon, *bytes.Buffer, *diskMaintFakes) {
 	t.Helper()
 	var buf bytes.Buffer
-	f := &diskMaintFakes{target: &diskMaintFakeTarget{}, quiet: true}
+	f := &diskMaintFakes{target: &diskMaintFakeTarget{}, quiet: true, notify: notifyfake.New()}
 	d := &Daemon{
 		config:       &Config{TownRoot: t.TempDir()},
 		logger:       log.New(&buf, "", 0),
 		patrolConfig: diskMaintEnabled("", ""),
+		notifier:     f.notify,
 	}
 	d.maint.quiet = func(*Daemon) (bool, string) { return f.quiet, f.quietWhy }
 	d.diskMaint.now = func() time.Time { return diskMaintNow }

@@ -241,6 +241,9 @@ type Daemon struct {
 	// pass runs off the loop goroutine, so the marker it writes is atomic and
 	// the loop only reads it.
 	diskMaintSettled atomic.Int64
+	// diskMaintAlerts is the set of disk alert keys the patrol has open: it
+	// alerts a disk once, and a clear needs a reading that says so.
+	diskMaintAlerts diskMaintAlerts
 
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
