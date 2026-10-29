@@ -2821,7 +2821,7 @@ func settleFreeDaemonLock(pidFile string, release func() error) {
 // not know, is not known to be a container town, and takes the host path it
 // had before this check existed (gt-qpeei.19).
 //
-// The unknown is not a licence to signal a container's PID: what the kind
+// The unknown is not a license to signal a container's PID: what the kind
 // changes here is the meaning of a PID on this host, and the signal still runs
 // through verifyGTDaemonPID, which proves the process is this town's
 // `gt daemon run` on this host — never a daemon of the container's namespace.
