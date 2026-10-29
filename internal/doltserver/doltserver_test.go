@@ -4057,6 +4057,63 @@ func TestIsRemote(t *testing.T) {
 	}
 }
 
+// A daemon in the container reaches the host's loopback-bound Dolt server by
+// another name, so in container mode the town resolves dolt.container_host and
+// the config carries that host, which must be remote; the same town outside
+// container mode keeps dolt.host, this machine's loopback (gt-qpeei.17).
+// Ignoring container_host in container mode resolves 127.0.0.1 here and the
+// container case fails.
+func TestIsRemote_ContainerHost(t *testing.T) {
+	t.Parallel()
+	const (
+		localHost     = "127.0.0.1"
+		containerHost = "host.docker.internal"
+	)
+	townRoot := t.TempDir()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	townJSON := `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z",` +
+		`"dolt":{"host":"` + localHost + `","container_host":"` + containerHost + `","port":3307}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(townJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lookupHost := func(host string) ([]string, error) {
+		if host != containerHost {
+			t.Errorf("lookupHost(%q), want %q", host, containerHost)
+		}
+		return []string{"192.168.65.2"}, nil
+	}
+
+	tests := []struct {
+		name        string
+		inContainer bool
+		wantHost    string
+		wantRemote  bool
+	}{
+		{"container mode reaches the server by container_host", true, containerHost, true},
+		{"outside container mode keeps the loopback host", false, localHost, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &host{
+				doltEndpoint: func(townRoot string) (configpkg.DoltEndpoint, bool) {
+					return configpkg.ResolveDoltEndpointFor(townRoot, tt.inContainer)
+				},
+				lookupHost: lookupHost,
+			}
+			c := h.DefaultConfig(townRoot)
+			if c.Host != tt.wantHost {
+				t.Fatalf("DefaultConfig Host = %q, want %q", c.Host, tt.wantHost)
+			}
+			if got := c.IsRemote(); got != tt.wantRemote {
+				t.Errorf("Config{Host: %q}.IsRemote() = %v, want %v", c.Host, got, tt.wantRemote)
+			}
+		})
+	}
+}
+
 func TestSQLArgs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

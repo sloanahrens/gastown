@@ -1123,6 +1123,55 @@ func TestResolveDoltEndpoint_IgnoresStateFile(t *testing.T) {
 	}
 }
 
+// A daemon in the container reaches the host's loopback-bound Dolt server by
+// another name, so container mode swaps in dolt.container_host (gt-qpeei.17).
+// Every other mode, and a town that names no container host, keeps dolt.host.
+// The mode is injected because the unit tier bans env mutation
+// (docs/testing.md, `no-env`); the read that turns ContainerModeEnv into this
+// boolean is TestIntegrationDoltContainerHostFromEnvironment.
+func TestDoltEndpointContainerHost(t *testing.T) {
+	t.Parallel()
+	const (
+		localHost     = "127.0.0.1"
+		containerHost = "host.docker.internal"
+	)
+	containerMode := []string{ContainerModeEnv, SupervisorContainer}
+	withContainerHost := testTownJSON + `,"dolt":{"host":"` + localHost + `","container_host":"` + containerHost + `","port":5507}}`
+	withoutContainerHost := testTownJSON + `,"dolt":{"host":"` + localHost + `","port":5507}}`
+	blankContainerHost := testTownJSON + `,"dolt":{"host":"` + localHost + `","container_host":"  ","port":5507}}`
+
+	tests := []struct {
+		name               string
+		townJSON, yamlBody string
+		env                []string
+		wantHost           string
+	}{
+		{"container mode uses container_host", withContainerHost, "", containerMode, containerHost},
+		{"outside container mode keeps dolt.host", withContainerHost, "", nil, localHost},
+		{"another supervisor kind keeps dolt.host", withContainerHost, "", []string{ContainerModeEnv, SupervisorLaunchd}, localHost},
+		{"container mode without container_host keeps dolt.host", withoutContainerHost, "", containerMode, localHost},
+		{"container mode with a blank container_host keeps dolt.host", blankContainerHost, "", containerMode, localHost},
+		{"container mode leaves the config.yaml fallback alone", testTownJSON + `}`, "listener:\n  host: 127.0.0.2\n  port: 3309\n", containerMode, "127.0.0.2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeDoltTown(t, tt.townJSON, tt.yamlBody)
+			inContainer := inContainerMode(envOf(tt.env...))
+			if ep, ok := ResolveDoltEndpointFor(root, inContainer); !ok || ep.Host != tt.wantHost {
+				t.Errorf("ResolveDoltEndpointFor = %+v, %v; want host %q", ep, ok, tt.wantHost)
+			}
+			if got := configuredDoltEnvFor(root, inContainer)["BEADS_DOLT_SERVER_HOST"]; got != tt.wantHost {
+				t.Errorf("ConfiguredDoltEnv BEADS_DOLT_SERVER_HOST = %q, want %q", got, tt.wantHost)
+			}
+			normalized := envSliceMap(normalizeConfiguredDoltEnvFor([]string{"BEADS_DOLT_SERVER_HOST=stale"}, root, inContainer))
+			if got := normalized["BEADS_DOLT_SERVER_HOST"]; got != tt.wantHost {
+				t.Errorf("NormalizeConfiguredDoltEnv BEADS_DOLT_SERVER_HOST = %q, want %q", got, tt.wantHost)
+			}
+		})
+	}
+}
+
 func TestNormalizeConfiguredDoltEnv_TownEndpointReplacesStaleEnv(t *testing.T) {
 	t.Parallel()
 	root := writeDoltTown(t, testTownJSON+`,"dolt":{"host":"127.0.0.2","port":5507}}`, "")

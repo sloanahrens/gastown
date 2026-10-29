@@ -45,10 +45,15 @@ type TownConfig struct {
 }
 
 // DoltEndpoint is where the town's Dolt sql-server listens. An empty Host is
-// the local machine.
+// the local machine. ContainerHost is the name the same server answers to from
+// inside the daemon's container, which reaches the host's loopback-bound
+// server by another name; it stands in for Host only there, and a town that
+// sets it runs the same server named both ways (ResolveDoltEndpointFor,
+// gt-qpeei.17).
 type DoltEndpoint struct {
-	Host string `json:"host,omitempty"`
-	Port int    `json:"port"`
+	Host          string `json:"host,omitempty"`
+	ContainerHost string `json:"container_host,omitempty"`
+	Port          int    `json:"port"`
 }
 
 // TrackerEndpoint is where the town's tracker (trackerd) listens. An empty
