@@ -534,25 +534,48 @@ func TestMaintColimaTargetPrunesThroughTheSandboxSocket(t *testing.T) {
 
 func TestMaintNodesTargetNamesTheSandboxCluster(t *testing.T) {
 	t.Parallel()
-	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+	runner := &fakeMaintRunner{}
+	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, runner.run, t.TempDir(), io.Discard)
 	if err != nil {
 		t.Fatalf("maintTargets() error = %v", err)
 	}
-	// The runner lists no nodes, so the plan refuses and names the cluster it
-	// looked for: the refusal is the only place the defaults show.
+	// The runner lists no nodes, so the plan refuses. The refusal names the
+	// node prefix it looked for, and the docker call names the context.
 	plan, err := targets[maintTargetNodes].Plan(context.Background(), diskmaint.Policy{Keep: 5})
 	if err != nil {
 		t.Fatalf("Plan() error = %v", err)
 	}
-	want := "no kind nodes named gt-sbx-* under docker context colima-gt-sbx"
-	if plan.Refused != want {
-		t.Fatalf("Refused = %q, want %q", plan.Refused, want)
+	if !strings.Contains(plan.Refused, "gt-sbx-") {
+		t.Errorf("Refused = %q, want the sandbox's node prefix gt-sbx-", plan.Refused)
+	}
+	if len(runner.calls) == 0 || !strings.Contains(strings.Join(runner.calls[0], " "), "colima-gt-sbx") {
+		t.Errorf("docker calls = %v, want one under the colima-gt-sbx context", runner.calls)
+	}
+}
+
+func TestMaintCivolTargetReadsTheCIContainers(t *testing.T) {
+	t.Parallel()
+	// The runner answers false for the inspect, so the plan keeps the CI
+	// daemon as down and plans nothing: the one call shows the container name.
+	runner := &fakeMaintRunner{out: "false\n"}
+	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, runner.run, t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatalf("maintTargets() error = %v", err)
+	}
+	if _, err := targets[maintTargetCivol].Plan(context.Background(), diskmaint.Policy{Keep: 5}); err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	want := []string{"docker", "inspect", "-f", "{{.State.Running}}", "forgejo-docker-in-docker-1"}
+	if len(runner.calls) != 1 || !slices.Equal(runner.calls[0], want) {
+		t.Fatalf("calls = %v, want [%s]: the civol target reads the CI daemon's container", runner.calls, strings.Join(want, " "))
 	}
 }
 
 func TestMaintPlanOfCivolPlansOnlyThatTarget(t *testing.T) {
 	t.Parallel()
-	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+	// The CI daemon is down, so the civol plan has nothing to delete: a clean
+	// plan with no refusal, which makes the run's error nil.
+	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{out: "false\n"}).run, t.TempDir(), io.Discard)
 	if err != nil {
 		t.Fatalf("maintTargets() error = %v", err)
 	}
@@ -562,10 +585,8 @@ func TestMaintPlanOfCivolPlansOnlyThatTarget(t *testing.T) {
 		Keep:    5,
 	}
 	var out strings.Builder
-	// The fake runner lists no CI volumes, so the civol plan may be refused; a
-	// refusal is the run's error and must name civol, never another target.
-	if err := runMaintContext(context.Background(), &out, deps, maintModePlan, maintTargetCivol); err != nil && !strings.Contains(err.Error(), maintTargetCivol+":") {
-		t.Fatalf("runMaintContext(civol) error = %v, want one naming %s", err, maintTargetCivol)
+	if err := runMaintContext(context.Background(), &out, deps, maintModePlan, maintTargetCivol); err != nil {
+		t.Fatalf("runMaintContext(civol) error = %v, want a clean plan", err)
 	}
 	for _, other := range []string{maintTargetBaks, maintTargetColima, maintTargetNodes, maintTargetSizes, maintTargetWorktree} {
 		if strings.Contains(out.String(), other+":") {
@@ -1009,9 +1030,18 @@ func TestMaintTargetsRefuseWithoutAHome(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := maintTargets(context.Background(), t.TempDir(), tc.cfg, 5, maintModePlan, (&fakeMaintRunner{}).run, "", io.Discard)
+			town := t.TempDir()
+			targets, err := maintTargets(context.Background(), town, tc.cfg, 5, maintModeApply, (&fakeMaintRunner{}).run, "", io.Discard)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("maintTargets() error = %v, want one naming %q", err, tc.want)
+			}
+			if targets != nil {
+				t.Errorf("targets = %v, want none: a blank HOME builds no docker target", maintTargetNames(targets))
+			}
+			// The ledger directory is made after the HOME check, so a refused
+			// apply leaves nothing behind.
+			if _, statErr := os.Stat(filepath.Join(town, ".runtime", "diskmaint")); !os.IsNotExist(statErr) {
+				t.Errorf("ledger directory stat = %v, want it absent after a refused apply", statErr)
 			}
 		})
 	}

@@ -87,8 +87,9 @@ the docker ones only the images and volumes their daemons list.
 
 A target names what to maintain: baks, civol, colima, nodes, registry (only
 when the town configures a registry), sizes or worktree. The known targets are
-listed when a name is unknown, and naming none runs every target in name order. A plan that could not
-read its inputs refuses instead of guessing, and both leaves exit non-zero then.`,
+listed when a name is unknown, and naming none runs every target in name order.
+A plan that could not read its inputs refuses instead of guessing, and both
+leaves exit non-zero then.`,
 	RunE: requireSubcommand,
 }
 
@@ -451,10 +452,12 @@ func maintLocalTargets(town, home string, run diskmaint.Runner, ledger *diskmain
 
 // maintDockerTargets builds the targets that maintain the sandbox's docker
 // daemons: the kind node images, the colima daemon's dangling images and the CI
-// cache volumes. Each shares the run's ledger and names the defaults of its
-// package, so the run maintains the same cluster, daemon and volumes the
-// nodeprune command and the CI runner use. They carry no dry-run gate of their
-// own: runMaintContext calls Apply only in apply mode, and Plan never does.
+// cache volumes. Each shares the run's ledger. The nodes and civol targets take
+// the container names and limits their packages default to, the same ones the
+// nodeprune command and the CI runner use: civol's container names are
+// unexported there, and TestMaintCivolTargetReadsTheCIContainers pins them
+// through the runner. They carry no dry-run gate of their own: runMaintContext
+// calls Apply only in apply mode, and Plan never does.
 func maintDockerTargets(home string, run diskmaint.Runner, ledger *diskmaint.Ledger) map[string]diskmaint.Target {
 	return map[string]diskmaint.Target{
 		maintTargetNodes: nodes.NewTarget(nodes.Config{
