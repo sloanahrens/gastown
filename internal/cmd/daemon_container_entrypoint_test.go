@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -100,6 +101,33 @@ func TestContainerEntrypointRefusesOutsideContainerMode(t *testing.T) {
 				t.Errorf("recorded %d commands, want none: %v", len(r.calls), r.calls)
 			}
 		})
+	}
+}
+
+func TestContainerEntrypointRefusesTownRootThatIsNotAbsolute(t *testing.T) {
+	for _, root := range []string{"", "gt"} {
+		t.Run("GT_TOWN_ROOT="+root, func(t *testing.T) {
+			// The town is present under the relative path, so only the
+			// absolute-path check stands between this start and the exec.
+			r := townRig()
+			r.env[containerTownRootEnv] = root
+			r.exists[filepath.Join(root, "mayor", "town.json")] = true
+			if err := runContainerEntrypoint(r.entrypoint()); err == nil {
+				t.Fatal("expected a refusal for a town root that is not absolute")
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("recorded %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
+	}
+}
+
+func TestContainerEntrypointReturnsDaemonExecError(t *testing.T) {
+	r := townRig()
+	e := r.entrypoint()
+	e.exec = func(argv []string) error { return errors.New("exec failed") }
+	if err := runContainerEntrypoint(e); err == nil {
+		t.Fatal("expected the exec failure to surface")
 	}
 }
 
