@@ -39,14 +39,21 @@ type fakeGit struct {
 	revErr    error
 	addErr    error
 	removeErr error
-	calls     []gitCall
+	// fetchErr fails the fetch; fetchFixes makes the commit appear once a fetch ran.
+	fetchErr   error
+	fetchFixes bool
+	fetched    bool
+	calls      []gitCall
 }
 
 func (f *fakeGit) run(dir string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append(gitCall{dir}, args...))
 	switch {
+	case len(args) >= 1 && args[0] == "fetch":
+		f.fetched = true
+		return nil, f.fetchErr
 	case len(args) >= 1 && args[0] == "rev-parse":
-		if f.revErr != nil {
+		if f.revErr != nil && !(f.fetchFixes && f.fetched) {
 			return nil, f.revErr
 		}
 		return []byte(f.revParse + "\n"), nil
@@ -382,4 +389,94 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func countCalls(g *fakeGit, verb string) int {
+	n := 0
+	for _, c := range g.calls {
+		if len(c) > 1 && c[1] == verb {
+			n++
+		}
+	}
+	return n
+}
+
+// A commit the checkout lacks is fetched for once, then looked up again, and the
+// build goes ahead when the fetch brought it in (gt-pme82).
+func TestCompileFetchesOnceWhenTheCommitIsMissingThenBuilds(t *testing.T) {
+	t.Parallel()
+	git := &fakeGit{revParse: fullCommit, revErr: errors.New("fatal: Needed a single revision"), fetchFixes: true}
+	build := &fakeGo{}
+	got, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got != fullCommit {
+		t.Errorf("Compile returned %q, want %q", got, fullCommit)
+	}
+	fetch := git.find("fetch")
+	if fetch == nil || strings.Join(fetch, " ") != "/beads fetch --quiet origin main" {
+		t.Errorf("fetch call = %v, want one 'fetch --quiet origin main' in the checkout", fetch)
+	}
+	if n := countCalls(git, "fetch"); n != 1 {
+		t.Errorf("Compile fetched %d times, want once", n)
+	}
+	if n := countCalls(git, "rev-parse"); n != 2 {
+		t.Errorf("Compile looked the commit up %d times, want twice (before and after the fetch)", n)
+	}
+	if build.dir == "" {
+		t.Error("Compile did not build after the fetch brought the commit in")
+	}
+}
+
+// A commit the checkout already holds costs no fetch.
+func TestCompileDoesNotFetchWhenTheCommitIsPresent(t *testing.T) {
+	t.Parallel()
+	git := &fakeGit{revParse: fullCommit}
+	build := &fakeGo{}
+	if _, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run); err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if n := countCalls(git, "fetch"); n != 0 {
+		t.Errorf("Compile fetched %d times for a commit the checkout holds, want none", n)
+	}
+}
+
+// A fetch that fails is reported with the commit and the checkout, and nothing is built.
+func TestCompileRefusesWhenTheFetchFails(t *testing.T) {
+	t.Parallel()
+	git := &fakeGit{revErr: errors.New("fatal: Needed a single revision"), fetchErr: errors.New("could not resolve host")}
+	build := &fakeGo{}
+	_, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run)
+	if err == nil {
+		t.Fatal("Compile built although the commit was missing and the fetch failed")
+	}
+	for _, want := range []string{fullCommit, "/beads", "does not hold", "could not resolve host"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Compile: error lacks %q: %v", want, err)
+		}
+	}
+	if build.dir != "" {
+		t.Errorf("Compile built in %q after a failed fetch", build.dir)
+	}
+}
+
+// A commit still missing after a fetch that succeeded is refused: origin does not have it either.
+func TestCompileRefusesACommitStillMissingAfterTheFetch(t *testing.T) {
+	t.Parallel()
+	git := &fakeGit{revErr: errors.New("fatal: Needed a single revision")}
+	build := &fakeGo{}
+	_, err := Compile(Options{Src: "/beads", Out: "/out/bd", Commit: fullCommit, BuildDir: t.TempDir()}, git.run, build.run)
+	if err == nil {
+		t.Fatal("Compile built a commit the checkout still does not hold after the fetch")
+	}
+	if !strings.Contains(err.Error(), "does not hold") || !strings.Contains(err.Error(), fullCommit) {
+		t.Errorf("Compile: error %v does not name the missing commit", err)
+	}
+	if n := countCalls(git, "fetch"); n != 1 {
+		t.Errorf("Compile fetched %d times, want once", n)
+	}
+	if build.dir != "" {
+		t.Errorf("Compile built in %q for a commit that is still missing", build.dir)
+	}
 }
