@@ -57,7 +57,7 @@ func TestDashPolecatStateFollowsTheInventory(t *testing.T) {
 // needs-operator reads as that label with its own text rather than as
 // needs-human, and a bead carrying two of the labels reads as the first step,
 // the overseer's (gt-slmaz).
-func TestDashPolecatStateNamesThePersonLabel(t *testing.T) {
+func TestNeedsOverseerDashPolecatStateNamesThePersonLabel(t *testing.T) {
 	t.Parallel()
 	working := dashItem(polecat.StateWorking, polecat.WorkstateDisposition{})
 	for _, tc := range []struct {
