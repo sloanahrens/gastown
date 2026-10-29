@@ -142,16 +142,6 @@ func (s *State) PruneDead(isLive func(Agent) (bool, error)) (int, error) {
 	return dropped, nil
 }
 
-// Held returns every name the state holds at now with every recorded agent
-// counted, which is what Pick reads once PruneDead has dropped the dead ones.
-func (s *State) Held(now time.Time, ttl time.Duration) map[string]bool {
-	taken := s.heldByState(now, ttl)
-	for _, a := range s.Agents {
-		taken[a.Name] = true
-	}
-	return taken
-}
-
 // Taken returns every name the state holds at now — bound, reserved for less
 // than ttl, or held by an agent isLive accepts — and fails rather than guess
 // when a liveness cannot be read, since a name it cannot judge may be in use.
@@ -167,6 +157,29 @@ func (s *State) Taken(now time.Time, ttl time.Duration, isLive func(Agent) (bool
 		}
 	}
 	return taken, nil
+}
+
+// HoldReason returns why the state holds name at now, or the empty reason when
+// no entry of it does: a binding, which holds its name for good; a reservation
+// younger than ttl; or a recorded agent, which is a live one where the caller
+// pruned the dead agents first.
+func (s *State) HoldReason(name string, now time.Time, ttl time.Duration) SkipReason {
+	for _, b := range s.Bindings {
+		if b.Name == name {
+			return SkipBound
+		}
+	}
+	for _, res := range s.Reservations {
+		if res.Name == name && !res.Expired(now, ttl) {
+			return SkipReserved
+		}
+	}
+	for _, a := range s.Agents {
+		if a.Name == name {
+			return SkipLiveProcess
+		}
+	}
+	return ""
 }
 
 // heldByState is the part of the taken set no process table decides.
