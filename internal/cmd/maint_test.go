@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -457,6 +458,7 @@ func TestMaintKeepReadsThePluginKnob(t *testing.T) {
 func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
+	writeMaintRigs(t, town, `{"version":1,"rigs":{"gastown":{"git_url":"u"}}}`)
 	settings := filepath.Join(town, "settings")
 	if err := os.MkdirAll(settings, 0o755); err != nil {
 		t.Fatal(err)
@@ -487,6 +489,9 @@ func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 	if got := targets[maintTargetRegistry].Name(); got != maintTargetRegistry {
 		t.Errorf("Name() = %q, want %q", got, maintTargetRegistry)
 	}
+	if _, refused := targets[maintTargetWorktree].(maintRefusedTarget); refused {
+		t.Errorf("worktree target = %v, want the real target: a readable rig registry builds one", targets[maintTargetWorktree])
+	}
 	if runner.calls != nil {
 		t.Errorf("building a target ran %v, want no program", runner.calls)
 	}
@@ -494,7 +499,9 @@ func TestMaintTargetsBuildTheRegistryFromTheTownConfig(t *testing.T) {
 
 func TestMaintTargetsWithoutARegistryKeepTheLocalTargets(t *testing.T) {
 	t.Parallel()
-	targets, err := maintTargets(context.Background(), t.TempDir(), polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+	town := t.TempDir()
+	writeMaintRigs(t, town, `{"version":1,"rigs":{"gastown":{"git_url":"u"}}}`)
+	targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
 	if err != nil {
 		t.Fatalf("maintTargets() error = %v, want the local targets", err)
 	}
@@ -528,8 +535,10 @@ func TestMaintLocalTargetsRemoveOnlyInApply(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			town := t.TempDir()
+			writeMaintRigs(t, town, `{"version":1,"rigs":{"gastown":{"git_url":"u"}}}`)
 			ledger := diskmaint.NewLedger(filepath.Join(t.TempDir(), "ledger.jsonl"), maintLedgerMaxBytes)
-			targets := maintLocalTargets(t.TempDir(), t.TempDir(), nil, (&fakeMaintRunner{}).run, ledger, tc.apply)
+			targets := maintLocalTargets(town, t.TempDir(), (&fakeMaintRunner{}).run, ledger, tc.apply)
 			// An empty plan removes nothing, so the only answer that differs
 			// between the two modes is the dry-run gate itself.
 			for _, name := range []string{maintTargetWorktree, maintTargetBaks} {
@@ -542,7 +551,7 @@ func TestMaintLocalTargetsRemoveOnlyInApply(t *testing.T) {
 	}
 }
 
-func TestMaintRigNamesAreSortedAndAnUnreadableRegistryRefuses(t *testing.T) {
+func TestMaintRigNamesAreSortedAndARegistryThatCannotBeReadRefuses(t *testing.T) {
 	t.Parallel()
 	t.Run("sorted", func(t *testing.T) {
 		t.Parallel()
@@ -556,22 +565,128 @@ func TestMaintRigNamesAreSortedAndAnUnreadableRegistryRefuses(t *testing.T) {
 			t.Errorf("maintRigNames() = %v, want %v", got, want)
 		}
 	})
-	t.Run("no registry is no rigs", func(t *testing.T) {
+	t.Run("missing registry is not an empty town", func(t *testing.T) {
 		t.Parallel()
 		got, err := maintRigNames(t.TempDir())
-		if err != nil || len(got) != 0 {
-			t.Errorf("maintRigNames() = %v, %v; want no rigs and no error", got, err)
+		if err == nil || !strings.Contains(err.Error(), "rig registry") {
+			t.Fatalf("maintRigNames() = %v, %v; want the missing rig registry refusal", got, err)
 		}
 	})
-	t.Run("unreadable registry refuses the run", func(t *testing.T) {
+	t.Run("damaged registry refuses", func(t *testing.T) {
 		t.Parallel()
 		town := t.TempDir()
 		writeMaintRigs(t, town, `{"version":1,"rigs":`)
-		_, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "rig registry") {
-			t.Fatalf("maintTargets() error = %v, want the unreadable rig registry refusal", err)
+		if _, err := maintRigNames(town); err == nil || !strings.Contains(err.Error(), "rig registry") {
+			t.Fatalf("maintRigNames() error = %v, want the unreadable rig registry refusal", err)
 		}
 	})
+}
+
+func TestMaintRigNamesRefuseANameThatIsNotADirectoryName(t *testing.T) {
+	t.Parallel()
+	// Each name would join outside the rig it names, so the worktree target
+	// must be refused rather than asked to look there.
+	for _, name := range []string{"", ".", "..", "a/b", "../escape", "/abs"} {
+		t.Run(fmt.Sprintf("name %q", name), func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeMaintRigs(t, town, fmt.Sprintf(`{"version":1,"rigs":{%q:{"git_url":"u"}}}`, name))
+			targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+			if err != nil {
+				t.Fatalf("maintTargets() error = %v, want every target", err)
+			}
+			plan, err := targets[maintTargetWorktree].Plan(context.Background(), diskmaint.Policy{})
+			if err != nil {
+				t.Fatalf("worktree Plan() error = %v, want the refusal in the plan", err)
+			}
+			if !strings.Contains(plan.Refused, "not a directory in the town") {
+				t.Fatalf("worktree plan refusal = %q, want the rig name refusal", plan.Refused)
+			}
+		})
+	}
+}
+
+func TestMaintUnreadableRigRegistryRefusesOnlyTheWorktreeTarget(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeMaintRigs(t, town, `{"version":1,"rigs":`)
+	cfg := polecatimage.Config{Registry: "localhost:5001"}
+	targets, err := maintTargets(context.Background(), town, cfg, 5, maintModePlan, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatalf("maintTargets() error = %v, want every target: a damaged rig registry refuses the worktree target alone", err)
+	}
+	if _, ok := targets[maintTargetRegistry]; !ok {
+		t.Fatalf("targets = %v, want the registry target: a damaged rig registry must not take the registry run with it", maintTargetNames(targets))
+	}
+	plan, err := targets[maintTargetWorktree].Plan(context.Background(), diskmaint.Policy{})
+	if err != nil {
+		t.Fatalf("worktree Plan() error = %v, want the refusal in the plan", err)
+	}
+	if !strings.Contains(plan.Refused, "rig registry") {
+		t.Fatalf("worktree plan refusal = %q, want it to name the rig registry", plan.Refused)
+	}
+}
+
+func TestMaintTargetsWireTheModeIntoTheDryRunGate(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		mode    string
+		refused bool
+	}{
+		{name: "a plan target refuses to remove", mode: maintModePlan, refused: true},
+		{name: "an apply target may remove", mode: maintModeApply, refused: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeMaintRigs(t, town, `{"version":1,"rigs":{"gastown":{"git_url":"u"}}}`)
+			targets, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, tc.mode, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard)
+			if err != nil {
+				t.Fatalf("maintTargets(%s) error = %v, want none", tc.mode, err)
+			}
+			// An empty plan removes nothing, so the only answer that differs
+			// between the two modes is the dry-run gate the mode sets.
+			_, applyErr := targets[maintTargetWorktree].Apply(context.Background(), diskmaint.Plan{Target: maintTargetWorktree})
+			if got := applyErr != nil; got != tc.refused {
+				t.Fatalf("%s worktree Apply() refused = %v, want %v (error %v)", tc.mode, got, tc.refused, applyErr)
+			}
+		})
+	}
+}
+
+func TestMaintLedgerDirectoryIsMadeForAnApplyOnly(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		mode string
+		want bool
+	}{
+		{name: "plan leaves none", mode: maintModePlan, want: false},
+		{name: "apply makes one", mode: maintModeApply, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			// No registry configured: the ledger is the local targets' record,
+			// not the registry's, so it is made for them too.
+			if _, err := maintTargets(context.Background(), town, polecatimage.Config{}, 5, tc.mode, (&fakeMaintRunner{}).run, t.TempDir(), io.Discard); err != nil {
+				t.Fatalf("maintTargets(%s) error = %v, want none", tc.mode, err)
+			}
+			info, err := os.Stat(filepath.Join(town, ".runtime", "diskmaint"))
+			if tc.want {
+				if err != nil || !info.IsDir() {
+					t.Fatalf("apply left no ledger directory (stat error %v): a delete it could not record must not run", err)
+				}
+				return
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("a plan left the ledger directory behind (stat error %v): plan is a dry run and must write nothing", err)
+			}
+		})
+	}
 }
 
 // writeMaintRigs writes the town's rig registry, the file a rig list is read
@@ -812,9 +927,26 @@ func TestMaintExecFailureCarriesTheLastStderrLine(t *testing.T) {
 
 func TestMaintTargetsRefuseWithoutAHome(t *testing.T) {
 	t.Parallel()
-	cfg := polecatimage.Config{Registry: "localhost:5001"}
-	_, err := maintTargets(context.Background(), t.TempDir(), cfg, 5, maintModePlan, (&fakeMaintRunner{}).run, "", io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "HOME is unset") {
-		t.Fatalf("maintTargets() error = %v, want the missing HOME", err)
+	cases := []struct {
+		name string
+		cfg  polecatimage.Config
+		want string
+	}{
+		// The local targets name their paths under HOME, so a town with no
+		// registry still refuses rather than join them against the working
+		// directory.
+		{name: "no registry still needs HOME", cfg: polecatimage.Config{}, want: "HOME is unset"},
+		// A town that configures a registry keeps the registry's own refusal.
+		{name: "the registry keeps its refusal", cfg: polecatimage.Config{Registry: "localhost:5001"}, want: "colima docker socket"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := maintTargets(context.Background(), t.TempDir(), tc.cfg, 5, maintModePlan, (&fakeMaintRunner{}).run, "", io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("maintTargets() error = %v, want one naming %q", err, tc.want)
+			}
+		})
 	}
 }

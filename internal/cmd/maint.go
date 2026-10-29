@@ -64,9 +64,10 @@ var maintCmd = &cobra.Command{
 	Long: `Plan or apply the maintenance the town's disks need.
 
 plan is a dry run: it prints every action it would take and changes nothing.
-apply runs the plan it just printed. Every apply runs under the polecat-image
-lock, so a delete never races an image push; an apply that finds the lock held
-defers and says to retry.
+apply runs the plan it just printed. A registry apply runs under the
+polecat-image lock, so a delete never races an image push; one that finds the
+lock held defers and says to retry. The local targets keep no lock: they touch
+only the worktrees, backups and directories this machine owns.
 
 A target names what to maintain: baks, registry (only when the town configures
 a registry), sizes or worktree. The known targets are listed when a name is
@@ -316,8 +317,9 @@ func maintKeep(get func(string) string) (int, error) {
 
 // maintTargets builds every target the town configures: the local targets,
 // which every town has, and the registry target, which only a town that names
-// a registry has. The first target that cannot be built fails the run rather
-// than leaving a half-built set.
+// a registry has. A target whose settings cannot be read refuses that target
+// alone (see maintLocalTargets), so the registry still plans for a town whose
+// rig registry is damaged, exactly as it did before the local targets existed.
 //
 // The ledger directory is made in apply mode alone: a plan is a dry run, so it
 // must not leave a directory behind that was not there before. An apply whose
@@ -326,9 +328,16 @@ func maintKeep(get func(string) string) (int, error) {
 func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, keep int, mode string, run diskmaint.Runner, home string, out io.Writer) (map[string]diskmaint.Target, error) {
 	ledgerDir := filepath.Join(town, ".runtime", "diskmaint")
 	ledger := diskmaint.NewLedger(filepath.Join(ledgerDir, "ledger.jsonl"), maintLedgerMaxBytes)
+	// The registry target is built first, so a town that configures a registry
+	// refuses on what it refused on before, with the same message.
 	registryTarget, err := maintRegistryTarget(ctx, town, cfg, keep, run, home, out, ledger)
 	if err != nil {
 		return nil, err
+	}
+	// Every local target names paths under the operator's home, and a blank
+	// HOME would join them against the working directory.
+	if home == "" {
+		return nil, errors.New("cannot read the operator's files: HOME is unset")
 	}
 	apply := mode == maintModeApply
 	if apply {
@@ -336,11 +345,7 @@ func maintTargets(ctx context.Context, town string, cfg polecatimage.Config, kee
 			return nil, fmt.Errorf("creating the maintenance ledger directory: %w", err)
 		}
 	}
-	rigs, err := maintRigNames(town)
-	if err != nil {
-		return nil, err
-	}
-	targets := maintLocalTargets(town, home, rigs, run, ledger, apply)
+	targets := maintLocalTargets(town, home, run, ledger, apply)
 	if registryTarget != nil {
 		targets[maintTargetRegistry] = registryTarget
 	}
@@ -380,22 +385,20 @@ func maintRegistryTarget(ctx context.Context, town string, cfg polecatimage.Conf
 }
 
 // maintLocalTargets builds the targets that maintain this machine's own files:
-// the stale crew worktrees under the rigs, the backup files in the town, the
-// operator's config and the binary directories, and the sizes of the Dolt and
-// backup paths. Each shares the run's ledger. apply is the dry-run gate for the
-// two targets that remove files: a target built for a plan refuses to remove
+// the stale crew worktrees under the town's rigs, the backup files in the town
+// and the operator's config and binary directories, and the sizes of the Dolt
+// and backup paths. Each shares the run's ledger. apply is the dry-run gate the
+// two removing targets carry: a target built for a plan refuses to remove
 // anything, so only an apply can delete.
-func maintLocalTargets(town, home string, rigs []string, run diskmaint.Runner, ledger *diskmaint.Ledger, apply bool) map[string]diskmaint.Target {
+//
+// A town whose rig registry cannot be read still gets a worktree target, one
+// that refuses the plan with the read error. Leaving the target out would hide
+// the worktrees from the run, and failing the build here would take the other
+// targets down with it.
+func maintLocalTargets(town, home string, run diskmaint.Runner, ledger *diskmaint.Ledger, apply bool) map[string]diskmaint.Target {
 	policy := diskmaint.Policy{Apply: apply}
 	configDirs, binaryDirs := baks.DefaultDirs(town, home)
-	return map[string]diskmaint.Target{
-		maintTargetWorktree: worktree.NewTarget(worktree.Config{
-			Town:   town,
-			Rigs:   rigs,
-			Run:    run,
-			Policy: policy,
-			Ledger: ledger,
-		}),
+	targets := map[string]diskmaint.Target{
 		maintTargetBaks: baks.NewTarget(baks.Config{
 			ConfigDirs: configDirs,
 			BinaryDirs: binaryDirs,
@@ -411,22 +414,76 @@ func maintLocalTargets(town, home string, rigs []string, run diskmaint.Runner, l
 			Ledger: ledger,
 		}),
 	}
+	rigs, err := maintRigNames(town)
+	if err != nil {
+		targets[maintTargetWorktree] = maintRefusedTarget{name: maintTargetWorktree, reason: err}
+		return targets
+	}
+	targets[maintTargetWorktree] = worktree.NewTarget(worktree.Config{
+		Town:   town,
+		Rigs:   rigs,
+		Run:    run,
+		Policy: policy,
+		Ledger: ledger,
+	})
+	return targets
+}
+
+// maintRefusedTarget stands in for a target the town's settings would not let
+// maintTargets build. It keeps the target's name in the run's list, and every
+// call answers with the reason, so the run refuses on that target instead of
+// dropping it and planning the rest as if the work did not exist.
+type maintRefusedTarget struct {
+	name   string
+	reason error
+}
+
+// Compile-time check that the stand-in satisfies the diskmaint contract.
+var _ diskmaint.Target = maintRefusedTarget{}
+
+func (t maintRefusedTarget) Name() string { return t.name }
+
+func (t maintRefusedTarget) Measure(context.Context) (diskmaint.Measurement, error) {
+	return diskmaint.Measurement{}, t.reason
+}
+
+func (t maintRefusedTarget) Plan(context.Context, diskmaint.Policy) (diskmaint.Plan, error) {
+	return diskmaint.Plan{Target: t.name, Refused: t.reason.Error()}, nil
+}
+
+func (t maintRefusedTarget) Apply(context.Context, diskmaint.Plan) (diskmaint.Result, error) {
+	return diskmaint.Result{Target: t.name}, t.reason
 }
 
 // maintRigNames lists the rigs registered in the town, sorted so every run
-// reads them in the same order. An unreadable registry is an error rather than
-// an empty list, so the worktree target never looks under no rigs by mistake.
+// reads them in the same order. A registry that cannot be read, or that names
+// something which is not a rig directory, is an error rather than a shorter
+// list: the names are joined into paths under the town, so a name holding a
+// separator or ".." would point the worktree target outside its rig.
 func maintRigNames(town string) ([]string, error) {
-	rc, err := config.LoadRigsConfigOrEmpty(filepath.Join(town, "mayor", "rigs.json"))
+	rc, err := config.LoadRigsConfig(filepath.Join(town, "mayor", "rigs.json"))
 	if err != nil {
 		return nil, fmt.Errorf("reading the town's rig registry: %w", err)
 	}
 	names := make([]string, 0, len(rc.Rigs))
 	for name := range rc.Rigs {
+		if !maintRigName(name) {
+			return nil, fmt.Errorf("the town's rig registry names %q, which is not a directory in the town", name)
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// maintRigName reports whether name is a rig directory name: one path element
+// that is neither the town root nor its parent, so joining it under the town
+// stays inside the town.
+func maintRigName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	return !filepath.IsAbs(name) && filepath.Base(name) == name
 }
 
 // maintInstalled reads the installed gt's commit by running `gt version`, the
