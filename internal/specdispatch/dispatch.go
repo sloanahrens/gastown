@@ -32,6 +32,12 @@ const CrewOnlyLabel = "crew-only"
 // dispatch.HumanOnlyLabel is named here for the skip line rather than for the
 // verdict: the shared rule holds it already, and a name in this list is what
 // makes the refusal a board-carried line the tick prints (gt-me800).
+//
+// The overseer-first labels (overseer-only, operator-only, gt:needs-overseer,
+// gt:needs-operator) and the plain needs-overseer and needs-operator spellings
+// are named here so ReadyQueryLabels filters them server-side and the dispatcher
+// never fetches them (gt-ft52x). The shared hold rule holds each one too, so
+// the verdict is the same whether the query or Eligible catches it.
 var excludedLabels = []string{"gt:ready-to-land", "needs-human", "needs-overseer", "needs-operator", DispatchFailedLabel, CrewOnlyLabel, dispatch.HumanOnlyLabel, dispatch.OverseerOnlyLabel, dispatch.OperatorOnlyLabel, dispatch.NeedsOverseerLabel, dispatch.NeedsOperatorLabel}
 
 // ExcludedLabels returns the labels that keep a bead from the dispatcher.
