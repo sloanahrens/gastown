@@ -150,6 +150,7 @@ func (d *Daemon) applyDiskAlerts(readings []disks.Reading) {
 			d.diskMaintAlerts.mark(alert.Key, true)
 		case alert.Clear:
 			if err := d.clearAlertsErr(alert.Detail, alert.Key); err != nil {
+				d.logger.Printf("disk_maintenance: alert %s was not cleared: %v", alert.Key, err)
 				continue // still open, and the next pass clears it again
 			}
 			d.diskMaintAlerts.mark(alert.Key, false)
