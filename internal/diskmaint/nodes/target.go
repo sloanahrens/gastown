@@ -51,7 +51,7 @@ var (
 	// quiet run.
 	errNoRunner = errors.New("no docker runner configured")
 	// errListNodes reports a failed node listing. The runner's error carries the
-	// command's stderr, so it is dropped in favour of this fixed reason.
+	// command's stderr, so it is dropped in favor of this fixed reason.
 	errListNodes = errors.New("list kind nodes failed")
 	// errBadRef reports a plan action whose ref is not <node>/<image digest>.
 	errBadRef = errors.New("ref is not <node>/sha256:<64 hex>")
