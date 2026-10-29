@@ -138,13 +138,13 @@ func crewEnv(env map[string]string) func(string) string {
 	return func(k string) string { return env[k] }
 }
 
-// TestCrewSubmissionActor: a crew submission writes as the session's agent
+// TestCrewActorFromEnv: a crew submission writes as the session's agent
 // identity, never as the git committer the shell carries, which is the human
 // when the human runs gt done by hand — a submission the landing worker
-// refuses (gt-i817y). Only a session naming no identity keeps the committer.
-func TestCrewSubmissionActor(t *testing.T) {
+// refuses (gt-i817y). A session naming no identity names "" here, so gt done
+// keeps the committer it always fell back to.
+func TestCrewActorFromEnv(t *testing.T) {
 	t.Parallel()
-	const human = "Sloan Ahrens"
 	cases := []struct {
 		name string
 		env  map[string]string
@@ -154,30 +154,16 @@ func TestCrewSubmissionActor(t *testing.T) {
 		{"BD_ACTOR leads BEADS_ACTOR", map[string]string{"BD_ACTOR": "gastown/crew/sloan", "BEADS_ACTOR": "town/crew/overseer"}, "gastown/crew/sloan"},
 		{"GT_ROLE names the crew member", map[string]string{"GT_ROLE": "town/crew/overseer"}, "town/crew/overseer"},
 		{"a bare crew role is its own identity", map[string]string{"GT_ROLE": "crew"}, "crew"},
-		{"a blank BEADS_ACTOR names no one", map[string]string{"BEADS_ACTOR": "  "}, human},
-		{"no identity keeps the committer", map[string]string{}, human},
+		{"a blank BEADS_ACTOR names no one", map[string]string{"BEADS_ACTOR": "  "}, ""},
+		{"no identity at all", map[string]string{}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := crewSubmissionActor(crewEnv(tc.env), func() string { return human })
-			if err != nil {
-				t.Fatalf("crewSubmissionActor(%v): %v", tc.env, err)
-			}
-			if got != tc.want {
-				t.Errorf("actor = %q, want %q", got, tc.want)
+			if got := crewActorFromEnv(crewEnv(tc.env)); got != tc.want {
+				t.Errorf("crewActorFromEnv(%v) = %q, want %q", tc.env, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestCrewSubmissionActorRefusesNoIdentity: with no session identity and no
-// committer there is nobody to attribute the submission to, and gt done says
-// so rather than writing an authorless comment.
-func TestCrewSubmissionActorRefusesNoIdentity(t *testing.T) {
-	t.Parallel()
-	if actor, err := crewSubmissionActor(crewEnv(nil), func() string { return "" }); err == nil {
-		t.Fatalf("actor = %q, want a refusal", actor)
 	}
 }
 
@@ -187,14 +173,11 @@ func TestCrewSubmissionActorRefusesNoIdentity(t *testing.T) {
 // (gt-i817y).
 func TestCrewSubmitCommentAuthoredBySessionActor(t *testing.T) {
 	t.Parallel()
-	const (
-		human = "Sloan Ahrens"
-		actor = "town/crew/overseer"
-	)
+	const actor = "town/crew/overseer"
 	h := newCrewSubmitHarness(t)
-	got, err := crewSubmissionActor(crewEnv(map[string]string{"BEADS_ACTOR": actor}), func() string { return human })
-	if err != nil {
-		t.Fatalf("resolving the session actor: %v", err)
+	got := crewActorFromEnv(crewEnv(map[string]string{"BEADS_ACTOR": actor}))
+	if got == "" {
+		t.Fatal("crewActorFromEnv named no actor for a session with BEADS_ACTOR set")
 	}
 	h.r.sender = got
 	if err := submitCrewForLanding(h.r); err != nil {
