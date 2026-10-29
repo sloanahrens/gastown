@@ -26,6 +26,12 @@ import (
 // the file must not contain read the raw text instead.
 type composeFile struct {
 	Services map[string]composeService `yaml:"services"`
+	Volumes  map[string]any            `yaml:"volumes"`
+	Networks map[string]composeNetwork `yaml:"networks"`
+}
+
+type composeNetwork struct {
+	Internal bool `yaml:"internal"`
 }
 
 type composeService struct {
@@ -34,8 +40,13 @@ type composeService struct {
 	Restart       string            `yaml:"restart"`
 	StopGrace     string            `yaml:"stop_grace_period"`
 	WorkingDir    string            `yaml:"working_dir"`
+	Privileged    bool              `yaml:"privileged"`
+	Command       []string          `yaml:"command"`
+	DependsOn     []string          `yaml:"depends_on"`
 	Environment   map[string]string `yaml:"environment"`
 	Volumes       []composeVolume   `yaml:"volumes"`
+	Networks      []string          `yaml:"networks"`
+	Ports         []string          `yaml:"ports"`
 }
 
 type composeVolume struct {
@@ -43,6 +54,13 @@ type composeVolume struct {
 	Source string `yaml:"source"`
 	Target string `yaml:"target"`
 }
+
+// The engine's service and volume names are part of the file's contract, so the
+// tests name them literally rather than reading the renderer's own constants.
+const (
+	engineName   = "sweep-dind"
+	engineVolume = "sweep_dind_data"
+)
 
 // liveSpec is the live town's daemon, the fixture the golden file was rendered
 // from. The name refusals below are what keep a scratch town from rendering
@@ -102,8 +120,13 @@ func TestRenderDaemonCompose_ServiceShape(t *testing.T) {
 	if svc.StopGrace != templates.MinimumStopGrace.String() {
 		t.Errorf("stop_grace_period = %q, want %s (MinimumStopGrace)", svc.StopGrace, templates.MinimumStopGrace)
 	}
-	if got := len(f.Services); got != 1 {
-		t.Errorf("services = %d, want the daemon alone (sweep-dind is C2's)", got)
+	for _, name := range []string{"daemon", "sweep-dind"} {
+		if _, ok := f.Services[name]; !ok {
+			t.Errorf("services = %v, want %q among them", f.Services, name)
+		}
+	}
+	if got := len(f.Services); got != 2 {
+		t.Errorf("services = %d, want the daemon and its sweep engine alone", got)
 	}
 }
 
@@ -165,6 +188,127 @@ func TestRenderDaemonCompose_ContainerNameIsTheOwnerID(t *testing.T) {
 	}
 	if got := svc.Environment["GT_TOWN_ROOT"]; got != spec.TownRoot {
 		t.Errorf("GT_TOWN_ROOT = %q, want the town root %s", got, spec.TownRoot)
+	}
+}
+
+// The engine is what the sweep drives, so the daemon's DOCKER_HOST and the
+// engine's service name are one string (A3 wrote it, C2 adds the service), and
+// the dependency order makes compose start the engine first.
+func TestRenderDaemonCompose_SweepDindService(t *testing.T) {
+	t.Parallel()
+	_, f := render(t, liveSpec())
+
+	engine, ok := f.Services["sweep-dind"]
+	if !ok {
+		t.Fatalf("services = %v, want a sweep-dind engine", f.Services)
+	}
+	if engine.Image != templates.DindImage {
+		t.Errorf("engine image = %q, want the pinned DindImage %q", engine.Image, templates.DindImage)
+	}
+	if !engine.Privileged {
+		t.Error("engine is not privileged: the sweep's dind needs it to run the CI jobs' containers")
+	}
+	if !slices.Equal(engine.Command, []string{"--tls=false"}) {
+		t.Errorf("engine command = %q, want [--tls=false]: the network is the engine's only guard, not TLS", engine.Command)
+	}
+	if got, ok := engine.Environment["DOCKER_TLS_CERTDIR"]; !ok || got != "" {
+		t.Errorf("DOCKER_TLS_CERTDIR = %q (present %t), want it set empty so the engine starts without a TLS cert dir", got, ok)
+	}
+	if engine.Restart == "" {
+		t.Error("engine has no restart policy: the daemon would depend on an engine that stays down after a reboot")
+	}
+
+	if got := f.Services["daemon"].Environment["DOCKER_HOST"]; got != "tcp://"+engineName+":2375" {
+		t.Errorf("daemon DOCKER_HOST = %q, want it to name the %s service", got, engineName)
+	}
+	if got := f.Services["daemon"].DependsOn; !slices.Equal(got, []string{engineName}) {
+		t.Errorf("daemon depends_on = %q, want [%s]", got, engineName)
+	}
+
+	vols := engine.Volumes
+	if len(vols) != 1 {
+		t.Fatalf("engine volumes = %+v, want its own data volume alone", vols)
+	}
+	if vols[0].Type != "volume" || vols[0].Source != engineVolume || vols[0].Target != "/var/lib/docker" {
+		t.Errorf("engine volume = %+v, want the named volume %s at /var/lib/docker", vols[0], engineVolume)
+	}
+	if _, ok := f.Volumes[engineVolume]; !ok {
+		t.Errorf("top-level volumes = %v, want %s declared so compose names it", f.Volumes, engineVolume)
+	}
+}
+
+// An engine that accepts unauthenticated connections and runs privileged is a
+// host-VM shell for anyone who can reach it (design section 10), so it publishes
+// no port and nothing but that engine is privileged.
+func TestRenderDaemonCompose_SweepDindIsTheOnlyPrivilegedServiceAndPublishesNoPort(t *testing.T) {
+	t.Parallel()
+	_, f := render(t, liveSpec())
+
+	for name, svc := range f.Services {
+		if len(svc.Ports) != 0 {
+			t.Errorf("service %q publishes ports %q, want none: a published port is reachable from outside the project", name, svc.Ports)
+		}
+		want := name == engineName
+		if svc.Privileged != want {
+			t.Errorf("service %q privileged = %t, want %t", name, svc.Privileged, want)
+		}
+	}
+}
+
+// pinnedDigestShape is the part of an image reference after @sha256:.
+var pinnedDigestShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// The digest lives in images.go and nowhere else, so this reads the constant
+// rather than a copy, and the pin check proves the reference cannot move.
+func TestRenderDaemonCompose_SweepDindImageIsPinnedByDigest(t *testing.T) {
+	t.Parallel()
+	const prefix = "@sha256:"
+	at := strings.LastIndex(templates.DindImage, prefix)
+	if at < 0 {
+		t.Fatalf("DindImage = %q, want it pinned by digest: a tag can move between restarts", templates.DindImage)
+	}
+	if digest := templates.DindImage[at+len(prefix):]; !pinnedDigestShape.MatchString(digest) {
+		t.Errorf("DindImage digest = %q, want 64 lowercase hex characters", digest)
+	}
+	if !slices.Contains(imageTable(t), templates.DindImage) {
+		t.Errorf("images.go does not declare DindImage %q", templates.DindImage)
+	}
+
+	_, f := render(t, liveSpec())
+	if got := f.Services[engineName].Image; got != templates.DindImage {
+		t.Errorf("engine image = %q, want %q: a second copy of the reference would drift from images.go", got, templates.DindImage)
+	}
+}
+
+// The engine is reachable only over a network declared internal, and only the
+// daemon is on it: compose would otherwise attach both services to the default
+// network, which is how a privileged engine becomes reachable.
+func TestRenderDaemonCompose_OnlyTheDaemonAndTheEngineJoinAnInternalNetwork(t *testing.T) {
+	t.Parallel()
+	_, f := render(t, liveSpec())
+
+	engineNet := f.Services[engineName].Networks
+	if len(engineNet) != 1 {
+		t.Fatalf("engine networks = %q, want the project's one internal network", engineNet)
+	}
+	net, ok := f.Networks[engineNet[0]]
+	if !ok {
+		t.Fatalf("networks = %v, want the engine's network %q declared", f.Networks, engineNet[0])
+	}
+	if !net.Internal {
+		t.Errorf("network %q is not internal: true, so the engine is reachable from outside the project", engineNet[0])
+	}
+	if len(f.Networks) != 1 {
+		t.Errorf("networks = %v, want the internal one alone", f.Networks)
+	}
+
+	for name, svc := range f.Services {
+		if !slices.Equal(svc.Networks, engineNet) {
+			t.Errorf("service %q networks = %q, want exactly %q: no service may join anything else", name, svc.Networks, engineNet)
+		}
+	}
+	if got := len(f.Services); got != 2 {
+		t.Errorf("services = %d, want only the daemon and the engine", got)
 	}
 }
 

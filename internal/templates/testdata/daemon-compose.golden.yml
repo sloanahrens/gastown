@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     stop_grace_period: "30s"
     working_dir: "/towns/live"
+    depends_on:
+      - sweep-dind
     environment:
       DOCKER_HOST: "tcp://sweep-dind:2375"
       GT_DAEMON_CONTAINER_NAME: "gt-town-daemon-1"
@@ -16,3 +18,23 @@ services:
       - type: bind
         source: "/towns/live"
         target: "/towns/live"
+    networks:
+      - sweep
+  sweep-dind:
+    image: "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1"
+    restart: unless-stopped
+    privileged: true
+    command: ["--tls=false"]
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - type: volume
+        source: sweep_dind_data
+        target: /var/lib/docker
+    networks:
+      - sweep
+networks:
+  sweep:
+    internal: true
+volumes:
+  sweep_dind_data:

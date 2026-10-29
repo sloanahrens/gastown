@@ -17,4 +17,10 @@ const (
 	// DaemonBaseImage is the base image the daemon image builds on, the same
 	// one deploy/polecat/Dockerfile uses.
 	DaemonBaseImage = "ubuntu:24.04"
+
+	// DindImage is the Docker engine the daemon's tier sweep drives, pinned by
+	// digest rather than tag so a restart runs the engine the ladder proved.
+	// It is the same digest the live Forgejo project's engine runs, so the
+	// sweep meets the engine its CI jobs already use.
+	DindImage = "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1"
 )
