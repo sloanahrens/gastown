@@ -46,3 +46,37 @@ func TestRebuildGTStarvedEscalation_FiresAtThePoolInstallYield(t *testing.T) {
 		})
 	}
 }
+
+// TestRebuildGTInstallCap_ReadsThePoolWithNothingInjected (gt-pa4tg) goes
+// through the production read: with no test seam set, the cap is the town
+// pool's own InstallYield, and the starvation alarm fires at that duration and
+// not a minute before. The seam-driven test above cannot see a threshold that
+// stopped reading the pool, because it replaces the read.
+func TestRebuildGTInstallCap_ReadsThePoolWithNothingInjected(t *testing.T) {
+	t.Parallel()
+	d, _ := daemonWithRecorder(t)
+	if d.rebuildGTInstallYieldFn != nil {
+		t.Fatal("daemonWithRecorder set the install-yield seam; this test needs the production read")
+	}
+	want := slot.PoolForTown(d.config.TownRoot).InstallYield()
+	if got := d.rebuildGTInstallCap(); got != want {
+		t.Fatalf("rebuildGTInstallCap() = %s, want the town pool's InstallYield %s", got, want)
+	}
+	for _, tc := range []struct {
+		name string
+		age  time.Duration
+		want int
+	}{
+		{"a block a minute short of the pool's cap stays quiet", want - time.Minute, 0},
+		{"a block at the pool's cap escalates", want, 1},
+	} {
+		d, rec := daemonWithRecorder(t)
+		d.rebuildGTBlock.open(d.clk().Now().Add(-tc.age))
+		cycle := d.startDogCycle("rebuild_gt")
+		d.rebuildGTNoteBlocked(cycle, true, "not quiet: a gate suite holds a slot")
+		cycle.close()
+		if got := len(rec.Escalations()); got != tc.want {
+			t.Errorf("%s: escalations = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
