@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/steveyegge/gastown/tracker/internal/pgdsn"
 )
 
 const (
@@ -155,29 +157,6 @@ func dumpArgv(pgBin, partial, dsnNoPassword string) []string {
 	return []string{name, "-Fc", "-f", partial, "-d", dsnNoPassword}
 }
 
-// dsnWithoutPassword is dsn with its password removed and every other setting
-// kept, so sslmode and the rest reach pg_dump. The error never quotes the DSN.
-func dsnWithoutPassword(dsn string) (string, error) {
-	if strings.Contains(dsn, "://") {
-		u, err := url.Parse(dsn)
-		if err != nil {
-			return "", errors.New("cannot use TRACKER_DSN as a connection string")
-		}
-		if u.User != nil {
-			u.User = url.User(u.User.Username())
-		}
-		// A password can also ride in the query string (?password=...).
-		q := u.Query()
-		q.Del("password")
-		u.RawQuery = q.Encode()
-		return u.String(), nil
-	}
-	return keywordPassword.ReplaceAllString(dsn, ""), nil
-}
-
-// keywordPassword matches a password setting in a libpq keyword string.
-var keywordPassword = regexp.MustCompile(`(?i)\s*\bpassword\s*=\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|\S+)`)
-
 // Run writes today's dump, publishes it only after pg_dump has exited 0 with a
 // non-empty file, then deletes the oldest dumps beyond keep. Any failure leaves
 // the dumps already in the directory, today's included, untouched.
@@ -204,9 +183,12 @@ func (b *backup) Run(ctx context.Context) error {
 	now := b.clock.Now()
 	target := filepath.Join(b.dir, now.Format(dateLayout)+dumpSuffix)
 	partial := target + partialSuffix
-	noPassword, err := dsnWithoutPassword(b.dsn)
+	// The password comes out of the string and travels in PGPASSWORD, so argv,
+	// which every local user can list, holds no credential; sslmode and the
+	// rest stay in the string pg_dump parses.
+	noPassword, err := pgdsn.WithoutPassword(b.dsn)
 	if err != nil {
-		return err
+		return errors.New("cannot use TRACKER_DSN as a connection string") // the parse error can echo the DSN
 	}
 
 	// The file is opened 0600 here rather than left to pg_dump, whose new file
