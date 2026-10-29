@@ -257,9 +257,15 @@ type Daemon struct {
 	// patrolRestartFails holds each seat's run of consecutive failed
 	// patrol-scan restarts under its alert key, so a seat whose restart
 	// keeps failing the same way is escalated once instead of retried
-	// silently (gt-6hhp8). Created on first write; guarded by the mutex.
+	// silently (gt-6hhp8). patrolRestartTried holds the keys a scan of the
+	// current rig tried to restart, so the scan's end can break the runs it
+	// did not continue; patrolRestartAlerts holds the keys with an escalation
+	// open, which a successful restart clears even after its run was broken.
+	// Created on first write; guarded by the mutex.
 	patrolRestartFailsMu sync.Mutex
 	patrolRestartFails   map[string]patrolRestartFailure
+	patrolRestartTried   map[string]bool
+	patrolRestartAlerts  map[string]bool
 
 	// jsonlPushFailures tracks consecutive git push failures for JSONL backup.
 	// Only accessed from heartbeat loop goroutine - no sync needed.

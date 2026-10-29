@@ -751,9 +751,7 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 	// it under flag descriptions for a caller that keeps only the last line
 	// (gt-6hhp8). A bad argument still fails cobra's Args check before this
 	// point, so it still prints usage.
-	if cmd != nil {
-		cmd.SilenceUsage = true
-	}
+	cmd.SilenceUsage = true
 
 	// Resolve the seat before anything else: restart must refuse exactly the
 	// addresses start refuses, and refuse them before it prints a "Starting

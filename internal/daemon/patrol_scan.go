@@ -165,6 +165,7 @@ func (d *Daemon) runPatrolScan() {
 			return
 		}
 		report := scanner.Tick(rigName)
+		d.endPatrolRestartScan(rigName)
 		for _, line := range report.Lines() {
 			d.logger.Printf("patrol_scan: %s", line)
 		}
@@ -709,8 +710,7 @@ func (h *patrolScanHost) Heartbeat(rig, name string) *patrolscan.Heartbeat {
 }
 
 // Restart restarts a seat through the supervisor and records how the attempt
-// ended, so a seat whose restart keeps failing the same way is escalated once
-// rather than retried silently for as long as the condition lasts (gt-6hhp8).
+// ended for the seat's patrol-restart run (gt-6hhp8).
 func (h *patrolScanHost) Restart(rig, name, reason string) error {
 	err := h.d.sup().Restart(h.seat(rig, name), reason, patrolscan.Actor)
 	h.d.notePatrolRestart(rig, name, err)
@@ -733,34 +733,37 @@ func patrolRestartKey(rig, name string) string {
 }
 
 // notePatrolRestart records how one patrol scan's restart attempt ended for a
-// seat and escalates a seat whose restart has now failed with the same cause
-// on two consecutive scans; the escalation names the seat and the cause, the
-// part a retry cannot fix by itself (gt-6hhp8).
+// seat and escalates a seat whose restart has failed with the same cause on
+// two consecutive scans, naming the seat and the cause (gt-6hhp8).
 //
 // The alert clears on the first restart that succeeds, and only that clears
 // it: a cause that changes is a different failure and is escalated again from
-// its own second scan. A refusal started nothing and spends no attempt
-// against the streak — the supervisor escalates its own refusals under their
-// own keys.
+// its own second scan. A refusal is an attempt that started nothing, so it
+// neither starts nor ends a run, and the supervisor escalates its own
+// refusals under their own keys.
 func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 	key := patrolRestartKey(rig, name)
+	d.patrolRestartFailsMu.Lock()
+	if d.patrolRestartTried == nil {
+		d.patrolRestartTried = map[string]bool{}
+	}
+	d.patrolRestartTried[key] = true
 	if err == nil {
-		if d.forgetPatrolRestart(key) {
+		delete(d.patrolRestartFails, key)
+		open := d.patrolRestartAlerts[key]
+		delete(d.patrolRestartAlerts, key)
+		d.patrolRestartFailsMu.Unlock()
+		if open {
 			d.clearAlerts("restarting "+rig+"/"+name+" succeeded again", key)
 		}
 		return
 	}
 	if errors.Is(err, supervisor.ErrRefused) {
-		// A refusal started nothing, so it neither starts nor ends a run of
-		// failures. The record is kept rather than dropped: it is what lets a
-		// restart that eventually succeeds clear the escalation the run
-		// raised, and the supervisor escalates its own refusals under their
-		// own keys.
+		d.patrolRestartFailsMu.Unlock()
 		return
 	}
 
 	cause := err.Error()
-	d.patrolRestartFailsMu.Lock()
 	if d.patrolRestartFails == nil {
 		d.patrolRestartFails = map[string]patrolRestartFailure{}
 	}
@@ -771,24 +774,37 @@ func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 		last = patrolRestartFailure{cause: cause, scans: 1}
 	}
 	d.patrolRestartFails[key] = last
+	escalate := last.scans == 2
+	if escalate {
+		if d.patrolRestartAlerts == nil {
+			d.patrolRestartAlerts = map[string]bool{}
+		}
+		d.patrolRestartAlerts[key] = true
+	}
 	d.patrolRestartFailsMu.Unlock()
 
-	if last.scans == 2 {
+	if escalate {
 		d.escalateAlert(key, "patrol-restart", fmt.Sprintf(
 			"%s/%s: the patrol scan could not restart the seat on %d consecutive scans, same cause: %s",
 			rig, name, last.scans, cause))
 	}
 }
 
-// forgetPatrolRestart drops a seat's run of failed restarts and reports
-// whether it had one, so the caller clears an alert only when one can be
-// open.
-func (d *Daemon) forgetPatrolRestart(key string) bool {
+// endPatrolRestartScan closes one rig's patrol scan for the restart runs. A
+// run counts consecutive scans, so a seat of the rig whose restart the scan
+// did not try breaks its run: the seat recovered, or was not a restart this
+// scan. An open alert stays open until a restart succeeds (gt-6hhp8). The
+// tried set then starts over for the next scan.
+func (d *Daemon) endPatrolRestartScan(rig string) {
+	prefix := patrolRestartKey(rig, "")
 	d.patrolRestartFailsMu.Lock()
 	defer d.patrolRestartFailsMu.Unlock()
-	_, had := d.patrolRestartFails[key]
-	delete(d.patrolRestartFails, key)
-	return had
+	for key := range d.patrolRestartFails {
+		if strings.HasPrefix(key, prefix) && !d.patrolRestartTried[key] {
+			delete(d.patrolRestartFails, key)
+		}
+	}
+	clear(d.patrolRestartTried)
 }
 
 // Kill stops a stalled seat's live session through the supervisor's
