@@ -165,6 +165,35 @@ func TestGuardStartup(t *testing.T) {
 			probe: unreachableProbe,
 		},
 		{
+			// A state.json that cannot be read at all (here a directory) refuses
+			// before any owner is judged.
+			name: "a state.json that cannot be read refuses without reading an owner",
+			setup: func(t *testing.T, town string) {
+				if err := os.MkdirAll(StateFile(town), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			takeover: true,
+			probe:    unreachableProbe,
+			wantErr:  "state.json",
+		},
+		{
+			// The candidates are named from the town's daemon settings, so a
+			// settings file that does not parse refuses rather than guessing them.
+			name: "a daemon settings file that does not parse refuses",
+			setup: func(t *testing.T, town string) {
+				path := PatrolConfigFile(town)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			probe:   unreachableProbe,
+			wantErr: "refusing to start: reading",
+		},
+		{
 			// A state that does not parse names no owner. The refusal must come
 			// before CheckTakeover, which would probe the candidates here.
 			name: "an unparsable state.json refuses without reading an owner",
