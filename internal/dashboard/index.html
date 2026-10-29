@@ -3842,8 +3842,10 @@ function mangoTrend(m, stale) {
   head.textContent = "Rejected before landing, by week";
 
   // The side margins leave room for a week label centred on either end of the
-  // span and for the share scale's labels on the left.
-  const W = 700, left = 44, right = W - 44, baseTop = 46, baseBottom = 132, rowPx = 12;
+  // span and for the share scale's labels on the left. Label rows are 14 units
+  // apart at 11 units of type, and the plot starts 52 units down, so the third
+  // row's baseline clears it.
+  const W = 700, left = 44, right = W - 44, baseTop = 52, baseBottom = 132, rowPx = 14;
   // The x span runs from the first week to a week past the last one, so the
   // newest dot is not drawn against the right edge; an event outside the span
   // has no x on the trend and is left out.
@@ -3854,11 +3856,11 @@ function mangoTrend(m, stale) {
   const marks = (m.events || []).filter(e => { const d = day(e.date); return d >= first && d <= last; }).sort((a, b) => day(a.date) - day(b.date));
 
   // The page's font is monospace, so a label's width is its character count
-  // times the advance at font-size 9 (0.6em, 5.4px), rounded up to 5.6: an
-  // estimate that under-measures lays two labels on one row whose text then
-  // runs together, and the viewBox scales the whole chart as one piece, so the
-  // page width cannot part them (gt-ejvpk).
-  const charPx = 5.6, labelGap = 8, chartPad = 2;
+  // times the advance at font-size 11 (0.6em, 6.6px): an estimate that
+  // under-measures lays two labels on one row whose text then runs together,
+  // and the viewBox scales the whole chart as one piece, so the page width
+  // cannot part them (gt-ejvpk).
+  const charPx = 6.6, labelGap = 8, chartPad = 2;
   // The viewBox clips anything past its edge, so a label is cut to the width it
   // is measured at, at a word boundary and with an ellipsis, rather than losing
   // its end where no one can see it was cut.
@@ -3913,7 +3915,7 @@ function mangoTrend(m, stale) {
   for (const tick of [0.1, 0.2]) {
     const y = yAt(tick);
     svg.append(svgEl("line", {x1: left, x2: right, y1: y.toFixed(1), y2: y.toFixed(1), class: "mgtgrid", stroke: "currentColor", "stroke-dasharray": "2 3", "stroke-opacity": "0.35"}));
-    const label = svgEl("text", {x: left - 6, y: (y + 3).toFixed(1), "text-anchor": "end", class: "mgtytick", fill: "currentColor", "font-size": "9", "fill-opacity": "0.6"});
+    const label = svgEl("text", {x: left - 6, y: (y + 3).toFixed(1), "text-anchor": "end", class: "mgtytick", fill: "currentColor", "font-size": "11", "fill-opacity": "0.6"});
     label.textContent = Math.round(tick * 100) + "%";
     svg.append(label);
   }
@@ -3923,17 +3925,19 @@ function mangoTrend(m, stale) {
   svg.append(svgEl("polyline", {points: pts.map(p => p.x.toFixed(1) + "," + p.y.toFixed(1)).join(" "), fill: "none", stroke: "var(--teal)", "stroke-width": "1.5", class: "mgtline"}));
   for (const p of pts) {
     svg.append(svgEl("circle", {cx: p.x.toFixed(1), cy: p.y.toFixed(1), r: "3", class: "mgtdot", fill: "var(--teal)"}));
-    const pct = svgEl("text", {x: p.x.toFixed(1), y: (p.y - 7).toFixed(1), "text-anchor": "middle", class: "mgtpct", fill: "currentColor", "font-size": "9"});
+    const pct = svgEl("text", {x: p.x.toFixed(1), y: (p.y - 7).toFixed(1), "text-anchor": "middle", class: "mgtpct", fill: "currentColor", "font-size": "11", stroke: "var(--panel)", "stroke-width": "3", "paint-order": "stroke", "stroke-linejoin": "round"});
     pct.textContent = jevPct(p.w.rejected_share);
     svg.append(pct);
-    const wk = svgEl("text", {x: p.x.toFixed(1), y: String(H - 14), "text-anchor": "middle", class: "mgtwk", fill: "currentColor", "font-size": "9", "fill-opacity": "0.7"});
+    const wk = svgEl("text", {x: p.x.toFixed(1), y: String(H - 14), "text-anchor": "middle", class: "mgtwk", fill: "currentColor", "font-size": "11", "fill-opacity": "0.7"});
     wk.textContent = "wk of " + p.w.week.slice(5) + " (" + p.w.landings + ")";
     svg.append(wk);
   }
 
+  // Each label is haloed in the panel's colour, so the dashed marker it sits
+  // beside is cut under the word rather than running through it.
   for (const {x, shown, anchor, at, row} of placed) {
     svg.append(svgEl("line", {x1: x.toFixed(1), x2: x.toFixed(1), y1: top, y2: bottom, class: "mgtmark", stroke: "currentColor", "stroke-dasharray": "3 3", "stroke-opacity": "0.55"}));
-    const label = svgEl("text", {x: at.toFixed(1), y: String(11 + row * rowPx), "text-anchor": anchor, class: "mgtwhat", fill: "currentColor", "font-size": "9", "fill-opacity": "0.8"});
+    const label = svgEl("text", {x: at.toFixed(1), y: String(11 + row * rowPx), "text-anchor": anchor, class: "mgtwhat", fill: "currentColor", "font-size": "11", "fill-opacity": "0.8", stroke: "var(--panel)", "stroke-width": "3", "paint-order": "stroke", "stroke-linejoin": "round"});
     label.textContent = shown;
     svg.append(label);
   }
@@ -3944,7 +3948,7 @@ function mangoTrend(m, stale) {
   const countWords = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
   const count = countWords[weeks.length] || String(weeks.length);
   const cap = el("div", "mgtcap");
-  cap.textContent = "Landings per week in brackets. " + count.charAt(0).toUpperCase() + count.slice(1) + " weeks is too few to say what caused the rise; the dates mark when things changed.";
+  cap.textContent = "Landings per week in brackets. " + count.charAt(0).toUpperCase() + count.slice(1) + " weeks is too few to say what caused the rise; dashed lines mark when a regime changed.";
   block.append(cap);
   return block;
 }
