@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
@@ -141,6 +142,35 @@ func TestDoltLatencyMixIsReadOnly(t *testing.T) {
 		if _, err := step.query.Inline(); err != nil {
 			t.Errorf("step %s is refused as not read-only: %v", step.name, err)
 		}
+		// DB.Query runs ReadOnly on the statement text it sends. The mix has no
+		// arguments, so that text is String(); check it as the production path does.
+		if err := beadsql.ReadOnly(step.query.String()); err != nil {
+			t.Errorf("step %s text is refused by the production Query guard: %v", step.name, err)
+		}
+	}
+}
+
+func TestDoltLatencyDSNEscapesDatabaseName(t *testing.T) {
+	t.Parallel()
+	// Each name holds a character that means something in a DSN: a query
+	// string, a path separator, a fragment, a space, an at sign.
+	for _, database := range []string{"beads", "beads?parseTime=true", "a/b", "a#b", "a b", "x@y"} {
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			got, err := mysql.ParseDSN(doltLatencyDSN("127.0.0.1", 3307, database))
+			if err != nil {
+				t.Fatalf("ParseDSN: %v", err)
+			}
+			if got.DBName != database {
+				t.Errorf("DBName = %q; want %q", got.DBName, database)
+			}
+			if got.Addr != "127.0.0.1:3307" || got.Net != "tcp" {
+				t.Errorf("target = %s %s; want tcp 127.0.0.1:3307", got.Net, got.Addr)
+			}
+			if got.User != "root" || got.Passwd != "" {
+				t.Errorf("user %q with a password set; want the default user and no password", got.User)
+			}
+		})
 	}
 }
 
@@ -229,6 +259,24 @@ func TestRunDoltLatencyRefusesConnectionFailure(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("printed output on a failed connection: %q", out.String())
+	}
+}
+
+func TestRunDoltLatencyRefusesNegativeRounds(t *testing.T) {
+	t.Parallel()
+	clock := &fakeLatencyClock{t: time.Unix(1_700_000_000, 0)}
+	conn := &fakeLatencyConn{clock: clock, failAt: -1}
+	var dialed []string
+	var out bytes.Buffer
+
+	err := runDoltLatencyProbe(context.Background(), &out, fakeLatencyDialer(conn, nil, &dialed), clock.now, doltLatencyRun{
+		Host: "127.0.0.1", Port: 3307, Database: "beads", Rounds: -1,
+	})
+	if !errors.Is(err, errNoDoltLatencySamples) {
+		t.Fatalf("negative-rounds run error = %v; want errNoDoltLatencySamples", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("printed a summary for a negative-rounds run: %q", out.String())
 	}
 }
 

@@ -8,16 +8,11 @@ import (
 	"sort"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
-
-// `gt dolt latency` measures bd-style round trips against a Dolt SQL server and
-// prints p50, p95 and max. It is the measurement behind the Dolt-in-Kubernetes
-// gate: a bd round trip from the Mac, p95 under 20 ms. The query mix and the
-// percentile method are fixed here. The connection and the clock are injected,
-// so the arithmetic and the refusals are tested without a server.
 
 // doltLatencyStep is one read in the fixed mix.
 type doltLatencyStep struct {
@@ -109,7 +104,9 @@ type doltLatencyRun struct {
 func runDoltLatencyProbe(ctx context.Context, w io.Writer, dial doltLatencyDialer, now func() time.Time, run doltLatencyRun) error {
 	addr := fmt.Sprintf("%s:%d", run.Host, run.Port)
 	// Opening a connection also reads the schema level, so a server that
-	// accepts the socket and then stalls must not hang the probe.
+	// accepts the socket and then stalls must not hang the probe. The dial
+	// context is canceled as soon as dial returns; each later step runs under
+	// its own context.
 	dialCtx, cancelDial := context.WithTimeout(ctx, doltLatencyQueryTimeout)
 	conn, err := dial(dialCtx, run.Host, run.Port, run.Database)
 	cancelDial()
@@ -120,7 +117,9 @@ func runDoltLatencyProbe(ctx context.Context, w io.Writer, dial doltLatencyDiale
 	// close error does not change the result.
 	defer func() { _ = conn.Close() }()
 
-	samples := make([]time.Duration, 0, run.Rounds*len(doltLatencyMix))
+	// A count below one runs no rounds, so the empty series is refused below. The
+	// clamp keeps a negative count from making the buffer negative.
+	samples := make([]time.Duration, 0, max(run.Rounds, 0)*len(doltLatencyMix))
 	for round := 0; round < run.Rounds; round++ {
 		for _, step := range doltLatencyMix {
 			stepCtx, cancel := context.WithTimeout(ctx, doltLatencyQueryTimeout)
@@ -190,15 +189,32 @@ func wrapBeadsLatencyConn(db *beadsql.DB, err error) (doltLatencyConn, error) {
 	return beadsLatencyConn{db: db}, nil
 }
 
-// dialBeadsLatency opens a beadsql handle on database at host:port. The DSN
-// carries the server's user and password, so it is passed to beadsql and never
-// printed or put in an error.
-func dialBeadsLatency(ctx context.Context, host string, port int, database string) (doltLatencyConn, error) {
+// doltLatencyDSN is the DSN the probe opens database with on host:port. It is
+// built by the driver's formatter, which escapes the database name, so a name
+// with a reserved character cannot change the target. The probe connects as the
+// default user with no password, because the Config it builds carries none; the
+// DSN is passed to beadsql and never printed.
+func doltLatencyDSN(host string, port int, database string) string {
 	cfg := doltserver.Config{Host: host, Port: port}
-	dsn := fmt.Sprintf("%s@tcp(%s)/%s", cfg.UserDSN(), cfg.HostPort(), database)
-	return wrapBeadsLatencyConn(beadsql.Open(ctx, dsn, database))
+	m := mysql.NewConfig()
+	m.User = doltserver.DefaultUser
+	m.Net = "tcp"
+	m.Addr = cfg.HostPort()
+	m.DBName = database
+	return m.FormatDSN()
 }
 
+// dialBeadsLatency opens a beadsql handle on database at host:port. Its errors
+// name only the database, from beadsql, and the driver's own dial error.
+func dialBeadsLatency(ctx context.Context, host string, port int, database string) (doltLatencyConn, error) {
+	return wrapBeadsLatencyConn(beadsql.Open(ctx, doltLatencyDSN(host, port, database), database))
+}
+
+// `gt dolt latency` measures bd-style round trips against a Dolt SQL server and
+// prints p50, p95 and max. It is the measurement behind the Dolt-in-Kubernetes
+// gate: a bd round trip from the Mac, p95 under 20 ms. The query mix and the
+// percentile method are fixed here. The connection and the clock are injected,
+// so the arithmetic and the refusals are tested without a server.
 var doltLatencyCmd = &cobra.Command{
 	Use:   "latency",
 	Short: "Measure bd-style query latency against a Dolt server",
