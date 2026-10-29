@@ -816,7 +816,7 @@ func TestWriteTownHealth_DaemonFieldBeforeTheFirstHeartbeat(t *testing.T) {
 				if err := os.Remove(stateFile); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := SaveState(d.config.TownRoot, startState(4242, now.Add(-tc.startedAgo), "abc123", Owner{Kind: OwnerKindManual, ID: "test-host:4242"})); err != nil {
+			} else if err := SaveState(d.config.TownRoot, startState(4242, now.Add(-tc.startedAgo), "abc123")); err != nil {
 				t.Fatal(err)
 			}
 			d.writeTownHealth()

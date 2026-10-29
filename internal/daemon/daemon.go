@@ -122,8 +122,13 @@ type Daemon struct {
 
 	// hostname names the host a manual owner's id carries (see
 	// hostnameOrOS); nil reads os.Hostname. Tests set it to drive the failed
-	// read, which refuses the start.
+	// read, which refuses a manual start.
 	hostname func() (string, error)
+
+	// owner is what started this daemon (DetectSelf), named once at the start
+	// and stamped onto every state this process saves (see saveState), so no
+	// writer drops it. nil before the start names it.
+	owner *Owner
 
 	// cpuIdleFn replaces the production read of the host's CPU idle percent
 	// in checkPressure (pressure.go); nil runs top. It returns an error for a
@@ -1257,14 +1262,11 @@ func (d *Daemon) Run() (err error) {
 	// Name this daemon's owner before anything is written: every state this
 	// process saves carries it, and a start that cannot name itself never
 	// touches the town (gt-qpeei.12).
-	hostname, err := d.hostnameOrOS()
-	if err != nil {
-		return fmt.Errorf("naming the daemon's owner: %w", err)
-	}
-	self, err := DetectSelf(d.env, hostname)
+	self, err := DetectSelf(d.env, d.hostnameOrOS)
 	if err != nil {
 		return err
 	}
+	d.owner = &self
 	d.logger.Printf("Daemon owner: %s %q", self.Kind, self.ID)
 
 	// Acquire exclusive lock to prevent multiple daemons from running.
@@ -1310,8 +1312,8 @@ func (d *Daemon) Run() (err error) {
 	}
 
 	// Update state
-	state := startState(os.Getpid(), time.Now(), d.resolveOwnCommit(), self)
-	if err := SaveState(d.config.TownRoot, state); err != nil {
+	state := startState(os.Getpid(), time.Now(), d.resolveOwnCommit())
+	if err := d.saveState(state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
 
@@ -2006,15 +2008,15 @@ var heartbeatSteps = []heartbeatStep{
 // identified by the host it runs on and its pid there.
 const OwnerKindManual = "manual"
 
-// DetectSelf names the owner of a daemon started from this process, from the
-// environment that started it: container (the container-mode variable, with
-// the compose file's container name as the id), launchd (XPC_SERVICE_NAME is
-// the job label), systemd (INVOCATION_ID), or manual ("hostname:pid"). Every
-// environment read goes through env so a test sets the fixture.
+// DetectSelf names the owner of a daemon started from this process: the
+// container (ContainerNameEnv), the launchd job (LaunchdJobEnv), the systemd
+// unit (SystemdInvocationEnv), or manual ("hostname:pid"). Every environment
+// read goes through env so a test sets the fixture.
 //
-// Container mode with no container name is an error: the id is what the
-// takeover guard and the container supervisor compare, so it is never guessed.
-func DetectSelf(env func(string) string, hostname string) (Owner, error) {
+// hostname is read only for the manual owner: the other kinds name themselves
+// without the host, so an unreadable host name must not refuse them. Container
+// mode with no container name is an error, never a guessed id.
+func DetectSelf(env func(string) string, hostname func() (string, error)) (Owner, error) {
 	if containerMode(env) {
 		name := env(agentconfig.ContainerNameEnv)
 		if name == "" {
@@ -2023,13 +2025,17 @@ func DetectSelf(env func(string) string, hostname string) (Owner, error) {
 		}
 		return Owner{Kind: agentconfig.SupervisorContainer, ID: name}, nil
 	}
-	if label := env("XPC_SERVICE_NAME"); label != "" {
+	if label := env(agentconfig.LaunchdJobEnv); label != "" {
 		return Owner{Kind: agentconfig.SupervisorLaunchd, ID: label}, nil
 	}
-	if invocation := env("INVOCATION_ID"); invocation != "" {
+	if invocation := env(agentconfig.SystemdInvocationEnv); invocation != "" {
 		return Owner{Kind: agentconfig.SupervisorSystemd, ID: invocation}, nil
 	}
-	return Owner{Kind: OwnerKindManual, ID: fmt.Sprintf("%s:%d", hostname, os.Getpid())}, nil
+	host, err := hostname()
+	if err != nil {
+		return Owner{}, fmt.Errorf("naming the daemon's owner: %w", err)
+	}
+	return Owner{Kind: OwnerKindManual, ID: fmt.Sprintf("%s:%d", host, os.Getpid())}, nil
 }
 
 // containerMode reports whether the compose file started this process as the
@@ -2060,16 +2066,26 @@ func (d *Daemon) hostnameOrOS() (string, error) {
 // heartbeat completes about a minute later, so LastHeartbeat starts at the
 // start time with count 0: the health line then reads a young daemon as
 // fresh instead of "no heartbeat recorded", and a daemon that never beats
-// still ages past the heartbeat threshold from its start (gt-v9oug).
-func startState(pid int, now time.Time, commit string, owner Owner) *State {
+// still ages past the heartbeat threshold from its start (gt-v9oug). The
+// owner comes from saveState (gt-qpeei.12).
+func startState(pid int, now time.Time, commit string) *State {
 	return &State{
 		Running:       true,
 		PID:           pid,
 		StartedAt:     now,
 		LastHeartbeat: now,
 		Commit:        commit,
-		Owner:         &owner,
 	}
+}
+
+// saveState writes the daemon's state under the owner it named at its start,
+// so no writer can drop it: the start, every heartbeat and the shutdown save
+// here (gt-qpeei.12). A daemon that named no owner writes the state as given.
+func (d *Daemon) saveState(state *State) error {
+	if d.owner != nil {
+		state.Owner = d.owner
+	}
+	return SaveState(d.config.TownRoot, state)
 }
 
 // heartbeatWork is the recovery work of one heartbeat, run after the
@@ -2088,7 +2104,7 @@ func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
 	// Update state
 	state.LastHeartbeat = time.Now()
 	state.HeartbeatCount++
-	if err := SaveState(d.config.TownRoot, state); err != nil {
+	if err := d.saveState(state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
 
@@ -2594,7 +2610,7 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	}
 
 	state.Running = false
-	if err := SaveState(d.config.TownRoot, state); err != nil {
+	if err := d.saveState(state); err != nil {
 		d.logger.Printf("Warning: failed to save final state: %v", err)
 	}
 

@@ -74,6 +74,14 @@ const (
 	// start, never a guessed id.
 	ContainerNameEnv = "GT_DAEMON_CONTAINER_NAME"
 
+	// LaunchdJobEnv is the variable launchd sets to the job label of the
+	// process it started; the label is the launchd owner's id (gt-qpeei.12).
+	LaunchdJobEnv = "XPC_SERVICE_NAME"
+
+	// SystemdInvocationEnv is the variable systemd sets to the unit's
+	// invocation id, which is the systemd owner's id (gt-qpeei.12).
+	SystemdInvocationEnv = "INVOCATION_ID"
+
 	// DefaultContainerName and DefaultComposeProject name the container and
 	// its compose project for a town that sets container_name and
 	// compose_project neither.

@@ -774,7 +774,7 @@ func TestDetectSelf(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := DetectSelf(ownerEnv(tc.env), "fixture-host")
+			got, err := DetectSelf(ownerEnv(tc.env), fixtureHostname("fixture-host"))
 			if err != nil {
 				t.Fatalf("DetectSelf = %v, want %+v", err, tc.want)
 			}
@@ -784,13 +784,62 @@ func TestDetectSelf(t *testing.T) {
 		})
 	}
 
+	// Only the manual owner's id carries the host name, so only that path may
+	// read it: a launchd, systemd or container start that failed here would be
+	// refused for an id it never writes (gt-qpeei.12).
+	t.Run("the service managers never read the hostname", func(t *testing.T) {
+		t.Parallel()
+		unreadable := func() (string, error) {
+			t.Errorf("DetectSelf read the host name for an owner kind whose id does not carry it")
+			return "", errors.New("no hostname")
+		}
+		for _, tc := range []struct {
+			name string
+			env  map[string]string
+			want Owner
+		}{
+			{
+				name: "launchd",
+				env:  map[string]string{"XPC_SERVICE_NAME": "com.gastown.daemon"},
+				want: Owner{Kind: "launchd", ID: "com.gastown.daemon"},
+			},
+			{
+				name: "systemd",
+				env:  map[string]string{"INVOCATION_ID": "9f2c4d1e"},
+				want: Owner{Kind: "systemd", ID: "9f2c4d1e"},
+			},
+			{
+				name: "container",
+				env:  map[string]string{"GT_DAEMON_SUPERVISOR": "container", "GT_DAEMON_CONTAINER_NAME": "scratch-town-daemon-1"},
+				want: Owner{Kind: "container", ID: "scratch-town-daemon-1"},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				got, err := DetectSelf(ownerEnv(tc.env), unreadable)
+				if err != nil {
+					t.Fatalf("DetectSelf = %v, want %+v: this owner kind names itself without the host", err, tc.want)
+				}
+				if got != tc.want {
+					t.Fatalf("DetectSelf = %+v, want %+v", got, tc.want)
+				}
+			})
+		}
+	})
+
 	t.Run("container mode without a container name", func(t *testing.T) {
 		t.Parallel()
-		got, err := DetectSelf(ownerEnv(map[string]string{"GT_DAEMON_SUPERVISOR": "container"}), "fixture-host")
+		got, err := DetectSelf(ownerEnv(map[string]string{"GT_DAEMON_SUPERVISOR": "container"}), fixtureHostname("fixture-host"))
 		if err == nil || !strings.Contains(err.Error(), "GT_DAEMON_CONTAINER_NAME") {
 			t.Fatalf("DetectSelf = %+v, %v; want an error naming GT_DAEMON_CONTAINER_NAME, never a guessed id", got, err)
 		}
 	})
+}
+
+// fixtureHostname is the host a test's manual owner names, so no test reads
+// the host it runs on.
+func fixtureHostname(host string) func() (string, error) {
+	return func() (string, error) { return host, nil }
 }
 
 // startParkedRun starts a Run on an empty temp town and parks it at the
@@ -805,10 +854,11 @@ func startParkedRun(t *testing.T, env map[string]string) (*Config, func() error)
 	}
 	cfg := DefaultConfig(town)
 	d := &Daemon{
-		config: cfg,
-		logger: log.New(io.Discard, "", 0),
-		getenv: ownerEnv(env),
-		clock:  clockwork.NewFakeClockAt(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)),
+		config:   cfg,
+		logger:   log.New(io.Discard, "", 0),
+		getenv:   ownerEnv(env),
+		hostname: fixtureHostname("fixture-host"),
+		clock:    clockwork.NewFakeClockAt(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)),
 	}
 	// The rest of the startup does real host work: the heartbeat dispatches
 	// and restarts sessions, the sweep touches the tmux socket directory, and
@@ -883,6 +933,31 @@ func TestRunWritesLaunchdOwner(t *testing.T) {
 	}
 	if want := (Owner{Kind: "launchd", ID: "com.gastown.daemon"}); stopped.Owner == nil || *stopped.Owner != want {
 		t.Errorf("state.json owner after the shutdown save = %+v, want %+v: the clean stop must name who left it", stopped.Owner, want)
+	}
+}
+
+// The owner reaches the writers that save a state they did not build: the
+// heartbeat ticks the state it was handed. Naming the owner only in
+// startState would leave them free to drop it (gt-qpeei.12).
+func TestHeartbeatSaveKeepsTheOwner(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig(t.TempDir())
+	want := Owner{Kind: "launchd", ID: "com.gastown.daemon"}
+	d := &Daemon{
+		config: cfg,
+		logger: log.New(io.Discard, "", 0),
+		owner:  &want,
+	}
+	d.seams.heartbeatStep = func(*Daemon, heartbeatStep) {}
+
+	d.heartbeatWork(&State{Running: true}, false)
+
+	state, err := LoadState(cfg.TownRoot)
+	if err != nil {
+		t.Fatalf("LoadState after the heartbeat save = %v", err)
+	}
+	if state.Owner == nil || *state.Owner != want {
+		t.Fatalf("state.json owner after the heartbeat save = %+v, want %+v", state.Owner, want)
 	}
 }
 
@@ -993,7 +1068,12 @@ func TestRunRefusesWhenThePidFileCannotBeWritten(t *testing.T) {
 	}
 	cfg := DefaultConfig(town)
 	cfg.PidFile = filepath.Join(town, "daemon", "absent-dir", "daemon.pid")
-	d := &Daemon{config: cfg, logger: log.New(io.Discard, "", 0), getenv: ownerEnv(nil)}
+	d := &Daemon{
+		config:   cfg,
+		logger:   log.New(io.Discard, "", 0),
+		getenv:   ownerEnv(nil),
+		hostname: fixtureHostname("fixture-host"),
+	}
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	d.cancel()
 
