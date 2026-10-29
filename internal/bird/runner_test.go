@@ -344,6 +344,22 @@ func TestStartRollsTheClaimBackWhenExecFails(t *testing.T) {
 	}
 }
 
+func TestStartSaysWhenItCannotRollTheClaimBack(t *testing.T) {
+	t.Parallel()
+	r, reg, _ := testRunner(t, "wren")
+	r.Exec = func(string, []string, []string) error {
+		// The rollback is the only write after the exec, so it is the one that
+		// fails, and the caller has to be told the record may still be there.
+		reg.Write = func(string, any) error { return errors.New("the state file is not writable") }
+		return errors.New("exec format error")
+	}
+
+	err := r.Start(nil)
+	if err == nil || !strings.Contains(err.Error(), "exec format error") || !strings.Contains(err.Error(), "rolling the claim back also failed") {
+		t.Fatalf("Start = %v, want the exec failure and the rollback failure", err)
+	}
+}
+
 func TestStartKeepsABindingTheBeadHadBeforeExecFails(t *testing.T) {
 	t.Parallel()
 	r, reg, _ := testRunner(t, "wren", "robin")
