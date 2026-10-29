@@ -423,10 +423,14 @@ func TestCollectAbandonedAtTheCallersDeadline(t *testing.T) {
 	lines := make(chan []string, 1)
 	go func() { lines <- target.gc(ctx, &result) }()
 
+	// The test's own wait ends well after the caller's deadline, so a collect
+	// that is not abandoned fails the test rather than hanging it.
+	wait, expire := context.WithTimeout(context.Background(), 20*time.Second)
+	defer expire()
 	var got []string
 	select {
 	case got = <-lines:
-	case <-time.After(20 * time.Second):
+	case <-wait.Done():
 		t.Fatal("the collect was not abandoned at the caller's deadline; a docker client that never answers is holding the plugin lock")
 	}
 	select {
