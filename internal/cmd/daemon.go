@@ -311,7 +311,7 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 		case st.Err != nil:
 			unconfirmed = fmt.Errorf("could not read the %s job's state: %w", sup.name, st.Err)
 		case st.Loaded:
-			if runErr := c.run(sup.stop); runErr != nil {
+			if runErr := sup.runArgv(sup.stop); runErr != nil {
 				unconfirmed = fmt.Errorf("could not stop the %s job: %w", sup.name, runErr)
 			} else {
 				stoppedUnder = sup.name
