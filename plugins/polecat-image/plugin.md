@@ -26,9 +26,9 @@ commit (gt-pmxo9); gt is reinstalled after most landings, so without this
 plugin every sandbox sling would be refused until someone rebuilt the image by
 hand.
 
-`rebuild_gt` installs at most once per 30 minutes, so this plugin builds at most
-about 48 times a day; a build is three cross-compiles and a `docker build`, about
-a minute.
+`rebuild_gt` installs at most once per 30 minutes, so this plugin builds about
+48 times a day; a build is three cross-compiles and a `docker build`, about a
+minute.
 
 `make install` (`cmd/gt-installer`) runs this plugin itself: by default it
 builds the image before it swaps the binary and fails the install if the build
@@ -57,7 +57,7 @@ detached, escalating a failure under `install-gt:image-build-failed`.
    `~/gt/gastown/.polecat-image-build/<sha>`, runs `make polecat-image
    BD_SRC=~/gt/beads/mayor/rig` there, removes the worktree, and checks the
    labels it ended with; the Makefile's `BD_COMMIT` comment says which bd
-   commit goes into the image and why (gt-7b7a5).
+   commit goes into the image and when the build fetches one (gt-7b7a5).
 5. Reads the installed commit again; if a newer install landed during the
    build it builds again, at most 3 rounds.
 6. With a registry resolved ("Publishing to a registry"), publishes what it just

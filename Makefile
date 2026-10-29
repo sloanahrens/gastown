@@ -148,9 +148,9 @@ POLE_COMMIT := $(shell git rev-parse HEAD 2>/dev/null)
 BD_SRC ?=
 # The commit of BD_SRC the image's bd is built from: empty builds the commit the
 # installed bd reports (`bd version --json`, gt-7b7a5), so host and sandbox
-# share one schema ceiling. The build refuses a commit the checkout's object
-# store does not hold; it never fetches, so a newer host bd needs a BD_SRC that
-# was fetched past it.
+# share one schema ceiling. A commit the checkout's object store does not hold
+# is fetched for once there and looked for again; still missing, or a fetch that
+# fails, refuses the build (gt-pme82).
 BD_COMMIT ?=
 # The image's Go floor is the highest `go` line of the rigs' go.mod files, read
 # from each rig's canonical checkout under POLE_TOWN (deploy/polecat/go-floor.sh).
