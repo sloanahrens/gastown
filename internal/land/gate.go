@@ -336,21 +336,10 @@ func WithSlot(g CommandGate, townRoot, role string) CommandGate {
 	return g
 }
 
-// WithSlotForCommand returns WithSlot(g, townRoot, role) unless command
-// declares itself container-free, in which case g is returned as it is and no
-// step takes a slot.
-//
-// A command declares itself container-free when every segment of its line
-// leads with GT_TEST_DOCKER=0 (`GT_TEST_DOCKER=0 bash
-// scripts/post-land-shell.sh`) and no segment mentions the variable again. A
-// segment that stays silent keeps the slot, since its run inherits whatever
-// GT_TEST_DOCKER the ambient environment holds, which may be 1: `make lint;
-// GT_TEST_DOCKER=0 make test` and `GT_TEST_DOCKER=0 bash x.sh; make test` both
-// take it.
-//
-// The declaration is the whole evidence: a rig whose command is `make test`
-// may or may not start containers, and that is not visible in its text, so a
-// command that stays silent keeps the slot (gt-7k0hz).
+// WithSlotForCommand returns WithSlot(g, townRoot, role), except that a command
+// declaring itself container-free (GT_TEST_DOCKER=0 leading every segment, see
+// declaresContainerFree) takes no slot. A command that stays silent keeps it:
+// whether `make test` starts containers is not visible in its text (gt-7k0hz).
 func WithSlotForCommand(g CommandGate, townRoot, role, command string) CommandGate {
 	if declaresContainerFree(command) {
 		return g

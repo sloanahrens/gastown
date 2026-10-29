@@ -427,6 +427,7 @@ func TestWithSlotForCommandKeepsTheSlotOtherwise(t *testing.T) {
 		"make lint; GT_TEST_DOCKER=0 make test",
 		"true | GT_TEST_DOCKER=0 make test",
 		"GT_TEST_DOCKER=0 make test | tee log",
+		"GT_TEST_DOCKER=0 make test &> log",
 		"",
 		"   ",
 		"GT_TEST_DOCKER=0 FOO=1 GT_TEST_DOCKER=1 bash scripts/post-land-shell.sh",

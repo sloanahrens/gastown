@@ -1225,12 +1225,12 @@ func postLandRun(repo, workRoot, logRoot, townRoot, rigName, remote string, time
 			_ = g.WorktreeRemove(dir, true)
 			_ = g.WorktreePrune()
 		}()
-		// Named "test" so the slot, when taken, is held around it. The role is
-		// gate-class (slot.IsGateRole): this run is the red-main detector, so
-		// it takes reserved slots and crew yield to it. A command that leads
-		// every segment with GT_TEST_DOCKER=0 starts no containers, so it
-		// takes no slot and an install is not blocked by the shell tier
-		// (gt-7k0hz).
+		// Named "test" so the slot, when taken, is held around it. A command
+		// that leads every segment with GT_TEST_DOCKER=0 starts no containers
+		// and takes no slot, so an install is not blocked by the shell tier
+		// (gt-7k0hz). Any other command takes the slot under a gate-class role
+		// (slot.IsGateRole): that run is the red-main detector, so it takes
+		// reserved slots and crew yield to it.
 		cg := land.WithSlotForCommand(land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}, townRoot, rigName+"/post-land", cmd)
 		cg.LogDir = filepath.Join(logRoot, filepath.Base(parent))
 		rctx, cancel := context.WithTimeout(ctx, timeout)
