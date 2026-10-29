@@ -897,7 +897,7 @@ func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
 	}
 	for _, c := range []struct{ polecat, shown, full string }{
 		{"alpha", "docker-sbx", "deepseek-flash-sandbox"},
-		{"delta", "k8s-sbx", "deepseek-flash-sandbox-k8s"},
+		{"delta", "sbx-flash", "deepseek-flash-sandbox-k8s"},
 		{"bravo", "haiku", "claude-haiku"},
 		{"echo", "sonnet", "claude-sonnet"},
 		{"foxtrot", "flash", "deepseek-flash"},

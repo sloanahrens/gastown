@@ -220,7 +220,7 @@ func TestTheModelsPanelNamesTheSandboxSeatsByTheirShortNames(t *testing.T) {
 	})
 	for _, c := range []struct{ shown, full, key string }{
 		{"docker-sbx", "deepseek-flash-sandbox", "gastown.deepseek-flash-sandbox"},
-		{"k8s-sbx", "deepseek-flash-sandbox-k8s", "gastown.deepseek-flash-sandbox-k8s"},
+		{"sbx-flash", "deepseek-flash-sandbox-k8s", "gastown.deepseek-flash-sandbox-k8s"},
 	} {
 		cell := dom.cellWithText(t, "modelspanel", c.shown)
 		if want := c.full + " · " + c.key; cell.Title != want {
@@ -247,7 +247,7 @@ func TestTheModelsPanelActivityTableNamesAgentsByTheirShortNames(t *testing.T) {
 	})
 	for i, c := range []struct{ shown, full, landed, rejected string }{
 		{"docker-sbx", "deepseek-flash-sandbox", "2", "1"},
-		{"k8s-sbx", "deepseek-flash-sandbox-k8s", "0", "3"},
+		{"sbx-flash", "deepseek-flash-sandbox-k8s", "0", "3"},
 	} {
 		cell := dom.cellWithText(t, "modelspanel", c.shown)
 		if cell.Title != c.full {

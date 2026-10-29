@@ -330,9 +330,9 @@ func TestTheStripTellsAFailedSeatReadFromOneNotMade(t *testing.T) {
 		cell   string
 		why    string
 	}{
-		{"not yet read", map[string]any{"seat_rows": []any{unread}}, "k8s-sbx –/3", "has not been read yet"},
-		{"read failed", map[string]any{"seat_rows": []any{unread}, "seats_unreadable": true}, "k8s-sbx ?/3", "could not be read"},
-		{"read", map[string]any{"seat_rows": []any{read}}, "k8s-sbx 3/3", ""},
+		{"not yet read", map[string]any{"seat_rows": []any{unread}}, "sbx-flash –/3", "has not been read yet"},
+		{"read failed", map[string]any{"seat_rows": []any{unread}, "seats_unreadable": true}, "sbx-flash ?/3", "could not be read"},
+		{"read", map[string]any{"seat_rows": []any{read}}, "sbx-flash 3/3", ""},
 	} {
 		dom.call(t, "renderStrip", map[string]any{"models": c.models})
 		cell := dom.cellWithText(t, "strip", c.cell)
@@ -366,7 +366,7 @@ func TestTheStripNamesTheSandboxSeatsByTheirShortNames(t *testing.T) {
 	// its own cell, and cellWithText reads a cell by its whole text.
 	for _, c := range []struct{ cell, full string }{
 		{"docker-sbx 1/3", "deepseek-flash-sandbox"},
-		{" · k8s-sbx 0/3", "deepseek-flash-sandbox-k8s"},
+		{" · sbx-flash 0/3", "deepseek-flash-sandbox-k8s"},
 		{" · claude-haiku 1/2", "claude-haiku"},
 	} {
 		cell := dom.cellWithText(t, "strip", c.cell)
