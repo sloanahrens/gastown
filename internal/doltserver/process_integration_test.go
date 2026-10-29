@@ -175,6 +175,14 @@ func TestIntegrationStartProcessReapsExitedChild(t *testing.T) {
 	if std.processAlive(proc.pid) {
 		t.Fatalf("processAlive(%d) stayed true for 1s after the child exited: an unreaped zombie", proc.pid)
 	}
+	// cmd.Wait reaps the pid before the reaper closes done, so the pid can read
+	// as gone while the handle still reads as running. Wait for the close, with a
+	// bound, before asking the handle.
+	select {
+	case <-proc.done:
+	case <-time.After(time.Second):
+		t.Fatalf("proc.done stayed open for 1s after the child exited")
+	}
 	// The handle answers the same way every time it is asked.
 	for i := 0; i < 2; i++ {
 		if !proc.exited() {
