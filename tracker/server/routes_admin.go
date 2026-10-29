@@ -25,7 +25,9 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 
 // issueToken creates a token for the actor and scope the body names and
 // answers it once: the token is in no log line and no metric, so the response
-// body is the only copy the tracker makes in the clear.
+// body is the only copy the tracker makes in the clear. The one line the log
+// does get names the admin who issued it, the target actor and the scope, so
+// a seat's token can be traced back to the caller that handed it out.
 func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
 	var req api.IssueTokenRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -42,12 +44,15 @@ func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err, s.cfg.Log)
 		return
 	}
+	s.cfg.Log.Printf("token issue: admin=%q target=%q scope=%q", api.ActorFrom(r.Context()), req.Actor, scope)
 	writeJSON(w, http.StatusCreated, api.IssuedToken{Actor: req.Actor, Scope: scope, Token: token})
 }
 
 // revokeTokens ends every live token of the actor the body names, or the one
 // token it names by id: an actor with none is a success answering zero, while
-// an id that names none is a not_found, an exact reference that missed.
+// an id that names none is a not_found, an exact reference that missed. A
+// revoke that ends a token logs one line naming the admin, the target and how
+// many tokens it ended; a failed one logs nothing but the error.
 func (s *Server) revokeTokens(w http.ResponseWriter, r *http.Request) {
 	var req api.RevokeTokensRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -64,6 +69,7 @@ func (s *Server) revokeTokens(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err, s.cfg.Log)
 			return
 		}
+		s.cfg.Log.Printf("token revoke: admin=%q target=%q revoked=%d", api.ActorFrom(r.Context()), req.Actor, n)
 		writeJSON(w, http.StatusOK, api.RevokeTokensResult{Revoked: n})
 		return
 	}
@@ -76,6 +82,9 @@ func (s *Server) revokeTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, api.NotFound("token "+req.TokenID), s.cfg.Log)
 		return
 	}
+	// %q on every value: a token id is request text nothing checks for a
+	// newline, and an unquoted one would forge a line of its own.
+	s.cfg.Log.Printf("token revoke: admin=%q token_id=%q", api.ActorFrom(r.Context()), req.TokenID)
 	writeJSON(w, http.StatusOK, api.RevokeTokensResult{Revoked: 1})
 }
 
