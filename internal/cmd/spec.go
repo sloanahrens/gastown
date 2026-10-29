@@ -1715,16 +1715,18 @@ func specRecordTickVerdicts(env specDispatchEnv, report specDispatchReport) {
 // it away with the old file.
 func specVerdictLedgerLockPath(path string) string { return path + ".flock" }
 
-// specLockVerdictLedger takes the lock that makes one town's load-fold-save a
-// single step. Two ticks — the daemon's and an operator's `gt spec dispatch` —
-// that each loaded before either saved would both fold onto the same file and
-// the second save would drop the first's sighting, losing a tick of every
-// verdict it held (gt-tcsnr).
-func specLockVerdictLedger(path string) (func(), error) {
+// specLockVerdictLedger tries the lock that makes one town's load-fold-save a
+// single step, and does not wait for it: a holder that is stuck would hold up
+// every later tick. Two ticks — the daemon's and an operator's `gt spec
+// dispatch` — that each loaded before either saved would both fold onto the
+// same file and the second save would drop the first's sighting, losing a tick
+// of every verdict it held (gt-tcsnr). The second result is false when another
+// tick holds the lock.
+func specLockVerdictLedger(path string) (func(), bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("creating the ledger directory: %w", err)
+		return nil, false, fmt.Errorf("creating the ledger directory: %w", err)
 	}
-	return lock.FlockAcquire(specVerdictLedgerLockPath(path))
+	return lock.FlockTryAcquire(specVerdictLedgerLockPath(path))
 }
 
 // specRecordVerdictsTo folds one tick's entries into the verdict ledger at
@@ -1735,12 +1737,22 @@ func specLockVerdictLedger(path string) (func(), error) {
 // than recorded onto empty, because that would reset the first-seen time of
 // every verdict it holds (gt-8thox). A ledger that does not parse is the
 // exception: it can never be read again, so the tick replaces it and says so,
-// where leaving it would warn on every tick and heal nothing (gt-tcsnr).
+// where leaving it would warn on every tick and heal nothing (gt-tcsnr). The
+// tick moves those bytes aside first, to a sibling named for the tick's time,
+// and says where they are: a replaced ledger never loses what it could not
+// read. If the bytes cannot be moved aside, the ledger is not replaced.
+//
+// A tick that finds another tick holding the ledger records nothing and says
+// so: it neither waits for that tick nor saves onto the file it is replacing.
 func specRecordVerdictsTo(warn io.Writer, townRoot string, at time.Time, entries []specdispatch.Entry, file specLedgerFile) {
 	path := specdispatch.LedgerPath(townRoot)
-	unlock, err := specLockVerdictLedger(path)
+	unlock, held, err := specLockVerdictLedger(path)
 	if err != nil {
 		fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: %v\n", err)
+		return
+	}
+	if !held {
+		fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: another tick is saving it\n")
 		return
 	}
 	defer unlock()
@@ -1750,13 +1762,21 @@ func specRecordVerdictsTo(warn io.Writer, townRoot string, at time.Time, entries
 		fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: %v\n", err)
 		return
 	}
+	var kept string
+	if corrupt != nil {
+		kept = path + ".corrupt-" + at.UTC().Format("20060102T150405Z")
+		if err := os.Rename(path, kept); err != nil {
+			fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: keeping the unparsable ledger: %v\n", err)
+			return
+		}
+	}
 	ledger.Record(at, entries)
 	if err := file.Save(path, ledger); err != nil {
 		fmt.Fprintf(warn, "spec dispatch: verdict ledger not recorded: %v\n", err)
 		return
 	}
 	if corrupt != nil {
-		fmt.Fprintf(warn, "spec dispatch: verdict ledger replaced: %v\n", err)
+		fmt.Fprintf(warn, "spec dispatch: verdict ledger replaced: %v; the unparsable bytes are kept at %s\n", corrupt, kept)
 	}
 }
 
