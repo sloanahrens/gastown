@@ -209,17 +209,80 @@ func TestTargetPlanSkipsSymlinksAndDirs(t *testing.T) {
 	}
 }
 
+func TestDefaultDirsHandsOverUnjudgedPaths(t *testing.T) {
+	t.Parallel()
+	// A settings name that links to itself cannot be checked: stat fails with a
+	// loop error, which is neither "not there" nor "not a rig".
+	loopRig := t.TempDir()
+	mustMkdir(t, filepath.Join(loopRig, "gastown"))
+	loopSettings := filepath.Join(loopRig, "beads", "settings")
+	mustMkdir(t, filepath.Dir(loopSettings))
+	if err := os.Symlink(loopSettings, loopSettings); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	loopTown := filepath.Join(t.TempDir(), "town")
+	if err := os.Symlink(loopTown, loopTown); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		town string
+		want string // the path the plan must refuse on
+	}{
+		{name: "rig settings cannot be checked", town: loopRig, want: loopSettings},
+		{name: "town cannot be listed", town: loopTown, want: loopTown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			config, _ := DefaultDirs(tc.town, t.TempDir())
+			lsof := newFakeLsof(t)
+			plan, err := NewTarget(Config{ConfigDirs: config, Run: lsof.run}).
+				Plan(context.Background(), diskmaint.Policy{Now: testNow})
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			if plan.Refused == "" || !strings.Contains(plan.Refused, tc.want) {
+				t.Fatalf("Refused = %q, want an unreadable-state refusal naming %s", plan.Refused, tc.want)
+			}
+		})
+	}
+}
+
+func TestTargetPlanIgnoresAMissingDir(t *testing.T) {
+	t.Parallel()
+	// A configured directory that is not there holds no backups, so it is not
+	// a read error and does not refuse the plan.
+	absent := filepath.Join(t.TempDir(), "settings")
+
+	lsof := newFakeLsof(t)
+	target := NewTarget(Config{ConfigDirs: []string{absent}, Run: lsof.run})
+	plan, err := target.Plan(context.Background(), diskmaint.Policy{Now: testNow})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Refused != "" {
+		t.Fatalf("Refused = %q, want a plan for a directory that is not there", plan.Refused)
+	}
+	if len(plan.Actions) != 0 || len(plan.Kept) != 0 {
+		t.Fatalf("plan = %+v, want nothing from a missing directory", plan)
+	}
+	if got := len(lsof.calls); got != 0 {
+		t.Errorf("lsof calls = %d, want none with no candidate", got)
+	}
+}
+
 func TestTargetPlanRefusesUnreadableDir(t *testing.T) {
 	t.Parallel()
 	good := t.TempDir()
 	writeBackup(t, good, "app.toml.bak-01", 40*24*time.Hour, 10)
 
+	// A regular file cannot be listed by anyone, root included, so this needs no
+	// permissions to be unreadable.
 	bad := filepath.Join(t.TempDir(), "settings")
-	mustMkdir(t, bad)
-	// A directory with no permissions cannot be listed by anyone but root. The
-	// fixture stays empty so cleaning it up needs no mode put back.
-	if err := os.Chmod(bad, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
+	if err := os.WriteFile(bad, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
 	}
 
 	lsof := newFakeLsof(t)

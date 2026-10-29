@@ -91,9 +91,7 @@ func (t *Target) Name() string { return planTarget }
 func DefaultDirs(town, home string) (config, binary []string) {
 	if town != "" {
 		config = append(config, filepath.Join(town, settingsDir))
-		for _, rig := range rigDirs(town) {
-			config = append(config, filepath.Join(town, rig, settingsDir))
-		}
+		config = append(config, rigConfigDirs(town)...)
 		config = append(config, filepath.Join(town, "mayor"))
 	}
 	if home != "" {
@@ -103,30 +101,51 @@ func DefaultDirs(town, home string) (config, binary []string) {
 	return config, binary
 }
 
-// rigDirs returns the names of the town's subdirectories that hold a settings
-// directory, which is what makes one a rig here: a rig with no settings
-// directory has no settings backups to read. The names come in the order
-// os.ReadDir gives them, so the same town always yields the same paths. A town
-// that cannot be listed contributes no rigs; a rig this misses costs nothing,
-// because the directory it would name holds no backups the plan could act on.
-func rigDirs(town string) []string {
+// rigConfigDirs returns the settings directories of the town's rigs, which are
+// the town's subdirectories that hold a settings directory: a rig with none has
+// no settings backups to read. The paths come in the order os.ReadDir gives
+// them, so the same town always yields the same paths. A path that exists but
+// cannot be checked is returned in place of what it would have named, so scan
+// reads it and refuses the plan on the read error; skipping it would leave a
+// rig's backups unjudged and out of the measurement. A path that is not there
+// is skipped, because it holds nothing.
+func rigConfigDirs(town string) []string {
 	entries, err := os.ReadDir(town)
 	if err != nil {
+		return unjudged(town, err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		rig := filepath.Join(town, e.Name())
+		settings := filepath.Join(rig, settingsDir)
+		dir, err := os.Stat(rig)
+		if err != nil {
+			dirs = append(dirs, unjudged(settings, err)...)
+			continue
+		}
+		if !dir.IsDir() {
+			continue
+		}
+		info, err := os.Stat(settings)
+		if err != nil {
+			dirs = append(dirs, unjudged(settings, err)...)
+			continue
+		}
+		if info.IsDir() {
+			dirs = append(dirs, settings)
+		}
+	}
+	return dirs
+}
+
+// unjudged returns path when err says it could not be checked, and nothing when
+// err says it is not there. The caller hands the result to scan, which reads
+// each config directory and refuses the plan on a read error.
+func unjudged(path string, err error) []string {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	var rigs []string
-	for _, e := range entries {
-		dir, err := os.Stat(filepath.Join(town, e.Name()))
-		if err != nil || !dir.IsDir() {
-			continue
-		}
-		info, err := os.Stat(filepath.Join(town, e.Name(), settingsDir))
-		if err != nil || !info.IsDir() {
-			continue
-		}
-		rigs = append(rigs, e.Name())
-	}
-	return rigs
+	return []string{path}
 }
 
 // Measure reports how many backup candidates the directories hold and their
