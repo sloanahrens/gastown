@@ -240,12 +240,14 @@ func image(id byte, tag string, age time.Duration, digests ...string) nodeImage 
 }
 
 func TestName(t *testing.T) {
+	t.Parallel()
 	if got := NewTarget(Config{}).Name(); got != "nodes" {
 		t.Fatalf("Name() = %q, want nodes", got)
 	}
 }
 
 func TestNewTargetDefaultsContextAndPrefix(t *testing.T) {
+	t.Parallel()
 	f := newFake("", nil)
 	if _, err := NewTarget(Config{Run: f.run}).Measure(context.Background()); err != nil {
 		t.Fatal(err)
@@ -263,6 +265,7 @@ func TestNewTargetDefaultsContextAndPrefix(t *testing.T) {
 }
 
 func TestMeasureReportsNodeCountWithoutContactingNodes(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\ngt-sbx-b\n", nil)
 	m, err := NewTarget(Config{Run: f.run}).Measure(context.Background())
 	if err != nil {
@@ -280,6 +283,7 @@ func TestMeasureReportsNodeCountWithoutContactingNodes(t *testing.T) {
 }
 
 func TestMeasureFailsOnListingError(t *testing.T) {
+	t.Parallel()
 	f := newFake("", nil)
 	f.listErr = errors.New("cannot connect to the docker daemon")
 	if _, err := NewTarget(Config{Run: f.run}).Measure(context.Background()); err == nil {
@@ -288,6 +292,7 @@ func TestMeasureFailsOnListingError(t *testing.T) {
 }
 
 func TestPlanTurnsPlannedImagesIntoActions(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", map[string][]nodeImage{
 		"gt-sbx-a": {
 			image('a', "a", time.Hour),
@@ -331,6 +336,7 @@ func TestPlanTurnsPlannedImagesIntoActions(t *testing.T) {
 }
 
 func TestPlanLeavesAnUnreadableNodeAlone(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\ngt-sbx-b\n", map[string][]nodeImage{
 		"gt-sbx-a": {image('a', "a", time.Hour), image('c', "c", 3*time.Hour)},
 		"gt-sbx-b": {image('b', "b", time.Hour), image('d', "d", 3*time.Hour)},
@@ -354,6 +360,7 @@ func TestPlanLeavesAnUnreadableNodeAlone(t *testing.T) {
 }
 
 func TestPlanRefusesAnEmptyNodeList(t *testing.T) {
+	t.Parallel()
 	f := newFake("", nil)
 	plan, err := NewTarget(Config{Run: f.run}).Plan(context.Background(), diskmaint.Policy{Keep: 1})
 	if err != nil {
@@ -368,6 +375,7 @@ func TestPlanRefusesAnEmptyNodeList(t *testing.T) {
 }
 
 func TestPlanRefusesAFailedListing(t *testing.T) {
+	t.Parallel()
 	f := newFake("", nil)
 	f.listErr = errors.New("cannot connect to the docker daemon")
 	plan, err := NewTarget(Config{Run: f.run}).Plan(context.Background(), diskmaint.Policy{Keep: 1})
@@ -383,6 +391,7 @@ func TestPlanRefusesAFailedListing(t *testing.T) {
 }
 
 func TestPlanRefusesWithoutARunner(t *testing.T) {
+	t.Parallel()
 	plan, err := NewTarget(Config{}).Plan(context.Background(), diskmaint.Policy{Keep: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -396,6 +405,7 @@ func TestPlanRefusesWithoutARunner(t *testing.T) {
 // it is a substring match, so a container whose name merely contains gt-sbx-
 // comes back too, and such a name must never be planned or contacted.
 func TestPlanKeepsOnlyNamesThatStartWithThePrefix(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\nother-gt-sbx-b\ngt-sbx-a;evil\n", map[string][]nodeImage{
 		"gt-sbx-a":       {image('a', "a", time.Hour), image('c', "c", 3*time.Hour)},
 		"other-gt-sbx-b": {image('b', "b", time.Hour), image('d', "d", 3*time.Hour)},
@@ -420,6 +430,7 @@ func TestPlanKeepsOnlyNamesThatStartWithThePrefix(t *testing.T) {
 // TestPlanIssuesNoRmi is the dry-run rule: Policy.Apply is false, so a plan
 // reads the nodes and removes nothing.
 func TestPlanIssuesNoRmi(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", map[string][]nodeImage{
 		"gt-sbx-a": {image('a', "a", time.Hour), image('c', "c", 3*time.Hour)},
 	})
@@ -441,6 +452,7 @@ func TestPlanIssuesNoRmi(t *testing.T) {
 // TestApplyRemovesOnlyThePlannedImages is the bound Apply must hold: the live
 // state holds an old image the plan did not name, and Apply must leave it.
 func TestApplyRemovesOnlyThePlannedImages(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", map[string][]nodeImage{
 		"gt-sbx-a": {
 			image('a', "a", time.Hour),
@@ -471,6 +483,7 @@ func TestApplyRemovesOnlyThePlannedImages(t *testing.T) {
 }
 
 func TestApplyTouchesOnlyPlannedNodes(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\ngt-sbx-b\n", map[string][]nodeImage{
 		"gt-sbx-a": {image('a', "a", time.Hour), image('c', "c", 3*time.Hour)},
 		"gt-sbx-b": {image('a', "a", time.Hour), image('c', "c", 3*time.Hour)},
@@ -489,6 +502,7 @@ func TestApplyTouchesOnlyPlannedNodes(t *testing.T) {
 }
 
 func TestApplyValidatesBeforeAnyCommand(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		action diskmaint.Action
@@ -499,6 +513,7 @@ func TestApplyValidatesBeforeAnyCommand(t *testing.T) {
 		{"no node", diskmaint.Action{Kind: actionRemove, Ref: imgID('c')}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			f := newFake("gt-sbx-a\n", nil)
 			ledger := &fakeLedger{}
 			plan := diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{tc.action}}
@@ -526,6 +541,7 @@ func TestApplyValidatesBeforeAnyCommand(t *testing.T) {
 }
 
 func TestApplyRecordsAFailedRemovalAndKeepsGoing(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", map[string][]nodeImage{
 		"gt-sbx-a": {image('c', "c", 3*time.Hour), image('d', "d", 4*time.Hour)},
 	})
@@ -552,6 +568,7 @@ func TestApplyRecordsAFailedRemovalAndKeepsGoing(t *testing.T) {
 }
 
 func TestApplyRecordsARefusedPlanAndRunsNothing(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", nil)
 	ledger := &fakeLedger{}
 	plan := diskmaint.Plan{Target: planTarget, Refused: "no kind nodes"}
@@ -568,6 +585,7 @@ func TestApplyRecordsARefusedPlanAndRunsNothing(t *testing.T) {
 }
 
 func TestApplyRecordsAnEmptyPlan(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", nil)
 	ledger := &fakeLedger{}
 	if _, err := NewTarget(Config{Run: f.run, Ledger: ledger}).Apply(context.Background(), diskmaint.Plan{Target: planTarget}); err != nil {
@@ -582,6 +600,7 @@ func TestApplyRecordsAnEmptyPlan(t *testing.T) {
 }
 
 func TestApplyWithoutALedgerRefuses(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", nil)
 	plan := diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{{
 		Kind: actionRemove, Ref: "gt-sbx-a/" + imgID('c'), Why: "planned",
@@ -595,6 +614,7 @@ func TestApplyWithoutALedgerRefuses(t *testing.T) {
 }
 
 func TestApplyWithoutARunnerFails(t *testing.T) {
+	t.Parallel()
 	ledger := &fakeLedger{}
 	plan := diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{{
 		Kind: actionRemove, Ref: "gt-sbx-a/" + imgID('c'), Why: "planned",
@@ -608,6 +628,7 @@ func TestApplyWithoutARunnerFails(t *testing.T) {
 }
 
 func TestApplyReturnsALedgerFailure(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", map[string][]nodeImage{
 		"gt-sbx-a": {image('c', "c", 3*time.Hour)},
 	})
@@ -626,6 +647,7 @@ func TestApplyReturnsALedgerFailure(t *testing.T) {
 }
 
 func TestApplyStampsTheLedgerWithTheConfiguredClock(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", map[string][]nodeImage{
 		"gt-sbx-a": {image('c', "c", 3*time.Hour)},
 	})
@@ -647,6 +669,7 @@ func TestApplyStampsTheLedgerWithTheConfiguredClock(t *testing.T) {
 }
 
 func TestApplyWritesOneLedgerLinePerRun(t *testing.T) {
+	t.Parallel()
 	f := newFake("gt-sbx-a\n", map[string][]nodeImage{
 		"gt-sbx-a": {image('c', "c", 3*time.Hour), image('d', "d", 4*time.Hour)},
 	})
@@ -669,6 +692,7 @@ func TestApplyWritesOneLedgerLinePerRun(t *testing.T) {
 // TestActionImageAcceptsThePlannedRef pins the parser Apply relies on: a
 // planned ref yields exactly the node and the image it names.
 func TestActionImageAcceptsThePlannedRef(t *testing.T) {
+	t.Parallel()
 	node, im, err := actionImage(diskmaint.Action{Kind: actionRemove, Ref: "gt-sbx-a/" + imgID('c')})
 	if err != nil {
 		t.Fatal(err)
