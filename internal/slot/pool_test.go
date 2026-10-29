@@ -363,20 +363,21 @@ func TestPoolBusyReadOnly(t *testing.T) {
 	t.Parallel()
 	looking := errors.New("docker is not answering")
 	cases := []struct {
-		name    string
-		slots   int
-		held    []int
-		lines   []string
-		listErr error
-		want    bool
-		wantErr bool
+		name           string
+		slots          int
+		held           []int
+		lines          []string
+		listErr        error
+		lockUnopenable bool // a directory where the slot's lock file belongs
+		want           bool
+		wantErr        bool
 	}{
 		{name: "the pool is free", slots: 1},
 		{name: "the only slot is held", slots: 1, held: []int{0}, want: true},
 		{name: "one of two slots is held", slots: 2, held: []int{1}},
 		{name: "an unwrapped suite holds the docker VM", slots: 1, lines: []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite"}, want: true},
 		{name: "docker cannot be read", slots: 1, listErr: looking, wantErr: true},
-		{name: "the lock cannot be opened", slots: 1, wantErr: true},
+		{name: "the lock cannot be opened", slots: 1, lockUnopenable: true, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -404,7 +405,7 @@ func TestPoolBusyReadOnly(t *testing.T) {
 			} else {
 				tg.rt.setLines(tc.lines...)
 			}
-			if tc.wantErr {
+			if tc.lockUnopenable {
 				// A directory where the lock file belongs cannot be opened for a
 				// flock, which is how a slot read fails on the host.
 				lockPath := SlotLockPath(town, 0)
@@ -419,7 +420,7 @@ func TestPoolBusyReadOnly(t *testing.T) {
 			busy, err := tg.PoolBusyReadOnly(town, pool)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("PoolBusyReadOnly = (%v, nil); want the slot read's error, never a silent free", busy)
+					t.Fatalf("PoolBusyReadOnly = (%v, nil); want the failed check's error, never a silent free", busy)
 				}
 				return
 			}
@@ -439,6 +440,30 @@ func TestPoolBusyReadOnly(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestStatusPoolLocksOnlyReportsAnUnreadableSlot: a slot whose lock cannot be
+// opened is not reported free, because a report that reads "free" is what lets
+// the next suite start on top of a holder. The read fails, and the caller says
+// so.
+func TestStatusPoolLocksOnlyReportsAnUnreadableSlot(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	town := t.TempDir()
+	pool := Pool{Slots: 1}
+	if err := os.MkdirAll(LockDir(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the lock file belongs opens for reading but not for a
+	// flock, which is how the probe cannot take this slot.
+	if err := os.Mkdir(SlotLockPath(town, 0), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := tg.StatusPoolLocksOnly(town, pool)
+	if err == nil {
+		t.Fatalf("StatusPoolLocksOnly = %+v, nil; want the slot read's error", rep)
 	}
 }
 
