@@ -313,3 +313,72 @@ func TestRepairedDepsSynthesizesOnlyWhereTheRulePlainlyApplies(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairProblemsAcceptsWhatRepairedDepsWrites(t *testing.T) {
+	t.Parallel()
+	for name, ds := range map[string]*Dataset{
+		"a dotted child with no row":        {Issues: []IssueRow{{ID: "gt-p"}, {ID: "gt-p.1"}}},
+		"a wisp child of a wisp":            {Issues: []IssueRow{{ID: "gt-wisp-m", Wisp: true}, {ID: "gt-wisp-m.1", Wisp: true}}},
+		"a non-wisp child of a wisp":        {Issues: []IssueRow{{ID: "gt-wisp-m", Wisp: true}, {ID: "gt-wisp-m.1"}}},
+		"a child whose own row links it":    {Issues: []IssueRow{{ID: "gt-p"}, {ID: "gt-p.1"}}, Deps: []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-p", Type: "parent-child"}}},
+		"a child whose own row points away": {Issues: []IssueRow{{ID: "gt-p"}, {ID: "gt-q"}, {ID: "gt-p.1"}}, Deps: []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-q", Type: "blocks"}}},
+		"nothing to repair":                 {Issues: []IssueRow{{ID: "gt-p"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			deps, _ := repairedDeps(ds)
+			if got := repairProblems(ds, deps); len(got) != 0 {
+				t.Errorf("repairProblems = %q, want none for what repairedDeps wrote %+v", got, deps)
+			}
+		})
+	}
+}
+
+func TestRepairProblemsFlagsWhatTheRuleDoesNotGive(t *testing.T) {
+	t.Parallel()
+	childOf := DepRow{IssueID: "gt-p.1", DependsOn: "gt-p", Type: "parent-child"}
+	for name, tc := range map[string]struct {
+		ds   *Dataset
+		deps []DepRow
+		want string
+	}{
+		"a link to another parent": {
+			ds:   &Dataset{Issues: []IssueRow{{ID: "gt-p"}, {ID: "gt-p.1"}, {ID: "gt-q"}}},
+			deps: []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-q", Type: "parent-child"}},
+			want: "repair links gt-p.1 -> gt-q (parent-child)",
+		},
+		"a link of another type": {
+			ds:   &Dataset{Issues: []IssueRow{{ID: "gt-p"}, {ID: "gt-p.1"}}},
+			deps: []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-p", Type: "blocks"}},
+			want: "repair links gt-p.1 -> gt-p (blocks)",
+		},
+		"a child that has its own row": {
+			ds:   &Dataset{Issues: []IssueRow{{ID: "gt-p"}, {ID: "gt-p.1"}, {ID: "gt-q"}}, Deps: []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-q", Type: "blocks"}}},
+			deps: []DepRow{{IssueID: "gt-p.1", DependsOn: "gt-q", Type: "blocks"}, childOf},
+			want: "repair links gt-p.1 -> gt-p (parent-child)",
+		},
+		"a wisp child of a plain parent": {
+			ds:   &Dataset{Issues: []IssueRow{{ID: "gt-p"}, {ID: "gt-p.1", Wisp: true}}},
+			deps: []DepRow{childOf},
+			want: "repair links gt-p.1 -> gt-p (parent-child)",
+		},
+		"a prefix that is not an issue": {
+			ds:   &Dataset{Issues: []IssueRow{{ID: "gt-p.1"}}},
+			deps: []DepRow{childOf},
+			want: "repair links gt-p.1 -> gt-p (parent-child)",
+		},
+		"an eligible child left unlinked": {
+			ds:   &Dataset{Issues: []IssueRow{{ID: "gt-p"}, {ID: "gt-p.1"}}},
+			deps: nil,
+			want: "repair of gt-p.1 -> gt-p is missing from the import",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := strings.Join(repairProblems(tc.ds, tc.deps), "\n")
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("repairProblems = %q, want a problem naming %q", got, tc.want)
+			}
+		})
+	}
+}

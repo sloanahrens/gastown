@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 )
@@ -48,6 +49,7 @@ func dottedParent(id string) (string, bool) {
 // its own rows, so no row is ever replaced. A wisp child is repaired only when
 // its parent is a wisp too; the data says which rows are wisps, so no wisp is
 // left unjudged.
+// A non-wisp child is repaired whatever its parent is, wisp or not.
 func repairedDeps(ds *Dataset) (deps, synthesized []DepRow) {
 	isWisp := map[string]bool{}
 	for _, is := range ds.Issues {
@@ -71,6 +73,66 @@ func repairedDeps(ds *Dataset) (deps, synthesized []DepRow) {
 		synthesized = append(synthesized, DepRow{IssueID: is.ID, DependsOn: parent, Type: "parent-child"})
 	}
 	return append(slices.Clone(ds.Deps), synthesized...), synthesized
+}
+
+// linkKey identifies a dependency row by its issue, its target and its type.
+func linkKey(d DepRow) string { return d.IssueID + "\x1f" + d.DependsOn + "\x1f" + d.Type }
+
+// repairProblems checks deps, the dependency rows an import writes, against the
+// repair rule as repairedDeps states it. It reports each synthesized row the
+// rule does not give, and each child the rule repairs that deps leaves
+// unlinked. The rule is restated here rather than read from repairedDeps: a
+// check that calls the function it checks would accept that function's wrong
+// answer.
+func repairProblems(ds *Dataset, deps []DepRow) []string {
+	isWisp := map[string]bool{}
+	for _, is := range ds.Issues {
+		isWisp[is.ID] = is.Wisp
+	}
+	own := map[string]bool{}
+	fromDataset := map[string]bool{}
+	for _, d := range ds.Deps {
+		if d.DependsOn != "" {
+			own[d.IssueID] = true
+		}
+		fromDataset[linkKey(d)] = true
+	}
+	// eligible maps each child the rule repairs to the parent it links.
+	eligible := map[string]string{}
+	for _, is := range ds.Issues {
+		parent, ok := dottedParent(is.ID)
+		if !ok || own[is.ID] {
+			continue
+		}
+		parentWisp, known := isWisp[parent]
+		if !known || (is.Wisp && !parentWisp) {
+			continue
+		}
+		eligible[is.ID] = parent
+	}
+	var out []string
+	have := map[string]bool{}
+	for _, d := range deps {
+		k := linkKey(d)
+		repeated := have[k]
+		have[k] = true
+		if fromDataset[k] {
+			continue
+		}
+		if repeated {
+			out = append(out, fmt.Sprintf("repair links %s -> %s (%s) more than once", d.IssueID, d.DependsOn, d.Type))
+			continue
+		}
+		if want, ok := eligible[d.IssueID]; !ok || want != d.DependsOn || d.Type != "parent-child" {
+			out = append(out, fmt.Sprintf("repair links %s -> %s (%s), which the rule does not give it", d.IssueID, d.DependsOn, d.Type))
+		}
+	}
+	for _, is := range ds.Issues {
+		if parent, ok := eligible[is.ID]; ok && !have[linkKey(DepRow{IssueID: is.ID, DependsOn: parent, Type: "parent-child"})] {
+			out = append(out, fmt.Sprintf("repair of %s -> %s is missing from the import", is.ID, parent))
+		}
+	}
+	return out
 }
 
 // splitConfig separates memories (keys under "kv.") from rig configuration.
