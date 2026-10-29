@@ -626,14 +626,23 @@ func TestPruneRegistryBoundsEveryCommandWithTheBudget(t *testing.T) {
 }
 
 // cancellableBudget is a retention budget the test ends by hand, so the budget
-// expires at a point the test chooses rather than on a clock. cancel is set by
-// the budget when the retention starts.
+// expires at a point the test chooses rather than on a clock. deadline, when
+// set, is the deadline the retention reads for the collect's container timeout;
+// zero starts a budget with none. cancel is set by the budget when the retention
+// starts.
 type cancellableBudget struct {
-	cancel context.CancelFunc
+	deadline time.Time
+	cancel   context.CancelFunc
 }
 
 func (b *cancellableBudget) start() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if b.deadline.IsZero() {
+		ctx, cancel = context.WithCancel(context.Background())
+	} else {
+		ctx, cancel = context.WithDeadline(context.Background(), b.deadline)
+	}
 	b.cancel = cancel
 	return ctx, cancel
 }
@@ -715,70 +724,83 @@ func TestPruneRegistryBudgetEndingDuringCollectDoesNotCutItShort(t *testing.T) {
 // TestPruneRegistryHungCollectReturnsAtTheBudget: a docker client that never
 // answers holds the plugin lock only as long as the retention's budget. The
 // budget ends the wait for the client, and the collect that client started
-// carries a container timeout shorter than the time the budget left, so the
-// collect is over inside the container by the time the retention returns
-// (gt-eg14z).
+// carries a container timeout under the budget, so the collect is over inside
+// the container by the time the retention returns (gt-eg14z).
+//
+// The test ends the budget itself rather than waiting one out: the retention
+// waits on the budget's end either way, and a budget short enough to expire on a
+// clock spends the unit test's seconds on it and leaves the timeout comparison
+// one second boundary away from a spurious failure.
 func TestPruneRegistryHungCollectReturnsAtTheBudget(t *testing.T) {
 	t.Parallel()
 	reg := newFakeRegistry(devTag(),
 		registryTagAt(1), registryTagAt(2), registryTagAt(3))
 	tr := newRegistryRun(t, reg, tagName(3))
 	tr.Cfg.RegistryPrune = registryPruneApply
-	// A budget short enough for the test to reach its end, with enough left
-	// after registry.collectGrace for the collect to have a whole second.
-	const budget = 3 * time.Second
-	var deadline time.Time
-	tr.budget = func() (context.Context, context.CancelFunc) {
-		deadline = time.Now().Add(budget)
-		return context.WithDeadline(context.Background(), deadline)
-	}
+	// A deadline the clock never reaches during the test, and far enough above
+	// the grace that the collect's timeout has whole seconds to spend.
+	const budget = 10 * time.Minute
+	b := &cancellableBudget{deadline: time.Now().Add(budget)}
+	tr.budget = b.start
 	// The collect answers only when the test ends, so only the budget can end
 	// the wait for it.
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	hung := make(chan []string, 1)
-	var left time.Duration
+	started := make(chan []string, 1)
 	answer := tr.reply
 	tr.reply = func(c command) result {
 		if c.name != "docker" {
 			return answer(c)
 		}
-		left = time.Until(deadline)
-		hung <- c.args
+		started <- c.args
 		<-release
 		return result{}
 	}
+	// The bound on each wait, so a run that starts no collect or never returns
+	// fails the test instead of hanging it.
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		tr.PruneRegistry()
 	}()
-	// The bound on the wait, so a run that never returns fails the test instead
-	// of hanging it.
-	bound, cancel := context.WithTimeout(context.Background(), budget+5*time.Second)
-	defer cancel()
+	var gc []string
+	select {
+	case gc = <-started:
+	case <-bound.Done():
+		t.Fatal("no garbage collect started inside the bound")
+	}
+	// The budget is what the retention waits on: with it unspent and the collect
+	// unanswered, the run must still be going. A run that stops waiting for the
+	// client returns at once, so a short bound catches it.
+	unspent, stopWait := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer stopWait()
+	select {
+	case <-done:
+		t.Fatal("the retention returned with the budget unspent and the collect unanswered")
+	case <-unspent.Done():
+	}
+	b.cancel()
 	select {
 	case <-done:
 	case <-bound.Done():
-		t.Fatal("PruneRegistry did not return at its budget; a collect that never answered held it")
+		t.Fatal("PruneRegistry did not return when its budget ended; a collect that never answered held it")
 	}
 
-	var gc []string
-	select {
-	case gc = <-hung:
-	default:
-		t.Fatalf("no garbage collect started; calls: %v", callLines(tr, "docker"))
-	}
 	if len(gc) != 8 {
 		t.Fatalf("garbage-collect argv = %q, want the registry collect command", gc)
 	}
+	// The container's timeout is the time left on the budget less the grace, so
+	// the container ends the collect before the budget does. Both sides come from
+	// the budget the test named, so no second boundary in a measured time left
+	// can flip the comparison, and the range admits the run's own work before the
+	// collect the way the registry package's test of the same bound does.
+	budgetSecs := int(budget / time.Second)
 	secs, err := strconv.Atoi(gc[3])
-	if err != nil || secs < 1 {
-		t.Fatalf("garbage-collect timeout = %q, want a whole number of seconds", gc[3])
-	}
-	if whole := int(left / time.Second); secs >= whole {
-		t.Fatalf("garbage-collect timeout = %ds with %v left on the budget, want a timeout shorter than the time left so the container ends the collect first", secs, left)
+	if err != nil || secs < budgetSecs-5 || secs >= budgetSecs {
+		t.Fatalf("garbage-collect timeout = %q, want a whole number of seconds just under the %ds budget", gc[3], budgetSecs)
 	}
 	entries, err := diskmaint.NewLedger(tr.Cfg.RegistryLedger, registryLedgerMax).Tail(1)
 	if err != nil || len(entries) != 1 {
