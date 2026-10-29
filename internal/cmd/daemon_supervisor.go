@@ -112,7 +112,7 @@ func realDaemonControl() *daemonControl {
 			}
 			return nil
 		},
-		stateFor:          templates.SupervisorJobState,
+		stateFor:          supervisorJobState,
 		stopDirect:        daemon.StopDaemon,
 		isRunning:         daemon.IsRunning,
 		install:           installSupervisorFile,
@@ -127,14 +127,31 @@ func realDaemonControl() *daemonControl {
 	return c
 }
 
+// supervisorJobState is the live job read of this host. The container kind has
+// no reader yet, so its state is unknown rather than "not loaded": a failed
+// start that read "not loaded" would go on to a bootstrap, and a failed restart
+// to a hand stop of the running daemon.
+func supervisorJobState(kind string) templates.SupervisorState {
+	if kind == config.SupervisorContainer {
+		return templates.SupervisorState{Kind: kind, LastExit: -1, Err: errContainerStateUnread}
+	}
+	return templates.SupervisorJobState(kind)
+}
+
+// errContainerStateUnread is the state read of a container town until the
+// container state reader exists.
+var errContainerStateUnread = errors.New("the container kind's state is not read yet")
+
 // defaultDockerContext is the Docker context the container supervisor's argv
 // carry unless the control names another: Docker Desktop's Linux engine, the
 // one the live town runs in. Nothing here reads or changes the global context.
 const defaultDockerContext = "desktop-linux"
 
 // townDaemonConfig reads the town's daemon settings, the document that holds
-// daemon.supervisor, container_name and compose_project. A nil seam (the unit
-// tests of host detection) reads as a town that sets none.
+// daemon.supervisor, container_name and compose_project. It is read for every
+// supervisor decision because only it says a town is a container town, and an
+// unreadable file is refused for every kind rather than guessed at. A nil seam
+// (the unit tests of host detection) reads as a town that sets none.
 func (c *daemonControl) townDaemonConfig(townRoot string) (*config.DaemonPatrolConfig, error) {
 	if c.patrolConfig == nil {
 		return nil, nil
@@ -204,8 +221,8 @@ func composeFilePath(townRoot string) string {
 //
 // A town that sets daemon.supervisor to container gets the container
 // supervisor and never the host's: the setting is the one fact GOOS cannot
-// supply, and the launchd job such a host may still carry is the rollback
-// (the plan's L3), not what the town runs under.
+// supply, so a launchd job the host still carries is not what this town runs
+// under.
 func (c *daemonControl) detectDaemonSupervisor(townRoot string) (*daemonSupervisor, error) {
 	cfg, err := c.townDaemonConfig(townRoot)
 	if err != nil {
@@ -234,8 +251,7 @@ func (c *daemonControl) detectDaemonSupervisor(townRoot string) (*daemonSupervis
 
 // containerSupervisor is the supervisor a town with daemon.supervisor
 // "container" runs its daemon under: docker compose, against the compose file
-// at <townRoot>/daemon/container/compose.yml. Rendering that file is the setup
-// step's work; this is the driving side.
+// at <townRoot>/daemon/container/compose.yml.
 func (c *daemonControl) containerSupervisor(composeFile string, cfg *config.DaemonPatrolConfig) (*daemonSupervisor, error) {
 	// A missing compose file is an error, not "no supervisor": the town asked
 	// for the container kind, and a nil supervisor would hand-spawn a daemon
@@ -246,12 +262,18 @@ func (c *daemonControl) containerSupervisor(composeFile string, cfg *config.Daem
 	compose := func(service ...string) func() ([]string, error) {
 		return func() ([]string, error) { return c.composeArgv(composeFile, cfg, service...) }
 	}
+	// The load hint is printed to the operator, so a refused town gets a
+	// placeholder for its project rather than the live default.
+	project, err := containerComposeProject(cfg)
+	if err != nil {
+		project = "<compose_project>"
+	}
 	return &daemonSupervisor{
 		name:      config.SupervisorContainer,
 		start:     compose("up", "-d", "daemon"),
 		stop:      compose("stop", "daemon"),
 		bootstrap: compose("up", "-d"),
-		load:      fmt.Sprintf("docker --context %s compose -p %s -f %s up -d daemon", c.dockerCLIContext(), cfg.ComposeProject(), composeFile),
+		load:      fmt.Sprintf("docker --context %s compose -p %s -f %s up -d daemon", c.dockerCLIContext(), project, composeFile),
 		fallback:  "or unset daemon.supervisor to run the daemon by hand",
 		ctl:       c,
 	}, nil
@@ -277,21 +299,26 @@ func (c *daemonControl) dockerCLIContext() string {
 	return c.dockerContext
 }
 
-// containerComposeProject returns the compose project the container
-// supervisor runs under, and is where that supervisor refuses a town whose
-// settings it cannot act on: read absent, container_name and compose_project
-// take the live daemon's defaults, so a scratch town that inherited them would
-// stop or replace the live container (gt-ix1kz). Both must therefore be set,
-// in the shapes ValidateContainerNames accepts.
+// containerComposeProject returns the compose project the container supervisor
+// runs under, and is where that supervisor refuses a town whose settings it
+// cannot act on. The project is the field the argv carry, so the refusal keys
+// on it: a town that left it unset would run under the live project's default
+// and could stop or replace the live container (gt-ix1kz). Both fields must
+// then be set, in the shapes ValidateContainerNames accepts.
 func containerComposeProject(cfg *config.DaemonPatrolConfig) (string, error) {
+	if cfg == nil || cfg.ComposeProjectSetting == "" {
+		return "", errContainerSettingsUnset
+	}
 	if err := cfg.ValidateContainerNames(); err != nil {
 		return "", err
 	}
-	if cfg == nil || cfg.ContainerNameSetting == "" {
-		return "", fmt.Errorf("daemon.supervisor is container, but the town sets neither daemon.container_name nor daemon.compose_project: set both, so a scratch town cannot act on the live daemon's container")
-	}
 	return cfg.ComposeProject(), nil
 }
+
+// errContainerSettingsUnset is the refusal of a container town that does not
+// set both fields. It names both, since either one left out inherits the live
+// default.
+var errContainerSettingsUnset = errors.New("daemon.supervisor is container, but the town does not set both daemon.container_name and daemon.compose_project: set both, so a scratch town cannot act on the live daemon's container")
 
 // fileSupervisor is the launchd or systemd supervisor, whose argv are fixed
 // once the file path is known.
@@ -346,11 +373,10 @@ func (c *daemonControl) fileSupervisor(p, kind string) *daemonSupervisor {
 // so a changed file reaches the running job only through the unload and load
 // that startFromFile does, never through an in-place restart.
 //
-// A container town is left out of this entirely, and needs no branch here: the
-// repair it would ask for is launchd's ExitTimeOut, which
-// templates.SupervisorFileRepair renders for launchd alone — a compose file is
-// the setup step's output, not something this binary rewrites from its own
-// values, and the launchd job the host may still carry is the rollback.
+// A container town is left out of this: its supervisor file is the compose
+// file, and templates.SupervisorFileRepair repairs launchd's ExitTimeOut only,
+// so there is nothing here to rewrite. A launchd plist the host still carries is
+// not this town's supervisor, and is left as it is.
 func (c *daemonControl) syncSupervisorFile(townRoot string) (rewritten bool) {
 	cfg, err := c.townDaemonConfig(townRoot)
 	if err != nil {

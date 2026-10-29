@@ -1235,13 +1235,23 @@ func TestDetectDaemonSupervisor_ContainerWithoutAComposeFileIsAnError(t *testing
 	}
 }
 
-// A town that sets neither container_name nor compose_project reads as the
-// live daemon's defaults, and a scratch town that acted on them would stop or
-// replace the live container. Every command that would act on a container
-// refuses instead, before any docker argv is built (gt-ix1kz).
-func TestContainerSupervisor_RefusesATownWithoutContainerSettings(t *testing.T) {
+// A town that does not set both container_name and compose_project reads the
+// live daemon's default for whichever it left out, and a scratch town that
+// acted on that default would stop or replace the live container. Every
+// command that would act on a container refuses instead, before any docker
+// argv is built, and the error names both fields and never the live project
+// (gt-ix1kz).
+func TestContainerSupervisor_RefusesATownWithoutBothContainerSettings(t *testing.T) {
 	t.Parallel()
-	for _, tt := range []struct {
+	settings := []struct {
+		name string
+		cfg  *config.DaemonPatrolConfig
+	}{
+		{"neither", &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer}},
+		{"container_name only", &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer, ContainerNameSetting: "scratch-daemon-1"}},
+		{"compose_project only", &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer, ComposeProjectSetting: "scratch"}},
+	}
+	commands := []struct {
 		name  string
 		drive func(t *testing.T, c *daemonControl, town string) error
 	}{
@@ -1282,58 +1292,210 @@ func TestContainerSupervisor_RefusesATownWithoutContainerSettings(t *testing.T) 
 			}
 			return err
 		}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			town := t.TempDir()
-			writeComposeFile(t, town)
-			c, calls := stubContainerTown(t, &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer})
+	}
+	for _, setting := range settings {
+		for _, command := range commands {
+			t.Run(setting.name+"/"+command.name, func(t *testing.T) {
+				t.Parallel()
+				town := t.TempDir()
+				writeComposeFile(t, town)
+				c, calls := stubContainerTown(t, setting.cfg)
 
-			err := tt.drive(t, c, town)
-			if err == nil {
-				t.Fatal("succeeded although the town sets no container_name or compose_project")
-			}
-			for _, field := range []string{"daemon.container_name", "daemon.compose_project"} {
-				if !strings.Contains(err.Error(), field) {
-					t.Errorf("error = %v, want it to name %s", err, field)
+				err := command.drive(t, c, town)
+				if err == nil {
+					t.Fatal("succeeded although the town does not set both container_name and compose_project")
 				}
-			}
-			if len(calls.argv) != 0 {
-				t.Errorf("ran %v, want no docker command at all", calls.argv)
-			}
-			if calls.spawned {
-				t.Error("spawned a daemon by hand")
-			}
-		})
+				for _, field := range []string{"daemon.container_name", "daemon.compose_project"} {
+					if !strings.Contains(err.Error(), field) {
+						t.Errorf("error = %v, want it to name %s", err, field)
+					}
+				}
+				if strings.Contains(err.Error(), "-p "+config.DefaultComposeProject) {
+					t.Errorf("error = %v, points at the live project %s", err, config.DefaultComposeProject)
+				}
+				if len(calls.argv) != 0 {
+					t.Errorf("ran %v, want no docker command at all", calls.argv)
+				}
+				if calls.spawned {
+					t.Error("spawned a daemon by hand")
+				}
+			})
+		}
 	}
 }
 
-// A container town has no derived job file to repair: its compose file is the
-// setup step's, and the launchd plist the host may still carry is the
-// rollback. Reconciling must leave that plist alone.
-func TestSyncSupervisorFile_LeavesThePlistOfAContainerTownAlone(t *testing.T) {
+// A container town's supervisor file is its compose file, which this binary
+// never rewrites, and the launchd plist the host may still carry is not the
+// town's to touch either. Reconciling must write neither.
+func TestSyncSupervisorFile_LeavesTheFilesOfAContainerTownAlone(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	plist := writeStaleSupervisorFile(t, town)
-	writeComposeFile(t, town)
-	before, err := os.ReadFile(plist)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compose := writeComposeFile(t, town)
 	c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
 	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
 		return containerTownConfig("scratch-daemon-1", "scratch"), nil
+	}
+	installs := 0
+	c.install = func(path, content string) error {
+		installs++
+		return installSupervisorFile(path, content)
+	}
+	before := map[string]string{}
+	for _, path := range []string{compose, plist} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = string(body)
+	}
+	// The control: the same stale plist on a host town is rewritten, so the
+	// container town's untouched plist is the branch under test.
+	host := t.TempDir()
+	hostPlist := writeStaleSupervisorFile(t, host)
+	hostControl, _ := stubSupervisor(t, "darwin", hostPlist, loadedJob(), nil)
+	if !hostControl.syncSupervisorFile(host) {
+		t.Fatal("control: a host town's stale plist was not repaired, so the fixture proves nothing")
 	}
 
 	if c.syncSupervisorFile(town) {
 		t.Error("rewrote a supervisor file for a container town")
 	}
-	after, err := os.ReadFile(plist)
-	if err != nil {
-		t.Fatal(err)
+	if installs != 0 {
+		t.Errorf("wrote %d supervisor file(s) for a container town, want none", installs)
 	}
-	if string(after) != string(before) {
-		t.Error("the launchd plist changed although this town runs in a container")
+	for path, want := range before {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s changed although this town runs in a container", path)
+		}
+	}
+}
+
+// syncSupervisorFile reports false, and leaves the file it would have repaired
+// as it was, when it cannot make the repair: settings it cannot read, a kind it
+// cannot tell, and an install that fails. Each is a warning, never a reason to
+// refuse the start that follows.
+func TestSyncSupervisorFile_CannotRepairReportsFalseAndWritesNothing(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name         string
+		patrolConfig func(string) (*config.DaemonPatrolConfig, error)
+		installErr   error
+		wantInstalls int
+	}{
+		{
+			name: "unreadable settings",
+			patrolConfig: func(string) (*config.DaemonPatrolConfig, error) {
+				return nil, errors.New("daemon.json: unexpected end of JSON input")
+			},
+			wantInstalls: 0,
+		},
+		{
+			name: "unknown supervisor kind",
+			patrolConfig: func(string) (*config.DaemonPatrolConfig, error) {
+				return &config.DaemonPatrolConfig{Supervisor: "kube"}, nil
+			},
+			wantInstalls: 0,
+		},
+		{
+			name:         "install fails",
+			patrolConfig: func(string) (*config.DaemonPatrolConfig, error) { return nil, nil },
+			installErr:   errors.New("read-only file system"),
+			wantInstalls: 1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			plist := writeStaleSupervisorFile(t, town)
+			before, err := os.ReadFile(plist)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+			c.patrolConfig = tt.patrolConfig
+			installs := 0
+			c.install = func(string, string) error {
+				installs++
+				return tt.installErr
+			}
+
+			if c.syncSupervisorFile(town) {
+				t.Error("reported a rewrite it could not make")
+			}
+			if installs != tt.wantInstalls {
+				t.Errorf("installs = %d, want %d", installs, tt.wantInstalls)
+			}
+			after, err := os.ReadFile(plist)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Error("the supervisor file changed although the repair failed")
+			}
+		})
+	}
+}
+
+// productionContainerControl is the host's own daemonControl, so the state
+// reader is the production one, with the seams a container town needs faked:
+// its settings, the commands it runs, the direct stop and spawn, and the sleep.
+func productionContainerControl(cfg *config.DaemonPatrolConfig) (*daemonControl, *supervisorCalls) {
+	calls := &supervisorCalls{}
+	c := realDaemonControl()
+	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) { return cfg, nil }
+	c.run = func(argv []string) error {
+		calls.argv = append(calls.argv, append([]string{}, argv...))
+		return errors.New("docker: daemon unreachable")
+	}
+	c.stopDirect = func(string) error { calls.stopped = true; return nil }
+	c.spawn = func(string) (int, error) { calls.spawned = true; return 1234, nil }
+	c.sleep = func(time.Duration) {}
+	return c, calls
+}
+
+// The container kind has no job reader yet, so its state is unknown, never
+// "not loaded": a failed start that read "not loaded" would be retried as a
+// bootstrap, which brings up the whole compose project.
+func TestStartDaemon_ContainerFailedStartIsNotBootstrapped(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeComposeFile(t, town)
+	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
+	c.isRunning = func(string) (bool, int, error) { return false, 0, nil }
+
+	if _, _, err := c.startDaemon(town); err == nil {
+		t.Fatal("started although docker could not start the daemon")
+	}
+	if len(calls.argv) != 1 || !strings.HasSuffix(calls.joined(), "up -d daemon") {
+		t.Errorf("ran %v, want the start alone: a bootstrap would bring up the whole project", calls.argv)
+	}
+	if calls.spawned || calls.stopped {
+		t.Error("touched the daemon by hand after the container start failed")
+	}
+}
+
+// A failed container restart must not read "not loaded" either: that reading
+// sends the restart to a hand stop of the daemon that is still running.
+func TestRestartDaemon_ContainerFailedRestartLeavesTheDaemonAlone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeComposeFile(t, town)
+	c, calls := productionContainerControl(containerTownConfig("scratch-daemon-1", "scratch"))
+	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+
+	if _, _, err := c.restartDaemon(town); err == nil {
+		t.Fatal("restarted although docker could not start the daemon")
+	}
+	if calls.stopped {
+		t.Error("stopped the running daemon by hand after the container restart failed")
+	}
+	if len(calls.argv) != 1 || !strings.HasSuffix(calls.joined(), "up -d daemon") {
+		t.Errorf("ran %v, want the start alone", calls.argv)
 	}
 }
 
