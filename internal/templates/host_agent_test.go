@@ -87,12 +87,16 @@ func TestHostAgentPlist_EscapesTheValuesItWritesIntoXML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HostAgentPlist: %v", err)
 	}
-	got, err = supervisorWorkingDirectory(escaped)
+	written, xmlText := supervisorWorkingDirectory(escaped)
+	if !xmlText {
+		t.Errorf("supervisorWorkingDirectory read a plist as a unit's literal text")
+	}
+	got, err = decodeXMLEntities(written)
 	if err != nil {
-		t.Fatalf("supervisorWorkingDirectory read back an error: %v", err)
+		t.Fatalf("decodeXMLEntities read back an error: %v", err)
 	}
 	if got != "/towns/a&b" {
-		t.Errorf("supervisorWorkingDirectory read back %q, want /towns/a&b", got)
+		t.Errorf("the value read back and decoded is %q, want /towns/a&b", got)
 	}
 }
 

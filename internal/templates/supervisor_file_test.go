@@ -27,6 +27,8 @@ func TestDecodeXMLEntities(t *testing.T) {
 		{name: "undefined entity", in: "/towns/&nope;", wantErr: true},
 		{name: "truncated entity", in: "/towns/&amp", wantErr: true},
 		{name: "a raw ampersand", in: "/towns/a&b", wantErr: true},
+		{name: "CDATA", in: "/towns/<![CDATA[a&b]]>", wantErr: true},
+		{name: "a comment", in: "/towns/<!-- x -->", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -50,45 +52,41 @@ func TestDecodeXMLEntities(t *testing.T) {
 	}
 }
 
-// TestSupervisorWorkingDirectory reads both forms the two templates render,
-// and reports a value it cannot decode rather than passing the raw text on.
+// TestSupervisorWorkingDirectory reads both forms the two templates render and
+// returns the value as written, with whether it came from a plist (whose text a
+// renderer XML-escapes) or from a unit (a literal path).
 func TestSupervisorWorkingDirectory(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		body    string
 		want    string
-		wantErr bool
+		wantXML bool
 	}{
-		{name: "launchd plist", body: "<key>WorkingDirectory</key>\n    <string>/towns/live</string>\n", want: "/towns/live"},
-		{name: "escaped plist value", body: "<key>WorkingDirectory</key>\n    <string>/towns/a&amp;b</string>\n", want: "/towns/a&b"},
+		{name: "launchd plist", body: "<key>WorkingDirectory</key>\n    <string>/towns/live</string>\n", want: "/towns/live", wantXML: true},
+		{name: "escaped plist value, as written", body: "<key>WorkingDirectory</key>\n    <string>/towns/a&amp;b</string>\n", want: "/towns/a&amp;b", wantXML: true},
 		{name: "systemd unit", body: "[Service]\nWorkingDirectory=/towns/live\n", want: "/towns/live"},
+		{name: "a unit's literal entity text", body: "[Service]\nWorkingDirectory=/towns/a&amp;b\n", want: "/towns/a&amp;b"},
 		{name: "neither form", body: "<plist><dict></dict></plist>\n", want: ""},
-		{name: "a plist value holding markup", body: "<key>WorkingDirectory</key>\n    <string>/towns/<i>x</i></string>\n", wantErr: true},
+		{name: "a plist value holding markup, as written", body: "<key>WorkingDirectory</key>\n    <string>/towns/<i>x</i></string>\n", want: "/towns/<i>x</i>", wantXML: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := supervisorWorkingDirectory(tc.body)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("supervisorWorkingDirectory = %q, want an error", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("supervisorWorkingDirectory: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("supervisorWorkingDirectory = %q, want %q", got, tc.want)
+			got, xmlText := supervisorWorkingDirectory(tc.body)
+			if got != tc.want || xmlText != tc.wantXML {
+				t.Errorf("supervisorWorkingDirectory = (%q, %v), want (%q, %v)", got, xmlText, tc.want, tc.wantXML)
 			}
 		})
 	}
 }
 
-// TestSupervisorFileIsFor is the guard install and status read a town out of an
-// installed supervisor file with: the town the file was rendered for matches,
-// another does not, and a file whose value cannot be read back is an error
-// rather than a guess.
+// TestSupervisorFileIsFor is the guard install, status and the upgrade repair
+// read a town out of an installed supervisor file with: the town the file was
+// rendered for matches, another does not, and a file that names no town is an
+// error. The answer for an existing file never becomes an error because of how
+// its value is spelled: a plist written with the path unescaped still matches
+// its town (the repair exists to rewrite it), an escaped path matches too, and
+// a value that is neither the town nor decodable is a plain no.
 func TestSupervisorFileIsFor(t *testing.T) {
 	t.Parallel()
 	live, other := t.TempDir(), t.TempDir()
@@ -117,9 +115,7 @@ func TestSupervisorFileIsFor(t *testing.T) {
 		path     func(t *testing.T) string
 		townRoot string
 		want     bool
-		// wantErr is the reason the file is refused. The two refusals are
-		// different answers — no town named, and a value that does not decode —
-		// so each test pins the one it drives.
+		// wantErr is the reason the file is refused: no town named.
 		wantErr string
 	}{
 		{
@@ -153,12 +149,49 @@ func TestSupervisorFileIsFor(t *testing.T) {
 			wantErr:  "no WorkingDirectory",
 		},
 		{
-			name: "a value that does not decode",
+			name:     "a path holding & matches its escaped plist",
+			path:     func(t *testing.T) string { return fileOf(t, rendered(t, "/towns/a&b")) },
+			townRoot: "/towns/a&b",
+			want:     true,
+		},
+		{
+			name:     "an escaped plist is not another town's",
+			path:     func(t *testing.T) string { return fileOf(t, rendered(t, "/towns/a&b")) },
+			townRoot: "/towns/a",
+			want:     false,
+		},
+		{
+			// A file an older renderer wrote with the path raw. Its answer was
+			// true before decoding existed and must stay true: the upgrade
+			// repair finds the file through this guard to rewrite it.
+			name: "an existing plist with the path unescaped still matches",
+			path: func(t *testing.T) string {
+				return fileOf(t, "<key>WorkingDirectory</key>\n<string>/towns/a&b</string>\n")
+			},
+			townRoot: "/towns/a&b",
+			want:     true,
+		},
+		{
+			name: "a value that does not decode is a plain no, not an error",
 			path: func(t *testing.T) string {
 				return fileOf(t, "<key>WorkingDirectory</key>\n<string>/towns/<i>x</i></string>\n")
 			},
 			townRoot: live,
-			wantErr:  "holds markup",
+			want:     false,
+		},
+		{
+			// Only a plist's text is XML-escaped: a unit's path is literal, so
+			// decoding it would match a town the unit does not serve.
+			name:     "a unit's literal entity text is not decoded",
+			path:     func(t *testing.T) string { return fileOf(t, "[Service]\nWorkingDirectory=/towns/a&amp;b\n") },
+			townRoot: "/towns/a&b",
+			want:     false,
+		},
+		{
+			name:     "a unit's literal entity text matches its own spelling",
+			path:     func(t *testing.T) string { return fileOf(t, "[Service]\nWorkingDirectory=/towns/a&amp;b\n") },
+			townRoot: "/towns/a&amp;b",
+			want:     true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

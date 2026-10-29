@@ -721,3 +721,46 @@ func hostAgentInstallDepsFor(path, goos string, render func(gtPath, townRoot str
 	d.render = render
 	return d
 }
+
+// The temp-binary guard compares paths with their symlinks resolved, because
+// macOS's temp directory is reached by two names (/var and /private/var): a gt
+// under the temp directory is refused whichever name either path arrives by,
+// and one outside it is not.
+func TestHostAgentRefuseATemporaryBinaryResolvesSymlinks(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	gt := filepath.Join(real, "gt")
+	if err := os.WriteFile(gt, []byte("a stand-in for the gt binary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "gt")
+	if err := os.WriteFile(elsewhere, []byte("a stand-in for the gt binary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		gtPath  string
+		tempDir string
+		refused bool
+	}{
+		{"the same spelling", gt, real, true},
+		{"the binary by the real name, the temp dir by the link", gt, link, true},
+		{"the binary by the link, the temp dir by the real name", filepath.Join(link, "gt"), real, true},
+		{"a binary outside the temp dir", elsewhere, real, false},
+		{"a temp dir that cannot be resolved still compares by spelling", filepath.Join(dir, "gone", "gt"), filepath.Join(dir, "gone"), true},
+	} {
+		err := hostAgentRefuseATemporaryBinary(tc.gtPath, tc.tempDir)
+		if (err != nil) != tc.refused {
+			t.Errorf("%s: hostAgentRefuseATemporaryBinary(%q, %q) = %v, want refused=%v", tc.name, tc.gtPath, tc.tempDir, err, tc.refused)
+		}
+	}
+}

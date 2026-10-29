@@ -338,19 +338,31 @@ func installHostAgent(townRoot string, d hostAgentInstallDeps) (string, error) {
 // a plist naming one would start a program that is already gone; the operator
 // installs from a gt built or installed where it stays.
 //
-// Both paths reach install absolute (os.Executable and os.TempDir), so this
-// compares their cleaned spellings as strings and has no lookup to fail. A
-// temp directory with no name of its own ("", ".", "/") matches nothing, which
-// leaves the check unable to refuse rather than unable to install.
+// Both paths reach install absolute (os.Executable and os.TempDir), but not
+// always spelled alike: macOS's temp directory is under /var, a symlink to
+// /private/var, and either path may arrive by either name. Each is compared with
+// its symlinks resolved when they resolve, and by its cleaned spelling when a
+// lookup fails, so a failed lookup leaves the check unable to refuse rather
+// than unable to install. A temp directory with no name of its own ("", ".",
+// "/") matches nothing.
 func hostAgentRefuseATemporaryBinary(gtPath, tempDir string) error {
-	tempDir = filepath.Clean(tempDir)
+	tempDir = hostAgentCanonPath(tempDir)
 	if tempDir == "." || tempDir == string(filepath.Separator) {
 		return nil
 	}
-	if strings.HasPrefix(filepath.Clean(gtPath), tempDir+string(filepath.Separator)) {
+	if strings.HasPrefix(hostAgentCanonPath(gtPath), tempDir+string(filepath.Separator)) {
 		return fmt.Errorf("host agent install: %s is a temporary binary (go run builds there and deletes it); install from a built gt", gtPath)
 	}
 	return nil
+}
+
+// hostAgentCanonPath is p cleaned, with its symlinks resolved when they
+// resolve.
+func hostAgentCanonPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(r)
+	}
+	return filepath.Clean(p)
 }
 
 // hostAgentPrepareDirs creates the directories install writes into: the probe

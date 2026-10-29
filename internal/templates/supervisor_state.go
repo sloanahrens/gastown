@@ -406,8 +406,11 @@ func atoiOr(s string, fallback int) int {
 // SupervisorFileIsFor reports whether the plist / unit at path names townRoot
 // as its WorkingDirectory (both templates render it as
 // "<string>{{.TownRoot}}</string>" / "WorkingDirectory={{.TownRoot}}"). An
-// absent file is (false, nil); one this cannot read, or whose value does not
-// decode, is an error.
+// absent file is (false, nil); one this cannot read, or that records no
+// WorkingDirectory, is an error. A recorded value that is not this town's is
+// (false, nil) however it is spelled: the answer for an existing file changes
+// from false to true when the file's escaped spelling names the town, never to
+// an error.
 func SupervisorFileIsFor(path, townRoot string) (bool, error) {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -424,51 +427,62 @@ func SupervisorFileIsFor(path, townRoot string) (bool, error) {
 	// /private/tmp on macOS), and a miss here means a hand spawn beside a
 	// loaded job. Compare the recorded WorkingDirectory as a path, symlinks
 	// resolved, not as a string.
-	recorded, err := supervisorWorkingDirectory(string(data))
-	if err != nil {
-		return false, fmt.Errorf("supervisor file %s: %w", path, err)
-	}
+	recorded, xmlText := supervisorWorkingDirectory(string(data))
 	if recorded == "" {
 		// Present but not in the shape the templates render (hand-edited,
 		// older format): still a provisioned supervisor as far as launchd or
 		// systemd is concerned, so refusing beats treating it as absent.
 		return false, fmt.Errorf("supervisor file %s has no WorkingDirectory; cannot tell which town it serves — fix or remove it", path)
 	}
-	return samePath(recorded, townRoot), nil
+	// The spelling as written first: every file that has matched a town on it
+	// still does, including a plist an older renderer wrote with the path
+	// unescaped, which the upgrade repair exists to rewrite.
+	if samePath(recorded, townRoot) {
+		return true, nil
+	}
+	// A plist the renderer wrote carries & as &amp;, so a town whose path holds
+	// one is recorded in the escaped form. A value that does not decode is not
+	// a match and not an error either.
+	if xmlText {
+		if decoded, err := decodeXMLEntities(recorded); err == nil && decoded != recorded && samePath(decoded, townRoot) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // supervisorWorkingDirectory pulls the WorkingDirectory out of a rendered
 // plist ("<key>WorkingDirectory</key>\n<string>X</string>") or unit
-// ("WorkingDirectory=X"); "" when neither form is present.
-//
-// A plist carries its value XML-escaped, so what is read back is decoded
-// before it is compared with a town root: a town whose path holds & is
-// written as &amp; and must still match the town it names. A value that does
-// not decode is an error, never the raw text.
-func supervisorWorkingDirectory(body string) (string, error) {
+// ("WorkingDirectory=X"); "" when neither form is present. The value is
+// returned as written; xmlText says it came from a plist, whose text a
+// renderer XML-escapes, where a unit's is the literal path.
+func supervisorWorkingDirectory(body string) (value string, xmlText bool) {
 	if i := strings.Index(body, "<key>WorkingDirectory</key>"); i >= 0 {
 		rest := body[i:]
 		if a := strings.Index(rest, "<string>"); a >= 0 {
 			if b := strings.Index(rest[a:], "</string>"); b >= 0 {
-				return decodeXMLEntities(strings.TrimSpace(rest[a+len("<string>") : a+b]))
+				return strings.TrimSpace(rest[a+len("<string>") : a+b]), true
 			}
 		}
-		return "", nil
+		return "", true
 	}
 	for _, line := range strings.Split(body, "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "WorkingDirectory="); ok {
-			return strings.TrimSpace(v), nil
+			return strings.TrimSpace(v), false
 		}
 	}
-	return "", nil
+	return "", false
 }
 
 // decodeXMLEntities decodes the entity references a plist's text node carries,
 // so a value read back out of the file equals the one that was written into
-// it. Only text decodes: markup, an undefined entity or a truncated value is
-// an error, since no renderer writes any of them, and a caller that compared
-// the raw spelling instead would be guessing which town a file serves.
+// it. Only text decodes: a < anywhere in the value (a tag, a comment, CDATA), an
+// undefined entity or a truncated value is an error, since no renderer writes
+// any of them.
 func decodeXMLEntities(s string) (string, error) {
+	if strings.ContainsRune(s, '<') {
+		return "", errors.New("WorkingDirectory holds markup, not the text a rendered plist carries")
+	}
 	dec := xml.NewDecoder(strings.NewReader("<x>" + s + "</x>"))
 	var out strings.Builder
 	wrapper := false
