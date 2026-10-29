@@ -132,6 +132,10 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 		return nil, fmt.Errorf("the trim Job sandbox count %d: want the caller's count of running sandboxes, 0 when none runs", in.SandboxesRunning)
 	}
 
+	if err := checkListing(in.Listing); err != nil {
+		return nil, err
+	}
+
 	plan := PlanTrim(in.Listing, in.CapBytes, in.SandboxesRunning > 0)
 	if len(plan.Removals) == 0 {
 		return nil, fmt.Errorf("the trim Job on %s would remove nothing: the listing is %d bytes, and the cap is %d", in.ClaimName, plan.Total, in.CapBytes)
@@ -145,8 +149,9 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 		return nil, fmt.Errorf("the trim Job on %s needs %d shards, past the %d one Job mounts: want a trim that removes fewer paths", in.ClaimName, len(shards), TrimMaxShards)
 	}
 
-	// The caller raises the alarm from the same plan; the annotation puts the fact on the object,
-	// where an operator reading the Job later finds it.
+	// The annotation carries PlanTrim's own verdict onto the object: an operator reading the Job
+	// after the run finds from it why the claim is still over its cap, since the plan is not applied
+	// with it.
 	var annotations map[string]string
 	if plan.Overflow {
 		annotations = map[string]string{TrimOverflowAnnotation: strconv.FormatInt(plan.OverBytes, 10)}
@@ -207,8 +212,9 @@ func trimLabels() map[string]string {
 	}
 }
 
-// removeContainer deletes the listed files with the image's trim-paths helper. No shell sees the
-// paths, so each names exactly the file the listing did.
+// removeContainer deletes the listed files with the image's trim-paths helper. The paths reach it as
+// argv with no shell between, so a name that holds a space or a glob character stays the one word
+// the shard gave; the helper decides whether a word may be removed.
 func removeContainer(image string, shards int, mounts []VolumeMount) Container {
 	return Container{
 		Name:    "trim",
@@ -219,6 +225,41 @@ func removeContainer(image string, shards int, mounts []VolumeMount) Container {
 		// trimming the part of the list that did arrive.
 		VolumeMounts: mounts,
 	}
+}
+
+// checkListing refuses an entry whose Cache names a different part of the claim than its path sits
+// in. PlanTrim chooses what to remove by Entry.Cache while the container deletes by path, so a
+// listing that misnames the directory would have the rules admit a file of one cache and the argv
+// delete a file of the other: a module-cache file removed while a sandbox is building.
+//
+// An entry that is not claim-relative is a path problem, left to removalPaths, which refuses it
+// after the plan and still before any shard or Job is built.
+func checkListing(listing []Entry) error {
+	for _, e := range listing {
+		if !claimRelative(e.Path) {
+			continue
+		}
+		dir, ok := cacheDir(e.Cache)
+		if !ok {
+			return fmt.Errorf("the trim listing names the cache %d for %q: want BuildCache or ModuleCache", int(e.Cache), e.Path)
+		}
+		if !strings.HasPrefix(e.Path, dir+"/") {
+			return fmt.Errorf("the trim listing puts %q under a directory its cache does not name: want a path under %s/", e.Path, dir)
+		}
+	}
+	return nil
+}
+
+// cacheDir is the claim-relative directory a cache's entries sit in, and false for a Cache the
+// package does not define.
+func cacheDir(c Cache) (string, bool) {
+	switch c {
+	case BuildCache:
+		return SeedBuildCacheDir, true
+	case ModuleCache:
+		return SeedModuleCacheDir, true
+	}
+	return "", false
 }
 
 // removalPaths is PlanTrim's removals as the claim-relative paths the shards carry. A path that is
@@ -237,6 +278,13 @@ func removalPaths(removals []Removal) ([]string, error) {
 
 // claimRelative reports whether p is a path a walk of the claim gives: relative to the claim root,
 // already clean, and below it rather than at it or above it.
+//
+// The check is on the string, so a "." or ".." component keeps it inside the claim wherever the
+// component sits. Whether a component that stays inside the claim is a directory rather than a
+// symlink is decided at removal, by trim-paths on the mounted claim (internal/polecatimage/
+// trimpaths.go): it resolves the entry's directory and refuses one that leaves the claim, then
+// removes through an os.Root, which refuses a symlink pointing outside its root. This package reads
+// no filesystem, so the claim's own shape is the container's to judge.
 func claimRelative(p string) bool {
 	if p == "" || path.IsAbs(p) || path.Clean(p) != p {
 		return false

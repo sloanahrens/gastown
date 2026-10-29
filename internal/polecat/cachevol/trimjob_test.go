@@ -457,3 +457,36 @@ func TestBuildTrimManifestRefusesAnInputItCannotRender(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildTrimManifestRefusesAListingUnderAnotherCache pins the check that keeps the plan and the
+// argv on one cache: PlanTrim picks removals by Entry.Cache while the container deletes by path, so
+// a listing that misnames the directory would have the rules admit one cache's file and the argv
+// delete the other's.
+func TestBuildTrimManifestRefusesAListingUnderAnotherCache(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		listing []Entry
+	}{
+		{"a build-cache path labelled as the module cache", []Entry{
+			file("gocache/ab/cdef", ModuleCache, 100, 1, 1),
+		}},
+		{"a module-cache path labelled as the build cache", []Entry{
+			file("gomodcache/mod/x", BuildCache, 100, 1, 1),
+		}},
+		{"a cache the package does not define", []Entry{
+			file("gocache/ab/cdef", BuildCache, 100, 8, 8),
+			file("gocache/zz", Cache(7), 10, 1, 1),
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in := trimInput()
+			in.Listing = tc.listing
+			if m, err := BuildTrimManifest(in); err == nil {
+				t.Errorf("BuildTrimManifest(%+v) = %+v, want a refusal", in, m)
+			}
+		})
+	}
+}
