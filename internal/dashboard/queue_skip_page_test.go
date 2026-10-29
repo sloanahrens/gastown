@@ -141,7 +141,7 @@ func skippedRow(id, since, reason string, ticks int) map[string]any {
 	return row
 }
 
-// drawn reads one of the queue helpers over the page.
+// queueReadBack reads one of the queue helpers over the page.
 func queueReadBack(t *testing.T, dom *pageDOM, expr string, out any) {
 	t.Helper()
 
@@ -350,7 +350,8 @@ func TestQueueSkipPageReasonIsTextNotMarkup(t *testing.T) {
 
 // A ledger the page cannot present as current says so once, above the rows, and
 // that many minutes old: a verdict the dispatcher has not re-taken is not a
-// current skip, so no row draws one (gt-e2cif).
+// current skip, so neither the chip nor the row's tag nor its line draws one
+// (gt-e2cif).
 func TestQueueSkipPageStaleVerdicts(t *testing.T) {
 	t.Parallel()
 
@@ -374,33 +375,111 @@ func TestQueueSkipPageStaleVerdicts(t *testing.T) {
 		t.Errorf("the stale note reads %q, want it to say %q", notes[0], want)
 	}
 
-	clickQueueChip(t, dom, "skipped by dispatcher")
-	rows := queueRows(t, dom)
-	if len(rows) != 1 {
-		t.Fatalf("the skipped chip draws %+v, want the one row the reading holds", rows)
+	// The chip is the ledger's claim in miniature, so a stale ledger draws no
+	// chip counting a skip it cannot back.
+	for _, c := range queueChips(t, dom) {
+		if strings.HasPrefix(c.Label, "skipped by dispatcher") {
+			t.Errorf("a stale ledger still draws the %q chip, counting %s skips it cannot back", c.Label, c.Count)
+		}
 	}
-	if strings.Contains(rows[0].Text, "overlap hold") || strings.Contains(rows[0].Text, "skipped since") {
-		t.Errorf("a row claims a skip the stale ledger cannot back: %q", rows[0].Text)
+
+	// Nor does any row claim one. The dispatchable view opens on the shaped
+	// bead, so turn its filter off to see the row the reading gave shape
+	// "skipped": it draws neither the tag nor the reason line.
+	clickQueueChip(t, dom, "dispatchable")
+	rows := queueRows(t, dom)
+	if len(rows) != 2 {
+		t.Fatalf("the stale ledger draws %d rows, want both beads of the reading: %+v", len(rows), rows)
+	}
+	for _, r := range rows {
+		if strings.Contains(r.Text, "overlap hold") || strings.Contains(r.Text, "skipped since") {
+			t.Errorf("a row claims a skip the stale ledger cannot back: %q", r.Text)
+		}
+		for _, l := range r.Leaves {
+			if l.Text == "skipped by dispatcher" {
+				t.Errorf("a row wears the skipped tag while the ledger is stale: %q", r.Text)
+			}
+		}
 	}
 }
 
-// A ledger this read could not load at all has no time to age, so the note says
-// that rather than ageing a zero time into a number of minutes (gt-e2cif).
+// A stale ledger names no skip anywhere, the empty dispatchable view included:
+// with every ready bead passed over the view is empty, and it must not report a
+// count of skips the page cannot back (gt-e2cif).
+func TestQueueSkipPageStaleEmptyViewNamesNoSkip(t *testing.T) {
+	t.Parallel()
+
+	read := queueRead(
+		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "overlap hold: gt-okckk is in progress", 12),
+	)
+	read["verdicts_stale"] = true
+	dom := drawQueuePage(t, read)
+
+	var msg string
+	queueReadBack(t, dom, "__qEmpty()", &msg)
+	if strings.Contains(msg, "skipped") {
+		t.Errorf("the empty dispatchable view reports skips on a stale ledger: %q", msg)
+	}
+}
+
+// A filter left on the skipped chip when the ledger goes stale would keep
+// hiding rows behind a control the page no longer draws, so the page drops the
+// filter and lists every row the reading holds (gt-e2cif).
+func TestQueueSkipPageStaleDropsTheSkippedFilter(t *testing.T) {
+	t.Parallel()
+
+	dom := drawQueuePage(t, queueRead(
+		readyRow("gt-okckk", "ok"),
+		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "overlap hold: gt-okckk is in progress", 12),
+	))
+	// The operator is looking at the skipped view when the dispatcher's ledger
+	// ages out: the chip was pressed while the verdicts were still current.
+	clickQueueChip(t, dom, "skipped by dispatcher")
+	if _, err := dom.vm.RunString(`state.queue.verdicts_stale = true; renderWork(state, true);`); err != nil {
+		t.Fatalf("ageing the ledger under the skipped view: %v", err)
+	}
+
+	// The list is no longer narrowed to the shape the dropped chip filtered to:
+	// both beads of the reading are listed, the shaped one included.
+	if rows := queueRows(t, dom); len(rows) != 2 {
+		t.Fatalf("the stale ledger draws %d rows, want both beads of the reading: %+v", len(rows), rows)
+	}
+}
+
+// A ledger with no time to age says it could not be read, rather than ageing a
+// time it does not have: the server omits the time of a ledger it could not
+// read, and one it sent with a zero time is the JSON zero value, not an age
+// (gt-e2cif).
 func TestQueueSkipPageUnreadableLedger(t *testing.T) {
 	t.Parallel()
 
-	read := queueRead(readyRow("gt-okckk", "ok"))
-	read["verdicts_stale"] = true // the server's word for a ledger it could not read
-	dom := drawQueuePage(t, read)
+	for _, tt := range []struct {
+		name string
+		at   any
+	}{
+		{"no time at all", nil},
+		{"a zero time", "0001-01-01T00:00:00Z"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	notes := queueNotes(t, dom)
-	if len(notes) != 1 {
-		t.Fatalf("the unreadable ledger draws %d notes above the rows (%+v), want one", len(notes), notes)
-	}
-	if want := "verdict ledger could not be read"; !strings.Contains(notes[0], want) {
-		t.Errorf("the note reads %q, want it to say %q", notes[0], want)
-	}
-	if strings.Contains(notes[0], "minutes old") {
-		t.Errorf("a ledger with no time is aged into minutes: %q", notes[0])
+			read := queueRead(readyRow("gt-okckk", "ok"))
+			read["verdicts_stale"] = true // the server's word for a ledger it could not read
+			if tt.at != nil {
+				read["verdicts_at"] = tt.at
+			}
+			dom := drawQueuePage(t, read)
+
+			notes := queueNotes(t, dom)
+			if len(notes) != 1 {
+				t.Fatalf("the unreadable ledger draws %d notes above the rows (%+v), want one", len(notes), notes)
+			}
+			if want := "verdict ledger could not be read"; !strings.Contains(notes[0], want) {
+				t.Errorf("the note reads %q, want it to say %q", notes[0], want)
+			}
+			if strings.Contains(notes[0], "minutes old") {
+				t.Errorf("a ledger with no time is aged into minutes: %q", notes[0])
+			}
+		})
 	}
 }

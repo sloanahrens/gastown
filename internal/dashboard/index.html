@@ -4346,12 +4346,20 @@ function drawQueueList(box, s) {
   box.append(el("div", "qcaption", caption));
   const [, , totalKey, listKey] = QTABS.find(t => t[0] === qTab);
   const all = q[listKey] || [];
+  // A ledger the page cannot call current backs no skip at all: the note under
+  // the chips says why, and no chip, tag or row line says a bead is one
+  // (gt-e2cif).
+  const stale = !!q.verdicts_stale;
   // filters: which store, (for the ready list) whether the dispatcher would
   // slot it, and (for the blocked list) whether wisps are shown
   const rigs = Object.assign({}, q[listKey + "_rigs"] || {});
   if (!Object.keys(rigs).length) all.forEach(b => rigs[b.rig] = (rigs[b.rig] || 0) + 1);
   const rigNames = Object.keys(rigs).sort((a, b) => rigs[b] - rigs[a]);
   if (qRig !== "all" && !rigs[qRig]) qRig = "all";
+  // A stale ledger draws no skipped chip, so a filter left on it would keep
+  // hiding rows behind a control the page no longer draws: drop it and list
+  // everything (gt-e2cif).
+  if (stale && qShape === "skipped") qShape = "all";
   if (rigNames.length > 1 || qTab === "ready" || qTab === "blocked") {
     const f = el("div", "qtabs");
     const chip = (label, count, on, fn, tip) => { const b = el("button", "chip" + (on ? " on" : ""), label); if (tip) b.title = tip; b.append(el("b", "", String(count))); b.onclick = fn; f.append(b); };
@@ -4366,8 +4374,9 @@ function drawQueueList(box, s) {
       chip("dispatchable", ok, qShape === "ok", () => { qShape = qShape === "ok" ? "all" : "ok"; renderWork(state, true); });
       // A bead the dispatcher passed over lints clean and still waits, so it
       // is counted on a chip of its own rather than folded into a neighbour:
-      // the row that opens under it says why and since when (gt-e2cif).
-      chip("skipped by dispatcher", inRig.filter(b => b.shape === "skipped").length, qShape === "skipped",
+      // the row that opens under it says why and since when (gt-e2cif). A
+      // stale ledger has no such count, so it draws no such chip.
+      if (!stale) chip("skipped by dispatcher", inRig.filter(b => b.shape === "skipped").length, qShape === "skipped",
         () => { qShape = qShape === "skipped" ? "all" : "skipped"; renderWork(state, true); },
         "the dispatcher's last real tick passed these over: shaped and unassigned, but not taken. The row says why and since when.");
       chip("needs shaping", inRig.filter(b => b.shape === "fix").length, qShape === "fix", () => { qShape = qShape === "fix" ? "all" : "fix"; renderWork(state, true); });
@@ -4383,9 +4392,12 @@ function drawQueueList(box, s) {
   // a verdict nobody re-took is not a current skip, so the page draws the note
   // and leaves the rows to the shape the lint gave them (gt-e2cif). A ledger
   // that could not be read at all has no time to age, and says that instead.
-  if (q.verdicts_stale) {
-    const at = q.verdicts_at ? new Date(q.verdicts_at).getTime() : null;
-    const mins = at == null ? null : Math.max(0, Math.round((Date.now() - at) / 60000));
+  if (stale) {
+    // A ledger the server could not read carries no time, and one it sent with
+    // a zero time has no age to give: both say the ledger could not be read
+    // rather than age year 1 into a billion minutes.
+    const at = q.verdicts_at ? new Date(q.verdicts_at).getTime() : NaN;
+    const mins = Number.isFinite(at) && at > 0 ? Math.max(0, Math.round((Date.now() - at) / 60000)) : null;
     box.append(el("div", "warnc", mins == null
       ? "the dispatcher's verdict ledger could not be read, so no row says what its last tick decided"
       : "the dispatcher's verdicts are " + mins + (mins === 1 ? " minute" : " minutes") + " old, so no row shows a current skip"));
@@ -4402,7 +4414,9 @@ function drawQueueList(box, s) {
       const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
       const shaping = inRig.filter(b => b.shape === "fix").length;
       const held = inRig.filter(b => b.shape === "held").length;
-      const skipped = inRig.filter(b => b.shape === "skipped").length;
+      // A stale ledger's skip count says nothing about now, so the view names
+      // no skip at all (gt-e2cif).
+      const skipped = stale ? 0 : inRig.filter(b => b.shape === "skipped").length;
       const parts = [];
       if (inRig.length) {
         // A skipped bead lints clean and is still waiting, which is the case
@@ -4434,7 +4448,11 @@ function drawQueueList(box, s) {
     head.append(idc);
     const t = el("span", "t", b.title || "(no title)");
     if (b.shape === "ok") { const g = el("span", "tag good", "ready"); g.title = "the spec dispatcher would slot this bead"; t.append(document.createTextNode(" "), g); }
-    else if (b.shape === "skipped") { const g = el("span", "tag warnc", "skipped by dispatcher"); g.title = "the dispatcher's last real tick passed this bead over; the line below says why and since when"; t.append(document.createTextNode(" "), g); }
+    else if (b.shape === "skipped") {
+      // A stale ledger's skipped shape is left over from a tick the page
+      // cannot vouch for, so the row wears no skip tag (gt-e2cif).
+      if (!stale) { const g = el("span", "tag warnc", "skipped by dispatcher"); g.title = "the dispatcher's last real tick passed this bead over; the line below says why and since when"; t.append(document.createTextNode(" "), g); }
+    }
     else if (b.shape === "parked") { const g = el("span", "tag", "rig parked"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "held") { const g = el("span", "tag", "held"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "fix") { const g = el("span", "tag warnc", "needs shaping"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
@@ -4448,7 +4466,7 @@ function drawQueueList(box, s) {
     // The dispatcher's verdict on this row, in the dim line class the sub line
     // already uses. A stale ledger draws none of these: the note above the rows
     // says why, and no row claims a skip the dispatcher did not just take.
-    const skip = q.verdicts_stale ? null : queueSkipLine(b);
+    const skip = stale ? null : queueSkipLine(b);
     if (skip) head.append(el("span", "qsub", skip));
     head.onclick = () => openBead(b);
     row.append(head);
