@@ -89,7 +89,7 @@ func TestLandRejectionKeepsTheTailOfALongOMError(t *testing.T) {
 	l := f.lander()
 	l.ReviewErrorRejects = true
 	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsOverseer)
 	if !strings.Contains(rej.Reason, "the reviewer backend claude-deepseek-flash exited 1 in 0 seconds") {
 		t.Errorf("rejection reason lost the backend's cause:\n%s", rej.Reason)
 	}
@@ -114,7 +114,7 @@ func TestLandExecutionErrorOnAHugeDiffNamesTheSize(t *testing.T) {
 	l := f.lander()
 	l.ReviewErrorRejects = true
 	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsOverseer)
 	if !strings.Contains(rej.Reason, "diff too large for om; overseer review needed") {
 		t.Errorf("reason = %q; want it to name the size", rej.Reason)
 	}
@@ -135,7 +135,7 @@ func TestLandExecutionErrorUnderTheBoundStaysBare(t *testing.T) {
 	l := f.lander()
 	l.ReviewErrorRejects = true
 	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsOverseer)
 	if strings.Contains(rej.Reason, "diff too large for om") {
 		t.Errorf("reason = %q; a small diff must not be called too large", rej.Reason)
 	}
@@ -201,7 +201,7 @@ func TestLandRetriesOMReviewOnceThenRejects(t *testing.T) {
 	l := f.lander()
 	l.ReviewErrorRejects = true
 	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsOverseer)
 	if len(f.review.calls) != 2 {
 		t.Fatalf("review calls = %d, want 2 (the error and exactly one retry)", len(f.review.calls))
 	}
@@ -221,7 +221,7 @@ func TestLandDoesNotRetryANonExecutionOMError(t *testing.T) {
 	l := f.lander()
 	l.ReviewErrorRejects = true
 	_, err := l.Land(context.Background(), f.work)
-	f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	f.assertRejected(t, err, RejectReview, LabelNeedsOverseer)
 	if len(f.review.calls) != 1 {
 		t.Errorf("review calls = %d, want 1: a timeout is not retried", len(f.review.calls))
 	}
@@ -238,7 +238,7 @@ func TestLandDoesNotRetryAnOversizeOMError(t *testing.T) {
 	l := f.lander()
 	l.ReviewErrorRejects = true
 	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsOverseer)
 	if len(f.review.calls) != 1 {
 		t.Errorf("review calls = %d, want 1: an oversize execution error is deterministic", len(f.review.calls))
 	}

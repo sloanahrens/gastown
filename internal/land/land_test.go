@@ -932,7 +932,7 @@ func TestLandCapsTheReworkLoop(t *testing.T) {
 		b := f.bead()
 		wantLabel := LabelRework
 		if capped {
-			wantLabel = LabelNeedsHuman
+			wantLabel = LabelNeedsOverseer
 		}
 		if !beads.HasLabel(b, wantLabel) || beads.HasLabel(b, LabelRework) == capped || beads.HasLabel(b, LabelReadyToLand) {
 			t.Errorf("attempt %d: labels after the rejection = %v, want %s", attempt, b.Labels, wantLabel)
@@ -972,7 +972,7 @@ func TestLandCapsAGateLoop(t *testing.T) {
 		b := f.bead()
 		wantLabel := LabelRework
 		if capped {
-			wantLabel = LabelNeedsHuman
+			wantLabel = LabelNeedsOverseer
 		}
 		if !beads.HasLabel(b, wantLabel) || beads.HasLabel(b, LabelReadyToLand) {
 			t.Errorf("gate refusal %d: labels = %v, want %s", attempt, b.Labels, wantLabel)
@@ -1012,7 +1012,7 @@ func TestLandCapsAPolicyLoop(t *testing.T) {
 		b := f.bead()
 		wantLabel := LabelRework
 		if capped {
-			wantLabel = LabelNeedsHuman
+			wantLabel = LabelNeedsOverseer
 		}
 		if !beads.HasLabel(b, wantLabel) || beads.HasLabel(b, LabelReadyToLand) {
 			t.Errorf("policy refusal %d: labels = %v, want %s", attempt, b.Labels, wantLabel)
@@ -1258,7 +1258,7 @@ func TestLandRequeueLoopStillHitsTheAttemptCap(t *testing.T) {
 			t.Fatalf("attempt %d: %d rejection block(s), want %d", attempt, got, attempt)
 		}
 		if capped {
-			if b := f.bead(); !beads.HasLabel(b, LabelNeedsHuman) || beads.HasLabel(b, LabelReadyToLand) {
+			if b := f.bead(); !beads.HasLabel(b, LabelNeedsOverseer) || beads.HasLabel(b, LabelReadyToLand) {
 				t.Errorf("the cap did not escalate: labels %v", b.Labels)
 			}
 			return
@@ -1517,7 +1517,7 @@ func TestLandPolicyRejections(t *testing.T) {
 		f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "hooked", Type: "task", Description: "no_merge: true",
 			Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
 		_, err := f.lander().Land(context.Background(), f.work)
-		rej := f.assertRejected(t, err, RejectPolicy, LabelNeedsHuman)
+		rej := f.assertRejected(t, err, RejectPolicy, LabelNeedsOverseer)
 		if rej.Rework || !strings.Contains(rej.Reason, "no_merge") {
 			t.Errorf("rejection = %+v", rej)
 		}
@@ -1704,7 +1704,7 @@ func TestLandRevertLandsWhenOMHasNoVerdict(t *testing.T) {
 
 // TestLandOMBypassIsScopedToTheLabel: ReviewErrorLandsLabels frees only the
 // beads that carry the label. A bead without gt:revert whose om returned no
-// verdict still goes to gt:needs-human and never lands unreviewed (gt-j8ade).
+// verdict still goes to gt:needs-overseer and never lands unreviewed (gt-j8ade).
 func TestLandOMBypassIsScopedToTheLabel(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -1713,7 +1713,7 @@ func TestLandOMBypassIsScopedToTheLabel(t *testing.T) {
 	l.ReviewErrorRejects = true
 	l.ReviewErrorLandsLabels = []string{"gt:revert"}
 	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsOverseer)
 	if rej.Rework {
 		t.Errorf("rejection = %+v; an om error is not rework", rej)
 	}
@@ -1731,7 +1731,7 @@ func TestLandReviewErrorRejectsWhenItMayNotLand(t *testing.T) {
 	l := f.lander()
 	l.ReviewErrorRejects = true
 	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsOverseer)
 	if rej.Rework || !strings.Contains(rej.Reason, "timed out") {
 		t.Errorf("rejection = %+v", rej)
 	}
@@ -1798,7 +1798,7 @@ func TestLandHeadAlreadyOnTargetNeedsAHuman(t *testing.T) {
 	f.git.SetRef(t, f.origin, "refs/heads/main", f.work.Head)
 	f.base = f.work.Head
 	_, err := f.lander().Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectEmpty, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectEmpty, LabelNeedsOverseer)
 	if rej.Rework || !strings.Contains(rej.Reason, "already reachable") {
 		t.Errorf("rejection = %+v", rej)
 	}
@@ -2616,7 +2616,7 @@ func TestLandRejectionRetryDoesNotBurnAttempts(t *testing.T) {
 		}
 	}
 	b := f.bead()
-	if beads.HasLabel(b, LabelNeedsHuman) || !beads.HasLabel(b, LabelReadyToLand) {
+	if HasNeedsPerson(b) || !beads.HasLabel(b, LabelReadyToLand) {
 		t.Errorf("labels after %d failed records = %v; want the bead still ready and not escalated", MaxReworkAttempts, b.Labels)
 	}
 	if strings.Contains(b.Notes, "the loop is escalated") {
@@ -2821,12 +2821,79 @@ func TestLandForgedStatusIsAHumanRejection(t *testing.T) {
 	}}
 
 	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectForgedStatus, LabelNeedsHuman)
+	rej := f.assertRejected(t, err, RejectForgedStatus, LabelNeedsOverseer)
 	if !strings.Contains(rej.Reason, "mallory") {
 		t.Fatalf("reason %q; want it to name the account that posted the status", rej.Reason)
 	}
 	if rej.Rework {
 		t.Fatal("a forged status was left to the author to rework; only a human can settle it")
+	}
+}
+
+// TestLandLeftForAPersonGetsNeedsOverseer: a landing a person must settle is
+// written with gt:needs-overseer, the first step of every escalation. The swap
+// clears the person labels the bead still carries, the old spelling and the
+// operator's included, so the bead names one owner (gt-zjel5).
+func TestLandLeftForAPersonGetsNeedsOverseer(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AddLabels: []string{LabelNeedsHuman, LabelNeedsOperator}}); err != nil {
+		t.Fatal(err)
+	}
+	l := f.lander()
+	l.Candidate = &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
+	l.Merger = &fakeMerger{fn: func(MergeRequest) error {
+		return &ForgedStatusError{Reason: `the ci / gate (push) status was posted by an unknown account`}
+	}}
+
+	_, err := l.Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectForgedStatus, LabelNeedsOverseer)
+	if b := f.bead(); beads.HasLabel(b, LabelNeedsHuman) || beads.HasLabel(b, LabelNeedsOperator) {
+		t.Errorf("labels = %v; the swap left a person label beside %s", b.Labels, LabelNeedsOverseer)
+	}
+}
+
+// TestLandReworkRepeatHonorsEveryPersonLabel: a bead a person already holds
+// has its last refusal block as history, so a repeat of that refusal writes a
+// new block instead of completing the old one in place. Every person label
+// counts, the overseer-first spellings included (gt-zjel5).
+func TestLandReworkRepeatHonorsEveryPersonLabel(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		label  string
+		blocks int
+	}{
+		{name: "no person label completes the block in place", label: "", blocks: 1},
+		{name: "gt:needs-human starts a new block", label: LabelNeedsHuman, blocks: 2},
+		{name: "gt:needs-overseer starts a new block", label: LabelNeedsOverseer, blocks: 2},
+		{name: "gt:needs-operator starts a new block", label: LabelNeedsOperator, blocks: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			labels := []string{LabelReadyToLand}
+			if tc.label != "" {
+				labels = append(labels, tc.label)
+			}
+			f.bd.Seed(beads.Issue{ID: f.work.BeadID, Title: "add b", Status: "hooked", Type: "task",
+				Labels: labels, Notes: FormatRejectionNote(RejectionNote{
+					Attempt: 1, Kind: string(RejectGate), Reason: "earlier refusal",
+					Branch: f.work.Branch, Target: f.work.Target, MR: f.work.BeadID, Head: f.work.Head,
+				}) + "\n\n"})
+			f.gate.fn = func(string) GateResult {
+				return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+			}
+
+			_, err := f.lander().Land(context.Background(), f.work)
+			var rej *Rejection
+			if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+				t.Fatalf("Land = %T %v, want a recorded gate rejection", err, err)
+			}
+			if got := RejectionBlocks(f.bead().Notes); got != tc.blocks {
+				t.Errorf("%d rejection block(s), want %d:\n%s", got, tc.blocks, f.bead().Notes)
+			}
+		})
 	}
 }
 

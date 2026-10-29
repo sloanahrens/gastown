@@ -23,6 +23,14 @@ const (
 	// Land refused it on policy (no_merge), or the bead hit
 	// MaxReworkAttempts and the rework loop is the failure (gt-28ibg).
 	LabelNeedsHuman = "gt:needs-human"
+	// LabelNeedsOverseer is the overseer-first spelling of LabelNeedsHuman: a
+	// landing left for a person is written with it, because the overseer is
+	// the first step of every escalation (gt-zjel5). LabelNeedsHuman stays
+	// readable for beads written before the rename.
+	LabelNeedsOverseer = "gt:needs-overseer"
+	// LabelNeedsOperator is the operator's spelling of the same hold. Landing
+	// never writes it; it is read and cleared like LabelNeedsHuman (gt-zjel5).
+	LabelNeedsOperator = "gt:needs-operator"
 
 	// LabelOverseerReviewed marks a work bead whose head the overseer
 	// reviewed in place of om; it counts only beside an OverseerReviewedMarker
@@ -61,6 +69,22 @@ const (
 	// ReadyNoteMarker opens the notes block gt done writes to say what to land.
 	ReadyNoteMarker = "READY TO LAND"
 )
+
+// needsPersonLabels are every label that leaves a work bead for a person. The
+// readers ask HasNeedsPerson rather than one label, so the old spelling keeps
+// its meaning beside the new ones.
+var needsPersonLabels = []string{LabelNeedsHuman, LabelNeedsOverseer, LabelNeedsOperator}
+
+// HasNeedsPerson reports whether issue carries any label that leaves it for a
+// person (gt-zjel5).
+func HasNeedsPerson(issue *beads.Issue) bool {
+	for _, label := range needsPersonLabels {
+		if beads.HasLabel(issue, label) {
+			return true
+		}
+	}
+	return false
+}
 
 // Work is one landing request: the work bead and the pushed branch head it
 // declares.
