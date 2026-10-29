@@ -684,6 +684,189 @@ func TestRunOverrunGuard_ReslingStartsNewClock(t *testing.T) {
 	}
 }
 
+// A seat restarted hours after it died gets a fresh clock: the dead stretch was
+// not time a session was alive on the bead, so the new session is not stopped
+// seconds after it starts. The adopted restart is saved with the bead's state,
+// because the supervisor's restart stamps last only its budget window
+// (gt-y9lkx).
+func TestRunOverrunGuard_RestartStartsAFreshClock(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	// Slung at 12:00, dead until the supervised restart at 14:00.
+	restart := overrunSlung.Add(2 * time.Hour)
+	seat := overrunSeat{Rig: "gastown", Polecat: "goose", Bead: "gt-aaa11", RestartedAt: restart}
+	f := newOverrunFake(0, seat)
+	f.now = restart.Add(6 * time.Second)
+
+	d.runOverrunGuard(f.seams())
+	if len(f.stops) != 0 || len(f.nudges) != 0 {
+		t.Fatalf("a restarted seat was acted on 6s in: stops %v, nudges %v", f.stops, f.nudges)
+	}
+	st, err := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.RestartedAt.Equal(restart) {
+		t.Fatalf("RestartedAt = %v, want the restart %v saved", st.RestartedAt, restart)
+	}
+
+	// A later tick reads no restart stamp: the adopted restart carries the clock.
+	seat.RestartedAt = time.Time{}
+	f.seats = []overrunSeat{seat}
+	f.now = restart.Add(12 * time.Minute)
+	d.runOverrunGuard(f.seams())
+	if len(f.nudges) != 1 || len(f.stops) != 0 {
+		t.Fatalf("12m after the restart: nudges %v, stops %v; want the nudge on the new clock", f.nudges, f.stops)
+	}
+
+	f.now = restart.Add(20 * time.Minute)
+	d.runOverrunGuard(f.seams())
+	if len(f.stops) != 1 {
+		t.Errorf("stops = %v, want the stop 20m after the restart", f.stops)
+	}
+}
+
+// A seat that never died is stopped on its sling clock, as before: the restart
+// field it does not have moves nothing (gt-y9lkx).
+func TestRunOverrunGuard_SeatThatNeverDiedKeepsItsSlingClock(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11"})
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.stops) != 1 {
+		t.Errorf("stops = %v, want the stop 20m after the sling", f.stops)
+	}
+}
+
+// A restart stamped before the sling restarted the seat for whatever it held
+// then; it is not a restart of this dispatch, so the clock stays the sling's
+// (gt-y9lkx).
+func TestRunOverrunGuard_RestartBeforeTheSlingDoesNotMoveTheClock(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seat := overrunSeat{
+		Rig: "gastown", Polecat: "capable", Bead: "gt-aaa11",
+		RestartedAt: overrunSlung.Add(-30 * time.Minute),
+	}
+	f := newOverrunFake(20*time.Minute, seat)
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.stops) != 1 {
+		t.Errorf("stops = %v, want the stop 20m after the sling", f.stops)
+	}
+}
+
+// A rework slung after a restart starts its own clock: the restart adopted for
+// the earlier sling is not this run's, or every rework on a seat that was ever
+// restarted would be judged only minutes old (gt-y9lkx).
+func TestRunOverrunGuard_ReworkAfterARestartStartsOver(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	restart := overrunSlung.Add(2 * time.Hour)
+	seat := overrunSeat{Rig: "gastown", Polecat: "goose", Bead: "gt-aaa11", RestartedAt: restart}
+	f := newOverrunFake(0, seat)
+	f.now = restart.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+
+	resling := restart.Add(30 * time.Minute)
+	f.slung["gt-aaa11"] = resling
+	f.now = resling.Add(13 * time.Minute)
+	d.runOverrunGuard(f.seams())
+
+	if len(f.nudges) != 1 || len(f.stops) != 0 {
+		t.Errorf("nudges %v, stops %v; want one nudge 13m into the rework", f.nudges, f.stops)
+	}
+}
+
+// A seat that keeps dying and coming back does not get a fresh clock on every
+// restart: the first overrunMaxRestartClocks restarts each start the clock, and
+// after that it stays where the last of them left it, so the seat is stopped on
+// its next tick. The dashboard reads the same clock (gt-y9lkx).
+func TestRunOverrunGuard_RestartsStartTheClockOnlyUpToTheCap(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seat := overrunSeat{Rig: "gastown", Polecat: "goose", Bead: "gt-aaa11"}
+	f := newOverrunFake(0, seat)
+	// Each restart comes two hours after the one before, so the supervisor's
+	// hourly restart budget never freezes the seat.
+	restarts := make([]time.Time, overrunMaxRestartClocks+1)
+	for i := range restarts {
+		restarts[i] = overrunSlung.Add(time.Duration(i+1) * 2 * time.Hour)
+	}
+	for i, restart := range restarts[:overrunMaxRestartClocks] {
+		seat.RestartedAt = restart
+		f.seats = []overrunSeat{seat}
+		f.now = restart.Add(time.Minute)
+		d.runOverrunGuard(f.seams())
+		if len(f.stops) != 0 {
+			t.Fatalf("restart %d: stopped 1m after it: %v", i+1, f.stops)
+		}
+	}
+
+	last := restarts[overrunMaxRestartClocks-1]
+	if got := OverrunRestartClock(d.config.TownRoot, seat.Bead, overrunSlung); !got.Equal(last) {
+		t.Fatalf("clock = %v, want the last allowed restart %v", got, last)
+	}
+
+	seat.RestartedAt = restarts[overrunMaxRestartClocks]
+	f.seats = []overrunSeat{seat}
+	f.now = seat.RestartedAt.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+	if len(f.stops) != 1 {
+		t.Errorf("stops = %v, want the seat stopped on the clock the cap left it", f.stops)
+	}
+	if got := OverrunRestartClock(d.config.TownRoot, seat.Bead, overrunSlung); !got.Equal(last) {
+		t.Errorf("clock after the capped restart = %v, want it still %v", got, last)
+	}
+}
+
+// Gate time a seat spent before its restart is not charged to the clock the
+// restart starts. The clock counts the restarted session's own time, and gate
+// time after the restart is excluded as it is for any run (gt-y9lkx).
+func TestRunOverrunGuard_GateTimeBeforeARestartIsNotCarried(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seat := overrunSeat{Rig: "gastown", Polecat: "goose", Bead: "gt-aaa11"}
+	f := newOverrunFake(0, seat)
+	inGate := false
+	f.gateRunning = func(overrunSeat) (bool, error) { return inGate, nil }
+	tick := func(at time.Time) {
+		f.now = at
+		d.runOverrunGuard(f.seams())
+	}
+
+	// Ten minutes inside its gate before the session dies.
+	inGate = true
+	for m := 5; m <= 15; m++ {
+		tick(overrunSlung.Add(time.Duration(m) * time.Minute))
+	}
+	inGate = false
+	tick(overrunSlung.Add(16 * time.Minute))
+
+	// Restarted two hours later, then nine minutes inside its gate: 21 minutes
+	// of its own time by the 30th minute, past the 20 minute stop.
+	restart := overrunSlung.Add(2 * time.Hour)
+	seat.RestartedAt = restart
+	f.seats = []overrunSeat{seat}
+	tick(restart.Add(time.Minute))
+	inGate = true
+	for m := 2; m <= 11; m++ {
+		tick(restart.Add(time.Duration(m) * time.Minute))
+	}
+	if len(f.stops) != 0 {
+		t.Fatalf("stopped inside its gate, 2m of its own time: %v", f.stops)
+	}
+
+	inGate = false
+	tick(restart.Add(30 * time.Minute))
+	if len(f.stops) != 1 {
+		t.Errorf("stops = %v, want the stop at 21m of the restarted session's own time", f.stops)
+	}
+}
+
 // The guard judges the bead's clock, not the seat's: a bead re-slung to a
 // second seat is nudged or stopped on the dispatch it first went out on, even
 // though that seat has held it only a few minutes. A done event ends that run,
@@ -950,8 +1133,13 @@ func TestOverrunSeatFor_ReadsTheSubmissionAndDropsAnUnreadableBead(t *testing.T)
 	}.open
 
 	seatFor := supervisor.SeatFor("gastown", string(constants.RolePolecat), "capable")
+	restarts := []time.Time{
+		time.Date(2026, 10, 13, 11, 0, 0, 0, time.UTC),
+		time.Date(2026, 10, 13, 12, 10, 0, 0, time.UTC),
+	}
 	if _, err := intent.Update(d.config.TownRoot, supervisor.IntentSeat(seatFor), func(r *intent.Record) error {
 		r.WorkBead = "gt-aaa11"
+		r.Restarts = restarts
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -964,6 +1152,9 @@ func TestOverrunSeatFor_ReadsTheSubmissionAndDropsAnUnreadableBead(t *testing.T)
 	}
 	if want := time.Date(2026, 10, 13, 12, 5, 0, 0, time.UTC); !seat.SubmittedAt.Equal(want) {
 		t.Errorf("SubmittedAt = %v, want the READY TO LAND block's time %v", seat.SubmittedAt, want)
+	}
+	if want := restarts[1]; !seat.RestartedAt.Equal(want) {
+		t.Errorf("RestartedAt = %v, want the newest restart stamp %v", seat.RestartedAt, want)
 	}
 
 	d.openWorkBeads = unreadableBeads{}.open

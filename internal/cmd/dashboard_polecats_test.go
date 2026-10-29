@@ -388,18 +388,58 @@ func TestDashHookTimeDatesASubmittedBeadFromItsRework(t *testing.T) {
 
 	ready := &beads.Issue{ID: "gt-a", Notes: "READY TO LAND\nBranch: polecat/capable/gt-a+x\nHead: " +
 		strings.Repeat("a", 40) + "\nTarget: main\nWorker: capable\nSubmitted: 2026-10-27T10:00:00Z\n"}
-	if got, want := dashHookTime(agentUpdated, ready, dispatched, dispatches), time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC); !got.Equal(want) {
+	if got, want := dashHookTime(town, agentUpdated, ready, dispatched, dispatches), time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC); !got.Equal(want) {
 		t.Errorf("hook time = %v, want the dispatch after the submission, %v", got, want)
 	}
 
 	unsubmitted := &beads.Issue{ID: "gt-b"}
-	if got, want := dashHookTime(agentUpdated, unsubmitted, dispatched, dispatches), time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC); !got.Equal(want) {
+	if got, want := dashHookTime(town, agentUpdated, unsubmitted, dispatched, dispatches), time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC); !got.Equal(want) {
 		t.Errorf("hook time = %v, want the bead's first dispatch, %v", got, want)
 	}
 
 	undated := &beads.Issue{ID: "gt-undated"}
-	if got := dashHookTime(agentUpdated, undated, dispatched, dispatches); !got.Equal(agentUpdated) {
+	if got := dashHookTime(town, agentUpdated, undated, dispatched, dispatches); !got.Equal(agentUpdated) {
 		t.Errorf("hook time = %v, want the agent bead's last write %v", got, agentUpdated)
+	}
+}
+
+// The Age of a seat the overrun guard restarted reads the restart the guard
+// saved for the run, the clock it stops the seat on, not the dispatch the run
+// began with (gt-y9lkx). A run with no saved restart keeps its dispatch.
+func TestDashHookTimeDatesARestartedSeatFromTheGuardsRestart(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	body := `{"ts":"2026-10-27T11:00:00Z","source":"gt","type":"sling","actor":"x","payload":{"bead":"gt-a"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(town, gtevents.EventsFile), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dispatches := gtevents.NewDispatchReader(town)
+	dispatched, err := dispatches.Starts()
+	if err != nil {
+		t.Fatalf("dispatch reader: %v", err)
+	}
+	agentUpdated := time.Date(2026, 10, 27, 9, 5, 0, 0, time.UTC)
+	bead := &beads.Issue{ID: "gt-a"}
+	dispatch := time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC)
+	restart := time.Date(2026, 10, 27, 13, 0, 0, 0, time.UTC)
+
+	if got := dashHookTime(town, agentUpdated, bead, dispatched, dispatches); !got.Equal(dispatch) {
+		t.Fatalf("hook time = %v, want the dispatch %v before any restart is saved", got, dispatch)
+	}
+
+	// The guard's state file, as it saves an adopted restart of the run
+	// dispatched at 11:00.
+	stateDir := filepath.Join(town, ".runtime", "overrun-guard")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := fmt.Sprintf(`{"bead":"gt-a","restart_sling_at":%q,"restarted_at":%q,"restart_resets":1}`,
+		dispatch.Format(time.RFC3339), restart.Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(stateDir, "gt-a.json"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := dashHookTime(town, agentUpdated, bead, dispatched, dispatches); !got.Equal(restart) {
+		t.Errorf("hook time = %v, want the guard's restart %v", got, restart)
 	}
 }
 
