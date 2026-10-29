@@ -53,7 +53,7 @@ func (f *fakeRunner) run(_ context.Context, dir string, env, argv []string) erro
 		return errors.New("build failed")
 	}
 	if out := outOf(argv); out != "" {
-		return os.WriteFile(out, []byte("binary"), 0o755)
+		return os.WriteFile(out, []byte("binary"), 0o600)
 	}
 	return nil
 }
