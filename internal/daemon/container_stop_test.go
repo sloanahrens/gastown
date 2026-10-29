@@ -47,13 +47,13 @@ func unknownSettingsTown(t *testing.T, doc string) string {
 	if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte(doc), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	holdDaemonLock(t, townRoot, os.Getpid())
+	holdContainerTestDaemonLock(t, townRoot, os.Getpid())
 	return townRoot
 }
 
-// holdDaemonLock leaves the state of a daemon whose flock this process can
+// holdContainerTestDaemonLock leaves the state of a daemon whose flock this process can
 // see: daemon.lock held, and daemon.pid naming pid.
-func holdDaemonLock(t *testing.T, townRoot string, pid int) {
+func holdContainerTestDaemonLock(t *testing.T, townRoot string, pid int) {
 	t.Helper()
 	daemonDir := filepath.Join(townRoot, "daemon")
 	if err := os.MkdirAll(daemonDir, 0o755); err != nil {
@@ -89,7 +89,7 @@ func (c *countedSignals) signals() daemonStopSignals {
 func TestStopDaemonContainerTownRefusesWithoutSignaling(t *testing.T) {
 	t.Parallel()
 	townRoot := supervisorTown(t, agentconfig.SupervisorContainer)
-	holdDaemonLock(t, townRoot, os.Getpid())
+	holdContainerTestDaemonLock(t, townRoot, os.Getpid())
 	sigs := &countedSignals{}
 
 	err := stopDaemonWith(townRoot, sigs.signals())
@@ -230,7 +230,7 @@ func TestIsRunningUnknownSettingsWithComposeFileNamesNoPID(t *testing.T) {
 func TestIsRunningContainerTownNeverNamesThePIDFilePID(t *testing.T) {
 	t.Parallel()
 	townRoot := supervisorTown(t, agentconfig.SupervisorContainer)
-	holdDaemonLock(t, townRoot, os.Getpid())
+	holdContainerTestDaemonLock(t, townRoot, os.Getpid())
 
 	running, pid, err := IsRunning(townRoot)
 	if err != nil {
@@ -309,7 +309,7 @@ func TestIsRunningHostKindsStillNameThePIDFilePID(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := supervisorTown(t, kind)
-			holdDaemonLock(t, townRoot, os.Getpid())
+			holdContainerTestDaemonLock(t, townRoot, os.Getpid())
 
 			running, pid, err := IsRunning(townRoot)
 			if err != nil {
