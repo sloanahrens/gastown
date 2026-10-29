@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
@@ -22,7 +23,7 @@ func gcConfig(t *testing.T, reg *recordingRegistry, path string, run diskmaint.R
 // wantCollect is the command the plan fixes: docker exec with the validated
 // container name and the config path, on the configured daemon.
 func wantCollect(container, dockerHost string) (argv []string, env []string) {
-	return []string{"docker", "exec", container, "registry", "garbage-collect", "--delete-untagged", "/etc/docker/registry/config.yml"},
+	return []string{"docker", "exec", container, "timeout", CollectTimeoutSeconds, "registry", "garbage-collect", "--delete-untagged", "/etc/docker/registry/config.yml"},
 		[]string{"DOCKER_HOST=" + dockerHost}
 }
 
@@ -269,5 +270,24 @@ func TestGCRunsAfterAPartialDeleteFailure(t *testing.T) {
 	want := []string{deleteFailure(failing, "a1", http.StatusInternalServerError)}
 	if !slices.Equal(entry.Errors, want) {
 		t.Fatalf("ledger errors = %v, want only the failed delete %v", entry.Errors, want)
+	}
+}
+
+// The collect is bounded inside the container: a hung collect ends there, so
+// docker exec returns and the plugin lock is never held past the bound. The
+// bound must be a real number of seconds, neither zero (timeout 0 is no
+// timeout at all) nor so large it is no bound (gt-dl4nv.13).
+func TestCollectTimeoutIsARealBound(t *testing.T) {
+	t.Parallel()
+	secs, err := strconv.Atoi(CollectTimeoutSeconds)
+	if err != nil {
+		t.Fatalf("CollectTimeoutSeconds %q is not a number of seconds: %v", CollectTimeoutSeconds, err)
+	}
+	if secs < 60 || secs > 7200 {
+		t.Errorf("CollectTimeoutSeconds = %d, want between one minute and two hours so the collect is bounded but not cut short", secs)
+	}
+	argv, _ := wantCollect("gt-registry", "unix:///x")
+	if len(argv) < 5 || argv[3] != "timeout" || argv[4] != CollectTimeoutSeconds {
+		t.Errorf("the collect command %v does not run under the container's timeout", argv)
 	}
 }

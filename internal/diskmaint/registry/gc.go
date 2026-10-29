@@ -11,6 +11,17 @@ import (
 // container name, so nothing else a run reads can reach it.
 const collectConfigPath = "/etc/docker/registry/config.yml"
 
+// CollectTimeoutSeconds is how long the collect may run inside the registry
+// container before the container's own timeout ends it. The collect is run
+// under `timeout` in the container, not bounded by killing the docker client:
+// killing the client leaves the collect running after the plugin lock is
+// released, where it can race a push, while a collect ended in the container
+// ends for good and lets docker exec return on its own, so the lock is held at
+// most this long (gt-dl4nv.13). Thirty minutes is generous for a registry of
+// tens of gigabytes; a collect that needs longer is recorded as a failure and
+// the next run picks it up.
+const CollectTimeoutSeconds = "1800"
+
 // collectSkipped prefixes every ledger line that says why a collect did not
 // run: a skipped collect and a quiet one look alike in a ledger otherwise.
 const collectSkipped = "collect skipped: "
@@ -43,7 +54,7 @@ func (t *Target) gc(ctx context.Context, result *diskmaint.Result) []string {
 	}
 	env := []string{"DOCKER_HOST=" + t.cfg.DockerHost}
 	_, err := t.cfg.Run(ctx, env, "docker",
-		"exec", t.cfg.Container, "registry", "garbage-collect", "--delete-untagged", collectConfigPath)
+		"exec", t.cfg.Container, "timeout", CollectTimeoutSeconds, "registry", "garbage-collect", "--delete-untagged", collectConfigPath)
 	if err != nil {
 		return []string{"collect: " + err.Error()}
 	}

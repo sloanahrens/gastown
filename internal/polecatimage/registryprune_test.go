@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/diskmaint"
+	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 )
 
 // roundTrip serves registry requests from handler in process: no listener, no
@@ -256,7 +257,7 @@ func TestPruneRegistryApplyDeletes(t *testing.T) {
 	if got := reg.deleted(); !slices.Equal(got, want) {
 		t.Fatalf("deleted %v, want the two oldest digests %v", got, want)
 	}
-	tr.wantCall(t, "docker", "exec", registryContainer, "registry", "garbage-collect", "--delete-untagged", "/etc/docker/registry/config.yml")
+	tr.wantCall(t, "docker", "exec", registryContainer, "timeout", registry.CollectTimeoutSeconds, "registry", "garbage-collect", "--delete-untagged", "/etc/docker/registry/config.yml")
 	tr.wantLogged(t, "deleted 2 of 2 manifest(s)")
 
 	entries, err := diskmaint.NewLedger(tr.Cfg.RegistryLedger, registryLedgerMax).Tail(1)
