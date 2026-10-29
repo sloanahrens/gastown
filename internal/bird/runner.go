@@ -41,6 +41,9 @@ type Runner struct {
 	// adds no label. Start runs it best effort, so a bd that cannot write the
 	// label is a warning rather than a session that does not start.
 	LabelBead func(dir, bead, label string) error
+	// UnlabelBead removes label from bead in the store that holds it; nil
+	// removes none. A start whose exec fails takes back the label it added.
+	UnlabelBead func(dir, bead, label string) error
 	// Stdout is where a command's answer goes and Stderr where its warnings go;
 	// nil means the process's own streams.
 	Stdout io.Writer
@@ -85,21 +88,32 @@ func (r *Runner) Start(args []string) error {
 		fmt.Fprintln(r.stderr(), d.Stderr)
 	}
 	argv, env := d.Passthrough, r.environ()
-	var bound bool
+	var bound, labeled bool
 	if d.Launch != nil {
-		bound, err = r.bindBead(d.Launch)
+		bound, labeled, err = r.bindBead(d.Launch)
 		if err != nil {
-			return err
+			return r.unclaim(d.Launch, bound, err)
 		}
 		argv, env = d.Launch.Argv, d.Launch.Env
 	}
 	err = r.exec(r.Claude, append([]string{r.Claude}, argv...), env)
 	if err != nil && d.Launch != nil {
-		// No session runs under the name, so the record and the binding this
-		// launch added must not hold it as though one did.
-		if rbErr := r.Registry.Unclaim(d.Launch.Name, r.pid(), d.Launch.Bead, bound); rbErr != nil {
-			return fmt.Errorf("%w; rolling the claim back also failed: %v", err, rbErr)
+		// No session runs under the name, so the record, the binding and the
+		// label this launch added must not hold it as though one did.
+		if labeled {
+			r.unlabel(d.Launch.Bead, d.Launch.Name)
 		}
+		return r.unclaim(d.Launch, bound, err)
+	}
+	return err
+}
+
+// unclaim drops the record and, when bound says this launch added it, the
+// binding a start made before it failed. A rollback that fails too is added to
+// err, since the record may then still hold the name.
+func (r *Runner) unclaim(l *Launch, bound bool, err error) error {
+	if rbErr := r.Registry.Unclaim(l.Name, r.pid(), l.Bead, bound); rbErr != nil {
+		return fmt.Errorf("%w; rolling the claim back also failed: %v", err, rbErr)
 	}
 	return err
 }
@@ -203,33 +217,50 @@ func (r *Runner) claim(l *Launch) (bool, error) {
 
 // bindBead records that the launch's name ran the bead it named and labels the
 // bead agent:<name>, so bind and list can find the session later. It reports
-// whether the binding was new, which is what a failed exec has to undo.
-func (r *Runner) bindBead(l *Launch) (bool, error) {
+// whether the binding was new and whether the label was written, which is what
+// a failed exec has to undo.
+func (r *Runner) bindBead(l *Launch) (added, labeled bool, err error) {
 	if l.Bead == "" {
-		return false, nil
+		return false, false, nil
 	}
-	added, err := r.Registry.Bind(l.Name, l.Bead)
+	added, err = r.Registry.Bind(l.Name, l.Bead)
 	if err != nil {
-		return false, fmt.Errorf("recording that %s ran %s: %w", l.Name, l.Bead, err)
+		return false, false, fmt.Errorf("recording that %s ran %s: %w", l.Name, l.Bead, err)
 	}
-	r.label(l.Bead, l.Name)
-	return added, nil
+	return added, r.label(l.Bead, l.Name), nil
 }
 
-// label tags bead agent:<name> in the store that holds it: ~/.claude for the
-// claude-* beads, ~/gt for the town's own, since a bead is only found from the
-// directory its store is rooted in.
-func (r *Runner) label(bead, name string) {
+// label tags bead agent:<name> and reports whether the tag was written.
+func (r *Runner) label(bead, name string) bool {
 	if r.LabelBead == nil {
+		return false
+	}
+	if err := r.LabelBead(r.beadDir(bead), bead, "agent:"+name); err != nil {
+		fmt.Fprintf(r.stderr(), "gt bird: %s is not labeled agent:%s: %v\n", bead, name, err)
+		return false
+	}
+	return true
+}
+
+// unlabel takes back the agent:<name> tag a launch that never ran put on bead.
+// Like label it is best effort: the next bind of the bead writes it again.
+func (r *Runner) unlabel(bead, name string) {
+	if r.UnlabelBead == nil {
 		return
 	}
-	dir := filepath.Join(r.Home, "gt")
+	if err := r.UnlabelBead(r.beadDir(bead), bead, "agent:"+name); err != nil {
+		fmt.Fprintf(r.stderr(), "gt bird: %s still carries agent:%s: %v\n", bead, name, err)
+	}
+}
+
+// beadDir is the store a bead is labeled in: ~/.claude for the claude-* beads,
+// ~/gt for the town's own, since a bead is only found from the directory its
+// store is rooted in.
+func (r *Runner) beadDir(bead string) string {
 	if strings.HasPrefix(bead, "claude-") {
-		dir = filepath.Join(r.Home, ".claude")
+		return filepath.Join(r.Home, ".claude")
 	}
-	if err := r.LabelBead(dir, bead, "agent:"+name); err != nil {
-		fmt.Fprintf(r.stderr(), "gt bird: %s is not labeled agent:%s: %v\n", bead, name, err)
-	}
+	return filepath.Join(r.Home, "gt")
 }
 
 // recordBead points name's record at bead, keeping the pid and the directory it
@@ -254,7 +285,9 @@ func (r *Runner) checkClaude() error {
 	if err != nil {
 		return &MissingClaudeError{Path: r.Claude, Err: err}
 	}
-	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+	// claude is the operator's own install, so the owner's execute bit is the
+	// one that says it runs; a group or other bit alone does not.
+	if info.IsDir() || info.Mode().Perm()&0o100 == 0 {
 		return &MissingClaudeError{Path: r.Claude, Err: errors.New("it is not an executable file")}
 	}
 	return nil

@@ -125,12 +125,13 @@ func birdFailure(err error) error {
 // writer. Every read is a field, so a test drives the failures without a town
 // on this machine.
 type birdSetup struct {
-	home   func() (string, error)
-	find   func() (string, error)
-	guard  func(what, dir string) error
-	isTTY  func(*os.File) bool
-	claude func(home string) string
-	label  func(dir, bead, label string) error
+	home    func() (string, error)
+	find    func() (string, error)
+	guard   func(what, dir string) error
+	isTTY   func(*os.File) bool
+	claude  func(home string) string
+	label   func(dir, bead, label string) error
+	unlabel func(dir, bead, label string) error
 }
 
 // processBirdSetup is what the gt bird commands read from this process.
@@ -143,6 +144,9 @@ func processBirdSetup() birdSetup {
 		claude: birdClaudePath,
 		label: func(dir, bead, label string) error {
 			return beads.New(dir).Update(bead, beads.UpdateOptions{AddLabels: []string{label}})
+		},
+		unlabel: func(dir, bead, label string) error {
+			return beads.New(dir).Update(bead, beads.UpdateOptions{RemoveLabels: []string{label}})
 		},
 	}
 }
@@ -168,13 +172,14 @@ func (s birdSetup) runner() (*bird.Runner, error) {
 		return nil, err
 	}
 	return &bird.Runner{
-		Registry:  bird.New(townRoot),
-		Claude:    s.claude(home),
-		Home:      home,
-		Terminal:  bird.Terminal{Stdin: s.isTTY(os.Stdin), Stdout: s.isTTY(os.Stdout)},
-		LabelBead: s.label,
-		Stdout:    os.Stdout,
-		Stderr:    os.Stderr,
+		Registry:    bird.New(townRoot),
+		Claude:      s.claude(home),
+		Home:        home,
+		Terminal:    bird.Terminal{Stdin: s.isTTY(os.Stdin), Stdout: s.isTTY(os.Stdout)},
+		LabelBead:   s.label,
+		UnlabelBead: s.unlabel,
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
 	}, nil
 }
 

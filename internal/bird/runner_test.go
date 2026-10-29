@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -182,6 +183,9 @@ func TestStartLabelsTheBeadInItsOwnStore(t *testing.T) {
 			t.Parallel()
 			r, reg, _ := testRunner(t, "wren")
 			reg.ProcStart = starts(map[int]string{99: "tok99"})
+			// The operator's home is apart from the town root, so a label
+			// rooted in the wrong one reads as wrong.
+			r.Home = t.TempDir()
 			var dir, bead, label string
 			r.LabelBead = func(d, b, l string) error {
 				dir, bead, label = d, b, l
@@ -190,7 +194,7 @@ func TestStartLabelsTheBeadInItsOwnStore(t *testing.T) {
 			if err := r.Start([]string{"--bead", tc.bead}); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
-			if want := filepath.Join(townDir(reg), tc.dir); dir != want {
+			if want := filepath.Join(r.Home, tc.dir); dir != want {
 				t.Errorf("labeled in %q, want %q", dir, want)
 			}
 			if bead != tc.bead || label != "agent:wren" {
@@ -321,6 +325,9 @@ func TestStartFailsWhenTheBindingCannotBeRecorded(t *testing.T) {
 	if _, bound := st.Bound("gt-a"); bound {
 		t.Error("gt-a reads as bound although its binding was never written")
 	}
+	if _, held := agentNamed(t, reg, "wren"); held {
+		t.Error("wren is recorded as running although its binding was never written")
+	}
 }
 
 func TestStartRollsTheClaimBackWhenExecFails(t *testing.T) {
@@ -341,6 +348,63 @@ func TestStartRollsTheClaimBackWhenExecFails(t *testing.T) {
 	}
 	if _, held := agentNamed(t, reg, "wren"); held {
 		t.Error("wren is recorded as running after its exec failed")
+	}
+}
+
+func TestStartTakesTheLabelBackWhenExecFails(t *testing.T) {
+	t.Parallel()
+	r, _, _ := testRunner(t, "wren")
+	r.Home = t.TempDir()
+	r.Exec = func(string, []string, []string) error { return errors.New("exec format error") }
+	r.LabelBead = func(string, string, string) error { return nil }
+	var dir, bead, label string
+	r.UnlabelBead = func(d, b, l string) error {
+		dir, bead, label = d, b, l
+		return nil
+	}
+
+	if err := r.Start([]string{"--bead", "gt-a"}); err == nil {
+		t.Fatal("Start succeeded although the exec failed")
+	}
+	if want := filepath.Join(r.Home, "gt"); dir != want {
+		t.Errorf("unlabeled in %q, want %q", dir, want)
+	}
+	if bead != "gt-a" || label != "agent:wren" {
+		t.Errorf("unlabeled %q %q, want gt-a agent:wren", bead, label)
+	}
+}
+
+func TestStartLeavesTheLabelAloneWhenItWasNeverWritten(t *testing.T) {
+	t.Parallel()
+	r, _, _ := testRunner(t, "wren")
+	r.Exec = func(string, []string, []string) error { return errors.New("exec format error") }
+	r.LabelBead = func(string, string, string) error { return errors.New("bd is not installed") }
+	r.UnlabelBead = func(string, string, string) error {
+		t.Error("a label that was never written was taken back")
+		return nil
+	}
+	r.Stderr = &bytes.Buffer{}
+
+	if err := r.Start([]string{"--bead", "gt-a"}); err == nil {
+		t.Fatal("Start succeeded although the exec failed")
+	}
+}
+
+func TestStartSaysWhenTheLabelCannotBeTakenBack(t *testing.T) {
+	t.Parallel()
+	r, _, _ := testRunner(t, "wren")
+	r.Exec = func(string, []string, []string) error { return errors.New("exec format error") }
+	r.LabelBead = func(string, string, string) error { return nil }
+	r.UnlabelBead = func(string, string, string) error { return errors.New("bd is locked") }
+	var errOut bytes.Buffer
+	r.Stderr = &errOut
+
+	err := r.Start([]string{"--bead", "gt-a"})
+	if err == nil || !strings.Contains(err.Error(), "exec format error") {
+		t.Fatalf("Start = %v, want the exec failure alone", err)
+	}
+	if !strings.Contains(errOut.String(), "still carries agent:wren") {
+		t.Errorf("stderr = %q, want a line saying the bead still carries the label", errOut.String())
 	}
 }
 
@@ -437,7 +501,9 @@ func TestStartRefusesAMissingClaudeWithStatus127(t *testing.T) {
 
 func TestStartRefusesAClaudeThatIsNotExecutable(t *testing.T) {
 	t.Parallel()
-	for _, file := range []fakeFile{{mode: 0o644}, {dir: true, mode: 0o755}} {
+	// A group or other execute bit alone is not the operator's own claude, so
+	// it is refused with the owner's bit clear.
+	for _, file := range []fakeFile{{mode: 0o644}, {mode: 0o610}, {mode: 0o001}, {dir: true, mode: 0o755}} {
 		r, _, calls := testRunner(t, "wren")
 		r.Stat = func(string) (fs.FileInfo, error) { return file, nil }
 		err := r.Start(nil)
@@ -504,12 +570,6 @@ func TestConcurrentStartsTakeDifferentNames(t *testing.T) {
 	t.Parallel()
 	names := []string{"wren", "robin", "lark", "finch", "swift", "heron", "crane", "plover"}
 	reg := testRegistry(t, names...)
-	// Every launch here waits on the one registry lock, and the fake clock is
-	// shared by all of them: one launch's retry would spend another's lock
-	// budget. The real clock keeps each wait its own, and the lock is held for
-	// microseconds at a time, so nothing here waits on wall time.
-	reg.Now = nil
-	reg.Sleep = nil
 	// Every recorded session is live, as one is between its record and its own
 	// exit; the map is read by every launch's pruning and liveness checks.
 	var procsMu sync.Mutex
@@ -531,8 +591,21 @@ func TestConcurrentStartsTakeDifferentNames(t *testing.T) {
 		started.Add(1)
 		go func() {
 			defer started.Done()
+			// Each launch waits on the registry lock against its own clock, so
+			// one launch's retries never spend another's budget. Its Sleep
+			// advances that clock and yields to the holder instead of sleeping,
+			// and the budget is counted in tries, so no wait takes wall time and
+			// a start that cannot get the lock still ends.
+			launchAt := at(0)
+			own := *reg
+			own.Now = func() time.Time { return launchAt }
+			own.Sleep = func(d time.Duration) {
+				launchAt = launchAt.Add(d)
+				runtime.Gosched()
+			}
+			own.LockTimeout = time.Hour
 			r := &Runner{
-				Registry: reg,
+				Registry: &own,
 				Claude:   "/fake/bin/claude",
 				Home:     townDir(reg),
 				Terminal: Terminal{Stdin: true, Stdout: true},
