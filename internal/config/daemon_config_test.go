@@ -540,6 +540,9 @@ func TestDaemonPatrolConfig_SupervisorKind(t *testing.T) {
 	if ContainerModeEnv != "GT_DAEMON_SUPERVISOR" {
 		t.Errorf("ContainerModeEnv = %q, want GT_DAEMON_SUPERVISOR", ContainerModeEnv)
 	}
+	if ContainerNameEnv != "GT_DAEMON_CONTAINER_NAME" {
+		t.Errorf("ContainerNameEnv = %q, want GT_DAEMON_CONTAINER_NAME", ContainerNameEnv)
+	}
 	if SupervisorContainer != "container" || SupervisorLaunchd != "launchd" || SupervisorSystemd != "systemd" {
 		t.Errorf("supervisor kinds = %q, %q, %q", SupervisorLaunchd, SupervisorSystemd, SupervisorContainer)
 	}

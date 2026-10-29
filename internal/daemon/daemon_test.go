@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +11,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
@@ -714,5 +717,236 @@ func TestAutoRestartDisabled(t *testing.T) {
 					tc.rawJSON, got, tc.disabled)
 			}
 		})
+	}
+}
+
+// ownerEnv is the env seam a start runs under in these tests: a map stands in
+// for the process environment, so a fixture sets one variable and the real
+// environment never does.
+func ownerEnv(kv map[string]string) func(string) string {
+	return func(key string) string { return kv[key] }
+}
+
+// TestDetectSelf pins the owner a daemon names for itself from the environment
+// that started it (gt-qpeei.12), in the order the design ranks them.
+func TestDetectSelf(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  map[string]string
+		want Owner
+	}{
+		{
+			name: "the town's container",
+			env:  map[string]string{"GT_DAEMON_SUPERVISOR": "container", "GT_DAEMON_CONTAINER_NAME": "scratch-town-daemon-1"},
+			want: Owner{Kind: "container", ID: "scratch-town-daemon-1"},
+		},
+		{
+			name: "a launchd job",
+			env:  map[string]string{"XPC_SERVICE_NAME": "com.gastown.daemon"},
+			want: Owner{Kind: "launchd", ID: "com.gastown.daemon"},
+		},
+		{
+			name: "a systemd unit",
+			env:  map[string]string{"INVOCATION_ID": "9f2c4d1e"},
+			want: Owner{Kind: "systemd", ID: "9f2c4d1e"},
+		},
+		{
+			name: "a hand-run daemon",
+			want: Owner{Kind: "manual", ID: fmt.Sprintf("fixture-host:%d", os.Getpid())},
+		},
+		{
+			name: "container mode outranks the panel variables",
+			env: map[string]string{
+				"GT_DAEMON_SUPERVISOR":     "container",
+				"GT_DAEMON_CONTAINER_NAME": "scratch-town-daemon-1",
+				"XPC_SERVICE_NAME":         "com.gastown.daemon",
+				"INVOCATION_ID":            "9f2c4d1e",
+			},
+			want: Owner{Kind: "container", ID: "scratch-town-daemon-1"},
+		},
+		{
+			name: "launchd outranks systemd",
+			env:  map[string]string{"XPC_SERVICE_NAME": "com.gastown.daemon", "INVOCATION_ID": "9f2c4d1e"},
+			want: Owner{Kind: "launchd", ID: "com.gastown.daemon"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := DetectSelf(ownerEnv(tc.env), "fixture-host")
+			if err != nil {
+				t.Fatalf("DetectSelf = %v, want %+v", err, tc.want)
+			}
+			if got != tc.want {
+				t.Fatalf("DetectSelf = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("container mode without a container name", func(t *testing.T) {
+		t.Parallel()
+		got, err := DetectSelf(ownerEnv(map[string]string{"GT_DAEMON_SUPERVISOR": "container"}), "fixture-host")
+		if err == nil || !strings.Contains(err.Error(), "GT_DAEMON_CONTAINER_NAME") {
+			t.Fatalf("DetectSelf = %+v, %v; want an error naming GT_DAEMON_CONTAINER_NAME, never a guessed id", got, err)
+		}
+	})
+}
+
+// startParkedRun starts a Run on an empty temp town and parks it at the
+// legacy-socket step, the first point after the start-time writes, so a test
+// reads what a start leaves while the daemon is still up. finish ends the run
+// and returns Run's error.
+func startParkedRun(t *testing.T, env map[string]string) (*Config, func() error) {
+	t.Helper()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig(town)
+	d := &Daemon{
+		config: cfg,
+		logger: log.New(io.Discard, "", 0),
+		getenv: ownerEnv(env),
+		clock:  clockwork.NewFakeClock(),
+	}
+	// The rest of the startup does real host work: the heartbeat dispatches
+	// and restarts sessions, the sweep touches the tmux socket directory, and
+	// the probes reach the network.
+	d.disabledPatrols = map[string]bool{
+		"landing_infra":    true,
+		"resource_sampler": true,
+		"spec_dispatch":    true,
+	}
+	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
+
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	d.seams.cleanupLegacySockets = func(string) (int, int) {
+		close(parked)
+		<-release
+		return 0, 0
+	}
+
+	d.ctx, d.cancel = context.WithCancel(context.Background())
+	t.Cleanup(d.cancel)
+	done := make(chan error, 1)
+	go func() { done <- d.Run() }()
+	waitForSignal(t, parked, "Run never reached the end of its start-time writes")
+
+	var (
+		once      sync.Once
+		runResult error
+	)
+	finish := func() error {
+		once.Do(func() {
+			d.cancel()
+			close(release)
+			bounded, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			select {
+			case runResult = <-done:
+			case <-bounded.Done():
+				t.Fatal("Run did not return after the daemon context ended")
+			}
+		})
+		return runResult
+	}
+	t.Cleanup(func() { _ = finish() })
+	return cfg, finish
+}
+
+// TestRunWritesLaunchdOwner pins the owner at the call site that gives it
+// meaning: a daemon launchd started records the job label as its id, at start
+// and again at the shutdown save (gt-qpeei.12).
+func TestRunWritesLaunchdOwner(t *testing.T) {
+	t.Parallel()
+	cfg, finish := startParkedRun(t, map[string]string{"XPC_SERVICE_NAME": "com.gastown.daemon"})
+
+	state, err := LoadState(cfg.TownRoot)
+	if err != nil {
+		t.Fatalf("LoadState after the start-time writes = %v", err)
+	}
+	if want := (Owner{Kind: "launchd", ID: "com.gastown.daemon"}); state.Owner == nil || *state.Owner != want {
+		t.Fatalf("state.json owner = %+v, want %+v", state.Owner, want)
+	}
+
+	if err := finish(); err != nil {
+		t.Fatalf("Run after the daemon context ended = %v, want a clean shutdown", err)
+	}
+	stopped, err := LoadState(cfg.TownRoot)
+	if err != nil {
+		t.Fatalf("LoadState after the shutdown save = %v", err)
+	}
+	if stopped.Running {
+		t.Errorf("state.json running = true after Run returned, want the shutdown's clean stop")
+	}
+	if want := (Owner{Kind: "launchd", ID: "com.gastown.daemon"}); stopped.Owner == nil || *stopped.Owner != want {
+		t.Errorf("state.json owner after the shutdown save = %+v, want %+v: the clean stop must name who left it", stopped.Owner, want)
+	}
+}
+
+// TestRunInContainerModeWritesNoPidFile pins container mode at Run: no pid
+// file, because a pid from the container's namespace means nothing on the
+// host, and an owner naming the container (gt-qpeei.12).
+func TestRunInContainerModeWritesNoPidFile(t *testing.T) {
+	t.Parallel()
+	cfg, _ := startParkedRun(t, map[string]string{
+		"GT_DAEMON_SUPERVISOR":     "container",
+		"GT_DAEMON_CONTAINER_NAME": "scratch-town-daemon-1",
+	})
+
+	if _, err := os.Stat(cfg.PidFile); !os.IsNotExist(err) {
+		t.Fatalf("Run wrote %s in container mode; a pid from another namespace means nothing on the host", cfg.PidFile)
+	}
+	state, err := LoadState(cfg.TownRoot)
+	if err != nil {
+		t.Fatalf("LoadState after the start-time writes = %v", err)
+	}
+	if want := (Owner{Kind: "container", ID: "scratch-town-daemon-1"}); state.Owner == nil || *state.Owner != want {
+		t.Fatalf("state.json owner = %+v, want %+v", state.Owner, want)
+	}
+}
+
+// TestRunOutsideContainerModeWritesPidFile keeps the host path as it was: a
+// daemon no compose file started still writes the pid file its readers use.
+func TestRunOutsideContainerModeWritesPidFile(t *testing.T) {
+	t.Parallel()
+	cfg, _ := startParkedRun(t, nil)
+
+	if _, err := os.Stat(cfg.PidFile); err != nil {
+		t.Fatalf("Run wrote no %s outside container mode: %v", cfg.PidFile, err)
+	}
+}
+
+// A container-mode start that cannot name its container never touches the
+// town: no lock, no pid file, no state, and the error names the variable the
+// compose file failed to set (gt-qpeei.12).
+func TestRunRefusesContainerModeWithoutAContainerName(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig(town)
+	d := &Daemon{
+		config: cfg,
+		logger: log.New(io.Discard, "", 0),
+		getenv: ownerEnv(map[string]string{"GT_DAEMON_SUPERVISOR": "container"}),
+	}
+	// A start that got past the owner check would run the whole loop; a
+	// canceled context ends it at the first select instead of parking the test.
+	d.ctx, d.cancel = context.WithCancel(context.Background())
+	d.cancel()
+
+	err := d.Run()
+	if err == nil || !strings.Contains(err.Error(), "GT_DAEMON_CONTAINER_NAME") {
+		t.Fatalf("Run = %v, want a refusal naming GT_DAEMON_CONTAINER_NAME", err)
+	}
+	if _, err := os.Stat(cfg.PidFile); !os.IsNotExist(err) {
+		t.Errorf("Run wrote %s before refusing", cfg.PidFile)
+	}
+	if _, err := os.Stat(StateFile(cfg.TownRoot)); !os.IsNotExist(err) {
+		t.Errorf("Run wrote state.json before refusing")
 	}
 }

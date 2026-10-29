@@ -68,6 +68,12 @@ const (
 	// from another namespace means nothing on the host.
 	ContainerModeEnv = "GT_DAEMON_SUPERVISOR"
 
+	// ContainerNameEnv carries the container name the rendered compose file
+	// set beside the daemon into container mode, where it is the owner id the
+	// daemon writes into state.json (gt-qpeei.12). An empty value is a refused
+	// start, never a guessed id.
+	ContainerNameEnv = "GT_DAEMON_CONTAINER_NAME"
+
 	// DefaultContainerName and DefaultComposeProject name the container and
 	// its compose project for a town that sets container_name and
 	// compose_project neither.
