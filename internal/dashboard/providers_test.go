@@ -336,6 +336,22 @@ func TestCostProvidersClaudeDetailCarriesTheMonth(t *testing.T) {
 		t.Errorf("detail %q does not carry the month's use and its weeks at the ceiling", p.Detail)
 	}
 
+	// A counted month with no week at the ceiling says its use alone; one week
+	// at the ceiling is named in the singular.
+	plan, charts = claudeFixture()
+	plan.WeeksCounted = 3
+	plan.UtilizationPct = 57.4
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+	if !slices.Contains(p.Detail, "month 57% of plan") {
+		t.Errorf("detail %q does not carry the month's use alone", p.Detail)
+	}
+
+	plan.WeeksAtCeiling = 1
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+	if !slices.Contains(p.Detail, "month 57% of plan · 1 week at ceiling") {
+		t.Errorf("detail %q does not name the one week at the ceiling", p.Detail)
+	}
+
 	plan, charts = claudeFixture()
 	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
 	for _, line := range p.Detail {
@@ -387,6 +403,14 @@ func TestCostProvidersClaudeDetailCarriesTheStateError(t *testing.T) {
 
 	if !slices.Contains(p.Detail, "state not kept: the closeout history could not be written") {
 		t.Errorf("detail %q does not carry the state error", p.Detail)
+	}
+
+	plan, charts = claudeFixture()
+	p = claudeCostProvider(costProvidersNow, nil, plan, charts, nil)
+	for _, line := range p.Detail {
+		if strings.HasPrefix(line, "state not kept") {
+			t.Errorf("detail draws %q for a poll that kept its state", line)
+		}
 	}
 }
 
