@@ -19,6 +19,7 @@ services:
         source: "/towns/live"
         target: "/towns/live"
     networks:
+      - default
       - sweep
   sweep-dind:
     image: "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1"
@@ -34,6 +35,7 @@ services:
     networks:
       - sweep
 networks:
+  default:
   sweep:
     internal: true
 volumes:

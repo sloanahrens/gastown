@@ -280,16 +280,18 @@ func TestRenderDaemonCompose_SweepDindImageIsPinnedByDigest(t *testing.T) {
 	}
 }
 
-// The engine is reachable only over a network declared internal, and only the
-// daemon is on it: compose would otherwise attach both services to the default
-// network, which is how a privileged engine becomes reachable.
+// The engine's network is internal and the engine is on it alone with the
+// daemon: a privileged engine anyone else could reach is a shell on the host
+// VM (design section 10). The daemon also keeps an external network, because an
+// internal one has no way out and the daemon reaches the town's Dolt through
+// host.docker.internal.
 func TestRenderDaemonCompose_OnlyTheDaemonAndTheEngineJoinAnInternalNetwork(t *testing.T) {
 	t.Parallel()
 	_, f := render(t, liveSpec())
 
 	engineNet := f.Services[engineName].Networks
 	if len(engineNet) != 1 {
-		t.Fatalf("engine networks = %q, want the project's one internal network", engineNet)
+		t.Fatalf("engine networks = %q, want the project's internal network alone", engineNet)
 	}
 	net, ok := f.Networks[engineNet[0]]
 	if !ok {
@@ -298,17 +300,29 @@ func TestRenderDaemonCompose_OnlyTheDaemonAndTheEngineJoinAnInternalNetwork(t *t
 	if !net.Internal {
 		t.Errorf("network %q is not internal: true, so the engine is reachable from outside the project", engineNet[0])
 	}
-	if len(f.Networks) != 1 {
-		t.Errorf("networks = %v, want the internal one alone", f.Networks)
-	}
 
 	for name, svc := range f.Services {
-		if !slices.Equal(svc.Networks, engineNet) {
-			t.Errorf("service %q networks = %q, want exactly %q: no service may join anything else", name, svc.Networks, engineNet)
+		if !slices.Contains(svc.Networks, engineNet[0]) {
+			t.Errorf("service %q networks = %q, want it to be off %q", name, svc.Networks, engineNet[0])
 		}
 	}
 	if got := len(f.Services); got != 2 {
 		t.Errorf("services = %d, want only the daemon and the engine", got)
+	}
+
+	daemonNets := f.Services["daemon"].Networks
+	var exposed []string
+	for _, n := range daemonNets {
+		if n == engineNet[0] {
+			continue
+		}
+		if declared, ok := f.Networks[n]; ok && declared.Internal {
+			t.Errorf("daemon's other network %q is internal: true, so the daemon could not reach Dolt at host.docker.internal", n)
+		}
+		exposed = append(exposed, n)
+	}
+	if len(exposed) != 1 {
+		t.Errorf("daemon networks = %q, want the engine's internal network and exactly one external network", daemonNets)
 	}
 }
 
