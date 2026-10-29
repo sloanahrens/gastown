@@ -160,8 +160,8 @@ func removeSandboxSeatHostDirs(gits gitOpener, rigPath, rigName, name string, re
 		}
 		// The clone goes even after a failed detach: it is the stale copy, and
 		// the prune below forgets an entry whose worktree is gone.
-		if err := removeSeatDir(dirs.ClonePath); err != nil {
-			errs = append(errs, err)
+		if err := os.RemoveAll(dirs.ClonePath); err != nil {
+			errs = append(errs, fmt.Errorf("removing %s: %w", dirs.ClonePath, err))
 		} else {
 			deleted = true
 		}
@@ -169,8 +169,8 @@ func removeSandboxSeatHostDirs(gits gitOpener, rigPath, rigName, name string, re
 	if present, err := seatPathPresent(dirs.PolecatDir); err != nil {
 		errs = append(errs, err)
 	} else if present {
-		if err := removeSeatDir(dirs.PolecatDir); err != nil {
-			errs = append(errs, err)
+		if err := os.RemoveAll(dirs.PolecatDir); err != nil {
+			errs = append(errs, fmt.Errorf("removing %s: %w", dirs.PolecatDir, err))
 		} else {
 			deleted = true
 		}
@@ -202,14 +202,6 @@ func seatPathPresent(path string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("checking %s: %w", path, err)
-}
-
-// removeSeatDir removes a directory a caller has already found present.
-func removeSeatDir(path string) error {
-	if err := os.RemoveAll(path); err != nil {
-		return fmt.Errorf("removing %s: %w", path, err)
-	}
-	return nil
 }
 
 // detachRigWorktree removes clonePath from the rig repository's worktree list.

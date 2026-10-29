@@ -154,6 +154,28 @@ func TestRemoveSandboxSeatHostDirsRefusesUnsafeNames(t *testing.T) {
 	}
 }
 
+// A seat path that cannot be read is reported, not read as absent: the caller
+// must never hear "gone" from a check that did not run. A path under a plain
+// file answers ENOTDIR, which is neither "present" nor "not there".
+func TestRemoveSandboxSeatHostDirsReportsAnUnreadableSeatPath(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	writeSeatFile(t, filepath.Join(rigPath, "polecats"), "not a directory\n")
+	dirs := SandboxSeatHostDirsFor(rigPath, "rig", "agate")
+	remover := func(_, _ string) error {
+		t.Error("the remover ran for a path that could not be read")
+		return nil
+	}
+
+	deleted, err := RemoveSandboxSeatHostDirs(rigPath, "rig", "agate", remover)
+	if err == nil || !strings.Contains(err.Error(), "checking "+dirs.ClonePath) {
+		t.Fatalf("err = %v, want the unreadable clone path reported", err)
+	}
+	if deleted {
+		t.Error("deleted = true for a seat whose paths could not be read")
+	}
+}
+
 // A detach that fails does not stop the removal: the stale clone and its home
 // directory still go, and the failure is reported rather than swallowed.
 func TestRemoveSandboxSeatHostDirsRemovesAfterAFailedDetach(t *testing.T) {
