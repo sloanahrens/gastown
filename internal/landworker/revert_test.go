@@ -436,10 +436,11 @@ func TestRevertLandedKeepsTheHolderOfAHumanOnlyCulprit(t *testing.T) {
 }
 
 // An overseer-only or operator-only culprit keeps its holder through a revert,
-// as a human-only one does (gt-4rivs).
+// as a human-only one does (gt-4rivs). A label typed with other case or stray
+// spaces is still the hold: the revert reads labels as the hold rule does.
 func TestRevertLandedKeepsTheHolderOfAnOverseerOrOperatorOnlyCulprit(t *testing.T) {
 	t.Parallel()
-	for _, label := range []string{dispatch.OverseerOnlyLabel, dispatch.OperatorOnlyLabel} {
+	for _, label := range []string{dispatch.OverseerOnlyLabel, dispatch.OperatorOnlyLabel, "Overseer-Only", " OPERATOR-ONLY "} {
 		t.Run(label, func(t *testing.T) {
 			t.Parallel()
 			h := newRevertHarness(t, greenSHA)
@@ -449,7 +450,10 @@ func TestRevertLandedKeepsTheHolderOfAnOverseerOrOperatorOnlyCulprit(t *testing.
 			id := seedRevertBead(t, h)
 			h.r.RevertLanded(context.Background(), land.Work{BeadID: id}, land.Result{LandedCommit: "abababab"})
 
-			cul, _ := h.bd.Show("gt-cul")
+			cul, err := h.bd.Show("gt-cul")
+			if err != nil {
+				t.Fatal(err)
+			}
 			if cul.Status != string(beads.StatusOpen) || cul.Assignee != "gastown/polecats/opal" || !beads.HasLabel(cul, land.LabelRework) {
 				t.Fatalf("culprit %+v; want open, still held by its crew, rework", cul)
 			}
