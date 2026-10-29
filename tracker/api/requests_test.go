@@ -61,3 +61,59 @@ func TestAssignedRequestValidateRefusesOverTheBounds(t *testing.T) {
 		t.Errorf("a request at both bounds = %v, want nil", err)
 	}
 }
+
+// A seat address is one printable word: a control character, whitespace or no
+// longer, the transfer names no seat and is refused.
+func TestTransferRequestRefusesAssigneesNoSeatCouldHave(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		assignee string
+		want     string // text the refusal must carry; empty means the assignee is valid
+	}{
+		"a seat address":              {"gastown/polecats/bullet", ""},
+		"a dotted seat":               {"gastown.crew.dipper", ""},
+		"no assignee":                 {"", "transfer needs the assignee"},
+		"a blank assignee":            {"   ", "transfer needs the assignee"},
+		"whitespace inside":           {"two seats", "whitespace"},
+		"a tab":                       {"seat\tone", "whitespace"},
+		"a newline":                   {"seat\none", "whitespace"},
+		"a NUL":                       {"seat\x00one", "control character"},
+		"a bell":                      {"seat\aone", "control character"},
+		"an escape":                   {"seat\x1bone", "control character"},
+		"a delete":                    {"seat\x7fone", "control character"},
+		"a control character at end":  {"seat\x01", "control character"},
+		"a control character at head": {"\x1fseat", "control character"},
+		"an overlong assignee":        {strings.Repeat("a", MaxAssigneeLen+1), "at most"},
+	} {
+		err := TransferRequest{Assignee: tc.assignee}.Validate()
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("%s: Validate %q = %v, want nil", name, tc.assignee, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: Validate %q = %v, want api.ErrInvalid", name, tc.assignee, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: message %q does not name %q", name, err, tc.want)
+		}
+	}
+}
+
+// The refusal quotes the assignee with %q, so a control character cannot reach
+// an event line or a log raw.
+func TestATransferAssigneesControlCharacterIsQuotedInTheRefusal(t *testing.T) {
+	t.Parallel()
+	err := TransferRequest{Assignee: "seat\x1bone"}.Validate()
+	if err == nil {
+		t.Fatal("an escape-bearing assignee was accepted")
+	}
+	if strings.ContainsRune(err.Error(), '\x1b') {
+		t.Fatalf("message %q carries the raw escape", err)
+	}
+	if !strings.Contains(err.Error(), `\x1b`) {
+		t.Errorf("message %q does not quote the escape as \\x1b", err)
+	}
+}
