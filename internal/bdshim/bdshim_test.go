@@ -265,6 +265,261 @@ func TestDecideFailsClosedOnMalformedRouteTable(t *testing.T) {
 	}
 }
 
+// A flag's value that the table did not know read as an id, and an id no route
+// names took the working-directory rule away from the command, so a create or
+// a list from a tracker rig's directory landed in the rig's stale Dolt store
+// (gt-w8j7v). The town's own labels and assignees are hyphenated words, which
+// is why a value and an id read alike.
+func TestDecideRoutesAFlagValueByTheWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{"a short label flag", []string{"create", "T", "-l", "review-deep"}},
+		{"a short label flag on list", []string{"list", "-l", "human-only"}},
+		{"a short assignee flag", []string{"create", "T", "-a", "town-crew"}},
+		{"a long add-label flag", []string{"update", "--add-label", "x-y"}},
+	}
+	for _, tc := range commands {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decide(t, beta, "", tc.args...)
+			if err != nil {
+				t.Fatalf("Decide(%v) from the tracker rig = %v, want no error", tc.args, err)
+			}
+			if !got.Tracker || got.Route.Prefix != "bt-" {
+				t.Errorf("Decide(%v) from the tracker rig = %+v, want the tracker rig bt-", tc.args, got)
+			}
+
+			got, err = decide(t, alpha, "", tc.args...)
+			if err != nil {
+				t.Fatalf("Decide(%v) from the dolt rig = %v, want no error", tc.args, err)
+			}
+			if got.Tracker {
+				t.Errorf("Decide(%v) from the dolt rig = %+v, want bd.real", tc.args, got)
+			}
+		})
+	}
+}
+
+// A flag bd reads as a value on one command is not one it reads a value for on
+// another: -f is --file on create and --force on close. Reading it by the flat
+// flag name swallowed the id behind it, so `bd close -f bt-abc` from a Dolt
+// directory reached bd.real instead of the tracker rig that holds bt-abc.
+func TestDecideReadsAFlagsMeaningPerCommand(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+
+	for _, args := range [][]string{
+		{"close", "-f", "bt-abc"},
+		{"list", "-r", "bt-abc"},
+		{"gate", "list", "-a", "bt-abc"},
+	} {
+		got, err := decide(t, alpha, "", args...)
+		if err != nil {
+			t.Fatalf("Decide(%v) = %v, want no error", args, err)
+		}
+		if !got.Tracker || got.Route.Prefix != "bt-" {
+			t.Errorf("Decide(%v) = %+v, want the tracker rig bt-", args, got)
+		}
+	}
+}
+
+// bd reads a word as its command's alias, `bd new -l review-deep` being
+// `bd create -l review-deep`: the value stays a value, so the command routes by
+// the directory it runs in rather than by review-deep's prefix.
+func TestDecideReadsAnAliasAsItsCommand(t *testing.T) {
+	t.Parallel()
+	town := newTown(t, routeTown, routeAlpha, routeBeta)
+	alpha := filepath.Join(town, "alpha", "mayor", "rig")
+	beta := filepath.Join(town, "beta", "mayor", "rig")
+
+	got, err := decide(t, beta, "", "new", "-l", "review-deep")
+	if err != nil {
+		t.Fatalf("Decide(new -l review-deep) from the tracker rig = %v, want no error", err)
+	}
+	if !got.Tracker || got.Route.Prefix != "bt-" {
+		t.Errorf("Decide(new -l review-deep) from the tracker rig = %+v, want the tracker rig bt-", got)
+	}
+	got, err = decide(t, alpha, "", "new", "-l", "review-deep")
+	if err != nil {
+		t.Fatalf("Decide(new -l review-deep) from the dolt rig = %v, want no error", err)
+	}
+	if got.Tracker {
+		t.Errorf("Decide(new -l review-deep) from the dolt rig = %+v, want bd.real", got)
+	}
+}
+
+func TestCommandPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"a verb", []string{"show", "bt-abc"}, "show"},
+		{"a verb with an operand before a flag", []string{"list", "bt-abc", "--json"}, "list"},
+		{"a subverb a flag differs on", []string{"gate", "list", "-a"}, "gate list"},
+		{"a subverb with its own value flags", []string{"dep", "add", "bt-abc", "bt-def"}, "dep add"},
+		{"an alias of a verb", []string{"new", "T"}, "create"},
+		{"an alias of a subverb", []string{"backup", "add"}, "backup init"},
+		{"a subverb under an alias", []string{"protomolecule", "wisp", "gc"}, "mol wisp gc"},
+		{"a three word command", []string{"mol", "wisp", "gc"}, "mol wisp gc"},
+		{"no args", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := commandPath(tc.args); got != tc.want {
+				t.Errorf("commandPath(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// bdDocumented reads testdata/bd-flags.txt, the flags bd 1.2.2 documents, so
+// the tables the shim decides with can be checked against bd itself. The file
+// records bd's help rather than running it, because a unit test starts no
+// process; refresh it with `go run ./cmd/bdshim-record -flags`.
+func bdDocumented(t *testing.T) (value, boolean map[string]map[string]bool, persistent map[string]bool, aliased map[string]string) {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("testdata", "bd-flags.txt"))
+	if err != nil {
+		t.Fatalf("reading the recorded bd flags: %v", err)
+	}
+	value, boolean = map[string]map[string]bool{}, map[string]map[string]bool{}
+	persistent = map[string]bool{}
+	aliased = map[string]string{}
+	for _, line := range strings.Split(string(body), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		kind, rest, ok := strings.Cut(line, "\t")
+		if !ok {
+			t.Fatalf("testdata/bd-flags.txt: %q names no command", line)
+		}
+		if kind == "persistent" {
+			for _, flag := range strings.Fields(rest) {
+				persistent[flag] = true
+			}
+			continue
+		}
+		if kind == "alias" {
+			name, command, ok := strings.Cut(rest, "\t")
+			if !ok || command == "" {
+				t.Fatalf("testdata/bd-flags.txt: %q names no command its alias stands for", line)
+			}
+			aliased[name] = command
+			continue
+		}
+		command, flags, ok := strings.Cut(rest, "\t")
+		if !ok || strings.TrimSpace(flags) == "" {
+			t.Fatalf("testdata/bd-flags.txt: %q names no flag", line)
+		}
+		row := map[string]bool{}
+		for _, flag := range strings.Fields(flags) {
+			row[flag] = true
+		}
+		switch kind {
+		case "value":
+			value[command] = row
+		case "bool":
+			boolean[command] = row
+		default:
+			t.Fatalf("testdata/bd-flags.txt: %q has kind %q, want persistent, alias, value or bool", line, kind)
+		}
+	}
+	return value, boolean, persistent, aliased
+}
+
+// TestFlagTablesCoverWhatBdDocuments checks the shim's tables against the
+// recorded bd help, per command and both ways: a value flag bd documents that
+// the table lacks turns its value into an id, and a flag the table reads a
+// value for that bd reads as a boolean hides the operand behind it.
+func TestFlagTablesCoverWhatBdDocuments(t *testing.T) {
+	t.Parallel()
+	value, boolean, persistent, aliased := bdDocumented(t)
+
+	// Every check below walks a map, so a recording that parsed to nothing
+	// would pass them all and leave the tables looking complete.
+	if len(value) < 50 {
+		t.Fatalf("testdata/bd-flags.txt documents a value flag for %d commands, want bd 1.2.2's 100", len(value))
+	}
+	if len(boolean) < 10 {
+		t.Fatalf("testdata/bd-flags.txt documents %d commands with a boolean conflict, want bd 1.2.2's 20", len(boolean))
+	}
+	if len(persistent) < 5 {
+		t.Fatalf("testdata/bd-flags.txt documents %d persistent value flags, want bd 1.2.2's 6", len(persistent))
+	}
+	if len(aliased) < 5 {
+		t.Fatalf("testdata/bd-flags.txt documents %d command aliases, want bd 1.2.2's 12", len(aliased))
+	}
+
+	for command, flags := range value {
+		for flag := range flags {
+			if !takesValue(command, flag) {
+				t.Errorf("bd reads the token after %s %s as its value, and the table does not", command, flag)
+			}
+		}
+	}
+	for command, flags := range boolean {
+		for flag := range flags {
+			if takesValue(command, flag) {
+				t.Errorf("bd reads %s %s as a boolean, and the table reads the token after it as its value", command, flag)
+			}
+		}
+	}
+
+	// The other way, per command: a row the table holds that bd documents
+	// nowhere there is a typo, or a flag bd moved or dropped.
+	for command, flags := range valueFlags {
+		if value[command] == nil {
+			t.Errorf("the table reads a value flag for %q, and bd documents none", command)
+		}
+		for flag := range flags {
+			if !value[command][flag] {
+				t.Errorf("the table reads a value for %s %s, and bd documents none", command, flag)
+			}
+		}
+	}
+	for command, flags := range boolFlags {
+		if boolean[command] == nil {
+			t.Errorf("the table calls a flag on %q a boolean, and bd documents no conflict there", command)
+		}
+		for flag := range flags {
+			if !boolean[command][flag] {
+				t.Errorf("the table calls %s %s a boolean, and bd documents no conflict there", command, flag)
+			}
+		}
+	}
+	for flag := range persistentValueFlags {
+		if !persistent[flag] {
+			t.Errorf("the table calls %s a persistent value flag, and bd documents none", flag)
+		}
+	}
+	for flag := range persistent {
+		if !persistentValueFlags[flag] {
+			t.Errorf("bd reads a value for %s on every command, and the table does not", flag)
+		}
+	}
+	for name, command := range aliased {
+		if got := aliases[name]; got != command {
+			t.Errorf("the table reads the alias %s as %q, and bd reads it as %q", name, got, command)
+		}
+	}
+	for name, command := range aliases {
+		if aliased[name] != command {
+			t.Errorf("the table reads %s as %s, and bd documents no such alias", name, command)
+		}
+	}
+}
+
 func TestDecideVerbs(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -307,11 +562,20 @@ func TestIDTokens(t *testing.T) {
 		{"a flag-like token past a separator names no bead", []string{"show", "--", "--json"}, nil},
 		{"two ids", []string{"dep", "add", "bt-abc", "bt-def"}, []string{"bt-abc", "bt-def"}},
 		{"a verb", []string{"list"}, nil},
+		{"a short label value", []string{"create", "T", "-l", "review-deep"}, nil},
+		{"a short assignee value", []string{"list", "-a", "bt-abc"}, nil},
+		{"-f is a value flag on create", []string{"create", "T", "-f", "notes.md", "bt-abc"}, []string{"bt-abc"}},
+		{"-f is a boolean on close", []string{"close", "-f", "bt-abc"}, []string{"bt-abc"}},
+		{"-r is a value flag on close", []string{"close", "-r", "bt-abc"}, nil},
+		{"-r is a boolean on list", []string{"list", "-r", "bt-abc"}, []string{"bt-abc"}},
+		{"-a is a boolean on gate list", []string{"gate", "list", "-a", "bt-abc"}, []string{"bt-abc"}},
+		{"a bare --deps takes no value on list", []string{"list", "--deps", "bt-abc"}, []string{"bt-abc"}},
+		{"--deps takes a value on create", []string{"create", "T", "--deps", "bt-abc"}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := idTokens(tc.args)
+			got := idTokens(commandPath(tc.args), tc.args)
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Errorf("idTokens(%v) = %v, want %v", tc.args, got, tc.want)
 			}

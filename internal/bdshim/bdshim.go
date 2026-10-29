@@ -128,11 +128,12 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 		return Decision{}, fmt.Errorf("%s selects a store this shim cannot route while a tracker rig exists: run bd from the rig's own directory", flag)
 	}
 
-	ids := idTokens(args)
+	command := commandPath(args)
+	ids := idTokens(command, args)
 	// An operand that opens with a tracker rig's prefix names that rig even
 	// when IsBeadIDToken rejects its form: a form the token check does not know
 	// must not slip through to bd.real from a Dolt directory.
-	ids = append(ids, trackerPrefixed(operands(args), ids, routes)...)
+	ids = append(ids, trackerPrefixed(operands(command, args), ids, routes)...)
 	named := make(map[string]beads.Route, len(ids))
 	for _, id := range ids {
 		for _, r := range routes {
@@ -317,71 +318,6 @@ func trackerPrefixed(ops, ids []string, routes []beads.Route) []string {
 		}
 	}
 	return out
-}
-
-// valueFlags are the bd flags that take their value as the next token. Any
-// other flag is boolean, so the token after it stays an operand: `bd show
-// --json bt-abc` names bt-abc. A flag missing here turns a value into an id,
-// which routes or refuses it, never sends a tracker id to bd.real.
-var valueFlags = map[string]bool{
-	"--title": true, "--description": true, "--body": true, "--message": true,
-	"--notes": true, "--design": true, "--acceptance": true, "--parent": true,
-	"--assignee": true, "--status": true, "--priority": true, "--type": true,
-	"--label": true, "--labels": true, "--format": true, "--limit": true,
-	"--reason": true, "--from": true, "--deps": true, "--due": true,
-	"--defer": true, "--owner": true, "--actor": true, "--sort": true,
-	"--filter": true, "--db": true, "--directory": true, "-C": true,
-}
-
-// verbOf returns bd's subcommand: the first operand. A global value flag is
-// skipped with its value, so `bd --db hq list` names list.
-func verbOf(args []string) string {
-	if ops := operands(args); len(ops) > 0 {
-		return ops[0]
-	}
-	return ""
-}
-
-// idTokens returns the operands that can name a bead. A token after a value
-// flag is that flag's value and never an id, so `bd create --title gt-x` names
-// no bead and `--parent gt-x` does not route its own create.
-func idTokens(args []string) []string {
-	var ids []string
-	for _, arg := range operands(args) {
-		if beads.IsBeadIDToken(arg) && beads.ExtractPrefix(arg) != "" {
-			ids = append(ids, arg)
-		}
-	}
-	return ids
-}
-
-// operands returns the arguments bd reads as operands: not a flag, not the
-// value of a value flag, and not the -- separator. Past -- every token is one.
-func operands(args []string) []string {
-	var ops []string
-	pastSeparator := false
-	valueNext := false // the token before this one is a value flag, so this one is its value
-	for _, arg := range args {
-		switch {
-		case valueNext:
-			valueNext = false
-		case pastSeparator:
-			ops = append(ops, arg)
-		case arg == "--":
-			pastSeparator = true
-		case isFlag(arg):
-			_, _, inline := strings.Cut(arg, "=")
-			valueNext = !inline && valueFlags[arg]
-		default:
-			ops = append(ops, arg)
-		}
-	}
-	return ops
-}
-
-// isFlag reports whether arg is bd's flag rather than an operand.
-func isFlag(arg string) bool {
-	return len(arg) > 1 && arg[0] == '-'
 }
 
 // exitCode returns the status err carries, or -1 when it carries none, such

@@ -1,0 +1,147 @@
+# What bd 1.2.2 reads a value for, per command: recorded from the help of
+# every command `bd --help` lists, three levels deep (the subsections of
+# `bd <command> --help`, then theirs). Refresh it after a bd upgrade with
+#     go run ./cmd/bdshim-record -flags
+# which walks bd's help and writes this file; add -check to report drift
+# without writing, and update internal/bdshim/flags.go to match.
+#
+# persistent<TAB>the value flags bd puts on every command (bd --help, Flags:),
+#     left out of each command row because every command has them
+# alias<TAB><name><TAB>the command path bd reads that name as ("new" is create)
+# value<TAB><command><TAB>the flags bd reads a value for, space separated
+# bool<TAB><command><TAB>the flags bd reads as a boolean or an optional value
+#     here (--deps takes its value only after an =) although another command
+#     reads a value for the same flag
+persistent	--actor --database --db --directory --dolt-auto-commit --mem-profile -C
+alias	backup add	backup init
+alias	backup rm	backup remove
+alias	dep rm	dep remove
+alias	done	close
+alias	find-dups	find-duplicates
+alias	formula primitives	formula schema
+alias	hb	heartbeat
+alias	mol fart	mol bond
+alias	new	create
+alias	protomolecule	mol
+alias	stats	status
+alias	view	show
+value	admin cleanup	--older-than
+value	admin compact	--batch-size --id --limit --summary --tier --workers
+value	audit label	--label --reason
+value	audit record	--error --exit-code --issue-id --kind --model --prompt --response --tool-name
+value	batch	--file --message -f -m
+value	blocked	--exclude-label --label --label-any --parent -l
+value	close	--if-assignee --if-status --reason --reason-file --session -r
+value	comment	--file
+value	comments add	--author --file -a -f
+value	compact	--days
+value	config show	--source
+value	conflicts resolve	--strategy --table
+value	conflicts show	--table
+value	cook	--mode --prefix --search-path --var
+value	count	--assignee --closed-after --closed-before --created-after --created-before --desc-contains --id --label --label-any --metadata-field --notes-contains --priority --priority-max --priority-min --status --title --title-contains --type --updated-after --updated-before -a -l -p -s -t
+value	create	--acceptance --append-notes --assignee --body-file --context --defer --deps --description --design --design-file --due --estimate --event-actor --event-category --event-payload --event-target --external-ref --file --graph --id --labels --metadata --mol-type --notes --parent --priority --repo --skills --spec-id --status --storage-class --title --type --waits-for --waits-for-gate --wisp-type -a -d -e -f -l -p -s -t
+value	create-form	--parent
+value	defer	--reason --until
+value	delete	--from-file --if-assignee --if-status
+value	dep	--blocks -b
+value	dep add	--blocked-by --depends-on --file --type -t
+value	dep list	--direction --type -t
+value	dep tree	--direction --format --max-depth --max-rows --status -d
+value	doctor	--check --migration --orchestrator-duplicates-threshold --output -o
+value	dolt commit	--message -m
+value	dolt pull	--remote --strategy
+value	dolt push	--remote
+value	duplicate	--of
+value	epic close-eligible	--reason -r
+value	events export	--limit
+value	events prune	--before
+value	events tail	--limit --since
+value	export	--exclude-owner --output -o
+value	find-duplicates	--limit --max-rows --method --model --status --threshold -n -s
+value	formula lint	--search-path
+value	formula list	--type
+value	gate check	--limit --type -l -t
+value	gate create	--await-id --blocks --reason --timeout --title --type -r -t
+value	gate discover	--branch --limit --max-age -a -b -l
+value	gate list	--limit -n
+value	gate resolve	--reason -r
+value	graph	--max-rows
+value	help	--doc --docs-root
+value	history	--limit
+value	human dismiss	--reason
+value	human list	--status -s
+value	human respond	--file --response -r
+value	import	--input -i
+value	init	--agents-file --agents-profile --agents-template --backend --destroy-token --prefix --remote --role --server-host --server-port --server-socket --server-user -p
+value	land-record	--conflicting-file --gate-result --gate-tail --gate-tail-file --kind --landed-commit --om-findings --om-score --om-verdict --patch-id --route
+value	link	--type -t
+value	lint	--status --type -s -t
+value	list	--assignee --closed-after --closed-before --created-after --created-before --defer-after --defer-before --desc-contains --due-after --due-before --exclude-label --exclude-type --external-contains --external-ref --format --has-metadata-key --id --label --label-any --label-pattern --label-regex --limit --max-rows --metadata-field --mol-type --notes-contains --offset --parent --priority --priority-max --priority-min --sort --spec --status --title --title-contains --type --updated-after --updated-before --wisp-type -a -l -n -p -s -t
+value	merge-slot acquire	--holder
+value	merge-slot release	--holder
+value	migrate issues	--from --id --ids-file --include --label --priority --status --to --type
+value	migrate legacy-sqlite	--output --source-db
+value	mol bond	--as --ref --type --var
+value	mol current	--for --limit --range
+value	mol distill	--output --var
+value	mol pour	--assignee --attach --attach-type --var
+value	mol seed	--var
+value	mol squash	--summary
+value	mol wisp	--var
+value	mol wisp create	--var
+value	mol wisp gc	--age --exclude-type
+value	mol wisp list	--type
+value	note	--file
+value	orphans	--label --label-any -l
+value	prime	--max-memories --max-memory-chars
+value	promote	--reason -r
+value	provenance log	--kind
+value	provenance record	--at --issue --kind --payload --ref --ref-kind --source
+value	prune	--older-than --pattern
+value	purge	--older-than --pattern
+value	q	--labels --parent --priority --type -l -p -t
+value	query	--limit --offset --sort -n
+value	ready	--after --assignee --exclude-label --exclude-type --has-metadata-key --label --label-any --label-pattern --label-regex --limit --max-rows --metadata-field --mol --mol-type --offset --parent --priority --sort --type -a -l -n -p -s -t
+value	reclaim	--assignee --exclude-label --id --label --label-any --older-than -a -l
+value	remember	--key
+value	reopen	--reason -r
+value	rules audit	--path --threshold
+value	rules compact	--group --path
+value	search	--assignee --closed-after --closed-before --created-after --created-before --desc-contains --external-contains --has-metadata-key --label --label-any --limit --metadata-field --notes-contains --priority-max --priority-min --query --sort --status --type --updated-after --updated-before -a -l -n -s -t
+value	serve	--addr --allowed-host --auth-token-file
+value	set-state	--reason
+value	setup	--add --output -o
+value	show	--as-of --id
+value	stale	--days --exclude-label --label --label-any --limit --status -d -l -n -s
+value	supersede	--with
+value	swarm create	--coordinator
+value	sync	--attempts --remote
+value	todo add	--description --priority -d -p
+value	todo done	--reason
+value	unclaim	--if-assignee --reason -r
+value	update	--acceptance --add-label --append-notes --assignee --await-id --body-file --defer --description --design --design-file --due --estimate --external-ref --if-assignee --if-status --metadata --notes --parent --priority --remove-label --session --set-labels --set-metadata --spec-id --status --title --type --unset-metadata -a -d -e -p -s -t
+value	vc commit	--message -m
+value	vc merge	--strategy
+value	worktree create	--branch
+value	worktree remove	--merged-into
+bool	admin cleanup	-f
+bool	close	-f
+bool	compact	-f
+bool	delete	-f
+bool	doctor	-i
+bool	flatten	-f
+bool	gate check	-e
+bool	gate discover	-n
+bool	gate list	-a
+bool	gc	-f
+bool	list	--deps -r
+bool	mol show	-p
+bool	mol wisp gc	-f
+bool	orphans	-f
+bool	preflight	--check
+bool	prune	-f
+bool	purge	-f
+bool	query	-a -r
+bool	search	-r
+bool	setup	--check
