@@ -12,8 +12,9 @@ import (
 // The bead-side weekly quantities: labels, dependency density, the handoff
 // ratio, handoff size, mode shift and the weekly row that joins them.
 
-// WeeklyColumns is the header weekly.csv carries, in the Python's order. Change
-// it and WeeklyMetrics together, or the extract writes a column no row fills.
+// WeeklyColumns is the header weekly.csv carries, in the order its columns are
+// written. Change it and WeeklyMetrics together, or the extract writes a column
+// no row fills.
 var WeeklyColumns = []string{
 	"week", "rig", "thin", "landings", "unreadable", "size_median", "size_p90", "file_entropy_mean",
 	"package_entropy_mean", "attempts_mean", "rejected_share", "first_try_share", "manual_rescue_count",
