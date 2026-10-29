@@ -39,15 +39,17 @@ type ComposeSpec struct {
 	StopGrace time.Duration
 
 	// DoltHost is the host the daemon reaches the town's Dolt through from
-	// inside the container (town.json's dolt.container_host). The rendered
-	// file does not carry it: the daemon reads the town config over the bind
-	// mount, which keeps the endpoint in one source.
+	// inside the container. The rendered file does not carry it: the daemon
+	// reads the town config over the bind mount, which keeps the endpoint in
+	// one source.
 	//
-	// It may be empty: town.json's container_host is optional, and an empty one
-	// leaves the town's dolt.host in force, so refusing it would reject a
-	// town configured as shipped. Set, it must name the Mac on the far side of
-	// the mount and never a loopback address, which inside the container is
-	// the container itself; a loopback value is refused.
+	// It is the resolved host, not town.json's container_host alone: the caller
+	// passes container_host when the town sets it and dolt.host when it does
+	// not, because only the town config holds both. It is required here, and
+	// must name the Mac on the far side of the mount. An empty host is refused
+	// because town.json's dolt.host may be empty, and an empty one means the
+	// local machine, which inside the container is the container itself; so is
+	// a loopback address, for the same reason.
 	DoltHost string
 }
 
@@ -150,13 +152,16 @@ func (s ComposeSpec) validate() error {
 	case s.StopGrace < MinimumStopGrace:
 		return fmt.Errorf("compose spec: StopGrace %s is below MinimumStopGrace %s; a shorter grace period SIGKILLs the daemon mid-shutdown",
 			s.StopGrace, MinimumStopGrace)
+	case s.DoltHost == "":
+		return fmt.Errorf("compose spec: DoltHost is empty; pass town.json's dolt.container_host or dolt.host resolved, and an empty dolt.host is the local machine, which inside the container is the container itself")
 	}
 	return checkDoltHost(s.DoltHost)
 }
 
 // checkDoltHost refuses a loopback endpoint: the container's own loopback is
 // the container, so the daemon would fail to reach the town's Dolt while the
-// file looked right.
+// file looked right. An empty host is refused in validate, before this, for the
+// same reason.
 func checkDoltHost(host string) error {
 	loopback := strings.EqualFold(host, "localhost")
 	if ip := net.ParseIP(host); ip != nil {
