@@ -224,17 +224,122 @@ func TestApplyDeletesNothingAndAppendsOneLedgerEntry(t *testing.T) {
 	}
 }
 
-func TestPlanAndMeasureRefuseATownPathGlobCannotMatch(t *testing.T) {
+func TestPlanListsBackupsUnderATownWhoseNameHoldsGlobCharacters(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, false)
+	town := filepath.Join(t.TempDir(), "town[1]*?")
+	if err := os.Mkdir(town, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bak := filepath.Join(town, ".dolt-data.bak-1")
+	if err := os.Mkdir(bak, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	du := &fakeDu{kb: map[string]string{bak: "1"}, fail: map[string]bool{}}
+	tgt := f.target(du, nil)
+	tgt.cfg.Town = town
+	p, err := tgt.Plan(context.Background(), diskmaint.Policy{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if _, ok := keptRules(p)[bak]; !ok {
+		t.Fatalf("backup under a town named with glob characters was not listed: %v", p.Kept)
+	}
+}
+
+func TestPlanAndMeasureRefuseAnEmptyTownOrHome(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, true)
-	// An unclosed bracket is a malformed pattern, so listing the town fails.
-	bad := f.target(f.du(), nil)
-	bad.cfg.Town = filepath.Join(f.town, "[")
-	if _, err := bad.Plan(context.Background(), diskmaint.Policy{}); err == nil {
-		t.Fatal("Plan returned nil for a town path Glob cannot match, want an error")
+	for _, tc := range []struct {
+		name       string
+		town, home string
+	}{
+		{name: "empty town", town: "", home: f.home},
+		{name: "empty home", town: f.town, home: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tgt := f.target(f.du(), nil)
+			tgt.cfg.Town, tgt.cfg.Home = tc.town, tc.home
+			if _, err := tgt.Plan(context.Background(), diskmaint.Policy{}); err == nil {
+				t.Fatal("Plan returned nil for a blank root, want a refusal")
+			}
+			if _, err := tgt.Measure(context.Background()); err == nil {
+				t.Fatal("Measure returned nil for a blank root, want a refusal")
+			}
+		})
 	}
-	if _, err := bad.Measure(context.Background()); err == nil {
-		t.Fatal("Measure returned nil for a town path Glob cannot match, want an error")
+}
+
+func TestPlanFailsWhenTheTownCannotBeListed(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, true)
+	// A town that is a regular file exists but cannot be listed as a directory.
+	town := filepath.Join(t.TempDir(), "town")
+	if err := os.WriteFile(town, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tgt := f.target(f.du(), nil)
+	tgt.cfg.Town = town
+	if _, err := tgt.Plan(context.Background(), diskmaint.Policy{}); err == nil {
+		t.Fatal("Plan returned nil for a town that cannot be listed, want an error")
+	}
+	if _, err := tgt.Measure(context.Background()); err == nil {
+		t.Fatal("Measure returned nil for a town that cannot be listed, want an error")
+	}
+}
+
+func TestPlanListsNoTownPathsWhenTheTownIsAbsent(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, true)
+	tgt := f.target(f.du(), nil)
+	tgt.cfg.Town = filepath.Join(t.TempDir(), "absent")
+	p, err := tgt.Plan(context.Background(), diskmaint.Policy{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if got := keptRules(p); len(got) != 1 {
+		t.Fatalf("kept = %v, want only gt-backups", got)
+	}
+}
+
+func TestPlanShowsAGtBackupsStatFailureAsUnreadable(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t, false)
+	// A home that runs through a regular file: stat of gt-backups under it fails
+	// with ENOTDIR, which is not absence, so the row is listed as unreadable.
+	home := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(home, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backups := filepath.Join(home, "gt-backups")
+	tgt := f.target(f.du(), nil)
+	tgt.cfg.Home = home
+	p, err := tgt.Plan(context.Background(), diskmaint.Policy{})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	rule, ok := keptRules(p)[backups]
+	if !ok {
+		t.Fatalf("gt-backups that cannot be stat'd was not listed: %v", p.Kept)
+	}
+	if want := "report-only: unreadable, age unreadable, owner: operator"; rule != want {
+		t.Fatalf("gt-backups rule = %q, want %q", rule, want)
+	}
+}
+
+func TestPlanShowsASizeThatIsNotACountAsUnreadable(t *testing.T) {
+	t.Parallel()
+	for _, out := range []string{"512M", "-4"} {
+		f := newFixture(t, true)
+		du := f.du()
+		du.kb[f.trash] = out
+		p, err := f.target(du, nil).Plan(context.Background(), diskmaint.Policy{})
+		if err != nil {
+			t.Fatalf("Plan with du output %q: %v", out, err)
+		}
+		if rule := keptRules(p)[f.trash]; rule != "report-only: unreadable, 10d old, owner: operator" {
+			t.Fatalf("du output %q: trash rule = %q, want the size named unreadable", out, rule)
+		}
 	}
 }
 
