@@ -36,16 +36,25 @@ func (crewTokenIssuer) Issue(context.Context, string) (string, error) {
 	return "trk_crew-token-value", nil
 }
 
-// crewRemoveTown builds the rig crew remove runs against: a crew workspace, a
-// route table putting the rig on the tracker, and the member's token file.
+// crewRemoveTown builds the town the way a town is laid out: a mayor/town.json
+// marks the town root, the rig sits under it, and the town's route table puts
+// the rig on the tracker. The member's workspace is in the rig, and its token
+// file is in the town's runtime directory, where crew remove looks for it.
 func crewRemoveTown(t *testing.T) (rigPath, crewPath, tokenPath string) {
 	t.Helper()
-	rigPath = t.TempDir()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigPath = filepath.Join(town, "gastown")
 	crewPath = filepath.Join(rigPath, "crew", "max")
 	if err := os.MkdirAll(crewPath, 0o755); err != nil {
 		t.Fatalf("mkdir crew workspace: %v", err)
 	}
-	beadsDir := filepath.Join(rigPath, ".beads")
+	beadsDir := filepath.Join(town, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +63,7 @@ func crewRemoveTown(t *testing.T) (rigPath, crewPath, tokenPath string) {
 		t.Fatal(err)
 	}
 	seat := seattoken.CrewSeat("gastown", "max")
-	tokenPath, err := seattoken.New(rigPath).Ensure(context.Background(), seat, crewTokenIssuer{})
+	tokenPath, err := seattoken.New(town).Ensure(context.Background(), seat, crewTokenIssuer{})
 	if err != nil {
 		t.Fatalf("seeding the member's token file: %v", err)
 	}

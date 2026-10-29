@@ -295,3 +295,75 @@ func TestOpenShellOpsDeleteFailureRevokesNothing(t *testing.T) {
 		t.Errorf("revoked %v although the sandbox may still exist", revoker.actors)
 	}
 }
+
+// A sandbox with no record names no seat, so Delete cannot revoke its token. It
+// still deletes the sandbox, and says so in a warning rather than passing the
+// live token by in silence.
+func TestOpenShellOpsDeleteWarnsWhenTheRecordIsMissing(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	writeTrackerRoute(t, b.townRoot, openshellTestRig)
+	revoker := &revokeFake{}
+	b.revoker = revoker
+	var warnings []string
+	b.warnf = func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	}
+
+	if err := b.Delete(openshellTestSession); err != nil {
+		t.Fatalf("Delete = %v, want the warning to leave the delete a success", err)
+	}
+	if len(revoker.actors) != 0 {
+		t.Errorf("revoked %v for a sandbox with no record, want nothing", revoker.actors)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], openshellTestSession) || !strings.Contains(warnings[0], "no record") {
+		t.Errorf("warnings = %q, want one naming the sandbox and its missing record", warnings)
+	}
+}
+
+// The record path's delete, which patrol cleanup and the daemon reach through
+// SandboxDeleter, revokes the seat once, as Delete does.
+func TestOpenShellOpsRecordDeleteRevokesTheSeatToken(t *testing.T) {
+	t.Parallel()
+	b, _ := opsBackend(t, &sandbox.Fake{}, newSandboxProbe(t, true))
+	writeTrackerRoute(t, b.townRoot, openshellTestRig)
+	tokenPath := seedSeatToken(t, b.townRoot, openshellTestRig, openshellTestPolecat)
+	revoker := &revokeFake{}
+	b.revoker = revoker
+	rec := SandboxRecord{Session: openshellTestSession, Rig: openshellTestRig, Polecat: openshellTestPolecat}
+
+	if err := b.deleteRecorded(rec); err != nil {
+		t.Fatalf("deleteRecorded: %v", err)
+	}
+	if want := wantActors(openshellTestRig, openshellTestPolecat); !slices.Equal(revoker.actors, want) {
+		t.Errorf("revoked %v, want %v", revoker.actors, want)
+	}
+	if _, err := os.Stat(tokenPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("token file stat = %v, want it gone", err)
+	}
+}
+
+// Stop keeps the sandbox and its seat running, so the seat's token stays live.
+func TestOpenShellOpsStopKeepsTheSeatToken(t *testing.T) {
+	t.Parallel()
+	b, _ := opsBackend(t, &sandbox.Fake{}, newSandboxProbe(t, true))
+	writeOpsRecord(t, b)
+	writeTrackerRoute(t, b.townRoot, openshellTestRig)
+	tokenPath := seedSeatToken(t, b.townRoot, openshellTestRig, openshellTestPolecat)
+	revoker := &revokeFake{}
+	b.revoker = revoker
+
+	if err := b.Stop(openshellTestSession); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if len(revoker.actors) != 0 {
+		t.Errorf("revoked %v on stop, want nothing: the sandbox is kept", revoker.actors)
+	}
+	if _, err := os.Stat(tokenPath); err != nil {
+		t.Errorf("token file stat = %v, want it kept", err)
+	}
+	if _, ok, _ := ReadSandboxRecord(b.townRoot, openshellTestSession); !ok {
+		t.Error("record gone after a stop, want it kept")
+	}
+}

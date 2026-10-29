@@ -23,9 +23,10 @@ func init() {
 }
 
 // deleteSandboxRecord is SandboxDeleter: the sandbox a registry record names,
-// deleted from the record alone so cleanup and the daemon need no Prepare.
+// deleted from the record alone so cleanup and the daemon need no Prepare. It
+// ends the record's seat token as Delete does, so a patrol cleanup revokes too.
 func deleteSandboxRecord(townRoot string, rec SandboxRecord) error {
-	return recordBackend(townRoot, rec).deleteSandbox(rec.Session)
+	return recordBackend(townRoot, rec).deleteRecorded(rec)
 }
 
 // pushSandboxRecord is SandboxPusher: the record's clone branch pushed to origin
@@ -291,7 +292,8 @@ func (b *openshellBackend) Stop(session string) error {
 // and still ends the token; any other failure keeps the record so the delete
 // can be retried. A record that cannot be read is a refusal, not a guess: the
 // seat it names is unknown, so the sandbox stays until the record reads
-// (gt-p85pw.86).
+// (gt-p85pw.86). A sandbox with no record has no seat to name, so its token
+// cannot be revoked here; that is warned, never silent.
 func (b *openshellBackend) Delete(session string) error {
 	rec, hasRec, err := ReadSandboxRecord(b.townRoot, session)
 	if err != nil {
@@ -302,9 +304,23 @@ func (b *openshellBackend) Delete(session string) error {
 	}
 	if hasRec {
 		b.revokeSeat(rec)
+	} else {
+		b.warn("sandbox %s has no record, so its seat is unknown and no tracker token is revoked", session)
 	}
 	routing.forget(session)
 	return RemoveSandboxRecord(b.townRoot, session)
+}
+
+// deleteRecorded deletes the sandbox rec describes and ends the tracker token
+// of the seat rec names. It is the record path's delete: a sandbox that is
+// already gone still ends its seat, and a failed delete revokes nothing, since
+// the sandbox may still run.
+func (b *openshellBackend) deleteRecorded(rec SandboxRecord) error {
+	if err := b.deleteSandbox(rec.Session); err != nil {
+		return err
+	}
+	b.revokeSeat(rec)
+	return nil
 }
 
 // revokeSeat ends the tracker token of the seat rec names. A failed revoke is a

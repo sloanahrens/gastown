@@ -68,6 +68,56 @@ func TestRevokeSeatRevokesATrackerSeat(t *testing.T) {
 	}
 }
 
+// deadlineRevoker records whether the context it is given carries a deadline.
+type deadlineRevoker struct {
+	bounded bool
+}
+
+func (d *deadlineRevoker) Revoke(ctx context.Context, _ string) error {
+	_, d.bounded = ctx.Deadline()
+	return nil
+}
+
+// A revoke is bounded whatever context its caller passes, so a tracker that
+// never answers cannot hold a delete, a patrol tick or a removal.
+func TestRevokeSeatBoundsTheRevoke(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeRouteTable(t, town, trackerRoute)
+	revoker := &deadlineRevoker{}
+
+	if err := RevokeSeat(context.Background(), town, testSeat(), revoker); err != nil {
+		t.Fatalf("RevokeSeat: %v", err)
+	}
+	if !revoker.bounded {
+		t.Error("the revoke ran with no deadline, want one")
+	}
+}
+
+// A rig that has left the tracker still holds its seat's token file, which is
+// all that is left to end: the file goes, and nothing is revoked.
+func TestRevokeSeatRemovesTheFileOfADoltRig(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	store := New(town)
+	path, err := store.Ensure(context.Background(), testSeat(), &fakeIssuer{token: seatToken})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	writeRouteTable(t, town, doltRoute)
+	revoker := &fakeRevoker{}
+
+	if err := RevokeSeat(context.Background(), town, testSeat(), revoker); err != nil {
+		t.Fatalf("RevokeSeat = %v, want nil", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("token file stat = %v, want it gone", err)
+	}
+	if len(revoker.actors) != 0 {
+		t.Errorf("revoked %v on a Dolt rig, want nothing", revoker.actors)
+	}
+}
+
 // A seat on a Dolt rig has no tracker token: nothing is revoked, and the
 // revoker is not even needed.
 func TestRevokeSeatLeavesADoltRigAlone(t *testing.T) {
@@ -190,12 +240,16 @@ func (f failingRoundTrip) RoundTrip(*http.Request) (*http.Response, error) {
 	}, nil
 }
 
+// fakeTrackerURL is the endpoint the refusal case names. Its transport answers
+// every request, so nothing dials it.
+const fakeTrackerURL = "https://tracker.test"
+
 // The tracker's refusal of a revoke is reported with the tracker's answer, so
 // the warning a removal prints says why the token may still be live.
 func TestTrackerRevokerReportsARefusal(t *testing.T) {
 	t.Parallel()
 	tc, err := client.New(client.Config{
-		BaseURL: "http://127.0.0.1:7433",
+		BaseURL: fakeTrackerURL,
 		Token:   "admin-token-value",
 		HTTP:    &http.Client{Transport: failingRoundTrip(http.StatusInternalServerError)},
 	})
@@ -210,9 +264,10 @@ func TestTrackerRevokerReportsARefusal(t *testing.T) {
 }
 
 // A tracker rig whose town has no admin credential fails the revoke, naming
-// the seat rather than reading as a seat with nothing to revoke.
+// the seat rather than reading as a seat with nothing to revoke. The home
+// directory is the test's own, so no ambient config can supply a credential.
 func TestRevokeSeatReportsAMissingAdminCredential(t *testing.T) {
-	t.Parallel()
+	t.Setenv("HOME", t.TempDir())
 	town := t.TempDir()
 	writeRouteTable(t, town, trackerRoute)
 
