@@ -7,9 +7,8 @@
 # in-cluster Service (an ExternalName pointing at the Mac), and the policy must
 # also pin the address that name resolves to: OpenShell refuses private
 # addresses unless the endpoint lists them in allowed_ips. Verified on kind
-# 2026-10-24: Dolt over
-# raw TCP and Forgejo's git smart-HTTP paths pass; the web UI, API and LFS are
-# denied by the layer-7 rules.
+# 2026-10-24: Dolt over raw TCP and Forgejo's git smart-HTTP paths pass; the
+# web UI, API and LFS are denied by the layer-7 rules.
 #
 # The source header names Docker Desktop's host alias; the rendered header names
 # the in-cluster Services, so a kind policy does not describe the Docker route.
