@@ -396,6 +396,25 @@ two tries (gt-y3pgh.12).
 `docs/guides/spec-dispatcher.md` is the behavioral guide: candidates, the shape
 gate, the seat table and how to turn the ticker off.
 
+### Disk Maintenance
+
+Registry retention and the `disk_maintenance` patrol are switched by two
+environment knobs and one key under `daemon` in `settings/config.json`:
+
+| Knob | Default | Read by |
+|------|---------|---------|
+| `POLECAT_IMAGE_REGISTRY_KEEP` | `5` | the newest per-commit tags kept by the plugin's retention, `gt maint` and the patrol |
+| `POLECAT_IMAGE_REGISTRY_PRUNE` | `dry-run` | the `polecat-image` plugin only: `off`, `dry-run` or `apply` |
+| `daemon.patrols.disk_maintenance` | disabled; once enabled, `{"interval": "daily", "window": "04:30", "mode": "dry_run"}` (`mode` may be `apply`) | the daemon patrol |
+
+The two environment knobs are read from the environment of the run: the
+daemon's for the plugin and the patrol, the shell's for a hand-run `gt maint`.
+None of the three applies anything by default. A value the run cannot act on
+refuses the run rather than reading as "keep nothing" or "prune nothing".
+
+[The disk maintenance guide](guides/disk-maintenance.md) says what a run
+deletes and keeps, when it refuses, and how to read the ledger.
+
 ### Daemon Environment (`settings/daemon.env`)
 
 Optional. One `KEY=VALUE` pair per line; blank lines and lines starting with
