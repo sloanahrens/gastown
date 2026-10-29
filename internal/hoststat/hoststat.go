@@ -209,6 +209,11 @@ func procTable(s string) ([]byte, error) {
 	return []byte(out.String()), nil
 }
 
+// ParseCPUIdle reads the idle share out of top's output, nil when it has none.
+// It is for a caller that runs top itself, so the share it reads is the one
+// Sample reads.
+func ParseCPUIdle(s string) *float64 { return parseCPUIdle(s) }
+
 // parseCPUIdle reads the idle share out of top's last CPU line: macOS writes
 // "CPU usage: 39.24% user, 60.75% sys, 0.0% idle", Linux "%Cpu(s):  6.2 us,
 // 12.5 sy, 81.2 id". The last line wins because a two-sample top prints one
@@ -335,6 +340,11 @@ func isTestServer(argv []string) bool {
 	}
 	return false
 }
+
+// ParseTop reads "pcpu command" process lines into the n busiest processes,
+// largest first. It is for a caller that runs ps itself, so the names and
+// merging are the ones Sample reports.
+func ParseTop(s string, n int) []Proc { return parseTop(s, n) }
 
 // parseTop reads "pcpu command" lines and keeps the first n that use any CPU,
 // naming each process by the last element of its path and merging repeats
