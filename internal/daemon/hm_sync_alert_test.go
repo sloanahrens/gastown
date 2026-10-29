@@ -88,7 +88,7 @@ func hmSyncHealthTestDaemon(t *testing.T) (*Daemon, *bytes.Buffer, *hmSyncHealth
 		f.raised = append(f.raised, hmSyncAlertCall{key: key, source: source, message: message})
 		return f.raiseErr
 	}
-	d.hmSyncAlerts.clear = func(reason string, keys ...string) error {
+	d.hmSyncAlerts.clearFn = func(reason string, keys ...string) error {
 		f.cleared = append(f.cleared, hmSyncClearCall{reason: reason, keys: keys})
 		return f.clearErr
 	}
@@ -195,11 +195,12 @@ func TestHMSyncHealthClearsWhenASourceIsFresh(t *testing.T) {
 	}
 }
 
-// TestHMSyncHealthStaysQuietWhileFresh: a fresh town with no alert open raises
-// and clears nothing, on every interval.
+// TestHMSyncHealthStaysQuietWhileFresh: a fresh town the patrol knows has no
+// alert open raises and clears nothing, on every interval.
 func TestHMSyncHealthStaysQuietWhileFresh(t *testing.T) {
 	t.Parallel()
 	d, logs, f := hmSyncHealthTestDaemon(t)
+	d.hmSyncAlerts.mark(hmSyncAlertClosed)
 	f.statusOut = []byte(hmSyncHealthFresh)
 
 	d.runHMSync()
@@ -413,5 +414,49 @@ func TestHMSyncHealthUndeliveredClearKeepsTheAlertOpen(t *testing.T) {
 	d.runHMSync()
 	if len(f.cleared) != 2 {
 		t.Errorf("cleared %d times, want the alert cleared once", len(f.cleared))
+	}
+}
+
+// TestHMSyncHealthHealthyAfterRestartClearsOnce: a restart forgets the open
+// flag, so the first healthy read clears the alert an earlier run may have
+// left open, and a later healthy read has nothing to clear.
+func TestHMSyncHealthHealthyAfterRestartClearsOnce(t *testing.T) {
+	t.Parallel()
+	d, _, f := hmSyncHealthTestDaemon(t)
+	f.statusOut = []byte(hmSyncHealthFresh)
+
+	d.runHMSync()
+	if len(f.cleared) != 1 {
+		t.Fatalf("cleared %+v, want the first healthy read after the boot to clear", f.cleared)
+	}
+	if got := f.cleared[0]; len(got.keys) != 1 || got.keys[0] != hmsync.AlertKey {
+		t.Errorf("cleared %+v, want %q", got, hmsync.AlertKey)
+	}
+
+	hmSyncHealthNextInterval(f)
+	d.runHMSync()
+	if len(f.cleared) != 1 {
+		t.Errorf("cleared %d times, want once: the alert is known closed after the first clear", len(f.cleared))
+	}
+}
+
+// TestHMSyncHealthShutdownRaisesNothing: a status read cut short by the daemon
+// stopping is not an unreadable status, so it raises nothing and leaves the
+// alert as it was.
+func TestHMSyncHealthShutdownRaisesNothing(t *testing.T) {
+	t.Parallel()
+	d, logs, f := hmSyncHealthTestDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.ctx = ctx
+	f.statusErr = context.Canceled
+
+	d.checkHMSyncHealth()
+
+	if len(f.raised) != 0 || len(f.cleared) != 0 {
+		t.Errorf("raised %+v, cleared %+v, want neither while the daemon shuts down", f.raised, f.cleared)
+	}
+	if got := logs.String(); strings.Contains(got, "unreadable") {
+		t.Errorf("log = %q, want no unreadable line for a read cut short by shutdown", got)
 	}
 }

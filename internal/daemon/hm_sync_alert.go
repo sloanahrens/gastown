@@ -42,31 +42,45 @@ const (
 	hmSyncStatusJSON = "--json"
 )
 
+// hmSyncAlertState is what the patrol knows of hmsync:stale. The zero value is
+// unknown, which is the state after a boot.
+type hmSyncAlertState int
+
+const (
+	// hmSyncAlertUnknown: an alert an earlier run raised may still be open, and
+	// the patrol does not read that back.
+	hmSyncAlertUnknown hmSyncAlertState = iota
+	// hmSyncAlertClosed: the patrol last saw the alert cleared or never raised.
+	hmSyncAlertClosed
+	// hmSyncAlertOpen: the patrol raised the alert and has not cleared it.
+	hmSyncAlertOpen
+)
+
 // hmSyncAlerts is the patrol's memory of whether hmsync:stale is open, and the
 // two functions that carry it. A test replaces the functions with recorders;
 // the nil ones are the daemon's alert helpers, resolved per call so a Daemon
 // built as a literal needs no wiring.
 type hmSyncAlerts struct {
-	mu     sync.Mutex
-	active bool
+	mu    sync.Mutex
+	state hmSyncAlertState
 	// raise delivers the alert; nil is d.escalateAlertErr.
 	raise func(key, source, message string) error
-	// clear closes it; nil is d.clearAlertsErr.
-	clear func(reason string, keys ...string) error
+	// clearFn closes it; nil is d.clearAlertsErr.
+	clearFn func(reason string, keys ...string) error
 }
 
-// open reports whether the patrol has already raised the alert.
-func (a *hmSyncAlerts) open() bool {
+// current returns what the patrol knows of the alert.
+func (a *hmSyncAlerts) current() hmSyncAlertState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.active
+	return a.state
 }
 
-// mark records the alert as open, or as forgotten once a clear landed.
-func (a *hmSyncAlerts) mark(open bool) {
+// mark records what the patrol now knows of the alert.
+func (a *hmSyncAlerts) mark(state hmSyncAlertState) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.active = open
+	a.state = state
 }
 
 // raiseHMSyncAlert delivers the stale-sources alert. The caller branches on the
@@ -83,11 +97,11 @@ func (d *Daemon) raiseHMSyncAlert(message string) error {
 // clearHMSyncAlert closes the stale-sources alert under the same key it was
 // raised with, and only that key.
 func (d *Daemon) clearHMSyncAlert() error {
-	clear := d.hmSyncAlerts.clear
-	if clear == nil {
-		clear = d.clearAlertsErr
+	clearFn := d.hmSyncAlerts.clearFn
+	if clearFn == nil {
+		clearFn = d.clearAlertsErr
 	}
-	return clear(hmSyncHealthyReason, hmsync.AlertKey)
+	return clearFn(hmSyncHealthyReason, hmsync.AlertKey)
 }
 
 // checkHMSyncHealth reads the status once and applies the alert change it calls
@@ -109,25 +123,45 @@ func (d *Daemon) checkHMSyncHealth() {
 // unless the alert is already open, so an unreadable status is reported once
 // rather than every interval.
 func (d *Daemon) hmSyncVerdict() (hmsync.Verdict, bool) {
-	active := d.hmSyncAlerts.open()
+	state := d.hmSyncAlerts.current()
 
 	ctx, cancel := d.hmSyncStatusContext()
 	defer cancel()
 
 	command := hmSyncCommand(d.patrolConfig)
 	out, err := d.hmSyncSeamsOf().run(ctx, command, hmSyncStatusArg, hmSyncStatusJSON)
+	if err != nil && d.shuttingDown() {
+		// The daemon is stopping, so the run was cut short, not failed. Raising
+		// now would report a status the patrol never read.
+		return hmsync.Verdict{}, false
+	}
 	if err == nil {
 		var sources []hmsync.Source
 		if sources, err = hmsync.ParseStatus(out); err == nil {
-			return hmsync.Evaluate(sources, active), false
+			return hmSyncEvaluate(sources, state), false
 		}
 	}
 	// The detail names the failure and never the command's output, which can
 	// hold a path only the operator owns.
 	return hmsync.Verdict{
-		Raise:  !active,
+		Raise:  state != hmSyncAlertOpen,
 		Detail: fmt.Sprintf("hm status unreadable: %v", err),
 	}, true
+}
+
+// hmSyncEvaluate applies the evaluator to a readable status. The evaluator
+// clears only an alert the caller knows is open, so after a boot a healthy read
+// would never close an alert an earlier run left open. Unknown therefore clears
+// on any healthy read: a clear with nothing open is a no-op.
+func hmSyncEvaluate(sources []hmsync.Source, state hmSyncAlertState) hmsync.Verdict {
+	if state != hmSyncAlertUnknown {
+		return hmsync.Evaluate(sources, state == hmSyncAlertOpen)
+	}
+	v := hmsync.Evaluate(sources, false)
+	if !v.Raise {
+		v.Clear = true
+	}
+	return v
 }
 
 // applyHMSyncVerdict raises and clears the alert the verdict calls for, and
@@ -141,14 +175,14 @@ func (d *Daemon) applyHMSyncVerdict(v hmsync.Verdict) {
 			d.logger.Printf("hm_sync: alert %s was not delivered: %v", hmsync.AlertKey, err)
 			return
 		}
-		d.hmSyncAlerts.mark(true)
+		d.hmSyncAlerts.mark(hmSyncAlertOpen)
 		d.logger.Printf("hm_sync: raised %s: %s", hmsync.AlertKey, v.Detail)
 	case v.Clear:
 		if err := d.clearHMSyncAlert(); err != nil {
 			d.logger.Printf("hm_sync: alert %s was not cleared: %v", hmsync.AlertKey, err)
-			return // still open, and the next pass clears it again
+			return // not known closed, and the next pass clears it again
 		}
-		d.hmSyncAlerts.mark(false)
+		d.hmSyncAlerts.mark(hmSyncAlertClosed)
 		d.logger.Printf("hm_sync: cleared %s: %s", hmsync.AlertKey, v.Detail)
 	}
 }

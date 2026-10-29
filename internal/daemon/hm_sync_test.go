@@ -59,10 +59,12 @@ func hmSyncTestDaemon(t *testing.T, cfg *DaemonPatrolConfig) (*Daemon, *bytes.Bu
 		f.now = f.now.Add(f.advance)
 		return nil, f.err
 	}
-	// Alerts go to no-op functions rather than the notifier: the unit tier
-	// starts no gt, and these tests assert on the sync.
+	// The alert starts known closed, so the fresh read above clears nothing and
+	// logs nothing. Alerts go to no-op functions rather than the notifier: the
+	// unit tier starts no gt, and these tests assert on the sync.
+	d.hmSyncAlerts.mark(hmSyncAlertClosed)
 	d.hmSyncAlerts.raise = func(string, string, string) error { return nil }
-	d.hmSyncAlerts.clear = func(string, ...string) error { return nil }
+	d.hmSyncAlerts.clearFn = func(string, ...string) error { return nil }
 	// A sync runs inline: a test asserts what it did, so it must have done it
 	// by the time runHMSync returns.
 	d.hmSync.dispatch = func(fn func()) { fn() }
@@ -377,7 +379,7 @@ func TestHMSyncProductionRunSeam(t *testing.T) {
 		d.hmSync.run = nil
 		var argv []string
 		d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
-			if cmd.Args[1] == "sync" {
+			if len(cmd.Args) > 1 && cmd.Args[1] == "sync" {
 				argv = cmd.Args // the sync; the health check's status read follows it
 			}
 			return []byte("indexed 3 sources\n"), nil, nil
