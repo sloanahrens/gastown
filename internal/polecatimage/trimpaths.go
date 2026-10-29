@@ -52,12 +52,16 @@ func diskTrimPathsFS() trimPathsFS {
 // removeInRoot deletes rel through an os.Root opened on root, so the kernel-level walk refuses a
 // directory that was swapped for a symlink out of the claim after trimTarget resolved it: the guard
 // checks the path once, the removal enforces it at the moment of the unlink.
-func removeInRoot(root, rel string) error {
+func removeInRoot(root, rel string) (err error) {
 	r, err := os.OpenRoot(root)
 	if err != nil {
 		return err
 	}
-	defer r.Close()
+	defer func() {
+		if cerr := r.Close(); err == nil {
+			err = cerr
+		}
+	}()
 	return r.Remove(rel)
 }
 
