@@ -130,8 +130,8 @@ func Main(args []string) int {
 }
 
 // runProgram answers Main: no arguments runs one plugin run, and "trim-cache",
-// "trim-paths", "seed-clone" and "seed-cache" are the helpers a container of the
-// image runs in the seed and trim Jobs.
+// "trim-paths", "trim-list-write", "seed-clone" and "seed-cache" are the helpers a
+// container of the image runs in the seed and trim Jobs.
 func runProgram(args []string, stdout, stderr io.Writer, get func(string) string) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -139,6 +139,8 @@ func runProgram(args []string, stdout, stderr io.Writer, get func(string) string
 			return trimCacheMain(args[1:], stdout, stderr)
 		case "trim-paths":
 			return trimPathsMain(args[1:], stdout, stderr)
+		case "trim-list-write":
+			return trimListWriteMain(args[1:], stdout, stderr)
 		case "seed-clone":
 			return seedCloneMain(args[1:], stdout, stderr)
 		case "seed-cache":
@@ -204,31 +206,92 @@ func trimPathsMain(args []string, stdout, stderr io.Writer) int {
 
 // trimPathsRun is trimPathsMain over the filesystem w, so a test answers the calls.
 //
-// Once the run reaches the list, stdout carries "removed N absent M", the counts of
-// what it did, so a run that fails part way still says how much it removed. Exit 3
-// with a reason on stderr means the list could not be read whole or a removal
-// failed: a trim the helper cannot vouch for is reported rather than passed off as a
-// partial success.
+// The list comes from the mounted shards, or from the file a caller wrote into the
+// claim when --list-file names it. Once the run reaches the list, stdout carries
+// "removed N absent M", the counts of what it did, so a run that fails part way still
+// says how much it removed. Exit 3 with a reason on stderr means the list could not be
+// read whole or a removal failed: a trim the helper cannot vouch for is reported
+// rather than passed off as a partial success.
 func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 	flags := flag.NewFlagSet("trim-paths", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	root := flags.String("root", cachevol.SeedCacheRoot, "the claim the listed paths are relative to")
 	list := flags.String("list", cachevol.TrimListRoot, "the directory the shard volumes are mounted under")
+	listFile := flags.String("list-file", "", "the claim-relative file a claim-carried trim reads its list from")
+	listDigest := flags.String("list-sha256-file", "", "the claim-relative file holding the digest of the claim-carried list")
 	shardsText := flags.String("shards", "", "the number of shards the Job mounted")
 	if err := flags.Parse(args); err != nil {
 		return 3
 	}
-	shards, err := strconv.Atoi(*shardsText)
-	if err != nil || shards <= 0 {
-		fmt.Fprintln(stderr, "trim-paths: --shards needs a whole number of shards, at least 1")
-		return 3
+	var res TrimPathsResult
+	var err error
+	if *listFile != "" {
+		if *shardsText != "" {
+			fmt.Fprintln(stderr, "trim-paths: --list-file and --shards name two routes; give one")
+			return 3
+		}
+		if *listDigest == "" {
+			fmt.Fprintln(stderr, "trim-paths: --list-file needs --list-sha256-file, the digest the writer put beside the list")
+			return 3
+		}
+		res, err = RemoveTrimPathsFromClaim(*root, *listFile, *listDigest, w)
+	} else {
+		if *listDigest != "" {
+			fmt.Fprintln(stderr, "trim-paths: --list-sha256-file names a claim-carried list; give --list-file")
+			return 3
+		}
+		shards, aerr := strconv.Atoi(*shardsText)
+		if aerr != nil || shards <= 0 {
+			fmt.Fprintln(stderr, "trim-paths: --shards needs a whole number of shards, at least 1")
+			return 3
+		}
+		res, err = RemoveTrimPaths(*root, *list, shards, w)
 	}
-	res, err := RemoveTrimPaths(*root, *list, shards, w)
 	fmt.Fprintf(stdout, "removed %d absent %d\n", res.Removed, res.Absent)
 	if err != nil {
 		fmt.Fprintf(stderr, "trim-paths: %v\n", err)
 		return 3
 	}
+	return 0
+}
+
+// trimListWriteMain runs the writer: it plans PlanTrim's removal list from the claim at --root, under
+// the cap and sandbox count its Job passes, and writes the list and its digest into the claim where
+// the Job's trim container reads them. It is the claim-carried trim Job's init container.
+//
+// The list is planned here, in the pod that mounts the claim, because a list past one set of shards
+// has no other channel that reaches the claim whole and nothing outside the cluster mounts it. Exit 3
+// with a reason on stderr means nothing was written: the list is refused whole or written whole, so
+// the trim container never reads a list the writer did not vouch for.
+func trimListWriteMain(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("trim-list-write", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	root := flags.String("root", cachevol.SeedCacheRoot, "the shared cache claim the trim plans and writes its list in")
+	capText := flags.String("cap-bytes", "", "the size to bring the claim under, in bytes")
+	sandboxesText := flags.String("sandboxes", "", "the count of running sandboxes, whose module cache the plan leaves alone")
+	if err := flags.Parse(args); err != nil {
+		return 3
+	}
+	cap, err := strconv.ParseInt(*capText, 10, 64)
+	if err != nil || cap < 0 {
+		fmt.Fprintln(stderr, "trim-list-write: --cap-bytes needs a whole number of bytes")
+		return 3
+	}
+	sandboxes, err := strconv.Atoi(*sandboxesText)
+	if err != nil || sandboxes < 0 {
+		fmt.Fprintln(stderr, "trim-list-write: --sandboxes needs a whole number of running sandboxes, 0 when none runs")
+		return 3
+	}
+	paths, err := TrimListPaths(*root, cap, sandboxes > 0, filepath.Walk)
+	var digest string
+	if err == nil {
+		digest, err = writeTrimListInto(*root, paths)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "trim-list-write: %v\n", err)
+		return 3
+	}
+	fmt.Fprintf(stdout, "wrote %d paths %s %s\n", len(paths), cachevol.TrimClaimListPath, digest)
 	return 0
 }
 
