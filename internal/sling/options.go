@@ -78,6 +78,15 @@ type Options struct {
 	// dispatch are each a bead's first dispatch and run the check (gt-skk7,
 	// gt-eisp2). Tests that target a later guard set it to reach that guard.
 	SkipDuplicateCheck bool
+
+	// AdmitOverlap lets the sling proceed past a content overlap the check
+	// would refuse: a shared test against work in flight, or against unstarted
+	// work the dispatcher would sling first (gt-e1ufo). Only the spec
+	// dispatcher sets it, because its tick slings every ready bead it reaches
+	// and an overlap is no reason to leave one unslung. The check still runs,
+	// so the shared files and closed duplicates it finds still print as a
+	// warning. A manual sling never sets it, so the refusal stands for a human.
+	AdmitOverlap bool
 }
 
 // Result is a dispatch's outcome, for caller-level tracking.

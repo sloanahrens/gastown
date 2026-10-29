@@ -152,9 +152,10 @@ func TestSpecInFlightWithoutAStartStillParses(t *testing.T) {
 	}
 }
 
-// A candidate that names the files a running sling's bead names is held, as it
-// is held by a bead the sling has already hooked (gt-z80p9).
-func TestBackgroundTickHoldsACandidateOverlappingARunningSling(t *testing.T) {
+// A candidate that names the files a running sling's bead names is not held
+// for the overlap: the tick hands it back as a pending sling and says nothing
+// about a hold (gt-e1ufo).
+func TestBackgroundTickSlingsACandidateOverlappingARunningSling(t *testing.T) {
 	t.Parallel()
 	const guard = "internal/daemon/overrun_guard.go"
 	second := cleanSpec("gt-second", 2, "2026-09-29T10:04:00Z")
@@ -162,18 +163,14 @@ func TestBackgroundTickHoldsACandidateOverlappingARunningSling(t *testing.T) {
 	second.Description = specTestDescription + "\n\nToday " + guard + " (~254) calls Nudge with a 30 s context."
 	f := newFakeSpecTown(second)
 	env := backgroundEnv(f)
-	env.InFlight = []specInFlight{{Bead: "gt-first", Rig: "gastown", Agent: "claude-sonnet", Paths: []string{guard}}}
+	env.InFlight = []specInFlight{{Bead: "gt-first", Rig: "gastown", Agent: "claude-sonnet"}}
 	r := runSpecDispatchCycle(env)
 
-	if len(r.Pending) != 0 {
-		t.Fatalf("handed back %+v, want the overlapping candidate held", r.Pending)
+	if len(r.Pending) != 1 || r.Pending[0].Bead != "gt-second" {
+		t.Fatalf("handed back %+v, want the overlapping candidate handed back to run", r.Pending)
 	}
-	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "gt-second: held: gt-first (held by a sling still running on claude-sonnet") {
-		t.Fatalf("skipped = %+v, want gt-second held on the running sling's bead", r.Skipped)
-	}
-	// The rig's own held read is still made: the note must not stand in for it.
-	if f.heldRigs["gastown"] != 1 {
-		t.Fatalf("held reads = %d, want the rig read once beside the running sling's note", f.heldRigs["gastown"])
+	if len(r.Skipped) != 0 {
+		t.Fatalf("skipped = %+v, want no hold line for the overlap", r.Skipped)
 	}
 }
 
@@ -256,8 +253,8 @@ func TestParseSpecInFlight(t *testing.T) {
 	if got, err := parseSpecInFlight(""); err != nil || got != nil {
 		t.Fatalf("empty = %v, %v, want none", got, err)
 	}
-	got, err := parseSpecInFlight(`[{"bead":"gt-a","rig":"gastown","agent":"claude-sonnet","paths":["x.go"]}]`)
-	if err != nil || len(got) != 1 || got[0].Bead != "gt-a" || got[0].Agent != "claude-sonnet" || got[0].Paths[0] != "x.go" {
+	got, err := parseSpecInFlight(`[{"bead":"gt-a","rig":"gastown","agent":"claude-sonnet"}]`)
+	if err != nil || len(got) != 1 || got[0].Bead != "gt-a" || got[0].Agent != "claude-sonnet" {
 		t.Fatalf("parsed = %+v, %v", got, err)
 	}
 	if _, err := parseSpecInFlight("not json"); err == nil {

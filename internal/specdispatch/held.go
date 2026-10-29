@@ -93,7 +93,7 @@ type HeldMatch struct {
 	// candidate's priority bypasses the hold.
 	Reason string
 	// Bypassed is set when the candidate is urgent enough to skip a hold it
-	// would otherwise take; the tick logs Holder instead of skipping the bead.
+	// would otherwise take; the peer answer reads the candidate as unheld.
 	Bypassed bool
 	// Holder names the held bead and the seat holding it, as "<bead> held by
 	// <seat>". Empty when nothing overlaps.
@@ -118,7 +118,8 @@ type HeldMatch struct {
 // fails open rather than blocking a candidate on a bead no seat is working.
 //
 // A candidate below heldBypassPriority takes no hold: the match comes back
-// with Bypassed set and the holder named, for the tick to log (gt-iydx1).
+// with Bypassed set and the holder named, so the peer answer does not count it
+// as held (gt-iydx1).
 func HeldOverlap(paths, tests []string, priority int, held []HeldBead) HeldMatch {
 	if len(paths) == 0 && len(tests) == 0 || len(held) == 0 {
 		return HeldMatch{}

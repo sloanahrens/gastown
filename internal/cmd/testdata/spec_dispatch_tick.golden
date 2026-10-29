@@ -10,7 +10,7 @@ skipped: gt-bad2: unshaped: ## Gate
 skipped: gt-nofm: unknown formula: mol-gone
 skipped: gt-box2: clean, per-tick limit 3 reached
 skipped: gt-c3: clean, per-tick limit 3 reached
-skipped: gt-second: held: gt-t61ft (held by gastown/polecats/capable) is already hooked to a working seat and names internal/daemon/overrun_guard.go; the hold lifts when that bead closes
+skipped: gt-second: clean, per-tick limit 3 reached
 skipped: gt-c4: clean, per-tick limit 3 reached
 skipped: gt-c5: clean, per-tick limit 3 reached
 skipped: gt-c6: clean, per-tick limit 3 reached

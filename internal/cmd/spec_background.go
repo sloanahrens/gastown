@@ -43,23 +43,17 @@ type specSlingJob struct {
 	// the box, and the job carries the answer to the process that runs it.
 	OverrunNote string                  `json:"overrun_note,omitempty"`
 	Run         specdispatch.FormulaRun `json:"run"`
-	// Paths and Tests are the files and test names the bead's text cites, for
-	// the overlap hold on the candidates of later ticks while the sling runs.
-	Paths []string `json:"paths,omitempty"`
-	Tests []string `json:"tests,omitempty"`
 }
 
 // specInFlight is a running sling as the daemon hands it to the tick: the
-// bead and the seat it occupies, the files it holds, and when it started. A
-// sling has no session until it is well under way, so its start is the only
-// spawn the roster cannot show (gt-vames). A zero Started is a sling with no
-// start time: it still takes its seat.
+// bead and the seat it occupies, and when it started. A sling has no session
+// until it is well under way, so its start is the only spawn the roster cannot
+// show (gt-vames). A zero Started is a sling with no start time: it still takes
+// its seat.
 type specInFlight struct {
 	Bead    string    `json:"bead"`
 	Rig     string    `json:"rig"`
 	Agent   string    `json:"agent"`
-	Paths   []string  `json:"paths,omitempty"`
-	Tests   []string  `json:"tests,omitempty"`
 	Started time.Time `json:"started,omitzero"`
 }
 
@@ -86,7 +80,7 @@ label and notes a failed sling owes its bead.`,
 
 func init() {
 	specDispatchCmd.Flags().BoolVar(&specDispatchBackground, "background-slings", false, "Plan the slings and hand them back in the report instead of running them")
-	specDispatchCmd.Flags().StringVar(&specDispatchInFlight, "in-flight", "", "JSON list of the slings still running from earlier ticks ({bead, rig, agent, paths})")
+	specDispatchCmd.Flags().StringVar(&specDispatchInFlight, "in-flight", "", "JSON list of the slings still running from earlier ticks ({bead, rig, agent})")
 	specSlingCmd.Flags().StringVar(&specSlingJobJSON, "job", "", "The sling job, as the tick's report printed it")
 	specCmd.AddCommand(specSlingCmd)
 }
@@ -146,7 +140,7 @@ func specHandOffPendingSlings(pending []specPendingSling, report *specDispatchRe
 		report.Dispatched = append(report.Dispatched, entry)
 		report.Pending = append(report.Pending, specSlingJob{
 			Bead: p.id, Rig: p.c.Rig, Agent: p.seat.Agent, Reason: p.seat.Reason,
-			Resume: p.resume, Gone: p.gone, ShapeNote: p.shapeNote, OverrunNote: p.overrunNote, Run: p.c.Run, Paths: p.paths, Tests: p.tests,
+			Resume: p.resume, Gone: p.gone, ShapeNote: p.shapeNote, OverrunNote: p.overrunNote, Run: p.c.Run,
 		})
 	}
 }
@@ -163,8 +157,6 @@ func (j specSlingJob) pending() specPendingSling {
 		shapeNote:   j.ShapeNote,
 		overrunNote: j.OverrunNote,
 		entry:       specDispatchEntry{Bead: j.Bead, Rig: j.Rig, Agent: j.Agent},
-		paths:       j.Paths,
-		tests:       j.Tests,
 	}
 }
 

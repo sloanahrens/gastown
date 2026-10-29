@@ -123,17 +123,15 @@ decides and reports without slinging, labeling or commenting.
      Under either gate the tick spawns no planner (gt-4rizh), so a held bead
      waits for the operator.
 5. A spec that clears the shape gate takes the first free seat and is slung
-   through the shared rig-dispatch path in-process, with no auto-convoy. A
-   candidate naming a path or a test that a polecat seat's in-flight bead names
-   too is that defect filed twice, and it is skipped as `held: <bead> ... is
-   already hooked to a working seat`; a P0 or P1 candidate takes the seat anyway
-   and the skip is reported as a bypass (gt-iydx1). Only a polecat's bead holds:
-   a crew or operator session's bead, and a handoff bead whose notes name every
-   file the run read, are not work on the candidate's files (gt-asvow). Before
-   changing what a hold reads, read `specdispatch.HoldFiles`
-   (`internal/specdispatch/held.go`): it states which named paths drop out —
-   reference documents the Constraints do not list, and paths every mention
-   marks `(read-only)` (gt-5v13p).
+   through the shared rig-dispatch path in-process, with no auto-convoy. Content
+   overlap does not hold a candidate. A candidate that names a path or a test
+   another bead names is slung like any other, including one a polecat seat
+   already has in flight, and the tick says nothing about a hold for it
+   (gt-e1ufo). Landings are serial per rig and rebase, so a conflict costs a
+   bounce, which is cheaper than an idle seat. The sling-time guard still runs
+   for a dispatch and still prints its warning, but it admits the overlap
+   rather than refusing it (`sling.Options.AdmitOverlap`). A manual `gt sling`
+   keeps the refusal, and `--force` overrides it.
 6. A bead that takes a seat and matches the overrun-stop box is slung anyway
    and wears one comment saying so (see below).
 
@@ -409,12 +407,8 @@ four times with jittered backoff; the bond step inside the sling already
 retries on its own. Contention that outlasts the last retry is a skip, not a
 failure: Dolt rolled the attempt back before reporting it, so the next tick
 repeats the dispatch with no label for anyone to remove (gt-9x16z). Pool and
-merge-queue refusals are skips, and so is a
-content-overlap refusal: the guard refuses work in flight, and an unstarted peer
-only while that peer comes first in dispatch order and the dispatcher would
-sling it, so the refusal clears by itself once the peer is slung or closes and
-the next tick takes the bead again with no label for anyone to remove
-(gt-q6zoo, gt-nlkba, gt-00gee). A skip also hands back the seat the tick charged
+merge-queue refusals are skips. A content overlap is never a refusal on the
+dispatch path (gt-e1ufo), so it defers nothing. A skip also hands back the seat the tick charged
 for the candidate, so a deferral does not leave the tick counting a seat no
 polecat took. Any other failure
 leaves the bead unassigned, adds `spec-dispatch-failed` and one comment saying

@@ -102,13 +102,6 @@ type fakeSpecTown struct {
 	// (gt-01gix). An id absent here reads from showOverride, then specs.
 	showSeq   map[string][]specRead
 	childErrs map[string]error
-	// held is what a rig's working seats already hold, and heldErr a failed
-	// held read, for the pre-dispatch overlap hold (gt-z80p9).
-	held    map[string][]specdispatch.HeldBead
-	heldErr map[string]error
-	// heldRigs counts the held reads per rig, so a test can pin the tick's
-	// one-read-per-rig memo.
-	heldRigs  map[string]int
 	slingErrs map[string][]error // per bead, consumed in order
 	slung     []string
 	// slingSeats is the seat each sling went to, positionally with slung.
@@ -183,7 +176,6 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
 		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{},
 		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{}, blockers: map[string][]beads.IssueDep{},
-		held: map[string][]specdispatch.HeldBead{}, heldErr: map[string]error{}, heldRigs: map[string]int{},
 		omThreshold: map[string]float64{}, omThresholdErr: map[string]error{}, omThresholdReads: map[string]int{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
@@ -252,13 +244,6 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 				return nil, err
 			}
 			return f.children[id], nil
-		},
-		Held: func(rig string) ([]specdispatch.HeldBead, error) {
-			f.heldRigs[rig]++
-			if err := f.heldErr[rig]; err != nil {
-				return nil, err
-			}
-			return f.held[rig], nil
 		},
 		RigHold: func(rig string) string { return f.rigHold[rig] },
 		OMThreshold: func(rig string) (float64, error) {
@@ -649,520 +634,6 @@ func TestSpecDispatchOpenChildrenHoldTheContainer(t *testing.T) {
 	})
 }
 
-// The pre-dispatch overlap hold (gt-z80p9), replayed from the gt-t61ft /
-// gt-wikw1 pair: two beads on one defect, filed minutes apart, naming the same
-// file and sharing no test name.
-func TestSpecDispatchHoldsASecondFilingOfHeldWork(t *testing.T) {
-	t.Parallel()
-	const guard = "internal/daemon/overrun_guard.go"
-	// The candidate is the second filing; its text names the file the held
-	// bead names too.
-	secondFiling := func(id string, created string) specdispatch.Spec {
-		s := cleanSpec(id, 2, created)
-		s.Title = "overrun guard nudge uses wait-idle under a 30s context"
-		s.Description = specTestDescription + "\n\nToday internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."
-		return s
-	}
-	const seat = "gastown/polecats/capable"
-	heldBead := specdispatch.HeldBead{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}}
-
-	t.Run("a shared path holds and names the bead it overlaps", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(secondFiling("gt-wikw1", "2026-09-29T10:03:45Z"))
-		f.held["gastown"] = []specdispatch.HeldBead{heldBead}
-		r := runSpecDispatchCycle(f.env())
-		if len(f.slung) != 0 || len(r.Dispatched) != 0 {
-			t.Fatalf("slung a second filing of held work: slung %v report %+v", f.slung, r)
-		}
-		want := "gt-wikw1: held: gt-t61ft (held by " + seat + ") is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes"
-		if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
-			t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
-		}
-	})
-
-	t.Run("a candidate no held bead names a path of still slings", func(t *testing.T) {
-		t.Parallel()
-		other := cleanSpec("gt-other", 2, "2026-09-29T10:04:00Z")
-		other.Title = "notify: the cli retries a refused send"
-		other.Description = specTestDescription + "\n\ninternal/notify/send.go retries once on a refused send."
-		f := newFakeSpecTown(
-			secondFiling("gt-wikw1", "2026-09-29T10:03:45Z"),
-			other,
-		)
-		// What the seats hold names paths these candidates do not, and the
-		// two candidates name different files: the one that slings first
-		// does not hold the other (the same-tick overlap hold).
-		f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-t61ft", Paths: []string{"internal/notify/cli.go"}}}
-		env := f.env()
-		env.PerTick = 2
-		r := runSpecDispatchCycle(env)
-		if got := strings.Join(f.slung, " "); got != "gt-wikw1 gt-other" {
-			t.Fatalf("slung %q with no overlapping held bead", got)
-		}
-		if len(r.Dispatched) != 2 {
-			t.Fatalf("dispatched = %+v", r.Dispatched)
-		}
-		if f.heldRigs["gastown"] != 1 {
-			t.Errorf("held reads = %d, want one read for the rig's two candidates", f.heldRigs["gastown"])
-		}
-	})
-
-	t.Run("an unreadable held set holds the candidate", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(secondFiling("gt-wikw1", "2026-09-29T10:03:45Z"))
-		f.heldErr["gastown"] = errors.New("bd list: boom")
-		r := runSpecDispatchCycle(f.env())
-		if len(f.slung) != 0 {
-			t.Fatalf("slung a candidate whose held set could not be read: %v", f.slung)
-		}
-		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "cannot read the beads the seats hold") {
-			t.Fatalf("errors = %+v, want one held-read failure", r.Errors)
-		}
-	})
-}
-
-// A P0 or P1 candidate that overlaps work in flight takes its seat anyway and
-// the tick reports the bypass naming the holder; a P2 candidate on the same
-// overlap is held as before (gt-iydx1).
-func TestSpecDispatchBypassesTheOverlapHoldForUrgentWork(t *testing.T) {
-	t.Parallel()
-	const guard = "internal/daemon/overrun_guard.go"
-	const seat = "gastown/polecats/capable"
-	filing := func(id string, priority int) specdispatch.Spec {
-		s := cleanSpec(id, priority, "2026-10-26T10:00:00Z")
-		s.Title = "overrun guard nudge uses wait-idle under a 30s context"
-		s.Description = specTestDescription + "\n\nToday internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."
-		return s
-	}
-	held := []specdispatch.HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}}}
-	for _, tc := range []struct {
-		name     string
-		priority int
-	}{
-		{"P0 bypasses", 0},
-		{"P1 bypasses", 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			f := newFakeSpecTown(filing("gt-urgent", tc.priority))
-			f.held["gastown"] = held
-			r := runSpecDispatchCycle(f.env())
-			if got := strings.Join(f.slung, " "); got != "gt-urgent" {
-				t.Fatalf("slung %q, want the urgent bead dispatched despite the overlap", got)
-			}
-			want := fmt.Sprintf("gt-urgent: overlap hold bypassed for P%d (gt-t61ft held by %s)", tc.priority, seat)
-			if len(r.Bypassed) != 1 || r.Bypassed[0].Line != want {
-				t.Fatalf("bypassed = %+v, want %q", r.Bypassed, want)
-			}
-			if len(r.Skipped) != 0 {
-				t.Errorf("skipped = %+v, want the urgent bead not held", r.Skipped)
-			}
-		})
-	}
-
-	t.Run("P2 keeps the hold", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(filing("gt-normal", 2))
-		f.held["gastown"] = held
-		r := runSpecDispatchCycle(f.env())
-		if len(f.slung) != 0 {
-			t.Fatalf("slung a P2 bead overlapping held work: %v", f.slung)
-		}
-		if len(r.Bypassed) != 0 {
-			t.Errorf("bypassed = %+v, want no bypass for P2", r.Bypassed)
-		}
-		if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipHeld) {
-			t.Fatalf("skipped = %+v, want the P2 bead held", r.Skipped)
-		}
-	})
-}
-
-// A P0 candidate that overlaps nothing is dispatched with no bypass entry: the
-// report names only the holds the priority answered (gt-iydx1).
-func TestSpecDispatchNoBypassWithoutAnOverlap(t *testing.T) {
-	t.Parallel()
-	s := cleanSpec("gt-clear", 0, "2026-10-26T10:00:00Z")
-	s.Description = specTestDescription + "\n\ninternal/notify/send.go retries once on a refused send."
-	f := newFakeSpecTown(s)
-	f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-t61ft", Assignee: "gastown/polecats/capable", Paths: []string{"internal/daemon/overrun_guard.go"}}}
-	r := runSpecDispatchCycle(f.env())
-	if got := strings.Join(f.slung, " "); got != "gt-clear" {
-		t.Fatalf("slung %q, want gt-clear dispatched", got)
-	}
-	if len(r.Bypassed) != 0 {
-		t.Fatalf("bypassed = %+v, want none for a bead naming no held path", r.Bypassed)
-	}
-}
-
-// The dry run's printout carries the bypass twice: the tick's summary line
-// counts it and a bypassed line names the bead with what would have held it
-// (gt-iydx1).
-func TestSpecDispatchDryRunReportsTheOverlapBypass(t *testing.T) {
-	t.Parallel()
-	const guard = "internal/daemon/overrun_guard.go"
-	const seat = "gastown/polecats/capable"
-	s := cleanSpec("gt-urgent", 0, "2026-10-26T10:00:00Z")
-	s.Title = "overrun guard nudge uses wait-idle under a 30s context"
-	s.Description = specTestDescription + "\n\nToday internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."
-	f := newFakeSpecTown(s)
-	f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}}}
-	env := f.env()
-	env.DryRun = true
-	r := runSpecDispatchCycle(env)
-	if len(f.slung) != 0 {
-		t.Fatalf("dry run slung %v", f.slung)
-	}
-	var out bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.SetOut(&out)
-	printSpecDispatchReport(cmd, r)
-	for _, want := range []string{
-		"1 overlap hold bypassed",
-		"gt-urgent: overlap hold bypassed for P0 (gt-t61ft held by " + seat + ")",
-	} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("dry-run output %q does not carry %q", out.String(), want)
-		}
-	}
-}
-
-// An overlapping cluster — the dv-nnjl/dv-613z/dv-fec7.10 shapes seen on
-// devops 2026-10-25 — dispatches exactly the bead that precedes the others:
-// the dispatcher holds the rest on the shared test before a seat is charged or
-// a sling attempted, instead of spending one slot and 7-8 seconds per bead on a
-// guard refusal (gt-mqa3r).
-func TestSpecDispatchSelectsTheLeadingBeadOfAnOverlappingCluster(t *testing.T) {
-	t.Parallel()
-	// The three beads share one failing test and no file path, so only the
-	// test signal can hold them apart.
-	cluster := func(id string, priority int, created string) specdispatch.Spec {
-		s := cleanSpec(id, priority, created)
-		s.Title = "host rehearsal: the red tier sweep fails (TestHostRehearsal)"
-		return s
-	}
-	f := newFakeSpecTown(
-		cluster("dv-nnjl", 1, "2026-10-25T18:40:00Z"),
-		cluster("dv-613z", 2, "2026-10-25T18:41:00Z"),
-		cluster("dv-fec7.10", 2, "2026-10-25T18:42:00Z"),
-	)
-	env := f.env()
-	env.PerTick = 3
-	var mu sync.Mutex
-	calls := 0
-	sling := env.Sling
-	env.Sling = func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
-		mu.Lock()
-		calls++
-		mu.Unlock()
-		return sling(c, resume, seat)
-	}
-
-	r := runSpecDispatchCycle(env)
-
-	if got := strings.Join(f.slung, " "); got != "dv-nnjl" {
-		t.Fatalf("slung %q, want exactly the bead that precedes its overlapping peers", got)
-	}
-	if calls != 1 {
-		t.Errorf("sling attempts = %d, want one: a bead the guard would refuse takes no attempt", calls)
-	}
-	if len(r.Deferred) != 0 {
-		t.Errorf("deferred = %+v, want none: the overlap is answered before the sling", r.Deferred)
-	}
-	wantSkip := "dv-613z: held: dv-nnjl (held by this tick's sling on "
-	for _, e := range r.Skipped {
-		if strings.HasPrefix(e.Line, wantSkip) && strings.Contains(e.Line, "runs TestHostRehearsal") {
-			return
-		}
-	}
-	t.Errorf("skipped = %+v, want dv-613z held on dv-nnjl's TestHostRehearsal", r.Skipped)
-}
-
-// A bead the sling-time guard would refuse because work in flight names its
-// test is skipped before the seat choice: it costs the tick neither a seat
-// slot nor a sling attempt (gt-mqa3r).
-func TestSpecDispatchHoldsWorkInFlightOnASharedTest(t *testing.T) {
-	t.Parallel()
-	const seat = "gastown/polecats/capable"
-	candidate := cleanSpec("gt-second", 2, "2026-10-25T18:42:00Z")
-	candidate.Title = "host rehearsal: the sweep again (TestHostRehearsal)"
-	f := newFakeSpecTown(candidate)
-	f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-first", Assignee: seat, Tests: []string{"TestHostRehearsal"}}}
-	env := f.env()
-	var mu sync.Mutex
-	calls := 0
-	sling := env.Sling
-	env.Sling = func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
-		mu.Lock()
-		calls++
-		mu.Unlock()
-		return sling(c, resume, seat)
-	}
-
-	r := runSpecDispatchCycle(env)
-
-	if calls != 0 || len(f.slung) != 0 {
-		t.Fatalf("sling attempts = %d (slung %v), want none for a bead the guard would refuse", calls, f.slung)
-	}
-	want := "gt-second: held: gt-first (held by " + seat + ") is already hooked to a working seat and runs TestHostRehearsal; the hold lifts when that bead closes"
-	if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
-		t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
-	}
-}
-
-// A plan document is context every child of an epic cites, not work any one of
-// them does, so a held child's plan must not serialize its siblings (gt-4wb27,
-// the gt-mukgk force-sling). The code file it names still holds a second filing
-// of the same defect.
-func TestSpecDispatchHeldPlanDocumentDoesNotHoldSiblings(t *testing.T) {
-	t.Parallel()
-	const plan = "docs/plans/2026-10-19-epic-plan.md"
-	const code = "internal/cmd/spec.go"
-
-	db := beadsfake.New()
-	db.Seed(beads.Issue{ID: "gt-held-task", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
-		Description: "Plan " + plan + "; the fix lands in " + code + "."})
-	dir := t.TempDir()
-	heldEnv := func(f *fakeSpecTown) specDispatchEnv {
-		env := f.env()
-		env.Held = func(string) ([]specdispatch.HeldBead, error) {
-			return heldBeadsFrom(db, func(string, error) {}, dir)
-		}
-		return env
-	}
-	citing := func(id, created, text string) specdispatch.Spec {
-		s := cleanSpec(id, 2, created)
-		s.Description = specTestDescription + "\n\n" + text
-		return s
-	}
-
-	t.Run("two siblings citing only the plan both dispatch", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(
-			citing("gt-sibling-a", "2026-10-19T10:00:00Z", "Plan "+plan+"; the fix lands in internal/cmd/a.go."),
-			citing("gt-sibling-b", "2026-10-19T10:01:00Z", "Plan "+plan+"; the fix lands in internal/cmd/b.go."),
-		)
-		env := heldEnv(f)
-		env.PerTick = 2
-		r := runSpecDispatchCycle(env)
-		if got := strings.Join(f.slung, " "); got != "gt-sibling-a gt-sibling-b" {
-			t.Fatalf("slung %q, want both siblings the shared plan does not make one defect; report %+v", got, r)
-		}
-	})
-
-	t.Run("a second filing naming the held code file is still held", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(
-			citing("gt-dup", "2026-10-19T10:00:00Z", "Plan "+plan+"; the same "+code+" fix."),
-		)
-		r := runSpecDispatchCycle(heldEnv(f))
-		if len(f.slung) != 0 {
-			t.Fatalf("slung a second filing of the held code file: %v", f.slung)
-		}
-		if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, code) {
-			t.Fatalf("skipped = %+v, want the hold to name the shared code path", r.Skipped)
-		}
-	})
-}
-
-// The held read is the rig's own beads: the two statuses a working seat holds,
-// with the paths their own text names — description and notes both, as the
-// sling-time guard reads them (gt-z80p9). Only a bead an assignee names is a
-// seat's work: the same statuses with no assignee were never slung and hold
-// nothing (gt-xrog0).
-func TestSpecHeldBeadsFromAStore(t *testing.T) {
-	t.Parallel()
-	db := beadsfake.New()
-	db.Seed(
-		beads.Issue{ID: "gt-hooked", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
-			Description: "internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."},
-		beads.Issue{ID: "gt-claimed", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/capable",
-			Notes: "the fix lands in internal/notify/cli.go"},
-		beads.Issue{ID: "gt-stray", Status: string(beads.StatusInProgress),
-			Description: "internal/daemon/overrun_guard.go, a handoff bead no sling touched"},
-		beads.Issue{ID: "gt-ready", Status: "open", Description: "internal/daemon/overrun_guard.go"},
-		beads.Issue{ID: "gt-landed", Status: "closed", Description: "internal/daemon/overrun_guard.go"},
-		beads.Issue{ID: "gt-wordless", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable", Description: "no path at all"},
-	)
-	got, err := heldBeadsFrom(db, func(string, error) {}, t.TempDir())
-	if err != nil {
-		t.Fatalf("heldBeadsFrom: %v", err)
-	}
-	held := map[string]specdispatch.HeldBead{}
-	for _, h := range got {
-		held[h.ID] = h
-	}
-	if len(held) != 3 {
-		t.Fatalf("held = %+v, want the three beads a seat holds", got)
-	}
-	if _, ok := held["gt-stray"]; ok {
-		t.Errorf("held = %+v, want the unassigned in_progress bead left out", got)
-	}
-	if want := []string{"internal/daemon/overrun_guard.go"}; !reflect.DeepEqual(held["gt-hooked"].Paths, want) {
-		t.Errorf("gt-hooked paths = %v, want %v", held["gt-hooked"].Paths, want)
-	}
-	if want := []string{"internal/notify/cli.go"}; !reflect.DeepEqual(held["gt-claimed"].Paths, want) {
-		t.Errorf("gt-claimed paths = %v, want %v (notes are read too)", held["gt-claimed"].Paths, want)
-	}
-	if len(held["gt-wordless"].Paths) != 0 {
-		t.Errorf("gt-wordless paths = %v, want none", held["gt-wordless"].Paths)
-	}
-	for _, h := range got {
-		if h.Assignee != "gastown/polecats/capable" {
-			t.Errorf("%s assignee = %q, want the seat named in the hold reason", h.ID, h.Assignee)
-		}
-	}
-}
-
-// An unassigned in_progress bead naming a file does not hold a candidate naming
-// it too: no seat was ever slung it, so it is not a seat's work (gt-xrog0).
-func TestSpecHeldHoldSkipsAnUnassignedInProgressBead(t *testing.T) {
-	t.Parallel()
-	const guard = "internal/daemon/overrun_guard.go"
-	dir := t.TempDir()
-	db := beadsfake.New()
-	db.Seed(beads.Issue{ID: "gt-stray", Status: string(beads.StatusInProgress),
-		Description: "internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."})
-	env := specDispatchEnv{Held: func(string) ([]specdispatch.HeldBead, error) {
-		return heldBeadsFrom(db, func(string, error) {}, dir)
-	}}
-	candidate := cleanSpec("gt-second", 2, "2026-10-19T10:00:00Z")
-	candidate.Description += "\nToday " + guard + " calls Nudge with a 30 s context.\n"
-	if why, _, err := specHeldHold(env, "gastown", candidate, map[string]heldRead{}); err != nil || why != "" {
-		t.Fatalf("specHeldHold = %q, %v; want no hold from an unassigned bead", why, err)
-	}
-}
-
-// An epic's prose names its children's files, so a claimed epic is not a seat
-// working one of them: the held read leaves it out, as the sling-time guard
-// does, and a child naming the epic's file still dispatches (gt-aoyss).
-func TestHeldBeadsFromSkipsEpics(t *testing.T) {
-	t.Parallel()
-	db := beadsfake.New()
-	db.Seed(
-		beads.Issue{ID: "gt-epic", Type: "epic", Status: string(beads.StatusInProgress),
-			Description: "Children touch a.go."},
-		beads.Issue{ID: "gt-task", Type: "task", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
-			Description: "The fix lands in b.go."},
-	)
-	got, err := heldBeadsFrom(db, func(string, error) {}, t.TempDir())
-	if err != nil {
-		t.Fatalf("heldBeadsFrom: %v", err)
-	}
-	if len(got) != 1 || got[0].ID != "gt-task" || !reflect.DeepEqual(got[0].Paths, []string{"b.go"}) {
-		t.Fatalf("held = %+v, want only the hooked task naming b.go", got)
-	}
-
-	child := cleanSpec("gt-child", 1, "2026-09-29T10:00:00Z")
-	child.Description += "\nThe fix lands in a.go.\n"
-	dir := t.TempDir()
-	env := specDispatchEnv{Held: func(string) ([]specdispatch.HeldBead, error) {
-		return heldBeadsFrom(db, func(string, error) {}, dir)
-	}}
-	why, _, err := specHeldHold(env, "gastown", child, map[string]heldRead{})
-	if err != nil || why != "" {
-		t.Fatalf("specHeldHold = %q, %v; want no hold for a child naming the epic's file", why, err)
-	}
-	// P2, so the overlap hold is the rule under test rather than the urgent
-	// priority's bypass (gt-iydx1).
-	other := cleanSpec("gt-other", 2, "2026-09-29T10:00:00Z")
-	other.Description += "\nThe fix lands in b.go.\n"
-	if why, _, err := specHeldHold(env, "gastown", other, map[string]heldRead{}); err != nil || why == "" {
-		t.Fatalf("specHeldHold = %q, %v; want a hold for a candidate naming the hooked task's file", why, err)
-	}
-}
-
-// Only a polecat seat holds a candidate: the held read leaves out a handoff
-// bead, the crew session's other beads, and a handoff note any session holds
-// (gt-asvow). Their notes name every file the run touched; the files they
-// change are the polecat's.
-func TestHeldBeadsFromSkipsHandoffAndCrewHeldBeads(t *testing.T) {
-	t.Parallel()
-	db := beadsfake.New()
-	db.Seed(
-		beads.Issue{ID: "gt-seat", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
-			Description: "The fix lands in a.go."},
-		beads.Issue{ID: "gt-overseer", Status: string(beads.StatusInProgress), Assignee: "town/crew/overseer",
-			Labels: []string{"handoff"}, Description: "Read a.go today; the log names every file the run touched."},
-		beads.Issue{ID: "gt-crew", Status: beads.StatusHooked, Assignee: "town/crew/dipper",
-			Labels: []string{"gt:task"}, Description: "The crew notes land in a.go."},
-		beads.Issue{ID: "gt-note", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/capable",
-			Labels: []string{"gt:handoff"}, Description: "a.go is where the last session left off."},
-	)
-	got, err := heldBeadsFrom(db, func(string, error) {}, t.TempDir())
-	if err != nil {
-		t.Fatalf("heldBeadsFrom: %v", err)
-	}
-	if len(got) != 1 || got[0].ID != "gt-seat" {
-		t.Fatalf("held = %+v, want only the polecat seat's work bead", got)
-	}
-}
-
-// The candidate gt-overseer held on 2026-10-28 18:53: a crew session's handoff
-// log named the files the candidate changes, and the tick held it. It
-// dispatches now, while a polecat seat's bead on the same file still holds with
-// the same line (gt-asvow).
-func TestSpecDispatchHoldSkipsHandoffAndCrewHeldBeads(t *testing.T) {
-	t.Parallel()
-	const guard = "internal/daemon/overrun_guard.go"
-	const seat = "gastown/polecats/capable"
-	filing := func(id, created string) specdispatch.Spec {
-		s := cleanSpec(id, 2, created)
-		s.Description = specTestDescription + "\n\nToday " + guard + " (~254) calls Nudge with a 30 s context."
-		return s
-	}
-	// holdingEnv is the tick reading the one rig's held set from a store, the
-	// path production takes.
-	holdingEnv := func(t *testing.T, f *fakeSpecTown, issue beads.Issue) specDispatchEnv {
-		db := beadsfake.New()
-		db.Seed(issue)
-		dir := t.TempDir()
-		env := f.env()
-		env.Held = func(string) ([]specdispatch.HeldBead, error) {
-			return heldBeadsFrom(db, func(string, error) {}, dir)
-		}
-		return env
-	}
-
-	t.Run("a crew session's handoff bead does not hold", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(filing("gt-second", "2026-10-28T18:53:00Z"))
-		env := holdingEnv(t, f, beads.Issue{ID: "gt-overseer", Status: string(beads.StatusInProgress),
-			Assignee: "town/crew/overseer", Labels: []string{"handoff"},
-			Description: "Read " + guard + " today; the log names every file the run touched."})
-		r := runSpecDispatchCycle(env)
-		if got := strings.Join(f.slung, " "); got != "gt-second" {
-			t.Fatalf("slung %q, want the candidate a handoff log only names a file of; report %+v", got, r)
-		}
-	})
-
-	t.Run("a crew session's other bead does not hold", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(filing("gt-second", "2026-10-28T18:53:00Z"))
-		env := holdingEnv(t, f, beads.Issue{ID: "gt-crew", Status: beads.StatusHooked,
-			Assignee: "town/crew/dipper", Labels: []string{"gt:task"},
-			Description: "The crew's own notes land in " + guard + "."})
-		r := runSpecDispatchCycle(env)
-		if got := strings.Join(f.slung, " "); got != "gt-second" {
-			t.Fatalf("slung %q, want the candidate a crew session's bead does not hold; report %+v", got, r)
-		}
-	})
-
-	t.Run("a polecat seat's bead still holds", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(filing("gt-second", "2026-10-28T18:53:00Z"))
-		env := holdingEnv(t, f, beads.Issue{ID: "gt-first", Status: beads.StatusHooked,
-			Assignee: seat, Description: "The fix lands in " + guard + "."})
-		r := runSpecDispatchCycle(env)
-		if len(f.slung) != 0 {
-			t.Fatalf("slung a second filing of a polecat seat's work: %v", f.slung)
-		}
-		want := "gt-second: held: gt-first (held by " + seat + ") is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes"
-		if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
-			t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
-		}
-	})
-}
-
 // specHoldFiles drops a cited claude/docs standard once the bead's Constraints
 // section parses, listed or not: the standards tree lives in ~/.claude and no
 // polecat edits it (gt-kr17g). A section that is missing, empty or unparsed
@@ -1216,58 +687,6 @@ func TestSpecHoldFilesKeepsGoalDocsWhenConstraintsNameNoPath(t *testing.T) {
 			t.Parallel()
 			if got := specHoldFiles([]string{doc}, c.description, c.description); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("specHoldFiles = %v, want %v", got, c.want)
-			}
-		})
-	}
-}
-
-// Two beads that only read the same standard do not hold each other: the
-// standard is cited, not changed (gt-6t44f). Listing it under Constraints does
-// not change that — the standards tree lives in ~/.claude, which no polecat
-// edits (gt-kr17g). Two beads naming one source file still hold. A bead whose
-// Constraints section never parsed keeps its cited paths and holds (gt-zs8fq).
-func TestSpecHeldHoldReferenceDocsDoNotHold(t *testing.T) {
-	t.Parallel()
-	const standard = "claude/docs/standards/test-engineering.md"
-	const source = "internal/notify/cli.go"
-	cite := func(desc, path string) string { return desc + "\nRead " + path + " before you start.\n" }
-	reads := func(path string) string { return cite(specTestDescription, path) }
-	changes := func(path string) string {
-		body := "Update " + path + "."
-		return specConstraints(&body)
-	}
-	unparsed := strings.Replace(specTestDescription, "## Constraints", "## Constraint", 1)
-	noConstraints := specConstraints(nil)
-	cases := []struct {
-		name      string
-		held      string
-		candidate string
-		wantHold  bool
-	}{
-		{"two beads reading the same standard do not hold", reads(standard), reads(standard), false},
-		{"two beads naming the same source file hold", reads(source), reads(source), true},
-		{"two beads listing the standard under Constraints do not hold", changes(standard), changes(standard), false},
-		{"beads with no Constraints section keep the standard and hold", cite(noConstraints, standard), cite(noConstraints, standard), true},
-		{"beads whose Constraints heading did not parse hold", cite(unparsed, standard), cite(unparsed, standard), true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			db := beadsfake.New()
-			db.Seed(beads.Issue{ID: "gt-seat", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
-				Description: c.held})
-			env := specDispatchEnv{Held: func(string) ([]specdispatch.HeldBead, error) {
-				return heldBeadsFrom(db, func(string, error) {}, dir)
-			}}
-			candidate := cleanSpec("gt-second", 2, "2026-10-19T10:00:00Z")
-			candidate.Description = c.candidate
-			why, _, err := specHeldHold(env, "gastown", candidate, map[string]heldRead{})
-			if err != nil {
-				t.Fatalf("specHeldHold: %v", err)
-			}
-			if got := why != ""; got != c.wantHold {
-				t.Errorf("specHeldHold = %q, want a hold: %v", why, c.wantHold)
 			}
 		})
 	}
@@ -2140,51 +1559,6 @@ func TestSpecRunPendingSlingsReleasesTheSeatASlingLeftEmpty(t *testing.T) {
 	}
 }
 
-// A content-overlap refusal is a deferral, not a failure: the guard refuses
-// work in flight, and an unstarted peer only while it is ahead of this bead in
-// dispatch order and one the dispatcher would sling — here, an older bead on
-// the same test, with no hold of its own — so the refusal clears by itself once
-// that peer is slung or closes. The bead is retried with no label for an
-// operator to remove (gt-q6zoo, gt-nlkba, gt-00gee).
-func TestSpecDispatchOverlapRefusalDefersAndRetries(t *testing.T) {
-	t.Parallel()
-	overlap := sling.DecideDuplicates(
-		sling.Duplicate{ID: "gt-a", Status: "open", CreatedAt: "2026-10-15T12:00:00Z"},
-		[]sling.DuplicateMatch{{
-			Bead:        sling.Duplicate{ID: "gt-b", Status: "open", CreatedAt: "2026-10-15T09:00:00Z"},
-			SharedTests: []string{"TestSpecDispatch"},
-		}}).Err()
-	if !errors.Is(overlap, errSlingDuplicateContent) {
-		t.Fatalf("fixture: %v is not the overlap sentinel", overlap)
-	}
-
-	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
-	f.slingErrs["gt-a"] = []error{overlap}
-	r := runSpecDispatchCycle(f.env())
-	if len(r.Failed) != 0 || len(r.Skipped) != 1 {
-		t.Fatalf("overlap refusal handled as a failure: %+v", r)
-	}
-	if !strings.Contains(r.Skipped[0].Line, "content overlap") {
-		t.Errorf("deferral line = %q, want the overlap named", r.Skipped[0].Line)
-	}
-	if got := f.labels["gt-a"]; len(got) != 0 {
-		t.Errorf("overlap-refused bead labeled %v; the label would strand it out of the queue", got)
-	}
-	if n := len(f.notes["gt-a"]); n != 0 {
-		t.Errorf("overlap-refused bead annotated %d times, want none", n)
-	}
-
-	// The overlapping bead is slung or closes, the guard stops refusing, and
-	// the next tick dispatches the bead with nothing removed by hand.
-	r = runSpecDispatchCycle(f.env())
-	if len(f.slung) != 1 || f.slung[0] != "gt-a" {
-		t.Fatalf("slung %v, want gt-a retried on the next tick", f.slung)
-	}
-	if len(f.labels["gt-a"]) != 0 {
-		t.Errorf("labels after the retry = %v, want none", f.labels["gt-a"])
-	}
-}
-
 // A dispatch that fails for a reason it cannot clear itself leaves the queue
 // under the spec-dispatch-failed label, and the tick says exactly that: the
 // bead id, the reason, and the label that holds it out (gt-q6zoo).
@@ -2225,23 +1599,13 @@ func TestSpecDispatchFailureNamesTheExclusion(t *testing.T) {
 // line counts and truncates as before (gt-4wcqd).
 func TestSpecDispatchDeferralIsReportedOutsideTheSkipList(t *testing.T) {
 	t.Parallel()
-	overlap := sling.DecideDuplicates(
-		sling.Duplicate{ID: "gt-a", Status: "open", CreatedAt: "2026-10-15T12:00:00Z"},
-		[]sling.DuplicateMatch{{
-			Bead:        sling.Duplicate{ID: "gt-b", Status: "open", CreatedAt: "2026-10-15T09:00:00Z"},
-			SharedTests: []string{"TestSpecDispatch"},
-		}}).Err()
-	if !errors.Is(overlap, errSlingDuplicateContent) {
-		t.Fatalf("fixture: %v is not the overlap sentinel", overlap)
-	}
-
 	t.Run("a deferred sling is reported beside the unchanged skip", func(t *testing.T) {
 		t.Parallel()
 		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
-		f.slingErrs["gt-a"] = []error{overlap}
+		f.slingErrs["gt-a"] = []error{fmt.Errorf("%s gt-a is held (label needs-human): the hold was written after this dispatch read the bead", dispatch.SlingRefusalMarker)}
 		r := runSpecDispatchCycle(f.env())
-		if len(r.Deferred) != 1 || r.Deferred[0].Bead != "gt-a" || !strings.Contains(r.Deferred[0].Line, "content overlap") {
-			t.Fatalf("deferred = %+v, want gt-a's overlap deferral with its reason", r.Deferred)
+		if len(r.Deferred) != 1 || r.Deferred[0].Bead != "gt-a" || !strings.Contains(r.Deferred[0].Line, "is held") {
+			t.Fatalf("deferred = %+v, want gt-a's deferral with its reason", r.Deferred)
 		}
 		if len(r.Skipped) != 1 || r.Skipped[0].Line != r.Deferred[0].Line {
 			t.Errorf("skipped = %+v, want the deferral still listed unchanged so the tick line reads as before", r.Skipped)
@@ -2263,7 +1627,7 @@ func TestSpecDispatchDeferralIsReportedOutsideTheSkipList(t *testing.T) {
 	t.Run("a dry run reports neither", func(t *testing.T) {
 		t.Parallel()
 		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
-		f.slingErrs["gt-a"] = []error{overlap}
+		f.slingErrs["gt-a"] = []error{fmt.Errorf("%s gt-a is held (label needs-human): the hold was written after this dispatch read the bead", dispatch.SlingRefusalMarker)}
 		env := f.env()
 		env.DryRun = true
 		r := runSpecDispatchCycle(env)
@@ -3689,9 +3053,9 @@ func TestSpecHoldFilesHonorsTheReadOnlyMarkerThroughTheRealExtraction(t *testing
 }
 
 // TestSpecHoldReadOnlyMarkerReadsEveryTextField drives the marker through the
-// three production hold sites — heldBeadFrom for the tick's held set,
-// specPendingRefs for a pending bead's sling and specPeerHeldBySeat for the
-// guard's peer question — with a path marked (read-only) in each text field the
+// two production hold sites — heldBeadFrom for a seat's held bead and
+// specPeerHeldBySeat for the guard's peer question — with a path marked
+// (read-only) in each text field the
 // refs are extracted from. A site that stops passing its text, or an extraction
 // that stops reading a field, leaves the path held and turns that subtest red;
 // its unmarked twin shows the pair would otherwise hold (gt-dilzl, gt-5v13p).
@@ -3775,16 +3139,6 @@ func TestSpecHoldReadOnlyMarkerReadsEveryTextField(t *testing.T) {
 			},
 		},
 		{
-			name: "specPendingRefs",
-			stays: func(t *testing.T, field string, marked bool) bool {
-				t.Helper()
-				f := named(field, marked)
-				paths, _ := specPendingRefs(specdispatch.Spec{ID: "gt-peer", Title: f.title,
-					Description: f.description, Design: f.design, Notes: f.notes})
-				return holds(paths)
-			},
-		},
-		{
 			name: "specPeerHeldBySeat/peer marks",
 			stays: func(t *testing.T, field string, marked bool) bool {
 				t.Helper()
@@ -3816,5 +3170,49 @@ func TestSpecHoldReadOnlyMarkerReadsEveryTextField(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Two open beads that name one test and one file both dispatch in one tick: the
+// tick holds neither for the other, and says nothing about a hold or a
+// deferral. Landings are serial per rig and a rebase conflict costs a bounce, so
+// the overlap is not worth an idle seat (gt-e1ufo).
+func TestSpecDispatchSlingsEveryBeadOfAnOverlappingCluster(t *testing.T) {
+	t.Parallel()
+	cluster := func(id, created string) specdispatch.Spec {
+		s := cleanSpec(id, 2, created)
+		s.Title = "host rehearsal: the red tier sweep fails (TestHostRehearsal)"
+		s.Description = specTestDescription + "\n\nThe fix lands in internal/cmd/spec.go.\n"
+		return s
+	}
+	f := newFakeSpecTown(
+		cluster("gt-first", "2026-10-25T18:40:00Z"),
+		cluster("gt-second", "2026-10-25T18:41:00Z"),
+	)
+	env := f.env()
+	env.PerTick = 2
+	r := runSpecDispatchCycle(env)
+
+	slung := map[string]bool{}
+	for _, id := range f.slung {
+		slung[id] = true
+	}
+	if len(f.slung) != 2 || !slung["gt-first"] || !slung["gt-second"] {
+		t.Fatalf("slung %v, want both beads of the overlapping cluster in one tick; report %+v", f.slung, r)
+	}
+	if len(r.Skipped) != 0 || len(r.Deferred) != 0 {
+		t.Fatalf("skipped = %+v, deferred = %+v; want no hold or deferral line", r.Skipped, r.Deferred)
+	}
+}
+
+// The spec dispatcher's sling admits a content overlap instead of refusing it,
+// because the tick slings every ready bead it reaches (gt-e1ufo). The manual
+// sling never builds these params, so it keeps the refusal.
+func TestSpecSlingParamsAdmitOverlap(t *testing.T) {
+	t.Parallel()
+	c := specCandidate{Spec: specdispatch.Spec{ID: "gt-a"}, Rig: "gastown"}
+	p := specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, "", specdispatch.SeatChoice{Agent: "gastown/polecats/capable"})
+	if !p.AdmitOverlap {
+		t.Fatal("the spec dispatcher's sling params do not admit a content overlap")
 	}
 }

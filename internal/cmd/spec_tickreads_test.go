@@ -56,8 +56,8 @@ func specTickIssues() []beads.Issue {
 }
 
 // specGoldenTown is the fake town the golden runs over: specTickIssues as the
-// board, the container's open child, the held bead the second filing overlaps,
-// the taken bead's fresh read, and the formula the rig lacks.
+// board, the container's open child, the taken bead's fresh read, and the
+// formula the rig lacks.
 func specGoldenTown() *fakeSpecTown {
 	var specs []specdispatch.Spec
 	for _, i := range specTickIssues() {
@@ -67,9 +67,6 @@ func specGoldenTown() *fakeSpecTown {
 	f := newFakeSpecTown(specs...)
 	f.children["gt-box"] = []specdispatch.Child{{ID: "gt-box.1", Status: "open"}}
 	f.children["gt-box2"] = []specdispatch.Child{{ID: "gt-box2.1", Status: "closed"}}
-	f.held["gastown"] = []specdispatch.HeldBead{{
-		ID: "gt-t61ft", Assignee: "gastown/polecats/capable", Paths: []string{"internal/daemon/overrun_guard.go"},
-	}}
 	flip := f.specs["gt-flip"]
 	flip.Status, flip.Assignee = "hooked", "gastown/polecats/other"
 	f.showOverride = map[string]specdispatch.Spec{"gt-flip": flip}

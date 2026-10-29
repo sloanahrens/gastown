@@ -239,10 +239,10 @@ func TestSpecDispatchHeldTickOmitsItsPhaseTimes(t *testing.T) {
 	}
 }
 
-// Two candidates of one tick naming the same file: the second is held on the
-// first, as it was when the slings ran one after another and the first had
-// hooked its bead before the second was read.
-func TestSpecDispatchHoldsAnOverlappingCandidateOfTheSameTick(t *testing.T) {
+// Two candidates of one tick naming the same file both dispatch: the tick holds
+// the second on the first for an overlap it no longer reads, so both slings run
+// and neither line reports a hold (gt-e1ufo).
+func TestSpecDispatchSlingsBothCandidatesOfOneTickOnTheSameFile(t *testing.T) {
 	t.Parallel()
 	const guard = "internal/daemon/overrun_guard.go"
 	filing := func(id, created string) specdispatch.Spec {
@@ -257,10 +257,10 @@ func TestSpecDispatchHoldsAnOverlappingCandidateOfTheSameTick(t *testing.T) {
 	env := f.env()
 	env.PerTick = 0
 	r := runSpecDispatchCycle(env)
-	if got := strings.Join(f.slung, " "); got != "gt-first" {
-		t.Fatalf("slung %q, want only the first filing", got)
+	if got := strings.Join(f.slung, " "); got != "gt-first gt-second" {
+		t.Fatalf("slung %q, want both filings dispatched", got)
 	}
-	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "gt-second: held: gt-first (held by this tick's sling on ") || !strings.Contains(r.Skipped[0].Line, guard) {
-		t.Fatalf("skipped = %+v, want the second held on the first with the shared file", r.Skipped)
+	if len(r.Skipped) != 0 {
+		t.Fatalf("skipped = %+v, want no hold line", r.Skipped)
 	}
 }

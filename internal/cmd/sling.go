@@ -60,7 +60,9 @@ Content Duplicate Guard:
   always, and unstarted work only when it comes first in dispatch order
   (priority, then age, then id) and the dispatcher would sling it, so a cluster
   of overlapping ready beads dispatches one at a time even when the bead ahead
-  of it is held. A shared file alone warns and proceeds. --force overrides.
+  of it is held for another reason. The spec dispatcher does not refuse an
+  overlap at all, so its ready beads go out in the same tick. A shared file
+  alone warns and proceeds. --force overrides.
   gt sling gt-abc greenplace --force                # Sling despite the overlap
 
 Blocked Work:

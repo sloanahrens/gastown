@@ -194,6 +194,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		if dupCandidate != nil {
 			candidate = *dupCandidate
 		}
+		if opts.AdmitOverlap {
+			matches = AdmitOverlaps(candidate, matches)
+		}
 		if decision := DecideDuplicates(candidate, matches); decision.Message != "" {
 			if decision.Blocked {
 				result.ErrMsg = ErrDuplicateContent.Error()
