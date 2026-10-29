@@ -49,6 +49,19 @@ func TestRigOnTracker(t *testing.T) {
 		t.Errorf("RigOnTracker with no route table = %v, %v; want false, nil", got, err)
 	}
 
+	// An empty rig name names no rig, even on a tracker route whose path has an empty first segment.
+	emptyPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(emptyPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	emptyRoute := `{"prefix":"x-","path":"/mayor/rig","backend":"tracker"}` + "\n"
+	if err := os.WriteFile(filepath.Join(emptyPath, ".beads", RoutesFileName), []byte(emptyRoute), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := RigOnTracker(emptyPath, ""); err != nil || got {
+		t.Errorf("RigOnTracker(\"\") = %v, %v; want false, nil", got, err)
+	}
+
 	// routes.jsonl that is a directory cannot be read.
 	if err := os.RemoveAll(filepath.Join(beadsDir, RoutesFileName)); err != nil {
 		t.Fatal(err)

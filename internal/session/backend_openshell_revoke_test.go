@@ -30,12 +30,9 @@ type revokeFake struct {
 	actors []string
 }
 
-func (f *revokeFake) Revoke(_ context.Context, actor string) (int, error) {
+func (f *revokeFake) Revoke(_ context.Context, actor string) error {
 	f.actors = append(f.actors, actor)
-	if f.err != nil {
-		return 0, f.err
-	}
-	return 1, nil
+	return f.err
 }
 
 // writeTrackerRoute puts rig on the town tracker in this town's route table.
@@ -213,6 +210,67 @@ func TestOpenShellPrepareRollbackReportsAFailedDelete(t *testing.T) {
 	}
 	if len(revoker.actors) != 0 {
 		t.Errorf("revoked %v although the sandbox may still exist", revoker.actors)
+	}
+}
+
+// A record that cannot be read names no seat, so Delete refuses before it
+// touches the sandbox: the sandbox and its record stay for a retry, and no token
+// is revoked.
+func TestOpenShellOpsDeleteRefusesAnUnreadableRecord(t *testing.T) {
+	t.Parallel()
+	fake := &sandbox.Fake{}
+	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	writeOpsRecord(t, b)
+	writeTrackerRoute(t, b.townRoot, openshellTestRig)
+	recPath := sandboxRecordPath(b.townRoot, openshellTestSession)
+	if err := os.WriteFile(recPath, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	revoker := &revokeFake{}
+	b.revoker = revoker
+
+	if err := b.Delete(openshellTestSession); err == nil {
+		t.Fatal("Delete = nil, want the unreadable record refused")
+	}
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Errorf("sandbox CLI calls = %v, want none: the sandbox must stay until its record reads", calls)
+	}
+	if len(revoker.actors) != 0 {
+		t.Errorf("revoked %v, want nothing", revoker.actors)
+	}
+	if _, err := os.Stat(recPath); err != nil {
+		t.Errorf("record stat = %v, want it kept for the retry", err)
+	}
+}
+
+// A record that names no seat cannot have its token revoked. Delete still
+// deletes the sandbox, and warns naming the record rather than failing a retry
+// that could never succeed.
+func TestOpenShellOpsDeleteWarnsWhenTheRecordNamesNoSeat(t *testing.T) {
+	t.Parallel()
+	b, _ := opsBackend(t, &sandbox.Fake{}, newSandboxProbe(t, true))
+	if err := WriteSandboxRecord(b.townRoot, SandboxRecord{Session: openshellTestSession, Rig: openshellTestRig}); err != nil {
+		t.Fatal(err)
+	}
+	writeTrackerRoute(t, b.townRoot, openshellTestRig)
+	revoker := &revokeFake{}
+	b.revoker = revoker
+	var warnings []string
+	b.warnf = func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	}
+
+	if err := b.Delete(openshellTestSession); err != nil {
+		t.Fatalf("Delete = %v, want the warning to leave the delete a success", err)
+	}
+	if len(revoker.actors) != 0 {
+		t.Errorf("revoked %v for a record that names no seat, want nothing", revoker.actors)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "names no seat") {
+		t.Errorf("warnings = %q, want one saying the record names no seat", warnings)
+	}
+	if _, ok, _ := ReadSandboxRecord(b.townRoot, openshellTestSession); ok {
+		t.Error("record survived a delete of its sandbox")
 	}
 }
 

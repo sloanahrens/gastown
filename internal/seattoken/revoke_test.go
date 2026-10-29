@@ -21,12 +21,9 @@ type fakeRevoker struct {
 	actors []string
 }
 
-func (f *fakeRevoker) Revoke(_ context.Context, actor string) (int, error) {
+func (f *fakeRevoker) Revoke(_ context.Context, actor string) error {
 	f.actors = append(f.actors, actor)
-	if f.err != nil {
-		return 0, f.err
-	}
-	return 1, nil
+	return f.err
 }
 
 // writeRouteTable writes the town's route table holding one line, which the
@@ -134,15 +131,24 @@ func TestStoreRevokeIsIdempotent(t *testing.T) {
 func TestStoreRevokeRevokesWhenTheFileCannotBeRemoved(t *testing.T) {
 	t.Parallel()
 	store := New(t.TempDir())
-	seat := intent.Seat{Rig: strings.Repeat("r", 300), Role: "polecats", Name: "cheedo"}
-	if err := os.MkdirAll(store.seatDirs(seat)[1], 0o700); err != nil {
+	seat := testSeat()
+	path, err := store.Ensure(context.Background(), seat, &fakeIssuer{token: seatToken})
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	// A directory that holds a file cannot be removed by os.Remove, so the
+	// token path is no longer a file the delete can take away.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "held"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	revoker := &fakeRevoker{}
 
-	err := store.Revoke(context.Background(), seat, revoker)
+	err = store.Revoke(context.Background(), seat, revoker)
 	if err == nil {
-		t.Fatal("Revoke = nil, want the token file it could not stat")
+		t.Fatal("Revoke = nil, want the token file it could not remove")
 	}
 	if want := []string{seat.String()}; !slices.Equal(revoker.actors, want) {
 		t.Errorf("revoked %v, want %v", revoker.actors, want)
@@ -197,7 +203,7 @@ func TestTrackerRevokerReportsARefusal(t *testing.T) {
 		t.Fatalf("tracker client: %v", err)
 	}
 
-	_, err = NewTrackerRevoker(tc).Revoke(context.Background(), "gastown/crew/max")
+	err = NewTrackerRevoker(tc).Revoke(context.Background(), "gastown/crew/max")
 	if err == nil || !strings.Contains(err.Error(), "tracker answered 500") {
 		t.Fatalf("Revoke = %v, want the tracker's 500 reported", err)
 	}

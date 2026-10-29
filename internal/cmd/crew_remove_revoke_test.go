@@ -24,12 +24,9 @@ type crewRevoker struct {
 	actors []string
 }
 
-func (r *crewRevoker) Revoke(_ context.Context, actor string) (int, error) {
+func (r *crewRevoker) Revoke(_ context.Context, actor string) error {
 	r.actors = append(r.actors, actor)
-	if r.err != nil {
-		return 0, r.err
-	}
-	return 1, nil
+	return r.err
 }
 
 // crewTokenIssuer hands out one token, for the file a test seeds.

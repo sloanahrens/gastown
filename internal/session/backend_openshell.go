@@ -957,6 +957,9 @@ func (b *openshellBackend) checkSandboxGT(ctx context.Context, name string) erro
 func (b *openshellBackend) rollback(spec SpawnSpec, cause error, trace *SandboxTrace) error {
 	var deleteErr error
 	err := trace.Phase("teardown", func() error {
+		// A sandbox that a failed populate never finished creating is already
+		// gone, which is the state the rollback is after, so not-found is
+		// success here as it is in Delete.
 		deleteErr = b.deleteSandbox(spec.Session)
 		return errors.Join(deleteErr, RemoveSandboxRecord(b.townRoot, spec.Session))
 	})

@@ -289,15 +289,18 @@ func (b *openshellBackend) Stop(session string) error {
 // Delete removes the sandbox and its registry record, and ends the tracker
 // token of the seat it ran. A sandbox that is already gone counts as deleted
 // and still ends the token; any other failure keeps the record so the delete
-// can be retried.
+// can be retried. A record that cannot be read is a refusal, not a guess: the
+// seat it names is unknown, so the sandbox stays until the record reads
+// (gt-p85pw.86).
 func (b *openshellBackend) Delete(session string) error {
-	rec, hasRec, recErr := ReadSandboxRecord(b.townRoot, session)
+	rec, hasRec, err := ReadSandboxRecord(b.townRoot, session)
+	if err != nil {
+		return fmt.Errorf("sandbox %s: reading its record to find its seat's token: %w", session, err)
+	}
 	if err := b.deleteSandbox(session); err != nil {
 		return err
 	}
-	if recErr != nil {
-		b.warn("sandbox %s: reading its record to revoke its seat's token: %v", session, recErr)
-	} else if hasRec {
+	if hasRec {
 		b.revokeSeat(rec)
 	}
 	routing.forget(session)

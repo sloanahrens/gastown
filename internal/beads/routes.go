@@ -211,7 +211,8 @@ func GetPrefixForRig(townRoot, rigName string) string {
 	// Look for a route where the path starts with the rig name
 	// Routes paths are like "gastown/mayor/rig" or "beads/mayor/rig"
 	for _, r := range routes {
-		if routeNamesRig(r, rigName) {
+		parts := strings.SplitN(r.Path, "/", 2)
+		if len(parts) > 0 && parts[0] == rigName {
 			// Return prefix without trailing hyphen
 			return strings.TrimSuffix(r.Prefix, "-")
 		}
