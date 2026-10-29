@@ -183,7 +183,7 @@ func (r *Run) registryInstalledCommit(ctx context.Context) (string, error) {
 // docker is the exception once it has started. Garbage collect runs inside the
 // registry container, and killing the docker client leaves that collect running
 // after the plugin lock is released, where it can race a push. So docker is not
-// cancelled: the budget gates whether it starts, and the run waits for it.
+// canceled: the budget gates whether it starts, and the run waits for it.
 //
 // An environment entry with a value is carried to the command. An entry with an
 // empty value sets nothing, so it is dropped and the command inherits this
