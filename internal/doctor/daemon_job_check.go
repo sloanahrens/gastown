@@ -22,6 +22,9 @@ type DaemonJobCheck struct {
 	// job reads the launchd job serving the town; nil is hostDaemonJob, which
 	// is 'launchctl print' and nothing else, read-only.
 	job func(townRoot string) (st templates.SupervisorState, provisioned bool)
+	// containerReading is the container-town reading; nil is
+	// readContainerDaemon.
+	containerReading func(townRoot string) containerDaemonReading
 }
 
 // NewDaemonJobCheck creates a new daemon-job check.
@@ -56,6 +59,15 @@ func hostDaemonJob(townRoot string) (templates.SupervisorState, bool) {
 // no process of its own. The repair is the operator's to run: nothing in gt
 // boots a job out or in.
 func (c *DaemonJobCheck) Run(ctx *CheckContext) *CheckResult {
+	// A container town has no launchd job to judge: its daemon's liveness is
+	// the container's and the daemon's own report (gt-qpeei.20).
+	if v := judgeContainerDaemon(c.Name(), ctx.TownRoot, c.containerReading); v.isContainer {
+		if v.result != nil {
+			return v.result
+		}
+		return v.reading.okResult(c.Name())
+	}
+
 	goos := c.goos
 	if goos == "" {
 		goos = runtime.GOOS

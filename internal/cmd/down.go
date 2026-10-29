@@ -119,6 +119,18 @@ type downServices struct {
 	findIdleMonitors func(townRoot string) []int
 	findOrphans      func(townRoot string) []int
 
+	// portConflict answers a dry run's imposter question: the pid holding the
+	// Dolt port that is not the town's server, and a description. nil reads the
+	// real lsof through doltserver.CheckPortConflict; a test sets it so the unit
+	// tier starts no external tool (gt-qpeei.20).
+	portConflict func(townRoot string) (int, string)
+
+	// supervisor is how the town's daemon is supervised: it says whether the
+	// town runs its daemon in a container and runs that container's stop.
+	// nil reads the town's own daemon.supervisor setting through
+	// realDaemonControl, so every other kind takes the pid path below.
+	supervisor *daemonControl
+
 	// sessions replaces the per-rig session stops, which need a live tmux
 	// server. Nil means the real ones. When set, runDownWith opens no tmux, so
 	// the phases that read it (the legacy-socket sweep, --all's verification
@@ -161,6 +173,7 @@ func realDownServices() downServices {
 		killImposters:    doltserver.KillImposters,
 		findIdleMonitors: doltserver.FindIdleMonitorProcesses,
 		findOrphans:      findOrphanDoltServers,
+		portConflict:     doltserver.CheckPortConflict,
 	}
 }
 
@@ -440,6 +453,64 @@ func reportRigSessionsSkipped(rigNames []string, rigsErr error) {
 		fmt.Sprintf("%s not stopped: %v", rigAgentsNotStopped(rigNames), rigsErr))
 }
 
+// stopContainerDaemon is gt down's daemon phase for a town whose daemon runs
+// in a container: the container stops through its supervisor's own compose
+// command, and no pid from daemon.lock or daemon.pid is signaled, because
+// that number comes from the container's namespace and names nothing — or an
+// unrelated process — on this host (gt-qpeei.20). handled is false for every
+// other kind, which keeps the pid path gt down has always taken. It is also
+// false when the settings cannot be read and the town has no container
+// compose file: such a town is host-supervised, and the pid path is the one gt
+// down took before containers. With the compose file present the town may be a
+// container town whose daemon.lock pid names nothing on this host, so an
+// unreadable setting stops nothing and says so.
+func stopContainerDaemon(townRoot string, svc downServices, dryRun bool) (handled, ok bool) {
+	ctl := svc.supervisor
+	if ctl == nil {
+		ctl = realDaemonControl()
+	}
+	cfg, container, err := ctl.townDaemonKind(townRoot)
+	if err != nil {
+		// The settings are what name the supervisor, but the compose file a
+		// container town's supervisor drives does not depend on them. With it
+		// present the pid path is off the table; without it the town is a host
+		// town, and refusing would leave its daemon running over a settings file
+		// gt down never needed.
+		if config.MayBeContainerTown(townRoot) {
+			printDownStatus("Daemon", false, fmt.Sprintf("cannot tell how this town's daemon is supervised (%v), and %s exists, so it may be a container town whose daemon.lock pid names nothing on this host: fix the settings and run gt down again", err, config.ContainerComposeFile(townRoot)))
+			return true, false
+		}
+		fmt.Printf("%s Daemon: cannot tell how this town's daemon is supervised (%v); no container compose file, so stopping it as a host daemon\n", style.WarningPrefix, err)
+		return false, true
+	}
+	if !container {
+		return false, true
+	}
+
+	name := "container " + cfg.ContainerName()
+	if dryRun {
+		printDownStatus("Daemon", true, fmt.Sprintf("would stop through the container supervisor (%s)", name))
+		return true, true
+	}
+
+	sup, err := ctl.detectDaemonSupervisor(townRoot)
+	if err != nil {
+		printDownStatus("Daemon", false, fmt.Sprintf("cannot reach the %s supervisor: %v", name, err))
+		return true, false
+	}
+	argv, err := ctl.containerStopArgv(townRoot, cfg, sup)
+	if err != nil {
+		printDownStatus("Daemon", false, err.Error())
+		return true, false
+	}
+	if err := ctl.run(argv); err != nil {
+		printDownStatus("Daemon", false, fmt.Sprintf("the container supervisor did not stop %s: %v", name, err))
+		return true, false
+	}
+	printDownStatus("Daemon", true, fmt.Sprintf("stopped through the container supervisor (%s)", name))
+	return true, true
+}
+
 // stopTownServices stops the services that need neither the rig registry nor
 // tmux: the daemon, Dolt, and the stray Dolt servers around them, plus the
 // .beads/dolt directories that would respawn one. It reports each phase as it
@@ -450,27 +521,28 @@ func stopTownServices(townRoot string, svc downServices, dryRun bool) bool {
 	ok := true
 
 	// Phase 4: Stop Daemon
-	running, pid, daemonErr := svc.daemonRunning(townRoot)
-	if daemonErr != nil {
+	if handled, stopOK := stopContainerDaemon(townRoot, svc, dryRun); handled {
+		if !stopOK {
+			ok = false
+		}
+	} else if running, pid, daemonErr := svc.daemonRunning(townRoot); daemonErr != nil {
 		printDownStatus("Daemon", false, fmt.Sprintf("status check failed: %v", daemonErr))
 		ok = false
 	} else if dryRun {
 		if running {
 			printDownStatus("Daemon", true, fmt.Sprintf("would stop (PID %d)", pid))
 		}
-	} else {
-		if running {
-			if err := svc.stopDaemon(townRoot); err != nil {
-				printDownStatus("Daemon", false, err.Error())
-				ok = false
-			} else if pid > 0 {
-				printDownStatus("Daemon", true, fmt.Sprintf("stopped (was PID %d)", pid))
-			} else {
-				printDownStatus("Daemon", true, "stopped (stale lock cleaned)")
-			}
+	} else if running {
+		if err := svc.stopDaemon(townRoot); err != nil {
+			printDownStatus("Daemon", false, err.Error())
+			ok = false
+		} else if pid > 0 {
+			printDownStatus("Daemon", true, fmt.Sprintf("stopped (was PID %d)", pid))
 		} else {
-			printDownStatus("Daemon", true, "not running")
+			printDownStatus("Daemon", true, "stopped (stale lock cleaned)")
 		}
+	} else {
+		printDownStatus("Daemon", true, "not running")
 	}
 
 	// Phase 4b-i: Stop bd dolt idle-monitor processes.
@@ -532,7 +604,11 @@ func stopTownServices(townRoot string, svc downServices, dryRun bool) bool {
 			}
 		}
 	} else {
-		conflictPID, _ := doltserver.CheckPortConflict(townRoot)
+		portConflict := svc.portConflict
+		if portConflict == nil {
+			portConflict = doltserver.CheckPortConflict
+		}
+		conflictPID, _ := portConflict(townRoot)
 		if conflictPID > 0 {
 			printDownStatus("Dolt imposters", true, fmt.Sprintf("would stop imposter (PID %d)", conflictPID))
 		}

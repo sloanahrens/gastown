@@ -33,6 +33,9 @@ type DaemonRespawnCheck struct {
 	// without ever starting; nil is hostDaemonRespawn, which is launchctl
 	// print and nothing else, read-only.
 	probe func(townRoot string) (templates.SupervisorState, bool)
+	// containerReading is the container-town reading; nil is
+	// readContainerDaemon.
+	containerReading func(townRoot string) containerDaemonReading
 }
 
 // hostDaemonRespawn asks launchctl what it is doing with the daemon's job.
@@ -69,6 +72,16 @@ func daemonRespawnStatePath(townRoot string) string {
 // daemon back, and the repair is the operator's to run — nothing in gt
 // bootouts or bootstraps a job.
 func (c *DaemonRespawnCheck) Run(ctx *CheckContext) *CheckResult {
+	// launchd's spawn accounting says nothing about a container town's daemon,
+	// whose restart policy belongs to the container runtime; the container and
+	// the daemon's own state are the report (gt-qpeei.20).
+	if v := judgeContainerDaemon(c.Name(), ctx.TownRoot, c.containerReading); v.isContainer {
+		if v.result != nil {
+			return v.result
+		}
+		return v.reading.okResult(c.Name())
+	}
+
 	st, looping := c.daemonRespawn(ctx.TownRoot)
 
 	if st.Err != nil {

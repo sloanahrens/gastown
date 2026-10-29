@@ -3,7 +3,9 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1384,4 +1386,21 @@ func (p *PatrolsConfig) Count() int {
 		}
 	}
 	return n
+}
+
+// ContainerComposeFile is where a container town's compose file lives: rendered
+// when the town is set up, and the file its container supervisor drives.
+func ContainerComposeFile(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", "container", "compose.yml")
+}
+
+// MayBeContainerTown reports whether the town carries the compose file only a
+// container town has. It reads no settings, so it answers when they cannot be
+// read: a caller that cannot tell how the daemon is supervised asks it whether
+// the daemon.lock pid could be a container's, which names nothing on this host.
+// A compose file that cannot be statted for a reason other than being absent
+// counts as present, so the answer fails toward the container.
+func MayBeContainerTown(townRoot string) bool {
+	_, err := os.Stat(ContainerComposeFile(townRoot))
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
 }

@@ -20,6 +20,15 @@ type DaemonCheck struct {
 	// daemon's job; nil is hostSupervisor, which reads the plist / unit file
 	// and asks launchctl / systemctl.
 	supervisor daemonSupervisor
+
+	// running reports whether a daemon holds the lock, with its pid; nil is
+	// daemon.IsRunning. A container town never reaches it, and the container
+	// tests replace it with one that fails the test, so a pid read coming
+	// back on that path is red (gt-qpeei.20).
+	running func(townRoot string) (bool, int, error)
+	// containerReading is the container-town reading; nil is
+	// readContainerDaemon.
+	containerReading func(townRoot string) containerDaemonReading
 }
 
 // daemonSupervisor is what DaemonCheck needs from the host's supervisor.
@@ -72,7 +81,20 @@ func pidIfRunning(running bool, pid int) int {
 
 // Run checks if the daemon is running.
 func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
-	running, pid, err := daemon.IsRunning(ctx.TownRoot)
+	// A container town's daemon is judged by its container and its own state,
+	// never by the pid the lock file names (gt-qpeei.20).
+	if v := judgeContainerDaemon(c.Name(), ctx.TownRoot, c.containerReading); v.isContainer {
+		if v.result != nil {
+			return v.result
+		}
+		return v.reading.okResult(c.Name())
+	}
+
+	isRunning := c.running
+	if isRunning == nil {
+		isRunning = daemon.IsRunning
+	}
+	running, pid, err := isRunning(ctx.TownRoot)
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -139,6 +161,14 @@ func (c *DaemonCheck) DestructiveFix() bool { return true }
 func (c *DaemonCheck) Fix(ctx *CheckContext) error {
 	if ctx.NoStart {
 		return ErrSkippedNoStart
+	}
+
+	// A container town's daemon starts only through its container supervisor,
+	// so the repair is the operator's command: a process started here would
+	// be a second daemon on this host, reading the town beside the
+	// container's own (gt-qpeei.20).
+	if v := judgeContainerDaemon(c.Name(), ctx.TownRoot, c.containerReading); v.isContainer {
+		return fmt.Errorf("this town's daemon runs under its container supervisor, so nothing is started here: run 'gt daemon restart' in %s", ctx.TownRoot)
 	}
 
 	// Find gt executable

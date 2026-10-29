@@ -30,6 +30,10 @@ type daemonLivenessBaseline struct {
 // the process is alive via lock/PID.
 type DaemonLivenessCheck struct {
 	BaseCheck
+
+	// containerReading is the container-town reading; nil is
+	// readContainerDaemon.
+	containerReading func(townRoot string) containerDaemonReading
 }
 
 // NewDaemonLivenessCheck creates a new daemon-liveness check.
@@ -52,7 +56,22 @@ func daemonLivenessStatePath(townRoot string) string {
 // timestamp and, once the baseline is old enough to have given the daemon a
 // fair chance to tick again, an advancing count.
 func (c *DaemonLivenessCheck) Run(ctx *CheckContext) *CheckResult {
-	state, err := daemon.LoadState(ctx.TownRoot)
+	// In a container town a fresh heartbeat is not enough on its own: the
+	// container has to be up and to own the daemon that wrote it, and a
+	// reading that cannot say so is not health (gt-qpeei.20). The verdict's
+	// state is the one judged below, so the two never read two documents.
+	verdict := judgeContainerDaemon(c.Name(), ctx.TownRoot, c.containerReading)
+	if verdict.isContainer && verdict.result != nil {
+		return verdict.result
+	}
+
+	var state *daemon.State
+	var err error
+	if verdict.isContainer {
+		state, err = verdict.reading.state, verdict.reading.stateErr
+	} else {
+		state, err = daemon.LoadState(ctx.TownRoot)
+	}
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
