@@ -1,7 +1,6 @@
 package polecatimage
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -141,7 +140,7 @@ func runProgram(args []string, stdin io.Reader, stdout, stderr io.Writer, get fu
 		case "trim-paths":
 			return trimPathsMain(args[1:], stdout, stderr)
 		case "trim-list-write":
-			return trimListWriteMain(stdin, args[1:], stdout, stderr)
+			return trimListWriteMain(args[1:], stdout, stderr)
 		case "seed-clone":
 			return seedCloneMain(args[1:], stdout, stderr)
 		case "seed-cache":
@@ -219,7 +218,7 @@ func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 	root := flags.String("root", cachevol.SeedCacheRoot, "the claim the listed paths are relative to")
 	list := flags.String("list", cachevol.TrimListRoot, "the directory the shard volumes are mounted under")
 	listFile := flags.String("list-file", "", "the claim-relative file a claim-carried trim reads its list from")
-	listSHA256 := flags.String("list-sha256", "", "the digest of the claim-carried list the Job was built with")
+	listDigest := flags.String("list-sha256-file", "", "the claim-relative file holding the digest of the claim-carried list")
 	shardsText := flags.String("shards", "", "the number of shards the Job mounted")
 	if err := flags.Parse(args); err != nil {
 		return 3
@@ -231,10 +230,14 @@ func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 			fmt.Fprintln(stderr, "trim-paths: --list-file and --shards name two routes; give one")
 			return 3
 		}
-		res, err = RemoveTrimPathsFromClaim(*root, *listFile, *listSHA256, w)
+		if *listDigest == "" {
+			fmt.Fprintln(stderr, "trim-paths: --list-file needs --list-sha256-file, the digest the writer put beside the list")
+			return 3
+		}
+		res, err = RemoveTrimPathsFromClaim(*root, *listFile, *listDigest, w)
 	} else {
-		if *listSHA256 != "" {
-			fmt.Fprintln(stderr, "trim-paths: --list-sha256 names a claim-carried list; give --list-file")
+		if *listDigest != "" {
+			fmt.Fprintln(stderr, "trim-paths: --list-sha256-file names a claim-carried list; give --list-file")
 			return 3
 		}
 		shards, aerr := strconv.Atoi(*shardsText)
@@ -252,38 +255,43 @@ func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 	return 0
 }
 
-// trimListWriteMain runs the writer: it reads PlanTrim's removal list as a JSON array on
-// stdin and writes it into the claim at --root, where a claim-carried trim Job reads it.
+// trimListWriteMain runs the writer: it plans PlanTrim's removal list from the claim at --root, under
+// the cap and sandbox count its Job passes, and writes the list and its digest into the claim where
+// the Job's trim container reads them. It is the claim-carried trim Job's init container.
 //
-// stdin is the list because a list past one set of shards has no other channel that
-// reaches the claim whole. Exit 3 with a reason on stderr means nothing was written: the
-// list is refused whole or written whole, so a Job applied after it never reads a list
-// the writer did not vouch for.
-func trimListWriteMain(stdin io.Reader, args []string, stdout, stderr io.Writer) int {
+// The list is planned here, in the pod that mounts the claim, because a list past one set of shards
+// has no other channel that reaches the claim whole and nothing outside the cluster mounts it. Exit 3
+// with a reason on stderr means nothing was written: the list is refused whole or written whole, so
+// the trim container never reads a list the writer did not vouch for.
+func trimListWriteMain(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("trim-list-write", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	root := flags.String("root", cachevol.SeedCacheRoot, "the shared cache claim the trim reads")
+	root := flags.String("root", cachevol.SeedCacheRoot, "the shared cache claim the trim plans and writes its list in")
+	capText := flags.String("cap-bytes", "", "the size to bring the claim under, in bytes")
+	sandboxesText := flags.String("sandboxes", "", "the count of running sandboxes, whose module cache the plan leaves alone")
 	if err := flags.Parse(args); err != nil {
 		return 3
 	}
-	data, err := io.ReadAll(stdin)
-	if err != nil {
-		err = fmt.Errorf("reading the list from stdin: %w", err)
+	cap, err := strconv.ParseInt(*capText, 10, 64)
+	if err != nil || cap < 0 {
+		fmt.Fprintln(stderr, "trim-list-write: --cap-bytes needs a whole number of bytes")
+		return 3
 	}
-	var paths []string
-	if err == nil {
-		if err = json.Unmarshal(data, &paths); err != nil {
-			err = fmt.Errorf("the list on stdin is not a JSON array of paths")
-		}
+	sandboxes, err := strconv.Atoi(*sandboxesText)
+	if err != nil || sandboxes < 0 {
+		fmt.Fprintln(stderr, "trim-list-write: --sandboxes needs a whole number of running sandboxes, 0 when none runs")
+		return 3
 	}
+	paths, err := TrimListPaths(*root, cap, sandboxes > 0, filepath.Walk)
+	var digest string
 	if err == nil {
-		err = writeTrimListInto(*root, paths)
+		digest, err = writeTrimListInto(*root, paths)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "trim-list-write: %v\n", err)
 		return 3
 	}
-	fmt.Fprintf(stdout, "wrote %d paths %s\n", len(paths), cachevol.TrimClaimListPath)
+	fmt.Fprintf(stdout, "wrote %d paths %s %s\n", len(paths), cachevol.TrimClaimListPath, digest)
 	return 0
 }
 

@@ -1,8 +1,6 @@
 package cachevol
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -245,18 +243,28 @@ func TestTrimShardsGiveAnOversizedEntryItsOwnShard(t *testing.T) {
 	}
 }
 
-// shardPerPathListing is n build-cache files each encoding to just over half a shard, so every shard
-// holds one path and the shard count is the path count.
-func shardPerPathListing(n int) []Entry {
-	out := make([]Entry, 0, n)
+// halfShardPaths is n paths each encoding to just over half a shard, so every shard holds one path
+// and the shard count is the path count.
+func halfShardPaths(n int) []string {
+	out := make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		p := fmt.Sprintf("gocache/%03d", i) + strings.Repeat("a", TrimShardBytes/2-len("gocache/000"))
+		out = append(out, fmt.Sprintf("gocache/%03d", i)+strings.Repeat("a", TrimShardBytes/2-len("gocache/000")))
+	}
+	return out
+}
+
+// shardPerPathListing is halfShardPaths as a listing PlanTrim removes whole: the cap is the caller's
+// to set to zero.
+func shardPerPathListing(n int) []Entry {
+	paths := halfShardPaths(n)
+	out := make([]Entry, 0, n)
+	for i, p := range paths {
 		out = append(out, file(p, BuildCache, 1, 0, i))
 	}
 	return out
 }
 
-// TestBuildTrimManifestMountsAListAtTheShardCeilingInOneJob pins the boundary below the split: a list
+// TestBuildTrimManifestMountsAListAtTheShardCeilingInOneJob pins the boundary below the claim: a list
 // that fills exactly TrimMaxShards shards is one Job mounting all of them.
 func TestBuildTrimManifestMountsAListAtTheShardCeilingInOneJob(t *testing.T) {
 	t.Parallel()
@@ -265,131 +273,159 @@ func TestBuildTrimManifestMountsAListAtTheShardCeilingInOneJob(t *testing.T) {
 	in.Listing = shardPerPathListing(TrimMaxShards)
 
 	m := buildTrim(t, in)
-	if len(m.Shards()) != TrimMaxShards || len(m.jobs()) != 1 {
-		t.Fatalf("manifest = %d shards and %d Jobs, want %d shards in one Job", len(m.Shards()), len(m.jobs()), TrimMaxShards)
+	if m.Route() != TrimRouteShards || len(m.Shards()) != TrimMaxShards || len(m.jobs()) != 1 {
+		t.Fatalf("manifest = route %v, %d shards and %d Jobs, want %d shards in one Job", m.Route(), len(m.Shards()), len(m.jobs()), TrimMaxShards)
 	}
 	if got := m.jobs()[0].Metadata.Name; got != DefaultTrimJobName {
-		t.Errorf("the Job is named %q, want the name a one-Job trim always had, %q", got, DefaultTrimJobName)
+		t.Errorf("the Job is named %q, want the name a trim always had, %q", got, DefaultTrimJobName)
 	}
 }
 
-// TestBuildTrimManifestSplitsAListPastTheShardCeiling pins the route past one Job's mounts: a list one
-// shard longer than TrimMaxShards renders as one Job per run of at most TrimMaxShards shards. Every
-// shard is mounted by exactly one Job, the Job's --shards count is its own mount count, and the paths
-// reach the containers once each, in the order PlanTrim gave them.
-func TestBuildTrimManifestSplitsAListPastTheShardCeiling(t *testing.T) {
+// TestTrimShardCountMatchesTheShardsItCounts pins the count the route is decided on against the
+// shards the shard route applies, over the packings the boundary meets: a count that disagreed with
+// trimShards would route to the claim a list one set of shards could still carry, or the other way
+// round.
+func TestTrimShardCountMatchesTheShardsItCounts(t *testing.T) {
+	t.Parallel()
+	sizes := []int{0, 1, 2, 3, TrimMaxShards - 1, TrimMaxShards, TrimMaxShards + 1, 2 * TrimMaxShards}
+	for _, n := range sizes {
+		paths := halfShardPaths(n)
+		if got, want := trimShardCount(paths), len(trimShards(DefaultTrimJobName, "gt", paths)); got != want {
+			t.Errorf("trimShardCount of %d paths = %d, want the %d shards trimShards makes", len(paths), got, want)
+		}
+	}
+	// A path that alone exceeds a shard takes one of its own, and the packing has to count it so.
+	oversized := []string{"gocache/a", strings.Repeat("a", TrimShardBytes+1), "gocache/b"}
+	if got, want := trimShardCount(oversized), len(trimShards(DefaultTrimJobName, "gt", oversized)); got != want {
+		t.Errorf("trimShardCount of an oversized entry = %d, want the %d shards trimShards makes", got, want)
+	}
+}
+
+// TestBuildTrimManifestRoutesOnTheShardCount pins where the route changes. The route is decided on the
+// ConfigMaps the shard route would need, in shards rather than in bytes: a list that packs into
+// exactly TrimMaxShards shards stays in ConfigMaps, and one shard more takes the claim. So no trim
+// splits over several Jobs, and the Kubernetes objects a trim applies stop growing with its list
+// (gt-2rq36).
+func TestBuildTrimManifestRoutesOnTheShardCount(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		paths int
+		want  TrimRoute
+	}{
+		{name: "a list one shard short of the ceiling", paths: TrimMaxShards - 1, want: TrimRouteShards},
+		{name: "a list that fills the ceiling", paths: TrimMaxShards, want: TrimRouteShards},
+		{name: "one shard past the ceiling", paths: TrimMaxShards + 1, want: TrimRouteClaim},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in := trimInput()
+			in.CapBytes = 0
+			in.Listing = shardPerPathListing(tc.paths)
+			m := buildTrim(t, in)
+			if got := m.Route(); got != tc.want {
+				t.Fatalf("a list of %d paths takes route %v, want %v", tc.paths, got, tc.want)
+			}
+			if got := len(m.Shards()) > 0; got != (tc.want == TrimRouteShards) {
+				t.Errorf("the manifest applies shards = %v on route %v, want them exactly under the ceiling", got, tc.want)
+			}
+			if got := len(m.jobs()); got != 1 {
+				t.Errorf("the manifest has %d Jobs, want one on either route", got)
+			}
+		})
+	}
+}
+
+// TestBuildTrimManifestCarriesAListPastTheShardCeilingInTheClaim is the bead's goal: a list past what
+// one set of ConfigMap shards carries renders one Job that mounts the claim alone, plans the list from
+// the claim in an init container and writes it there, so nothing outside the tree has to write it and
+// the number of Jobs and ConfigMaps no longer grows with the list.
+func TestBuildTrimManifestCarriesAListPastTheShardCeilingInTheClaim(t *testing.T) {
 	t.Parallel()
 	in := trimInput()
 	in.CapBytes = 0
+	in.SandboxesRunning = 2
+	// 65 paths of about half a shard each: one set of 64 shards cannot carry them.
 	in.Listing = shardPerPathListing(TrimMaxShards + 1)
 	m := buildTrim(t, in)
 
-	jobs := m.jobs()
-	if len(jobs) != 2 {
-		t.Fatalf("the manifest has %d Jobs, want 2 for %d shards past one Job's %d mounts", len(jobs), len(m.Shards()), TrimMaxShards)
+	if got := m.Route(); got != TrimRouteClaim {
+		t.Fatalf("route = %v, want the claim for a list past the shard ceiling", got)
 	}
-	var mounted []string
-	for i, job := range jobs {
-		if want := DefaultTrimJobName + "-" + strconv.Itoa(i); job.Metadata.Name != want {
-			t.Errorf("Job %d is named %q, want %q", i, job.Metadata.Name, want)
-		}
-		pod := job.Spec.Template.Spec
-		trim := pod.Containers[0]
-		var shardMounts int
-		for _, v := range pod.Volumes {
-			if v.ConfigMap != nil {
-				mounted = append(mounted, v.ConfigMap.Name)
-				shardMounts++
-			}
-		}
-		if shardMounts == 0 || shardMounts > TrimMaxShards {
-			t.Errorf("Job %d mounts %d shards, want 1 to %d", i, shardMounts, TrimMaxShards)
-		}
-		if got := trim.Args[len(trim.Args)-1]; got != strconv.Itoa(shardMounts) {
-			t.Errorf("Job %d names --shards %s, want its mount count %d", i, got, shardMounts)
-		}
-		// The helper reads shard k at <TrimListRoot>/k, so each Job's own shards must sit there from 0.
-		var listMounts []string
-		for _, mt := range trim.VolumeMounts {
-			if strings.HasPrefix(mt.MountPath, TrimListRoot+"/") {
-				listMounts = append(listMounts, mt.MountPath)
-			}
-		}
-		if len(listMounts) != shardMounts {
-			t.Errorf("Job %d has %d list mounts for %d shard volumes, want one mount per shard", i, len(listMounts), shardMounts)
-		}
-		for k := 0; k < shardMounts; k++ {
-			if k >= len(listMounts) || listMounts[k] != TrimListRoot+"/"+strconv.Itoa(k) {
-				t.Errorf("Job %d mounts its shards at %v, want %s/0 to %s/%d in order", i, listMounts, TrimListRoot, TrimListRoot, shardMounts-1)
-				break
-			}
-		}
+	if got := len(m.Shards()); got != 0 {
+		t.Errorf("the manifest applies %d shard, want none: the claim carries the list", got)
+	}
+	if got := len(m.jobs()); got != 1 {
+		t.Fatalf("the manifest has %d Jobs, want one whatever the list size", got)
+	}
+	job := m.jobs()[0]
+	if job.Metadata.Name != DefaultTrimJobName {
+		t.Errorf("the Job is named %q, want the name a trim always had, %q", job.Metadata.Name, DefaultTrimJobName)
 	}
 
-	var shardNames []string
-	for _, shard := range m.Shards() {
-		shardNames = append(shardNames, shard.Metadata.Name)
+	pod := job.Spec.Template.Spec
+	if len(pod.Volumes) != 1 || pod.Volumes[0].PersistentVolumeClaim == nil ||
+		pod.Volumes[0].PersistentVolumeClaim.ClaimName != "gt-cache" {
+		t.Fatalf("volumes = %+v, want the gt-cache claim alone", pod.Volumes)
 	}
-	if !reflect.DeepEqual(mounted, shardNames) {
-		t.Errorf("the Jobs mount %v, want each of the manifest's shards %v exactly once, in order", mounted, shardNames)
-	}
-
-	var want []string
-	for _, r := range PlanTrim(in.Listing, in.CapBytes, false).Removals {
-		want = append(want, r.Path)
-	}
-	if got := manifestPaths(t, m); !reflect.DeepEqual(got, want) {
-		t.Errorf("the shards list %d paths, want PlanTrim's %d in order", len(got), len(want))
+	sc := pod.SecurityContext
+	if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != SeedUserID {
+		t.Errorf("pod securityContext = %+v, want the trim to run as the cache user %d", sc, SeedUserID)
 	}
 
-	if docs := m.Documents(); len(docs) != len(m.Shards())+len(jobs) {
-		t.Errorf("documents = %d, want one per shard and per Job", len(docs))
+	// The init container is the writer: it plans PlanTrim's list from the claim under the caller's cap
+	// and sandbox count, and the main container cannot start until it has written the list.
+	if len(pod.InitContainers) != 1 {
+		t.Fatalf("init containers = %d, want the one that writes the list", len(pod.InitContainers))
 	}
-}
-
-// TestBuildTrimManifestRefusesASplitJobNamePastTheLabelLimit pins the refusal on the name a split takes:
-// a Job's name is a DNS-1123 label, so a name that would pass 63 characters once its run index is added
-// is refused rather than rendered.
-func TestBuildTrimManifestRefusesASplitJobNamePastTheLabelLimit(t *testing.T) {
-	t.Parallel()
-	in := trimInput()
-	in.CapBytes = 0
-	in.Listing = shardPerPathListing(TrimMaxShards + 1)
-
-	// "-0" is two characters, so 61 characters is the longest name whose first run still fits.
-	in.Name = strings.Repeat("a", 62)
-	if m, err := BuildTrimManifest(in); err == nil {
-		t.Errorf("BuildTrimManifest with a 62-character name split over two Jobs = %+v, want a refusal", m)
+	plan := pod.InitContainers[0]
+	if want := []string{HelperPath, "trim-list-write"}; !reflect.DeepEqual(plan.Command, want) {
+		t.Errorf("init command = %v, want the image's trim-list-write helper", plan.Command)
+	}
+	if want := []string{"--root", SeedCacheRoot, "--cap-bytes", "0", "--sandboxes", "2"}; !reflect.DeepEqual(plan.Args, want) {
+		t.Errorf("init args = %v, want the caller's cap and sandbox count", plan.Args)
+	}
+	if len(plan.VolumeMounts) != 1 || plan.VolumeMounts[0].MountPath != SeedCacheRoot {
+		t.Errorf("init mounts = %+v, want the claim at %s", plan.VolumeMounts, SeedCacheRoot)
+	}
+	if plan.VolumeMounts[0].ReadOnly {
+		t.Error("the init container's claim mount is read-only, but it has to write the list into it")
 	}
 
-	in.Name = strings.Repeat("a", 61)
-	if _, err := BuildTrimManifest(in); err != nil {
-		t.Errorf("BuildTrimManifest with a 61-character name split over two Jobs: %v, want the suffixed name to fit", err)
+	// The trim container reads the list and the digest written beside it, both from the claim.
+	if len(pod.Containers) != 1 {
+		t.Fatalf("containers = %d, want the trim container alone", len(pod.Containers))
 	}
-}
-
-// TestTrimRunsRefusesASplitJobNameWithATwoDigitRunIndex pins the name limit at the first run index
-// that takes two digits. The runs are rendered from the shard list, so synthetic shards reach run 10
-// without building the 80 MB of real list that many shards would take.
-func TestTrimRunsRefusesASplitJobNameWithATwoDigitRunIndex(t *testing.T) {
-	t.Parallel()
-	shards := make([]TrimShard, 10*TrimMaxShards+1)
-
-	// Run 10 takes the suffix "-10", three characters, so 60 characters is the longest name it can take.
-	if _, err := trimRuns(trimInput(), strings.Repeat("a", 60), nil, shards); err != nil {
-		t.Errorf("trimRuns with a 60-character name over 11 runs: %v, want the suffixed name to fit", err)
+	trim := pod.Containers[0]
+	if want := []string{HelperPath, "trim-paths"}; !reflect.DeepEqual(trim.Command, want) {
+		t.Errorf("command = %v, want the image's trim-paths helper", trim.Command)
 	}
-	if _, err := trimRuns(trimInput(), strings.Repeat("a", 61), nil, shards); err == nil {
-		t.Errorf("trimRuns with a 61-character name over 11 runs, want a refusal at run 10")
+	want := []string{"--root", SeedCacheRoot, "--list-file", TrimClaimListPath, "--list-sha256-file", TrimClaimDigestPath}
+	if !reflect.DeepEqual(trim.Args, want) {
+		t.Errorf("args = %v, want %v", trim.Args, want)
 	}
-}
+	if len(trim.VolumeMounts) != 1 || trim.VolumeMounts[0].MountPath != SeedCacheRoot {
+		t.Errorf("mounts = %+v, want the claim alone at %s", trim.VolumeMounts, SeedCacheRoot)
+	}
+	if doc := string(job.JSON()); strings.Contains(doc, "gocache/") || strings.Contains(doc, "ConfigMap") {
+		t.Errorf("the Job document carries a path or a ConfigMap: %s", doc)
+	}
 
-// TestTrimRunsRefusesAListWithNoShard pins the refusal of a manifest with no Job: a list with no shard
-// would apply as a success that trims nothing.
-func TestTrimRunsRefusesAListWithNoShard(t *testing.T) {
-	t.Parallel()
-	if runs, err := trimRuns(trimInput(), DefaultTrimJobName, nil, nil); err == nil {
-		t.Errorf("trimRuns with no shards = %d runs, want a refusal", len(runs))
+	// The cleanup selector has to reach the Job a claim-carried trim applies, as it reaches a shard
+	// trim's.
+	if sel := TrimSelector(); !labelSelectorMatches(sel, job.Metadata.Labels) || !labelSelectorMatches(sel, job.Spec.Template.Metadata.Labels) {
+		t.Errorf("selector %q misses the claim-carried Job or its pods", sel)
+	}
+
+	// The one document is the Job, and it is the manifest's only route to it.
+	docs := m.Documents()
+	if len(docs) != 1 {
+		t.Fatalf("documents = %d, want the one Job", len(docs))
+	}
+	var doc TrimJob
+	if err := json.Unmarshal(docs[0], &doc); err != nil || doc.Kind != "Job" {
+		t.Errorf("the only document is %+v (%v), want the Job", doc, err)
 	}
 }
 
@@ -517,155 +553,6 @@ func TestBuildTrimManifestAnnotatesTheOverflow(t *testing.T) {
 	}
 }
 
-// ceilingListing is n build-cache files whose removal list encodes to exactly 4097n+1 bytes: each
-// path is 4094 characters, so it encodes to 4096, and the array adds its brackets and separators.
-// The fixture checks its own size, so a change to the path shape cannot drift to a case that is not
-// on the boundary it is named for.
-func ceilingListing(t *testing.T, n int) []Entry {
-	t.Helper()
-	out := make([]Entry, 0, n)
-	paths := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		prefix := fmt.Sprintf("gocache/%05d", i)
-		p := prefix + strings.Repeat("a", 4094-len(prefix))
-		paths = append(paths, p)
-		out = append(out, file(p, BuildCache, 1, 0, i))
-	}
-	enc, err := json.Marshal(paths)
-	if err != nil {
-		t.Fatalf("encoding the ceiling listing: %v", err)
-	}
-	if want := 4097*n + 1; len(enc) != want {
-		t.Fatalf("the ceiling listing of %d paths encodes to %d bytes, want %d", n, len(enc), want)
-	}
-	return out
-}
-
-// TestBuildTrimManifestRoutesOnTheEncodedCeiling pins where the route changes. The route is decided on
-// the list's encoded size: a list encoded to exactly TrimMaxShards*TrimShardBytes stays in ConfigMaps,
-// and one path more takes the claim. Shards pack by their own bytes, so a list at the ceiling can take
-// more than TrimMaxShards shards and so more than one Job; the ceiling is in bytes, not in shards.
-func TestBuildTrimManifestRoutesOnTheEncodedCeiling(t *testing.T) {
-	t.Parallel()
-	// 4094-character paths are 4096 encoded bytes each and the array adds 4097n+1, so 16 MiB is an
-	// integral number of paths.
-	const ceiling = TrimMaxShards * TrimShardBytes
-	const atCeiling = ceiling / 4097
-
-	tests := []struct {
-		name  string
-		paths int
-		want  TrimRoute
-	}{
-		{name: "a list encoded to exactly the ceiling", paths: atCeiling, want: TrimRouteShards},
-		{name: "one path past the ceiling", paths: atCeiling + 1, want: TrimRouteClaim},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			in := trimInput()
-			in.CapBytes = 0
-			in.Listing = ceilingListing(t, tc.paths)
-			m := buildTrim(t, in)
-			if got := m.Route(); got != tc.want {
-				t.Fatalf("a list of %d paths takes route %v, want %v", tc.paths, got, tc.want)
-			}
-			if got := len(m.Shards()); (got == 0) != (tc.want == TrimRouteClaim) {
-				t.Errorf("the manifest applies %d shard on route %v, want shards only under the ceiling", got, tc.want)
-			}
-			if got := m.ClaimList() == nil; got != (tc.want == TrimRouteShards) {
-				t.Errorf("ClaimList absent = %v on route %v, want a list exactly for the claim route", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestBuildTrimManifestCarriesAListPastTheShardCeilingInTheClaim is the bead's goal: a list past
-// what one set of ConfigMap shards carries renders one Job that reads the list from the claim, so
-// the number of Jobs and ConfigMaps no longer grows with the list and its only ceiling is the claim.
-func TestBuildTrimManifestCarriesAListPastTheShardCeilingInTheClaim(t *testing.T) {
-	t.Parallel()
-	in := trimInput()
-	in.CapBytes = 0
-	// 128 paths of about 128 KiB are about 16.8 MB encoded: past one set of 64 shards.
-	in.Listing = shardPerPathListing(2 * TrimMaxShards)
-	m := buildTrim(t, in)
-
-	if got := m.Route(); got != TrimRouteClaim {
-		t.Fatalf("route = %v, want the claim for a list past the shard ceiling", got)
-	}
-	if got := len(m.Shards()); got != 0 {
-		t.Errorf("the manifest applies %d shard, want none: the claim carries the list", got)
-	}
-	if got := len(m.jobs()); got != 1 {
-		t.Fatalf("the manifest has %d Jobs, want one whatever the list size", got)
-	}
-	job := m.jobs()[0]
-	if job.Metadata.Name != DefaultTrimJobName {
-		t.Errorf("the Job is named %q, want the name a trim always had, %q", job.Metadata.Name, DefaultTrimJobName)
-	}
-
-	pod := job.Spec.Template.Spec
-	if len(pod.Volumes) != 1 || pod.Volumes[0].PersistentVolumeClaim == nil ||
-		pod.Volumes[0].PersistentVolumeClaim.ClaimName != "gt-cache" {
-		t.Fatalf("volumes = %+v, want the gt-cache claim alone", pod.Volumes)
-	}
-	sc := pod.SecurityContext
-	if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != SeedUserID {
-		t.Errorf("pod securityContext = %+v, want the trim to run as the cache user %d", sc, SeedUserID)
-	}
-
-	trim := pod.Containers[0]
-	if want := []string{HelperPath, "trim-paths"}; !reflect.DeepEqual(trim.Command, want) {
-		t.Errorf("command = %v, want the image's trim-paths helper", trim.Command)
-	}
-	// The Job carries the digest of the list the caller writes, so its pod trims that list and no other.
-	sum := sha256.Sum256(m.ClaimList().Data)
-	if want := []string{"--root", SeedCacheRoot, "--list-file", TrimClaimListPath, "--list-sha256", hex.EncodeToString(sum[:])}; !reflect.DeepEqual(trim.Args, want) {
-		t.Errorf("args = %v, want the claim list file, its digest, and no shard count", trim.Args)
-	}
-	if len(trim.VolumeMounts) != 1 || trim.VolumeMounts[0].MountPath != SeedCacheRoot {
-		t.Errorf("mounts = %+v, want the claim alone at %s", trim.VolumeMounts, SeedCacheRoot)
-	}
-	if doc := string(job.JSON()); strings.Contains(doc, "gocache/") || strings.Contains(doc, "ConfigMap") {
-		t.Errorf("the Job document carries a path or a ConfigMap: %s", doc)
-	}
-
-	// The cleanup selector has to reach the Job a claim-carried trim applies, as it reaches a shard
-	// trim's.
-	if sel := TrimSelector(); !labelSelectorMatches(sel, job.Metadata.Labels) || !labelSelectorMatches(sel, job.Spec.Template.Metadata.Labels) {
-		t.Errorf("selector %q misses the claim-carried Job or its pods", sel)
-	}
-
-	list := m.ClaimList()
-	if list == nil {
-		t.Fatal("ClaimList is nil for a claim-carried trim, so a caller has nothing to write")
-	}
-	if list.Path != TrimClaimListPath {
-		t.Errorf("the list is written to %q, want the claim-relative %q", list.Path, TrimClaimListPath)
-	}
-	if n := len(list.Data); n <= TrimMaxShards*TrimShardBytes {
-		t.Errorf("the list is %d bytes, want past the %d bytes one set of shards carries", n, TrimMaxShards*TrimShardBytes)
-	}
-	var got []string
-	if err := json.Unmarshal(list.Data, &got); err != nil {
-		t.Fatalf("the list is not a JSON array of paths: %v", err)
-	}
-	if want := removedPaths(PlanTrim(in.Listing, in.CapBytes, false)); !reflect.DeepEqual(got, want) {
-		t.Errorf("the list holds %d paths, want PlanTrim's %d in order", len(got), len(want))
-	}
-
-	// The one document is the Job, and it is the manifest's only route to it.
-	docs := m.Documents()
-	if len(docs) != 1 {
-		t.Fatalf("documents = %d, want the one Job", len(docs))
-	}
-	var doc TrimJob
-	if err := json.Unmarshal(docs[0], &doc); err != nil || doc.Kind != "Job" {
-		t.Errorf("the only document is %+v (%v), want the Job", doc, err)
-	}
-}
-
 // hasModulePath reports whether a removal list names a module-cache file.
 func hasModulePath(paths []string) bool {
 	for _, p := range paths {
@@ -784,7 +671,7 @@ func TestTrimManifestExportsNoJobAccessor(t *testing.T) {
 	for i := 0; i < typ.NumMethod(); i++ {
 		got = append(got, typ.Method(i).Name)
 	}
-	if want := []string{"ClaimList", "Documents", "Route", "Shards"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"Documents", "Route", "Shards"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("TrimManifest exports %v, want %v: a Job accessor lets a caller apply a Job without what it reads", got, want)
 	}
 }
@@ -804,31 +691,36 @@ func labelSelectorMatches(sel string, labels map[string]string) bool {
 	return true
 }
 
-// TestTrimSelectorMatchesEveryShardAndTheJobs pins the cleanup's selector across a split trim: it
-// finds every shard ConfigMap and each Job and its pod template, so deleting by it after the Jobs
-// finish leaves no shard behind, whichever run mounted it.
+// TestTrimSelectorMatchesEveryShardAndTheJobs pins the cleanup's selector across both routes: it finds
+// every shard ConfigMap and the Job and its pod template, so deleting by it after the Job finishes
+// leaves no trim object behind, whichever route carried the list.
 func TestTrimSelectorMatchesEveryShardAndTheJobs(t *testing.T) {
 	t.Parallel()
-	in := trimInput()
-	in.CapBytes = 0
-	in.Listing = shardPerPathListing(TrimMaxShards + 1)
-	m := buildTrim(t, in)
+	shardTrim := trimInput()
+	shardTrim.CapBytes = 0
+	shardTrim.Listing = shardPerPathListing(3)
+
+	claimTrim := trimInput()
+	claimTrim.CapBytes = 0
+	claimTrim.Listing = shardPerPathListing(TrimMaxShards + 1)
 
 	sel := TrimSelector()
-	if len(m.jobs()) < 2 {
-		t.Fatalf("the manifest has %d Jobs, want a split trim with at least 2", len(m.jobs()))
-	}
-	for _, shard := range m.Shards() {
-		if !labelSelectorMatches(sel, shard.Metadata.Labels) {
-			t.Errorf("selector %q misses shard %s, labelled %v", sel, shard.Metadata.Name, shard.Metadata.Labels)
+	for _, m := range []*TrimManifest{buildTrim(t, shardTrim), buildTrim(t, claimTrim)} {
+		if m.Route() == TrimRouteShards && len(m.Shards()) == 0 {
+			t.Fatalf("the shard trim applies %d shards, want the several the fixture makes", len(m.Shards()))
 		}
-	}
-	for _, job := range m.jobs() {
-		if !labelSelectorMatches(sel, job.Metadata.Labels) {
-			t.Errorf("selector %q misses Job %s, labelled %v", sel, job.Metadata.Name, job.Metadata.Labels)
+		for _, shard := range m.Shards() {
+			if !labelSelectorMatches(sel, shard.Metadata.Labels) {
+				t.Errorf("selector %q misses shard %s, labelled %v", sel, shard.Metadata.Name, shard.Metadata.Labels)
+			}
 		}
-		if !labelSelectorMatches(sel, job.Spec.Template.Metadata.Labels) {
-			t.Errorf("selector %q misses the pods of Job %s, labelled %v", sel, job.Metadata.Name, job.Spec.Template.Metadata.Labels)
+		for _, job := range m.jobs() {
+			if !labelSelectorMatches(sel, job.Metadata.Labels) {
+				t.Errorf("selector %q misses Job %s, labelled %v", sel, job.Metadata.Name, job.Metadata.Labels)
+			}
+			if !labelSelectorMatches(sel, job.Spec.Template.Metadata.Labels) {
+				t.Errorf("selector %q misses the pods of Job %s, labelled %v", sel, job.Metadata.Name, job.Spec.Template.Metadata.Labels)
+			}
 		}
 	}
 }

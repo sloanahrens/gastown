@@ -25,3 +25,14 @@ func lastUsed(info os.FileInfo) time.Time {
 	}
 	return used
 }
+
+// filesystemFree is the room the filesystem holding root can still take, in bytes: what the
+// claim-carried list writer reads before it writes a list into a claim that may be over its policy
+// cap (gt-2rq36).
+func filesystemFree(root string) (int64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(root, &st); err != nil {
+		return 0, err
+	}
+	return int64(uint64(st.Bavail) * uint64(st.Bsize)), nil
+}
