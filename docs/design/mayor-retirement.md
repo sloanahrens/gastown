@@ -781,7 +781,6 @@ directory. **D** = DELETE (the role); **E** = EDIT (remove the role references);
 | `docs-lint.sh` | E | Comment naming a crew/mayor session. |
 | `install-gt.sh` | K | mayor/rig and mayor/town.json. |
 | `install-gt_test.sh` | K | mayor fixtures. |
-| `run-boot-scraper-vm.sh` | K | mayor/rig path. |
 | `uninstall-gt.sh` | K | mayor/town.json. |
 | `uninstall-gt_test.sh` | K | mayor fixture. |
 
