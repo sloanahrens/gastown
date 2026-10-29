@@ -41,17 +41,16 @@ type QuietProbes struct {
 // QuietProbeDeps overrides how the host probes read the host; a nil field reads
 // the host itself.
 type QuietProbeDeps struct {
-	// Stat is the only filesystem call the probes make, so a test can record
-	// every read: the hold file is the operator's to create and remove.
+	// Stat is the only filesystem call the dispatch-hold probe makes: the hold
+	// file is the operator's to create and remove.
 	Stat func(name string) (fs.FileInfo, error)
-	// Run starts pgrep, the one program the probes run.
+	// Run starts pgrep, the one program the quiet probes run.
 	Run func(name string, args ...string) error
-	// GateStatus reads the container-gate pool, the `docker ps` cross-check
-	// included, because a suite the slot does not know about is still a suite.
-	// slot's own status cleans up a dead holder's display-only owner file as it
-	// reads (internal/slot/pool.go), which is the one file the gate may remove;
-	// it creates none and never touches the operator's hold.
-	GateStatus func(townRoot string) (slot.Report, error)
+	// Gate holds the container-gate probe's Docker runtime; nil reads the host
+	// through the gate's defaults (the docker CLI). A test passes a Gate with a
+	// fake runtime, so the probe's own filesystem work runs for real and only
+	// its `docker ps` is a stub.
+	Gate *slot.Gate
 }
 
 // NewQuietProbes returns the host probes WaitQuiet reads for townRoot. It
@@ -71,11 +70,9 @@ func NewQuietProbes(townRoot string, deps QuietProbeDeps) (QuietProbes, error) {
 			return exec.Command(name, args...).Run()
 		}
 	}
-	gateStatus := deps.GateStatus
-	if gateStatus == nil {
-		gateStatus = func(townRoot string) (slot.Report, error) {
-			return slot.StatusPool(townRoot, containerGatePool(townRoot))
-		}
+	gate := deps.Gate
+	if gate == nil {
+		gate = slot.NewGate()
 	}
 	holdPath := dispatch.HoldFilePath(townRoot)
 	return QuietProbes{
@@ -102,11 +99,14 @@ func NewQuietProbes(townRoot string, deps QuietProbeDeps) (QuietProbes, error) {
 			}
 		},
 		GateBusy: func() (bool, error) {
-			rep, err := gateStatus(townRoot)
+			// Read only: the wait may give up at its budget, and a gate that
+			// swept a dead holder's owner file or created a lock file on the
+			// way would leave the town changed by a cutover that did nothing.
+			busy, err := gate.PoolBusyReadOnly(townRoot, containerGatePool(townRoot))
 			if err != nil {
 				return false, fmt.Errorf("reading the container-gate slot: %w", err)
 			}
-			return rep.Busy(), nil
+			return busy, nil
 		},
 	}, nil
 }

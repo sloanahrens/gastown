@@ -4,6 +4,7 @@ package lock
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -48,4 +49,38 @@ func TestFlockTryAcquireStableRetriesAnUnlinkedInode(t *testing.T) {
 	if _, err := FlockTryAcquireStable(path); !errors.Is(err, ErrFlockHeld) {
 		t.Fatalf("second acquire = %v, want ErrFlockHeld: the first lock must be on the file the path names", err)
 	}
+}
+
+// TestFlockTryAcquireExistingNeverCreatesTheFile: a read-only probe must be
+// able to ask whether a lock is taken without leaving a lock file behind, and
+// must report a lock someone else holds as held rather than as free.
+func TestFlockTryAcquireExistingNeverCreatesTheFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate.lock")
+
+	if _, ok, err := FlockTryAcquireExisting(path); !errors.Is(err, fs.ErrNotExist) || ok {
+		t.Fatalf("probing an absent lock file = (%v, %v); want fs.ErrNotExist", ok, err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the read-only probe left %s behind (stat err %v)", path, err)
+	}
+
+	held, took, err := FlockTryAcquire(path)
+	if err != nil || !took {
+		t.Fatalf("holding the lock = (%v, %v); want it taken", took, err)
+	}
+
+	if unlock, ok, err := FlockTryAcquireExisting(path); err != nil || ok {
+		t.Fatalf("probing a held lock = (%v, %v); want it read as held", ok, err)
+	} else if unlock != nil {
+		t.Errorf("probing a held lock returned a cleanup; nothing was taken")
+	}
+
+	held()
+
+	unlock, ok, err := FlockTryAcquireExisting(path)
+	if err != nil || !ok {
+		t.Fatalf("probing a released lock = (%v, %v); want it read as free", ok, err)
+	}
+	unlock()
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"github.com/jonboulle/clockwork"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -294,43 +296,124 @@ func TestWaitQuietDefaultsTheBudgetAndPoll(t *testing.T) {
 }
 
 // The quiet gate's own reads change nothing: the hold file is the operator's to
-// create and remove, and a cutover that gave up leaves the town as it found it
-// (gt-qpeei.22). The container-gate reading is stubbed here, so this covers the
-// hold probe's filesystem work alone.
+// create and remove, a cutover that gave up leaves the town as it found it, and
+// asking whether the container-gate slot is busy does not sweep the files an
+// ordinary status read would (gt-qpeei.22). The town tree is compared whole
+// before and after, so a write anywhere under it — a lock file created, a dead
+// holder's owner file removed — fails here. Only the gate's `docker ps` is a
+// stub; the rest of the gate probe, its flocks included, is the production code.
 func TestWaitQuietCreatesAndRemovesNoFile(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	var reads []string
-	probes, err := NewQuietProbes(town, QuietProbeDeps{
-		Stat: func(name string) (fs.FileInfo, error) {
-			reads = append(reads, name)
-			return os.Stat(name)
-		},
-		Run:        func(string, ...string) error { return testExit(1) },
-		GateStatus: func(string) (slot.Report, error) { return slot.Report{}, nil },
-	})
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name string
+		hold bool   // the operator's hold file exists
+		want string // the error the wait returns; "" wants nil
+	}{
+		{name: "the town is quiet and the wait returns", hold: true},
+		{name: "the wait gives up at its budget", want: "the dispatch hold is not on"},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			// A free slot whose last holder died: the lock file it took and the
+			// owner file it left. The ordinary status read sweeps that owner
+			// file (internal/slot/pool.go); the quiet gate must leave it alone.
+			if err := os.MkdirAll(slot.LockDir(town), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(slot.SlotLockPath(town, 0), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(slot.SlotOwnerPath(town, 0), []byte(`{"role":"gastown/landing","pid":999999}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.hold {
+				if err := os.WriteFile(filepath.Join(town, dispatch.HoldFileName), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := townTree(t, town)
 
-	err = waitQuietToTheBudget(t, clockwork.NewFakeClockAt(quietTestEpoch), 2*time.Minute, time.Minute, probes)
+			probes, err := NewQuietProbes(town, QuietProbeDeps{
+				Run:  func(string, ...string) error { return testExit(1) },
+				Gate: quietGate(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			budget, poll := 2*time.Minute, time.Minute
+			clk := clockwork.NewFakeClockAt(quietTestEpoch)
+			var got error
+			if tc.want == "" {
+				got = WaitQuiet(context.Background(), probes, clk, budget, poll)
+			} else {
+				got = waitQuietToTheBudget(t, clk, budget, poll, probes)
+			}
+			if tc.want == "" {
+				if got != nil {
+					t.Fatalf("WaitQuiet = %v; want nil for a quiet town", got)
+				}
+			} else if got == nil || !strings.Contains(got.Error(), tc.want) {
+				t.Fatalf("WaitQuiet = %v; want an error naming %q", got, tc.want)
+			}
 
-	if err == nil || !strings.Contains(err.Error(), "the dispatch hold is not on") {
-		t.Fatalf("WaitQuiet = %v; want a timeout on the operator's absent hold", err)
-	}
-	holdPath := filepath.Join(town, dispatch.HoldFileName)
-	if len(reads) == 0 {
-		t.Fatal("the hold probe never read the hold file")
-	}
-	for _, name := range reads {
-		if name != holdPath {
-			t.Errorf("the gate read %s; the hold file is the only file it reads", name)
-		}
-	}
-	if entries, readErr := os.ReadDir(town); readErr != nil || len(entries) != 0 {
-		t.Errorf("the gate left %v (err %v) in the town root", entries, readErr)
+			if after := townTree(t, town); !maps.Equal(before, after) {
+				t.Errorf("the quiet gate changed the town:\nbefore %v\nafter  %v", before, after)
+			}
+			if _, err := os.Stat(slot.SlotOwnerPath(town, 0)); err != nil {
+				t.Errorf("the dead holder's owner file is gone, so the gate's read swept it: %v", err)
+			}
+		})
 	}
 }
+
+// townTree is every path under root mapped to its content (directories to ""),
+// so a test can assert a wait left the town exactly as it found it.
+func townTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	tree := make(map[string]string)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			tree[rel+"/"] = ""
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		tree[rel] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("reading the town tree at %s: %v", root, err)
+	}
+	return tree
+}
+
+// quietGate is the container gate with its Docker runtime replaced: the gate
+// probe's filesystem and flock work is the production code, and only the
+// `docker ps` listing comes from here.
+func quietGate(lines ...string) *slot.Gate {
+	return slot.NewGate(slot.WithRuntime(quietGateRuntime{lines: lines}))
+}
+
+// quietGateRuntime is the gate's Docker stand-in: it answers the listing from
+// the fixture and never touches a container.
+type quietGateRuntime struct{ lines []string }
+
+func (r quietGateRuntime) List() ([]string, error) { return r.lines, nil }
+
+func (r quietGateRuntime) Remove(string, slot.RemoveOptions) error { return nil }
+
+func (r quietGateRuntime) Info() (slot.VMInfo, error) { return slot.VMInfo{}, nil }
 
 // testExit is a process exit code as os/exec reports it, so a fake pgrep can
 // answer with the code the real one would.
@@ -338,6 +421,29 @@ type testExit int
 
 func (e testExit) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
 func (e testExit) ExitCode() int { return int(e) }
+
+// processExitCode reads an exit status out of an error and -1 out of anything
+// else, so a pgrep that never ran cannot read as its own "nothing matched" 1.
+func TestProcessExitCode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"a process exit", testExit(3), 3},
+		{"not an exit at all", errors.New("exec: pgrep: executable file not found in $PATH"), -1},
+		{"no error", nil, -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := processExitCode(tc.err); got != tc.want {
+				t.Errorf("processExitCode(%v) = %d; want %d", tc.err, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestNewQuietProbesRefusesATownRootThatIsNotAbsolute(t *testing.T) {
 	t.Parallel()
@@ -354,14 +460,15 @@ func TestNewQuietProbesReadTheHost(t *testing.T) {
 	t.Parallel()
 	budget, poll := 3*time.Minute, time.Minute
 	cases := []struct {
-		name       string
-		hold       bool // the operator's hold file exists
-		statErr    error
-		pgrepExit  int // 0 one match, 1 none, anything else a pgrep that failed
-		gate       slot.Report
-		gateErr    error
-		want       string // the error WaitQuiet returns; "" wants nil
-		wantExited bool   // WaitQuiet must give up at the budget rather than return nil
+		name           string
+		hold           bool // the operator's hold file exists
+		statErr        error
+		pgrepExit      int      // 0 one match, 1 none, anything else a pgrep that failed
+		gateHeld       bool     // the test holds the gate's only slot
+		gateUnopenable bool     // the slot's lock file cannot be opened
+		gateLines      []string // what the gate's `docker ps` lists
+		want           string   // the error WaitQuiet returns; "" wants nil
+		wantExited     bool     // WaitQuiet must give up at the budget rather than return nil
 	}{
 		{name: "the operator holds dispatch and the gate is free", hold: true, pgrepExit: 1},
 		{
@@ -402,17 +509,25 @@ func TestNewQuietProbesReadTheHost(t *testing.T) {
 			name:       "the gate holds its only slot",
 			hold:       true,
 			pgrepExit:  1,
-			gate:       slot.Report{Held: true, HeldCount: 1, Total: 1},
+			gateHeld:   true,
 			want:       "the container-gate slot is busy",
 			wantExited: true,
 		},
 		{
-			name:       "the gate cannot be read",
+			name:       "an unwrapped suite holds the docker VM",
 			hold:       true,
 			pgrepExit:  1,
-			gateErr:    errors.New("the lock directory is unreadable"),
-			want:       "the container-gate probe cannot answer",
+			gateLines:  []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite"},
+			want:       "the container-gate slot is busy",
 			wantExited: true,
+		},
+		{
+			name:           "the gate cannot be read",
+			hold:           true,
+			pgrepExit:      1,
+			gateUnopenable: true,
+			want:           "the container-gate probe cannot answer",
+			wantExited:     true,
 		},
 	}
 	for _, tc := range cases {
@@ -424,6 +539,33 @@ func TestNewQuietProbesReadTheHost(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// The gate is read through the production probe: a fixture on the
+			// town is what makes the slot busy, unreadable or free.
+			lockPath := slot.SlotLockPath(town, 0)
+			switch {
+			case tc.gateHeld:
+				if err := os.MkdirAll(slot.LockDir(town), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				unlock, took, err := lock.FlockTryAcquire(lockPath)
+				if err != nil || !took {
+					t.Fatalf("holding the gate's slot = (%v, %v)", took, err)
+				}
+				t.Cleanup(unlock)
+			case tc.gateUnopenable:
+				if err := os.MkdirAll(slot.LockDir(town), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				// A directory opens for reading but not for a flock, which is a
+				// slot read the probe cannot take.
+				if err := os.Mkdir(lockPath, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
 			var ran []string
 			probes, err := NewQuietProbes(town, QuietProbeDeps{
 				Stat: func(name string) (fs.FileInfo, error) {
@@ -442,7 +584,7 @@ func TestNewQuietProbesReadTheHost(t *testing.T) {
 					}
 					return testExit(tc.pgrepExit)
 				},
-				GateStatus: func(string) (slot.Report, error) { return tc.gate, tc.gateErr },
+				Gate: quietGate(tc.gateLines...),
 			})
 			if err != nil {
 				t.Fatal(err)
