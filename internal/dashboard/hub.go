@@ -321,6 +321,7 @@ func (h *Hub) stateLocked() State {
 	st.Viewers = len(h.subs)
 	st.Polecats = h.polecatsLocked(st.Now)
 	st.Reads = h.readsLocked(st.Now)
+	st.CostProviders = h.costProviderRowsLocked(st.Now, st.Reads)
 	st.Mango = mangoAt(st.Mango, st.Now)
 	st.Strip = stripAlarms(&st)
 	return st
@@ -855,37 +856,51 @@ func (h *Hub) pollSpend() {
 func (h *Hub) rebuildCostChartsLocked() {
 	charts := BuildCostCharts(h.cfg.Now(), SpendPerDay(h.state.Spend), h.state.SpendHours, h.state.SpendSkipped, h.state.ClaudePlan, h.state.PlanSamples)
 	h.state.CostCharts = &charts
-	h.rebuildCostProvidersLocked()
 }
 
-// rebuildCostProvidersLocked rebuilds the Cost panel's provider rows from the
-// state the charts are built from. A provider whose reader this hub was not
-// given has no row; a configured one that has no figures says why. The caller
-// holds h.mu.
-func (h *Hub) rebuildCostProvidersLocked() {
+// costProviderRowsLocked builds the panel's rows from the state the charts are
+// built from: the default list through BuildCostProviders, or the list a test
+// handed the hub so it can add a provider without touching the town's. A
+// provider whose reader this hub was not given has no row. The rows are built
+// with each snapshot rather than when a read lands, so the Jev row says its
+// figures are stale as the read ages, with no read of its own to trigger it.
+// The caller holds h.mu.
+func (h *Hub) costProviderRowsLocked(now time.Time, reads map[string]ReadStatus) []CostProvider {
+	jev := jevSpendForRows(h.state.JevSpend, reads[SourceJevSpend])
 	unwired := map[string]bool{
 		costProviderDeepSeek: h.cfg.Spend == nil,
 		costProviderClaude:   h.cfg.ClaudePlan == nil,
 		costProviderJev:      h.cfg.JevSpend == nil,
 	}
-	rows := []CostProvider{}
-	for _, p := range h.costProviderRows() {
+	var built []CostProvider
+	if h.costProviders == nil {
+		built = BuildCostProviders(now, h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, jev)
+	} else {
+		built = buildCostProviders(h.costProviders, now, h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, jev)
+	}
+	// A town with no provider reader still sends an empty list, so the page can
+	// tell none from a reading that did not arrive.
+	rows := make([]CostProvider, 0, len(built))
+	for _, p := range built {
 		if !unwired[p.ID] {
 			rows = append(rows, p)
 		}
 	}
-	h.state.CostProviders = rows
+	return rows
 }
 
-// costProviderRows builds the panel's rows from the state the charts are built
-// from: the default list through BuildCostProviders, or the list a test handed
-// the hub so it can add a provider without touching the town's.
-func (h *Hub) costProviderRows() []CostProvider {
-	now := h.cfg.Now()
-	if h.costProviders == nil {
-		return BuildCostProviders(now, h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, h.state.JevSpend)
+// jevSpendForRows is the Jev value the Cost rows are built from, marked when
+// the stamped read is not current so the row says why instead of drawing the
+// last good figures as today's. The state's own value stays as the last good
+// read wrote it: the mark is the row's, not the ledger's.
+func jevSpendForRows(jev *JevSpend, r ReadStatus) *JevSpend {
+	if jev == nil || !r.Stale {
+		return jev
 	}
-	return buildCostProviders(h.costProviders, now, h.state.Spend, h.state.ClaudePlan, h.state.CostCharts, h.state.JevSpend)
+	marked := *jev
+	marked.ReadFailed = r.Error
+	marked.Stale = true
+	return &marked
 }
 
 // pollJevSpend keeps the last good Jev row across a failed read, like the
@@ -901,7 +916,6 @@ func (h *Hub) pollJevSpend() {
 		return
 	}
 	h.state.JevSpend = j
-	h.rebuildCostProvidersLocked()
 	h.readOKLocked(SourceJevSpend, h.cfg.JevSpendEvery)
 	h.publishLocked()
 }

@@ -344,26 +344,62 @@ func claudePlanUnreadWhy(plan *ClaudePlan, now time.Time) string {
 }
 
 // jevCostProvider is the Jev row: the window's calls and dollars, with a rate
-// only when the window is a day.
+// only when the window is a day. A read that is not current leaves the figures
+// off the row, where they would read as today's, and puts them in its hover.
 func jevCostProvider(_ time.Time, _ json.RawMessage, _ *ClaudePlan, _ *CostCharts, jev *JevSpend) CostProvider {
 	p := CostProvider{ID: costProviderJev, Label: "Jev", Kind: "cash", Status: "none"}
 	if jev == nil {
 		p.Why = "the Jev spend could not be read"
 		return p
 	}
+	if jev.Stale {
+		p.Why = jevUnreadWhy(jev)
+		p.Detail = append(p.Detail, jevLastGoodMoney(jev))
+		p.Detail = append(p.Detail, jevCallLines(jev)...)
+		return p
+	}
 	if hours, ok := windowHours(jev.Window); ok && hours == 24 {
 		rate := jev.USD / 24
 		p.PerHour24h = &rate
 	}
+	p.Detail = append(p.Detail, jevCallLines(jev)...)
+	return p
+}
+
+// jevUnreadWhy is why the row draws no figures, in the page's words: a failed
+// read says so, and one that only aged says it went stale.
+func jevUnreadWhy(jev *JevSpend) string {
+	if jev.ReadFailed {
+		return "the read failed"
+	}
+	return "the read went stale"
+}
+
+// jevLastGoodMoney is a stale row's money in its hover: the window's dollars,
+// and the hourly rate its own cell would carry when the window is a day.
+func jevLastGoodMoney(jev *JevSpend) string {
+	line := "last good: " + money(jev.USD)
+	if jev.Window != "" {
+		line += " over " + jev.Window
+	}
+	if hours, ok := windowHours(jev.Window); ok && hours == 24 {
+		line += " · " + money(jev.USD/24) + "/h"
+	}
+	return line
+}
+
+// jevCallLines is the row's hover lines for the window's calls and the caller
+// that cost the most.
+func jevCallLines(jev *JevSpend) []string {
 	calls := fmt.Sprintf("%d %s", jev.Calls, plural(jev.Calls, "call", "calls"))
 	if jev.Window != "" {
 		calls += " in " + jev.Window
 	}
-	p.Detail = append(p.Detail, calls)
+	lines := []string{calls}
 	if jev.TopCaller != "" {
-		p.Detail = append(p.Detail, fmt.Sprintf("top caller %s (%d %s, %s)", jev.TopCaller, jev.TopCallerCalls, plural(jev.TopCallerCalls, "call", "calls"), money(jev.TopCallerUSD)))
+		lines = append(lines, fmt.Sprintf("top caller %s (%d %s, %s)", jev.TopCaller, jev.TopCallerCalls, plural(jev.TopCallerCalls, "call", "calls"), money(jev.TopCallerUSD)))
 	}
-	return p
+	return lines
 }
 
 // windowHours is a spend window's length in hours. The reader writes it as the

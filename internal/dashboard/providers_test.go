@@ -399,6 +399,99 @@ func TestCostProvidersJevRow(t *testing.T) {
 	}
 }
 
+// costProviderRow is the row with id in a built list, which a test names rather
+// than counting rows.
+func costProviderRow(t *testing.T, rows []CostProvider, id string) CostProvider {
+	t.Helper()
+	for _, p := range rows {
+		if p.ID == id {
+			return p
+		}
+	}
+	t.Fatalf("no %s row in %d providers", id, len(rows))
+	return CostProvider{}
+}
+
+// A Jev read that failed or merely aged keeps its row, but the row says why and
+// carries no figures: the last good ones would read as today's. They stay in
+// the row's hover. The row is built against the hub's own read stamps, so it
+// follows a read that fails and one that is only old.
+func TestCostProvidersJevRowSaysWhyWhenItsReadIsNotCurrent(t *testing.T) {
+	t.Parallel()
+
+	// A read may age three of its own polls (five minutes each) before the hub
+	// calls it stale.
+	staleAge := 16 * time.Minute
+	for _, tc := range []struct {
+		name string
+		fail bool
+		age  time.Duration
+		want string
+	}{
+		{name: "failed", fail: true, want: "the read failed"},
+		{name: "stale", age: staleAge, want: "the read went stale"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			now := costProvidersNow
+			fail := false
+			raw := deepSeekFixture(t, 9)
+			h := NewHub(Config{
+				Now:   func() time.Time { return now },
+				Spend: func() json.RawMessage { return raw },
+				JevSpend: func() *JevSpend {
+					if fail {
+						return nil
+					}
+					return &JevSpend{Calls: 12, USD: 3.6, Window: "24h", TopCaller: "placeholder-caller", TopCallerCalls: 5, TopCallerUSD: 1.5}
+				},
+			})
+			h.pollSpend()
+			h.pollJevSpend()
+			if p := costProviderRow(t, h.State().CostProviders, costProviderJev); p.Why != "" {
+				t.Fatalf("a current Jev read draws the row marked %q", p.Why)
+			}
+
+			fail = tc.fail
+			now = now.Add(tc.age)
+			if tc.fail {
+				h.pollJevSpend()
+			}
+
+			st := h.State()
+			p := costProviderRow(t, st.CostProviders, costProviderJev)
+			if p.Why != tc.want {
+				t.Errorf("Jev why = %q, want %q", p.Why, tc.want)
+			}
+			for name, v := range map[string]*float64{
+				"balance": p.Balance, "plan_pct": p.PlanPct, "today": p.Today,
+				"yesterday": p.Yesterday, "avg_7d": p.Avg7d, "per_hour_1h": p.PerHour1h,
+				"per_hour_24h": p.PerHour24h, "runway": p.Runway,
+			} {
+				if v != nil {
+					t.Errorf("the Jev row carries %s = %v while its read is not current, want nil", name, *v)
+				}
+			}
+			if p.Status != "none" {
+				t.Errorf("the Jev row's status is %q, want none", p.Status)
+			}
+			for _, want := range []string{
+				"last good: $3.60 over 24h · $0.15/h",
+				"12 calls in 24h",
+				"top caller placeholder-caller (5 calls, $1.50)",
+			} {
+				if !slices.Contains(p.Detail, want) {
+					t.Errorf("the Jev row's hover %q does not carry %q", p.Detail, want)
+				}
+			}
+			if deep := costProviderRow(t, st.CostProviders, costProviderDeepSeek); deep.Why != "" || deep.Balance == nil {
+				t.Errorf("the Jev read's state changed the DeepSeek row: %+v", deep)
+			}
+		})
+	}
+}
+
 func TestCostProvidersOrderIsFixed(t *testing.T) {
 	t.Parallel()
 
@@ -470,9 +563,6 @@ func TestCostProvidersSendsAnEmptyListWhenNoReaderIsConfigured(t *testing.T) {
 	t.Parallel()
 
 	h := NewHub(Config{Now: func() time.Time { return costProvidersNow }})
-	h.mu.Lock()
-	h.rebuildCostProvidersLocked()
-	h.mu.Unlock()
 
 	body, err := json.Marshal(h.State())
 	if err != nil {

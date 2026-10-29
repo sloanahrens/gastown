@@ -721,8 +721,9 @@ type State struct {
 	// come from. Nil until one of them has reported.
 	CostCharts *CostCharts `json:"cost_charts,omitempty"`
 	// CostProviders is one row per provider the Cost panel's table draws, in
-	// the order costProviderBuilders lists them. It is rebuilt beside the
-	// charts; a provider whose reader is not configured has no row. It is always
+	// the order costProviderBuilders lists them. It is built with each snapshot
+	// against the reads' freshness, so a row whose read has failed or aged says
+	// so; a provider whose reader is not configured has no row. It is always
 	// sent, an empty list when there are no providers, so the page can tell none
 	// from a reading that did not arrive.
 	CostProviders []CostProvider `json:"cost_providers"`
