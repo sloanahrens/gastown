@@ -110,7 +110,7 @@ func seatEnvSessionManager(rigPath string, w *world, issuer seattoken.Issuer) *S
 // A seat whose rig is on the tracker carries the endpoint and the path to its
 // token file, and the token itself reaches neither the environment nor argv.
 // A seat whose rig is on Dolt carries neither name: its environment is byte
-// for byte what it was. A tracker name the shell exports changes neither.
+// for byte what it was. A tracker name the shell exports changes nothing.
 //
 //testpolicy:allow parallel — sets the process environment and points the process-wide sandbox routing at a temp town, which another test must not see mid-run
 func TestLaunchTrackerSeatEnv(t *testing.T) {
