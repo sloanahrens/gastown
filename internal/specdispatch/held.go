@@ -26,18 +26,12 @@ type HeldBead struct {
 }
 
 // WorksSeat reports whether a bead with this assignee and these labels is work
-// on a seat the overlap hold protects: a polecat's, never a crew or operator
-// session's, and never a handoff note's (gt-asvow).
-//
-// A caller reads most of the held set from a store, where a bead in flight can
-// belong to any session in town. Only a polecat changes the files a candidate
-// names; a crew or operator session holds its own bead for reasons of its own,
-// and a handoff bead's notes are a session log that names every file the run
-// touched without changing any of them, so letting one through would block
-// every candidate naming a file its session has read.
+// on a seat the overlap hold protects: a polecat seat's bead that is not a
+// handoff note (gt-asvow). Before changing what holds, read step 5 of
+// docs/guides/spec-dispatcher.md: it states the rule and why a crew session's
+// bead and a handoff log are not work on a candidate's files.
 func WorksSeat(assignee string, labels []string) bool {
-	parts := strings.Split(strings.TrimSpace(assignee), "/")
-	if len(parts) != 3 || parts[0] == "" || parts[1] != "polecats" || parts[2] == "" {
+	if !namesPolecatSeat(assignee) {
 		return false
 	}
 	for _, label := range labels {
@@ -48,9 +42,28 @@ func WorksSeat(assignee string, labels []string) bool {
 	return true
 }
 
+// namesPolecatSeat reports whether an assignee addresses a polecat seat: a
+// "polecats" path component followed by the seat's name, wherever the two sit
+// in the path (role.Actor writes "<rig>/polecats/<name>"). Components are read
+// rather than counted, so an assignee with an extra or missing segment is a
+// seat when it names one — a shape this rule misreads would let a second
+// filing of a seat's work dispatch. An assignee naming no such component — a
+// crew or operator session, a person, an empty assignee — addresses no seat.
+func namesPolecatSeat(assignee string) bool {
+	parts := strings.Split(strings.TrimSpace(assignee), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "polecats" && parts[i+1] != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // isHandoffLabel reports whether one label marks a bead as a handoff note. The
-// town spells a handoff bead's label both ways — a crew session's bead wears
-// "handoff", the runtime families in constants carry "gt:handoff" (gt-asvow).
+// town spells it both ways: a crew session's bead wears "handoff", and the
+// runtime families carry "gt:handoff" (capacity.LabelHandoff in
+// internal/scheduler/capacity), so a rule that read one spelling would miss
+// half the logs (gt-asvow).
 func isHandoffLabel(label string) bool {
 	switch strings.ToLower(strings.TrimSpace(label)) {
 	case "handoff", "gt:handoff":

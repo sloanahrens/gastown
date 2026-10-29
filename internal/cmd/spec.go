@@ -1772,9 +1772,8 @@ var specHeldStatuses = []string{beads.StatusHooked, string(beads.StatusInProgres
 // or reports false when no working seat holds it. An epic is not held: its
 // prose enumerates its children's files, so a claimed epic or wayfinder map
 // would otherwise hold every ready child that names one (the sling-time guard
-// skips epics for the same reason, findDuplicateMatches). Nor is a bead a crew
-// or operator session holds, or a handoff note: only a polecat changes the
-// files it names (specdispatch.WorksSeat, gt-xrog0, gt-asvow).
+// skips epics for the same reason, findDuplicateMatches). Nor is a bead no
+// polecat seat holds (specdispatch.WorksSeat, gt-xrog0, gt-asvow).
 //
 // The tick's held read and the guard's peer-hold question both reduce through
 // here, so the two cannot disagree about which beads hold a candidate.

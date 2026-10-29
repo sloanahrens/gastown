@@ -326,15 +326,24 @@ func TestWorksSeat(t *testing.T) {
 	}{
 		{name: "a polecat seat", assignee: "gastown/polecats/capable", want: true},
 		{name: "a polecat seat's work label", assignee: "gastown/polecats/capable", labels: []string{"rework", "gt:task"}, want: true},
+		// The seat is read from the path's components, not its length: a
+		// shape that names a polecats seat holds whatever else the path
+		// carries (gt-asvow).
+		{name: "a rig-relative seat", assignee: "polecats/capable", want: true},
+		{name: "a seat with a trailing slash", assignee: "gastown/polecats/capable/", want: true},
+		{name: "a seat path with a segment after the name", assignee: "gastown/polecats/capable/session", want: true},
+		{name: "a seat path inside another directory", assignee: "gastown/crew/polecats/capable", want: true},
 		{name: "a crew session", assignee: "town/crew/overseer", labels: []string{"gt:task"}, want: false},
 		{name: "a crew handoff bead", assignee: "town/crew/overseer", labels: []string{"handoff"}, want: false},
+		{name: "a rig crew session", assignee: "gastown/crew/sloan", labels: []string{"rework"}, want: false},
 		{name: "a polecat's handoff-labeled bead is a handoff note too", assignee: "gastown/polecats/capable", labels: []string{"gt:handoff"}, want: false},
 		{name: "the label's spelling does not matter", assignee: "gastown/polecats/capable", labels: []string{" HANDOFF "}, want: false},
 		{name: "an operator session", assignee: "operator", want: false},
+		{name: "a person", assignee: "sloan", want: false},
 		{name: "no assignee", assignee: "", want: false},
 		{name: "a polecats path that is not a seat", assignee: "gastown/polecat/capable", want: false},
-		{name: "a seat path inside another directory", assignee: "gastown/crew/polecats/capable", want: false},
 		{name: "a seat with no name", assignee: "gastown/polecats/", want: false},
+		{name: "a polecats component with no name after it", assignee: "gastown/polecats//capable", want: false},
 	}
 	for _, c := range cases {
 		c := c
