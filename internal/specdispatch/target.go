@@ -42,17 +42,25 @@ const targetPathTrim = " \t`'\"()[]<>,;:."
 // one literal path: a glob, a URL fragment, a comparison, an interpolation.
 const targetPathReject = "*?{}|$=+^\\\"'<>()[] \t"
 
-// introducedPhrases are the phrases in which a spec says it adds a file. A
-// path a line carries one of is a file the spec introduces, not one the branch
-// is expected to hold already, so it is never refused for being absent
-// (gt-7t1im).
-var introducedPhrases = regexp.MustCompile(`(?i)\b(?:new file|new path|new source file|does(?: not|n't)(?: yet)? exist|will be created|is created)\b`)
+// The cues below sit directly beside a path occurrence, in the same line. A
+// path is only read against the cue next to it, never a cue elsewhere on the
+// line, so one spec phrase cannot exempt a path it does not describe (gt-7t1im).
+//
+// introducedBefore and introducedAfter mark a path the spec adds: "a new file
+// X", "adds X", "X does not exist yet", "X will be created".
+var (
+	introducedBefore = regexp.MustCompile("(?i)\\b(?:new (?:source )?file|new path|add|adds|added|create|creates|created|introduce|introduces|introduced)\\s+[`\"']?(?:the\\s+|an?\\s+)?$")
+	introducedAfter  = regexp.MustCompile("(?i)^[`\"']?\\s+(?:does(?: not|n't)(?: yet)? exist|will be created|is created)\\b")
+)
 
-// introducedVerbs are the verbs a spec puts directly before the path it adds
-// ("adds internal/cli/foo.go", "create docs/guides/bar.md"). The verb is
-// matched next to the path, not anywhere on the line: "adds the check to
-// internal/cmd/spec.go" names a file it changes.
-var introducedVerbs = `(?:add|adds|added|create|creates|created|introduce|introduces|introduced)`
+// referenceBefore and referenceAfter mark a path the spec only reads, not one it
+// changes: "see X", "per X", "as in X", "X is read-only". A path is passed as a
+// reference only when every occurrence of it in Constraints carries one of these
+// cues, so a path the spec both cites and changes is still checked.
+var (
+	referenceBefore = regexp.MustCompile("(?i)\\b(?:see|per|read|refer to|references?|matches|mirrors|follows|as in|like)\\s+[`\"']?(?:the\\s+|an?\\s+)?$")
+	referenceAfter  = regexp.MustCompile("(?i)^[`\"']?\\s+(?:is read-only|is unchanged|is the reference)\\b")
+)
 
 // constraintFilePaths returns the repo-relative files a Constraints body names,
 // in first-seen order and without duplicates.
@@ -99,38 +107,45 @@ func targetPathOf(token string) (string, bool) {
 	return path, true
 }
 
-// introducedFilePaths returns the paths the spec's own words say it adds. Both
-// the Goal and the Constraints are read: a spec may introduce a file in
-// either, and a path introduced in one is never a file the branch is expected
-// to hold already (gt-7t1im).
-func introducedFilePaths(sections map[string]string) map[string]struct{} {
-	out := map[string]struct{}{}
-	for _, key := range []string{"goal", "constraints"} {
-		for _, line := range strings.Split(sections[key], "\n") {
-			for _, token := range pathTokens(line) {
-				path, ok := targetPathOf(token)
-				if !ok || !introducesPath(line, path) {
-					continue
-				}
-				out[path] = struct{}{}
+// cuedOccurrences counts the occurrences of path in text and how many of them
+// a cue marks: before matches the words ending just before the path, after the
+// words starting just after it. Each line is read on its own, so a cue never
+// reaches across a line break.
+func cuedOccurrences(text, path string, before, after *regexp.Regexp) (cued, total int) {
+	for _, line := range strings.Split(text, "\n") {
+		for off := 0; ; {
+			i := strings.Index(line[off:], path)
+			if i < 0 {
+				break
 			}
+			at := off + i
+			end := at + len(path)
+			total++
+			if before.MatchString(line[:at]) || after.MatchString(line[end:]) {
+				cued++
+			}
+			off = end
 		}
 	}
-	return out
+	return cued, total
 }
 
-// introducesPath reports whether line carries the path as a file the spec adds.
-// The words are matched literally — a phrase naming new files, or an add,
-// create or introduce verb standing next to this path — so a line that merely
-// names the path reads as "not introduced" and the path stays checked.
-func introducesPath(line, path string) bool {
-	line = strings.ToLower(line)
-	if introducedPhrases.MatchString(line) {
-		return true
+// introducedBy reports whether the spec's Goal or Constraints says it adds path.
+// One introducing occurrence is enough: the spec states the file is new.
+func introducedBy(sections map[string]string, path string) bool {
+	for _, key := range []string{"goal", "constraints"} {
+		if cued, _ := cuedOccurrences(sections[key], path, introducedBefore, introducedAfter); cued > 0 {
+			return true
+		}
 	}
-	adjacent := regexp.MustCompile(`\b` + introducedVerbs + `\s+[` + "`" + `"']?(?:the\s+|a\s+|an\s+)?` +
-		regexp.QuoteMeta(strings.ToLower(path)) + `\b`)
-	return adjacent.MatchString(line)
+	return false
+}
+
+// referenceOnly reports whether every mention of path in Constraints is a
+// reference cue, so the spec reads the file and does not change it.
+func referenceOnly(constraints, path string) bool {
+	cued, total := cuedOccurrences(constraints, path, referenceBefore, referenceAfter)
+	return total > 0 && cued == total
 }
 
 // targetRefusal is the shape failure a Constraints body earns against the
@@ -144,10 +159,9 @@ func targetRefusal(sections map[string]string, target *TargetTree) (Refusal, boo
 	if len(paths) == 0 {
 		return Refusal{}, false
 	}
-	introduced := introducedFilePaths(sections)
 	checked := make([]string, 0, len(paths))
 	for _, path := range paths {
-		if _, ok := introduced[path]; ok {
+		if introducedBy(sections, path) || referenceOnly(sections["constraints"], path) {
 			continue
 		}
 		checked = append(checked, path)

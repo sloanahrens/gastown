@@ -471,8 +471,8 @@ func acceptanceText(s Spec, sections map[string]string) string {
 //  2. every template section present and non-empty
 //  3. at least one acceptance item
 //  4. every repo file the Constraints names as a file it changes exists on the
-//     target branch; a path the spec's own words introduce, or one that is not
-//     a literal repo file, is passed (gt-7t1im)
+//     target branch; a path the spec introduces, reads only, or that is not a
+//     literal repo file, is passed (gt-7t1im)
 //  5. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused

@@ -36,11 +36,18 @@ gt:agent`, `type wisp`).
 The path check reads its paths from the Constraints section (gt-7t1im), and
 checks only the tokens that read as repo files — a slash-separated path whose
 last segment carries an extension — so a directory, a package, a command, a
-symbol, a glob and a URL are passed rather than guessed at. A path the spec's
-own words introduce is a file it adds, not one the branch must already hold, so
-it is passed too: the Goal or the Constraints says so ("new file X", "adds
-X", "X does not exist yet"). A bead naming a file with no inventory supplied is
-refused, never passed: a check that did not run is not a check that passed.
+symbol, a glob and a URL are passed rather than guessed at. Two cues pass a
+path the branch need not hold, and each reads the words directly beside the
+path, on its own line, never a cue elsewhere on the line:
+
+- a path the spec adds: "new file X", "adds X", "add X", "create X", or
+  "X does not exist yet" / "X will be created" in the Goal or the Constraints;
+- a path the spec only reads: "see X", "per X", "as in X", "like X", or "X is
+  read-only", where every mention of it in the Constraints carries such a cue.
+  A path the spec also changes, without a cue, is still checked.
+
+A bead naming a file with no inventory supplied is refused, never passed: a
+check that did not run is not a check that passed.
 
 The inventory is the branch the rig's landings target, read from the rig's
 `config.json` `default_branch` and `main` when that key is unset

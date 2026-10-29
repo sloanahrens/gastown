@@ -85,6 +85,32 @@ func TestLintChecksTheConstraintsPathsAgainstTheTargetBranch(t *testing.T) {
 			missing: "internal/cmd/bird.go",
 		},
 		{
+			name:   "a reference the spec only cites",
+			body:   "Keep the wording as in docs/guides/spec-dispatcher.md.",
+			target: targetOf("internal/cmd/spec.go"),
+		},
+		{
+			// A path the spec cites and also changes is checked: one mention
+			// that is not a reference cue is enough to make it a file to change.
+			name:    "a reference the spec also changes",
+			body:    "Keep it as in internal/cmd/bird.go, and change internal/cmd/bird.go.",
+			target:  targetOf("internal/cmd/spec.go"),
+			missing: "internal/cmd/bird.go",
+		},
+		{
+			// The new-file phrase exempts the path it sits beside, not the other
+			// path on its line.
+			name:    "a new file beside a changed path on one line",
+			body:    "Add a new file internal/cli/foo.go and change internal/cmd/bird.go.",
+			target:  targetOf("internal/cmd/spec.go"),
+			missing: "internal/cmd/bird.go",
+		},
+		{
+			name:   "a read-only path beside a new file",
+			body:   "internal/cmd/spec.go is read-only; add internal/cli/foo.go with the parser.",
+			target: targetOf("internal/cmd/spec.go"),
+		},
+		{
 			name:   "a directory",
 			body:   "Add the check under internal/specdispatch.",
 			target: targetOf("internal/specdispatch/lint.go"),
