@@ -276,3 +276,95 @@ func TestExportKeepsTheCallersDeadline(t *testing.T) {
 		t.Errorf("Export = %v after %d records, want the caller's minute to hold over the client's nanosecond", err, emitted)
 	}
 }
+
+// The real timer ends an export that has no deadline of its own, and the
+// stream ends as DeadlineExceeded whether it stalled before any answer or
+// after one record. Nothing else can end the stalled stream, so the outcome
+// does not depend on how loaded the host is.
+func TestExportWithoutADeadlineEndsOnTheRealTimer(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"stalls before any answer": "",
+		"stalls after one record":  `{"type":"issue","issue":{"id":"gt-1"}}` + "\n",
+	} {
+		c, _ := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			// Nothing is sent before the first record, so no answer's headers
+			// arrive either: the deadline then ends the request itself.
+			if body != "" {
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				_, _ = w.Write([]byte(body))
+				_ = http.NewResponseController(w).Flush()
+			}
+			<-r.Context().Done()
+		}), func(cfg *Config) { cfg.ExportTimeout = 50 * time.Millisecond })
+		var emitted int
+		err := c.Export(t.Context(), api.ExportRequest{Rig: "gt"}, func(api.ExportRecord) error {
+			emitted++
+			return nil
+		})
+		if !errors.Is(err, context.DeadlineExceeded) || emitted > 1 {
+			t.Errorf("%s: Export = %v after %d records, want DeadlineExceeded", name, err, emitted)
+		}
+	}
+}
+
+// A Client not built by New has no timer injected; an export with no deadline
+// still runs on the real one rather than calling a nil func.
+func TestExportWithoutADeadlineOnAClientNewDidNotBuildUsesTheRealTimer(t *testing.T) {
+	t.Parallel()
+	c, _ := newClient(t, writeStream(`{"type":"issue","issue":{"id":"gt-1"}}`+"\n"), nil)
+	c.after = nil
+	var emitted int
+	err := c.Export(t.Context(), api.ExportRequest{Rig: "gt"}, func(api.ExportRecord) error {
+		emitted++
+		return nil
+	})
+	if err != nil || emitted != 1 {
+		t.Errorf("Export = %v after %d records, want the stream to finish with its one record", err, emitted)
+	}
+}
+
+// A caller's own deadline ends the export with that deadline's error, not the
+// cause the caller attached to it.
+func TestExportWithACallersDeadlineReturnsTheDeadlineNotItsCause(t *testing.T) {
+	t.Parallel()
+	c, _ := newClient(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// As above: reading the body lets the server see the client going away.
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}), nil)
+	cause := errors.New("caller's own cause")
+	ctx, cancel := context.WithDeadlineCause(t.Context(), time.Now().Add(50*time.Millisecond), cause)
+	defer cancel()
+	err := c.Export(ctx, api.ExportRequest{Rig: "gt"}, func(api.ExportRecord) error {
+		t.Error("a stream that never answers emitted a record")
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, cause) {
+		t.Errorf("Export = %v, want the caller's context.DeadlineExceeded and not its cause", err)
+	}
+}
+
+// A read the caller cancelled mid-stream ends with the caller's ctx.Err(), not
+// the cause the caller attached when it cancelled.
+func TestExportReadCutByACallersCancelReturnsCtxErrNotItsCause(t *testing.T) {
+	t.Parallel()
+	c, _ := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"type":"issue","issue":{"id":"gt-1"}}` + "\n"))
+		_ = http.NewResponseController(w).Flush()
+		<-r.Context().Done()
+	}), nil)
+	cause := errors.New("caller gave up")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	err := c.Export(ctx, api.ExportRequest{Rig: "gt"}, func(api.ExportRecord) error {
+		cancel(cause)
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, cause) {
+		t.Errorf("Export = %v, want the caller's context.Canceled and not its cause", err)
+	}
+}

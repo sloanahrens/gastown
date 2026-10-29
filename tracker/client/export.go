@@ -31,7 +31,12 @@ func (c *Client) Export(ctx context.Context, req api.ExportRequest, emit func(ap
 		var cancel context.CancelCauseFunc
 		ctx, cancel = context.WithCancelCause(ctx)
 		defer cancel(nil)
-		stop := c.after(c.exportTime, func() { cancel(context.DeadlineExceeded) })
+		// A Client not built by New has no timer injected: it gets the real one.
+		after := c.after
+		if after == nil {
+			after = afterFunc
+		}
+		stop := after(c.exportTime, func() { cancel(errExportTimeout) })
 		defer stop()
 	}
 	body, err := json.Marshal(req)
@@ -72,21 +77,35 @@ func (c *Client) readExport(ctx context.Context, r *bufio.Reader, emit func(api.
 		}
 		if err != nil {
 			if cerr := ctx.Err(); cerr != nil {
-				return context.Cause(ctx)
+				return endErr(ctx)
 			}
 			return api.Unavailable("tracker export stream broke: %v", urlErrorOnly(err))
 		}
 	}
 }
 
-// endedBy is err, unless ctx ended first: then it is the cause that ended it,
-// so the export's own deadline reads as context.DeadlineExceeded whichever
-// read was in flight when it passed.
+// errExportTimeout is the cause Export's own timer cancels with. It is private,
+// so no cause a caller attaches to its ctx can read as the timer's.
+var errExportTimeout = errors.New("client: export timed out")
+
+// endedBy is err, unless ctx ended first: then it is why ctx ended (see
+// endErr), so the export's own deadline reads as context.DeadlineExceeded
+// whichever read was in flight when it passed.
 func endedBy(ctx context.Context, err error) error {
 	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
-		return context.Cause(ctx)
+		return endErr(ctx)
 	}
 	return err
+}
+
+// endErr is why an ended ctx ended: DeadlineExceeded when Export's own timer
+// ended it, otherwise ctx.Err(). A caller's cancellation or deadline keeps its
+// own error, whatever cause the caller attached to it.
+func endErr(ctx context.Context) error {
+	if errors.Is(context.Cause(ctx), errExportTimeout) {
+		return context.DeadlineExceeded
+	}
+	return ctx.Err()
 }
 
 // exportError is the error an error record carries, its message cleaned as
