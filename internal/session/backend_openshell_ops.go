@@ -11,6 +11,8 @@ import (
 
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/sandbox"
+	"github.com/steveyegge/gastown/internal/seattoken"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -21,9 +23,10 @@ func init() {
 }
 
 // deleteSandboxRecord is SandboxDeleter: the sandbox a registry record names,
-// deleted from the record alone so cleanup and the daemon need no Prepare.
+// deleted from the record alone so cleanup and the daemon need no Prepare. It
+// ends the record's seat token as Delete does, so a patrol cleanup revokes too.
 func deleteSandboxRecord(townRoot string, rec SandboxRecord) error {
-	return recordBackend(townRoot, rec).deleteSandbox(rec.Session)
+	return recordBackend(townRoot, rec).deleteRecorded(rec)
 }
 
 // pushSandboxRecord is SandboxPusher: the record's clone branch pushed to origin
@@ -284,15 +287,63 @@ func (b *openshellBackend) Stop(session string) error {
 	return b.cli.Stop(context.Background(), session)
 }
 
-// Delete removes the sandbox and its registry record. A sandbox that is
-// already gone counts as deleted; any other failure keeps the record so the
-// delete can be retried.
+// Delete removes the sandbox and its registry record, and ends the tracker
+// token of the seat it ran. A sandbox that is already gone counts as deleted
+// and still ends the token; any other failure keeps the record so the delete
+// can be retried. A record that cannot be read is a refusal, not a guess: the
+// seat it names is unknown, so the sandbox stays until the record reads
+// (gt-p85pw.86). A sandbox with no record has no seat to name, so its token
+// cannot be revoked here; that is warned, never silent.
 func (b *openshellBackend) Delete(session string) error {
+	rec, hasRec, err := ReadSandboxRecord(b.townRoot, session)
+	if err != nil {
+		return fmt.Errorf("sandbox %s: reading its record to find its seat's token: %w", session, err)
+	}
 	if err := b.deleteSandbox(session); err != nil {
 		return err
 	}
+	if hasRec {
+		b.revokeSeat(rec)
+	} else {
+		b.warn("sandbox %s has no record, so its seat is unknown and no tracker token is revoked", session)
+	}
 	routing.forget(session)
 	return RemoveSandboxRecord(b.townRoot, session)
+}
+
+// deleteRecorded deletes the sandbox rec describes and ends the tracker token
+// of the seat rec names. It is the record path's delete: a sandbox that is
+// already gone still ends its seat, and a failed delete revokes nothing, since
+// the sandbox may still run.
+func (b *openshellBackend) deleteRecorded(rec SandboxRecord) error {
+	if err := b.deleteSandbox(rec.Session); err != nil {
+		return err
+	}
+	b.revokeSeat(rec)
+	return nil
+}
+
+// revokeSeat ends the tracker token of the seat rec names. A failed revoke is a
+// warning naming the seat: the sandbox is gone, so the delete has happened
+// whether or not the tracker answered (gt-p85pw.86).
+func (b *openshellBackend) revokeSeat(rec SandboxRecord) {
+	if !plainPathName(rec.Rig) || !plainPathName(rec.Polecat) {
+		b.warn("sandbox %s: its record names no seat (rig %q, polecat %q), so no token is revoked", rec.Session, rec.Rig, rec.Polecat)
+		return
+	}
+	seat := seattoken.PolecatSeat(rec.Rig, rec.Polecat)
+	if err := seattoken.RevokeSeat(context.Background(), b.townRoot, seat, b.revoker); err != nil {
+		b.warn("sandbox %s: revoking the tracker token of seat %s: %v", rec.Session, seat, err)
+	}
+}
+
+// warn reports a warning through the test's hook, or to the console.
+func (b *openshellBackend) warn(format string, args ...any) {
+	if b.warnf != nil {
+		b.warnf(format, args...)
+		return
+	}
+	style.PrintWarning(format, args...)
 }
 
 // deleteSandbox is `sandbox delete` with "not found" as success.
