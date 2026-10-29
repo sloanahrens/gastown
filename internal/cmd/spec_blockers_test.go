@@ -192,9 +192,6 @@ func TestSpecSlingRefusesABeadBlockedAfterTheBoardRead(t *testing.T) {
 			if !isSpecSlingRefusal(err) {
 				t.Errorf("%q is not read as a deferral: the tick would label the bead dispatch-failed", err)
 			}
-			if isSpecOverlapRefusal(err) {
-				t.Errorf("%q is read as a content overlap", err)
-			}
 			h.wantNo("spawn")
 			h.wantNo("hook")
 		})

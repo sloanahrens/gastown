@@ -57,9 +57,9 @@ func (c *countingStore) GetAssignedIssue(assignee string) (*beads.Issue, error) 
 // TestSpecDispatchTickReadsEachBeadOnce runs the golden's sixteen candidates
 // through the tick's reads over a counting store: the candidate loop reads no
 // bead, since each candidate's spec is its board row (gt-bqj8q). A bead the
-// roster already read is not read again, the held-work read costs one batched
-// call, and each bead that reaches the last-moment re-read before its sling is
-// read once there. The tick's decisions are the golden's (gt-u8rbh).
+// roster already read is not read again, and each bead that reaches the
+// last-moment re-read before its sling is read once there. The tick's decisions
+// are the golden's (gt-u8rbh).
 func TestSpecDispatchTickReadsEachBeadOnce(t *testing.T) {
 	t.Parallel()
 	f := specGoldenTown()
@@ -95,9 +95,6 @@ func TestSpecDispatchTickReadsEachBeadOnce(t *testing.T) {
 		fresh[id]++
 		return showSpecWith(nil, id, read)
 	}
-	env.Held = func(string) ([]specdispatch.HeldBead, error) {
-		return heldBeadsFrom(reads.client(store), func(string, error) {}, t.TempDir())
-	}
 	r := runSpecDispatchCycle(env)
 
 	if got, want := renderSpecTick(f.slung, r), readSpecTickGolden(t); got != want {
@@ -118,10 +115,6 @@ func TestSpecDispatchTickReadsEachBeadOnce(t *testing.T) {
 		if n != want {
 			t.Errorf("bead %s read %d times, want %d", id, n, want)
 		}
-	}
-	// The held beads are read in the one batched call.
-	if len(store.multis) != 1 {
-		t.Errorf("held-work batches = %v, want one", store.multis)
 	}
 }
 

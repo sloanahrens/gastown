@@ -261,6 +261,20 @@ func IsPackageFixtureTest(name string) bool {
 	return packageFixtureTests[strings.TrimRight(name, "_")]
 }
 
+// AdmitOverlaps drops the matches a dispatcher admits: those Blocking would
+// refuse. What is left can only warn, so DecideDuplicates reports the shared
+// files and closed duplicates and says nothing about an overlap it admitted
+// (gt-e1ufo).
+func AdmitOverlaps(candidate Duplicate, matches []DuplicateMatch) []DuplicateMatch {
+	kept := make([]DuplicateMatch, 0, len(matches))
+	for _, m := range matches {
+		if !m.Blocking(candidate) {
+			kept = append(kept, m)
+		}
+	}
+	return kept
+}
+
 // DuplicateDecision is the outcome of a pre-dispatch dedupe check: whether to
 // refuse, and the report to print either way. Message is empty when nothing
 // overlapped.
