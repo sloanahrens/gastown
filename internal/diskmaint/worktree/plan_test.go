@@ -29,6 +29,7 @@ func TestBuildPlanKeepsWhenOneConditionFails(t *testing.T) {
 		"dirty":                 func(w *Worktree) { w.Dirty = 1 },
 		"not pushed or landed":  func(w *Worktree) { w.Pushed = false },
 		"under 48 hours":        func(w *Worktree) { w.LastCommit = testNow.Add(-47 * time.Hour) },
+		"no commit time":        func(w *Worktree) { w.LastCommit = time.Time{} },
 		"a non-overseer dir":    func(w *Worktree) { w.Dir = "other-b"; w.Path = "/town/repo-a/crew/other-b" },
 		"not under a crew dir":  func(w *Worktree) { w.Path = "/town/repo-a/overseer-a" },
 		"the clone named exact": func(w *Worktree) { w.Dir = "overseer"; w.Path = "/town/repo-a/crew/overseer" },
@@ -57,6 +58,9 @@ func TestBuildPlanRemovesAtExactlyMinAge(t *testing.T) {
 	if len(p.Actions) != 1 || p.Actions[0].Kind != "remove-worktree" {
 		t.Fatalf("actions = %+v, want one remove-worktree at exactly %v", p.Actions, MinAge)
 	}
+	if want := "idle 2d or more"; !strings.Contains(p.Actions[0].Why, want) {
+		t.Errorf("Why = %q, want the threshold %q derived from MinAge", p.Actions[0].Why, want)
+	}
 }
 
 func TestBuildPlanLandedWorktreeAlsoDeletesBranch(t *testing.T) {
@@ -84,15 +88,16 @@ func TestBuildPlanPushedOnlyWorktreeKeepsBranch(t *testing.T) {
 	}
 }
 
-// A detached landed worktree has no branch to name, so no delete-branch.
-func TestBuildPlanLandedDetachedWorktreeHasNoBranchAction(t *testing.T) {
+// A landed worktree gets delete-branch whatever its Branch field holds, as the
+// spec states; the apply step owns what to do with an empty branch name.
+func TestBuildPlanLandedWorktreeGetsBranchActionEvenWithoutBranchName(t *testing.T) {
 	t.Parallel()
 	w := cleanWorktree()
 	w.Landed = true
 	w.Branch = ""
 	p := BuildPlan([]Worktree{w}, testNow, nil)
-	if len(p.Actions) != 1 || p.Actions[0].Kind != "remove-worktree" {
-		t.Fatalf("actions = %+v, want remove-worktree alone", p.Actions)
+	if len(p.Actions) != 2 || p.Actions[1].Kind != "delete-branch" {
+		t.Fatalf("actions = %+v, want remove-worktree then delete-branch", p.Actions)
 	}
 }
 
@@ -144,9 +149,10 @@ func TestBuildPlanIsDeterministicAndOrderedByPath(t *testing.T) {
 	b.Path = "/town/repo-a/crew/overseer-b"
 	b.Dir = "overseer-b"
 	c := Worktree{Path: "/town/repo-a/crew/other-c", Dir: "other-c", LastCommit: testNow}
+	d := Worktree{Path: "/town/repo-a/crew/aaa-d", Dir: "aaa-d", LastCommit: testNow}
 
-	forward := []Worktree{a, b, c}
-	reversed := []Worktree{c, b, a}
+	forward := []Worktree{a, b, c, d}
+	reversed := []Worktree{d, c, b, a}
 
 	first := BuildPlan(forward, testNow, nil)
 	if again := BuildPlan(forward, testNow, nil); !reflect.DeepEqual(first, again) {
@@ -162,5 +168,13 @@ func TestBuildPlanIsDeterministicAndOrderedByPath(t *testing.T) {
 	}
 	if want := []string{a.Path, b.Path}; !reflect.DeepEqual(refs, want) {
 		t.Errorf("action refs = %v, want %v", refs, want)
+	}
+
+	var kept []string
+	for _, k := range first.Kept {
+		kept = append(kept, k.Ref)
+	}
+	if want := []string{d.Path, c.Path}; !reflect.DeepEqual(kept, want) {
+		t.Errorf("kept refs = %v, want %v", kept, want)
 	}
 }

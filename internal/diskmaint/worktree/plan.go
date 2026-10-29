@@ -18,6 +18,9 @@ import (
 // worktree may go; a fresher one is someone's live work.
 const MinAge = 48 * time.Hour
 
+// minAgeDays is MinAge in whole days, for the rule text a plan carries.
+const minAgeDays = int(MinAge / (24 * time.Hour))
+
 // planTarget is the Target name a plan carries.
 const planTarget = "worktree"
 
@@ -76,9 +79,9 @@ func BuildPlan(ws []Worktree, now time.Time, readErrs []string) diskmaint.Plan {
 			plan.Actions = append(plan.Actions, diskmaint.Action{
 				Kind: "remove-worktree",
 				Ref:  w.Path,
-				Why:  fmt.Sprintf("rule: clean, pushed or landed, idle 48h or more (%s, idle %dd)", state, days),
+				Why:  fmt.Sprintf("rule: clean, pushed or landed, idle %dd or more (%s, idle %dd)", minAgeDays, state, days),
 			})
-			if w.Landed && w.Branch != "" {
+			if w.Landed {
 				plan.Actions = append(plan.Actions, diskmaint.Action{
 					Kind: "delete-branch",
 					Ref:  w.Path + "#" + w.Branch,
@@ -90,12 +93,15 @@ func BuildPlan(ws []Worktree, now time.Time, readErrs []string) diskmaint.Plan {
 	return plan
 }
 
-// removable reports whether every removal condition holds for w.
+// removable reports whether every removal condition holds for w. A worktree
+// with no commit time is kept: subtracting the zero time saturates the age to
+// the largest duration, which would pass the age gate.
 func removable(w Worktree, age time.Duration) bool {
 	return strings.HasPrefix(w.Dir, removePrefix) &&
 		filepath.Base(filepath.Dir(w.Path)) == crewDir &&
 		w.Dirty == 0 &&
 		(w.Pushed || w.Landed) &&
+		!w.LastCommit.IsZero() &&
 		age >= MinAge &&
 		w.Err == ""
 }
