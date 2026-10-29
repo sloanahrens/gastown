@@ -82,6 +82,12 @@ type overrunSeat struct {
 	// the first dispatch (gt-chd44). It comes from the bead read the seat
 	// already costs, so the guard reads no bead twice for one clock.
 	SubmittedAt time.Time
+	// RestartedAt is the latest supervised restart of the seat's session, from
+	// the intent record's restart stamps; zero when it never was restarted. A
+	// restarted seat gets a fresh clock (overrunState.withRestart), because the
+	// time it spent dead was not time a session was alive on the bead
+	// (gt-y9lkx).
+	RestartedAt time.Time
 	// Scheduled is set when the bead carries a scheduled: label, the mark of a
 	// run the daemon's scheduled_slings patrol created. Those run long by
 	// design (the deep-review is report-only), so the guard never nudges them
@@ -331,9 +337,10 @@ func (d *Daemon) triggerOverrunGuard() {
 // once per run of the bead, remembered in the bead's state file; past the stop
 // threshold the stop seam runs. A seat on a scheduled sling is never nudged and
 // is judged by scheduled_stop_after alone (zero leaves it alone). The clock it
-// judges is the bead's dispatch (slungAt), less the time the seat spends inside
-// its gate, or waiting on an escalation it raised; a state that cannot be read
-// counts all of its time (overrun_guard_gate.go, overrun_guard_escalation.go).
+// judges is the later of the bead's dispatch (slungAt) and a restart of the
+// seat since then, less the time the seat spends inside its gate, or waiting on
+// an escalation it raised; a state that cannot be read counts all of its time
+// (overrun_guard_gate.go, overrun_guard_escalation.go, withRestart).
 // In dry-run mode nothing is sent, stopped or written, and the log says what
 // would have happened.
 func (d *Daemon) runOverrunGuard(s overrunSeams) {
@@ -398,22 +405,29 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			continue
 		}
 		state.Bead = seat.Bead
+		// Everything that outlives this tick is compared against before, written
+		// below only when it moved.
+		before := state
+
+		// A restart of the seat starts the clock over (withRestart), so the nudge
+		// and stop limits below measure the later of the sling and the restart;
+		// slung keeps dating the run for the stop's own state.
+		state, clockStart := state.withRestart(slung, seat.RestartedAt)
 
 		// A nudge sent before this clock belongs to an earlier run of the bead
 		// (a run that ended, after which the bead was dispatched again). The
 		// nudge is the bead's, not the seat's: a bead handed to a second seat
 		// keeps the clock, and the nudge already went out for it.
-		nudged := !state.NudgedAt.IsZero() && !state.NudgedAt.Before(slung)
+		nudged := !state.NudgedAt.IsZero() && !state.NudgedAt.Before(clockStart)
 
 		// Gate time does not count (overrun_guard_gate.go). A state that cannot
 		// be read counts all of the seat's time, the direction that stops.
-		before := state
 		inGate, err := gateRunning(seat)
 		if err != nil {
 			d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s, counting all of its time: %v", who, seat.Bead, err)
 			inGate = false
 		}
-		state, gateSpent := state.withGate(slung, now, inGate, maxGateCharge, maxGateTotal)
+		state, gateSpent := state.withGate(clockStart, now, inGate, maxGateCharge, maxGateTotal)
 
 		// A seat waiting on an escalation it raised is waiting on a person, not
 		// overrunning (overrun_guard_escalation.go). The escalation is read only
@@ -429,7 +443,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				waiting = false
 			}
 		}
-		state, escalationSpent := state.withEscalation(slung, now, waiting, maxGateCharge, maxEscalationTotal)
+		state, escalationSpent := state.withEscalation(clockStart, now, waiting, maxGateCharge, maxEscalationTotal)
 
 		if !dry && !state.sameWait(before) {
 			// The gate and escalation accounting outlives the tick: it is saved
@@ -440,7 +454,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			}
 		}
 
-		elapsed := now.Sub(slung) - gateSpent - escalationSpent
+		elapsed := now.Sub(clockStart) - gateSpent - escalationSpent
 		if dry && inGate {
 			// A dry run writes nothing, so it has no banked gate time to
 			// subtract: it says what it sees and leaves the verdict to a real
@@ -461,7 +475,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		}
 
 		in := overrunInput{
-			Now: now, SlungAt: slung, Nudged: nudged,
+			Now: now, SlungAt: clockStart, Nudged: nudged,
 			NudgeAt: nudgeAfter, StopAt: stopAfter, GateSpent: gateSpent, EscalationSpent: escalationSpent,
 		}
 		if seat.Scheduled {
@@ -477,11 +491,11 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				d.logger.Printf("overrun_guard: dry run: would nudge %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
 				continue
 			}
-			if state.nudgeHeld(slung, now) {
+			if state.nudgeHeld(clockStart, now) {
 				continue
 			}
 			if err := s.nudge(seat, overrunNudgeMessage); err != nil {
-				state.NudgeFailures = state.nudgeFailures(slung) + 1
+				state.NudgeFailures = state.nudgeFailures(clockStart) + 1
 				state.NudgeFailedAt = now
 				d.logger.Printf("overrun_guard: nudge %s on %s failed (attempt %d of %d): %v",
 					who, seat.Bead, state.NudgeFailures, overrunNudgeMaxAttempts, err)
@@ -595,6 +609,7 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 	}
 	seat.Parked = rec.Held()
 	seat.Submitted = rec.Submitted()
+	seat.RestartedAt = latestRestart(rec.Restarts)
 	if seat.Parked || seat.Submitted {
 		return seat, false // nothing to time, and no reason to spend a bd read
 	}
@@ -660,6 +675,20 @@ func (d *Daemon) gtDoneInFlight(sessionName string) bool {
 func heartbeatShowsGtDone(hb *polecat.SessionHeartbeat, now time.Time) bool {
 	return hb != nil && hb.EffectiveState() == polecat.HeartbeatExiting &&
 		now.Sub(hb.Timestamp) < polecat.SessionHeartbeatStaleThreshold
+}
+
+// latestRestart returns the newest of the seat's restart stamps, zero when it
+// was never restarted. The supervisor keeps only the stamps of its budget
+// window, so a run longer than that reads the restart from the guard's own
+// record once it has adopted it (withRestart).
+func latestRestart(stamps []time.Time) time.Time {
+	var out time.Time
+	for _, t := range stamps {
+		if t.After(out) {
+			out = t
+		}
+	}
+	return out
 }
 
 // hasScheduledSlingLabel reports whether labels include one with the

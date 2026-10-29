@@ -97,6 +97,30 @@ func (s overrunState) nudgeHeld(slung, now time.Time) bool {
 	return n >= overrunNudgeMaxAttempts || (n > 0 && now.Sub(s.NudgeFailedAt) < overrunNudgeRetryAfter)
 }
 
+// withRestart folds the seat's latest restart into the record and returns the
+// time the clock measures from: the later of the sling and the restart adopted
+// for it. A session restarted hours after its seat died starts its time over,
+// because the dead stretch was not time a session was alive on the bead; a seat
+// that never died measures from its sling as before (gt-y9lkx).
+//
+// An adopted restart is kept across ticks and written to the state file: the
+// intent record's stamps last only the supervisor's budget window. A restart
+// recorded for an earlier sling is dropped, the way the gate accounting is: a
+// rework starts a new clock. A stamp at or before the sling predates this
+// dispatch and is not a restart of it.
+func (s overrunState) withRestart(slung, restarted time.Time) (overrunState, time.Time) {
+	if !s.RestartSlingAt.Equal(slung) {
+		s.RestartSlingAt, s.RestartedAt = slung, time.Time{}
+	}
+	if restarted.After(slung) && restarted.After(s.RestartedAt) {
+		s.RestartedAt = restarted
+	}
+	if s.RestartedAt.After(slung) {
+		return s, s.RestartedAt
+	}
+	return s, slung
+}
+
 // withGate folds one tick's gate reading into the record and returns it with
 // the gate time to measure this tick's elapsed against. It charges the interval
 // since the last tick that saw the seat inside its gate, never past maxTotal for
@@ -163,12 +187,13 @@ func chargeWait(spent time.Duration, seenAt, now time.Time, inWait bool, maxChar
 	return min(spent, maxTotal), seenAt
 }
 
-// sameWait reports whether two records carry the same gate and escalation
-// accounting, so a tick writes the state only when one moved.
+// sameWait reports whether two records carry the same gate, escalation and
+// restart accounting, so a tick writes the state only when one moved.
 func (s overrunState) sameWait(o overrunState) bool {
 	return s.GateSeenAt.Equal(o.GateSeenAt) && s.GateSpent == o.GateSpent && s.GateSlingAt.Equal(o.GateSlingAt) &&
 		s.EscalationSeenAt.Equal(o.EscalationSeenAt) && s.EscalationSpent == o.EscalationSpent &&
-		s.EscalationSlingAt.Equal(o.EscalationSlingAt)
+		s.EscalationSlingAt.Equal(o.EscalationSlingAt) &&
+		s.RestartSlingAt.Equal(o.RestartSlingAt) && s.RestartedAt.Equal(o.RestartedAt)
 }
 
 // overrunState is what the guard remembers about one bead between ticks.
@@ -205,6 +230,14 @@ type overrunState struct {
 	EscalationSlingAt time.Time     `json:"escalation_sling_at,omitzero"`
 	EscalationSpent   time.Duration `json:"escalation_spent,omitempty"`
 	EscalationSeenAt  time.Time     `json:"escalation_seen_at,omitzero"`
+
+	// RestartSlingAt is the sling RestartedAt belongs to, and RestartedAt the
+	// restart of that sling's seat the guard has adopted as the start of the
+	// clock (withRestart). They are saved here because the intent record keeps
+	// restart stamps only for the supervisor's budget window, shorter than a
+	// run the guard polices (gt-y9lkx).
+	RestartSlingAt time.Time `json:"restart_sling_at,omitzero"`
+	RestartedAt    time.Time `json:"restarted_at,omitzero"`
 
 	// Rig, Polecat and Branch name the seat the stop acts on; Elapsed is how
 	// long it had held the bead when the stop began, gate time excluded.
