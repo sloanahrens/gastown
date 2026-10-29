@@ -87,15 +87,30 @@ func firstPassStores(t *testing.T, branches map[string]string, calls *[][]string
 	}
 }
 
-// firstPassStore is one rig's store over the fixture's branches.
+// firstPassStore is one rig's store over the fixture's branches. A case that
+// passes lists records the options each whole-board read asked with, so a test
+// sees a big store listed once rather than shown a chunk at a time.
 type firstPassStore struct {
 	t        *testing.T
 	branches map[string]string
 	calls    *[][]string
+	lists    *[]beads.ListOptions
 }
 
-func (s firstPassStore) List(beads.ListOptions) ([]*beads.Issue, error) {
-	return nil, errors.New("the first-pass section read the board")
+func (s firstPassStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	s.t.Helper()
+	if s.lists != nil {
+		*s.lists = append(*s.lists, opts)
+	}
+	issues := make([]*beads.Issue, 0, len(s.branches))
+	for id, branch := range s.branches {
+		notes := ""
+		if branch != "" {
+			notes = "Branch: " + branch
+		}
+		issues = append(issues, &beads.Issue{ID: id, Notes: notes})
+	}
+	return issues, nil
 }
 
 func (s firstPassStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
@@ -449,16 +464,16 @@ func TestMangoFirstPassSectionRefusesAFileThatNamesNoRig(t *testing.T) {
 	}
 }
 
-// TestMangoFirstPassSectionReadsBeadsInChunks holds the store read to bounded
-// reads: 130 distinct bead ids in one store are three store calls of 64, 64 and
-// 2, never one call carrying every id.
-func TestMangoFirstPassSectionReadsBeadsInChunks(t *testing.T) {
+// TestMangoFirstPassSectionReadsABigStoreWithOneList holds a store naming more
+// than storeShowChunk beads to one whole-board listing with the unclipped row
+// count, not a show chunked by 64.
+func TestMangoFirstPassSectionReadsABigStoreWithOneList(t *testing.T) {
 	t.Parallel()
-	const beads = 2*storeShowChunk + 2
-	landings := make([]land.LandingRecord, 0, beads)
-	reviews := make([]land.ReviewRecord, 0, beads)
-	branches := make(map[string]string, beads)
-	for i := 0; i < beads; i++ {
+	const merged = 2*storeShowChunk + 2
+	landings := make([]land.LandingRecord, 0, merged)
+	reviews := make([]land.ReviewRecord, 0, merged)
+	branches := make(map[string]string, merged)
+	for i := 0; i < merged; i++ {
 		id := fmt.Sprintf("gt-%03d", i)
 		landings = append(landings, firstPassLanded(id, firstPassAt))
 		reviews = append(reviews, firstPassVerdict(id, 1, land.VerdictApprove))
@@ -466,23 +481,26 @@ func TestMangoFirstPassSectionReadsBeadsInChunks(t *testing.T) {
 	}
 	town := firstPassTown(t, map[string][]land.LandingRecord{"gastown": landings}, reviews...)
 	var calls [][]string
+	var lists []beads.ListOptions
 	text, err := MangoFirstPassSection(context.Background(), Env{
 		Town: town, ReadFile: os.ReadFile, ReadDir: listDir,
-		Beads: firstPassStores(t, branches, &calls),
+		Beads: func(context.Context, string) BeadStore {
+			return firstPassStore{t: t, branches: branches, calls: &calls, lists: &lists}
+		},
 	}, time.Time{})
 	if err != nil {
 		t.Fatalf("MangoFirstPassSection: %v", err)
 	}
-	wantSizes := []int{64, 64, 2}
-	if len(calls) != len(wantSizes) {
-		t.Fatalf("the store was read %d time(s), want %d reads of %v", len(calls), len(wantSizes), wantSizes)
+	if len(calls) != 0 {
+		t.Errorf("the store was shown %d time(s), want none: %d beads are one listing", len(calls), merged)
 	}
-	for i, asked := range calls {
-		if len(asked) != wantSizes[i] {
-			t.Errorf("read %d asked for %d ids, want %d", i, len(asked), wantSizes[i])
-		}
+	if len(lists) != 1 {
+		t.Fatalf("the store was listed %d time(s), want one whole-board read", len(lists))
 	}
-	want := fmt.Sprintf("| polecat | %d | %d | 100.0%% | %d | 1.0 |", beads, beads, beads)
+	if opts := lists[0]; opts.Status != "all" || opts.Limit != 0 {
+		t.Errorf("List(%+v), want Status %q and Limit 0: bd's default of 50 rows would drop every bead past it", opts, "all")
+	}
+	want := fmt.Sprintf("| polecat | %d | %d | 100.0%% | %d | 1.0 |", merged, merged, merged)
 	if !strings.Contains(text, want) {
 		t.Errorf("text = %q, want it to hold %q", text, want)
 	}

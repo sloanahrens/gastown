@@ -3,7 +3,10 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -50,23 +53,27 @@ func notesStores(notes notesStore) BeadStores {
 // reported.
 func TestAttributeRecordsRefusesAFailedStoreRead(t *testing.T) {
 	t.Parallel()
-	records := []land.ReviewRecord{{BeadID: "gt-a", Rig: "gastown", Verdict: land.VerdictApprove}}
+	small := []land.ReviewRecord{{BeadID: "gt-a", Rig: "gastown", Verdict: land.VerdictApprove}}
+	large, _ := authorFixture(2*storeShowChunk + 2)
+	noStore := func(context.Context, string) BeadStore { return nil }
+	failing := func(context.Context, string) BeadStore {
+		return failingStore{err: errors.New("dolt is down")}
+	}
 	tests := []struct {
-		name string
-		env  Env
+		name    string
+		records []land.ReviewRecord
+		env     Env
 	}{
-		{"no seam", Env{Town: "/town"}},
-		{"a seam with no store", Env{Town: "/town", Beads: func(context.Context, string) BeadStore {
-			return nil
-		}}},
-		{"a read that failed", Env{Town: "/town", Beads: func(context.Context, string) BeadStore {
-			return failingStore{err: errors.New("dolt is down")}
-		}}},
+		{"no seam", small, Env{Town: "/town"}},
+		{"no seam, a whole-board listing", large, Env{Town: "/town"}},
+		{"a seam with no store", small, Env{Town: "/town", Beads: noStore}},
+		{"a seam with no store, a whole-board listing", large, Env{Town: "/town", Beads: noStore}},
+		{"a read that failed", small, Env{Town: "/town", Beads: failing}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got, err := AttributeRecords(context.Background(), tc.env, records); err == nil {
+			if got, err := AttributeRecords(context.Background(), tc.env, tc.records); err == nil {
 				t.Errorf("AttributeRecords = %v, nil; want a refused read", got)
 			}
 		})
@@ -127,6 +134,229 @@ func TestStoreBeadsKeepsTheIDsSorted(t *testing.T) {
 	want := []string{"gt-a", "gt-b", "gt-c", "gt-d", "gt-e", "gt-f", "gt-g", "gt-h", "gt-i", "gt-j"}
 	if !reflect.DeepEqual(ids, want) {
 		t.Errorf("rows = %v, want %v in id order", ids, want)
+	}
+}
+
+// listingStore serves a bead table both ways bd does: a whole-board List and a
+// ShowMultiple by id. It records every read, so a test sees which of the two the
+// attribution took and with which options, and it serves the same notes either
+// way, as bd does.
+type listingStore struct {
+	branches map[string]string // bead id -> the branch its notes name, "" for none
+	lists    []beads.ListOptions
+	shows    [][]string
+	listErr  error
+}
+
+func (s *listingStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	s.lists = append(s.lists, opts)
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	issues := make([]*beads.Issue, 0, len(s.branches))
+	for id, branch := range s.branches {
+		issues = append(issues, &beads.Issue{ID: id, Notes: landingNotes(branch)})
+	}
+	return issues, nil
+}
+
+func (s *listingStore) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("the attribution read the ready board")
+}
+
+func (s *listingStore) Blocked() ([]*beads.Issue, error) {
+	return nil, errors.New("the attribution read the blocked board")
+}
+
+func (s *listingStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	s.shows = append(s.shows, append([]string(nil), ids...))
+	found := make(map[string]*beads.Issue, len(ids))
+	for _, id := range ids {
+		branch, ok := s.branches[id]
+		if !ok {
+			continue
+		}
+		found[id] = &beads.Issue{ID: id, Notes: landingNotes(branch)}
+	}
+	return found, nil
+}
+
+// landingNotes is the note the landing worker writes for a branch, or a note
+// naming no branch when branch is empty.
+func landingNotes(branch string) string {
+	if branch == "" {
+		return "READY TO LAND\nHead: abc\n"
+	}
+	return "READY TO LAND\nBranch: " + branch + "\nHead: abc\n"
+}
+
+// listingEnv is the seam a test reads a store through without a town behind it.
+func listingEnv(store *listingStore) Env {
+	return Env{Town: "/town", Beads: func(context.Context, string) BeadStore { return store }}
+}
+
+// authorFixture returns n review records of one rig and the branch each bead's
+// notes name, cycling a polecat branch, a crew branch, the overseer's crew
+// branch and a bead naming no branch. A case larger than storeShowChunk takes
+// the listing read, so its rows come from every shape a kind is read from.
+func authorFixture(n int) ([]land.ReviewRecord, map[string]string) {
+	records := make([]land.ReviewRecord, 0, n)
+	branches := make(map[string]string, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("gt-%03d", i)
+		records = append(records, land.ReviewRecord{BeadID: id, Rig: "gastown", Verdict: land.VerdictApprove})
+		switch i % 4 {
+		case 0:
+			branches[id] = "polecat/alfa/" + id
+		case 1:
+			branches[id] = "crew/merlin/" + id
+		case 2:
+			branches[id] = "crew/overseer/" + id
+		default:
+			branches[id] = ""
+		}
+	}
+	return records, branches
+}
+
+// assertKinds checks that each record is attributed the kind its bead's branch
+// names, in the order the records were passed.
+func assertKinds(t *testing.T, got []AttributedRecord, records []land.ReviewRecord, branches map[string]string) {
+	t.Helper()
+	if len(got) != len(records) {
+		t.Fatalf("attributed records = %d, want %d", len(got), len(records))
+	}
+	for i, rec := range records {
+		if got[i].Record.BeadID != rec.BeadID {
+			t.Fatalf("record %d = %s, want %s in the log's order", i, got[i].Record.BeadID, rec.BeadID)
+		}
+		if want := AuthorKind(branches[rec.BeadID]); got[i].AuthorKind != want {
+			t.Errorf("record %d (%s) kind = %q, want %q for the branch its notes name",
+				i, rec.BeadID, got[i].AuthorKind, want)
+		}
+	}
+}
+
+// A store naming more than storeShowChunk beads is read once with the
+// whole-board listing, not shown a chunk at a time, and the rows it yields are
+// the ones the show path gives the same beads.
+func TestAttributeRecordsReadsALargeStoreWithOneList(t *testing.T) {
+	t.Parallel()
+	records, branches := authorFixture(2*storeShowChunk + 2)
+	store := &listingStore{branches: branches}
+	got, err := AttributeRecords(context.Background(), listingEnv(store), records)
+	if err != nil {
+		t.Fatalf("AttributeRecords: %v", err)
+	}
+	if len(store.lists) != 1 {
+		t.Fatalf("the store was listed %d time(s), want one whole-board read", len(store.lists))
+	}
+	if opts := store.lists[0]; opts.Status != "all" || opts.Limit != 0 {
+		t.Errorf("List(%+v), want Status %q and Limit 0: bd's default of 50 rows would drop every bead past it", opts, "all")
+	}
+	if len(store.shows) != 0 {
+		t.Errorf("the store was shown %d time(s), want none: a store this size is one listing", len(store.shows))
+	}
+	assertKinds(t, got, records, branches)
+
+	// The same beads read through the show path agree row for row with the
+	// listing's, so the listing changes how the notes are read, not which rows
+	// the table gets.
+	smallStore := &listingStore{branches: branches}
+	small, err := AttributeRecords(context.Background(), listingEnv(smallStore), records[:storeShowChunk])
+	if err != nil {
+		t.Fatalf("AttributeRecords of the show path: %v", err)
+	}
+	if len(smallStore.shows) != 1 || len(smallStore.lists) != 0 {
+		t.Fatalf("the %d-bead store was shown %d time(s) and listed %d, want one show and no listing",
+			storeShowChunk, len(smallStore.shows), len(smallStore.lists))
+	}
+	if !reflect.DeepEqual(small, got[:storeShowChunk]) {
+		t.Errorf("the show path's rows differ from the listing's for the same %d beads", storeShowChunk)
+	}
+}
+
+// A store naming storeShowChunk beads, the size of the show's own read, keeps
+// the show: the listing costs a whole board for ids it may not name.
+func TestAttributeRecordsKeepsShowForASmallStore(t *testing.T) {
+	t.Parallel()
+	records, branches := authorFixture(storeShowChunk)
+	store := &listingStore{branches: branches}
+	got, err := AttributeRecords(context.Background(), listingEnv(store), records)
+	if err != nil {
+		t.Fatalf("AttributeRecords: %v", err)
+	}
+	if len(store.lists) != 0 {
+		t.Errorf("the store was listed %d time(s), want none: %d beads are one show", len(store.lists), storeShowChunk)
+	}
+	if len(store.shows) != 1 {
+		t.Fatalf("the store was shown %d time(s), want one", len(store.shows))
+	}
+	if len(store.shows[0]) != storeShowChunk {
+		t.Errorf("the show asked for %d ids, want %d", len(store.shows[0]), storeShowChunk)
+	}
+	assertKinds(t, got, records, branches)
+}
+
+// A bead the whole-board listing no longer holds is the unknown author's, as a
+// bead the show leaves out is: a gone bead is an answer, not a broken read.
+func TestAttributeRecordsLeavesOutABeadTheListingDoesNotHold(t *testing.T) {
+	t.Parallel()
+	records, branches := authorFixture(2*storeShowChunk + 2)
+	gone := records[0].BeadID
+	delete(branches, gone)
+	got, err := AttributeRecords(context.Background(), listingEnv(&listingStore{branches: branches}), records)
+	if err != nil {
+		t.Fatalf("AttributeRecords: %v", err)
+	}
+	if got[0].AuthorKind != AuthorKindUnknown {
+		t.Errorf("%s kind = %q, want %q for a bead the listing leaves out", gone, got[0].AuthorKind, AuthorKindUnknown)
+	}
+	assertKinds(t, got[1:], records[1:], branches)
+}
+
+// A failing listing is an error naming the read, never the unknown author's: a
+// kind derived from a read that broke would be printed as a seat's.
+func TestAttributeRecordsRefusesAFailedListing(t *testing.T) {
+	t.Parallel()
+	records, branches := authorFixture(2*storeShowChunk + 2)
+	store := &listingStore{branches: branches, listErr: errors.New("dolt is down")}
+	got, err := AttributeRecords(context.Background(), listingEnv(store), records)
+	if err == nil {
+		t.Fatalf("AttributeRecords = %v, nil; want the failed listing reported", got)
+	}
+	if !strings.Contains(err.Error(), "bd list in") {
+		t.Errorf("err = %v, want it to name the listing read", err)
+	}
+}
+
+// storeBeads returns the rows the records' ids name and no other, so the
+// whole-board listing answers what a show of those ids would: a bead the
+// records do not name is left out of the rows, and an id bd would read as a
+// flag is never matched.
+func TestStoreBeadsTakesOnlyTheListedRowsTheIDsName(t *testing.T) {
+	t.Parallel()
+	records, branches := authorFixture(2*storeShowChunk + 2)
+	branches["gt-extra"] = "polecat/alfa/gt-extra"
+	branches["-gt-flag"] = "polecat/alfa/-gt-flag"
+	records = append(records, land.ReviewRecord{BeadID: "-gt-flag", Rig: "gastown"})
+	rows, err := storeBeads(context.Background(), listingEnv(&listingStore{branches: branches}), "/town/gastown", records)
+	if err != nil {
+		t.Fatalf("storeBeads: %v", err)
+	}
+	want := make([]string, 0, len(records))
+	for _, rec := range records {
+		if isBeadID(rec.BeadID) {
+			want = append(want, rec.BeadID)
+		}
+	}
+	sort.Strings(want)
+	var got []string
+	for _, row := range rows {
+		got = append(got, row.ID)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rows = %v, want the %d named ids %v", got, len(want), want)
 	}
 }
 

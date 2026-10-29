@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/steveyegge/gastown/internal/authorkind"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -115,11 +116,14 @@ func AttributeRecords(ctx context.Context, env Env, records []land.ReviewRecord)
 }
 
 // storeBeads reads the notes of the beads records name from the store opened in
-// dir, storeShowChunk ids per read, and returns them in id order so a reader's
-// rows never depend on the store's map. An id that is not a bead id is never
-// asked for, since bd reads an argument beginning with a dash as a flag. A read
-// that fails is an error; a bead the store leaves out is not, because its
-// branch is then unknown rather than unread.
+// dir and returns them in id order so a reader's rows never depend on the
+// store's map. A store naming more than storeShowChunk distinct beads is listed
+// whole in one read and the rows taken from it by id, because a show of every id
+// a chunk at a time was 50 commands and most of a mango run's time (gt-kcuug). A
+// smaller store keeps the show, which asks for exactly the ids it wants. An id
+// that is not a bead id is never asked for, since bd reads an argument beginning
+// with a dash as a flag. A read that fails is an error; a bead the store leaves
+// out is not, because its branch is then unknown rather than unread.
 func storeBeads(ctx context.Context, env Env, dir string, records []land.ReviewRecord) ([]BeadRow, error) {
 	seen := make(map[string]bool, len(records))
 	ids := make([]string, 0, len(records))
@@ -131,16 +135,62 @@ func storeBeads(ctx context.Context, env Env, dir string, records []land.ReviewR
 		ids = append(ids, rec.BeadID)
 	}
 	sort.Strings(ids)
-	shown, err := showBeads(ctx, env, dir, ids)
-	if err != nil {
-		return nil, fmt.Errorf("bd show in %s: %w", dir, err)
+	var issues []*beads.Issue
+	if len(ids) > storeShowChunk {
+		listed, err := listBeads(ctx, env, dir)
+		if err != nil {
+			return nil, fmt.Errorf("bd list in %s: %w", dir, err)
+		}
+		issues = namedBeads(listed, ids)
+	} else {
+		shown, err := showBeads(ctx, env, dir, ids)
+		if err != nil {
+			return nil, fmt.Errorf("bd show in %s: %w", dir, err)
+		}
+		issues = make([]*beads.Issue, 0, len(shown))
+		for _, issue := range shown {
+			issues = append(issues, issue)
+		}
 	}
-	beads := make([]BeadRow, 0, len(shown))
-	for _, issue := range shown {
-		beads = append(beads, BeadRow{ID: issue.ID, Branch: BranchLine(issue.Notes)})
+	rows := make([]BeadRow, 0, len(issues))
+	for _, issue := range issues {
+		rows = append(rows, BeadRow{ID: issue.ID, Branch: BranchLine(issue.Notes)})
 	}
-	sort.Slice(beads, func(i, j int) bool { return beads[i].ID < beads[j].ID })
-	return beads, nil
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	return rows, nil
+}
+
+// listBeads returns every bead the store in dir holds: one bd list --all with
+// Limit 0, since bd's default of 50 rows would drop every bead past it. A
+// missing seam or a failed read is an error.
+func listBeads(ctx context.Context, env Env, dir string) ([]*beads.Issue, error) {
+	if env.Beads == nil {
+		return nil, fmt.Errorf("no bead store seam for %s", dir)
+	}
+	store := env.Beads(ctx, dir)
+	if store == nil {
+		return nil, fmt.Errorf("no bead store for %s", dir)
+	}
+	return store.List(beads.ListOptions{Status: "all"})
+}
+
+// namedBeads keeps the listed beads the ids name, so a whole-board listing
+// answers the rows a show of those ids would: a bead the listing does not hold
+// is left out, and an id bd would read as a flag is never matched.
+func namedBeads(listed []*beads.Issue, ids []string) []*beads.Issue {
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if isBeadID(id) {
+			wanted[id] = true
+		}
+	}
+	held := make([]*beads.Issue, 0, len(wanted))
+	for _, issue := range listed {
+		if wanted[issue.ID] {
+			held = append(held, issue)
+		}
+	}
+	return held
 }
 
 // AttributeReviews returns the reviews with Author and AuthorKind filled from
