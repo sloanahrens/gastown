@@ -1,9 +1,7 @@
 package dashboard
 
 import (
-	"fmt"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -218,26 +216,4 @@ func bucketOf(starts []time.Time, lastEnd time.Time, at time.Time) int {
 	// The first start after at bounds the bucket that holds it; a start exactly
 	// at is not after it.
 	return sort.Search(len(starts), func(i int) bool { return starts[i].After(at) }) - 1
-}
-
-// claudeSeriesAria is what a chart's aria-label adds for its Claude series: the
-// name, every figure, and how many buckets the series has no sample for.
-func claudeSeriesAria(s *CostClaudeSeries) string {
-	var words []string
-	gaps := 0
-	for _, b := range s.Bars {
-		if b.Gap {
-			gaps++
-			continue
-		}
-		words = append(words, b.Label+" "+money(b.Value))
-	}
-	out := ". " + s.Name
-	if len(words) > 0 {
-		out += ": " + strings.Join(words, ", ")
-	}
-	if gaps > 0 {
-		out += fmt.Sprintf("; %d %s no sample", gaps, plural(gaps, "bucket has", "buckets have"))
-	}
-	return out
 }

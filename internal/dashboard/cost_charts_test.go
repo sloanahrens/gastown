@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -306,4 +307,183 @@ func TestPollClaudePlanRebuildsTheLimitLine(t *testing.T) {
 	if math.Abs(charts.Daily.Limit.Value-10) > 1e-9 {
 		t.Errorf("limit = %v, want 10 a day", charts.Daily.Limit.Value)
 	}
+}
+
+// costSeriesFake is a third provider's builder: one bar of a dollar per bucket.
+func costSeriesFake(chart *CostChart) CostSeries {
+	bars := make([]CostBar, len(chart.Bars))
+	for i, b := range chart.Bars {
+		bars[i] = CostBar{Label: b.Label, Value: 1, Title: b.Label + " $1.00 Jev"}
+	}
+	return CostSeries{ID: "jev", Name: "Jev", Bars: bars}
+}
+
+// costSeriesWith is the default builders with one more appended, so a test adds
+// a provider without touching the package's list.
+func costSeriesWith(extra costSeriesBuilder) []costSeriesBuilder {
+	return append(append([]costSeriesBuilder{}, costSeriesBuilders...), extra)
+}
+
+// costSeriesCharts is the daily and hourly chart by name, so each check runs over
+// both.
+func costSeriesCharts(c CostCharts) []struct {
+	name  string
+	chart *CostChart
+} {
+	return []struct {
+		name  string
+		chart *CostChart
+	}{{"daily", c.Daily}, {"hourly", c.Hourly}}
+}
+
+// The DeepSeek series comes first and the Claude series second on both charts,
+// and their bars are the chart's own bars and Claude bars value for value.
+func TestCostChartSeriesDeepSeekFirstAndClaudeSecond(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 10, 25, 15, 0, 0, 0, time.Local)
+	samples := claudeSeries(claudeSampleAt(base, 10), claudeSampleAt(base.Add(20*time.Minute), 12))
+	c := BuildCostCharts(claudeSeriesNow, claudeSeriesDays, claudeSeriesHours(), 0, claudeSeriesPlan, samples)
+	for _, tc := range costSeriesCharts(c) {
+		chart := tc.chart
+		if chart == nil || chart.Claude == nil {
+			t.Fatalf("%s chart has no Claude series to compare", tc.name)
+		}
+		if len(chart.Series) != 2 {
+			t.Fatalf("%s series = %d, want 2", tc.name, len(chart.Series))
+		}
+		ds, cl := chart.Series[0], chart.Series[1]
+		if ds.ID != costProviderDeepSeek || ds.Name != costSeriesDeepSeekName || ds.Why != "" {
+			t.Errorf("%s first series = %+v, want the DeepSeek series", tc.name, ds)
+		}
+		if cl.ID != costProviderClaude || cl.Name != claudePlanSeriesName || cl.Why != "" {
+			t.Errorf("%s second series = %+v, want the Claude series", tc.name, cl)
+		}
+		if !costBarsEqual(ds.Bars, chart.Bars) {
+			t.Errorf("%s DeepSeek series bars = %+v, want the chart's bars %+v", tc.name, ds.Bars, chart.Bars)
+		}
+		if !costBarsEqual(cl.Bars, chart.Claude.Bars) {
+			t.Errorf("%s Claude series bars = %+v, want the Claude bars %+v", tc.name, cl.Bars, chart.Claude.Bars)
+		}
+	}
+}
+
+// A Claude series that could not be built is an entry with the chart's ClaudeWhy
+// and no bars, and the aria says it is not drawn.
+func TestCostChartSeriesClaudeEntryCarriesWhyWhenNotBuilt(t *testing.T) {
+	t.Parallel()
+	c := BuildCostCharts(claudeSeriesNow, claudeSeriesDays, claudeSeriesHours(), 0, claudeSeriesPlan, PlanSamples{})
+	for _, tc := range costSeriesCharts(c) {
+		chart := tc.chart
+		if chart == nil || chart.Claude != nil || chart.ClaudeWhy == "" {
+			t.Fatalf("%s chart carries a Claude series with no samples: %+v", tc.name, chart)
+		}
+		if len(chart.Series) != 2 {
+			t.Fatalf("%s series = %d, want 2", tc.name, len(chart.Series))
+		}
+		cl := chart.Series[1]
+		if cl.Why != chart.ClaudeWhy || cl.Bars != nil {
+			t.Errorf("%s Claude series = %+v, want why %q and nil bars", tc.name, cl, chart.ClaudeWhy)
+		}
+		if cl.Name != claudePlanSeriesName {
+			t.Errorf("%s Claude series name = %q, want %q", tc.name, cl.Name, claudePlanSeriesName)
+		}
+		if !strings.Contains(chart.Aria, ". "+claudePlanSeriesName+" not drawn: "+chart.ClaudeWhy) {
+			t.Errorf("%s aria %q does not say the Claude series is not drawn", tc.name, chart.Aria)
+		}
+	}
+}
+
+// A builder appended to the list adds a third series to both charts, after the
+// two the page already reads.
+func TestCostChartSeriesAFakeBuilderAddsAThirdSeries(t *testing.T) {
+	t.Parallel()
+	builders := costSeriesWith(costSeriesFake)
+	c := buildCostCharts(builders, claudeSeriesNow, claudeSeriesDays, claudeSeriesHours(), 0, claudeSeriesPlan, PlanSamples{})
+	for _, tc := range costSeriesCharts(c) {
+		chart := tc.chart
+		if chart == nil || len(chart.Series) != 3 {
+			t.Fatalf("%s series = %+v, want three", tc.name, chart)
+		}
+		if jev := chart.Series[2]; jev.ID != "jev" || jev.Why != "" || len(jev.Bars) != len(chart.Bars) {
+			t.Errorf("%s third series = %+v, want the fake's %d bars", tc.name, jev, len(chart.Bars))
+		}
+	}
+}
+
+// A builder whose bars are not one per bucket becomes an entry that names the
+// mismatch, on both charts, with no bars.
+func TestCostChartSeriesWrongLengthBecomesAWhy(t *testing.T) {
+	t.Parallel()
+	long := func(chart *CostChart) CostSeries {
+		s := costSeriesFake(chart)
+		return CostSeries{ID: s.ID, Name: s.Name, Bars: append(s.Bars, CostBar{Label: "extra"})}
+	}
+	empty := func(*CostChart) CostSeries { return CostSeries{ID: "jev", Name: "Jev"} }
+	for _, tc := range []struct {
+		name  string
+		build costSeriesBuilder
+		bars  func(buckets int) int // the bars the builder returns for that many buckets
+	}{
+		{"one bar too many", long, func(n int) int { return n + 1 }},
+		{"no bars", empty, func(int) int { return 0 }},
+	} {
+		c := buildCostCharts(costSeriesWith(tc.build), claudeSeriesNow, claudeSeriesDays, claudeSeriesHours(), 0, claudeSeriesPlan, PlanSamples{})
+		for _, ch := range costSeriesCharts(c) {
+			chart := ch.chart
+			if chart == nil || len(chart.Series) != 3 {
+				t.Fatalf("%s %s: series = %+v, want three", tc.name, ch.name, chart)
+			}
+			s := chart.Series[2]
+			want := fmt.Sprintf("it has %d where the chart has %d", tc.bars(len(chart.Bars)), len(chart.Bars))
+			if s.Bars != nil || !strings.Contains(s.Why, want) {
+				t.Errorf("%s %s: mismatched series = %+v, want no bars and a why containing %q", tc.name, ch.name, s, want)
+			}
+		}
+	}
+}
+
+// The aria-label names each series with its total, built from the series array:
+// the DeepSeek total and the Claude total, each a figure the bars add to.
+func TestCostChartSeriesAriaNamesEachTotal(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 10, 25, 15, 0, 0, 0, time.Local)
+	samples := claudeSeries(claudeSampleAt(base, 10), claudeSampleAt(base.Add(20*time.Minute), 12))
+	c := BuildCostCharts(claudeSeriesNow, claudeSeriesDays, claudeSeriesHours(), 0, claudeSeriesPlan, samples)
+	if c.Daily == nil || c.Hourly == nil || c.Daily.Claude == nil || c.Hourly.Claude == nil {
+		t.Fatal("the charts are missing a series to total")
+	}
+
+	// Daily: the two known days sum to $3.00 for DeepSeek, and five days have
+	// no figure. Hourly: no hour spent anything, so DeepSeek totals $0.00.
+	if !strings.Contains(c.Daily.Aria, ". DeepSeek total $3.00; 5 buckets have no sample") {
+		t.Errorf("daily aria %q does not name the DeepSeek total", c.Daily.Aria)
+	}
+	if !strings.Contains(c.Hourly.Aria, ". DeepSeek total $0.00") {
+		t.Errorf("hourly aria %q does not name the DeepSeek total", c.Hourly.Aria)
+	}
+	for _, tc := range costSeriesCharts(c) {
+		var sum float64
+		for _, b := range tc.chart.Claude.Bars {
+			if !b.Gap {
+				sum += b.Value
+			}
+		}
+		want := ". " + claudePlanSeriesName + " total " + money(sum)
+		if !strings.Contains(tc.chart.Aria, want) {
+			t.Errorf("%s aria %q does not name the Claude total %q", tc.name, tc.chart.Aria, want)
+		}
+	}
+}
+
+// costBarsEqual is whether two bar lists hold the same bars in the same order.
+func costBarsEqual(a, b []CostBar) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
