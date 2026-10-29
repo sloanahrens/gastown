@@ -316,6 +316,14 @@ type Daemon struct {
 	// (jsonl_tracker_export.go).
 	jsonlTrackerExportFn trackerRigExporter
 
+	// jsonlTrackerDBs holds the databases the current backup cycle exported
+	// through the tracker, so the commit subject can mark their counts and the
+	// spike guard can tell a tracker-measured count from a Dolt one
+	// (jsonlTrackerCountToken). The cycle fills it before the export loop;
+	// empty or nil means no database was read through the tracker. Only the
+	// jsonl_git_backup goroutine touches it.
+	jsonlTrackerDBs map[string]bool
+
 	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
 	// writes the real feed; tests capture the event instead.
 	dogFeedFn func(eventType string, payload map[string]interface{}) error
