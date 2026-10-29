@@ -169,12 +169,14 @@ func moduleSizeLine(path string, kb int64) string {
 }
 
 func TestName(t *testing.T) {
+	t.Parallel()
 	if got := target(newFake()).Name(); got != "civol" {
 		t.Fatalf("Name() = %q, want civol", got)
 	}
 }
 
 func TestNewTargetFillsDefaults(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	f.dind = defaultDind
 	f.runner = defaultRunner
@@ -204,6 +206,7 @@ func TestNewTargetFillsDefaults(t *testing.T) {
 // TestPlanTrimsOverCapGocache drives an over-cap build cache whose listing the
 // fake returns, and asserts the plan removes its oldest entries first.
 func TestPlanTrimsOverCapGocache(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	f.sizes[gocacheVolume] = answer{out: strconv.FormatInt(10*kbPerGB, 10) + "\n"}
 	f.listings[gocacheVolume] = answer{out: fileLine("oldest.bin", testNow.Add(-5*day), 3*gb) +
@@ -234,6 +237,7 @@ func TestPlanTrimsOverCapGocache(t *testing.T) {
 }
 
 func TestPlanDindNotRunning(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	f.running = answer{out: "false\n"}
 
@@ -255,6 +259,7 @@ func TestPlanDindNotRunning(t *testing.T) {
 // TestPlanJobGate drives the gated trim: the guard is read from the oldest
 // running job's start, and an unreadable start makes the volume wait.
 func TestPlanJobGate(t *testing.T) {
+	t.Parallel()
 	start := time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC)
 	overCap := func(f *fakeDocker) {
 		f.sizes[gocacheVolume] = answer{out: strconv.FormatInt(10*kbPerGB, 10) + "\n"}
@@ -263,6 +268,7 @@ func TestPlanJobGate(t *testing.T) {
 	}
 
 	t.Run("earlier of two starts", func(t *testing.T) {
+		t.Parallel()
 		f := newFake()
 		overCap(f)
 		f.ps = answer{out: "aaa\nbbb\n"}
@@ -295,6 +301,7 @@ func TestPlanJobGate(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			f := newFake()
 			overCap(f)
 			ids := make([]string, 0, len(c.starts))
@@ -321,6 +328,7 @@ func TestPlanJobGate(t *testing.T) {
 // TestPlanModuleEntries reads the module cache by whole "<module>@<version>"
 // directories and sizes each from du.
 func TestPlanModuleEntries(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	f.sizes[gomodVolume] = answer{out: strconv.FormatInt(6*kbPerGB, 10) + "\n"}
 	f.listings[gomodVolume] = answer{out: moduleLine("github.com/first@v1.0.0", testNow.Add(-5*day)) +
@@ -347,6 +355,7 @@ func TestPlanModuleEntries(t *testing.T) {
 }
 
 func TestPlanMissingVolume(t *testing.T) {
+	t.Parallel()
 	f := newFake()
 	f.volumes[npmVolume] = answer{err: errors.New("Error response from daemon: No such volume: ci-npm")}
 
@@ -362,6 +371,7 @@ func TestPlanMissingVolume(t *testing.T) {
 // TestPlanRefusesFailedRead drives every read that can fail, one at a time, and
 // asserts each one refuses the plan without naming an action.
 func TestPlanRefusesFailedRead(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("daemon unreachable")
 	cases := []struct {
 		name      string
@@ -380,6 +390,7 @@ func TestPlanRefusesFailedRead(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			f := newFake()
 			f.sizes[gocacheVolume] = answer{out: strconv.FormatInt(10*kbPerGB, 10) + "\n"}
 			f.listings[gocacheVolume] = answer{out: fileLine("old.bin", testNow.Add(-5*day), gb)}
@@ -400,7 +411,9 @@ func TestPlanRefusesFailedRead(t *testing.T) {
 }
 
 func TestPlanRefusesUnparseableListing(t *testing.T) {
+	t.Parallel()
 	t.Run("file listing", func(t *testing.T) {
+		t.Parallel()
 		f := newFake()
 		f.sizes[gocacheVolume] = answer{out: strconv.FormatInt(10*kbPerGB, 10) + "\n"}
 		f.listings[gocacheVolume] = answer{out: "not a listing\n"}
@@ -411,6 +424,7 @@ func TestPlanRefusesUnparseableListing(t *testing.T) {
 	})
 
 	t.Run("module without a size", func(t *testing.T) {
+		t.Parallel()
 		f := newFake()
 		f.sizes[gomodVolume] = answer{out: strconv.FormatInt(6*kbPerGB, 10) + "\n"}
 		f.listings[gomodVolume] = answer{out: moduleLine("github.com/one@v1.0.0", testNow.Add(-day))}
@@ -423,6 +437,7 @@ func TestPlanRefusesUnparseableListing(t *testing.T) {
 }
 
 func TestMeasure(t *testing.T) {
+	t.Parallel()
 	m, err := target(newFake()).Measure(context.Background())
 	if err != nil {
 		t.Fatalf("measure: %v", err)
@@ -436,12 +451,15 @@ func TestMeasure(t *testing.T) {
 }
 
 func TestMeasureFailsClosed(t *testing.T) {
+	t.Parallel()
 	t.Run("no runner", func(t *testing.T) {
+		t.Parallel()
 		if _, err := NewTarget(Config{}).Measure(context.Background()); err == nil {
 			t.Fatal("measure without a runner did not error")
 		}
 	})
 	t.Run("df fails", func(t *testing.T) {
+		t.Parallel()
 		f := newFake()
 		f.df = answer{err: errors.New("daemon unreachable")}
 		if _, err := target(f).Measure(context.Background()); err == nil {
@@ -449,6 +467,7 @@ func TestMeasureFailsClosed(t *testing.T) {
 		}
 	})
 	t.Run("df does not parse", func(t *testing.T) {
+		t.Parallel()
 		f := newFake()
 		f.df = answer{out: "not df output\n"}
 		if _, err := target(f).Measure(context.Background()); err == nil {
@@ -458,6 +477,7 @@ func TestMeasureFailsClosed(t *testing.T) {
 }
 
 func TestApplyIsDeferred(t *testing.T) {
+	t.Parallel()
 	res, err := target(newFake()).Apply(context.Background(), diskmaint.Plan{Target: planTarget})
 	if err != nil {
 		t.Fatalf("apply: %v", err)
