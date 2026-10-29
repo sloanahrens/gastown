@@ -134,6 +134,7 @@ func TestTrackerExportRow(t *testing.T) {
 		Metadata: json.RawMessage(`{"k":1}`),
 	}
 	comment := api.Comment{ID: "c1", IssueID: "al-1", Author: "me", Text: "hi", CreatedAt: at}
+	markup := api.Comment{ID: "c2", IssueID: "al-1", Author: "me", Text: "<b>a & b</b>", CreatedAt: at}
 
 	cases := []struct {
 		name      string
@@ -180,6 +181,12 @@ func TestTrackerExportRow(t *testing.T) {
 			rec:       api.ExportRecord{Type: api.RecordComment, Comment: &comment},
 			wantTable: "comments",
 			want:      `{"id":"c1","issue_id":"al-1","author":"me","text":"hi","created_at":"2026-10-29T12:00:00Z"}`,
+		},
+		{
+			name:      "markup in a comment, left unescaped",
+			rec:       api.ExportRecord{Type: api.RecordComment, Comment: &markup},
+			wantTable: "comments",
+			want:      `{"id":"c2","issue_id":"al-1","author":"me","text":"<b>a & b</b>","created_at":"2026-10-29T12:00:00Z"}`,
 		},
 		{
 			name:    "a record type the backup does not write",
@@ -229,11 +236,8 @@ func TestTrackerExportRow(t *testing.T) {
 			if table != c.wantTable {
 				t.Fatalf("table = %q, want %q", table, c.wantTable)
 			}
-			line, err := json.Marshal(row)
-			if err != nil {
-				t.Fatalf("marshal the row: %v", err)
-			}
-			if string(line) != c.want {
+			// The backup's own encoder, so an escaping difference cannot pass.
+			if line := string(trackerLine(row)); line != c.want {
 				t.Errorf("line =\n%s\nwant\n%s", line, c.want)
 			}
 		})
@@ -365,10 +369,78 @@ func TestSyncJsonlGitBackupTrackerExportFailureRaisesTheExportAlert(t *testing.T
 	}
 }
 
-// TestTrackerExporterNamesTheMissingSetting: a tracker rig with no endpoint or
-// token fails its export and says which setting is missing; it never falls
-// back to the Dolt database the rig left behind.
-func TestTrackerExporterNamesTheMissingSetting(t *testing.T) {
+// TestExportDatabaseToJsonlTrackerRouteTableUnreadable: a route table the
+// backup cannot read fails the database's export instead of reading the rig
+// through Dolt, so no rig's backend is guessed.
+func TestExportDatabaseToJsonlTrackerRouteTableUnreadable(t *testing.T) {
+	t.Parallel()
+	townRoot := trackerTown(t)
+	// A directory where the table should be: every read of it fails.
+	routes := filepath.Join(townRoot, ".beads", "routes.jsonl")
+	if err := os.Remove(routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(routes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := backupTestDaemon(t)
+	d.config = &Config{TownRoot: townRoot}
+	d.jsonlTrackerExportFn = func(context.Context, string, func(api.ExportRecord) error) error {
+		t.Error("the tracker export ran with no readable route table")
+		return nil
+	}
+
+	if _, err := d.exportDatabaseToJsonl("gt", t.TempDir(), t.TempDir(), true); err == nil ||
+		!strings.Contains(err.Error(), "reading the route table") {
+		t.Fatalf("exportDatabaseToJsonl = %v, want the unreadable route table named", err)
+	}
+}
+
+// TestExportDatabaseToJsonlTrackerExportRefusesAStrayRecord: a record the
+// backup has no file for fails the export rather than being dropped.
+func TestExportDatabaseToJsonlTrackerExportRefusesAStrayRecord(t *testing.T) {
+	t.Parallel()
+	townRoot := trackerTown(t)
+	d, _ := backupTestDaemon(t)
+	d.config = &Config{TownRoot: townRoot}
+	d.jsonlTrackerExportFn = func(_ context.Context, _ string, emit func(api.ExportRecord) error) error {
+		return emit(api.ExportRecord{Type: "event"})
+	}
+
+	if _, err := d.exportDatabaseToJsonl("al", t.TempDir(), t.TempDir(), true); err == nil ||
+		!strings.Contains(err.Error(), "not one the backup writes") {
+		t.Fatalf("exportDatabaseToJsonl = %v, want the stray record refused", err)
+	}
+}
+
+// TestExportDatabaseToJsonlTrackerExportWriteFailureIsReported: a shard that
+// cannot be written fails the database's export, so the cycle counts it as a
+// failed database rather than an empty one.
+func TestExportDatabaseToJsonlTrackerExportWriteFailureIsReported(t *testing.T) {
+	t.Parallel()
+	townRoot := trackerTown(t)
+	d, _ := backupTestDaemon(t)
+	d.config = &Config{TownRoot: townRoot}
+	d.jsonlTrackerExportFn = func(_ context.Context, _ string, emit func(api.ExportRecord) error) error {
+		return emit(api.ExportRecord{Type: api.RecordLabel, Label: &api.ExportLabel{IssueID: "al-1", Label: "task"}})
+	}
+	gitRepo := t.TempDir()
+	// A directory where the shard's temp belongs: the write cannot happen, so
+	// the export is reported failed rather than counted as empty.
+	if err := os.MkdirAll(filepath.Join(gitRepo, "al", "issues.jsonl.tmp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := d.exportDatabaseToJsonl("al", gitRepo, t.TempDir(), true); err == nil ||
+		!strings.Contains(err.Error(), "issues") {
+		t.Fatalf("exportDatabaseToJsonl = %v, want the unwritable issues shard named", err)
+	}
+}
+
+// TestTrackerExporterRefusesSettingsItCannotReach: a tracker rig with no
+// endpoint, no token or an unusable endpoint fails its export and says what is
+// wrong; it never falls back to the Dolt database the rig left behind.
+func TestTrackerExporterRefusesSettingsItCannotReach(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -377,6 +449,11 @@ func TestTrackerExporterNamesTheMissingSetting(t *testing.T) {
 	}{
 		{"no endpoint", nil, "TRACKER_URL is not set"},
 		{"an endpoint with no token", map[string]string{"TRACKER_URL": "https://tracker.example"}, "TRACKER_TOKEN"},
+		{
+			"an endpoint that is not a URL",
+			map[string]string{"TRACKER_URL": "not-a-url", "TRACKER_TOKEN": "secret"},
+			"is not a URL with a host",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -21,6 +21,7 @@ package daemon
 // until the operator accepts the new level (spikeAcceptHint).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -145,11 +146,7 @@ func (d *Daemon) exportTrackerDatabaseToJsonl(rig, db, dbDir string) (int, error
 		if table == "" {
 			return nil // a record the backup leaves out, such as a wisp
 		}
-		line, err := json.Marshal(row)
-		if err != nil {
-			return fmt.Errorf("%s: %w", table, err)
-		}
-		rows[table] = append(rows[table], line)
+		rows[table] = append(rows[table], trackerLine(row))
 		return nil
 	}); err != nil {
 		return 0, fmt.Errorf("tracker export: %w", err)
@@ -217,6 +214,18 @@ func trackerExportRow(rec api.ExportRecord) (string, any, error) {
 
 func missingPayload(recordType string) error {
 	return fmt.Errorf("a %q record with no payload is not one the backup writes", recordType)
+}
+
+// trackerLine encodes one row of the backup as a file line. The row types hold
+// only strings, numbers and bools, so encoding cannot fail. The encoder leaves
+// <, > and & as they are: Dolt's JSON output does not escape them, and an
+// escaped line would rewrite an issue that never changed.
+func trackerLine(row any) json.RawMessage {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(row)
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 }
 
 // trackerBackupTime renders a wire time the way the export's other timestamps
