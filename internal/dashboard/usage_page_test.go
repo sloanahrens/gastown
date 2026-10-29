@@ -20,8 +20,11 @@ func TestUsagePanelDrawsThePayload(t *testing.T) {
 		`byClass.filter(r => isDeepSeek(r.model))`,
 		`text: "DeepSeek est. " + money(est) + " · " + over.length + (over.length === 1 ? " bead" : " beads") + " over 20m"`,
 		`warn: over.length > 0,`,
-		// Claude rows are tokens, DeepSeek rows are dollars labelled est.
-		`isDeepSeek(r.model) ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens"`,
+		// Money and tokens are separate columns: dollars are est. for a row with an
+		// estimate and a dash for one without, and every row's tokens are counted.
+		`[r.est_cost_usd ? "est. " + money(r.est_cost_usd) : "–", "n"],`,
+		`[fmtTokens(r.uncached), "n"]]))`,
+		`["Calls", 1], ["Spend ($)", 1], ["Tokens", 1]`,
 		// A bead over twenty minutes is flagged in the page's warning style.
 		`[r.bead, "warnc"]`,
 		`r.test_runs + " runs, " + r.failed_test_runs + " failed"`,
@@ -56,11 +59,13 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 		`box.append(el("div", "badc", "usage records unreadable"))`,
 		`el("div", "empty warnc", "never scanned")`,
 		`"records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")`,
-		`none("no usage in the last " + (u.window || "24h"))`,
+		`const win = u.window || "24h";`,
+		`none("no usage in the last " + win)`,
 		`none("no deep review runs")`,
-		`none("no beads in the last " + (u.window || "24h"))`,
+		`none("no beads in the last " + win)`,
 		`none("none in the last 48h")`,
-		`section("Over 20 minutes (48h)", over.length`,
+		`costFold(box, "cost.over20", "Over 20 minutes (48h)",`,
+		`costFold(box, "cost.quality", "Data quality", counts)`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("costUsage has no %q", want)
@@ -82,19 +87,25 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 	}
 }
 
-// The pane is collapsed on load and keeps the viewer's choice across redraws,
-// the way the idle polecats section does.
-func TestUsagePanelIsCollapsedByDefault(t *testing.T) {
+// Each usage block is a fold of its own under its own key, so the viewer's choice
+// for each is kept across redraws the way the chart folds' is, and no single
+// details block holds them all.
+func TestUsagePanelBlocksAreFoldsUnderTheirOwnKeys(t *testing.T) {
 	t.Parallel()
 
-	if !strings.Contains(string(indexHTML), `let openUsage = false;`) {
-		t.Error("the Usage pane does not start collapsed")
+	if strings.Contains(string(indexHTML), `let openUsage`) {
+		t.Error("the Usage part still keeps one open choice for a details block")
 	}
 	draw := pageFunc(t, "costUsage")
+	if strings.Contains(draw, `createElement("details")`) {
+		t.Error("costUsage still draws a details block")
+	}
 	for _, want := range []string{
-		`document.createElement("details")`,
-		`d.open = openUsage;`,
-		`d.ontoggle = () => { openUsage = d.open; };`,
+		`costFold(box, "cost.byclass", "By class and model",`,
+		`costFold(box, "cost.deepreview", "Deep reviews",`,
+		`costFold(box, "cost.topbeads", "Top beads",`,
+		`costFold(box, "cost.over20", "Over 20 minutes (48h)",`,
+		`costFold(box, "cost.quality", "Data quality", counts)`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("costUsage has no %q", want)
