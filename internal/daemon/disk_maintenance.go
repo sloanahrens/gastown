@@ -255,26 +255,29 @@ func (due diskMaintDue) selection(targets map[string]diskmaint.Target) []string 
 // is due from its own last run and ignores the window; a target without one
 // keeps the window and its one run a day (gt-z6qre.17).
 //
-// The errors are settings the patrol cannot schedule. Decoding refuses them
-// from the config file, and this is the same refusal for a config built in
-// code: the target runs on no cadence rather than quietly on the daily window.
+// The errors are settings the patrol cannot act on: a target name it does not
+// know, or a cadence it cannot schedule. Decoding refuses them from the config
+// file, and this is the same refusal for a config built in code: the target
+// runs nothing rather than quietly on a clock the town never asked for
+// (gt-kdbzb).
 func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 	due := diskMaintDue{scheduled: map[string]bool{}}
 	var errs []error
 	if cfg := diskMaintenanceSettings(d.patrolConfig); cfg != nil {
 		for _, name := range slices.Sorted(maps.Keys(cfg.Targets)) {
-			target := cfg.Targets[name]
-			if target.Interval == "" {
-				continue // no cadence: the daily window decides
-			}
 			// A target given a cadence never runs on the daily window, whether
 			// that cadence is due or unreadable: falling back would run it on a
 			// clock the town never asked for.
-			due.scheduled[name] = true
-			every, err := target.Every()
+			if cfg.Targets[name].Interval != "" {
+				due.scheduled[name] = true
+			}
+			every, err := cfg.Cadence(name)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("patrols.disk_maintenance.targets.%s.interval: %w", name, err))
+				errs = append(errs, err)
 				continue
+			}
+			if every == 0 {
+				continue // no cadence: the daily window decides
 			}
 			if last := d.diskMaintSchedule.lastRunAt(name); last.IsZero() || now.Sub(last) >= every {
 				due.interval = append(due.interval, name)
