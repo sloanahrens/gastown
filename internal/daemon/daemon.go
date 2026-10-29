@@ -120,6 +120,11 @@ type Daemon struct {
 	// start runs under an environment fixture.
 	getenv func(string) string
 
+	// hostname names the host a manual owner's id carries (see
+	// hostnameOrOS); nil reads os.Hostname. Tests set it to drive the failed
+	// read, which refuses the start.
+	hostname func() (string, error)
+
 	// cpuIdleFn replaces the production read of the host's CPU idle percent
 	// in checkPressure (pressure.go); nil runs top. It returns an error for a
 	// reading that could not be taken.
@@ -1252,7 +1257,7 @@ func (d *Daemon) Run() (err error) {
 	// Name this daemon's owner before anything is written: every state this
 	// process saves carries it, and a start that cannot name itself never
 	// touches the town (gt-qpeei.12).
-	hostname, err := os.Hostname()
+	hostname, err := d.hostnameOrOS()
 	if err != nil {
 		return fmt.Errorf("naming the daemon's owner: %w", err)
 	}
@@ -2040,6 +2045,15 @@ func (d *Daemon) env(key string) string {
 		return d.getenv(key)
 	}
 	return os.Getenv(key)
+}
+
+// hostnameOrOS names the host a manual owner's id carries (see the hostname
+// field); a nil seam reads it from the OS.
+func (d *Daemon) hostnameOrOS() (string, error) {
+	if d.hostname != nil {
+		return d.hostname()
+	}
+	return os.Hostname()
 }
 
 // startState is the state record a daemon writes as it starts. The first

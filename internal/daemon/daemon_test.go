@@ -950,3 +950,58 @@ func TestRunRefusesContainerModeWithoutAContainerName(t *testing.T) {
 		t.Errorf("Run wrote state.json before refusing")
 	}
 }
+
+// A start that cannot read its hostname cannot name a manual owner, so it
+// refuses before touching the town rather than record a guessed id
+// (gt-qpeei.12).
+func TestRunRefusesWhenItCannotNameItsHost(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig(town)
+	d := &Daemon{
+		config:   cfg,
+		logger:   log.New(io.Discard, "", 0),
+		getenv:   ownerEnv(nil),
+		hostname: func() (string, error) { return "", errors.New("no hostname") },
+	}
+	d.ctx, d.cancel = context.WithCancel(context.Background())
+	d.cancel()
+
+	err := d.Run()
+	if err == nil || !strings.Contains(err.Error(), "naming the daemon's owner") {
+		t.Fatalf("Run = %v, want a refusal naming the owner", err)
+	}
+	if _, err := os.Stat(cfg.PidFile); !os.IsNotExist(err) {
+		t.Errorf("Run wrote %s before refusing", cfg.PidFile)
+	}
+	if _, err := os.Stat(StateFile(cfg.TownRoot)); !os.IsNotExist(err) {
+		t.Errorf("Run wrote state.json before refusing")
+	}
+}
+
+// A pid file the daemon cannot write fails the start: a daemon no host reader
+// can find by pid would take the town without leaving the one mark it has
+// (gt-qpeei.12).
+func TestRunRefusesWhenThePidFileCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig(town)
+	cfg.PidFile = filepath.Join(town, "daemon", "absent-dir", "daemon.pid")
+	d := &Daemon{config: cfg, logger: log.New(io.Discard, "", 0), getenv: ownerEnv(nil)}
+	d.ctx, d.cancel = context.WithCancel(context.Background())
+	d.cancel()
+
+	err := d.Run()
+	if err == nil || !strings.Contains(err.Error(), "writing PID file") {
+		t.Fatalf("Run = %v, want a refusal naming the PID file", err)
+	}
+	if _, err := os.Stat(StateFile(cfg.TownRoot)); !os.IsNotExist(err) {
+		t.Errorf("Run wrote state.json after the PID file failed")
+	}
+}
