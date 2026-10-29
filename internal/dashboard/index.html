@@ -3952,52 +3952,40 @@ function mangoUnchecked(t, stale) {
 }
 
 // costBarChart draws one of the Cost panel's charts from its data, which the
-// server builds (CostChart): one bar or gap per entry, the Claude series beside
-// them on the same buckets, an optional limit line, and the aria-label that
-// carries the numbers. The page only places what it is given; it decides no
-// value, label or line of its own.
+// server builds (CostChart): one bar or gap per entry, a bar for each series the
+// chart draws beside them on the same buckets, an optional limit line, and the
+// aria-label that carries the numbers. The page only places what it is given; it
+// decides no value, label or line of its own.
 function costBarChart(box, c, kind, providers) {
   if (!c || !Array.isArray(c.bars) || !c.bars.length) return;
   const daily = kind === "daily";
-  // The Claude series is drawn only when it lines up bucket for bucket; a series
-  // the server built on other buckets would put one day's dollars over another.
-  // A series dropped for that says so under the chart, like one the server left
-  // out: a chart without Claude dollars never goes quiet about why.
-  let claudeWhy = c.claude_why || "";
-  let cl = null;
-  if (c.claude) {
-    if (Array.isArray(c.claude.bars) && c.claude.bars.length === c.bars.length) cl = c.claude;
-    else claudeWhy = "the series does not line up with the chart's buckets: it has " + (Array.isArray(c.claude.bars) ? c.claude.bars.length : "no") + " where the chart has " + c.bars.length;
+  // A series is drawn only when it lines up bucket for bucket; a series the
+  // server built on other buckets would put one day's dollars over another. A
+  // series not drawn says so under the chart, like one the server left out: a
+  // chart never goes quiet about why a provider's dollars are missing.
+  const drawn = [], notDrawn = [];
+  for (const s of costChartSeries(c)) {
+    if (!s.why && Array.isArray(s.bars) && s.bars.length === c.bars.length) drawn.push(s);
+    else notDrawn.push({name: s.name || s.id, why: s.why || "the series does not line up with the chart's buckets: it has " + (Array.isArray(s.bars) ? s.bars.length : "no") + " where the chart has " + c.bars.length});
   }
+  const n = drawn.length;
   const W = 700, H = daily ? 150 : 120, pad = 26, base = H - (daily ? 26 : 22);
-  const top = Math.max(0.01, c.limit ? c.limit.value : 0, ...c.bars.map(b => b.value || 0), ...(cl ? cl.bars.map(b => b.value || 0) : []));
+  const top = Math.max(0.01, c.limit ? c.limit.value : 0, ...drawn.flatMap(s => s.bars.map(b => b.value || 0)));
   const y = v => base - (Math.max(0, v) / top) * (base - 16);
   const slot = (W - 2 * pad) / c.bars.length;
+  // The drawn series share the wide part of the slot with a 2px gap between
+  // bars: one series takes all of it, two take the halves the DeepSeek and
+  // Claude pair always had.
   const wide = slot * (daily ? 0.56 : 0.6);
-  const w = cl ? wide / 2 - 1 : wide;
+  const w = n ? (wide - 2 * (n - 1)) / n : wide;
   const svg = svgEl("svg", {viewBox: "0 0 " + W + " " + H, class: "dchart " + kind, role: "img", "aria-label": c.aria});
-  if (cl) svg.append(claudeHatch(kind));
+  if (n > 1) svg.append(costHatch(kind));
   svg.append(svgEl("line", {x1: pad, x2: W - pad, y1: base, y2: base, class: "axis"}));
   c.bars.forEach((b, i) => {
     const cx = pad + slot * i + slot / 2;
-    // A shared chart sets the two bars side by side in the slot; the DeepSeek
-    // bar keeps the left half and the Claude bar the right.
-    const dx = cl ? cx - w - 1 : cx - w / 2;
-    const mid = dx + w / 2;
-    if (b.gap) {
-      svg.append(svgEl("line", {x1: mid, x2: mid, y1: base - 3, y2: base, class: "gap"}));
-    } else {
-      const bar = svgEl("rect", {x: dx, y: y(b.value), width: w, height: Math.max(0, base - y(b.value)), class: "bar"});
-      const t = svgEl("title", {}); t.textContent = b.title;
-      bar.append(t);
-      svg.append(bar);
-      if (daily) {
-        const amt = svgEl("text", {x: mid, y: y(b.value) - 4, class: "amt", "text-anchor": "middle"});
-        amt.textContent = money(b.value);
-        svg.append(amt);
-      }
-    }
-    if (cl) costClaudeBar(svg, cl.bars[i], cx + 1, w, base, y, kind);
+    drawn.forEach((s, k) => {
+      costSeriesBucket(svg, s.bars[i], k, cx - wide / 2 + k * (w + 2), w, base, y, kind, costChartColour(providers, s.id, k));
+    });
     if (daily || i % 3 === 0) {
       const lbl = svgEl("text", {x: cx, y: H - (daily ? 8 : 6), class: "day", "text-anchor": "middle"});
       lbl.textContent = b.label;
@@ -4009,37 +3997,78 @@ function costBarChart(box, c, kind, providers) {
   if (c.limit) svg.append(svgEl("line", {x1: pad, x2: W - pad, y1: y(c.limit.value), y2: y(c.limit.value), class: "limit"}));
   box.append(svg);
   // The legend names each series the chart draws, since the colour is the only
-  // thing that tells them apart; the Claude entry says in full what its dollars
-  // are. The series are drawn by the providers that own them, so the legend
-  // follows the providers array rather than a fixed pair.
-  const lg = costLegend(providers, {deepseek: true, claude: cl ? cl.name || true : null});
+  // thing that tells them apart; a series' own name says in full what its
+  // dollars are. The legend follows the providers array, so it lists only the
+  // series drawn.
+  const named = {};
+  drawn.forEach(s => { named[s.id] = s.name || true; });
+  const lg = costLegend(providers, named);
   if (lg) box.append(lg);
   if (c.limit) box.append(el("div", "title", "dashed line: " + c.limit.label));
-  // A chart with no Claude series says why on the panel, so an absent series is
-  // not read as a week of no plan spend.
-  if (!cl && claudeWhy) box.append(el("div", "title", "Claude series not drawn — " + claudeWhy));
+  // A series not drawn says why on the panel, so an absent series is not read
+  // as a week of no spend.
+  for (const s of notDrawn) box.append(el("div", "title", s.name + " series not drawn: " + s.why));
 }
 
-// claudeHatch is the pattern a Claude bucket with no sample is filled with: the
-// absence of a reading is marked, never drawn as a bar of zero, which would read
-// as a quiet bucket.
-function claudeHatch(kind) {
+// costChartSeries is the chart's series the page draws: the server's series
+// array, or, for a server older than the array, the DeepSeek bars and the Claude
+// series beside them in the same shape. The fallback goes with the array's
+// fallback in a later bead.
+function costChartSeries(c) {
+  if (Array.isArray(c.series)) return c.series;
+  const out = [{id: "deepseek", name: "", bars: c.bars}];
+  if (c.claude) out.push({id: "claude", name: c.claude.name, bars: c.claude.bars});
+  else if (c.claude_why) out.push({id: "claude", name: COST_SERIES_NAMES.claude, why: c.claude_why});
+  return out;
+}
+
+// costChartColour is the colour a series' bars are drawn in, the one its legend
+// swatch shows: the provider's place in the providers array, or, for a series
+// with no provider there, its place among the drawn series.
+function costChartColour(providers, id, k) {
+  const at = (Array.isArray(providers) ? providers : []).findIndex(p => p && typeof p === "object" && p.id === id);
+  return costSeriesColour(id, at >= 0 ? at : k);
+}
+
+// costSeriesBucket draws one bucket of a drawn series at x. A value is a bar in
+// the series' colour with its tooltip; a gap is a tick under the first series,
+// as the DeepSeek bars always marked one, and a hatched column under the others,
+// as the Claude series did. The first series also carries the daily amount above
+// its bar. The class keeps the look of the first two series; the fill is the
+// legend swatch's colour, so a bar matches its swatch whichever series comes first.
+function costSeriesBucket(svg, b, k, x, w, base, y, kind, colour) {
+  if (b.gap) {
+    if (k === 0) {
+      const mid = x + w / 2;
+      svg.append(svgEl("line", {x1: mid, x2: mid, y1: base - 3, y2: base, class: "gap"}));
+    } else {
+      const r = svgEl("rect", {x: x, y: 16, width: w, height: base - 16, class: "cgap", fill: "url(#dhatch-" + kind + ")"});
+      const t = svgEl("title", {}); t.textContent = b.title;
+      r.append(t);
+      svg.append(r);
+    }
+    return;
+  }
+  const bar = svgEl("rect", {x: x, y: y(b.value), width: w, height: Math.max(0, base - y(b.value)), class: k === 1 ? "cbar" : "bar", style: "fill:" + colour});
+  const t = svgEl("title", {}); t.textContent = b.title;
+  bar.append(t);
+  svg.append(bar);
+  if (k === 0 && kind === "daily") {
+    const amt = svgEl("text", {x: x + w / 2, y: y(b.value) - 4, class: "amt", "text-anchor": "middle"});
+    amt.textContent = money(b.value);
+    svg.append(amt);
+  }
+}
+
+// costHatch is the pattern a series' bucket with no sample is filled with, from
+// the second series on: the absence of a reading is marked, never drawn as a bar
+// of zero, which would read as a quiet bucket.
+function costHatch(kind) {
   const defs = svgEl("defs", {});
   const pat = svgEl("pattern", {id: "dhatch-" + kind, width: "4", height: "4", patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)"});
   pat.append(svgEl("line", {x1: "0", y1: "0", x2: "0", y2: "4", class: "hatch"}));
   defs.append(pat);
   return defs;
-}
-
-// costClaudeBar draws one bucket of the Claude series at x: a bar, or a hatched
-// column where the series has no sample.
-function costClaudeBar(svg, b, x, w, base, y, kind) {
-  const r = b.gap
-    ? svgEl("rect", {x: x, y: 16, width: w, height: base - 16, class: "cgap", fill: "url(#dhatch-" + kind + ")"})
-    : svgEl("rect", {x: x, y: y(b.value), width: w, height: Math.max(0, base - y(b.value)), class: "cbar"});
-  const t = svgEl("title", {}); t.textContent = b.title;
-  r.append(t);
-  svg.append(r);
 }
 
 // COST_SERIES_COLOURS pins the two chart series to the colours their bars are
