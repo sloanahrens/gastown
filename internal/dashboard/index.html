@@ -2518,8 +2518,12 @@ const COST_STATUS_CLASS = {ok: "good", warn: "warnc", bad: "badc"};
 // provider the server adds needs no change here. A provider that could not be
 // read keeps its row, dim, since dropping it would read as no provider at all.
 function costProviders(box, list) {
-  if (!Array.isArray(list) || !list.length) return;
-  const rows = list.filter(p => p && typeof p === "object");
+  // The server omits cost_providers when it has no providers, so an absent list
+  // is none and says so. A value that is not a list is a reading that failed, and
+  // says that instead of passing as clean.
+  if (list != null && !Array.isArray(list)) { box.append(el("div", "empty warnc", "unavailable — the reading has no provider list")); return; }
+  const rows = (Array.isArray(list) ? list : []).filter(p => p && typeof p === "object");
+  if (!rows.length) { box.append(el("div", "empty", "no providers")); return; }
   const t = el("table", "costprov");
   const head = el("tr");
   // The figure columns read right-aligned, so the dollars line up down the table.
@@ -3947,22 +3951,36 @@ function costClaudeBar(svg, b, x, w, base, y, kind) {
   svg.append(r);
 }
 
-// COST_SERIES_COLOURS are the chart series' colours by a provider's place in the
-// providers array: DeepSeek's blue and Claude's violet, then a fixed palette for
-// a provider added after them.
-const COST_SERIES_COLOURS = ["var(--blue)", "var(--violet)", "var(--amber)", "var(--green)", "var(--red)"];
+// COST_SERIES_COLOURS pins the two chart series to the colours their bars are
+// drawn in (.bar is blue, .cbar violet), so a legend swatch always matches its
+// bar, whatever order the providers come in. A provider with no pinned colour
+// takes the palette by its place in the providers array.
+const COST_SERIES_COLOURS = {deepseek: "var(--blue)", claude: "var(--violet)"};
+const COST_PALETTE = ["var(--amber)", "var(--green)", "var(--red)"];
+const COST_SERIES_NAMES = {deepseek: "DeepSeek", claude: "Claude"};
+function costSeriesColour(id, i) {
+  return COST_SERIES_COLOURS[id] || COST_PALETTE[i % COST_PALETTE.length];
+}
 // costLegend lists the series a chart draws, one entry per provider that has
 // one, in the providers' order. drawn maps a provider's id to the name its
 // series carries: true takes the provider's own label, a string is the series'
 // own name. A provider with no series in the chart has no entry, and no entry
-// means no legend at all.
+// means no legend at all. A series whose provider is not in the array (the
+// array is missing) is still named, so the legend does not vanish with the list.
 function costLegend(providers, drawn) {
   const items = [];
+  const named = new Set();
   (Array.isArray(providers) ? providers : []).forEach((p, i) => {
-    if (!p || !drawn[p.id]) return;
-    const name = typeof drawn[p.id] === "string" ? drawn[p.id] : p.label;
-    items.push([COST_SERIES_COLOURS[i % COST_SERIES_COLOURS.length], name]);
+    if (!p || typeof p !== "object" || !drawn[p.id]) return;
+    named.add(p.id);
+    const name = typeof drawn[p.id] === "string" ? drawn[p.id] : p.label || p.id;
+    items.push([costSeriesColour(p.id, i), name]);
   });
+  for (const id of Object.keys(drawn)) {
+    if (!drawn[id] || named.has(id)) continue;
+    const name = typeof drawn[id] === "string" ? drawn[id] : COST_SERIES_NAMES[id] || id;
+    items.push([costSeriesColour(id, items.length), name]);
+  }
   return items.length ? legend(items) : null;
 }
 // costChartFolds keeps each chart's fold by its key. A fold is a section of its
@@ -3991,19 +4009,21 @@ function costChartFold(box, kind, chart, providers) {
 }
 
 // renderCost draws the Cost panel. The table draws even without a spend report,
-// since its rows come from the other readers too, and the panel greys with the
-// spend read the table and charts are drawn from.
+// since its rows come from the other readers too. It sits outside the part a
+// stale spend read greys: the Claude and Jev rows are not the spend read's, and
+// the page cannot tell which row a stale spend read feeds, so no row greys with
+// it; the note carries that read's state. The charts stay in the greyed part.
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
   note.className = "r"; note.textContent = ""; note.title = "";
   const d = s.spend, u = s.usage, r = readOf(s, "spend");
+  costProviders(box, s.cost_providers);
   const spendBox = el("div", "spendpart");
   box.append(spendBox);
   paintsRead(spendBox, note, r);
   // A usage scan that has not answered yet is reading, not missing.
   if (!d) spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + (u ? "" : "; usage still reading…")));
-  costProviders(spendBox, s.cost_providers);
   if (!d && !u) {
     costGCP(box, s.cloud);
     return;

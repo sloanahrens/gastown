@@ -40,7 +40,7 @@ func costTable(t *testing.T, dom *pageDOM) []costTableRow {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const tbl = __byId["cost"].children[0].children.filter(c => c.className === "costprov")[0];
+		const tbl = __byId["cost"].children.filter(c => c.className === "costprov")[0];
 		if (!tbl) return null;
 		return tbl.children.map(tr => ({
 			class: tr.className, title: tr.title || "",
@@ -60,13 +60,18 @@ func costTable(t *testing.T, dom *pageDOM) []costTableRow {
 	return rows
 }
 
-// panelTexts reads the text of each element of the Cost panel's own box that
-// carries class, in the order the panel drew them: the warnings under the table
-// are the ones a test reads this way.
+// panelTexts reads the text of each element of the Cost panel that carries class,
+// at the panel's level or in its spend part: the warnings under the table and
+// the no-providers line sit at the panel's level, the no-spend-report line in the
+// spend part.
 func panelTexts(t *testing.T, dom *pageDOM, class string) []string {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children[0].children.filter(c => c.className === ` + quoteJS(class) + `).map(c => c.textContent))`)
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const cost = __byId["cost"];
+		const spend = cost.children.filter(c => c.className === "spendpart")[0];
+		return cost.children.concat(spend ? spend.children : []).filter(c => c.className === ` + quoteJS(class) + `).map(c => c.textContent);
+	})())`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel for %q: %v", class, err)
 	}
@@ -84,7 +89,7 @@ func costFoldChildren(t *testing.T, dom *pageDOM, key string) []costElem {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const sec = __byId["cost"].children[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
+		const sec = __byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
 		if (!sec) return null;
 		return sec.children[1].children.map(c => ({tag: c.tagName, class: c.className || c.getAttribute("class") || "", text: c.textContent}));
 	})())`)
@@ -101,13 +106,24 @@ func costFoldChildren(t *testing.T, dom *pageDOM, key string) []costElem {
 	return out
 }
 
+// costTableDrawn reports whether the Cost panel drew a providers table at all.
+func costTableDrawn(t *testing.T, dom *pageDOM) bool {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`__byId["cost"].children.some(c => c.className === "costprov")`)
+	if err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	return v.ToBoolean()
+}
+
 // costLegendEntries reads the labels of the legend the fold keyed key draws, one
 // per series, in the order it lists them.
 func costLegendEntries(t *testing.T, dom *pageDOM, key string) []string {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const sec = __byId["cost"].children[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
+		const sec = __byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
 		const lg = sec.children[1].children.filter(c => c.className === "legend")[0];
 		return lg ? lg.children.map(x => x.textContent) : [];
 	})())`)
@@ -346,20 +362,152 @@ func TestCostProvidersTableDrawsWithoutASpendReport(t *testing.T) {
 	}
 }
 
-// A provider the server sent is drawn in a row the first time, and the page does
-// not add rows for a provider it has no reading for.
-func TestCostProvidersTableDrawsNoRowsWithoutTheArray(t *testing.T) {
+// The server omits cost_providers when it has no providers, so a reading with no
+// key draws no table and says there are none, under the Cost heading.
+func TestCostProvidersTableSaysNoProvidersWhenTheKeyIsAbsent(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderCost", map[string]any{"spend": spendReading()})
-	v, err := dom.vm.RunString(`__byId["cost"].children[0].children.filter(c => c.className === "costprov").length`)
+	if costTableDrawn(t, dom) {
+		t.Error("the panel drew a providers table with no providers sent")
+	}
+	if got := panelTexts(t, dom, "empty"); !containsText(got, "no providers") {
+		t.Errorf("the panel does not say there are no providers; it drew %q", got)
+	}
+}
+
+// A provider list that is not a list is a failed reading, and the panel says so
+// rather than drawing nothing.
+func TestCostProvidersTableSaysSoForAReadingThatIsNotAList(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", map[string]any{"spend": spendReading(), "cost_providers": "garbled"})
+	if costTableDrawn(t, dom) {
+		t.Error("the panel drew a providers table from a value that is not a list")
+	}
+	if got := panelTexts(t, dom, "empty warnc"); !containsText(got, "unavailable — the reading has no provider list") {
+		t.Errorf("the panel does not say the provider list failed; it drew %q", got)
+	}
+}
+
+// An empty provider list draws no table and says there are no providers.
+func TestCostProvidersTableSaysNoProvidersForAnEmptyList(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", costPanelState(nil, map[string]any{"spend": spendReading()}))
+	if got := panelTexts(t, dom, "empty"); !containsText(got, "no providers") {
+		t.Errorf("the panel does not say there are no providers; it drew %q", got)
+	}
+}
+
+// A zero 7-day average is a figure, drawn as $0.00, not a dash for a missing one.
+func TestCostProvidersTableDrawsAZeroSevenDayAverageAsAFigure(t *testing.T) {
+	t.Parallel()
+
+	ds := deepSeekProvider()
+	ds["avg_7d"] = 0.0
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", costPanelState([]map[string]any{ds}, map[string]any{"spend": spendReading()}))
+	rows := costTable(t, dom)
+	if got := rows[1].Cells[5].Text; got != "$0.00" {
+		t.Errorf("the 7-day average of 0 draws %q, want $0.00", got)
+	}
+}
+
+// A stale spend read greys the spend part the charts are drawn in, and the
+// providers table is not in it: the Claude and Jev rows are not the spend read's,
+// so no row greys with a read it does not come from.
+func TestCostProvidersTableStaysClearOfAStaleSpendRead(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", costPanelState([]map[string]any{deepSeekProvider(), claudeProvider(), jevProvider()}, map[string]any{
+		"spend": spendReading(),
+		"reads": map[string]any{"spend": map[string]any{"stale": true}},
+	}))
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const cost = __byId["cost"];
+		const spend = cost.children.filter(c => c.className.split(" ").indexOf("spendpart") >= 0)[0];
+		return {
+			tableOnPanel: cost.children.some(c => c.className === "costprov"),
+			spendGreyed: spend.className.split(" ").indexOf("stale") >= 0,
+			tableInSpend: spend.children.some(c => c.className === "costprov")
+		};
+	})())`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
 	}
-	if v.ToInteger() != 0 {
-		t.Error("the panel drew a providers table with no providers sent")
+	var got struct {
+		TableOnPanel bool `json:"tableOnPanel"`
+		SpendGreyed  bool `json:"spendGreyed"`
+		TableInSpend bool `json:"tableInSpend"`
 	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	if !got.SpendGreyed {
+		t.Error("a stale spend read does not grey the spend part the charts are drawn in")
+	}
+	if !got.TableOnPanel || got.TableInSpend {
+		t.Errorf("the providers table is on the panel %v and in the greyed part %v, want on the panel and not greyed", got.TableOnPanel, got.TableInSpend)
+	}
+}
+
+// Each legend swatch carries the colour of the bar it names, whatever order the
+// providers come in: DeepSeek's blue and Claude's violet, not their places in
+// the array.
+func TestCostLegendSwatchesMatchTheirBars(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", costPanelState([]map[string]any{claudeProvider(), deepSeekProvider()}, map[string]any{
+		"spend":       spendReading(),
+		"cost_charts": map[string]any{"daily": costChartFixture(3, true, false)},
+	}))
+	got := costLegendSwatches(t, dom, "cost.daily")
+	want := []string{"var(--violet)", "var(--blue)"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("the swatches are %q, want %q (Claude then DeepSeek, in the array's order)", got, want)
+	}
+}
+
+// A chart's legend survives a reading with no provider list: its series are
+// still drawn, so they are still named.
+func TestCostLegendNamesItsSeriesWithoutTheArray(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", map[string]any{
+		"spend":       spendReading(),
+		"cost_charts": map[string]any{"daily": costChartFixture(3, true, false)},
+	})
+	want := []string{"DeepSeek", "Claude, plan-equivalent estimate"}
+	if got := costLegendEntries(t, dom, "cost.daily"); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("the legend lists %q with no provider list, want %q", got, want)
+	}
+}
+
+// costLegendSwatches reads the colour of each swatch in the legend the fold keyed
+// key draws, in the order the entries list.
+func costLegendSwatches(t *testing.T, dom *pageDOM, key string) []string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const sec = __byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
+		const lg = sec.children[1].children.filter(c => c.className === "legend")[0];
+		return lg ? lg.children.map(x => x.children[0].style.background) : [];
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the %s swatches: %v", key, err)
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the %s swatches: %v", key, err)
+	}
+	return out
 }
 
 // The daily and hourly spend charts are folds under their own headings: the
@@ -616,7 +764,7 @@ func costSVGChildren(t *testing.T, dom *pageDOM, key string) []costElem {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const sec = __byId["cost"].children[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
+		const sec = __byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold === ` + quoteJS(key) + `)[0];
 		const svg = sec.children[1].children.filter(c => c.tagName === "SVG")[0];
 		if (!svg) return [];
 		return svg.children.map(c => ({tag: c.tagName, class: c.getAttribute("class") || "", text: c.textContent}));
@@ -635,7 +783,7 @@ func costSVGChildren(t *testing.T, dom *pageDOM, key string) []costElem {
 func costFoldKeys(t *testing.T, dom *pageDOM) []string {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children[0].children.filter(c => c.dataset && c.dataset.fold).map(c => c.dataset.fold))`)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.filter(c => c.className === "spendpart")[0].children.filter(c => c.dataset && c.dataset.fold).map(c => c.dataset.fold))`)
 	if err != nil {
 		t.Fatalf("reading the Cost folds: %v", err)
 	}

@@ -142,15 +142,17 @@ func TestCostPanelGCPLineByCloudState(t *testing.T) {
 	}
 }
 
-// With neither a spend report nor usage there is one line, the cloud's budget
-// alert still shows, and the caption never says "undefined".
+// With neither a spend report nor usage there is one line naming them, under the
+// providers line; the cloud's budget alert still shows, and the caption never
+// says "undefined".
 func TestCostPanelEmptyStateAndCaption(t *testing.T) {
 	t.Parallel()
 
-	// No spend command configured, usage not scanned yet: one honest line.
+	// No spend command configured, usage not scanned yet, no providers: the
+	// providers line and one honest line about the spend report.
 	lines, note := drawCost(t, map[string]any{})
-	if len(lines) != 1 || !strings.Contains(lines[0].Text, "no spend report") || !strings.Contains(lines[0].Text, "usage still reading") {
-		t.Errorf("empty panel = %+v, want one line naming the spend report and the usage read", lines)
+	if len(lines) != 2 || lines[0].Text != "no providers" || !strings.Contains(lines[1].Text, "no spend report") || !strings.Contains(lines[1].Text, "usage still reading") {
+		t.Errorf("empty panel = %+v, want the no-providers line, then one line naming the spend report and the usage read", lines)
 	}
 	if note.Text != "" {
 		t.Errorf("empty panel caption = %q, want none", note.Text)
@@ -158,8 +160,8 @@ func TestCostPanelEmptyStateAndCaption(t *testing.T) {
 
 	// The same panel with a budget alert keeps the alert.
 	lines, _ = drawCost(t, map[string]any{"cloud": map[string]any{"state": "fresh", "findings": []any{budgetFinding("urgent")}}})
-	if len(lines) != 2 || !strings.HasPrefix(lines[1].Text, "GCP budget") {
-		t.Errorf("empty panel with an alert = %+v, want the line and the alert", lines)
+	if len(lines) != 3 || !strings.HasPrefix(lines[2].Text, "GCP budget") {
+		t.Errorf("empty panel with an alert = %+v, want the lines and the alert last", lines)
 	}
 
 	// Usage not yet answered beside a spend report: the caption is the report's

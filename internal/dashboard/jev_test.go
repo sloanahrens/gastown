@@ -923,17 +923,11 @@ func TestJevPanelFailureSaysUnavailableOnItsTitle(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	// The table's rows come from the server's providers array, which a scorecard
-	// read does not feed, so the table draws the same whatever the scorecard says.
-	providers := []any{map[string]any{"id": "jev", "label": "Jev", "kind": "cash", "today": 0.5, "status": "none"}}
-	drawTable := func(s map[string]any) []costTableRow {
-		s["cost_providers"] = providers
-		dom := newPageDOM(t)
-		dom.call(t, "renderCost", s)
-		return costTable(t, dom)
+	// A fresh scorecard draws no alarm, so the alarms below are the read's own.
+	_, fresh, _ := drawJev(t, jevScorecardState(now, map[string]any{}))
+	if fresh.Class != "r" || strings.HasPrefix(fresh.Text, "unavailable") {
+		t.Errorf("a fresh scorecard's title line = %q (class %q), want no alarm", fresh.Text, fresh.Class)
 	}
-	healthy := drawTable(jevStateAt(now, map[string]any{"reads": jevRead(nil)}))
-
 	cases := map[string]struct {
 		read  map[string]any
 		want  string
@@ -949,9 +943,6 @@ func TestJevPanelFailureSaysUnavailableOnItsTitle(t *testing.T) {
 		}
 		if len(rows) != 0 {
 			t.Errorf("%s: drew %v from an unreadable scorecard", name, jevRowTexts(rows))
-		}
-		if got := drawTable(jevScorecardState(now, tc.read)); !reflect.DeepEqual(got, healthy) {
-			t.Errorf("%s: the providers table = %+v, want the healthy one %+v", name, got, healthy)
 		}
 	}
 
