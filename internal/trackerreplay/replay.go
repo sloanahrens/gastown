@@ -31,6 +31,10 @@ type Apply func(argv []string) error
 type Result struct {
 	Applied  int64
 	Commands int
+	// Defaulted counts the creations replayed with bd's defaults for priority,
+	// type and description, because the feed carries only the title at creation.
+	// The command reports it: a replayed create is never a silent fill-in.
+	Defaulted int
 }
 
 // UnreplayableError is an event the replay refuses to guess at: its kind, or
@@ -115,6 +119,9 @@ func Replay(ctx context.Context, src Source, apply Apply, since int64, dryRun bo
 				return res, &ApplyError{Seq: ev.Seq, Verb: argv[0], Err: err}
 			}
 			res.Applied, res.Commands = ev.Seq, res.Commands+1
+			if ev.Op == "created" {
+				res.Defaulted++
+			}
 			after = ev.Seq
 		}
 	}
@@ -143,7 +150,8 @@ func feedEnded(page api.EventsPage, after int64) error {
 // one bd call; an event the feed cannot replay is an *UnreplayableError.
 //
 // The feed carries an issue's title at creation, not its type, priority or
-// description, so a creation replays with bd's defaults for those. An update
+// description, so a creation replays with bd's defaults for those: Result.Defaulted
+// counts them and the command says so, so the fill-in is never silent. An update
 // whose field's new value the feed does not carry (defer_until, and the rows
 // written before the store recorded values) is refused rather than filled in
 // with the old one.

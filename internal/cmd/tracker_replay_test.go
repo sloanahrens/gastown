@@ -265,9 +265,50 @@ func TestRunTrackerReplayPrintsTheSeqToResumeAfterAFailingBdCall(t *testing.T) {
 	if !errors.Is(err, bdErr) {
 		t.Fatalf("runTrackerReplay = %v, want the bd failure", err)
 	}
-	want := "replay stopped: last applied seq 1; fix the cause, then rerun with --since-seq 1\n"
+	want := "warning: 1 created issue(s) replayed with bd's defaults for priority, type and description (the feed carries only the title); review them in the rig\nreplay stopped: last applied seq 1; fix the cause, then rerun with --since-seq 1\n"
 	if errOut.String() != want {
 		t.Errorf("stop hint = %q, want %q", errOut.String(), want)
+	}
+}
+
+// A creation replays with bd's defaults because the feed carries only its title;
+// the run says so on stderr instead of filling the fields in silently (gt-p85pw.71).
+func TestRunTrackerReplayWarnsWhenACreationTookBdDefaults(t *testing.T) {
+	t.Parallel()
+	env := replayFixture([]api.Event{{Seq: 1, Op: "created", IssueID: "gt-1", NewValue: strPtr("Add x")}})
+	env.newApply = func(string) trackerreplay.Apply { return func([]string) error { return nil } }
+	var out, errOut bytes.Buffer
+	if err := runTrackerReplay(env, &out, &errOut, "gastown", 0, false); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	want := "warning: 1 created issue(s) replayed with bd's defaults for priority, type and description (the feed carries only the title); review them in the rig\n"
+	if errOut.String() != want {
+		t.Errorf("stderr = %q, want %q", errOut.String(), want)
+	}
+}
+
+// A replay with no creation says nothing about defaults.
+func TestRunTrackerReplayIsQuietWhenNothingWasCreated(t *testing.T) {
+	t.Parallel()
+	env := replayFixture([]api.Event{{Seq: 1, Op: "status_changed", IssueID: "gt-1", NewValue: strPtr("closed")}})
+	env.newApply = func(string) trackerreplay.Apply { return func([]string) error { return nil } }
+	var out, errOut bytes.Buffer
+	if err := runTrackerReplay(env, &out, &errOut, "gastown", 0, false); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if errOut.String() != "" {
+		t.Errorf("stderr = %q, want nothing", errOut.String())
+	}
+}
+
+// A negative --since-seq is refused before anything is read (gt-p85pw.71).
+func TestRunTrackerReplayRefusesANegativeSinceSeq(t *testing.T) {
+	t.Parallel()
+	env := replayFixture(nil)
+	var out, errOut bytes.Buffer
+	err := runTrackerReplay(env, &out, &errOut, "gastown", -1, false)
+	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("runTrackerReplay since -1 = %v, want a refusal naming the negative value", err)
 	}
 }
 

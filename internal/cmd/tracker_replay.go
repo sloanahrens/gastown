@@ -44,8 +44,10 @@ replay (it names the kind and seq; nothing is guessed) or the first bd call
 that fails, and prints the last seq applied. Rerun with --since-seq set to that
 seq to resume.
 
-The rig must already be routed to Dolt. --dry-run prints the bd calls and runs
-none.
+The feed carries a created issue's title only, so each creation replays with bd's
+defaults for priority, type and description; the run counts them on stderr so
+you can review those issues. The rig must already be routed to Dolt. --dry-run
+prints the bd calls and runs none.
 
 Examples:
   gt tracker replay --rig agentlab --since-seq 1200 --dry-run
@@ -106,11 +108,15 @@ func bdApply(run func(args ...string) ([]byte, error)) trackerreplay.Apply {
 }
 
 func runTrackerReplay(env replayEnv, out, errOut io.Writer, rig string, since int64, dryRun bool) error {
+	if since < 0 {
+		return fmt.Errorf("gt tracker replay: --since-seq must not be negative (got %d)", since)
+	}
 	rigDir, src, err := openTrackerReplay(env, rig)
 	if err != nil {
 		return err
 	}
 	res, err := trackerreplay.Replay(context.Background(), src, env.newApply(rigDir), since, dryRun, out)
+	replayDefaultedNote(errOut, res)
 	if err != nil {
 		replayStopHint(errOut, res)
 		return err
@@ -121,6 +127,17 @@ func runTrackerReplay(env replayEnv, out, errOut io.Writer, rig string, since in
 	}
 	fmt.Fprintf(out, "applied %d bd calls through seq %d\n", res.Commands, res.Applied)
 	return nil
+}
+
+// replayDefaultedNote says how many creations replayed with bd's defaults. The
+// feed carries a created issue's title only, so its priority, type and
+// description come back as bd's defaults: that is told on every run that did
+// it, so the rollback never fills in a field without saying so.
+func replayDefaultedNote(w io.Writer, res trackerreplay.Result) {
+	if res.Defaulted == 0 {
+		return
+	}
+	fmt.Fprintf(w, "warning: %d created issue(s) replayed with bd's defaults for priority, type and description (the feed carries only the title); review them in the rig\n", res.Defaulted)
 }
 
 // replayStopHint says how to resume a stopped replay. A run whose first call

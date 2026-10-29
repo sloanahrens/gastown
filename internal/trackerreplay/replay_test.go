@@ -281,8 +281,8 @@ func TestReplayDryRunPrintsEachBdCallAndRunsNone(t *testing.T) {
 	if out.String() != want {
 		t.Errorf("dry run printed %q, want %q", out.String(), want)
 	}
-	if res != (Result{Applied: 2, Commands: 2}) {
-		t.Errorf("dry run result = %+v, want Applied 2 Commands 2", res)
+	if res != (Result{Applied: 2, Commands: 2, Defaulted: 1}) {
+		t.Errorf("dry run result = %+v, want Applied 2 Commands 2 Defaulted 1 (the one creation)", res)
 	}
 }
 
@@ -303,8 +303,8 @@ func TestReplayStopsAtTheFirstFailingCommandAndKeepsItsErrorOutOfTheMessage(t *t
 	if strings.Contains(err.Error(), "sk-secret") {
 		t.Errorf("error message carries the runner's output: %q", err.Error())
 	}
-	if res != (Result{Applied: 1, Commands: 1}) {
-		t.Errorf("result = %+v, want Applied 1 (the last seq that ran) Commands 1", res)
+	if res != (Result{Applied: 1, Commands: 1, Defaulted: 1}) {
+		t.Errorf("result = %+v, want Applied 1 (the last seq that ran) Commands 1 Defaulted 1", res)
 	}
 	if len(run.calls) != 2 {
 		t.Errorf("runner was called %d times, want 2: the close after the failure must not run", len(run.calls))
