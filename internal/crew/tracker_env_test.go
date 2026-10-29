@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -171,5 +172,60 @@ func TestTrackerEnvIssuerFailureHoldsNoToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tracker: 503 unavailable") {
 		t.Errorf("error %q does not name the cause", err)
+	}
+}
+
+// Start on a tracker-backed rig whose token the tracker refuses fails before
+// any session is touched, and its error carries the cause and no token. The
+// refusal happens before tmux is reached, so the test runs no session.
+func TestStartFailsWhenTrackerRefusesToken(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	root := writeCrewTown(t, trackerRouteGastown, "")
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bare := filepath.Join(root, "bare-repo.git")
+	f.InitBare(t, bare)
+	r := &rig.Rig{Name: "gastown", Path: rigPath, GitURL: bare}
+	const leaked = "trk_must-not-appear-in-errors"
+	issuer := &fakeSeatIssuer{token: leaked, err: errors.New("tracker: 503 unavailable")}
+	m := fakeManager(t, f, r)
+	m.trackerIssuer = issuer
+
+	err := m.Start("dave", StartOptions{ClaudeConfigDir: t.TempDir()})
+	if err == nil {
+		t.Fatal("Start = nil, want the tracker refusal")
+	}
+	if strings.Contains(err.Error(), leaked) {
+		t.Errorf("Start error %q carries the token", err)
+	}
+	if !strings.Contains(err.Error(), "tracker: 503 unavailable") {
+		t.Errorf("Start error %q does not name the cause", err)
+	}
+	if len(issuer.actors) != 1 {
+		t.Errorf("tokens requested = %d, want 1", len(issuer.actors))
+	}
+}
+
+// A tracker-backed rig with no injected issuer and no admin credential in its
+// town refuses before it mints a token: no token file is written.
+func TestTrackerEnvWithoutAdminCredentialRefuses(t *testing.T) {
+	t.Parallel()
+	root := writeCrewTown(t, trackerRouteGastown, "")
+	env, err := (&Manager{rig: &rig.Rig{Name: "gastown"}}).trackerEnv(root, "dave")
+	if err == nil || !strings.Contains(err.Error(), "tracker token issuer") {
+		t.Fatalf("trackerEnv error = %v, want the host issuer to be refused", err)
+	}
+	if env != nil {
+		t.Errorf("environment = %v after a refused issuer, want none", env)
+	}
+	tokens, err := filepath.Glob(filepath.Join(root, ".runtime", "seats", "gastown", "*.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 0 {
+		t.Errorf("token files written = %v, want none", tokens)
 	}
 }
