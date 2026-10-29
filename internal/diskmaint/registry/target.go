@@ -254,17 +254,28 @@ func anchorRefusal(tags []TagInfo) string {
 
 // manifestTags reads every tag's manifest so the plan can rank by creation time
 // and size; each failed read is returned rather than dropped, because a tag
-// left out of the input would look absent.
+// left out of the input would look absent. A stray repo's manifest that
+// GetManifest cannot read (its config blob is missing, say) is taken by digest
+// alone, since nothing names it and a stray repo is deleted whole; a main-repo
+// manifest that fails still refuses the plan.
 func (t *Target) manifestTags(ctx context.Context, repo string, tags []TagInfo) ([]TagInfo, []string) {
 	out := make([]TagInfo, 0, len(tags))
 	var errs []string
 	for _, ti := range tags {
 		m, err := t.client.GetManifest(ctx, repo, ti.Tag)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("manifest %s:%s: %v", repo, ti.Tag, err))
+		if err == nil {
+			out = append(out, TagInfo{Repo: repo, Tag: ti.Tag, Digest: m.Digest, Created: m.Created, Bytes: m.Bytes})
 			continue
 		}
-		out = append(out, TagInfo{Repo: repo, Tag: ti.Tag, Digest: m.Digest, Created: m.Created, Bytes: m.Bytes})
+		if slices.Contains(StrayRepos, repo) {
+			digest, digestErr := t.client.ManifestDigest(ctx, repo, ti.Tag)
+			if digestErr == nil {
+				out = append(out, TagInfo{Repo: repo, Tag: ti.Tag, Digest: digest, Unreadable: true})
+				continue
+			}
+			err = fmt.Errorf("%w; digest fallback: %v", err, digestErr)
+		}
+		errs = append(errs, fmt.Sprintf("manifest %s:%s: %v", repo, ti.Tag, err))
 	}
 	return out, errs
 }

@@ -14,6 +14,10 @@ const ruleSandboxRecord = "named by a sandbox record"
 // strayWhy is the Action.Why a stray repository's manifests carry.
 const strayWhy = "stray repo"
 
+// strayUnreadableWhy is the Action.Why of a stray manifest that could not be
+// read in full and is deleted by digest alone.
+const strayUnreadableWhy = "stray repo; manifest unreadable, deleted by digest"
+
 // nameRefusal returns the first name in in.Repos that fails validation, naming
 // the offender, or "" when every name validates. Repos come from the registry
 // and from sandbox records, so they are untrusted until checked: a name reaches
@@ -73,11 +77,15 @@ func planStrayRepos(in PlanInput, keepDigests map[string]bool) ([]diskmaint.Acti
 				kept = append(kept, diskmaint.Kept{Ref: ref, Rule: strayKeepRule(ti.Digest, in)})
 				continue
 			}
+			why := strayWhy
+			if ti.Unreadable {
+				why = strayUnreadableWhy
+			}
 			actions = append(actions, diskmaint.Action{
 				Kind:  "delete-manifest",
 				Ref:   ref,
 				Bytes: ti.Bytes,
-				Why:   strayWhy,
+				Why:   why,
 			})
 		}
 	}
