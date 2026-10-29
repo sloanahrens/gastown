@@ -55,7 +55,10 @@ var (
 //
 // The dry-run gate reads the policy the plan carries, so a caller that planned
 // a dry run cannot remove anything by applying that plan, even after another
-// Plan on the same target ran with Apply true. A dry run, a refused plan and a
+// Plan on the same target ran with Apply true. The gate trusts the plan: a
+// caller that builds a Plan by hand with Policy.Apply set authorizes a removal,
+// and the only production caller, runMaint, sets it from the run's mode
+// (TestMaintRunSetsTheBaksGateFromTheMode). A dry run, a refused plan and a
 // run with no handle check remove nothing and report that as an error, so an
 // unapplied plan cannot read as a clean run. An empty plan removes nothing and
 // reads as clean. A canceled context stops the run.

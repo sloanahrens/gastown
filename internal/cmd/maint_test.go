@@ -721,6 +721,72 @@ func TestMaintUnreadableRigRegistryRefusesOnlyTheWorktreeTarget(t *testing.T) {
 	}
 }
 
+// lsofExit1 is the error lsof's runner reports for "no process holds the file":
+// the baks target reads the exit code through ExitCode().
+type lsofExit1 struct{}
+
+func (lsofExit1) Error() string { return "exit status 1" }
+func (lsofExit1) ExitCode() int { return 1 }
+
+// TestMaintRunSetsTheBaksGateFromTheMode drives the real run loop against a
+// real baks target and a real backup file: a plan-mode run builds a dry-run
+// plan and removes nothing, an apply-mode run builds an apply plan and removes
+// the oldest copy. The mode reaches the gate through the policy runMaint hands
+// Plan, which the baks target stamps on its plan, so this is the wiring a
+// hand-built Plan cannot show (om d3a492b3cdfb).
+func TestMaintRunSetsTheBaksGateFromTheMode(t *testing.T) {
+	t.Parallel()
+	closed := func(context.Context, []string, string, ...string) ([]byte, error) {
+		// lsof exits 1 and prints nothing when no process holds the file.
+		return nil, lsofExit1{}
+	}
+	cases := []struct {
+		name     string
+		mode     string
+		wantGone bool
+	}{
+		{name: "plan mode keeps the file", mode: maintModePlan, wantGone: false},
+		{name: "apply mode removes the oldest copy", mode: maintModeApply, wantGone: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, home := t.TempDir(), t.TempDir()
+			binDir := filepath.Join(home, ".local", "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var oldest string
+			for i, name := range []string{"gt.bak-01", "gt.bak-02", "gt.bak-03"} {
+				path := filepath.Join(binDir, name)
+				if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				when := maintTestNow.Add(-time.Duration(i+1) * time.Hour)
+				if err := os.Chtimes(path, when, when); err != nil {
+					t.Fatal(err)
+				}
+				oldest = path
+			}
+			ledger := diskmaint.NewLedger(filepath.Join(t.TempDir(), "ledger.jsonl"), maintLedgerMaxBytes)
+			deps := maintDeps{
+				Targets: func() (map[string]diskmaint.Target, error) {
+					return maintLocalTargets(town, home, closed, ledger, tc.mode == maintModeApply), nil
+				},
+				Now:  func() time.Time { return maintTestNow },
+				Keep: 5,
+			}
+			if err := runMaint(io.Discard, deps, tc.mode, maintTargetBaks); err != nil {
+				t.Fatalf("runMaint(%s) error = %v, want none", tc.mode, err)
+			}
+			_, statErr := os.Stat(oldest)
+			if gone := os.IsNotExist(statErr); gone != tc.wantGone {
+				t.Errorf("%s: oldest backup gone = %v, want %v (stat error %v)", tc.mode, gone, tc.wantGone, statErr)
+			}
+		})
+	}
+}
+
 func TestMaintTargetsWireTheModeIntoTheDryRunGate(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
