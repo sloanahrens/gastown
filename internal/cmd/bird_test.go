@@ -150,6 +150,13 @@ func TestBirdRunnerRefusesWhatItCannotRead(t *testing.T) {
 			},
 			wants: "refused",
 		},
+		{
+			name: "a bird_claude setting that cannot be read",
+			set: func(s *birdSetup) {
+				s.claude = func(string, string) (string, error) { return "", errors.New("bird_claude unreadable") }
+			},
+			wants: "bird_claude unreadable",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
