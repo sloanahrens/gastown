@@ -280,15 +280,26 @@ func TestWriteLandingSidecarExactBytes(t *testing.T) {
 	}
 }
 
+// causeWriter fails every write with its cause, so a test can tell the
+// error wraps that exact cause and not a copy of its text.
+type causeWriter struct{ cause error }
+
+func (w causeWriter) Write([]byte) (int, error) { return 0, w.cause }
+
 // TestWriteLandingSidecarWriteErrorIsNamed checks a failed write is reported
-// as the file's, so a reader of the error knows which artifact is short.
+// as the file's, so a reader of the error knows which artifact is short, and
+// that the error still wraps the write's cause.
 func TestWriteLandingSidecarWriteErrorIsNamed(t *testing.T) {
 	t.Parallel()
-	err := WriteLandingSidecar(failingWriter{})
+	boom := errors.New("boom")
+	err := WriteLandingSidecar(causeWriter{cause: boom})
 	if err == nil {
 		t.Fatal("WriteLandingSidecar to a failing writer returned no error")
 	}
 	if !strings.HasPrefix(err.Error(), "landings.sidecar.json:") {
 		t.Errorf("error = %q, want a landings.sidecar.json: prefix", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("error = %q, want it to wrap the write's cause", err)
 	}
 }
