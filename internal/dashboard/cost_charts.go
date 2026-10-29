@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 )
@@ -98,18 +99,26 @@ var costSeriesBuilders = []costSeriesBuilder{
 // costSeriesDeepSeekName is the DeepSeek series' legend entry.
 const costSeriesDeepSeekName = "DeepSeek"
 
-// deepSeekCostSeries is the DeepSeek series: the chart's own bars.
+// deepSeekCostSeries is the DeepSeek series: a copy of the chart's own bars.
 func deepSeekCostSeries(chart *CostChart) CostSeries {
-	return CostSeries{ID: costProviderDeepSeek, Name: costSeriesDeepSeekName, Bars: chart.Bars}
+	return CostSeries{ID: costProviderDeepSeek, Name: costSeriesDeepSeekName, Bars: slices.Clone(chart.Bars)}
 }
 
-// claudePlanCostSeries is the Claude series: the chart's Claude bars, or the
-// reason there are none.
+// costSeriesClaudeNoWhy is the reason a Claude series carries when the chart has
+// neither Claude bars nor a ClaudeWhy, so the entry still says why it is absent.
+const costSeriesClaudeNoWhy = "the chart has no Claude series"
+
+// claudePlanCostSeries is the Claude series: a copy of the chart's Claude bars,
+// or the reason there are none.
 func claudePlanCostSeries(chart *CostChart) CostSeries {
 	if chart.Claude == nil {
-		return CostSeries{ID: costProviderClaude, Name: claudePlanSeriesName, Why: chart.ClaudeWhy}
+		why := chart.ClaudeWhy
+		if why == "" {
+			why = costSeriesClaudeNoWhy
+		}
+		return CostSeries{ID: costProviderClaude, Name: claudePlanSeriesName, Why: why}
 	}
-	return CostSeries{ID: costProviderClaude, Name: chart.Claude.Name, Bars: chart.Claude.Bars}
+	return CostSeries{ID: costProviderClaude, Name: chart.Claude.Name, Bars: slices.Clone(chart.Claude.Bars)}
 }
 
 // buildCostSeries runs the builders over one chart, in order. A series whose
@@ -131,8 +140,8 @@ func buildCostSeries(builders []costSeriesBuilder, chart *CostChart) []CostSerie
 }
 
 // costSeriesAria is what a chart's aria-label adds for its series: each one named
-// with its total, or with why it is not drawn, and how many buckets it has no
-// sample for.
+// with its total and every figure, or with why it is not drawn, and how many
+// buckets it has no sample for.
 func costSeriesAria(series []CostSeries) string {
 	var out string
 	for _, s := range series {
@@ -141,6 +150,7 @@ func costSeriesAria(series []CostSeries) string {
 			continue
 		}
 		var total float64
+		var words []string
 		gaps := 0
 		for _, b := range s.Bars {
 			if b.Gap {
@@ -148,8 +158,12 @@ func costSeriesAria(series []CostSeries) string {
 				continue
 			}
 			total += b.Value
+			words = append(words, b.Label+" "+money(b.Value))
 		}
 		out += ". " + s.Name + " total " + money(total)
+		if len(words) > 0 {
+			out += ": " + strings.Join(words, ", ")
+		}
 		if gaps > 0 {
 			out += fmt.Sprintf("; %d %s no sample", gaps, plural(gaps, "bucket has", "buckets have"))
 		}
@@ -202,7 +216,6 @@ func buildDailyChart(builders []costSeriesBuilder, now time.Time, perDay map[str
 	}
 	chart := &CostChart{Bars: make([]CostBar, 0, costDailyDays)}
 	buckets := costDailyBuckets(now)
-	var words []string
 	for _, b := range buckets {
 		spent, ok := perDay[b.Name]
 		if !ok {
@@ -214,14 +227,8 @@ func buildDailyChart(builders []costSeriesBuilder, now time.Time, perDay map[str
 			bar.Title = b.Name + " +" + money(-spent) + " added"
 		}
 		chart.Bars = append(chart.Bars, bar)
-		words = append(words, bar.Title)
 	}
-	aria := fmt.Sprintf("Daily spend, last %d days: ", costDailyDays)
-	if len(words) > 0 {
-		aria += strings.Join(words, ", ")
-	} else {
-		aria += "no figures"
-	}
+	aria := fmt.Sprintf("Daily spend, last %d days", costDailyDays)
 	if plan != nil && plan.WeeklyValueUSD > 0 {
 		daily := plan.WeeklyValueUSD / costDailyDays
 		pct := pctText(plan.ProjectedPctAtReset)
@@ -245,31 +252,16 @@ func buildHourlyChart(builders []costSeriesBuilder, hours []SpendHour, skipped i
 	}
 	chart := &CostChart{Bars: make([]CostBar, 0, len(hours)), Skipped: skipped}
 	buckets := make([]costBucket, len(hours))
-	var words []string
-	gaps := 0
 	for i, h := range hours {
 		hr := h.Start.Format("15") + ":00"
 		buckets[i] = costBucket{Label: hr, Name: hr, Start: h.Start}
 		if h.Samples == 0 {
-			gaps++
 			chart.Bars = append(chart.Bars, CostBar{Label: hr, Gap: true, Title: hr + " no ledger sample"})
 			continue
 		}
-		bar := CostBar{Label: hr, Value: max(h.Spent, 0), Title: hr + " " + money(h.Spent)}
-		chart.Bars = append(chart.Bars, bar)
-		if h.Spent > 0 {
-			words = append(words, bar.Title)
-		}
+		chart.Bars = append(chart.Bars, CostBar{Label: hr, Value: max(h.Spent, 0), Title: hr + " " + money(h.Spent)})
 	}
 	aria := fmt.Sprintf("Hourly spend, last %d hours", len(hours))
-	if len(words) > 0 {
-		aria += ": " + strings.Join(words, ", ")
-	} else {
-		aria += ": no spend"
-	}
-	if gaps > 0 {
-		aria += fmt.Sprintf(". %d %s no ledger sample", gaps, plural(gaps, "hour has", "hours have"))
-	}
 	if skipped > 0 {
 		aria += fmt.Sprintf(". %d malformed ledger %s skipped", skipped, plural(skipped, "line", "lines"))
 	}

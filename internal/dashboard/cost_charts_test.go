@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -123,8 +124,8 @@ func TestBuildCostChartsHourlyHasOneBarPerHourAndGapsAreNotZeroBars(t *testing.T
 	if gaps != 1 {
 		t.Errorf("gaps = %d, want the one hour with no sample", gaps)
 	}
-	if !strings.Contains(c.Aria, "1 hour has no ledger sample") {
-		t.Errorf("aria %q does not name the gap", c.Aria)
+	if !strings.Contains(c.Aria, "; 1 bucket has no sample") {
+		t.Errorf("aria %q does not name the gap on the DeepSeek series", c.Aria)
 	}
 }
 
@@ -422,10 +423,9 @@ func TestCostChartSeriesWrongLengthBecomesAWhy(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		build costSeriesBuilder
-		bars  func(buckets int) int // the bars the builder returns for that many buckets
 	}{
-		{"one bar too many", long, func(n int) int { return n + 1 }},
-		{"no bars", empty, func(int) int { return 0 }},
+		{"one bar too many", long},
+		{"no bars", empty},
 	} {
 		c := buildCostCharts(costSeriesWith(tc.build), claudeSeriesNow, claudeSeriesDays, claudeSeriesHours(), 0, claudeSeriesPlan, PlanSamples{})
 		for _, ch := range costSeriesCharts(c) {
@@ -434,9 +434,9 @@ func TestCostChartSeriesWrongLengthBecomesAWhy(t *testing.T) {
 				t.Fatalf("%s %s: series = %+v, want three", tc.name, ch.name, chart)
 			}
 			s := chart.Series[2]
-			want := fmt.Sprintf("it has %d where the chart has %d", tc.bars(len(chart.Bars)), len(chart.Bars))
-			if s.Bars != nil || !strings.Contains(s.Why, want) {
-				t.Errorf("%s %s: mismatched series = %+v, want no bars and a why containing %q", tc.name, ch.name, s, want)
+			want := fmt.Sprintf("where the chart has %d", len(chart.Bars))
+			if s.Bars != nil || !strings.Contains(s.Why, "does not line up with the chart's buckets") || !strings.Contains(s.Why, want) {
+				t.Errorf("%s %s: mismatched series = %+v, want no bars and a why saying it does not line up, %q", tc.name, ch.name, s, want)
 			}
 		}
 	}
@@ -455,7 +455,7 @@ func TestCostChartSeriesAriaNamesEachTotal(t *testing.T) {
 
 	// Daily: the two known days sum to $3.00 for DeepSeek, and five days have
 	// no figure. Hourly: no hour spent anything, so DeepSeek totals $0.00.
-	if !strings.Contains(c.Daily.Aria, ". DeepSeek total $3.00; 5 buckets have no sample") {
+	if !strings.Contains(c.Daily.Aria, ". DeepSeek total $3.00: ") || !strings.Contains(c.Daily.Aria, "; 5 buckets have no sample") {
 		t.Errorf("daily aria %q does not name the DeepSeek total", c.Daily.Aria)
 	}
 	if !strings.Contains(c.Hourly.Aria, ". DeepSeek total $0.00") {
@@ -472,6 +472,81 @@ func TestCostChartSeriesAriaNamesEachTotal(t *testing.T) {
 		if !strings.Contains(tc.chart.Aria, want) {
 			t.Errorf("%s aria %q does not name the Claude total %q", tc.name, tc.chart.Aria, want)
 		}
+	}
+}
+
+// The aria-label lists every bucket's figure in each series, so a Claude figure
+// the page reads out is the same one its bar draws.
+func TestCostChartSeriesAriaListsEachFigure(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 10, 25, 15, 0, 0, 0, time.Local)
+	samples := claudeSeries(claudeSampleAt(base, 10), claudeSampleAt(base.Add(20*time.Minute), 12))
+	c := BuildCostCharts(claudeSeriesNow, claudeSeriesDays, claudeSeriesHours(), 0, claudeSeriesPlan, samples)
+	for _, tc := range costSeriesCharts(c) {
+		chart := tc.chart
+		if chart == nil || len(chart.Series) != 2 {
+			t.Fatalf("%s chart has no two series to list", tc.name)
+		}
+		listed := 0
+		for _, s := range chart.Series {
+			for _, b := range s.Bars {
+				if b.Gap {
+					continue
+				}
+				listed++
+				if want := b.Label + " " + money(b.Value); !strings.Contains(chart.Aria, want) {
+					t.Errorf("%s aria %q does not list %s's figure %q", tc.name, chart.Aria, s.Name, want)
+				}
+			}
+		}
+		if listed == 0 {
+			t.Errorf("%s has no figures to list", tc.name)
+		}
+	}
+}
+
+// A chart with neither Claude bars nor a ClaudeWhy still gives its Claude entry a
+// reason, so the entry never reads as a length mismatch with no bars.
+func TestCostChartSeriesClaudeWithoutAWhyGivesANoSeriesReason(t *testing.T) {
+	t.Parallel()
+	chart := &CostChart{Bars: make([]CostBar, 3)}
+	series := buildCostSeries(costSeriesBuilders, chart)
+	if len(series) != 2 {
+		t.Fatalf("series = %d, want 2", len(series))
+	}
+	cl := series[1]
+	if cl.Why != costSeriesClaudeNoWhy || cl.Bars != nil {
+		t.Errorf("Claude series = %+v, want why %q and nil bars", cl, costSeriesClaudeNoWhy)
+	}
+	if strings.Contains(cl.Why, "does not line up") {
+		t.Errorf("Claude series why %q names a length mismatch it does not have", cl.Why)
+	}
+}
+
+// Each series holds its own copy of the bars, so a change to the chart's bars or
+// Claude bars after the build does not reach the series the page draws.
+func TestCostChartSeriesBarsAreCopies(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 10, 25, 15, 0, 0, 0, time.Local)
+	samples := claudeSeries(claudeSampleAt(base, 10), claudeSampleAt(base.Add(20*time.Minute), 12))
+	c := BuildCostCharts(claudeSeriesNow, claudeSeriesDays, claudeSeriesHours(), 0, claudeSeriesPlan, samples)
+	daily := c.Daily
+	if daily == nil || daily.Claude == nil {
+		t.Fatal("the daily chart has no Claude series to change")
+	}
+	ds := daily.Series[0].Bars[0].Value
+	daily.Bars[0].Value = 999
+	if daily.Series[0].Bars[0].Value != ds {
+		t.Errorf("DeepSeek series bar = %v after the chart's bar changed, want %v", daily.Series[0].Bars[0].Value, ds)
+	}
+	i := slices.IndexFunc(daily.Claude.Bars, func(b CostBar) bool { return !b.Gap })
+	if i < 0 {
+		t.Fatal("the Claude series has no figure to change")
+	}
+	cl := daily.Series[1].Bars[i].Value
+	daily.Claude.Bars[i].Value = 999
+	if daily.Series[1].Bars[i].Value != cl {
+		t.Errorf("Claude series bar = %v after the Claude bar changed, want %v", daily.Series[1].Bars[i].Value, cl)
 	}
 }
 
