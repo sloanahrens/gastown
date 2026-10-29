@@ -55,7 +55,7 @@ Per script, `tiertrigger.Due(state, packages, git, now, loc)` (`internal/tiertri
 - The hourly sweep runs every script (`--all`), so a wrong trigger declaration is caught within the hour.
 - History or state that cannot be read runs everything.
 - `land.ShellTierInputs` (`internal/land/gate.go`), which the post-land revert reads, becomes the union of the manifest's triggers. The drift test `TestShellTierInputsMatchPostLandScript` becomes a test that the constant equals that union.
-- An entry that declares no triggers gets `scripts/` and `Makefile`.
+- An entry that declares no triggers gets `scripts/` and `Makefile`. A script that compiles or runs the repository's Go for real sets `BuildsGo` and also gets the Go tree (`go.mod`, `go.sum`, `cmd/`, `internal/`, `plugins/`), because a Go-only landing can change its result. Today exactly one does: `scripts/install-gt_test.sh` builds `./cmd/install-lock`, `./cmd/image-supervisor` and `./plugins/polecat-image` (lines 294 to 303); every other shell test stubs `go`. The present rule has the same hole (`land.ShellTierInputs` covers `plugins/` but not `cmd/`). A guard fails any script that names a `go build/run/test/vet/install` or `make install` command without `BuildsGo` or a listed stub-only reason, so the list cannot go stale. Until `gt-tpg0p.14` deletes `install-gt_test.sh`, that script (61 s) runs on Go landings too.
 - A guard scans each script for the repo paths it names and fails when one is not covered by its triggers (test-engineering rule 6: declare your inputs).
 
 Expected effect: from 100% of landings to about 9% (7 of 77 touched an input; this upper bound counts a landing that changed an input, and "since the last green commit" runs at most once per such change).
@@ -71,7 +71,7 @@ Independence evidence so far (grep over the 28 scripts, not proof): no listeners
 
 ### 3.4 Compatibility with the daemon and settings
 
-- The runner prints the existing summary line byte for byte, `tier-sweep: shell GREEN|RED passed=N failed=N skipped=N [failed: <names>] (logs <dir>) in <duration>`, with the same exit codes. `land.shellTierSummaryRE` (task A3 of the plan exports it as `land.ShellTierSummaryRE`) and `tier_sweep.go` keep parsing it unchanged.
+- The runner prints the existing summary line in the same format and field order, `tier-sweep: shell GREEN|RED passed=N failed=N skipped=N [failed: <names>] (logs <dir>) in <duration>`, with the same exit codes. The counts change meaning only in that each script is counted (a green run prints `passed=28` where it printed `passed=5`, because `test-makefile.sh` counted as one). `land.shellTierSummaryRE` (task A3 of the plan exports it as `land.ShellTierSummaryRE`) and `tier_sweep.go` keep parsing it unchanged.
 - Cutover is two one-line changes in the overseer's area, each its own bead: the sweep's shell stage command in `tier_sweep.go`, and gastown's `post_land_command`, which becomes `GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --since-green`. The `GT_TEST_DOCKER=0` text is what `gt-7k0hz` keys on to take no container slot.
 - During the transition `tier-sweep.sh`'s shell branch is a one-line `exec` of the runner (a thin wrapper, allowed by the scripts policy), and `make test-slow` and `make test-makefile` call the runner.
 
@@ -111,4 +111,5 @@ Tests of the runner use fakes for exec, clock, filesystem and the history reader
 - That the 28 scripts are independent under concurrency: grep evidence only; the proof is the per-script flip.
 - The `go run` build cost per landing: not measured.
 - The 9% figure counts landings that changed an input, over 6.5 hours of first-parent history in a shallow clone; a longer window may differ.
+- The list of scripts that build Go for real comes from a scan of the 28 scripts for `go build/run/test/vet/install` and `make install` lines plus reading every hit; a script that builds through a path the scan did not match is not excluded, and the guard in plan task A7b is what keeps the list honest.
 - The per-script wall times are one serial run each on a loaded host (load 20 to 34 during parts of the work).

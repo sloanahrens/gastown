@@ -56,14 +56,15 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 **Files:** create `internal/shelltier/manifest.go`, `manifest_test.go`, `main_test.go`.
 
 **Interfaces:**
-- Produces: `type Mode int` with `Serial` and `Parallel`; `type Entry struct { Path string; Triggers []string; Mode Mode }`; `var DefaultTriggers = []string{"scripts/", "Makefile"}`; `func Manifest() []Entry` (today's 28 scripts in today's order, every one `Serial`, every one with `DefaultTriggers`); `func (e Entry) TriggersOrDefault() []string`.
+- Produces: `type Mode int` with `Serial` and `Parallel`; `type Entry struct { Path string; Triggers []string; Mode Mode; BuildsGo bool }`; `var DefaultTriggers = []string{"scripts/", "Makefile"}`; `var GoTriggers = []string{"go.mod", "go.sum", "cmd/", "internal/", "plugins/"}`; `func Manifest() []Entry` (today's 28 scripts in today's order, every one `Serial`, every one with `DefaultTriggers`); `func (e Entry) TriggersOrDefault() []string`.
 - Guard seam: `type Lister func() ([]string, error)` returning the tracked `*_test.sh` paths (production: `git ls-files '*_test.sh'`, minus any path containing `/testdata/`).
 
 **Acceptance (bead boxes):**
 - [ ] `TestManifestCoversEveryTrackedShellTest`: with a fake `Lister` returning the 28 paths the test passes; a tracked `*_test.sh` missing from the manifest fails with its path named. Mutation: delete one manifest entry; the test fails.
 - [ ] `TestManifestEntriesExist`: a manifest path the filesystem fake does not hold fails and names it. Mutation: add a bogus path; the test fails.
 - [ ] `TestManifestOrderIsToday`: the first 24 entries are the `scripts/test-makefile.sh` order, ending with `scripts/makefile-gate_test.sh`, then the four extras. Mutation: swap two entries.
-- [ ] `TestTriggersOrDefault`: an entry with no triggers returns `DefaultTriggers`.
+- [ ] `TestTriggersOrDefault`: an entry with no triggers returns `DefaultTriggers`; an entry with `BuildsGo` also returns every `GoTriggers` path. Mutation: ignore `BuildsGo`.
+- [ ] `TestOnlyInstallGtBuildsGo`: `scripts/install-gt_test.sh` is the one entry with `BuildsGo` (it compiles `./cmd/install-lock`, `./cmd/image-supervisor` and `./plugins/polecat-image` for real, lines 294 to 303, so a Go-only landing can change its result; every other script stubs `go`). Mutation: clear its flag.
 - [ ] `go test ./internal/shelltier -run 'TestManifest|TestTriggersOrDefault' -count=1` passes and `go vet ./internal/shelltier` is clean.
 
 **Depends on:** nothing.
@@ -180,6 +181,20 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 
 **Depends on:** A6.
 
+### Task A7b: The path-scan guard and the go-command guard
+
+**Files:** create `internal/shelltier/triggers_guard_test.go`.
+
+**Behaviour:** for each manifest entry, scan the script's text for repo-relative paths it names (`scripts/…`, `deploy/…`, `plugins/…`, `.githooks/…`, `Makefile`, `internal/…`), and fail when a named path is not at or under one of the entry's triggers (`tiertrigger.Runs`). Entries with the default triggers (`scripts/`, `Makefile`) are checked the same way, so `deploy/…` and `plugins/…` references force their triggers to be declared. A second rule covers what a path scan cannot see: a Go change can change a test that compiles the repository's Go for real. Every script whose text names `go build`, `go run`, `go test`, `go vet`, `go install` or `make install` must either have `BuildsGo` set or appear in a stub-only list in the guard test with a one-line reason each (install-om_test.sh: a `go.log` stub; tier-sweep_test.sh: a fake `tiertrigger`; makefile-gate_test.sh: a stub `go`; and whatever else the scan finds).
+
+**Acceptance:**
+- [ ] `TestEveryReferencedRepoPathIsATrigger` passes on the manifest as filed, which means A1's default triggers are widened in this task wherever the scan finds an uncovered path. Mutation: remove one trigger; the test fails and names the script and path.
+- [ ] `TestScanFindsPathsInQuotesAndVariables` (a fixture script text).
+- [ ] `TestEveryGoCommandScriptIsBuildsGoOrStubOnly`: a fixture script naming `go build` with neither `BuildsGo` nor a stub-only entry fails and names it; the real manifest passes. Mutation: clear `BuildsGo` on `scripts/install-gt_test.sh`.
+- [ ] `go test ./internal/shelltier -run 'TestEveryReferenced|TestScanFinds' -count=1` passes.
+
+**Depends on:** A7 (chained so the dispatcher runs one task at a time in `internal/shelltier`; it comes before A8 because A8 builds the union of the triggers this task widens).
+
 ### Task A8: `land.ShellTierInputs` from the manifest
 
 **Files:** `internal/land/gate.go`, `internal/land/gate_test.go` (replace `TestShellTierInputsMatchPostLandScript`).
@@ -192,7 +207,7 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 - [ ] the old `TestShellTierInputsMatchPostLandScript` is gone, and `grep -n 'INPUTS' internal/land/gate_test.go` prints nothing.
 - [ ] `go test ./internal/land -run 'TestShellTierInputs' -count=1` passes and `go build ./...` succeeds.
 
-**Depends on:** A1 (and before A12).
+**Depends on:** A7b. The union includes `GoTriggers` while any entry has `BuildsGo`, so the post-land revert's blame rule is honest about `install-gt_test.sh` until `gt-tpg0p.14` deletes it.
 
 ### Task A9: The timing log
 
@@ -236,19 +251,6 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 
 **Depends on:** A10. Gate owed by the overseer: the same proof on the live town (three concurrent runs on the real host).
 
-### Task A8b: The path-scan guard
-
-**Files:** create `internal/shelltier/triggers_guard_test.go`.
-
-**Behaviour:** for each manifest entry, scan the script's text for repo-relative paths it names (`scripts/…`, `deploy/…`, `plugins/…`, `.githooks/…`, `Makefile`, `internal/…`), and fail when a named path is not at or under one of the entry's triggers (`tiertrigger.Runs`). Entries with the default triggers (`scripts/`, `Makefile`) are checked the same way, so `deploy/…` and `plugins/…` references force their triggers to be declared.
-
-**Acceptance:**
-- [ ] `TestEveryReferencedRepoPathIsATrigger` passes on the manifest as filed, which means A1's default triggers are widened in this task wherever the scan finds an uncovered path. Mutation: remove one trigger; the test fails and names the script and path.
-- [ ] `TestScanFindsPathsInQuotesAndVariables` (a fixture script text).
-- [ ] `go test ./internal/shelltier -run 'TestEveryReferenced|TestScanFinds' -count=1` passes.
-
-**Depends on:** A11 (chained after it so the dispatcher runs one task at a time in `internal/shelltier`).
-
 ### Task A12: Delete the three orchestration scripts
 
 **Files:** delete `scripts/test-makefile.sh`, `scripts/post-land-shell.sh`, `scripts/post-land-shell_test.sh`; remove their lines from `internal/repoguard/shell-scripts.txt`; remove `scripts/post-land-shell_test.sh` from the manifest; update every reference found by `git grep -n -E 'test-makefile\.sh|post-land-shell'`.
@@ -258,7 +260,7 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 - [ ] `go test ./internal/repoguard ./internal/shelltier ./internal/land -run 'Shell|Manifest|Guard' -count=1` passes.
 - [ ] the three allowlist lines are gone from `internal/repoguard/shell-scripts.txt`.
 
-**Depends on:** A5a, A5b, A7, A8; and the overseer's change of gastown's `post_land_command` to `GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --since-green` (settings, not a bead; filed as an owed action on this task's Gate).
+**Depends on:** A5a, A5b, A11; and the overseer's change of gastown's `post_land_command` to `GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --since-green` (settings, not a bead; filed as an owed action on this task's Gate).
 
 ---
 
@@ -341,7 +343,7 @@ Cases: the openshell-providers cases run the stub gt, not the host's; the stub g
 
 ## Dependency summary
 
-A1 → A2 → A3 → A4 → (A5a, A5b: overseer) ; A4 → A6 → A7 → A8 → A9 → A10 → A11 → A8b ; A12 needs A5a, A5b, A8b and the overseer's `post_land_command` change. B1 → B2 → B3 → B4 → B5a → B5b → B6 → B7 → B8 → B9 → B10 → B11 → B12 → B13 (B13 also needs A12). Parts A and B touch different packages (`internal/shelltier` and `internal/makegate`), so they can run side by side; within each part the dispatcher runs one task at a time.
+A1 → A2 → A3 → A4 → (A5a, A5b: overseer) ; A4 → A6 → A7 → A7b → A8 → A9 → A10 → A11 ; A12 needs A5a, A5b, A11 and the overseer's `post_land_command` change. B1 → B2 → B3 → B4 → B5a → B5b → B6 → B7 → B8 → B9 → B10 → B11 → B12 → B13 (B13 also needs A12). Parts A and B touch different packages (`internal/shelltier` and `internal/makegate`), so they can run side by side; within each part the dispatcher runs one task at a time.
 
 ## Out of this plan, and what it waits for
 
@@ -349,6 +351,6 @@ The per-script ports (the other ~22 scripts in the manifest) wait for the classi
 
 ## Self-review
 
-- Spec coverage: design 3.1 (A1), 3.2 (A6, A7, A8), 3.3 (A2, A9, A10, A11), 3.4 (A3, A5a, A5b, A12), 3.5 (A1 to A12 and B1 to B13). Section 3.6's tests are in each task's acceptance. The path-scan guard is task A8b, placed before A12.
+- Spec coverage: design 3.1 (A1), 3.2 (A6, A7, A8), 3.3 (A2, A9, A10, A11), 3.4 (A3, A5a, A5b, A12), 3.5 (A1 to A12 and B1 to B13). Section 3.6's tests are in each task's acceptance. The path-scan guard is task A7b, placed before A12.
 - Placeholder scan: none; every task names its files and tests. The names in Part B tasks B2 to B12 give the case titles and the file, and the polecat names the Go tests after the cases, as B1 shows.
 - Type consistency: `Entry`, `Mode`, `Config`, `Result`, `Exec`, `Exit`, `Select`, `Record`, `StatePath` are defined in A1 to A6 and used unchanged in A7 to A12.
