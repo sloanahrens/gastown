@@ -43,6 +43,10 @@ type Deployer struct {
 // it, and the rename happens before the command runs, so a container that
 // starts always starts from the file on disk, never from a half-written one.
 //
+// The start command must name composePath as its only compose file, since that
+// is the file written here; a command that named another would start a
+// container this deploy never rendered.
+//
 // The start argv is asked for first and run last. Asking first is what makes a
 // refused town harmless: an unset daemon.container_name or daemon.compose_project
 // refuses there, before the render replaces the file. A render or write error
@@ -65,6 +69,9 @@ func (d Deployer) Deploy(ctx context.Context, sup Supervisor, composePath string
 	if err != nil {
 		return fmt.Errorf("daemonimage: the supervisor refused to start the container: %w", err)
 	}
+	if files := composeFiles(argv); len(files) != 1 || files[0] != composePath {
+		return fmt.Errorf("daemonimage: the start command must name %s as its only compose file, the one Deploy writes; nothing was written or started", composePath)
+	}
 	content, err := templates.RenderDaemonCompose(spec)
 	if err != nil {
 		return fmt.Errorf("daemonimage: cannot render the compose file for %s; the old file is unchanged and nothing was started: %w", composePath, err)
@@ -78,26 +85,54 @@ func (d Deployer) Deploy(ctx context.Context, sup Supervisor, composePath string
 	return nil
 }
 
+// composeFiles returns the compose files argv names: the value of each -f or
+// --file flag, whether the value follows the flag or is joined to it with =.
+// A flag with no value yields an empty name, which no compose file matches.
+func composeFiles(argv []string) []string {
+	var files []string
+	for i := 0; i < len(argv); i++ {
+		switch a := argv[i]; {
+		case a == "-f" || a == "--file":
+			name := ""
+			if i+1 < len(argv) {
+				name = argv[i+1]
+			}
+			files = append(files, name)
+			i++
+		case strings.HasPrefix(a, "--file="):
+			files = append(files, strings.TrimPrefix(a, "--file="))
+		case strings.HasPrefix(a, "-f="):
+			files = append(files, strings.TrimPrefix(a, "-f="))
+		}
+	}
+	return files
+}
+
 // writeComposeFile replaces path with content in one rename, so a reader of the
-// file — the start command, a status check — sees either the old render or the
-// new one, never a partly written file. The temporary file is path with .tmp
-// appended: in the same directory, because a rename is atomic only within one
-// filesystem. A deploy is the only writer of a town's compose file, and one
-// that found a previous deploy's leftover temp file replaces it rather than
-// reads it.
-//
-// path is untouched until the rename, so both failures leave the old render in
-// place. A write that fails may leave a partial temporary file, which the next
-// deploy overwrites; a rename that fails removes it here, since it is the only
-// copy of the new render and nothing would ever read it.
-func writeComposeFile(path string, content []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, content, 0o644); err != nil {
+// file sees either the old render or the new one, never a partly written file.
+// The render goes to a new temporary file beside path, since a rename is atomic
+// only within one filesystem, and the name is unique so concurrent writers never
+// share it. The temporary file is removed unless the rename puts it in place.
+func writeComposeFile(path string, content []byte) (err error) {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err = f.Write(content); err != nil {
+		_ = f.Close()
 		return err
 	}
-	return nil
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Chmod(tmp, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

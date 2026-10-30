@@ -69,10 +69,10 @@ func deploySpec() templates.ComposeSpec {
 	}
 }
 
-// containerStartArgv is what the landed start builder returns for a container
-// town whose compose project is scratch and whose compose file is composePath:
-// `up -d daemon` in the explicit Docker Desktop context (gt-qpeei.10, A2's own
-// acceptance). A test pins Deploy to exactly this argv, so the two never drift.
+// containerStartArgv is a start argv in the shape the container supervisor
+// builds: `up -d daemon` in the explicit Docker Desktop context, against
+// composePath. It is a fixture for Deploy's own behaviour; that the real builder
+// returns this argv is pinned by the test beside the supervisor in internal/cmd.
 func containerStartArgv(composePath string) []string {
 	return []string{"docker", "--context", "desktop-linux", "compose", "-p", "scratch", "-f", composePath, "up", "-d", "daemon"}
 }
@@ -245,33 +245,34 @@ func TestDeployStartFailureIsReturned(t *testing.T) {
 	}
 }
 
-// TestDeployWriteErrorLeavesTheOldComposeFileAndRunsNothing: a compose path the
-// write cannot replace (a directory), or a temporary path that is one, fails the
-// deploy without starting anything and leaves no partial render behind.
-func TestDeployWriteErrorLeavesTheOldComposeFileAndRunsNothing(t *testing.T) {
+// TestDeployWriteErrorLeavesNothingBehindAndRunsNothing: a render that cannot be
+// written, because its directory is missing or its compose path is a directory,
+// fails the deploy without starting anything and leaves no temporary file.
+func TestDeployWriteErrorLeavesNothingBehindAndRunsNothing(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		// block makes the deploy's write fail: the path it writes the render to,
-		// or the path it renames over.
-		block func(t *testing.T, path string)
+		// setup makes the write fail and returns the compose path the deploy
+		// names, inside dir.
+		setup func(t *testing.T, dir string) string
+		// want is what dir holds after the failed deploy.
+		want []string
 	}{
-		{name: "the temporary path is a directory", block: func(t *testing.T, path string) {
-			if err := os.Mkdir(path+".tmp", 0o755); err != nil {
-				t.Fatalf("making the temporary path a directory: %v", err)
-			}
+		{name: "the compose directory does not exist", setup: func(t *testing.T, dir string) string {
+			return filepath.Join(dir, "absent", "compose.yml")
 		}},
-		{name: "the compose path is a directory", block: func(t *testing.T, path string) {
-			if err := os.Mkdir(path, 0o755); err != nil {
+		{name: "the compose path is a directory", setup: func(t *testing.T, dir string) string {
+			p := filepath.Join(dir, "compose.yml")
+			if err := os.Mkdir(p, 0o755); err != nil {
 				t.Fatalf("making the compose path a directory: %v", err)
 			}
-		}},
+			return p
+		}, want: []string{"compose.yml"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			path := filepath.Join(dir, "compose.yml")
-			tt.block(t, path)
+			path := tt.setup(t, dir)
 			run := &deployRunner{composePath: path}
 			sup := &fakeSupervisor{argv: containerStartArgv(path)}
 			if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err == nil {
@@ -284,10 +285,91 @@ func TestDeployWriteErrorLeavesTheOldComposeFileAndRunsNothing(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reading %s: %v", dir, err)
 			}
-			if len(entries) != 1 {
-				t.Errorf("%s holds %d entries after a failed write, want only the path the test blocked", dir, len(entries))
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			if !reflect.DeepEqual(names, tt.want) {
+				t.Errorf("%s holds %v after a failed write, want %v", dir, names, tt.want)
 			}
 		})
+	}
+}
+
+// TestDeployRefusesAStartCommandThatNamesOtherComposeFiles: the start command
+// must name the one compose file Deploy writes, and only that one. A command
+// that names another, several, or none would start a container from a file this
+// deploy did not write, so it is refused before anything is written or run.
+func TestDeployRefusesAStartCommandThatNamesOtherComposeFiles(t *testing.T) {
+	t.Parallel()
+	path := composePathIn(t)
+	writeOldCompose(t, path)
+	other := filepath.Join(filepath.Dir(path), "other.yml")
+	tests := []struct {
+		name string
+		argv []string
+	}{
+		{name: "another file", argv: containerStartArgv(other)},
+		{name: "the file and another", argv: []string{"docker", "compose", "-f", path, "-f", other, "up", "-d", "daemon"}},
+		{name: "no file", argv: []string{"docker", "compose", "up", "-d", "daemon"}},
+		{name: "a file flag with no value", argv: []string{"docker", "compose", "up", "-d", "daemon", "-f"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := &deployRunner{composePath: path}
+			sup := &fakeSupervisor{argv: tt.argv}
+			if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err == nil {
+				t.Fatalf("Deploy accepted the start command %q", tt.argv)
+			}
+			if len(run.calls) != 0 {
+				t.Errorf("recorded %d commands, want none for a command that names another file", len(run.calls))
+			}
+			if got := readCompose(t, path); !reflect.DeepEqual(got, oldCompose) {
+				t.Errorf("the compose file = %q, want the old one unchanged", got)
+			}
+		})
+	}
+}
+
+// TestDeployAcceptsTheComposeFileInEitherFlagForm: -f and --file name the file
+// whether the value follows the flag or is joined to it with =.
+func TestDeployAcceptsTheComposeFileInEitherFlagForm(t *testing.T) {
+	t.Parallel()
+	path := composePathIn(t)
+	for _, argv := range [][]string{
+		{"docker", "compose", "--file", path, "up", "-d", "daemon"},
+		{"docker", "compose", "--file=" + path, "up", "-d", "daemon"},
+		{"docker", "compose", "-f=" + path, "up", "-d", "daemon"},
+	} {
+		run := &deployRunner{composePath: path}
+		sup := &fakeSupervisor{argv: argv}
+		if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err != nil {
+			t.Errorf("Deploy(%q): %v", argv, err)
+		}
+		if len(run.calls) != 1 {
+			t.Errorf("Deploy(%q) recorded %d commands, want the start command", argv, len(run.calls))
+		}
+	}
+}
+
+// TestDeployLeavesOtherFilesBesideTheComposeFileAlone: the render's temporary
+// file is a new name, so a file a deploy does not own, even one at the old
+// fixed temporary name, is never overwritten by it.
+func TestDeployLeavesOtherFilesBesideTheComposeFileAlone(t *testing.T) {
+	t.Parallel()
+	path := composePathIn(t)
+	writeOldCompose(t, path)
+	keep := []byte("someone else's file\n")
+	if err := os.WriteFile(path+".tmp", keep, 0o644); err != nil {
+		t.Fatalf("writing a neighbouring file: %v", err)
+	}
+	run := &deployRunner{composePath: path}
+	sup := &fakeSupervisor{argv: containerStartArgv(path)}
+	if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if got := readCompose(t, path+".tmp"); !reflect.DeepEqual(got, keep) {
+		t.Errorf("the neighbouring file = %q, want it untouched", got)
 	}
 }
 
