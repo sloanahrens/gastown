@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -49,7 +50,7 @@ func TestPrintTailRedAndRenamedJob(t *testing.T) {
 			name:     "the job with the probe's name",
 			jobs:     []forgejo.ActionRunJob{{ID: 70, Name: testJobName, Status: "failure"}},
 			wantJob:  70,
-			wantLogs: "log tail of the log of run 7's job 'gate':",
+			wantLogs: "log tail of run 7's job 'gate':",
 		},
 		{
 			name: "a renamed job falls back to the failed job",
@@ -58,7 +59,7 @@ func TestPrintTailRedAndRenamedJob(t *testing.T) {
 				{ID: 72, Name: "lint", Status: "failure"},
 			},
 			wantJob:  72,
-			wantLogs: "log tail of the log of run 7's job 'lint':",
+			wantLogs: "log tail of run 7's job 'lint':",
 		},
 	}
 	for _, tc := range cases {
@@ -198,4 +199,70 @@ func TestPrintTailReadFailuresLogAndStop(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPrintTailKeepsCharactersWhole holds the tail to whole characters: a cut
+// that lands inside a multi-byte character leaves its last bytes at the front of
+// the tail, and the probe drops them.
+func TestPrintTailKeepsCharactersWhole(t *testing.T) {
+	t.Parallel()
+	// The cut falls on the second byte of "€" (E2 82 AC), so the tail would open
+	// on 82 AC.
+	whole := "€" + strings.Repeat("b", tailBytes-2)
+	st := &fakeStatuses{
+		runs: pushRun(7),
+		jobs: []forgejo.ActionRunJob{{ID: 70, Name: testJobName, Status: "failure"}},
+		log:  whole,
+	}
+	var out bytes.Buffer
+	var logs logCapture
+
+	PrintTail(context.Background(), st, &out, logs.logf, "acme", "rig", testSHA, testJobName)
+
+	if got, want := out.String(), strings.Repeat("b", tailBytes-2)+"\n"; got != want {
+		t.Errorf("out = %q, want %q", got, want)
+	}
+}
+
+// TestPrintTailKeepsTheAdminTokenOut holds the admin token out of what the tail
+// prints and logs. The first case reads through the probe's real client, so every
+// read presents the token and the output is checked against it.
+func TestPrintTailKeepsTheAdminTokenOut(t *testing.T) {
+	t.Parallel()
+	const tok = "tail-admin-token-7f3a"
+	t.Run("the reads present the token and the output holds none", func(t *testing.T) {
+		t.Parallel()
+		fx := &fakeForgejo{sha: testSHA, jobName: testJobName, jobLog: "vet failed\n"}
+		client, err := NewClient("https://forgejo.example/api/v1", Token(tok), &http.Client{Transport: fx})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		var logs logCapture
+
+		PrintTail(context.Background(), client, &out, logs.logf, "acme", "rig", testSHA, testJobName)
+
+		if !allCallsPresent(fx.calls, tok) {
+			t.Fatalf("calls = %+v, want every read to present the token", fx.calls)
+		}
+		if strings.Contains(out.String(), tok) || strings.Contains(strings.Join(logs.lines, "\n"), tok) {
+			t.Errorf("the token reached the output %q or the log %q", out.String(), logs.lines)
+		}
+	})
+	t.Run("a dead transport logs no token", func(t *testing.T) {
+		t.Parallel()
+		fx := &fakeForgejo{sha: testSHA, transportErr: errors.New("connection refused")}
+		client, err := NewClient("https://forgejo.example/api/v1", Token(tok), &http.Client{Transport: fx})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		var logs logCapture
+
+		PrintTail(context.Background(), client, &out, logs.logf, "acme", "rig", testSHA, testJobName)
+
+		if strings.Contains(out.String(), tok) || strings.Contains(strings.Join(logs.lines, "\n"), tok) {
+			t.Errorf("the token reached the output %q or the log %q", out.String(), logs.lines)
+		}
+	})
 }

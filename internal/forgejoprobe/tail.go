@@ -3,6 +3,7 @@ package forgejoprobe
 import (
 	"context"
 	"io"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
@@ -57,7 +58,12 @@ func PrintTail(ctx context.Context, st Statuses, out io.Writer, logf func(string
 	if len(log) > tailBytes {
 		log = log[len(log)-tailBytes:]
 	}
-	logf("log tail of the log of run %d's job '%s':", run.ID, job.Name)
+	// A cut can land inside a multi-byte character, leaving its last bytes at the
+	// front. They are dropped, at most three, so the tail opens on a character.
+	for i := 0; i < utf8.UTFMax-1 && log != "" && !utf8.RuneStart(log[0]); i++ {
+		log = log[1:]
+	}
+	logf("log tail of run %d's job '%s':", run.ID, job.Name)
 	if _, err := io.WriteString(out, log+"\n"); err != nil {
 		logf("the log tail could not be written (%v)", err)
 	}
