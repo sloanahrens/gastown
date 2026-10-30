@@ -1,7 +1,6 @@
 // Command bootstrap-local-rig creates a clean Gas Town rig from a local source
 // repo by running gt rig add with --local-repo, then optionally records the
-// polecat role agent in the rig settings. Ported from
-// scripts/bootstrap-local-rig.sh (gt-tpg0p.95).
+// polecat role agent in the rig settings (gt-tpg0p.95).
 package main
 
 import (
