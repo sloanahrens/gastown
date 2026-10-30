@@ -4320,12 +4320,17 @@ function detailBlock(d) {
   return box;
 }
 
+// SKIP_ID is a store-issued bead id and the ": " the dispatcher writes after
+// it: a lowercase prefix, then one or more hyphen-separated segments (a wisp's
+// id has several, "hq-wisp-dvrty"), then any dotted child ids ("gt-tpg0p.46").
+const SKIP_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)+(?:\.[a-z0-9]+)*: /;
+
 // skipWhy is a tick's skip reason without the "<bead id>: " the dispatcher
 // writes in front of it ("gt-vesnm: no seat: over the town total"). Only a
 // bead-id shape is cut: "held: ..." and "unshaped: ..." are reasons, not ids
 // (gt-fvtw7).
 function skipWhy(reason) {
-  return String(reason || "").replace(/^[a-z]{1,6}-[a-z0-9]+(?:\.[a-z0-9]+)*: /, "");
+  return String(reason || "").replace(SKIP_ID, "");
 }
 
 // skipClass says what a tick's skip reason means to the operator (gt-qt0ym):
