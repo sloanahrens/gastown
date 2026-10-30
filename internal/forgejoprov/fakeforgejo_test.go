@@ -226,19 +226,31 @@ func (f *fakeForgejo) mintToken(user string, body []byte) (int, string) {
 	return reply(http.StatusCreated, map[string]any{"name": in.Name, "scopes": in.Scopes, f.tokenField: value})
 }
 
-// refusedScopes names why a scope list is refused, or returns "" when it is allowed.
-// Every scope must be one a role uses, so write:admin, which no role uses, is refused
-// too, and so is a repository list that names it. roleTable is the production table,
-// so the fake cannot drift from it.
+// knownScopes is the token scopes the fake accepts, written out rather than read from
+// the production role table: the table is the thing under test, so the fake must not
+// agree with it by construction. TestFakeKnowsEveryRoleScope holds the two together.
+var knownScopes = []string{"read:repository", "read:user", "write:repository", "read:package", "write:package"}
+
+// repositoryScopes are the token scopes that reach a repository. The live server refuses
+// one of them minted together with write:admin.
+var repositoryScopes = []string{"read:repository", "write:repository"}
+
+// refusalRepositoryAdmin is the reason the fake gives for a repository scope minted with
+// write:admin. It is a rule of its own, so that pair is refused for this reason and not
+// only because write:admin is an unknown scope.
+const refusalRepositoryAdmin = "a repository scope cannot be minted with write:admin"
+
+// refusedScopes names why a scope list is refused, or returns "" when it is allowed. A
+// repository scope with write:admin is refused by its own rule first. Every other scope
+// must be one in knownScopes, so write:admin alone, which no role uses, is refused as an
+// unknown scope wherever it sits in the list.
 func refusedScopes(scopes []string) string {
-	allowed := map[string]bool{}
-	for _, r := range roleTable() {
-		for _, s := range r.scopes {
-			allowed[s] = true
-		}
+	hasRepository := slices.ContainsFunc(scopes, func(s string) bool { return slices.Contains(repositoryScopes, s) })
+	if hasRepository && slices.Contains(scopes, "write:admin") {
+		return refusalRepositoryAdmin
 	}
 	for _, s := range scopes {
-		if !allowed[s] {
+		if !slices.Contains(knownScopes, s) {
 			return fmt.Sprintf("scope %s is not one the roles use", s)
 		}
 	}
