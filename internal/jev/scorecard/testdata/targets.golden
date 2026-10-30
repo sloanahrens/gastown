@@ -17,7 +17,7 @@ likely_defect (noul)
     0.4-0.6      1  0.400  0.000
     0.6-0.8      2  0.650  0.500
     0.8-1.0      2  0.850  0.000
-  calibration error 0.41, brier 0.31, monotone: yes
+  calibration error 0.41, brier 0.31, monotone: n/a
   verdict: not-yet
 
 logic_churn (noul)

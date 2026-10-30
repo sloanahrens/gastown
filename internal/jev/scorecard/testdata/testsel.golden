@@ -15,5 +15,5 @@ affects_tests (noul)
     0.4-0.6      1  0.400  1.000
     0.6-0.8      0  n/a  n/a
     0.8-1.0      1  0.900  0.000
-  calibration error 0.60, brier 0.46, monotone: yes
+  calibration error 0.60, brier 0.46, monotone: n/a
   verdict: not-yet

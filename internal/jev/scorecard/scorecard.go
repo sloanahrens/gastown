@@ -58,8 +58,8 @@ const (
 	// nBins is the number of equal-width calibration bands over 0 to 1.
 	nBins = 5
 	// minMonotoneBand is how many labeled lines a band needs before the
-	// monotone flag reads its label rate: a rate measured on fewer moves with
-	// one label and is not a fall a reader can act on (gt-km2b8).
+	// monotone flag reads its label rate: a rate over a handful of lines moves
+	// by chance, so a fall read there is not one a reader can act on (gt-km2b8).
 	minMonotoneBand = 10
 )
 
@@ -444,7 +444,9 @@ func calibration(samples []sample) []Bin {
 // label rate over every populated band; brier is the mean squared gap between
 // each value and its label. monotone is true when the label rate never falls
 // from one band of at least minMonotoneBand labeled lines to the next higher
-// one. All three are nil when no line is labeled.
+// one, and nil when no band is that large, so a thin log reads no flag at all
+// rather than a rising rate nobody measured. ece and brier are nil when no line
+// is labeled.
 func calibrationMetrics(bins []Bin, samples []sample) (ece, brier *float64, monotone *bool) {
 	if len(samples) == 0 {
 		return nil, nil, nil
@@ -477,6 +479,9 @@ func calibrationMetrics(bins []Bin, samples []sample) (ece, brier *float64, mono
 			break
 		}
 		prev, seen = *b.LabelRate, true
+	}
+	if !seen {
+		return ptr(gap), ptr(squared / float64(len(samples))), nil
 	}
 	return ptr(gap), ptr(squared / float64(len(samples))), boolPtr(up)
 }

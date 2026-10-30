@@ -12,7 +12,7 @@ blocked_on_environment (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      0  n/a  n/a
-  calibration error 0.90, brier 0.81, monotone: yes
+  calibration error 0.90, brier 0.81, monotone: n/a
   verdict: not-yet
 
 drifted_from_bead (noul)
@@ -52,7 +52,7 @@ making_progress (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      2  0.800  0.500
-  calibration error 0.30, brier 0.34, monotone: yes
+  calibration error 0.30, brier 0.34, monotone: n/a
   verdict: not-yet
 
 remaining (score)

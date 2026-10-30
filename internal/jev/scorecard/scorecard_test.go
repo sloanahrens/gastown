@@ -618,6 +618,45 @@ func TestCalibrationMonotoneSkipsThinBands(t *testing.T) {
 	}
 }
 
+// A question whose every band is under minMonotoneBand labeled lines has no
+// falling rate anyone measured, so it carries no flag: the JSON omits it and
+// the text reads n/a, while ece and brier still print.
+func TestCalibrationMonotoneUnreadableOnThinBands(t *testing.T) {
+	t.Parallel()
+	rep := noulFixture(t, []obs{
+		{value: 0.1, label: true},
+		{value: 0.7, label: false},
+		{value: 0.9, label: true},
+	})
+	needs := question(t, rep, "needs")
+	if needs.ECE == nil || needs.Brier == nil {
+		t.Fatalf("needs ece %v brier %v, want both set on three labeled lines", needs.ECE, needs.Brier)
+	}
+	if needs.CalibrationMonotone != nil {
+		t.Fatalf("calibration_monotone = %v on three thin bands, want it unset", *needs.CalibrationMonotone)
+	}
+
+	data, err := json.Marshal(needs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("decoding the JSON question: %v\n%s", err, data)
+	}
+	if v, ok := decoded["calibration_monotone"]; ok {
+		t.Errorf("JSON prints calibration_monotone %v on thin bands, want it absent: %s", v, data)
+	}
+
+	var out strings.Builder
+	if err := WriteText(&out, rep); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "monotone: n/a") {
+		t.Errorf("text report does not read monotone: n/a on thin bands:\n%s", out.String())
+	}
+}
+
 // TestCalibrationReport checks the JSON and the text: noul and choice
 // questions carry the three fields and print the line, a score question and a
 // question with no labeled lines carry none of it.

@@ -26,7 +26,7 @@ needs_review_now (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      2  0.850  0.500
-  calibration error 0.35, brier 0.43, monotone: yes
+  calibration error 0.35, brier 0.43, monotone: n/a
   verdict: not-yet
 
 risk (score)

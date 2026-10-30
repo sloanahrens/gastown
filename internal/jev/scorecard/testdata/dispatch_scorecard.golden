@@ -24,7 +24,7 @@ fits_twenty_minutes (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      1  0.700  0.000
     0.8-1.0      2  0.850  1.000
-  calibration error 0.45, brier 0.30, monotone: yes
+  calibration error 0.45, brier 0.30, monotone: n/a
   verdict: not-yet
 
 lands_first_try (noul)
@@ -38,7 +38,7 @@ lands_first_try (noul)
     0.4-0.6      1  0.400  0.000
     0.6-0.8      1  0.700  1.000
     0.8-1.0      2  0.850  1.000
-  calibration error 0.25, brier 0.14, monotone: yes
+  calibration error 0.25, brier 0.14, monotone: n/a
   verdict: not-yet
 
 needs_strong_model (noul)

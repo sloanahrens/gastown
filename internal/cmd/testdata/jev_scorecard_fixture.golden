@@ -12,7 +12,7 @@ needs (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      1  0.700  0.000
     0.8-1.0      1  0.900  1.000
-  calibration error 0.33, brier 0.18, monotone: yes
+  calibration error 0.33, brier 0.18, monotone: n/a
   verdict: not-yet
 
 route (choice)
@@ -26,7 +26,7 @@ route (choice)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      1  0.600  0.000
     0.8-1.0      1  0.800  1.000
-  calibration error 0.37, brier 0.16, monotone: yes
+  calibration error 0.37, brier 0.16, monotone: n/a
   verdict: not-yet
 
 urgency (score)

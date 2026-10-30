@@ -12,7 +12,7 @@ doc_now_stale (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      2  0.650  1.000
     0.8-1.0      1  0.900  1.000
-  calibration error 0.25, brier 0.08, monotone: yes
+  calibration error 0.25, brier 0.08, monotone: n/a
   verdict: not-yet
 
 drift_kind (choice)
@@ -26,5 +26,5 @@ drift_kind (choice)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      1  0.700  0.000
     0.8-1.0      1  0.800  1.000
-  calibration error 0.45, brier 0.26, monotone: yes
+  calibration error 0.45, brier 0.26, monotone: n/a
   verdict: not-yet

@@ -12,7 +12,7 @@ any_duplicate (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      1  0.900  1.000
-  calibration error 0.12, brier 0.02, monotone: yes
+  calibration error 0.12, brier 0.02, monotone: n/a
   verdict: not-yet
 
 duplicate (choice)
@@ -26,7 +26,7 @@ duplicate (choice)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      4  0.900  1.000
-  calibration error 0.10, brier 0.01, monotone: yes
+  calibration error 0.10, brier 0.01, monotone: n/a
   verdict: not-yet
 
 fix_worthy (noul)
@@ -40,7 +40,7 @@ fix_worthy (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      2  0.850  1.000
-  calibration error 0.20, brier 0.04, monotone: yes
+  calibration error 0.20, brier 0.04, monotone: n/a
   verdict: not-yet
 
 report_only (noul)
@@ -54,7 +54,7 @@ report_only (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      1  0.800  1.000
-  calibration error 0.17, brier 0.03, monotone: yes
+  calibration error 0.17, brier 0.03, monotone: n/a
   verdict: not-yet
 
 severity (score)
