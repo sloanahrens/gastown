@@ -210,6 +210,11 @@ func (o *Options) validate(timeout, poll string) error {
 	if err := requirePlain("--main-branch", o.MainBranch); err != nil {
 		return err
 	}
+	// The branch reaches git argv in a later bead, so a leading dash would read as
+	// an option, the same class the URL flags refuse.
+	if strings.HasPrefix(o.MainBranch, "-") {
+		return usagef("--main-branch '%s' must not start with '-'", o.MainBranch)
+	}
 	var err error
 	if o.Timeout, err = parseSeconds("--timeout", timeout); err != nil {
 		return err

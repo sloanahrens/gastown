@@ -272,6 +272,8 @@ func TestValidateTable(t *testing.T) {
 		{"missing repo", []string{"rig"}, "--repo is required"},
 		{"repo that is not OWNER/NAME", []string{"rig", "--repo", "not-a-repo"}, "--repo 'not-a-repo' must be OWNER/NAME"},
 		{"main branch with a slash", []string{"rig", "--repo", "acme/rig", "--main-branch", "ma/in"}, "--main-branch 'ma/in' must match [A-Za-z0-9._-]+"},
+		{"main branch with a leading dash", []string{"rig", "--repo", "acme/rig", "--main-branch", "-x"}, "--main-branch '-x' must not start with '-'"},
+		{"main branch that is only a dash", []string{"rig", "--repo", "acme/rig", "--main-branch", "-"}, "--main-branch '-' must not start with '-'"},
 		{"main branch with a colon", []string{"rig", "--repo", "acme/rig", "--main-branch", "ma:in"}, "--main-branch 'ma:in' must match [A-Za-z0-9._-]+"},
 		{"zero timeout", []string{"rig", "--repo", "acme/rig", "--timeout", "0"}, "--timeout '0' must be a positive integer"},
 		{"zero timeout written with zeros", []string{"rig", "--repo", "acme/rig", "--timeout", "000"}, "--timeout '000' must be a positive integer"},
