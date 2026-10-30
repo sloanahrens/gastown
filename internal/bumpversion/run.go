@@ -29,8 +29,9 @@ type Env struct {
 // checks they hold the new version, installs when asked, then makes the commit and
 // tag under --commit and --tag. Each step that fails returns before any later step, so
 // a refused run leaves no commit and no tag behind. A run that fails after its first
-// edit prints one line naming the edited files and the command that restores them.
-// Run never pushes.
+// edit prints the command that restores the edited files, or, when one of them had
+// uncommitted work before the run, a warning and the diff to review instead. The
+// summary is the last block every run prints. Run never pushes.
 //
 // ACCEPTED-RISK: a mismatch or an unverified gt after make install is a warning, and
 // the run still commits and tags (gt-tpg0p.74). A hard stop there would leave the edits
@@ -38,9 +39,10 @@ type Env struct {
 // as the last lines the command prints.
 func Run(env Env, opts Options) (err error) {
 	var edited []string
+	var dirty map[string]bool
 	defer func() {
 		if err != nil && len(edited) > 0 {
-			fmt.Fprintf(env.Out, "Edited before this failure. Restore with: git checkout -- %s\n", strings.Join(edited, " "))
+			restoreNote(env.Out, edited, dirty)
 		}
 	}()
 
@@ -62,6 +64,16 @@ func Run(env Env, opts Options) (err error) {
 	fmt.Fprintf(out, "Bumping version: %s → %s\n\n", old, newVersion)
 	if err := CheckTree(env.Git, env.Root, opts, out); err != nil {
 		return err
+	}
+	// Before the first edit, record which files the run may edit already differ from
+	// HEAD. A restore of one of them would destroy that work.
+	dirty = map[string]bool{}
+	for _, name := range editable(nix) {
+		differs, err := isDirty(env.Git, env.Root, name)
+		if err != nil {
+			return err
+		}
+		dirty[name] = differs
 	}
 
 	fmt.Fprintln(out, "Updating version files...")
@@ -138,15 +150,13 @@ func Run(env Env, opts Options) (err error) {
 		fmt.Fprintln(out, "To commit and release:")
 		fmt.Fprintf(out, "  bump-version %s --commit --tag --install\n", newVersion)
 	}
-	if opts.Install {
-		summary(out, opts, newVersion, installed)
-	}
+	summary(out, opts, newVersion, installed)
 	return nil
 }
 
-// summary is the block printed last when the run installs. It repeats a mismatch or an
-// unverified install, so the warning is the final thing the operator reads, and it says
-// whether the run made a commit and a tag.
+// summary is the block every run prints last. It repeats a mismatch or an unverified
+// install, so the warning is the final thing the operator reads, and it says whether
+// the run made a commit and a tag.
 func summary(out io.Writer, opts Options, version string, installed InstallResult) {
 	fmt.Fprintln(out, "Summary:")
 	switch installed.Status {
@@ -170,4 +180,36 @@ func summary(out io.Writer, opts Options, version string, installed InstallResul
 func hasNix(run Exec) bool {
 	_, err := run.LookPath("nix")
 	return err == nil
+}
+
+// editable is every file the run may edit, in the order it edits them. flake.nix is
+// in the list only when nix is on PATH, since that is when the run edits it.
+func editable(nix bool) []string {
+	files := []string{VersionGoPath, PackageJSONPath}
+	if nix {
+		files = append(files, FlakePath)
+	}
+	return append(files, ChangelogPath)
+}
+
+// restoreNote is the line a failed run prints after its first edit. When no edited file
+// had uncommitted work before the run, it names the command that puts the files back to
+// HEAD in the index and the work tree, which undoes a git add as well as the edit. When
+// one did, a restore would destroy that work, so the note names that file, warns, and
+// points at the diff to review, and it prints no restore command.
+func restoreNote(out io.Writer, edited []string, dirty map[string]bool) {
+	var had []string
+	for _, name := range edited {
+		if dirty[name] {
+			had = append(had, name)
+		}
+	}
+	files := strings.Join(edited, " ")
+	if len(had) == 0 {
+		fmt.Fprintf(out, "Edited before this failure. Restore with: git restore --source=HEAD --staged --worktree -- %s\n", files)
+		return
+	}
+	fmt.Fprintf(out, "Edited before this failure: %s.\n", files)
+	fmt.Fprintf(out, "Had uncommitted changes before this run: %s. A restore would destroy that work, so no restore command is printed.\n", strings.Join(had, " "))
+	fmt.Fprintf(out, "Review the edits with: git diff HEAD -- %s, then revert them by hand.\n", files)
 }

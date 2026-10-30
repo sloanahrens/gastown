@@ -20,6 +20,7 @@ type world struct {
 	t          *testing.T
 	files      *memFS
 	gitCodes   map[string]int // exit status by git subcommand, 0 for any other
+	fileCodes  map[string]int // exit status of diff-index on one file: 1 when that file is dirty
 	gitArgs    [][]string     // the arguments of each git call, in order
 	log        []string       // "make install", "git commit", ... in call order
 	nix        bool           // nix is on PATH
@@ -106,6 +107,9 @@ func (w *world) run(opts Options) error {
 func (w *world) runGit(dir string, args ...string) (int, error) {
 	w.gitArgs = append(w.gitArgs, args)
 	w.log = append(w.log, "git "+args[0])
+	if len(args) == 5 && args[0] == "diff-index" {
+		return w.fileCodes[args[4]], nil
+	}
 	return w.gitCodes[args[0]], nil
 }
 
@@ -351,7 +355,7 @@ func TestRunDirtyTreeRefusesBeforeEditing(t *testing.T) {
 			if tc.wantOut != "" && !strings.Contains(w.out.String(), tc.wantOut) {
 				t.Errorf("output lacks %q:\n%s", tc.wantOut, w.out.String())
 			}
-			if strings.Contains(w.out.String(), "git checkout") {
+			if strings.Contains(w.out.String(), "Edited before this failure") {
 				t.Errorf("a refusal before any edit named files to restore:\n%s", w.out.String())
 			}
 			edited := w.files.files[VersionGoPath] != before
@@ -436,7 +440,7 @@ func TestRunRefusesOutsideTheRepository(t *testing.T) {
 			if err == nil || err.Error() != tc.wantErr {
 				t.Fatalf("Run error = %v, want %q", err, tc.wantErr)
 			}
-			if strings.Contains(w.out.String(), "git checkout") {
+			if strings.Contains(w.out.String(), "Edited before this failure") {
 				t.Errorf("a refused run named files to restore:\n%s", w.out.String())
 			}
 			if len(w.files.files) != before || len(w.log) != 0 {
@@ -532,6 +536,17 @@ func TestRunSummaryRepeatsTheInstallWarning(t *testing.T) {
 			want:  "Summary:\n⚠ installed gt reports 1.2.0, wanted 1.3.0\nNo commit or tag made.\n",
 			steps: []string{"make install"},
 		},
+		{
+			name: "plain run ends with the summary",
+			opts: Options{Version: "1.3.0"},
+			want: "Summary:\nNo commit or tag made.\n",
+		},
+		{
+			name:  "commit without install ends with the summary and no install line",
+			opts:  Options{Version: "1.3.0", Commit: true},
+			want:  "Summary:\nCommitted 1.3.0; no tag made.\n",
+			steps: []string{"git add", "git commit"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -551,28 +566,90 @@ func TestRunSummaryRepeatsTheInstallWarning(t *testing.T) {
 	}
 }
 
-// TestRunFailureAfterEditsNamesTheFilesToRestore: a run that fails after it has edited
-// files prints one line naming them and the git checkout that restores them. The files
-// are the ones the run wrote, in order: the flake.nix version edit landed before the
-// vendorHash failed.
-func TestRunFailureAfterEditsNamesTheFilesToRestore(t *testing.T) {
+// TestRunFailureAfterEditsPrintsTheRightRestore: a run that fails after its first edit
+// prints the note for the files it changed. A clean file gets the command that puts it
+// back to HEAD in the index and the work tree, so the command still works after git add
+// has staged it. A file that had uncommitted work before the run gets no command: the note
+// names it, warns that a restore would destroy that work, and points at the diff. The
+// dirty check is per file, so a dirty file the run does not edit does not withhold the
+// command.
+func TestRunFailureAfterEditsPrintsTheRightRestore(t *testing.T) {
 	t.Parallel()
-	w := newWorld(t)
-	w.failVendor = true
-	if err := w.run(Options{Version: "1.3.0"}); err == nil {
-		t.Fatal("Run succeeded with a failing vendorHash")
+	const restore = "Edited before this failure. Restore with: git restore --source=HEAD --staged --worktree -- "
+	tests := []struct {
+		name     string
+		setup    func(w *world)
+		opts     Options
+		wantLine string   // the exact restore line, when the run prints one
+		wantHas  []string // text the output must contain
+		wantNot  []string // text the output must not contain
+	}{
+		{
+			name:     "clean tree, failure after the edits",
+			setup:    func(w *world) { w.failVendor = true },
+			opts:     Options{Version: "1.3.0"},
+			wantLine: restore + VersionGoPath + " " + PackageJSONPath + " " + FlakePath + "\n",
+		},
+		{
+			name:     "failure after staging names --staged",
+			setup:    func(w *world) { w.gitCodes = map[string]int{"commit": 1} },
+			opts:     Options{Version: "1.3.0", Commit: true},
+			wantLine: restore + VersionGoPath + " " + PackageJSONPath + " " + FlakePath + " " + ChangelogPath + "\n",
+		},
+		{
+			name: "--allow-dirty over an edited file with uncommitted work prints no command",
+			setup: func(w *world) {
+				w.gitCodes = map[string]int{"diff-index": 1}
+				w.fileCodes = map[string]int{VersionGoPath: 1}
+				w.failVendor = true
+			},
+			opts: Options{Version: "1.3.0", AllowDirty: true},
+			wantHas: []string{
+				"Edited before this failure: " + VersionGoPath + " " + PackageJSONPath + " " + FlakePath + ".\n",
+				"Had uncommitted changes before this run: " + VersionGoPath + ". A restore would destroy that work",
+				"Review the edits with: git diff HEAD -- " + VersionGoPath + " " + PackageJSONPath + " " + FlakePath + ", then revert them by hand.",
+			},
+			wantNot: []string{"git restore", "git checkout", "Restore with"},
+		},
+		{
+			name: "--allow-dirty with an unrelated dirty tree still prints the command",
+			setup: func(w *world) {
+				w.gitCodes = map[string]int{"diff-index": 1}
+				w.failVendor = true
+			},
+			opts:     Options{Version: "1.3.0", AllowDirty: true},
+			wantLine: restore + VersionGoPath + " " + PackageJSONPath + " " + FlakePath + "\n",
+		},
 	}
-	want := "Edited before this failure. Restore with: git checkout -- " +
-		VersionGoPath + " " + PackageJSONPath + " " + FlakePath + "\n"
-	if !strings.Contains(w.out.String(), want) {
-		t.Errorf("output lacks the restore line %q:\n%s", want, w.out.String())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			tc.setup(w)
+			if err := w.run(tc.opts); err == nil {
+				t.Fatal("Run succeeded; the case under test is a failure after the edits")
+			}
+			out := w.out.String()
+			if tc.wantLine != "" && !strings.Contains(out, tc.wantLine) {
+				t.Errorf("output lacks the restore line %q:\n%s", tc.wantLine, out)
+			}
+			for _, want := range tc.wantHas {
+				if !strings.Contains(out, want) {
+					t.Errorf("output lacks %q:\n%s", want, out)
+				}
+			}
+			for _, banned := range tc.wantNot {
+				if strings.Contains(out, banned) {
+					t.Errorf("output has %q, want none:\n%s", banned, out)
+				}
+			}
+		})
 	}
 }
 
-// TestRunCommitFailureStopsBeforeTheTagAndRestoresTheEdits: a git commit that exits
-// non-zero stops the run before the tag, returns the commit's status, and prints the
-// restore line for the four files the run edited.
-func TestRunCommitFailureStopsBeforeTheTagAndRestoresTheEdits(t *testing.T) {
+// TestRunCommitFailureStopsBeforeTheTag: a git commit that exits non-zero stops the run
+// before the tag and returns the commit's status.
+func TestRunCommitFailureStopsBeforeTheTag(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
 	w.gitCodes = map[string]int{"commit": 1}
@@ -583,10 +660,25 @@ func TestRunCommitFailureStopsBeforeTheTagAndRestoresTheEdits(t *testing.T) {
 	if got := w.steps(); !reflect.DeepEqual(got, []string{"git add", "git commit"}) {
 		t.Errorf("steps = %q, want the staging and the failed commit only", got)
 	}
-	want := "Edited before this failure. Restore with: git checkout -- " +
-		VersionGoPath + " " + PackageJSONPath + " " + FlakePath + " " + ChangelogPath + "\n"
-	if !strings.Contains(w.out.String(), want) {
-		t.Errorf("output lacks the restore line %q:\n%s", want, w.out.String())
+}
+
+// TestRunDirtyCheckFailureStopsBeforeEditing: a diff-index that cannot say whether an
+// edited file differs from HEAD stops the run before any file is edited. The check fails
+// closed; an unreadable answer never passes as clean.
+func TestRunDirtyCheckFailureStopsBeforeEditing(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.fileCodes = map[string]int{PackageJSONPath: 128}
+	before := w.files.files[VersionGoPath]
+	err := w.run(Options{Version: "1.3.0", Commit: true})
+	if err == nil || !strings.Contains(err.Error(), "git diff-index: exit 128") {
+		t.Fatalf("Run error = %v, want it to contain %q", err, "git diff-index: exit 128")
+	}
+	if got := w.files.files[VersionGoPath]; got != before {
+		t.Errorf("version.go was edited before the dirty check failed:\n%s", got)
+	}
+	if got := w.steps(); len(got) != 0 {
+		t.Errorf("steps after a failed dirty check = %q, want none", got)
 	}
 }
 

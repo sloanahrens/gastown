@@ -38,16 +38,12 @@ type Release struct {
 // --allow-dirty was given, which stands in for the script's interactive Continue
 // anyway? prompt. A git that fails for any other reason is an error, never clean.
 func CheckTree(g Git, root string, opts Options, out io.Writer) error {
-	code, err := g.Run(root, "diff-index", "--quiet", "HEAD", "--")
+	dirty, err := isDirty(g, root)
 	if err != nil {
-		return fmt.Errorf("git diff-index: %w", err)
+		return err
 	}
-	switch code {
-	case 0:
+	if !dirty {
 		return nil
-	case dirtyExit:
-	default:
-		return fmt.Errorf("git diff-index: exit %d", code)
 	}
 	fmt.Fprintln(out, "Warning: You have uncommitted changes")
 	if opts.Commit {
@@ -57,6 +53,23 @@ func CheckTree(g Git, root string, opts Options, out io.Writer) error {
 		return &Refusal{Msg: "Error: uncommitted changes (pass --allow-dirty to continue over them)"}
 	}
 	return nil
+}
+
+// isDirty reports whether the tree, or only paths when any are given, differs from
+// HEAD. A git that fails for any other reason is an error, never a clean tree.
+func isDirty(g Git, root string, paths ...string) (bool, error) {
+	args := append([]string{"diff-index", "--quiet", "HEAD", "--"}, paths...)
+	code, err := g.Run(root, args...)
+	if err != nil {
+		return false, fmt.Errorf("git diff-index: %w", err)
+	}
+	switch code {
+	case 0:
+		return false, nil
+	case dirtyExit:
+		return true, nil
+	}
+	return false, fmt.Errorf("git diff-index: exit %d", code)
 }
 
 // Commit stages the version files and commits them with the release message. The
