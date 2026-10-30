@@ -174,6 +174,10 @@ type dashSubmitters struct {
 	stamp fileStamp
 	read  bool
 	names func(rig, bead string) string
+	// crew reports whether the bead's newest submission is on a crew session's
+	// branch, read from the same records the names are: a crew landing has no
+	// polecat seat, and its row says so rather than drawing a dash (gt-kmp7c).
+	crew func(rig, bead string) bool
 	// failed is the read failure already reported, so a log that stays
 	// unreadable reports once rather than on every poll (gt-72xqp).
 	failed readFailure
@@ -220,11 +224,29 @@ func (s *dashSubmitters) get() func(rig, bead string) string {
 			s.failed = f
 			s.logf("the submission log %s could not be read, so the Landings rows it names read \"?\": %v", subPath, err)
 		}
+		s.crew = noCrew
 		return unreadableSubmitters
 	}
 	s.failed = readFailure{}
-	s.names, s.stamp, s.read = landingNameLookup(subs), st, true
+	s.names, s.crew, s.stamp, s.read = landingNameLookup(subs), crewLandingLookup(subs), st, true
 	return s.names
+}
+
+// noCrew answers no for every bead: what a submission log that cannot be read
+// says about crew branches, since the dash the row draws claims less than
+// calling the landing a crew's would.
+func noCrew(string, string) bool { return false }
+
+// crewLookup returns whether a bead's newest submission was built on a crew
+// session's branch. It is read from the same log and the same read as the
+// names, so a row asks one source for both. A log that cannot be read answers
+// no: the row draws a dash, which claims less than calling the landing crew
+// would.
+func (s *dashSubmitters) crewLookup() func(rig, bead string) bool {
+	s.get()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.crew
 }
 
 // landingNameLookup builds the lookup the Landings rows ask: the polecat or
@@ -245,6 +267,21 @@ func landingNameLookup(subs []land.SubmissionRecord) func(rig, bead string) stri
 	return func(rig, bead string) string {
 		return polecatOfBranch(branches[beadKey{rig, bead}])
 	}
+}
+
+// crewLandingLookup builds the lookup that says whether a bead's newest
+// submission is on a crew session's branch ("crew/<agent>/<bead>" or
+// "crew/<agent>"): no polecat seat works a crew landing, so its row says crew
+// instead of drawing a dash. Like the names, the last submitted branch wins.
+func crewLandingLookup(subs []land.SubmissionRecord) func(rig, bead string) bool {
+	type beadKey struct{ rig, bead string }
+	crew := make(map[beadKey]bool, len(subs))
+	for _, s := range subs {
+		if s.Branch != "" {
+			crew[beadKey{s.Rig, s.Bead}] = isCrewLandingBranch(s.Branch)
+		}
+	}
+	return func(rig, bead string) bool { return crew[beadKey{rig, bead}] }
 }
 
 // landingName asks a lookup who submitted a landing. A nil lookup names no one,
@@ -269,13 +306,16 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 // (gt-yxl22) — comes with it, for the pane's Polecat column (gt-90wi1). who
 // names who submitted a row whose record carries no branch: a rejection keeps
 // its branch on the bead's rejection note, which a row does not read, so the
-// name comes from the first-sight submission log instead (gt-gclus). polecat
-// reads a bead's polecat time from the spans log: a rejected row takes the
-// reading a landed record would carry (asOf zero), and a running row takes the
-// time so far (asOf now), each only for the rows the bound keeps, so the reads
-// are bounded like the titles. A crew-branch row is marked crew, which the page
-// draws in place of a dash.
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, who func(rig, bead string) string, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), limit int) []dashboard.LandingRow {
+// name comes from the first-sight submission log instead (gt-gclus). crew is
+// that same log's branch: a rejected or running row built on a crew session's
+// branch is marked crew, which the page draws in place of a dash, and a landed
+// row is marked from the branch its own record carries. polecat reads a bead's
+// polecat time from the spans log: a rejected row takes the reading a landed
+// record would carry (asOf zero), and a running row takes the time so far (asOf
+// now). Both lookups are asked only for the rows the table keeps — the
+// rejections the bound left, and the live rows above it — so the reads are
+// bounded like the titles.
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, who func(rig, bead string) string, crew func(rig, bead string) bool, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
 	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
@@ -339,16 +379,25 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 	if len(live) > 0 {
 		rows = append(append([]dashboard.LandingRow(nil), live...), rows...)
 	}
-	if polecat != nil {
-		for i := range rows {
-			switch rows[i].Outcome {
-			case "rejected":
-				secs, attempts, lower := polecat(rows[i].Bead, time.Time{})
-				setPolecatReading(&rows[i], secs, attempts, lower)
-			case "running":
-				secs, attempts, lower := polecat(rows[i].Bead, now)
-				setPolecatReading(&rows[i], secs, attempts, lower)
-			}
+	for i := range rows {
+		// A landed row carries its own branch; a rejected or running row has
+		// none, so a crew build is read from the submission log the name comes
+		// from (gt-kmp7c).
+		var asOf time.Time
+		switch rows[i].Outcome {
+		case "rejected":
+			asOf = time.Time{} // the reading a landed record would carry
+		case "running":
+			asOf = now // the time so far
+		default:
+			continue
+		}
+		if crew != nil && crew(rows[i].Rig, rows[i].Bead) {
+			rows[i].Crew = true
+		}
+		if polecat != nil {
+			secs, attempts, lower := polecat(rows[i].Bead, asOf)
+			setPolecatReading(&rows[i], secs, attempts, lower)
 		}
 	}
 	if title != nil {
@@ -476,10 +525,82 @@ func setPolecatReading(row *dashboard.LandingRow, secs float64, attempts []land.
 
 // spanPolecatTimes is the Landings pane's polecat-time reader: the landing
 // worker's own reader over the town's spans log, so a rejected or running row
-// and a landed record read the one way.
+// and a landed record read the one way. The store under it keeps each bead's
+// summary until its log moves, so a poll reads a rejected bead's log once
+// rather than on every publish (gt-kmp7c).
 func spanPolecatTimes(townRoot string) func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool) {
-	f := &land.LandingsFile{Spans: spans.New(spans.DefaultDir(townRoot), nil)}
+	f := &land.LandingsFile{Spans: newSpanCache(spans.DefaultDir(townRoot))}
 	return f.PolecatTime
+}
+
+// spanCacheRows bounds what the span cache keeps: the bead summaries of a
+// day's landings, well past the rows the pane shows. Past it the cache starts
+// over, so a dashboard that runs for weeks spends a re-read on the beads it
+// still shows rather than holding every bead it ever read.
+const spanCacheRows = 512
+
+// spanCache is the dashboard's span store: one bead's summary, kept until the
+// bead's log changes. A rejected bead's log never moves again, so re-reading it
+// on every poll would spend the disk on an answer that cannot have changed,
+// while a running bead's log is stamped anew by each open and close, so its
+// time so far is read again (gt-kmp7c).
+type spanCache struct {
+	dir   string
+	store *spans.Store
+
+	mu     sync.Mutex
+	byBead map[string]cachedSpan
+}
+
+type cachedSpan struct {
+	stamp fileStamp
+	sum   spans.Summary
+}
+
+func newSpanCache(dir string) *spanCache {
+	return &spanCache{dir: dir, store: spans.New(dir, nil)}
+}
+
+// Summarize reads a bead's spans log, answering from the last read while the
+// log's stamp is unchanged. Only a read that succeeded is kept: a log that
+// could not be read is asked again on the next poll rather than pinning the
+// failure until something writes the file.
+func (c *spanCache) Summarize(bead string) (spans.Summary, error) {
+	// The bead names the log, so it is checked before it can reach a path; the
+	// store checks it again and refuses an id that is not one path component.
+	if !spans.ValidBeadID(bead) {
+		return c.store.Summarize(bead)
+	}
+	st, err := stampFile(filepath.Join(c.dir, bead+".jsonl"))
+	if err != nil {
+		// A bead with no log recorded nothing: the store's empty answer. There
+		// is nothing to keep either, since a log that appears gets a stamp.
+		return c.store.Summarize(bead)
+	}
+	c.mu.Lock()
+	old, ok := c.byBead[bead]
+	c.mu.Unlock()
+	if ok && old.stamp == st {
+		return old.sum, nil
+	}
+	sum, err := c.store.Summarize(bead)
+	if err != nil {
+		return sum, err
+	}
+	c.mu.Lock()
+	if c.byBead == nil || len(c.byBead) >= spanCacheRows {
+		c.byBead = make(map[string]cachedSpan, spanCacheRows)
+	}
+	c.byBead[bead] = cachedSpan{stamp: st, sum: sum}
+	c.mu.Unlock()
+	return sum, nil
+}
+
+// EndOpen is the writer's half of the store the landing worker reads times
+// through. The dashboard only reads, so it hands the store's own answer on
+// rather than keeping a record the worker would write.
+func (c *spanCache) EndOpen(bead, seat string, reason spans.Reason, at time.Time) (bool, error) {
+	return c.store.EndOpen(bead, seat, reason, at)
 }
 
 func shortSHA(sha string) string {

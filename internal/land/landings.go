@@ -188,15 +188,23 @@ func (f *LandingsFile) PolecatTime(bead string, asOf time.Time) (secs float64, a
 		return 0, nil, false
 	}
 	attempts = make([]PolecatAttempt, len(sum.Attempts))
-	secs = sum.Secs
+	secs, lowerBound = sum.Secs, sum.LowerBound
 	for i, a := range sum.Attempts {
 		attempts[i] = PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound}
-		if a.Open && !asOf.IsZero() && asOf.After(a.StartedAt) {
+		if !a.Open || asOf.IsZero() {
+			continue
+		}
+		// A landing still running reads the open attempt up to asOf, and it is a
+		// floor while the seat keeps working however little time has passed: the
+		// reading the summary carries knows the attempt is open, not that this
+		// reading counted it.
+		lowerBound = true
+		if asOf.After(a.StartedAt) {
 			attempts[i].Secs = asOf.Sub(a.StartedAt).Seconds()
 			secs += attempts[i].Secs
 		}
 	}
-	return secs, attempts, sum.LowerBound
+	return secs, attempts, lowerBound
 }
 
 // appendJSONLine appends one newline-terminated record to the log at path with

@@ -494,6 +494,10 @@ type LandingRow struct {
 	Rig     string    `json:"rig,omitempty"`
 	Title   string    `json:"title,omitempty"`
 	Polecat string    `json:"polecat,omitempty"`
+	// Crew marks a row built on a crew session's branch, landed or still
+	// running: no polecat built it, so the Polecat cell reads crew rather than
+	// a dash, which would look like missing time (gt-kmp7c).
+	Crew bool `json:"crew,omitempty"`
 	// Outcome is "landed", "rejected", "running" for a landing the worker
 	// holds right now, or "backoff" for one that keeps failing and is waiting
 	// for a retry. A running row's At is the merge, and it carries no verdict,
@@ -501,10 +505,7 @@ type LandingRow struct {
 	// ends. Verdict is om's reading of a landing: "approved", "skipped"
 	// (landed with no review of its own) or "error". Kind is why a rejection
 	// was refused: review, gate, conflict, policy or empty.
-	Outcome string `json:"outcome"`
-	// Crew marks a landed row built on a crew session's branch: no polecat
-	// built it, so the Polecat cell reads crew rather than a dash.
-	Crew     bool     `json:"crew,omitempty"`
+	Outcome  string   `json:"outcome"`
 	Verdict  string   `json:"verdict,omitempty"`
 	Kind     string   `json:"kind,omitempty"`
 	Score    *float64 `json:"score,omitempty"`
