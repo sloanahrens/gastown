@@ -77,35 +77,46 @@ const scriptSkippedMarker = "[plugin-result skipped]"
 // satisfies the gate is written when the script finishes, with its real
 // result.
 //
-// It also remembers which plugins have an escalation open, so a good run
-// closes it and a plugin that never failed costs no `gt escalate clear`.
+// It also remembers the keys each plugin has an escalation open under, so a
+// good run closes them and a plugin that never failed costs no
+// `gt escalate clear`. The keys are a set because a plugin's alert key moves
+// with its finding set: a recovery closes every key this daemon raised.
 // The memory is the daemon's: after a restart an open escalation stays open
 // until the operator closes it or the plugin fails and recovers again.
 type scriptRunner struct {
 	mu        sync.Mutex
 	running   map[string]time.Time
-	escalated map[string]bool
+	escalated map[string]map[string]bool
 	active    sync.WaitGroup // one per run in flight, done when it finishes
 }
 
 func newScriptRunner() *scriptRunner {
-	return &scriptRunner{running: map[string]time.Time{}, escalated: map[string]bool{}}
+	return &scriptRunner{running: map[string]time.Time{}, escalated: map[string]map[string]bool{}}
 }
 
-// markEscalated records that name has an escalation open.
-func (r *scriptRunner) markEscalated(name string) {
+// markEscalated records that an escalation under key is open for name.
+func (r *scriptRunner) markEscalated(name, key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.escalated[name] = true
+	if r.escalated[name] == nil {
+		r.escalated[name] = map[string]bool{}
+	}
+	r.escalated[name][key] = true
 }
 
-// takeEscalated reports whether name had an escalation open and forgets it.
-func (r *scriptRunner) takeEscalated(name string) bool {
+// takeEscalated returns the keys name has escalations open under and forgets
+// them, sorted for a stable clear.
+func (r *scriptRunner) takeEscalated(name string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	was := r.escalated[name]
+	keys := r.escalated[name]
 	delete(r.escalated, name)
-	return was
+	out := make([]string, 0, len(keys))
+	for key := range keys {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // tryStart marks name as running and reports whether the caller may start
@@ -454,20 +465,43 @@ func pluginTarget(p *plugin.Plugin) string {
 
 // escalatePluginFailure raises (or adds to) p's failure escalation with the
 // output tail, and remembers it so the next good run closes it.
+//
+// The cloud-check plugin's key carries the urgent finding set (see
+// plugin_findings.go): an unchanged set refreshes one escalation, a changed
+// set raises another, and a set whose escalation was closed recently waits out
+// pluginEscalationReopenWindow.
 func (d *Daemon) escalatePluginFailure(p *plugin.Plugin, res scriptResult, townRoot string) {
-	msg := fmt.Sprintf("script plugin %s failed: %s\n\nThe daemon ran %s; full output of the last run: %s\n\n%s",
-		p.Name, res.status(), pluginTarget(p), scriptLogPath(townRoot, p.Name), strings.TrimRight(res.output, "\n"))
-	if err := d.escalateAlertErr(pluginFailureAlertKey(p.Name), "plugin:"+p.Name, msg); err != nil {
+	key := pluginFailureAlertKey(p.Name)
+	summary := ""
+	if ids, kinds := d.cloudCheckFindings(p); len(ids) > 0 {
+		key = findingSetKey(p.Name, ids)
+		summary = findingSummary(kinds)
+	}
+	if p.Name == cloudCheckPlugin && d.pluginEscalationClosedRecently(key) {
+		d.logger.Printf("Handler: script plugin %s failed (%s); its escalation was closed within %s, not raising another",
+			p.Name, res.status(), pluginEscalationReopenWindow)
 		return
 	}
-	d.scripts.markEscalated(p.Name)
+	msg := fmt.Sprintf("script plugin %s failed: %s", p.Name, res.status())
+	if summary != "" {
+		msg += "\n\n" + summary
+	}
+	msg += fmt.Sprintf("\n\nThe daemon ran %s; full output of the last run: %s\n\n%s",
+		pluginTarget(p), scriptLogPath(townRoot, p.Name), strings.TrimRight(res.output, "\n"))
+	if err := d.escalateAlertErr(key, "plugin:"+p.Name, msg); err != nil {
+		return
+	}
+	d.scripts.markEscalated(p.Name, key)
 }
 
-// clearPluginFailure closes p's failure escalation when this daemon raised
-// one.
+// clearPluginFailure closes the failure escalations this daemon raised under
+// p's keys. A key whose escalation was already closed is not an error to clear
+// again (see clearAlerts), so recovery after a finding set came and went
+// closes whatever is still open.
 func (d *Daemon) clearPluginFailure(p *plugin.Plugin) {
-	if d.scripts.takeEscalated(p.Name) {
-		d.clearAlerts(fmt.Sprintf("plugin %s ran clean", p.Name), pluginFailureAlertKey(p.Name))
+	keys := d.scripts.takeEscalated(p.Name)
+	if len(keys) > 0 {
+		d.clearAlerts(fmt.Sprintf("plugin %s ran clean", p.Name), keys...)
 	}
 }
 

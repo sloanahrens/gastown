@@ -123,6 +123,11 @@ type Daemon struct {
 	// (gt-3bqfy).
 	pluginRuns pluginRunSource
 
+	// cloudReportsDir names the cloud patrol's reports directory the
+	// cloud-check plugin's failure key reads finding ids from; nil reads
+	// config.CloudReportsDir. Tests inject a fixture directory (gt-ggd75).
+	cloudReportsDir func() string
+
 	// getenv reads the environment the start names its owner from
 	// (DetectSelf); nil reads the process environment. Tests set it so a
 	// start runs under an environment fixture.

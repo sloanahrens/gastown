@@ -47,7 +47,10 @@ each heartbeat and runs the ones whose gate is open — a script-type plugin
 (`[execution] type = "script"` with a `run.sh` or a `binary`) in-process,
 recording a plugin-run receipt. A failed run is logged and escalated with `gt escalate`
 under the fingerprint `plugin:<name>:failed`; the plugin's next good run
-(success or skipped) closes it. Nothing runs markdown-instruction ("agent")
+(success or skipped) closes it. The cloud-check plugin's fingerprint also
+carries a hash of the patrol report's urgent finding ids: an unchanged set
+refreshes the one escalation, a changed set raises a new one, and a set whose
+escalation was closed stays quiet for 24 hours (gt-ggd75). Nothing runs markdown-instruction ("agent")
 plugins any more: a cooldown plugin without a script `run.sh` is logged as
 skipped every heartbeat. No patrol schedules plugins: one the daemon dispatches runs twice if
 a patrol step also runs it (gt-o1z7).
