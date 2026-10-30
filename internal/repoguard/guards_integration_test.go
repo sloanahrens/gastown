@@ -9,20 +9,27 @@ import (
 	"testing"
 )
 
-// The cases of scripts/repo-guards_test.sh, run against real git and real gofmt
-// in a throwaway repository under t.TempDir(). The script test counts 14 cases;
-// each one is a subtest here, and each asserts whether the guards fail, which is
-// the exit status repo-guards returns. Cases that stage a file with git add
-// exercise the index, which is what the guards read.
+// The 14 cases of the previous shell test, run against real git and real gofmt
+// in a throwaway repository under t.TempDir(). Each case is a subtest here, and
+// each asserts whether the guards fail, which is the exit status repo-guards
+// returns. Cases that stage a file with git add exercise the index, which is
+// what the guards read.
+
+// guardRepo is a throwaway repository and the environment its git and gofmt
+// run in. The HOME is made once per test, with the repository, so every command
+// the test runs shares it.
+type guardRepo struct {
+	root string
+	env  []string
+}
 
 // guardEnviron is the environment git and gofmt run in here. It carries no
 // ambient git config and no repository variables from a hook, so the machine
-// the test runs on cannot change its answer. HOME is the test's own.
-func guardEnviron(t *testing.T) []string {
-	t.Helper()
+// the test runs on cannot change its answer. HOME is home, the test's own.
+func guardEnviron(home string) []string {
 	return []string{
 		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + t.TempDir(),
+		"HOME=" + home,
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -31,11 +38,10 @@ func guardEnviron(t *testing.T) []string {
 }
 
 // liveEnv is the production wiring of Check: the git binary, gofmt from PATH,
-// and the real filesystem for go.mod. The commands run in guardEnviron.
-func liveEnv(t *testing.T) Env {
-	t.Helper()
+// and the real filesystem for go.mod. The commands run in r.env.
+func liveEnv(r guardRepo) Env {
 	ex := CLIExec{start: func(cmd *exec.Cmd) error {
-		cmd.Env = guardEnviron(t)
+		cmd.Env = r.env
 		return cmd.Run()
 	}}
 	return Env{
@@ -48,23 +54,23 @@ func liveEnv(t *testing.T) Env {
 
 // newGuardRepo makes a git repository with a .beads directory and the go.mod
 // every case starts from.
-func newGuardRepo(t *testing.T) string {
+func newGuardRepo(t *testing.T) guardRepo {
 	t.Helper()
-	root := t.TempDir()
-	gitIn(t, root, "init", "-q")
-	if err := os.Mkdir(filepath.Join(root, ".beads"), 0o755); err != nil {
+	r := guardRepo{root: t.TempDir(), env: guardEnviron(t.TempDir())}
+	gitIn(t, r, "init", "-q")
+	if err := os.Mkdir(filepath.Join(r.root, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeGuardFile(t, root, "go.mod", "module example.com/x\n\ngo 1.26\n")
-	return root
+	writeGuardFile(t, r.root, "go.mod", "module example.com/x\n\ngo 1.26\n")
+	return r
 }
 
-// gitIn runs git in root in guardEnviron. Its output is not shown on failure: a
-// git error there can echo file contents.
-func gitIn(t *testing.T, root string, args ...string) {
+// gitIn runs git in r.root in r.env. Its output is not shown on failure: a git
+// error there can echo file contents.
+func gitIn(t *testing.T, r guardRepo, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-	cmd.Env = guardEnviron(t)
+	cmd := exec.Command("git", append([]string{"-C", r.root}, args...)...)
+	cmd.Env = r.env
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git %s: %v", args[0], err)
 	}
@@ -97,126 +103,126 @@ func appendGuardFile(t *testing.T, root, rel, content string) {
 	}
 }
 
-// TestIntegrationRepoGuardsCases mirrors the 14 cases of the script test.
+// TestIntegrationRepoGuardsCases mirrors the 14 cases of the previous shell test.
 func TestIntegrationRepoGuardsCases(t *testing.T) {
 	t.Parallel()
 	const trackerReplaceLine = "replace github.com/steveyegge/gastown/tracker => ./tracker\n"
 	tests := []struct {
 		name  string
-		setup func(t *testing.T, root string)
+		setup func(t *testing.T, r guardRepo)
 		fail  bool
 	}{
 		{
 			name:  "clean repo",
-			setup: func(t *testing.T, root string) {},
+			setup: func(t *testing.T, r guardRepo) {},
 			fail:  false,
 		},
 		{
 			name: "replace directive",
-			setup: func(t *testing.T, root string) {
-				appendGuardFile(t, root, "go.mod", "replace example.com/y => ../y\n")
+			setup: func(t *testing.T, r guardRepo) {
+				appendGuardFile(t, r.root, "go.mod", "replace example.com/y => ../y\n")
 			},
 			fail: true,
 		},
 		{
 			name: "replace block",
-			setup: func(t *testing.T, root string) {
-				appendGuardFile(t, root, "go.mod", "replace (\n\texample.com/y => ../y\n)\n")
+			setup: func(t *testing.T, r guardRepo) {
+				appendGuardFile(t, r.root, "go.mod", "replace (\n\texample.com/y => ../y\n)\n")
 			},
 			fail: true,
 		},
 		{
 			name: "the tracker module replace",
-			setup: func(t *testing.T, root string) {
-				appendGuardFile(t, root, "go.mod", trackerReplaceLine)
+			setup: func(t *testing.T, r guardRepo) {
+				appendGuardFile(t, r.root, "go.mod", trackerReplaceLine)
 			},
 			fail: false,
 		},
 		{
 			name: "the tracker module replaced by another path",
-			setup: func(t *testing.T, root string) {
-				appendGuardFile(t, root, "go.mod", "replace github.com/steveyegge/gastown/tracker => ../tracker\n")
+			setup: func(t *testing.T, r guardRepo) {
+				appendGuardFile(t, r.root, "go.mod", "replace github.com/steveyegge/gastown/tracker => ../tracker\n")
 			},
 			fail: true,
 		},
 		{
 			name: "the tracker replace beside another",
-			setup: func(t *testing.T, root string) {
-				appendGuardFile(t, root, "go.mod", trackerReplaceLine+"replace example.com/y => ../y\n")
+			setup: func(t *testing.T, r guardRepo) {
+				appendGuardFile(t, r.root, "go.mod", trackerReplaceLine+"replace example.com/y => ../y\n")
 			},
 			fail: true,
 		},
 		{
 			name: "the tracker replace in a block",
-			setup: func(t *testing.T, root string) {
-				appendGuardFile(t, root, "go.mod", "replace (\n\tgithub.com/steveyegge/gastown/tracker => ./tracker\n)\n")
+			setup: func(t *testing.T, r guardRepo) {
+				appendGuardFile(t, r.root, "go.mod", "replace (\n\tgithub.com/steveyegge/gastown/tracker => ./tracker\n)\n")
 			},
 			fail: true,
 		},
 		{
 			name: "untracked issues.jsonl",
-			setup: func(t *testing.T, root string) {
-				writeGuardFile(t, root, ".beads/issues.jsonl", "{}\n")
+			setup: func(t *testing.T, r guardRepo) {
+				writeGuardFile(t, r.root, ".beads/issues.jsonl", "{}\n")
 			},
 			fail: false,
 		},
 		{
 			name: "tracked issues.jsonl",
-			setup: func(t *testing.T, root string) {
-				writeGuardFile(t, root, ".beads/issues.jsonl", "{}\n")
-				gitIn(t, root, "add", ".beads/issues.jsonl")
+			setup: func(t *testing.T, r guardRepo) {
+				writeGuardFile(t, r.root, ".beads/issues.jsonl", "{}\n")
+				gitIn(t, r, "add", ".beads/issues.jsonl")
 			},
 			fail: true,
 		},
 		{
 			name: "gofmt-clean go file",
-			setup: func(t *testing.T, root string) {
-				writeGuardFile(t, root, "a.go", "package x\n")
-				gitIn(t, root, "add", "a.go")
+			setup: func(t *testing.T, r guardRepo) {
+				writeGuardFile(t, r.root, "a.go", "package x\n")
+				gitIn(t, r, "add", "a.go")
 			},
 			fail: false,
 		},
 		{
 			name: "unformatted tracked go file",
-			setup: func(t *testing.T, root string) {
-				writeGuardFile(t, root, "a.go", "package x\n\nfunc  f( ) {}\n")
-				gitIn(t, root, "add", "a.go")
+			setup: func(t *testing.T, r guardRepo) {
+				writeGuardFile(t, r.root, "a.go", "package x\n\nfunc  f( ) {}\n")
+				gitIn(t, r, "add", "a.go")
 			},
 			fail: true,
 		},
 		{
 			name: "drift only gofmt -s sees",
-			setup: func(t *testing.T, root string) {
-				writeGuardFile(t, root, "a.go", "package x\n\nfunc f(s []int) []int { return s[0:len(s)] }\n")
-				gitIn(t, root, "add", "a.go")
+			setup: func(t *testing.T, r guardRepo) {
+				writeGuardFile(t, r.root, "a.go", "package x\n\nfunc f(s []int) []int { return s[0:len(s)] }\n")
+				gitIn(t, r, "add", "a.go")
 			},
 			fail: true,
 		},
 		{
 			name: "unformatted testdata fixture",
-			setup: func(t *testing.T, root string) {
-				writeGuardFile(t, root, "testdata/fixture.go", "package x\n\nfunc  f( ) {}\n")
-				gitIn(t, root, "add", "testdata/fixture.go")
+			setup: func(t *testing.T, r guardRepo) {
+				writeGuardFile(t, r.root, "testdata/fixture.go", "package x\n\nfunc  f( ) {}\n")
+				gitIn(t, r, "add", "testdata/fixture.go")
 			},
 			fail: false,
 		},
 		{
 			name: "unformatted untracked go file",
-			setup: func(t *testing.T, root string) {
-				writeGuardFile(t, root, "a.go", "package x\n\nfunc  f( ) {}\n")
+			setup: func(t *testing.T, r guardRepo) {
+				writeGuardFile(t, r.root, "a.go", "package x\n\nfunc  f( ) {}\n")
 			},
 			fail: false,
 		},
 	}
 	if len(tests) != 14 {
-		t.Fatalf("got %d cases, want the 14 of scripts/repo-guards_test.sh", len(tests))
+		t.Fatalf("got %d cases, want the 14 of the previous shell test", len(tests))
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			root := newGuardRepo(t)
-			tc.setup(t, root)
-			if got := Check(root, liveEnv(t)).Failed(); got != tc.fail {
+			r := newGuardRepo(t)
+			tc.setup(t, r)
+			if got := Check(r.root, liveEnv(r)).Failed(); got != tc.fail {
 				t.Errorf("guards failed = %v, want %v", got, tc.fail)
 			}
 		})
@@ -224,33 +230,33 @@ func TestIntegrationRepoGuardsCases(t *testing.T) {
 }
 
 // TestIntegrationRepoGuardsMessages asserts the failing text of each guard in a
-// real repository, byte for byte as the script prints it.
+// real repository, byte for byte as the previous shell version printed it.
 func TestIntegrationRepoGuardsMessages(t *testing.T) {
 	t.Parallel()
 	t.Run("replace directive", func(t *testing.T) {
 		t.Parallel()
-		root := newGuardRepo(t)
-		appendGuardFile(t, root, "go.mod", "replace example.com/y => ../y\n")
-		rep := Check(root, liveEnv(t))
+		r := newGuardRepo(t)
+		appendGuardFile(t, r.root, "go.mod", "replace example.com/y => ../y\n")
+		rep := Check(r.root, liveEnv(r))
 		wantLines := []string{"repo-guards: go.mod contains replace directives; they break go install ...@latest (upstream #2230)"}
 		assertProblems(t, rep, wantLines)
 		assertReplaces(t, rep, []string{"replace example.com/y => ../y"})
 	})
 	t.Run("tracked issues.jsonl", func(t *testing.T) {
 		t.Parallel()
-		root := newGuardRepo(t)
-		writeGuardFile(t, root, ".beads/issues.jsonl", "{}\n")
-		gitIn(t, root, "add", ".beads/issues.jsonl")
-		assertProblems(t, Check(root, liveEnv(t)), []string{
+		r := newGuardRepo(t)
+		writeGuardFile(t, r.root, ".beads/issues.jsonl", "{}\n")
+		gitIn(t, r, "add", ".beads/issues.jsonl")
+		assertProblems(t, Check(r.root, liveEnv(r)), []string{
 			"repo-guards: .beads/issues.jsonl is tracked; the Dolt server is the only beads backend (git rm --cached it)",
 		})
 	})
 	t.Run("unformatted tracked go file", func(t *testing.T) {
 		t.Parallel()
-		root := newGuardRepo(t)
-		writeGuardFile(t, root, "a.go", "package x\n\nfunc  f( ) {}\n")
-		gitIn(t, root, "add", "a.go")
-		rep := Check(root, liveEnv(t))
+		r := newGuardRepo(t)
+		writeGuardFile(t, r.root, "a.go", "package x\n\nfunc  f( ) {}\n")
+		gitIn(t, r, "add", "a.go")
+		rep := Check(r.root, liveEnv(r))
 		assertProblems(t, rep, []string{
 			"repo-guards: these files are not gofmt -s clean; run 'gofmt -s -w' on them:",
 			"a.go",

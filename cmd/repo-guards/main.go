@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/repoguard"
@@ -76,14 +77,33 @@ func repoRoot(args []string, env repoguard.Env) (root string, code int, err erro
 	if len(args) == 0 {
 		return top, 0, nil
 	}
-	// --show-prefix is empty exactly at the top level, so git decides what
-	// the path is and no symlink or trailing-slash handling is needed here.
-	prefix, err := env.Exec.Run(dir, "git", "rev-parse", "--show-prefix")
-	if err != nil {
-		return "", 1, fmt.Errorf("repo-guards: %s is not a git repository", dir)
-	}
-	if strings.TrimSpace(prefix) != "" {
+	if same, err := sameDir(dir, top); err != nil || !same {
 		return "", 2, fmt.Errorf("repo-guards: %s is not the top level of its repository (%s)", dir, top)
 	}
 	return top, 0, nil
+}
+
+// sameDir reports whether a and b name the same directory. Both are made
+// absolute and their symlinks resolved, so "dir/", "./dir" and "dir/../dir"
+// name "dir", and a path through a symlink names its target. A path that does
+// not exist is an error, not a match.
+func sameDir(a, b string) (bool, error) {
+	ca, err := canonicalDir(a)
+	if err != nil {
+		return false, err
+	}
+	cb, err := canonicalDir(b)
+	if err != nil {
+		return false, err
+	}
+	return ca == cb, nil
+}
+
+// canonicalDir is p made absolute, with its symlinks resolved.
+func canonicalDir(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
 }

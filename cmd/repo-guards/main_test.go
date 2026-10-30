@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -15,8 +17,8 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 
-// The stderr lines are copied from scripts/repo-guards.sh. TestRunMessages holds
-// the guards to them byte for byte, so a reworded message fails here.
+// The stderr lines are copied from the previous shell version. TestRunMessages
+// holds the guards to them byte for byte, so a reworded message fails here.
 const (
 	replaceLine    = "replace example.com/y => ../y"
 	replaceStderr  = "repo-guards: go.mod contains replace directives; they break go install ...@latest (upstream #2230)\n"
@@ -51,13 +53,11 @@ func (f *fakeGit) IsTracked(root, path string) bool {
 }
 
 // fakeExec answers the commands the guards run. toplevel is what git rev-parse
-// --show-toplevel prints, prefix what --show-prefix prints, or revErr is what
-// rev-parse fails with. gofmt lists the files in unformatted and fails with
-// gofmtErr when set. calls records every command, so a test can see what ran.
+// --show-toplevel prints, or revErr is what rev-parse fails with. gofmt lists
+// the files in unformatted and fails with gofmtErr when set. calls records every
+// command, so a test can see what ran.
 type fakeExec struct {
 	toplevel    string
-	prefix      string
-	prefixErr   error
 	revErr      error
 	unformatted []string
 	gofmtErr    error
@@ -66,9 +66,6 @@ type fakeExec struct {
 
 func (f *fakeExec) Run(dir string, name string, args ...string) (string, error) {
 	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
-	if name == "git" && slices.Contains(args, "--show-prefix") {
-		return f.prefix, f.prefixErr
-	}
 	if name == "git" && slices.Contains(args, "rev-parse") {
 		return f.toplevel, f.revErr
 	}
@@ -139,10 +136,11 @@ func TestRunRunsEveryGuard(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			repo := t.TempDir()
 			g := &fakeGit{tracked: tc.tracked, files: []string{"a.go"}}
-			e := &fakeExec{toplevel: "/repo\n", unformatted: tc.unformatted}
+			e := &fakeExec{toplevel: repo + "\n", unformatted: tc.unformatted}
 			var stdout, stderr bytes.Buffer
-			got := run([]string{"/repo"}, fakeEnv(tc.goMod, g, e, false), &stdout, &stderr)
+			got := run([]string{repo}, fakeEnv(tc.goMod, g, e, false), &stdout, &stderr)
 			if got != tc.wantExit {
 				t.Errorf("exit = %d, want %d", got, tc.wantExit)
 			}
@@ -157,7 +155,7 @@ func TestRunRunsEveryGuard(t *testing.T) {
 }
 
 // TestRunMessages pins each guard's failing text byte for byte, copied from the
-// script, and the offending go.mod lines on stdout.
+// previous shell version, and the offending go.mod lines on stdout.
 func TestRunMessages(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -209,10 +207,11 @@ func TestRunMessages(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			repo := t.TempDir()
 			g := &fakeGit{tracked: tc.tracked, files: []string{"b.go"}}
-			e := &fakeExec{toplevel: "/repo\n", unformatted: tc.unformatted, gofmtErr: tc.gofmtErr}
+			e := &fakeExec{toplevel: repo + "\n", unformatted: tc.unformatted, gofmtErr: tc.gofmtErr}
 			var stdout, stderr bytes.Buffer
-			if got := run([]string{"/repo"}, fakeEnv(tc.goMod, g, e, tc.noGofmt), &stdout, &stderr); got != 1 {
+			if got := run([]string{repo}, fakeEnv(tc.goMod, g, e, tc.noGofmt), &stdout, &stderr); got != 1 {
 				t.Errorf("exit = %d, want 1", got)
 			}
 			if stdout.String() != tc.wantStdout {
@@ -268,55 +267,83 @@ func TestMainDefaultRoot(t *testing.T) {
 // TestRunRootMustBeTopLevel holds an explicit root to the repository's top
 // level. From a subdirectory the guards would read that subtree, where a tracked
 // root file looks untracked, so the refusal must exit 2 before any guard runs.
+// The paths are real, so the comparison runs on the filesystem as in production.
 func TestRunRootMustBeTopLevel(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
-		arg        string
-		prefix     string
-		prefixErr  error
+		arg        func(repo string) string
+		revErr     error
 		wantExit   int
-		wantRoot   string
-		wantStderr string
+		wantStderr func(repo string) string
 	}{
 		{
-			name:       "a prefix git cannot report is refused with exit 1",
-			arg:        "/repo",
-			prefixErr:  errors.New("exit 128"),
-			wantExit:   1,
-			wantStderr: "repo-guards: /repo is not a git repository\n",
-		},
-		{
-			name:     "the top level is accepted and returned",
-			arg:      "/repo",
+			name:     "the top level is accepted",
+			arg:      func(repo string) string { return repo },
 			wantExit: 0,
-			wantRoot: "/repo",
 		},
 		{
 			name:     "a trailing slash on the top level is accepted",
-			arg:      "/repo/",
+			arg:      func(repo string) string { return repo + "/" },
 			wantExit: 0,
-			wantRoot: "/repo",
 		},
 		{
-			name:       "a subdirectory is refused and no guard runs",
-			arg:        "/repo/sub",
-			prefix:     "sub/\n",
-			wantExit:   2,
-			wantStderr: "repo-guards: /repo/sub is not the top level of its repository (/repo)\n",
+			name:     "a dot prefix on the top level is accepted",
+			arg:      func(repo string) string { return repo + "/./" },
+			wantExit: 0,
+		},
+		{
+			name:     "a name that goes into a subdirectory and back is accepted",
+			arg:      func(repo string) string { return repo + "/sub/.." },
+			wantExit: 0,
+		},
+		{
+			name:     "a subdirectory is refused and no guard runs",
+			arg:      func(repo string) string { return repo + "/sub" },
+			wantExit: 2,
+			wantStderr: func(repo string) string {
+				return fmt.Sprintf("repo-guards: %s/sub is not the top level of its repository (%s)\n", repo, repo)
+			},
+		},
+		{
+			name:     "a path that does not exist is refused with exit 2",
+			arg:      func(repo string) string { return repo + "/missing" },
+			wantExit: 2,
+			wantStderr: func(repo string) string {
+				return fmt.Sprintf("repo-guards: %s/missing is not the top level of its repository (%s)\n", repo, repo)
+			},
+		},
+		{
+			name:     "a path git cannot resolve is refused with exit 1",
+			arg:      func(repo string) string { return repo },
+			revErr:   errors.New("exit 128"),
+			wantExit: 1,
+			wantStderr: func(repo string) string {
+				return fmt.Sprintf("repo-guards: %s is not a git repository\n", repo)
+			},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			repo := t.TempDir()
+			if err := os.Mkdir(filepath.Join(repo, "sub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			arg := tc.arg(repo)
 			g := &fakeGit{}
-			e := &fakeExec{toplevel: "/repo\n", prefix: tc.prefix, prefixErr: tc.prefixErr}
+			e := &fakeExec{toplevel: repo + "\n", revErr: tc.revErr}
 			var stdout, stderr bytes.Buffer
-			if got := run([]string{tc.arg}, fakeEnv(cleanGoMod, g, e, false), &stdout, &stderr); got != tc.wantExit {
+			got := run([]string{arg}, fakeEnv(cleanGoMod, g, e, false), &stdout, &stderr)
+			if got != tc.wantExit {
 				t.Errorf("exit = %d, want %d; stderr %q", got, tc.wantExit, stderr.String())
 			}
-			if stderr.String() != tc.wantStderr {
-				t.Errorf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
+			if tc.wantStderr != nil {
+				if want := tc.wantStderr(repo); stderr.String() != want {
+					t.Errorf("stderr = %q, want %q", stderr.String(), want)
+				}
+			} else if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want none", stderr.String())
 			}
 			if tc.wantExit != 0 {
 				if len(g.roots) != 0 {
@@ -333,9 +360,54 @@ func TestRunRootMustBeTopLevel(t *testing.T) {
 				t.Fatal("no guard ran")
 			}
 			for _, root := range g.roots {
-				if root != tc.wantRoot {
-					t.Errorf("guard ran in %q, want %q", root, tc.wantRoot)
+				if root != repo {
+					t.Errorf("guard ran in %q, want %q", root, repo)
 				}
+			}
+		})
+	}
+}
+
+// TestSameDir holds the top-level comparison to the directory a path names, on
+// a real tree. Spellings of one directory match it, a symlink to it matches,
+// a sibling does not, and a path that does not exist is an error, not a match.
+func TestSameDir(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	dir := filepath.Join(base, "dir")
+	other := filepath.Join(base, "other")
+	link := filepath.Join(base, "link")
+	for _, d := range []string{dir, other} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		a, b    string
+		want    bool
+		wantErr bool
+	}{
+		{name: "the same path", a: dir, b: dir, want: true},
+		{name: "a trailing slash", a: dir + "/", b: dir, want: true},
+		{name: "a dot prefix", a: base + "/./dir", b: dir, want: true},
+		{name: "a name that goes up and back", a: base + "/dir/../dir", b: dir, want: true},
+		{name: "a symlink to it", a: link, b: dir, want: true},
+		{name: "a sibling directory", a: other, b: dir, want: false},
+		{name: "a missing directory is an error", a: filepath.Join(base, "missing"), b: dir, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := sameDir(tc.a, tc.b)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("sameDir(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
 			}
 		})
 	}

@@ -46,6 +46,8 @@ func Check(root string, env Env) Report {
 		r.Replaces = bad
 		r.Problems = append(r.Problems, gomodProblem)
 	}
+	// The seam reports tracked on any error other than exit status 1, so a git
+	// that cannot run fails this guard (see CLIGit.IsTracked in trackedfiles.go).
 	if CheckIssuesJSONL(env.Git, root) {
 		r.Problems = append(r.Problems, IssuesJSONLProblem)
 	}

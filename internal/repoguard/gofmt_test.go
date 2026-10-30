@@ -251,6 +251,52 @@ func TestCLIExecRunReturnsStdoutAndError(t *testing.T) {
 	}
 }
 
+// TestGuardEnvironDropsHookVariables gives the builder an environment a git hook
+// would leave. The three repository variables go, matched by exact name; a near
+// miss such as GIT_DIRECTORY stays, and so does everything else, PATH included.
+func TestGuardEnvironDropsHookVariables(t *testing.T) {
+	t.Parallel()
+	environ := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/slit",
+		"GIT_DIR=/hook/.git",
+		"GIT_WORK_TREE=/hook",
+		"GIT_INDEX_FILE=/hook/index",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_DIRECTORY=/keep",
+	}
+	want := []string{"PATH=/usr/bin", "HOME=/home/slit", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_DIRECTORY=/keep"}
+	if got := GuardEnviron(environ); !slices.Equal(got, want) {
+		t.Errorf("GuardEnviron() = %q, want %q", got, want)
+	}
+}
+
+// TestCLIExecRunDropsHookVariables holds the production runner to GuardEnviron:
+// a command the guards start gets an environment of its own without the hook
+// variables, even when the process itself carries them. It sets the process
+// environment, so it is not parallel.
+func TestCLIExecRunDropsHookVariables(t *testing.T) {
+	t.Setenv("GIT_DIR", "/hook/.git")
+	t.Setenv("GIT_INDEX_FILE", "/hook/index")
+	var got *exec.Cmd
+	e := CLIExec{start: func(cmd *exec.Cmd) error {
+		got = cmd
+		return nil
+	}}
+	if _, err := e.Run("/repo", "git", "ls-files"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got.Env == nil {
+		t.Fatal("Env = nil, so the command inherits the hook variables")
+	}
+	for _, kv := range got.Env {
+		name, _, _ := strings.Cut(kv, "=")
+		if slices.Contains(hookVariables, name) {
+			t.Errorf("command environment carries %s", name)
+		}
+	}
+}
+
 // TestCheckGofmtBatchesLongLists lists 5000 tracked files, enough that one
 // call would overrun argv. Every call must stay under 100000 bytes, and the
 // reported files must come back in order.
