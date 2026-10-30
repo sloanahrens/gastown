@@ -117,7 +117,8 @@ func TestRenderDaemonCompose_ScratchRefusesTheLiveRootThroughALink(t *testing.T)
 }
 
 // A root that cannot be resolved, because a path component is a file, is refused
-// rather than taken as clear: the check cannot tell where it would mount.
+// rather than taken as clear, whichever root it is: the check cannot tell where
+// it would mount.
 func TestRenderDaemonCompose_ScratchRefusesARootThatCannotBeResolved(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -125,11 +126,24 @@ func TestRenderDaemonCompose_ScratchRefusesARootThatCannotBeResolved(t *testing.
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	spec := scratchSpec()
-	spec.LiveTownRoot = filepath.Join(base, "live")
-	spec.TownRoot = filepath.Join(file, "scratch")
-	if _, err := templates.RenderDaemonCompose(spec); err == nil {
-		t.Errorf("scratch TownRoot %q under a file rendered, want a refusal", spec.TownRoot)
+	tests := []struct {
+		name     string
+		liveRoot string
+		scratch  string
+	}{
+		{"scratch root under a file", filepath.Join(base, "live"), filepath.Join(file, "scratch")},
+		{"live root under a file", filepath.Join(file, "live"), filepath.Join(base, "scratch")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			spec := scratchSpec()
+			spec.LiveTownRoot = tt.liveRoot
+			spec.TownRoot = tt.scratch
+			if _, err := templates.RenderDaemonCompose(spec); err == nil {
+				t.Errorf("scratch TownRoot %q with live root %q rendered, want a refusal", tt.scratch, tt.liveRoot)
+			}
+		})
 	}
 }
 
