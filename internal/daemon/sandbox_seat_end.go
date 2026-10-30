@@ -162,7 +162,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		log("kept: %v", err)
 		return false
 	} else if !ok {
-		// A tmux seat keeps today's behaviour, silently. Whatever a later
+		// A tmux seat keeps today's behavior, silently. Whatever a later
 		// pass recorded about the seat is answered: it is not a sandbox seat.
 		h.clearPendingSeatEnd(rig, name)
 		return false
