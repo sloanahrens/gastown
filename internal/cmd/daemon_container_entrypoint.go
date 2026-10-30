@@ -23,28 +23,50 @@ const (
 
 	// containerMountinfo is the table of mounts this process sees.
 	containerMountinfo = "/proc/self/mountinfo"
+
+	// containerScratchTownFlag lets the scratch compose project ask for the
+	// one install a container may run.
+	containerScratchTownFlag = "scratch-town"
 )
 
-var daemonContainerEntrypointCmd = &cobra.Command{
-	Use:   "container-entrypoint",
-	Short: "Start the daemon as the container's entrypoint (internal)",
-	Long: `Start the Gas Town daemon as the container's entrypoint.
+// newDaemonContainerEntrypointCmd builds the command over run, which receives
+// the --scratch-town value the command parsed. A test passes a run that records
+// it, so the flag the shell sets is the value the decision reads.
+func newDaemonContainerEntrypointCmd(run func(scratch bool) error) *cobra.Command {
+	var scratch bool
+	cmd := &cobra.Command{
+		Use:   "container-entrypoint",
+		Short: "Start the daemon as the container's entrypoint (internal)",
+		Long: `Start the Gas Town daemon as the container's entrypoint.
 
-Runs only in container mode (GT_DAEMON_SUPERVISOR=container). It starts the
-daemon on the town at GT_TOWN_ROOT and refuses everything else, so a missing
-or wrong bind mount never turns into a fresh town:
+Runs only in container mode. It starts the daemon on the town root in its
+environment and refuses everything else, so a missing or wrong bind mount never
+turns into a fresh town:
 
   - mayor/town.json present: exec 'gt daemon run'.
-  - mayor/town.json absent, GT_SCRATCH_TOWN unset: refuse.
-  - mayor/town.json absent, GT_SCRATCH_TOWN=1: run 'gt install <townRoot> --git'
-    once, only when the town root is a mount point, holds the scratch marker
-    file, and holds nothing else; then exec 'gt daemon run'. Otherwise refuse.
+  - mayor/town.json absent, --scratch-town not given: refuse.
+  - mayor/town.json absent, --scratch-town given: run 'gt install <townRoot>
+    --git' once, only when the town root is a mount point, holds the scratch
+    marker that internal/config defines and the scratch runbook creates, and
+    holds nothing else; then exec 'gt daemon run'. Otherwise refuse.
 
-Every check runs before the first command, so a refusal runs nothing.`,
-	Hidden: true,
-	Args:   cobra.NoArgs,
-	RunE:   runDaemonContainerEntrypoint,
+Every check runs before the first command, so a refusal runs nothing.
+
+--scratch-town is for the scratch compose project, which passes it as this
+container's command; the live project passes no command. That compose line is
+gt-qpeei.29 (E1).`,
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			return run(scratch)
+		},
+	}
+	cmd.Flags().BoolVar(&scratch, containerScratchTownFlag, false,
+		"Install a town at the town root when it holds only the scratch marker")
+	return cmd
 }
+
+var daemonContainerEntrypointCmd = newDaemonContainerEntrypointCmd(runDaemonContainerEntrypoint)
 
 // containerEntrypoint is what the entrypoint reads and runs. Every command it
 // runs goes through run or exec, so a test records the whole sequence and no
@@ -57,9 +79,11 @@ type containerEntrypoint struct {
 	mountinfo func() (string, error)    // text of /proc/self/mountinfo
 	dirNames  func(dir string) ([]string, error)
 	exists    func(path string) (bool, error)
+	scratch   bool // the scratch compose project asked for a scratch town
 }
 
-func runDaemonContainerEntrypoint(cmd *cobra.Command, args []string) error {
+// runDaemonContainerEntrypoint runs the entrypoint with the real seams.
+func runDaemonContainerEntrypoint(scratch bool) error {
 	return runContainerEntrypoint(containerEntrypoint{
 		self:      os.Executable,
 		getenv:    os.Getenv,
@@ -68,6 +92,7 @@ func runDaemonContainerEntrypoint(cmd *cobra.Command, args []string) error {
 		mountinfo: func() (string, error) { return readTextFile(containerMountinfo) },
 		dirNames:  listDirNames,
 		exists:    entrypointPathExists,
+		scratch:   scratch,
 	})
 }
 
@@ -147,7 +172,7 @@ func (e containerEntrypoint) decideStart(townRoot string) (bool, error) {
 	if hasTown {
 		return false, nil
 	}
-	if e.getenv(config.ScratchTownEnv) != "1" {
+	if !e.scratch {
 		return false, fmt.Errorf("%s has no mayor/town.json, so the bind mount is missing or the path is wrong; a town is not installed here, and nothing was started", townRoot)
 	}
 

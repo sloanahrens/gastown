@@ -31,12 +31,6 @@ var gtEnvIdentity = map[string]bool{
 	// same town.json the Mac reads — so no config file can stand in for it: the
 	// same file is on both sides of the boundary.
 	ContainerModeEnv: true,
-	// The scratch compose project sets this to 1 on the same daemon container,
-	// beside GT_DAEMON_SUPERVISOR. It gates the one install a container may run,
-	// and that install happens before any town.json exists to carry a flag, so
-	// only the environment of the process the compose file starts can say so
-	// (gt-qpeei.26).
-	ScratchTownEnv: true,
 }
 
 // gtEnvPreferences are the GT_ variables that carry the operator's display and

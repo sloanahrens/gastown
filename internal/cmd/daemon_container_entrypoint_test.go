@@ -31,30 +31,31 @@ type entrypointRig struct {
 	brokenPath string
 	dir        []string
 	dirErr     error
+	scratch    bool
 	calls      [][]string
 }
 
 // scratchRig is a container whose town root is the scratch town: every
-// condition for an install holds, and GT_SCRATCH_TOWN=1 asks for one.
+// condition for an install holds, and --scratch-town asks for one.
 func scratchRig() *entrypointRig {
 	return &entrypointRig{
 		env: map[string]string{
 			config.ContainerModeEnv: config.SupervisorContainer,
 			containerTownRootEnv:    entrypointTown,
-			config.ScratchTownEnv:   "1",
 			containerGitUserEnv:     "daemon",
 			containerGitEmailEnv:    "daemon@example.invalid",
 		},
 		mountinfo: entrypointGtMount,
 		exists:    map[string]bool{entrypointMarker: true},
 		dir:       []string{config.ScratchTownMarker},
+		scratch:   true,
 	}
 }
 
 // townRig is a container whose town root already holds mayor/town.json.
 func townRig() *entrypointRig {
 	r := scratchRig()
-	delete(r.env, config.ScratchTownEnv)
+	r.scratch = false
 	r.exists[entrypointTownCfg] = true
 	return r
 }
@@ -77,6 +78,7 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 			}
 			return r.exists[path], nil
 		},
+		scratch: r.scratch,
 	}
 }
 
@@ -89,6 +91,37 @@ func (r *entrypointRig) installCalls() int {
 		}
 	}
 	return n
+}
+
+// The compose project's command is the only way in: the live project passes
+// none, so the default is off, and --scratch-town turns it on.
+func TestContainerEntrypointScratchFlagIsWired(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"live project passes no command", []string{}, false},
+		{"scratch project passes the flag", []string{"--scratch-town"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got bool
+			c := newDaemonContainerEntrypointCmd(func(scratch bool) error {
+				got = scratch
+				return nil
+			})
+			c.SetArgs(tc.args)
+			c.SilenceUsage, c.SilenceErrors = true, true
+			if err := c.Execute(); err != nil {
+				t.Fatalf("execute container-entrypoint %v: %v", tc.args, err)
+			}
+			if got != tc.want {
+				t.Errorf("scratch = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestContainerEntrypointRefusesOutsideContainerMode(t *testing.T) {
@@ -173,20 +206,15 @@ func TestContainerEntrypointEmptyGitIdentityLeavesGitConfigAlone(t *testing.T) {
 
 func TestContainerEntrypointAbsentTownRefusesWithoutScratchFlag(t *testing.T) {
 	t.Parallel()
-	for _, flag := range []string{"", "0"} {
-		t.Run("GT_SCRATCH_TOWN="+flag, func(t *testing.T) {
-			t.Parallel()
-			// Every scratch condition holds, so the refusal is the only thing
-			// that stops an install.
-			r := scratchRig()
-			r.env[config.ScratchTownEnv] = flag
-			if err := runContainerEntrypoint(r.entrypoint()); err == nil {
-				t.Fatal("expected a refusal with no mayor/town.json and no scratch flag")
-			}
-			if len(r.calls) != 0 {
-				t.Errorf("recorded %d commands, want none: %v", len(r.calls), r.calls)
-			}
-		})
+	// Every scratch condition holds, so the refusal is the only thing that
+	// stops an install. This is the live project's shape: no flag, no town.
+	r := scratchRig()
+	r.scratch = false
+	if err := runContainerEntrypoint(r.entrypoint()); err == nil {
+		t.Fatal("expected a refusal with no mayor/town.json and no scratch flag")
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("recorded %d commands, want none: %v", len(r.calls), r.calls)
 	}
 }
 
@@ -252,6 +280,25 @@ func TestContainerEntrypointScratchTownInstallsOnceBeforeDaemon(t *testing.T) {
 	}
 	if n := r.installCalls(); n != 1 {
 		t.Errorf("recorded %d gt install argv, want exactly 1", n)
+	}
+}
+
+// The scratch gate admits a directory holding only the marker, so the install
+// the entrypoint runs must accept exactly that directory. This drives the real
+// install path at the seams the other install unit tests use (no beads and no
+// git, which need a live Dolt and a subprocess) and checks it writes
+// mayor/town.json rather than refusing the directory.
+func TestScratchTownInstallAcceptsTheMarkerOnlyDirectory(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(townRoot, config.ScratchTownMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runInstallWith(installOptions{noBeads: true}, []string{townRoot}); err != nil {
+		t.Fatalf("gt install into a marker-only directory was refused: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, "mayor", "town.json")); err != nil {
+		t.Fatalf("mayor/town.json after install: %v", err)
 	}
 }
 
