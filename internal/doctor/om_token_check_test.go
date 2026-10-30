@@ -99,7 +99,7 @@ func TestOMTokenExpiryStates(t *testing.T) {
 		{"31 days left", 31 * day, StatusOK, "(31 days left)"},
 		{"30 days and a second left", 30*day + time.Second, StatusOK, "30 days left"},
 		{"exactly 30 days left", 30 * day, StatusWarning, "(30 days left)"},
-		{"one day left", day, StatusWarning, "(1 days left)"},
+		{"one day left", day, StatusWarning, "(1 day left)"},
 		{"an hour left", time.Hour, StatusWarning, "(0 days left)"},
 		{"expiring now", 0, StatusError, "expired on"},
 		{"expired 3 days ago", -3 * day, StatusError, "(3 days ago)"},
@@ -163,17 +163,33 @@ func TestOMTokenExpiryWarnsWhenTheExpiryCannotBeRead(t *testing.T) {
 	})
 }
 
-// A relative sidecar path is not read, and unreadable settings warn.
-func TestOMTokenExpiryRefusesWhatItCannotTrust(t *testing.T) {
+// A relative sidecar path is refused: it warns and reads nothing.
+func TestOMTokenExpiryRefusesARelativeSidecarPath(t *testing.T) {
 	t.Parallel()
 	r := newOMRig("relative/om-token.json", expiresIn(100*24*time.Hour))
 	if got := r.run(); got.Status != StatusWarning || len(r.reads) != 0 {
 		t.Errorf("relative path: %v %q reads %v, want a warning and no read", got.Status, got.Message, r.reads)
 	}
-	r = newOMRig(omSidecar, expiresIn(100*24*time.Hour))
+}
+
+// Settings that do not parse are refused: they warn and nothing is read.
+func TestOMTokenExpiryRefusesUnreadableSettings(t *testing.T) {
+	t.Parallel()
+	r := newOMRig(omSidecar, expiresIn(100*24*time.Hour))
 	r.cfgErr = errors.New("settings do not parse")
 	if got := r.run(); got.Status != StatusWarning || len(r.reads) != 0 {
 		t.Errorf("unreadable settings: %v %q reads %v, want a warning and no read", got.Status, got.Message, r.reads)
+	}
+}
+
+// The date is named as the operator wrote it, in the offset written, so a
+// 00:30 expiry at +09:00 on the 20th is the 20th and not the 19th in UTC.
+func TestOMTokenExpiryNamesTheDateAsWritten(t *testing.T) {
+	t.Parallel()
+	r := newOMRig(omSidecar, `{"expires_at": "2026-11-20T00:30:00+09:00"}`)
+	got := r.run()
+	if got.Status != StatusWarning || !strings.Contains(got.Message, "expires on 2026-11-20 (20 days left)") {
+		t.Errorf("result = %v %q, want a warning naming 2026-11-20 with 20 days left", got.Status, got.Message)
 	}
 }
 
@@ -181,15 +197,22 @@ func TestOMTokenExpiryRefusesWhatItCannotTrust(t *testing.T) {
 // is never read, and the sentinel is in no output of any state.
 func TestOMTokenExpiryNeverReadsTheTokenFile(t *testing.T) {
 	t.Parallel()
-	for _, left := range []time.Duration{100 * 24 * time.Hour, 10 * 24 * time.Hour, -24 * time.Hour} {
-		r := newOMRig(omSidecar, expiresIn(left))
-		got := r.run()
-		if len(r.reads) != 1 || r.reads[0] != omSidecar {
-			t.Errorf("left %s: read %v, want the sidecar alone", left, r.reads)
-		}
-		if strings.Contains(output(got), omSentinel) {
-			t.Errorf("left %s: the sentinel is in the output", left)
-		}
+	for name, left := range map[string]time.Duration{
+		"ok":      100 * 24 * time.Hour,
+		"warning": 10 * 24 * time.Hour,
+		"error":   -24 * time.Hour,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newOMRig(omSidecar, expiresIn(left))
+			got := r.run()
+			if len(r.reads) != 1 || r.reads[0] != omSidecar {
+				t.Errorf("read %v, want the sidecar alone", r.reads)
+			}
+			if strings.Contains(output(got), omSentinel) {
+				t.Error("the sentinel is in the output")
+			}
+		})
 	}
 }
 

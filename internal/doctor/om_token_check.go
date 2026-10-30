@@ -131,7 +131,8 @@ func parseOMTokenExpiry(data []byte) (time.Time, bool) {
 // The message names the date and the days left and nothing else.
 func judgeOMTokenExpiry(name string, expires, now time.Time) *CheckResult {
 	remaining := expires.Sub(now)
-	date := expires.UTC().Format(time.DateOnly)
+	// Keep the zone the operator wrote: in UTC an early-morning expiry east of it names the day before.
+	date := expires.Format(time.DateOnly)
 	switch {
 	case remaining <= 0:
 		ago := int(-remaining / (24 * time.Hour))
@@ -145,13 +146,21 @@ func judgeOMTokenExpiry(name string, expires, now time.Time) *CheckResult {
 		return &CheckResult{
 			Name:    name,
 			Status:  StatusWarning,
-			Message: fmt.Sprintf("the om token expires on %s (%d days left)", date, int(remaining/(24*time.Hour))),
+			Message: fmt.Sprintf("the om token expires on %s (%s)", date, daysLeft(int(remaining/(24*time.Hour)))),
 			FixHint: "generate a new token with claude setup-token, replace the token file, and update expires_at in the sidecar",
 		}
 	}
 	return &CheckResult{
 		Name:    name,
 		Status:  StatusOK,
-		Message: fmt.Sprintf("the om token expires on %s (%d days left)", date, int(remaining/(24*time.Hour))),
+		Message: fmt.Sprintf("the om token expires on %s (%s)", date, daysLeft(int(remaining/(24*time.Hour)))),
 	}
+}
+
+// daysLeft words a whole number of days left, singular for one.
+func daysLeft(days int) string {
+	if days == 1 {
+		return "1 day left"
+	}
+	return fmt.Sprintf("%d days left", days)
 }
