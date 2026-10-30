@@ -1,6 +1,7 @@
 package binaryinstall
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -125,7 +126,12 @@ func newSeam() *seam {
 		},
 		IsImmutable: func(path string) (bool, error) {
 			s.log("is-immutable", path)
-			return !s.unset, s.probeErr
+			// The real probe's contract: an error comes with false, never with
+			// a guess.
+			if s.probeErr != nil {
+				return false, s.probeErr
+			}
+			return !s.unset, nil
 		},
 		ClearImmutable: func(path string) error {
 			s.log("clear-immutable", path)
@@ -674,28 +680,33 @@ func indexOf(calls []string, call string) int {
 }
 
 // TestReplaceRestoreFailureDependsOnTheFlagHavingBeenSet is the gt-pkgew table:
-// a failed restore is an error only when the probe found the flag set before
-// the clear. chattr -i on a plain file exits 0 on a host that never grants the
-// flag, so a clear that returned no error proves nothing.
+// a failed restore is an error when the probe found the flag set before the
+// clear, and also when the probe could not tell and the clear succeeded (it may
+// have taken a real flag off: fail closed). chattr -i on a plain file exits 0 on
+// a host that never grants the flag, so the clear alone proves nothing.
 func TestReplaceRestoreFailureDependsOnTheFlagHavingBeenSet(t *testing.T) {
 	t.Parallel()
+	errProbe := errors.New("lsattr unreadable")
 	for _, tt := range []struct {
 		name     string
 		unset    bool
 		probeErr error
+		clearErr error
 		setErr   error
 		wantErr  bool
 		warnings int
 	}{
-		{"set before, restore fails", false, nil, errSet, true, 0},
-		{"not set before, restore refused", true, nil, errSet, false, 1},
-		{"probe error, restore refused", false, errors.New("lsattr unreadable"), errSet, false, 1},
-		{"set before, restore succeeds", false, nil, nil, false, 0},
+		{"set before, restore fails", false, nil, nil, errSet, true, 0},
+		{"not set before, restore refused", true, nil, nil, errSet, false, 1},
+		{"probe error, clear failed too, restore refused", false, errProbe, errClear, errSet, false, 1},
+		{"probe error, clear succeeded, restore refused", false, errProbe, nil, errSet, true, 0},
+		{"set before, restore succeeds", false, nil, nil, nil, false, 0},
+		{"probe error, restore succeeds", false, errProbe, nil, nil, false, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			s := newSeam()
-			s.unset, s.probeErr, s.setErr = tt.unset, tt.probeErr, tt.setErr
+			s.unset, s.probeErr, s.clearErr, s.setErr = tt.unset, tt.probeErr, tt.clearErr, tt.setErr
 			err := s.replace("gt")
 			if tt.wantErr != errors.Is(err, errSet) {
 				t.Fatalf("Replace: %v, want an error naming the restore: %t", err, tt.wantErr)
@@ -708,6 +719,62 @@ func TestReplaceRestoreFailureDependsOnTheFlagHavingBeenSet(t *testing.T) {
 			}
 			if len(s.warnings) != tt.warnings {
 				t.Fatalf("warnings %q, want %d", s.warnings, tt.warnings)
+			}
+		})
+	}
+}
+
+// TestReplaceRunsTheRealFlagCommandsThroughTheExecSeam drives the probe, the
+// clear and the restore with no flag seams but a fake Exec, and pins the exact
+// commands in order: one seam is the only way a command runs. The first host
+// refuses chflags (Linux, chattr takes over), the second answers it (macOS).
+func TestReplaceRunsTheRealFlagCommandsThroughTheExecSeam(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		goos string
+		out  map[string]string // command line -> output; a missing one fails
+		want []string
+	}{
+		{"linux", "linux", map[string]string{
+			"lsattr -d " + testDest: "----i---------e------- " + testDest,
+			"chattr -i " + testDest: "",
+			"chattr +i " + testDest: "",
+		}, []string{
+			"lsattr -d " + testDest,
+			"chflags nouchg " + testDest, "chattr -i " + testDest,
+			"chflags uchg " + testDest, "chattr +i " + testDest,
+		}},
+		{"darwin", "darwin", map[string]string{
+			"stat -f %f " + testDest:     "2",
+			"chflags nouchg " + testDest: "",
+			"chflags uchg " + testDest:   "",
+		}, []string{
+			"stat -f %f " + testDest,
+			"chflags nouchg " + testDest,
+			"chflags uchg " + testDest,
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newSeam()
+			s.files.ClearImmutable, s.files.SetImmutable, s.files.IsImmutable = nil, nil, nil
+			s.files.goos = tt.goos
+			var ran []string
+			s.files.Exec = func(_ context.Context, name string, args ...string) ([]byte, error) {
+				line := strings.Join(append([]string{name}, args...), " ")
+				ran = append(ran, line)
+				out, ok := tt.out[line]
+				if !ok {
+					return nil, errors.New("exit status 1")
+				}
+				return []byte(out), nil
+			}
+			if err := s.replace("gt"); err != nil {
+				t.Fatalf("Replace: %v", err)
+			}
+			if strings.Join(ran, "\n") != strings.Join(tt.want, "\n") {
+				t.Fatalf("commands run:\n got %q\nwant %q", ran, tt.want)
 			}
 		})
 	}
@@ -741,13 +808,20 @@ func TestIsImmutableReadsTheHostsReport(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var ran []string
-			run := func(name string, args ...string) ([]byte, error) {
+			files := Files{goos: tt.goos, Exec: func(_ context.Context, name string, args ...string) ([]byte, error) {
 				ran = append(ran, name+" "+strings.Join(args, " "))
 				return []byte(tt.out), tt.runErr
-			}
-			got, err := probeImmutable(run, tt.goos, "/usr/local/bin/gt")
+			}}
+			got, err := files.isImmutable("/usr/local/bin/gt")
 			if (err != nil) != tt.wantErr || got != tt.want {
-				t.Fatalf("probeImmutable = %v, %v; want %v, error %t (ran %v)", got, err, tt.want, tt.wantErr, ran)
+				t.Fatalf("isImmutable = %v, %v; want %v, error %t (ran %v)", got, err, tt.want, tt.wantErr, ran)
+			}
+			wantRan := map[string][]string{
+				"darwin": {"stat -f %f /usr/local/bin/gt"},
+				"linux":  {"lsattr -d /usr/local/bin/gt"},
+			}[tt.goos]
+			if strings.Join(ran, "\n") != strings.Join(wantRan, "\n") {
+				t.Fatalf("probe ran %q, want %q", ran, wantRan)
 			}
 			if tt.wantErr && got {
 				t.Fatalf("a probe that could not tell answered set")
