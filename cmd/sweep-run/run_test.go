@@ -412,6 +412,64 @@ func TestRunKeepsTheResultWhenCleanupFails(t *testing.T) {
 	}
 }
 
+// TestCloneWithReportsGitFailures: the clone the result records is the one this
+// file builds (safe.directory on the read-only mount, no hard links, a detached
+// checkout), and a step that fails is the error the run reports rather than a
+// tree the sweep would test at the wrong commit.
+func TestCloneWithReportsGitFailures(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		fails func(args []string) bool
+		out   string
+		want  string
+		calls int
+	}{
+		{
+			name:  "the clone",
+			fails: func(args []string) bool { return args[2] == "clone" },
+			out:   "fatal: '/repo.git' does not appear to be a git repository",
+			want:  "git clone /repo.git: fatal: '/repo.git' does not appear to be a git repository",
+			calls: 1, // the checkout is not attempted on a tree that was never made
+		},
+		{
+			name:  "the checkout",
+			fails: func(args []string) bool { return args[0] == "checkout" },
+			out:   "fatal: reference is not a tree",
+			want:  "git checkout " + testSHA + ": fatal: reference is not a tree",
+			calls: 2,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls [][]string
+			run := func(_ string, args ...string) (int, string) {
+				calls = append(calls, args)
+				if tc.fails(args) {
+					return 128, tc.out
+				}
+				return 0, ""
+			}
+			err := cloneWith(run, "/repo.git", testSHA, "/work")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to hold %q", err, tc.want)
+			}
+			if len(calls) != tc.calls {
+				t.Fatalf("git ran %d times, want %d: %q", len(calls), tc.calls, calls)
+			}
+			if got, want := strings.Join(calls[0], " "), "-c safe.directory=/repo.git clone --no-hardlinks /repo.git /work"; got != want {
+				t.Errorf("clone ran %q, want %q", got, want)
+			}
+			if tc.calls > 1 {
+				if got, want := strings.Join(calls[1], " "), "checkout --detach "+testSHA; got != want {
+					t.Errorf("checkout ran %q, want %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 // TestEnvironWithAppendsTheOverridesInOrder: the environment a sweep's children
 // see does not depend on map iteration order.
 func TestEnvironWithAppendsTheOverridesInOrder(t *testing.T) {

@@ -355,17 +355,24 @@ func removeWork(removeAll func(string) error, work string, stderr io.Writer) {
 	}
 }
 
-// gitClone makes the tree the sweep runs in: the bare repository cloned without
-// hard links, since the mount is read-only and the clone must not share its
-// objects, then the sha checked out detached.
+// gitRunner runs one git command in dir and returns its exit code and output,
+// as runGit does. A test substitutes a fake, so the unit tier starts no process.
+type gitRunner func(dir string, args ...string) (int, string)
+
+// gitClone makes the tree the sweep runs in.
+func gitClone(repo, sha, work string) error { return cloneWith(runGit, repo, sha, work) }
+
+// cloneWith is gitClone over a runner: the bare repository cloned without hard
+// links, since the mount is read-only and the clone must not share its objects,
+// then the sha checked out detached.
 //
 // safe.directory is set for the bare repository because the mount can be owned
 // by another user, and git refuses to read a repository it does not trust.
-func gitClone(repo, sha, work string) error {
-	if code, out := runGit("", "-c", "safe.directory="+repo, "clone", "--no-hardlinks", repo, work); code != 0 {
+func cloneWith(run gitRunner, repo, sha, work string) error {
+	if code, out := run("", "-c", "safe.directory="+repo, "clone", "--no-hardlinks", repo, work); code != 0 {
 		return fmt.Errorf("git clone %s: %s", repo, out)
 	}
-	if code, out := runGit(work, "checkout", "--detach", sha); code != 0 {
+	if code, out := run(work, "checkout", "--detach", sha); code != 0 {
 		return fmt.Errorf("git checkout %s: %s", sha, out)
 	}
 	return nil
