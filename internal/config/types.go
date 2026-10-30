@@ -176,6 +176,9 @@ type TownSettings struct {
 	// (secrets.go, gt-y3pgh.5).
 	Secrets *SecretsConfig `json:"secrets,omitempty"`
 
+	// Ring names the key that signs the One (ring_key.go, gt-6mlik.2).
+	Ring *RingConfig `json:"ring,omitempty"`
+
 	// Prime configures gt prime's optional sections ("prime" in
 	// settings/config.json: gt config does not write this section, so it is
 	// set by hand).
