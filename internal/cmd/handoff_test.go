@@ -1570,7 +1570,7 @@ func TestHandoffEnvIdentity(t *testing.T) {
 				if want == "" {
 					t.Fatalf("config.AgentEnv does not export %s for a %s", key, tt.role)
 				}
-				if !strings.Contains(plan.Command, key+"="+want+" ") {
+				if !slices.Contains(strings.Fields(plan.Command), key+"="+want) {
 					t.Errorf("respawn command does not carry %s=%s:\n%s", key, want, plan.Command)
 				}
 			}
@@ -1587,6 +1587,33 @@ func TestHandoffEnvIdentity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHandoffEnvIdentityQuotesSeatName checks that a seat name needing shell
+// quoting reaches the respawn command quoted, as the first spawn's export
+// quotes it. The respawn builds the identity values into the shell command it
+// runs, so an unquoted name would split or expand in that shell.
+func TestHandoffEnvIdentityQuotesSeatName(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	const seat = "o'neil$x"
+	opts := restartOpts(townRoot, map[string]string{})
+	opts.Registry = reg
+	plan, err := buildRestartPlan(session.PolecatSessionName(reg.PrefixForRig("gastown"), seat), opts)
+	if err != nil {
+		t.Fatalf("buildRestartPlan: %v", err)
+	}
+	quoted := config.ShellQuote(seat)
+	for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"} {
+		if want := key + "=" + quoted; !strings.Contains(plan.Command, want) {
+			t.Errorf("respawn command does not carry %s:\n%s", want, plan.Command)
+		}
+		if bad := key + "=" + seat; strings.Contains(plan.Command, bad) {
+			t.Errorf("respawn command exports %s unquoted:\n%s", bad, plan.Command)
+		}
 	}
 }
 
