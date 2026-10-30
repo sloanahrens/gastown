@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -53,9 +54,10 @@ type ComposeSpec struct {
 	// local machine, which inside the container is the container itself; so is
 	// a loopback address, for the same reason.
 	//
-	// A scratch spec's DoltHost is the scratch Dolt service itself,
-	// ScratchDoltService, and no other: the live Dolt is on the Mac, and a
-	// scratch daemon that reached it would write to the live town's database.
+	// A scratch spec does not set DoltHost, and a scratch render ignores it. The
+	// scratch daemon's Dolt host comes from the scratch town's own settings under
+	// the bind mount, which the spec does not carry. The scratch render is tested
+	// to carry none of the live render's names, the live Dolt's among them.
 	DoltHost string
 
 	// Scratch renders the scratch project: its own engine, networks, volumes and
@@ -155,6 +157,10 @@ func scratchDaemonCommand() string {
 // healthcheck holds the daemon until the server accepts a connection, which is
 // the wait the engine's own healthcheck gives the daemon (gt-3bp5q): the port
 // is the Dolt server's default, 3306, which the service does not change.
+//
+// The probe runs bash's /dev/tcp, so it assumes bash in the image. That is not
+// verified: no image was pulled when this was written, so the L1 check confirms
+// it before the scratch project is trusted.
 const scratchDoltBody = `  %[1]s:
     image: %[2]q
     restart: unless-stopped
@@ -329,25 +335,21 @@ func (s ComposeSpec) validate() error {
 	case s.StopGrace < MinimumStopGrace:
 		return fmt.Errorf("compose spec: StopGrace %s is below MinimumStopGrace %s; a shorter grace period SIGKILLs the daemon mid-shutdown",
 			s.StopGrace, MinimumStopGrace)
-	case s.DoltHost == "":
+	case !s.Scratch && s.DoltHost == "":
 		return fmt.Errorf("compose spec: DoltHost is empty; pass town.json's dolt.container_host or dolt.host resolved, and an empty dolt.host is the local machine, which inside the container is the container itself")
-	}
-	if err := checkDoltHost(s.DoltHost); err != nil {
-		return err
 	}
 	if s.Scratch {
 		return s.validateScratch()
 	}
-	return nil
+	return checkDoltHost(s.DoltHost)
 }
 
 // validateScratch refuses a scratch spec that could reach the live town: the
-// live town's root, container name or compose project, or the live Dolt. The
-// container name and project are the config defaults a live daemon runs under.
-// The live root is the caller's, passed as LiveTownRoot, because no constant
-// names it, so an empty one is refused rather than compared as "no root". The
-// scratch daemon's DoltHost must be the scratch Dolt service, so a spec that
-// names the live Dolt, or any other host, cannot reach the live database.
+// live town's root, container name or compose project. The container name and
+// project are the config defaults a live daemon runs under. The live root is the
+// caller's, passed as LiveTownRoot, because no constant names it, so an empty
+// one is refused rather than compared as "no root". The scratch spec carries no
+// DoltHost: its daemon's Dolt host comes from the scratch town's own settings.
 func (s ComposeSpec) validateScratch() error {
 	switch {
 	case s.LiveTownRoot == "":
@@ -358,19 +360,18 @@ func (s ComposeSpec) validateScratch() error {
 		return fmt.Errorf("compose spec: scratch ContainerName %q is the live daemon's container name", s.ContainerName)
 	case s.Project == config.DefaultComposeProject:
 		return fmt.Errorf("compose spec: scratch Project %q is the live compose project", s.Project)
-	case s.DoltHost != ScratchDoltService:
-		return fmt.Errorf("compose spec: scratch DoltHost %q is not the scratch Dolt service %q; the scratch daemon reaches its own Dolt server by that name, never the live Dolt", s.DoltHost, ScratchDoltService)
 	case s.ScratchDoltImage == "":
 		return fmt.Errorf("compose spec: ScratchDoltImage is empty; the scratch project runs its own Dolt server, at DoltServerImage")
 	}
 	return s.checkScratchRoot()
 }
 
-// checkScratchRoot refuses a scratch town root that resolves to the live root or
-// to a path under it. The check runs on resolved paths, because a symlink to the
-// live root, or a directory under one that does not exist yet, names the live
-// town under another path. A path that cannot be resolved is refused rather than
-// taken as clear.
+// checkScratchRoot refuses a scratch town root that resolves to the live root, to
+// a path under it, or to an ancestor of it: mounting an ancestor exposes the live
+// town just as mounting it does. The check runs on resolved paths, because a
+// symlink to the live root, or a directory under one that does not exist yet,
+// names the live town under another path. A path that cannot be resolved is
+// refused rather than taken as clear.
 func (s ComposeSpec) checkScratchRoot() error {
 	scratch, err := resolvePath(s.TownRoot)
 	if err != nil {
@@ -382,6 +383,9 @@ func (s ComposeSpec) checkScratchRoot() error {
 	}
 	if within(scratch, live) {
 		return fmt.Errorf("compose spec: scratch TownRoot %q is the live town root %q or lies under it; the scratch project mounts its own directory, never the live one", s.TownRoot, s.LiveTownRoot)
+	}
+	if within(live, scratch) {
+		return fmt.Errorf("compose spec: scratch TownRoot %q contains the live town root %q; mounting it would expose the live town, so the scratch project mounts its own directory", s.TownRoot, s.LiveTownRoot)
 	}
 	return nil
 }
@@ -397,22 +401,28 @@ func within(path, root string) bool {
 // resolvePath returns path with its symlinks resolved. A path that does not
 // exist yet resolves through its nearest existing ancestor and keeps the rest
 // of its name, so a directory a scratch install has not created yet, under a
-// link to the live root, still resolves to the live root. Any other error stops
+// link to the live root, still resolves to the live root. A dangling link is an
+// entry that exists but whose target does not, so it is an error, never a name
+// to keep lexically: its target could be the live root. Any other error stops
 // the resolution.
 func resolvePath(path string) (string, error) {
 	clean := filepath.Clean(path)
 	dir, rest := clean, ""
 	for {
-		resolved, err := filepath.EvalSymlinks(dir)
-		if err == nil {
+		_, err := os.Lstat(dir)
+		switch {
+		case err == nil:
+			resolved, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				return "", err
+			}
 			return filepath.Join(resolved, rest), nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
+		case !errors.Is(err, fs.ErrNotExist):
 			return "", err
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return clean, nil
+			return "", fmt.Errorf("no existing ancestor of %q", clean)
 		}
 		rest = filepath.Join(filepath.Base(dir), rest)
 		dir = parent

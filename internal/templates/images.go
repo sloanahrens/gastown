@@ -34,7 +34,10 @@ const (
 	// DoltServerImage is the Dolt SQL server the scratch project runs, at the
 	// version DoltVersion names, so the scratch town's Dolt and the daemon
 	// image's client are one version. It is named by tag, not digest: the
-	// dolt-sql-server digest was not read when this was written, and only the
-	// scratch project uses it. The concatenation keeps the version in one place.
+	// dolt-sql-server digest could not be read when this was written (no
+	// registry access), and DoltImageDigest does not carry over, since a digest
+	// names one repository and that one is dolthub/dolt. Pin it once the digest
+	// is read; only the scratch project uses it. The concatenation keeps the
+	// version in one place.
 	DoltServerImage = "dolthub/dolt-sql-server:" + DoltVersion
 )

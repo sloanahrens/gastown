@@ -12,9 +12,9 @@ import (
 )
 
 // scratchSpec is the scratch project's daemon. Its image is one of the fields
-// the renderer refuses when empty, and its DoltHost is the scratch Dolt service
-// the renderer requires, so the golden built from it is a render a real scratch
-// start could apply.
+// the renderer refuses when empty, so the golden built from it is a render a
+// real scratch start could apply. It names no DoltHost: the scratch daemon's
+// Dolt host comes from the scratch town's own settings.
 func scratchSpec() templates.ComposeSpec {
 	return templates.ComposeSpec{
 		Project:          "gt-scratch",
@@ -22,7 +22,6 @@ func scratchSpec() templates.ComposeSpec {
 		Image:            "gt-daemon:4f2a1c9",
 		TownRoot:         "/towns/scratch",
 		StopGrace:        templates.MinimumStopGrace,
-		DoltHost:         templates.ScratchDoltService,
 		Scratch:          true,
 		ScratchDoltImage: templates.DoltServerImage,
 		LiveTownRoot:     liveSpec().TownRoot,
@@ -42,8 +41,8 @@ func TestRenderDaemonCompose_ScratchGolden(t *testing.T) {
 	}
 }
 
-// Each row is one of the three live-identity checks, the live Dolt, or a field a
-// scratch render cannot do without. Removing any check turns its row red.
+// Each row is one of the live-identity checks or a field a scratch render cannot
+// do without. Removing any check turns its row red.
 func TestRenderDaemonCompose_ScratchRefusesTheLiveIdentity(t *testing.T) {
 	t.Parallel()
 	live := liveSpec()
@@ -59,9 +58,6 @@ func TestRenderDaemonCompose_ScratchRefusesTheLiveIdentity(t *testing.T) {
 		{"directory under the live town root", func(s *templates.ComposeSpec) { s.TownRoot = live.TownRoot + "/scratch" }},
 		{"live container name", func(s *templates.ComposeSpec) { s.ContainerName = config.DefaultContainerName }},
 		{"live compose project", func(s *templates.ComposeSpec) { s.Project = config.DefaultComposeProject }},
-		{"live Dolt host", func(s *templates.ComposeSpec) { s.DoltHost = live.DoltHost }},
-		{"empty Dolt host", func(s *templates.ComposeSpec) { s.DoltHost = "" }},
-		{"another Dolt host", func(s *templates.ComposeSpec) { s.DoltHost = "other-dolt" }},
 		{"no live town root to check against", func(s *templates.ComposeSpec) { s.LiveTownRoot = "" }},
 		{"live town root not absolute", func(s *templates.ComposeSpec) { s.LiveTownRoot = "live" }},
 		{"no scratch Dolt image", func(s *templates.ComposeSpec) { s.ScratchDoltImage = "" }},
@@ -81,7 +77,11 @@ func TestRenderDaemonCompose_ScratchRefusesTheLiveIdentity(t *testing.T) {
 // A scratch root reached through a symlink to the live root, or under one, names
 // the live town under another path, so it is refused too. The directory under
 // the link does not exist yet, which is the case a scratch install starts from.
-// Removing the resolved-path comparison turns the link rows red.
+// A dangling link is refused as well: it exists, and its target may be the live
+// root, so it cannot be taken as a plain name. An ancestor of the live root is
+// refused, because mounting it exposes the live town. Removing the resolved-path
+// comparison turns the link rows red; resolving a dangling link by its name
+// turns the dangling rows red; dropping the ancestor check turns that row red.
 func TestRenderDaemonCompose_ScratchRefusesTheLiveRootThroughALink(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -93,6 +93,14 @@ func TestRenderDaemonCompose_ScratchRefusesTheLiveRootThroughALink(t *testing.T)
 	if err := os.Symlink(live, link); err != nil {
 		t.Fatal(err)
 	}
+	danglingIntoLive := filepath.Join(base, "dangling-live")
+	if err := os.Symlink(filepath.Join(live, "missing"), danglingIntoLive); err != nil {
+		t.Fatal(err)
+	}
+	danglingElsewhere := filepath.Join(base, "dangling-elsewhere")
+	if err := os.Symlink(filepath.Join(base, "nowhere"), danglingElsewhere); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name     string
 		liveRoot string
@@ -102,6 +110,10 @@ func TestRenderDaemonCompose_ScratchRefusesTheLiveRootThroughALink(t *testing.T)
 		{"a directory under a symlink to the live root", live, filepath.Join(link, "scratch")},
 		{"the live root reached through a symlink", link, live},
 		{"a directory under the live root", live, filepath.Join(live, "scratch")},
+		{"a dangling symlink into the live root", live, danglingIntoLive},
+		{"a directory under a dangling symlink into the live root", live, filepath.Join(danglingIntoLive, "scratch")},
+		{"a dangling symlink elsewhere", live, danglingElsewhere},
+		{"an ancestor of the live root", live, base},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -147,8 +159,8 @@ func TestRenderDaemonCompose_ScratchRefusesARootThatCannotBeResolved(t *testing.
 	}
 }
 
-// The control for the refusals above: a scratch root beside the live root is
-// not refused.
+// The controls for the refusals above: a scratch root beside the live root, and
+// one reached through a symlink to a directory elsewhere, are not refused.
 func TestRenderDaemonCompose_ScratchAcceptsARootBesideTheLiveRoot(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -156,11 +168,31 @@ func TestRenderDaemonCompose_ScratchAcceptsARootBesideTheLiveRoot(t *testing.T) 
 	if err := os.Mkdir(live, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	spec := scratchSpec()
-	spec.LiveTownRoot = live
-	spec.TownRoot = filepath.Join(base, "scratch")
-	if _, err := templates.RenderDaemonCompose(spec); err != nil {
-		t.Errorf("scratch TownRoot beside the live root = %v, want a render", err)
+	elsewhere := filepath.Join(base, "elsewhere")
+	if err := os.Mkdir(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		scratch string
+	}{
+		{"a root beside the live root", filepath.Join(base, "scratch")},
+		{"a root under a symlink to elsewhere", filepath.Join(link, "scratch")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			spec := scratchSpec()
+			spec.LiveTownRoot = live
+			spec.TownRoot = tt.scratch
+			if _, err := templates.RenderDaemonCompose(spec); err != nil {
+				t.Errorf("scratch TownRoot %q with live root %q = %v, want a render", tt.scratch, live, err)
+			}
+		})
 	}
 }
 
