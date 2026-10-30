@@ -137,7 +137,8 @@ func TestReadWanedAtTheExpiry(t *testing.T) {
 // and each names its own cause.
 func TestReadAbsentWithItsReason(t *testing.T) {
 	t.Parallel()
-	signedRec := func() Record {
+	signedRec := func(t *testing.T) Record {
+		t.Helper()
 		rec, err := Sign(Record{ForgedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), ForgedBy: "mayor"}, testKey)
 		if err != nil {
 			t.Fatal(err)
@@ -164,7 +165,7 @@ func TestReadAbsentWithItsReason(t *testing.T) {
 		}, ReasonUnparseable},
 		{"no expires_at", func(t *testing.T) string {
 			root := tempTown(t, map[string]any{"type": "town", "version": 2, "name": "test"})
-			rec := signedRec()
+			rec := signedRec(t)
 			writeSection(t, root, map[string]any{
 				"forged_at": rec.ForgedAt,
 				"forged_by": rec.ForgedBy,
@@ -174,7 +175,7 @@ func TestReadAbsentWithItsReason(t *testing.T) {
 		}, ReasonNoExpiry},
 		{"no signature", func(t *testing.T) string {
 			root := tempTown(t, map[string]any{"type": "town", "version": 2, "name": "test"})
-			rec := signedRec()
+			rec := signedRec(t)
 			rec.HMAC = ""
 			writeSection(t, root, map[string]any{
 				"forged_at":  rec.ForgedAt,
@@ -191,7 +192,7 @@ func TestReadAbsentWithItsReason(t *testing.T) {
 			return townWith(t, rec)
 		}, ReasonBadSignature},
 		{"a signed field changed after signing", func(t *testing.T) string {
-			rec := signedRec()
+			rec := signedRec(t)
 			rec.ForgedBy = "someone else"
 			return townWith(t, rec)
 		}, ReasonBadSignature},
