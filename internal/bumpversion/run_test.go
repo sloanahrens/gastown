@@ -721,3 +721,29 @@ func TestRunWithoutChangelogWarnsAndContinues(t *testing.T) {
 		t.Errorf("output lacks the skip warning:\n%s", w.out.String())
 	}
 }
+
+// TestRunRefusesAVersionParseDidNotCheck: Run is called with Options built by hand as
+// well as by Parse, so a version that is not MAJOR.MINOR.PATCH is refused before any
+// file is read, edited or committed.
+func TestRunRefusesAVersionParseDidNotCheck(t *testing.T) {
+	t.Parallel()
+	for _, version := range []string{"", "v1.3.0", "1.3", "1.3.0.1", "1.3.0\n", "1.3.x"} {
+		t.Run(version, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			err := w.run(Options{Version: version, Commit: true, Tag: true})
+			var bad *VersionError
+			if !errors.As(err, &bad) {
+				t.Fatalf("Run(%q) = %v, want a *VersionError", version, err)
+			}
+			if len(w.gitArgs) != 0 || len(w.log) != 0 {
+				t.Errorf("Run(%q) started work before refusing: git %v, steps %v", version, w.gitArgs, w.log)
+			}
+			for name, text := range w.files.files {
+				if strings.Contains(text, "1.3") && !strings.Contains(text, "1.2.1") {
+					t.Errorf("Run(%q) edited %s", version, name)
+				}
+			}
+		})
+	}
+}

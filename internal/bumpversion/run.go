@@ -31,13 +31,19 @@ type Env struct {
 // a refused run leaves no commit and no tag behind. A run that fails after its first
 // edit prints the command that restores the edited files, or, when one of them had
 // uncommitted work before the run, a warning and the diff to review instead. The
-// summary is the last block every run prints. Run never pushes.
+// summary is the last block a run that finishes prints; a run that fails prints its
+// error, and the restore note above, instead. Run never pushes.
 //
 // ACCEPTED-RISK: a mismatch or an unverified gt after make install is a warning, and
 // the run still commits and tags (gt-tpg0p.74). A hard stop there would leave the edits
 // uncommitted over a problem the operator can read, so the summary repeats the warning
 // as the last lines the command prints.
 func Run(env Env, opts Options) (err error) {
+	// Parse has checked the version already; Run is also called with Options built
+	// by hand, so it holds the same rule before it reads or edits anything.
+	if !versionPattern.MatchString(opts.Version) {
+		return &VersionError{Version: opts.Version}
+	}
 	var edited []string
 	var dirty map[string]bool
 	defer func() {
