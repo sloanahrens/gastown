@@ -651,9 +651,10 @@ func TestTierSweepCommand_ArgvPerTier(t *testing.T) {
 
 // TestTierSweepCommand_ExitOverrulesGreen: the integration and race stage reads
 // its output with the shell stage's fail-closed rule. A non-zero exit withholds
-// a GREEN line, and a RED line stays RED. The one exception is the command's
-// decline: an exit 2 that names the tier it does not offer leaves the verdicts
-// before it standing (gt-qgrdy).
+// a GREEN line, and a RED line stays RED. The one exception is the rig's own
+// script's decline: an exit 2 that names the tier it does not offer leaves the
+// verdicts before it standing (gt-qgrdy). The Go command offers both tiers, so
+// its output never excuses a tier, whatever exit status it reports.
 func TestTierSweepCommand_ExitOverrulesGreen(t *testing.T) {
 	t.Parallel()
 	const (
@@ -662,9 +663,9 @@ func TestTierSweepCommand_ExitOverrulesGreen(t *testing.T) {
 		race  = "tier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs /tmp/tier-sweep.z)\n"
 		decl  = "tier-sweep: unknown tier race (want shell, integration or race)\n"
 	)
-	integration := tierSweepStage{tiers: []string{"integration", "race"}}
 	tests := []struct {
 		name     string
+		script   bool // true when the rig's script runs the stage, not the Go command
 		output   string
 		exitCode int
 		want     map[string]string // tier -> verdict; a tier absent here has no verdict
@@ -677,13 +678,26 @@ func TestTierSweepCommand_ExitOverrulesGreen(t *testing.T) {
 			want: map[string]string{}},
 		{name: "RED stays RED", output: red + race, exitCode: 1,
 			want: map[string]string{"integration": tierSweepRed}},
-		{name: "decline leaves the GREEN before it standing", output: green + decl, exitCode: 2,
+		{name: "go command: a decline line at exit 1 excuses nothing", output: green + decl, exitCode: 1,
+			want: map[string]string{}},
+		{name: "go command: a decline line at exit 2 excuses nothing", output: green + decl, exitCode: 2,
+			want: map[string]string{}},
+		{name: "script: decline leaves the GREEN before it standing", script: true, output: green + decl, exitCode: 2,
 			want: map[string]string{"integration": tierSweepGreen}},
+		{name: "script: decline line at exit 1 is withheld", script: true, output: green + decl, exitCode: 1,
+			want: map[string]string{}},
+		{name: "script: decline line at exit 137 is withheld", script: true, output: green + decl, exitCode: 137,
+			want: map[string]string{}},
+		{name: "script: decline line at exit 0 is withheld, not the decline shape", script: true, output: green + decl, exitCode: 0,
+			want: map[string]string{}},
+		{name: "script: exit 2 with no decline line is withheld", script: true, output: green, exitCode: 2,
+			want: map[string]string{}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			reported := tierSweepStageReported(integration, tierSweepStageResult{output: tc.output, exitCode: tc.exitCode, ran: true})
+			stage := tierSweepStage{tiers: []string{"integration", "race"}, script: tc.script}
+			reported := tierSweepStageReported(stage, tierSweepStageResult{output: tc.output, exitCode: tc.exitCode, ran: true})
 			got := map[string]string{}
 			for tier, ts := range reported {
 				got[tier] = ts.Verdict
@@ -1926,6 +1940,7 @@ func TestTierSweepRigCycleTierTheScriptDoesNotOffer(t *testing.T) {
 			t.Parallel()
 			now := atHour(time.Now(), 15)
 			d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+			d.tierSweepSeams.treeHas = treeWith("scripts/tier-sweep.sh")
 			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
 			d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 			rec.result = func(st tierSweepStage) tierSweepStageResult {
@@ -1999,6 +2014,57 @@ func TestTierSweepRigCycleTierTheScriptDoesNotOffer(t *testing.T) {
 	}
 }
 
+// The Go command offers every tier it is asked for, so an unknown-tier line in
+// its output excuses nothing: the tier it names is RED, not left out of the
+// results. The stage does not depend on the exit status go run reports.
+func TestTierSweepRigCycleGoCommandDeclineExcusesNothing(t *testing.T) {
+	t.Parallel()
+	const (
+		shellSummary = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
+		declinedRace = "tier-sweep: unknown tier race (want shell, integration or race)\n"
+		wantLog      = "tier_sweep: gastown: race RED: no verdict line (exit 1)"
+	)
+	now := atHour(time.Now(), 15)
+	d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{output: declinedRace, exitCode: 1, ran: true}
+		}
+		return tierSweepStageResult{output: shellSummary, exitCode: 0, ran: true}
+	}
+	cycle := d.startDogCycle("tier_sweep")
+	defer cycle.close()
+	d.runTierSweepRig(context.Background(), cycle, "gastown", now)
+
+	race, ok := tierSweepTestState(t, d, "gastown").Tiers["race"]
+	if !ok || race.Verdict != tierSweepRed || len(race.FailedNames) != 1 || race.FailedNames[0] != "no verdict line (exit 1)" {
+		t.Errorf("race = %+v (present = %v), want RED %q: a Go command's unknown-tier line excuses no tier", race, ok, "no verdict line (exit 1)")
+	}
+	if !slices.Contains(strings.Split(logs.String(), "\n"), wantLog) {
+		t.Errorf("log has no line %q:\n%s", wantLog, logs.String())
+	}
+	if strings.Contains(logs.String(), "not offered") {
+		t.Errorf("a tier was logged as not offered, want race judged RED:\n%s", logs.String())
+	}
+	var raceBeads int
+	for _, c := range bd.created {
+		if strings.HasPrefix(c.Title, tierSweepBeadPrefix("gastown", "race")) {
+			raceBeads++
+		}
+	}
+	var raceItems int
+	for _, it := range tierSweepItems(t, d, now, "gastown") {
+		if strings.Contains(it.Summary, "tier sweep gastown race ") {
+			raceItems++
+		}
+	}
+	if raceBeads != 1 || raceItems != 1 {
+		t.Errorf("race beads = %d, attention items = %d, want 1 each: the RED race verdict files its bead and item", raceBeads, raceItems)
+	}
+}
+
 // gt-zlcl6: the rig's script runs its tiers in an order of its own, and a
 // decline is read as ending the stage rather than as a position in the stage's
 // list. A script that declines the tier the stage lists last and exits 2 never
@@ -2012,6 +2078,7 @@ func TestTierSweepRigCycleDeclinedTierEndsTheStageWhicheverOrderItRuns(t *testin
 	)
 	now := atHour(time.Now(), 15)
 	d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.treeHas = treeWith("scripts/tier-sweep.sh")
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	rec.result = func(st tierSweepStage) tierSweepStageResult {
@@ -2229,6 +2296,8 @@ func TestTierSweepRigCycleEveryTierDeclined(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
 	d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+	// A decline is the rig's script's contract, so the tree ships the script.
+	d.tierSweepSeams.treeHas = treeWith("scripts/tier-sweep.sh")
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
