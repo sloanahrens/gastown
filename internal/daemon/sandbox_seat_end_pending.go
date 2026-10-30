@@ -19,8 +19,10 @@ import (
 // branch, and the stamp the rules cursor is compared against — are recorded
 // here, one file per seat under the town's runtime directory. The record is
 // removed the moment an end decides anything else about the seat: removed,
-// kept for a fact that stays true, or not a sandbox seat any more. A record
-// that no pass settles stays until an operator looks at the seat.
+// kept for a fact that stays true, or not a sandbox seat any more. A record an
+// end cannot settle (a fact it could not measure) is retried on each heartbeat
+// and goes once its one-hour window has closed, so no record outlives the seat
+// it was waiting on.
 
 // pendingSandboxSeatEnd is one recorded seat end. Rig and Name are the file it
 // was read from; the file holds only the landing, since the path is the

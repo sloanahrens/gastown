@@ -150,6 +150,9 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 	// takes no lock and asks nothing.
 	fields, err := h.seatAgentFields(rig, name)
 	if err != nil {
+		// Nothing was measured, so no pass may still offer this seat's end; a
+		// record it left goes with the window that could have kept the seat.
+		h.expirePendingSeatEnd(rig, name)
 		log("kept: cannot read its agent bead: %v", err)
 		return false
 	}
@@ -159,6 +162,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		return false
 	}
 	if _, ok, err := h.openshellSeatFor(fields.Agent); err != nil {
+		h.expirePendingSeatEnd(rig, name)
 		log("kept: %v", err)
 		return false
 	} else if !ok {
@@ -182,53 +186,64 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		}
 		if why := end.keepReason(); why != "" {
 			kept = why
+			// The record and the decision that wrote it are one fact, so both
+			// go under the seat lock the removal below is decided under: a
+			// heartbeat pass never reads a record this end has already
+			// discarded, nor misses one it has just decided to keep
+			// (gt-381oj).
+			if why == rulesPendingReason {
+				h.recordPendingSeatEnd(rig, name, landing)
+			} else {
+				h.clearPendingSeatEnd(rig, name)
+			}
 			return nil
 		}
 		deleted, err := h.removeSeatDirs(rigPath, rig, name)
 		if err != nil {
 			// A removal that deleted something and then failed has not kept
 			// the seat: saying so would send an operator looking for a seat
-			// that is half gone (gt-sefzt).
+			// that is half gone (gt-sefzt). Either way nothing is left to
+			// wait for, so the record goes.
 			if deleted {
 				partial = err.Error()
 			} else {
 				kept = "removing its host directories: " + err.Error()
 			}
+			h.clearPendingSeatEnd(rig, name)
 			return nil
 		}
 		removed = true
+		h.clearPendingSeatEnd(rig, name)
 		return nil
 	})
 	switch {
 	case err != nil:
-		// The lock itself failed, so nothing was measured: whatever a later
-		// pass recorded about this seat is left for that pass to retry.
+		// The lock itself failed, so nothing was measured: the seat is neither
+		// kept nor removed, and its record goes with the window that could
+		// have kept it, so it is not offered for ever (gt-381oj).
+		h.expirePendingSeatEnd(rig, name)
 		log("kept: %v", err)
 		return false
 	case partial != "":
-		// The seat is half gone; nothing is left to wait for the rules ask.
-		h.clearPendingSeatEnd(rig, name)
 		log("its host directories were partly removed, then the removal failed: %s (the seat is finished: landed %s)", partial, landing.BeadID)
 		return false
 	case unmeasured != "":
-		// A fact that could not be read is the fact a later pass retries, so
-		// the record, if there is one, stays.
+		// A fact that could not be read is retried by a later pass, but only
+		// while the window that would have kept the seat is open (gt-381oj).
+		h.expirePendingSeatEnd(rig, name)
 		log("kept: %s", unmeasured)
 		return false
 	case kept == rulesPendingReason:
-		// The landing's own run of this step is spent, so the seat is recorded
-		// with its landing facts and offered again on later passes until the
-		// ask has happened or the window has closed (gt-381oj).
-		h.recordPendingSeatEnd(rig, name, landing)
+		// The landing's own run of this step is spent, so the seat was
+		// recorded under the lock with its landing facts and is offered again
+		// on later passes until the ask has happened or the window has closed
+		// (gt-381oj).
 		log("kept: %s", kept)
 		return false
 	case kept != "":
-		// A fact that stays true decides the seat: no pass waits for it.
-		h.clearPendingSeatEnd(rig, name)
 		log("kept: %s", kept)
 		return false
 	case removed:
-		h.clearPendingSeatEnd(rig, name)
 		log("removed its host directories: the seat is finished (landed %s)", landing.BeadID)
 	}
 	return removed
@@ -242,8 +257,12 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 // will offer it again.
 func (h *patrolScanHost) recordPendingSeatEnd(rig, name string, landing sandboxSeatLanding) {
 	landing.Submitted = rulesAskStamp(h.d.clk().Now(), landing.Submitted)
-	if err := writePendingSandboxSeatEnd(h.town(), rig, name, landing); err != nil {
-		h.d.logger.Printf("sandbox seat end %s/%s: cannot record the seat for a later rules pass: %v", rig, name, err)
+	write := h.writePendingSeatEnd
+	if write == nil {
+		write = writePendingSandboxSeatEnd
+	}
+	if err := write(h.town(), rig, name, landing); err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: cannot record the seat for a later rules pass: %v; the seat is kept, and only a later landing on the same polecat offers it a pass again", rig, name, err)
 	}
 }
 
@@ -252,6 +271,27 @@ func (h *patrolScanHost) clearPendingSeatEnd(rig, name string) {
 	if err := removePendingSandboxSeatEnd(h.town(), rig, name); err != nil {
 		h.d.logger.Printf("sandbox seat end %s/%s: cannot remove its pending record: %v", rig, name, err)
 	}
+}
+
+// expirePendingSeatEnd forgets a record once its one-hour window has closed. An
+// end that measured nothing keeps the seat, but that answer cannot wait for the
+// rules ask: past rulesPendingWindow the ask can no longer be pending, so a
+// record left behind could never end the seat and would only be offered again
+// on every heartbeat for ever. A record still inside its window stays, so the
+// next pass retries an end that could not be measured this time (gt-381oj).
+func (h *patrolScanHost) expirePendingSeatEnd(rig, name string) {
+	path, err := pendingSandboxSeatEndPath(h.town(), rig, name)
+	if err != nil {
+		return // a name no path can hold has no record
+	}
+	rec, ok := readPendingSandboxSeatEnd(path)
+	if !ok {
+		return // no record, or one this pass cannot read (reported when the store is listed)
+	}
+	if h.d.clk().Now().Sub(rec.Landing.Submitted) < rulesPendingWindow {
+		return // the ask can still happen: the next heartbeat offers the seat again
+	}
+	h.clearPendingSeatEnd(rig, name)
 }
 
 // measureSandboxSeatEnd reads the facts the seat's end decides on. It runs
@@ -323,9 +363,12 @@ func rulesAskStamp(now, submitted time.Time) time.Time {
 // A submission with no stamp is not pending: the seat is kept only on a fact
 // this step measured, never on the absence of one.
 //
-// A cursor this town cannot read is not pending either, and it says so once
-// with a line naming the seat, so an unreadable cursor never looks like a
-// clean one. A cursor not written yet is not pending and says nothing: the
+// A cursor this town cannot read is not pending either, and it says so on
+// every measurement, with a line naming the seat and the error, so an
+// unreadable cursor never looks like a clean one. Releasing the seat on that
+// answer is deliberate and the bead asks for it: only a fact this step measured
+// keeps a seat, and the seat that is released here loses its transcript for the
+// rules battery. A cursor not written yet is not pending and says nothing: the
 // battery has asked about nothing, and there is no fact to report (gt-381oj).
 func (h *patrolScanHost) rulesPending(rig, name string, submitted time.Time) bool {
 	if submitted.IsZero() || !h.d.isPatrolActive("jev_rules") {

@@ -865,6 +865,144 @@ func TestEndFinishedSandboxSeatRecordsAPendingSeatEnd(t *testing.T) {
 	}
 }
 
+// A record that cannot be written is a seat nothing will offer again, so the
+// failure is said once and the seat is kept: it must not look like a recorded
+// seat, and a lost record must never cost the seat its directories (gt-381oj).
+func TestEndFinishedSandboxSeatKeepsASeatWhoseRecordCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	f.host.d.clock = clockwork.NewFakeClockAt(now)
+	f.host.d.patrolConfig = jevRulesOnly()
+	f.cursorAt = now.Add(-11 * time.Minute)
+	f.host.writePendingSeatEnd = func(string, string, string, sandboxSeatLanding) error {
+		return errors.New("writing the pending seat end: no space left on device")
+	}
+
+	landing := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: now.Add(-10 * time.Minute), Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landing) {
+		t.Fatal("a seat whose pending record could not be written was removed")
+	}
+	if !dirExists(t, dirs.PolecatDir) {
+		t.Error("a seat kept for the rules ask lost its host directory")
+	}
+	want := "cannot record the seat for a later rules pass: writing the pending seat end: no space left on device"
+	if got := strings.Count(logs.String(), want); got != 1 {
+		t.Errorf("log says %q %d times, want once: %q", want, got, logs.String())
+	}
+}
+
+// The pending record is written under the seat lock the decision is made
+// under, so a heartbeat never lists a record this end has not finished
+// deciding on (gt-381oj).
+func TestEndFinishedSandboxSeatRecordsThePendingSeatUnderTheSeatLock(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	f.host.d.clock = clockwork.NewFakeClockAt(now)
+	f.host.d.patrolConfig = jevRulesOnly()
+	f.cursorAt = now.Add(-11 * time.Minute)
+	// The lock file the seat's end takes, spelled out here rather than taken
+	// from the code under test.
+	lockPath := filepath.Join(f.town, endRig, ".runtime", "locks", "polecat-"+endPolecat+".lock")
+	var wrote, lockedWhileWriting bool
+	f.host.writePendingSeatEnd = func(townRoot, rig, name string, landing sandboxSeatLanding) error {
+		probe := flock.New(lockPath)
+		held, err := probe.TryLock()
+		if err != nil {
+			t.Fatalf("probing the seat lock: %v", err)
+		}
+		if held {
+			_ = probe.Unlock()
+		}
+		wrote, lockedWhileWriting = true, !held
+		return writePendingSandboxSeatEnd(townRoot, rig, name, landing)
+	}
+
+	landing := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: now.Add(-10 * time.Minute), Landed: true}
+	f.host.endFinishedSandboxSeat(endRig, endPolecat, landing)
+
+	if !wrote {
+		t.Fatal("the seat kept for the rules ask was not recorded")
+	}
+	if !lockedWhileWriting {
+		t.Error("the pending record was written with the seat lock not held")
+	}
+	if records, _, err := readPendingSandboxSeatEnds(f.town); err != nil || len(records) != 1 {
+		t.Fatalf("pending ends = %+v, %v; want the one record", records, err)
+	}
+}
+
+// An end that measured nothing keeps the seat but does not leave its record for
+// ever: past the one-hour window no ask can be pending, so the record goes,
+// while one still inside its window stays for the next heartbeat to retry
+// (gt-381oj).
+func TestEndFinishedSandboxSeatExpiresAStalePendingRecord(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	// unreadableBead, unreadableGateway and lockedOut are the three ways a pass
+	// measures nothing: before the lock, inside it, and unable to take it.
+	unreadableBead := func(f *seatEndFake) {
+		f.agentDB.FailWith("show", errors.New("dolt: connection refused"))
+	}
+	unreadableGateway := func(f *seatEndFake) {
+		f.host.sandboxExists = func(string, string) (bool, error) {
+			return false, errors.New("gateway unreachable")
+		}
+	}
+	lockedOut := func(f *seatEndFake) {
+		// The lock's directory is a file, so the lock cannot be taken at all.
+		lockDir := filepath.Join(f.town, endRig, ".runtime", "locks")
+		if err := os.RemoveAll(lockDir); err != nil {
+			f.t.Fatal(err)
+		}
+		if err := os.WriteFile(lockDir, []byte("x"), 0o600); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name       string
+		advance    time.Duration
+		change     func(f *seatEndFake)
+		wantRecord bool
+	}{
+		// The recorded submission is ten minutes before now, so the window
+		// closes fifty minutes after now.
+		{name: "inside the window the record stays", advance: 30 * time.Minute, change: unreadableBead, wantRecord: true},
+		{name: "past the window the record goes", advance: 50 * time.Minute, change: unreadableBead},
+		{name: "an unreadable gateway inside the lock expires too", advance: 50 * time.Minute, change: unreadableGateway},
+		{name: "a lock that cannot be taken expires too", advance: 50 * time.Minute, change: lockedOut},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f, clk, _ := seatEndWaitingForRules(t, now)
+			clk.Advance(tt.advance)
+			tt.change(f)
+
+			landing := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: now.Add(-10 * time.Minute), Landed: true}
+			if f.host.endFinishedSandboxSeat(endRig, endPolecat, landing) {
+				t.Fatal("a seat whose facts could not be read was removed")
+			}
+			records, _, err := readPendingSandboxSeatEnds(f.town)
+			if err != nil {
+				t.Fatalf("reading the pending ends: %v", err)
+			}
+			if got := len(records) > 0; got != tt.wantRecord {
+				t.Errorf("a pending end is recorded = %v, want %v (%+v)", got, tt.wantRecord, records)
+			}
+		})
+	}
+}
+
 // A recorded seat is offered to the end again on every pass: once the rules ask
 // has happened, or the window has closed, the seat goes; while the ask is
 // outstanding it stays; and a seat another fact now decides is dropped from the
@@ -1012,6 +1150,18 @@ func TestReadRulesCursorReportsAnUnreadableFile(t *testing.T) {
 	}
 	if _, ok, err := d.readRulesCursor(); err == nil || ok {
 		t.Errorf("readRulesCursor = ok %v, err %v; want the parse error", ok, err)
+	}
+}
+
+// A cursor never written is no ask yet, not an unreadable cursor: the
+// production reader says so with no error, and the end reads it as not pending
+// without a line (gt-381oj).
+func TestReadRulesCursorReportsAMissingCursor(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+	if at, ok, err := d.readRulesCursor(); ok || err != nil {
+		t.Errorf("readRulesCursor = (%v, %v, %v); want no cursor and no error", at, ok, err)
 	}
 }
 
