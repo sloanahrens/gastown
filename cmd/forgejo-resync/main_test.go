@@ -41,6 +41,7 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 		"api-url without http":   {args: []string{"--api-url", "forgejo.test", "acme/gastown"}, stderr: "--api-url must be http:// or https://"},
 		"main-branch with space": {args: []string{"--main-branch", "ma in", "acme/gastown"}, stderr: "--main-branch 'ma in' must match"},
 		"repository with space":  {args: []string{"acme/git town"}, stderr: "'acme/git town' must be OWNER/NAME"},
+		"three-part repository":  {args: []string{"a/b/c"}, stderr: "'a/b/c' must be OWNER/NAME"},
 		"web-url without http":   {args: []string{"--web-url", "web.test", "acme/gastown"}, stderr: "the web root (--web-url or FORGEJO_URL) must be http:// or https://"},
 		"no HOME, no backup dir": {args: []string{"acme/gastown"}, stderr: "--backup-dir is required"},
 	}
@@ -90,24 +91,50 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 	}
 }
 
-// TestMainValidCommandLineFailsUntilRunIsPorted: a command line that parses has
-// no run behind it in this build, so it exits 1 and says so. Exiting 0 here
-// would report a resync that never happened.
-func TestMainValidCommandLineFailsUntilRunIsPorted(t *testing.T) {
+// TestMainValidCommandLineWithoutTokenExitsOne: a command line that parses and
+// reaches the run, with no admin token, is a failed run: exit 1, the broker
+// command named, and no usage hint, since the command line itself was valid.
+func TestMainValidCommandLineWithoutTokenExitsOne(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr strings.Builder
 	got := run([]string{"--dry-run", "acme/gastown"}, homeEnv, &stdout, &stderr)
 	if got != forgejoresync.ExitFailure {
 		t.Fatalf("run = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "the run for acme/gastown is not ported yet") {
-		t.Errorf("stderr = %q, want the unported run named", stderr.String())
+	if !strings.Contains(stderr.String(), "no admin token") {
+		t.Errorf("stderr = %q, want the missing token named", stderr.String())
 	}
 	if strings.Contains(stderr.String(), "usage: forgejo-resync --help") {
 		t.Errorf("stderr = %q, want no usage hint: the command line was valid", stderr.String())
 	}
 	if stdout.Len() != 0 {
-		t.Errorf("stdout = %q, want nothing from an unported run", stdout.String())
+		t.Errorf("stdout = %q, want nothing from a failed run", stdout.String())
+	}
+}
+
+// TestRunExitCodes pins the exit codes the command reports: help is 0, a refused
+// command line is 2, and a run that cannot start for want of an admin token is 1.
+// The token case stops before any git or HTTP call, so it is hermetic.
+func TestRunExitCodes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		args   []string
+		getenv func(string) string
+		want   int
+	}{
+		{name: "help", args: []string{"--help"}, getenv: noEnv, want: forgejoresync.ExitOK},
+		{name: "bad flag", args: []string{"--nope", "acme/gastown"}, getenv: homeEnv, want: forgejoresync.ExitUsage},
+		{name: "no admin token", args: []string{"--dry-run", "acme/gastown"}, getenv: homeEnv, want: forgejoresync.ExitFailure},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr strings.Builder
+			if got := run(tc.args, tc.getenv, &stdout, &stderr); got != tc.want {
+				t.Fatalf("run(%v) = %d, want %d (stderr: %s)", tc.args, got, tc.want, stderr.String())
+			}
+		})
 	}
 }
 

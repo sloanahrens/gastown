@@ -1,7 +1,6 @@
-// Package forgejoresync is the command line of scripts/forgejo-resync.sh as a
-// Go type: its flags, defaults and validation. The run that spends them arrives
-// in a later bead, and the shell script stays in place, and green, until the
-// port's last bead deletes it.
+// Package forgejoresync is scripts/forgejo-resync.sh as Go: the command line here,
+// the run in run.go, and the lift and restore around it. The shell script stays
+// in place until the port's deletion bead removes it.
 package forgejoresync
 
 import (

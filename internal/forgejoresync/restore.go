@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"time"
 
@@ -25,66 +24,11 @@ const defaultRestoreTimeout = 2 * time.Minute
 // since the provisioner's own lines already reached the log.
 var errRestoreFailed = errors.New("provisioner run failed")
 
-// Step is one ordered stage of the run. An error from Run stops the run there, and
+// Step is one ordered stage of the run. An error from a stage stops the run there, and
 // the protection restore still runs.
 type Step struct {
 	Name string
 	Run  func() error
-}
-
-// stubSteps are the five stages, in run order. Their bodies arrive with the run-flow
-// bead (gt-tpg0p.41); until then each succeeds without touching the repository.
-func stubSteps() []Step {
-	var steps []Step
-	for _, name := range []string{"list", "fetch", "lift", "push", "verify"} {
-		steps = append(steps, Step{Name: name, Run: func() error { return nil }})
-	}
-	return steps
-}
-
-// Run runs the steps in order and restores main's protection afterwards. The restore is
-// deferred once the admin token resolves, so every exit past that point runs it: a
-// failed step, a panic, and success alike. A failed restore forces ExitFailure even
-// when the steps succeeded, because main is left unprotected until someone reruns the
-// provisioner by hand.
-func (r *Resync) Run() (rc int) {
-	var token forgejoprov.Secret
-	ready := false
-	defer func() {
-		if !ready {
-			return
-		}
-		if err := r.restore(token); err != nil {
-			r.logf("%v", err)
-			r.logf("ERROR: could not restore %s protection on %s; run the provisioner by hand", r.Opts.MainBranch, r.Opts.Repo)
-			rc = ExitFailure
-		}
-	}()
-	token, err := forgejoprov.ResolveAdminToken(r.getenv(), r.readFile(), r.Opts.AdminTokenFile)
-	if err != nil {
-		r.logf("%v", err)
-		return ExitFailure
-	}
-	ready = true
-	if err := r.runSteps(); err != nil {
-		r.logf("%v", err)
-		return ExitFailure
-	}
-	return ExitOK
-}
-
-// runSteps runs each stage in order and stops at the first error.
-func (r *Resync) runSteps() error {
-	steps := r.Steps
-	if steps == nil {
-		steps = stubSteps()
-	}
-	for _, step := range steps {
-		if err := step.Run(); err != nil {
-			return fmt.Errorf("%s failed: %w", step.Name, err)
-		}
-	}
-	return nil
 }
 
 // restore re-runs the provisioner in process with the options a cutover used, so it

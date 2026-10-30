@@ -56,20 +56,32 @@ func (osFiles) CreateNew(path string, data []byte, perm fs.FileMode) error {
 // the rule is read and deleted through, and the seams the clock, the disk and
 // the progress log go through. A nil seam is the real one.
 type Resync struct {
-	Opts   *Options
+	Opts *Options
+	// Client is the Forgejo API the rule is read and deleted through; nil makes Run build
+	// one from the admin token, through HTTP.
 	Client *forgejoprov.Client
-	Files  Files
-	Now    func() time.Time
-	Log    func(string)
+	// HTTP sends the requests of the client Run builds; nil means the client's default.
+	HTTP  *http.Client
+	Files Files
+	Now   func() time.Time
+	Log   func(string)
 	// Getenv and ReadFile resolve the admin token; nil means the process's own.
 	Getenv   func(string) string
 	ReadFile func(string) ([]byte, error)
-	// Steps are the run's ordered stages; nil runs the stubs. Provision re-runs the
-	// provisioner; nil runs forgejoprov.Run.
+	// Steps are the run's ordered stages; nil runs the production stages. Provision re-runs
+	// the provisioner; nil runs forgejoprov.Run.
 	Steps     []Step
 	Provision func(context.Context, *forgejoprov.Options, forgejoprov.Env) int
 	// RestoreTimeout bounds the protection restore; zero means the default.
 	RestoreTimeout time.Duration
+	// Git runs the git calls the mirror makes; nil runs the git binary.
+	Git Git
+	// MkdirTemp and RemoveAll make and remove the scratch directory the mirror is built in;
+	// nil means os.MkdirTemp and os.RemoveAll.
+	MkdirTemp func(dir, pattern string) (string, error)
+	RemoveAll func(path string) error
+	// work is the scratch directory the fetch stage made; Run removes it on every path.
+	work string
 }
 
 // LiftProtection removes the protection rule on MainBranch so the admin push
