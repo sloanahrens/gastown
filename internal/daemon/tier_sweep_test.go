@@ -1493,6 +1493,120 @@ func TestRunTierSweep_LogsTheElapsedTimeOfTheSweep(t *testing.T) {
 	}
 }
 
+// TestTierSweepLogsSlotWait: a stage's wall can be mostly the container-gate
+// queue, so the finished line names the wait apart from the run time
+// (gt-sy14g). Mutation: drop the waitNote append and the first row goes red;
+// the second holds the wait under a second out of the line.
+func TestTierSweepLogsSlotWait(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		slotWait time.Duration
+		want     string
+		notWant  string
+	}{
+		{"a wait is named apart from the run time", 22*time.Minute + 27*time.Second,
+			"tier_sweep: gastown: integration finished (exit 0) in 26m53s (slot wait 22m27s);", ""},
+		{"no wait adds nothing", 0,
+			"tier_sweep: gastown: integration finished (exit 0) in 26m53s;", "slot wait"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+			clk := clockwork.NewFakeClockAt(now)
+			d.clock = clk
+			rec.result = func(st tierSweepStage) tierSweepStageResult {
+				clk.Advance(26*time.Minute + 53*time.Second)
+				var b strings.Builder
+				for _, tier := range st.tiers {
+					fmt.Fprintf(&b, "tier-sweep: %s GREEN passed=3 failed=0 skipped=0 in 4m23s\n", tier)
+				}
+				res := tierSweepStageResult{output: b.String(), exitCode: 0, ran: true}
+				if st.slot {
+					res.slotWait = tc.slotWait
+				}
+				return res
+			}
+			sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+			d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+			if !d.runTierSweep() {
+				t.Fatal("runTierSweep deferred; want a verdict")
+			}
+			out := logs.String()
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("log missing %q; got:\n%s", tc.want, out)
+			}
+			if tc.notWant != "" && strings.Contains(out, tc.notWant) {
+				t.Errorf("log carries %q beside no wait; got:\n%s", tc.notWant, out)
+			}
+		})
+	}
+}
+
+// TestTierSweepStateRecordsSlotWait: the record keeps the wait beside the
+// verdict, so the dashboard and the next investigation read queue and work
+// apart. The tiers of the stage that held the slot carry it; the shell stage
+// never holds the slot and omits it (gt-sy14g).
+func TestTierSweepStateRecordsSlotWait(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	clk := clockwork.NewFakeClockAt(now)
+	d.clock = clk
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		clk.Advance(time.Minute)
+		var b strings.Builder
+		for _, tier := range st.tiers {
+			fmt.Fprintf(&b, "tier-sweep: %s GREEN passed=3 failed=0 skipped=0 in 4m23s\n", tier)
+		}
+		res := tierSweepStageResult{output: b.String(), exitCode: 0, ran: true}
+		if st.slot {
+			res.slotWait = 22*time.Minute + 27*time.Second
+		}
+		return res
+	}
+	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+	if !d.runTierSweep() {
+		t.Fatal("runTierSweep deferred; want a verdict")
+	}
+	st := tierSweepTestState(t, d, "gastown")
+	for tier, want := range map[string]int{"integration": 1347, "race": 1347, "shell": 0} {
+		if got := st.Tiers[tier].SlotWaitSeconds; got != want {
+			t.Errorf("%s slot_wait_seconds = %d, want %d", tier, got, want)
+		}
+	}
+	// The shell tier's object must omit the key, not write a zero: a reader
+	// takes its presence as the stage having held the slot.
+	raw, err := os.ReadFile(tierSweepStatePath(d.config.TownRoot, "gastown"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written struct {
+		Tiers map[string]map[string]any `json:"tiers"`
+	}
+	if err := json.Unmarshal(raw, &written); err != nil {
+		t.Fatalf("decoding the record: %v", err)
+	}
+	for tier, want := range map[string]int{"integration": 1347, "race": 1347, "shell": 0} {
+		got, present := written.Tiers[tier]["slot_wait_seconds"]
+		if want == 0 {
+			if present {
+				t.Errorf("%s record carries slot_wait_seconds %v, want the key omitted", tier, got)
+			}
+			continue
+		}
+		if !present || got != float64(want) {
+			t.Errorf("%s record slot_wait_seconds = %v (present %t), want %d", tier, got, present, want)
+		}
+	}
+}
+
 // TestRunTierSweep_LogsSweepStarted: the cycle's start names the rig's sha and
 // every tier the cycle will run, so the dashboard's Tier sweeps pane reads an
 // exact running state instead of inferring it (gt-rntre).

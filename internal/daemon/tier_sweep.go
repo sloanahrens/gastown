@@ -188,6 +188,12 @@ type tierSweepTierResult struct {
 	// tree: the Go command, or the rig's own script. The sweep bead's check
 	// command names it. Empty when no command ran (gt-j0wki).
 	Command string `json:"command,omitempty"`
+	// SlotWaitSeconds is how long the tier's stage waited for the
+	// container-gate slot before holding it, in whole seconds. The stage's run
+	// time is separate from it, so a slow tier that was mostly a queue reads
+	// as such. Set for the tiers of a stage that held the slot, and omitted
+	// when there was no wait (gt-sy14g).
+	SlotWaitSeconds int `json:"slot_wait_seconds,omitempty"`
 	// SHA is the tip this verdict was taken at: the cycle's own tip for a tier
 	// that cycle ran, an earlier one for a tier a later Partial cycle carried
 	// forward (gt-euxf1). It, not the record's LastSHA, is what a verdict's
@@ -500,6 +506,11 @@ type tierSweepStageResult struct {
 	// reason, when set, is the RED reason a tier with no verdict line takes in
 	// place of the exit-code reason: a tree with no command to run.
 	reason string
+	// slotWait is how long the stage's step waited for the container-gate slot
+	// before holding it, from the step's SlotWait. Elapsed begins after the
+	// hold, so a stage that sat out a queue reads as its own work alone
+	// (gt-sy14g).
+	slotWait time.Duration
 }
 
 // tierSweepSeams replace the sweep's outside effects in tests; the zero value
@@ -1145,10 +1156,22 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			if runnable {
 				ts.Command = st.command()
 			}
+			// The stage held the slot, so its wait is the tiers' own: a tier
+			// whose wall was mostly the queue says so in the record, apart from
+			// the run time (gt-sy14g).
+			if st.slot {
+				ts.SlotWaitSeconds = int(res.slotWait.Round(time.Second).Seconds())
+			}
 			results[tier] = ts
 		}
-		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s; last lines:\n%s",
-			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), lastLines(res.output, tierSweepLogTailLines))
+		waitNote := ""
+		// Under a second reads as no wait, and the line is about the sweep, not
+		// a clock tick.
+		if res.slotWait >= time.Second {
+			waitNote = fmt.Sprintf(" (slot wait %s)", res.slotWait.Round(time.Second))
+		}
+		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s%s; last lines:\n%s",
+			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), waitNote, lastLines(res.output, tierSweepLogTailLines))
 	}
 
 	if len(results) == 0 {
@@ -1467,6 +1490,7 @@ func (d *Daemon) tierSweepRunStage(ctx context.Context, dir string, st tierSweep
 		exitCode: step.ExitCode,
 		timedOut: step.TimedOut,
 		ran:      true,
+		slotWait: step.SlotWait,
 	}
 }
 
