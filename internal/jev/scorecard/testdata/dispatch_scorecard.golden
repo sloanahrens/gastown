@@ -17,7 +17,7 @@ fits_twenty_minutes (noul)
   logged 7, labeled 4, positives 3, negatives 1, base rate 75.0%
   at 0.5: precision 66.7%, recall 66.7%
   best F1 0.857 at threshold 0.200
-  precision at the best F1 cut: 75.0%
+  precision at the best F1 cut: 75.0% over 4 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      1  0.200  1.000
@@ -30,7 +30,7 @@ lands_first_try (noul)
   logged 7, labeled 6, positives 4, negatives 2, base rate 66.7%
   at 0.5: precision 100.0%, recall 75.0%
   best F1 0.889 at threshold 0.300
-  precision at the best F1 cut: 80.0%
+  precision at the best F1 cut: 80.0% over 5 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      2  0.250  0.500

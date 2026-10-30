@@ -5,7 +5,7 @@ blocked_on_environment (noul)
   logged 6, labeled 1, positives 1, negatives 0, base rate 100.0%
   at 0.5: precision n/a, recall 0.0%
   best F1 1.000 at threshold 0.100
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      1  0.100  1.000
     0.2-0.4      0  n/a  n/a
@@ -42,7 +42,7 @@ making_progress (noul)
   logged 6, labeled 2, positives 1, negatives 1, base rate 50.0%
   at 0.5: precision 50.0%, recall 100.0%
   best F1 0.667 at threshold 0.800
-  precision at the best F1 cut: 50.0%
+  precision at the best F1 cut: 50.0% over 2 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      0  n/a  n/a

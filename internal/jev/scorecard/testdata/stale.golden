@@ -17,7 +17,7 @@ obsolete (noul)
   logged 4, labeled 2, positives 1, negatives 1, base rate 50.0%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.900
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      1  0.100  0.000
     0.2-0.4      0  n/a  n/a
@@ -36,7 +36,7 @@ superseded (noul)
   logged 3, labeled 2, positives 1, negatives 1, base rate 50.0%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.800
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      1  0.100  0.000
     0.2-0.4      0  n/a  n/a
@@ -49,7 +49,7 @@ worth_doing (noul)
   logged 5, labeled 1, positives 1, negatives 0, base rate 100.0%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.900
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      0  n/a  n/a
