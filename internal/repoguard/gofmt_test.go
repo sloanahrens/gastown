@@ -54,18 +54,26 @@ func lookPathMissing(string) (string, error) { return "", errors.New("not found"
 
 // TestCheckGofmtTable runs the guard over fake git and gofmt. Every case also
 // checks the invocation: gofmt runs in root with -s -l first, and no file in
-// unchecked is ever handed to it.
+// unchecked is ever handed to it. The listing of tracked .go files is checked
+// too: one NUL-separated call for *.go, in root.
 func TestCheckGofmtTable(t *testing.T) {
 	t.Parallel()
 	const header = "repo-guards: these files are not gofmt -s clean; run 'gofmt -s -w' on them:"
 	tests := []struct {
 		name          string
 		files         []string
+		deleted       []string
 		needsFormat   []string
 		needsSimplify []string
 		unchecked     []string
 		want          []string
 	}{
+		{
+			name:      "tracked file deleted from the worktree is not checked",
+			files:     []string{"main.go", "gone.go"},
+			deleted:   []string{"gone.go"},
+			unchecked: []string{"gone.go"},
+		},
 		{
 			name:  "clean files pass",
 			files: []string{"main.go", "pkg/a.go"},
@@ -109,10 +117,14 @@ func TestCheckGofmtTable(t *testing.T) {
 			t.Parallel()
 			const root = "/repo"
 			g := &fakeGit{files: tc.files}
+			g.deleted = tc.deleted
 			e := &fakeExec{run: fakeGofmt(tc.needsFormat, tc.needsSimplify)}
 			got, problem := CheckGofmt(g, e, lookPathFound, root)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("unformatted = %q, want %q", got, tc.want)
+			}
+			if len(g.lsCalls) != 1 || g.lsCalls[0].root != root || !g.lsCalls[0].nul || !slices.Equal(g.lsCalls[0].pathspec, []string{"*.go"}) {
+				t.Errorf("ls-files calls = %+v, want one NUL-separated listing of *.go in %s", g.lsCalls, root)
 			}
 			wantProblem := ""
 			if len(tc.want) > 0 {
@@ -147,9 +159,17 @@ func TestCheckGofmtProblems(t *testing.T) {
 		lookPath    func(string) (string, error)
 		files       []string
 		lsErr       error
+		deletedErr  error
 		run         func(args []string) (string, error)
 		wantProblem string
 	}{
+		{
+			name:        "listing deleted go files fails",
+			lookPath:    lookPathFound,
+			files:       []string{"main.go"},
+			deletedErr:  errors.New("not a git repository"),
+			wantProblem: "repo-guards: cannot list the tracked .go files",
+		},
 		{
 			name:        "gofmt missing from PATH",
 			lookPath:    lookPathMissing,
@@ -179,6 +199,7 @@ func TestCheckGofmtProblems(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			g := &fakeGit{files: tc.files, lsErr: tc.lsErr}
+			g.delErr = tc.deletedErr
 			e := &fakeExec{run: tc.run}
 			got, problem := CheckGofmt(g, e, tc.lookPath, "/repo")
 			if got != nil {

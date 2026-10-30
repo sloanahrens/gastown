@@ -6,19 +6,36 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
-// fakeGit answers the Git seam from fixed data. It records nothing: each case
-// states the index it expects the guard to read.
+// fakeGit answers the Git seam from fixed data. It records each LsFiles call,
+// so a test can check the listing the guard asked for; each case states the
+// index it expects the guard to read.
 type fakeGit struct {
 	tracked map[string]bool
 	files   []string
 	lsErr   error
+	deleted []string
+	delErr  error
+	lsCalls []lsCall
+}
+
+// lsCall is one LsFiles call a fakeGit answered.
+type lsCall struct {
+	root     string
+	nul      bool
+	pathspec []string
 }
 
 func (f *fakeGit) LsFiles(root string, nul bool, pathspec ...string) ([]string, error) {
+	f.lsCalls = append(f.lsCalls, lsCall{root: root, nul: nul, pathspec: pathspec})
 	return f.files, f.lsErr
+}
+
+func (f *fakeGit) LsDeleted(root string, pathspec ...string) ([]string, error) {
+	return f.deleted, f.delErr
 }
 
 func (f *fakeGit) IsTracked(root, path string) bool {
@@ -154,12 +171,50 @@ func TestCLIGitIsTrackedTable(t *testing.T) {
 	}
 }
 
-// TestCheckIssuesJSONLProblemText pins the guard's message to the script's
-// line byte for byte, since operators grep for it.
+// TestCheckIssuesJSONLProblemText pins the guard's message to the line the
+// script prints, byte for byte, since operators grep for it. The script is the
+// source: the test reads it, so the constant cannot drift from what ships.
 func TestCheckIssuesJSONLProblemText(t *testing.T) {
 	t.Parallel()
-	const want = "repo-guards: .beads/issues.jsonl is tracked; the Dolt server is the only beads backend (git rm --cached it)"
-	if IssuesJSONLProblem != want {
-		t.Errorf("IssuesJSONLProblem = %q, want %q", IssuesJSONLProblem, want)
+	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "repo-guards.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `echo "` + IssuesJSONLProblem + `" >&2`
+	if !strings.Contains(string(script), want) {
+		t.Errorf("scripts/repo-guards.sh does not print IssuesJSONLProblem: want a line with %s", want)
+	}
+}
+
+// TestCLIGitLsDeletedTable checks the argv git gets for the deleted listing,
+// and that its NUL-separated output is split. A failed listing is returned.
+func TestCLIGitLsDeletedTable(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("exit status 128")
+	tests := []struct {
+		name string
+		out  string
+		err  error
+		want []string
+	}{
+		{name: "deleted names split on NUL", out: "gone.go\x00dir/old.go\x00", want: []string{"gone.go", "dir/old.go"}},
+		{name: "a failed listing is an error", err: failure},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := &fakeExec{run: func([]string) (string, error) { return tc.out, tc.err }}
+			got, err := CLIGit{ex: e}.LsDeleted("/repo", "*.go")
+			if !errors.Is(err, tc.err) {
+				t.Errorf("err = %v, want %v", err, tc.err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("paths = %q, want %q", got, tc.want)
+			}
+			wantArgs := []string{"ls-files", "--deleted", "-z", "--", "*.go"}
+			if len(e.calls) != 1 || e.calls[0].dir != "/repo" || e.calls[0].name != "git" || !slices.Equal(e.calls[0].args, wantArgs) {
+				t.Errorf("calls = %+v, want one git %q in /repo", e.calls, wantArgs)
+			}
+		})
 	}
 }
