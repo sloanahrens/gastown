@@ -47,7 +47,7 @@ func TestRunDaemonEnableSupervisor_RefusesWhenDaemonLockHeld(t *testing.T) {
 
 	provisioned := false
 	provision := func(string, time.Duration) (string, error) { provisioned = true; return "", nil }
-	if err := enableSupervisor(townRoot, provision); err == nil {
+	if err := enableSupervisor(townRoot, provision, func(string) error { return nil }); err == nil {
 		t.Fatal("enableSupervisor() error = nil, want error while daemon.lock is held")
 	} else if !strings.Contains(err.Error(), "stop the running daemon first: gt daemon stop") {
 		t.Errorf("enableSupervisor() error = %q, want it to mention 'gt daemon stop'", err.Error())

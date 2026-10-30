@@ -47,6 +47,12 @@ type daemonSupervisor struct {
 	// through the control, which needs the kind alone; the container kind sets
 	// it, because its container is named by the town's settings.
 	state templates.SupervisorReader
+	// owner is the owner the daemon this supervisor starts will name for
+	// itself (daemon.DetectSelf in that process), which the start guard needs
+	// to judge a start the way Run will. The container kind refuses here when
+	// the town does not set both container fields, so no guard ever reads the
+	// live container's name off a default.
+	owner func() (daemon.Owner, error)
 
 	ctl *daemonControl // what runs the commands above and reads the job
 }
@@ -86,6 +92,26 @@ func (s *daemonSupervisor) runArgv(build func() ([]string, error)) error {
 	return s.ctl.run(argv)
 }
 
+// runArgvEnv builds one of the supervisor's argv and runs it with extra
+// environment. Only the one start --takeover makes uses it; every other
+// command goes through runArgv and the plain argv seam, which carries none.
+func (s *daemonSupervisor) runArgvEnv(build func() ([]string, error), env []string) error {
+	argv, err := build()
+	if err != nil {
+		return fmt.Errorf("%w: %w", errSupervisorRefused, err)
+	}
+	return s.ctl.runEnv(argv, env)
+}
+
+// runStartArgv runs a start-side argv with env when there is any, through the
+// env-carrying seam, and through the plain argv seam otherwise.
+func (s *daemonSupervisor) runStartArgv(build func() ([]string, error), env []string) error {
+	if len(env) > 0 {
+		return s.runArgvEnv(build, env)
+	}
+	return s.runArgv(build)
+}
+
 // daemonControl is what the daemon's start, stop, restart and status paths
 // take from the host: supervisor detection (the town's daemon.supervisor
 // setting first, then GOOS and the file paths), running the supervisor's
@@ -106,12 +132,25 @@ type daemonControl struct {
 	// runs in, never the global one, which nothing here may change.
 	dockerContext string
 	run           func(argv []string) error
+	// runEnv runs argv with env added to the process environment: the env
+	// carrying seam beside run, for the one start --takeover makes (the
+	// compose file passes GT_DAEMON_TAKEOVER through to the container).
+	runEnv func(argv []string, env []string) error
+	// guard is the startup guard every start path asks before it launches
+	// anything: daemon.GuardStart, with self the owner the started daemon will
+	// name. nil reads as the real guard, so a control built without one can
+	// never skip it.
+	guard func(townRoot string, self daemon.Owner, takeover bool) error
+	// syncFile brings the supervisor file up to date and reports whether it
+	// rewrote it (syncSupervisorFile); nil reads as that. Only start reads it
+	// through this seam, so a test can say the file was rewritten.
+	syncFile func(townRoot string) bool
 	// dockerInspect runs one docker command and returns its stdout; a failure
 	// is a *templates.DockerInspectError carrying its stderr, so the container
 	// kind's state read never parses the two streams as one.
 	dockerInspect templates.ContainerDocker
 	stateFor      templates.SupervisorReader
-	spawn         func(townRoot string) (int, error)
+	spawn         func(townRoot string, env []string) (int, error)
 	stopDirect    func(townRoot string) error
 	isRunning     func(townRoot string) (bool, int, error)
 	// install writes a repaired supervisor file (installSupervisorFile).
@@ -136,10 +175,11 @@ func realDaemonControl() *daemonControl {
 		patrolConfig: daemon.ReadPatrolConfig,
 		run: func(argv []string) error {
 			out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from detectDaemonSupervisor
-			if err != nil {
-				return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-			}
-			return nil
+			return commandError(out, err)
+		},
+		runEnv: func(argv, env []string) error {
+			out, err := commandWithEnv(argv, env).CombinedOutput()
+			return commandError(out, err)
 		},
 		dockerInspect:     templates.RunDockerInspect,
 		stateFor:          supervisorJobState,
@@ -150,9 +190,26 @@ func realDaemonControl() *daemonControl {
 		pollInterval:      daemonPollInterval,
 		loadRetryInterval: supervisorLoadRetryInterval,
 	}
-	c.spawn = func(townRoot string) (int, error) { return spawnDaemonProcess(c, townRoot) }
+	c.spawn = func(townRoot string, env []string) (int, error) { return spawnDaemonProcess(c, townRoot, env) }
 	c.statusLine = c.supervisedLine
 	return c
+}
+
+// commandError is the error a supervisor command's failure reports: the exit
+// error with the command's combined output after it.
+func commandError(out []byte, err error) error {
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// commandWithEnv builds the command the env-carrying seam runs: argv with env
+// added to this process's environment.
+func commandWithEnv(argv, env []string) *exec.Cmd {
+	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // fixed argv from detectDaemonSupervisor
+	cmd.Env = append(os.Environ(), env...)
+	return cmd
 }
 
 // supervisorJobState is the live job read of this host, keyed by kind alone.
@@ -277,6 +334,18 @@ func (c *daemonControl) hostSupervisorFile() (path, kind string) {
 	return "", ""
 }
 
+// hostSupervisorJob is the supervisor enable-supervisor is about to provision
+// on this host, as far as the start guard needs it: its kind and owner, none of
+// its commands. nil on a host with no supported supervisor, which the guard
+// then judges as a hand-run start.
+func (c *daemonControl) hostSupervisorJob() *daemonSupervisor {
+	path, kind := c.hostSupervisorFile()
+	if kind == "" {
+		return nil
+	}
+	return c.fileSupervisor(path, kind)
+}
+
 // composeFilePath is where a container town's compose file lives: rendered
 // when the town is set up, read by the container supervisor's argv.
 func composeFilePath(townRoot string) string {
@@ -349,7 +418,13 @@ func (c *daemonControl) containerSupervisor(composeFile string, cfg *config.Daem
 		load:      fmt.Sprintf("docker --context %s compose -p %s -f %s up -d daemon", c.dockerCLIContext(), project, composeFile),
 		fallback:  "or unset daemon.supervisor to run the daemon by hand",
 		state:     c.containerJobState(cfg),
-		ctl:       c,
+		owner: func() (daemon.Owner, error) {
+			if _, err := containerComposeProject(cfg); err != nil {
+				return daemon.Owner{}, err
+			}
+			return daemon.Owner{Kind: config.SupervisorContainer, ID: cfg.ContainerName()}, nil
+		},
+		ctl: c,
 	}, nil
 }
 
@@ -462,7 +537,10 @@ func (c *daemonControl) fileSupervisor(p, kind string) *daemonSupervisor {
 			bootstrap: argv("launchctl", "bootstrap", fmt.Sprintf("gui/%d", c.uid), p),
 			load:      fmt.Sprintf("launchctl bootstrap gui/%d %s", c.uid, p),
 			fallback:  "or remove its file to run the daemon by hand",
-			ctl:       c,
+			owner: func() (daemon.Owner, error) {
+				return daemon.Owner{Kind: config.SupervisorLaunchd, ID: templates.LaunchdLabel}, nil
+			},
+			ctl: c,
 		}
 	case config.SupervisorSystemd:
 		return &daemonSupervisor{
@@ -472,7 +550,13 @@ func (c *daemonControl) fileSupervisor(p, kind string) *daemonSupervisor {
 			bootstrap: argv("systemctl", "--user", "enable", "--now", templates.SystemdUnit),
 			load:      "systemctl --user daemon-reload && systemctl --user enable --now " + templates.SystemdUnit,
 			fallback:  "or remove its file to run the daemon by hand",
-			ctl:       c,
+			// A systemd daemon names itself by its invocation id, which no
+			// CLI can know: the empty id equals no recorded owner, so the
+			// guard judges the recorded one on its heartbeat and probe.
+			owner: func() (daemon.Owner, error) {
+				return daemon.Owner{Kind: config.SupervisorSystemd}, nil
+			},
+			ctl: c,
 		}
 	}
 	return nil
@@ -577,6 +661,13 @@ func (c *daemonControl) reconcileSupervisorJob(townRoot string, daemonPID int) (
 		return "", nil
 	}
 
+	// The reload below starts a daemon, so it asks the guard first. This is
+	// after the file sync on purpose: a gt up that reloads nothing never asks,
+	// and a daemon already running under its own owner is not judged here
+	// (gt-qpeei.28).
+	if err := c.guardStart(townRoot, sup, false); err != nil {
+		return "", fmt.Errorf("not reloading the %s job from its rewritten file: %w", sup.name, err)
+	}
 	if err := sup.startFromFile(); err != nil {
 		return "", fmt.Errorf("reloading the %s job from its rewritten file: %w", sup.name, err)
 	}
@@ -609,7 +700,12 @@ func (c *daemonControl) reconcileSupervisorJob(townRoot string, daemonPID int) (
 // fails; so the job is confirmed gone first and the load is retried. An unload
 // that reports failure is checked against the job's live state too, because
 // launchd reports errors for a job it did remove.
-func (s *daemonSupervisor) startFromFile() error {
+func (s *daemonSupervisor) startFromFile() error { return s.startFromFileEnv(nil) }
+
+// startFromFileEnv is startFromFile with env added to the load command, so the
+// one start --takeover makes keeps its variable when the supervisor file was
+// rewritten first. The unload carries none: only the start needs it.
+func (s *daemonSupervisor) startFromFileEnv(env []string) error {
 	// Unload only a job the manager knows: bootout on a job that is not there
 	// fails, and startFromFile is also reached from start, where "not loaded"
 	// (the state `gt daemon stop` leaves) is ordinary.
@@ -623,7 +719,7 @@ func (s *daemonSupervisor) startFromFile() error {
 		}
 		s.waitUnloaded()
 	}
-	return s.loadJob()
+	return s.loadJobEnv(env)
 }
 
 // waitUnloaded polls until the service manager no longer knows the job, for
@@ -650,13 +746,17 @@ const (
 // gt up) loaded it between attempts. It is the half of an unload-and-load
 // that must not be given up on early: a failure here leaves the town with no
 // loaded job and no daemon.
-func (s *daemonSupervisor) loadJob() error {
+func (s *daemonSupervisor) loadJob() error { return s.loadJobEnv(nil) }
+
+// loadJobEnv is loadJob with env added to the bootstrap command (see
+// runStartArgv).
+func (s *daemonSupervisor) loadJobEnv(env []string) error {
 	var err error
 	for attempt := range supervisorLoadAttempts {
 		if attempt > 0 {
 			s.ctl.sleep(s.ctl.loadRetryInterval)
 		}
-		if err = s.runArgv(s.bootstrap); err == nil {
+		if err = s.runStartArgv(s.bootstrap, env); err == nil {
 			return nil
 		}
 		if errors.Is(err, errSupervisorRefused) {
@@ -683,6 +783,15 @@ func startDaemon(townRoot string) (via string, pid int, err error) {
 }
 
 func (c *daemonControl) startDaemon(townRoot string) (via string, pid int, err error) {
+	return c.startDaemonWith(townRoot, false)
+}
+
+// startDaemonWith is startDaemon with the operator's --takeover. Whatever the
+// supervisor, the startup guard is asked first, before the supervisor file is
+// touched and before any command runs: a refusal reaches the operator with
+// nothing launched (gt-qpeei.28). A supervisor error refuses the start and
+// never falls through to a direct spawn.
+func (c *daemonControl) startDaemonWith(townRoot string, takeover bool) (via string, pid int, err error) {
 	running, pid, err := c.isRunning(townRoot)
 	if err != nil {
 		return "", 0, fmt.Errorf("checking daemon status: %w", err)
@@ -694,15 +803,33 @@ func (c *daemonControl) startDaemon(townRoot string) (via string, pid int, err e
 	if err != nil {
 		return "", 0, err
 	}
+	if err := c.refuseFileKindTakeover(sup, takeover); err != nil {
+		return "", 0, err
+	}
+	if err := c.guardStart(townRoot, sup, takeover); err != nil {
+		return "", 0, err
+	}
+	// Only a start the operator asked to take over carries the variable; every
+	// other start goes through the plain argv seam, which carries none.
+	var takeoverEnv []string
+	if takeover {
+		takeoverEnv = []string{config.TakeoverEnv + "=1"}
+	}
 	if sup != nil {
-		rewritten := c.syncSupervisorFile(townRoot)
+		sync := c.syncSupervisorFile
+		if c.syncFile != nil {
+			sync = c.syncFile
+		}
+		rewritten := sync(townRoot)
 		var runErr error
 		if rewritten {
 			// The file the job will start from is the one just rewritten, so
 			// the job has to be loaded from it rather than restarted in place.
-			runErr = sup.startFromFile()
+			// The takeover variable rides the load too, or a start the guard
+			// approved over a fresh owner would run without it.
+			runErr = sup.startFromFileEnv(takeoverEnv)
 		} else {
-			runErr = sup.runArgv(sup.start)
+			runErr = sup.runStartArgv(sup.start, takeoverEnv)
 			if runErr != nil {
 				// kickstart / restart reach only a job the service manager knows.
 				// One that gt daemon stop unloaded is bootstrapped instead, so that
@@ -729,8 +856,49 @@ func (c *daemonControl) startDaemon(townRoot string) (via string, pid int, err e
 		}
 		return sup.name, pid, nil
 	}
-	pid, err = c.spawn(townRoot)
+	pid, err = c.spawn(townRoot, takeoverEnv)
 	return "", pid, err
+}
+
+// guardStart asks the startup guard whether the daemon sup is about to start
+// (or a hand-run one, when sup is nil) may take townRoot. The guard is
+// daemon.GuardStart, the one function Run asks in the daemon itself, so a
+// refusal here is the refusal the daemon would give after launch.
+func (c *daemonControl) guardStart(townRoot string, sup *daemonSupervisor, takeover bool) error {
+	self := daemon.Owner{Kind: daemon.OwnerKindManual}
+	if sup != nil && sup.owner != nil {
+		owner, err := sup.owner()
+		if err != nil {
+			return err
+		}
+		self = owner
+	}
+	guard := c.guard
+	if guard == nil {
+		guard = realStartGuard
+	}
+	return guard(townRoot, self, takeover)
+}
+
+// realStartGuard is the guard of this host: docker, launchd and systemd read
+// for real, the wall clock.
+func realStartGuard(townRoot string, self daemon.Owner, takeover bool) error {
+	return daemon.GuardStart(townRoot, self, takeover, nil, time.Now())
+}
+
+// refuseFileKindTakeover refuses --takeover under launchd or systemd. Their
+// job is the one thing a takeover must not start beside a recorded owner, and
+// neither can carry the variable into the daemon (the job's own environment is
+// fixed in its file), so the operator boots the job out and starts without it.
+func (c *daemonControl) refuseFileKindTakeover(sup *daemonSupervisor, takeover bool) error {
+	if !takeover || sup == nil || sup.name == config.SupervisorContainer {
+		return nil
+	}
+	hint := "stop the job first"
+	if argv, err := sup.stop(); err == nil {
+		hint = "boot the job out first: " + strings.Join(argv, " ")
+	}
+	return fmt.Errorf("--takeover cannot start the daemon under %s: %s, then run gt daemon start without --takeover", sup.name, hint)
 }
 
 // daemonPollInterval is how often waitForDaemon/waitForRestart re-check the
@@ -846,6 +1014,11 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 			return "", 0, err
 		}
 		return c.startDaemon(townRoot)
+	}
+	// A restart under a supervisor starts a daemon too, so it asks the same
+	// guard before the file is rewritten or the job touched (gt-qpeei.28).
+	if err := c.guardStart(townRoot, sup, false); err != nil {
+		return "", 0, err
 	}
 	var runErr error
 	if c.syncSupervisorFile(townRoot) {
