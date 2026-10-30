@@ -60,7 +60,7 @@ func TestIntegrationSliceOrdersByCommitDate(t *testing.T) {
 		Getenv:   func(k string) string { return map[string]string{"DOCS_LINT_ROOT": root}[k] },
 		TopLevel: func() (string, error) { return root, nil },
 		NewFS:    func(r string) FS { return OSFiles{Root: r} },
-		NewGit:   func(r string) Git { return GitLog{Root: r} },
+		NewGit:   func(r string) Git { return fixtureGitLog(r) },
 	}, &out, &errb)
 	if want := "docs/design/live.md\ndocs/HOOKS.md\ninternal/pkg/b.go\n"; out.String() != want || code != ExitClean {
 		t.Errorf("--slice 2 1 = %q exit %d stderr %q, want %q", out.String(), code, errb.String(), want)
