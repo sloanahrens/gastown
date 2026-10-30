@@ -76,16 +76,35 @@ func CensusTopRows(rows []CensusRow) string {
 }
 
 // WriteCensusSink writes rows to path as one "verb@caller=count" line each, for
-// the process that started this one to log (gt-139dp).
+// the process that started this one to log (gt-139dp). The rows are written to
+// a temp file beside path and renamed over it, so a reader racing the writer
+// reads one whole snapshot or the other, never a line torn in half.
 func WriteCensusSink(path string, rows []CensusRow) error {
 	var b strings.Builder
 	for _, row := range rows {
 		fmt.Fprintf(&b, "%s@%s=%d\n", row.Verb, row.Caller, row.Count)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("writing the census sink: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	// One writer per sink, so the temp name is fixed: a writer killed mid-write
+	// leaves the temp file, never a half-written census, and the next tick's
+	// write replaces it.
+	tmpPath := path + ".tmp"
+	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("writing the census sink: %w", err)
+	}
+	_, err = tmp.WriteString(b.String())
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmpPath, path)
+	}
+	if err != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("writing the census sink: %w", err)
 	}
 	return nil

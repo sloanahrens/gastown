@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -171,6 +173,78 @@ func TestSpecTickReads(t *testing.T) {
 	}
 }
 
+// countingClient is a beads.Client that counts the reads which reach it, so a
+// test can hold the ledger's count to the calls the store answered.
+type countingClient struct {
+	beads.Client
+	mu sync.Mutex
+	n  int
+}
+
+func (c *countingClient) count() {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+}
+
+func (c *countingClient) calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+func (c *countingClient) Show(id string) (*beads.Issue, error) {
+	c.count()
+	return &beads.Issue{ID: id}, nil
+}
+
+func (c *countingClient) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	c.count()
+	out := make(map[string]*beads.Issue, len(ids))
+	for _, id := range ids {
+		out[id] = &beads.Issue{ID: id}
+	}
+	return out, nil
+}
+
+// A ledger read concurrently (a show beside a ShowMultiple, as two passes of a
+// tick can) is race-free, and every count it makes is a call the store
+// answered: the shows map and the per-phase counters are read and written under
+// the same lock (gt-139dp).
+func TestSpecTickReadsAreSafeUnderConcurrentReads(t *testing.T) {
+	t.Parallel()
+	reads := newSpecTickReads()
+	reads.setPhase(specPhaseCandidates)
+	store := &countingClient{}
+	client := reads.client(store)
+
+	const n = 64
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := client.Show(fmt.Sprintf("gt-show-%d", i)); err != nil {
+				t.Errorf("Show: %v", err)
+			}
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := client.ShowMultiple([]string{"gt-shared", fmt.Sprintf("gt-batch-%d", i)}); err != nil {
+				t.Errorf("ShowMultiple: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if got, want := reads.Calls(), store.calls(); got != want {
+		t.Errorf("ledger counted %d calls, want the store's %d", got, want)
+	}
+	if got, want := reads.endPhase(), store.calls(); got != want {
+		t.Errorf("candidates phase counted %d calls, want the store's %d", got, want)
+	}
+}
+
 // A bd call is counted under the phase that was active when it was made: the
 // roster's reads count as roster, the board's as board, and a call made with no
 // phase current counts in the total alone (gt-139dp).
@@ -256,9 +330,9 @@ func TestSpecDispatchReportsItsPhaseCalls(t *testing.T) {
 // A tick started by a daemon writes its bd census rows to the town's census
 // file, which the daemon logs; a tick run by hand has no owner to write for,
 // and a dry run is not the tick the daemon reports, so neither writes
-// (gt-139dp).
+// (gt-139dp). The tick defaults the package's sling actor on its first call, so
+// two ticks in one process are run one after the other, not in parallel.
 func TestSpecDispatchAtWritesTheCensusOfADaemonsTick(t *testing.T) {
-	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		owner  string
@@ -270,7 +344,6 @@ func TestSpecDispatchAtWritesTheCensusOfADaemonsTick(t *testing.T) {
 		{"a dry run", "123.456", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			root := specTickTownWithHold(t)
 			if _, err := runSpecDispatchAtWith(root, tc.owner, tc.dryRun); err != nil {
 				t.Fatalf("runSpecDispatchAtWith: %v", err)
@@ -287,9 +360,9 @@ func TestSpecDispatchAtWritesTheCensusOfADaemonsTick(t *testing.T) {
 }
 
 // A census the tick cannot write is an error in its report, not a tick that
-// reads as having made no bd calls (gt-139dp).
+// reads as having made no bd calls (gt-139dp). It runs beside the tick test
+// above and so, for the same reason, is not parallel.
 func TestSpecDispatchAtReportsACensusItCouldNotWrite(t *testing.T) {
-	t.Parallel()
 	root := specTickTownWithHold(t)
 	// A regular file where the town's daemon directory goes stops the write.
 	if err := os.WriteFile(filepath.Join(root, "daemon"), nil, 0o600); err != nil {

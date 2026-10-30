@@ -378,8 +378,9 @@ func (r *specTickReads) call() {
 	r.mu.Unlock()
 }
 
-// count adds one call to the ledger. The caller holds the lock, or is the
-// tick's own goroutine, as show and the client below are.
+// count adds one call to the ledger. The caller holds the lock: every write to
+// the per-phase counters and the total happens under it, so a read made
+// concurrently by show and ShowMultiple cannot tear them.
 func (r *specTickReads) count() {
 	r.calls++
 	if r.phase != "" {
@@ -422,19 +423,25 @@ func (r *specTickReads) Calls() int {
 }
 
 // show returns bead id from the ledger, or runs read (one bd call) and keeps
-// what it returned.
+// what it returned. The lock is not held across the read, which is the slow
+// part; the map and the counters are touched either side of it, under the lock.
 func (r *specTickReads) show(id string, read func() (*beads.Issue, error)) (*beads.Issue, error) {
 	if r == nil {
 		return read()
 	}
-	if issue, ok := r.shows[id]; ok {
+	r.mu.Lock()
+	issue, ok := r.shows[id]
+	r.mu.Unlock()
+	if ok {
 		return issue, nil
 	}
 	issue, err := read()
+	r.mu.Lock()
 	r.count()
 	if err == nil && issue != nil {
 		r.shows[id] = issue
 	}
+	r.mu.Unlock()
 	return issue, err
 }
 
@@ -463,6 +470,7 @@ func (c specTickClient) Show(id string) (*beads.Issue, error) {
 func (c specTickClient) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
 	out := make(map[string]*beads.Issue, len(ids))
 	var missing []string
+	c.reads.mu.Lock()
 	for _, id := range ids {
 		if issue, ok := c.reads.shows[id]; ok {
 			out[id] = issue
@@ -470,10 +478,13 @@ func (c specTickClient) ShowMultiple(ids []string) (map[string]*beads.Issue, err
 			missing = append(missing, id)
 		}
 	}
+	c.reads.mu.Unlock()
 	if len(missing) == 0 {
 		return out, nil
 	}
 	found, err := c.Client.ShowMultiple(missing)
+	c.reads.mu.Lock()
+	defer c.reads.mu.Unlock()
 	c.reads.count()
 	for id, issue := range found {
 		out[id] = issue

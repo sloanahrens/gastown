@@ -323,13 +323,10 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 	// The census file holds this tick's rows and nothing else: a tick killed
 	// before it writes leaves the last one's, which were already logged, so the
 	// file is cleared first (gt-139dp).
-	censusPath := d.specDispatchCensusPath()
-	if rerr := os.Remove(censusPath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
-		d.logger.Printf("spec_dispatch: the census file could not be cleared, so this tick may be logged with the last one's rows: %v", rerr)
-	}
+	census := d.clearSpecDispatchCensus(d.specDispatchCensusPath())
 	start := d.clk().Now()
 	out, err := d.runSpecDispatchCommand(bound, tickArgs...)
-	d.logSpecDispatchCensus(censusPath, err == nil)
+	d.logSpecDispatchCensus(census, err == nil)
 	if err != nil {
 		elapsed := d.clk().Now().Sub(start).Round(time.Second)
 		d.logger.Printf("spec_dispatch: tick failed after %s of its %s bound: %v", elapsed, bound, err)
@@ -564,17 +561,52 @@ func (d *Daemon) specDispatchCensusPath() string {
 	return dispatch.SpecCensusPath(d.config.TownRoot)
 }
 
+// removeCensusFile removes the census file, replaced by a test whose clear
+// fails (gt-139dp).
+func (d *Daemon) removeCensusFile(path string) error {
+	if d.specCensusRemove != nil {
+		return d.specCensusRemove(path)
+	}
+	return os.Remove(path)
+}
+
+// specCensus is the tick's census file as the daemon left it: the path, and
+// the error that kept the file from being cleared, which leaves the last
+// tick's rows in it (gt-139dp).
+type specCensus struct {
+	path     string
+	clearErr error
+}
+
+// clearSpecDispatchCensus empties the census file before a tick runs, so the
+// rows logged for the tick are its own. A clear that fails costs observability
+// and never the tick: the state is logged once, after the tick, marked
+// unavailable rather than read as zero calls (gt-139dp).
+func (d *Daemon) clearSpecDispatchCensus(path string) specCensus {
+	err := d.removeCensusFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	return specCensus{path: path, clearErr: err}
+}
+
 // logSpecDispatchCensus logs the rows the tick's census file holds, busiest
-// caller first. The tick is told the path when it starts, so a file a clean
-// tick did not write is a census that was lost, not a tick that read nothing,
-// and is reported; a tick that failed may have written nothing at all
-// (gt-139dp).
-func (d *Daemon) logSpecDispatchCensus(path string, tickOK bool) {
-	rows, err := beads.ReadCensusSink(path)
+// caller first. A file that could not be cleared is marked unavailable rather
+// than read, since its rows may be the last tick's. A file that cannot be read
+// is logged with its path and error: a clean tick was told where to write, so
+// losing it is a census lost, not a tick that read nothing; a failed tick that
+// left no file wrote no census, and says nothing (gt-139dp).
+func (d *Daemon) logSpecDispatchCensus(c specCensus, tickOK bool) {
+	if c.clearErr != nil {
+		d.logger.Printf("spec_dispatch: bd census (spec dispatch): unavailable: the file at %s was not cleared, so its rows may be the last tick's: %v", c.path, c.clearErr)
+		return
+	}
+	rows, err := beads.ReadCensusSink(c.path)
 	if err != nil {
-		if tickOK {
-			d.logger.Printf("spec_dispatch: bd census unread after the tick: %v", err)
+		if !tickOK && errors.Is(err, fs.ErrNotExist) {
+			return
 		}
+		d.logger.Printf("spec_dispatch: bd census (spec dispatch): unreadable at %s: %v", c.path, err)
 		return
 	}
 	if total := beads.CensusRowsTotal(rows); total > 0 {

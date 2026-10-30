@@ -296,6 +296,66 @@ func TestWriteCensusSinkFailsOnAPathItCannotWrite(t *testing.T) {
 	}
 }
 
+// A reader racing the writer reads one whole snapshot or the other, never a
+// line torn in half: the sink writes a temp file and renames it over the census
+// (gt-139dp).
+func TestCensusSinkReplacesTheFileWhole(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "spec_census.txt")
+	snapshot := func(prefix string) []CensusRow {
+		rows := make([]CensusRow, 64)
+		for i := range rows {
+			rows[i] = CensusRow{Verb: "show", Caller: fmt.Sprintf("%s.call%d", prefix, i), Count: i + 1}
+		}
+		return rows
+	}
+	first, second := snapshot("cmd.first"), snapshot("cmd.second")
+	if err := WriteCensusSink(path, first); err != nil {
+		t.Fatal(err)
+	}
+
+	writeErr := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			rows := first
+			if i%2 == 1 {
+				rows = second
+			}
+			if err := WriteCensusSink(path, rows); err != nil {
+				writeErr <- err
+				return
+			}
+		}
+	}()
+
+	reads := 0
+	for {
+		rows, err := ReadCensusSink(path)
+		if err != nil {
+			t.Fatalf("a reader saw a torn census: %v", err)
+		}
+		if !reflect.DeepEqual(rows, first) && !reflect.DeepEqual(rows, second) {
+			t.Fatalf("reader saw %d rows, neither whole snapshot", len(rows))
+		}
+		reads++
+		select {
+		case <-done:
+			select {
+			case err := <-writeErr:
+				t.Fatalf("writer: %v", err)
+			default:
+			}
+			if reads == 0 {
+				t.Fatal("the reader never read the sink")
+			}
+			return
+		default:
+		}
+	}
+}
+
 // The top-rows text names the busiest censusLogRows and nothing of an empty
 // census (gt-139dp).
 func TestCensusTopRowsCapsItsRows(t *testing.T) {
