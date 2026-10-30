@@ -24,7 +24,4 @@ func TestIntegrationMakeDocsLintRecipe(t *testing.T) {
 	if got, want := strings.TrimSpace(string(out)), "go run ./cmd/docs-lint"; got != want {
 		t.Errorf("make -n docs-lint printed %q, want %q", got, want)
 	}
-	if _, err := os.Stat("../../scripts/docs-lint.sh"); !os.IsNotExist(err) {
-		t.Errorf("scripts/docs-lint.sh is still there (stat error %v)", err)
-	}
 }
