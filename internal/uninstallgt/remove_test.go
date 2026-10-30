@@ -14,6 +14,7 @@ import (
 // an operation on it behaves.
 type entry struct {
 	dir       bool  // Stat and Lstat report a directory
+	link      bool  // Lstat reports a symlink, which Stat would follow
 	lstatErr  error // Lstat fails with this instead
 	statErr   error // Stat fails with this instead
 	removeErr error // Remove fails with this
@@ -63,7 +64,7 @@ func (r *recorder) Lstat(path string) (fs.FileInfo, error) {
 		if e.lstatErr != nil {
 			return nil, e.lstatErr
 		}
-		return info{name: filepath.Base(path), dir: e.dir}, nil
+		return info{name: filepath.Base(path), dir: e.dir, link: e.link}, nil
 	}
 	if err := r.afterRemove[path]; err != nil {
 		return nil, err
@@ -112,13 +113,17 @@ func (r *recorder) exec(name string, args ...string) error {
 type info struct {
 	name string
 	dir  bool
+	link bool
 }
 
 func (i info) Name() string { return i.name }
 func (i info) Size() int64  { return 0 }
 
 func (i info) Mode() fs.FileMode {
-	if i.dir {
+	switch {
+	case i.link:
+		return fs.ModeSymlink | 0o777
+	case i.dir:
 		return fs.ModeDir | 0o755
 	}
 	return 0o644
@@ -218,6 +223,60 @@ func TestImmutableFlagClearedBeforeRemoval(t *testing.T) {
 		if chflagsAt > removeAt {
 			t.Errorf("%s: the flag was cleared at %d, after the removal at %d", path, chflagsAt, removeAt)
 		}
+	}
+}
+
+// touches lists, in order, the operations in ops that clear path's flag or
+// remove path, so a test reads what was done to one path and nothing else.
+func touches(ops []string, path string) []string {
+	var got []string
+	for _, op := range ops {
+		if op == "remove "+path || strings.HasPrefix(op, "exec ") && strings.HasSuffix(op, " "+path) {
+			got = append(got, op)
+		}
+	}
+	return got
+}
+
+// TestImmutableFallbacksRunForARegularFile pins the full flag sequence for a
+// regular file: the -h attempt, then both fallbacks, then the removal.
+func TestImmutableFallbacksRunForARegularFile(t *testing.T) {
+	t.Parallel()
+	rec := newRecorder()
+	path := "/install/gt"
+	rec.add(path, entry{})
+
+	if err := Remove(rec, rec.exec, path); err != nil {
+		t.Fatalf("Remove = %v, want nil", err)
+	}
+
+	want := []string{
+		"exec chflags -h nouchg " + path,
+		"exec chflags nouchg " + path,
+		"exec chattr -i " + path,
+		"remove " + path,
+	}
+	if got := touches(rec.ops, path); !reflect.DeepEqual(got, want) {
+		t.Errorf("operations on a regular file = %v, want %v", got, want)
+	}
+}
+
+// TestImmutableFallbacksSkipASymlink pins the symlink case: the fallbacks
+// follow a link to its target, so a symlinked bd gets the -h attempt alone and
+// the file it points at is never named by a flag command.
+func TestImmutableFallbacksSkipASymlink(t *testing.T) {
+	t.Parallel()
+	rec := newRecorder()
+	path := "/install/bd"
+	rec.add(path, entry{link: true})
+
+	if err := Remove(rec, rec.exec, path); err != nil {
+		t.Fatalf("Remove = %v, want nil", err)
+	}
+
+	want := []string{"exec chflags -h nouchg " + path, "remove " + path}
+	if got := touches(rec.ops, path); !reflect.DeepEqual(got, want) {
+		t.Errorf("operations on a symlink = %v, want %v", got, want)
 	}
 }
 

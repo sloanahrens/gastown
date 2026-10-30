@@ -56,6 +56,12 @@ func fileState(path string) string {
 	return "gone"
 }
 
+// fixture is a directory and the files a case creates in it before its run.
+type fixture struct {
+	dir   string
+	files []string
+}
+
 func TestMainUsage(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -67,23 +73,19 @@ func TestMainUsage(t *testing.T) {
 	absent := filepath.Join(base, "absent")
 	town := filepath.Join(base, "town")
 
-	// The live-style default directory holds both binaries from the start, so
-	// the case that names another directory can show they survive, and the
-	// last case can remove them.
-	writeFiles(t, defaultDir, "gt", "bd")
-	writeFiles(t, filepath.Join(town, "mayor"), "town.json")
-
+	// Each case builds the directories it reads, so no case depends on what an
+	// earlier one left behind: a case that removes the default binaries does
+	// not change what the case after it finds.
 	tests := []struct {
 		name string
 		args []string
 		vars map[string]string
-		// dir holds the files the case sets up before the run.
-		dir   string
-		files []string
+		// setup holds the directories and files the case creates before its run.
+		setup []fixture
 		code  int
-		// out is the whole of stdout when non-empty; holds is a substring of
-		// it otherwise, and errText a substring of stderr. usage says whether
-		// the usage line follows the message on stderr.
+		// out is the whole of stdout when non-empty, compared exactly; holds is
+		// a substring of stdout otherwise, and errText a substring of stderr.
+		// usage says whether the usage line follows the message on stderr.
 		out     string
 		holds   string
 		errText string
@@ -135,8 +137,7 @@ func TestMainUsage(t *testing.T) {
 			name:    "an explicit --install-dir removes exactly the two binaries",
 			args:    []string{"--install-dir", explicit},
 			vars:    map[string]string{"HOME": home},
-			dir:     explicit,
-			files:   []string{"gt", "bd", "unrelated"},
+			setup:   []fixture{{explicit, []string{"gt", "bd", "unrelated"}}},
 			code:    uninstallgt.ExitOK,
 			holds:   "done — 2 removed from " + explicit,
 			gone:    []string{filepath.Join(explicit, "gt"), filepath.Join(explicit, "bd")},
@@ -146,33 +147,35 @@ func TestMainUsage(t *testing.T) {
 			name:  "--install-dir is printed with its source",
 			args:  []string{"--install-dir", explicit},
 			vars:  map[string]string{"HOME": home, "INSTALL_DIR": home},
-			dir:   explicit,
+			setup: []fixture{{explicit, nil}},
 			code:  uninstallgt.ExitOK,
 			holds: "uninstall-gt: target " + explicit + " (from --install-dir)\n",
 		},
 		{
 			name:    "INSTALL_DIR is printed as the source and leaves the default alone",
 			vars:    map[string]string{"HOME": home, "INSTALL_DIR": instEnv},
-			dir:     instEnv,
-			files:   []string{"gt", "bd"},
+			setup:   []fixture{{instEnv, []string{"gt", "bd"}}, {defaultDir, []string{"gt", "bd"}}},
 			code:    uninstallgt.ExitOK,
 			holds:   "uninstall-gt: target " + instEnv + " (from $INSTALL_DIR)\n",
 			gone:    []string{filepath.Join(instEnv, "gt"), filepath.Join(instEnv, "bd")},
-			present: []string{filepath.Join(defaultDir, "gt")},
+			present: []string{filepath.Join(defaultDir, "gt"), filepath.Join(defaultDir, "bd")},
 		},
 		{
 			name:    "INSTALL_GT_BIN_DIR wins over INSTALL_DIR and leaves it alone",
 			vars:    map[string]string{"HOME": home, "INSTALL_GT_BIN_DIR": gtBin, "INSTALL_DIR": defaultDir},
-			dir:     gtBin,
-			files:   []string{"gt", "bd"},
+			setup:   []fixture{{gtBin, []string{"gt", "bd"}}, {defaultDir, []string{"gt", "bd"}}},
 			code:    uninstallgt.ExitOK,
 			holds:   "uninstall-gt: target " + gtBin + " (from $INSTALL_GT_BIN_DIR)\n",
 			gone:    []string{filepath.Join(gtBin, "gt"), filepath.Join(gtBin, "bd")},
 			present: []string{filepath.Join(defaultDir, "gt"), filepath.Join(defaultDir, "bd")},
 		},
 		{
-			name:    "INSTALL_DIR naming the live install is refused",
-			vars:    map[string]string{"HOME": home, "INSTALL_DIR": defaultDir, "GT_TOWN_ROOT": town},
+			name: "INSTALL_DIR naming the live install is refused",
+			vars: map[string]string{"HOME": home, "INSTALL_DIR": defaultDir, "GT_TOWN_ROOT": town},
+			setup: []fixture{
+				{defaultDir, []string{"gt", "bd"}},
+				{filepath.Join(town, "mayor"), []string{"town.json"}},
+			},
 			code:    uninstallgt.ExitRefused,
 			errText: "refusing to run: " + defaultDir + " is the live install of the town at " + town,
 			present: []string{filepath.Join(defaultDir, "gt"), filepath.Join(defaultDir, "bd")},
@@ -180,25 +183,25 @@ func TestMainUsage(t *testing.T) {
 		{
 			name:    "the default directory is HOME/.local/bin",
 			vars:    map[string]string{"HOME": home},
-			dir:     defaultDir,
-			files:   []string{"gt"},
+			setup:   []fixture{{defaultDir, []string{"gt", "bd"}}},
 			code:    uninstallgt.ExitOK,
 			holds:   "uninstall-gt: target " + defaultDir + " (from the default (HOME/.local/bin))\n",
 			gone:    []string{filepath.Join(defaultDir, "gt"), filepath.Join(defaultDir, "bd")},
 			present: []string{home},
 		},
 		{
-			name:  "a missing directory has nothing to do",
-			args:  []string{"--install-dir", absent},
-			vars:  map[string]string{"HOME": home},
-			code:  uninstallgt.ExitOK,
-			holds: "uninstall-gt: nothing to do — " + absent + " does not exist\n",
+			name: "a missing directory has nothing to do",
+			args: []string{"--install-dir", absent},
+			vars: map[string]string{"HOME": home},
+			code: uninstallgt.ExitOK,
+			out: "uninstall-gt: target " + absent + " (from --install-dir)\n" +
+				"uninstall-gt: nothing to do — " + absent + " does not exist\n",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.dir != "" {
-				writeFiles(t, tt.dir, tt.files...)
+			for _, f := range tt.setup {
+				writeFiles(t, f.dir, f.files...)
 			}
 			var stdout, stderr strings.Builder
 			code := run(tt.args, &stdout, &stderr, env(tt.vars))

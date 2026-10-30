@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestRunMissingDirectoryExitsZero pins the run's first case: a directory that
+// TestMissingDirectoryExitsZero pins the run's first case: a directory that
 // is not there has nothing to remove, so the run says so and succeeds.
 func TestMissingDirectoryExitsZero(t *testing.T) {
 	t.Parallel()
@@ -32,7 +32,7 @@ func TestMissingDirectoryExitsZero(t *testing.T) {
 	}
 }
 
-// TestRunAbsentFilesAreReportedNotErrors pins that an install directory with
+// TestAbsentFilesAreReportedNotErrors pins that an install directory with
 // neither binary is a report and a zero exit, not a failure.
 func TestAbsentFilesAreReportedNotErrors(t *testing.T) {
 	t.Parallel()
@@ -61,7 +61,7 @@ func TestAbsentFilesAreReportedNotErrors(t *testing.T) {
 	}
 }
 
-// TestRunFailureExitsOneAndSaysNothingElseWasTouched pins the failure contract:
+// TestFailureExitsOneAndSaysNothingElseWasTouched pins the failure contract:
 // the run keeps going after a path it could not remove, ends exit 1, and says
 // on stderr that the removal was all it touched.
 func TestFailureExitsOneAndSaysNothingElseWasTouched(t *testing.T) {
@@ -155,17 +155,39 @@ func TestRunRefusalRemovesNothing(t *testing.T) {
 	}
 }
 
+// printLog is a run's stdout as the call log sees it: each line the run prints
+// is one entry in the same log as its filesystem and command calls, so a test
+// reads what happened in the order it happened.
+type printLog struct{ rec *recorder }
+
+// Write logs one printed line; a run prints each line in a single write.
+func (p printLog) Write(b []byte) (int, error) {
+	p.rec.ops = append(p.rec.ops, "print "+strings.TrimSuffix(string(b), "\n"))
+	return len(b), nil
+}
+
+// firstOp returns the index of the first operation in ops that starts with
+// prefix, or -1 when none does.
+func firstOp(ops []string, prefix string) int {
+	for i, op := range ops {
+		if strings.HasPrefix(op, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestRunChecksLiveBeforeRemoving pins the order inside the run: the live
-// check's announcement comes before the target line and before any removal, so
-// a forced run cannot start removing first and decide afterwards.
+// check's announcement is logged before the target line, before any flag
+// command and before any removal, so a forced run cannot start removing first
+// and decide afterwards.
 func TestRunChecksLiveBeforeRemoving(t *testing.T) {
 	t.Parallel()
 	h := newHost(t)
-	gt, bd := filepath.Join(h.live, "gt"), filepath.Join(h.live, "bd")
 	rec := newRecorder()
 	rec.add(h.live, entry{dir: true})
-	rec.add(gt, entry{})
-	rec.add(bd, entry{})
+	rec.add(filepath.Join(h.live, "gt"), entry{})
+	rec.add(filepath.Join(h.live, "bd"), entry{})
 	env := Env{
 		Getenv:  vars(map[string]string{"HOME": h.home, "GT_TOWN_ROOT": h.town}),
 		Files:   rec,
@@ -173,43 +195,29 @@ func TestRunChecksLiveBeforeRemoving(t *testing.T) {
 		Signal0: neverSignals,
 	}
 
-	var stdout, stderr strings.Builder
-	code := Run([]string{"--install-dir", h.live, "--force"}, &stdout, &stderr, env)
+	var stderr strings.Builder
+	code := Run([]string{"--install-dir", h.live, "--force"}, printLog{rec}, &stderr, env)
 
 	if code != ExitOK {
 		t.Fatalf("Run --force on the live install = %d, want %d (stderr: %s)",
 			code, ExitOK, stderr.String())
 	}
-	notice := Program + ": FORCE=1 — removing the live install of the town at " + h.town
-	target := Program + ": target " + h.live
-	removed := []string{Program + ": removed " + gt, Program + ": removed " + bd}
-	lines := strings.SplitAfter(stdout.String(), "\n")
-	noticeAt, targetAt := indexOfLine(lines, notice), indexOfLine(lines, target)
-	if noticeAt < 0 || targetAt < 0 {
-		t.Fatalf("Run printed %q, want both the FORCE announcement and the target line", stdout.String())
+	noticeAt := firstOp(rec.ops, "print "+Program+": FORCE=1 — removing the live install of the town at "+h.town)
+	targetAt := firstOp(rec.ops, "print "+Program+": target "+h.live)
+	flagAt := firstOp(rec.ops, "exec ")
+	removeAt := firstOp(rec.ops, "remove ")
+	if noticeAt < 0 || targetAt < 0 || flagAt < 0 || removeAt < 0 {
+		t.Fatalf("call log %v, want the FORCE announcement, the target line, a flag command and a removal", rec.ops)
 	}
 	if noticeAt > targetAt {
-		t.Errorf("the live-check announcement came at line %d, after the target line at %d", noticeAt, targetAt)
+		t.Errorf("the live-check announcement is op %d, after the target line at op %d (ops: %v)", noticeAt, targetAt, rec.ops)
 	}
-	for _, line := range removed {
-		at := indexOfLine(lines, line)
-		if at < 0 {
-			t.Fatalf("Run printed %q, want it to hold %q", stdout.String(), line)
-		}
-		if noticeAt > at {
-			t.Errorf("the live-check announcement came at line %d, after the removal at %d", noticeAt, at)
-		}
+	if noticeAt > flagAt {
+		t.Errorf("the live-check announcement is op %d, after the first flag command at op %d (ops: %v)", noticeAt, flagAt, rec.ops)
 	}
-}
-
-// indexOfLine returns the index of the first line starting with prefix, or -1.
-func indexOfLine(lines []string, prefix string) int {
-	for i, line := range lines {
-		if strings.HasPrefix(line, prefix) {
-			return i
-		}
+	if noticeAt > removeAt {
+		t.Errorf("the live-check announcement is op %d, after the first removal at op %d (ops: %v)", noticeAt, removeAt, rec.ops)
 	}
-	return -1
 }
 
 // TestRunForceRemovesTheLiveInstall pins --force: the run announces what it is

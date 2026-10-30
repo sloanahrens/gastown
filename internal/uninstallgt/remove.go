@@ -57,19 +57,20 @@ func OSExec(name string, args ...string) error {
 // run cannot examine may hold a binary it would leave behind, and "not
 // present" has to mean the path was looked at and was not there.
 func Remove(files Files, run Exec, path string) error {
-	if _, err := files.Lstat(path); err != nil {
+	info, err := files.Lstat(path)
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return ErrAbsent
 		}
 		return err
 	}
-	clearImmutable(run, path)
+	clearImmutable(run, path, info.Mode()&fs.ModeSymlink != 0)
 	if err := files.Remove(path); err != nil {
 		return err
 	}
 	// The run reports a removal only once it has seen the path go: a remove
 	// that answered without removing anything is a failure, not a success.
-	_, err := files.Lstat(path)
+	_, err = files.Lstat(path)
 	if err == nil {
 		return fmt.Errorf("%s: still present after its removal", path)
 	}
@@ -80,15 +81,22 @@ func Remove(files Files, run Exec, path string) error {
 }
 
 // clearImmutable takes the OS-immutable flag off path, which the installer
-// leaves set and the kernel refuses to unlink through (gt-vya0s). The three
-// commands are tried in turn and every failure is ignored: a host without the
-// tool, or a filesystem without the flag, still has a file to remove. -h keeps
-// a symlinked bd pointing at a file elsewhere, leaving that target untouched.
-func clearImmutable(run Exec, path string) {
+// leaves set and the kernel refuses to unlink through (gt-vya0s). The commands
+// are tried in turn and every failure is ignored: a host without the tool, or a
+// filesystem without the flag, still has a file to remove.
+//
+// -h makes chflags act on a symlink itself, so a symlinked bd keeps its target
+// untouched. The two fallbacks have no -h form and follow a symlink to its
+// target, so a symlink gets the -h attempt alone: clearing the flag on a file
+// outside the directory is a change to a path the run never removes.
+func clearImmutable(run Exec, path string, link bool) {
 	if run == nil {
 		return
 	}
 	_ = run("chflags", "-h", "nouchg", path)
+	if link {
+		return
+	}
 	_ = run("chflags", "nouchg", path)
 	_ = run("chattr", "-i", path)
 }
