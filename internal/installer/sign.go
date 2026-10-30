@@ -1,8 +1,12 @@
 package installer
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/signing"
 )
 
 // signIdentifier is the designated-requirement identifier the installed binary
@@ -135,7 +139,9 @@ func (r *Run) Sign() {
 	}
 	// The password reaches security on stdin and nowhere else: it is never in
 	// the unlock's argv, where ps shows it for as long as the unlock takes, and
-	// never logged, never echoed and never handed to codesign (gt-4ucnp).
+	// never logged, never echoed and never handed to codesign (gt-4ucnp). That is
+	// why this unlock does not use signing.Unlock, whose argv carries the password;
+	// gt-tpg0p.70 moves the shared one off argv.
 	//
 	// A status of 0 is not taken as proof the keychain opened: what security -i
 	// reports for the command it reads is undocumented, and the macOS form is
@@ -163,10 +169,25 @@ func (r *Run) Sign() {
 		return
 	}
 	r.Files.clearImmutable(tmp)
-	output, code := r.codesign(tmp)
-	if code != 0 {
+	// The restore removes the copy, the only file codesign writes, so the
+	// installed binary is never touched. A failed removal is not reported: it
+	// leaves a stray temp file, never a half-signed binary.
+	err = signing.CodesignWith(func() (string, string, error) {
+		output, err := r.codesign(tmp)
+		return output, "", err
+	}, func() error {
 		_ = r.Files.remove(tmp)
-		r.C.Log("WARNING: installing ad-hoc: codesign failed: " + firstLine(output))
+		return nil
+	})
+	// Any error stops the sign, so a copy that was never signed is never renamed
+	// over the binary, whatever the restore comes to report.
+	if err != nil {
+		notice := err.Error()
+		var codesignErr signing.CodesignError
+		if errors.As(err, &codesignErr) {
+			notice = codesignErr.Notice
+		}
+		r.C.Log("WARNING: installing ad-hoc: codesign failed: " + notice)
 		return
 	}
 	r.Files.clearImmutable(bin)
@@ -183,10 +204,11 @@ func (r *Run) Sign() {
 // codesign signs path with the town's identity, bounded by the signing timeout
 // where timeout(1) (coreutils) or gtimeout (brew's) is on PATH. Where neither
 // is, codesign runs unguarded: it gets no stdin and an already-unlocked
-// keychain, so it has nothing left to prompt for.
-func (r *Run) codesign(path string) (string, int) {
+// keychain, so it has nothing left to prompt for. The bound stays an argv
+// prefix, not a signing.Bound context, so the install keeps the script's guard.
+func (r *Run) codesign(path string) (string, error) {
 	name := "codesign"
-	args := []string{"--force", "--keychain", r.Signing.Keychain(), "-s", r.Signing.Identity, "-i", signIdentifier, path}
+	args := signing.CodesignArgs(r.Signing.Keychain(), r.Signing.Identity, signIdentifier, path)
 	switch {
 	case r.found("timeout"):
 		name = "timeout"
@@ -196,15 +218,9 @@ func (r *Run) codesign(path string) (string, int) {
 		args = append([]string{r.Signing.Timeout, "codesign"}, args...)
 	}
 	stdout, stderr, code := r.Cmd.run("", name, args...)
-	return string(stdout) + string(stderr), code
-}
-
-// firstLine is the first line of what a command said, the script's `head -1`:
-// what codesign objected to, without a wall of text in one log line.
-func firstLine(s string) string {
-	if s == "" {
-		return "no output"
+	output := string(stdout) + string(stderr)
+	if code != 0 {
+		return output, fmt.Errorf("codesign exited with status %d", code)
 	}
-	line, _, _ := strings.Cut(s, "\n")
-	return line
+	return output, nil
 }

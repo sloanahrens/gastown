@@ -89,6 +89,21 @@ func TestUnlockPassesThePathAsAnOptionSafeOperand(t *testing.T) {
 	}
 }
 
+// TestCodesignGuardsALeadingDashInKeychainAndPath pins the argv Codesign hands
+// exec: a dash-leading keychain or path is read from ./, never as an option.
+func TestCodesignGuardsALeadingDashInKeychainAndPath(t *testing.T) {
+	t.Parallel()
+	exec := &fakeExec{}
+	err := Codesign(context.Background(), exec.exec, "-keys/k", "id", "com.gastown.gt", "-build", func() error { return nil })
+	if err != nil {
+		t.Fatalf("Codesign() = %v, want nil", err)
+	}
+	want := []string{"codesign", "--force", "--keychain", "./-keys/k", "-s", "id", "-i", "com.gastown.gt", "./-build"}
+	if len(exec.calls) != 1 || !reflect.DeepEqual(exec.calls[0], want) {
+		t.Errorf("codesign argv = %q, want %q", exec.calls, want)
+	}
+}
+
 func TestCodesignRestoresTheBuildAndNamesTheFirstLineOfItsOutput(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

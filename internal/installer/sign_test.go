@@ -188,6 +188,19 @@ func TestSign(t *testing.T) {
 			wantCmds: 2,
 		},
 		{
+			// The installer hands codesign's output over as stdout, so a failure
+			// that reports only there is named by the first line of it too.
+			name: "codesign that reports on stdout is named by the first line there",
+			respond: func(dir, name string, args []string) ([]byte, []byte, int) {
+				if name == "codesign" {
+					return []byte("no identity found\nmore\n"), nil, 1
+				}
+				return nil, nil, 0
+			},
+			want:     "[install-gt] WARNING: installing ad-hoc: codesign failed: no identity found",
+			wantCmds: 2,
+		},
+		{
 			name: "a signed copy that cannot be renamed leaves the binary alone",
 			setup: func(w *signWorld) {
 				w.Files.Rename = func(string, string) error { return errors.New("read-only") }
@@ -339,6 +352,57 @@ func TestSign(t *testing.T) {
 			}
 			if leftovers := strayFiles(t, filepath.Dir(w.bin)); len(leftovers) != 0 {
 				t.Errorf("temporary copies left behind: %q", leftovers)
+			}
+		})
+	}
+}
+
+// TestCodesignArgvGuardsALeadingDash pins the codesign argv the installer runs:
+// a keychain or a path that starts with a dash reaches codesign as ./-value, so
+// codesign reads it as a path and never as an option. The expectations are
+// written out, not built by the code under test (gt-qaa5m).
+func TestCodesignArgvGuardsALeadingDash(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		dir          string
+		path         string
+		wantKeychain string
+		wantPath     string
+	}{
+		{
+			name:         "ordinary keychain and path are unchanged",
+			dir:          "/keys",
+			path:         "/bin/.gt.signed.1",
+			wantKeychain: "/keys/gastown-signing.keychain-db",
+			wantPath:     "/bin/.gt.signed.1",
+		},
+		{
+			name:         "a keychain in a dash-leading directory gets ./",
+			dir:          "-keys",
+			path:         "/bin/.gt.signed.1",
+			wantKeychain: "./-keys/gastown-signing.keychain-db",
+			wantPath:     "/bin/.gt.signed.1",
+		},
+		{
+			name:         "a dash-leading path gets ./",
+			dir:          "/keys",
+			path:         "-gt.signed.1",
+			wantKeychain: "/keys/gastown-signing.keychain-db",
+			wantPath:     "./-gt.signed.1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newSignWorld(t)
+			w.Signing.Dir = tc.dir
+			if _, err := w.codesign(tc.path); err != nil {
+				t.Fatalf("codesign: %v", err)
+			}
+			want := []string{"codesign", "--force", "--keychain", tc.wantKeychain, "-s", "gastown-dev-unattended", "-i", signIdentifier, tc.wantPath}
+			if len(w.cmds) != 1 || !reflect.DeepEqual(w.cmds[0], want) {
+				t.Errorf("codesign ran %q, want %q", w.cmds, want)
 			}
 		})
 	}
