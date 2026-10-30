@@ -70,7 +70,7 @@ func (t *SandboxTrace) record(name string, from time.Time) {
 // Summary is the trace on one line: each phase with its duration, then the
 // total since the trace began. The time no phase named is reported as "other",
 // so the phases always add up to the total and a gap is visible rather than
-// folded into a neighbour (gt-7nctk). It is "" when no phase ran, which is how
+// folded into a neighbor (gt-7nctk). It is "" when no phase ran, which is how
 // a sling that never touched a sandbox is left out of the log.
 func (t *SandboxTrace) Summary() string {
 	if t == nil || len(t.phases) == 0 {
