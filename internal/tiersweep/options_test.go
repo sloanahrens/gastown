@@ -246,8 +246,8 @@ func TestParseOptionsUnknownTier(t *testing.T) {
 	if got := (&UnknownTierError{Tier: "bogus"}).Error(); got != want {
 		t.Errorf("unknown tier line = %q, want %q", got, want)
 	}
-	if UnknownTierExit != 2 {
-		t.Errorf("UnknownTierExit = %d, want 2 (the script's exit for an unknown tier)", UnknownTierExit)
+	if UsageExit != 2 {
+		t.Errorf("UsageExit = %d, want 2 (the script's exit for an unknown tier)", UsageExit)
 	}
 	// A copy of the daemon's tierSweepUnknownTierRE.
 	unknownTierRE := regexp.MustCompile(`^tier-sweep: unknown tier (\S+)`)

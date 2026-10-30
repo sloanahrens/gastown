@@ -44,10 +44,11 @@ const (
 	logDirPattern = "tier-sweep."
 )
 
-// UnknownTierExit is the code the command exits for a tier it does not offer:
-// the script's 2, reached once the tiers before the unknown one have printed
-// their summary lines.
-const UnknownTierExit = 2
+// UsageExit is the code the command exits for every refusal that is not a RED
+// tier: a tier it does not offer (reached once the tiers before it have printed
+// their summary lines, the script's 2), a command line it cannot read, and a log
+// directory it cannot make.
+const UsageExit = 2
 
 // Options is one tier-sweep invocation: the tiers a command line named and the
 // environment the run reads.
