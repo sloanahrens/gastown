@@ -5,13 +5,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -96,9 +96,15 @@ const databasePrefix = testdb.MintPrefix + "bdshim_record_"
 // A fixture file that does not hold every bead of fixtureIDs is refused here, before any database
 // is made: the preflight would ask bd for such a bead and record its "not found" as the answer.
 func provisionFixture(run Runner, fixture, scratch string) (Copier, error) {
-	path, err := filepath.Abs(fixture)
+	return provisionFixtureFrom(os.Getwd, run, fixture, scratch)
+}
+
+// provisionFixtureFrom is provisionFixture with the working directory injected, so a test drives
+// the error a process whose working directory the OS cannot answer for gets.
+func provisionFixtureFrom(getwd func() (string, error), run Runner, fixture, scratch string) (Copier, error) {
+	path, err := absolutePath(getwd, fixture)
 	if err != nil {
-		return nil, fmt.Errorf("name the fixture by an absolute path: %w", err)
+		return nil, err
 	}
 	if err := checkFixtureFile(path); err != nil {
 		return nil, err
@@ -108,15 +114,25 @@ func provisionFixture(run Runner, fixture, scratch string) (Copier, error) {
 	}, nil
 }
 
+// absolutePath returns path joined to the working directory when it is relative, since bd import
+// runs in the copy rather than in the operator's directory.
+func absolutePath(getwd func() (string, error), path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	dir, err := getwd()
+	if err != nil {
+		return "", fmt.Errorf("name the fixture by an absolute path: %w", err)
+	}
+	return filepath.Join(dir, path), nil
+}
+
 // provisionCopy makes one copy and returns it with the function that removes it.
 func provisionCopy(run Runner, fixture, scratch string) (string, func() error, error) {
-	name, err := newDatabaseName()
-	if err != nil {
-		return "", nil, err
-	}
+	name := newDatabaseName()
 	dir, err := os.MkdirTemp(scratch, "fixture-")
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("make a copy in the scratch directory %s: %w", scratch, err)
 	}
 	if err := initDatabase(run, dir, name); err != nil {
 		// A failed init leaves no .beads, so there is nowhere for the drop to run from. A name
@@ -158,12 +174,8 @@ func dropDatabase(run Runner, dir, name string) error {
 }
 
 // newDatabaseName returns a name no other copy holds, so two copies never share a store.
-func newDatabaseName() (string, error) {
-	var raw [8]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("name the copy's database: %w", err)
-	}
-	return databasePrefix + hex.EncodeToString(raw[:]), nil
+func newDatabaseName() string {
+	return databasePrefix + strings.ToLower(rand.Text())
 }
 
 // fixtureLineMax is the longest fixture line checkFixtureFile reads. A bead's description can be

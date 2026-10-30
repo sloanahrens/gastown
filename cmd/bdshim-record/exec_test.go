@@ -1,16 +1,64 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testdb"
 )
+
+// exitError is bd's exit code as the error exec.ExitError reports it.
+type exitError int
+
+func (e exitError) Error() string { return "exit status " + strconv.Itoa(int(e)) }
+func (e exitError) ExitCode() int { return int(e) }
+
+// TestExitResultKeepsAnExitAndRefusesARunThatNeverFinished: a non-zero exit is bd's answer, while a
+// run that timed out, was killed, or never started is an error. A unit test may not start bd, so
+// this drives the converter execBD hands each run's ending to.
+func TestExitResultKeepsAnExitAndRefusesARunThatNeverFinished(t *testing.T) {
+	t.Parallel()
+	stdout := []byte("bd's answer\n")
+	tests := []struct {
+		name     string
+		runErr   error
+		timedOut bool
+		wantExit int
+		wantErr  string
+	}{
+		{"ran to exit 0", nil, false, 0, ""},
+		{"ran to a non-zero exit", exitError(13), false, 13, ""},
+		{"ran past the limit", exitError(0), true, 0, "ran past"},
+		{"killed by a signal", exitError(-1), false, 0, "signal"},
+		{"never started", errors.New("exec: bd: not found"), false, 0, "not found"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, exit, err := exitResult(stdout, tc.runErr, tc.timedOut)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("exitResult(%s) = %v, want an error naming %q", tc.name, err, tc.wantErr)
+				}
+				if out != nil || exit != 0 {
+					t.Errorf("exitResult(%s) = (%q, %d) with an error, want nothing and 0", tc.name, out, exit)
+				}
+				return
+			}
+			if err != nil || exit != tc.wantExit || !bytes.Equal(out, stdout) {
+				t.Errorf("exitResult(%s) = (%q, %d, %v), want bd's stdout, exit %d and no error", tc.name, out, exit, err, tc.wantExit)
+			}
+		})
+	}
+}
 
 // okBD answers every call with exit 0.
 func okBD([]string) ([]byte, int, error) { return nil, 0, nil }
@@ -265,6 +313,41 @@ func TestProvisionFixtureRefusesALineThatIsNotABead(t *testing.T) {
 	_, err := provisionFixture(okRun, fixture, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "line 2") {
 		t.Fatalf("provisionFixture over a line that is not a bead = %v, want the line named", err)
+	}
+}
+
+// TestProvisionFixtureReportsAScratchItCannotMake: a copy needs its directory under scratch, and
+// when the scratch path cannot hold one the run stops naming the directory.
+func TestProvisionFixtureReportsAScratchItCannotMake(t *testing.T) {
+	t.Parallel()
+	provision, err := provisionFixture(okRun, writeFixture(t, fixtureIDs...), filepath.Join(t.TempDir(), "missing"))
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	if _, _, err := provision(); err == nil || !strings.Contains(err.Error(), "scratch directory") {
+		t.Fatalf("provision with a missing scratch directory = %v, want an error naming it", err)
+	}
+}
+
+// TestProvisionFixtureReportsAFixtureItCannotRead: a fixture path that opens but cannot be read is
+// an error, not a fixture holding no beads.
+func TestProvisionFixtureReportsAFixtureItCannotRead(t *testing.T) {
+	t.Parallel()
+	// A directory opens as a file but fails the first read, on Linux and macOS alike.
+	_, err := provisionFixture(okRun, t.TempDir(), t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "read the fixture") {
+		t.Fatalf("provisionFixture of a fixture that cannot be read = %v, want an error naming the read", err)
+	}
+}
+
+// TestProvisionFixtureReportsAWorkingDirectoryItCannotRead: a relative fixture is resolved against
+// the working directory, and a process the OS will not name one for fails rather than guessing.
+func TestProvisionFixtureReportsAWorkingDirectoryItCannotRead(t *testing.T) {
+	t.Parallel()
+	getwd := func() (string, error) { return "", errors.New("getwd: i/o error") }
+	_, err := provisionFixtureFrom(getwd, okRun, "fixture.jsonl", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "i/o error") {
+		t.Fatalf("provisionFixtureFrom without a working directory = %v, want the getwd failure reported", err)
 	}
 }
 
