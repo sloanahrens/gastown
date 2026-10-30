@@ -27,6 +27,9 @@ type countingStore struct {
 	multis   [][]string
 	lists    int
 	assigned int
+	// children counts the per-bead children reads, so a test can hold a scan's
+	// cost to the bd calls that reached the store (gt-km9jt).
+	children int
 	// failBatch makes the batched reads (ShowMultiple, List) fail.
 	failBatch bool
 }
@@ -46,6 +49,11 @@ func (c *countingStore) ShowMultiple(ids []string) (map[string]*beads.Issue, err
 		return nil, errors.New("bd show: boom")
 	}
 	return c.Client.ShowMultiple(ids)
+}
+
+func (c *countingStore) Children(parentID string) ([]*beads.Issue, error) {
+	c.children++
+	return c.Client.Children(parentID)
 }
 
 func (c *countingStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {

@@ -25,7 +25,8 @@ import (
 //
 // The same file carries the shape and label verdicts of the candidates the
 // scan read (specCandidateVerdict), for the same reason: a candidate whose
-// board row has not moved answers the same verdict without the details read
+// board row has not moved answers the same label and shape verdict without
+// deciding them again, and a refused one costs no details read at all
 // (gt-km9jt).
 //
 // The memory lasts as long as the daemon does (the owner is the one the detail

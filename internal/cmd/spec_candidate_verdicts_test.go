@@ -16,13 +16,15 @@ import (
 // (86 candidates at 12:37, gt-km9jt).
 const specCandidateFixtureSize = 80
 
-// specCandidateChildrenBeforeGTKM9JT is the 80 children reads one tick made
-// over the fixture before this change: one per candidate, the whole per-bead
-// cost of the scan. It was measured at 9c64ca5d1, the main this branch was cut
-// from, and TestSpecCandidateChildrenBeforeTheMemory measures it again with the
-// verdict memory off, so the number the second tick is compared against is one
-// this code still produces rather than the fixture size restated.
-const specCandidateChildrenBeforeGTKM9JT = 80
+// specCandidateReadsBeforeGTKM9JT is the bd reads one tick's candidate scan
+// made over the fixture before this change: the one details batch per rig plus
+// one children read per candidate, eighty-one in all. It was measured at
+// b4f678ef (the main this branch was cut from) through the counting store:
+// details batches 1, children reads 80. TestSpecCandidateScanBeforeTheMemory
+// measures the same number again with the verdict memory off and the pre-change
+// per-bead children wiring, so the second tick is compared against a count this
+// harness still measures rather than the fixture size restated.
+const specCandidateReadsBeforeGTKM9JT = 81
 
 // specCandidateFixture is eighty ready beads in one rig, as the board lists
 // them.
@@ -56,9 +58,14 @@ func specCandidateBoardRead(t *testing.T, issues []*beads.Issue) specBoardRead {
 // updated_at and dependency count the memory can key on, a counting store for
 // the details read, and a counting grouped reader for the children.
 type verdictTick struct {
-	root   string
-	rows   map[string]string
-	deps   map[string]int
+	root string
+	rows map[string]string
+	deps map[string]int
+	// extra are candidates the board read carries beyond the fake's own, for a
+	// bead the fake's candidate filter would hold out of it (a refusal).
+	extra  []specCandidate
+	f      *fakeSpecTown
+	db     *beadsfake.Fake
 	store  *countingStore
 	reads  *specTickReads
 	groups int
@@ -88,6 +95,8 @@ func newVerdictTick(t *testing.T, n int) *verdictTick {
 		v.rows[id] = fmt.Sprintf("2026-09-30T00:%02d:00Z", i)
 		db.Seed(beads.Issue{ID: id, Design: "design of " + id})
 	}
+	v.f = f
+	v.db = db
 	v.store = newCountingStore(db)
 	memory := newSpecAnnotatedTick(v.root, "daemon-1", func(string) beads.Client { return nil }).memory
 	v.env = v.wire(f, newSpecCandidateVerdicts(memory,
@@ -115,19 +124,15 @@ func (v *verdictTick) wire(f *fakeSpecTown, verdicts *specCandidateVerdicts) spe
 	var children func(beadID string) ([]specdispatch.Child, error)
 	env.Candidates = func() specBoardRead {
 		read := board()
+		read.Candidates = append(read.Candidates, v.extra...)
 		for i := range read.Candidates {
 			id := read.Candidates[i].Spec.ID
 			read.Candidates[i].UpdatedAt = v.rows[id]
 			read.Candidates[i].DepCount = v.deps[id]
 		}
+		// The details read fills the design and the admission edges from the
+		// store, exactly as the tick's own wiring does.
 		read = specBoardDetails(reads, func(string) beads.Client { return v.store }, read, verdicts)
-		// The store answers no dependencies here, so the fake's own blocking
-		// edges stand in for the details read's, as a seeded store would.
-		for i := range read.Candidates {
-			if b, ok := f.blockers[read.Candidates[i].Spec.ID]; ok {
-				read.Candidates[i].Blockers = b
-			}
-		}
 		if verdicts != nil && verdicts.memory != nil {
 			verdicts.memory.observe(read)
 		}
@@ -141,6 +146,23 @@ func (v *verdictTick) wire(f *fakeSpecTown, verdicts *specCandidateVerdicts) spe
 		return children(id)
 	}
 	return env
+}
+
+// setBlocker gives id a blocking edge on blocker, which stands at status, and
+// moves the board row's dependency count: the edge and its status are the
+// details read's to answer, the count the board's.
+func (v *verdictTick) setBlocker(t *testing.T, id, blocker, status string) {
+	t.Helper()
+	v.db.Seed(beads.Issue{ID: blocker, Status: status})
+	if err := v.db.AddDependency(id, blocker); err != nil {
+		t.Fatalf("adding the blocking edge: %v", err)
+	}
+	v.deps[id] = 1
+}
+
+// setBlockerStatus moves a blocker's status, leaving the dependent's row alone.
+func (v *verdictTick) setBlockerStatus(blocker, status string) {
+	v.db.Seed(beads.Issue{ID: blocker, Status: status})
 }
 
 // retown runs the same memory over a changed town: the next tick the daemon
@@ -172,11 +194,11 @@ func (v *verdictTick) childRead(_ string, ids []string) (map[string][]*beads.Iss
 	return out, nil
 }
 
-// A tick over eighty candidates whose rows have not moved reads each bead's
-// details and children once; a second tick over the same board reads no details
-// at all and one grouped children view, against the eighty per-candidate
-// children reads the scan made before (gt-km9jt).
-func TestSpecCandidateVerdictsSecondTickReadsNoDetails(t *testing.T) {
+// A tick over eighty candidates costs one details batch and one grouped
+// children view, and a second tick over unchanged rows costs the same: the
+// details are read every tick for the admission edges, and the shape verdicts
+// the memory serves save the decision, not the read (gt-km9jt).
+func TestSpecCandidateVerdictsSecondTickReadsOneBatchPerRig(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, specCandidateFixtureSize)
 
@@ -196,19 +218,19 @@ func TestSpecCandidateVerdictsSecondTickReadsNoDetails(t *testing.T) {
 
 	runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
 
-	if len(v.store.multis) != 1 {
-		t.Errorf("the second tick made %d details reads, want none: every row was unchanged", len(v.store.multis)-1)
+	if len(v.store.multis) != 2 || len(v.store.multis[1]) != specCandidateFixtureSize {
+		t.Fatalf("the second tick's details batches = %v, want one more batch over the fixture for its edges", v.store.multis)
 	}
 	if v.groups != 2 {
 		t.Errorf("the second tick made %d children reads, want its one grouped view", v.groups-1)
 	}
-	if got := v.reads.Calls(); got != 1 {
-		t.Errorf("the second tick counted %d bd reads, want the one grouped children view", got)
+	if got := v.reads.Calls(); got != 2 {
+		t.Errorf("the second tick counted %d bd reads, want its details batch and grouped children view", got)
 	}
-	// The phase costs at most the board reads: one read per rig, against the
-	// eighty per-candidate reads a tick made before (gt-km9jt).
-	if got := v.reads.Calls(); got > specCandidateChildrenBeforeGTKM9JT/2 {
-		t.Errorf("the second tick cost %d bd reads, want at most half the pre-change %d", got, specCandidateChildrenBeforeGTKM9JT)
+	// The phase costs at most half the bd reads a tick made before this change,
+	// over the same fixture (gt-km9jt).
+	if got := v.reads.Calls(); got > specCandidateReadsBeforeGTKM9JT/2 {
+		t.Errorf("the second tick cost %d bd reads, want at most half the pre-change %d", got, specCandidateReadsBeforeGTKM9JT)
 	}
 }
 
@@ -222,27 +244,25 @@ func newFakeVerdictTown(v *verdictTick) *fakeSpecTown {
 	return f
 }
 
-// The scan with no verdict memory makes exactly the per-candidate children read
-// it made before this change: the old number, measured here so the second
-// tick's cost is compared against a count this code still produces (gt-km9jt).
-func TestSpecCandidateChildrenBeforeTheMemory(t *testing.T) {
+// The scan with no verdict memory and the pre-change per-bead children wiring
+// costs the old number of bd reads, counted at the store: one details batch and
+// one children read per candidate (gt-km9jt).
+func TestSpecCandidateScanBeforeTheMemoryReadsChildrenPerBead(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, specCandidateFixtureSize)
-	// No memory: every candidate is decided and its children read again, as
-	// before this change.
+	// No memory: every candidate is decided, and the children are read one bead
+	// at a time the way the scan read them before this change.
 	v.env.Verdicts = nil
-	perCandidate := 0
-	children := v.env.Children
 	v.env.Children = func(id string) ([]specdispatch.Child, error) {
-		perCandidate++
-		return children(id)
+		kids, err := v.store.Children(id)
+		if err != nil {
+			return nil, err
+		}
+		return childSpecs(kids), nil
 	}
 	runSpecDispatchCycle(v.env)
-	if len(specCandidateFixture()) != specCandidateChildrenBeforeGTKM9JT {
-		t.Fatalf("the fixture holds %d candidates, want the %d the old count was measured over", len(specCandidateFixture()), specCandidateChildrenBeforeGTKM9JT)
-	}
-	if perCandidate != specCandidateChildrenBeforeGTKM9JT {
-		t.Errorf("the memory-off tick read children %d times, want the %d per-candidate reads pinned before this change", perCandidate, specCandidateChildrenBeforeGTKM9JT)
+	if got, want := len(v.store.multis)+v.store.children, specCandidateReadsBeforeGTKM9JT; got != want {
+		t.Errorf("the pre-change wiring cost %d bd reads over the fixture, want the %d measured at b4f678ef", got, want)
 	}
 }
 
@@ -272,20 +292,19 @@ func TestSpecCandidateVerdictsAreRereadWhenTheBeadIsEdited(t *testing.T) {
 	}
 }
 
-// A candidate whose blocking edges moved is read again: an edge added without
-// touching the bead is seen, because the row's dependency count is part of the
-// key (gt-km9jt).
-func TestSpecCandidateVerdictsAreRereadWhenAnEdgeMoves(t *testing.T) {
+// A blocking edge added between two ticks is seen at the next one, though the
+// bead's own fields did not move and its stored label and shape verdict still
+// applies: the admission edges are the details read's, fresh every tick
+// (gt-km9jt).
+func TestSpecCandidateVerdictsSeeAnAddedEdge(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, 1)
 	id := "gt-cand-00"
 	runSpecDispatchCycle(v.env)
 
-	f := newFakeVerdictTown(v)
-	f.blockers[id] = []beads.IssueDep{{ID: "gt-blocker", Status: "open", DependencyType: "blocks"}}
-	v.deps[id] = 1
+	v.setBlocker(t, id, "gt-blocker", string(beads.StatusOpen))
 
-	r := runSpecDispatchCycle(v.retown(f))
+	r := runSpecDispatchCycle(v.retown(v.f))
 	if len(v.store.multis) != 2 {
 		t.Fatalf("the tick after the edge made %d details reads, want the bead read again", len(v.store.multis))
 	}
@@ -316,24 +335,84 @@ func TestSpecCandidateVerdictsAreRereadWhenTheRulesChange(t *testing.T) {
 	}
 }
 
-// A candidate the last read found blocked is read again every tick: a blocker
-// that closes does not move the dependent's row, so only a fresh read can see
-// the bead freed (gt-km9jt).
-func TestSpecCandidateVerdictsRereadABlockedCandidate(t *testing.T) {
+// A candidate blocked at one tick is eligible at the next once its blocker
+// closes: the blocker's change does not move the dependent's row, so the edges
+// must be the tick's own read, never a served verdict (gt-km9jt).
+func TestSpecCandidateVerdictsSeeABlockerClose(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, 1)
 	id := "gt-cand-00"
-	f := newFakeVerdictTown(v)
-	f.blockers[id] = []beads.IssueDep{{ID: "gt-blocker", Status: "open", DependencyType: "blocks"}}
+	v.setBlocker(t, id, "gt-blocker", string(beads.StatusOpen))
 
-	runSpecDispatchCycle(v.retown(f))
-	if len(v.store.multis) != 1 {
-		t.Fatalf("first tick's details reads = %d, want 1", len(v.store.multis))
+	if r := runSpecDispatchCycle(v.retown(v.f)); len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "blocked") {
+		t.Fatalf("first tick skipped %+v, want the admission refusal", r.Skipped)
 	}
-	// Nothing about the bead moved; the blocker is still open.
-	runSpecDispatchCycle(v.retown(f))
+
+	// The blocker closes; the dependent's own row does not move.
+	v.setBlockerStatus("gt-blocker", string(beads.StatusClosed))
+	r := runSpecDispatchCycle(v.retown(v.f))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNoSeat) {
+		t.Errorf("the tick after the blocker closed skipped %+v, want the bead freed as far as the seat hold", r.Skipped)
+	}
+}
+
+// A candidate free at one tick is blocked at the next once a blocker reopens:
+// serving the edge verdict from the memory would sling it over the reopened
+// blocker (gt-km9jt).
+func TestSpecCandidateVerdictsSeeABlockerReopen(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	id := "gt-cand-00"
+	// The edge is on the bead from the start, closed, so the dependency count
+	// never moves: only the blocker's status does.
+	v.setBlocker(t, id, "gt-blocker", string(beads.StatusClosed))
+
+	if r := runSpecDispatchCycle(v.retown(v.f)); len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNoSeat) {
+		t.Fatalf("first tick skipped %+v, want the bead free of blockers as far as the seat hold", r.Skipped)
+	}
+
+	// The blocker reopens; the dependent's own row does not move.
+	v.setBlockerStatus("gt-blocker", string(beads.StatusOpen))
+	r := runSpecDispatchCycle(v.retown(v.f))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "blocked") {
+		t.Errorf("the tick after the blocker reopened skipped %+v, want the admission refusal", r.Skipped)
+	}
+}
+
+// A candidate the board refuses on its own fields costs no details read once
+// its unchanged row's refusal is known, and is read again the moment the row
+// moves (gt-km9jt).
+func TestSpecCandidateRefusalSkipsTheDetailsRead(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 0)
+	id := "gt-held"
+	// The hold is in the design, which only the details read carries: the row
+	// itself reads as an ordinary open bead.
+	v.extra = []specCandidate{{Spec: cleanSpec(id, 2, "2026-09-29T10:00:00Z"), Rig: "gastown"}}
+	v.rows[id] = "2026-09-30T00:00:00Z"
+	v.db.Seed(beads.Issue{ID: id, Design: "do not redispatch"})
+
+	first := runSpecDispatchCycle(v.env)
+	if len(first.Skipped) != 1 || !strings.Contains(first.Skipped[0].Line, specdispatch.SkipNotEligible) {
+		t.Fatalf("first tick skipped %+v, want the hold's refusal", first.Skipped)
+	}
+	if len(v.store.multis) != 1 {
+		t.Fatalf("first tick made %d details reads, want the one that found the hold", len(v.store.multis))
+	}
+
+	runSpecDispatchCycle(v.retown(v.f))
+	if len(v.store.multis) != 1 {
+		t.Errorf("the unchanged refused candidate cost a details read at the next tick")
+	}
+
+	// The row moves; the refusal is decided again from a fresh read.
+	v.rows[id] = "2026-09-30T01:00:00Z"
+	r := runSpecDispatchCycle(v.retown(v.f))
 	if len(v.store.multis) != 2 {
-		t.Errorf("the blocked candidate was not read again, so a closed blocker would never be seen")
+		t.Errorf("the moved refused candidate was not read again")
+	}
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNotEligible) {
+		t.Errorf("the moved candidate skipped %+v, want the same refusal", r.Skipped)
 	}
 }
 
@@ -436,7 +515,7 @@ func TestSpecCandidateVerdictsServeOnlyAShapedRecordOfTheSameRow(t *testing.T) {
 	verdicts := newSpecCandidateVerdicts(memory, func(string) specCandidateInputs { return specCandidateInputs{} })
 	c := specCandidate{Spec: specdispatch.Spec{ID: "gt-x"}, Rig: "gastown", UpdatedAt: "2026-09-30T00:00:00Z"}
 
-	verdicts.record(c, specCandidateVerdict{Eligible: true, Blockers: []beads.IssueDep{{ID: "gt-y", Status: "open"}}})
+	verdicts.record(c, specCandidateVerdict{Eligible: true})
 	if _, served := verdicts.lookUp(c); served {
 		t.Errorf("a record with no shape was served to the next tick")
 	}

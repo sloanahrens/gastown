@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"sort"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -15,18 +14,24 @@ import (
 // tick gets from the ready board and from one details read per rig. Nearly every
 // candidate repeats the verdict of the last tick, so the scan keeps each
 // verdict in the annotations file, keyed by the board row it was decided from,
-// and reads a candidate again only when that row has moved (gt-km9jt).
+// and decides an unchanged candidate again from the record (gt-km9jt).
 //
 // The key is (bead id, updated_at, dependency_count) plus the knobs the verdict
 // was decided under (specCandidateInputs): a bead's own edit moves updated_at,
 // an edge added or removed moves dependency_count, and a change to the template,
-// the gate, the priority ceiling or the target branch reads the candidate again.
-// Staleness bound: a change to the bead is seen at the next tick, because it
-// moves updated_at. A blocking edge that closes does not move the dependent's
-// row, so a refused candidate is never recorded at all: it is read again every
-// tick, and the edge's status is only kept for a bead the read found free to
-// go. The children are read fresh every tick for the same reason (their change
-// does not move the parent's row either).
+// the gate, the priority ceiling or the target branch decides the candidate
+// again. Staleness bound: a change to the bead is seen at the next tick,
+// because it moves updated_at.
+//
+// The record holds no admission edges. A blocker that closes or REOPENS does
+// not move the dependent's row, so an edge verdict keyed on that row would go
+// stale in both directions — a bead held after its blocker closed, or slung
+// over a blocker that reopened. The edges are therefore read fresh every tick,
+// from the one batched details view per rig the scan already makes
+// (specBoardDetails); only a bead the board refuses on its own fields skips
+// that read, because it is never slung and needs no edges. The children are
+// read fresh every tick for the same reason (their change does not move the
+// parent's row either).
 
 // specCandidateInputs are the knobs a verdict was decided under. They are part
 // of the record, not the key alone, so a tick whose template, gate, ceiling or
@@ -45,8 +50,10 @@ type specCandidateInputs struct {
 }
 
 // specCandidateVerdict is one candidate's shape and label verdict, as the tick
-// that read it decided. It keeps the admission edges beside the verdict, so a
-// later tick can check admission without the details read that supplied them.
+// that read it decided. It holds only what the bead's own row decides; the
+// blocking edges are never kept, because a blocker's change does not move the
+// dependent's row and a stored edge verdict would go stale (see the file
+// comment).
 type specCandidateVerdict struct {
 	// UpdatedAt and DepCount are the board row the verdict was decided from:
 	// the next tick serves it only while both still match.
@@ -65,9 +72,6 @@ type specCandidateVerdict struct {
 	Shaped bool `json:"shaped,omitempty"`
 	// Shape is specdispatch.Lint's verdict.
 	Shape specdispatch.LintVerdict `json:"shape"`
-	// Blockers are the bead's blocking edges as the details read returned them,
-	// kept so a sling can still check admission without the read.
-	Blockers []beads.IssueDep `json:"blockers,omitempty"`
 }
 
 // specCandidateVerdicts is the candidate scan's verdict memory: the annotated
@@ -116,13 +120,25 @@ func (v *specCandidateVerdicts) lookUp(c specCandidate) (specCandidateVerdict, b
 		return specCandidateVerdict{}, false
 	}
 	// An eligible candidate's shape was decided with its labels, so a record
-	// without one never got past the admission check: the bead was blocked, or
-	// the file is not one this code wrote. Both are read again, because a
-	// blocker that closes does not move the dependent's row.
+	// without one never got past the admission check (the bead was blocked), or
+	// the file is not one this code wrote. Neither is a verdict to serve.
 	if entry.Eligible && !entry.Shaped {
 		return specCandidateVerdict{}, false
 	}
 	if entry.Inputs != v.inputs(c.Rig) {
+		return specCandidateVerdict{}, false
+	}
+	return entry, true
+}
+
+// refusal answers c's stored label refusal when its board row and the tick's
+// knobs still match, and false otherwise. Only a refusal may skip the details
+// read: the bead is never slung, so it needs no admission edges. An eligible
+// candidate is always read, because the edges admission runs on are never
+// served from the memory.
+func (v *specCandidateVerdicts) refusal(c specCandidate) (specCandidateVerdict, bool) {
+	entry, ok := v.lookUp(c)
+	if !ok || entry.Eligible {
 		return specCandidateVerdict{}, false
 	}
 	return entry, true

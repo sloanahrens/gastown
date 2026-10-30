@@ -1490,9 +1490,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// before the sling is what catches a bead that changed since the board.
 		full := c.Spec
 		// The shape and label verdicts of a candidate whose board row has not
-		// moved are the ones the last tick reached: the details read that fed
-		// them is skipped for it (specBoardDetails), so the loop takes them from
-		// the record rather than deciding them again from a bead it did not read
+		// moved are the ones the last tick reached. An eligible candidate is
+		// still read each tick for its admission edges (specBoardDetails), so
+		// serving them here saves the decision, not the read; a refused
+		// candidate is not read at all, and its skip is all the tick knows
 		// (gt-km9jt).
 		remembered, served := env.Verdicts.lookUp(c)
 		eligible, why := specdispatch.Eligible(full, env.MaxPriority)
@@ -1526,13 +1527,15 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// candidate whose edges could not be read never reached it. A refusal is
 		// a skip, not a failure: the bead stays ready and the next tick asks
 		// again once the blocker closes.
+		//
+		// The edges are always this tick's read, never a served verdict: a
+		// blocker that closes or reopens does not move the dependent's row, so a
+		// remembered edge verdict would hold the bead after its blocker freed it
+		// or sling it over one that reopened (gt-km9jt).
 		blockers := c.Blockers
-		if served {
-			blockers = remembered.Blockers
-		}
 		if why := specBlocked(sling.Admit(blockers)); why != "" {
-			// Not remembered: a blocker that closes does not move the bead's
-			// row, so the next tick reads the edges again (gt-km9jt).
+			// Not remembered: the bead stays ready and the next tick reads its
+			// edges again.
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, why)})
 			continue
 		}
@@ -1579,7 +1582,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		} else {
 			full.Target = env.target(c.Rig)
 			verdict = specdispatch.Lint(full, env.Template)
-			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict, Blockers: blockers})
+			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict})
 		}
 		shapeNote := ""
 		if env.ShapeGate != specdispatch.ShapeGateOff {
@@ -3080,15 +3083,17 @@ func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 // unread, and a bead with no list is not a bead with no blockers (gt-o70a9). It
 // waits for the next tick rather than dispatching blind.
 //
-// A candidate whose stored verdict still describes its board row is not read at
-// all: the verdict carries the shape and label answer the details would have
-// fed, so the tick spends the details read on the beads that changed or are new
-// (gt-km9jt).
+// A candidate the board itself refuses — an excluded label, a status, an
+// assignee — costs no details read once its unchanged row's refusal is known:
+// it is never slung, so it needs neither the design nor the edges. Every other
+// candidate is read every tick, because the edges admission runs on are never
+// served from the verdict memory: a blocker that closes or reopens does not
+// move the dependent's row (gt-km9jt).
 func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Client, read specBoardRead, verdicts *specCandidateVerdicts) specBoardRead {
 	var rigs []string
 	byRig := map[string][]int{}
 	for i, c := range read.Candidates {
-		if _, remembered := verdicts.lookUp(c); remembered {
+		if _, refused := verdicts.refusal(c); refused {
 			continue
 		}
 		if _, seen := byRig[c.Rig]; !seen {
