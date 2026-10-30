@@ -171,10 +171,21 @@ func (r *Run) imageStep(detached bool) Exit {
 	// A build before the swap is the one that fails the install, so it waits out
 	// a sling in flight rather than failing on the first deferral (gt-rfwr4).
 	// The detached build cannot fail the install and defers on its own.
-	if !detached && !r.waitForSling() {
-		return r.imageFail()
+	alarm := time.Duration(r.imageAlarm()) * time.Second
+	var waited time.Duration
+	if !detached {
+		var ok bool
+		if waited, ok = r.waitForSling(alarm); !ok {
+			return r.imageFail()
+		}
+		// The wait comes out of the alarm, so the build before the swap runs
+		// within it as a whole. Nothing left is a failure: a build with an alarm
+		// of zero would have no bound at all (gt-jie3d).
+		if waited >= alarm {
+			r.C.Log("polecat image: the sling wait used the whole alarm of " + alarm.String() + "; the build is not run")
+			return r.imageFail()
+		}
 	}
-	alarm := r.imageAlarm()
 	logPath := r.imageLog()
 	if logPath != os.DevNull {
 		_ = r.Files.mkdirAll(filepath.Dir(logPath))
@@ -183,7 +194,7 @@ func (r *Run) imageStep(detached bool) Exit {
 	b := ImageBuild{
 		Program:  program,
 		Env:      r.imageEnv(registry.Value, crane, bin, !detached),
-		Alarm:    time.Duration(alarm) * time.Second,
+		Alarm:    alarm - waited,
 		Lock:     r.imageLock(),
 		Log:      logPath,
 		Detached: detached,
@@ -222,30 +233,36 @@ func (r *Run) imageStep(detached bool) Exit {
 	return r.imageFail()
 }
 
-// waitForSling reports whether the build before the swap may run now. It reads
-// the sling deferral first and returns at once when none is in flight, so a
-// build that is not deferred never polls. Otherwise it reads again every
-// imageSlingPoll until the deferral clears or imageSlingBound has passed; past
-// the bound it logs why and reports false, and the caller fails the install
-// with the image's own error. The reading is the same one the plugin defers
-// on (polecatimage.SlingDeferReason), so the build does not start into a sling
-// the plugin would refuse (gt-rfwr4).
-func (r *Run) waitForSling() bool {
+// waitForSling reports whether the build before the swap may run now, and how
+// long it waited. It reads the sling deferral first and returns at once when
+// none is in flight, so a build that is not deferred never polls. Otherwise it
+// reads again every imageSlingPoll until the deferral clears or the bound has
+// passed. The bound is imageSlingBound, or the alarm when that is shorter, so
+// the wait never runs past the alarm the build is given. Past the bound it logs
+// why and reports false, and the caller fails the install with the image's own
+// error. The reading is the same one the plugin defers on
+// (polecatimage.SlingDeferReason), so the build does not start into a sling the
+// plugin would refuse (gt-rfwr4).
+func (r *Run) waitForSling(alarm time.Duration) (time.Duration, bool) {
 	reason := r.slingDeferral()
 	if reason == "" {
-		return true
+		return 0, true
 	}
-	r.C.Log("polecat image: " + reason + "; waiting up to " + imageSlingBound.String() +
+	bound := min(imageSlingBound, alarm)
+	r.C.Log("polecat image: " + reason + "; waiting up to " + bound.String() +
 		" for it to finish before the build")
-	for waited := time.Duration(0); waited < imageSlingBound; waited += imageSlingPoll {
-		r.imageSleep(imageSlingPoll)
+	var waited time.Duration
+	for waited < bound {
+		poll := min(imageSlingPoll, bound-waited)
+		r.imageSleep(poll)
+		waited += poll
 		if reason = r.slingDeferral(); reason == "" {
 			r.C.Log("polecat image: no sling is running, so the build goes ahead")
-			return true
+			return waited, true
 		}
 	}
-	r.C.Log("polecat image: " + reason + " after " + imageSlingBound.String() + "; the build is not run")
-	return false
+	r.C.Log("polecat image: " + reason + " after " + bound.String() + "; the build is not run")
+	return waited, false
 }
 
 // slingDeferral is the reason a gt sling defers the build, "" when none runs.
