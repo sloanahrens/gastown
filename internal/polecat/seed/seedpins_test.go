@@ -5,7 +5,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -42,15 +41,17 @@ func TestSeedPinsNameEverySeededRig(t *testing.T) {
 	}
 }
 
-// seedRepoRoot is the repository root, found from this file's directory so the
-// test reads the same tree however it is invoked.
+// seedRepoRoot is the repository root, found by walking up from the test's
+// working directory (go test runs a package's tests in that package's
+// directory), so the test reads the tree it is running against rather than one
+// named by a source path compiled into the binary (gt-vgd9i).
 func seedRepoRoot(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("working directory: %v", err)
 	}
-	dir := filepath.Dir(file)
+	start := dir
 	for {
 		_, err := os.Stat(filepath.Join(dir, "go.mod"))
 		if err == nil {
@@ -61,7 +62,7 @@ func seedRepoRoot(t *testing.T) string {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("no go.mod in %s or any directory above it", filepath.Dir(file))
+			t.Fatalf("no go.mod in %s or any directory above it", start)
 		}
 		dir = parent
 	}
