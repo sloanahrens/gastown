@@ -1,6 +1,7 @@
 package docslint
 
 import (
+	"fmt"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -9,14 +10,15 @@ import (
 
 // Git reports when each path was last committed, which the slice is ordered by.
 type Git interface {
-	// LastCommit is the Unix time of the newest commit touching p, and 0 when
-	// git knows none.
-	LastCommit(p string) int64
+	// LastCommit is the Unix time of the newest commit touching p. It is 0 with
+	// no error when git knows no commit for p, and an error when git cannot answer.
+	LastCommit(p string) (int64, error)
 }
 
 // Slice is the audit's reading order: the n docs and then the m go files whose
-// last commit is oldest. A tier that cannot be read stops it, because a shorter
-// slice would read as the audit's whole plan.
+// last commit is oldest. A tier that cannot be read, or a git lookup that fails,
+// stops it, because a shorter slice would read as the audit's whole plan. The
+// error return departs from the []string signature in gt-tpg0p.110's spec.
 func Slice(fsys FS, git Git, n, m int) ([]string, error) {
 	docs, err := docsAndReference(fsys)
 	if err != nil {
@@ -26,8 +28,16 @@ func Slice(fsys FS, git Git, n, m int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := firstN(oldestFirst(docs, git), n)
-	return append(out, firstN(oldestFirst(goFiles, git), m)...), nil
+	docOrder, err := oldestFirst(docs, git)
+	if err != nil {
+		return nil, err
+	}
+	goOrder, err := oldestFirst(goFiles, git)
+	if err != nil {
+		return nil, err
+	}
+	out := firstN(docOrder, n)
+	return append(out, firstN(goOrder, m)...), nil
 }
 
 // docsAndReference is the docs half of the slice: an audit may edit a file in
@@ -46,14 +56,18 @@ func docsAndReference(fsys FS) ([]string, error) {
 
 // oldestFirst orders paths by last commit time ascending, ties by path
 // bytewise, so the same tree yields the same slice on every run and host.
-func oldestFirst(paths []string, git Git) []string {
+func oldestFirst(paths []string, git Git) ([]string, error) {
 	type dated struct {
 		path string
 		time int64
 	}
 	entries := make([]dated, 0, len(paths))
 	for _, p := range paths {
-		entries = append(entries, dated{path: p, time: git.LastCommit(p)})
+		t, err := git.LastCommit(p)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, dated{path: p, time: t})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].time != entries[j].time {
@@ -65,7 +79,7 @@ func oldestFirst(paths []string, git Git) []string {
 	for i, e := range entries {
 		out[i] = e.path
 	}
-	return out
+	return out, nil
 }
 
 // firstN is the first n paths, and none for a count of zero or less, which the
@@ -90,21 +104,27 @@ type GitLog struct {
 	run func(dir string, args ...string) ([]byte, error)
 }
 
-// LastCommit is the Unix time of the newest commit touching p, and 0 when git
-// knows none: an untracked path, or a git that cannot answer.
-func (g GitLog) LastCommit(p string) int64 {
+// LastCommit is the Unix time of the newest commit touching p. It is 0 with no
+// error for an untracked path, and an error when git cannot answer.
+func (g GitLog) LastCommit(p string) (int64, error) {
 	out, err := g.runner()(g.Root, "log", "-1", "--format=%ct", "--", p)
-	// The shell's `git log ... || true` left a failed lookup at 0, and it stays
-	// there: the slice spends the time on ordering, never on a verdict, so a
-	// lost one costs a file its place and nothing else.
+	// A failed lookup is an error, not a 0: 0 is how an uncommitted file reads,
+	// so a git that cannot answer would pass as a file no commit touched.
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("docslint: git log for %s: %w", p, err)
 	}
-	ts, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	text := strings.TrimSpace(string(out))
+	// git prints nothing for a path no commit touched.
+	if text == "" {
+		return 0, nil
+	}
+	ts, err := strconv.ParseInt(text, 10, 64)
 	if err != nil {
-		return 0
+		// The output stays out of the error: it is captured command output, which
+		// can hold anything.
+		return 0, fmt.Errorf("docslint: git log for %s gave no commit time", p)
 	}
-	return ts
+	return ts, nil
 }
 
 func (g GitLog) runner() func(dir string, args ...string) ([]byte, error) {

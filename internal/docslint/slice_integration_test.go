@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -16,11 +17,7 @@ import (
 func TestIntegrationSliceOrder(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	// An empty global and system config, so a developer's gitconfig cannot
-	// change what these commits record.
-	gitFixture(t, root,
-		[]string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null"},
-		"init", "-q")
+	gitFixture(t, root, nil, "init", "-q")
 
 	writeFileAt(t, root, "AGENTS.md", "# agents\n")
 	writeFileAt(t, root, "internal/pkg/a.go", "package pkg\n")
@@ -39,13 +36,21 @@ func TestIntegrationSliceOrder(t *testing.T) {
 	writeFileAt(t, root, "internal/pkg/b.go", "package pkg\n")
 
 	fsys := OSFiles{Root: root}
-	git := GitLog{Root: root}
+	git := fixtureGitLog(root)
 
-	if got, want := git.LastCommit("AGENTS.md"), int64(1767225600); got != want {
-		t.Errorf("LastCommit(AGENTS.md) = %d, want %d", got, want)
+	agents, err := git.LastCommit("AGENTS.md")
+	if err != nil {
+		t.Fatalf("LastCommit(AGENTS.md): %v", err)
 	}
-	if got := git.LastCommit("docs/HOOKS.md"); got != 0 {
-		t.Errorf("LastCommit(docs/HOOKS.md) = %d, want 0 for a file no commit touched", got)
+	if want := int64(1767225600); agents != want {
+		t.Errorf("LastCommit(AGENTS.md) = %d, want %d", agents, want)
+	}
+	hooks, err := git.LastCommit("docs/HOOKS.md")
+	if err != nil {
+		t.Fatalf("LastCommit(docs/HOOKS.md): %v", err)
+	}
+	if hooks != 0 {
+		t.Errorf("LastCommit(docs/HOOKS.md) = %d, want 0 for a file no commit touched", hooks)
 	}
 
 	tests := []struct {
@@ -108,8 +113,6 @@ func writeFileAt(t *testing.T, root, rel, contents string) {
 func commitAt(t *testing.T, root, date string, paths ...string) {
 	t.Helper()
 	env := []string{
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_AUTHOR_NAME=docslint", "GIT_AUTHOR_EMAIL=docslint@example.com",
 		"GIT_COMMITTER_NAME=docslint", "GIT_COMMITTER_EMAIL=docslint@example.com",
 		"GIT_AUTHOR_DATE=" + date, "GIT_COMMITTER_DATE=" + date,
@@ -118,13 +121,37 @@ func commitAt(t *testing.T, root, date string, paths ...string) {
 	gitFixture(t, root, env, "commit", "-q", "-m", "fixture")
 }
 
-// gitFixture runs git in root under env, and fails the test with git's output
-// when it does.
+// fixtureGitLog is GitLog over the fixture, asking git under fixtureEnv, so the
+// lookups see the same repository and config as the fixture's own commands.
+func fixtureGitLog(root string) GitLog {
+	return GitLog{Root: root, run: func(dir string, args ...string) ([]byte, error) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = fixtureEnv()
+		return cmd.Output()
+	}}
+}
+
+// gitFixture runs git in root under fixtureEnv(env...), and fails the test with
+// git's output when it does.
 func gitFixture(t *testing.T, root string, env []string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = fixtureEnv(env...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
+}
+
+// fixtureEnv is the caller's environment minus every GIT_ variable, since a
+// GIT_DIR or GIT_INDEX_FILE inherited from a hook would point git at another
+// repository. It then sets an empty global and system config, so a developer's
+// gitconfig cannot change what these commits record, and appends extra.
+func fixtureEnv(extra ...string) []string {
+	env := []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null"}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, extra...)
 }
