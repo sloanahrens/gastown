@@ -1,16 +1,24 @@
 // Package ominstaller builds om from the job-owned clone and puts it in force.
 // Run is the entry point; the rebuild_om daemon job calls it in process. Run
-// refuses an empty daemon directory, then takes the install lock and, under it:
+// refuses an empty daemon directory, then takes the install lock and, under it,
+// calls install, which does these steps in order:
 //
-//  1. refuses when there is no clone, the clone is dirty or its HEAD is unreadable;
-//  2. does nothing when the om at OMPath already reports the built commit;
-//  3. builds the clone into a temp file beside om;
-//  4. signs the build;
-//  5. keeps the om at OMPath as om.prev beside it;
-//  6. swaps the build over om;
-//  7. smoke-checks that om reports the built commit, and rolls back if it does not.
+//  1. refuses when there is no clone, the clone is dirty or its HEAD is
+//     unreadable (`gitRepo`, `gitDirty`, `gitHead`);
+//  2. does nothing when the om at OMPath already reports the built commit
+//     (`probeVersion`);
+//  3. builds the clone into a temp file beside om (`install`);
+//  4. signs the build (`sign`);
+//  5. keeps the om at OMPath as om.prev beside it (`keepPrevious`);
+//  6. swaps the build over om (`swap`);
+//  7. smoke-checks that om reports the built commit, and rolls back if it does
+//     not (`probeVersion`, `smokeFailed`).
 //
-// Run appends one receipt to the daemon directory for each outcome it reaches.
+// Run appends one receipt to the daemon directory for each outcome it reaches
+// after the start time is read. Two outcomes write none, because there is no
+// receipts file to write to or no start time to record: an empty daemon
+// directory (refused, no-daemon-dir) and a clock that panics twice (failed,
+// clock).
 package ominstaller
 
 import (
@@ -139,9 +147,9 @@ type Config struct {
 }
 
 // Run takes the install lock and runs the install, and returns the result and
-// its exit status. It writes one receipt for the outcome. It never panics: a
-// panic in a seam, or any path not anticipated here, is a failed run with the
-// reason "unexpected". A clock that panics twice fails the run with the reason
+// its exit status. It writes one receipt for the outcome, except the two the
+// package doc names. It never panics: a panic in a seam, or any path not
+// anticipated here, is a failed run with the reason "unexpected". A clock that panics twice fails the run with the reason
 // "clock" and writes no receipt, since there is no start time to record.
 func Run(ctx context.Context, cfg Config) (res Result, exit Exit) {
 	start, ok := cfg.startTime()
