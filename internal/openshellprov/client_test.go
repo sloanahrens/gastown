@@ -49,9 +49,9 @@ func TestClientPutsTheGatewayFlagBeforeTheSubcommand(t *testing.T) {
 		run  func(c Client) error
 		sub  string
 	}{
-		{"ProviderExists", func(c Client) error { c.ProviderExists("deepseek"); return nil }, "provider list"},
+		{"ProviderExists", func(c Client) error { _, err := c.ProviderExists("deepseek"); return err }, "provider list"},
 		{"ProfileExists", func(c Client) error { _, err := c.ProfileExists("forgejo-polecat"); return err }, "profile list --global"},
-		{"ExportProfile", func(c Client) error { return c.ExportProfile("forgejo-polecat", io.Discard) }, "profile export --global forgejo-polecat"},
+		{"ExportProfile", func(c Client) error { return c.ExportProfile("forgejo-polecat", io.Discard) }, "profile export --global -- forgejo-polecat"},
 	}
 	for _, tc := range calls {
 		t.Run(tc.name+" with a gateway", func(t *testing.T) {
@@ -93,20 +93,31 @@ func TestProviderExistsFirstColumnOnly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fake := &fakeRunner{stdout: []byte(tc.listing)}
-			if got := (Client{Run: fake}).ProviderExists("deepseek"); got != tc.want {
+			got, err := (Client{Run: fake}).ProviderExists("deepseek")
+			if err != nil {
+				t.Fatalf("ProviderExists(deepseek) over %q: %v", tc.listing, err)
+			}
+			if got != tc.want {
 				t.Errorf("ProviderExists(deepseek) over %q = %v, want %v", tc.listing, got, tc.want)
 			}
 		})
 	}
 }
 
-// A failed provider list must read as absent even when its partial output names
-// the provider, as the script's `|| true` does.
-func TestProviderListFailureReadsAsAbsent(t *testing.T) {
+// A failed provider list is an error even when its partial output names the
+// provider. It must never read as absent, and it must never read as present.
+func TestProviderListFailureIsAnError(t *testing.T) {
 	t.Parallel()
 	fake := &fakeRunner{stdout: []byte("deepseek deepseek-claude\n"), err: errors.New("gateway down")}
-	if (Client{Run: fake}).ProviderExists("deepseek") {
-		t.Fatal("ProviderExists(deepseek) = true after a failed list, want false")
+	exists, err := (Client{Run: fake}).ProviderExists("deepseek")
+	if err == nil {
+		t.Fatalf("ProviderExists(deepseek) after a failed list = (%v, nil), want an error", exists)
+	}
+	if want := "openshell provider list failed, so whether provider deepseek exists is unknown"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
+	}
+	if exists {
+		t.Error("ProviderExists after a failed list reported the provider as present")
 	}
 }
 
