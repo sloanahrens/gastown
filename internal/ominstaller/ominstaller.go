@@ -1,11 +1,31 @@
 // Package ominstaller builds om from the job-owned clone and puts it in force.
-// The rebuild_om daemon job runs it in process.
+// Run is the entry point; the rebuild_om daemon job calls it in process. Run
+// refuses an empty daemon directory, then takes the install lock and, under it,
+// calls install, which does these steps in order:
+//
+//  1. refuses when there is no clone, the clone is dirty or its HEAD is
+//     unreadable (`gitRepo`, `gitDirty`, `gitHead`);
+//  2. does nothing when the om at OMPath already reports the built commit
+//     (`probeVersion`);
+//  3. builds the clone into a temp file beside om (`install`);
+//  4. signs the build (`sign`);
+//  5. keeps the om at OMPath as om.prev beside it (`keepPrevious`);
+//  6. swaps the build over om (`swap`);
+//  7. smoke-checks that om reports the built commit, and rolls back if it does
+//     not (`probeVersion`, `smokeFailed`).
+//
+// Run appends one receipt to the daemon directory for each outcome it reaches
+// after the start time is read. Two outcomes write none, because there is no
+// receipts file to write to or no start time to record: an empty daemon
+// directory (refused, no-daemon-dir) and a clock that panics twice (failed,
+// clock).
 package ominstaller
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"time"
 
@@ -31,8 +51,10 @@ const (
 	eventFailed  = "failed"
 	eventRefused = "refused"
 
-	reasonUnexpected = "unexpected"
-	reasonLockBusy   = "lock-busy"
+	reasonUnexpected  = "unexpected"
+	reasonLockBusy    = "lock-busy"
+	reasonNoDaemonDir = "no-daemon-dir"
+	reasonClock       = "clock"
 
 	lockName = "install-om.lock"
 )
@@ -120,14 +142,21 @@ type Config struct {
 	Now func() time.Time
 	// Logf receives the notices a run does not fail for. Nil discards them.
 	Logf func(format string, args ...any)
+	// Stderr receives a receipt the run could not write when Logf is nil. Nil is os.Stderr.
+	Stderr io.Writer
 }
 
 // Run takes the install lock and runs the install, and returns the result and
-// its exit status. It writes one receipt for the outcome. It never panics: a
-// panic in a seam, or any path not anticipated here, is a failed run with the
-// reason "unexpected".
+// its exit status. It writes one receipt for the outcome, except the two the
+// package doc names. It never panics: a panic in a seam, or any path not
+// anticipated here, is a failed run with the reason "unexpected". A clock that panics twice fails the run with the reason
+// "clock" and writes no receipt, since there is no start time to record.
 func Run(ctx context.Context, cfg Config) (res Result, exit Exit) {
-	start := cfg.now()
+	start, ok := cfg.startTime()
+	if !ok {
+		cfg.logf("[install-om] FAILED: the clock panicked twice; no receipt written")
+		return Result{Event: eventFailed, Reason: reasonClock}, ExitFailed
+	}
 	defer func() {
 		if p := recover(); p != nil {
 			res, exit = Result{Event: eventFailed, Reason: reasonUnexpected}, ExitFailed
@@ -135,6 +164,9 @@ func Run(ctx context.Context, cfg Config) (res Result, exit Exit) {
 		cfg.writeReceipt(res, start)
 	}()
 
+	if cfg.DaemonDir == "" {
+		return cfg.refuse(reasonNoDaemonDir, "no daemon directory for the install lock and receipts")
+	}
 	release, err := cfg.Acquire(lockPath(cfg.DaemonDir), cfg.LockWait)
 	if errors.Is(err, installlock.ErrBusy) {
 		cfg.logf("[install-om] Another install held the lock for %ds; not installing.", int64(cfg.LockWait/time.Second))
@@ -158,6 +190,25 @@ func (c Config) now() time.Time {
 		return time.Now()
 	}
 	return c.Now()
+}
+
+// startTime reads the clock for the run's start. A clock that panics is read
+// once more; if that panics too, ok is false and the run writes no receipt.
+func (c Config) startTime() (start time.Time, ok bool) {
+	if start, ok = c.readClock(); ok {
+		return start, true
+	}
+	return c.readClock()
+}
+
+// readClock is now, with a panic reported as ok false.
+func (c Config) readClock() (t time.Time, ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	return c.now(), true
 }
 
 func (c Config) logf(format string, args ...any) {

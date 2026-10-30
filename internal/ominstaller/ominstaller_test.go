@@ -1,11 +1,17 @@
 package ominstaller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +121,156 @@ func TestRunRecoversAPanicAsFailedUnexpected(t *testing.T) {
 	}
 }
 
+func TestRunReadsTheStartClockAgainAfterAPanic(t *testing.T) {
+	t.Parallel()
+	retry := fixedNow.Add(-5 * time.Second)
+	tests := []struct {
+		name       string
+		clock      func() time.Time
+		wantResult Result
+		wantExit   Exit
+		// wantReceipt is the receipt written, or "" for none.
+		wantReceipt string
+	}{
+		{
+			name:        "clock panics once: the receipt carries the retry time",
+			clock:       panicOnceThenRead(retry),
+			wantResult:  Result{Event: "refused", Reason: "lock-busy"},
+			wantExit:    ExitBusy,
+			wantReceipt: `"duration_s": 5,`,
+		},
+		{
+			name: "clock panics twice: failed with reason clock, no receipt",
+			clock: func() time.Time {
+				panic("clock exploded")
+			},
+			wantResult: Result{Event: "failed", Reason: "clock"},
+			wantExit:   ExitFailed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			acq := &fakeAcquire{err: installlock.ErrBusy}
+			cfg := testConfig(t, acq)
+			cfg.Now = tc.clock
+
+			res, exit := Run(context.Background(), cfg)
+
+			if res != tc.wantResult {
+				t.Errorf("result = %+v, want %+v", res, tc.wantResult)
+			}
+			if exit != tc.wantExit {
+				t.Errorf("exit = %d, want %d", exit, tc.wantExit)
+			}
+			got, err := os.ReadFile(filepath.Join(cfg.DaemonDir, "install-om-receipts.jsonl"))
+			if tc.wantReceipt == "" {
+				if !os.IsNotExist(err) {
+					t.Errorf("receipts = %q (err %v), want no receipts file", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read receipts: %v", err)
+			}
+			if !strings.Contains(string(got), tc.wantReceipt) {
+				t.Errorf("receipt %q has no %q", got, tc.wantReceipt)
+			}
+		})
+	}
+}
+
+// panicOnceThenRead is a clock whose first call panics, whose second call reads
+// at, and whose later calls read fixedNow: the run's start is at, and its
+// receipt is written at fixedNow.
+func panicOnceThenRead(at time.Time) func() time.Time {
+	calls := 0
+	return func() time.Time {
+		calls++
+		switch calls {
+		case 1:
+			panic("clock exploded")
+		case 2:
+			return at
+		}
+		return fixedNow
+	}
+}
+
+func TestRunRefusesAnEmptyDaemonDirBeforeTheLockOrReceipt(t *testing.T) {
+	t.Parallel()
+	acq := &fakeAcquire{}
+	cfg := testConfig(t, acq)
+	cfg.DaemonDir = ""
+	var logged []string
+	cfg.Logf = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	// go test runs a package in its own directory, so that is the working
+	// directory: a refused run must leave it as it was.
+	before := listDir(t, ".")
+
+	res, exit := Run(context.Background(), cfg)
+
+	if want := (Result{Event: "refused", Reason: "no-daemon-dir"}); res != want {
+		t.Errorf("result = %+v, want %+v", res, want)
+	}
+	if exit != ExitRefused {
+		t.Errorf("exit = %d, want %d", exit, ExitRefused)
+	}
+	if acq.path != "" {
+		t.Errorf("install lock was taken at %q, want no lock", acq.path)
+	}
+	if strings.Contains(strings.Join(logged, "\n"), "could not append a receipt") {
+		t.Errorf("refused run with no daemon dir attempted a receipt: %q", logged)
+	}
+	if after := listDir(t, "."); !slices.Equal(after, before) {
+		t.Errorf("refused run changed the working directory: before %v, after %v", before, after)
+	}
+}
+
+// listDir is the names of the entries in dir, sorted by os.ReadDir.
+func listDir(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("list %s: %v", dir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func TestANilLoggerKeepsNoticesSilent(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+	cfg := testConfig(t, &fakeAcquire{err: installlock.ErrBusy})
+	cfg.Logf = nil
+	cfg.Stderr = &stderr
+
+	Run(context.Background(), cfg)
+
+	if stderr.Len() != 0 {
+		t.Errorf("a notice with no Logf reached stderr: %q", stderr.String())
+	}
+}
+
+func TestAReceiptWriteFailureWithNoLoggerReachesStderr(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+	cfg := testConfig(t, &fakeAcquire{err: installlock.ErrBusy})
+	cfg.DaemonDir = fileBlocksDaemonDir(t)
+	cfg.Logf = nil
+	cfg.Stderr = &stderr
+
+	Run(context.Background(), cfg)
+
+	if !strings.Contains(stderr.String(), "could not append a receipt") {
+		t.Errorf("failed receipt write was not written to stderr: %q", stderr.String())
+	}
+}
+
 func TestRunLockErrorsEndTheRun(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -201,6 +357,150 @@ func TestRunAppendsOneReceiptForItsOutcome(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunWritesAReceiptForExactlyTheReasonsThatHaveOne pins the package doc's
+// receipt rule to the code: each reason Run can return either appends a receipt
+// that names it, or writes none.
+func TestRunWritesAReceiptForExactlyTheReasonsThatHaveOne(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		configure   func(cfg *Config)
+		wantReason  string
+		wantReceipt bool
+	}{
+		{
+			name:        "empty daemon directory is refused, with no receipt",
+			configure:   func(cfg *Config) { cfg.DaemonDir = "" },
+			wantReason:  "no-daemon-dir",
+			wantReceipt: false,
+		},
+		{
+			name: "clock panics twice, so the run fails with no receipt",
+			configure: func(cfg *Config) {
+				cfg.Now = func() time.Time { panic("clock exploded") }
+			},
+			wantReason:  "clock",
+			wantReceipt: false,
+		},
+		{
+			name: "busy lock is refused, with a receipt",
+			configure: func(cfg *Config) {
+				cfg.Acquire = (&fakeAcquire{err: installlock.ErrBusy}).acquire
+			},
+			wantReason:  "lock-busy",
+			wantReceipt: true,
+		},
+		{
+			name: "other lock failure is unexpected, with a receipt",
+			configure: func(cfg *Config) {
+				cfg.Acquire = (&fakeAcquire{err: errors.New("open lock: permission denied")}).acquire
+			},
+			wantReason:  "unexpected",
+			wantReceipt: true,
+		},
+		{
+			name: "no clone is refused by an install step, with a receipt",
+			configure: func(cfg *Config) {
+				cfg.Exec = func(context.Context, Command) (string, string, error) {
+					return "", "", errors.New("git is missing")
+				}
+			},
+			wantReason:  "no-source",
+			wantReceipt: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t, &fakeAcquire{})
+			dir := cfg.DaemonDir
+			tc.configure(&cfg)
+
+			res, _ := Run(context.Background(), cfg)
+
+			if res.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", res.Reason, tc.wantReason)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, receiptName))
+			if !tc.wantReceipt {
+				if !os.IsNotExist(err) {
+					t.Errorf("receipts = %q (err %v), want none", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read receipts: %v", err)
+			}
+			if want := `"reason": "` + tc.wantReason + `"`; !strings.Contains(string(got), want) {
+				t.Errorf("receipt %q has no %s", got, want)
+			}
+		})
+	}
+}
+
+// TestPackageDocNamesTheFunctionThatDoesEachStep reads the numbered steps in the
+// package doc and asserts each one names a function the package declares, so the
+// doc cannot describe a step the code does not take.
+func TestPackageDocNamesTheFunctionThatDoesEachStep(t *testing.T) {
+	t.Parallel()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "ominstaller.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse ominstaller.go: %v", err)
+	}
+	// A step starts a line with its number; the list is one paragraph of the doc.
+	stepStart := regexp.MustCompile(`(?m)^\s*\d+\. `)
+	var steps []string
+	for _, para := range strings.Split(f.Doc.Text(), "\n\n") {
+		if stepStart.MatchString(para) {
+			steps = append(steps, stepStart.Split(para, -1)[1:]...)
+		}
+	}
+	if len(steps) == 0 {
+		t.Fatal("package doc has no numbered steps")
+	}
+
+	declared := declaredFuncs(t, fset)
+	named := regexp.MustCompile("`([A-Za-z_][A-Za-z0-9_]*)`")
+	for i, step := range steps {
+		names := named.FindAllStringSubmatch(step, -1)
+		if len(names) == 0 {
+			t.Errorf("step %d names no function: %q", i+1, step)
+		}
+		for _, m := range names {
+			if !declared[m[1]] {
+				t.Errorf("step %d names %s, which the package does not declare", i+1, m[1])
+			}
+		}
+	}
+}
+
+// declaredFuncs is the name of every function and method the package's non-test
+// files declare. go test runs in the package directory, so "." is the package.
+func declaredFuncs(t *testing.T, fset *token.FileSet) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("list package: %v", err)
+	}
+	declared := map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok {
+				declared[fd.Name.Name] = true
+			}
+		}
+	}
+	return declared
 }
 
 func TestReceiptLineFormat(t *testing.T) {
