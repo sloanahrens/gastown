@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"reflect"
 	"testing"
 	"time"
@@ -25,6 +26,8 @@ type fakeRun struct {
 	calls []Command
 	// deadline reports whether codesign's context carried a deadline.
 	deadline bool
+	// unlockDeadline reports whether the unlock's context carried a deadline.
+	unlockDeadline bool
 
 	unlockErr      error
 	codesignErr    error
@@ -36,6 +39,7 @@ func (r *fakeRun) exec(ctx context.Context, c Command) (string, string, error) {
 	r.calls = append(r.calls, c)
 	switch c.Name {
 	case "security":
+		_, r.unlockDeadline = ctx.Deadline()
 		return "", "", r.unlockErr
 	case "codesign":
 		_, r.deadline = ctx.Deadline()
@@ -94,6 +98,9 @@ func TestSignUsesTheTownIdentity(t *testing.T) {
 	if !reflect.DeepEqual(rig.run.calls, want) {
 		t.Errorf("commands = %+v, want %+v", rig.run.calls, want)
 	}
+	if !rig.run.unlockDeadline {
+		t.Error("unlock ran with no deadline, want the sign timeout to bound it")
+	}
 	if !rig.run.deadline {
 		t.Error("codesign ran with no deadline, want the sign timeout to bound it")
 	}
@@ -104,31 +111,67 @@ func TestSignUsesTheTownIdentity(t *testing.T) {
 
 func TestSignFallsBackAdHocWithOneWarning(t *testing.T) {
 	t.Parallel()
+	rig := newSignRig()
+	delete(rig.files.files, keychainFile)
+	delete(rig.files.files, passwordFile)
+
+	if err := sign(context.Background(), rig.cfg, omBuild); err != nil {
+		t.Fatalf("sign = %v, want nil so the build goes in ad-hoc", err)
+	}
+	if len(rig.run.calls) != 0 {
+		t.Errorf("ran %d commands with no signing material, want none", len(rig.run.calls))
+	}
+	want := []string{"[install-om] WARNING: installing ad-hoc: no keychain or password file in " + signDir}
+	if !reflect.DeepEqual(rig.logs.lines, want) {
+		t.Errorf("log = %q, want exactly one WARNING line %q", rig.logs.lines, want)
+	}
+	if got := string(rig.files.files[omBuild]); got != unsignedOM {
+		t.Errorf("build = %q, want it left unsigned", got)
+	}
+}
+
+func TestSignPartialMaterialFailsClosed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name    string
-		missing string
-		reason  string
+		name  string
+		setup func(rig *signRig)
 	}{
-		{name: "no keychain", missing: keychainFile, reason: "no keychain at " + keychainFile},
-		{name: "no password file", missing: passwordFile, reason: "no password file at " + passwordFile},
+		{
+			name:  "keychain missing beside its password file",
+			setup: func(rig *signRig) { delete(rig.files.files, keychainFile) },
+		},
+		{
+			name:  "password file missing beside its keychain",
+			setup: func(rig *signRig) { delete(rig.files.files, passwordFile) },
+		},
+		{
+			name: "keychain is not a regular file",
+			setup: func(rig *signRig) {
+				rig.files.modes[keychainFile] = fs.ModeDir | 0o755
+			},
+		},
+		{
+			name: "password file is not a regular file",
+			setup: func(rig *signRig) {
+				rig.files.modes[passwordFile] = fs.ModeDir | 0o755
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rig := newSignRig()
-			delete(rig.files.files, tc.missing)
+			tc.setup(rig)
 
-			if err := sign(context.Background(), rig.cfg, omBuild); err != nil {
-				t.Fatalf("sign = %v, want nil so the build goes in ad-hoc", err)
+			err := sign(context.Background(), rig.cfg, omBuild)
+			if !errors.Is(err, errSigning) {
+				t.Fatalf("sign = %v, want errSigning: half the material is a broken setup, not ad-hoc", err)
+			}
+			if n := rig.logs.warnings(); n != 0 {
+				t.Errorf("WARNING lines = %d, want none", n)
 			}
 			if len(rig.run.calls) != 0 {
-				t.Errorf("ran %d commands with no signing material, want none", len(rig.run.calls))
-			}
-			if n := rig.logs.warnings(); n != 1 {
-				t.Errorf("WARNING lines = %d, want exactly 1: %q", n, rig.logs.lines)
-			}
-			if want := "[install-om] WARNING: installing ad-hoc: " + tc.reason; len(rig.logs.lines) != 1 || rig.logs.lines[0] != want {
-				t.Errorf("log = %q, want [%q]", rig.logs.lines, want)
+				t.Errorf("ran %d commands with broken signing material, want none", len(rig.run.calls))
 			}
 			if got := string(rig.files.files[omBuild]); got != unsignedOM {
 				t.Errorf("build = %q, want it left unsigned", got)
@@ -152,6 +195,11 @@ func TestSignFailureAfterMaterialFailsClosed(t *testing.T) {
 			checkBuild: true,
 		},
 		{
+			name:       "password file status unknown",
+			setup:      func(rig *signRig) { rig.files.statErr[passwordFile] = errBoom },
+			checkBuild: true,
+		},
+		{
 			name:       "password file unreadable",
 			setup:      func(rig *signRig) { rig.files.readErr[passwordFile] = errBoom },
 			checkBuild: true,
@@ -164,6 +212,11 @@ func TestSignFailureAfterMaterialFailsClosed(t *testing.T) {
 		{
 			name:       "unlock refused",
 			setup:      func(rig *signRig) { rig.run.unlockErr = errBoom },
+			checkBuild: true,
+		},
+		{
+			name:       "unlock times out",
+			setup:      func(rig *signRig) { rig.run.unlockErr = context.DeadlineExceeded },
 			checkBuild: true,
 		},
 		{

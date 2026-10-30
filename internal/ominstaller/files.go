@@ -56,16 +56,16 @@ func (c Config) files() Files {
 	return c.Files
 }
 
-// isFile reports whether path is a regular file. An absent path is false, not an
-// error. Any other failure to look is an error, so a caller fails closed rather
-// than reading "cannot tell" as "absent".
-func isFile(files Files, path string) (bool, error) {
-	mode, err := files.Stat(path)
+// statOptional returns path's mode and whether path exists, whatever kind of entry
+// it is. An absent path returns false, not an error. Any other failure to look is
+// an error, so a caller fails closed rather than reading "cannot tell" as "absent".
+func statOptional(files Files, path string) (mode fs.FileMode, exists bool, err error) {
+	mode, err = files.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
-	return mode.IsRegular(), nil
+	return mode, true, nil
 }

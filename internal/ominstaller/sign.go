@@ -26,9 +26,11 @@ const (
 var errSigning = errors.New("signing failed")
 
 // sign signs tmp, the build about to replace om, with the town's identity. With no
-// signing material it logs one WARNING and returns nil, and the build goes in
-// ad-hoc. Once the material is found, any failing step returns errSigning and tmp
-// holds the unsigned build again, so the caller installs nothing.
+// signing material, neither the keychain nor the password file, it logs one
+// WARNING and returns nil, and the build goes in ad-hoc. A keychain or password
+// file without the other is a broken setup, not an absent one, so it fails. Once
+// the material is found, any failing step returns errSigning and tmp holds the
+// unsigned build again, so the caller installs nothing.
 //
 // The unsigned build is read before codesign runs, because codesign rewrites tmp
 // in place and a failed run can leave it half-written.
@@ -37,21 +39,29 @@ func sign(ctx context.Context, cfg Config, tmp string) error {
 	keychain := filepath.Join(cfg.SignDir, keychainName)
 	passwordFile := filepath.Join(cfg.SignDir, passwordFileName)
 
-	present, err := isFile(files, keychain)
+	keychainMode, haveKeychain, err := statOptional(files, keychain)
 	if err != nil {
 		return signFailed("cannot tell whether " + keychain + " exists")
 	}
-	if !present {
-		cfg.logf("[install-om] WARNING: installing ad-hoc: no keychain at %s", keychain)
-		return nil
-	}
-	present, err = isFile(files, passwordFile)
+	passwordMode, havePassword, err := statOptional(files, passwordFile)
 	if err != nil {
 		return signFailed("cannot tell whether " + passwordFile + " exists")
 	}
-	if !present {
-		cfg.logf("[install-om] WARNING: installing ad-hoc: no password file at %s", passwordFile)
+	if !haveKeychain && !havePassword {
+		cfg.logf("[install-om] WARNING: installing ad-hoc: no keychain or password file in %s", cfg.SignDir)
 		return nil
+	}
+	if !haveKeychain {
+		return signFailed("keychain " + keychain + " is missing beside its password file")
+	}
+	if !havePassword {
+		return signFailed("password file " + passwordFile + " is missing beside its keychain")
+	}
+	if !keychainMode.IsRegular() {
+		return signFailed(keychain + " is not a regular file")
+	}
+	if !passwordMode.IsRegular() {
+		return signFailed(passwordFile + " is not a regular file")
 	}
 
 	if cfg.SignWait <= 0 {
@@ -63,10 +73,7 @@ func sign(ctx context.Context, cfg Config, tmp string) error {
 	}
 	password := strings.TrimRight(string(data), "\n")
 
-	// The password travels in the unlock's argv, where ps can see it while the
-	// unlock runs. That is the script's behavior, kept as it is. The unlock's
-	// output is discarded, so the password is never printed.
-	if _, _, err := cfg.Exec(ctx, Command{Name: "security", Args: []string{"unlock-keychain", "-p", password, keychain}}); err != nil {
+	if err := unlockKeychain(ctx, cfg, keychain, password); err != nil {
 		return signFailed("cannot unlock " + keychain)
 	}
 
@@ -97,6 +104,17 @@ func sign(ctx context.Context, cfg Config, tmp string) error {
 	}
 	cfg.logf("[install-om] Signed the build as %s", signIdentifier)
 	return nil
+}
+
+// unlockKeychain unlocks the keychain under the sign timeout, so a hung unlock fails
+// the install as a hung codesign does. unlock-keychain -p takes the password in its
+// argv, so ps can see it while the unlock runs. The unlock's output is discarded,
+// so the password is never logged.
+func unlockKeychain(ctx context.Context, cfg Config, keychain, password string) error {
+	unlockCtx, cancel := context.WithTimeout(ctx, cfg.SignWait)
+	defer cancel()
+	_, _, err := cfg.Exec(unlockCtx, Command{Name: "security", Args: []string{"unlock-keychain", "-p", password, keychain}})
+	return err
 }
 
 // restore puts the unsigned build back at tmp, the state a failed codesign can
