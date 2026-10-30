@@ -48,11 +48,6 @@ COPY --chmod=0755 om /usr/local/bin/om
 # downloads it or runs an install script for it.
 COPY --chmod=0755 claude /usr/local/bin/claude
 
-# The claude CLI om's reviewer runs, at the version templates.ClaudeCLIVersion
-# names. The deployer's FetchClaudeCLI downloads it, verifies its sha256 against
-# templates.ClaudeCLISHA256, and places it in the build context; nothing here
-# downloads it or runs an install script for it.
-
 # The entrypoint is a gt subcommand rather than a shell script: it refuses to
 # start without a town on the bind mount, so a missing mount never turns into a
 # fresh town. The subcommand is added by gt-qpeei.26; until it lands, gt rejects
