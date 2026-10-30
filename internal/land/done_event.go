@@ -20,7 +20,7 @@ import (
 const doneEventDedupeWindow = 15 * time.Minute
 
 // Event payload fields are bounded so a seat's own submission cannot put an
-// unbounded or unprintable string into the host's log (bead c9eb6a).
+// unbounded or unprintable string into the host's log (gt-1m9gr).
 const (
 	eventSeatNameLimit = 64
 	eventBeadIDLimit   = 128
@@ -230,7 +230,7 @@ func validEventPayload(s string, limit int) bool {
 // event that names the bead but carries no readable time marks the bead
 // unjudged, and a bead stays unjudged until the log is replaced: the recorder
 // then fails closed rather than risk a duplicate, which is what a bead's
-// remaining passes pay for one corrupt line (bead 180518e7).
+// remaining passes pay for one corrupt line (gt-1m9gr).
 type doneEventLog struct {
 	path     string
 	offset   int64
