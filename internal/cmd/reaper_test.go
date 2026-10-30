@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
@@ -445,4 +447,124 @@ func TestReaperAutoCloseWholeTownPreviewHash(t *testing.T) {
 	if err != nil || got != "stale" {
 		t.Errorf("single-db autoClosePreviewHash = %q, %v; want the operator's hash", got, err)
 	}
+}
+
+// TestReaperDisarmFromConfig pins the hand-run reaper's auto-close refusal
+// (gt-ptslm). The old path read the config through daemon.LoadPatrolConfig,
+// which answers nil both for an absent file and for one that does not parse, so
+// a settings/config.json that said auto_close=false but could not be read let a
+// hand-run sweep write the closes that setting exists to stop. Only an error
+// disarms; an absent file keeps today's behavior.
+func TestReaperDisarmFromConfig(t *testing.T) {
+	t.Parallel()
+	source := "/town/settings/config.json (section \"daemon\")"
+	off, on := false, true
+	withKnob := func(knob *bool) *daemon.DaemonPatrolConfig {
+		return &daemon.DaemonPatrolConfig{
+			Patrols: &daemon.PatrolsConfig{WispReaper: &daemon.WispReaperConfig{AutoClose: knob}},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		cfg     *daemon.DaemonPatrolConfig
+		readErr error
+		want    bool
+		wantIn  []string
+	}{
+		{
+			name: "absent config does not disarm",
+		},
+		{
+			name:   "auto_close=false disarms",
+			cfg:    withKnob(&off),
+			want:   true,
+			wantIn: []string{source, "patrols.wisp_reaper.auto_close=false"},
+		},
+		{
+			name: "auto_close=true does not disarm",
+			cfg:  withKnob(&on),
+		},
+		{
+			name: "auto_close unset does not disarm",
+			cfg:  withKnob(nil),
+		},
+		{
+			name: "an unparseable config disarms",
+			readErr: &config.ParseError{
+				Path: "/town/settings/config.json", Offset: 1, Line: 1, Column: 1,
+				Err: errors.New("invalid character 'n' looking for beginning of object key string"),
+			},
+			want:   true,
+			wantIn: []string{source, "/town/settings/config.json", "invalid character 'n'"},
+		},
+		{
+			name:    "a read error that names no file still names the source",
+			readErr: errors.New("permission denied"),
+			want:    true,
+			wantIn:  []string{source, "permission denied"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, reason := reaperDisarmFromConfig(tt.cfg, tt.readErr, source)
+			if got != tt.want {
+				t.Fatalf("reaperDisarmFromConfig = %v (%q), want %v", got, reason, tt.want)
+			}
+			if !tt.want && reason != "" {
+				t.Errorf("reason = %q for a sweep that is not disarmed, want empty", reason)
+			}
+			for _, want := range tt.wantIn {
+				if !strings.Contains(reason, want) {
+					t.Errorf("reason = %q, want it to contain %q", reason, want)
+				}
+			}
+		})
+	}
+}
+
+// TestReaperAutoCloseDisarmedAt is the bug gt-ptslm names, driven through the
+// production readers on a temp town: a settings/config.json that does not parse
+// reads to daemon.ReadPatrolConfig as absent (the layout follows
+// mayor/daemon.json into its host file and defers a broken host to its own
+// loader), so a resolution that asks only the patrol config would auto-close on
+// defaults. The town with the file absent is not disarmed.
+func TestReaperAutoCloseDisarmedAt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unparseable settings/config.json disarms", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		path := filepath.Join(town, "settings", "config.json")
+		writeTownFile(t, path, `{not json`)
+		disarmed, reason := reaperAutoCloseDisarmedAt(town)
+		if !disarmed {
+			t.Fatalf("reaperAutoCloseDisarmedAt = false (%q), want disarmed: a broken config must not read as absent", reason)
+		}
+		if !strings.Contains(reason, path) {
+			t.Errorf("reason = %q, want it to name %s", reason, path)
+		}
+	})
+
+	t.Run("absent settings/config.json does not disarm", func(t *testing.T) {
+		t.Parallel()
+		if disarmed, reason := reaperAutoCloseDisarmedAt(t.TempDir()); disarmed {
+			t.Fatalf("reaperAutoCloseDisarmedAt = true (%q) for a town with no config, want not disarmed", reason)
+		}
+	})
+
+	t.Run("auto_close=false in settings/config.json disarms", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeTownFile(t, filepath.Join(town, "settings", "config.json"),
+			`{"daemon":{"type":"daemon-patrol-config","version":1,"patrols":{"wisp_reaper":{"enabled":true,"auto_close":false}}}}`)
+		disarmed, reason := reaperAutoCloseDisarmedAt(town)
+		if !disarmed {
+			t.Fatalf("reaperAutoCloseDisarmedAt = false (%q), want disarmed by auto_close=false", reason)
+		}
+		if !strings.Contains(reason, "auto_close=false") {
+			t.Errorf("reason = %q, want the knob it read", reason)
+		}
+	})
 }
