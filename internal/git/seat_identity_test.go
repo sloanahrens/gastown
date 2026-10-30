@@ -2,6 +2,8 @@ package git
 
 import (
 	"errors"
+	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -104,5 +106,43 @@ func TestGlobalAuthorEmailFrom(t *testing.T) {
 				t.Errorf("globalAuthorEmailFrom = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGlobalAuthorEmailEnvironment(t *testing.T) {
+	t.Parallel()
+	host := map[string]string{
+		"HOME":              "/home/host",
+		"PATH":              "/usr/bin:/bin",
+		"GIT_DIR":           "/rig/.git",
+		"GIT_CONFIG_GLOBAL": "/tmp/other.gitconfig",
+		"GIT_AUTHOR_EMAIL":  "seat@gastown.local",
+	}
+	var cmd *exec.Cmd
+	newCmd := func(name string, args ...string) *exec.Cmd {
+		if name != "git" || strings.Join(args, " ") != "config --global user.email" {
+			t.Errorf("ran %s %v, want git config --global user.email", name, args)
+		}
+		// Err stops the command before it starts, so no git runs in the unit test.
+		cmd = &exec.Cmd{Path: name, Err: errors.New("git not run in unit test")}
+		return cmd
+	}
+	globalAuthorEmailWith(newCmd, func(key string) string { return host[key] })
+	if cmd == nil {
+		t.Fatal("globalAuthorEmailWith built no command")
+	}
+	if want := []string{"HOME=/home/host", "PATH=/usr/bin:/bin"}; !reflect.DeepEqual(cmd.Env, want) {
+		t.Errorf("env = %v, want %v: repository and GIT_* settings must not reach git", cmd.Env, want)
+	}
+}
+
+func TestGlobalAuthorEmailWithoutGit(t *testing.T) {
+	t.Parallel()
+	newCmd := func(name string, args ...string) *exec.Cmd {
+		return &exec.Cmd{Path: name, Err: errors.New("exec: git: executable file not found")}
+	}
+	getenv := func(string) string { return "" }
+	if got := globalAuthorEmailWith(newCmd, getenv); got != "" {
+		t.Errorf("globalAuthorEmailWith = %q, want \"\" when git cannot run", got)
 	}
 }
