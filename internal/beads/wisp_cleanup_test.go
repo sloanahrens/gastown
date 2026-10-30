@@ -200,10 +200,10 @@ func TestWispTree_WalksAllEphemeralLevels(t *testing.T) {
 // still come back; a regression to parsing the envelope directly reports no
 // children or errors, and the patrol closes only the root (gt-8f6m4).
 //
-// The fake is a shell bd, like every other wisp test in this file (gt-da2x):
-// the subprocess path is what is under test — machine mode in the environment
-// and the Cmd layer's unwrapping — so an in-process seam would replace the
-// code this test exists to cover.
+// The fake is a shell bd, like every sibling TestWispTree_* test in this file
+// (gt-da2x): the subprocess path is what is under test. The test covers Cmd's
+// unwrap and the strict parse together, so an in-process seam would replace the
+// code it exists to cover. wispCmd has no runner seam to inject.
 func TestWispTree_ReadsMachineEnvelope(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "bd.log")
 	writeFakeBd(t, t.TempDir(), logPath, fakeWispMachineTreeBody)

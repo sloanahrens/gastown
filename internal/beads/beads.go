@@ -3666,12 +3666,9 @@ func parseChildrenJSON(raw []byte) ([]*Issue, error) {
 	}
 }
 
-// parseChildrenMapJSON parses `bd show <ids...> --children --json`: one
-// array per resolved parent ID. Parents with no children are dropped: bd
-// initializes every resolved parent's list to [], so a childless parent is an
-// empty array, which this reads and then drops. A null member is not a shape
-// bd emits, and it stays an error here rather than being tolerated, because
-// tolerating it reads as "no children" — the silent answer gt-8f6m4 removed.
+// parseChildrenMapJSON parses `bd show <ids...> --children --json`: one array
+// per resolved parent ID, with childless parents dropped. A null member is
+// refused, not read as no children (gt-8f6m4).
 func parseChildrenMapJSON(raw []byte) (map[string][]*Issue, error) {
 	groups, err := childrenGroups(raw)
 	if err != nil {
