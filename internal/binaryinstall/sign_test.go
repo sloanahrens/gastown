@@ -192,16 +192,6 @@ func TestSignFallsBackToAdHocOnEachMissingPieceWithTheReason(t *testing.T) {
 			want:  "installing ad-hoc: no password file at " + passwordPath,
 		},
 		{
-			name:  "unreadable password file",
-			setup: func(f *signSeam) { f.readErr = errReadPassword },
-			want:  "installing ad-hoc: cannot read " + passwordPath,
-		},
-		{
-			name:  "failed unlock",
-			setup: func(f *signSeam) { f.unlockErr = errUnlockRefused },
-			want:  "installing ad-hoc: cannot unlock " + keychainPath,
-		},
-		{
 			name: "no town and no home",
 			setup: func(f *signSeam) {
 				delete(f.env, "INSTALL_GT_SIGN_DIR")
@@ -234,8 +224,9 @@ func TestSignFailureRestoresTheTempFromSource(t *testing.T) {
 	f.codesignOut = "errSecInternalComponent\nsecond line"
 	f.partial = []byte("half-written")
 
-	if err := f.signer().Sign(signTmp, signSrc, signedName); err != nil {
-		t.Fatalf("Sign() = %v, want nil: a failed codesign installs ad-hoc", err)
+	err := f.signer().Sign(signTmp, signSrc, signedName)
+	if !errors.Is(err, ErrSigningFailed) {
+		t.Fatalf("Sign() = %v, want ErrSigningFailed: a codesign that failed once the material was found fails the install", err)
 	}
 	if got := string(f.files[signTmp]); got != "built bytes" {
 		t.Errorf("temp after failed codesign = %q, want the source's bytes %q", got, "built bytes")
@@ -243,7 +234,7 @@ func TestSignFailureRestoresTheTempFromSource(t *testing.T) {
 	if got := f.modes[signTmp]; got != 0o750 {
 		t.Errorf("temp mode after failed codesign = %#o, want the source's %#o", got, 0o750)
 	}
-	want := "installing ad-hoc: codesign failed: errSecInternalComponent"
+	want := "codesign failed: errSecInternalComponent"
 	if len(f.warnings) != 1 || f.warnings[0] != want {
 		t.Errorf("warnings = %q, want [%q]", f.warnings, want)
 	}
@@ -254,12 +245,56 @@ func TestSignNamesACodesignFailureWithNoOutput(t *testing.T) {
 	f := newSignSeam()
 	f.codesignErr = errCodesignExit
 
-	if err := f.signer().Sign(signTmp, signSrc, signedName); err != nil {
-		t.Fatalf("Sign() = %v, want nil", err)
+	err := f.signer().Sign(signTmp, signSrc, signedName)
+	if !errors.Is(err, ErrSigningFailed) {
+		t.Fatalf("Sign() = %v, want ErrSigningFailed", err)
 	}
-	want := "installing ad-hoc: codesign failed: no output"
+	want := "codesign failed: no output"
 	if len(f.warnings) != 1 || f.warnings[0] != want {
 		t.Errorf("warnings = %q, want [%q]", f.warnings, want)
+	}
+}
+
+// The signing error names the step and never repeats codesign's output, which
+// can hold a secret: the output reaches the operator only as the one notice.
+func TestSignErrorNeverCarriesCodesignOutput(t *testing.T) {
+	t.Parallel()
+	f := newSignSeam()
+	f.codesignErr = errCodesignExit
+	f.codesignOut = "errSecInternalComponent"
+
+	err := f.signer().Sign(signTmp, signSrc, signedName)
+	if err == nil || strings.Contains(err.Error(), "errSecInternalComponent") {
+		t.Errorf("Sign() = %v, want a signing error that does not carry the codesign output", err)
+	}
+}
+
+func TestSignUnlockFailureAndUnreadablePasswordAreSigningFailures(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		setup  func(*signSeam)
+		reason string
+	}{
+		{"unreadable password file", func(f *signSeam) { f.readErr = errReadPassword }, "cannot read " + passwordPath},
+		{"failed unlock", func(f *signSeam) { f.unlockErr = errUnlockRefused }, "cannot unlock " + keychainPath},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSignSeam()
+			tc.setup(f)
+			err := f.signer().Sign(signTmp, signSrc, signedName)
+			if !errors.Is(err, ErrSigningFailed) || err.Error() != "signing failed: "+tc.reason {
+				t.Fatalf("Sign() = %v, want ErrSigningFailed with reason %q", err, tc.reason)
+			}
+			if strings.Contains(err.Error(), samplePassword) {
+				t.Errorf("the signing error carries the keychain password: %v", err)
+			}
+			if len(f.warnings) != 0 {
+				t.Errorf("warnings = %q, want none: the failure is the error, not a notice", f.warnings)
+			}
+		})
 	}
 }
 
@@ -321,12 +356,10 @@ func TestSignRefusesATimeoutThatIsNotSeconds(t *testing.T) {
 		t.Run(raw, func(t *testing.T) {
 			f := newSignSeam()
 			f.env["INSTALL_GT_SIGN_TIMEOUT"] = raw
-			if err := f.signer().Sign(signTmp, signSrc, signedName); err != nil {
-				t.Fatalf("Sign() = %v, want nil: a bad timeout installs ad-hoc", err)
-			}
-			want := fmt.Sprintf("installing ad-hoc: INSTALL_GT_SIGN_TIMEOUT=%q is not a positive number of seconds", raw)
-			if len(f.warnings) != 1 || f.warnings[0] != want {
-				t.Errorf("warnings = %q, want [%q]", f.warnings, want)
+			err := f.signer().Sign(signTmp, signSrc, signedName)
+			want := fmt.Sprintf("signing failed: INSTALL_GT_SIGN_TIMEOUT=%q is not a positive number of seconds", raw)
+			if err == nil || err.Error() != want || !errors.Is(err, ErrSigningFailed) {
+				t.Fatalf("Sign() = %v, want the signing error %q: a bad timeout fails the install", err, want)
 			}
 			if len(f.calls) != 0 {
 				t.Errorf("%d commands ran, want none: the timeout is judged before any is run", len(f.calls))

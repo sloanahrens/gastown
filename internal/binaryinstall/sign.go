@@ -2,6 +2,7 @@ package binaryinstall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -26,11 +27,27 @@ const (
 	maxSignSeconds = float64(math.MaxInt64 / int64(time.Second))
 )
 
+// ErrSigningFailed is the error of a signing step that failed once the signing
+// material was found. The install must not go on unsigned then: a dev box with
+// no material installs ad-hoc, but a broken signing setup is a failed install,
+// so the copy never replaces the installed binary (gt-tpg0p.68). Run maps it to
+// exit status 3.
+var ErrSigningFailed = errors.New("signing failed")
+
+// signingError is ErrSigningFailed with the step that failed. Its message names
+// the step and never the output of a command, which can hold a secret.
+type signingError struct{ reason string }
+
+func (e signingError) Error() string { return ErrSigningFailed.Error() + ": " + e.reason }
+
+func (e signingError) Unwrap() error { return ErrSigningFailed }
+
 // Signer signs a copy of a binary with the town's identity before it replaces
-// the installed one (gt-ykots). None of the signing material is required, and
-// every way it can be missing or broken leaves the copy unsigned, which installs
-// ad-hoc exactly as it would with no signing at all: the notices say why, and
-// no failure of the signing steps fails the install.
+// the installed one (gt-ykots). None of the signing material is required: when
+// there is none, the copy is left unsigned and installs ad-hoc exactly as it
+// would with no signing at all, and the notice says why. Once the material is
+// found, a failing step fails the install (ErrSigningFailed), so a signing that
+// is set up but broken never installs an unsigned binary over a signed one.
 type Signer struct {
 	// Installer supplies the Files seam Sign reads and restores through, and
 	// the Warnf that receives every notice the signing steps do not fail for.
@@ -58,10 +75,13 @@ type Signer struct {
 // restores tmp from src before it returns, so the caller installs either the
 // signed copy or the unsigned one.
 //
-// Every failure of the signing steps is one notice and a nil return, which
-// installs ad-hoc. The one error is a restore that failed: tmp is then neither
-// the signed copy nor the source, and the caller must not install it.
-// INSTALL_BINARY_SIGN=0 skips the step entirely, with no command run.
+// With no signing material the step is skipped: one notice and a nil return,
+// which installs ad-hoc. Once the material is found, every failing step returns
+// ErrSigningFailed with the reason, and tmp holds the source's bytes or nothing
+// is installed. A restore that failed is returned as it is, not as a signing
+// failure, and tmp is then neither the signed copy nor the source. The caller
+// must not install it either way. INSTALL_BINARY_SIGN=0 skips the step entirely,
+// with no command run.
 func (s Signer) Sign(tmp, src, name string) error {
 	if s.getenv("INSTALL_BINARY_SIGN") == "0" {
 		return nil
@@ -77,11 +97,6 @@ func (s Signer) Sign(tmp, src, name string) error {
 	if identity == "" {
 		identity = defaultSignIdentity
 	}
-	limit, err := s.timeout()
-	if err != nil {
-		s.adHoc(err.Error())
-		return nil
-	}
 	if !s.Installer.Files.isFile(keychain) {
 		s.adHoc("no signing keychain at " + keychain)
 		return nil
@@ -90,10 +105,13 @@ func (s Signer) Sign(tmp, src, name string) error {
 		s.adHoc("no password file at " + passwordFile)
 		return nil
 	}
+	limit, err := s.timeout()
+	if err != nil {
+		return signingError{err.Error()}
+	}
 	data, err := s.readFile(passwordFile)
 	if err != nil {
-		s.adHoc("cannot read " + passwordFile)
-		return nil
+		return signingError{"cannot read " + passwordFile}
 	}
 	password := strings.TrimRight(string(data), "\n")
 	// The password travels in this call's argv, where ps can see it for as long
@@ -101,8 +119,7 @@ func (s Signer) Sign(tmp, src, name string) error {
 	// the unlock off argv is a separate decision (gt-tpg0p.70). Its output is
 	// discarded, so the password is never printed.
 	if _, err := s.run(context.Background(), "security", "unlock-keychain", "-p", password, optionSafe(keychain)); err != nil {
-		s.adHoc("cannot unlock " + keychain)
-		return nil
+		return signingError{"cannot unlock " + keychain}
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), s.now().Add(limit))
 	defer cancel()
@@ -111,8 +128,10 @@ func (s Signer) Sign(tmp, src, name string) error {
 		if restoreErr := s.restore(tmp, src); restoreErr != nil {
 			return restoreErr
 		}
-		s.adHoc("codesign failed: " + firstLine(string(out)))
-		return nil
+		// The first line of codesign's output is a notice, not part of the
+		// error: the error names the step only.
+		s.Installer.warnf("codesign failed: %s", firstLine(string(out)))
+		return signingError{"codesign failed"}
 	}
 	s.notef("signed %s as %s", name, signIdentifier)
 	return nil
@@ -140,7 +159,7 @@ func (s Signer) signDir() (string, bool) {
 
 // timeout is the codesign limit in seconds from INSTALL_GT_SIGN_TIMEOUT, else
 // 30. A value that is not a positive number of seconds is an error, not a
-// silent default: the notice names it and the install is ad-hoc.
+// silent default: the error names it and the install fails.
 func (s Signer) timeout() (time.Duration, error) {
 	raw := s.getenv("INSTALL_GT_SIGN_TIMEOUT")
 	if raw == "" {
