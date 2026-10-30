@@ -2296,8 +2296,8 @@ func TestContainerSupervisorRestartRefusesAnUnsetTown(t *testing.T) {
 	}
 
 	c.isRunning = func(string) (bool, int, error) { return true, 1111, nil }
-	if _, _, err := c.restartDaemon(town); err == nil {
-		t.Error("restartDaemon recreated the container of a town that sets neither container field")
+	if _, _, err := c.restartDaemon(town); !errors.Is(err, errContainerSettingsUnset) {
+		t.Errorf("restartDaemon error = %v, want the unset-settings refusal; a town that sets neither container field must not be recreated", err)
 	}
 	if len(calls.argv) != 0 {
 		t.Errorf("restartDaemon on an unset town ran %v", calls.argv)
