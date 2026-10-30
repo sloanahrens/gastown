@@ -62,13 +62,13 @@ type Deps struct {
 // verdict. TIER_SWEEP_JOBS above 1 runs that many packages at once, longest
 // first by the file's walls, with each package serial.txt names run alone.
 //
-// TIER_SWEEP_RESUME names a file of packages this run may take as passed: one
-// line is appended for each package that passes, and a package already recorded
-// at this TIER_SWEEP_TESTED commit, skip list and GOFLAGS is counted as passed
-// and not run, so a sweep a restart cut finishes the work it had left. A GREEN
-// run deletes its own record, the regular file of that name directly inside the
-// run's log directory, and leaves any other path the variable names alone; a
-// run that names no commit resumes nothing.
+// TIER_SWEEP_RESUME names the record of packages this run may take as passed:
+// one line is appended for each package that passes, and a package already
+// recorded at this TIER_SWEEP_TESTED commit, skip list and GOFLAGS is counted as
+// passed and not run, so a sweep a restart cut finishes the work it had left. The
+// variable takes effect only when it names exactly ResumeRecordPath of the run's
+// log root; any other value is named once and ignored. A GREEN run deletes that
+// record, one regular file, and a run that names no commit resumes nothing.
 //
 // A run that made its own log directory first prunes the old ones beside it
 // (PruneMaxAge), and removes its own after the last summary line when every
@@ -129,7 +129,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	if opts.Jobs > 1 && opts.TimingsFile != "" {
 		walls = readWalls(host, opts.TimingsFile, stderr)
 	}
-	resume := OpenResume(opts.ResumeFile, opts.Tested, opts.SkipList, host, stderr)
+	resume := OpenResume(opts, host, stderr)
 	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr,
 		Now: now, Timings: timings, Walls: walls, Began: d.Began, Resume: resume}
 	code := runTiers(s, opts.Tiers, stdout, stderr)
@@ -148,10 +148,9 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	}
 	// Every package passed at this commit and skip list, so the record has
 	// nothing left to save and the next run starts clean (gt-loqew). Only the
-	// run's own record inside its log directory goes; any other path the
-	// variable names is left alone and named (om b49f3e).
+	// record this run derives goes, one regular file (om b49f3e, om 70902e).
 	if resume != nil {
-		resume.Remove(opts.LogDir, host)
+		resume.Remove(host)
 	}
 	if opts.OwnsLogDir && cleanup {
 		if err := host.RemoveAll(opts.LogDir); err != nil {

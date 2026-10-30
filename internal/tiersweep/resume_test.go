@@ -41,10 +41,15 @@ func recordLine(t *testing.T, tier, pkg string, passed bool) string {
 	return string(line)
 }
 
-// resumePath is a resume file in a directory of the test's own.
-func resumePath(t *testing.T) string {
+// rigRecord is the record a rig run derives from its log directory, and the
+// directory it lives in, made for real so the run can append to it.
+func rigRecord(t *testing.T, r *rig) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), "resume.jsonl")
+	path := ResumeRecordPath(filepath.Dir(r.logDir))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("make the resume directory: %v", err)
+	}
+	return path
 }
 
 // seedResume writes a record naming pkgs at tested under skipList, through the
@@ -81,17 +86,53 @@ func resumedLines(stderr string) []string {
 	return lines
 }
 
+// fakeFS is the filesystem a resume test sees: the Lstat answer per path, the
+// bytes ReadFile returns per path, and every call the record makes on it. No
+// test that uses it touches the machine's filesystem.
+type fakeFS struct {
+	infos     map[string]fs.FileInfo
+	data      map[string][]byte
+	appends   [][]byte
+	removes   []string
+	removeErr error
+}
+
+// host is the Host the fake answers for: every seam a resume uses is wired.
+func (f *fakeFS) host() Host {
+	return Host{
+		Env:      func(string) string { return "" },
+		MkdirAll: func(string, fs.FileMode) error { return nil },
+		ReadFile: func(name string) ([]byte, error) {
+			if b, ok := f.data[name]; ok {
+				return b, nil
+			}
+			return nil, fs.ErrNotExist
+		},
+		AppendFile: func(_ string, data []byte) error {
+			f.appends = append(f.appends, data)
+			return nil
+		},
+		Remove: func(name string) error {
+			f.removes = append(f.removes, name)
+			return f.removeErr
+		},
+		Lstat: func(name string) (fs.FileInfo, error) {
+			if info, ok := f.infos[name]; ok {
+				return info, nil
+			}
+			return nil, fs.ErrNotExist
+		},
+	}
+}
+
 // TestResumeSkipsPackagesPassedAtThisSha: a sweep that passed two of four
 // packages records those two, and the next run for the same sha executes only
 // the other two while counting all four passed.
-//
-// Mutation recorded in gt-loqew: make ParseResume ignore the sha and
-// TestResumeIgnoresAnotherShaOrSkipList's "another commit" case goes red.
 func TestResumeSkipsPackagesPassedAtThisSha(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
 	fourTagged(r.repo)
-	r.tested, r.resumeFile = "shaA", resumePath(t)
+	r.tested, r.resumeFile = "shaA", rigRecord(t, r)
 	r.tier.codes = map[string]int{". ./r3": 1, ". ./r4": 1}
 	code, _, stderr := r.run("integration")
 	if code != 1 {
@@ -153,7 +194,7 @@ func TestResumeIgnoresAnotherShaOrSkipList(t *testing.T) {
 			t.Parallel()
 			r := newRig(t)
 			fourTagged(r.repo)
-			r.tested, r.resumeFile = tc.tested, resumePath(t)
+			r.tested, r.resumeFile = tc.tested, rigRecord(t, r)
 			r.skip = tc.skip
 			seedResume(t, r.resumeFile, "shaA", "", TierIntegration, "./r1", "./r2")
 			code, stdout, stderr := r.run("integration")
@@ -180,7 +221,7 @@ func TestResumeIgnoresAnotherEnvironment(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
 	fourTagged(r.repo)
-	r.tested, r.resumeFile = "shaA", resumePath(t)
+	r.tested, r.resumeFile = "shaA", rigRecord(t, r)
 	r.goflags = "-tags=changed"
 	seedResume(t, r.resumeFile, "shaA", "", TierIntegration, "./r1", "./r2")
 	code, stdout, stderr := r.run("integration")
@@ -202,7 +243,7 @@ func TestResumeNeverRecordsAFailure(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
 	fourTagged(r.repo)
-	r.tested, r.resumeFile = "shaA", resumePath(t)
+	r.tested, r.resumeFile = "shaA", rigRecord(t, r)
 	r.tier.codes = map[string]int{". ./r2": 1}
 	if code, _, stderr := r.run("integration"); code != 1 {
 		t.Fatalf("exit %d, stderr %q, want 1: ./r2 fails", code, stderr)
@@ -228,10 +269,6 @@ func TestResumeNeverRecordsAFailure(t *testing.T) {
 // TestResumeTornLastLineIsRerun: a record a restart cut can end in a half
 // written line, and that line is no pass while every whole line before it
 // still counts (om 05f655).
-//
-// Mutation recorded in gt-loqew: accept a line that ends without its newline
-// and the "a torn last line" row goes red; drop the parse-error skip and the
-// same row goes red again.
 func TestResumeTornLastLineIsRerun(t *testing.T) {
 	t.Parallel()
 	whole := func(t *testing.T) []string {
@@ -277,7 +314,7 @@ func TestResumeTornLastLineIsRerun(t *testing.T) {
 			t.Parallel()
 			r := newRig(t)
 			fourTagged(r.repo)
-			r.tested, r.resumeFile = "shaA", resumePath(t)
+			r.tested, r.resumeFile = "shaA", rigRecord(t, r)
 			seedLines(t, r.resumeFile, tc.record(t))
 			code, stdout, stderr := r.run("integration")
 			if code != 0 || !strings.Contains(stdout, "integration GREEN passed=4 failed=0 skipped=0") {
@@ -293,12 +330,49 @@ func TestResumeTornLastLineIsRerun(t *testing.T) {
 	}
 }
 
+// TestResumeTornTailIsNotGluedToTheNextRecord: a record whose last line was torn
+// by a restart gets a newline before the next line is appended, so the new pass
+// is not swallowed by the torn one. A record that already ends in a newline gets
+// no extra one (om 9aa0b4).
+func TestResumeTornTailIsNotGluedToTheNextRecord(t *testing.T) {
+	t.Parallel()
+	whole := recordLine(t, TierIntegration, "./r1", true) + "\n"
+	cases := []struct {
+		name       string
+		data       string
+		wantPrefix string
+	}{
+		{name: "a torn tail is closed off before the append", data: whole + whole[:len(whole)/2], wantPrefix: "\n"},
+		{name: "a record ending on a newline is appended to as it is", data: whole, wantPrefix: "{"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := "/x/logs/resume/resume.jsonl"
+			f := &fakeFS{data: map[string][]byte{path: []byte(tc.data)}}
+			res := OpenResume(Options{ResumeFile: path, Tested: "shaA", LogDir: "/x/logs/run"}, f.host(), &strings.Builder{})
+			if res == nil {
+				t.Fatalf("OpenResume returned nil for the derived record")
+			}
+			res.Passed()
+			res.Record(TierIntegration, "./r2")
+			if len(f.appends) != 1 {
+				t.Fatalf("appends = %d, want 1", len(f.appends))
+			}
+			got := string(f.appends[0])
+			if !strings.HasPrefix(got, tc.wantPrefix) || !strings.HasSuffix(got, "\n") {
+				t.Errorf("append = %q, want a line starting %q and ending in a newline", got, tc.wantPrefix)
+			}
+			if strings.Count(strings.TrimPrefix(got, "\n"), "\n") != 1 {
+				t.Errorf("append = %q, want exactly one new line", got)
+			}
+		})
+	}
+}
+
 // TestResumeRecordOnlyCountsAPass: the reader takes a package as passed only
 // when the line says its final verdict was a pass, so a line that says
 // otherwise is rerun (om aad931).
-//
-// Mutation recorded in gt-loqew: read a line without checking Passed and the
-// "verdict not a pass" row goes red.
 func TestResumeRecordOnlyCountsAPass(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -314,7 +388,7 @@ func TestResumeRecordOnlyCountsAPass(t *testing.T) {
 			t.Parallel()
 			r := newRig(t)
 			fourTagged(r.repo)
-			r.tested, r.resumeFile = "shaA", resumePath(t)
+			r.tested, r.resumeFile = "shaA", rigRecord(t, r)
 			seedLines(t, r.resumeFile, recordLine(t, TierIntegration, "./r1", tc.passed)+"\n")
 			code, stdout, stderr := r.run("integration")
 			if code != 0 || !strings.Contains(stdout, "integration GREEN passed=4 failed=0 skipped=0") {
@@ -328,7 +402,7 @@ func TestResumeRecordOnlyCountsAPass(t *testing.T) {
 }
 
 // TestGreenSweepDeletesTheResumeFile: a GREEN sweep has nothing left to resume,
-// so it deletes its own record, while a RED one keeps it for the next run.
+// so it deletes the record it derived, while a RED one keeps it for the next run.
 func TestGreenSweepDeletesTheResumeFile(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -349,10 +423,10 @@ func TestGreenSweepDeletesTheResumeFile(t *testing.T) {
 			t.Parallel()
 			r := newRig(t)
 			fourTagged(r.repo)
-			// The record the sweep may delete is the one inside its own log
-			// directory; the rig's Lstat answers for it as a regular file.
 			r.tested = "shaA"
-			r.resumeFile = filepath.Join(r.logDir, "resume.jsonl")
+			r.resumeFile = rigRecord(t, r)
+			// The rig's Lstat answers for the record as a regular file, so the
+			// run may remove it.
 			r.infos = map[string]fs.FileInfo{
 				r.resumeFile: fakeInfo{name: "resume.jsonl", size: 2, mode: 0o644},
 			}
@@ -384,7 +458,12 @@ func TestResumeUnreadableRecordRunsEveryPackage(t *testing.T) {
 	r := newRig(t)
 	fourTagged(r.repo)
 	r.tested = "shaA"
-	r.resumeFile = t.TempDir()
+	r.resumeFile = rigRecord(t, r)
+	// A directory where the record should be is not a regular file, so the rig's
+	// Lstat finds nothing to refuse and the read fails instead.
+	if err := os.MkdirAll(r.resumeFile, 0o755); err != nil {
+		t.Fatalf("make the directory: %v", err)
+	}
 	code, stdout, stderr := r.run("integration")
 	if code != 0 || !strings.Contains(stdout, "integration GREEN passed=4 failed=0 skipped=0") {
 		t.Errorf("exit %d, stdout %q, stderr %q, want GREEN passed=4", code, stdout, stderr)
@@ -403,7 +482,7 @@ func TestResumeAppendFailureIsNamedOnce(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
 	fourTagged(r.repo)
-	r.tested, r.resumeFile = "shaA", resumePath(t)
+	r.tested, r.resumeFile = "shaA", rigRecord(t, r)
 	r.appendErr = errors.New("disk full")
 	code, stdout, stderr := r.run("integration")
 	if code != 0 || !strings.Contains(stdout, "integration GREEN passed=4 failed=0 skipped=0") {
@@ -421,8 +500,11 @@ func TestResumeWithoutRemoveKeepsTheRecord(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
 	fourTagged(r.repo)
-	r.noCleanupSlots = true
-	r.tested, r.resumeFile = "shaA", resumePath(t)
+	r.noRemove = true
+	r.tested, r.resumeFile = "shaA", rigRecord(t, r)
+	r.infos = map[string]fs.FileInfo{
+		r.resumeFile: fakeInfo{name: "resume.jsonl", size: 2, mode: 0o644},
+	}
 	seedResume(t, r.resumeFile, "shaA", "", TierIntegration, "./r1", "./r2")
 	code, stdout, stderr := r.run("integration")
 	if code != 0 || !strings.Contains(stdout, "integration GREEN passed=4 failed=0 skipped=0") {
@@ -436,128 +518,189 @@ func TestResumeWithoutRemoveKeepsTheRecord(t *testing.T) {
 	}
 }
 
-// TestResumeRemoveOnlyDeletesItsOwnRecord: a GREEN run removes the regular file
-// TIER_SWEEP_RESUME names inside its log directory and nothing else — not a
-// directory, not a symlink, not a path that climbs out of the directory and not
-// the root. Each refusal reaches the removal seam zero times (om b49f3e).
-//
-// Mutation recorded in gt-loqew: drop the containment check and the climbing
-// rows go red; drop the regular-file check and the directory and symlink rows
-// go red; call host.RemoveAll and the recording seam sees no Remove call.
-func TestResumeRemoveOnlyDeletesItsOwnRecord(t *testing.T) {
+// TestResumeWithoutLstatLeavesResumeOff: a host that cannot Lstat cannot show the
+// record is a regular file, so the run does not read it and every package runs,
+// and the record is left alone (om 70902e).
+func TestResumeWithoutLstatLeavesResumeOff(t *testing.T) {
 	t.Parallel()
+	r := newRig(t)
+	fourTagged(r.repo)
+	r.noCleanupSlots = true
+	r.tested, r.resumeFile = "shaA", rigRecord(t, r)
+	seedResume(t, r.resumeFile, "shaA", "", TierIntegration, "./r1", "./r2")
+	code, stdout, stderr := r.run("integration")
+	if code != 0 || !strings.Contains(stdout, "integration GREEN passed=4 failed=0 skipped=0") {
+		t.Fatalf("exit %d, stdout %q, stderr %q, want GREEN passed=4", code, stdout, stderr)
+	}
+	if got := r.tier.testRuns(); len(got) != 4 {
+		t.Errorf("go test runs = %v, want all four: resume is off without Lstat", got)
+	}
+	if !strings.Contains(stderr, "host has no Lstat, so resume is off") {
+		t.Errorf("stderr = %q, want it to name why resume is off", stderr)
+	}
+	if _, err := os.Stat(r.resumeFile); err != nil {
+		t.Errorf("the record is gone: %v", err)
+	}
+}
+
+// TestResumeRecordIsOnlyTheDerivedPath: the record a run trusts and removes is
+// the one ResumeRecordPath derives from its log root and nothing else. A path
+// the variable names that is not that record, or a record that is not a regular
+// file, is refused: the run says so once, reads nothing from it, and removes
+// nothing. The filesystem is fake, so every refusal is a row here (om b49f3e,
+// om 70902e).
+func TestResumeRecordIsOnlyTheDerivedPath(t *testing.T) {
+	t.Parallel()
+	const (
+		logDir = "/x/logs/run"
+		root   = "/x/logs"
+	)
+	record := ResumeRecordPath(root)
+	resumeDir := filepath.Dir(record)
+	regular := fakeInfo{name: "resume.jsonl", size: 2, mode: 0o644}
+	directory := fakeInfo{name: "resume.jsonl", mode: fs.ModeDir | 0o755}
+	link := fakeInfo{name: "resume.jsonl", mode: fs.ModeSymlink | 0o777}
 	cases := []struct {
 		name        string
-		victim      func(t *testing.T, dir string) string
-		wantRemoved bool
+		own         bool
+		resumeFile  string
+		infos       map[string]fs.FileInfo
+		wantTrusted bool
+		wantRemoved []string
+		wantNamed   string
 	}{
 		{
-			name: "the record inside the log directory is removed",
-			victim: func(t *testing.T, dir string) string {
-				path := filepath.Join(dir, "resume.jsonl")
-				seedLines(t, path, recordLine(t, TierIntegration, "./r1", true)+"\n")
-				return path
-			},
-			wantRemoved: true,
+			name:        "the record this run derives is trusted and removed by a green run",
+			resumeFile:  record,
+			infos:       map[string]fs.FileInfo{record: regular},
+			wantTrusted: true,
+			wantRemoved: []string{record},
 		},
 		{
-			name: "a directory of the same name is refused",
-			victim: func(t *testing.T, dir string) string {
-				path := filepath.Join(dir, "resume.jsonl")
-				if err := os.MkdirAll(path, 0o755); err != nil {
-					t.Fatalf("make the directory: %v", err)
-				}
-				seedLines(t, filepath.Join(path, "kept"), "keep me\n")
-				return path
-			},
+			name:        "a record not written yet is trusted and nothing is removed",
+			resumeFile:  record,
+			wantTrusted: true,
 		},
 		{
-			name: "a symlink is refused",
-			victim: func(t *testing.T, dir string) string {
-				target := filepath.Join(dir, "target.jsonl")
-				seedLines(t, target, "keep me\n")
-				path := filepath.Join(dir, "resume.jsonl")
-				if err := os.Symlink(target, path); err != nil {
-					t.Fatalf("link: %v", err)
-				}
-				return path
-			},
+			name:        "the record derived from a run's own temporary directory is trusted",
+			own:         true,
+			resumeFile:  "/x/tmp/resume/resume.jsonl",
+			infos:       map[string]fs.FileInfo{"/x/tmp/resume/resume.jsonl": regular},
+			wantTrusted: true,
+			wantRemoved: []string{"/x/tmp/resume/resume.jsonl"},
 		},
 		{
-			name: "a path climbing out of the log directory is refused",
-			victim: func(t *testing.T, dir string) string {
-				path := filepath.Join(filepath.Dir(dir), "outside.jsonl")
-				seedLines(t, path, "keep me\n")
-				return path
-			},
+			name:       "a directory at the record is refused",
+			resumeFile: record,
+			infos:      map[string]fs.FileInfo{record: directory},
+			wantNamed:  "is not a regular file",
 		},
 		{
-			name: "the root is refused",
-			victim: func(t *testing.T, dir string) string {
-				return "/"
-			},
+			name:       "a symlink at the record is refused",
+			resumeFile: record,
+			infos:      map[string]fs.FileInfo{record: link},
+			wantNamed:  "is not a regular file",
 		},
 		{
-			name: "a file in another directory is refused",
-			victim: func(t *testing.T, dir string) string {
-				path := resumePath(t)
-				seedLines(t, path, "keep me\n")
-				return path
-			},
+			name:       "another file in the resume directory is refused",
+			resumeFile: filepath.Join(resumeDir, "other.jsonl"),
+			infos:      map[string]fs.FileInfo{filepath.Join(resumeDir, "other.jsonl"): regular},
+			wantNamed:  "not the record this run keeps",
+		},
+		{
+			name:       "a path climbing out of the resume directory is refused",
+			resumeFile: filepath.Join(resumeDir, "..", "outside.jsonl"),
+			infos:      map[string]fs.FileInfo{filepath.Join(root, "outside.jsonl"): regular},
+			wantNamed:  "not the record this run keeps",
+		},
+		{
+			name:       "the file beside the resume directory in the log root is refused",
+			resumeFile: filepath.Join(root, "resume.jsonl"),
+			infos:      map[string]fs.FileInfo{filepath.Join(root, "resume.jsonl"): regular},
+			wantNamed:  "not the record this run keeps",
+		},
+		{
+			name:       "a file in a sibling directory is refused",
+			resumeFile: "/x/other/resume/resume.jsonl",
+			infos:      map[string]fs.FileInfo{"/x/other/resume/resume.jsonl": regular},
+			wantNamed:  "not the record this run keeps",
+		},
+		{
+			name:       "the root is refused",
+			resumeFile: "/",
+			wantNamed:  "not the record this run keeps",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			dir := t.TempDir()
-			path := tc.victim(t, dir)
-			var removes []string
-			host := Host{
-				Lstat: os.Lstat,
-				Remove: func(name string) error {
-					removes = append(removes, name)
-					return os.Remove(name)
-				},
+			opts := Options{ResumeFile: tc.resumeFile, Tested: "shaA", LogDir: logDir}
+			if tc.own {
+				opts = Options{ResumeFile: tc.resumeFile, Tested: "shaA", LogDir: "/x/tmp/tier-sweep.abc",
+					OwnsLogDir: true, LogDirParent: "/x/tmp"}
 			}
-			res := &Resume{Path: path, Key: primeKey("shaA")}
-			res.Remove(dir, host)
-			if got := len(removes) == 1; got != tc.wantRemoved {
-				t.Errorf("removal calls = %v, want removed %v", removes, tc.wantRemoved)
+			f := &fakeFS{infos: tc.infos}
+			var stderr strings.Builder
+			host := f.host()
+			res := OpenResume(opts, host, &stderr)
+			if got := res != nil; got != tc.wantTrusted {
+				t.Errorf("resume trusted = %v, want %v (stderr %q)", got, tc.wantTrusted, stderr.String())
 			}
-			if tc.wantRemoved {
+			if res != nil {
+				res.Remove(host)
+			}
+			if !reflect.DeepEqual(f.removes, tc.wantRemoved) {
+				t.Errorf("removals = %v, want %v", f.removes, tc.wantRemoved)
+			}
+			if tc.wantNamed == "" {
+				if stderr.String() != "" {
+					t.Errorf("stderr = %q, want nothing", stderr.String())
+				}
 				return
 			}
-			if _, err := os.Lstat(path); err != nil {
-				t.Errorf("%s is gone, want it left alone: %v", path, err)
+			if got := stderr.String(); !strings.Contains(got, tc.wantNamed) || strings.Count(got, "\n") != 1 {
+				t.Errorf("stderr = %q, want one line naming %q", got, tc.wantNamed)
 			}
 		})
 	}
 }
 
-// TestResumeRemoveNamesASeamItCannotUse: a host missing the Lstat, or one whose
-// Lstat fails for another reason, leaves the record alone, names the reason and
-// never reaches the removal (gt-xk9my).
+// TestResumeRemoveNamesASeamItCannotUse: a host missing a seam the removal needs
+// leaves the record alone, names the reason and never reaches the removal
+// (gt-xk9my).
 func TestResumeRemoveNamesASeamItCannotUse(t *testing.T) {
 	t.Parallel()
+	record := ResumeRecordPath("/x/logs")
+	regular := fakeInfo{name: "resume.jsonl", mode: 0o644}
 	cases := []struct {
 		name string
-		host func(removes *int) Host
+		host func(f *fakeFS) Host
 		want string
 	}{
 		{
+			name: "a host with no Remove",
+			host: func(f *fakeFS) Host {
+				h := f.host()
+				h.Remove = nil
+				return h
+			},
+			want: "host has no Remove",
+		},
+		{
 			name: "a host with no Lstat",
-			host: func(removes *int) Host {
-				return Host{Remove: func(string) error { *removes++; return nil }}
+			host: func(f *fakeFS) Host {
+				h := f.host()
+				h.Lstat = nil
+				return h
 			},
 			want: "host has no Lstat",
 		},
 		{
 			name: "an Lstat that fails for another reason",
-			host: func(removes *int) Host {
-				return Host{
-					Lstat:  func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission },
-					Remove: func(string) error { *removes++; return nil },
-				}
+			host: func(f *fakeFS) Host {
+				h := f.host()
+				h.Lstat = func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission }
+				return h
 			},
 			want: fs.ErrPermission.Error(),
 		},
@@ -565,13 +708,12 @@ func TestResumeRemoveNamesASeamItCannotUse(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			dir := t.TempDir()
+			f := &fakeFS{infos: map[string]fs.FileInfo{record: regular}}
 			var stderr strings.Builder
-			var removals int
-			res := &Resume{Path: filepath.Join(dir, "resume.jsonl"), Key: primeKey("shaA"), stderr: &stderr}
-			res.Remove(dir, tc.host(&removals))
-			if removals != 0 {
-				t.Errorf("removal calls = %d, want none", removals)
+			res := &Resume{Path: record, Key: primeKey("shaA"), stderr: &stderr}
+			res.Remove(tc.host(f))
+			if len(f.removes) != 0 {
+				t.Errorf("removals = %v, want none", f.removes)
 			}
 			if got := stderr.String(); !strings.Contains(got, tc.want) || strings.Count(got, "\n") != 1 {
 				t.Errorf("stderr = %q, want one line naming %q", got, tc.want)
@@ -584,17 +726,14 @@ func TestResumeRemoveNamesASeamItCannotUse(t *testing.T) {
 // has nothing to delete, and says nothing about it.
 func TestResumeRemoveWithoutARecordIsQuiet(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
+	record := ResumeRecordPath("/x/logs")
+	f := &fakeFS{}
 	var stderr strings.Builder
-	host := Host{
-		Lstat: os.Lstat,
-		Remove: func(name string) error {
-			t.Errorf("removed %s, want no removal call: there is no record", name)
-			return nil
-		},
+	res := &Resume{Path: record, Key: primeKey("shaA"), stderr: &stderr}
+	res.Remove(f.host())
+	if len(f.removes) != 0 {
+		t.Errorf("removals = %v, want none: there is no record", f.removes)
 	}
-	res := &Resume{Path: filepath.Join(dir, "resume.jsonl"), Key: primeKey("shaA"), stderr: &stderr}
-	res.Remove(dir, host)
 	if stderr.String() != "" {
 		t.Errorf("stderr = %q, want nothing", stderr.String())
 	}
@@ -604,20 +743,34 @@ func TestResumeRemoveWithoutARecordIsQuiet(t *testing.T) {
 // nothing else; the record stays for the next run.
 func TestResumeRemoveFailureIsNamed(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "resume.jsonl")
-	seedLines(t, path, recordLine(t, TierIntegration, "./r1", true)+"\n")
-	var stderr strings.Builder
-	host := Host{
-		Lstat:  os.Lstat,
-		Remove: func(string) error { return errors.New("read-only file system") },
+	record := ResumeRecordPath("/x/logs")
+	f := &fakeFS{
+		infos:     map[string]fs.FileInfo{record: fakeInfo{name: "resume.jsonl", mode: 0o644}},
+		removeErr: errors.New("read-only file system"),
 	}
-	res := &Resume{Path: path, Key: primeKey("shaA"), stderr: &stderr}
-	res.Remove(dir, host)
-	if got := strings.Count(stderr.String(), "tier-sweep: resume: remove "+path); got != 1 {
+	var stderr strings.Builder
+	res := &Resume{Path: record, Key: primeKey("shaA"), stderr: &stderr}
+	res.Remove(f.host())
+	if got := strings.Count(stderr.String(), "tier-sweep: resume: remove "+record); got != 1 {
 		t.Errorf("stderr names the removal failure %d times, want once:\n%s", got, stderr.String())
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("the record is gone: %v", err)
+}
+
+// TestGoflagsReadsOnlyTheInjectedHost: the environment key is read from the
+// host the run was given, and a host with no Env reads nothing, so the process's
+// own GOFLAGS never reaches a record key (om 97eb48).
+func TestGoflagsReadsOnlyTheInjectedHost(t *testing.T) {
+	t.Setenv("GOFLAGS", "-tags=process")
+	if got := goflags(Host{}); got != "" {
+		t.Errorf("goflags(no Env) = %q, want empty: the process environment is not read", got)
+	}
+	host := Host{Env: func(name string) string {
+		if name == "GOFLAGS" {
+			return "-tags=host"
+		}
+		return ""
+	}}
+	if got := goflags(host); got != "-tags=host" {
+		t.Errorf("goflags(host) = %q, want the host's value", got)
 	}
 }

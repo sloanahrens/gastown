@@ -66,6 +66,9 @@ type rig struct {
 	// noCleanupSlots leaves ReadDir, Lstat and RemoveAll unset on the Host, as a
 	// caller that wired only the directory creation does.
 	noCleanupSlots bool
+	// noRemove leaves only the single-file Remove unset on the Host, as a caller
+	// that wired every cleanup but the record's removal does.
+	noRemove bool
 	// events records each stdout line printed and each directory removed, in
 	// the order they happened.
 	events []string
@@ -167,6 +170,9 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 	}
 	if r.noCleanupSlots {
 		host.ReadDir, host.Lstat, host.RemoveAll, host.Remove = nil, nil, nil, nil
+	}
+	if r.noRemove {
+		host.Remove = nil
 	}
 	code = Run(args, out, &errw, Deps{
 		Host:    host,

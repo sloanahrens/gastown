@@ -89,10 +89,11 @@ type Options struct {
 	Trigger string
 	// Tested is TIER_SWEEP_TESTED, the commit a run tests.
 	Tested string
-	// ResumeFile is TIER_SWEEP_RESUME: the file a run appends each package it
+	// ResumeFile is TIER_SWEEP_RESUME: the record a run appends each package it
 	// passed to, and reads the packages an earlier run at this commit and skip
 	// list already passed, so a sweep cut by a restart runs only what is left.
-	// Empty names none.
+	// It counts only when it names ResumeRecordPath of the run's log root; empty
+	// names none.
 	ResumeFile string
 	// TimingsFile is TIER_SWEEP_TIMINGS: a persistent file a run replaces with
 	// its own timings lines at the end, so the next run can read this one's.
@@ -151,17 +152,16 @@ type Host struct {
 	// and is never rewritten. A nil AppendFile takes the process's filesystem in
 	// Run, as a nil ReadFile takes os.ReadFile.
 	AppendFile func(name string, data []byte) error
-	// Remove deletes one file, as os.Remove does: TIER_SWEEP_RESUME's own record
-	// after a GREEN run, and nothing else. A directory is never removed through
-	// it, so a path that is not the record is a refusal, not a recursive delete
-	// (om b49f3e). A nil Remove leaves the record in place, named once.
+	// Remove deletes one file, as os.Remove does: the resume record after a
+	// GREEN run, and nothing else. A directory is never removed through it, so a
+	// path that is not the record is a refusal, not a recursive delete (om
+	// b49f3e). A nil Remove leaves the record in place, named once.
 	Remove func(name string) error
 	// RemoveAll deletes a log directory and everything under it, as os.RemoveAll
 	// does: a GREEN run's own directory, and the old ones a prune deletes.
 	// Remove, RemoveAll, ReadDir and Lstat are the only way Run reaches a
 	// filesystem for cleanup, and it fills no os default for them: a host that
-	// leaves one nil
-	// has every cleanup skipped, named once on stderr (gt-xk9my).
+	// leaves one nil has every cleanup skipped, named once on stderr (gt-xk9my).
 	RemoveAll func(path string) error
 	// ReadDir lists a directory, as os.ReadDir does: the prune reads TMPDIR
 	// through it.

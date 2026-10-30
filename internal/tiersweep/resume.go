@@ -13,13 +13,40 @@ import (
 	"sync"
 )
 
+// The record's place is derived, never taken whole from the environment: a
+// record sits in a resume directory beside the run's log directories, under a
+// fixed name, so a GREEN run can delete exactly the file it wrote (om 70902e).
+const (
+	resumeDirName    = "resume"
+	resumeRecordName = "resume.jsonl"
+)
+
+// ResumeRecordPath is the record a sweep keeps for a log root: one file under
+// the resume directory beside the log directories. It sits outside the run's own
+// log directory, which a GREEN run removes, so the record outlives the run that
+// wrote it and a restart finds it. TIER_SWEEP_RESUME takes effect only when it
+// names exactly this path.
+func ResumeRecordPath(logRoot string) string {
+	return filepath.Join(logRoot, resumeDirName, resumeRecordName)
+}
+
+// logRoot is the directory the record's resume directory sits in: the TMPDIR a
+// run made its own log directory in, or else the parent of the log directory the
+// caller named.
+func (o Options) logRoot() string {
+	if o.OwnsLogDir {
+		return o.LogDirParent
+	}
+	return filepath.Dir(o.LogDir)
+}
+
 // Resume is the record of the packages a sweep already passed at one commit,
 // so a sweep a restart cut picks up where it stopped instead of starting over
 // (gt-loqew). It is keyed by the commit, the skip list and the environment as
 // well as the package, so a record never carries a pass across a different
 // code, a different list of what runs or a different build environment.
 type Resume struct {
-	// Path is TIER_SWEEP_RESUME, the file the records live in.
+	// Path is the record this run derives, ResumeRecordPath of its log root.
 	Path string
 	// Key is what a record must name to count for this run.
 	Key ResumeKey
@@ -35,6 +62,10 @@ type Resume struct {
 	// failed drops every later append after the first one fails, so a full disk
 	// is one stderr line rather than one per package.
 	failed bool
+	// torn is set when the record as last read ends without a newline: its last
+	// line is a torn one, and the next append starts a new line so it is not
+	// glued onto the torn one (om 9aa0b4).
+	torn bool
 }
 
 // ResumeKey is what a record must name to count as a pass: the commit under
@@ -65,15 +96,32 @@ type resumeRecord struct {
 }
 
 // OpenResume is the run's resume record, and nil when TIER_SWEEP_RESUME names
-// no file. A run that names a file but no commit gets none either, named once
-// on stderr: without a commit no record can be shown to belong to this run.
-func OpenResume(path, tested, skipList string, host Host, stderr io.Writer) *Resume {
-	if path == "" {
+// no file. A run that names a file but no commit gets none, and so does one
+// whose file is not the record this run derives or is not a regular file: each
+// is named once on stderr and every package runs. The record's directory is
+// made here, so the first append has somewhere to go.
+func OpenResume(opts Options, host Host, stderr io.Writer) *Resume {
+	if opts.ResumeFile == "" {
 		return nil
 	}
-	if tested == "" {
+	if opts.Tested == "" {
 		fmt.Fprintf(stderr, "%s: resume: %s names no commit, so %s is not read (%s)\n",
-			Name, EnvTested, path, sweepGoesOn)
+			Name, EnvTested, opts.ResumeFile, sweepGoesOn)
+		return nil
+	}
+	path := ResumeRecordPath(opts.logRoot())
+	if filepath.Clean(opts.ResumeFile) != path {
+		fmt.Fprintf(stderr, "%s: resume: %s names %s, not the record this run keeps at %s, so resume is off (%s)\n",
+			Name, EnvResume, opts.ResumeFile, path, sweepGoesOn)
+		return nil
+	}
+	if err := checkRecord(path, host); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(stderr, "%s: resume: %s: %v, so resume is off (%s)\n", Name, EnvResume, err, sweepGoesOn)
+		return nil
+	}
+	if err := host.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		fmt.Fprintf(stderr, "%s: resume: create %s: %v, so resume is off (%s)\n",
+			Name, filepath.Dir(path), err, sweepGoesOn)
 		return nil
 	}
 	read := host.ReadFile
@@ -84,7 +132,7 @@ func OpenResume(path, tested, skipList string, host Host, stderr io.Writer) *Res
 	if appendFile == nil {
 		appendFile = appendToFile
 	}
-	key := ResumeKey{Tested: tested, SkipHash: skipHash(skipList), EnvHash: envHash(goflags(host))}
+	key := ResumeKey{Tested: opts.Tested, SkipHash: skipHash(opts.SkipList), EnvHash: envHash(goflags(host))}
 	return &Resume{Path: path, Key: key, ReadFile: read, AppendFile: appendFile, stderr: stderr}
 }
 
@@ -95,6 +143,7 @@ func OpenResume(path, tested, skipList string, host Host, stderr io.Writer) *Res
 func (r *Resume) Passed() map[string]bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.torn = false
 	data, err := r.ReadFile(r.Path)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -102,6 +151,7 @@ func (r *Resume) Passed() map[string]bool {
 		}
 		return nil
 	}
+	r.torn = len(data) > 0 && data[len(data)-1] != '\n'
 	return ParseResume(data, r.Key)
 }
 
@@ -124,20 +174,28 @@ func (r *Resume) Record(tier, name string) {
 		r.fail(err)
 		return
 	}
-	if err := r.AppendFile(r.Path, append(line, '\n')); err != nil {
-		r.fail(err)
+	data := append(line, '\n')
+	if r.torn {
+		data = append([]byte{'\n'}, data...)
 	}
+	if err := r.AppendFile(r.Path, data); err != nil {
+		r.fail(err)
+		return
+	}
+	r.torn = false
 }
 
-// Remove deletes the record a GREEN run leaves nothing to resume from. Only the
-// run's own record goes: TIER_SWEEP_RESUME is environment text naming whatever
-// it names, so the path must be a regular file, not a link, directly inside the
-// run's log directory, and it is removed with one os.Remove. Every other path
-// is left alone and named once on stderr, because deleting an operator-supplied
-// path is the worst thing this feature could do (om b49f3e).
-func (r *Resume) Remove(logDir string, host Host) {
-	path, err := removableRecord(r.Path, logDir, host)
-	if errors.Is(err, errNoRecord) {
+// Remove deletes the record a GREEN run leaves nothing to resume from. The record
+// is the file this run derives, so the only thing removed is that path: it must
+// be a regular file on Lstat, and it goes with one os.Remove. A host that wired
+// no Remove keeps the record and says so (gt-xk9my).
+func (r *Resume) Remove(host Host) {
+	if host.Remove == nil {
+		r.report("remove", errors.New("skipped, host has no Remove"))
+		return
+	}
+	err := checkRecord(r.Path, host)
+	if errors.Is(err, fs.ErrNotExist) {
 		// A run that never wrote a record has nothing to delete, and saying so
 		// on every clean sweep would bury the lines that matter.
 		return
@@ -146,42 +204,26 @@ func (r *Resume) Remove(logDir string, host Host) {
 		r.report("remove", err)
 		return
 	}
-	if err := host.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := host.Remove(r.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		r.report("remove", err)
 	}
 }
 
-// errNoRecord is what a GREEN run finds when the record is already gone: there
-// is nothing to delete, so the run says nothing.
-var errNoRecord = errors.New("no record to remove")
-
-// removableRecord is the path a GREEN run may delete, or why it may not: the
-// file must sit directly in logDir after both are cleaned, and Lstat must find
-// a regular file there, never a directory and never a symlink. The checks run
-// before the removal, so a refusal reaches no filesystem call beyond Lstat.
-func removableRecord(path, logDir string, host Host) (string, error) {
-	if host.Remove == nil {
-		return "", errors.New("skipped, host has no Remove")
-	}
+// checkRecord is nil when path is a regular file, and fs.ErrNotExist (wrapped)
+// when nothing is there. A link, a directory or any other file is refused, and so
+// is a host with no Lstat, since the link check cannot run without one.
+func checkRecord(path string, host Host) error {
 	if host.Lstat == nil {
-		return "", errors.New("skipped, host has no Lstat")
+		return errors.New("skipped, host has no Lstat")
 	}
-	clean := filepath.Clean(path)
-	dir := filepath.Clean(logDir)
-	if filepath.Dir(clean) != dir {
-		return "", fmt.Errorf("%s is not a record in %s, so it is left alone", clean, dir)
-	}
-	info, err := host.Lstat(clean)
+	info, err := host.Lstat(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", errNoRecord
-		}
-		return "", err
+		return err
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("%s is not a regular file, so it is left alone", clean)
+		return fmt.Errorf("%s is not a regular file, so it is left alone", path)
 	}
-	return clean, nil
+	return nil
 }
 
 // fail names a write failure and stops the recording for this run; the package
@@ -236,11 +278,12 @@ func envHash(goflags string) string {
 	return hashString("GOFLAGS=" + goflags)
 }
 
-// goflags is the GOFLAGS a run's children inherit, empty when the host leaves
-// the name unset.
+// goflags is the GOFLAGS a run's children inherit, read only from the host's
+// environment: a host that wires no Env has none to read, so it is empty and the
+// process's own environment is never consulted (om 97eb48).
 func goflags(host Host) string {
 	if host.Env == nil {
-		return os.Getenv("GOFLAGS")
+		return ""
 	}
 	return host.Env("GOFLAGS")
 }
