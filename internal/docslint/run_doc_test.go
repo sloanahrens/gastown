@@ -6,6 +6,9 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -35,10 +38,72 @@ func restatedUsage(doc string) []string {
 	return got
 }
 
+// usageClaim matches a claim that the command prints a usage block. A negated
+// claim ("prints no usage block") and a bare mention of usage do not match.
+var usageClaim = regexp.MustCompile(`(?i)\bprint(?:s|ing)?\s+(?:an?\s+|the\s+)?usage\b`)
+
+// claimsUsageBlock reports whether doc says the command prints a usage block.
+func claimsUsageBlock(doc string) bool {
+	return usageClaim.MatchString(doc)
+}
+
+// docOptions is each option the command doc names: the word after the command
+// name on a line, when that word is an option.
+func docOptions(doc string) []string {
+	var got []string
+	for _, line := range strings.Split(doc, "\n") {
+		if words := strings.Fields(line); len(words) >= 2 && words[0] == "docs-lint" && strings.HasPrefix(words[1], "--") {
+			got = append(got, words[1])
+		}
+	}
+	return got
+}
+
+// parsedOptions is each option parseArgs has a case for, read from the source of
+// run.go, so the test compares the doc with the code that refuses or accepts.
+func parsedOptions(src string) ([]string, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), "run.go", src, 0)
+	if err != nil {
+		return nil, err
+	}
+	var got []string
+	var unquoteErr error
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "parseArgs" || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			clause, ok := n.(*ast.CaseClause)
+			if !ok {
+				return true
+			}
+			for _, e := range clause.List {
+				if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					opt, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						unquoteErr = err
+					}
+					got = append(got, opt)
+				}
+			}
+			return true
+		})
+	}
+	if unquoteErr != nil {
+		return nil, unquoteErr
+	}
+	if got == nil {
+		return nil, errors.New("parseArgs has no option cases")
+	}
+	return got, nil
+}
+
 // TestCommandDocListsOptions holds the option list to one home: the cmd/docs-lint
-// package doc, the only place a reader of the command finds it. The command
-// refuses an unknown option on stderr and prints no usage block, so the doc names
-// the options without claiming the command prints them.
+// package doc, the only place a reader of the command finds it. Its options must
+// be the ones parseArgs accepts. The command refuses an unknown option on stderr
+// and prints no usage block, so the doc names the options without claiming the
+// command prints them.
 func TestCommandDocListsOptions(t *testing.T) {
 	t.Parallel()
 	file, err := parser.ParseFile(token.NewFileSet(), "../../cmd/docs-lint/main.go", nil, parser.ParseComments)
@@ -48,14 +113,82 @@ func TestCommandDocListsOptions(t *testing.T) {
 	if file.Doc == nil {
 		t.Fatal("cmd/docs-lint has no package doc")
 	}
+	src, err := os.ReadFile("run.go")
+	if err != nil {
+		t.Fatalf("read run.go: %v", err)
+	}
+	parsed, err := parsedOptions(string(src))
+	if err != nil {
+		t.Fatalf("run.go: %v", err)
+	}
 	doc := file.Doc.Text()
-	for _, opt := range []string{"docs-lint --list <tier>", "docs-lint --slice N M", "docs-lint --words"} {
-		if !strings.Contains(doc, opt) {
-			t.Errorf("package doc does not document %q", opt)
+	documented := docOptions(doc)
+	for _, opt := range parsed {
+		if !slices.Contains(documented, opt) {
+			t.Errorf("parseArgs accepts %q, package doc does not document it", opt)
 		}
 	}
-	if strings.Contains(strings.ToLower(doc), "usage") {
+	for _, opt := range documented {
+		if !slices.Contains(parsed, opt) {
+			t.Errorf("package doc documents %q, parseArgs refuses it", opt)
+		}
+	}
+	if claimsUsageBlock(doc) {
 		t.Error("package doc claims the command prints a usage block")
+	}
+}
+
+// TestParsedOptionsFixtures drives the read of parseArgs's cases over source text:
+// every string in a case clause counts, and a source with no parseArgs or that
+// does not parse is refused.
+func TestParsedOptionsFixtures(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		src     string
+		want    []string
+		wantErr bool
+	}{
+		{"each case string is an option", "package docslint\n\nfunc parseArgs(args []string) {\n\tswitch args[0] {\n\tcase \"--a\":\n\tcase \"--b\", \"--c\":\n\t}\n}\n", []string{"--a", "--b", "--c"}, false},
+		{"no parseArgs is refused", "package docslint\n\nfunc Run() {}\n", nil, true},
+		{"source that does not parse is refused", "package docslint\n\nfunc parseArgs(\n", nil, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parsedOptions(c.src)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("parsedOptions error = %v, want error %v", err, c.wantErr)
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("parsedOptions = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestClaimsUsageBlock drives the usage-claim check over doc text: a positive
+// claim, a negated claim, a bare mention of usage and a doc with no usage word.
+func TestClaimsUsageBlock(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		doc  string
+		want bool
+	}{
+		{"positive claim with a usage block", "A refused line prints a usage block on stderr.", true},
+		{"positive claim with the usage", "It prints the usage and exits 2.", true},
+		{"negated claim", "The command refuses an unknown option and prints no usage block.", false},
+		{"bare mention of usage", "See the usage notes in the README.", false},
+		{"no usage word", "docs-lint --words   total words across the agent-facing tier", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := claimsUsageBlock(c.doc); got != c.want {
+				t.Errorf("claimsUsageBlock(%q) = %v, want %v", c.doc, got, c.want)
+			}
+		})
 	}
 }
 
