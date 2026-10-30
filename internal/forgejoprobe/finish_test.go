@@ -74,6 +74,7 @@ func (f *finisher) hasLog(sub string) bool {
 var allCalls = []string{"cleanup", "delete", "record", "workdir"}
 
 func TestFinishOrderAndExitCodes(t *testing.T) {
+	t.Parallel()
 	gone := &forgejo.APIError{Method: http.MethodDelete, Path: "/branches/" + testBranch, StatusCode: http.StatusNotFound}
 	for _, tc := range []struct {
 		name  string
@@ -148,6 +149,7 @@ func TestFinishOrderAndExitCodes(t *testing.T) {
 }
 
 func TestFinishWritesNoRecordWhenHooksNotExercised(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		mode    PushMode
@@ -192,6 +194,7 @@ func TestFinishWritesNoRecordWhenHooksNotExercised(t *testing.T) {
 }
 
 func TestFinishWithoutABranchDeletesNothing(t *testing.T) {
+	t.Parallel()
 	f := &finisher{created: false}
 	got := Finish(f, false, PushedFromWorktree, ExitFailure)
 	if got != ExitFailure {
@@ -203,6 +206,7 @@ func TestFinishWithoutABranchDeletesNothing(t *testing.T) {
 }
 
 func TestDryRunLines(t *testing.T) {
+	t.Parallel()
 	plan := DryRunPlan{
 		Main:    testMain,
 		SHA:     testSHA,

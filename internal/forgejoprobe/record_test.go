@@ -108,6 +108,7 @@ func writeTestRecord(fsys FS) (string, error) {
 }
 
 func TestWriteRecordContent(t *testing.T) {
+	t.Parallel()
 	fsys := newRecordFS()
 	path, err := writeTestRecord(fsys)
 	if err != nil {
@@ -139,6 +140,7 @@ func TestWriteRecordContent(t *testing.T) {
 }
 
 func TestWriteRecordFailures(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("boom")
 	for _, tc := range []struct {
 		step string
