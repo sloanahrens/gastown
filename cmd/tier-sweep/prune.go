@@ -44,10 +44,11 @@ func runPrune(args []string, stdout, stderr io.Writer, d tiersweep.Deps) int {
 		return tiersweep.UsageExit
 	}
 	host := d.Host
-	// A host missing a call is a refusal, not a fallback to os: the fallback
-	// would list and delete on whatever machine the command happens to run on.
-	if host.Env == nil || host.ReadDir == nil || host.Lstat == nil || (opts.apply && host.RemoveAll == nil) {
-		fmt.Fprintf(stderr, "%s: prune: the host cannot read TMPDIR, list, describe and delete directories\n", tiersweep.Name)
+	// A host missing a call it needs is a refusal, not a fallback to os: the
+	// fallback would list and delete on whatever machine the command runs on.
+	if host.ReadDir == nil || host.Lstat == nil ||
+		(opts.apply && host.RemoveAll == nil) || (opts.dir == "" && host.Env == nil) {
+		fmt.Fprintf(stderr, "%s: prune: the host is missing a call it needs to list, describe and delete directories\n", tiersweep.Name)
 		return pruneErrorExit
 	}
 	now := d.Now
@@ -83,16 +84,20 @@ func runPrune(args []string, stdout, stderr io.Writer, d tiersweep.Deps) int {
 		fmt.Fprintf(stderr, "%s: prune %s: %v\n", tiersweep.Name, dir, err)
 		code = pruneErrorExit
 	}
-	if listed, gone := missing(candidates, removed), strays(candidates, removed); len(listed) > 0 || len(gone) > 0 {
-		for _, path := range listed {
-			fmt.Fprintf(stderr, "%s: prune %s: not removed\n", tiersweep.Name, path)
-		}
-		for _, path := range gone {
-			fmt.Fprintf(stderr, "%s: prune %s: removed although the list above did not name it\n", tiersweep.Name, path)
-		}
+	// The list is what an operator approved, so a deletion of anything else is
+	// a failure as much as a listed directory left behind: the count in the
+	// total line is the listed ones that went, never len(removed).
+	notRemoved, extra := missing(candidates, removed), strays(candidates, removed)
+	for _, path := range notRemoved {
+		fmt.Fprintf(stderr, "%s: prune %s: not removed\n", tiersweep.Name, path)
+	}
+	for _, path := range extra {
+		fmt.Fprintf(stderr, "%s: prune %s: removed although the list above did not name it\n", tiersweep.Name, path)
+	}
+	if len(notRemoved) > 0 || len(extra) > 0 {
 		code = pruneErrorExit
 	}
-	fmt.Fprintf(stdout, "%s: %s: removed %d of %d\n", tiersweep.Name, summary, len(removed), len(candidates))
+	fmt.Fprintf(stdout, "%s: %s: removed %d of %d\n", tiersweep.Name, summary, len(candidates)-len(notRemoved), len(candidates))
 	return code
 }
 

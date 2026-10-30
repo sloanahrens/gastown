@@ -287,30 +287,82 @@ func TestPruneListsTheDirectoryAndAgeItWasGiven(t *testing.T) {
 	}
 }
 
-// TestPruneApplyWithAHostThatCannotDelete: --apply on a host with no RemoveAll
-// refuses rather than reporting a removal that did not happen, and the same
-// host still lists in a dry run, which needs no RemoveAll.
-func TestPruneApplyWithAHostThatCannotDelete(t *testing.T) {
+// TestPruneRefusesAHostMissingACall: a host without the call a command line
+// needs exits 1 with the gap named, rather than falling back to os. A host with
+// no RemoveAll still lists in a dry run, which deletes nothing, and a host with
+// no Env still lists the directory --dir named.
+func TestPruneRefusesAHostMissingACall(t *testing.T) {
 	t.Parallel()
-	f := newPruneFake(t)
-	host := f.host()
-	host.RemoveAll = nil
-	var stdout, stderr bytes.Buffer
-	if code := runPrune(nil, &stdout, &stderr, tiersweep.Deps{Host: host, Now: func() time.Time { return pruneNow }}); code != 0 {
-		t.Errorf("dry run exit = %d, want 0: it deletes nothing (stderr %q)", code, stderr.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-	code := runPrune([]string{"--apply"}, &stdout, &stderr, tiersweep.Deps{Host: host, Now: func() time.Time { return pruneNow }})
-	if code != pruneErrorExit {
-		t.Errorf("--apply exit = %d, want %d for a host that cannot delete", code, pruneErrorExit)
-	}
-	if stdout.String() != "" {
-		t.Errorf("stdout = %q, want no list and no total for a refused --apply", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "cannot read TMPDIR, list, describe and delete") {
-		t.Errorf("stderr = %q, want it to name what the host cannot do", stderr.String())
-	}
+	t.Run("no RemoveAll under --apply", func(t *testing.T) {
+		t.Parallel()
+		f := newPruneFake(t)
+		host := f.host()
+		host.RemoveAll = nil
+		var stdout, stderr bytes.Buffer
+		if code := runPrune(nil, &stdout, &stderr, tiersweep.Deps{Host: host, Now: func() time.Time { return pruneNow }}); code != 0 {
+			t.Errorf("dry run exit = %d, want 0: it deletes nothing (stderr %q)", code, stderr.String())
+		}
+		stdout.Reset()
+		stderr.Reset()
+		code := runPrune([]string{"--apply"}, &stdout, &stderr, tiersweep.Deps{Host: host, Now: func() time.Time { return pruneNow }})
+		if code != pruneErrorExit {
+			t.Errorf("--apply exit = %d, want %d for a host that cannot delete", code, pruneErrorExit)
+		}
+		if stdout.String() != "" {
+			t.Errorf("stdout = %q, want no list and no total for a refused --apply", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "missing a call it needs to list, describe and delete") {
+			t.Errorf("stderr = %q, want it to name what the host cannot do", stderr.String())
+		}
+	})
+	t.Run("no ReadDir and no Lstat", func(t *testing.T) {
+		t.Parallel()
+		for _, drop := range []string{"ReadDir", "Lstat"} {
+			f := newPruneFake(t)
+			host := f.host()
+			if drop == "ReadDir" {
+				host.ReadDir = nil
+			} else {
+				host.Lstat = nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := runPrune(nil, &stdout, &stderr, tiersweep.Deps{Host: host, Now: func() time.Time { return pruneNow }})
+			if code != pruneErrorExit {
+				t.Errorf("without %s: exit = %d, want %d", drop, code, pruneErrorExit)
+			}
+			if len(f.readDirs) != 0 || len(f.removed) != 0 {
+				t.Errorf("without %s: read %q and removed %q, want nothing touched", drop, f.readDirs, f.removed)
+			}
+		}
+	})
+	t.Run("no Env and no --dir", func(t *testing.T) {
+		t.Parallel()
+		f := newPruneFake(t)
+		host := f.host()
+		host.Env = nil
+		var stdout, stderr bytes.Buffer
+		code := runPrune(nil, &stdout, &stderr, tiersweep.Deps{Host: host, Now: func() time.Time { return pruneNow }})
+		if code != pruneErrorExit {
+			t.Errorf("exit = %d, want %d for a host that cannot read TMPDIR", code, pruneErrorExit)
+		}
+		if len(f.readDirs) != 0 || len(f.removed) != 0 {
+			t.Errorf("read %q and removed %q, want nothing touched", f.readDirs, f.removed)
+		}
+	})
+	t.Run("no Env but --dir names the directory", func(t *testing.T) {
+		t.Parallel()
+		f := newPruneFake(t)
+		host := f.host()
+		host.Env = nil
+		var stdout, stderr bytes.Buffer
+		code := runPrune([]string{"--dir", "/tmp"}, &stdout, &stderr, tiersweep.Deps{Host: host, Now: func() time.Time { return pruneNow }})
+		if code != 0 {
+			t.Errorf("exit = %d, want 0: --dir needs no TMPDIR (stderr %q)", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "tier-sweep: prune /tmp/tier-sweep.aaa age ") {
+			t.Errorf("stdout = %q, want the named directory's list", stdout.String())
+		}
+	})
 }
 
 // TestPruneReportsFailure: a listing it cannot read and a removal that fails
@@ -405,13 +457,16 @@ func TestPruneReportsFailure(t *testing.T) {
 				"/tmp/tier-sweep.bbb": dirInfo("tier-sweep.bbb", 4096, pruneOld),
 			},
 		}
-		code, _, stderr := runPruneFake(t, f, "--apply")
+		code, stdout, stderr := runPruneFake(t, f, "--apply")
 		if code != pruneErrorExit {
 			t.Errorf("exit = %d, want %d for a deletion the list did not name", code, pruneErrorExit)
 		}
 		want := "tier-sweep: prune /tmp/tier-sweep.bbb: removed although the list above did not name it"
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+		if !strings.Contains(stdout, "removed 1 of 1") {
+			t.Errorf("stdout = %q, want the count over the listed directories, not every deletion", stdout)
 		}
 	})
 }
