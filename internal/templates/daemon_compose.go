@@ -157,15 +157,23 @@ const (
 	liveForgeSSHPort  = 2222
 )
 
-// The scratch Forgejo stack's names. Each is the scratch project's own: none is a
-// name the live Forgejo project declares (the list is the test's, in
+// The scratch Forgejo stack's service names, which a compose command takes to
+// start them: the forge, its database, the engine the runner drives and the
+// runner. Each is the scratch project's own: none is a name the live Forgejo
+// project declares (the list is the test's, in
 // daemon_compose_scratch_forge_test.go, so it is written once), and the compose
 // project scopes them again.
 const (
-	ScratchForgejoService = "scratch-forgejo"
-	scratchForgeDBService = "scratch-forgejo-db"
-	scratchForgeDind      = "scratch-forge-dind"
-	scratchForgeRunner    = "scratch-forge-runner"
+	ScratchForgejoService     = "scratch-forgejo"
+	ScratchForgejoDBService   = "scratch-forgejo-db"
+	ScratchForgeDindService   = "scratch-forge-dind"
+	ScratchForgeRunnerService = "scratch-forge-runner"
+)
+
+// The stack's networks, the alias the runner reaches its engine by, and its
+// volumes: no command names one from outside this package, so they stay
+// unexported.
+const (
 	scratchForgeNetwork   = "scratch-forge"
 	scratchForgeCINetwork = "scratch-forge-ci"
 	scratchForgeDindAlias = "docker"
@@ -201,7 +209,7 @@ const (
 // http://scratch-forgejo:3000/. compose starts it with the rest of the project;
 // without a config.yml in its data volume it exits, and restart "no" leaves it
 // stopped. The L2 window registers it against this forge and starts it again.
-const scratchForgeBody = `  ` + scratchForgeDBService + `:
+const scratchForgeBody = `  ` + ScratchForgejoDBService + `:
     image: %[3]q
     restart: unless-stopped
     environment:
@@ -223,11 +231,11 @@ const scratchForgeBody = `  ` + scratchForgeDBService + `:
     image: %[4]q
     restart: unless-stopped
     depends_on:
-      ` + scratchForgeDBService + `:
+      ` + ScratchForgejoDBService + `:
         condition: service_healthy
     environment:
       FORGEJO__database__DB_TYPE: postgres
-      FORGEJO__database__HOST: ` + scratchForgeDBService + `:5432
+      FORGEJO__database__HOST: ` + ScratchForgejoDBService + `:5432
       FORGEJO__database__NAME: forgejo
       FORGEJO__database__USER: forgejo
       FORGEJO__server__DOMAIN: ` + ScratchForgejoService + `
@@ -249,7 +257,7 @@ const scratchForgeBody = `  ` + scratchForgeDBService + `:
       - ` + scratchForgeNetwork + `
       - ` + scratchForgeCINetwork + `
       - %[6]s
-  ` + scratchForgeDind + `:
+  ` + ScratchForgeDindService + `:
     image: %[5]q
     restart: unless-stopped
     privileged: true
@@ -267,13 +275,13 @@ const scratchForgeBody = `  ` + scratchForgeDBService + `:
       ` + scratchForgeCINetwork + `:
         aliases:
           - ` + scratchForgeDindAlias + `
-  ` + scratchForgeRunner + `:
+  ` + ScratchForgeRunnerService + `:
     image: %[7]q
     restart: "no"
     depends_on:
       ` + ScratchForgejoService + `:
         condition: service_started
-      ` + scratchForgeDind + `:
+      ` + ScratchForgeDindService + `:
         condition: service_started
     working_dir: /data
     command: ["forgejo-runner", "--config", "config.yml", "daemon"]

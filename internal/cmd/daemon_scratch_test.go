@@ -86,6 +86,19 @@ func (r *daemonScratchRig) spec() templates.ComposeSpec {
 	}
 }
 
+// forgeSpec is the same spec with the throwaway forge on, the way both port
+// flags ask for it.
+func (r *daemonScratchRig) forgeSpec(httpPort, sshPort int) templates.ComposeSpec {
+	s := r.spec()
+	s.ScratchForge, s.ScratchForgeHTTPPort, s.ScratchForgeSSHPort = true, httpPort, sshPort
+	return s
+}
+
+// setForge gives both forge port flags on the rig's flags.
+func (r *daemonScratchRig) setForge(httpPort, sshPort int) {
+	r.flags.forge = forgePorts{httpPort: httpPort, sshPort: sshPort, httpSet: true, sshSet: true}
+}
+
 // composeExists reports whether the compose file is a regular file on disk.
 func (r *daemonScratchRig) composeExists() bool {
 	info, err := os.Stat(r.flags.composeFile)
@@ -164,6 +177,122 @@ func TestDaemonScratchUpReportsAFailedStart(t *testing.T) {
 	}
 	if !r.composeExists() {
 		t.Error("the compose file was not left written after the failed start")
+	}
+}
+
+// Both forge port flags make the render print the template's forge render for
+// the same spec, and nothing else: no file, no command.
+func TestDaemonScratchRenderPrintsTheForgeRenderWithBothPorts(t *testing.T) {
+	t.Parallel()
+	r := newDaemonScratchRig(t)
+	r.setForge(3100, 2322)
+	want, err := templates.RenderDaemonCompose(r.forgeSpec(3100, 2322))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runDaemonScratch(context.Background(), "render", r.flags, r.deps); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+
+	if r.out.String() != string(want) {
+		t.Errorf("output differs from the template's forge render:\n%s", r.out.String())
+	}
+	for _, published := range []string{`"127.0.0.1:3100:3000"`, `"127.0.0.1:2322:22"`} {
+		if !strings.Contains(r.out.String(), published) {
+			t.Errorf("the render does not publish %s", published)
+		}
+	}
+	if r.composeExists() || len(r.runs) != 0 {
+		t.Errorf("render wrote a file (%v) or ran %d commands", r.composeExists(), len(r.runs))
+	}
+}
+
+// Both forge port flags make up write that same render and start the forge's
+// services beside the daemon: the forge services are not dependencies of
+// daemon, so naming daemon alone would leave the forge stopped.
+func TestDaemonScratchUpStartsTheForgeServicesBesideTheDaemon(t *testing.T) {
+	t.Parallel()
+	r := newDaemonScratchRig(t)
+	r.setForge(3100, 2322)
+	want, err := templates.RenderDaemonCompose(r.forgeSpec(3100, 2322))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runDaemonScratch(context.Background(), "up", r.flags, r.deps); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	if len(r.runs) != 1 {
+		t.Fatalf("ran %d commands, want exactly the start", len(r.runs))
+	}
+	run := r.runs[0]
+	wantArgv := []string{"docker", "--context", daemonimage.DockerContext, "compose", "-p", "gt-scratch", "-f", r.flags.composeFile,
+		"up", "-d", "daemon",
+		templates.ScratchForgejoService, templates.ScratchForgejoDBService, templates.ScratchForgeDindService, templates.ScratchForgeRunnerService}
+	if strings.Join(run.argv, " ") != strings.Join(wantArgv, " ") {
+		t.Errorf("argv = %v, want %v", run.argv, wantArgv)
+	}
+	if run.compose != string(want) {
+		t.Error("the compose file was not on disk with the forge render when the start ran")
+	}
+}
+
+// Neither forge port flag leaves the forge off: the render carries no forge
+// service and the start names the daemon alone.
+func TestDaemonScratchWithoutForgePortsStartsTheDaemonAlone(t *testing.T) {
+	t.Parallel()
+	r := newDaemonScratchRig(t)
+
+	if err := runDaemonScratch(context.Background(), "up", r.flags, r.deps); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	if len(r.runs) != 1 {
+		t.Fatalf("ran %d commands, want exactly the start", len(r.runs))
+	}
+	if got := r.runs[0].argv[len(r.runs[0].argv)-1]; got != "daemon" {
+		t.Errorf("the start's last service is %q, want the daemon alone", got)
+	}
+	if strings.Contains(r.runs[0].compose, templates.ScratchForgejoService) {
+		t.Error("the compose file carries the scratch forge without its ports being asked for")
+	}
+}
+
+// A half port pair, a live Forgejo port, one port for both services and a value
+// that is not a port are each refused before anything is written or run, for
+// render and up alike. Each row is one check; a test fails if it is removed.
+func TestDaemonScratchRefusesAHalfOrLiveForgePort(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		forge forgePorts
+		want  string
+	}{
+		{"http port alone", forgePorts{httpPort: 3100, httpSet: true}, "--forge-http-port 3100 is given without --forge-ssh-port"},
+		{"ssh port alone", forgePorts{sshPort: 2322, sshSet: true}, "--forge-ssh-port 2322 is given without --forge-http-port"},
+		{"the live Forgejo's http port", forgePorts{httpPort: 3000, sshPort: 2322, httpSet: true, sshSet: true}, "is a host port the live Forgejo publishes"},
+		{"the live Forgejo's ssh port", forgePorts{httpPort: 3100, sshPort: 2222, httpSet: true, sshSet: true}, "is a host port the live Forgejo publishes"},
+		{"one port for both services", forgePorts{httpPort: 3100, sshPort: 3100, httpSet: true, sshSet: true}, "need different host ports"},
+		{"a port flag given as zero", forgePorts{httpPort: 0, sshPort: 2322, httpSet: true, sshSet: true}, "is not a port"},
+	} {
+		for _, action := range []string{"render", "up"} {
+			t.Run(tc.name+" "+action, func(t *testing.T) {
+				t.Parallel()
+				r := newDaemonScratchRig(t)
+				r.flags.forge = tc.forge
+
+				err := runDaemonScratch(context.Background(), action, r.flags, r.deps)
+
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("%s error = %v, want it to contain %q", action, err, tc.want)
+				}
+				if r.out.Len() != 0 || len(r.runs) != 0 || r.composeExists() {
+					t.Errorf("a refusal printed %d bytes, ran %d commands, wrote a file: %v", r.out.Len(), len(r.runs), r.composeExists())
+				}
+			})
+		}
 	}
 }
 
@@ -338,12 +467,14 @@ func TestDaemonScratchFlagsAreWired(t *testing.T) {
 		return nil
 	})
 	c.SetArgs([]string{"up", "--live-root", "/l", "--root", "/r", "--compose-file", "/c", "--image", "gt-daemon:abc1234",
-		"--project", "gt-scratch", "--container", "gt-scratch-daemon-1", "--om-token-file", "/t"})
+		"--project", "gt-scratch", "--container", "gt-scratch-daemon-1", "--om-token-file", "/t",
+		"--forge-http-port", "3100", "--forge-ssh-port", "2322"})
 	c.SilenceUsage, c.SilenceErrors = true, true
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	want := scratchFlags{liveRoot: "/l", root: "/r", composeFile: "/c", image: "gt-daemon:abc1234", project: "gt-scratch", container: "gt-scratch-daemon-1", omTokenFile: "/t"}
+	want := scratchFlags{liveRoot: "/l", root: "/r", composeFile: "/c", image: "gt-daemon:abc1234", project: "gt-scratch", container: "gt-scratch-daemon-1", omTokenFile: "/t",
+		forge: forgePorts{httpPort: 3100, sshPort: 2322, httpSet: true, sshSet: true}}
 	if gotAction != "up" || got != want {
 		t.Errorf("action %q flags %+v, want up and %+v", gotAction, got, want)
 	}
