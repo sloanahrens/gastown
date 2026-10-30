@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // tokenFileMode is the mode of a role's token file: the owner alone reads it.
@@ -44,7 +45,9 @@ type tempFile interface {
 }
 
 // osFiles is the real filesystem. Its zero value runs on the real disk; a test
-// sets the function fields to make one step fail.
+// sets the function fields to make one step fail. The hooks are the Files seam
+// pattern this package and internal/docslint (OSFiles.walk and .stat) already
+// use for steps a unit test cannot make fail on a real disk.
 type osFiles struct {
 	mkdirAll   func(path string, perm fs.FileMode) error
 	createTemp func(dir, pattern string) (tempFile, error)
@@ -177,10 +180,18 @@ func (p *Provisioner) EnsureToken(role string) error {
 		}
 	}
 
-	token, err := p.mintToken(user, scopes)
+	token, duplicate, err := p.mintToken(user, scopes)
 	if err != nil {
-		if revoked {
+		switch {
+		case revoked:
 			return fmt.Errorf("%w; the previous '%s' token for %s was already revoked, so the token in %s no longer works: run again with --rotate to mint a new one", err, p.TokenName, user, path)
+		case duplicate && p.Rotate:
+			// The revoke warned and did not take, so the old token is still live.
+			return fmt.Errorf("%w; the previous '%s' token for %s could not be revoked and is STILL LIVE (%s still holds it): revoke it by hand in the web UI, then run again with --rotate", err, p.TokenName, user, path)
+		case duplicate:
+			// A token with this name exists but there is no file: the value came
+			// back once, at creation, and is lost.
+			return fmt.Errorf("%w; a '%s' token for %s already exists on the server but %s is missing, so its value is lost: run again with --rotate to revoke it and mint a new one", err, p.TokenName, user, path)
 		}
 		return err
 	}
@@ -221,31 +232,34 @@ func (p *Provisioner) tokenFileExists(path string) (bool, error) {
 // mintToken asks for a new token for user and returns its value. Forgejo
 // serializes the value as "sha1" (the struct's long-standing field name);
 // "token" is read first, for a version that renames it.
-func (p *Provisioner) mintToken(user string, scopes []string) (string, error) {
+func (p *Provisioner) mintToken(user string, scopes []string) (token string, duplicate bool, err error) {
 	path := "/admin/users/" + url.PathEscape(user) + "/tokens"
 	body := map[string]any{"name": p.TokenName, "scopes": scopes}
 	status, resp, err := p.Client.Do(http.MethodPost, path, body)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	switch status {
 	case http.StatusCreated:
 	case http.StatusForbidden:
-		return "", fmt.Errorf("the admin token cannot mint a token for %s; it needs site-administrator rights, and a token limit of 'all'.%s", user, p.Client.BodyTail(resp))
+		return "", false, fmt.Errorf("the admin token cannot mint a token for %s; it needs site-administrator rights, and a token limit of 'all'.%s", user, p.Client.BodyTail(resp))
 	default:
-		return "", p.Client.Unexpected(http.MethodPost, path, status, resp)
+		// Forgejo refuses a second token of the same name with a 422 whose
+		// message says the name "has been used already".
+		dup := status == http.StatusUnprocessableEntity && strings.Contains(strings.ToLower(string(resp)), "used already")
+		return "", dup, p.Client.Unexpected(http.MethodPost, path, status, resp)
 	}
 	var reply map[string]any
 	_ = json.Unmarshal(resp, &reply)
-	token, _ := reply["token"].(string)
+	token, _ = reply["token"].(string)
 	if token == "" {
 		token, _ = reply["sha1"].(string)
 	}
 	// The reply is not quoted: it holds the value that did not pass.
 	if !tokenValue.MatchString(token) {
-		return "", fmt.Errorf("POST %s returned no usable token", path)
+		return "", false, fmt.Errorf("POST %s returned no usable token", path)
 	}
-	return token, nil
+	return token, false, nil
 }
 
 // revokeOldToken removes the token of this run's name so a rotation does not

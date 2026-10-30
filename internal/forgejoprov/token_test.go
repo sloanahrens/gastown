@@ -2,10 +2,12 @@ package forgejoprov
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +80,38 @@ func (m *memFiles) seed(path, content string, mode fs.FileMode) {
 	m.modes[path] = mode
 }
 
+// minted40 matches the 40-hex values the fake mints.
+var minted40 = regexp.MustCompile(`[0-9a-f]{40}`)
+
+// masked hides every token a test run holds: the admin token and any value the
+// fake minted. Every failure message that quotes text a token could be in goes
+// through it, so a failing test never prints one.
+func masked(s string) string {
+	return minted40.ReplaceAllString(redactToken(s), redacted)
+}
+
+// errorfer is the part of *testing.T compareSecretText uses, so a test can hand
+// it a recorder and read what a failure would print.
+type errorfer interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
+
+// compareSecretText fails when got and want differ, reporting both with every
+// token masked. When masking makes them look equal it says only that they differ
+// at a secret, with the lengths.
+func compareSecretText(t errorfer, what, got, want string) {
+	t.Helper()
+	if got == want {
+		return
+	}
+	if masked(got) == masked(want) {
+		t.Errorf("%s differs in a secret value (lengths %d and %d)", what, len(got), len(want))
+		return
+	}
+	t.Errorf("%s = %q, want %q", what, masked(got), masked(want))
+}
+
 // tokenDir is the config directory every token test uses; nothing is written there.
 const tokenDir = "/cfg"
 
@@ -111,7 +145,7 @@ func withBot(t *testing.T, f *fakeForgejo, role string) {
 	t.Helper()
 	var logs []string
 	if err := userProvisioner(f, false, &logs).EnsureUser(role); err != nil {
-		t.Fatalf("seed bot %s: %v", role, err)
+		t.Fatalf("seed bot %s: %v", role, masked(errString(err)))
 	}
 }
 
@@ -134,7 +168,7 @@ func TestEnsureTokenMintsWithTheRoleScopes(t *testing.T) {
 			var logs []string
 			p := tokenProvisioner(f, files, false, false, &logs)
 			if err := p.EnsureToken(role); err != nil {
-				t.Fatalf("EnsureToken(%s): %v", role, err)
+				t.Fatalf("EnsureToken(%s): %v", role, masked(errString(err)))
 			}
 			user := DefaultBotPrefix + role
 			want, _ := RoleScopes(role)
@@ -147,9 +181,7 @@ func TestEnsureTokenMintsWithTheRoleScopes(t *testing.T) {
 			}
 			path := filepath.Join(tokenDir, "forgejo-"+role+".env")
 			value := f.token(user, DefaultTokenName)
-			if string(files.files[path]) != tokenFileText(user, value) {
-				t.Errorf("token file = %q, want the three lines with the minted value", redactToken(string(files.files[path])))
-			}
+			compareSecretText(t, "token file", string(files.files[path]), tokenFileText(user, value))
 		})
 	}
 }
@@ -164,12 +196,10 @@ func TestEnsureTokenAcceptsTheTokenField(t *testing.T) {
 	files := newMemFiles()
 	var logs []string
 	if err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat"); err != nil {
-		t.Fatalf("EnsureToken: %v", err)
+		t.Fatalf("EnsureToken: %v", masked(errString(err)))
 	}
 	path := filepath.Join(tokenDir, "forgejo-polecat.env")
-	if want := tokenFileText("bot-polecat", f.token("bot-polecat", DefaultTokenName)); string(files.files[path]) != want {
-		t.Errorf("token file = %q, want %q", string(files.files[path]), want)
-	}
+	compareSecretText(t, "token file", string(files.files[path]), tokenFileText("bot-polecat", f.token("bot-polecat", DefaultTokenName)))
 }
 
 // TestEnsureTokenRefusesWhatItCannotStore covers an unknown role and a directory
@@ -182,7 +212,7 @@ func TestEnsureTokenRefusesWhatItCannotStore(t *testing.T) {
 		var logs []string
 		err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("../etc/passwd")
 		if err == nil || !strings.Contains(err.Error(), "unknown role") {
-			t.Errorf("err = %v, want an unknown role error", err)
+			t.Errorf("err = %v, want an unknown role error", masked(errString(err)))
 		}
 		if len(f.callLog()) != 0 {
 			t.Errorf("an unknown role reached the server: %v", f.callLog())
@@ -198,7 +228,7 @@ func TestEnsureTokenRefusesWhatItCannotStore(t *testing.T) {
 		var logs []string
 		err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
 		if err == nil || !strings.Contains(err.Error(), "is a directory") {
-			t.Errorf("err = %v, want a directory error", err)
+			t.Errorf("err = %v, want a directory error", masked(errString(err)))
 		}
 		if len(f.writes()) != before {
 			t.Errorf("a token was minted though nothing could store it: %v", f.writes())
@@ -214,7 +244,7 @@ func TestEnsureTokenRefusesWhatItCannotStore(t *testing.T) {
 		var logs []string
 		err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
 		if err == nil || !errors.Is(err, fs.ErrPermission) {
-			t.Errorf("err = %v, want the permission error", err)
+			t.Errorf("err = %v, want the permission error", masked(errString(err)))
 		}
 		if len(f.writes()) != before {
 			t.Errorf("a token was minted though the file could not be examined: %v", f.writes())
@@ -231,7 +261,7 @@ func TestTokenFileIsMode0600ThroughTheSeam(t *testing.T) {
 	files := newMemFiles()
 	var logs []string
 	if err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat"); err != nil {
-		t.Fatalf("EnsureToken: %v", err)
+		t.Fatalf("EnsureToken: %v", masked(errString(err)))
 	}
 	path := filepath.Join(tokenDir, "forgejo-polecat.env")
 	want := []string{"write " + path + " -rw-------", "chmod " + path + " -rw-------"}
@@ -240,7 +270,10 @@ func TestTokenFileIsMode0600ThroughTheSeam(t *testing.T) {
 	}
 }
 
-// TestTokenFileIsMode0600AndAtomic runs the real filesystem in a temp directory:
+// TestTokenFileIsMode0600AndAtomic runs the real filesystem in a temp directory.
+// The in-memory Files seam cannot show a rename replacing a file (the inode
+// changes) or the mode a real chmod leaves, so this is the one test that touches
+// the disk; it writes only under t.TempDir() and is hermetic. It runs:
 // the file is replaced by a rename with mode 0600, no temp file is left behind,
 // and a write that fails leaves the old file and no partial one.
 func TestTokenFileIsMode0600AndAtomic(t *testing.T) {
@@ -258,7 +291,7 @@ func TestTokenFileIsMode0600AndAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := (osFiles{}).WriteFileAtomic(path, []byte("new"), 0o600); err != nil {
-		t.Fatalf("WriteFileAtomic: %v", err)
+		t.Fatalf("WriteFileAtomic: %v", masked(errString(err)))
 	}
 	after, err := os.Stat(path)
 	if err != nil {
@@ -293,7 +326,7 @@ func TestTokenFileIsMode0600AndAtomic(t *testing.T) {
 	// The mode argument is what the file gets, not a constant inside the writer.
 	odd := filepath.Join(dir, "forgejo-odd.env")
 	if err := (osFiles{}).WriteFileAtomic(odd, []byte("x"), 0o640); err != nil {
-		t.Fatalf("WriteFileAtomic with mode 0640: %v", err)
+		t.Fatalf("WriteFileAtomic with mode 0640: %v", masked(errString(err)))
 	}
 	if info, err := os.Stat(odd); err != nil || info.Mode().Perm() != 0o640 {
 		t.Errorf("a write asked for mode 0640 produced %v %v", info, err)
@@ -301,7 +334,7 @@ func TestTokenFileIsMode0600AndAtomic(t *testing.T) {
 	// A missing directory is created, 0700.
 	nested := filepath.Join(t.TempDir(), "a", "b", "f.env")
 	if err := (osFiles{}).WriteFileAtomic(nested, []byte("x"), 0o600); err != nil {
-		t.Fatalf("WriteFileAtomic into a new directory: %v", err)
+		t.Fatalf("WriteFileAtomic into a new directory: %v", masked(errString(err)))
 	}
 	if info, err := os.Stat(filepath.Dir(nested)); err != nil || info.Mode().Perm() != 0o700 {
 		t.Errorf("new directory = %v %v, want mode 0700", info, err)
@@ -337,10 +370,10 @@ func TestEnsureTokenLeavesAnExistingFile(t *testing.T) {
 	writesBefore := len(f.writes())
 	var logs []string
 	if err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat"); err != nil {
-		t.Fatalf("EnsureToken: %v", err)
+		t.Fatalf("EnsureToken: %v", masked(errString(err)))
 	}
 	if string(files.files[path]) != "kept" {
-		t.Errorf("the existing file changed: %q", files.files[path])
+		t.Errorf("the existing file changed: %q", masked(string(files.files[path])))
 	}
 	if files.modes[path] != 0o600 {
 		t.Errorf("mode = %v, want 0600", files.modes[path])
@@ -352,7 +385,7 @@ func TestEnsureTokenLeavesAnExistingFile(t *testing.T) {
 		t.Errorf("the server was written to: %v", f.writes())
 	}
 	if len(logs) != 1 || logs[0] != "token "+path+" exists; leaving it (--rotate mints a new one)" {
-		t.Errorf("logs = %v", logs)
+		t.Errorf("logs = %v", masked(strings.Join(logs, " | ")))
 	}
 }
 
@@ -366,18 +399,18 @@ func TestRotateRevokesThenMints(t *testing.T) {
 	var logs []string
 	p := tokenProvisioner(f, files, false, false, &logs)
 	if err := p.EnsureToken("polecat"); err != nil {
-		t.Fatalf("first mint: %v", err)
+		t.Fatalf("first mint: %v", masked(errString(err)))
 	}
 	first := f.token("bot-polecat", DefaultTokenName)
 	f.calls = nil
 	p.Rotate = true
 	logs = nil
 	if err := p.EnsureToken("polecat"); err != nil {
-		t.Fatalf("rotate: %v", err)
+		t.Fatalf("rotate: %v", masked(errString(err)))
 	}
 	second := f.token("bot-polecat", DefaultTokenName)
 	if first == second || second == "" {
-		t.Fatalf("rotation kept the token: %q then %q", redactToken(first), redactToken(second))
+		t.Fatalf("rotation kept the token (both %d characters)", len(first))
 	}
 	var order []string
 	for _, c := range f.callLog() {
@@ -398,7 +431,7 @@ func TestRotateRevokesThenMints(t *testing.T) {
 	joined := strings.Join(logs, "\n")
 	for _, line := range []string{"rotating the token in " + path, "revoked the previous 'gt-provision' token"} {
 		if !strings.Contains(joined, line) {
-			t.Errorf("logs lack %q: %v", line, logs)
+			t.Errorf("logs lack %q: %v", line, masked(strings.Join(logs, " | ")))
 		}
 	}
 }
@@ -449,7 +482,7 @@ func TestRotateRevokeFailuresAreWarnings(t *testing.T) {
 		{name: "list fails", tr: func(n http.RoundTripper) http.RoundTripper { return failingRevokeTransport{next: n, listStatus: 500} },
 			want: "warning: cannot list bot-polecat's tokens (HTTP 500)"},
 		{name: "delete fails", tr: func(n http.RoundTripper) http.RoundTripper { return failingRevokeTransport{next: n, delStatus: 500} },
-			seedToken: true, want: "warning: could not revoke the previous 'gt-provision' token (HTTP 500)", wantErr: "unexpected HTTP 422"},
+			seedToken: true, want: "warning: could not revoke the previous 'gt-provision' token (HTTP 500)", wantErr: "STILL LIVE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -461,7 +494,7 @@ func TestRotateRevokeFailuresAreWarnings(t *testing.T) {
 			var logs []string
 			if tc.seedToken {
 				if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
-					t.Fatalf("seed token: %v", err)
+					t.Fatalf("seed token: %v", masked(errString(err)))
 				}
 				logs = nil
 			}
@@ -469,7 +502,7 @@ func TestRotateRevokeFailuresAreWarnings(t *testing.T) {
 			f.calls = nil
 			err := tokenProvisioner(tc.tr(f), files, true, false, &logs).EnsureToken("polecat")
 			if !strings.Contains(strings.Join(logs, "\n"), tc.want) {
-				t.Errorf("logs lack %q: %v", tc.want, logs)
+				t.Errorf("logs lack %q: %v", tc.want, masked(strings.Join(logs, " | ")))
 			}
 			posted := false
 			for _, c := range f.callLog() {
@@ -482,22 +515,22 @@ func TestRotateRevokeFailuresAreWarnings(t *testing.T) {
 			}
 			if tc.wantErr == "" {
 				if err != nil {
-					t.Fatalf("EnsureToken: %v", err)
+					t.Fatalf("EnsureToken: %v", masked(errString(err)))
 				}
 				if string(files.files[path]) == "old" {
 					t.Errorf("the file was not replaced after the warning")
 				}
 			} else {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+					t.Fatalf("err = %v, want %q", masked(errString(err)), tc.wantErr)
 				}
 				if string(files.files[path]) != "old" {
-					t.Errorf("the file changed though the mint failed: %q", files.files[path])
+					t.Errorf("the file changed though the mint failed: %q", masked(string(files.files[path])))
 				}
 			}
 			for _, line := range append(logs, errString(err)) {
 				if strings.Contains(line, fixtureToken) || strings.Contains(line, mintedSecret) {
-					t.Errorf("a log line or error carries a token: %q", redactToken(line))
+					t.Errorf("a log line or error carries a token: %q", masked(line))
 				}
 			}
 		})
@@ -521,11 +554,11 @@ func TestRotateNoTokenNamed(t *testing.T) {
 	files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
 	var logs []string
 	if err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat"); err != nil {
-		t.Fatalf("EnsureToken: %v", err)
+		t.Fatalf("EnsureToken: %v", masked(errString(err)))
 	}
 	want := "no token named 'gt-provision' to revoke; if the file held a token minted under another name, revoke it in the web UI"
 	if !strings.Contains(strings.Join(logs, "\n"), want) {
-		t.Errorf("logs lack %q: %v", want, logs)
+		t.Errorf("logs lack %q: %v", want, masked(strings.Join(logs, " | ")))
 	}
 	for _, c := range f.callLog() {
 		if c.method == http.MethodDelete {
@@ -555,7 +588,7 @@ func TestEnsureTokenDryRun(t *testing.T) {
 			writesBefore := len(f.writes())
 			var logs []string
 			if err := tokenProvisioner(f, files, existing, true, &logs).EnsureToken("polecat"); err != nil {
-				t.Fatalf("EnsureToken: %v", err)
+				t.Fatalf("EnsureToken: %v", masked(errString(err)))
 			}
 			if len(files.ops) != 0 {
 				t.Errorf("a dry run touched the files: %v", files.ops)
@@ -565,7 +598,7 @@ func TestEnsureTokenDryRun(t *testing.T) {
 			}
 			want := "would mint a 'gt-provision' token for bot-polecat and write " + path
 			if !strings.Contains(strings.Join(logs, "\n"), want) {
-				t.Errorf("logs lack %q: %v", want, logs)
+				t.Errorf("logs lack %q: %v", want, masked(strings.Join(logs, " | ")))
 			}
 		})
 	}
@@ -595,7 +628,7 @@ func TestMintFailures(t *testing.T) {
 		var logs []string
 		err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
 		if err == nil || !strings.Contains(err.Error(), "needs site-administrator rights, and a token limit of 'all'") {
-			t.Fatalf("err = %v, want the site-administrator message", err)
+			t.Fatalf("err = %v, want the site-administrator message", masked(errString(err)))
 		}
 		if len(files.ops) != 0 {
 			t.Errorf("a file was written after the refusal: %v", files.ops)
@@ -614,10 +647,10 @@ func TestMintFailures(t *testing.T) {
 			p := tokenProvisioner(noUsableTransport{status: http.StatusCreated, body: tc.body}, files, false, false, &logs)
 			err := p.EnsureToken("polecat")
 			if err == nil || !strings.Contains(err.Error(), "returned no usable token") {
-				t.Fatalf("err = %v, want the no usable token error", err)
+				t.Fatalf("err = %v, want the no usable token error", masked(errString(err)))
 			}
 			if strings.Contains(err.Error(), mintedSecret) || strings.Contains(err.Error(), "abc def") {
-				t.Errorf("the error echoes the reply: %q", err.Error())
+				t.Errorf("the error echoes the reply: %q", masked(err.Error()))
 			}
 			if len(files.ops) != 0 {
 				t.Errorf("a file was written for an unusable token: %v", files.ops)
@@ -631,10 +664,10 @@ func TestMintFailures(t *testing.T) {
 		p := tokenProvisioner(noUsableTransport{status: http.StatusInternalServerError, body: echoReply}, files, false, false, &logs)
 		err := p.EnsureToken("polecat")
 		if err == nil || !strings.Contains(err.Error(), "unexpected HTTP 500") {
-			t.Fatalf("err = %v, want an unexpected HTTP 500 error", err)
+			t.Fatalf("err = %v, want an unexpected HTTP 500 error", masked(errString(err)))
 		}
 		if strings.Contains(err.Error(), fixtureToken) || strings.Contains(err.Error(), mintedSecret) {
-			t.Errorf("the error carries a token: %q", redactToken(err.Error()))
+			t.Errorf("the error carries a token: %q", masked(err.Error()))
 		}
 	})
 	t.Run("write fails", func(t *testing.T) {
@@ -647,7 +680,7 @@ func TestMintFailures(t *testing.T) {
 		err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
 		path := filepath.Join(tokenDir, "forgejo-polecat.env")
 		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "disk full") || !strings.Contains(err.Error(), "--rotate") {
-			t.Fatalf("err = %v, want the path, the cause and the --rotate hint", err)
+			t.Fatalf("err = %v, want the path, the cause and the --rotate hint", masked(errString(err)))
 		}
 		if v := f.token("bot-polecat", DefaultTokenName); v != "" && strings.Contains(err.Error(), v) {
 			t.Errorf("the error carries the minted token")
@@ -692,9 +725,9 @@ func TestNoTokenInOutput(t *testing.T) {
 		surfaces = append(surfaces, v.method+" "+v.path)
 	}
 	for _, line := range surfaces {
-		for _, s := range secrets {
+		for i, s := range secrets {
 			if strings.Contains(line, s) {
-				t.Errorf("a token appears in %q", strings.ReplaceAll(line, s, redacted))
+				t.Errorf("secret %d (0 admin, 1 first minted, 2 second minted) appears in %q", i, masked(line))
 			}
 		}
 	}
@@ -766,7 +799,7 @@ func TestTokenFileWriteFailureLeavesNoTempFile(t *testing.T) {
 			}
 			err := o.WriteFileAtomic("/d/forgejo-polecat.env", []byte("x"), 0o600)
 			if !errors.Is(err, boom) {
-				t.Fatalf("err = %v, want the injected failure", err)
+				t.Fatalf("err = %v, want the injected failure", masked(errString(err)))
 			}
 			if tc.wantRemove != (len(removed) == 1) {
 				t.Errorf("removed = %v, want the temp file removed: %v", removed, tc.wantRemove)
@@ -801,7 +834,7 @@ func TestEnsureTokenChmodFailures(t *testing.T) {
 		var logs []string
 		err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat")
 		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "mode 600") {
-			t.Fatalf("err = %v, want an error naming %s and mode 600", err, path)
+			t.Fatalf("err = %v, want an error naming %s and mode 600", masked(errString(err)), path)
 		}
 		if len(f.writes()) != before {
 			t.Errorf("a token was minted though the file could not be secured: %v", f.writes())
@@ -816,7 +849,7 @@ func TestEnsureTokenChmodFailures(t *testing.T) {
 		var logs []string
 		err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
 		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "IS stored") || !strings.Contains(err.Error(), "not lost") {
-			t.Fatalf("err = %v, want an error saying the token IS stored in %s", err, path)
+			t.Fatalf("err = %v, want an error saying the token IS stored in %s", masked(errString(err)), path)
 		}
 		if _, ok := files.files[path]; !ok {
 			t.Errorf("the token file is not there though the error says it is stored")
@@ -855,14 +888,14 @@ func TestEnsureTokenTransportFailures(t *testing.T) {
 			// A first mint makes the rotation list, delete and mint all happen.
 			if method != http.MethodPost {
 				if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
-					t.Fatalf("seed token: %v", err)
+					t.Fatalf("seed token: %v", masked(errString(err)))
 				}
 			}
 			files := newMemFiles()
 			files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
 			err := tokenProvisioner(methodFailsTransport{next: f, method: method}, files, true, false, &logs).EnsureToken("polecat")
 			if err == nil || !strings.Contains(err.Error(), "request failed") {
-				t.Fatalf("err = %v, want a request failed error", err)
+				t.Fatalf("err = %v, want a request failed error", masked(errString(err)))
 			}
 			if string(files.files[filepath.Join(tokenDir, "forgejo-polecat.env")]) != "old" {
 				t.Errorf("the file changed though the %s failed", method)
@@ -897,10 +930,10 @@ func TestMintAndRevokeRepliesAreScrubbed(t *testing.T) {
 			check := func(t *testing.T, where, text string) {
 				t.Helper()
 				if strings.Contains(text, fixtureToken) {
-					t.Errorf("%s carries the admin token: %q", where, redactToken(text))
+					t.Errorf("%s carries the admin token: %q", where, masked(text))
 				}
 				if !strings.Contains(text, redacted) {
-					t.Errorf("%s lacks the masked marker, so the reply was not quoted through the scrubber: %q", where, text)
+					t.Errorf("%s lacks the masked marker, so the reply was not quoted through the scrubber: %q", where, masked(text))
 				}
 			}
 			for _, status := range []int{http.StatusForbidden, http.StatusInternalServerError} {
@@ -924,7 +957,7 @@ func TestMintAndRevokeRepliesAreScrubbed(t *testing.T) {
 				var logs []string
 				if name == "delete" {
 					if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
-						t.Fatalf("seed token: %v", err)
+						t.Fatalf("seed token: %v", masked(errString(err)))
 					}
 					logs = nil
 				}
@@ -938,7 +971,7 @@ func TestMintAndRevokeRepliesAreScrubbed(t *testing.T) {
 					}
 				}
 				if warning == "" {
-					t.Fatalf("%s: no warning was logged: %v", name, logs)
+					t.Fatalf("%s: no warning was logged: %v", name, masked(strings.Join(logs, " | ")))
 				}
 				check(t, name+" warning", warning)
 			}
@@ -958,13 +991,13 @@ func TestRotateMintFailureSaysTheOldTokenIsRevoked(t *testing.T) {
 		withBot(t, f, "polecat")
 		var logs []string
 		if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
-			t.Fatalf("seed token: %v", err)
+			t.Fatalf("seed token: %v", masked(errString(err)))
 		}
 		files := newMemFiles()
 		files.seed(path, "old", 0o600)
 		err := tokenProvisioner(methodFailsTransport{next: f, method: http.MethodPost}, files, true, false, &logs).EnsureToken("polecat")
 		if err == nil || !strings.Contains(err.Error(), "already revoked") || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "run again with --rotate") {
-			t.Fatalf("err = %v, want the revoked-token explanation naming %s", err, path)
+			t.Fatalf("err = %v, want the revoked-token explanation naming %s", masked(errString(err)), path)
 		}
 		if string(files.files[path]) != "old" {
 			t.Errorf("the file changed though the mint failed")
@@ -982,7 +1015,72 @@ func TestRotateMintFailureSaysTheOldTokenIsRevoked(t *testing.T) {
 			t.Fatal("no error")
 		}
 		if strings.Contains(err.Error(), "already revoked") {
-			t.Errorf("the error claims a revoke that did not happen: %v", err)
+			t.Errorf("the error claims a revoke that did not happen: %v", masked(errString(err)))
 		}
 	})
+}
+
+// TestEnsureTokenLostFileDuplicate checks the refusal of a duplicate token name
+// when the token file is gone: the value came back once and is lost, so the
+// error says the file is missing and to rerun with --rotate.
+func TestEnsureTokenLostFileDuplicate(t *testing.T) {
+	t.Parallel()
+	f := newFakeForgejo()
+	withBot(t, f, "polecat")
+	var logs []string
+	if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
+		t.Fatalf("first mint: %v", masked(errString(err)))
+	}
+	files := newMemFiles() // the file is gone
+	err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	for _, want := range []string{"already exists on the server", path + " is missing", "its value is lost", "run again with --rotate"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to contain %q", masked(errString(err)), want)
+		}
+	}
+	if len(files.ops) != 0 {
+		t.Errorf("a file was written for a refused mint: %v", files.ops)
+	}
+}
+
+// recorder collects the failure messages compareSecretText would print.
+type recorder struct{ msgs []string }
+
+func (r *recorder) Helper() {}
+func (r *recorder) Errorf(format string, args ...any) {
+	r.msgs = append(r.msgs, fmt.Sprintf(format, args...))
+}
+
+// TestFailureMessagesNeverPrintATokenValue drives the comparison helper with texts
+// that differ in and around a token, and checks what it would print never
+// holds the admin token or a minted value.
+func TestFailureMessagesNeverPrintATokenValue(t *testing.T) {
+	t.Parallel()
+	minted := fmt.Sprintf("%040x", 41)
+	cases := []struct{ name, got, want string }{
+		{"same shape, different secret", "FORGEJO_TOKEN=" + minted + "\n", "FORGEJO_TOKEN=" + fmt.Sprintf("%040x", 42) + "\n"},
+		{"different text around a secret", "user=a\nFORGEJO_TOKEN=" + minted + "\n", "user=b\nFORGEJO_TOKEN=" + minted + "\n"},
+		{"the admin token in the text", "token " + fixtureToken, "token " + minted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var r recorder
+			compareSecretText(&r, "token file", tc.got, tc.want)
+			if len(r.msgs) != 1 {
+				t.Fatalf("messages = %d, want exactly one", len(r.msgs))
+			}
+			for _, secret := range []string{minted, fmt.Sprintf("%040x", 42), fixtureToken} {
+				if strings.Contains(r.msgs[0], secret) {
+					t.Errorf("the failure message carries a token value: %q", masked(r.msgs[0]))
+				}
+			}
+		})
+	}
+	var r recorder
+	compareSecretText(&r, "equal", "x"+minted, "x"+minted)
+	if len(r.msgs) != 0 {
+		t.Errorf("equal texts failed: %v", r.msgs)
+	}
 }
