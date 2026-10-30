@@ -24,5 +24,14 @@ func lockBackupDir(dir string) (func(), error) {
 		}
 		return nil, fmt.Errorf("lock %s: %w", dir, err)
 	}
-	return func() { _ = f.Close() }, nil
+	return func() {
+		// flock belongs to the open file description, not to this descriptor:
+		// a child another goroutine forked while the lock was held keeps a
+		// copy of the description, and the lock, alive until it execs.
+		// Closing alone would leave the lock held after this release;
+		// LOCK_UN drops it for every holder of the description (gt-ubj9e,
+		// the same class as gt-0ph7q).
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
