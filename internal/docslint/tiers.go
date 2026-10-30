@@ -4,6 +4,7 @@
 package docslint
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -14,13 +15,16 @@ import (
 )
 
 // FS is the checkout as the tiers see it. Every path is repo-relative and
-// slash-separated, never prefixed "./".
+// slash-separated, never prefixed "./". Exists reports a regular file, so a
+// directory path is not a file the tiers list.
 //
-// WalkFiles reports the files under dir in no particular order; a dir that does
-// not exist is an empty list rather than an error, because a docs-only tree is
-// a legitimate checkout and an empty glob is an empty tier (gt-et39).
+// WalkFiles reports the files under dir in no particular order. A dir that
+// does not exist is an empty list rather than an error, because a docs-only
+// tree is a legitimate checkout and an empty glob is an empty tier (gt-et39).
+// A dir it cannot read is an error, never a shorter list: a tier that dropped
+// an unreadable subtree would report a clean tree it did not check.
 type FS interface {
-	WalkFiles(dir string) []string
+	WalkFiles(dir string) ([]string, error)
 	ReadFile(path string) ([]byte, error)
 	Exists(path string) bool
 }
@@ -58,7 +62,7 @@ var ceilingExempt = map[string]string{
 
 // AgentFacing is the tier the writing rules are addressed to: every instruction
 // an agent is handed at startup or on a step.
-func AgentFacing(fsys FS) []string {
+func AgentFacing(fsys FS) ([]string, error) {
 	out := make([]string, 0, len(agentFacingPaths)+4)
 	for _, p := range agentFacingPaths {
 		if fsys.Exists(p) {
@@ -66,21 +70,29 @@ func AgentFacing(fsys FS) []string {
 		}
 	}
 	for _, g := range agentFacingGlobs {
-		out = append(out, matching(fsys, g.dir, g.pattern)...)
+		matched, err := matching(fsys, g.dir, g.pattern)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, matched...)
 	}
-	return sortedUnique(out)
+	return sortedUnique(out), nil
 }
 
 // CeilingTier is AgentFacing less the exempt formulas: the files the word
 // ceiling is measured over.
-func CeilingTier(fsys FS) []string {
+func CeilingTier(fsys FS) ([]string, error) {
+	agentFacing, err := AgentFacing(fsys)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
-	for _, p := range AgentFacing(fsys) {
+	for _, p := range agentFacing {
 		if _, exempt := ceilingExempt[p]; !exempt {
 			out = append(out, p)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // IsHistorical reports whether p records past work rather than instructing a
@@ -96,7 +108,9 @@ func IsHistorical(fsys FS, p string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		return found && strings.HasPrefix(line, "> Status:"), nil
+		// An indented header is the same declaration, so the leading space of
+		// a nested quote does not move the file into the reference tier.
+		return found && strings.HasPrefix(strings.TrimLeft(line, " \t"), "> Status:"), nil
 	}
 	return false, nil
 }
@@ -106,7 +120,11 @@ func IsHistorical(fsys FS, p string) (bool, error) {
 func Historical(fsys FS) ([]string, error) {
 	var out []string
 	for _, dir := range []string{"docs/plans", "docs/research", "docs/design"} {
-		for _, p := range fsys.WalkFiles(dir) {
+		files, err := fsys.WalkFiles(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range files {
 			if !strings.HasSuffix(p, ".md") {
 				continue
 			}
@@ -130,7 +148,11 @@ func Reference(fsys FS) ([]string, error) {
 	if fsys.Exists("README.md") {
 		out = append(out, "README.md")
 	}
-	for _, p := range fsys.WalkFiles("docs") {
+	files, err := fsys.WalkFiles("docs")
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range files {
 		if !strings.HasSuffix(p, ".md") || p == "docs/HOOKS.md" {
 			continue
 		}
@@ -147,16 +169,20 @@ func Reference(fsys FS) ([]string, error) {
 
 // Go is the go tier: the non-test .go files under cmd and internal. A missing
 // directory is an empty tier, so a docs-only tree still lists.
-func Go(fsys FS) []string {
+func Go(fsys FS) ([]string, error) {
 	var out []string
 	for _, dir := range []string{"cmd", "internal"} {
-		for _, p := range fsys.WalkFiles(dir) {
+		files, err := fsys.WalkFiles(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range files {
 			if strings.HasSuffix(p, ".go") && !strings.HasSuffix(p, "_test.go") {
 				out = append(out, p)
 			}
 		}
 	}
-	return sortedUnique(out)
+	return sortedUnique(out), nil
 }
 
 // List is the tier `--list` prints. An unknown name is refused rather than read
@@ -164,13 +190,13 @@ func Go(fsys FS) []string {
 func List(fsys FS, tier string) ([]string, error) {
 	switch tier {
 	case TierAgentFacing:
-		return AgentFacing(fsys), nil
+		return AgentFacing(fsys)
 	case TierReference:
 		return Reference(fsys)
 	case TierHistorical:
 		return Historical(fsys)
 	case TierGo:
-		return Go(fsys), nil
+		return Go(fsys)
 	}
 	return nil, fmt.Errorf("docs-lint: unknown tier '%s'", tier)
 }
@@ -195,16 +221,20 @@ func firstNonBlankLine(fsys FS, p string) (string, bool, error) {
 
 // matching returns the files under dir that pattern matches. A pattern matching
 // nothing contributes nothing: the tiers are allowed to be empty (gt-et39).
-func matching(fsys FS, dir, pattern string) []string {
+func matching(fsys FS, dir, pattern string) ([]string, error) {
+	files, err := fsys.WalkFiles(dir)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
-	for _, p := range fsys.WalkFiles(dir) {
+	for _, p := range files {
 		// The pattern is a constant in this file, so the only error path is a
 		// malformed one, which cannot arise.
 		if ok, _ := path.Match(pattern, p); ok {
 			out = append(out, p)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // sortedUnique orders paths bytewise, which is the order the shell tiers print
@@ -226,10 +256,10 @@ type OSFiles struct {
 	Root string
 }
 
-// Exists reports whether p is present under Root.
+// Exists reports whether p is a regular file under Root.
 func (o OSFiles) Exists(p string) bool {
-	_, err := os.Stat(o.abspath(p))
-	return err == nil
+	info, err := os.Stat(o.abspath(p))
+	return err == nil && info.Mode().IsRegular()
 }
 
 // ReadFile reads p under Root.
@@ -237,30 +267,37 @@ func (o OSFiles) ReadFile(p string) ([]byte, error) {
 	return os.ReadFile(o.abspath(p))
 }
 
-// WalkFiles reports the files under dir. A dir that does not exist is empty,
-// which is the docs-only tree's answer for the go tier (gt-et39). A subtree the
-// process cannot read is skipped rather than stopping the walk, matching the
-// script's `find ... 2>/dev/null`.
-func (o OSFiles) WalkFiles(dir string) []string {
+// WalkFiles reports the files under dir, or an empty list when dir does not
+// exist, which is a docs-only tree's answer for the go tier (gt-et39). Any
+// other walk failure is returned: the script's `find ... 2>/dev/null` dropped
+// an unreadable subtree silently, and a gate cannot.
+func (o OSFiles) WalkFiles(dir string) ([]string, error) {
+	root := o.abspath(dir)
+	if _, err := os.Stat(root); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("docs-lint: walking %s: %w", dir, err)
+	}
 	var out []string
-	_ = filepath.WalkDir(o.abspath(dir), func(p string, entry fs.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(p string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			if entry != nil && entry.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
+			return err
 		}
 		if entry.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(o.Root, p)
 		if err != nil {
-			return nil
+			return err
 		}
 		out = append(out, filepath.ToSlash(rel))
 		return nil
 	})
-	return out
+	if err != nil {
+		return nil, fmt.Errorf("docs-lint: walking %s: %w", dir, err)
+	}
+	return out, nil
 }
 
 func (o OSFiles) abspath(p string) string {

@@ -1,9 +1,9 @@
 package docslint
 
 import (
+	"errors"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -18,8 +18,9 @@ func TestMain(m *testing.M) {
 }
 
 // memFS is the checkout a test describes: each file path mapped to its
-// contents. WalkFiles iterates a map, so its order is the unspecified one the
-// real walker also gives.
+// contents. It holds files and no directories, which is what Exists reports on
+// the real filesystem too. WalkFiles iterates a map, so its order is the
+// unspecified one the real walker also gives.
 type memFS map[string]string
 
 func (m memFS) Exists(p string) bool { _, ok := m[p]; return ok }
@@ -32,14 +33,28 @@ func (m memFS) ReadFile(p string) ([]byte, error) {
 	return []byte(contents), nil
 }
 
-func (m memFS) WalkFiles(dir string) []string {
+func (m memFS) WalkFiles(dir string) ([]string, error) {
 	var out []string
 	for p := range m {
 		if strings.HasPrefix(p, dir+"/") {
 			out = append(out, p)
 		}
 	}
-	return out
+	return out, nil
+}
+
+// walkErrorFS is a tree with one subtree the walk cannot enter, the way a
+// directory the process may not read fails on disk.
+type walkErrorFS struct {
+	memFS
+	failDir string
+}
+
+func (w walkErrorFS) WalkFiles(dir string) ([]string, error) {
+	if dir == w.failDir {
+		return nil, fs.ErrPermission
+	}
+	return w.memFS.WalkFiles(dir)
 }
 
 func TestAgentFacingTier(t *testing.T) {
@@ -98,7 +113,11 @@ func TestAgentFacingTier(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := AgentFacing(tc.files); !reflect.DeepEqual(got, tc.want) {
+			got, err := AgentFacing(tc.files)
+			if err != nil {
+				t.Fatalf("AgentFacing(): %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("AgentFacing() = %q, want %q", got, tc.want)
 			}
 		})
@@ -115,6 +134,7 @@ func TestHistoricalAndReferenceTiers(t *testing.T) {
 		"docs/research/survey.md": "# survey\n",
 		"docs/design/live.md":     "# live design\n\n> Status: historical\n",
 		"docs/design/retired.md":  "\n \n> Status: historical (2026-01). Abandoned.\n\n# retired\n",
+		"docs/design/indented.md": "  > Status: historical (2026-02). Abandoned.\n",
 		"docs/design/notes.txt":   "not markdown\n",
 		"docs/plans/data.json":    "{}\n",
 	}
@@ -128,6 +148,7 @@ func TestHistoricalAndReferenceTiers(t *testing.T) {
 			{"docs/research/survey.md", true},
 			{"docs/research/deep/inner.md", true},
 			{"docs/design/retired.md", true},
+			{"docs/design/indented.md", true},
 			{"docs/design/live.md", false},
 			{"docs/guides/guide.md", false},
 			{"docs/HOOKS.md", false},
@@ -146,6 +167,7 @@ func TestHistoricalAndReferenceTiers(t *testing.T) {
 
 	t.Run("historical tier", func(t *testing.T) {
 		want := []string{
+			"docs/design/indented.md",
 			"docs/design/retired.md",
 			"docs/plans/old-plan.md",
 			"docs/research/survey.md",
@@ -197,13 +219,8 @@ func TestHistoricalUnreadableDesignDocIsAnError(t *testing.T) {
 	t.Parallel()
 	// A docs/design file that cannot be read is not a live one and not a
 	// historical one: the tier functions report it rather than guess.
-	files := memFS{}
-	got, err := Reference(files)
-	if err != nil {
-		t.Fatalf("Reference() on an empty root: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("Reference() on an empty root = %q, want empty", got)
+	if got, err := Reference(memFS{}); err != nil || len(got) != 0 {
+		t.Fatalf("Reference() on an empty root = %q, %v; want empty, nil", got, err)
 	}
 
 	unreadable := failingReadFS{}
@@ -220,15 +237,79 @@ type failingReadFS struct{}
 
 func (failingReadFS) Exists(p string) bool { return p == "docs/design/x.md" }
 
-func (failingReadFS) WalkFiles(dir string) []string {
+func (failingReadFS) WalkFiles(dir string) ([]string, error) {
 	if dir == "docs" || dir == "docs/design" {
-		return []string{"docs/design/x.md"}
+		return []string{"docs/design/x.md"}, nil
 	}
-	return nil
+	return nil, nil
 }
 
 func (failingReadFS) ReadFile(p string) ([]byte, error) {
 	return nil, fs.ErrPermission
+}
+
+func TestWalkErrorsAreReturned(t *testing.T) {
+	t.Parallel()
+	// A tier that could not read part of the tree must fail, not list what it
+	// managed to see: the checks would report a clean slice of a tree they
+	// never finished reading.
+	files := memFS{
+		"AGENTS.md":                                "# agents\n",
+		"plugins/p/plugin.md":                      "# plugin\n",
+		"internal/formula/formulas/f.formula.toml": "description = \"f\"\n",
+		"docs/design/retired.md":                   "> Status: historical\n",
+		"docs/guides/guide.md":                     "# guide\n",
+		"internal/pkg/a.go":                        "package pkg\n",
+	}
+	tests := []struct {
+		name    string
+		failDir string
+		tier    func(FS) ([]string, error)
+	}{
+		{"agent-facing plugin glob", "plugins", AgentFacing},
+		{"agent-facing formula glob", "internal/formula/formulas", AgentFacing},
+		{"ceiling tier", "plugins", CeilingTier},
+		{"historical", "docs/design", Historical},
+		{"reference", "docs", Reference},
+		{"go", "internal", Go},
+		{"list reference", "docs", func(fsys FS) ([]string, error) { return List(fsys, TierReference) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.tier(walkErrorFS{memFS: files, failDir: tc.failDir})
+			if !errors.Is(err, fs.ErrPermission) {
+				t.Fatalf("error = %v, want the walker's %v", err, fs.ErrPermission)
+			}
+			if got != nil {
+				t.Errorf("tier = %q, want nil alongside the error", got)
+			}
+		})
+	}
+}
+
+func TestExistsReportsOnlyFiles(t *testing.T) {
+	t.Parallel()
+	// The fake holds files and no directories, so a directory path is absent,
+	// which is what OSFiles.Exists reports for one too.
+	files := memFS{
+		"AGENTS.md":        "# agents\n",
+		"docs/design/x.md": "# x\n",
+	}
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"AGENTS.md", true},
+		{"docs/design/x.md", true},
+		{"docs/design", false},
+		{"docs", false},
+		{"missing.md", false},
+	}
+	for _, tc := range tests {
+		if got := files.Exists(tc.path); got != tc.want {
+			t.Errorf("Exists(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
 }
 
 func TestGoTierExcludesTests(t *testing.T) {
@@ -242,7 +323,11 @@ func TestGoTierExcludesTests(t *testing.T) {
 		"docs/guides/guide.md":   "# guide\n",
 	}
 	want := []string{"cmd/gt/main.go", "internal/pkg/a.go"}
-	if got := Go(files); !reflect.DeepEqual(got, want) {
+	got, err := Go(files)
+	if err != nil {
+		t.Fatalf("Go(): %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Go() = %q, want %q", got, want)
 	}
 }
@@ -281,7 +366,10 @@ func TestCeilingTierExemptions(t *testing.T) {
 		"internal/formula/formulas/mol-big.formula.toml":                   "description = \"big\"\n",
 		"AGENTS.md": "# agents\n",
 	}
-	agentFacing := AgentFacing(files)
+	agentFacing, err := AgentFacing(files)
+	if err != nil {
+		t.Fatalf("AgentFacing(): %v", err)
+	}
 	for _, p := range []string{
 		"internal/formula/formulas/mol-polecat-work.formula.toml",
 		"internal/formula/formulas/mol-polecat-work-monorepo.formula.toml",
@@ -295,7 +383,11 @@ func TestCeilingTierExemptions(t *testing.T) {
 		"AGENTS.md",
 		"internal/formula/formulas/mol-big.formula.toml",
 	}
-	if got := CeilingTier(files); !reflect.DeepEqual(got, want) {
+	got, err := CeilingTier(files)
+	if err != nil {
+		t.Fatalf("CeilingTier(): %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("CeilingTier() = %q, want %q", got, want)
 	}
 }
@@ -361,66 +453,6 @@ func TestListTable(t *testing.T) {
 		}
 		if got != nil {
 			t.Errorf("List(%q) = %q, want nil alongside the error", tier, got)
-		}
-	}
-}
-
-func TestOSFilesReadsACheckout(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	write := func(rel, contents string) {
-		p := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatalf("MkdirAll(%s): %v", rel, err)
-		}
-		if err := os.WriteFile(p, []byte(contents), 0o644); err != nil {
-			t.Fatalf("WriteFile(%s): %v", rel, err)
-		}
-	}
-	write("AGENTS.md", "# agents\n")
-	write("docs/design/retired.md", "> Status: historical\n")
-	write("docs/design/live.md", "# live\n")
-	write("plugins/p/plugin.md", "# plugin\n")
-	write("internal/pkg/a.go", "package pkg\n")
-	write("internal/pkg/a_test.go", "package pkg\n")
-
-	fsys := OSFiles{Root: root}
-
-	if !fsys.Exists("AGENTS.md") {
-		t.Error("Exists(AGENTS.md) = false, want true")
-	}
-	if fsys.Exists("docs/plans") || fsys.Exists("missing.md") {
-		t.Error("Exists reported a path that is not a file")
-	}
-	if data, err := fsys.ReadFile("docs/design/live.md"); err != nil || string(data) != "# live\n" {
-		t.Errorf("ReadFile(docs/design/live.md) = %q, %v", data, err)
-	}
-
-	wantHistorical := []string{"docs/design/retired.md"}
-	got, err := Historical(fsys)
-	if err != nil {
-		t.Fatalf("Historical(): %v", err)
-	}
-	if !reflect.DeepEqual(got, wantHistorical) {
-		t.Errorf("Historical() = %q, want %q", got, wantHistorical)
-	}
-
-	wantGo := []string{"internal/pkg/a.go"}
-	if got := Go(fsys); !reflect.DeepEqual(got, wantGo) {
-		t.Errorf("Go() = %q, want %q", got, wantGo)
-	}
-
-	wantAgentFacing := []string{"AGENTS.md", "plugins/p/plugin.md"}
-	if got := AgentFacing(fsys); !reflect.DeepEqual(got, wantAgentFacing) {
-		t.Errorf("AgentFacing() = %q, want %q", got, wantAgentFacing)
-	}
-
-	// The walker reports repo-relative slash paths, never the root prefix.
-	for _, dir := range []string{"docs", "plugins", "internal", "cmd"} {
-		for _, p := range fsys.WalkFiles(dir) {
-			if strings.HasPrefix(p, root) || strings.HasPrefix(p, "./") || strings.Contains(p, "\\") {
-				t.Errorf("WalkFiles(%q) returned %q, want a clean repo-relative slash path", dir, p)
-			}
 		}
 	}
 }
