@@ -304,7 +304,7 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue Atten
 	}
 
 	sort.SliceStable(at.Rows, func(i, j int) bool { return attentionBefore(at.Rows[i], at.Rows[j]) })
-	orderRiskPathRows(at.Rows, risks.Risks)
+	orderRiskPathRows(at.Rows)
 	at.NeedsYou = AttentionGroup{Rows: []AttentionRow{}}
 	at.Pipeline = AttentionGroup{Rows: []AttentionRow{}}
 	for _, r := range at.Rows {
@@ -378,7 +378,7 @@ func attentionBefore(a, b AttentionRow) bool {
 }
 
 // orderRiskPathRows reorders the risk-path rows among the places the panel's
-// order gave them, by the landing battery's risk answer, highest first.
+// order gave them, by the landing risk drawn on each, highest first.
 //
 // The risk ranks the rows against each other inside their group of one owner,
 // kind and alert level; the panel's own order still says where those places
@@ -386,7 +386,7 @@ func attentionBefore(a, b AttentionRow) bool {
 // row the battery has not answered sorts after the answered ones in its group
 // and keeps the panel's order among them, and every row stays on the list: the
 // risk ranks the reviews and hides none of them (gt-n8tmf).
-func orderRiskPathRows(rows []AttentionRow, risks attention.LandingRisks) {
+func orderRiskPathRows(rows []AttentionRow) {
 	type group struct {
 		owner   string
 		kind    string
@@ -406,12 +406,11 @@ func orderRiskPathRows(rows []AttentionRow, risks attention.LandingRisks) {
 			risky[k] = rows[i]
 		}
 		sort.SliceStable(risky, func(i, j int) bool {
-			a, aScored := risks[risky[i].ID]
-			b, bScored := risks[risky[j].ID]
-			if aScored != bScored {
-				return aScored
+			a, b := risky[i].LandingRisk, risky[j].LandingRisk
+			if (a != nil) != (b != nil) {
+				return a != nil
 			}
-			return aScored && a > b
+			return a != nil && *a > *b
 		})
 		for k, i := range idx {
 			rows[i] = risky[k]
