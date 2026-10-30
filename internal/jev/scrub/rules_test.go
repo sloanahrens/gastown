@@ -179,6 +179,21 @@ func ruleCases() []ruleCase {
 			want: "prompt_tokens: 800",
 		},
 		{
+			name: "api key len is a credential", rule: RuleAssignment,
+			in:   "api_key_len=abcd1234efgh",
+			want: "api_key_len=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "secret count is a credential", rule: RuleAssignment,
+			in:   "secret_count=abcd1234efgh",
+			want: "secret_count=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "key count is a credential", rule: RuleAssignment,
+			in:   "key_count: 12",
+			want: "key_count: [REDACTED:assignment]", count: 1,
+		},
+		{
 			name: "bare key is a credential", rule: RuleAssignment,
 			in:   "key=cache-key-1",
 			want: "key=[REDACTED:assignment]", count: 1,
