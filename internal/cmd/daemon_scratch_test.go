@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/templates"
 )
@@ -68,6 +69,10 @@ func newDaemonScratchRig(t *testing.T) *daemonScratchRig {
 		out:     r.out,
 		stat:    os.Stat,
 		lstat:   os.Lstat,
+
+		readFile:     os.ReadFile,
+		readPatrol:   daemon.ReadPatrolConfig,
+		evalSymlinks: filepath.EvalSymlinks,
 	}
 	return r
 }
@@ -81,9 +86,10 @@ func (r *daemonScratchRig) spec() templates.ComposeSpec {
 	}
 }
 
+// composeExists reports whether the compose file is a regular file on disk.
 func (r *daemonScratchRig) composeExists() bool {
-	_, err := os.Stat(r.flags.composeFile)
-	return err == nil
+	info, err := os.Stat(r.flags.composeFile)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // render prints exactly what the scratch render makes for the spec the flags
@@ -156,6 +162,9 @@ func TestDaemonScratchUpReportsAFailedStart(t *testing.T) {
 	if err := runDaemonScratch(context.Background(), "up", r.flags, r.deps); err == nil || !strings.Contains(err.Error(), "docker: boom") {
 		t.Fatalf("up = %v, want the start's error", err)
 	}
+	if !r.composeExists() {
+		t.Error("the compose file was not left written after the failed start")
+	}
 }
 
 // down runs the compose down -v of the scratch project and nothing else, in the
@@ -225,9 +234,10 @@ func TestDaemonScratchRefusesBeforeAnyFileOrCommand(t *testing.T) {
 			}
 			r.flags.liveRoot = dir
 		}, "is not a town"},
-		{"--root equal to the live town", func(_ *testing.T, r *daemonScratchRig) {
+		{"--root equal to the live town", func(t *testing.T, r *daemonScratchRig) {
+			t.Helper()
 			if err := os.WriteFile(filepath.Join(r.flags.liveRoot, config.ScratchTownMarker), nil, 0o600); err != nil {
-				panic(err)
+				t.Fatalf("writing the marker: %v", err)
 			}
 			r.flags.root = r.flags.liveRoot
 		}, "live town root"},
@@ -242,17 +252,19 @@ func TestDaemonScratchRefusesBeforeAnyFileOrCommand(t *testing.T) {
 			r.flags.root = under
 		}, "or lies under it"},
 		{"--root around the live town", func(t *testing.T, r *daemonScratchRig) {
+			t.Helper()
 			outer := filepath.Dir(r.flags.liveRoot)
 			if err := os.WriteFile(filepath.Join(outer, config.ScratchTownMarker), nil, 0o600); err != nil {
-				t.Fatal(err)
+				t.Fatalf("writing the marker: %v", err)
 			}
 			r.flags.root = outer
 			r.flags.composeFile = filepath.Join(t.TempDir(), "compose.yml")
 		}, "contains the live town root"},
 		{"--root that does not exist", func(t *testing.T, r *daemonScratchRig) { r.flags.root = filepath.Join(t.TempDir(), "absent") }, "not an existing directory"},
-		{"--root with no marker", func(_ *testing.T, r *daemonScratchRig) {
+		{"--root with no marker", func(t *testing.T, r *daemonScratchRig) {
+			t.Helper()
 			if err := os.Remove(filepath.Join(r.flags.root, config.ScratchTownMarker)); err != nil {
-				panic(err)
+				t.Fatalf("removing the marker: %v", err)
 			}
 		}, "holds no .gt-scratch-town marker"},
 	} {
@@ -285,6 +297,7 @@ func TestDaemonScratchDownRefusals(t *testing.T) {
 		edit func(r *daemonScratchRig)
 		want string
 	}{
+		{"no --live-root", func(r *daemonScratchRig) { r.flags.liveRoot = "" }, "--live-root is required"},
 		{"no compose file on disk", func(*daemonScratchRig) {}, "is not a file"},
 		{"a relative compose file", func(r *daemonScratchRig) { r.flags.composeFile = "compose.yml" }, "is not absolute"},
 		{"the live project", func(r *daemonScratchRig) { r.flags.project = config.DefaultComposeProject }, "live compose project"},
@@ -397,5 +410,201 @@ func TestDaemonScratchRenderRefuses(t *testing.T) {
 				t.Errorf("a refused render printed %d bytes, ran %d commands, wrote a file: %v", r.out.Len(), len(r.runs), r.composeExists())
 			}
 		})
+	}
+}
+
+// scratchLiveSettings writes one live-town settings state for a name check: what
+// the live town's daemon settings or settings file hold.
+type scratchLiveSettings struct {
+	name  string
+	write func(t *testing.T, live string)
+	want  string // "" means the scratch names pass
+}
+
+func writeLiveFile(t *testing.T, live, rel, body string) {
+	t.Helper()
+	p := filepath.Join(live, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatalf("mkdir for %s: %v", rel, err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", rel, err)
+	}
+}
+
+func liveDirInstead(t *testing.T, live, rel string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(live, rel), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rel, err)
+	}
+}
+
+// render, up and down all refuse a scratch project or container that equals the
+// name the live town's own settings give it, and fail closed on settings that
+// cannot be read or parsed: down removes volumes, so "no override found" is never
+// the answer to an error. A missing settings file means the compiled-in defaults
+// only. The production readers run over the temp live town.
+func TestDaemonScratchRefusesTheLiveTownsConfiguredNames(t *testing.T) {
+	t.Parallel()
+	cases := []scratchLiveSettings{
+		{"no settings at all", func(*testing.T, string) {}, ""},
+		{"settings that name other things", func(t *testing.T, live string) {
+			writeLiveFile(t, live, "mayor/daemon.json", `{"type":"daemon-patrol-config","version":1,"container_name":"live-daemon-9","compose_project":"live-9"}`)
+		}, ""},
+		{"a settings file with no daemon section", func(t *testing.T, live string) {
+			writeLiveFile(t, live, "settings/config.json", `{"unrelated": 1}`)
+		}, ""},
+		{"the project is a configured override", func(t *testing.T, live string) {
+			writeLiveFile(t, live, "mayor/daemon.json", `{"type":"daemon-patrol-config","version":1,"container_name":"live-daemon-9","compose_project":"gt-scratch"}`)
+		}, "is the live town's compose project"},
+		{"the container is a configured override", func(t *testing.T, live string) {
+			writeLiveFile(t, live, "mayor/daemon.json", `{"type":"daemon-patrol-config","version":1,"container_name":"gt-scratch-daemon-1","compose_project":"live-9"}`)
+		}, "is the live town's container name"},
+		{"the settings file does not parse", func(t *testing.T, live string) {
+			writeLiveFile(t, live, "settings/config.json", `{not json`)
+		}, "do not parse"},
+		{"the settings file cannot be read", func(t *testing.T, live string) {
+			liveDirInstead(t, live, "settings/config.json")
+		}, "cannot be read"},
+		{"the daemon settings do not parse", func(t *testing.T, live string) {
+			writeLiveFile(t, live, "mayor/daemon.json", `{not json`)
+		}, "daemon settings cannot be read"},
+		{"the daemon settings cannot be read", func(t *testing.T, live string) {
+			liveDirInstead(t, live, "mayor/daemon.json")
+		}, "daemon settings cannot be read"},
+	}
+	for _, tc := range cases {
+		for _, action := range []string{"render", "up", "down"} {
+			t.Run(tc.name+" "+action, func(t *testing.T) {
+				t.Parallel()
+				r := newDaemonScratchRig(t)
+				tc.write(t, r.flags.liveRoot)
+				if action == "down" {
+					if err := os.WriteFile(r.flags.composeFile, []byte("services: {}\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				err := runDaemonScratch(context.Background(), action, r.flags, r.deps)
+
+				if tc.want == "" {
+					if err != nil {
+						t.Fatalf("%s: %v", action, err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("%s error = %v, want it to contain %q", action, err, tc.want)
+				}
+				if len(r.runs) != 0 {
+					t.Errorf("a refusal ran %d commands", len(r.runs))
+				}
+				if action == "up" && r.composeExists() {
+					t.Error("a refused up wrote the compose file")
+				}
+			})
+		}
+	}
+}
+
+// A compose file inside the live town root is refused, on resolved paths: a
+// directory link into the live town names it under another spelling.
+func TestDaemonScratchRefusesAComposeFileInsideTheLiveRoot(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		edit func(t *testing.T, r *daemonScratchRig)
+	}{
+		{"a compose file under the live root", func(t *testing.T, r *daemonScratchRig) {
+			t.Helper()
+			r.flags.composeFile = filepath.Join(r.flags.liveRoot, "crew", "compose.yml")
+		}},
+		{"a compose file path that contains the live root", func(t *testing.T, r *daemonScratchRig) {
+			t.Helper()
+			r.flags.composeFile = filepath.Dir(r.flags.liveRoot)
+		}},
+		{"a compose file through a link into the live root", func(t *testing.T, r *daemonScratchRig) {
+			t.Helper()
+			if err := os.MkdirAll(filepath.Join(r.flags.liveRoot, "crew"), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			link := filepath.Join(t.TempDir(), "link")
+			if err := os.Symlink(filepath.Join(r.flags.liveRoot, "crew"), link); err != nil {
+				t.Fatalf("symlink: %v", err)
+			}
+			r.flags.composeFile = filepath.Join(link, "compose.yml")
+		}},
+	} {
+		for _, action := range []string{"render", "up", "down"} {
+			t.Run(tc.name+" "+action, func(t *testing.T) {
+				t.Parallel()
+				r := newDaemonScratchRig(t)
+				tc.edit(t, r)
+
+				err := runDaemonScratch(context.Background(), action, r.flags, r.deps)
+
+				if err == nil || !strings.Contains(err.Error(), "resolves inside the live town root") {
+					t.Fatalf("%s error = %v, want the compose-file refusal", action, err)
+				}
+				if len(r.runs) != 0 || r.composeExists() {
+					t.Errorf("a refusal ran %d commands or wrote the compose file", len(r.runs))
+				}
+			})
+		}
+	}
+}
+
+// ACCEPTED RISK pin: gt daemon scratch is exempt from the bd handshake because it
+// never needs bd, and this keeps it so. Every command the three actions run goes
+// through the runner, and none is bd or names one; a bd call added to any path
+// turns this red, so the exemption cannot quietly grow into a path that needs the
+// handshake.
+func TestDaemonScratchNeverRunsBD(t *testing.T) {
+	t.Parallel()
+	r := newDaemonScratchRig(t)
+	for _, action := range []string{"render", "up", "down"} {
+		if err := runDaemonScratch(context.Background(), action, r.flags, r.deps); err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+	}
+	if len(r.runs) != 2 {
+		t.Fatalf("ran %d commands for render, up and down, want 2 (the start and the down)", len(r.runs))
+	}
+	for _, run := range r.runs {
+		joined := strings.Join(run.argv, " ")
+		if filepath.Base(run.argv[0]) == "bd" || strings.Contains(joined, "bd ") || strings.HasPrefix(joined, "bd") {
+			t.Errorf("a scratch command ran bd: %v", run.argv)
+		}
+	}
+}
+
+// resolveThroughExisting resolves the nearest existing ancestor and appends the
+// rest, and returns an error that is not "does not exist" as it is.
+func TestResolveThroughExisting(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	resolvedReal, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveThroughExisting(filepath.Join(link, "a", "b.yml"), filepath.EvalSymlinks)
+	if err != nil || got != filepath.Join(resolvedReal, "a", "b.yml") {
+		t.Errorf("resolveThroughExisting = %q, %v; want the link resolved and the absent tail appended", got, err)
+	}
+	boom := errors.New("permission denied")
+	if _, err := resolveThroughExisting("/x/y", func(string) (string, error) { return "", boom }); !errors.Is(err, boom) {
+		t.Errorf("a non-ENOENT error = %v, want it returned", err)
+	}
+	if _, err := resolveThroughExisting("/x/y", func(string) (string, error) { return "", os.ErrNotExist }); err == nil {
+		t.Error("a path with no existing ancestor, not even the root, resolved")
 	}
 }

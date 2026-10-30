@@ -147,9 +147,11 @@ var scratchOperatorNote = []string{
 }
 
 // scratchDaemonCommand is the daemon's command in the scratch project: the
-// operator note, then the container entrypoint's flag, the one way a container
-// asks for its scratch town's install. The entrypoint is the image's ENTRYPOINT,
-// so the command carries its flags alone. The live project passes nothing.
+// operator note, then the flags the container entrypoint is passed: --scratch-town,
+// the one way a container asks for its scratch town's install, and, when
+// omTokenFile is set, --om-token-file <path> beside it. The entrypoint is the
+// image's ENTRYPOINT, so the command carries its flags alone. The live project
+// passes nothing.
 func scratchDaemonCommand(omTokenFile string) string {
 	var b strings.Builder
 	for _, line := range scratchOperatorNote {

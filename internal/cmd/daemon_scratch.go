@@ -2,14 +2,18 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/templates"
 )
@@ -36,11 +40,20 @@ type scratchDeps struct {
 	out     io.Writer
 	stat    func(path string) (os.FileInfo, error)
 	lstat   func(path string) (os.FileInfo, error)
+	// readFile reads the live town's settings file; readPatrol reads its daemon
+	// settings through the config accessors; evalSymlinks resolves a path. All
+	// three only read, and only the live town's settings.
+	readFile     func(path string) ([]byte, error)
+	readPatrol   func(townRoot string) (*config.DaemonPatrolConfig, error)
+	evalSymlinks func(path string) (string, error)
 }
 
 // realScratchDeps is the host's.
 func realScratchDeps(out io.Writer) scratchDeps {
-	return scratchDeps{run: execImageRunner, environ: os.Environ(), out: out, stat: os.Stat, lstat: os.Lstat}
+	return scratchDeps{
+		run: execImageRunner, environ: os.Environ(), out: out, stat: os.Stat, lstat: os.Lstat,
+		readFile: os.ReadFile, readPatrol: daemon.ReadPatrolConfig, evalSymlinks: filepath.EvalSymlinks,
+	}
 }
 
 // newDaemonScratchCmd builds `gt daemon scratch` with its three subcommands over
@@ -125,10 +138,14 @@ func runDaemonScratch(ctx context.Context, action string, f scratchFlags, d scra
 		deployer := daemonimage.Deployer{Run: d.run, Environ: d.environ}
 		return deployer.Deploy(ctx, sup, f.composeFile, spec)
 	case "down":
-		if err := validateScratchNames(f); err != nil {
-			return err
+		// down removes volumes, so it is checked against the live town as hard as
+		// up is: the same names guard, with the live town's settings read.
+		for _, req := range []struct{ flag, value string }{{"--live-root", f.liveRoot}, {"--compose-file", f.composeFile}} {
+			if strings.TrimSpace(req.value) == "" {
+				return fmt.Errorf("%s is required", req.flag)
+			}
 		}
-		if err := requireAbs("--compose-file", f.composeFile); err != nil {
+		if err := scratchGuards(f, d); err != nil {
 			return err
 		}
 		if info, err := d.stat(f.composeFile); err != nil || !info.Mode().IsRegular() {
@@ -157,15 +174,11 @@ func scratchSpecFor(f scratchFlags, d scratchDeps) (templates.ComposeSpec, error
 			return templates.ComposeSpec{}, fmt.Errorf("%s is required", req.flag)
 		}
 	}
-	if err := validateScratchNames(f); err != nil {
+	if err := requireAbs("--root", f.root); err != nil {
 		return templates.ComposeSpec{}, err
 	}
-	for _, p := range []struct{ flag, value string }{
-		{"--live-root", f.liveRoot}, {"--root", f.root}, {"--compose-file", f.composeFile},
-	} {
-		if err := requireAbs(p.flag, p.value); err != nil {
-			return templates.ComposeSpec{}, err
-		}
+	if err := scratchGuards(f, d); err != nil {
+		return templates.ComposeSpec{}, err
 	}
 	if f.omTokenFile != "" {
 		if err := requireAbs("--"+config.OMTokenFileFlag, f.omTokenFile); err != nil {
@@ -174,10 +187,6 @@ func scratchSpecFor(f scratchFlags, d scratchDeps) (templates.ComposeSpec, error
 	}
 	if pathWithin(f.composeFile, f.root) {
 		return templates.ComposeSpec{}, fmt.Errorf("--compose-file %q is inside --root %q: the container installs the scratch town only into a directory that holds nothing but its marker, so the compose file lives outside it", f.composeFile, f.root)
-	}
-	info, err := d.lstat(filepath.Join(f.liveRoot, "mayor", "town.json"))
-	if err != nil || !info.Mode().IsRegular() {
-		return templates.ComposeSpec{}, fmt.Errorf("--live-root %q is not a town (no regular mayor/town.json): it is read only to refuse a scratch root under or around it, so it must name the live town", f.liveRoot)
 	}
 	return templates.ComposeSpec{
 		Project:          f.project,
@@ -239,4 +248,103 @@ func requireAbs(flag, path string) error {
 func pathWithin(path, root string) bool {
 	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// scratchGuards is the refusal helper render, up and down share, so none of them
+// can act on a project or a file the live town could be reached through: the
+// scratch names are valid and are neither the live defaults nor the names the
+// live town's own settings give, the live root is an absolute town, and the
+// compose file is not inside it.
+func scratchGuards(f scratchFlags, d scratchDeps) error {
+	if err := validateScratchNames(f); err != nil {
+		return err
+	}
+	for _, p := range []struct{ flag, value string }{{"--live-root", f.liveRoot}, {"--compose-file", f.composeFile}} {
+		if err := requireAbs(p.flag, p.value); err != nil {
+			return err
+		}
+	}
+	info, err := d.lstat(filepath.Join(f.liveRoot, "mayor", "town.json"))
+	if err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("--live-root %q is not a town (no regular mayor/town.json): it is read only to refuse a scratch root under or around it, so it must name the live town", f.liveRoot)
+	}
+	if err := refuseLiveConfiguredNames(f, d); err != nil {
+		return err
+	}
+	return refuseComposeFileInLiveRoot(f, d)
+}
+
+// refuseLiveConfiguredNames refuses a scratch project or container that equals
+// the name the live town's own settings give it. The compiled-in defaults are
+// refused by validateScratchNames; a live town may override them, and down
+// removes volumes, so this fails closed: a settings file that is present and
+// cannot be read or parsed refuses, never "no override found". A missing
+// settings file means the defaults only.
+//
+// The raw settings/config.json is read as well as the daemon settings through
+// the config accessors, because the accessors treat a settings file that does
+// not parse as absent and so would report no override for a broken one.
+func refuseLiveConfiguredNames(f scratchFlags, d scratchDeps) error {
+	settings := filepath.Join(f.liveRoot, "settings", "config.json")
+	data, err := d.readFile(settings)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return fmt.Errorf("the live town's settings %s cannot be read, so its container and project names are unknown and the scratch names cannot be checked against them: %w", settings, err)
+	default:
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(data, &top); err != nil {
+			return fmt.Errorf("the live town's settings %s do not parse, so its container and project names are unknown and the scratch names cannot be checked against them", settings)
+		}
+	}
+	live, err := d.readPatrol(f.liveRoot)
+	if err != nil {
+		return fmt.Errorf("the live town's daemon settings cannot be read, so its container and project names are unknown and the scratch names cannot be checked against them: %w", err)
+	}
+	switch {
+	case f.container == live.ContainerName():
+		return fmt.Errorf("--container %q is the live town's container name", f.container)
+	case f.project == live.ComposeProject():
+		return fmt.Errorf("--project %q is the live town's compose project", f.project)
+	}
+	return nil
+}
+
+// refuseComposeFileInLiveRoot refuses a compose file that resolves inside the
+// live town root, or a live root that lies inside the compose file's path, on
+// resolved paths: a link into the live town names it under another spelling.
+func refuseComposeFileInLiveRoot(f scratchFlags, d scratchDeps) error {
+	live, err := d.evalSymlinks(f.liveRoot)
+	if err != nil {
+		return fmt.Errorf("--live-root %q cannot be resolved: %w", f.liveRoot, err)
+	}
+	compose, err := resolveThroughExisting(f.composeFile, d.evalSymlinks)
+	if err != nil {
+		return fmt.Errorf("--compose-file %q cannot be resolved: %w", f.composeFile, err)
+	}
+	if pathWithin(compose, live) || pathWithin(live, compose) {
+		return fmt.Errorf("--compose-file %q resolves inside the live town root %q: the scratch project's files stay outside the live town", f.composeFile, f.liveRoot)
+	}
+	return nil
+}
+
+// resolveThroughExisting resolves path's symbolic links when the file need not
+// exist yet: the nearest existing ancestor is resolved and the rest appended.
+func resolveThroughExisting(path string, eval func(string) (string, error)) (string, error) {
+	var rest []string
+	for p := filepath.Clean(path); ; {
+		resolved, err := eval(p)
+		if err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, rest[i])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(p)
+		if !errors.Is(err, fs.ErrNotExist) || parent == p {
+			return "", err
+		}
+		rest = append(rest, filepath.Base(p))
+		p = parent
+	}
 }
