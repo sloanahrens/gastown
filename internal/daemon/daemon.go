@@ -2598,12 +2598,13 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 // (gt-y3pgh.4).
 //
 // Docked is the identity bead's status:docked label, and reading it costs a
-// bd subprocess, so that read is memoized for a short window
-// (rigOperationalCacheTTL) - see internal/daemon/rig_status.go for why. This
-// function is evaluated per rig per heartbeat by the patrol rig filters and
-// witness and refinery auto-start, and each of those used to repeat the
-// subprocess read, whose 60s budget a CPU-starved host spends in full
-// (gt-4nu3).
+// bd subprocess, so that read is memoized for a window (rigOperationalCacheTTL)
+// - see internal/daemon/rig_status.go for why. This function is evaluated per
+// rig per heartbeat by the patrol rig filters and witness and refinery
+// auto-start, and each of those used to repeat the subprocess read, whose 60s
+// budget a CPU-starved host spends in full (gt-4nu3). `gt rig dock` and
+// `gt rig undock` stamp the rig's dock stamp, which drops the memo, so the
+// window only bounds a label edited on the bead by hand.
 //
 // A failed bead read still fails closed: the rig is reported not operational, so
 // nothing is auto-started for a rig whose state could not be verified. It is
@@ -2651,17 +2652,35 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 // is fresh and from a fresh bd read otherwise. ok is false when the read could
 // not answer, in which case the entry carries the failure category.
 //
+// Fresh also requires the rig's dock stamp to not be newer than the one this
+// entry recorded: see rigOperationalCache.get and internal/rig.DockStamp.
+//
 // The window a read opens starts when the read answers, not when it was issued.
 // Measuring from before the read would hand a starved host an entry that is
 // already stale on arrival - a 60s read with a 60s window buys nothing, and
 // every call site in the tick re-pays the budget the memo exists to save.
 func (d *Daemon) rigBeadVerdict(rigName string) (rigBeadEntry, bool) {
-	if entry, ok := d.rigOperational.get(rigName, d.clk().Now()); ok {
+	// The stamp is read before the bead, so the stamp an entry records is never
+	// newer than the read it describes. A dock that lands while the bd read is
+	// in flight then leaves a stamp the next call sees as newer than the entry,
+	// and the entry is dropped; stamping after the read would record the new
+	// stamp against the old verdict and hold a docked rig as active for the rest
+	// of the window.
+	now := d.clk().Now()
+	stampAt, stampErr := rig.DockStamp(d.config.TownRoot, rigName)
+	stamp := rigDockStamp{at: stampAt, known: stampErr == nil}
+	if stampErr != nil && d.rigOperational.noteStampError(rigName, now, rigOperationalCacheTTL) {
+		// The memo still answers (see get); only the notice is rate-limited, so
+		// a stamp that stays unreadable does not turn every call site into a log
+		// line.
+		d.logger.Printf("Warning: cannot read the dock stamp for rig %s, so a dock is not noticed until its memoized read expires: %v", rigName, stampErr)
+	}
+	if entry, ok := d.rigOperational.get(rigName, now, stamp); ok {
 		return entry, entry.failed == ""
 	}
 
 	rigBeadID, verdict, err := d.queryRigBead(rigName)
-	now := d.clk().Now()
+	answeredAt := d.clk().Now()
 	if err != nil {
 		// The category is in the line on purpose: "assuming not operational"
 		// alone left a starved-host timeout and a missing identity bead looking
@@ -2670,13 +2689,13 @@ func (d *Daemon) rigBeadVerdict(rigName string) (rigBeadEntry, bool) {
 		category := rigStatusFailureCategory(err)
 		d.logger.Printf("Warning: failed to check rig bead %s for docked status: %s — assuming not operational (rig %s): %v",
 			rigBeadID, category, rigName, err)
-		if d.rigOperational.store(rigName, verdict, category, rigOperationalFailureCacheTTL, now).open {
+		if d.rigOperational.store(rigName, verdict, category, rigOperationalFailureCacheTTL, answeredAt, stamp).open {
 			d.alertRigStatusUnverified(rigName, category, err)
 		}
 		return rigBeadEntry{failed: category}, false
 	}
 
-	if d.rigOperational.store(rigName, verdict, "", rigOperationalCacheTTL, now).clear {
+	if d.rigOperational.store(rigName, verdict, "", rigOperationalCacheTTL, answeredAt, stamp).clear {
 		d.clearRigStatusUnverified(rigName)
 	}
 	return rigBeadEntry{verdict: verdict}, true

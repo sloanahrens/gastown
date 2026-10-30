@@ -326,7 +326,7 @@ func (unavailableShowBeads) Show(string) (*beads.Issue, error) {
 // would leave status:docked in place.
 func TestUndockRig_ShowErrorIsNotNotDocked(t *testing.T) {
 	t.Parallel()
-	err := undockRig(unavailableShowBeads{}, "gt-gastown", "gastown")
+	err := undockRig(t.TempDir(), unavailableShowBeads{}, "gt-gastown", "gastown")
 	if err == nil {
 		t.Fatal("undockRig with unreadable identity bead = nil; want error")
 	}
@@ -339,8 +339,77 @@ func TestUndockRig_ShowErrorIsNotNotDocked(t *testing.T) {
 // not docked, so undock reports that and succeeds.
 func TestUndockRig_ShowNotFoundIsNotDocked(t *testing.T) {
 	t.Parallel()
-	if err := undockRig(notFoundBeads{}, "gt-gastown", "gastown"); err != nil {
+	if err := undockRig(t.TempDir(), notFoundBeads{}, "gt-gastown", "gastown"); err != nil {
 		t.Errorf("undockRig with no identity bead = %v; want nil", err)
+	}
+}
+
+// dockedRecordingBeads is a docked identity bead whose Update calls are
+// recorded.
+type dockedRecordingBeads struct {
+	beads.Client
+	updates []string
+}
+
+func (b *dockedRecordingBeads) Show(string) (*beads.Issue, error) {
+	return &beads.Issue{Labels: []string{RigDockedLabel}}, nil
+}
+
+func (b *dockedRecordingBeads) Update(id string, _ beads.UpdateOptions) error {
+	b.updates = append(b.updates, id)
+	return nil
+}
+
+// TestUndockRig_StampsTheRig: undocking a docked rig stamps its dock stamp,
+// which is what tells a running daemon that the memoized identity-bead read it
+// holds is stale. Without it the daemon keeps a docked verdict for the rest of
+// its window.
+func TestUndockRig_StampsTheRig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	bd := &dockedRecordingBeads{}
+
+	if err := undockRig(townRoot, bd, "gt-gastown", "gastown"); err != nil {
+		t.Fatalf("undockRig = %v", err)
+	}
+	if !slices.Equal(bd.updates, []string{"gt-gastown"}) {
+		t.Fatalf("Update calls = %q; want the docked label removed", bd.updates)
+	}
+	stamp, err := rig.DockStamp(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("DockStamp = %v", err)
+	}
+	if stamp.IsZero() {
+		t.Error("undocking a rig stamped no dock stamp; the daemon would not re-read its bead")
+	}
+}
+
+// TestUndockRig_StampFailureIsReported: the label is removed, but a stamp that
+// could not be written is reported rather than swallowed, because the daemon
+// will not see the undock until it re-reads the bead.
+func TestUndockRig_StampFailureIsReported(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	// A regular file where the rig's runtime directory belongs, so the stamp
+	// cannot be created.
+	stampPath, err := rig.DockStampPath(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("DockStampPath = %v", err)
+	}
+	rigRuntime := filepath.Dir(stampPath)
+	if err := os.MkdirAll(filepath.Dir(rigRuntime), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigRuntime, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bd := &dockedRecordingBeads{}
+
+	if err := undockRig(townRoot, bd, "gt-gastown", "gastown"); err == nil {
+		t.Fatal("undockRig with an unwritable dock stamp = nil; want the failure reported")
+	}
+	if !slices.Equal(bd.updates, []string{"gt-gastown"}) {
+		t.Errorf("Update calls = %q; want the undock itself still written", bd.updates)
 	}
 }
 
@@ -500,8 +569,9 @@ func TestStopAndDockRig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			stub := tt.stub // a copy: the subtests run in parallel
+			townRoot := t.TempDir()
 			bd := &recordingUpdateBeads{updateErr: tt.updateErr}
-			stopped, err := stopAndDockRig(bd, "gt-gastown", &stub)
+			stopped, err := stopAndDockRig(townRoot, "gastown", bd, "gt-gastown", &stub)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("stopAndDockRig error = %v; want %v", err, tt.wantErr)
 			}
@@ -511,6 +581,48 @@ func TestStopAndDockRig(t *testing.T) {
 			if !slices.Equal(stopped, tt.wantOut) {
 				t.Errorf("stopped = %q; want %q", stopped, tt.wantOut)
 			}
+			// A dock that landed stamps the rig, which is the only signal a
+			// running daemon has that its memoized read is stale. A dock whose
+			// label write failed did not happen, so it must not stamp.
+			stamp, stampErr := rig.DockStamp(townRoot, "gastown")
+			if stampErr != nil {
+				t.Fatalf("DockStamp = %v", stampErr)
+			}
+			landed := len(tt.wantUpdates) > 0 && tt.updateErr == nil
+			if landed != !stamp.IsZero() {
+				t.Errorf("dock stamp present = %v after updates %q; want %v",
+					!stamp.IsZero(), tt.wantUpdates, landed)
+			}
 		})
+	}
+}
+
+// TestStopAndDockRig_StampFailureIsReported: the docked label is written, but a
+// dock stamp that could not be written is reported rather than swallowed, because
+// a running daemon will not see the dock until it re-reads the bead.
+func TestStopAndDockRig_StampFailureIsReported(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	// A regular file where the rig's runtime directory belongs, so the stamp
+	// cannot be created.
+	stampPath, err := rig.DockStampPath(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("DockStampPath = %v", err)
+	}
+	rigRuntime := filepath.Dir(stampPath)
+	if err := os.MkdirAll(filepath.Dir(rigRuntime), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigRuntime, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bd := &recordingUpdateBeads{}
+	stub := &stubDockPolecatSessions{}
+
+	if _, err := stopAndDockRig(townRoot, "gastown", bd, "gt-gastown", stub); err == nil {
+		t.Fatal("stopAndDockRig with an unwritable dock stamp = nil; want the failure reported")
+	}
+	if !slices.Equal(bd.updates, []string{"gt-gastown"}) {
+		t.Errorf("Update calls = %q; want the dock itself still written", bd.updates)
 	}
 }
