@@ -242,8 +242,7 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 // will offer it again.
 func (h *patrolScanHost) recordPendingSeatEnd(rig, name string, landing sandboxSeatLanding) {
 	landing.Submitted = rulesAskStamp(h.d.clk().Now(), landing.Submitted)
-	rec := pendingSandboxSeatEnd{Landing: landing}
-	if err := writePendingSandboxSeatEnd(h.town(), rig, name, rec); err != nil {
+	if err := writePendingSandboxSeatEnd(h.town(), rig, name, landing); err != nil {
 		h.d.logger.Printf("sandbox seat end %s/%s: cannot record the seat for a later rules pass: %v", rig, name, err)
 	}
 }

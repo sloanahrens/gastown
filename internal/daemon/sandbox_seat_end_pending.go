@@ -45,15 +45,15 @@ func pendingSandboxSeatEndPath(townRoot, rig, name string) (string, error) {
 	return filepath.Join(pendingSandboxSeatEndsDir(townRoot), rig, name+".json"), nil
 }
 
-// writePendingSandboxSeatEnd records rec for the pass that offers the seat
+// writePendingSandboxSeatEnd records landing for the pass that offers the seat
 // again. The write is atomic, so a crash leaves the previous record or this
 // one, never half of either.
-func writePendingSandboxSeatEnd(townRoot, rig, name string, rec pendingSandboxSeatEnd) error {
+func writePendingSandboxSeatEnd(townRoot, rig, name string, landing sandboxSeatLanding) error {
 	path, err := pendingSandboxSeatEndPath(townRoot, rig, name)
 	if err != nil {
 		return err
 	}
-	return atomicfile.EnsureDirAndWriteJSON(path, rec)
+	return atomicfile.EnsureDirAndWriteJSON(path, pendingSandboxSeatEnd{Landing: landing})
 }
 
 // removePendingSandboxSeatEnd forgets the record of rig/name, if there is one.
@@ -96,8 +96,7 @@ func readPendingSandboxSeatEnds(townRoot string) (records []pendingSandboxSeatEn
 			path := filepath.Join(rigPath, entry.Name())
 			name, isJSON := strings.CutSuffix(entry.Name(), ".json")
 			if entry.IsDir() || !isJSON {
-				bad = append(bad, path)
-				continue
+				continue // an atomic write's temp file, or something that is not a record
 			}
 			if err := polecat.CheckSandboxSeatNames(rigEntry.Name(), name); err != nil {
 				bad = append(bad, path)
