@@ -82,6 +82,8 @@ const scriptSkippedMarker = "[plugin-result skipped]"
 // `gt escalate clear`. The keys are a set because a plugin's alert key moves
 // with its finding set: the run that raises a new key closes the ones it
 // replaces, and a recovery closes every key this daemon raised.
+// A key leaves the set only once its clear has landed, so a clear that fails
+// leaves the escalation tracked and the next run tries again.
 // The memory is the daemon's: after a restart an open escalation stays open
 // until the operator closes it or the plugin fails and recovers again, so a
 // set that changed across a restart leaves the old escalation for the
@@ -107,41 +109,38 @@ func (r *scriptRunner) markEscalated(name, key string) {
 	r.escalated[name][key] = true
 }
 
-// takeEscalated returns the keys name has escalations open under and forgets
-// them, sorted for a stable clear.
-func (r *scriptRunner) takeEscalated(name string) []string {
+// escalatedKeys returns, sorted, the keys name has escalations open under.
+// It does not forget them: only the clear that lands may do that.
+func (r *scriptRunner) escalatedKeys(name string) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	keys := r.escalated[name]
-	delete(r.escalated, name)
-	out := make([]string, 0, len(keys))
-	for key := range keys {
-		out = append(out, key)
-	}
-	sort.Strings(out)
-	return out
+	return sortedKeys(r.escalated[name])
 }
 
-// takeEscalatedExcept is takeEscalated for the keys other than keep: a run
+// supersededEscalations is escalatedKeys for the keys other than keep: a run
 // that raised keep supersedes every other escalation this daemon has open for
-// name, and hands back those keys to close.
-func (r *scriptRunner) takeEscalatedExcept(name, keep string) []string {
+// name, and takes back those keys to close.
+func (r *scriptRunner) supersededEscalations(name, keep string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keys := make(map[string]bool, len(r.escalated[name]))
+	for key := range r.escalated[name] {
+		if key != keep {
+			keys[key] = true
+		}
+	}
+	return sortedKeys(keys)
+}
+
+// forgetEscalated drops key from name's open set, once its clear has landed.
+func (r *scriptRunner) forgetEscalated(name, key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	keys := r.escalated[name]
-	out := make([]string, 0, len(keys))
-	for key := range keys {
-		if key == keep {
-			continue
-		}
-		out = append(out, key)
-		delete(keys, key)
-	}
+	delete(keys, key)
 	if len(keys) == 0 {
 		delete(r.escalated, name)
 	}
-	sort.Strings(out)
-	return out
 }
 
 // tryStart marks name as running and reports whether the caller may start
@@ -491,16 +490,15 @@ func pluginTarget(p *plugin.Plugin) string {
 // escalatePluginFailure raises (or adds to) p's failure escalation with the
 // output tail, and remembers it so the next good run closes it.
 //
-// The cloud-check plugin's key carries the urgent finding set (see
-// plugin_findings.go): an unchanged set refreshes one escalation, a changed
-// set raises another, and a set whose escalation was closed recently waits out
-// pluginEscalationReopenWindow.
+// The cloud-check plugin's key carries the urgent finding set. Before changing
+// that, read the cloud-check paragraph of docs/design/plugin-system.md: it
+// states the refresh, supersede and reopen rule that this function and
+// plugin_findings.go implement.
 //
-// A run that raised or refreshed the escalation for one key supersedes every
-// other escalation the plugin has open: the finding set key moves with the
-// set, so leaving the previous key open would put two escalations in the
-// attention queue for one plugin, which is the accumulation this key exists to
-// end (gt-ggd75). The old ones close only once the new raise has landed; a
+// A run that raised or refreshed one key supersedes every other escalation the
+// plugin has open, because the key moves with the finding set and leaving the
+// previous one open would put two escalations in the attention queue for one
+// plugin (gt-ggd75). The old ones close only once the new raise has landed; a
 // raise that failed leaves them open rather than trading one alarm for none.
 func (d *Daemon) escalatePluginFailure(p *plugin.Plugin, res scriptResult, townRoot string) {
 	key := pluginFailureAlertKey(p.Name)
@@ -533,22 +531,39 @@ func (d *Daemon) escalatePluginFailure(p *plugin.Plugin, res scriptResult, townR
 // supersedePluginEscalations closes the escalations this daemon has open for
 // name under any key but key, the one the run just raised or refreshed. Their
 // finding sets are gone: the report now describes key's set.
+//
+// A key is forgotten only after its clear lands. A clear that failed leaves
+// the escalation open in the store, so forgetting it here would leak an alarm
+// nothing would close; keeping it lets the next failing run, or the next
+// recovery, retry the clear.
 func (d *Daemon) supersedePluginEscalations(name, key string) {
-	superseded := d.scripts.takeEscalatedExcept(name, key)
+	superseded := d.scripts.supersededEscalations(name, key)
 	if len(superseded) == 0 {
 		return
 	}
-	d.clearAlerts("superseded by "+key, superseded...)
+	if err := d.clearAlertsErr("superseded by "+key, superseded...); err != nil {
+		return
+	}
+	for _, old := range superseded {
+		d.scripts.forgetEscalated(name, old)
+	}
 }
 
 // clearPluginFailure closes the failure escalations this daemon raised under
 // p's keys. A key whose escalation was already closed is not an error to clear
 // again (see clearAlerts), so recovery after a finding set came and went
-// closes whatever is still open.
+// closes whatever is still open. As with a superseded key, a key stays tracked
+// until its clear lands, so a failed clear is retried on the next pass.
 func (d *Daemon) clearPluginFailure(p *plugin.Plugin) {
-	keys := d.scripts.takeEscalated(p.Name)
-	if len(keys) > 0 {
-		d.clearAlerts("cleared: the plugin passed", keys...)
+	keys := d.scripts.escalatedKeys(p.Name)
+	if len(keys) == 0 {
+		return
+	}
+	if err := d.clearAlertsErr("cleared: the plugin passed", keys...); err != nil {
+		return
+	}
+	for _, key := range keys {
+		d.scripts.forgetEscalated(p.Name, key)
 	}
 }
 

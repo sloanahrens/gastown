@@ -22,13 +22,11 @@ import (
 // pages: without a key that changes with the finding set the next run minted a
 // fresh escalation and the attention queue never drained (gt-ggd75).
 //
-// The key below is the sorted set of urgent finding ids, so an unchanged set
-// refreshes the open escalation and a changed one raises a new escalation,
-// closing the previous set's (see escalatePluginFailure in plugin_script.go).
-// A set whose escalation the operator closed stays quiet for
-// pluginEscalationReopenWindow, then pages again if it is still there. The
-// exit code and the dashboard pill are untouched: this is the escalation path
-// only.
+// The key is the sorted set of urgent finding ids. Before changing it, read
+// the cloud-check paragraph of docs/design/plugin-system.md: it states the
+// refresh, supersede and reopen rule once, and this file and
+// escalatePluginFailure implement it. The exit code and the dashboard pill are
+// untouched: this is the escalation path only.
 const (
 	// cloudCheckPlugin is the script plugin whose nonzero exit reports the
 	// cloud patrol's urgent findings.
@@ -51,6 +49,12 @@ const (
 	// plugin key, so a report this daemon could not read is one item an
 	// operator closes once, and it comes back only after the reopen window.
 	cloudUnreadableKey = "unreadable-report"
+
+	// cloudUnidentifiedKey is the finding set a report whose urgent findings
+	// carry nothing to key them by gets. It is separate from the unreadable
+	// report's key: the report was read, and the findings in it are still
+	// named in the escalation's kinds and counts.
+	cloudUnidentifiedKey = "findings-without-identity"
 
 	// cloudKindMax caps a finding kind in the escalation text, in runes.
 	cloudKindMax = 40
@@ -210,7 +214,13 @@ func (d *Daemon) cloudCheckAlert(p *plugin.Plugin) (key, summary string) {
 	}
 	ids, kinds := urgentFindingIDs(rep)
 	if len(ids) == 0 {
-		return "", ""
+		if len(kinds) == 0 {
+			return "", ""
+		}
+		// Urgent findings that name nothing to key them by still raise their
+		// own escalation, and it names their kinds and counts: a finding must
+		// not disappear because the report left its identity blank.
+		return pluginFailureAlertKey(p.Name) + ":" + cloudUnidentifiedKey, findingSummary(kinds)
 	}
 	return findingSetKey(p.Name, ids), findingSummary(kinds)
 }

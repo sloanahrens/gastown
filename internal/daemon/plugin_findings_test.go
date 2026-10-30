@@ -487,6 +487,49 @@ func TestCloudCheckSupersedeWaitsForTheNewRaise(t *testing.T) {
 	}
 }
 
+// A superseded key whose clear does not land stays tracked, so the next run
+// retries the clear instead of leaving an escalation open that nothing knows
+// about.
+func TestCloudCheckSupersedeKeepsAFailedClearTracked(t *testing.T) {
+	t.Parallel()
+
+	clk := newFixedClock()
+	dir := cloudReportsFixture(t, cloudFindingFixture("f0", "api_enabled"))
+	notes := notifyfake.New()
+	d := cloudCheckDaemon(t, dir, notes, clk, nil)
+	p := scriptPlugin(t, cloudCheckPlugin, "exit 1\n")
+	rec := &fakeRecorder{}
+
+	d.startScriptPlugin(p, rec)
+	d.scripts.wait()
+	first := findingSetKey(cloudCheckPlugin, []string{"f0"})
+
+	writeCloudReport(t, dir,
+		cloudFindingFixture("f0", "api_enabled"),
+		cloudFindingFixture("f1", "service_account"),
+	)
+	second := findingSetKey(cloudCheckPlugin, []string{"f0", "f1"})
+
+	notes.Fail(notifyfake.KindClear, errors.New("gt escalate clear: dolt is unreachable"))
+	d.startScriptPlugin(p, rec)
+	d.scripts.wait()
+	notes.Fail(notifyfake.KindClear, nil)
+
+	if open := notes.OpenEscalations(first); len(open) != 1 {
+		t.Fatalf("the superseded escalation closed although the clear failed: %+v", open)
+	}
+	if open := notes.OpenEscalations(second); len(open) != 1 {
+		t.Errorf("the new set's escalation is not open: %+v", open)
+	}
+
+	// The next run still knows the superseded key, and its clear lands.
+	d.startScriptPlugin(p, rec)
+	d.scripts.wait()
+	if open := notes.OpenEscalations(first); len(open) != 0 {
+		t.Errorf("the retried clear did not close the superseded escalation: %+v", open)
+	}
+}
+
 // clearReason returns the reason of the clear that closed key, or "".
 func clearReason(notes *notifyfake.Recorder, key string) string {
 	label := notify.FingerprintLabel(key)
@@ -526,6 +569,36 @@ func TestCloudCheckEscalationForAnUnreadableReport(t *testing.T) {
 	d.scripts.wait()
 	if calls := notes.Escalations(); len(calls) != 1 {
 		t.Errorf("an unreadable report closed minutes ago was raised again: %+v", calls)
+	}
+}
+
+// A report whose urgent findings carry nothing to key them by still gets its
+// own escalation, and its reason names their kinds and counts: an unnamed
+// finding is not dropped from the alarm.
+func TestCloudCheckEscalationWhenNoUrgentFindingHasAnIdentity(t *testing.T) {
+	t.Parallel()
+
+	dir := cloudReportsFixture(t,
+		cloudFinding{Severity: cloudUrgent},
+		cloudFinding{Severity: cloudUrgent},
+	)
+	notes := notifyfake.New()
+	d := cloudCheckDaemon(t, dir, notes, newFixedClock(), nil)
+	p := scriptPlugin(t, cloudCheckPlugin, "exit 1\n")
+	rec := &fakeRecorder{}
+
+	d.startScriptPlugin(p, rec)
+	d.scripts.wait()
+
+	key := pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudUnidentifiedKey
+	calls := notes.Escalations()
+	if len(calls) != 1 || calls[0].Escalation.Fingerprint != key {
+		t.Fatalf("escalations = %+v, want one under %q", calls, key)
+	}
+	for _, want := range []string{"unknown x2", "2 urgent"} {
+		if !strings.Contains(calls[0].Escalation.Reason, want) {
+			t.Errorf("reason lacks %q:\n%s", want, calls[0].Escalation.Reason)
+		}
 	}
 }
 

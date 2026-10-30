@@ -88,8 +88,10 @@ Daemon heartbeat
    The cloud-check plugin's fingerprint adds a hash of the urgent finding ids
    in the patrol's report, so an unchanged finding set refreshes one
    escalation, a changed set raises its own and closes the previous set's as
-   superseded, and a set whose escalation was closed stays quiet for 24 hours
-   (gt-ggd75).
+   superseded, and a set whose escalation was closed stays quiet for 24 hours.
+   A report that cannot be read, and a report whose urgent findings carry no
+   identity to hash, each key by their own fixed name instead of a hash, and
+   the escalation names the finding kinds and counts (gt-ggd75).
 ```
 
 A cooldown plugin that is not a script plugin with a `run.sh` is logged as
