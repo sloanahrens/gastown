@@ -28,6 +28,6 @@ func (s *Sweep) Race() (line string, red bool) {
 		Timings:  s.Timings,
 		Now:      s.Now,
 	}
-	c := runner.Tier(TierRace, ".", slotPrefix(), raceArgs, []string{racePkg})
+	c := runner.Tier(TierRace, ".", slotPrefix(s.Opts.Nice), raceArgs, []string{racePkg})
 	return Summary(TierRace, s.Opts.LogDir, c.Passed, c.Failed, c.Skipped, strings.Join(c.FailedNames, " "), elapsed())
 }
