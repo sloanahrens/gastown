@@ -314,3 +314,26 @@ func TestOpenTimingsNamesAnUncreatableFile(t *testing.T) {
 		t.Errorf("Bytes() = %q, want the line kept", tm.Bytes())
 	}
 }
+
+// TestParseWalls: a timings file's lines become the wall each tier and package
+// took, keyed by tier and package, and a line that is not a timing is dropped
+// so a torn file starts the packages in list order.
+func TestParseWalls(t *testing.T) {
+	t.Parallel()
+	data := `{"tier":"integration","package":"./cmd","wall_ms":196000,"exit":0,"start":"2026-10-30T00:00:00Z"}
+{"tier":"integration-docker","package":"./cmd","wall_ms":1000,"exit":0,"start":"2026-10-30T00:00:00Z"}
+not a timing line
+
+{"tier":"race","package":"./cmd","wall_ms":500,"exit":1,"start":"2026-10-30T00:00:00Z"}`
+	want := map[string]int64{
+		TimingsKey(TierIntegration, "./cmd"): 196000,
+		TimingsKey(TierDocker, "./cmd"):      1000,
+		TimingsKey(TierRace, "./cmd"):        500,
+	}
+	if got := ParseWalls([]byte(data)); !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseWalls() = %v, want %v", got, want)
+	}
+	if got := ParseWalls([]byte("not a timing\n")); len(got) != 0 {
+		t.Errorf("ParseWalls over no timing = %v, want none", got)
+	}
+}

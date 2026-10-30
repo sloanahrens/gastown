@@ -109,6 +109,11 @@ type Client interface {
 	// for any), each carrying its relation in DependencyType. Targets
 	// outside this database (external:<rig>:<id>) are left out.
 	DepList(id, depType string) ([]IssueDep, error)
+	// DepListUp returns the issues that depend on id with relation depType
+	// ("" for any), each carrying its relation in DependencyType, wisps
+	// included. Every dependent is an issue in this database, so unlike
+	// DepList there is no external target to leave out.
+	DepListUp(id, depType string) ([]IssueDep, error)
 	// RemoveDependency removes that dependency, whatever its type.
 	RemoveDependency(issue, dependsOn string) error
 	// AppendNotes appends note to the issue's notes, on a new line when

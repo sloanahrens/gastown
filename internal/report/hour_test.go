@@ -135,7 +135,8 @@ var reportReadOnlyClientMethods = map[string]bool{
 	"GetAssignedIssue": true, "ListIssueStatuses": true,
 	"ListAssignedIssueStatuses": true, "Ready": true, "ReadyAll": true, "ReadyFiltered": true,
 	"Children": true, "ChildrenOf": true, "Comments": true, "DepList": true,
-	"ShowText": true,
+	"DepListUp": true,
+	"ShowText":  true,
 }
 
 // TestReportNoWriteGuardCoversClient pins that the no-write guard still

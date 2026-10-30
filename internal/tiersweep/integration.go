@@ -48,6 +48,10 @@ type Sweep struct {
 	// Timings receives one line per package a tier runs, and holds the lines for
 	// TIER_SWEEP_TIMINGS. Run sets it; nil writes no timings.
 	Timings *Timings
+	// Walls is the previous run's wall time per tier and package, keyed by
+	// TimingsKey. Run sets it from TIER_SWEEP_TIMINGS before the first package
+	// starts; nil starts the packages in list order.
+	Walls map[string]int64
 }
 
 // integrationPlan is what the integration tier runs.
@@ -98,6 +102,8 @@ func (s *Sweep) Integration() (line string, red bool) {
 		Stderr:   s.Stderr,
 		Timings:  s.Timings,
 		Now:      s.Now,
+		Jobs:     s.Opts.Jobs,
+		Walls:    s.Walls,
 	}
 	root := runner.Tier(TierIntegration, ".", slotPrefix(s.Opts.Nice), taggedArgs, plan.root)
 	docker := runner.Tier(TierDocker, ".", slotPrefix(s.Opts.Nice), nil, plan.docker)

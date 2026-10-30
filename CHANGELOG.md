@@ -118,6 +118,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `disk_maintenance` patrol trims the shared cache claim** (gt-rm4am) —
+  the claim a kubernetes sandbox profile mounts is now brought under
+  `POLECAT_CACHE_CAP` by the patrol's daily window instead of by hand. It reads
+  the claim's listing through a running pod that mounts it, builds the trim Job
+  from `cachevol.BuildTrimManifest`, and in `apply` mode applies the shard
+  ConfigMaps before the Job that mounts them and deletes the shards once the Job
+  finishes. A listing that cannot be read trims nothing and the log says why;
+  `dry_run` logs the objects it would apply and applies nothing.
+
 - **`gt rig hold` / `gt rig release`** (gt-vty1v) — an operator can stop new
   automatic dispatches for one rig without parking it. The hold is a
   `dispatch_hold` record `{since, by, reason}` on the rig's entry in

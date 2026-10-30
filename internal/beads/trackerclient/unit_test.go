@@ -440,3 +440,13 @@ func TestShowTextRefusesAFlagWithoutARequest(t *testing.T) {
 		t.Errorf("ShowText with a flag sent %d requests, want none", asked)
 	}
 }
+
+// DepListUp's tracker backend is its own bead (gt-p85pw.105); until it lands
+// the adapter names the gap, so a caller cannot read an empty list as "no
+// dependents".
+func TestDepListUpNamesItsMissingBackend(t *testing.T) {
+	t.Parallel()
+	if _, err := New(nil, "gt").DepListUp("gt-x", ""); err == nil || !strings.Contains(err.Error(), "DepListUp") {
+		t.Fatalf("DepListUp = %v, want an error naming DepListUp", err)
+	}
+}

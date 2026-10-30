@@ -1060,6 +1060,40 @@ func (f *Fake) DepList(id, depType string) ([]beads.IssueDep, error) {
 	return out, nil
 }
 
+// DepListUp returns the issues that depend on id with relation depType ("" for
+// any), each with its relation in DependencyType, in creation order. The fake
+// keys durable issues and wisps alike in one table, so an ephemeral dependent
+// needs no special path.
+func (f *Fake) DepListUp(id, depType string) ([]beads.IssueDep, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.issues[id]; !ok {
+		return nil, notFound(id)
+	}
+	records := make([]*record, 0, len(f.issues))
+	for _, r := range f.issues {
+		records = append(records, r)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].seq < records[j].seq })
+	var out []beads.IssueDep
+	for _, r := range records {
+		for _, e := range r.deps {
+			if e.to != id || (depType != "" && e.typ != depType) {
+				continue
+			}
+			out = append(out, beads.IssueDep{
+				ID:             r.issue.ID,
+				Title:          r.issue.Title,
+				Status:         r.issue.Status,
+				Priority:       r.issue.Priority,
+				Type:           r.issue.Type,
+				DependencyType: e.typ,
+			})
+		}
+	}
+	return out, nil
+}
+
 // isExternalRef reports whether id is a cross-database reference
 // (external:<rig>:<id>), which bd stores but show does not list.
 func isExternalRef(id string) bool { return strings.HasPrefix(id, "external:") }
