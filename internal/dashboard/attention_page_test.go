@@ -506,6 +506,28 @@ func TestThePanelDrawsTheLandingRiskLevel(t *testing.T) {
 	}
 }
 
+// A risk-path row the landing log did not answer draws no level: the row keeps
+// its place, but the panel does not invent a level (or print "risk undefined")
+// for an answer it does not have.
+func TestThePanelDrawsNoLandingRiskLevelWithoutAnAnswer(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
+		map[string]any{"kind": "item", "owner": "overseer", "id": "risk:gt-9:feedface", "title": "gt-9 landed touching internal/cmd",
+			"level": "warn", "rule": "landing.risk_path", "age_sec": 120},
+	}}))
+	switchOwner(t, dom, "overseer")
+
+	rows := panelRows(t, dom)
+	if len(rows) != 1 {
+		t.Fatalf("the panel drew %d rows (%+v), want the risk-path row", len(rows), rows)
+	}
+	if strings.Contains(rows[0].Text, "risk ") || panelCells(rows[0], "span lrisk") {
+		t.Errorf("the risk-path row with no landing answer reads %q with cells %v, want no level drawn", rows[0].Text, rows[0].Cells)
+	}
+}
+
 // The panel draws the rows in the two groups the reader acts on: what needs a
 // person, then what is only waiting on work already in flight, with each
 // group's count in the panel's header. A pipeline row names who holds it and
