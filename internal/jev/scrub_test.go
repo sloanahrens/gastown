@@ -76,6 +76,19 @@ func TestClientWithoutScrubIsUnchanged(t *testing.T) {
 	assert.Equal(t, readTestdata(t, "ask_request_body.json"), string(rs.raw))
 }
 
+// TestClientScrubStateThatCannotEncode: a state the encoder refuses fails the
+// call before a request leaves, scrubbing set or not.
+func TestClientScrubStateThatCannotEncode(t *testing.T) {
+	t.Parallel()
+	rs := &respond{body: readTestdata(t, "choice_response.json")}
+	c := newTestClient(t, rs, WithScrub(scrub.Default()))
+
+	_, err := c.Choice(context.Background(), func() {}, "Which team?", shoeCriteria)
+
+	require.Error(t, err)
+	assert.Equal(t, 0, rs.callCnt, "no request leaves when the state does not encode")
+}
+
 // TestClientScrubRecordsCountsNotText: the request line says the state was
 // scrubbed, counts each rule that fired, and carries none of the text they
 // replaced.
