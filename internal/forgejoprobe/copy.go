@@ -70,9 +70,11 @@ func redactions(rawURL string) []redaction {
 	for _, f := range urlSpellings(u.Host + u.Path) {
 		add(f, placeholder)
 	}
+	// A username alone is not a secret, and replacing it would mangle any
+	// message that spells it; the user:password@ form is caught by userinfo.
 	if u.User != nil {
-		add(u.User.String(), secret)
 		if pw, ok := u.User.Password(); ok {
+			add(u.User.String(), secret)
 			add(pw, secret)
 		}
 	}

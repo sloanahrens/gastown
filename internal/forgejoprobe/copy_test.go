@@ -101,6 +101,15 @@ var redactRows = []redactRow{
 		wantEcho: "fatal: unable to access '<repository URL>/': refused",
 		header:   "<repository URL>",
 	},
+	{
+		// A username with no password is not a secret: the word that spells
+		// it inside "specific" must survive.
+		name:     "a username with no password",
+		rawURL:   "https://ci@forgejo.example/acme/rig.git",
+		echo:     "fatal: unable to access 'https://ci@forgejo.example/acme/rig.git/': specific refusal",
+		wantEcho: "fatal: unable to access '<repository URL>/': specific refusal",
+		header:   "https://ci@forgejo.example/acme/rig.git",
+	},
 }
 
 // TestCloneCopyRedactsEveryForm pins the redaction of a failing clone: each

@@ -70,7 +70,7 @@ const (
 	testWork    = "work"
 	testWT      = "work/wt"
 	testCopy    = "work/copy"
-	testSHA     = "0123abcd"
+	pushSHA     = "0123abcd"
 	testMain    = "main"
 	testBranch  = "land/probe-rig"
 	testPushURL = "https://forgejo.example/acme/rig.git"
@@ -80,9 +80,9 @@ const (
 // accepted by the hook.
 func worktreeAnswers() map[string]gitAnswer {
 	return map[string]gitAnswer{
-		"rev-parse --verify --quiet " + testSHA + "^{commit}":                                  {out: testSHA + "\n"},
-		"worktree add --detach " + testWT + " " + testSHA:                                      {},
-		"push --quiet --force -- " + testPushURL + " " + testSHA + ":refs/heads/" + testBranch: {},
+		"rev-parse --verify --quiet " + pushSHA + "^{commit}":                                  {out: pushSHA + "\n"},
+		"worktree add --detach " + testWT + " " + pushSHA:                                      {},
+		"push --quiet --force -- " + testPushURL + " " + pushSHA + ":refs/heads/" + testBranch: {},
 		"worktree remove --force " + testWT:                                                    {},
 	}
 }
@@ -120,7 +120,7 @@ func TestPushFromWorktreeRunsTheHook(t *testing.T) {
 		g := &rigGit{answers: worktreeAnswers(), wt: testWT, refused: errors.New("exit status 1: " + hookText)}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		_, err := p.Push(testSHA)
+		_, err := p.Push(pushSHA)
 		if err == nil || !strings.Contains(err.Error(), hookText) {
 			t.Fatalf("Push = %v, want the hook's refusal text", err)
 		}
@@ -140,7 +140,7 @@ func TestPushFromWorktreeRunsTheHook(t *testing.T) {
 		g := &rigGit{answers: worktreeAnswers(), wt: testWT}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		if _, err := p.Push(testSHA); err != nil {
+		if _, err := p.Push(pushSHA); err != nil {
 			t.Fatalf("Push: %v", err)
 		}
 		if want := []string{testWT}; !reflect.DeepEqual(g.hookRuns, want) {
@@ -165,7 +165,7 @@ func TestPushReportsItsMode(t *testing.T) {
 		t.Parallel()
 		g := &rigGit{answers: worktreeAnswers(), wt: testWT}
 		var logs []string
-		mode, err := pushPusher(g, true, &logs).Push(testSHA)
+		mode, err := pushPusher(g, true, &logs).Push(pushSHA)
 		if err != nil {
 			t.Fatalf("Push: %v", err)
 		}
@@ -179,7 +179,7 @@ func TestPushReportsItsMode(t *testing.T) {
 			"push --quiet --force -- " + testPushURL + " refs/remotes/origin/main:refs/heads/" + testBranch: {},
 		}}
 		var logs []string
-		mode, err := pushPusher(g, false, &logs).Push(testSHA)
+		mode, err := pushPusher(g, false, &logs).Push(pushSHA)
 		if err != nil {
 			t.Fatalf("Push: %v", err)
 		}
@@ -191,7 +191,7 @@ func TestPushReportsItsMode(t *testing.T) {
 		t.Parallel()
 		g := &rigGit{answers: worktreeAnswers(), wt: testWT, refused: errors.New("exit status 1")}
 		var logs []string
-		mode, err := pushPusher(g, true, &logs).Push(testSHA)
+		mode, err := pushPusher(g, true, &logs).Push(pushSHA)
 		if err == nil {
 			t.Fatal("Push succeeded, want the refusal")
 		}
@@ -210,7 +210,7 @@ func TestPushFallsBackToTheCloneLoudly(t *testing.T) {
 	}}
 	var logs []string
 	p := pushPusher(g, false, &logs)
-	if _, err := p.Push(testSHA); err != nil {
+	if _, err := p.Push(pushSHA); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	want := "warning: no rig repository at rig/.repo.git, so the probe pushes from the clone and the rig's hooks were not exercised"
@@ -257,10 +257,10 @@ func TestPushRefusesAnUnheldCommit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			g := &rigGit{answers: map[string]gitAnswer{
-				"rev-parse --verify --quiet " + testSHA + "^{commit}": {err: tc.err},
+				"rev-parse --verify --quiet " + pushSHA + "^{commit}": {err: tc.err},
 			}}
 			var logs []string
-			_, err := pushPusher(g, true, &logs).Push(testSHA)
+			_, err := pushPusher(g, true, &logs).Push(pushSHA)
 			if err == nil || err.Error() != tc.wantErr {
 				t.Fatalf("Push = %v, want %q", err, tc.wantErr)
 			}
@@ -281,10 +281,10 @@ func TestPushRefusesADashValue(t *testing.T) {
 		apply func(p *Pusher)
 	}{
 		{name: "a commit", sha: "-x", apply: func(p *Pusher) {}},
-		{name: "a git URL", sha: testSHA, apply: func(p *Pusher) { p.GitURL = "--upload-pack=sh" }},
-		{name: "a main branch", sha: testSHA, apply: func(p *Pusher) { p.MainBranch = "-main" }},
-		{name: "a branch", sha: testSHA, apply: func(p *Pusher) { p.Branch = "-land" }},
-		{name: "a worktree path", sha: testSHA, apply: func(p *Pusher) { p.Work = "-work" }},
+		{name: "a git URL", sha: pushSHA, apply: func(p *Pusher) { p.GitURL = "--upload-pack=sh" }},
+		{name: "a main branch", sha: pushSHA, apply: func(p *Pusher) { p.MainBranch = "-main" }},
+		{name: "a branch", sha: pushSHA, apply: func(p *Pusher) { p.Branch = "-land" }},
+		{name: "a worktree path", sha: pushSHA, apply: func(p *Pusher) { p.Work = "-work" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -311,7 +311,7 @@ func TestPushFailsClosedOnStatError(t *testing.T) {
 	var logs []string
 	p := pushPusher(g, true, &logs)
 	p.Stat = func(string) (fs.FileInfo, error) { return nil, errors.New("permission denied") }
-	if _, err := p.Push(testSHA); err == nil || !strings.Contains(err.Error(), "could not stat the rig repository rig/.repo.git") {
+	if _, err := p.Push(pushSHA); err == nil || !strings.Contains(err.Error(), "could not stat the rig repository rig/.repo.git") {
 		t.Fatalf("Push = %v, want a stat refusal", err)
 	}
 	if len(g.calls) != 0 || len(logs) != 0 {
@@ -327,11 +327,11 @@ func TestPushReportsItsFailures(t *testing.T) {
 	t.Run("a worktree that cannot be cut is named and nothing is pushed", func(t *testing.T) {
 		t.Parallel()
 		answers := worktreeAnswers()
-		answers["worktree add --detach "+testWT+" "+testSHA] = gitAnswer{err: errors.New("fatal: already exists")}
+		answers["worktree add --detach "+testWT+" "+pushSHA] = gitAnswer{err: errors.New("fatal: already exists")}
 		g := &rigGit{answers: answers, wt: testWT}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		_, err := p.Push(testSHA)
+		_, err := p.Push(pushSHA)
 		if want := "could not add a worktree of rig/.repo.git at 0123abcd under work/wt"; err == nil || err.Error() != want {
 			t.Fatalf("Push = %v, want %q", err, want)
 		}
@@ -351,14 +351,14 @@ func TestPushReportsItsFailures(t *testing.T) {
 		t.Parallel()
 		const credURL = "https://ci:s3cret@forgejo.example/acme/rig.git"
 		answers := worktreeAnswers()
-		delete(answers, "push --quiet --force -- "+testPushURL+" "+testSHA+":refs/heads/"+testBranch)
-		answers["push --quiet --force -- "+credURL+" "+testSHA+":refs/heads/"+testBranch] = gitAnswer{}
+		delete(answers, "push --quiet --force -- "+testPushURL+" "+pushSHA+":refs/heads/"+testBranch)
+		answers["push --quiet --force -- "+credURL+" "+pushSHA+":refs/heads/"+testBranch] = gitAnswer{}
 		g := &rigGit{answers: answers, wt: testWT, refused: errors.New(
 			"exit status 128: fatal: unable to access '" + credURL + "/': refused")}
 		var logs []string
 		p := pushPusher(g, true, &logs)
 		p.GitURL = credURL
-		_, err := p.Push(testSHA)
+		_, err := p.Push(pushSHA)
 		if err == nil {
 			t.Fatal("Push succeeded, want the refusal")
 		}
@@ -384,7 +384,7 @@ func TestPushRedactsEveryForm(t *testing.T) {
 			var logs []string
 			p := pushPusher(g, true, &logs)
 			p.GitURL = row.rawURL
-			_, err := p.Push(testSHA)
+			_, err := p.Push(pushSHA)
 			want := "git push of main (0123abcd) to " + row.header + " as land/probe-rig failed from work/wt: " + row.wantEcho
 			if err == nil || err.Error() != want {
 				t.Fatalf("Push = %v, want %q", err, want)
@@ -419,7 +419,7 @@ func TestPushChildrenNeverInheritTheTokens(t *testing.T) {
 	}}
 	var logs []string
 	p := pushPusher(g, true, &logs)
-	if _, err := p.Push(testSHA); err != nil {
+	if _, err := p.Push(pushSHA); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	if err := p.Cleanup(); err != nil {
@@ -449,7 +449,7 @@ func TestCleanupRemovesNeverPrunes(t *testing.T) {
 		g := &rigGit{answers: worktreeAnswers(), wt: testWT}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		if _, err := p.Push(testSHA); err != nil {
+		if _, err := p.Push(pushSHA); err != nil {
 			t.Fatalf("Push: %v", err)
 		}
 		if err := p.Cleanup(); err != nil {
@@ -472,7 +472,7 @@ func TestCleanupRemovesNeverPrunes(t *testing.T) {
 		g := &rigGit{answers: answers, wt: testWT}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		if _, err := p.Push(testSHA); err != nil {
+		if _, err := p.Push(pushSHA); err != nil {
 			t.Fatalf("Push: %v", err)
 		}
 		if err := p.Cleanup(); err == nil {
