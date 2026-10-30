@@ -1,0 +1,8 @@
+package cmd
+
+// Version information - set at build time via ldflags
+var (
+	Version = "1.2.1"
+	// Build can be set via ldflags at compile time
+	Build = "dev"
+)
