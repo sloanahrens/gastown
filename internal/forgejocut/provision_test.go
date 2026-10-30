@@ -211,6 +211,30 @@ func TestProvisionPropagatesFailure(t *testing.T) {
 	}
 }
 
+// TestProvisionRefusesACommandLineTheProvisionerRejects pins the guard on a command
+// line the cutover itself would never have produced: a cutover built without its
+// parse (an API root the provisioner cannot address) stops before the run, with an
+// error naming the refused command line, and the provisioner is never called.
+// Dropping the parse error check turns it red.
+func TestProvisionRefusesACommandLineTheProvisionerRejects(t *testing.T) {
+	t.Parallel()
+	c, logs, calls := newProvisionCutover(false)
+	c.Opts.APIURL = "not-a-url"
+	err := c.Provision()
+	if err == nil {
+		t.Fatal("Provision() = nil, want the provisioner's refusal")
+	}
+	if !strings.HasPrefix(err.Error(), "the provisioning command line was refused: ") {
+		t.Fatalf("Provision() error = %q, want the refused command line named", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("the provisioner ran %d times over a refused command line, want none", len(*calls))
+	}
+	if len(*logs) != 0 {
+		t.Fatalf("the run logged %q over a refused command line, want nothing", *logs)
+	}
+}
+
 // provisionFakeCutover is a cutover over an in-process Forgejo: the real
 // forgejoprov.Run, the fake's transport, a token file read through the seam, and a
 // config home under t.TempDir. The repository is one the fake holds, and the viewer
