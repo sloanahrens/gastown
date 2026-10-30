@@ -109,7 +109,7 @@ func TestFetchClaudeCLIFailsOnAMismatchAndLeavesNothing(t *testing.T) {
 	t.Parallel()
 	f := &fakeFetcher{body: bytes.NewReader([]byte("tampered"))}
 	b := claudeBuilder(t, f)
-	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes))
+	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes), claudeCLIMaxBytes)
 	if err == nil {
 		t.Fatalf("a mismatched download returned %q and no error", path)
 	}
@@ -128,7 +128,7 @@ func TestFetchClaudeCLIReturnsTheVerifiedBinary(t *testing.T) {
 	t.Parallel()
 	f := &fakeFetcher{body: bytes.NewReader(claudeBytes)}
 	b := claudeBuilder(t, f)
-	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes))
+	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes), claudeCLIMaxBytes)
 	if err != nil {
 		t.Fatalf("fetchClaudeCLI: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestFetchClaudeCLIFailedDownloadLeavesNothing(t *testing.T) {
 	t.Parallel()
 	f := &fakeFetcher{err: errors.New("connection refused")}
 	b := claudeBuilder(t, f)
-	if _, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes)); err == nil {
+	if _, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes), claudeCLIMaxBytes); err == nil {
 		t.Fatal("a failed download returned no error")
 	}
 	if got := dirNames(t, b.Out); len(got) != 0 {
@@ -169,7 +169,7 @@ func TestFetchClaudeCLIInterruptedReadLeavesNothing(t *testing.T) {
 	body := io.MultiReader(bytes.NewReader(claudeBytes[:4]), iotest.ErrReader(errors.New("connection reset")))
 	f := &fakeFetcher{body: body}
 	b := claudeBuilder(t, f)
-	if _, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes)); err == nil {
+	if _, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes), claudeCLIMaxBytes); err == nil {
 		t.Fatal("an interrupted download returned no error")
 	}
 	if got := dirNames(t, b.Out); len(got) != 0 {
@@ -183,9 +183,87 @@ func TestFetchClaudeCLIFailsWhenTheTempFileCannotBeMade(t *testing.T) {
 	t.Parallel()
 	f := &fakeFetcher{body: bytes.NewReader(claudeBytes)}
 	b := Builder{Out: filepath.Join(t.TempDir(), "missing"), Fetch: f.fetch}
-	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes))
+	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes), claudeCLIMaxBytes)
 	if err == nil || !strings.Contains(err.Error(), "cannot stage the claude CLI") {
 		t.Fatalf("fetchClaudeCLI = %q, %v; want an error naming the staging step", path, err)
+	}
+}
+
+// endlessStream serves bytes without end and fails the read that serves past
+// limit. An unbounded copy reads the whole stream; the test fails at the read
+// that goes over, rather than letting the copy run on.
+type endlessStream struct {
+	t     *testing.T
+	limit int64
+	read  int64
+}
+
+func (s *endlessStream) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	s.read += int64(len(p))
+	if s.read > s.limit {
+		s.t.Errorf("the fetch read %d bytes of a stream the bound caps at %d", s.read, s.limit-1)
+		return 0, errors.New("stream read past its limit")
+	}
+	return len(p), nil
+}
+
+// TestFetchClaudeCLIRefusesADownloadOneByteOverTheBound: a download one byte over
+// the bound is refused even when its sha256 matches the pin, so the bound is not
+// skipped by a correct checksum. It returns an error naming the bound and leaves
+// nothing in the build context.
+func TestFetchClaudeCLIRefusesADownloadOneByteOverTheBound(t *testing.T) {
+	t.Parallel()
+	const max = 16
+	content := bytes.Repeat([]byte("x"), max+1)
+	f := &fakeFetcher{body: bytes.NewReader(content)}
+	b := claudeBuilder(t, f)
+	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(content), max)
+	if err == nil || !strings.Contains(err.Error(), "bound") {
+		t.Fatalf("fetchClaudeCLI = %q, %v; want an error naming the bound", path, err)
+	}
+	if got := dirNames(t, b.Out); len(got) != 0 {
+		t.Errorf("a download over the bound left %q in the build context, want nothing", got)
+	}
+}
+
+// TestFetchClaudeCLIStopsReadingAtTheBound: a stream that never ends is refused
+// after the bound plus one byte, so the copy is never allowed to read past it.
+func TestFetchClaudeCLIStopsReadingAtTheBound(t *testing.T) {
+	t.Parallel()
+	const max = 16
+	body := &endlessStream{t: t, limit: max + 1}
+	f := &fakeFetcher{body: body}
+	b := claudeBuilder(t, f)
+	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes), max)
+	if err == nil || !strings.Contains(err.Error(), "bound") {
+		t.Fatalf("fetchClaudeCLI = %q, %v; want an error naming the bound", path, err)
+	}
+	if got := dirNames(t, b.Out); len(got) != 0 {
+		t.Errorf("an endless download left %q in the build context, want nothing", got)
+	}
+}
+
+// TestFetchClaudeCLIAcceptsADownloadAtTheBound: a download of exactly the bound,
+// with a matching sha256, is written, so the bound refuses only what is over it.
+func TestFetchClaudeCLIAcceptsADownloadAtTheBound(t *testing.T) {
+	t.Parallel()
+	const max = 16
+	content := bytes.Repeat([]byte("x"), max)
+	f := &fakeFetcher{body: bytes.NewReader(content)}
+	b := claudeBuilder(t, f)
+	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(content), max)
+	if err != nil {
+		t.Fatalf("fetchClaudeCLI at the bound: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the returned binary: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("the binary holds %d bytes, want the %d the fetch served", len(got), len(content))
 	}
 }
 
@@ -211,7 +289,7 @@ func TestFetchClaudeCLIFailsWhenTheTempFileDoesNotClose(t *testing.T) {
 		}
 		return closeFailsFile{tmp}, nil
 	}
-	path, err := b.fetchClaudeCLIWith(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes), create)
+	path, err := b.fetchClaudeCLIWith(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes), claudeCLIMaxBytes, create)
 	if err == nil || !strings.Contains(err.Error(), "cannot write the claude CLI") {
 		t.Fatalf("fetchClaudeCLIWith = %q, %v; want an error naming the write", path, err)
 	}
@@ -230,7 +308,7 @@ func TestFetchClaudeCLIFailsWhenTheNameIsTaken(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(b.Out, "claude"), 0o755); err != nil {
 		t.Fatalf("making the claude directory: %v", err)
 	}
-	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes))
+	path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", "2.1.314", claudeSum(claudeBytes), claudeCLIMaxBytes)
 	if err == nil || !strings.Contains(err.Error(), "cannot move the claude CLI") {
 		t.Fatalf("fetchClaudeCLI = %q, %v; want an error naming the move", path, err)
 	}
@@ -261,7 +339,7 @@ func TestFetchClaudeCLIRefusesBeforeFetching(t *testing.T) {
 			f := &fakeFetcher{body: bytes.NewReader(claudeBytes)}
 			b := claudeBuilder(t, f)
 			tc.breakIt(&b)
-			path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", tc.version, tc.sha)
+			path, err := b.fetchClaudeCLI(context.Background(), "https://example.test/claude", tc.version, tc.sha, claudeCLIMaxBytes)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("fetchClaudeCLI = %q, %v; want an error naming %q", path, err, tc.want)
 			}
