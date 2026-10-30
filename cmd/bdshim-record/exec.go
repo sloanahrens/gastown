@@ -21,19 +21,37 @@ import (
 // runLimit bounds one bd run, so a hung bd fails the recording instead of stalling it.
 const runLimit = time.Minute
 
+// childBD is every bd process a recorder starts: the rows' runs, the workspace the guard makes, and
+// the read-only answer the guard resolves (gt-p85pw.115). main wires it to the binary -bd names; a
+// unit test injects a fake, since a unit test may not start a process.
+type childBD struct {
+	Run   Runner
+	Env   func(dir string) []string
+	Where Resolver
+}
+
+// execChild returns the child bd the binary bin names, every call carrying the recording
+// environment built from base.
+func execChild(bin string) childBD {
+	base := os.Environ()
+	return childBD{
+		Run:   execBD(bin, base),
+		Env:   func(dir string) []string { return childEnv(base, dir) },
+		Where: whereBD(bin),
+	}
+}
+
 // execBD returns a Runner that runs the bd binary bin in dir with the Dolt server's address passed
-// through from the environment and the store selectors dropped (gt-p85pw.92).
+// through from base and the workspace beside dir pinned (gt-p85pw.92, gt-p85pw.115).
 //
 // The address passes through because a fresh copy has no .beads of its own when bd init makes its
-// database, so the environment is the only thing that can name the server. The selectors are
-// dropped because a BEADS_DIR or BEADS_DOLT_SERVER_DATABASE inherited from the operator's shell
-// would otherwise aim every row at the live store instead of the copy it runs in. bdshim.ExecRunner
-// cannot serve here: it strips every BEADS_DOLT_* variable, leaving bd init with no server.
-func execBD(bin string) Runner {
+// database, so the environment is the only thing that can name the server. bdshim.ExecRunner cannot
+// serve here: it strips every BEADS_DOLT_* variable, leaving bd init with no server.
+func execBD(bin string, base []string) Runner {
 	return func(dir string, args []string) ([]byte, int, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), runLimit)
 		defer cancel()
-		c := bdCommand(ctx, bin, dir, args, os.Environ())
+		c := bdCommand(ctx, bin, dir, args, base)
 		var stdout bytes.Buffer
 		c.Stdout = &stdout
 		c.Stderr = os.Stderr
@@ -42,25 +60,94 @@ func execBD(bin string) Runner {
 	}
 }
 
+// whereBD returns a Resolver that asks bd which workspace it resolves in dir: bd where --json names
+// the active beads location, which is the one read-only answer the guard trusts (gt-p85pw.115).
+func whereBD(bin string) Resolver {
+	return func(dir string, env []string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), runLimit)
+		defer cancel()
+		c := bdCommandWith(ctx, bin, dir, []string{"where", "--json"}, env)
+		var stdout bytes.Buffer
+		c.Stdout = &stdout
+		c.Stderr = os.Stderr
+		err := c.Run()
+		return whereResult(stdout.Bytes(), err, errors.Is(ctx.Err(), context.DeadlineExceeded))
+	}
+}
+
+// whereResult turns how the bd where run ended into the workspace it named. A run that timed out or
+// never finished is an error, so a workspace is never read out of an answer bd did not give.
+func whereResult(stdout []byte, runErr error, timedOut bool) (string, error) {
+	if timedOut {
+		return "", fmt.Errorf("bd where ran past %s", runLimit)
+	}
+	if runErr != nil {
+		return "", fmt.Errorf("bd where: %w", runErr)
+	}
+	return workspaceFromWhere(stdout)
+}
+
+// workspaceFromWhere reads the workspace out of bd where's JSON answer. An answer that does not
+// parse is an error rather than an empty workspace, so a bd the recorder cannot read is refused
+// instead of taken for one that named nothing.
+func workspaceFromWhere(stdout []byte) (string, error) {
+	var answer struct {
+		Data struct {
+			Path string `json:"path"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout, &answer); err != nil {
+		return "", fmt.Errorf("bd where did not answer with JSON: %w", err)
+	}
+	return answer.Data.Path, nil
+}
+
 // bdCommand returns the command one bd run is: bin with args, run in dir, carrying the recording
-// environment built from base, so bd works on the copy it runs in and records the recorder as the
-// author of every bead it writes (gt-p85pw.103).
+// environment built from base, so bd works on the workspace beside dir and records the recorder as
+// the author of every bead it writes (gt-p85pw.103).
 func bdCommand(ctx context.Context, bin, dir string, args, base []string) *exec.Cmd {
+	return bdCommandWith(ctx, bin, dir, args, childEnv(base, dir))
+}
+
+// bdCommandWith returns a bd process run in dir with env already built, so the guard can resolve
+// with the exact environment a child is given.
+func bdCommandWith(ctx context.Context, bin, dir string, args, env []string) *exec.Cmd {
 	c := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin is the bd binary the operator names; args are the recording's fixed rows
 	c.Dir = dir
-	c.Env = recordingEnv(base)
+	c.Env = env
 	c.WaitDelay = time.Second
 	return c
 }
 
-// storeSelectors are the variables that name the store bd works on, as a .beads directory, a
-// database file, or a server database.
-var storeSelectors = []string{
+// beadsDirIn names the workspace beside dir, which is the one the recorder makes for a bd that runs
+// there.
+func beadsDirIn(dir string) string {
+	return filepath.Join(dir, ".beads")
+}
+
+// childEnv is the environment a bd run in dir gets: the recording environment with the workspace
+// beside dir pinned into it (gt-p85pw.115).
+func childEnv(base []string, dir string) []string {
+	return recordingEnv(base, beadsDirIn(dir))
+}
+
+// workspaceVars are the variables the beads fork reads to find the workspace a run works in: the
+// .beads directory, the database file, the shared server's directory and the Dolt data directory.
+// It is the list internal/beads strips as its bdTargetEnvKeys, and the one stripped list older here
+// went by. Each is pinned to the workspace the recorder made, so a value inherited from the
+// operator's shell cannot aim a run at another store (gt-p85pw.115).
+var workspaceVars = []string{
 	"BEADS_DIR",
 	"BEADS_DB",
 	"BD_DB",
 	"BEADS_SHARED_SERVER_DIR",
 	"GT_DOLT_DATA",
+}
+
+// storeSelectors are the variables naming a store that is not the workspace the recorder made: the
+// server database a run would otherwise be aimed at. They are dropped rather than pinned, since a
+// copy's own database is the one its .beads metadata names (gt-p85pw.92).
+var storeSelectors = []string{
 	"BEADS_DOLT_SERVER_DATABASE",
 }
 
@@ -76,11 +163,15 @@ var pinnedIdentity = [][2]string{
 	{"GIT_COMMITTER_EMAIL", "bdshim-record@example.invalid"},
 }
 
-// recordingEnv returns base without the store selectors, so bd works on the copy it runs in, and
-// with the identity pinned, so bd records the recorder as the author of every bead it writes.
-func recordingEnv(base []string) []string {
+// recordingEnv returns base with every workspace variable pinned to beadsDir and the store selectors
+// dropped, so bd works on the workspace the recorder made, and with the identity pinned, so bd
+// records the recorder as the author of every bead it writes.
+func recordingEnv(base []string, beadsDir string) []string {
 	for _, key := range storeSelectors {
 		base = beads.StripEnvKey(base, key)
+	}
+	for _, key := range workspaceVars {
+		base = append(beads.StripEnvKey(base, key), key+"="+beadsDir)
 	}
 	for _, pinned := range pinnedIdentity {
 		base = append(beads.StripEnvKey(base, pinned[0]), pinned[0]+"="+pinned[1])
@@ -175,9 +266,10 @@ func provisionCopy(run Runner, fixture, scratch string) (string, func() error, e
 	return dir, remove, nil
 }
 
-// initDatabase makes the copy's database with bd init. The flags beyond --database and --prefix
-// keep the init off the operator's tree: a copy sits inside the worktree, where bd would otherwise
-// install git hooks, and a terminal run would otherwise wait for an answer (gt-p85pw.92).
+// initDatabase makes the workspace in dir with bd init, for a copy and for the scratch the guard
+// checks. The flags beyond --database and --prefix keep the init off the operator's tree: the
+// directory sits inside the worktree, where bd would otherwise install git hooks, and a terminal
+// run would otherwise wait for an answer (gt-p85pw.92).
 func initDatabase(run Runner, dir, name string) error {
 	args := []string{
 		"init", "--database", name, "--prefix", fixturePrefix,
