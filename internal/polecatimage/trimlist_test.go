@@ -595,3 +595,80 @@ func TestTrimListWriteDoesNotWriteThroughAStaleTemporary(t *testing.T) {
 		t.Errorf("the list at its destination is %q, want %q", list, want)
 	}
 }
+
+// TestTrimListingNamesTheCacheEachFileBelongsTo pins the listing the helper prints and its caller
+// builds a trim from: every cache file, by its claim-relative path, with the cache that decides which
+// rule may remove it and the times PlanTrim orders by. A reader that cannot tell the two caches apart
+// would hand PlanTrim a module-cache file as a build-cache one.
+func TestTrimListingNamesTheCacheEachFileBelongsTo(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	plantCacheFile(t, filepath.Join(root, cachevol.SeedBuildCacheDir, "ab", "cdef"), 100, testTime)
+	plantCacheFile(t, filepath.Join(root, cachevol.SeedModuleCacheDir, "mod", "x"), 200, testTime)
+	plantCacheFile(t, filepath.Join(root, "source", "rig", ".git", "HEAD"), 10, testTime)
+
+	listing, err := trimListing(root, filepath.Walk)
+	if err != nil {
+		t.Fatalf("trimListing: %v", err)
+	}
+	want := map[string]struct {
+		cache string
+		size  int64
+	}{
+		cachevol.SeedBuildCacheDir + "/ab/cdef": {TrimListCacheBuild, 100},
+		cachevol.SeedModuleCacheDir + "/mod/x":  {TrimListCacheModule, 200},
+	}
+	got := make(map[string]struct {
+		cache string
+		size  int64
+	}, len(listing))
+	for _, entry := range listing {
+		got[entry.Path] = struct {
+			cache string
+			size  int64
+		}{entry.Cache, entry.Size}
+		if !entry.Atime.Equal(testTime) || !entry.Mtime.Equal(testTime) {
+			t.Errorf("the entry %s carries atime %v mtime %v, want both %v", entry.Path, entry.Atime, entry.Mtime, testTime)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the listing is %+v, want %+v", got, want)
+	}
+}
+
+// TestTrimListMainPrintsTheListing drives the helper a caller runs: the claim's listing on stdout as
+// JSON, and a claim it cannot read is exit 3 with the reason, never a partial listing.
+func TestTrimListMainPrintsTheListing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	plantCacheFile(t, filepath.Join(root, cachevol.SeedBuildCacheDir, "ab", "cdef"), 100, testTime)
+
+	var stdout, stderr bytes.Buffer
+	if code := trimListMain([]string{"--root", root}, &stdout, &stderr); code != 0 {
+		t.Fatalf("trim-list exit = %d, want 0 (stderr %q)", code, stderr.String())
+	}
+	var entries []trimListEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("trim-list printed %q, want a JSON listing: %v", stdout.String(), err)
+	}
+	if len(entries) != 1 || entries[0].Path != cachevol.SeedBuildCacheDir+"/ab/cdef" || entries[0].Cache != TrimListCacheBuild {
+		t.Errorf("trim-list printed %+v, want the one build-cache file", entries)
+	}
+}
+
+// TestTrimListMainRefusesAClaimItCannotRead pins the fail-closed read: a root that is not there is
+// exit 3 with the reason, since an empty listing would plan a trim of a claim nothing looked at.
+func TestTrimListMainRefusesAClaimItCannotRead(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	code := trimListMain([]string{"--root", filepath.Join(t.TempDir(), "missing")}, &stdout, &stderr)
+	if code != 3 {
+		t.Fatalf("trim-list exit = %d, want 3", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("trim-list printed %q for a claim it could not read, want nothing", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "trim-list:") {
+		t.Errorf("stderr = %q, want the reason", stderr.String())
+	}
+}
