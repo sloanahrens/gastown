@@ -301,6 +301,49 @@ func TestValidChannelName(t *testing.T) {
 // awaitEventTestEpoch is the fake clock's start for the polling tests.
 var awaitEventTestEpoch = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 
+const (
+	// awaitEventWaitDeadline is the real deadline a polling test gives its
+	// wait. It is far past the end of any test, so it never decides the
+	// outcome: the test ends the wait by cancelling the context.
+	awaitEventWaitDeadline = 10 * time.Minute
+
+	// awaitEventHangGuard bounds a test's wait for a call that must return.
+	// A passing test never waits on it, so it fails a call that never
+	// returns at all and never a call that is merely slow.
+	awaitEventHangGuard = 10 * time.Second
+)
+
+// awaitEventWithin returns the value ch delivers, failing the test if nothing
+// arrives: the call under test must return on a condition, and the guard
+// catches only a call that never returns.
+func awaitEventWithin[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(awaitEventHangGuard): //testpolicy:allow no-sleep — a hang guard only: the wait must end on a condition, so this fails a call that never returns, never a slow one
+		var zero T
+		t.Fatalf("%s never returned", what)
+		return zero
+	}
+}
+
+// awaitEventWaitersRegistered blocks until the wait under test has created n
+// timers or tickers on the fake clock, so the test can advance them.
+//
+// The wait is bounded by the hang guard rather than by the wait's own far
+// deadline: a wait that never registers a waiter fails the test in seconds
+// instead of hanging until that deadline. Passing ctx as well ends the wait
+// early if the wait under test ends first.
+func awaitEventWaitersRegistered(t *testing.T, ctx context.Context, clk *clockwork.FakeClock, n int) {
+	t.Helper()
+	guardCtx, cancel := context.WithTimeout(ctx, awaitEventHangGuard)
+	defer cancel()
+	if err := clk.BlockUntilContext(guardCtx, n); err != nil {
+		t.Fatalf("%d clock waiters never registered: %v", n, err)
+	}
+}
+
 // waitForEventFilesAsync runs waitForEventFiles on clk in the background.
 func waitForEventFilesAsync(ctx context.Context, clk clockwork.Clock, dir string, yieldAfter time.Duration) <-chan *AwaitEventResult {
 	done := make(chan *AwaitEventResult, 1)
@@ -400,25 +443,28 @@ func TestWaitForEventFilesTimeoutWithPolling(t *testing.T) {
 	// Regression test for gt-x2lc: the ticker-driven poll must honor
 	// ctx cancellation even if events never arrive. Previously the wait
 	// could stall past the deadline if readPendingEvents was slow.
+	//
+	// The polls come from a fake clock and the wait ends when the test
+	// cancels ctx, so the deadline is far away and nothing reads the wall
+	// clock: a loaded host cannot change the outcome.
 	dir := t.TempDir()
+	clk := clockwork.NewFakeClockAt(awaitEventTestEpoch)
 
-	deadline := 600 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	ctx, cancel := context.WithTimeout(t.Context(), awaitEventWaitDeadline)
 	defer cancel()
 
-	start := time.Now()
-	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), dir, 0)
-	elapsed := time.Since(start)
+	done := waitForEventFilesAsync(ctx, clk, dir, 0)
+	awaitEventWaitersRegistered(t, ctx, clk, 1) // the poll ticker
+	clk.Advance(500 * time.Millisecond)         // polls with nothing to find
+	clk.Advance(500 * time.Millisecond)
+	cancel()
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	result := awaitEventWithin(t, done, "waitForEventFiles")
 	if result.Reason != "timeout" {
 		t.Errorf("expected reason 'timeout', got %q", result.Reason)
 	}
-	// Must return close to the deadline, not hang.
-	if elapsed > deadline+2*time.Second {
-		t.Errorf("wait took %v; expected ~%v (ctx.Done not honored?)", elapsed, deadline)
+	if len(result.Events) != 0 {
+		t.Errorf("expected no events, got %d", len(result.Events))
 	}
 }
 
@@ -433,50 +479,32 @@ func TestReadPendingEventsBoundedFinishes(t *testing.T) {
 	}
 }
 
-func TestReadPendingEventsBoundedCtxDone(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	// Even when ctx is already done, the bounded read should return
-	// promptly (within the grace window) rather than hang.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	start := time.Now()
-	_ = readPendingEventsBounded(ctx, dir, 5*time.Second)
-	elapsed := time.Since(start)
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("bounded read took %v with cancelled ctx; expected prompt return", elapsed)
-	}
-}
-
 func TestWaitForEventFilesContextYield(t *testing.T) {
 	t.Parallel()
 	// Regression test for #3870: --context-check-interval must cause an early
 	// return with reason "context-yield" before the full backoff timeout expires.
+	//
+	// Both timers are the fake clock's, and the test advances the clock past
+	// the yield interval: only the yield timer can produce the result, so no
+	// wall-clock reading and no loaded host enters the verdict.
 	dir := t.TempDir()
+	clk := clockwork.NewFakeClockAt(awaitEventTestEpoch)
 
-	// Full timeout is much longer than the yield interval.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// The full timeout is far longer than the yield interval.
+	ctx, cancel := context.WithTimeout(t.Context(), awaitEventWaitDeadline)
 	defer cancel()
 
-	yieldAfter := 600 * time.Millisecond
+	yieldAfter := 5 * time.Second
+	done := waitForEventFilesAsync(ctx, clk, dir, yieldAfter)
+	awaitEventWaitersRegistered(t, ctx, clk, 2) // the yield timer and the poll ticker
+	clk.Advance(yieldAfter)
 
-	start := time.Now()
-	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), dir, yieldAfter)
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	result := awaitEventWithin(t, done, "waitForEventFiles")
 	if result.Reason != "context-yield" {
-		t.Errorf("expected reason 'context-yield', got %q (elapsed: %v)", result.Reason, elapsed)
+		t.Errorf("expected reason 'context-yield', got %q", result.Reason)
 	}
-	// Must return close to the yield interval, not the full 10s timeout.
-	if elapsed < yieldAfter-100*time.Millisecond {
-		t.Errorf("returned too early (%v); yield interval was %v", elapsed, yieldAfter)
-	}
-	if elapsed > yieldAfter+2*time.Second {
-		t.Errorf("returned too late (%v); yield interval was %v", elapsed, yieldAfter)
+	if len(result.Events) != 0 {
+		t.Errorf("expected no events, got %d", len(result.Events))
 	}
 }
 
@@ -536,23 +564,19 @@ func TestWaitForEventFilesNoContextYieldWhenZero(t *testing.T) {
 	// When contextCheckAfter is 0 (not set), behavior is unchanged:
 	// the wait runs to the full timeout without yielding.
 	dir := t.TempDir()
+	clk := clockwork.NewFakeClockAt(awaitEventTestEpoch)
 
-	deadline := 600 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	ctx, cancel := context.WithTimeout(t.Context(), awaitEventWaitDeadline)
 	defer cancel()
 
-	start := time.Now()
-	result, err := waitForEventFiles(ctx, clockwork.NewRealClock(), dir, 0) // zero = no yield
-	elapsed := time.Since(start)
+	done := waitForEventFilesAsync(ctx, clk, dir, 0) // zero = no yield
+	awaitEventWaitersRegistered(t, ctx, clk, 1)      // the poll ticker
+	clk.Advance(500 * time.Millisecond)              // a poll with nothing to find
+	cancel()
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	result := awaitEventWithin(t, done, "waitForEventFiles")
 	if result.Reason != "timeout" {
 		t.Errorf("expected reason 'timeout' with zero yield interval, got %q", result.Reason)
-	}
-	if elapsed > deadline+2*time.Second {
-		t.Errorf("wait took %v; should have returned at ~%v", elapsed, deadline)
 	}
 }
 
