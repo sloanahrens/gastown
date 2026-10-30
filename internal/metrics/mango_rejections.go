@@ -69,7 +69,7 @@ var rejectionPatterns = []rejectionPattern{
 	{Name: "unshown_verification", Rule: 6, Phrases: []string{"no shown output", "verification claim"}},
 	{Name: "hermeticity", Rule: 7, Phrases: []string{"not hermetic", "$shell", "live town tree"}},
 	{Name: "script", Rule: 8, Phrases: []string{"shell script", "python script"}},
-	{Name: "out_of_scope", Rule: 9, Phrases: []string{"outside the stated scope", "unexplained transitive dependency"}},
+	{Name: "out_of_scope", Rule: 9, Phrases: []string{"outside the bead's constraints", "unexplained transitive dependency"}},
 	{Name: "call_site_untested", Rule: 10, Phrases: []string{"helper directly", "call site"}},
 	{Name: "secrets_in_errors", Rule: 11, Phrases: []string{"captured output", "captured command output"}},
 }

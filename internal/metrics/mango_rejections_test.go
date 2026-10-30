@@ -63,7 +63,7 @@ var rejectionFixtures = []struct {
 	{"a test reads the live town tree instead of a temp dir", "hermeticity"},
 	{"new parsing and state logic added to a shell script", "script"},
 	{"a new python script parses the config", "script"},
-	{"change touches files outside the stated scope", "out_of_scope"},
+	{"the diff edits a file outside the bead's Constraints", "out_of_scope"},
 	{"a go.mod bump with an unexplained transitive dependency", "out_of_scope"},
 	{"a test that calls the helper directly", "call_site_untested"},
 	{"the test calls the helper, so deleting the call site leaves it green", "call_site_untested"},
