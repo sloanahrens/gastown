@@ -523,6 +523,107 @@ func TestImportNeverPrintsTheToken(t *testing.T) {
 	}
 }
 
+// queryToken stands in for a token an operator-supplied remote carries in its query
+// string, which util.RedactURL keeps.
+const queryToken = "query-token-value"
+
+// redactionOpts is tokenOpts with the query token in both sides' git URLs.
+func redactionOpts() Options {
+	opts := tokenOpts()
+	opts.GitHubURL += "?token=" + queryToken
+	opts.AdminGitURL += "?token=" + queryToken
+	return opts
+}
+
+// errGitRefused is the sentinel a fake git call fails with. A test matches it
+// through errors.Is after the error is redacted.
+var errGitRefused = errors.New("git refused the call")
+
+// gitErrPrints is the error a git call fails with when git prints the URL it was
+// given, the way the binary does, wrapping errGitRefused.
+func gitErrPrints(raw string) error {
+	return fmt.Errorf("fatal: unable to access '%s': %w", raw, errGitRefused)
+}
+
+// TestImportRedactsGitErrorText pins that a git error which prints a URL with its
+// password and query token reaches neither the returned error nor the log, and that
+// the returned error still matches the git error it wraps. Each row drives one call
+// site that formats such an error, so removing that site's redactErr turns its row
+// red.
+func TestImportRedactsGitErrorText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		staged func(Options) map[string][]lsReply
+		fail   string // the subcommand whose call fails with a URL-bearing error, "" for none
+	}{
+		{
+			name: "the GitHub listing's git error",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{opts.GitHubURL: {lsFails(gitErrPrints(opts.GitHubURL))}}
+			},
+		},
+		{
+			name: "the admin base listing's git error",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{
+					opts.GitHubURL:   {lsOK(stagedAnswers().github)},
+					opts.AdminGitURL: {lsFails(gitErrPrints(opts.AdminGitURL))},
+				}
+			},
+		},
+		{
+			name:   "the fetch's git error",
+			staged: convergedListings,
+			fail:   "fetch",
+		},
+		{
+			name:   "the push's git error",
+			staged: convergedListings,
+			fail:   "push",
+		},
+		{
+			name:   "the plan's git error",
+			staged: convergedListings,
+			fail:   "merge-base",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := redactionOpts()
+			git := newImportGitFake(tt.staged(opts))
+			git.ancestor = map[string]bool{shaMiddle + ">" + shaTip: true}
+			git.ahead = map[string]string{shaMiddle + ">" + shaTip: "2"}
+			if tt.fail != "" {
+				git.fail = map[string]error{tt.fail: gitErrPrints(opts.AdminGitURL)}
+			}
+			c, logs := newImportCutover(t, git, opts)
+
+			err := c.ImportRefs()
+			if err == nil {
+				t.Fatalf("the failing git call did not refuse the run; %d log line(s)", len(*logs))
+			}
+			if !errors.Is(err, errGitRefused) {
+				t.Fatal("the refusal no longer matches the git error it wraps")
+			}
+			secrets := []string{testToken, queryToken, opts.GitHubURL, opts.AdminGitURL}
+			for _, secret := range secrets {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("the refusal carries %q", secret)
+				}
+			}
+			for i, line := range *logs {
+				for _, secret := range secrets {
+					if strings.Contains(line, secret) {
+						t.Fatalf("log line %d carries %q", i, secret)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestImportFinalComparison pins the last comparison's two messages: the count it
 // reports on success, and the refusal that names each GitHub ref Forgejo lacks
 // after the push.

@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/forgejoresync"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Cutover is one cutover run: the options it was parsed with, the git it reads and
@@ -54,12 +54,12 @@ var forgejoRefspecs = []string{"+refs/heads/*:refs/forgejo/heads/*", "+refs/tags
 // over has Forgejo ahead of a frozen GitHub, and a forced push would discard every
 // commit landed since (gt-fn9e6.51).
 //
-// Every URL this run prints goes through util.RedactURL first: an operator-supplied
+// Every URL this run prints goes through printedURL first: an operator-supplied
 // remote can carry a credential in its userinfo, and the log is read and pasted
 // into a bead.
 func (c *Cutover) ImportRefs() error {
 	o := c.Opts
-	c.logf("importing every GitHub ref through %s without force", util.RedactURL(o.AdminGitURL))
+	c.logf("importing every GitHub ref through %s without force", printedURL(o.AdminGitURL))
 
 	githubBefore, err := c.listRefs(o.GitHubURL)
 	if err != nil {
@@ -81,7 +81,7 @@ func (c *Cutover) ImportRefs() error {
 
 	plan, err := Plan(githubBefore, forgejoBefore, ExecRefGit{Dir: scratch, Run: c.git()})
 	if err != nil {
-		return err
+		return c.redact(err)
 	}
 	specs, diverged := c.importSpecs(plan)
 	if len(diverged) > 0 && !o.AcceptDiverged {
@@ -95,7 +95,7 @@ func (c *Cutover) ImportRefs() error {
 	if len(specs) == 0 {
 		c.logf("no GitHub ref needs importing")
 	} else {
-		c.logf("+ git -C %s push --quiet -- %s %s", scratch, util.RedactURL(o.AdminGitURL), strings.Join(specs, " "))
+		c.logf("+ git -C %s push --quiet -- %s %s", scratch, printedURL(o.AdminGitURL), strings.Join(specs, " "))
 		if !o.DryRun {
 			if err := pushRefs(c.git(), scratch, o.AdminGitURL, specs); err != nil {
 				return err
@@ -167,14 +167,14 @@ func missingNames(github, forgejo []forgejoresync.Ref) []string {
 
 // listRefs logs and reads one side's branch and tag listing, sorted by ref name.
 func (c *Cutover) listRefs(url string) ([]forgejoresync.Ref, error) {
-	c.logf("+ git ls-remote --heads --tags --refs %s", util.RedactURL(url))
+	c.logf("+ git ls-remote --heads --tags --refs %s", printedURL(url))
 	out, err := forgejoresync.ExecGit{Run: c.git()}.LsRemote(url)
 	if err != nil {
-		return nil, fmt.Errorf("could not list the refs at %s: %w", util.RedactURL(url), err)
+		return nil, c.redact(fmt.Errorf("could not list the refs at %s: %w", printedURL(url), err))
 	}
 	refs, err := forgejoresync.ParseRefs(out)
 	if err != nil {
-		return nil, fmt.Errorf("could not read the ref listing at %s: %w", util.RedactURL(url), err)
+		return nil, c.redact(fmt.Errorf("could not read the ref listing at %s: %w", printedURL(url), err))
 	}
 	return refs, nil
 }
@@ -186,7 +186,7 @@ func (c *Cutover) fetchBoth(scratch string) error {
 	git := forgejoresync.ExecGit{Run: c.git()}
 	c.logf("+ git init --bare --quiet %s", scratch)
 	if err := git.InitBare(scratch); err != nil {
-		return fmt.Errorf("could not make the scratch repository %s: %w", scratch, err)
+		return c.redact(fmt.Errorf("could not make the scratch repository %s: %w", scratch, err))
 	}
 	for _, side := range []struct {
 		url      string
@@ -195,9 +195,9 @@ func (c *Cutover) fetchBoth(scratch string) error {
 		{url: c.Opts.AdminGitURL, refspecs: forgejoRefspecs},
 		{url: c.Opts.GitHubURL, refspecs: forgejoresync.Refspecs},
 	} {
-		c.logf("+ git -C %s fetch --quiet -- %s %s", scratch, util.RedactURL(side.url), strings.Join(side.refspecs, " "))
+		c.logf("+ git -C %s fetch --quiet -- %s %s", scratch, printedURL(side.url), strings.Join(side.refspecs, " "))
 		if err := git.Fetch(scratch, side.url, side.refspecs...); err != nil {
-			return fmt.Errorf("could not fetch %s into the scratch repository: %w", util.RedactURL(side.url), err)
+			return c.redact(fmt.Errorf("could not fetch %s into the scratch repository: %w", printedURL(side.url), err))
 		}
 	}
 	return nil
@@ -209,9 +209,92 @@ func (c *Cutover) fetchBoth(scratch string) error {
 func pushRefs(git forgejoresync.Runner, scratch, url string, specs []string) error {
 	argv := append([]string{"git", "-C", scratch, "push", "--quiet", "--", url}, specs...)
 	if _, err := git(context.Background(), argv); err != nil {
-		return fmt.Errorf("the push of %d ref(s) to the admin base failed: %w", len(specs), err)
+		return redactErr(fmt.Errorf("the push of %d ref(s) to the admin base failed: %w", len(specs), err), url)
 	}
 	return nil
+}
+
+// redactErr returns err with each URL, and each credential those URLs carry, taken
+// out of its text. A git error prints the URL it was given, and a URL can hold a
+// password in its userinfo or a token in its query, so the text is scrubbed here,
+// where the URL is in scope, not at each place a URL is formatted. The error it
+// was made from stays in the chain, so errors.Is and errors.As still match.
+func redactErr(err error, urls ...string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	clean := msg
+	// Every URL goes first: a credential taken out early would stop a raw URL
+	// that holds it from matching.
+	for _, raw := range urls {
+		if raw != "" {
+			clean = strings.ReplaceAll(clean, raw, printedURL(raw))
+		}
+	}
+	for _, raw := range urls {
+		for _, secret := range urlSecrets(raw) {
+			clean = strings.ReplaceAll(clean, secret, "[redacted]")
+		}
+	}
+	if clean == msg {
+		return err
+	}
+	return &redactedError{msg: clean, err: err}
+}
+
+// printedURL is how a URL reads in the run's log and its errors: without its userinfo
+// and without its query, since a query can carry a token as easily as userinfo can
+// carry a password. A URL that does not parse reads "[redacted]", as no part of it
+// can be told apart from a credential. Text with no scheme is returned as it is.
+func printedURL(raw string) string {
+	if !strings.Contains(raw, "://") {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[redacted]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	return u.String()
+}
+
+// urlSecrets are the credentials a URL carries: its password and every query value.
+// An unparsed URL has none to report, and printedURL already hides it whole.
+func urlSecrets(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	var secrets []string
+	if pass, ok := u.User.Password(); ok && pass != "" {
+		secrets = append(secrets, pass)
+	}
+	for _, values := range u.Query() {
+		for _, v := range values {
+			if v != "" {
+				secrets = append(secrets, v)
+			}
+		}
+	}
+	return secrets
+}
+
+// redactedError is an error whose text has its credentials taken out. It keeps the
+// error it was made from, so errors.Is and errors.As still match through it.
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+
+func (e *redactedError) Unwrap() error { return e.err }
+
+// redact is redactErr over the two git URLs this run reads and pushes through.
+func (c *Cutover) redact(err error) error {
+	return redactErr(err, c.Opts.GitHubURL, c.Opts.AdminGitURL)
 }
 
 // makeScratch creates the scratch directory and returns the bare repository inside
