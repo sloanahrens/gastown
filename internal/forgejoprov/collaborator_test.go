@@ -27,6 +27,7 @@ func (s *statusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // for the polecat and landing bots, read for the viewer, none for the registry, and an
 // error for a role no table names.
 func TestCollaboratorPermissionTable(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		role    string
@@ -56,6 +57,7 @@ func TestCollaboratorPermissionTable(t *testing.T) {
 // TestEnsureCollaboratorGrantsOnce grants the polecat bot write access and checks a
 // second run reads the access back and sends no write.
 func TestEnsureCollaboratorGrantsOnce(t *testing.T) {
+	t.Parallel()
 	f := newFakeForgejo()
 	f.addRepo(testRepo)
 	var logs []string
@@ -83,6 +85,7 @@ func TestEnsureCollaboratorGrantsOnce(t *testing.T) {
 // TestEnsureCollaboratorAcceptsAnyGrantStatus checks that a grant the server answers
 // 204, 200 or 201 counts as granted, and that the grant is sent after a 404 read.
 func TestEnsureCollaboratorAcceptsAnyGrantStatus(t *testing.T) {
+	t.Parallel()
 	for _, put := range []int{http.StatusNoContent, http.StatusOK, http.StatusCreated} {
 		t.Run(http.StatusText(put), func(t *testing.T) {
 			tr := &statusTransport{status: map[string]int{"GET": http.StatusNotFound, "PUT": put}}
@@ -106,6 +109,7 @@ func TestEnsureCollaboratorAcceptsAnyGrantStatus(t *testing.T) {
 // client so the tokens the reply echoes stay out of it, and no grant is sent after a
 // read that did not answer 404.
 func TestEnsureCollaboratorRefusesAnUnexpectedStatus(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		get, put    int
@@ -141,6 +145,7 @@ func TestEnsureCollaboratorRefusesAnUnexpectedStatus(t *testing.T) {
 // TestEnsureCollaboratorStopsOnTransportFailure checks a read that never reaches the
 // server is returned as an error and no grant follows it.
 func TestEnsureCollaboratorStopsOnTransportFailure(t *testing.T) {
+	t.Parallel()
 	var logs []string
 	p := userProvisioner(failingTransport{}, false, &logs)
 	if err := p.EnsureCollaborator("polecat", testRepo, "write"); err == nil {
@@ -151,6 +156,7 @@ func TestEnsureCollaboratorStopsOnTransportFailure(t *testing.T) {
 // TestEnsureCollaboratorRefusesAMalformedRepo checks a repository that is not
 // owner/name is refused before any request is sent.
 func TestEnsureCollaboratorRefusesAMalformedRepo(t *testing.T) {
+	t.Parallel()
 	for _, repo := range []string{"acme", "/rig", "acme/"} {
 		t.Run(repo, func(t *testing.T) {
 			f := newFakeForgejo()
@@ -169,6 +175,7 @@ func TestEnsureCollaboratorRefusesAMalformedRepo(t *testing.T) {
 // TestEnsureCollaboratorDryRunSendsNoWrite checks a dry run reads the access, reports
 // the grant it would make, and sends no write.
 func TestEnsureCollaboratorDryRunSendsNoWrite(t *testing.T) {
+	t.Parallel()
 	f := newFakeForgejo()
 	f.addRepo(testRepo)
 	var logs []string
@@ -191,6 +198,7 @@ func TestEnsureCollaboratorDryRunSendsNoWrite(t *testing.T) {
 // read grant lands only when the viewer bot exists and the run does not provision the
 // viewer role itself. A run that provisions it grants it in its role loop instead.
 func TestEnsureViewerAccessOnlyWhenTheViewerExistsAndIsNotRequested(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name         string
 		viewerExists bool
@@ -232,6 +240,7 @@ func TestEnsureViewerAccessOnlyWhenTheViewerExistsAndIsNotRequested(t *testing.T
 // TestEnsureViewerAccessRefusesWhatItCannotRead checks an unexpected status on the
 // viewer's user read is an error, and no grant is sent after it.
 func TestEnsureViewerAccessRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
 	tr := &statusTransport{status: map[string]int{"GET": http.StatusInternalServerError}}
 	var logs []string
 	p := userProvisioner(tr, false, &logs)
