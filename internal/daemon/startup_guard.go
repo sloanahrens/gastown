@@ -170,11 +170,17 @@ func jobOwnerRunning(st templates.SupervisorState) (running, known bool) {
 
 // systemdOwnerRunning judges a systemd owner by the unit's current invocation
 // id: a recorded id that is not the one the unit runs now belongs to an earlier
-// or another run, and is not judged by the unit's state. An id that cannot be
-// read matches nothing, so an empty unit id never matches an empty owner id
-// (gt-iiqlb, gt-nirga).
+// or another run, and is not judged by the unit's state. A stopped unit runs no
+// owner at all, so a stale record on it is known to be stopped. An id that
+// cannot be read matches nothing, so an empty unit id never matches an empty
+// owner id.
 func systemdOwnerRunning(id string, st templates.SupervisorState) (running, known bool) {
-	if st.Err != nil || st.InvocationID == "" || st.InvocationID != id {
+	switch {
+	case st.Err != nil:
+		return false, false
+	case st.PID == 0:
+		return false, true
+	case st.InvocationID == "" || st.InvocationID != id:
 		return false, false
 	}
 	return jobOwnerRunning(st)
