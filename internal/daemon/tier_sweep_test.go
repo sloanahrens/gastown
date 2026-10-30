@@ -650,9 +650,10 @@ func TestTierSweepStagePassesTimingsAndResumePaths(t *testing.T) {
 
 			want := []string{"TIER_SWEEP_TIMINGS=" + filepath.Join(dir, "timings.jsonl")}
 			if tc.resume {
-				want = append(want, "TIER_SWEEP_RESUME="+filepath.Join(dir, "resume.jsonl"))
+				want = append(want, "TIER_SWEEP_TESTED=abc123", "TIER_SWEEP_RESUME="+filepath.Join(dir, "resume.jsonl"))
 			}
 			for _, st := range tierSweepStages("gastown") {
+				st.tested = "abc123"
 				if got := d.tierSweepGate(st).Steps[0].Env; !slices.Equal(got, want) {
 					t.Errorf("stage %v env = %q, want %q", st.tiers, got, want)
 				}
@@ -665,6 +666,35 @@ func TestTierSweepStagePassesTimingsAndResumePaths(t *testing.T) {
 			}
 			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 				t.Errorf("rig directory %s: err = %v, want a directory", dir, err)
+			}
+		})
+	}
+}
+
+func TestTierSweepStageEnvRunsWithoutPathsWhenDirCannotBeMade(t *testing.T) {
+	t.Parallel()
+	for _, enable := range []string{"", "1"} {
+		t.Run("enable "+enable, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, logs := newTierSweepDaemon(t, time.Now(), "gastown")
+			d.getenv = func(string) string { return enable }
+			dir := filepath.Join(d.config.TownRoot, ".runtime", "tier-sweep", "gastown")
+			var made []string
+			d.tierSweepSeams.makeDir = func(got string) error {
+				made = append(made, got)
+				return errors.New("read-only file system")
+			}
+
+			st := tierSweepStages("gastown")[1]
+			st.tested = "abc123"
+			if got := d.tierSweepGate(st).Steps[0].Env; got != nil {
+				t.Errorf("env = %q, want none when the directory cannot be made", got)
+			}
+			if want := []string{dir}; !slices.Equal(made, want) {
+				t.Errorf("makeDir called with %q, want %q", made, want)
+			}
+			if !strings.Contains(logs.String(), "running without the timings and resume paths") {
+				t.Errorf("log = %q, want the fallback named", logs.String())
 			}
 		})
 	}
