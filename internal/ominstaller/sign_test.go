@@ -109,7 +109,7 @@ func TestSignUsesTheTownIdentity(t *testing.T) {
 		t.Fatalf("sign = %v, want nil", err)
 	}
 	want := []Command{
-		{Name: "security", Args: []string{"unlock-keychain", "-p", password, keychainFile}},
+		{Name: "security", Args: []string{"unlock-keychain", keychainFile}, Stdin: password + "\n"},
 		{Name: "codesign", Args: []string{"--force", "--keychain", keychainFile, "-s", "town-identity", "-i", "com.gastown.om", omBuild}},
 	}
 	if !reflect.DeepEqual(rig.run.calls, want) {
@@ -142,7 +142,7 @@ func TestSignKeepsADashLeadingSignDirFromReadingAsAnOption(t *testing.T) {
 		t.Fatalf("sign = %v, want nil", err)
 	}
 	want := []Command{
-		{Name: "security", Args: []string{"unlock-keychain", "-p", password, "./" + keychain}},
+		{Name: "security", Args: []string{"unlock-keychain", "./" + keychain}, Stdin: password + "\n"},
 		{Name: "codesign", Args: []string{"--force", "--keychain", "./" + keychain, "-s", "gastown-dev-unattended", "-i", "com.gastown.om", omBuild}},
 	}
 	if !reflect.DeepEqual(rig.run.calls, want) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,6 +18,7 @@ var (
 // the test sets. A codesign answers with codesignErr; security answers with unlockErr.
 type fakeExec struct {
 	calls       [][]string
+	stdins      []string
 	stdout      string
 	stderr      string
 	unlockErr   error
@@ -29,6 +31,14 @@ func (f *fakeExec) exec(_ context.Context, name string, args ...string) (string,
 		return f.stdout, f.stderr, f.unlockErr
 	}
 	return f.stdout, f.stderr, f.codesignErr
+}
+
+// execStdin is the stdin seam Unlock runs through. It records the bytes fed to
+// the command's standard input next to its argv, and answers with unlockErr.
+func (f *fakeExec) execStdin(_ context.Context, stdin, name string, args ...string) (string, string, error) {
+	f.stdins = append(f.stdins, stdin)
+	f.calls = append(f.calls, append([]string{name}, args...))
+	return f.stdout, f.stderr, f.unlockErr
 }
 
 func TestUnlockReportsATimeoutOnlyWhenTheDeadlineCutItOff(t *testing.T) {
@@ -69,7 +79,7 @@ func TestUnlockReportsATimeoutOnlyWhenTheDeadlineCutItOff(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := Bound(context.Background(), func() time.Time { return tc.now }, tc.limit)
 			defer cancel()
-			err := Unlock(ctx, tc.exec.exec, "/keys/gt.keychain-db", "pass")
+			err := Unlock(ctx, tc.exec.execStdin, "/keys/gt.keychain-db", "pass")
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("Unlock() = %v, want %v", err, tc.want)
 			}
@@ -77,15 +87,71 @@ func TestUnlockReportsATimeoutOnlyWhenTheDeadlineCutItOff(t *testing.T) {
 	}
 }
 
+// TestUnlockKeepsThePasswordOffArgvAndOnStdin pins the contract: the argv is
+// security unlock-keychain and the keychain, with no -p and nothing that holds
+// the password, and stdin is the password plus one newline.
+func TestUnlockKeepsThePasswordOffArgvAndOnStdin(t *testing.T) {
+	t.Parallel()
+	const password = "s3cret-pass"
+	exec := &fakeExec{}
+	if err := Unlock(context.Background(), exec.execStdin, "/keys/gt.keychain-db", password); err != nil {
+		t.Fatalf("Unlock() = %v, want nil", err)
+	}
+	want := []string{"security", "unlock-keychain", "/keys/gt.keychain-db"}
+	if len(exec.calls) != 1 || !reflect.DeepEqual(exec.calls[0], want) {
+		t.Errorf("command = %q, want %q", exec.calls, want)
+	}
+	for _, arg := range exec.calls[0] {
+		if strings.Contains(arg, password) {
+			t.Errorf("argv %q carries the password", exec.calls[0])
+		}
+	}
+	if want := []string{password + "\n"}; !reflect.DeepEqual(exec.stdins, want) {
+		t.Errorf("stdin = %q, want %q", exec.stdins, want)
+	}
+}
+
 func TestUnlockPassesThePathAsAnOptionSafeOperand(t *testing.T) {
 	t.Parallel()
 	exec := &fakeExec{}
-	if err := Unlock(context.Background(), exec.exec, "-keychain", "pass"); err != nil {
+	if err := Unlock(context.Background(), exec.execStdin, "-keychain", "pass"); err != nil {
 		t.Fatalf("Unlock() = %v, want nil", err)
 	}
-	want := []string{"security", "unlock-keychain", "-p", "pass", "./-keychain"}
+	want := []string{"security", "unlock-keychain", "./-keychain"}
 	if got := exec.calls[0]; !reflect.DeepEqual(got, want) {
 		t.Errorf("command = %q, want %q", got, want)
+	}
+}
+
+// TestUnlockErrorNeverCarriesThePassword: a refused unlock returns an error that
+// names no password, even when the command's output names the keychain, and a
+// deadline that cut the unlock off still reads as ErrUnlockTimeout.
+func TestUnlockErrorNeverCarriesThePassword(t *testing.T) {
+	t.Parallel()
+	const password = "s3cret-pass"
+	cases := []struct {
+		name    string
+		now     time.Time
+		limit   time.Duration
+		wantErr error
+	}{
+		{name: "refused before the deadline", now: time.Now(), limit: time.Hour, wantErr: errRefused},
+		{name: "refused after the deadline", now: time.Now().Add(-time.Hour), limit: time.Minute, wantErr: ErrUnlockTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			exec := &fakeExec{unlockErr: errRefused, stderr: "SecKeychainUnlock /keys/gt.keychain-db: wrong passphrase"}
+			ctx, cancel := Bound(context.Background(), func() time.Time { return tc.now }, tc.limit)
+			defer cancel()
+			err := Unlock(ctx, exec.execStdin, "/keys/gt.keychain-db", password)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Unlock() = %v, want %v", err, tc.wantErr)
+			}
+			if err != nil && strings.Contains(err.Error(), password) {
+				t.Errorf("Unlock() = %q carries the password", err)
+			}
+		})
 	}
 }
 

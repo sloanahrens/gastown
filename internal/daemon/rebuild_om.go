@@ -378,6 +378,9 @@ func (d *Daemon) runOMInstall(ctx context.Context, cfg ominstaller.Config) (omin
 func (d *Daemon) omInstallExec(ctx context.Context, c ominstaller.Command) (string, string, error) {
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.Dir = c.Dir
+	if c.Stdin != "" {
+		cmd.Stdin = strings.NewReader(c.Stdin)
+	}
 	stdout, stderr, err := d.runCmd(cmd)
 	return string(stdout), string(stderr), err
 }

@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -448,6 +450,55 @@ func TestRebuildOMInstallExec_RunsThroughTheDaemonSeam(t *testing.T) {
 	}
 	if stdout != "built\n" || stderr != "warn\n" {
 		t.Errorf("stdout, stderr = %q, %q, want the command's output", stdout, stderr)
+	}
+}
+
+// TestRebuildOMInstallExec_FeedsStdinToTheCommand: the keychain unlock sends the
+// password on stdin, so the child reads it there; a command with no stdin keeps
+// /dev/null.
+func TestRebuildOMInstallExec_FeedsStdinToTheCommand(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		stdin     string
+		wantInput string
+		wantNil   bool
+	}{
+		{name: "password on stdin", stdin: "pw-sentinel\n", wantInput: "pw-sentinel\n"},
+		{name: "no stdin", stdin: "", wantNil: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := daemonWithRecorder(t)
+			var input string
+			var stdinNil bool
+			d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				stdinNil = cmd.Stdin == nil
+				if cmd.Stdin != nil {
+					b, err := io.ReadAll(cmd.Stdin)
+					if err != nil {
+						t.Errorf("read stdin: %v", err)
+					}
+					input = string(b)
+				}
+				return nil, nil, nil
+			}
+
+			if _, _, err := d.omInstallExec(context.Background(), ominstaller.Command{
+				Name:  "security",
+				Args:  []string{"unlock-keychain", "/keys/gastown-signing.keychain-db"},
+				Stdin: tc.stdin,
+			}); err != nil {
+				t.Fatalf("omInstallExec: %v", err)
+			}
+			if stdinNil != tc.wantNil {
+				t.Errorf("stdin nil = %v, want %v", stdinNil, tc.wantNil)
+			}
+			if input != tc.wantInput {
+				t.Errorf("stdin = %q, want %q", input, tc.wantInput)
+			}
+		})
 	}
 }
 

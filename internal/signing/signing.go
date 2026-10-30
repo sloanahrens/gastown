@@ -16,6 +16,11 @@ import (
 // and standard error.
 type Exec func(ctx context.Context, name string, args ...string) (stdout, stderr string, err error)
 
+// StdinExec is Exec with stdin written to the command's standard input before
+// it runs. It is the seam for a command that takes a secret on stdin, so the
+// secret never reaches argv.
+type StdinExec func(ctx context.Context, stdin, name string, args ...string) (stdout, stderr string, err error)
+
 // ErrUnlockTimeout is an unlock the deadline cut off, as distinct from one that
 // was refused.
 var ErrUnlockTimeout = errors.New("unlock timed out")
@@ -38,12 +43,12 @@ func Bound(parent context.Context, now func() time.Time, limit time.Duration) (c
 	return context.WithDeadline(parent, now().Add(limit))
 }
 
-// Unlock unlocks keychain with password, bounded by ctx. The password travels
-// in argv, where ps can see it while the unlock runs; moving it off argv is a
-// separate decision (gt-tpg0p.70). The unlock's output is discarded, so the
-// password is never printed.
-func Unlock(ctx context.Context, exec Exec, keychain, password string) error {
-	_, _, err := exec(ctx, "security", "unlock-keychain", "-p", password, OptionSafe(keychain))
+// Unlock unlocks keychain with password, bounded by ctx. The password goes to
+// security on stdin, as a line of its own, and never in argv: ps shows only
+// security unlock-keychain and the keychain path (gt-tpg0p.70). The unlock's
+// output is discarded, so the password is never printed.
+func Unlock(ctx context.Context, exec StdinExec, keychain, password string) error {
+	_, _, err := exec(ctx, password+"\n", "security", "unlock-keychain", OptionSafe(keychain))
 	if err != nil && ctx.Err() == context.DeadlineExceeded {
 		return ErrUnlockTimeout
 	}

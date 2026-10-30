@@ -86,6 +86,9 @@ type Command struct {
 	Name string
 	Args []string
 	Dir  string
+	// Stdin is written to the command's standard input. Empty leaves it at
+	// /dev/null. The keychain unlock sends the password here, never in Args.
+	Stdin string
 }
 
 // ExecFunc runs a Command and returns what it wrote to stdout and stderr.
