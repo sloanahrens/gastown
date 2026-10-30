@@ -145,6 +145,10 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 // whose batch failed, is read per seat through the rig's own store, so a
 // failure costs calls and never changes a seat's count. It holds what it read:
 // build one per tick.
+//
+// A bead is answered from the batch only in a form the seat read can use whole:
+// an agent bead is complete (listedAgentBeadComplete) or read live by id, and an
+// id two rigs' lists carry is answered in a fixed order (heldIssue).
 type poolSeatBatch struct {
 	townRoot string
 	store    func(rigName string) beads.Client
@@ -153,24 +157,26 @@ type poolSeatBatch struct {
 }
 
 // rigSeatBatch is one rig's reads. store is the rig's client, which the
-// per-seat fallback reads too. agents and assigned are nil when their read
-// failed or was not made; an agent bead the batch did not answer is read live,
-// as the per-seat read does. held holds the work beads the list read and the
-// hook and source-issue beads a later batch added, by id; an id it does not
-// hold is read live, as the per-seat read does.
+// per-seat fallback reads too. assigned and held come from the rig's work list,
+// and are nil when that read failed; agents is nil when no agent bead was
+// answered. A rig whose work list failed falls back to the per-seat reads: its
+// agent beads cost one batch and its assignments one live read each. held holds
+// the work beads by id — those the list returned, plus the hook and source-issue
+// beads a later batch added — and an id it does not hold is read live, as the
+// per-seat read does.
 type rigSeatBatch struct {
 	store    beads.Client
-	asked    map[string]bool         // agent bead ids the batch asked for
+	asked    map[string]bool         // agent bead ids the batch answered (found or not)
 	agents   map[string]*beads.Issue // the agent beads that exist among them
 	parsed   map[string]parsedAgent  // each agent bead's parse, once, by id
 	assigned map[string]*beads.Issue // assignee -> the issue GetAssignedIssue picks
-	held     map[string]*beads.Issue // hook and source-issue beads, by id
+	held     map[string]*beads.Issue // work, hook and source-issue beads, by id
 }
 
 // parsedAgent is one batched agent bead's parse: what a live read of the bead
-// would have returned. The batch asks for the same bead twice — first the
-// references it follows (readSourceIssues) and then the seat read itself
-// (agentBead) — so the description is parsed once, here.
+// would have returned. The batch parses each bead once and answers both the
+// references it follows (readSourceIssues) and the seat read itself (agentBead)
+// from that parse.
 type parsedAgent struct {
 	fields *beads.AgentFields
 	err    error
@@ -248,10 +254,17 @@ func (b *poolSeatBatch) landingWork(town beads.Client) poolSeatWorkFunc {
 }
 
 // heldIssue answers a bead id from the batches made so far. One bead is one
-// bead whichever rig's list carried it, so the rigs are searched in turn.
+// bead whichever rig's list carried it, so the rigs are searched in name order:
+// a bead two rigs hold is answered by the same rig on every run, where a walk
+// over the map would answer by whichever rig the iteration reached first.
 func (b *poolSeatBatch) heldIssue(id string) (*beads.Issue, bool) {
-	for _, rb := range b.rigs {
-		if issue, ok := rb.held[id]; ok {
+	names := make([]string, 0, len(b.rigs))
+	for name := range b.rigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if issue, ok := b.rigs[name].held[id]; ok {
 			return issue, true
 		}
 	}
@@ -292,16 +305,17 @@ func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 
 // readAgents answers the polecats' agent beads from the work list and, for the
 // beads that list does not carry — one filed closed, deferred or pinned, none
-// of which an assigned-work list asks for — one ShowMultiple. An agent bead the
-// batch asked for and did not find does not exist; one it could not ask about
-// goes to the live per-seat read, so a failed read costs calls and never
-// changes a seat's count.
+// of which an assigned-work list asks for, or one whose list record is not
+// whole (listedAgentBeadComplete) — one ShowMultiple. An agent bead the batch
+// asked for and did not find does not exist; one it could not ask about goes to
+// the live per-seat read, so a failed read costs calls and never changes a
+// seat's count.
 func (rb *rigSeatBatch) readAgents(ids []string) {
 	agents := make(map[string]*beads.Issue, len(ids))
 	asked := make(map[string]bool, len(ids))
 	var missing []string
 	for _, id := range ids {
-		if issue, ok := rb.held[id]; ok {
+		if issue, ok := rb.held[id]; ok && listedAgentBeadComplete(issue) {
 			agents[id] = issue
 			asked[id] = true
 			continue
@@ -330,6 +344,25 @@ func (rb *rigSeatBatch) readAgents(ids []string) {
 		_, fields, err := beads.GetAgentBead(heldIssueStore{Client: rb.store, issue: agent}, id)
 		rb.parsed[id] = parsedAgent{fields: fields, err: err}
 	}
+}
+
+// listedAgentBeadComplete reports whether a work-list record carries every field
+// the seat read takes from an agent bead: the gt:agent label (or the legacy
+// agent type), the id and status, and the role_type and agent_state lines every
+// agent description is written with (beads.FormatAgentDescription). A record
+// missing one would read as an agent bead holding nothing — its hook_bead and
+// agent_state parsed empty — and its seat as free, so readAgents asks the store
+// for that bead by id instead. TestListedAgentBeadCarriesTheShowFields holds a
+// recorded bd list and bd show of one bead to this: the list form is whole.
+func listedAgentBeadComplete(issue *beads.Issue) bool {
+	if issue == nil || !beads.IsAgentBead(issue) {
+		return false
+	}
+	if strings.TrimSpace(issue.ID) == "" || strings.TrimSpace(issue.Status) == "" {
+		return false
+	}
+	fields := beads.ParseAgentFields(issue.Description)
+	return strings.TrimSpace(fields.RoleType) != "" && strings.TrimSpace(fields.AgentState) != ""
 }
 
 // readSourceIssues reads the beads the polecats' hook references and source-issue

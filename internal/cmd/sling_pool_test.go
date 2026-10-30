@@ -2103,8 +2103,8 @@ func TestPoolPolecatSeatStateLandedLookupFailureStaysUnpushed(t *testing.T) {
 // TestPoolRouterReadsSeatsThroughTheBatch is the sling's seat picture over two
 // rigs of three idle polecat directories each. The router reads them through
 // the rig batch: one bd call per rig, the assigned-work list that also answers
-// the agent beads it carries, where the per-seat read spent two on each of the
-// six. The idle polecats hold no seat, so the count is empty (gt-4efmk).
+// the agent beads it carries. The idle polecats hold no seat, so the count is
+// empty (gt-4efmk).
 func TestPoolRouterReadsSeatsThroughTheBatch(t *testing.T) {
 	t.Parallel()
 	town, db := seatBatchTown(t)

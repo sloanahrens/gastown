@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,14 +14,14 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// rosterCallsAtTwentySeats is the number of bd read calls the dispatcher's
-// roster made over the twenty-seat fixture at d6851c36e, the commit before
-// gt-4efmk: one ShowMultiple asking for the twenty agent beads and one List
-// asking for the rig's assigned work. The fixture is seatTown(t, 20) — the same
-// twenty polecat directories, three of them with a live session and one
-// dead-hooked — and the count is what the store answered, taken with
-// TestSpecRosterReadsTwentySeatsInHalfTheBaseline below.
-const rosterCallsAtTwentySeats = 2
+// rosterCallsBefore records the number of bd read calls the roster made over
+// seatTown(t, 20) before this bead's fold, measured at d6851c36e: one
+// ShowMultiple asking for the twenty agent beads and one List asking for the
+// rig's assigned work. The fixture is the same twenty polecat directories,
+// three of them with a live session and one dead-hooked. The test measures the
+// count again (rosterCallsWithoutTheFold) and fails if the two disagree, so the
+// constant is the number the current fixture costs and not a remembered one.
+const rosterCallsBefore = 2
 
 // countingCalls is the calls a countingStore was asked for: every read a bd
 // subprocess would have been spent on.
@@ -30,11 +33,32 @@ func countingCalls(store *countingStore) int {
 	return total
 }
 
+// rosterCallsWithoutTheFold measures the reads the roster made over the fixture
+// before the work list answered the agent beads: one ShowMultiple for the rig's
+// agent beads and one List for its assigned work, the two batched reads the
+// per-rig seat read issued. The fold removes the first of them.
+func rosterCallsWithoutTheFold(t *testing.T, db *beadsfake.Fake, town, rig string, names []string) int {
+	t.Helper()
+	store := newCountingStore(db)
+	prefix := beads.GetPrefixForRig(town, rig)
+	ids := make([]string, 0, len(names))
+	for _, name := range names {
+		ids = append(ids, beads.PolecatBeadIDWithPrefix(prefix, rig, name))
+	}
+	if _, err := store.ShowMultiple(ids); err != nil {
+		t.Fatalf("agent batch: %v", err)
+	}
+	if _, err := store.List(beads.ListOptions{Status: strings.Join(assignedStatuses, ","), Priority: -1}); err != nil {
+		t.Fatalf("work list: %v", err)
+	}
+	return countingCalls(store)
+}
+
 // TestSpecRosterReadsTwentySeatsInHalfTheBaseline is gt-4efmk: the roster over
-// the twenty-seat fixture costs at most half the bd calls it cost before, and
-// the seats it counts are the per-seat read's. One assigned-work list per rig
-// answers the agent beads it carries, where the roster used to read them in a
-// second batch of its own.
+// the twenty-seat fixture costs at most half the bd calls it cost before the
+// work list answered the agent beads, and the seats it counts are the per-seat
+// read's. The baseline is measured over the same fixture, not trusted from the
+// constant, and the constant records the count taken at d6851c36e.
 func TestSpecRosterReadsTwentySeatsInHalfTheBaseline(t *testing.T) {
 	t.Parallel()
 	town, db, lister := seatTown(t, 20)
@@ -54,11 +78,17 @@ func TestSpecRosterReadsTwentySeatsInHalfTheBaseline(t *testing.T) {
 	}
 	assertSameSeats(t, snap.sessions, want)
 
+	baseline := rosterCallsWithoutTheFold(t, db, town, "gastown", polecatNames(20))
+	if baseline != rosterCallsBefore {
+		t.Fatalf("the fixture's baseline is %d bd calls, want the %d measured at d6851c36e: the fixture changed under the constant",
+			baseline, rosterCallsBefore)
+	}
 	got := countingCalls(store)
-	t.Logf("the roster spent %d bd calls over the twenty-seat fixture; it spent %d at d6851c36e", got, rosterCallsAtTwentySeats)
-	if got*2 > rosterCallsAtTwentySeats {
+	t.Logf("the roster spent %d bd calls over the twenty-seat fixture, at most half of the %d it spent at d6851c36e",
+		got, baseline)
+	if got*2 > baseline {
 		t.Errorf("roster spent %d bd calls over the twenty-seat fixture, want at most half of the %d it spent at d6851c36e",
-			got, rosterCallsAtTwentySeats)
+			got, baseline)
 	}
 	if reads.Calls() != got {
 		t.Errorf("the tick's ledger counted %d calls, the store saw %d", reads.Calls(), got)
@@ -116,12 +146,12 @@ func seatShapeTown(t *testing.T, shapes []seatShape) (string, *beadsfake.Fake, *
 	return town, db, lister
 }
 
-// TestSpecRosterSeatDispositionsAreUnchanged is gt-4efmk's constraint: the
-// roster answers a seat's state the way the per-seat read does, whatever shape
-// the seat is in. Each row puts a polecat in one state the decision turns on —
-// a live session, a hooked bead, an assigned bead, a closed or absent hook, a
-// closed source issue, an agent bead filed outside the work list, or no agent
-// bead at all — and holds the batched read to the per-seat read's answer.
+// TestSpecRosterSeatDispositionsAreUnchanged: the roster answers a seat's state
+// the way the per-seat read does, whatever shape the seat is in. Each row puts a
+// polecat in one state the decision turns on — a live session, a hooked bead, an
+// assigned bead, a closed or absent hook, a closed source issue, an agent bead
+// filed outside the work list, or no agent bead at all — and holds the batched
+// read to the per-seat read's answer (gt-4efmk).
 func TestSpecRosterSeatDispositionsAreUnchanged(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -182,7 +212,7 @@ func TestSpecRosterFailsOnALandingReadItLoses(t *testing.T) {
 	db := beadsfake.New()
 	seedPolecatAgentBead(db, town, "gastown", "ruby", "")
 	db.Seed(beads.Issue{ID: "gt-ruby", Status: string(beads.StatusPinned), Labels: []string{land.LabelReadyToLand}})
-	store := &sourceBatchFails{countingStore: newCountingStore(db)}
+	store := &showMultipleFails{countingStore: newCountingStore(db), fail: asksFor("gt-ruby")}
 
 	_, err := specRosterSnapshotWith(newSpecTickReads(), town, seatPool("deepseek-flash", 30),
 		&fakeLister{sessions: map[string]map[string]string{}}, func(string) beads.Client { return store }, time.Now)
@@ -196,15 +226,16 @@ func TestSpecRosterFailsOnALandingReadItLoses(t *testing.T) {
 // batch, and a batch that fails leaves that bead to the live per-seat read
 // rather than answering it as a bead that does not exist. A seat filed pinned
 // is the case — the list never carries one — and its disposition is still the
-// per-seat read's (gt-4efmk).
+// per-seat read's.
 func TestSeatBatchReadsALostAgentBeadLive(t *testing.T) {
 	t.Parallel()
 	town, db, _ := seatShapeTown(t, []seatShape{
 		{name: "p01", assigned: "gt-prog-p01", assignedStatus: string(beads.StatusInProgress)},
 		{name: "p02", agentStatus: string(beads.StatusPinned), assigned: "gt-prog-p02", assignedStatus: string(beads.StatusInProgress)},
 	})
+	pinned := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "gastown"), "gastown", "p02")
 	perSeat := poolDispositionAnswering(town, seatReadsOver(newCountingStore(db)))
-	store := &sourceBatchFails{countingStore: newCountingStore(db)}
+	store := &showMultipleFails{countingStore: newCountingStore(db), fail: asksFor(pinned)}
 	batched := batchOverStore(town, store).disposition
 
 	for _, name := range []string{"p01", "p02"} {
@@ -222,7 +253,6 @@ func TestSeatBatchReadsALostAgentBeadLive(t *testing.T) {
 	}
 	// The bead the work list answered is never read live; the one it could not
 	// answer is, once.
-	pinned := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "gastown"), "gastown", "p02")
 	listed := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "gastown"), "gastown", "p01")
 	if store.shows[pinned] != 1 {
 		t.Errorf("pinned agent bead read live %d times, want once (%v)", store.shows[pinned], store.shows)
@@ -232,17 +262,17 @@ func TestSeatBatchReadsALostAgentBeadLive(t *testing.T) {
 	}
 }
 
-// TestSpecRosterReadsALandingSeatFromTheBatch is gt-4efmk's second cut: a seat
-// mid-landing is confirmed from the batch the roster already made when the
-// bead is live work in the rig's list, and the town read is spent only for a
-// bead that list does not carry — one filed pinned, or slung from the town. The
-// seat counts as held either way.
+// TestSpecRosterReadsALandingSeatFromTheBatch: a seat mid-landing is confirmed
+// from the rig work list the roster already read when the bead is live work in
+// it, and the town-wide read is spent only for a bead that list does not carry
+// — one filed pinned, or slung from the town. The seat counts as held either
+// way, and the rig's own store is never asked for a batch.
 func TestSpecRosterReadsALandingSeatFromTheBatch(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		status string
-		town   int // the town-wide ShowMultiple calls the read costs
+		town   int // the town-wide ShowMultiple calls the landing read costs
 	}{
 		{"a landing bead the work list carries", string(beads.StatusOpen), 0},
 		{"a landing bead the work list does not carry", string(beads.StatusPinned), 1},
@@ -258,8 +288,14 @@ func TestSpecRosterReadsALandingSeatFromTheBatch(t *testing.T) {
 			pool := seatPool("deepseek-flash", 30)
 			lister := &fakeLister{sessions: map[string]map[string]string{}}
 
-			store := newCountingStore(db)
-			snap, err := specRosterSnapshotWith(newSpecTickReads(), town, pool, lister, func(string) beads.Client { return store }, time.Now)
+			stores := map[string]*countingStore{}
+			storeFor := func(dir string) beads.Client {
+				if _, ok := stores[dir]; !ok {
+					stores[dir] = newCountingStore(db)
+				}
+				return stores[dir]
+			}
+			snap, err := specRosterSnapshotWith(newSpecTickReads(), town, pool, lister, storeFor, time.Now)
 			if err != nil {
 				t.Fatalf("roster: %v", err)
 			}
@@ -272,9 +308,108 @@ func TestSpecRosterReadsALandingSeatFromTheBatch(t *testing.T) {
 			if held != 1 {
 				t.Fatalf("roster = %+v, want the landing seat held once", snap.sessions)
 			}
-			if len(store.multis) != tc.town {
-				t.Errorf("town-wide batches = %v, want %d", store.multis, tc.town)
+			if townStore := stores[town]; len(townStore.multis) != tc.town {
+				t.Errorf("town-wide batches = %v, want %d", townStore.multis, tc.town)
+			}
+			rigStore := stores[filepath.Join(town, "gastown")]
+			if len(rigStore.multis) != 0 {
+				t.Errorf("rig batches = %v, want none: the rig's work list answers its beads", rigStore.multis)
+			}
+			if rigStore.lists != 1 {
+				t.Errorf("rig work lists = %d, want one", rigStore.lists)
 			}
 		})
+	}
+}
+
+// recordedIssues reads one recorded bd read: the issue array bd printed (the
+// data of its machine envelope), unmarshalled the way the client parses it and
+// keyed by id.
+func recordedIssues(t *testing.T, name string) map[string]*beads.Issue {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("reading %s: %v", name, err)
+	}
+	var issues []*beads.Issue
+	if err := json.Unmarshal(raw, &issues); err != nil {
+		t.Fatalf("parsing %s: %v", name, err)
+	}
+	out := make(map[string]*beads.Issue, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			t.Fatalf("%s holds a null issue", name)
+		}
+		out[issue.ID] = issue
+	}
+	return out
+}
+
+// TestListedAgentBeadCarriesTheShowFields is the work list's contract for the
+// roster: the seat read takes an agent bead's id, its gt:agent label, its
+// status and the fields its description carries, and a bd list record carries
+// all of them, equal to the bd show record of the same bead. The fixtures are
+// one recorded `bd list --status=open,in_progress,hooked --json` read (the data
+// array run unwraps) and one recorded `bd show --json` read of the same two
+// beads, taken from a live town on 2026-10-30. Both go through the read the
+// roster makes of a batched bead, beads.GetAgentBead.
+func TestListedAgentBeadCarriesTheShowFields(t *testing.T) {
+	t.Parallel()
+	const agentID, workID = "gt-gastown-polecat-valkyrie", "gt-p85pw.111"
+	listed := recordedIssues(t, "pool_seat_list.json")
+	shown := recordedIssues(t, "pool_seat_show.json")
+	for _, id := range []string{agentID, workID} {
+		if listed[id] == nil || shown[id] == nil {
+			t.Fatalf("the fixtures do not both carry %s (list %v, show %v)", id, listed[id] != nil, shown[id] != nil)
+		}
+	}
+
+	// The agent bead: every field the seat read takes must be there, and the
+	// same, in the list form.
+	_, listFields, err := beads.GetAgentBead(heldIssueStore{issue: listed[agentID]}, agentID)
+	if err != nil {
+		t.Fatalf("parsing the listed agent bead: %v", err)
+	}
+	_, showFields, err := beads.GetAgentBead(heldIssueStore{issue: shown[agentID]}, agentID)
+	if err != nil {
+		t.Fatalf("parsing the shown agent bead: %v", err)
+	}
+	if !listedAgentBeadComplete(listed[agentID]) {
+		t.Errorf("the list record of %s is not a whole agent bead; the roster would spend a second read on it", agentID)
+	}
+	if !reflect.DeepEqual(listFields, showFields) {
+		t.Errorf("listed agent fields = %+v, want the shown bead's %+v", listFields, showFields)
+	}
+	for name, value := range map[string]string{
+		"id":          listed[agentID].ID,
+		"status":      listed[agentID].Status,
+		"role_type":   listFields.RoleType,
+		"agent_state": listFields.AgentState,
+		"hook_bead":   listFields.HookBead,
+		"agent":       listFields.Agent,
+	} {
+		if strings.TrimSpace(value) == "" {
+			t.Errorf("the list record of %s carries no %s", agentID, name)
+		}
+	}
+	if !beads.IsAgentBead(listed[agentID]) {
+		t.Errorf("the list record of %s does not read as an agent bead: it carries no gt:agent label", agentID)
+	}
+
+	// The assigned work bead: the assignee and status the batch's pick reads
+	// are the shown bead's.
+	for name, got := range map[string]string{
+		"status":   listed[workID].Status,
+		"assignee": listed[workID].Assignee,
+	} {
+		if strings.TrimSpace(got) == "" {
+			t.Errorf("the list record of %s carries no %s", workID, name)
+		}
+	}
+	if want := shown[workID].Status; listed[workID].Status != want {
+		t.Errorf("listed work status = %q, want the shown bead's %q", listed[workID].Status, want)
+	}
+	if want := shown[workID].Assignee; listed[workID].Assignee != want {
+		t.Errorf("listed work assignee = %q, want the shown bead's %q", listed[workID].Assignee, want)
 	}
 }

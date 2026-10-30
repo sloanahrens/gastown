@@ -14,8 +14,9 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// seatReadsOver is the per-seat read over store: what the roster spent on every
-// polecat before the batch.
+// seatReadsOver is the per-seat read over store: each polecat's agent bead, its
+// assignment and the references it names, read one at a time. It is the answer
+// the batch is held to.
 func seatReadsOver(store beads.Client) poolSeatReads {
 	return poolSeatReads{
 		agentBead: func(_ beads.Client, id string) (*beads.Issue, *beads.AgentFields, error) {
@@ -83,11 +84,10 @@ func batchOverStore(town string, store beads.Client) *poolSeatBatch {
 }
 
 // TestPoolSeatBatchReadsIdlePolecatsInBatches is the roster over 25 polecat
-// directories: the seats counted are the per-seat read's, and the read is one
+// directories: the seats counted are the per-seat read's, and the reads are one
 // batched assigned-work list for the rig, which also answers the agent beads it
-// carries, where the per-seat read spent two on every polecat. The idle
-// polecats with no session and no hooked work cost nothing of their own
-// (gt-u8rbh, gt-4efmk).
+// carries. The idle polecats with no session and no hooked work cost nothing of
+// their own (gt-u8rbh, gt-4efmk).
 func TestPoolSeatBatchReadsIdlePolecatsInBatches(t *testing.T) {
 	t.Parallel()
 	town, db, lister := seatTown(t, 25)
@@ -408,13 +408,23 @@ func TestPoolSeatBatchReadsSourceIssuesLiveWhenTheBatchFails(t *testing.T) {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
-	store := &sourceBatchFails{countingStore: newCountingStore(db)}
+	store := &showMultipleFails{countingStore: newCountingStore(db), fail: sourcesUnder}
 	got, err := poolSeatSessionsWith(lister, town, batchOverStore(town, store).disposition, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
 	assertSameSeats(t, got, want)
 
+	// The agent beads came from the work list, which answered; only the source
+	// batch failed, so every source issue is read live and no agent bead is.
+	if len(store.multis) != 1 || !sourcesUnder(store.multis[0]) {
+		t.Errorf("batched reads = %v, want the one source batch that failed", store.multis)
+	}
+	for id := range store.shows {
+		if !strings.HasPrefix(id, "gt-old-") {
+			t.Errorf("source batch's failure also cost a live read of %s, want the agent beads from the work list", id)
+		}
+	}
 	if len(store.shows) != 6 {
 		t.Errorf("live reads = %v, want each of the 6 source issues read once", store.shows)
 	}
@@ -573,12 +583,162 @@ func TestPoolSeatBatchReportsABeadThatIsNotAnAgentBead(t *testing.T) {
 	}
 }
 
-// sourceBatchFails is a rig store whose one batched read, the source issues the
-// work list does not hold, fails. The work list still answers the agent beads.
-type sourceBatchFails struct {
+// showMultipleFails is a store whose ShowMultiple fails for the ids fail names,
+// so a test can lose one batched read and leave the others answering.
+type showMultipleFails struct {
+	*countingStore
+	fail func(ids []string) bool
+}
+
+func (s *showMultipleFails) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	if s.fail(ids) {
+		// The call was made, so it is counted even though bd failed it.
+		s.multis = append(s.multis, append([]string(nil), ids...))
+		return nil, errors.New("bd show: boom")
+	}
+	return s.countingStore.ShowMultiple(ids)
+}
+
+// asksFor selects a ShowMultiple that asks the store for id.
+func asksFor(id string) func([]string) bool {
+	return func(ids []string) bool {
+		for _, asked := range ids {
+			if asked == id {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// sourcesUnder is the selector for a batch of the closed source issues
+// closedSourceTown seeds: the reads whose ids are all gt-old-*.
+func sourcesUnder(ids []string) bool {
+	for _, id := range ids {
+		if !strings.HasPrefix(id, "gt-old-") {
+			return false
+		}
+	}
+	return len(ids) > 0
+}
+
+// workListFails is a rig store whose assigned-work List fails; its batched
+// agent-bead reads still answer.
+type workListFails struct {
 	*countingStore
 }
 
-func (s *sourceBatchFails) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
-	return nil, errors.New("bd show: boom")
+func (w *workListFails) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("bd list: boom")
+}
+
+// agentListOmits is a store whose work list drops every agent bead's
+// description, the field a list form that did not carry it would leave out.
+type agentListOmits struct {
+	*countingStore
+}
+
+func (s *agentListOmits) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	issues, err := s.countingStore.List(opts)
+	if err != nil {
+		return nil, err
+	}
+	for _, issue := range issues {
+		if beads.IsAgentBead(issue) {
+			issue.Description = ""
+		}
+	}
+	return issues, nil
+}
+
+// TestSeatBatchReadsAnAgentBeadTheListDidNotCarryWhole is the batch's guard on
+// the work list as an agent-bead source: a list record that does not carry the
+// fields the seat read parses is not answered as an agent bead holding nothing —
+// which would read its seat free — but read by id, and the seat keeps the work
+// its description names.
+func TestSeatBatchReadsAnAgentBeadTheListDidNotCarryWhole(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "p01")
+	db := beadsfake.New()
+	seedPolecatAgentBead(db, town, "gastown", "p01", "gt-hooked")
+	db.Seed(beads.Issue{ID: "gt-hooked", Status: beads.StatusHooked})
+	store := &agentListOmits{countingStore: newCountingStore(db)}
+
+	perSeat := poolDispositionAnswering(town, seatReadsOver(newCountingStore(db)))
+	want, err := perSeat("gastown", "p01")
+	if err != nil {
+		t.Fatalf("per-seat read: %v", err)
+	}
+	got, err := batchOverStore(town, store).disposition("gastown", "p01")
+	if err != nil {
+		t.Fatalf("batched read: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("seat = %+v, want the per-seat read's %+v", got, want)
+	}
+	if !got.HookHeld || !got.Disposition.CountsTowardCapacity {
+		t.Errorf("seat = %+v, want the hooked work its description names to hold it", got)
+	}
+	// The record the list could not carry whole is read by id instead.
+	agentID := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "gastown"), "gastown", "p01")
+	if len(store.multis) != 1 || len(store.multis[0]) != 1 || store.multis[0][0] != agentID {
+		t.Errorf("batched reads = %v, want the one agent bead the list left incomplete", store.multis)
+	}
+}
+
+// TestPoolSeatBatchCountsSeatsWhenTheWorkListFails is the work list's failure
+// branch: the list is what answers both agent beads and assignments, and its
+// failure costs a batch of agent-bead reads and one live read per polecat, not
+// a picture of a pool with free seats.
+func TestPoolSeatBatchCountsSeatsWhenTheWorkListFails(t *testing.T) {
+	t.Parallel()
+	town, db, lister := seatTown(t, 20)
+	pool := seatPool("deepseek-flash", 30)
+
+	perSeat := newCountingStore(db)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	if err != nil {
+		t.Fatalf("per-seat roster: %v", err)
+	}
+
+	store := &workListFails{countingStore: newCountingStore(db)}
+	got, err := poolSeatSessionsWith(lister, town, batchOverStore(town, store).disposition, nil, pool)
+	if err != nil {
+		t.Fatalf("batched roster: %v", err)
+	}
+	assertSameSeats(t, got, want)
+	if n := poolSeatCount("deepseek-flash", got); n != 4 {
+		t.Fatalf("seat count = %d, want 3 live and 1 dead-hooked with the work list down (%+v)", n, got)
+	}
+	// The agent beads the failed list could not answer cost one batch, and the
+	// assignments the failed list could not answer cost one live read each.
+	if len(store.multis) == 0 || len(store.multis[0]) != 20 {
+		t.Errorf("batched reads = %v, want the 20 agent beads asked for in the first batch", store.multis)
+	}
+	if store.assigned != 20 {
+		t.Errorf("per-polecat assigned-work reads = %d, want one for each of the 20", store.assigned)
+	}
+}
+
+// TestSeatBatchHeldIssueIsOneBeadWhicheverRigListsIt: a bead id two rigs' work
+// lists carry is answered by the same rig on every read, so a batch's answers do
+// not change from one call to the next.
+func TestSeatBatchHeldIssueIsOneBeadWhicheverRigListsIt(t *testing.T) {
+	t.Parallel()
+	batch := newPoolSeatBatch("", nil, nil)
+	batch.rigs["arig"] = &rigSeatBatch{held: map[string]*beads.Issue{"gt-shared": {ID: "gt-shared", Title: "arig"}}}
+	batch.rigs["brig"] = &rigSeatBatch{held: map[string]*beads.Issue{"gt-shared": {ID: "gt-shared", Title: "brig"}}}
+	first, ok := batch.heldIssue("gt-shared")
+	if !ok {
+		t.Fatalf("the batch holds nothing for gt-shared, want a rig's record")
+	}
+	for i := 0; i < 64; i++ {
+		issue, ok := batch.heldIssue("gt-shared")
+		if !ok || issue.Title != first.Title {
+			t.Fatalf("read %d answered gt-shared with %v (%v), want the first read's %q",
+				i, issue, ok, first.Title)
+		}
+	}
 }

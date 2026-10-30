@@ -1,0 +1,62 @@
+[
+  {
+    "id": "gt-gastown-polecat-valkyrie",
+    "title": "gt-gastown-polecat-valkyrie",
+    "description": "gt-gastown-polecat-valkyrie\n\nrole_type: polecat\nrig: gastown\nagent_state: spawning\nhook_bead: gt-4efmk\ncleanup_status: null\nactive_mr: null\nnotification_level: null\nagent: sbx-flash",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "sloan.ahrens@gmail.com",
+    "created_at": "2026-10-21T14:59:32Z",
+    "created_by": "daemon",
+    "updated_at": "2026-10-30T19:56:53Z",
+    "labels": [
+      "gt:agent"
+    ],
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0,
+    "revision": -8099786551167882210
+  },
+  {
+    "id": "gt-p85pw.111",
+    "title": "tracker Mo3a: trackerd lists and counts wisps by age and status",
+    "description": "attached_molecule: gt-wisp-sttlf4\nattached_formula: mol-polecat-work\nattached_at: 2026-10-30T19:17:41.924343Z\nattached_args: HOST SAFETY (spec dispatcher): any test of install or uninstall MUST use a temporary INSTALL_DIR (mktemp -d) and never the real ~/.local/bin. Never run make install, gt dolt cleanup, or rm -rf outside your worktree on this host.\nattached_vars: [\"feature=tracker Mo3a: trackerd lists and counts wisps by age and status\",\"issue=gt-p85pw.111\",\"test_command=make gate\",\"build_command=make build\",\"base_branch=main\",\"lint_command=\",\"setup_command=\",\"typecheck_command=\"]\ndispatched_by: daemon/spec-dispatch\nformula_vars: [\"feature=tracker Mo3a: trackerd lists and counts wisps by age and status\",\"issue=gt-p85pw.111\",\"test_command=make gate\",\"build_command=make build\",\"base_branch=main\",\"lint_command=\",\"setup_command=\",\"typecheck_command=\"]\n\n## Goal\nThe wisp reaper (internal/reaper/reaper.go, hourly from internal/daemon/wisp_reaper.go) and `gt reaper scan` read the wisps tables by SQL, and a tracker rig is absent from their discovery. The tracker stores ephemeral rows (the contract cases list them); give trackerd and its client a read for them: list ephemeral issues by status, closed-before and created-before cutoffs with a page cursor, plus a count, so the reaper port (next beads) has a data source. Read tracker/store/postgres_list.go first and extend its filter; add the matching request fields in tracker/api/requests.go and the client method in tracker/client/issues.go.\n\n## Constraints\n- Files: tracker/api/requests.go, tracker/store/postgres_list.go, tracker/server/routes_issues.go, tracker/client/issues.go and their tests (the store test runs under the container gate).\n- No delete here: purge is the next bead.\n\n## Out of scope\nDeleting rows, the reaper policy, the daemon.\n\n## Gate\ngo test ./tracker/...\n\n## Size\none worker, one MR\n\n## Acceptance\n\n- [x] a store test shows list by status and age cutoffs returns the expected ephemeral rows and pages with a cursor\n- [x] a client test against the in-process server shows the count matches the list length\n- [x] a test shows non-ephemeral issues are never returned by this read\n",
+    "acceptance_criteria": "- [x] a store test shows list by status and age cutoffs returns the expected ephemeral rows and pages with a cursor\n- [x] a client test against the in-process server shows the count matches the list length\n- [x] a test shows non-ephemeral issues are never returned by this read",
+    "notes": "Landed the read Mo3b purges from; no delete here.\n\n- api.ListFilter gains ClosedBefore and CreatedBefore (strictly before; zero is no bound; an issue with a NULL close time never matches a close bound).\n- New CountIssues store method, POST /v1/issues:count ({filter: ListFilter} -> {count: n}) and client.Count. The count is the whole match: a filter carrying limit or cursor is refused as invalid at the route and again in the store.\n- Wisp reads are List with Ephemeral true (postgres pins issues.ephemeral = $n, so a durable issue can never come back), Statuses ([\"closed\"] or [\"all\"]), the cutoffs, Limit and Cursor.\n- Tests: contract cases_wisp.go (age cutoffs both directions, cursor walk, count vs list length, durable issue never returned, page refused) run under the container gate; unit tier covers the WHERE builder, the route refusal and client<->route agreement.\nREADY TO LAND\nBranch: polecat/dag/gt-p85pw.111+mvvct21d\nHead: 9f2efc25cd05c002ea8fe57220798e9cb26cb303\nTarget: main\nWorker: dag\nSubmitted: 2026-10-30T19:59:01Z",
+    "status": "hooked",
+    "priority": 2,
+    "issue_type": "task",
+    "assignee": "gastown/polecats/dag",
+    "owner": "dipper@gastown.local",
+    "created_at": "2026-10-30T17:42:56Z",
+    "created_by": "town/crew/dipper",
+    "updated_at": "2026-10-30T19:59:01Z",
+    "labels": [
+      "bird-filed",
+      "gt:ready-to-land",
+      "tracker"
+    ],
+    "dependencies": [
+      {
+        "id": "gt-p85pw",
+        "title": "Town tracker: replace beads and Dolt (slices S0-S2)",
+        "description": "## Goal\nReplace the Dolt-backed bd tracker with a town-owned Postgres service (trackerd) for the verbs the town uses, behind the existing beads.Client seam, with a bd shim for rig-by-rig migration.\n\n## Design and plan\ndocs/plans/2026-10-25-town-tracker-design.md and docs/plans/2026-10-25-town-tracker-plan.md (landing via gt-gfmn3). Handoff bead: claude-477 in ~/.claude. Decisions were grilled with Sloan on 2026-10-25 (Q1-Q16, all accepted).\n\n## Tracks\nR research, B seam bypasses, C crew foundation (not polecat), E polecat image, V verbs, M migration, Mo wisps and molecules, X shim, O ops, A ADRs. The interim Dolt track (D) is run by the crew session and the overseer, not polecats.\n\n## Rules\nPolecat beads add to existing packages only: no schema change, no new dependency. The crew tasks C1-C6 create the module, schema and dependencies first. Tests follow ~/.claude/docs/standards/test-engineering.md.\n",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "epic",
+        "owner": "sloan.ahrens@gmail.com",
+        "created_at": "2026-10-25T15:22:30Z",
+        "created_by": "town/crew/dipper",
+        "updated_at": "2026-10-25T15:22:30Z",
+        "dependency_type": "parent-child"
+      }
+    ],
+    "parent": "gt-p85pw",
+    "dependent_count": 2,
+    "dependency_count": 1,
+    "comment_count": 1,
+    "comments_omitted": true,
+    "revision": -5568785361826768796
+  }
+]
