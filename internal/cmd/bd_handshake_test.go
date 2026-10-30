@@ -534,7 +534,7 @@ func TestTownStartHandshakeRefusesABackendNeitherStoreSpeaks(t *testing.T) {
 // table the gate cannot read does not refuse a town. The town runs the bd
 // handshake it ran before a route could name the tracker, so its verdict is
 // the gate's verdict, and the read error is reported once instead of being
-// dropped (gt-p85pw.110; om c94b4ddd8e0c).
+// dropped (gt-p85pw.110).
 func TestTownStartHandshakeFallsBackToTheBDHandshakeForAnUnreadableRoute(t *testing.T) {
 	t.Parallel()
 	refusal := fmt.Errorf("%w: bd not found on PATH", deps.ErrBDHandshake)
