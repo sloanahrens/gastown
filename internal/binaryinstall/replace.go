@@ -3,10 +3,14 @@
 // rename(2), so a concurrent reader sees either the complete old binary or the
 // complete new one, never a partial copy (gt-0het).
 //
+// Replaces of one target are serialized on a lock file beside it, so two
+// installs cannot interleave their flag clears, copies and renames.
+//
 // internal/installer/binary.go reads the commit an installed binary was built
 // from and offers nothing a replace needs, and the copy and immutable-flag
 // helpers beside it in that package's Files seam are unexported, so this
-// package carries its own with the same shape (gt-tpg0p.66).
+// package carries its own with the same shape. The per-target lock reuses
+// internal/installlock, the flock the Go installer already holds (gt-tpg0p.66).
 package binaryinstall
 
 import (
@@ -17,11 +21,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/installlock"
 )
 
 // ErrSourceNotFound is a replace whose source binary is not a regular file,
 // the shell's `[ ! -f "$src" ]` refusal (gt-tpg0p.66).
 var ErrSourceNotFound = errors.New("source binary not found")
+
+// ErrReplaceInProgress reports that another replace holds the target's lock.
+// Replace does not wait for a peer; the refused install is the caller's to
+// retry (gt-tpg0p.66).
+var ErrReplaceInProgress = errors.New("another install is in progress")
 
 // Files is the filesystem a replace touches. Every field is a seam with the
 // real operation behind a nil one, so a test scripts the failing rename and the
@@ -49,6 +60,10 @@ type Files struct {
 	ClearImmutable func(path string) error
 	// SetImmutable puts the flag back on path.
 	SetImmutable func(path string) error
+	// Lock takes path's exclusive lock without waiting and returns its release.
+	// It returns installlock.ErrBusy when another holder has the lock, and any
+	// other error when the lock could not be taken at all.
+	Lock func(path string) (release func(), err error)
 }
 
 // Installer replaces an installed binary through its filesystem seam.
@@ -58,6 +73,10 @@ type Installer struct {
 
 // Replace installs src as destDir/name, replacing a binary already there
 // atomically; an empty name takes src's base name.
+//
+// One replace of a target holds its lock from before the copy until the
+// immutable flag is back, and a second replace that finds it held returns
+// ErrReplaceInProgress rather than interlacing with the first (gt-tpg0p.66).
 func (i Installer) Replace(src, destDir, name string) (err error) {
 	f := i.Files
 	if name == "" {
@@ -80,10 +99,26 @@ func (i Installer) Replace(src, destDir, name string) (err error) {
 	if mkErr := f.mkdirAll(destDir); mkErr != nil {
 		return fmt.Errorf("binaryinstall: create %s: %w", destDir, mkErr)
 	}
+	dest := filepath.Join(destDir, name)
+	// The lock covers the whole mutation below: the flag clear, the copy, the
+	// rename and the flag restore. Two replaces that interleaved there could
+	// have one restore the flag while the other is about to rename onto an
+	// immutable target, which the platform refuses. The lock is taken without
+	// waiting: a peer's install is under way, and this one is refused rather
+	// than queued behind it (gt-tpg0p.66).
+	lockPath := filepath.Join(destDir, "."+name+".replace.lock")
+	release, lockErr := f.lock(lockPath)
+	if errors.Is(lockErr, installlock.ErrBusy) {
+		return fmt.Errorf("binaryinstall: %s: %w", name, ErrReplaceInProgress)
+	}
+	if lockErr != nil {
+		return fmt.Errorf("binaryinstall: lock %s: %w", lockPath, lockErr)
+	}
+	defer release()
 	// The temp file sits in destDir, never in the system temp directory: a
 	// rename across filesystems is a copy, and a copy is not atomic. Its name
-	// is unique so two concurrent installs cannot rename each other's
-	// half-written copy into place.
+	// is unique so two installs cannot rename each other's half-written copy
+	// into place even when they name different targets in one directory.
 	tmp, err := f.tempFile(destDir, "."+name+".tmp.*")
 	if err != nil {
 		return fmt.Errorf("binaryinstall: create temp file in %s: %w", destDir, err)
@@ -96,7 +131,6 @@ func (i Installer) Replace(src, destDir, name string) (err error) {
 		_ = f.remove(tmp)
 		return fmt.Errorf("binaryinstall: set mode %#o on %s: %w", perm, tmp, chmodErr)
 	}
-	dest := filepath.Join(destDir, name)
 	// The flag comes off here, at the rename it would block, and not a moment
 	// sooner, so the live binary is writable for no longer than the replace
 	// (gt-tqxdd).
@@ -202,6 +236,16 @@ func (f Files) setImmutable(path string) error {
 		return f.SetImmutable(path)
 	}
 	return setImmutable(path)
+}
+
+// lock takes the per-target lock. A zero wait makes the real take
+// non-blocking, so a peer that holds it answers ErrBusy at once instead of
+// making this install wait.
+func (f Files) lock(path string) (func(), error) {
+	if f.Lock != nil {
+		return f.Lock(path)
+	}
+	return installlock.Acquire(path, 0)
 }
 
 // createTempFile is mktemp: the pattern decides the name, the directory decides
