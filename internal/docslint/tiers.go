@@ -27,6 +27,9 @@ type FS interface {
 	WalkFiles(dir string) ([]string, error)
 	ReadFile(path string) ([]byte, error)
 	Exists(path string) bool
+	// PathExists reports whether p exists as a file or a directory. A link may
+	// point at a directory, so the dead-link check asks this rather than Exists.
+	PathExists(path string) bool
 }
 
 // The tier names `--list` accepts.
@@ -264,6 +267,12 @@ type OSFiles struct {
 func (o OSFiles) Exists(p string) bool {
 	info, err := os.Stat(o.abspath(p))
 	return err == nil && info.Mode().IsRegular()
+}
+
+// PathExists reports whether p exists under Root, as a file or a directory.
+func (o OSFiles) PathExists(p string) bool {
+	_, err := os.Stat(o.abspath(p))
+	return err == nil
 }
 
 // ReadFile reads p under Root.

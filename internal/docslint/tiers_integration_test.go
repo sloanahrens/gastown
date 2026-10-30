@@ -41,6 +41,10 @@ func TestIntegrationOSFilesReadsACheckout(t *testing.T) {
 	if fsys.Exists("docs/plans") || fsys.Exists("docs") || fsys.Exists("missing.md") {
 		t.Error("Exists reported a path that is not a regular file")
 	}
+	// PathExists reports a directory as well: a link may point at one.
+	if !fsys.PathExists("docs/design") || fsys.PathExists("docs/missing") {
+		t.Error("PathExists did not report a directory that exists and a path that does not")
+	}
 	if data, err := fsys.ReadFile("docs/design/live.md"); err != nil || string(data) != "# live\n" {
 		t.Errorf("ReadFile(docs/design/live.md) = %q, %v", data, err)
 	}
