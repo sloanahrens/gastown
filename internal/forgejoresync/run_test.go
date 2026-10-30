@@ -441,6 +441,31 @@ func TestRunStepFailureRestoresAndCleansUp(t *testing.T) {
 	}
 }
 
+// TestRunScratchRemovalFailureIsLogged checks a scratch directory the run cannot remove is named
+// in the log without changing the result: the mirror landed, the restore still ran, and the run
+// exits 0. Mutation: drop the log line in removeWork and the log check goes red.
+func TestRunScratchRemovalFailureIsLogged(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	fx.resync.RemoveAll = func(path string) error {
+		fx.removed = append(fx.removed, path)
+		return errors.New("permission denied")
+	}
+	if rc := fx.resync.Run(); rc != ExitOK {
+		t.Fatalf("Run = %d, want 0; logs %q", rc, fx.logs)
+	}
+	want := "could not remove the scratch dir " + runWork + ": permission denied"
+	if !slices.Contains(fx.logs, want) {
+		t.Fatalf("logs %q do not hold %q", fx.logs, want)
+	}
+	if fx.made != 1 || !slices.Equal(fx.removed, []string{runWork}) {
+		t.Fatalf("scratch made %d, removal attempts %v; want 1 made and %s attempted", fx.made, fx.removed, runWork)
+	}
+	if fx.lastEvent() != "restore" || len(fx.calls) != 1 {
+		t.Fatalf("restore did not run last: events %v", fx.events)
+	}
+}
+
 // TestRunRefusesAListingThatWouldEmptyTheForgejoCopy checks a GitHub listing with no refs, or
 // without main, stops the run before the fetch, the lift and the push, and that the restore
 // still runs. Mutation: drop the guard and the empty row lifts main and prunes the copy to
