@@ -493,6 +493,31 @@ func TestNamesDoc(t *testing.T) {
 	}
 }
 
+// TestNamesDocCompilePanicReleasesLock checks that a panic while compiling a
+// doc's pattern does not leave the cache locked: the caller that panicked
+// recovers, the lock is free for the next caller, and that caller still gets
+// an answer.
+func TestNamesDocCompilePanicReleasesLock(t *testing.T) {
+	t.Parallel()
+	names := newDocNameCache()
+	names.compile = func(doc string) *regexp.Regexp {
+		panic("compile failed for " + doc)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		names.namesDoc("docs: fix docs/reference.md", "docs/reference.md")
+	}()
+
+	names.compile = compileDocName
+	if !names.mu.TryLock() {
+		t.Fatal("cache mutex stayed locked after a compile panic")
+	}
+	names.mu.Unlock()
+	if got := names.namesDoc("docs: fix docs/scorecard.md", "docs/scorecard.md"); !got {
+		t.Errorf("namesDoc after a compile panic = false, want true")
+	}
+}
+
 // TestNamesDocCompilesOncePerDoc drives namesDoc over many texts for two docs,
 // counting each doc's pattern compiles through the seam: one compile per doc,
 // however many texts ask, and each doc's pattern answers only its own texts.
