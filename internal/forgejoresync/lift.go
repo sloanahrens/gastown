@@ -47,11 +47,8 @@ func (osFiles) CreateNew(path string, data []byte, perm fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	_, werr := f.Write(data)
+	return errors.Join(werr, f.Close())
 }
 
 // Resync is one run of the lift: the options it was given, the Forgejo client

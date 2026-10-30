@@ -454,6 +454,33 @@ func TestLiftNeverOverwritesABackup(t *testing.T) {
 	assertNoTokenIn(t, fx, err)
 }
 
+// TestLiftStopsWhenNoBackupNameIsFree checks a lift whose every backup name is taken stops
+// before the DELETE: the rule stays on the repository and no copy is overwritten.
+func TestLiftStopsWhenNoBackupNameIsFree(t *testing.T) {
+	t.Parallel()
+	fx := newLiftFixture(t, "main", false, liftRule("main"))
+	for i := range maxBackups {
+		name := liftFirstBackup
+		if i > 0 {
+			name = fmt.Sprintf("%s.%d", liftFirstBackup, i)
+		}
+		fx.files.files[name] = []byte("taken")
+	}
+	err := fx.resync.LiftProtection()
+	if err == nil || !strings.Contains(err.Error(), "no free backup name") {
+		t.Fatalf("LiftProtection error = %v, want no free backup name", err)
+	}
+	if fx.fake.Rule(liftRepo, "main") == nil {
+		t.Fatal("rule deleted although no backup was written")
+	}
+	for _, event := range fx.events {
+		if strings.HasPrefix(event, "DELETE") {
+			t.Fatalf("DELETE sent with no free backup name: %v", fx.events)
+		}
+	}
+	assertNoTokenIn(t, fx, err)
+}
+
 // TestOSFilesCreateNewRefusesExisting checks the real filesystem seam refuses to write over
 // a file that exists: the second create fails with fs.ErrExist and the first copy stays.
 // Mutation: drop O_EXCL from CreateNew and the second write replaces the first.
