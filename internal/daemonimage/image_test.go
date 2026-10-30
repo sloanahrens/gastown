@@ -308,6 +308,24 @@ func TestDaemonDockerfileCopiesTheClaudeCLIAndNothingFetchesIt(t *testing.T) {
 	}
 }
 
+// TestDaemonDockerfileHasNoRepeatedCommentLine: a comment block pasted twice is
+// left dangling above the next instruction, so no comment line may appear twice.
+// A bare "#" separator is exempt.
+func TestDaemonDockerfileHasNoRepeatedCommentLine(t *testing.T) {
+	t.Parallel()
+	seen := map[string]bool{}
+	for _, line := range strings.Split(readDockerfile(t), "\n") {
+		text := strings.TrimSpace(line)
+		if !strings.HasPrefix(text, "#") || text == "#" {
+			continue
+		}
+		if seen[text] {
+			t.Errorf("%s repeats the comment line %q; a pasted comment block is left dangling", DockerfilePath, text)
+		}
+		seen[text] = true
+	}
+}
+
 // copyOperands returns a COPY's --from stage, and its source and destination
 // operands, with its --flag entries dropped. A COPY with no --from reads the
 // build context, so its from is empty.
