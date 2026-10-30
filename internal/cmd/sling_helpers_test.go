@@ -126,7 +126,7 @@ type moleculeBond struct {
 func TestMoleculeDepsKeepsOpenMoleculesBondedToTheBead(t *testing.T) {
 	t.Parallel()
 	open := func(id, issueType string) beads.Issue {
-		return beads.Issue{ID: id, Title: id, Status: "open", Type: issueType}
+		return beads.Issue{ID: id, Title: id, Status: "open", Type: issueType, Ephemeral: true}
 	}
 	tests := []struct {
 		name     string
@@ -169,7 +169,7 @@ func TestMoleculeDepsKeepsOpenMoleculesBondedToTheBead(t *testing.T) {
 		},
 		{
 			name:   "closed molecule is excluded",
-			issues: []beads.Issue{{ID: "gt-wisp-dead", Title: "dead", Status: "closed", Type: "molecule"}},
+			issues: []beads.Issue{{ID: "gt-wisp-dead", Title: "dead", Status: "closed", Type: "molecule", Ephemeral: true}},
 			bonds:  []moleculeBond{{"gt-wisp-dead", "blocks"}},
 		},
 		{
@@ -187,8 +187,13 @@ func TestMoleculeDepsKeepsOpenMoleculesBondedToTheBead(t *testing.T) {
 			issues: []beads.Issue{open("gt-wisp-loose", "molecule")},
 		},
 		{
+			name:   "a persistent molecule-typed issue under a blocking bond is not attached (the old statement joined wisps)",
+			issues: []beads.Issue{{ID: "gt-mol-template", Title: "template", Status: "open", Type: "molecule"}},
+			bonds:  []moleculeBond{{"gt-mol-template", "blocks"}},
+		},
+		{
 			name:   "tombstoned molecule is excluded",
-			issues: []beads.Issue{{ID: "gt-wisp-gone", Title: "gone", Status: "tombstone", Type: "molecule"}},
+			issues: []beads.Issue{{ID: "gt-wisp-gone", Title: "gone", Status: "tombstone", Type: "molecule", Ephemeral: true}},
 			bonds:  []moleculeBond{{"gt-wisp-gone", "blocks"}},
 		},
 		{
@@ -207,7 +212,7 @@ func TestMoleculeDepsKeepsOpenMoleculesBondedToTheBead(t *testing.T) {
 			name: "mixed: open kept in creation order, closed and non-molecule skipped",
 			issues: []beads.Issue{
 				open("gt-wisp-a", "molecule"),
-				{ID: "gt-wisp-b", Title: "b", Status: "closed", Type: "molecule"},
+				{ID: "gt-wisp-b", Title: "b", Status: "closed", Type: "molecule", Ephemeral: true},
 				open("gt-wisp-c", "molecule"),
 				open("gt-wisp-d", "task"),
 			},
@@ -261,7 +266,7 @@ func TestMoleculeDepsReadsLocalBondsThroughTheSeamAndExternalByOneStatement(t *t
 	t.Parallel()
 	db := beadsfake.New()
 	db.Seed(beads.Issue{ID: "gt-work", Title: "work", Status: "open", Type: "task"},
-		beads.Issue{ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule"})
+		beads.Issue{ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule", Ephemeral: true})
 	if err := db.AddTypedDependency("gt-wisp-live", "gt-work", "blocks"); err != nil {
 		t.Fatalf("AddTypedDependency: %v", err)
 	}
@@ -319,8 +324,8 @@ func TestMoleculeDepsExternalBondsFollowTheLocalOnes(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
 	db.Seed(beads.Issue{ID: "gt-work", Title: "work", Status: "open", Type: "task"},
-		beads.Issue{ID: "gt-wisp-a", Title: "a", Status: "open", Type: "molecule"},
-		beads.Issue{ID: "gt-wisp-b", Title: "b", Status: "open", Type: "molecule"})
+		beads.Issue{ID: "gt-wisp-a", Title: "a", Status: "open", Type: "molecule", Ephemeral: true},
+		beads.Issue{ID: "gt-wisp-b", Title: "b", Status: "open", Type: "molecule", Ephemeral: true})
 	if err := db.AddTypedDependency("gt-wisp-a", "gt-work", "blocks"); err != nil {
 		t.Fatalf("AddTypedDependency: %v", err)
 	}
@@ -363,7 +368,7 @@ func TestMoleculeDepsRefusesAFailedRead(t *testing.T) {
 	errRead := errors.New("bd dep list: connection refused")
 	db := beadsfake.New()
 	db.Seed(beads.Issue{ID: "gt-work", Title: "work", Status: "open", Type: "task"},
-		beads.Issue{ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule"})
+		beads.Issue{ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule", Ephemeral: true})
 	if err := db.AddTypedDependency("gt-wisp-live", "gt-work", "blocks"); err != nil {
 		t.Fatalf("AddTypedDependency: %v", err)
 	}
@@ -413,7 +418,7 @@ func TestMoleculeDepsReadsAnOmittedCandidateAlone(t *testing.T) {
 	errRead := errors.New("bd show: connection refused")
 	db := beadsfake.New()
 	db.Seed(beads.Issue{ID: "gt-work", Title: "work", Status: "open", Type: "task"},
-		beads.Issue{ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule"})
+		beads.Issue{ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule", Ephemeral: true})
 	if err := db.AddTypedDependency("gt-wisp-live", "gt-work", "blocks"); err != nil {
 		t.Fatalf("AddTypedDependency: %v", err)
 	}

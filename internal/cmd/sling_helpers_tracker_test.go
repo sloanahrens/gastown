@@ -69,9 +69,9 @@ func TestMoleculeDepsOnATrackerStoreReadsLocalBondsAndWarnsOnce(t *testing.T) {
 				{ID: "gt-wisp-done", Title: "done", Status: "closed", DependencyType: "parent-child"},
 				{ID: "gt-wisp-track", Title: "track", Status: "open", DependencyType: "tracks"},
 			}},
-			"gt-wisp-live":  {ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule"},
-			"gt-wisp-done":  {ID: "gt-wisp-done", Title: "done", Status: "closed", Type: "molecule"},
-			"gt-wisp-track": {ID: "gt-wisp-track", Title: "track", Status: "open", Type: "molecule"},
+			"gt-wisp-live":  {ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule", Ephemeral: true},
+			"gt-wisp-done":  {ID: "gt-wisp-done", Title: "done", Status: "closed", Type: "molecule", Ephemeral: true},
+			"gt-wisp-track": {ID: "gt-wisp-track", Title: "track", Status: "open", Type: "molecule", Ephemeral: true},
 		}}},
 	})
 	if err != nil {

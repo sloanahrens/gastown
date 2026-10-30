@@ -332,7 +332,11 @@ func bondedMolecules(store slingStore, beadID string) ([]string, error) {
 				return nil, fmt.Errorf("reading bond candidate %s of %s: store gave no answer", id, beadID)
 			}
 		}
-		if issue.Type != "molecule" {
+		// The old statement joined the wisps table: only an ephemeral
+		// molecule instance is attached to a bead, and a persistent
+		// molecule-typed issue under the same relation is not (burning it
+		// would close real work).
+		if issue.Type != "molecule" || !issue.Ephemeral {
 			continue
 		}
 		if issue.Status == "closed" || issue.Status == "tombstone" {
