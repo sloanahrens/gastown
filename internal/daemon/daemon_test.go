@@ -868,13 +868,17 @@ func fixtureHostname(host string) func() (string, error) {
 // and returns Run's error.
 func startParkedRun(t *testing.T, env map[string]string) (*Config, func() error) {
 	t.Helper()
-	return startParkedRunIn(t, t.TempDir(), env, nil)
+	return startParkedRunIn(t, t.TempDir(), env, unreachableProbe(t))
 }
 
 // startParkedRunIn is startParkedRun on the town root town, with probe as the
-// owner probe the startup guard reads (nil reads the supervisors for real).
+// owner probe the startup guard reads. A nil probe is refused: it would read
+// the real supervisors from a test.
 func startParkedRunIn(t *testing.T, town string, env map[string]string, probe OwnerProbe) (*Config, func() error) {
 	t.Helper()
+	if probe == nil {
+		t.Fatal("startParkedRunIn needs a probe: a nil probe reads the real supervisors")
+	}
 	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
 		t.Fatal(err)
 	}
