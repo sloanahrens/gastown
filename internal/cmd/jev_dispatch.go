@@ -102,6 +102,7 @@ func jevDispatchSettings(townRoot string) (dispatch.Settings, error) {
 	return dispatch.Settings{
 		MaxUSDPerDay:        c.MaxUSDPerDay,
 		USDPerBillionTokens: c.USDPerBillionTokens,
+		Scrub:               c.Scrub,
 	}, nil
 }
 

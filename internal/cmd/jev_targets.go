@@ -148,5 +148,6 @@ func jevTargetsSettings(townRoot string) (targets.Settings, error) {
 	return targets.Settings{
 		MaxUSDPerDay:        c.MaxUSDPerDay,
 		USDPerBillionTokens: c.USDPerBillionTokens,
+		Scrub:               c.Scrub,
 	}, nil
 }

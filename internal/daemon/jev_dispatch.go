@@ -55,6 +55,7 @@ func (d *Daemon) runJevDispatch() {
 		settings = jevdispatch.Settings{
 			MaxUSDPerDay:        c.Patrols.JevDispatch.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevDispatch.USDPerBillionTokens,
+			Scrub:               c.Patrols.JevDispatch.Scrub,
 		}
 	}
 	open := d.jevDispatchOpen

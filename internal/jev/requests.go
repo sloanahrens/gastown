@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/jev/scrub"
 )
 
 // requestsFile is the request log's name in the usage ledger's directory.
@@ -59,7 +60,8 @@ type RequestRecord struct {
 	// RequestID is the response's X-Request-Id header, empty when the server
 	// sent none.
 	RequestID string `json:"request_id"`
-	// StateBytes is the size of the state as the client marshaled it.
+	// StateBytes is the size of the state as sent: the scrubbed text's size
+	// when a scrubber is set, else the state as marshaled.
 	StateBytes int `json:"state_bytes"`
 	// BodyBytes is the exact size of the body posted.
 	BodyBytes int `json:"body_bytes"`
@@ -77,6 +79,13 @@ type RequestRecord struct {
 	StateBytesBeforeCut *int `json:"state_bytes_before_cut,omitempty"`
 	// Cut is whether a state implementing CutState was cut, present only then.
 	Cut *bool `json:"cut,omitempty"`
+	// Scrubbed is whether the client scrubbed the state before sending it,
+	// present only when a scrubber is set.
+	Scrubbed *bool `json:"scrubbed,omitempty"`
+	// Replacements counts how many times each scrubbing rule replaced text in
+	// the state, by rule name; the text it replaced stays out. Present only
+	// when a rule fired.
+	Replacements map[string]int `json:"replacements,omitempty"`
 }
 
 // requestLog appends one JSON line per request that reached the network. The
@@ -120,9 +129,29 @@ func (c *Client) stateSize(state any) (int, error) {
 	return len(b), nil
 }
 
+// sentState returns the state the request body carries, the size the request
+// log records for it, and the scrubbing report when a scrubber is set. A
+// scrubbed state is the JSON document ScrubJSON returned, so the body carries
+// exactly the text that was scrubbed and the questions stay untouched.
+func (c *Client) sentState(state any) (any, int, *scrub.Report, error) {
+	if c.scrub != nil {
+		raw, err := json.Marshal(state)
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("jev: encode request: %w", err)
+		}
+		scrubbed, report := c.scrub.ScrubJSON(raw)
+		return json.RawMessage(scrubbed), len(scrubbed), &report, nil
+	}
+	n, err := c.stateSize(state)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return state, n, nil, nil
+}
+
 // requestRecord builds the log line for one posted request from what the
 // client sent and how the call ended.
-func (c *Client) requestRecord(state any, stateBytes int, body []byte, qs map[string]Question, got reply, err error) *RequestRecord {
+func (c *Client) requestRecord(state any, stateBytes int, body []byte, qs map[string]Question, got reply, err error, report *scrub.Report) *RequestRecord {
 	sum := sha256.Sum256(body)
 	rec := &RequestRecord{
 		TS:          time.Now().UTC(),
@@ -137,6 +166,11 @@ func (c *Client) requestRecord(state any, stateBytes int, body []byte, qs map[st
 	if got.bodyReadFailed {
 		rec.HTTPStatus = got.status
 	}
+	if report != nil {
+		scrubbed := true
+		rec.Scrubbed = &scrubbed
+		rec.Replacements = ruleCounts(report)
+	}
 	if cs, ok := state.(CutState); ok {
 		// after is the battery's own count of the state it passes in; the line
 		// records the size the client actually marshaled.
@@ -145,6 +179,16 @@ func (c *Client) requestRecord(state any, stateBytes int, body []byte, qs map[st
 		rec.Cut = &wasCut
 	}
 	return rec
+}
+
+// ruleCounts maps each rule that replaced text to how many times it did, for
+// the request log; a count names the rule, never the text it replaced.
+func ruleCounts(report *scrub.Report) map[string]int {
+	counts := make(map[string]int)
+	for _, name := range report.Rules() {
+		counts[name] = report.Count(name)
+	}
+	return counts
 }
 
 // questionIDs returns qs's ids in a stable order.

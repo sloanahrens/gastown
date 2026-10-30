@@ -61,6 +61,7 @@ func (d *Daemon) runJevStale() bool {
 		settings = stale.Settings{
 			MaxUSDPerDay:        c.Patrols.JevStale.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevStale.USDPerBillionTokens,
+			Scrub:               c.Patrols.JevStale.Scrub,
 		}
 	}
 	open := d.jevStaleOpen

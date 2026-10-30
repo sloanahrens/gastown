@@ -79,6 +79,7 @@ func (d *Daemon) runJevProgress() {
 		settings = progress.Settings{
 			MaxUSDPerDay:        c.Patrols.JevProgress.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevProgress.USDPerBillionTokens,
+			Scrub:               c.Patrols.JevProgress.Scrub,
 		}
 	}
 	open := d.jevProgressOpen

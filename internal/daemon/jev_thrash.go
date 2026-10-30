@@ -54,6 +54,7 @@ func (d *Daemon) runJevThrash() {
 		settings = jevthrash.Settings{
 			MaxUSDPerDay:        c.Patrols.JevThrash.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevThrash.USDPerBillionTokens,
+			Scrub:               c.Patrols.JevThrash.Scrub,
 		}
 	}
 	open := d.jevThrashOpen
