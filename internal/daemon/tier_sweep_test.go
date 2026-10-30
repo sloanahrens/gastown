@@ -2891,7 +2891,7 @@ func TestTierSweepTreeHas_ReadsTheTree(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "scripts", "tier-sweep.sh"), []byte("#!/bin/bash\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "shipped.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "notadir"), []byte("x"), 0o600); err != nil {
@@ -2903,7 +2903,7 @@ func TestTierSweepTreeHas_ReadsTheTree(t *testing.T) {
 		want    bool
 		wantErr bool
 	}{
-		{name: "file is shipped", rel: "scripts/tier-sweep.sh", want: true},
+		{name: "file is shipped", rel: "scripts/shipped.txt", want: true},
 		{name: "directory is shipped", rel: "cmd/tier-sweep", want: true},
 		{name: "absent path is not shipped", rel: "internal/shelltier/cmd/shelltier", want: false},
 		{name: "parent is a file, an error", rel: "notadir/tier-sweep.sh", wantErr: true},
