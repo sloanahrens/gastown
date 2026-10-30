@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,8 @@ type installRig struct {
 	steps []string
 	// ldflags is the -ldflags value the build was run with.
 	ldflags string
+	// buildDir is the working directory the build ran in.
+	buildDir string
 
 	// git answers: repoErr fails the work-tree check (repoStderr names a
 	// non-repository), headErr fails HEAD, statusOut and statusErr answer status.
@@ -110,6 +113,7 @@ func (r *installRig) exec(ctx context.Context, c Command) (string, string, error
 	case "go":
 		r.steps = append(r.steps, "build")
 		r.ldflags = c.Args[1]
+		r.buildDir = c.Dir
 		if r.buildErr != nil {
 			return "", "", r.buildErr
 		}
@@ -323,6 +327,149 @@ func TestInstallHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(r.receipts(t), `"prev_commit": "`+commitOld+`"`) {
 		t.Errorf("receipts = %q, want the previous commit recorded", r.receipts(t))
+	}
+}
+
+// TestInstallBuildsInsideTheJobClone pins the build's working directory: ./cmd/om
+// resolves against the clone the job keeps, so the build must run there. It pins
+// existing behaviour on purpose, as a regression guard.
+func TestInstallBuildsInsideTheJobClone(t *testing.T) {
+	t.Parallel()
+	r := newInstallRig(t)
+
+	if _, exit := Run(context.Background(), r.cfg); exit != ExitInstalled {
+		t.Fatalf("exit = %d, want %d: %v", exit, ExitInstalled, r.logs.lines)
+	}
+	if r.buildDir != installSrc {
+		t.Errorf("go build ran in %q, want the job's clone %q", r.buildDir, installSrc)
+	}
+}
+
+// keychainSentinel stands in for the keychain password in the install tests. It is
+// long enough that it cannot occur by accident in output.
+const keychainSentinel = "pw-sentinel-9f3a7c1e2b8d5"
+
+// namedOutput is one piece of output a leak check reads, named so a failure can say
+// where the password was found.
+type namedOutput struct {
+	name string
+	text string
+}
+
+// keychainLeak is an output that holds the keychain password: its name and the byte
+// offset of the first match. It carries nothing of the output or the password.
+type keychainLeak struct {
+	name   string
+	offset int
+}
+
+// leaksKeychainPassword returns, in the order given, each output that contains the
+// password.
+func leaksKeychainPassword(password string, outputs ...namedOutput) []keychainLeak {
+	var leaks []keychainLeak
+	for _, o := range outputs {
+		if i := strings.Index(o.text, password); i >= 0 {
+			leaks = append(leaks, keychainLeak{name: o.name, offset: i})
+		}
+	}
+	return leaks
+}
+
+// TestKeychainLeakCheckNamesEachOutputThatHoldsThePassword is the positive control for
+// the install leak check: the password in a log line, a result or a receipt is
+// reported by name, and clean outputs report none.
+func TestKeychainLeakCheckNamesEachOutputThatHoldsThePassword(t *testing.T) {
+	t.Parallel()
+	clean := namedOutput{name: "result", text: "installed om at 3f2a1b"}
+	tests := []struct {
+		name    string
+		outputs []namedOutput
+		want    []string
+	}{
+		{
+			name:    "clean outputs",
+			outputs: []namedOutput{{name: "logs", text: "ok"}, clean, {name: "receipt", text: "{}"}},
+		},
+		{
+			name:    "password in a log line",
+			outputs: []namedOutput{{name: "logs", text: "unlocked with " + keychainSentinel}, clean, {name: "receipt", text: "{}"}},
+			want:    []string{"logs"},
+		},
+		{
+			name:    "password in a result field",
+			outputs: []namedOutput{{name: "logs", text: "ok"}, {name: "result", text: "installed " + keychainSentinel}, {name: "receipt", text: "{}"}},
+			want:    []string{"result"},
+		},
+		{
+			name:    "password in a receipt",
+			outputs: []namedOutput{{name: "logs", text: "ok"}, clean, {name: "receipt", text: `{"note": "` + keychainSentinel + `"}`}},
+			want:    []string{"receipt"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for _, l := range leaksKeychainPassword(keychainSentinel, tc.outputs...) {
+				got = append(got, l.name)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("outputs holding the password = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInstallKeepsTheKeychainPasswordOutOfItsOutput pins that the keychain password
+// reaches no log line, result or receipt, for the signed install and for each signing
+// failure that carries an error.
+func TestInstallKeepsTheKeychainPasswordOutOfItsOutput(t *testing.T) {
+	t.Parallel()
+	if len(keychainSentinel) < 16 {
+		t.Fatalf("keychainSentinel is %d bytes, want at least 16 so a short constant cannot weaken the check", len(keychainSentinel))
+	}
+	tests := []struct {
+		name  string
+		setup func(r *installRig)
+	}{
+		{name: "signed", setup: func(*installRig) {}},
+		{
+			name:  "unlock fails",
+			setup: func(r *installRig) { r.run.unlockErr = errors.New("security: unlock failed") },
+		},
+		{
+			name: "codesign fails",
+			setup: func(r *installRig) {
+				r.run.codesignErr = errors.New("exit status 1")
+				r.run.codesignStderr = "no identity found"
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newInstallRig(t)
+			r.files.files[passwordFile] = []byte(keychainSentinel + "\n")
+			tc.setup(r)
+
+			res, _ := Run(context.Background(), r.cfg)
+
+			reachedUnlock := false
+			for _, c := range r.run.calls {
+				reachedUnlock = reachedUnlock || slices.Contains(c.Args, keychainSentinel)
+			}
+			if !reachedUnlock {
+				t.Fatal("the sentinel never reached the unlock, so the leak check would prove nothing")
+			}
+			leaks := leaksKeychainPassword(keychainSentinel,
+				namedOutput{name: "logs", text: strings.Join(r.logs.lines, "\n")},
+				namedOutput{name: "result", text: res.Line()},
+				namedOutput{name: "receipt", text: r.receipts(t)},
+			)
+			for _, l := range leaks {
+				t.Errorf("the keychain password is in the %s, at byte %d", l.name, l.offset)
+			}
+		})
 	}
 }
 
