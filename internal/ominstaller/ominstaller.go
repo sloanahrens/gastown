@@ -78,12 +78,31 @@ type AcquireFunc func(path string, wait time.Duration) (release func(), err erro
 // seams: a test replaces them, and the production wiring sets them to the real
 // command runner and installlock.Acquire.
 type Config struct {
+	// OMPath is the om binary the install replaces, the --om-path equivalent.
+	// Empty takes INSTALL_OM_PATH, else ~/go/bin/om.
+	OMPath string
+	// TownRoot is the town the clone and signing directory sit under. Empty takes
+	// GT_TOWN_ROOT, else the outermost town above the working directory.
+	TownRoot string
+	// SrcDir is the om clone the build reads. Empty takes INSTALL_OM_SRC_DIR, else
+	// <town>/.runtime/om-src.
+	SrcDir string
+	// SignDir holds the signing identity. Empty takes INSTALL_OM_SIGN_DIR, else
+	// <town>/.runtime/signing.
+	SignDir string
+
 	// DaemonDir holds the install lock and install-om-receipts.jsonl.
 	DaemonDir string
 	// Source is the receipt's source: manual or rebuild-om.
 	Source string
-	// LockWait is how long a run waits for a peer holding the lock.
+	// LockWait is how long a run waits for a peer holding the lock. Zero takes
+	// INSTALL_OM_LOCK_WAIT, else 300 s.
 	LockWait time.Duration
+	// SignWait bounds the codesign step. Zero takes INSTALL_OM_SIGN_TIMEOUT, else 30 s.
+	SignWait time.Duration
+	// SmokeWait bounds the om version smoke check. Zero takes INSTALL_OM_SMOKE_TIMEOUT,
+	// else 30 s.
+	SmokeWait time.Duration
 
 	// Exec runs every external command the install makes.
 	Exec ExecFunc
