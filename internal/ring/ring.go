@@ -270,3 +270,32 @@ func write(townRoot string, hostOf func(key string) (host string, ok bool), rec 
 	}
 	return nil
 }
+
+// Remove deletes the ring section from mayor/town.json, leaving every other
+// section as it is. It reports false when the town had no ring section to
+// delete.
+func Remove(townRoot string) (bool, error) {
+	return remove(townRoot, config.SectionHost)
+}
+
+// remove is Remove over a section lookup, so a test can drive the refusal no
+// build with the layout's registration in place can reach.
+func remove(townRoot string, hostOf func(key string) (host string, ok bool)) (bool, error) {
+	path, err := hostPath(townRoot, hostOf)
+	if err != nil {
+		return false, err
+	}
+	removed := false
+	err = config.UpdateRawJSON(path, func(tree map[string]any) (bool, error) {
+		_, removed = tree[SectionKey]
+		if !removed {
+			return false, nil
+		}
+		delete(tree, SectionKey)
+		return true, nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("removing the ring: %w", err)
+	}
+	return removed, nil
+}
