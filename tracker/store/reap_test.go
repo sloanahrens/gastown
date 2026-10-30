@@ -25,6 +25,13 @@ func closedAt(id string, closed time.Time) api.Issue {
 	return w
 }
 
+// withParent sets the parent id a wisp carries, as the store reads it from
+// parent_id. An external parent is named external:<rig>:<id>.
+func withParent(w api.Issue, parent string) api.Issue {
+	w.Parent = parent
+	return w
+}
+
 // durableClosed is a closed durable task issue closed at closed.
 func durableClosed(id string, closed time.Time) api.Issue {
 	return api.Issue{ID: id, Type: "task", Status: "closed", CreatedAt: closed.Add(-time.Hour), ClosedAt: &closed}
@@ -72,6 +79,9 @@ func TestClassifyWisp(t *testing.T) {
 			Parents: []api.IssueDep{{ID: "m", Type: "molecule", Status: "closed"}, {ID: "p", Type: "task", Status: "open"}}}, Keep, ""},
 		{"a closed task parent does not close the wisp", WispFacts{Wisp: wispAt("w", "open", young),
 			Parents: []api.IssueDep{{ID: "p", Type: "task", Status: "closed"}}}, Keep, ""},
+		{"stale wisp whose only parent is external is kept", WispFacts{Wisp: withParent(wispAt("w", "open", stale), "external:om:om-7")}, Keep, ""},
+		{"young step whose external parent is unread is kept though its molecule is closed", WispFacts{Wisp: withParent(wispAt("w", "open", young), "external:om:om-7"),
+			Parents: []api.IssueDep{{ID: "m", Type: "molecule", Status: "closed"}}}, Keep, ""},
 		{"merge request in flight is kept at any age", WispFacts{Wisp: wispAt("w", "open", ago(100*time.Hour), "gt:merge-request")}, Keep, ""},
 		{"cleanup wisp tracking a merge within 24h is kept", WispFacts{Wisp: func() api.Issue {
 			w := wispAt("w", "open", ago(100*time.Hour), "cleanup", "state:merge-requested")
@@ -177,6 +187,30 @@ func TestReapPassClosesStaleAndPurgesExpiredButKeepsProtectedWisps(t *testing.T)
 	}
 	if got := sortedCopy(s.deleted); !slices.Equal(got, []string{"w-free", "w-old"}) {
 		t.Errorf("deleted = %v, want [w-free w-old]: the agent wisp, the held wisp, the young wisp and the durable issue are kept", got)
+	}
+}
+
+// The external parent is not in Dependencies (memStore has no row for it), so
+// only the wisp's parent_id tells the pass the wisp has one.
+func TestReapPassKeepsAStaleWispWhoseParentIsExternal(t *testing.T) {
+	ago := func(d time.Duration) time.Time { return reapNow.Add(-d) }
+	s := &memStore{now: reapNow, issues: []api.Issue{
+		withParent(wispAt("w-ext", "open", ago(30*time.Hour)), "external:om:om-7"),
+		wispAt("w-plain", "open", ago(30*time.Hour)),
+	}}
+
+	res, err := ReapPass(context.Background(), s, reapNow, ReapPolicy{})
+	if err != nil {
+		t.Fatalf("ReapPass: %v", err)
+	}
+	if want := (PassResult{Closed: 1}); res != want {
+		t.Errorf("pass = %+v, want %+v", res, want)
+	}
+	if _, closed := s.closed["w-ext"]; closed {
+		t.Errorf("closed w-ext, a stale wisp under an external parent the old reaper kept")
+	}
+	if _, closed := s.closed["w-plain"]; !closed {
+		t.Errorf("w-plain was not closed; the stale wisp with no parent should be")
 	}
 }
 

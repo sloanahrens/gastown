@@ -115,6 +115,10 @@ func Classify(f WispFacts, now time.Time, p ReapPolicy) Verdict {
 		}
 	}
 	switch {
+	case w.Parent != "" && !slices.ContainsFunc(f.Parents, func(par api.IssueDep) bool { return par.ID == w.Parent }):
+		// Dependencies leaves out external targets, so a parent it does not
+		// list is external. Its status is not readable here, so the wisp stays.
+		return keep("an external parent keeps it; its status is not read here")
 	case openParent:
 		return keep("an open parent keeps it")
 	case closedMolecule:
