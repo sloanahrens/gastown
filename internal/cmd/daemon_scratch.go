@@ -29,6 +29,16 @@ type scratchFlags struct {
 	project     string
 	container   string
 	omTokenFile string // optional: the token file's path inside the container
+	forge       forgePorts
+}
+
+// forgePorts are the scratch forge's two host ports as the flags gave them:
+// given both, the throwaway forge is on, given neither it is off, and one alone
+// is refused. The ports themselves go to the template's own validation, so what
+// is recorded here is only whether a forge was asked for.
+type forgePorts struct {
+	httpPort, sshPort int
+	httpSet, sshSet   bool
 }
 
 // scratchDeps is what the command takes from the host: how commands run, the
@@ -92,11 +102,15 @@ the live town.`,
 		}
 		name := action.name
 		sub.RunE = func(cmd *cobra.Command, _ []string) error {
+			f.forge.httpSet = cmd.Flags().Changed("forge-http-port")
+			f.forge.sshSet = cmd.Flags().Changed("forge-ssh-port")
 			return run(cmd.Context(), name, cmd.OutOrStdout(), f)
 		}
 		if name != "down" {
 			sub.Flags().StringVar(&f.image, "image", "", "daemon image tag, gt-daemon:<rev>")
 			sub.Flags().StringVar(&f.omTokenFile, config.OMTokenFileFlag, "", "path of the om token file inside the container, passed to the daemon's command line")
+			sub.Flags().IntVar(&f.forge.httpPort, "forge-http-port", 0, "host port of the scratch forge's http; given with --forge-ssh-port it adds the throwaway forge to the project")
+			sub.Flags().IntVar(&f.forge.sshPort, "forge-ssh-port", 0, "host port of the scratch forge's ssh; given with --forge-http-port it adds the throwaway forge to the project")
 		}
 		parent.AddCommand(sub)
 	}
@@ -134,7 +148,8 @@ func runDaemonScratch(ctx context.Context, action string, f scratchFlags, d scra
 		if err := checkScratchRoot(f.root, d); err != nil {
 			return err
 		}
-		sup := containerDeploySupervisor{start: func() ([]string, error) { return scratchComposeArgv(f, "up", "-d", "daemon"), nil }, container: f.container}
+		start := append([]string{"up", "-d", "daemon"}, scratchForgeServices(spec)...)
+		sup := containerDeploySupervisor{start: func() ([]string, error) { return scratchComposeArgv(f, start...), nil }, container: f.container}
 		deployer := daemonimage.Deployer{Run: d.run, Environ: d.environ}
 		return deployer.Deploy(ctx, sup, f.composeFile, spec)
 	case "down":
@@ -188,17 +203,64 @@ func scratchSpecFor(f scratchFlags, d scratchDeps) (templates.ComposeSpec, error
 	if pathWithin(f.composeFile, f.root) {
 		return templates.ComposeSpec{}, fmt.Errorf("--compose-file %q is inside --root %q: the container installs the scratch town only into a directory that holds nothing but its marker, so the compose file lives outside it", f.composeFile, f.root)
 	}
+	forge, err := scratchForge(f.forge)
+	if err != nil {
+		return templates.ComposeSpec{}, err
+	}
 	return templates.ComposeSpec{
-		Project:          f.project,
-		ContainerName:    f.container,
-		Image:            f.image,
-		TownRoot:         f.root,
-		StopGrace:        templates.MinimumStopGrace,
-		Scratch:          true,
-		ScratchDoltImage: templates.DoltServerImage,
-		LiveTownRoot:     f.liveRoot,
-		OMTokenFile:      f.omTokenFile,
+		Project:              f.project,
+		ContainerName:        f.container,
+		Image:                f.image,
+		TownRoot:             f.root,
+		StopGrace:            templates.MinimumStopGrace,
+		Scratch:              true,
+		ScratchDoltImage:     templates.DoltServerImage,
+		LiveTownRoot:         f.liveRoot,
+		OMTokenFile:          f.omTokenFile,
+		ScratchForge:         forge.on,
+		ScratchForgeHTTPPort: forge.httpPort,
+		ScratchForgeSSHPort:  forge.sshPort,
 	}, nil
+}
+
+// scratchForgeFields is whether the scratch forge is on and, when it is, the
+// two host ports it publishes.
+type scratchForgeFields struct {
+	on                bool
+	httpPort, sshPort int
+}
+
+// scratchForge decides whether the flags ask for the scratch forge: both ports
+// turn it on with those ports, neither leaves it off, and one alone is refused,
+// because a forge named on half a port pair would publish one of its services
+// and leave the other without a host port. The ports are passed on as given, so
+// the template's own checkScratchForge refuses a live port, an equal pair or a
+// value that is not a port, rather than a second copy of that check here.
+func scratchForge(p forgePorts) (scratchForgeFields, error) {
+	switch {
+	case p.httpSet && p.sshSet:
+		return scratchForgeFields{on: true, httpPort: p.httpPort, sshPort: p.sshPort}, nil
+	case p.httpSet:
+		return scratchForgeFields{}, fmt.Errorf("--forge-http-port %d is given without --forge-ssh-port: the scratch forge takes both its host ports, or neither for no forge", p.httpPort)
+	case p.sshSet:
+		return scratchForgeFields{}, fmt.Errorf("--forge-ssh-port %d is given without --forge-http-port: the scratch forge takes both its host ports, or neither for no forge", p.sshPort)
+	}
+	return scratchForgeFields{}, nil
+}
+
+// scratchForgeServices are the forge's services `up` names beside the daemon.
+// They are not dependencies of daemon, so naming daemon alone would leave the
+// forge stopped; compose starts each one's own dependencies from there.
+func scratchForgeServices(spec templates.ComposeSpec) []string {
+	if !spec.ScratchForge {
+		return nil
+	}
+	return []string{
+		templates.ScratchForgejoService,
+		templates.ScratchForgejoDBService,
+		templates.ScratchForgeDindService,
+		templates.ScratchForgeRunnerService,
+	}
 }
 
 // validateScratchNames refuses a project or container name the scratch project
