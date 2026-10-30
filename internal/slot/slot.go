@@ -30,6 +30,7 @@
 package slot
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -282,11 +283,21 @@ func matchGateContainers(psOutput string) []string {
 		// it widens into fields it never looked at.
 		container := parseGateContainer(line)
 		haystack := strings.ToLower(container.Image + " " + container.Name)
+		matched := false
 		for _, pat := range gateContainerPatterns {
 			if strings.Contains(haystack, pat) {
-				matches = append(matches, line)
+				matched = true
 				break
 			}
+		}
+		// The build machinery for the documented scratch project is kept too:
+		// while an L1/L2 window builds its image, docker's builder container is
+		// the only evidence `docker ps` reports for the build, and a listing
+		// that dropped it would let the install's quiet check walk into the
+		// build and the Docker restart behind it (gt-4gixm). It is the one
+		// addition: nothing else widens here.
+		if matched || container.ScratchBuild() {
+			matches = append(matches, line)
 		}
 	}
 	return matches
@@ -497,6 +508,20 @@ type Report struct {
 	// counting it as one is what let a single orphan block the town.
 	UnwrappedContainers []string
 
+	// ScratchContainers lists matching `docker ps` entries that belong to the
+	// documented scratch project and are steadily running (scratch.Holder). They
+	// are a known holder, not an unwrapped suite, so they never make the report
+	// Busy; they are reported so a reader can name what it walked past.
+	ScratchContainers []string
+
+	// ScratchBuilding lists matching `docker ps` entries of the documented
+	// scratch project that are mid-work (scratch.Building): docker is creating
+	// or restarting one of its containers, or a build it started is in flight.
+	// They are not an unwrapped suite either, so they do not make the report
+	// Busy, but an install's quiet check refuses while one is named: an image
+	// build and a Docker restart are exactly what it protects (gt-4gixm).
+	ScratchBuilding []string
+
 	// DebrisContainers lists matching `docker ps` entries classified as
 	// debris: old enough that no live suite can be behind them. Reported so
 	// an operator can see what 'gt slot reap' would remove; never a reason to
@@ -507,6 +532,12 @@ type Report struct {
 	// check for running containers, so UnwrappedContainers could not be
 	// determined and must not be treated as "none found".
 	DockerUnknown bool
+
+	// DockerError is why the docker listing failed when DockerUnknown is true,
+	// as docker's own CLI reported it. A caller that has to say why it cannot
+	// vouch for the VM names the failure; only DockerQuiet licenses reading the
+	// VM as empty.
+	DockerError string
 
 	// Slots is the per-slot picture when the report came from StatusPool or
 	// StatusPoolLocksOnly (Status fills it with the single slot 0, as does
@@ -538,6 +569,16 @@ func (r Report) Busy() bool {
 		return r.AllHeld() || len(r.UnwrappedContainers) > 0 || r.DockerUnknown
 	}
 	return r.Held || len(r.UnwrappedContainers) > 0 || r.DockerUnknown
+}
+
+// DockerQuiet reports whether a failed docker listing is one a caller may read
+// as "nothing is running": docker's own message says the daemon refused the
+// connection, so no container exists to compete with. Any other failure — a
+// wedged daemon, a permission-denied socket — is a VM that could not be read,
+// and a caller deciding whether to start work must not read it as free
+// (gt-4gixm).
+func (r Report) DockerQuiet() bool {
+	return r.DockerUnknown && isDaemonUnreachable(errors.New(r.DockerError))
 }
 
 // Status reports whether the slot is currently held, decorated with owner

@@ -4388,7 +4388,21 @@ func (b *Beads) AddTypedDependency(issue, dependsOn, depType string) error {
 // keeps every relation. Targets in other databases are left out, since bd
 // joins the edges with its own issues table.
 func (b *Beads) DepList(id, depType string) ([]IssueDep, error) {
-	args := []string{"dep", "list", id, "--direction=down", "--json"}
+	return b.depList(id, "down", depType)
+}
+
+// DepListUp returns the issues that depend on id in this database (bd dep
+// list --direction=up), each with its relation in DependencyType; depType ""
+// keeps every relation. A wisp dependent is included: measured on bd 1.2.2,
+// dep list up of a bead carrying a molecule bond listed the bonded wisp beside
+// the durable dependents, so the wisp-aware read needs no second call.
+func (b *Beads) DepListUp(id, depType string) ([]IssueDep, error) {
+	return b.depList(id, "up", depType)
+}
+
+// depList reads one direction of id's dependency edges.
+func (b *Beads) depList(id, direction, depType string) ([]IssueDep, error) {
+	args := []string{"dep", "list", id, "--direction=" + direction, "--json"}
 	if depType != "" {
 		args = append(args, "--type="+depType)
 	}

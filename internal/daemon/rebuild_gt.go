@@ -1130,17 +1130,38 @@ func (d *Daemon) rebuildGTInstallCap() time.Duration {
 
 // rebuildGTGate reads the container-gate picture: which gate-class roles hold
 // a slot, and whether the blocker is one the slot serializes (and so can be
-// waited out). A reading that fails is not a reason to block: a broken status
-// read must never park installs forever.
+// waited out).
+//
+// Three readings of the report are this job's own:
+//
+//   - the documented scratch project's containers are a known holder, so a
+//     running L1/L2 window does not block an install for its whole hour. They
+//     are named in the log on every path, whether or not something else blocks,
+//     because a reader of the log otherwise cannot tell what was on the VM
+//     (gt-4gixm);
+//   - the project mid-work — a container docker is creating or restarting, or a
+//     build for it in flight — does block: an image build and a Docker restart
+//     are what this check protects (gt-4gixm);
+//   - a docker or gate reading that could not be taken is not quiet. Only the
+//     daemon refusing its own connection means nothing can be running, and that
+//     one case still proceeds; anything else refuses the install and says so,
+//     because an unreadable VM is not an empty one.
 func (d *Daemon) rebuildGTGate() (busy string, reservable bool) {
 	if d.rebuildGTGateFn != nil {
 		return d.rebuildGTGateFn()
 	}
-	rep, err := slot.StatusPool(d.config.TownRoot, slot.PoolForTown(d.config.TownRoot))
-	if err != nil {
-		d.logger.Printf("rebuild_gt: slot status unreadable (%v); treating the town as quiet", err)
-		return "", false
+	// slotGate is the host gate unless a test supplied one over a fake runtime;
+	// the production path is the same classification either way (gt-4gixm).
+	g := d.slotGate
+	if g == nil {
+		g = slot.NewGate()
 	}
+	rep, err := g.StatusPool(d.config.TownRoot, slot.PoolForTown(d.config.TownRoot))
+	if err != nil {
+		d.logger.Printf("rebuild_gt: not quiet: the container-gate status could not be read (%v)", err)
+		return "the container-gate status could not be read", false
+	}
+
 	// Every held pool slot is named as its seat, not just gate roles: the
 	// readings below reach the MEDIUM starvation escalation, and naming who
 	// holds the slots is what makes that alarm actionable (gt-t135z). A
@@ -1156,17 +1177,35 @@ func (d *Daemon) rebuildGTGate() (busy string, reservable bool) {
 		}
 	}
 	saturated := rep.AllHeld()
+
+	// Named before the decision, so it is on the record even when something
+	// else is what blocked this pass (gt-4gixm).
+	if len(rep.ScratchContainers) > 0 {
+		d.logger.Printf("rebuild_gt: proceeding despite the documented scratch project's containers: %s (a known holder, not an unwrapped suite)",
+			strings.Join(rep.ScratchContainers, ", "))
+	}
+
 	switch {
 	case len(gateSeats) > 0:
 		busy = "a gate suite holds a slot (" + strings.Join(gateSeats, ", ") + ")"
+	case len(rep.ScratchBuilding) > 0:
+		busy = "the documented scratch project is being built or restarted: " + strings.Join(rep.ScratchBuilding, ", ") +
+			" (an image build or a Docker restart is what this check protects)"
+	case rep.DockerUnknown && !rep.DockerQuiet():
+		// Docker could not be read for a reason other than its own daemon
+		// refusing the connection (a wedged daemon, a socket this process cannot
+		// open): the VM is unread, not quiet, and an install must not walk into
+		// what it cannot see.
+		d.logger.Printf("rebuild_gt: not quiet: the docker container listing could not be read (%s)", rep.DockerError)
+		busy = "the docker container listing could not be read, so the VM's containers are unknown"
 	case len(rep.UnwrappedContainers) > 0:
 		busy = "container(s) are running outside the gate: " + strings.Join(rep.UnwrappedContainers, ", ")
+	case rep.DockerUnknown:
+		// Docker's own message is that it cannot connect to its daemon: no
+		// container is running to compete with the build.
+		d.logger.Printf("rebuild_gt: treating the town as quiet: docker's daemon refused the connection (%s)", rep.DockerError)
 	case saturated:
 		busy = "every container-gate slot is held (" + strings.Join(heldSeats, ", ") + ")"
-	default:
-		// A docker reading that could not be taken is not a reason to wait: a
-		// VM that is down runs no suite to compete with.
-		return "", false
 	}
 	return busy, len(gateSeats) > 0 || saturated
 }

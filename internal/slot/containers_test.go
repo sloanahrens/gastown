@@ -24,6 +24,14 @@ func dockerPSLine(id, image, name string, created time.Time, labels map[string]s
 		id, image, name, created.Format(dockerCreatedAtLayout), strings.Join(pairs, ","))
 }
 
+// dockerPSLineInState is dockerPSLine with docker's own state word for what the
+// container is doing: "running", "created" by a compose up not started yet, or
+// "restarting".
+func dockerPSLineInState(id, image, name string, created time.Time, labels map[string]string, state string) string {
+	return strings.TrimSuffix(dockerPSLine(id, image, name, created, labels), "}") +
+		fmt.Sprintf(`,"State":%q}`, state)
+}
+
 // sessionLabels is the label set a testcontainers suite puts on the containers
 // of one session.
 func sessionLabels(sessionID string) map[string]string {

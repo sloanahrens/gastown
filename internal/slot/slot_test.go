@@ -57,6 +57,19 @@ func TestMatchGateContainers(t *testing.T) {
 			out:  "\n\ndolt/dolt-sql-server:2.2.0 suite\n\n",
 			want: []string{"dolt/dolt-sql-server:2.2.0 suite"},
 		},
+		{
+			// The documented scratch project's build machinery is the only
+			// addition the listing makes: docker's builder container is the one
+			// thing `docker ps` reports for an image build in flight, so a
+			// listing that dropped it would let the install's quiet check walk
+			// into the build (gt-4gixm). A builder for anything else stays out.
+			name: "keeps the build machinery of the documented scratch project alone",
+			out: `{"ID":"b-1","Image":"moby/buildkit:buildx-stable-1","Names":"buildx_buildkit_gt-scratch0","Labels":"","State":"running"}` + "\n" +
+				`{"ID":"b-2","Image":"moby/buildkit:buildx-stable-1","Names":"buildx_buildkit_default0","Labels":"","State":"running"}` + "\n",
+			want: []string{
+				`{"ID":"b-1","Image":"moby/buildkit:buildx-stable-1","Names":"buildx_buildkit_gt-scratch0","Labels":"","State":"running"}`,
+			},
+		},
 	}
 
 	for _, tt := range tests {

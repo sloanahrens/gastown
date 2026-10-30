@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // TimingsName is the timings file a run writes into its log directory: one
@@ -25,6 +26,28 @@ type Timing struct {
 	WallMS  int64  `json:"wall_ms"`
 	Exit    int    `json:"exit"`
 	Start   string `json:"start"`
+}
+
+// TimingsKey is the key a timing is held under: the tier and the package name
+// together, since integration and race both run ./internal/cmd.
+func TimingsKey(tier, name string) string { return tier + " " + name }
+
+// ParseWalls reads timings lines, in timings.jsonl's format, into the wall time
+// each tier and package took, keyed by TimingsKey. A line that is not a timing
+// is dropped: the file is an instrument, and a torn line must not reorder a run.
+func ParseWalls(data []byte) map[string]int64 {
+	walls := make(map[string]int64)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var tm Timing
+		if err := json.Unmarshal([]byte(line), &tm); err != nil {
+			continue
+		}
+		walls[TimingsKey(tm.Tier, tm.Package)] = tm.WallMS
+	}
+	return walls
 }
 
 // Timings is one run's timings file and the lines it holds. A file that cannot

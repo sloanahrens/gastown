@@ -51,7 +51,7 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 	if err := b.InitDatabase(InitOptions{Prefix: "gt", Database: "gastown", ServerPort: 3307, Force: true, DestroyToken: "DESTROY-gt"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.InitDatabase(InitOptions{Database: "hq"}); err != nil {
+	if err := b.InitDatabase(InitOptions{Database: "hq", ServerHost: "dolt.example", ServerPort: 3307}); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.InitDatabase(InitOptions{Prefix: "gt", SkipAgents: true, ReinitLocal: true, DiscardRemote: true, DestroyToken: "DESTROY-gt"}); err != nil {
@@ -70,7 +70,7 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 		"sql --csv SELECT COUNT(*) as cnt FROM issues",
 		"stats --json",
 		"init --prefix gt --database gastown --server --server-port 3307 --force --destroy-token=DESTROY-gt",
-		"init --database hq --server",
+		"init --database hq --server --server-host dolt.example --server-port 3307",
 		"init --prefix gt --server --skip-agents --reinit-local --discard-remote --destroy-token=DESTROY-gt",
 		"migrate --update-repo-id",
 		"mol wisp gc --dry-run --json --age 1h30m0s",

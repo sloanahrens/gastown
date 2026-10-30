@@ -94,6 +94,7 @@ func (b *Beads) StatsJSON() ([]byte, error) {
 type InitOptions struct {
 	Prefix       string // --prefix, when set
 	Database     string // --database, when set
+	ServerHost   string // --server-host, when set (bd defaults to 127.0.0.1)
 	ServerPort   int    // --server-port, when non-zero
 	Force        bool   // --force: re-initialize over an existing database
 	DestroyToken string // --destroy-token, the confirmation --force requires
@@ -115,6 +116,9 @@ func (b *Beads) InitDatabase(opts InitOptions) error {
 		args = append(args, "--database", opts.Database)
 	}
 	args = append(args, "--server")
+	if opts.ServerHost != "" {
+		args = append(args, "--server-host", opts.ServerHost)
+	}
 	if opts.ServerPort != 0 {
 		args = append(args, "--server-port", strconv.Itoa(opts.ServerPort))
 	}

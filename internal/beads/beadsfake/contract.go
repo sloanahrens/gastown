@@ -45,6 +45,20 @@ func RunShowTextContract(t *testing.T, newClient func(t *testing.T) beads.Client
 	})
 }
 
+// RunDepListUpContract checks DepListUp, the reverse-dependency read: the
+// issues that depend on one, with the relation that holds, a wisp dependent
+// counted like a durable one. It is separate from RunClientContract because a
+// store can answer the rest of the seam before it grows this read: the
+// tracker's backend is its own bead (gt-p85pw.105) and answers the named stub
+// error until then.
+func RunDepListUpContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
+	t.Helper()
+	t.Run("dep list up", func(t *testing.T) {
+		t.Parallel()
+		contractDepListUp(t, newScope(t, newClient(t)))
+	})
+}
+
 // RunCreatorOptionContract checks that CreateOptions.Actor names the creator
 // recorded on the new issue (bd's --actor on create). It is separate from
 // RunClientContract because a store that records every write as the caller's
@@ -232,6 +246,17 @@ func sorted(in ...string) []string {
 
 func labels(is *beads.Issue) []string {
 	return sorted(is.Labels...)
+}
+
+// depRows renders dependency rows as "id relation", sorted, so a case compares
+// them to a want list in one line.
+func depRows(deps []beads.IssueDep) []string {
+	out := make([]string, 0, len(deps))
+	for _, d := range deps {
+		out = append(out, d.ID+" "+d.DependencyType)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // contractShowText pins what a store with a bd behind it can say about the
@@ -906,6 +931,45 @@ func contractTypedDependencies(t *testing.T, s *scope) {
 	}
 	if err := s.AddTypedDependency(s.tag+"-nosuch", local.ID, "tracks"); err == nil {
 		t.Error("AddTypedDependency from a missing issue succeeded")
+	}
+}
+
+// contractDepListUp pins DepListUp: the issues that depend on one, each with
+// the relation that holds, a wisp dependent counted like a durable one, and the
+// type filter narrowing to one relation. A missing issue is an error, as it is
+// for DepList.
+func contractDepListUp(t *testing.T, s *scope) {
+	target := s.mustCreate(t, beads.CreateOptions{Title: "target", Priority: -1})
+	if deps, err := s.DepListUp(target.ID, ""); err != nil || len(deps) != 0 {
+		t.Errorf("DepListUp(target) = %+v, %v; want no dependents", deps, err)
+	}
+	blocker := s.mustCreate(t, beads.CreateOptions{Title: "blocked by target", Priority: -1})
+	mustDo(t, "AddDependency(blocker, target)", s.AddDependency(blocker.ID, target.ID))
+	kid := s.mustCreate(t, beads.CreateOptions{Title: "child", Parent: target.ID, Priority: -1})
+	wisp := s.mustCreate(t, beads.CreateOptions{Title: "wisp dependent", Priority: -1, Ephemeral: true})
+	mustDo(t, "AddDependency(wisp, target)", s.AddDependency(wisp.ID, target.ID))
+	s.mustCreate(t, beads.CreateOptions{Title: "unrelated", Priority: -1})
+
+	deps, err := s.DepListUp(target.ID, "")
+	if err != nil {
+		t.Fatalf("DepListUp(target): %v", err)
+	}
+	if got, want := depRows(deps), sorted(blocker.ID+" blocks", kid.ID+" parent-child", wisp.ID+" blocks"); !reflect.DeepEqual(got, want) {
+		t.Errorf("DepListUp(target) = %v, want %v", got, want)
+	}
+	blocks, err := s.DepListUp(target.ID, "blocks")
+	if got, want := depRows(blocks), sorted(blocker.ID+" blocks", wisp.ID+" blocks"); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("DepListUp(target, blocks) = %v, %v; want %v", got, err, want)
+	}
+	kids, err := s.DepListUp(target.ID, "parent-child")
+	if got, want := depRows(kids), []string{kid.ID + " parent-child"}; err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("DepListUp(target, parent-child) = %v, %v; want %v", got, err, want)
+	}
+	if deps, err := s.DepListUp(target.ID, "tracks"); err != nil || len(deps) != 0 {
+		t.Errorf("DepListUp(target, tracks) = %+v, %v; want none", deps, err)
+	}
+	if _, err := s.DepListUp(s.tag+"-nosuch", ""); err == nil {
+		t.Error("DepListUp of a missing issue succeeded")
 	}
 }
 

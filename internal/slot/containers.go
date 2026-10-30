@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/scratchtown"
 )
 
 // GateContainer is one running container the gate's `docker ps` listing
@@ -22,6 +24,12 @@ type GateContainer struct {
 
 	// Labels is the container's label set, empty when it carries none.
 	Labels map[string]string
+
+	// State is docker's own word for what the container is doing: "running"
+	// for one it is simply running, "created" for one the compose up after an
+	// image build has not started yet, "restarting" for one the daemon is
+	// bringing back up. Empty when the listing did not say (gt-4gixm).
+	State string
 }
 
 // Display renders the container the way `gt slot status` and the gate's own
@@ -43,6 +51,36 @@ func (c GateContainer) Age(now time.Time) (time.Duration, bool) {
 // sidecar whose lifetime is its session's.
 func (c GateContainer) IsReaper() bool {
 	return strings.Contains(strings.ToLower(c.Image+" "+c.Name), "ryuk")
+}
+
+// ScratchIdentity is the documented scratch project's identity
+// (internal/scratchtown): the directory its compose file must live under. The
+// project's name, container names and images are that package's constants, so
+// this package keeps no copy of the operator's conventions, and a container is
+// the project's only when every fact docker reports agrees (gt-4gixm).
+type ScratchIdentity = scratchtown.Identity
+
+// HostScratchIdentity is the identity the operator's host documents; a home
+// directory that cannot be resolved exempts nothing.
+var HostScratchIdentity = scratchtown.HostIdentity
+
+// scratchData is the container as the scratch package reads it.
+func (c GateContainer) scratchData() scratchtown.Container {
+	return scratchtown.Container{Name: c.Name, Image: c.Image, Labels: c.Labels, State: c.State}
+}
+
+// ScratchClass reads this container against the documented project: Holder for
+// one of its containers docker is steadily running, Building for the project
+// mid-work, Unrelated for everything else.
+func (c GateContainer) ScratchClass(id ScratchIdentity) scratchtown.Class {
+	return id.Classify(c.scratchData())
+}
+
+// ScratchBuild reports whether this is docker's build machinery for the
+// documented project; the gate's listing keeps it, so a build in flight is seen
+// rather than missed (gt-4gixm).
+func (c GateContainer) ScratchBuild() bool {
+	return scratchtown.ProjectBuild(c.scratchData())
 }
 
 // SessionID returns the testcontainers session the container belongs to, or
@@ -92,6 +130,7 @@ type dockerPSContainer struct {
 	Names     string `json:"Names"`
 	CreatedAt string `json:"CreatedAt"`
 	Labels    string `json:"Labels"`
+	State     string `json:"State"`
 }
 
 // dockerCreatedAtLayouts are the layouts parseDockerCreatedAt accepts: the one
@@ -115,6 +154,7 @@ func parseGateContainer(line string) GateContainer {
 			Name:    raw.Names,
 			Created: parseDockerCreatedAt(raw.CreatedAt),
 			Labels:  parseDockerLabels(raw.Labels),
+			State:   strings.TrimSpace(raw.State),
 		}
 	}
 	image, name, _ := strings.Cut(line, " ")
@@ -176,6 +216,21 @@ const (
 	// VerdictUnknown means docker reported no start time, so the gate cannot
 	// tell this container's debris from a live suite's.
 	VerdictUnknown Verdict = "unknown"
+
+	// VerdictScratch means the container is the documented scratch project's
+	// and docker is steadily running it (scratchtown.Holder): a known holder that
+	// neither occupies the gate nor is debris, so a reader can tell "the scratch
+	// project holds this VM" from a live suite and from a reap's target
+	// (gt-4gixm).
+	VerdictScratch Verdict = "scratch"
+
+	// VerdictScratchBuild means the container is the documented scratch
+	// project's and the project is mid-work (scratchtown.Building): docker is
+	// creating or restarting one of its containers, or a build it started is in
+	// flight. The install's quiet check refuses while this is reported, because
+	// an image build and a Docker restart are what it protects, and no reap
+	// removes a container in this state (gt-4gixm).
+	VerdictScratchBuild Verdict = "scratch-building"
 )
 
 // StaleContainerWindow is the age past which a gate container is a debris
@@ -198,9 +253,18 @@ type ContainerVerdict struct {
 
 // Blocks reports whether the container still occupies the gate: a live suite
 // does, and so does one whose age could not be established. Debris does not —
-// that is the whole point of the classification (gt-ul1k).
+// that is the whole point of the classification (gt-ul1k) — and neither does
+// the documented scratch project's known holder, which is a holder of the host
+// and not a suite competing for a slot (gt-4gixm). The project mid-work is a
+// builder reading rather than a gate reading: the gate does not wait behind it,
+// and the install's quiet check is what refuses (see VerdictScratchBuild).
 func (v ContainerVerdict) Blocks() bool {
-	return v.Verdict != VerdictDebris
+	switch v.Verdict {
+	case VerdictDebris, VerdictScratch, VerdictScratchBuild:
+		return false
+	default:
+		return true
+	}
 }
 
 // logDebris records one container the gate is walking past, with the age and
