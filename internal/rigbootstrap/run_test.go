@@ -3,6 +3,7 @@ package rigbootstrap
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -23,23 +24,34 @@ type call struct {
 // A successful gt call writes gtOut and gtErrOut as gt would, creates the rig
 // directory as gt rig add does, and seeds rigFiles (relative path to contents)
 // under it, as a rig created from a repo that already has settings would.
+// gitStartErr and gtStartErr are returned instead of an exit code when set: the
+// program could not start.
 type fakeExec struct {
-	t        *testing.T
-	calls    []call
-	gtCode   int
-	gtOut    string
-	gtErrOut string
-	gitFails bool
-	rigFiles map[string][]byte
+	t           *testing.T
+	calls       []call
+	gtCode      int
+	gtOut       string
+	gtErrOut    string
+	gitFails    bool
+	gitStartErr error
+	gtStartErr  error
+	rigFiles    map[string][]byte
+	rigFileMode fs.FileMode // the mode of seeded rigFiles; zero means 0o644
 }
 
 func (f *fakeExec) exec(_ context.Context, dir, name string, args []string, stdout, stderr io.Writer) (int, error) {
 	f.calls = append(f.calls, call{dir: dir, name: name, args: args})
 	if name == "git" {
+		if f.gitStartErr != nil {
+			return 0, f.gitStartErr
+		}
 		if f.gitFails {
 			return 128, nil
 		}
 		return 0, nil
+	}
+	if f.gtStartErr != nil {
+		return 0, f.gtStartErr
 	}
 	io.WriteString(stdout, f.gtOut)
 	io.WriteString(stderr, f.gtErrOut)
@@ -50,12 +62,19 @@ func (f *fakeExec) exec(_ context.Context, dir, name string, args []string, stdo
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		f.t.Fatal(err)
 	}
+	mode := f.rigFileMode
+	if mode == 0 {
+		mode = 0o644
+	}
 	for rel, data := range f.rigFiles {
 		path := filepath.Join(rigDir, rel)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			f.t.Fatal(err)
 		}
-		if err := os.WriteFile(path, data, 0o644); err != nil {
+		if err := os.WriteFile(path, data, mode); err != nil {
+			f.t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
 			f.t.Fatal(err)
 		}
 	}
@@ -220,6 +239,19 @@ func TestRunRefusals(t *testing.T) {
 				return f.opts("nightrider"), "Local repo is not a git repository: " + f.repo
 			},
 		},
+		{
+			// A trailing slash on the town root must not double the separator: the
+			// message names the rig once, as the settings write does.
+			name: "target rig is a directory, town root has a trailing slash",
+			setup: func(f *fixture) (Options, string) {
+				if err := os.MkdirAll(filepath.Join(f.town, "nightrider"), 0o755); err != nil {
+					f.t.Fatal(err)
+				}
+				o := f.opts("nightrider")
+				o.TownRoot = f.town + "/"
+				return o, "Target rig already exists: " + filepath.Join(f.town, "nightrider")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -297,6 +329,59 @@ func TestRunGtArgvAndCwd(t *testing.T) {
 			}
 			if got, want := f.stdout.String(), "Rig bootstrapped at "+f.town+"/nightrider\n"; got != want {
 				t.Fatalf("stdout = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestRunStartFailures: a program that cannot start is not an answer about the
+// repo or the rig. The run names the program, exits 127 as the command-not-run
+// code, and does not go on to refuse or write anything.
+func TestRunStartFailures(t *testing.T) {
+	t.Parallel()
+	startErr := errors.New("fork/exec: no such file or directory")
+	tests := []struct {
+		name       string
+		setup      func(f *fixture)
+		wantGT     int    // the number of gt calls: a start failure still counts as an attempt
+		wantStderr string // the stderr line
+	}{
+		{
+			name:       "git cannot start",
+			setup:      func(f *fixture) { f.fake.gitStartErr = startErr },
+			wantGT:     0,
+			wantStderr: "Could not run git: " + startErr.Error() + "\n",
+		},
+		{
+			name:       "gt cannot start",
+			setup:      func(f *fixture) { f.fake.gtStartErr = startErr },
+			wantGT:     1,
+			wantStderr: "Could not run gt: " + startErr.Error() + "\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			tt.setup(f)
+			o := f.opts("nightrider")
+			o.PolecatAgent = "claude"
+
+			if code := Run(context.Background(), o, f.deps()); code != 127 {
+				t.Fatalf("Run() = %d, want 127; stderr %q", code, f.stderr.String())
+			}
+			if got := f.stderr.String(); got != tt.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tt.wantStderr)
+			}
+			if f.stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want nothing", f.stdout.String())
+			}
+			if got := len(f.gtCalls()); got != tt.wantGT {
+				t.Fatalf("gt ran %d time(s), want %d", got, tt.wantGT)
+			}
+			if _, err := os.Stat(filepath.Join(f.town, "nightrider")); !os.IsNotExist(err) {
+				t.Fatalf("rig directory exists after a start failure: err = %v", err)
 			}
 		})
 	}
@@ -435,6 +520,44 @@ func TestRunSettings(t *testing.T) {
 				t.Fatalf("stderr = %q, want the rig-exists message for %s", f.stderr.String(), rigPath)
 			}
 		})
+	}
+}
+
+// TestRunSettingsKeepsExistingMode: the 0644 mode is for a settings file the run
+// creates. A file that already exists keeps the mode the operator gave it.
+func TestRunSettingsKeepsExistingMode(t *testing.T) {
+	t.Parallel()
+	before, err := os.ReadFile("testdata/settings_before.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile("testdata/settings_after.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t)
+	f.fake.rigFiles = map[string][]byte{"settings/config.json": before}
+	f.fake.rigFileMode = 0o600
+	o := f.opts("nightrider")
+	o.PolecatAgent = "claude"
+	settingsPath := filepath.Join(f.town, "nightrider", "settings", "config.json")
+
+	if code := Run(context.Background(), o, f.deps()); code != 0 {
+		t.Fatalf("Run() = %d, want 0; stderr %q", code, f.stderr.String())
+	}
+	info, err := os.Stat(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("settings mode = %v, want 0600 kept from the existing file", info.Mode().Perm())
+	}
+	got, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, after) {
+		t.Fatalf("settings file = %q, want the merged file %q", got, after)
 	}
 }
 

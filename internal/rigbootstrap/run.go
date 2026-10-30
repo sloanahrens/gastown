@@ -35,12 +35,16 @@ type Deps struct {
 // OSFiles is Files on the host's filesystem.
 type OSFiles struct{}
 
+// Stat reports the host file info for name, as os.Stat does.
 func (OSFiles) Stat(name string) (fs.FileInfo, error) { return os.Stat(name) }
 
+// ReadFile returns the host file's contents, as os.ReadFile does.
 func (OSFiles) ReadFile(name string) ([]byte, error) { return os.ReadFile(name) }
 
+// MkdirAll creates path and any missing parents, as os.MkdirAll does.
 func (OSFiles) MkdirAll(path string, perm fs.FileMode) error { return os.MkdirAll(path, perm) }
 
+// WriteFile writes data to the host file name, as os.WriteFile does.
 func (OSFiles) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	return os.WriteFile(name, data, perm)
 }
@@ -57,16 +61,20 @@ func Run(ctx context.Context, opts Options, deps Deps) int {
 	if !isDir(deps.Files, opts.LocalRepo) {
 		return refuse(deps.Stderr, "Local repo does not exist: "+opts.LocalRepo)
 	}
-	if !isGitRepo(ctx, deps.Exec, opts.LocalRepo) {
+	isRepo, err := isGitRepo(ctx, deps.Exec, opts.LocalRepo)
+	if err != nil {
+		fmt.Fprintf(deps.Stderr, "Could not run git: %v\n", err)
+		return 127
+	}
+	if !isRepo {
 		return refuse(deps.Stderr, "Local repo is not a git repository: "+opts.LocalRepo)
 	}
 	remote := opts.Remote
 	if remote == "" {
 		remote = "file://" + opts.LocalRepo
 	}
-	// The paths are joined as text, as the script joined them, so the message
-	// names the path the operator typed.
-	rigPath := opts.TownRoot + "/" + opts.Rig
+	// Built once, so the refusal message and the settings write name the same path.
+	rigPath := filepath.Join(opts.TownRoot, opts.Rig)
 	if _, err := deps.Files.Stat(rigPath); err == nil {
 		return refuse(deps.Stderr, "Target rig already exists: "+rigPath)
 	}
@@ -114,6 +122,8 @@ func writeSettings(files Files, rigPath, polecat string) error {
 	if err != nil {
 		return err
 	}
+	// The mode applies only when the file is created: WriteFile keeps an existing
+	// settings file's mode, so a permission the operator set survives the merge.
 	return files.WriteFile(settingsPath, merged, 0o644)
 }
 
@@ -123,11 +133,15 @@ func isDir(files Files, name string) bool {
 	return err == nil && info.IsDir()
 }
 
-// isGitRepo is the script's gate for a local repo: a rig is not made from a
-// directory git does not accept as a repository.
-func isGitRepo(ctx context.Context, execFn Exec, repo string) bool {
+// isGitRepo is the gate for a local repo: a rig is not made from a directory git
+// does not accept as a repository. An error means git did not start, so it is
+// not an answer about the repo and the caller must not read it as one.
+func isGitRepo(ctx context.Context, execFn Exec, repo string) (bool, error) {
 	code, err := execFn(ctx, "", "git", []string{"-C", repo, "rev-parse", "--git-dir"}, io.Discard, io.Discard)
-	return err == nil && code == 0
+	if err != nil {
+		return false, err
+	}
+	return code == 0, nil
 }
 
 // refuse is the exit path of every refusal: the message on stderr and exit 1, as
