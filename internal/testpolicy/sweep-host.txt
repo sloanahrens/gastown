@@ -1,0 +1,29 @@
+# Packages the sweep runner leaves to the host sweep: integration-tagged
+# packages whose tests reach for the Mac (a darwin build step, launchctl,
+# osascript, codesign, /Library). The runner runs every other integration-
+# tagged package: SweepRunnerPackages in sweephost.go. The rule for changing
+# this list, and its pin, are at maxSweepHost in sweephost_test.go.
+#
+# The seed is deliberately wide: each reason is the marker the seed rule found
+# in that package's test files, not proof that the package cannot run in the
+# container. The first full runner run confirms or removes each line.
+#
+# Seven seed candidates are not listed because the integration tag adds no
+# file to them at all, so no sweep ever runs them: internal/templates,
+# internal/resourcesampler, internal/procid, internal/power, internal/signing,
+# cmd/gt-installer, and internal/ominstaller (whose only match is
+# "//go:build !integration"). Listing one of them fails
+# TestSweepHostNamesOnlyExistingPackages, so that paragraph is checked, not
+# asserted.
+internal/cmd # "find /Library" in the dangerous-command guard; darwin steps in host_agent_test.go
+internal/doctor # launchctl parsing in daemon_job_check_test.go; darwin daemon checks
+internal/daemon # /Library tool paths and launchd supervisor states in the unit tests
+internal/binaryinstall # codesign signing of the installed binary
+internal/installer # codesign; sign_darwin_integration_test.go builds only for darwin
+internal/util # diskspace_darwin_test.go builds only for darwin
+internal/testutil # runtime.GOOS darwin branch in doltserver_owner_test.go
+internal/session # the polecat image seed builds a GOOS=darwin step in polecat_image_seed_test.go
+internal/polecat # /Library tool paths in gatesuite_test.go
+internal/metrics # /System/Library ps output in source_hostcpu_test.go
+internal/config # /Library developer SDK paths in daemon_env_test.go
+cmd/gt # darwin build tags in build_integration_test.go
