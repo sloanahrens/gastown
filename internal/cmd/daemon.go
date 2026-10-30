@@ -194,6 +194,7 @@ func init() {
 	daemonCmd.AddCommand(daemonEnableSupervisorCmd)
 	daemonCmd.AddCommand(daemonClearBackoffCmd)
 	daemonCmd.AddCommand(daemonRotateLogsCmd)
+	daemonCmd.AddCommand(daemonContainerEntrypointCmd)
 
 	daemonStartCmd.Flags().BoolVar(&daemonStartTakeover, "takeover", false, "Start over a recorded owner whose heartbeat is still fresh, when that owner is shown not running (container and unsupervised starts only)")
 	daemonLogsCmd.Flags().IntVarP(&daemonLogLines, "lines", "n", 50, "Number of lines to show")
