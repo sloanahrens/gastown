@@ -1755,8 +1755,10 @@ func TestRestartDaemon_ContainerFailedRestartLeavesTheDaemonAlone(t *testing.T) 
 	if calls.stopped {
 		t.Error("stopped the running daemon by hand after the container restart failed")
 	}
-	if len(calls.argv) != 1 || !strings.HasSuffix(calls.joined(), "up -d daemon") {
-		t.Errorf("ran %v, want the start alone", calls.argv)
+	// The restart verb (gt-qpeei.39) names the daemon service alone, so a failed
+	// restart is still never a bootstrap of the whole project.
+	if len(calls.argv) != 1 || !strings.HasSuffix(calls.joined(), "up -d --force-recreate daemon") {
+		t.Errorf("ran %v, want the restart alone", calls.argv)
 	}
 }
 
@@ -2018,5 +2020,115 @@ func TestRestartDaemon_SupervisorFailureWithoutANewDaemonIsAnError(t *testing.T)
 	}
 	if !strings.Contains(calls.joined(), "kickstart") {
 		t.Errorf("the restart was never attempted: %v", calls.argv)
+	}
+}
+
+// The container supervisor's restart is `up -d --force-recreate daemon` on the
+// same context, project and file as its start: `up -d` alone does not recreate
+// an unchanged service, so a restart on the same image would do nothing
+// (gt-qpeei.39). The file kinds have no restart verb of their own.
+func TestContainerSupervisorRestartRecreatesTheService(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	compose := writeComposeFile(t, town)
+	c, _ := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
+	sup, err := c.detectDaemonSupervisor(town)
+	if err != nil || sup == nil {
+		t.Fatalf("detectDaemonSupervisor = (%v, %v), want the container supervisor", sup, err)
+	}
+
+	got, err := sup.restart()
+	if err != nil {
+		t.Fatalf("restart builder: %v", err)
+	}
+	want := []string{"docker", "--context", defaultDockerContext, "compose", "-p", "scratch", "-f", compose, "up", "-d", "--force-recreate", "daemon"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("restart argv = %v, want %v", got, want)
+	}
+	start, err := sup.start()
+	if err != nil {
+		t.Fatalf("start builder: %v", err)
+	}
+	// Everything but the verb is the start's: the same context, project and file.
+	withoutFlag := make([]string, 0, len(got))
+	for _, a := range got {
+		if a != "--force-recreate" {
+			withoutFlag = append(withoutFlag, a)
+		}
+	}
+	if strings.Join(withoutFlag, " ") != strings.Join(start, " ") {
+		t.Errorf("restart argv %v differs from the start argv %v by more than --force-recreate", got, start)
+	}
+
+	launchd := c.fileSupervisor("/plist", config.SupervisorLaunchd)
+	systemd := c.fileSupervisor("/unit", config.SupervisorSystemd)
+	if launchd.restart != nil || systemd.restart != nil {
+		t.Error("a file kind has a restart builder: launchd and systemd restart with their start")
+	}
+}
+
+// restartDaemon over a running container runs the restart builder and never the
+// start builder, with nothing in the environment: a restart is not a takeover.
+func TestRestartDaemon_ContainerRunsTheRestartBuilderNotTheStart(t *testing.T) {
+	t.Parallel()
+	town := startGuardTown(t)
+	writeComposeFile(t, town)
+	c, calls := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
+	c.guard = guardProbe(neverProbed(t))
+	reads := 0
+	c.isRunning = func(string) (bool, int, error) {
+		reads++
+		if reads == 1 {
+			return true, 1111, nil // the daemon being replaced
+		}
+		return true, 4242, nil // its replacement
+	}
+
+	via, pid, err := c.restartDaemon(town)
+	if err != nil {
+		t.Fatalf("restartDaemon: %v", err)
+	}
+	if via != config.SupervisorContainer || pid != 4242 {
+		t.Errorf("restartDaemon = (%q, %d), want (container, 4242)", via, pid)
+	}
+	if len(calls.argv) != 1 {
+		t.Fatalf("commands = %v, want exactly the restart", calls.argv)
+	}
+	if got := calls.joined(); !strings.HasSuffix(got, " up -d --force-recreate daemon") {
+		t.Errorf("command = %q, want the --force-recreate restart", got)
+	}
+	if calls.envs[0] != nil {
+		t.Errorf("the restart carried environment %v, want none", calls.envs[0])
+	}
+}
+
+// With container_name and compose_project unset the restart builder refuses with
+// errSupervisorRefused and nothing runs, so a scratch town can never recreate
+// the live container (gt-ix1kz).
+func TestContainerSupervisorRestartRefusesAnUnsetTown(t *testing.T) {
+	t.Parallel()
+	town := startGuardTown(t)
+	writeComposeFile(t, town)
+	c, calls := stubContainerTown(t, &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer})
+	sup, err := c.detectDaemonSupervisor(town)
+	if err != nil || sup == nil {
+		t.Fatalf("detectDaemonSupervisor = (%v, %v), want the container supervisor", sup, err)
+	}
+
+	err = sup.runArgv(sup.restart)
+
+	if !errors.Is(err, errSupervisorRefused) || !errors.Is(err, errContainerSettingsUnset) {
+		t.Fatalf("restart error = %v, want errSupervisorRefused wrapping the unset-settings refusal", err)
+	}
+	if len(calls.argv) != 0 {
+		t.Errorf("a refused restart ran %v", calls.argv)
+	}
+
+	c.isRunning = func(string) (bool, int, error) { return true, 1111, nil }
+	if _, _, err := c.restartDaemon(town); err == nil {
+		t.Error("restartDaemon recreated the container of a town that sets neither container field")
+	}
+	if len(calls.argv) != 0 {
+		t.Errorf("restartDaemon on an unset town ran %v", calls.argv)
 	}
 }
