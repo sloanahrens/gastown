@@ -41,8 +41,8 @@ const (
 	QuarterHour Cadence = "15m"
 	// Weekly is a battery the daemon runs once a week.
 	Weekly Cadence = "weekly"
-	// OnLanding is a battery a landing's gate writes, which landings make
-	// continuous.
+	// OnLanding is a battery only a landing's gate writes, so a day without a
+	// landing leaves it quiet by design.
 	OnLanding Cadence = "landing"
 	// OnEvent is a battery that writes only when an event it watches happens.
 	OnEvent Cadence = "event"
@@ -214,6 +214,9 @@ type Input struct {
 	HasCursor bool
 	// Log is every line of the battery's log that parsed.
 	Log []Line
+	// Unparsed is how many of the log's non-blank lines did not parse: a line
+	// a schema change broke must be counted, not read as a quiet battery.
+	Unparsed int
 }
 
 // Line is the part of one log line health reads.
@@ -235,16 +238,23 @@ type Row struct {
 	Median7       int        `json:"median_7d"`
 	LedgerCalls   int        `json:"ledger_calls_24h"`
 	NoAnswerShare float64    `json:"no_answer_share"`
+	Unparsed      int        `json:"unparsed_lines"`
 	Status        Status     `json:"status"`
 	Reason        string     `json:"reason,omitempty"`
 }
 
+// landingsBattery is the battery whose log records each landing the town
+// reviewed; its last day is the landing clock an OnLanding battery is judged
+// against.
+const landingsBattery = "landing"
+
 // Report judges every battery in Batteries, in table order, from each
 // battery's files in inputs and each caller's calls in the last day in ledger.
 func Report(cfg Config, inputs map[string]Input, ledger map[string]int, now time.Time) []Row {
+	landings24 := countBetween(inputs[landingsBattery].Log, now.Add(-Window), now)
 	rows := make([]Row, 0, len(Batteries))
 	for _, b := range Batteries {
-		rows = append(rows, judge(b, cfg, inputs[b.Name], ledger, now))
+		rows = append(rows, judge(b, cfg, inputs[b.Name], ledger, landings24, now))
 	}
 	return rows
 }
@@ -261,7 +271,7 @@ func ExitFails(rows []Row) bool {
 }
 
 // judge builds one battery's row.
-func judge(b Battery, cfg Config, in Input, ledger map[string]int, now time.Time) Row {
+func judge(b Battery, cfg Config, in Input, ledger map[string]int, landings24 int, now time.Time) Row {
 	row := Row{
 		Name:          b.Name,
 		Enabled:       cfg.Enabled[b.ConfigKey],
@@ -270,18 +280,30 @@ func judge(b Battery, cfg Config, in Input, ledger map[string]int, now time.Time
 		Median7:       medianDaily(in.Log, now),
 		LedgerCalls:   ledger[b.Caller],
 		NoAnswerShare: noAnswerShare(in.Log, now),
+		Unparsed:      in.Unparsed,
 	}
 	if t, ok := lastPass(in); ok {
 		row.LastPass = &t
 	}
-	row.judgeStatus(b, cfg, now)
+	row.judgeStatus(b, cfg, landings24, now)
+	if row.Unparsed > 0 {
+		row.Reason = reasonWith(row.Reason, fmt.Sprintf("%d log lines did not parse", row.Unparsed))
+	}
 	return row
+}
+
+// reasonWith joins a verdict's reason with a note about the row, "; " between.
+func reasonWith(reason, note string) string {
+	if reason == "" {
+		return note
+	}
+	return reason + "; " + note
 }
 
 // judgeStatus sets the first rule the row breaks, reading the config and the
 // freshness of the last pass before the counts: a stale battery also logs
 // nothing, and naming the missed pass says more than naming the empty count.
-func (r *Row) judgeStatus(b Battery, cfg Config, now time.Time) {
+func (r *Row) judgeStatus(b Battery, cfg Config, landings24 int, now time.Time) {
 	switch {
 	case !r.Enabled:
 		r.Status, r.Reason = Disabled, "patrols."+b.ConfigKey+" is off"
@@ -292,6 +314,11 @@ func (r *Row) judgeStatus(b Battery, cfg Config, now time.Time) {
 		return
 	case b.IdleReason != "":
 		r.Status, r.Reason = Idle, b.IdleReason
+		return
+	}
+
+	if b.Cadence == OnLanding {
+		r.judgeLanding(landings24)
 		return
 	}
 
@@ -318,6 +345,26 @@ func (r *Row) judgeStatus(b Battery, cfg Config, now time.Time) {
 		return
 	}
 
+	r.judgeCounts()
+}
+
+// judgeLanding judges a battery only a landing writes by whether the town kept
+// landing while the battery stopped logging: a day with landings and no line
+// here is a gate that stopped calling it, and a day with no landing is quiet.
+func (r *Row) judgeLanding(landings24 int) {
+	switch {
+	case landings24 == 0:
+		r.Status, r.Reason = OK, "no landing in the last day"
+	case r.Lines24 == 0:
+		r.Status = Stale
+		r.Reason = fmt.Sprintf("%d landings in the last day, none logged here", landings24)
+	default:
+		r.judgeCounts()
+	}
+}
+
+// judgeCounts sets low or unanswered from the row's counts, ok otherwise.
+func (r *Row) judgeCounts() {
 	if r.Median7 >= LowMedian && float64(r.Lines24) < float64(r.Median7)*LowShare {
 		r.Status = Low
 		r.Reason = fmt.Sprintf("%d lines in 24h against a median of %d", r.Lines24, r.Median7)
@@ -405,10 +452,10 @@ func ageText(d time.Duration) string {
 }
 
 // ParseLog decodes a battery log's JSON lines into the parts health reads,
-// skipping a line that does not parse or carries no stamp because it names no
-// pass any window can count.
-func ParseLog(data []byte) []Line {
-	var out []Line
+// returning how many non-blank lines it could not read: a line that does not
+// parse or carries no stamp names no pass any window can count, and the count
+// is what keeps such a line from reading as a quiet battery.
+func ParseLog(data []byte) (lines []Line, unparsed int) {
 	for _, raw := range bytes.Split(data, []byte{'\n'}) {
 		if len(bytes.TrimSpace(raw)) == 0 {
 			continue
@@ -418,11 +465,12 @@ func ParseLog(data []byte) []Line {
 			Answers json.RawMessage `json:"answers"`
 		}
 		if err := json.Unmarshal(raw, &rec); err != nil || rec.TS.IsZero() {
+			unparsed++
 			continue
 		}
-		out = append(out, Line{TS: rec.TS, HasAnswers: carriesAnswers(rec.Answers)})
+		lines = append(lines, Line{TS: rec.TS, HasAnswers: carriesAnswers(rec.Answers)})
 	}
-	return out
+	return lines, unparsed
 }
 
 // carriesAnswers reports whether an answers field holds any answer. Every

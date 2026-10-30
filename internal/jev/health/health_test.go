@@ -44,7 +44,8 @@ func baselineLines(now time.Time, perDay int) []string {
 
 // parseLines reads fixture log text into the lines a row is judged on.
 func parseLines(lines []string) []health.Line {
-	return health.ParseLog([]byte(strings.Join(lines, "\n")))
+	parsed, _ := health.ParseLog([]byte(strings.Join(lines, "\n")))
+	return parsed
 }
 
 // cursorInput is one battery's input with a cursor written age ago.
@@ -169,6 +170,27 @@ func TestHealthStatuses(t *testing.T) {
 			want: map[string]health.Status{"dedupe": health.OK},
 		},
 		{
+			name:    "landing battery ok when it logged the day's landing",
+			enabled: []string{"jev_testsel"},
+			inputs: map[string]health.Input{
+				"testsel": logInput(answered(now, time.Hour)),
+				"landing": logInput(answered(now, 2*time.Hour)),
+			},
+			want: map[string]health.Status{"testsel": health.OK},
+		},
+		{
+			name:    "landing battery stale when a landing went unlogged",
+			enabled: []string{"jev_testsel"},
+			inputs:  map[string]health.Input{"landing": logInput(answered(now, time.Hour))},
+			want:    map[string]health.Status{"testsel": health.Stale},
+			fails:   true,
+		},
+		{
+			name:    "landing battery quiet when no landing happened",
+			enabled: []string{"jev_testsel"},
+			want:    map[string]health.Status{"testsel": health.OK},
+		},
+		{
 			name:    "unanswered",
 			enabled: []string{"jev_dedupe"},
 			inputs: map[string]health.Input{"dedupe": cursorInput(now, 5*time.Minute,
@@ -260,4 +282,33 @@ func TestHealthRowCounts(t *testing.T) {
 	assert.Equal(t, 2, dedupe.LedgerCalls, "only the battery's own caller's calls count")
 	assert.InDelta(t, 0.25, dedupe.NoAnswerShare, 1e-9, "one of the four window lines carries no answers")
 	assert.Equal(t, health.OK, dedupe.Status, "reason %q", dedupe.Reason)
+}
+
+// TestUnparsedLinesAreReported checks that a log line the reader cannot parse is
+// counted and named in its row instead of reading as a quiet battery.
+func TestUnparsedLinesAreReported(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+
+	data := strings.Join([]string{
+		answered(now, time.Hour),
+		`{"ts":`,
+		`{"answers":{"q":"a"}}`,
+	}, "\n")
+	lines, unparsed := health.ParseLog([]byte(data))
+	assert.Len(t, lines, 1, "the one readable line")
+	assert.Equal(t, 2, unparsed, "the truncated line and the one with no stamp")
+
+	rows := health.Report(health.Config{Enabled: enabled("jev_dedupe")}, map[string]health.Input{
+		"dedupe": {Cursor: now.Add(-5 * time.Minute), HasCursor: true, Log: lines, Unparsed: unparsed},
+	}, nil, now)
+
+	var dedupe health.Row
+	for _, r := range rows {
+		if r.Name == "dedupe" {
+			dedupe = r
+		}
+	}
+	assert.Equal(t, 2, dedupe.Unparsed, "the count reaches the row")
+	assert.Contains(t, dedupe.Reason, "2 log lines did not parse", "a drifting log is named, not read as quiet")
 }

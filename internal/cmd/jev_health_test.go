@@ -64,22 +64,20 @@ func jevHealthDir(t *testing.T, town string) string {
 	return dir
 }
 
-// runJevHealthCommand drives the subcommand from inside town, as gt would.
-func runJevHealthCommand(t *testing.T, town string, asJSON bool) (string, error) {
+// runJevHealthCommand drives the subcommand it builds for the fixture town and
+// clocks it at now, as gt would.
+func runJevHealthCommand(t *testing.T, town string, now time.Time, asJSON bool) (string, error) {
 	t.Helper()
-	//testpolicy:allow no-chdir — the cwd is the input under test: runJevHealth finds the town from the working directory
-	t.Chdir(town)
 	var out bytes.Buffer
-	jevHealthCmd.SetOut(&out)
-	jevHealthCmd.SetErr(&bytes.Buffer{})
-	args := []string{"--json=false"}
+	cmd := newJevHealthCmd(townFinder(town), func() time.Time { return now })
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
 	if asJSON {
-		args = []string{"--json=true"}
+		cmd.SetArgs([]string{"--json"})
+	} else {
+		cmd.SetArgs([]string{})
 	}
-	if err := jevHealthCmd.ParseFlags(args); err != nil {
-		t.Fatalf("parsing the flags: %v", err)
-	}
-	err := runJevHealth(jevHealthCmd, nil)
+	err := cmd.Execute()
 	return out.String(), err
 }
 
@@ -109,16 +107,16 @@ func jevHealthRow(t *testing.T, rows []health.Row, name string) health.Row {
 
 // TestJevHealthCommand runs gt jev health against a fixture town: a healthy
 // town prints an ok dedupe row and exits 0, and a town whose cursor is two
-// hours old prints stale and exits 1.
-//
-//testpolicy:allow parallel — the command reads the process working directory, which t.Chdir sets for the whole process
+// hours old prints stale and exits 1. The command reads the fixed now the
+// fixture's timestamps are built from, so no wall clock reaches the verdict.
 func TestJevHealthCommand(t *testing.T) {
-	now := time.Now()
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	healthy := newJevHealthTown(t, now, 5*time.Minute)
 	stale := newJevHealthTown(t, now, 2*time.Hour)
 
 	t.Run("healthy table", func(t *testing.T) {
-		out, err := runJevHealthCommand(t, healthy, false)
+		out, err := runJevHealthCommand(t, healthy, now, false)
 		require.NoError(t, err)
 		assert.Contains(t, out, "BATTERY")
 		row := jevHealthTableRow(t, out, "dedupe")
@@ -127,7 +125,7 @@ func TestJevHealthCommand(t *testing.T) {
 	})
 
 	t.Run("healthy json rows", func(t *testing.T) {
-		out, err := runJevHealthCommand(t, healthy, true)
+		out, err := runJevHealthCommand(t, healthy, now, true)
 		require.NoError(t, err)
 
 		var doc jevHealthDoc
@@ -141,12 +139,12 @@ func TestJevHealthCommand(t *testing.T) {
 		assert.Equal(t, 1, dedupe.LedgerCalls, "only the dedupe caller's call counts")
 
 		targets := jevHealthRow(t, doc.Batteries, "targets")
-		assert.False(t, targets.Enabled, "a patrol key the config does not set is off")
+		assert.False(t, targets.Enabled, "a battery the config does not turn on is disabled")
 		assert.Equal(t, health.Disabled, targets.Status)
 	})
 
 	t.Run("stale fixture exits 1", func(t *testing.T) {
-		out, err := runJevHealthCommand(t, stale, false)
+		out, err := runJevHealthCommand(t, stale, now, false)
 
 		code, ok := IsSilentExit(err)
 		require.True(t, ok, "want a silent coded exit, got %v", err)
@@ -187,7 +185,7 @@ func TestJevHealthRefusesAnUnreadableLedger(t *testing.T) {
 
 	err := jevHealthInTown(&bytes.Buffer{}, townFinder(town), false, time.Now())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "usage ledger")
+	assert.ErrorIs(t, err, errJevHealthLedger)
 }
 
 // TestJevHealthRefusesAnUnreadableLog covers the log read's failure path: a

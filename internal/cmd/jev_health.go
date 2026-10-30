@@ -18,23 +18,52 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-var jevHealthJSON bool
+// errJevHealthLedger marks a usage ledger the command could not read, so a
+// test names the failure by identity instead of matching this package's prose.
+var errJevHealthLedger = errors.New("reading the usage ledger")
 
-var jevHealthCmd = &cobra.Command{
-	Use:   "health",
-	Short: "Show whether each Jev battery is collecting data",
-	Long: `Judge every Jev battery from the files it writes, one row per battery: when
+// newJevHealthCmd builds the subcommand over the town lookup and the clock it
+// reads, which the test supplies so a fixture is judged at a fixed instant.
+func newJevHealthCmd(findTown func() (string, error), now func() time.Time) *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "health",
+		Short: "Show whether each Jev battery is collecting data",
+		Long:  jevHealthLong(),
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			err := jevHealthInTown(cmd.OutOrStdout(), findTown, asJSON, now())
+			if _, ok := IsSilentExit(err); ok {
+				// The exit status is the verdict; cobra must not print it as an error.
+				cmd.SilenceUsage, cmd.SilenceErrors = true, true
+			}
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Print the rows as JSON")
+	return cmd
+}
+
+func init() {
+	jevCmd.AddCommand(newJevHealthCmd(workspace.FindFromCwdOrError, time.Now))
+}
+
+// jevHealthLong states the rules, rendering each threshold from the constant
+// that applies it so the help cannot drift from the code.
+func jevHealthLong() string {
+	return fmt.Sprintf(`Judge every Jev battery from the files it writes, one row per battery: when
 it last passed, its lines in the last 24 hours against the median of the seven
-days before, its calls in the usage ledger, and the share of its last day's
-lines that carry no answers.
+days before, its calls in the usage ledger, the share of its last day's lines
+that carry no answers, and how many of its log lines did not parse.
 
-A battery is ok; disabled, when patrols.<name> is off; idle by design, for the
-batteries only an event writes (progress, failcause, and targets while
-scheduled_slings is off), where a quiet log is expected; stale, for a
-continuous battery more than 45 minutes behind; late, for a weekly battery
-more than 8 days behind; low, when a battery with a median of 20 or more lines
-a day wrote under a quarter of it; or unanswered, when over half of its last
-day's lines carry no answers.
+A battery is ok; disabled, when the town has not turned it on under
+patrols.<name>; idle by design, for the batteries only an event writes
+(progress, failcause, and targets while scheduled_slings is off), where a
+quiet log is expected; stale, for a continuous battery more than %s
+behind, or for a landing battery the town landed past without a line;
+late, for a weekly battery more than %s behind; low, when a battery with
+a median of %d or more lines a day wrote under %s of it; or unanswered,
+when over %s of its last day's lines carry no answers.
 
 The exit status is 1 when any enabled battery that is not idle by design is
 stale, late, low or unanswered, and 0 otherwise, so one command answers
@@ -43,22 +72,30 @@ whether Jev is collecting today. --json prints the same rows.
 Examples:
   gt jev health
   gt jev health --json`,
-	Args: cobra.NoArgs,
-	RunE: runJevHealth,
+		briefDuration(health.StaleAfter), briefDuration(health.LateAfter),
+		health.LowMedian, shareText(health.LowShare), shareText(health.UnansweredShare))
 }
 
-func init() {
-	jevHealthCmd.Flags().BoolVar(&jevHealthJSON, "json", false, "Print the rows as JSON")
-	jevCmd.AddCommand(jevHealthCmd)
-}
-
-func runJevHealth(cmd *cobra.Command, _ []string) error {
-	err := jevHealthInTown(cmd.OutOrStdout(), workspace.FindFromCwdOrError, jevHealthJSON, time.Now())
-	if _, ok := IsSilentExit(err); ok {
-		// The exit status is the verdict; cobra must not print it as an error.
-		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+// briefDuration renders a threshold in the help's words.
+func briefDuration(d time.Duration) string {
+	switch {
+	case d%(24*time.Hour) == 0:
+		return fmt.Sprintf("%d days", int(d/(24*time.Hour)))
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%d minutes", int(d/time.Minute))
 	}
-	return err
+	return d.String()
+}
+
+// shareText renders a fraction in the help's words.
+func shareText(share float64) string {
+	switch share {
+	case 0.25:
+		return "a quarter"
+	case 0.5:
+		return "half"
+	}
+	return fmt.Sprintf("%.0f%%", share*100)
 }
 
 // jevHealthInTown resolves the town through findTown and prints the report.
@@ -118,10 +155,11 @@ func jevHealthConfig(cfg *daemon.DaemonPatrolConfig) health.Config {
 	return out
 }
 
-// jevBatteryEnabled reads one patrol key's enabled flag. jev_targets is read
-// by the deep-review script rather than by a daemon patrol, so IsPatrolEnabled
-// does not know the key and would answer with the default, on, for a block the
-// operator turned off.
+// jevBatteryEnabled reads one patrol key's enabled flag; a key the config does
+// not set is off, because every Jev battery is opt-in. jev_targets is read here
+// rather than through IsPatrolEnabled: that function does not know the key,
+// and its unknown-key default is on, which would report a battery the config
+// leaves off as collecting.
 func jevBatteryEnabled(cfg *daemon.DaemonPatrolConfig, key string) bool {
 	if key == "jev_targets" {
 		return cfg != nil && cfg.Patrols != nil && cfg.Patrols.JevTargets != nil && cfg.Patrols.JevTargets.Enabled
@@ -156,7 +194,7 @@ func jevHealthInput(townRoot string, b health.Battery) (health.Input, error) {
 	if err != nil {
 		return health.Input{}, err
 	}
-	in.Log = health.ParseLog(data)
+	in.Log, in.Unparsed = health.ParseLog(data)
 	return in, nil
 }
 
@@ -165,7 +203,7 @@ func jevHealthInput(townRoot string, b health.Battery) (health.Input, error) {
 func jevHealthLedger(townRoot string, now time.Time) (map[string]int, error) {
 	rep, err := jev.ReadSpend(jev.UsageLedgerPath(townRoot), now.Add(-health.Window), now, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errJevHealthLedger, err)
 	}
 	calls := make(map[string]int, len(rep.ByCaller))
 	for caller, spend := range rep.ByCaller {
@@ -203,11 +241,11 @@ func jevFileModTime(path string) (time.Time, bool, error) {
 // writeJevHealthTable prints one row per battery in table order.
 func writeJevHealthTable(w io.Writer, rows []health.Row) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "BATTERY\tENABLED\tCADENCE\tLAST PASS\tLINES 24H\tMEDIAN 7D\tLEDGER 24H\tNO ANSWERS\tSTATUS\tREASON")
+	fmt.Fprintln(tw, "BATTERY\tENABLED\tCADENCE\tLAST PASS\tLINES 24H\tMEDIAN 7D\tLEDGER 24H\tNO ANSWERS\tUNPARSED\tSTATUS\tREASON")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%.0f%%\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%.0f%%\t%d\t%s\t%s\n",
 			r.Name, yesNo(r.Enabled), r.Cadence, lastPassCell(r), r.Lines24, r.Median7,
-			r.LedgerCalls, r.NoAnswerShare*100, r.Status, r.Reason)
+			r.LedgerCalls, r.NoAnswerShare*100, r.Unparsed, r.Status, r.Reason)
 	}
 	return tw.Flush()
 }

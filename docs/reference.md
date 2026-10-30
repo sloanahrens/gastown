@@ -1251,6 +1251,22 @@ use up the first one's room. `Cap.Allows` is whether today's spend is still
 under `MaxUSDPerDay`. The ledger stores tokens, so `USDPerBillionTokens` is
 required to price them.
 
+### Collection health (`gt jev health`)
+
+`gt jev health` is the one command that answers whether Jev collected today: it
+judges every battery from the files each one writes, the patrol config and
+`usage.jsonl`. The statuses, thresholds and row fields are in `gt jev health
+--help`, and `--json` prints the same rows. The exit status is 1 when an
+enabled battery is not collecting, so a cron or a morning check reads it
+without parsing the table.
+
+The rules live in `internal/jev/health` as pure functions over what the command
+read, so each status is a unit test over fixtures. Two readings are worth
+knowing: a battery only a landing writes is judged against the landings the
+town recorded, never against a clock, and a log line that no longer parses is
+counted in its row, so a schema drift reads as unparsed lines rather than as a
+quiet day.
+
 ### Attention battery
 
 `internal/jev/attention` asks one Jev call per raise: each `new` transition in
