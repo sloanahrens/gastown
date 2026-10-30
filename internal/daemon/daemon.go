@@ -753,6 +753,10 @@ type Daemon struct {
 	rebuildOMBlock       rebuildGTBlock
 	rebuildOMCycleDoneFn func()
 
+	// rebuildOMInstallFn replaces the in-process install in tests; nil runs
+	// ominstaller.Run (rebuild_om.go).
+	rebuildOMInstallFn rebuildOMInstallFunc
+
 	// jevDedupeRunning is the jev_dedupe pass's single-flight guard
 	// (jev_dedupe.go). A pass makes network calls, so it runs on its own
 	// goroutine and the heartbeat never waits for it.

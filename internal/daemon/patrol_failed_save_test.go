@@ -19,6 +19,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/ominstaller"
 )
 
 // The patrols that decide due-ness with a persisted last-run time keep an
@@ -401,7 +402,8 @@ func TestRebuildOMFailedSaveSuppressesTheRerun(t *testing.T) {
 	t.Parallel()
 	d, _, clk := rebuildOMTown(t)
 	unwritableLastRun(t, d.config.TownRoot)
-	cli := rebuildOMCli(t, d, rebuildOMHeadSHA, omInstalled(rebuildOMHeadSHA))
+	rebuildOMCli(t, d, rebuildOMHeadSHA)
+	inst := fakeOMInstall(d, ominstaller.Result{Event: "installed", Commit: rebuildOMHeadSHA, Prev: rebuildOMStaleSHA}, ominstaller.ExitInstalled)
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{RebuildOM: &PatrolConfig{Enabled: true}}}
 	logs := &bytes.Buffer{}
 	d.logger = log.New(io.MultiWriter(logs), "", 0)
@@ -411,7 +413,7 @@ func TestRebuildOMFailedSaveSuppressesTheRerun(t *testing.T) {
 	d.triggerRebuildOM()
 	waitFlagClear(t, &d.rebuildOMRunning)
 
-	if n := len(installCalls(cli)); n != 1 {
+	if n := len(inst.runs); n != 1 {
 		t.Errorf("rebuild_om ran %d installs inside one interval after a failed save, want 1", n)
 	}
 	if !strings.Contains(logs.String(), "cannot persist last-run time") {
@@ -421,7 +423,7 @@ func TestRebuildOMFailedSaveSuppressesTheRerun(t *testing.T) {
 	clk.Advance(defaultRebuildOMInterval)
 	d.triggerRebuildOM()
 	waitFlagClear(t, &d.rebuildOMRunning)
-	if n := len(installCalls(cli)); n != 2 {
+	if n := len(inst.runs); n != 2 {
 		t.Errorf("rebuild_om ran %d installs after the interval, want 2", n)
 	}
 }

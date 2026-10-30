@@ -1,6 +1,5 @@
 // Package ominstaller builds om from the job-owned clone and puts it in force.
-// It is the Go form of scripts/install-om.sh, which the rebuild_om daemon job
-// runs (gt-tpg0p.16).
+// The rebuild_om daemon job runs it in process.
 package ominstaller
 
 import (

@@ -11,8 +11,6 @@ bash scripts/check-install-path_test.sh
 bash -n deploy/polecat/go-floor.sh
 bash scripts/polecat-go-floor_test.sh
 bash -n scripts/lib/install-gt-lib.sh
-bash -n scripts/install-om.sh
-bash scripts/install-om_test.sh
 bash scripts/install-local_test.sh
 bash -n scripts/deep-review.sh
 bash scripts/deep-review_test.sh

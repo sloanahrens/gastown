@@ -374,7 +374,7 @@ func TestOMReviewerRecordsTheVersionOfTheOMThatRanTheReview(t *testing.T) {
 		}
 		code, err := stub.run(ctx, dir, env, argv, out)
 		if omSubcommand(argv) == "review" && !slices.Contains(argv, "--help") {
-			// install-om.sh renames the new build over the path mid-review.
+			// The om installer renames the new build over the path mid-review.
 			current = swappedVersion
 			if werr := os.WriteFile(bin, []byte("a newer, larger om binary\n"), 0o600); werr != nil {
 				t.Error(werr)

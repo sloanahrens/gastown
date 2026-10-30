@@ -65,18 +65,6 @@ func gtInstallerCalls(cli *fakeCLI) [][]string {
 	return out
 }
 
-// installCalls returns every shell install invocation the cycle made; the
-// rebuild_om job runs its install script that way.
-func installCalls(cli *fakeCLI) [][]string {
-	var out [][]string
-	for _, c := range cli.recorded() {
-		if c.name == "bash" {
-			out = append(out, c.args)
-		}
-	}
-	return out
-}
-
 // buildInstallerCalls returns the `make gt-installer` invocations a cycle made.
 func buildInstallerCalls(cli *fakeCLI) []cliCall {
 	var out []cliCall

@@ -8,18 +8,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gofrs/flock"
-	"github.com/steveyegge/gastown/internal/version"
+	"github.com/steveyegge/gastown/internal/installlock"
+	"github.com/steveyegge/gastown/internal/ominstaller"
 )
 
 // The rebuild_om job keeps the installed om at the om origin's main, the way
 // rebuild_gt does for gt (gt-0f228). Without it the om that reviews landings
 // only moves when someone installs by hand, which is the skew om_skew.go
-// reports. This job decides; scripts/install-om.sh installs.
+// reports. This job decides; ominstaller.Run installs, in process.
 //
 // It builds from a clone it owns, never from <town>/om/mayor/rig: an om build
 // there races whoever is working in that worktree. The rig is read once, for
@@ -46,9 +46,9 @@ const (
 	rebuildOMGitTimeout   = 2 * time.Minute
 	rebuildOMCloneTimeout = 5 * time.Minute
 
-	// rebuildOMLockWait is how long the clone sync waits for install-om.sh's
-	// lock before deferring: a held lock means an install is building from the
-	// clone right now. rebuildOMInstallLockWait is what the script waits for it.
+	// rebuildOMLockWait is how long the clone sync waits for the install lock
+	// before deferring: a held lock means an install is building from the clone
+	// right now. rebuildOMInstallLockWait is how long the install waits for it.
 	rebuildOMLockWait        = 30 * time.Second
 	rebuildOMInstallLockWait = 60 * time.Second
 
@@ -62,9 +62,13 @@ const (
 	alertKeyRebuildOMInstallFail = "rebuild-om:install-failed"
 )
 
-// rebuildOMSource is the --source install-om.sh records and the source every
-// escalation from this job carries.
+// rebuildOMSource is the source the install's receipt records and the source
+// every escalation from this job carries.
 const rebuildOMSource = "rebuild-om"
+
+// rebuildOMInstallFunc runs one install and returns its result and exit. The
+// job runs ominstaller.Run through it; a test replaces it so no build runs.
+type rebuildOMInstallFunc func(ctx context.Context, cfg ominstaller.Config) (ominstaller.Result, ominstaller.Exit)
 
 func rebuildOMInterval(config *DaemonPatrolConfig) time.Duration {
 	if config != nil && config.Patrols != nil && config.Patrols.RebuildOM != nil {
@@ -184,7 +188,7 @@ func (d *Daemon) rebuildOMCycle(ctx context.Context, cycle *dogCycle) bool {
 		return outcome != rebuildGTSyncDefer
 	}
 
-	d.logger.Printf("rebuild_om: installing om %s -> %s through scripts/install-om.sh", shortOMSHA(installed), shortOMSHA(head))
+	d.logger.Printf("rebuild_om: installing om %s -> %s in process", shortOMSHA(installed), shortOMSHA(head))
 	return d.rebuildOMInstall(ctx, cycle, src, omPath, head)
 }
 
@@ -275,14 +279,10 @@ func (d *Daemon) rebuildOMBusy() string {
 	return busy
 }
 
-// rebuildOMSync fast-forwards the clone's checkout to origin/main under
-// install-om.sh's lock, so the tree cannot move under a build already running
-// from it.
+// rebuildOMSync fast-forwards the clone's checkout to origin/main under the
+// install lock, so the tree cannot move under a build already running from it.
 func (d *Daemon) rebuildOMSync(ctx context.Context, src string) (rebuildGTSyncOutcome, string) {
-	lockPath := filepath.Join(d.config.TownRoot, "daemon", "install-om.lock")
-	if dir := os.Getenv("INSTALL_OM_DAEMON_DIR"); dir != "" {
-		lockPath = filepath.Join(dir, "install-om.lock")
-	}
+	lockPath := filepath.Join(d.rebuildOMDaemonDir(), "install-om.lock")
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		return rebuildGTSyncDefer, "cannot create the install lock directory: " + err.Error()
 	}
@@ -303,76 +303,36 @@ func (d *Daemon) rebuildOMSync(ctx context.Context, src string) (rebuildGTSyncOu
 	return rebuildGTSyncOK, ""
 }
 
-// rebuildOMInstall runs scripts/install-om.sh and maps its exit code and
-// RESULT line, the contract install-om.sh documents.
+// rebuildOMInstall runs the install in process and maps its exit and result,
+// the contract ominstaller.Run documents: 0 installed or already in force, 1
+// failed (the previous om stays), 2 refused, 3 busy.
 func (d *Daemon) rebuildOMInstall(ctx context.Context, cycle *dogCycle, src, omPath, head string) bool {
-	repoRoot, err := version.GetRepoRootForTown(d.config.TownRoot)
-	if err != nil {
-		cycle.failStep("installer", "no gt source checkout holds scripts/install-om.sh")
-		_ = d.rebuildOMAlert(alertKeyRebuildOMInstallFail,
-			"rebuild_om: no gt source checkout under the town, so nothing can run scripts/install-om.sh")
-		return true
-	}
-	installer := filepath.Join(repoRoot, "scripts", "install-om.sh")
-	if _, err := os.Stat(installer); err != nil {
-		cycle.failStep("installer", "scripts/install-om.sh is missing")
-		_ = d.rebuildOMAlert(alertKeyRebuildOMInstallFail,
-			fmt.Sprintf("rebuild_om: %s is missing, so nothing can install om", installer))
-		return true
-	}
+	res, exit := d.runOMInstall(ctx, d.rebuildOMInstallConfig(src, omPath))
+	d.logger.Printf("rebuild_om: install-om finished (%s)", reasonOr(res.Event, "no result"))
 
-	out := &rebuildGTInstallLog{}
-	cmd := exec.CommandContext(ctx, "bash", installer, "--om-path", omPath, "--source", rebuildOMSource)
-	cmd.Dir = repoRoot
-	// The script builds the clone this job just synced and installs the om the
-	// landing worker resolves; the environment pins both so an operator's
-	// INSTALL_OM_* cannot point it elsewhere.
-	cmd.Env = append(os.Environ(),
-		"GT_TOWN_ROOT="+d.config.TownRoot,
-		"INSTALL_OM_SRC_DIR="+src,
-		"INSTALL_OM_LOCK_WAIT="+strconv.Itoa(int(rebuildOMInstallLockWait.Seconds())),
-	)
-	cmd.Stdout = out
-	cmd.Stderr = out
-
-	_, _, runErr := d.runCmd(cmd)
-	res := parseOMInstallResult(out.text())
-	d.logger.Printf("rebuild_om: install-om finished (%s); last lines:\n%s", reasonOr(res.event, "no result"), out.tail(rebuildGTLogTailLines))
-
-	code := 0
-	if runErr != nil {
-		var exitErr interface{ ExitCode() int }
-		if errors.As(runErr, &exitErr) {
-			code = exitErr.ExitCode()
-		} else {
-			code = -1
-		}
-	}
-
-	// A run the cycle's budget or a signal killed never printed its RESULT
-	// line, so there is no verdict to hold the interval over.
-	if ctx.Err() != nil || code < 0 {
-		d.rebuildOMNoteBlocked(cycle, "install-om was killed before it reported a result")
+	// A run the cycle's budget cut off holds no verdict: the install may have
+	// stopped partway, and the next heartbeat asks again.
+	if ctx.Err() != nil {
+		d.rebuildOMNoteBlocked(cycle, "install-om was cut off by the cycle budget before it reported a result")
 		return false
 	}
 
-	switch code {
-	case 0:
+	switch exit {
+	case ominstaller.ExitInstalled:
 		cycle.closeStep("install")
-		d.rebuildOMReachedForce(cycle, fmt.Sprintf("install-om %s: om is %s", reasonOr(res.event, "ok"), shortOMSHA(reasonOr(res.commit, head))))
+		d.rebuildOMReachedForce(cycle, fmt.Sprintf("install-om %s: om is %s", reasonOr(res.Event, "ok"), shortOMSHA(reasonOr(res.Commit, head))))
 		return true
-	case 2:
-		cycle.skipStep("install", "install-om refused: "+reasonOr(res.reason, "unknown"))
-		d.rebuildOMNoteBlocked(cycle, "install-om refused: "+reasonOr(res.reason, "unknown"))
+	case ominstaller.ExitRefused:
+		cycle.skipStep("install", "install-om refused: "+reasonOr(res.Reason, "unknown"))
+		d.rebuildOMNoteBlocked(cycle, "install-om refused: "+reasonOr(res.Reason, "unknown"))
 		return true
-	case 3:
-		d.rebuildOMNoteBlocked(cycle, "install-om deferred: "+reasonOr(res.reason, "unknown"))
+	case ominstaller.ExitBusy:
+		d.rebuildOMNoteBlocked(cycle, "install-om deferred: "+reasonOr(res.Reason, "unknown"))
 		return false
 	default:
-		// install-om has no escalation of its own, and it left the previous om in
-		// force: it never swaps without a way back, and a failed smoke check
-		// renames the old binary back.
-		reason := reasonOr(res.reason, fmt.Sprintf("exit %d", code))
+		// The install left the previous om in force: it never swaps without a way
+		// back, and a failed smoke check renames the old binary back.
+		reason := reasonOr(res.Reason, fmt.Sprintf("exit %d", exit))
 		cycle.failStep("install", "install-om failed: "+reason)
 		_ = d.rebuildOMAlert(alertKeyRebuildOMInstallFail,
 			fmt.Sprintf("rebuild_om: install-om failed (%s) installing %s; the previous om stays in force", reason, shortOMSHA(head)))
@@ -380,32 +340,55 @@ func (d *Daemon) rebuildOMInstall(ctx context.Context, cycle *dogCycle, src, omP
 	}
 }
 
-// text returns everything the installer printed.
-func (w *rebuildGTInstallLog) text() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.String()
+// rebuildOMInstallConfig is the install the cycle asks for: the job's clone,
+// the om the landing worker resolves, the job's lock wait and receipt source.
+// Signing, timeouts and any INSTALL_OM_* override resolve from the environment
+// in runOMInstall.
+func (d *Daemon) rebuildOMInstallConfig(src, omPath string) ominstaller.Config {
+	return ominstaller.Config{
+		OMPath:    omPath,
+		TownRoot:  d.config.TownRoot,
+		SrcDir:    src,
+		DaemonDir: d.rebuildOMDaemonDir(),
+		Source:    rebuildOMSource,
+		LockWait:  rebuildOMInstallLockWait,
+		Exec:      d.omInstallExec,
+		Acquire:   installlock.Acquire,
+		Logf:      d.logger.Printf,
+	}
 }
 
-// parseOMInstallResult reads install-om.sh's one machine-readable line,
-// `install-om: RESULT <event> <commit> <prev> <reason>`, where a field it has
-// nothing to say about is "-". The last such line wins.
-func parseOMInstallResult(text string) rebuildGTInstallResult {
-	var res rebuildGTInstallResult
-	for _, line := range strings.Split(text, "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 3 || fields[0] != "install-om:" || fields[1] != "RESULT" {
-			continue
-		}
-		fields = append(fields, "-", "-", "-", "-")
-		res = rebuildGTInstallResult{
-			event:  fields[2],
-			commit: dashToEmpty(fields[3]),
-			prev:   dashToEmpty(fields[4]),
-			reason: dashToEmpty(fields[5]),
-		}
+// runOMInstall runs one install in process. The config is resolved from the
+// environment first, so an operator's INSTALL_OM_* settings apply. A config
+// that does not resolve fails the install without running it.
+func (d *Daemon) runOMInstall(ctx context.Context, cfg ominstaller.Config) (ominstaller.Result, ominstaller.Exit) {
+	if d.rebuildOMInstallFn != nil {
+		return d.rebuildOMInstallFn(ctx, cfg)
 	}
-	return res
+	resolved, err := ominstaller.Resolve(cfg)
+	if err != nil {
+		d.logger.Printf("rebuild_om: install-om settings do not resolve, so nothing was installed: %v", err)
+		return ominstaller.Result{Event: "failed", Reason: "unexpected"}, ominstaller.ExitFailed
+	}
+	return ominstaller.Run(ctx, resolved)
+}
+
+// omInstallExec is the command runner the install's commands go through: the
+// daemon's command seam, in the directory the install names.
+func (d *Daemon) omInstallExec(ctx context.Context, c ominstaller.Command) (string, string, error) {
+	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
+	cmd.Dir = c.Dir
+	stdout, stderr, err := d.runCmd(cmd)
+	return string(stdout), string(stderr), err
+}
+
+// rebuildOMDaemonDir is the directory the install lock and the receipts file
+// sit in: INSTALL_OM_DAEMON_DIR, else <town>/daemon.
+func (d *Daemon) rebuildOMDaemonDir() string {
+	if dir := os.Getenv("INSTALL_OM_DAEMON_DIR"); dir != "" {
+		return dir
+	}
+	return filepath.Join(d.config.TownRoot, "daemon")
 }
 
 // rebuildOMAlert raises a MEDIUM alert under key. The delivery outcome is

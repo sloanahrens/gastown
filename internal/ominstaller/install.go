@@ -12,8 +12,8 @@ import (
 // lock runs one install at a time, so one name serves, as keepTempName does.
 const newBinName = ".om.new"
 
-// The reasons install reports on the RESULT line. The names are the script's, so
-// the daemon's mapping holds for both.
+// The reasons install reports in its Result. The names are fixed: the receipts
+// file and the rebuild_om alerts report them.
 const (
 	eventInstalled  = "installed"
 	eventNoop       = "noop"
