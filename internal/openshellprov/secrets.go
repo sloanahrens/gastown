@@ -8,15 +8,16 @@ import (
 	"strings"
 )
 
-// maskText is what each occurrence of the secret is replaced with.
+// maskText is what each run of occurrences of the secret is replaced with.
 const maskText = "***"
 
 // KeyValue returns the value of key in a KEY=value env file. The file is read
 // as data and never sourced: a line that is not an assignment to key is
 // ignored, the last assignment wins, a leading "export " and one pair of
 // surrounding single or double quotes are stripped, and nothing in the value
-// is expanded. A key the file does not set, or sets to nothing, returns "" and
-// no error; the caller refuses an empty secret.
+// is expanded. Whitespace around a line, and a carriage return at its end, is
+// not part of the key or the value. A key the file does not set, or sets to
+// nothing, returns "" and no error; the caller refuses an empty secret.
 func KeyValue(file, key string) (string, error) {
 	data, err := os.ReadFile(file)
 	if err != nil {
@@ -24,6 +25,7 @@ func KeyValue(file, key string) (string, error) {
 	}
 	value := ""
 	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
 		rest, ok := strings.CutPrefix(line, "export ")
 		if !ok {
 			rest = line
@@ -48,101 +50,131 @@ func unquote(s string) string {
 
 // Masked returns a writer that copies to w with every occurrence of secret
 // replaced by ***. It matches the secret itself, not a pattern, so a one-
-// character key is hidden as surely as a long one. Occurrences that overlap are
-// one run and get one ***. An occurrence split across two Writes is still
-// replaced: the bytes that could still begin or extend an occurrence are held
-// back until a later Write settles them. Output that ends while bytes are held
-// is not written, which costs the tail of the stream but never shows the
-// secret. An empty secret masks nothing, so Masked returns w unchanged; the
-// caller refuses an empty secret before it gets here.
-func Masked(secret string, w io.Writer) io.Writer {
+// character key is hidden as surely as a long one. Occurrences that overlap or
+// touch form one maximal run of covered bytes, and each run is written as one
+// ***. An occurrence split across Writes is still replaced: the writer holds
+// back only the bytes that could still begin an occurrence, never more than
+// len(secret)-1 of them, however long the stream runs. Each Write costs
+// O(len(p)*len(secret)).
+//
+// Close must be called to flush what is held. A held tail is always a prefix of
+// the secret, so it is written as *** unless the run before it already masks it:
+// a partial secret is a secret, and it is never written in the clear. Close
+// ends the stream: the writer holds nothing after it. An empty secret masks
+// nothing, so Masked passes w through; the caller refuses an empty secret before
+// it gets here.
+func Masked(secret string, w io.Writer) io.WriteCloser {
 	if secret == "" {
-		return w
+		return nopCloser{w}
 	}
 	return &maskWriter{secret: []byte(secret), w: w}
 }
+
+// nopCloser is the writer Masked returns for an empty secret: it passes every
+// byte through and has nothing to flush.
+type nopCloser struct{ io.Writer }
+
+func (nopCloser) Close() error { return nil }
 
 // maskWriter holds back the bytes that might still become part of the secret.
 type maskWriter struct {
 	secret []byte
 	w      io.Writer
-	// held is the tail of the input not yet written: from the start of the first
-	// occurrence that a later byte could still extend.
+	// held is the undecided tail: a proper prefix of secret, starting at the first
+	// byte a later write could still complete into an occurrence.
 	held []byte
+	// inRun reports that a run of occurrences is open at the start of held.
+	// covered is how far into held that run reaches; a byte at or past covered
+	// starts no run and is written.
+	inRun   bool
+	covered int
 }
 
-// Write masks p and writes what is settled to the underlying writer. The held
-// tail is written by a later Write. When the underlying write fails, Write
-// consumes nothing and keeps its state, as io.Writer requires.
+// Write masks p and writes what is settled. The undecided tail stays held for a
+// later Write. When the underlying write fails, Write returns 0 and keeps the
+// writer's state, so the same bytes can be written again, as io.Writer requires.
 func (m *maskWriter) Write(p []byte) (int, error) {
-	buf := append(append([]byte(nil), m.held...), p...)
-	cut, out := settle(buf, m.secret)
-	if len(out) > 0 {
-		if _, err := m.w.Write(out); err != nil {
-			return 0, err
-		}
+	next := *m
+	out := next.settle(append(append([]byte(nil), m.held...), p...), false)
+	if err := writeOut(m.w, out); err != nil {
+		return 0, err
 	}
-	m.held = append([]byte(nil), buf[cut:]...)
+	*m = next
 	return len(p), nil
 }
 
-// settle returns the masked prefix of buf that no later byte can change, and
-// the length of buf it covers. A later byte can only begin an occurrence at or
-// after the partial suffix of buf, so a run of occurrences that reaches past
-// that point is not settled: the cut moves back to its start and the run is
-// held whole, to be masked when a later Write completes it.
-func settle(buf, secret []byte) (int, []byte) {
-	limit := len(buf) - partialSuffix(buf, secret)
-	runs := occurrenceRuns(buf, secret)
-	cut := limit
-	for _, r := range runs {
-		if r[1] > limit {
-			cut = min(cut, r[0])
-		}
+// Close writes the held tail, masked as described on Masked, and ends the
+// stream. It writes nothing when no tail is held.
+func (m *maskWriter) Close() error {
+	next := *m
+	out := next.settle(m.held, true)
+	if err := writeOut(m.w, out); err != nil {
+		return err
 	}
+	*m = next
+	return nil
+}
+
+// writeOut writes out to w, and writes nothing for an empty out.
+func writeOut(w io.Writer, out []byte) error {
+	if len(out) == 0 {
+		return nil
+	}
+	_, err := w.Write(out)
+	return err
+}
+
+// settle masks every byte of buf that no later byte can change, and holds the
+// rest in m.held. final means no bytes follow buf, so a tail that is a prefix
+// of the secret is decided as it stands. It returns the masked output.
+//
+// Each position is decided once, in order. An occurrence that starts there
+// opens a run, or extends the open one when it overlaps or touches it, so the
+// run is written as one ***. A byte inside the open run is covered and not
+// written. Any other byte is written. A position where buf ends inside a
+// possible occurrence is held, because a later byte could complete it.
+func (m *maskWriter) settle(buf []byte, final bool) []byte {
 	var out []byte
-	done := 0
-	for _, r := range runs {
-		if r[1] > cut {
-			break
+	for i := 0; i < len(buf); i++ {
+		occ, partial := occursAt(buf[i:], m.secret)
+		switch {
+		case partial && !final:
+			// A later byte could complete an occurrence here, so hold from i on.
+			m.held = buf[i:]
+			m.covered = max(m.covered-i, 0)
+			return out
+		case partial:
+			// The input ends inside an occurrence. Its bytes are masked by the run
+			// before them when there is one, and by a mask of their own otherwise.
+			if !m.inRun {
+				out = append(out, maskText...)
+			}
+			m.held, m.inRun, m.covered = nil, false, 0
+			return out
+		case occ:
+			if !m.inRun {
+				out = append(out, maskText...)
+			}
+			m.inRun = true
+			m.covered = max(m.covered, i+len(m.secret))
+		case i < m.covered:
+			// Inside the open run: already masked, so not written.
+		default:
+			m.inRun = false
+			out = append(out, buf[i])
 		}
-		out = append(out, buf[done:r[0]]...)
-		out = append(out, maskText...)
-		done = r[1]
 	}
-	out = append(out, buf[done:cut]...)
-	return cut, out
+	m.held = nil
+	m.covered = max(m.covered-len(buf), 0)
+	return out
 }
 
-// occurrenceRuns returns the [start, end) span of each run of occurrences of
-// secret in buf, in order. Occurrences that overlap share a run, so the run is
-// masked once and no part of it is shown; occurrences that only touch are
-// separate runs.
-func occurrenceRuns(buf, secret []byte) [][2]int {
-	var runs [][2]int
-	for i := 0; ; {
-		j := bytes.Index(buf[i:], secret)
-		if j < 0 {
-			return runs
-		}
-		start := i + j
-		end := start + len(secret)
-		if n := len(runs); n > 0 && start < runs[n-1][1] {
-			runs[n-1][1] = end
-		} else {
-			runs = append(runs, [2]int{start, end})
-		}
-		i = start + 1
+// occursAt reports whether secret starts at the front of rest. partial reports
+// that rest is shorter than secret and is a prefix of it, so the answer depends
+// on bytes not yet written.
+func occursAt(rest, secret []byte) (occ, partial bool) {
+	if len(rest) >= len(secret) {
+		return bytes.Equal(rest[:len(secret)], secret), false
 	}
-}
-
-// partialSuffix returns the length of the longest suffix of buf that is a
-// proper prefix of secret: the bytes that could still grow into an occurrence.
-func partialSuffix(buf, secret []byte) int {
-	for n := min(len(buf), len(secret)-1); n > 0; n-- {
-		if bytes.Equal(buf[len(buf)-n:], secret[:n]) {
-			return n
-		}
-	}
-	return 0
+	return false, bytes.HasPrefix(secret, rest)
 }

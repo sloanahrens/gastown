@@ -46,6 +46,10 @@ func TestKeyValueTable(t *testing.T) {
 		{name: "lone quote is kept", content: "DEEPSEEK_API_KEY=\"\n", want: "\""},
 		{name: "CRLF line ending is not part of the value", content: "DEEPSEEK_API_KEY=abc123\r\n", want: "abc123"},
 		{name: "trailing spaces are not part of the value", content: "DEEPSEEK_API_KEY=abc123   \n", want: "abc123"},
+		{name: "CRLF with surrounding spaces is not part of the value", content: "  DEEPSEEK_API_KEY=abc123  \r\n", want: "abc123"},
+		{name: "indentation is not part of the key", content: "   DEEPSEEK_API_KEY=abc123\n", want: "abc123"},
+		{name: "inner spaces are kept", content: "DEEPSEEK_API_KEY=abc 123\n", want: "abc 123"},
+		{name: "spaces inside quotes are kept", content: "DEEPSEEK_API_KEY=\" abc \"\n", want: " abc "},
 		{
 			name:       "command substitution stays literal",
 			content:    "DEEPSEEK_API_KEY=$(touch DIR/pwned)\n",
@@ -97,7 +101,8 @@ func TestKeyValueReturnsTheReadError(t *testing.T) {
 }
 
 // writeChunks writes each chunk to a masked writer in turn, checks every Write
-// reports its whole chunk consumed, and returns what reached the underlying writer.
+// reports its whole chunk consumed, closes the writer, and returns what reached
+// the underlying writer.
 func writeChunks(t *testing.T, secret string, chunks []string) string {
 	t.Helper()
 	var out bytes.Buffer
@@ -111,6 +116,9 @@ func writeChunks(t *testing.T, secret string, chunks []string) string {
 			t.Fatalf("Write(%q) = %d, want %d", c, n, len(c))
 		}
 	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want none", err)
+	}
 	return out.String()
 }
 
@@ -123,7 +131,16 @@ func TestMaskedReplacesEveryOccurrence(t *testing.T) {
 		want   string
 	}{
 		{name: "repeated", secret: "s3cret", chunks: []string{"s3cret and s3cret"}, want: "*** and ***"},
-		{name: "adjacent", secret: "s3cret", chunks: []string{"s3crets3cret"}, want: "******"},
+		{name: "adjacent occurrences are one run", secret: "s3cret", chunks: []string{"s3crets3cret"}, want: "***"},
+		{name: "split across three writes", secret: "password", chunks: []string{"my pa", "s", "sword!"}, want: "my ***!"},
+		{name: "self-overlap aa in aaa", secret: "aa", chunks: []string{"aaa"}, want: "***"},
+		{name: "self-overlap abab in abababab", secret: "abab", chunks: []string{"abababab"}, want: "***"},
+		{name: "occurrences touching across writes", secret: "ab", chunks: []string{"ab", "ab"}, want: "***"},
+		{name: "secret at the very start", secret: "s3cret", chunks: []string{"s3cret and more"}, want: "*** and more"},
+		{name: "secret at the very end", secret: "s3cret", chunks: []string{"and s3cret"}, want: "and ***"},
+		{name: "empty chunk inside a split secret", secret: "pass", chunks: []string{"pa", "", "ss"}, want: "***"},
+		{name: "chunk shorter than the secret", secret: "s3cret", chunks: []string{"s3", "cr", "et"}, want: "***"},
+		{name: "a 1 MiB run is masked once", secret: "aa", chunks: []string{strings.Repeat("a", 1<<20)}, want: "***"},
 		{name: "one character", secret: "k", chunks: []string{"key k"}, want: "***ey ***"},
 		{name: "regex metacharacters", secret: "a.*+?(b)[c]", chunks: []string{"a.*+?(b)[c] vs aXb"}, want: "*** vs aXb"},
 		{name: "split across writes", secret: "password", chunks: []string{"my pass", "word here"}, want: "my *** here"},
@@ -183,13 +200,41 @@ func TestMaskedWithAnEmptySecretPassesEverythingThrough(t *testing.T) {
 	}
 }
 
+func TestMaskedFlushesTheHeldTail(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		secret string
+		chunks []string
+		want   string
+	}{
+		{name: "tail that is a prefix of the secret is masked", secret: "pass", chunks: []string{"xx pa"}, want: "xx ***"},
+		{name: "one-byte tail that is a prefix is masked", secret: "pass", chunks: []string{"xx p"}, want: "xx ***"},
+		{name: "tail that is not a prefix is written unchanged", secret: "pass", chunks: []string{"xx pb"}, want: "xx pb"},
+		{name: "no tail held writes nothing more", secret: "pass", chunks: []string{"xx"}, want: "xx"},
+		{name: "no input writes nothing", secret: "pass", chunks: nil, want: ""},
+		{name: "tail inside a run is not written in the clear", secret: "aba", chunks: []string{"abab"}, want: "***"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := writeChunks(t, tc.secret, tc.chunks); got != tc.want {
+				t.Errorf("masked output = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMaskedReturnsTheUnderlyingWriteError(t *testing.T) {
 	t.Parallel()
 	n, err := Masked("s3cret", failingWriter{}).Write([]byte("no secret here"))
 	if err == nil {
 		t.Fatal("Write to a failing writer error = nil, want the write error")
 	}
-	if n >= len("no secret here") {
-		t.Errorf("Write to a failing writer = %d, want fewer than %d bytes consumed", n, len("no secret here"))
+	if err.Error() != "disk full" {
+		t.Errorf("Write to a failing writer error = %q, want the underlying %q", err, "disk full")
+	}
+	if n != 0 {
+		t.Errorf("Write to a failing writer = %d, want 0 bytes consumed", n)
 	}
 }
