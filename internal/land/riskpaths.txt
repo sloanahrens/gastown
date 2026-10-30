@@ -33,7 +33,8 @@ internal/imagebuild/**
 cmd/install-lock/**
 cmd/image-supervisor/**
 scripts/lib/install-gt-lib.sh
-scripts/install-binary.sh
+internal/binaryinstall/**
+cmd/install-binary/**
 internal/uninstallgt/**
 cmd/uninstall-gt/**
 scripts/post-land-shell.sh

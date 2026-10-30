@@ -1,7 +1,6 @@
 // Command install-binary replaces an installed binary atomically and signs the
-// copy with the town's identity before it lands (gt-tpg0p.68). It is the Go
-// port of scripts/install-binary.sh, the replace the Makefile's install-local
-// recipe runs:
+// copy with the town's identity before it lands (gt-tpg0p.68). The Makefile's
+// install-local recipe runs it:
 //
 //	install-binary <built-binary> <install-dir> [name]
 //

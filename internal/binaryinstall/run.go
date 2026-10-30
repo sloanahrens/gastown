@@ -65,8 +65,8 @@ func Run(args []string, stderr io.Writer, inst Installer, sign Signer) int {
 	return 0
 }
 
-// commandNotice writes a notice under the command's name, as the script's
-// echo lines were written under install-binary.sh:.
+// commandNotice writes a notice under the command's name, as the notices of
+// the shell installer were written under its own name.
 func commandNotice(stderr io.Writer) func(format string, args ...any) {
 	return func(format string, args ...any) {
 		fmt.Fprintf(stderr, "install-binary: "+format+"\n", args...)

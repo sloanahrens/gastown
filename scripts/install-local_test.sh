@@ -10,7 +10,7 @@
 #
 # The target's prerequisites (check-up-to-date, check-forward-only, build) are
 # declared up to date with make -o, so no build runs and nothing reads the
-# network; scripts/install-binary.sh runs for real, into a temp INSTALL_DIR
+# network; cmd/install-binary runs for real, into a temp INSTALL_DIR
 # under a temp HOME. HOST SAFETY: this never touches the real ~/.local/bin or
 # ~/go/bin.
 set -uo pipefail
@@ -25,7 +25,7 @@ fail() { echo "  FAIL: $1"; [[ $# -gt 1 ]] && printf '%s\n' "$2" | sed 's/^/    
 T=""
 cleanup() {
   if [[ -n "$T" && -d "$T" ]]; then
-    # install-binary.sh leaves the installed binary OS-immutable (gt-vya0s);
+    # the installer leaves the installed binary OS-immutable (gt-vya0s);
     # rm -rf cannot remove it until the flag comes off.
     chflags -R nouchg "$T" 2>/dev/null || true
     chattr -R -i "$T" 2>/dev/null || true
@@ -45,7 +45,7 @@ new_world() {
 # run_install_local INSTALL_DIR — install-local against a temp HOME, with the
 # build and source checks declared up to date. Output in $T/out, rc returned.
 #
-# INSTALL_GT_SIGN_DIR points install-binary.sh at signing material that does
+# INSTALL_GT_SIGN_DIR points the installer at signing material that does
 # not exist, so it installs ad-hoc: a run from inside a town would otherwise
 # pick up the town's real keychain through GT_TOWN_ROOT (gt-ykots) and unlock
 # it to sign a throwaway binary.

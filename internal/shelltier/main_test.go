@@ -28,7 +28,6 @@ var trackedShellTests = []string{
 	"scripts/forgejo-provision_test.sh",
 	"scripts/forgejo-resync_test.sh",
 	"scripts/gate-vs-load_test.sh",
-	"scripts/install-binary_test.sh",
 	"scripts/install-local_test.sh",
 	"scripts/install-om_test.sh",
 	"scripts/makefile-gate_test.sh",
