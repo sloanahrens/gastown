@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/installlock"
+	"github.com/steveyegge/gastown/internal/signing"
 )
 
 // ErrSourceNotFound is a replace whose source binary is not a regular file,
@@ -323,12 +324,9 @@ func (f Files) lock(path string, wait time.Duration) (func(), error) {
 }
 
 // optionSafe keeps a path that starts with a dash from reading as an option to
-// chflags or chattr: it is returned as a path from the current directory.
+// chflags or chattr. The guard is shared with the signing step.
 func optionSafe(path string) string {
-	if strings.HasPrefix(path, "-") {
-		return "./" + path
-	}
-	return path
+	return signing.OptionSafe(path)
 }
 
 // createTempFile is mktemp: the pattern decides the name, the directory decides

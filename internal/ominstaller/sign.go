@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/signing"
 )
 
 // signIdentifier is the designated-requirement identifier om is signed under. A
@@ -81,8 +83,11 @@ func sign(ctx context.Context, cfg Config, tmp string) error {
 		return signFailed("password file " + passwordFile + " is empty")
 	}
 
-	if err := unlockKeychain(ctx, cfg, keychain, password); err != nil {
-		if errors.Is(err, errUnlockTimeout) {
+	unlockCtx, cancelUnlock := signing.Bound(ctx, nil, cfg.SignWait)
+	err = signing.Unlock(unlockCtx, signExec(cfg), keychain, password)
+	cancelUnlock()
+	if err != nil {
+		if errors.Is(err, signing.ErrUnlockTimeout) {
 			return signFailed(fmt.Sprintf("unlock exceeded %s", cfg.SignWait))
 		}
 		return signFailed("cannot unlock " + keychain)
@@ -97,42 +102,30 @@ func sign(ctx context.Context, cfg Config, tmp string) error {
 		return signFailed("cannot read the mode of " + tmp)
 	}
 
-	signCtx, cancel := context.WithTimeout(ctx, cfg.SignWait)
+	signCtx, cancel := signing.Bound(ctx, nil, cfg.SignWait)
 	defer cancel()
-	stdout, stderr, err := cfg.Exec(signCtx, Command{Name: "codesign", Args: []string{"--force", "--keychain", keychain, "-s", cfg.SignIdentity, "-i", signIdentifier, tmp}})
-	if err != nil {
-		if restoreErr := restore(files, tmp, unsigned, perm.Perm()); restoreErr != nil {
-			return signFailed("cannot restore the unsigned build at " + tmp + " after codesign failed")
-		}
+	err = signing.Codesign(signCtx, signExec(cfg), keychain, cfg.SignIdentity, signIdentifier, tmp, func() error {
+		return restore(files, tmp, unsigned, perm.Perm())
+	})
+	var codesignErr signing.CodesignError
+	if errors.As(err, &codesignErr) {
 		// codesign's first line says what it objected to. It is logged, not put in
 		// the error, which names the step only.
-		out := stderr
-		if out == "" {
-			out = stdout
-		}
-		cfg.logf("[install-om] codesign failed: %s", firstLine(out))
+		cfg.logf("[install-om] codesign failed: %s", codesignErr.Notice)
 		return signFailed("codesign failed or timed out")
+	}
+	if err != nil {
+		return signFailed("cannot restore the unsigned build at " + tmp + " after codesign failed")
 	}
 	cfg.logf("[install-om] Signed the build as %s", signIdentifier)
 	return nil
 }
 
-// errUnlockTimeout is the unlock running past the sign timeout.
-var errUnlockTimeout = errors.New("unlock timed out")
-
-// unlockKeychain unlocks the keychain under the sign timeout, so a hung unlock fails
-// the install as a hung codesign does. unlock-keychain -p takes the password in its
-// argv, so ps can see it while the unlock runs. The unlock's output is discarded,
-// so the password is never logged. A run cut off by its own deadline returns
-// errUnlockTimeout, so the caller can name the timeout.
-func unlockKeychain(ctx context.Context, cfg Config, keychain, password string) error {
-	unlockCtx, cancel := context.WithTimeout(ctx, cfg.SignWait)
-	defer cancel()
-	_, _, err := cfg.Exec(unlockCtx, Command{Name: "security", Args: []string{"unlock-keychain", "-p", password, keychain}})
-	if err != nil && unlockCtx.Err() == context.DeadlineExceeded {
-		return errUnlockTimeout
+// signExec runs the sign commands through cfg.Exec as the shared signing.Exec.
+func signExec(cfg Config) signing.Exec {
+	return func(ctx context.Context, name string, args ...string) (string, string, error) {
+		return cfg.Exec(ctx, Command{Name: name, Args: args})
 	}
-	return err
 }
 
 // restore puts the unsigned build back at tmp, the state a failed codesign can
@@ -148,13 +141,4 @@ func restore(files Files, tmp string, unsigned []byte, perm fs.FileMode) error {
 // a step, never the output of a command, which can hold a secret.
 func signFailed(reason string) error {
 	return fmt.Errorf("%w: %s", errSigning, reason)
-}
-
-// firstLine is the first line of s, or "no output" when s is empty.
-func firstLine(s string) string {
-	if s == "" {
-		return "no output"
-	}
-	line, _, _ := strings.Cut(s, "\n")
-	return line
 }

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/signing"
 )
 
 // signIdentifier is the designated-requirement identifier the installed binary
@@ -138,30 +140,30 @@ func (s Signer) Sign(tmp, src, name string) error {
 	if password == "" {
 		return signingError{"password file " + passwordFile + " is empty"}
 	}
-	// The password travels in this call's argv, where ps can see it for as long
-	// as the unlock takes. That is the script's behavior, kept as it is: moving
-	// the unlock off argv is a separate decision (gt-tpg0p.70). Its output is
-	// discarded, so the password is never printed. The unlock runs under the
-	// same limit as codesign, so a hung unlock fails the install (gt-e2prc).
-	unlockCtx, cancelUnlock := context.WithDeadline(context.Background(), s.now().Add(limit))
-	_, err = s.run(unlockCtx, "security", "unlock-keychain", "-p", password, optionSafe(keychain))
+	// The unlock runs under the same limit as codesign, so a hung unlock fails
+	// the install (gt-e2prc). Each step gets its own deadline.
+	unlockCtx, cancelUnlock := signing.Bound(context.Background(), s.now, limit)
+	err = signing.Unlock(unlockCtx, s.exec(), keychain, password)
 	cancelUnlock()
 	if err != nil {
 		return signingError{"cannot unlock " + keychain}
 	}
-	ctx, cancel := context.WithDeadline(context.Background(), s.now().Add(limit))
+	ctx, cancel := signing.Bound(context.Background(), s.now, limit)
 	defer cancel()
-	out, err := s.run(ctx, "codesign", "--force", "--keychain", optionSafe(keychain), "-s", identity, "-i", signIdentifier, optionSafe(tmp))
-	if err != nil {
-		if restoreErr := s.restore(tmp, src); restoreErr != nil {
-			return restoreErr
-		}
-		// The first line of codesign's output is a notice, not part of the
+	err = signing.Codesign(ctx, s.exec(), keychain, identity, signIdentifier, tmp, func() error {
+		return s.restore(tmp, src)
+	})
+	var codesignErr signing.CodesignError
+	if errors.As(err, &codesignErr) {
+		// The notice is the first line of codesign's output, not part of the
 		// error: the error names the step only. codesign does not print the
 		// keychain password, and the unlock's own output was discarded above,
 		// so this one line holds no secret.
-		s.Installer.warnf("codesign failed: %s", firstLine(string(out)))
+		s.Installer.warnf("codesign failed: %s", codesignErr.Notice)
 		return signingError{"codesign failed"}
+	}
+	if err != nil {
+		return err
 	}
 	s.notef("signed %s as %s", name, signIdentifier)
 	return nil
@@ -238,6 +240,15 @@ func (s Signer) run(ctx context.Context, name string, args ...string) ([]byte, e
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
+// exec is run as the shared signing.Exec. Output is combined here, so it all
+// comes back as standard output.
+func (s Signer) exec() signing.Exec {
+	return func(ctx context.Context, name string, args ...string) (string, string, error) {
+		out, err := s.run(ctx, name, args...)
+		return string(out), "", err
+	}
+}
+
 // material reports whether anything is at path and what it is, without
 // following a symlink. A failure other than a missing entry is an error, never
 // absence, so material that cannot be inspected does not count as none.
@@ -293,14 +304,4 @@ func (s Signer) notef(format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
-}
-
-// firstLine is the first line of what a command said, the script's `head -1`,
-// so one log line names what codesign objected to without a wall of text.
-func firstLine(s string) string {
-	if s == "" {
-		return "no output"
-	}
-	line, _, _ := strings.Cut(s, "\n")
-	return line
 }
