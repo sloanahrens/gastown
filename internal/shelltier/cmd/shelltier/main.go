@@ -2,6 +2,7 @@
 // manifest, in order, as `bash <path>` (gt-u560q.4).
 //
 //	go run ./internal/shelltier/cmd/shelltier --all
+//	go run ./internal/shelltier/cmd/shelltier --since-green --town <dir>
 //
 // Before each script it writes `tier-sweep: shell <path> ...` to stderr, and it
 // writes the summary line there last. It exits with the tier's verdict: 0 when
@@ -17,11 +18,13 @@ import (
 	"os"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/shelltier"
+	"github.com/steveyegge/gastown/internal/tiertrigger"
 )
 
 // usage is the line a usage error prints, the one a caller greps for.
-const usage = "usage: shelltier [--all] [--root dir] [--logdir dir] [--budget duration]"
+const usage = "usage: shelltier [--all] [--since-green --town dir] [--root dir] [--logdir dir] [--budget duration]"
 
 // Env is one run's inputs. main fills it with the real manifest, process and
 // clock; tests fill every field with fakes, so no case runs a script or reads
@@ -37,6 +40,13 @@ type Env struct {
 	// TempDir is the directory a default --logdir is made under: $TMPDIR.
 	TempDir   string
 	MkdirTemp func(dir, pattern string) (string, error)
+	// Files reads and writes the shell state a --since-green run keeps.
+	Files tiertrigger.Files
+	// Checkout is the repository at root that --since-green reads HEAD and the
+	// change since each record from.
+	Checkout func(root string) shelltier.Checkout
+	// Zone is the zone the daily window is read in.
+	Zone func() (*time.Location, error)
 }
 
 func main() {
@@ -48,7 +58,49 @@ func main() {
 		WithTimeout: context.WithTimeout,
 		TempDir:     os.TempDir(),
 		MkdirTemp:   os.MkdirTemp,
+		Files:       tiertrigger.OSFiles{},
+		Checkout:    gitCheckout,
+		Zone:        tiertrigger.DailyZoneLocation,
 	}))
+}
+
+// gitCheckout is the repository at root, read through git.
+func gitCheckout(root string) shelltier.Checkout {
+	r := git.NewGit(root)
+	return shelltier.Checkout{
+		Head: func() (string, error) { return r.Rev("HEAD") },
+		Git:  worktreeGit{diff: r.DiffNameOnly, status: r.Status},
+	}
+}
+
+// worktreeGit answers the due decision's reads from a git repository, the way
+// the container tier's command does: the commits since a record, and the
+// checkout's uncommitted paths. The two reads are fields so a test can fail them.
+type worktreeGit struct {
+	diff   func(base, head string) ([]string, error)
+	status func() (*git.GitStatus, error)
+}
+
+func (g worktreeGit) DiffNameOnly(base, head string) ([]string, error) {
+	return g.diff(base, head)
+}
+
+func (g worktreeGit) Worktree() ([]string, error) {
+	status, err := g.status()
+	if err != nil {
+		return nil, err
+	}
+	return worktreePaths(status), nil
+}
+
+// worktreePaths is every path the checkout has uncommitted changes in, tracked
+// or not: an untracked test file is code the run compiles.
+func worktreePaths(status *git.GitStatus) []string {
+	var paths []string
+	for _, group := range [][]string{status.Modified, status.Added, status.Deleted, status.Unmerged, status.Untracked} {
+		paths = append(paths, group...)
+	}
+	return paths
 }
 
 // Main parses args, runs the entries and returns the exit code. Help goes to
@@ -59,9 +111,10 @@ func Main(args []string, out io.Writer, env Env) int {
 	// The flag package would print its own defaults list; the usage line is
 	// printed below, to out for -h and to env.Err for a usage error.
 	fs.Usage = func() {}
-	// --all is accepted but not read yet: the trigger that picks entries is
-	// gt-u560q.7, so every run covers the whole manifest until then.
-	fs.Bool("all", false, "run every manifest entry")
+	// --all runs every entry and ignores the state, even with --since-green.
+	all := fs.Bool("all", false, "run every manifest entry and ignore the shell state")
+	sinceGreen := fs.Bool("since-green", false, "run only the entries whose triggers changed since their last green run")
+	town := fs.String("town", "", "the town root whose shell state --since-green reads and writes")
 	root := fs.String("root", ".", "the directory each script runs in")
 	logdir := fs.String("logdir", "", "the directory for each script's log and TMPDIR (default: a new temp dir)")
 	budget := fs.Duration("budget", 10*time.Minute, "the time limit for each script")
@@ -77,6 +130,10 @@ func Main(args []string, out io.Writer, env Env) int {
 		fmt.Fprintln(env.Err, usage)
 		return 2
 	}
+	if *sinceGreen && !*all && *town == "" {
+		fmt.Fprintln(env.Err, usage)
+		return 2
+	}
 
 	dir := *logdir
 	if dir == "" {
@@ -88,8 +145,13 @@ func Main(args []string, out io.Writer, env Env) int {
 		dir = made
 	}
 
+	plan := shelltier.AllEntries(env.Entries)
+	if *sinceGreen && !*all {
+		plan = shelltier.PlanSinceGreen(env.Entries, *town, env.Files, env.Checkout(*root), env.Zone, env.Now(), env.Err)
+	}
+
 	result := shelltier.Run(context.Background(), shelltier.Config{
-		Entries:     env.Entries,
+		Entries:     plan.Run,
 		Root:        *root,
 		LogDir:      dir,
 		Budget:      *budget,
@@ -97,6 +159,8 @@ func Main(args []string, out io.Writer, env Env) int {
 		Now:         env.Now,
 		WithTimeout: env.WithTimeout,
 	})
+	result.Skipped = plan.Skipped
+	plan.Finish(result, env.Now(), env.Err)
 	fmt.Fprintln(env.Err, shelltier.Summary(result, dir))
 	return int(result.Exit())
 }
