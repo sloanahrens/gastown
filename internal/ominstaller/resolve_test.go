@@ -270,6 +270,7 @@ func TestResolveRefusesAValueItCannotResolve(t *testing.T) {
 		env   map[string]string
 		cwd   string
 		files []string
+		abs   func(string) (string, error)
 	}{
 		{
 			name: "no GT_TOWN_ROOT and no town above the working directory",
@@ -280,6 +281,12 @@ func TestResolveRefusesAValueItCannotResolve(t *testing.T) {
 			name: "no GT_TOWN_ROOT and no town above a relative working directory",
 			env:  map[string]string{envTownRoot: ""},
 			cwd:  ".",
+		},
+		{
+			name: "no GT_TOWN_ROOT and a working directory that cannot be made absolute",
+			env:  map[string]string{envTownRoot: ""},
+			cwd:  ".",
+			abs:  func(string) (string, error) { return "", errors.New("no working directory") },
 		},
 		{
 			name: "a negative Config sign wait",
@@ -308,7 +315,11 @@ func TestResolveRefusesAValueItCannotResolve(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := resolveConfig(tc.cfg, tc.cwd, envWith(tc.env), filesExist(tc.files), fakeAbs); err == nil {
+			abs := tc.abs
+			if abs == nil {
+				abs = fakeAbs
+			}
+			if _, err := resolveConfig(tc.cfg, tc.cwd, envWith(tc.env), filesExist(tc.files), abs); err == nil {
 				t.Error("resolveConfig returned no error, want a refusal")
 			}
 		})
