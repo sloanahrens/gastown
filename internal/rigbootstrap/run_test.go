@@ -7,10 +7,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // call is one program the fake exec was asked to run.
@@ -25,7 +27,8 @@ type call struct {
 // directory as gt rig add does, and seeds rigFiles (relative path to contents)
 // under it, as a rig created from a repo that already has settings would.
 // gitStartErr and gtStartErr are returned instead of an exit code when set: the
-// program could not start.
+// program could not start. gitBlocks makes the git call wait for its context to
+// end and return that error, as a program the context kills does.
 type fakeExec struct {
 	t           *testing.T
 	calls       []call
@@ -33,17 +36,22 @@ type fakeExec struct {
 	gtOut       string
 	gtErrOut    string
 	gitFails    bool
+	gitBlocks   bool
 	gitStartErr error
 	gtStartErr  error
 	rigFiles    map[string][]byte
 	rigFileMode fs.FileMode // the mode of seeded rigFiles; zero means 0o644
 }
 
-func (f *fakeExec) exec(_ context.Context, dir, name string, args []string, stdout, stderr io.Writer) (int, error) {
+func (f *fakeExec) exec(ctx context.Context, dir, name string, args []string, stdout, stderr io.Writer) (int, error) {
 	f.calls = append(f.calls, call{dir: dir, name: name, args: args})
 	if name == "git" {
 		if f.gitStartErr != nil {
 			return 0, f.gitStartErr
+		}
+		if f.gitBlocks {
+			<-ctx.Done()
+			return 0, ctx.Err()
 		}
 		if f.gitFails {
 			return 128, nil
@@ -353,6 +361,12 @@ func TestRunStartFailures(t *testing.T) {
 			wantStderr: "Could not run git: " + startErr.Error() + "\n",
 		},
 		{
+			name:       "git not found on the path",
+			setup:      func(f *fixture) { f.fake.gitStartErr = exec.ErrNotFound },
+			wantGT:     0,
+			wantStderr: "Could not run git: " + exec.ErrNotFound.Error() + "\n",
+		},
+		{
 			name:       "gt cannot start",
 			setup:      func(f *fixture) { f.fake.gtStartErr = startErr },
 			wantGT:     1,
@@ -382,6 +396,63 @@ func TestRunStartFailures(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(f.town, "nightrider")); !os.IsNotExist(err) {
 				t.Fatalf("rig directory exists after a start failure: err = %v", err)
+			}
+		})
+	}
+}
+
+// TestRunGitInterrupted: a context that ends while git is checked is an
+// interrupted run, not a start failure. It exits 1 with the interrupt named, and
+// it does not exit 127, run gt, or write anything.
+func TestRunGitInterrupted(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		ctx     func() (context.Context, context.CancelFunc) // the context the run gets
+		wantErr string                                       // the stderr line
+	}{
+		{
+			name: "cancelled before git runs",
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, cancel
+			},
+			wantErr: "interrupted: context canceled\n",
+		},
+		{
+			name: "deadline passes while git runs",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 10*time.Millisecond)
+			},
+			wantErr: "interrupted: context deadline exceeded\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			f.fake.gitBlocks = true
+			o := f.opts("nightrider")
+			o.PolecatAgent = "claude"
+			ctx, cancel := tt.ctx()
+			defer cancel()
+
+			if code := Run(ctx, o, f.deps()); code != 1 {
+				t.Fatalf("Run() = %d, want 1; stderr %q", code, f.stderr.String())
+			}
+			if got := f.stderr.String(); got != tt.wantErr {
+				t.Fatalf("stderr = %q, want %q", got, tt.wantErr)
+			}
+			if f.stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want nothing", f.stdout.String())
+			}
+			if got := len(f.gtCalls()); got != 0 {
+				t.Fatalf("gt ran %d time(s), want none", got)
+			}
+			if _, err := os.Stat(filepath.Join(f.town, "nightrider")); !os.IsNotExist(err) {
+				t.Fatalf("rig directory exists after an interrupted run: err = %v", err)
 			}
 		})
 	}

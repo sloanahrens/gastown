@@ -54,6 +54,8 @@ func (OSFiles) WriteFile(name string, data []byte, perm fs.FileMode) error {
 // repo that is not a git repository, and a rig name already taken. Then it runs
 // gt rig add in the town root, and when opts.PolecatAgent is set it records that
 // agent in the rig settings. Refusals print their message to stderr and exit 1.
+// A git that cannot start exits 127: that says nothing about the repo, so it is
+// not reported as a non-repository.
 func Run(ctx context.Context, opts Options, deps Deps) int {
 	if !isDir(deps.Files, opts.TownRoot) {
 		return refuse(deps.Stderr, "Town root does not exist: "+opts.TownRoot)
@@ -63,6 +65,10 @@ func Run(ctx context.Context, opts Options, deps Deps) int {
 	}
 	isRepo, err := isGitRepo(ctx, deps.Exec, opts.LocalRepo)
 	if err != nil {
+		if ctx.Err() != nil {
+			fmt.Fprintln(deps.Stderr, err)
+			return 1
+		}
 		fmt.Fprintf(deps.Stderr, "Could not run git: %v\n", err)
 		return 127
 	}
@@ -134,11 +140,16 @@ func isDir(files Files, name string) bool {
 }
 
 // isGitRepo is the gate for a local repo: a rig is not made from a directory git
-// does not accept as a repository. An error means git did not start, so it is
-// not an answer about the repo and the caller must not read it as one.
+// does not accept as a repository. An error comes back only when git could not
+// start or the context ended. A context that ended is an interrupted run, not a
+// start failure, so it is wrapped as "interrupted: ..." for the caller to report.
+// Neither error is an answer about the repo, so the caller must not read it as one.
 func isGitRepo(ctx context.Context, execFn Exec, repo string) (bool, error) {
 	code, err := execFn(ctx, "", "git", []string{"-C", repo, "rev-parse", "--git-dir"}, io.Discard, io.Discard)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, fmt.Errorf("interrupted: %w", ctxErr)
+		}
 		return false, err
 	}
 	return code == 0, nil
