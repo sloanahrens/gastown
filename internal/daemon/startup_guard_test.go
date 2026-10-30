@@ -378,7 +378,70 @@ func TestStartupOwnerProbe(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			probe := startupOwnerProbe(tc.docker, tc.host)
+			probe := startupOwnerProbe(tc.docker, tc.host, nil)
+			running, known := probe(tc.owner)
+			if running != tc.running || known != tc.known {
+				t.Fatalf("probe(%+v) = running %v known %v, want running %v known %v",
+					tc.owner, running, known, tc.running, tc.known)
+			}
+		})
+	}
+}
+
+// The systemd owner is the invocation id of the run it names. The probe judges
+// that owner by the unit's state only while the unit runs that same invocation
+// (gt-nirga).
+func TestStartupOwnerProbeSystemd(t *testing.T) {
+	t.Parallel()
+	const invocation = "8f3c0a1e2b4d4c6e9a7f1b2c3d4e5f60"
+	owner := Owner{Kind: agentconfig.SupervisorSystemd, ID: invocation}
+	unit := func(st templates.SupervisorState) templates.SupervisorReader {
+		return func(kind string) templates.SupervisorState {
+			if kind != agentconfig.SupervisorSystemd {
+				t.Errorf("read(%q), want the systemd job", kind)
+			}
+			return st
+		}
+	}
+	cases := []struct {
+		name    string
+		owner   Owner
+		state   templates.SupervisorState
+		running bool
+		known   bool
+	}{
+		{
+			name: "the unit runs the owner's invocation", owner: owner,
+			state:   templates.SupervisorState{Kind: "systemd", Loaded: true, PID: 1234, InvocationID: invocation},
+			running: true, known: true,
+		},
+		{
+			name: "the unit's invocation is the owner's but it is stopped", owner: owner,
+			state: templates.SupervisorState{Kind: "systemd", Loaded: true, InvocationID: invocation},
+			known: true,
+		},
+		{
+			name: "the unit runs a different invocation", owner: owner,
+			state: templates.SupervisorState{Kind: "systemd", Loaded: true, PID: 1234, InvocationID: "0123456789abcdef0123456789abcdef"},
+		},
+		{
+			name: "the unit's invocation cannot be read", owner: owner,
+			state: templates.SupervisorState{Kind: "systemd", Loaded: true, PID: 1234, Err: errors.New("systemctl failed")},
+		},
+		{
+			name: "the unit reports no invocation", owner: owner,
+			state: templates.SupervisorState{Kind: "systemd", Loaded: true, PID: 1234},
+		},
+		{
+			name:  "an empty owner id never matches an empty invocation",
+			owner: Owner{Kind: agentconfig.SupervisorSystemd},
+			state: templates.SupervisorState{Kind: "systemd", Loaded: true, PID: 1234},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			probe := startupOwnerProbe(nil, fixtureHostname("fixture-host"), unit(tc.state))
 			running, known := probe(tc.owner)
 			if running != tc.running || known != tc.known {
 				t.Fatalf("probe(%+v) = running %v known %v, want running %v known %v",

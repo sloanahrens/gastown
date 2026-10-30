@@ -1352,7 +1352,7 @@ func (d *Daemon) Run() (err error) {
 	// the guard could read as a prior run.
 	probe := d.ownerProbe
 	if probe == nil {
-		probe = startupOwnerProbe(templates.RunDockerInspect, d.hostnameOrOS)
+		probe = startupOwnerProbe(templates.RunDockerInspect, d.hostnameOrOS, nil)
 	}
 	takeover := d.env(agentconfig.TakeoverEnv) == "1"
 	if err := guardStartup(d.config.TownRoot, self, takeover, probe, d.clk().Now(), d.logPreexisted); err != nil {

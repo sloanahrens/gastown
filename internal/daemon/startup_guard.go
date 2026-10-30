@@ -57,7 +57,7 @@ func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, 
 // CLI has written nothing to it.
 func GuardStart(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time) error {
 	if probe == nil {
-		probe = startupOwnerProbe(templates.RunDockerInspect, os.Hostname)
+		probe = startupOwnerProbe(templates.RunDockerInspect, os.Hostname, nil)
 	}
 	_, err := os.Stat(DefaultConfig(townRoot).LogFile)
 	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist))
@@ -114,8 +114,12 @@ func startupCandidates(townRoot string) ([]Owner, error) {
 // container (run, templates.RunDockerInspect in production), the service
 // manager's job for launchd and systemd, and a same-host process check for a
 // manual owner (hostname names this host). Whatever it cannot read is unknown,
-// and unknown refuses.
-func startupOwnerProbe(run templates.ContainerDocker, hostname func() (string, error)) OwnerProbe {
+// and unknown refuses. read reads a supervisor job; nil reads the service
+// manager for real.
+func startupOwnerProbe(run templates.ContainerDocker, hostname func() (string, error), read templates.SupervisorReader) OwnerProbe {
+	if read == nil {
+		read = templates.SupervisorJobState
+	}
 	return func(owner Owner) (running, known bool) {
 		switch owner.Kind {
 		case agentconfig.SupervisorContainer:
@@ -124,9 +128,9 @@ func startupOwnerProbe(run templates.ContainerDocker, hostname func() (string, e
 			if owner.ID != templates.LaunchdLabel {
 				return false, false
 			}
-			return jobOwnerRunning(templates.SupervisorJobState(owner.Kind))
+			return jobOwnerRunning(read(owner.Kind))
 		case agentconfig.SupervisorSystemd:
-			return jobOwnerRunning(templates.SupervisorJobState(owner.Kind))
+			return systemdOwnerRunning(owner.ID, read(owner.Kind))
 		case OwnerKindManual:
 			return manualOwnerRunning(owner.ID, hostname)
 		}
@@ -162,6 +166,18 @@ func jobOwnerRunning(st templates.SupervisorState) (running, known bool) {
 		return false, true
 	}
 	return st.PID != 0, true
+}
+
+// systemdOwnerRunning judges a systemd owner by the unit's current invocation
+// id: a recorded id that is not the one the unit runs now belongs to an earlier
+// or another run, and is not judged by the unit's state. An id that cannot be
+// read matches nothing, so an empty unit id never matches an empty owner id
+// (gt-iiqlb, gt-nirga).
+func systemdOwnerRunning(id string, st templates.SupervisorState) (running, known bool) {
+	if st.Err != nil || st.InvocationID == "" || st.InvocationID != id {
+		return false, false
+	}
+	return jobOwnerRunning(st)
 }
 
 // manualOwnerRunning checks a hand-run owner, whose id is "host:pid". Only a
