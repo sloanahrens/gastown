@@ -93,7 +93,15 @@ func daemonPID(town string) int {
 // process exists, so the caller tells "exists" from "gone" itself. The probe
 // is read-only and cannot disturb the process it names.
 func Signal0(pid int) error {
-	proc, err := os.FindProcess(pid)
+	return signal0(os.FindProcess, pid)
+}
+
+// signal0 is Signal0 with the process lookup injected. os.FindProcess answers
+// without an error on every host this town runs on, so the lookup failure is
+// reachable only through the seam, and its error must still reach the caller:
+// probeAlive then counts the daemon as running.
+func signal0(find func(int) (*os.Process, error), pid int) error {
+	proc, err := find(pid)
 	if err != nil {
 		return err
 	}

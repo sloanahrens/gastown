@@ -295,6 +295,20 @@ func TestDaemonRunningReadsTheProbeError(t *testing.T) {
 	}
 }
 
+// TestSignal0ReportsAFailedLookup drives the one probe error a host cannot
+// produce: a lookup that fails must reach the caller rather than read as a
+// probe that found nothing. What the caller makes of the error is
+// TestDaemonRunningReadsTheProbeError's subject.
+func TestSignal0ReportsAFailedLookup(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("no process table")
+	find := func(int) (*os.Process, error) { return nil, boom }
+
+	if got := signal0(find, 4242); !errors.Is(got, boom) {
+		t.Errorf("signal0 with a failing lookup = %v, want %v", got, boom)
+	}
+}
+
 func TestDaemonRunningHintOnlyWhenRunning(t *testing.T) {
 	t.Parallel()
 	h := newHost(t)
