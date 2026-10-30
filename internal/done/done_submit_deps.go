@@ -73,6 +73,10 @@ type doneSubmitDeps struct {
 	// enqueueNudge queues a nudge to a session; nil on the polecat path, which
 	// never stands another seat down.
 	enqueueNudge func(townRoot, sessionName string, n nudge.QueuedNudge) error
+	// globalEmail returns the host's global git user.email, the legacy author
+	// address existing branches carry; "" when unset. The rework lease accepts
+	// it as one of the seat's own addresses. nil reads as unset.
+	globalEmail func() string
 }
 
 // doneOptions are the flags and environment the submit path reads.
@@ -145,5 +149,6 @@ func (r *doneRun) useRealSubmitDeps(o Options) {
 		pushSubmodules: func(baseRef string) error { return pushSubmoduleChanges(r.g, baseRef) },
 		sleep:          sleep,
 		retryDelays:    delays,
+		globalEmail:    git.GlobalAuthorEmail,
 	}
 }

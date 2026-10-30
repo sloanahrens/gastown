@@ -711,8 +711,13 @@ func TestRecoverDivergedPush_RefusalSaysWhenACommitHasNoSubject(t *testing.T) {
 
 func TestReworkPushAllows(t *testing.T) {
 	t.Parallel()
+	const (
+		localAddr = reworkTestSeat + "@gastown.local"
+		legacy    = "host@test.com"
+	)
 	seatOnly := []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: reworkTestEmail}}
 	seat := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
+	withLocal := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail, seatLocalEmail: localAddr, legacyEmail: legacy}
 	tests := []struct {
 		name   string
 		rework reworkPush
@@ -730,6 +735,14 @@ func TestReworkPushAllows(t *testing.T) {
 		{name: "empty origin range is not all seat's", rework: seat, origin: reworkTestRejected},
 		{name: "no seat author", rework: reworkPush{rejectedHead: reworkTestRejected, seatEmail: reworkTestEmail}, origin: reworkTestRejected, commit: seatOnly},
 		{name: "no seat email fails closed", rework: reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}, origin: reworkTestRejected, commit: seatOnly},
+		{name: "all under the seat's gastown.local address", rework: withLocal, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: localAddr}}, want: true},
+		{name: "mix of legacy global email and gastown.local under the right name", rework: withLocal, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: "c1", Author: reworkTestSeat, Email: legacy}, {SHA: reworkTestRejected, Author: reworkTestSeat, Email: localAddr}}, want: true},
+		{name: "legacy global email under the right name", rework: withLocal, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: legacy}}, want: true},
+		{name: "another name under the gastown.local address", rework: withLocal, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: "Sloan Ahrens", Email: localAddr}}},
+		{name: "another name under the legacy global email", rework: withLocal, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: "Sloan Ahrens", Email: legacy}}},
+		{name: "a gastown.local address that is not this seat's", rework: withLocal, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: "other@gastown.local"}}},
+		{name: "gastown.local address without the local address configured", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: localAddr}}},
+		{name: "empty legacy email never matches an empty author email", rework: reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail, seatLocalEmail: localAddr}, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: ""}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -742,7 +755,7 @@ func TestReworkPushAllows(t *testing.T) {
 
 func TestReworkPushForNilIssueIsEmpty(t *testing.T) {
 	t.Parallel()
-	if got := reworkPushFor(nil, reworkTestSeat, reworkTestEmail); got != (reworkPush{}) {
+	if got := reworkPushFor(nil, reworkTestSeat, reworkTestEmail, "", ""); got != (reworkPush{}) {
 		t.Errorf("reworkPushFor(nil) = %+v, want the zero value", got)
 	}
 }
@@ -750,7 +763,7 @@ func TestReworkPushForNilIssueIsEmpty(t *testing.T) {
 func TestReworkPushForNoSeatEmailIsEmpty(t *testing.T) {
 	t.Parallel()
 	issue := reworkBead([]string{land.LabelRework}, reworkStandDownNote("", "feature", reworkTestRejected))
-	if got := reworkPushFor(issue, reworkTestSeat, ""); got != (reworkPush{}) {
+	if got := reworkPushFor(issue, reworkTestSeat, "", reworkTestSeat+"@gastown.local", "host@test.com"); got != (reworkPush{}) {
 		t.Errorf("reworkPushFor with no seat email = %+v, want the zero value", got)
 	}
 }

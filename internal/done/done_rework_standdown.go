@@ -75,22 +75,31 @@ type reworkPush struct {
 	// rejectedHead is the head the live MERGE REJECTION note names: the commit
 	// the landing worker refused.
 	rejectedHead string
-	// seatAuthor and seatEmail are the git identity this seat's commits carry,
-	// as git.SeatIdentityFor decides it: the bare agent name and the
-	// worktree's user.email, the same pair gt commit authors with (gt-tip6u).
-	// Both must match, so a commit under the same name from another mailbox is
-	// not read as this seat's. Git author fields are self-asserted, so this
-	// rules out accidents rather than a deliberate forgery; the lease pinned
-	// to the rejected head is what limits the overwrite.
+	// seatAuthor is the seat's bare agent name, the name git.SeatIdentityFor
+	// derives. The name must match exactly, so a commit under another name is
+	// never read as this seat's. Git author fields are self-asserted, so the
+	// name and email checks rule out accidents rather than a deliberate
+	// forgery; the lease pinned to the rejected head is what limits the
+	// overwrite.
 	seatAuthor string
-	seatEmail  string
+	// seatEmail is the worktree's user.email, the address this seat's commits
+	// carried before the seat identity moved to its own address.
+	seatEmail string
+	// seatLocalEmail is the seat's own address, <name>@gastown.local
+	// (git.SeatLocalEmail). Empty adds nothing.
+	seatLocalEmail string
+	// legacyEmail is the host's global user.email, the address the existing
+	// branches carry (the globalEmail seam). Empty adds nothing, so an unset
+	// global email never matches an empty author email.
+	legacyEmail string
 }
 
 // reworkPushFor reads the rework context off a work bead. It is empty unless
 // the bead carries the rework label and its rejection names a head, and it is
 // empty for a seat with no author name or email, because nothing can then be
-// matched as this seat's own.
-func reworkPushFor(issue *beads.Issue, seatAuthor, seatEmail string) reworkPush {
+// matched as this seat's own. seatLocalEmail and legacyEmail widen the
+// accepted addresses only; the name is always matched exactly.
+func reworkPushFor(issue *beads.Issue, seatAuthor, seatEmail, seatLocalEmail, legacyEmail string) reworkPush {
 	seatAuthor, seatEmail = strings.TrimSpace(seatAuthor), strings.TrimSpace(seatEmail)
 	if issue == nil || seatAuthor == "" || seatEmail == "" || !beads.HasLabel(issue, land.LabelRework) {
 		return reworkPush{}
@@ -99,15 +108,35 @@ func reworkPushFor(issue *beads.Issue, seatAuthor, seatEmail string) reworkPush 
 	if !ok {
 		return reworkPush{}
 	}
-	return reworkPush{rejectedHead: head, seatAuthor: seatAuthor, seatEmail: seatEmail}
+	return reworkPush{
+		rejectedHead:   head,
+		seatAuthor:     seatAuthor,
+		seatEmail:      seatEmail,
+		seatLocalEmail: strings.TrimSpace(seatLocalEmail),
+		legacyEmail:    strings.TrimSpace(legacyEmail),
+	}
+}
+
+// ownEmail reports whether a commit's author email is one this seat may carry:
+// its worktree email, its own gastown.local address, or the legacy global
+// email. An empty commit email never matches, so an unset legacy address
+// cannot match an author with no email.
+func (r reworkPush) ownEmail(email string) bool {
+	if email == "" {
+		return false
+	}
+	return email == r.seatEmail ||
+		(r.seatLocalEmail != "" && email == r.seatLocalEmail) ||
+		(r.legacyEmail != "" && email == r.legacyEmail)
 }
 
 // allows reports whether origin's tip may be overwritten under the lease: the
 // tip is the rejected head, and every commit in origin's range is this seat's
-// by both name and email. origin must list the full range, merged-in commits
-// included; a first-parent listing would miss another author's commit on a
-// merge's second parent. Origin's range must hold at least one commit, so an
-// empty range is never read as "all of it is this seat's".
+// by name and by one of its addresses (see ownEmail). origin must list the
+// full range, merged-in commits included; a first-parent listing would miss
+// another author's commit on a merge's second parent. Origin's range must hold
+// at least one commit, so an empty range is never read as "all of it is this
+// seat's".
 func (r reworkPush) allows(originSHA string, origin []git.CommitSummary) bool {
 	if r.rejectedHead == "" || r.seatAuthor == "" || r.seatEmail == "" || !land.HeadsEqual(originSHA, r.rejectedHead) {
 		return false
@@ -116,7 +145,7 @@ func (r reworkPush) allows(originSHA string, origin []git.CommitSummary) bool {
 		return false
 	}
 	for _, c := range origin {
-		if c.Author != r.seatAuthor || c.Email != r.seatEmail {
+		if c.Author != r.seatAuthor || !r.ownEmail(c.Email) {
 			return false
 		}
 	}
