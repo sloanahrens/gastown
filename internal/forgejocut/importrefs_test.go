@@ -33,7 +33,7 @@ type importGitFake struct {
 	ancestor map[string]bool     // "a>b" -> a is b or an ancestor of b
 	ahead    map[string]string   // "a>b" -> the commits b has that a lacks
 	calls    [][]string
-	pushErr  error
+	fail     map[string]error // subcommand -> the error its call answers with
 }
 
 func newImportGitFake(listings map[string][]string) *importGitFake {
@@ -52,6 +52,9 @@ func (f *importGitFake) run(argv []string) ([]byte, error) {
 		}
 		sub, rest = argv[3], argv[4:]
 	}
+	if err := f.fail[sub]; err != nil {
+		return nil, err
+	}
 	switch sub {
 	case "ls-remote":
 		url := rest[len(rest)-1]
@@ -62,10 +65,8 @@ func (f *importGitFake) run(argv []string) ([]byte, error) {
 		answer := answers[min(f.listed[url], len(answers)-1)]
 		f.listed[url]++
 		return []byte(answer), nil
-	case "init", "fetch":
+	case "init", "fetch", "push":
 		return nil, nil
-	case "push":
-		return nil, f.pushErr
 	case "merge-base":
 		if f.ancestor[rest[1]+">"+rest[2]] {
 			return nil, nil
@@ -441,6 +442,48 @@ func TestImportFinalComparison(t *testing.T) {
 						t.Fatalf("the failed import claimed success: %q", line)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestImportFailedGitCallStops pins that a git call the import depends on refuses
+// the run instead of reading as an empty plan. Dropping a wrap turns the case red.
+func TestImportFailedGitCallStops(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		fail  string
+		want  string
+		reads int // listings the run makes before it stops
+	}{
+		{name: "the GitHub listing fails", fail: "ls-remote", want: "could not list the refs at", reads: 1},
+		{name: "the scratch repository cannot be made", fail: "init", want: "could not make the scratch repository", reads: 2},
+		{name: "a fetch fails", fail: "fetch", want: "could not fetch", reads: 2},
+		{name: "the push fails", fail: "push", want: "the push of 2 ref(s) to the admin base failed", reads: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := importOpts()
+			git := newImportGitFake(convergedListings(opts))
+			git.ancestor = map[string]bool{shaMiddle + ">" + shaTip: true}
+			git.ahead = map[string]string{shaMiddle + ">" + shaTip: "2"}
+			git.fail = map[string]error{tt.fail: errExit}
+			c, logs := newImportCutover(t, git, opts)
+
+			err := c.ImportRefs()
+			if err == nil {
+				t.Fatalf("a failed %s call did not stop the import; logs %q", tt.fail, *logs)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error %q does not carry %q", err, tt.want)
+			}
+			if fail := tt.fail; fail != "push" && git.count("push") != 0 {
+				t.Fatalf("the run pushed after the %s call failed", fail)
+			}
+			if got := git.count("ls-remote"); got != tt.reads {
+				t.Fatalf("the run read %d listings, want %d before it stopped", got, tt.reads)
 			}
 		})
 	}

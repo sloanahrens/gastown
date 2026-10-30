@@ -11,8 +11,7 @@ import (
 )
 
 // Cutover is one cutover run: the options it was parsed with, the git it reads and
-// writes through, and where it logs. The steps after the import add their own
-// seams to it.
+// writes through, and where it logs.
 type Cutover struct {
 	Opts *Options
 	// Git runs one git argv and returns its stdout; nil runs the git binary, each
