@@ -87,7 +87,7 @@ type QuestionReport struct {
 	FlaggedAtBest int `json:"flagged_at_best,omitempty"`
 	// Calibration is set for noul and choice questions only.
 	Calibration []Bin `json:"calibration,omitempty"`
-	// ECE, Brier and CalibrationMonotone summarise the calibration table for
+	// ECE, Brier and CalibrationMonotone summarize the calibration table for
 	// noul and choice questions: the labeled-weighted gap between value and
 	// label rate, the mean squared gap between value and label, and whether
 	// the label rate never falls across readable bands. They are absent for a
