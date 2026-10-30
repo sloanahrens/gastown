@@ -23,8 +23,12 @@ func TestKeepPreviousCopiesAtomically(t *testing.T) {
 	logs := &logRecorder{}
 	cfg := Config{Files: files, Logf: logs.logf}
 
-	if err := keepPrevious(cfg, installedOM); err != nil {
+	kept, err := keepPrevious(cfg, installedOM)
+	if err != nil {
 		t.Fatalf("keepPrevious = %v, want nil", err)
+	}
+	if !kept {
+		t.Error("keepPrevious kept = false, want true: this run kept the om it replaces")
 	}
 	if got := string(files.files[keptPrev]); got != installed {
 		t.Errorf("om.prev = %q, want the installed om's bytes", got)
@@ -87,9 +91,12 @@ func TestKeepPreviousFailedCopyLeavesNoPartialOM(t *testing.T) {
 			tc.setup(files)
 			cfg := Config{Files: files}
 
-			err := keepPrevious(cfg, installedOM)
+			kept, err := keepPrevious(cfg, installedOM)
 			if !errors.Is(err, errKeepPrevious) {
 				t.Fatalf("keepPrevious = %v, want errKeepPrevious", err)
+			}
+			if kept {
+				t.Error("keepPrevious kept = true after a failed copy, want false")
 			}
 			if _, ok := files.files[keptPrev]; ok {
 				t.Errorf("om.prev = %q after a failed copy, want none", files.files[keptPrev])
@@ -109,7 +116,7 @@ func TestKeepPreviousFailedCopyKeepsTheEarlierPrev(t *testing.T) {
 	files.writeErr = errBoom
 	files.partial = []byte("instal")
 
-	if err := keepPrevious(Config{Files: files}, installedOM); !errors.Is(err, errKeepPrevious) {
+	if _, err := keepPrevious(Config{Files: files}, installedOM); !errors.Is(err, errKeepPrevious) {
 		t.Fatalf("keepPrevious = %v, want errKeepPrevious", err)
 	}
 	if got := string(files.files[keptPrev]); got != oldPrev {
@@ -124,8 +131,12 @@ func TestKeepPreviousFirstInstallKeepsNothing(t *testing.T) {
 	logs := &logRecorder{}
 	cfg := Config{Files: files, Logf: logs.logf}
 
-	if err := keepPrevious(cfg, installedOM); err != nil {
+	kept, err := keepPrevious(cfg, installedOM)
+	if err != nil {
 		t.Fatalf("keepPrevious = %v, want nil on a first install", err)
+	}
+	if kept {
+		t.Error("keepPrevious kept = true on a first install, want false")
 	}
 	if len(files.writes) != 0 || len(files.renames) != 0 {
 		t.Errorf("wrote %q and renamed %q on a first install, want nothing", files.writes, files.renames)
