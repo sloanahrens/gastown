@@ -251,9 +251,8 @@ the run it ceded to named. Package-scoped suites (`go test ./internal/x/...`, a
 `-run`-filtered run, `make presubmit`) are unaffected. The landing gate is never capped,
 never counted against the cap and never waits on it: a gate is not full-suite class, so
 it takes its own slot — a gate-reserved one where the pool reserves any, any free one
-otherwise — and a gate started while a whole-tree run holds a slot proceeds at once. The daemon's tier sweep already
-takes the token as `<rig>/tier-sweep`; run the flake sweep as
-`gt slot run --role <rig>/flake-sweep -- bash scripts/flake-sweep.sh [ITER] [CONC]`.
+otherwise — and a gate started while a whole-tree run holds a slot proceeds at once.
+The daemon's tier sweep already takes the token as `<rig>/tier-sweep`.
 
 **A post-landing suite yields to an install in flight (gt-t135z).** The post-landing
 suite — `<rig>/post-land`, the red-main detector a landing runs once merged — is the one

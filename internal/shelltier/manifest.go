@@ -81,7 +81,6 @@ func Manifest() []Entry {
 		{Path: "scripts/polecat-go-floor_test.sh", StubsGo: "stub: scripts/polecat-go-floor_test.sh:66 defines fake GO_BIN binaries"},
 		{Path: "scripts/install-local_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/deep-review_test.sh", StubsGo: "none: go test appears only in fixture text"},
-		{Path: "scripts/flake-sweep_test.sh", StubsGo: "stub: scripts/flake-sweep_test.sh:25 puts a fake go on PATH"},
 		{Path: "scripts/gate-vs-load_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/forgejo-provision_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/forgejo-probe_test.sh", StubsGo: "none: names no go command"},
