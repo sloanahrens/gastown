@@ -98,11 +98,14 @@ type Client struct {
 
 	// shadowPercent, shadowAllows and shadowSet configure the shadow scrub check
 	// (WithShadowScrub). shadows tracks the background calls it starts, so a
-	// test can wait for them.
+	// test can wait for them. shadowMu guards capped, the count of capped checks
+	// in the current window.
 	shadowPercent int
 	shadowAllows  func() (bool, error)
 	shadowSet     bool
 	shadows       sync.WaitGroup
+	shadowMu      sync.Mutex
+	capped        cappedWindow
 }
 
 // Option configures a Client.
@@ -169,7 +172,7 @@ func NewClient(opts ...Option) (*Client, error) {
 	if c.keyPaths != nil {
 		key, err = readKeyFrom(c.keyPaths)
 	} else {
-		key, err = ReadKey()
+		key, err = readKey()
 	}
 	if err != nil {
 		return nil, err

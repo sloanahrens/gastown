@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -13,32 +14,55 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/scrub"
 )
 
-// ShadowScrubPercent is the share of requests the shadow scrub check samples:
-// the 2 percent the re-ask helper samples (battery.ReaskPercent). This package
-// cannot import battery, which imports it, so the value is repeated here.
-const ShadowScrubPercent = 2
-
 // shadowCaller suffixes the caller name a shadow call is billed under.
 const shadowCaller = "-scrubcheck"
 
 // scrubCheckFile is the check log's name in the usage ledger's directory.
 const scrubCheckFile = "scrubcheck.jsonl"
 
+// SamplePercent is the share of requests the batteries' sampled measurements
+// take: the shadow scrub check here, and the re-ask helper, whose
+// battery.ReaskPercent is this value. The constant lives here because battery
+// imports this package, not the other way round.
+const SamplePercent = 2
+
+// The outcomes a request's line in the check log can record. A client built
+// with WithShadowScrub writes exactly one line per request, so every sampled
+// state is counted once: sampled = checked + failed + capped.
+const (
+	// outcomeUnsampled is a state the sample did not choose.
+	outcomeUnsampled = "unsampled"
+	// outcomeChecked is a sampled state whose two answer sets are logged. It
+	// carries unchanged: true when the scrub replaced nothing, so no second
+	// call ran.
+	outcomeChecked = "checked"
+	// outcomeFailed is a sampled state whose scrub or second call errored. The
+	// line carries error_class, never the error's text.
+	outcomeFailed = "failed"
+	// outcomeCapped is a sampled state whose second call the spent daily cap
+	// refused.
+	outcomeCapped = "capped"
+)
+
 // WithShadowScrub makes the client measure what scrubbing costs in signal. For
 // the percent of requests whose state hashes into the sample, a call that
 // succeeds is followed by a second call with the scrubbed state and the same
-// questions, and one line of both answer sets is appended to scrubcheck.jsonl
-// beside the usage ledger. The line holds answers and rule counts, never state
-// text. A scrub that changes nothing sends no second call and logs unchanged.
+// questions, and the request's line in scrubcheck.jsonl holds both answer sets.
+// Every other request writes its line too, with an outcome that says why no
+// second call ran. The lines hold answers and rule counts, never state text. A
+// scrub that changes nothing sends no second call and logs unchanged.
 //
 // percent must divide 100 evenly. allows is the battery's daily cap check: a
-// second call is made only when it reports true, and an error or false writes
-// no line. WithLedger is required, since the check log sits beside the ledger.
-// The second call runs in the background, so the original call never waits
-// for it; it is billed to the ledger under the caller name plus "-scrubcheck".
+// second call is made only when it reports true. WithLedger is required, since
+// the check log sits beside the ledger. The second call runs in the background,
+// so the original call never waits for it; it is billed to the ledger under the
+// caller name plus "-scrubcheck".
 func WithShadowScrub(percent int, allows func() (bool, error)) Option {
 	return func(c *Client) { c.shadowPercent, c.shadowAllows, c.shadowSet = percent, allows, true }
 }
+
+// ShadowScrubbing reports whether the client was built with WithShadowScrub.
+func (c *Client) ShadowScrubbing() bool { return c.shadowSet }
 
 // checkShadowOptions refuses a WithShadowScrub the client cannot honor: a
 // sample that is not a whole share of 100, a missing cap check, or no ledger
@@ -87,8 +111,15 @@ type shadowScore struct {
 }
 
 // shadowAnswersOf copies an Ask's answers into the check log's shape, so the
-// background call never reads maps the caller may still hold.
+// background call never reads maps the caller may still hold. Every string is
+// scrubbed on the way: a model can echo a secret in an answer, and the log
+// holds no secret.
 func shadowAnswersOf(a *Answers) shadowAnswers {
+	s := scrub.Default()
+	text := func(v string) string {
+		out, _ := s.Scrub(v)
+		return out
+	}
 	out := shadowAnswers{}
 	for id, ca := range a.Choice {
 		if out.Choice == nil {
@@ -96,28 +127,28 @@ func shadowAnswersOf(a *Answers) shadowAnswers {
 		}
 		probs := make(map[string]float64, len(ca.Probabilities))
 		for opt, p := range ca.Probabilities {
-			probs[opt] = p
+			probs[text(opt)] = p
 		}
-		out.Choice[id] = shadowChoice{Choice: ca.Choice, Probabilities: probs, Confidence: ca.Confidence}
+		out.Choice[text(id)] = shadowChoice{Choice: text(ca.Choice), Probabilities: probs, Confidence: ca.Confidence}
 	}
 	for id, n := range a.Noul {
 		if out.Noul == nil {
 			out.Noul = make(map[string]float64, len(a.Noul))
 		}
-		out.Noul[id] = n
+		out.Noul[text(id)] = n
 	}
 	for id, sa := range a.Score {
 		if out.Score == nil {
 			out.Score = make(map[string]shadowScore, len(a.Score))
 		}
-		out.Score[id] = shadowScore{Score: sa.Score, Confidence: sa.Confidence}
+		out.Score[text(id)] = shadowScore{Score: sa.Score, Confidence: sa.Confidence}
 	}
 	return out
 }
 
 // scrubCheckRecord is one line of scrubcheck.jsonl.
 type scrubCheckRecord struct {
-	// TS is when the check was logged.
+	// TS is when the request was logged.
 	TS time.Time `json:"ts"`
 	// Caller is the original call's caller name, not the shadow's.
 	Caller string `json:"caller"`
@@ -125,41 +156,48 @@ type scrubCheckRecord struct {
 	QuestionIDs []string `json:"question_ids"`
 	// StateSHA256 is the hex SHA-256 of the state as marshaled before scrubbing.
 	StateSHA256 string `json:"state_sha256"`
-	// Original holds the answers of the call as the caller made it.
-	Original shadowAnswers `json:"original_answers"`
+	// Outcome is unsampled, checked, failed or capped.
+	Outcome string `json:"outcome"`
+	// ErrorClass names what failed, on a failed line: the class of the error,
+	// never its text.
+	ErrorClass string `json:"error_class,omitempty"`
+	// Original holds the answers of the call as the caller made it; absent on
+	// an unsampled line.
+	Original *shadowAnswers `json:"original_answers,omitempty"`
 	// Unchanged is true when the scrub replaced nothing, so no second call ran.
 	Unchanged bool `json:"unchanged,omitempty"`
-	// Scrubbed holds the answers of the second call; absent when unchanged. A
-	// line is written only once the second call has returned usable answers.
+	// Scrubbed holds the answers of the second call; present only on a checked
+	// line that made the call.
 	Scrubbed *shadowAnswers `json:"scrubbed_answers,omitempty"`
 	// Replacements counts how many times each scrubbing rule replaced text, by
 	// rule name; present only when a rule fired.
 	Replacements map[string]int `json:"replacements,omitempty"`
 }
 
-// shadowCheck runs the sampled check for one successful Ask. The state is
-// marshaled and scrubbed here, while the caller still holds it; the call and
-// the log write run in a goroutine that Client.shadows tracks.
+// shadowCheck settles the check for one successful Ask and writes the request's
+// line. The state is marshaled and hashed here, while the caller still holds
+// it. An unsampled state writes its line now. A sampled one is finished in a
+// goroutine that Client.shadows tracks, so the original call never waits.
 func (c *Client) shadowCheck(ctx context.Context, state any, qs map[string]Question, wire map[string]question, orig *Answers) {
 	if !c.shadowSet {
 		return
 	}
+	rec := scrubCheckRecord{TS: time.Now().UTC(), Caller: c.caller, QuestionIDs: questionIDs(qs)}
 	raw, err := json.Marshal(state)
 	if err != nil {
+		c.failShadow(rec, "encode")
 		return
 	}
 	sum := sha256.Sum256(raw)
+	rec.StateSHA256 = hex.EncodeToString(sum[:])
 	if !shadowSelected(sum, c.shadowPercent) {
+		rec.Outcome = outcomeUnsampled
+		c.appendScrubCheck(rec)
 		return
 	}
 	scrubbed, report := scrub.Default().ScrubJSON(raw)
-	rec := scrubCheckRecord{
-		TS:          time.Now().UTC(),
-		Caller:      c.caller,
-		QuestionIDs: questionIDs(qs),
-		StateSHA256: hex.EncodeToString(sum[:]),
-		Original:    shadowAnswersOf(orig),
-	}
+	original := shadowAnswersOf(orig)
+	rec.Original = &original
 	if report.Total() == 0 {
 		rec.Unchanged = true
 	} else {
@@ -172,34 +210,103 @@ func (c *Client) shadowCheck(ctx context.Context, state any, qs map[string]Quest
 	}()
 }
 
-// finishShadow sends the scrubbed state when the scrub changed something, and
-// appends the check line. A failed or capped call writes no line, and never
-// touches the original call's answers or its ledger line.
+// finishShadow settles one sampled check and writes its line. A scrub that
+// changed nothing logs unchanged and sends no second call. Otherwise the second
+// call runs when the cap allows it: a spent cap logs capped, and a cap check, a
+// call or its answers that fail log failed with the error's class. None of
+// these touch the original call's answers or its ledger line.
 func (c *Client) finishShadow(ctx context.Context, rec scrubCheckRecord, scrubbed []byte, wire map[string]question, qs map[string]Question) {
-	if !rec.Unchanged {
-		if ok, err := c.shadowAllows(); err != nil || !ok {
-			return
-		}
-		body, err := json.Marshal(request{State: json.RawMessage(scrubbed), Model: Model, Questions: wire})
-		if err != nil {
-			return
-		}
-		data, _, err := c.post(ctx, body)
-		if err != nil {
-			return
-		}
-		out, err := parseAnswers(data, qs)
-		if out == nil {
-			return
-		}
-		(&ledger{path: c.ledgerPath, caller: c.caller + shadowCaller, warnings: c.warnings}).record(out.Usage)
-		if err != nil {
-			return
-		}
-		answers := shadowAnswersOf(out)
-		rec.Scrubbed = &answers
+	if rec.Unchanged {
+		rec.Outcome = outcomeChecked
+		c.appendScrubCheck(rec)
+		return
 	}
+	allowed, err := c.shadowAllows()
+	if err != nil {
+		c.failShadow(rec, "cap")
+		return
+	}
+	if !allowed {
+		rec.Outcome = outcomeCapped
+		c.noteCapped(time.Now())
+		c.appendScrubCheck(rec)
+		return
+	}
+	body, err := json.Marshal(request{State: json.RawMessage(scrubbed), Model: Model, Questions: wire})
+	if err != nil {
+		c.failShadow(rec, "encode")
+		return
+	}
+	data, _, err := c.post(ctx, body)
+	if err != nil {
+		c.failShadow(rec, shadowErrorClass(err))
+		return
+	}
+	out, err := parseAnswers(data, qs)
+	if out == nil {
+		c.failShadow(rec, shadowErrorClass(err))
+		return
+	}
+	(&ledger{path: c.ledgerPath, caller: c.caller + shadowCaller, warnings: c.warnings}).record(out.Usage)
+	if err != nil {
+		c.failShadow(rec, shadowErrorClass(err))
+		return
+	}
+	scrubbedAnswers := shadowAnswersOf(out)
+	rec.Scrubbed = &scrubbedAnswers
+	rec.Outcome = outcomeChecked
 	c.appendScrubCheck(rec)
+}
+
+// failShadow writes a failed line that names the class of what went wrong.
+func (c *Client) failShadow(rec scrubCheckRecord, class string) {
+	rec.Outcome, rec.ErrorClass = outcomeFailed, class
+	c.appendScrubCheck(rec)
+}
+
+// shadowErrorClass names the class of an error for a failed line. A class is
+// all the line keeps of an error, since its text can carry a server message.
+func shadowErrorClass(err error) string {
+	var rateLimited *RateLimitError
+	var status *StatusError
+	switch {
+	case err == nil:
+		return "unknown"
+	case errors.Is(err, ErrTimeout), errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.As(err, &rateLimited):
+		return "rate_limit"
+	case errors.Is(err, ErrUnauthorized):
+		return "unauthorized"
+	case errors.As(err, &status):
+		return "status"
+	case errors.Is(err, ErrBadResponse):
+		return "bad_response"
+	default:
+		return "transport"
+	}
+}
+
+// cappedWindow counts the capped checks of one window, a UTC day.
+type cappedWindow struct {
+	day   string
+	count int
+}
+
+// noteCapped counts a capped check in its window. The first capped check of a
+// later day says how many the day before had: once per window, in the
+// warnings, since the cap is what made them capped.
+func (c *Client) noteCapped(now time.Time) {
+	c.shadowMu.Lock()
+	defer c.shadowMu.Unlock()
+	day := now.UTC().Format(time.DateOnly)
+	if day != c.capped.day {
+		if c.capped.count > 0 && c.warnings != nil {
+			fmt.Fprintf(c.warnings, "jev: scrub check capped %d times on %s: the daily cap was spent\n", c.capped.count, c.capped.day)
+		}
+		c.capped = cappedWindow{day: day}
+	}
+	c.capped.count++
 }
 
 // appendScrubCheck appends rec to the check log beside the usage ledger. The

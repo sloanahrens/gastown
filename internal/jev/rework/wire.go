@@ -55,7 +55,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	client, err := jev.NewClient(jev.BatteryOptions(townRoot, Caller, warnings, jev.BatteryScrub{
 		Scrub:      s.Scrub,
 		ScrubCheck: s.ScrubCheck,
-		Allows:     func() (bool, error) { return town.Allows(time.Now) },
+		Allows:     town.AllowsNow,
 	})...)
 	if err != nil {
 		return nil, fmt.Errorf("opening the Jev client: %w", err)
@@ -67,7 +67,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		Rigs:       &townRigs{townRoot: townRoot},
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
-		Allows:     func() (bool, error) { return town.Allows(time.Now) },
+		Allows:     town.AllowsNow,
 		Warnf:      warnTo(warnings),
 	}, nil
 }

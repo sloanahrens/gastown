@@ -39,7 +39,7 @@ func BatteryOptions(townRoot, caller string, warnings io.Writer, s BatteryScrub)
 		opts = append(opts, WithScrub(scrub.Default()))
 	}
 	if s.ScrubCheck {
-		opts = append(opts, WithShadowScrub(ShadowScrubPercent, s.Allows))
+		opts = append(opts, WithShadowScrub(SamplePercent, s.Allows))
 	}
 	return opts
 }

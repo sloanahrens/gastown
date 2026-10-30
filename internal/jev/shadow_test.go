@@ -1,8 +1,10 @@
 package jev
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,12 +14,33 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/jev/scrub"
 )
+
+// shadowWaitGuard bounds waitShadows. A shadow call still running after it is a
+// bug, and the test fails with a message rather than hanging.
+const shadowWaitGuard = 10 * time.Second
+
+// waitShadows waits for the background shadow calls the client started.
+func waitShadows(t *testing.T, c *Client) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		c.shadows.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	//testpolicy:allow no-sleep — the guard only bounds a shadow call that never returns; no test sleeps on it.
+	case <-time.After(shadowWaitGuard):
+		t.Fatalf("a shadow call did not finish within %v", shadowWaitGuard)
+	}
+}
 
 // scriptedReply is one answer the scripted transport gives: a status and body,
 // or a transport error.
@@ -51,13 +74,7 @@ func (s *scriptedRT) RoundTrip(r *http.Request) (*http.Response, error) {
 	if rep.status == 0 {
 		rep.status = http.StatusOK
 	}
-	resp := &http.Response{
-		StatusCode: rep.status,
-		Header:     http.Header{},
-		Body:       io.NopCloser(strings.NewReader(rep.body)),
-		Request:    r,
-	}
-	return resp, nil
+	return httpReply(r, rep.status, rep.body), nil
 }
 
 // count returns how many requests the transport has seen.
@@ -72,6 +89,35 @@ func (s *scriptedRT) body(n int) []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.bodies[n]
+}
+
+// alwaysAnswers answers every request with the same usable choice.
+type alwaysAnswers struct{}
+
+func (alwaysAnswers) RoundTrip(r *http.Request) (*http.Response, error) {
+	return httpReply(r, http.StatusOK, replyChoice("returns", 1)), nil
+}
+
+// failSecondCall answers the original call and fails the shadow call, whose
+// state has had the token scrubbed out of it.
+type failSecondCall struct{}
+
+func (failSecondCall) RoundTrip(r *http.Request) (*http.Response, error) {
+	raw, _ := io.ReadAll(r.Body)
+	if !strings.Contains(string(raw), testVendorKey) {
+		return nil, fmt.Errorf("connection reset")
+	}
+	return httpReply(r, http.StatusOK, replyChoice("returns", 1)), nil
+}
+
+// httpReply builds the response a fake transport returns for r.
+func httpReply(r *http.Request, status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    r,
+	}
 }
 
 // replyChoice answers the one question q with choice, probabilities 1 and 0.
@@ -102,6 +148,11 @@ func shadowFixture(t *testing.T, rt http.RoundTripper, percent int, allows func(
 	return c, dir
 }
 
+// leakyState is a state that carries the token, with i making each one differ.
+func leakyState(i int) map[string]string {
+	return map[string]string{"log": fmt.Sprintf("git push with %s from %s/src/%d", testVendorKey, testHomeDir, i)}
+}
+
 func allowCap() (bool, error) { return true, nil }
 
 // TestShadowScrubSamplesDeterministically: over fixture states the sampled share
@@ -114,8 +165,8 @@ func TestShadowScrubSamplesDeterministically(t *testing.T) {
 		raw, err := json.Marshal(map[string]string{"log": fmt.Sprintf("build %d went red", i)})
 		require.NoError(t, err)
 		sum := sha256.Sum256(raw)
-		first := shadowSelected(sum, ShadowScrubPercent)
-		assert.Equal(t, first, shadowSelected(sum, ShadowScrubPercent), "state %d is sampled the same way twice", i)
+		first := shadowSelected(sum, SamplePercent)
+		assert.Equal(t, first, shadowSelected(sum, SamplePercent), "state %d is sampled the same way twice", i)
 		if first {
 			selected++
 		}
@@ -142,7 +193,7 @@ func TestShadowScrubLogsBothAnswers(t *testing.T) {
 
 		got, err := c.Choice(context.Background(), scrubState(), "Which team?", shoeCriteria)
 		require.NoError(t, err)
-		c.shadows.Wait()
+		waitShadows(t, c)
 
 		require.Equal(t, 2, rt.count(), "one call for the original, one shadow call")
 		assert.Equal(t, "returns", got.Choice, "the original answer is returned as before")
@@ -161,6 +212,7 @@ func TestShadowScrubLogsBothAnswers(t *testing.T) {
 		lines := checkLines(t, filepath.Join(dir, scrubCheckFile))
 		require.Len(t, lines, 1)
 		line := lines[0]
+		assert.Equal(t, outcomeChecked, line["outcome"])
 		assert.Equal(t, "testcaller", line["caller"])
 		assert.Equal(t, []any{"q"}, line["question_ids"])
 		assert.Len(t, line["state_sha256"], 64)
@@ -198,20 +250,87 @@ func TestShadowScrubLogsBothAnswers(t *testing.T) {
 
 		_, err := c.Choice(context.Background(), map[string]string{"title": "the gate stays red"}, "Which team?", shoeCriteria)
 		require.NoError(t, err)
-		c.shadows.Wait()
+		waitShadows(t, c)
 
 		assert.Equal(t, 1, rt.count(), "an unchanged state sends no second call")
 		lines := checkLines(t, filepath.Join(dir, scrubCheckFile))
 		require.Len(t, lines, 1)
+		assert.Equal(t, outcomeChecked, lines[0]["outcome"])
 		assert.Equal(t, true, lines[0]["unchanged"])
 		assert.NotContains(t, lines[0], "scrubbed_answers")
 		assert.NotContains(t, lines[0], "replacements")
 	})
 }
 
+// TestShadowScrubEachRequestLogsOneOutcome: every request writes exactly one
+// line, a state the sample did not choose is unsampled, and the sampled ones
+// add up: sampled = checked + failed + capped. Each outcome has its own value,
+// so a failed check and a capped one never look like an unsampled state.
+func TestShadowScrubEachRequestLogsOneOutcome(t *testing.T) {
+	t.Parallel()
+	const states, percent = 300, 10
+	closed := func() (bool, error) { return false, nil }
+	tests := []struct {
+		name   string
+		rt     http.RoundTripper
+		allows func() (bool, error)
+		want   string
+	}{
+		{name: "every second call answers", rt: alwaysAnswers{}, allows: allowCap, want: outcomeChecked},
+		{name: "a spent cap sends no second call", rt: alwaysAnswers{}, allows: closed, want: outcomeCapped},
+		{name: "a second call that fails", rt: failSecondCall{}, allows: allowCap, want: outcomeFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, dir := shadowFixture(t, tt.rt, percent, tt.allows)
+			for i := range states {
+				_, err := c.Choice(context.Background(), leakyState(i), "Which team?", shoeCriteria)
+				require.NoError(t, err, "the original call succeeds whatever the shadow does")
+			}
+			waitShadows(t, c)
+
+			lines := checkLines(t, filepath.Join(dir, scrubCheckFile))
+			require.Len(t, lines, states, "one line per request")
+			outcomes := map[string]string{}
+			for _, line := range lines {
+				sha, _ := line["state_sha256"].(string)
+				outcome, _ := line["outcome"].(string)
+				_, dup := outcomes[sha]
+				require.False(t, dup, "a state has one line, not two")
+				outcomes[sha] = outcome
+			}
+
+			sampled := 0
+			for i := range states {
+				raw, err := json.Marshal(leakyState(i))
+				require.NoError(t, err)
+				sum := sha256.Sum256(raw)
+				outcome := outcomes[hex.EncodeToString(sum[:])]
+				if shadowSelected(sum, percent) {
+					sampled++
+					assert.Equal(t, tt.want, outcome, "state %d", i)
+				} else {
+					assert.Equal(t, outcomeUnsampled, outcome, "state %d", i)
+				}
+			}
+			require.Positive(t, sampled, "the fixture samples some states")
+
+			counts := map[string]int{}
+			for _, outcome := range outcomes {
+				counts[outcome]++
+			}
+			assert.Equal(t, sampled, counts[outcomeChecked]+counts[outcomeFailed]+counts[outcomeCapped],
+				"sampled = checked + failed + capped")
+			assert.Equal(t, states-sampled, counts[outcomeUnsampled])
+		})
+	}
+}
+
 // TestShadowScrubFailureIsHarmless: a failing shadow call, or a cap that is
-// closed, leaves the original answers and ledger line as they were and writes
-// no check line.
+// closed, leaves the original answers and ledger line as they were. The sampled
+// request writes one line that says what happened, with the class of the error
+// and never its text.
 func TestShadowScrubFailureIsHarmless(t *testing.T) {
 	t.Parallel()
 	closed := func() (bool, error) { return false, nil }
@@ -221,12 +340,15 @@ func TestShadowScrubFailureIsHarmless(t *testing.T) {
 		replies []scriptedReply
 		allows  func() (bool, error)
 		calls   int
+		outcome string
+		class   string
+		leak    string
 	}{
-		{name: "server error", replies: []scriptedReply{{body: replyChoice("returns", 328)}, {status: http.StatusInternalServerError, body: "boom"}}, allows: allowCap, calls: 2},
-		{name: "transport error", replies: []scriptedReply{{body: replyChoice("returns", 328)}, {err: fmt.Errorf("connection reset")}}, allows: allowCap, calls: 2},
-		{name: "timeout", replies: []scriptedReply{{body: replyChoice("returns", 328)}, {err: context.DeadlineExceeded}}, allows: allowCap, calls: 2},
-		{name: "cap closed", replies: []scriptedReply{{body: replyChoice("returns", 328)}}, allows: closed, calls: 1},
-		{name: "cap unreadable", replies: []scriptedReply{{body: replyChoice("returns", 328)}}, allows: failed, calls: 1},
+		{name: "server error", replies: []scriptedReply{{body: replyChoice("returns", 328)}, {status: http.StatusInternalServerError, body: "boom"}}, allows: allowCap, calls: 2, outcome: outcomeFailed, class: "status", leak: "boom"},
+		{name: "transport error", replies: []scriptedReply{{body: replyChoice("returns", 328)}, {err: fmt.Errorf("connection reset")}}, allows: allowCap, calls: 2, outcome: outcomeFailed, class: "transport", leak: "connection reset"},
+		{name: "timeout", replies: []scriptedReply{{body: replyChoice("returns", 328)}, {err: context.DeadlineExceeded}}, allows: allowCap, calls: 2, outcome: outcomeFailed, class: "timeout"},
+		{name: "cap closed", replies: []scriptedReply{{body: replyChoice("returns", 328)}}, allows: closed, calls: 1, outcome: outcomeCapped},
+		{name: "cap unreadable", replies: []scriptedReply{{body: replyChoice("returns", 328)}}, allows: failed, calls: 1, outcome: outcomeFailed, class: "cap", leak: "the ledger is unreadable"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -236,16 +358,86 @@ func TestShadowScrubFailureIsHarmless(t *testing.T) {
 
 			got, err := c.Choice(context.Background(), scrubState(), "Which team?", shoeCriteria)
 			require.NoError(t, err, "the original call succeeds whatever the shadow does")
-			c.shadows.Wait()
+			waitShadows(t, c)
 
 			assert.Equal(t, "returns", got.Choice)
 			assert.Equal(t, tt.calls, rt.count())
-			assert.NoFileExists(t, filepath.Join(dir, scrubCheckFile), "a failed or capped check writes no line")
+
+			lines := checkLines(t, filepath.Join(dir, scrubCheckFile))
+			require.Len(t, lines, 1, "the sampled request writes its one line")
+			assert.Equal(t, tt.outcome, lines[0]["outcome"])
+			if tt.class != "" {
+				assert.Equal(t, tt.class, lines[0]["error_class"])
+			} else {
+				assert.NotContains(t, lines[0], "error_class")
+			}
+			assert.NotContains(t, lines[0], "scrubbed_answers")
+			if tt.leak != "" {
+				text, err := os.ReadFile(filepath.Join(dir, scrubCheckFile))
+				require.NoError(t, err)
+				assert.NotContains(t, string(text), tt.leak, "the line carries the error's class, not its text")
+			}
+
 			ledger := ledgerLines(t, filepath.Join(dir, "usage.jsonl"))
 			require.Len(t, ledger, 1, "only the original call is billed")
 			assert.Equal(t, "testcaller", ledger[0].Caller)
 		})
 	}
+}
+
+// TestShadowScrubLogsNoSecretInAnswers: a model that echoes a secret back in an
+// answer does not put it in the check log, and the caller still gets the answer
+// the model gave.
+func TestShadowScrubLogsNoSecretInAnswers(t *testing.T) {
+	t.Parallel()
+	criteria := map[string]string{
+		"billing":     "Charges, invoices, payment problems",
+		testVendorKey: "An option the model echoes a token into",
+	}
+	b, err := json.Marshal(map[string]any{
+		"model": Model,
+		"answers": map[string]any{"q": map[string]any{
+			"type": "choice", "choice": testVendorKey, "confidence": 1.0,
+			"probabilities": map[string]float64{"billing": 0, testVendorKey: 1},
+		}},
+		"usage": map[string]int{"input_tokens": 100, "output_tokens": 10},
+	})
+	require.NoError(t, err)
+	rt := &scriptedRT{replies: []scriptedReply{{body: string(b)}, {body: string(b)}}}
+	c, dir := shadowFixture(t, rt, 100, allowCap)
+
+	got, err := c.Choice(context.Background(), scrubState(), "Which team?", criteria)
+	require.NoError(t, err)
+	waitShadows(t, c)
+	assert.Equal(t, testVendorKey, got.Choice, "the caller gets the answer the model gave")
+
+	text, err := os.ReadFile(filepath.Join(dir, scrubCheckFile))
+	require.NoError(t, err)
+	assert.NotContains(t, string(text), testVendorKey, "no answer in the log holds the raw secret")
+	lines := checkLines(t, filepath.Join(dir, scrubCheckFile))
+	require.Len(t, lines, 1)
+	assert.Equal(t, outcomeChecked, lines[0]["outcome"])
+}
+
+// TestShadowScrubCapSaysOncePerWindow: the cap's refusals of one UTC day are
+// said once, with their count, when the next day's first refusal arrives.
+func TestShadowScrubCapSaysOncePerWindow(t *testing.T) {
+	t.Parallel()
+	var warnings bytes.Buffer
+	c := &Client{warnings: &warnings}
+	day := time.Date(2026, time.October, 30, 9, 0, 0, 0, time.UTC)
+	for range 3 {
+		c.noteCapped(day)
+	}
+	c.noteCapped(day.Add(time.Hour))
+	assert.Empty(t, warnings.String(), "a day that is still going says nothing yet")
+
+	c.noteCapped(day.Add(24 * time.Hour))
+	want := "jev: scrub check capped 4 times on 2026-10-30: the daily cap was spent\n"
+	assert.Equal(t, want, warnings.String())
+
+	c.noteCapped(day.Add(24*time.Hour + time.Minute))
+	assert.Equal(t, want, warnings.String(), "the day is said once")
 }
 
 // TestNewClientRefusesAShadowCheckItCannotHonor: a check that would sample a

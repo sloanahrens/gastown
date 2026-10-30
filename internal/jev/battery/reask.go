@@ -6,13 +6,16 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/jev"
 )
 
 const (
 	// ReaskPercent is the share of a battery's groups asked again with the
 	// identical state, so the spread of the answers measures how far Jev moves
-	// when nothing changes. The operator approved 2 percent on 2026-10-30.
-	ReaskPercent = 2
+	// when nothing changes. The operator approved 2 percent on 2026-10-30. It is
+	// jev.SamplePercent, the share the shadow scrub check samples too.
+	ReaskPercent = jev.SamplePercent
 
 	// ReaskRepeats is how many times one sampled group is asked again. The
 	// operator approved 5 on 2026-10-30.
