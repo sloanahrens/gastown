@@ -2,6 +2,7 @@ package forgejoprobe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -41,7 +42,8 @@ const (
 	Red
 	// TimedOut means the context reported nothing settled before the deadline.
 	TimedOut
-	// Unreadable means the combined status could not be read.
+	// Unreadable means the combined status could not be read, or the wait was
+	// refused before its first read.
 	Unreadable
 	// Interrupted means the wait's context was canceled before a verdict: the
 	// run was stopped by a signal.
@@ -77,6 +79,11 @@ func (v Verdict) Line(rig, contextName, sha string, timeout time.Duration) strin
 // A canceled ctx ends the wait as Interrupted, whether it was canceled during
 // a read or a sleep, and no verdict read after the cancellation is trusted.
 func Wait(ctx context.Context, st Statuses, c Clock, owner, repo, sha, contextName string, timeout, poll time.Duration) Verdict {
+	// A poll that is not positive sleeps for nothing between reads, so the wait
+	// would hit the API in a tight loop. It is refused before the first read.
+	if poll <= 0 {
+		return Verdict{Outcome: Unreadable, Err: errors.New("poll interval must be positive")}
+	}
 	deadline := c.Now().Add(timeout)
 	for {
 		if err := ctx.Err(); err != nil {

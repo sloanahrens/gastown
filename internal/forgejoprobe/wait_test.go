@@ -107,6 +107,35 @@ func status(id int64, contextName string, state forgejo.CommitState) forgejo.Com
 	return forgejo.CommitStatus{ID: id, Context: contextName, Status: state}
 }
 
+// TestWaitRefusesANonPositivePoll holds the refusal: a poll that is not positive
+// would read the API in a tight loop, so the wait ends before its first read. The
+// status settles green on the third read, so a wait that reads at all reports
+// green and fails the test.
+func TestWaitRefusesANonPositivePoll(t *testing.T) {
+	t.Parallel()
+	for _, poll := range []time.Duration{0, -time.Second} {
+		t.Run(poll.String(), func(t *testing.T) {
+			t.Parallel()
+			st := &fakeStatuses{combined: func(n int) (*forgejo.CombinedStatus, error) {
+				if n < 3 {
+					return reporting(status(1, testContext, forgejo.StatePending)), nil
+				}
+				return reporting(status(2, testContext, forgejo.StateSuccess)), nil
+			}}
+			clock := &fakeClock{now: time.Unix(1000, 0)}
+
+			v := Wait(context.Background(), st, clock, "acme", "rig", testSHA, testContext, time.Hour, poll)
+
+			if v.Outcome != Unreadable || v.Err == nil {
+				t.Errorf("verdict = %+v, want Unreadable with an error", v)
+			}
+			if st.reads != 0 {
+				t.Errorf("reads = %d, want none", st.reads)
+			}
+		})
+	}
+}
+
 func TestWaitPollsUntilItReports(t *testing.T) {
 	t.Parallel()
 	const poll = 5 * time.Second
