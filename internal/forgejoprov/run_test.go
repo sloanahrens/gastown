@@ -57,6 +57,25 @@ type runResult struct {
 	reads []string
 }
 
+// shown is the logs as a failure message may quote them: every secret value a test
+// holds is replaced by its name, so a failing assertion is safe to paste into a bead
+// even when a token reached the output.
+func (r runResult) shown() string {
+	return redactKnown(r.logs)
+}
+
+// redactKnown replaces each known secret value in text with its name in angle brackets.
+func redactKnown(text string) string {
+	for _, s := range []namedSecret{
+		{"admin token", fixtureToken},
+		{"decoy token", decoyToken},
+		{"minted token", mintedSecret},
+	} {
+		text = strings.ReplaceAll(text, s.value, "<"+s.name+">")
+	}
+	return text
+}
+
 // runProvisioning parses args with env as the environment, then runs the command through
 // Run, sending its requests through rt (the fake, or a transport that fails one route) and
 // writing its token files into files. No request leaves the process.
@@ -130,8 +149,10 @@ func (r failingRoute) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // ctxRoute serves requests through next and honors the request context the way
 // net/http's transport does: a request whose context is already done is refused
-// before it reaches next. After it has served cancelAfter requests it calls cancel,
-// which is how a test cancels the run between two requests; a nil cancel never does.
+// before it reaches next. It calls cancel while handling the cancelAfter-th request, and
+// that request is still served; the next request then finds the context done and is
+// refused. That is how a test cancels the run between two requests; a nil cancel never
+// does.
 type ctxRoute struct {
 	next        http.RoundTripper
 	cancelAfter int
@@ -221,10 +242,10 @@ func TestRunFirstThenSecondRunIsIdempotent(t *testing.T) {
 
 	first := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
 	if first.code != ExitOK {
-		t.Fatalf("first run = %d, want %d (logs: %s)", first.code, ExitOK, first.logs)
+		t.Fatalf("first run = %d, want %d (logs: %s)", first.code, ExitOK, first.shown())
 	}
 	if !strings.Contains(first.logs, "no bot-viewer user; skipping its read grant on acme/rig") {
-		t.Errorf("first run logs = %q, want the missing viewer notice", first.logs)
+		t.Errorf("first run logs = %q, want the missing viewer notice", first.shown())
 	}
 	if got := len(files.files); got != 3 {
 		t.Fatalf("first run wrote %d files, want the three role token files", got)
@@ -234,7 +255,7 @@ func TestRunFirstThenSecondRunIsIdempotent(t *testing.T) {
 	before := len(f.callLog())
 	second := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
 	if second.code != ExitOK {
-		t.Fatalf("second run = %d, want %d (logs: %s)", second.code, ExitOK, second.logs)
+		t.Fatalf("second run = %d, want %d (logs: %s)", second.code, ExitOK, second.shown())
 	}
 	if writes := nonGET(f.callLog()[before:]); len(writes) != 0 {
 		t.Errorf("second run sent writes %v, want none", writes)
@@ -246,7 +267,7 @@ func TestRunFirstThenSecondRunIsIdempotent(t *testing.T) {
 	}
 	for _, want := range []string{"bot-polecat already has write access to acme/rig", "branch protection main on acme/rig is already set"} {
 		if !strings.Contains(second.logs, want) {
-			t.Errorf("second run logs = %q, want %q", second.logs, want)
+			t.Errorf("second run logs = %q, want %q", second.shown(), want)
 		}
 	}
 }
@@ -262,13 +283,13 @@ func TestRunOverAnExistingViewerBot(t *testing.T) {
 
 	first := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
 	if first.code != ExitOK {
-		t.Fatalf("first run = %d, want %d (logs: %s)", first.code, ExitOK, first.logs)
+		t.Fatalf("first run = %d, want %d (logs: %s)", first.code, ExitOK, first.shown())
 	}
 	if got := f.permission(protectionRepo, "bot-viewer"); got != permissionRead {
 		t.Errorf("viewer permission = %q, want %q", got, permissionRead)
 	}
 	if !strings.Contains(first.logs, "granted bot-viewer read access to acme/rig") {
-		t.Errorf("first run logs = %q, want the viewer grant", first.logs)
+		t.Errorf("first run logs = %q, want the viewer grant", first.shown())
 	}
 	if _, ok := files.files[fixtureTokenFile("viewer")]; ok {
 		t.Errorf("viewer token file written, want none: the viewer grant mints no token")
@@ -277,13 +298,13 @@ func TestRunOverAnExistingViewerBot(t *testing.T) {
 	before := len(f.callLog())
 	second := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
 	if second.code != ExitOK {
-		t.Fatalf("second run = %d, want %d (logs: %s)", second.code, ExitOK, second.logs)
+		t.Fatalf("second run = %d, want %d (logs: %s)", second.code, ExitOK, second.shown())
 	}
 	if writes := nonGET(f.callLog()[before:]); len(writes) != 0 {
 		t.Errorf("second run sent writes %v, want none", writes)
 	}
 	if !strings.Contains(second.logs, "bot-viewer already has read access to acme/rig") {
-		t.Errorf("second run logs = %q, want the viewer grant held", second.logs)
+		t.Errorf("second run logs = %q, want the viewer grant held", second.shown())
 	}
 }
 
@@ -298,7 +319,7 @@ func TestRunDriftIsRepaired(t *testing.T) {
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitOK {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
 	calls := f.callLog()[before:]
 	if got := countCalls(calls, http.MethodPatch, "/branch_protections/main"); got != 1 {
@@ -308,7 +329,7 @@ func TestRunDriftIsRepaired(t *testing.T) {
 		t.Errorf("POSTs of a branch protection = %d, want 0: the rule exists", got)
 	}
 	if !strings.Contains(res.logs, "updated branch protection main on acme/rig") {
-		t.Errorf("logs = %q, want the update reported", res.logs)
+		t.Errorf("logs = %q, want the update reported", res.shown())
 	}
 }
 
@@ -322,7 +343,7 @@ func TestRunRemovesCandidateBranchRule(t *testing.T) {
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitOK {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
 	writes := f.writes()
 	if got := countCalls(writes, http.MethodDelete, "/branch_protections/land%2F"); got != 1 {
@@ -332,7 +353,7 @@ func TestRunRemovesCandidateBranchRule(t *testing.T) {
 		t.Errorf("POSTs of a branch protection = %d, want 1 (main only)", got)
 	}
 	if !strings.Contains(res.logs, "removed branch protection land/* on acme/rig") {
-		t.Errorf("logs = %q, want the removal reported", res.logs)
+		t.Errorf("logs = %q, want the removal reported", res.shown())
 	}
 }
 
@@ -344,13 +365,13 @@ func TestRunRotateReplacesToken(t *testing.T) {
 	f.addRepo(protectionRepo)
 	files := newMemFiles()
 	if first := runProvisioning(t, f, files, nil, "--repo", protectionRepo); first.code != ExitOK {
-		t.Fatalf("first run = %d, want %d (logs: %s)", first.code, ExitOK, first.logs)
+		t.Fatalf("first run = %d, want %d (logs: %s)", first.code, ExitOK, first.shown())
 	}
 
 	before := len(f.callLog())
 	res := runProvisioning(t, f, files, nil, "--repo", protectionRepo, "--rotate")
 	if res.code != ExitOK {
-		t.Fatalf("rotate run = %d, want %d (logs: %s)", res.code, ExitOK, res.logs)
+		t.Fatalf("rotate run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
 	calls := f.callLog()[before:]
 	if got := countCalls(calls, http.MethodDelete, "/admin/users/"+fixtureLandingBot+"/tokens/"+DefaultTokenName); got != 1 {
@@ -384,7 +405,7 @@ func TestRunAdminTokenSources(t *testing.T) {
 			f.addRepo(protectionRepo)
 			res := runProvisioning(t, f, newMemFiles(), tc.env, "--repo", protectionRepo)
 			if res.code != ExitOK {
-				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.logs)
+				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 			}
 			if v := f.violations(); len(v) != 0 {
 				t.Errorf("requests without the accepted token: %v", v)
@@ -412,10 +433,10 @@ func TestRunWithoutAdminToken(t *testing.T) {
 			f.addRepo(protectionRepo)
 			res := runProvisioning(t, f, newMemFiles(), tc.env, "--repo", protectionRepo)
 			if res.code != ExitFailure {
-				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 			}
 			if !strings.Contains(res.logs, "no admin token") || !strings.Contains(res.logs, tc.wantLog) {
-				t.Errorf("logs = %q, want the no admin token failure naming %q", res.logs, tc.wantLog)
+				t.Errorf("logs = %q, want the no admin token failure naming %q", res.shown(), tc.wantLog)
 			}
 			if calls := f.callLog(); len(calls) != 0 {
 				t.Errorf("requests sent without a token: %v", calls)
@@ -432,7 +453,7 @@ func TestRunIgnoresHomeEnvToken(t *testing.T) {
 	f.addRepo(protectionRepo)
 	res := runProvisioning(t, f, newMemFiles(), map[string]string{"FORGEJO_ADMIN_ENV": ""}, "--repo", protectionRepo)
 	if res.code != ExitFailure {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 	}
 	for _, path := range res.reads {
 		if path == fixtureHomeEnv {
@@ -454,7 +475,7 @@ func TestRunDryRunSendsNoWriteAndSaysWould(t *testing.T) {
 
 	res := runProvisioning(t, f, files, nil, "--repo", protectionRepo, "--dry-run")
 	if res.code != ExitOK {
-		t.Fatalf("dry run = %d, want %d (logs: %s)", res.code, ExitOK, res.logs)
+		t.Fatalf("dry run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
 	if writes := f.writes(); len(writes) != 0 {
 		t.Errorf("dry run sent writes %v, want none", writes)
@@ -469,7 +490,7 @@ func TestRunDryRunSendsNoWriteAndSaysWould(t *testing.T) {
 		"dry run: no write was sent",
 	} {
 		if !strings.Contains(res.logs, want) {
-			t.Errorf("dry run logs = %q, want %q", res.logs, want)
+			t.Errorf("dry run logs = %q, want %q", res.shown(), want)
 		}
 	}
 }
@@ -486,7 +507,7 @@ func TestRunDryRunReportsRemovalAndViewerGrant(t *testing.T) {
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo, "--dry-run")
 	if res.code != ExitOK {
-		t.Fatalf("dry run = %d, want %d (logs: %s)", res.code, ExitOK, res.logs)
+		t.Fatalf("dry run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
 	if writes := f.writes(); len(writes) != 0 {
 		t.Errorf("dry run sent writes %v, want none", writes)
@@ -496,7 +517,7 @@ func TestRunDryRunReportsRemovalAndViewerGrant(t *testing.T) {
 		"would remove branch protection land/* on acme/rig",
 	} {
 		if !strings.Contains(res.logs, want) {
-			t.Errorf("dry run logs = %q, want %q", res.logs, want)
+			t.Errorf("dry run logs = %q, want %q", res.shown(), want)
 		}
 	}
 }
@@ -539,20 +560,21 @@ func TestRunExitCodes(t *testing.T) {
 			}
 			res := runProvisioning(t, f, newMemFiles(), tc.env, tc.args...)
 			if res.code != ExitFailure {
-				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 			}
 			if !strings.Contains(res.logs, tc.wantLog) {
-				t.Errorf("logs = %q, want %q", res.logs, tc.wantLog)
+				t.Errorf("logs = %q, want %q", res.shown(), tc.wantLog)
 			}
 		})
 	}
 }
 
-// TestRunRefusesUsageWithItsMessage: a refused command line never reaches Run. Parse
-// returns a *UsageError whose message names the value that failed, and the command
-// prints that message and exits 2 (cmd/forgejo-provision's TestMainUsageExitsTwo
-// holds the exit code for the same command lines).
-func TestRunRefusesUsageWithItsMessage(t *testing.T) {
+// TestParseRefusesUsageWithItsMessage: a refused command line never reaches Run, so this
+// is a Parse test and holds only the refusal and its message: Parse returns a
+// *UsageError whose message names the value that failed. The exit code 2 is the
+// command's, and cmd/forgejo-provision's TestMainUsageExitsTwo holds it for the same
+// command lines.
+func TestParseRefusesUsageWithItsMessage(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
 		args        []string
@@ -586,7 +608,7 @@ func TestRunDeniedMintWritesNoTokenFile(t *testing.T) {
 	f.addRepo(protectionRepo)
 	files := newMemFiles()
 	if res := runProvisioning(t, f, files, nil, "--repo", protectionRepo); res.code != ExitFailure {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 	}
 	if got := len(files.files); got != 0 {
 		t.Errorf("refused mint wrote %d files, want none", got)
@@ -602,7 +624,7 @@ func TestRunUnprotectedRepoProvisions(t *testing.T) {
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitOK {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
 	writes := f.writes()
 	if got := countCalls(writes, http.MethodPost, "/branch_protections"); got != 1 {
@@ -621,7 +643,7 @@ func TestRunGrantsAccessBeforeProtection(t *testing.T) {
 	f := newFakeForgejo()
 	f.addRepo(protectionRepo)
 	if res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo); res.code != ExitOK {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
 	grant, protect := -1, -1
 	for i, c := range f.writes() {
@@ -651,7 +673,7 @@ func TestRunViewerRoleReadsOnly(t *testing.T) {
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--role", "viewer", "--repo", protectionRepo)
 	if res.code != ExitOK {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
 	if got := f.permission(protectionRepo, "bot-viewer"); got != permissionRead {
 		t.Errorf("viewer permission = %q, want %q", got, permissionRead)
@@ -674,10 +696,10 @@ func TestRunFailsWhenAUserReadFails(t *testing.T) {
 
 	res := runProvisioning(t, failingRoute{next: f, match: "/users/bot-polecat", status: http.StatusInternalServerError}, files, nil, "--repo", protectionRepo)
 	if res.code != ExitFailure {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 	}
 	if !strings.Contains(res.logs, "GET /users/bot-polecat: unexpected HTTP 500") {
-		t.Errorf("logs = %q, want the failed read named", res.logs)
+		t.Errorf("logs = %q, want the failed read named", res.shown())
 	}
 	if got := len(files.files); got != 0 {
 		t.Errorf("failed read wrote %d token files, want none", got)
@@ -697,10 +719,10 @@ func TestRunFailsWhenTheViewerReadFails(t *testing.T) {
 
 	res := runProvisioning(t, failingRoute{next: f, match: "/users/bot-viewer", status: http.StatusInternalServerError}, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitFailure {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 	}
 	if !strings.Contains(res.logs, "GET /users/bot-viewer: unexpected HTTP 500") {
-		t.Errorf("logs = %q, want the failed viewer read named", res.logs)
+		t.Errorf("logs = %q, want the failed viewer read named", res.shown())
 	}
 	if got := f.permission(protectionRepo, "bot-viewer"); got != "" {
 		t.Errorf("viewer permission = %q, want none: the grant was never reached", got)
@@ -864,18 +886,19 @@ func TestRunCancelledBeforeStartSendsNothing(t *testing.T) {
 	cancel()
 	res := runProvisioningCtx(ctx, t, &ctxRoute{next: f}, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitFailure {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 	}
 	if !strings.Contains(res.logs, "request failed") {
-		t.Errorf("logs = %q, want the cancelled request failed", res.logs)
+		t.Errorf("logs = %q, want the cancelled request failed", res.shown())
 	}
 	if calls := f.callLog(); len(calls) != 0 {
 		t.Errorf("requests reached the server under a cancelled context: %v", calls)
 	}
 }
 
-// TestRunCancelledBetweenTwoRequestsSendsNoMore: cancelled after the second request
-// is served, the run fails at the third, and the server records exactly two requests.
+// TestRunCancelledBetweenTwoRequestsSendsNoMore: the context is cancelled while the
+// second request is handled; that request is served, the run fails at the third, and
+// the server records exactly two requests.
 func TestRunCancelledBetweenTwoRequestsSendsNoMore(t *testing.T) {
 	t.Parallel()
 	f := newFakeForgejo()
@@ -884,12 +907,30 @@ func TestRunCancelledBetweenTwoRequestsSendsNoMore(t *testing.T) {
 	defer cancel()
 	res := runProvisioningCtx(ctx, t, &ctxRoute{next: f, cancelAfter: 2, cancel: cancel}, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitFailure {
-		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
 	}
 	if !strings.Contains(res.logs, "request failed") {
-		t.Errorf("logs = %q, want the request after the cancel failed", res.logs)
+		t.Errorf("logs = %q, want the request after the cancel failed", res.shown())
 	}
 	if calls := f.callLog(); len(calls) != 2 {
 		t.Errorf("the server recorded %d requests, want 2: the request after the cancel must not be sent", len(calls))
+	}
+}
+
+// TestRunResultShownNeverQuotesASecret: the logs a failure message quotes have every known
+// secret value replaced by its name, so a failing assertion can be pasted into a bead.
+func TestRunResultShownNeverQuotesASecret(t *testing.T) {
+	t.Parallel()
+	r := runResult{logs: "a " + fixtureToken + " b " + decoyToken + " c " + mintedSecret + " d"}
+	shown := r.shown()
+	for _, secret := range []string{fixtureToken, decoyToken, mintedSecret} {
+		if strings.Contains(shown, secret) {
+			t.Errorf("shown() still holds a secret value (%d bytes) in %d bytes of output", len(secret), len(shown))
+		}
+	}
+	for _, name := range []string{"<admin token>", "<decoy token>", "<minted token>"} {
+		if !strings.Contains(shown, name) {
+			t.Errorf("shown() does not name %s", name)
+		}
 	}
 }

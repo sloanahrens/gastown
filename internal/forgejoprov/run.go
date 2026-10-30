@@ -11,9 +11,11 @@ import (
 
 // Env is what Run reads and writes beside its options: the environment the admin
 // token and the defaults come from, the file the admin token is read through, the
-// progress lines, and the seams a test replaces. Each nil field takes the production
-// value named on it: the process environment, the real file, the real filesystem,
-// crypto/rand and the default HTTP client. A nil Log discards the progress lines.
+// progress lines, and the seams a test replaces. Run itself applies the defaults for
+// Getenv (os.Getenv), ReadFile (os.ReadFile) and Log (discarded). HTTP, Files and Random
+// are passed through unchanged, and the type that uses each applies its own default when
+// it is nil: the client's default HTTP client with a request timeout, the real
+// filesystem, and crypto/rand.
 type Env struct {
 	// Getenv reads the environment the admin token resolves from; nil means os.Getenv.
 	Getenv func(string) string
@@ -22,11 +24,13 @@ type Env struct {
 	// Log receives the progress lines and the failure, each prefixed "forgejo-provision:";
 	// nil discards them.
 	Log io.Writer
-	// HTTP sends the requests; nil means the default client with a timeout.
+	// HTTP sends the requests; nil is left to the client, which uses its default client.
 	HTTP *http.Client
-	// Files is the filesystem the token files are written through; nil means the real one.
+	// Files is the filesystem the token files are written through; nil is left to the
+	// provisioner, which uses the real one.
 	Files Files
-	// Random is the source of a new bot's password; nil means crypto/rand.
+	// Random is the source of a new bot's password; nil is left to the provisioner, which
+	// uses crypto/rand.
 	Random io.Reader
 }
 
