@@ -42,8 +42,8 @@ const (
 	DefaultTimeout = "10m"
 	// DefaultTempDir is TMPDIR's stand-in when it is unset or empty.
 	DefaultTempDir = "/tmp"
-	// MaxJobs is the most packages TIER_SWEEP_JOBS may run at once, the bound
-	// sweeprunner.Spec.Jobs takes too, so a run is sized for one host.
+	// MaxJobs is the most packages TIER_SWEEP_JOBS may run at once: a sweep is
+	// sized for the one host it runs on, and a typo must not swamp it.
 	MaxJobs = 16
 	// logDirPattern names the default log directory: tier-sweep.XXXXXX under
 	// TMPDIR.

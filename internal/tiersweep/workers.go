@@ -44,12 +44,19 @@ func serialPackage(name string) bool { return serialSet[strings.TrimPrefix(name,
 
 // startOrder returns tasks ordered as a run starts them: longest first by the
 // wall time the previous run took for this tier, and a package with no wall
-// after the ones with one, in list order. The sort is stable, so a run with no
-// walls starts in list order (gt-0rtgc).
+// after the ones with one, in list order. A wall the previous run recorded as
+// zero is still a wall, so that package keeps its place ahead of an unmeasured
+// one. The sort is stable, so a run with no walls starts in list order
+// (gt-0rtgc).
 func startOrder(tasks []*task, walls map[string]int64, tier string) []*task {
 	ordered := append([]*task(nil), tasks...)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return walls[TimingsKey(tier, ordered[i].name)] > walls[TimingsKey(tier, ordered[j].name)]
+		left, leftKnown := walls[TimingsKey(tier, ordered[i].name)]
+		right, rightKnown := walls[TimingsKey(tier, ordered[j].name)]
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		return left > right
 	})
 	return ordered
 }
@@ -67,30 +74,37 @@ func splitSerial(tasks []*task) (parallel, serial []*task) {
 	return parallel, serial
 }
 
-// pool runs tasks on at most Jobs workers, starting them in the order given:
-// the dispatcher hands out one package per worker and waits for that worker to
-// take it up before handing out the next.
+// pool runs tasks on at most Jobs workers, starting them in the order given.
+// The dispatcher runs in its own goroutine: it takes a token, prints the
+// package's progress line and starts a worker, and it starts the next package
+// only once this one's command has begun, so the commands begin in plan order
+// even inside the first wave. The caller reports each package as its command
+// finishes, so a failure's excerpt appears while the rest of the pool still
+// runs (gt-0rtgc).
 func (r *Runner) pool(tier, dir string, prefix, args []string, tasks []*task) {
 	if len(tasks) == 0 {
 		return
 	}
 	tokens := make(chan struct{}, r.jobs())
-	entered := make(chan struct{})
+	begun := make(chan struct{})
 	done := make(chan *task, len(tasks))
 	var wg sync.WaitGroup
-	for _, t := range tasks {
-		tokens <- struct{}{}
-		r.start(tier, t)
-		wg.Add(1)
-		go func(t *task) {
-			defer wg.Done()
-			entered <- struct{}{}
-			t.result = r.runPackage(tier, dir, prefix, args, t)
-			<-tokens
-			done <- t
-		}(t)
-		<-entered
-	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, t := range tasks {
+			tokens <- struct{}{}
+			r.start(tier, t)
+			wg.Add(1)
+			go func(t *task) {
+				defer wg.Done()
+				t.result = r.runPackage(tier, dir, prefix, args, t, func() { begun <- struct{}{} })
+				<-tokens
+				done <- t
+			}(t)
+			<-begun
+		}
+	}()
 	for range tasks {
 		r.report(tier, <-done)
 	}

@@ -138,22 +138,23 @@ func (f *poolGo) ranPackages() []string {
 	return pkgs
 }
 
-// lineFeed is a Runner's stderr in a test: it keeps the text and reports each
-// write on lines, so a test can wait for the line a package's report printed
-// without polling.
+// lineFeed is a Runner's stderr in a test: it keeps the text and wakes every
+// waiter on each write, so a write never blocks on a reader and a test waits
+// for the line it wants without polling.
 type lineFeed struct {
-	mu    sync.Mutex
-	buf   bytes.Buffer
-	lines chan string
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	notify chan struct{}
 }
 
-func newLineFeed() *lineFeed { return &lineFeed{lines: make(chan string, 64)} }
+func newLineFeed() *lineFeed { return &lineFeed{notify: make(chan struct{})} }
 
 func (f *lineFeed) Write(p []byte) (int, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	n, err := f.buf.Write(p)
-	f.mu.Unlock()
-	f.lines <- string(p)
+	close(f.notify)
+	f.notify = make(chan struct{})
 	return n, err
 }
 
@@ -163,12 +164,21 @@ func (f *lineFeed) String() string {
 	return f.buf.String()
 }
 
-// waitForLine waits until a stderr write holds want.
-func waitForLine(t *testing.T, lines <-chan string, want string) {
+// waitForLine waits until the text written so far holds want.
+func (f *lineFeed) waitForLine(t *testing.T, want string) {
 	t.Helper()
 	for {
-		if line := waitOrFail(t, lines, "a stderr line holding "+want); strings.Contains(line, want) {
+		f.mu.Lock()
+		written := strings.Contains(f.buf.String(), want)
+		notified := f.notify
+		f.mu.Unlock()
+		if written {
 			return
+		}
+		select {
+		case <-notified:
+		case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: the write is the event waited for, and a report that never comes fails here rather than hanging the suite
+			t.Fatalf("waited %s for a stderr line holding %s", waitBound, want)
 		}
 	}
 }
@@ -335,10 +345,9 @@ func TestWorkersOneJobKeepsTheSerialOutput(t *testing.T) {
 }
 
 // TestWorkersStartLongestFirst: a run given the previous walls starts the
-// longest packages first, and a run given none starts them in list order. The
-// first wave starts together, so its order is read as the set the plan names;
-// every command after it starts alone as a slot frees, so its place is read
-// exactly from the fake's own record of the starts.
+// longest packages first, in that order even inside the first wave, and a run
+// given none starts them in list order. Each place is the fake's own record of
+// the command's start.
 func TestWorkersStartLongestFirst(t *testing.T) {
 	t.Parallel()
 	const jobs = 3
@@ -383,8 +392,8 @@ func TestWorkersStartLongestFirst(t *testing.T) {
 			for i := 0; i < jobs; i++ {
 				first = append(first, waitOrFail(t, fake.started, "a command of the first wave to start"))
 			}
-			if got, want := sorted(first), sorted(tc.want[:jobs]); !reflect.DeepEqual(got, want) {
-				t.Errorf("the first wave started %q, want the longest %q", got, want)
+			if !reflect.DeepEqual(first, tc.want[:jobs]) {
+				t.Errorf("the first wave started %q, want the longest %q in that order", first, tc.want[:jobs])
 			}
 
 			// Freeing a slot starts the next package the plan names, one at a
@@ -405,6 +414,25 @@ func TestWorkersStartLongestFirst(t *testing.T) {
 	}
 }
 
+// TestStartOrderKeepsARecordedZeroWall: a package the previous run timed at
+// zero still has a wall, so it starts ahead of one the file does not name.
+func TestStartOrderKeepsARecordedZeroWall(t *testing.T) {
+	t.Parallel()
+	tasks := []*task{{name: "./unmeasured"}, {name: "./zero"}, {name: "./long"}}
+	walls := map[string]int64{
+		TimingsKey(TierIntegration, "./zero"): 0,
+		TimingsKey(TierIntegration, "./long"): 9000,
+	}
+	var order []string
+	for _, task := range startOrder(tasks, walls, TierIntegration) {
+		order = append(order, task.name)
+	}
+	want := []string{"./long", "./zero", "./unmeasured"}
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("start order = %q, want %q", order, want)
+	}
+}
+
 // wallsFor keys each package's wall as the run reads it: by the tier and the
 // package name together.
 func wallsFor(walls map[string]int64) map[string]int64 {
@@ -412,13 +440,6 @@ func wallsFor(walls map[string]int64) map[string]int64 {
 	for pkg, ms := range walls {
 		out[TimingsKey(TierIntegration, pkg)] = ms
 	}
-	return out
-}
-
-// sorted returns a sorted copy of items.
-func sorted(items []string) []string {
-	out := append([]string(nil), items...)
-	sort.Strings(out)
 	return out
 }
 
@@ -470,12 +491,10 @@ func TestSerialPackagesRunAlone(t *testing.T) {
 	if got := waitOrFail(t, finished, "the tier to count its packages"); !reflect.DeepEqual(got, Counts{Passed: len(pkgs)}) {
 		t.Errorf("Tier() = %+v, want all %d passed", got, len(pkgs))
 	}
-	// The two beside it start together, in either order; the serial package
-	// starts after both.
-	order := fake.startOrder()
-	wantOrder := []string{"./a", "./b"}
-	if len(order) != len(pkgs) || !reflect.DeepEqual(sorted(order[:2]), wantOrder) || order[2] != serial {
-		t.Errorf("start order = %q, want %q in either order and then %s", order, wantOrder, serial)
+	// The two beside it start first, in list order, and the serial package only
+	// once both are done.
+	if order, want := fake.startOrder(), []string{"./a", "./b", serial}; !reflect.DeepEqual(order, want) {
+		t.Errorf("start order = %q, want %q", order, want)
 	}
 }
 
@@ -643,7 +662,7 @@ func TestWorkersKeepEachPackagesLogAndTiming(t *testing.T) {
 	order := []string{"./a", "./c", "./b"}
 	for _, pkg := range order {
 		gates.release(pkg)
-		waitForLine(t, feed.lines, strings.TrimSpace(output[pkg]))
+		feed.waitForLine(t, strings.TrimSpace(output[pkg]))
 	}
 	if got := waitOrFail(t, finished, "the tier to count its packages"); got.Failed != len(pkgs) {
 		t.Errorf("Tier() = %+v, want every package failed", got)
@@ -773,8 +792,8 @@ func TestWorkersTimingsFileFallback(t *testing.T) {
 			for i := 0; i < 2; i++ {
 				first = append(first, waitOrFail(t, fake.started, "a command of the first wave to start"))
 			}
-			if got, want := sorted(first), sorted(tc.want[:2]); !reflect.DeepEqual(got, want) {
-				t.Errorf("the first wave started %q, want %q", got, want)
+			if !reflect.DeepEqual(first, tc.want[:2]) {
+				t.Errorf("the first wave started %q, want %q in that order", first, tc.want[:2])
 			}
 			for i := 2; i < len(tc.want); i++ {
 				gates.release(tc.want[i-2])
@@ -807,22 +826,66 @@ func watchAll(pkgs []string) map[string]bool {
 	return watch
 }
 
-// TestSerialListNamesOnlyDiscoveredPackages: every package serial.txt names is
-// one the integration tier's own plan discovers, so a renamed or deleted
-// package cannot silently drop out of the list that keeps it alone.
-func TestSerialListNamesOnlyDiscoveredPackages(t *testing.T) {
-	t.Parallel()
-	found := discoveredPackages(t, worktree{root: filepath.Join("..", "..")})
-	for _, pkg := range SerialPackages() {
+// undiscoveredSerial lists the packages serial.txt names that the plan does not
+// run, so a renamed or deleted package cannot silently drop out of the list
+// that keeps it alone. The integration tier runs it against the repository
+// through the production listing; the unit tier checks the test that reads it.
+func undiscoveredSerial(serial []string, found map[string]bool) []string {
+	var missing []string
+	for _, pkg := range serial {
 		if !found[pkg] {
-			t.Errorf("serial.txt names %s, which the integration plan does not run: no integration-tagged test under it", pkg)
+			missing = append(missing, pkg)
 		}
 	}
-	// The same plan leaves a package whose test carries no integration tag out.
-	plain := baseRepo()
-	plain.lists[". *_test.go"] = []string{"a/x_test.go"}
-	plain.files["a/x_test.go"] = plainTest
-	if discoveredPackages(t, plain)["a"] {
+	return missing
+}
+
+// TestSerialGuardNamesUndiscoveredPackages: the guard reports a serial package
+// the plan does not run and keeps the ones it does.
+func TestSerialGuardNamesUndiscoveredPackages(t *testing.T) {
+	t.Parallel()
+	found := map[string]bool{"./internal/tmux": true, "./internal/lock": true}
+	serial := []string{"./internal/tmux", "./gone", "./internal/lock"}
+	if got, want := undiscoveredSerial(serial, found), []string{"./gone"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("undiscoveredSerial = %q, want %q", got, want)
+	}
+	if got := undiscoveredSerial(serial[:1], found); len(got) != 0 {
+		t.Errorf("undiscoveredSerial = %q, want none", got)
+	}
+}
+
+// TestSerialPackagesParse: serial.txt holds package names, not repeats, and the
+// guard has a list to read.
+func TestSerialPackagesParse(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]bool)
+	for _, pkg := range SerialPackages() {
+		if strings.HasPrefix(pkg, "./") || pkg == "" {
+			t.Errorf("serial.txt names %q, want a name without ./", pkg)
+		}
+		if seen[pkg] {
+			t.Errorf("serial.txt names %s twice", pkg)
+		}
+		seen[pkg] = true
+	}
+	if len(seen) == 0 {
+		t.Error("serial.txt names no package")
+	}
+}
+
+// TestDiscoveredPackagesCountsOnlyTaggedTests: the plan the serial guard reads
+// discovers a package that adds an integration-tagged file and leaves one whose
+// test carries no tag out.
+func TestDiscoveredPackagesCountsOnlyTaggedTests(t *testing.T) {
+	t.Parallel()
+	repo := taggedRepo([]string{"./a"})
+	repo.lists[". *_test.go"] = append(repo.lists[". *_test.go"], "b/b_test.go")
+	repo.files["b/b_test.go"] = plainTest
+	found := discoveredPackages(t, repo)
+	if !found["a"] {
+		t.Error("a package with an integration-tagged test reads as undiscovered")
+	}
+	if found["b"] {
 		t.Error("a package with only a plain test reads as discovered")
 	}
 }
@@ -846,41 +909,4 @@ func discoveredPackages(t *testing.T, src Source) map[string]bool {
 		}
 	}
 	return found
-}
-
-// worktree is the Source the guard reads this checkout through: the files under
-// a directory that match the pattern, listed from disk and read from disk. The
-// plan lists through git in production, and a unit test may not run git, so the
-// listing comes from the directory tree the checkout is.
-type worktree struct{ root string }
-
-func (w worktree) LsFiles(dir, pattern string) ([]string, error) {
-	base := filepath.Join(w.root, filepath.FromSlash(dir))
-	suffix := strings.TrimPrefix(pattern, "*")
-	var files []string
-	err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" && path != base {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, suffix) {
-			return nil
-		}
-		rel, err := filepath.Rel(base, path)
-		if err != nil {
-			return err
-		}
-		files = append(files, filepath.ToSlash(rel))
-		return nil
-	})
-	return files, err
-}
-
-func (w worktree) ReadFile(name string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(w.root, filepath.FromSlash(name)))
 }

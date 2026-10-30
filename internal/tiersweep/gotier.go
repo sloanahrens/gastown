@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -71,6 +72,9 @@ type Runner struct {
 	// nil, or a package with no entry, keeps list order. A run of one job
 	// ignores Walls and keeps list order, so it prints what it always has.
 	Walls map[string]int64
+	// stderr keeps the progress lines and the reports whole while a run of more
+	// than one job writes them from the dispatcher and the collector at once.
+	stderrMu sync.Mutex
 }
 
 // Counts is one tier's tally: the packages that passed, failed and were
@@ -190,21 +194,38 @@ func (r *Runner) jobs() int {
 // runOne runs one package in this goroutine and reports it.
 func (r *Runner) runOne(tier, dir string, prefix, args []string, t *task) {
 	r.start(tier, t)
-	t.result = r.runPackage(tier, dir, prefix, args, t)
+	t.result = r.runPackage(tier, dir, prefix, args, t, nil)
 	r.report(tier, t)
 }
 
 // start prints the progress line a package's command is announced with.
 func (r *Runner) start(tier string, t *task) {
+	r.stderrMu.Lock()
+	defer r.stderrMu.Unlock()
 	fmt.Fprintf(r.Stderr, "%s: %s %s ...\n", Name, tier, t.name)
 }
 
 // runPackage creates one package's log, runs its command and closes the log.
-func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task) packageResult {
+// begin, when not nil, reports that the command has begun; a pool hands the
+// next package out only once it has heard that, so commands start in plan
+// order. A package whose log cannot be created calls it too, so the pool is
+// never left waiting on a command that never runs.
+func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task, begin func()) packageResult {
+	began := false
+	beganOnce := func() {
+		if !began {
+			began = true
+			if begin != nil {
+				begin()
+			}
+		}
+	}
+	defer beganOnce()
 	log := filepath.Join(r.LogDir, LogName(tier, t.name))
 	f, err := os.Create(log)
 	if err != nil {
 		// Without a log the package cannot be run, and it is not passed.
+		beganOnce()
 		return packageResult{log: log, createErr: err}
 	}
 	argv := append(append([]string{}, prefix...), "go", "test", "-count=1", "-timeout", r.Timeout)
@@ -214,6 +235,7 @@ func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task) pa
 	}
 	argv = append(argv, t.pkg)
 	start := r.now()
+	beganOnce()
 	code := r.Exec(dir, r.Env, argv, f)
 	closeErr := f.Close()
 	return packageResult{ran: true, code: code, start: start, log: log, closeErr: closeErr}
@@ -221,6 +243,8 @@ func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task) pa
 
 // report writes the failure a package's result names and records its timing.
 func (r *Runner) report(tier string, t *task) {
+	r.stderrMu.Lock()
+	defer r.stderrMu.Unlock()
 	res := t.result
 	if res.createErr != nil {
 		fmt.Fprintf(r.Stderr, "    create log %s: %v\n", res.log, res.createErr)
