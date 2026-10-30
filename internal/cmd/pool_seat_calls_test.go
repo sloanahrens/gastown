@@ -14,13 +14,12 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// rosterCallsBefore records the number of bd read calls the roster made over
-// seatTown(t, 20) before this bead's fold, measured at d6851c36e: one
-// ShowMultiple asking for the twenty agent beads and one List asking for the
-// rig's assigned work. The fixture is the same twenty polecat directories,
-// three of them with a live session and one dead-hooked. The test measures the
-// count again (rosterCallsWithoutTheFold) and fails if the two disagree, so the
-// constant is the number the current fixture costs and not a remembered one.
+// rosterCallsBefore is the bd read count the roster's baseline costs over
+// seatTown(t, 20): one ShowMultiple asking for the twenty agent beads and one
+// List asking for the rig's assigned work, measured at d6851c36e and the number
+// rosterCallsWithoutTheFold makes again. The test fails if the two disagree, so
+// the constant is the count the current fixture costs, pinned to the commit it
+// was measured at.
 const rosterCallsBefore = 2
 
 // countingCalls is the calls a countingStore was asked for: every read a bd
@@ -349,13 +348,14 @@ func recordedIssues(t *testing.T, name string) map[string]*beads.Issue {
 // roster: the seat read takes an agent bead's id, its gt:agent label, its
 // status and the fields its description carries, and a bd list record carries
 // all of them, equal to the bd show record of the same bead. The fixtures are
-// one recorded `bd list --status=open,in_progress,hooked --json` read (the data
-// array run unwraps) and one recorded `bd show --json` read of the same two
-// beads, taken from a live town on 2026-10-30. Both go through the read the
-// roster makes of a batched bead, beads.GetAgentBead.
+// the shape of a `bd list --status=open,in_progress,hooked --json` read and of
+// a `bd show --json` read of the same two beads, with invented ids, rig, agent
+// and titles: every value a person wrote is replaced, and only the fields the
+// two reads emit are kept. Both go through the read the roster makes of a
+// batched bead, beads.GetAgentBead.
 func TestListedAgentBeadCarriesTheShowFields(t *testing.T) {
 	t.Parallel()
-	const agentID, workID = "gt-gastown-polecat-valkyrie", "gt-p85pw.111"
+	const agentID, workID = "zz-polecat-alice", "zz-work-42"
 	listed := recordedIssues(t, "pool_seat_list.json")
 	shown := recordedIssues(t, "pool_seat_show.json")
 	for _, id := range []string{agentID, workID} {

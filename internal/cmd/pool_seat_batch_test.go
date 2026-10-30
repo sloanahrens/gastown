@@ -688,6 +688,85 @@ func TestSeatBatchReadsAnAgentBeadTheListDidNotCarryWhole(t *testing.T) {
 	}
 }
 
+// agentListTruncates is a store whose work list keeps each agent bead but drops
+// the description lines drop names, the shape of a list form that cut a
+// description short.
+type agentListTruncates struct {
+	*countingStore
+	drop []string
+}
+
+func (s *agentListTruncates) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	issues, err := s.countingStore.List(opts)
+	if err != nil {
+		return nil, err
+	}
+	for _, issue := range issues {
+		if beads.IsAgentBead(issue) {
+			issue.Description = withoutDescriptionKeys(issue.Description, s.drop)
+		}
+	}
+	return issues, nil
+}
+
+// withoutDescriptionKeys returns description without the lines whose key is in
+// drop.
+func withoutDescriptionKeys(description string, drop []string) string {
+	gone := make(map[string]bool, len(drop))
+	for _, key := range drop {
+		gone[strings.ToLower(key)] = true
+	}
+	var kept []string
+	for _, line := range strings.Split(description, "\n") {
+		key, _, ok := strings.Cut(line, ":")
+		if ok && gone[strings.ToLower(strings.TrimSpace(key))] {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// TestSeatBatchReadsAnAgentBeadTheListTruncated is the completeness gate on a
+// record that kept the role and state lines and lost the rest: a working seat's
+// hook line is gone, so answering from the list record would read the seat idle
+// with a free seat. The batch reads that bead by id instead, and the seat keeps
+// the work its description names (gt-4efmk).
+func TestSeatBatchReadsAnAgentBeadTheListTruncated(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "p01")
+	db := beadsfake.New()
+	seedPolecatAgentBead(db, town, "gastown", "p01", "gt-hooked")
+	db.Seed(beads.Issue{ID: "gt-hooked", Status: beads.StatusHooked})
+	store := &agentListTruncates{
+		countingStore: newCountingStore(db),
+		drop:          []string{"hook_bead"},
+	}
+
+	perSeat := poolDispositionAnswering(town, seatReadsOver(newCountingStore(db)))
+	want, err := perSeat("gastown", "p01")
+	if err != nil {
+		t.Fatalf("per-seat read: %v", err)
+	}
+	got, err := batchOverStore(town, store).disposition("gastown", "p01")
+	if err != nil {
+		t.Fatalf("batched read: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("seat = %+v, want the per-seat read's %+v", got, want)
+	}
+	if !got.HookHeld || !got.Disposition.CountsTowardCapacity {
+		t.Errorf("seat = %+v, want the hooked work its description names to hold it", got)
+	}
+	// The record the list carried short is read by id instead.
+	agentID := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "gastown"), "gastown", "p01")
+	if len(store.multis) != 1 || len(store.multis[0]) != 1 || store.multis[0][0] != agentID {
+		t.Errorf("batched reads = %v, want the one agent bead the list left incomplete", store.multis)
+	}
+}
+
 // TestPoolSeatBatchCountsSeatsWhenTheWorkListFails is the work list's failure
 // branch: the list is what answers both agent beads and assignments, and its
 // failure costs a batch of agent-bead reads and one live read per polecat, not
