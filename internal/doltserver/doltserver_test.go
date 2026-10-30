@@ -2530,6 +2530,81 @@ func TestInitRig_DoltAndAbsentRouteStillCreate(t *testing.T) {
 	}
 }
 
+// blockBeadsDir plants a regular file where rigName's mayor/rig/.beads
+// directory belongs, so the step that seeds issue_prefix cannot make it.
+func blockBeadsDir(t *testing.T, townRoot, rigName string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, rigName, "mayor", "rig")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads"), []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Each failure path of InitRig names the step that failed, so a caller's warning
+// says where preparing the rig's database stopped (gt-p85pw.102).
+func TestInitRig_NamesTheStepThatFailed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creating rig directory", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeHost().on("dolt *", fakeReply{})
+		h := f.host()
+		townRoot := testTown(t)
+		// .dolt-data as a regular file: the rig's directory cannot be made under it.
+		if err := os.WriteFile(filepath.Join(townRoot, ".dolt-data"), []byte("not a directory"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.InitRig(townRoot, "agrig"); err == nil || !strings.Contains(err.Error(), "creating rig directory") {
+			t.Fatalf("InitRig error = %v, want the rig directory step named", err)
+		}
+	})
+
+	t.Run("initializing Dolt database", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeHost().on("dolt init", fakeReply{stderr: "boom", code: 1}).on("dolt *", fakeReply{})
+		h := f.host()
+		if _, err := h.InitRig(testTown(t), "agrig"); err == nil || !strings.Contains(err.Error(), "initializing Dolt database") {
+			t.Fatalf("InitRig error = %v, want the dolt init step named", err)
+		}
+	})
+
+	t.Run("ensuring issue_prefix for a new database", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeHost().on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
+		h := f.host()
+		townRoot := testTown(t)
+		blockBeadsDir(t, townRoot, "agrig")
+		if _, err := h.InitRig(townRoot, "agrig"); err == nil || !strings.Contains(err.Error(), `issue_prefix for database "agrig"`) {
+			t.Fatalf("InitRig error = %v, want the issue_prefix step named", err)
+		}
+	})
+
+	t.Run("ensuring issue_prefix for an existing database", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeHost().on("dolt *", fakeReply{})
+		h := f.host()
+		townRoot := testTown(t)
+		if err := os.MkdirAll(filepath.Join(RigDatabaseDir(townRoot, "agrig"), ".dolt"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		blockBeadsDir(t, townRoot, "agrig")
+		if _, err := h.InitRig(townRoot, "agrig"); err == nil || !strings.Contains(err.Error(), `issue_prefix for existing database "agrig"`) {
+			t.Fatalf("InitRig error = %v, want the existing database step named", err)
+		}
+	})
+
+	t.Run("creating database on the running server", func(t *testing.T) {
+		t.Parallel()
+		_, h, townRoot, _ := runningRemoveFixture(t, fakeReply{stderr: "connection refused", code: 1})
+		if _, err := h.InitRig(townRoot, "agrig"); err == nil || !strings.Contains(err.Error(), "creating database on running server") {
+			t.Fatalf("InitRig error = %v, want the running-server step named", err)
+		}
+	})
+}
+
 // RepairWorkspace names the tracker skip rather than reporting a database that
 // the rig never had, so a repair report never sends the operator looking for
 // one (gt-p85pw.102).
