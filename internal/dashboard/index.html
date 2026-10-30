@@ -2954,6 +2954,10 @@ function drawAttention() {
   // The rows are read; only Jev's answers behind them are not. The panel says
   // so beside the rows rather than rendering them as a queue nothing scored.
   if (at.scores_failed) box.append(el("div", "empty", "Jev's needs_human answers could not be read: every queue item reads needs ?"));
+  // The risk-path rows are ranked by the landing answers, which are the same kind
+  // of read: a failed one keeps the order of the last good answers, and the panel
+  // says so rather than presenting that order as this read's (gt-n8tmf).
+  if (at.landing_risk_failed) box.append(el("div", "empty", "Jev's landing risk answers could not be read: the risk-path rows keep the order of the last good answers"));
   const shown = (at.rows || []).filter(ownerShown);
   if (!shown.length) {
     // A filter with no chip on is the reader's own doing; otherwise the panel is

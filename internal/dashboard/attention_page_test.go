@@ -447,6 +447,27 @@ func TestThePanelDrawsTheNeedsHumanScore(t *testing.T) {
 	}
 }
 
+// A landing log nobody could read is said beside the rows: the risk-path rows
+// keep the order of the last good answers, and the panel does not present that
+// order as this read's (gt-n8tmf).
+func TestThePanelSaysALandingRiskLogItCannotRead(t *testing.T) {
+	t.Parallel()
+
+	riskRow := map[string]any{"kind": "item", "owner": "overseer", "class": "pipeline", "id": "risk:gt-7:deadbeef",
+		"title": "gt-7 landed touching internal/cmd", "level": "warn", "rule": "landing.risk_path", "age_sec": 180}
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{riskRow}}))
+	if body := dom.element(t, "attention").Text; strings.Contains(body, "landing risk answers") {
+		t.Fatalf("the panel says the landing answers could not be read on a read that succeeded: %q", body)
+	}
+
+	dom.call(t, "renderAttention", attentionState(map[string]any{"landing_risk_failed": true, "rows": []any{riskRow}}))
+	if body := dom.element(t, "attention").Text; !strings.Contains(body, "landing risk answers could not be read") {
+		t.Errorf("the panel does not say the landing log could not be read: %q", body)
+	}
+}
+
 // The panel draws the rows in the two groups the reader acts on: what needs a
 // person, then what is only waiting on work already in flight, with each
 // group's count in the panel's header. A pipeline row names who holds it and
