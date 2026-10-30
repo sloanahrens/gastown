@@ -137,22 +137,30 @@ func teardownStep(spec Spec, args ...string) Step {
 	return step
 }
 
-// runnerName is the container the sweep runs in. It carries the rig and the sha,
-// so a leftover container makes the next create fail by name rather than be
-// joined silently (gt-74ix9).
-func runnerName(spec Spec) string { return "gt-sweep-" + spec.Rig + "-" + spec.SHA[:8] }
+// The names below carry the run id as well as the rig and the sha: teardown
+// removes objects by name and runs even after a failed start, so a name keyed to
+// the rig and sha alone would let one run's teardown force-remove another run's
+// container, network or volume (gt-74ix9).
+
+// runnerName is the container the sweep runs in.
+func runnerName(spec Spec) string {
+	return "gt-sweep-" + spec.Rig + "-" + spec.SHA[:8] + "-" + spec.RunID
+}
 
 // dindName is the sidecar's container name.
-func dindName(spec Spec) string { return "gt-sweep-dind-" + spec.Rig + "-" + spec.SHA[:8] }
+func dindName(spec Spec) string {
+	return "gt-sweep-dind-" + spec.Rig + "-" + spec.SHA[:8] + "-" + spec.RunID
+}
 
 // networkName is the run's private network, which only the sidecar and the
 // runner join.
-func networkName(spec Spec) string { return "gt-sweep-net-" + spec.Rig + "-" + spec.SHA[:8] }
+func networkName(spec Spec) string {
+	return "gt-sweep-net-" + spec.Rig + "-" + spec.SHA[:8] + "-" + spec.RunID
+}
 
-// volumeName is the sidecar's engine state. It carries the run id as well as the
-// sha because docker volume create reuses a volume of that name without a word,
-// so a name keyed to the rig or the sha alone would hand one run's engine state
-// to the next (gt-74ix9).
+// volumeName is the sidecar's engine state. docker volume create reuses a
+// volume of an existing name without a word, so the name must belong to one run
+// (gt-74ix9).
 func volumeName(spec Spec) string {
 	return "gt-sweep-dind-data-" + spec.Rig + "-" + spec.SHA[:8] + "-" + spec.RunID
 }

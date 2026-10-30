@@ -3,6 +3,7 @@ package sweeprunner
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
 // goldenSpec is the fixed Spec testdata/docker-render.golden.json was rendered
@@ -71,7 +73,6 @@ func TestDockerRenderGolden(t *testing.T) {
 		t.Parallel()
 		spec := goldenSpec()
 		spec.Dind = false
-		spec.RunID = ""
 		plain, err := Docker{}.Render(spec)
 		if err != nil {
 			t.Fatalf("rendering a spec without dind: %v", err)
@@ -212,7 +213,8 @@ func TestSpecValidation(t *testing.T) {
 		{"repo dir holds a colon", "repoDir", func(s *Spec) { s.RepoDir = "/Users/ops/gt:stale/.repo.git" }},
 		{"context is empty", "context", func(s *Spec) { s.Context = "" }},
 		{"context holds a colon", "context", func(s *Spec) { s.Context = "colima:gt-sbx" }},
-		{"dind has no run id", "runID", func(s *Spec) { s.RunID = "" }},
+		{"run id is empty", "runID", func(s *Spec) { s.RunID = "" }},
+		{"run id is empty without dind", "runID", func(s *Spec) { s.Dind, s.RunID = false, "" }},
 		{"run id escapes its segment", "runID", func(s *Spec) { s.RunID = "a/b" }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -283,34 +285,112 @@ func TestDockerRenderTeardownRemovesEveryObjectItMade(t *testing.T) {
 	}
 }
 
-// TestDockerRenderGivesEachRunItsOwnDindVolume is the single-run invariant: a
-// run's engine state is named for that run, so a rerun of the same commit never
-// inherits it (gt-74ix9).
-func TestDockerRenderGivesEachRunItsOwnDindVolume(t *testing.T) {
+// TestDockerRenderGivesEachRunItsOwnObjects is the single-run invariant: every
+// object a run makes is named for that run, so a rerun of one rig and sha neither
+// inherits the first run's engine state nor has its objects removed by the other
+// run's teardown (gt-74ix9).
+func TestDockerRenderGivesEachRunItsOwnObjects(t *testing.T) {
 	t.Parallel()
 	first, second := goldenSpec(), goldenSpec()
 	second.RunID = "mvv8askp"
-	firstPlan, err := Docker{}.Render(first)
-	if err != nil {
-		t.Fatalf("rendering the first run: %v", err)
-	}
-	secondPlan, err := Docker{}.Render(second)
-	if err != nil {
-		t.Fatalf("rendering the second run: %v", err)
-	}
-	created := func(plan Plan) string {
-		step, ok := findStep(plan, "volume")
-		if !ok {
-			t.Fatal("the plan renders no volume step for a dind run")
+	made := func(spec Spec) []string {
+		plan, err := Docker{}.Render(spec)
+		if err != nil {
+			t.Fatalf("rendering the run %q: %v", spec.RunID, err)
 		}
-		return step.Argv[len(step.Argv)-1]
+		var names []string
+		for _, step := range plan.Steps {
+			if step.Teardown {
+				continue
+			}
+			if name, ok := valueAfter(step.Argv, "--name"); ok {
+				names = append(names, name)
+			} else if step.Argv[3] == "network" || step.Argv[3] == "volume" {
+				names = append(names, step.Argv[len(step.Argv)-1])
+			}
+		}
+		return names
 	}
-	firstVolume, secondVolume := created(firstPlan), created(secondPlan)
-	if firstVolume == secondVolume {
-		t.Fatalf("two runs of %s render the same dind volume %q", first.SHA[:8], firstVolume)
+	firstNames, secondNames := made(first), made(second)
+	if len(firstNames) != 4 {
+		t.Fatalf("a dind run makes %d named objects, want the network, the volume, the sidecar and the runner: %v", len(firstNames), firstNames)
 	}
-	if !strings.Contains(firstVolume, first.RunID) {
-		t.Errorf("volume %q does not carry the run id %q", firstVolume, first.RunID)
+	for i, name := range firstNames {
+		if name == secondNames[i] {
+			t.Errorf("two runs of %s make the same object %q", first.SHA[:8], name)
+		}
+		if !strings.Contains(name, first.RunID) {
+			t.Errorf("object %q does not carry the run id %q", name, first.RunID)
+		}
+	}
+}
+
+// TestDockerRenderTeardownRunsAfterAFailedStart is the caller contract: the
+// runner step fails, and the run still removes every object the steps before it
+// made, each one named for this run alone (gt-74ix9).
+func TestDockerRenderTeardownRunsAfterAFailedStart(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Docker{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	// Run the start steps as a caller does, up to and including the runner step
+	// that fails.
+	made := map[string]bool{}
+	for _, step := range plan.Steps {
+		if step.Teardown {
+			break
+		}
+		if name, ok := valueAfter(step.Argv, "--name"); ok {
+			made[name] = true
+			if name == runnerName(spec) {
+				break
+			}
+			continue
+		}
+		if step.Argv[3] == "network" || step.Argv[3] == "volume" {
+			made[step.Argv[len(step.Argv)-1]] = true
+		}
+	}
+	if len(made) < 3 {
+		t.Fatalf("the run failed after making %d objects, want the network, the volume and the sidecar or the runner: %v", len(made), made)
+	}
+	teardown := plan.Teardown()
+	if len(teardown) != 4 {
+		t.Fatalf("the plan renders %d teardown steps, want one per object a dind run makes: %v", len(teardown), teardown)
+	}
+	removed := map[string]bool{}
+	for _, step := range teardown {
+		name := step.Argv[len(step.Argv)-1]
+		removed[name] = true
+		if !strings.Contains(name, spec.RunID) {
+			t.Errorf("teardown step %v names %q, which a concurrent run of this rig and sha could own", step.Argv, name)
+		}
+	}
+	for name := range made {
+		if !removed[name] {
+			t.Errorf("%s was made before the runner step failed and is never removed", name)
+		}
+	}
+}
+
+// TestTiersOrDefaultIsTheSweepsOwnDefault holds a run naming no tier to the tiers
+// a tier-sweep command line naming none runs, so the two lists cannot drift and a
+// run through the runner tests what a host sweep tests (gt-74ix9).
+func TestTiersOrDefaultIsTheSweepsOwnDefault(t *testing.T) {
+	t.Parallel()
+	var host tiersweep.Host
+	host.Env = func(string) string { return "" }
+	host.MkdirTemp = func(string, string) (string, error) { return "/tmp/tier-sweep.test", nil }
+	host.MkdirAll = func(string, fs.FileMode) error { return nil }
+	opts, err := tiersweep.ParseOptions(nil, host)
+	if err != nil {
+		t.Fatalf("resolving the sweep's default tiers: %v", err)
+	}
+	got := Spec{}.TiersOrDefault()
+	if !slices.Equal(got, opts.Tiers) {
+		t.Errorf("a Spec naming no tier runs %q, but a tier-sweep command line naming none runs %q", got, opts.Tiers)
 	}
 }
 

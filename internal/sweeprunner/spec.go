@@ -30,8 +30,8 @@ type Spec struct {
 	CPUs int
 	// MemoryGB is the runner's memory limit in GB, 2 to 48.
 	MemoryGB int
-	// Tiers are the tiers to run, in the order given. Empty runs every tier the
-	// sweep offers (TiersOrDefault).
+	// Tiers are the tiers to run, in the order given. Empty runs the tiers a
+	// tier-sweep command line naming none runs (TiersOrDefault).
 	Tiers []string
 	// Jobs is how many packages the run tests at once, 1 to 16.
 	Jobs int
@@ -45,8 +45,10 @@ type Spec struct {
 	// Docker API (internal/testutil starts Dolt through testcontainers). The
 	// runner never mounts the host's socket.
 	Dind bool
-	// RunID names this launch and must be unique to it: the dind data volume is
-	// named after it, so two runs never share one run's engine state (gt-74ix9).
+	// RunID names this launch and must be unique to it. Every container, network
+	// and volume the run makes carries it, so two runs of one rig and sha never
+	// name the same object and one run's teardown cannot remove another's
+	// (gt-74ix9).
 	RunID string
 	// Context is the Docker CLI context the steps run against (desktop-linux,
 	// colima-gt-sbx). It is a field so a render names its engine instead of
@@ -111,22 +113,25 @@ func (s Spec) Validate() error {
 	if !nameSegment(s.Context) {
 		return &FieldError{Field: "context", Rule: fmt.Sprintf("%q is not one Docker context name", s.Context)}
 	}
-	if s.Dind && s.RunID == "" {
-		return &FieldError{Field: "runID", Rule: "is empty; a dind run's data volume is named for its run alone"}
-	}
-	if s.RunID != "" && !nameSegment(s.RunID) {
-		return &FieldError{Field: "runID", Rule: fmt.Sprintf("%q is not one name segment", s.RunID)}
+	if !nameSegment(s.RunID) {
+		return &FieldError{Field: "runID", Rule: fmt.Sprintf("%q is not one name segment; every object the run makes is named after it", s.RunID)}
 	}
 	return nil
 }
 
-// TiersOrDefault returns the tiers to run, in order: the Spec's own, or every
-// tier the sweep offers, in the sweep's own order, when the Spec names none.
+// defaultTiers are the tiers a run naming none tests: the same three, in the
+// same order, that a tier-sweep command line naming none runs, so a sweep
+// through the runner tests what a host sweep tests. A test resolves the sweep's
+// own default and holds the two lists equal (gt-74ix9).
+var defaultTiers = []string{tiersweep.TierShell, tiersweep.TierIntegration, tiersweep.TierRace}
+
+// TiersOrDefault returns the tiers to run, in order: the Spec's own, or
+// defaultTiers when the Spec names none.
 func (s Spec) TiersOrDefault() []string {
 	if len(s.Tiers) > 0 {
 		return s.Tiers
 	}
-	return []string{tiersweep.TierShell, tiersweep.TierIntegration, tiersweep.TierRace}
+	return append([]string(nil), defaultTiers...)
 }
 
 // nameSegment reports whether v can stand as one Docker name: non-empty, one

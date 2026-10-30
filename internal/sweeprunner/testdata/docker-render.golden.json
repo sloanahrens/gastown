@@ -7,7 +7,7 @@
       "network",
       "create",
       "--internal",
-      "gt-sweep-net-gastown-4f2a9c1e"
+      "gt-sweep-net-gastown-4f2a9c1e-mvv8asko"
     ]
   },
   {
@@ -28,10 +28,10 @@
       "run",
       "-d",
       "--name",
-      "gt-sweep-dind-gastown-4f2a9c1e",
+      "gt-sweep-dind-gastown-4f2a9c1e-mvv8asko",
       "--privileged",
       "--network",
-      "gt-sweep-net-gastown-4f2a9c1e",
+      "gt-sweep-net-gastown-4f2a9c1e-mvv8asko",
       "--network-alias",
       "sweep-dind",
       "--env",
@@ -50,7 +50,7 @@
       "run",
       "-d",
       "--name",
-      "gt-sweep-gastown-4f2a9c1e",
+      "gt-sweep-gastown-4f2a9c1e-mvv8asko",
       "--platform",
       "linux/arm64",
       "--cpus",
@@ -58,7 +58,7 @@
       "--memory",
       "24G",
       "--network",
-      "gt-sweep-net-gastown-4f2a9c1e",
+      "gt-sweep-net-gastown-4f2a9c1e-mvv8asko",
       "--env",
       "DOCKER_HOST=tcp://sweep-dind:2375",
       "--volume",
@@ -83,7 +83,7 @@
       "colima-gt-sbx",
       "rm",
       "-f",
-      "gt-sweep-gastown-4f2a9c1e"
+      "gt-sweep-gastown-4f2a9c1e-mvv8asko"
     ],
     "teardown": true
   },
@@ -94,7 +94,7 @@
       "colima-gt-sbx",
       "rm",
       "-f",
-      "gt-sweep-dind-gastown-4f2a9c1e"
+      "gt-sweep-dind-gastown-4f2a9c1e-mvv8asko"
     ],
     "teardown": true
   },
@@ -116,7 +116,7 @@
       "colima-gt-sbx",
       "network",
       "rm",
-      "gt-sweep-net-gastown-4f2a9c1e"
+      "gt-sweep-net-gastown-4f2a9c1e-mvv8asko"
     ],
     "teardown": true
   }
