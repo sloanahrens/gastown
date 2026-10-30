@@ -17,11 +17,6 @@ func TestUsagePanelDrawsThePayload(t *testing.T) {
 	draw := pageFunc(t, "costUsage")
 	for _, want := range []string{
 		`function costUsage(box, u, s) {`,
-		// The panel's header reads without opening the part: the DeepSeek
-		// estimate and the count of beads over twenty minutes.
-		`byClass.filter(r => isDeepSeek(r.model))`,
-		`text: "DeepSeek est. " + money(est) + " · " + over.length + (over.length === 1 ? " bead" : " beads") + " over 20m"`,
-		`warn: over.length > 0,`,
 		// A bead over twenty minutes is flagged in the page's warning style.
 		`[r.bead, "warnc"]`,
 		`r.test_runs + " runs, " + r.failed_test_runs + " failed"`,
@@ -65,7 +60,7 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 
 	// The unavailable branch returns before any list is drawn.
 	branch := draw[strings.Index(draw, `if (u.unavailable) {`):]
-	if ret, list := strings.Index(branch, "return {text:"), strings.Index(branch, "const byClass"); ret < 0 || list < 0 || ret > list {
+	if ret, list := strings.Index(branch, "return;"), strings.Index(branch, "const byClass"); ret < 0 || list < 0 || ret > list {
 		t.Error("an unreadable record set falls through to the lists")
 	}
 

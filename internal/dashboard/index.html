@@ -3249,9 +3249,9 @@ function drawOverseerQueue(panel, s) {
 
 // The Usage part of the Cost panel: what the town spent over the last day, from
 // the records the usage scan writes. Each block is a fold of its own, closed by
-// default, with a one-line summary on its heading; the Cost panel's header
-// carries the day's DeepSeek estimate and how many beads ran over twenty
-// minutes. Read-only.
+// default, with a one-line summary on its heading; the Cost panel's expanded
+// line above the table carries today's spend across the providers, the DeepSeek
+// estimate, and, as a badge, how many beads ran over twenty minutes. Read-only.
 //
 // Money and tokens are in separate columns: Spend ($) holds dollars and is
 // "est." for DeepSeek rows only, since the scan estimates no cost for Claude
@@ -3287,21 +3287,14 @@ function costTable(heads, rows) {
   return t;
 }
 // costUsage draws the part into box from the usage payload u and the whole
-// state s, and returns what the panel's caption says of it: text, the tooltip
-// that explains the text, and whether it is a warning (warn) or a failure (bad).
+// state s. Its figures and problems are in the expanded panel, not the header.
 function costUsage(box, u, s) {
-  if (!u) { box.append(el("div", "empty", "reading…")); return {}; }
+  if (!u) { box.append(el("div", "empty", "reading…")); return; }
   if (u.unavailable) {
     box.append(el("div", "badc", "usage records unreadable"));
-    return {text: "usage unreadable", bad: true};
+    return;
   }
   const byClass = u.by_class_model || [], deep = u.deep_review_runs || [], top = u.top_beads || [], over = u.over20 || [];
-  const est = byClass.filter(r => isDeepSeek(r.model)).reduce((sum, r) => sum + (r.est_cost_usd || 0), 0);
-  const caption = {
-    text: "DeepSeek est. " + money(est) + " · " + over.length + (over.length === 1 ? " bead" : " beads") + " over 20m",
-    title: "DeepSeek spend estimated from the usage records over the last " + (u.window || "24h") + "; beads that ran over twenty minutes in the last 48 hours",
-    warn: over.length > 0,
-  };
 
   const win = u.window || "24h";
   const table = costTable;
@@ -3383,7 +3376,6 @@ function costUsage(box, u, s) {
     quality.body.append(el("div", "empty" + (old ? " warnc" : ""), "records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")));
   }
   quality.body.append(el("div", "empty", counts));
-  return caption;
 }
 
 // costFolds keeps each fold of the Cost panel's usage part by its key, built once
@@ -3541,8 +3533,10 @@ const BUDGET_SPENT = /spent ([\d.,]+) ([A-Za-z]{3}) of its ([\d.,]+) [A-Za-z]{3}
 const BUDGET_PCT = /(\d+(?:\.\d+)?)% of the budget/;
 function costGCP(box, c) {
   if (!c) return;
-  if (c.state === "error") { box.append(el("div", "badc", "GCP budget · cloud read failed" + (c.note ? " · " + c.note : ""))); return; }
-  if (c.state === "missing") { if (!c.no_patrol) box.append(el("div", "empty", "GCP budget · no patrol report")); return; }
+  if (c.state === "error") { box.append(el("div", "badc", "GCP: unreadable" + (c.note ? " · " + c.note : ""))); return; }
+  if (c.state === "missing") { if (!c.no_patrol) box.append(el("div", "warnc", "GCP: no data")); return; }
+  // A state the page does not know is a reading that did not say, not a quiet budget.
+  if (c.state !== "fresh" && c.state !== "overdue") { box.append(el("div", "warnc", "GCP: no data")); return; }
   const rows = (c.findings || []).filter(f => f.kind === "budget_alert");
   const late = c.state === "overdue" ? " · patrol overdue" : "";
   for (const f of rows) {
@@ -4198,21 +4192,137 @@ function costChartFold(box, kind, chart, providers) {
   box.append(f.sec);
 }
 
+// costHeaderParts is the Cost panel's collapsed header, the three things the
+// operator watches while he looks at the rest of the page: DeepSeek's balance
+// and its hourly spend, the Claude week's percent and its hourly spend, and the
+// age of the spend read. Every figure is a provider row's own value, and the
+// hourly one is the table's Last 1h column, so the header and the table cannot
+// disagree. A figure the row cannot give is drawn as "?", never left out and
+// never drawn as a zero. A provider the list does not name is not configured,
+// so it has no part; a list that did not arrive leaves both figures unknown. A
+// stale or failed read colours its parts and says so in the age part, since grey
+// figures alone must not pass as live ones.
+function costHeaderParts(s, d, r) {
+  const list = Array.isArray(s.cost_providers) ? s.cost_providers.filter(p => p && typeof p === "object") : null;
+  const row = id => list ? list.find(p => p.id === id) : null;
+  const deep = row("deepseek"), claude = row("claude");
+  const readCls = costReadClass(r);
+  const hourly = p => { const v = costNum(p && p.per_hour_1h); return v == null ? "?" : money(v) + "/h"; };
+  const parts = [];
+  if (!list || deep) {
+    const bal = costNum(deep && deep.balance);
+    parts.push({
+      text: "DeepSeek " + (bal == null ? "?" : money(bal)) + " · " + hourly(deep),
+      cls: readCls || COST_STATUS_CLASS[deep && deep.status] || "",
+      title: (deep && (deep.why || deep.status_text)) || "",
+    });
+  }
+  if (!list || claude) {
+    const pct = costNum(claude && claude.plan_pct);
+    parts.push({
+      text: "Claude " + (pct == null ? "?" : Math.round(pct) + "% (wk)") + " · " + hourly(claude),
+      cls: readCls || COST_STATUS_CLASS[claude && claude.status] || "",
+      // The limit's status is the row's text, shown on hover and never parsed.
+      title: (claude && (claude.why || claude.status_text)) || "",
+    });
+  }
+  const ago = r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : "read ?";
+  if (r && r.stale && r.error) parts.push({text: ago + " · read failed" + (deep && deep.why ? ": " + deep.why : ""), cls: "badc"});
+  else if (!d) parts.push({text: "no spend read", cls: "warnc"});
+  else if (r && r.stale) parts.push({text: ago + " · stale", cls: "warnc"});
+  else parts.push({text: ago});
+  return parts;
+}
+
+// costNum reads a figure the server sent, or null when there is none to read.
+const costNum = v => v == null || isNaN(Number(v)) ? null : Number(v);
+// costReadClass is the colour of a spend read that is not current, the same
+// rule paintsRead gives a pane's caption: red for a read that failed, amber for
+// one gone old, and none for a live reading.
+function costReadClass(r) { return r && r.stale ? (r.error ? "badc" : "warnc") : ""; }
+
+// paintCostHeader writes the header parts into note, one span each so a part
+// wears its own status colour. The three groups are set apart by a run of
+// non-breaking spaces, since each group's own figures are joined by " · ".
+function paintCostHeader(note, parts) {
+  note.replaceChildren();
+  parts.forEach((p, i) => {
+    if (i) note.append(document.createTextNode("\u00a0\u00a0\u00a0"));
+    const span = el("span", p.cls || "", p.text);
+    if (p.title) span.title = p.title;
+    note.append(span);
+  });
+}
+
+// costSummary is the expanded panel's line above the table, where the figures
+// the collapsed header no longer carries go, so the information moves rather
+// than goes. Today's total names cash and the plan's estimate apart; the
+// DeepSeek estimate and the beads over twenty minutes come from the usage scan;
+// the ledger time says how old the spend ledger is. An unreadable usage scan
+// says so, and the over-twenty count is a badge only when there is one to count.
+function costSummary(box, s, d, u) {
+  const rows = (Array.isArray(s.cost_providers) ? s.cost_providers : []).filter(p => p && typeof p === "object" && !p.why);
+  let cash = null, planEst = null;
+  for (const p of rows) {
+    const v = costNum(p.today);
+    if (v == null) continue;
+    if (p.kind === "plan") planEst = (planEst || 0) + v;
+    else cash = (cash || 0) + v;
+  }
+  const parts = [];
+  if (cash != null || planEst != null) {
+    // Cash spend and the Claude plan's estimate of today's tokens are different
+    // money, so the total names each rather than adding them under one word.
+    const bits = [];
+    if (cash != null) bits.push(money(cash) + " cash");
+    if (planEst != null) bits.push(money(planEst) + " plan est.");
+    parts.push(el("span", "", "today " + bits.join(" · ")));
+  }
+  if (u && u.unavailable) parts.push(el("span", "badc", "usage unreadable"));
+  else if (u && Array.isArray(u.by_class_model)) {
+    const est = u.by_class_model.filter(r => isDeepSeek(r.model)).reduce((sum, r) => sum + (costNum(r.est_cost_usd) || 0), 0);
+    const e = el("span", "", "DeepSeek est. " + money(est));
+    e.title = "DeepSeek spend estimated from the usage records over the last " + (u.window || "24h");
+    parts.push(e);
+  }
+  const over = u && !u.unavailable ? (u.over20 || []).length : 0;
+  if (over > 0) {
+    const b = el("span", "badge warnc", over + (over === 1 ? " bead" : " beads") + " over 20m");
+    b.title = "beads that ran over twenty minutes in the last 48 hours";
+    parts.push(b);
+  }
+  if (d && d.last_sample) parts.push(el("span", "", "ledger " + d.last_sample.replace("T", " ")));
+  if (!parts.length) return;
+  const line = el("div", "title");
+  parts.forEach((p, i) => { if (i) line.append(document.createTextNode(" · ")); line.append(p); });
+  box.append(line);
+}
+
 // renderCost draws the Cost panel. The table draws even without a spend report,
 // since its rows come from the other readers too. It sits outside the part a
 // stale spend read greys, so only the DeepSeek row, whose money that read feeds,
-// greys inside the table; the Claude and Jev rows stay clear. The GCP budget
-// line goes directly under the table, above the folded spend part, and the
-// charts stay in the greyed part.
+// greys inside the table; the Claude and Jev rows stay clear. The summary line
+// and the GCP budget line go above and under the table, and the charts stay in
+// the greyed part.
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
-  note.className = "r"; note.textContent = ""; note.title = "";
+  // The header starts every render with no status class: the colour is whatever
+  // this render's read earns, so a stale or failed read of the last render
+  // cannot outlast it.
+  note.className = "r";
   const d = s.spend, u = s.usage, r = readOf(s, "spend");
+  // The header is the collapsed line: DeepSeek's balance and hourly spend, the
+  // Claude week and its hourly spend, and the read's age. The ledger time goes
+  // in its tooltip, and the rest is in the expanded panel below.
+  paintCostHeader(note, costHeaderParts(s, d, r));
+  note.title = d && d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : "";
+  costSummary(box, s, d, u);
   costProviders(box, s.cost_providers, !!(r && r.stale));
   costGCP(box, s.cloud);
   const spendBox = el("div", "spendpart");
   box.append(spendBox);
+  // paintsRead colours the header from the same read the figures are read from.
   paintsRead(spendBox, note, r);
   // A usage scan that has not answered yet is reading, not missing.
   if (!d) spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + (u ? "" : "; usage still reading…")));
@@ -4220,17 +4330,9 @@ function renderCost(s) {
   const charts = s.cost_charts || {};
   costChartFold(spendBox, "daily", charts.daily, s.cost_providers);
   costChartFold(spendBox, "hourly", charts.hourly, s.cost_providers);
-  const usage = costUsage(box, u, s);
+  costUsage(box, u, s);
   costJevFold(box, s);
   costRework(box, s.rework);
-  // The caption carries the spend report's ledger sample and its read age,
-  // which the table's hover does not, beside the usage glance.
-  const spendWords = [d && d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null];
-  note.textContent = readCaption(r, [usage.text || null].concat(spendWords));
-  note.title = usage.title || "";
-  // A stale or failed spend read has already coloured the caption; the usage
-  // part only colours one that is otherwise plain.
-  if (note.className === "r" && (usage.bad || usage.warn)) note.className = "r " + (usage.bad ? "badc" : "warnc");
 }
 
 // An escalation's severity is why a row is where it is, so the panel colours
