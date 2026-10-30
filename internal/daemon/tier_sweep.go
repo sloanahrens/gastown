@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -98,9 +99,8 @@ const (
 	tierSweepShellDir = "internal/shelltier/cmd/shelltier"
 	tierSweepTierDir  = "cmd/tier-sweep"
 
-	// tierSweepScriptPath is the rig's own tier script, run with the tiers as
-	// arguments in a tree that has no Go command. It is the entry point the sweep
-	// ran before the Go commands replaced it (gt-tpg0p.102, gt-u560q.5).
+	// tierSweepScriptPath is the rig's own tier script. A checked-out tree that
+	// ships no Go command runs it with the tiers as arguments (resolveIn).
 	tierSweepScriptPath = "scripts/tier-sweep.sh"
 
 	// tierSweepNoCommandReason is the RED reason of a stage whose tree ships
@@ -462,20 +462,30 @@ func (s tierSweepStage) command() string {
 }
 
 // resolveIn picks the command the stage runs in a checked-out tree. has reports
-// whether the tree ships a path. The Go command runs where its directory is; a
-// tree without it runs the rig's script with the same tiers; a tree with
-// neither has no command, and the stage is RED, never skipped or GREEN. The
-// returned stage is what the cycle runs and reads: a script stage carries no
-// runner, so its output is read as the script's.
-func (s tierSweepStage) resolveIn(has func(rel string) bool) (tierSweepStage, bool) {
-	if has(s.goDir) {
-		return s, true
+// whether the tree ships a path, and an error when it cannot tell. The Go
+// command runs where its directory is; a tree without it runs the rig's script
+// with the same tiers; a tree with neither has no command (runnable is false),
+// and the stage is RED, never skipped or GREEN. A check that errors returns
+// that error, so a tree that cannot be read is not taken for one without the
+// command. The returned stage is what the cycle runs and reads: a script stage
+// carries no runner, so its output is read as the script's.
+func (s tierSweepStage) resolveIn(has func(rel string) (bool, error)) (st tierSweepStage, runnable bool, err error) {
+	goOK, err := has(s.goDir)
+	if err != nil {
+		return s, false, err
 	}
-	if has(tierSweepScriptPath) {
+	if goOK {
+		return s, true, nil
+	}
+	scriptOK, err := has(tierSweepScriptPath)
+	if err != nil {
+		return s, false, err
+	}
+	if scriptOK {
 		s.runner, s.script = "", true
-		return s, true
+		return s, true, nil
 	}
-	return s, false
+	return s, false, nil
 }
 
 // tierSweepStageResult is what one stage run produced.
@@ -510,8 +520,9 @@ type tierSweepSeams struct {
 	// run executes one stage in dir.
 	run func(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult
 	// treeHas reports whether the checked-out tree at dir ships rel, a file or a
-	// directory. Each stage's command is picked from it before the stage runs.
-	treeHas func(dir, rel string) bool
+	// directory, and an error when the tree cannot be read. Each stage's command
+	// is picked from it before the stage runs.
+	treeHas func(dir, rel string) (bool, error)
 	// beads opens the rig's writable bead store.
 	beads func(rig string) tierSweepBeadStore
 	// promote builds the rig's GitHub promotion owner, or nil when the rig
@@ -984,10 +995,19 @@ func tierSweepStages(rig string) []tierSweepStage {
 	}}
 }
 
-// tierSweepTreeHas is the production tree check: rel exists under dir.
-func tierSweepTreeHas(dir, rel string) bool {
+// tierSweepTreeHas is the production tree check: rel exists under dir. Only a
+// path that is not there means the tree does not ship it. Any other stat error
+// (a permission failure, or a parent that is a file) is returned, so the stage
+// is RED with that error rather than read as a tree without the command.
+func tierSweepTreeHas(dir, rel string) (bool, error) {
 	_, err := os.Stat(filepath.Join(dir, rel))
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 // tierSweepTierList names the tiers a cycle's stages will run, in the order it
@@ -1059,10 +1079,14 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		stageStart := d.clk().Now()
 		// The command is picked from the tree this cycle checked out, before the
 		// stage runs (gt-j0wki). A tree with neither the Go command nor the
-		// script runs nothing: its stage is RED with the reason, never skipped.
-		st, runnable := planned.resolveIn(func(rel string) bool { return treeHas(dir, rel) })
+		// script runs nothing, and a tree that cannot be read runs nothing
+		// either: the stage is RED with the reason, never skipped.
+		st, runnable, treeErr := planned.resolveIn(func(rel string) (bool, error) { return treeHas(dir, rel) })
 		res := tierSweepStageResult{exitCode: -1, ran: true, output: tierSweepNoCommandReason + "\n", reason: tierSweepNoCommandReason}
-		if runnable {
+		switch {
+		case treeErr != nil:
+			res.output, res.reason = treeErr.Error()+"\n", treeErr.Error()
+		case runnable:
 			res = run(ctx, dir, st)
 		}
 		stageElapsed := d.clk().Now().Sub(stageStart)

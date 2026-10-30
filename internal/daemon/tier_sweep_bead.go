@@ -398,13 +398,25 @@ func tierSweepUnitSubject(tier, unit string) string {
 	return "the " + tier + " tier"
 }
 
+// tierSweepRecordCommand is the command a shell record says ran. A record
+// written before Command existed ran the Go shell runner, since every tree ran
+// it then, so its check still names the runner. An empty Command on a red unit
+// with a real name is that legacy case: a stage that ran nothing files its
+// stand-in reason as the unit, and tierSweepCheckCommand returns empty for it.
+func tierSweepRecordCommand(tier string, ts tierSweepTierResult) string {
+	if tier == "shell" && ts.Command == "" {
+		return tierSweepShellCommand
+	}
+	return ts.Command
+}
+
 // tierSweepAcceptanceItem is the one criterion a polecat ticks: the narrow
 // re-run of the failing unit. When the sweep cannot name a command (a missing
 // log, no failing test line, a unit name it cannot trust) it asks the polecat
 // to read the log and re-run the test, which is still a check one worker can
 // do alone.
 func tierSweepAcceptanceItem(tier, unit string, ts tierSweepTierResult, red tierSweepUnitRed) string {
-	if cmd := tierSweepCheckCommand(tier, unit, ts.Command, red); cmd != "" {
+	if cmd := tierSweepCheckCommand(tier, unit, tierSweepRecordCommand(tier, ts), red); cmd != "" {
 		item := "- [ ] `" + cmd + "` passes on a worktree rebased onto main."
 		if tier != "shell" {
 			// A -run filter taken from a log line can match no test, and go test
