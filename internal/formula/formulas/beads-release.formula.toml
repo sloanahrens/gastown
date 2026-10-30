@@ -95,7 +95,7 @@ Sections:
 - ### Fixed
 - ### Documentation
 
-The bump script will stamp the date automatically.
+The bump command will stamp the date automatically.
 """
 
 [[steps]]

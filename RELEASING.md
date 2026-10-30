@@ -29,7 +29,8 @@ go run ./cmd/bump-version X.Y.Z --commit --tag --install
 ```
 
 The command never pushes. It commits and tags locally; the push of `main` and
-the tag is a separate step, run by the operator or the landing path.
+the tag is a separate step, run by the operator or the landing path. A `--push`
+argument is refused by `Parse` in `internal/bumpversion/options.go`.
 
 ### Option C: Manual
 

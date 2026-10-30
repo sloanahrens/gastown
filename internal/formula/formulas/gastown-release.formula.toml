@@ -171,7 +171,7 @@ Sections to use:
 
 Base entries on the git log from the previous step. Group related commits.
 
-The bump script will automatically create the version header with today's date.
+The bump command will automatically create the version header with today's date.
 """
 
 [[steps]]
@@ -213,7 +213,7 @@ grep '"version"' npm-package/package.json | head -1
 Both should show {{version}}.
 
 ## On mismatch:
-Do NOT proceed. Either the bump script failed or there's a bug.
+Do NOT proceed. Either the bump command failed or there's a bug.
 - **Crew**: Investigate and fix manually
 - **Unattended**: Escalate immediately - version mismatch is a release blocker
 """
