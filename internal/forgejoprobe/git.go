@@ -27,7 +27,8 @@ var scrubbedVars = []string{"GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"}
 // command; it is the one process seam, so a test drives both failure paths
 // without a subprocess.
 type execGit struct {
-	run func(*exec.Cmd) error
+	run     func(*exec.Cmd) error
+	environ func() []string // the environment a child inherits; nil means os.Environ
 }
 
 // NewGit returns the production Git.
@@ -40,7 +41,11 @@ func NewGit() Git {
 func (g execGit) Run(dir string, env []string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = gitEnv(append(os.Environ(), env...))
+	inherited := os.Environ
+	if g.environ != nil {
+		inherited = g.environ
+	}
+	cmd.Env = gitEnv(append(inherited(), env...))
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

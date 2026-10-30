@@ -398,25 +398,33 @@ func TestPushRedactsEveryForm(t *testing.T) {
 
 // TestPushChildrenNeverInheritTheTokens pins the environment of every git the
 // Pusher starts: none carries the probe's credentials or a repository pin, even
-// when the probe's own environment holds them. The four git calls are the
-// rev-parse, the worktree add, the push and the worktree remove. t.Setenv keeps
-// this test sequential.
+// when the probe's own environment holds them. The environment is a fake, so
+// the test reads no real one. The four git calls are the rev-parse, the
+// worktree add, the push and the worktree remove.
 func TestPushChildrenNeverInheritTheTokens(t *testing.T) {
-	t.Setenv("GT_AUTH_FORGEJO_TOKEN", "broker-token")
-	t.Setenv("FORGEJO_ADMIN_TOKEN", "admin-token")
-	t.Setenv("FOO_TOKEN", "foo-token")
-	t.Setenv("GIT_DIR", "/elsewhere/.git")
-	t.Setenv("GIT_INDEX_FILE", "/elsewhere/index")
-	t.Setenv("GIT_WORK_TREE", "/elsewhere/tree")
+	t.Parallel()
+	inherited := []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=/home/furiosa",
+		"GT_AUTH_FORGEJO_TOKEN=broker-token",
+		"FORGEJO_ADMIN_TOKEN=admin-token",
+		"FOO_TOKEN=foo-token",
+		"GIT_DIR=/elsewhere/.git",
+		"GIT_INDEX_FILE=/elsewhere/index",
+		"GIT_WORK_TREE=/elsewhere/tree",
+	}
 	scrubbed := []string{"GT_AUTH_FORGEJO_TOKEN", "FORGEJO_ADMIN_TOKEN", "FOO_TOKEN", "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"}
 
 	var argvs [][]string
 	var envs [][]string
-	g := execGit{run: func(cmd *exec.Cmd) error {
-		argvs = append(argvs, cmd.Args[1:])
-		envs = append(envs, cmd.Env)
-		return nil
-	}}
+	g := execGit{
+		run: func(cmd *exec.Cmd) error {
+			argvs = append(argvs, cmd.Args[1:])
+			envs = append(envs, cmd.Env)
+			return nil
+		},
+		environ: func() []string { return inherited },
+	}
 	var logs []string
 	p := pushPusher(g, true, &logs)
 	if _, err := p.Push(pushSHA); err != nil {
