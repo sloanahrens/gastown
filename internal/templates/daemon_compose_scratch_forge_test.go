@@ -237,6 +237,38 @@ func TestRenderDaemonCompose_ScratchForgeServicesMountDeclaredVolumes(t *testing
 	}
 }
 
+// Since the forge's services are not dependencies of daemon, `up` must name
+// them and so reads the list: a service added to the body without the list
+// would leave `up` not starting it, and a name the body dropped would make
+// `up` fail.
+func TestRenderDaemonCompose_ScratchForgeServicesAreTheServicesTheBodyAdds(t *testing.T) {
+	t.Parallel()
+	_, plain := render(t, scratchSpec())
+	_, forge := render(t, forgeSpec())
+
+	var added []string
+	for name := range forge.Services {
+		if _, ok := plain.Services[name]; !ok {
+			added = append(added, name)
+		}
+	}
+	want := templates.ScratchForgeServices(forgeSpec())
+	slices.Sort(added)
+	slices.Sort(want)
+	if !slices.Equal(added, want) {
+		t.Errorf("the forge render adds services %q, ScratchForgeServices names %q", added, want)
+	}
+}
+
+// A scratch spec without the forge names no service, so `up` starts the daemon
+// alone rather than failing on a service the file does not declare.
+func TestScratchForgeServices_NamesNothingWithoutTheForge(t *testing.T) {
+	t.Parallel()
+	if got := templates.ScratchForgeServices(scratchSpec()); got != nil {
+		t.Errorf("ScratchForgeServices(no forge) = %q, want nil", got)
+	}
+}
+
 // The scratch Forgejo publishes exactly its two ports, on loopback and on the
 // ports the spec names; nothing else in the stack publishes anything.
 func TestRenderDaemonCompose_ScratchForgePublishesOnlyItsTwoPortsOnLoopback(t *testing.T) {

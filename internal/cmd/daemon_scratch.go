@@ -148,7 +148,7 @@ func runDaemonScratch(ctx context.Context, action string, f scratchFlags, d scra
 		if err := checkScratchRoot(f.root, d); err != nil {
 			return err
 		}
-		start := append([]string{"up", "-d", "daemon"}, scratchForgeServices(spec)...)
+		start := append([]string{"up", "-d", "daemon"}, templates.ScratchForgeServices(spec)...)
 		sup := containerDeploySupervisor{start: func() ([]string, error) { return scratchComposeArgv(f, start...), nil }, container: f.container}
 		deployer := daemonimage.Deployer{Run: d.run, Environ: d.environ}
 		return deployer.Deploy(ctx, sup, f.composeFile, spec)
@@ -246,21 +246,6 @@ func scratchForge(p forgePorts) (scratchForgeFields, error) {
 		return scratchForgeFields{}, fmt.Errorf("--forge-ssh-port %d is given without --forge-http-port: the scratch forge takes both its host ports, or neither for no forge", p.sshPort)
 	}
 	return scratchForgeFields{}, nil
-}
-
-// scratchForgeServices are the forge's services `up` names beside the daemon.
-// They are not dependencies of daemon, so naming daemon alone would leave the
-// forge stopped; compose starts each one's own dependencies from there.
-func scratchForgeServices(spec templates.ComposeSpec) []string {
-	if !spec.ScratchForge {
-		return nil
-	}
-	return []string{
-		templates.ScratchForgejoService,
-		templates.ScratchForgejoDBService,
-		templates.ScratchForgeDindService,
-		templates.ScratchForgeRunnerService,
-	}
 }
 
 // validateScratchNames refuses a project or container name the scratch project
