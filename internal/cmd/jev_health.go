@@ -1,0 +1,228 @@
+package cmd
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"text/tabwriter"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/jev/health"
+	"github.com/steveyegge/gastown/internal/workspace"
+)
+
+var jevHealthJSON bool
+
+var jevHealthCmd = &cobra.Command{
+	Use:   "health",
+	Short: "Show whether each Jev battery is collecting data",
+	Long: `Judge every Jev battery from the files it writes, one row per battery: when
+it last passed, its lines in the last 24 hours against the median of the seven
+days before, its calls in the usage ledger, and the share of its last day's
+lines that carry no answers.
+
+A battery is ok; disabled, when patrols.<name> is off; idle by design, for the
+batteries only an event writes (progress, failcause, and targets while
+scheduled_slings is off), where a quiet log is expected; stale, for a
+continuous battery more than 45 minutes behind; late, for a weekly battery
+more than 8 days behind; low, when a battery with a median of 20 or more lines
+a day wrote under a quarter of it; or unanswered, when over half of its last
+day's lines carry no answers.
+
+The exit status is 1 when any enabled battery that is not idle by design is
+stale, late, low or unanswered, and 0 otherwise, so one command answers
+whether Jev is collecting today. --json prints the same rows.
+
+Examples:
+  gt jev health
+  gt jev health --json`,
+	Args: cobra.NoArgs,
+	RunE: runJevHealth,
+}
+
+func init() {
+	jevHealthCmd.Flags().BoolVar(&jevHealthJSON, "json", false, "Print the rows as JSON")
+	jevCmd.AddCommand(jevHealthCmd)
+}
+
+func runJevHealth(cmd *cobra.Command, _ []string) error {
+	err := jevHealthInTown(cmd.OutOrStdout(), workspace.FindFromCwdOrError, jevHealthJSON, time.Now())
+	if _, ok := IsSilentExit(err); ok {
+		// The exit status is the verdict; cobra must not print it as an error.
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	}
+	return err
+}
+
+// jevHealthInTown resolves the town through findTown and prints the report.
+func jevHealthInTown(out io.Writer, findTown func() (string, error), asJSON bool, now time.Time) error {
+	townRoot, err := findTown()
+	if err != nil {
+		return fmt.Errorf("finding the town root: %w", err)
+	}
+	return jevHealthReport(out, townRoot, asJSON, now)
+}
+
+// jevHealthDoc is the --json document: the same rows the table prints.
+type jevHealthDoc struct {
+	Batteries []health.Row `json:"batteries"`
+}
+
+// jevHealthReport reads the town's patrol config, Jev logs, cursors and usage
+// ledger, then prints and judges every battery.
+func jevHealthReport(out io.Writer, townRoot string, asJSON bool, now time.Time) error {
+	cfg, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return fmt.Errorf("reading the patrol config: %w", err)
+	}
+	ledger, err := jevHealthLedger(townRoot, now)
+	if err != nil {
+		return err
+	}
+	inputs, err := jevHealthInputs(townRoot)
+	if err != nil {
+		return err
+	}
+	rows := health.Report(jevHealthConfig(cfg), inputs, ledger, now)
+	if asJSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(jevHealthDoc{Batteries: rows}); err != nil {
+			return err
+		}
+	} else if err := writeJevHealthTable(out, rows); err != nil {
+		return err
+	}
+	if health.ExitFails(rows) {
+		return NewSilentExit(1)
+	}
+	return nil
+}
+
+// jevHealthConfig reads whether the town turned on each battery's patrol.
+func jevHealthConfig(cfg *daemon.DaemonPatrolConfig) health.Config {
+	out := health.Config{
+		Enabled:         make(map[string]bool, len(health.Batteries)),
+		ScheduledSlings: daemon.IsPatrolEnabled(cfg, "scheduled_slings"),
+	}
+	for _, b := range health.Batteries {
+		out.Enabled[b.ConfigKey] = jevBatteryEnabled(cfg, b.ConfigKey)
+	}
+	return out
+}
+
+// jevBatteryEnabled reads one patrol key's enabled flag. jev_targets is read
+// by the deep-review script rather than by a daemon patrol, so IsPatrolEnabled
+// does not know the key and would answer with the default, on, for a block the
+// operator turned off.
+func jevBatteryEnabled(cfg *daemon.DaemonPatrolConfig, key string) bool {
+	if key == "jev_targets" {
+		return cfg != nil && cfg.Patrols != nil && cfg.Patrols.JevTargets != nil && cfg.Patrols.JevTargets.Enabled
+	}
+	return daemon.IsPatrolEnabled(cfg, key)
+}
+
+// jevHealthInputs reads every battery's files, keyed by battery name.
+func jevHealthInputs(townRoot string) (map[string]health.Input, error) {
+	inputs := make(map[string]health.Input, len(health.Batteries))
+	for _, b := range health.Batteries {
+		in, err := jevHealthInput(townRoot, b)
+		if err != nil {
+			return nil, err
+		}
+		inputs[b.Name] = in
+	}
+	return inputs, nil
+}
+
+// jevHealthInput reads one battery's cursor and log.
+func jevHealthInput(townRoot string, b health.Battery) (health.Input, error) {
+	var in health.Input
+	if b.CursorPath != nil {
+		t, ok, err := jevFileModTime(b.CursorPath(townRoot))
+		if err != nil {
+			return health.Input{}, err
+		}
+		in.Cursor, in.HasCursor = t, ok
+	}
+	data, err := jevReadFile(b.LogPath(townRoot))
+	if err != nil {
+		return health.Input{}, err
+	}
+	in.Log = health.ParseLog(data)
+	return in, nil
+}
+
+// jevHealthLedger counts every caller's calls in the last day from the usage
+// ledger, where a missing ledger is no calls and not an error.
+func jevHealthLedger(townRoot string, now time.Time) (map[string]int, error) {
+	rep, err := jev.ReadSpend(jev.UsageLedgerPath(townRoot), now.Add(-health.Window), now, 0)
+	if err != nil {
+		return nil, err
+	}
+	calls := make(map[string]int, len(rep.ByCaller))
+	for caller, spend := range rep.ByCaller {
+		calls[caller] = spend.Calls
+	}
+	return calls, nil
+}
+
+// jevReadFile reads a file a battery may not have written yet, where absent is
+// empty and any other error fails the command rather than reading a battery as
+// quiet.
+func jevReadFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the path is the town's Jev runtime directory
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// jevFileModTime is a file's modification time, and false when it is absent.
+func jevFileModTime(path string) (time.Time, bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return info.ModTime(), true, nil
+}
+
+// writeJevHealthTable prints one row per battery in table order.
+func writeJevHealthTable(w io.Writer, rows []health.Row) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "BATTERY\tENABLED\tCADENCE\tLAST PASS\tLINES 24H\tMEDIAN 7D\tLEDGER 24H\tNO ANSWERS\tSTATUS\tREASON")
+	for _, r := range rows {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%.0f%%\t%s\t%s\n",
+			r.Name, yesNo(r.Enabled), r.Cadence, lastPassCell(r), r.Lines24, r.Median7,
+			r.LedgerCalls, r.NoAnswerShare*100, r.Status, r.Reason)
+	}
+	return tw.Flush()
+}
+
+// lastPassCell prints a row's last pass in UTC, or "-" when it has none.
+func lastPassCell(r health.Row) string {
+	if r.LastPass == nil {
+		return "-"
+	}
+	return r.LastPass.UTC().Format("2006-01-02 15:04Z")
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
