@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -86,7 +87,7 @@ func TestIntegrationWaitForDoltReady_ServerListening(t *testing.T) {
 	writeTownDoltPort(t, townRoot, port)
 
 	start := time.Now()
-	waitForDoltReady(townRoot)
+	waitForDoltReady(townRoot, io.Discard)
 	elapsed := time.Since(start)
 
 	if elapsed > 2*time.Second {
@@ -99,7 +100,7 @@ func TestIntegrationWaitForDoltReady_GracefulDegradation(t *testing.T) {
 	// The wrapper should log a warning and continue (graceful degradation).
 	// Uses a town root with no server metadata so it returns immediately.
 	townRoot := t.TempDir()
-	waitForDoltReady(townRoot) // Should not panic
+	waitForDoltReady(townRoot, io.Discard) // Should not panic
 
 	// Also verify the underlying doltserver.WaitForReady detects unreachable servers.
 	// Use bind-then-close to find a guaranteed-free port. (review finding #4)

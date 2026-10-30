@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -59,17 +58,16 @@ func TestMaxConcurrentAgentStarts_Constant(t *testing.T) {
 // Verifies that gt up detects and recovers orphaned hooked beads after crash.
 // =============================================================================
 
+// TestWaitForDoltReady_NoServerMode: a town with no server-mode metadata has
+// nothing to wait for, so the wait reports success and gt up says nothing. A
+// town with no configured endpoint is the case that pins it: had the wait gone
+// on to probe, it would have reported ErrNoEndpoint as a warning (gt-zou1n).
 func TestWaitForDoltReady_NoServerMode(t *testing.T) {
 	t.Parallel()
-	// When no server mode metadata exists, waitForDoltReady should not block.
-	townRoot := t.TempDir()
-
-	start := time.Now()
-	waitForDoltReady(townRoot)
-	elapsed := time.Since(start)
-
-	if elapsed > 1*time.Second {
-		t.Errorf("waitForDoltReady took %v with no server mode, should return immediately", elapsed)
+	var warn bytes.Buffer
+	waitForDoltReady(t.TempDir(), &warn)
+	if warn.Len() != 0 {
+		t.Fatalf("a town with no server mode warned: %q", warn.String())
 	}
 }
 

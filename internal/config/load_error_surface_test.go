@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -76,18 +80,48 @@ func TestOverseerDetectionKeepsAnUnparseableFile(t *testing.T) {
 
 // TestOverseerDetectionCommandsAreTimeBounded: detection commands run inside
 // read-only paths, so a wedged one must not outlive its deadline (gt-ptysu).
-// The 100ms deadline stands in for overseerDetectTimeout, which
-// runOverseerDetection installs, so the proof costs 100ms rather than 5s.
+// The child records its pid and stops itself before the deadline, so the
+// proof is that the call returned the deadline error and the pid is gone —
+// not that the call was quick on a quiet host (gt-ddp7c).
 func TestOverseerDetectionCommandsAreTimeBounded(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		//testpolicy:allow no-skip — /bin/sh is the wedged child; Windows has none
+		t.Skip("the wedged child is a /bin/sh process")
+	}
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	// The deadline only has to outlast the child's own start, so it is a
+	// second, not the detection timeout runOverseerDetection installs.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	start := time.Now()
-	if _, err := runDetectionCommand(ctx, "", "/bin/sleep", "3"); err == nil {
-		t.Fatal("runDetectionCommand(ctx, sleep 3) = nil error, want the deadline to cut it")
+	done := make(chan error, 1)
+	go func() {
+		_, err := runDetectionCommand(ctx, "", "/bin/sh", "-c", "echo $$ > "+pidFile+"; kill -STOP $$")
+		done <- err
+	}()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(time.Minute): //testpolicy:allow no-sleep — a hang guard only: the deadline the call must enforce is this test's subject, so this fails a helper that never returns at all
+		t.Fatal("runDetectionCommand never returned: the wedged command was not killed at the deadline")
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("took %v, want it cut off at the 100ms deadline", elapsed)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runDetectionCommand = %v, want the deadline error", err)
+	}
+	pidText, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatalf("the wedged child never recorded its pid: %v", readErr)
+	}
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(pidText)))
+	if convErr != nil {
+		t.Fatalf("the wedged child wrote pid %q: %v", pidText, convErr)
+	}
+	// A stopped process still answers signal 0; only a kill makes it answer
+	// ESRCH, so this is the deadline having killed the child rather than the
+	// call returning beside it.
+	if sigErr := syscall.Kill(pid, 0); !errors.Is(sigErr, syscall.ESRCH) {
+		t.Fatalf("the wedged child %d was not killed at the deadline (signal 0 = %v)", pid, sigErr)
 	}
 }

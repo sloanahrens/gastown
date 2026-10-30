@@ -25,11 +25,19 @@ func runOverseerDetection(dir, name string, args ...string) ([]byte, error) {
 }
 
 // runDetectionCommand runs one detection command to completion or ctx's
-// deadline, whichever comes first.
+// deadline, whichever comes first. A call the deadline ended reports ctx's
+// error rather than the kill signal exec returns for the child, the way
+// runUpgradeHealCommand does: the deadline is what ended the call.
 func runDetectionCommand(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	return cmd.Output()
+	out, err := cmd.Output()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return out, fmt.Errorf("%w: %w", ctxErr, err)
+		}
+	}
+	return out, err
 }
 
 // OverseerConfig represents the human operator's identity: mayor/town.json's

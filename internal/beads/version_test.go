@@ -121,8 +121,8 @@ func TestSchemaLevelEndsWithTheCallersBudget(t *testing.T) {
 		}
 		readCtx <- ctx
 		// A read that outlives the caller's budget is the failure under test,
-		// so the runner caps its own wait: a regression costs seconds, not the
-		// seam's minute.
+		// so the runner caps its own wait: a hang guard for a call no deadline
+		// ever ends, not the measurement.
 		select {
 		case <-ctx.Done():
 		case <-time.After(2 * time.Second):
@@ -132,15 +132,15 @@ func TestSchemaLevelEndsWithTheCallersBudget(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
+	callerDeadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("the test's own context has no deadline")
+	}
 	b := newBeads(beadsFields{workDir: t.TempDir(), isolated: true, noRoute: true, exec: run, callCtx: ctx, budget: time.Minute})
 
-	start := time.Now()
 	_, err := b.SchemaLevel()
 	if err == nil {
 		t.Fatal("SchemaLevel: want an error")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("the read took %s, want it ended by the callers %s budget", elapsed, budget)
 	}
 	if !errors.Is(err, ErrStoreUnavailable) {
 		t.Errorf("a deadline-killed read must wrap ErrStoreUnavailable: %v", err)
@@ -148,17 +148,21 @@ func TestSchemaLevelEndsWithTheCallersBudget(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("error %q does not name the deadline that ended the read", err)
 	}
+	var readUnder context.Context
 	select {
-	case callCtx := <-readCtx:
-		deadline, ok := callCtx.Deadline()
-		if !ok {
-			t.Fatal("the bd read ran with no deadline")
-		}
-		if until := time.Until(deadline); until > 2*budget {
-			t.Errorf("the read's deadline is %s away, want it parented on the callers %s budget", until, budget)
-		}
+	case readUnder = <-readCtx:
 	default:
 		t.Fatal("the bd read never reached the seam")
+	}
+	if !errors.Is(readUnder.Err(), context.DeadlineExceeded) {
+		t.Errorf("the read ran under a context the caller's deadline did not cancel: %v", readUnder.Err())
+	}
+	deadline, ok := readUnder.Deadline()
+	if !ok {
+		t.Fatal("the bd read ran with no deadline")
+	}
+	if !deadline.Equal(callerDeadline) {
+		t.Errorf("the read's deadline is %s, want the caller's %s", deadline, callerDeadline)
 	}
 }
 
