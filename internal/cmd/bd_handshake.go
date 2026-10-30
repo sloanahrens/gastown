@@ -132,10 +132,7 @@ func runTownStartHandshake(ctx context.Context, townRoot string) error {
 // a test drives the route decision with neither a bd nor a tracker, and with
 // w taking the warning for a route table the gate cannot read.
 func townHandshakeFor(ctx context.Context, townRoot string, bd, tracker func(context.Context, string) error, w io.Writer) error {
-	backend, err := townRouteBackend(townRoot, w)
-	if err != nil {
-		return fmt.Errorf("the store the town runs on cannot be decided: %w", err)
-	}
+	backend := townRouteBackend(townRoot, w)
 	switch backend {
 	case beads.BackendDolt:
 		return bd(ctx, townRoot)
@@ -158,21 +155,22 @@ func townHandshakeFor(ctx context.Context, townRoot string, bd, tracker func(con
 // command. That is not a hole, because the Dolt path is the bd handshake, so a
 // tracker town behind an unreadable table still fails closed, refused for a
 // missing bd build rather than for the table. Only a table that parses and
-// names a backend that is neither Dolt nor the tracker is an error here: that
-// backend was written down, and this gate does not know what it speaks.
-func townRouteBackend(townRoot string, w io.Writer) (string, error) {
+// names a backend that is neither Dolt nor the tracker is returned as written,
+// and the caller refuses it: that backend was written down, and this gate does
+// not know what it speaks.
+func townRouteBackend(townRoot string, w io.Writer) string {
 	routes, err := beads.LoadRoutes(beads.GetTownBeadsPath(townRoot))
 	if err != nil {
 		warnUnreadableRouteOnce(w, townRoot, err)
-		return beads.BackendDolt, nil
+		return beads.BackendDolt
 	}
 	townBeads := filepath.Clean(beads.GetTownBeadsPath(townRoot))
 	for _, r := range routes {
 		if filepath.Clean(filepath.Join(townRoot, r.Path, ".beads")) == townBeads {
-			return r.BackendName(), nil
+			return r.BackendName()
 		}
 	}
-	return beads.BackendDolt, nil
+	return beads.BackendDolt
 }
 
 // unreadableRouteWarned records the towns whose unreadable route table this
