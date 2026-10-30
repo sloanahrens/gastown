@@ -296,6 +296,23 @@ func TestMoleculeDepsRefusesAFailedExternalRead(t *testing.T) {
 	}
 }
 
+// TestMoleculeDepsRefusesAnExternalReadWithoutIssueID: a statement answer whose
+// header has no issue_id column cannot be read as molecule ids, so moleculeDeps
+// refuses rather than reading the bond set as empty.
+func TestMoleculeDepsRefusesAnExternalReadWithoutIssueID(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-work", Title: "work", Status: "open", Type: "task"})
+	db.OnSQL(func(string) ([][]string, error) {
+		return [][]string{{"id"}, {"gt-wisp-ext"}}, nil
+	})
+
+	got, err := fakeSlingStores(db).moleculeDeps("gt-work", t.TempDir())
+	if err == nil {
+		t.Fatalf("moleculeDeps() = %v, nil; want a refusal for a result without issue_id", got)
+	}
+}
+
 // TestMoleculeDepsExternalBondsFollowTheLocalOnes: a molecule bonded both ways
 // is listed once, in its local position; an external-only molecule trails.
 func TestMoleculeDepsExternalBondsFollowTheLocalOnes(t *testing.T) {
