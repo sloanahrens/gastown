@@ -165,17 +165,22 @@ RUN groupadd -g 10001 polecat \
 # runtime. A failing vet or test compile is logged and skipped: a module may
 # need system headers the image lacks. The chmod for uid 10001 is in this same
 # RUN, as one in a later layer would copy every file again.
+#
+# Nested example modules are skipped: they belong to no rig's presubmit build,
+# so the seed has no use for them, and a stale go.sum in one fails the whole
+# image (gt-9yqcc). The failure log is kept at 40 lines so the first error lines
+# reach the install log, not only the tail of `go`'s report.
 ENV GOCACHE=/tmp/gocache \
     GOMODCACHE=/tmp/gomodcache
 RUN --mount=type=bind,source=seed,target=/seed \
     export PATH="/usr/local/go/bin:$PATH" GOFLAGS="-p=4 -modcacherw" \
     && mkdir -p "$GOCACHE" "$GOMODCACHE" \
-    && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' | sort); do \
+    && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' -not -path '*/examples/*' | sort); do \
          dir=$(dirname "$gomod"); echo "seed: $dir"; \
          for step in "go mod download" "go build ./..." "go vet ./..." \
                      "go test -count=1 -run ^\$ ./..."; do \
            if ! (cd "$dir" && $step >/tmp/seed.log 2>&1); then \
-             echo "seed: '$step' failed in $dir:"; tail -n 5 /tmp/seed.log; \
+             echo "seed: '$step' failed in $dir:"; tail -n 40 /tmp/seed.log; \
              case "$step" in "go build ./..."|"go mod download") exit 1 ;; esac; \
            fi; \
          done; \

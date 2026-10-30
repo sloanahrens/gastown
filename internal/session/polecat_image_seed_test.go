@@ -51,6 +51,54 @@ func dockerfileEnv(t *testing.T) map[string]string {
 	return env
 }
 
+// seedRun returns the shell command of the Dockerfile's seed RUN.
+func seedRun(t *testing.T) string {
+	t.Helper()
+	const prefix = "RUN --mount=type=bind,source=seed,target=/seed "
+	var seed string
+	for _, in := range dockerfileInstructions(t) {
+		if cmd, ok := strings.CutPrefix(in, prefix); ok {
+			seed = cmd
+		}
+	}
+	if seed == "" {
+		t.Fatal("no seed RUN (RUN --mount=type=bind,source=seed,target=/seed ...) in deploy/polecat/Dockerfile")
+	}
+	return seed
+}
+
+// The seed builds every module it finds under /seed. Nested example modules are
+// in no rig's presubmit build, so the seed has no use for them, and one whose
+// go.sum has drifted fails the whole image: the beads pin's
+// examples/library-usage and examples/bd-example-extension-go did, on every
+// install from 10:28 (gt-9yqcc). So the walk skips them, as it already skips
+// testdata.
+func TestPolecatImageSeedSkipsExampleModules(t *testing.T) {
+	t.Parallel()
+	seed := seedRun(t)
+	find := seed
+	i := strings.Index(find, "find /seed -name go.mod")
+	if i < 0 {
+		t.Fatalf("the seed RUN does not walk the modules with `find /seed -name go.mod`:\n%s", seed)
+	}
+	find = find[i:]
+	if j := strings.Index(find, "| sort"); j >= 0 {
+		find = find[:j]
+	}
+	for _, excluded := range []string{"*/testdata/*", "*/examples/*"} {
+		want := "-not -path '" + excluded + "'"
+		if !strings.Contains(find, want) {
+			t.Errorf("the seed's walk lacks %q, so it builds the modules under %s: one bad go.sum there fails every install (gt-9yqcc)\n%s", want, excluded, find)
+		}
+	}
+	// The RUN's only report is this tail. At 5 lines a `go build` failure shows
+	// the closing lines of its report and not the error that caused them, which is
+	// all the 10:28 install log had.
+	if !strings.Contains(seed, "tail -n 40 /tmp/seed.log") {
+		t.Errorf("the seed RUN does not tail 40 lines of its failure log, so the install log cannot show the failing step's first error lines:\n%s", seed)
+	}
+}
+
 // The image carries seeded Go caches (gt-ieuvf) so a cold sandbox's presubmit
 // does not recompile its dependencies (devops: 967 compiles and a 4.8-10 GB peak
 // cold, 66 compiles and 1.2 GB seeded). The caches sit OUTSIDE /sandbox: the
