@@ -369,3 +369,33 @@ func TestPathWithin(t *testing.T) {
 		}
 	}
 }
+
+// render refuses what up refuses, with nothing printed: the command's own flag
+// checks (a missing --image) and the render's own (a scratch root that is the
+// live town).
+func TestDaemonScratchRenderRefuses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		edit func(r *daemonScratchRig)
+		want string
+	}{
+		{"no --image", func(r *daemonScratchRig) { r.flags.image = "" }, "--image is required"},
+		{"a root that is the live town", func(r *daemonScratchRig) { r.flags.root = r.flags.liveRoot }, "live town root"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newDaemonScratchRig(t)
+			tc.edit(r)
+
+			err := runDaemonScratch(context.Background(), "render", r.flags, r.deps)
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("render error = %v, want it to contain %q", err, tc.want)
+			}
+			if r.out.Len() != 0 || len(r.runs) != 0 || r.composeExists() {
+				t.Errorf("a refused render printed %d bytes, ran %d commands, wrote a file: %v", r.out.Len(), len(r.runs), r.composeExists())
+			}
+		})
+	}
+}
