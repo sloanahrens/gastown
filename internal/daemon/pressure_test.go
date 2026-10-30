@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -161,19 +162,50 @@ func TestWarnPressureScaleSpeaksAtStartOnce(t *testing.T) {
 	}
 }
 
-// With no cpuIdleFn the tier runs the real top. The reading depends on the
-// host, so the test holds the contract only: top is readable and the reading
-// is a percent. A host whose top cannot be read fails it, since the gate would
-// be blind there (gt-kc8v1).
+// With no cpuIdleFn the tier reads the idle share off top's own output, and a
+// top that cannot be run is an error rather than an idle host. The top is a
+// canned sample: a real read costs the host's load, not this test's time
+// (gt-kc8v1, gt-fbf5n).
 func TestHostCPUIdleProductionReadIsAPercent(t *testing.T) {
 	t.Parallel()
-	d, _ := newTestDaemon(t.TempDir())
-	idle, err := d.hostCPUIdle()
-	if err != nil {
-		t.Fatalf("production top read failed: %v", err)
+	tests := []struct {
+		name    string
+		top     func(context.Context) ([]byte, error)
+		want    float64
+		wantErr bool
+	}{
+		{
+			name: "top's last CPU line is the idle share",
+			top: func(context.Context) ([]byte, error) {
+				return []byte("CPU usage: 4.5% user, 0.0% sys, 95.5% idle\n"), nil
+			},
+			want: 95.5,
+		},
+		{
+			name:    "a top that cannot be run is an error",
+			top:     func(context.Context) ([]byte, error) { return nil, errors.New("no top here") },
+			wantErr: true,
+		},
 	}
-	if idle < 0 || idle > 100 {
-		t.Errorf("idle = %v, want a percent", idle)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newTestDaemon(t.TempDir())
+			d.hostTop = tt.top
+			got, err := d.hostCPUIdle()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("hostCPUIdle = %v, want an error from the unreadable top", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("hostCPUIdle failed: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("hostCPUIdle = %v, want the sample's %v", got, tt.want)
+			}
+		})
 	}
 }
 

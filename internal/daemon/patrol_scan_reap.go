@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -162,11 +164,13 @@ const unknownPolecats = -1
 
 // runRecoveryBatchWithin runs the rig's sweep under bound, the deadline
 // recoveryBatchBound gave a rig of polecats seats (unknownPolecats when the
-// seats could not be listed). A run the deadline kills names its elapsed time,
-// bound and seat count in its error, which is the line the reap pass writes for
-// every seat the batch could not answer.
+// seats could not be listed). The deadline runs on the daemon's clock (clk()),
+// so a test's fake clock decides when it fires rather than the host's load. A
+// run the deadline kills names its elapsed time, bound and seat count in its
+// error, which is the line the reap pass writes for every seat the batch could
+// not answer.
 func (h *patrolScanHost) runRecoveryBatchWithin(rig string, polecats int, bound time.Duration) reapBatch {
-	ctx, cancel := context.WithTimeout(h.d.ctxOrBackground(), bound)
+	ctx, cancel := clockwork.WithTimeout(h.d.ctxOrBackground(), h.d.clk(), bound)
 	defer cancel()
 	// --reconcile-cleanup is the only write check-recovery has; the tick
 	// writes nothing but the removal, so it is never passed.
@@ -198,7 +202,16 @@ func (h *patrolScanHost) runRecoveryBatchWithin(rig string, polecats int, bound 
 // off, as a context error or as a death by signal (ExitCode -1). A command that
 // failed with an exit status of its own as the deadline passed was not killed,
 // and its error is the answer.
+//
+// Done is read before Err: a clock-driven context's Err blocks until its Done
+// closes, so a deadline that has not passed has to be read off the channel
+// (gt-fbf5n).
 func killedByDeadline(ctx context.Context, err error) bool {
+	select {
+	case <-ctx.Done():
+	default:
+		return false
+	}
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return false
 	}

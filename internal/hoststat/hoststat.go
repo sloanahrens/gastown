@@ -121,6 +121,13 @@ func SampleCPUIdle(ctx context.Context) (float64, error) {
 	return sampleCPUIdle(ctx, hostProbes.top)
 }
 
+// SampleCPUIdleTop is SampleCPUIdle over the top output top returns, so a
+// caller that owns the host read takes this package's sample, timeout and
+// parse over it.
+func SampleCPUIdleTop(ctx context.Context, top func(context.Context) ([]byte, error)) (float64, error) {
+	return sampleCPUIdle(ctx, top)
+}
+
 // sampleCPUIdle is SampleCPUIdle over a top probe.
 func sampleCPUIdle(ctx context.Context, top func(context.Context) ([]byte, error)) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
