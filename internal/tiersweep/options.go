@@ -1,0 +1,161 @@
+// Package tiersweep is the hourly tier sweep: the tiers `make gate` does not
+// run (shell, integration, race), each reported as one summary line the daemon
+// parses byte for byte. It is the Go port of scripts/tier-sweep.sh, which stays
+// until the deletion bead (gt-tpg0p.97, gt-tpg0p.104).
+package tiersweep
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"strings"
+)
+
+// Name is the command's name: the binary, and the prefix of every line it
+// prints.
+const Name = "tier-sweep"
+
+// The tiers a run may name. A command line that names none runs them in this
+// order.
+const (
+	TierShell       = "shell"
+	TierIntegration = "integration"
+	TierRace        = "race"
+)
+
+// The environment names the sweep reads. SHELL_TESTS is not among them: the
+// shell tier is the shell-tier runner's, and it passes SHELL_TESTS there.
+const (
+	EnvSkip    = "TIER_SWEEP_SKIP"
+	EnvTimeout = "TIER_SWEEP_TIMEOUT"
+	EnvLogDir  = "TIER_SWEEP_LOGDIR"
+	EnvTrigger = "TIER_SWEEP_TRIGGER"
+	EnvTested  = "TIER_SWEEP_TESTED"
+)
+
+// The values the script supplies for a name it leaves unset.
+const (
+	// DefaultTimeout is TIER_SWEEP_TIMEOUT: the per-package go test timeout.
+	DefaultTimeout = "10m"
+	// DefaultTempDir is TMPDIR's stand-in when it is unset or empty.
+	DefaultTempDir = "/tmp"
+	// logDirPattern names the default log directory, the script's
+	// tier-sweep.XXXXXX under TMPDIR.
+	logDirPattern = "tier-sweep."
+)
+
+// UnknownTierExit is the code the command exits for a tier it does not offer:
+// the script's 2, reached once the tiers before the unknown one have printed
+// their summary lines.
+const UnknownTierExit = 2
+
+// Options is one tier-sweep invocation: the tiers a command line named and the
+// environment the run reads.
+type Options struct {
+	// Tiers are the tiers to run, in the order given. A command line that
+	// names none runs TierShell, TierIntegration and TierRace in that order.
+	// A tier the sweep does not offer stays here: the run reports it when it
+	// reaches it, so the tiers before it keep their summary lines.
+	Tiers []string
+	// SkipList is TIER_SWEEP_SKIP, the known-red entries SkipFor reads.
+	SkipList string
+	// Timeout is TIER_SWEEP_TIMEOUT, the per-package go test timeout.
+	Timeout string
+	// LogDir is TIER_SWEEP_LOGDIR: the directory the run writes one log per
+	// package into, created when a run reads its options.
+	LogDir string
+	// Trigger is TIER_SWEEP_TRIGGER as given; "0" turns the container trigger
+	// off, and every other value (including the default) leaves it on.
+	Trigger string
+	// Tested is TIER_SWEEP_TESTED, the commit a run tests.
+	Tested string
+}
+
+// UnknownTierError is a command line naming a tier the sweep does not offer.
+// Error is the line the command prints on stderr, which the daemon matches
+// with its tierSweepUnknownTierRE.
+type UnknownTierError struct{ Tier string }
+
+func (e *UnknownTierError) Error() string {
+	return fmt.Sprintf("%s: unknown tier %s (want %s, %s or %s)",
+		Name, e.Tier, TierShell, TierIntegration, TierRace)
+}
+
+// KnownTier reports whether name is one of the three tiers a sweep runs.
+func KnownTier(name string) bool {
+	switch name {
+	case TierShell, TierIntegration, TierRace:
+		return true
+	}
+	return false
+}
+
+// Host is what ParseOptions reads the process through: its environment and the
+// two directory calls the default log directory needs.
+type Host struct {
+	// Env reads an environment name. An empty value means the name is unset,
+	// the treatment the script's ${NAME:=default} gives one.
+	Env func(string) string
+	// MkdirTemp creates the default log directory, the script's
+	// `mktemp -d "$TMPDIR/tier-sweep.XXXXXX"`.
+	MkdirTemp func(dir, pattern string) (string, error)
+	// MkdirAll creates TIER_SWEEP_LOGDIR, the script's `mkdir -p`. It runs
+	// for the default directory too, where it finds the directory there.
+	MkdirAll func(path string, perm fs.FileMode) error
+}
+
+// ProcessHost reads the running process.
+var ProcessHost = Host{Env: os.Getenv, MkdirTemp: os.MkdirTemp, MkdirAll: os.MkdirAll}
+
+// ParseOptions resolves one tier-sweep command line and the environment it
+// reads, creating the log directory so no run starts without one.
+func ParseOptions(args []string, host Host) (Options, error) {
+	opts := Options{
+		Tiers:    append([]string(nil), args...),
+		SkipList: host.Env(EnvSkip),
+		Timeout:  orDefault(host.Env(EnvTimeout), DefaultTimeout),
+		Trigger:  host.Env(EnvTrigger),
+		Tested:   host.Env(EnvTested),
+	}
+	if len(opts.Tiers) == 0 {
+		opts.Tiers = []string{TierShell, TierIntegration, TierRace}
+	}
+	logDir := host.Env(EnvLogDir)
+	if logDir == "" {
+		dir, err := host.MkdirTemp(orDefault(host.Env("TMPDIR"), DefaultTempDir), logDirPattern)
+		if err != nil {
+			return Options{}, fmt.Errorf("%s: create the default log directory: %w", Name, err)
+		}
+		logDir = dir
+	}
+	if err := host.MkdirAll(logDir, 0o755); err != nil {
+		return Options{}, fmt.Errorf("%s: create log directory %s: %w", Name, logDir, err)
+	}
+	opts.LogDir = logDir
+	return opts, nil
+}
+
+// SkipFor reports how TIER_SWEEP_SKIP treats one package in one tier: whole
+// for a package it skips entirely, or the -skip pattern for a package that
+// runs some of its tests.
+func SkipFor(list, tier, pkg string) (whole bool, pattern string) {
+	prefix := tier + ":" + pkg
+	for _, entry := range strings.Fields(list) {
+		switch {
+		case entry == prefix:
+			return true, ""
+		case strings.HasPrefix(entry, prefix+":"):
+			return false, entry[len(prefix)+1:]
+		}
+	}
+	return false, ""
+}
+
+// orDefault is the script's ${name:=fallback}: an empty value takes the
+// fallback.
+func orDefault(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
