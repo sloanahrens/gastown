@@ -149,6 +149,22 @@ func (w Work) seat() string {
 	return w.Rig + "/" + polecat
 }
 
+// refusalSeat is the seat a refusal may end an attempt for: the polecat the
+// verified branch names, in the rig the landing worker is draining (w.Rig is
+// the worker's own rig, never a field of the ready note), or "" when the
+// branch is not a polecat's, the landing names no rig, or the ready note's
+// worker line disagrees with the branch.
+func refusalSeat(w Work) string {
+	if w.Rig == "" || authorkind.Kind(w.Branch) != authorkind.Polecat {
+		return ""
+	}
+	polecat := authorkind.Seat(w.Branch)
+	if w.Worker != "" && w.Worker != polecat {
+		return ""
+	}
+	return w.Rig + "/" + polecat
+}
+
 // FormatReadyNote renders the READY TO LAND block for w. Every value is
 // collapsed onto one line, so no field can inject a line the parser reads.
 // Submitted is left out while it is zero.

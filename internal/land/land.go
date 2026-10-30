@@ -2403,6 +2403,10 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.RecordErr = fmt.Errorf("reopening the bead: %w", err)
 		return rej
 	}
+	// Ends the polecat's attempt as the landing path does (closeAttempt).
+	if l.Landings != nil && !birdOwned {
+		l.Landings.closeAttempt(w.BeadID, w.Head, refusalSeat(w), w.Submitted, l.now())
+	}
 	return rej
 }
 
