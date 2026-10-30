@@ -133,6 +133,138 @@ func TestCrewSubmitRefusals(t *testing.T) {
 	}
 }
 
+// crewEnv is a getenv over a fixed map.
+func crewEnv(env map[string]string) func(string) string {
+	return func(k string) string { return env[k] }
+}
+
+// TestCrewActorFromEnv: a crew submission writes as the session's agent
+// identity, never as the git committer the shell carries, which is the human
+// when the human runs gt done by hand — a submission the landing worker
+// refuses (gt-i817y). A session naming no identity names "" here, so gt done
+// keeps the committer it always fell back to.
+func TestCrewActorFromEnv(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"BEADS_ACTOR is the session's identity", map[string]string{"BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
+		{"BEADS_ACTOR leads BD_ACTOR", map[string]string{"BD_ACTOR": "gastown/crew/sloan", "BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
+		{"BD_ACTOR is the identity when BEADS_ACTOR is unset", map[string]string{"BD_ACTOR": "gastown/crew/sloan"}, "gastown/crew/sloan"},
+		{"GT_ROLE names the crew member", map[string]string{"GT_ROLE": "town/crew/overseer"}, "town/crew/overseer"},
+		{"a bare crew role is its own identity", map[string]string{"GT_ROLE": "crew"}, "crew"},
+		{"a blank BEADS_ACTOR names no one", map[string]string{"BEADS_ACTOR": "  "}, ""},
+		{"no identity at all", map[string]string{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := crewActorFromEnv(crewEnv(tc.env)); got != tc.want {
+				t.Errorf("crewActorFromEnv(%v) = %q, want %q", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+// gitName is the committer a checkout's git config names, as newCrewDoneRun
+// reads it on the fallback path.
+func gitName(name string) func() string { return func() string { return name } }
+
+// crewRunFromEnv builds the run a crew session submits as through the same
+// constructor runDoneCrew calls, then gives it the submit harness's seams.
+func crewRunFromEnv(t *testing.T, h *submitHarness, env map[string]string, committer string) *doneRun {
+	t.Helper()
+	r := newCrewDoneRun(crewEnv(env), gitName(committer), h.r.cwd, h.townRoot, "gastown", crewTestBranch, "bd-source")
+	r.deps = h.r.deps
+	r.opts = h.r.opts
+	return r
+}
+
+// TestCrewSubmitCommentAuthoredBySessionActor: the Submitted-for-landing
+// comment the landing worker reads is added under BEADS_ACTOR when the
+// session has one, not under the git user.name the human's checkout carries
+// (gt-i817y).
+func TestCrewSubmitCommentAuthoredBySessionActor(t *testing.T) {
+	t.Parallel()
+	const actor = "town/crew/overseer"
+	h := newCrewSubmitHarness(t)
+	r := crewRunFromEnv(t, h, map[string]string{"BEADS_ACTOR": actor}, "Sloan Ahrens")
+	if err := submitCrewForLanding(r); err != nil {
+		t.Fatalf("crew submit: %v", err)
+	}
+	comments, err := h.bd.Comments("bd-source")
+	if err != nil || len(comments) != 1 {
+		t.Fatalf("comments = %v (%v), want one submission comment", comments, err)
+	}
+	if comments[0].Author != actor {
+		t.Errorf("submission comment by %q, want the session's BEADS_ACTOR %q", comments[0].Author, actor)
+	}
+}
+
+// TestCrewSubmitWithNoSessionActorKeepsCommitter: a session naming no agent
+// still records the submission under the git committer, as it always did.
+func TestCrewSubmitWithNoSessionActorKeepsCommitter(t *testing.T) {
+	t.Parallel()
+	const committer = "Sloan Ahrens"
+	h := newCrewSubmitHarness(t)
+	r := crewRunFromEnv(t, h, map[string]string{}, committer)
+	if err := submitCrewForLanding(r); err != nil {
+		t.Fatalf("crew submit: %v", err)
+	}
+	comments, err := h.bd.Comments("bd-source")
+	if err != nil || len(comments) != 1 {
+		t.Fatalf("comments = %v (%v), want one submission comment", comments, err)
+	}
+	if comments[0].Author != committer {
+		t.Errorf("submission comment by %q, want the git committer %q", comments[0].Author, committer)
+	}
+}
+
+// TestCrewDoneRunSenderPrefersSessionActor: the run's sender is the session's
+// identity, and the git committer is read only when the session names none.
+// A session with neither has an empty sender, which submit refuses.
+func TestCrewDoneRunSenderPrefersSessionActor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		env       map[string]string
+		committer string
+		want      string
+	}{
+		{"session actor wins over the committer", map[string]string{"BEADS_ACTOR": "town/crew/overseer"}, "Sloan Ahrens", "town/crew/overseer"},
+		{"no session actor falls back to the committer", map[string]string{}, "Sloan Ahrens", "Sloan Ahrens"},
+		{"no session actor and no committer names no one", map[string]string{}, "  ", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newCrewDoneRun(crewEnv(tc.env), gitName(tc.committer), t.TempDir(), t.TempDir(), "gastown", crewTestBranch, "bd-source")
+			if r.sender != tc.want {
+				t.Errorf("sender = %q, want %q", r.sender, tc.want)
+			}
+		})
+	}
+}
+
+// TestCrewSubmitRefusesWithNoIdentity: a submission nobody can be attributed
+// to is refused before any gate runs or any comment is written (gt-i817y).
+func TestCrewSubmitRefusesWithNoIdentity(t *testing.T) {
+	t.Parallel()
+	h := newCrewSubmitHarness(t)
+	r := crewRunFromEnv(t, h, map[string]string{}, "  ")
+	if err := submitCrewForLanding(r); err == nil {
+		t.Fatal("crew submit with no session actor and no committer succeeded, want a refusal")
+	}
+	if len(h.gate.heads) != 0 {
+		t.Errorf("gate ran on %v for an unattributed submission, want none", h.gate.heads)
+	}
+	if comments, _ := h.bd.Comments("bd-source"); len(comments) != 0 {
+		t.Errorf("unattributed submission wrote comments %v, want none", comments)
+	}
+}
+
 // TestDoneIsCrewRun: crew is detected positively (a crew role, actor or
 // worktree path) and any polecat trace rules it out (gt-avwp2).
 func TestDoneIsCrewRun(t *testing.T) {

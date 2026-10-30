@@ -77,6 +77,25 @@ func isCrewActor(actor string) bool {
 	return len(parts) == 3 && parts[0] != "" && parts[1] == "crew" && parts[2] != ""
 }
 
+// crewActorFromEnv is the identity a crew submission's bead writes carry, as
+// far as the session's environment names it: BEADS_ACTOR (the session's own
+// identity, what bd resolves an author from), then BD_ACTOR (what a spawned
+// session exports), then the crew member GT_ROLE names. "" means the session
+// names no agent, and the caller keeps the committer git user.name — the
+// human's identity when the human runs gt done by hand, which the landing
+// worker refuses to land (gt-i817y).
+func crewActorFromEnv(getenv func(string) string) string {
+	for _, key := range []string{"BEADS_ACTOR", "BD_ACTOR"} {
+		if actor := strings.TrimSpace(getenv(key)); actor != "" {
+			return actor
+		}
+	}
+	if parsed, rig, name := role.Parse(getenv("GT_ROLE")); parsed == role.Crew {
+		return role.Actor(parsed, rig, name)
+	}
+	return ""
+}
+
 // crewBeadFromBranch is the bead id a crew branch name carries, or "". A
 // crew branch is crew/<user>/<slug>, and a slug such as "crew-done-submit"
 // looks like a bead id to the polecat parser, so only an id whose prefix
@@ -126,14 +145,9 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 	}
 
 	g := git.NewGit(gitRoot)
-	actor := strings.TrimSpace(getenv("BD_ACTOR"))
-	if actor == "" {
-		// Crew have no seat identity; the bead records the committer.
+	gitUserName := func() string {
 		name, _ := g.ConfigGet("user.name")
-		actor = strings.TrimSpace(name)
-		if actor == "" {
-			return fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
-		}
+		return name
 	}
 
 	branch, err := g.CurrentBranch()
@@ -159,16 +173,8 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		rigName = beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(issueID))
 	}
 
-	r := &doneRun{
-		g:             g,
-		cwd:           gitRoot,
-		townRoot:      townRoot,
-		rigName:       rigName,
-		sender:        actor,
-		branch:        branch,
-		issueID:       issueID,
-		defaultBranch: "main",
-	}
+	r := newCrewDoneRun(getenv, gitUserName, gitRoot, townRoot, rigName, branch, issueID)
+	r.g = g
 	if rigName != "" {
 		rigPath := filepath.Join(townRoot, rigName)
 		rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
@@ -187,9 +193,9 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 			// Route from the town, not the worktree: a crew worktree's own
 			// .beads may be the source repo's, not the town's.
 			// bd records the submission's label and notes as written by
-			// actor, which is git user.name when the shell has no BD_ACTOR.
+			// the run's sender, the session's own identity (gt-i817y).
 			info, err := resolveSubmitSourceIssueIn(townRoot, id, func(cwd, beadsDir string) beads.Client {
-				return beads.NewWithBeadsDir(cwd, beadsDir).ActingAs(actor)
+				return beads.NewWithBeadsDir(cwd, beadsDir).ActingAs(r.sender)
 			})
 			if err != nil {
 				return nil, nil, err
@@ -215,6 +221,28 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		enqueueNudge: nudge.Enqueue,
 	}
 	return submitCrewForLanding(r)
+}
+
+// newCrewDoneRun is the run a crew submission runs as. Its sender is the
+// session's agent identity (crewActorFromEnv); only a session naming none
+// falls back to the git committer, the human's identity when the human runs
+// gt done by hand (gt-i817y). gitUserName is read only on that fallback. A
+// sender left "" is refused by submitCrewForLanding.
+func newCrewDoneRun(getenv func(string) string, gitUserName func() string, gitRoot, townRoot, rigName, branch, issueID string) *doneRun {
+	actor := crewActorFromEnv(getenv)
+	if actor == "" {
+		// Crew have no seat identity; the bead records the committer.
+		actor = strings.TrimSpace(gitUserName())
+	}
+	return &doneRun{
+		cwd:           gitRoot,
+		townRoot:      townRoot,
+		rigName:       rigName,
+		sender:        actor,
+		branch:        branch,
+		issueID:       issueID,
+		defaultBranch: "main",
+	}
 }
 
 // polecatAssigneeSeat maps a bead assignee to the tmux session of the polecat
@@ -277,6 +305,10 @@ func submitCrewForLanding(r *doneRun) error {
 	}
 	if r.issueID == "" {
 		return fmt.Errorf("crew branch %s names no bead; pass --bead <id>", r.branch)
+	}
+	if r.sender == "" {
+		// Nobody to attribute the submission to: refuse before any write.
+		return fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
 	}
 	repo := r.deps.repo
 	workStatus, err := repo.CheckUncommittedWork()
