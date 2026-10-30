@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -406,9 +407,11 @@ func (a *driftAdapter) beadLanded(item Item) (bool, error) {
 }
 
 // docNameCache answers a doc's whole-path question from a pattern compiled
-// once. compile is the seam a test counts compiles through.
+// once. compile is the seam a test counts compiles through. mu guards byDoc,
+// since parallel callers share one cache.
 type docNameCache struct {
 	compile func(doc string) *regexp.Regexp
+	mu      sync.Mutex
 	byDoc   map[string]*regexp.Regexp
 }
 
@@ -428,11 +431,13 @@ func (c *docNameCache) namesDoc(text, doc string) bool {
 	if !strings.Contains(text, doc) {
 		return false
 	}
+	c.mu.Lock()
 	re, ok := c.byDoc[doc]
 	if !ok {
 		re = c.compile(doc)
 		c.byDoc[doc] = re
 	}
+	c.mu.Unlock()
 	return re.MatchString(text)
 }
 
