@@ -69,10 +69,9 @@ const (
 	tierSweepLogTailLines = 20
 
 	// tierSweepTierCommand runs the integration and race tiers, taking the tier
-	// names as arguments (gt-tpg0p.102). It is the Go port of the script it
-	// replaces, so its summary, progress and unknown-tier lines keep the
-	// script's text and the parsers below read them unchanged. The command is
-	// resolved in the checked-out tree, so a sweep runs the Go source main has.
+	// names as arguments. Its summary, progress and unknown-tier lines are the
+	// text the parsers below read. The command is resolved in the checked-out
+	// tree, so a sweep runs the Go source main has.
 	tierSweepTierCommand = "go run ./cmd/tier-sweep"
 
 	// tierSweepShellRunner is the shell stage's command in place of the tier
@@ -1111,7 +1110,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			deferred = true
 			continue
 		}
-		declined := parseTierSweepUnknownTiers(res.output)
+		declined := tierSweepDeclined(st, res.output)
 		unreached := tierSweepUnreachedAfterDeclined(st.tiers, declined)
 		logPath := d.tierSweepWriteLog(rig, st.tiers[0], res.output)
 		for _, tier := range st.tiers {
@@ -1515,6 +1514,17 @@ func parseTierSweepUnknownTiers(output string) map[string]bool {
 	return out
 }
 
+// tierSweepDeclined names the tiers a stage's output declined to run. Only the
+// rig's script declines: it exits 2 at a tier it does not offer. The Go command
+// offers every tier the stage asks for, and go run exits 1 whenever its child
+// fails, so a Go stage's output never excuses a tier, whatever it prints.
+func tierSweepDeclined(st tierSweepStage, output string) map[string]bool {
+	if !st.script {
+		return map[string]bool{}
+	}
+	return parseTierSweepUnknownTiers(output)
+}
+
 // tierSweepUnreachedAfterDeclined names the stage's tiers a declined tier left
 // unrun. The script runs its tiers one at a time and exits 2 at a tier it does
 // not offer, so a decline ends the stage: any other tier with no summary line
@@ -1576,14 +1586,13 @@ func parseTierSweepSummaries(output string) map[string]tierSweepTierResult {
 // and the caller records a tier with no verdict as RED.
 //
 // The integration and race stage is read the same way, with one exception: the
-// command exits 2 at a tier it does not offer, after the tiers before it have
-// printed their verdicts, and those verdicts stand (gt-qgrdy). Only that decline
-// is excused. Any other non-zero exit withholds GREEN.
+// rig's script exits 2 at a tier it does not offer, after the tiers before it
+// have printed their verdicts, and those verdicts stand (gt-qgrdy). Only that
+// decline is excused (tierSweepDeclined). Any other non-zero exit withholds GREEN.
 func tierSweepStageReported(st tierSweepStage, res tierSweepStageResult) map[string]tierSweepTierResult {
 	if st.runner == "" {
 		reported := parseTierSweepSummaries(res.output)
-		declined := len(parseTierSweepUnknownTiers(res.output)) > 0
-		if res.exitCode != 0 && !declined {
+		if res.exitCode != 0 && len(tierSweepDeclined(st, res.output)) == 0 {
 			withholdTierSweepGreen(reported)
 		}
 		return reported
