@@ -109,6 +109,10 @@ type Settings struct {
 	// Scrub scrubs the state before it is sent: the patrol's scrub key
 	// sets it (gt-aqczg).
 	Scrub bool
+
+	// ScrubCheck runs the shadow scrub check on a sample of requests. The
+	// scrub_check key sets it (gt-jb20i).
+	ScrubCheck bool
 }
 
 // Open wires the production pass for a town: the Jev client writing to the
@@ -128,12 +132,15 @@ func Open(townRoot string, rigs []string, s Settings, warnings io.Writer) (*Pass
 		return nil, fmt.Errorf("jev_stale.max_usd_per_day must be above zero, not %v", capUSD)
 	}
 
-	client, err := jev.NewClient(jev.BatteryOptions(townRoot, Caller, warnings, s.Scrub)...)
+	town := battery.Cap{Ledger: jev.UsageLedgerPath(townRoot), MaxUSDPerDay: capUSD, USDPerBillionTokens: price}
+	client, err := jev.NewClient(jev.BatteryOptions(townRoot, Caller, warnings, jev.BatteryScrub{
+		Scrub:      s.Scrub,
+		ScrubCheck: s.ScrubCheck,
+		Allows:     town.AllowsNow,
+	})...)
 	if err != nil {
 		return nil, fmt.Errorf("opening the Jev client: %w", err)
 	}
-
-	town := battery.Cap{Ledger: jev.UsageLedgerPath(townRoot), MaxUSDPerDay: capUSD, USDPerBillionTokens: price}
 
 	var searcher Searcher
 	if _, err := exec.LookPath("hm"); err == nil {
@@ -146,7 +153,7 @@ func Open(townRoot string, rigs []string, s Settings, warnings io.Writer) (*Pass
 		Beads:    townBeads{townRoot: townRoot},
 		Rigs:     rigs,
 		LogPath:  LogPath(townRoot),
-		Allows:   func() (bool, error) { return town.Allows(time.Now) },
+		Allows:   town.AllowsNow,
 	}, nil
 }
 

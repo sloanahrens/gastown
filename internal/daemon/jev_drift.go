@@ -54,6 +54,7 @@ func (d *Daemon) runJevDrift() {
 			MaxUSDPerDay:        c.Patrols.JevDrift.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevDrift.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevDrift.Scrub,
+			ScrubCheck:          c.Patrols.JevDrift.ScrubCheck,
 		}
 	}
 	open := d.jevDriftOpen

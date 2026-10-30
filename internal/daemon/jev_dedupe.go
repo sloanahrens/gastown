@@ -57,6 +57,7 @@ func (d *Daemon) runJevDedupe() {
 			MaxUSDPerDay:        c.Patrols.JevDedupe.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevDedupe.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevDedupe.Scrub,
+			ScrubCheck:          c.Patrols.JevDedupe.ScrubCheck,
 		}
 	}
 	open := d.jevDedupeOpen

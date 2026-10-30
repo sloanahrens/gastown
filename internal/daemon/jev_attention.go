@@ -54,6 +54,7 @@ func (d *Daemon) runJevAttention() {
 			MaxUSDPerDay:        c.Patrols.JevAttention.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevAttention.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevAttention.Scrub,
+			ScrubCheck:          c.Patrols.JevAttention.ScrubCheck,
 		}
 	}
 	open := d.jevAttentionOpen

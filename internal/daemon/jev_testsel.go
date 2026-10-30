@@ -19,6 +19,7 @@ func (d *Daemon) jevTestselCandidate(rigName string, gate *land.CandidateGate) l
 			MaxUSDPerDay:        c.Patrols.JevTestsel.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevTestsel.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevTestsel.Scrub,
+			ScrubCheck:          c.Patrols.JevTestsel.ScrubCheck,
 		}
 	}
 	pass, err := testsel.Open(d.config.TownRoot, settings, d.logger.Writer())

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/jev/scrub"
@@ -94,6 +95,17 @@ type Client struct {
 	// given, so NewClient can refuse a nil scrubber.
 	scrub    *scrub.Scrubber
 	scrubSet bool
+
+	// shadowPercent, shadowAllows and shadowSet configure the shadow scrub check
+	// (WithShadowScrub). shadows tracks the background calls it starts, so a
+	// test can wait for them. shadowMu guards capped, the count of capped checks
+	// in the current window.
+	shadowPercent int
+	shadowAllows  func() (bool, error)
+	shadowSet     bool
+	shadows       sync.WaitGroup
+	shadowMu      sync.Mutex
+	capped        cappedWindow
 }
 
 // Option configures a Client.
@@ -147,6 +159,9 @@ func NewClient(opts ...Option) (*Client, error) {
 	if c.requestsPath != "" {
 		c.requests = &requestLog{path: c.requestsPath, warnings: c.warnings}
 	}
+	if err := c.checkShadowOptions(); err != nil {
+		return nil, err
+	}
 	if c.key != "" {
 		return c, nil
 	}
@@ -155,7 +170,7 @@ func NewClient(opts ...Option) (*Client, error) {
 		err error
 	)
 	if c.keyPaths != nil {
-		key, err = readKeyFrom(c.keyPaths)
+		key, err = readKeyFrom(ReadKeyFile, c.keyPaths)
 	} else {
 		key, err = ReadKey()
 	}
@@ -313,6 +328,7 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Question) (*A
 	if err != nil {
 		return nil, err
 	}
+	c.shadowCheck(ctx, state, qs, wire, out)
 	return out, nil
 }
 

@@ -1,6 +1,8 @@
 package jev
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -78,26 +80,26 @@ func TestReadKeyFrom(t *testing.T) {
 	t.Run("first file with a key wins", func(t *testing.T) {
 		writeKeyFile(t, first, "TYPESAFE_API_KEY=one\n", 0o600)
 		writeKeyFile(t, second, "TYPESAFE_API_KEY=two\n", 0o600)
-		got, err := readKeyFrom([]string{first, second})
+		got, err := readKeyFrom(ReadKeyFile, []string{first, second})
 		require.NoError(t, err)
 		assert.Equal(t, "one", got)
 	})
 
 	t.Run("missing file is skipped", func(t *testing.T) {
-		got, err := readKeyFrom([]string{missing, second})
+		got, err := readKeyFrom(ReadKeyFile, []string{missing, second})
 		require.NoError(t, err)
 		assert.Equal(t, "two", got)
 	})
 
 	t.Run("file without the line is skipped", func(t *testing.T) {
 		writeKeyFile(t, first, "OTHER=x\n", 0o600)
-		got, err := readKeyFrom([]string{first, second})
+		got, err := readKeyFrom(ReadKeyFile, []string{first, second})
 		require.NoError(t, err)
 		assert.Equal(t, "two", got)
 	})
 
 	t.Run("no key anywhere names the files", func(t *testing.T) {
-		_, err := readKeyFrom([]string{missing, first})
+		_, err := readKeyFrom(ReadKeyFile, []string{missing, first})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), missing)
 		assert.Contains(t, err.Error(), first)
@@ -130,7 +132,44 @@ func TestReadKeyFrom_OpenPermissionsAbortSearch(t *testing.T) {
 	writeKeyFile(t, open, "TYPESAFE_API_KEY=one\n", 0o640)
 	writeKeyFile(t, later, "TYPESAFE_API_KEY=two\n", 0o600)
 
-	_, err := readKeyFrom([]string{open, later})
+	_, err := readKeyFrom(ReadKeyFile, []string{open, later})
 
 	require.Error(t, err, "a key file others can read is an error, not a reason to try the next file")
+}
+
+// TestReadKeyFrom_UsesTheReaderItWasGiven: the search asks the reader it was
+// handed, not the key files on disk. A fake that holds a key answers with it; a
+// fake that holds none, or that succeeds with an empty key, refuses with an
+// error naming every path. A loader that read the real files instead, or that
+// took an empty key as an answer, fails here.
+func TestReadKeyFrom_UsesTheReaderItWasGiven(t *testing.T) {
+	t.Parallel()
+	keys := map[string]string{"fake-one": "key-from-the-reader", "fake-empty": ""}
+	read := func(path string) (string, error) {
+		if key, ok := keys[path]; ok {
+			return key, nil
+		}
+		return "", fmt.Errorf("fake reader: %s: %w", path, fs.ErrNotExist)
+	}
+
+	got, err := readKeyFrom(read, []string{"fake-missing", "fake-one"})
+	require.NoError(t, err)
+	assert.Equal(t, "key-from-the-reader", got)
+
+	for _, tt := range []struct {
+		name  string
+		paths []string
+	}{
+		{name: "a fake that holds no key", paths: []string{"fake-missing", "fake-two"}},
+		{name: "a fake that succeeds with an empty key", paths: []string{"fake-missing", "fake-empty"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := readKeyFrom(read, tt.paths)
+			require.Error(t, err, "an empty or absent key is refused")
+			for _, path := range tt.paths {
+				assert.Contains(t, err.Error(), path)
+			}
+		})
+	}
 }

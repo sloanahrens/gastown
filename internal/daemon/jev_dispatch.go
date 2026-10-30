@@ -56,6 +56,7 @@ func (d *Daemon) runJevDispatch() {
 			MaxUSDPerDay:        c.Patrols.JevDispatch.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevDispatch.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevDispatch.Scrub,
+			ScrubCheck:          c.Patrols.JevDispatch.ScrubCheck,
 		}
 	}
 	open := d.jevDispatchOpen

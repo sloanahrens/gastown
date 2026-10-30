@@ -107,6 +107,7 @@ func jevDedupeSettings(townRoot string) (dedupe.Settings, error) {
 		MaxUSDPerDay:        c.MaxUSDPerDay,
 		USDPerBillionTokens: c.USDPerBillionTokens,
 		Scrub:               c.Scrub,
+		ScrubCheck:          c.ScrubCheck,
 	}, nil
 }
 

@@ -114,6 +114,7 @@ func jevSubmissionSettings(townRoot string) (submission.Settings, error) {
 		MaxUSDPerDay:        c.MaxUSDPerDay,
 		USDPerBillionTokens: c.USDPerBillionTokens,
 		Scrub:               c.Scrub,
+		ScrubCheck:          c.ScrubCheck,
 	}, nil
 }
 
