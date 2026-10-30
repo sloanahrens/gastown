@@ -69,21 +69,24 @@ func gitCheckout(root string) shelltier.Checkout {
 	r := git.NewGit(root)
 	return shelltier.Checkout{
 		Head: func() (string, error) { return r.Rev("HEAD") },
-		Git:  worktreeGit{r: r},
+		Git:  worktreeGit{diff: r.DiffNameOnly, status: r.Status},
 	}
 }
 
 // worktreeGit answers the due decision's reads from a git repository, the way
 // the container tier's command does: the commits since a record, and the
-// checkout's uncommitted paths.
-type worktreeGit struct{ r *git.Git }
+// checkout's uncommitted paths. The two reads are fields so a test can fail them.
+type worktreeGit struct {
+	diff   func(base, head string) ([]string, error)
+	status func() (*git.GitStatus, error)
+}
 
 func (g worktreeGit) DiffNameOnly(base, head string) ([]string, error) {
-	return g.r.DiffNameOnly(base, head)
+	return g.diff(base, head)
 }
 
 func (g worktreeGit) Worktree() ([]string, error) {
-	status, err := g.r.Status()
+	status, err := g.status()
 	if err != nil {
 		return nil, err
 	}

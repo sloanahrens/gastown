@@ -318,3 +318,19 @@ func TestWorktreePathsCountsUntrackedFiles(t *testing.T) {
 		t.Fatalf("worktreePaths = %v, want %v", got, want)
 	}
 }
+
+func TestWorktreeGitReportsAFailedStatus(t *testing.T) {
+	t.Parallel()
+	statusErr := errors.New("index is locked")
+	g := worktreeGit{
+		diff:   func(string, string) ([]string, error) { return nil, nil },
+		status: func() (*git.GitStatus, error) { return nil, statusErr },
+	}
+	paths, err := g.Worktree()
+	if !errors.Is(err, statusErr) {
+		t.Fatalf("error = %v, want the status failure", err)
+	}
+	if paths != nil {
+		t.Fatalf("paths = %v with a failed status, want none", paths)
+	}
+}
