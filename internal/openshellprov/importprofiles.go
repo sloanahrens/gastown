@@ -61,6 +61,9 @@ type Run struct {
 	Paths Paths
 	// Files is the filesystem the run reads and writes.
 	Files Files
+	// Env is the environment a provider create runs with; the credential is added
+	// to a copy of it, so the secret reaches only that child.
+	Env []string
 	// Out receives the run's progress lines and what openshell prints to stdout.
 	Out io.Writer
 	// Err receives what openshell prints to stderr.

@@ -165,3 +165,14 @@ func TestStaleReasonVerdicts(t *testing.T) {
 		})
 	}
 }
+
+// gt's stderr is its reason for a refusal, so a stream that cannot take it is an
+// error: the run would otherwise stop with no explanation.
+func TestGtStderrWriteFailureIsAnError(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRunner{stderr: []byte("refused\n")}
+	err := (Gt{Run: fake, Err: failingWriter{}}).CheckEndpoint()
+	if err == nil || !strings.Contains(err.Error(), "writing gt's errors") {
+		t.Fatalf("CheckEndpoint = %v, want the stderr write failure", err)
+	}
+}

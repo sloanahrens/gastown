@@ -78,10 +78,24 @@ type Host struct {
 	// Stat reports a path's file information, so the repository-root walk runs
 	// against a tree a test scripts rather than one it builds on disk.
 	Stat func(string) (fs.FileInfo, error)
+	// Exec runs the openshell and gt calls.
+	Exec Runner
+	// Files is the filesystem the profiles and key files are read from.
+	Files Files
+	// Env reports the environment a provider create inherits.
+	Env func() []string
 }
 
 // ProcessHost reads the running process.
-var ProcessHost = Host{Getwd: os.Getwd, Getenv: os.Getenv, LookPath: exec.LookPath, Stat: os.Stat}
+var ProcessHost = Host{
+	Getwd:    os.Getwd,
+	Getenv:   os.Getenv,
+	LookPath: exec.LookPath,
+	Stat:     os.Stat,
+	Exec:     ExecRunner{},
+	Files:    OSFiles{},
+	Env:      os.Environ,
+}
 
 // Paths are the directories a run reads.
 type Paths struct {
