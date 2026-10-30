@@ -26,14 +26,16 @@ var shellSummaryRE = regexp.MustCompile(`^tier-sweep: shell (GREEN|RED) passed=`
 // RED summary line or a non-zero exit is RED, and a run that prints no summary
 // line is RED too, never an empty line.
 //
-// The shell tier takes no skip list and no per-package timeout: the script's
-// shell branch reads neither TIER_SWEEP_SKIP nor TIER_SWEEP_TIMEOUT. The daemon's
-// shell stage passes the runner no flags; its budget is the gate step's timeout.
+// The shell tier has no skip list: the runner's command takes no skip option
+// (its flags are --all, --root, --logdir and --budget, in
+// internal/shelltier/cmd/shelltier). The sweep's timeout (TIER_SWEEP_TIMEOUT,
+// 10m by default) is passed as the runner's --budget, the time limit for each
+// script, so the shell scripts are held to the same limit as the Go packages.
 func (s *Sweep) Shell() (line string, red bool) {
 	start := s.Now()
 	elapsed := func() int { return int(s.Now().Sub(start) / time.Second) }
 	var out bytes.Buffer
-	code := s.Exec(".", shellEnv(s.Environ), shellArgv(s.Opts.LogDir), &out)
+	code := s.Exec(".", s.shellEnv(), shellArgv(s.Opts.LogDir, s.Opts.Timeout), &out)
 	summary, others := splitShellOutput(out.String())
 	for _, l := range others {
 		fmt.Fprintln(s.Stderr, l)
@@ -51,15 +53,16 @@ func (s *Sweep) Shell() (line string, red bool) {
 }
 
 // shellArgv is the runner's command: every manifest entry, with its logs in the
-// log directory the summary line names.
-func shellArgv(logDir string) []string {
-	return []string{"go", "run", shellPkg, "--all", "--logdir", logDir}
+// log directory the summary line names and each script held to budget.
+func shellArgv(logDir, budget string) []string {
+	return []string{"go", "run", shellPkg, "--all", "--logdir", logDir, "--budget", budget}
 }
 
-// shellEnv is the runner's environment: the sweep's, with the container tests
-// off, as the script's shell branch runs its scripts.
-func shellEnv(environ []string) []string {
-	return append(append([]string(nil), environ...), "GT_TEST_DOCKER=0")
+// shellEnv is the runner's environment: the sweep's exported environment, with
+// the container tests off, as the script's shell branch runs its scripts. The
+// entry is appended last, so it is the value the child sees.
+func (s *Sweep) shellEnv() []string {
+	return append(s.exportEnv(s.Opts.Tested, s.Opts.SkipList), "GT_TEST_DOCKER=0")
 }
 
 // splitShellOutput returns the runner's summary line and every other non-empty
