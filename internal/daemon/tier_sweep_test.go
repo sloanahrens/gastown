@@ -629,6 +629,7 @@ func TestTierSweepStages_ShellStageRunsTheGoRunner(t *testing.T) {
 }
 
 func TestTierSweepStagePassesTimingsAndResumePaths(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		env    map[string]string
@@ -642,6 +643,7 @@ func TestTierSweepStagePassesTimingsAndResumePaths(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			d, _, _, _ := newTierSweepDaemon(t, time.Now(), "gastown")
 			d.getenv = func(key string) string { return tc.env[key] }
 			dir := filepath.Join(d.config.TownRoot, ".runtime", "tier-sweep", "gastown")
@@ -669,8 +671,10 @@ func TestTierSweepStagePassesTimingsAndResumePaths(t *testing.T) {
 }
 
 func TestTierSweepRigPathSegmentIsValidated(t *testing.T) {
+	t.Parallel()
 	for _, rig := range []string{"", ".", "..", "../escape", "a/b"} {
 		t.Run(fmt.Sprintf("rig %q", rig), func(t *testing.T) {
+			t.Parallel()
 			d, _, _, logs := newTierSweepDaemon(t, time.Now())
 			d.getenv = func(string) string { return "1" }
 			st := tierSweepStages("gastown")[0]
