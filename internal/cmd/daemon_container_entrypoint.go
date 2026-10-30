@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -83,7 +84,9 @@ install left) from the host side of the scratch directory.
 With --dolt-host, the scratch town's install is given that host as its own
 --dolt-host, so the scratch town uses the Dolt server the scratch project runs
 instead of a local one. The flag is accepted only with --scratch-town, and an
-empty host is refused: the live project's command line stays empty.
+empty host or one beginning with a dash is refused: the live project's command
+line stays empty. Only an install writes the host into the town, so a start
+that runs none refuses a host the installed town does not already name.
 
 With --om-token-file, the file's contents (trimmed) become
 CLAUDE_CODE_OAUTH_TOKEN in the daemon's environment; an unreadable or empty file
@@ -269,6 +272,11 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	if err != nil {
 		return err
 	}
+	if !install {
+		if err := e.refuseDoltHostTheTownDoesNotName(townRoot); err != nil {
+			return err
+		}
+	}
 	if err := e.setGitIdentity(); err != nil {
 		return err
 	}
@@ -285,21 +293,66 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 
 // refuseDoltHost refuses a --dolt-host that no install would act on. Only the
 // scratch town's install takes a Dolt host, so one given without --scratch-town
-// is a mistake; and an empty host names nothing, which the flag alone cannot
-// tell from no host at all. A host of spaces is empty too, as `gt install`
-// reads it. Both refusals run before the first command.
+// is a mistake; and a host that is empty or begins with a dash names nothing,
+// which the flag alone cannot tell from no host at all. A host of spaces is
+// empty too, as `gt install` reads it. Every refusal runs before the first
+// command.
 func (e containerEntrypoint) refuseDoltHost() error {
 	if !e.doltHostSet {
 		return nil
 	}
-	if strings.TrimSpace(e.doltHost) == "" {
+	host := strings.TrimSpace(e.doltHost)
+	if host == "" {
 		return fmt.Errorf("--%s is empty; the scratch town's install needs the Dolt server's host, so nothing was started", config.DoltHostFlag)
+	}
+	if strings.HasPrefix(host, "-") {
+		return fmt.Errorf("--%s %q begins with a dash, so it names a flag rather than a host; name the Dolt server's host, and nothing was started", config.DoltHostFlag, host)
 	}
 	if !e.scratch {
 		return fmt.Errorf("--%s is given without --%s; only the scratch town's install takes a Dolt host, and the live project's command line stays empty, so nothing was started",
 			config.DoltHostFlag, config.ScratchTownFlag)
 	}
 	return nil
+}
+
+// refuseDoltHostTheTownDoesNotName refuses a --dolt-host this start would
+// never write. The host reaches a town only through the scratch install, which
+// writes it into mayor/town.json; a start that finds the town already there
+// runs no install, so the flag would be dropped without a word unless the town
+// already names that host, and a value that disagrees is refused instead. A
+// host the town already names is the one the install wrote, so the restart the
+// compose file's unchanged command line gives keeps starting. A town whose
+// config cannot be read or parsed is refused rather than taken as naming
+// nothing, since that would drop the flag in silence too.
+func (e containerEntrypoint) refuseDoltHostTheTownDoesNotName(townRoot string) error {
+	if !e.doltHostSet {
+		return nil
+	}
+	path := filepath.Join(townRoot, "mayor", "town.json")
+	text, err := e.readFile(path)
+	if err != nil {
+		return fmt.Errorf("read the town's %s: %w; --%s is written only by an install, and this start runs none, so nothing was started",
+			path, err, config.DoltHostFlag)
+	}
+	var town config.TownConfig
+	if err := json.Unmarshal([]byte(text), &town); err != nil {
+		return fmt.Errorf("parse the town's %s: %w; the Dolt server it names cannot be told from --%s, so nothing was started",
+			path, err, config.DoltHostFlag)
+	}
+	named := ""
+	if town.Dolt != nil {
+		named = strings.TrimSpace(town.Dolt.Host)
+	}
+	host := strings.TrimSpace(e.doltHost)
+	if strings.EqualFold(named, host) {
+		return nil
+	}
+	if named == "" {
+		return fmt.Errorf("--%s %q names a Dolt server, but the town at %s names none, and this start runs no install that would write it; nothing was started",
+			config.DoltHostFlag, host, townRoot)
+	}
+	return fmt.Errorf("--%s %q is not the Dolt server the town at %s already names (%q), and this start runs no install that would write it, so the flag would be ignored; nothing was started",
+		config.DoltHostFlag, host, townRoot, named)
 }
 
 // apiCredentialEnvs are the variables that outrank CLAUDE_CODE_OAUTH_TOKEN in
