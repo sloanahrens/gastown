@@ -64,6 +64,7 @@ type memFiles struct {
 	createErr error
 	closeErr  error
 	tempErr   error
+	diskFull  bool
 }
 
 // profileFile is one profile under testProfiles: its file name and its body.
@@ -112,9 +113,17 @@ type memWriter struct {
 
 func (w memWriter) Close() error { return w.closeErr }
 
+// fullWriter is a file on a full disk: every write fails and Close is clean.
+type fullWriter struct{ failingWriter }
+
+func (fullWriter) Close() error { return nil }
+
 func (m *memFiles) Create(name string) (io.WriteCloser, error) {
 	if m.createErr != nil {
 		return nil, m.createErr
+	}
+	if m.diskFull {
+		return fullWriter{}, nil
 	}
 	buf := &bytes.Buffer{}
 	m.written[name] = buf
@@ -304,7 +313,7 @@ func TestImportProfilesListFailureStopsTheRun(t *testing.T) {
 	}
 }
 
-func TestForgejoPolecatRenderedForTheGateway(t *testing.T) {
+func TestImportProfilesForgejoPolecatRenderedForTheGateway(t *testing.T) {
 	t.Parallel()
 	runner := &scriptRunner{reply: answerWith(answer{match: "--render", out: "rendered for the gateway\n"})}
 	files := newMemFiles(profileFile{"forgejo-polecat.yaml", "id: forgejo-polecat\nhost: docker-alias\n"})
@@ -321,7 +330,7 @@ func TestForgejoPolecatRenderedForTheGateway(t *testing.T) {
 	}
 }
 
-func TestForgejoPolecatStaleIsUpdatedAndBoundIsKept(t *testing.T) {
+func TestImportProfilesForgejoPolecatStaleIsUpdatedAndBoundIsKept(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
@@ -465,6 +474,36 @@ func TestImportProfilesRefusalsStopTheRun(t *testing.T) {
 				{match: "--check", err: errors.New("no profile names the gateway")},
 			},
 			wantLast:    checkCall,
+			wantRemoved: []string{testWork},
+		},
+		{
+			name:        "the export file cannot be created",
+			profiles:    []profileFile{forgejo},
+			answers:     []answer{{match: "profile list", out: "forgejo-polecat\n"}},
+			mutate:      func(m *memFiles) { m.createErr = errors.New("read-only temp dir") },
+			wantLast:    listCall,
+			wantRemoved: []string{testWork},
+		},
+		{
+			name:     "the export cannot be written",
+			profiles: []profileFile{forgejo},
+			answers: []answer{
+				{match: "profile list", out: "forgejo-polecat\n"},
+				{match: "profile export", out: "exported\n"},
+			},
+			mutate:      func(m *memFiles) { m.diskFull = true },
+			wantLast:    exportCall,
+			wantRemoved: []string{testWork},
+		},
+		{
+			name:     "the export file cannot be closed",
+			profiles: []profileFile{forgejo},
+			answers: []answer{
+				{match: "profile list", out: "forgejo-polecat\n"},
+				{match: "profile export", out: "exported\n"},
+			},
+			mutate:      func(m *memFiles) { m.closeErr = errors.New("disk full") },
+			wantLast:    exportCall,
 			wantRemoved: []string{testWork},
 		},
 		{
