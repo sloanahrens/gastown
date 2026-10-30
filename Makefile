@@ -162,9 +162,9 @@ POLE_RIG_GO_MODS ?= $(wildcard $(POLE_TOWN)/*/mayor/rig/go.mod)
 # so the image publish time) stable until the pins change: `make
 # polecat-seed-pins` re-pins to each rig's current canonical checkout, weekly or
 # when a go.sum changes.
-# beads is seeded because it is the only rig whose tests need
-# github.com/DATA-DOG/go-sqlmock (internal/storage/uow), and a beads polecat's
-# presubmit has no network (hq-smfiv).
+# beads is seeded because internal/storage/uow's tests import
+# github.com/DATA-DOG/go-sqlmock, and a beads polecat's presubmit has no
+# network (hq-smfiv).
 POLE_SEED_RIGS ?= gastown devops beads
 POLE_SEED_PINS ?= deploy/polecat/seed-pins
 POLE_SEED_DIR ?= $(CURDIR)/deploy/polecat/seed
