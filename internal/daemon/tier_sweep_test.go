@@ -589,6 +589,29 @@ func TestTierSweepStages_EveryHourRunsEveryTier(t *testing.T) {
 	}
 }
 
+// TestTierSweepStages_ShellStageRunsTheGoRunner: the shell stage runs the Go
+// runner with --all, the integration and race stage keeps its script, and only
+// the integration stage holds the container-gate slot.
+func TestTierSweepStages_ShellStageRunsTheGoRunner(t *testing.T) {
+	t.Parallel()
+	stages := tierSweepStages("gastown")
+	if len(stages) != 2 {
+		t.Fatalf("stages = %+v, want shell then integration race", stages)
+	}
+	shell, integration := stages[0], stages[1]
+	// The runner gets the shell tier's per-script limit as --budget, 10m, so a
+	// slow script is held to the same bound the script's go test had.
+	if got, want := shell.command(), "go run ./internal/shelltier/cmd/shelltier --all --budget 10m"; got != want {
+		t.Errorf("shell command = %q, want %q", got, want)
+	}
+	if got, want := integration.command(), "bash scripts/tier-sweep.sh integration race"; got != want {
+		t.Errorf("integration command = %q, want %q", got, want)
+	}
+	if shell.slot || !integration.slot {
+		t.Errorf("slot: shell = %v, integration = %v; want only the integration stage to hold the slot", shell.slot, integration.slot)
+	}
+}
+
 func TestRunTierSweep_RunsEveryTierEveryCycle(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15) // odd
@@ -664,6 +687,59 @@ func TestRunTierSweep_TimeoutIsRedWithTheReasonNeverGreen(t *testing.T) {
 	}
 	if len(ts.FailedNames) != 1 || ts.FailedNames[0] != "timeout" {
 		t.Errorf("failed names = %v, want [timeout]", ts.FailedNames)
+	}
+}
+
+// TestRunTierSweep_ShellVerdictReadsTheRunnersExit drives the shell stage's
+// output and exit code through a cycle. The runner prints its summary and exits
+// 2 on a usage or log-dir failure with no summary, so a non-zero exit must
+// never read as GREEN, even beside a GREEN line.
+func TestRunTierSweep_ShellVerdictReadsTheRunnersExit(t *testing.T) {
+	t.Parallel()
+	const green = "tier-sweep: shell GREEN passed=28 failed=0 skipped=0 (logs /tmp/tier-sweep.x) in 3m02s"
+	const red = "tier-sweep: shell RED passed=27 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.x) in 3m02s"
+	tests := []struct {
+		name     string
+		output   string
+		exitCode int
+		want     string
+		// names is the tier's failed names, joined by a space.
+		names string
+	}{
+		{name: "GREEN summary, exit 0", output: green + "\n", exitCode: 0, want: tierSweepGreen},
+		{name: "RED summary, exit 1", output: red + "\n", exitCode: 1, want: tierSweepRed, names: "scripts/x.sh"},
+		{name: "no summary, exit 2", output: "tier-sweep: shell scripts/x.sh ...\nusage: shelltier [--all]\n", exitCode: 2, want: tierSweepRed, names: "no verdict line (exit 2)"},
+		{name: "GREEN summary, exit 2", output: green + "\n", exitCode: 2, want: tierSweepRed, names: "no verdict line (exit 2)"},
+		{name: "last summary GREEN, exit 0", output: red + "\n" + green + "\n", exitCode: 0, want: tierSweepGreen},
+		{name: "last summary RED, exit 1", output: green + "\n" + red + "\n", exitCode: 1, want: tierSweepRed, names: "scripts/x.sh"},
+		{name: "empty output, exit 0", output: "", exitCode: 0, want: tierSweepRed, names: "no verdict line"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+			rec.green()
+			greenStage := rec.result
+			rec.result = func(st tierSweepStage) tierSweepStageResult {
+				if st.runner == "" {
+					return greenStage(st)
+				}
+				return tierSweepStageResult{output: tc.output, exitCode: tc.exitCode, ran: true}
+			}
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+			d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+			d.runTierSweep()
+
+			ts := tierSweepTestState(t, d, "gastown").Tiers["shell"]
+			if ts.Verdict != tc.want {
+				t.Fatalf("shell verdict = %+v, want %s", ts, tc.want)
+			}
+			if got := strings.Join(ts.FailedNames, " "); got != tc.names {
+				t.Errorf("shell failed names = %q, want %q", got, tc.names)
+			}
+		})
 	}
 }
 

@@ -339,19 +339,20 @@ func tierSweepUnique(names []string) []string {
 }
 
 // tierSweepCheckCommand is the narrow command that re-runs one failing unit:
-// the tier's own script for the shell tier, and `go test` filtered to the
-// failing tests for a Go tier. A filtered run is what the polecat test guard
-// allows on a heavy package, and a whole package is what it refuses. The Go
-// command keeps the sweep's own wrapper: GT_TEST_DOCKER=1, or the container
-// tests skip and a green tick proves nothing, and gt slot run around it, or
-// the container-suite guard refuses it. Empty when no command can be named
-// from what the sweep knows, so the caller falls back to the log.
+// the shell runner for the shell tier, and `go test` filtered to the failing
+// tests for a Go tier. A filtered run is what the polecat test guard allows on
+// a heavy package, and a whole package is what it refuses. The shell runner
+// takes no filter, so it runs every shell test. The Go command keeps the
+// sweep's own wrapper: GT_TEST_DOCKER=1, or the container tests skip and a
+// green tick proves nothing, and gt slot run around it, or the container-suite
+// guard refuses it. Empty when no command can be named from what the sweep
+// knows, so the caller falls back to the log.
 func tierSweepCheckCommand(tier, unit string, red tierSweepUnitRed) string {
 	if !tierSweepUnitIsName(unit) {
 		return ""
 	}
 	if tier == "shell" {
-		return "GT_TEST_DOCKER=0 bash " + unit
+		return "GT_TEST_DOCKER=0 " + tierSweepShellCommand
 	}
 	// A finding names its test in its own line, so the filter it earns is the
 	// one a FAIL line earns. A test with both is named once.
