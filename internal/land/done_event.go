@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,72 +212,37 @@ func validEventPayload(s string, limit int) bool {
 	return true
 }
 
-// doneEventLog follows the town's events log and answers, per bead, whether it
-// already holds a done event at or after a cutoff.
+// doneEventLog answers, per bead, whether the town's events log already holds
+// a done event at or after a cutoff.
 //
-// It reads only the bytes appended since the last call and keeps what it
-// parsed, because the landing worker asks once per waiting submission per
-// pass and the log only grows between passes. The tail read is deliberate:
-// the prune patrol replaces the log with a shorter one under it, so a file
-// that is not the one the offset counts (os.SameFile) or that is shorter than
-// the offset is read again from the top. A rewrite that keeps the same inode
-// and grows past the offset between two passes is indistinguishable from an
-// append; the prune replaces the file rather than truncating it in place, so
-// that case does not arise.
+// The whole log is read on each refresh. The prune patrol caps it at 1 MiB,
+// and the landing worker asks once per waiting submission per pass, so the
+// read is cheap next to the state a tail read needs to stay correct across a
+// log the prune replaces under it.
 //
 // A line that is not a JSON event cannot name a bead and is skipped. A done
 // event that names the bead but carries no readable time marks the bead
-// unjudged, and a bead stays unjudged until the log is replaced: the recorder
+// unjudged, and a bead stays unjudged for the life of this read: the recorder
 // then fails closed rather than risk a duplicate, which is what a bead's
 // remaining passes pay for one corrupt line (gt-1m9gr).
 type doneEventLog struct {
-	path     string
-	offset   int64
-	file     os.FileInfo
 	latest   map[string]time.Time
 	unjudged map[string]bool
 }
 
-// refresh folds every complete line appended since the last call into the
-// per-bead state. A missing log is a town that logged nothing: it reads as
-// empty rather than as an error, and a log that appears later is read from its
-// start.
+// refresh reads the log at path into the per-bead state. A missing log is a
+// town that logged nothing: it reads as empty rather than as an error.
 func (l *doneEventLog) refresh(path string) error {
-	if l.path != path {
-		l.reset(path)
-	}
-	f, err := os.Open(path) //nolint:gosec // G304: the path is the town's own events log
+	l.latest = make(map[string]time.Time)
+	l.unjudged = make(map[string]bool)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the path is the town's own events log
 	if err != nil {
 		if os.IsNotExist(err) {
-			l.reset(path)
 			return nil
 		}
 		return fmt.Errorf("reading %s: %w", path, err)
 	}
-	defer f.Close() //nolint:errcheck // read-only
-
-	fi, err := f.Stat()
-	if err != nil {
-		return fmt.Errorf("statting %s: %w", path, err)
-	}
-	if l.file != nil && os.SameFile(fi, l.file) && fi.Size() == l.offset {
-		l.file = fi
-		return nil
-	}
-	if l.file == nil || !os.SameFile(fi, l.file) || fi.Size() < l.offset {
-		l.reset(path)
-	}
-	data, err := io.ReadAll(io.NewSectionReader(f, l.offset, fi.Size()-l.offset))
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", path, err)
-	}
-	// Fold in whole lines only: the bytes after the last newline are a line a
-	// writer has not finished, and the next call reads it from its first byte.
-	if end := bytes.LastIndexByte(data, '\n'); end >= 0 {
-		l.fold(data[:end+1])
-		l.offset += int64(end + 1)
-	}
-	l.file = fi
+	l.fold(data)
 	return nil
 }
 
@@ -295,21 +259,9 @@ func (l *doneEventLog) alreadyDone(bead string, cutoff time.Time) (bool, error) 
 	return false, nil
 }
 
-func (l *doneEventLog) reset(path string) {
-	l.path = path
-	l.offset = 0
-	l.file = nil
-	l.latest = make(map[string]time.Time)
-	l.unjudged = make(map[string]bool)
-}
-
-// fold reads every complete line of b, keeping each done event's bead and the
-// latest time the bead's events carry.
+// fold reads every line of b, keeping each done event's bead and the latest
+// time the bead's events carry.
 func (l *doneEventLog) fold(b []byte) {
-	if l.latest == nil {
-		l.latest = make(map[string]time.Time)
-		l.unjudged = make(map[string]bool)
-	}
 	for _, line := range bytes.Split(b, []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue

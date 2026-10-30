@@ -444,6 +444,24 @@ func (d *Daemon) refreshAuthorSeat(rigName, polecat string) error {
 	return d.gitAt(workDir).RefreshRemoteDefaultBranch("origin")
 }
 
+// seatAssignee is the bead's assignee reader the done-event recorder binds a
+// submission's Worker to: the sling wrote <rig>/polecats/<name> there, and the
+// seat's own note cannot change it. A bead that cannot be read is an error, so
+// the recorder fails closed rather than writing an event for a seat the host
+// cannot confirm it slung.
+func seatAssignee(reader beadReader) func(beadID string) (string, error) {
+	return func(beadID string) (string, error) {
+		issue, err := reader.Show(beadID)
+		if err != nil {
+			return "", err
+		}
+		if issue == nil {
+			return "", fmt.Errorf("bead %s not found", beadID)
+		}
+		return issue.Assignee, nil
+	}
+}
+
 // newRigLandingWorker wires the production collaborators for one rig.
 func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error) {
 	townRoot := d.config.TownRoot
@@ -789,16 +807,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			},
 			&land.DoneEventRecorder{
 				TownRoot: townRoot,
-				Assignee: func(beadID string) (string, error) {
-					issue, err := bd.Show(beadID)
-					if err != nil {
-						return "", err
-					}
-					if issue == nil {
-						return "", fmt.Errorf("bead %s not found", beadID)
-					}
-					return issue.Assignee, nil
-				},
+				Assignee: seatAssignee(bd),
 			},
 		}},
 	}, nil

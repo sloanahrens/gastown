@@ -347,6 +347,66 @@ func TestDoneEventRecorderReadsALogReplacedUnderIt(t *testing.T) {
 	}
 }
 
+// Each refusal fails closed: the host writes nothing rather than an event it
+// cannot stand behind.
+func TestDoneEventRecorderRefusesWhatItCannotVouchFor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		build func(t *testing.T, w *Work) (*DoneEventRecorder, string)
+	}{
+		{"no town root", func(t *testing.T, w *Work) (*DoneEventRecorder, string) {
+			rec, _ := newDoneRecorder(t, *w)
+			rec.TownRoot = ""
+			return rec, ""
+		}},
+		{"bad bead id", func(t *testing.T, w *Work) (*DoneEventRecorder, string) {
+			w.BeadID = "gt bad"
+			return newDoneRecorder(t, *w)
+		}},
+		{"bad branch", func(t *testing.T, w *Work) (*DoneEventRecorder, string) {
+			w.Branch = "polecat/opal/bad branch"
+			return newDoneRecorder(t, *w)
+		}},
+		{"unreadable log", func(t *testing.T, w *Work) (*DoneEventRecorder, string) {
+			rec, path := newDoneRecorder(t, *w)
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", path, err)
+			}
+			return rec, ""
+		}},
+		{"no assignee reader", func(t *testing.T, w *Work) (*DoneEventRecorder, string) {
+			rec, path := newDoneRecorder(t, *w)
+			rec.Assignee = nil
+			return rec, path
+		}},
+		{"assignee unreadable", func(t *testing.T, w *Work) (*DoneEventRecorder, string) {
+			rec, path := newDoneRecorder(t, *w)
+			rec.Assignee = func(string) (string, error) { return "", errors.New("dolt is down") }
+			return rec, path
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := doneWork()
+			rec, path := tc.build(t, &w)
+			wrote, err := rec.Record(w)
+			if err == nil {
+				t.Fatalf("Record = nil error for %s; want the refusal", tc.name)
+			}
+			if wrote {
+				t.Fatalf("Record = true for %s", tc.name)
+			}
+			if path != "" {
+				if lines := readEventLines(t, path); len(lines) != 0 {
+					t.Fatalf("events = %d lines for %s, want none", len(lines), tc.name)
+				}
+			}
+		})
+	}
+}
+
 // A failed write is the error the worker logs; nothing is recorded as written.
 func TestDoneEventRecorderReturnsAFailedWrite(t *testing.T) {
 	t.Parallel()

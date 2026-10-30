@@ -186,6 +186,28 @@ func TestNewRigLandingWorker_PublishesIntoTheDaemonsQueueView(t *testing.T) {
 	}
 }
 
+// seatAssignee is what binds a submission's Worker to the host's record: it
+// answers the sling's assignee, and a bead it cannot read is an error the
+// recorder fails closed on rather than an empty name it might write.
+func TestSeatAssignee(t *testing.T) {
+	t.Parallel()
+	if got, err := seatAssignee(fakeBeadReader{issues: map[string]*beads.Issue{"gt-1": {ID: "gt-1", Assignee: "gastown/polecats/opal"}}})("gt-1"); err != nil || got != "gastown/polecats/opal" {
+		t.Fatalf("seatAssignee = %q, %v; want the sling's assignee", got, err)
+	}
+	if _, err := seatAssignee(fakeBeadReader{err: errors.New("dolt is down")})("gt-1"); err == nil {
+		t.Fatal("seatAssignee = nil error for a bead that cannot be read; the recorder would then guess the seat")
+	}
+	if _, err := seatAssignee(nilBeadReader{})("gt-1"); err == nil {
+		t.Fatal("seatAssignee = nil error for a reader that answers no bead; want it refused")
+	}
+}
+
+// nilBeadReader answers every read with no bead and no error, the shape a
+// client returns for an id the store does not know.
+type nilBeadReader struct{}
+
+func (nilBeadReader) Show(string) (*beads.Issue, error) { return nil, nil }
+
 // The worker's one first-sight hook carries both records a submission is owed:
 // the battery's, read from the clone, and the done event a sandbox seat could
 // not write into this town's log (gt-1m9gr). The done recorder is built with
