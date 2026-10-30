@@ -84,7 +84,7 @@ func (d Deployer) Deploy(ctx context.Context, sup Supervisor, composePath string
 	if err != nil {
 		return fmt.Errorf("daemonimage: cannot render the compose file for %s; the old file is unchanged and nothing was started: %w", composePath, err)
 	}
-	if err := writeComposeFile(composePath, content); err != nil {
+	if err := WriteComposeFile(composePath, content); err != nil {
 		return fmt.Errorf("daemonimage: cannot write %s; the old compose file is unchanged and nothing was started: %w", composePath, err)
 	}
 	if err := d.Run(ctx, filepath.Dir(composePath), dockerEnv(d.Environ), argv); err != nil {
@@ -138,13 +138,28 @@ func valueAfter(argv []string, i int) string {
 	return ""
 }
 
-// writeComposeFile replaces path with content in one rename, so a reader of the
+// WriteComposeFile replaces path with content in one rename, so a reader of the
 // file sees either the old render or the new one, never a partly written file.
 // The render is written to a temporary file beside path, because a rename is
 // atomic only within one filesystem; its unique name keeps concurrent writers
 // apart. The temporary file is removed unless the rename puts it in place.
-func writeComposeFile(path string, content []byte) error {
+//
+// `gt daemon compose write` renders the live town's file through this too, so
+// every writer of a compose file replaces it the same way.
+func WriteComposeFile(path string, content []byte) error {
 	return writeComposeFileWith(path, content, createComposeTemp)
+}
+
+// ImageTagRev returns the rev an image tag names: the commit ImageTag stamps.
+// It refuses any other tag, so a tag the builder could not have made never
+// reaches a rendered compose file. The shape is read with the builder's own
+// check, so the two cannot drift.
+func ImageTagRev(tag string) (string, error) {
+	rev, ok := strings.CutPrefix(strings.TrimSpace(tag), "gt-daemon:")
+	if !ok || !isCommit(rev) {
+		return "", fmt.Errorf("daemonimage: image tag %q is not gt-daemon:<7 or more hex digits>; build one with gt daemon image", tag)
+	}
+	return rev, nil
 }
 
 // composeTemp is the temporary file a render is written to. *os.File is one;
@@ -156,12 +171,12 @@ type composeTemp interface {
 	Name() string
 }
 
-// createComposeTemp makes the temporary file writeComposeFile writes through.
+// createComposeTemp makes the temporary file WriteComposeFile writes through.
 func createComposeTemp(dir, pattern string) (composeTemp, error) {
 	return os.CreateTemp(dir, pattern)
 }
 
-// writeComposeFileWith is writeComposeFile with the temporary file's source
+// writeComposeFileWith is WriteComposeFile with the temporary file's source
 // injected, so each step's failure can be driven.
 func writeComposeFileWith(path string, content []byte, create func(dir, pattern string) (composeTemp, error)) (err error) {
 	f, err := create(filepath.Dir(path), filepath.Base(path)+".*.tmp")
