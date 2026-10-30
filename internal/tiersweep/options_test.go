@@ -360,6 +360,19 @@ func TestSkipForTable(t *testing.T) {
 			pkg:       "./p",
 			wantWhole: true,
 		},
+		{
+			name: "a trailing colon names no pattern and skips nothing",
+			list: "integration:./p:",
+			tier: TierIntegration,
+			pkg:  "./p",
+		},
+		{
+			name:        "a trailing colon does not shadow a later entry (gt-jtyrs)",
+			list:        "integration:./p: integration:./p:^TestA$",
+			tier:        TierIntegration,
+			pkg:         "./p",
+			wantPattern: "^TestA$",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
