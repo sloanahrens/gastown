@@ -396,6 +396,25 @@ func TestPushRedactsEveryForm(t *testing.T) {
 	}
 }
 
+// TestPushFallsBackToTheCloneRefusesLoudly pins the fallback push failing: the
+// clone's push error names the copy as the place it ran, and the mode is not
+// exercised. No rig repository, no hook, and a refused push all at once.
+func TestPushFallsBackToTheCloneRefusesLoudly(t *testing.T) {
+	t.Parallel()
+	g := &rigGit{answers: map[string]gitAnswer{}}
+	var logs []string
+	mode, err := pushPusher(g, false, &logs).Push(testSHA)
+	if err == nil || !strings.Contains(err.Error(), "failed from "+testCopy+": ") {
+		t.Fatalf("Push = %v, want the clone's push refusal naming %q", err, testCopy)
+	}
+	if mode != PushMode(0) || mode.HooksExercised() {
+		t.Errorf("mode = %v on a refused clone push, want the zero value, not exercised", mode)
+	}
+	if want := []string{testCopy}; !reflect.DeepEqual(g.pushes(), want) {
+		t.Errorf("pushes ran in %q, want only %q", g.pushes(), want)
+	}
+}
+
 // TestPushChildrenNeverInheritTheTokens pins the environment of every git the
 // Pusher starts: none carries the probe's credentials or a repository pin, even
 // when the probe's own environment holds them. The environment is a fake, so
