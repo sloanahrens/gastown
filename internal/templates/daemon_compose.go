@@ -170,6 +170,23 @@ const (
 	ScratchForgeRunnerService = "scratch-forge-runner"
 )
 
+// ScratchForgeServices are the services the scratch forge adds to the file, in
+// the order a compose command names them to start them: none is a dependency of
+// daemon, so naming daemon alone would leave the forge stopped. The list is
+// empty unless s.ScratchForge is set, the only case that renders the body, and
+// daemon_compose_scratch_forge_test.go holds it to the body's service set.
+func ScratchForgeServices(s ComposeSpec) []string {
+	if !s.ScratchForge {
+		return nil
+	}
+	return []string{
+		ScratchForgejoService,
+		ScratchForgejoDBService,
+		ScratchForgeDindService,
+		ScratchForgeRunnerService,
+	}
+}
+
 // The stack's networks, the alias the runner reaches its engine by, and its
 // volumes: no command names one from outside this package, so they stay
 // unexported.
