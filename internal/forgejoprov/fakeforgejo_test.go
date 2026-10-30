@@ -198,8 +198,7 @@ func (f *fakeForgejo) listTokens(user string) (int, string) {
 
 // mintToken creates a token for a user. Only a site administrator's token may do it,
 // so an adminless fake answers 403. A body with no name or no scopes, a scope no
-// role uses, a repository scope with write:admin, and a name the user already has
-// are all 422, and mint nothing.
+// role uses, and a name the user already has are all 422, and mint nothing.
 func (f *fakeForgejo) mintToken(user string, body []byte) (int, string) {
 	if f.adminless {
 		return refusal(http.StatusForbidden, "the token needs site-administrator rights to mint a token")
@@ -226,19 +225,17 @@ func (f *fakeForgejo) mintToken(user string, body []byte) (int, string) {
 	return reply(http.StatusCreated, map[string]any{"name": in.Name, "scopes": in.Scopes, f.tokenField: value})
 }
 
+// knownScopes is the token scopes the fake accepts, written out rather than read from
+// the production role table: the table is the thing under test, so the fake must not
+// agree with it by construction. TestFakeKnowsEveryRoleScope holds the two together.
+var knownScopes = []string{"read:repository", "read:user", "write:repository", "read:package", "write:package"}
+
 // refusedScopes names why a scope list is refused, or returns "" when it is allowed.
-// Every scope must be one a role uses, so write:admin, which no role uses, is refused
-// too, and so is a repository list that names it. roleTable is the production table,
-// so the fake cannot drift from it.
+// Every scope must be one in knownScopes, so write:admin, which no role uses, is refused
+// wherever it sits in the list.
 func refusedScopes(scopes []string) string {
-	allowed := map[string]bool{}
-	for _, r := range roleTable() {
-		for _, s := range r.scopes {
-			allowed[s] = true
-		}
-	}
 	for _, s := range scopes {
-		if !allowed[s] {
+		if !slices.Contains(knownScopes, s) {
 			return fmt.Sprintf("scope %s is not one the roles use", s)
 		}
 	}

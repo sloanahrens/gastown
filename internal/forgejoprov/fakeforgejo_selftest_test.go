@@ -191,9 +191,9 @@ func TestFakeCallLogHidesTheAuthorizationValue(t *testing.T) {
 	}
 }
 
-// TestFakeRefusesWhatLiveRefuses checks that a token naming a scope no role uses, or
-// a repository scope with write:admin, is 422 and mints nothing, and that the role's
-// own scopes are accepted.
+// TestFakeRefusesWhatLiveRefuses checks that a token naming a scope no role uses is 422
+// and mints nothing, also when a valid scope comes before it, and that the role's own
+// scopes are accepted.
 func TestFakeRefusesWhatLiveRefuses(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -202,7 +202,7 @@ func TestFakeRefusesWhatLiveRefuses(t *testing.T) {
 		status int
 	}{
 		{"a scope no role uses", []string{"write:admin"}, http.StatusUnprocessableEntity},
-		{"a repository list with write:admin", []string{"read:repository", "write:admin"}, http.StatusUnprocessableEntity},
+		{"an unused scope after a valid one", []string{"read:repository", "write:admin"}, http.StatusUnprocessableEntity},
 		{"the scopes of a role", []string{"write:repository", "read:user"}, http.StatusCreated},
 	}
 	for _, tc := range cases {
@@ -224,6 +224,20 @@ func TestFakeRefusesWhatLiveRefuses(t *testing.T) {
 				t.Fatalf("a refused mint left a token behind")
 			}
 		})
+	}
+}
+
+// TestFakeKnowsEveryRoleScope checks that every scope the production role table gives a
+// role is one the fake accepts. The fake's list is written out, so a scope the table
+// gains fails here until the fake is updated to match.
+func TestFakeKnowsEveryRoleScope(t *testing.T) {
+	t.Parallel()
+	for _, r := range roleTable() {
+		for _, s := range r.scopes {
+			if !slices.Contains(knownScopes, s) {
+				t.Errorf("role %s uses scope %s, which the fake does not accept", r.name, s)
+			}
+		}
 	}
 }
 
