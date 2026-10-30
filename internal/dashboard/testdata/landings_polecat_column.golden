@@ -1,6 +1,7 @@
 [
   {"bead": "gt-attempts", "text": "23m", "title": "2 attempts: 14m + 9m"},
   {"bead": "gt-lower-attempts", "text": "23m+", "title": "2 attempts: 14m+ + 9m"},
+  {"bead": "gt-upper", "text": "≤23m", "title": "1 attempt: ≤23m"},
   {"bead": "gt-crew", "text": "–", "title": ""},
   {"bead": "gt-open", "text": "–", "title": "1 attempt: open"},
   {"bead": "gt-subsecond", "text": "<1s", "title": ""}

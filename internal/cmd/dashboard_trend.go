@@ -353,9 +353,9 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			secs := rec.PolecatSecs
 			row.PolecatSecs = &secs
 		}
-		row.PolecatLowerBound = rec.PolecatLowerBound
+		row.PolecatLowerBound, row.PolecatUpperBound = rec.PolecatLowerBound, rec.PolecatUpperBound
 		for _, a := range rec.PolecatAttempts {
-			row.PolecatAttempts = append(row.PolecatAttempts, dashboard.PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound})
+			row.PolecatAttempts = append(row.PolecatAttempts, dashboard.PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound, UpperBound: a.UpperBound})
 		}
 		timing(&row, omStageFor(stages, rec.Bead, rec.LandedAt))
 		rows = append(rows, row)
@@ -519,7 +519,7 @@ func setPolecatReading(row *dashboard.LandingRow, secs float64, attempts []land.
 		row.PolecatSecs = &s
 	}
 	for _, a := range attempts {
-		row.PolecatAttempts = append(row.PolecatAttempts, dashboard.PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound})
+		row.PolecatAttempts = append(row.PolecatAttempts, dashboard.PolecatAttempt{Seat: a.Seat, Secs: a.Secs, LowerBound: a.LowerBound, UpperBound: a.UpperBound})
 	}
 }
 

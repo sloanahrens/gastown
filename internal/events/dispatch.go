@@ -55,15 +55,22 @@ type DispatchClock struct {
 	// dispatches. A list holds the dispatches the log still carries for a bead
 	// whose runs are not ended, which is a handful for any bead the log keeps.
 	ends   map[string]time.Time
-	starts map[string][]time.Time
+	starts map[string][]dispatchPoint
 	// targets is the seat each bead was last slung to, so a spec-dispatch sling
 	// to a different seat can be told from a repeat to the seat that holds it.
 	targets map[string]string
 }
 
+// dispatchPoint is one sling filed in a bead's start list: when it was written,
+// and the seat it named ("" when it named none).
+type dispatchPoint struct {
+	at     time.Time
+	target string
+}
+
 // NewDispatchClock returns an empty clock.
 func NewDispatchClock() *DispatchClock {
-	return &DispatchClock{ends: map[string]time.Time{}, starts: map[string][]time.Time{}, targets: map[string]string{}}
+	return &DispatchClock{ends: map[string]time.Time{}, starts: map[string][]dispatchPoint{}, targets: map[string]string{}}
 }
 
 // Add folds evs into the clock, in log order. Adding the same events again
@@ -73,48 +80,75 @@ func NewDispatchClock() *DispatchClock {
 // (DispatchStart); a repeat to the same seat does not.
 func (c *DispatchClock) Add(evs []Event) {
 	for _, ev := range evs {
-		bead := payloadBead(ev)
-		if bead == "" {
-			continue
-		}
-		switch ev.Type {
-		case TypeSling:
-			ts, err := eventTime(ev)
-			if err != nil {
-				continue
-			}
-			target, _ := ev.Payload["target"].(string)
-			if prev, ok := c.targets[bead]; ev.Actor == SpecDispatchActor && ok && target != "" && prev != target {
-				c.EndRun(bead, ts)
-			}
-			if target != "" {
-				c.targets[bead] = target
-			}
-			c.addStart(bead, ts)
-		case TypeDone, TypeBeadClosed, TypeOverrunStop:
-			at, err := runEndTime(ev)
-			if err != nil {
-				continue
-			}
-			c.EndRun(bead, at)
-		}
+		c.add(ev)
 	}
 }
 
-// addStart files ts among bead's dispatches since its last run end. A sling
-// before the end belongs to the run that ended and is not filed at all.
-func (c *DispatchClock) addStart(bead string, ts time.Time) {
+// add folds one event into the clock (Add).
+func (c *DispatchClock) add(ev Event) {
+	bead := payloadBead(ev)
+	if bead == "" {
+		return
+	}
+	switch ev.Type {
+	case TypeSling:
+		ts, err := eventTime(ev)
+		if err != nil {
+			return
+		}
+		target, _ := ev.Payload["target"].(string)
+		if prev, ok := c.targets[bead]; ev.Actor == SpecDispatchActor && ok && target != "" && prev != target {
+			c.EndRun(bead, ts)
+		}
+		if target != "" {
+			c.targets[bead] = target
+		}
+		c.addStart(bead, ts, target)
+	case TypeDone, TypeBeadClosed, TypeOverrunStop:
+		at, err := runEndTime(ev)
+		if err != nil {
+			return
+		}
+		c.EndRun(bead, at)
+	}
+}
+
+// DispatchedBy returns when the run bead was working under at end was
+// dispatched, and the seat that sling named: the earliest sling event of the
+// run the log holds strictly before end, with the run ends and seat moves
+// before it folded in (DispatchStart). The run's own end event, written at or
+// after end, is not folded in, so the clock names the run that was still
+// current rather than the rework after it. The second return is "" when the
+// sling named no seat, and the third is false when the log holds no such sling.
+//
+// A landing uses it to time a bead whose seat wrote no span start, where the
+// dispatch is the earliest the seat can have been given the bead (gt-v7ptp).
+func DispatchedBy(evs []Event, bead string, end time.Time) (time.Time, string, bool) {
+	c := NewDispatchClock()
+	for _, ev := range evs {
+		if ts, err := eventTime(ev); err == nil && !ts.Before(end) {
+			continue
+		}
+		c.add(ev)
+	}
+	return c.Dispatched(bead)
+}
+
+// addStart files ts, slung to target, among bead's dispatches since its last
+// run end. A sling before the end belongs to the run that ended and is not
+// filed at all.
+func (c *DispatchClock) addStart(bead string, ts time.Time, target string) {
 	if end, ok := c.ends[bead]; ok && ts.Before(end) {
 		return
 	}
 	s := c.starts[bead]
-	i := sort.Search(len(s), func(i int) bool { return !s[i].Before(ts) })
-	if i < len(s) && s[i].Equal(ts) {
+	i := sort.Search(len(s), func(i int) bool { return !s[i].at.Before(ts) })
+	if i < len(s) && s[i].at.Equal(ts) {
 		return // the same event folded in twice
 	}
-	s = append(s, time.Time{})
+	s = append(s, dispatchPoint{})
 	copy(s[i+1:], s[i:])
-	s[i] = ts
+	s[i] = dispatchPoint{at: ts, target: target}
 	c.starts[bead] = s
 }
 
@@ -131,7 +165,7 @@ func (c *DispatchClock) EndRun(bead string, at time.Time) {
 	}
 	c.ends[bead] = at
 	s := c.starts[bead]
-	if i := sort.Search(len(s), func(i int) bool { return !s[i].Before(at) }); i > 0 {
+	if i := sort.Search(len(s), func(i int) bool { return !s[i].at.Before(at) }); i > 0 {
 		s = s[i:]
 	}
 	if len(s) == 0 {
@@ -165,11 +199,19 @@ func (c *DispatchClock) StartSince(bead string, end time.Time) (time.Time, bool)
 // Start returns when bead's current run was dispatched, false when no sling
 // since its last run end names it.
 func (c *DispatchClock) Start(bead string) (time.Time, bool) {
+	at, _, ok := c.Dispatched(bead)
+	return at, ok
+}
+
+// Dispatched returns when bead's current run was dispatched and the seat that
+// sling named, "" when it named none. The seat is the one the dispatch time
+// belongs to, so a reader can tell whose clock it is reading.
+func (c *DispatchClock) Dispatched(bead string) (time.Time, string, bool) {
 	s := c.starts[bead]
 	if len(s) == 0 {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
-	return s[0], true
+	return s[0].at, s[0].target, true
 }
 
 // Starts returns a copy of every bead's dispatch, so a caller cannot change the
@@ -178,7 +220,7 @@ func (c *DispatchClock) Starts() map[string]time.Time {
 	out := make(map[string]time.Time, len(c.starts))
 	for bead, s := range c.starts {
 		if len(s) > 0 {
-			out[bead] = s[0]
+			out[bead] = s[0].at
 		}
 	}
 	return out

@@ -534,13 +534,16 @@ type LandingRow struct {
 	ShipRunState string `json:"ship_run_state,omitempty"`
 	// PolecatSecs is the time the bead's polecat seats spent hooked on it, as
 	// the landing worker read it from the spans log; PolecatAttempts is each
-	// seat's share of it, which the cell's title lists, and PolecatLowerBound
-	// marks a total that may understate the time. A crew landing and a record
-	// written before the fields existed carry none of them, and the page draws
-	// a dash (gt-yxl22, gt-90wi1).
+	// seat's share of it, which the cell's title lists, PolecatLowerBound
+	// marks a total that may understate the time, and PolecatUpperBound one
+	// read from the bead's dispatch because no seat wrote a start, which may
+	// overstate it. A crew landing and a record written before the fields
+	// existed carry none of them, and the page draws a dash (gt-yxl22,
+	// gt-90wi1, gt-v7ptp).
 	PolecatSecs       *float64         `json:"polecat_secs,omitempty"`
 	PolecatAttempts   []PolecatAttempt `json:"polecat_attempts,omitempty"`
 	PolecatLowerBound bool             `json:"polecat_lower_bound,omitempty"`
+	PolecatUpperBound bool             `json:"polecat_upper_bound,omitempty"`
 	Commit            string           `json:"commit,omitempty"`
 	Route             string           `json:"route,omitempty"`
 	Risk              bool             `json:"risk,omitempty"`
@@ -557,11 +560,14 @@ type LandingRow struct {
 
 // PolecatAttempt is one seat's time on a landing's bead, an entry of a row's
 // polecat_attempts: what the Landings pane's Polecat cell lists on hover. Secs
-// is the attempt's duration and LowerBound marks it a floor (gt-90wi1).
+// is the attempt's duration, LowerBound marks it a floor, and UpperBound one
+// read from the bead's dispatch rather than the seat's start (gt-90wi1,
+// gt-v7ptp).
 type PolecatAttempt struct {
 	Seat       string  `json:"seat"`
 	Secs       float64 `json:"secs"`
 	LowerBound bool    `json:"lower_bound,omitempty"`
+	UpperBound bool    `json:"upper_bound,omitempty"`
 }
 
 // Trend is the last 24 hours as the page draws it: landings and rejections by

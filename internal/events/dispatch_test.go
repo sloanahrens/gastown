@@ -444,3 +444,82 @@ func TestDispatchClockStopThenSameSeatSlingStartsNewRun(t *testing.T) {
 		t.Errorf("start = %v (%t), want 13:00:00Z: a stop ends the run, so the next sling starts a new one", got, ok)
 	}
 }
+
+// DispatchedBy reads the run that was current at a bead's end, so a landing can
+// time a bead whose seat wrote no start event. The run's own done event is at
+// or after that end, so the clock must not let it drop the sling (gt-v7ptp).
+func TestDispatchedByReadsTheRunCurrentAtEnd(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		evs  []Event
+		end  string
+		want string // "" for not found
+	}{
+		{
+			name: "the done event at the end does not drop the run's sling",
+			evs: []Event{
+				dispatchEv(TypeSling, t9, "gt-a"),
+				dispatchEv(TypeDone, t11, "gt-a"),
+			},
+			end:  t11,
+			want: t9,
+		},
+		{
+			name: "a rework after the end is not what the landing times",
+			evs: []Event{
+				dispatchEv(TypeSling, t9, "gt-a"),
+				dispatchEv(TypeDone, t10, "gt-a"),
+				dispatchEv(TypeSling, t11, "gt-a"),
+				dispatchEv(TypeDone, t12, "gt-a"),
+			},
+			end:  t10,
+			want: t9,
+		},
+		{
+			name: "a re-sling to the same seat before the end keeps the run's first dispatch",
+			evs: []Event{
+				dispatchEv(TypeSling, t9, "gt-a"),
+				dispatchEv(TypeSling, t10, "gt-a"),
+				dispatchEv(TypeDone, t11, "gt-a"),
+			},
+			end:  t11,
+			want: t9,
+		},
+		{
+			name: "a bead the log never dispatched has no clock",
+			evs:  []Event{dispatchEv(TypeSling, t9, "gt-b")},
+			end:  t11,
+			want: "",
+		},
+		{
+			name: "a sling at or after the end dates no run before it",
+			evs:  []Event{dispatchEv(TypeSling, t11, "gt-a")},
+			end:  t11,
+			want: "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			end := mustTime(t, tt.end)
+			got, seat, ok := DispatchedBy(tt.evs, "gt-a", end)
+			if tt.want == "" {
+				if ok {
+					t.Errorf("DispatchedBy = %v; want no dispatch", got)
+				}
+				if seat != "" {
+					t.Errorf("seat = %q; want none with no dispatch", seat)
+				}
+				return
+			}
+			if !ok || !got.Equal(mustTime(t, tt.want)) {
+				t.Errorf("DispatchedBy = %v (%t), want %s", got, ok, tt.want)
+			}
+			// the seat is the one the dated sling named, so a landing can tell
+			// whose clock it is reading (gt-v7ptp).
+			if want := "gastown/polecats/gt-a"; seat != want {
+				t.Errorf("seat = %q, want %q", seat, want)
+			}
+		})
+	}
+}

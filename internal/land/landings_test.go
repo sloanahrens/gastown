@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 )
@@ -911,5 +912,376 @@ func TestLandingsFilePolecatTimeAsOfCountsAnOpenAttemptToThatTime(t *testing.T) 
 				t.Errorf("lower bound = %v, want %v: a running read counts an attempt that is still open", lower, tc.wantLower)
 			}
 		})
+	}
+}
+
+// seedSling writes the town's event log line for bead's dispatch at at: the
+// sling start a record falls back on when the seat wrote no span start
+// (gt-v7ptp). The seat it names is the landing's own "gastown/opal" in the
+// log's "gastown/polecats/opal" spelling.
+func seedSling(t *testing.T, town, bead string, at time.Time) {
+	t.Helper()
+	seedSlingTo(t, town, bead, "gastown/polecats/opal", at)
+}
+
+// seedSlingTo is seedSling with the seat the sling names chosen by the caller.
+func seedSlingTo(t *testing.T, town, bead, seat string, at time.Time) {
+	t.Helper()
+	line, err := json.Marshal(events.Event{
+		Timestamp: at.UTC().Format(time.RFC3339), Source: "gt", Type: events.TypeSling,
+		Actor: events.ActorDaemon, Payload: events.SlingPayload(bead, seat),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(town, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(town, events.EventsFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLandingsFileAppendFloorsTheTimeASeatWithNoStartLeft: a landed bead whose
+// seat wrote no start event at all has no clock in the span log, so the record
+// is timed from the bead's dispatch to the end the landing trusts, and named a
+// dispatch interval rather than the seat's own measurement. It is an upper
+// bound, not a floor: the session starts after the sling, so the interval can
+// only overstate the seat's time (gt-v7ptp).
+func TestLandingsFileAppendFloorsTheTimeASeatWithNoStartLeft(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	// A span store the seat never wrote to: gt-p85pw.92's shape.
+	f.Spans = spans.New(spans.DefaultDir(town), nil)
+	seedSling(t, town, "gt-abc", spanEpoch)
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(30*time.Minute))
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, keyed := lastLine(t, f)
+	if want := 20 * 60.0; rec.PolecatSecs != want {
+		t.Errorf("polecat_secs = %v, want the %v from the sling to the submission", rec.PolecatSecs, want)
+	}
+	if !rec.PolecatUpperBound {
+		t.Error("polecat_upper_bound unset on a time read from the dispatch rather than the seat")
+	}
+	if rec.PolecatLowerBound {
+		t.Error("polecat_lower_bound set on a dispatch interval, which can only overstate the seat's time")
+	}
+	want := []PolecatAttempt{{Seat: "gastown/opal", Secs: 20 * 60, UpperBound: true, From: PolecatFromSling}}
+	if !reflect.DeepEqual(rec.PolecatAttempts, want) {
+		t.Errorf("polecat_attempts = %+v, want %+v", rec.PolecatAttempts, want)
+	}
+	for _, key := range []string{"polecat_secs", "polecat_attempts", "polecat_upper_bound"} {
+		if _, ok := keyed[key]; !ok {
+			t.Errorf("%s missing from %v", key, keyed)
+		}
+	}
+	if _, ok := keyed["polecat_lower_bound"]; ok {
+		t.Errorf("a dispatch interval wrote polecat_lower_bound: %v", keyed)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "wrote no span start") {
+		t.Errorf("logged = %q, want one line naming the missing span start", logged)
+	}
+}
+
+// TestLandingsFileAppendFloorsNothingWithoutASling: a bead the event log never
+// dispatched has no start either, so the record keeps its silence rather than
+// inventing one (gt-v7ptp).
+func TestLandingsFileAppendFloorsNothingWithoutASling(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	f.Spans = spans.New(spans.DefaultDir(town), nil)
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(30*time.Minute))
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, keyed := lastLine(t, f)
+	if rec.PolecatSecs != 0 || rec.PolecatAttempts != nil || rec.PolecatLowerBound {
+		t.Errorf("record = %+v; want no polecat time for a bead with neither a start nor a sling", rec)
+	}
+	for key := range keyed {
+		if strings.HasPrefix(key, "polecat_") {
+			t.Errorf("a bead with no start and no sling wrote %s", key)
+		}
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "no sling") {
+		t.Errorf("logged = %q, want one line saying the event log holds no sling", logged)
+	}
+}
+
+// TestLandingsFileAppendFloorsNothingWithoutAFirstSight: the end of a dispatch
+// floor is the host's, not the seat's, so a submission the host never saw ends
+// nothing and the record keeps its silence (gt-8yk78, gt-v7ptp).
+func TestLandingsFileAppendFloorsNothingWithoutAFirstSight(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name     string
+		firstSee func(*LandingsFile)
+		want     string
+	}{
+		{"the log holds no record for the submission", func(*LandingsFile) {}, "no first-sight record"},
+		{"the landing has no first-sight reader", func(f *LandingsFile) { f.FirstSeen = nil }, "no first-sight reader"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			f, err := RigLandingsFile(town, "gastown")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logged []string
+			f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+			f.Spans = spans.New(spans.DefaultDir(town), nil)
+			c.firstSee(f)
+			seedSling(t, town, "gt-abc", spanEpoch)
+
+			rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+			if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+
+			rec, _ := lastLine(t, f)
+			if rec.PolecatSecs != 0 || rec.PolecatAttempts != nil {
+				t.Errorf("record = %+v; want no time ended on the seat's word alone", rec)
+			}
+			if len(logged) != 1 || !strings.Contains(logged[0], c.want) {
+				t.Errorf("logged = %q, want one line saying the submission has no trusted end (%q)", logged, c.want)
+			}
+		})
+	}
+}
+
+// TestLandingsFileAppendFloorsNothingFromASlingAfterTheEnd: a start the reader
+// dates at or after the end is not the start of the run that submitted, so it
+// times nothing (gt-v7ptp).
+func TestLandingsFileAppendFloorsNothingFromASlingAfterTheEnd(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	f.Spans = spans.New(spans.DefaultDir(town), nil)
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(30*time.Minute))
+	// A reader that dates the sling at the end itself: SlungAtIn reads only
+	// slings before the end, so the guard this drives is the one between a
+	// seam's answer and the record.
+	f.SlungAt = func(string, time.Time) (time.Time, string, error) {
+		return spanEpoch.Add(20 * time.Minute), "gastown/polecats/opal", nil
+	}
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.PolecatSecs != 0 || rec.PolecatAttempts != nil {
+		t.Errorf("record = %+v; want no time from a sling after the submission", rec)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "not before the end") {
+		t.Errorf("logged = %q, want one line saying the sling is not before the end", logged)
+	}
+}
+
+// TestLandingsFileAppendFloorsNothingFromAnotherSeatsDispatch: the dispatch
+// clock belongs to the run of the seat the sling named. When that is not the
+// landing's seat — another polecat, or no seat at all — the interval is not
+// this seat's time and is not attributed to it (gt-v7ptp).
+func TestLandingsFileAppendFloorsNothingFromAnotherSeatsDispatch(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "dispatched to another polecat", target: "gastown/polecats/morsov", want: "dispatched to"},
+		{name: "the sling names no seat", target: "", want: "names no seat"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			f, err := RigLandingsFile(town, "gastown")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logged []string
+			f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+			f.Spans = spans.New(spans.DefaultDir(town), nil)
+			seedSlingTo(t, town, "gt-abc", tt.target, spanEpoch)
+			seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(30*time.Minute))
+
+			rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+			if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+
+			rec, _ := lastLine(t, f)
+			if rec.PolecatSecs != 0 || rec.PolecatAttempts != nil || rec.PolecatUpperBound {
+				t.Errorf("record = %+v; want no time from a dispatch that is not this seat's", rec)
+			}
+			if len(logged) != 1 || !strings.Contains(logged[0], tt.want) {
+				t.Errorf("logged = %q, want one line containing %q", logged, tt.want)
+			}
+		})
+	}
+}
+
+// TestLandingsFileAppendReadsTheFirstSightOnce: the close of the seat's attempt
+// and a dispatch floor end at the same trusted time, so one landing reads the
+// first-sight record once rather than per clock (gt-v7ptp).
+func TestLandingsFileAppendReadsTheFirstSightOnce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Spans = spans.New(spans.DefaultDir(town), nil)
+	seedSling(t, town, "gt-abc", spanEpoch)
+	reads := 0
+	f.FirstSeen = func(bead, head string) (time.Time, error) {
+		reads++
+		return spanEpoch.Add(30 * time.Minute), nil
+	}
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := lastLine(t, f); rec.PolecatSecs != 20*60 {
+		t.Errorf("polecat_secs = %v, want the 1200s the floor reads", rec.PolecatSecs)
+	}
+	if reads != 1 {
+		t.Errorf("first-sight reads = %d, want one for the landing", reads)
+	}
+}
+
+// TestLandingsFileAppendFloorsNothingFromALogPastTheReadBound: the dispatch
+// clock is read from a bounded window of the event log. A log larger than it
+// may start inside the run, where a repeat sling would date the bead later than
+// its dispatch and the interval would come out short, so such a log times
+// nothing rather than an interval that may understate the seat's time
+// (gt-v7ptp).
+func TestLandingsFileAppendFloorsNothingFromALogPastTheReadBound(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	f.Spans = spans.New(spans.DefaultDir(town), nil)
+	padEventLog(t, town, dispatchLogBytes)
+	// The sling sits at the very end of a log too large to be read whole.
+	seedSling(t, town, "gt-abc", spanEpoch)
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(30*time.Minute))
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.PolecatSecs != 0 || rec.PolecatAttempts != nil {
+		t.Errorf("record = %+v; want no time from a log read in part", rec)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "larger than") {
+		t.Errorf("logged = %q, want one line saying the log is larger than the read", logged)
+	}
+}
+
+// padEventLog grows the town's event log past size bytes with well-formed
+// lines, so a reader's bound is what decides how much of it is seen.
+func padEventLog(t *testing.T, town string, size int64) {
+	t.Helper()
+	if err := os.MkdirAll(town, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fh, err := os.OpenFile(filepath.Join(town, events.EventsFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := json.Marshal(events.Event{
+		Timestamp: spanEpoch.Add(-time.Hour).UTC().Format(time.RFC3339), Source: "gt",
+		Type: events.TypeNudge, Payload: events.HookPayload("gt-pad"),
+	})
+	if err != nil {
+		_ = fh.Close()
+		t.Fatal(err)
+	}
+	block := bytes.Repeat(append(line, '\n'), 512)
+	for written := int64(0); written < size; written += int64(len(block)) {
+		if _, err := fh.Write(block); err != nil {
+			_ = fh.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := fh.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLandingsFileAppendFloorsNothingWhenTheEventLogCannotBeRead: the dispatch
+// is a read like any other, so a log the landing cannot read costs the time and
+// the landing is written anyway, the way an unreadable span log does.
+func TestLandingsFileAppendFloorsNothingWhenTheEventLogCannotBeRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	f.Spans = spans.New(spans.DefaultDir(town), nil)
+	// A directory where the event log belongs: opening it succeeds and reading
+	// it fails, the shape of a log that is there but cannot be read.
+	if err := os.MkdirAll(filepath.Join(town, events.EventsFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(30*time.Minute))
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+		t.Fatalf("AppendSubmitted with an unreadable event log: %v; the landing must still be written", err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.LandedCommit != "c1" || rec.PolecatSecs != 0 || rec.PolecatAttempts != nil {
+		t.Errorf("record = %+v; want the landing with no dispatch floor", rec)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "no dispatch floor") {
+		t.Errorf("logged = %q, want one line saying the floor could not be read", logged)
 	}
 }

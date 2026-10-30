@@ -506,17 +506,21 @@ type LandingRecord struct {
 	// crew landing has no seat and records none, so the field is left out of
 	// the JSON and the note rather than written empty (gt-mukgk.6).
 	Agent string `json:"agent,omitempty"`
-	// PolecatSecs, PolecatAttempts and PolecatLowerBound are the time the
+	// PolecatSecs, PolecatAttempts and the two bound flags are the time the
 	// bead's polecat seats spent hooked on it, read from the spans log when
 	// the record is written (Append). A crew landing has no seat and a bead
-	// with no spans has no entries, so all three are left out then. A total
+	// with no spans has no entries, so all of them are left out then. A total
 	// that may understate the time sets PolecatLowerBound, with the time still
 	// recorded where there is any: an attempt that is still open adds no time,
 	// one a dead seat closed adds the time to its close, and an unreadable log
-	// leaves the time out entirely (gt-yxl22).
+	// leaves the time out entirely (gt-yxl22). A time read from the bead's
+	// dispatch instead of a span start sets PolecatUpperBound: the interval
+	// begins before the seat could have been working, so the time is at most
+	// that (gt-v7ptp).
 	PolecatSecs       float64          `json:"polecat_secs,omitempty"`
 	PolecatAttempts   []PolecatAttempt `json:"polecat_attempts,omitempty"`
 	PolecatLowerBound bool             `json:"polecat_lower_bound,omitempty"`
+	PolecatUpperBound bool             `json:"polecat_upper_bound,omitempty"`
 }
 
 // PolecatAttempt is one seat's time on the landing's bead, an entry of
@@ -526,10 +530,22 @@ type PolecatAttempt struct {
 	// Secs is the attempt's duration: the time to its close. An attempt its
 	// seat never ended adds none. Either way LowerBound marks the duration a
 	// floor — the seat's time past the open attempt or the dead close is not in
-	// the record.
+	// the record — and UpperBound marks one read from a clock that starts
+	// before the seat could have been working (gt-v7ptp).
 	Secs       float64 `json:"secs"`
 	LowerBound bool    `json:"lower_bound,omitempty"`
+	UpperBound bool    `json:"upper_bound,omitempty"`
+	// From names the clock an attempt was read from when the seat wrote no
+	// start event: PolecatFromSling is the bead's dispatch to the end the
+	// landing trusts for the submission. It is empty for an attempt timed from
+	// its own start event (gt-v7ptp).
+	From string `json:"from,omitempty"`
 }
+
+// PolecatFromSling is the From of an attempt whose seat wrote no start event,
+// so its duration is the interval from the bead's dispatch to the end the
+// landing trusts for the submission (gt-v7ptp).
+const PolecatFromSling = "sling"
 
 // NoteBlock is the LANDING RECORD block Land appends to the work bead.
 func (r LandingRecord) NoteBlock() string {

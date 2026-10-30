@@ -269,36 +269,42 @@ func TestThePolecatTimeColumnFormatsItsReadings(t *testing.T) {
 	for _, c := range []struct {
 		secs  string // a JS expression, so the unknown reading can be null
 		lower bool
+		upper bool
 		want  string
 	}{
-		{`null`, false, "–"},
-		{`undefined`, false, "–"},
-		{`0`, false, "–"},
-		{`0`, true, "–"},
-		{`0.4`, false, "<1s"},
-		{`0.6`, false, "<1s"},
-		{`0.4`, true, "<1s+"},
-		{`1`, false, "1s"},
-		{`59`, false, "59s"},
-		{`60`, false, "60s"},
-		{`75`, false, "75s"},
-		{`89`, false, "89s"},
-		{`90`, false, "2m"},
-		{`1380`, false, "23m"},
-		{`3569.6`, false, "1h"},
-		{`3570`, false, "1h"},
-		{`3600`, false, "1h"},
-		{`4320`, false, "1h12m"},
-		{`5400`, false, "1h30m"},
-		{`93600`, false, "26h"},
-		{`1380`, true, "23m+"},
+		{`null`, false, false, "–"},
+		{`undefined`, false, false, "–"},
+		{`0`, false, false, "–"},
+		{`0`, true, false, "–"},
+		{`0`, false, true, "–"},
+		{`0.4`, false, false, "<1s"},
+		{`0.6`, false, false, "<1s"},
+		{`0.4`, true, false, "<1s+"},
+		{`1`, false, false, "1s"},
+		{`59`, false, false, "59s"},
+		{`60`, false, false, "60s"},
+		{`75`, false, false, "75s"},
+		{`89`, false, false, "89s"},
+		{`90`, false, false, "2m"},
+		{`1380`, false, false, "23m"},
+		{`3569.6`, false, false, "1h"},
+		{`3570`, false, false, "1h"},
+		{`3600`, false, false, "1h"},
+		{`4320`, false, false, "1h12m"},
+		{`5400`, false, false, "1h30m"},
+		{`93600`, false, false, "26h"},
+		{`1380`, true, false, "23m+"},
+		// A reading from the bead's dispatch may overstate the seat's time, so
+		// it is marked an upper bound rather than a floor (gt-v7ptp).
+		{`1380`, false, true, "≤23m"},
+		{`0.4`, false, true, "≤1s"},
 	} {
-		v, err := dom.vm.RunString(fmt.Sprintf("polecatDur(%s, %t)", c.secs, c.lower))
+		v, err := dom.vm.RunString(fmt.Sprintf("polecatDur(%s, %t, %t)", c.secs, c.lower, c.upper))
 		if err != nil {
-			t.Fatalf("polecatDur(%s, %t): %v", c.secs, c.lower, err)
+			t.Fatalf("polecatDur(%s, %t, %t): %v", c.secs, c.lower, c.upper, err)
 		}
 		if got := v.String(); got != c.want {
-			t.Errorf("polecatDur(%s, %t) = %q, want %q", c.secs, c.lower, got, c.want)
+			t.Errorf("polecatDur(%s, %t, %t) = %q, want %q", c.secs, c.lower, c.upper, got, c.want)
 		}
 	}
 }
@@ -372,6 +378,15 @@ func TestTheLandingsPaneDrawsThePolecatTimeColumn(t *testing.T) {
 				"polecat_attempts": []map[string]any{
 					{"seat": "gastown/opal", "secs": 840, "lower_bound": true},
 					{"seat": "gastown/jade", "secs": 540},
+				},
+			},
+			{
+				// gt-p85pw.92's shape: no span start, so the record carries the
+				// dispatch interval, marked an upper bound (gt-v7ptp).
+				"at": now.Add(-2*time.Minute + 30*time.Second).Format(time.RFC3339), "bead": "gt-upper", "outcome": "landed",
+				"polecat_secs": 1380, "polecat_upper_bound": true,
+				"polecat_attempts": []map[string]any{
+					{"seat": "gastown/morsov", "secs": 1380, "upper_bound": true},
 				},
 			},
 			{"at": now.Add(-3 * time.Minute).Format(time.RFC3339), "bead": "gt-crew", "outcome": "landed"},
