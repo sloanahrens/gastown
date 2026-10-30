@@ -99,3 +99,70 @@ func TestIntegrationPolecatImageSeedReportsBothEndsOfAFailureLog(t *testing.T) {
 		})
 	}
 }
+
+// seedModuleWalk returns the shell that walks the seed's modules as the
+// Dockerfile's seed RUN does: from the find to the echo of the module it keeps.
+// The seed root is moved into dir, and the build steps are replaced by a visit
+// line, so the walk runs against a fixture and no go command runs.
+func seedModuleWalk(t *testing.T, dir string) string {
+	t.Helper()
+	const start = "for gomod in $(find /seed -name go.mod"
+	const end = `echo "seed: $dir";`
+	seed := seedRun(t)
+	i := strings.Index(seed, start)
+	j := strings.Index(seed, end)
+	if i < 0 || j < i {
+		t.Fatalf("the seed RUN has no module walk from %q to %q:\n%s", start, end, seed)
+	}
+	walk := strings.ReplaceAll(seed[i:j+len(end)], "/seed", dir)
+	return walk + ` echo "visit $dir"; done`
+}
+
+// The seed walk builds every module under the seed root except testdata and the
+// examples directory directly under a rig. It skips that examples directory with
+// a named line in the log, and builds a module under an examples directory inside
+// the rig's own tree (gt-vvu6d). The walk runs over a fixture tree of those cases.
+func TestIntegrationPolecatImageSeedWalkSkipsOnlyARigsExamples(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, mod := range []string{
+		"rigA/go.mod",
+		"rigA/examples/demo/go.mod",
+		"rigA/cmd/examples/deep/go.mod",
+		"rigA/testdata/fixture/go.mod",
+		"rigB/go.mod",
+	} {
+		p := filepath.Join(dir, mod)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("module fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("sh", "-c", seedModuleWalk(t, dir))
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the module walk exited with %v; output:\n%s", err, out)
+	}
+	var visited []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(line, "visit "); ok {
+			visited = append(visited, v)
+		}
+	}
+	// In the walk's sort order: rigA/cmd/... sorts before rigA/go.mod.
+	want := []string{
+		filepath.Join(dir, "rigA", "cmd", "examples", "deep"),
+		filepath.Join(dir, "rigA"),
+		filepath.Join(dir, "rigB"),
+	}
+	if strings.Join(visited, "\n") != strings.Join(want, "\n") {
+		t.Errorf("the walk built %q, want %q:\n%s", visited, want, out)
+	}
+	skipped := filepath.Join(dir, "rigA", "examples", "demo", "go.mod")
+	if !strings.Contains(string(out), "seed: skip "+skipped+":") {
+		t.Errorf("the walk does not name the skipped example module %s in the log:\n%s", skipped, out)
+	}
+}
