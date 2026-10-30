@@ -86,6 +86,33 @@ func TestListSendsTheFilterAndMapsInvalid(t *testing.T) {
 	}
 }
 
+func TestCountSendsTheFilterToTheCountRouteAndReadsTheCount(t *testing.T) {
+	t.Parallel()
+	var s seen
+	c, _ := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.record(r)
+		_, _ = w.Write([]byte(`{"count":4}`))
+	}), nil)
+	n, err := c.Count(t.Context(), api.ListFilter{Ephemeral: true, Statuses: []string{"closed"}})
+	if err != nil || n != 4 {
+		t.Fatalf("Count = %d, %v; want the server's 4", n, err)
+	}
+	if s.method != "POST" || s.path != "/v1/issues:count" || s.ct != "application/json" ||
+		s.body != `{"filter":{"statuses":["closed"],"ephemeral":true}}` {
+		t.Errorf("request = %s %s ct=%q body=%q, want a POST of the filter to /v1/issues:count", s.method, s.path, s.ct, s.body)
+	}
+}
+
+func TestCountOfAFilterThatCarriesAPageIsInvalid(t *testing.T) {
+	t.Parallel()
+	c, _ := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, 400, api.Invalid("count takes no limit; it counts every issue the filter matches"))
+	}), nil)
+	if _, err := c.Count(t.Context(), api.ListFilter{Ephemeral: true, Limit: 1}); !errors.Is(err, api.ErrInvalid) {
+		t.Errorf("Count with a limit = %v, want errors.Is api.ErrInvalid", err)
+	}
+}
+
 func TestListAllFollowsThreePagesAndStopsAtTheEnd(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex

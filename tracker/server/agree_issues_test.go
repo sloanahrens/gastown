@@ -67,3 +67,30 @@ func TestClientReadsAgreeWithTheRoutes(t *testing.T) {
 		t.Errorf("List bad cursor = %v, want api.ErrInvalid", err)
 	}
 }
+
+// TestClientCountAgreesWithTheListItCounts pins the pair the wisp reaper sizes
+// its work with: over one store, Count answers for every row List walks.
+func TestClientCountAgreesWithTheListItCounts(t *testing.T) {
+	t.Parallel()
+	wisps := []api.Issue{
+		{ID: "gt-wisp-a", Title: "a", Ephemeral: true},
+		{ID: "gt-wisp-b", Title: "b", Ephemeral: true},
+		{ID: "gt-wisp-c", Title: "c", Ephemeral: true},
+	}
+	ts := stubServer(t, issueStub{
+		list: func(_ context.Context, f api.ListFilter) (api.IssuePage, error) {
+			return api.IssuePage{Issues: wisps}, nil
+		},
+		count: func(_ context.Context, f api.ListFilter) (int, error) { return len(wisps), nil },
+	})
+	c := agreeClient(t, ts.URL)
+	f := api.ListFilter{Ephemeral: true, Statuses: []string{"closed"}}
+	got, err := c.ListAll(t.Context(), f)
+	if err != nil || len(got) != 3 {
+		t.Fatalf("ListAll = %v, %v; want the three wisps", got, err)
+	}
+	n, err := c.Count(t.Context(), f)
+	if err != nil || n != len(got) {
+		t.Errorf("Count = %d, %v; want %d, the length of the list it counts", n, err, len(got))
+	}
+}

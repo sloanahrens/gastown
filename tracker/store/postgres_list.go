@@ -69,9 +69,10 @@ func decodeListCursor(s string) (*listCursor, error) {
 	return &c, nil
 }
 
-// buildListQuery turns a filter and cursor into SQL and its arguments. Only
-// placeholders carry values, so no filter text reaches the query string.
-func buildListQuery(f api.ListFilter, cur *listCursor, limit int) (string, []any, error) {
+// buildListWhere turns a filter and cursor into the WHERE clause a list and a
+// count share, and its arguments. Only placeholders carry values, so no
+// filter text reaches the query string.
+func buildListWhere(f api.ListFilter, cur *listCursor) (string, []any, error) {
 	var where []string
 	var args []any
 	arg := func(v any) string {
@@ -120,13 +121,32 @@ func buildListQuery(f api.ListFilter, cur *listCursor, limit int) (string, []any
 	if !f.ClosedAfter.IsZero() {
 		where = append(where, "issues.closed_at >= "+arg(f.ClosedAfter))
 	}
+	if !f.ClosedBefore.IsZero() {
+		// NULL < anything is NULL, so an issue that is not closed never
+		// matches an upper bound either.
+		where = append(where, "issues.closed_at < "+arg(f.ClosedBefore))
+	}
 	if !f.CreatedAfter.IsZero() {
 		where = append(where, "issues.created_at >= "+arg(f.CreatedAfter))
+	}
+	if !f.CreatedBefore.IsZero() {
+		where = append(where, "issues.created_at < "+arg(f.CreatedBefore))
 	}
 	if cur != nil {
 		where = append(where, fmt.Sprintf("(issues.priority, issues.created_at, issues.id) > (%s, %s, %s)", arg(cur.Priority), arg(cur.CreatedAt), arg(cur.ID)))
 	}
-	q := "SELECT " + issueColumns + " FROM tracker.issues WHERE " + strings.Join(where, " AND ") +
+	return strings.Join(where, " AND "), args, nil
+}
+
+// buildListQuery is one page of the list: the shared WHERE clause, then the
+// list's order and one row past the page so NextCursor knows whether more
+// remain.
+func buildListQuery(f api.ListFilter, cur *listCursor, limit int) (string, []any, error) {
+	where, args, err := buildListWhere(f, cur)
+	if err != nil {
+		return "", nil, err
+	}
+	q := "SELECT " + issueColumns + " FROM tracker.issues WHERE " + where +
 		" ORDER BY priority, created_at, id LIMIT " + strconv.Itoa(limit+1)
 	return q, args, nil
 }
@@ -169,6 +189,24 @@ func (p *Postgres) ListIssues(ctx context.Context, f api.ListFilter) (api.IssueP
 		return api.IssuePage{}, err
 	}
 	return page, nil
+}
+
+// CountIssues counts the whole match, so a page in f is refused rather than
+// read as the total.
+func (p *Postgres) CountIssues(ctx context.Context, f api.ListFilter) (int, error) {
+	if err := api.ValidateCount(f); err != nil {
+		return 0, err
+	}
+	where, args, err := buildListWhere(f, nil)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	q := "SELECT count(*) FROM tracker.issues WHERE " + where
+	if err := p.pool.QueryRow(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count issues: %w", err)
+	}
+	return n, nil
 }
 
 // fillPage adds labels and the three counts to the issues of a page.
