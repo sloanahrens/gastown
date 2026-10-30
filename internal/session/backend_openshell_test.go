@@ -899,7 +899,7 @@ func TestCheckImageGTAcceptsADocsOnlyGap(t *testing.T) {
 			paths: []string{"docs/a.md", "internal/session/backend_openshell.go"}, wantDrift: true},
 		{name: "the Dockerfile is drift", paths: []string{"Dockerfile"}, wantDrift: true},
 		{name: "a deploy file is drift", paths: []string{"deploy/polecat/policy.yaml"}, wantDrift: true},
-		{name: "a plugin file is drift", paths: []string{"plugins/polecat-image/run.sh"}, wantDrift: true},
+		{name: "a plugin file is drift", paths: []string{"plugins/polecat-image/main.go"}, wantDrift: true},
 		{name: "markdown the binary embeds is drift",
 			paths: []string{"internal/templates/polecat-CLAUDE.md"}, wantDrift: true},
 		{name: "a comparison git cannot make is drift", queryErr: errors.New("exit status 1"), wantDrift: true},
