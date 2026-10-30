@@ -9,8 +9,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/ring"
+	"github.com/steveyegge/gastown/internal/ring/ringtest"
 )
 
 // assertOffNotRecorded fails when Off left any power state behind.
@@ -238,5 +243,136 @@ func TestStatusReportsAnUnreadableRouteTable(t *testing.T) {
 	got := f.statusOutput(t, o)
 	if !strings.Contains(got, "cannot read the route table") {
 		t.Errorf("status output read an unreadable route table as no tracker rig:\n%s", got)
+	}
+}
+
+// testRingKey signs the Ring records the status tests write; the fake hands
+// it out as the town's ring key.
+var testRingKey = []byte("ring-status-test-key")
+
+// ringCase is one Ring state written into a fake town, and the ring line the
+// status report must print for it.
+type ringCase struct {
+	name  string
+	setup func(t *testing.T, f *fake)
+	line  string
+}
+
+var ringCases = []ringCase{
+	{"no ring section", func(t *testing.T, f *fake) {
+		f.writeTownJSON(t, `{"type":"town","version":1,"name":"test"}`)
+	}, "ring: absent (" + ring.ReasonNoSection + ")"},
+	{"valid", func(t *testing.T, f *fake) {
+		// Forged 5h before now with a 36h lease: 31h of it is left.
+		ringtest.Valid(t, f.town, testRingKey, f.now.Add(-5*time.Hour))
+	}, "ring: valid, wanes in 31h"},
+	{"waned", func(t *testing.T, f *fake) {
+		// The lease ended 2h before now: the record expires at now-2h.
+		ringtest.Waned(t, f.town, testRingKey, f.now.Add(-2*time.Hour+time.Minute))
+	}, "ring: waned 2h ago"},
+	{"tampered", func(t *testing.T, f *fake) {
+		ringtest.Tampered(t, f.town, testRingKey, f.now)
+	}, "ring: absent (" + ring.ReasonBadSignature + ")"},
+	{"key unavailable", func(t *testing.T, f *fake) {
+		ringtest.Valid(t, f.town, testRingKey, f.now)
+		f.ringKey = nil
+	}, "ring: key unavailable"},
+}
+
+// statusWithRing runs the status report on a healthy fake whose part is set up
+// by part and whose Ring by ring, and returns what it printed.
+func statusWithRing(t *testing.T, part func(t *testing.T, f *fake), rc ringCase) string {
+	t.Helper()
+	f := newFake(t)
+	part(t, f)
+	f.ringKey = testRingKey
+	rc.setup(t, f)
+	o, _, _ := f.optsWithOut()
+	return f.statusOutput(t, o)
+}
+
+func TestStatusPrintsTheRingLine(t *testing.T) {
+	t.Parallel()
+	healthy := func(t *testing.T, f *fake) { f.setHealthy() }
+	for _, tt := range ringCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := statusWithRing(t, healthy, tt)
+			if !slices.Contains(strings.Split(got, "\n"), tt.line) {
+				t.Errorf("status output has no line %q:\n%s", tt.line, got)
+			}
+		})
+	}
+}
+
+func TestStatusReadsAnUnreadableRingAsUnreadable(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.ringKey = testRingKey
+	f.writeTownJSON(t, `{"type":"town"`)
+	o, _, _ := f.optsWithOut()
+	got := f.statusOutput(t, o)
+	if !slices.ContainsFunc(strings.Split(got, "\n"), func(l string) bool {
+		return strings.HasPrefix(l, "ring: unreadable (")
+	}) {
+		t.Errorf("a town config that cannot be parsed did not read as an unreadable ring:\n%s", got)
+	}
+}
+
+// stateLine is the report's derived state line.
+func stateLine(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "state ") {
+			return l
+		}
+	}
+	return ""
+}
+
+// touchSentinel creates a file a brake reads by its presence: the ESTOP or the
+// hold.
+func touchSentinel(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRingDoesNotChangeTheDerivedState(t *testing.T) {
+	t.Parallel()
+	for _, part := range []struct {
+		name  string
+		setup func(t *testing.T, f *fake)
+		want  string
+	}{
+		{"full", func(t *testing.T, f *fake) { f.setHealthy() }, "full"},
+		{"standby", func(t *testing.T, f *fake) {
+			f.setHealthy()
+			touchSentinel(t, estop.FilePath(f.town))
+			touchSentinel(t, dispatch.HoldFilePath(f.town))
+		}, "standby"},
+		{"off", func(t *testing.T, f *fake) {
+			f.setHealthy()
+			f.forgejo = false
+			f.loaded = map[string]bool{}
+		}, "off"},
+	} {
+		t.Run(part.name, func(t *testing.T) {
+			t.Parallel()
+			base := stateLine(statusWithRing(t, part.setup, ringCases[0]))
+			if want := statusLine("state", part.want); base != want {
+				t.Fatalf("with no ring section, state line = %q, want %q", base, want)
+			}
+			for _, r := range ringCases[1:] {
+				got := stateLine(statusWithRing(t, part.setup, r))
+				if got != base {
+					t.Errorf("the %s ring changed the state line to %q, want %q as with no ring", r.name, got, base)
+				}
+			}
+		})
 	}
 }

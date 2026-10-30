@@ -54,6 +54,9 @@ type fake struct {
 	jobhost    bool // the binary is on PATH
 	polecatErr error
 
+	// ringKey is what RingKey hands out; nil leaves the Ring keyless.
+	ringKey []byte
+
 	releasebot    bool
 	jobhostRan    bool
 	failJobhost   bool
@@ -119,6 +122,12 @@ func (f *fake) opts() Options {
 		Sleep:  func(_ context.Context, d time.Duration) error { f.now = f.now.Add(d); return nil },
 		Out:    &out,
 		ErrOut: &errOut,
+	}
+	o.RingKey = func(string) ([]byte, error) {
+		if f.ringKey == nil {
+			return nil, errors.New("no ring key in the fake")
+		}
+		return f.ringKey, nil
 	}
 	return o
 }

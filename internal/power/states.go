@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/ring"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -55,6 +56,7 @@ func Status(ctx context.Context, o Options) error {
 	}
 	line("ESTOP file", yesNo(r.estop, "present", "absent"))
 	line("hold file", yesNo(r.hold, "present", "absent"))
+	fmt.Fprintln(o.Out, e.ringLine())
 	line("landings pending", pending)
 	line("polecats working", r.workingCount())
 	line("dolt gc running", strconv.Itoa(boolInt(r.gc)))
@@ -62,6 +64,38 @@ func Status(ctx context.Context, o Options) error {
 	line("cloud-deploy daemons", fmt.Sprintf("%d plist(s), outside the states; see %s",
 		r.cloud, filepath.Join(o.TownRoot, "devops", "wizard-src", "cloud-check.sh")))
 	return nil
+}
+
+// ringLine is the Ring's line in the report: what its signed lease says at the
+// engine's clock, or why it cannot be trusted. It is information only, since
+// derive never reads it, so no power state changes with the Ring.
+func (e *engine) ringLine() string {
+	var key []byte
+	if e.o.RingKey != nil {
+		key, _ = e.o.RingKey(e.o.TownRoot)
+	}
+	now := e.o.Now()
+	st, err := ring.Read(e.o.TownRoot, key, now)
+	switch {
+	case errors.Is(err, ring.ErrNoKey):
+		return "ring: key unavailable"
+	case err != nil:
+		return fmt.Sprintf("ring: unreadable (%v)", err)
+	case st.Kind == ring.Valid:
+		return "ring: valid, wanes in " + spanText(st.Record.ExpiresAt.Sub(now))
+	case st.Kind == ring.Waned:
+		return "ring: waned " + spanText(now.Sub(st.Record.ExpiresAt)) + " ago"
+	default:
+		return "ring: " + st.String()
+	}
+}
+
+// spanText words a span for the ring line: whole hours, or minutes under one.
+func spanText(d time.Duration) string {
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh", int(d.Hours()))
 }
 
 // trackerStatus is the tracker's part of the report. A town with no rig on

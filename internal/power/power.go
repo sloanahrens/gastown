@@ -18,6 +18,7 @@ package power
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -135,6 +136,9 @@ type Options struct {
 	// reported, so a test that forgets the fake cannot reach the host's
 	// openshell.
 	NewSandboxBackend func(townRoot string, p session.Profile) (session.Backend, error)
+	// RingKey reads the key the Ring is signed with. An error, or a nil
+	// seam, leaves the Ring keyless: the status report says so.
+	RingKey func(townRoot string) ([]byte, error)
 
 	Out    io.Writer
 	ErrOut io.Writer
@@ -170,6 +174,9 @@ func RealSeams(o *Options) {
 	if o.NewSandboxBackend == nil {
 		o.NewSandboxBackend = session.NewOpenShellBackend
 	}
+	if o.RingKey == nil {
+		o.RingKey = unwiredRingKey
+	}
 	if o.LaunchDaemonsDir == "" {
 		o.LaunchDaemonsDir = "/Library/LaunchDaemons"
 	}
@@ -179,6 +186,12 @@ func RealSeams(o *Options) {
 	if o.UID == 0 {
 		o.UID = os.Getuid()
 	}
+}
+
+// unwiredRingKey is RealSeams' key reader until gt ring names where the key
+// lives (gt-6mlik.2): with no reference to read, the Ring reads as keyless.
+func unwiredRingKey(string) ([]byte, error) {
+	return nil, errors.New("no ring key reference is configured")
 }
 
 // engine is one state's run: the options plus the output helpers.
