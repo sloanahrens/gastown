@@ -847,14 +847,13 @@ func TestCostHeaderShowsItsSummaryWhenClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the Cost heading: %v", err)
 	}
-	if !strings.Contains(v.String(), "today $1.20 cash · DeepSeek 3.0d runway") {
+	if !strings.Contains(v.String(), "DeepSeek $27.45 · $0.05/h") {
 		t.Errorf("the closed Cost heading does not show the header line: %s", v.String())
 	}
 
-	// A row that carries a balance but none of the header's figures leaves the
-	// header empty, and the fold's own summary names the providers instead.
-	// The spend reading is present, so the header has no missing report to name
-	// and the row's balance is the only thing left to summarise.
+	// A row that carries a balance but no hourly spend draws that figure as ?,
+	// so the heading still names the provider and says what it cannot read.
+	// The spend reading is present, so the header has no missing report to name.
 	dom = newPageDOM(t)
 	dom.call(t, "renderCost", costPanelState([]map[string]any{{"id": "deepseek", "label": "DeepSeek", "kind": "cash", "balance": 27.45}}, map[string]any{"spend": spendReading()}))
 	if _, err := dom.vm.RunString(`state = ` + mustJSONString(t, costPanelState([]map[string]any{{"id": "deepseek", "label": "DeepSeek", "kind": "cash", "balance": 27.45}}, map[string]any{"spend": spendReading()})) + `; (() => { const f = folds.filter(f => f.key === "cost")[0]; f.closed = true; paintFolds(state); })()`); err != nil {
@@ -864,7 +863,7 @@ func TestCostHeaderShowsItsSummaryWhenClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the Cost heading: %v", err)
 	}
-	if !strings.Contains(v.String(), `"summary":"DeepSeek $27.45"`) {
+	if !strings.Contains(v.String(), `"summary":"DeepSeek $27.45 · ?`) {
 		t.Errorf("the closed Cost heading has no summary of its provider: %s", v.String())
 	}
 }

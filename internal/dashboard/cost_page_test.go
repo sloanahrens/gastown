@@ -112,11 +112,13 @@ func TestCostPanelGCPLineByCloudState(t *testing.T) {
 			"", ""},
 		{"fresh and under the threshold", map[string]any{"state": "fresh"}, "", ""},
 		{"read failed", map[string]any{"state": "error", "note": "reports unreadable"},
-			"badc", "GCP budget · cloud read failed · reports unreadable"},
+			"badc", "GCP: unreadable · reports unreadable"},
 		{"overdue with no alert", map[string]any{"state": "overdue"},
 			"warnc", "patrol overdue, no alert on its last report"},
 		{"report missing", map[string]any{"state": "missing", "note": "no report"},
-			"empty", "GCP budget · no patrol report"},
+			"warnc", "GCP: no data"},
+		{"unknown state", map[string]any{"state": "garbled"},
+			"warnc", "GCP: no data"},
 		{"no patrol on this machine", map[string]any{"state": "missing", "no_patrol": true}, "", ""},
 	}
 	for _, tc := range cases {
@@ -125,7 +127,7 @@ func TestCostPanelGCPLineByCloudState(t *testing.T) {
 			lines, _ := drawCost(t, map[string]any{"spend": spend, "cloud": tc.cloud})
 			var gcp []costLine
 			for _, l := range lines {
-				if strings.HasPrefix(l.Text, "GCP budget") {
+				if strings.HasPrefix(l.Text, "GCP") {
 					gcp = append(gcp, l)
 				}
 			}
@@ -156,7 +158,7 @@ func TestCostPanelDrawsGCPUnderTheProviderRows(t *testing.T) {
 	})
 	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c =>
 		c.className === "spendpart" ? "spendpart"
-			: c.textContent.indexOf("GCP budget") === 0 ? "gcp"
+			: c.textContent.indexOf("GCP") === 0 ? "gcp"
 			: c.tagName === "TABLE" ? "providers" : "other"))`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
@@ -204,14 +206,17 @@ func TestCostPanelEmptyStateAndCaption(t *testing.T) {
 	if strings.Contains(note.Text, "undefined") || strings.Contains(note.Text, "null") || strings.Contains(note.Title, "undefined") || !strings.Contains(note.Title, "ledger 2026-10-15 10:00:00") {
 		t.Errorf("caption with usage absent = %q (tooltip %q)", note.Text, note.Title)
 	}
-	if note.Text != "" {
-		t.Errorf("a spend report with no provider row drew a headline figure: %q", note.Text)
+	// A spend report with no provider list does not say its figures are zero: the
+	// list did not arrive, so each figure is unknown.
+	if want := "DeepSeek ? · ?" + headerSep + "Claude ? · ?" + headerSep + "read ?"; note.Text != want {
+		t.Errorf("a spend report with no provider list reads %q, want %q", note.Text, want)
 	}
 
-	// Unreadable usage reaches the caption in the page's failure colour.
-	_, note = drawCost(t, map[string]any{"spend": spend, "usage": map[string]any{"unavailable": true}})
-	if !strings.Contains(note.Text, "usage unreadable") || !strings.Contains(note.Class, "badc") {
-		t.Errorf("caption with unreadable usage = %q (%s)", note.Text, note.Class)
+	// Unreadable usage reaches the expanded panel's line in the page's failure colour.
+	dom := newPageDOM(t)
+	drawCostOn(t, dom, map[string]any{"spend": spend, "usage": map[string]any{"unavailable": true}})
+	if _, parts := summaryLine(t, dom); partByText(t, parts, "usage unreadable").Class != "badc" {
+		t.Errorf("unreadable usage did not wear the failure colour: %+v", parts)
 	}
 }
 
