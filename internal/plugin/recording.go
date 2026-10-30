@@ -246,23 +246,14 @@ func pluginLabel(labels []string) string {
 // checkWindow refuses a window the ledger cannot answer. A longer one than the
 // ledger was loaded with would count a prefix of the runs and read as fewer
 // runs than happened, which opens a cooldown gate that should be closed.
+//
+// A window of zero or less asks nothing of the ledger — no run is inside a
+// span that ends now or in the future — so any ledger answers it.
 func (l *RunLedger) checkWindow(window time.Duration) error {
-	if l.since == 0 {
-		return nil
-	}
-	if window > 0 && window <= l.since {
+	if l.since == 0 || window <= 0 || window <= l.since {
 		return nil
 	}
 	return fmt.Errorf("plugin run ledger: window %s is not within the %s it was loaded with", window, l.since)
-}
-
-// cutoff is the instant window reaches back to, the zero time for a window
-// that reaches back through every run the ledger holds.
-func (l *RunLedger) cutoff(window time.Duration) time.Time {
-	if window <= 0 {
-		return time.Time{}
-	}
-	return l.loadedAt.Add(-window)
 }
 
 // Count returns the number of pluginName's runs within window, printed
@@ -272,13 +263,16 @@ func (l *RunLedger) Count(pluginName string, window time.Duration) (int, error) 
 	if err := l.checkWindow(window); err != nil {
 		return 0, err
 	}
-	cutoff := l.cutoff(window)
+	if window <= 0 {
+		// CountRunsSince reads back from now for a zero or negative window, so
+		// it finds no run; a span that ends at or before now holds none.
+		return 0, nil
+	}
+	cutoff := l.loadedAt.Add(-window)
 	count := 0
 	for _, run := range l.runs[pluginName] {
-		if cutoff.IsZero() || !run.CreatedAt.Before(cutoff) {
-			if run.Result != ResultPrinted {
-				count++
-			}
+		if !run.CreatedAt.Before(cutoff) && run.Result != ResultPrinted {
+			count++
 		}
 	}
 	return count, nil

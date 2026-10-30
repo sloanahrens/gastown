@@ -115,16 +115,21 @@ func (d *Daemon) dispatchPlugins(rigsConfig *config.RigsConfig) {
 				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
 				continue
 			}
-			if ledger == nil {
-				continue // The tick logged why the ledger is unreadable.
-			}
-			count, err := ledger.Count(p.Name, window)
-			if err != nil {
-				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
-				continue
-			}
-			if count > 0 {
-				continue // Still in cooldown
+			// A zero or negative window reaches back to now, so no run holds
+			// the gate closed and it asks nothing of the ledger: the plugin
+			// runs, as it did when CountRunsSince counted from now.
+			if window > 0 {
+				if ledger == nil {
+					continue // The tick logged why the ledger is unreadable.
+				}
+				count, err := ledger.Count(p.Name, window)
+				if err != nil {
+					d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
+					continue
+				}
+				if count > 0 {
+					continue // Still in cooldown
+				}
 			}
 		}
 

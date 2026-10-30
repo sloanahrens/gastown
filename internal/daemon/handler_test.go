@@ -343,3 +343,42 @@ func TestDispatchPlugins_LedgerReadFailureSkipsGatedPlugins(t *testing.T) {
 		t.Errorf("ledger read failure not logged:\n%s", logs.String())
 	}
 }
+
+// A cooldown gate whose duration is zero or negative reaches back to now, so
+// no run holds it closed: the plugin runs on every tick, as it did when
+// CountRunsSince counted from now, and it costs the tick no ledger read.
+func TestDispatchPlugins_ZeroCooldownRunsWithoutALedgerRead(t *testing.T) {
+	for _, duration := range []string{"0", "-5m"} {
+		t.Run(duration, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			logs := &lockedBuffer{}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			bash := newFakeCLIFor(func(cliCall) cliReply {
+				cancel()
+				return cliReply{code: 1}
+			})
+			runs := &countingClient{Client: beadsfake.New()}
+			d := &Daemon{
+				config:     &Config{TownRoot: townRoot},
+				logger:     log.New(logs, "", 0),
+				ctx:        ctx,
+				execCmd:    bash.run,
+				pluginRuns: recorderSource{plugin.NewRecorderOn(runs)},
+			}
+
+			writeTestCooldownScriptPlugin(t, townRoot, "every-tick", duration)
+
+			d.dispatchPlugins(nil)
+			d.scripts.wait()
+
+			if ran, want := startedPlugins(bash.recorded()), []string{"every-tick"}; !slices.Equal(ran, want) {
+				t.Errorf("started %v, want %v: a %q window holds nothing closed", ran, want, duration)
+			}
+			if runs.lists != 0 {
+				t.Errorf("%d ledger list(s), want 0: a window of %q asks the ledger nothing", runs.lists, duration)
+			}
+		})
+	}
+}

@@ -291,6 +291,9 @@ func TestRunLedgerAnswersMatchPerPluginQueries(t *testing.T) {
 		{"alpha", "5h", 2},
 		{"beta", "1h", 0},
 		{"beta", "3h", 1},
+		// A window of zero or less ends at or before now, so it holds no run.
+		{"alpha", "0", 0},
+		{"alpha", "-5m", 0},
 		// A plugin with no runs counts 0 and has no last run.
 		{"gamma", "1h", 0},
 		{"gamma", "5h", 0},
@@ -348,6 +351,9 @@ func TestRunLedgerRefusesWindowItWasNotLoadedWith(t *testing.T) {
 	}
 	if _, err := ledger.Count("alpha", time.Hour); err != nil {
 		t.Errorf("ledger.Count at its own window: %v", err)
+	}
+	if got, err := ledger.Count("alpha", 0); err != nil || got != 0 {
+		t.Errorf("ledger.Count with a zero window = %d, %v; want 0, nil: a span ending now holds no run, so any ledger answers it", got, err)
 	}
 	if _, err := recorder.LoadRunLedger(-time.Minute); err == nil {
 		t.Error("LoadRunLedger with a negative window returned no error")
