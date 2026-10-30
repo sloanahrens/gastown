@@ -366,16 +366,28 @@ func tiersFrom(tiers []string, rep sweepReport, code int, logDir string) []sweep
 	if tail := tailOf(rep.stderr); tail != "" {
 		reason += ": " + tail
 	}
+	// A non-zero exit is the sweep saying a tier failed. When a summary line
+	// already says RED for some tier, the exit is explained and every GREEN tier
+	// beside it stays GREEN: the sweep ran those and they passed. Only when the
+	// sweep exited non-zero and NO line says RED is there a contradiction no tier
+	// can be blamed for, and then every tier that reported GREEN is turned RED,
+	// each with the contradiction recorded.
+	anyRed := false
+	for tier, line := range lines {
+		if lineIsRed(line, tier) {
+			anyRed = true
+		}
+	}
 	out := make([]sweeprunner.Tier, 0, len(tiers))
 	for _, tier := range tiers {
 		line, ok := lines[tier]
 		switch {
 		case !ok:
 			line = withFailedNote(generated(tier, logDir, reason, budget), rep.dropped)
-		case code != 0:
+		case code != 0 && !anyRed:
 			line = redOnFailure(line, tier, code)
 		}
-		out = append(out, sweeprunner.Tier{Tier: tier, Summary: line})
+		out = append(out, sweeprunner.Tier{Tier: tier, Summary: withinCap(line)})
 	}
 	return out
 }
@@ -449,6 +461,31 @@ func withLogDir(line, logDir string) string {
 	return line + group
 }
 
+// withinCap keeps a summary line inside maxSummaryBytes once the notes the runner
+// adds (the dropped-output note, the exit contradiction) are on it: the part
+// before the log group gives way, and the group the daemon parses stays whole.
+func withinCap(line string) string {
+	if len(line) <= maxSummaryBytes {
+		return line
+	}
+	i := strings.Index(line, " (logs ")
+	if i < 0 {
+		return capRunes(line, maxSummaryBytes)
+	}
+	tail := line[i:]
+	room := maxSummaryBytes - len(tail)
+	if room < 1 {
+		return capRunes(line, maxSummaryBytes)
+	}
+	return capRunes(line[:i], room) + tail
+}
+
+// lineIsRed reports whether a tier's summary line carries the RED verdict.
+func lineIsRed(line, tier string) bool {
+	rest, ok := strings.CutPrefix(line, tiersweep.Name+": "+tier+" ")
+	return ok && strings.HasPrefix(rest, "RED")
+}
+
 // redOnFailure turns a tier's GREEN line RED when the sweep exited non-zero:
 // the exit status is the verdict, and a GREEN line beside it is a contradiction
 // the result records rather than hides. The counts and names stay as printed;
@@ -465,10 +502,10 @@ func redOnFailure(line, tier string, code int) string {
 	if i < 0 {
 		return line
 	}
-	if strings.Contains(line[:i], " failed: ") {
+	if strings.Contains(line[:i], failedLabel) {
 		return line[:i] + ", " + note + line[i:]
 	}
-	return line[:i] + " failed: " + note + line[i:]
+	return line[:i] + failedLabel + note + line[i:]
 }
 
 // tailOf is the end of the sweep's stderr as one short line: what a reader

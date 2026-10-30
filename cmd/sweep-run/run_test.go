@@ -605,6 +605,43 @@ func TestRunTakesTheVerdictFromTheSweepExit(t *testing.T) {
 		}
 	})
 
+	t.Run("a non-zero exit beside one RED tier leaves the GREEN tier GREEN", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			fmt.Fprintf(stdout, "tier-sweep: shell GREEN passed=9 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
+			fmt.Fprintf(stdout, "tier-sweep: integration RED passed=6 failed=1 skipped=0 failed: pkg/a (logs %s) in 2s\n", overrides[tiersweep.EnvLogDir])
+			return 1
+		})
+		got := runAndReadAll(t, h, "shell", "integration")
+		if got["shell"].Result.Verdict != "GREEN" {
+			t.Errorf("shell = %+v, want GREEN: the sweep ran it and it passed, the failure is integration's", got["shell"].Result)
+		}
+		if strings.Contains(got["shell"].Summary, "sweep exited") {
+			t.Errorf("the GREEN tier's summary %q names a contradiction it does not have", got["shell"].Summary)
+		}
+		if got["integration"].Result.Verdict != "RED" || strings.Contains(got["integration"].Summary, "sweep exited") {
+			t.Errorf("integration = %+v, summary %q, want the sweep's own RED line unchanged", got["integration"].Result, got["integration"].Summary)
+		}
+	})
+
+	t.Run("a non-zero exit beside only GREEN lines turns each RED, naming the contradiction", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			fmt.Fprintf(stdout, "tier-sweep: shell GREEN passed=9 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
+			fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=7 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
+			return 3
+		})
+		got := runAndReadAll(t, h, "shell", "integration")
+		for _, tier := range []string{"shell", "integration"} {
+			if !strings.Contains(got[tier].Summary, " RED ") || !strings.Contains(got[tier].Summary, "sweep exited 3") {
+				t.Errorf("%s summary %q, want RED with the exit named: no tier can be blamed", tier, got[tier].Summary)
+			}
+			if got[tier].Result.Verdict != "RED" {
+				t.Errorf("%s = %+v, want RED", tier, got[tier].Result)
+			}
+		}
+	})
+
 	t.Run("a non-zero exit with no line is RED with the sweep's words", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t, nil, func(_ []string, _ map[string]string, _, stderr io.Writer) int {
@@ -655,6 +692,35 @@ func runAndRead(t *testing.T, h *harness, tier string) (sweeprunner.TierResult, 
 		t.Fatalf("convert the result: %v", err)
 	}
 	return verdicts[tier], r.Tiers[0].Summary
+}
+
+// tierRead is one tier of a read result: its verdict and the summary line the
+// result holds for it.
+type tierRead struct {
+	Result  sweeprunner.TierResult
+	Summary string
+}
+
+// runAndReadAll runs the runner for several tiers and returns each tier's
+// verdict and summary line.
+func runAndReadAll(t *testing.T, h *harness, tiers ...string) map[string]tierRead {
+	t.Helper()
+	if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", strings.Join(tiers, ","), "--out", h.out, "--repo", "/repo.git"); code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+	}
+	r, err := sweeprunner.Read(h.out, "gastown", testSHA)
+	if err != nil {
+		t.Fatalf("read the result: %v", err)
+	}
+	verdicts, err := sweeprunner.ToTierResults(r)
+	if err != nil {
+		t.Fatalf("convert the result: %v", err)
+	}
+	out := map[string]tierRead{}
+	for _, tier := range r.Tiers {
+		out[tier.Tier] = tierRead{Result: verdicts[tier.Tier], Summary: tier.Summary}
+	}
+	return out
 }
 
 // TestRunSanitisesTheSweepOutput: whatever the sweep prints is data a reader is
