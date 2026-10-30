@@ -4,9 +4,11 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
@@ -286,6 +288,72 @@ func TestWalkErrorsAreReturned(t *testing.T) {
 		})
 	}
 }
+
+// TestOSFilesWalkFailsClosed drives the branches a real tree reaches only
+// through a directory the process may not read, which the unit tier cannot
+// build; the integration tier takes the same branches through the real walker.
+func TestOSFilesWalkFailsClosed(t *testing.T) {
+	t.Parallel()
+	const root = "/repo"
+	tests := []struct {
+		name    string
+		walk    func(string, fs.WalkDirFunc) error
+		want    []string
+		wantErr error
+	}{
+		{
+			name:    "a walk error is returned",
+			walk:    func(string, fs.WalkDirFunc) error { return fs.ErrPermission },
+			wantErr: fs.ErrPermission,
+		},
+		{
+			name: "an unreadable subtree stops the walk",
+			walk: func(root string, fn fs.WalkDirFunc) error {
+				return fn(filepath.Join(root, "locked"), nil, fs.ErrPermission)
+			},
+			wantErr: fs.ErrPermission,
+		},
+		{
+			name: "a missing root is an empty tier",
+			walk: func(root string, fn fs.WalkDirFunc) error {
+				return fn(root, nil, fs.ErrNotExist)
+			},
+			want: nil,
+		},
+		{
+			name: "the walk root is itself a file",
+			walk: func(root string, fn fs.WalkDirFunc) error {
+				return fn(root, fs.FileInfoToDirEntry(notADirectory{}), nil)
+			},
+			want: []string{"docs"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := OSFiles{Root: root, walk: tc.walk}
+			got, err := fsys.WalkFiles("docs")
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("WalkFiles() error = %v, want %v", err, tc.wantErr)
+			}
+			if err != nil && got != nil {
+				t.Errorf("WalkFiles() = %q, want nil alongside the error", got)
+			}
+			if err == nil && !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("WalkFiles() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// notADirectory is the walk root's entry when the tier names a file.
+type notADirectory struct{}
+
+func (notADirectory) Name() string       { return "docs" }
+func (notADirectory) Size() int64        { return 0 }
+func (notADirectory) Mode() fs.FileMode  { return 0o644 }
+func (notADirectory) ModTime() time.Time { return time.Time{} }
+func (notADirectory) IsDir() bool        { return false }
+func (notADirectory) Sys() any           { return nil }
 
 func TestExistsReportsOnlyFiles(t *testing.T) {
 	t.Parallel()

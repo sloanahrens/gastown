@@ -254,6 +254,10 @@ func sortedUnique(paths []string) []string {
 // paths are resolved against.
 type OSFiles struct {
 	Root string
+	// walk is filepath.WalkDir. A unit test replaces it to reach the branches a
+	// real tree takes only through a directory it may not read, which the unit
+	// tier cannot build (docs/testing.md).
+	walk func(root string, fn fs.WalkDirFunc) error
 }
 
 // Exists reports whether p is a regular file under Root.
@@ -273,25 +277,30 @@ func (o OSFiles) ReadFile(p string) ([]byte, error) {
 // an unreadable subtree silently, and a gate cannot.
 func (o OSFiles) WalkFiles(dir string) ([]string, error) {
 	root := o.abspath(dir)
-	if _, err := os.Stat(root); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("docs-lint: walking %s: %w", dir, err)
+	walk := o.walk
+	if walk == nil {
+		walk = filepath.WalkDir
 	}
 	var out []string
-	err := filepath.WalkDir(root, func(p string, entry fs.DirEntry, err error) error {
+	err := walk(root, func(p string, entry fs.DirEntry, err error) error {
 		if err != nil {
+			// Only an absent root is an empty tier; a subtree that cannot be
+			// read stops the walk, so a caller never reads a partial list as a
+			// complete one (gt-et39).
+			if p == root && errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		if entry.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(o.Root, p)
-		if err != nil {
-			return err
+		rel, under := strings.CutPrefix(p, root+string(filepath.Separator))
+		if !under {
+			// The walk root is itself a file, so it is the whole list.
+			rel = ""
 		}
-		out = append(out, filepath.ToSlash(rel))
+		out = append(out, path.Join(dir, filepath.ToSlash(rel)))
 		return nil
 	})
 	if err != nil {
