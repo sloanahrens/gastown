@@ -3,3 +3,4 @@
 # gastown is pinned like devops (2026-10-26): the image builds the build commit, and the pin-drift guard refuses a pin that lacks a module that commit requires. Bump the pin when the guard refuses; refresh date 2026-10-26.
 gastown fb1fa4d818410b99cb01538802999480655f5d58
 devops 5ba8ed051f435c171f2de75bd801f5ec5567a4ed
+beads 9bcbb454c2ba30ed740602e4956a79e8ae8676fd
