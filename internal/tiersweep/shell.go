@@ -36,20 +36,33 @@ func (s *Sweep) Shell() (line string, red bool) {
 	elapsed := func() int { return int(s.Now().Sub(start) / time.Second) }
 	var out bytes.Buffer
 	code := s.Exec(".", s.shellEnv(), shellArgv(s.Opts.LogDir, s.Opts.Timeout), &out)
-	summary, others := splitShellOutput(out.String())
+	summary, others, red := ShellVerdict(out.String(), code)
 	for _, l := range others {
 		fmt.Fprintln(s.Stderr, l)
 	}
 	switch {
 	case summary != "":
-		verdict := shellSummaryRE.FindStringSubmatch(summary)[1]
-		return summary, code != 0 || verdict == "RED"
+		return summary, red
 	case len(others) == 0:
 		fmt.Fprintf(s.Stderr, "%s: %s: the shell-tier runner exited %d and printed nothing\n", Name, TierShell, code)
 		return Summary(TierShell, s.Opts.LogDir, 0, 0, 0, "", elapsed())
 	}
 	fmt.Fprintf(s.Stderr, "%s: %s: the shell-tier runner exited %d with no summary line\n", Name, TierShell, code)
 	return Summary(TierShell, s.Opts.LogDir, 0, 1, 0, shellNoSummary, elapsed())
+}
+
+// ShellVerdict reads the shell-tier runner's combined output and exit code. It
+// returns the summary line the output ends with, the other non-empty lines in
+// order, and whether the tier is RED. The last summary line decides. A
+// non-zero exit is RED even beside a GREEN line, since the runner exits 2 on a
+// usage or log-dir failure. Output with no summary line is RED, and summary is
+// "" then.
+func ShellVerdict(output string, code int) (summary string, others []string, red bool) {
+	summary, others = splitShellOutput(output)
+	if summary == "" {
+		return "", others, true
+	}
+	return summary, others, code != 0 || shellSummaryRE.FindStringSubmatch(summary)[1] == "RED"
 }
 
 // shellArgv is the runner's command: every manifest entry, with its logs in the

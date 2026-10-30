@@ -799,11 +799,21 @@ func TestTierSweepBead_ShellTierNamesTheRunner(t *testing.T) {
 	if v := lintTierSweepBead(opts); !v.Clean() {
 		t.Fatalf("the shell bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
 	}
-	if want := "`GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --all` passes"; !strings.Contains(opts.Acceptance, want) {
+	if want := "`GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --all --budget 10m` passes"; !strings.Contains(opts.Acceptance, want) {
 		t.Errorf("acceptance = %q, want it to carry %q", opts.Acceptance, want)
 	}
 	if strings.Contains(opts.Acceptance, "test-makefile.sh") {
 		t.Errorf("acceptance = %q, want no reference to scripts/test-makefile.sh", opts.Acceptance)
+	}
+}
+
+// The check command for a red shell unit is the command the shell stage runs,
+// so the polecat re-runs what the sweep ran, whichever script it named.
+func TestTierSweepBead_ShellCheckCommandIsTheStageCommand(t *testing.T) {
+	t.Parallel()
+	want := "GT_TEST_DOCKER=0 " + tierSweepStages("gastown")[0].command()
+	if got := tierSweepCheckCommand("shell", "scripts/test-makefile.sh", tierSweepUnitRed{}); got != want {
+		t.Errorf("check command = %q, want the shell stage's command %q", got, want)
 	}
 }
 

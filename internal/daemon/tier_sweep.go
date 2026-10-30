@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/promote"
+	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
 // The tier_sweep job runs origin/main's shell tests through the Go runner
@@ -76,6 +77,17 @@ const (
 	// (gt-u560q.4). It takes no per-script filter, so the sweep bead names it
 	// whatever unit is red.
 	tierSweepShellRunner = "go run ./internal/shelltier/cmd/shelltier --all"
+
+	// tierSweepShellScriptBudget is the per-script limit the runner takes as
+	// --budget: the TIER_SWEEP_TIMEOUT default the shell tier's scripts ran
+	// under (scripts/tier-sweep.sh), 10m, which is also the runner's own
+	// default. It bounds each script. tierSweepShellBudget bounds the whole
+	// stage, and the runner does not raise either.
+	tierSweepShellScriptBudget = "10m"
+
+	// tierSweepShellCommand is the shell stage's full command, and the one the
+	// sweep bead's check command names for a red shell unit.
+	tierSweepShellCommand = tierSweepShellRunner + " --budget " + tierSweepShellScriptBudget
 
 	// tierSweepRedLabel marks a bead the sweep filed for one failing unit. It
 	// is deliberately not landworker.LabelRedMain: the post-land runner's
@@ -905,7 +917,7 @@ func tierSweepStages(rig string) []tierSweepStage {
 	return []tierSweepStage{{
 		tiers:  []string{"shell"},
 		budget: tierSweepShellBudget,
-		runner: tierSweepShellRunner,
+		runner: tierSweepShellCommand,
 		step:   "shell",
 	}, {
 		tiers:  []string{"integration", "race"},
@@ -989,7 +1001,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			deferred = true
 			continue
 		}
-		reported := parseTierSweepSummaries(res.output)
+		reported := tierSweepStageReported(st, res)
 		if !res.timedOut && ctx.Err() != nil && !tierSweepStageJudged(st, reported) {
 			// The cycle's own deadline ended a stage that never reached a
 			// verdict. Land's gate marks a step TimedOut only when the step's
@@ -1450,6 +1462,26 @@ func parseTierSweepSummaries(output string) map[string]tierSweepTierResult {
 		}
 	}
 	return out
+}
+
+// tierSweepStageReported reads the verdicts one stage's output reported. The
+// shell stage's output is the runner's, so it is read through
+// tiersweep.ShellVerdict, the same rule the sweep's own shell tier applies. A
+// non-zero exit overrules a GREEN summary line (the runner's exit 2 is a usage
+// or log-dir failure). That GREEN line is withheld, so the tier is unreported,
+// and the caller records a tier with no verdict as RED.
+func tierSweepStageReported(st tierSweepStage, res tierSweepStageResult) map[string]tierSweepTierResult {
+	if st.runner == "" {
+		return parseTierSweepSummaries(res.output)
+	}
+	summary, _, red := tiersweep.ShellVerdict(res.output, res.exitCode)
+	reported := parseTierSweepSummaries(summary)
+	for tier, ts := range reported {
+		if red && ts.Verdict == tierSweepGreen {
+			delete(reported, tier)
+		}
+	}
+	return reported
 }
 
 // tierSweepBeadPrefix keys an open sweep bead for one rig and tier.

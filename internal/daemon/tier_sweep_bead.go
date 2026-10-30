@@ -352,7 +352,7 @@ func tierSweepCheckCommand(tier, unit string, red tierSweepUnitRed) string {
 		return ""
 	}
 	if tier == "shell" {
-		return "GT_TEST_DOCKER=0 " + tierSweepShellRunner
+		return "GT_TEST_DOCKER=0 " + tierSweepShellCommand
 	}
 	// A finding names its test in its own line, so the filter it earns is the
 	// one a FAIL line earns. A test with both is named once.
