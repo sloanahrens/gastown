@@ -117,7 +117,6 @@ func TestRebuildGTCycle_InstallsWhenAnEmbedSourceChanged(t *testing.T) {
 		"internal/config/roles/worker.toml",
 		"internal/formula/formulas/polecat.formula.toml",
 		"cmd/install-binary/main.go",
-		"plugins/tool-updater/main.go", // not embedded: Go source that make build compiles
 	} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
@@ -205,6 +204,7 @@ func TestRebuildGTNonBinaryPath(t *testing.T) {
 		{"internal/daemon/rebuild_gt.go", false},
 		{"internal/binaryinstall/run.go", false},
 		{"plugins/tool-updater/main.go", false},
+		{"plugins/tool-updater/plugin.md", true},
 		{"plugins/README.md", true},
 		{"main.go", false},
 		{"AGENTS.md", true},
