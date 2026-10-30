@@ -27,6 +27,7 @@ var (
 	errRestoreCopy   = errors.New("restore copy refused")
 	errRestoreChmod  = errors.New("restore chmod refused")
 	errNoHome        = errors.New("no home directory")
+	errInspect       = errors.New("permission denied")
 )
 
 // signSeam is the filesystem, environment, clock and command runner one Sign
@@ -38,6 +39,11 @@ type signSeam struct {
 	env   map[string]string
 	home  string
 	now   time.Time
+	// kinds makes a path a directory or a symlink instead of a regular file, and
+	// inspectErr makes Lstat fail for a path, a failure that is not a missing
+	// entry.
+	kinds      map[string]os.FileMode
+	inspectErr map[string]error
 
 	homeErr     error
 	readErr     error
@@ -64,15 +70,28 @@ type signCall struct {
 
 func newSignSeam() *signSeam {
 	f := &signSeam{
-		files: map[string][]byte{signSrc: []byte("built bytes"), signTmp: []byte("built bytes")},
-		modes: map[string]os.FileMode{signSrc: 0o750, signTmp: 0o600},
-		env:   map[string]string{"INSTALL_GT_SIGN_DIR": keysDir},
-		home:  "/home/tester",
-		now:   time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC),
+		files:      map[string][]byte{signSrc: []byte("built bytes"), signTmp: []byte("built bytes")},
+		modes:      map[string]os.FileMode{signSrc: 0o750, signTmp: 0o600},
+		env:        map[string]string{"INSTALL_GT_SIGN_DIR": keysDir},
+		home:       "/home/tester",
+		now:        time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC),
+		kinds:      map[string]os.FileMode{},
+		inspectErr: map[string]error{},
 	}
 	f.addMaterial(keysDir)
 	return f
 }
+
+// fakeInfo is the os.FileInfo Lstat returns for a fake entry: Sign reads only
+// its mode.
+type fakeInfo struct{ mode os.FileMode }
+
+func (i fakeInfo) Name() string       { return "" }
+func (i fakeInfo) Size() int64        { return 0 }
+func (i fakeInfo) Mode() os.FileMode  { return i.mode }
+func (i fakeInfo) ModTime() time.Time { return time.Time{} }
+func (i fakeInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i fakeInfo) Sys() any           { return nil }
 
 // addMaterial puts a keychain and its password file in dir.
 func (f *signSeam) addMaterial(dir string) {
@@ -85,10 +104,6 @@ func (f *signSeam) signer() Signer {
 	return Signer{
 		Installer: Installer{
 			Files: Files{
-				IsFile: func(path string) bool {
-					_, ok := f.files[path]
-					return ok
-				},
 				Mode: func(path string) (os.FileMode, error) {
 					mode, ok := f.modes[path]
 					if !ok {
@@ -110,6 +125,18 @@ func (f *signSeam) signer() Signer {
 			},
 		},
 		Exec: f.exec,
+		Lstat: func(path string) (os.FileInfo, error) {
+			if err := f.inspectErr[path]; err != nil {
+				return nil, err
+			}
+			if mode, ok := f.kinds[path]; ok {
+				return fakeInfo{mode: mode}, nil
+			}
+			if _, ok := f.files[path]; ok {
+				return fakeInfo{}, nil
+			}
+			return nil, os.ErrNotExist
+		},
 		ReadFile: func(path string) ([]byte, error) {
 			if f.readErr != nil {
 				return nil, f.readErr
@@ -176,7 +203,10 @@ func argsEqual(got, want []string) bool {
 	return strings.Join(got, "\x00") == strings.Join(want, "\x00")
 }
 
-func TestSignFallsBackToAdHocOnEachMissingPieceWithTheReason(t *testing.T) {
+// With neither file there is no signing material, and the install goes ad-hoc
+// with one notice. Either file alone is a broken setup, not an absence: see
+// TestSignFailsClosedOnPartialOrNonRegularMaterial.
+func TestSignInstallsAdHocWhenNeitherMaterialFileIsPresent(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
@@ -184,14 +214,12 @@ func TestSignFallsBackToAdHocOnEachMissingPieceWithTheReason(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "missing keychain",
-			setup: func(f *signSeam) { delete(f.files, keychainPath) },
-			want:  "installing ad-hoc: no signing keychain at " + keychainPath,
-		},
-		{
-			name:  "missing password file",
-			setup: func(f *signSeam) { delete(f.files, passwordPath) },
-			want:  "installing ad-hoc: no password file at " + passwordPath,
+			name: "neither keychain nor password file",
+			setup: func(f *signSeam) {
+				delete(f.files, keychainPath)
+				delete(f.files, passwordPath)
+			},
+			want: "installing ad-hoc: no signing keychain at " + keychainPath,
 		},
 		{
 			name: "no town and no home",
@@ -216,6 +244,105 @@ func TestSignFallsBackToAdHocOnEachMissingPieceWithTheReason(t *testing.T) {
 				t.Errorf("codesign ran %d times, want 0", n)
 			}
 		})
+	}
+}
+
+// Once either material file is present, the material must be two regular
+// files. Anything else fails the install before any command runs, and the temp
+// is left as it was, so nothing is installed. A symlink is refused as itself,
+// never followed to a file that looks regular.
+func TestSignFailsClosedOnPartialOrNonRegularMaterial(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		setup  func(*signSeam)
+		reason string
+	}{
+		{
+			name:   "keychain only",
+			setup:  func(f *signSeam) { delete(f.files, passwordPath) },
+			reason: "no password file at " + passwordPath + ", but the keychain " + keychainPath + " is present",
+		},
+		{
+			name:   "password only",
+			setup:  func(f *signSeam) { delete(f.files, keychainPath) },
+			reason: "no signing keychain at " + keychainPath + ", but the password file " + passwordPath + " is present",
+		},
+		{
+			name: "keychain is a directory",
+			setup: func(f *signSeam) {
+				delete(f.files, keychainPath)
+				f.kinds[keychainPath] = os.ModeDir
+			},
+			reason: keychainPath + " is not a regular file",
+		},
+		{
+			name: "keychain is a symlink",
+			setup: func(f *signSeam) {
+				delete(f.files, keychainPath)
+				f.kinds[keychainPath] = os.ModeSymlink
+			},
+			reason: keychainPath + " is not a regular file",
+		},
+		{
+			name: "password file is a directory",
+			setup: func(f *signSeam) {
+				delete(f.files, passwordPath)
+				f.kinds[passwordPath] = os.ModeDir
+			},
+			reason: passwordPath + " is not a regular file",
+		},
+		{
+			name: "password file is a symlink",
+			setup: func(f *signSeam) {
+				delete(f.files, passwordPath)
+				f.kinds[passwordPath] = os.ModeSymlink
+			},
+			reason: passwordPath + " is not a regular file",
+		},
+		{
+			name:   "keychain cannot be inspected",
+			setup:  func(f *signSeam) { f.inspectErr[keychainPath] = errInspect },
+			reason: "cannot inspect " + keychainPath,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSignSeam()
+			tc.setup(f)
+
+			err := f.signer().Sign(signTmp, signSrc, signedName)
+			if !errors.Is(err, ErrSigningFailed) || err.Error() != "signing failed: "+tc.reason {
+				t.Fatalf("Sign() = %v, want ErrSigningFailed with reason %q", err, tc.reason)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("%d commands ran, want none: nothing is unlocked or signed on a broken setup", len(f.calls))
+			}
+			if got := string(f.files[signTmp]); got != "built bytes" {
+				t.Errorf("temp = %q, want the source's bytes untouched %q", got, "built bytes")
+			}
+			if len(f.warnings) != 0 {
+				t.Errorf("warnings = %q, want none: the failure is the error, not a notice", f.warnings)
+			}
+		})
+	}
+}
+
+// Both material files present and regular is the only state that reaches the
+// unlock and the codesign.
+func TestSignUnlocksAndSignsWhenBothMaterialFilesAreRegular(t *testing.T) {
+	t.Parallel()
+	f := newSignSeam()
+
+	if err := f.signer().Sign(signTmp, signSrc, signedName); err != nil {
+		t.Fatalf("Sign() = %v, want nil", err)
+	}
+	if n := len(f.commandsNamed("security")); n != 1 {
+		t.Errorf("unlock ran %d times, want 1", n)
+	}
+	if n := len(f.commandsNamed("codesign")); n != 1 {
+		t.Errorf("codesign ran %d times, want 1", n)
 	}
 }
 
