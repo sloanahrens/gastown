@@ -888,9 +888,13 @@ func runDoltInitRig(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	rigName := args[0]
+	return doltInitRig(os.Stdout, townRoot, args[0])
+}
 
-	serverWasRunning, created, err := doltserver.InitRig(townRoot, rigName)
+// doltInitRig initializes rigName's database in townRoot and writes the report
+// to out, so a test drives the command without moving the process's directory.
+func doltInitRig(out io.Writer, townRoot, rigName string) error {
+	result, err := doltserver.InitRig(townRoot, rigName)
 	if err != nil {
 		return err
 	}
@@ -898,25 +902,28 @@ func runDoltInitRig(cmd *cobra.Command, args []string) error {
 	config := doltserver.DefaultConfig(townRoot)
 	rigDir := doltserver.RigDatabaseDir(townRoot, rigName)
 
-	if !created {
-		// A tracker rig gets no database, and InitRig has already said why. The
-		// directory is then absent, so there is no location to report and
-		// "already exists" would name a database this rig never had.
-		if _, err := os.Stat(rigDir); err == nil {
-			fmt.Printf("%s Rig database %q already exists (no-op)\n", style.Bold.Render("✓"), rigName)
-			fmt.Printf("  Location: %s\n", rigDir)
-		}
+	if result.SkipReason != "" {
+		// The rig keeps its beads in the tracker, so it has no database here and
+		// no location to report: say why instead of "already exists"
+		// (gt-p85pw.102).
+		fmt.Fprintln(out, result.SkipReason)
 		return nil
 	}
 
-	fmt.Printf("%s Initialized rig database %q\n", style.Bold.Render("✓"), rigName)
-	fmt.Printf("  Location: %s\n", rigDir)
-	fmt.Printf("  Data dir: %s\n", config.DataDir)
+	if !result.Created {
+		fmt.Fprintf(out, "%s Rig database %q already exists (no-op)\n", style.Bold.Render("✓"), rigName)
+		fmt.Fprintf(out, "  Location: %s\n", rigDir)
+		return nil
+	}
 
-	if serverWasRunning {
-		fmt.Printf("  Server: %s\n", style.Bold.Render("database registered with running server"))
+	fmt.Fprintf(out, "%s Initialized rig database %q\n", style.Bold.Render("✓"), rigName)
+	fmt.Fprintf(out, "  Location: %s\n", rigDir)
+	fmt.Fprintf(out, "  Data dir: %s\n", config.DataDir)
+
+	if result.ServerWasRunning {
+		fmt.Fprintf(out, "  Server: %s\n", style.Bold.Render("database registered with running server"))
 	} else {
-		fmt.Printf("\nStart server with: %s\n", style.Dim.Render("gt dolt start"))
+		fmt.Fprintf(out, "\nStart server with: %s\n", style.Dim.Render("gt dolt start"))
 	}
 
 	return nil

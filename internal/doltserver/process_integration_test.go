@@ -281,11 +281,11 @@ func TestIntegrationDoltServerLifecycle(t *testing.T) {
 				t.Fatalf("setting dolt %s in the sandbox HOME: %v", kv[0], err)
 			}
 		}
-		_, created, err := h.InitRig(town, "testrig")
+		result, err := h.InitRig(town, "testrig")
 		if err != nil {
 			return fmt.Errorf("InitRig: %w", err)
 		}
-		if !created {
+		if !result.Created {
 			t.Fatal("InitRig created = false, want true")
 		}
 		return nil

@@ -2349,8 +2349,7 @@ func TestInitRig_EmptyName(t *testing.T) {
 	t.Parallel()
 	h := newFakeHost().host()
 	townRoot := t.TempDir()
-	_, _, err := h.InitRig(townRoot, "")
-	if err == nil {
+	if _, err := h.InitRig(townRoot, ""); err == nil {
 		t.Fatal("expected error for empty rig name")
 	}
 }
@@ -2360,10 +2359,22 @@ func TestInitRig_InvalidCharacters(t *testing.T) {
 	h := newFakeHost().host()
 	townRoot := t.TempDir()
 	for _, name := range []string{"my rig", "rig/name", "rig.name", "rig@name"} {
-		_, _, err := h.InitRig(townRoot, name)
-		if err == nil {
+		if _, err := h.InitRig(townRoot, name); err == nil {
 			t.Errorf("expected error for invalid rig name %q", name)
 		}
+	}
+}
+
+// writeTownRigs writes townRoot's rig registry, which records each rig's beads
+// prefix beside the route table that keys on it.
+func writeTownRigs(t *testing.T, townRoot, body string) {
+	t.Helper()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2384,8 +2395,9 @@ func writeTownRoutes(t *testing.T, townRoot string, rows ...string) {
 }
 
 // A rig whose route names the tracker backend keeps its beads in the tracker,
-// so InitRig makes no database for it: created is false, and no command runs,
-// so no server is asked for one (gt-p85pw.102).
+// so InitRig makes no database for it and says why: created is false, no
+// command runs, so no server is asked for one, and the result names the reason
+// (gt-p85pw.102).
 func TestInitRig_TrackerRouteCreatesNoDatabase(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost().townPort(4551).on("dolt *", fakeReply{})
@@ -2393,12 +2405,15 @@ func TestInitRig_TrackerRouteCreatesNoDatabase(t *testing.T) {
 	townRoot := testTown(t)
 	writeTownRoutes(t, townRoot, `{"prefix":"ag-","path":"agrig/mayor/rig","backend":"tracker"}`)
 
-	running, created, err := h.InitRig(townRoot, "agrig")
+	result, err := h.InitRig(townRoot, "agrig")
 	if err != nil {
 		t.Fatalf("InitRig: %v", err)
 	}
-	if running || created {
-		t.Fatalf("InitRig = (running %v, created %v); want no server involved and nothing created", running, created)
+	if result.ServerWasRunning || result.Created {
+		t.Fatalf("InitRig = (running %v, created %v); want no server involved and nothing created", result.ServerWasRunning, result.Created)
+	}
+	if !strings.Contains(result.SkipReason, `"agrig"`) || !strings.Contains(result.SkipReason, "tracker backend") {
+		t.Errorf("SkipReason = %q, want the rig name and the tracker backend", result.SkipReason)
 	}
 	if got := f.commands(); len(got) != 0 {
 		t.Errorf("commands run = %q, want none", got)
@@ -2408,6 +2423,52 @@ func TestInitRig_TrackerRouteCreatesNoDatabase(t *testing.T) {
 	}
 	if _, err := os.Stat(RigDatabaseDir(townRoot, "agrig")); !os.IsNotExist(err) {
 		t.Errorf("database directory for a tracker rig: %v, want it absent", err)
+	}
+}
+
+// The route table is keyed by prefix, so the rig is resolved to its prefix
+// first: a rig whose registered prefix names a tracker route is skipped even
+// when no route path starts with its name (gt-p85pw.102).
+func TestInitRig_TrackerRouteFoundByRegisteredPrefix(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().on("dolt *", fakeReply{})
+	h := f.host()
+	townRoot := testTown(t)
+	writeTownRoutes(t, townRoot, `{"prefix":"ag-","path":"greenhouse/mayor/rig","backend":"tracker"}`)
+	writeTownRigs(t, townRoot, `{"version":1,"rigs":{"agrig":{"beads":{"prefix":"ag"}}}}`)
+
+	result, err := h.InitRig(townRoot, "agrig")
+	if err != nil {
+		t.Fatalf("InitRig: %v", err)
+	}
+	if result.Created || result.SkipReason == "" {
+		t.Fatalf("InitRig = (created %v, skip %q); want the rig's registered prefix to reach its tracker route", result.Created, result.SkipReason)
+	}
+	if got := f.commands(); len(got) != 0 {
+		t.Errorf("commands run = %q, want none", got)
+	}
+}
+
+// A rig registry InitRig cannot read is an error, never a rig with no prefix:
+// the prefix is what selects the route whose backend decides the rig's store,
+// so guessing "no prefix" would create a database the table refuses
+// (gt-p85pw.102).
+func TestInitRig_CorruptRigRegistryIsAnError(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().on("dolt *", fakeReply{})
+	h := f.host()
+	townRoot := testTown(t)
+	// No route path names agrig, so only the registry can give it the prefix
+	// that selects its tracker route.
+	writeTownRoutes(t, townRoot, `{"prefix":"ag-","path":"greenhouse/mayor/rig","backend":"tracker"}`)
+	writeTownRigs(t, townRoot, "{not json")
+
+	_, err := h.InitRig(townRoot, "agrig")
+	if err == nil || !strings.Contains(err.Error(), "rig registry") {
+		t.Fatalf("InitRig error = %v, want the rig registry named", err)
+	}
+	if got := f.commands(); len(got) != 0 {
+		t.Errorf("commands run = %q, want none", got)
 	}
 }
 
@@ -2424,9 +2485,8 @@ func TestInitRig_UnreadableRouteTableIsAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	running, created, err := h.InitRig(townRoot, "agrig")
-	if err == nil {
-		t.Fatalf("InitRig = (running %v, created %v); want an error for an unreadable route table", running, created)
+	if _, err := h.InitRig(townRoot, "agrig"); err == nil {
+		t.Fatal("InitRig read an unreadable route table as a rig that is not on the tracker")
 	}
 	if got := f.commands(); len(got) != 0 {
 		t.Errorf("commands run = %q, want none", got)
@@ -2458,14 +2518,41 @@ func TestInitRig_DoltAndAbsentRouteStillCreate(t *testing.T) {
 				writeTownRoutes(t, townRoot, tt.routes...)
 			}
 
-			running, created, err := h.InitRig(townRoot, "testrig")
-			if err != nil || running || !created {
-				t.Fatalf("InitRig = (running %v, created %v, err %v); want a new database on a stopped server", running, created, err)
+			result, err := h.InitRig(townRoot, "testrig")
+			if err != nil || result.ServerWasRunning || !result.Created {
+				t.Fatalf("InitRig = (running %v, created %v, skip %q, err %v); want a new database on a stopped server",
+					result.ServerWasRunning, result.Created, result.SkipReason, err)
 			}
 			if got := f.ranMatching("dolt init"); len(got) != 1 {
 				t.Errorf("dolt init calls = %q, want one", got)
 			}
 		})
+	}
+}
+
+// RepairWorkspace names the tracker skip rather than reporting a database that
+// the rig never had, so a repair report never sends the operator looking for
+// one (gt-p85pw.102).
+func TestRepairWorkspace_TrackerRigReportsTheSkip(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().on("dolt *", fakeReply{})
+	h := f.host()
+	townRoot := testTown(t)
+	writeTownRoutes(t, townRoot, `{"prefix":"ag-","path":"agrig/mayor/rig","backend":"tracker"}`)
+
+	desc, err := h.RepairWorkspace(townRoot, BrokenWorkspace{
+		RigName:      "agrig",
+		BeadsDir:     filepath.Join(townRoot, "agrig", ".beads"),
+		ConfiguredDB: "agrig",
+	})
+	if err != nil {
+		t.Fatalf("RepairWorkspace: %v", err)
+	}
+	if !strings.Contains(desc, "tracker backend") {
+		t.Errorf("RepairWorkspace description = %q, want the tracker skip reason, not an existing database", desc)
+	}
+	if got := f.commands(); len(got) != 0 {
+		t.Errorf("commands run = %q, want none", got)
 	}
 }
 
@@ -2536,9 +2623,9 @@ func TestInitRigSeedsIssuePrefixEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	running, created, err := h.InitRig(townRoot, "testrig")
-	if err != nil || running || !created {
-		t.Fatalf("InitRig = %v, %v, %v; want a new database on a stopped server", running, created, err)
+	result, err := h.InitRig(townRoot, "testrig")
+	if err != nil || result.ServerWasRunning || !result.Created {
+		t.Fatalf("InitRig = %+v, %v; want a new database on a stopped server", result, err)
 	}
 	if got := f.ranMatching("dolt init"); len(got) != 1 {
 		t.Errorf("dolt init calls = %q, want one", got)

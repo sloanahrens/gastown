@@ -1,28 +1,22 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
-// `gt dolt init-rig` on a tracker rig returns without an error and leaves no
-// database behind: InitRig made none, so there is no location to report
-// (gt-p85pw.102). The line InitRig prints is not captured here: the unit tier
-// may not swap process stdio, so this drives the call site itself.
-//
-//testpolicy:allow parallel — the cwd names the town under test, so the test chdirs the whole process
+// `gt dolt init-rig` on a tracker rig returns without an error, leaves no
+// database behind and says why: InitRig made none, so there is no location to
+// report and "already exists" would name a database this rig never had
+// (gt-p85pw.102).
 func TestDoltInitRigTrackerRig(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"),
-		[]byte(`{"type":"town","version":2,"name":"t"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	beadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -32,13 +26,14 @@ func TestDoltInitRigTrackerRig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	//testpolicy:allow no-chdir — the cwd names the town under test: runDoltInitRig finds it through workspace.FindFromCwdOrError
-	t.Chdir(townRoot)
-
-	if err := runDoltInitRig(doltInitRigCmd, []string{"agrig"}); err != nil {
-		t.Fatalf("runDoltInitRig: %v", err)
+	var out bytes.Buffer
+	if err := doltInitRig(&out, townRoot, "agrig"); err != nil {
+		t.Fatalf("doltInitRig: %v", err)
 	}
 	if _, err := os.Stat(doltserver.RigDatabaseDir(townRoot, "agrig")); !os.IsNotExist(err) {
 		t.Errorf("database directory for a tracker rig: %v, want it absent", err)
+	}
+	if got := out.String(); !strings.Contains(got, "tracker backend") || !strings.Contains(got, "agrig") {
+		t.Errorf("output = %q, want the reason the rig has no database here", got)
 	}
 }
