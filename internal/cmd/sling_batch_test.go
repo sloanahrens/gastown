@@ -399,3 +399,31 @@ func TestBatchSling_VerifyBeadCausePreserved(t *testing.T) {
 		t.Errorf("slung %v after the up-front check failed", f.executed)
 	}
 }
+
+// TestRunBatchSlingWith_VerifyCauseReachesCaller drives the entry point the CLI
+// calls: a verify failure that is not a missing bead reaches the caller with
+// the refused bead named and the cause wrapped (gt-u4x82).
+func TestRunBatchSlingWith_VerifyCauseReachesCaller(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("dolt: connection refused")
+	opts := slingOptions{verifyBead: func(beadID string) error {
+		if beadID == "gt-bbb" {
+			return cause
+		}
+		return nil
+	}}
+
+	err := runBatchSlingWith(opts, []string{"gt-aaa", "gt-bbb", "gt-ccc"}, "gastown", batchSlingTownDir(t))
+	if err == nil {
+		t.Fatal("expected an error for the unreadable bead, got nil")
+	}
+	if !strings.Contains(err.Error(), "gt-bbb") {
+		t.Errorf("error should name the bead, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "gt-aaa") || strings.Contains(err.Error(), "gt-ccc") {
+		t.Errorf("error should name only the refused bead, got: %v", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("cause should be wrapped, not flattened: %v", err)
+	}
+}

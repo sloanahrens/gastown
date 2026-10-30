@@ -88,10 +88,14 @@ type batchSling struct {
 
 // realBatchSling is a batch sling with opts and the running gt's collaborators.
 func realBatchSling(opts slingOptions) batchSling {
+	verifyBead := opts.verifyBead
+	if verifyBead == nil {
+		verifyBead = verifyBeadExists
+	}
 	return batchSling{
 		opts:              batchSlingOptionsFrom(opts),
 		out:               os.Stdout,
-		verifyBead:        verifyBeadExists,
+		verifyBead:        verifyBead,
 		beadInfo:          getBeadInfo,
 		verifyInTargetRig: verifyBeadExistsInTargetRigDatabase,
 		crossRigGuard:     checkCrossRigGuard,
