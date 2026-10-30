@@ -303,7 +303,12 @@ func TestSignFailsClosedOnPartialOrNonRegularMaterial(t *testing.T) {
 		{
 			name:   "keychain cannot be inspected",
 			setup:  func(f *signSeam) { f.inspectErr[keychainPath] = errInspect },
-			reason: "cannot inspect " + keychainPath,
+			reason: "cannot inspect " + keychainPath + ": " + errInspect.Error(),
+		},
+		{
+			name:   "password file cannot be inspected",
+			setup:  func(f *signSeam) { f.inspectErr[passwordPath] = errInspect },
+			reason: "cannot inspect " + passwordPath + ": " + errInspect.Error(),
 		},
 	}
 	for _, tc := range cases {

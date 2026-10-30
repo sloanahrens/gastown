@@ -106,11 +106,11 @@ func (s Signer) Sign(tmp, src, name string) error {
 	}
 	keyInfo, hasKeychain, err := s.material(keychain)
 	if err != nil {
-		return signingError{"cannot inspect " + keychain}
+		return signingError{"cannot inspect " + keychain + ": " + err.Error()}
 	}
 	passInfo, hasPassword, err := s.material(passwordFile)
 	if err != nil {
-		return signingError{"cannot inspect " + passwordFile}
+		return signingError{"cannot inspect " + passwordFile + ": " + err.Error()}
 	}
 	if !hasKeychain && !hasPassword {
 		s.adHoc("no signing keychain at " + keychain)
