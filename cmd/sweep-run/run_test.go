@@ -207,7 +207,7 @@ func TestRunReportsRedAndStillExitsZero(t *testing.T) {
 	t.Run("a failed clone is a RED result with the git error", func(t *testing.T) {
 		t.Parallel()
 		const gitErr = "fatal: '/repo.git' does not appear to be a git repository\n" +
-			"fatal: Could not read from remote repository."
+			"fatal: Could not read from remote repository.\x1b[0m"
 		h := newHarness(t, func(string, string, string) error { return errors.New(gitErr) },
 			func([]string, map[string]string, io.Writer) int {
 				t.Error("the sweep ran after the clone failed")
@@ -235,9 +235,10 @@ func TestRunReportsRedAndStillExitsZero(t *testing.T) {
 		if !strings.Contains(r.Tiers[0].Summary, "fatal: '/repo.git' does not appear to be a git repository") {
 			t.Errorf("summary %q does not hold the git error", r.Tiers[0].Summary)
 		}
-		// The error is two lines; the summary the daemon parses is one.
-		if strings.ContainsAny(r.Tiers[0].Summary, "\n\r") {
-			t.Errorf("summary %q holds a line break", r.Tiers[0].Summary)
+		// The error is two lines and a terminal escape; the summary the daemon
+		// parses is one line and holds no control character.
+		if strings.ContainsAny(r.Tiers[0].Summary, "\n\r\x1b") {
+			t.Errorf("summary %q holds a line break or a control character", r.Tiers[0].Summary)
 		}
 	})
 
