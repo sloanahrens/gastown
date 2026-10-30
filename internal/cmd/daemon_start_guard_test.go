@@ -597,15 +597,76 @@ func TestRunArgvEnvBuilderRefusalRunsNothing(t *testing.T) {
 	}
 }
 
-// The real env seam reports a command that fails. A binary that does not exist
-// fails before any process starts, so the case launches nothing.
-func TestRealRunEnvReportsAFailingCommand(t *testing.T) {
+// The real env seam's command carries argv and the added environment on top of
+// this process's, and a failure reports the command's output. Neither starts a
+// process: the command is built and the error is built from what it would have
+// returned.
+func TestRealEnvSeamCommandAndError(t *testing.T) {
 	t.Parallel()
-	c := realDaemonControl()
+	cmd := commandWithEnv([]string{"docker", "compose", "up"}, []string{"GT_DAEMON_TAKEOVER=1"})
+	if got := strings.Join(cmd.Args, " "); got != "docker compose up" {
+		t.Errorf("command = %q, want docker compose up", got)
+	}
+	if n := len(cmd.Env); n == 0 || cmd.Env[n-1] != "GT_DAEMON_TAKEOVER=1" {
+		t.Errorf("environment ends %v, want GT_DAEMON_TAKEOVER=1 added last", cmd.Env)
+	}
+	if err := commandError([]byte("ok\n"), nil); err != nil {
+		t.Errorf("commandError for a success = %v, want nil", err)
+	}
+	boom := errors.New("exit status 1")
+	err := commandError([]byte(" no such container \n"), boom)
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "no such container") {
+		t.Errorf("commandError = %v, want the exit error with the output after it", err)
+	}
+}
 
-	err := c.runEnv([]string{"gt-test-no-such-binary"}, []string{"GT_DAEMON_TAKEOVER=1"})
+// A takeover the guard approved reaches the compose process whether or not the
+// supervisor file was rewritten on the way in, and a start without --takeover
+// never carries it. The rewritten file loads the job (compose up -d) rather
+// than restarting it, and that load is the command that needs the variable.
+func TestStartDaemonTakeoverSurvivesAFileRewrite(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		rewritten bool
+		takeover  bool
+		wantEnv   bool
+	}{
+		{name: "takeover with the file rewritten", rewritten: true, takeover: true, wantEnv: true},
+		{name: "takeover with the file unchanged", rewritten: false, takeover: true, wantEnv: true},
+		{name: "no takeover with the file rewritten", rewritten: true, takeover: false},
+		{name: "no takeover with the file unchanged", rewritten: false, takeover: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := startGuardTown(t)
+			if tc.takeover {
+				// Only a takeover is asked to pass another owner's fresh heartbeat.
+				writeTownState(t, town, freshHeartbeatOf(startGuardLaunchd))
+			}
+			writeComposeFile(t, town)
+			c, calls := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
+			c.syncFile = func(string) bool { return tc.rewritten }
+			c.guard = guardProbe(probeAnswers(false, true))
 
-	if err == nil {
-		t.Fatal("runEnv succeeded for a binary that does not exist")
+			if _, _, err := c.startDaemonWith(town, tc.takeover); err != nil {
+				t.Fatalf("startDaemonWith: %v", err)
+			}
+
+			if len(calls.argv) == 0 {
+				t.Fatal("no compose command ran")
+			}
+			for i, env := range calls.envs {
+				carries := len(env) == 1 && env[0] == "GT_DAEMON_TAKEOVER=1"
+				starts := strings.HasSuffix(strings.Join(calls.argv[i], " "), " up -d daemon") || strings.HasSuffix(strings.Join(calls.argv[i], " "), " up -d")
+				if starts && carries != tc.wantEnv {
+					t.Errorf("start %v ran with environment %v, want the takeover variable: %v", calls.argv[i], env, tc.wantEnv)
+				}
+				if !starts && len(env) != 0 {
+					t.Errorf("non-start command %v carried environment %v", calls.argv[i], env)
+				}
+			}
+		})
 	}
 }

@@ -103,6 +103,15 @@ func (s *daemonSupervisor) runArgvEnv(build func() ([]string, error), env []stri
 	return s.ctl.runEnv(argv, env)
 }
 
+// runStartArgv runs a start-side argv with env when there is any, through the
+// env-carrying seam, and through the plain argv seam otherwise.
+func (s *daemonSupervisor) runStartArgv(build func() ([]string, error), env []string) error {
+	if len(env) > 0 {
+		return s.runArgvEnv(build, env)
+	}
+	return s.runArgv(build)
+}
+
 // daemonControl is what the daemon's start, stop, restart and status paths
 // take from the host: supervisor detection (the town's daemon.supervisor
 // setting first, then GOOS and the file paths), running the supervisor's
@@ -132,6 +141,10 @@ type daemonControl struct {
 	// name. nil reads as the real guard, so a control built without one can
 	// never skip it.
 	guard func(townRoot string, self daemon.Owner, takeover bool) error
+	// syncFile brings the supervisor file up to date and reports whether it
+	// rewrote it (syncSupervisorFile); nil reads as that. Only start reads it
+	// through this seam, so a test can say the file was rewritten.
+	syncFile func(townRoot string) bool
 	// dockerInspect runs one docker command and returns its stdout; a failure
 	// is a *templates.DockerInspectError carrying its stderr, so the container
 	// kind's state read never parses the two streams as one.
@@ -162,19 +175,11 @@ func realDaemonControl() *daemonControl {
 		patrolConfig: daemon.ReadPatrolConfig,
 		run: func(argv []string) error {
 			out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from detectDaemonSupervisor
-			if err != nil {
-				return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-			}
-			return nil
+			return commandError(out, err)
 		},
 		runEnv: func(argv, env []string) error {
-			cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // fixed argv from detectDaemonSupervisor
-			cmd.Env = append(os.Environ(), env...)
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-			}
-			return nil
+			out, err := commandWithEnv(argv, env).CombinedOutput()
+			return commandError(out, err)
 		},
 		dockerInspect:     templates.RunDockerInspect,
 		stateFor:          supervisorJobState,
@@ -188,6 +193,23 @@ func realDaemonControl() *daemonControl {
 	c.spawn = func(townRoot string, env []string) (int, error) { return spawnDaemonProcess(c, townRoot, env) }
 	c.statusLine = c.supervisedLine
 	return c
+}
+
+// commandError is the error a supervisor command's failure reports: the exit
+// error with the command's combined output after it.
+func commandError(out []byte, err error) error {
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// commandWithEnv builds the command the env-carrying seam runs: argv with env
+// added to this process's environment.
+func commandWithEnv(argv, env []string) *exec.Cmd {
+	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // fixed argv from detectDaemonSupervisor
+	cmd.Env = append(os.Environ(), env...)
+	return cmd
 }
 
 // supervisorJobState is the live job read of this host, keyed by kind alone.
@@ -678,7 +700,12 @@ func (c *daemonControl) reconcileSupervisorJob(townRoot string, daemonPID int) (
 // fails; so the job is confirmed gone first and the load is retried. An unload
 // that reports failure is checked against the job's live state too, because
 // launchd reports errors for a job it did remove.
-func (s *daemonSupervisor) startFromFile() error {
+func (s *daemonSupervisor) startFromFile() error { return s.startFromFileEnv(nil) }
+
+// startFromFileEnv is startFromFile with env added to the load command, so the
+// one start --takeover makes keeps its variable when the supervisor file was
+// rewritten first. The unload carries none: only the start needs it.
+func (s *daemonSupervisor) startFromFileEnv(env []string) error {
 	// Unload only a job the manager knows: bootout on a job that is not there
 	// fails, and startFromFile is also reached from start, where "not loaded"
 	// (the state `gt daemon stop` leaves) is ordinary.
@@ -692,7 +719,7 @@ func (s *daemonSupervisor) startFromFile() error {
 		}
 		s.waitUnloaded()
 	}
-	return s.loadJob()
+	return s.loadJobEnv(env)
 }
 
 // waitUnloaded polls until the service manager no longer knows the job, for
@@ -719,13 +746,17 @@ const (
 // gt up) loaded it between attempts. It is the half of an unload-and-load
 // that must not be given up on early: a failure here leaves the town with no
 // loaded job and no daemon.
-func (s *daemonSupervisor) loadJob() error {
+func (s *daemonSupervisor) loadJob() error { return s.loadJobEnv(nil) }
+
+// loadJobEnv is loadJob with env added to the bootstrap command (see
+// runStartArgv).
+func (s *daemonSupervisor) loadJobEnv(env []string) error {
 	var err error
 	for attempt := range supervisorLoadAttempts {
 		if attempt > 0 {
 			s.ctl.sleep(s.ctl.loadRetryInterval)
 		}
-		if err = s.runArgv(s.bootstrap); err == nil {
+		if err = s.runStartArgv(s.bootstrap, env); err == nil {
 			return nil
 		}
 		if errors.Is(err, errSupervisorRefused) {
@@ -785,18 +816,20 @@ func (c *daemonControl) startDaemonWith(townRoot string, takeover bool) (via str
 		takeoverEnv = []string{config.TakeoverEnv + "=1"}
 	}
 	if sup != nil {
-		rewritten := c.syncSupervisorFile(townRoot)
+		sync := c.syncSupervisorFile
+		if c.syncFile != nil {
+			sync = c.syncFile
+		}
+		rewritten := sync(townRoot)
 		var runErr error
 		if rewritten {
 			// The file the job will start from is the one just rewritten, so
 			// the job has to be loaded from it rather than restarted in place.
-			runErr = sup.startFromFile()
+			// The takeover variable rides the load too, or a start the guard
+			// approved over a fresh owner would run without it.
+			runErr = sup.startFromFileEnv(takeoverEnv)
 		} else {
-			if takeover {
-				runErr = sup.runArgvEnv(sup.start, takeoverEnv)
-			} else {
-				runErr = sup.runArgv(sup.start)
-			}
+			runErr = sup.runStartArgv(sup.start, takeoverEnv)
 			if runErr != nil {
 				// kickstart / restart reach only a job the service manager knows.
 				// One that gt daemon stop unloaded is bootstrapped instead, so that

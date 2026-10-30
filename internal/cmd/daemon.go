@@ -239,8 +239,9 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 
 // spawnDaemonProcess starts 'gt daemon run' as a detached child of this
 // process — the right thing only when no supervisor is provisioned (see
-// startDaemon), with env added to its environment — and returns the PID of the daemon now holding the lock
-// (ours, or a concurrent starter's that won the race).
+// startDaemon) — and returns the PID of the daemon now holding the lock
+// (ours, or a concurrent starter's that won the race). env is added to the
+// child's environment.
 func spawnDaemonProcess(c *daemonControl, townRoot string, env []string) (int, error) {
 	// Start daemon in background
 	// We use 'gt daemon run' as the actual daemon process
