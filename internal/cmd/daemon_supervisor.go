@@ -43,9 +43,9 @@ type daemonSupervisor struct {
 	// state a stop leaves behind on macOS, where bootout unloads and
 	// kickstart then cannot reach the job.
 	bootstrap func() ([]string, error)
-	// logs is the command that shows why the daemon did not come up, for the
-	// kinds whose restart is proven by state.json rather than a pid (the
-	// container).
+	// logs is the command that shows why the daemon did not come up. Only the
+	// container sets it: its restart is proven by state.json rather than a pid,
+	// so its logs are where a failed restart is explained.
 	logs string
 	load string // how to load the job when start says it is not loaded
 	// fallback ends the start and restart errors, after load: how the
