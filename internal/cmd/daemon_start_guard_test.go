@@ -577,3 +577,35 @@ func TestRealStartGuardReadsTheTownsFiles(t *testing.T) {
 		t.Fatalf("realStartGuard with a daemon.log and no state.json = %v, want the missing-state refusal", err)
 	}
 }
+
+// runArgvEnv refuses, and runs nothing, when the supervisor's builder refuses:
+// the same errSupervisorRefused the plain seam's runArgv marks, so the start's
+// wait and retry logic does not read a command that never ran as one that did.
+func TestRunArgvEnvBuilderRefusalRunsNothing(t *testing.T) {
+	t.Parallel()
+	c := &daemonControl{runEnv: func([]string, []string) error {
+		t.Error("the env seam ran although the builder refused")
+		return nil
+	}}
+	sup := &daemonSupervisor{name: config.SupervisorContainer, ctl: c}
+	refusal := errors.New("builder: settings unset")
+
+	err := sup.runArgvEnv(func() ([]string, error) { return nil, refusal }, []string{"GT_DAEMON_TAKEOVER=1"})
+
+	if !errors.Is(err, errSupervisorRefused) || !errors.Is(err, refusal) {
+		t.Fatalf("runArgvEnv error = %v, want errSupervisorRefused wrapping the builder's refusal", err)
+	}
+}
+
+// The real env seam reports a command that fails. A binary that does not exist
+// fails before any process starts, so the case launches nothing.
+func TestRealRunEnvReportsAFailingCommand(t *testing.T) {
+	t.Parallel()
+	c := realDaemonControl()
+
+	err := c.runEnv([]string{"gt-test-no-such-binary"}, []string{"GT_DAEMON_TAKEOVER=1"})
+
+	if err == nil {
+		t.Fatal("runEnv succeeded for a binary that does not exist")
+	}
+}
