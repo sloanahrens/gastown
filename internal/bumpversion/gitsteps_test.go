@@ -341,6 +341,49 @@ func TestNeverPushes(t *testing.T) {
 	}
 }
 
+// TestFinishStopsAtAFailedStep: a commit or tag that git refuses stops Finish there.
+// No later step runs, and the next-step lines are not printed for a release that was
+// not made.
+func TestFinishStopsAtAFailedStep(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		git      fakeGit
+		wantErr  string
+		wantRuns []string
+	}{
+		{
+			name:     "commit refused: no tag",
+			git:      fakeGit{codes: map[string]int{"commit": 1}},
+			wantErr:  "git commit: exit 1",
+			wantRuns: []string{"add", "commit"},
+		},
+		{
+			name:     "tag refused: no next steps",
+			git:      fakeGit{codes: map[string]int{"tag": 128}},
+			wantErr:  "git tag: exit 128",
+			wantRuns: []string{"add", "commit", "tag"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := tc.git
+			var out bytes.Buffer
+			err := Finish(f.git(), &memFS{files: map[string]string{}}, "/root", Options{Commit: true, Tag: true}, releaseFor(false), &out)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Finish error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if got := f.subcommands(); !reflect.DeepEqual(got, tc.wantRuns) {
+				t.Errorf("git ran %q, want %q", got, tc.wantRuns)
+			}
+			if out.Len() != 0 {
+				t.Errorf("Finish wrote %q after a refused step, want nothing", out.String())
+			}
+		})
+	}
+}
+
 // TestDirtyTreeRules: a clean tree passes. A dirty tree is refused under --commit,
 // even with --allow-dirty, and without --commit is refused unless --allow-dirty is
 // given. A git that fails for any other reason is an error, never a clean tree.
