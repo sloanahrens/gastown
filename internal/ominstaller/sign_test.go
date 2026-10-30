@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,17 +32,31 @@ type fakeRun struct {
 	// unlockDeadline reports whether the unlock's context carried a deadline.
 	unlockDeadline bool
 
-	unlockErr      error
+	unlockErr error
+	// unlockHangs makes the unlock wait for its context to end, as a hung unlock
+	// does. With no deadline on that context it fails at once, so a test of an
+	// unbounded unlock goes red rather than waiting forever.
+	unlockHangs    bool
 	codesignErr    error
 	codesignStderr string
 	onCodesign     func()
 }
+
+// errNoDeadline is what a hung unlock returns when nothing bounds it.
+var errNoDeadline = errors.New("unlock ran with no deadline")
 
 func (r *fakeRun) exec(ctx context.Context, c Command) (string, string, error) {
 	r.calls = append(r.calls, c)
 	switch c.Name {
 	case "security":
 		_, r.unlockDeadline = ctx.Deadline()
+		if r.unlockHangs {
+			if !r.unlockDeadline {
+				return "", "", errNoDeadline
+			}
+			<-ctx.Done()
+			return "", "", ctx.Err()
+		}
 		return "", "", r.unlockErr
 	case "codesign":
 		_, r.deadline = ctx.Deadline()
@@ -215,8 +232,16 @@ func TestSignFailureAfterMaterialFailsClosed(t *testing.T) {
 			checkBuild: true,
 		},
 		{
-			name:       "unlock times out",
-			setup:      func(rig *signRig) { rig.run.unlockErr = context.DeadlineExceeded },
+			name: "unlock times out",
+			setup: func(rig *signRig) {
+				rig.run.unlockHangs = true
+				rig.cfg.SignWait = time.Nanosecond
+			},
+			checkBuild: true,
+		},
+		{
+			name:       "password file is empty",
+			setup:      func(rig *signRig) { rig.files.files[passwordFile] = []byte("\n") },
 			checkBuild: true,
 		},
 		{
@@ -262,5 +287,152 @@ func TestSignFailureAfterMaterialFailsClosed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSignUnlockOverBudgetNamesTheTimeout(t *testing.T) {
+	t.Parallel()
+	rig := newSignRig()
+	rig.run.unlockHangs = true
+	rig.cfg.SignWait = time.Nanosecond
+
+	err := sign(context.Background(), rig.cfg, omBuild)
+	if !errors.Is(err, errSigning) {
+		t.Fatalf("sign = %v, want errSigning", err)
+	}
+	if want := "unlock exceeded 1ns"; !strings.Contains(err.Error(), want) {
+		t.Errorf("sign = %q, want the reason to name the timeout: %q", err, want)
+	}
+	if n := len(rig.run.calls); n != 1 {
+		t.Errorf("ran %d commands, want only the unlock: codesign must not run after it timed out", n)
+	}
+}
+
+func TestSignEmptyPasswordFailsBeforeUnlock(t *testing.T) {
+	t.Parallel()
+	rig := newSignRig()
+	rig.files.files[passwordFile] = []byte("\n")
+
+	err := sign(context.Background(), rig.cfg, omBuild)
+	if !errors.Is(err, errSigning) {
+		t.Fatalf("sign = %v, want errSigning: an empty password is a broken setup", err)
+	}
+	if n := len(rig.run.calls); n != 0 {
+		t.Errorf("ran %d commands with an empty password, want none: the unlock must not run", n)
+	}
+}
+
+// TestSignRealFilesystemJudgesMaterialByItsEntry runs sign over the real
+// filesystem in a temporary directory. The link rows need a link on disk: a Stat
+// that followed links would read a dangling one as absent, and a link to a
+// regular file as regular.
+func TestSignRealFilesystemJudgesMaterialByItsEntry(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		// wantSigning is whether the material must fail closed with errSigning.
+		wantSigning bool
+		// wantCommands is how many commands must run: the unlock and codesign
+		// when the material is good, none otherwise.
+		wantCommands int
+		// wantWarnings is how many WARNING lines must be logged.
+		wantWarnings int
+	}{
+		{
+			name:         "neither present: ad-hoc with one WARNING",
+			setup:        func(t *testing.T, dir string) {},
+			wantWarnings: 1,
+		},
+		{
+			name: "dangling link at the keychain",
+			setup: func(t *testing.T, dir string) {
+				symlink(t, filepath.Join(dir, "missing"), filepath.Join(dir, keychainName))
+			},
+			wantSigning: true,
+		},
+		{
+			name: "dangling link at the password file",
+			setup: func(t *testing.T, dir string) {
+				symlink(t, filepath.Join(dir, "missing"), filepath.Join(dir, passwordFileName))
+			},
+			wantSigning: true,
+		},
+		{
+			name: "link to a regular keychain",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, "real-keychain"), "keychain")
+				symlink(t, filepath.Join(dir, "real-keychain"), filepath.Join(dir, keychainName))
+				writeFile(t, filepath.Join(dir, passwordFileName), password+"\n")
+			},
+			wantSigning: true,
+		},
+		{
+			name: "link to a regular password file",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, keychainName), "keychain")
+				writeFile(t, filepath.Join(dir, "real-password"), password+"\n")
+				symlink(t, filepath.Join(dir, "real-password"), filepath.Join(dir, passwordFileName))
+			},
+			wantSigning: true,
+		},
+		{
+			name: "both regular: signs",
+			setup: func(t *testing.T, dir string) {
+				writeFile(t, filepath.Join(dir, keychainName), "keychain")
+				writeFile(t, filepath.Join(dir, passwordFileName), password+"\n")
+			},
+			wantCommands: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			build := filepath.Join(dir, "om.new")
+			writeFile(t, build, unsignedOM)
+			tc.setup(t, dir)
+
+			run := &fakeRun{}
+			logs := &logRecorder{}
+			cfg := Config{
+				SignDir:      dir,
+				SignIdentity: "gastown-dev-unattended",
+				SignWait:     30 * time.Second,
+				Exec:         run.exec,
+				Files:        osFiles{},
+				Logf:         logs.logf,
+			}
+			err := sign(context.Background(), cfg, build)
+			if tc.wantSigning && !errors.Is(err, errSigning) {
+				t.Errorf("sign = %v, want errSigning: broken material must not go ad-hoc", err)
+			}
+			if !tc.wantSigning && err != nil {
+				t.Errorf("sign = %v, want nil", err)
+			}
+			if n := len(run.calls); n != tc.wantCommands {
+				t.Errorf("ran %d commands, want %d", n, tc.wantCommands)
+			}
+			if n := logs.warnings(); n != tc.wantWarnings {
+				t.Errorf("WARNING lines = %d, want %d", n, tc.wantWarnings)
+			}
+			if got, err := os.ReadFile(build); err != nil || string(got) != unsignedOM {
+				t.Errorf("build = %q (%v), want it left unsigned", got, err)
+			}
+		})
+	}
+}
+
+func writeFile(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func symlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
 	}
 }

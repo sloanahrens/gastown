@@ -23,7 +23,8 @@ var errKeepPrevious = errors.New("cannot keep the previous om")
 // smoke check can put it back. The copy is written to a temp file and renamed into
 // place: om.prev is never partly written, and a failed copy leaves any earlier
 // om.prev as it was. With no installed om, a first install, it keeps nothing and
-// logs that it kept nothing.
+// logs that it kept nothing. keepPrevious is not called by Run yet: the install
+// sequence (gt-tpg0p.16.4) wires it in, before the swap.
 func keepPrevious(cfg Config, omPath string) error {
 	files := cfg.files()
 	dir := filepath.Dir(omPath)

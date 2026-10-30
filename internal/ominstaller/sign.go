@@ -34,16 +34,21 @@ var errSigning = errors.New("signing failed")
 //
 // The unsigned build is read before codesign runs, because codesign rewrites tmp
 // in place and a failed run can leave it half-written.
+//
+// Material is judged by its own entry, a symbolic link counted as an entry, so a
+// dangling link is material and fails rather than reading as absent. The unlock
+// and codesign each get their own sign timeout, not one shared deadline. sign is
+// not called by Run yet: the install sequence (gt-tpg0p.16.4) wires it in.
 func sign(ctx context.Context, cfg Config, tmp string) error {
 	files := cfg.files()
 	keychain := filepath.Join(cfg.SignDir, keychainName)
 	passwordFile := filepath.Join(cfg.SignDir, passwordFileName)
 
-	keychainMode, haveKeychain, err := statOptional(files, keychain)
+	keychainMode, haveKeychain, err := lstatOptional(files, keychain)
 	if err != nil {
 		return signFailed("cannot tell whether " + keychain + " exists")
 	}
-	passwordMode, havePassword, err := statOptional(files, passwordFile)
+	passwordMode, havePassword, err := lstatOptional(files, passwordFile)
 	if err != nil {
 		return signFailed("cannot tell whether " + passwordFile + " exists")
 	}
@@ -72,8 +77,14 @@ func sign(ctx context.Context, cfg Config, tmp string) error {
 		return signFailed("cannot read " + passwordFile)
 	}
 	password := strings.TrimRight(string(data), "\n")
+	if password == "" {
+		return signFailed("password file " + passwordFile + " is empty")
+	}
 
 	if err := unlockKeychain(ctx, cfg, keychain, password); err != nil {
+		if errors.Is(err, errUnlockTimeout) {
+			return signFailed(fmt.Sprintf("unlock exceeded %s", cfg.SignWait))
+		}
 		return signFailed("cannot unlock " + keychain)
 	}
 
@@ -106,14 +117,21 @@ func sign(ctx context.Context, cfg Config, tmp string) error {
 	return nil
 }
 
+// errUnlockTimeout is the unlock running past the sign timeout.
+var errUnlockTimeout = errors.New("unlock timed out")
+
 // unlockKeychain unlocks the keychain under the sign timeout, so a hung unlock fails
 // the install as a hung codesign does. unlock-keychain -p takes the password in its
 // argv, so ps can see it while the unlock runs. The unlock's output is discarded,
-// so the password is never logged.
+// so the password is never logged. A run cut off by its own deadline returns
+// errUnlockTimeout, so the caller can name the timeout.
 func unlockKeychain(ctx context.Context, cfg Config, keychain, password string) error {
 	unlockCtx, cancel := context.WithTimeout(ctx, cfg.SignWait)
 	defer cancel()
 	_, _, err := cfg.Exec(unlockCtx, Command{Name: "security", Args: []string{"unlock-keychain", "-p", password, keychain}})
+	if err != nil && unlockCtx.Err() == context.DeadlineExceeded {
+		return errUnlockTimeout
+	}
 	return err
 }
 

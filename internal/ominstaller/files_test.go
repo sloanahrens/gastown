@@ -56,6 +56,12 @@ func (f *fakeFiles) Stat(path string) (fs.FileMode, error) {
 	return 0o644, nil
 }
 
+// Lstat is Stat: the fake holds no symbolic links. The rows that need a link use
+// the real filesystem, in a temporary directory.
+func (f *fakeFiles) Lstat(path string) (fs.FileMode, error) {
+	return f.Stat(path)
+}
+
 func (f *fakeFiles) ReadFile(path string) ([]byte, error) {
 	if err := f.readErr[path]; err != nil {
 		return nil, err

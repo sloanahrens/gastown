@@ -10,9 +10,12 @@ import (
 // when Config.Files is nil; a test passes a fake, so no install writes a file or
 // touches the installed om.
 type Files interface {
-	// Stat returns path's mode bits. An absent path returns an error for which
-	// errors.Is(err, fs.ErrNotExist) holds.
+	// Stat returns path's mode bits, following a symbolic link. An absent path
+	// returns an error for which errors.Is(err, fs.ErrNotExist) holds.
 	Stat(path string) (fs.FileMode, error)
+	// Lstat returns the mode bits of the entry at path itself, never following a
+	// symbolic link, so a link reads as a link and a dangling one still exists.
+	Lstat(path string) (fs.FileMode, error)
 	// ReadFile returns path's bytes.
 	ReadFile(path string) ([]byte, error)
 	// WriteFile writes data to path, creating or truncating it.
@@ -30,6 +33,14 @@ type osFiles struct{}
 
 func (osFiles) Stat(path string) (fs.FileMode, error) {
 	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Mode(), nil
+}
+
+func (osFiles) Lstat(path string) (fs.FileMode, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
 		return 0, err
 	}
@@ -56,11 +67,12 @@ func (c Config) files() Files {
 	return c.Files
 }
 
-// statOptional returns path's mode and whether path exists, whatever kind of entry
-// it is. An absent path returns false, not an error. Any other failure to look is
-// an error, so a caller fails closed rather than reading "cannot tell" as "absent".
-func statOptional(files Files, path string) (mode fs.FileMode, exists bool, err error) {
-	mode, err = files.Stat(path)
+// lstatOptional returns the mode of the entry at path, a symbolic link included,
+// and whether an entry exists there. An absent path returns false, not an error. A
+// dangling link exists, so it is not absent. Any other failure to look is an
+// error, so a caller fails closed rather than reading "cannot tell" as "absent".
+func lstatOptional(files Files, path string) (mode fs.FileMode, exists bool, err error) {
+	mode, err = files.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, false, nil
 	}
