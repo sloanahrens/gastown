@@ -9,6 +9,9 @@ type Git interface {
 	// LsFiles lists the paths tracked under root that match pathspec. nul
 	// selects NUL-separated git output, so a name with a newline survives.
 	LsFiles(root string, nul bool, pathspec ...string) ([]string, error)
+	// LsDeleted lists the paths tracked under root that match pathspec and are
+	// missing from the working tree.
+	LsDeleted(root string, pathspec ...string) ([]string, error)
 	// IsTracked reports whether path, relative to root, is in the index.
 	IsTracked(root, path string) bool
 }
@@ -56,6 +59,17 @@ func (g CLIGit) LsFiles(root string, nul bool, pathspec ...string) ([]string, er
 		sep = "\x00"
 	}
 	return nonEmptyFields(out, sep), nil
+}
+
+// LsDeleted runs git ls-files --deleted in root. The output is NUL-separated,
+// so a name with a newline survives.
+func (g CLIGit) LsDeleted(root string, pathspec ...string) ([]string, error) {
+	args := append([]string{"ls-files", "--deleted", "-z", "--"}, pathspec...)
+	out, err := g.run().Run(root, "git", args...)
+	if err != nil {
+		return nil, err
+	}
+	return nonEmptyFields(out, "\x00"), nil
 }
 
 // IsTracked runs git ls-files --error-unmatch. Exit status 1 means the path is

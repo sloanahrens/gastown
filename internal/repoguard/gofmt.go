@@ -3,6 +3,7 @@ package repoguard
 import (
 	"bytes"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -59,6 +60,11 @@ func CheckGofmt(g Git, e Exec, lookPath func(string) (string, error), root strin
 	if err != nil {
 		return nil, gofmtListFailedProblem
 	}
+	deleted, err := g.LsDeleted(root, "*.go")
+	if err != nil {
+		return nil, gofmtListFailedProblem
+	}
+	listed = dropPaths(listed, deleted)
 	for _, batch := range gofmtBatches(checkableGoFiles(listed)) {
 		out, err := e.Run(root, gofmt, append([]string{"-s", "-l"}, batch...)...)
 		if err != nil {
@@ -81,6 +87,19 @@ func checkableGoFiles(paths []string) []string {
 			continue
 		}
 		keep = append(keep, p)
+	}
+	return keep
+}
+
+// dropPaths returns paths without the names in drop. A tracked file deleted from
+// the working tree has nothing for gofmt to read, so it is not a formatting
+// failure; the deletion is for git status to report.
+func dropPaths(paths, drop []string) []string {
+	var keep []string
+	for _, p := range paths {
+		if !slices.Contains(drop, p) {
+			keep = append(keep, p)
+		}
 	}
 	return keep
 }
