@@ -1085,6 +1085,13 @@ type specRoster struct {
 	// because they record no agent and the seat map has several seats.
 	Unrecorded []string
 	Newest     time.Time
+	// Draining counts, per agent, the polecats the sling's own pool check holds
+	// beyond the roster: a draining session the roster read as released, which
+	// the sling still counts (no known creation time to release it by), or a
+	// session new since the roster read (specDrainingSessions). The tick adds
+	// them to its total, so the pre-check reads the count the sling refuses on
+	// (gt-97ppg).
+	Draining map[string]int
 }
 
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
@@ -1276,6 +1283,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	budget.Seats = append([]specdispatch.Seat(nil), env.Budget.Seats...)
 	budget.SetLive(specLiveWithInFlight(roster.Live, env.InFlight))
 	budget.SetDeadHooked(roster.DeadHooked)
+	budget.SetDraining(roster.Draining)
 	budget.NewestSpawn = specNewestSpawn(roster.Newest, env.InFlight)
 	// The picture reads each seat's window at the tick's clock; the budget was
 	// built a moment before, and its construction time is no longer the one the
@@ -2142,6 +2150,45 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 	return r
 }
 
+// specRosterOf is the tick's roster: the seats the roster read (specRosterFrom),
+// plus the draining polecats the sling's own pool check holds beyond them. The
+// sling's check reads occupied (snapshotOccupied over the same snapshot), and
+// poolHeldCount counts it, so the tick's total and the sling's total come from
+// one occupancy read. A failed read is an error, not an empty count: a tick
+// that cannot see what a sling will count does not dispatch (gt-97ppg).
+func specRosterOf(seats poolSeatSnapshot, ts *config.TownSettings, occupied func() ([]poolSession, error)) (specRoster, error) {
+	roster := specRosterFrom(seats.sessions, ts)
+	held, err := occupied()
+	if err != nil {
+		return specRoster{}, fmt.Errorf("counting the seats a sling will see: %w", err)
+	}
+	roster.Draining = specRosterFrom(specDrainingSessions(seats.sessions, held), ts).Live
+	return roster, nil
+}
+
+// specDrainingSessions is the sling-side occupancy beyond the roster: each held
+// session whose seat the roster did not count. A seat is one seat by its rig and
+// polecat name, so a seat the roster counted dead-hooked and the listing now
+// shows live is counted once, and a seat claim the roster holds (which names no
+// seat, and which the sling's own ledger counts apart) is not drawn from held
+// at all. What remains is the draining session the roster released and the
+// sling still counts, and any session new since the roster read (gt-97ppg).
+func specDrainingSessions(rosterSeats, held []poolSession) []poolSession {
+	counted := map[string]bool{}
+	for _, s := range rosterSeats {
+		if key := s.seatKey(); key != "" {
+			counted[key] = true
+		}
+	}
+	var out []poolSession
+	for _, s := range held {
+		if key := s.seatKey(); key == "" || !counted[key] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // loadSpecDispatchConfig returns daemon.json's patrols.spec_dispatch, or nil.
 // It reads nil for a block that does not parse as well as for an absent one, so
 // it is for a caller that has a fallback: gt spec lint falls back to the
@@ -2315,7 +2362,9 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			// snapshot plus the live sessions and claims of its moment
 			// (snapshotOccupied) instead of every polecat directory again.
 			snapshot.Store(&seats)
-			return specRosterFrom(seats.sessions, ts), nil
+			return specRosterOf(seats, ts, func() ([]poolSession, error) {
+				return snapshotOccupied(seats, newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)()
+			})
 		},
 		Annotate: annotations.annotate,
 		AddLabel: func(id, label string) error {
