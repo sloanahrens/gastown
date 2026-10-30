@@ -57,6 +57,7 @@ func (f *fakeGit) IsTracked(root, path string) bool {
 type fakeExec struct {
 	toplevel    string
 	prefix      string
+	prefixErr   error
 	revErr      error
 	unformatted []string
 	gofmtErr    error
@@ -66,7 +67,7 @@ type fakeExec struct {
 func (f *fakeExec) Run(dir string, name string, args ...string) (string, error) {
 	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
 	if name == "git" && slices.Contains(args, "--show-prefix") {
-		return f.prefix, nil
+		return f.prefix, f.prefixErr
 	}
 	if name == "git" && slices.Contains(args, "rev-parse") {
 		return f.toplevel, f.revErr
@@ -273,10 +274,18 @@ func TestRunRootMustBeTopLevel(t *testing.T) {
 		name       string
 		arg        string
 		prefix     string
+		prefixErr  error
 		wantExit   int
 		wantRoot   string
 		wantStderr string
 	}{
+		{
+			name:       "a prefix git cannot report is refused with exit 1",
+			arg:        "/repo",
+			prefixErr:  errors.New("exit 128"),
+			wantExit:   1,
+			wantStderr: "repo-guards: /repo is not a git repository\n",
+		},
 		{
 			name:     "the top level is accepted and returned",
 			arg:      "/repo",
@@ -301,7 +310,7 @@ func TestRunRootMustBeTopLevel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			g := &fakeGit{}
-			e := &fakeExec{toplevel: "/repo\n", prefix: tc.prefix}
+			e := &fakeExec{toplevel: "/repo\n", prefix: tc.prefix, prefixErr: tc.prefixErr}
 			var stdout, stderr bytes.Buffer
 			if got := run([]string{tc.arg}, fakeEnv(cleanGoMod, g, e, false), &stdout, &stderr); got != tc.wantExit {
 				t.Errorf("exit = %d, want %d; stderr %q", got, tc.wantExit, stderr.String())
@@ -309,7 +318,7 @@ func TestRunRootMustBeTopLevel(t *testing.T) {
 			if stderr.String() != tc.wantStderr {
 				t.Errorf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
 			}
-			if tc.wantExit == 2 {
+			if tc.wantExit != 0 {
 				if len(g.roots) != 0 {
 					t.Errorf("guards ran in a refused root: %q", g.roots)
 				}
