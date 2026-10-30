@@ -1,9 +1,9 @@
 package events
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -98,15 +98,15 @@ func TestReadSkipsMalformedLines(t *testing.T) {
 	}
 }
 
-// TestReadTailReadsAtMostItsBound: a reader that asks for a bounded tail gets
-// the newest events and is told the file was not read whole, so it cannot take
-// a window that begins inside the log for the log (gt-v7ptp).
-func TestReadTailReadsAtMostItsBound(t *testing.T) {
+// TestReadBoundedRefusesALogPastItsBound: a reader that needs the whole log
+// gets it while it fits, and an error when it does not — never a window of it,
+// which a caller could take for the log (gt-v7ptp).
+func TestReadBoundedRefusesALogPastItsBound(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	for _, reason := range []string{"first", "second", "third"} {
-		if err := LogFeedTo(townRoot, TypeWake, "gastown/polecats/shale", WakePayload("gastown", reason)); err != nil {
-			t.Fatalf("LogFeedTo %s: %v", reason, err)
+	for _, context := range []string{"first", "second", "third"} {
+		if err := LogFeedTo(townRoot, TypeWake, "gastown/polecats/shale", WakePayload("gastown", context)); err != nil {
+			t.Fatalf("LogFeedTo %s: %v", context, err)
 		}
 	}
 	path := filepath.Join(townRoot, EventsFile)
@@ -115,41 +115,30 @@ func TestReadTailReadsAtMostItsBound(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 
-	// Whole file within the bound: every event, and whole true.
-	got, whole, err := ReadTail(townRoot, info.Size())
+	// A log no larger than the bound is read whole.
+	got, err := ReadBounded(townRoot, info.Size())
 	if err != nil {
-		t.Fatalf("ReadTail whole: %v", err)
+		t.Fatalf("ReadBounded within its bound: %v", err)
 	}
-	if !whole || len(got) != 3 {
-		t.Fatalf("ReadTail whole = %d events, whole %v; want 3 and true", len(got), whole)
+	if len(got) != 3 {
+		t.Fatalf("ReadBounded = %d events, want 3", len(got))
 	}
 
-	// A window over the last line alone: the newest event, and whole false.
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	lastLine := int64(len(data) - strings.LastIndex(string(data[:len(data)-1]), "\n") - 1)
-	got, whole, err = ReadTail(townRoot, lastLine)
-	if err != nil {
-		t.Fatalf("ReadTail bounded: %v", err)
-	}
-	if whole {
-		t.Error("whole = true for a read that started inside the file")
-	}
-	if len(got) != 1 || got[0].Type != TypeWake {
-		t.Fatalf("ReadTail bounded = %d events (%v), want the newest one", len(got), got)
-	}
-	if context, _ := got[0].Payload["context"].(string); context != "third" {
-		t.Errorf("newest event context = %q, want third", context)
+	// One byte past the bound refuses the log rather than returning a window of
+	// it: a caller cannot tell a window that begins inside a run from the run.
+	for _, bound := range []int64{info.Size() - 1, 1} {
+		got, err := ReadBounded(townRoot, bound)
+		if !errors.Is(err, ErrEventsLogTooLarge) {
+			t.Errorf("ReadBounded(%d) error = %v, want ErrEventsLogTooLarge", bound, err)
+		}
+		if got != nil {
+			t.Errorf("ReadBounded(%d) = %d events, want none with the error", bound, len(got))
+		}
 	}
 
-	// A log no larger than the bound is still read whole.
-	got, whole, err = ReadTail(townRoot, info.Size()+1)
-	if err != nil {
-		t.Fatalf("ReadTail above the file's size: %v", err)
-	}
-	if !whole || len(got) != 3 {
-		t.Errorf("ReadTail = %d events, whole %v; want 3 and true", len(got), whole)
+	// A missing log is nothing to read, as Read has it.
+	got, err = ReadBounded(t.TempDir(), 1)
+	if err != nil || got != nil {
+		t.Errorf("ReadBounded on a town with no log = %v, %v; want no events and no error", got, err)
 	}
 }
