@@ -110,12 +110,12 @@ func TestResolvePathsFindsTheOutermostTown(t *testing.T) {
 	}
 }
 
-// isTownRoot is the real check: the marker file, nothing else.
+// IsTownRoot is the real check: the marker file, nothing else.
 func TestIsTownRoot(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	if isTownRoot(town) {
-		t.Fatalf("isTownRoot(%q) = true with no marker", town)
+	if IsTownRoot(town) {
+		t.Fatalf("IsTownRoot(%q) = true with no marker", town)
 	}
 	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
@@ -123,8 +123,8 @@ func TestIsTownRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !isTownRoot(town) {
-		t.Errorf("isTownRoot(%q) = false with the marker", town)
+	if !IsTownRoot(town) {
+		t.Errorf("IsTownRoot(%q) = false with the marker", town)
 	}
 }
 
