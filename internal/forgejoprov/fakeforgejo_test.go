@@ -126,6 +126,7 @@ func (f *fakeForgejo) RoundTrip(req *http.Request) (*http.Response, error) {
 // serve answers an authorized request from the fake's state, with the status and
 // body the live server sends. A route the fake does not know is a 404.
 func (f *fakeForgejo) serve(method, path string, body []byte) (int, string) {
+	f.seedViewer()
 	route, ok := strings.CutPrefix(path, fakeAPIPath+"/")
 	if !ok {
 		return notFound()
@@ -151,13 +152,22 @@ func (f *fakeForgejo) serve(method, path string, body []byte) (int, string) {
 	return notFound()
 }
 
-// getUser answers whether a bot exists, with its email when it does. The viewer bot
-// exists before any create call when viewerExists is set.
+// seedViewer stores the viewer bot when viewerExists is set, so every route agrees that it
+// exists: a GET answers it, a create is refused, and its tokens are listed. It runs before
+// each authorized request, so a reset brings the bot back for the next one.
+func (f *fakeForgejo) seedViewer() {
+	if !f.viewerExists {
+		return
+	}
+	name := DefaultBotPrefix + "viewer"
+	if _, ok := f.users[name]; !ok {
+		f.users[name] = &fakeUser{email: name + "@" + DefaultBotEmailDomain, tokens: map[string]fakeToken{}}
+	}
+}
+
+// getUser answers whether a bot exists, with its email when it does.
 func (f *fakeForgejo) getUser(name string) (int, string) {
 	u, ok := f.users[name]
-	if !ok && f.viewerExists && name == DefaultBotPrefix+"viewer" {
-		return reply(http.StatusOK, map[string]string{"username": name, "email": name + "@" + DefaultBotEmailDomain})
-	}
 	if !ok {
 		return refusal(http.StatusNotFound, "user does not exist")
 	}
