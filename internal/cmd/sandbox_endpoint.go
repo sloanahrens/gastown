@@ -21,9 +21,9 @@ import (
 // forgejo-polecat provider profile must bind. A sandbox reaches Forgejo at the
 // host its profile's control_plane_host names, on the port and allowed_ips its
 // policy file lists for that host, so all three come from those two places and
-// nowhere else. scripts/openshell-providers.sh imports the profile from this
-// output: the script keeps no copy of the values, and a gateway whose profile
-// binds a different host gets a different profile instead of a 403 at clone.
+// nowhere else. cmd/openshell-providers imports the profile from this output:
+// the command keeps no copy of the values, and a gateway whose profile binds a
+// different host gets a different profile instead of a 403 at clone.
 
 var sandboxCmd = &cobra.Command{
 	Use:     "sandbox",

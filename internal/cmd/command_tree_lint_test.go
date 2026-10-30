@@ -81,7 +81,9 @@ func TestCommandTokensResolve(t *testing.T) {
 	// mol-gastown-boot.formula.toml and rewrote the templates and formulas that
 	// addressed the role: templates fell from 338 to 279 and formulas from 216
 	// to 210. The templates floor drops by the same 59 invocations.
-	floors := map[string]int{"formulas": 160, "templates": 230, "plugins": 1, "go": 17, "scripts": 22, "agent": 10}
+	// The openshell-providers port (gt-tpg0p) took the scripts floor to 1, a
+	// canary only.
+	floors := map[string]int{"formulas": 160, "templates": 230, "plugins": 1, "go": 17, "scripts": 1, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++

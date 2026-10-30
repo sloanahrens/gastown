@@ -245,7 +245,7 @@ polecat-caches:
 # Profiles are imported and the two providers created from the key files under
 # ~/.config/gt; a provider that already exists is left alone, so a rerun is a no-op.
 openshell-providers:
-	scripts/openshell-providers.sh
+	@go run ./cmd/openshell-providers
 
 # How long `make lint` keeps re-running a lint that another worktree's
 # golangci-lint holds the module lock against, in seconds (gt-uoppq). Each

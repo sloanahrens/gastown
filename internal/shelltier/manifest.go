@@ -87,7 +87,6 @@ func Manifest() []Entry {
 		{Path: "scripts/forgejo-probe_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/forgejo-resync_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/forgejo-cutover_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/openshell-providers_test.sh", StubsGo: "none: names no go command"},
 		{Path: "deploy/k8s/kind/kind_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/resource-sampler_test.sh", StubsGo: "none: go test appears only in a ps fixture line"},
 		{Path: "scripts/makefile-gate_test.sh", StubsGo: "go: the shell-test list case runs the real shelltier through go run (gt-chlve)"},

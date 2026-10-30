@@ -38,8 +38,6 @@ scripts/install-local_test.sh	port: gt-tpg0p
 scripts/lib/install-gt-lib.sh	port: gt-tpg0p
 scripts/lint-lock-wait.sh	port: gt-tpg0p
 scripts/makefile-gate_test.sh	port: gt-tpg0p
-scripts/openshell-providers.sh	port: gt-tpg0p
-scripts/openshell-providers_test.sh	port: gt-tpg0p
 scripts/polecat-go-floor_test.sh	port: gt-tpg0p
 scripts/post-land-shell.sh	port: gt-tpg0p
 scripts/post-land-shell_test.sh	port: gt-tpg0p

@@ -24,8 +24,6 @@ bash -n scripts/forgejo-resync.sh
 bash scripts/forgejo-resync_test.sh
 bash -n scripts/forgejo-cutover.sh
 bash scripts/forgejo-cutover_test.sh
-bash -n scripts/openshell-providers.sh
-bash scripts/openshell-providers_test.sh
 bash -n deploy/k8s/kind/common.sh
 bash -n deploy/k8s/kind/up.sh
 bash -n deploy/k8s/kind/down.sh

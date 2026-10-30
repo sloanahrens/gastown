@@ -1,7 +1,6 @@
 // Command openshell-providers imports the OpenShell profiles a polecat sandbox
 // needs and creates the deepseek and forgejo-polecat providers from key files
-// under ~/.config/gt (gt-tpg0p.53). Until gt-tpg0p.59 deletes the shell script,
-// make openshell-providers still runs scripts/openshell-providers.sh.
+// under ~/.config/gt (gt-tpg0p.53). make openshell-providers runs this command.
 package main
 
 import (
