@@ -41,6 +41,22 @@ func TestRaceCommandLine(t *testing.T) {
 	}
 }
 
+func TestRaceRunsInTheSweepEnvironment(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{}
+	s := raceSweep(t, fake)
+	s.Environ = []string{"PATH=/usr/bin"}
+	s.Opts.Tested = "abc123"
+	s.Race()
+	want := []string{"PATH=/usr/bin", "TIER_SWEEP_TESTED=abc123", "TIER_SWEEP_SKIP="}
+	if len(fake.calls) != 1 {
+		t.Fatalf("race ran %d commands, want 1: %v", len(fake.calls), fake.calls)
+	}
+	if got := fake.calls[0].env; !reflect.DeepEqual(got, want) {
+		t.Errorf("race ran with env %q, want %q", got, want)
+	}
+}
+
 func TestRaceSummary(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

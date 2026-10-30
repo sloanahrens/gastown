@@ -49,6 +49,43 @@ func TestShellCommandLine(t *testing.T) {
 	}
 }
 
+func TestShellRunsWithTheContainerTestsOff(t *testing.T) {
+	t.Parallel()
+	fake := &fakeShell{}
+	s := shellSweep(t, fake)
+	s.Environ = []string{"PATH=/usr/bin", "GT_TEST_DOCKER=1"}
+	s.Shell()
+	want := []string{"PATH=/usr/bin", "GT_TEST_DOCKER=1", "GT_TEST_DOCKER=0"}
+	if len(fake.calls) != 1 {
+		t.Fatalf("shell ran %d commands, want 1: %v", len(fake.calls), fake.calls)
+	}
+	if got := fake.calls[0].env; !reflect.DeepEqual(got, want) {
+		t.Errorf("shell ran with env %q, want %q", got, want)
+	}
+}
+
+func TestShellTakesNoTimeoutOrSkip(t *testing.T) {
+	t.Parallel()
+	plain := &fakeShell{}
+	ps := shellSweep(t, plain)
+	ps.Shell()
+	set := &fakeShell{}
+	ss := shellSweep(t, set)
+	ss.Opts.Timeout = "7m"
+	ss.Opts.SkipList = "shell:scripts/test-makefile.sh"
+	ss.Shell()
+	if len(set.calls) != 1 || len(plain.calls) != 1 {
+		t.Fatalf("shell ran %d and %d commands, want 1 each", len(set.calls), len(plain.calls))
+	}
+	// The argv names the log directory, which differs per sweep; compare the rest.
+	if got, want := set.calls[0].argv[:5], plain.calls[0].argv[:5]; !reflect.DeepEqual(got, want) {
+		t.Errorf("shell argv with timeout and skip set is %q, want %q", got, want)
+	}
+	if got, want := set.calls[0].env, plain.calls[0].env; !reflect.DeepEqual(got, want) {
+		t.Errorf("shell env with timeout and skip set is %q, want %q", got, want)
+	}
+}
+
 func TestShellReturnsTheRunnersLine(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -71,6 +108,13 @@ func TestShellReturnsTheRunnersLine(t *testing.T) {
 			out:  "tier-sweep: shell scripts/b_test.sh ...\ntier-sweep: shell RED passed=2 failed=1 skipped=0 failed: scripts/b_test.sh (logs %[1]s) in 1m3s\n",
 			want: "tier-sweep: shell RED passed=2 failed=1 skipped=0 failed: scripts/b_test.sh (logs %[1]s) in 1m3s",
 			code: 1,
+			red:  true,
+		},
+		{
+			name: "RED summary with exit 0 is red",
+			out:  "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/d_test.sh (logs %[1]s) in 4s\n",
+			want: "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/d_test.sh (logs %[1]s) in 4s",
+			code: 0,
 			red:  true,
 		},
 		{

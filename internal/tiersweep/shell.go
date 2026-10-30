@@ -22,21 +22,26 @@ const shellNoSummary = "shelltier-command"
 var shellSummaryRE = regexp.MustCompile(`^tier-sweep: shell (GREEN|RED) passed=`)
 
 // Shell runs the shell tier through the shell-tier runner and returns the
-// summary line the runner prints, unchanged, and whether the tier is RED. The
-// runner's exit code decides RED, and a run that prints no summary line is RED
-// too, never an empty line.
+// summary line the runner prints, unchanged, and whether the tier is RED. A
+// RED summary line or a non-zero exit is RED, and a run that prints no summary
+// line is RED too, never an empty line.
+//
+// The shell tier takes no skip list and no per-package timeout: the script's
+// shell branch reads neither TIER_SWEEP_SKIP nor TIER_SWEEP_TIMEOUT. The daemon's
+// shell stage passes the runner no flags; its budget is the gate step's timeout.
 func (s *Sweep) Shell() (line string, red bool) {
 	start := s.Now()
 	elapsed := func() int { return int(s.Now().Sub(start) / time.Second) }
 	var out bytes.Buffer
-	code := s.Exec(".", s.Environ, shellArgv(s.Opts.LogDir), &out)
+	code := s.Exec(".", shellEnv(s.Environ), shellArgv(s.Opts.LogDir), &out)
 	summary, others := splitShellOutput(out.String())
 	for _, l := range others {
 		fmt.Fprintln(s.Stderr, l)
 	}
 	switch {
 	case summary != "":
-		return summary, code != 0
+		verdict := shellSummaryRE.FindStringSubmatch(summary)[1]
+		return summary, code != 0 || verdict == "RED"
 	case len(others) == 0:
 		fmt.Fprintf(s.Stderr, "%s: %s: the shell-tier runner exited %d and printed nothing\n", Name, TierShell, code)
 		return Summary(TierShell, s.Opts.LogDir, 0, 0, 0, "", elapsed())
@@ -49,6 +54,12 @@ func (s *Sweep) Shell() (line string, red bool) {
 // log directory the summary line names.
 func shellArgv(logDir string) []string {
 	return []string{"go", "run", shellPkg, "--all", "--logdir", logDir}
+}
+
+// shellEnv is the runner's environment: the sweep's, with the container tests
+// off, as the script's shell branch runs its scripts.
+func shellEnv(environ []string) []string {
+	return append(append([]string(nil), environ...), "GT_TEST_DOCKER=0")
 }
 
 // splitShellOutput returns the runner's summary line and every other non-empty
