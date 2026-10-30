@@ -12,6 +12,7 @@ pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
 
 FAKE_BIN=$(mktemp -d "${TMPDIR:-/tmp}/post-land-shell-bin.XXXXXX")
+trap 'rm -rf "$FAKE_BIN"' EXIT
 printf '#!/usr/bin/env bash\necho TIER-RAN "${@: -1}"\n' > "$FAKE_BIN/go"
 chmod +x "$FAKE_BIN/go"
 export PATH="$FAKE_BIN:$PATH"

@@ -453,6 +453,18 @@ func TestIntegrationTriggerSkipsAndRecord(t *testing.T) {
 // its git reads: the sweep names none of them.
 var triggerLogicWords = []string{"state.json", "DiffNameOnly", "DailyRunDue", "DailyZone", ".runtime", "GT_TOWN_ROOT", "git diff", "git log", "go list"}
 
+// triggerLogicHits returns one "line N names <word>" entry for the first
+// occurrence of each trigger-logic word in src, in word order.
+func triggerLogicHits(src string) []string {
+	var hits []string
+	for _, word := range triggerLogicWords {
+		if i := strings.Index(src, word); i >= 0 {
+			hits = append(hits, fmt.Sprintf("line %d names %q", 1+strings.Count(src[:i], "\n"), word))
+		}
+	}
+	return hits
+}
+
 // TestIntegrationHoldsNoTriggerLogic pins that the sweep stays a thin caller of
 // the trigger: integration.go names none of its state or git reads, even in a
 // comment. If it fails, move that logic back into internal/tiertrigger.
@@ -462,11 +474,41 @@ func TestIntegrationHoldsNoTriggerLogic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read integration.go: %v", err)
 	}
-	for _, word := range triggerLogicWords {
-		if i := strings.Index(string(src), word); i >= 0 {
-			t.Errorf("integration.go mentions %q on line %d: the trigger's decision belongs to internal/tiertrigger", word, 1+strings.Count(string(src[:i]), "\n"))
-		}
+	for _, hit := range triggerLogicHits(string(src)) {
+		t.Errorf("integration.go %s: the trigger's decision belongs to internal/tiertrigger", hit)
 	}
+}
+
+// TestTriggerLogicHitsDrivesTheFailingBranch drives the scan over sources the
+// test writes, so the branch that reports a hit does not depend on the real
+// integration.go: a clean source reports nothing, each logic word is reported
+// with its line, and a word in a comment counts.
+func TestTriggerLogicHitsDrivesTheFailingBranch(t *testing.T) {
+	t.Parallel()
+	t.Run("a clean source reports nothing", func(t *testing.T) {
+		t.Parallel()
+		if hits := triggerLogicHits("package tiersweep\n\nfunc run() {}\n"); len(hits) != 0 {
+			t.Errorf("triggerLogicHits(clean) = %q, want none", hits)
+		}
+	})
+	t.Run("each word is reported with its line", func(t *testing.T) {
+		t.Parallel()
+		for _, word := range triggerLogicWords {
+			hits := triggerLogicHits("package tiersweep\n\n// uses " + word + " here\n")
+			want := []string{fmt.Sprintf("line 3 names %q", word)}
+			if !reflect.DeepEqual(hits, want) {
+				t.Errorf("triggerLogicHits(%q) = %q, want %q", word, hits, want)
+			}
+		}
+	})
+	t.Run("two words are both reported in word order", func(t *testing.T) {
+		t.Parallel()
+		hits := triggerLogicHits("a\nDailyZone\nstate.json\n")
+		want := []string{`line 3 names "state.json"`, `line 2 names "DailyZone"`}
+		if !reflect.DeepEqual(hits, want) {
+			t.Errorf("triggerLogicHits() = %q, want %q", hits, want)
+		}
+	})
 }
 
 // TestIntegrationUnnamedHeadRecordsNothing: when git cannot name HEAD, the
