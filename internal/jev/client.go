@@ -269,8 +269,8 @@ type response struct {
 // returns ErrUnauthorized, any other non-2xx returns a *StatusError, and a 2xx
 // that does not answer every question as asked returns ErrBadResponse. The
 // usage ledger records one line per call whose 2xx reply decodes, bad answers
-// included; the request log records one line per call that reaches the
-// network, failed calls included.
+// included; the request log records one line per call that sent a request,
+// failed calls included, and none for a call that stopped before sending.
 func (c *Client) Ask(ctx context.Context, state any, qs map[string]Question) (*Answers, error) {
 	if len(qs) == 0 {
 		return nil, errors.New("jev: Ask needs at least one question")
@@ -288,7 +288,9 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Question) (*A
 		return nil, fmt.Errorf("jev: encode request: %w", err)
 	}
 	data, got, err := c.post(ctx, body)
-	c.requests.record(c.requestRecord(state, stateBytes, body, qs, got, err))
+	if c.requests != nil && got.sent {
+		c.requests.record(c.requestRecord(state, stateBytes, body, qs, got, err))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -328,10 +330,16 @@ func (c *Client) Choice(ctx context.Context, state any, instructions string, cri
 // reply is what an HTTP response carried beyond its body, for the request
 // log.
 type reply struct {
+	// sent is whether the round trip was attempted; a request the client
+	// could not build never left, so it writes no log line.
+	sent bool
 	// status is the HTTP status code, or zero when no response arrived.
 	status int
 	// requestID is the X-Request-Id header, empty when the server sent none.
 	requestID string
+	// bodyReadFailed is whether a response arrived whose body could not be
+	// read, so status is not the call's outcome.
+	bodyReadFailed bool
 }
 
 // post sends body to the endpoint and returns the 2xx response body, what the
@@ -349,12 +357,13 @@ func (c *Client) post(ctx context.Context, body []byte) ([]byte, reply, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, reply{}, c.transportErr(ctx, err)
+		return nil, reply{sent: true}, c.transportErr(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	got := reply{status: resp.StatusCode, requestID: resp.Header.Get("X-Request-Id")}
+	got := reply{sent: true, status: resp.StatusCode, requestID: resp.Header.Get("X-Request-Id")}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
+		got.bodyReadFailed = true
 		return nil, got, c.transportErr(ctx, err)
 	}
 

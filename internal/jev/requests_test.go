@@ -5,12 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -127,30 +127,40 @@ func TestClientRecordsCutState(t *testing.T) {
 	assert.NotContains(t, plain, "cut", "a state without the interface carries no cut flag")
 }
 
+// timeoutErr is a transport failure the client reads as a timeout, so the
+// failed-call test needs no wall clock to reach one.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+// failingBody is a response body whose every read fails.
+type failingBody struct{}
+
+func (failingBody) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+func (failingBody) Close() error             { return nil }
+
 func TestClientRecordsFailedCalls(t *testing.T) {
 	t.Parallel()
 	const sentinelState = "SENTINEL-STATE-TEXT"
 	const sentinelKey = "sk-sentinel-key-0123456789"
 	const sentinelInstructions = "SENTINEL-INSTRUCTIONS"
-	block := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		<-r.Context().Done()
-		return nil, r.Context().Err()
-	})
+	timeout := roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, timeoutErr{} })
 
 	tests := []struct {
 		name   string
 		rt     http.RoundTripper
-		opts   []Option
 		status any
 	}{
-		{"timeout", block, []Option{WithTimeout(20 * time.Millisecond)}, statusTimeout},
-		{"rate limited", &respond{status: http.StatusTooManyRequests, body: `{"error":"slow down"}`}, nil, float64(http.StatusTooManyRequests)},
-		{"server error", &respond{status: http.StatusInternalServerError, body: "upstream exploded"}, nil, float64(http.StatusInternalServerError)},
+		{"timeout", timeout, statusTimeout},
+		{"rate limited", &respond{status: http.StatusTooManyRequests, body: `{"error":"slow down"}`}, float64(http.StatusTooManyRequests)},
+		{"server error", &respond{status: http.StatusInternalServerError, body: "upstream exploded"}, float64(http.StatusInternalServerError)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "requests.jsonl")
-			opts := append([]Option{WithRequests(path), WithCaller("failed caller"), WithKey(sentinelKey)}, tt.opts...)
+			opts := []Option{WithRequests(path), WithCaller("failed caller"), WithKey(sentinelKey)}
 			c := newTestClient(t, tt.rt, opts...)
 
 			_, err := c.Ask(context.Background(), sentinelState, map[string]Question{
@@ -183,6 +193,48 @@ func TestClientRecordsNothingForACallThatNeverLeaves(t *testing.T) {
 	require.Error(t, err)
 	assert.Zero(t, rs.callCnt, "no request left")
 	assert.NoFileExists(t, filepath.Join(dir, "requests.jsonl"))
+}
+
+func TestClientRecordsNothingForARequestThatCannotBeBuilt(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "requests.jsonl")
+	rs := &respond{body: readTestdata(t, "choice_response.json")}
+	// ":" is not a URL the client can build a request from, so the call stops
+	// before any round trip.
+	c := newTestClient(t, rs, WithRequests(path), WithBaseURL(":"))
+
+	_, err := c.Ask(context.Background(), shoeState, map[string]Question{
+		questionID: {Type: typeChoice, Instructions: "Which team?", Options: shoeCriteria},
+	})
+
+	require.Error(t, err)
+	assert.Zero(t, rs.callCnt, "a request the client cannot build never leaves")
+	assert.NoFileExists(t, path, "no line for a request that never left")
+}
+
+func TestClientRecordsABodyReadFailure(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "requests.jsonl")
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"X-Request-Id": {"req-read"}},
+			Body:       failingBody{},
+			Request:    r,
+		}, nil
+	})
+	c := newTestClient(t, rt, WithRequests(path), WithCaller("read caller"))
+
+	_, err := c.Ask(context.Background(), shoeState, map[string]Question{
+		questionID: {Type: typeChoice, Instructions: "Which team?", Options: shoeCriteria},
+	})
+
+	require.Error(t, err)
+	lines := requestLines(t, path)
+	require.Len(t, lines, 1)
+	assert.Equal(t, statusBodyReadFailed, lines[0].Status, "a body that cannot be read is not a success")
+	assert.Equal(t, http.StatusOK, lines[0].HTTPStatus, "the reply's status is kept beside the class")
+	assert.Equal(t, "req-read", lines[0].RequestID)
 }
 
 func TestClientRecordsNothingForAStateThatWillNotEncode(t *testing.T) {
@@ -230,16 +282,83 @@ func TestReadRequestsReportsAnUnreadableLog(t *testing.T) {
 		blocker := filepath.Join(t.TempDir(), "blocker")
 		require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
 
-		_, err := ReadRequests(filepath.Join(blocker, "requests.jsonl"), "", 20)
+		_, _, err := ReadRequests(filepath.Join(blocker, "requests.jsonl"), "", 20)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "opening the request log")
 	})
 	t.Run("reading", func(t *testing.T) {
 		// Opening a directory succeeds; reading it does not.
-		_, err := ReadRequests(t.TempDir(), "", 20)
+		_, _, err := ReadRequests(t.TempDir(), "", 20)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reading the request log")
 	})
+}
+
+// writeRequestLog writes lines to a fresh log and returns its path.
+func writeRequestLog(t *testing.T, lines ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "requests.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+	return path
+}
+
+func TestReadRequestsCountsUnreadableLines(t *testing.T) {
+	t.Parallel()
+	path := writeRequestLog(t,
+		`{"caller":"dispatch","body_sha256":"aaa"}`,
+		`{not json`,
+		``,
+		`{"caller":"dispatch","body_sha256":"bbb"}`,
+	)
+
+	records, skipped, err := ReadRequests(path, "", 20)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, skipped, "the unreadable line is counted, not dropped in silence")
+	require.Len(t, records, 2)
+	assert.Equal(t, "aaa", records[0].BodySHA256)
+	assert.Equal(t, "bbb", records[1].BodySHA256)
+}
+
+func TestReadRequestsRecentWindow(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		`{"caller":"dispatch","body_sha256":"aaa"}`,
+		`{"caller":"dispatch","body_sha256":"bbb"}`,
+	}
+	tests := []struct {
+		name    string
+		lines   []string
+		recent  int
+		want    []string
+		skipped int
+	}{
+		{"an empty file is no records", []string{}, 20, nil, 0},
+		{"a window wider than the log keeps every line", lines, 20, []string{"aaa", "bbb"}, 0},
+		{"a window exactly the log's length keeps every line", lines, 2, []string{"aaa", "bbb"}, 0},
+		{"a window one short drops the oldest line", lines, 1, []string{"bbb"}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var path string
+			if len(tt.lines) == 0 {
+				path = filepath.Join(t.TempDir(), "requests.jsonl")
+				require.NoError(t, os.WriteFile(path, nil, 0o600))
+			} else {
+				path = writeRequestLog(t, tt.lines...)
+			}
+
+			records, skipped, err := ReadRequests(path, "", tt.recent)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.skipped, skipped)
+			var got []string
+			for _, rec := range records {
+				got = append(got, rec.BodySHA256)
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }

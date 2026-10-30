@@ -21,10 +21,12 @@ import (
 // requestsFile is the request log's name in the usage ledger's directory.
 const requestsFile = "requests.jsonl"
 
-// The status classes a request line carries when no HTTP status came back.
+// The status classes a request line carries in place of an HTTP status: no
+// reply arrived, or a reply arrived whose body could not be read.
 const (
-	statusTimeout   = "timeout"
-	statusTransport = "transport"
+	statusTimeout        = "timeout"
+	statusTransport      = "transport"
+	statusBodyReadFailed = "body_read_failed"
 )
 
 // RequestsPath is the town's default request log, a sibling of
@@ -64,8 +66,12 @@ type RequestRecord struct {
 	// BodySHA256 is the hex SHA-256 of the exact body posted.
 	BodySHA256 string `json:"body_sha256"`
 	// Status is the HTTP status the server answered, or one of the strings
-	// "timeout" and "transport" when no reply arrived.
+	// "timeout" and "transport" when no reply arrived, or "body_read_failed"
+	// when a reply arrived whose body could not be read.
 	Status any `json:"status"`
+	// HTTPStatus is the status a reply carried when Status names
+	// "body_read_failed"; empty otherwise, since Status then holds it.
+	HTTPStatus int `json:"http_status,omitempty"`
 	// StateBytesBeforeCut is the state's size before a battery cut it, present
 	// only when the state implements CutState.
 	StateBytesBeforeCut *int `json:"state_bytes_before_cut,omitempty"`
@@ -75,7 +81,8 @@ type RequestRecord struct {
 
 // requestLog appends one JSON line per request that reached the network. The
 // write is best-effort, as the usage ledger's is: a failure warns and never
-// fails the call.
+// fails the call. A client holds one only when a request log is configured,
+// so record is never called otherwise.
 type requestLog struct {
 	path     string
 	warnings io.Writer
@@ -83,9 +90,6 @@ type requestLog struct {
 
 // record appends one line for r. It never returns an error.
 func (l *requestLog) record(r *RequestRecord) {
-	if l == nil {
-		return
-	}
 	line, err := json.Marshal(r)
 	if err != nil {
 		l.warnf(err)
@@ -128,7 +132,10 @@ func (c *Client) requestRecord(state any, stateBytes int, body []byte, qs map[st
 		StateBytes:  stateBytes,
 		BodyBytes:   len(body),
 		BodySHA256:  hex.EncodeToString(sum[:]),
-		Status:      requestStatus(got.status, err),
+		Status:      requestStatus(got, err),
+	}
+	if got.bodyReadFailed {
+		rec.HTTPStatus = got.status
 	}
 	if cs, ok := state.(CutState); ok {
 		// after is the battery's own count of the state it passes in; the line
@@ -150,11 +157,15 @@ func questionIDs(qs map[string]Question) []string {
 	return ids
 }
 
-// requestStatus is the HTTP status of a reply, or the class of the failure
-// that kept one from arriving.
-func requestStatus(status int, err error) any {
-	if status != 0 {
-		return status
+// requestStatus is the HTTP status of a reply, the class of the failure that
+// kept one from arriving, or the class of a reply whose body could not be
+// read.
+func requestStatus(got reply, err error) any {
+	if got.bodyReadFailed {
+		return statusBodyReadFailed
+	}
+	if got.status != 0 {
+		return got.status
 	}
 	if errors.Is(err, ErrTimeout) {
 		return statusTimeout
@@ -164,22 +175,26 @@ func requestStatus(status int, err error) any {
 
 // ReadRequests returns up to recent request records from the log at path,
 // oldest first, keeping only those whose caller is caller; an empty caller
-// keeps every line. A missing log is no records, not an error, and a line
-// that does not parse is dropped.
-func ReadRequests(path, caller string, recent int) ([]RequestRecord, error) {
+// keeps every line. It also returns how many non-empty lines it could not
+// read, so a caller can say the log holds lines it did not look at. A missing
+// log is no records, not an error.
+func ReadRequests(path, caller string, recent int) ([]RequestRecord, int, error) {
 	if recent < 1 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("opening the request log: %w", err)
+		return nil, 0, fmt.Errorf("opening the request log: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	var out []RequestRecord
+	var (
+		out     []RequestRecord
+		skipped int
+	)
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
@@ -189,6 +204,7 @@ func ReadRequests(path, caller string, recent int) ([]RequestRecord, error) {
 		}
 		var rec RequestRecord
 		if err := json.Unmarshal([]byte(text), &rec); err != nil {
+			skipped++
 			continue
 		}
 		if caller != "" && rec.Caller != caller {
@@ -200,7 +216,7 @@ func ReadRequests(path, caller string, recent int) ([]RequestRecord, error) {
 		out = append(out, rec)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("reading the request log: %w", err)
+		return nil, skipped, fmt.Errorf("reading the request log: %w", err)
 	}
-	return out, nil
+	return out, skipped, nil
 }

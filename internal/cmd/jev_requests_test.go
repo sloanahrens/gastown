@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,19 +43,41 @@ func jevRequestLine(ts time.Time, caller, bodySHA string) string {
 	return string(data)
 }
 
-// TestJevRequestsCommand runs the cobra command, not the reader, so the flag
-// wiring and the town lookup are covered too. Parsing the flags and then
-// calling runJevRequests stands in for Execute, which would also run the root
-// command's pre-run hooks.
-//
-//testpolicy:allow parallel — the requests command's flag variables are process-wide
-func TestJevRequestsCommand(t *testing.T) {
-	town := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(town, "mayor"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}\n"), 0o600))
-	//testpolicy:allow no-chdir — the cwd is the input under test: runJevRequests finds the town from the working directory
-	t.Chdir(town)
+// runRequests runs one freshly built requests command against town and returns
+// its output, its notes and its error. A command per run keeps one run's flag
+// values out of the next, and the deps fake keeps the town lookup off the host
+// filesystem.
+func runRequests(t *testing.T, town string, args ...string) (out, notes string, err error) {
+	t.Helper()
+	deps := jevRequestsDeps{findTownRoot: func() (string, error) { return town, nil }}
+	cmd := newJevRequestsCmd(deps)
+	var outBuf, notesBuf bytes.Buffer
+	cmd.SetOut(&outBuf)
+	cmd.SetErr(&notesBuf)
+	cmd.SetArgs(args)
+	err = cmd.Execute()
+	return outBuf.String(), notesBuf.String(), err
+}
 
+// requestLines parses the records a requests run printed.
+func requestLines(t *testing.T, out string) []jev.RequestRecord {
+	t.Helper()
+	var records []jev.RequestRecord
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec jev.RequestRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &rec), line)
+		records = append(records, rec)
+	}
+	return records
+}
+
+// TestJevRequestsCommand runs the cobra command over a fixture log.
+func TestJevRequestsCommand(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	writeJevRequestsLog(t, town,
 		jevRequestLine(now.Add(-3*time.Minute), "dispatch", "aaa"),
@@ -62,59 +85,81 @@ func TestJevRequestsCommand(t *testing.T) {
 		jevRequestLine(now.Add(-time.Minute), "dispatch", "ccc"),
 	)
 
-	// print runs the command with args and returns its output lines.
-	print := func(t *testing.T, args ...string) []jev.RequestRecord {
-		t.Helper()
-		var buf bytes.Buffer
-		jevRequestsCmd.SetOut(&buf)
-		require.NoError(t, jevRequestsCmd.ParseFlags(args))
-		require.NoError(t, runJevRequests(jevRequestsCmd, nil))
-		var out []jev.RequestRecord
-		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-			var rec jev.RequestRecord
-			require.NoError(t, json.Unmarshal([]byte(line), &rec), line)
-			out = append(out, rec)
-		}
-		return out
-	}
-
 	t.Run("recent keeps the last lines oldest first", func(t *testing.T) {
-		got := print(t, "--recent", "2")
+		out, _, err := runRequests(t, town, "--recent", "2")
 
+		require.NoError(t, err)
+		got := requestLines(t, out)
 		require.Len(t, got, 2)
 		assert.Equal(t, "bbb", got[0].BodySHA256)
 		assert.Equal(t, "ccc", got[1].BodySHA256)
 	})
 
 	t.Run("caller keeps that caller's last lines", func(t *testing.T) {
-		got := print(t, "--caller", "dispatch", "--recent", "1")
+		out, _, err := runRequests(t, town, "--caller", "dispatch", "--recent", "1")
 
+		require.NoError(t, err)
+		got := requestLines(t, out)
 		require.Len(t, got, 1)
 		assert.Equal(t, "dispatch", got[0].Caller)
 		assert.Equal(t, "ccc", got[0].BodySHA256)
 	})
 
+	t.Run("a run without flags does not inherit the last run's flags", func(t *testing.T) {
+		_, _, err := runRequests(t, town, "--caller", "dispatch", "--recent", "1")
+		require.NoError(t, err)
+
+		out, _, err := runRequests(t, town)
+
+		require.NoError(t, err)
+		assert.Len(t, requestLines(t, out), 3, "a fresh command keeps every caller and the default window")
+	})
+
 	t.Run("zero recent is refused", func(t *testing.T) {
-		jevRequestsCmd.SetOut(&bytes.Buffer{})
-		require.NoError(t, jevRequestsCmd.ParseFlags([]string{"--recent", "0"}))
-		err := runJevRequests(jevRequestsCmd, nil)
+		_, _, err := runRequests(t, town, "--recent", "0")
+
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--recent")
 	})
 
 	t.Run("a missing log prints no lines", func(t *testing.T) {
-		var buf bytes.Buffer
-		jevRequestsCmd.SetOut(&buf)
-		require.NoError(t, writeJevRequests(&buf, filepath.Join(t.TempDir(), "missing.jsonl"), "", 20))
-		assert.Equal(t, "no requests logged yet\n", buf.String())
-	})
+		out, notes, err := runRequests(t, t.TempDir())
 
+		require.NoError(t, err)
+		assert.Equal(t, "no requests logged yet\n", out)
+		assert.Empty(t, notes)
+	})
+}
+
+// TestJevRequestsOutsideATown covers the town lookup failing, with the lookup
+// itself faked: the test never needs a directory the walk could find a town
+// in.
+func TestJevRequestsOutsideATown(t *testing.T) {
+	t.Parallel()
+	deps := jevRequestsDeps{findTownRoot: func() (string, error) { return "", errors.New("no town here") }}
+	cmd := newJevRequestsCmd(deps)
+	cmd.SilenceUsage = true
+	var out, notes bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&notes)
+
+	err := cmd.Execute()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "finding the town root")
+	assert.Empty(t, out)
+}
+
+// TestWriteJevRequestsOverFixtures drives the reader through the command's
+// writer: the paths it reports and the lines it refuses.
+func TestWriteJevRequestsOverFixtures(t *testing.T) {
+	t.Parallel()
 	t.Run("an unusable log path is reported", func(t *testing.T) {
 		// A regular file where the log's directory should be fails the open.
 		blocker := filepath.Join(t.TempDir(), "blocker")
 		require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
 
-		err := writeJevRequests(&bytes.Buffer{}, filepath.Join(blocker, "requests.jsonl"), "", 20)
+		err := writeJevRequests(&bytes.Buffer{}, &bytes.Buffer{}, filepath.Join(blocker, "requests.jsonl"), "", 20)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "request log")
@@ -122,35 +167,35 @@ func TestJevRequestsCommand(t *testing.T) {
 
 	t.Run("a log that cannot be read is reported", func(t *testing.T) {
 		// Opening a directory succeeds; reading it does not.
-		err := writeJevRequests(&bytes.Buffer{}, t.TempDir(), "", 20)
+		err := writeJevRequests(&bytes.Buffer{}, &bytes.Buffer{}, t.TempDir(), "", 20)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "request log")
 	})
 
 	t.Run("a writer that fails is reported", func(t *testing.T) {
-		err := writeJevRequests(failingWriter{}, jev.RequestsPath(town), "", 20)
+		town := t.TempDir()
+		writeJevRequestsLog(t, town, jevRequestLine(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC), "dispatch", "aaa"))
+
+		err := writeJevRequests(failingWriter{}, &bytes.Buffer{}, jev.RequestsPath(town), "", 20)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "printing a request line")
 	})
-}
 
-// TestJevRequestsOutsideATown drives the town lookup's failure: the walk from
-// an empty directory finds no marker and an empty GT_TOWN_ROOT leaves the
-// environment fallback with nothing to return.
-//
-//testpolicy:allow parallel — GT_TOWN_ROOT and the cwd are process-wide
-func TestJevRequestsOutsideATown(t *testing.T) {
-	//testpolicy:allow no-env — the empty town root is the input under test: it leaves the fallback nothing to resolve
-	t.Setenv("GT_TOWN_ROOT", "")
-	//testpolicy:allow no-chdir — the cwd is the input under test: no town marker sits above it
-	t.Chdir(t.TempDir())
+	t.Run("the count of unreadable lines goes to the notes", func(t *testing.T) {
+		town := t.TempDir()
+		now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+		writeJevRequestsLog(t, town,
+			jevRequestLine(now, "dispatch", "aaa"),
+			"{not json",
+			jevRequestLine(now, "dispatch", "ccc"),
+		)
+		var out, notes bytes.Buffer
 
-	var buf bytes.Buffer
-	jevRequestsCmd.SetOut(&buf)
-	err := runJevRequests(jevRequestsCmd, nil)
+		require.NoError(t, writeJevRequests(&out, &notes, jev.RequestsPath(town), "", 20))
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "finding the town root")
+		assert.Len(t, requestLines(t, out.String()), 2)
+		assert.Contains(t, notes.String(), "skipped 1 unreadable line(s)")
+	})
 }
