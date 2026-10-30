@@ -124,6 +124,11 @@ const (
 	// the scratch town's one install; the entrypoint registers it and the
 	// scratch render passes it, so both read one string (gt-qpeei.26).
 	ScratchTownFlag = "scratch-town"
+
+	// OMTokenFileFlag is the entrypoint flag, without its dashes, that names the
+	// file the om subscription token is read from; the entrypoint registers it
+	// and the scratch render can pass it, so both read one string (gt-qpeei.36).
+	OMTokenFileFlag = "om-token-file" //nolint:gosec // a flag name, not a credential
 )
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town

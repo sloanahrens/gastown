@@ -1,0 +1,242 @@
+package cmd
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemonimage"
+	"github.com/steveyegge/gastown/internal/templates"
+)
+
+// scratchFlags are the values `gt daemon scratch` parsed. The scratch project is
+// described entirely by them: the scratch town has no settings before its first
+// start installs it, so nothing is read from a town's settings.
+type scratchFlags struct {
+	liveRoot    string // the live town's root, read only to refuse a scratch root under or around it
+	root        string // the scratch town's root, bind-mounted into the container
+	composeFile string // where the compose file is written, outside root
+	image       string // gt-daemon:<rev>
+	project     string
+	container   string
+	omTokenFile string // optional: the token file's path inside the container
+}
+
+// scratchDeps is what the command takes from the host: how commands run, the
+// environment they start from, how a path is looked at, and where output goes.
+// A test supplies fakes, so no unit test starts Docker or touches a town.
+type scratchDeps struct {
+	run     daemonimage.Runner
+	environ []string
+	out     io.Writer
+	stat    func(path string) (os.FileInfo, error)
+	lstat   func(path string) (os.FileInfo, error)
+}
+
+// realScratchDeps is the host's.
+func realScratchDeps(out io.Writer) scratchDeps {
+	return scratchDeps{run: execImageRunner, environ: os.Environ(), out: out, stat: os.Stat, lstat: os.Lstat}
+}
+
+// newDaemonScratchCmd builds `gt daemon scratch` with its three subcommands over
+// run, which receives the subcommand's name and the flags it parsed.
+func newDaemonScratchCmd(run func(ctx context.Context, action string, out io.Writer, f scratchFlags) error) *cobra.Command {
+	var f scratchFlags
+	parent := &cobra.Command{
+		Use:   "scratch",
+		Short: "Render, start and remove the daemon container's scratch project",
+		Long: `The scratch project is the daemon container's rehearsal on a throwaway town:
+its own project name, container, Dolt server, networks and volumes, and a town
+root that is neither the live town nor anything around it.
+
+The scratch town has no settings before its first start installs it, so these
+commands take everything from flags. They run from any directory that is neither
+the live town nor the scratch town. --live-root names the live town and is read
+only to refuse a scratch root under or around it; nothing is run or written in
+the live town.`,
+		RunE: requireSubcommand,
+	}
+	pf := parent.PersistentFlags()
+	pf.StringVar(&f.liveRoot, "live-root", "", "absolute path of the live town (read only, to refuse a scratch root under or around it)")
+	pf.StringVar(&f.root, "root", "", "absolute scratch town root, holding only its .gt-scratch-town marker before the first start")
+	pf.StringVar(&f.composeFile, "compose-file", "", "absolute path of the compose file, outside --root")
+	pf.StringVar(&f.project, "project", "", "scratch compose project (not the live project)")
+	pf.StringVar(&f.container, "container", "", "scratch daemon container name (not the live container)")
+	for _, action := range []struct{ name, short string }{
+		{"render", "Print the scratch compose file and write nothing"},
+		{"up", "Write the scratch compose file and start the project"},
+		{"down", "Remove the scratch project's containers and volumes"},
+	} {
+		sub := &cobra.Command{
+			Use:   action.name,
+			Short: action.short,
+			Args:  cobra.NoArgs,
+		}
+		name := action.name
+		sub.RunE = func(cmd *cobra.Command, _ []string) error {
+			return run(cmd.Context(), name, cmd.OutOrStdout(), f)
+		}
+		if name != "down" {
+			sub.Flags().StringVar(&f.image, "image", "", "daemon image tag, gt-daemon:<rev>")
+			sub.Flags().StringVar(&f.omTokenFile, config.OMTokenFileFlag, "", "path of the om token file inside the container, passed to the daemon's command line")
+		}
+		parent.AddCommand(sub)
+	}
+	return parent
+}
+
+var daemonScratchCmd = newDaemonScratchCmd(func(ctx context.Context, action string, out io.Writer, f scratchFlags) error {
+	return runDaemonScratch(ctx, action, f, realScratchDeps(out))
+})
+
+func init() {
+	daemonCmd.AddCommand(daemonScratchCmd)
+}
+
+// runDaemonScratch runs one of render, up and down. Every refusal comes before
+// any file is written or command run.
+func runDaemonScratch(ctx context.Context, action string, f scratchFlags, d scratchDeps) error {
+	switch action {
+	case "render":
+		spec, err := scratchSpecFor(f, d)
+		if err != nil {
+			return err
+		}
+		content, err := templates.RenderDaemonCompose(spec)
+		if err != nil {
+			return err
+		}
+		_, err = d.out.Write(content)
+		return err
+	case "up":
+		spec, err := scratchSpecFor(f, d)
+		if err != nil {
+			return err
+		}
+		if err := checkScratchRoot(f.root, d); err != nil {
+			return err
+		}
+		sup := containerDeploySupervisor{start: func() ([]string, error) { return scratchComposeArgv(f, "up", "-d", "daemon"), nil }, container: f.container}
+		deployer := daemonimage.Deployer{Run: d.run, Environ: d.environ}
+		return deployer.Deploy(ctx, sup, f.composeFile, spec)
+	case "down":
+		if err := validateScratchNames(f); err != nil {
+			return err
+		}
+		if err := requireAbs("--compose-file", f.composeFile); err != nil {
+			return err
+		}
+		if info, err := d.stat(f.composeFile); err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("--compose-file %q is not a file: down removes the project that file describes, and there is none to remove", f.composeFile)
+		}
+		return d.run(ctx, filepath.Dir(f.composeFile), daemonimage.DockerEnv(d.environ), scratchComposeArgv(f, "down", "-v"))
+	}
+	return fmt.Errorf("unknown scratch action %q", action)
+}
+
+// scratchComposeArgv is a compose command on the scratch project: the explicit
+// context, the project and the file, then the subcommand.
+func scratchComposeArgv(f scratchFlags, sub ...string) []string {
+	argv := []string{"docker", "--context", daemonimage.DockerContext, "compose", "-p", f.project, "-f", f.composeFile}
+	return append(argv, sub...)
+}
+
+// scratchSpecFor validates the flags and builds the scratch render's spec from
+// them. The refusals here are the command's own; the render adds its own (the
+// live identity, the live root through a link).
+func scratchSpecFor(f scratchFlags, d scratchDeps) (templates.ComposeSpec, error) {
+	for _, req := range []struct{ flag, value string }{
+		{"--live-root", f.liveRoot}, {"--root", f.root}, {"--compose-file", f.composeFile}, {"--image", f.image},
+	} {
+		if strings.TrimSpace(req.value) == "" {
+			return templates.ComposeSpec{}, fmt.Errorf("%s is required", req.flag)
+		}
+	}
+	if err := validateScratchNames(f); err != nil {
+		return templates.ComposeSpec{}, err
+	}
+	for _, p := range []struct{ flag, value string }{
+		{"--live-root", f.liveRoot}, {"--root", f.root}, {"--compose-file", f.composeFile},
+	} {
+		if err := requireAbs(p.flag, p.value); err != nil {
+			return templates.ComposeSpec{}, err
+		}
+	}
+	if f.omTokenFile != "" {
+		if err := requireAbs("--"+config.OMTokenFileFlag, f.omTokenFile); err != nil {
+			return templates.ComposeSpec{}, err
+		}
+	}
+	if pathWithin(f.composeFile, f.root) {
+		return templates.ComposeSpec{}, fmt.Errorf("--compose-file %q is inside --root %q: the container installs the scratch town only into a directory that holds nothing but its marker, so the compose file lives outside it", f.composeFile, f.root)
+	}
+	info, err := d.lstat(filepath.Join(f.liveRoot, "mayor", "town.json"))
+	if err != nil || !info.Mode().IsRegular() {
+		return templates.ComposeSpec{}, fmt.Errorf("--live-root %q is not a town (no regular mayor/town.json): it is read only to refuse a scratch root under or around it, so it must name the live town", f.liveRoot)
+	}
+	return templates.ComposeSpec{
+		Project:          f.project,
+		ContainerName:    f.container,
+		Image:            f.image,
+		TownRoot:         f.root,
+		StopGrace:        templates.MinimumStopGrace,
+		Scratch:          true,
+		ScratchDoltImage: templates.DoltServerImage,
+		LiveTownRoot:     f.liveRoot,
+		OMTokenFile:      f.omTokenFile,
+	}, nil
+}
+
+// validateScratchNames refuses a project or container name the scratch project
+// may not use: either one unset, one set without the other, one of an invalid
+// shape, or one of the live town's defaults.
+func validateScratchNames(f scratchFlags) error {
+	if strings.TrimSpace(f.project) == "" || strings.TrimSpace(f.container) == "" {
+		return fmt.Errorf("--project and --container are both required: a scratch name left unset could fall back to the live town's")
+	}
+	names := &config.DaemonPatrolConfig{ContainerNameSetting: f.container, ComposeProjectSetting: f.project}
+	if err := names.ValidateContainerNames(); err != nil {
+		return err
+	}
+	switch {
+	case f.container == config.DefaultContainerName:
+		return fmt.Errorf("--container %q is the live daemon's container name", f.container)
+	case f.project == config.DefaultComposeProject:
+		return fmt.Errorf("--project %q is the live compose project", f.project)
+	}
+	return nil
+}
+
+// checkScratchRoot is the preflight of `up`: the scratch root exists as a
+// directory and holds the scratch marker, so a missing or wrong root is refused
+// before the project's containers start rather than by the entrypoint after.
+func checkScratchRoot(root string, d scratchDeps) error {
+	if info, err := d.stat(root); err != nil || !info.IsDir() {
+		return fmt.Errorf("--root %q is not an existing directory: create it and its %s marker first", root, config.ScratchTownMarker)
+	}
+	if info, err := d.lstat(filepath.Join(root, config.ScratchTownMarker)); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("--root %q holds no %s marker: the entrypoint installs a scratch town only into a directory that does", root, config.ScratchTownMarker)
+	}
+	return nil
+}
+
+// requireAbs refuses a path that is not absolute: docker resolves a relative one
+// against the directory it runs in, not this command's.
+func requireAbs(flag, path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%s %q is not absolute", flag, path)
+	}
+	return nil
+}
+
+// pathWithin reports whether path is root or lies under it, by their cleaned
+// absolute spellings.
+func pathWithin(path, root string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}

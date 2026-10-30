@@ -481,6 +481,11 @@ var dockerEnvKeys = map[string]bool{
 	"http_proxy": true, "https_proxy": true, "no_proxy": true,
 }
 
+// DockerEnv is dockerEnv for a caller that runs its own docker command with an
+// explicit --context: the variables docker needs, and none of DOCKER_CONTEXT or
+// DOCKER_HOST, so a shell cannot swap the engine.
+func DockerEnv(environ []string) []string { return dockerEnv(environ) }
+
 // dockerEnv is the environment the image build runs with, taken from environ in
 // its own order. A nil environ reads the host's.
 func dockerEnv(environ []string) []string {

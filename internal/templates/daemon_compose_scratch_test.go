@@ -356,3 +356,70 @@ func TestRenderDaemonCompose_ScratchDoltImageTagIsDoltVersion(t *testing.T) {
 		t.Errorf("scratch-dolt image = %q, want DoltServerImage %q", image, templates.DoltServerImage)
 	}
 }
+
+// The scratch render passes the om token file to the entrypoint beside
+// --scratch-town, in a golden of its own; without it the command is the flag
+// alone (TestRenderDaemonCompose_ScratchGolden).
+func TestRenderDaemonCompose_ScratchPassesTheOMTokenFile(t *testing.T) {
+	t.Parallel()
+	spec := scratchSpec()
+	spec.OMTokenFile = "/run/secrets/om-token"
+	out, parsed := render(t, spec)
+
+	golden, err := os.ReadFile(filepath.Join("testdata", "daemon-compose-scratch-omtoken.golden.yml"))
+	if err != nil {
+		t.Fatalf("reading golden file: %v", err)
+	}
+	if out != string(golden) {
+		t.Errorf("rendered file differs from testdata/daemon-compose-scratch-omtoken.golden.yml\ngot:\n%s\nwant:\n%s", out, golden)
+	}
+	want := []string{"--" + config.ScratchTownFlag, "--" + config.OMTokenFileFlag, "/run/secrets/om-token"}
+	if got := parsed.Services["daemon"].Command; !slices.Equal(got, want) {
+		t.Errorf("scratch daemon command = %q, want %q", got, want)
+	}
+}
+
+// A dollar sign in the path reaches the container as itself: compose interpolates
+// every value it reads, so the render doubles it.
+func TestRenderDaemonCompose_ScratchEscapesADollarInTheTokenPath(t *testing.T) {
+	t.Parallel()
+	spec := scratchSpec()
+	spec.OMTokenFile = "/run/$secrets/om-token"
+	out, _ := render(t, spec)
+	if !strings.Contains(out, `"/run/$$secrets/om-token"`) {
+		t.Errorf("the token path is not escaped for compose:\n%s", out)
+	}
+}
+
+// The field is the scratch render's alone: a live spec that sets it is refused,
+// as are a relative path and a control character, and the live render carries
+// none of it.
+func TestRenderDaemonCompose_OMTokenFileIsRefusedWhereItDoesNotBelong(t *testing.T) {
+	t.Parallel()
+	live := liveSpec()
+	live.OMTokenFile = "/run/secrets/om-token"
+	relative := scratchSpec()
+	relative.OMTokenFile = "secrets/om-token"
+	control := scratchSpec()
+	control.OMTokenFile = "/run/secrets/om\ntoken"
+	for name, tc := range map[string]struct {
+		spec templates.ComposeSpec
+		want string
+	}{
+		"a live spec":     {live, "OMTokenFile is set on a live spec"},
+		"a relative path": {relative, "is not absolute"},
+		"a control char":  {control, "control character"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			out, err := templates.RenderDaemonCompose(tc.spec)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("RenderDaemonCompose = %q, %v; want an error naming %q", out, err, tc.want)
+			}
+		})
+	}
+	liveOut, _ := render(t, liveSpec())
+	if strings.Contains(liveOut, config.OMTokenFileFlag) {
+		t.Errorf("the live render carries --%s:\n%s", config.OMTokenFileFlag, liveOut)
+	}
+}
