@@ -471,7 +471,7 @@ func runInstallWith(opts installOptions, args []string) error {
 		res, err := steps.initRig(absPath, "hq")
 		if err != nil {
 			// "Preparing", not "creating": the step can fail reading the
-			// server's catalogue before any database is created (gt-q0ppq).
+			// server's catalog before any database is created (gt-q0ppq).
 			return fmt.Errorf("preparing the hq database on the remote Dolt at %s:%d: %w", doltHost, installEndpointPort, err)
 		}
 		if res.Created {
