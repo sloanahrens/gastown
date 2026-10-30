@@ -183,8 +183,10 @@ func TestCostPanelEmptyStateAndCaption(t *testing.T) {
 	if len(lines) != 2 || lines[0].Text != "no providers" || !strings.Contains(lines[1].Text, "no spend report") || !strings.Contains(lines[1].Text, "usage still reading") {
 		t.Errorf("empty panel = %+v, want the no-providers line, then one line naming the spend report and the usage read", lines)
 	}
-	if note.Text != "" {
-		t.Errorf("empty panel caption = %q, want none", note.Text)
+	// The header names the missing spend report too, so a quiet header is never a
+	// missing one.
+	if note.Text != "no spend read" {
+		t.Errorf("empty panel caption = %q, want the missing spend report named", note.Text)
 	}
 
 	// The same panel with a budget alert keeps the alert, directly under the

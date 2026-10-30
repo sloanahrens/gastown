@@ -3250,8 +3250,8 @@ function drawOverseerQueue(panel, s) {
 // The Usage part of the Cost panel: what the town spent over the last day, from
 // the records the usage scan writes. Each block is a fold of its own, closed by
 // default, with a one-line summary on its heading; the Cost panel's header
-// carries today's spend across the providers and, as a badge, how many beads ran
-// over twenty minutes. Read-only.
+// carries today's spend across the providers, the DeepSeek estimate, and, as a
+// badge, how many beads ran over twenty minutes. Read-only.
 //
 // Money and tokens are in separate columns: Spend ($) holds dollars and is
 // "est." for DeepSeek rows only, since the scan estimates no cost for Claude
@@ -3260,6 +3260,7 @@ function drawOverseerQueue(panel, s) {
 // goes through el(), which writes textContent: a bead id or model name is text
 // and never markup.
 const USAGE_STALE_SEC = 3 * 3600;
+const isDeepSeek = model => /^deepseek/i.test(model || "");
 const fmtTokens = n => {
   n = Number(n) || 0;
   if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
@@ -4194,32 +4195,45 @@ function costChartFold(box, kind, chart, providers) {
 
 // costHeaderParts is the Cost panel's header line: the few figures the operator
 // reads first, each in the colour the providers table gives the row it comes
-// from — today's spend across the providers, DeepSeek's runway, the week's
+// from — today's spend, DeepSeek's runway and 24-hour estimate, the week's
 // Claude percent with the day its limit is reached, and the GCP budget's
-// percent. Every figure is one a row already computed, so the header and the
-// table cannot disagree; one a row does not carry is left out of the line, and
-// is never drawn as a zero. The over-twenty-minute bead count is a badge, and
-// only when there is one to count.
+// percent. Every figure is one a row already computed, or one the usage scan
+// already wrote, so the header and the table cannot disagree; a figure that is
+// missing is named as missing or left out, and is never drawn as a zero. The
+// over-twenty-minute bead count is a badge, and only when there is one to count.
 function costHeaderParts(s) {
   const num = v => v == null || isNaN(Number(v)) ? null : Number(v);
   const rows = (Array.isArray(s.cost_providers) ? s.cost_providers : [])
     .filter(p => p && typeof p === "object" && !p.why);
   const parts = [];
 
-  let today = null;
+  // Cash spend and the Claude plan's estimate of today's tokens are different
+  // money, so the total names each rather than adding them under one word.
+  let cash = null, planEst = null;
   for (const p of rows) {
     const v = num(p.today);
-    if (v != null) today = (today || 0) + v;
+    if (v == null) continue;
+    if (p.kind === "plan") planEst = (planEst || 0) + v;
+    else cash = (cash || 0) + v;
   }
-  if (today != null) parts.push({text: "today " + money(today)});
+  if (cash != null && planEst != null) parts.push({text: "today " + money(cash) + " cash · " + money(planEst) + " plan est."});
+  else if (cash != null) parts.push({text: "today " + money(cash) + " cash"});
+  else if (planEst != null) parts.push({text: "today " + money(planEst) + " plan est."});
 
   const byId = id => rows.find(p => p.id === id);
   const deep = byId("deepseek"), runway = deep && num(deep.runway_days);
   if (runway != null) {
     parts.push({text: (deep.label || "DeepSeek") + " " + runway.toFixed(1) + "d runway", cls: COST_STATUS_CLASS[deep.status] || ""});
   }
+  const u = s.usage || {};
+  if (u.unavailable) parts.push({text: "usage unreadable", cls: "badc"});
+  else if (Array.isArray(u.by_class_model)) {
+    const est = u.by_class_model.filter(r => isDeepSeek(r.model)).reduce((sum, r) => sum + (num(r.est_cost_usd) || 0), 0);
+    parts.push({text: "DeepSeek est. " + money(est), title: "DeepSeek spend estimated from the usage records over the last " + (u.window || "24h")});
+  }
   const claude = byId("claude"), planPct = claude && num(claude.plan_pct);
   if (planPct != null) {
+    // The limit's projection is the row's own status text, shown as written.
     parts.push({
       text: (claude.label || "Claude") + " " + Math.round(planPct) + "% (wk)" + (claude.status_text ? " " + claude.status_text : ""),
       cls: COST_STATUS_CLASS[claude.status] || "",
@@ -4228,9 +4242,7 @@ function costHeaderParts(s) {
   const gcp = costBudgetFigure(s.cloud);
   if (gcp) parts.push(gcp);
 
-  const u = s.usage || {};
-  if (u.unavailable) parts.push({text: "usage unreadable", cls: "badc"});
-  else {
+  if (!u.unavailable) {
     const over = (u.over20 || []).length;
     if (over > 0) {
       parts.push({
@@ -4245,27 +4257,37 @@ function costHeaderParts(s) {
 // costBudgetFigure is the header's GCP figure, read from the same budget_alert
 // findings the GCP line under the table draws, so the two cannot tell different
 // budgets. The percent goes with the budget it is a percent of; the worst alert
-// is the one that speaks for the projects, and an alert whose sentence does not
-// carry the figures is left to the line below rather than guessed at here. Its
-// colour is the table's: red for a budget spent past its whole, else the
-// finding's own severity — the alert is the patrol saying the project is near
-// its budget.
+// is the one that speaks for the projects. Its colour is the table's: red for a
+// budget spent past its whole, else the finding's own severity. A cloud state
+// that could not be read, or has no report, is named in the line rather than
+// left out, since an absent figure reads as a quiet budget. A town with no
+// cloud patrol has no budget to watch, so it draws nothing, as the line under
+// the table does.
 const COST_SEV_CLASS = {urgent: "badc", normal: "warnc"};
 function costBudgetFigure(c) {
-  if (!c || (c.state !== "fresh" && c.state !== "overdue")) return null;
-  let worst = null, worstPct = -1, severity = "";
+  if (!c) return null;
+  if (c.state === "error") return {text: "GCP: unreadable", cls: "badc", title: c.note || ""};
+  if (c.state === "missing") return c.no_patrol ? null : {text: "GCP: no data", cls: "warnc", title: c.note || ""};
+  if (c.state !== "fresh" && c.state !== "overdue") return {text: "GCP: no data", cls: "warnc"};
+  // A figure from a patrol that is overdue is its last report's, so it is
+  // marked stale and the hover says why.
+  const overdue = c.state === "overdue";
+  const stale = {title: overdue ? "the cloud patrol is overdue, so this is its last report" : "", suffix: overdue ? " (stale)" : "", floor: overdue ? "warnc" : ""};
+  let worst = null, worstPct = -1, severity = "", unread = null;
   for (const f of (c.findings || []).filter(f => f.kind === "budget_alert")) {
     const spent = BUDGET_SPENT.exec(f.detail || ""), pct = BUDGET_PCT.exec(f.detail || "");
-    if (spent && pct && Number(pct[1]) > worstPct) { worst = spent; worstPct = Number(pct[1]); severity = f.severity || ""; }
+    if (!spent || !pct) { unread = unread || f; continue; }
+    if (Number(pct[1]) > worstPct) { worst = spent; worstPct = Number(pct[1]); severity = f.severity || ""; }
   }
-  if (!worst) return null;
+  if (!worst) {
+    // An alert whose sentence does not carry its figures is named, not guessed at.
+    if (unread) return {text: "GCP: alert, no figures" + stale.suffix, cls: COST_SEV_CLASS[unread.severity] || stale.floor, title: unread.detail || stale.title};
+    return {text: "GCP: no alert" + stale.suffix, cls: stale.floor, title: stale.title};
+  }
   const amount = Number(String(worst[3]).replace(/,/g, ""));
   const budget = isNaN(amount) ? worst[3] : "$" + (Number.isInteger(amount) ? amount : amount.toFixed(2));
-  return {text: "GCP " + (Number.isInteger(worstPct) ? worstPct : worstPct.toFixed(1)) + "% of " + budget,
-    cls: worstPct >= 100 ? "badc" : (COST_SEV_CLASS[severity] || ""),
-    // A figure from a patrol that is overdue is its last report's, which the
-    // GCP line under the table says in words; the header says it on hover.
-    title: c.state === "overdue" ? "the cloud patrol is overdue, so this is its last report" : ""};
+  const cls = worstPct >= 100 ? "badc" : (COST_SEV_CLASS[severity] || stale.floor);
+  return {text: "GCP " + (Number.isInteger(worstPct) ? worstPct : worstPct.toFixed(1)) + "% of " + budget + stale.suffix, cls: cls, title: stale.title};
 }
 
 // paintCostHeader writes the header parts into note, one span each so a part
@@ -4297,6 +4319,7 @@ function renderCost(s) {
   // line, since grey figures alone must not pass as live ones.
   const parts = costHeaderParts(s);
   if (r && r.stale) parts.push({text: r.error ? "read failed" : "stale", cls: r.error ? "badc" : "warnc"});
+  if (!d) parts.push({text: "no spend read", cls: r && r.error ? "badc" : "warnc"});
   paintCostHeader(note, parts);
   note.title = [
     d && d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null,
