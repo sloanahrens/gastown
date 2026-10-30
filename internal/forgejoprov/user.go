@@ -62,10 +62,15 @@ func (p *Provisioner) EnsureUser(role string) error {
 		p.logf("user %s exists", user)
 		return nil
 	case http.StatusNotFound:
+		return p.createUser(user)
 	default:
 		return p.Client.Unexpected(http.MethodGet, path, status, resp)
 	}
-	// A dry run draws no password: it reports the create and sends none.
+}
+
+// createUser creates the missing bot account user with a random password. A dry
+// run reports the create and sends none, and draws no password.
+func (p *Provisioner) createUser(user string) error {
 	if p.Client.DryRun {
 		p.logf("would create user %s", user)
 		return nil
@@ -82,7 +87,7 @@ func (p *Provisioner) EnsureUser(role string) error {
 		"must_change_password": false,
 		"send_notify":          false,
 	}
-	status, resp, err = p.Client.Do(http.MethodPost, "/admin/users", body)
+	status, resp, err := p.Client.Do(http.MethodPost, "/admin/users", body)
 	if err != nil {
 		return err
 	}

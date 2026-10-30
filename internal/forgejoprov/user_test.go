@@ -125,7 +125,7 @@ func userProvisioner(transport http.RoundTripper, dryRun bool, logs *[]string) *
 
 // TestEnsureUserCreatesWhenMissing checks that a missing bot is created by one POST,
 // and that a second run finds it and writes nothing. The password travels in the
-// create body and in no log line or call record.
+// create body and in no log line.
 func TestEnsureUserCreatesWhenMissing(t *testing.T) {
 	t.Parallel()
 	f := newFakeForgejo()
@@ -167,9 +167,6 @@ func TestEnsureUserCreatesWhenMissing(t *testing.T) {
 			t.Errorf("log line carries the password: %q", line)
 		}
 	}
-	if calls := fmt.Sprintf("%+v", f.callLog()); strings.Contains(calls, countingPassword) {
-		t.Errorf("call log carries the password")
-	}
 }
 
 // TestEnsureUserLeavesAnExistingUser checks that a bot already on the instance takes
@@ -200,7 +197,8 @@ func TestEnsureUserTreats422AsExisting(t *testing.T) {
 	f := newFakeForgejo()
 	f.users["bot-polecat"] = &fakeUser{email: "bot-polecat@" + DefaultBotEmailDomain, tokens: map[string]fakeToken{}}
 	var logs []string
-	p := userProvisioner(staleReadTransport{next: f}, false, &logs)
+	bodies := &bodyTransport{next: staleReadTransport{next: f}}
+	p := userProvisioner(bodies, false, &logs)
 
 	if err := p.EnsureUser("polecat"); err != nil {
 		t.Fatalf("EnsureUser with a 422 create: unexpected error: %v", err)
@@ -211,6 +209,15 @@ func TestEnsureUserTreats422AsExisting(t *testing.T) {
 	}
 	if want := []string{"user bot-polecat exists"}; !slices.Equal(logs, want) {
 		t.Errorf("log lines = %q, want %q", logs, want)
+	}
+	// The 422 path draws and sends a password, so the same no-leak rule holds here.
+	if len(bodies.bodies) != 1 || !strings.Contains(bodies.bodies[0], countingPassword) {
+		t.Fatalf("create body does not carry the drawn password: the no-leak check below would prove nothing")
+	}
+	for _, line := range logs {
+		if strings.Contains(line, countingPassword) {
+			t.Errorf("log line carries the password: %q", line)
+		}
 	}
 }
 
@@ -249,6 +256,9 @@ func TestEnsureUserFailsOnOtherStatus(t *testing.T) {
 			if strings.Contains(err.Error(), fixtureToken) || strings.Contains(err.Error(), mintedSecret) {
 				t.Errorf("error quotes a credential the reply echoed")
 			}
+			if strings.Contains(err.Error(), countingPassword) {
+				t.Errorf("error carries the password drawn for the create")
+			}
 			wantMethods := []string{http.MethodGet}
 			if tc.wantPost {
 				wantMethods = append(wantMethods, http.MethodPost)
@@ -272,6 +282,9 @@ func TestEnsureUserStopsWhenTheCreateGetsNoReply(t *testing.T) {
 	err := p.EnsureUser("polecat")
 	if err == nil || !strings.Contains(err.Error(), "POST ") || !strings.Contains(err.Error(), "request failed") {
 		t.Fatalf("EnsureUser with no create reply: error = %v, want one naming the failed POST", err)
+	}
+	if strings.Contains(err.Error(), countingPassword) {
+		t.Errorf("error carries the password drawn for the create")
 	}
 	if len(logs) != 0 {
 		t.Errorf("log lines = %q, want none", logs)
