@@ -129,5 +129,5 @@ require (
 	gopkg.in/src-d/go-errors.v1 v1.0.0 // indirect
 )
 
-// The tracker module lives in this repository; scripts/repo-guards.sh allows this one replace.
+// The tracker module lives in this repository; cmd/repo-guards allows this one replace.
 replace github.com/steveyegge/gastown/tracker => ./tracker

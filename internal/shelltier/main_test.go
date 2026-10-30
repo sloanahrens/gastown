@@ -35,7 +35,6 @@ var trackedShellTests = []string{
 	"scripts/openshell-providers_test.sh",
 	"scripts/polecat-go-floor_test.sh",
 	"scripts/post-land-shell_test.sh",
-	"scripts/repo-guards_test.sh",
 	"scripts/resource-sampler_test.sh",
 	"scripts/tier-sweep_test.sh",
 	"scripts/town_metrics_test.sh",

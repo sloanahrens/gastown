@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -168,21 +167,6 @@ func TestCLIGitIsTrackedTable(t *testing.T) {
 				t.Errorf("calls = %+v, want one git %q in /repo", e.calls, wantArgs)
 			}
 		})
-	}
-}
-
-// TestCheckIssuesJSONLProblemText pins the guard's message to the line the
-// script prints, byte for byte, since operators grep for it. The script is the
-// source: the test reads it, so the constant cannot drift from what ships.
-func TestCheckIssuesJSONLProblemText(t *testing.T) {
-	t.Parallel()
-	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "repo-guards.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `echo "` + IssuesJSONLProblem + `" >&2`
-	if !strings.Contains(string(script), want) {
-		t.Errorf("scripts/repo-guards.sh does not print IssuesJSONLProblem: want a line with %s", want)
 	}
 }
 
