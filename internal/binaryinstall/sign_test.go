@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +68,8 @@ type signSeam struct {
 type signCall struct {
 	name string
 	args []string
+	// stdin is what the command was fed on standard input; only the unlock has any.
+	stdin string
 }
 
 func newSignSeam() *signSeam {
@@ -124,7 +128,8 @@ func (f *signSeam) signer() Signer {
 				f.warnings = append(f.warnings, fmt.Sprintf(format, args...))
 			},
 		},
-		Exec: f.exec,
+		Exec:      f.exec,
+		StdinExec: f.execStdin,
 		Lstat: func(path string) (os.FileInfo, error) {
 			if err := f.inspectErr[path]; err != nil {
 				return nil, err
@@ -168,14 +173,20 @@ func (f *signSeam) copyBytes(dst, src string) error {
 	return nil
 }
 
-// exec answers the two commands Sign runs. codesign writes its signed bytes to
-// the temp file, the last argument, or its partial copy when it fails.
+// execStdin answers the unlock, the one command that takes the password on
+// stdin. It records what it was fed and answers with unlockErr.
+func (f *signSeam) execStdin(ctx context.Context, stdin, name string, args ...string) (string, string, error) {
+	f.calls = append(f.calls, signCall{name: name, args: args, stdin: stdin})
+	f.unlockDeadline, _ = ctx.Deadline()
+	return "", "", f.unlockErr
+}
+
+// exec answers codesign, the one command Sign runs through Exec. It writes its
+// signed bytes to the temp file, the last argument, or its partial copy when it
+// fails.
 func (f *signSeam) exec(ctx context.Context, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, signCall{name: name, args: args})
 	switch name {
-	case "security":
-		f.unlockDeadline, _ = ctx.Deadline()
-		return nil, f.unlockErr
 	case "codesign":
 		f.deadline, _ = ctx.Deadline()
 		tmp := args[len(args)-1]
@@ -580,9 +591,12 @@ func TestSignPassesAPathThatStartsWithADashAsAPath(t *testing.T) {
 		t.Fatalf("Sign() = %v, want nil", err)
 	}
 	unlock := f.commandsNamed("security")
-	wantUnlock := []string{"unlock-keychain", "-p", samplePassword, "./-keys/gastown-signing.keychain-db"}
+	wantUnlock := []string{"unlock-keychain", "./-keys/gastown-signing.keychain-db"}
 	if len(unlock) != 1 || !argsEqual(unlock[0].args, wantUnlock) {
 		t.Errorf("unlock call = %q, want %q", unlock, wantUnlock)
+	}
+	if len(unlock) == 1 && unlock[0].stdin != samplePassword+"\n" {
+		t.Errorf("unlock stdin = %q, want the password and a newline", unlock[0].stdin)
 	}
 	codesign := f.commandsNamed("codesign")
 	if len(codesign) != 1 {
@@ -676,9 +690,62 @@ func TestSignResolvesTheSigningDirectory(t *testing.T) {
 				t.Fatalf("Sign() = %v, want nil", err)
 			}
 			unlock := f.commandsNamed("security")
-			wantUnlock := []string{"unlock-keychain", "-p", samplePassword, tc.dir + "/gastown-signing.keychain-db"}
+			wantUnlock := []string{"unlock-keychain", tc.dir + "/gastown-signing.keychain-db"}
 			if len(unlock) != 1 || !argsEqual(unlock[0].args, wantUnlock) {
 				t.Errorf("unlock call = %q, want %q", unlock, wantUnlock)
+			}
+			if len(unlock) == 1 && unlock[0].stdin != samplePassword+"\n" {
+				t.Errorf("unlock stdin = %q, want the password and a newline", unlock[0].stdin)
+			}
+		})
+	}
+}
+
+// TestRunStdinFeedsTheCommandAndNamesOnlyItsStatusOnFailure: the production
+// runner hands the password to the command on stdin, and a refused run's error
+// names the command, its arguments and the exit status, never the password.
+func TestRunStdinFeedsTheCommandAndNamesOnlyItsStatusOnFailure(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cret-stdin"
+	cases := []struct {
+		name    string
+		run     error
+		wantErr string
+	}{
+		{name: "the command ran", run: nil},
+		{
+			name:    "the command exited with a status",
+			run:     errors.New("exit status 51"),
+			wantErr: "security unlock-keychain " + keychainPath + ": exit status 51",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var fed string
+			run := func(cmd *exec.Cmd) error {
+				data, err := io.ReadAll(cmd.Stdin)
+				if err != nil {
+					t.Errorf("read stdin: %v", err)
+				}
+				fed = string(data)
+				return tc.run
+			}
+			_, _, err := runStdinWith(context.Background(), run, secret+"\n", "security", "unlock-keychain", keychainPath)
+			if fed != secret+"\n" {
+				t.Errorf("stdin = %q, want the password and a newline", fed)
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("runStdinWith() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("runStdinWith() = %v, want %q", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error %q carries the password", err)
 			}
 		})
 	}
@@ -717,10 +784,20 @@ func TestSignNeverPrintsThePassword(t *testing.T) {
 					}
 				}
 			}
-			// The unlock call is the one place the password goes, as today.
+			// The unlock call is the one place the password goes, on stdin only.
 			unlock := f.commandsNamed("security")
-			if len(unlock) != 1 || !argsEqual(unlock[0].args, []string{"unlock-keychain", "-p", samplePassword, keychainPath}) {
-				t.Errorf("unlock call = %q, want the password in its argv only", unlock)
+			if len(unlock) != 1 || !argsEqual(unlock[0].args, []string{"unlock-keychain", keychainPath}) {
+				t.Errorf("unlock call = %q, want the keychain path in its argv", unlock)
+			}
+			if len(unlock) == 1 && unlock[0].stdin != samplePassword+"\n" {
+				t.Errorf("unlock stdin = %q, want the password on stdin only", unlock[0].stdin)
+			}
+			for _, c := range unlock {
+				for _, arg := range c.args {
+					if strings.Contains(arg, samplePassword) {
+						t.Errorf("password passed to security in argv: %q", c.args)
+					}
+				}
 			}
 		})
 	}

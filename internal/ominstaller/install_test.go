@@ -456,10 +456,13 @@ func TestInstallKeepsTheKeychainPasswordOutOfItsOutput(t *testing.T) {
 
 			reachedUnlock := false
 			for _, c := range r.run.calls {
-				reachedUnlock = reachedUnlock || slices.Contains(c.Args, keychainSentinel)
+				reachedUnlock = reachedUnlock || c.Stdin == keychainSentinel+"\n"
+				if slices.Contains(c.Args, keychainSentinel) {
+					t.Errorf("the keychain password is in the argv of %s, which ps would show", c.Name)
+				}
 			}
 			if !reachedUnlock {
-				t.Fatal("the sentinel never reached the unlock, so the leak check would prove nothing")
+				t.Fatal("the sentinel never reached the unlock's stdin, so the leak check would prove nothing")
 			}
 			leaks := leaksKeychainPassword(keychainSentinel,
 				namedOutput{name: "logs", text: strings.Join(r.logs.lines, "\n")},

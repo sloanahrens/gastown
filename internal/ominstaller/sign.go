@@ -84,7 +84,7 @@ func sign(ctx context.Context, cfg Config, tmp string) error {
 	}
 
 	unlockCtx, cancelUnlock := signing.Bound(ctx, nil, cfg.SignWait)
-	err = signing.Unlock(unlockCtx, signExec(cfg), keychain, password)
+	err = signing.Unlock(unlockCtx, signStdinExec(cfg), keychain, password)
 	cancelUnlock()
 	if err != nil {
 		if errors.Is(err, signing.ErrUnlockTimeout) {
@@ -125,6 +125,14 @@ func sign(ctx context.Context, cfg Config, tmp string) error {
 func signExec(cfg Config) signing.Exec {
 	return func(ctx context.Context, name string, args ...string) (string, string, error) {
 		return cfg.Exec(ctx, Command{Name: name, Args: args})
+	}
+}
+
+// signStdinExec runs the keychain unlock through cfg.Exec with the password on
+// the command's standard input, so the password is never in its argv.
+func signStdinExec(cfg Config) signing.StdinExec {
+	return func(ctx context.Context, stdin, name string, args ...string) (string, string, error) {
+		return cfg.Exec(ctx, Command{Name: name, Args: args, Stdin: stdin})
 	}
 }
 

@@ -45,11 +45,12 @@ func (r *runRig) run(args ...string) int {
 			}
 			return fakeInfo{}, nil
 		},
+		StdinExec: func(_ context.Context, _, name string, args ...string) (string, string, error) {
+			r.log("exec", name+" "+strings.Join(args, " "))
+			return "", "", r.unlockErr
+		},
 		Exec: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			r.log("exec", name+" "+strings.Join(args, " "))
-			if name == "security" {
-				return nil, r.unlockErr
-			}
 			if name != "codesign" {
 				return nil, nil
 			}

@@ -1,6 +1,7 @@
 package binaryinstall
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -58,6 +59,9 @@ type Signer struct {
 	// Exec runs a command and returns its combined output and its error. nil
 	// runs it with os/exec, with no stdin, so the command reads /dev/null.
 	Exec func(ctx context.Context, name string, args ...string) ([]byte, error)
+	// StdinExec runs the keychain unlock, which takes the password on stdin and
+	// never in argv. nil runs it with os/exec and feeds stdin to the command.
+	StdinExec signing.StdinExec
 	// Lstat reports what is at a material path without following a symlink, so
 	// a symlink is found as itself and not as its target; nil is os.Lstat.
 	Lstat func(path string) (os.FileInfo, error)
@@ -143,7 +147,7 @@ func (s Signer) Sign(tmp, src, name string) error {
 	// The unlock runs under the same limit as codesign, so a hung unlock fails
 	// the install (gt-e2prc). Each step gets its own deadline.
 	unlockCtx, cancelUnlock := signing.Bound(context.Background(), s.now, limit)
-	err = signing.Unlock(unlockCtx, s.exec(), keychain, password)
+	err = signing.Unlock(unlockCtx, s.stdinExec(), keychain, password)
 	cancelUnlock()
 	if err != nil {
 		return signingError{"cannot unlock " + keychain}
@@ -247,6 +251,37 @@ func (s Signer) exec() signing.Exec {
 		out, err := s.run(ctx, name, args...)
 		return string(out), "", err
 	}
+}
+
+// stdinExec is the unlock's runner: StdinExec when it is set, else runStdin.
+func (s Signer) stdinExec() signing.StdinExec {
+	if s.StdinExec != nil {
+		return s.StdinExec
+	}
+	return runStdin
+}
+
+// runStdin runs name with stdin on its standard input. It returns what the
+// command wrote to standard output and standard error, which the unlock
+// discards. Its error names the command, its arguments (the keychain path) and
+// the exit status; it never includes stdin or that output, which can hold the
+// password.
+func runStdin(ctx context.Context, stdin, name string, args ...string) (string, string, error) {
+	return runStdinWith(ctx, func(cmd *exec.Cmd) error { return cmd.Run() }, stdin, name, args...)
+}
+
+// runStdinWith is runStdin with its run step injected, so a test drives the
+// failure path without starting a process.
+func runStdinWith(ctx context.Context, run func(*exec.Cmd) error, stdin, name string, args ...string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	if err := run(cmd); err != nil {
+		return out.String(), errOut.String(), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return out.String(), errOut.String(), nil
 }
 
 // material reports whether anything is at path and what it is, without
