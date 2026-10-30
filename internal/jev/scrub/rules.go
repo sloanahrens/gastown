@@ -208,12 +208,13 @@ func assignmentValue(text string, pos int) (end int, quoted bool) {
 }
 
 // credentialWords name a credential on their own; a field name that contains
-// one of them as a word holds a credential.
+// one of them as a word holds a credential. "key" is absent on purpose: a bare
+// key field is as often a map key, cache key or sort key as a credential, while
+// a compound ("api_key", "secret-key") is listed here or in
+// compoundCredentialNames.
 var credentialWords = map[string]bool{
 	"credential":  true,
 	"credentials": true,
-	"key":         true,
-	"keys":        true,
 	"passwd":      true,
 	"password":    true,
 	"passwords":   true,
@@ -245,29 +246,78 @@ var compoundCredentialNames = map[string]bool{
 	"userpassword": true,
 }
 
-// safeCredentialNames hold a credential word but count it or describe it rather
-// than hold it, so redacting them would replace signal with a marker.
-var safeCredentialNames = map[string]bool{
-	"max_tokens":  true,
-	"token_count": true,
-	"tokens_used": true,
+// keyWords name a key. A compound name that holds one ("api_key", "secret-key")
+// is a credential; the bare name is a map key, cache key or sort key too often
+// to redact, so it is kept.
+var keyWords = map[string]bool{"key": true, "keys": true}
+
+// counterWords count something rather than hold it. A name built from a
+// credential word plus one of these is a quantity ("tokens_used", "maxTokens",
+// "input_tokens"), not a secret, so redacting it would replace signal with a
+// marker.
+var counterWords = map[string]bool{
+	"budget":     true,
+	"completion": true,
+	"count":      true,
+	"counts":     true,
+	"input":      true,
+	"len":        true,
+	"length":     true,
+	"limit":      true,
+	"limits":     true,
+	"max":        true,
+	"min":        true,
+	"num":        true,
+	"number":     true,
+	"output":     true,
+	"prompt":     true,
+	"size":       true,
+	"total":      true,
+	"used":       true,
 }
+
+// countedName reports whether words name a quantity: a counter word beside
+// only token(s) or key(s) ("token_count", "maxTokens", "input_tokens"). Any
+// other credential word in the name makes it a credential again.
+func countedName(words []string) bool {
+	counted := false
+	for _, w := range words {
+		if counterWords[w] {
+			counted = true
+		}
+	}
+	if !counted {
+		return false
+	}
+	for _, w := range words {
+		if credentialWords[w] && !tokenWords[w] {
+			return false
+		}
+	}
+	return true
+}
+
+// tokenWords are the credential words a counter may count.
+var tokenWords = map[string]bool{"token": true, "tokens": true}
 
 // credentialName reports whether a field name names a credential, however its
 // words are separated: api_token, APIKey, db.password, apikey.
+//
+// A name made of a credential word and a counter is a count and is kept, and a
+// bare "key" is kept; every other shape holding a credential word is redacted.
 func credentialName(name string) bool {
 	words := nameWords(name)
 	if len(words) == 0 {
 		return false
 	}
-	if safeCredentialNames[strings.ToLower(name)] {
+	if countedName(words) {
 		return false
 	}
-	if len(words) == 1 && compoundCredentialNames[words[0]] {
-		return true
+	if len(words) == 1 {
+		return compoundCredentialNames[words[0]] || credentialWords[words[0]]
 	}
 	for _, w := range words {
-		if credentialWords[w] {
+		if credentialWords[w] || keyWords[w] {
 			return true
 		}
 	}
@@ -338,43 +388,42 @@ func scrubLongTokens(text string) (string, int) {
 }
 
 // looksLikeLongSecret reports whether a long non-hex run is key material rather
-// than a path, slug or id. Mixed case or a base64 symbol is key material; a run
-// of lower-case words joined by separators is not.
+// than a path, slug or id. Mixed case or a base64 symbol is key material, and
+// so is any lower-case run that is not a path of short word segments: a
+// lower-case-only base64 blob carries no upper case, no base64 symbol and
+// possibly few digits, and a secret that reaches the hosted service cannot be
+// recovered, so the run redacts.
 func looksLikeLongSecret(s string) bool {
-	var upper, lower, digits int
-	base64Symbol := false
 	for _, r := range s {
 		switch {
-		case r >= 'A' && r <= 'Z':
-			upper++
-		case r >= 'a' && r <= 'z':
-			lower++
-		case r >= '0' && r <= '9':
-			digits++
-		case r == '+' || r == '=':
-			base64Symbol = true
+		case r >= 'A' && r <= 'Z', r == '+' || r == '=':
+			return true
 		}
 	}
-	if base64Symbol || (upper > 0 && lower > 0) {
-		return true
-	}
-	if pathShape(s) {
-		return false
-	}
-	// A single-case run with no separator: random key material carries digits,
-	// a long English word does not.
-	return digits >= 8
+	return !pathShape(s)
 }
 
-// pathShape reports whether a run reads as a path or slug: lower-case letters
-// and digits joined by separators.
+// pathSegmentLimit is the longest segment a path, slug or id may hold. A longer
+// unbroken segment is base64-like, not a word.
+const pathSegmentLimit = 16
+
+// pathShape reports whether a run reads as a path, slug or id: lower-case
+// letters and digits in short segments joined by separators. A run with a
+// segment longer than pathSegmentLimit is a token that happens to hold a
+// separator, not a path.
 func pathShape(s string) bool {
 	separator := false
+	segment := 0
 	for _, r := range s {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			segment++
+			if segment > pathSegmentLimit {
+				return false
+			}
 		case r == '/' || r == '-' || r == '_':
 			separator = true
+			segment = 0
 		default:
 			return false
 		}

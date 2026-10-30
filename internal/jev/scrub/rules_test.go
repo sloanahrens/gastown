@@ -1,6 +1,8 @@
 package scrub
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +154,51 @@ func ruleCases() []ruleCase {
 			want: "max_tokens=4096",
 		},
 		{
+			name: "camel case max tokens", rule: RuleAssignment,
+			in:   "maxTokens=4096",
+			want: "maxTokens=4096",
+		},
+		{
+			name: "camel case token count", rule: RuleAssignment,
+			in:   "tokenCount: 12",
+			want: "tokenCount: 12",
+		},
+		{
+			name: "camel case tokens used", rule: RuleAssignment,
+			in:   "tokensUsed=42",
+			want: "tokensUsed=42",
+		},
+		{
+			name: "input tokens is a count", rule: RuleAssignment,
+			in:   "input_tokens=1200",
+			want: "input_tokens=1200",
+		},
+		{
+			name: "prompt tokens is a count", rule: RuleAssignment,
+			in:   "prompt_tokens: 800",
+			want: "prompt_tokens: 800",
+		},
+		{
+			name: "bare key is a map key", rule: RuleAssignment,
+			in:   "key=cache-key-1",
+			want: "key=cache-key-1",
+		},
+		{
+			name: "json colon password", rule: RuleAssignment,
+			in:   `"password": "hunter2"`,
+			want: `"password": "[REDACTED:assignment]"`, count: 1,
+		},
+		{
+			name: "json colon api key", rule: RuleAssignment,
+			in:   `"api_key": "0123456789abcdef0123456789abcdef"`,
+			want: `"api_key": "[REDACTED:assignment]"`, count: 1,
+		},
+		{
+			name: "api key header", rule: RuleAssignment,
+			in:   "X-Api-Key: 0123456789abcdef0123456789abcdef",
+			want: "X-Api-Key: [REDACTED:assignment]", count: 1,
+		},
+		{
 			name: "secretary is not a secret", rule: RuleAssignment,
 			in:   "secretary=alice",
 			want: "secretary=alice",
@@ -212,6 +259,16 @@ func ruleCases() []ruleCase {
 			name: "sha256 digest", rule: RuleLongToken,
 			in:   "the sha256 digest is " + hex64,
 			want: "the sha256 digest is [REDACTED:long-token]", count: 1,
+		},
+		{
+			name: "lower case base64 like", rule: RuleLongToken,
+			in:   "blob " + strings.Repeat("qzjxkvzpmw", 4) + "8f3a end",
+			want: "blob [REDACTED:long-token] end", count: 1,
+		},
+		{
+			name: "lower case base64url", rule: RuleLongToken,
+			in:   "blob " + strings.Repeat("qzjxkvzpmw", 2) + "_" + strings.Repeat("qzjxkvzpmw", 2) + " end",
+			want: "blob [REDACTED:long-token] end", count: 1,
 		},
 		{
 			name: "slug", rule: RuleLongToken,
@@ -428,10 +485,73 @@ func TestScrubSafe(t *testing.T) {
 func checkDeadlineBudget(t *testing.T, start time.Time) {
 	t.Helper()
 	deadline, ok := t.Deadline()
-	if !ok {
-		t.Fatal("the test has no deadline, so its time budget went unchecked; run go test with its default timeout")
+	if err := deadlineBudgetError(start, time.Now(), deadline, ok); err != nil {
+		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > deadline.Sub(start)/2 {
-		t.Fatalf("scrubbing took %s, more than half the %s left on the test deadline", elapsed, deadline.Sub(start))
+}
+
+// deadlineBudgetError is the decision checkDeadlineBudget makes, split out so
+// both of its failing branches have a test without needing a real deadline.
+func deadlineBudgetError(start, now, deadline time.Time, hasDeadline bool) error {
+	if !hasDeadline {
+		return errors.New("the test has no deadline, so its time budget went unchecked; run go test with its default timeout")
+	}
+	elapsed := now.Sub(start)
+	if budget := deadline.Sub(start); elapsed > budget/2 {
+		return fmt.Errorf("scrubbing took %s, more than half the %s left on the test deadline", elapsed, budget)
+	}
+	return nil
+}
+
+// TestDeadlineBudgetError drives both failing branches of the deadline check,
+// so a broken check cannot pass TestScrubSafe silently.
+func TestDeadlineBudgetError(t *testing.T) {
+	t.Parallel()
+	start := time.Unix(1000, 0)
+	cases := []struct {
+		name        string
+		now         time.Time
+		deadline    time.Time
+		hasDeadline bool
+		wantErr     string
+	}{
+		{
+			name:        "no deadline",
+			now:         start.Add(time.Second),
+			hasDeadline: false,
+			wantErr:     "no deadline",
+		},
+		{
+			name:        "over half the budget",
+			now:         start.Add(60 * time.Second),
+			deadline:    start.Add(100 * time.Second),
+			hasDeadline: true,
+			wantErr:     "more than half",
+		},
+		{
+			name:        "within the budget",
+			now:         start.Add(10 * time.Second),
+			deadline:    start.Add(100 * time.Second),
+			hasDeadline: true,
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			err := deadlineBudgetError(start, c.now, c.deadline, c.hasDeadline)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("deadlineBudgetError() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("deadlineBudgetError() = nil, want an error holding %q", c.wantErr)
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("deadlineBudgetError() = %q, want it to hold %q", err, c.wantErr)
+			}
+		})
 	}
 }

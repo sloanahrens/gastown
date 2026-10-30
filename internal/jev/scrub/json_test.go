@@ -89,7 +89,7 @@ func TestScrubJSONCredentialValues(t *testing.T) {
   "secret": ["hunter2", "hunter3"],
   "password": 1234,
   "api_key": true,
-  "nested": {"tokens_used": 12, "author": "alice", "items": [1, 2]}
+  "nested": {"tokens_used": 12, "author": "alice", "items": [1, 2], "input_tokens": 900, "maxTokens": 4096, "key": "cache-key-1"}
 }`)
 
 	out, report := Default().ScrubJSON(raw)
@@ -115,6 +115,15 @@ func TestScrubJSONCredentialValues(t *testing.T) {
 	}
 	if got, want := nested["author"], any("alice"); got != want {
 		t.Errorf("nested.author = %v, want %v", got, want)
+	}
+	for key, want := range map[string]any{
+		"input_tokens": float64(900),
+		"maxTokens":    float64(4096),
+		"key":          "cache-key-1",
+	} {
+		if got := nested[key]; got != want {
+			t.Errorf("nested.%s = %v, want the count or map key %v", key, got, want)
+		}
 	}
 	items := nested["items"].([]any)
 	if len(items) != 2 || items[0] != any(float64(1)) || items[1] != any(float64(2)) {
