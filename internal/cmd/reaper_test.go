@@ -581,3 +581,29 @@ func TestReaperAutoCloseDisarmedAt(t *testing.T) {
 		}
 	})
 }
+
+// TestReaperAutoCloseCommandRefusesAnUnreadableConfig drives the command's own
+// refusal, not just the helper: gt reaper auto-close in a town whose
+// settings/config.json does not parse must stop before it reaches a database
+// (gt-ptslm). The town root comes from the working directory, and the command
+// takes no directory argument, so the cwd is the input.
+//
+//testpolicy:allow parallel — the command reads the process working directory (workspace.FindFromCwd), which t.Chdir sets for the whole process
+func TestReaperAutoCloseCommandRefusesAnUnreadableConfig(t *testing.T) {
+	town := t.TempDir()
+	writeTownFile(t, filepath.Join(town, "mayor", "town.json"), `{"name":"test-town"}`)
+	settings := filepath.Join(town, "settings", "config.json")
+	writeTownFile(t, settings, `{not json`)
+	//testpolicy:allow no-chdir — the town root is the input under test: the command takes no directory argument
+	t.Chdir(town)
+
+	err := reaperAutoCloseCmd.RunE(reaperAutoCloseCmd, nil)
+	if err == nil {
+		t.Fatal("gt reaper auto-close with an unreadable config = nil error, want the refusal")
+	}
+	for _, want := range []string{"disarmed", settings} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to contain %q", err, want)
+		}
+	}
+}
