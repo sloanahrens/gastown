@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -15,6 +16,8 @@ const (
 	entrypointBin     = "/usr/bin/gt"
 	entrypointMarker  = "/gt/.gt-scratch-town"
 	entrypointTownCfg = "/gt/mayor/town.json"
+	// entrypointIncomplete is the install-incomplete marker in the test town.
+	entrypointIncomplete = "/gt/.gt-install-incomplete"
 	// entrypointGtMount is a mountinfo table in which /gt is a bind mount.
 	entrypointGtMount = "36 35 98:0 /srv/scratch /gt rw,noatime - ext4 /dev/root rw\n"
 )
@@ -35,8 +38,11 @@ type entrypointRig struct {
 	dirErr     error
 	removed    []string
 	removeErr  error
-	scratch    bool
-	calls      [][]string
+	// created records the paths the create seam made; createErr fails it.
+	created   []string
+	createErr error
+	scratch   bool
+	calls     [][]string
 }
 
 // scratchRig is a container whose town root is the scratch town: every
@@ -88,6 +94,13 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 				return false, errors.New("stat failed")
 			}
 			return r.exists[path], nil
+		},
+		create: func(path string) error {
+			if r.createErr != nil {
+				return r.createErr
+			}
+			r.created = append(r.created, path)
+			return nil
 		},
 		remove: func(path string) error {
 			r.removed = append(r.removed, path)
@@ -446,6 +459,11 @@ func TestContainerEntrypointScratchTownInstallsOnceBeforeDaemon(t *testing.T) {
 	if n := r.installCalls(); n != 1 {
 		t.Errorf("recorded %d gt install argv, want exactly 1", n)
 	}
+	// The marker brackets the install: created before it, removed after it
+	// succeeded.
+	if !reflect.DeepEqual(r.created, []string{entrypointIncomplete}) || !reflect.DeepEqual(r.removed, []string{entrypointIncomplete}) {
+		t.Errorf("incomplete marker created %v and removed %v, want it created and then removed once", r.created, r.removed)
+	}
 }
 
 // The scratch gate admits a directory holding only the marker, so the install
@@ -471,7 +489,10 @@ func TestScratchTownInstallAcceptsTheMarkerOnlyDirectory(t *testing.T) {
 
 // A failed scratch install that wrote mayor/town.json must leave none behind:
 // the next start would exec a half-written town. This runs the real filesystem
-// seams over a t.TempDir, so the removal is what the disk shows.
+// seams over a t.TempDir, so the removal is what the disk shows. It is hermetic:
+// the town root is a t.TempDir, the mountinfo text is a fixture naming it, and
+// run is a recording fake whose install branch writes the temp directory itself,
+// so no gt install and no other process runs.
 func TestContainerEntrypointFailedScratchInstallLeavesNoTownJSON(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -485,6 +506,7 @@ func TestContainerEntrypointFailedScratchInstallLeavesNoTownJSON(t *testing.T) {
 	e := r.entrypoint()
 	e.lstat = entrypointLstat
 	e.exists = entrypointPathExists
+	e.create = entrypointCreateExclusive
 	e.dirNames = listDirNames
 	e.remove = os.RemoveAll
 	e.run = func(argv []string) error {
@@ -510,8 +532,241 @@ func TestContainerEntrypointFailedScratchInstallLeavesNoTownJSON(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("the scratch marker was not kept: %v", err)
 	}
+	if _, err := os.Lstat(filepath.Join(townRoot, config.ScratchInstallIncompleteMarker)); err != nil {
+		t.Errorf("the install-incomplete marker was not kept after a failed install: %v", err)
+	}
 	if n := r.execCalls(); n != 0 {
 		t.Errorf("recorded %d daemon exec argv after a failed install, want none: %v", n, r.calls)
+	}
+}
+
+// A failed install whose cleanup also fails leaves mayor/town.json on disk, and
+// the next start must still refuse: the incomplete marker, not town.json, decides.
+// Both starts run the real filesystem seams over a t.TempDir with a recording
+// fake for every command, so nothing outside the temp directory is touched; the
+// first start's removal is made to fail for everything but the marker, the way a
+// read-only or busy entry would.
+func TestContainerEntrypointFailedInstallWithFailedCleanupLeavesTheTownUnstartable(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(townRoot, config.ScratchTownMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := scratchRig()
+	r.env[containerTownRootEnv] = townRoot
+	r.mountinfo = entrypointMountinfo(townRoot)
+	realSeams := func(scratch bool) containerEntrypoint {
+		e := r.entrypoint()
+		e.lstat = entrypointLstat
+		e.exists = entrypointPathExists
+		e.create = entrypointCreateExclusive
+		e.dirNames = listDirNames
+		e.remove = os.RemoveAll
+		e.scratch = scratch
+		return e
+	}
+
+	first := realSeams(true)
+	first.run = func(argv []string) error {
+		r.calls = append(r.calls, append([]string{}, argv...))
+		if len(argv) > 1 && argv[1] == "install" {
+			if err := os.Mkdir(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0o600); err != nil {
+				return err
+			}
+			return errors.New("install failed")
+		}
+		return nil
+	}
+	first.remove = func(string) error { return errors.New("remove failed") }
+	if err := runContainerEntrypoint(first); err == nil {
+		t.Fatal("expected the failed install to surface")
+	}
+	if _, err := os.Lstat(filepath.Join(townRoot, "mayor", "town.json")); err != nil {
+		t.Fatalf("the failed removal should have left mayor/town.json on disk: %v", err)
+	}
+
+	for _, scratch := range []bool{false, true} {
+		before := len(r.calls)
+		err := runContainerEntrypoint(realSeams(scratch))
+		if err == nil || !strings.Contains(err.Error(), config.ScratchInstallIncompleteMarker) {
+			t.Errorf("scratch=%v: next start error = %v, want a refusal naming the %s marker", scratch, err, config.ScratchInstallIncompleteMarker)
+		}
+		if len(r.calls) != before {
+			t.Errorf("scratch=%v: the next start ran %v, want nothing", scratch, r.calls[before:])
+		}
+	}
+}
+
+// The marker is created before the install runs, and the install is not run at
+// all when it cannot be created: an install never starts unbracketed.
+func TestContainerEntrypointCreateFailureRunsNoInstall(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	r.createErr = errors.New("file exists")
+	err := runContainerEntrypoint(r.entrypoint())
+	if err == nil || !strings.Contains(err.Error(), config.ScratchInstallIncompleteMarker) {
+		t.Fatalf("error = %v, want a refusal naming the incomplete marker", err)
+	}
+	if n := r.installCalls(); n != 0 {
+		t.Errorf("recorded %d gt install argv after the marker could not be created, want none", n)
+	}
+	if n := r.execCalls(); n != 0 {
+		t.Errorf("recorded %d daemon exec argv, want none", n)
+	}
+}
+
+// Every install failure keeps the marker, whether the cleanup worked or not:
+// it is removed only after a good install.
+func TestContainerEntrypointFailedInstallKeepsTheIncompleteMarker(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		removeErr error
+	}{
+		{"cleanup succeeds", nil},
+		{"cleanup fails", errors.New("remove failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			e := r.entrypoint()
+			e.run = r.failingInstall(func() {
+				r.dir = []string{config.ScratchTownMarker, config.ScratchInstallIncompleteMarker, "mayor"}
+				r.removeErr = tc.removeErr
+			})
+			if err := runContainerEntrypoint(e); err == nil {
+				t.Fatal("expected the failed install to surface")
+			}
+			if !reflect.DeepEqual(r.created, []string{entrypointIncomplete}) {
+				t.Errorf("created %v, want the incomplete marker once", r.created)
+			}
+			for _, path := range r.removed {
+				if path == entrypointIncomplete {
+					t.Errorf("a failed install removed the incomplete marker: removed %v", r.removed)
+				}
+			}
+			if n := r.execCalls(); n != 0 {
+				t.Errorf("recorded %d daemon exec argv, want none", n)
+			}
+		})
+	}
+}
+
+// A good install whose marker cannot be removed refuses: the next start would
+// refuse on the marker anyway, and starting a daemon beside it is not the state
+// the marker allows.
+func TestContainerEntrypointMarkerRemovalFailureAfterAGoodInstallRefuses(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	r.removeErr = errors.New("remove failed")
+	err := runContainerEntrypoint(r.entrypoint())
+	if err == nil || !strings.Contains(err.Error(), config.ScratchInstallIncompleteMarker) {
+		t.Fatalf("error = %v, want a refusal naming the incomplete marker", err)
+	}
+	if n := r.execCalls(); n != 0 {
+		t.Errorf("recorded %d daemon exec argv, want none", n)
+	}
+}
+
+// With the incomplete marker present the entrypoint refuses and runs nothing,
+// whatever mayor/town.json is, whether --scratch-town is given, and however the
+// marker is spelled on disk (a link counts: it is not followed or ignored).
+// Without the marker a good town.json execs the daemon.
+func TestContainerEntrypointIncompleteMarkerDecides(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		rig     func() *entrypointRig
+		marker  entryKind // what Lstat finds at the incomplete marker
+		wantRun bool      // the daemon is exec'd
+	}{
+		{"marker with a good town.json refuses", townRig, entryRegular, false},
+		{"symlinked marker with a good town.json refuses", townRig, entryOther, false},
+		{"marker with the scratch flag and no town.json refuses", scratchRig, entryRegular, false},
+		{"no marker with a good town.json execs", townRig, entryAbsent, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := tc.rig()
+			r.kind[entrypointIncomplete] = tc.marker
+			err := runContainerEntrypoint(r.entrypoint())
+			if tc.wantRun {
+				if err != nil {
+					t.Fatalf("runContainerEntrypoint: %v", err)
+				}
+				if n := r.execCalls(); n != 1 {
+					t.Errorf("recorded %d daemon exec argv, want 1", n)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), config.ScratchInstallIncompleteMarker) {
+				t.Fatalf("error = %v, want a refusal naming the incomplete marker", err)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("a refusal ran %v, want nothing", r.calls)
+			}
+		})
+	}
+}
+
+// A read of the marker that fails refuses: a marker that cannot be ruled out
+// counts as present.
+func TestContainerEntrypointUnreadableIncompleteMarkerRefuses(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	r.brokenPath = entrypointIncomplete
+	if err := runContainerEntrypoint(r.entrypoint()); err == nil {
+		t.Fatal("expected a refusal when the marker cannot be read")
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("a refusal ran %v, want nothing", r.calls)
+	}
+}
+
+// The real exclusive create makes an empty file, and refuses a path that
+// exists, a dangling symbolic link included. A t.TempDir only.
+func TestEntrypointCreateExclusive(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "marker")
+	if err := entrypointCreateExclusive(path); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if err := entrypointCreateExclusive(path); err == nil {
+		t.Error("second create succeeded over an existing file")
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(filepath.Join(dir, "absent"), link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := entrypointCreateExclusive(link); err == nil {
+		t.Error("create succeeded through a dangling symbolic link")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "absent")); err == nil {
+		t.Error("create followed the link and made its target")
+	}
+}
+
+// The root command's persistent pre-run runs before this command, and the
+// town-running gate in it refuses a town whose config does not parse, which a
+// scratch town does not yet have. The gate is keyed by the exact command path
+// (bdHandshakeGatedCommands), and this command is not in it, so the gate does
+// not run here. The other hooks it runs are read-only or write outside the town
+// root: the usage log goes to gtDataDir, the registry loads only from a town
+// found by town.json, and the branch check needs a .git the scratch directory
+// does not have until the install runs.
+func TestContainerEntrypointIsNotGatedByTheTownHandshake(t *testing.T) {
+	t.Parallel()
+	if requiresBDHandshake(daemonContainerEntrypointCmd) {
+		t.Fatalf("%q is in bdHandshakeGatedCommands: the gate would refuse the scratch town before the entrypoint ran",
+			daemonContainerEntrypointCmd.CommandPath())
+	}
+	if got, want := daemonContainerEntrypointCmd.CommandPath(), "gt daemon container-entrypoint"; got != want {
+		t.Errorf("command path = %q, want %q", got, want)
 	}
 }
 

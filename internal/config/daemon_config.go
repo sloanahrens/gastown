@@ -102,6 +102,14 @@ const (
 	// root. Its presence proves the directory is the scratch town, and it is
 	// visible from the host (gt-qpeei.26).
 	ScratchTownMarker = ".gt-scratch-town"
+
+	// ScratchInstallIncompleteMarker is the file the entrypoint creates in the
+	// scratch town root, exclusively, before it runs the install, and removes
+	// only after the install succeeded. While it exists the entrypoint starts
+	// no daemon, whatever mayor/town.json looks like, so an install that failed
+	// and could not be cleaned up never becomes a town the next start runs
+	// (gt-qpeei.26).
+	ScratchInstallIncompleteMarker = ".gt-install-incomplete"
 )
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town

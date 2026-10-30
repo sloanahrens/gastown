@@ -50,9 +50,16 @@ turns into a fresh town:
   - mayor/town.json absent, --scratch-town given: run 'gt install <townRoot>
     --git' once, only when the town root is a mount point, holds the scratch
     marker that internal/config defines and the scratch runbook creates, and
-    holds nothing else; then exec 'gt daemon run'. If that install fails, the
-    entries it wrote are removed, the marker is kept, and the command refuses.
-    Otherwise refuse.
+    holds nothing else; then exec 'gt daemon run'. Otherwise refuse.
+  - an install-incomplete marker (see below) present, whatever else is there:
+    refuse.
+
+The scratch install is bracketed by an install-incomplete marker, created
+before the install starts and removed only after it succeeded. If the install
+fails, the entries it wrote are removed on a best effort, the scratch marker is
+kept, the incomplete marker stays, and the command refuses; so does every later
+start, until the operator removes the incomplete marker (and anything the
+install left) from the host side of the scratch directory.
 
 Every check runs before the first command, so a refusal runs nothing.`,
 		Hidden: true,
@@ -80,6 +87,7 @@ type containerEntrypoint struct {
 	dirNames  func(dir string) ([]string, error)
 	lstat     func(path string) (entryKind, error) // what sits at mayor/town.json, a link not followed
 	exists    func(path string) (bool, error)
+	create    func(path string) error // creates an empty file, failing if the path exists (O_EXCL)
 	remove    func(path string) error // removes an entry and what it holds
 	scratch   bool                    // --scratch-town: the scratch project asked for a scratch town
 }
@@ -105,6 +113,7 @@ func runDaemonContainerEntrypoint(scratch bool) error {
 		dirNames:  listDirNames,
 		lstat:     entrypointLstat,
 		exists:    entrypointPathExists,
+		create:    entrypointCreateExclusive,
 		remove:    os.RemoveAll,
 		scratch:   scratch,
 	})
@@ -124,6 +133,16 @@ func entrypointLstat(path string) (entryKind, error) {
 	default:
 		return entryOther, nil
 	}
+}
+
+// entrypointCreateExclusive creates an empty file at path and fails if anything,
+// a symbolic link included, is already there.
+func entrypointCreateExclusive(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // readTextFile returns the text of one file.
@@ -174,6 +193,12 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	if err != nil {
 		return fmt.Errorf("find the gt binary to exec: %w; nothing was started", err)
 	}
+	// First, before town.json is looked at: an earlier install that did not
+	// finish leaves the town unstartable, even when its cleanup failed and a
+	// regular mayor/town.json is still on disk.
+	if err := e.refuseIncompleteInstall(townRoot); err != nil {
+		return err
+	}
 	install, err := e.decideStart(townRoot)
 	if err != nil {
 		return err
@@ -182,8 +207,8 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 		return err
 	}
 	if install {
-		if err := e.run([]string{self, "install", townRoot, "--git"}); err != nil {
-			return e.undoScratchInstall(townRoot, fmt.Errorf("install the scratch town at %s: %w", townRoot, err))
+		if err := e.installScratchTown(self, townRoot); err != nil {
+			return err
 		}
 	}
 	if err := e.exec([]string{self, "daemon", "run"}); err != nil {
@@ -192,26 +217,69 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	return nil
 }
 
-// undoScratchInstall removes every entry the failed install left in the scratch
-// town except the marker. The directory held only the marker before the install,
-// so everything else is the install's own work. Without this, the next start
-// would find a half-written mayor/town.json and exec it without repair.
+// refuseIncompleteInstall refuses when the install-incomplete marker is there.
+// It is looked at with Lstat, so a link planted at that name counts as the
+// marker rather than being followed or ignored, and a read that fails refuses:
+// a marker that cannot be ruled out is treated as present.
+func (e containerEntrypoint) refuseIncompleteInstall(townRoot string) error {
+	path := filepath.Join(townRoot, config.ScratchInstallIncompleteMarker)
+	kind, err := e.lstat(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w; nothing was started", path, err)
+	}
+	if kind == entryAbsent {
+		return nil
+	}
+	return fmt.Errorf("%s exists: an earlier scratch install did not finish, so the town under %s is not safe to start; "+
+		"nothing was started. Remove %s and every entry but %s from the scratch directory on the host, then start again",
+		path, townRoot, config.ScratchInstallIncompleteMarker, config.ScratchTownMarker)
+}
+
+// installScratchTown runs the one install a scratch container may run, between
+// the install-incomplete marker's creation and its removal. The marker is
+// created first and exclusively, so an install never starts without it, and is
+// removed only after the install succeeded, so a failure of any kind, the
+// cleanup's included, leaves a town the next start refuses. The marker stays
+// after every failed install and only the operator clears it; a failure to
+// remove it after a good install refuses too, for the same reason.
+func (e containerEntrypoint) installScratchTown(self, townRoot string) error {
+	incomplete := filepath.Join(townRoot, config.ScratchInstallIncompleteMarker)
+	if err := e.create(incomplete); err != nil {
+		return fmt.Errorf("create the %s marker under %s: %w; nothing was installed or started",
+			config.ScratchInstallIncompleteMarker, townRoot, err)
+	}
+	if err := e.run([]string{self, "install", townRoot, "--git"}); err != nil {
+		return e.undoScratchInstall(townRoot, fmt.Errorf("install the scratch town at %s: %w", townRoot, err))
+	}
+	if err := e.remove(incomplete); err != nil {
+		return fmt.Errorf("the scratch install at %s succeeded, but its %s marker could not be removed: %w; "+
+			"the next start refuses until it is removed, and nothing was started", townRoot, config.ScratchInstallIncompleteMarker, err)
+	}
+	return nil
+}
+
+// undoScratchInstall removes, on a best effort, every entry the failed install
+// left in the scratch town except the two markers. The directory held only the
+// scratch marker before the install, so everything else is the install's own
+// work. The incomplete marker stays whatever happens here, so a removal that
+// fails still leaves a town the next start refuses.
 func (e containerEntrypoint) undoScratchInstall(townRoot string, cause error) error {
 	names, err := e.dirNames(townRoot)
 	if err != nil {
-		return fmt.Errorf("%w; and could not list %s to remove the partial install: %v; remove every entry but %s by hand before the next start",
-			cause, townRoot, err, config.ScratchTownMarker)
+		return fmt.Errorf("%w; and could not list %s to remove the partial install: %v; the %s marker stays, so the next start refuses; remove every entry but %s by hand",
+			cause, townRoot, err, config.ScratchInstallIncompleteMarker, config.ScratchTownMarker)
 	}
 	for _, name := range names {
-		if name == config.ScratchTownMarker {
+		if name == config.ScratchTownMarker || name == config.ScratchInstallIncompleteMarker {
 			continue
 		}
 		if err := e.remove(filepath.Join(townRoot, name)); err != nil {
-			return fmt.Errorf("%w; and could not remove %s from the partial install: %v; remove every entry but %s by hand before the next start",
-				cause, name, err, config.ScratchTownMarker)
+			return fmt.Errorf("%w; and could not remove %s from the partial install: %v; the %s marker stays, so the next start refuses; remove every entry but %s by hand",
+				cause, name, err, config.ScratchInstallIncompleteMarker, config.ScratchTownMarker)
 		}
 	}
-	return fmt.Errorf("%w; the partial install was removed and nothing was started", cause)
+	return fmt.Errorf("%w; the partial install was removed, the %s marker stays and the next start refuses until it is removed, and nothing was started",
+		cause, config.ScratchInstallIncompleteMarker)
 }
 
 // decideStart says whether this start installs the town first, or returns the
