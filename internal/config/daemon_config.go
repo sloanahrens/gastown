@@ -119,6 +119,11 @@ const (
 	// and could not be cleaned up never becomes a town the next start runs
 	// (gt-qpeei.26).
 	ScratchInstallIncompleteMarker = ".gt-install-incomplete"
+
+	// ScratchTownFlag is the entrypoint flag, without its dashes, that asks for
+	// the scratch town's one install; the entrypoint registers it and the
+	// scratch render passes it, so both read one string (gt-qpeei.26).
+	ScratchTownFlag = "scratch-town"
 )
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town

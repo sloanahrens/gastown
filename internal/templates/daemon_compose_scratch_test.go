@@ -11,9 +11,10 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
-// scratchSpec is the scratch project's daemon. Its image and DoltHost are the
-// two fields the renderer refuses when empty or loopback, so the golden built
-// from it is a render a real scratch start could apply.
+// scratchSpec is the scratch project's daemon. Its image is one of the fields
+// the renderer refuses when empty, and its DoltHost is the scratch Dolt service
+// the renderer requires, so the golden built from it is a render a real scratch
+// start could apply.
 func scratchSpec() templates.ComposeSpec {
 	return templates.ComposeSpec{
 		Project:          "gt-scratch",
@@ -21,7 +22,7 @@ func scratchSpec() templates.ComposeSpec {
 		Image:            "gt-daemon:4f2a1c9",
 		TownRoot:         "/towns/scratch",
 		StopGrace:        templates.MinimumStopGrace,
-		DoltHost:         "host.docker.internal",
+		DoltHost:         templates.ScratchDoltService,
 		Scratch:          true,
 		ScratchDoltImage: templates.DoltServerImage,
 		LiveTownRoot:     liveSpec().TownRoot,
@@ -41,7 +42,7 @@ func TestRenderDaemonCompose_ScratchGolden(t *testing.T) {
 	}
 }
 
-// Each row is one of the three live-identity checks, plus the two fields a
+// Each row is one of the three live-identity checks, the live Dolt, or a field a
 // scratch render cannot do without. Removing any check turns its row red.
 func TestRenderDaemonCompose_ScratchRefusesTheLiveIdentity(t *testing.T) {
 	t.Parallel()
@@ -55,9 +56,14 @@ func TestRenderDaemonCompose_ScratchRefusesTheLiveIdentity(t *testing.T) {
 		// macOS volumes are case-insensitive by default, so the same directory
 		// can be spelled in another case.
 		{"live town root in other letter case", func(s *templates.ComposeSpec) { s.TownRoot = strings.ToUpper(live.TownRoot) }},
+		{"directory under the live town root", func(s *templates.ComposeSpec) { s.TownRoot = live.TownRoot + "/scratch" }},
 		{"live container name", func(s *templates.ComposeSpec) { s.ContainerName = config.DefaultContainerName }},
 		{"live compose project", func(s *templates.ComposeSpec) { s.Project = config.DefaultComposeProject }},
+		{"live Dolt host", func(s *templates.ComposeSpec) { s.DoltHost = live.DoltHost }},
+		{"empty Dolt host", func(s *templates.ComposeSpec) { s.DoltHost = "" }},
+		{"another Dolt host", func(s *templates.ComposeSpec) { s.DoltHost = "other-dolt" }},
 		{"no live town root to check against", func(s *templates.ComposeSpec) { s.LiveTownRoot = "" }},
+		{"live town root not absolute", func(s *templates.ComposeSpec) { s.LiveTownRoot = "live" }},
 		{"no scratch Dolt image", func(s *templates.ComposeSpec) { s.ScratchDoltImage = "" }},
 	}
 	for _, tt := range tests {
@@ -72,15 +78,72 @@ func TestRenderDaemonCompose_ScratchRefusesTheLiveIdentity(t *testing.T) {
 	}
 }
 
+// A scratch root reached through a symlink to the live root, or under one, names
+// the live town under another path, so it is refused too. The directory under
+// the link does not exist yet, which is the case a scratch install starts from.
+// Removing the resolved-path comparison turns the link rows red.
+func TestRenderDaemonCompose_ScratchRefusesTheLiveRootThroughALink(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	live := filepath.Join(base, "live")
+	if err := os.Mkdir(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(live, link); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		liveRoot string
+		scratch  string
+	}{
+		{"a symlink to the live root", live, link},
+		{"a directory under a symlink to the live root", live, filepath.Join(link, "scratch")},
+		{"the live root reached through a symlink", link, live},
+		{"a directory under the live root", live, filepath.Join(live, "scratch")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			spec := scratchSpec()
+			spec.LiveTownRoot = tt.liveRoot
+			spec.TownRoot = tt.scratch
+			if _, err := templates.RenderDaemonCompose(spec); err == nil {
+				t.Errorf("scratch TownRoot %q with live root %q rendered, want a refusal", tt.scratch, tt.liveRoot)
+			}
+		})
+	}
+}
+
+// The control for the link rows: a scratch root beside the live root, reached
+// through a link that points elsewhere, is not refused.
+func TestRenderDaemonCompose_ScratchAcceptsARootBesideTheLiveRoot(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	live := filepath.Join(base, "live")
+	if err := os.Mkdir(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := scratchSpec()
+	spec.LiveTownRoot = live
+	spec.TownRoot = filepath.Join(base, "scratch")
+	if _, err := templates.RenderDaemonCompose(spec); err != nil {
+		t.Errorf("scratch TownRoot beside the live root = %v, want a render", err)
+	}
+}
+
 // liveIdentifiers are the names the live render declares or joins, which a
 // scratch render must not carry anywhere in its text: its container name, its
-// project, its town root and every volume and network it names.
+// project, its town root, its engine, its socket and Dolt host, and every
+// volume and network it names.
 func liveIdentifiers(t *testing.T) []string {
 	t.Helper()
 	live := liveSpec()
 	_, f := render(t, live)
 
-	names := []string{live.ContainerName, live.Project, live.TownRoot}
+	names := []string{live.ContainerName, live.Project, live.TownRoot, live.DoltHost, engineName}
+	names = append(names, f.Services["daemon"].Environment["DOCKER_HOST"])
 	for v := range f.Volumes {
 		names = append(names, v)
 	}
@@ -110,25 +173,63 @@ func TestRenderDaemonCompose_ScratchSharesNoNameWithTheLiveRender(t *testing.T) 
 	}
 }
 
-// The scratch daemon takes the --scratch-town flag the container entrypoint
-// reads. The live daemon passes nothing, so a live start never asks for an
-// install. The operator note about a failed install is in the scratch file.
+// The scratch daemon's command is the entrypoint's flag, built from the one
+// constant the entrypoint registers, so the two cannot drift apart. The live
+// daemon passes nothing, so a live start never asks for an install.
 func TestRenderDaemonCompose_ScratchPassesTheScratchTownFlagAndTheLiveOneDoesNot(t *testing.T) {
 	t.Parallel()
-	scratchOut, scratch := render(t, scratchSpec())
-	if got := scratch.Services["daemon"].Command; !slices.Equal(got, []string{"--scratch-town"}) {
-		t.Errorf("scratch daemon command = %q, want [--scratch-town]", got)
-	}
-	if !strings.Contains(scratchOut, ".gt-install-incomplete") {
-		t.Errorf("scratch render does not tell the operator how to clear a failed install (.gt-install-incomplete)")
+	_, scratch := render(t, scratchSpec())
+	if got, want := scratch.Services["daemon"].Command, []string{"--" + config.ScratchTownFlag}; !slices.Equal(got, want) {
+		t.Errorf("scratch daemon command = %q, want %q", got, want)
 	}
 
 	liveOut, live := render(t, liveSpec())
 	if got := live.Services["daemon"].Command; len(got) != 0 {
 		t.Errorf("live daemon command = %q, want none", got)
 	}
-	if strings.Contains(liveOut, "--scratch-town") {
+	if strings.Contains(liveOut, config.ScratchTownFlag) {
 		t.Errorf("live render asks for a scratch install:\n%s", liveOut)
+	}
+}
+
+// The operator note about a failed install is written once, in Go, and rendered
+// as YAML comments. Each line must appear exactly once as a whole line, so a
+// second copy or a reworded one fails here.
+func TestRenderDaemonCompose_ScratchOperatorNoteAppearsOnceAsWholeLines(t *testing.T) {
+	t.Parallel()
+	out, _ := render(t, scratchSpec())
+	for _, line := range []string{
+		"    # After a failed scratch install the entrypoint refuses every start until",
+		"    # the operator removes .gt-install-incomplete and what the install left,",
+		"    # from the host side of the scratch directory.",
+	} {
+		if n := strings.Count(out, "\n"+line+"\n"); n != 1 {
+			t.Errorf("operator note line %q appears %d times in the scratch render, want once:\n%s", line, n, out)
+		}
+	}
+}
+
+// The scratch daemon starts only once the scratch Dolt server accepts a
+// connection, the same wait the engine's health gives it (gt-3bp5q). The live
+// render has no scratch service and no such wait.
+func TestRenderDaemonCompose_ScratchDaemonWaitsForItsDoltServer(t *testing.T) {
+	t.Parallel()
+	_, f := render(t, scratchSpec())
+
+	dep, ok := f.Services["daemon"].DependsOn[templates.ScratchDoltService]
+	if !ok || dep.Condition != "service_healthy" {
+		t.Errorf("daemon depends_on = %v, want %s with condition service_healthy", f.Services["daemon"].DependsOn, templates.ScratchDoltService)
+	}
+	if hc := f.Services[templates.ScratchDoltService].Healthcheck; hc == nil || len(hc.Test) == 0 {
+		t.Errorf("%s has no healthcheck, so service_healthy never holds the daemon", templates.ScratchDoltService)
+	}
+
+	_, live := render(t, liveSpec())
+	if _, ok := live.Services["daemon"].DependsOn[templates.ScratchDoltService]; ok {
+		t.Errorf("live daemon depends_on the scratch Dolt server")
+	}
+	if _, ok := live.Services[templates.ScratchDoltService]; ok {
+		t.Errorf("live render declares the scratch Dolt server")
 	}
 }
 

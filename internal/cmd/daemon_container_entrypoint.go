@@ -34,10 +34,6 @@ const (
 	containerOMTokenFileFlag = "om-token-file" //nolint:gosec // a flag name, not a credential
 	// omTokenEnv is the variable the claude CLI reads a subscription token from.
 	omTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // an environment variable name, not a credential
-
-	// containerScratchTownFlag lets the scratch compose project ask for the
-	// one install a container may run.
-	containerScratchTownFlag = "scratch-town"
 )
 
 // entrypointFlags are the values the command's flags parsed.
@@ -90,7 +86,7 @@ Every check runs before the first command, so a refusal runs nothing.`,
 			return run(flags)
 		},
 	}
-	cmd.Flags().BoolVar(&flags.scratch, containerScratchTownFlag, false,
+	cmd.Flags().BoolVar(&flags.scratch, config.ScratchTownFlag, false,
 		"Install a town at the town root when it holds only the scratch marker")
 	cmd.Flags().StringVar(&flags.omTokenFile, containerOMTokenFileFlag, "",
 		"Read the om subscription token from this file and give it to the daemon; the file's mode is not checked")

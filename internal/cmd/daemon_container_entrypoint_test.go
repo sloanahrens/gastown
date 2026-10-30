@@ -177,7 +177,7 @@ func TestContainerEntrypointScratchFlagIsWired(t *testing.T) {
 		want bool
 	}{
 		{"live project passes no command", []string{}, false},
-		{"scratch project passes the flag", []string{"--scratch-town"}, true},
+		{"scratch project passes the flag", []string{"--" + config.ScratchTownFlag}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

@@ -6,12 +6,14 @@ services:
     restart: unless-stopped
     stop_grace_period: "30s"
     working_dir: "/towns/scratch"
-    # After a failed scratch install every start refuses until the operator
-    # removes .gt-install-incomplete and what the install left, from the host
-    # side of the scratch directory.
+    # After a failed scratch install the entrypoint refuses every start until
+    # the operator removes .gt-install-incomplete and what the install left,
+    # from the host side of the scratch directory.
     command: ["--scratch-town"]
     depends_on:
       scratch-dind:
+        condition: service_healthy
+      scratch-dolt:
         condition: service_healthy
     environment:
       DOCKER_HOST: "tcp://scratch-dind:2375"
@@ -48,6 +50,12 @@ services:
   scratch-dolt:
     image: "dolthub/dolt-sql-server:2.3.2"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3306"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
     volumes:
       - type: volume
         source: scratch_dolt_data
