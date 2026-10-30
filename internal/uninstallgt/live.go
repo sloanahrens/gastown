@@ -1,6 +1,7 @@
 package uninstallgt
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,20 +20,23 @@ type Town struct {
 	DaemonRunning bool
 }
 
-// DetectTown returns the town a run belongs to: $GT_TOWN_ROOT when it names a
-// town, else the outermost town above selfDir, else the conventional $HOME/gt
-// (gt-bqzoq).
+// DetectTown returns the town a run belongs to: $GT_TOWN_ROOT when it carries
+// the town marker, else the outermost town above selfDir, else the
+// conventional $HOME/gt (gt-bqzoq).
 //
-// selfDir is the running binary's own directory, the only tie an install
-// outside the town has to one, and a $GT_TOWN_ROOT without the town marker is
-// no town rather than an error, so a caller can point a run at a scratch tree.
-func DetectTown(getenv func(string) string, selfDir string, signal0 func(pid int) bool) Town {
+// A set $GT_TOWN_ROOT stands in for the search above selfDir entirely, so a
+// value without the marker — absent, a file, an ordinary directory — is no
+// error but a run pointed at a scratch tree; it then falls through to the same
+// $HOME/gt fallback as a host with no value at all, and that fallback counts
+// only when its own marker is there. selfDir is the running binary's own
+// directory, the only tie an install outside the town has to one.
+func DetectTown(getenv func(string) string, selfDir string, signal0 func(pid int) error) Town {
 	return detectTown(getenv, selfDir, installer.IsTownRoot, signal0)
 }
 
 // detectTown is DetectTown with the town marker check injected, so a test reads
 // a tree it built rather than whatever sits above its temporary directory.
-func detectTown(getenv func(string) string, selfDir string, isTown func(string) bool, signal0 func(pid int) bool) Town {
+func detectTown(getenv func(string) string, selfDir string, isTown func(string) bool, signal0 func(pid int) error) Town {
 	town := ""
 	if named := getenv("GT_TOWN_ROOT"); named != "" {
 		if named = filepath.Clean(named); isTown(named) {
@@ -53,45 +57,58 @@ func detectTown(getenv func(string) string, selfDir string, isTown func(string) 
 
 // DaemonRunning reports whether town's daemon is alive, asking signal0 about
 // the pid its pid file names; no town, no pid file or no pid is no daemon.
-func DaemonRunning(town string, signal0 func(pid int) bool) bool {
+func DaemonRunning(town string, signal0 func(pid int) error) bool {
 	if town == "" || signal0 == nil {
 		return false
 	}
+	// daemonPID already answers 0 for anything unusable, so a probe is made
+	// only for a pid the check may signal.
 	pid := daemonPID(town)
-	return pid > 0 && signal0(pid)
+	if pid == 0 {
+		return false
+	}
+	return probeAlive(signal0(pid))
 }
 
 // daemonPID reads the pid an install's daemon writes as the first line of its
-// pid file ("PID\nNONCE", internal/daemon/pidfile.go). A pid is never 0 or
-// negative, and a signal-0 probe of one of those names the caller's own
-// process group, so anything that is not a positive pid reads as no daemon.
+// pid file ("PID\nNONCE", internal/daemon/pidfile.go). The line is trimmed and
+// parsed whole: a pid with a sign, any other character, or a value of 0 or
+// less is not a pid this check may probe, so it reads as no daemon. Probing 0
+// or a negative would name the caller's own process group rather than a
+// daemon.
 func daemonPID(town string) int {
 	data, err := os.ReadFile(filepath.Join(town, "daemon", "daemon.pid"))
 	if err != nil {
 		return 0
 	}
 	line, _, _ := strings.Cut(string(data), "\n")
-	digits := strings.Map(func(r rune) rune {
-		if r >= '0' && r <= '9' {
-			return r
-		}
-		return -1
-	}, line)
-	pid, err := strconv.Atoi(digits)
-	if err != nil {
+	pid, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil || pid <= 0 {
 		return 0
 	}
 	return pid
 }
 
-// Signal0 reports whether a process named by pid exists: the read-only probe
-// the daemon check makes, which cannot disturb the process.
-func Signal0(pid int) bool {
+// Signal0 returns the error a signal-0 probe of pid reports: nil when the
+// process exists, so the caller tells "exists" from "gone" itself. The probe
+// is read-only and cannot disturb the process it names.
+func Signal0(pid int) error {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return false
+		return err
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return proc.Signal(syscall.Signal(0))
+}
+
+// probeAlive maps a signal-0 probe's error to liveness, and only "no such
+// process" reads as gone: EPERM says the process exists under another user,
+// and any other error leaves liveness unreadable, so both count as running. A
+// daemon the check cannot rule out must not make the live install look safe.
+func probeAlive(err error) bool {
+	if err == nil {
+		return true
+	}
+	return !errors.Is(err, syscall.ESRCH) && !errors.Is(err, os.ErrProcessDone)
 }
 
 // CheckLive returns the notice a forced run prints, or the refusal it returns

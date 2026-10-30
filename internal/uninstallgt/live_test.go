@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -53,7 +54,7 @@ func mustWrite(t *testing.T, path, content string) {
 }
 
 // neverSignals is the Signal0 seam for a case that expects no probe.
-func neverSignals(int) bool { return false }
+func neverSignals(int) error { return nil }
 
 // neverTown is a marker check for a tree with no town in it.
 func neverTown(string) bool { return false }
@@ -137,6 +138,61 @@ func TestHomeGtFallbackIsATown(t *testing.T) {
 	}
 }
 
+// TestInvalidTownRootFallsBackToHomeGt pins what a set-but-unusable
+// $GT_TOWN_ROOT does: it suppresses the search above the binary, and the run
+// then finds the conventional town in HOME exactly as a host with no value at
+// all does. A value pointing at nothing must not leave the run townless while
+// a town answers for the host.
+func TestInvalidTownRootFallsBackToHomeGt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// value builds the unusable $GT_TOWN_ROOT from the case's temp dir.
+		value func(t *testing.T, base string) string
+	}{
+		{
+			name: "a path that does not exist",
+			value: func(t *testing.T, base string) string {
+				return filepath.Join(base, "absent")
+			},
+		},
+		{
+			name: "an ordinary directory with no marker",
+			value: func(t *testing.T, base string) string {
+				dir := filepath.Join(base, "not-a-town")
+				mustMkdir(t, dir)
+				return dir
+			},
+		},
+		{
+			name: "a file rather than a directory",
+			value: func(t *testing.T, base string) string {
+				file := filepath.Join(base, "a-file")
+				mustWrite(t, file, "not a town\n")
+				return file
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHost(t)
+			conventional := filepath.Join(h.home, "gt")
+			mustMkdir(t, filepath.Join(conventional, "mayor"))
+			mustWrite(t, filepath.Join(conventional, "mayor", "town.json"), "{}\n")
+			named := tt.value(t, filepath.Dir(h.home))
+
+			town := detectTown(vars(map[string]string{"GT_TOWN_ROOT": named, "HOME": h.home}),
+				filepath.Join(filepath.Dir(h.home), "clone", "bin"),
+				func(dir string) bool { return dir == conventional }, neverSignals)
+
+			if town.Root != conventional {
+				t.Fatalf("detectTown(GT_TOWN_ROOT=%q) town = %q, want the HOME/gt fallback %q",
+					named, town.Root, conventional)
+			}
+		})
+	}
+}
+
 func TestNoTownMeansNoRefusal(t *testing.T) {
 	t.Parallel()
 	h := newHost(t)
@@ -166,14 +222,18 @@ func TestDaemonRunningProbesThePidFile(t *testing.T) {
 		want  bool
 		asked int // 0: the probe must not be made
 	}{
-		{name: "an alive pid", pid: "4242\nnonce\n", alive: true, want: true, asked: 4242},
-		{name: "a pid that is gone", pid: "4242\nnonce\n", alive: false, want: false, asked: 4242},
+		{name: "the pid alone", pid: "123\n", alive: true, want: true, asked: 123},
+		{name: "the daemon's pid and nonce lines", pid: "4242\nnonce\n", alive: true, want: true, asked: 4242},
 		{name: "the first line is the pid, not the nonce", pid: "4242\n5150\n", alive: true, want: true, asked: 4242},
-		{name: "digits among other characters", pid: "pid=4242\n\n", alive: true, want: true, asked: 4242},
-		{name: "no pid file", pid: "", alive: true, want: false, asked: 0},
-		{name: "an empty pid file", pid: "\nnonce\n", alive: true, want: false, asked: 0},
-		{name: "a pid of 0 names the process group", pid: "0\nnonce\n", alive: true, want: false, asked: 0},
-		{name: "no pid in the file", pid: "not-a-pid\n", alive: true, want: false, asked: 0},
+		{name: "a pid padded with spaces and a newline", pid: " 123\n\n", alive: true, want: true, asked: 123},
+		{name: "a pid that is gone", pid: "4242\nnonce\n", alive: false, want: false, asked: 4242},
+		{name: "a negative pid", pid: "-5\n", alive: true, want: false},
+		{name: "a pid of 0 names the process group", pid: "0\n", alive: true, want: false},
+		{name: "a pid with trailing characters", pid: "12a\n", alive: true, want: false},
+		{name: "a float-shaped pid", pid: "1e3\n", alive: true, want: false},
+		{name: "no pid file", pid: "", alive: true, want: false},
+		{name: "an empty pid file", pid: "\nnonce\n", alive: true, want: false},
+		{name: "no pid in the file", pid: "not-a-pid\n", alive: true, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -182,9 +242,12 @@ func TestDaemonRunningProbesThePidFile(t *testing.T) {
 				h.daemon(t, tt.pid)
 			}
 			var asked []int
-			signal0 := func(pid int) bool {
+			signal0 := func(pid int) error {
 				asked = append(asked, pid)
-				return tt.alive
+				if tt.alive {
+					return nil
+				}
+				return syscall.ESRCH
 			}
 
 			if got := DaemonRunning(h.town, signal0); got != tt.want {
@@ -201,6 +264,37 @@ func TestDaemonRunningProbesThePidFile(t *testing.T) {
 	}
 }
 
+// TestDaemonRunningReadsTheProbeError pins the mapping from a signal-0 probe's
+// error to liveness: only "no such process" means gone, because a daemon this
+// check cannot rule out must not make the live install look safe.
+func TestDaemonRunningReadsTheProbeError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		probe error
+		want  bool
+	}{
+		{name: "the process exists", probe: nil, want: true},
+		{name: "another user's process answers EPERM", probe: syscall.EPERM, want: true},
+		{name: "EPERM wrapped in a syscall error", probe: os.NewSyscallError("signal", syscall.EPERM), want: true},
+		{name: "no such process answers ESRCH", probe: syscall.ESRCH, want: false},
+		{name: "ESRCH wrapped in a syscall error", probe: os.NewSyscallError("signal", syscall.ESRCH), want: false},
+		{name: "a released process handle is gone", probe: os.ErrProcessDone, want: false},
+		{name: "an unreadable probe counts as running", probe: errors.New("boom"), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHost(t)
+			h.daemon(t, "4242\nnonce\n")
+			signal0 := func(pid int) error { return tt.probe }
+
+			if got := DaemonRunning(h.town, signal0); got != tt.want {
+				t.Errorf("DaemonRunning(%q) with a probe answering %v = %t, want %t", h.town, tt.probe, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDaemonRunningHintOnlyWhenRunning(t *testing.T) {
 	t.Parallel()
 	h := newHost(t)
@@ -208,7 +302,12 @@ func TestDaemonRunningHintOnlyWhenRunning(t *testing.T) {
 	getenv := vars(map[string]string{"GT_TOWN_ROOT": h.town, "HOME": h.home})
 	isTown := func(dir string) bool { return dir == h.town }
 
-	running := detectTown(getenv, "", isTown, func(pid int) bool { return pid == 4242 })
+	running := detectTown(getenv, "", isTown, func(pid int) error {
+		if pid == 4242 {
+			return nil
+		}
+		return syscall.ESRCH
+	})
 	if !running.DaemonRunning {
 		t.Fatalf("detectTown = %+v, want a running daemon", running)
 	}
@@ -221,7 +320,7 @@ func TestDaemonRunningHintOnlyWhenRunning(t *testing.T) {
 		t.Errorf("the refusal of a running town's install = %q, want it to carry %q", refusal.Reason, hint)
 	}
 
-	gone := detectTown(getenv, "", isTown, func(int) bool { return false })
+	gone := detectTown(getenv, "", isTown, func(int) error { return syscall.ESRCH })
 	if gone.DaemonRunning {
 		t.Fatalf("detectTown = %+v, want no running daemon", gone)
 	}
@@ -381,6 +480,10 @@ func TestCanonical(t *testing.T) {
 		{name: "a . inside the path", dir: filepath.Join(dir, "."), want: resolved},
 		{name: "a symlink", dir: link, want: resolved},
 		{
+			// A target the run is about to create cannot be resolved, and a
+			// refusal must still compare it: its cleaned spelling is the only
+			// form an unresolved path has, and it is the same form the live
+			// install's side takes when that is absent too.
 			name: "an absent path keeps its cleaned spelling",
 			dir:  filepath.Join(base, "absent", "bin", "..", "bin"),
 			want: filepath.Join(base, "absent", "bin"),
