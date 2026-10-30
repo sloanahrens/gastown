@@ -227,6 +227,12 @@ type Daemon struct {
 	// record the seats it was asked to end.
 	endSandboxSeat func(rig, name string, landing sandboxSeatLanding) bool
 
+	// rulesCursorAt reads the stamp of the jev_rules battery's cursor (see
+	// readRulesCursor) when set; nil reads it with battery.ReadCursor. A seam
+	// for the unit tier, and for the unreadable cursor a real file need not
+	// produce (gt-381oj).
+	rulesCursorAt func(path string) (time.Time, bool, error)
+
 	// sandboxSeatEndMu guards sandboxSeatEndStopped together with the count
 	// below, so no seat end is added to the wait shutdown joins (see
 	// startSandboxSeatEnd, stopSandboxSeatEnds).
@@ -1994,6 +2000,12 @@ var heartbeatSteps = []heartbeatStep{
 	// branches via git fetch. After merge, remote branches are deleted but local
 	// branches persist indefinitely. This cleans them up periodically.
 	{name: "branch-prune", run: (*Daemon).pruneStaleBranches},
+
+	// Offer every sandbox seat whose end waits for the jev_rules battery to
+	// ask about its submission again, so the seat goes once the ask has
+	// happened or its one-hour window has closed (gt-381oj). Non-lifecycle:
+	// it removes leftovers, and an E-stopped town still wants them gone.
+	{name: "sandbox-seat-ends", run: (*Daemon).retryPendingSandboxSeatEnds},
 
 	// Dispatch scheduled work (capacity-controlled polecat dispatch).
 	// Runs internal/schedulerrun in process; package cmd installs the deps.

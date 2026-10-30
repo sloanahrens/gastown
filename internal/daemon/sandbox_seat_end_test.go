@@ -56,6 +56,10 @@ type seatEndFake struct {
 	removeDeleted bool
 	gwAsked       []string
 	seatFields    beads.AgentFields
+	// cursorAt and cursorErr answer the daemon's jev_rules cursor seam: a zero
+	// cursorAt with no err is a town that has not written a cursor yet.
+	cursorAt  time.Time
+	cursorErr error
 }
 
 func newSeatEndFake(t *testing.T) *seatEndFake {
@@ -73,6 +77,15 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 	}
 	f.agentBead = beads.AgentBeadIDFor(constants.RolePolecat, endRig, endPolecat, town)
 	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+	d.rulesCursorAt = func(string) (time.Time, bool, error) {
+		if f.cursorErr != nil {
+			return time.Time{}, false, f.cursorErr
+		}
+		if f.cursorAt.IsZero() {
+			return time.Time{}, false, nil
+		}
+		return f.cursorAt, true, nil
+	}
 	f.host = &patrolScanHost{
 		d:                 d,
 		openRecoveryBeads: func([]string) beads.Client { return f.agentDB },
@@ -98,6 +111,16 @@ func (f *seatEndFake) seedAgent() {
 		ID: f.agentBead, Title: f.agentBead, Labels: []string{"gt:agent"}, Priority: -1,
 		Description: beads.FormatAgentDescription(f.agentBead, &f.seatFields),
 	}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// setAgent rewrites the seat's agent bead from f.seatFields, so a test can
+// change a fact between two passes of the end.
+func (f *seatEndFake) setAgent() {
+	f.t.Helper()
+	desc := beads.FormatAgentDescription(f.agentBead, &f.seatFields)
+	if err := f.agentDB.Update(f.agentBead, beads.UpdateOptions{Description: &desc}); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -539,6 +562,9 @@ func TestSandboxSeatEndKeepReasons(t *testing.T) {
 		{"missing status", func(e *sandboxSeatEnd) { e.CleanupStatus = "" }, "<missing>", false},
 		{"push failed", func(e *sandboxSeatEnd) { e.PushFailed = true }, "push_failed=true", false},
 		{"rules ask pending", func(e *sandboxSeatEnd) { e.RulesPending = true }, "jev_rules has not yet asked about this submission", false},
+		// The may-go baseline beside it: the seat is landed, clean and retired,
+		// and only an outstanding rules ask holds it.
+		{"the rules ask answered, so the seat may go", func(e *sandboxSeatEnd) { e.RulesPending = false }, "", true},
 		{"unlanded with the rules ask pending", func(e *sandboxSeatEnd) { e.Landed = false; e.RulesPending = true }, "unlanded", false},
 		{"unpushed with the rules ask pending", func(e *sandboxSeatEnd) { e.CleanupStatus = polecat.CleanupUnpushed; e.RulesPending = true }, "has_unpushed", false},
 		{"hook set", func(e *sandboxSeatEnd) { e.HookBead = endBead }, "hook_bead=" + endBead, false},
@@ -552,7 +578,14 @@ func TestSandboxSeatEndKeepReasons(t *testing.T) {
 			t.Parallel()
 			e := finished
 			tt.mut(&e)
-			if why := e.keepReason(); !strings.Contains(why, tt.want) {
+			why := e.keepReason()
+			if tt.empty {
+				if why != "" {
+					t.Errorf("keepReason = %q, want the seat to go", why)
+				}
+				return
+			}
+			if !strings.Contains(why, tt.want) {
 				t.Errorf("keepReason = %q, want it to name %q", why, tt.want)
 			}
 		})
@@ -563,47 +596,61 @@ func TestSandboxSeatEndKeepReasons(t *testing.T) {
 // jev_rules patrol is on, the submission is inside the one-hour window, and the
 // battery's cursor has not reached that submission. Every way of not knowing —
 // the patrol off, no cursor, an unreadable cursor, no submission stamp —
-// leaves the seat to the other facts (gt-381oj).
+// leaves the seat to the other facts (gt-381oj). The cursor is read through
+// the daemon's seam, so the unreadable path is one a test can drive, and it
+// must say so: an unreadable cursor never looks like a clean one.
 func TestSandboxSeatEndRulesPending(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	submitted := now.Add(-10 * time.Minute)
-	at := func(t time.Time) *time.Time { return &t }
+	at := func(t time.Time) (time.Time, bool, error) { return t, true, nil }
 	tests := []struct {
-		name          string
-		patrol        bool
-		submitted     time.Time
-		cursor        *time.Time
-		cursorGarbled bool
-		wantPending   bool
+		name        string
+		patrol      bool
+		submitted   time.Time
+		cursor      func() (time.Time, bool, error)
+		wantPending bool
+		// wantLog is the one line an unreadable cursor must leave; empty means
+		// the measurement must say nothing at all.
+		wantLog string
 	}{
 		{
 			name: "a cursor before the submission is pending", patrol: true, submitted: submitted,
-			cursor: at(submitted.Add(-5 * time.Minute)), wantPending: true,
+			cursor: func() (time.Time, bool, error) { return at(submitted.Add(-5 * time.Minute)) }, wantPending: true,
 		},
 		{
 			name: "a cursor past the submission is not pending", patrol: true, submitted: submitted,
-			cursor: at(submitted.Add(time.Minute)),
+			cursor: func() (time.Time, bool, error) { return at(submitted.Add(time.Minute)) },
 		},
 		{
 			name: "a submission past the window is not pending", patrol: true,
 			submitted: now.Add(-rulesPendingWindow - time.Minute),
-			cursor:    at(now.Add(-rulesPendingWindow - 5*time.Minute)),
+			cursor:    func() (time.Time, bool, error) { return at(now.Add(-rulesPendingWindow - 5*time.Minute)) },
+		},
+		{
+			name: "a future submission is clamped to now and is pending", patrol: true,
+			submitted:   now.Add(2 * time.Hour),
+			cursor:      func() (time.Time, bool, error) { return at(now.Add(-5 * time.Minute)) },
+			wantPending: true,
 		},
 		{
 			name: "a town with the patrol off is not pending", submitted: submitted,
-			cursor: at(submitted.Add(-5 * time.Minute)),
+			cursor: func() (time.Time, bool, error) { return at(submitted.Add(-5 * time.Minute)) },
 		},
 		{
-			name: "a cursor that cannot be read is not pending", patrol: true, submitted: submitted,
-			cursorGarbled: true,
+			name: "a cursor that cannot be read is not pending and says so", patrol: true, submitted: submitted,
+			cursor: func() (time.Time, bool, error) {
+				return time.Time{}, false, errors.New("jev_rules cursor: bad checksum")
+			},
+			wantLog: "jev_rules cursor unreadable: jev_rules cursor: bad checksum; the seat is not held for rules",
 		},
 		{
-			name: "a cursor never written is not pending", patrol: true, submitted: submitted,
+			name: "a cursor never written is not pending and says nothing", patrol: true, submitted: submitted,
+			cursor: func() (time.Time, bool, error) { return time.Time{}, false, nil },
 		},
 		{
 			name: "a submission with no stamp is not pending", patrol: true,
-			cursor: at(submitted.Add(-5 * time.Minute)),
+			cursor: func() (time.Time, bool, error) { return at(submitted.Add(-5 * time.Minute)) },
 		},
 	}
 	for _, tt := range tests {
@@ -612,26 +659,20 @@ func TestSandboxSeatEndRulesPending(t *testing.T) {
 			f := newSeatEndFake(t)
 			f.seedAgent()
 			f.retire(intent.DesiredStop)
+			var logs strings.Builder
 			d := f.host.d
+			d.logger = log.New(&logs, "", 0)
 			d.clock = clockwork.NewFakeClockAt(now)
 			if tt.patrol {
 				d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 					JevRules: &JevRulesConfig{Enabled: true},
 				}}
 			}
-			cursorPath := jevrules.CursorPath(f.town)
-			switch {
-			case tt.cursorGarbled:
-				if err := os.MkdirAll(filepath.Dir(cursorPath), 0o700); err != nil {
-					t.Fatal(err)
+			d.rulesCursorAt = func(path string) (time.Time, bool, error) {
+				if want := jevrules.CursorPath(f.town); path != want {
+					t.Errorf("cursor read at %q, want the rules battery's %q", path, want)
 				}
-				if err := os.WriteFile(cursorPath, []byte("{not a cursor"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			case tt.cursor != nil:
-				if err := battery.WriteCursor(cursorPath, battery.Cursor{Time: *tt.cursor}); err != nil {
-					t.Fatal(err)
-				}
+				return tt.cursor()
 			}
 			landing := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: tt.submitted, Landed: true}
 
@@ -642,6 +683,15 @@ func TestSandboxSeatEndRulesPending(t *testing.T) {
 			}
 			if end.RulesPending != tt.wantPending {
 				t.Errorf("RulesPending = %v, want %v", end.RulesPending, tt.wantPending)
+			}
+			if tt.wantLog != "" {
+				if got := logs.String(); !strings.Contains(got, endRig+"/"+endPolecat) || !strings.Contains(got, tt.wantLog) {
+					t.Errorf("log %q does not carry the seat and %q", got, tt.wantLog)
+				}
+				return
+			}
+			if got := logs.String(); got != "" {
+				t.Errorf("log = %q, want nothing said", got)
 			}
 		})
 	}
@@ -728,6 +778,9 @@ func TestSandboxSeatEnderDefaultPathKeepsASeatUntilTheRulesAsk(t *testing.T) {
 	}}
 	d.sandboxExists = f.host.sandboxExists
 	d.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+	// The production cursor reader, reading the battery's file as it does in
+	// the town; the other rules tests drive the daemon's seam instead.
+	d.rulesCursorAt = nil
 	d.endSandboxSeat = nil
 	landings := &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
 	if err := landings.Append(land.LandingRecord{BeadID: endBead, Head: head, Branch: endBranch}); err != nil {
@@ -755,6 +808,217 @@ func TestSandboxSeatEnderDefaultPathKeepsASeatUntilTheRulesAsk(t *testing.T) {
 
 	if dirExists(t, dirs.PolecatDir) || dirExists(t, dirs.PromptFile) {
 		t.Error("the seat stayed after the cursor passed its submission")
+	}
+}
+
+// jevRulesOnly is a patrol config with the rules battery enabled and nothing
+// else said.
+func jevRulesOnly() *DaemonPatrolConfig {
+	return &DaemonPatrolConfig{Patrols: &PatrolsConfig{JevRules: &JevRulesConfig{Enabled: true}}}
+}
+
+// seatEndWaitingForRules prepares a finished sandbox seat whose rules ask is
+// outstanding and runs the landing's own pass: the seat is kept and recorded,
+// and the test drives what happens on later passes.
+func seatEndWaitingForRules(t *testing.T, now time.Time) (*seatEndFake, *clockwork.FakeClock, sandboxSeatLanding) {
+	t.Helper()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	clk := clockwork.NewFakeClockAt(now)
+	f.host.d.clock = clk
+	f.host.d.patrolConfig = jevRulesOnly()
+	// A later pass builds its own end over the daemon's seams, not the host's.
+	f.host.d.sandboxExists = f.host.sandboxExists
+	f.host.d.openRecoveryBeads = f.host.openRecoveryBeads
+	submitted := now.Add(-10 * time.Minute)
+	f.cursorAt = submitted.Add(-time.Minute)
+	landing := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: submitted, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landing) {
+		t.Fatal("the landing's pass removed a seat whose rules ask was outstanding")
+	}
+	return f, clk, landing
+}
+
+// A seat kept for the rules ask is recorded with its landing facts: the
+// landing's own run of the end is spent, and the record is what offers the seat
+// to a later pass (gt-381oj).
+func TestEndFinishedSandboxSeatRecordsAPendingSeatEnd(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	f, _, landing := seatEndWaitingForRules(t, now)
+
+	if !dirExists(t, filepath.Join(f.town, endRig, "polecats", endPolecat)) {
+		t.Fatal("a kept seat lost its host directory")
+	}
+	records, bad, err := readPendingSandboxSeatEnds(f.town)
+	if err != nil {
+		t.Fatalf("reading the pending ends: %v", err)
+	}
+	if len(bad) != 0 {
+		t.Fatalf("unreadable pending ends = %v", bad)
+	}
+	want := pendingSandboxSeatEnd{Rig: endRig, Name: endPolecat, Landing: landing}
+	if len(records) != 1 || records[0] != want {
+		t.Fatalf("pending ends = %+v, want just %+v", records, want)
+	}
+}
+
+// A recorded seat is offered to the end again on every pass: once the rules ask
+// has happened, or the window has closed, the seat goes; while the ask is
+// outstanding it stays; and a seat another fact now decides is dropped from the
+// store instead of offered for ever (gt-381oj).
+func TestRetryPendingSandboxSeatEnds(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	submitted := now.Add(-10 * time.Minute)
+	tests := []struct {
+		name string
+		// landingStamp is what the landing's own pass hands the end; zero is
+		// submitted.
+		landingStamp time.Time
+		// change is the world between the two passes.
+		change      func(f *seatEndFake, clk *clockwork.FakeClock)
+		wantRemoved bool
+		wantRecord  bool
+		wantAsked   bool
+	}{
+		{
+			name: "the cursor reached the submission",
+			change: func(f *seatEndFake, _ *clockwork.FakeClock) {
+				f.cursorAt = submitted.Add(time.Minute)
+			},
+			wantRemoved: true, wantAsked: true,
+		},
+		{
+			name: "the window closed with the cursor behind",
+			change: func(_ *seatEndFake, clk *clockwork.FakeClock) {
+				clk.Advance(rulesPendingWindow + time.Minute)
+			},
+			wantRemoved: true, wantAsked: true,
+		},
+		{
+			name:         "a stamp in the future waits only the window from now",
+			landingStamp: now.Add(2 * time.Hour),
+			change: func(_ *seatEndFake, clk *clockwork.FakeClock) {
+				clk.Advance(rulesPendingWindow + time.Minute)
+			},
+			wantRemoved: true, wantAsked: true,
+		},
+		{
+			name:       "the ask is still outstanding, so the seat waits",
+			change:     func(*seatEndFake, *clockwork.FakeClock) {},
+			wantRecord: true, wantAsked: true,
+		},
+		{
+			name: "another fact now keeps the seat",
+			change: func(f *seatEndFake, _ *clockwork.FakeClock) {
+				f.cursorAt = submitted.Add(time.Minute)
+				f.seatFields.CleanupStatus = string(polecat.CleanupUnpushed)
+				f.setAgent()
+			},
+			wantAsked: true,
+		},
+		{
+			name: "the agent bead is gone",
+			change: func(f *seatEndFake, _ *clockwork.FakeClock) {
+				if err := f.agentDB.DeleteIssues(f.agentBead); err != nil {
+					f.t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f, clk, _ := seatEndWaitingForRules(t, now)
+			if !tt.landingStamp.IsZero() {
+				// The landing's own pass again with the future stamp: the
+				// record it leaves counts from the clamp, not the stamp.
+				if f.host.endFinishedSandboxSeat(endRig, endPolecat, sandboxSeatLanding{
+					BeadID: endBead, Branch: endBranch, Submitted: tt.landingStamp, Landed: true,
+				}) {
+					t.Fatal("a seat with a future stamp was removed")
+				}
+			}
+			tt.change(f, clk)
+			dirs := f.seatDirs()
+			f.gwAsked = nil // the landing's own pass asked; count the retry's
+
+			f.host.d.retryPendingSandboxSeatEnds()
+			waitSeatEndCycles(t, f.host.d)
+
+			if got := dirExists(t, dirs.PolecatDir); got == tt.wantRemoved {
+				t.Errorf("seat directory exists = %v, want removed = %v", got, tt.wantRemoved)
+			}
+			records, bad, err := readPendingSandboxSeatEnds(f.town)
+			if err != nil || len(bad) != 0 {
+				t.Fatalf("reading the pending ends: %v, %v", err, bad)
+			}
+			if got := len(records) > 0; got != tt.wantRecord {
+				t.Errorf("a pending end is recorded = %v, want %v (%+v)", got, tt.wantRecord, records)
+			}
+			if asked := len(f.gwAsked) > 0; asked != tt.wantAsked {
+				t.Errorf("gateway asked = %v, want %v (%v)", asked, tt.wantAsked, f.gwAsked)
+			}
+		})
+	}
+}
+
+// The heartbeat's step is what re-runs a kept seat (gt-381oj): the step the
+// daemon schedules is the retry, and a seat whose cursor has passed is gone by
+// the time the step returns.
+func TestHeartbeatRetriesPendingSandboxSeatEnds(t *testing.T) {
+	t.Parallel()
+	var step *heartbeatStep
+	for i := range heartbeatSteps {
+		if heartbeatSteps[i].name == "sandbox-seat-ends" {
+			step = &heartbeatSteps[i]
+		}
+	}
+	if step == nil {
+		t.Fatal("the heartbeat has no sandbox-seat-ends step")
+	}
+	if step.lifecycle {
+		t.Error("sandbox-seat-ends must not be a lifecycle step: an E-stopped town still wants the seat gone")
+	}
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	f, _, _ := seatEndWaitingForRules(t, now)
+	f.cursorAt = now
+	dirs := f.seatDirs()
+
+	step.run(f.host.d)
+	waitSeatEndCycles(t, f.host.d)
+
+	if dirExists(t, dirs.PolecatDir) {
+		t.Error("the heartbeat's seat-end step left a seat whose rules ask had happened")
+	}
+}
+
+// A record that cannot be read is reported, and the records beside it are still
+// offered: one corrupt file does not stop the pass or pass silently.
+func TestRetryPendingSandboxSeatEndsReportsUnreadableRecords(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	f, _, _ := seatEndWaitingForRules(t, now)
+	f.cursorAt = now
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	broken := filepath.Join(pendingSandboxSeatEndsDir(f.town), endRig, "broken.json")
+	if err := os.WriteFile(broken, []byte("{not a record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirs := f.seatDirs()
+
+	f.host.d.retryPendingSandboxSeatEnds()
+	waitSeatEndCycles(t, f.host.d)
+
+	if dirExists(t, dirs.PolecatDir) {
+		t.Error("the readable record beside the broken one was not offered")
+	}
+	if got := logs.String(); !strings.Contains(got, "cannot read the record "+broken) {
+		t.Errorf("log %q does not report the unreadable record", got)
 	}
 }
 

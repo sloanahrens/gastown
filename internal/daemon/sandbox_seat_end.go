@@ -72,6 +72,12 @@ type sandboxSeatEnd struct {
 	RulesPending bool
 }
 
+// rulesPendingReason is the keep reason of a seat whose only outstanding fact
+// is the rules battery's ask: every other keep reason names a fact that stays
+// true, and this one is answered with time, so the end offers the seat again
+// on later passes until it is (gt-381oj).
+const rulesPendingReason = "jev_rules has not yet asked about this submission"
+
 // keepReason names why the seat's host directories must stay, or "" when they
 // may be removed. Every reason is a fact someone else measured; the first one
 // this file can answer decides. A missing fact keeps the seat: the removal
@@ -90,7 +96,7 @@ func (e sandboxSeatEnd) keepReason() string {
 	case e.PushFailed:
 		return "push_failed=true: the seat's branch never reached origin"
 	case e.RulesPending:
-		return "jev_rules has not yet asked about this submission"
+		return rulesPendingReason
 	case strings.TrimSpace(e.HookBead) != "":
 		return "hook_bead=" + e.HookBead + " is still set"
 	case strings.TrimSpace(e.Branch) == "" || strings.TrimSpace(e.LandedBranch) == "":
@@ -149,24 +155,29 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 	}
 	if fields == nil {
 		log("kept: no agent bead, so this town does not track it as a seat")
+		h.clearPendingSeatEnd(rig, name)
 		return false
 	}
 	if _, ok, err := h.openshellSeatFor(fields.Agent); err != nil {
 		log("kept: %v", err)
 		return false
 	} else if !ok {
-		return false // a tmux seat keeps today's behavior, silently
+		// A tmux seat keeps today's behaviour, silently. Whatever a later
+		// pass recorded about the seat is answered: it is not a sandbox seat.
+		h.clearPendingSeatEnd(rig, name)
+		return false
 	}
 	rigPath := filepath.Join(h.town(), rig)
 	var (
-		kept    string
-		partial string
-		removed bool
+		kept       string
+		unmeasured string
+		partial    string
+		removed    bool
 	)
 	err = polecat.WithSandboxSeatLock(rigPath, name, func() error {
-		end, unmeasured := h.measureSandboxSeatEnd(rig, name, landing)
-		if unmeasured != "" {
-			kept = unmeasured
+		end, unmeasuredReason := h.measureSandboxSeatEnd(rig, name, landing)
+		if unmeasuredReason != "" {
+			unmeasured = unmeasuredReason
 			return nil
 		}
 		if why := end.keepReason(); why != "" {
@@ -190,18 +201,58 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 	})
 	switch {
 	case err != nil:
+		// The lock itself failed, so nothing was measured: whatever a later
+		// pass recorded about this seat is left for that pass to retry.
 		log("kept: %v", err)
 		return false
 	case partial != "":
+		// The seat is half gone; nothing is left to wait for the rules ask.
+		h.clearPendingSeatEnd(rig, name)
 		log("its host directories were partly removed, then the removal failed: %s (the seat is finished: landed %s)", partial, landing.BeadID)
 		return false
+	case unmeasured != "":
+		// A fact that could not be read is the fact a later pass retries, so
+		// the record, if there is one, stays.
+		log("kept: %s", unmeasured)
+		return false
+	case kept == rulesPendingReason:
+		// The landing's own run of this step is spent, so the seat is recorded
+		// with its landing facts and offered again on later passes until the
+		// ask has happened or the window has closed (gt-381oj).
+		h.recordPendingSeatEnd(rig, name, landing)
+		log("kept: %s", kept)
+		return false
 	case kept != "":
+		// A fact that stays true decides the seat: no pass waits for it.
+		h.clearPendingSeatEnd(rig, name)
 		log("kept: %s", kept)
 		return false
 	case removed:
+		h.clearPendingSeatEnd(rig, name)
 		log("removed its host directories: the seat is finished (landed %s)", landing.BeadID)
 	}
 	return removed
+}
+
+// recordPendingSeatEnd leaves the seat's landing facts for a later pass, which
+// offers the same end again. The stamp is clamped to now, so a seat whose
+// submission the landing worker stamped in the future still waits only
+// rulesPendingWindow from here (gt-8yk78, gt-381oj). A write that fails is
+// logged: the seat stays, and nothing but a later landing on the same polecat
+// will offer it again.
+func (h *patrolScanHost) recordPendingSeatEnd(rig, name string, landing sandboxSeatLanding) {
+	landing.Submitted = rulesAskStamp(h.d.clk().Now(), landing.Submitted)
+	rec := pendingSandboxSeatEnd{Landing: landing}
+	if err := writePendingSandboxSeatEnd(h.town(), rig, name, rec); err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: cannot record the seat for a later rules pass: %v", rig, name, err)
+	}
+}
+
+// clearPendingSeatEnd forgets a record this end has just decided on.
+func (h *patrolScanHost) clearPendingSeatEnd(rig, name string) {
+	if err := removePendingSandboxSeatEnd(h.town(), rig, name); err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: cannot remove its pending record: %v", rig, name, err)
+	}
 }
 
 // measureSandboxSeatEnd reads the facts the seat's end decides on. It runs
@@ -241,7 +292,7 @@ func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandbox
 		return sandboxSeatEnd{}, "cannot read its intent record: " + err.Error()
 	}
 	end.Retired = !rec.Held() && rec.EffectiveDesired() == intent.DesiredStop
-	end.RulesPending = h.rulesPending(landing.Submitted)
+	end.RulesPending = h.rulesPending(rig, name, landing.Submitted)
 	return end, ""
 }
 
@@ -251,28 +302,65 @@ func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandbox
 // (gt-381oj).
 const rulesPendingWindow = time.Hour
 
+// rulesAskStamp is the stamp the rules wait counts from: a seat's clock may run
+// ahead of the daemon's, so a stamp in the future is clamped to now. That is the
+// rule closeSubmittedSpan applies to a landing's stamp (gt-8yk78), and it is
+// what stops a future stamp keeping the seat past rulesPendingWindow from now
+// (gt-381oj).
+func rulesAskStamp(now, submitted time.Time) time.Time {
+	if submitted.After(now) {
+		return now
+	}
+	return submitted
+}
+
 // rulesPending reports whether the jev_rules patrol may still ask about a
-// submission stamped submitted: the patrol is on, the submission is inside
+// submission stamped submitted: the patrol is on, the stamp is inside
 // rulesPendingWindow, and the battery's cursor has not reached it. The battery
 // reads the transcript out of the host worktree, so a submission it has not
 // asked about yet is the only thing that worktree is still wanted for
 // (gt-381oj).
 //
-// A submission with no stamp, and a cursor this town cannot read or has not
-// written yet, are not pending: the seat is kept only on a fact it measured,
-// never on the absence of one.
-func (h *patrolScanHost) rulesPending(submitted time.Time) bool {
+// A submission with no stamp is not pending: the seat is kept only on a fact
+// this step measured, never on the absence of one.
+//
+// A cursor this town cannot read is not pending either, and it says so once
+// with a line naming the seat, so an unreadable cursor never looks like a
+// clean one. A cursor not written yet is not pending and says nothing: the
+// battery has asked about nothing, and there is no fact to report (gt-381oj).
+func (h *patrolScanHost) rulesPending(rig, name string, submitted time.Time) bool {
 	if submitted.IsZero() || !h.d.isPatrolActive("jev_rules") {
 		return false
 	}
-	if h.d.clk().Now().Sub(submitted) >= rulesPendingWindow {
+	now := h.d.clk().Now()
+	submitted = rulesAskStamp(now, submitted)
+	if now.Sub(submitted) >= rulesPendingWindow {
 		return false
 	}
-	cur, ok, err := battery.ReadCursor(jevrules.CursorPath(h.town()))
+	at, ok, err := h.d.readRulesCursor()
+	if err != nil {
+		h.d.logger.Printf("sandbox seat end %s/%s: jev_rules cursor unreadable: %v; the seat is not held for rules", rig, name, err)
+		return false
+	}
+	if !ok {
+		return false
+	}
+	return at.Before(submitted)
+}
+
+// readRulesCursor reads the stamp of the jev_rules battery's cursor, through
+// the daemon's seam when it has one, and reports whether the town has written
+// one.
+func (d *Daemon) readRulesCursor() (time.Time, bool, error) {
+	path := jevrules.CursorPath(d.config.TownRoot)
+	if d.rulesCursorAt != nil {
+		return d.rulesCursorAt(path)
+	}
+	cur, ok, err := battery.ReadCursor(path)
 	if err != nil || !ok {
-		return false
+		return time.Time{}, ok, err
 	}
-	return cur.Time.Before(submitted)
+	return cur.Time, true, nil
 }
 
 // seatAgentFields reads the polecat's agent bead. A bead that does not exist is
@@ -320,6 +408,15 @@ func (d *Daemon) startSandboxSeatEnd(rigName string, landings *land.LandingsFile
 	if name == "" {
 		return // a crew landing has no seat
 	}
+	d.startSandboxSeatEndStep(rigName, name, func() {
+		d.runSandboxSeatEnd(rigName, landings, w)
+	})
+}
+
+// startSandboxSeatEndStep runs one seat end off the caller's goroutine, with
+// the shutdown accounting every seat end shares: a daemon that is already
+// stopping starts none, and stopSandboxSeatEnds joins the ones in flight.
+func (d *Daemon) startSandboxSeatEndStep(rigName, name string, run func()) {
 	d.sandboxSeatEndMu.Lock()
 	if d.sandboxSeatEndStopped || d.ctxOrBackground().Err() != nil {
 		d.sandboxSeatEndMu.Unlock()
@@ -335,8 +432,35 @@ func (d *Daemon) startSandboxSeatEnd(rigName string, landings *land.LandingsFile
 				d.logger.Printf("landing_worker: %s: sandbox seat end panicked: %v", rigName, r)
 			}
 		}()
-		d.runSandboxSeatEnd(rigName, landings, w)
+		run()
 	}()
+}
+
+// retryPendingSandboxSeatEnds offers every recorded seat to the end again. The
+// end measures the rules ask afresh, so a seat whose ask has happened, or whose
+// window has closed, is removed here; one still waiting is kept and recorded
+// again for the next pass. Without this a seat kept for the ask would wait for
+// its polecat name to be slung again, and the transcript the battery reads
+// would sit there unread (gt-381oj).
+func (d *Daemon) retryPendingSandboxSeatEnds() {
+	if d.config == nil {
+		return
+	}
+	records, bad, err := readPendingSandboxSeatEnds(d.config.TownRoot)
+	for _, path := range bad {
+		// An unreadable record is reported, never silently skipped: its seat
+		// is not offered again until someone can read the record.
+		d.logger.Printf("sandbox seat end: cannot read the record %s, so its seat is not offered again", path)
+	}
+	if err != nil {
+		d.logger.Printf("sandbox seat end: cannot list the pending ends: %v", err)
+		return
+	}
+	for _, rec := range records {
+		d.startSandboxSeatEndStep(rec.Rig, rec.Name, func() {
+			d.sandboxSeatEnder()(rec.Rig, rec.Name, rec.Landing)
+		})
+	}
 }
 
 // stopSandboxSeatEnds refuses new seat ends and waits, bounded, for the ones in
