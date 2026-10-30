@@ -10,7 +10,7 @@ services:
     # After a failed scratch install the entrypoint refuses every start until
     # the operator removes .gt-install-incomplete and what the install left,
     # from the host side of the scratch directory.
-    command: ["--scratch-town"]
+    command: ["--scratch-town", "--dolt-host", "scratch-dolt"]
     depends_on:
       scratch-dind:
         condition: service_healthy

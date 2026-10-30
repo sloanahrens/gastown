@@ -49,6 +49,10 @@ type entrypointRig struct {
 	readErr     error
 	omTokenFile string
 	scratch     bool
+	// doltHost is the --dolt-host value and doltHostSet says the flag was given,
+	// since an empty host is refused and differs from no flag.
+	doltHost    string
+	doltHostSet bool
 	calls       [][]string
 }
 
@@ -129,6 +133,8 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 		},
 		scratch:     r.scratch,
 		omTokenFile: r.omTokenFile,
+		doltHost:    r.doltHost,
+		doltHostSet: r.doltHostSet,
 	}
 }
 
@@ -198,6 +204,40 @@ func TestContainerEntrypointScratchFlagIsWired(t *testing.T) {
 	}
 }
 
+// The entrypoint parses --dolt-host into the flags it acts on, and it tells a
+// host given as the empty string apart from no flag at all: the empty one is
+// refused, so the two cannot be one value.
+func TestContainerEntrypointDoltHostFlagIsWired(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		want    string
+		wantSet bool
+	}{
+		{"no flag", []string{}, "", false},
+		{"the flag", []string{"--dolt-host", "scratch-dolt"}, "scratch-dolt", true},
+		{"an empty value", []string{"--dolt-host="}, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got entrypointFlags
+			c := newDaemonContainerEntrypointCmd(func(flags entrypointFlags) error {
+				got = flags
+				return nil
+			})
+			c.SetArgs(tc.args)
+			c.SilenceUsage, c.SilenceErrors = true, true
+			if err := c.Execute(); err != nil {
+				t.Fatalf("execute container-entrypoint %v: %v", tc.args, err)
+			}
+			if got.doltHost != tc.want || got.doltHostSet != tc.wantSet {
+				t.Errorf("--dolt-host parsed as %q (set %v), want %q (set %v)", got.doltHost, got.doltHostSet, tc.want, tc.wantSet)
+			}
+		})
+	}
+}
+
 func TestContainerEntrypointRefusesOutsideContainerMode(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{"", "launchd"} {
@@ -230,6 +270,40 @@ func TestContainerEntrypointRefusesTownRootThatIsNotAbsolute(t *testing.T) {
 			}
 			if len(r.calls) != 0 {
 				t.Errorf("recorded %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
+	}
+}
+
+// A Dolt host belongs to the scratch town's install alone: given without
+// --scratch-town it is never used, and an empty one names nothing. Each row
+// refuses before any command runs; removing its check lets the start go on with
+// a host no command acted on, so the row goes red.
+func TestContainerEntrypointRefusesADoltHostItCannotUse(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		rig     func() *entrypointRig
+		host    string
+		wantMsg string
+	}{
+		{"a host without the scratch flag", townRig, "scratch-dolt", "without --" + config.ScratchTownFlag},
+		{"an empty host in the scratch town", scratchRig, "", "is empty"},
+		{"an empty host with no scratch flag", townRig, "", "is empty"},
+		{"a host of spaces", scratchRig, "  ", "is empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := tc.rig()
+			r.doltHost, r.doltHostSet = tc.host, true
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if err == nil || !strings.Contains(err.Error(), config.DoltHostFlag) || !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("error = %v, want a refusal naming --%s and saying %q", err, config.DoltHostFlag, tc.wantMsg)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
 			}
 		})
 	}
@@ -485,6 +559,29 @@ func TestContainerEntrypointScratchTownInstallsOnceBeforeDaemon(t *testing.T) {
 	// succeeded.
 	if !reflect.DeepEqual(r.created, []string{entrypointIncomplete}) || !reflect.DeepEqual(r.removed, []string{entrypointIncomplete}) {
 		t.Errorf("incomplete marker created %v and removed %v, want it created and then removed once", r.created, r.removed)
+	}
+}
+
+// With --dolt-host the scratch install is given the same flag and value, so the
+// town it writes reaches the scratch project's Dolt server. The flag's name is
+// the one the render passes, both read from config.DoltHostFlag. Without the
+// flag the install is what it always was
+// (TestContainerEntrypointScratchTownInstallsOnceBeforeDaemon).
+func TestContainerEntrypointScratchTownPassesTheDoltHostToTheInstall(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	r.doltHost, r.doltHostSet = "scratch-dolt", true
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	want := [][]string{
+		{"git", "config", "--global", "user.name", "daemon"},
+		{"git", "config", "--global", "user.email", "daemon@example.invalid"},
+		{entrypointBin, "install", entrypointTown, "--git", "--" + config.DoltHostFlag, "scratch-dolt"},
+		{entrypointBin, "daemon", "run"},
+	}
+	if !reflect.DeepEqual(r.calls, want) {
+		t.Errorf("commands = %v, want %v", r.calls, want)
 	}
 }
 

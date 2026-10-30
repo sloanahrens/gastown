@@ -129,6 +129,13 @@ const (
 	// file the om subscription token is read from; the entrypoint registers it
 	// and the scratch render can pass it, so both read one string (gt-qpeei.36).
 	OMTokenFileFlag = "om-token-file" //nolint:gosec // a flag name, not a credential
+
+	// DoltHostFlag is the entrypoint flag, without its dashes, that names the
+	// Dolt server the scratch town's install uses; the entrypoint registers it
+	// and hands its value to `gt install` as the same flag, and the scratch
+	// render passes it, so all three read one string (gt-4f3j2). Only
+	// --scratch-town takes it: the live project's command line stays empty.
+	DoltHostFlag = "dolt-host"
 )
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town
