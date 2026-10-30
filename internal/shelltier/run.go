@@ -40,6 +40,9 @@ type Config struct {
 // Result counts the outcomes of one run.
 type Result struct {
 	Passed, Failed, Skipped int
+	// TimedOut counts the failed scripts whose own Budget ran out. A script the
+	// parent context ended is failed but not timed out.
+	TimedOut int
 	// FailedNames are the paths of the failed scripts, in manifest order.
 	FailedNames []string
 	Elapsed     time.Duration
@@ -49,24 +52,36 @@ type Result struct {
 // script passes on exit 0. A non-zero exit, an Exec error or a Budget timeout
 // fails it, and the run goes on to the next script. Run creates no directories:
 // Exec creates LogDir and each TMPDIR before it runs a command.
+//
+// Once ctx ends, no further script is run: the one it interrupts and every
+// script after it fail, none counted as timed out.
 func Run(ctx context.Context, cfg Config) Result {
 	start := cfg.Now()
 	var r Result
 	for _, e := range cfg.Entries {
-		if runOne(ctx, cfg, e) {
+		passed, timedOut := false, false
+		if ctx.Err() == nil {
+			passed, timedOut = runOne(ctx, cfg, e)
+		}
+		if passed {
 			r.Passed++
 			continue
 		}
 		r.Failed++
+		if timedOut {
+			r.TimedOut++
+		}
 		r.FailedNames = append(r.FailedNames, e.Path)
 	}
 	r.Elapsed = cfg.Now().Sub(start)
 	return r
 }
 
-// runOne runs one entry under its own Budget and reports whether it passed.
-// A script whose budget ran out fails even when Exec reports success.
-func runOne(ctx context.Context, cfg Config, e Entry) bool {
+// runOne runs one entry under its own Budget and reports whether it passed and
+// whether its Budget ran out. A script whose context ended fails even when
+// Exec reports success; it is timed out only when the parent context is still
+// live, so a canceled parent is not counted as a budget expiry.
+func runOne(ctx context.Context, cfg Config, e Entry) (passed, timedOut bool) {
 	name := logName(e.Path)
 	sctx, cancel := cfg.WithTimeout(ctx, cfg.Budget)
 	defer cancel()
@@ -79,7 +94,9 @@ func runOne(ctx context.Context, cfg Config, e Entry) bool {
 		},
 		Log: filepath.Join(cfg.LogDir, name+".log"),
 	})
-	return err == nil && code == 0 && sctx.Err() == nil
+	ended := sctx.Err() != nil
+	timedOut = ended && ctx.Err() == nil
+	return !ended && err == nil && code == 0, timedOut
 }
 
 // logName is the stem of a script's log file and TMPDIR: its path with each
