@@ -34,11 +34,11 @@ const (
 // together so they are easy to change. The acting threshold is a separate,
 // later decision (gt-1nxhm).
 const (
-	// minPositives is a judgement call, vetted 2026-10-29 as the floor below which no one could act on a yes: finding.any_duplicate read earning on 615 labeled lines with only 3 positives (gt-1nxhm).
+	// minPositives is a judgement call, vetted 2026-10-29 as the floor for "not worth reading as a signal": finding.any_duplicate read earning on 615 labeled lines with only 3 positives (gt-1nxhm).
 	minPositives = 10
 	// minNegatives is the same judgement as minPositives, guarding the label a precision needs as its denominator (gt-1nxhm).
 	minNegatives = 10
-	// minPrecisionAtBest is a judgement call, vetted 2026-10-29: below it a yes is wrong too often to act on, while finding.any_duplicate (0.018) and finding.report_only (0.053) read earning (gt-1nxhm).
+	// minPrecisionAtBest is a judgement call, vetted 2026-10-29 as the floor for "not worth reading as a signal": finding.any_duplicate (0.018) and finding.report_only (0.053) read earning (gt-1nxhm).
 	minPrecisionAtBest = 0.3
 )
 
@@ -458,15 +458,15 @@ func meanByLabel(samples []sample) (positive, negative *float64) {
 // verdict holds earning back to a question whose labels are plentiful enough
 // to act on: too few positives or negatives is not-yet whatever the metrics
 // say, and a noul or choice whose precision at the best cut is under the floor
-// is no-signal, since a yes it answers cannot be trusted. A score kind has no
-// precision, so only the count floors apply to it.
+// or cannot be read is no-signal, since a yes it answers cannot be trusted. A
+// score kind has no precision, so only the count floors apply to it.
 func verdict(kind string, positives, negatives, labeled int, bestF1, baseRate float64, precisionAtBest *float64) string {
 	switch {
 	case positives < minPositives || negatives < minNegatives:
 		return VerdictNotYet
 	case labeled < minLabeled:
 		return VerdictNotYet
-	case kind != KindScore && precisionAtBest != nil && *precisionAtBest < minPrecisionAtBest-eps:
+	case kind != KindScore && (precisionAtBest == nil || *precisionAtBest < minPrecisionAtBest-eps):
 		return VerdictNoSignal
 	case bestF1-baseRate >= earnMargin-eps:
 		return VerdictEarning

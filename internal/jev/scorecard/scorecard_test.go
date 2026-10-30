@@ -239,7 +239,8 @@ func TestScorecardVerdictBoundaries(t *testing.T) {
 		{"a score with nine negatives is not-yet", KindScore, 21, 9, 30, 1, 0.7, nil, VerdictNotYet},
 		{"a score with ten negatives skips the precision rule and earns", KindScore, 20, 10, 30, 0.9, 0.6, nil, VerdictEarning},
 		{"a score ignores a precision handed to it, since a score has none", KindScore, 20, 20, 40, 1, 0.5, prec(0.1), VerdictEarning},
-		{"a noul with no precision to read is judged on the margin alone", KindNoul, 20, 20, 40, 1, 0.5, nil, VerdictEarning},
+		{"a noul with no precision to read is no-signal, not judged on the margin alone", KindNoul, 20, 20, 40, 1, 0.5, nil, VerdictNoSignal},
+		{"a choice with no precision to read is no-signal, not judged on the margin alone", KindChoice, 20, 20, 40, 1, 0.5, nil, VerdictNoSignal},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
