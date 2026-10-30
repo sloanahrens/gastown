@@ -464,6 +464,13 @@ func TestImportNeverPrintsTheToken(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "a listing that is not ref pairs",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{opts.GitHubURL: {lsOK("refs/heads/main\n")}}
+			},
+			wantErr: true,
+		},
+		{
 			name: "the admin base's listing that fails",
 			staged: func(opts Options) map[string][]lsReply {
 				return map[string][]lsReply{
