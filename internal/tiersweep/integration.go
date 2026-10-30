@@ -187,7 +187,7 @@ func (s *Sweep) headCommit() string {
 func (s *Sweep) dueSkips(tested string) string {
 	var out bytes.Buffer
 	if s.Exec(".", s.triggerEnv(tested, s.Opts.SkipList), triggerArgv("skips"), &out) != 0 {
-		fmt.Fprint(s.Stderr, out.String())
+		fmt.Fprintf(s.Stderr, "%s", out.String())
 		return ""
 	}
 	return strings.TrimSpace(out.String())
