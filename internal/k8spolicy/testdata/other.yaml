@@ -1,0 +1,16 @@
+# Gas Town sandbox policy fixture: Dolt and Forgejo are reached through Docker Desktop's host alias.
+network_policies:
+  golang:
+    endpoints:
+      - host: proxy.golang.org
+        port: 443
+        protocol: rest
+  unrelated:
+    endpoints:
+      - host: host.docker.internal
+        port: 9999
+        protocol: tcp
+        tls: skip
+  last:
+    endpoints:
+      - host: host.docker.internal
