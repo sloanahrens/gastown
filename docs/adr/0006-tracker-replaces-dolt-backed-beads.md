@@ -37,7 +37,7 @@ Dolt: no remote sync, no routine history rewrite, owned garbage collection.
   and a test that it imports nothing from `gt`, so extraction later is a move, not a rewrite.
 
 Consequence: `gt` requires the nested `tracker/` module through a `replace` directive in `go.mod`, which
-`scripts/repo-guards.sh` allows for that one module only. `go install .../cmd/gt@latest` no longer works for
+`go run ./cmd/repo-guards` allows for that one module only. `go install .../cmd/gt@latest` no longer works for
 this fork; it installs from a checkout (`make install`), which is what the town already does. `flake.nix`'s
 `vendorHash` must be recomputed at the next release (`scripts/update-nix-flake.sh`).
 

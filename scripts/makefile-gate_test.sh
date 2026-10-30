@@ -160,10 +160,8 @@ else
 fi
 
 # The shell tests have one list (gt-tqxdd): test-makefile runs
-# scripts/test-makefile.sh, the same file and env test-slow runs. Its own
-# hand-written list had drifted from the script and skipped the uninstall and
-# repo-guards tests, so both halves are checked — the delegation, and that the
-# script still runs what the drift dropped.
+# scripts/test-makefile.sh, the same file and env test-slow runs. A hand-written
+# list drifted from the script once, so the delegation is checked.
 echo "test-makefile"
 if mout=$(dry test-makefile); then
   pass "make -n test-makefile exits 0"
@@ -175,16 +173,6 @@ if [[ "$mtests" = "scripts/test-makefile.sh" ]] && grep -q -F 'GT_TEST_DOCKER=0 
   pass "test-makefile runs the script alone, as test-slow does (gt-tqxdd)"
 else
   fail "test-makefile runs the script alone, as test-slow does (gt-tqxdd)" "invoked: $mtests"
-fi
-list="$ROOT/scripts/test-makefile.sh"
-missing=""
-for t in scripts/repo-guards_test.sh; do
-  grep -q -F "bash $t" "$list" || missing="$missing $t"
-done
-if [[ -z "$missing" ]]; then
-  pass "the shell-test list runs the scripts the old hand list skipped (gt-tqxdd)"
-else
-  fail "the shell-test list runs the scripts the old hand list skipped (gt-tqxdd)" "missing:$missing"
 fi
 
 # The OpenShell polecat sandbox targets (claude-q3f.9): an operator runs them
