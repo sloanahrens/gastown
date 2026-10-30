@@ -996,6 +996,79 @@ func TestHeartbeatRetriesPendingSandboxSeatEnds(t *testing.T) {
 	}
 }
 
+// The production cursor reader hands an unreadable cursor file back as an
+// error, which the end logs and reads as not pending; the daemon's seam is
+// only for tests (gt-381oj).
+func TestReadRulesCursorReportsAnUnreadableFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+	path := jevrules.CursorPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not a cursor"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := d.readRulesCursor(); err == nil || ok {
+		t.Errorf("readRulesCursor = ok %v, err %v; want the parse error", ok, err)
+	}
+}
+
+// The pending store refuses a rig or polecat name a path cannot hold, on every
+// one of its writes, and a store that cannot be listed is an error rather than
+// an empty set of records (gt-381oj).
+func TestPendingSandboxSeatEndStoreReportsFailures(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	for _, bad := range []struct{ rig, name string }{
+		{"../gastown", endPolecat},
+		{endRig, "a/agate"},
+	} {
+		if _, err := pendingSandboxSeatEndPath(town, bad.rig, bad.name); err == nil {
+			t.Errorf("a path was made for rig %q name %q", bad.rig, bad.name)
+		}
+		if err := writePendingSandboxSeatEnd(town, bad.rig, bad.name, sandboxSeatLanding{}); err == nil {
+			t.Errorf("a record was written for rig %q name %q", bad.rig, bad.name)
+		}
+		if err := removePendingSandboxSeatEnd(town, bad.rig, bad.name); err == nil {
+			t.Errorf("a record was removed for rig %q name %q", bad.rig, bad.name)
+		}
+	}
+	// A store path that is a file cannot be listed: the pass must fail, not
+	// read it as a store with no records.
+	dir := pendingSandboxSeatEndsDir(town)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readPendingSandboxSeatEnds(town); err == nil {
+		t.Error("a store that is a file was read as an empty store")
+	}
+}
+
+// A record that cannot be removed is reported rather than read as already
+// gone: the next pass retries the end either way, so a stale record costs one
+// extra run, never a wrong one (gt-381oj).
+func TestRemovePendingSandboxSeatEndReportsAFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// The rig's directory position is a file, so the record under it cannot be
+	// removed and the error is not the "no such record" that means success.
+	rigFile := filepath.Join(pendingSandboxSeatEndsDir(town), endRig)
+	if err := os.MkdirAll(filepath.Dir(rigFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removePendingSandboxSeatEnd(town, endRig, endPolecat); err == nil {
+		t.Error("removing a record under a file was reported as success")
+	}
+}
+
 // A record that cannot be read is reported, and the records beside it are still
 // offered: one corrupt file does not stop the pass or pass silently.
 func TestRetryPendingSandboxSeatEndsReportsUnreadableRecords(t *testing.T) {
