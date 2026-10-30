@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
@@ -406,6 +408,63 @@ func listedAgentBeadComplete(issue *beads.Issue) bool {
 		if field.always && !present[field.key] {
 			return false
 		}
+	}
+	// The always-written lines prove the record reaches notification_level, not
+	// that it reaches the end: the lines after it are written only when they
+	// carry a value, so a cut there loses a value and leaves no gap. Two checks
+	// stand in for the end. The last line must be a whole "key: value" line of
+	// a key an agent description holds (a cut inside a line, or in anything but
+	// a known line, fails it), and a seat that is live (an agent_state other than
+	// idle, done or nuked) always records its agent, so a live record without
+	// one lost it. A cut exactly between two optional lines of a dormant seat is
+	// the one loss neither can see; the recorded list and show of one bead
+	// (TestListedAgentBeadCarriesTheShowFields) are the evidence the list form
+	// returns the description whole.
+	if !endsOnAKnownLine(issue.Description) {
+		return false
+	}
+	if agentStateIsLive(fields.AgentState) && !present["agent"] {
+		return false
+	}
+	return true
+}
+
+// endsOnAKnownLine reports whether the last non-empty line of an agent
+// description is a whole "key: value" line of a key the seat read knows.
+func endsOnAKnownLine(description string) bool {
+	lines := strings.Split(strings.TrimRight(description, " \t\r\n"), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	key, value, ok := strings.Cut(last, ":")
+	if !ok || strings.TrimSpace(value) == "" {
+		return false
+	}
+	return knownAgentKeys()[strings.ToLower(strings.TrimSpace(key))]
+}
+
+// knownAgentKeys is every key beads.FormatAgentDescription can write, found by
+// formatting a description whose every string field is set and every flag true. The list comes from
+// the formatter, so a key it starts writing is known here without an edit.
+var knownAgentKeys = sync.OnceValue(func() map[string]bool {
+	var fields beads.AgentFields
+	v := reflect.ValueOf(&fields).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		switch f := v.Field(i); {
+		case !f.CanSet():
+		case f.Kind() == reflect.String:
+			f.SetString("x")
+		case f.Kind() == reflect.Bool:
+			f.SetBool(true)
+		}
+	}
+	return agentDescriptionKeys(beads.FormatAgentDescription("t", &fields))
+})
+
+// agentStateIsLive reports whether an agent_state names a seat that is doing or
+// about to do work, one whose agent line a whole record always carries.
+func agentStateIsLive(state string) bool {
+	switch beads.AgentState(strings.TrimSpace(state)) {
+	case beads.AgentStateIdle, beads.AgentStateDone, beads.AgentStateNuked, "":
+		return false
 	}
 	return true
 }

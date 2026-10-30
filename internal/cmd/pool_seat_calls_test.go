@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,12 +15,14 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// rosterCallsBefore is the bd read count the roster's baseline costs over
+// rosterCallsBefore is the number of bd reads the unfolded roster makes over
 // seatTown(t, 20): one ShowMultiple asking for the twenty agent beads and one
-// List asking for the rig's assigned work, measured at d6851c36e and the number
-// rosterCallsWithoutTheFold makes again. The test fails if the two disagree, so
-// the constant is the count the current fixture costs, pinned to the commit it
-// was measured at.
+// List asking for the rig's assigned work. rosterCallsWithoutTheFold computes
+// the same number by replaying those reads through the counting store, and the
+// test fails if the two differ, so the constant is the fixture's baseline and
+// the folded roster is held to half of it. The replay is a hand-written copy of
+// the old reads, not the old code: the same count was taken from the code at
+// d6851c36e, which is where the number comes from.
 const rosterCallsBefore = 2
 
 // countingCalls is the calls a countingStore was asked for: every read a bd
@@ -411,5 +414,74 @@ func TestListedAgentBeadCarriesTheShowFields(t *testing.T) {
 	}
 	if want := shown[workID].Assignee; listed[workID].Assignee != want {
 		t.Errorf("listed work assignee = %q, want the shown bead's %q", listed[workID].Assignee, want)
+	}
+}
+
+// listedRecord is a bd list record of an agent bead whose description is the
+// given text.
+func listedRecord(description string) *beads.Issue {
+	return &beads.Issue{
+		ID: "zz-polecat-alice", Status: "open", Labels: []string{"gt:agent"},
+		Description: description,
+	}
+}
+
+// TestListedAgentBeadCompletenessCatchesATruncatedRecord holds the gate to the
+// truncations it can see: a record cut inside a line, cut before a live seat's
+// agent line, or cut before the always-written lines is not whole and is read
+// by id, and a whole record (an idle seat that ends on notification_level, a
+// live seat that ends on its agent line, one that ends on a completion line the
+// formatter writes) is. Mutation: dropping the last-line check turns the mid-line
+// row red; dropping the live-seat agent check turns the live row red.
+func TestListedAgentBeadCompletenessCatchesATruncatedRecord(t *testing.T) {
+	t.Parallel()
+	const head = "zz-polecat-alice\n\nrole_type: polecat\nrig: zzrig\nagent_state: %s\nhook_bead: %s\ncleanup_status: null\nactive_mr: null\nnotification_level: null"
+	idle := fmt.Sprintf(head, "idle", "null")
+	live := fmt.Sprintf(head, "working", "zz-work-42")
+	cases := []struct {
+		name string
+		desc string
+		want bool
+	}{
+		{"an idle seat that ends on notification_level", idle, true},
+		{"a live seat with its agent line", live + "\nagent: zz-test-agent", true},
+		{"a live seat that ends on a completion line the formatter writes", live + "\nagent: zz-test-agent\nexit_type: COMPLETED", true},
+		{"a live seat cut before its agent line", live, false},
+		{"a record cut inside a line", live + "\nagen", false},
+		{"a record cut inside a value line", idle + "\nagent:", false},
+		{"a record cut before the always-written lines", "zz-polecat-alice\n\nrole_type: polecat\nrig: zzrig\nagent_state: idle", false},
+		{"a record ending on an unknown line", idle + "\nnot_a_key: x", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := listedAgentBeadComplete(listedRecord(c.desc)); got != c.want {
+				t.Errorf("listedAgentBeadComplete = %v, want %v for:\n%s", got, c.want, c.desc)
+			}
+		})
+	}
+}
+
+// TestRosterAlwaysKeysAreTheFormatterAlwaysKeys: the lines the completeness
+// gate treats as always present are the lines beads.FormatAgentDescription
+// writes for a description with no optional field set, not a list this file
+// asserts. A line the formatter starts or stops writing unconditionally turns
+// this red, so the gate cannot drift from it.
+func TestRosterAlwaysKeysAreTheFormatterAlwaysKeys(t *testing.T) {
+	t.Parallel()
+	written := agentDescriptionKeys(beads.FormatAgentDescription("t", &beads.AgentFields{}))
+	always := map[string]bool{}
+	for _, field := range rosterAgentFields {
+		if field.always {
+			always[field.key] = true
+		}
+	}
+	if !reflect.DeepEqual(written, always) {
+		t.Errorf("the formatter always writes %v, rosterAgentFields marks %v always", written, always)
+	}
+	for _, field := range rosterAgentFields {
+		if !knownAgentKeys()[field.key] {
+			t.Errorf("rosterAgentFields names %q, which the formatter never writes", field.key)
+		}
 	}
 }
