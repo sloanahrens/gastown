@@ -50,10 +50,11 @@ type signSeam struct {
 	codesignOut string
 	partial     []byte
 
-	calls    []signCall
-	deadline time.Time
-	warnings []string
-	notes    []string
+	calls          []signCall
+	deadline       time.Time
+	unlockDeadline time.Time
+	warnings       []string
+	notes          []string
 }
 
 type signCall struct {
@@ -146,6 +147,7 @@ func (f *signSeam) exec(ctx context.Context, name string, args ...string) ([]byt
 	f.calls = append(f.calls, signCall{name: name, args: args})
 	switch name {
 	case "security":
+		f.unlockDeadline, _ = ctx.Deadline()
 		return nil, f.unlockErr
 	case "codesign":
 		f.deadline, _ = ctx.Deadline()
@@ -368,6 +370,73 @@ func TestSignRefusesATimeoutThatIsNotSeconds(t *testing.T) {
 	}
 }
 
+// The unlock is bounded by the same limit as codesign, so a hung unlock fails
+// the install the way a hung codesign does (gt-e2prc).
+func TestSignBoundsTheUnlockWithTheConfiguredLimit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		timeout string
+		want    time.Duration
+	}{
+		{name: "unset takes thirty seconds", timeout: "", want: 30 * time.Second},
+		{name: "whole seconds", timeout: "7", want: 7 * time.Second},
+		{name: "fractional seconds", timeout: "2.5", want: 2500 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSignSeam()
+			if tc.timeout != "" {
+				f.env["INSTALL_GT_SIGN_TIMEOUT"] = tc.timeout
+			}
+			if err := f.signer().Sign(signTmp, signSrc, signedName); err != nil {
+				t.Fatalf("Sign() = %v, want nil", err)
+			}
+			if got := f.unlockDeadline.Sub(f.now); got != tc.want {
+				t.Errorf("unlock deadline is %v from now, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSignRefusesATimeoutTooShortToMeasure(t *testing.T) {
+	t.Parallel()
+	// Both round to zero nanoseconds, which would be a deadline already past.
+	for _, raw := range []string{"1e-12", "4e-10"} {
+		t.Run(raw, func(t *testing.T) {
+			f := newSignSeam()
+			f.env["INSTALL_GT_SIGN_TIMEOUT"] = raw
+			err := f.signer().Sign(signTmp, signSrc, signedName)
+			want := fmt.Sprintf("signing failed: INSTALL_GT_SIGN_TIMEOUT=%q is below the 1ns the timeout can measure", raw)
+			if err == nil || err.Error() != want || !errors.Is(err, ErrSigningFailed) {
+				t.Fatalf("Sign() = %v, want the signing error %q: a timeout that rounds to no time fails the install", err, want)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("%d commands ran, want none: the timeout is judged before any is run", len(f.calls))
+			}
+		})
+	}
+}
+
+func TestSignRefusesAnEmptyPasswordBeforeUnlock(t *testing.T) {
+	t.Parallel()
+	for _, contents := range []string{"", "\n", "\n\n"} {
+		t.Run(fmt.Sprintf("%q", contents), func(t *testing.T) {
+			f := newSignSeam()
+			f.files[passwordPath] = []byte(contents)
+
+			err := f.signer().Sign(signTmp, signSrc, signedName)
+			want := "signing failed: password file " + passwordPath + " is empty"
+			if err == nil || err.Error() != want || !errors.Is(err, ErrSigningFailed) {
+				t.Fatalf("Sign() = %v, want the signing error %q", err, want)
+			}
+			if n := len(f.commandsNamed("security")); n != 0 {
+				t.Errorf("unlock ran %d times, want 0: an empty password is refused before the unlock", n)
+			}
+		})
+	}
+}
+
 func TestSignPassesAPathThatStartsWithADashAsAPath(t *testing.T) {
 	t.Parallel()
 	f := newSignSeam()
@@ -379,15 +448,17 @@ func TestSignPassesAPathThatStartsWithADashAsAPath(t *testing.T) {
 		t.Fatalf("Sign() = %v, want nil", err)
 	}
 	unlock := f.commandsNamed("security")
-	if len(unlock) != 1 || unlock[0].args[3] != "./-keys/gastown-signing.keychain-db" {
-		t.Errorf("unlock call = %q, want its keychain as ./-keys/gastown-signing.keychain-db", unlock)
+	wantUnlock := []string{"unlock-keychain", "-p", samplePassword, "./-keys/gastown-signing.keychain-db"}
+	if len(unlock) != 1 || !argsEqual(unlock[0].args, wantUnlock) {
+		t.Errorf("unlock call = %q, want %q", unlock, wantUnlock)
 	}
 	codesign := f.commandsNamed("codesign")
 	if len(codesign) != 1 {
 		t.Fatalf("codesign ran %d times, want 1", len(codesign))
 	}
-	if got := codesign[0].args[len(codesign[0].args)-1]; got != "./-install/.gt.tmp.1" {
-		t.Errorf("codesign temp argument = %q, want ./-install/.gt.tmp.1 so no option can read it", got)
+	wantCodesign := []string{"--force", "--keychain", "./-keys/gastown-signing.keychain-db", "-s", "gastown-dev-unattended", "-i", "com.gastown.gt", "./-install/.gt.tmp.1"}
+	if !argsEqual(codesign[0].args, wantCodesign) {
+		t.Errorf("codesign args = %q, want %q so no option can read the temp", codesign[0].args, wantCodesign)
 	}
 }
 
@@ -473,11 +544,9 @@ func TestSignResolvesTheSigningDirectory(t *testing.T) {
 				t.Fatalf("Sign() = %v, want nil", err)
 			}
 			unlock := f.commandsNamed("security")
-			if len(unlock) != 1 {
-				t.Fatalf("unlock ran %d times, want 1", len(unlock))
-			}
-			if got, want := unlock[0].args[3], tc.dir+"/gastown-signing.keychain-db"; got != want {
-				t.Errorf("unlocked keychain %q, want %q", got, want)
+			wantUnlock := []string{"unlock-keychain", "-p", samplePassword, tc.dir + "/gastown-signing.keychain-db"}
+			if len(unlock) != 1 || !argsEqual(unlock[0].args, wantUnlock) {
+				t.Errorf("unlock call = %q, want %q", unlock, wantUnlock)
 			}
 		})
 	}

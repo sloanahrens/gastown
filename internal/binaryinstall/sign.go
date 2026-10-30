@@ -114,11 +114,18 @@ func (s Signer) Sign(tmp, src, name string) error {
 		return signingError{"cannot read " + passwordFile}
 	}
 	password := strings.TrimRight(string(data), "\n")
+	if password == "" {
+		return signingError{"password file " + passwordFile + " is empty"}
+	}
 	// The password travels in this call's argv, where ps can see it for as long
 	// as the unlock takes. That is the script's behavior, kept as it is: moving
 	// the unlock off argv is a separate decision (gt-tpg0p.70). Its output is
-	// discarded, so the password is never printed.
-	if _, err := s.run(context.Background(), "security", "unlock-keychain", "-p", password, optionSafe(keychain)); err != nil {
+	// discarded, so the password is never printed. The unlock runs under the
+	// same limit as codesign, so a hung unlock fails the install (gt-e2prc).
+	unlockCtx, cancelUnlock := context.WithDeadline(context.Background(), s.now().Add(limit))
+	_, err = s.run(unlockCtx, "security", "unlock-keychain", "-p", password, optionSafe(keychain))
+	cancelUnlock()
+	if err != nil {
 		return signingError{"cannot unlock " + keychain}
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), s.now().Add(limit))
@@ -159,9 +166,11 @@ func (s Signer) signDir() (string, bool) {
 	return filepath.Join(town, ".runtime", "signing"), true
 }
 
-// timeout is the codesign limit in seconds from INSTALL_GT_SIGN_TIMEOUT, else
-// 30. A value that is not a positive number of seconds is an error, not a
-// silent default: the error names it and the install fails.
+// timeout is the codesign and unlock limit in seconds from
+// INSTALL_GT_SIGN_TIMEOUT, else 30. A value that is not a positive number of
+// seconds is an error, not a silent default: the error names it and the install
+// fails. So is one too short to hold a nanosecond: it would round to a zero
+// duration, a deadline already past (gt-e2prc).
 func (s Signer) timeout() (time.Duration, error) {
 	raw := s.getenv("INSTALL_GT_SIGN_TIMEOUT")
 	if raw == "" {
@@ -171,7 +180,11 @@ func (s Signer) timeout() (time.Duration, error) {
 	if err != nil || !(secs > 0) || secs > maxSignSeconds {
 		return 0, fmt.Errorf("INSTALL_GT_SIGN_TIMEOUT=%q is not a positive number of seconds", raw)
 	}
-	return time.Duration(secs * float64(time.Second)), nil
+	limit := time.Duration(secs * float64(time.Second))
+	if limit <= 0 {
+		return 0, fmt.Errorf("INSTALL_GT_SIGN_TIMEOUT=%q is below the 1ns the timeout can measure", raw)
+	}
+	return limit, nil
 }
 
 // restore puts tmp back to src's bytes and mode, the state a failed codesign
