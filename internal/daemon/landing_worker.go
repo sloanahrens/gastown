@@ -775,14 +775,32 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		AgentBeadID: func(polecat string) string {
 			return beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, rigName), rigName, polecat)
 		},
-		// The first-sight record the submission battery asks from, read from the
-		// clone this worker lands through (gt-l7ciu).
-		FirstSight: &land.SubmissionRecorder{
-			Path: land.SubmissionsSeenPath(townRoot), Git: git.NewGit(repo), Remote: landingRemote,
-			Warn: func(format string, args ...any) {
-				d.logger.Printf("landing_worker: %s: %s", rigName, fmt.Sprintf(format, args...))
+		// The first-sight records the submission battery asks from, read from
+		// the clone this worker lands through (gt-l7ciu), and the done event a
+		// sandbox seat could not write into this town's log (gt-1m9gr). The
+		// seat's Worker is trusted only once the bead's own assignee, which the
+		// sling wrote, names it.
+		FirstSight: &land.FirstSightComposite{Recorders: []land.FirstSight{
+			&land.SubmissionRecorder{
+				Path: land.SubmissionsSeenPath(townRoot), Git: git.NewGit(repo), Remote: landingRemote,
+				Warn: func(format string, args ...any) {
+					d.logger.Printf("landing_worker: %s: %s", rigName, fmt.Sprintf(format, args...))
+				},
 			},
-		},
+			&land.DoneEventRecorder{
+				TownRoot: townRoot,
+				Assignee: func(beadID string) (string, error) {
+					issue, err := bd.Show(beadID)
+					if err != nil {
+						return "", err
+					}
+					if issue == nil {
+						return "", fmt.Errorf("bead %s not found", beadID)
+					}
+					return issue.Assignee, nil
+				},
+			},
+		}},
 	}, nil
 }
 
