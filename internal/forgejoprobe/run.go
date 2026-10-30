@@ -55,7 +55,9 @@ var _ API = (*forgejo.Client)(nil)
 
 // Run is the probe's whole run and returns the process's exit code. The order is
 // the contract: every refusal happens before anything is pushed, and every exit
-// once the work has begun goes through Finish, so no stale record survives it.
+// once the work has begun goes through Finish, so no stale record survives it. A
+// canceled ctx, which the command cancels on SIGINT or SIGTERM, ends the run
+// through Finish as well, with ExitInterrupted.
 func Run(ctx context.Context, args []string, getenv func(string) string, s Streams, d Deps) int {
 	opts, err := Parse(args, getenv)
 	switch {
@@ -75,6 +77,9 @@ func Run(ctx context.Context, args []string, getenv func(string) string, s Strea
 	if _, err := d.LookPath("git"); err != nil {
 		fmt.Fprintln(s.Stderr, "forgejo-probe: git is not on PATH")
 		return ExitFailure
+	}
+	if d.Stat == nil {
+		d.Stat = os.Stat
 	}
 	p := &probeRun{ctx: ctx, opts: opts, getenv: getenv, s: s, d: d}
 	return p.run()
@@ -195,12 +200,8 @@ func (p *probeRun) cloneAndGate() error {
 // rigRepository reports whether the rig's own repository is present, which decides
 // whether the push rides a worktree of it (and so runs the rig's hooks).
 func (p *probeRun) rigRepository() (bool, error) {
-	stat := p.d.Stat
-	if stat == nil {
-		stat = os.Stat
-	}
 	bare := p.opts.Bare()
-	_, err := stat(bare)
+	_, err := p.d.Stat(bare)
 	switch {
 	case err == nil:
 		return true, nil
@@ -234,8 +235,13 @@ func (p *probeRun) dryRun(rigRepo bool) int {
 
 // pushAndWait pushes the candidate, waits for the gate's verdict on it and ends
 // the run through Finish. A red, timed-out or unreadable verdict prints the failing
-// job's log tail first, so the reader has the reason before the exit.
+// job's log tail first, so the reader has the reason before the exit. An interrupted
+// run prints no tail: there is no verdict for the tail to explain.
 func (p *probeRun) pushAndWait() int {
+	if p.ctx.Err() != nil {
+		p.Logf("interrupted before the push: nothing was pushed")
+		return Finish(p, false, PushedFromClone, ExitInterrupted)
+	}
 	opts := p.opts
 	p.pusher = &Pusher{
 		Git:        p.d.Git,
@@ -250,6 +256,12 @@ func (p *probeRun) pushAndWait() int {
 	}
 	mode, err := p.pusher.Push(p.sha)
 	if err != nil {
+		if p.ctx.Err() != nil {
+			// A signal can land mid-push, after the remote has taken the branch. The
+			// exit deletes it either way: a branch that never arrived answers that
+			// delete with 404, which counts as already gone.
+			p.branchCreated = true
+		}
 		return p.fail(err)
 	}
 	p.branchCreated = true
@@ -257,8 +269,11 @@ func (p *probeRun) pushAndWait() int {
 		opts.MainBranch, p.sha, opts.Repo, opts.Branch(), int64(opts.Timeout/time.Second), p.gate.Context())
 
 	verdict := Wait(p.ctx, p.api, p.d.Clock, opts.Owner, opts.Name, p.sha, p.gate.Context(), opts.Timeout, opts.PollInterval)
-	green := verdict.Outcome == Green
 	p.Logf("%s", verdict.Line(opts.Rig, p.gate.Context(), p.sha, opts.Timeout))
+	if verdict.Outcome == Interrupted {
+		return Finish(p, false, mode, ExitInterrupted)
+	}
+	green := verdict.Outcome == Green
 	rc := ExitOK
 	if !green {
 		rc = ExitFailure
@@ -269,9 +284,22 @@ func (p *probeRun) pushAndWait() int {
 
 // fail reports a run that cannot go on and ends it through Finish, so the probe
 // branch, the worktree and any stale record are dealt with as on every other exit.
+// A run that a signal cut short exits ExitInterrupted, whatever error the cut-short
+// call reported.
 func (p *probeRun) fail(err error) int {
 	p.Logf("%v", err)
+	if p.ctx.Err() != nil {
+		p.Logf("interrupted by a signal: cleaning up")
+		return Finish(p, false, PushedFromClone, ExitInterrupted)
+	}
 	return Finish(p, false, PushedFromClone, ExitFailure)
+}
+
+// cleanupContext is the context the exit's own calls run under. It outlives the
+// run's cancellation, since an interrupted run still has to clean up, and it is
+// bounded by callTimeout, so a hung server cannot hold the exit.
+func cleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), callTimeout)
 }
 
 // Logf writes one line of progress to stderr, prefixed with the command's name.
@@ -296,9 +324,13 @@ func (p *probeRun) BranchCreated() bool { return p.branchCreated }
 func (p *probeRun) Branch() string { return p.opts.Branch() }
 func (p *probeRun) Repo() string   { return p.opts.Repo }
 
-// DeleteBranch deletes the probe branch on the Forgejo copy.
+// DeleteBranch deletes the probe branch on the Forgejo copy. It runs under the
+// cleanup context, so an interrupted run still deletes the branch it may have
+// pushed.
 func (p *probeRun) DeleteBranch() error {
-	return p.api.DeleteBranch(p.ctx, p.opts.Owner, p.opts.Name, p.opts.Branch())
+	ctx, cancel := cleanupContext(p.ctx)
+	defer cancel()
+	return p.api.DeleteBranch(ctx, p.opts.Owner, p.opts.Name, p.opts.Branch())
 }
 
 // Bare is the rig's own repository, named when the hooks did not run.

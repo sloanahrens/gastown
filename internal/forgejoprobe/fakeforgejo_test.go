@@ -1,7 +1,9 @@
 package forgejoprobe
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -52,11 +54,18 @@ type fakeForgejo struct {
 	deleted []string
 }
 
-// RoundTrip answers one request from the routes the probe calls. Any other route
-// answers 404, so a call the probe should not make fails loudly.
+// RoundTrip answers one request from the routes the probe calls. A request whose
+// context was canceled fails before it is answered, as a real transport does, so a
+// call made under a canceled run's context fails here. Only cancellation is
+// honoured: a deadline is taken from the injected clock, which a test sets to a
+// fixed time, not from the wall clock a real transport compares it with. Any other
+// route answers 404, so a call the probe should not make fails loudly.
 func (f *fakeForgejo) RoundTrip(req *http.Request) (*http.Response, error) {
 	if f.transportErr != nil {
 		return nil, f.transportErr
+	}
+	if errors.Is(req.Context().Err(), context.Canceled) {
+		return nil, context.Canceled
 	}
 	path := strings.TrimPrefix(req.URL.EscapedPath(), "/api/v1")
 	f.calls = append(f.calls, fakeCall{

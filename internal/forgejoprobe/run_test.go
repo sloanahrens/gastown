@@ -66,12 +66,21 @@ type fakeRepoGit struct {
 	pushes      []string
 	// cloneErr fails the clone when set, as an unreachable GitHub does.
 	cloneErr error
+	// interrupt, when set, is the signal that cuts a push short: it runs as the
+	// push starts, and the push fails as git does when it is killed.
+	interrupt context.CancelFunc
+	// onClone, when set, runs as the clone finishes, so a case can signal the run
+	// between its clone and its push.
+	onClone func()
 }
 
 func (g *fakeRepoGit) Run(dir string, env []string, args ...string) (string, error) {
 	g.calls = append(g.calls, rigCall{dir: dir, env: slices.Clone(env), args: slices.Clone(args)})
 	switch args[0] {
 	case "clone":
+		if g.onClone != nil {
+			g.onClone()
+		}
 		return "", g.cloneErr
 	case "show":
 		if g.gateMissing {
@@ -119,6 +128,10 @@ func (g *fakeRepoGit) worktree(args []string) (string, error) {
 // push sends a refspec. From a worktree of the rig's repository the rig's hook
 // answers first; a refusal is the push's error, with the hook's own words.
 func (g *fakeRepoGit) push(dir, refspec string) error {
+	if g.interrupt != nil {
+		g.interrupt()
+		return errorString("signal: interrupt")
+	}
 	if _, remoteRef, ok := strings.Cut(refspec, ":"); ok && g.worktrees[dir] && g.hook != nil {
 		g.hookRuns = append(g.hookRuns, dir)
 		if err := g.hook(remoteRef); err != nil {
@@ -156,19 +169,27 @@ type runFixture struct {
 	env     map[string]string
 	rigRepo bool
 	noGit   bool
+	// ctx is the run's context; cancel is the signal a case fires.
+	ctx    context.Context
+	cancel context.CancelFunc
 	// mkdirErr and statErr fail the work directory and the rig repository's stat when set.
 	mkdirErr error
 	statErr  error
-	removed  []string
-	stdout   strings.Builder
-	stderr   strings.Builder
+	// rmErr fails the work directory's removal when set, as a busy directory does.
+	rmErr   error
+	removed []string
+	stdout  strings.Builder
+	stderr  strings.Builder
 }
 
 // newRunFixture is the default case: the rig's repository present, the copy's gate
 // the standard one, a green gate on the first status read, and the broker's token
 // in the environment.
 func newRunFixture() *runFixture {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &runFixture{
+		ctx:    ctx,
+		cancel: cancel,
 		git: &fakeRepoGit{
 			gateDoc:    runGateDoc,
 			sha:        runSHA,
@@ -227,7 +248,7 @@ func (fx *runFixture) deps() Deps {
 		},
 		RemoveAll: func(path string) error {
 			fx.removed = append(fx.removed, path)
-			return nil
+			return fx.rmErr
 		},
 	}
 }
@@ -235,7 +256,7 @@ func (fx *runFixture) deps() Deps {
 // run runs the probe with args against the fixture and returns its exit code.
 func (fx *runFixture) run(args []string) int {
 	getenv := func(key string) string { return fx.env[key] }
-	return Run(context.Background(), args, getenv, Streams{Stdout: &fx.stdout, Stderr: &fx.stderr}, fx.deps())
+	return Run(fx.ctx, args, getenv, Streams{Stdout: &fx.stdout, Stderr: &fx.stderr}, fx.deps())
 }
 
 // output is both streams, as a test reads them for what a run printed.
@@ -309,6 +330,7 @@ func TestRunHelp(t *testing.T) {
 				"(default: 15)",
 				"Exit codes:",
 				"3    green, but the rig's hooks were not exercised, so no record was written",
+				"130  interrupted by SIGINT or SIGTERM before a verdict",
 			} {
 				if !strings.Contains(fx.stdout.String(), want) {
 					t.Errorf("stdout = %q, want it to hold %q", fx.stdout.String(), want)
@@ -466,6 +488,88 @@ func TestRunNoRigRepository(t *testing.T) {
 	expect(t, !recorded, "a green run whose hooks did not run writes no record")
 }
 
+// TestRunWorkDirWarning holds the warning path of a work directory that will not
+// come off: the run still exits by its verdict and writes its record, and the
+// warning names the directory to remove by hand.
+func TestRunWorkDirWarning(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture()
+	fx.rmErr = errorString("device busy")
+	rc := fx.run(runArgs())
+	expect(t, rc == ExitOK, fmt.Sprintf("a green run whose work directory stays exits 0, got %d", rc))
+	expect(t, strings.Contains(fx.stderr.String(), "warning: could not remove the probe's work directory "+runWork+" (device busy); remove it by hand"),
+		"the warning names the work directory and the error")
+	_, recorded := fx.fsys.files[runRecord]
+	expect(t, recorded, "the record is still written: the verdict stands")
+}
+
+// TestRunInterrupted holds a run a signal cuts short. Its exit still deletes the
+// probe branch and unregisters the worktree, through a cleanup context the cancel
+// does not reach; it prints no log tail, writes no record and exits 130.
+func TestRunInterrupted(t *testing.T) {
+	t.Parallel()
+	// assertCleanedUp is what every interrupted run owes: the branch is deleted, the
+	// worktree unregistered and the work directory removed, with no record written.
+	assertCleanedUp := func(t *testing.T, fx *runFixture) {
+		t.Helper()
+		expect(t, slices.Equal(fx.forge.deleted, []string{runBranch}),
+			"the cleanup deletes the probe branch under a context the cancel does not reach")
+		expect(t, len(fx.git.added) == 1 && slices.Equal(fx.git.added, fx.git.removed),
+			"the worktree is unregistered")
+		expect(t, slices.Equal(fx.removed, []string{runWork}), "the work directory is removed")
+		_, recorded := fx.fsys.files[runRecord]
+		expect(t, !recorded, "an interrupted run writes no record")
+		expect(t, fx.forge.count(http.MethodGet, "/repos/acme/rig/actions/jobs/311/logs") == 0,
+			"an interrupted run reads no log tail")
+	}
+
+	t.Run("canceled during the wait", func(t *testing.T) {
+		t.Parallel()
+		fx := newRunFixture()
+		fx.forge.plan = []string{"pending"}
+		fx.clock.onSleep = fx.cancel
+		rc := fx.run(runArgs())
+		expect(t, rc == ExitInterrupted, fmt.Sprintf("an interrupted wait exits %d, got %d", ExitInterrupted, rc))
+		expect(t, strings.Contains(fx.stderr.String(), "interrupted before "+runContext+" reported"),
+			"the run names the interruption")
+		assertCleanedUp(t, fx)
+	})
+
+	t.Run("canceled during the push", func(t *testing.T) {
+		t.Parallel()
+		fx := newRunFixture()
+		fx.git.interrupt = fx.cancel
+		rc := fx.run(runArgs())
+		expect(t, rc == ExitInterrupted, fmt.Sprintf("an interrupted push exits %d, got %d", ExitInterrupted, rc))
+		expect(t, len(fx.git.pushes) == 0, "the push cut short sends no ref the fake remote keeps")
+		expect(t, fx.forge.reads == 0, "no status is read after a push cut short")
+		assertCleanedUp(t, fx)
+	})
+
+	t.Run("canceled after the clone, before the push, pushes nothing", func(t *testing.T) {
+		t.Parallel()
+		fx := newRunFixture()
+		fx.git.onClone = fx.cancel
+		rc := fx.run(runArgs())
+		expect(t, rc == ExitInterrupted, fmt.Sprintf("a run canceled before its push exits %d, got %d", ExitInterrupted, rc))
+		expect(t, len(fx.git.pushes) == 0, "a run canceled before its push pushes nothing")
+		expect(t, len(fx.forge.deleted) == 0, "a run that never pushed deletes no branch")
+		expect(t, strings.Contains(fx.stderr.String(), "interrupted before the push"), "the run names the interruption before the push")
+	})
+
+	t.Run("canceled before the run starts pushes nothing", func(t *testing.T) {
+		t.Parallel()
+		fx := newRunFixture()
+		fx.cancel()
+		rc := fx.run(runArgs())
+		expect(t, rc == ExitInterrupted, fmt.Sprintf("a run canceled up front exits %d, got %d", ExitInterrupted, rc))
+		expect(t, len(fx.git.pushes) == 0, "a canceled run pushes nothing")
+		expect(t, len(fx.forge.deleted) == 0, "a run that never pushed deletes no branch")
+		_, recorded := fx.fsys.files[runRecord]
+		expect(t, !recorded, "a canceled run writes no record")
+	})
+}
+
 // TestRunRenamedWorkflow is the context derived from the workflow's own name and
 // job, not from a fixed one.
 func TestRunRenamedWorkflow(t *testing.T) {
@@ -493,16 +597,6 @@ func TestRunRefusalsAndFailures(t *testing.T) {
 		msg    string
 		assert func(t *testing.T, fx *runFixture)
 	}{
-		{
-			name:  "a rig with no repository is green but exits 3 and writes no record",
-			rc:    ExitHooksNotExercised,
-			setup: func(fx *runFixture) { fx.rigRepo = false },
-			msg:   "no rig repository at " + runBare,
-			assert: func(t *testing.T, fx *runFixture) {
-				expect(t, strings.Contains(fx.stderr.String(), "NOT exercised"), "the run names that its hooks were NOT exercised")
-				expect(t, slices.Equal(fx.forge.deleted, []string{runBranch}), "the fallback push still deletes the branch")
-			},
-		},
 		{
 			name:  "a hook refusing the candidate fails the probe",
 			setup: func(fx *runFixture) { fx.git.hook = refuseLandBranches },
@@ -713,7 +807,7 @@ func TestRunRedTimeoutAndPending(t *testing.T) {
 		expect(t, rc == ExitFailure, "a silent gate exits 1")
 		expect(t, strings.Contains(fx.stderr.String(), "reported nothing"), "the timeout is reported")
 		expect(t, strings.Contains(fx.stderr.String(), "no workflow run tested"), "a silent gate reports there is no run to read")
-		expect(t, fx.forge.reads <= 4, "the wait is bounded by the timeout")
+		expect(t, fx.forge.reads == 3, "the wait reads at once, polls twice at the one-second interval, then gives up at the deadline")
 		expect(t, slices.Equal(fx.forge.deleted, []string{runBranch}), "the probe branch is deleted after a timeout")
 		_, recorded := fx.fsys.files[runRecord]
 		expect(t, !recorded, "a timed-out probe writes no record")

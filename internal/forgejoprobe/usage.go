@@ -32,6 +32,8 @@ Exit codes:
   1    the run failed, or the probe was red
   2    a refused command line
   3    green, but the rig's hooks were not exercised, so no record was written
+  130  interrupted by SIGINT or SIGTERM before a verdict: the probe branch, the
+       worktree and any stale record are cleaned up, and no record is written
 `,
 	DefaultAPIURL,
 	DefaultMainBranch,

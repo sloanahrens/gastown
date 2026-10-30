@@ -5,12 +5,19 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/steveyegge/gastown/internal/forgejoprobe"
 )
 
 func main() {
-	os.Exit(forgejoprobe.Run(context.Background(), os.Args[1:], os.Getenv,
+	// A SIGINT or SIGTERM cancels the run rather than killing the process, so the
+	// run's exit still deletes the probe branch, the worktree and any stale record.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	rc := forgejoprobe.Run(ctx, os.Args[1:], os.Getenv,
 		forgejoprobe.Streams{Stdout: os.Stdout, Stderr: os.Stderr},
-		forgejoprobe.SystemDeps()))
+		forgejoprobe.SystemDeps())
+	stop()
+	os.Exit(rc)
 }
