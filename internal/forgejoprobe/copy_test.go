@@ -52,6 +52,79 @@ const testGitHubURL = "https://github.com/acme/rig.git"
 // workflow, one job.
 const gateWorkflow = "name: ci\non: push\njobs:\n  gate:\n    runs-on: ubuntu-latest\n"
 
+// tokenPath is a 40-character token a forge can carry as a path segment.
+const tokenPath = "0123456789abcdef0123456789abcdef01234567"
+
+// redactRow is one URL and the error git echoes for it. echo names the URL in a
+// spelling redaction must catch; wantEcho is echo once redacted; secret is what
+// must not reach the error; header is how a push error names the URL itself.
+type redactRow struct {
+	name     string
+	rawURL   string
+	echo     string
+	secret   string
+	wantEcho string
+	header   string
+}
+
+// redactRows covers the spellings git prints a URL in: with its password, with a
+// token in the path, without its scheme, and a URL that does not parse.
+var redactRows = []redactRow{
+	{
+		name:     "a password in the URL and in git's echo",
+		rawURL:   "https://ci:s3cret@forgejo.example/acme/rig.git",
+		echo:     "fatal: unable to access 'https://ci:s3cret@forgejo.example/acme/rig.git/': refused",
+		secret:   "s3cret",
+		wantEcho: "fatal: unable to access '<repository URL>/': refused",
+		header:   "https://ci:xxxxx@forgejo.example/acme/rig.git",
+	},
+	{
+		name:     "a token carried as a path segment",
+		rawURL:   "https://forgejo.example/" + tokenPath + "/rig.git",
+		echo:     "fatal: unable to access 'https://forgejo.example/" + tokenPath + "/rig.git/': refused",
+		secret:   tokenPath,
+		wantEcho: "fatal: unable to access '<repository URL>/': refused",
+		header:   "<repository URL>",
+	},
+	{
+		name:     "the URL echoed without its scheme",
+		rawURL:   "https://forgejo.example/acme/rig.git",
+		echo:     "fatal: 'forgejo.example/acme/rig.git/' not found",
+		wantEcho: "fatal: '<repository URL>/' not found",
+		header:   "https://forgejo.example/acme/rig.git",
+	},
+	{
+		name:     "a URL that does not parse",
+		rawURL:   "https://ci:s3cret@forgejo.example/%zz/rig.git",
+		echo:     "fatal: unable to access 'https://ci:s3cret@forgejo.example/%zz/rig.git/': refused",
+		secret:   "s3cret",
+		wantEcho: "fatal: unable to access '<repository URL>/': refused",
+		header:   "<repository URL>",
+	},
+}
+
+// TestCloneCopyRedactsEveryForm pins the redaction of a failing clone: each
+// spelling of the URL that git echoes reaches the error redacted, and no secret
+// the URL carried does.
+func TestCloneCopyRedactsEveryForm(t *testing.T) {
+	t.Parallel()
+	for _, row := range redactRows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			g := &fakeGit{answers: map[string]gitAnswer{
+				"clone --quiet -- " + row.rawURL + " dest/copy": {err: errors.New(row.echo)},
+			}}
+			err := CloneCopy(g, row.rawURL, "dest/copy")
+			if want := "git clone failed: " + row.wantEcho; err == nil || err.Error() != want {
+				t.Fatalf("CloneCopy = %v, want %q", err, want)
+			}
+			if row.secret != "" && strings.Contains(err.Error(), row.secret) {
+				t.Fatalf("error carries a secret the URL held")
+			}
+		})
+	}
+}
+
 // TestCloneCopyIsFull pins the clone to git clone --quiet -- URL DEST, with no
 // --depth: Forgejo refuses a shallow push, and the -- keeps a URL from being
 // read as an option. A failing clone's error carries git's own output, and no
@@ -99,7 +172,9 @@ func TestCloneCopyIsFull(t *testing.T) {
 		if strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "ci:") {
 			t.Fatalf("error %q carries the URL's credentials", err.Error())
 		}
-		if want := "git clone failed: fatal: unable to access 'https://<redacted>@github.com/acme/rig.git/': timed out"; err.Error() != want {
+		// The host and path are redacted with the credentials: the spelling
+		// without a scheme is one of the forms git prints.
+		if want := "git clone failed: fatal: unable to access 'https://<redacted>@<repository URL>/': timed out"; err.Error() != want {
 			t.Fatalf("error = %q, want %q", err.Error(), want)
 		}
 	})

@@ -28,10 +28,38 @@ type Pusher struct {
 	worktree bool // a worktree of Bare was added and Cleanup must remove it
 }
 
-// Push sends sha to the Forgejo copy as the probe branch. A push the rig's hook
-// refuses fails with the hook's own output, which is the finding the probe
-// exists to produce.
-func (p *Pusher) Push(sha string) error {
+// PushMode says whether a push ran the rig's hooks. Its zero value is the
+// not-exercised one, so a result nobody assigned never reads as exercised.
+type PushMode int
+
+const (
+	// PushedFromClone is a push from the copy: no rig repository was present,
+	// so no hook ran. It is the zero value.
+	PushedFromClone PushMode = iota
+	// PushedFromWorktree is a push from a worktree of the rig's repository: the
+	// rig's hooks ran.
+	PushedFromWorktree
+)
+
+// HooksExercised reports whether the push ran the rig's hooks.
+func (m PushMode) HooksExercised() bool {
+	return m == PushedFromWorktree
+}
+
+// String names the mode for a verdict line. Push logs the rig repository's path
+// when the hooks did not run.
+func (m PushMode) String() string {
+	if m == PushedFromWorktree {
+		return "rig hooks exercised"
+	}
+	return "rig hooks NOT exercised: no rig repository"
+}
+
+// Push sends sha to the Forgejo copy as the probe branch and reports whether the
+// rig's hooks ran. A push the rig's hook refuses fails with the hook's own
+// output, which is the finding the probe exists to produce. On error the mode
+// is the zero value, PushedFromClone, which is not exercised.
+func (p *Pusher) Push(sha string) (PushMode, error) {
 	for _, v := range []struct{ what, value string }{
 		{"commit", sha},
 		{"git URL", p.GitURL},
@@ -40,37 +68,49 @@ func (p *Pusher) Push(sha string) error {
 		{"probe worktree", p.worktreePath()},
 	} {
 		if strings.HasPrefix(v.value, "-") {
-			return fmt.Errorf("refusing the %s: it starts with -", v.what)
+			return PushedFromClone, fmt.Errorf("refusing the %s: it starts with -", v.what)
 		}
 	}
 	_, err := p.stat(p.Bare)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("could not stat the rig repository %s: %w", p.Bare, err)
+		return PushedFromClone, fmt.Errorf("could not stat the rig repository %s: %w", p.Bare, err)
 	}
 	if err == nil {
 		return p.pushFromWorktree(sha)
 	}
 	p.log("warning: no rig repository at " + p.Bare + ", so the probe pushes from the clone and the rig's hooks were not exercised")
-	return p.push(p.Copy, sha, "refs/remotes/origin/"+p.MainBranch+":refs/heads/"+p.Branch)
+	if err := p.push(p.Copy, sha, "refs/remotes/origin/"+p.MainBranch+":refs/heads/"+p.Branch); err != nil {
+		return PushedFromClone, err
+	}
+	return PushedFromClone, nil
 }
 
 // pushFromWorktree cuts a detached worktree of the rig's repository at sha and
 // pushes from it. The worktree is remembered only once it exists, so Cleanup
 // removes nothing a failed add did not create.
-func (p *Pusher) pushFromWorktree(sha string) error {
+func (p *Pusher) pushFromWorktree(sha string) (PushMode, error) {
 	if _, err := p.Git.Run(p.Bare, nil, "rev-parse", "--verify", "--quiet", sha+"^{commit}"); err != nil {
-		return fmt.Errorf("the rig repository %s has no %s, the %s the probe would push; fetch %s in %s and run the probe again, since the hooks it must exercise live there",
-			p.Bare, sha, p.MainBranch, p.MainBranch, p.Bare)
+		// rev-parse exits 1 when the repository does not hold sha. Any other
+		// failure means the repository could not be read at all.
+		var exit interface{ ExitCode() int }
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return PushedFromClone, fmt.Errorf("the rig repository %s has no %s, the %s the probe would push; fetch %s in %s and run the probe again, since the hooks it must exercise live there",
+				p.Bare, sha, p.MainBranch, p.MainBranch, p.Bare)
+		}
+		return PushedFromClone, fmt.Errorf("could not check the rig repository %s for %s: %s", p.Bare, sha, redact(err.Error(), p.GitURL))
 	}
 	wt := p.worktreePath()
 	// LFS smudging is off, as internal/git's WorktreeAddDetached sets it: the
 	// worktree is cut for its .githooks, not for a checkout of the tree.
 	if _, err := p.Git.Run(p.Bare, []string{"GIT_LFS_SKIP_SMUDGE=1"}, "worktree", "add", "--detach", wt, sha); err != nil {
-		return fmt.Errorf("could not add a worktree of %s at %s under %s", p.Bare, sha, wt)
+		return PushedFromClone, fmt.Errorf("could not add a worktree of %s at %s under %s", p.Bare, sha, wt)
 	}
 	p.worktree = true
 	p.log("pushing from a throwaway worktree of " + p.Bare + ", so the rig's hooks run")
-	return p.push(wt, sha, sha+":refs/heads/"+p.Branch)
+	if err := p.push(wt, sha, sha+":refs/heads/"+p.Branch); err != nil {
+		return PushedFromClone, err
+	}
+	return PushedFromWorktree, nil
 }
 
 // push sends refspec from dir to the git URL. Its failure carries git's output,
@@ -121,10 +161,11 @@ func (p *Pusher) log(msg string) {
 }
 
 // redactedURL is the git URL as an error may carry it: net/url's Redacted form,
-// so the password of user:password@ never reaches a message.
+// so the password of user:password@ never reaches a message. A URL whose path
+// holds a token, or that does not parse, is named by a placeholder instead.
 func redactedURL(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil {
+	if err != nil || hasTokenSegment(u.Path) {
 		return "<repository URL>"
 	}
 	return u.Redacted()

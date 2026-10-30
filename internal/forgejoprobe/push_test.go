@@ -3,8 +3,10 @@ package forgejoprobe
 import (
 	"errors"
 	"io/fs"
+	"os/exec"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -55,6 +57,13 @@ func (g *rigGit) pushes() []string {
 	}
 	return dirs
 }
+
+// exitError is a git failure that carries its exit status, as the error execGit
+// returns for a git that exited does.
+type exitError struct{ code int }
+
+func (e exitError) Error() string { return "exit status " + strconv.Itoa(e.code) }
+func (e exitError) ExitCode() int { return e.code }
 
 const (
 	testBare    = "rig/.repo.git"
@@ -111,7 +120,7 @@ func TestPushFromWorktreeRunsTheHook(t *testing.T) {
 		g := &rigGit{answers: worktreeAnswers(), wt: testWT, refused: errors.New("exit status 1: " + hookText)}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		err := p.Push(testSHA)
+		_, err := p.Push(testSHA)
 		if err == nil || !strings.Contains(err.Error(), hookText) {
 			t.Fatalf("Push = %v, want the hook's refusal text", err)
 		}
@@ -131,7 +140,7 @@ func TestPushFromWorktreeRunsTheHook(t *testing.T) {
 		g := &rigGit{answers: worktreeAnswers(), wt: testWT}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		if err := p.Push(testSHA); err != nil {
+		if _, err := p.Push(testSHA); err != nil {
 			t.Fatalf("Push: %v", err)
 		}
 		if want := []string{testWT}; !reflect.DeepEqual(g.hookRuns, want) {
@@ -147,6 +156,51 @@ func TestPushFromWorktreeRunsTheHook(t *testing.T) {
 	})
 }
 
+// TestPushReportsItsMode pins the mode a push returns: the rig's hooks were
+// exercised only by a push from the worktree, and a refused push reports the
+// zero value, which is not exercised.
+func TestPushReportsItsMode(t *testing.T) {
+	t.Parallel()
+	t.Run("a push from the worktree exercised the hooks", func(t *testing.T) {
+		t.Parallel()
+		g := &rigGit{answers: worktreeAnswers(), wt: testWT}
+		var logs []string
+		mode, err := pushPusher(g, true, &logs).Push(testSHA)
+		if err != nil {
+			t.Fatalf("Push: %v", err)
+		}
+		if mode != PushedFromWorktree || !mode.HooksExercised() || mode.String() != "rig hooks exercised" {
+			t.Errorf("mode = %v (%q, exercised %t), want PushedFromWorktree, exercised", mode, mode, mode.HooksExercised())
+		}
+	})
+	t.Run("a push from the clone did not exercise the hooks", func(t *testing.T) {
+		t.Parallel()
+		g := &rigGit{answers: map[string]gitAnswer{
+			"push --quiet --force -- " + testPushURL + " refs/remotes/origin/main:refs/heads/" + testBranch: {},
+		}}
+		var logs []string
+		mode, err := pushPusher(g, false, &logs).Push(testSHA)
+		if err != nil {
+			t.Fatalf("Push: %v", err)
+		}
+		if mode != PushedFromClone || mode.HooksExercised() || mode.String() != "rig hooks NOT exercised: no rig repository" {
+			t.Errorf("mode = %v (%q, exercised %t), want PushedFromClone, not exercised", mode, mode, mode.HooksExercised())
+		}
+	})
+	t.Run("a refused push reports the zero value, not exercised", func(t *testing.T) {
+		t.Parallel()
+		g := &rigGit{answers: worktreeAnswers(), wt: testWT, refused: errors.New("exit status 1")}
+		var logs []string
+		mode, err := pushPusher(g, true, &logs).Push(testSHA)
+		if err == nil {
+			t.Fatal("Push succeeded, want the refusal")
+		}
+		if mode != PushMode(0) || mode.HooksExercised() {
+			t.Errorf("mode = %v on a refused push, want the zero value, not exercised", mode)
+		}
+	})
+}
+
 // TestPushFallsBackToTheCloneLoudly pins the push with no rig repository: the
 // exact warning, the copy's refspec, no worktree and no hook.
 func TestPushFallsBackToTheCloneLoudly(t *testing.T) {
@@ -156,7 +210,7 @@ func TestPushFallsBackToTheCloneLoudly(t *testing.T) {
 	}}
 	var logs []string
 	p := pushPusher(g, false, &logs)
-	if err := p.Push(testSHA); err != nil {
+	if _, err := p.Push(testSHA); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	want := "warning: no rig repository at rig/.repo.git, so the probe pushes from the clone and the rig's hooks were not exercised"
@@ -177,21 +231,43 @@ func TestPushFallsBackToTheCloneLoudly(t *testing.T) {
 	}
 }
 
-// TestPushRefusesAnUnheldCommit pins the refusal of a rig repository that does
-// not hold the commit: nothing is pushed and no worktree is cut.
+// TestPushRefusesAnUnheldCommit pins the two refusals of a rig repository that
+// cannot give the commit: rev-parse exiting 1 says it does not hold it, and any
+// other failure says the repository could not be read. Either way nothing is
+// pushed and no worktree is cut.
 func TestPushRefusesAnUnheldCommit(t *testing.T) {
 	t.Parallel()
-	g := &rigGit{answers: map[string]gitAnswer{
-		"rev-parse --verify --quiet " + testSHA + "^{commit}": {err: errors.New("exit status 1")},
-	}}
-	var logs []string
-	err := pushPusher(g, true, &logs).Push(testSHA)
-	want := "the rig repository rig/.repo.git has no 0123abcd, the main the probe would push; fetch main in rig/.repo.git and run the probe again, since the hooks it must exercise live there"
-	if err == nil || err.Error() != want {
-		t.Fatalf("Push = %v, want %q", err, want)
+	cases := []struct {
+		name    string
+		err     error
+		wantErr string
+	}{
+		{
+			name:    "the repository does not hold the commit",
+			err:     exitError{code: 1},
+			wantErr: "the rig repository rig/.repo.git has no 0123abcd, the main the probe would push; fetch main in rig/.repo.git and run the probe again, since the hooks it must exercise live there",
+		},
+		{
+			name:    "the repository could not be read",
+			err:     exitError{code: 128},
+			wantErr: "could not check the rig repository rig/.repo.git for 0123abcd: exit status 128",
+		},
 	}
-	if len(g.calls) != 1 || g.calls[0].dir != testBare {
-		t.Errorf("calls = %+v, want only the rev-parse in %q", g.calls, testBare)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := &rigGit{answers: map[string]gitAnswer{
+				"rev-parse --verify --quiet " + testSHA + "^{commit}": {err: tc.err},
+			}}
+			var logs []string
+			_, err := pushPusher(g, true, &logs).Push(testSHA)
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("Push = %v, want %q", err, tc.wantErr)
+			}
+			if len(g.calls) != 1 || g.calls[0].dir != testBare {
+				t.Errorf("calls = %+v, want only the rev-parse in %q", g.calls, testBare)
+			}
+		})
 	}
 }
 
@@ -217,7 +293,7 @@ func TestPushRefusesADashValue(t *testing.T) {
 			var logs []string
 			p := pushPusher(g, true, &logs)
 			tc.apply(p)
-			if err := p.Push(tc.sha); err == nil || !strings.Contains(err.Error(), "starts with -") {
+			if _, err := p.Push(tc.sha); err == nil || !strings.Contains(err.Error(), "starts with -") {
 				t.Fatalf("Push = %v, want a refusal of the dash value", err)
 			}
 			if len(g.calls) != 0 {
@@ -235,7 +311,7 @@ func TestPushFailsClosedOnStatError(t *testing.T) {
 	var logs []string
 	p := pushPusher(g, true, &logs)
 	p.Stat = func(string) (fs.FileInfo, error) { return nil, errors.New("permission denied") }
-	if err := p.Push(testSHA); err == nil || !strings.Contains(err.Error(), "could not stat the rig repository rig/.repo.git") {
+	if _, err := p.Push(testSHA); err == nil || !strings.Contains(err.Error(), "could not stat the rig repository rig/.repo.git") {
 		t.Fatalf("Push = %v, want a stat refusal", err)
 	}
 	if len(g.calls) != 0 || len(logs) != 0 {
@@ -255,7 +331,7 @@ func TestPushReportsItsFailures(t *testing.T) {
 		g := &rigGit{answers: answers, wt: testWT}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		err := p.Push(testSHA)
+		_, err := p.Push(testSHA)
 		if want := "could not add a worktree of rig/.repo.git at 0123abcd under work/wt"; err == nil || err.Error() != want {
 			t.Fatalf("Push = %v, want %q", err, want)
 		}
@@ -282,7 +358,7 @@ func TestPushReportsItsFailures(t *testing.T) {
 		var logs []string
 		p := pushPusher(g, true, &logs)
 		p.GitURL = credURL
-		err := p.Push(testSHA)
+		_, err := p.Push(testSHA)
 		if err == nil {
 			t.Fatal("Push succeeded, want the refusal")
 		}
@@ -296,6 +372,73 @@ func TestPushReportsItsFailures(t *testing.T) {
 	})
 }
 
+// TestPushRedactsEveryForm pins the refused push's error for each URL in
+// redactRows: the URL's header and git's echo are both redacted, and no secret
+// the URL carried reaches the error.
+func TestPushRedactsEveryForm(t *testing.T) {
+	t.Parallel()
+	for _, row := range redactRows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			g := &rigGit{answers: worktreeAnswers(), wt: testWT, refused: errors.New(row.echo)}
+			var logs []string
+			p := pushPusher(g, true, &logs)
+			p.GitURL = row.rawURL
+			_, err := p.Push(testSHA)
+			want := "git push of main (0123abcd) to " + row.header + " as land/probe-rig failed from work/wt: " + row.wantEcho
+			if err == nil || err.Error() != want {
+				t.Fatalf("Push = %v, want %q", err, want)
+			}
+			if row.secret != "" && strings.Contains(err.Error(), row.secret) {
+				t.Fatalf("error carries a secret the URL held")
+			}
+		})
+	}
+}
+
+// TestPushChildrenNeverInheritTheTokens pins the environment of every git the
+// Pusher starts: none carries the probe's credentials or a repository pin, even
+// when the probe's own environment holds them. The four git calls are the
+// rev-parse, the worktree add, the push and the worktree remove. t.Setenv keeps
+// this test sequential.
+func TestPushChildrenNeverInheritTheTokens(t *testing.T) {
+	t.Setenv("GT_AUTH_FORGEJO_TOKEN", "broker-token")
+	t.Setenv("FORGEJO_ADMIN_TOKEN", "admin-token")
+	t.Setenv("FOO_TOKEN", "foo-token")
+	t.Setenv("GIT_DIR", "/elsewhere/.git")
+	t.Setenv("GIT_INDEX_FILE", "/elsewhere/index")
+	t.Setenv("GIT_WORK_TREE", "/elsewhere/tree")
+	scrubbed := []string{"GT_AUTH_FORGEJO_TOKEN", "FORGEJO_ADMIN_TOKEN", "FOO_TOKEN", "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"}
+
+	var argvs [][]string
+	var envs [][]string
+	g := execGit{run: func(cmd *exec.Cmd) error {
+		argvs = append(argvs, cmd.Args[1:])
+		envs = append(envs, cmd.Env)
+		return nil
+	}}
+	var logs []string
+	p := pushPusher(g, true, &logs)
+	if _, err := p.Push(testSHA); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if err := p.Cleanup(); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if len(argvs) != 4 {
+		t.Fatalf("git ran %d times, want the four a worktree push starts: %q", len(argvs), argvs)
+	}
+	for i, env := range envs {
+		for _, kv := range env {
+			key, _, _ := strings.Cut(kv, "=")
+			if slices.Contains(scrubbed, key) {
+				// Name the key only: a value here may be a credential.
+				t.Errorf("git %q inherited %s", argvs[i], key)
+			}
+		}
+	}
+}
+
 // TestCleanupRemovesNeverPrunes pins Cleanup: it removes the worktree and never
 // prunes, a failed remove names the prune remedy in its warning, and a second
 // call does nothing.
@@ -306,7 +449,7 @@ func TestCleanupRemovesNeverPrunes(t *testing.T) {
 		g := &rigGit{answers: worktreeAnswers(), wt: testWT}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		if err := p.Push(testSHA); err != nil {
+		if _, err := p.Push(testSHA); err != nil {
 			t.Fatalf("Push: %v", err)
 		}
 		if err := p.Cleanup(); err != nil {
@@ -329,7 +472,7 @@ func TestCleanupRemovesNeverPrunes(t *testing.T) {
 		g := &rigGit{answers: answers, wt: testWT}
 		var logs []string
 		p := pushPusher(g, true, &logs)
-		if err := p.Push(testSHA); err != nil {
+		if _, err := p.Push(testSHA); err != nil {
 			t.Fatalf("Push: %v", err)
 		}
 		if err := p.Cleanup(); err == nil {
