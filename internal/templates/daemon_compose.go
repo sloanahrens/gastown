@@ -51,6 +51,21 @@ type ComposeSpec struct {
 	// local machine, which inside the container is the container itself; so is
 	// a loopback address, for the same reason.
 	DoltHost string
+
+	// Scratch renders the scratch project: its own engine, networks, volumes and
+	// Dolt server, and the --scratch-town flag that lets the container
+	// entrypoint install the scratch town. No name in it is one the live render
+	// carries.
+	Scratch bool
+
+	// ScratchDoltImage is the Dolt server image the scratch project runs. It is
+	// required when Scratch is set; the scratch spec passes DoltServerImage.
+	ScratchDoltImage string
+
+	// LiveTownRoot is the live town's root, which a scratch spec must not
+	// mount. It is required when Scratch is set, so a scratch render is always
+	// checked against the live town it could otherwise reach.
+	LiveTownRoot string
 }
 
 // MinimumStopGrace is the shortest stop_grace_period RenderDaemonCompose
@@ -79,6 +94,54 @@ const (
 	defaultNetwork = "default"
 )
 
+// composeNames are the names one project's engine and networks take. The live
+// project's are the sweep names above. A scratch project takes its own, so no
+// name in its render is one the live render carries.
+type composeNames struct {
+	engine  string // the engine's service name, which DOCKER_HOST reaches
+	network string // the internal network the engine, the daemon and the scratch Dolt share
+	volume  string // the engine's data volume
+	egress  string // the network the daemon reaches the outside through
+}
+
+var (
+	liveNames    = composeNames{engine: dindService, network: dindNetwork, volume: dindVolume, egress: defaultNetwork}
+	scratchNames = composeNames{engine: "scratch-dind", network: "scratch-internal", volume: "scratch_dind_data", egress: "scratch-egress"}
+)
+
+// The scratch project's Dolt server, which only the scratch render has. It
+// joins the internal network alone and publishes no port.
+const (
+	scratchDoltService  = "scratch-dolt"
+	scratchDoltVolume   = "scratch_dolt_data"
+	scratchDoltDataPath = "/var/lib/dolt"
+)
+
+// scratchDaemonCommand is the daemon's command in the scratch project: the
+// container entrypoint's --scratch-town flag, the one way a container asks for
+// its scratch town's install. The live project passes nothing. After a failed
+// install every later start refuses until the operator removes
+// .gt-install-incomplete and what the install left, from the host side of the
+// scratch directory.
+const scratchDaemonCommand = `    # After a failed scratch install every start refuses until the operator
+    # removes .gt-install-incomplete and what the install left, from the host
+    # side of the scratch directory.
+    command: ["--scratch-town"]
+`
+
+// scratchDoltBody is the scratch project's Dolt server service. It has no
+// ports, so the only way in is the internal network the daemon also joins.
+const scratchDoltBody = `  %[1]s:
+    image: %[2]q
+    restart: unless-stopped
+    volumes:
+      - type: volume
+        source: %[3]s
+        target: %[4]s
+    networks:
+      - %[5]s
+`
+
 // daemonComposeBody renders the daemon service and the Docker engine its sweep
 // drives. Every spec value takes a %q, quoted so a town root with a space or a
 // colon cannot change the YAML's shape, and passes through composeLiteral so a
@@ -106,7 +169,7 @@ services:
     restart: unless-stopped
     stop_grace_period: %[3]q
     working_dir: %[4]q
-    depends_on:
+%[12]s    depends_on:
       %[5]s:
         condition: service_healthy
     environment:
@@ -141,13 +204,13 @@ services:
         target: %[10]s
     networks:
       - %[7]s
-networks:
+%[13]snetworks:
   %[11]s:
   %[7]s:
     internal: true
 volumes:
   %[9]s:
-`
+%[14]s`
 
 // RenderDaemonCompose renders the compose file the container supervisor
 // starts, stops and inspects: the daemon service and the Docker engine its
@@ -172,18 +235,36 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		return nil, err
 	}
 
+	names := liveNames
+	var command, dolt, doltVolume string
+	if s.Scratch {
+		names = scratchNames
+		command = scratchDaemonCommand
+		dolt = fmt.Sprintf(scratchDoltBody,
+			scratchDoltService,
+			composeLiteral(s.ScratchDoltImage),
+			scratchDoltVolume,
+			scratchDoltDataPath,
+			names.network,
+		)
+		doltVolume = "  " + scratchDoltVolume + ":\n"
+	}
+
 	out := fmt.Sprintf(daemonComposeBody,
 		composeLiteral(s.Image),
 		composeLiteral(s.ContainerName),
 		s.StopGrace.String(),
 		composeLiteral(s.TownRoot),
-		dindService,
+		names.engine,
 		config.SupervisorContainer,
-		dindNetwork,
+		names.network,
 		composeLiteral(DindImage),
-		dindVolume,
+		names.volume,
 		dindDataPath,
-		defaultNetwork,
+		names.egress,
+		command,
+		dolt,
+		doltVolume,
 	)
 	return []byte(out), nil
 }
@@ -218,7 +299,34 @@ func (s ComposeSpec) validate() error {
 	case s.DoltHost == "":
 		return fmt.Errorf("compose spec: DoltHost is empty; pass town.json's dolt.container_host or dolt.host resolved, and an empty dolt.host is the local machine, which inside the container is the container itself")
 	}
-	return checkDoltHost(s.DoltHost)
+	if err := checkDoltHost(s.DoltHost); err != nil {
+		return err
+	}
+	if s.Scratch {
+		return s.validateScratch()
+	}
+	return nil
+}
+
+// validateScratch refuses a scratch spec that could reach the live town: the
+// live town's root, container name or compose project. The container name and
+// project are the config defaults a live daemon runs under. The live root is
+// the caller's, passed as LiveTownRoot, because no constant names it, so an
+// empty one is refused rather than compared as "no root".
+func (s ComposeSpec) validateScratch() error {
+	switch {
+	case s.LiveTownRoot == "":
+		return fmt.Errorf("compose spec: LiveTownRoot is empty; a scratch spec is checked against the live town root, so the live root must be named")
+	case strings.EqualFold(filepath.Clean(s.TownRoot), filepath.Clean(s.LiveTownRoot)):
+		return fmt.Errorf("compose spec: scratch TownRoot %q is the live town root; the scratch project mounts its own directory, never the live one", s.TownRoot)
+	case s.ContainerName == config.DefaultContainerName:
+		return fmt.Errorf("compose spec: scratch ContainerName %q is the live daemon's container name", s.ContainerName)
+	case s.Project == config.DefaultComposeProject:
+		return fmt.Errorf("compose spec: scratch Project %q is the live compose project", s.Project)
+	case s.ScratchDoltImage == "":
+		return fmt.Errorf("compose spec: ScratchDoltImage is empty; the scratch project runs its own Dolt server, at DoltServerImage")
+	}
+	return nil
 }
 
 // checkDoltHost refuses a loopback endpoint: the container's own loopback is
