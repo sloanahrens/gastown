@@ -1699,11 +1699,26 @@ func overrunSeatSessionSeams(d *Daemon, f *overrunFake) overrunSeams {
 	return s
 }
 
-// overrunStopSeatSession is the tmux session name of seat, built as the seat
-// identity builds it for every other caller.
-func overrunStopSeatSession(seat overrunSeat) string {
-	supSeat := supervisor.SeatFor(seat.Rig, constants.RolePolecat, seat.Polecat)
-	return supSeat.SessionName()
+// overrunStopPrefix is the rig prefix the stop's supervisor tests pin for the
+// seat's rig, so the session they seed is the one the kill must reach. The
+// process-wide registry the daemon would otherwise read is shared with every
+// parallel test.
+const overrunStopPrefix = "gt"
+
+// overrunStopSessionName is the tmux session of stopSeat under that prefix.
+var overrunStopSessionName = overrunStopPrefix + "-" + stopSeat.Polecat
+
+// seedOverrunStopSession pins the daemon's rig prefix and seeds the seat's
+// session, returning the tmux the stop's kill must reach.
+func seedOverrunStopSession(t *testing.T, d *Daemon) *fakeTmux {
+	t.Helper()
+	reg := session.NewPrefixRegistry()
+	reg.Register(stopSeat.Rig, overrunStopPrefix)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	tm := newFakeTmux(newFixedClock())
+	tm.addSession(overrunStopSessionName, "", overrunSlung)
+	d.tmux = tm
+	return tm
 }
 
 // overrunSupervisorActions reads the supervisor's action log.
@@ -1736,16 +1751,13 @@ func overrunSupervisorActions(t *testing.T, townRoot string) []supervisor.Action
 func TestOverrunGuardStop_GoesThroughTheSupervisor(t *testing.T) {
 	t.Parallel()
 	d, buf := newOverrunDaemon(t, false)
-	tm := newFakeTmux(newFixedClock())
-	name := overrunStopSeatSession(stopSeat)
-	tm.addSession(name, "", overrunSlung)
-	d.tmux = tm
+	tm := seedOverrunStopSession(t, d)
 	f := newOverrunFake(21*time.Minute, stopSeat)
 
 	d.runOverrunGuard(overrunSeatSessionSeams(d, f))
 
-	if alive, _ := tm.HasSession(name); alive {
-		t.Fatalf("session %s still running after the stop: %s", name, buf.String())
+	if alive, _ := tm.HasSession(overrunStopSessionName); alive {
+		t.Fatalf("session %s still running after the stop: %s", overrunStopSessionName, buf.String())
 	}
 	wantReason := "overrun (20 minute rule) on " + stopSeat.Bead
 	lines := overrunSupervisorActions(t, d.config.TownRoot)
@@ -1754,8 +1766,8 @@ func TestOverrunGuardStop_GoesThroughTheSupervisor(t *testing.T) {
 	}
 	got := lines[0]
 	if got.Verb != "kill" || got.Actor != overrunActor || got.Outcome != "done" ||
-		got.Reason != wantReason || got.Session != name {
-		t.Errorf("action line = %+v, want a done kill of %s by %s for %q", got, name, overrunActor, wantReason)
+		got.Reason != wantReason || got.Session != overrunStopSessionName {
+		t.Errorf("action line = %+v, want a done kill of %s by %s for %q", got, overrunStopSessionName, overrunActor, wantReason)
 	}
 	// The stop ran to its end: the bead was handed back with its branch.
 	if len(f.handedBack) != 1 || !strings.HasPrefix(f.handedBack[0], stopSeat.Bead+" "+stopSeat.Branch) {
@@ -1770,10 +1782,7 @@ func TestOverrunGuardStop_EstopRefusesTheStop(t *testing.T) {
 	t.Parallel()
 	for _, which := range []string{"town", "rig"} {
 		d, buf := newOverrunDaemon(t, false)
-		tm := newFakeTmux(newFixedClock())
-		name := overrunStopSeatSession(stopSeat)
-		tm.addSession(name, "", overrunSlung)
-		d.tmux = tm
+		tm := seedOverrunStopSession(t, d)
 		if which == "town" {
 			if err := estop.Activate(d.config.TownRoot, estop.TriggerManual, "operator halt"); err != nil {
 				t.Fatal(err)
@@ -1785,8 +1794,8 @@ func TestOverrunGuardStop_EstopRefusesTheStop(t *testing.T) {
 
 		d.runOverrunGuard(overrunSeatSessionSeams(d, f))
 
-		if alive, _ := tm.HasSession(name); !alive {
-			t.Fatalf("%s e-stop: session %s was stopped under the e-stop", which, name)
+		if alive, _ := tm.HasSession(overrunStopSessionName); !alive {
+			t.Fatalf("%s e-stop: session %s was stopped under the e-stop", which, overrunStopSessionName)
 		}
 		if !strings.Contains(buf.String(), stopSeat.Bead+" refused: supervisor refused: e-stop is active") {
 			t.Errorf("%s e-stop: log lacks the refusal line with the supervisor's text:\n%s", which, buf.String())
