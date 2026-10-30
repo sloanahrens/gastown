@@ -1251,3 +1251,37 @@ func padEventLog(t *testing.T, town string, size int64) {
 		t.Fatal(err)
 	}
 }
+
+// TestLandingsFileAppendFloorsNothingWhenTheEventLogCannotBeRead: the dispatch
+// is a read like any other, so a log the landing cannot read costs the time and
+// the landing is written anyway, the way an unreadable span log does.
+func TestLandingsFileAppendFloorsNothingWhenTheEventLogCannotBeRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	f.Spans = spans.New(spans.DefaultDir(town), nil)
+	// A directory where the event log belongs: opening it succeeds and reading
+	// it fails, the shape of a log that is there but cannot be read.
+	if err := os.MkdirAll(filepath.Join(town, events.EventsFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seedFirstSight(t, town, "gt-abc", "h1", spanEpoch.Add(30*time.Minute))
+
+	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+		t.Fatalf("AppendSubmitted with an unreadable event log: %v; the landing must still be written", err)
+	}
+
+	rec, _ := lastLine(t, f)
+	if rec.LandedCommit != "c1" || rec.PolecatSecs != 0 || rec.PolecatAttempts != nil {
+		t.Errorf("record = %+v; want the landing with no dispatch floor", rec)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "no dispatch floor") {
+		t.Errorf("logged = %q, want one line saying the floor could not be read", logged)
+	}
+}
