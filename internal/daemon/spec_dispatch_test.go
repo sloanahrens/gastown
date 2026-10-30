@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -895,6 +898,158 @@ func TestSpecDispatchHeldTickLogsNoDuration(t *testing.T) {
 
 	if n := countContaining(lines(), "tick took"); n != 0 {
 		t.Errorf("tick took lines = %d for a held tick, want none: %v", n, lines())
+	}
+}
+
+// The 'tick took' line ends with the bd calls each phase made, after the times
+// it already named, so a phase that is slow is also read by what it cost
+// (gt-139dp).
+func TestSpecDispatchTickTookLineNamesItsPhaseCalls(t *testing.T) {
+	t.Parallel()
+	const report = `{"candidates": 3, "roster_ns": 1000000000, "board_ns": 2000000000,
+		"candidates_ns": 30000000000, "sling_ns": 5000000000,
+		"roster_calls": 41, "board_calls": 20, "candidates_calls": 15}`
+	r, err := parseSpecDispatchReport(wireOut(report))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := specDispatchTookLine(r, 40*time.Second)
+	const want = "tick took 40s (roster 1s, board 2s, candidates 3 30s, sling 5s); roster 41 calls, board 20 calls, candidates 15 calls"
+	if got != want {
+		t.Fatalf("tick took line = %q, want %q", got, want)
+	}
+	if !strings.HasSuffix(got, "roster 41 calls, board 20 calls, candidates 15 calls") {
+		t.Errorf("tick took line %q does not end with the phase calls", got)
+	}
+}
+
+// A tick's census file is logged once the tick returns, as the daemon's census
+// line, naming the busiest callers of the subprocess's bd reads (gt-139dp).
+func TestSpecDispatchLogsItsCensus(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLIFor(func(c cliCall) cliReply {
+		rows := []beads.CensusRow{
+			{Verb: "show", Caller: "cmd.specRoster", Count: 30},
+			{Verb: "mol wisp", Caller: "cmd.specBoard", Count: 12},
+		}
+		if err := beads.WriteCensusSink(dispatch.SpecCensusPath(c.dir), rows); err != nil {
+			t.Errorf("writing the tick's census: %v", err)
+		}
+		return cliReply{stdout: string(wireOut(`{"candidates": 1}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	d.runSpecDispatch()
+
+	const want = "spec_dispatch: bd census (spec dispatch): total=42 top: show@cmd.specRoster=30 mol wisp@cmd.specBoard=12"
+	if n := countContaining(lines(), want); n != 1 {
+		t.Errorf("census lines = %d, want one %q: %v", n, want, lines())
+	}
+}
+
+// The census file is this tick's alone: rows a killed tick left behind are
+// cleared before the next one runs, so a tick that wrote nothing logs nothing
+// rather than the last one's calls (gt-139dp).
+func TestSpecDispatchKilledTickLogsNoStaleCensus(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{code: 1, stderr: "signal: killed"} })
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	stale := []beads.CensusRow{{Verb: "show", Caller: "cmd.specRoster", Count: 9}}
+	if err := beads.WriteCensusSink(d.specDispatchCensusPath(), stale); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runSpecDispatch()
+
+	if n := countContaining(lines(), "bd census (spec dispatch)"); n != 0 {
+		t.Errorf("census lines = %d after a killed tick, want none: %v", n, lines())
+	}
+}
+
+// A clean tick that leaves no census file is reported: the tick is told where
+// to write, so a missing file is a census lost, not a tick that read nothing
+// (gt-139dp).
+func TestSpecDispatchReportsACensusItCannotRead(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply {
+		return cliReply{stdout: string(wireOut(`{"candidates": 1}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	d.runSpecDispatch()
+
+	path := d.specDispatchCensusPath()
+	if n := countContaining(lines(), "bd census (spec dispatch): unreadable at", path, "no such file"); n != 1 {
+		t.Errorf("census error lines = %d, want one naming the path and the error: %v", n, lines())
+	}
+}
+
+// A census file the daemon cannot clear costs observability and not the tick:
+// the tick still runs, and one line names the path and the clear's error and
+// marks the census unavailable, so the file's rows are not reported as this
+// tick's (gt-139dp).
+func TestSpecDispatchRunsWhenTheCensusCannotBeCleared(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply {
+		return cliReply{stdout: string(wireOut(`{"candidates": 1, "roster_ns": 1000000}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	stale := []beads.CensusRow{{Verb: "show", Caller: "cmd.specRoster", Count: 9}}
+	if err := beads.WriteCensusSink(d.specDispatchCensusPath(), stale); err != nil {
+		t.Fatal(err)
+	}
+	clearErr := errors.New("permission denied")
+	removals := 0
+	d.specCensusRemove = func(string) error {
+		removals++
+		return clearErr
+	}
+
+	d.runSpecDispatch()
+
+	if got := len(fake.argvs("spec", "dispatch")); got != 1 {
+		t.Errorf("tick runs = %d, want the tick to run once despite the census: %v", got, lines())
+	}
+	if n := countContaining(lines(), "tick took"); n != 1 {
+		t.Errorf("tick took lines = %d, want the tick to have reported: %v", n, lines())
+	}
+	if removals != 1 {
+		t.Errorf("census removals = %d, want one per tick", removals)
+	}
+	if n := countContaining(lines(), "bd census (spec dispatch): unavailable", d.specDispatchCensusPath(), clearErr.Error()); n != 1 {
+		t.Errorf("unavailable census lines = %d, want one naming the path and the error: %v", n, lines())
+	}
+	if n := countContaining(lines(), "total=9"); n != 0 {
+		t.Errorf("stale census rows logged %d times, want none: %v", n, lines())
+	}
+}
+
+// A failed tick whose census file the tick left unreadable is reported with the
+// path and the read error, not passed over in silence (gt-139dp).
+func TestSpecDispatchReportsAFailedTicksUnreadableCensus(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLIFor(func(c cliCall) cliReply {
+		path := dispatch.SpecCensusPath(c.dir)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Errorf("making the census directory: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("not-a-row\n"), 0o600); err != nil {
+			t.Errorf("planting an unreadable census: %v", err)
+		}
+		return cliReply{code: 1, stderr: "signal: killed"}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	d.runSpecDispatch()
+
+	path := d.specDispatchCensusPath()
+	if n := countContaining(lines(), "bd census (spec dispatch): unreadable at", path, "not verb@caller=count"); n != 1 {
+		t.Errorf("unreadable census lines = %d, want one naming the path and the row error: %v", n, lines())
 	}
 }
 

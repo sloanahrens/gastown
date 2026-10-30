@@ -590,6 +590,11 @@ type Daemon struct {
 	specDispatchCycles  sync.WaitGroup
 	specDispatchHold    dispatch.HoldLatch
 
+	// specCensusRemove removes the spec dispatcher's census file before a tick
+	// (spec_dispatch.go); nil removes the real file. A test whose clear fails
+	// sets it (gt-139dp).
+	specCensusRemove func(path string) error
+
 	// specDispatchTick is when the running tick started, the clock an upgrade
 	// restart waits on (upgrade_restart.go, gt-cbaoy), published before
 	// specDispatchRunning is set and cleared with it (gt-32j1y);

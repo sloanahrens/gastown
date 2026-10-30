@@ -568,8 +568,8 @@ func TestSpecDispatchAtRecordsTheTownsLedger(t *testing.T) {
 	if err := os.WriteFile(dispatch.HoldFilePath(root), nil, 0o644); err != nil {
 		t.Fatalf("planting the operator hold: %v", err)
 	}
-	if _, err := runSpecDispatchAt(root); err != nil {
-		t.Fatalf("runSpecDispatchAt: %v", err)
+	if _, err := runSpecTickAtForTest(t, root); err != nil {
+		t.Fatalf("runSpecTickAtForTest: %v", err)
 	}
 	if _, err := os.Stat(specdispatch.LedgerPath(root)); err != nil {
 		t.Fatalf("the tick wrote no ledger under the town it ran for: %v", err)
