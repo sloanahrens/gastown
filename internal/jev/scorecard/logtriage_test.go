@@ -136,19 +136,19 @@ func TestLogtriageLabelRules(t *testing.T) {
 		{
 			name: "a critical escalation and an operator event are a follow-up that pages",
 			line: 0, now: logtriageNow, labeled: true,
-			labels: map[string]bool{"needs_action": true, "is_routine_noise": false, "severity": true},
+			labels: map[string]bool{"needs_action": true, "is_routine_noise": false, "auto_remediable": false, "severity": true},
 			rule:   ruleLogtriageFollowUp,
 		},
 		{
 			name: "an event past the window and a cleared event are no follow-up",
 			line: 1, now: logtriageNow, labeled: true,
-			labels: map[string]bool{"needs_action": false},
+			labels: map[string]bool{"needs_action": false, "is_routine_noise": true, "auto_remediable": false},
 			rule:   ruleLogtriageQuiet,
 		},
 		{
 			name: "a self-healed event sets auto_remediable and no action",
 			line: 2, now: logtriageNow, labeled: true,
-			labels: map[string]bool{"needs_action": false, "auto_remediable": true},
+			labels: map[string]bool{"needs_action": false, "is_routine_noise": true, "auto_remediable": true},
 			rule:   ruleLogtriageQuiet + "+" + ruleLogtriageSelfHealed,
 		},
 		{
@@ -158,13 +158,13 @@ func TestLogtriageLabelRules(t *testing.T) {
 		{
 			name: "a medium escalation is a follow-up that is a review",
 			line: 4, now: logtriageNow, labeled: true,
-			labels: map[string]bool{"needs_action": true, "is_routine_noise": false, "severity": false},
+			labels: map[string]bool{"needs_action": true, "is_routine_noise": false, "auto_remediable": false, "severity": false},
 			rule:   ruleLogtriageFollowUp,
 		},
 		{
 			name: "a group exactly an hour old is labeled",
 			line: 1, now: time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC), labeled: true,
-			labels: map[string]bool{"needs_action": false},
+			labels: map[string]bool{"needs_action": false, "is_routine_noise": true, "auto_remediable": false},
 			rule:   ruleLogtriageQuiet,
 		},
 	}
@@ -225,13 +225,13 @@ func TestLogtriageLabelsAFixtureOfGroups(t *testing.T) {
 		{
 			name:    "the event inside the dolt group's window is a follow-up",
 			labeled: true,
-			labels:  map[string]bool{"needs_action": true, "is_routine_noise": false},
+			labels:  map[string]bool{"needs_action": true, "is_routine_noise": false, "auto_remediable": false},
 			rule:    ruleLogtriageFollowUp,
 		},
 		{
 			name:    "the event after the polecat group's window is no follow-up",
 			labeled: true,
-			labels:  map[string]bool{"needs_action": false},
+			labels:  map[string]bool{"needs_action": false, "is_routine_noise": true, "auto_remediable": false},
 			rule:    ruleLogtriageQuiet,
 		},
 		{
@@ -406,19 +406,35 @@ func TestLogtriageUnreadableDataLeavesTheGroupUnlabeled(t *testing.T) {
 			if tc.labeled && lab.Labels[QuestionID(logtriage.QNeedsAction)] != tc.needsAction {
 				t.Errorf("needs_action %v, want %v", lab.Labels[QuestionID(logtriage.QNeedsAction)], tc.needsAction)
 			}
+			if !tc.labeled {
+				for _, q := range []string{logtriage.QRoutineNoise, logtriage.QAutoRemediate} {
+					if _, ok := lab.Labels[QuestionID(q)]; ok {
+						t.Errorf("%s is labeled from data the adapter could not read", q)
+					}
+				}
+			}
+			// An unresolved unreadable follow-up could be self-healed, so
+			// auto_remediable gets no false beside it.
+			if tc.labeled && tc.needsAction {
+				if v, ok := lab.Labels[QuestionID(logtriage.QAutoRemediate)]; ok {
+					t.Errorf("auto_remediable labeled %v beside an unreadable follow-up", v)
+				}
+			}
 		})
 	}
 }
+
+// logtriageNoSubjectLine is a group with no category and no bead id.
+const logtriageNoSubjectLine = `{"ts":"2026-10-21T09:45:00Z","key":"something <n>","count":1,"first":"2026-10-21T08:00:00Z","last":"2026-10-21T08:00:00Z","samples":["2026/10/21 08:00:00 something happened"],"answers":{"needs_action":{"noul":0.5}},"question_version":1,"model":"m1"}`
 
 // TestLogtriageGroupWithNoSubjectStaysUnlabeled checks that a group with no
 // category and no bead id, which nothing could be a follow-up to, is unlabeled
 // even when an event in its hour is raised.
 func TestLogtriageGroupWithNoSubjectStaysUnlabeled(t *testing.T) {
 	t.Parallel()
-	raw := `{"ts":"2026-10-21T09:45:00Z","key":"something <n>","count":1,"first":"2026-10-21T08:00:00Z","last":"2026-10-21T08:00:00Z","samples":["2026/10/21 08:00:00 something happened"],"answers":{"needs_action":{"noul":0.5}},"question_version":1,"model":"m1"}`
 	events := []attention.Event{{TS: time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC), Text: "something happened", State: attention.EventNew, Handled: attention.HandledOperatorAction}}
 	a := logtriageAdapterWith(logtriageNow, events, nil)
-	lab, err := a.Label(context.Background(), parseLogtriageLine(t, a, raw))
+	lab, err := a.Label(context.Background(), parseLogtriageLine(t, a, logtriageNoSubjectLine))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,5 +551,45 @@ func TestLogtriageParseRejectsMalformedLines(t *testing.T) {
 		if _, err := a.Parse([]byte(raw)); err == nil {
 			t.Errorf("Parse(%q) returned no error", raw)
 		}
+	}
+}
+
+// TestLogtriageAutoRemediable checks both outcomes of auto_remediable for a
+// group that has a subject, and that a group with none gets no label.
+func TestLogtriageAutoRemediable(t *testing.T) {
+	t.Parallel()
+	healed := attention.Event{TS: time.Date(2026, 10, 21, 9, 20, 0, 0, time.UTC), Text: "polecat capable hook refreshed for gt-pq7", State: attention.EventNew, Handled: attention.HandledSelfHealed}
+	operator := attention.Event{TS: time.Date(2026, 10, 21, 9, 20, 0, 0, time.UTC), Text: "polecat capable hook empty for gt-pq7", State: attention.EventNew, Handled: attention.HandledOperatorAction}
+	cases := []struct {
+		name    string
+		line    int
+		events  []attention.Event
+		labeled bool
+		want    bool
+	}{
+		{name: "a self-healed follow-up is true", line: 2, events: []attention.Event{healed}, labeled: true, want: true},
+		{name: "an operator follow-up and no self-healed one is false", line: 2, events: []attention.Event{operator}, labeled: true},
+		{name: "no follow-up at all is false", line: 2, labeled: true},
+		{name: "a group with no subject is unlabeled", line: -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := logtriageAdapterWith(logtriageNow, tc.events, nil)
+			var item Item
+			if tc.line < 0 {
+				item = parseLogtriageLine(t, a, logtriageNoSubjectLine)
+			} else {
+				item = parseLogtriageLine(t, a, logtriageFixtureLog[tc.line])
+			}
+			lab, err := a.Label(context.Background(), item)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := lab.Labels[QuestionID(logtriage.QAutoRemediate)]
+			if ok != tc.labeled || got != tc.want {
+				t.Errorf("auto_remediable labeled %v value %v, want labeled %v value %v", ok, got, tc.labeled, tc.want)
+			}
+		})
 	}
 }

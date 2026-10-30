@@ -273,6 +273,12 @@ func (a *driftAdapter) ParseLines(raw []byte) ([]Item, error) {
 	for i, s := range l.Sections {
 		answers := make(map[QuestionID]Answer, len(s.Answers))
 		for id, ans := range s.Answers {
+			// needs_new_section has no label rule: a later docs heading is not
+			// evidence that this change needed one, so it is never scored. The
+			// battery keeps asking it; dropping the ask is a Version change.
+			if id == drift.QNeedsNewSection {
+				continue
+			}
 			// A choice is scored by its probability for the option Jev picked,
 			// so the picked option is the positive one.
 			if ans.Choice != "" {

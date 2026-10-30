@@ -2,27 +2,27 @@ Scorecard for battery logtriage, all time
 Items: 5 parsed, 2 line(s) skipped
 
 auto_remediable (noul)
-  logged 5, labeled 1, positives 1, negatives 0, base rate 100.0%
+  logged 5, labeled 4, positives 1, negatives 3, base rate 25.0%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.700
   precision at the best F1 cut: 100.0%
   calibration (band, labeled n, mean value, label rate):
-    0.0-0.2      0  n/a  n/a
-    0.2-0.4      0  n/a  n/a
+    0.0-0.2      2  0.100  0.000
+    0.2-0.4      1  0.200  0.000
     0.4-0.6      0  n/a  n/a
     0.6-0.8      1  0.700  1.000
     0.8-1.0      0  n/a  n/a
   verdict: not-yet
 
 is_routine_noise (noul)
-  logged 5, labeled 2, positives 0, negatives 2, base rate 0.0%
-  at 0.5: precision n/a, recall n/a
-  best F1 0.000 at threshold 0.100
-  precision at the best F1 cut: 0.0%
+  logged 5, labeled 4, positives 2, negatives 2, base rate 50.0%
+  at 0.5: precision n/a, recall 0.0%
+  best F1 1.000 at threshold 0.300
+  precision at the best F1 cut: 100.0%
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      2  0.100  0.000
-    0.2-0.4      0  n/a  n/a
-    0.4-0.6      0  n/a  n/a
+    0.2-0.4      1  0.300  1.000
+    0.4-0.6      1  0.400  1.000
     0.6-0.8      0  n/a  n/a
     0.8-1.0      0  n/a  n/a
   verdict: not-yet
