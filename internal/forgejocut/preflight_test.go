@@ -398,7 +398,10 @@ func TestProbeNeverReadsTheAdminTokenFile(t *testing.T) {
 	if err := ProbeGreen(run, o, func(string) {}); err != nil {
 		t.Fatalf("ProbeGreen with an absent token file = %v, want nil", err)
 	}
+	// The failure message names the surface, never the argv: a mutation that leaked
+	// the token would put it in the recorded call, and printing that would leak it
+	// into the test output the bead forbids.
 	if len(run.calls) != 1 || !slices.Equal(run.calls[0], probeArgvWithToken(o.AdminTokenFile)) {
-		t.Fatalf("ProbeGreen ran %q, want one call of %q", run.calls, probeArgvWithToken(o.AdminTokenFile))
+		t.Fatal("a recorded argv is not the exact expected argv")
 	}
 }
