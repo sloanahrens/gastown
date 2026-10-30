@@ -3,7 +3,8 @@
 // a seat's session calls one of them, and they enforce, in one place:
 //
 //   - the seat's hold: an operator park or a supervisor freeze in the seat's
-//     intent record (internal/intent) refuses both verbs;
+//     intent record (internal/intent) refuses both verbs. KillOwnPark passes
+//     only the park its caller wrote itself (the overrun guard's stop);
 //   - submitted work: a seat whose intent record says desired=submitted (gt
 //     done handed its branch to the landing worker) refuses Restart, since a
 //     new session would only find finished work; Kill still works;
@@ -228,11 +229,18 @@ func (s *Supervisor) refuse(l ActionLine, kind error, detail string) error {
 // guard runs the checks both verbs share: a readable, unheld intent record
 // and no e-stop covering the seat.
 func (s *Supervisor) guard(seat Seat, l ActionLine) error {
+	return s.guardFor(seat, l, "")
+}
+
+// guardFor is guard, with the hold ownPark wrote not refusing the action
+// ("" refuses every hold). The e-stop is checked either way: it is what
+// refuses the overrun guard's stop (KillOwnPark).
+func (s *Supervisor) guardFor(seat Seat, l ActionLine, ownPark string) error {
 	rec, err := intent.Read(s.o.TownRoot, IntentSeat(seat))
 	if err != nil {
 		return s.refuse(l, ErrIntentUnreadable, err.Error())
 	}
-	if rec.Held() {
+	if rec.Held() && !ownParkOf(rec, ownPark) {
 		kind := ErrPaused
 		if rec.Frozen {
 			kind = ErrFrozen
@@ -247,6 +255,12 @@ func (s *Supervisor) guard(seat Seat, l ActionLine) error {
 		return s.refuseSeat(seat, l, ErrEstop, detail)
 	}
 	return nil
+}
+
+// ownParkOf reports whether rec's hold is the park ownPark wrote, and not a
+// freeze: the one hold a kill may pass without being the operator's override.
+func ownParkOf(rec intent.Record, ownPark string) bool {
+	return ownPark != "" && !rec.Frozen && rec.Desired == intent.DesiredPark && rec.PausedBy == ownPark
 }
 
 // refuseHeldUnderLock refuses an action whose hold was found inside the
@@ -304,7 +318,17 @@ func refusal(kind error, detail string) error {
 // takes the same lock) cannot land between the check and the kill. Killing a
 // seat with no session succeeds.
 func (s *Supervisor) Kill(seat Seat, reason, actor string) error {
-	return s.kill(seat, "kill", false, reason, actor)
+	return s.kill(seat, "kill", false, "", reason, actor)
+}
+
+// KillOwnPark is Kill for a seat the caller parked itself: the park the
+// caller wrote (desired=park with paused_by=actor) does not refuse it, so a
+// stop can end the session it parked to keep every scanner off the seat while
+// it runs (the overrun guard's stop). An operator's park, a freeze and an
+// e-stop still refuse it, it is logged as verb kill with the actor like any
+// other, and it leaves the park in place for the caller's own release.
+func (s *Supervisor) KillOwnPark(seat Seat, reason, actor string) error {
+	return s.kill(seat, "kill", false, actor, reason, actor)
 }
 
 // KillAll is Kill for the operator's explicit `gt kill-all` (gt-4k3fj.4):
@@ -313,7 +337,7 @@ func (s *Supervisor) Kill(seat Seat, reason, actor string) error {
 // It is logged as verb kill-all with the actor and records desired=stop,
 // except on a held seat, whose park or freeze it leaves in place.
 func (s *Supervisor) KillAll(seat Seat, reason, actor string) error {
-	return s.kill(seat, verbKillAll, true, reason, actor)
+	return s.kill(seat, verbKillAll, true, "", reason, actor)
 }
 
 const verbKillAll = "kill-all"
@@ -326,7 +350,7 @@ const verbKillAll = "kill-all"
 // forbids. It is logged as verb stop with the actor (the command and who ran
 // it) and the reason, and records desired=stop unless the seat is held.
 func (s *Supervisor) Stop(seat Seat, reason, actor string) error {
-	return s.kill(seat, verbStop, true, reason, actor)
+	return s.kill(seat, verbStop, true, "", reason, actor)
 }
 
 // Cleanup is the kill of a session gt itself just created and is abandoning
@@ -334,7 +358,7 @@ func (s *Supervisor) Stop(seat Seat, reason, actor string) error {
 // a lifecycle decision: nothing refuses it, and it is logged as verb cleanup
 // with the actor and reason like Stop.
 func (s *Supervisor) Cleanup(seat Seat, reason, actor string) error {
-	return s.kill(seat, verbCleanup, true, reason, actor)
+	return s.kill(seat, verbCleanup, true, "", reason, actor)
 }
 
 // StopSession is Stop for a caller holding a session name. A name that does
@@ -411,12 +435,13 @@ func (s *Supervisor) Respawn(seat Seat, reason, actor string, run func() error) 
 	return nil
 }
 
-// kill is Kill, KillAll, Stop and Cleanup; force skips the hold and e-stop.
-func (s *Supervisor) kill(seat Seat, verb string, force bool, reason, actor string) error {
+// kill is Kill, KillAll, Stop and Cleanup; force skips the hold and e-stop,
+// and ownPark lets the hold ownPark wrote through ("" is no exemption).
+func (s *Supervisor) kill(seat Seat, verb string, force bool, ownPark, reason, actor string) error {
 	name := seat.SessionName()
 	l := ActionLine{Verb: verb, Seat: IntentSeat(seat).String(), Session: name, Reason: reason, Actor: actor}
 	if !force {
-		if err := s.guard(seat, l); err != nil {
+		if err := s.guardFor(seat, l, ownPark); err != nil {
 			return err
 		}
 	}
@@ -425,7 +450,7 @@ func (s *Supervisor) kill(seat Seat, verb string, force bool, reason, actor stri
 	var killed bool
 	var killErr error
 	rec, err := intent.Update(s.o.TownRoot, IntentSeat(seat), func(r *intent.Record) error {
-		if r.Held() && !force {
+		if r.Held() && !force && !ownParkOf(*r, ownPark) {
 			held = r.HoldReason()
 			return errHeld
 		}
