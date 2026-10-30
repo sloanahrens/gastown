@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deps"
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // writeInstallTown writes a town whose endpoint is in town.json and/or the
@@ -475,6 +476,108 @@ func TestRunInstallWritesTheTrackerEndpoint(t *testing.T) {
 	want := config.TrackerEndpoint{Host: "tracker.internal", Port: 8000}
 	if town.Tracker == nil || *town.Tracker != want {
 		t.Errorf("re-install town.json tracker = %+v, want %+v", town.Tracker, want)
+	}
+}
+
+// An install with a Dolt host writes that endpoint to town.json and starts no
+// local Dolt: a local server's data directory is .dolt-data, and its beads are
+// .beads/ (gt-i3ywa).
+func TestRunInstallDoltHostWritesTheRemoteEndpoint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		doltPort int
+		wantPort int
+	}{
+		{"the server's default port", 0, doltserver.DefaultPort},
+		{"the port the flag names", 3308, 3308},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			hqPath := filepath.Join(t.TempDir(), "hq")
+
+			opts := installOptions{doltHost: "scratch-dolt", doltHostSet: true, doltPort: tt.doltPort}
+			if err := runInstallWith(opts, []string{hqPath}); err != nil {
+				t.Fatalf("gt install --dolt-host scratch-dolt: %v", err)
+			}
+
+			town, err := config.LoadTownConfig(filepath.Join(hqPath, "mayor", "town.json"))
+			if err != nil {
+				t.Fatalf("load town.json: %v", err)
+			}
+			want := config.DoltEndpoint{Host: "scratch-dolt", Port: tt.wantPort}
+			if town.Dolt == nil || *town.Dolt != want {
+				t.Fatalf("town.json dolt = %+v, want %+v", town.Dolt, want)
+			}
+			for _, rel := range []string{".dolt-data", ".beads"} {
+				if _, err := os.Stat(filepath.Join(hqPath, rel)); !os.IsNotExist(err) {
+					t.Errorf("gt install --dolt-host left %s/ behind (err = %v)", rel, err)
+				}
+			}
+		})
+	}
+}
+
+// A host that names a local Dolt, an empty one, and --dolt-host beside
+// --no-beads are each refused before the install writes anything (gt-i3ywa).
+func TestRunInstallRefusesADoltHostThatNamesNoRemote(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		opts installOptions
+		want string
+	}{
+		{"an empty host", installOptions{doltHostSet: true}, "--dolt-host needs a host"},
+		{"localhost", installOptions{doltHost: "localhost", doltHostSet: true}, "loopback"},
+		{"127.0.0.1", installOptions{doltHost: "127.0.0.1", doltHostSet: true}, "loopback"},
+		{"an ipv6 loopback", installOptions{doltHost: "::1", doltHostSet: true}, "loopback"},
+		{"a bracketed ipv6 loopback", installOptions{doltHost: "[::1]", doltHostSet: true}, "loopback"},
+		{"beside --no-beads", installOptions{doltHost: "scratch-dolt", doltHostSet: true, noBeads: true}, "--no-beads"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			hqPath := filepath.Join(t.TempDir(), "hq")
+
+			err := runInstallWith(tt.opts, []string{hqPath})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("runInstallWith(%+v) = %v, want an error naming %q", tt.opts, err, tt.want)
+			}
+			if _, statErr := os.Stat(hqPath); !os.IsNotExist(statErr) {
+				t.Errorf("refused install wrote %s (err = %v)", hqPath, statErr)
+			}
+		})
+	}
+}
+
+// The endpoint writer leaves a host the town already names alone when the
+// endpoint it is given has none, which is what keeps a local --force
+// re-install off the operator's endpoint. A local install cannot reach this
+// in the unit tier (its beads need a running Dolt), so the writer is called
+// directly; TestRunInstallDoltHostWritesTheRemoteEndpoint covers the install's
+// own call to it (gt-i3ywa).
+func TestStampTownDoltEndpointKeepsTheHostOfALocalInstall(t *testing.T) {
+	t.Parallel()
+	townPath := filepath.Join(t.TempDir(), "town.json")
+	if err := config.SaveTownConfig(townPath, &config.TownConfig{
+		Type: "town", Version: config.CurrentTownVersion, Name: "t",
+		Dolt: &config.DoltEndpoint{Host: "scratch-dolt", Port: 3307},
+	}); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+
+	if err := stampTownDoltEndpoint(townPath, config.DoltEndpoint{Port: 4400}); err != nil {
+		t.Fatalf("stampTownDoltEndpoint: %v", err)
+	}
+
+	town, err := config.LoadTownConfig(townPath)
+	if err != nil {
+		t.Fatalf("load town.json: %v", err)
+	}
+	want := config.DoltEndpoint{Host: "scratch-dolt", Port: 4400}
+	if town.Dolt == nil || *town.Dolt != want {
+		t.Fatalf("town.json dolt = %+v, want %+v", town.Dolt, want)
 	}
 }
 
