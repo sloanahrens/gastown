@@ -286,7 +286,7 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 // (gt-tqxdd).
 const ShellTierInputs = `^(scripts/|plugins/|\.githooks/|Makefile$|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)`
 
-// shellTierSummaryRE matches the shell tier's one summary line and captures
+// ShellTierSummaryRE matches the shell tier's one summary line and captures
 // the scripts it names. The log directory trails the names, and the tier's
 // elapsed time trails that (gt-iqzr0); scripts/post-land-shell.sh execs the
 // same sweep, so this is the post-land run's own line too (gt-40so9):
@@ -295,7 +295,7 @@ const ShellTierInputs = `^(scripts/|plugins/|\.githooks/|Makefile$|internal/test
 //
 // A script path holds no parenthesis, so the capture stops at the marker; a
 // line without the marker or the duration (an older sweep) still matches.
-var shellTierSummaryRE = regexp.MustCompile(`^tier-sweep: shell RED passed=\d+ failed=\d+ skipped=\d+ failed:([^()]*?)(?: \(logs [^)]*\))?(?: in \S+)?$`)
+var ShellTierSummaryRE = regexp.MustCompile(`^tier-sweep: shell RED passed=\d+ failed=\d+ skipped=\d+ failed:([^()]*?)(?: \(logs [^)]*\))?(?: in \S+)?$`)
 
 // hasMakeTarget reports whether dir's Makefile defines target.
 func hasMakeTarget(dir, target string) bool {
@@ -683,7 +683,7 @@ func packageElapsed(line string) (time.Duration, bool) {
 func parseShellTierFailures(out string) []string {
 	var names []string
 	for _, line := range strings.Split(out, "\n") {
-		if m := shellTierSummaryRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+		if m := ShellTierSummaryRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
 			names = strings.Fields(m[1])
 		}
 	}
