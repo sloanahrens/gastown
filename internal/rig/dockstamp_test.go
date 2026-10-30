@@ -53,6 +53,24 @@ func TestDockStamp_RefusesABadRigName(t *testing.T) {
 	}
 }
 
+// TestTouchDockStamp_RefusesABadRigName is the same refusal on the writer, which
+// must report it rather than create anything outside the town.
+func TestTouchDockStamp_RefusesABadRigName(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	err := TouchDockStamp(townRoot, "../x", time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "invalid rig name") {
+		t.Fatalf("TouchDockStamp with a traversal name = %v, want an invalid rig name error", err)
+	}
+	entries, readErr := os.ReadDir(townRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("TouchDockStamp with a traversal name left %d entries in the town root, want none", len(entries))
+	}
+}
+
 // TestDockStamp_ReadFailureCarriesThePath drives the reader's failure branch
 // through a stat that always fails: a stat error that is not "no such file" is an
 // error naming the stamp, because the daemon reports an unreadable stamp
