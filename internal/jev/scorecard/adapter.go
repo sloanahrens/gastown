@@ -22,6 +22,16 @@ type Answer struct {
 	Positive      string             `json:"positive,omitempty"`
 }
 
+// Kind names the answer's kind, KindNoul, KindScore or KindChoice, or the empty
+// string when the answer carries none of them.
+func (ans Answer) Kind() string { return kindOf(ans) }
+
+// Value reports the number a question of kind scores ans by — a noul's
+// probability, a score's level, or a choice's probability for its positive
+// option — and whether chosen marks the positive option. ok is false when the
+// answer carries nothing of that kind.
+func (ans Answer) Value(kind string) (value float64, chosen, ok bool) { return usable(ans, kind) }
+
 // Item is one parsed log line: the item Jev answered, when, and its answers.
 type Item struct {
 	ID      string
