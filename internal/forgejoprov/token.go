@@ -172,22 +172,20 @@ func (p *Provisioner) EnsureToken(role string) error {
 	// token of the same name, so the order cannot be reversed. A mint that then
 	// fails leaves the file holding a token that no longer works, and the error
 	// says so.
-	revoked := false
+	outcome := revokeNone
 	if p.Rotate {
-		var err error
-		if revoked, err = p.revokeOldToken(user); err != nil {
-			return err
-		}
+		outcome = p.revokeOldToken(user)
 	}
 
 	token, duplicate, err := p.mintToken(user, scopes)
 	if err != nil {
 		switch {
-		case revoked:
+		case outcome == revokeDone:
 			return fmt.Errorf("%w; the previous '%s' token for %s was already revoked, so the token in %s no longer works: run again with --rotate to mint a new one", err, p.TokenName, user, path)
-		case duplicate && p.Rotate:
-			// The revoke warned and did not take, so the old token is still live.
-			return fmt.Errorf("%w; the previous '%s' token for %s could not be revoked and is STILL LIVE (%s still holds it): revoke it by hand in the web UI, then run again with --rotate", err, p.TokenName, user, path)
+		case outcome == revokeFailed:
+			// The revoke warned and did not take (or could not be tried), so the
+			// old token may still be live whatever the mint says.
+			return fmt.Errorf("%w; the previous '%s' token for %s could not be revoked and may still be live (%s still holds it): revoke it by hand in the web UI, then run again with --rotate", err, p.TokenName, user, path)
 		case duplicate:
 			// A token with this name exists but there is no file: the value came
 			// back once, at creation, and is lost.
@@ -262,31 +260,74 @@ func (p *Provisioner) mintToken(user string, scopes []string) (token string, dup
 	return token, false, nil
 }
 
+// tokenPageSize is how many tokens one page of the list asks for, and
+// maxTokenPages the bound on how many pages the search for the old token reads.
+// A user with more tokens than their product is not a user a rotation can read
+// to the end, so it stops with a warning naming the bound.
+const (
+	tokenPageSize = 50
+	maxTokenPages = 10
+)
+
+// revokeOutcome says what a rotation's revoke achieved, so a mint that fails
+// afterwards can say what state the old token is in.
+type revokeOutcome int
+
+const (
+	// revokeNone means no token of that name was found, so there was nothing to
+	// revoke and the error claims nothing about one.
+	revokeNone revokeOutcome = iota
+	// revokeDone means the old token was deleted.
+	revokeDone
+	// revokeFailed means a warning was logged because the old token could not be
+	// found or deleted, so it may still be live.
+	revokeFailed
+)
+
 // revokeOldToken removes the token of this run's name so a rotation does not
-// leave the previous credential live. A miss is a warning: the file may hold a
-// token the operator made by hand, and replacing the file is what matters.
-func (p *Provisioner) revokeOldToken(user string) (revoked bool, err error) {
+// leave the previous credential live. Every failure to list or delete is a
+// warning, not an abort: the file may hold a token the operator made by hand,
+// replacing the file is what matters, and the mint is still attempted.
+func (p *Provisioner) revokeOldToken(user string) revokeOutcome {
 	base := "/admin/users/" + url.PathEscape(user) + "/tokens"
-	status, resp, err := p.Client.Do(http.MethodGet, base, nil)
+	for page := 1; page <= maxTokenPages; page++ {
+		status, resp, err := p.Client.Do(http.MethodGet, fmt.Sprintf("%s?page=%d&limit=%d", base, page, tokenPageSize), nil)
+		if err != nil {
+			p.logf("warning: cannot list %s's tokens (%v); revoke the old '%s' token by hand", user, err, p.TokenName)
+			return revokeFailed
+		}
+		if status != http.StatusOK {
+			p.logf("warning: cannot list %s's tokens (HTTP %d)%s; revoke the old '%s' token by hand", user, status, p.Client.BodyTail(resp), p.TokenName)
+			return revokeFailed
+		}
+		var items []json.RawMessage
+		if err := json.Unmarshal(resp, &items); err != nil {
+			p.logf("warning: cannot read %s's token list (not a JSON array); revoke the old '%s' token by hand", user, p.TokenName)
+			return revokeFailed
+		}
+		if _, found := FindObject(resp, "name", p.TokenName); found {
+			return p.deleteToken(base)
+		}
+		if len(items) < tokenPageSize {
+			p.logf("no token named '%s' to revoke; if the file held a token minted under another name, revoke it in the web UI", p.TokenName)
+			return revokeNone
+		}
+	}
+	p.logf("warning: stopped looking for the '%s' token of %s after %d pages of %d (the bound); revoke it by hand in the web UI", p.TokenName, user, maxTokenPages, tokenPageSize)
+	return revokeFailed
+}
+
+// deleteToken deletes the token of this run's name from the user's list at base.
+func (p *Provisioner) deleteToken(base string) revokeOutcome {
+	status, resp, err := p.Client.Do(http.MethodDelete, base+"/"+url.PathEscape(p.TokenName), nil)
 	if err != nil {
-		return false, err
-	}
-	if status != http.StatusOK {
-		p.logf("warning: cannot list %s's tokens (HTTP %d)%s; revoke the old '%s' token by hand", user, status, p.Client.BodyTail(resp), p.TokenName)
-		return false, nil
-	}
-	if _, found := FindObject(resp, "name", p.TokenName); !found {
-		p.logf("no token named '%s' to revoke; if the file held a token minted under another name, revoke it in the web UI", p.TokenName)
-		return false, nil
-	}
-	status, resp, err = p.Client.Do(http.MethodDelete, base+"/"+url.PathEscape(p.TokenName), nil)
-	if err != nil {
-		return false, err
+		p.logf("warning: could not revoke the previous '%s' token (%v); revoke it in the web UI", p.TokenName, err)
+		return revokeFailed
 	}
 	if status == http.StatusNoContent {
 		p.logf("revoked the previous '%s' token", p.TokenName)
-		return true, nil
+		return revokeDone
 	}
 	p.logf("warning: could not revoke the previous '%s' token (HTTP %d)%s; revoke it in the web UI", p.TokenName, status, p.Client.BodyTail(resp))
-	return false, nil
+	return revokeFailed
 }

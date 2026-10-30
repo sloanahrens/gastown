@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -482,7 +483,7 @@ func TestRotateRevokeFailuresAreWarnings(t *testing.T) {
 		{name: "list fails", tr: func(n http.RoundTripper) http.RoundTripper { return failingRevokeTransport{next: n, listStatus: 500} },
 			want: "warning: cannot list bot-polecat's tokens (HTTP 500)"},
 		{name: "delete fails", tr: func(n http.RoundTripper) http.RoundTripper { return failingRevokeTransport{next: n, delStatus: 500} },
-			seedToken: true, want: "warning: could not revoke the previous 'gt-provision' token (HTTP 500)", wantErr: "STILL LIVE"},
+			seedToken: true, want: "warning: could not revoke the previous 'gt-provision' token (HTTP 500)", wantErr: "may still be live"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -874,37 +875,223 @@ func (m methodFailsTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	return m.next.RoundTrip(req)
 }
 
-// TestEnsureTokenTransportFailures checks a request that never gets an answer fails
-// the run at each of its three calls, with no file written and no token in the
-// error.
-func TestEnsureTokenTransportFailures(t *testing.T) {
+// TestRotateRevokeFailuresAreWarningsAndTheMintIsAttempted covers every way the
+// revoke can fail: a transport error or a non-2xx on the token list, a transport
+// error or a non-2xx on the delete. Each logs a warning and the mint is still
+// attempted. The old token is still there, so the server refuses the same name,
+// and the error then says the old token may still be live and the file keeps the
+// token it had.
+func TestRotateRevokeFailuresAreWarningsAndTheMintIsAttempted(t *testing.T) {
 	t.Parallel()
-	for _, method := range []string{http.MethodGet, http.MethodDelete, http.MethodPost} {
-		t.Run(method, func(t *testing.T) {
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	cases := []struct {
+		name string
+		tr   func(next http.RoundTripper) http.RoundTripper
+		warn string
+	}{
+		{"transport error on the list", func(n http.RoundTripper) http.RoundTripper {
+			return methodFailsTransport{next: n, method: http.MethodGet}
+		},
+			"warning: cannot list bot-polecat's tokens"},
+		{"transport error on the delete", func(n http.RoundTripper) http.RoundTripper {
+			return methodFailsTransport{next: n, method: http.MethodDelete}
+		},
+			"warning: could not revoke the previous 'gt-provision' token (DELETE"},
+		{"non-2xx on the delete", func(n http.RoundTripper) http.RoundTripper { return failingRevokeTransport{next: n, delStatus: 403} },
+			"warning: could not revoke the previous 'gt-provision' token (HTTP 403)"},
+		{"non-2xx on the list", func(n http.RoundTripper) http.RoundTripper { return failingRevokeTransport{next: n, listStatus: 500} },
+			"warning: cannot list bot-polecat's tokens (HTTP 500)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeForgejo()
 			withBot(t, f, "polecat")
 			var logs []string
-			// A first mint makes the rotation list, delete and mint all happen.
-			if method != http.MethodPost {
-				if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
-					t.Fatalf("seed token: %v", masked(errString(err)))
+			if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
+				t.Fatalf("seed token: %v", masked(errString(err)))
+			}
+			logs = nil
+			files := newMemFiles()
+			files.seed(path, "old", 0o600)
+			f.calls = nil
+			err := tokenProvisioner(tc.tr(f), files, true, false, &logs).EnsureToken("polecat")
+			if !strings.Contains(strings.Join(logs, "\n"), tc.warn) {
+				t.Errorf("logs lack %q: %v", tc.warn, masked(strings.Join(logs, " | ")))
+			}
+			posted := false
+			for _, c := range f.callLog() {
+				if c.method == http.MethodPost {
+					posted = true
 				}
 			}
-			files := newMemFiles()
-			files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
-			err := tokenProvisioner(methodFailsTransport{next: f, method: method}, files, true, false, &logs).EnsureToken("polecat")
-			if err == nil || !strings.Contains(err.Error(), "request failed") {
-				t.Fatalf("err = %v, want a request failed error", masked(errString(err)))
+			if !posted {
+				t.Errorf("the mint was not attempted after the warning: %v", f.callLog())
 			}
-			if string(files.files[filepath.Join(tokenDir, "forgejo-polecat.env")]) != "old" {
-				t.Errorf("the file changed though the %s failed", method)
+			if err == nil || !strings.Contains(err.Error(), "may still be live") || !strings.Contains(err.Error(), path) {
+				t.Errorf("err = %v, want the may-still-be-live explanation naming %s", masked(errString(err)), path)
 			}
-			if strings.Contains(err.Error(), fixtureToken) {
-				t.Errorf("the error carries the admin token")
+			if string(files.files[path]) != "old" {
+				t.Errorf("the file changed though the mint was refused")
 			}
 		})
 	}
+	t.Run("transport error on the list with nothing to collide with", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeForgejo()
+		withBot(t, f, "polecat")
+		files := newMemFiles()
+		files.seed(path, "old", 0o600)
+		var logs []string
+		err := tokenProvisioner(methodFailsTransport{next: f, method: http.MethodGet}, files, true, false, &logs).EnsureToken("polecat")
+		if err != nil {
+			t.Fatalf("EnsureToken: %v", masked(errString(err)))
+		}
+		if !strings.Contains(strings.Join(logs, "\n"), "warning: cannot list bot-polecat's tokens") {
+			t.Errorf("no warning for the failed list: %v", masked(strings.Join(logs, " | ")))
+		}
+		if string(files.files[path]) == "old" {
+			t.Errorf("the file was not replaced though the mint was free to run")
+		}
+	})
+}
+
+// TestEnsureTokenMintTransportFailure checks a mint that never gets an answer is
+// an error with no file written and no token in the text.
+func TestEnsureTokenMintTransportFailure(t *testing.T) {
+	t.Parallel()
+	f := newFakeForgejo()
+	withBot(t, f, "polecat")
+	files := newMemFiles()
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	files.seed(path, "old", 0o600)
+	var logs []string
+	err := tokenProvisioner(methodFailsTransport{next: f, method: http.MethodPost}, files, true, false, &logs).EnsureToken("polecat")
+	if err == nil || !strings.Contains(err.Error(), "request failed") {
+		t.Fatalf("err = %v, want a request failed error", masked(errString(err)))
+	}
+	if string(files.files[path]) != "old" {
+		t.Errorf("the file changed though the mint failed")
+	}
+	if strings.Contains(err.Error(), fixtureToken) {
+		t.Errorf("the error carries the admin token")
+	}
+}
+
+// pagedTokens serves the token list from fixed pages (page 1 is the first) and
+// passes everything else to next, so a test controls how far the search reads.
+// pages[i] is the number of tokens on page i+1; the token named target is on the
+// page numbered targetPage, 0 for none.
+type pagedTokens struct {
+	next       http.RoundTripper
+	pages      []int
+	targetPage int
+	requested  []string
+}
+
+func (p *pagedTokens) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/tokens") {
+		return p.next.RoundTrip(req)
+	}
+	p.requested = append(p.requested, req.URL.RawQuery)
+	page, _ := strconv.Atoi(req.URL.Query().Get("page"))
+	if page < 1 || page > len(p.pages) {
+		return respond(req, http.StatusOK, "[]")
+	}
+	var items []string
+	for i := 0; i < p.pages[page-1]; i++ {
+		items = append(items, fmt.Sprintf(`{"name":"other-%d-%d"}`, page, i))
+	}
+	if page == p.targetPage {
+		items[len(items)-1] = `{"name":"gt-provision"}`
+	}
+	return respond(req, http.StatusOK, "["+strings.Join(items, ",")+"]")
+}
+
+// TestRotateTokenListPaging checks the search for the old token reads the list a
+// page at a time: it finds a token on the second page, stops at a short page, and
+// stops at the named bound with a warning when every page is full.
+func TestRotateTokenListPaging(t *testing.T) {
+	t.Parallel()
+	query := func(page int) string { return fmt.Sprintf("page=%d&limit=%d", page, tokenPageSize) }
+	run := func(t *testing.T, pt *pagedTokens) ([]string, []fakeCall) {
+		t.Helper()
+		f := newFakeForgejo()
+		withBot(t, f, "polecat")
+		pt.next = f
+		files := newMemFiles()
+		files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
+		var logs []string
+		f.calls = nil
+		_ = tokenProvisioner(pt, files, true, false, &logs).EnsureToken("polecat")
+		return logs, f.callLog()
+	}
+	t.Run("two pages, the token is on the second", func(t *testing.T) {
+		t.Parallel()
+		pt := &pagedTokens{pages: []int{tokenPageSize, 7}, targetPage: 2}
+		_, calls := run(t, pt)
+		if strings.Join(pt.requested, "|") != query(1)+"|"+query(2) {
+			t.Errorf("pages requested = %v, want pages 1 and 2", pt.requested)
+		}
+		deleted := false
+		for _, c := range calls {
+			if c.method == http.MethodDelete {
+				deleted = true
+			}
+		}
+		if !deleted {
+			t.Errorf("the token found on page 2 was not deleted: %v", calls)
+		}
+	})
+	t.Run("a short first page ends the search", func(t *testing.T) {
+		t.Parallel()
+		pt := &pagedTokens{pages: []int{3, 3}}
+		logs, _ := run(t, pt)
+		if len(pt.requested) != 1 {
+			t.Errorf("pages requested = %v, want only page 1", pt.requested)
+		}
+		if !strings.Contains(strings.Join(logs, "\n"), "no token named 'gt-provision' to revoke") {
+			t.Errorf("logs lack the no-token line: %v", logs)
+		}
+	})
+	t.Run("every page full stops at the bound with a warning", func(t *testing.T) {
+		t.Parallel()
+		full := make([]int, maxTokenPages+3)
+		for i := range full {
+			full[i] = tokenPageSize
+		}
+		pt := &pagedTokens{pages: full}
+		logs, calls := run(t, pt)
+		if len(pt.requested) != maxTokenPages {
+			t.Errorf("pages requested = %d, want the bound %d", len(pt.requested), maxTokenPages)
+		}
+		want := fmt.Sprintf("warning: stopped looking for the 'gt-provision' token of bot-polecat after %d pages of %d (the bound)", maxTokenPages, tokenPageSize)
+		if !strings.Contains(strings.Join(logs, "\n"), want) {
+			t.Errorf("logs lack %q: %v", want, logs)
+		}
+		posted := false
+		for _, c := range calls {
+			if c.method == http.MethodPost {
+				posted = true
+			}
+		}
+		if !posted {
+			t.Errorf("the mint was not attempted after the bound warning")
+		}
+	})
+	t.Run("a list that is not a JSON array is a warning", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeForgejo()
+		withBot(t, f, "polecat")
+		files := newMemFiles()
+		files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
+		var logs []string
+		bad := failingRevokeTransport{next: f, listStatus: http.StatusOK, body: "<html>not json</html>"}
+		_ = tokenProvisioner(bad, files, true, false, &logs).EnsureToken("polecat")
+		if !strings.Contains(strings.Join(logs, "\n"), "not a JSON array") {
+			t.Errorf("logs lack the unreadable-list warning: %v", logs)
+		}
+	})
 }
 
 // echoShapes are the ways a server or proxy might echo the admin token back in a
@@ -921,7 +1108,7 @@ func echoShapes() map[string]string {
 // TestMintAndRevokeRepliesAreScrubbed drives the 403 path, the unexpected-status
 // path and both revoke warnings with a reply that echoes the admin token in text
 // that is not JSON, and checks neither the error nor the warning carries it. The
-// replies go through the scrubbing Client methods from gt-3r55b (62531b83).
+// replies go through the scrubbing Client methods from gt-3r55b.
 func TestMintAndRevokeRepliesAreScrubbed(t *testing.T) {
 	t.Parallel()
 	for shape, body := range echoShapes() {
