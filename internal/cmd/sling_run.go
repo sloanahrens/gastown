@@ -44,6 +44,10 @@ type slingOptions struct {
 	formula        string
 	crew           string
 	reviewOnly     bool
+
+	// verifyBead replaces the bd existence check a batch runs before it spawns;
+	// nil reads bd. Only tests set it, so they can drive runBatchSlingWith.
+	verifyBead func(beadID string) error
 }
 
 // slingOptionsFromFlags is the options the cobra flags hold.
