@@ -54,7 +54,7 @@ func (c GateContainer) IsReaper() bool {
 }
 
 // ScratchIdentity is the documented scratch project's identity
-// (internal/scratch): the directory its compose file must live under. The
+// (internal/scratchtown): the directory its compose file must live under. The
 // project's name, container names and images are that package's constants, so
 // this package keeps no copy of the operator's conventions, and a container is
 // the project's only when every fact docker reports agrees (gt-4gixm).

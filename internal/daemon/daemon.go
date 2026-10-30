@@ -405,7 +405,7 @@ type Daemon struct {
 	// slotGate is the container gate the quiet check reads its report through;
 	// nil is slot.NewGate(), which lists the host's docker. A test supplies a
 	// gate over a fake runtime, so the quiet check's container classification
-	// (internal/scratch) runs through the same code the host's docker feeds
+	// (internal/scratchtown) runs through the same code the host's docker feeds
 	// rather than a report a test built by hand (gt-4gixm).
 	slotGate *slot.Gate
 	// rebuildGTInstallYieldFn answers the pool's install cap, the duration at

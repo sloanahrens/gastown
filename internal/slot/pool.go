@@ -784,7 +784,7 @@ func (g *Gate) pendingInstall(townRoot string) (*installpending.Marker, error) {
 }
 
 // scratchVerdicts stamps the documented scratch project's containers with
-// their own verdicts (internal/scratch): a steadily running project container
+// their own verdicts (internal/scratchtown): a steadily running project container
 // is VerdictScratch, and one the project is mid-work on — docker creating or
 // restarting it, or a build for the project in flight — is
 // VerdictScratchBuild. Every other container keeps the classification it had,
