@@ -1,6 +1,7 @@
 package forgejoresync
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
@@ -163,7 +164,7 @@ func TestGitExecArgs(t *testing.T) {
 		{
 			name: "LsRemote",
 			call: func(g ExecGit) error { _, err := g.LsRemote(url); return err },
-			want: []string{"git", "ls-remote", "--heads", "--tags", "--refs", url},
+			want: []string{"git", "ls-remote", "--heads", "--tags", "--refs", "--", url},
 		},
 		{
 			name: "InitBare",
@@ -173,12 +174,12 @@ func TestGitExecArgs(t *testing.T) {
 		{
 			name: "Fetch",
 			call: func(g ExecGit) error { return g.Fetch(dir, url, refspecs...) },
-			want: []string{"git", "-C", dir, "fetch", "--quiet", url, refspecs[0], refspecs[1]},
+			want: []string{"git", "-C", dir, "fetch", "--quiet", "--", url, refspecs[0], refspecs[1]},
 		},
 		{
 			name: "PushPrune",
 			call: func(g ExecGit) error { return g.PushPrune(dir, url, refspecs...) },
-			want: []string{"git", "-C", dir, "push", "--prune", "--quiet", url, refspecs[0], refspecs[1]},
+			want: []string{"git", "-C", dir, "push", "--prune", "--quiet", "--", url, refspecs[0], refspecs[1]},
 		},
 	}
 	for _, tc := range cases {
@@ -192,6 +193,56 @@ func TestGitExecArgs(t *testing.T) {
 				t.Fatalf("%s argv = %q, want %q", tc.name, f.calls, tc.want)
 			}
 		})
+	}
+}
+
+// TestGitExecEndsOptionsBeforeURL pins that a url which starts with "-" reaches
+// git after a "--", so it is read as a repository and never as an option. Without
+// the "--" the url below would be the first argument after the subcommand's
+// options, where git takes it as a flag.
+func TestGitExecEndsOptionsBeforeURL(t *testing.T) {
+	t.Parallel()
+	const hostile = "--upload-pack=touch /tmp/owned"
+	const dir = "scratch/refs.git"
+	cases := []struct {
+		name string
+		call func(g ExecGit) error
+	}{
+		{name: "LsRemote", call: func(g ExecGit) error { _, err := g.LsRemote(hostile); return err }},
+		{name: "Fetch", call: func(g ExecGit) error { return g.Fetch(dir, hostile, Refspecs...) }},
+		{name: "PushPrune", call: func(g ExecGit) error { return g.PushPrune(dir, hostile, Refspecs...) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeRunner{}
+			if err := tc.call(ExecGit{Run: f.run}); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if len(f.calls) != 1 {
+				t.Fatalf("%s made %d calls, want 1", tc.name, len(f.calls))
+			}
+			argv := f.calls[0]
+			at := slices.Index(argv, hostile)
+			if at < 1 || argv[at-1] != "--" {
+				t.Fatalf("%s argv = %q, want %q directly before the url", tc.name, argv, "--")
+			}
+		})
+	}
+}
+
+// TestGitCommandDisablesPrompt pins that a git process is built with terminal
+// prompting off and with the argv it was given. The command is built, never
+// started, so no process runs.
+func TestGitCommandDisablesPrompt(t *testing.T) {
+	t.Parallel()
+	argv := []string{"git", "ls-remote", "--heads", "--", "https://github.com/acme/gastown.git"}
+	cmd := gitCommand(context.Background(), argv[0], argv[1:]...)
+	if !slices.Equal(cmd.Args, argv) {
+		t.Fatalf("gitCommand args = %q, want %q", cmd.Args, argv)
+	}
+	if !slices.Contains(cmd.Env, "GIT_TERMINAL_PROMPT=0") {
+		t.Fatal("gitCommand environment lacks GIT_TERMINAL_PROMPT=0, so a credential prompt could block the run")
 	}
 }
 

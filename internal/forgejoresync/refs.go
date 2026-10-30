@@ -1,10 +1,15 @@
 package forgejoresync
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Ref is one branch or tag of a repository and the sha it points at.
@@ -97,10 +102,44 @@ func NewExecGit() ExecGit {
 	return ExecGit{Run: RunExec}
 }
 
-// RunExec is the production Runner: it starts the program through os/exec.
-var RunExec Runner = execRunner(func(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).Output()
-})
+// gitTimeout bounds one git call, so a stalled remote cannot hold the run open.
+// It is long on purpose: one full fetch of a large repository over a slow link
+// can take many minutes, and a shorter bound would fail a healthy transfer.
+const gitTimeout = 30 * time.Minute
+
+// gitWaitDelay caps how long a killed git call waits for its output pipes to
+// close. A remote helper git spawned can hold stdout open. The group kill reaches
+// a helper that is still in the call's group, but not one that has left it, and
+// without this cap Output would wait on that helper past the bound. It matches
+// the wait internal/git gives a timed-out command.
+var gitWaitDelay = util.ProcessGroupKillGrace + 3*time.Second
+
+// RunExec is the production Runner: each git call is bounded by gitTimeout.
+var RunExec Runner = gitRunner(gitTimeout)
+
+// gitRunner is the Runner that bounds each call to bound: the call's context
+// ends after bound and gitCommand kills the process group. A test passes a
+// short bound; RunExec passes gitTimeout.
+func gitRunner(bound time.Duration) Runner {
+	return execRunner(func(name string, args ...string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), bound)
+		defer cancel()
+		return gitCommand(ctx, name, args...).Output()
+	})
+}
+
+// gitCommand builds the process for one git call without starting it. It turns
+// terminal prompting off, so a credential prompt fails the call instead of
+// blocking the run on a terminal nobody reads. It runs in its own process group
+// and ctx ending kills the whole group, so a remote helper git spawned goes too;
+// WaitDelay then stops Output waiting on a pipe a helper outside the group holds.
+func gitCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = gitWaitDelay
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd
+}
 
 // execRunner wraps a process starter as a Runner. Its error names the program
 // and subcommand, never the output, which can carry a secret. The starter is a
@@ -115,9 +154,10 @@ func execRunner(start func(name string, args ...string) ([]byte, error)) Runner 
 	}
 }
 
-// LsRemote lists the branches and tags of url.
+// LsRemote lists the branches and tags of url. The "--" ends the options, so a
+// url that starts with "-" is read as a repository, never as a git option.
 func (g ExecGit) LsRemote(url string) ([]byte, error) {
-	return g.Run([]string{"git", "ls-remote", "--heads", "--tags", "--refs", url})
+	return g.Run([]string{"git", "ls-remote", "--heads", "--tags", "--refs", "--", url})
 }
 
 // InitBare creates a bare repository at dir, the scratch the mirror is built in.
@@ -126,16 +166,18 @@ func (g ExecGit) InitBare(dir string) error {
 	return err
 }
 
-// Fetch fetches refspecs from url into the repository at dir.
+// Fetch fetches refspecs from url into the repository at dir. The "--" keeps a
+// url that starts with "-" from being read as a git option.
 func (g ExecGit) Fetch(dir, url string, refspecs ...string) error {
-	_, err := g.Run(append([]string{"git", "-C", dir, "fetch", "--quiet", url}, refspecs...))
+	_, err := g.Run(append([]string{"git", "-C", dir, "fetch", "--quiet", "--", url}, refspecs...))
 	return err
 }
 
 // PushPrune pushes refspecs from the repository at dir to url, deleting every
-// ref at url that the refspecs do not name.
+// ref at url that the refspecs do not name. The "--" keeps a url that starts
+// with "-" from being read as a git option.
 func (g ExecGit) PushPrune(dir, url string, refspecs ...string) error {
-	_, err := g.Run(append([]string{"git", "-C", dir, "push", "--prune", "--quiet", url}, refspecs...))
+	_, err := g.Run(append([]string{"git", "-C", dir, "push", "--prune", "--quiet", "--", url}, refspecs...))
 	return err
 }
 
