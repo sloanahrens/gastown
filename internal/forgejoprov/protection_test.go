@@ -12,8 +12,8 @@ import (
 // protectionRepo is the repository the branch protection tests protect.
 const protectionRepo = "acme/rig"
 
-// testOptions is the command line the protection tests run with: the defaults, with the
-// landing bot and gate contexts the script's tests use.
+// testOptions is the command line the protection tests run with: the defaults, with a
+// landing bot and the default gate contexts.
 func testOptions() Options {
 	return Options{
 		MainBranch:   DefaultMainBranch,
@@ -212,6 +212,50 @@ func TestEnsureRuleCreateConvergeAndIdempotent(t *testing.T) {
 			}
 			if n := len(f.writes()); n != wantWrites {
 				t.Fatalf("second run sent %d writes in all, want the first run's %d and no more", n, wantWrites)
+			}
+		})
+	}
+}
+
+// TestEnsureRuleJudgesEveryField checks that a live rule differing from MainRule in any one
+// field is patched, not reported as already set. Each row changes one field and nothing
+// else, so a field left out of the drift check fails its row. The rule name is the lookup
+// key, so it cannot differ on a rule that was found, and it has no row.
+func TestEnsureRuleJudgesEveryField(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "enable_push", field: "enable_push", value: true},
+		{name: "enable_push_whitelist", field: "enable_push_whitelist", value: true},
+		{name: "push whitelist entry while enable_push is false", field: "push_whitelist_usernames", value: []any{"someone"}},
+		{name: "push_whitelist_deploy_keys", field: "push_whitelist_deploy_keys", value: true},
+		{name: "apply_to_admins", field: "apply_to_admins", value: false},
+		{name: "enable_merge_whitelist", field: "enable_merge_whitelist", value: false},
+		{name: "merge whitelist with an extra user", field: "merge_whitelist_usernames", value: []any{"bot-landing", "someone"}},
+		{name: "enable_status_check", field: "enable_status_check", value: false},
+		{name: "status_check_contexts with one context missing", field: "status_check_contexts", value: []any{"om / review"}},
+		{name: "block_on_outdated_branch", field: "block_on_outdated_branch", value: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			opts := testOptions()
+			f := newFakeForgejo()
+			f.addRepo(protectionRepo)
+			drifted := servedRule(t, MainRule(opts))
+			drifted[c.field] = c.value
+			seedRule(t, f, protectionRepo, drifted)
+			var logs []string
+			p := userProvisioner(f, false, &logs)
+			if err := p.EnsureRule(protectionRepo, opts); err != nil {
+				t.Fatalf("EnsureRule: %v", err)
+			}
+			writes := f.writes()
+			if len(writes) != 1 || writes[0].method != http.MethodPatch {
+				t.Fatalf("sent %d writes, want one PATCH", len(writes))
 			}
 		})
 	}

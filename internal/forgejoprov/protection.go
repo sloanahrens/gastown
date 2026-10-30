@@ -9,24 +9,6 @@ import (
 	"strings"
 )
 
-// mainRuleChecks names the fields an existing main rule must carry to be left alone:
-// the fields the script's main_checks names, plus the push whitelist, which the script
-// leaves unjudged. A live rule with a push whitelist would otherwise pass as set. A
-// live rule that has converged is not patched on every run, so these are the only
-// fields a drift is judged on.
-var mainRuleChecks = []string{
-	"enable_push",
-	"enable_push_whitelist",
-	"push_whitelist_usernames",
-	"apply_to_admins",
-	"push_whitelist_deploy_keys",
-	"enable_merge_whitelist",
-	"merge_whitelist_usernames",
-	"enable_status_check",
-	"status_check_contexts",
-	"block_on_outdated_branch",
-}
-
 // MainRule is the protection body of the main rule: nobody pushes to it, admins
 // included, the landing bot alone may merge, the gate contexts are required, and a
 // stale pull request is refused rather than merged.
@@ -47,9 +29,10 @@ func MainRule(o Options) map[string]any {
 }
 
 // EnsureRule leaves the main rule of repo as MainRule(opts) describes it: it creates
-// the rule when absent, patches it when a checked field has drifted, and sends no write
-// when it has not. A write's own reply must carry every checked field, so a field
-// Forgejo ignores fails the run instead of passing it.
+// the rule when absent, patches it when any field of the body has drifted, and sends no
+// write when none has. The body is the one compared field for field, so a field added to
+// it is judged for drift as well. A write's own reply must carry every field of the body,
+// so a field Forgejo ignores fails the run instead of passing it.
 func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
@@ -58,13 +41,12 @@ func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 	base := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name) + "/branch_protections"
 	rule := opts.MainBranch
 	body := MainRule(opts)
-	checks := checkedFields(body)
 	rules, err := p.listRules(base)
 	if err != nil {
 		return err
 	}
 	if held := findRule(rules, rule); held != nil {
-		if carries(held, checks) {
+		if carries(held, body) {
 			p.logf("branch protection %s on %s is already set", rule, repo)
 			return nil
 		}
@@ -85,7 +67,7 @@ func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 			return p.Client.Unexpected(http.MethodPatch, path, status, resp)
 		}
 		p.logf("updated branch protection %s on %s", rule, repo)
-		return p.verifyWrite(rule, repo, resp, checks)
+		return p.verifyWrite(rule, repo, resp, body)
 	}
 	if p.Client.DryRun {
 		p.logf("would create branch protection %s on %s", rule, repo)
@@ -99,14 +81,14 @@ func (p *Provisioner) EnsureRule(repo string, opts Options) error {
 		return p.Client.Unexpected(http.MethodPost, base, status, resp)
 	}
 	p.logf("created branch protection %s on %s", rule, repo)
-	return p.verifyWrite(rule, repo, resp, checks)
+	return p.verifyWrite(rule, repo, resp, body)
 }
 
 // EnsureNoRule leaves no protection rule named rule on repo: it removes the rule when
 // one is present and reports one already absent, so a run converges either way.
 // Forgejo refuses to delete a branch that a protection rule matches, so a rule on the
-// candidate branches would stop the worker deleting each one after its merge
-// (gt-fn9e6.21), and the branches would pile up.
+// candidate branches would stop the worker deleting each one after its merge, and the
+// branches would pile up.
 func (p *Provisioner) EnsureNoRule(repo, rule string) error {
 	owner, name, err := splitRepo(repo)
 	if err != nil {
@@ -163,29 +145,20 @@ func (p *Provisioner) listRules(base string) ([]map[string]any, error) {
 	return rules, nil
 }
 
-// verifyWrite fails when the reply to a write does not carry every checked field, so a
+// verifyWrite fails when the reply to a write does not carry every field of body, so a
 // write Forgejo silently ignored in part is reported, not passed.
-func (p *Provisioner) verifyWrite(rule, repo string, resp []byte, checks map[string]any) error {
+func (p *Provisioner) verifyWrite(rule, repo string, resp []byte, body map[string]any) error {
 	var got map[string]any
-	if err := json.Unmarshal(resp, &got); err != nil || !carries(got, checks) {
+	if err := json.Unmarshal(resp, &got); err != nil || !carries(got, body) {
 		return fmt.Errorf("the write for %s on %s did not take%s", rule, repo, p.Client.BodyTail(resp))
 	}
 	return nil
 }
 
-// checkedFields returns the fields of body that mainRuleChecks names.
-func checkedFields(body map[string]any) map[string]any {
-	picked := make(map[string]any, len(mainRuleChecks))
-	for _, key := range mainRuleChecks {
-		picked[key] = body[key]
-	}
-	return picked
-}
-
-// carries reports whether have holds every field of checks at the value checks names.
-func carries(have, checks map[string]any) bool {
-	for key, want := range checks {
-		if !sameJSON(have[key], want) {
+// carries reports whether have holds every field of want at the value want names.
+func carries(have, want map[string]any) bool {
+	for key, value := range want {
+		if !sameJSON(have[key], value) {
 			return false
 		}
 	}
