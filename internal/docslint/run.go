@@ -61,11 +61,6 @@ func checks() []check {
 // listing, a count or the findings to stdout and the reason for any refusal to
 // stderr, and returns the exit code.
 //
-//	docs-lint                 run all checks; one line per finding; exit 1 on any
-//	docs-lint --list <tier>   agent-facing | reference | historical | go
-//	docs-lint --slice N M     N docs and M go files, least recently committed first
-//	docs-lint --words         total words across the agent-facing tier
-//
 // A check that cannot run exits 2 with the reason on stderr, after the findings
 // the other checks found: an erroring check with no findings is never exit 1 and
 // never silent (gt-et39).
