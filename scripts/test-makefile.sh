@@ -35,8 +35,6 @@ bash -n deploy/k8s/kind/common.sh
 bash -n deploy/k8s/kind/up.sh
 bash -n deploy/k8s/kind/down.sh
 bash deploy/k8s/kind/kind_test.sh
-bash -n deploy/k8s/render-policy.sh
-bash deploy/k8s/render-policy_test.sh
 bash -n scripts/resource-sampler_test.sh
 bash scripts/resource-sampler_test.sh
 bash -n scripts/test-makefile.sh

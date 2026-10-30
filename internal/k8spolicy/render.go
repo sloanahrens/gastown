@@ -84,8 +84,8 @@ var (
 // It returns an error, and no output, for a Params value that is not a DNS name,
 // an IPv4 address or a port number (see Params).
 //
-// It is a line state machine, the port of the awk program of
-// deploy/k8s/render-policy.sh. A host line is held, not printed, and the lines
+// It is a line state machine, the port of the awk program of the shell script
+// gt-tpg0p.84 deleted. A host line is held, not printed, and the lines
 // after it are buffered until one decides the block:
 //
 //   - a `port:` line settles it. The port is the digits after `port:`. For an

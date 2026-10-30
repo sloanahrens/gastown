@@ -93,7 +93,6 @@ func TestManifestOrderIsToday(t *testing.T) {
 		"scripts/openshell-providers_test.sh",
 		"deploy/gke-probe/probe_test.sh",
 		"deploy/k8s/kind/kind_test.sh",
-		"deploy/k8s/render-policy_test.sh",
 		"scripts/resource-sampler_test.sh",
 		"scripts/makefile-gate_test.sh",
 		".githooks/pre-push_test.sh",

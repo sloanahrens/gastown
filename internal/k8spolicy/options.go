@@ -1,9 +1,9 @@
 // Package k8spolicy renders the polecat sandbox policy for a Kubernetes
 // gateway from the Docker policy (deploy/polecat/policy.yaml), so the two
-// cannot drift apart (gt-tpg0p.81). This slice is the command line and the two
-// input validators; the endpoint rewriter, the tracker host's flag and the
-// render arrive in gt-tpg0p.82 and gt-tpg0p.83. deploy/k8s/render-policy.sh is
-// the port's specification.
+// cannot drift apart (gt-tpg0p.81). The package holds the command line and the
+// input validators (this file and validate.go) and the endpoint rewriter
+// (render.go); cmd/render-policy writes the result. It is the port of a shell
+// script that gt-tpg0p.84 deleted.
 package k8spolicy
 
 import (
