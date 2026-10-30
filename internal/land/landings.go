@@ -148,7 +148,11 @@ func (f *LandingsFile) landedAt(rec LandingRecord) time.Time {
 // first-sight record the host has seen no submission at all and no end is
 // written — no credit is better than the seat's word for it (gt-8yk78).
 func (f *LandingsFile) attemptEnd(beadID, head, seat string, submitted, capped time.Time) (time.Time, bool) {
-	if f.FirstSeen == nil || seat == "" || submitted.IsZero() || !spans.ValidBeadID(beadID) {
+	if f.FirstSeen == nil {
+		f.logf("landings file %s: no first-sight reader, so no end is written for %s on %s", f.Path, seat, beadID)
+		return time.Time{}, false
+	}
+	if seat == "" || submitted.IsZero() || !spans.ValidBeadID(beadID) {
 		return time.Time{}, false
 	}
 	seen, err := f.FirstSeen(beadID, head)

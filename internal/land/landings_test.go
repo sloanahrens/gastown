@@ -1041,27 +1041,40 @@ func TestLandingsFileAppendFloorsNothingWithoutASling(t *testing.T) {
 // nothing and the record keeps its silence (gt-8yk78, gt-v7ptp).
 func TestLandingsFileAppendFloorsNothingWithoutAFirstSight(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	f, err := RigLandingsFile(town, "gastown")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var logged []string
-	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
-	f.Spans = spans.New(spans.DefaultDir(town), nil)
-	seedSling(t, town, "gt-abc", spanEpoch)
+	for _, c := range []struct {
+		name     string
+		firstSee func(*LandingsFile)
+		want     string
+	}{
+		{"the log holds no record for the submission", func(*LandingsFile) {}, "no first-sight record"},
+		{"the landing has no first-sight reader", func(f *LandingsFile) { f.FirstSeen = nil }, "no first-sight reader"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			f, err := RigLandingsFile(town, "gastown")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logged []string
+			f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+			f.Spans = spans.New(spans.DefaultDir(town), nil)
+			c.firstSee(f)
+			seedSling(t, town, "gt-abc", spanEpoch)
 
-	rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
-	if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
-		t.Fatal(err)
-	}
+			rec0 := LandingRecord{BeadID: "gt-abc", Head: "h1", LandedCommit: "c1", LandedAt: spanEpoch.Add(40 * time.Minute)}
+			if err := f.AppendSubmitted(rec0, "gastown/opal", spanEpoch.Add(20*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
 
-	rec, _ := lastLine(t, f)
-	if rec.PolecatSecs != 0 || rec.PolecatAttempts != nil {
-		t.Errorf("record = %+v; want no time ended on the seat's word alone", rec)
-	}
-	if len(logged) != 1 || !strings.Contains(logged[0], "no first-sight record") {
-		t.Errorf("logged = %q, want one line saying the submission has no trusted end", logged)
+			rec, _ := lastLine(t, f)
+			if rec.PolecatSecs != 0 || rec.PolecatAttempts != nil {
+				t.Errorf("record = %+v; want no time ended on the seat's word alone", rec)
+			}
+			if len(logged) != 1 || !strings.Contains(logged[0], c.want) {
+				t.Errorf("logged = %q, want one line saying the submission has no trusted end (%q)", logged, c.want)
+			}
+		})
 	}
 }
 
