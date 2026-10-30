@@ -231,6 +231,9 @@ type Worker struct {
 	Now   func() time.Time
 
 	state map[string]*beadState
+	// memo holds the beads this run judged already, so a held bead whose row
+	// has not moved is not read again before its hold is due (gt-r9pj9).
+	memo *outcomeMemos
 	// escWG lets a test wait for Escalate goroutines.
 	escWG sync.WaitGroup
 	// pendingRepair holds landings whose record was left incomplete; the
@@ -283,6 +286,14 @@ type beadState struct {
 	// installNow is whether the bead carried LabelInstallNow when this pass
 	// loaded it; only a landing of it turns the flag into a report field.
 	installNow bool
+	// annotated are the annotation keys this run has already posted on the
+	// bead: an outcome the bead already carries is not written again, and the
+	// keys outlive the failure runs they were posted in, so alternating
+	// outcomes do not take turns re-posting each other (gt-r9pj9).
+	annotated map[string]bool
+	// wrote is whether this pass commented on the bead, which moves its row.
+	// The pass consumes it when it records the bead's outcome (gt-r9pj9).
+	wrote bool
 }
 
 // BackoffWriter records a rig's failing landings for readers outside the
@@ -329,6 +340,48 @@ func (w *Worker) bead(id string) *beadState {
 		w.state[id] = s
 	}
 	return s
+}
+
+func (w *Worker) outcomeMemo() *outcomeMemos {
+	if w.memo == nil {
+		w.memo = newOutcomeMemos(w.now)
+	}
+	return w.memo
+}
+
+// rememberOutcome records what the pass left the bead on: a bead held until a
+// time is not read again before then, and one the pass landed, or that carries
+// no hold, is read afresh on the next pass (gt-r9pj9).
+func (w *Worker) rememberOutcome(issue *beads.Issue) {
+	st := w.state[issue.ID]
+	wrote := st != nil && st.wrote
+	if st != nil {
+		st.wrote = false
+	}
+	if st == nil || !st.until.After(w.now()) {
+		w.outcomeMemo().forget(issue.ID)
+		return
+	}
+	w.outcomeMemo().record(issue.ID, w.outcomeRow(issue, wrote), st.until)
+}
+
+// outcomeRow is the bead's list row as the pass leaves it. A pass that
+// commented on the bead moved the row itself, and recording the row it listed
+// would make the next pass read the bead to learn of the worker's own write: a
+// Show, a Children, a Comments and a whole landing attempt to find nothing new.
+// One Show in the pass that wrote instead. A failed read leaves the row unknown,
+// so the memo holds nothing and the next pass reads the bead: a row nothing can
+// prove is never skipped (gt-r9pj9).
+func (w *Worker) outcomeRow(issue *beads.Issue, wrote bool) string {
+	if !wrote {
+		return issue.UpdatedAt
+	}
+	fresh, err := w.Beads.Show(issue.ID)
+	if err != nil || fresh == nil {
+		w.logf("%s: asking bd where the pass's comment left the row (%v); the next pass reads the bead again", issue.ID, err)
+		return ""
+	}
+	return fresh.UpdatedAt
 }
 
 // Pass lands every ready bead once, highest priority first and, within a
@@ -430,11 +483,14 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		if _, pending := w.pendingRepair[issue.ID]; pending {
 			continue
 		}
-		if st := w.bead(issue.ID); w.now().Before(st.until) {
+		// A bead whose row is the one its last outcome left, and whose hold
+		// has not come due, is not read again (gt-r9pj9).
+		if w.outcomeMemo().held(issue.ID, issue.UpdatedAt) {
 			rep.Skipped++
 			continue
 		}
 		w.process(ctx, issue, &rep)
+		w.rememberOutcome(issue)
 	}
 	return rep
 }
@@ -843,9 +899,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			return
 		}
 		msg := reworkMessage(rej)
-		if cerr := w.Beads.AddComment(work.BeadID, msg); cerr != nil {
-			w.logf("%s: adding the rework comment: %v", work.BeadID, cerr)
-		}
+		w.annotate(work.BeadID, "rework:"+work.Head, "adding the rework comment", msg)
 		w.clearIntent(work)
 	case outRejectedHuman:
 		var rej *land.Rejection
@@ -860,10 +914,11 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			return
 		}
 		w.endFailureRun(work.BeadID)
-		msg := humanMessage(rej)
-		if cerr := w.Beads.AddComment(work.BeadID, msg); cerr != nil {
-			w.logf("%s: adding the human-rejection comment: %v", work.BeadID, cerr)
-		}
+		// The bead keeps its ready label until someone acts on the refusal,
+		// so it is re-read on the wait a human refusal gets rather than on
+		// every pass (gt-r9pj9).
+		w.bead(work.BeadID).until = w.now().Add(humanWaitBackoff)
+		w.annotate(work.BeadID, "human-rejection:"+work.Head, "adding the human-rejection comment", humanMessage(rej))
 		w.clearIntent(work)
 	case outRace:
 		// Target moved during the gate: nothing written; land again next pass.
@@ -882,6 +937,10 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	case outNotReady:
 		delete(w.pendingRepair, work.BeadID)
 		rep.Skipped++
+		// Not ready means the store's bead disagrees with the row the pass
+		// listed, so the next list shows the change; until it does, the bead
+		// waits the refusal's wait rather than every pass (gt-r9pj9).
+		st.until = w.now().Add(humanWaitBackoff)
 		w.logf("%s: %v", work.BeadID, err)
 	case outReadBack:
 		rep.Failed++
@@ -923,10 +982,18 @@ func (w *Worker) alertAsync(beadID string, call func()) {
 
 // endFailureRun forgets a bead's run of failures: the bead landed or was
 // rejected, so the next failure starts the count again, and the escalation
-// the run raised closes.
+// the run raised closes. Everything the run accumulated goes — the state is
+// dropped whole rather than field by field, so a field added later starts the
+// next run at zero like the rest — except the annotations the bead already
+// carries, which outlive the run so a refusal is not posted a second time
+// (gt-r9pj9).
 func (w *Worker) endFailureRun(beadID string) {
+	st := w.state[beadID]
 	w.closeFailureRun(beadID)
 	delete(w.state, beadID)
+	if st != nil && len(st.annotated) > 0 {
+		w.bead(beadID).annotated = st.annotated
+	}
 }
 
 // closeFailureRun is endFailureRun for a path that still needs the bead's
@@ -1104,15 +1171,30 @@ func (w *Worker) waitForHuman(id, key, msg string) {
 }
 
 func (w *Worker) announce(id, key, msg string) {
+	w.annotate(id, key, "annotating", msg)
+}
+
+// annotate posts msg on id once per key, whatever the pass's outcome was
+// repeated from: the bead already carries the annotation, and posting it again
+// is a write nothing reads (gt-r9pj9). Every key posted is remembered, not just
+// the last, so a bead whose outcome alternates — refused for one reason, then
+// another, then the first again — does not re-post each one in turn. A failed
+// write is logged as what failed and leaves the key unset, so the next pass
+// tries again.
+func (w *Worker) annotate(id, key, what, msg string) {
 	st := w.bead(id)
-	if st.announced == key {
+	if st.annotated[key] {
 		return
 	}
 	if err := w.Beads.AddComment(id, msg); err != nil {
-		w.logf("%s: annotating: %v", id, err)
+		w.logf("%s: %s: %v", id, what, err)
 		return
 	}
-	st.announced = key
+	if st.annotated == nil {
+		st.annotated = map[string]bool{}
+	}
+	st.annotated[key] = true
+	st.wrote = true
 }
 
 // afterLanding runs the post-landing command for a new landing and tells
