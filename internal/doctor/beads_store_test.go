@@ -188,24 +188,25 @@ func (noBeadsDB) ReadyAll() ([]*beads.Issue, error) { return nil, errNoDatabase 
 func (noBeadsDB) ReadyFiltered(beads.ReadyOptions) ([]*beads.Issue, error) {
 	return nil, errNoDatabase
 }
-func (noBeadsDB) Children(string) ([]*beads.Issue, error)          { return nil, errNoDatabase }
-func (noBeadsDB) Comments(string) ([]beads.Comment, error)         { return nil, errNoDatabase }
-func (noBeadsDB) Create(beads.CreateOptions) (*beads.Issue, error) { return nil, errNoDatabase }
-func (noBeadsDB) Update(string, beads.UpdateOptions) error         { return errNoDatabase }
-func (noBeadsDB) Close(...string) error                            { return errNoDatabase }
-func (noBeadsDB) CloseWithReason(string, ...string) error          { return errNoDatabase }
-func (noBeadsDB) ForceCloseWithReason(string, ...string) error     { return errNoDatabase }
-func (noBeadsDB) DeleteIssues(...string) error                     { return errNoDatabase }
-func (noBeadsDB) Release(string) error                             { return errNoDatabase }
-func (noBeadsDB) AddComment(string, string) error                  { return errNoDatabase }
-func (noBeadsDB) AddCommentAs(string, string, string) error        { return errNoDatabase }
-func (noBeadsDB) AddDependency(string, string) error               { return errNoDatabase }
-func (noBeadsDB) AddTypedDependency(string, string, string) error  { return errNoDatabase }
-func (noBeadsDB) DepList(string, string) ([]beads.IssueDep, error) { return nil, errNoDatabase }
-func (noBeadsDB) RemoveDependency(string, string) error            { return errNoDatabase }
-func (noBeadsDB) AppendNotes(string, string) error                 { return errNoDatabase }
-func (noBeadsDB) GateCheck(...string) (string, error)              { return "", errNoDatabase }
-func (noBeadsDB) ReleaseIfAssignee(string, string) (bool, error)   { return false, errNoDatabase }
+func (noBeadsDB) Children(string) ([]*beads.Issue, error)            { return nil, errNoDatabase }
+func (noBeadsDB) Comments(string) ([]beads.Comment, error)           { return nil, errNoDatabase }
+func (noBeadsDB) Create(beads.CreateOptions) (*beads.Issue, error)   { return nil, errNoDatabase }
+func (noBeadsDB) Update(string, beads.UpdateOptions) error           { return errNoDatabase }
+func (noBeadsDB) Close(...string) error                              { return errNoDatabase }
+func (noBeadsDB) CloseWithReason(string, ...string) error            { return errNoDatabase }
+func (noBeadsDB) ForceCloseWithReason(string, ...string) error       { return errNoDatabase }
+func (noBeadsDB) DeleteIssues(...string) error                       { return errNoDatabase }
+func (noBeadsDB) Release(string) error                               { return errNoDatabase }
+func (noBeadsDB) AddComment(string, string) error                    { return errNoDatabase }
+func (noBeadsDB) AddCommentAs(string, string, string) error          { return errNoDatabase }
+func (noBeadsDB) AddDependency(string, string) error                 { return errNoDatabase }
+func (noBeadsDB) AddTypedDependency(string, string, string) error    { return errNoDatabase }
+func (noBeadsDB) DepList(string, string) ([]beads.IssueDep, error)   { return nil, errNoDatabase }
+func (noBeadsDB) DepListUp(string, string) ([]beads.IssueDep, error) { return nil, errNoDatabase }
+func (noBeadsDB) RemoveDependency(string, string) error              { return errNoDatabase }
+func (noBeadsDB) AppendNotes(string, string) error                   { return errNoDatabase }
+func (noBeadsDB) GateCheck(...string) (string, error)                { return "", errNoDatabase }
+func (noBeadsDB) ReleaseIfAssignee(string, string) (bool, error)     { return false, errNoDatabase }
 func (noBeadsDB) TransferIfAssignee(string, string, string, string) (bool, error) {
 	return false, errNoDatabase
 }
