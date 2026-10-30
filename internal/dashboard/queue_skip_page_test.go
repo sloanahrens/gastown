@@ -269,6 +269,9 @@ func TestSkipClass(t *testing.T) {
 		// The live reasons carry the bead id first (gt-fvtw7).
 		{"live no seat", "gt-vesnm: no seat: over the town total: 14/12 live polecats across every seat", "waiting for a seat"},
 		{"id-prefixed dotted id", "gt-tpg0p.70: no seat: over the town total", "waiting for a seat"},
+		// A wisp's or a molecule's id carries more than one hyphen segment.
+		{"id-prefixed hyphenated id", "hq-wisp-dvrty: no seat: over the town total", "waiting for a seat"},
+		{"id-prefixed hyphenated id with a child", "gt-wisp-mruldf.2: no seat: over the town total", "waiting for a seat"},
 		{"id-prefixed not eligible", "gt-vesnm: not eligible (assigned to gastown/polecats/slit)", "skipped"},
 		{"id-prefixed unshaped", "gt-vesnm: unshaped: missing ## Gate", "skipped"},
 		{"id-prefixed held", "gt-vesnm: held: overlap with gt-okckk", "skipped"},
@@ -311,21 +314,23 @@ func TestQueueSkipPageTagsByCause(t *testing.T) {
 		seat("gt-late1", 2, "2026-10-29T10:00:00Z"),
 		seat("gt-p1new", 1, "2026-10-29T11:00:00Z"),
 		seat("gt-early", 2, "2026-10-28T10:00:00Z"),
+		seat("hq-wisp-dvrty", 3, "2026-10-29T09:00:00Z"),
 		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "gt-skpv2: not eligible (assigned to gastown/polecats/slit)", 2),
 	))
 
 	tags := map[string]queueRowDrawn{}
 	for _, r := range queueRows(t, dom) {
-		for _, id := range []string{"gt-late1", "gt-p1new", "gt-early", "gt-skpv2"} {
+		for _, id := range []string{"gt-late1", "gt-p1new", "gt-early", "hq-wisp-dvrty", "gt-skpv2"} {
 			if strings.Contains(r.Text, id) {
 				tags[id] = r
 			}
 		}
 	}
 	for id, want := range map[string]string{
-		"gt-p1new": "waiting for a seat #1 of 3",
-		"gt-early": "waiting for a seat #2 of 3",
-		"gt-late1": "waiting for a seat #3 of 3",
+		"gt-p1new":      "waiting for a seat #1 of 4",
+		"gt-early":      "waiting for a seat #2 of 4",
+		"gt-late1":      "waiting for a seat #3 of 4",
+		"hq-wisp-dvrty": "waiting for a seat #4 of 4",
 	} {
 		if l, ok := leafSaying(tags[id], "tag", "waiting for a seat"); !ok || l.Text != want {
 			t.Errorf("%s wears %+v, want the tag %q", id, l, want)
