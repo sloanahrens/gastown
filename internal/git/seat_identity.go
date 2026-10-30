@@ -41,9 +41,16 @@ func SeatLocalEmail(seat string) string {
 // unreadable. It runs with only HOME and PATH, so a repository's or an ambient
 // GIT_* setting does not decide the answer.
 func GlobalAuthorEmail() string {
+	return globalAuthorEmailWith(exec.Command, os.Getenv)
+}
+
+// globalAuthorEmailWith is GlobalAuthorEmail with its two seams: newCmd builds
+// the git command and getenv reads the host environment. Only HOME and PATH
+// reach the command's environment, whatever getenv would also return.
+func globalAuthorEmailWith(newCmd func(name string, args ...string) *exec.Cmd, getenv func(string) string) string {
 	return globalAuthorEmailFrom(func(name string, args ...string) ([]byte, error) {
-		cmd := exec.Command(name, args...) //nolint:gosec // G204: fixed command
-		cmd.Env = []string{"HOME=" + os.Getenv("HOME"), "PATH=" + os.Getenv("PATH")}
+		cmd := newCmd(name, args...)
+		cmd.Env = []string{"HOME=" + getenv("HOME"), "PATH=" + getenv("PATH")}
 		return cmd.Output()
 	})
 }
