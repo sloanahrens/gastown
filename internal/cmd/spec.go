@@ -526,6 +526,18 @@ func childSpecs(issues []*beads.Issue) []specdispatch.Child {
 	return out
 }
 
+// specCandidateChildren is the tick's children read: the annotated memory's
+// answer for a candidate the board has not moved, and specChildren counted in
+// the candidates phase for one it has (gt-km9jt).
+func specCandidateChildren(townRoot string, reads *specTickReads, memory *specAnnotatedTick) func(beadID string) ([]specdispatch.Child, error) {
+	return func(beadID string) ([]specdispatch.Child, error) {
+		return memory.children(beadID, func() ([]specdispatch.Child, error) {
+			reads.call()
+			return specChildren(townRoot, beadID)
+		})
+	}
+}
+
 // specHoldKnobs is the dispatcher's own settings the peer-hold question reads:
 // the candidate filter's priority ceiling, and the shape gate with the
 // template it lints against. Reading them from the town is the caller's
@@ -1116,6 +1128,9 @@ type specDispatchEntry struct {
 type specCandidate struct {
 	Spec specdispatch.Spec
 	Rig  string
+	// UpdatedAt is the board row's updated_at: the tick's key for reusing the
+	// children it read last time instead of reading them again (gt-km9jt).
+	UpdatedAt string
 	// Blockers are the bead's blocking edges, from the board's detail read, for
 	// the admission check (sling.Admit). The ready board carries no dependency
 	// rows (gt-ndad8), so an empty slice is a bead the read answered as having
@@ -2503,11 +2518,11 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			return showSpecWith(reads, id, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 		},
 		ShowFresh: func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
-		Children: func(id string) ([]specdispatch.Child, error) {
-			reads.call()
-			return specChildren(townRoot, id)
-		},
-		RigHold: func(rig string) string { return dispatch.RigHold(townRoot, rig) },
+		// A candidate the board has not moved keeps the children the last tick
+		// read, so the scan's one read per candidate is spent on the beads that
+		// changed (gt-km9jt).
+		Children: specCandidateChildren(townRoot, reads, annotations),
+		RigHold:  func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
 			return rigRevertInFlight(townRoot, rig, func(beadID string) bool {
 				reads.call()
@@ -2817,6 +2832,7 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 	}
 	var specs []specdispatch.Spec
 	rigOf := map[string]string{}
+	updatedAt := map[string]string{}
 	labeled := map[string]bool{}
 	for _, name := range names {
 		rigPath := filepath.Join(townRoot, name)
@@ -2891,13 +2907,14 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 				continue
 			}
 			rigOf[s.ID] = name
+			updatedAt[s.ID] = issue.UpdatedAt
 			specs = append(specs, s)
 		}
 	}
 	specdispatch.Order(specs)
 	read.Candidates = make([]specCandidate, 0, len(specs))
 	for _, s := range specs {
-		read.Candidates = append(read.Candidates, specCandidate{Spec: s, Rig: rigOf[s.ID]})
+		read.Candidates = append(read.Candidates, specCandidate{Spec: s, Rig: rigOf[s.ID], UpdatedAt: updatedAt[s.ID]})
 	}
 	read.LabeledFailed = len(labeled)
 	return read
