@@ -465,7 +465,10 @@ const polecatDur = (secs, lower, upper) => {
     const m = Math.round(s / 60), h = Math.floor(m / 60);
     out = h + "h" + (m % 60 ? String(m % 60).padStart(2, "0") + "m" : "");
   }
-  return upper ? "≤" + out : lower ? out + "+" : out;
+  // An upper bound reads "≤23m"; a sub-second one folds the two signs into
+  // "≤1s" rather than the "≤<1s" that concatenation would give.
+  if (upper) return "≤" + (out.startsWith("<") ? out.slice(1) : out);
+  return lower ? out + "+" : out;
 };
 const age = iso => iso ? fmtDur((Date.now() - new Date(iso).getTime()) / 1000) : "–";
 // fmtMS is a span in minutes and seconds, the form the om rework table draws a
