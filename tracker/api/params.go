@@ -29,8 +29,9 @@ type CreateParams struct {
 // Rig scopes the answer to one rig and Rigs to several, which is what a
 // cross-rig read asks (internal/beads.ListAcross); both name a prefix the
 // tracker files issues under (tracker.rigs), not the town's directory name.
-// Rigs beside Rig is a caller's mistake, and a rig the tracker does not hold
-// is refused rather than answered with no issues.
+// Rigs beside Rig is a caller's mistake. A rig the tracker does not hold is
+// reported in the page's RigErrors and answered with no issues of its own; the
+// count refuses it instead, since a count has no per-rig answer to carry it.
 type ListFilter struct {
 	Statuses     []string `json:"statuses,omitempty"`
 	Labels       []string `json:"labels,omitempty"`

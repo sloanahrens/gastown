@@ -18,6 +18,7 @@ import (
 type queueTrackerTown struct {
 	rows   map[string]int    // "<rig name>/<column>" issue counts
 	fail   map[string]bool   // "<rig name>/waiting_to_land" refused in the one call
+	refuse bool              // the one call is refused as a whole
 	prefix map[string]string // rig name to the prefix the store files it under
 
 	mu     sync.Mutex
@@ -55,6 +56,9 @@ func (t *queueTrackerStore) ListAcross(rigs []string, _ beads.ListOptions) (bead
 	t.owner.mu.Lock()
 	t.owner.across = append(t.owner.across, append([]string(nil), rigs...))
 	t.owner.mu.Unlock()
+	if t.owner.refuse {
+		return beads.AcrossResult{}, fmt.Errorf("tracker: the request was refused")
+	}
 	res := beads.AcrossResult{Rigs: map[string][]*beads.Issue{}, Errors: map[string]error{}}
 	for _, prefix := range rigs {
 		rig := t.owner.rigName(prefix)
@@ -174,6 +178,23 @@ func TestSourceQueueLandingColumnNilWhenOneTrackerRigFails(t *testing.T) {
 	town := &queueTrackerTown{
 		rows:   map[string]int{"gastown/waiting_to_land": 3, "hm/waiting_to_land": 1, "gastown/ready": 4, "hm/ready": 2},
 		fail:   map[string]bool{"hm/waiting_to_land": true},
+		prefix: prefix,
+	}
+	cols, err := queueSource{}.Collect(context.Background(), queueTrackerEnv(t, town, queueTrackerRigs(prefix)))
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	queueWantColumns(t, cols, map[string]any{"waiting_to_land": nil, "ready": 6, "blocked": 0})
+}
+
+// A tracker that refuses the whole request nils the landing column and leaves
+// the per-rig columns, which the request does not touch, as they were.
+func TestSourceQueueLandingColumnNilWhenTheTrackerRefusesTheRequest(t *testing.T) {
+	t.Parallel()
+	prefix := map[string]string{"gastown": "gt", "hm": "hm"}
+	town := &queueTrackerTown{
+		rows:   map[string]int{"gastown/waiting_to_land": 3, "hm/waiting_to_land": 1, "gastown/ready": 4, "hm/ready": 2},
+		refuse: true,
 		prefix: prefix,
 	}
 	cols, err := queueSource{}.Collect(context.Background(), queueTrackerEnv(t, town, queueTrackerRigs(prefix)))

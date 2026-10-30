@@ -17,6 +17,13 @@ import (
 // was sent.
 func acrossServer(t *testing.T, issues ...api.Issue) (*Client, func() []api.ListFilter) {
 	t.Helper()
+	return acrossServerPage(t, api.IssuePage{Issues: issues})
+}
+
+// acrossServerPage answers the list route with page and records every filter
+// it was sent.
+func acrossServerPage(t *testing.T, page api.IssuePage) (*Client, func() []api.ListFilter) {
+	t.Helper()
 	var mu sync.Mutex
 	var asked []api.ListFilter
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +33,7 @@ func acrossServer(t *testing.T, issues ...api.Issue) (*Client, func() []api.List
 		asked = append(asked, f)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.IssuePage{Issues: issues})
+		_ = json.NewEncoder(w).Encode(page)
 	})
 	tc, err := client.New(client.Config{BaseURL: "http://127.0.0.1:1", Token: "t", SchemaLevel: api.SchemaLevel, MaxRetries: -1, HTTP: &http.Client{Transport: roundTrip(handler)}})
 	if err != nil {
@@ -76,13 +83,64 @@ func TestListAcrossAsksForEveryRigOnce(t *testing.T) {
 	}
 }
 
-// An issue filed under a rig the caller did not ask for is a broken answer,
-// not an issue to file under a rig nobody listed.
-func TestListAcrossRefusesAnIssueFromARigItDidNotAskFor(t *testing.T) {
+// An issue filed under a rig the caller did not ask for is not an answer to
+// this read, so it is left out and the rigs that were asked for keep theirs.
+func TestListAcrossLeavesOutAnIssueFromARigItDidNotAskFor(t *testing.T) {
 	t.Parallel()
-	c, _ := acrossServer(t, api.Issue{ID: "nope-a", Title: "elsewhere"})
-	if _, err := c.ListAcross([]string{"gt"}, beads.ListOptions{}); err == nil || !strings.Contains(err.Error(), "nope") {
-		t.Errorf("ListAcross = %v, want an error naming the rig it was not asked for", err)
+	c, _ := acrossServer(t, api.Issue{ID: "gt-a", Title: "a"}, api.Issue{ID: "nope-a", Title: "elsewhere"})
+	res, err := c.ListAcross([]string{"gt"}, beads.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListAcross: %v, want the stray issue left out without failing the call", err)
+	}
+	if got := len(res.Rigs["gt"]); got != 1 {
+		t.Errorf("gt holds %d issues, want its 1", got)
+	}
+	if _, ok := res.Rigs["nope"]; ok || len(res.Errors) != 0 {
+		t.Errorf("answer = %v, errors %v; want only gt and no errors", res.Rigs, res.Errors)
+	}
+}
+
+// A rig the tracker does not hold is named on its own entry: the rigs it does
+// hold keep their issues, and the unknown rig is an error, never an empty rig.
+func TestListAcrossNamesAnUnknownRigOnItsOwnEntry(t *testing.T) {
+	t.Parallel()
+	c, _ := acrossServerPage(t, api.IssuePage{
+		Issues:    []api.Issue{{ID: "gt-a", Title: "a"}},
+		RigErrors: map[string]string{"nope": "unknown rig nope"},
+	})
+	res, err := c.ListAcross([]string{"gt", "nope"}, beads.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListAcross: %v, want the unknown rig on its own entry", err)
+	}
+	if got := len(res.Rigs["gt"]); got != 1 {
+		t.Errorf("gt holds %d issues, want 1", got)
+	}
+	if _, ok := res.Rigs["nope"]; ok {
+		t.Error("nope is in the answered rigs; an unknown rig must not read as an empty one")
+	}
+	if e := res.Errors["nope"]; e == nil || !strings.Contains(e.Error(), "unknown rig nope") {
+		t.Errorf("errors = %v, want nope's refusal", res.Errors)
+	}
+}
+
+// A prefix with a dash cannot carry an id (the store reads an id's rig as the
+// text before its first dash), so it is an error on its own entry and is not
+// sent to the tracker at all.
+func TestListAcrossNamesADashedPrefixWithoutAskingForIt(t *testing.T) {
+	t.Parallel()
+	c, asked := acrossServer(t, api.Issue{ID: "gt-a", Title: "a"})
+	res, err := c.ListAcross([]string{"gt", "my-rig"}, beads.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListAcross: %v", err)
+	}
+	if got := strings.Join(asked()[0].Rigs, ","); got != "gt" {
+		t.Errorf("the request named %q, want only gt", got)
+	}
+	if got := len(res.Rigs["gt"]); got != 1 {
+		t.Errorf("gt holds %d issues, want 1", got)
+	}
+	if e := res.Errors["my-rig"]; e == nil || !strings.Contains(e.Error(), "dash") {
+		t.Errorf("errors = %v, want my-rig's dash refusal", res.Errors)
 	}
 }
 

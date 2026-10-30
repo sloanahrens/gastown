@@ -81,8 +81,11 @@ func (g *acrossGate) highWater() int {
 	return g.max
 }
 
+// acrossBound is the parallel bound the tests pass to ListAcross.
+const acrossBound = 4
+
 // A town whose rigs are separate stores reads them side by side, never more
-// than listAcrossParallel at once, and every rig comes back.
+// than acrossBound at once, and every rig comes back.
 func TestListAcrossReadsOwnRigsInParallelWithinTheBound(t *testing.T) {
 	t.Parallel()
 	names := []string{"al", "be", "bv", "dv", "fr", "gt", "hm", "om"}
@@ -93,18 +96,18 @@ func TestListAcrossReadsOwnRigsInParallelWithinTheBound(t *testing.T) {
 	gate := newAcrossGate()
 	done := make(chan AcrossResult, 1)
 	go func() {
-		res, _ := ListAcross(names, open.open, ListOptions{}, gate.read)
+		res, _ := ListAcross(names, open.open, ListOptions{}, gate.read, acrossBound)
 		done <- res
 	}()
-	for i := 0; i < listAcrossParallel; i++ {
+	for i := 0; i < acrossBound; i++ {
 		select {
 		case <-gate.started:
 		case <-time.After(5 * time.Second):
-			t.Fatalf("only %d read(s) started; want %d at once", i, listAcrossParallel)
+			t.Fatalf("only %d read(s) started; want %d at once", i, acrossBound)
 		}
 	}
-	if got := gate.highWater(); got != listAcrossParallel {
-		t.Errorf("%d reads ran at once, want the bound of %d", got, listAcrossParallel)
+	if got := gate.highWater(); got != acrossBound {
+		t.Errorf("%d reads ran at once, want the bound of %d", got, acrossBound)
 	}
 	close(gate.release)
 	res := <-done
@@ -126,7 +129,7 @@ func TestListAcrossKeepsTheRigsThatAnswerWhenOneFails(t *testing.T) {
 		errs: map[string]error{"dv": nil, "fr": errors.New("unreadable route table")},
 	}
 	open.stores["dv"] = &acrossRig{err: dead}
-	res, err := ListAcross([]string{"gt", "dv", "hm", "fr"}, open.open, ListOptions{}, nil)
+	res, err := ListAcross([]string{"gt", "dv", "hm", "fr"}, open.open, ListOptions{}, nil, acrossBound)
 	if err != nil {
 		t.Fatalf("ListAcross: %v", err)
 	}
@@ -191,7 +194,7 @@ func TestListAcrossAsksACrossRigStoreOnceForEveryRigItHolds(t *testing.T) {
 		"hq": cross,
 		"hm": &acrossRig{issues: issuesNamed("hm-a")},
 	}}
-	res, err := ListAcross([]string{"gt", "hq", "hm"}, open.open, ListOptions{}, nil)
+	res, err := ListAcross([]string{"gt", "hq", "hm"}, open.open, ListOptions{}, nil, acrossBound)
 	if err != nil {
 		t.Fatalf("ListAcross: %v", err)
 	}
@@ -224,7 +227,7 @@ func TestListAcrossNamesTheRigsACrossRigStoreDidNotAnswer(t *testing.T) {
 	}
 	for _, tc := range tests {
 		open := &acrossOpen{stores: map[string]Lister{"gt": tc.store, "hq": tc.store}}
-		res, err := ListAcross([]string{"gt", "hq"}, open.open, ListOptions{}, nil)
+		res, err := ListAcross([]string{"gt", "hq"}, open.open, ListOptions{}, nil, acrossBound)
 		if err != nil {
 			t.Fatalf("%s: ListAcross: %v", tc.name, err)
 		}
@@ -248,7 +251,7 @@ func TestListAcrossReadsOwnRigsWithTheCallersRead(t *testing.T) {
 	_, err := ListAcross([]string{"gt"}, open.open, ListOptions{}, func(l Lister) ([]*Issue, error) {
 		read = append(read, fmt.Sprintf("%T", l))
 		return l.List(ListOptions{})
-	})
+	}, acrossBound)
 	if err != nil {
 		t.Fatalf("ListAcross: %v", err)
 	}
@@ -263,7 +266,7 @@ func TestListAcrossReadsOwnRigsWithTheCallersRead(t *testing.T) {
 func TestListAcrossRefusesACallItCannotHonour(t *testing.T) {
 	t.Parallel()
 	open := &acrossOpen{stores: map[string]Lister{"gt": &acrossRig{}}}
-	res, err := ListAcross([]string{"gt", "gt"}, open.open, ListOptions{}, nil)
+	res, err := ListAcross([]string{"gt", "gt"}, open.open, ListOptions{}, nil, acrossBound)
 	if err != nil {
 		t.Fatalf("ListAcross: %v", err)
 	}
@@ -271,9 +274,15 @@ func TestListAcrossRefusesACallItCannotHonour(t *testing.T) {
 		t.Errorf("a rig asked for twice was opened %d times and answered %d, want once each", len(open.opened), len(res.Rigs))
 	}
 	for name, call := range map[string]func() error{
-		"no opener":    func() error { _, err := ListAcross([]string{"gt"}, nil, ListOptions{}, nil); return err },
-		"an empty rig": func() error { _, err := ListAcross([]string{""}, open.open, ListOptions{}, nil); return err },
-		"a Rig filter": func() error { _, err := ListAcross([]string{"gt"}, open.open, ListOptions{Rig: "gt"}, nil); return err },
+		"no opener": func() error { _, err := ListAcross([]string{"gt"}, nil, ListOptions{}, nil, acrossBound); return err },
+		"an empty rig": func() error {
+			_, err := ListAcross([]string{""}, open.open, ListOptions{}, nil, acrossBound)
+			return err
+		},
+		"a Rig filter": func() error {
+			_, err := ListAcross([]string{"gt"}, open.open, ListOptions{Rig: "gt"}, nil, acrossBound)
+			return err
+		},
 	} {
 		if err := call(); err == nil {
 			t.Errorf("%s: ListAcross = nil, want a refusal", name)

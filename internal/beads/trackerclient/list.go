@@ -1,12 +1,14 @@
 package trackerclient
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/tracker/api"
+	"github.com/steveyegge/gastown/tracker/client"
 )
 
 // listFilter maps beads.ListOptions to the tracker's filter. The tracker shares
@@ -75,42 +77,64 @@ func (c *Client) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 
 // ListAcross returns the issues matching opts for each rig of rigs, from one
 // request: the tracker holds every rig in one database, so a rig scope list
-// answers them together. Every rig asked for is in the answer, empty when it
-// matched nothing; a rig the tracker does not hold, and an opts filter the list
-// query cannot express, refuse the call. Each issue is filed under the rig its
-// id starts with, which is the rig the store holds it under: newID mints
-// "<rig>-", and a child keeps its parent's prefix.
+// answers them together. Each rig asked for is in the answer, empty when it
+// matched nothing, or in Errors with why. That is a rig the tracker does not
+// hold, and a rig whose prefix has a dash: the store reads an id's rig as the
+// text before its first dash, so no id of such a rig can be filed or matched.
+// An opts filter the list query cannot express refuses the call. Each issue is
+// filed under the rig its id starts with, which is the rig the store holds it
+// under: newID mints "<rig>-", and a child keeps its parent's prefix.
 func (c *Client) ListAcross(rigs []string, opts beads.ListOptions) (beads.AcrossResult, error) {
 	res := beads.AcrossResult{Rigs: map[string][]*beads.Issue{}, Errors: map[string]error{}}
 	if err := refusedListFilter(opts); err != nil {
 		return res, err
 	}
-	if len(rigs) == 0 {
+	var asked []string
+	for _, rig := range rigs {
+		if strings.Contains(rig, "-") {
+			res.Errors[rig] = fmt.Errorf("trackerclient: rig %q has a dash in its prefix, which no tracker id can carry", rig)
+			continue
+		}
+		asked = append(asked, rig)
+	}
+	if len(asked) == 0 {
 		return res, nil
 	}
 	f := listFilter(opts)
-	f.Rigs = rigs
-	var page []api.Issue
-	if f.Limit > 0 {
-		p, err := c.tc.List(ctx(), f)
-		if err != nil {
-			return res, mapErr(err)
+	f.Rigs = asked
+	refused := map[string]string{}
+	fetch := func(cx context.Context, cursor string) ([]api.Issue, string, error) {
+		f.Cursor = cursor
+		p, err := c.tc.List(cx, f)
+		for rig, why := range p.RigErrors {
+			refused[rig] = why
 		}
-		page = p.Issues
-	} else {
-		all, err := c.tc.ListAll(ctx(), f)
-		if err != nil {
-			return res, mapErr(err)
-		}
-		page = all
+		return p.Issues, p.NextCursor, err
 	}
-	for _, rig := range rigs {
+	var page []api.Issue
+	var err error
+	if f.Limit > 0 {
+		page, _, err = fetch(ctx(), "")
+	} else {
+		page, err = client.All(ctx(), fetch)
+	}
+	if err != nil {
+		return res, mapErr(err)
+	}
+	for _, rig := range asked {
+		if why, ok := refused[rig]; ok {
+			res.Errors[rig] = fmt.Errorf("trackerclient: list rig %s: %s", rig, why)
+			continue
+		}
 		res.Rigs[rig] = []*beads.Issue{}
 	}
 	for _, a := range page {
+		// The request named the rigs it answers, so an issue whose id is under
+		// any other rig is not an answer to this read. It is left out, and the
+		// rigs that answered keep their issues.
 		rig, _, hasPrefix := strings.Cut(a.ID, "-")
-		if _, asked := res.Rigs[rig]; !hasPrefix || !asked {
-			return res, fmt.Errorf("trackerclient: issue %s is filed under rig %q, which this read did not ask for", a.ID, rig)
+		if _, held := res.Rigs[rig]; !hasPrefix || !held {
+			continue
 		}
 		res.Rigs[rig] = append(res.Rigs[rig], issue(a))
 	}

@@ -37,28 +37,24 @@ type AcrossStore interface {
 type RigsOpen func(rig string) (Lister, error)
 
 // AcrossRead is a caller's own read of one rig's store, for the rigs no
-// AcrossStore answers. A caller that needs its reads attributed to itself
-// passes one: internal/beads' census names the bd caller from the frame that
-// started the call, and the call budgets are data keyed by that name
-// (census_budgets.go). It asks for opts' list. nil reads l.List(opts).
+// AcrossStore answers. A caller whose reads must be attributed to itself passes
+// one (the census in census_budgets.go is keyed by the caller's name). It asks
+// for opts' list. nil reads l.List(opts).
 type AcrossRead func(l Lister) ([]*Issue, error)
 
 // errNoRigAnswer is a cross-rig store that left a rig out of its answer: a
 // rig nobody read is not a rig with no issues.
 var errNoRigAnswer = errors.New("beads: the cross-rig store did not answer for a rig it was asked for")
 
-// listAcrossParallel bounds the rigs read at once when they are separate
-// stores: a hung store costs its rig, and the other rigs still answer.
-const listAcrossParallel = 4
-
 // ListAcross reads one list in every rig of rigs and keys the answers by rig.
 //
 // The rigs a store holding several of them answers (AcrossStore) cost one
-// request between them; every other rig is read from its own store,
-// listAcrossParallel at a time. A rig whose open or read fails is in Errors
-// with why and leaves the other rigs' answers intact. err is non-nil only when
-// the call itself cannot be made.
-func ListAcross(rigs []string, open RigsOpen, opts ListOptions, read AcrossRead) (AcrossResult, error) {
+// request between them; every other rig is read from its own store, parallel
+// rigs at a time (at least one), so a hung store costs its rig and the others
+// still answer. A rig whose open or read fails is in Errors with why and leaves
+// the other rigs' answers intact. err is non-nil only when the call itself
+// cannot be made.
+func ListAcross(rigs []string, open RigsOpen, opts ListOptions, read AcrossRead, parallel int) (AcrossResult, error) {
 	res := AcrossResult{Rigs: map[string][]*Issue{}, Errors: map[string]error{}}
 	if open == nil {
 		return res, fmt.Errorf("beads: ListAcross needs a store opener")
@@ -104,7 +100,7 @@ func ListAcross(rigs []string, open RigsOpen, opts ListOptions, read AcrossRead)
 	if cross != nil {
 		listAcrossStore(res, cross, crossRigs, opts)
 	}
-	readOwn(res, own, opts, read)
+	readOwn(res, own, opts, read, parallel)
 	return res, nil
 }
 
@@ -137,14 +133,17 @@ type ownStore struct {
 	l   Lister
 }
 
-// readOwn reads each rig from its own store, listAcrossParallel at a time.
-func readOwn(res AcrossResult, own []ownStore, opts ListOptions, read AcrossRead) {
+// readOwn reads each rig from its own store, parallel rigs at a time.
+func readOwn(res AcrossResult, own []ownStore, opts ListOptions, read AcrossRead, parallel int) {
 	if read == nil {
 		read = func(l Lister) ([]*Issue, error) { return l.List(opts) }
 	}
+	if parallel < 1 {
+		parallel = 1
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, listAcrossParallel)
+	sem := make(chan struct{}, parallel)
 	for _, s := range own {
 		wg.Add(1)
 		sem <- struct{}{}

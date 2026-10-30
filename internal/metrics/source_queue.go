@@ -365,10 +365,12 @@ func queueStoreCounts(ctx context.Context, env Env, rigs []queueRig, col queueBe
 
 // queueListCounts reads a column as a plain list through beads.ListAcross: the
 // rigs a store that holds several of them answers cost one request between
-// them, and every other rig is read from its own store. A rig left unanswered
-// is a failed read. One deadline covers the batch, because a cross-rig request
-// has no per-rig budget to keep, so a hung store costs the column and not the
-// group.
+// them, and every other rig is read from its own store, queueRigParallel at a
+// time. A rig left unanswered is a failed read. The cross-rig request has one
+// deadline of its own; each bd rig has one too, started when its read runs
+// (queueRigLister), so a rig read late in the batch is not charged for the
+// rigs read before it. A hung store costs its column, and the group's own
+// deadline still caps the whole.
 func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.ListOptions, read beads.AcrossRead) (map[string]int, bool) {
 	if len(rigs) == 0 {
 		return map[string]int{}, true
@@ -376,8 +378,6 @@ func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.L
 	if env.Beads == nil {
 		return nil, false
 	}
-	callCtx, cancel := context.WithTimeout(ctx, queueBdTimeout)
-	defer cancel()
 	names := make(map[string]string, len(rigs)) // the rig's prefix to its name
 	prefixes := make([]string, len(rigs))
 	for i, rig := range rigs {
@@ -389,13 +389,28 @@ func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.L
 		names[rig.prefix] = rig.name
 		prefixes[i] = rig.prefix
 	}
-	res, err := beads.ListAcross(prefixes, func(prefix string) (beads.Lister, error) {
-		store := env.Beads(callCtx, filepath.Join(env.Town, names[prefix]))
+	callCtx, cancel := context.WithTimeout(ctx, queueBdTimeout)
+	defer cancel()
+	open := func(prefix string) (beads.Lister, error) {
+		path := filepath.Join(env.Town, names[prefix])
+		store := env.Beads(callCtx, path)
 		if store == nil {
 			return nil, fmt.Errorf("queue: no bead store for %s", names[prefix])
 		}
-		return store, nil
-	}, opts, read)
+		if _, ok := store.(beads.AcrossStore); ok {
+			// The tracker answers every rig it holds in the one request
+			// callCtx covers.
+			return store, nil
+		}
+		return queueRigStore{ctx: ctx, env: env, path: path}, nil
+	}
+	own := func(l beads.Lister) ([]*beads.Issue, error) {
+		if r, ok := l.(queueRigStore); ok {
+			return r.with(read)
+		}
+		return read(l)
+	}
+	res, err := beads.ListAcross(prefixes, open, opts, own, queueRigParallel)
 	if err != nil {
 		return nil, false
 	}
@@ -407,6 +422,35 @@ func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.L
 		counts[rig.name] = len(res.Rigs[rig.prefix])
 	}
 	return counts, true
+}
+
+// queueRigStore is one bd rig of a list column, which its store is opened for
+// when the rig's read runs (with). The store's call context carries that read's
+// deadline, so each rig gets queueBdTimeout from its own read and not from when
+// the batch was opened. The read itself is the column's, so a bd call is still
+// attributed to the column (internal/beads' census names the caller from the
+// frame that started the call).
+type queueRigStore struct {
+	ctx  context.Context
+	env  Env
+	path string
+}
+
+// with runs read on this rig's store under a deadline that starts now.
+func (r queueRigStore) with(read beads.AcrossRead) ([]*beads.Issue, error) {
+	callCtx, cancel := context.WithTimeout(r.ctx, queueBdTimeout)
+	defer cancel()
+	store := r.env.Beads(callCtx, r.path)
+	if store == nil {
+		return nil, fmt.Errorf("queue: no bead store for %s", r.path)
+	}
+	return read(store)
+}
+
+// List is refused: ListAcross hands a rig's read to queueListCounts, which
+// opens the store with with. A direct List would run without the deadline.
+func (r queueRigStore) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, fmt.Errorf("queue: rig %s is read through its column's read", r.path)
 }
 
 // queueCount runs one column's read in one rig's store under its own deadline
