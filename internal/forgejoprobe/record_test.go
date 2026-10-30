@@ -231,6 +231,55 @@ func TestWriteRecordRigRule(t *testing.T) {
 	}
 }
 
+// TestWriteRecordValueRule holds the repo, commit and context to the shapes a
+// record line carries whole: a value that would break a line, or that names no
+// repository or commit, writes and makes nothing.
+func TestWriteRecordValueRule(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		repo string
+		sha  string
+		ctx  string
+		ok   bool
+	}{
+		{name: "plain values", repo: "acme/gastown", sha: testSHA, ctx: "forgejo/gastown", ok: true},
+		{name: "a full commit", repo: "acme/gastown", sha: "3f9c2e1d4b5a60718293a4b5c6d7e8f901234567", ctx: "ctx", ok: true},
+		{name: "a repo with no slash", repo: "gastown", sha: testSHA, ctx: "ctx"},
+		{name: "a repo with a dot segment", repo: "acme/..", sha: testSHA, ctx: "ctx"},
+		{name: "a repo with a line break", repo: "acme/x\nverdict=red", sha: testSHA, ctx: "ctx"},
+		{name: "a commit with a line break", repo: "acme/gastown", sha: testSHA + "\nverdict=red", ctx: "ctx"},
+		{name: "a commit that is not hex", repo: "acme/gastown", sha: "stale-sha", ctx: "ctx"},
+		{name: "a commit too short to name", repo: "acme/gastown", sha: "3f9c", ctx: "ctx"},
+		{name: "a context with a line break", repo: "acme/gastown", sha: testSHA, ctx: "forgejo/gastown\nverdict=red"},
+		{name: "a context with a carriage return", repo: "acme/gastown", sha: testSHA, ctx: "ctx\rverdict=red"},
+		{name: "a context with a NUL", repo: "acme/gastown", sha: testSHA, ctx: "ctx\x00"},
+		{name: "a context with an equals sign", repo: "acme/gastown", sha: testSHA, ctx: "a=b"},
+		{name: "an empty context", repo: "acme/gastown", sha: testSHA, ctx: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newRecordFS()
+			path, err := WriteRecord(fsys, &fakeClock{now: recordWhen}, "cfg", "gastown", tc.repo, tc.sha, tc.ctx)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("WriteRecord: %v", err)
+				}
+				if want := "cfg/probe-gastown.record"; path != want {
+					t.Errorf("path = %q, want %q", path, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("WriteRecord returned %q with no error", path)
+			}
+			if len(fsys.made) != 0 || len(fsys.files) != 0 {
+				t.Errorf("a refused value made %v and left %d files; it must write and make nothing", fsys.made, len(fsys.files))
+			}
+		})
+	}
+}
+
 func TestWriteRecordRemoveRecord(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")

@@ -6,12 +6,18 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // recordMode is the mode of the record and of the temporary file it is written
 // through. The record names a verdict, never a credential, so 0600 is the rule.
 const recordMode fs.FileMode = 0o600
+
+// recordSHA is a commit as git names it: an abbreviated or full hex object name.
+var recordSHA = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
 
 // FS is the filesystem the green record is written through. The run puts the
 // operating system's behind it; a test puts an in-memory fake.
@@ -40,9 +46,13 @@ func recordPath(configDir, rig string) string {
 // under configDir and returns the record's path. The lines go to a temporary
 // file that is renamed into place, so a cutover never reads a half-written
 // record. A failed step removes the temporary file and returns an error that
-// names the step. A rig the command line would refuse writes nothing.
+// names the step. A rig, repo, commit or context the record cannot hold writes
+// nothing.
 func WriteRecord(fsys FS, clock Clock, configDir, rig, repo, sha, ctx string) (string, error) {
 	if err := requireRig(rig); err != nil {
+		return "", err
+	}
+	if err := requireRecordValues(repo, sha, ctx); err != nil {
 		return "", err
 	}
 	if err := fsys.MkdirAll(configDir, 0o700); err != nil {
@@ -60,6 +70,22 @@ func WriteRecord(fsys FS, clock Clock, configDir, rig, repo, sha, ctx string) (s
 		return "", fmt.Errorf("could not store the probe record at %s: %w", path, errors.Join(err, removeTemp(fsys, tmp.Name())))
 	}
 	return path, nil
+}
+
+// requireRecordValues refuses a repo, commit or context that would break the
+// key=value lines of the record. A value holding a line break would write a key
+// of its own, so the record takes only the shapes a line can carry whole.
+func requireRecordValues(repo, sha, ctx string) error {
+	if !validRepo(repo) {
+		return usagef("the probe record's repo %q must be OWNER/NAME", repo)
+	}
+	if !recordSHA.MatchString(sha) {
+		return usagef("the probe record's commit %q must be a hex object name", sha)
+	}
+	if ctx == "" || strings.Contains(ctx, "=") || strings.IndexFunc(ctx, unicode.IsControl) >= 0 {
+		return usagef("the probe record's context %q must be one line of text with no '='", ctx)
+	}
+	return nil
 }
 
 // RemoveRecord removes the rig's green record, so a run that did not prove green
