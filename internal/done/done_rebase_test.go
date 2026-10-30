@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
@@ -53,11 +54,43 @@ type fakeDivergedPushGit struct {
 
 	fetchErr   error
 	fetchCalls int
+
+	// ownFetches records each refspec fetched by name, as "remote refspec".
+	ownFetches  []string
+	ownFetchErr error
 }
 
 func (f *fakeDivergedPushGit) Fetch(remote string) error {
 	f.fetchCalls++
 	return f.fetchErr
+}
+
+func (f *fakeDivergedPushGit) FetchRefspecWithTimeout(remote, refspec string, _ time.Duration) error {
+	f.ownFetches = append(f.ownFetches, remote+" "+refspec)
+	return f.ownFetchErr
+}
+
+// patchIdenticalDivergence is a fake whose origin tip and local HEAD differ by
+// a rebase only, so recoverDivergedPush recovers unless a fetch fails first.
+func patchIdenticalDivergence() *fakeDivergedPushGit {
+	return &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		mergeBases: map[[2]string]string{
+			{"origin/main", "origSHA"}:  "base1",
+			{"origin/main", "localSHA"}: "base2",
+		},
+		patchIDs: map[[2]string]string{
+			{"base1", "origSHA"}:  "samepatch",
+			{"base2", "localSHA"}: "samepatch",
+		},
+		patchIDLists: map[[2]string][]string{
+			{"base1", "origSHA"}:  {"p1"},
+			{"base2", "localSHA"}: {"p1"},
+		},
+	}
 }
 
 func (f *fakeDivergedPushGit) Rev(ref string) (string, error) {
@@ -141,6 +174,68 @@ func TestRecoverDivergedPush_FetchFailsAborts(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+// The own branch is fetched by name before origin/<branch> is read: the bare
+// fetch no longer refreshes it in a polecat clone (the clone pins main only).
+func TestRecoverDivergedPush_RefreshesOwnBranchByName(t *testing.T) {
+	t.Parallel()
+	f := patchIdenticalDivergence()
+	recovered, _, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !recovered {
+		t.Error("a branch origin still holds must be read and recovered")
+	}
+	want := []string{"origin +refs/heads/feature:refs/remotes/origin/feature"}
+	if strings.Join(f.ownFetches, "|") != strings.Join(want, "|") {
+		t.Errorf("fetched by name = %v, want %v", f.ownFetches, want)
+	}
+}
+
+func TestRecoverDivergedPush_OwnBranchFetchFailsAborts(t *testing.T) {
+	t.Parallel()
+	f := patchIdenticalDivergence()
+	f.ownFetchErr = errors.New("network unreachable")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
+	if recovered {
+		t.Error("must not recover on a stale origin/feature when its fetch fails")
+	}
+	if diagnosis != "" {
+		t.Errorf("diagnosis = %q, want empty (comparison never ran)", diagnosis)
+	}
+	if err == nil || !strings.Contains(err.Error(), "fetch origin/feature before divergence check") {
+		t.Fatalf("err = %v, want the own-branch fetch failure", err)
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+// A branch origin landed and deleted is not a fetch failure: the own-branch
+// fetch reports a missing ref, and recoverDivergedPush takes the no-ref path.
+// Without that routing the git error surfaces as a fetch failure instead.
+func TestRecoverDivergedPush_OwnBranchDeletedOnOriginIsNoRef(t *testing.T) {
+	t.Parallel()
+	f := patchIdenticalDivergence()
+	f.ownFetchErr = &gitpkg.GitError{Command: "fetch", Stderr: "fatal: couldn't find remote ref refs/heads/feature"}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
+	if recovered {
+		t.Error("must not recover when origin deleted the branch")
+	}
+	if diagnosis != "" {
+		t.Errorf("diagnosis = %q, want empty (comparison never ran)", diagnosis)
+	}
+	if err == nil || !strings.Contains(err.Error(), "origin/feature has no ref") {
+		t.Fatalf("err = %v, want the no-ref outcome", err)
+	}
+	if strings.Contains(err.Error(), "before divergence check") {
+		t.Errorf("err = %v, a deleted branch must not be reported as a fetch failure", err)
 	}
 	if f.leaseCalls != 0 {
 		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)

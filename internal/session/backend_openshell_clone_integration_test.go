@@ -52,6 +52,30 @@ func TestIntegrationCloneScriptLeavesOriginMainForGTDone(t *testing.T) {
 	}
 }
 
+// TestIntegrationCloneScriptPinsNoPolecatBranch checks the fetch refspec the
+// clone script leaves behind, then deletes the polecat branch on the remote the
+// way a landing does. The bare fetch that gt done runs before a rebase must
+// still succeed: the configured refspec names main alone.
+func TestIntegrationCloneScriptPinsNoPolecatBranch(t *testing.T) {
+	t.Parallel()
+	remote := cloneReplayRemote(t, []string{"main", openshellTestBranch})
+	dest := filepath.Join(t.TempDir(), "clone")
+	cmd := exec.Command("sh", "-c", cloneScript, "sh", openshellTestBranch, remote, dest, strconv.Itoa(sandboxCloneDepth))
+	cmd.Env = cloneReplayEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone script: %v\n%s", err, out)
+	}
+	fetchRefspecs := cloneReplayGit(t, dest, "config", "--get-all", "remote.origin.fetch")
+	if strings.Contains(fetchRefspecs, openshellTestBranch) {
+		t.Fatalf("remote.origin.fetch pins the polecat branch:\n%s", fetchRefspecs)
+	}
+	if !strings.Contains(fetchRefspecs, "+refs/heads/main:refs/remotes/origin/main") {
+		t.Fatalf("remote.origin.fetch lost the main refspec:\n%s", fetchRefspecs)
+	}
+	cloneReplayGit(t, strings.TrimPrefix(remote, "file://"), "update-ref", "-d", "refs/heads/"+openshellTestBranch)
+	cloneReplayGit(t, dest, "fetch", "origin")
+}
+
 // TestIntegrationShallowCloneKeepsWhatGTDoneNeeds clones a repository whose
 // history is deeper than the clone depth, with main having moved past the
 // commit the polecat branch forked from, and runs what gt done does with

@@ -53,21 +53,17 @@ const (
 var sandboxDroppedEnv = []string{"CLAUDE_CONFIG_DIR", "TMPDIR", "GOTMPDIR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
 
 // cloneScript clones the polecat branch with the Forgejo token the provider
-// put in the sandbox's environment, then fetches main into origin/main: the
-// single-branch clone's refspec covers only the polecat branch, and gt done
-// compares the branch with origin/main. Both fetches are shallow ($4 commits):
-// the full history of the town's largest repo took about 10 s and 88 MB to
-// clone, 1.3 s and 13 MB at depth 500, and everything gt done does with history
-// (merge-base against origin/main, rebase onto it, rev-list counts, patch-id,
-// pushing the new commits) needs only the commits since the branch forked from
-// main. When main has moved further than the depth since the fork, the fork
-// point falls outside origin/main's shallow history and merge-base fails; the
-// script then refetches both refs in full, so the depth is a cost bound and not
-// a cap on how far behind a branch may fall. Arguments are positional, so no
-// value is spliced into the script text.
+// put in the sandbox's environment, then fetches main into origin/main.
+// `set-branches` without --add replaces the single-branch clone's refspec,
+// which names the polecat branch, with main, so the clone never pins its own
+// branch: once origin deletes that branch, a bare `git fetch origin` still
+// works. Both fetches are shallow ($4 commits), which covers what gt done needs
+// from history; when the fork point falls outside that depth, the script
+// refetches in full. Arguments are positional, so no value is spliced into the
+// script text.
 const cloneScript = `H="http.extraHeader=Authorization: token $FORGEJO_TOKEN"; ` +
 	`git -c "$H" clone --branch "$1" --single-branch --depth "$4" "$2" "$3" && cd "$3" && ` +
-	`git remote set-branches --add origin main && git -c "$H" fetch --depth "$4" origin main && ` +
+	`git remote set-branches origin main && git -c "$H" fetch --depth "$4" origin main && ` +
 	`(git merge-base HEAD origin/main >/dev/null 2>&1 || ` +
 	`(git -c "$H" fetch --unshallow origin && git merge-base HEAD origin/main >/dev/null 2>&1))`
 

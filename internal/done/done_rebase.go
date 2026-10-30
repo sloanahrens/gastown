@@ -1,8 +1,10 @@
 package done
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
@@ -11,6 +13,7 @@ import (
 // divergedPushGit is the subset of *git.Git that recoverDivergedPush needs.
 type divergedPushGit interface {
 	Fetch(remote string) error
+	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	Rev(ref string) (string, error)
 	MergeBase(a, b string) (string, error)
 	PatchID(base, head string) (string, error)
@@ -80,6 +83,17 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 	// garnet/gt-en6o).
 	if err := g.Fetch(remote); err != nil {
 		return false, "", fmt.Errorf("fetch %s before divergence check: %w", remote, err)
+	}
+	// The bare fetch runs only the configured refspecs, and a polecat clone
+	// names only main in them, so origin/<branch> is refreshed by name here.
+	ownRefspec := "+refs/heads/" + branch + ":refs/remotes/" + remote + "/" + branch
+	if err := g.FetchRefspecWithTimeout(remote, ownRefspec, git.RemoteQueryTimeout); err != nil {
+		if !isMissingRemoteRef(err) {
+			return false, "", fmt.Errorf("fetch %s/%s before divergence check: %w", remote, branch, err)
+		}
+		// origin landed and deleted the branch: it has no tip to compare, so
+		// this is the no-ref outcome, not a fetch failure.
+		return false, "", fmt.Errorf("%s/%s has no ref: %w", remote, branch, err)
 	}
 
 	originSHA, revErr := g.Rev(remote + "/" + branch)
@@ -177,6 +191,13 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 		return false, diagnosis, fmt.Errorf("leased force-push failed: %w", leaseErr)
 	}
 	return true, diagnosis, nil
+}
+
+// isMissingRemoteRef reports whether a git fetch failed because origin has no
+// ref by that name: git's "couldn't find remote ref" for a deleted branch.
+func isMissingRemoteRef(err error) bool {
+	var ge *git.GitError
+	return errors.As(err, &ge) && strings.Contains(ge.Stderr, "couldn't find remote ref")
 }
 
 // reworkLocalCarriesCommits reports whether local HEAD holds at least one commit

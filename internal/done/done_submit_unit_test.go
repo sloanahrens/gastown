@@ -118,6 +118,8 @@ func (f *fakeDoneRepo) CleanBaseRef(remote, defaultBranch, target string) string
 
 func (f *fakeDoneRepo) Fetch(string) error { return f.fetchErr }
 
+func (f *fakeDoneRepo) FetchRefspecWithTimeout(string, string, time.Duration) error { return nil }
+
 func (f *fakeDoneRepo) Rev(ref string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
