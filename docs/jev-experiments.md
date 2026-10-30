@@ -43,7 +43,13 @@ Every state goes to the hosted service (`api.typesafe.ai`). The vendor says it w
 | drift | doc sections and diff hunks |
 | attention | item summaries |
 
-Transcripts and log tails can hold a path, an id or a secret that a scrub would remove. The scrub bead for hm is proposed in the Jev Report; until a scrub exists, no idea adds a new kind of text to this list. The dataset export below sends nothing to Jev: it reads logs the town already holds and writes ids and features only.
+Transcripts and log tails can hold a path, an id or a secret that a scrub would remove. On 2026-10-30 the operator widened the scrub scope to every sender above. The program has a measurement step before any battery is switched over, so we know the signal cost:
+
+1. S1 builds the scrubber (a pure package). S2 adds a per-caller client switch, default off, after the request log (`gt-s0tsg`).
+2. S3 sends a deterministic 2% sample of a caller's requests twice, unscrubbed and scrubbed, and logs both answer sets (answers and rule counts only). S4 reports, per question, how often the answer changes, against the repeat noise from I2.
+3. A caller is switched to scrubbed input when S4 says `free` for it (at least 30 pairs, crossing share within two points of the repeat baseline). `costly` goes to the operator: keep unscrubbed, or tighten the rules.
+4. Order: rules and progress (transcripts) first, then failcause, logtriage, drift, then the batteries that send bead text. hm uses its own eval comparison (S5).
+5. Until a sender class is scrubbed, no idea adds a new kind of text to the list: I8, I9 and N1 stay blocked on it. The dataset export below sends nothing to Jev: it reads logs the town already holds and writes ids and features only.
 
 ## Dataset for mango
 
@@ -76,6 +82,11 @@ Status values: row (proposed, nothing built), bead filed, collecting, reviewed. 
 | N2 | **Bead shaping quality.** Jev's `acceptance_tickable` answer predicts a polecat refusing to tick a box. | Existing dispatch battery; needs the label | Floor once a label rule exists (gt done refusals) | 0 | none new | After a label rule exists, overseer | Which bead features predict an unticked box | `gt spec lint` already catches the same cases | row only |
 | N3 | **Early stuck warning.** Asking progress at half the overrun limit predicts the later stop. | Move one existing ask earlier, log-only | Floor on `looping` against overrun stops | small | none new | After I4, overseer | Which runs warn early and stop late | The early ask matches a plain elapsed-time rule | row only |
 | N4 | **Rejection cause mix.** The rework battery's `cause` question, which has no label rule by design, shows which causes cluster by rig, size and seat. | Existing rework battery | Descriptive only; no floor | 0 | none new | After the first dataset, merlin reports | Which causes cluster by rig, bead size and seat | The mix is flat | row only |
+| S1 | **Scrubber.** A rule list removes secret shapes and the operator's name from text. | None; pure package | Unit tests per rule | 0 | reduces exposure | n/a | none | It strips signal (commit ids are kept on purpose) | `gt-l9tm6` |
+| S2 | **Client switch.** One option at the single request choke point scrubs any caller's state. | None; default off | Byte-identical output when off | 0 | reduces exposure | The overseer flips it per caller | none | A caller needs per-field rules the generic walk cannot give | `gt-aqczg` |
+| S3 | **Signal cost, collection.** Scrubbed input changes answers by no more than repeat noise. | 2% of requests sent twice, both answer sets logged | Pairs measured; at least 30 per question | about 2% of the callers' calls | none new (the scrubbed copy sends less) | Overseer flips `scrub_check` per caller | Which rule drives the changed answers | The shadow volume is not worth the answer | `gt-jb20i` |
+| S4 | **Signal cost, report.** `gt jev scrubcheck` reads S3 against the I2 baseline. | None | Verdict `free` within two points of the repeat baseline; `costly` above five | 0 | none | Overseer reports; operator decides on `costly` | Which question types lose signal | No baseline data exists | `gt-ozucj` |
+| S5 | **hm scrub.** hm's reranker keeps its recall after scrubbing query and passages. | `hm eval --scrub-compare` on the golden set | Recall at k=6 before and after, and cases whose rank changes | 0 | reduces exposure | Overseer reads, operator decides | none | Recall falls more than the eval's own run-to-run difference | `hm-27k` |
 
 ## Adding a row
 
