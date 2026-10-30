@@ -17,22 +17,9 @@ import (
 // seeded anyway. That checks what the instruction does, not how it is spelled
 // (TestPolecatImageSeedSetsCachesOutsideTheWorkspace covers its wording).
 
-// seedInstruction returns the shell command of the Dockerfile's seed RUN.
-func seedInstruction(t *testing.T) string {
-	t.Helper()
-	const prefix = "RUN --mount=type=bind,source=seed,target=/seed "
-	for _, in := range dockerfileInstructions(t) {
-		if cmd, ok := strings.CutPrefix(in, prefix); ok {
-			return cmd
-		}
-	}
-	t.Fatal("no seed RUN (RUN --mount=type=bind,source=seed,target=/seed ...) in deploy/polecat/Dockerfile")
-	return ""
-}
-
 func runSeed(t *testing.T, files map[string]string) (out string, err error, cache, mod string) {
 	t.Helper()
-	return runSeedScript(t, seedInstruction(t), files)
+	return runSeedScript(t, seedRun(t), files)
 }
 
 // runSeedScript runs one seed RUN command against files: the Dockerfile's, or a
@@ -107,6 +94,38 @@ func TestIntegrationSeedRunFailsTheImageWhenTheBuildFails(t *testing.T) {
 	}
 }
 
+// An example module that does not build is not the seed's problem: examples are
+// in no rig's presubmit build, and the beads rig's two nested ones failed every
+// install from 10:28 with a drifted go.sum (gt-9yqcc). The good root module must
+// still seed, so the RUN exits 0 and never names the example.
+func TestIntegrationSeedRunSkipsExampleModules(t *testing.T) {
+	t.Parallel()
+	out, err, cache, _ := runSeed(t, map[string]string{
+		"go.mod":                seedGoMod,
+		"main.go":               "package main\n\nfunc main() { println(\"hi\") }\n",
+		"examples/demo/go.mod":  "module example.invalid/demo\n\ngo 1.21\n",
+		"examples/demo/main.go": "package main\n\nfunc main() { undefinedCall() }\n",
+	})
+	if err != nil {
+		t.Fatalf("seed RUN failed on an example module that does not build: examples are not part of any rig's presubmit (gt-9yqcc): %v\n%s", err, out)
+	}
+	if strings.Contains(out, "examples") {
+		t.Errorf("the seed RUN walked the example module at all:\n%s", out)
+	}
+	// An exclusion wide enough to skip the whole walk would also exit 0, so the
+	// module outside examples/ has to have seeded.
+	n := 0
+	_ = filepath.WalkDir(cache, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			n++
+		}
+		return nil
+	})
+	if n == 0 {
+		t.Errorf("the seed skipped the good module too: GOCACHE %s is empty\n%s", cache, out)
+	}
+}
+
 func TestIntegrationSeedRunToleratesAVetOnlyFailure(t *testing.T) {
 	t.Parallel()
 	out, err, cache, _ := runSeed(t, map[string]string{
@@ -152,7 +171,7 @@ func TestIntegrationSeedRunDoesNotBuildForDarwin(t *testing.T) {
 // command name instead of an assignment.
 func TestIntegrationSeedRunNamesADarwinStep(t *testing.T) {
 	t.Parallel()
-	script := strings.Replace(seedInstruction(t), `"go mod download" "go build ./..."`, `"go mod download" "env GOOS=darwin GOARCH=arm64 go build ./..." "go build ./..."`, 1)
+	script := strings.Replace(seedRun(t), `"go mod download" "go build ./..."`, `"go mod download" "env GOOS=darwin GOARCH=arm64 go build ./..." "go build ./..."`, 1)
 	out, err, _, _ := runSeedScript(t, script, map[string]string{
 		"go.mod":           seedGoMod,
 		"main.go":          "package main\n\nfunc main() { println(\"hi\") }\n",
