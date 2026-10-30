@@ -1,4 +1,4 @@
-package forgejoprov
+package forgejotest
 
 import (
 	"encoding/json"
@@ -12,8 +12,8 @@ import (
 // The fixtures name a bot the way the provisioning run does: the default prefix and
 // the polecat role, with the default token name and the scope the polecat role uses.
 const (
-	fixtureBot       = DefaultBotPrefix + "polecat"
-	fixtureTokenName = DefaultTokenName
+	fixtureBot       = botPrefix + "polecat"
+	fixtureTokenName = "gt-provision"
 	fixtureScope     = "write:repository"
 	// fixtureWrongToken stands in for a credential that is not the admin token.
 	fixtureWrongToken = "attacker-guess-5d2e"
@@ -32,32 +32,32 @@ func TestFakeUsersAndTokens(t *testing.T) {
 	for _, field := range []string{"sha1", "token"} {
 		t.Run(field, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			f.tokenField = field
+			f := New()
+			f.TokenField = field
 			tokens := tokensRoute(fixtureBot)
 			tokenPath := tokens + "/" + fixtureTokenName
-			mintBody := jsonBody(map[string]any{"name": fixtureTokenName, "scopes": []string{fixtureScope}})
+			mintBody := JSONBody(map[string]any{"name": fixtureTokenName, "scopes": []string{fixtureScope}})
 
-			if status, _ := f.call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusNotFound {
+			if status, _ := f.Call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusNotFound {
 				t.Fatalf("GET of a bot before it exists: status %d, want 404", status)
 			}
-			if status, _ := f.call(t, http.MethodGet, tokens, ""); status != http.StatusNotFound {
+			if status, _ := f.Call(t, http.MethodGet, tokens, ""); status != http.StatusNotFound {
 				t.Fatalf("GET of tokens for a user that does not exist: status %d, want 404", status)
 			}
-			if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusCreated {
+			if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureBot))); status != http.StatusCreated {
 				t.Fatalf("create %s: status %d, want 201", fixtureBot, status)
 			}
-			if status, _ := f.call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusOK {
+			if status, _ := f.Call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusOK {
 				t.Fatalf("GET of an existing bot: status %d, want 200", status)
 			}
-			if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusUnprocessableEntity {
+			if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureBot))); status != http.StatusUnprocessableEntity {
 				t.Fatalf("repeat create of %s: status %d, want 422", fixtureBot, status)
 			}
-			if status, body := f.call(t, http.MethodGet, tokens, ""); status != http.StatusOK || body != "[]" {
+			if status, body := f.Call(t, http.MethodGet, tokens, ""); status != http.StatusOK || body != "[]" {
 				t.Fatalf("list of a new bot's tokens: status %d body %q, want 200 []", status, body)
 			}
 
-			status, body := f.call(t, http.MethodPost, tokens, mintBody)
+			status, body := f.Call(t, http.MethodPost, tokens, mintBody)
 			if status != http.StatusCreated {
 				t.Fatalf("mint %s: status %d, want 201", fixtureTokenName, status)
 			}
@@ -69,14 +69,14 @@ func TestFakeUsersAndTokens(t *testing.T) {
 			if value == "" {
 				t.Fatalf("mint reply carries no %q field", field)
 			}
-			if got := f.token(fixtureBot, fixtureTokenName); got != value {
+			if got := f.Token(fixtureBot, fixtureTokenName); got != value {
 				t.Fatalf("the fake holds a token value other than the one the mint returned")
 			}
-			if status, _ := f.call(t, http.MethodPost, tokens, mintBody); status != http.StatusUnprocessableEntity {
+			if status, _ := f.Call(t, http.MethodPost, tokens, mintBody); status != http.StatusUnprocessableEntity {
 				t.Fatalf("mint of a name the bot already has: status %d, want 422", status)
 			}
 
-			status, body = f.call(t, http.MethodGet, tokens, "")
+			status, body = f.Call(t, http.MethodGet, tokens, "")
 			var list []struct {
 				Name   string   `json:"name"`
 				Scopes []string `json:"scopes"`
@@ -88,25 +88,25 @@ func TestFakeUsersAndTokens(t *testing.T) {
 				t.Fatalf("token list: status %d, %+v; want 200 with one %s token of scope %s", status, list, fixtureTokenName, fixtureScope)
 			}
 
-			if status, _ := f.call(t, http.MethodDelete, tokenPath, ""); status != http.StatusNoContent {
+			if status, _ := f.Call(t, http.MethodDelete, tokenPath, ""); status != http.StatusNoContent {
 				t.Fatalf("delete %s: status %d, want 204", fixtureTokenName, status)
 			}
-			if status, _ := f.call(t, http.MethodDelete, tokenPath, ""); status != http.StatusNotFound {
+			if status, _ := f.Call(t, http.MethodDelete, tokenPath, ""); status != http.StatusNotFound {
 				t.Fatalf("delete of a token already gone: status %d, want 404", status)
 			}
-			if got := f.token(fixtureBot, fixtureTokenName); got != "" {
+			if got := f.Token(fixtureBot, fixtureTokenName); got != "" {
 				t.Fatalf("a deleted token still holds a value")
 			}
 
-			want := []fakeCall{
-				{http.MethodPost, fakeAPIPath + "/admin/users", http.StatusCreated},
-				{http.MethodPost, fakeAPIPath + "/admin/users", http.StatusUnprocessableEntity},
-				{http.MethodPost, fakeAPIPath + tokens, http.StatusCreated},
-				{http.MethodPost, fakeAPIPath + tokens, http.StatusUnprocessableEntity},
-				{http.MethodDelete, fakeAPIPath + tokenPath, http.StatusNoContent},
-				{http.MethodDelete, fakeAPIPath + tokenPath, http.StatusNotFound},
+			want := []LoggedCall{
+				{http.MethodPost, APIPath + "/admin/users", http.StatusCreated},
+				{http.MethodPost, APIPath + "/admin/users", http.StatusUnprocessableEntity},
+				{http.MethodPost, APIPath + tokens, http.StatusCreated},
+				{http.MethodPost, APIPath + tokens, http.StatusUnprocessableEntity},
+				{http.MethodDelete, APIPath + tokenPath, http.StatusNoContent},
+				{http.MethodDelete, APIPath + tokenPath, http.StatusNotFound},
 			}
-			if got := f.writes(); !slices.Equal(got, want) {
+			if got := f.Writes(); !slices.Equal(got, want) {
 				t.Fatalf("writes: got %v, want %v", got, want)
 			}
 		})
@@ -127,12 +127,12 @@ func TestFakeRequiresAuthorization(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			if status, _ := f.send(t, tc.auth, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusUnauthorized {
+			f := New()
+			if status, _ := f.Send(t, tc.auth, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusUnauthorized {
 				t.Fatalf("request %s: status %d, want 401", tc.name, status)
 			}
-			want := []fakeCall{{http.MethodGet, fakeAPIPath + "/users/" + fixtureBot, http.StatusUnauthorized}}
-			if got := f.violations(); !slices.Equal(got, want) {
+			want := []LoggedCall{{http.MethodGet, APIPath + "/users/" + fixtureBot, http.StatusUnauthorized}}
+			if got := f.Violations(); !slices.Equal(got, want) {
 				t.Fatalf("violations: got %v, want %v", got, want)
 			}
 		})
@@ -140,17 +140,17 @@ func TestFakeRequiresAuthorization(t *testing.T) {
 
 	t.Run("an authorized request is not a violation", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
-		if status, _ := f.call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusNotFound {
+		f := New()
+		if status, _ := f.Call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusNotFound {
 			t.Fatalf("authorized GET of a missing bot: status %d, want 404", status)
 		}
-		if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusCreated {
+		if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureBot))); status != http.StatusCreated {
 			t.Fatalf("authorized create: status %d, want 201", status)
 		}
-		if status, _ := f.call(t, http.MethodGet, "/nope", ""); status != http.StatusNotFound {
+		if status, _ := f.Call(t, http.MethodGet, "/nope", ""); status != http.StatusNotFound {
 			t.Fatalf("authorized request to a route the fake lacks: status %d, want 404", status)
 		}
-		if got := f.violations(); len(got) != 0 {
+		if got := f.Violations(); len(got) != 0 {
 			t.Fatalf("authorized requests recorded as violations: %v", got)
 		}
 	})
@@ -161,23 +161,23 @@ func TestFakeRequiresAuthorization(t *testing.T) {
 // them. The log must also hold the calls, so an empty log cannot pass.
 func TestFakeCallLogHidesTheAuthorizationValue(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusCreated {
+	f := New()
+	if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureBot))); status != http.StatusCreated {
 		t.Fatalf("create %s: status %d, want 201", fixtureBot, status)
 	}
-	mintBody := jsonBody(map[string]any{"name": fixtureTokenName, "scopes": []string{fixtureScope}})
-	if status, _ := f.call(t, http.MethodPost, tokensRoute(fixtureBot), mintBody); status != http.StatusCreated {
+	mintBody := JSONBody(map[string]any{"name": fixtureTokenName, "scopes": []string{fixtureScope}})
+	if status, _ := f.Call(t, http.MethodPost, tokensRoute(fixtureBot), mintBody); status != http.StatusCreated {
 		t.Fatalf("mint %s: status %d, want 201", fixtureTokenName, status)
 	}
-	if status, _ := f.send(t, "token "+fixtureWrongToken, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusUnauthorized {
+	if status, _ := f.Send(t, "token "+fixtureWrongToken, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusUnauthorized {
 		t.Fatalf("request with a wrong token: status %d, want 401", status)
 	}
 
-	log := f.callLog()
+	log := f.CallLog()
 	if len(log) != 3 {
 		t.Fatalf("call log holds %d calls, want 3", len(log))
 	}
-	secrets := []string{fixtureToken, fixtureWrongToken, f.token(fixtureBot, fixtureTokenName)}
+	secrets := []string{AdminToken, fixtureWrongToken, f.Token(fixtureBot, fixtureTokenName)}
 	if secrets[2] == "" {
 		t.Fatalf("no token was minted, so the log has nothing to hide")
 	}
@@ -185,7 +185,7 @@ func TestFakeCallLogHidesTheAuthorizationValue(t *testing.T) {
 		shown := fmt.Sprintf("%+v %#v", c, c)
 		for _, secret := range secrets {
 			if strings.Contains(shown, secret) {
-				t.Fatalf("call log entry %s %s shows a secret", c.method, c.path)
+				t.Fatalf("call log entry %s %s shows a secret", c.Method, c.Path)
 			}
 		}
 	}
@@ -212,100 +212,24 @@ func TestFakeRefusesWhatLiveRefuses(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusCreated {
+			f := New()
+			if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureBot))); status != http.StatusCreated {
 				t.Fatalf("create %s: status %d, want 201", fixtureBot, status)
 			}
-			mintBody := jsonBody(map[string]any{"name": fixtureTokenName, "scopes": tc.scopes})
-			status, body := f.call(t, http.MethodPost, tokensRoute(fixtureBot), mintBody)
+			mintBody := JSONBody(map[string]any{"name": fixtureTokenName, "scopes": tc.scopes})
+			status, body := f.Call(t, http.MethodPost, tokensRoute(fixtureBot), mintBody)
 			if status != tc.status {
 				t.Fatalf("mint with scopes %v: status %d, want %d", tc.scopes, status, tc.status)
 			}
 			if tc.reason != "" && !strings.Contains(body, tc.reason) {
 				t.Fatalf("mint with scopes %v: reply does not give the reason %q", tc.scopes, tc.reason)
 			}
-			minted := f.token(fixtureBot, fixtureTokenName)
+			minted := f.Token(fixtureBot, fixtureTokenName)
 			if tc.status == http.StatusCreated && minted == "" {
 				t.Fatalf("an allowed mint left no token")
 			}
 			if tc.status != http.StatusCreated && minted != "" {
 				t.Fatalf("a refused mint left a token behind")
-			}
-		})
-	}
-}
-
-// scopeDrift reports how a role table and a known scope list disagree: a role with no
-// scope, a scope a role uses that the list lacks, and a listed scope no role uses. An
-// empty table is a disagreement too, so the check cannot pass on nothing.
-func scopeDrift(table []roleScopes, known []string) []string {
-	if len(table) == 0 {
-		return []string{"the role table is empty"}
-	}
-	var problems []string
-	used := map[string]bool{}
-	for _, r := range table {
-		if len(r.scopes) == 0 {
-			problems = append(problems, fmt.Sprintf("role %s has no scopes", r.name))
-		}
-		for _, s := range r.scopes {
-			used[s] = true
-			if !slices.Contains(known, s) {
-				problems = append(problems, fmt.Sprintf("role %s uses scope %s, which the fake does not accept", r.name, s))
-			}
-		}
-	}
-	for _, s := range known {
-		if !used[s] {
-			problems = append(problems, fmt.Sprintf("the fake accepts scope %s, which no role uses", s))
-		}
-	}
-	return problems
-}
-
-// TestFakeKnowsEveryRoleScope checks that the fake's scope list and the production role
-// table agree both ways: every scope a role uses is one the fake accepts, and every scope
-// the fake accepts is one a role uses. The table must not be empty.
-func TestFakeKnowsEveryRoleScope(t *testing.T) {
-	t.Parallel()
-	table := roleTable()
-	if len(table) == 0 {
-		t.Fatalf("the production role table is empty")
-	}
-	if problems := scopeDrift(table, knownScopes); len(problems) != 0 {
-		t.Errorf("the fake and the role table disagree: %v", problems)
-	}
-}
-
-// TestScopeDriftReports drives each way the role table and the known list can disagree,
-// and the agreeing case, so the check is seen to report a problem and to pass when there
-// is none.
-func TestScopeDriftReports(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name  string
-		table []roleScopes
-		known []string
-		want  string
-	}{
-		{"agreeing table and list", []roleScopes{{"polecat", []string{"write:repository"}}}, []string{"write:repository"}, ""},
-		{"a role uses a scope the list lacks", []roleScopes{{"admin", []string{"write:admin"}}}, []string{"write:repository"}, "role admin uses scope write:admin"},
-		{"the list holds a scope no role uses", []roleScopes{{"polecat", []string{"write:repository"}}}, []string{"write:repository", "read:user"}, "scope read:user, which no role uses"},
-		{"a role with no scopes", []roleScopes{{"empty", nil}}, []string{"write:repository"}, "role empty has no scopes"},
-		{"an empty role table", nil, []string{"write:repository"}, "the role table is empty"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			problems := scopeDrift(tc.table, tc.known)
-			if tc.want == "" {
-				if len(problems) != 0 {
-					t.Fatalf("agreeing table reported problems: %v", problems)
-				}
-				return
-			}
-			if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, tc.want) }) {
-				t.Fatalf("problems %v do not name %q", problems, tc.want)
 			}
 		})
 	}
@@ -328,34 +252,34 @@ func TestFakeRefusesAnIncompleteUserBody(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			body := userMap(fixtureBot)
+			f := New()
+			body := UserBody(fixtureBot)
 			tc.edit(body)
-			if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(body)); status != http.StatusUnprocessableEntity {
+			if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(body)); status != http.StatusUnprocessableEntity {
 				t.Fatalf("create with %s: status %d, want 422", tc.name, status)
 			}
-			if status, _ := f.call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusNotFound {
+			if status, _ := f.Call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusNotFound {
 				t.Fatalf("a refused create left the bot in place: GET status %d, want 404", status)
 			}
 		})
 	}
 }
 
-// TestFakeAdminlessMintIsForbidden checks that a fake set adminless answers a token
+// TestFakeAdminlessMintIsForbidden checks that a fake set Adminless answers a token
 // create 403 and mints nothing, while creating a user is still allowed.
 func TestFakeAdminlessMintIsForbidden(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.adminless = true
-	if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusCreated {
-		t.Fatalf("create %s while adminless: status %d, want 201", fixtureBot, status)
+	f := New()
+	f.Adminless = true
+	if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureBot))); status != http.StatusCreated {
+		t.Fatalf("create %s while Adminless: status %d, want 201", fixtureBot, status)
 	}
-	mintBody := jsonBody(map[string]any{"name": fixtureTokenName, "scopes": []string{fixtureScope}})
-	if status, _ := f.call(t, http.MethodPost, tokensRoute(fixtureBot), mintBody); status != http.StatusForbidden {
-		t.Fatalf("mint while adminless: status %d, want 403", status)
+	mintBody := JSONBody(map[string]any{"name": fixtureTokenName, "scopes": []string{fixtureScope}})
+	if status, _ := f.Call(t, http.MethodPost, tokensRoute(fixtureBot), mintBody); status != http.StatusForbidden {
+		t.Fatalf("mint while Adminless: status %d, want 403", status)
 	}
-	if got := f.token(fixtureBot, fixtureTokenName); got != "" {
-		t.Fatalf("an adminless mint left a token behind")
+	if got := f.Token(fixtureBot, fixtureTokenName); got != "" {
+		t.Fatalf("an Adminless mint left a token behind")
 	}
 }
 
@@ -363,21 +287,21 @@ func TestFakeAdminlessMintIsForbidden(t *testing.T) {
 // violations, so one fake can serve several cases in turn.
 func TestFakeResetForgetsState(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusCreated {
+	f := New()
+	if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureBot))); status != http.StatusCreated {
 		t.Fatalf("create %s: status %d, want 201", fixtureBot, status)
 	}
-	if status, _ := f.send(t, "", http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusUnauthorized {
+	if status, _ := f.Send(t, "", http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusUnauthorized {
 		t.Fatalf("anonymous request: status %d, want 401", status)
 	}
-	f.reset()
-	if status, _ := f.call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusNotFound {
+	f.Reset()
+	if status, _ := f.Call(t, http.MethodGet, "/users/"+fixtureBot, ""); status != http.StatusNotFound {
 		t.Fatalf("GET of a bot after reset: status %d, want 404", status)
 	}
-	if got := f.violations(); len(got) != 0 {
+	if got := f.Violations(); len(got) != 0 {
 		t.Fatalf("violations survived reset: %v", got)
 	}
-	if got := f.callLog(); len(got) != 1 {
+	if got := f.CallLog(); len(got) != 1 {
 		t.Fatalf("call log after reset holds %d calls, want the 1 made since", len(got))
 	}
 }

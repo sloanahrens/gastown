@@ -1,4 +1,4 @@
-package forgejoprov
+package forgejotest
 
 import (
 	"encoding/json"
@@ -16,8 +16,8 @@ const (
 	fixtureOtherRepo  = "forgejo-owner/elsewhere"
 	fixtureMainRule   = "main"
 	fixtureLandRule   = "land/*"
-	fixtureLandingBot = DefaultBotPrefix + "landing"
-	fixtureViewerBot  = DefaultBotPrefix + "viewer"
+	fixtureLandingBot = botPrefix + "landing"
+	fixtureViewerBot  = botPrefix + "viewer"
 	fixturePermission = "write"
 )
 
@@ -44,33 +44,18 @@ func ruleRoute(rule string) string {
 	return rulesRoute() + "/" + strings.ReplaceAll(rule, "/", "%2F")
 }
 
-// ruleBody is the rule the provisioning run writes, with the given merge whitelist.
-func ruleBody(name string, whitelist []string) map[string]any {
-	return map[string]any{
-		"rule_name":                  name,
-		"enable_push":                false,
-		"apply_to_admins":            true,
-		"push_whitelist_deploy_keys": false,
-		"enable_merge_whitelist":     true,
-		"merge_whitelist_usernames":  whitelist,
-		"enable_status_check":        true,
-		"status_check_contexts":      []string{"ci/test"},
-		"block_on_outdated_branch":   true,
-	}
-}
-
 // holdRule creates a rule on the fixture repository through the route the run posts to.
-func holdRule(t *testing.T, f *fakeForgejo, name string) {
+func holdRule(t *testing.T, f *Fake, name string) {
 	t.Helper()
-	if status, _ := f.call(t, http.MethodPost, rulesRoute(), jsonBody(ruleBody(name, nil))); status != http.StatusCreated {
+	if status, _ := f.Call(t, http.MethodPost, rulesRoute(), JSONBody(RuleBody(name, nil))); status != http.StatusCreated {
 		t.Fatalf("create rule %s: status %d, want 201", name, status)
 	}
 }
 
 // listedRules reads the fixture repository's rule list through the route the run reads.
-func listedRules(t *testing.T, f *fakeForgejo) []listedRule {
+func listedRules(t *testing.T, f *Fake) []listedRule {
 	t.Helper()
-	status, body := f.call(t, http.MethodGet, rulesRoute(), "")
+	status, body := f.Call(t, http.MethodGet, rulesRoute(), "")
 	if status != http.StatusOK {
 		t.Fatalf("GET of the rule list: status %d, want 200", status)
 	}
@@ -97,34 +82,34 @@ func ruleNamed(t *testing.T, rules []listedRule, name string) listedRule {
 // the permission its body names (204), and that the stored permission follows each PUT.
 func TestFakeRepoCollaborators(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(fixtureRepo)
+	f := New()
+	f.AddRepo(fixtureRepo)
 	route := collaboratorRoute(fixtureBot)
 
-	if status, _ := f.call(t, http.MethodGet, route, ""); status != http.StatusNotFound {
+	if status, _ := f.Call(t, http.MethodGet, route, ""); status != http.StatusNotFound {
 		t.Fatalf("GET of a user with no access: status %d, want 404", status)
 	}
-	if status, _ := f.call(t, http.MethodPut, route, jsonBody(map[string]string{"permission": fixturePermission})); status != http.StatusNoContent {
+	if status, _ := f.Call(t, http.MethodPut, route, JSONBody(map[string]string{"permission": fixturePermission})); status != http.StatusNoContent {
 		t.Fatalf("PUT of %s access: status %d, want 204", fixturePermission, status)
 	}
-	if status, _ := f.call(t, http.MethodGet, route, ""); status != http.StatusNoContent {
+	if status, _ := f.Call(t, http.MethodGet, route, ""); status != http.StatusNoContent {
 		t.Fatalf("GET after the grant: status %d, want 204", status)
 	}
-	if got := f.permission(fixtureRepo, fixtureBot); got != fixturePermission {
+	if got := f.Permission(fixtureRepo, fixtureBot); got != fixturePermission {
 		t.Fatalf("stored permission %q, want %q", got, fixturePermission)
 	}
-	if status, _ := f.call(t, http.MethodPut, route, jsonBody(map[string]string{"permission": "read"})); status != http.StatusNoContent {
+	if status, _ := f.Call(t, http.MethodPut, route, JSONBody(map[string]string{"permission": "read"})); status != http.StatusNoContent {
 		t.Fatalf("PUT of read access: status %d, want 204", status)
 	}
-	if got := f.permission(fixtureRepo, fixtureBot); got != "read" {
+	if got := f.Permission(fixtureRepo, fixtureBot); got != "read" {
 		t.Fatalf("stored permission after a second PUT %q, want read", got)
 	}
 
-	want := []fakeCall{
-		{http.MethodPut, fakeAPIPath + route, http.StatusNoContent},
-		{http.MethodPut, fakeAPIPath + route, http.StatusNoContent},
+	want := []LoggedCall{
+		{http.MethodPut, APIPath + route, http.StatusNoContent},
+		{http.MethodPut, APIPath + route, http.StatusNoContent},
 	}
-	if got := f.writes(); !slices.Equal(got, want) {
+	if got := f.Writes(); !slices.Equal(got, want) {
 		t.Fatalf("writes: got %v, want %v", got, want)
 	}
 }
@@ -134,14 +119,14 @@ func TestFakeRepoCollaborators(t *testing.T) {
 // this through its %2F-escaped path.
 func TestFakeRepoBranchProtections(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(fixtureRepo)
+	f := New()
+	f.AddRepo(fixtureRepo)
 	if got := listedRules(t, f); len(got) != 0 {
 		t.Fatalf("a new repository lists %d rules, want none", len(got))
 	}
 
 	landing := []string{fixtureLandingBot}
-	if status, _ := f.call(t, http.MethodPost, rulesRoute(), jsonBody(ruleBody(fixtureLandRule, landing))); status != http.StatusCreated {
+	if status, _ := f.Call(t, http.MethodPost, rulesRoute(), JSONBody(RuleBody(fixtureLandRule, landing))); status != http.StatusCreated {
 		t.Fatalf("create %s: status %d, want 201", fixtureLandRule, status)
 	}
 	rule := ruleNamed(t, listedRules(t, f), fixtureLandRule)
@@ -149,30 +134,30 @@ func TestFakeRepoBranchProtections(t *testing.T) {
 		t.Fatalf("created rule lists as %+v, want the whitelist %v and block_on_outdated_branch", rule, landing)
 	}
 
-	if status, _ := f.call(t, http.MethodPatch, ruleRoute(fixtureLandRule), jsonBody(map[string]any{"block_on_outdated_branch": false})); status != http.StatusOK {
+	if status, _ := f.Call(t, http.MethodPatch, ruleRoute(fixtureLandRule), JSONBody(map[string]any{"block_on_outdated_branch": false})); status != http.StatusOK {
 		t.Fatalf("PATCH of %s: status %d, want 200", fixtureLandRule, status)
 	}
 	if got := ruleNamed(t, listedRules(t, f), fixtureLandRule); got.BlockOnOutdatedBranch {
 		t.Fatalf("PATCH did not change block_on_outdated_branch")
 	}
 
-	if status, _ := f.call(t, http.MethodDelete, ruleRoute(fixtureLandRule), ""); status != http.StatusNoContent {
+	if status, _ := f.Call(t, http.MethodDelete, ruleRoute(fixtureLandRule), ""); status != http.StatusNoContent {
 		t.Fatalf("DELETE of %s: status %d, want 204", fixtureLandRule, status)
 	}
-	if status, _ := f.call(t, http.MethodDelete, ruleRoute(fixtureLandRule), ""); status != http.StatusNotFound {
+	if status, _ := f.Call(t, http.MethodDelete, ruleRoute(fixtureLandRule), ""); status != http.StatusNotFound {
 		t.Fatalf("DELETE of a rule already gone: status %d, want 404", status)
 	}
 	if got := listedRules(t, f); len(got) != 0 {
 		t.Fatalf("a deleted rule is still listed: %+v", got)
 	}
 
-	want := []fakeCall{
-		{http.MethodPost, fakeAPIPath + rulesRoute(), http.StatusCreated},
-		{http.MethodPatch, fakeAPIPath + ruleRoute(fixtureLandRule), http.StatusOK},
-		{http.MethodDelete, fakeAPIPath + ruleRoute(fixtureLandRule), http.StatusNoContent},
-		{http.MethodDelete, fakeAPIPath + ruleRoute(fixtureLandRule), http.StatusNotFound},
+	want := []LoggedCall{
+		{http.MethodPost, APIPath + rulesRoute(), http.StatusCreated},
+		{http.MethodPatch, APIPath + ruleRoute(fixtureLandRule), http.StatusOK},
+		{http.MethodDelete, APIPath + ruleRoute(fixtureLandRule), http.StatusNoContent},
+		{http.MethodDelete, APIPath + ruleRoute(fixtureLandRule), http.StatusNotFound},
 	}
-	if got := f.writes(); !slices.Equal(got, want) {
+	if got := f.Writes(); !slices.Equal(got, want) {
 		t.Fatalf("writes: got %v, want %v", got, want)
 	}
 }
@@ -186,7 +171,7 @@ func TestFakeRepoRefusesWhatTheModelRefuses(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
-		setup  func(*testing.T, *fakeForgejo)
+		setup  func(*testing.T, *Fake)
 		method string
 		path   string
 		body   string
@@ -196,26 +181,26 @@ func TestFakeRepoRefusesWhatTheModelRefuses(t *testing.T) {
 		{"a collaborator PUT whose body is not JSON", nil, http.MethodPut, collaboratorRoute(fixtureBot), `not json`, http.StatusUnprocessableEntity},
 		{"a rule POST with no rule_name", nil, http.MethodPost, rulesRoute(), `{"enable_push":false}`, http.StatusUnprocessableEntity},
 		{"a rule POST whose body is not an object", nil, http.MethodPost, rulesRoute(), `[]`, http.StatusUnprocessableEntity},
-		{"a rule POST for a name already held", func(t *testing.T, f *fakeForgejo) { holdRule(t, f, fixtureMainRule) },
-			http.MethodPost, rulesRoute(), jsonBody(ruleBody(fixtureMainRule, nil)), http.StatusUnprocessableEntity},
+		{"a rule POST for a name already held", func(t *testing.T, f *Fake) { holdRule(t, f, fixtureMainRule) },
+			http.MethodPost, rulesRoute(), JSONBody(RuleBody(fixtureMainRule, nil)), http.StatusUnprocessableEntity},
 		{"a rule PATCH for a rule the repository lacks", nil, http.MethodPatch, ruleRoute(fixtureMainRule), `{}`, http.StatusNotFound},
-		{"a rule PATCH whose body is not an object", func(t *testing.T, f *fakeForgejo) { holdRule(t, f, fixtureMainRule) },
+		{"a rule PATCH whose body is not an object", func(t *testing.T, f *Fake) { holdRule(t, f, fixtureMainRule) },
 			http.MethodPatch, ruleRoute(fixtureMainRule), `[]`, http.StatusUnprocessableEntity},
 		{"a rule DELETE for a rule the repository lacks", nil, http.MethodDelete, ruleRoute(fixtureMainRule), "", http.StatusNotFound},
 		{"a PATCH on the rule list, which takes no PATCH", nil, http.MethodPatch, rulesRoute(), `{}`, http.StatusNotFound},
 		{"the rule list of a repository the fake does not hold", nil, http.MethodGet, "/repos/" + fixtureOtherRepo + "/branch_protections", "", http.StatusNotFound},
 		{"a collaborator PUT on a repository the fake does not hold", nil, http.MethodPut, "/repos/" + fixtureOtherRepo + "/collaborators/" + fixtureBot,
-			jsonBody(map[string]string{"permission": fixturePermission}), http.StatusNotFound},
+			JSONBody(map[string]string{"permission": fixturePermission}), http.StatusNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			f.addRepo(fixtureRepo)
+			f := New()
+			f.AddRepo(fixtureRepo)
 			if tc.setup != nil {
 				tc.setup(t, f)
 			}
-			if status, _ := f.call(t, tc.method, tc.path, tc.body); status != tc.status {
+			if status, _ := f.Call(t, tc.method, tc.path, tc.body); status != tc.status {
 				t.Fatalf("%s %s: status %d, want %d", tc.method, tc.path, status, tc.status)
 			}
 		})
@@ -227,8 +212,8 @@ func TestFakeRepoRefusesWhatTheModelRefuses(t *testing.T) {
 // a path, so the test calls the router with the segment directly.
 func TestFakeRepoRefusesAnUnescapableSegment(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(fixtureRepo)
+	f := New()
+	f.AddRepo(fixtureRepo)
 	segments := []string{"forgejo-owner", "gastown", "branch_protections", "land%zz"}
 	if status, _ := f.serveRepo(http.MethodDelete, segments, nil); status != http.StatusBadRequest {
 		t.Fatalf("DELETE of a segment that is not escaped text: status %d, want 400", status)
@@ -253,18 +238,18 @@ func TestFakeRoutesAndLogsTheEscapedPath(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			f.protectedLandBranch = true
-			f.addRepo(fixtureRepo)
-			if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusCreated {
+			f := New()
+			f.ProtectedLandBranch = true
+			f.AddRepo(fixtureRepo)
+			if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureBot))); status != http.StatusCreated {
 				t.Fatalf("create %s: status %d, want 201", fixtureBot, status)
 			}
-			before := len(f.callLog())
-			if status, _ := f.call(t, tc.method, tc.path, ""); status != tc.status {
+			before := len(f.CallLog())
+			if status, _ := f.Call(t, tc.method, tc.path, ""); status != tc.status {
 				t.Fatalf("%s %s: status %d, want %d", tc.method, tc.path, status, tc.status)
 			}
-			want := []fakeCall{{tc.method, fakeAPIPath + tc.path, tc.status}}
-			if got := f.callLog()[before:]; !slices.Equal(got, want) {
+			want := []LoggedCall{{tc.method, APIPath + tc.path, tc.status}}
+			if got := f.CallLog()[before:]; !slices.Equal(got, want) {
 				t.Fatalf("call log: got %v, want %v", got, want)
 			}
 		})
@@ -272,14 +257,14 @@ func TestFakeRoutesAndLogsTheEscapedPath(t *testing.T) {
 
 	t.Run("a request without the admin token is logged as a violation under its escaped path", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
-		f.protectedLandBranch = true
-		f.addRepo(fixtureRepo)
-		if status, _ := f.send(t, "", http.MethodDelete, ruleRoute(fixtureLandRule), ""); status != http.StatusUnauthorized {
+		f := New()
+		f.ProtectedLandBranch = true
+		f.AddRepo(fixtureRepo)
+		if status, _ := f.Send(t, "", http.MethodDelete, ruleRoute(fixtureLandRule), ""); status != http.StatusUnauthorized {
 			t.Fatalf("DELETE without the admin token: status %d, want 401", status)
 		}
-		want := []fakeCall{{http.MethodDelete, fakeAPIPath + ruleRoute(fixtureLandRule), http.StatusUnauthorized}}
-		if got := f.violations(); !slices.Equal(got, want) {
+		want := []LoggedCall{{http.MethodDelete, APIPath + ruleRoute(fixtureLandRule), http.StatusUnauthorized}}
+		if got := f.Violations(); !slices.Equal(got, want) {
 			t.Fatalf("violations: got %v, want %v", got, want)
 		}
 	})
@@ -291,7 +276,7 @@ func TestFakeRoutesAndLogsTheEscapedPath(t *testing.T) {
 func TestFakeRepoSwitches(t *testing.T) {
 	t.Parallel()
 
-	t.Run("repoMissing answers every repository route 404", func(t *testing.T) {
+	t.Run("RepoMissing answers every repository route 404", func(t *testing.T) {
 		t.Parallel()
 		cases := []struct {
 			name    string
@@ -304,11 +289,11 @@ func TestFakeRepoSwitches(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
-				f := newFakeForgejo()
-				f.addRepo(fixtureRepo)
-				f.repoMissing = tc.missing
-				rules, _ := f.call(t, http.MethodGet, rulesRoute(), "")
-				collab, _ := f.call(t, http.MethodPut, collaboratorRoute(fixtureBot), jsonBody(map[string]string{"permission": fixturePermission}))
+				f := New()
+				f.AddRepo(fixtureRepo)
+				f.RepoMissing = tc.missing
+				rules, _ := f.Call(t, http.MethodGet, rulesRoute(), "")
+				collab, _ := f.Call(t, http.MethodPut, collaboratorRoute(fixtureBot), JSONBody(map[string]string{"permission": fixturePermission}))
 				if got := []int{rules, collab}; !slices.Equal(got, tc.want) {
 					t.Fatalf("statuses %v, want %v", got, tc.want)
 				}
@@ -316,7 +301,7 @@ func TestFakeRepoSwitches(t *testing.T) {
 		}
 	})
 
-	t.Run("protectedLandBranch seeds a land/* rule on an added repository", func(t *testing.T) {
+	t.Run("ProtectedLandBranch seeds a land/* rule on an added repository", func(t *testing.T) {
 		t.Parallel()
 		cases := []struct {
 			name      string
@@ -330,20 +315,20 @@ func TestFakeRepoSwitches(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
-				f := newFakeForgejo()
-				f.protectedLandBranch = tc.protected
-				f.addRepo(fixtureRepo)
+				f := New()
+				f.ProtectedLandBranch = tc.protected
+				f.AddRepo(fixtureRepo)
 				if got := listedRules(t, f); len(got) != tc.wantRules {
 					t.Fatalf("rules listed: %d, want %d", len(got), tc.wantRules)
 				}
-				if status, _ := f.call(t, http.MethodDelete, ruleRoute(fixtureLandRule), ""); status != tc.wantLand {
+				if status, _ := f.Call(t, http.MethodDelete, ruleRoute(fixtureLandRule), ""); status != tc.wantLand {
 					t.Fatalf("DELETE of %s: status %d, want %d", fixtureLandRule, status, tc.wantLand)
 				}
 			})
 		}
 	})
 
-	t.Run("dropWhitelistEntry leaves a PATCH's merge whitelist as it was", func(t *testing.T) {
+	t.Run("DropWhitelistEntry leaves a PATCH's merge whitelist as it was", func(t *testing.T) {
 		t.Parallel()
 		landing := []string{fixtureLandingBot}
 		cases := []struct {
@@ -357,14 +342,14 @@ func TestFakeRepoSwitches(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
-				f := newFakeForgejo()
-				f.dropWhitelistEntry = tc.drop
-				f.addRepo(fixtureRepo)
-				if status, _ := f.call(t, http.MethodPost, rulesRoute(), jsonBody(ruleBody(fixtureMainRule, nil))); status != http.StatusCreated {
+				f := New()
+				f.DropWhitelistEntry = tc.drop
+				f.AddRepo(fixtureRepo)
+				if status, _ := f.Call(t, http.MethodPost, rulesRoute(), JSONBody(RuleBody(fixtureMainRule, nil))); status != http.StatusCreated {
 					t.Fatalf("create %s: status %d, want 201", fixtureMainRule, status)
 				}
-				body := jsonBody(map[string]any{"merge_whitelist_usernames": landing})
-				if status, _ := f.call(t, http.MethodPatch, ruleRoute(fixtureMainRule), body); status != http.StatusOK {
+				body := JSONBody(map[string]any{"merge_whitelist_usernames": landing})
+				if status, _ := f.Call(t, http.MethodPatch, ruleRoute(fixtureMainRule), body); status != http.StatusOK {
 					t.Fatalf("PATCH of %s: status %d, want 200", fixtureMainRule, status)
 				}
 				got := ruleNamed(t, listedRules(t, f), fixtureMainRule).MergeWhitelistUsernames
@@ -375,7 +360,7 @@ func TestFakeRepoSwitches(t *testing.T) {
 		}
 	})
 
-	t.Run("viewerExists answers the viewer bot's GET 200 and no other bot's", func(t *testing.T) {
+	t.Run("ViewerExists answers the viewer bot's GET 200 and no other bot's", func(t *testing.T) {
 		t.Parallel()
 		cases := []struct {
 			name   string
@@ -388,10 +373,10 @@ func TestFakeRepoSwitches(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
-				f := newFakeForgejo()
-				f.viewerExists = tc.exists
-				viewer, _ := f.call(t, http.MethodGet, "/users/"+fixtureViewerBot, "")
-				polecat, _ := f.call(t, http.MethodGet, "/users/"+fixtureBot, "")
+				f := New()
+				f.ViewerExists = tc.exists
+				viewer, _ := f.Call(t, http.MethodGet, "/users/"+fixtureViewerBot, "")
+				polecat, _ := f.Call(t, http.MethodGet, "/users/"+fixtureBot, "")
 				if got := []int{viewer, polecat}; !slices.Equal(got, tc.want) {
 					t.Fatalf("statuses %v, want %v", got, tc.want)
 				}
@@ -399,7 +384,7 @@ func TestFakeRepoSwitches(t *testing.T) {
 		}
 	})
 
-	t.Run("viewerExists stores the viewer bot, so its tokens list and its create is refused", func(t *testing.T) {
+	t.Run("ViewerExists stores the viewer bot, so its tokens list and its create is refused", func(t *testing.T) {
 		t.Parallel()
 		cases := []struct {
 			name       string
@@ -413,10 +398,10 @@ func TestFakeRepoSwitches(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
-				f := newFakeForgejo()
-				f.viewerExists = tc.exists
-				tokens, _ := f.call(t, http.MethodGet, tokensRoute(fixtureViewerBot), "")
-				create, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureViewerBot)))
+				f := New()
+				f.ViewerExists = tc.exists
+				tokens, _ := f.Call(t, http.MethodGet, tokensRoute(fixtureViewerBot), "")
+				create, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureViewerBot)))
 				if got := []int{tokens, create}; !slices.Equal(got, []int{tc.wantTokens, tc.wantCreate}) {
 					t.Fatalf("statuses %v, want %v", got, []int{tc.wantTokens, tc.wantCreate})
 				}
@@ -424,11 +409,11 @@ func TestFakeRepoSwitches(t *testing.T) {
 		}
 	})
 
-	t.Run("adminless refuses only the token mint", func(t *testing.T) {
+	t.Run("Adminless refuses only the token mint", func(t *testing.T) {
 		t.Parallel()
 		cases := []struct {
 			name      string
-			adminless bool
+			Adminless bool
 			want      []int
 		}{
 			{"off: the mint is 201", false, []int{http.StatusCreated, http.StatusNoContent, http.StatusOK}},
@@ -437,16 +422,16 @@ func TestFakeRepoSwitches(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
-				f := newFakeForgejo()
-				f.adminless = tc.adminless
-				f.addRepo(fixtureRepo)
-				if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusCreated {
+				f := New()
+				f.Adminless = tc.Adminless
+				f.AddRepo(fixtureRepo)
+				if status, _ := f.Call(t, http.MethodPost, "/admin/users", JSONBody(UserBody(fixtureBot))); status != http.StatusCreated {
 					t.Fatalf("create %s: status %d, want 201", fixtureBot, status)
 				}
-				mint := jsonBody(map[string]any{"name": fixtureTokenName, "scopes": []string{fixtureScope}})
-				mintStatus, _ := f.call(t, http.MethodPost, tokensRoute(fixtureBot), mint)
-				grant, _ := f.call(t, http.MethodPut, collaboratorRoute(fixtureBot), jsonBody(map[string]string{"permission": fixturePermission}))
-				rules, _ := f.call(t, http.MethodGet, rulesRoute(), "")
+				mint := JSONBody(map[string]any{"name": fixtureTokenName, "scopes": []string{fixtureScope}})
+				mintStatus, _ := f.Call(t, http.MethodPost, tokensRoute(fixtureBot), mint)
+				grant, _ := f.Call(t, http.MethodPut, collaboratorRoute(fixtureBot), JSONBody(map[string]string{"permission": fixturePermission}))
+				rules, _ := f.Call(t, http.MethodGet, rulesRoute(), "")
 				if got := []int{mintStatus, grant, rules}; !slices.Equal(got, tc.want) {
 					t.Fatalf("statuses %v, want %v", got, tc.want)
 				}

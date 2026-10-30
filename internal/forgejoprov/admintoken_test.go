@@ -7,11 +7,13 @@ import (
 	"io/fs"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/forgejotest"
 )
 
 // fixtureToken stands in for a real token in every test. It is a placeholder,
 // and failure messages never print it, so a leak is reported without its value.
-const fixtureToken = "fixture-admin-7f3a9c"
+const fixtureToken = forgejotest.AdminToken
 
 // adminFile is the token file path the resolution tests name.
 const adminFile = "/etc/gt/admin.env"

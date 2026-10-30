@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/forgejotest"
 )
 
 // recordingTransport passes every request to the fake and keeps the
@@ -52,9 +54,9 @@ func (brokenReader) Read([]byte) (int, error) {
 
 // clientFor returns a client over the fake, with the admin token and the log
 // lines it is given captured.
-func clientFor(f *fakeForgejo, dryRun bool, logs *[]string) *Client {
+func clientFor(f *forgejotest.Fake, dryRun bool, logs *[]string) *Client {
 	return &Client{
-		API:    fakeAPIRoot + fakeAPIPath,
+		API:    forgejotest.APIRoot + forgejotest.APIPath,
 		HTTP:   &http.Client{Transport: f},
 		Token:  newSecret(fixtureToken),
 		DryRun: dryRun,
@@ -67,9 +69,9 @@ func clientFor(f *fakeForgejo, dryRun bool, logs *[]string) *Client {
 // still reaches it.
 func TestClientDryRunSendsNoWrite(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap("bot-polecat")))
-	f.reset()
+	f := forgejotest.New()
+	f.Call(t, http.MethodPost, "/admin/users", forgejotest.JSONBody(forgejotest.UserBody("bot-polecat")))
+	f.Reset()
 	var logs []string
 	c := clientFor(f, true, &logs)
 
@@ -82,7 +84,7 @@ func TestClientDryRunSendsNoWrite(t *testing.T) {
 			t.Errorf("dry-run %s = status %d, body %q; want status 0 and no body", method, status, body)
 		}
 	}
-	if writes := f.writes(); len(writes) != 0 {
+	if writes := f.Writes(); len(writes) != 0 {
 		t.Errorf("dry run reached the fake with %d write(s): %+v", len(writes), writes)
 	}
 
@@ -93,7 +95,7 @@ func TestClientDryRunSendsNoWrite(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Errorf("dry-run GET status = %d, want %d from the fake", status, http.StatusNotFound)
 	}
-	if got := len(f.callLog()); got != 1 {
+	if got := len(f.CallLog()); got != 1 {
 		t.Errorf("fake answered %d request(s), want only the one GET", got)
 	}
 }
@@ -103,7 +105,7 @@ func TestClientDryRunSendsNoWrite(t *testing.T) {
 // reply and the log lines do not either.
 func TestClientSendsTheTokenOnlyInTheHeader(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	rec := &recordingTransport{next: f}
 	var logs []string
 	c := clientFor(f, false, &logs)
@@ -128,7 +130,7 @@ func TestClientSendsTheTokenOnlyInTheHeader(t *testing.T) {
 			t.Errorf("request %d URL carries the token: %s", i, strings.ReplaceAll(url, fixtureToken, redacted))
 		}
 	}
-	if n := len(f.violations()); n != 0 {
+	if n := len(f.Violations()); n != 0 {
 		t.Errorf("fake refused %d request(s) that should have carried the token", n)
 	}
 	// Do logs nothing of its own, so any line here would be one it should not
@@ -162,7 +164,7 @@ func TestClientTransportErrorHasNoToken(t *testing.T) {
 	t.Parallel()
 	var logs []string
 	c := &Client{
-		API:   fakeAPIRoot + fakeAPIPath,
+		API:   forgejotest.APIRoot + forgejotest.APIPath,
 		HTTP:  &http.Client{Transport: failingTransport{}},
 		Token: newSecret(fixtureToken),
 		Log:   func(line string) { logs = append(logs, line) },
@@ -171,7 +173,7 @@ func TestClientTransportErrorHasNoToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("transport failure returned no error")
 	}
-	want := "GET " + fakeAPIRoot + fakeAPIPath + "/users/bot-polecat: request failed"
+	want := "GET " + forgejotest.APIRoot + forgejotest.APIPath + "/users/bot-polecat: request failed"
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err.Error(), want)
 	}
@@ -184,9 +186,9 @@ func TestClientTransportErrorHasNoToken(t *testing.T) {
 // before any request is sent.
 func TestClientRefusesAnUnencodableBody(t *testing.T) {
 	t.Parallel()
-	rec := &recordingTransport{next: newFakeForgejo()}
+	rec := &recordingTransport{next: forgejotest.New()}
 	c := &Client{
-		API:   fakeAPIRoot + fakeAPIPath,
+		API:   forgejotest.APIRoot + forgejotest.APIPath,
 		HTTP:  &http.Client{Transport: rec},
 		Token: newSecret(fixtureToken),
 	}
@@ -195,7 +197,7 @@ func TestClientRefusesAnUnencodableBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unencodable body returned no error")
 	}
-	if !strings.Contains(err.Error(), "POST "+fakeAPIRoot+fakeAPIPath+"/admin/users: encode body") {
+	if !strings.Contains(err.Error(), "POST "+forgejotest.APIRoot+forgejotest.APIPath+"/admin/users: encode body") {
 		t.Errorf("error = %q, want the method, URL and encode-body rule", err.Error())
 	}
 	if status != 0 || body != nil {
@@ -210,7 +212,7 @@ func TestClientRefusesAnUnencodableBody(t *testing.T) {
 // reported, with no token in the text, and that nothing is sent.
 func TestClientRefusesABadURL(t *testing.T) {
 	t.Parallel()
-	rec := &recordingTransport{next: newFakeForgejo()}
+	rec := &recordingTransport{next: forgejotest.New()}
 	c := &Client{
 		API:   "http://[::1",
 		HTTP:  &http.Client{Transport: rec},
@@ -236,7 +238,7 @@ func TestClientRefusesABadURL(t *testing.T) {
 func TestClientReportsAReplyReadError(t *testing.T) {
 	t.Parallel()
 	c := &Client{
-		API:   fakeAPIRoot + fakeAPIPath,
+		API:   forgejotest.APIRoot + forgejotest.APIPath,
 		HTTP:  &http.Client{Transport: brokenBodyTransport{}},
 		Token: newSecret(fixtureToken),
 	}
@@ -244,7 +246,7 @@ func TestClientReportsAReplyReadError(t *testing.T) {
 	if err == nil {
 		t.Fatal("a reply that fails on read returned no error")
 	}
-	if !strings.Contains(err.Error(), "GET "+fakeAPIRoot+fakeAPIPath+"/users/bot-polecat: read reply") {
+	if !strings.Contains(err.Error(), "GET "+forgejotest.APIRoot+forgejotest.APIPath+"/users/bot-polecat: read reply") {
 		t.Errorf("error = %q, want the method, URL and read-reply rule", err.Error())
 	}
 	if status != 0 || body != nil {

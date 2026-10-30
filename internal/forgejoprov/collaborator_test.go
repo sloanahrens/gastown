@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/forgejotest"
 )
 
 // testRepo is the repository the collaborator tests grant access on.
@@ -51,10 +53,8 @@ func (l *levelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // seedCollaborator gives user access to repo at level on the fake, as a run that
 // already granted it would have left it.
-func seedCollaborator(f *fakeForgejo, repo, user, level string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.repos[repo].collaborators[user] = level
+func seedCollaborator(f *forgejotest.Fake, repo, user, level string) {
+	f.SeedCollaborator(repo, user, level)
 }
 
 // TestCollaboratorPermissionTable checks the access each role's bot is granted: write
@@ -92,23 +92,23 @@ func TestCollaboratorPermissionTable(t *testing.T) {
 // second run reads the access back and sends no write.
 func TestEnsureCollaboratorGrantsOnce(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(testRepo)
+	f := forgejotest.New()
+	f.AddRepo(testRepo)
 	var logs []string
 	p := userProvisioner(f, false, &logs)
 	if err := p.EnsureCollaborator("polecat", testRepo, "write"); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	if got := f.permission(testRepo, DefaultBotPrefix+"polecat"); got != "write" {
+	if got := f.Permission(testRepo, DefaultBotPrefix+"polecat"); got != "write" {
 		t.Fatalf("after the first run the bot holds %q, want write", got)
 	}
-	if n := len(f.writes()); n != 1 {
+	if n := len(f.Writes()); n != 1 {
 		t.Fatalf("first run sent %d writes, want 1", n)
 	}
 	if err := p.EnsureCollaborator("polecat", testRepo, "write"); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
-	if n := len(f.writes()); n != 1 {
+	if n := len(f.Writes()); n != 1 {
 		t.Fatalf("second run sent %d writes in all, want the first run's 1 and no more", n)
 	}
 	if len(logs) != 2 || !strings.Contains(logs[1], "already has write access") {
@@ -141,8 +141,8 @@ func TestEnsureCollaboratorSettlesAtTheRequestedLevel(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			f.addRepo(testRepo)
+			f := forgejotest.New()
+			f.AddRepo(testRepo)
 			user := DefaultBotPrefix + "polecat"
 			if c.held != "" {
 				seedCollaborator(f, testRepo, user, c.held)
@@ -152,10 +152,10 @@ func TestEnsureCollaboratorSettlesAtTheRequestedLevel(t *testing.T) {
 			if err := p.EnsureCollaborator("polecat", testRepo, c.requested); err != nil {
 				t.Fatalf("EnsureCollaborator: %v", err)
 			}
-			if got := f.permission(testRepo, user); got != c.requested {
+			if got := f.Permission(testRepo, user); got != c.requested {
 				t.Fatalf("the bot holds %q after the run, want %q", got, c.requested)
 			}
-			if n := len(f.writes()); n != c.wantWrites {
+			if n := len(f.Writes()); n != c.wantWrites {
 				t.Fatalf("sent %d writes, want %d", n, c.wantWrites)
 			}
 			line := strings.Join(logs, "\n")
@@ -173,8 +173,8 @@ func TestEnsureCollaboratorSettlesAtTheRequestedLevel(t *testing.T) {
 // another level reports the change it would make and sends no write.
 func TestEnsureCollaboratorDryRunReportsAChange(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(testRepo)
+	f := forgejotest.New()
+	f.AddRepo(testRepo)
 	user := DefaultBotPrefix + "viewer"
 	seedCollaborator(f, testRepo, user, "write")
 	var logs []string
@@ -182,10 +182,10 @@ func TestEnsureCollaboratorDryRunReportsAChange(t *testing.T) {
 	if err := p.EnsureCollaborator("viewer", testRepo, "read"); err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
-	if n := len(f.writes()); n != 0 {
+	if n := len(f.Writes()); n != 0 {
 		t.Fatalf("dry run sent %d writes, want none", n)
 	}
-	if got := f.permission(testRepo, user); got != "write" {
+	if got := f.Permission(testRepo, user); got != "write" {
 		t.Fatalf("dry run left the bot at %q, want write", got)
 	}
 	if len(logs) != 1 || !strings.Contains(logs[0], "would change") || !strings.Contains(logs[0], "from write to read") {
@@ -342,14 +342,14 @@ func TestEnsureCollaboratorRefusesAMalformedRepo(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.repo, func(t *testing.T) {
-			f := newFakeForgejo()
+			f := forgejotest.New()
 			var logs []string
 			p := userProvisioner(f, false, &logs)
 			err := p.EnsureCollaborator("polecat", c.repo, "write")
 			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 				t.Fatalf("EnsureCollaborator error = %v, want one containing %q", err, c.wantErr)
 			}
-			if n := len(f.callLog()); n != 0 {
+			if n := len(f.CallLog()); n != 0 {
 				t.Fatalf("sent %d requests for a malformed repository, want none", n)
 			}
 		})
@@ -362,14 +362,14 @@ func TestEnsureCollaboratorAcceptsPlainRepoNames(t *testing.T) {
 	t.Parallel()
 	for _, repo := range []string{"a/b", "good-owner.v2/rig_1-x"} {
 		t.Run(repo, func(t *testing.T) {
-			f := newFakeForgejo()
-			f.addRepo(repo)
+			f := forgejotest.New()
+			f.AddRepo(repo)
 			var logs []string
 			p := userProvisioner(f, false, &logs)
 			if err := p.EnsureCollaborator("polecat", repo, "write"); err != nil {
 				t.Fatalf("EnsureCollaborator(%q): %v", repo, err)
 			}
-			if got := f.permission(repo, DefaultBotPrefix+"polecat"); got != "write" {
+			if got := f.Permission(repo, DefaultBotPrefix+"polecat"); got != "write" {
 				t.Fatalf("the bot holds %q on %s, want write", got, repo)
 			}
 		})
@@ -380,17 +380,17 @@ func TestEnsureCollaboratorAcceptsPlainRepoNames(t *testing.T) {
 // the grant it would make, and sends no write.
 func TestEnsureCollaboratorDryRunSendsNoWrite(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(testRepo)
+	f := forgejotest.New()
+	f.AddRepo(testRepo)
 	var logs []string
 	p := userProvisioner(f, true, &logs)
 	if err := p.EnsureCollaborator("polecat", testRepo, "write"); err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
-	if n := len(f.writes()); n != 0 {
+	if n := len(f.Writes()); n != 0 {
 		t.Fatalf("dry run sent %d writes, want none", n)
 	}
-	if got := f.permission(testRepo, DefaultBotPrefix+"polecat"); got != "" {
+	if got := f.Permission(testRepo, DefaultBotPrefix+"polecat"); got != "" {
 		t.Fatalf("dry run granted %q, want no grant", got)
 	}
 	if len(logs) != 1 || !strings.Contains(logs[0], "would grant") {
@@ -419,15 +419,15 @@ func TestEnsureViewerAccessOnlyWhenTheViewerExistsAndIsNotRequested(t *testing.T
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			f := newFakeForgejo()
-			f.addRepo(testRepo)
+			f := forgejotest.New()
+			f.AddRepo(testRepo)
 			if c.viewerExists {
 				withBot(t, f, "viewer")
 			}
 			if c.held != "" {
 				seedCollaborator(f, testRepo, DefaultBotPrefix+"viewer", c.held)
 			}
-			before := len(f.callLog())
+			before := len(f.CallLog())
 			var logs []string
 			p := userProvisioner(f, false, &logs)
 			p.ViewerRequested = c.requested
@@ -438,11 +438,11 @@ func TestEnsureViewerAccessOnlyWhenTheViewerExistsAndIsNotRequested(t *testing.T
 			if got != c.want {
 				t.Fatalf("EnsureViewerAccess = %v, want %v", got, c.want)
 			}
-			if level := f.permission(testRepo, DefaultBotPrefix+"viewer"); level != c.wantLevel {
+			if level := f.Permission(testRepo, DefaultBotPrefix+"viewer"); level != c.wantLevel {
 				t.Fatalf("viewer holds %q on %s, want %q", level, testRepo, c.wantLevel)
 			}
-			if c.requested && len(f.callLog()) != before {
-				t.Fatalf("a run that provisions the viewer sent %d requests, want none", len(f.callLog())-before)
+			if c.requested && len(f.CallLog()) != before {
+				t.Fatalf("a run that provisions the viewer sent %d requests, want none", len(f.CallLog())-before)
 			}
 			if got == ViewerSkipped && !strings.Contains(strings.Join(logs, "\n"), "skipping") {
 				t.Fatalf("missing viewer logged %q, want a skip notice", logs)
@@ -483,10 +483,10 @@ func TestEnsureViewerAccessStopsOnTransportFailure(t *testing.T) {
 // returned as its error, so the run cannot carry on as though the viewer could read.
 func TestEnsureViewerAccessReturnsAFailedGrant(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(testRepo)
+	f := forgejotest.New()
+	f.AddRepo(testRepo)
 	withBot(t, f, "viewer")
-	f.repoMissing = true
+	f.RepoMissing = true
 	var logs []string
 	p := userProvisioner(f, false, &logs)
 	if _, err := p.EnsureViewerAccess(testRepo); err == nil || !strings.Contains(err.Error(), "unexpected HTTP") {
