@@ -526,15 +526,63 @@ func childSpecs(issues []*beads.Issue) []specdispatch.Child {
 	return out
 }
 
-// specCandidateChildren is the tick's children read: the annotated memory's
-// answer for a candidate the board has not moved, and specChildren counted in
-// the candidates phase for one it has (gt-km9jt).
-func specCandidateChildren(townRoot string, reads *specTickReads, memory *specAnnotatedTick) func(beadID string) ([]specdispatch.Child, error) {
+// specCandidateChildren is the tick's children read for every candidate of a
+// board read: one bd view per rig the candidates live in, answered per bead,
+// with a per-bead fallback when the grouped read fails so one unreadable bead
+// does not cost the whole rig its children (gt-km9jt). The children are read
+// fresh every tick: a child's change does not move its parent's row, so a
+// remembered child set would hide a closure from the container hold.
+func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCandidate, read func(dir string, ids []string) (map[string][]*beads.Issue, error)) func(beadID string) ([]specdispatch.Child, error) {
+	byDir := map[string][]string{}
+	for _, c := range cands {
+		dir := resolveBeadDirFromTownRoot(townRoot, c.Spec.ID)
+		byDir[dir] = append(byDir[dir], c.Spec.ID)
+	}
+	if read == nil {
+		read = func(dir string, ids []string) (map[string][]*beads.Issue, error) {
+			return slingStores{}.pinnedAt(dir).ChildrenOf(ids...)
+		}
+	}
+	var mu sync.Mutex
+	kids := map[string][]specdispatch.Child{}
+	errs := map[string]error{}
+	done := map[string]bool{}
 	return func(beadID string) ([]specdispatch.Child, error) {
-		return memory.children(beadID, func() ([]specdispatch.Child, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		dir := resolveBeadDirFromTownRoot(townRoot, beadID)
+		if !done[dir] {
+			done[dir] = true
+			ids := byDir[dir]
+			if len(ids) == 0 {
+				ids = []string{beadID}
+			}
 			reads.call()
-			return specChildren(townRoot, beadID)
-		})
+			group, err := read(dir, ids)
+			if err != nil {
+				// One parent the grouped read could not answer fails the whole
+				// read, so each bead is read alone: the rest still get their
+				// children and only the unreadable bead reports.
+				for _, id := range ids {
+					reads.call()
+					single, readErr := read(dir, []string{id})
+					if readErr != nil {
+						errs[id] = readErr
+						continue
+					}
+					kids[id] = childSpecs(single[id])
+				}
+			}
+			for id, is := range group {
+				kids[id] = childSpecs(is)
+			}
+		}
+		if err := errs[beadID]; err != nil {
+			return nil, err
+		}
+		// A parent the grouped read answered with no children is absent from
+		// the map: the read itself is the answer, an empty child set.
+		return kids[beadID], nil
 	}
 }
 
@@ -1128,9 +1176,11 @@ type specDispatchEntry struct {
 type specCandidate struct {
 	Spec specdispatch.Spec
 	Rig  string
-	// UpdatedAt is the board row's updated_at: the tick's key for reusing the
-	// children it read last time instead of reading them again (gt-km9jt).
+	// UpdatedAt and DepCount are the board row's updated_at and dependency
+	// count: the key a stored shape-and-label verdict is served against, so an
+	// unchanged candidate is not read again (gt-km9jt).
 	UpdatedAt string
+	DepCount  int
 	// Blockers are the bead's blocking edges, from the board's detail read, for
 	// the admission check (sling.Admit). The ready board carries no dependency
 	// rows (gt-ndad8), so an empty slice is a bead the read answered as having
@@ -1189,7 +1239,11 @@ type specDispatchEnv struct {
 	// a tick with no town to read wants.
 	StartupBackoff func(beadID string) string
 	Candidates     func() specBoardRead
-	Show           func(beadID string) (specdispatch.Spec, error)
+	// Verdicts is the shape-and-label memory the scan serves an unchanged
+	// candidate from (specCandidateVerdicts). Nil decides every candidate from
+	// the bead it read, which is what a tick that keeps nothing does.
+	Verdicts *specCandidateVerdicts
+	Show     func(beadID string) (specdispatch.Spec, error)
 	// ShowFresh is Show that never answers from an earlier read of the tick: the
 	// last-moment re-read before a sling is the check that a submission did not
 	// land in the window, so it asks bd. Nil falls back to Show (gt-u8rbh).
@@ -1435,7 +1489,20 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// spends no read per candidate (gt-bqj8q). The last-moment re-read
 		// before the sling is what catches a bead that changed since the board.
 		full := c.Spec
-		if ok, why := specdispatch.Eligible(full, env.MaxPriority); !ok {
+		// The shape and label verdicts of a candidate whose board row has not
+		// moved are the ones the last tick reached: the details read that fed
+		// them is skipped for it (specBoardDetails), so the loop takes them from
+		// the record rather than deciding them again from a bead it did not read
+		// (gt-km9jt).
+		remembered, served := env.Verdicts.lookUp(c)
+		eligible, why := specdispatch.Eligible(full, env.MaxPriority)
+		if served {
+			eligible, why = remembered.Eligible, remembered.Skip
+		}
+		if !eligible {
+			if !served {
+				env.Verdicts.record(c, specCandidateVerdict{Skip: why})
+			}
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s (%s)", id, specdispatch.SkipNotEligible, why)})
 			continue
 		}
@@ -1459,7 +1526,13 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// candidate whose edges could not be read never reached it. A refusal is
 		// a skip, not a failure: the bead stays ready and the next tick asks
 		// again once the blocker closes.
-		if why := specBlocked(sling.Admit(c.Blockers)); why != "" {
+		blockers := c.Blockers
+		if served {
+			blockers = remembered.Blockers
+		}
+		if why := specBlocked(sling.Admit(blockers)); why != "" {
+			// Not remembered: a blocker that closes does not move the bead's
+			// row, so the next tick reads the edges again (gt-km9jt).
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, why)})
 			continue
 		}
@@ -1500,8 +1573,14 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// (gt-b9j3o.4). The target branch's files are the candidate's rig's: a
 		// bead whose Constraints name a file the branch never got is work on a
 		// base that is not there (gt-7t1im).
-		full.Target = env.target(c.Rig)
-		verdict := specdispatch.Lint(full, env.Template)
+		var verdict specdispatch.LintVerdict
+		if served {
+			verdict = remembered.Shape
+		} else {
+			full.Target = env.target(c.Rig)
+			verdict = specdispatch.Lint(full, env.Template)
+			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict, Blockers: blockers})
+		}
 		shapeNote := ""
 		if env.ShapeGate != specdispatch.ShapeGateOff {
 			switch {
@@ -2486,6 +2565,21 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	// candidate, and the files a branch holds do not change inside a tick
 	// (gt-7t1im).
 	targets := map[string]*specdispatch.TargetTree{}
+	targetOf := func(rig string) *specdispatch.TargetTree {
+		if tree, ok := targets[rig]; ok {
+			return tree
+		}
+		tree := specTargetTree(filepath.Join(townRoot, rig), openRigTree)
+		targets[rig] = tree
+		return tree
+	}
+	template := specdispatch.LoadTemplate(tmplPath)
+	// The shape-and-label verdicts of the candidates the scan already read,
+	// kept across the daemon's ticks beside the annotations (gt-km9jt).
+	verdicts := newSpecCandidateVerdicts(annotations.memory,
+		specCandidateInputsFor(template, ts.PolecatPool.GetShapeGate(), maxPriority, targetOf))
+	// The tick's children read, grouped per rig once the board is known.
+	var children func(beadID string) ([]specdispatch.Child, error)
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
 		PendingInstall: func(now time.Time) (*installpending.Marker, error) { return pendingInstall.Pending(now) },
@@ -2510,19 +2604,26 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			}, IsRigParkedOrDocked, retry)
 			read = specBoardDetails(reads, func(rig string) beads.Client {
 				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
-			}, read)
+			}, read, verdicts)
 			annotations.observe(read)
+			children = specCandidateChildren(townRoot, reads, read.Candidates, nil)
 			return read
 		},
+		Verdicts: verdicts,
 		Show: func(id string) (specdispatch.Spec, error) {
 			return showSpecWith(reads, id, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 		},
 		ShowFresh: func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
-		// A candidate the board has not moved keeps the children the last tick
-		// read, so the scan's one read per candidate is spent on the beads that
-		// changed (gt-km9jt).
-		Children: specCandidateChildren(townRoot, reads, annotations),
-		RigHold:  func(rig string) string { return dispatch.RigHold(townRoot, rig) },
+		// Every candidate's children in one bd view per rig, read fresh each
+		// tick: a child closed without moving its parent's row is still seen by
+		// the next tick's container hold (gt-km9jt).
+		Children: func(id string) ([]specdispatch.Child, error) {
+			if children == nil {
+				return specChildren(townRoot, id)
+			}
+			return children(id)
+		},
+		RigHold: func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
 			return rigRevertInFlight(townRoot, rig, func(beadID string) bool {
 				reads.call()
@@ -2562,7 +2663,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		},
 		Sleep:    time.Sleep,
 		Now:      time.Now,
-		Template: specdispatch.LoadTemplate(tmplPath),
+		Template: template,
 		Budget:   budget,
 		PerTick:  perTick,
 		DryRun:   dryRun,
@@ -2583,14 +2684,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		OMThreshold: func(rig string) (float64, error) {
 			return land.OMThreshold(filepath.Join(townRoot, rig))
 		},
-		Target: func(rig string) *specdispatch.TargetTree {
-			if tree, ok := targets[rig]; ok {
-				return tree
-			}
-			tree := specTargetTree(filepath.Join(townRoot, rig), openRigTree)
-			targets[rig] = tree
-			return tree
-		},
+		Target: targetOf,
 	}
 	report := runSpecDispatchCycle(env)
 	report.Notices = append(report.Notices, slingTraces.notices()...)
@@ -2833,6 +2927,7 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 	var specs []specdispatch.Spec
 	rigOf := map[string]string{}
 	updatedAt := map[string]string{}
+	depCount := map[string]int{}
 	labeled := map[string]bool{}
 	for _, name := range names {
 		rigPath := filepath.Join(townRoot, name)
@@ -2908,13 +3003,14 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 			}
 			rigOf[s.ID] = name
 			updatedAt[s.ID] = issue.UpdatedAt
+			depCount[s.ID] = issue.DependencyCount
 			specs = append(specs, s)
 		}
 	}
 	specdispatch.Order(specs)
 	read.Candidates = make([]specCandidate, 0, len(specs))
 	for _, s := range specs {
-		read.Candidates = append(read.Candidates, specCandidate{Spec: s, Rig: rigOf[s.ID], UpdatedAt: updatedAt[s.ID]})
+		read.Candidates = append(read.Candidates, specCandidate{Spec: s, Rig: rigOf[s.ID], UpdatedAt: updatedAt[s.ID], DepCount: depCount[s.ID]})
 	}
 	read.LabeledFailed = len(labeled)
 	return read
@@ -2983,10 +3079,18 @@ func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 // A candidate the read does not answer is dropped with its error: the edges are
 // unread, and a bead with no list is not a bead with no blockers (gt-o70a9). It
 // waits for the next tick rather than dispatching blind.
-func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Client, read specBoardRead) specBoardRead {
+//
+// A candidate whose stored verdict still describes its board row is not read at
+// all: the verdict carries the shape and label answer the details would have
+// fed, so the tick spends the details read on the beads that changed or are new
+// (gt-km9jt).
+func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Client, read specBoardRead, verdicts *specCandidateVerdicts) specBoardRead {
 	var rigs []string
 	byRig := map[string][]int{}
 	for i, c := range read.Candidates {
+		if _, remembered := verdicts.lookUp(c); remembered {
+			continue
+		}
 		if _, seen := byRig[c.Rig]; !seen {
 			rigs = append(rigs, c.Rig)
 		}

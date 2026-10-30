@@ -9,12 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
-	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // A bead the dispatcher holds (unshaped, refused, planning) is annotated once,
@@ -25,9 +23,10 @@ import (
 // board still shows that count no comment has been added since, so the note is
 // still there and the read is skipped.
 //
-// The same file carries the candidates' children reads (specChildrenMemory),
-// for the same reason: nearly every candidate answers the child set the last
-// tick read (gt-km9jt).
+// The same file carries the shape and label verdicts of the candidates the
+// scan read (specCandidateVerdict), for the same reason: a candidate whose
+// board row has not moved answers the same verdict without the details read
+// (gt-km9jt).
 //
 // The memory lasts as long as the daemon does (the owner is the one the detail
 // cache uses), and a missing, unreadable or foreign file is an empty memory:
@@ -35,12 +34,12 @@ import (
 // still writes the note once.
 
 // specAnnotatedFile is the memory's file: for each bead, the comment_count
-// recorded under the digest of each note key, and the children its last read
-// answered (specChildrenMemory).
+// recorded under the digest of each note key, and the shape-and-label verdict
+// the candidate scan last reached (specCandidateVerdict).
 type specAnnotatedFile struct {
-	Owner      string                        `json:"owner"`
-	Beads      map[string]map[string]int     `json:"beads"`
-	Candidates map[string]specChildrenMemory `json:"candidates,omitempty"`
+	Owner    string                          `json:"owner"`
+	Beads    map[string]map[string]int       `json:"beads"`
+	Verdicts map[string]specCandidateVerdict `json:"verdicts,omitempty"`
 }
 
 type specAnnotated struct {
@@ -51,15 +50,11 @@ type specAnnotated struct {
 
 	path  string // "" keeps the memory for this tick only
 	owner string
-	// now is the tick's clock, which the children memory measures its lease on.
-	now func() time.Time
 
 	seen map[string]map[string]int
-	// candidates is the children memory of the beads the last ticks read.
-	candidates map[string]specChildrenMemory
-	// rows is this tick's board updated_at for each candidate: the key the
-	// children memory is reused against.
-	rows map[string]string
+	// verdicts is each candidate's shape-and-label verdict as the tick that
+	// read it decided, keyed by bead id.
+	verdicts map[string]specCandidateVerdict
 	// counts is this tick's board comment_count for each candidate; a bead
 	// absent from it is not remembered or skipped.
 	counts map[string]int
@@ -73,12 +68,10 @@ type specAnnotated struct {
 // tick no daemon started (owner "") keeps nothing between runs.
 func loadSpecAnnotated(path, owner string) *specAnnotated {
 	a := &specAnnotated{
-		owner:      owner,
-		now:        time.Now,
-		seen:       map[string]map[string]int{},
-		candidates: map[string]specChildrenMemory{},
-		rows:       map[string]string{},
-		counts:     map[string]int{},
+		owner:    owner,
+		seen:     map[string]map[string]int{},
+		verdicts: map[string]specCandidateVerdict{},
+		counts:   map[string]int{},
 	}
 	if owner == "" {
 		return a
@@ -93,22 +86,23 @@ func loadSpecAnnotated(path, owner string) *specAnnotated {
 		return a
 	}
 	a.seen = f.Beads
-	if f.Candidates != nil {
-		a.candidates = f.Candidates
+	if f.Verdicts != nil {
+		a.verdicts = f.Verdicts
 	}
 	return a
 }
 
-// specAnnotatedTick is one tick's annotation memory, wired to the four points
+// specAnnotatedTick is one tick's annotation memory, wired to the three points
 // the dispatcher drives it at: the board read it observes, the Annotate call,
-// the candidates' children read, and the save at the tick's end. The tick and
-// its tests share this value, so a test runs the wiring the tick runs rather
-// than a copy of it (gt-fpxlb).
+// and the save at the tick's end. The tick and its tests share this value, so a
+// test runs the wiring the tick runs rather than a copy of it (gt-fpxlb).
 type specAnnotatedTick struct {
 	observe  func(specBoardRead)
 	annotate func(beadID, key, text string) error
-	children func(beadID string, read func() ([]specdispatch.Child, error)) ([]specdispatch.Child, error)
 	save     func()
+	// memory is the value behind the wiring, which the candidate scan keeps its
+	// verdicts in.
+	memory *specAnnotated
 }
 
 // newSpecAnnotatedTick loads the memory the town's annotated path keeps for the
@@ -116,17 +110,10 @@ type specAnnotatedTick struct {
 // is read and written through; it is asked only when the memory does not hold
 // the note.
 func newSpecAnnotatedTick(townRoot, owner string, storeFor func(beadID string) beads.Client) *specAnnotatedTick {
-	return newSpecAnnotatedTickAt(townRoot, owner, time.Now, storeFor)
-}
-
-// newSpecAnnotatedTickAt is newSpecAnnotatedTick with the clock the children
-// memory measures its lease on, so a test can age a read.
-func newSpecAnnotatedTickAt(townRoot, owner string, now func() time.Time, storeFor func(beadID string) beads.Client) *specAnnotatedTick {
 	a := loadSpecAnnotated(dispatch.SpecAnnotatedPath(townRoot), owner)
-	a.now = now
 	return &specAnnotatedTick{
-		observe:  a.observe,
-		children: a.children,
+		observe: a.observe,
+		memory:  a,
 		annotate: func(beadID, key, text string) error {
 			return a.once(beadID, key, func() (bool, error) {
 				return annotateSpecWrote(storeFor(beadID), beadID, key, text)
@@ -136,14 +123,12 @@ func newSpecAnnotatedTickAt(townRoot, owner string, now func() time.Time, storeF
 	}
 }
 
-// observe takes the comment_count and updated_at of every candidate of the
-// tick's board read.
+// observe takes the comment_count of every candidate of the tick's board read.
 func (a *specAnnotated) observe(read specBoardRead) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, c := range read.Candidates {
 		a.counts[c.Spec.ID] = c.Spec.CommentCount
-		a.rows[c.Spec.ID] = c.UpdatedAt
 	}
 	a.observed = len(read.Errors) == 0
 }
@@ -201,9 +186,9 @@ func (a *specAnnotated) save() {
 				a.dirty = true
 			}
 		}
-		for id := range a.candidates {
+		for id := range a.verdicts {
 			if _, listed := a.counts[id]; !listed {
-				delete(a.candidates, id)
+				delete(a.verdicts, id)
 				a.dirty = true
 			}
 		}
@@ -213,7 +198,7 @@ func (a *specAnnotated) save() {
 	}
 	err := os.MkdirAll(filepath.Dir(a.path), 0o700)
 	if err == nil {
-		err = atomicfile.WriteJSONWithPerm(a.path, specAnnotatedFile{Owner: a.owner, Beads: a.seen, Candidates: a.candidates}, 0o600)
+		err = atomicfile.WriteJSONWithPerm(a.path, specAnnotatedFile{Owner: a.owner, Beads: a.seen, Verdicts: a.verdicts}, 0o600)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: spec annotated set not saved: %v\n", err)
