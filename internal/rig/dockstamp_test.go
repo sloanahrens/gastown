@@ -2,6 +2,7 @@ package rig
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,10 +14,64 @@ import (
 // directory, keyed by rig, so the daemon and `gt rig dock` cannot drift apart.
 func TestDockStampPath(t *testing.T) {
 	t.Parallel()
-	got := DockStampPath("/town", "gastown")
+	got, err := DockStampPath("/town", "gastown")
+	if err != nil {
+		t.Fatalf("DockStampPath = %v", err)
+	}
 	want := filepath.Join("/town", ".runtime", "rigs", "gastown", DockStampFile)
 	if got != want {
 		t.Errorf("DockStampPath = %q, want %q", got, want)
+	}
+}
+
+// TestDockStampPath_RefusesNamesThatLeaveTheDirectory: the stamp path is built
+// from a rig name, so a name that is a path segment, holds a separator, or is not
+// made of plain name characters must be refused rather than joined into a file
+// outside the rig's directory.
+func TestDockStampPath_RefusesNamesThatLeaveTheDirectory(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"", ".", "..", "../x", "a/b", `a\b`, "rig name", "rig:1"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := DockStampPath("/town", name)
+			if err == nil {
+				t.Fatalf("DockStampPath(%q) = %q, nil; want an error", name, got)
+			}
+			if got != "" {
+				t.Errorf("DockStampPath(%q) = %q alongside an error; want the empty string", name, got)
+			}
+		})
+	}
+}
+
+// TestDockStamp_RefusesABadRigName is the refusal at the production entry point:
+// the reader must not silently look at a path the name built.
+func TestDockStamp_RefusesABadRigName(t *testing.T) {
+	t.Parallel()
+	if got, err := DockStamp(t.TempDir(), "../x"); err == nil {
+		t.Errorf("DockStamp with a traversal name = %v, nil; want an error", got)
+	}
+}
+
+// TestDockStamp_ReadFailureCarriesThePath drives the reader's failure branch
+// through a stat that always fails: a stat error that is not "no such file" is an
+// error naming the stamp, because the daemon reports an unreadable stamp
+// differently from a rig that was never docked.
+func TestDockStamp_ReadFailureCarriesThePath(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("permission denied")
+	fsys := dockStampFS{stat: func(string) (fs.FileInfo, error) { return nil, boom }}
+
+	got, err := dockStamp("/town", "gastown", fsys)
+	if !errors.Is(err, boom) {
+		t.Fatalf("dockStamp = %v, want it to wrap %v", err, boom)
+	}
+	if !got.IsZero() {
+		t.Errorf("dockStamp with a failing stat = %v, want the zero time", got)
+	}
+	wantPath := filepath.Join("/town", ".runtime", "rigs", "gastown", DockStampFile)
+	if !strings.Contains(err.Error(), wantPath) {
+		t.Errorf("dockStamp error = %q, want it to name %q", err, wantPath)
 	}
 }
 
@@ -110,7 +165,11 @@ func TestDockStamp_UnreadableStampIsAnError(t *testing.T) {
 	townRoot := t.TempDir()
 	// A regular file where the rig's runtime directory belongs: stat on the
 	// stamp below it fails with ENOTDIR, which is not ErrNotExist.
-	rigDir := filepath.Dir(DockStampPath(townRoot, "gastown"))
+	stampPath, err := DockStampPath(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("DockStampPath = %v", err)
+	}
+	rigDir := filepath.Dir(stampPath)
 	if err := os.MkdirAll(filepath.Dir(rigDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +198,7 @@ func TestTouchDockStamp_FailuresAreReported(t *testing.T) {
 		{
 			name: "runtime directory cannot be made",
 			fsys: dockStampFS{
+				stat:      os.Stat,
 				mkdirAll:  func(string, os.FileMode) error { return boom },
 				writeFile: os.WriteFile,
 				chtimes:   os.Chtimes,
@@ -148,6 +208,7 @@ func TestTouchDockStamp_FailuresAreReported(t *testing.T) {
 		{
 			name: "stamp cannot be written",
 			fsys: dockStampFS{
+				stat:      os.Stat,
 				mkdirAll:  func(string, os.FileMode) error { return nil },
 				writeFile: func(string, []byte, os.FileMode) error { return boom },
 				chtimes:   os.Chtimes,
@@ -157,6 +218,7 @@ func TestTouchDockStamp_FailuresAreReported(t *testing.T) {
 		{
 			name: "stamp cannot be dated",
 			fsys: dockStampFS{
+				stat:      os.Stat,
 				mkdirAll:  os.MkdirAll,
 				writeFile: os.WriteFile,
 				chtimes:   func(string, time.Time, time.Time) error { return boom },

@@ -146,10 +146,10 @@ type dockPolecatSessions interface {
 }
 
 // stopAndDockRig stops the rig's polecat sessions, sets the docked label on its
-// identity bead, and stamps the rig so a running daemon drops its memoized
-// bead read. The label is written only after the stop succeeded: a rig labeled
-// docked while its sessions still run is one the daemon will not restart and
-// nobody is watching.
+// identity bead, and stamps the rig (internal/rig.DockStamp) so a running
+// daemon drops its memoized bead read. The label is written only after the stop
+// succeeded: a rig labeled docked while its sessions still run is one the
+// daemon will not restart and nobody is watching.
 func stopAndDockRig(townRoot, rigName string, bd beads.Client, rigBeadID string, m dockPolecatSessions) ([]string, error) {
 	stopped, err := stopDockedPolecats(m)
 	if err != nil {
@@ -167,10 +167,9 @@ func stopAndDockRig(townRoot, rigName string, bd beads.Client, rigBeadID string,
 }
 
 // stampRigDockState tells a running daemon that the rig's dock state changed
-// (internal/rig.DockStamp). The label on the identity bead is the state; this is
-// the notice that drops the daemon's memoized read. The command's own work is
-// already done when this runs, so a failure here is reported as what it is: the
-// dock stands, and the daemon keeps its verdict until its window expires.
+// (internal/rig.DockStamp). A failure is reported rather than swallowed: the
+// dock itself stands, and the daemon keeps its old verdict until its window
+// expires.
 func stampRigDockState(townRoot, rigName string) error {
 	if err := rig.TouchDockStamp(townRoot, rigName, time.Now()); err != nil {
 		return fmt.Errorf("%s's dock state is recorded, but the daemon will not see it until it re-reads the bead: %w", rigName, err)
@@ -229,10 +228,10 @@ func runRigUndock(cmd *cobra.Command, args []string) error {
 }
 
 // undockRig removes the docked label from the rig identity bead, and stamps the
-// rig so a running daemon drops its memoized read. Only beads.ErrNotFound means
-// there is no identity bead to be docked. Any other read failure is returned:
-// the rig's state is unknown, and reporting "not docked" would leave the daemon
-// treating it as docked.
+// rig (internal/rig.DockStamp) so a running daemon drops its memoized read. Only
+// beads.ErrNotFound means there is no identity bead to be docked. Any other read
+// failure is returned: the rig's state is unknown, and reporting "not docked"
+// would leave the daemon treating it as docked.
 func undockRig(townRoot string, bd beads.Client, rigBeadID, rigName string) error {
 	rigBead, err := bd.Show(rigBeadID)
 	if errors.Is(err, beads.ErrNotFound) {

@@ -392,7 +392,11 @@ func TestUndockRig_StampFailureIsReported(t *testing.T) {
 	townRoot := t.TempDir()
 	// A regular file where the rig's runtime directory belongs, so the stamp
 	// cannot be created.
-	rigRuntime := filepath.Dir(rig.DockStampPath(townRoot, "gastown"))
+	stampPath, err := rig.DockStampPath(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("DockStampPath = %v", err)
+	}
+	rigRuntime := filepath.Dir(stampPath)
 	if err := os.MkdirAll(filepath.Dir(rigRuntime), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +605,11 @@ func TestStopAndDockRig_StampFailureIsReported(t *testing.T) {
 	townRoot := t.TempDir()
 	// A regular file where the rig's runtime directory belongs, so the stamp
 	// cannot be created.
-	rigRuntime := filepath.Dir(rig.DockStampPath(townRoot, "gastown"))
+	stampPath, err := rig.DockStampPath(townRoot, "gastown")
+	if err != nil {
+		t.Fatalf("DockStampPath = %v", err)
+	}
+	rigRuntime := filepath.Dir(stampPath)
 	if err := os.MkdirAll(filepath.Dir(rigRuntime), 0o755); err != nil {
 		t.Fatal(err)
 	}

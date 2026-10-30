@@ -18,27 +18,20 @@ import (
 // rig takes effect on the next evaluation rather than on the next expiry.
 //
 // The identity bead is global and synced - what `gt rig dock` writes - and
-// reading it costs a bd subprocess. That read is 0.4s on an idle host but
-// spends its entire 60s budget (internal/beads.bdSubprocessTimeout) when the
-// host is CPU-starved, and one heartbeat evaluates it per rig from roughly ten
-// call sites: each patrol's rig filter (getPatrolRigs), witness auto-start,
-// and refinery auto-start. A
-// saturated host therefore stalled the heartbeat for a minute per rig per call
-// site - during exactly the window the heartbeat exists to cover, since some of
-// those call sites are the ones that restart dead agents (gt-4nu3). So the
-// bead read is memoized, for this long.
+// reading it costs a bd subprocess, whose entire 60s budget
+// (internal/beads.bdSubprocessTimeout) a CPU-starved host spends in full. One
+// heartbeat evaluates it per rig from the patrol rig filters and the witness and
+// refinery auto-starts, and that repetition per rig per call site is what
+// stalled the heartbeat on a saturated host (gt-4nu3). So the bead read is
+// memoized, for this long.
 //
-// The window is longer than the default heartbeat interval (3m) because a dock
-// no longer has to wait for it: `gt rig dock` and `gt rig undock` stamp the rig,
-// and an entry whose read predates the stamp is dropped (internal/rig.DockStamp
-// says why the stamp exists). A dock through gt therefore costs one extra read,
-// while the memo still covers the call sites within a tick. What the window
-// bounds is the one case gt cannot see - the label edited on the bead by hand -
-// and a rig is docked or undocked a few times a month, so five minutes of that is
-// the honest staleness to pay for cutting this read from 7.7 a minute to about
-// 1.5 (gt-z0dcj). (`gt rig dock` stops the rig's witness and refinery itself and
-// drops the rig from the daemon patrol config's patrols, so this read is the
-// backstop, not the mechanism.)
+// Five minutes, not one: the memo is dropped early by the dock stamp that
+// `gt rig dock` and `gt rig undock` write (internal/rig.DockStamp), so a dock
+// through gt costs one extra read, and the window bounds only a label edited on
+// the bead by hand. The cache census counted 7.7 of these reads a minute; nine
+// rigs on this window make at most 1.8 (gt-z0dcj). (`gt rig dock` stops the
+// rig's witness and refinery itself and drops the rig from the daemon patrol
+// config's patrols, so this read is the backstop, not the mechanism.)
 const rigOperationalCacheTTL = 5 * time.Minute
 
 // A bead read that fails is memoized for this long instead.
@@ -94,22 +87,20 @@ type rigBeadEntry struct {
 	verdict   rigBeadVerdict
 	failed    string // failure category when the read could not answer
 	expiresAt time.Time
-	// dockStamp is the dock stamp observed before this read: a newer one means
-	// gt docked or undocked the rig since, and the verdict here is stale.
-	dockStamp rigDockStamp
+	// dockStamp is the dock stamp observed before this read, zero when it could
+	// not be read: a newer one means gt docked or undocked the rig since
+	// (internal/rig.DockStamp).
+	dockStamp time.Time
 	// alertOpen records that this rig's failure has an escalation standing, so
 	// a later read that answers clears it rather than leaving the operator with
 	// a stale alert for a rig that recovered.
 	alertOpen bool
 }
 
-// rigDockStamp is a rig's dock stamp (internal/rig.DockStamp) as the memo
-// compares it: when gt last docked or undocked the rig, and whether that could
-// be read at all.
-//
-// known is what keeps an unreadable stamp from being read as "no dock
-// happened": an entry whose stamp could not be read cannot be trusted, so it is
-// re-read rather than served for the rest of its window.
+// rigDockStamp is a rig's dock stamp as the memo reads it: when gt last docked
+// or undocked the rig (internal/rig.DockStamp), and whether that could be read at
+// all. A stamp that could not be read vouches for nothing; get says what the memo
+// does with it.
 type rigDockStamp struct {
 	at    time.Time
 	known bool
@@ -132,12 +123,21 @@ type rigOperationalCache struct {
 	// escalations holds each rig's pending escalation work, in order; a rig is
 	// listed only while its worker runs. See enqueueEscalation.
 	escalations map[string][]func()
+	// stampErrLogged holds, per rig, when its unreadable dock stamp was last
+	// logged. See noteStampError.
+	stampErrLogged map[string]time.Time
 }
 
 // get returns the memoized read for rigName when it is still fresh: inside the
-// window, and with both dock stamps read and the entry's no older than the
-// current one. A stamp that cannot be compared - unreadable on either side -
-// leaves the entry unserved rather than trusted.
+// window, and not superseded by a dock stamp newer than the one the entry
+// recorded.
+//
+// A stamp that cannot be read now does not cost the memo: the entry is served
+// for the rest of its window, so a host that cannot stat the stamp pays the
+// window's one read rather than one per call site. Nothing can change a rig's
+// dock state without writing that stamp, so the window is the whole staleness
+// bound in that case. An entry recorded while the stamp was unreadable holds the
+// zero stamp, so the first stamp that reads again is newer and drops it.
 func (c *rigOperationalCache) get(rigName string, now time.Time, at rigDockStamp) (rigBeadEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -145,10 +145,27 @@ func (c *rigOperationalCache) get(rigName string, now time.Time, at rigDockStamp
 	if !ok || !now.Before(entry.expiresAt) {
 		return rigBeadEntry{}, false
 	}
-	if !at.known || !entry.dockStamp.known || at.at.After(entry.dockStamp.at) {
+	if at.known && at.at.After(entry.dockStamp) {
 		return rigBeadEntry{}, false
 	}
 	return entry, true
+}
+
+// noteStampError reports whether rigName's unreadable dock stamp should be
+// logged now: once per rig per window, so one tick's call sites do not repeat
+// the line, and a stamp that stays unreadable keeps saying so on the
+// evaluations where the window turns over.
+func (c *rigOperationalCache) noteStampError(rigName string, now time.Time, window time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stampErrLogged == nil {
+		c.stampErrLogged = make(map[string]time.Time)
+	}
+	if last, ok := c.stampErrLogged[rigName]; ok && now.Before(last.Add(window)) {
+		return false
+	}
+	c.stampErrLogged[rigName] = now
+	return true
 }
 
 // store memoizes a bead read for rigName and reports the escalation the caller
@@ -180,7 +197,7 @@ func (c *rigOperationalCache) store(rigName string, verdict rigBeadVerdict, fail
 		verdict:   verdict,
 		failed:    failed,
 		expiresAt: now.Add(ttl),
-		dockStamp: at,
+		dockStamp: at.at,
 		alertOpen: failed != "" && (alertWasOpen || result.open),
 	}
 	return result

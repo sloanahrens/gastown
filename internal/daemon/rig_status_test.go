@@ -794,59 +794,104 @@ func TestIsRigOperational_NineRigsOverTenMinutesInEighteenReads(t *testing.T) {
 	}
 }
 
-// TestIsRigOperational_UnreadableDockStampReReads: the stamp is the evidence
-// that the memoized verdict still holds, so a stamp that cannot be read cannot
-// vouch for it. Reading a failed stat as "no dock happened" would keep a verdict
-// the daemon can no longer justify - the fail-open direction - so the bead is
-// read again instead, and the memo picks back up once the stamp is readable.
-func TestIsRigOperational_UnreadableDockStampReReads(t *testing.T) {
-	t.Parallel()
-	f := newRigStatusFakeFixture(t, rigShowOperational)
-
-	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
-		t.Fatalf("rig starts operational, got %q", reason)
+// obstructDockStamp puts a regular file where the rig's stamp directory belongs,
+// so the stamp's stat fails with something that is not "no stamp", and returns
+// the path to remove to lift the obstruction.
+func obstructDockStamp(t *testing.T, townRoot, rigName string) string {
+	t.Helper()
+	stampPath, err := rig.DockStampPath(townRoot, rigName)
+	if err != nil {
+		t.Fatalf("DockStampPath = %v", err)
 	}
-	if got := f.showCount(t); got != 1 {
-		t.Fatalf("stub bd served %d reads, want 1", got)
-	}
-
-	// A regular file where the rig's runtime directory belongs: the stamp's
-	// stat now fails with something that is not "no stamp".
-	rigRuntime := filepath.Dir(rig.DockStampPath(f.townRoot, f.rigName))
+	rigRuntime := filepath.Dir(stampPath)
 	if err := os.MkdirAll(filepath.Dir(rigRuntime), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(rigRuntime, []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return rigRuntime
+}
 
-	if operational, _ := f.daemon.isRigOperational(f.rigName); !operational {
-		t.Fatal("the rig is still active on its bead")
+// TestIsRigOperational_UnreadableDockStampKeepsTheMemo pins the rework of
+// gt-z0dcj: the memo exists to bound this read, so a stamp that cannot be read
+// must not turn every call site back into a bead read. The entry is served for
+// the rest of its window - the whole staleness bound in that case - the error is
+// logged once per window, and a stamp that reads again invalidates the entry at
+// once.
+func TestIsRigOperational_UnreadableDockStampKeepsTheMemo(t *testing.T) {
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
+	obstruction := obstructDockStamp(t, f.townRoot, f.rigName)
+
+	// Ten evaluations a simulated minute apart, as a heartbeat does.
+	for minute := 0; minute < 10; minute++ {
+		if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+			t.Fatalf("minute %d: the rig is active on its bead, got %q", minute, reason)
+		}
+		f.clock.Advance(time.Minute)
 	}
+
+	// Two reads: one at t=0, one when the window turns over at t=5. A reader
+	// that fell back to an uncached read on the stamp error makes this ten.
 	if got := f.showCount(t); got != 2 {
-		t.Errorf("stub bd served %d reads with an unreadable stamp, want 2: the memo cannot be trusted", got)
+		t.Errorf("stub bd served %d reads over 10 simulated minutes with an unreadable stamp, want 2 (one per window)", got)
 	}
-	if logged := f.logBuf.String(); !strings.Contains(logged, "cannot read the dock stamp") {
-		t.Errorf("an unreadable stamp must be logged, got:\n%s", logged)
+	if got := strings.Count(f.logBuf.String(), "cannot read the dock stamp"); got != 2 {
+		t.Errorf("stamp error logged %d times over 10 simulated minutes, want 2 (once per window):\n%s", got, f.logBuf.String())
 	}
 
-	// Clear the obstruction: the first call re-reads once more (the entry
-	// stored under the unreadable stamp carries the zero stamp, and the real
-	// one is newer), and from there the memo works again.
-	if err := os.Remove(rigRuntime); err != nil {
+	// The window that opened at t=5 has turned, so the read at t=10 lands and
+	// the memo holds again - still with no readable stamp.
+	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatalf("the rig is active on its bead, got %q", reason)
+	}
+	if got := f.showCount(t); got != 3 {
+		t.Fatalf("stub bd served %d reads at t=10, want 3", got)
+	}
+
+	// Lift the obstruction and dock the rig: a readable stamp must be seen on
+	// this call, not at the next window boundary.
+	if err := os.Remove(obstruction); err != nil {
 		t.Fatal(err)
 	}
-	if operational, _ := f.daemon.isRigOperational(f.rigName); !operational {
-		t.Fatal("the rig is still active on its bead")
+	f.setShow(rigShowDocked)
+	if err := rig.TouchDockStamp(f.townRoot, f.rigName, f.clock.Now()); err != nil {
+		t.Fatalf("stamping the dock: %v", err)
 	}
-	settled := f.showCount(t)
-	if settled != 3 {
-		t.Fatalf("stub bd served %d reads on the call that could read the stamp, want 3", settled)
+	if operational, reason := f.daemon.isRigOperational(f.rigName); operational {
+		t.Fatal("a dock stamped after a memoized read must be seen on the next call")
+	} else if reason != "rig is docked (global)" {
+		t.Errorf("reason = %q, want the docked verdict", reason)
 	}
-	if operational, _ := f.daemon.isRigOperational(f.rigName); !operational {
-		t.Fatal("the rig is still active on its bead")
+	if got := f.showCount(t); got != 4 {
+		t.Errorf("stub bd served %d reads on the call that could read the stamp, want 4", got)
 	}
-	if got := f.showCount(t); got != settled {
-		t.Errorf("stub bd served %d reads after recovery, want %d: the memo must work again", got, settled)
+}
+
+// TestRigDockStamp_DaemonReadsThePathTheCommandWrites connects the two sides at
+// the production seam: `gt rig dock` stamps under the town root getRig returns,
+// and the daemon reads under its own config.TownRoot. Both must resolve to the
+// same file for the same town and rig, or a dock never drops the memo.
+func TestRigDockStamp_DaemonReadsThePathTheCommandWrites(t *testing.T) {
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
+
+	if err := rig.TouchDockStamp(f.townRoot, f.rigName, f.clock.Now()); err != nil {
+		t.Fatalf("stamping the dock: %v", err)
+	}
+	written, err := rig.DockStampPath(f.townRoot, f.rigName)
+	if err != nil {
+		t.Fatalf("DockStampPath = %v", err)
+	}
+	read, err := rig.DockStampPath(f.daemon.config.TownRoot, f.rigName)
+	if err != nil {
+		t.Fatalf("DockStampPath = %v", err)
+	}
+	if read != written {
+		t.Errorf("the daemon reads %q but the dock wrote %q", read, written)
+	}
+	if stamp, err := rig.DockStamp(f.daemon.config.TownRoot, f.rigName); err != nil || stamp.IsZero() {
+		t.Errorf("the daemon cannot read the stamp the dock wrote: %v, %v", stamp, err)
 	}
 }
