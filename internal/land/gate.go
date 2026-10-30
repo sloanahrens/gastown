@@ -41,7 +41,11 @@ type GateResult struct {
 	// order: the gate prints each as a "gate: WARNING" line. They fail
 	// nothing.
 	Preflight []string
-	Err       error
+	// SlotWait is the wait of a step the container-gate slot was refused to.
+	// That step never ran, so no StepResult carries the wait, and the wait is
+	// still what its wall time went on (gt-njgu2).
+	SlotWait time.Duration
+	Err      error
 }
 
 // StepResult is one step's outcome.
@@ -50,6 +54,11 @@ type StepResult struct {
 	Command  string
 	ExitCode int
 	Elapsed  time.Duration
+	// SlotWait is how long this step waited for its container-gate slot
+	// before holding it. Elapsed begins after the hold, so a wait is never
+	// part of it; a step with no SlotRole waited for nothing and reports zero
+	// (gt-njgu2).
+	SlotWait time.Duration
 	// Tail is the last gateTailLines lines of the step's combined output.
 	Tail string
 	// Packages are the Go packages the step reported as ok or FAIL, in order.
@@ -189,6 +198,17 @@ type CommandGate struct {
 	// and returns the release to call when the step has ended, with its exit
 	// status (nil when the step never ran). nil means the town's real slot.
 	holdSlot func(ctx context.Context, townRoot, role string) (release func(exitCode *int), err error)
+	// now is the clock SlotWait is measured on. nil means time.Now; a test
+	// advances it instead of waiting out a hold.
+	now func() time.Time
+}
+
+// nowTime is the gate's clock.
+func (g CommandGate) nowTime() time.Time {
+	if g.now != nil {
+		return g.now()
+	}
+	return time.Now()
 }
 
 // GoGate is the Go rigs' default gate: `make lint`, `go build ./...`,
@@ -427,20 +447,24 @@ func isCommandSeparator(r rune) bool {
 }
 
 // takeSlot holds the container-gate slot a step runs under, returning the
-// release to call when the step has ended. A step with no SlotRole gets a
-// no-op release, so callers call what they are handed without asking.
-func (g CommandGate) takeSlot(ctx context.Context, role string) (func(exitCode *int), error) {
+// release to call when the step has ended and how long the hold took to get.
+// A step with no SlotRole gets a no-op release and no wait, so callers call
+// what they are handed without asking. A refused hold still reports the wait
+// it spent being refused.
+func (g CommandGate) takeSlot(ctx context.Context, role string) (func(exitCode *int), time.Duration, error) {
 	if role == "" {
-		return func(*int) {}, nil
+		return func(*int) {}, 0, nil
 	}
 	if g.TownRoot == "" {
-		return nil, fmt.Errorf("gate step holds the container-gate slot as %q with no TownRoot to hold it in", role)
+		return nil, 0, fmt.Errorf("gate step holds the container-gate slot as %q with no TownRoot to hold it in", role)
 	}
 	hold := g.holdSlot
 	if hold == nil {
 		hold = holdTownSlot
 	}
-	return hold(ctx, g.TownRoot, role)
+	asked := g.nowTime()
+	release, err := hold(ctx, g.TownRoot, role)
+	return release, g.nowTime().Sub(asked), err
 }
 
 // holdTownSlot is the real container-gate hold: the town's pool, and a wait
@@ -542,8 +566,9 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 		ctx, cancel = context.WithTimeout(parent, s.Timeout)
 		defer cancel()
 	}
-	release, err := g.takeSlot(ctx, s.SlotRole)
+	release, slotWait, err := g.takeSlot(ctx, s.SlotRole)
 	if err != nil {
+		res.SlotWait = slotWait
 		res.Err = fmt.Errorf("gate step %s (%s) could not take the container-gate slot: %w", s.Name, s.Command, err)
 		return false
 	}
@@ -593,6 +618,7 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 		Command:       s.Command,
 		ExitCode:      code,
 		Elapsed:       time.Since(start),
+		SlotWait:      slotWait,
 		Tail:          lastLines(out, gateTailLines),
 		Packages:      pkgs,
 		Warnings:      parseWarnings(out),

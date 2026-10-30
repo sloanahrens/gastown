@@ -314,6 +314,94 @@ func TestWithSlotHoldsOnlyForTheTestStep(t *testing.T) {
 	}
 }
 
+// fakeClock is the gate's clock in a test: advancing it costs no wall time, so
+// a wait is measured without waiting (gt-njgu2).
+type fakeClock struct{ at time.Time }
+
+func (c *fakeClock) now() time.Time { return c.at }
+
+func (c *fakeClock) advance(d time.Duration) { c.at = c.at.Add(d) }
+
+// A step's slot wait is what its wall time hid: a sweep that spends 22 minutes
+// waiting and 4 testing recorded only the 26. Elapsed keeps the step's own
+// time, so the two numbers stay separable (gt-njgu2).
+func TestStepRecordsSlotWait(t *testing.T) {
+	t.Parallel()
+	clock := &fakeClock{at: time.Unix(1000, 0)}
+	run := func(hold time.Duration) GateResult {
+		s := &scriptedRun{answers: map[string]scriptedAnswer{}}
+		g := WithSlot(GoGate(false), "/town", "gastown/landing")
+		g.run = s.run
+		g.now = clock.now
+		g.holdSlot = func(context.Context, string, string) (func(*int), error) {
+			clock.advance(hold)
+			return func(*int) {}, nil
+		}
+		return g.Run(context.Background(), "/w")
+	}
+
+	waited := run(90 * time.Second)
+	if got := waited.Steps[2].SlotWait; got != 90*time.Second {
+		t.Errorf("test step SlotWait = %s, want the 90s it waited", got)
+	}
+	unwaited := run(0)
+	if got := unwaited.Steps[2].SlotWait; got != 0 {
+		t.Errorf("test step SlotWait = %s for a hold taken at once, want zero", got)
+	}
+	for _, res := range []GateResult{waited, unwaited} {
+		if e := res.Steps[2].Elapsed; e >= time.Second {
+			t.Errorf("test step Elapsed = %s beside a %s slot wait, want the step's own time alone", e, res.Steps[2].SlotWait)
+		}
+	}
+}
+
+// Only a step that asks for the slot reads the clock: a gate with no slot step
+// measures nothing (gt-njgu2).
+func TestStepWithoutSlotRoleHasNoSlotWait(t *testing.T) {
+	t.Parallel()
+	s := &scriptedRun{answers: map[string]scriptedAnswer{}}
+	g := GoGate(false)
+	g.run = s.run
+	g.now = func() time.Time {
+		t.Error("the gate read its clock for a gate with no slot step")
+		return time.Time{}
+	}
+	res := g.Run(context.Background(), "/w")
+	if !res.Passed {
+		t.Fatalf("gate = %+v, want passed", res)
+	}
+	for _, st := range res.Steps {
+		if st.SlotWait != 0 {
+			t.Errorf("%s SlotWait = %s, want zero", st.Name, st.SlotWait)
+		}
+	}
+}
+
+// A refused hold still costs its wait, and the step it refused never ran: the
+// wait rides on the result, the step gets no StepResult (gt-njgu2).
+func TestRefusedSlotReportsTheWait(t *testing.T) {
+	t.Parallel()
+	clock := &fakeClock{at: time.Unix(1000, 0)}
+	s := &scriptedRun{answers: map[string]scriptedAnswer{}}
+	g := CommandGate{TownRoot: "/town", Steps: []Step{{Name: "test", Command: "make test", SlotRole: "gastown/landing"}}}
+	g.run = s.run
+	g.now = clock.now
+	g.holdSlot = func(context.Context, string, string) (func(*int), error) {
+		clock.advance(30 * time.Second)
+		return nil, errors.New("pool has no slot available")
+	}
+	res := g.Run(context.Background(), "/w")
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "no slot available") {
+		t.Fatalf("gate = %+v, want the refusal as an infrastructure error", res)
+	}
+	if got := res.SlotWait; got != 30*time.Second {
+		t.Errorf("SlotWait = %s, want the 30s spent being refused", got)
+	}
+	if len(res.Steps) != 0 || len(s.calls) != 0 {
+		t.Errorf("gate reported %d step(s) and ran %d after a refusal, want none of either", len(res.Steps), len(s.calls))
+	}
+}
+
 // A step whose command never ran has no exit status, and a gate that could not
 // take the slot at all must not run the step: both are the hold's own
 // outcomes, and both must leave the slot behind (gt-638go.12).
