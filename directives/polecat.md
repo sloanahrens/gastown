@@ -203,7 +203,7 @@ Logic goes in Go with unit tests. A new .sh or .py file is refused.
 ## 9. Stay in scope
 
 Change only what the bead asks for. Unrelated files, dependency bumps and renames are findings.
-- om flags: "edit to a file outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency bumps". Before: a fix that also rewrites an existing test. After: the fix alone, or a bead comment saying why the other file had to change.
+- om flags: "edit to a file outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency bumps". Earlier rounds quoted "change touches files outside the stated scope"; it still counts under this rule. Before: a fix that also rewrites an existing test. After: the fix alone, or a bead comment saying why the other file had to change.
 
 ## 10. Test the call site, not the helper
 
@@ -247,6 +247,6 @@ Applies to any change that touches a cloud project, a role, a service account or
 
 ## 16. Rework: answer every open finding
 
-A bead that comes back has a MERGE REJECTION block in its notes listing om's findings. Fix every one before you submit again, including any marked "still open" from an earlier round: om repeats them and the bead burns another round (35 findings in three days). Never weaken a test, raise a limit or floor, or widen an allowlist to land the fix (10 findings). If a finding is wrong, say why on the bead with the evidence, and fix the others.
+A bead that comes back has a MERGE REJECTION block in its notes listing om's findings. Fix every one before you submit again, including any marked "still open" from an earlier round: om repeats them and the bead burns another round (35 findings in three days). Never loosen a test or a limit to land the fix (10 findings; the test-ratchet policy is in `~/.claude/docs/standards/test-engineering.md`). If a finding is wrong, say why on the bead with the evidence, and fix the others.
 - om flags: "still open", "claimed resolved but not changed by the diff", "ratchet floor lowered to land the change", "existing test edited to fit the new behaviour".
 - Before: delete the failing assertion, or lower the floor. After: fix the code, or comment on the bead why the finding is wrong.

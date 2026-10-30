@@ -110,8 +110,9 @@ func TestPolecatDirectiveHasSixteenRules(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("polecat.md rule headings = %v, want 1 to %d in order", got, rules)
 	}
-	if intro := ruleCountWords[rules] + " rules."; !strings.Contains(text, intro) {
-		t.Errorf("polecat.md's intro does not say %q; it carries %d numbered rule headings", intro, len(got))
+	intro := regexp.MustCompile(`(?m)^Read before you write code\. (\w+) rules\. `).FindStringSubmatch(text)
+	if intro == nil || intro[1] != ruleCountWords[rules] {
+		t.Errorf("polecat.md's intro does not open with %q rules; it carries %d numbered rule headings", ruleCountWords[rules], len(got))
 	}
 	for _, quoted := range []string{
 		`- om flags: "still open"`,
