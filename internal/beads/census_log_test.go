@@ -294,6 +294,14 @@ func TestWriteCensusSinkFailsOnAPathItCannotWrite(t *testing.T) {
 	if err := WriteCensusSink(asDir, []CensusRow{{Verb: "show", Caller: "cmd.a", Count: 1}}); err == nil {
 		t.Error("writing the sink over a directory succeeded")
 	}
+	// A directory where the sink's temp file goes stops the write at the open.
+	tmpBlocked := filepath.Join(dir, "tmp_blocked.txt")
+	if err := os.Mkdir(tmpBlocked+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteCensusSink(tmpBlocked, nil); err == nil {
+		t.Error("writing the sink whose temp path is a directory succeeded")
+	}
 }
 
 // A reader racing the writer reads one whole snapshot or the other, never a
