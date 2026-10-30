@@ -1,6 +1,7 @@
 package ominstaller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -112,6 +113,136 @@ func TestRunRecoversAPanicAsFailedUnexpected(t *testing.T) {
 	}
 	if want := (Result{Event: "failed", Reason: "unexpected"}); res != want {
 		t.Errorf("result = %+v, want %+v", res, want)
+	}
+}
+
+func TestRunReadsTheStartClockAgainAfterAPanic(t *testing.T) {
+	t.Parallel()
+	retry := fixedNow.Add(-5 * time.Second)
+	tests := []struct {
+		name       string
+		clock      func() time.Time
+		wantResult Result
+		wantExit   Exit
+		// wantReceipt is the receipt written, or "" for none.
+		wantReceipt string
+	}{
+		{
+			name:        "clock panics once: the receipt carries the retry time",
+			clock:       panicOnceThenRead(retry),
+			wantResult:  Result{Event: "refused", Reason: "lock-busy"},
+			wantExit:    ExitBusy,
+			wantReceipt: `"duration_s": 5,`,
+		},
+		{
+			name: "clock panics twice: failed with reason clock, no receipt",
+			clock: func() time.Time {
+				panic("clock exploded")
+			},
+			wantResult: Result{Event: "failed", Reason: "clock"},
+			wantExit:   ExitFailed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			acq := &fakeAcquire{err: installlock.ErrBusy}
+			cfg := testConfig(t, acq)
+			cfg.Now = tc.clock
+
+			res, exit := Run(context.Background(), cfg)
+
+			if res != tc.wantResult {
+				t.Errorf("result = %+v, want %+v", res, tc.wantResult)
+			}
+			if exit != tc.wantExit {
+				t.Errorf("exit = %d, want %d", exit, tc.wantExit)
+			}
+			got, err := os.ReadFile(filepath.Join(cfg.DaemonDir, "install-om-receipts.jsonl"))
+			if tc.wantReceipt == "" {
+				if !os.IsNotExist(err) {
+					t.Errorf("receipts = %q (err %v), want no receipts file", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read receipts: %v", err)
+			}
+			if !strings.Contains(string(got), tc.wantReceipt) {
+				t.Errorf("receipt %q has no %q", got, tc.wantReceipt)
+			}
+		})
+	}
+}
+
+// panicOnceThenRead is a clock whose first call panics, whose second call reads
+// at, and whose later calls read fixedNow: the run's start is at, and its
+// receipt is written at fixedNow.
+func panicOnceThenRead(at time.Time) func() time.Time {
+	calls := 0
+	return func() time.Time {
+		calls++
+		switch calls {
+		case 1:
+			panic("clock exploded")
+		case 2:
+			return at
+		}
+		return fixedNow
+	}
+}
+
+func TestRunRefusesAnEmptyDaemonDirBeforeTheLockOrReceipt(t *testing.T) {
+	t.Parallel()
+	acq := &fakeAcquire{}
+	cfg := testConfig(t, acq)
+	cfg.DaemonDir = ""
+	var logged []string
+	cfg.Logf = func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	res, exit := Run(context.Background(), cfg)
+
+	if want := (Result{Event: "refused", Reason: "no-daemon-dir"}); res != want {
+		t.Errorf("result = %+v, want %+v", res, want)
+	}
+	if exit != ExitRefused {
+		t.Errorf("exit = %d, want %d", exit, ExitRefused)
+	}
+	if acq.path != "" {
+		t.Errorf("install lock was taken at %q, want no lock", acq.path)
+	}
+	if strings.Contains(strings.Join(logged, "\n"), "could not append a receipt") {
+		t.Errorf("refused run with no daemon dir attempted a receipt: %q", logged)
+	}
+}
+
+func TestANilLoggerKeepsNoticesSilent(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+	cfg := testConfig(t, &fakeAcquire{err: installlock.ErrBusy})
+	cfg.Logf = nil
+	cfg.Stderr = &stderr
+
+	Run(context.Background(), cfg)
+
+	if stderr.Len() != 0 {
+		t.Errorf("a notice with no Logf reached stderr: %q", stderr.String())
+	}
+}
+
+func TestAReceiptWriteFailureWithNoLoggerReachesStderr(t *testing.T) {
+	t.Parallel()
+	var stderr bytes.Buffer
+	cfg := testConfig(t, &fakeAcquire{err: installlock.ErrBusy})
+	cfg.DaemonDir = fileBlocksDaemonDir(t)
+	cfg.Logf = nil
+	cfg.Stderr = &stderr
+
+	Run(context.Background(), cfg)
+
+	if !strings.Contains(stderr.String(), "could not append a receipt") {
+		t.Errorf("failed receipt write was not written to stderr: %q", stderr.String())
 	}
 }
 

@@ -26,9 +26,18 @@ type receipt struct {
 	start time.Time
 }
 
-// writeReceipt appends the receipt for res to the receipts file. A failed write
-// is logged and changes nothing else about the run.
+// writeReceipt appends the receipt for res to the receipts file. A failed write,
+// or a clock that panics, is reported and changes nothing else about the run.
+// With no daemon directory there is no receipts file, so nothing is written.
 func (c Config) writeReceipt(res Result, start time.Time) {
+	if c.DaemonDir == "" {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			c.warnReceipt("[install-om] WARNING: could not write a receipt: %v", p)
+		}
+	}()
 	now := c.now()
 	path := filepath.Join(c.DaemonDir, receiptName)
 	line := receiptLine(receipt{
@@ -40,8 +49,22 @@ func (c Config) writeReceipt(res Result, start time.Time) {
 		start:  start,
 	}, now)
 	if err := appendLine(path, c.DaemonDir, line); err != nil {
-		c.logf("[install-om] WARNING: could not append a receipt to %s: %v", path, err)
+		c.warnReceipt("[install-om] WARNING: could not append a receipt to %s: %v", path, err)
 	}
+}
+
+// warnReceipt reports a receipt the run could not write. Logf takes it when set.
+// Otherwise it goes to Stderr, because a lost receipt is otherwise silent.
+func (c Config) warnReceipt(format string, args ...any) {
+	if c.Logf != nil {
+		c.Logf(format, args...)
+		return
+	}
+	w := c.Stderr
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, format+"\n", args...)
 }
 
 // appendLine appends line to path, creating dir first.
