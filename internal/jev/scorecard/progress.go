@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,6 +35,10 @@ const (
 	ruleProgressNotLanded = "progress:not-landed-in-window"
 	ruleProgressStopped   = "progress:stopped-by-overrun"
 	ruleProgressGateWait  = "progress:gate-wait"
+	// ruleProgressScope is a proxy for drift, not ground truth: a refusal that
+	// names scope is evidence the work left the bead, and nothing cheaper is
+	// recorded (gt-tpv79).
+	ruleProgressScope = "progress:rejection-names-scope"
 )
 
 // The question ids the progress battery logs, named by the progress package.
@@ -41,6 +46,8 @@ const (
 	qMakingProgress       QuestionID = progress.QMakingProgress
 	qBlockedOnEnvironment QuestionID = progress.QBlockedOnEnvironment
 	qRemaining            QuestionID = progress.QRemaining
+	qLooping              QuestionID = progress.QLooping
+	qDriftedFromBead      QuestionID = progress.QDriftedFromBead
 )
 
 func init() {
@@ -111,13 +118,19 @@ func (a *progressAdapter) Parse(raw []byte) (Item, error) {
 // window is unlabeled. Otherwise the rules are, in order:
 //
 //  1. a landing record that names a landing within the window after the nudge
-//     sets making_progress true and remaining true (done or nearly done);
+//     sets making_progress true, remaining true (done or nearly done), and
+//     looping and drifted_from_bead false: a bead that landed was neither
+//     repeating a command nor working away from its bead;
 //  2. no landing in the window sets remaining false: the bead was not shown
 //     done or nearly done at the nudge. A bead the store no longer holds takes
 //     no remaining label, since its state cannot be read;
-//  3. else an overrun stop at or after the nudge sets making_progress false;
+//  3. else an overrun stop at or after the nudge sets making_progress false,
+//     and looping true unless the stop was charged to gate time: a stop the
+//     environment caused says nothing about the seat repeating itself;
 //  4. an overrun record whose gate time was charged at or after the nudge sets
-//     blocked_on_environment true.
+//     blocked_on_environment true;
+//  5. a MERGE REJECTION block written after the nudge whose text names scope
+//     drift sets drifted_from_bead true.
 //
 // Rules 1 and 3 are exclusive: a landing in the window is progress, so a stop
 // cannot also be the answer for the same nudge. The rule that set each label is
@@ -147,9 +160,11 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 	labels := map[QuestionID]bool{}
 	var rules []string
 	if rec, landed := land.ParseLandingRecord(notes); landed && inProgressWindow(rec.LandedAt, nudged) {
+		rules = append(rules, ruleProgressLanded)
 		labels[qMakingProgress] = true
 		labels[qRemaining] = true
-		rules = append(rules, ruleProgressLanded)
+		labels[qLooping] = false
+		labels[qDriftedFromBead] = false
 	} else {
 		if !missing {
 			labels[qRemaining] = false
@@ -158,9 +173,16 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 		if !stop.StoppedAt.IsZero() && !stop.StoppedAt.Before(nudged) {
 			labels[qMakingProgress] = false
 			rules = append(rules, ruleProgressStopped)
+			if !gateCharged(stop, nudged) {
+				labels[qLooping] = true
+			}
+		}
+		if rejectionNamesScope(notes, nudged) {
+			labels[qDriftedFromBead] = true
+			rules = append(rules, ruleProgressScope)
 		}
 	}
-	if stop.GateSpent > 0 && !stop.GateSeenAt.Before(nudged) {
+	if gateCharged(stop, nudged) {
 		labels[qBlockedOnEnvironment] = true
 		rules = append(rules, ruleProgressGateWait)
 	}
@@ -174,6 +196,110 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 // end.
 func inProgressWindow(landed, nudged time.Time) bool {
 	return !landed.Before(nudged) && landed.Sub(nudged) <= progressWindow
+}
+
+// gateCharged reports whether a stop was charged to gate time seen at or after
+// nudged. Such a stop is the environment's wait rather than the seat repeating
+// itself, so it leaves looping unlabeled.
+func gateCharged(stop progressStop, nudged time.Time) bool {
+	return stop.GateSpent > 0 && !stop.GateSeenAt.Before(nudged)
+}
+
+// scopeDriftRE matches a word a refusal names scope drift with, whole and in
+// either case. The whole-word form keeps telescoped from reading as a drift.
+var scopeDriftRE = regexp.MustCompile(`(?i)\b(scope|unrelated|beyond)\b`)
+
+// rejectionNamesScope reports whether notes hold a MERGE REJECTION block
+// written after nudged whose text names scope drift.
+func rejectionNamesScope(notes string, nudged time.Time) bool {
+	for _, rej := range progressRejections(notes) {
+		if rej.submitted.IsZero() || rej.submitted.Before(nudged) {
+			continue
+		}
+		if scopeDriftRE.MatchString(rej.text) {
+			return true
+		}
+	}
+	return false
+}
+
+// progressRejection is one MERGE REJECTION block in a bead's notes, and the
+// submission it answers.
+type progressRejection struct {
+	// submitted is the Submitted stamp of the READY TO LAND block the refusal
+	// answers, the last one the notes hold before it. Zero when that block
+	// carries no readable stamp.
+	submitted time.Time
+	// text runs from the block's header to the line before the next block.
+	text string
+}
+
+// progressRejections returns the notes' MERGE REJECTION blocks in the order
+// they were written. The blocks carry no time of their own, so a block is
+// placed by the submission it answers: bd appends notes in order, so the READY
+// TO LAND block before it is that submission, and the refusal was written after
+// it.
+func progressRejections(notes string) []progressRejection {
+	lines := strings.Split(notes, "\n")
+	var out []progressRejection
+	var submitted time.Time
+	for i := 0; i < len(lines); i++ {
+		switch {
+		case lines[i] == land.ReadyNoteMarker:
+			submitted = readySubmitted(lines[i+1:])
+		case isRejectionHeader(lines[i]):
+			start := i
+			for i+1 < len(lines) && !opensNoteBlock(lines[i+1]) {
+				i++
+			}
+			out = append(out, progressRejection{submitted: submitted, text: strings.Join(lines[start:i+1], "\n")})
+		}
+	}
+	return out
+}
+
+// opensNoteBlock reports whether line starts a note block the progress adapter
+// reads, so a rejection's text stops there: a later round's submission or
+// refusal never lends this one its words.
+func opensNoteBlock(line string) bool {
+	return line == land.ReadyNoteMarker || line == land.LandingNoteMarker || isRejectionHeader(line)
+}
+
+// isRejectionHeader reports whether line opens a MERGE REJECTION block. It
+// reads the header through land's own parser, so a marker quoted inside a
+// refusal's reason, finding or gate tail is content and never a block
+// (gt-9bioi.1).
+func isRejectionHeader(line string) bool {
+	if !strings.HasPrefix(line, land.MergeRejectionNoteMarker+" ") {
+		return false
+	}
+	_, ok := land.ParseRejectionNote(line)
+	return ok
+}
+
+// readySubmitted reads a READY TO LAND block's Submitted stamp, with the field
+// rules land.ParseReadyNote reads: the fields run to the first line that is not
+// one, and a stamp no clock can read orders as none, rather than failing the
+// whole report over a bead whose work is fine.
+func readySubmitted(fields []string) time.Time {
+	for _, line := range fields {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			return time.Time{}
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "branch", "head", "target", "worker":
+		case "submitted":
+			at, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+			if err != nil {
+				return time.Time{}
+			}
+			return at
+		default:
+			return time.Time{}
+		}
+	}
+	return time.Time{}
 }
 
 // progressStop is the part of the overrun guard's per-bead record the progress
