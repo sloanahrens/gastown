@@ -471,6 +471,7 @@ func TestReaperDisarmFromConfig(t *testing.T) {
 		readErr  error
 		want     bool
 		wantIn   []string
+		wantOut  []string
 		wantOnce string
 	}{
 		{
@@ -491,25 +492,34 @@ func TestReaperDisarmFromConfig(t *testing.T) {
 			cfg:  withKnob(nil),
 		},
 		{
-			name: "an unparseable config disarms",
+			// A ParseError names the file it read. A broken settings/config.json
+			// is the operator's whole file, not the "daemon" section the patrol
+			// config would live in, so the refusal names the file and not the
+			// section the operator cannot be told to fix (gt-dcxbw).
+			name: "an unparseable config disarms and names the file it read",
 			readErr: &config.ParseError{
 				Path: "/town/settings/config.json", Offset: 1, Line: 1, Column: 1,
 				Err: errors.New("invalid character 'n' looking for beginning of object key string"),
 			},
-			want:   true,
-			wantIn: []string{source, "/town/settings/config.json", "invalid character 'n'"},
+			want:    true,
+			wantIn:  []string{"/town/settings/config.json", "invalid character 'n'", "does not parse"},
+			wantOut: []string{source, "could not be read"},
 		},
 		{
+			// A read failure is not a parse failure: the operator is told which
+			// of the two happened (gt-dcxbw).
 			name:    "a read error that names no file still names the source",
 			readErr: errors.New("permission denied"),
 			want:    true,
-			wantIn:  []string{source, "permission denied"},
+			wantIn:  []string{source, "permission denied", "could not be read"},
+			wantOut: []string{"does not parse"},
 		},
 		{
 			name:     "an error that already names the source is not doubled",
 			readErr:  errors.New(source + ": read: connection reset"),
 			want:     true,
-			wantIn:   []string{source, "connection reset"},
+			wantIn:   []string{source, "connection reset", "could not be read"},
+			wantOut:  []string{"does not parse"},
 			wantOnce: source,
 		},
 	}
@@ -526,6 +536,11 @@ func TestReaperDisarmFromConfig(t *testing.T) {
 			for _, want := range tt.wantIn {
 				if !strings.Contains(reason, want) {
 					t.Errorf("reason = %q, want it to contain %q", reason, want)
+				}
+			}
+			for _, unwanted := range tt.wantOut {
+				if strings.Contains(reason, unwanted) {
+					t.Errorf("reason = %q, want it NOT to contain %q", reason, unwanted)
 				}
 			}
 			if tt.wantOnce != "" {
@@ -564,6 +579,29 @@ func TestReaperAutoCloseDisarmedAt(t *testing.T) {
 		t.Parallel()
 		if disarmed, reason := reaperAutoCloseDisarmedAt(t.TempDir()); disarmed {
 			t.Fatalf("reaperAutoCloseDisarmedAt = true (%q) for a town with no config, want not disarmed", reason)
+		}
+	})
+
+	// A leftover mayor/daemon.json on a migrated town used to supply the config
+	// while the operator's own settings/config.json was broken, so the sweep ran
+	// on a file the daemon reads past; the root reader refuses the broken host
+	// now, and the refusal names that file, not its "daemon" section (gt-dcxbw).
+	t.Run("a broken settings/config.json disarms even when a leftover daemon.json loads", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		settings := filepath.Join(town, "settings", "config.json")
+		writeTownFile(t, settings, `{not json`)
+		writeTownFile(t, filepath.Join(town, "mayor", "daemon.json"),
+			`{"type":"daemon-patrol-config","version":1}`)
+		disarmed, reason := reaperAutoCloseDisarmedAt(town)
+		if !disarmed {
+			t.Fatalf("reaperAutoCloseDisarmedAt = false (%q), want disarmed: a broken operator file must not read as absent", reason)
+		}
+		if !strings.Contains(reason, settings) {
+			t.Errorf("reason = %q, want it to name %s", reason, settings)
+		}
+		if strings.Contains(reason, `section "daemon"`) {
+			t.Errorf("reason = %q, want the operator's file rather than its daemon section", reason)
 		}
 	})
 

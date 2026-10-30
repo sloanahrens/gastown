@@ -200,12 +200,37 @@ func LoadPatrolConfig(townRoot string) *DaemonPatrolConfig {
 // ReadPatrolConfig loads the patrol config (see PatrolConfigFile) through the config package's one
 // parser, telling absent (nil, nil) from unparseable (nil, *config.ParseError
 // naming the file and offset).
+//
+// It also refuses a settings/config.json that cannot be read or is not a JSON
+// object. On the two-file layout the patrol config is that file's "daemon"
+// section, and config.readConfigFile defers a host that does not parse to the
+// host's own loader (it cannot tell whether the section is there), so a broken
+// operator file reaches this reader as "no patrol config" — and would reach it
+// as "no patrol config" again while a leftover mayor/daemon.json supplied one
+// (gt-dcxbw). A settings file that parses is accepted whatever keys it
+// declares: the check is for a broken file, not for the strict schema the town
+// otherwise enforces, so an undeclared key stays the non-error it was here
+// before.
 func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 	cfg, err := agentconfig.LoadDaemonPatrolConfig(PatrolConfigFile(townRoot))
+	if hostErr := checkOperatorSettingsReadable(townRoot); hostErr != nil {
+		return nil, hostErr
+	}
 	if errors.Is(err, agentconfig.ErrNotFound) {
 		return nil, nil
 	}
 	return cfg, err
+}
+
+// checkOperatorSettingsReadable reports a settings/config.json that cannot be
+// read or is not a JSON object; an absent file is nil. Every JSON object
+// parses, declared keys or not.
+func checkOperatorSettingsReadable(townRoot string) error {
+	// A map target: every object the file holds is declared by it, so the check
+	// asks only whether the file is a JSON object, not whether this binary
+	// knows its keys.
+	var object map[string]any
+	return agentconfig.CheckJSONFileParses(agentconfig.TownSettingsPath(townRoot), &object)
 }
 
 // SavePatrolConfig writes the patrol config (see PatrolConfigFile) through the config package's
