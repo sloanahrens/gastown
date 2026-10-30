@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 	"github.com/steveyegge/gastown/internal/tiersweep"
@@ -31,22 +32,38 @@ const (
 	UsageExit = 2
 	// FailureExit is a run that could not produce a result, named on stderr: the
 	// work directory could not be made, the output directory could not be
-	// prepared, or the result could not be written. A sweep whose tiers failed
-	// exits 0: its verdicts are in the result, which is what the daemon reads.
+	// prepared, the sweep produced no exit status, or the result could not be
+	// written. A sweep whose tiers failed exits 0: its verdicts are in the
+	// result, which is what the daemon reads.
 	FailureExit = 1
 )
 
 // usage is the line every refusal of the command line prints.
 const usage = "usage: sweep-run --rig R --sha S [--tiers shell,integration,race] [--jobs N] [--out DIR] [--repo DIR]"
 
-// maxJobs is the largest --jobs, and the one sweeprunner.Spec.Validate holds a
-// render to: a spec the daemon cannot render is one this runner need not accept.
-const maxJobs = 16
-
-// envJobs is the worker count the sweep reads. The sweep package does not read
-// it yet (S7, gt-0rtgc, adds the knob there); the runner sets it now, so the
-// container passes the count as soon as the sweep grows it.
+// envJobs is the worker count the runner passes to the sweep. The sweep reads
+// its own knobs from the environment it is given, so the runner sets this one
+// beside the log directory and the tested commit (tiersweep.Options).
 const envJobs = "TIER_SWEEP_JOBS"
+
+// The bounds on what the runner keeps of the sweep's output. The sweep is the
+// untrusted side of the boundary: a runaway or hostile line must not decide how
+// much the result holds or what a reader is shown (gt-dibnm).
+const (
+	// maxSummaryBytes bounds one summary line in the result.
+	maxSummaryBytes = 4 << 10
+	// maxCaptureBytes bounds what the run keeps of the sweep's streams. The
+	// whole stream still reaches the process's own stdout and stderr; only the
+	// copy the result is built from is bounded.
+	maxCaptureBytes = 64 << 10
+	// maxStderrTail bounds the sweep's own words quoted in a RED reason.
+	maxStderrTail = 512
+)
+
+// sweepNoExit is what the Sweep seam returns when the sweep produced no exit
+// status: the process died on a signal or never started. Any negative value
+// means the same thing.
+const sweepNoExit = -1
 
 // The result's runner block. The engine that started the container is not
 // observable from inside it, and the rendered run passes the container the
@@ -68,7 +85,10 @@ type Deps struct {
 	Clone func(repo, sha, work string) error
 	// Sweep runs the tiers args names, with work as the repository root. The
 	// overrides reach the sweep's own option reads and the environment of every
-	// child it starts; nothing else in the environment changes.
+	// child it starts; nothing else in the environment changes. It returns the
+	// sweep's exit status, which is the run's verdict: a non-zero status is RED
+	// whatever the summary lines say. A negative value means the sweep produced
+	// no exit status (sweepNoExit), which is a run that cannot report a result.
 	Sweep func(args []string, overrides map[string]string, stdout, stderr io.Writer) int
 	// WriteResult records a result as result.json in dir, as sweeprunner.Write.
 	WriteResult func(dir string, r sweeprunner.Result) error
@@ -108,7 +128,8 @@ func (o options) logDir() string { return filepath.Join(o.Out, "logs") }
 // Run runs one container sweep and returns the process's exit code: 0 whenever
 // a result was written, whatever verdicts it holds, and non-zero only when the
 // run could not produce one (UsageExit for a command line it cannot use,
-// FailureExit for a result that could not be written).
+// FailureExit for a sweep that produced no exit status or a result that could
+// not be written).
 func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	opts, err := parseArgs(args, d.Environ)
 	if err != nil {
@@ -140,7 +161,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		// No tier ran, so every requested tier is RED with the reason: a run
 		// that could not start must never leave a tier it did not test looking
 		// GREEN (gt-dibnm).
-		res.Tiers = redTiers(opts.Tiers, opts.logDir(), oneLine(err.Error()))
+		res.Tiers = redTiers(opts.Tiers, opts.logDir(), sanitise(err.Error(), maxSummaryBytes))
 	} else {
 		overrides := map[string]string{
 			tiersweep.EnvLogDir: opts.logDir(),
@@ -149,9 +170,21 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		}
 		// The sweep's summary lines are echoed as it prints them, so the
 		// container's log reads like a host sweep's, and captured for the result.
-		var captured bytes.Buffer
-		code := d.Sweep(sweepArgs(work, opts.Tiers), overrides, io.MultiWriter(stdout, &captured), stderr)
-		res.Tiers = tiersFrom(opts.Tiers, captured.String(), code, opts.logDir())
+		// The capture is bounded and the echo is not: the sweep's whole output
+		// reaches the container log, and only the copy the result is built from
+		// is capped (gt-dibnm).
+		var captured, sweepErrs bytes.Buffer
+		code := d.Sweep(sweepArgs(work, opts.Tiers), overrides,
+			io.MultiWriter(stdout, newCapture(&captured, maxCaptureBytes)),
+			io.MultiWriter(stderr, newCapture(&sweepErrs, maxCaptureBytes)))
+		// No exit status is no verdict: a sweep that was killed or never started
+		// did not produce one, so the run reports that it could not produce a
+		// result rather than recording a tier it does not know about (gt-dibnm).
+		if code < 0 {
+			fmt.Fprintf(stderr, "%s: the sweep did not exit (%d): it was killed or never started\n", name, code)
+			return FailureExit
+		}
+		res.Tiers = tiersFrom(opts.Tiers, captured.String(), sweepErrs.String(), code, opts.logDir())
 	}
 	res.Finished = now()
 	if err := d.WriteResult(opts.Out, res); err != nil {
@@ -175,7 +208,7 @@ func parseArgs(args, env []string) (options, error) {
 	if raw := envValue(env, sweeprunner.EnvJobs); raw != "" {
 		jobs, err := strconv.Atoi(raw)
 		if err != nil {
-			return options{}, fmt.Errorf("%s=%q: want a whole number from 1 to %d", sweeprunner.EnvJobs, raw, maxJobs)
+			return options{}, fmt.Errorf("%s=%q: want a whole number", sweeprunner.EnvJobs, raw)
 		}
 		opts.Jobs = jobs
 	}
@@ -205,7 +238,7 @@ func parseArgs(args, env []string) (options, error) {
 		case "--jobs":
 			jobs, err := strconv.Atoi(value)
 			if err != nil {
-				return options{}, fmt.Errorf("--jobs %q: want a whole number from 1 to %d", value, maxJobs)
+				return options{}, fmt.Errorf("--jobs %q: want a whole number", value)
 			}
 			opts.Jobs = jobs
 		case "--out":
@@ -221,43 +254,32 @@ func parseArgs(args, env []string) (options, error) {
 	return opts, nil
 }
 
-// validate refuses what a run cannot start with. The rules on the rig, sha,
-// tiers and jobs are sweeprunner.Spec.Validate's, so a spec the daemon renders
-// is one this runner starts; a test holds the two to the same answers.
+// validate refuses what a run cannot start with. Every rule is
+// sweeprunner.Spec.Validate's, so the spec the daemon renders is exactly what
+// this runner starts and each rule lives in one place (gt-dibnm). The fields
+// the container never receives — the image, the CPU and memory limits, the
+// context and the run id — are filled with the values the result records, so
+// Validate rules only what the entrypoint was given.
 func (o options) validate() error {
 	if o.Rig == "" {
 		return fmt.Errorf("--rig is required (or %s)", sweeprunner.EnvRig)
 	}
-	if !nameSegment(o.Rig) {
-		return fmt.Errorf("--rig %q: want one name segment, not a path", o.Rig)
-	}
 	if o.SHA == "" {
 		return fmt.Errorf("--sha is required (or %s)", sweeprunner.EnvSHA)
 	}
-	if !shaPattern.MatchString(o.SHA) {
-		return fmt.Errorf("--sha %q: want 40 lower-case hex digits", o.SHA)
-	}
-	seen := make(map[string]bool, len(o.Tiers))
-	for _, tier := range o.Tiers {
-		if !tiersweep.KnownTier(tier) {
-			return fmt.Errorf("--tiers: %q is not a tier the sweep runs (want %s, %s or %s)",
-				tier, tiersweep.TierShell, tiersweep.TierIntegration, tiersweep.TierRace)
-		}
-		if seen[tier] {
-			return fmt.Errorf("--tiers: %q appears twice", tier)
-		}
-		seen[tier] = true
-	}
-	if o.Jobs < 1 || o.Jobs > maxJobs {
-		return fmt.Errorf("--jobs %d: want 1 to %d", o.Jobs, maxJobs)
-	}
-	if !filepath.IsAbs(o.Out) {
-		return fmt.Errorf("--out %q: want an absolute path", o.Out)
-	}
-	if !filepath.IsAbs(o.Repo) {
-		return fmt.Errorf("--repo %q: want an absolute path", o.Repo)
-	}
-	return nil
+	return sweeprunner.Spec{
+		Rig:      o.Rig,
+		SHA:      o.SHA,
+		Tiers:    o.Tiers,
+		Jobs:     o.Jobs,
+		OutDir:   o.Out,
+		RepoDir:  o.Repo,
+		Image:    runnerImage,
+		CPUs:     1,
+		MemoryGB: 2,
+		Context:  runnerBackend,
+		RunID:    runnerBackend,
+	}.Validate()
 }
 
 // splitTiers reads the comma-separated tier list. A list naming none runs the
@@ -282,23 +304,44 @@ func sweepArgs(work string, tiers []string) []string {
 	return append([]string{"--root", work}, tiers...)
 }
 
-// tiersFrom turns the sweep's stdout into the result's tiers: one entry per
-// requested tier, in the requested order, holding the exact summary line the
-// sweep printed. A tier with no line — the sweep never reached it, or refused
-// its arguments — is RED with the reason, because a tier that did not run is
-// not a tier that passed.
-func tiersFrom(tiers []string, stdout string, code int, logDir string) []sweeprunner.Tier {
+// tiersFrom turns the sweep's output into the result's tiers: one entry per
+// requested tier, in the requested order.
+//
+// The sweep's exit status is the verdict, and a summary line only supplies the
+// counts and the names (gt-dibnm). A non-zero status with a GREEN line is RED,
+// with the contradiction recorded; a tier with no line — the sweep never
+// reached it, or refused its arguments — is RED with the status and the tail of
+// the sweep's own complaint, because a tier that did not run is not a tier that
+// passed.
+func tiersFrom(tiers []string, stdout, stderrText string, code int, logDir string) []sweeprunner.Tier {
+	// The log group the runner adds is part of the line's cap, so a line that
+	// arrived at the limit still ends in a whole group.
+	group := " (logs " + logDir + ")"
+	room := maxSummaryBytes - len(group)
+	if room < 1 {
+		room = 1
+	}
 	lines := make(map[string]string, len(tiers))
-	for _, line := range strings.Split(stdout, "\n") {
-		if tier, ok := summaryTier(line); ok {
-			lines[tier] = line
+	for _, raw := range strings.Split(stdout, "\n") {
+		line := sanitise(raw, maxSummaryBytes)
+		tier, ok := summaryTier(line)
+		if !ok {
+			continue
 		}
+		lines[tier] = withLogDir(capRunes(line, room), logDir)
+	}
+	reason := fmt.Sprintf("no summary line (exit %d)", code)
+	if tail := tailOf(stderrText); tail != "" {
+		reason += ": " + tail
 	}
 	out := make([]sweeprunner.Tier, 0, len(tiers))
 	for _, tier := range tiers {
 		line, ok := lines[tier]
-		if !ok {
-			line, _ = tiersweep.Summary(tier, logDir, 0, 1, 0, fmt.Sprintf("no summary line (exit %d)", code), 0)
+		switch {
+		case !ok:
+			line = generated(tier, logDir, reason)
+		case code != 0:
+			line = redOnFailure(line, tier, code, logDir)
 		}
 		out = append(out, sweeprunner.Tier{Tier: tier, Summary: line})
 	}
@@ -312,13 +355,71 @@ func tiersFrom(tiers []string, stdout string, code int, logDir string) []sweepru
 func redTiers(tiers []string, logDir, reason string) []sweeprunner.Tier {
 	out := make([]sweeprunner.Tier, 0, len(tiers))
 	for _, tier := range tiers {
-		line, _ := tiersweep.Summary(tier, logDir, 0, 1, 0, reason, 0)
-		out = append(out, sweeprunner.Tier{Tier: tier, Summary: line})
+		out = append(out, sweeprunner.Tier{Tier: tier, Summary: generated(tier, logDir, reason)})
 	}
 	return out
 }
 
-// summaryTier reports the tier a sweep summary line names.
+// generated is a RED summary line the runner writes itself: one failing unit
+// named by reason, in the sweep's own format, capped like a printed line.
+func generated(tier, logDir, reason string) string {
+	line, _ := tiersweep.Summary(tier, logDir, 0, 1, 0, sanitise(reason, maxSummaryBytes), 0)
+	return capRunes(line, maxSummaryBytes)
+}
+
+// withLogDir replaces a summary line's "(logs ...)" group with logDir, or adds
+// one where the daemon's parser reads it: before the " in <duration>" suffix,
+// or at the end when the line names no duration. The sweep names a path there,
+// and the daemon later opens or deletes what the line names, so the path comes
+// from the runner and never from the sweep's text (gt-dibnm).
+func withLogDir(line, logDir string) string {
+	group := " (logs " + logDir + ")"
+	if i := strings.Index(line, " (logs "); i >= 0 {
+		if j := strings.Index(line[i:], ")"); j >= 0 {
+			return line[:i] + group + line[i+j+1:]
+		}
+	}
+	if i := strings.LastIndex(line, " in "); i >= 0 {
+		return line[:i] + group + line[i:]
+	}
+	return line + group
+}
+
+// redOnFailure turns a tier's GREEN line RED when the sweep exited non-zero:
+// the exit status is the verdict, and a GREEN line beside it is a contradiction
+// the result records rather than hides. The counts and names stay as printed;
+// the contradiction joins the failed names so the daemon shows why.
+func redOnFailure(line, tier string, code int, logDir string) string {
+	prefix := tiersweep.Name + ": " + tier + " "
+	rest, ok := strings.CutPrefix(line, prefix)
+	if !ok || !strings.HasPrefix(rest, "GREEN") {
+		return line
+	}
+	line = prefix + "RED" + strings.TrimPrefix(rest, "GREEN")
+	note := fmt.Sprintf("sweep exited %d beside a GREEN summary line", code)
+	i := strings.Index(line, " (logs ")
+	if i < 0 {
+		return line
+	}
+	if strings.Contains(line[:i], " failed: ") {
+		return line[:i] + ", " + note + line[i:]
+	}
+	return line[:i] + " failed: " + note + line[i:]
+}
+
+// tailOf is the end of the sweep's stderr as one short line: what a reader
+// needs when the sweep said nothing that parses. A sweep's own complaint comes
+// after whatever progress it printed, so the end is the part worth keeping.
+func tailOf(text string) string {
+	if len(text) > maxStderrTail {
+		text = text[len(text)-maxStderrTail:]
+	}
+	return sanitise(text, maxStderrTail)
+}
+
+// summaryTier reports the tier a sweep summary line names. A line needs the
+// tier and a verdict: the sweep has printed half a line when it was cut, and
+// that is not a summary a result can hold.
 func summaryTier(line string) (string, bool) {
 	rest, ok := strings.CutPrefix(line, tiersweep.Name+": ")
 	if !ok {
@@ -326,6 +427,9 @@ func summaryTier(line string) (string, bool) {
 	}
 	fields := strings.Fields(rest)
 	if len(fields) < 2 {
+		return "", false
+	}
+	if fields[1] != "GREEN" && fields[1] != "RED" {
 		return "", false
 	}
 	return fields[0], true
@@ -359,7 +463,9 @@ func removeWork(removeAll func(string) error, work string, stderr io.Writer) {
 // as runGit does. A test substitutes a fake, so the unit tier starts no process.
 type gitRunner func(dir string, args ...string) (int, string)
 
-// gitClone makes the tree the sweep runs in.
+// gitClone makes the tree the sweep runs in. The unit tier runs no subprocess,
+// so its tests drive cloneWith through an injected runner; the real command is
+// exercised by the integration tier (clone_integration_test.go).
 func gitClone(repo, sha, work string) error { return cloneWith(runGit, repo, sha, work) }
 
 // cloneWith is gitClone over a runner: the bare repository cloned without hard
@@ -402,11 +508,11 @@ func runGit(dir string, args ...string) (int, string) {
 // environment, without mutating the process's environment.
 func processSweep(args []string, overrides map[string]string, stdout, stderr io.Writer) int {
 	host := tiersweep.ProcessHost
-	host.Env = func(name string) string {
-		if value, ok := overrides[name]; ok {
+	host.Env = func(key string) string {
+		if value, ok := overrides[key]; ok {
 			return value
 		}
-		return os.Getenv(name)
+		return os.Getenv(key)
 	}
 	return tiersweep.Run(args, stdout, stderr, tiersweep.Deps{
 		Host:     host,
@@ -422,44 +528,26 @@ func processSweep(args []string, overrides map[string]string, stdout, stderr io.
 func environWith(base []string, overrides map[string]string) []string {
 	env := append([]string(nil), base...)
 	names := make([]string, 0, len(overrides))
-	for name := range overrides {
-		names = append(names, name)
+	for key := range overrides {
+		names = append(names, key)
 	}
 	sort.Strings(names)
-	for _, name := range names {
-		env = append(env, name+"="+overrides[name])
+	for _, key := range names {
+		env = append(env, key+"="+overrides[key])
 	}
 	return env
 }
 
-// envValue reads name from an environment slice, as os.Getenv reads the process.
-// An empty value means the name is unset, so its default applies.
-func envValue(env []string, name string) string {
-	prefix := name + "="
+// envValue reads key from an environment slice, as os.Getenv reads the process.
+// An empty value means the key is unset, so its default applies.
+func envValue(env []string, key string) string {
+	prefix := key + "="
 	for _, entry := range env {
 		if value, ok := strings.CutPrefix(entry, prefix); ok {
 			return value
 		}
 	}
 	return ""
-}
-
-// shaPattern is a git commit as git prints it: sweeprunner.Spec's rule, so a
-// spec the daemon renders names a commit this runner accepts.
-var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-
-// nameSegment reports whether v can stand as one name: sweeprunner's rule for a
-// rig, which is part of every container name the daemon builds from it.
-func nameSegment(v string) bool {
-	if v == "" || v == "." || v == ".." || strings.HasPrefix(v, "-") {
-		return false
-	}
-	for _, r := range v {
-		if r == '/' || r == '\\' || r == ':' || unicode.IsSpace(r) || unicode.IsControl(r) {
-			return false
-		}
-	}
-	return true
 }
 
 // oneLine is text as one summary line can hold it: control characters read as
@@ -473,4 +561,55 @@ func oneLine(text string) string {
 		return r
 	}, text)
 	return strings.Join(strings.Fields(clean), " ")
+}
+
+// ansiRE matches the escape sequences a terminal colours text with: a CSI
+// sequence (ESC [ parameters final) and a two-character escape. They carry no
+// meaning into a result and would only be quoted back at a reader.
+var ansiRE = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\\\^_]")
+
+// sanitise makes text of unknown provenance safe to store: ANSI escapes
+// removed, invalid UTF-8 replaced, control characters read as spaces, runs of
+// whitespace collapsed, and the whole cut to max bytes without splitting a
+// character. The sweep is the untrusted side of the boundary, so nothing it
+// prints reaches a result unchanged (gt-dibnm).
+func sanitise(text string, max int) string {
+	text = ansiRE.ReplaceAllString(text, "")
+	text = strings.ToValidUTF8(text, "�")
+	return capRunes(oneLine(text), max)
+}
+
+// capRunes cuts text to at most max bytes without splitting a rune.
+func capRunes(text string, max int) string {
+	if len(text) <= max {
+		return text
+	}
+	cut := text[:max]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return strings.TrimRight(cut, " ")
+}
+
+// capture is a bounded copy of a stream the sweep writes. It keeps the first
+// max bytes and discards the rest while reporting every byte written, so the
+// writer it is paired with (the process's own stdout or stderr) still receives
+// the whole stream.
+type capture struct {
+	buf *bytes.Buffer
+	max int
+}
+
+func newCapture(buf *bytes.Buffer, max int) *capture { return &capture{buf: buf, max: max} }
+
+// Write keeps what fits and accepts the rest without storing it.
+func (c *capture) Write(p []byte) (int, error) {
+	if room := c.max - c.buf.Len(); room > 0 {
+		keep := p
+		if len(keep) > room {
+			keep = keep[:room]
+		}
+		c.buf.Write(keep)
+	}
+	return len(p), nil
 }

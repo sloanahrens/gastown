@@ -23,7 +23,11 @@ func main() {
 }
 
 // processDeps is the real process and filesystem behind the runner's seams.
-func processDeps() Deps {
+func processDeps() Deps { return depsWith(os.Environ()) }
+
+// depsWith is processDeps with the environment the run reads passed in, so the
+// wiring is a value a test can hold rather than the live process's own.
+func depsWith(env []string) Deps {
 	return Deps{
 		Clone:       gitClone,
 		Sweep:       processSweep,
@@ -31,7 +35,7 @@ func processDeps() Deps {
 		MkdirTemp:   os.MkdirTemp,
 		MkdirAll:    os.MkdirAll,
 		RemoveAll:   os.RemoveAll,
-		Environ:     os.Environ(),
+		Environ:     env,
 		Now:         time.Now,
 	}
 }
