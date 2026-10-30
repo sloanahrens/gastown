@@ -278,18 +278,35 @@ func TestAReceiptWriteFailureIsLoggedNotFatal(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
+		blocked    func(t *testing.T) string
 		acq        *fakeAcquire
 		wantResult Result
 		wantExit   Exit
 	}{
 		{
-			name:       "unexpected",
+			name:       "unexpected, daemon directory is a file",
+			blocked:    fileBlocksDaemonDir,
 			acq:        &fakeAcquire{panicWith: "boom"},
 			wantResult: Result{Event: "failed", Reason: "unexpected"},
 			wantExit:   ExitFailed,
 		},
 		{
-			name:       "busy lock",
+			name:       "unexpected, receipts path is a directory",
+			blocked:    dirBlocksReceipts,
+			acq:        &fakeAcquire{panicWith: "boom"},
+			wantResult: Result{Event: "failed", Reason: "unexpected"},
+			wantExit:   ExitFailed,
+		},
+		{
+			name:       "busy lock, daemon directory is a file",
+			blocked:    fileBlocksDaemonDir,
+			acq:        &fakeAcquire{err: installlock.ErrBusy},
+			wantResult: Result{Event: "refused", Reason: "lock-busy"},
+			wantExit:   ExitBusy,
+		},
+		{
+			name:       "busy lock, receipts path is a directory",
+			blocked:    dirBlocksReceipts,
 			acq:        &fakeAcquire{err: installlock.ErrBusy},
 			wantResult: Result{Event: "refused", Reason: "lock-busy"},
 			wantExit:   ExitBusy,
@@ -297,15 +314,9 @@ func TestAReceiptWriteFailureIsLoggedNotFatal(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// A regular file where the daemon directory belongs makes every
-			// receipt write fail.
-			blocker := filepath.Join(t.TempDir(), "daemon")
-			if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
-				t.Fatalf("write blocker: %v", err)
-			}
 			var logged []string
 			cfg := testConfig(t, tc.acq)
-			cfg.DaemonDir = blocker
+			cfg.DaemonDir = tc.blocked(t)
 			cfg.Logf = func(format string, args ...any) {
 				logged = append(logged, fmt.Sprintf(format, args...))
 			}
@@ -323,4 +334,26 @@ func TestAReceiptWriteFailureIsLoggedNotFatal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fileBlocksDaemonDir makes the daemon directory a regular file, so the receipts
+// directory cannot be created.
+func fileBlocksDaemonDir(t *testing.T) string {
+	t.Helper()
+	blocker := filepath.Join(t.TempDir(), "daemon")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	return blocker
+}
+
+// dirBlocksReceipts makes the receipts path a directory, so the receipts file
+// cannot be opened for append.
+func dirBlocksReceipts(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "install-om-receipts.jsonl"), 0o755); err != nil {
+		t.Fatalf("make blocker: %v", err)
+	}
+	return dir
 }
