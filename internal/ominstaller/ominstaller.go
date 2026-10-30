@@ -1,0 +1,144 @@
+// Package ominstaller builds om from the job-owned clone and puts it in force.
+// It is the Go form of scripts/install-om.sh, which the rebuild_om daemon job
+// runs (gt-tpg0p.16).
+package ominstaller
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/installlock"
+)
+
+// Exit is the status Run returns. The daemon's rebuild_om job maps it, as it
+// maps the gt installer's codes.
+type Exit int
+
+const (
+	// ExitInstalled means om was installed, or the installed om already is the built sha.
+	ExitInstalled Exit = 0
+	// ExitFailed means the build, the swap or the smoke check failed. A failed smoke check is rolled back.
+	ExitFailed Exit = 1
+	// ExitRefused means there is no clone, the clone is dirty, or its HEAD cannot be read. om is untouched.
+	ExitRefused Exit = 2
+	// ExitBusy means another install held the lock for the whole wait.
+	ExitBusy Exit = 3
+)
+
+const (
+	eventFailed  = "failed"
+	eventRefused = "refused"
+
+	reasonUnexpected = "unexpected"
+	reasonLockBusy   = "lock-busy"
+
+	lockName = "install-om.lock"
+)
+
+// Result is the outcome Run reports on its last stdout line. An empty field
+// prints as "-".
+type Result struct {
+	Event  string
+	Commit string
+	Prev   string
+	Reason string
+}
+
+// Line is the machine-readable last line of the install-om command.
+func (r Result) Line() string {
+	return fmt.Sprintf("install-om: RESULT %s %s %s %s",
+		dashIfEmpty(r.Event), dashIfEmpty(r.Commit), dashIfEmpty(r.Prev), dashIfEmpty(r.Reason))
+}
+
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// Command is one external command the installer runs through Config.Exec.
+type Command struct {
+	Name string
+	Args []string
+	Dir  string
+}
+
+// ExecFunc runs a Command and returns what it wrote to stdout and stderr.
+type ExecFunc func(ctx context.Context, c Command) (stdout, stderr string, err error)
+
+// AcquireFunc takes the exclusive install lock on path, waiting up to wait, and
+// returns the release. It returns installlock.ErrBusy when the wait ran out.
+type AcquireFunc func(path string, wait time.Duration) (release func(), err error)
+
+// Config is what an install run needs from its caller. Exec and Acquire are the
+// seams: a test replaces them, and the production wiring sets them to the real
+// command runner and installlock.Acquire.
+type Config struct {
+	// DaemonDir holds the install lock and install-om-receipts.jsonl.
+	DaemonDir string
+	// Source is the receipt's source: manual or rebuild-om.
+	Source string
+	// LockWait is how long a run waits for a peer holding the lock.
+	LockWait time.Duration
+
+	// Exec runs every external command the install makes.
+	Exec ExecFunc
+	// Acquire takes the install lock: the real one is installlock.Acquire.
+	Acquire AcquireFunc
+	// Now is the clock for the receipt timestamp and duration. Nil uses time.Now.
+	Now func() time.Time
+	// Logf receives the notices a run does not fail for. Nil discards them.
+	Logf func(format string, args ...any)
+}
+
+// Run takes the install lock and runs the install, and returns the result and
+// its exit status. It writes one receipt for the outcome. It never panics: a
+// panic in a seam, or any path not anticipated here, is a failed run with the
+// reason "unexpected".
+//
+// The install steps arrive in later slices of gt-tpg0p.16; until then the body
+// reports the failure as unexpected.
+func Run(ctx context.Context, cfg Config) (res Result, exit Exit) {
+	start := cfg.now()
+	defer func() {
+		if p := recover(); p != nil {
+			res, exit = Result{Event: eventFailed, Reason: reasonUnexpected}, ExitFailed
+		}
+		cfg.writeReceipt(res, start)
+	}()
+
+	release, err := cfg.Acquire(lockPath(cfg.DaemonDir), cfg.LockWait)
+	if errors.Is(err, installlock.ErrBusy) {
+		return Result{Event: eventRefused, Reason: reasonLockBusy}, ExitBusy
+	}
+	if err != nil {
+		cfg.logf("[install-om] could not take the install lock: %v", err)
+		return Result{Event: eventFailed, Reason: reasonUnexpected}, ExitFailed
+	}
+	defer release()
+
+	// The install steps arrive in later slices; until then the run reports
+	// the script's EXIT-trap result for a path nothing anticipated.
+	return Result{Event: eventFailed, Reason: reasonUnexpected}, ExitFailed
+}
+
+func lockPath(daemonDir string) string {
+	return filepath.Join(daemonDir, lockName)
+}
+
+func (c Config) now() time.Time {
+	if c.Now == nil {
+		return time.Now()
+	}
+	return c.Now()
+}
+
+func (c Config) logf(format string, args ...any) {
+	if c.Logf != nil {
+		c.Logf(format, args...)
+	}
+}
