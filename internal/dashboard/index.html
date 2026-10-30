@@ -4458,8 +4458,10 @@ function drawQueueList(box, s) {
     rowsBox.append(el("div", "empty", msg));
   }
   // The ready list is capped when the page holds fewer ready rows than the
-  // server counted (queueMaxRows lives in the server, not here).
-  const seatsCapped = qTab === "ready" && all.length < (q.ready_total || 0);
+  // server counted (queueMaxRows lives in the server, not here). A reading with
+  // no count cannot show the list was not cut, so it counts as capped.
+  const readyCounted = typeof q.ready_total === "number" && Number.isFinite(q.ready_total);
+  const seatsCapped = qTab === "ready" && (!readyCounted || all.length < q.ready_total);
   const places = seatPlaces(all, seatsCapped);
   rows.forEach(b => {
     const id = b.rig + "/" + b.id;
