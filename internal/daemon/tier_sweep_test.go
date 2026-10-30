@@ -2788,6 +2788,12 @@ func TestTierSweepStages_ResolveInPicksTheTreesCommand(t *testing.T) {
 		{name: "tree with neither, integration race", has: treeWith(), stage: 1, wantOK: false},
 		{name: "unreadable tree, shell", has: treeFailing(statErr), stage: 0, wantErr: statErr},
 		{name: "unreadable tree, integration race", has: treeFailing(statErr), stage: 1, wantErr: statErr},
+		{name: "no Go dir, unreadable script check", has: func(_, rel string) (bool, error) {
+			if rel == script {
+				return false, statErr
+			}
+			return false, nil
+		}, stage: 1, wantErr: statErr},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
