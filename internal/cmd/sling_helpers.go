@@ -230,9 +230,15 @@ func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
 // molecule under any other relation is not attached to it.
 var moleculeBondTypes = map[string]bool{"blocks": true, "conditional-blocks": true, "parent-child": true}
 
-// moleculeDeps returns the open molecules bonded to beadID. It reads the
-// dependents through DepListUp, not bd sql, because a tracker rig answers no
-// SQL and sling must still be able to burn its stale molecules.
+// moleculeDeps returns the open molecules bonded to beadID, in the order
+// DepListUp lists them (the store's creation order). The removed bd sql read
+// had no ORDER BY, so it promised no order; this one promises that one.
+//
+// The dependents come from DepListUp, not bd sql, because a tracker rig
+// answers no SQL and sling must still be able to burn its stale molecules.
+// DepListUp matches only the local target id (the tracker's dependents read
+// and the fake do the same), so a bond held as an external:<rig>:<id> target
+// is not returned here and this read does not see it.
 func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	if beadID == "" {
 		return nil, nil
@@ -266,7 +272,18 @@ func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	var molecules []string
 	for _, id := range candidates {
 		issue := issues[id]
-		if issue == nil || issue.Type != "molecule" {
+		if issue == nil {
+			// An id the batch omits is an unanswered read, not a non-molecule:
+			// read it alone, and refuse when it is still unanswered.
+			issue, err = store.Show(id)
+			if err != nil {
+				return nil, fmt.Errorf("reading bond candidate %s of %s: %w", id, beadID, err)
+			}
+			if issue == nil {
+				return nil, fmt.Errorf("reading bond candidate %s of %s: store gave no answer", id, beadID)
+			}
+		}
+		if issue.Type != "molecule" {
 			continue
 		}
 		if issue.Status == "closed" || issue.Status == "tombstone" {

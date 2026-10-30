@@ -168,6 +168,27 @@ func TestMoleculeDepsKeepsOpenMoleculesBondedToTheBead(t *testing.T) {
 			bonds:  []moleculeBond{{"gt-wisp-live", "tracks"}},
 		},
 		{
+			name:   "unbonded open molecule is excluded",
+			issues: []beads.Issue{open("gt-wisp-loose", "molecule")},
+		},
+		{
+			name:   "tombstoned molecule is excluded",
+			issues: []beads.Issue{{ID: "gt-wisp-gone", Title: "gone", Status: "tombstone", Type: "molecule"}},
+			bonds:  []moleculeBond{{"gt-wisp-gone", "blocks"}},
+		},
+		{
+			name:   "molecule bonded twice is listed once",
+			issues: []beads.Issue{open("gt-wisp-live", "molecule")},
+			bonds:  []moleculeBond{{"gt-wisp-live", "blocks"}, {"gt-wisp-live", "parent-child"}},
+			want:   []string{"gt-wisp-live"},
+		},
+		{
+			name:   "creation order, not id order",
+			issues: []beads.Issue{open("gt-wisp-z", "molecule"), open("gt-wisp-a", "molecule")},
+			bonds:  []moleculeBond{{"gt-wisp-a", "blocks"}, {"gt-wisp-z", "blocks"}},
+			want:   []string{"gt-wisp-z", "gt-wisp-a"},
+		},
+		{
 			name: "mixed: open kept in creation order, closed and non-molecule skipped",
 			issues: []beads.Issue{
 				open("gt-wisp-a", "molecule"),
@@ -283,6 +304,82 @@ func TestMoleculeDepsRefusesAFailedRead(t *testing.T) {
 			}
 		})
 	}
+}
+
+// omittingStore is a sling store whose ShowMultiple leaves out omit from every
+// batch; its single Show is show.
+type omittingStore struct {
+	slingFake
+	omit string
+	show func(id string) (*beads.Issue, error)
+}
+
+func (s omittingStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	out, err := s.Fake.ShowMultiple(ids)
+	delete(out, s.omit)
+	return out, err
+}
+
+func (s omittingStore) Show(id string) (*beads.Issue, error) { return s.show(id) }
+
+// TestMoleculeDepsReadsAnOmittedCandidateAlone: a bond candidate the batch
+// status read leaves out is an unanswered read, not a non-molecule. It is
+// read alone; if that read is unanswered too, moleculeDeps refuses.
+func TestMoleculeDepsReadsAnOmittedCandidateAlone(t *testing.T) {
+	t.Parallel()
+	errRead := errors.New("bd show: connection refused")
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-work", Title: "work", Status: "open", Type: "task"},
+		beads.Issue{ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule"})
+	if err := db.AddTypedDependency("gt-wisp-live", "gt-work", "blocks"); err != nil {
+		t.Fatalf("AddTypedDependency: %v", err)
+	}
+
+	t.Run("single read answers", func(t *testing.T) {
+		t.Parallel()
+		reads := 0
+		stores := slingStores{pinned: func(string) slingStore {
+			return omittingStore{slingFake{db}, "gt-wisp-live", func(id string) (*beads.Issue, error) {
+				reads++
+				return db.Show(id)
+			}}
+		}}
+		got, err := stores.moleculeDeps("gt-work", t.TempDir())
+		if err != nil {
+			t.Fatalf("moleculeDeps: %v", err)
+		}
+		if want := []string{"gt-wisp-live"}; !slices.Equal(got, want) {
+			t.Errorf("moleculeDeps() = %v, want %v", got, want)
+		}
+		if reads != 1 {
+			t.Errorf("single Show reads = %d, want 1", reads)
+		}
+	})
+
+	t.Run("single read fails", func(t *testing.T) {
+		t.Parallel()
+		stores := slingStores{pinned: func(string) slingStore {
+			return omittingStore{slingFake{db}, "gt-wisp-live", func(string) (*beads.Issue, error) {
+				return nil, errRead
+			}}
+		}}
+		got, err := stores.moleculeDeps("gt-work", t.TempDir())
+		if !errors.Is(err, errRead) {
+			t.Fatalf("moleculeDeps() = %v, %v; want the read error", got, err)
+		}
+	})
+
+	t.Run("single read gives no answer", func(t *testing.T) {
+		t.Parallel()
+		stores := slingStores{pinned: func(string) slingStore {
+			return omittingStore{slingFake{db}, "gt-wisp-live", func(string) (*beads.Issue, error) {
+				return nil, nil
+			}}
+		}}
+		if got, err := stores.moleculeDeps("gt-work", t.TempDir()); err == nil {
+			t.Fatalf("moleculeDeps() = %v, nil; want a refusal for the unanswered candidate", got)
+		}
+	})
 }
 
 func TestIsSlingConfigError(t *testing.T) {
