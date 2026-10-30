@@ -65,17 +65,15 @@ func TestCommitAuthorEnvIsTheSeatAddress(t *testing.T) {
 	}
 }
 
-// TestCommitHelpNamesTheSeatAddress checks the command's help shows the seat-local
-// address and no longer says a worktree without a user.email is refused.
+// TestCommitHelpNamesTheSeatAddress checks the help's identity mapping shows the
+// seat's own name and address, as seatForCommit derives them for the same seat.
 func TestCommitHelpNamesTheSeatAddress(t *testing.T) {
 	t.Parallel()
+	seat := seatForCommit("gastown/crew/jack")
 	long := commitCmd.Long
-	if !strings.Contains(long, "@gastown.local") {
-		t.Errorf("help does not show the seat-local address:\n%s", long)
-	}
-	for _, stale := range []string{"is refused", "worktree's user.email"} {
-		if strings.Contains(long, stale) {
-			t.Errorf("help still says %q:\n%s", stale, long)
+	for _, line := range []string{"Name: " + seat.Name + "\n", "Email: " + seat.Email + "\n"} {
+		if !strings.Contains(long, line) {
+			t.Errorf("help does not show %q:\n%s", strings.TrimSpace(line), long)
 		}
 	}
 }

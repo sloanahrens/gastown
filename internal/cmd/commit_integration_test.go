@@ -48,14 +48,10 @@ func TestIntegrationGtCommitAuthorMatchesSeatIdentity(t *testing.T) {
 	if len(fields) != 4 {
 		t.Fatalf("git log returned %d fields, want author and committer name and email", len(fields))
 	}
-	seat := seatForCommit("gastown/polecats/coma")
-	for i, want := range []string{seat.Name, seat.Email, seat.Name, seat.Email} {
+	for i, want := range []string{"coma", "coma@gastown.local", "coma", "coma@gastown.local"} {
 		if fields[i] != want {
 			t.Errorf("field %d (author name, author email, committer name, committer email) = %q, want %q", i, fields[i], want)
 		}
-	}
-	if seat.Email != "coma@gastown.local" {
-		t.Errorf("seat email = %q, want coma@gastown.local", seat.Email)
 	}
 }
 
