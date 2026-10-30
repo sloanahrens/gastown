@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Getenv, os.ReadFile, os.Stdout, os.Stderr))
 }
 
 // parseOptions is the seam runParse reads its command line through: Parse in
@@ -23,17 +23,17 @@ func main() {
 type parseOptions func(args []string, getenv func(string) string) (*forgejoresync.Options, error)
 
 // run is the process minus os.Exit: a test hands it a command line, the
-// environment seam and the streams, and reads the code the process would have
-// exited with.
-func run(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	return runParse(args, getenv, stdout, stderr, forgejoresync.Parse)
+// environment and file seams and the streams, and reads the code the process
+// would have exited with.
+func run(args []string, getenv func(string) string, readFile func(string) ([]byte, error), stdout, stderr io.Writer) int {
+	return runParse(args, getenv, readFile, stdout, stderr, forgejoresync.Parse)
 }
 
 // runParse turns what Parse returned into the script's exit codes: the help
 // request is the usage text and success, a refused command line is its message
 // and the usage hint, and any other error is a run that failed. A command line
 // that parses is run, and its exit code is the run's.
-func runParse(args []string, getenv func(string) string, stdout, stderr io.Writer, parse parseOptions) int {
+func runParse(args []string, getenv func(string) string, readFile func(string) ([]byte, error), stdout, stderr io.Writer, parse parseOptions) int {
 	opts, err := parse(args, getenv)
 	switch {
 	case errors.Is(err, forgejoresync.ErrHelp):
@@ -54,9 +54,10 @@ func runParse(args []string, getenv func(string) string, stdout, stderr io.Write
 		return forgejoresync.ExitFailure
 	}
 	resync := &forgejoresync.Resync{
-		Opts:   opts,
-		Getenv: getenv,
-		Log:    func(line string) { fmt.Fprintf(stderr, "forgejo-resync: %s\n", line) },
+		Opts:     opts,
+		Getenv:   getenv,
+		ReadFile: readFile,
+		Log:      func(line string) { fmt.Fprintf(stderr, "forgejo-resync: %s\n", line) },
 	}
 	return resync.Run()
 }
