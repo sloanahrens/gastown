@@ -48,6 +48,15 @@ COPY --chmod=0755 om /usr/local/bin/om
 # downloads it or runs an install script for it.
 COPY --chmod=0755 claude /usr/local/bin/claude
 
+# The scratch town's first start runs a dolt preflight that copies git's global
+# user.name and user.email into dolt's config and builds no town without them
+# (internal/cmd/install.go). A host has a person's identity to copy; an image has
+# none, so the image carries one. It is the daemon's, never a person's name or
+# address, and because no USER instruction sets one, these write root's config:
+# root is the user the container runs as.
+RUN git config --global user.name gt-daemon
+RUN git config --global user.email gt-daemon@gastown.local
+
 # The entrypoint is a gt subcommand rather than a shell script: it refuses to
 # start without a town on the bind mount, so a missing mount never turns into a
 # fresh town. The subcommand is added by gt-qpeei.26; until it lands, gt rejects
