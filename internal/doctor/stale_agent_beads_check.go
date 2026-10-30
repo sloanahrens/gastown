@@ -41,6 +41,22 @@ func NewStaleAgentBeadsCheck() *StaleAgentBeadsCheck {
 }
 
 // Run checks for agent beads that have no matching agent on disk.
+// agentWispsFromStore returns the agent beads among bd's wisps, keyed by ID. A
+// *beads.Beads keeps its bd read, so a bd rig's answer is unchanged. Any other
+// store reads its wisps through the Client seam, the read a tracker rig
+// answers, and a failed read is returned rather than read as no wisps: the
+// rig's list would otherwise be partial and look clean.
+func agentWispsFromStore(bd doctorBeads) (map[string]*beads.Issue, error) {
+	if b, ok := bd.(*beads.Beads); ok {
+		return b.ListAgentBeadsFromWisps()
+	}
+	wisps, err := bd.List(beads.ListOptions{Ephemeral: true, Priority: -1})
+	if err != nil {
+		return nil, err
+	}
+	return beads.AgentBeadsFromWisps(wisps), nil
+}
+
 func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Load routes to get prefixes
 	beadsDir := filepath.Join(ctx.TownRoot, ".beads")
@@ -155,7 +171,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			// Also check wisps table for migrated agent beads. A failed read
 			// leaves this rig's list partial, so the rig is left out of the
 			// stale set like one whose bead list failed above.
-			wispMap, wispErr := bd.ListAgentBeadsFromWisps()
+			wispMap, wispErr := agentWispsFromStore(bd)
 			if wispErr != nil {
 				addQueryErr(rigName, wispErr)
 				return

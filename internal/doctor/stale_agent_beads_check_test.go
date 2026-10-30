@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -297,14 +298,10 @@ func (f failingBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.doctorBeads.List(opts)
-}
-
-func (f failingBeads) ListAgentBeadsFromWisps() (map[string]*beads.Issue, error) {
-	if f.wispsErr != nil {
+	if opts.Ephemeral && f.wispsErr != nil {
 		return nil, f.wispsErr
 	}
-	return f.doctorBeads.ListAgentBeadsFromWisps()
+	return f.doctorBeads.List(opts)
 }
 
 func (f failingBeads) ListAgentBeads() (map[string]*beads.Issue, error) {
@@ -466,6 +463,72 @@ func TestStaleAgentBeadsCheckWispErrorLeavesRigOut(t *testing.T) {
 	}
 	if updates := town.updates(); len(updates) != 0 {
 		t.Errorf("Fix() closed beads from a rig with a partial list: %v", updates)
+	}
+}
+
+// TestStaleAgentBeadsCheckWispsThroughSeam covers the wisp read the check makes
+// through the Client seam, the read a tracker rig answers. Each wisp is one
+// classification case: the check must flag the stale agent wisps (labelled,
+// unlabelled by ID shape, and typed as agent) and leave the live, closed and
+// non-agent ones alone, with no query error recorded.
+func TestStaleAgentBeadsCheckWispsThroughSeam(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		wisp      beads.Issue
+		onDisk    bool // the worker has a directory, so its bead is not stale
+		wantStale bool
+	}{
+		{name: "live labelled polecat wisp", wisp: beads.Issue{ID: "gt-gastown-polecat-toast", Status: "hooked", Labels: []string{"gt:agent"}, Ephemeral: true}, onDisk: true},
+		{name: "stale labelled polecat wisp", wisp: beads.Issue{ID: "gt-gastown-polecat-ghost", Status: "open", Labels: []string{"gt:agent"}, Ephemeral: true}, wantStale: true},
+		{name: "closed labelled polecat wisp", wisp: beads.Issue{ID: "gt-gastown-polecat-spent", Status: "closed", Labels: []string{"gt:agent"}, Ephemeral: true}},
+		{name: "stale polecat wisp by ID shape only", wisp: beads.Issue{ID: "gt-gastown-polecat-bare", Status: "open", Ephemeral: true}, wantStale: true},
+		{name: "stale polecat wisp by type only", wisp: beads.Issue{ID: "gt-gastown-polecat-typed", Status: "open", Type: "agent", Ephemeral: true}, wantStale: true},
+		{name: "non-agent wisp", wisp: beads.Issue{ID: "gt-wisp-plain", Status: "open", Labels: []string{"gt:work"}, Type: "task", Ephemeral: true}},
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(tmpDir, "gastown", "mayor", "rig")
+	for _, dir := range []string{filepath.Join(rigDir, ".beads"), filepath.Join(tmpDir, "gastown", "crew"), filepath.Join(tmpDir, "gastown", "polecats")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	town := newDoctorTown()
+	var wantStale []string
+	for _, tt := range tests {
+		town.db(rigDir).Seed(tt.wisp)
+		if tt.onDisk {
+			if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "polecats", strings.TrimPrefix(tt.wisp.ID, "gt-gastown-polecat-")), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if tt.wantStale {
+			wantStale = append(wantStale, tt.wisp.ID)
+		}
+	}
+	ctx := town.ctx(tmpDir, "")
+
+	check := NewStaleAgentBeadsCheck()
+	result := check.Run(ctx)
+
+	if strings.Contains(result.Message, "could not read") {
+		t.Errorf("message = %q, want no query error when the wisp read answers", result.Message)
+	}
+	got := append([]string(nil), result.Details...)
+	sort.Strings(got)
+	sort.Strings(wantStale)
+	if !reflect.DeepEqual(got, wantStale) {
+		t.Errorf("stale details = %v, want %v", got, wantStale)
 	}
 }
 
