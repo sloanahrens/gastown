@@ -34,7 +34,7 @@
 #                          `make gate` on the merged tree, so this is the cheap
 #                          first look, not the gate. No containers, no slot.
 #   make test-slow         the post-landing check: the gate, then the shell
-#                          tests (scripts/test-makefile.sh, which `make
+#                          tests (the shelltier Go runner, which `make
 #                          test-makefile` also runs alone), with
 #                          GT_TEST_DOCKER=0. No containers, no slot. The
 #                          landing worker runs it as the rig's
@@ -413,9 +413,11 @@ NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins tracker -name go.mo
 # reach them. tracker/ is the town tracker (docs/plans/2026-10-25-town-tracker-design.md).
 TESTED_MODULES := $(patsubst %/go.mod,%,$(wildcard tracker/go.mod))
 
-# The shell tests, run by test-slow after the gate. A make variable only so
-# scripts/makefile-gate_test.sh can drive the failure paths with a stub.
-SHELL_TESTS ?= scripts/test-makefile.sh
+# The shell tests, run by test-slow after the gate: the shelltier Go runner runs
+# every manifest entry as `bash <path>` and exits 0 green, 1 red, 2 on a usage
+# or log-dir failure. A make variable only so scripts/makefile-gate_test.sh can
+# drive the failure paths with a stub command.
+SHELL_TESTS ?= go run ./internal/shelltier/cmd/shelltier --all
 
 # The exec-tax preflight the gate runs first (gt-2ycne.1): it measures what an
 # exec of a fresh program costs in this process tree and warns, naming itself
@@ -548,7 +550,7 @@ presubmit: lint
 # merge_queue.post_land_command names it.
 test-slow: gate
 	@start=$$(date +%s); \
-	GT_TEST_DOCKER=0 bash $(SHELL_TESTS) || { echo "test-slow: FAILED at shell tests" >&2; exit 1; }; \
+	GT_TEST_DOCKER=0 $(SHELL_TESTS) || { echo "test-slow: FAILED at shell tests" >&2; exit 1; }; \
 	echo "test-slow: PASSED (shell tests in $$(( $$(date +%s) - start ))s wall, after the gate)" >&2
 
 # test runs every tier for a human: the gate and the shell tests (test-slow),
@@ -622,11 +624,11 @@ test-integration-wall:
 test-timing:
 	go run ./internal/testpolicy/cmd/testtiming -- $(PKGS)
 
-# test-makefile runs the shell tests from scripts/test-makefile.sh, the one
-# list test-slow runs too: a second copy here drifted from it and made
+# test-makefile runs the shell tests alone: the same runner (SHELL_TESTS) that
+# test-slow runs too, so a second copy cannot drift from it and make
 # `make test-slow` run less than this target advertised (gt-tqxdd).
 test-makefile:
-	GT_TEST_DOCKER=0 bash $(SHELL_TESTS)
+	GT_TEST_DOCKER=0 $(SHELL_TESTS)
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:
