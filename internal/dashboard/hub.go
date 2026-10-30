@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"regexp"
@@ -12,6 +13,15 @@ import (
 
 const (
 	loadHistory = 360 // samples kept: an hour at the default 10s
+)
+
+// The lists the state frame leaves out, each sent as its own event. They are the
+// bulk of the frame and change at most about once a minute, so each goes out only
+// when its bytes changed (gt-6ecd0).
+const (
+	evTrendRecent  = "trend.recent"
+	evQueueReady   = "queue.ready"
+	evQueueBlocked = "queue.blocked"
 )
 
 // Hub polls the readers while a page is open and fans their results out.
@@ -32,6 +42,10 @@ type Hub struct {
 	// slow interval only.
 	cloudAt      *time.Time
 	cloudMissing bool
+
+	// listSent is the bytes each list event last carried, by event name, so a
+	// poll sends a list again only when it changed (gt-6ecd0).
+	listSent map[string][]byte
 
 	// alerts decides what needs the operator's attention, and prev is the
 	// snapshot it compares the next one against.
@@ -77,12 +91,13 @@ type Sub struct {
 func NewHub(cfg Config) *Hub {
 	cfg.defaults()
 	return &Hub{
-		cfg:     cfg,
-		subs:    map[*Sub]struct{}{},
-		gating:  map[string]bool{},
-		jevGood: map[string]time.Time{},
-		wake:    make(chan struct{}),
-		alerts:  NewAlerter(cfg.Now),
+		cfg:      cfg,
+		subs:     map[*Sub]struct{}{},
+		gating:   map[string]bool{},
+		jevGood:  map[string]time.Time{},
+		listSent: map[string][]byte{},
+		wake:     make(chan struct{}),
+		alerts:   NewAlerter(cfg.Now),
 	}
 }
 
@@ -286,7 +301,10 @@ func (h *Hub) Subscribe() (*Sub, [][]byte) {
 		h.alerts.Baseline()
 	}
 	h.subs[s] = struct{}{}
-	initial := [][]byte{frame("state", h.stateLocked())}
+	// Every list goes out whatever its bytes were, and ahead of the state that
+	// draws them, so a page that connects late has both lists in its first frames.
+	initial := h.listFramesLocked(true)
+	initial = append(initial, frame("state", h.stateFrameLocked()))
 	if len(h.ring) > 0 {
 		initial = append(initial, frame("backlog", h.ring))
 	}
@@ -332,6 +350,63 @@ func (h *Hub) stateLocked() State {
 	st.Mango = mangoAt(st.Mango, st.Now)
 	st.Strip = stripAlarms(&st)
 	return st
+}
+
+// stateFrameLocked is the body of the state event: stateLocked without the lists
+// that travel as their own events. The Queue and Trend it trims are copies, so
+// the lists the hub keeps, and what State returns, are untouched.
+func (h *Hub) stateFrameLocked() State {
+	st := h.stateLocked()
+	if q := st.Queue; q != nil {
+		trimmed := *q
+		trimmed.Ready, trimmed.Blocked = nil, nil
+		st.Queue = &trimmed
+	}
+	if t := st.Trend; t != nil {
+		trimmed := *t
+		trimmed.Recent = nil
+		st.Trend = &trimmed
+	}
+	return st
+}
+
+// listEvent is one list the state frame leaves out, under the event that sends it.
+type listEvent struct {
+	name  string
+	value any
+}
+
+// listEvents names the lists that travel as their own events, each with the value
+// the state frame would have carried. A list whose reader has not reported is
+// left out.
+func (h *Hub) listEvents() []listEvent {
+	var out []listEvent
+	if t := h.state.Trend; t != nil {
+		out = append(out, listEvent{evTrendRecent, t.Recent})
+	}
+	if q := h.state.Queue; q != nil {
+		out = append(out, listEvent{evQueueReady, q.Ready}, listEvent{evQueueBlocked, q.Blocked})
+	}
+	return out
+}
+
+// listFramesLocked returns the list events to send: every list when all is set,
+// otherwise only the lists whose bytes differ from what was last sent. What it
+// returns is recorded as sent, so the next call compares against it.
+func (h *Hub) listFramesLocked(all bool) [][]byte {
+	var out [][]byte
+	for _, ev := range h.listEvents() {
+		b, err := json.Marshal(ev.value)
+		if err != nil {
+			b = []byte(`null`)
+		}
+		if !all && bytes.Equal(b, h.listSent[ev.name]) {
+			continue
+		}
+		h.listSent[ev.name] = b
+		out = append(out, rawFrame(ev.name, b))
+	}
+	return out
 }
 
 // readsLocked stamps each source's staleness against now, so a pane whose
@@ -392,7 +467,12 @@ func (h *Hub) publishLocked() {
 	// raised at, so a list built once and published again would show a wait that
 	// stopped growing (gt-bi6w0).
 	h.attentionLocked()
-	h.broadcastLocked(frame("state", h.stateLocked()))
+	// The lists go out first, so the page holds them when the state that draws
+	// them lands, and each goes out only when it changed (gt-6ecd0).
+	for _, f := range h.listFramesLocked(false) {
+		h.broadcastLocked(f)
+	}
+	h.broadcastLocked(frame("state", h.stateFrameLocked()))
 }
 
 // observeLocked runs the alert rules over the state change this poll just made,
@@ -464,7 +544,12 @@ func frame(event string, v any) []byte {
 	if err != nil {
 		b = []byte(`null`)
 	}
-	return append(append([]byte("event: "+event+"\ndata: "), b...), '\n', '\n')
+	return rawFrame(event, b)
+}
+
+// rawFrame frames data, which is already JSON, as one event.
+func rawFrame(event string, data []byte) []byte {
+	return append(append([]byte("event: "+event+"\ndata: "), data...), '\n', '\n')
 }
 
 func (h *Hub) pollHealth() {
