@@ -108,17 +108,24 @@ func (c Config) swap(src, dst string) error {
 		return c.Swap(src, dst)
 	}
 	inst := binaryinstall.Installer{
-		Files: binaryinstall.Files{
-			Exec: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				out, _, err := c.Exec(ctx, Command{Name: name, Args: args})
-				return []byte(out), err
-			},
-			Lock: func(path string) (func(), error) { return c.Acquire(path, c.LockWait) },
-		},
+		Files:    c.replaceFiles(),
 		LockWait: c.LockWait,
 		Warnf:    c.logf,
 	}
 	return inst.Replace(src, filepath.Dir(dst), filepath.Base(dst))
+}
+
+// replaceFiles is the seam binaryinstall's Replace runs its commands and lock
+// through: the run's Exec and Acquire, so the flag commands are the ones the rest
+// of the install runs.
+func (c Config) replaceFiles() binaryinstall.Files {
+	return binaryinstall.Files{
+		Exec: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			out, _, err := c.Exec(ctx, Command{Name: name, Args: args})
+			return []byte(out), err
+		},
+		Lock: func(path string) (func(), error) { return c.Acquire(path, c.LockWait) },
+	}
 }
 
 // probeVersion returns the commit om at omPath reports, or "" when it cannot say.

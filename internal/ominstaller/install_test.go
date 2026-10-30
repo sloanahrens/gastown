@@ -452,6 +452,60 @@ func TestInstallFirstInstallKeepsNothing(t *testing.T) {
 	}
 }
 
+// TestReplaceFilesRunsItsCommandsThroughExec drives the swap's command seam
+// through the production adapter, so a failing flag command reaches Replace as
+// its error and the command's output reaches it unchanged.
+func TestReplaceFilesRunsItsCommandsThroughExec(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		execErr error
+	}{
+		{name: "a command that succeeds returns its output", execErr: nil},
+		{name: "a command that fails returns its error", execErr: errBoom},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var sent Command
+			cfg := Config{Exec: func(_ context.Context, c Command) (string, string, error) {
+				sent = c
+				return "flag output", "", tc.execErr
+			}}
+
+			out, err := cfg.replaceFiles().Exec(context.Background(), "chattr", "-i", "/home/op/go/bin/om")
+
+			if string(out) != "flag output" {
+				t.Errorf("output = %q, want the command's output", out)
+			}
+			if !errors.Is(err, tc.execErr) {
+				t.Errorf("error = %v, want %v", err, tc.execErr)
+			}
+			if sent.Name != "chattr" || !reflect.DeepEqual(sent.Args, []string{"-i", "/home/op/go/bin/om"}) {
+				t.Errorf("command = %+v, want chattr -i on om", sent)
+			}
+		})
+	}
+}
+
+// TestReplaceFilesTakesItsLockWithTheRunsWait checks the swap's lock is taken
+// through Acquire with the run's wait, and released by the release it returns.
+func TestReplaceFilesTakesItsLockWithTheRunsWait(t *testing.T) {
+	t.Parallel()
+	acq := &fakeAcquire{}
+	cfg := Config{LockWait: 42 * time.Second, Acquire: acq.acquire}
+
+	release, err := cfg.replaceFiles().Lock("/home/op/go/bin/.om.replace.lock")
+	if err != nil {
+		t.Fatalf("Lock = %v, want nil", err)
+	}
+	release()
+
+	if acq.path != "/home/op/go/bin/.om.replace.lock" || acq.wait != 42*time.Second || !acq.released {
+		t.Errorf("lock = path %q wait %v released %v, want the replace lock, 42s, released", acq.path, acq.wait, acq.released)
+	}
+}
+
 // containsLine reports whether want is one of lines.
 func containsLine(lines []string, want string) bool {
 	for _, line := range lines {
