@@ -24,12 +24,13 @@ var (
 var jevCmd = &cobra.Command{
 	Use:     "jev",
 	GroupID: GroupDiag,
-	Short:   "Read Jev's usage ledger",
+	Short:   "Read Jev's usage ledger and report battery health",
 	Long: `Read the town's Jev logs under <town>/.runtime/jev: the usage ledger,
 where every answered Jev call appends its token counts and the caller that
 spent them, and the request log, where every call that reaches the network
 appends what it sent as sizes and a hash. The calls record themselves; gt jev
-only reads.`,
+only reads. The health subcommand judges the batteries from the files they
+write; it reads nothing else.`,
 	RunE: requireSubcommand,
 }
 

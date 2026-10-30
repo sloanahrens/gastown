@@ -1,0 +1,259 @@
+package cmd
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/jev/health"
+)
+
+// newJevHealthTown writes a fixture town whose only enabled battery is
+// dedupe: a cursor written cursorAge ago, one answered line a minute old and a
+// day of ledger calls from two callers.
+func newJevHealthTown(t *testing.T, now time.Time, cursorAge time.Duration) string {
+	t.Helper()
+	town := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(town, "mayor"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(town, "settings"), 0o755))
+	cfg := `{"daemon":{"patrols":{"jev_dedupe":{"enabled":true,"max_usd_per_day":1,"usd_per_billion_tokens":42}}}}`
+	require.NoError(t, os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte(cfg), 0o644))
+
+	jevDir := filepath.Join(town, ".runtime", "jev")
+	require.NoError(t, os.MkdirAll(jevDir, 0o700))
+	cursor := filepath.Join(jevDir, "dedupe.cursor.json")
+	require.NoError(t, os.WriteFile(cursor, []byte(`{"time":"2026-10-30T11:00:00Z","id":"gt-x"}`), 0o600))
+	at := now.Add(-cursorAge)
+	require.NoError(t, os.Chtimes(cursor, at, at))
+
+	line := fmt.Sprintf(`{"ts":%q,"answers":{"q":"a"}}`, now.Add(-time.Minute).UTC().Format(time.RFC3339))
+	require.NoError(t, os.WriteFile(filepath.Join(jevDir, "dedupe.jsonl"), []byte(line+"\n"), 0o600))
+
+	writeJevSpendLedger(t, town,
+		jevSpendLine(now.Add(-30*time.Minute), "jev-dedupe", 100, 50),
+		jevSpendLine(now.Add(-20*time.Minute), "jev-thrash", 100, 50),
+	)
+	return town
+}
+
+// jevHealthFailingWriter refuses every write, for the report's write failures.
+type jevHealthFailingWriter struct{}
+
+func (jevHealthFailingWriter) Write([]byte) (int, error) { return 0, errors.New("the writer refused") }
+
+// townFinder resolves the fixture town the test names.
+func townFinder(town string) func() (string, error) {
+	return func() (string, error) { return town, nil }
+}
+
+// jevHealthDir is the town's Jev runtime directory, created.
+func jevHealthDir(t *testing.T, town string) string {
+	t.Helper()
+	dir := filepath.Join(town, ".runtime", "jev")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	return dir
+}
+
+// runJevHealthCommand drives the subcommand it builds for the fixture town and
+// clocks it at now, as gt would.
+func runJevHealthCommand(t *testing.T, town string, now time.Time, asJSON bool) (string, error) {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := newJevHealthCmd(townFinder(town), func() time.Time { return now })
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	if asJSON {
+		cmd.SetArgs([]string{"--json"})
+	} else {
+		cmd.SetArgs([]string{})
+	}
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+// runJevHealthError drives the subcommand its constructor builds for findTown,
+// writing to out, so every failure path is reached through the command the way
+// gt reaches it, on the fixed clock and never on the wall clock.
+func runJevHealthError(t *testing.T, findTown func() (string, error), out io.Writer, args ...string) error {
+	t.Helper()
+	if out == nil {
+		out = &bytes.Buffer{}
+	}
+	cmd := newJevHealthCmd(findTown, jevHealthFixedNow)
+	cmd.SetOut(out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs(args)
+	return cmd.Execute()
+}
+
+// jevHealthTableRow finds a battery's table line.
+func jevHealthTableRow(t *testing.T, table, name string) string {
+	t.Helper()
+	for _, line := range strings.Split(table, "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 && fields[0] == name {
+			return line
+		}
+	}
+	t.Fatalf("no row for %s in:\n%s", name, table)
+	return ""
+}
+
+// jevHealthRow finds a battery's row in the --json document.
+func jevHealthRow(t *testing.T, rows []health.Row, name string) health.Row {
+	t.Helper()
+	for _, r := range rows {
+		if r.Name == name {
+			return r
+		}
+	}
+	t.Fatalf("no row for %s", name)
+	return health.Row{}
+}
+
+// TestJevHealthCommand runs gt jev health against a fixture town: a healthy
+// town prints an ok dedupe row and exits 0, and a town whose cursor is two
+// hours old prints stale and exits 1. The command reads the fixed now the
+// fixture's timestamps are built from, so no wall clock reaches the verdict.
+func TestJevHealthCommand(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	healthy := newJevHealthTown(t, now, 5*time.Minute)
+	stale := newJevHealthTown(t, now, 2*time.Hour)
+
+	t.Run("healthy table", func(t *testing.T) {
+		out, err := runJevHealthCommand(t, healthy, now, false)
+		require.NoError(t, err)
+		assert.Contains(t, out, "BATTERY")
+		row := jevHealthTableRow(t, out, "dedupe")
+		assert.Contains(t, row, " ok")
+		assert.NotContains(t, row, "stale")
+	})
+
+	t.Run("healthy json rows", func(t *testing.T) {
+		out, err := runJevHealthCommand(t, healthy, now, true)
+		require.NoError(t, err)
+
+		var doc jevHealthDoc
+		require.NoError(t, json.Unmarshal([]byte(out), &doc))
+		require.Len(t, doc.Batteries, len(health.Batteries))
+
+		dedupe := jevHealthRow(t, doc.Batteries, "dedupe")
+		assert.True(t, dedupe.Enabled)
+		assert.Equal(t, health.OK, dedupe.Status)
+		assert.Equal(t, 1, dedupe.Lines24)
+		assert.Equal(t, 1, dedupe.LedgerCalls, "only the dedupe caller's call counts")
+
+		targets := jevHealthRow(t, doc.Batteries, "targets")
+		assert.False(t, targets.Enabled, "a battery the config does not turn on is disabled")
+		assert.Equal(t, health.Disabled, targets.Status)
+	})
+
+	t.Run("stale fixture exits 1", func(t *testing.T) {
+		out, err := runJevHealthCommand(t, stale, now, false)
+
+		code, ok := IsSilentExit(err)
+		require.True(t, ok, "want a silent coded exit, got %v", err)
+		assert.Equal(t, 1, code)
+		assert.Contains(t, jevHealthTableRow(t, out, "dedupe"), " stale")
+	})
+}
+
+// jevHealthFixedNow is the instant every fixture is judged at, so no test
+// reaches the wall clock.
+func jevHealthFixedNow() time.Time {
+	return time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+}
+
+// TestJevHealthRefusesAMissingTown covers the town lookup's failure path.
+func TestJevHealthRefusesAMissingTown(t *testing.T) {
+	t.Parallel()
+	err := runJevHealthError(t, func() (string, error) { return "", errors.New("no town") }, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "finding the town root")
+}
+
+// TestJevHealthRefusesABrokenPatrolConfig covers the config read's failure
+// path: a config that does not parse must fail the command, not read as a town
+// with every battery off. The fixture is written where the loader reads it and
+// the error must name that path, so a fixture that lands elsewhere fails here.
+func TestJevHealthRefusesABrokenPatrolConfig(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := daemon.PatrolConfigFile(town)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("{"), 0o644))
+
+	err := runJevHealthError(t, townFinder(town), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading the patrol config")
+	assert.Contains(t, err.Error(), path, "the error names the file the fixture wrote")
+}
+
+// TestJevHealthRefusesAnUnreadableLedger covers the ledger read's failure
+// path: a ledger that is a directory cannot be read, and must not read as no
+// calls. The cause stays wrapped, so a caller can still name the file.
+func TestJevHealthRefusesAnUnreadableLedger(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(jevHealthDir(t, town), "usage.jsonl"), 0o700))
+
+	err := runJevHealthError(t, townFinder(town), nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errJevHealthLedger)
+	var pathErr *fs.PathError
+	assert.ErrorAs(t, err, &pathErr, "the ledger failure keeps its cause")
+}
+
+// TestJevHealthRefusesAnUnreadableLog covers the log read's failure path: a
+// log that is a directory cannot be read, and must not read as a quiet
+// battery.
+func TestJevHealthRefusesAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(jevHealthDir(t, town), "attention.jsonl"), 0o700))
+
+	err := runJevHealthError(t, townFinder(town), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attention.jsonl")
+}
+
+// TestJevHealthRefusesAnUnreadableCursor covers the cursor stat's failure
+// path: a cursor that cannot be statted must not read as a battery with no
+// pass.
+func TestJevHealthRefusesAnUnreadableCursor(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A symlink to itself: the stat fails with ELOOP, not with "not there".
+	require.NoError(t, os.Symlink("attention.cursor.json", filepath.Join(jevHealthDir(t, town), "attention.cursor.json")))
+
+	err := runJevHealthError(t, townFinder(town), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attention.cursor.json")
+}
+
+// TestJevHealthReportsAWriteFailure covers both write paths: the table's flush
+// and the JSON encoder's write.
+func TestJevHealthReportsAWriteFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	for name, args := range map[string][]string{"table": nil, "json": {"--json"}} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := runJevHealthError(t, townFinder(town), jevHealthFailingWriter{}, args...)
+			require.Error(t, err)
+		})
+	}
+}
