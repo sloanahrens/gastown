@@ -31,7 +31,7 @@ const (
 	// entrypoint reads the file and puts the token into the environment of the
 	// daemon it execs as omTokenEnv; with the flag unset no token is loaded
 	// (gt-qpeei.36).
-	containerOMTokenFileFlag = "om-token-file" //nolint:gosec // a flag name, not a credential
+	containerOMTokenFileFlag = config.OMTokenFileFlag
 	// omTokenEnv is the variable the claude CLI reads a subscription token from.
 	omTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // an environment variable name, not a credential
 )

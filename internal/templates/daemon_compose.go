@@ -70,6 +70,13 @@ type ComposeSpec struct {
 	// required when Scratch is set; the scratch spec passes DoltServerImage.
 	ScratchDoltImage string
 
+	// OMTokenFile is the path, inside the container, of the file the om
+	// subscription token is read from. When set, the scratch render passes it to
+	// the entrypoint as --om-token-file beside --scratch-town. Only the scratch
+	// render takes it: the live project's command line stays empty, and a live
+	// spec that sets it is refused (gt-qpeei.36).
+	OMTokenFile string
+
 	// LiveTownRoot is the live town's root, which a scratch spec must not
 	// mount, nor mount anything under. It is required when Scratch is set, and
 	// absolute, so a scratch render is always checked against the live town it
@@ -140,15 +147,21 @@ var scratchOperatorNote = []string{
 }
 
 // scratchDaemonCommand is the daemon's command in the scratch project: the
-// operator note, then the container entrypoint's flag, the one way a container
-// asks for its scratch town's install. The entrypoint is the image's ENTRYPOINT,
-// so the command carries its flags alone. The live project passes nothing.
-func scratchDaemonCommand() string {
+// operator note, then the flags the container entrypoint is passed: --scratch-town,
+// the one way a container asks for its scratch town's install, and, when
+// omTokenFile is set, --om-token-file <path> beside it. The entrypoint is the
+// image's ENTRYPOINT, so the command carries its flags alone. The live project
+// passes nothing.
+func scratchDaemonCommand(omTokenFile string) string {
 	var b strings.Builder
 	for _, line := range scratchOperatorNote {
 		b.WriteString("    # " + line + "\n")
 	}
-	fmt.Fprintf(&b, "    command: [%q]\n", "--"+config.ScratchTownFlag)
+	if omTokenFile == "" {
+		fmt.Fprintf(&b, "    command: [%q]\n", "--"+config.ScratchTownFlag)
+		return b.String()
+	}
+	fmt.Fprintf(&b, "    command: [%q, %q, %q]\n", "--"+config.ScratchTownFlag, "--"+config.OMTokenFileFlag, composeLiteral(omTokenFile))
 	return b.String()
 }
 
@@ -278,7 +291,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 	var command, dolt, doltVolume, doltWait string
 	if s.Scratch {
 		names = scratchNames
-		command = scratchDaemonCommand()
+		command = scratchDaemonCommand(s.OMTokenFile)
 		dolt = fmt.Sprintf(scratchDoltBody,
 			ScratchDoltService,
 			composeLiteral(s.ScratchDoltImage),
@@ -337,6 +350,12 @@ func (s ComposeSpec) validate() error {
 	case s.StopGrace < MinimumStopGrace:
 		return fmt.Errorf("compose spec: StopGrace %s is below MinimumStopGrace %s; a shorter grace period SIGKILLs the daemon mid-shutdown",
 			s.StopGrace, MinimumStopGrace)
+	case s.OMTokenFile != "" && !s.Scratch:
+		return fmt.Errorf("compose spec: OMTokenFile is set on a live spec; only the scratch render passes --%s, and the live project's command line stays empty", config.OMTokenFileFlag)
+	case s.OMTokenFile != "" && !filepath.IsAbs(s.OMTokenFile):
+		return fmt.Errorf("compose spec: OMTokenFile %q is not absolute; it names a path inside the container", s.OMTokenFile)
+	case strings.ContainsFunc(s.OMTokenFile, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+		return fmt.Errorf("compose spec: OMTokenFile %q holds a control character, which a command line entry cannot carry", s.OMTokenFile)
 	case !s.Scratch && s.DoltHost == "":
 		return fmt.Errorf("compose spec: DoltHost is empty; pass town.json's dolt.container_host or dolt.host resolved, and an empty dolt.host is the local machine, which inside the container is the container itself")
 	}

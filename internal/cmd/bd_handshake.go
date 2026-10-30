@@ -48,18 +48,19 @@ var bdHandshakeTownVerbs = map[string]bool{
 // bdHandshakeNotTownRunning are start/run-named commands that start no agent
 // session, daemon or polecat, with the reason each is exempt.
 var bdHandshakeNotTownRunning = map[string]string{
-	"gt agent resume":     "clears a pause flag; starts no session",
-	"gt scheduler resume": "clears a pause flag; dispatch goes through gt sling (gated)",
-	"gt plugin run":       "runs one plugin gate; starts no agent session",
-	"gt reaper run":       "closes stale beads through bd; starts nothing",
-	"gt metrics run":      "the hourly town-metrics plugin: snapshot and analysis only, no session, daemon or polecat; the plugin it replaces was never gated",
-	"gt slot run":         "wraps a test suite in the container slot",
-	"gt host agent run":   "writes the host probe file a container daemon reads; starts no session, daemon or polecat",
-	"gt spec sling":       "runs one sling a gt spec dispatch tick planned, which the tick made itself with no gate; only the daemon runs it, and the daemon passed the gate at start",
-	"gt dolt start":       "starts the Dolt server, which recovery needs when bd is broken",
-	"gt dolt restart":     "restarts the Dolt server, which recovery needs when bd is broken",
-	"gt bird start":       "starts claude, not a town session, and must run when bd is missing or outdated (gt-qipl5)",
-	"gt bird spawn":       "opens the tab a gt bird start runs in, so it starts claude and not a town session, and must run when bd is missing or outdated (gt-b58mk)",
+	"gt agent resume":      "clears a pause flag; starts no session",
+	"gt scheduler resume":  "clears a pause flag; dispatch goes through gt sling (gated)",
+	"gt plugin run":        "runs one plugin gate; starts no agent session",
+	"gt reaper run":        "closes stale beads through bd; starts nothing",
+	"gt metrics run":       "the hourly town-metrics plugin: snapshot and analysis only, no session, daemon or polecat; the plugin it replaces was never gated",
+	"gt slot run":          "wraps a test suite in the container slot",
+	"gt host agent run":    "writes the host probe file a container daemon reads; starts no session, daemon or polecat",
+	"gt daemon scratch up": "ACCEPTED RISK: starts the scratch project's own containers from flags, before the scratch town exists, so there is no town config or bd for the handshake to read; the live town is named only to be refused and nothing of it is started. The command path never executes bd (pinned by TestDaemonScratchNeverRunsBD), so this exemption cannot grow into a path that needs the handshake",
+	"gt spec sling":        "runs one sling a gt spec dispatch tick planned, which the tick made itself with no gate; only the daemon runs it, and the daemon passed the gate at start",
+	"gt dolt start":        "starts the Dolt server, which recovery needs when bd is broken",
+	"gt dolt restart":      "restarts the Dolt server, which recovery needs when bd is broken",
+	"gt bird start":        "starts claude, not a town session, and must run when bd is missing or outdated (gt-qipl5)",
+	"gt bird spawn":        "opens the tab a gt bird start runs in, so it starts claude and not a town session, and must run when bd is missing or outdated (gt-b58mk)",
 }
 
 // bdHandshakeTimeout bounds the whole handshake: the version and schema reads,

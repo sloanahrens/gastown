@@ -118,3 +118,13 @@ func TestPlanRefusesWhatABuildRefuses(t *testing.T) {
 		})
 	}
 }
+
+// DockerEnv keeps what docker needs and drops the variables that would pick
+// another engine, whatever the shell holds.
+func TestDockerEnvDropsTheShellsEngineChoice(t *testing.T) {
+	t.Parallel()
+	got := DockerEnv([]string{"PATH=/usr/bin", "DOCKER_CONTEXT=other", "DOCKER_HOST=tcp://x:2375", "HOME=/h", "GOFLAGS=-mod=mod"})
+	if strings.Join(got, " ") != "PATH=/usr/bin HOME=/h" {
+		t.Errorf("DockerEnv = %v, want PATH and HOME only", got)
+	}
+}
