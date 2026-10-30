@@ -58,6 +58,15 @@ type DaemonPatrolConfig struct {
 	// ComposeProjectSetting is the compose project the container supervisor
 	// runs under, read through ComposeProject for the same reason.
 	ComposeProjectSetting string `json:"compose_project,omitempty"`
+
+	// OMTokenMetaSetting is the path of the small JSON sidecar whose expires_at
+	// field dates the subscription token om authenticates with in the container
+	// (gt-qpeei.37). Setting it is what tells gt doctor that this town runs om
+	// on a token: unset, the expiry check is not applicable. It is a setting,
+	// not a GT_ variable, because the environment-read guard forbids a new one
+	// and the same town settings are read on both sides of the container
+	// boundary. The sidecar never holds the token.
+	OMTokenMetaSetting string `json:"om_token_meta,omitempty"`
 }
 
 // The supervisor kinds daemon.supervisor accepts, and the names the container
@@ -125,6 +134,15 @@ func (c *DaemonPatrolConfig) SupervisorKind() (string, error) {
 	}
 	return "", fmt.Errorf("daemon.supervisor %q: accepted values are %q, %q and %q; leave it unset to detect the host's service manager",
 		c.Supervisor, SupervisorLaunchd, SupervisorSystemd, SupervisorContainer)
+}
+
+// OMTokenMeta returns the sidecar path daemon.om_token_meta sets, "" when the
+// town sets none.
+func (c *DaemonPatrolConfig) OMTokenMeta() string {
+	if c == nil {
+		return ""
+	}
+	return c.OMTokenMetaSetting
 }
 
 // ContainerName returns the container the container supervisor manages.
