@@ -1,6 +1,7 @@
 package templates_test
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -46,8 +47,26 @@ type composeService struct {
 	Healthcheck   *composeHealthcheck          `yaml:"healthcheck"`
 	Environment   map[string]string            `yaml:"environment"`
 	Volumes       []composeVolume              `yaml:"volumes"`
-	Networks      []string                     `yaml:"networks"`
+	Networks      composeServiceNetworks       `yaml:"networks"`
 	Ports         []string                     `yaml:"ports"`
+}
+
+// composeServiceNetworks is a service's networks by name, whether the file lists
+// them or maps them (a mapped one carries aliases, which the forge tests read
+// from the raw file).
+type composeServiceNetworks []string
+
+func (n *composeServiceNetworks) UnmarshalYAML(v *yaml.Node) error {
+	switch v.Kind {
+	case yaml.SequenceNode:
+		return v.Decode((*[]string)(n))
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(v.Content); i += 2 {
+			*n = append(*n, v.Content[i].Value)
+		}
+		return nil
+	}
+	return fmt.Errorf("networks: want a list or a mapping, got node kind %d", v.Kind)
 }
 
 // composeDependency is one entry of the long-form depends_on, which carries the

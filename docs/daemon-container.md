@@ -40,7 +40,7 @@ live town, and no step runs a `gt daemon` command in the live town. Every Docker
   | | value |
   |---|---|
   | live town | the live town's root, for example `~/gt` (written `<live-town>` below); it is only ever named to be refused, nothing is run or written in it |
-  | scratch root | an absolute directory that does not exist yet and is neither under `<live-town>` nor an ancestor of it, for example `~/gt-scratch.noindex/l1/town` beside the live tree (written `<scratch-root>`); the scratch render refuses a root under the live town root, so a directory in the crew area, which is under it, cannot be used |
+  | scratch root | an absolute directory that does not exist yet and is neither under `<live-town>` nor an ancestor of it, `~/gt-scratch.noindex/l1/town`, under the operator-approved scratch location `~/gt-scratch.noindex/l1/` beside the live tree (written `<scratch-root>`); the scratch render refuses a root under the live town root, so a directory in the crew area, which is under it, cannot be used |
   | compose file | an absolute path that is not inside the scratch root and not under `<live-town>`, for example `~/gt-scratch.noindex/l1/compose.yml` (`<compose-file>`) |
   | scratch parent | the scratch root's parent directory, `~/gt-scratch.noindex/l1` (`<scratch-parent>`); the commands that must not run from either town run from here |
   | project | `gt-scratch` |

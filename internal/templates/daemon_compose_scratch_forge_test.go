@@ -1,12 +1,16 @@
 package templates_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/gastown/internal/templates"
 )
@@ -22,15 +26,42 @@ func forgeSpec() templates.ComposeSpec {
 }
 
 // The live Forgejo compose project (~/forgejo/compose.yml) declares these
-// names. They are copied here, not read from the operator's home, so the gate
-// needs nothing outside the repository; the project's own file is the source and
-// a name it gains belongs in this list.
+// names, and this list is the one place they are written down: the renderer's
+// comment points here. They are copied, not read from the operator's home, so the
+// gate needs nothing outside the repository; the project's own file is the source
+// and a name it gains belongs in this list. The ports are the live ones' host
+// side of 127.0.0.1:3000:3000 and 127.0.0.1:2222:22.
 var (
 	liveForgeServices = []string{"db", "forgejo", "docker-in-docker", "runner-register", "runner-daemon"}
 	liveForgeVolumes  = []string{"pgdata", "forgejo_data", "runner_data", "docker_certs", "dind_data"}
 	liveForgeNetworks = []string{"default"}
 	liveForgeProject  = "forgejo"
+	liveForgePorts    = []int{3000, 2222}
 )
+
+// hostPort is the host side of one published port mapping, with or without an
+// interface in front: "127.0.0.1:3100:3000", "3100:3000" and "3100" all publish
+// 3100 on the host except the last, which publishes a random one and returns 0.
+func hostPort(t *testing.T, mapping string) int {
+	t.Helper()
+	parts := strings.Split(mapping, ":")
+	var host string
+	switch len(parts) {
+	case 1:
+		return 0
+	case 2:
+		host = parts[0]
+	case 3:
+		host = parts[1]
+	default:
+		t.Fatalf("port mapping %q has an unexpected shape", mapping)
+	}
+	n, err := strconv.Atoi(host)
+	if err != nil {
+		t.Fatalf("port mapping %q: host side %q is not a port: %v", mapping, host, err)
+	}
+	return n
+}
 
 func TestRenderDaemonCompose_ScratchForgeGolden(t *testing.T) {
 	t.Parallel()
@@ -119,7 +150,14 @@ func TestRenderDaemonCompose_ScratchForgeAcceptsPortsBesideTheLiveOnes(t *testin
 	for _, ports := range [][2]int{{3001, 2223}, {2223, 3001}, {1, 65535}} {
 		spec := forgeSpec()
 		spec.ScratchForgeHTTPPort, spec.ScratchForgeSSHPort = ports[0], ports[1]
-		render(t, spec)
+		_, f := render(t, spec)
+		want := []string{fmt.Sprintf("127.0.0.1:%d:3000", ports[0]), fmt.Sprintf("127.0.0.1:%d:22", ports[1])}
+		if got := f.Services["scratch-forgejo"].Ports; !slices.Equal(got, want) {
+			t.Errorf("ports %v: scratch-forgejo publishes %q, want %q", ports, got, want)
+		}
+		if got := f.Services["scratch-forgejo"].Environment["FORGEJO__server__SSH_PORT"]; got != strconv.Itoa(ports[1]) {
+			t.Errorf("ports %v: SSH_PORT = %q, want %d", ports, got, ports[1])
+		}
 	}
 }
 
@@ -159,9 +197,14 @@ func TestRenderDaemonCompose_ScratchForgeSharesNoNameWithTheLiveForgejo(t *testi
 				t.Errorf("service %q mounts volume %q, one the live Forgejo project declares", name, v.Source)
 			}
 		}
+		for dep := range svc.DependsOn {
+			if slices.Contains(liveForgeServices, dep) {
+				t.Errorf("service %q depends on %q, a service the live Forgejo project declares", name, dep)
+			}
+		}
 		for _, p := range svc.Ports {
-			if strings.Contains(p, ":3000:") || strings.Contains(p, ":2222:") {
-				t.Errorf("service %q publishes %q, a host port the live Forgejo takes", name, p)
+			if hp := hostPort(t, p); slices.Contains(liveForgePorts, hp) {
+				t.Errorf("service %q publishes %q, host port %d, one the live Forgejo takes", name, p, hp)
 			}
 		}
 	}
@@ -187,7 +230,7 @@ func TestRenderDaemonCompose_ScratchForgeServicesMountDeclaredVolumes(t *testing
 			}
 		}
 		for _, n := range svc.Networks {
-			if _, ok := f.Networks[n]; !ok && n != "scratch-egress" {
+			if _, ok := f.Networks[n]; !ok {
 				t.Errorf("service %q joins %q, which the file does not declare", name, n)
 			}
 		}
@@ -295,5 +338,70 @@ func TestRenderDaemonCompose_ScratchForgeDatabaseIsOnItsInternalNetworkAlone(t *
 		if slices.Contains(f.Services[name].Networks, db.Networks[0]) {
 			t.Errorf("service %q joins the database's network %q", name, db.Networks[0])
 		}
+	}
+}
+
+// hostPort reads the mapping shapes the check must not be fooled by: a bare
+// "3000:3000" with no interface put the live port at index 0, where a substring
+// match for ":3000:" never saw it.
+func TestHostPort_ReadsEveryMappingShape(t *testing.T) {
+	t.Parallel()
+	for mapping, want := range map[string]int{
+		"127.0.0.1:3000:3000": 3000,
+		"3000:3000":           3000,
+		"2222:22":             2222,
+		"127.0.0.1:3100:3000": 3100,
+		"3000":                0,
+	} {
+		if got := hostPort(t, mapping); got != want {
+			t.Errorf("hostPort(%q) = %d, want %d", mapping, got, want)
+		}
+	}
+}
+
+// The runner reaches its engine as "docker", and compose's DNS resolves service
+// names and network aliases but not a container's hostname, so the render must
+// give the engine that alias on a network the runner joins. The privileged
+// engine and the daemon share no network: only the forge bridges them.
+func TestRenderDaemonCompose_ScratchForgeRunnerResolvesItsEngineAndTheDaemonNeverReachesIt(t *testing.T) {
+	t.Parallel()
+	out, f := render(t, forgeSpec())
+
+	var raw struct {
+		Services map[string]struct {
+			Networks yaml.Node `yaml:"networks"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &raw); err != nil {
+		t.Fatal(err)
+	}
+	var dindNets map[string]struct {
+		Aliases []string `yaml:"aliases"`
+	}
+	dindNode := raw.Services["scratch-forge-dind"].Networks
+	if err := dindNode.Decode(&dindNets); err != nil {
+		t.Fatalf("scratch-forge-dind networks are not a mapping with aliases: %v", err)
+	}
+
+	host := strings.TrimSuffix(strings.TrimPrefix(f.Services["scratch-forge-runner"].Environment["DOCKER_HOST"], "tcp://"), ":2376")
+	resolved := false
+	for net, cfg := range dindNets {
+		if slices.Contains(cfg.Aliases, host) && slices.Contains(f.Services["scratch-forge-runner"].Networks, net) {
+			resolved = true
+		}
+	}
+	if !resolved {
+		t.Errorf("runner reaches its engine as %q, but no alias of that name sits on a network the runner joins: %v", host, dindNets)
+	}
+
+	for _, daemonNet := range f.Services["daemon"].Networks {
+		if slices.Contains(f.Services["scratch-forge-dind"].Networks, daemonNet) {
+			t.Errorf("the privileged runner engine joins %q, a network the daemon is on", daemonNet)
+		}
+	}
+	if !slices.ContainsFunc(f.Services["scratch-forgejo"].Networks, func(n string) bool {
+		return slices.Contains(f.Services["daemon"].Networks, n)
+	}) {
+		t.Errorf("scratch-forgejo shares no network with the daemon, so the daemon cannot reach the forge")
 	}
 }

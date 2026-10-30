@@ -108,12 +108,12 @@ services:
       - "127.0.0.1:2322:22"
     networks:
       - scratch-forge
+      - scratch-forge-ci
       - scratch-egress
   scratch-forge-dind:
     image: "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1"
     restart: unless-stopped
     privileged: true
-    hostname: docker
     command: ["--insecure-registry=scratch-forgejo:3000"]
     environment:
       DOCKER_TLS_CERTDIR: /certs
@@ -125,7 +125,9 @@ services:
         source: scratch_forge_dind_data
         target: /var/lib/docker
     networks:
-      - scratch-egress
+      scratch-forge-ci:
+        aliases:
+          - docker
   scratch-forge-runner:
     image: "data.forgejo.org/forgejo/runner:13.2.0"
     restart: "no"
@@ -148,13 +150,14 @@ services:
         source: scratch_forge_certs
         target: /certs
     networks:
-      - scratch-egress
+      - scratch-forge-ci
 networks:
   scratch-egress:
   scratch-internal:
     internal: true
   scratch-forge:
     internal: true
+  scratch-forge-ci:
 volumes:
   scratch_dind_data:
   scratch_dolt_data:

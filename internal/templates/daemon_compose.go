@@ -158,16 +158,17 @@ const (
 )
 
 // The scratch Forgejo stack's names. Each is the scratch project's own: none is a
-// name the live Forgejo project (~/forgejo/compose.yml: db, forgejo,
-// docker-in-docker, runner-register, runner-daemon; volumes pgdata, forgejo_data,
-// runner_data, docker_certs, dind_data) declares, and the compose project scopes
-// them again.
+// name the live Forgejo project declares (the list is the test's, in
+// daemon_compose_scratch_forge_test.go, so it is written once), and the compose
+// project scopes them again.
 const (
 	ScratchForgejoService = "scratch-forgejo"
 	scratchForgeDBService = "scratch-forgejo-db"
 	scratchForgeDind      = "scratch-forge-dind"
 	scratchForgeRunner    = "scratch-forge-runner"
 	scratchForgeNetwork   = "scratch-forge"
+	scratchForgeCINetwork = "scratch-forge-ci"
+	scratchForgeDindAlias = "docker"
 
 	scratchForgeDBVolume     = "scratch_forgejo_pgdata"
 	scratchForgeDataVolume   = "scratch_forgejo_data"
@@ -178,22 +179,28 @@ const (
 
 // scratchForgeBody is the throwaway Forgejo stack. %[1]d and %[2]d are the host
 // ports for http and ssh, bound to 127.0.0.1 as the live project binds its own.
+// SSH_PORT is the host port, as the live project's is: it is the port clone URLs
+// advertise, and the port a client reaches the forge's ssh on is the host one.
 //
-// The forge and its Postgres share an internal network, so the database has no
-// way in or out but the forge. Postgres trusts connections on that network
-// because the stack holds nothing but scratch data, and a password would be one
-// more secret for the render to carry or interpolate. The forge, the runner and
-// the runner's engine join the scratch project's egress network, where the
-// scratch daemon is too, so the daemon and the runner both reach the forge by
-// its service name. The runner's engine speaks TLS with its own certs volume,
-// as the live one does, so reaching it from the shared network still needs the
-// client certificates.
+// Three networks keep the privileged engine away from the daemon. The forge and
+// its Postgres share an internal one, so the database has no way in or out but
+// the forge. The forge, the runner and the runner's engine share the CI network,
+// which is not internal because the engine pulls its job images through it; the
+// daemon is not on it. The forge also joins the scratch egress network, the
+// daemon's, so the daemon reaches the forge by its service name without ever
+// reaching the engine. Postgres trusts connections on its network because the
+// stack holds nothing but scratch data, and a password would be one more secret
+// for the render to carry or interpolate. The engine speaks TLS with its own
+// certs volume, as the live one does.
 //
-// The runner is written to run and register against this forge only: the one
-// URL the file names is http://scratch-forgejo:3000/. It starts only after the L2
-// window has registered it and written its config.yml into its data volume, so
-// it is not restarted: without that file it exits, which is the right state
-// until then.
+// The runner reaches its engine as "docker": the engine's cert is valid for that
+// name, and the CI network gives the engine that alias explicitly, because a
+// container's hostname is not a name compose's DNS resolves.
+//
+// The runner names this forge only: the one forge URL the file carries is
+// http://scratch-forgejo:3000/. compose starts it with the rest of the project;
+// without a config.yml in its data volume it exits, and restart "no" leaves it
+// stopped. The L2 window registers it against this forge and starts it again.
 const scratchForgeBody = `  ` + scratchForgeDBService + `:
     image: %[3]q
     restart: unless-stopped
@@ -240,12 +247,12 @@ const scratchForgeBody = `  ` + scratchForgeDBService + `:
       - "127.0.0.1:%[2]d:22"
     networks:
       - ` + scratchForgeNetwork + `
+      - ` + scratchForgeCINetwork + `
       - %[6]s
   ` + scratchForgeDind + `:
     image: %[5]q
     restart: unless-stopped
     privileged: true
-    hostname: docker
     command: ["--insecure-registry=` + ScratchForgejoService + `:3000"]
     environment:
       DOCKER_TLS_CERTDIR: /certs
@@ -257,7 +264,9 @@ const scratchForgeBody = `  ` + scratchForgeDBService + `:
         source: ` + scratchForgeDindVolume + `
         target: /var/lib/docker
     networks:
-      - %[6]s
+      ` + scratchForgeCINetwork + `:
+        aliases:
+          - ` + scratchForgeDindAlias + `
   ` + scratchForgeRunner + `:
     image: %[7]q
     restart: "no"
@@ -269,7 +278,7 @@ const scratchForgeBody = `  ` + scratchForgeDBService + `:
     working_dir: /data
     command: ["forgejo-runner", "--config", "config.yml", "daemon"]
     environment:
-      DOCKER_HOST: tcp://docker:2376
+      DOCKER_HOST: tcp://` + scratchForgeDindAlias + `:2376
       DOCKER_CERT_PATH: /certs/client
       DOCKER_TLS_VERIFY: "1"
     volumes:
@@ -280,12 +289,13 @@ const scratchForgeBody = `  ` + scratchForgeDBService + `:
         source: ` + scratchForgeCertsVolume + `
         target: /certs
     networks:
-      - %[6]s
+      - ` + scratchForgeCINetwork + `
 `
 
 // scratchForgeNetworkDecl and scratchForgeVolumeDecls are the stack's entries in
 // the file's networks and volumes sections.
-const scratchForgeNetworkDecl = "  " + scratchForgeNetwork + ":\n    internal: true\n"
+const scratchForgeNetworkDecl = "  " + scratchForgeNetwork + ":\n    internal: true\n" +
+	"  " + scratchForgeCINetwork + ":\n"
 
 var scratchForgeVolumeDecls = "  " + scratchForgeDBVolume + ":\n" +
 	"  " + scratchForgeDataVolume + ":\n" +
