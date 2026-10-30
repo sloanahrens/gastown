@@ -4328,7 +4328,9 @@ function isReadyToDispatch(b) { return b.shape === "ok" || b.shape === "skipped"
 function seatPlaces(all) {
   const waiting = all.filter(b => b.shape === "skipped" && skipClass(b.skip_reason || b.shape_note) === "waiting for a seat");
   const t = b => { const n = Date.parse(b.created_at); return Number.isFinite(n) ? n : Infinity; };
-  waiting.sort((a, b) => a.priority - b.priority || (t(a) === t(b) ? 0 : t(a) < t(b) ? -1 : 1) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // A missing or non-numeric priority sorts last, like an unparseable time.
+  const pri = b => (b.priority != null && Number.isFinite(Number(b.priority))) ? Number(b.priority) : 99;
+  waiting.sort((a, b) => pri(a) - pri(b) || (t(a) === t(b) ? 0 : t(a) < t(b) ? -1 : 1) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const places = {};
   waiting.forEach((b, i) => { places[b.rig + "/" + b.id] = (i + 1) + " of " + waiting.length; });
   return places;

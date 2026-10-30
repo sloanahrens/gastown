@@ -266,8 +266,9 @@ func TestSkipClass(t *testing.T) {
 		{"overlap hold", "overlap hold: gt-okckk is in progress", "skipped"},
 		{"empty", "", "skipped"},
 	} {
+		// Not parallel: the subtests share one goja VM, which is not safe for
+		// concurrent use.
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			v, err := dom.vm.RunString("skipClass(" + quoteJS(tt.reason) + ")")
 			if err != nil {
 				t.Fatalf("skipClass(%q): %v", tt.reason, err)
@@ -416,6 +417,13 @@ func TestQueueSkipPageStaleVerdicts(t *testing.T) {
 		t.Errorf("the stale note reads %q, want it to say %q", notes[0], want)
 	}
 
+	// The chip counts what the rows below it list: a row shaped "skipped" lints
+	// clean, so a stale page still counts it as ready (2 here) and only stops
+	// claiming why it was passed over.
+	if got := chipNamed(t, queueChips(t, dom), "ready to dispatch"); got.Count != "2" {
+		t.Errorf("the stale page's ready to dispatch chip counts %s, want 2 (the shaped bead and the skipped one)", got.Count)
+	}
+
 	// No row claims a skip either: the row the reading gave shape "skipped" is
 	// only "ready", with neither the skip tag nor the reason line.
 	rows := queueRows(t, dom)
@@ -467,6 +475,47 @@ func TestQueueSkipPageUnreadableLedger(t *testing.T) {
 			}
 			if strings.Contains(notes[0], "minutes old") {
 				t.Errorf("a ledger with no time is aged into minutes: %q", notes[0])
+			}
+		})
+	}
+}
+
+// A bead with a missing or non-numeric priority takes the last place in the
+// seat order rather than breaking the sort with NaN (gt-qt0ym).
+func TestQueueSkipPageSeatPlaceMissingPriority(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		priority any
+	}{
+		{"missing", nil},
+		{"non-numeric", "high"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			odd := skippedRow("gt-nopri", "2026-10-29T11:58:00Z", "no seat: over the town total", 4)
+			odd["created_at"] = "2026-10-27T10:00:00Z"
+			if tt.priority == nil {
+				delete(odd, "priority")
+			} else {
+				odd["priority"] = tt.priority
+			}
+			normal := skippedRow("gt-normal", "2026-10-29T11:58:00Z", "no seat: over the town total", 4)
+			normal["created_at"] = "2026-10-29T10:00:00Z"
+			dom := drawQueuePage(t, queueRead(odd, normal))
+
+			want := map[string]string{"gt-normal": "waiting for a seat #1 of 2", "gt-nopri": "waiting for a seat #2 of 2"}
+			for _, r := range queueRows(t, dom) {
+				for id, tag := range want {
+					if !strings.Contains(r.Text, id) {
+						continue
+					}
+					if l, ok := leafSaying(r, "tag", "waiting for a seat"); !ok || l.Text != tag {
+						t.Errorf("%s wears %+v, want %q", id, l, tag)
+					}
+				}
 			}
 		})
 	}
