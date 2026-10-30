@@ -4,6 +4,7 @@ services:
     image: "gt-daemon:4f2a1c9"
     container_name: "gt-town-daemon-1"
     restart: unless-stopped
+    init: true
     stop_grace_period: "30s"
     working_dir: "/towns/live"
     depends_on:
