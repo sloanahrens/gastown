@@ -230,12 +230,22 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if via != "" {
-		fmt.Printf("%s Daemon restarted under %s (PID %d)\n", style.Bold.Render("✓"), via, pid)
-	} else {
-		fmt.Printf("%s Daemon restarted (PID %d)\n", style.Bold.Render("✓"), pid)
-	}
+	fmt.Printf("%s %s\n", style.Bold.Render("✓"), restartedLine(via, pid))
 	return nil
+}
+
+// restartedLine is what gt daemon restart prints. A container restart has no
+// pid to report: the lock pid of a container is from its own namespace, and the
+// restart is proven by state.json instead.
+func restartedLine(via string, pid int) string {
+	line := "Daemon restarted"
+	if via != "" {
+		line += " under " + via
+	}
+	if pid > 0 {
+		line += fmt.Sprintf(" (PID %d)", pid)
+	}
+	return line
 }
 
 // spawnDaemonProcess starts 'gt daemon run' as a detached child of this

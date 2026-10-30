@@ -2067,38 +2067,209 @@ func TestContainerSupervisorRestartRecreatesTheService(t *testing.T) {
 	}
 }
 
+// containerRestartRig is a running container town whose restart is proven from
+// state.json: the readings state.json gives in order (the last repeats; the
+// first is the baseline read before the restart), what docker says about the
+// container, and what the restart command records.
+type containerRestartRig struct {
+	c         *daemonControl
+	calls     *supervisorCalls
+	town      string
+	readings  []stateReading
+	reads     int
+	sleeps    int
+	dockerOut string
+	dockerErr error
+}
+
+type stateReading struct {
+	state *daemon.State
+	err   error
+}
+
+var restartBaselineStart = time.Date(2026, 10, 30, 6, 0, 0, 0, time.UTC)
+
+func containerOwnerState(start time.Time, running bool) *daemon.State {
+	owner := daemon.Owner{Kind: config.SupervisorContainer, ID: "scratch-daemon-1"}
+	return &daemon.State{Running: running, Owner: &owner, StartedAt: start}
+}
+
+func newContainerRestartRig(t *testing.T, readings ...stateReading) *containerRestartRig {
+	t.Helper()
+	r := &containerRestartRig{readings: readings, dockerOut: "running scratch-image\n"}
+	r.town = startGuardTown(t)
+	writeComposeFile(t, r.town)
+	r.c, r.calls = stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
+	r.c.guard = guardProbe(neverProbed(t))
+	r.c.isRunning = func(string) (bool, int, error) { return true, 1111, nil }
+	r.c.sleep = func(time.Duration) { r.sleeps++ }
+	r.c.readState = func(string) (*daemon.State, error) {
+		i := min(r.reads, len(r.readings)-1)
+		r.reads++
+		return r.readings[i].state, r.readings[i].err
+	}
+	r.c.dockerInspect = func(context.Context, []string) ([]byte, error) {
+		if r.dockerErr != nil {
+			return nil, r.dockerErr
+		}
+		return []byte(r.dockerOut), nil
+	}
+	return r
+}
+
 // restartDaemon over a running container runs the restart builder and never the
-// start builder, with nothing in the environment: a restart is not a takeover.
+// start builder, with nothing in the environment (a restart is not a takeover),
+// and judges the result by state.json, so there is no pid to return
+// (gt-qpeei.40): the owner is the town's container, running, with a start time
+// later than the one recorded before the restart.
 func TestRestartDaemon_ContainerRunsTheRestartBuilderNotTheStart(t *testing.T) {
 	t.Parallel()
-	town := startGuardTown(t)
-	writeComposeFile(t, town)
-	c, calls := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
-	c.guard = guardProbe(neverProbed(t))
-	reads := 0
-	c.isRunning = func(string) (bool, int, error) {
-		reads++
-		if reads == 1 {
-			return true, 1111, nil // the daemon being replaced
-		}
-		return true, 4242, nil // its replacement
-	}
+	later := restartBaselineStart.Add(time.Minute)
+	r := newContainerRestartRig(t,
+		stateReading{state: containerOwnerState(restartBaselineStart, true)}, // the baseline
+		stateReading{state: containerOwnerState(later, true)})
 
-	via, pid, err := c.restartDaemon(town)
+	via, pid, err := r.c.restartDaemon(r.town)
 	if err != nil {
 		t.Fatalf("restartDaemon: %v", err)
 	}
-	if via != config.SupervisorContainer || pid != 4242 {
-		t.Errorf("restartDaemon = (%q, %d), want (container, 4242)", via, pid)
+	if via != config.SupervisorContainer || pid != 0 {
+		t.Errorf("restartDaemon = (%q, %d), want (container, 0): a container restart has no pid", via, pid)
 	}
-	if len(calls.argv) != 1 {
-		t.Fatalf("commands = %v, want exactly the restart", calls.argv)
+	if len(r.calls.argv) != 1 {
+		t.Fatalf("commands = %v, want exactly the restart", r.calls.argv)
 	}
-	if got := calls.joined(); !strings.HasSuffix(got, " up -d --force-recreate daemon") {
+	if got := r.calls.joined(); !strings.HasSuffix(got, " up -d --force-recreate daemon") {
 		t.Errorf("command = %q, want the --force-recreate restart", got)
 	}
-	if calls.envs[0] != nil {
-		t.Errorf("the restart carried environment %v, want none", calls.envs[0])
+	if r.calls.envs[0] != nil {
+		t.Errorf("the restart carried environment %v, want none", r.calls.envs[0])
+	}
+}
+
+// The restart is proven only by state.json and docker together. Each of these
+// readings keeps the wait going to the end of the budget on the fake sleeps and
+// ends in the timeout that names the reading and prints the logs command; none
+// is ever success. A test that treats an unknown state as success fails here.
+func TestRestartDaemon_ContainerRestartIsNotProvenByAnythingLess(t *testing.T) {
+	t.Parallel()
+	later := restartBaselineStart.Add(time.Minute)
+	good := stateReading{state: containerOwnerState(later, true)}
+	baseline := stateReading{state: containerOwnerState(restartBaselineStart, true)}
+	launchdOwner := containerOwnerState(later, true)
+	other := daemon.Owner{Kind: config.SupervisorLaunchd, ID: templates.LaunchdLabel}
+	launchdOwner.Owner = &other
+	cases := []struct {
+		name      string
+		readings  []stateReading
+		dockerOut string
+		dockerErr error
+		want      string
+	}{
+		{"the same start time", []stateReading{baseline, baseline}, "running img\n", nil, "still records the start"},
+		{"an earlier start time", []stateReading{baseline, {state: containerOwnerState(restartBaselineStart.Add(-time.Hour), true)}}, "running img\n", nil, "still records the start"},
+		{"another owner with a later start", []stateReading{baseline, {state: launchdOwner}}, "running img\n", nil, "names owner"},
+		{"the container's daemon recorded not running", []stateReading{baseline, {state: containerOwnerState(later, false)}}, "running img\n", nil, "not running"},
+		{"state.json unreadable", []stateReading{baseline, {err: errors.New("read failed")}}, "running img\n", nil, "cannot be read"},
+		{"state.json missing", []stateReading{baseline, {}}, "running img\n", nil, "is missing"},
+		{"docker state unknown", []stateReading{baseline, good}, "", errors.New("docker: unreachable"), "container's state cannot be read"},
+		{"docker reports it exited", []stateReading{baseline, good}, "exited img\n", nil, "does not report the container running"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newContainerRestartRig(t, tc.readings...)
+			r.dockerOut, r.dockerErr = tc.dockerOut, tc.dockerErr
+
+			_, _, err := r.c.restartDaemon(r.town)
+
+			if err == nil || !strings.Contains(err.Error(), "did not take the town") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want the timeout naming %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "docker --context "+defaultDockerContext+" logs scratch-daemon-1") {
+				t.Errorf("error lacks the docker logs command: %v", err)
+			}
+			if r.sleeps != restartWaitAttempts {
+				t.Errorf("waited %d polls, want the whole budget of %d", r.sleeps, restartWaitAttempts)
+			}
+		})
+	}
+}
+
+// The wait goes on past stale readings and passes when the new start shows up,
+// and a restart command that reports an error after the container came up is
+// still success, as it is for the other kinds.
+func TestRestartDaemon_ContainerWaitPassesWhenTheNewStartAppears(t *testing.T) {
+	t.Parallel()
+	stale := stateReading{state: containerOwnerState(restartBaselineStart, true)}
+	fresh := stateReading{state: containerOwnerState(restartBaselineStart.Add(time.Minute), true)}
+	for _, runErr := range []error{nil, errors.New("docker: exit 1")} {
+		r := newContainerRestartRig(t, stale, stale, stale, stale, fresh)
+		if runErr != nil {
+			r.c.run = func(a []string) error { r.calls.argv = append(r.calls.argv, a); return runErr }
+		}
+		via, pid, err := r.c.restartDaemon(r.town)
+		if err != nil || via != config.SupervisorContainer || pid != 0 {
+			t.Fatalf("runErr=%v: restartDaemon = (%q, %d, %v), want success without a pid", runErr, via, pid, err)
+		}
+		if r.sleeps != 4 {
+			t.Errorf("runErr=%v: waited %d polls, want 3 stale polls and then the one that sees the new start", runErr, r.sleeps)
+		}
+	}
+}
+
+// A restart whose command failed and whose container never took the town is the
+// "could not restart" error with the load hint, not a bare timeout.
+func TestRestartDaemon_ContainerFailedCommandAndNoNewStartIsAnError(t *testing.T) {
+	t.Parallel()
+	stale := stateReading{state: containerOwnerState(restartBaselineStart, true)}
+	r := newContainerRestartRig(t, stale)
+	r.c.run = func(a []string) error { r.calls.argv = append(r.calls.argv, a); return errors.New("docker: exit 1") }
+
+	_, _, err := r.c.restartDaemon(r.town)
+
+	if err == nil || !strings.Contains(err.Error(), "could not restart the daemon") {
+		t.Fatalf("error = %v, want the could-not-restart error", err)
+	}
+}
+
+// A state.json that cannot be read before the restart refuses it: with no
+// recorded start the new daemon could not be told from the old one. A missing
+// file records no start, so any start passes.
+func TestRestartDaemon_ContainerBaselineReadFailureRefusesBeforeRestarting(t *testing.T) {
+	t.Parallel()
+	r := newContainerRestartRig(t, stateReading{err: errors.New("read failed")})
+
+	_, _, err := r.c.restartDaemon(r.town)
+
+	if err == nil || !strings.Contains(err.Error(), "nothing was restarted") {
+		t.Fatalf("error = %v, want a refusal that nothing was restarted", err)
+	}
+	if len(r.calls.argv) != 0 {
+		t.Errorf("a refused restart ran %v", r.calls.argv)
+	}
+
+	missing := newContainerRestartRig(t, stateReading{}, stateReading{state: containerOwnerState(restartBaselineStart, true)})
+	if _, _, err := missing.c.restartDaemon(missing.town); err != nil {
+		t.Errorf("a restart with no state.json before it = %v, want success on the first start recorded", err)
+	}
+}
+
+// The restart's output names a pid only when there is one.
+func TestRestartedLine(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		via  string
+		pid  int
+		want string
+	}{
+		{"container", 0, "Daemon restarted under container"},
+		{"launchd", 4242, "Daemon restarted under launchd (PID 4242)"},
+		{"", 7, "Daemon restarted (PID 7)"},
+	} {
+		if got := restartedLine(tc.via, tc.pid); got != tc.want {
+			t.Errorf("restartedLine(%q, %d) = %q, want %q", tc.via, tc.pid, got, tc.want)
+		}
 	}
 }
 
