@@ -310,8 +310,9 @@ var counterWords = map[string]bool{
 }
 
 // countedName reports whether words name a quantity: a counter word beside
-// only token(s) or key(s) ("token_count", "maxTokens", "input_tokens"). Any
-// other credential word in the name makes it a credential again.
+// only token(s) ("token_count", "maxTokens", "input_tokens"). Any other
+// credential word, and any key word, makes it a credential again: "api_key_len"
+// and "key_count" hold a key, so their values are redacted.
 func countedName(words []string) bool {
 	counted := false
 	for _, w := range words {
@@ -323,7 +324,7 @@ func countedName(words []string) bool {
 		return false
 	}
 	for _, w := range words {
-		if credentialWords[w] && !tokenWords[w] {
+		if (credentialWords[w] || keyWords[w]) && !tokenWords[w] {
 			return false
 		}
 	}
@@ -336,8 +337,8 @@ var tokenWords = map[string]bool{"token": true, "tokens": true}
 // credentialName reports whether a field name names a credential, however its
 // words are separated: api_token, APIKey, db.password, apikey.
 //
-// A name made of a credential word and a counter is a count and is kept, and a
-// bare "key" is kept; every other shape holding a credential word is redacted.
+// A name made of a token word and a counter is a count and is kept; every other
+// shape holding a credential or key word is redacted.
 func credentialName(name string) bool {
 	words := nameWords(name)
 	if len(words) == 0 {
