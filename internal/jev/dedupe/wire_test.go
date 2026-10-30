@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -255,20 +254,16 @@ func TestJevDedupeOpenScrubsStateWhenSettingsSaySo(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var body string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				b, _ := io.ReadAll(r.Body)
-				body = string(b)
-				w.WriteHeader(http.StatusBadGateway)
-			}))
-			defer srv.Close()
-
+			sink := &postedBody{}
 			town := t.TempDir()
 			if err := os.MkdirAll(filepath.Join(town, RigName, ".beads"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			client := func(opts ...jev.Option) (*jev.Client, error) {
-				return jev.NewClient(append(opts, jev.WithKey("test-key"), jev.WithBaseURL(srv.URL))...)
+				return jev.NewClient(append(opts,
+					jev.WithKey("test-key"),
+					jev.WithBaseURL("http://jev.test/v1/systemone"),
+					jev.WithHTTPClient(&http.Client{Transport: sink}))...)
 			}
 			p, err := open(town, Settings{USDPerBillionTokens: 4, Scrub: tt.scrub}, nil, client)
 			if err != nil {
@@ -277,9 +272,27 @@ func TestJevDedupeOpenScrubsStateWhenSettingsSaySo(t *testing.T) {
 			_, _ = p.Asker.Ask(context.Background(), map[string]string{"log": "pushed with " + token}, map[string]jev.Question{
 				"q": {Type: "choice", Instructions: "Which team?", Options: map[string]string{"returns": "Exchanges"}},
 			})
-			if got := strings.Contains(body, token); got != tt.wantToken {
+			if got := strings.Contains(sink.body, token); got != tt.wantToken {
 				t.Errorf("posted body holds the token = %v, want %v", got, tt.wantToken)
 			}
 		})
 	}
+}
+
+// postedBody stands in for the network: it keeps the body the client sent and
+// answers a status the test ignores.
+type postedBody struct{ body string }
+
+func (p *postedBody) RoundTrip(r *http.Request) (*http.Response, error) {
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	p.body = string(b)
+	return &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    r,
+	}, nil
 }

@@ -5,7 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -83,23 +83,37 @@ func jevDedupeSettingsFrom(t *testing.T, config *JevDedupeConfig) dedupe.Setting
 }
 
 // patrolBody sends a state holding both test secrets through the client the
-// daemon builds from settings, and returns the body the server received. The
-// server answers a 502, which the test ignores: the body is what it checks.
+// daemon builds from settings, and returns the body the client posted. The
+// transport answers a 502, which the test ignores: the body is what it checks.
 func patrolBody(t *testing.T, settings dedupe.Settings) string {
 	t.Helper()
-	var body []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ = io.ReadAll(r.Body)
-		w.WriteHeader(http.StatusBadGateway)
-	}))
-	defer srv.Close()
-
+	sink := &postedBody{}
 	opts := append(jev.BatteryOptions(t.TempDir(), dedupe.Caller, nil, settings.Scrub),
-		jev.WithKey("test-key"), jev.WithBaseURL(srv.URL))
+		jev.WithKey("test-key"),
+		jev.WithBaseURL("http://jev.test/v1/systemone"),
+		jev.WithHTTPClient(&http.Client{Transport: sink}))
 	c, err := jev.NewClient(opts...)
 	require.NoError(t, err)
 
 	state := map[string]string{"log": "pushed with " + scrubTestToken + " from " + scrubTestHome + "/src"}
 	_, _ = c.Choice(t.Context(), state, "Which team should handle this?", map[string]string{"returns": "Exchanges"})
-	return string(body)
+	return sink.body
+}
+
+// postedBody stands in for the network: it keeps the body the client sent and
+// answers a status the test ignores.
+type postedBody struct{ body string }
+
+func (p *postedBody) RoundTrip(r *http.Request) (*http.Response, error) {
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	p.body = string(b)
+	return &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    r,
+	}, nil
 }
