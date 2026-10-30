@@ -55,10 +55,24 @@ func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *
 		logger:         log.New(&logs, "", 0),
 		clock:          clockwork.NewFakeClockAt(now),
 		dogFeedFn:      (&feedCapture{}).record,
-		tierSweepSeams: tierSweepSeams{run: rec.run, beads: func(string) tierSweepBeadStore { return bd }},
+		tierSweepSeams: tierSweepSeams{run: rec.run, beads: func(string) tierSweepBeadStore { return bd }, treeHas: goTree},
 	}
 	useGitfake(t, d)
 	return d, rec, bd, &logs
+}
+
+// goTree is a checked-out tree that ships every path, so each stage runs the Go
+// command. A test reaches the tree check through the seam, never a real stat.
+func goTree(string, string) (bool, error) { return true, nil }
+
+// treeWith is a checked-out tree that ships exactly the paths listed in paths.
+func treeWith(paths ...string) func(dir, rel string) (bool, error) {
+	return func(_, rel string) (bool, error) { return slices.Contains(paths, rel), nil }
+}
+
+// treeFailing is a checked-out tree whose every path fails to check with err.
+func treeFailing(err error) func(dir, rel string) (bool, error) {
+	return func(_, _ string) (bool, error) { return false, err }
 }
 
 // tierSweepRunRecorder records each stage the cycle ran and answers it with
@@ -2738,5 +2752,236 @@ func TestTierSweepFileRed_LeavesShapedAndClaimedBeadsAlone(t *testing.T) {
 
 	if len(bd.updated) != 0 {
 		t.Errorf("updated = %+v, want no rewrite of a shaped or claimed bead", bd.updated)
+	}
+}
+
+// TestTierSweepStages_ResolveInPicksTheTreesCommand: each stage runs the Go
+// command where the checked-out tree ships its directory, the rig's own script
+// where it does not, and no command where the tree ships neither (gt-j0wki). A
+// stage that always picks the Go command fails the script rows.
+func TestTierSweepStages_ResolveInPicksTheTreesCommand(t *testing.T) {
+	t.Parallel()
+	const (
+		shellDir  = "internal/shelltier/cmd/shelltier"
+		tierDir   = "cmd/tier-sweep"
+		script    = "scripts/tier-sweep.sh"
+		goShell   = "go run ./internal/shelltier/cmd/shelltier --all --budget 10m"
+		goTiers   = "go run ./cmd/tier-sweep integration race"
+		scriptSh  = "bash scripts/tier-sweep.sh shell"
+		scriptInt = "bash scripts/tier-sweep.sh integration race"
+	)
+	statErr := errors.New("stat tree: permission denied")
+	tests := []struct {
+		name    string
+		has     func(dir, rel string) (bool, error)
+		stage   int
+		want    string
+		wantOK  bool
+		wantErr error
+	}{
+		{name: "go tree, shell", has: treeWith(shellDir, tierDir, script), stage: 0, want: goShell, wantOK: true},
+		{name: "go tree, integration race", has: treeWith(shellDir, tierDir, script), stage: 1, want: goTiers, wantOK: true},
+		{name: "script tree, shell", has: treeWith(script), stage: 0, want: scriptSh, wantOK: true},
+		{name: "script tree, integration race", has: treeWith(script), stage: 1, want: scriptInt, wantOK: true},
+		{name: "tree with only the shell Go dir, integration falls to the script", has: treeWith(shellDir, script), stage: 1, want: scriptInt, wantOK: true},
+		{name: "tree with neither, shell", has: treeWith(), stage: 0, wantOK: false},
+		{name: "tree with neither, integration race", has: treeWith(), stage: 1, wantOK: false},
+		{name: "unreadable tree, shell", has: treeFailing(statErr), stage: 0, wantErr: statErr},
+		{name: "unreadable tree, integration race", has: treeFailing(statErr), stage: 1, wantErr: statErr},
+		{name: "no Go dir, unreadable script check", has: func(_, rel string) (bool, error) {
+			if rel == script {
+				return false, statErr
+			}
+			return false, nil
+		}, stage: 1, wantErr: statErr},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, ok, err := tierSweepStages("devops")[tc.stage].resolveIn(func(rel string) (bool, error) { return tc.has("", rel) })
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("runnable = %v, want %v", ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if got := st.command(); got != tc.want {
+				t.Errorf("command = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTierSweepRig_TreeWithNoCommandIsRed: a tree with neither the Go command
+// nor the script runs no stage. Each tier is RED with the reason, files a bead,
+// and the rig's tip is not recorded green (gt-j0wki).
+func TestTierSweepRig_TreeWithNoCommandIsRed(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "devops")
+	d.tierSweepSeams.treeHas = treeWith()
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	cycle := d.startDogCycle("tier_sweep")
+	defer cycle.close()
+
+	d.runTierSweepRig(context.Background(), cycle, "devops", now)
+
+	if len(rec.stages) != 0 {
+		t.Errorf("stages run = %d, want none: the tree has no command to run", len(rec.stages))
+	}
+	st := tierSweepTestState(t, d, "devops")
+	for _, tier := range []string{"shell", "integration", "race"} {
+		ts, ok := st.Tiers[tier]
+		if !ok || ts.Verdict != tierSweepRed || !slices.Equal(ts.FailedNames, []string{tierSweepNoCommandReason}) {
+			t.Errorf("tier %s = %+v, want RED with reason %q", tier, ts, tierSweepNoCommandReason)
+		}
+		if ts.Command != "" {
+			t.Errorf("tier %s command = %q, want none: nothing ran", tier, ts.Command)
+		}
+	}
+	if st.LastGreenSHA == "abc123" {
+		t.Errorf("LastGreenSHA = %q, want the tip not recorded green", st.LastGreenSHA)
+	}
+}
+
+// TestTierSweepRig_UnreadableTreeIsRedWithTheError: a tree whose check fails
+// runs no stage. Each tier is RED with the check's error, not the no-command
+// reason, since the tree may well ship a command; the tip is not recorded green
+// (gt-j0wki).
+func TestTierSweepRig_UnreadableTreeIsRedWithTheError(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "devops")
+	statErr := errors.New("stat tree: permission denied")
+	d.tierSweepSeams.treeHas = treeFailing(statErr)
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	cycle := d.startDogCycle("tier_sweep")
+	defer cycle.close()
+
+	d.runTierSweepRig(context.Background(), cycle, "devops", now)
+
+	if len(rec.stages) != 0 {
+		t.Errorf("stages run = %d, want none: the tree could not be checked", len(rec.stages))
+	}
+	st := tierSweepTestState(t, d, "devops")
+	for _, tier := range []string{"shell", "integration", "race"} {
+		ts, ok := st.Tiers[tier]
+		if !ok || ts.Verdict != tierSweepRed || !slices.Equal(ts.FailedNames, []string{statErr.Error()}) {
+			t.Errorf("tier %s = %+v, want RED with reason %q", tier, ts, statErr.Error())
+		}
+		if ts.Command != "" {
+			t.Errorf("tier %s command = %q, want none: nothing ran", tier, ts.Command)
+		}
+	}
+	if st.LastGreenSHA == "abc123" {
+		t.Errorf("LastGreenSHA = %q, want the tip not recorded green", st.LastGreenSHA)
+	}
+}
+
+// TestTierSweepTreeHas_ReadsTheTree reads the production tree check against a
+// real temporary tree: a file or a directory that is there is shipped, a path
+// that is not is not shipped, and a path whose parent is a file is an error,
+// not a missing command (gt-j0wki). A real stat is the one thing this test
+// checks, so it is the one test that touches a tree on disk.
+func TestTierSweepTreeHas_ReadsTheTree(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "cmd", "tier-sweep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "shipped.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notadir"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		rel     string
+		want    bool
+		wantErr bool
+	}{
+		{name: "file is shipped", rel: "scripts/shipped.txt", want: true},
+		{name: "directory is shipped", rel: "cmd/tier-sweep", want: true},
+		{name: "absent path is not shipped", rel: "internal/shelltier/cmd/shelltier", want: false},
+		{name: "parent is a file, an error", rel: "notadir/tier-sweep.sh", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tierSweepTreeHas(dir, tc.rel)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error = %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("shipped = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTierSweepRig_ScriptTreeReadsTheScriptVerdict: a tree that ships only
+// scripts/tier-sweep.sh runs it with the tiers. Its GREEN lines with exit 0 are
+// green; the same lines with exit 1 withhold GREEN, and the tip is not recorded
+// green.
+func TestTierSweepRig_ScriptTreeReadsTheScriptVerdict(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		exitCode  int
+		wantGreen bool
+	}{
+		{name: "exit 0", exitCode: 0, wantGreen: true},
+		{name: "exit 1", exitCode: 1, wantGreen: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, rec, _, _ := newTierSweepDaemon(t, now, "devops")
+			d.tierSweepSeams.treeHas = treeWith("scripts/tier-sweep.sh")
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+			d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+			rec.result = func(st tierSweepStage) tierSweepStageResult {
+				var b strings.Builder
+				for _, tier := range st.tiers {
+					fmt.Fprintf(&b, "tier-sweep: %s GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n", tier)
+				}
+				return tierSweepStageResult{output: b.String(), exitCode: tc.exitCode, ran: true}
+			}
+			cycle := d.startDogCycle("tier_sweep")
+			defer cycle.close()
+
+			d.runTierSweepRig(context.Background(), cycle, "devops", now)
+
+			wantCmds := []string{"bash scripts/tier-sweep.sh shell", "bash scripts/tier-sweep.sh integration race"}
+			var gotCmds []string
+			for _, st := range rec.stages {
+				gotCmds = append(gotCmds, st.command())
+			}
+			if !slices.Equal(gotCmds, wantCmds) {
+				t.Fatalf("commands run = %q, want %q", gotCmds, wantCmds)
+			}
+			st := tierSweepTestState(t, d, "devops")
+			for _, tier := range []string{"shell", "integration", "race"} {
+				ts := st.Tiers[tier]
+				if got := ts.Verdict == tierSweepGreen; got != tc.wantGreen {
+					t.Errorf("tier %s verdict = %q, want green = %v", tier, ts.Verdict, tc.wantGreen)
+				}
+			}
+			if got := st.LastGreenSHA == "abc123"; got != tc.wantGreen {
+				t.Errorf("LastGreenSHA = %q, want recorded green = %v", st.LastGreenSHA, tc.wantGreen)
+			}
+			if got := st.Tiers["shell"].Command; got != "bash scripts/tier-sweep.sh shell" {
+				t.Errorf("shell command on the record = %q, want the script the tree ran", got)
+			}
+		})
 	}
 }

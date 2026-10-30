@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -87,9 +88,24 @@ const (
 	// stage, and the runner does not raise either.
 	tierSweepShellScriptBudget = "10m"
 
-	// tierSweepShellCommand is the shell stage's full command, and the one the
-	// sweep bead's check command names for a red shell unit.
+	// tierSweepShellCommand is the Go shell stage's full command. A red shell
+	// unit's sweep bead names the command that ran for its rig (Command on the
+	// tier result), which is this one in a tree that ships the Go runner.
 	tierSweepShellCommand = tierSweepShellRunner + " --budget " + tierSweepShellScriptBudget
+
+	// The Go commands run only in a tree that ships their directories. A rig
+	// that ships its own script (devops) has neither, and the stage falls back
+	// to the script (gt-j0wki).
+	tierSweepShellDir = "internal/shelltier/cmd/shelltier"
+	tierSweepTierDir  = "cmd/tier-sweep"
+
+	// tierSweepScriptPath is the rig's own tier script. A checked-out tree that
+	// ships no Go command runs it with the tiers as arguments (resolveIn).
+	tierSweepScriptPath = "scripts/tier-sweep.sh"
+
+	// tierSweepNoCommandReason is the RED reason of a stage whose tree ships
+	// neither the Go command nor the script. Nothing ran, so nothing is green.
+	tierSweepNoCommandReason = "no tier-sweep command in this tree"
 
 	// tierSweepRedLabel marks a bead the sweep filed for one failing unit. It
 	// is deliberately not landworker.LabelRedMain: the post-land runner's
@@ -172,6 +188,10 @@ type tierSweepTierResult struct {
 	// (gt-j6vlz). Omitted when the sweep that wrote the record reported none,
 	// which is also how a record written before the field existed reads.
 	LogDir string `json:"log_dir,omitempty"`
+	// Command is the command the stage ran for this tier in the rig's checked-out
+	// tree: the Go command, or the rig's own script. The sweep bead's check
+	// command names it. Empty when no command ran (gt-j0wki).
+	Command string `json:"command,omitempty"`
 	// SHA is the tip this verdict was taken at: the cycle's own tip for a tier
 	// that cycle ran, an earlier one for a tier a later Partial cycle carried
 	// forward (gt-euxf1). It, not the record's LastSHA, is what a verdict's
@@ -414,6 +434,12 @@ type tierSweepStage struct {
 	// runner, when set, is the command the stage runs in place of the tier
 	// script: the shell stage's Go runner.
 	runner string
+	// goDir is the directory the stage's Go command needs in the checked-out
+	// tree. The Go command runs only where it exists (resolveIn).
+	goDir string
+	// script is true when resolveIn found the Go command missing and the tree
+	// ships scripts/tier-sweep.sh: the stage runs that script with its tiers.
+	script bool
 	// slot is true when the stage starts containers and so must run under the
 	// town's container-gate slot.
 	slot bool
@@ -429,7 +455,37 @@ func (s tierSweepStage) command() string {
 	if s.runner != "" {
 		return s.runner
 	}
+	if s.script {
+		return "bash " + tierSweepScriptPath + " " + strings.Join(s.tiers, " ")
+	}
 	return tierSweepTierCommand + " " + strings.Join(s.tiers, " ")
+}
+
+// resolveIn picks the command the stage runs in a checked-out tree. has reports
+// whether the tree ships a path, and an error when it cannot tell. The Go
+// command runs where its directory is; a tree without it runs the rig's script
+// with the same tiers; a tree with neither has no command (runnable is false),
+// and the stage is RED, never skipped or GREEN. A check that errors returns
+// that error, so a tree that cannot be read is not taken for one without the
+// command. The returned stage is what the cycle runs and reads: a script stage
+// carries no runner, so its output is read as the script's.
+func (s tierSweepStage) resolveIn(has func(rel string) (bool, error)) (st tierSweepStage, runnable bool, err error) {
+	goOK, err := has(s.goDir)
+	if err != nil {
+		return s, false, err
+	}
+	if goOK {
+		return s, true, nil
+	}
+	scriptOK, err := has(tierSweepScriptPath)
+	if err != nil {
+		return s, false, err
+	}
+	if scriptOK {
+		s.runner, s.script = "", true
+		return s, true, nil
+	}
+	return s, false, nil
 }
 
 // tierSweepStageResult is what one stage run produced.
@@ -445,6 +501,9 @@ type tierSweepStageResult struct {
 	ran bool
 	// err is why a stage that did not run never started.
 	err error
+	// reason, when set, is the RED reason a tier with no verdict line takes in
+	// place of the exit-code reason: a tree with no command to run.
+	reason string
 }
 
 // tierSweepSeams replace the sweep's outside effects in tests; the zero value
@@ -460,6 +519,10 @@ type tierSweepSeams struct {
 	worktree func(ctx context.Context, repo, dir, sha string) (func(), error)
 	// run executes one stage in dir.
 	run func(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult
+	// treeHas reports whether the checked-out tree at dir ships rel, a file or a
+	// directory, and an error when the tree cannot be read. Each stage's command
+	// is picked from it before the stage runs.
+	treeHas func(dir, rel string) (bool, error)
 	// beads opens the rig's writable bead store.
 	beads func(rig string) tierSweepBeadStore
 	// promote builds the rig's GitHub promotion owner, or nil when the rig
@@ -920,14 +983,31 @@ func tierSweepStages(rig string) []tierSweepStage {
 		tiers:  []string{"shell"},
 		budget: tierSweepShellBudget,
 		runner: tierSweepShellCommand,
+		goDir:  tierSweepShellDir,
 		step:   "shell",
 	}, {
 		tiers:  []string{"integration", "race"},
 		budget: tierSweepIntegrationBudget,
+		goDir:  tierSweepTierDir,
 		slot:   true,
 		role:   rig + "/tier-sweep",
 		step:   "test",
 	}}
+}
+
+// tierSweepTreeHas is the production tree check: rel exists under dir. Only a
+// path that is not there means the tree does not ship it. Any other stat error
+// (a permission failure, or a parent that is a file) is returned, so the stage
+// is RED with that error rather than read as a tree without the command.
+func tierSweepTreeHas(dir, rel string) (bool, error) {
+	_, err := os.Stat(filepath.Join(dir, rel))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 // tierSweepTierList names the tiers a cycle's stages will run, in the order it
@@ -989,11 +1069,26 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// no verdict at all (gt-qgrdy).
 	notOffered := map[string]bool{}
 	deferred := false
-	for _, st := range stages {
+	treeHas := seams.treeHas
+	if treeHas == nil {
+		treeHas = tierSweepTreeHas
+	}
+	for _, planned := range stages {
 		// The stage's own start, so `gt tail` shows a slow or hung stage on the
 		// line that names it (gt-iqzr0).
 		stageStart := d.clk().Now()
-		res := run(ctx, dir, st)
+		// The command is picked from the tree this cycle checked out, before the
+		// stage runs (gt-j0wki). A tree with neither the Go command nor the
+		// script runs nothing, and a tree that cannot be read runs nothing
+		// either: the stage is RED with the reason, never skipped.
+		st, runnable, treeErr := planned.resolveIn(func(rel string) (bool, error) { return treeHas(dir, rel) })
+		res := tierSweepStageResult{exitCode: -1, ran: true, output: tierSweepNoCommandReason + "\n", reason: tierSweepNoCommandReason}
+		switch {
+		case treeErr != nil:
+			res.output, res.reason = treeErr.Error()+"\n", treeErr.Error()
+		case runnable:
+			res = run(ctx, dir, st)
+		}
 		stageElapsed := d.clk().Now().Sub(stageStart)
 		if !res.ran {
 			// The stage never started (a slot the sweep could not take, say):
@@ -1038,7 +1133,9 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 				// or never reached the tier. That is RED, never GREEN, and the
 				// reason stands in for the failing unit the script did not name.
 				reason := fmt.Sprintf("no verdict line (exit %d)", res.exitCode)
-				if res.timedOut {
+				if res.reason != "" {
+					reason = res.reason
+				} else if res.timedOut {
 					reason = "timeout"
 				} else if res.exitCode == 0 {
 					reason = "no verdict line"
@@ -1047,6 +1144,11 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 				d.logger.Printf("tier_sweep: %s: %s %s: %s", rig, tier, tierSweepRed, reason)
 			}
 			ts.Log = logPath
+			// The command that ran for this tier in this rig's tree, which the
+			// sweep bead's check command names (gt-j0wki). Empty when none ran.
+			if runnable {
+				ts.Command = st.command()
+			}
 			results[tier] = ts
 		}
 		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s; last lines:\n%s",
