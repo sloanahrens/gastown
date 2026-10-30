@@ -1085,6 +1085,13 @@ type specRoster struct {
 	// because they record no agent and the seat map has several seats.
 	Unrecorded []string
 	Newest     time.Time
+	// Draining counts, per agent, the polecats the sling's own pool check holds
+	// beyond the roster: a draining session the roster read as released, which
+	// the sling still counts (no known creation time to release it by), or a
+	// session new since the roster read (specDrainingSessions). The tick adds
+	// them to its total, so the pre-check reads the count the sling refuses on
+	// (gt-97ppg).
+	Draining map[string]int
 }
 
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
@@ -1276,6 +1283,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	budget.Seats = append([]specdispatch.Seat(nil), env.Budget.Seats...)
 	budget.SetLive(specLiveWithInFlight(roster.Live, env.InFlight))
 	budget.SetDeadHooked(roster.DeadHooked)
+	budget.SetDraining(roster.Draining)
 	budget.NewestSpawn = specNewestSpawn(roster.Newest, env.InFlight)
 	// The picture reads each seat's window at the tick's clock; the budget was
 	// built a moment before, and its construction time is no longer the one the
@@ -2142,6 +2150,101 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 	return r
 }
 
+// specRosterOf is the tick's roster: the seats the roster read (specRosterFrom),
+// plus the draining polecats the sling's own pool check holds beyond them. The
+// sling's check reads occupied (snapshotOccupied over the same snapshot), and
+// poolHeldCount counts it, so the tick's total and the sling's total come from
+// one occupancy read. A failed read is an error, not an empty count: a tick
+// that cannot see what a sling will count does not dispatch (gt-97ppg).
+func specRosterOf(seats poolSeatSnapshot, ts *config.TownSettings, occupied func() ([]poolSession, error)) (specRoster, error) {
+	roster := specRosterFrom(seats.sessions, ts)
+	held, err := occupied()
+	if err != nil {
+		return specRoster{}, fmt.Errorf("counting the seats a sling will see: %w", err)
+	}
+	roster.Draining = specRosterFrom(specDrainingSessions(seats.sessions, held), ts).Live
+	return roster, nil
+}
+
+// specRosterStep is a tick's Roster step: the seat snapshot is read once and
+// kept for the tick's slings through keep, and the roster is counted over one
+// sling-side occupancy read that occupied builds from that snapshot. The read
+// happens once per tick, not once per candidate: specRosterOf calls it exactly
+// once, and the cycle calls this once (gt-97ppg). A failed read is an error, so
+// the tick reports it and dispatches nothing on it.
+func specRosterStep(read func() (poolSeatSnapshot, error), ts *config.TownSettings, occupied func(poolSeatSnapshot) func() ([]poolSession, error), keep func(poolSeatSnapshot)) (specRoster, error) {
+	seats, err := read()
+	if err != nil {
+		return specRoster{}, fmt.Errorf("listing polecat seats: %w", err)
+	}
+	keep(seats)
+	return specRosterOf(seats, ts, occupied(seats))
+}
+
+// specDispatchRoster is the tick's Roster step over one town. The seat snapshot
+// and the sling-side occupancy read the same lister, the occupancy once per tick
+// (specRosterStep), so a test can drive the wiring with fakes (gt-97ppg).
+func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSettings, lister func() sessionLister, storeFor func(dir string) beads.Client, snapshot *atomic.Pointer[poolSeatSnapshot]) func() (specRoster, error) {
+	return func() (specRoster, error) {
+		return specRosterStep(
+			func() (poolSeatSnapshot, error) {
+				return specRosterSnapshotWith(reads, townRoot, ts.PolecatPool, lister(), storeFor, time.Now)
+			},
+			ts,
+			func(seats poolSeatSnapshot) func() ([]poolSession, error) {
+				return snapshotOccupied(seats, lister, sandboxSeatDeathsFor(townRoot), time.Now)
+			},
+			// Kept for the slings: each one's seat decision reads this
+			// snapshot plus the live sessions and claims of its moment
+			// (snapshotOccupied) instead of every polecat directory again.
+			func(seats poolSeatSnapshot) { snapshot.Store(&seats) },
+		)
+	}
+}
+
+// specDrainingSessions is the sling-side occupancy beyond the roster: each held
+// session the roster did not already count. Both reads name an occupancy the
+// same way (specOccupancyKey), so one occupancy is counted once however many
+// entries describe it: a seat the roster counted dead-hooked and the listing
+// now shows live, a seat claim the roster holds, and a polecat session whose
+// role names no seat. What remains is the draining session the roster released
+// and the sling still counts, and any session new since the roster read
+// (gt-97ppg).
+//
+// held never carries a seat claim: snapshotOccupied lists tmux sessions and the
+// roster's dead and landing seats, and the sling reads claims under its own
+// lock. An in-flight sling enters the total once, through specLiveWithInFlight,
+// and its entry has no key that could match a session. The one overlap left is a
+// sling that spawned between the roster read and the listing: it counts in both
+// terms for one tick, which errs toward fewer slings (gt-97ppg).
+func specDrainingSessions(rosterSeats, held []poolSession) []poolSession {
+	counted := map[string]bool{}
+	for _, s := range rosterSeats {
+		counted[specOccupancyKey(s)] = true
+	}
+	var out []poolSession
+	for _, s := range held {
+		key := specOccupancyKey(s)
+		if counted[key] {
+			continue
+		}
+		counted[key] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// specOccupancyKey names what a session holds, the same way on the roster and on
+// the sling's read: its pool seat, or, for a session that names no seat (a seat
+// claim, or a polecat whose GT_ROLE does not parse), its own name. A key of ""
+// would let every such session collide with every other one.
+func specOccupancyKey(s poolSession) string {
+	if key := s.seatKey(); key != "" {
+		return "seat " + key
+	}
+	return "session " + s.name
+}
+
 // loadSpecDispatchConfig returns daemon.json's patrols.spec_dispatch, or nil.
 // It reads nil for a block that does not parse as well as for an absent one, so
 // it is for a caller that has a fallback: gt spec lint falls back to the
@@ -2302,21 +2405,11 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 				return revertBeadOpen(townRoot, rig, beadID)
 			})
 		},
-		Roster: func() (specRoster, error) {
-			// The same seat picture `gt daemon dispatch-check` nudges from:
-			// live sessions, in-flight claims, and seats mid-landing. Two
-			// pictures of one pool is how the dispatcher ends up slinging into
-			// a seat the nudge just called free (gt-thy6r).
-			seats, err := specRosterSnapshot(reads, townRoot, ts.PolecatPool)
-			if err != nil {
-				return specRoster{}, fmt.Errorf("listing polecat seats: %w", err)
-			}
-			// Kept for the slings: each one's seat decision reads this
-			// snapshot plus the live sessions and claims of its moment
-			// (snapshotOccupied) instead of every polecat directory again.
-			snapshot.Store(&seats)
-			return specRosterFrom(seats.sessions, ts), nil
-		},
+		// The same seat picture `gt daemon dispatch-check` nudges from:
+		// live sessions, in-flight claims, and seats mid-landing. Two
+		// pictures of one pool is how the dispatcher ends up slinging into
+		// a seat the nudge just called free (gt-thy6r).
+		Roster:   specDispatchRoster(reads, townRoot, ts, newPoolSessionLister, func(dir string) beads.Client { return beads.New(dir) }, &snapshot),
 		Annotate: annotations.annotate,
 		AddLabel: func(id, label string) error {
 			return poolBeadLabelAdd(townRoot, id, label)
@@ -2431,18 +2524,13 @@ func (s *specSlingTraces) notices() []string {
 	return out
 }
 
-// specRosterSnapshot is the seat picture poolSeatSessions draws, with its
+// specRosterSnapshotWith is the seat picture poolSeatSessions draws, with its
 // polecat-state reads batched per rig and read through the tick's ledger, and
 // the seats that read released kept beside it for the tick's slings
-// (snapshotOccupied).
-func specRosterSnapshot(reads *specTickReads, townRoot string, pool *config.PolecatPool) (poolSeatSnapshot, error) {
-	return specRosterSnapshotWith(reads, townRoot, pool, newPoolSessionLister(), func(dir string) beads.Client { return beads.New(dir) }, time.Now)
-}
-
-// specRosterSnapshotWith is specRosterSnapshot with the session lister, the
-// store for a directory and the clock passed in, so a test can run this wiring
-// over a fake. The time it began is taken before any session is listed, so a
-// session created after it counts as new.
+// (snapshotOccupied). The session lister, the store for a directory and the
+// clock are passed in, so a test can run this wiring over a fake. The time it
+// began is taken before any session is listed, so a session created after it
+// counts as new.
 func specRosterSnapshotWith(reads *specTickReads, townRoot string, pool *config.PolecatPool, lister sessionLister, storeFor func(dir string) beads.Client, now func() time.Time) (poolSeatSnapshot, error) {
 	store := func(dir string) beads.Client { return reads.client(storeFor(dir)) }
 	batch := newPoolSeatBatch(townRoot,

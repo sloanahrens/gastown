@@ -406,6 +406,27 @@ func (b *Budget) SetDeadHooked(dead map[string]int) {
 	}
 }
 
+// SetDraining adds the polecats the sling's own pool check holds beyond the
+// roster: a draining session the roster read as released, which the sling
+// still counts because it has no known creation time to release it by. It adds
+// each agent's count to the first seat named that agent, as Bump does, and to
+// LiveTotal, so the pre-check reads the total the sling refuses on. It runs
+// after SetLive, which it does not reset (gt-97ppg).
+func (b *Budget) SetDraining(draining map[string]int) {
+	for agent, n := range draining {
+		if n <= 0 {
+			continue
+		}
+		for i := range b.Seats {
+			if b.Seats[i].Agent == agent {
+				b.Seats[i].Live += n
+				break
+			}
+		}
+		b.LiveTotal += n
+	}
+}
+
 // Bump records one more polecat on agent, spawned at now. It charges the total
 // for every bump, seated or not — an agent no seat names is still a live
 // polecat — and records the charge against the agent so Release can give back

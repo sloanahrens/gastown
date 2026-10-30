@@ -430,6 +430,43 @@ func TestChooseSeatTownTotal(t *testing.T) {
 	}
 }
 
+// TestTotalPrecheck is the tick's pre-check over the town total. The roster can
+// read below the total while the sling's own check, which counts the draining
+// sessions the roster released, reads at or over it: the tick must skip the
+// candidate then, not start a sling the pool refuses (gt-97ppg).
+func TestTotalPrecheck(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		maxTotal int
+		live     map[string]int
+		draining map[string]int
+		wantSkip bool
+	}{
+		{"roster under the total, nothing draining", 4, map[string]int{"deepseek-flash": 1, "claude-sonnet": 1}, nil, false},
+		{"draining sessions the sling counts fill the total", 4, map[string]int{"deepseek-flash": 1, "claude-sonnet": 1}, map[string]int{"claude-sonnet": 2}, true},
+		{"draining one short of the total still dispatches", 4, map[string]int{"deepseek-flash": 1, "claude-sonnet": 1}, map[string]int{"claude-sonnet": 1}, false},
+		{"draining on an agent no seat names counts toward the total", 4, map[string]int{"deepseek-flash": 1}, map[string]int{"gpt-unseated": 3}, true},
+		{"non-positive draining is ignored", 2, map[string]int{"deepseek-flash": 1}, map[string]int{"claude-sonnet": -3}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := baseBudget()
+			b.MaxTotal = tc.maxTotal
+			b.SetLive(tc.live)
+			b.SetDraining(tc.draining)
+			got := ChooseSeat(b, goodSpec())
+			if got.Skip != tc.wantSkip {
+				t.Fatalf("Skip = %v (reason %q), want %v", got.Skip, got.Reason, tc.wantSkip)
+			}
+			if tc.wantSkip && !strings.Contains(got.Reason, "over the town total") {
+				t.Errorf("reason = %q, want the town total named", got.Reason)
+			}
+		})
+	}
+}
+
 // TestBudgetPictureNamesDeadHookedSeats pins the operator surface gt-tldj4 adds:
 // a seat that holds a crashed polecat — its session gone, its bead still
 // hooked, its restart due — names that occupant, so a full seat showing fewer
