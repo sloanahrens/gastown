@@ -410,22 +410,20 @@ func resolvePath(path string) (string, error) {
 	dir, rest := clean, ""
 	for {
 		_, err := os.Lstat(dir)
-		switch {
-		case err == nil:
-			resolved, err := filepath.EvalSymlinks(dir)
-			if err != nil {
-				return "", err
-			}
-			return filepath.Join(resolved, rest), nil
-		case !errors.Is(err, fs.ErrNotExist):
+		parent := filepath.Dir(dir)
+		if errors.Is(err, fs.ErrNotExist) && parent != dir {
+			rest = filepath.Join(filepath.Base(dir), rest)
+			dir = parent
+			continue
+		}
+		if err != nil {
 			return "", err
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", fmt.Errorf("no existing ancestor of %q", clean)
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return "", err
 		}
-		rest = filepath.Join(filepath.Base(dir), rest)
-		dir = parent
+		return filepath.Join(resolved, rest), nil
 	}
 }
 
