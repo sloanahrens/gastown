@@ -2,7 +2,9 @@ package repoguard
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -100,27 +102,38 @@ func ReadPluginRunShAllowlist(name string) (map[string]string, error) {
 	return allowed, nil
 }
 
-// PluginRunShTree is the lister over a checkout: every plugins/<name>/run.sh
-// under root, with the binary its plugin.md declares. A root with no plugins
-// directory, a run.sh with no plugin.md beside it and an unreadable file are
-// errors, never an empty tree: the guard reads an empty map as clean. A plugins
-// directory with no run.sh is the clean end state, every shim ported.
+// PluginRunShTree lists every plugins/<name>/run.sh under root with the binary
+// its plugin.md declares; anything it cannot read is an error, never an empty
+// tree, because the guard reads an empty map as clean. A plugins directory with
+// no run.sh is the clean end state once every shim is ported (gt-tpg0p.2).
 func PluginRunShTree(root string) PluginRunShLister {
+	return pluginRunShTree(root, os.ReadDir)
+}
+
+// pluginRunShTree is PluginRunShTree over an injected directory reader. Only
+// the unlistable-directory row needs the seam: a chmod fixture would not fail
+// for a user that reads through permission bits, so the test injects the error.
+func pluginRunShTree(root string, readDir func(string) ([]fs.DirEntry, error)) PluginRunShLister {
 	return func() (map[string]PluginRunSh, error) {
 		dir := filepath.Join(root, "plugins")
-		info, err := os.Stat(dir)
+		entries, err := readDir(dir)
 		if err != nil {
-			return nil, fmt.Errorf("reading plugins under %s: %w", root, err)
+			return nil, fmt.Errorf("listing %s: %w", dir, err)
 		}
-		if !info.IsDir() {
-			return nil, fmt.Errorf("%s is not a directory", dir)
-		}
-		paths, err := filepath.Glob(filepath.Join(dir, "*", "run.sh"))
-		if err != nil {
-			return nil, fmt.Errorf("globbing plugins/*/run.sh under %s: %w", root, err)
-		}
-		scripts := make(map[string]PluginRunSh, len(paths))
-		for _, p := range paths {
+		scripts := map[string]PluginRunSh{}
+		for _, entry := range entries {
+			// A plain file in plugins/ (a README, say) is not a plugin directory.
+			// Anything else may hold a run.sh, so it is looked up, and only a run.sh
+			// that does not exist is skipped.
+			if entry.Type().IsRegular() {
+				continue
+			}
+			p := filepath.Join(dir, entry.Name(), "run.sh")
+			if _, err := os.Lstat(p); errors.Is(err, fs.ErrNotExist) {
+				continue
+			} else if err != nil {
+				return nil, fmt.Errorf("%s: %w", p, err)
+			}
 			body, err := os.ReadFile(p)
 			if err != nil {
 				return nil, fmt.Errorf("%s reads: %w", p, err)
@@ -129,9 +142,7 @@ func PluginRunShTree(root string) PluginRunShLister {
 			if err != nil {
 				return nil, fmt.Errorf("%s declares its binary: %w", p, err)
 			}
-			// The glob matched <root>/plugins/<name>/run.sh, so the repo-relative
-			// path is the plugin directory's base name, in slash form.
-			scripts[path.Join("plugins", filepath.Base(filepath.Dir(p)), "run.sh")] = PluginRunSh{
+			scripts[path.Join("plugins", entry.Name(), "run.sh")] = PluginRunSh{
 				Body:   string(body),
 				Binary: declaredBinary(string(manifest)),
 			}
