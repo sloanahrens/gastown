@@ -19,9 +19,9 @@ const (
 	LevelCrit = "crit"
 )
 
-// Alert is one thing the operator should look at. The page shows it as a toast
-// and a browser notification while the operator has alerts switched on, and
-// State.Alerts keeps the recent ones.
+// Alert is one thing the operator should look at. The page lists it in the
+// EVENTS feed and, while the operator has alerts switched on, raises a browser
+// notification for it. State.Alerts keeps the recent ones.
 type Alert struct {
 	ID    string    `json:"id"`
 	At    time.Time `json:"at"`
@@ -29,9 +29,13 @@ type Alert struct {
 	Key   string    `json:"key"`
 	Title string    `json:"title"`
 	Text  string    `json:"text"`
+	// Bead is the bead the alert is about, where the alert names one: a rejected
+	// landing and a polecat holding work. The EVENTS feed shows it as its own
+	// column; an alert about no bead leaves it empty.
+	Bead string `json:"bead,omitempty"`
 	// Rule is the attention rule an alert raised from the attention queue
 	// carries, which is what the Attention panel tags and orders the row by. The
-	// Alerter's own rules leave it empty: they are the page's toasts, and the
+	// Alerter's own rules leave it empty: they are the EVENTS feed's lines, and the
 	// conditions behind them are either a queue item already or a feed line.
 	Rule string `json:"rule,omitempty"`
 }
@@ -331,6 +335,7 @@ func (a *Alerter) polecatAlerts(prev, next State, now time.Time) []Alert {
 		}
 		title := key + " is " + p.State
 		if al, ok := a.fire(now, LevelWarn, polecatAlertPrefix+key, title, text); ok {
+			al.Bead = p.Bead
 			out = append(out, al)
 		}
 	}
@@ -374,12 +379,15 @@ func (a *Alerter) rejectionAlerts(entries []Entry, now time.Time) []Alert {
 		// cooldown fold them into one alert; a line that names no bead keys on its
 		// own number.
 		key := fmt.Sprintf("reject:%d", e.Seq)
+		bead := ""
 		if b := rejectionBeadRe.FindStringSubmatch(e.Text); b != nil {
+			bead = b[1]
 			key = "reject:" + b[1] + ":" + m[1]
 		}
 		al, ok := a.fire(now, LevelWarn, key,
 			"a landing was rejected ("+m[1]+")", e.Text)
 		if ok {
+			al.Bead = bead
 			out = append(out, al)
 		}
 	}
