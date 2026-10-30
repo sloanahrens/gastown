@@ -49,9 +49,8 @@ func (OSFiles) MkdirTemp() (string, error) { return os.MkdirTemp("", Name+"-") }
 // RemoveAll removes path and everything under it.
 func (OSFiles) RemoveAll(path string) error { return os.RemoveAll(path) }
 
-// Run is one run of the profile import, the loop in scripts/openshell-providers.sh.
-// Every openshell call goes through Client and every gt call through Gt; every
-// file goes through Files.
+// Run is one run of the profile import. Every openshell call goes through
+// Client and every gt call through Gt; every file goes through Files.
 type Run struct {
 	// Client makes the openshell calls.
 	Client Client

@@ -27,7 +27,6 @@ var trackedShellTests = []string{
 	"scripts/gate-vs-load_test.sh",
 	"scripts/install-local_test.sh",
 	"scripts/makefile-gate_test.sh",
-	"scripts/openshell-providers_test.sh",
 	"scripts/polecat-go-floor_test.sh",
 	"scripts/post-land-shell_test.sh",
 	"scripts/resource-sampler_test.sh",

@@ -1,7 +1,6 @@
 // Package openshellprov parses the command line of openshell-providers and
-// resolves the directories a run reads (gt-tpg0p.53). The openshell calls and
-// the import itself arrive in later steps of the port from
-// scripts/openshell-providers.sh.
+// resolves the directories a run reads (gt-tpg0p.53), and runs the import of
+// the OpenShell profiles and the providers built from them.
 package openshellprov
 
 import (
