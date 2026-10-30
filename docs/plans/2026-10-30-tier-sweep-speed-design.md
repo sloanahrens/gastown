@@ -1,3 +1,5 @@
+> Status: historical (2026-10). Merged in: gt-jzwoz (design and plan; the implementation beads are gt-ic4sf, gt-dwlbj, gt-xk9my, gt-0rtgc and the rest listed in the plan). Not maintained.
+
 # Tier sweeps at half the time, in their own container (design)
 
 Author: dunlin. Date: 2026-10-30. Status: proposed (operator direction 2026-10-30; overseer decisions the same day). Evidence: `~/gt/.runtime/overseer/birds/tier-sweep-findings.md` (read it first; every number below is from it). Plan: `2026-10-30-tier-sweep-speed-plan.md`.
