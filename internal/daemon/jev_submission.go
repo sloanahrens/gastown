@@ -89,7 +89,7 @@ func (d *Daemon) runJevSubmission() {
 		d.logger.Printf("jev_submission: error: %v", err)
 		return
 	}
-	if sum.Asked > 0 || sum.Skipped > 0 || sum.CapReached {
-		d.logger.Printf("jev_submission: asked %d submissions, skipped %d (daily cap reached: %v)", sum.Asked, sum.Skipped, sum.CapReached)
+	if sum.Asked > 0 || sum.Skipped > 0 || sum.Repeated > 0 || sum.CapReached {
+		d.logger.Printf("jev_submission: asked %d submissions, skipped %d, repeated %d (daily cap reached: %v)", sum.Asked, sum.Skipped, sum.Repeated, sum.CapReached)
 	}
 }
