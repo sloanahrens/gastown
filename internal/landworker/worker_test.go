@@ -661,21 +661,28 @@ func TestPassStartupRepairsOpenBeadsFromTheLandingsFile(t *testing.T) {
 func TestPassInfraFailureBacksOffAndAnnouncesOnce(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
+	cs := newCountingStore()
+	h.bd = cs.Fake
+	h.w.Beads = cs
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.InfraError{Stage: "gate", Err: errors.New("make: not found")}
 	}
 	for i := 0; i < infraAnnounceAfter+2; i++ {
 		h.w.Pass(context.Background())
-		h.w.Pass(context.Background()) // inside the backoff: skipped
+		cs.reset()
+		h.w.Pass(context.Background()) // inside the backoff: not even read
+		if n := cs.countOf("Show", "Children", "Comments", "AddComment"); n != 0 {
+			t.Fatalf("the pass inside the backoff made %d reads of the bead; want it held on the row it left", n)
+		}
 		h.now = h.now.Add(infraBackoffMax)
 	}
 	if len(h.lander.calls) != infraAnnounceAfter+2 {
 		t.Fatalf("landed %d times; want one attempt per backoff window", len(h.lander.calls))
 	}
-	cs := h.comments(t, "gt-abc")
-	if len(cs) != 1 || !strings.Contains(cs[0], "infrastructure") {
-		t.Fatalf("comments %q; want one infrastructure notice", cs)
+	comments := h.comments(t, "gt-abc")
+	if len(comments) != 1 || !strings.Contains(comments[0], "infrastructure") {
+		t.Fatalf("comments %q; want one infrastructure notice", comments)
 	}
 	if len(h.cleared) != 0 {
 		t.Fatal("intent cleared on an infrastructure failure")

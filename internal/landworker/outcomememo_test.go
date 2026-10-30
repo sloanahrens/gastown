@@ -2,7 +2,9 @@ package landworker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,7 +34,7 @@ func TestOutcomeMemoHoldsOnlyARowItCanProveIsUnchanged(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			m := newOutcomeMemo(func() time.Time { return tc.at })
+			m := newOutcomeMemos(func() time.Time { return tc.at })
 			if tc.has {
 				m.entries["gt-abc"] = tc.entry
 			}
@@ -181,24 +183,38 @@ func TestPassReadsAHeldBeadOnlyOnceWhileItsRowStandsStill(t *testing.T) {
 // human's note never waits out the hold (gt-r9pj9).
 func TestPassReadsAHeldBeadAgainOnceItsRowMoves(t *testing.T) {
 	t.Parallel()
-	h, _, l := refuseEveryPass(t)
+	h, cs, l := refuseEveryPass(t)
 	h.seedReady(t, "gt-abc")
+	// The refusal comment moves the row, as bd journals it, and the pass the
+	// memo records is the one its own comment left: a later move is someone
+	// else's, and is read.
+	cs.bumpOnComment = true
 	h.w.Pass(context.Background())
+	if l.calls != 1 {
+		t.Fatalf("landed %d times on the first pass; want the refusal attempted once", l.calls)
+	}
 
 	if err := h.bd.Update("gt-abc", beads.UpdateOptions{AddLabels: []string{"human-touched"}}); err != nil {
 		t.Fatal(err)
 	}
+	cs.reset()
 	h.w.Pass(context.Background())
 	if l.calls != 2 {
 		t.Fatalf("landed %d times; want the changed row read again", l.calls)
 	}
+	if n := cs.countOf("Show", "Children", "Comments"); n == 0 {
+		t.Fatal("the pass that saw the row move read nothing of the bead")
+	}
 }
 
 // A bead the landing finds not ready is held on the same wait a refusal gets,
-// never re-landed on every pass (gt-r9pj9).
+// never re-read or re-landed on every pass (gt-r9pj9).
 func TestPassHoldsABeadTheLandingFindsNotReady(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
+	cs := newCountingStore()
+	h.bd = cs.Fake
+	h.w.Beads = cs
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, fmt.Errorf("%w: parked for a human", land.ErrNotReady)
@@ -207,31 +223,81 @@ func TestPassHoldsABeadTheLandingFindsNotReady(t *testing.T) {
 	if len(h.lander.calls) != 1 {
 		t.Fatalf("landed %d times; want the not-ready answer once", len(h.lander.calls))
 	}
+	cs.reset()
 	if rep := h.w.Pass(context.Background()); rep.Skipped != 1 || len(h.lander.calls) != 1 {
 		t.Fatalf("second pass %v with %d landings; want the not-ready bead held", rep, len(h.lander.calls))
 	}
+	if n := cs.countOf("Show", "Children", "Comments"); n != 0 {
+		t.Fatalf("the second pass made %d reads of the not-ready bead; want it held on the row it left", n)
+	}
 }
 
-// The refusal a held bead carries is posted once: the comment is on the bead,
-// and posting it again is a write nothing reads (gt-r9pj9).
+// The refusal a held bead carries is posted once, and the pass that posts it
+// learns where its own comment left the row: the passes inside the hold pay
+// neither a read of the bead nor another landing attempt (gt-r9pj9).
 func TestPassPostsTheRefusalAnnotationOnce(t *testing.T) {
 	t.Parallel()
 	h, cs, l := refuseEveryPass(t)
 	h.seedReady(t, "gt-abc")
 	// A comment moves the row, as bd journals it: the memo must still not
-	// repost the annotation the bead already carries.
+	// repost the annotation the bead already carries, nor mistake its own
+	// comment for a change worth re-reading the bead.
 	cs.bumpOnComment = true
 
-	for pass := 1; pass <= 5; pass++ {
+	h.w.Pass(context.Background())
+	for pass := 2; pass <= 5; pass++ {
+		cs.reset()
 		h.w.Pass(context.Background())
+		if n := cs.countOf("Show", "Children", "Comments", "AddComment"); n != 0 {
+			t.Fatalf("pass %d made %d reads of the bead the pass before had judged; want none", pass, n)
+		}
 	}
-	if cs := h.comments(t, "gt-abc"); len(cs) != 1 {
-		t.Fatalf("%d refusal annotations across 5 passes; want the one the bead already carries", len(cs))
+	if got := h.comments(t, "gt-abc"); len(got) != 1 {
+		t.Fatalf("%d refusal annotations across 5 passes; want the one the bead already carries", len(got))
 	}
-	// The annotation moves the row, which costs one more read; the hold
-	// covers the rest.
-	if l.calls > 2 {
-		t.Fatalf("landed %d times across 5 passes; want at most the first pass and the re-read the comment's own row move costs", l.calls)
+	if l.calls != 1 {
+		t.Fatalf("landed %d times across 5 passes; want the first pass alone", l.calls)
+	}
+}
+
+// An annotation is posted once per reason even when a bead's outcomes
+// alternate: one remembered key would let an infrastructure notice and a
+// refusal take turns re-posting each other (gt-r9pj9).
+func TestPassDoesNotRepostAnAnnotationWhenOutcomesAlternate(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	infra := &land.InfraError{Stage: "gate", Err: errors.New("make: not found")}
+	refusal := &land.Rejection{Kind: land.RejectReview, Reason: "om review returned no verdict", Rework: false}
+	h.lander.fn = func(n int, _ land.Work) (land.Result, error) {
+		if n == infraAnnounceAfter+1 {
+			return land.Result{}, refusal
+		}
+		return land.Result{}, infra
+	}
+	for i := 0; i < infraAnnounceAfter; i++ {
+		h.w.Pass(context.Background())
+		h.now = h.now.Add(infraBackoffMax)
+	}
+	// The refusal, once its own wait is due.
+	h.w.Pass(context.Background())
+	h.now = h.now.Add(humanWaitBackoff)
+	// The same infrastructure failures again: the bead already carries the
+	// notice, so it is not posted a second time.
+	for i := 0; i < infraAnnounceAfter; i++ {
+		h.w.Pass(context.Background())
+		h.now = h.now.Add(infraBackoffMax)
+	}
+
+	var infraNotices int
+	cs := h.comments(t, "gt-abc")
+	for _, c := range cs {
+		if strings.Contains(c, "infrastructure") {
+			infraNotices++
+		}
+	}
+	if infraNotices != 1 || len(cs) != 2 {
+		t.Fatalf("comments %q; want one infrastructure notice and one refusal", cs)
 	}
 }
 
