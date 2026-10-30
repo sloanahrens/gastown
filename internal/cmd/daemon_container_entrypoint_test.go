@@ -340,6 +340,44 @@ func TestContainerEntrypointSymlinkedTownJSONRefuses(t *testing.T) {
 	}
 }
 
+// TestContainerEntrypointLstat drives each outcome of the real Lstat seam over a
+// t.TempDir: absent, a regular file, a link, and a path that fails for a reason
+// other than absence (a component is a regular file), which must be an error.
+func TestContainerEntrypointLstat(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "regular")
+	if err := os.WriteFile(regular, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(regular, link); err != nil {
+		t.Fatalf("make the symlink: %v", err)
+	}
+	for _, tc := range []struct {
+		name    string
+		path    string
+		want    entryKind
+		wantErr bool
+	}{
+		{"absent", filepath.Join(dir, "absent"), entryAbsent, false},
+		{"regular file", regular, entryRegular, false},
+		{"symbolic link is not followed", link, entryOther, false},
+		{"beneath a regular file is an error, not absent", filepath.Join(regular, "child"), entryAbsent, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := entrypointLstat(tc.path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("entrypointLstat(%q) error = %v, want error %v", tc.path, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("entrypointLstat(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 // entrypointMountinfo is a mountinfo table in which dir is a bind mount.
 func entrypointMountinfo(dir string) string {
 	return "36 35 98:0 /srv/scratch " + dir + " rw,noatime - ext4 /dev/root rw\n"
