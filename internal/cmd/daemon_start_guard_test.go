@@ -302,6 +302,48 @@ func TestStartDaemonSupervisorErrorNeverFallsBackToASpawn(t *testing.T) {
 	}
 }
 
+// The restart over a running daemon and the job reload gt up makes meet the
+// same rule: a supervisor command that fails refuses, and neither falls back to
+// a hand spawn (enable-supervisor spawns nothing: it only provisions).
+func TestRestartAndReloadSupervisorErrorNeverFallBackToASpawn(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		file func(t *testing.T, town string) string
+		run  func(c *daemonControl, town string) error
+	}{
+		{
+			name: "gt daemon restart",
+			file: writeCurrentSupervisorFile,
+			run:  func(c *daemonControl, town string) error { _, _, err := c.restartDaemon(town); return err },
+		},
+		{
+			name: "gt up reloading a stale job",
+			file: writeStaleSupervisorFile,
+			run:  func(c *daemonControl, town string) error { _, err := c.reconcileSupervisorJob(town, 1111); return err },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := startGuardTown(t)
+			c, calls := stubRestart(t, "darwin", tc.file(t, town), 1111)
+			c.run = func(a []string) error {
+				calls.argv = append(calls.argv, a)
+				return errors.New("launchctl: boom")
+			}
+			c.guard = guardProbe(neverProbed(t))
+
+			if err := tc.run(c, town); err == nil {
+				t.Fatal("the supervisor command failed, but the path reported success")
+			}
+			if calls.spawned {
+				t.Fatal("the path spawned gt daemon run by hand after a supervisor error")
+			}
+		})
+	}
+}
+
 // guardSelfFor records the owner each supervisor kind hands the guard: the one
 // the daemon it starts will name for itself, so the guard judges the start the
 // way Run will.
