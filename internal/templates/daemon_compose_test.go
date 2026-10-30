@@ -35,10 +35,13 @@ type composeNetwork struct {
 	Internal bool `yaml:"internal"`
 }
 
+// composeService is one rendered service. Init is a pointer so a service that
+// carries no init key reads as nil, apart from one that sets it false.
 type composeService struct {
 	Image         string                       `yaml:"image"`
 	ContainerName string                       `yaml:"container_name"`
 	Restart       string                       `yaml:"restart"`
+	Init          *bool                        `yaml:"init"`
 	StopGrace     string                       `yaml:"stop_grace_period"`
 	WorkingDir    string                       `yaml:"working_dir"`
 	Privileged    bool                         `yaml:"privileged"`
@@ -160,6 +163,50 @@ func TestRenderDaemonCompose_ServiceShape(t *testing.T) {
 	}
 	if got := len(f.Services); got != 2 {
 		t.Errorf("services = %d, want the daemon and its sweep engine alone", got)
+	}
+}
+
+// The daemon is PID 1 in its container and reaps nothing, so every dolt and sh
+// it spawns and finishes stands as a defunct process for as long as the
+// container lives. docker's init as PID 1 reaps them (gt-4pdud). The sweep
+// engine and the forge stack run their own init, so the key is the daemon's
+// alone.
+func TestRenderDaemonCompose_DaemonRunsUnderAnInit(t *testing.T) {
+	t.Parallel()
+
+	withOMToken := scratchSpec()
+	withOMToken.OMTokenFile = "/run/secrets/om-token"
+
+	specs := []struct {
+		name string
+		spec templates.ComposeSpec
+	}{
+		{"live", liveSpec()},
+		{"scratch", scratchSpec()},
+		{"scratch with an om token", withOMToken},
+		{"scratch with forge", forgeSpec()},
+	}
+	for _, tt := range specs {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, f := render(t, tt.spec)
+
+			daemon, ok := f.Services["daemon"]
+			if !ok {
+				t.Fatalf("services = %v, want a daemon service", f.Services)
+			}
+			if daemon.Init == nil || !*daemon.Init {
+				t.Errorf("daemon carries no init: true, want it under an init: nothing else reaps the children it spawns and finishes")
+			}
+			for name, svc := range f.Services {
+				if name == "daemon" {
+					continue
+				}
+				if svc.Init != nil {
+					t.Errorf("service %q carries an init key, want the daemon under an init alone", name)
+				}
+			}
+		})
 	}
 }
 
