@@ -29,6 +29,10 @@ type Client struct {
 
 var _ beads.Client = (*Client)(nil)
 
+// The tracker holds every rig in one database, so it answers a cross-rig list
+// too (beads.ListAcross, internal/metrics' landing column).
+var _ beads.AcrossStore = (*Client)(nil)
+
 // New returns a Client over tc. defaultRig is the rig new issues go to when
 // CreateOptions names neither a rig, an ID nor a parent.
 func New(tc *client.Client, defaultRig string) *Client { return &Client{tc: tc, rig: defaultRig} }

@@ -61,6 +61,17 @@ func queueTestRigs(names ...string) map[string]string {
 	return map[string]string{filepath.Join(queueTestTown, "mayor", "rigs.json"): b.String()}
 }
 
+// queueTestRigList is the rigs named, each with itself as its prefix: the
+// registry queueTestRigs builds records no beads prefix, so a rig's prefix is
+// its name.
+func queueTestRigList(names ...string) []queueRig {
+	rigs := make([]queueRig, len(names))
+	for i, name := range names {
+		rigs[i] = queueRig{name: name, prefix: name}
+	}
+	return rigs
+}
+
 // queueStores is the fake bead store the queue tests read: one rig's reads
 // answered from a table of issue counts, ephemeral counts and failures keyed
 // "<rig>/<column>", with every read recorded.

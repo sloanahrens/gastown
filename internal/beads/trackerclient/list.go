@@ -73,6 +73,50 @@ func (c *Client) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	return issues(all), nil
 }
 
+// ListAcross returns the issues matching opts for each rig of rigs, from one
+// request: the tracker holds every rig in one database, so a rig scope list
+// answers them together. Every rig asked for is in the answer, empty when it
+// matched nothing; a rig the tracker does not hold, and an opts filter the list
+// query cannot express, refuse the call. Each issue is filed under the rig its
+// id starts with, which is the rig the store holds it under: newID mints
+// "<rig>-", and a child keeps its parent's prefix.
+func (c *Client) ListAcross(rigs []string, opts beads.ListOptions) (beads.AcrossResult, error) {
+	res := beads.AcrossResult{Rigs: map[string][]*beads.Issue{}, Errors: map[string]error{}}
+	if err := refusedListFilter(opts); err != nil {
+		return res, err
+	}
+	if len(rigs) == 0 {
+		return res, nil
+	}
+	f := listFilter(opts)
+	f.Rigs = rigs
+	var page []api.Issue
+	if f.Limit > 0 {
+		p, err := c.tc.List(ctx(), f)
+		if err != nil {
+			return res, mapErr(err)
+		}
+		page = p.Issues
+	} else {
+		all, err := c.tc.ListAll(ctx(), f)
+		if err != nil {
+			return res, mapErr(err)
+		}
+		page = all
+	}
+	for _, rig := range rigs {
+		res.Rigs[rig] = []*beads.Issue{}
+	}
+	for _, a := range page {
+		rig, _, hasPrefix := strings.Cut(a.ID, "-")
+		if _, asked := res.Rigs[rig]; !hasPrefix || !asked {
+			return res, fmt.Errorf("trackerclient: issue %s is filed under rig %q, which this read did not ask for", a.ID, rig)
+		}
+		res.Rigs[rig] = append(res.Rigs[rig], issue(a))
+	}
+	return res, nil
+}
+
 // ListByAssignee returns every issue, open or closed, assigned to assignee.
 func (c *Client) ListByAssignee(assignee string) ([]*beads.Issue, error) {
 	return c.List(beads.ListOptions{Status: "all", Assignee: assignee, Priority: beads.PriorityAny})

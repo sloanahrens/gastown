@@ -115,6 +115,9 @@ func buildListWhere(f api.ListFilter, cur *listCursor) (string, []any, error) {
 	if f.Rig != "" {
 		where = append(where, "issues.rig = "+arg(f.Rig))
 	}
+	if len(f.Rigs) > 0 {
+		where = append(where, "issues.rig = ANY("+arg(f.Rigs)+")")
+	}
 	if len(f.IDs) > 0 {
 		where = append(where, "issues.id = ANY("+arg(f.IDs)+")")
 	}
@@ -161,9 +164,56 @@ func buildCountQuery(f api.ListFilter) (string, []any, error) {
 	return "SELECT count(*) FROM tracker.issues WHERE " + where, args, nil
 }
 
+// rigScope is f.Rigs reduced to the rigs the tracker holds. A rig it does not
+// hold is refused: answered with no issues it would read as a rig whose queue
+// emptied.
+func (p *Postgres) rigScope(ctx context.Context, f api.ListFilter) ([]string, error) {
+	if len(f.Rigs) == 0 {
+		return nil, nil
+	}
+	if f.Rig != "" {
+		return nil, api.Invalid("rig and rigs cannot both be set")
+	}
+	rigs := uniqueStrings(f.Rigs)
+	if len(rigs) == 0 {
+		return nil, api.Invalid("rigs holds no rig")
+	}
+	rows, err := p.pool.Query(ctx, "SELECT prefix FROM tracker.rigs WHERE prefix = ANY($1)", rigs)
+	if err != nil {
+		return nil, fmt.Errorf("store: list rigs: %w", err)
+	}
+	defer rows.Close()
+	known := map[string]bool{}
+	for rows.Next() {
+		var rig string
+		if err := rows.Scan(&rig); err != nil {
+			return nil, fmt.Errorf("store: list rigs: %w", err)
+		}
+		known[rig] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list rigs: %w", err)
+	}
+	var unknown []string
+	for _, rig := range rigs {
+		if !known[rig] {
+			unknown = append(unknown, rig)
+		}
+	}
+	if len(unknown) > 0 {
+		return nil, api.Invalid("unknown rig %s", strings.Join(unknown, ", "))
+	}
+	return rigs, nil
+}
+
 // ListIssues returns one page of issues matching f, ordered by priority,
 // creation time and id, with comment and dependency counts filled in.
 func (p *Postgres) ListIssues(ctx context.Context, f api.ListFilter) (api.IssuePage, error) {
+	rigs, err := p.rigScope(ctx, f)
+	if err != nil {
+		return api.IssuePage{}, err
+	}
+	f.Rigs = rigs
 	cur, err := decodeListCursor(f.Cursor)
 	if err != nil {
 		return api.IssuePage{}, err
@@ -206,6 +256,11 @@ func (p *Postgres) CountIssues(ctx context.Context, f api.ListFilter) (int, erro
 	if err := api.ValidateCount(f); err != nil {
 		return 0, err
 	}
+	rigs, err := p.rigScope(ctx, f)
+	if err != nil {
+		return 0, err
+	}
+	f.Rigs = rigs
 	q, args, err := buildCountQuery(f)
 	if err != nil {
 		return 0, err

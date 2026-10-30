@@ -24,8 +24,9 @@ import (
 //
 // Each bead column is one store read per registered rig, summed, except
 // waiting_to_land, which a rig's landing worker's published count answers
-// while that count is fresh (queueLandingColumn). The rigs come from
-// mayor/rigs.json, or from the registry section of mayor/town.json on the
+// while that count is fresh, and whose rigs a store that holds several of them
+// answers in one request (queueLandingColumn, beads.ListAcross). The rigs come
+// from mayor/rigs.json, or from the registry section of mayor/town.json on the
 // two-file layout (internal/config/layout.go). Each read goes through a store
 // opened for the rig's own directory, which is the scoping `bd -C <town>/<rig>`
 // gave, and the filters each column asks for are queueBeadColumns' own.
@@ -103,17 +104,28 @@ var queueTookRe = regexp.MustCompile(`^tick took (\S+) \(`)
 var queueSeatRe = regexp.MustCompile(`^([^\s]+) (\d+)/(\d+)`)
 
 // queueBeadColumn is one bead count and the store read in one rig that fills
-// it.
+// it. A column is read one of two ways: read runs its query in one rig's own
+// store, and list with readAcross reads it as a plain list across every rig,
+// which a store holding several rigs answers for all of them in one request.
+// Exactly one of the two is set.
 type queueBeadColumn struct {
 	column string
 	read   func(BeadStore) ([]*beads.Issue, error)
+	// list is the column's query as a plain list (beads.ListAcross).
+	list *beads.ListOptions
+	// readAcross runs list in one rig's own store. It is the column's own
+	// function so a bd read stays attributed to the column that asks for it:
+	// internal/beads' census names the caller from the frame that started the
+	// call, and its budgets are keyed by that name (census_budgets.go).
+	readAcross beads.AcrossRead
 	// published, when set, is where a count someone else read the same board
 	// for answers this column: the landing worker's own list, which the sample
 	// can report instead of repeating it (gt-hw6ih). It returns the counts
 	// fresh as of now, and a rig it leaves out is read from the store.
 	published func(env Env, now time.Time) map[string]int
 	// skipEphemeral leaves out the rows bd marks ephemeral (infrastructure
-	// wisps, not work).
+	// wisps, not work). It is for a column read per rig: a list column counts
+	// every row the list answers.
 	skipEphemeral bool
 }
 
@@ -162,7 +174,12 @@ func queueBeadColumns() []queueBeadColumn {
 // scope are the whole query, as they were for the pre-seam `bd list`; Limit 0
 // asks for the whole board rather than bd's default page, which is what the
 // pre-seam --limit 0 did.
+//
+// The rigs a tracker rig's store answers come back in one request for the
+// whole town instead of one per rig; the option is the one readAcross reads,
+// so both forms ask the same board.
 func queueLandingColumn() queueBeadColumn {
+	opts := beads.ListOptions{Label: "gt:ready-to-land", Limit: 0}
 	return queueBeadColumn{
 		column: "waiting_to_land",
 		published: func(env Env, now time.Time) map[string]int {
@@ -171,9 +188,8 @@ func queueLandingColumn() queueBeadColumn {
 			}
 			return env.LandingQueue(now)
 		},
-		read: func(s BeadStore) ([]*beads.Issue, error) {
-			return s.List(beads.ListOptions{Label: "gt:ready-to-land", Limit: 0})
-		},
+		list:       &opts,
+		readAcross: func(l beads.Lister) ([]*beads.Issue, error) { return l.List(opts) },
 	}
 }
 
@@ -209,9 +225,19 @@ type queueColumnResult struct {
 	value  any
 }
 
-// queueRigs lists the registered rig names, sorted. An unreadable registry is
-// an error: summed over no rigs, every bead column would read as an empty town.
-func queueRigs(env Env) ([]string, error) {
+// queueRig is one registered rig: the name its directory and the landing
+// worker's published counts use, and the beads prefix its store files its
+// issues under, which is how a store that holds several rigs (the tracker)
+// names it.
+type queueRig struct {
+	name   string
+	prefix string
+}
+
+// queueRigs lists the registered rigs, sorted by name. An unreadable registry
+// is an error: summed over no rigs, every bead column would read as an empty
+// town.
+func queueRigs(env Env) ([]queueRig, error) {
 	data, err := env.ReadFile(filepath.Join(env.Town, "mayor", "rigs.json"))
 	if err != nil {
 		town, townErr := env.ReadFile(filepath.Join(env.Town, config.MachineConfigFile))
@@ -225,30 +251,43 @@ func queueRigs(env Env) ([]string, error) {
 		if tc.Registry == nil {
 			return nil, fmt.Errorf("queue: %s carries no rig registry", config.MachineConfigFile)
 		}
-		return queueRigNames(tc.Registry), nil
+		return queueRigList(tc.Registry), nil
 	}
 	var rc config.RigsConfig
 	if err := json.Unmarshal(data, &rc); err != nil {
 		return nil, fmt.Errorf("queue: parsing mayor/rigs.json: %w", err)
 	}
-	return queueRigNames(&rc), nil
+	return queueRigList(&rc), nil
 }
 
-// queueRigNames sorts the registry's names so a snapshot reads the same on
-// every run.
-func queueRigNames(rc *config.RigsConfig) []string {
-	names := make([]string, 0, len(rc.Rigs))
-	for name := range rc.Rigs {
-		names = append(names, name)
+// queueRigList sorts the registry's rigs so a snapshot reads the same on every
+// run.
+func queueRigList(rc *config.RigsConfig) []queueRig {
+	rigs := make([]queueRig, 0, len(rc.Rigs))
+	for name, entry := range rc.Rigs {
+		rigs = append(rigs, queueRig{name: name, prefix: queueRigPrefix(name, entry)})
 	}
-	sort.Strings(names)
-	return names
+	sort.Slice(rigs, func(i, j int) bool { return rigs[i].name < rigs[j].name })
+	return rigs
 }
 
-// queueSumBeads runs one column's read in every rig, queueRigParallel at a
-// time, and sums the beads. Any rig that fails leaves the column nil: a
-// partial sum would read as a queue that shrank.
-func queueSumBeads(ctx context.Context, env Env, rigs []string, col queueBeadColumn) any {
+// queueRigPrefix is the prefix the rig's store files its issues under: the
+// registry's beads prefix without its trailing dash. A rig the registry records
+// no prefix for keeps its name, so a rig a store cannot name fails its own read
+// instead of being summed in as an empty one.
+func queueRigPrefix(name string, e config.RigEntry) string {
+	if e.BeadsConfig != nil {
+		if p := strings.TrimSuffix(e.BeadsConfig.Prefix, "-"); p != "" {
+			return p
+		}
+	}
+	return name
+}
+
+// queueSumBeads runs one column's read in every rig and sums the beads. Any
+// rig that fails leaves the column nil: a partial sum would read as a queue
+// that shrank.
+func queueSumBeads(ctx context.Context, env Env, rigs []queueRig, col queueBeadColumn) any {
 	n, ok := queueSumCount(ctx, env, rigs, col)
 	if !ok {
 		return nil
@@ -260,12 +299,44 @@ func queueSumBeads(ctx context.Context, env Env, rigs []string, col queueBeadCol
 // when any rig failed, so a caller that needs the count cannot mistake a
 // failed read for an empty queue. A rig the column's published count answers
 // costs no store read; the rigs it does not answer are read as before.
-func queueSumCount(ctx context.Context, env Env, rigs []string, col queueBeadColumn) (int, bool) {
+func queueSumCount(ctx context.Context, env Env, rigs []queueRig, col queueBeadColumn) (int, bool) {
 	var published map[string]int
 	if col.published != nil {
 		published = col.published(env, env.now())
 	}
+	sum := 0
+	read := make([]queueRig, 0, len(rigs))
+	for _, rig := range rigs {
+		if n, ok := published[rig.name]; ok {
+			sum += n
+			continue
+		}
+		read = append(read, rig)
+	}
+	counts, ok := queueRigCounts(ctx, env, read, col)
+	if !ok {
+		return 0, false
+	}
+	for _, n := range counts {
+		sum += n
+	}
+	return sum, true
+}
+
+// queueRigCounts reads one column in rigs and returns each rig's count keyed by
+// name. ok is false when any rig failed.
+func queueRigCounts(ctx context.Context, env Env, rigs []queueRig, col queueBeadColumn) (map[string]int, bool) {
+	if col.list != nil {
+		return queueListCounts(ctx, env, rigs, *col.list, col.readAcross)
+	}
+	return queueStoreCounts(ctx, env, rigs, col)
+}
+
+// queueStoreCounts runs one column's read in every rig, queueRigParallel at a
+// time.
+func queueStoreCounts(ctx context.Context, env Env, rigs []queueRig, col queueBeadColumn) (map[string]int, bool) {
 	type result struct {
+		rig string
 		n   int
 		err error
 	}
@@ -273,32 +344,75 @@ func queueSumCount(ctx context.Context, env Env, rigs []string, col queueBeadCol
 	sem := make(chan struct{}, queueRigParallel)
 	var wg sync.WaitGroup
 	for i, rig := range rigs {
-		if n, ok := published[rig]; ok {
-			results[i] = result{n: n}
-			continue
-		}
 		sem <- struct{}{}
 		wg.Add(1)
-		go func(i int, rig string) {
+		go func(i int, rig queueRig) {
 			defer func() { <-sem; wg.Done() }()
-			n, err := queueCount(ctx, env, filepath.Join(env.Town, rig), col)
-			results[i] = result{n: n, err: err}
+			n, err := queueCount(ctx, env, filepath.Join(env.Town, rig.name), col)
+			results[i] = result{rig: rig.name, n: n, err: err}
 		}(i, rig)
 	}
 	wg.Wait()
-	sum := 0
+	counts := make(map[string]int, len(rigs))
 	for _, r := range results {
 		if r.err != nil {
-			return 0, false
+			return nil, false
 		}
-		sum += r.n
+		counts[r.rig] = r.n
 	}
-	return sum, true
+	return counts, true
+}
+
+// queueListCounts reads a column as a plain list through beads.ListAcross: the
+// rigs a store that holds several of them answers cost one request between
+// them, and every other rig is read from its own store. A rig left unanswered
+// is a failed read. One deadline covers the batch, because a cross-rig request
+// has no per-rig budget to keep, so a hung store costs the column and not the
+// group.
+func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.ListOptions, read beads.AcrossRead) (map[string]int, bool) {
+	if len(rigs) == 0 {
+		return map[string]int{}, true
+	}
+	if env.Beads == nil {
+		return nil, false
+	}
+	callCtx, cancel := context.WithTimeout(ctx, queueBdTimeout)
+	defer cancel()
+	names := make(map[string]string, len(rigs)) // the rig's prefix to its name
+	prefixes := make([]string, len(rigs))
+	for i, rig := range rigs {
+		if _, dup := names[rig.prefix]; dup {
+			// One prefix for two rigs is a registry the town cannot route, and
+			// each rig's answer would count the other's board too.
+			return nil, false
+		}
+		names[rig.prefix] = rig.name
+		prefixes[i] = rig.prefix
+	}
+	res, err := beads.ListAcross(prefixes, func(prefix string) (beads.Lister, error) {
+		store := env.Beads(callCtx, filepath.Join(env.Town, names[prefix]))
+		if store == nil {
+			return nil, fmt.Errorf("queue: no bead store for %s", names[prefix])
+		}
+		return store, nil
+	}, opts, read)
+	if err != nil {
+		return nil, false
+	}
+	counts := make(map[string]int, len(rigs))
+	for _, rig := range rigs {
+		if err := res.Errors[rig.prefix]; err != nil {
+			return nil, false
+		}
+		counts[rig.name] = len(res.Rigs[rig.prefix])
+	}
+	return counts, true
 }
 
 // queueCount runs one column's read in one rig's store under its own deadline
 // and returns how many beads it answered, leaving out the ephemeral ones when
-// the column asks.
+// the column asks. Only a column read with read takes it: a list column reads
+// through queueListCounts.
 func queueCount(ctx context.Context, env Env, rigPath string, col queueBeadColumn) (int, error) {
 	callCtx, cancel := context.WithTimeout(ctx, queueBdTimeout)
 	defer cancel()

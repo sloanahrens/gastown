@@ -78,7 +78,7 @@ func TestSourceQueueLandingColumnFallsBackPastTheViewsBound(t *testing.T) {
 	col := queueLandingColumn()
 
 	env.Now = func() time.Time { return fixedNow().Add(landworker.LandingQueueMaxAge) }
-	if n, ok := queueSumCount(context.Background(), env, []string{"alpha"}, col); !ok || n != 4 {
+	if n, ok := queueSumCount(context.Background(), env, queueTestRigList("alpha"), col); !ok || n != 4 {
 		t.Fatalf("count at the bound = %d (ok %v); want the published 4", n, ok)
 	}
 	if n := queueLandingReads(fake, "alpha"); n != 0 {
@@ -86,7 +86,7 @@ func TestSourceQueueLandingColumnFallsBackPastTheViewsBound(t *testing.T) {
 	}
 
 	env.Now = func() time.Time { return fixedNow().Add(landworker.LandingQueueMaxAge + time.Second) }
-	if n, ok := queueSumCount(context.Background(), env, []string{"alpha"}, col); !ok || n != 3 {
+	if n, ok := queueSumCount(context.Background(), env, queueTestRigList("alpha"), col); !ok || n != 3 {
 		t.Fatalf("count past the bound = %d (ok %v); want the board's 3", n, ok)
 	}
 	if n := queueLandingReads(fake, "alpha"); n != 1 {
@@ -150,7 +150,7 @@ func TestQueueLandingColumnMakesNoBdCallForAFreshView(t *testing.T) {
 	col := queueLandingColumn()
 
 	for i := 0; i < 10; i++ {
-		n, ok := queueSumCount(context.Background(), env, []string{"alpha", "beta"}, col)
+		n, ok := queueSumCount(context.Background(), env, queueTestRigList("alpha", "beta"), col)
 		if !ok || n != 6 {
 			t.Fatalf("sample %d = %d (ok %v); want the published 6", i, n, ok)
 		}
@@ -161,7 +161,7 @@ func TestQueueLandingColumnMakesNoBdCallForAFreshView(t *testing.T) {
 
 	env.LandingQueue = nil
 	for i := 0; i < 10; i++ {
-		if _, ok := queueSumCount(context.Background(), env, []string{"alpha", "beta"}, col); !ok {
+		if _, ok := queueSumCount(context.Background(), env, queueTestRigList("alpha", "beta"), col); !ok {
 			t.Fatalf("sample %d with no published count failed", i)
 		}
 	}

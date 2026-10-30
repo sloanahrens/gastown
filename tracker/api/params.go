@@ -25,6 +25,12 @@ type CreateParams struct {
 // issue that is not an infrastructure type. Statuses are ORed; Labels are
 // ANDed. Limit 0 means no limit (a page is still bounded by the server, and
 // NextCursor says so).
+//
+// Rig scopes the answer to one rig and Rigs to several, which is what a
+// cross-rig read asks (internal/beads.ListAcross); both name a prefix the
+// tracker files issues under (tracker.rigs), not the town's directory name.
+// Rigs beside Rig is a caller's mistake, and a rig the tracker does not hold
+// is refused rather than answered with no issues.
 type ListFilter struct {
 	Statuses     []string `json:"statuses,omitempty"`
 	Labels       []string `json:"labels,omitempty"`
@@ -34,6 +40,7 @@ type ListFilter struct {
 	NoAssignee   bool     `json:"no_assignee,omitempty"`
 	IssueType    string   `json:"issue_type,omitempty"`
 	Rig          string   `json:"rig,omitempty"`
+	Rigs         []string `json:"rigs,omitempty"`
 	IDs          []string `json:"ids,omitempty"`
 	Ephemeral    bool     `json:"ephemeral,omitempty"`
 	IncludeInfra bool     `json:"include_infra,omitempty"`
