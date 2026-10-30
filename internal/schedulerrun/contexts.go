@@ -81,11 +81,18 @@ func beadsForContextRecord(rec contextRecord) beads.Client {
 // readiness to mark blocked status, and uses a batch fetch for work bead info
 // to avoid N+1 subprocess spawns.
 func ListScheduled(townRoot string) ([]ContextInfo, error) {
-	contexts, err := listAllSlingContextRecords(townRoot)
+	return listScheduledWith(townRoot, contextStore{})
+}
+
+// listScheduledWith is ListScheduled reading and judging through store; the
+// zero value is production. A scan that fails lists nothing: a partial answer
+// would read as "only these are scheduled".
+func listScheduledWith(townRoot string, store contextStore) ([]ContextInfo, error) {
+	contexts, err := store.readAll(townRoot)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listing sling contexts: %w", err)
 	}
-	assessments, err := assessScheduledContexts(townRoot, contexts, nil)
+	assessments, err := assessScheduledContexts(townRoot, contexts, store, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -135,13 +142,15 @@ type workBeadInfoFetch func(townRoot string, ids []string) map[string]beadStatus
 type contextCloser func(rec contextRecord, reason string) error
 
 // contextStore is the sling-context surface one dispatch cycle touches: the
-// read at the top of the cycle and the closes the cleanup writes against that
-// same read. The zero value is production. A cycle builds the value once and
-// hands it to every step, so the steps cannot each read the town again.
+// read at the top of the cycle, the closes the cleanup writes against that
+// same read, and the work-bead reads that judge it. The zero value is
+// production. A cycle builds the value once and hands it to every step, so the
+// steps cannot each read the town again.
 type contextStore struct {
-	scan   contextScan
-	status workBeadInfoFetch
-	close  contextCloser
+	scan    contextScan
+	status  workBeadInfoFetch
+	close   contextCloser
+	blocked blockedWorkQuery
 }
 
 func (s contextStore) readAll(townRoot string) ([]contextRecord, error) {
@@ -165,6 +174,15 @@ func (s contextStore) closeContext(rec contextRecord, reason string) error {
 	return beads.CloseSlingContext(beadsForContextRecord(rec), rec.issue.ID, reason)
 }
 
+// blockedQuery is the read behind listBlockedWorkBeadIDStatesWithRunner: nil
+// is the production `bd blocked` per beads database.
+func (s contextStore) blockedQuery() blockedWorkQuery {
+	if s.blocked != nil {
+		return s.blocked
+	}
+	return runBlockedWorkQuery
+}
+
 // cycleContexts is one dispatch cycle's view of the open sling contexts: it
 // reads them once, lets the cleanup close the stale ones against that same
 // read, and assesses what survives. The read is shared, so a cycle costs one
@@ -183,15 +201,22 @@ func cycleContexts(townRoot string, cleanup bool, store contextStore, w io.Write
 		return nil, err
 	}
 	if cleanup {
-		contexts = closeStaleContexts(townRoot, contexts, store)
+		contexts = closeStaleContexts(townRoot, contexts, store, w)
 	}
-	return assessScheduledContexts(townRoot, contexts, w)
+	return assessScheduledContexts(townRoot, contexts, store, w)
 }
 
 // closeStaleContexts closes the invalid, circuit-broken and stale contexts of
 // one cycle's read and returns the records that survive, which is what the
 // rest of that cycle reads.
-func closeStaleContexts(townRoot string, contexts []contextRecord, store contextStore) []contextRecord {
+//
+// A close that fails keeps its context in the result: the store still has it
+// open, so reporting the cycle without it would hide a context the cleanup
+// could not reach. The failure is logged once with the context id, and the
+// next cycle retries the close.
+func closeStaleContexts(townRoot string, contexts []contextRecord, store contextStore, w io.Writer) []contextRecord {
+	kept := make([]contextRecord, 0, len(contexts))
+
 	// First pass: close invalid and circuit-broken contexts, collect work bead IDs
 	// that need status checks for stale detection.
 	var staleCheckContexts []contextRecord
@@ -199,11 +224,17 @@ func closeStaleContexts(townRoot string, contexts []contextRecord, store context
 	for _, ctx := range contexts {
 		fields := beads.ParseSlingContextFields(ctx.issue.Description)
 		if fields == nil {
-			_ = store.closeContext(ctx, "invalid-context")
+			if err := store.closeContext(ctx, "invalid-context"); err != nil {
+				warnCloseFailure(w, ctx, "invalid-context", err)
+				kept = append(kept, ctx)
+			}
 			continue
 		}
 		if fields.DispatchFailures >= MaxDispatchFailures {
-			_ = store.closeContext(ctx, "circuit-broken")
+			if err := store.closeContext(ctx, "circuit-broken"); err != nil {
+				warnCloseFailure(w, ctx, "circuit-broken", err)
+				kept = append(kept, ctx)
+			}
 			continue
 		}
 		staleCheckContexts = append(staleCheckContexts, ctx)
@@ -211,7 +242,7 @@ func closeStaleContexts(townRoot string, contexts []contextRecord, store context
 	}
 
 	if len(staleCheckContexts) == 0 {
-		return nil
+		return kept
 	}
 
 	// Collect work bead IDs to fetch
@@ -228,12 +259,14 @@ func closeStaleContexts(townRoot string, contexts []contextRecord, store context
 	// actively worked, and bd ready won't return it, so the dispatch query
 	// already prevents re-dispatch. The context stays open until the polecat
 	// finishes and the bead transitions to closed/tombstone.
-	kept := make([]contextRecord, 0, len(staleCheckContexts))
 	for i, ctx := range staleCheckContexts {
 		fields := staleCheckFields[i]
 		info, found := workBeadInfo[fields.WorkBeadID]
 		if found && (info.Status == "hooked" || info.Status == "closed" || info.Status == "tombstone") {
-			_ = store.closeContext(ctx, "stale-work-bead")
+			if err := store.closeContext(ctx, "stale-work-bead"); err != nil {
+				warnCloseFailure(w, ctx, "stale-work-bead", err)
+				kept = append(kept, ctx)
+			}
 			continue
 		}
 		kept = append(kept, ctx)
@@ -241,11 +274,19 @@ func closeStaleContexts(townRoot string, contexts []contextRecord, store context
 	return kept
 }
 
+// warnCloseFailure reports a close the cleanup could not make: once, naming
+// the context that is still open in the store.
+func warnCloseFailure(w io.Writer, rec contextRecord, reason string, err error) {
+	warnf(w, "%s Warning: failed to close sling context %s (%s): %v\n",
+		style.Dim.Render("⚠"), rec.issue.ID, reason, err)
+}
+
 // assessScheduledContexts judges the given sling contexts against their work
 // beads: does the bead still exist, is it blocked, is a blocker's merge
 // request still open, and may it dispatch. It reads no contexts of its own;
-// its caller passes the one read of the cycle. w takes the warnings.
-func assessScheduledContexts(townRoot string, contexts []contextRecord, w io.Writer) ([]assessment, error) {
+// its caller passes the one read of the cycle, and store answers the work-bead
+// reads. w takes the warnings.
+func assessScheduledContexts(townRoot string, contexts []contextRecord, store contextStore, w io.Writer) ([]assessment, error) {
 	if len(contexts) == 0 {
 		return nil, nil
 	}
@@ -276,8 +317,8 @@ func assessScheduledContexts(townRoot string, contexts []contextRecord, w io.Wri
 		return candidates[i].context.issue.ID < candidates[j].context.issue.ID
 	})
 
-	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
-	blockedWorkIDs, blockedUnknownIDs, blockedErr := listBlockedWorkBeadIDStates(townRoot, workBeadIDs, w)
+	workBeadInfo := store.workBeadInfo(townRoot, workBeadIDs)
+	blockedWorkIDs, blockedUnknownIDs, blockedErr := listBlockedWorkBeadIDStatesWithRunner(townRoot, workBeadIDs, store.blockedQuery(), w)
 	mergePendingWorkIDs := listUnmergedBlockedWorkBeadIDs(townRoot, workBeadIDs, workBeadInfo, w)
 
 	seenWork := make(map[string]bool)
@@ -496,10 +537,6 @@ func runBlockedWorkQuery(beadsDir string, _ []string) ([]*beads.Issue, error) {
 	// scheduler makes outside Client.
 	var store blockedReader = beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
 	return store.Blocked()
-}
-
-func listBlockedWorkBeadIDStates(townRoot string, workBeadIDs []string, w io.Writer) (map[string]bool, map[string]bool, error) {
-	return listBlockedWorkBeadIDStatesWithRunner(townRoot, workBeadIDs, runBlockedWorkQuery, w)
 }
 
 // listBlockedWorkBeadIDStatesWithRunner reads `bd blocked` once per beads

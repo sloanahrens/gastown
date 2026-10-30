@@ -149,6 +149,9 @@ type runner struct {
 	deps Deps
 	// actor is opts.Actor with the empty-string default applied.
 	actor string
+	// contexts is the sling-context surface a dispatch cycle reads and closes
+	// through. The zero value is production; tests inject a recording fake.
+	contexts contextStore
 }
 
 func (r *runner) out() io.Writer {
@@ -516,8 +519,11 @@ func (r *runner) buildPlan(townRoot string, batchOverride int, cleanup bool) (*s
 	// closes the stale ones against it and the plan is built from what
 	// survives. A paused or direct-mode run skips the cleanup but still pays
 	// the one read, since the plan below needs it either way (gt-pjcpb).
+	// One read before both steps is safe: the cleanup opens no context of its
+	// own and only closes entries of that read, so the plan judges the same
+	// snapshot the cleanup closed from.
 	cleanStale := cleanup && !state.Paused && maxPolecats > 0
-	assessments, blockedErr := cycleContexts(townRoot, cleanStale, contextStore{}, r.errOut())
+	assessments, blockedErr := cycleContexts(townRoot, cleanStale, r.contexts, r.errOut())
 	if blockedErr != nil {
 		return nil, blockedErr
 	}

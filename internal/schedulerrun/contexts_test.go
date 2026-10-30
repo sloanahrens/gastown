@@ -3,6 +3,7 @@ package schedulerrun
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
@@ -331,36 +333,148 @@ func contextRecordFixture(t *testing.T, townRoot, rig, contextID, workBeadID str
 	}
 }
 
-// A dispatch cycle reads the open sling contexts once, where each step used to
-// read them again. The production scan issues one store read (one bd query)
-// per search dir, so the cycle's query count is the rig count rather than a
-// multiple of it.
-func TestDispatchCycleReadsSlingContextsOnce(t *testing.T) {
-	t.Parallel()
-	townRoot := townWithRigDirs(t, "alpha", "beta")
+// cycleQueryLog is a fake bd for one dispatch cycle. It records every call it
+// takes, keyed by verb, the way the census counts bd subprocesses; its scan
+// issues one list per search dir, which is what the production scan does, so a
+// cycle's query count is counted from the calls rather than assumed.
+type cycleQueryLog struct {
+	events   []string // "<verb> <detail>", in call order
+	contexts []contextRecord
+	status   map[string]beadStatusInfo
+}
+
+func (l *cycleQueryLog) store() contextStore {
+	return contextStore{
+		scan:   l.scan,
+		status: func(string, []string) map[string]beadStatusInfo { return l.status },
+		close:  l.closeContext,
+		blocked: func(string, []string) ([]*beads.Issue, error) {
+			return nil, nil
+		},
+	}
+}
+
+func (l *cycleQueryLog) scan(townRoot string) ([]contextRecord, error) {
 	dirs, err := beads.SlingContextSearchDirs(townRoot)
 	if err != nil {
-		t.Fatalf("search dirs: %v", err)
+		return nil, err
 	}
-	if len(dirs) != 3 {
-		t.Fatalf("search dirs = %v, want the town root and the two rigs", dirs)
+	for _, dir := range dirs {
+		l.events = append(l.events, "list "+dir)
 	}
+	return l.contexts, nil
+}
 
-	queries := 0
-	store := contextStore{scan: func(string) ([]contextRecord, error) {
-		queries += len(dirs) // the production scan reads every search dir once
-		return nil, nil
-	}}
+func (l *cycleQueryLog) closeContext(rec contextRecord, reason string) error {
+	l.events = append(l.events, "close "+rec.issue.ID+" "+reason)
+	return nil
+}
 
-	for _, cleanup := range []bool{true, false} {
-		queries = 0
-		if _, err := cycleContexts(townRoot, cleanup, store, nil); err != nil {
-			t.Fatalf("cycle (cleanup=%t): %v", cleanup, err)
+// countVerb counts the calls of one verb: the census-style query count.
+func (l *cycleQueryLog) countVerb(verb string) int {
+	n := 0
+	for _, e := range l.events {
+		if strings.HasPrefix(e, verb+" ") {
+			n++
 		}
-		if queries != len(dirs) {
-			t.Errorf("cycle (cleanup=%t) issued %d sling-context queries, want %d (one per search dir): the cycle reads the contexts once, not once per step",
-				cleanup, queries, len(dirs))
-		}
+	}
+	return n
+}
+
+// writeCapacityTownSettings gives the town a polecat cap, so a cleanup is
+// what a cycle is asked to run rather than direct mode skipping it.
+func writeCapacityTownSettings(t *testing.T, townRoot string) {
+	t.Helper()
+	maxPolecats := 2
+	writeJSONFile(t, config.TownSettingsPath(townRoot), config.TownSettings{
+		Type:      "town-settings",
+		Version:   1,
+		Scheduler: &capacity.SchedulerConfig{MaxPolecats: &maxPolecats},
+	})
+}
+
+// A dispatch cycle issues one sling-context query per search dir, where each
+// step used to issue its own: the cycle reads the contexts once and the
+// cleanup and the plan share that read (gt-pjcpb). The count covers the
+// unpaused plan, the paused plan (which skips the cleanup), a cycle with no
+// contexts, and the list path.
+func TestDispatchCycleQueriesSlingContextsOncePerSearchDir(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		paused   bool
+		list     bool
+		contexts bool
+	}{
+		{name: "plan with cleanup", contexts: true},
+		{name: "plan while paused", paused: true, contexts: true},
+		{name: "plan with zero contexts"},
+		{name: "list", list: true, contexts: true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := townWithRigDirs(t, "alpha", "beta")
+			dirs, err := beads.SlingContextSearchDirs(townRoot)
+			if err != nil {
+				t.Fatalf("search dirs: %v", err)
+			}
+			if len(dirs) != 3 {
+				t.Fatalf("search dirs = %v, want the town root and the two rigs", dirs)
+			}
+
+			log := &cycleQueryLog{status: map[string]beadStatusInfo{
+				"gt-live":  {Status: "open"},
+				"gt-stale": {Status: "closed"},
+			}}
+			if tc.contexts {
+				log.contexts = []contextRecord{
+					contextRecordFixture(t, townRoot, "alpha", "gt-wisp-stale", "gt-stale", 0),
+					contextRecordFixture(t, townRoot, "alpha", "gt-wisp-live", "gt-live", 0),
+				}
+			}
+
+			if tc.list {
+				if _, err := listScheduledWith(townRoot, log.store()); err != nil {
+					t.Fatalf("list: %v", err)
+				}
+			} else {
+				writeCapacityTownSettings(t, townRoot)
+				if tc.paused {
+					if err := capacity.SaveState(townRoot, &capacity.SchedulerState{Paused: true, PausedBy: "test"}); err != nil {
+						t.Fatalf("save paused state: %v", err)
+					}
+				}
+				r := &runner{
+					opts:     Options{ErrOut: io.Discard},
+					deps:     Deps{Seats: func(string, bool) (Seats, error) { return Seats{Free: 1}, nil }},
+					contexts: log.store(),
+				}
+				if _, err := r.buildPlan(townRoot, 0, true); err != nil {
+					t.Fatalf("plan: %v", err)
+				}
+			}
+
+			if got, want := log.countVerb("list"), len(dirs); got != want {
+				t.Errorf("cycle issued %d sling-context queries, want %d (one per search dir): the cycle reads the contexts once, not once per step",
+					got, want)
+			}
+			// The cleanup runs after the read, so its close follows the scan it
+			// was judged against. A paused cycle closes nothing.
+			wantEvents := len(dirs)
+			wantClose := ""
+			if tc.contexts && !tc.paused && !tc.list {
+				wantEvents++
+				wantClose = "close gt-wisp-stale stale-work-bead"
+			}
+			if len(log.events) != wantEvents {
+				t.Fatalf("cycle calls = %v, want %d", log.events, wantEvents)
+			}
+			if wantClose != "" && log.events[len(log.events)-1] != wantClose {
+				t.Errorf("cycle calls = %v, want the reads first and then %q", log.events, wantClose)
+			}
+		})
 	}
 }
 
@@ -420,7 +534,7 @@ func TestCloseStaleContextsReturnsOnlyTheSurvivors(t *testing.T) {
 		},
 	}
 
-	kept := closeStaleContexts(townRoot, []contextRecord{stale, live}, store)
+	kept := closeStaleContexts(townRoot, []contextRecord{stale, live}, store, nil)
 
 	if len(closed) != 1 || closed[0] != "gt-wisp-stale stale-work-bead" {
 		t.Fatalf("closes = %v, want only the stale context", closed)
@@ -450,11 +564,98 @@ func TestDispatchCycleReportsAFailedSlingContextRead(t *testing.T) {
 	}
 }
 
-// ListScheduled reports a scan it could not make rather than an empty queue,
-// which reads as "nothing scheduled".
-func TestListScheduledReportsAFailedScan(t *testing.T) {
+// ListScheduled reports the scan it could not make, wrapped, rather than an
+// empty queue, which reads as "nothing scheduled". It reports that failure
+// once and lists nothing: a partial answer would say "only these are
+// scheduled".
+func TestListScheduledReportsTheScansOwnFailure(t *testing.T) {
 	t.Parallel()
-	if _, err := ListScheduled(filepath.Join(t.TempDir(), "no-such-town")); err == nil {
-		t.Fatal("ListScheduled on an unreadable town root = nil error, want the scan failure")
+	townRoot := townWithRigDirs(t, "alpha")
+	scanErr := errors.New("dolt unavailable")
+
+	got, err := listScheduledWith(townRoot, contextStore{
+		scan: func(string) ([]contextRecord, error) { return nil, scanErr },
+	})
+	if !errors.Is(err, scanErr) {
+		t.Fatalf("ListScheduled error = %v, want the injected scan failure", err)
+	}
+	if got != nil {
+		t.Fatalf("ListScheduled = %+v with a failed scan, want nothing listed", got)
+	}
+	if n := strings.Count(err.Error(), scanErr.Error()); n != 1 {
+		t.Fatalf("the scan failure appears %d time(s) in %q, want once", n, err.Error())
+	}
+
+	// The failure must be this scan's, not any error: a different one is not
+	// reported as the sentinel above.
+	otherErr := errors.New("routes unreadable")
+	_, err = listScheduledWith(townRoot, contextStore{
+		scan: func(string) ([]contextRecord, error) { return nil, otherErr },
+	})
+	if !errors.Is(err, otherErr) || errors.Is(err, scanErr) {
+		t.Fatalf("ListScheduled error = %v, want the scan's own failure only", err)
+	}
+
+	// A scan that succeeds reports no failure and nothing scheduled.
+	got, err = listScheduledWith(townRoot, contextStore{
+		scan: func(string) ([]contextRecord, error) { return nil, nil },
+	})
+	if err != nil || got != nil {
+		t.Fatalf("ListScheduled with nothing scheduled = (%+v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// A close the cleanup cannot make leaves the context open in the store, so the
+// cycle keeps it: dropping it would report the cycle without a context bd
+// still has, and the next cycle retries the close. The failure is logged once
+// with the context id.
+func TestCloseFailureKeepsTheContextInTheCycle(t *testing.T) {
+	t.Parallel()
+	townRoot := townWithRigDirs(t, "alpha")
+	stale := contextRecordFixture(t, townRoot, "alpha", "gt-wisp-stale", "gt-stale", 0)
+	closeErr := errors.New("dolt write failed")
+
+	var warnings strings.Builder
+	store := contextStore{
+		scan: func(string) ([]contextRecord, error) { return []contextRecord{stale}, nil },
+		status: func(string, []string) map[string]beadStatusInfo {
+			return map[string]beadStatusInfo{"gt-stale": {Status: "closed"}}
+		},
+		close: func(contextRecord, string) error { return closeErr },
+		blocked: func(string, []string) ([]*beads.Issue, error) {
+			return nil, nil
+		},
+	}
+
+	assessments, err := cycleContexts(townRoot, true, store, &warnings)
+	if err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if len(assessments) != 1 || assessments[0].context.issue.ID != "gt-wisp-stale" {
+		t.Fatalf("assessments = %+v, want the context whose close failed to stay in the cycle's read", assessments)
+	}
+	if got := strings.Count(warnings.String(), "gt-wisp-stale"); got != 1 {
+		t.Fatalf("close failure reported %d time(s) in %q, want once with the context id", got, warnings.String())
+	}
+	if !strings.Contains(warnings.String(), closeErr.Error()) {
+		t.Fatalf("warning %q does not name the failure %q", warnings.String(), closeErr)
+	}
+}
+
+// The same rule for a context whose description does not parse: a close that
+// fails leaves it for the next cycle instead of dropping it.
+func TestCloseStaleContextsKeepsAnInvalidContextWhoseCloseFailed(t *testing.T) {
+	t.Parallel()
+	townRoot := townWithRigDirs(t, "alpha")
+	invalid := contextRecord{
+		issue:    &beads.Issue{ID: "gt-wisp-invalid", Description: "not a sling context"},
+		workDir:  filepath.Join(townRoot, "alpha"),
+		beadsDir: filepath.Join(townRoot, "alpha", ".beads"),
+	}
+	store := contextStore{close: func(contextRecord, string) error { return errors.New("dolt write failed") }}
+
+	kept := closeStaleContexts(townRoot, []contextRecord{invalid}, store, io.Discard)
+	if len(kept) != 1 || kept[0].issue.ID != "gt-wisp-invalid" {
+		t.Fatalf("kept = %+v, want the invalid context whose close failed", kept)
 	}
 }
