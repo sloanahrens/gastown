@@ -1,0 +1,7 @@
+# Container packages, one per line. A # starts a comment to the end of its line.
+internal/beads
+
+internal/testutil   # the Dolt container helpers
+internal/cmd   extra fields after the first are ignored
+   # an indented comment line
+	internal/daemon
