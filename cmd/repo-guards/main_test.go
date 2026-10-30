@@ -397,7 +397,8 @@ func TestSameDir(t *testing.T) {
 		{name: "a name that goes up and back", a: base + "/dir/../dir", b: dir, want: true},
 		{name: "a symlink to it", a: link, b: dir, want: true},
 		{name: "a sibling directory", a: other, b: dir, want: false},
-		{name: "a missing directory is an error", a: filepath.Join(base, "missing"), b: dir, wantErr: true},
+		{name: "a missing first directory is an error", a: filepath.Join(base, "missing"), b: dir, wantErr: true},
+		{name: "a missing second directory is an error", a: dir, b: filepath.Join(base, "missing"), wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
