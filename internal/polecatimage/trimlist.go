@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
@@ -167,6 +168,48 @@ func TrimListPaths(root string, capBytes int64, sandboxesRunning bool, walk file
 		paths = append(paths, r.Path)
 	}
 	return paths, nil
+}
+
+// The names trim-list prints for the two caches a listing entry can belong to. A reader maps them
+// back to cachevol.BuildCache and cachevol.ModuleCache; PlanTrim chooses what to remove by that
+// cache, so a name outside this set is refused rather than read as the build cache.
+const (
+	TrimListCacheBuild  = "build"
+	TrimListCacheModule = "module"
+)
+
+// trimListEntry is one claim file as the trim-list helper prints it: the path a trim removes, the
+// cache it belongs to, its size, and the last use PlanTrim orders by.
+type trimListEntry struct {
+	Path  string    `json:"path"`
+	Cache string    `json:"cache"`
+	Size  int64     `json:"size"`
+	Atime time.Time `json:"atime"`
+	Mtime time.Time `json:"mtime"`
+}
+
+// trimListing returns the claim at root as the listing a caller builds a trim manifest from: the
+// files claimListing names, with the cache each belongs to spelled as trim-list prints it.
+//
+// It is the read side of the trim: a caller that does not mount the claim itself reads this through
+// the helper and hands the entries to cachevol.BuildTrimManifest, which plans the removals and picks
+// the route they travel by.
+func trimListing(root string, walk fileWalk) ([]trimListEntry, error) {
+	listing, err := claimListing(root, walk)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]trimListEntry, 0, len(listing))
+	for _, e := range listing {
+		// claimListing names one of the two caches; the module cache is the one
+		// its walk sets explicitly, and everything else is the build cache's tree.
+		cache := TrimListCacheBuild
+		if e.Cache == cachevol.ModuleCache {
+			cache = TrimListCacheModule
+		}
+		out = append(out, trimListEntry{Path: e.Path, Cache: cache, Size: e.Size, Atime: e.Atime, Mtime: e.Mtime})
+	}
+	return out, nil
 }
 
 // claimListing is the claim's cache files as PlanTrim's entries: every regular file under GOCACHE and

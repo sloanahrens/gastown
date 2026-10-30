@@ -23,8 +23,6 @@ gt-model-eval/scripts/results-to-discussion.sh	port: gt-tpg0p
 scripts/check-install-path_test.sh	port: gt-tpg0p
 scripts/deep-review.sh	port: gt-tpg0p
 scripts/deep-review_test.sh	port: gt-tpg0p
-scripts/flake-sweep.sh	port: gt-tpg0p
-scripts/flake-sweep_test.sh	port: gt-tpg0p
 scripts/forgejo-cutover.sh	port: gt-tpg0p
 scripts/forgejo-cutover_test.sh	port: gt-tpg0p
 scripts/forgejo-probe.sh	port: gt-tpg0p

@@ -231,6 +231,13 @@ func (c *Client) DepList(id, depType string) ([]beads.IssueDep, error) {
 	return deps(d), nil
 }
 
+// DepListUp is the reverse-dependency read. The tracker's dependents answer is
+// its own bead (gt-p85pw.105), so this names the gap instead of returning an
+// empty list a caller would read as "no dependents".
+func (c *Client) DepListUp(id, depType string) ([]beads.IssueDep, error) {
+	return nil, fmt.Errorf("trackerclient: DepListUp is not implemented yet (gt-p85pw.105)")
+}
+
 // RemoveDependency removes that dependency, whatever its type.
 func (c *Client) RemoveDependency(issue, dependsOn string) error {
 	return mapErr(c.tc.RemoveDependency(ctx(), issue, dependsOn))

@@ -60,22 +60,12 @@ func reaperAutoCloseDisarmed() (bool, string) {
 
 // reaperAutoCloseDisarmedAt is reaperAutoCloseDisarmed for the town at
 // townRoot, which the tests drive directly instead of chdir-ing into a town.
+// ReadPatrolConfig is the one reader: it refuses a settings/config.json that
+// cannot be read or does not parse, in place of the caller-side check this
+// function used to run on the operator's file (gt-dcxbw).
 func reaperAutoCloseDisarmedAt(townRoot string) (bool, string) {
 	cfg, readErr := daemon.ReadPatrolConfig(townRoot)
-	source := daemon.PatrolConfigSource(townRoot)
-	if readErr == nil && cfg == nil {
-		// ReadPatrolConfig follows mayor/daemon.json into settings/config.json
-		// and a host file that does not parse at all reads to it as absent
-		// (config.readConfigFile defers the broken host to its own loader), so
-		// a broken settings/config.json arrives here as "no config" and the
-		// sweep would run on defaults. Ask the operator file directly; the
-		// daemon names the same file when it refuses to start the town from it.
-		settingsPath := agentconfig.TownSettingsPath(townRoot)
-		if _, err := agentconfig.LoadTownSettings(settingsPath); err != nil {
-			readErr, source = err, settingsPath
-		}
-	}
-	return reaperDisarmFromConfig(cfg, readErr, source)
+	return reaperDisarmFromConfig(cfg, readErr, daemon.PatrolConfigSource(townRoot))
 }
 
 // reaperDisarmFromConfig resolves the hand-run reaper's auto-close refusal from
@@ -88,13 +78,26 @@ func reaperAutoCloseDisarmedAt(townRoot string) (bool, string) {
 // have said auto_close=false, and running the write that setting exists to stop
 // is worse than skipping a sweep. An absent file is not disarmed — there is no
 // setting to honor, and --force lifts either refusal.
+//
+// A *config.ParseError names the file it read, and that path wins over source:
+// a broken settings/config.json is the operator's whole file, not the "daemon"
+// section the patrol config would live in, so the refusal must not point the
+// operator at a section of the file they cannot be told to fix (gt-dcxbw).
 func reaperDisarmFromConfig(cfg *daemon.DaemonPatrolConfig, readErr error, source string) (bool, string) {
 	if readErr != nil {
 		msg := readErr.Error()
+		var pe *agentconfig.ParseError
+		if errors.As(readErr, &pe) && pe.Path != "" {
+			source = pe.Path
+		}
 		if !strings.Contains(msg, source) {
 			msg = fmt.Sprintf("%s: %s", source, msg)
 		}
-		return true, fmt.Sprintf("a patrol config that does not parse: %s", msg)
+		label := "a patrol config that could not be read"
+		if errors.Is(readErr, agentconfig.ErrUnparseable) {
+			label = "a patrol config that does not parse"
+		}
+		return true, fmt.Sprintf("%s: %s", label, msg)
 	}
 	if daemon.WispReaperAutoCloseDisarmed(cfg) {
 		return true, fmt.Sprintf("%s (patrols.wisp_reaper.auto_close=false)", source)

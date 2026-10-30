@@ -27,6 +27,10 @@ type Copier func() (dir string, remove func() error, err error)
 type Recorder struct {
 	Run  Runner
 	Copy Copier
+	// Normalize rewrites a row's stdout before it becomes a golden. The recorder sets it to the
+	// normalization the committed goldens hold (gt-p85pw.103); a nil Normalize keeps the bytes bd
+	// printed, which is what a test of the running itself wants.
+	Normalize func(stdout []byte) []byte
 }
 
 // Golden is what bd printed for one row.
@@ -135,6 +139,9 @@ func (rc Recorder) runRow(row Row, sharedDir string) (Golden, error) {
 	}
 	if err != nil {
 		return Golden{}, fmt.Errorf("%s: %w", name, err)
+	}
+	if rc.Normalize != nil {
+		stdout = rc.Normalize(stdout)
 	}
 	return Golden{Name: name, Stdout: stdout, Exit: exit}, nil
 }
