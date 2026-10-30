@@ -35,13 +35,13 @@ import (
 const specSlingHoldLabel = "a spec dispatch sling"
 
 // specSlingFlight is one running sling. job is the tick's job object, passed
-// to `gt spec sling` as it came; the daemon reads only the fields below.
+// to `gt spec sling` as it came; the bead and its seat are the only parts of
+// it the daemon reads, the job's file and test lists being the sling's own
+// business (gt-mx656).
 type specSlingFlight struct {
-	Bead  string   `json:"bead"`
-	Rig   string   `json:"rig"`
-	Agent string   `json:"agent"`
-	Paths []string `json:"paths,omitempty"`
-	Tests []string `json:"tests,omitempty"`
+	Bead  string `json:"bead"`
+	Rig   string `json:"rig"`
+	Agent string `json:"agent"`
 
 	job     json.RawMessage
 	started time.Time
@@ -125,10 +125,13 @@ func (s *specSlings) newest() (time.Time, bool) {
 // the tick used to give a sling.
 func specSlingBound() time.Duration { return specDispatchTimeout }
 
-// specTickFlight is a running sling as the tick reads it: the set's fields, and
-// the start the stagger measures from (gt-vames).
+// specTickFlight is a running sling as the tick reads it: the bead, the seat it
+// occupies, and the start the stagger measures from (gt-vames). The job's file
+// and test lists stay out: the tick never reads them (gt-mx656).
 type specTickFlight struct {
-	specSlingFlight
+	Bead  string `json:"bead"`
+	Rig   string `json:"rig"`
+	Agent string `json:"agent"`
 	// omitzero: omitempty has no effect on a time.Time, so a flight with no
 	// start time would be written as 0001-01-01T00:00:00Z (gt-fzcge).
 	Started time.Time `json:"started,omitzero"`
@@ -143,7 +146,7 @@ func (d *Daemon) specTickArgs() ([]string, error) {
 	if flights := d.specSlings.list(); len(flights) > 0 {
 		payload := make([]specTickFlight, 0, len(flights))
 		for _, f := range flights {
-			payload = append(payload, specTickFlight{specSlingFlight: f, Started: f.started})
+			payload = append(payload, specTickFlight{Bead: f.Bead, Rig: f.Rig, Agent: f.Agent, Started: f.started})
 		}
 		raw, err := json.Marshal(payload)
 		if err != nil {
