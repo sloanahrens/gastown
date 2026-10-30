@@ -79,14 +79,13 @@ var bearerText = regexp.MustCompile(`(?i)(bearer[ \t]+)[A-Za-z0-9._~+/=-]+`)
 
 // Scrub returns text with the token masked wherever it was echoed: every
 // occurrence of the value, the rest of any Authorization line, and the
-// credential after "Bearer". A zero or empty Secret has nothing to hide and
-// returns text unchanged.
+// credential after "Bearer". The Authorization and Bearer rules match by shape,
+// not by value, so they apply even to a zero or empty Secret; only the
+// replacement of the value itself needs a value to look for.
 func (s Secret) Scrub(text string) string {
-	value := s.Reveal()
-	if value == "" {
-		return text
+	if value := s.Reveal(); value != "" {
+		text = strings.ReplaceAll(text, value, redacted)
 	}
-	text = strings.ReplaceAll(text, value, redacted)
 	text = authorizationLine.ReplaceAllString(text, "${1}"+redacted)
 	return bearerText.ReplaceAllString(text, "${1}"+redacted)
 }

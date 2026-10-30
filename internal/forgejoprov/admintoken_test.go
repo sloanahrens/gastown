@@ -317,8 +317,9 @@ func TestSecretScrub(t *testing.T) {
 	}{
 		{name: "value present twice", secret: tok, text: fixtureToken + " then " + fixtureToken, want: redacted + " then " + redacted},
 		{name: "value absent", secret: tok, text: "nothing to hide", want: "nothing to hide"},
-		{name: "empty secret", secret: newSecret(""), text: "Authorization: token abc", want: "Authorization: token abc"},
-		{name: "zero secret", secret: Secret{}, text: "Bearer abc", want: "Bearer abc"},
+		{name: "empty secret still masks the authorization line", secret: newSecret(""), text: "Authorization: token abc", want: "Authorization: " + redacted},
+		{name: "zero secret still masks bearer text", secret: Secret{}, text: "Bearer abc", want: "Bearer " + redacted},
+		{name: "zero secret leaves other text alone", secret: Secret{}, text: "nothing to hide", want: "nothing to hide"},
 		{name: "authorization line", secret: tok, text: "a\nAuthorization: token " + fixtureToken + "\nb", want: "a\nAuthorization: " + redacted + "\nb"},
 		{name: "authorization line, lower case", secret: tok, text: "authorization: other-scheme xyz", want: "authorization: " + redacted},
 		{name: "bearer text", secret: tok, text: "got Bearer abc.DEF-123 back", want: "got Bearer " + redacted + " back"},

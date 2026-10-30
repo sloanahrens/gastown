@@ -382,7 +382,7 @@ func TestClientBodyTailScrubsBeforeTheCut(t *testing.T) {
 	tail := c.BodyTail([]byte(resp))
 	for n := 4; n <= len(fixtureToken); n++ {
 		if strings.Contains(tail, fixtureToken[:n]) {
-			t.Fatalf("BodyTail keeps the first %d characters of the token across the cut: %q", n, tail[len(tail)-20:])
+			t.Fatalf("BodyTail keeps the first %d characters of the token across the cut (tail is %d bytes)", n, len(tail))
 		}
 	}
 	if got := len(tail) - len(" - "); got > bodyTailLimit {
@@ -391,14 +391,14 @@ func TestClientBodyTailScrubsBeforeTheCut(t *testing.T) {
 }
 
 // TestClientBodyTailEmptyAndAnonymous covers the empty reply and a client that
-// has no token to hide.
+// has no token to hide: its Authorization line is still masked by shape.
 func TestClientBodyTailEmptyAndAnonymous(t *testing.T) {
 	t.Parallel()
 	if got := (&Client{Token: newSecret(fixtureToken)}).BodyTail(nil); got != "" {
 		t.Errorf("BodyTail(nil) = %q, want empty", got)
 	}
 	anon := &Client{}
-	if got, want := anon.BodyTail([]byte("Authorization: token x")), " - Authorization: token x"; got != want {
-		t.Errorf("a client with no token changed the reply: %q, want %q", got, want)
+	if got, want := anon.BodyTail([]byte("Authorization: token x")), " - Authorization: "+redacted; got != want {
+		t.Errorf("a client with no token left its Authorization line: %q, want %q", got, want)
 	}
 }
