@@ -1232,6 +1232,24 @@ func TestSpanPolecatTimesAnswersAnUnchangedLogFromTheLastRead(t *testing.T) {
 	}
 }
 
+// A log the store cannot read leaves the bead's time unknown rather than zero:
+// the reader marks the total a lower bound, as the landing record does for the
+// same log, so the row shows a floor instead of a dash that claims no seat ever
+// worked the bead (gt-kmp7c).
+func TestSpanPolecatTimesReportsAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the bead's log belongs: present, so the stamp reads, but
+	// not the regular file the store reads and errors on.
+	if err := os.MkdirAll(filepath.Join(spans.DefaultDir(town), "gt-bad.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	read := spanPolecatTimes(town)
+	if secs, attempts, lower := read("gt-bad", time.Now()); secs != 0 || attempts != nil || !lower {
+		t.Errorf("unreadable log read = %v secs %+v lower %v, want no time and a lower bound", secs, attempts, lower)
+	}
+}
+
 // A row with no record of its own — one the worker is still landing, and one it
 // rejected — takes crew from the submission lookup: its branch is not in the
 // landings file yet, so without the lookup the Polecat cell would draw a dash
