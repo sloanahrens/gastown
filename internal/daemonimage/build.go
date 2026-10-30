@@ -253,11 +253,12 @@ func isCommit(s string) bool {
 
 // Plan returns the steps a full build of rev would run, one line each, and runs
 // none of them: it makes no worktree, resolves no commit, writes no file and
-// reaches no network. It refuses what a build would refuse of its inputs (an
-// empty or relative Out, a rev or bd commit that is not a commit, a missing
-// source or Dockerfile), so a plan that prints is one the build's own checks
-// pass. The commits in it are the ones named, not resolved: a build resolves
-// them against the source checkouts when it runs.
+// reaches no network. It refuses the inputs a build refuses before it runs
+// anything (an empty or relative Out, a rev or bd commit that is not a commit,
+// an unnamed source, a Dockerfile that is not an absolute regular file). It does
+// not check the claude CLI pin, and it does not check that a commit exists in its
+// checkout: a build checks both when it runs, so a plan that prints can still
+// fail there. The commits in it are the ones named, not resolved.
 func (b Builder) Plan(rev string) ([]string, error) {
 	rev, bdCommit, err := b.checkBuildInputs(rev)
 	if err != nil {
