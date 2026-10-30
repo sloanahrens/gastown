@@ -476,3 +476,63 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkRefusesForeignAuthor(t *te
 		t.Errorf("origin feature = %s, want it untouched at %s", got, rejected)
 	}
 }
+
+// TestIntegrationRecoverDivergedPush_RealRepoOriginDeletedBranch: origin lands and
+// deletes the polecat branch after gt done listed its tip. The own-branch fetch then
+// fails with git's own "couldn't find remote ref" message, and the classifier must
+// recognise THAT error (not a hand-built one) and route it to the no-ref outcome that
+// TestRecoverDivergedPush_OriginMissingBranch already pins: no recovery, no lease push,
+// and an error that says origin has no ref, never a fetch failure (gt-mysaa).
+func TestIntegrationRecoverDivergedPush_RealRepoOriginDeletedBranch(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	seed := filepath.Join(tmp, "seed")
+	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
+	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.name", "Test")
+	writeRepoFile(t, seed, "README.md", "# initial\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "initial")
+	testRunGit(t, seed, "remote", "add", "origin", remote)
+	testRunGit(t, seed, "push", "origin", "main")
+	testRunGit(t, seed, "checkout", "-b", "feature")
+	writeRepoFile(t, seed, "feature.txt", "feature work\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "feature work")
+	testRunGit(t, seed, "push", "origin", "feature:feature")
+
+	work := filepath.Join(tmp, "work")
+	testRunGit(t, tmp, "clone", remote, work)
+	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.name", "Test")
+	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
+
+	// origin deletes the branch after the clone knows it.
+	testRunGit(t, seed, "push", "origin", "--delete", "feature")
+
+	g := gitpkg.NewGit(work)
+	fetchErr := g.FetchRefspecWithTimeout("origin", "+refs/heads/feature:refs/remotes/origin/feature", gitpkg.RemoteQueryTimeout)
+	if fetchErr == nil {
+		t.Fatal("fetching the deleted branch by name succeeded, want git's missing-ref failure")
+	}
+	if !isMissingRemoteRef(fetchErr) {
+		t.Fatalf("isMissingRemoteRef(%v) = false for the error real git returned", fetchErr)
+	}
+
+	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
+	if recovered {
+		t.Error("recovered over a branch origin deleted")
+	}
+	if diagnosis != "" {
+		t.Errorf("diagnosis = %q, want empty: the comparison never ran", diagnosis)
+	}
+	if err == nil || !strings.Contains(err.Error(), "origin/feature has no ref") {
+		t.Fatalf("err = %v, want the no-ref outcome", err)
+	}
+	if strings.Contains(err.Error(), "before divergence check") {
+		t.Errorf("err = %v: a deleted branch must not read as a fetch failure", err)
+	}
+}
