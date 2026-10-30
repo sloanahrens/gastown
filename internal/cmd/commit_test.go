@@ -1,54 +1,82 @@
 package cmd
 
 import (
-	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
 )
 
+// TestSeatForCommit checks the identity an agent's commit is authored as is the
+// seat's bare name and its own gastown.local address, from the compound identity
+// alone: nothing about the worktree's git config reaches it.
 func TestSeatForCommit(t *testing.T) {
 	t.Parallel()
-	errUnset := errors.New("exit status 1")
 	tests := []struct {
-		name          string
-		identity      string
-		worktreeEmail string
-		emailErr      error
-		want          git.SeatIdentity
-		wantErr       bool
+		name     string
+		identity string
+		want     git.SeatIdentity
 	}{
-		{
-			name:          "worktree email names the seat",
-			identity:      "gastown/polecats/coma",
-			worktreeEmail: "seat@test.com",
-			want:          git.SeatIdentity{Name: "coma", Email: "seat@test.com"},
-		},
-		{
-			name:     "unset email is refused",
-			identity: "gastown/polecats/coma",
-			emailErr: errUnset,
-			wantErr:  true,
-		},
-		{
-			name:          "empty email is refused",
-			identity:      "gastown/polecats/coma",
-			worktreeEmail: "  ",
-			wantErr:       true,
-		},
+		{"polecat", "gastown/polecats/coma", git.SeatIdentity{Name: "coma", Email: "coma@gastown.local"}},
+		{"crew", "gastown/crew/max", git.SeatIdentity{Name: "max", Email: "max@gastown.local"}},
+		{"a trailing slash", "gastown/polecats/coma/", git.SeatIdentity{Name: "coma", Email: "coma@gastown.local"}},
+		{"another rig", "beads/polecats/abacus", git.SeatIdentity{Name: "abacus", Email: "abacus@gastown.local"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := seatForCommit(tt.identity, tt.worktreeEmail, tt.emailErr)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("seatForCommit error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if got != tt.want {
-				t.Errorf("seatForCommit = %+v, want %+v", got, tt.want)
+			if got := seatForCommit(tt.identity); got != tt.want {
+				t.Errorf("seatForCommit(%q) = %+v, want %+v", tt.identity, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCommitAuthorEnvIsTheSeatAddress hands the wrapper's git arguments and
+// environment the seat from seatForCommit, with an environment that already
+// holds another author and committer address: every one of the four variables
+// ends up the seat's, once, and the other address is gone.
+func TestCommitAuthorEnvIsTheSeatAddress(t *testing.T) {
+	t.Parallel()
+	seat := seatForCommit("gastown/polecats/coma")
+	env := []string{
+		"PATH=/usr/bin",
+		"GIT_AUTHOR_NAME=Host Human", "GIT_AUTHOR_EMAIL=host@example.com",
+		"GIT_COMMITTER_NAME=Host Human", "GIT_COMMITTER_EMAIL=host@example.com",
+	}
+	got := withAuthorEnv(env, seat)
+	want := []string{
+		"PATH=/usr/bin",
+		"GIT_AUTHOR_NAME=coma", "GIT_AUTHOR_EMAIL=coma@gastown.local",
+		"GIT_COMMITTER_NAME=coma", "GIT_COMMITTER_EMAIL=coma@gastown.local",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("withAuthorEnv = %v, want %v", got, want)
+	}
+	for _, kv := range got {
+		if strings.Contains(kv, "host@example.com") || strings.Contains(kv, "Host Human") {
+			t.Errorf("the host identity survived: %q", kv)
+		}
+	}
+	args := commitGitArgs([]string{"-m", "msg"}, seat)
+	if wantArgs := []string{"-c", "user.name=coma", "-c", "user.email=coma@gastown.local", "commit", "-m", "msg"}; !slices.Equal(args, wantArgs) {
+		t.Errorf("commitGitArgs = %v, want %v", args, wantArgs)
+	}
+}
+
+// TestCommitHelpNamesTheSeatAddress checks the command's help shows the seat-local
+// address and no longer says a worktree without a user.email is refused.
+func TestCommitHelpNamesTheSeatAddress(t *testing.T) {
+	t.Parallel()
+	long := commitCmd.Long
+	if !strings.Contains(long, "@gastown.local") {
+		t.Errorf("help does not show the seat-local address:\n%s", long)
+	}
+	for _, stale := range []string{"is refused", "worktree's user.email"} {
+		if strings.Contains(long, stale) {
+			t.Errorf("help still says %q:\n%s", stale, long)
+		}
 	}
 }
 

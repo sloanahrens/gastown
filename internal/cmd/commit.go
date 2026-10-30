@@ -1,18 +1,19 @@
 package cmd
 
 import (
-	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
-// DefaultAgentEmailDomain is the default domain for agent git emails.
-const DefaultAgentEmailDomain = "gastown.local"
+// DefaultAgentEmailDomain is the domain `gt config agent-email-domain` reports
+// when the town sets none. It is the seat-local domain the seats' author
+// addresses use, defined once in config.
+const DefaultAgentEmailDomain = config.SeatLocalDomain
 
 var commitCmd = &cobra.Command{
 	Use:   "commit [flags] [-- git-commit-args...]",
@@ -21,12 +22,12 @@ var commitCmd = &cobra.Command{
 
 When run by an agent (GT_ROLE set), this command:
 1. Detects the agent identity from environment variables
-2. Authors as that seat's git identity: its bare agent name and the user.email
-   its worktree resolves
+2. Authors as that seat's git identity: its bare agent name and its own
+   address, <name>@gastown.local
 3. Runs 'git commit' with the correct identity
 
-A worktree whose user.email is unset or unreadable is refused: the commit is not
-made, because gt done's rework lease could not match an author it did not write.
+The identity comes from the seat alone, so it does not depend on the worktree's
+git config: a worktree with no user.email commits as the seat like any other.
 
 Examples:
   gt commit -m "Fix bug"              # Commit as current agent
@@ -35,7 +36,7 @@ Examples:
 
 Identity mapping:
   Agent: gastown/crew/jack  →  Name: jack
-                                Email: the worktree's user.email
+                                Email: jack@gastown.local
 
 When run without GT_ROLE (human), passes through to git commit with no changes.`,
 	RunE:               runCommit,
@@ -64,31 +65,18 @@ func runCommit(cmd *cobra.Command, args []string) error {
 		return runGitCommit(args, git.SeatIdentity{})
 	}
 
-	// The worktree's own user.email is what a plain `git commit` here authors
-	// with, so it is the half of the seat identity gt done's lease compares
-	// (gt-tip6u).
-	worktreeEmail, emailErr := git.NewGit(cwd).AuthorEmail()
-	seat, err := seatForCommit(identity, worktreeEmail, emailErr)
-	if err != nil {
-		return err
-	}
-	return runGitCommit(args, seat)
+	return runGitCommit(args, seatForCommit(identity))
 }
 
-// seatForCommit returns the identity an agent's commit is authored as. The
-// email is the worktree's user.email, the address gt done's rework lease reads.
-// An unset or unreadable user.email is an error and not a fallback: an author
-// written under an address the lease cannot match is refused as divergence,
-// so the commit waits until the worktree names one.
-func seatForCommit(identity, worktreeEmail string, emailErr error) (git.SeatIdentity, error) {
-	if emailErr != nil {
-		return git.SeatIdentity{}, fmt.Errorf("gt commit: the worktree's user.email cannot be read (%w); set it with git config user.email, or gt done's rework lease cannot match this seat's commits", emailErr)
-	}
-	seat := git.SeatIdentityFor(identity, worktreeEmail)
-	if seat.Email == "" {
-		return git.SeatIdentity{}, errors.New("gt commit: the worktree's user.email is empty; set it with git config user.email, or gt done's rework lease cannot match this seat's commits")
-	}
-	return seat, nil
+// seatForCommit returns the identity an agent's commit is authored as: the
+// seat's bare agent name and its own address, <name>@gastown.local. Both come
+// from the seat's compound identity alone, the same pair the seat is spawned with
+// (config.GitIdentityEnv) and gt done's rework lease accepts, so the worktree's
+// git config, which a linked worktree shares with the rig repository, decides
+// nothing.
+func seatForCommit(identity string) git.SeatIdentity {
+	name := git.SeatIdentityFor(identity, "").Name
+	return git.SeatIdentity{Name: name, Email: config.SeatLocalEmail(name)}
 }
 
 // commitIdentity returns the agent identity to author a commit as, or "" when

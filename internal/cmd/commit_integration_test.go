@@ -8,15 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/git"
 )
 
-// TestIntegrationGtCommitAuthorMatchesSeatIdentity pins the identity gt commit
-// writes to the one gt done's rework lease compares (git.SeatIdentityFor): the
-// seat's bare agent name and the worktree's user.email. gt commit used to
-// author the compound address at the agent email domain, which the lease read
-// as another seat's and refused (gt-tip6u).
+// TestIntegrationGtCommitAuthorMatchesSeatIdentity pins that gt commit authors as
+// the seat's own identity from the seat alone: its bare agent name and
+// <name>@gastown.local, even though the worktree's user.name and user.email name
+// someone else. The lease in gt done accepts that address.
 func TestIntegrationGtCommitAuthorMatchesSeatIdentity(t *testing.T) {
 	dir := t.TempDir()
 	runGit := func(args ...string) string {
@@ -47,22 +44,26 @@ func TestIntegrationGtCommitAuthorMatchesSeatIdentity(t *testing.T) {
 		t.Fatalf("gt commit: %v", err)
 	}
 
-	fields := strings.Split(strings.TrimSpace(runGit("log", "-1", "--format=%an%x00%ae")), "\x00")
-	if len(fields) != 2 {
-		t.Fatalf("git log returned %d fields, want author name and email", len(fields))
+	fields := strings.Split(strings.TrimSpace(runGit("log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce")), "\x00")
+	if len(fields) != 4 {
+		t.Fatalf("git log returned %d fields, want author and committer name and email", len(fields))
 	}
-	seat := git.SeatIdentityFor("gastown/polecats/coma", "seat@test.com")
-	if fields[0] != seat.Name || fields[1] != seat.Email {
-		t.Errorf("author = %q <%s>, want the seat identity %q <%s>", fields[0], fields[1], seat.Name, seat.Email)
+	seat := seatForCommit("gastown/polecats/coma")
+	for i, want := range []string{seat.Name, seat.Email, seat.Name, seat.Email} {
+		if fields[i] != want {
+			t.Errorf("field %d (author name, author email, committer name, committer email) = %q, want %q", i, fields[i], want)
+		}
+	}
+	if seat.Email != "coma@gastown.local" {
+		t.Errorf("seat email = %q, want coma@gastown.local", seat.Email)
 	}
 }
 
-// TestIntegrationGtCommitRefusesUnsetAuthorEmail pins that an agent's commit in
-// a worktree with no user.email is refused and made nowhere: gt commit used to
-// author it under the agent's fallback address, which gt done's rework lease
-// could not match (gt-tip6u). The host's global and system config are kept out
-// so no email is inherited.
-func TestIntegrationGtCommitRefusesUnsetAuthorEmail(t *testing.T) {
+// TestIntegrationGtCommitWithoutUserEmailCommitsAsTheSeat pins that an agent's
+// commit in a worktree with no user.email at all is made, authored as the seat's
+// own address: the identity comes from the seat, not from git config. The host's
+// global and system config are kept out so no email is inherited.
+func TestIntegrationGtCommitWithoutUserEmailCommitsAsTheSeat(t *testing.T) {
 	dir := t.TempDir()
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -85,10 +86,10 @@ func TestIntegrationGtCommitRefusesUnsetAuthorEmail(t *testing.T) {
 	t.Chdir(dir)
 	t.Setenv("GT_ROLE", "gastown/polecats/coma")
 
-	if err := runCommit(commitCmd, []string{"-m", "test: no author email"}); err == nil {
-		t.Fatal("gt commit with no user.email: want an error, got nil")
+	if err := runCommit(commitCmd, []string{"-m", "test: no author email in git config"}); err != nil {
+		t.Fatalf("gt commit with no user.email: %v", err)
 	}
-	if commits := strings.TrimSpace(runGit("rev-list", "--all")); commits != "" {
-		t.Errorf("gt commit made a commit with no user.email: %s", commits)
+	if got := strings.TrimSpace(runGit("log", "-1", "--format=%an <%ae>")); got != "coma <coma@gastown.local>" {
+		t.Errorf("author = %q, want coma <coma@gastown.local>", got)
 	}
 }
