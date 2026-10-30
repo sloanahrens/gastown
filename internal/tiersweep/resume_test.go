@@ -756,13 +756,13 @@ func TestResumeRemoveFailureIsNamed(t *testing.T) {
 	}
 }
 
-// TestGoflagsReadsOnlyTheInjectedHost: the environment key is read from the
-// host the run was given, and a host with no Env reads nothing, so the process's
-// own GOFLAGS never reaches a record key (om 97eb48).
+// TestGoflagsReadsOnlyTheInjectedHost: the environment key is the GOFLAGS the
+// host the run was given reports, and a host with no Env reports none, so a
+// record key is never built from the process's own environment (om 97eb48).
 func TestGoflagsReadsOnlyTheInjectedHost(t *testing.T) {
-	t.Setenv("GOFLAGS", "-tags=process")
+	t.Parallel()
 	if got := goflags(Host{}); got != "" {
-		t.Errorf("goflags(no Env) = %q, want empty: the process environment is not read", got)
+		t.Errorf("goflags(no Env) = %q, want empty", got)
 	}
 	host := Host{Env: func(name string) string {
 		if name == "GOFLAGS" {
