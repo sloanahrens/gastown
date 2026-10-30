@@ -284,6 +284,86 @@ func TestStartDaemon_UsesSystemdWhenProvisioned(t *testing.T) {
 	}
 }
 
+// The owner a systemd unit's start names is the invocation id the unit runs
+// now, the same id daemon.DetectSelf reads from the environment there, so the
+// guard recognizes a restart of that unit. An id that cannot be read leaves
+// the owner's id empty and no error: the state the guard judges on the
+// recorded owner's heartbeat and probe (gt-h7iy7).
+func TestSystemdSupervisorOwner(t *testing.T) {
+	t.Parallel()
+	const kind = config.SupervisorSystemd
+	rows := []struct {
+		name  string
+		state templates.SupervisorState
+		want  daemon.Owner
+	}{
+		{
+			name:  "the unit's current invocation id",
+			state: templates.SupervisorState{Kind: kind, Loaded: true, PID: 4242, LastExit: -1, InvocationID: "inv-2"},
+			want:  daemon.Owner{Kind: kind, ID: "inv-2"},
+		},
+		{
+			name:  "a unit reporting no invocation id",
+			state: templates.SupervisorState{Kind: kind, Loaded: true, PID: 4242, LastExit: -1},
+			want:  daemon.Owner{Kind: kind},
+		},
+		{
+			name:  "a unit whose state cannot be read",
+			state: templates.SupervisorState{Kind: kind, LastExit: -1, InvocationID: "inv-2", Err: errors.New("systemctl: failed to connect to bus")},
+			want:  daemon.Owner{Kind: kind},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			c := &daemonControl{
+				goos:     "linux",
+				stateFor: func(string) templates.SupervisorState { return row.state },
+			}
+			owner, err := c.fileSupervisor("/unit", kind).owner()
+			if err != nil {
+				t.Fatalf("owner: %v", err)
+			}
+			if owner != row.want {
+				t.Errorf("owner = %+v, want %+v", owner, row.want)
+			}
+		})
+	}
+}
+
+// The owner the systemd supervisor reports is the one the real guard judges:
+// state.json naming the invocation the unit runs now, under a fresh
+// heartbeat, is this unit restarting itself, and any other id is refused
+// (gt-h7iy7).
+func TestSystemdRestartOwnerPassesTheRealTakeoverGuard(t *testing.T) {
+	t.Parallel()
+	const running = "inv-2"
+	c := &daemonControl{
+		goos: "linux",
+		stateFor: func(kind string) templates.SupervisorState {
+			return templates.SupervisorState{Kind: kind, Loaded: true, PID: 4242, LastExit: -1, InvocationID: running}
+		},
+	}
+	self, err := c.fileSupervisor("/unit", config.SupervisorSystemd).owner()
+	if err != nil {
+		t.Fatalf("owner: %v", err)
+	}
+	now := time.Now()
+	recorded := daemon.Owner{Kind: config.SupervisorSystemd, ID: running}
+	in := daemon.TakeoverInput{
+		State: &daemon.State{Owner: &recorded, Running: true, LastHeartbeat: now.Add(-time.Minute)},
+		Now:   now,
+		Self:  self,
+	}
+	if err := daemon.CheckTakeover(in); err != nil {
+		t.Errorf("CheckTakeover for the unit's own invocation = %v, want the restart allowed", err)
+	}
+	in.Self = daemon.Owner{Kind: config.SupervisorSystemd, ID: "inv-9"}
+	if err := daemon.CheckTakeover(in); err == nil {
+		t.Error("CheckTakeover allowed a start naming another invocation id")
+	}
+}
+
 // An OS with no supervisor support spawns directly.
 func TestStartDaemon_UnsupportedOSSpawnsDirectly(t *testing.T) {
 	t.Parallel()
@@ -768,6 +848,67 @@ func TestRestartDaemon_SupervisedRestartsInPlace(t *testing.T) {
 	// Reports the NEW pid, not the outgoing one the lock still names.
 	if pid == 1111 {
 		t.Error("restart reported the outgoing daemon's pid")
+	}
+}
+
+// A restart of a systemd daemon asks the guard about the invocation the unit
+// runs now, read before anything is stopped, so the daemon coming back is this
+// unit's own and not a second daemon's start; a guard that refuses that owner
+// refuses the restart before any command runs (gt-h7iy7).
+func TestRestartDaemon_SystemdNamesTheRunningInvocation(t *testing.T) {
+	t.Parallel()
+	running := daemon.Owner{Kind: config.SupervisorSystemd, ID: "inv-2"}
+	rows := []struct {
+		name string
+		// allowed is the owner the guard accepts, standing in for the one
+		// state.json records when CheckTakeover reads it.
+		allowed daemon.Owner
+		wantOK  bool
+	}{
+		{name: "the guard sees the unit's running invocation", allowed: running, wantOK: true},
+		{name: "a guard refusing a different owner refuses the restart", allowed: daemon.Owner{Kind: config.SupervisorSystemd, ID: "inv-9"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+			c, calls := stubRestart(t, "linux", unit, 1111, 1111, 4242)
+			c.stateFor = func(kind string) templates.SupervisorState {
+				return templates.SupervisorState{Kind: kind, Loaded: true, PID: 4242, LastExit: -1, InvocationID: "inv-2"}
+			}
+			var guarded daemon.Owner
+			c.guard = func(townRoot string, self daemon.Owner, takeover bool) error {
+				guarded = self
+				if self != row.allowed {
+					return errors.New("state.json records a different owner; refusing to start beside it")
+				}
+				return nil
+			}
+
+			via, _, err := c.restartDaemon(town)
+			if guarded != running {
+				t.Errorf("guard was asked about %+v, want %+v", guarded, running)
+			}
+			if !row.wantOK {
+				if err == nil {
+					t.Fatal("restartDaemon succeeded, want the guard's refusal")
+				}
+				if len(calls.argv) != 0 || calls.spawned {
+					t.Errorf("ran=%v spawned=%v after the refusal, want neither", calls.argv, calls.spawned)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("restartDaemon: %v", err)
+			}
+			if got := calls.joined(); got != "systemctl --user restart gastown-daemon.service" {
+				t.Errorf("supervisor command = %q, want the systemctl restart", got)
+			}
+			if via != config.SupervisorSystemd {
+				t.Errorf("via = %q, want %q", via, config.SupervisorSystemd)
+			}
+		})
 	}
 }
 

@@ -540,6 +540,16 @@ func containerComposeProject(cfg *config.DaemonPatrolConfig) (string, error) {
 // default.
 var errContainerSettingsUnset = errors.New("daemon.supervisor is container, but the town does not set both daemon.container_name and daemon.compose_project: set both, so a scratch town cannot act on the live daemon's container")
 
+// supervisorState reads one supervisor job's live state through this control's
+// state seam, and through the host's own reader when none is set, so a test
+// that fakes the state never runs systemctl.
+func (c *daemonControl) supervisorState(kind string) templates.SupervisorState {
+	if c.stateFor == nil {
+		return supervisorJobState(kind)
+	}
+	return c.stateFor(kind)
+}
+
 // fileSupervisor is the launchd or systemd supervisor, whose argv are fixed
 // once the file path is known.
 func (c *daemonControl) fileSupervisor(p, kind string) *daemonSupervisor {
@@ -569,11 +579,19 @@ func (c *daemonControl) fileSupervisor(p, kind string) *daemonSupervisor {
 			bootstrap: argv("systemctl", "--user", "enable", "--now", templates.SystemdUnit),
 			load:      "systemctl --user daemon-reload && systemctl --user enable --now " + templates.SystemdUnit,
 			fallback:  "or remove its file to run the daemon by hand",
-			// A systemd daemon names itself by its invocation id, which no
-			// CLI can know: the empty id equals no recorded owner, so the
-			// guard judges the recorded one on its heartbeat and probe.
+			// A systemd daemon names itself by the unit's invocation id, so
+			// the guard must be told the id the unit runs now: read before
+			// any restart, it makes the daemon that comes back this unit's
+			// own rather than a second daemon's start beside it (gt-h7iy7).
+			// An id that cannot be read leaves the owner id empty, which
+			// equals no recorded owner: the guard then judges the recorded
+			// owner on its heartbeat and probe, as it did before.
 			owner: func() (daemon.Owner, error) {
-				return daemon.Owner{Kind: config.SupervisorSystemd}, nil
+				owner := daemon.Owner{Kind: config.SupervisorSystemd}
+				if st := c.supervisorState(config.SupervisorSystemd); st.Err == nil {
+					owner.ID = st.InvocationID
+				}
+				return owner, nil
 			},
 			ctl: c,
 		}
