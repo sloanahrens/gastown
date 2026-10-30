@@ -47,18 +47,59 @@ func parseReaperAge(flag, value string) (time.Duration, error) {
 }
 
 // reaperAutoCloseDisarmed reports whether the daemon patrol config disarms the
-// wisp_reaper auto-close step, and where that config lives for the message
-// (the file it was read from, so a two-file town is told settings/config.json
-// and not a retired mayor/daemon.json). Checked here as
-// well as in the daemon so a hand-run sweep cannot auto-close either: the
-// disarm has to hold on every path that reaches the write.
+// wisp_reaper auto-close step, and why, for the message. Checked here as well
+// as in the daemon so a hand-run sweep cannot auto-close either: the disarm has
+// to hold on every path that reaches the write.
 func reaperAutoCloseDisarmed() (bool, string) {
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
 		return false, ""
 	}
-	return daemon.WispReaperAutoCloseDisarmed(daemon.LoadPatrolConfig(townRoot)),
-		daemon.PatrolConfigSource(townRoot)
+	return reaperAutoCloseDisarmedAt(townRoot)
+}
+
+// reaperAutoCloseDisarmedAt is reaperAutoCloseDisarmed for the town at
+// townRoot, which the tests drive directly instead of chdir-ing into a town.
+func reaperAutoCloseDisarmedAt(townRoot string) (bool, string) {
+	cfg, readErr := daemon.ReadPatrolConfig(townRoot)
+	source := daemon.PatrolConfigSource(townRoot)
+	if readErr == nil && cfg == nil {
+		// ReadPatrolConfig follows mayor/daemon.json into settings/config.json
+		// and a host file that does not parse at all reads to it as absent
+		// (config.readConfigFile defers the broken host to its own loader), so
+		// a broken settings/config.json arrives here as "no config" and the
+		// sweep would run on defaults. Ask the operator file directly; the
+		// daemon names the same file when it refuses to start the town from it.
+		settingsPath := agentconfig.TownSettingsPath(townRoot)
+		if _, err := agentconfig.LoadTownSettings(settingsPath); err != nil {
+			readErr, source = err, settingsPath
+		}
+	}
+	return reaperDisarmFromConfig(cfg, readErr, source)
+}
+
+// reaperDisarmFromConfig resolves the hand-run reaper's auto-close refusal from
+// what daemon.ReadPatrolConfig returned: the config (nil when there is none),
+// its error (nil when the file is absent or parsed), and source, the file the
+// config was read from, which a refusal names so the operator knows which file
+// to fix.
+//
+// A config that could not be read disarms the sweep (fail closed): the file may
+// have said auto_close=false, and running the write that setting exists to stop
+// is worse than skipping a sweep. An absent file is not disarmed — there is no
+// setting to honor, and --force lifts either refusal.
+func reaperDisarmFromConfig(cfg *daemon.DaemonPatrolConfig, readErr error, source string) (bool, string) {
+	if readErr != nil {
+		msg := readErr.Error()
+		if !strings.Contains(msg, source) {
+			msg = fmt.Sprintf("%s: %s", source, msg)
+		}
+		return true, fmt.Sprintf("a patrol config that does not parse: %s", msg)
+	}
+	if daemon.WispReaperAutoCloseDisarmed(cfg) {
+		return true, fmt.Sprintf("%s (patrols.wisp_reaper.auto_close=false)", source)
+	}
+	return false, ""
 }
 
 // reaperWriter returns the bd writer a live reaper run against dbName writes
@@ -697,7 +738,9 @@ Four guards apply, the first three answering the 2026-09-16 mis-close that swept
     (nothing is closed) unless --force.
   - auto-close disarmed in the daemon patrol config
     (daemon.patrols.wisp_reaper.auto_close=false in settings/config.json)
-    is refused unless --force.
+    is refused unless --force. A config that does not parse is refused the
+    same way: the setting cannot be read, so the sweep does not assume it is
+    unset (gt-ptslm).
   - a live run with no --preview hash is refused (nothing is closed) unless
     --force: the sweep only closes a set a dry run already showed, whatever
     order the two commands ran in (gt-39bu — the 2026-09-20 reaper ran live
@@ -713,8 +756,8 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 			return err
 		}
 
-		if disarmed, configPath := reaperAutoCloseDisarmed(); disarmed && !reaperForce {
-			return fmt.Errorf("auto-close is disarmed by %s (patrols.wisp_reaper.auto_close=false); pass --force to override", configPath)
+		if disarmed, reason := reaperAutoCloseDisarmed(); disarmed && !reaperForce {
+			return fmt.Errorf("auto-close is disarmed by %s; pass --force to override", reason)
 		}
 
 		databases := reaperDatabaseNames()
@@ -870,7 +913,7 @@ it by hand.`,
 			return err
 		}
 
-		autoCloseDisarmed, autoCloseConfigPath := reaperAutoCloseDisarmed()
+		autoCloseDisarmed, autoCloseReason := reaperAutoCloseDisarmed()
 
 		var totalReaped, totalMoleculeSteps, totalPurged, totalMailPurged, totalClosed, totalOpen int
 		// openDBs counts the databases totalOpen covers and openFailures the ones
@@ -954,7 +997,7 @@ it by hand.`,
 			// order the two phases, and a live sweep closes only what a preview
 			// showed (gt-39bu).
 			if autoCloseDisarmed && !reaperForce {
-				fmt.Printf("%s: auto-close skipped (disarmed by %s)\n", dbName, autoCloseConfigPath)
+				fmt.Printf("%s: auto-close skipped (disarmed by %s)\n", dbName, autoCloseReason)
 			} else {
 				preview, err := reaper.AutoClose(db, nil, dbName, reaper.AutoCloseOptions{
 					StaleAge:  staleAge,
