@@ -23,8 +23,9 @@ func answered(now time.Time, ago time.Duration) string {
 	return logLine(now.Add(-ago), `{"q":"a"}`)
 }
 
-// dayLines builds n answered lines inside baseline day day, day 1 the closest
-// to now.
+// dayLines builds n answered lines in the day-th 24-hour bucket before now
+// (day 1 is the bucket ending a full window ago, so the lines fall inside the
+// baseline the median reads), one minute apart.
 func dayLines(now time.Time, day, n int) []string {
 	var lines []string
 	for i := 1; i <= n; i++ {
@@ -352,8 +353,51 @@ func TestUnparsedLinesAreReported(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 2, dedupe.Unparsed, "the count reaches the row")
-	assert.Contains(t, dedupe.Reason, "2 log lines did not parse", "a drifting log is named, not read as quiet")
+	assert.Contains(t, dedupe.Reason, "2 of 3 log lines did not parse", "a drifting log is named, not read as quiet")
 	assert.NotEqual(t, health.Unparseable, dedupe.Status, "a log with a readable line is still judged")
+	assert.Equal(t, health.Drifted, dedupe.Status, "two thirds of the log unreadable is a drift, not ok")
+	assert.True(t, dedupe.Status.Fails(), "a drifted battery fails the command's exit status")
+}
+
+// TestDriftShareSeparatesStrayLinesFromADrift checks the line DriftShare draws:
+// a stray unreadable line among many readable ones keeps the battery ok and is
+// named in its reason, and the same count over a mostly unreadable log is a
+// drift, so a partly broken log never reads as ok.
+func TestDriftShareSeparatesStrayLinesFromADrift(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+
+	build := func(readable, unreadable int) health.Row {
+		var lines []health.Line
+		for i := 0; i < readable; i++ {
+			parsed, _ := health.ParseLog([]byte(answered(now, time.Duration(i+1)*time.Minute)))
+			lines = append(lines, parsed...)
+		}
+		rows := health.Report(health.Config{Enabled: enabled("jev_dedupe")}, map[string]health.Input{
+			"dedupe": {
+				Cursor: now.Add(-5 * time.Minute), HasCursor: true,
+				Log: lines, Unparsed: unreadable, LogPresent: true,
+			},
+		}, nil, now)
+		for _, r := range rows {
+			if r.Name == "dedupe" {
+				return r
+			}
+		}
+		t.Fatal("no dedupe row")
+		return health.Row{}
+	}
+
+	stray := build(30, 1)
+	assert.Equal(t, health.OK, stray.Status, "one stray line in 31 is under DriftShare")
+	assert.Contains(t, stray.Reason, "1 log lines did not parse", "the stray line is still named")
+
+	atShare := build(9, 1)
+	assert.Equal(t, health.OK, atShare.Status, "exactly DriftShare is not over it")
+
+	drift := build(8, 2)
+	assert.Equal(t, health.Drifted, drift.Status, "two in ten is over DriftShare")
+	assert.Contains(t, drift.Reason, "2 of 10 log lines did not parse")
 }
 
 // TestFutureLinesNameNoPass checks that a line stamped after now is left out of

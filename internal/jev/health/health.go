@@ -71,6 +71,10 @@ const (
 	// no count can say what it collected, and reading that as quiet would hide
 	// a schema change behind an empty row.
 	Unparseable Status = "unparseable"
+	// Drifted means the battery's log parses, but more than DriftShare of its
+	// lines do not: part of what it collects can no longer be read, and
+	// counting only the readable part would pass a half-broken log as ok.
+	Drifted Status = "drifted"
 	// Unknown means the evidence a rule needs cannot be read: a battery only a
 	// landing writes, judged against a landing clock the town has not recorded.
 	Unknown Status = "unknown"
@@ -79,7 +83,7 @@ const (
 // Fails reports whether the status means an enabled battery is not collecting.
 func (s Status) Fails() bool {
 	switch s {
-	case Stale, Late, Low, Unanswered, Unparseable, Unknown:
+	case Stale, Late, Low, Unanswered, Unparseable, Drifted, Unknown:
 		return true
 	}
 	return false
@@ -102,6 +106,10 @@ const (
 	// LowShare is the fraction of the baseline median a last-day count must
 	// reach.
 	LowShare = 0.25
+	// DriftShare is the fraction of a log's lines that may fail to parse
+	// before the battery reads drifted: a few stray lines from an older
+	// format are normal, a tenth or more of the log is a schema change.
+	DriftShare = 0.1
 	// UnansweredShare is the fraction of answer-free lines above which a
 	// battery is writing lines without collecting answers.
 	UnansweredShare = 0.5
@@ -310,10 +318,23 @@ func judge(b Battery, cfg Config, in Input, ledger map[string]int, landingKnown 
 		row.LastPass = &t
 	}
 	row.judgeStatus(b, cfg, in, landingKnown, landings24, now)
-	if row.Unparsed > 0 && row.Status != Unparseable {
+	if row.Status == OK && unparsedShare(in) > DriftShare {
+		row.Status = Drifted
+		row.Reason = fmt.Sprintf("%d of %d log lines did not parse", in.Unparsed, in.Unparsed+len(in.Log))
+	} else if row.Unparsed > 0 && row.Status != Unparseable {
 		row.Reason = reasonWith(row.Reason, fmt.Sprintf("%d log lines did not parse", row.Unparsed))
 	}
 	return row
+}
+
+// unparsedShare is the fraction of the log's non-blank lines that did not
+// parse, zero for an empty log.
+func unparsedShare(in Input) float64 {
+	total := in.Unparsed + len(in.Log)
+	if total == 0 {
+		return 0
+	}
+	return float64(in.Unparsed) / float64(total)
 }
 
 // reasonWith joins a verdict's reason with a note about the row, "; " between.

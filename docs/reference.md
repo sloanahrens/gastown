@@ -1260,13 +1260,7 @@ judges every battery from the files each one writes, the patrol config and
 enabled battery is not collecting, so a cron or a morning check reads it
 without parsing the table.
 
-The rules live in `internal/jev/health` as pure functions over what the command
-read, so each status is a unit test over fixtures. Both rules that could pass a
-silent battery as `ok` are closed: a battery only a landing writes is judged
-against the landings the town recorded, and with no landing to read it reports
-`unknown`, never `ok`; a log line that no longer parses is named in its row, and
-a log that holds lines and parses none of them reports `unparseable`, so a
-schema drift never reads as a quiet day.
+The rules are pure functions in `internal/jev/health`, one unit test per status; `gt jev health --help` lists the statuses.
 
 ### Attention battery
 
