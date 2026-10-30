@@ -49,22 +49,16 @@ type answerLine struct {
 // each call returns its own map: a caller may keep or change what it was given
 // without touching the next call's answers.
 type ScoreReader struct {
-	path string
-
-	mu     sync.Mutex
-	offset int64
-	// tail is the last answersTailBytes of the consumed log, checked before the
-	// read continues: a replacement that is not shorter would otherwise be
-	// read from the middle of a line.
-	tail []byte
-	// stat is the file as it stood at the last read, for the quiet check.
-	stat   os.FileInfo
+	mu sync.Mutex
+	// tail is the read position in one answers log, shared with the landing
+	// risk reader because the two logs are read the same way.
+	tail   consumedTail
 	scores Scores
 }
 
 // NewScoreReader reads the scores from the answers log at path.
 func NewScoreReader(path string) *ScoreReader {
-	return &ScoreReader{path: path}
+	return &ScoreReader{tail: consumedTail{path: path}}
 }
 
 // Scores returns the needs_human answer per item life as the log stands, and
@@ -77,58 +71,26 @@ func (r *ScoreReader) Scores() (Scores, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// The stat is the quiet check alone: a path it cannot stat is opened anyway,
-	// so the open's error is what names why the log could not be read.
-	fi, _ := os.Stat(r.path)
-	if fi != nil && r.stat != nil && os.SameFile(fi, r.stat) &&
-		fi.ModTime().Equal(r.stat.ModTime()) && fi.Size() == r.offset {
-		return r.copy(), nil // nothing appended since the last read
-	}
-
-	f, err := os.Open(r.path) //nolint:gosec // G304: the path is the town's own runtime file
+	data, restart, err := r.tail.next()
 	if err != nil {
-		if os.IsNotExist(err) {
-			// the battery has not run, or the log was removed: no item has an answer,
-			// so the answers last read from it are dropped rather than served
-			r.offset, r.scores, r.tail, r.stat = 0, nil, nil, nil
-			return r.copy(), nil
-		}
-		return r.copy(), fmt.Errorf("reading %s: %w", r.path, err)
+		return r.copy(), err
 	}
-	defer func() { _ = f.Close() }()
-	// A truncated or replaced log makes every offset read so far name a line
-	// that is gone or changed under it, so the read starts over. The reset is
-	// applied only once the read succeeded: a failed read leaves the last good
-	// answers in place beside its error.
-	start, scores, tail := r.offset, r.scores, r.tail
-	if (fi != nil && fi.Size() < start) || !r.continues(f) {
-		start, scores, tail = 0, nil, nil
+	if restart {
+		r.scores = nil
 	}
-	data, err := io.ReadAll(io.NewSectionReader(f, start, math.MaxInt64))
-	if err != nil {
-		return r.copy(), fmt.Errorf("reading %s: %w", r.path, err)
-	}
-	r.stat = fi
-	// A pass killed mid-write can leave its last line cut short. Consuming only
-	// whole lines leaves that line for the next read, after the write finished.
-	end := bytes.LastIndexByte(data, '\n') + 1
-	if end == 0 {
-		r.offset, r.scores, r.tail = start, scores, tail
+	if len(data) == 0 {
 		return r.copy(), nil
 	}
-	if scores == nil {
-		scores = Scores{}
+	if r.scores == nil {
+		r.scores = Scores{}
 	}
-	for _, raw := range bytes.Split(data[:end], []byte("\n")) {
+	for _, raw := range bytes.Split(data, []byte("\n")) {
 		var l answerLine
 		if err := json.Unmarshal(raw, &l); err != nil || l.Key == "" || l.FirstSeen.IsZero() || l.Answers == nil {
 			continue // a failed call has no answer to score with
 		}
-		scores[LifeKey(l.Key, l.FirstSeen)] = l.Answers.NeedsHuman
+		r.scores[LifeKey(l.Key, l.FirstSeen)] = l.Answers.NeedsHuman
 	}
-	r.offset = start + int64(end)
-	r.scores = scores
-	r.tail = lastBytes(append(tail, data[:end]...), answersTailBytes)
 	return r.copy(), nil
 }
 
@@ -145,18 +107,87 @@ func (r *ScoreReader) copy() Scores {
 	return out
 }
 
+// consumedTail is the incremental read the answer readers share: the whole
+// lines appended after the offset it already consumed, and the state that
+// notices a log which shrank or was replaced. A reader holds one under its own
+// lock and folds the lines into the answers it keeps.
+type consumedTail struct {
+	path   string
+	offset int64
+	// tail is the last answersTailBytes of the consumed log, checked before the
+	// read continues: a replacement that is not shorter would otherwise be
+	// read from the middle of a line.
+	tail []byte
+	// stat is the file as it stood at the last read, for the quiet check.
+	stat os.FileInfo
+}
+
+// next returns the whole lines appended since the last call and whether the
+// read started over. A start-over means every offset read so far names a line
+// that is gone or changed under it, so the lines returned are the log from its
+// first byte and the caller drops everything it kept from it. A missing log is
+// a start-over with no lines.
+//
+// A log that exists but cannot be read returns the error with the read
+// position untouched, so a later call continues from the last good read. Only
+// whole lines are returned: a pass killed mid-write leaves its last line cut
+// short, and that line waits for the read after the write finished.
+func (t *consumedTail) next() (data []byte, restart bool, err error) {
+	// The stat is the quiet check alone: a path it cannot stat is opened anyway,
+	// so the open's error is what names why the log could not be read.
+	fi, _ := os.Stat(t.path)
+	if fi != nil && t.stat != nil && os.SameFile(fi, t.stat) &&
+		fi.ModTime().Equal(t.stat.ModTime()) && fi.Size() == t.offset {
+		return nil, false, nil // nothing appended since the last read
+	}
+
+	f, err := os.Open(t.path) //nolint:gosec // G304: the path is a town runtime file
+	if err != nil {
+		if os.IsNotExist(err) {
+			// the battery has not run, or the log was removed: nothing it said holds
+			t.offset, t.tail, t.stat = 0, nil, nil
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("reading %s: %w", t.path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	start := t.offset
+	if (fi != nil && fi.Size() < start) || !t.continues(f) {
+		start, restart = 0, true
+	}
+	all, err := io.ReadAll(io.NewSectionReader(f, start, math.MaxInt64))
+	if err != nil {
+		return nil, false, fmt.Errorf("reading %s: %w", t.path, err)
+	}
+	t.stat = fi
+	end := bytes.LastIndexByte(all, '\n') + 1
+	if end == 0 {
+		if restart {
+			t.offset, t.tail = start, nil
+		}
+		return nil, restart, nil
+	}
+	if restart {
+		t.tail = nil
+	}
+	t.offset = start + int64(end)
+	t.tail = lastBytes(append(t.tail, all[:end]...), answersTailBytes)
+	return all[:end], restart, nil
+}
+
 // continues reports whether the bytes before the read offset are still the
 // bytes that were consumed: a log swapped for another that is not shorter is
 // otherwise read on from the middle of whatever line now sits at the offset.
-func (r *ScoreReader) continues(f *os.File) bool {
-	if len(r.tail) == 0 {
+func (t *consumedTail) continues(f *os.File) bool {
+	if len(t.tail) == 0 {
 		return true
 	}
-	got := make([]byte, len(r.tail))
-	if _, err := f.ReadAt(got, r.offset-int64(len(r.tail))); err != nil {
+	got := make([]byte, len(t.tail))
+	if _, err := f.ReadAt(got, t.offset-int64(len(t.tail))); err != nil {
 		return false
 	}
-	return bytes.Equal(got, r.tail)
+	return bytes.Equal(got, t.tail)
 }
 
 // lastBytes returns a copy of b's last n bytes.

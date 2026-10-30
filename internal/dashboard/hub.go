@@ -777,8 +777,10 @@ func (h *Hub) pollEscalation() {
 // readers as they stand at that instant.
 func (h *Hub) attentionLocked() {
 	scores, err := h.needsHuman()
+	risks, riskErr := h.landingRisk()
 	h.state.Attention = buildAttention(h.state.Escalations, h.state.Questions, h.alerts.Standing(),
-		AttentionQueue{Items: h.queueItems, Failed: h.queueFailed}, ScoresRead{Scores: scores, Err: err}, h.cfg.Now())
+		AttentionQueue{Items: h.queueItems, Failed: h.queueFailed}, ScoresRead{Scores: scores, Err: err},
+		LandingRiskRead{Risks: risks, Err: riskErr}, h.cfg.Now())
 }
 
 // needsHuman reads Jev's needs_human answers, with no reader leaving every item
@@ -790,6 +792,17 @@ func (h *Hub) needsHuman() (attention.Scores, error) {
 		return nil, nil
 	}
 	return h.cfg.NeedsHuman()
+}
+
+// landingRisk reads the landing battery's risk answers, with no reader leaving
+// every risk-path row unranked: the panel then keeps the queue's own order. An
+// error says the landing log exists but could not be read, which the panel
+// names rather than drawing the last answers as this read's.
+func (h *Hub) landingRisk() (attention.LandingRisks, error) {
+	if h.cfg.LandingRisk == nil {
+		return nil, nil
+	}
+	return h.cfg.LandingRisk()
 }
 
 func (h *Hub) pollDispatch() {

@@ -441,6 +441,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// since the last publish, and it is read from the shared attention package
 	// so the dashboard does not reach into the battery's own (gt-b9j3o.2).
 	attentionScoreReader := attention.NewScoreReader(attention.AnswersPath(townRoot))
+	landingRiskReader := attention.NewLandingRiskReader(attention.LandingRiskPath(townRoot))
 	return dashboard.NewHub(dashboard.Config{
 		Feed:           feed,
 		Summary:        func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache, dispatches) },
@@ -470,6 +471,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Attention:      dashboard.NewAttentionFollower(townRoot).Read,
 		AttentionItems: dashboard.NewAttentionFollower(townRoot).Items,
 		NeedsHuman:     attentionScoreReader.Scores,
+		LandingRisk:    landingRiskReader.Risks,
 		Models:         models.read,
 		SeatRoster:     func() dashboard.SeatRoster { return dashboardSeatRoster(poolLiveFor(townRoot)) },
 		Queue:          func() *dashboard.Queue { return queue.read(time.Now()) },

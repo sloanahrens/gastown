@@ -55,6 +55,12 @@ no answers. A log that exists but cannot be read is different: the table then
 says so in a header, and the NEEDS cells read "?" rather than claiming Jev
 never answered the item.
 
+The risk-path items, the post-landing reviews, are ranked among themselves by
+the landing battery's risk answer instead: the risk level it gave the landing,
+highest first, read from <town>/.runtime/jev/landing.jsonl. An item with no
+answer there sorts after the answered ones, and the risk keeps each item in the
+place the needs_human score gave it, so every other kind keeps its order.
+
 The queue is four files under <town>/.runtime/attention/:
 
   state.json     the current set, rewritten atomically by the daemon every
@@ -147,7 +153,13 @@ type attentionView struct {
 	// queue is the daemon's file and still prints; the table names the failed
 	// read rather than drawing its items as unanswered (gt-b9j3o.2).
 	ScoresErr error
-	Stale     bool
+	// Risks is the landing battery's risk answer per risk-path item key. An
+	// item with no entry has no answer, so it keeps today's order.
+	Risks attention.LandingRisks
+	// RisksErr is set when the landing log exists and could not be read: the
+	// queue prints, and the risk-path items keep the order of the last answers.
+	RisksErr error
+	Stale    bool
 }
 
 // buildAttention reads the queue for a town at now, with the answers its Jev
@@ -163,11 +175,14 @@ func buildAttention(townRoot string, now time.Time) (attentionView, error) {
 		return attentionView{}, err
 	}
 	scores, scoresErr := attention.NewScoreReader(attention.AnswersPath(townRoot)).Scores()
+	risks, risksErr := attention.NewLandingRiskReader(attention.LandingRiskPath(townRoot)).Risks()
 	return attentionView{
 		State:     state,
 		Acks:      acks,
 		Scores:    scores,
 		ScoresErr: scoresErr,
+		Risks:     risks,
+		RisksErr:  risksErr,
 		Stale:     attention.Stale(state, now, attention.StaleAfter),
 	}, nil
 }
@@ -274,6 +289,12 @@ func renderAttention(w io.Writer, v attentionView, all bool, now time.Time) {
 		// (gt-b9j3o.2).
 		fmt.Fprintf(w, "NEEDS unavailable: the Jev answers log could not be read: %v\n", v.ScoresErr)
 	}
+	if v.RisksErr != nil {
+		// The order the risk-path items keep is the last answers read; the
+		// landing log itself failed, so the table says so rather than letting
+		// its risk order pass as this read's (gt-n8tmf).
+		fmt.Fprintf(w, "RISK unavailable: the Jev landing log could not be read: %v\n", v.RisksErr)
+	}
 	rows := attentionRows(v, all)
 	if len(rows) == 0 {
 		fmt.Fprintln(w, "No attention items.")
@@ -289,9 +310,10 @@ func renderAttention(w io.Writer, v attentionView, all bool, now time.Time) {
 	_ = tw.Flush()
 }
 
-// attentionRows returns the items to show, highest needs_human score first,
-// hiding acked ones unless all is set. An item is acked if state.json marks it
-// or acks.json names its key, so an ack shows before the daemon's next tick.
+// attentionRows returns the items to show, highest needs_human score first and
+// the risk-path items ordered among themselves by the landing risk, hiding
+// acked ones unless all is set. An item is acked if state.json marks it or
+// acks.json names its key, so an ack shows before the daemon's next tick.
 func attentionRows(v attentionView, all bool) []attention.Item {
 	rows := make([]attention.Item, 0, len(v.State.Items))
 	for _, it := range v.State.Items {
@@ -300,7 +322,7 @@ func attentionRows(v attentionView, all bool) []attention.Item {
 		}
 		rows = append(rows, it)
 	}
-	return attention.OrderByNeedsHuman(rows, v.Scores)
+	return attention.OrderByLandingRisk(rows, v.Scores, v.Risks)
 }
 
 // needsHumanCell is the NEEDS column: the item's answer to two decimals, a dash

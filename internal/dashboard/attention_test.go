@@ -44,7 +44,7 @@ func TestBuildAttentionMergesTheReadersIntoOneTaggedList(t *testing.T) {
 			Title: attention.RuleHostDiskCrit, Text: "the volume is 96% full", Rule: attention.RuleHostDiskCrit},
 	}
 
-	at := buildAttention(esc, ask, items, AttentionQueue{}, ScoresRead{}, attentionNow)
+	at := buildAttention(esc, ask, items, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if len(at.Failed) != 0 || len(at.Pending) != 0 {
 		t.Errorf("a list built from reads that reported names %v failed and %v pending", at.Failed, at.Pending)
 	}
@@ -122,7 +122,7 @@ func TestAttentionPanelSortsTheAlarmsAboveReviewDebt(t *testing.T) {
 	}
 	ask := &Questions{Rows: []QuestionRow{{ID: "gt-q1", Title: "retry policy", Priority: 0, State: QuestionAwaiting}}}
 
-	at := buildAttention(nil, ask, items, AttentionQueue{}, ScoresRead{}, attentionNow)
+	at := buildAttention(nil, ask, items, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	want := []string{"gt-q1", "host.docker_stack_down", "red-main:gastown:internal/cmd", "risk:gt-abc:deadbeef"}
 	if len(at.Rows) != len(want) {
 		t.Fatalf("the list holds %+v, want the question and the three queue items", at.Rows)
@@ -185,7 +185,7 @@ func TestARejectionIsNotARowOfThePanel(t *testing.T) {
 	a.Observe(State{}, State{}, []Entry{{Seq: 1, At: alertBase, Kind: "landings",
 		Text: "[land] gt-9: rejected (review): om requested changes"}})
 
-	if at := buildAttention(nil, nil, a.Standing(), AttentionQueue{}, ScoresRead{}, alertBase); len(at.Rows) != 0 {
+	if at := buildAttention(nil, nil, a.Standing(), AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, alertBase); len(at.Rows) != 0 {
 		t.Errorf("a rejection reached the attention list: %+v", at.Rows)
 	}
 }
@@ -214,7 +214,7 @@ func TestARejectedTwiceRowIsTheOverseersAndNotTheHumans(t *testing.T) {
 		t.Fatalf("the line raised %+v, want the one row: a rule that wakes still lists it", raised)
 	}
 
-	at := buildAttention(&Escalations{}, &Questions{}, a.Standing(), AttentionQueue{}, ScoresRead{}, attentionNow)
+	at := buildAttention(&Escalations{}, &Questions{}, a.Standing(), AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if len(at.Rows) != 1 {
 		t.Fatalf("the panel holds %+v, want the rejected bead's own row", at.Rows)
 	}
@@ -244,7 +244,7 @@ func TestAttentionDoesNotListABeadTwice(t *testing.T) {
 		{Key: "stall:gastown/opal", Rule: attention.RulePolecatStall, Title: attention.RulePolecatStall, Text: "opal is stalled", At: attentionNow},
 	}
 
-	at := buildAttention(esc, ask, items, AttentionQueue{}, ScoresRead{}, attentionNow)
+	at := buildAttention(esc, ask, items, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if len(at.Rows) != 3 {
 		t.Fatalf("the list holds %d rows (%+v), want the bead's two and the queue's one", len(at.Rows), at.Rows)
 	}
@@ -264,7 +264,7 @@ func TestAttentionCountsTheHumanRowsBesideTheCap(t *testing.T) {
 	at := buildAttention(
 		&Escalations{Rows: []EscalationRow{{ID: "hq-1", Title: "disk full", Severity: "high"}}, More: 4},
 		&Questions{Rows: []QuestionRow{{ID: "gt-q1", Title: "retry?", State: QuestionAwaiting}}, More: 1},
-		nil, AttentionQueue{}, ScoresRead{}, attentionNow,
+		nil, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow,
 	)
 	if at.Mine != 1 || at.More != 5 {
 		t.Errorf("the list counts %d rows for the human beside %d capped out, want the one awaiting question and both caps",
@@ -278,19 +278,19 @@ func TestAttentionCountsTheHumanRowsBesideTheCap(t *testing.T) {
 func TestBuildAttentionNamesTheReadsBehindTheList(t *testing.T) {
 	t.Parallel()
 
-	failed := buildAttention(&Escalations{Unavailable: true}, &Questions{}, nil, AttentionQueue{}, ScoresRead{}, attentionNow)
+	failed := buildAttention(&Escalations{Unavailable: true}, &Questions{}, nil, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if len(failed.Failed) != 1 || failed.Failed[0] != "escalations" {
 		t.Errorf("a failed escalations read names %v", failed.Failed)
 	}
-	if n := buildAttention(&Escalations{}, &Questions{Unavailable: true}, nil, AttentionQueue{}, ScoresRead{}, attentionNow); len(n.Failed) != 1 || n.Failed[0] != "questions" {
+	if n := buildAttention(&Escalations{}, &Questions{Unavailable: true}, nil, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow); len(n.Failed) != 1 || n.Failed[0] != "questions" {
 		t.Errorf("a failed questions read names %v", n.Failed)
 	}
 	// A queue state that could not be read is not an empty queue: the rows still
 	// stand, and the read that would have classified them is named.
-	if n := buildAttention(&Escalations{}, &Questions{}, nil, AttentionQueue{Failed: true}, ScoresRead{}, attentionNow); len(n.Failed) != 1 || n.Failed[0] != "attention queue" {
+	if n := buildAttention(&Escalations{}, &Questions{}, nil, AttentionQueue{Failed: true}, ScoresRead{}, LandingRiskRead{}, attentionNow); len(n.Failed) != 1 || n.Failed[0] != "attention queue" {
 		t.Errorf("a failed queue read names %v", n.Failed)
 	}
-	both := buildAttention(nil, nil, nil, AttentionQueue{}, ScoresRead{}, attentionNow)
+	both := buildAttention(nil, nil, nil, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if len(both.Pending) != 2 || both.Pending[0] != "escalations" || both.Pending[1] != "questions" {
 		t.Errorf("neither reader having reported names %v pending", both.Pending)
 	}
@@ -300,7 +300,7 @@ func TestBuildAttentionNamesTheReadsBehindTheList(t *testing.T) {
 
 	// The rows the reader that did report returned are listed beside the name of
 	// the one that failed, and only those are counted for the human.
-	half := buildAttention(&Escalations{}, &Questions{Rows: []QuestionRow{{ID: "gt-q1", State: QuestionAwaiting}}}, nil, AttentionQueue{}, ScoresRead{}, attentionNow)
+	half := buildAttention(&Escalations{}, &Questions{Rows: []QuestionRow{{ID: "gt-q1", State: QuestionAwaiting}}}, nil, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if len(half.Rows) != 1 || half.Mine != 1 {
 		t.Errorf("a half-read list holds %+v with %d for the human, want the one question", half.Rows, half.Mine)
 	}
@@ -332,7 +332,7 @@ func TestBuildAttentionSplitsTheRowsIntoNeedsYouAndPipeline(t *testing.T) {
 		{Key: "review:backlog", Kind: attention.KindReviewBacklog},
 	}
 
-	at := buildAttention(&Escalations{}, &Questions{}, items, AttentionQueue{Items: queue}, ScoresRead{}, attentionNow)
+	at := buildAttention(&Escalations{}, &Questions{}, items, AttentionQueue{Items: queue}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if at.NeedsYou.Count != 1 || len(at.NeedsYou.Rows) != 1 {
 		t.Errorf("the needs-you group holds %d rows (%+v), want the host reading alone", at.NeedsYou.Count, at.NeedsYou.Rows)
 	}
@@ -381,7 +381,7 @@ func TestMineCountsOnlyTheRowsThatNeedAPerson(t *testing.T) {
 	queue := AttentionQueue{Items: []attention.Item{
 		{Key: "host:gpu", Kind: attention.KindReviewBacklog, Owner: "opal", WaitingOn: "the next review round"},
 	}}
-	at := buildAttention(&Escalations{}, &Questions{}, pipeOnly, queue, ScoresRead{}, attentionNow)
+	at := buildAttention(&Escalations{}, &Questions{}, pipeOnly, queue, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if len(at.Pipeline.Rows) != 1 || at.Pipeline.Rows[0].Owner != string(attention.OwnerOperator) {
 		t.Fatalf("the fixture drew %+v in the pipeline group, want one row the human's rule owns", at.Pipeline.Rows)
 	}
@@ -395,7 +395,7 @@ func TestMineCountsOnlyTheRowsThatNeedAPerson(t *testing.T) {
 	// The row that does need a person, beside it, is what the count is made of.
 	withAct := append(append([]Alert{}, pipeOnly...),
 		Alert{Key: "host:disk", Rule: attention.RuleHostDiskCrit, Text: "the volume is 96% full", At: attentionNow, Level: LevelCrit})
-	at = buildAttention(&Escalations{}, &Questions{}, withAct, queue, ScoresRead{}, attentionNow)
+	at = buildAttention(&Escalations{}, &Questions{}, withAct, queue, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if len(at.NeedsYou.Rows) != 1 || at.Pipeline.Count != 1 {
 		t.Fatalf("the groups hold %+v and %+v, want the host reading and the GPU row", at.NeedsYou.Rows, at.Pipeline.Rows)
 	}
@@ -414,7 +414,7 @@ func TestBuildAttentionShowsARowTheQueueCannotClassify(t *testing.T) {
 		{Key: "rejected-twice:gt-9", Rule: attention.RuleRejectedTwice, Title: attention.RuleRejectedTwice,
 			Text: "gt-9 was rejected twice", At: attentionNow, Level: LevelWarn},
 	}
-	at := buildAttention(&Escalations{}, &Questions{}, items, AttentionQueue{}, ScoresRead{}, attentionNow)
+	at := buildAttention(&Escalations{}, &Questions{}, items, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if len(at.Rows) != 1 || at.Rows[0].Class != string(attention.ClassAct) {
 		t.Fatalf("the list holds %+v, want the row shown as act", at.Rows)
 	}
@@ -468,7 +468,7 @@ func TestTheServedAttentionNamesTheOperator(t *testing.T) {
 	items := []Alert{
 		{Key: "host:disk", Rule: attention.RuleHostDiskCrit, Text: "the volume is 96% full", At: attentionNow, Level: LevelCrit},
 	}
-	at := buildAttention(&Escalations{}, &Questions{}, items, AttentionQueue{}, ScoresRead{}, attentionNow)
+	at := buildAttention(&Escalations{}, &Questions{}, items, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	raw, err := json.Marshal(at)
 	if err != nil {
 		t.Fatalf("marshalling the attention reading: %v", err)
@@ -512,7 +512,7 @@ func TestAttentionOrdersItemsByNeedsHumanScore(t *testing.T) {
 		attention.LifeKey("landing:gt-1", items[2].At):       0.50,
 	}
 
-	at := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{Scores: scores}, attentionNow)
+	at := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{Scores: scores}, LandingRiskRead{}, attentionNow)
 	if len(at.Rows) != 3 {
 		t.Fatalf("the list holds %d rows (%+v), want all three items", len(at.Rows), at.Rows)
 	}
@@ -554,7 +554,7 @@ func TestAttentionKeepsACritRowAboveAWarnOne(t *testing.T) {
 		attention.LifeKey("host.docker_stack_down", items[2].At): 0.60,
 	}
 
-	at := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{Scores: scores}, attentionNow)
+	at := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{Scores: scores}, LandingRiskRead{}, attentionNow)
 	want := []string{"host.docker_stack_down", "red-main:gastown", "stall:gastown/opal"}
 	if len(at.Rows) != len(want) {
 		t.Fatalf("the list holds %+v, want all three items", at.Rows)
@@ -584,7 +584,7 @@ func TestAttentionKeepsTiesInArrivalOrderAndUnscoredRowsVisible(t *testing.T) {
 		attention.LifeKey("stall:gastown/opal", items[1].At): 0.50,
 	}
 
-	at := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{Scores: scores}, attentionNow)
+	at := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{Scores: scores}, LandingRiskRead{}, attentionNow)
 	want := []string{"red-main:gastown", "stall:gastown/opal", "landing:gt-1"}
 	if len(at.Rows) != len(want) {
 		t.Fatalf("the list holds %+v, want the tied pair and the unanswered item", at.Rows)
@@ -599,6 +599,91 @@ func TestAttentionKeepsTiesInArrivalOrderAndUnscoredRowsVisible(t *testing.T) {
 	}
 }
 
+// The risk-path rows are ranked among each other by the landing battery's risk
+// answer, highest first, inside their group of one owner, kind and alert level:
+// the level still leads, so a crit review stays above a warn one, and no row
+// leaves the list (gt-n8tmf).
+func TestAttentionOrdersRiskPath(t *testing.T) {
+	t.Parallel()
+
+	const (
+		riskA = "risk:gt-a:aaaaaaaaaaaa"
+		riskB = "risk:gt-b:bbbbbbbbbbbb"
+		riskC = "risk:gt-c:cccccccccccc"
+		riskD = "risk:gt-d:dddddddddddd"
+		riskE = "risk:gt-e:eeeeeeeeeeee"
+	)
+	riskPath := func(key, text string, at time.Time, level string) Alert {
+		return Alert{ID: key, At: at, Level: level, Key: key, Title: attention.RuleRiskPath, Text: text, Rule: attention.RuleRiskPath}
+	}
+	items := []Alert{
+		riskPath(riskA, "gt-a landed touching cmd", attentionNow.Add(-6*time.Minute), LevelWarn),
+		riskPath(riskB, "gt-b landed touching cmd", attentionNow.Add(-5*time.Minute), LevelWarn),
+		riskPath(riskC, "gt-c landed touching cmd", attentionNow.Add(-4*time.Minute), LevelWarn),
+		riskPath(riskD, "gt-d landed touching cmd", attentionNow.Add(-3*time.Minute), LevelWarn),
+		{ID: "alert-5", At: attentionNow.Add(-2 * time.Minute), Level: LevelWarn, Key: "stall:gastown/opal",
+			Title: attention.RulePolecatStall, Text: "opal is stalled", Rule: attention.RulePolecatStall},
+		riskPath(riskE, "gt-e landed touching guards", attentionNow.Add(-time.Minute), LevelCrit),
+	}
+	risks := attention.LandingRisks{riskA: 1, riskB: 3, riskC: 2, riskE: 0}
+
+	at := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{}, LandingRiskRead{Risks: risks}, attentionNow)
+	if len(at.Rows) != len(items) {
+		t.Fatalf("the panel holds %d rows, want all %d", len(at.Rows), len(items))
+	}
+	// The crit review leads however low its risk, and every warn row keeps its
+	// place: the four warn risk-path rows are ranked by the landing answer and
+	// the stall row keeps the place today's order gave it.
+	want := []string{riskE, riskB, riskC, riskA, riskD, "stall:gastown/opal"}
+	for i, id := range want {
+		if at.Rows[i].ID != id {
+			t.Fatalf("row %d is %q, want %q (rows %+v)", i, at.Rows[i].ID, id, at.Rows)
+		}
+	}
+	for _, row := range at.Rows {
+		switch row.ID {
+		case riskE, riskA, riskB, riskC:
+			risk, ok := risks[row.ID]
+			if !ok || row.LandingRisk == nil || *row.LandingRisk != risk {
+				t.Errorf("row %q shows the landing risk %v, want %.1f", row.ID, row.LandingRisk, risk)
+			}
+		case riskD, "stall:gastown/opal":
+			if row.LandingRisk != nil {
+				t.Errorf("row %q shows the landing risk %v, want none", row.ID, *row.LandingRisk)
+			}
+		}
+	}
+}
+
+// A landing log that exists but could not be read keeps the last good risk
+// answers, marks them stale, and names the failed read: the panel does not draw
+// an old answer as this read's (gt-n8tmf).
+func TestAttentionKeepsTheLastLandingRiskOnAFailedRead(t *testing.T) {
+	t.Parallel()
+
+	const riskA = "risk:gt-a:aaaaaaaaaaaa"
+	items := []Alert{{
+		ID: riskA, At: attentionNow.Add(-5 * time.Minute), Level: LevelWarn, Key: riskA,
+		Title: attention.RuleRiskPath, Text: "gt-a landed touching cmd", Rule: attention.RuleRiskPath,
+	}}
+	at := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{},
+		LandingRiskRead{Risks: attention.LandingRisks{riskA: 2}, Err: errors.New("reading landing.jsonl: permission denied")},
+		attentionNow)
+	if !at.LandingRiskFailed {
+		t.Error("a failed landing read left the panel saying the risk answers were read")
+	}
+	if len(at.Rows) != 1 || at.NeedsYou.Count != 1 {
+		t.Fatalf("a failed landing read left rows %+v, %d needs-you", at.Rows, at.NeedsYou.Count)
+	}
+	row := at.Rows[0]
+	if row.LandingRisk == nil || *row.LandingRisk != 2 {
+		t.Errorf("the row shows the landing risk %v, want the last good answer 2", row.LandingRisk)
+	}
+	if !row.LandingRiskStale {
+		t.Error("the row draws the last good answer as this read's")
+	}
+}
+
 // An answers log that exists but could not be read is a state of its own: the
 // rows and the counts still stand, and the panel says the scores are missing
 // rather than drawing a queue Jev answered nothing about (gt-b9j3o.2).
@@ -610,7 +695,7 @@ func TestAttentionNamesAnAnswersLogItCannotRead(t *testing.T) {
 			Title: attention.RuleRedMain, Text: "main is red", Rule: attention.RuleRedMain},
 	}
 	at := buildAttention(nil, nil, items, AttentionQueue{},
-		ScoresRead{Err: errors.New("reading attention.jsonl: permission denied")}, attentionNow)
+		ScoresRead{Err: errors.New("reading attention.jsonl: permission denied")}, LandingRiskRead{}, attentionNow)
 	if !at.ScoresFailed {
 		t.Error("a failed answers read left the panel saying the scores were read")
 	}
@@ -624,7 +709,7 @@ func TestAttentionNamesAnAnswersLogItCannotRead(t *testing.T) {
 	}
 
 	// A read with no error clears it again.
-	ok := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{}, attentionNow)
+	ok := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
 	if ok.ScoresFailed {
 		t.Error("a read with no error left the panel saying the scores were unreadable")
 	}
