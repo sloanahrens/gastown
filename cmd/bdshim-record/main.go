@@ -22,9 +22,9 @@
 //
 // -scratch must sit outside any .beads tree. bd init walks up from the copy it runs in, refuses a
 // tree that already holds a workspace, and on the way rewrites the first store it finds, so the
-// recorder refuses to run when its working directory or the scratch directory sits in one
-// (gt-p85pw.103). A scratch directory that is its own git repository works, since no directory above
-// it holds a workspace.
+// recorder refuses to run when its working directory or the scratch directory sits in one, at the
+// path their symlinks lead to (gt-p85pw.103). A scratch directory that is its own git repository
+// works, since no directory above it holds a workspace.
 package main
 
 import (

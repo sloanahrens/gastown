@@ -42,7 +42,11 @@ func guardRun(getwd func() (string, error), scratch string) error {
 			return err
 		}
 		if found {
-			return fmt.Errorf("%s (that is %s) sits in or under the beads workspace %s, where bd init would rewrite that workspace's store; run the recorder outside any .beads tree", root, real, workspace)
+			where := root
+			if real != root {
+				where = fmt.Sprintf("%s (that is %s)", root, real)
+			}
+			return fmt.Errorf("%s sits in or under the beads workspace %s, where bd init would rewrite that workspace's store; run the recorder outside any .beads tree", where, workspace)
 		}
 	}
 	return nil

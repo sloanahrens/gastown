@@ -190,7 +190,7 @@ func TestRunRefusesASymlinkedScratchUnderAWorkspace(t *testing.T) {
 	}
 	link := filepath.Join(t.TempDir(), "clean-looking")
 	if err := os.Symlink(inside, link); err != nil {
-		t.Skipf("this filesystem makes no symlink: %v", err)
+		t.Fatalf("make the symlink: %v", err)
 	}
 	scratch := filepath.Join(link, "scratch")
 	out := filepath.Join(t.TempDir(), "golden")
@@ -228,7 +228,7 @@ func TestGuardRunAcceptsASymlinkedScratchOutsideAWorkspace(t *testing.T) {
 	target := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("this filesystem makes no symlink: %v", err)
+		t.Fatalf("make the symlink: %v", err)
 	}
 	if err := guardRun(safeCwd(t), filepath.Join(link, "scratch")); err != nil {
 		t.Errorf("guardRun over a symlink to %s = %v, want it accepted", target, err)
