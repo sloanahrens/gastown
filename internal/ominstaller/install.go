@@ -57,7 +57,7 @@ func install(ctx context.Context, cfg Config) (Result, Exit) {
 	}
 
 	prev := cfg.probeVersion(ctx, cfg.OMPath)
-	if prev != "" && strings.HasPrefix(commit, prev) {
+	if prev != "" && prev == commit {
 		cfg.logf("[install-om] Installed om is already %s; nothing to do.", commit)
 		return Result{Event: eventNoop, Commit: commit, Prev: prev, Reason: reasonAlreadyInstalled}, ExitInstalled
 	}
@@ -94,7 +94,8 @@ func install(ctx context.Context, cfg Config) (Result, Exit) {
 	// Replace copied the build into place, so the temp file is spent.
 	_ = files.Remove(tmp)
 
-	if got := cfg.probeVersion(ctx, cfg.OMPath); got == "" || !strings.HasPrefix(commit, got) {
+	// An unknown probe ("") is not the built commit, and neither is a prefix of it.
+	if got := cfg.probeVersion(ctx, cfg.OMPath); got != commit {
 		return cfg.smokeFailed(commit, prev, kept, cfg.OMPath+" does not report the built commit "+commit)
 	}
 
