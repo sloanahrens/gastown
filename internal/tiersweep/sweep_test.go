@@ -52,6 +52,9 @@ type rig struct {
 	listings map[string][]fs.DirEntry
 	infos    map[string]fs.FileInfo
 	readErr  error
+	// noCleanupSlots leaves ReadDir, Lstat and RemoveAll unset on the Host, as a
+	// caller that wired only the directory creation does.
+	noCleanupSlots bool
 	// events records each stdout line printed and each directory removed, in
 	// the order they happened.
 	events []string
@@ -105,39 +108,43 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 	if r.ownLogDir {
 		env[EnvLogDir] = ""
 	}
-	code = Run(args, out, &errw, Deps{
-		Host: Host{
-			Env:       func(name string) string { return env[name] },
-			MkdirTemp: func(string, string) (string, error) { return r.logDir, nil },
-			MkdirAll:  func(string, fs.FileMode) error { return nil },
-			WriteFile: func(name string, data []byte, perm fs.FileMode) error {
-				r.writes = append(r.writes, name)
-				return os.WriteFile(name, data, perm)
-			},
-			Rename: func(oldpath, newpath string) error {
-				r.renames = append(r.renames, [2]string{oldpath, newpath})
-				return os.Rename(oldpath, newpath)
-			},
-			ReadDir: func(dir string) ([]fs.DirEntry, error) {
-				r.prunes = append(r.prunes, dir)
-				if r.readErr != nil {
-					return nil, r.readErr
-				}
-				return r.listings[dir], nil
-			},
-			Lstat: func(name string) (fs.FileInfo, error) {
-				info, ok := r.infos[name]
-				if !ok {
-					return nil, fs.ErrNotExist
-				}
-				return info, nil
-			},
-			RemoveAll: func(path string) error {
-				r.removals = append(r.removals, path)
-				r.events = append(r.events, "removed "+path)
-				return r.removeErrs[path]
-			},
+	host := Host{
+		Env:       func(name string) string { return env[name] },
+		MkdirTemp: func(string, string) (string, error) { return r.logDir, nil },
+		MkdirAll:  func(string, fs.FileMode) error { return nil },
+		WriteFile: func(name string, data []byte, perm fs.FileMode) error {
+			r.writes = append(r.writes, name)
+			return os.WriteFile(name, data, perm)
 		},
+		Rename: func(oldpath, newpath string) error {
+			r.renames = append(r.renames, [2]string{oldpath, newpath})
+			return os.Rename(oldpath, newpath)
+		},
+		ReadDir: func(dir string) ([]fs.DirEntry, error) {
+			r.prunes = append(r.prunes, dir)
+			if r.readErr != nil {
+				return nil, r.readErr
+			}
+			return r.listings[dir], nil
+		},
+		Lstat: func(name string) (fs.FileInfo, error) {
+			info, ok := r.infos[name]
+			if !ok {
+				return nil, fs.ErrNotExist
+			}
+			return info, nil
+		},
+		RemoveAll: func(path string) error {
+			r.removals = append(r.removals, path)
+			r.events = append(r.events, "removed "+path)
+			return r.removeErrs[path]
+		},
+	}
+	if r.noCleanupSlots {
+		host.ReadDir, host.Lstat, host.RemoveAll = nil, nil, nil
+	}
+	code = Run(args, out, &errw, Deps{
+		Host:    host,
 		Exec:    exec,
 		Src:     r.repo,
 		Environ: []string{"PATH=/fake/bin"},

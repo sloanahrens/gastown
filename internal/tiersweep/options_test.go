@@ -30,6 +30,7 @@ type fakeHost struct {
 	readDirs  []string
 	listings  map[string][]fs.DirEntry
 	infos     map[string]fs.FileInfo
+	infoErrs  map[string]error
 	readErr   error
 	removed   []string
 	removeErr map[string]error
@@ -60,6 +61,9 @@ func (f *fakeHost) host() Host {
 			return f.listings[dir], nil
 		},
 		Lstat: func(name string) (fs.FileInfo, error) {
+			if err := f.infoErrs[name]; err != nil {
+				return nil, err
+			}
 			info, ok := f.infos[name]
 			if !ok {
 				return nil, fs.ErrNotExist

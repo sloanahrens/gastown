@@ -129,15 +129,16 @@ type Host struct {
 	// os.Rename in Run.
 	Rename func(oldpath, newpath string) error
 	// RemoveAll deletes a log directory and everything under it, as os.RemoveAll
-	// does: a GREEN run's own directory, and the old ones a prune deletes. A nil
-	// RemoveAll takes os.RemoveAll in Run.
+	// does: a GREEN run's own directory, and the old ones a prune deletes.
+	// RemoveAll, ReadDir and Lstat are the only way Run reaches a filesystem for
+	// cleanup, and it fills no os default for them: a host that leaves one nil
+	// has every cleanup skipped, named once on stderr (gt-xk9my).
 	RemoveAll func(path string) error
 	// ReadDir lists a directory, as os.ReadDir does: the prune reads TMPDIR
-	// through it. A nil ReadDir takes os.ReadDir in Run.
+	// through it.
 	ReadDir func(name string) ([]fs.DirEntry, error)
 	// Lstat describes a path without following a symlink, as os.Lstat does:
-	// the prune never deletes a link, only the directory it finds there. A nil
-	// Lstat takes os.Lstat in Run.
+	// the prune never deletes a link, only the directory it finds there.
 	Lstat func(name string) (fs.FileInfo, error)
 }
 

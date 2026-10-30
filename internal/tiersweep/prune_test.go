@@ -3,6 +3,8 @@ package tiersweep
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -128,15 +130,39 @@ func TestPruneReportsEveryFailure(t *testing.T) {
 	})
 	t.Run("a path it cannot describe", func(t *testing.T) {
 		t.Parallel()
-		// The listing names a directory the fake has no Lstat answer for, as a
-		// path removed between the listing and the read would be.
-		f := pruneFake(t, fs.FileInfoToDirEntry(dirInfo("tier-sweep.missing", 4096, pruneOld)))
+		// Lstat fails for a reason other than a vanished path: the prune stops,
+		// because it cannot tell what the entry is.
+		f := pruneFake(t,
+			fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld)),
+			fs.FileInfoToDirEntry(dirInfo("tier-sweep.denied", 4096, pruneOld)),
+		)
+		f.infoErrs = map[string]error{"/tmp/tier-sweep.denied": errors.New("permission denied")}
 		removed, err := Prune(f.host(), "/tmp", pruneNow, PruneMaxAge)
-		if removed != nil || !errors.Is(err, fs.ErrNotExist) {
+		if removed != nil || err == nil || !strings.Contains(err.Error(), "permission denied") {
 			t.Errorf("Prune = %q, %v, want no removals and the Lstat error", removed, err)
 		}
 		if len(f.removed) != 0 {
 			t.Errorf("RemoveAll ran despite the Lstat error: %q", f.removed)
+		}
+	})
+	t.Run("an entry another sweep pruned first", func(t *testing.T) {
+		t.Parallel()
+		// The listing names an entry that is gone by the time it is described,
+		// as a concurrent sweep's prune leaves it: it is skipped, and the
+		// candidates beside it are still removed.
+		f := pruneFake(t,
+			fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld)),
+			fs.FileInfoToDirEntry(dirInfo("tier-sweep.missing", 4096, pruneOld)),
+		)
+		removed, err := Prune(f.host(), "/tmp", pruneNow, PruneMaxAge)
+		if err != nil {
+			t.Fatalf("Prune: %v, want the vanished entry skipped", err)
+		}
+		if !reflect.DeepEqual(removed, []string{"/tmp/tier-sweep.aaa"}) {
+			t.Errorf("removed = %q, want the candidate that was still there", removed)
+		}
+		if !reflect.DeepEqual(f.removed, []string{"/tmp/tier-sweep.aaa"}) {
+			t.Errorf("RemoveAll saw %q, want only the entry that was still there", f.removed)
 		}
 	})
 	t.Run("one directory it cannot delete", func(t *testing.T) {
@@ -230,16 +256,80 @@ func TestNamedLogDirIsNeverRemoved(t *testing.T) {
 	}
 }
 
+// TestCurrentLogDirIsNeverPruned: the run's own log directory is held back by
+// name, not by its age, so it is never a prune candidate even when its mtime is
+// old, and a RED run that keeps it never sees it go.
+func TestCurrentLogDirIsNeverPruned(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.ownLogDir = true
+	r.logDir = filepath.Join(t.TempDir(), "tier-sweep.current")
+	r.tmpDir = filepath.Dir(r.logDir)
+	if err := os.MkdirAll(r.logDir, 0o755); err != nil {
+		t.Fatalf("make the run's log directory: %v", err)
+	}
+	oldSibling := filepath.Join(r.tmpDir, "tier-sweep.old")
+	r.listings = map[string][]fs.DirEntry{
+		r.tmpDir: {
+			fs.FileInfoToDirEntry(dirInfo("tier-sweep.current", 4096, pruneOld)),
+			fs.FileInfoToDirEntry(dirInfo("tier-sweep.old", 4096, pruneOld)),
+		},
+	}
+	r.infos = map[string]fs.FileInfo{
+		r.logDir:   dirInfo("tier-sweep.current", 4096, pruneOld),
+		oldSibling: dirInfo("tier-sweep.old", 4096, pruneOld),
+	}
+	r.shellOut, r.shellCode = shellLine("RED"), 1
+	code, stdout, stderr := r.run("shell")
+	if code != 1 || !strings.Contains(stdout, "shell RED") {
+		t.Fatalf("code %d, stdout %q, stderr %q, want a RED exit 1", code, stdout, stderr)
+	}
+	if want := []string{oldSibling}; !reflect.DeepEqual(r.removals, want) {
+		t.Errorf("removed %q, want only the old sibling %q: the run's own %q is never pruned", r.removals, want, r.logDir)
+	}
+}
+
+// TestHostWithoutCleanupCallsIsLeftAlone: a host that wires no ReadDir, Lstat or
+// RemoveAll gets no prune and no removal, because Run fills no os default for
+// them; one stderr line says the cleanup was skipped and changes no verdict.
+func TestHostWithoutCleanupCallsIsLeftAlone(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.ownLogDir = true
+	r.noCleanupSlots = true
+	// A directory of this test's own, so a future default to the real os calls
+	// would see an empty listing instead of the host's TMPDIR.
+	r.tmpDir = t.TempDir()
+	r.shellOut, r.shellCode = shellLine("GREEN"), 0
+	code, stdout, stderr := r.run("shell")
+	if code != 0 || stdout != shellLine("GREEN") {
+		t.Fatalf("code %d, stdout %q, stderr %q, want the GREEN line and exit 0", code, stdout, stderr)
+	}
+	if len(r.prunes) != 0 || len(r.removals) != 0 {
+		t.Errorf("pruned %q and removed %q, want a host with no cleanup calls left alone", r.prunes, r.removals)
+	}
+	if got := strings.Count(stderr, "\n"); got != 1 {
+		t.Fatalf("stderr = %q, want exactly one line", stderr)
+	}
+	if !strings.Contains(stderr, "cleanup skipped") || !strings.Contains(stderr, sweepGoesOn) {
+		t.Errorf("stderr = %q, want it to name the skipped cleanup and say the sweep goes on", stderr)
+	}
+}
+
 // TestPruneFailureIsNotAVerdict: a prune or removal failure leaves the verdicts
-// and the exit code unchanged and prints one stderr line.
+// and the exit code unchanged and prints one stderr line for the failure, beside
+// the line of each directory the prune did remove.
 func TestPruneFailureIsNotAVerdict(t *testing.T) {
 	t.Parallel()
 	greenLine := shellLine("GREEN")
 	cases := []struct {
 		name  string
 		setup func(r *rig)
-		// wantErr is a fragment of the one stderr line.
+		// wantErr is a fragment of the one failure line.
 		wantErr string
+		// wantPruned is a directory the prune removed before the failure; it
+		// keeps its own line, so the stderr has one more line than wantErr's.
+		wantPruned string
 	}{
 		{
 			name: "the directory listing fails",
@@ -274,7 +364,8 @@ func TestPruneFailureIsNotAVerdict(t *testing.T) {
 				}
 				r.removeErrs = map[string]error{"/tmp/tier-sweep.aaa": errors.New("busy")}
 			},
-			wantErr: "prune /tmp: busy",
+			wantErr:    "prune /tmp: busy",
+			wantPruned: "tier-sweep: pruned /tmp/tier-sweep.bbb",
 		},
 		{
 			name: "the run's own directory cannot be deleted",
@@ -300,8 +391,15 @@ func TestPruneFailureIsNotAVerdict(t *testing.T) {
 			if code != 0 || stdout != greenLine {
 				t.Errorf("code %d, stdout %q, want the GREEN line and exit 0 unchanged", code, stdout)
 			}
-			if got := strings.Count(stderr, "\n"); got != 1 {
-				t.Fatalf("stderr = %q, want exactly one line", stderr)
+			wantLines := 1
+			if tc.wantPruned != "" {
+				wantLines = 2
+				if !strings.Contains(stderr, tc.wantPruned) {
+					t.Errorf("stderr = %q, want it to name the directory that was pruned %q", stderr, tc.wantPruned)
+				}
+			}
+			if got := strings.Count(stderr, "\n"); got != wantLines {
+				t.Fatalf("stderr = %q, want exactly %d line(s)", stderr, wantLines)
 			}
 			if !strings.Contains(stderr, wantErr) || !strings.Contains(stderr, sweepGoesOn) {
 				t.Errorf("stderr = %q, want it to name %q and say the sweep goes on", stderr, wantErr)

@@ -60,7 +60,9 @@ type Deps struct {
 // A run that made its own log directory first prunes the old ones beside it
 // (PruneMaxAge), and removes its own after the last summary line when every
 // tier was GREEN; a RED run keeps it for diagnosis. A prune or removal that
-// fails is one stderr line and changes no verdict (gt-xk9my).
+// fails is one stderr line and changes no verdict, and a host that does not
+// wire the calls they need leaves every directory alone rather than falling
+// back to os (gt-xk9my).
 func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	root, tiers, err := splitRoot(args)
 	if err != nil {
@@ -74,15 +76,12 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	if host.Rename == nil {
 		host.Rename = os.Rename
 	}
-	if host.RemoveAll == nil {
-		host.RemoveAll = os.RemoveAll
-	}
-	if host.ReadDir == nil {
-		host.ReadDir = os.ReadDir
-	}
-	if host.Lstat == nil {
-		host.Lstat = os.Lstat
-	}
+	// The prune and the removal run only through the host's own calls. Run
+	// fills no default for them, unlike WriteFile and Rename above: a host that
+	// wired Env, MkdirTemp and MkdirAll but not these has no filesystem seam,
+	// and defaulting to os would list, stat and delete on the machine the run
+	// happens to be on (gt-xk9my).
+	cleanup := cleanupReady(host)
 	now := d.Now
 	if now == nil {
 		now = time.Now
@@ -92,8 +91,11 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		fmt.Fprintln(stderr, err)
 		return UsageExit
 	}
-	if opts.OwnsLogDir {
-		pruneOldLogDirs(host, opts.LogDirParent, now, stderr)
+	if opts.OwnsLogDir && !cleanup {
+		fmt.Fprintf(stderr, "%s: log directory cleanup skipped: host has no ReadDir, Lstat and RemoveAll (%s)\n", Name, sweepGoesOn)
+	}
+	if opts.OwnsLogDir && cleanup {
+		pruneOldLogDirs(host, opts.LogDirParent, now(), opts.LogDir, stderr)
 	}
 	exec := d.Exec
 	if root != DefaultRoot {
@@ -108,10 +110,42 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		src = gitSource{exec: exec, read: func(name string) ([]byte, error) { return read(filepath.Join(root, name)) }}
 	}
 	timings := OpenTimings(filepath.Join(opts.LogDir, TimingsName), stderr)
-	defer timings.Close()
 	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr, Now: now, Timings: timings}
+	code := runTiers(s, opts.Tiers, stdout, stderr)
+	if code == UsageExit {
+		timings.Close()
+		return code
+	}
+	if opts.TimingsFile != "" {
+		timings.Replace(opts.TimingsFile, host)
+	}
+	// The file is closed before the directory holding it can go, and Run closes
+	// it on every path out, so a GREEN run's removal never leaves a handle open.
+	timings.Close()
+	if code != 0 {
+		return code
+	}
+	if opts.OwnsLogDir && cleanup {
+		if err := host.RemoveAll(opts.LogDir); err != nil {
+			fmt.Fprintf(stderr, "%s: remove %s: %v (%s)\n", Name, opts.LogDir, err, sweepGoesOn)
+		}
+	}
+	return 0
+}
+
+// cleanupReady reports whether host can list a directory, describe an entry and
+// delete one. A host missing any of them leaves every log directory alone: Run
+// calls no os function in their place (gt-xk9my).
+func cleanupReady(host Host) bool {
+	return host.ReadDir != nil && host.Lstat != nil && host.RemoveAll != nil
+}
+
+// runTiers runs the tiers in the order given, printing each summary line as its
+// tier ends, and returns the exit code they make: 0 when every tier was GREEN,
+// 1 when any was RED, and UsageExit for a tier the sweep does not offer.
+func runTiers(s *Sweep, tiers []string, stdout, stderr io.Writer) int {
 	red := false
-	for _, tier := range opts.Tiers {
+	for _, tier := range tiers {
 		var line string
 		var tierRed bool
 		switch tier {
@@ -128,32 +162,24 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		fmt.Fprintln(stdout, line)
 		red = red || tierRed
 	}
-	if opts.TimingsFile != "" {
-		timings.Replace(opts.TimingsFile, host)
-	}
 	if red {
 		return 1
-	}
-	timings.Close()
-	if opts.OwnsLogDir {
-		if err := host.RemoveAll(opts.LogDir); err != nil {
-			fmt.Fprintf(stderr, "%s: remove %s: %v (%s)\n", Name, opts.LogDir, err, sweepGoesOn)
-		}
 	}
 	return 0
 }
 
-// pruneOldLogDirs deletes the finished runs' log directories under dir and
-// names each one on stderr, so a host does not accumulate a directory per
-// sweep. A failure is one stderr line: the run's verdicts are its tiers'.
-func pruneOldLogDirs(host Host, dir string, now func() time.Time, stderr io.Writer) {
-	removed, err := Prune(host, dir, now(), PruneMaxAge)
-	if err != nil {
-		fmt.Fprintf(stderr, "%s: prune %s: %v (%s)\n", Name, dir, err, sweepGoesOn)
-		return
-	}
+// pruneOldLogDirs deletes the finished runs' log directories under dir, never
+// the current run's own, and names each removal on stderr, so a host does not
+// accumulate a directory per sweep. A failure is one stderr line: the run's
+// verdicts are its tiers', and the directories that were removed are still
+// named when one is not.
+func pruneOldLogDirs(host Host, dir string, now time.Time, current string, stderr io.Writer) {
+	removed, err := pruneExcept(host, dir, now, PruneMaxAge, current)
 	for _, path := range removed {
 		fmt.Fprintf(stderr, "%s: pruned %s\n", Name, path)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: prune %s: %v (%s)\n", Name, dir, err, sweepGoesOn)
 	}
 }
 
