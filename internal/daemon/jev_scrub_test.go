@@ -58,6 +58,43 @@ func TestJevPatrolScrubKey(t *testing.T) {
 	}
 }
 
+// TestJevPatrolScrubCheckKey: the scrub_check key is off when the config leaves
+// it out and on when it is set, and the daemon hands it to the pass builder
+// independently of the scrub key.
+func TestJevPatrolScrubCheckKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		config *JevDedupeConfig
+		check  bool
+		scrub  bool
+	}{
+		{
+			name:   "left out, no shadow check",
+			config: &JevDedupeConfig{Enabled: true, USDPerBillionTokens: 3},
+		},
+		{
+			name:   "set, the check is on and the scrub key stays off",
+			config: &JevDedupeConfig{Enabled: true, USDPerBillionTokens: 3, JevScrub: JevScrub{ScrubCheck: true}},
+			check:  true,
+		},
+		{
+			name:   "set beside the scrub key, both are on",
+			config: &JevDedupeConfig{Enabled: true, USDPerBillionTokens: 3, JevScrub: JevScrub{Scrub: true, ScrubCheck: true}},
+			check:  true,
+			scrub:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			settings := jevDedupeSettingsFrom(t, tt.config)
+			assert.Equal(t, tt.check, settings.ScrubCheck)
+			assert.Equal(t, tt.scrub, settings.Scrub)
+		})
+	}
+}
+
 // jevDedupeSettingsFrom writes config as the town's patrol config, runs one
 // jev_dedupe pass, and returns the settings the daemon handed the pass
 // builder.
@@ -90,7 +127,7 @@ func jevDedupeSettingsFrom(t *testing.T, config *JevDedupeConfig) dedupe.Setting
 func patrolBody(t *testing.T, settings dedupe.Settings) string {
 	t.Helper()
 	sink := &jevtest.PostedBody{}
-	opts := append(jev.BatteryOptions(t.TempDir(), dedupe.Caller, nil, settings.Scrub),
+	opts := append(jev.BatteryOptions(t.TempDir(), dedupe.Caller, nil, jev.BatteryScrub{Scrub: settings.Scrub}),
 		jev.WithKey("test-key"),
 		jev.WithBaseURL("http://jev.test/v1/systemone"),
 		jev.WithHTTPClient(&http.Client{Transport: sink}))

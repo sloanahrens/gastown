@@ -54,6 +54,7 @@ func (d *Daemon) runJevRework() {
 			MaxUSDPerDay:        c.Patrols.JevRework.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevRework.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevRework.Scrub,
+			ScrubCheck:          c.Patrols.JevRework.ScrubCheck,
 		}
 	}
 	open := d.jevReworkOpen

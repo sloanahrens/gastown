@@ -54,6 +54,7 @@ func (d *Daemon) runJevSubmission() {
 			MaxUSDPerDay:        c.Patrols.JevSubmission.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevSubmission.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevSubmission.Scrub,
+			ScrubCheck:          c.Patrols.JevSubmission.ScrubCheck,
 		}
 	}
 	open := d.jevSubmissionOpen

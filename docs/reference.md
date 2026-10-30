@@ -1259,6 +1259,15 @@ request log line gains `scrubbed: true` and `replacements`, a count per rule
 that fired and none of the text it replaced. The operator turns it on one
 battery at a time, after that battery's signal cost is measured.
 
+The optional key `scrub_check`, false unless set, measures that cost. For a
+fixed 2 percent of states (by the state's SHA-256) a successful call is
+followed by a second call with the scrubbed state and the same questions, in the
+background. Each sampled call appends one line to `scrubcheck.jsonl` beside
+the usage ledger: both answer sets, the rule counts and `state_sha256`, never
+state text. A scrub that changes nothing logs `unchanged: true` and sends no
+second call. The second call is billed under the caller name plus
+`-scrubcheck` and honors the daily cap; a failed or capped call writes no line.
+
 ### Collection health (`gt jev health`)
 
 `gt jev health` is the one command that answers whether Jev collected today: it

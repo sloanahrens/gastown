@@ -70,6 +70,10 @@ type Settings struct {
 	// Scrub scrubs the state before it is sent: the patrol's scrub key
 	// sets it (gt-aqczg).
 	Scrub bool
+
+	// ScrubCheck runs the shadow scrub check on a sample of requests. The
+	// scrub_check key sets it (gt-jb20i).
+	ScrubCheck bool
 }
 
 // Pass is one run of the attention battery, with every dependency injected.
@@ -418,12 +422,15 @@ func open(townRoot string, s Settings, warnings io.Writer, extra ...jev.Option) 
 		return nil, fmt.Errorf("jev_attention.max_usd_per_day must be above zero, not %v", capUSD)
 	}
 
-	client, err := jev.NewClient(append(jev.BatteryOptions(townRoot, Caller, warnings, s.Scrub), extra...)...)
+	town := battery.Cap{Ledger: jev.UsageLedgerPath(townRoot), MaxUSDPerDay: capUSD, USDPerBillionTokens: price}
+	client, err := jev.NewClient(append(jev.BatteryOptions(townRoot, Caller, warnings, jev.BatteryScrub{
+		Scrub:      s.Scrub,
+		ScrubCheck: s.ScrubCheck,
+		Allows:     func() (bool, error) { return town.Allows(time.Now) },
+	}), extra...)...)
 	if err != nil {
 		return nil, fmt.Errorf("opening the Jev client: %w", err)
 	}
-
-	town := battery.Cap{Ledger: jev.UsageLedgerPath(townRoot), MaxUSDPerDay: capUSD, USDPerBillionTokens: price}
 
 	return &Pass{
 		Asker:      client,

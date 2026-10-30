@@ -62,6 +62,7 @@ func (d *Daemon) runJevStale() bool {
 			MaxUSDPerDay:        c.Patrols.JevStale.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevStale.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevStale.Scrub,
+			ScrubCheck:          c.Patrols.JevStale.ScrubCheck,
 		}
 	}
 	open := d.jevStaleOpen

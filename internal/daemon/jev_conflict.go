@@ -55,6 +55,7 @@ func (d *Daemon) runJevConflict() {
 			MaxUSDPerDay:        c.Patrols.JevConflict.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevConflict.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevConflict.Scrub,
+			ScrubCheck:          c.Patrols.JevConflict.ScrubCheck,
 		}
 	}
 	open := d.jevConflictOpen
