@@ -30,6 +30,17 @@ type Provisioner struct {
 	BotEmailDomain string
 	// Random is the source of a new bot's password; nil means crypto/rand.
 	Random io.Reader
+	// TokenName names each minted token.
+	TokenName string
+	// WebURL is the web root written to the token files.
+	WebURL string
+	// ConfigDir is where the role token files go.
+	ConfigDir string
+	// Rotate mints a new token where a token file exists, revoking the old one.
+	Rotate bool
+	// Files is the filesystem the token files are written through; nil means
+	// the real one.
+	Files Files
 }
 
 // EnsureUser creates the bot account of role when it is missing and leaves an
