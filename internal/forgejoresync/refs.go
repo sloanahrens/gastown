@@ -1,10 +1,13 @@
 package forgejoresync
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Ref is one branch or tag of a repository and the sha it points at.
@@ -97,10 +100,30 @@ func NewExecGit() ExecGit {
 	return ExecGit{Run: RunExec}
 }
 
-// RunExec is the production Runner: it starts the program through os/exec.
+// gitTimeout bounds one git call, so a stalled remote cannot hold the run open.
+const gitTimeout = 30 * time.Minute
+
+// RunExec is the production Runner: it starts the program through os/exec, under
+// gitContext and with the environment gitCommand sets.
 var RunExec Runner = execRunner(func(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).Output()
+	ctx, cancel := gitContext()
+	defer cancel()
+	return gitCommand(ctx, name, args...).Output()
 })
+
+// gitContext is the context one git call runs under: it ends after gitTimeout.
+func gitContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), gitTimeout)
+}
+
+// gitCommand builds the process for one git call without starting it. It turns
+// terminal prompting off, so a credential prompt fails the call instead of
+// blocking the run on a terminal nobody reads, and it is killed when ctx ends.
+func gitCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd
+}
 
 // execRunner wraps a process starter as a Runner. Its error names the program
 // and subcommand, never the output, which can carry a secret. The starter is a
@@ -115,9 +138,10 @@ func execRunner(start func(name string, args ...string) ([]byte, error)) Runner 
 	}
 }
 
-// LsRemote lists the branches and tags of url.
+// LsRemote lists the branches and tags of url. The "--" ends the options, so a
+// url that starts with "-" is read as a repository, never as a git option.
 func (g ExecGit) LsRemote(url string) ([]byte, error) {
-	return g.Run([]string{"git", "ls-remote", "--heads", "--tags", "--refs", url})
+	return g.Run([]string{"git", "ls-remote", "--heads", "--tags", "--refs", "--", url})
 }
 
 // InitBare creates a bare repository at dir, the scratch the mirror is built in.
@@ -126,16 +150,18 @@ func (g ExecGit) InitBare(dir string) error {
 	return err
 }
 
-// Fetch fetches refspecs from url into the repository at dir.
+// Fetch fetches refspecs from url into the repository at dir. The "--" keeps a
+// url that starts with "-" from being read as a git option.
 func (g ExecGit) Fetch(dir, url string, refspecs ...string) error {
-	_, err := g.Run(append([]string{"git", "-C", dir, "fetch", "--quiet", url}, refspecs...))
+	_, err := g.Run(append([]string{"git", "-C", dir, "fetch", "--quiet", "--", url}, refspecs...))
 	return err
 }
 
 // PushPrune pushes refspecs from the repository at dir to url, deleting every
-// ref at url that the refspecs do not name.
+// ref at url that the refspecs do not name. The "--" keeps a url that starts
+// with "-" from being read as a git option.
 func (g ExecGit) PushPrune(dir, url string, refspecs ...string) error {
-	_, err := g.Run(append([]string{"git", "-C", dir, "push", "--prune", "--quiet", url}, refspecs...))
+	_, err := g.Run(append([]string{"git", "-C", dir, "push", "--prune", "--quiet", "--", url}, refspecs...))
 	return err
 }
 
