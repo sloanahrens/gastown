@@ -285,6 +285,8 @@ func TestRebuildOMCycle_FreshOmClearsEveryAlert(t *testing.T) {
 // TestRebuildOMCycle_BusyTownDefersThenEscalatesStarved pins the quiet-town
 // gate: a landing or a gate suite defers the install and keeps the cycle
 // retrying; past the starve window the block raises rebuild-om:starved once.
+// The drain wait is configured past the starve window here, since a block the
+// drain clears past it is the case the drain tests cover (gt-0hsf6).
 func TestRebuildOMCycle_BusyTownDefersThenEscalatesStarved(t *testing.T) {
 	t.Parallel()
 	cases := map[string]func(d *Daemon){
@@ -297,6 +299,9 @@ func TestRebuildOMCycle_BusyTownDefersThenEscalatesStarved(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			d, rec, clk := rebuildOMTown(t)
+			d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+				RebuildOM: &PatrolConfig{Enabled: true, DrainAfter: (rebuildOMStarveAfter + time.Hour).String()},
+			}}
 			makeBusy(d)
 			inst := fakeOMInstall(d, ominstaller.Result{}, ominstaller.ExitFailed)
 			cli := rebuildOMCli(t, d, rebuildOMHeadSHA)
@@ -320,6 +325,210 @@ func TestRebuildOMCycle_BusyTownDefersThenEscalatesStarved(t *testing.T) {
 
 			if keys := escalationKeys(rec); len(keys) != 1 || keys[0] != alertKeyRebuildOMStarved {
 				t.Fatalf("escalations = %v, want exactly one %s", keys, alertKeyRebuildOMStarved)
+			}
+		})
+	}
+}
+
+// rebuildOMStaleBlock makes the current block older than the drain wait: the om
+// has been stale and uninstalled long enough that the job holds landings off
+// for it.
+func rebuildOMStaleBlock(t *testing.T, d *Daemon, clk clockwork.Clock) {
+	t.Helper()
+	d.rebuildOMBlock.open(clk.Now().Add(-d.rebuildOMDrainAfter() - time.Minute))
+}
+
+// rebuildOMCycleInBackground runs one cycle on its own goroutine, with the
+// drain hook telling the test the landing hold is on.
+func rebuildOMCycleInBackground(t *testing.T, d *Daemon) (done <-chan bool, held <-chan struct{}) {
+	t.Helper()
+	heldCh := make(chan struct{})
+	d.rebuildOMDrainFn = func() { close(heldCh) }
+	doneCh := make(chan bool, 1)
+	go func() { doneCh <- d.runRebuildOM() }()
+	return doneCh, heldCh
+}
+
+// TestRebuildOMCycle_DrainInstallsOnceThePassesFinish is the starvation fix: a
+// stale om blocked by a landing pass takes the same hold the upgrade restart
+// takes, installs as soon as that pass ends, and releases the hold, so steady
+// landings no longer starve the install (gt-0hsf6).
+func TestRebuildOMCycle_DrainInstallsOnceThePassesFinish(t *testing.T) {
+	t.Parallel()
+	d, _, clk := rebuildOMTown(t)
+	d.landingPasses.Store(1)
+	rebuildOMStaleBlock(t, d, clk)
+	inst := fakeOMInstall(d, ominstaller.Result{Event: "installed", Commit: rebuildOMHeadSHA, Prev: rebuildOMStaleSHA}, ominstaller.ExitInstalled)
+	rebuildOMCli(t, d, rebuildOMHeadSHA)
+	done, held := rebuildOMCycleInBackground(t, d)
+
+	<-held
+	if !d.landingHolds.heldBy(landingHoldRebuildOM) {
+		t.Fatal("the cycle waits for a landing pass without holding new ones off")
+	}
+	// The pass in flight ends; the hold keeps another from taking its place.
+	d.landingPassEnded()
+
+	if settled := <-done; !settled {
+		t.Fatal("the install is a verdict and holds the interval")
+	}
+	if len(inst.runs) != 1 {
+		t.Fatalf("installs = %d, want exactly one", len(inst.runs))
+	}
+	if d.landingHolds.held() {
+		t.Error("the hold outlived the cycle, so no landing pass starts again")
+	}
+}
+
+// TestRebuildOMCycle_DrainReleasedAfterAFailedInstall pins the release on the
+// failure path: the om stays as it was, and a landing pass starts again.
+func TestRebuildOMCycle_DrainReleasedAfterAFailedInstall(t *testing.T) {
+	t.Parallel()
+	d, rec, clk := rebuildOMTown(t)
+	d.landingPasses.Store(1)
+	rebuildOMStaleBlock(t, d, clk)
+	fakeOMInstall(d, ominstaller.Result{Event: "failed", Reason: "build-failed"}, ominstaller.ExitFailed)
+	rebuildOMCli(t, d, rebuildOMHeadSHA)
+	done, held := rebuildOMCycleInBackground(t, d)
+
+	<-held
+	d.landingPassEnded()
+
+	if settled := <-done; !settled {
+		t.Fatal("a failed install is a verdict and holds the interval")
+	}
+	if keys := escalationKeys(rec); !slices.Contains(keys, alertKeyRebuildOMInstallFail) {
+		t.Errorf("escalations = %v, want %s", keys, alertKeyRebuildOMInstallFail)
+	}
+	if d.landingHolds.held() {
+		t.Error("a failed install left landings held off")
+	}
+}
+
+// TestRebuildOMCycle_DrainTimedOutReleasesTheHold pins the bound: past
+// rebuildOMDrainBound with the pass still in flight the cycle installs nothing
+// (a pass is reviewed by the om being replaced), releases the hold and retries
+// on the next heartbeat.
+func TestRebuildOMCycle_DrainTimedOutReleasesTheHold(t *testing.T) {
+	t.Parallel()
+	d, _, clk := rebuildOMTown(t)
+	d.landingPasses.Store(1)
+	rebuildOMStaleBlock(t, d, clk)
+	inst := fakeOMInstall(d, ominstaller.Result{Event: "installed", Commit: rebuildOMHeadSHA}, ominstaller.ExitInstalled)
+	rebuildOMCli(t, d, rebuildOMHeadSHA)
+	done, held := rebuildOMCycleInBackground(t, d)
+
+	<-held
+	// The pass never ends: the drain stops waiting at its bound.
+	if settled := driveClock(t, clk, rebuildOMDrainBound, done); settled {
+		t.Fatal("a drain that timed out installed beside the pass it waited for")
+	}
+	if len(inst.runs) != 0 {
+		t.Errorf("installs = %d, want none while a pass is in flight", len(inst.runs))
+	}
+	if d.landingHolds.held() {
+		t.Error("the drain timed out and left landings held off")
+	}
+}
+
+// TestRebuildOMCycle_DrainCutOffReleasesTheHold pins the budget path: a cycle
+// whose context ends inside the drain wait installs nothing, holds no verdict,
+// and gives the landings back.
+func TestRebuildOMCycle_DrainCutOffReleasesTheHold(t *testing.T) {
+	t.Parallel()
+	d, _, clk := rebuildOMTown(t)
+	d.landingPasses.Store(1)
+	rebuildOMStaleBlock(t, d, clk)
+	inst := fakeOMInstall(d, ominstaller.Result{Event: "installed", Commit: rebuildOMHeadSHA}, ominstaller.ExitInstalled)
+	rebuildOMCli(t, d, rebuildOMHeadSHA)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.rebuildOMDrainFn = cancel // the budget ends while the drain waits
+	cycle := d.startDogCycle("rebuild_om")
+	defer cycle.close()
+
+	if settled := d.rebuildOMCycle(ctx, cycle); settled {
+		t.Fatal("a drain cut off by the budget must retry on the next heartbeat")
+	}
+	if len(inst.runs) != 0 {
+		t.Errorf("installs = %d, want none after a cut-off drain", len(inst.runs))
+	}
+	if d.landingHolds.held() {
+		t.Error("a cut-off drain left landings held off")
+	}
+}
+
+// TestRebuildOMCycle_NoDrainWithoutAStaleBlockOrALandingPass pins the two
+// conditions the drain needs: a block younger than the wait is ordinary churn,
+// and a gate suite is not the rebuild's to stop, so neither holds landings off.
+func TestRebuildOMCycle_NoDrainWithoutAStaleBlockOrALandingPass(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(d *Daemon, clk clockwork.Clock){
+		"a block younger than the drain wait": func(d *Daemon, clk clockwork.Clock) {
+			d.landingPasses.Store(1)
+			d.rebuildOMBlock.open(clk.Now())
+		},
+		"a gate suite with no landing pass": func(d *Daemon, clk clockwork.Clock) {
+			d.rebuildGTGateFn = func() (string, bool) { return "a gate suite holds a slot (gastown/landing)", true }
+			rebuildOMStaleBlock(t, d, clk)
+		},
+	}
+	for name, setUp := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, _, clk := rebuildOMTown(t)
+			setUp(d, clk)
+			inst := fakeOMInstall(d, ominstaller.Result{}, ominstaller.ExitFailed)
+			rebuildOMCli(t, d, rebuildOMHeadSHA)
+			d.rebuildOMDrainFn = func() {
+				t.Error("the cycle held landing passes off for a blocker the drain cannot clear")
+			}
+
+			if settled := d.runRebuildOM(); settled {
+				t.Fatal("a deferral accomplished nothing and must retry next heartbeat")
+			}
+			if len(inst.runs) != 0 {
+				t.Errorf("installs = %d, want none in a busy town", len(inst.runs))
+			}
+			if d.landingHolds.held() {
+				t.Error("a hold was left behind")
+			}
+		})
+	}
+}
+
+// TestRebuildOMDrainAfter pins the configured wait: the default when the key is
+// absent, the configured value when it parses, and the default with a line
+// naming the bad value when it does not.
+func TestRebuildOMDrainAfter(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		config *DaemonPatrolConfig
+		want   time.Duration
+		warn   string
+	}{
+		{"no config", nil, defaultRebuildOMDrainAfter, ""},
+		{"no patrols", &DaemonPatrolConfig{}, defaultRebuildOMDrainAfter, ""},
+		{"no rebuild_om", &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, defaultRebuildOMDrainAfter, ""},
+		{"no drain_after", &DaemonPatrolConfig{Patrols: &PatrolsConfig{RebuildOM: &PatrolConfig{Enabled: true}}}, defaultRebuildOMDrainAfter, ""},
+		{"configured", &DaemonPatrolConfig{Patrols: &PatrolsConfig{RebuildOM: &PatrolConfig{DrainAfter: "30m"}}}, 30 * time.Minute, ""},
+		{"not a duration", &DaemonPatrolConfig{Patrols: &PatrolsConfig{RebuildOM: &PatrolConfig{DrainAfter: "soon"}}}, defaultRebuildOMDrainAfter, `"soon"`},
+		{"not positive", &DaemonPatrolConfig{Patrols: &PatrolsConfig{RebuildOM: &PatrolConfig{DrainAfter: "-5m"}}}, defaultRebuildOMDrainAfter, `"-5m"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			d := &Daemon{logger: log.New(&logs, "", 0), patrolConfig: tc.config}
+
+			if got := d.rebuildOMDrainAfter(); got != tc.want {
+				t.Errorf("drain wait = %v, want %v", got, tc.want)
+			}
+			if got := strings.Contains(logs.String(), tc.warn); tc.warn != "" && !got {
+				t.Errorf("a bad drain_after was not named in the log: %q", logs.String())
+			} else if tc.warn == "" && logs.Len() != 0 {
+				t.Errorf("a usable drain_after logged: %q", logs.String())
 			}
 		})
 	}
@@ -698,5 +907,22 @@ func TestRebuildOMInForce(t *testing.T) {
 		if got := rebuildOMInForce(tc.installed, tc.head); got != tc.want {
 			t.Errorf("rebuildOMInForce(%q, %q) = %v, want %v", tc.installed, tc.head, got, tc.want)
 		}
+	}
+}
+
+// TestRebuildOMDrainBoundFitsTheCycleBudget pins that the drain's timeout
+// branch can fire in production: the bound, with the longest waits that
+// surround it (one git step, the sync's lock wait, the install's lock wait),
+// stays inside the cycle budget, and the bound is no longer than the upgrade
+// restart's (gt-0hsf6).
+func TestRebuildOMDrainBoundFitsTheCycleBudget(t *testing.T) {
+	t.Parallel()
+	around := rebuildOMGitTimeout + rebuildOMLockWait + rebuildOMInstallLockWait
+	if rebuildOMDrainBound+around >= rebuildOMRunBudget {
+		t.Errorf("drain bound %s plus %s of surrounding waits does not fit the %s cycle budget, so the timeout branch cannot fire",
+			rebuildOMDrainBound, around, rebuildOMRunBudget)
+	}
+	if rebuildOMDrainBound > postLandRestartCap {
+		t.Errorf("drain bound %s is longer than the upgrade restart's %s", rebuildOMDrainBound, postLandRestartCap)
 	}
 }

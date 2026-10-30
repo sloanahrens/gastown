@@ -258,7 +258,7 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
 			t.Fatal("restarted under a running tier sweep before the cap")
 		}
-		if d.upgradeRestartPending.Load() {
+		if d.upgradeRestartDrains() {
 			t.Fatal("landing workers were drained while only the tier sweep held the restart")
 		}
 		if got := strings.Count(logs.String(), "landing passes continue while"); got != 1 {
@@ -300,7 +300,7 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
 			t.Fatal("restarted under a running tier sweep before the cap")
 		}
-		if d.upgradeRestartPending.Load() {
+		if d.upgradeRestartDrains() {
 			t.Fatal("a soft dispatch tick drained the landing workers beside the sweep")
 		}
 		if got := strings.Count(logs.String(), "landing passes continue while"); got != 1 {
@@ -315,7 +315,7 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if !d.checkUpgradeRestart(now.Add(tierSweepRestartCap)) {
 			t.Fatal("soft work in flight must not hold the restart past the sweep's cap")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("the drain did not start at the cap with soft work in flight")
 		}
 		if !strings.Contains(logs.String(), "cutting the sweep short") {
@@ -343,7 +343,7 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(now) {
 			t.Fatal("restarted under a landing pass")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("a landing pass hold must drain the landing workers")
 		}
 
@@ -354,7 +354,7 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(now.Add(3 * time.Minute)) {
 			t.Fatal("restarted under a running tier sweep before the cap")
 		}
-		if d.upgradeRestartPending.Load() {
+		if d.upgradeRestartDrains() {
 			t.Fatal("the drain stayed on with only the sweep holding")
 		}
 		want := "upgrade-restart: the drain held landing passes for 3m0s, last waiting for landing pass gt-x"
@@ -419,13 +419,13 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(now) {
 			t.Fatal("restarted under a running tier sweep before the cap")
 		}
-		if d.upgradeRestartPending.Load() {
+		if d.upgradeRestartDrains() {
 			t.Fatal("landing workers were drained before the cap while only the tier sweep held the restart")
 		}
 		if !d.checkUpgradeRestart(now.Add(tierSweepRestartCap)) {
 			t.Fatal("a sweep still running at the cap must not hold the restart further")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("the drain did not start at the cap while the sweep still ran")
 		}
 		if !strings.Contains(logs.String(), "cutting the sweep short") {
@@ -455,7 +455,7 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(now.Add(time.Minute)) {
 			t.Fatal("restarted under a landing pass")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("a landing pass hold must drain the landing workers")
 		}
 		if got := strings.Count(logs.String(), "upgrade-restart: draining: no new landing pass until restart"); got != 1 {
@@ -491,7 +491,7 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(later) {
 			t.Fatal("restarted under a sweep that began after the marker")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("a sweep that began after the marker must drain the landing workers")
 		}
 	})
@@ -508,7 +508,7 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(time.Now()) {
 			t.Fatal("restarted under a post-land run inside its cap")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("a post-land run hold must drain the landing workers")
 		}
 	})
@@ -538,7 +538,7 @@ func TestUpgradeDispatchTickAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
 			t.Fatal("restarted under a running spec dispatch tick before its bound")
 		}
-		if d.upgradeRestartPending.Load() {
+		if d.upgradeRestartDrains() {
 			t.Fatal("landing workers were drained while only the dispatch tick held the restart")
 		}
 		if !d.upgradeTickWaiting.Load() {
@@ -557,8 +557,9 @@ func TestUpgradeDispatchTickAloneDoesNotDrainLandings(t *testing.T) {
 			t.Fatalf("drain line logged while the drain was deferred:\n%s", logs.String())
 		}
 
-		// The drain is off, so upgradeRestartPending cannot keep the ticker from
-		// starting a tick behind the one the restart waits on: the tick wait does.
+		// The drain is off, so the restart's landing hold cannot keep the
+		// ticker from starting a tick behind the one it waits on: the tick wait
+		// does.
 		d.logger = log.New(io.Discard, "", 0)
 		if d.triggerSpecDispatch() {
 			t.Fatal("a tick started behind the one the restart waits on")
@@ -573,7 +574,7 @@ func TestUpgradeDispatchTickAloneDoesNotDrainLandings(t *testing.T) {
 		if !d.checkUpgradeRestart(now.Add(2 * time.Minute)) {
 			t.Fatal("a closed spec dispatch tick must not hold the restart")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("the restart did not drain the landing workers for its own moment")
 		}
 	})
@@ -605,7 +606,7 @@ func TestUpgradeDispatchTickAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(later) {
 			t.Fatal("restarted under a tick that began after the marker")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("a tick that began after the marker must drain the landing workers")
 		}
 		if d.upgradeTickWaiting.Load() {
@@ -631,7 +632,7 @@ func TestUpgradeDispatchTickAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(now) {
 			t.Fatal("restarted under a running spec dispatch tick before its bound")
 		}
-		if d.upgradeRestartPending.Load() {
+		if d.upgradeRestartDrains() {
 			t.Fatal("landing workers were drained while only the dispatch tick held the restart")
 		}
 		if !strings.Contains(logs.String(), "after its 7m0s bound") {
@@ -640,7 +641,7 @@ func TestUpgradeDispatchTickAloneDoesNotDrainLandings(t *testing.T) {
 		if !d.checkUpgradeRestart(now.Add(bound)) {
 			t.Fatal("a tick still running at its bound must not hold the restart further")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("the drain did not start at the tick's bound")
 		}
 		if !strings.Contains(logs.String(), "a spec dispatch tick is still in flight after its") {
@@ -675,7 +676,7 @@ func TestUpgradeDispatchTickAloneDoesNotDrainLandings(t *testing.T) {
 		if d.checkUpgradeRestart(now.Add(time.Minute)) {
 			t.Fatal("restarted under a landing pass")
 		}
-		if !d.upgradeRestartPending.Load() {
+		if !d.upgradeRestartDrains() {
 			t.Fatal("a landing pass hold must drain the landing workers")
 		}
 		if d.upgradeTickWaiting.Load() {
@@ -697,9 +698,9 @@ func TestUpgradeDispatchTickAloneDoesNotDrainLandings(t *testing.T) {
 	})
 }
 
-// gt-u1fzb: with the drain off the deferral clears upgradeRestartPending, the
-// flag that parks the ticker. The tick wait parks it in its place, so no tick
-// starts behind the one the restart waits on and extends the wait.
+// gt-u1fzb: with the drain off the deferral clears the restart's landing hold,
+// the flag that parks the ticker. The tick wait parks it in its place, so no
+// tick starts behind the one the restart waits on and extends the wait.
 func TestUpgradeTickWaitParksTheTicker(t *testing.T) {
 	t.Parallel()
 	d := upgradeTestDaemon(t)
@@ -1533,7 +1534,7 @@ func TestFailedRestartStampReleasesThePendingFlag(t *testing.T) {
 	if err := d.exitForUpgradeIfRequested(state, now); err != nil || !state.Running {
 		t.Fatalf("failed stamp: err = %v, shut down = %v; want no error and no shutdown", err, !state.Running)
 	}
-	if d.upgradeRestartPending.Load() {
+	if d.upgradeRestartDrains() {
 		t.Fatal("pending flag still set after the stamp failed")
 	}
 	// Restored so the dispatch tick runs as it does in a daemon. The tick runs
@@ -1997,11 +1998,11 @@ func TestUpgradeDrainsLandingPassesThenRestarts(t *testing.T) {
 	fakeHistory(t, d, "aaa", "bbb")
 
 	// No marker: passes continue back to back.
-	if d.upgradeRestartPending.Load() {
+	if d.upgradeRestartDrains() {
 		t.Fatal("drain on with no marker")
 	}
 	d.checkUpgradeRestart(time.Now())
-	if d.upgradeRestartPending.Load() {
+	if d.upgradeRestartDrains() {
 		t.Fatal("drain on with no marker")
 	}
 
@@ -2012,7 +2013,7 @@ func TestUpgradeDrainsLandingPassesThenRestarts(t *testing.T) {
 	if d.checkUpgradeRestart(now) {
 		t.Fatal("restarted under a landing pass")
 	}
-	if !d.upgradeRestartPending.Load() {
+	if !d.upgradeRestartDrains() {
 		t.Fatal("pending restart must drain the landing workers")
 	}
 	if d.checkUpgradeRestart(now.Add(3 * time.Minute)) {
@@ -2120,7 +2121,7 @@ func TestUpgradeRestartsOnTheDrainedLandingWake(t *testing.T) {
 	fakeHistory(t, d, "aaa", "bbb")
 	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
 	// The heartbeat drained the workers while the pass was in flight.
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 
 	state := &State{Running: true}
 	if err := d.restartOnDrainedLanding(state); !errors.Is(err, ErrRestartForUpgrade) {
@@ -2144,7 +2145,7 @@ func TestUpgradeDrainEndsWhenMarkerIsGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.checkUpgradeRestart(time.Now())
-	if d.upgradeRestartPending.Load() {
+	if d.upgradeRestartDrains() {
 		t.Fatal("drain must end with the marker")
 	}
 }

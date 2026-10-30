@@ -483,14 +483,14 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	}
 
 	// Landing workers finish their pass and start no new one from here on.
-	if !d.upgradeRestartPending.Load() {
+	if !d.upgradeRestartDrains() {
 		// The sling wait is frozen here, where the drain turns on: no sling
 		// starts after this, so the set only shrinks and its youngest member
 		// gets the bound it had when the drain began (gt-nosod).
 		d.upgradeSlingSince, _ = d.specSlings.newest()
 		d.upgradeSlingFrozen = true
 	}
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 	// The drain is on from here, and that is what parks the ticker: the tick
 	// wait belonged to the deferred wait above, so it ends with it. It is
 	// cleared after the drain is set, so no ticker pass sees a restart that
@@ -710,11 +710,11 @@ func (d *Daemon) upgradeDrainDeferred(hold *daemonWork) bool {
 // hold had it going — ends here, and its end line says for how long it held
 // landings (gt-9vjw8).
 func (d *Daemon) deferUpgradeDrain(now time.Time, name string) {
-	// The ticker is parked by upgradeRestartPending while the drain is on, and
-	// this call is what clears it. While the hold is the tick in flight, the tick
-	// wait is set before the clear, so no ticker pass sees a restart that is
-	// waiting park nothing: a tick started in the gap would outlast the wait and
-	// be cut by the restart, leaving a sling half done (gt-cbaoy, gt-u1fzb).
+	// The ticker is parked by the restart's landing hold while the drain is on,
+	// and this call is what clears it. While the hold is the tick in flight, the
+	// tick wait is set before the clear, so no ticker pass sees a restart that
+	// is waiting park nothing: a tick started in the gap would outlast the wait
+	// and be cut by the restart, leaving a sling half done (gt-cbaoy, gt-u1fzb).
 	d.upgradeTickWaiting.Store(name == specDispatchHoldLabel)
 	d.resumeDispatchAfterDrain()
 	d.reportDrainHeld(now)
@@ -755,7 +755,7 @@ func (d *Daemon) endUpgradeDrain(now time.Time) {
 // before this call while the restart still waits on a tick, and the paths that
 // end the wait clear it with endDispatchTickWait.
 func (d *Daemon) resumeDispatchAfterDrain() {
-	d.upgradeRestartPending.Store(false)
+	d.landingHolds.release(landingHoldUpgradeRestart)
 	d.upgradeSlingSince = time.Time{}
 	d.upgradeSlingFrozen = false
 }

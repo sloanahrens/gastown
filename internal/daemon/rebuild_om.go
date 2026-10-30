@@ -37,9 +37,22 @@ const (
 	// town working as designed.
 	rebuildOMStarveAfter = 30 * time.Minute
 
-	// rebuildOMRunBudget bounds one cycle: the clone, the fetch, the lock wait
-	// and the build behind them.
+	// rebuildOMRunBudget bounds one cycle: the clone, the fetch, the lock wait,
+	// the drain wait and the build behind them. It is unchanged by the drain:
+	// the drain bound and the steps around it fit inside it
+	// (TestRebuildOMDrainBoundFitsTheCycleBudget).
 	rebuildOMRunBudget = 15 * time.Minute
+
+	// defaultRebuildOMDrainAfter is how long a stale om may stay blocked by
+	// landing passes before the job holds new ones off: the default for
+	// patrols.rebuild_om.drain_after. Under it, a pass in flight is the town
+	// working as designed.
+	defaultRebuildOMDrainAfter = 10 * time.Minute
+
+	// rebuildOMDrainBound is how long the job waits for the passes in flight
+	// once it holds new ones off. It is the bound the upgrade restart gives the
+	// same wait (postLandRestartCap), never a longer one (gt-0hsf6).
+	rebuildOMDrainBound = postLandRestartCap
 
 	// rebuildOMGitTimeout bounds one git read or write, rebuildOMCloneTimeout
 	// the first clone.
@@ -178,8 +191,14 @@ func (d *Daemon) rebuildOMCycle(ctx context.Context, cycle *dogCycle) bool {
 		return true
 	}
 
-	if busy := d.rebuildOMBusy(); busy != "" {
-		d.rebuildOMNoteBlocked(cycle, "not quiet: "+busy)
+	release, why := d.rebuildOMQuietForInstall(ctx, d.clk().Now())
+	if release != nil {
+		// The hold outlasts the install: a pass starting mid-swap is what it
+		// exists to keep off, and every exit from here runs this.
+		defer release()
+	}
+	if why != "" {
+		d.rebuildOMNoteBlocked(cycle, "not quiet: "+why)
 		return false
 	}
 
@@ -277,6 +296,84 @@ func (d *Daemon) rebuildOMBusy() string {
 	}
 	busy, _ := d.rebuildGTGate()
 	return busy
+}
+
+// rebuildOMQuietForInstall reports whether the cycle may install now: "" when
+// the town is quiet, else what still holds it. A busy town is left to the next
+// heartbeat unless the block has outlasted the drain wait and a landing pass is
+// the blocker; then the job takes the landing hold the upgrade restart uses,
+// waits for the passes in flight up to rebuildOMDrainBound, and returns the
+// release for the cycle to defer across the install (gt-0hsf6).
+func (d *Daemon) rebuildOMQuietForInstall(ctx context.Context, now time.Time) (release func(), why string) {
+	busy := d.rebuildOMBusy()
+	if busy == "" {
+		return nil, ""
+	}
+	age, open := d.rebuildOMBlock.openFor(now)
+	if !open || age < d.rebuildOMDrainAfter() {
+		return nil, busy
+	}
+	// Only a landing pass is what the drain frees: a gate suite ends on its own
+	// and is not this job's to stop.
+	if d.landingPasses.Load() == 0 {
+		return nil, busy
+	}
+
+	idle := d.landingHolds.hold(landingHoldRebuildOM)
+	release = func() { d.landingHolds.release(landingHoldRebuildOM) }
+	d.logger.Printf("rebuild_om: stale and blocked for %s behind %s; holding new landing passes off for up to %s",
+		age.Round(time.Minute), busy, rebuildOMDrainBound)
+	d.noteRebuildOMDrain()
+	// The count is read only after the hold is on, so a pass that ended in
+	// between is seen here rather than waited out to the bound.
+	if d.landingPasses.Load() == 0 {
+		d.logger.Printf("rebuild_om: the landing passes in flight have finished; installing")
+		return release, ""
+	}
+	select {
+	case <-idle:
+		d.logger.Printf("rebuild_om: the landing passes in flight have finished; installing")
+	case <-d.clk().After(rebuildOMDrainBound):
+		// Installing beside a pass is what the busy gate refuses: the pass is
+		// reviewed by the om being replaced. The hold still stops the queue
+		// growing, so the next heartbeat finds the town quiet.
+		return release, fmt.Sprintf("landing passes still in flight after %s", rebuildOMDrainBound)
+	case <-ctx.Done():
+		return release, "the drain wait was cut off by the cycle budget"
+	}
+	if busy := d.rebuildOMBusy(); busy != "" {
+		return release, busy
+	}
+	return release, ""
+}
+
+// noteRebuildOMDrain tells a test the hold is on (see rebuildOMDrainFn).
+func (d *Daemon) noteRebuildOMDrain() {
+	if d.rebuildOMDrainFn != nil {
+		d.rebuildOMDrainFn()
+	}
+}
+
+// rebuildOMDrainAfter is how long a blocked om runs before the job holds new
+// landing passes off: patrols.rebuild_om.drain_after, default 10m. A value that
+// is not a positive duration takes the default and says so, because a block
+// nobody drains is the starvation this wait exists to end (gt-0hsf6).
+func (d *Daemon) rebuildOMDrainAfter() time.Duration {
+	cfg := d.patrolConfig
+	if cfg == nil || cfg.Patrols == nil || cfg.Patrols.RebuildOM == nil {
+		return defaultRebuildOMDrainAfter
+	}
+	raw := cfg.Patrols.RebuildOM.DrainAfter
+	if raw == "" {
+		return defaultRebuildOMDrainAfter
+	}
+	wait, err := time.ParseDuration(raw)
+	if err != nil || wait <= 0 {
+		d.logger.Printf("rebuild_om: patrols.rebuild_om.drain_after %q is not a positive duration; using %s",
+			raw, defaultRebuildOMDrainAfter)
+		return defaultRebuildOMDrainAfter
+	}
+	return wait
 }
 
 // rebuildOMSync fast-forwards the clone's checkout to origin/main under the

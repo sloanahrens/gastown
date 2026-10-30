@@ -688,15 +688,17 @@ type Daemon struct {
 	// production.
 	landingPassFn func()
 
-	// upgradeRestartPending is true while a restart marker the daemon must
-	// act on exists and the landing drain is on. The landing workers drain on it:
-	// they finish the pass in flight and start no new one, so the restart finds
-	// an idle moment (gt-nxvpe). Cleared when the marker is gone or covered.
-	upgradeRestartPending atomic.Bool
+	// landingHolds is the set of holds on new landing passes (landing_hold.go).
+	// The upgrade restart takes one while a marker the daemon must act on
+	// exists, so it finds an idle moment (gt-nxvpe); rebuild_om takes one when
+	// a stale om has been blocked too long (gt-0hsf6). The landing workers
+	// finish the pass in flight and start no new one while any hold is taken.
+	landingHolds landingHolds
 
 	// upgradeTickWaiting is true while the restart waits on the spec dispatch
-	// tick in flight with the drain deferred, where upgradeRestartPending is
-	// false and cannot keep a new tick from starting behind the one it waits on
+	// tick in flight with the drain deferred, where the restart's landing hold
+	// is not taken and cannot keep a new tick from starting behind the one it
+	// waits on
 	// (gt-u1fzb). The ticker is parked while either flag is set, so the
 	// transition between them sets the arriving flag before it clears the
 	// leaving one; see deferUpgradeDrain and endDispatchTickWait.
@@ -786,6 +788,13 @@ type Daemon struct {
 	rebuildOMRunning     atomic.Bool
 	rebuildOMBlock       rebuildGTBlock
 	rebuildOMCycleDoneFn func()
+
+	// rebuildOMDrainFn, when non-nil, is called on the cycle's goroutine once
+	// the cycle has taken the landing hold and before it waits for the passes in
+	// flight. Test seam, as landingPassFn is: a test has to know the hold is on
+	// before it ends the pass that holds the cycle. It must not block; nil in
+	// production.
+	rebuildOMDrainFn func()
 
 	// rebuildOMInstallFn replaces the in-process install in tests; nil runs
 	// ominstaller.Run (rebuild_om.go).

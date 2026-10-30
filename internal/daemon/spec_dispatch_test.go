@@ -485,14 +485,14 @@ func TestTriggerSpecDispatchSingleFlight(t *testing.T) {
 func TestTriggerSpecDispatchDefersWhileARestartIsPending(t *testing.T) {
 	t.Parallel()
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 	if d.triggerSpecDispatch() {
 		t.Fatal("a tick started while an upgrade restart is pending")
 	}
 	if d.specDispatchRunning.Load() {
 		t.Fatal("a deferred tick left its single-flight guard set")
 	}
-	d.upgradeRestartPending.Store(false)
+	d.landingHolds.release(landingHoldUpgradeRestart)
 	if !d.triggerSpecDispatch() {
 		t.Fatal("tick did not start once the restart was no longer pending")
 	}
@@ -541,7 +541,7 @@ func TestTriggerSpecDispatchDefersForTheRestartCheckPending(t *testing.T) {
 	if d.checkUpgradeRestart(time.Now()) {
 		t.Fatal("restarted under a post-land run")
 	}
-	if !d.upgradeRestartPending.Load() {
+	if !d.upgradeRestartDrains() {
 		t.Fatal("the restart check did not mark the restart pending")
 	}
 	if d.triggerSpecDispatch() {

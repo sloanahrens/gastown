@@ -195,7 +195,7 @@ func (d *Daemon) startSpecSlings(jobs []json.RawMessage, tickSeq uint64) {
 				Line: "sling job unreadable, not run: " + reason})
 			continue
 		}
-		if d.upgradeRestartPending.Load() {
+		if d.upgradeRestartDrains() {
 			reason := "an upgrade restart is pending; the bead stays ready for the next tick after it"
 			d.logger.Printf("spec_dispatch: %s: sling not started: %s", f.Bead, reason)
 			d.feedSpecSlingOutcome(f, specSlingNotStarted, specSlingNotStartedEntry(f.Bead, reason))

@@ -187,9 +187,9 @@ type Worker struct {
 	SweepInterval time.Duration
 	// Draining, when set and true, stops the worker from starting anything
 	// new: the landing in flight finishes, no further ready bead is claimed
-	// and the watch and the sweep are skipped. The daemon sets it while an
-	// upgrade restart is pending, so the restart finds an idle moment
-	// (gt-nxvpe).
+	// and the watch and the sweep are skipped. The daemon sets it while any
+	// job holds new landing passes off, an upgrade restart or the om rebuild,
+	// so that job finds an idle moment (gt-nxvpe, gt-0hsf6).
 	Draining func() bool
 	// Active is told which bead is being landed (and "" when it ends), so
 	// the daemon can say what a pending restart is waiting for.

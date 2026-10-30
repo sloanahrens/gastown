@@ -555,7 +555,7 @@ func (d *Daemon) triggerTierSweep() {
 	if !d.isPatrolActive("tier_sweep") {
 		return
 	}
-	if !d.upgradeRestartPending.Load() {
+	if !d.upgradeRestartDrains() {
 		// No restart pending: the next one logs its skip again.
 		d.tierSweepSkipLogged.Store(false)
 		d.tierSweepStaleLogged.Store(false)
@@ -721,7 +721,7 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 // line has a latch of its own: shared with the skip line's, a restart that had
 // already deferred a younger sweep would swallow it (gt-icmdq).
 func (d *Daemon) tierSweepDeferForRestart(now time.Time) bool {
-	if !d.upgradeRestartPending.Load() {
+	if !d.upgradeRestartDrains() {
 		return false
 	}
 	age, swept, owed := d.tierSweepAge(now)

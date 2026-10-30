@@ -551,6 +551,11 @@ type PatrolConfig struct {
 	// coalesce them; an empty or invalid value leaves that patrol's own
 	// default in force. A run the patrol decides on its own is unaffected.
 	MinInterval string `json:"min_interval,omitempty"`
+	// DrainAfter is how long rebuild_om may stay blocked before it holds new
+	// landing passes off to install (internal/daemon/rebuild_om.go). Only that
+	// patrol reads it: the others have no landing pass to drain. Empty takes
+	// the job's default.
+	DrainAfter string `json:"drain_after,omitempty"`
 }
 
 // MinIntervalOrDefault returns the patrol's minimum interval between forced

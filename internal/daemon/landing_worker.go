@@ -312,17 +312,18 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 				d.logger.Printf("landing_worker: %s: not landing: %s", rigName, why)
 				skipLogged = why
 			}
-		} else if d.upgradeRestartPending.Load() {
-			// Drain: no new pass while an upgrade restart is pending.
+		} else if d.landingHolds.held() {
+			// Drain: no new pass while a job holds landing passes off, whether
+			// it is an upgrade restart (gt-nxvpe) or a rebuild_om about to swap
+			// the om this pass reviews with (gt-0hsf6).
 			skipLogged = ""
-		} else {
+		} else if d.beginLandingPass() {
 			skipLogged = ""
 			pruneLandingLogs(d.landingLogRoot(rigName), time.Now())
-			d.landingPasses.Add(1)
 			d.landingStates.beginPass(rigName)
 			rep := pass(d.ctx)
 			d.landingStates.endPass(rigName)
-			d.landingPasses.Add(-1)
+			d.landingPassEnded()
 			if rep != (landworker.Report{}) {
 				d.logger.Printf("landing_worker: %s: pass: %s", rigName, rep)
 			}
@@ -343,7 +344,7 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			// This pass was the last thing a pending restart waited for, so
 			// its end is the idle moment: wake the run loop now rather than
 			// up to a heartbeat (3 min) later (gt-fzwcd).
-			if d.upgradeRestartPending.Load() {
+			if d.upgradeRestartDrains() {
 				d.signalLandingDrained()
 			}
 			// The pass's report has been applied, so the pass is over: tell a
@@ -353,12 +354,16 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			// submitted while it ran. Pass again at once rather than idle them
 			// for a whole interval; only an idle pass waits. Skipped or
 			// failed-only passes wait too, so a broken queue cannot spin.
-			if rep.Landed+rep.Rejected+rep.Repaired > 0 && !d.upgradeRestartPending.Load() {
+			if rep.Landed+rep.Rejected+rep.Repaired > 0 && !d.landingHolds.held() {
 				if d.ctx.Err() != nil {
 					return
 				}
 				continue
 			}
+		} else {
+			// A hold went on between the check above and the count:
+			// beginLandingPass gave the slot back, so this pass does not run.
+			skipLogged = ""
 		}
 		select {
 		case <-d.ctx.Done():
@@ -754,7 +759,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			d.clearAlerts(fmt.Sprintf("the landing of %s on %s is off the failing list", beadID, rigName),
 				failingLandingKey(rigName, beadID))
 		},
-		Draining: d.upgradeRestartPending.Load,
+		Draining: d.landingPassDraining,
 		Active: func(id string) {
 			// The Active callback is the landing-stuck item's clock: a bead
 			// entering flight is when its in-flight time starts, and leaving

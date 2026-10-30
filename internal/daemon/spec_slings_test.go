@@ -651,7 +651,7 @@ func TestNoSlingStartsWhileAnUpgradeRestartIsPending(t *testing.T) {
 	})
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 
 	d.runSpecDispatch()
 	waitSlings(t, d)

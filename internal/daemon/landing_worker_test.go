@@ -1003,7 +1003,7 @@ func TestLandingWorkerWakesTheRunLoopWhenADrainedPassEnds(t *testing.T) {
 	go d.landingWorkerLoop("testrig", time.Hour, pass)
 	<-started
 	// The heartbeat drains the workers while this pass is in flight.
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 	close(release)
 	// Never woken = the run loop restarts only at the next heartbeat; the
 	// test binary's timeout reports that.
