@@ -76,6 +76,10 @@ type Runner struct {
 	// Exec, before the pool starts the next one. The pool cannot see a command's
 	// own start, so a test reads the order the pool hands them out from here.
 	Began func(pkg string)
+	// Resume, when not nil, is the record of the packages already passed at this
+	// commit and skip list: a package it names counts as passed and is not run,
+	// and each package that passes is appended to it (gt-loqew).
+	Resume *Resume
 	// stderr keeps the progress lines and the reports whole while a run of more
 	// than one job writes them from the dispatcher and the collector at once.
 	stderrMu sync.Mutex
@@ -95,9 +99,19 @@ type Counts struct {
 // packages ran in; a run with Jobs of one or less prints each package's line
 // where the package is listed, as the sweep always has.
 func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
-	tasks := r.tasks(tier, dir, pkgs)
+	tasks := r.tasks(tier, dir, pkgs, r.passed())
 	r.runTasks(tier, dir, prefix, args, tasks)
 	return tally(tasks)
+}
+
+// passed is the set of packages this tier may count without running them. The
+// record is read once, as the tier starts, so packages this run appends cannot
+// make a later read think they were passed by an earlier run.
+func (r *Runner) passed() map[string]bool {
+	if r.Resume == nil {
+		return nil
+	}
+	return r.Resume.Passed()
 }
 
 // task is one package's place in a tier run: the package, the name the skip
@@ -108,6 +122,7 @@ type task struct {
 	name    string
 	pattern string
 	skip    bool
+	resume  bool
 	refuse  bool
 	result  packageResult
 }
@@ -123,8 +138,10 @@ type packageResult struct {
 	closeErr  error
 }
 
-// tasks resolves each package's fate before anything runs.
-func (r *Runner) tasks(tier, dir string, pkgs []string) []*task {
+// tasks resolves each package's fate before anything runs. A skipped package
+// stays skipped rather than resumed: the skip list is the operator's decision to
+// run nothing there, and counting it as passed would report a tier that ran.
+func (r *Runner) tasks(tier, dir string, pkgs []string, passed map[string]bool) []*task {
 	tasks := make([]*task, 0, len(pkgs))
 	for _, pkg := range pkgs {
 		t := &task{pkg: pkg, name: packageName(dir, pkg)}
@@ -133,6 +150,8 @@ func (r *Runner) tasks(tier, dir string, pkgs []string) []*task {
 			t.refuse = true
 		case whole:
 			t.skip = true
+		case passed[TimingsKey(tier, t.name)]:
+			t.resume = true
 		default:
 			t.pattern = pattern
 		}
@@ -181,6 +200,8 @@ func (r *Runner) announce(tier string, t *task) bool {
 		fmt.Fprintf(r.Stderr, "%s: package argument starts with a dash\n", t.name)
 	case t.skip:
 		fmt.Fprintf(r.Stderr, "%s: %s %s SKIPPED (%s)\n", Name, tier, t.name, EnvSkip)
+	case t.resume:
+		fmt.Fprintf(r.Stderr, "%s: %s %s RESUMED (%s)\n", Name, tier, t.name, EnvResume)
 	default:
 		return true
 	}
@@ -255,6 +276,9 @@ func (r *Runner) report(tier string, t *task) {
 		return
 	}
 	r.addTiming(tier, t.name, res.start, res.code)
+	if res.passed() {
+		r.recordPass(tier, t.name)
+	}
 	if res.closeErr != nil {
 		fmt.Fprintf(r.Stderr, "    close log %s: %v\n", res.log, res.closeErr)
 	}
@@ -263,6 +287,12 @@ func (r *Runner) report(tier string, t *task) {
 			fmt.Fprintf(r.Stderr, "    read log %s: %v\n", res.log, err)
 		}
 	}
+}
+
+// passed reports whether a package's result is one the tier counts as passed:
+// its command ran, its log was opened and closed, and it exited zero.
+func (res packageResult) passed() bool {
+	return res.ran && res.createErr == nil && res.code == 0 && res.closeErr == nil
 }
 
 // tally counts the run in the caller's package-list order, so a failure is
@@ -276,7 +306,7 @@ func tally(tasks []*task) Counts {
 			c.FailedNames = append(c.FailedNames, t.name)
 		case t.skip:
 			c.Skipped++
-		case t.result.ran && t.result.createErr == nil && t.result.code == 0 && t.result.closeErr == nil:
+		case t.resume, t.result.passed():
 			c.Passed++
 		default:
 			c.Failed++
@@ -284,6 +314,15 @@ func tally(tasks []*task) Counts {
 		}
 	}
 	return c
+}
+
+// recordPass appends a package that passed to the resume record, so a sweep a
+// restart cuts after it does not run it again (gt-loqew).
+func (r *Runner) recordPass(tier, name string) {
+	if r.Resume == nil {
+		return
+	}
+	r.Resume.Record(tier, name)
 }
 
 func (r *Runner) now() time.Time {

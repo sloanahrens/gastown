@@ -54,6 +54,10 @@ type Sweep struct {
 	Walls map[string]int64
 	// Began is handed to each parallel Runner as its Began; nil records nothing.
 	Began func(pkg string)
+	// Resume is the run's record of the packages already passed at this commit
+	// and skip list. Run sets it from TIER_SWEEP_RESUME; nil resumes nothing
+	// (gt-loqew).
+	Resume *Resume
 }
 
 // integrationPlan is what the integration tier runs.
@@ -107,6 +111,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 		Jobs:     s.Opts.Jobs,
 		Walls:    s.Walls,
 		Began:    s.Began,
+		Resume:   s.Resume,
 	}
 	root := runner.Tier(TierIntegration, ".", slotPrefix(s.Opts.Nice), taggedArgs, plan.root)
 	docker := runner.Tier(TierDocker, ".", slotPrefix(s.Opts.Nice), nil, plan.docker)
