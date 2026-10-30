@@ -983,7 +983,7 @@ the path that reads it.
 overseer judgment, and acknowledges an item.
 
 ```bash
-gt attention                 # the queue, highest needs_human score first; risk-path rows by landing risk
+gt attention                 # the queue, highest needs_human score first (risk-path rows: see below)
 gt attention --all           # include acked items
 gt attention --json          # state.json
 gt attention -f              # stream new transitions as they append
@@ -1000,8 +1000,7 @@ and a low score only sinks it. The dashboard's Attention panel draws the same
 number beside each queue item and orders each alert level by it. Its risk-path
 rows (post-landing reviews) are the exception: they are ranked among themselves
 by the landing battery's risk answer, read from
-`<town>/.runtime/jev/landing.jsonl` (see **Landing battery**). `gt attention
---help` states the order the CLI gives the queue.
+`<town>/.runtime/jev/landing.jsonl` (see **Landing battery**).
 
 A `-` in `NEEDS` is an item no answer names yet, and a log that was never
 written leaves every item at `-`. A log that exists but cannot be read is a
