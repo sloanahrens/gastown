@@ -106,9 +106,13 @@ func TestRecordingEnvPinsTheIdentityAndDropsTheStoreSelectors(t *testing.T) {
 // the operator's (gt-p85pw.103). It checks the command execBD builds, since a unit test may not
 // start bd.
 func TestBDCommandCarriesTheRecordingEnvironment(t *testing.T) {
-	t.Setenv("BEADS_ACTOR", "operator@example.com")
-	t.Setenv("BEADS_DIR", "/home/operator/gt/.beads")
-	cmd := bdCommand(context.Background(), "bd", "/tmp/copy", []string{"show", "fx-1"})
+	t.Parallel()
+	base := []string{
+		"PATH=/usr/bin",
+		"BEADS_ACTOR=operator@example.com",
+		"BEADS_DIR=/home/operator/gt/.beads",
+	}
+	cmd := bdCommand(context.Background(), "bd", "/tmp/copy", []string{"show", "fx-1"}, base)
 	if cmd.Dir != "/tmp/copy" {
 		t.Errorf("command runs in %q, want the copy /tmp/copy", cmd.Dir)
 	}

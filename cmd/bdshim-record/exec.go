@@ -33,7 +33,7 @@ func execBD(bin string) Runner {
 	return func(dir string, args []string) ([]byte, int, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), runLimit)
 		defer cancel()
-		c := bdCommand(ctx, bin, dir, args)
+		c := bdCommand(ctx, bin, dir, args, os.Environ())
 		var stdout bytes.Buffer
 		c.Stdout = &stdout
 		c.Stderr = os.Stderr
@@ -43,12 +43,12 @@ func execBD(bin string) Runner {
 }
 
 // bdCommand returns the command one bd run is: bin with args, run in dir, carrying the recording
-// environment, so bd works on the copy it runs in and records the recorder as the author of every
-// bead it writes (gt-p85pw.103).
-func bdCommand(ctx context.Context, bin, dir string, args []string) *exec.Cmd {
+// environment built from base, so bd works on the copy it runs in and records the recorder as the
+// author of every bead it writes (gt-p85pw.103).
+func bdCommand(ctx context.Context, bin, dir string, args, base []string) *exec.Cmd {
 	c := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin is the bd binary the operator names; args are the recording's fixed rows
 	c.Dir = dir
-	c.Env = recordingEnv(os.Environ())
+	c.Env = recordingEnv(base)
 	c.WaitDelay = time.Second
 	return c
 }
