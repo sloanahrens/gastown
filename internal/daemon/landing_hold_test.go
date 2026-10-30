@@ -77,3 +77,37 @@ func TestBeginLandingPassRefusesAPassAfterAHoldGoesOn(t *testing.T) {
 		t.Errorf("a refused pass left %d in flight, want 0", got)
 	}
 }
+
+// TestLandingPassDrainsUnderAnyHold pins what the pass in flight stops on: a
+// hold by either job stops it claiming beads, and no hold lets it go on. The
+// in-pass drain once read only the upgrade restart's hold, so a pass kept
+// claiming through rebuild_om's wait (gt-0hsf6).
+func TestLandingPassDrainsUnderAnyHold(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		hold string
+		want bool
+	}{
+		{name: "no hold", want: false},
+		{name: "the upgrade restart holds", hold: landingHoldUpgradeRestart, want: true},
+		{name: "rebuild_om holds", hold: landingHoldRebuildOM, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{}
+			if tc.hold != "" {
+				d.landingHolds.hold(tc.hold)
+			}
+			if got := d.landingPassDraining(); got != tc.want {
+				t.Errorf("landingPassDraining = %v, want %v", got, tc.want)
+			}
+			if tc.hold != "" {
+				d.landingHolds.release(tc.hold)
+				if d.landingPassDraining() {
+					t.Error("the pass still drains after the hold was released")
+				}
+			}
+		})
+	}
+}

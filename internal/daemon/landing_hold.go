@@ -107,3 +107,12 @@ func (d *Daemon) landingPassEnded() {
 func (d *Daemon) upgradeRestartDrains() bool {
 	return d.landingHolds.heldBy(landingHoldUpgradeRestart)
 }
+
+// landingPassDraining reports whether the landing pass in flight must stop
+// claiming beads: any job's hold counts, the upgrade restart's and
+// rebuild_om's alike. A pass that kept claiming under rebuild_om's hold would
+// run the whole queue and the drain would wait out its bound for nothing
+// (gt-0hsf6).
+func (d *Daemon) landingPassDraining() bool {
+	return d.landingHolds.held()
+}

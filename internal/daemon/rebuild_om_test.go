@@ -909,3 +909,20 @@ func TestRebuildOMInForce(t *testing.T) {
 		}
 	}
 }
+
+// TestRebuildOMDrainBoundFitsTheCycleBudget pins that the drain's timeout
+// branch can fire in production: the bound, with the longest waits that
+// surround it (one git step, the sync's lock wait, the install's lock wait),
+// stays inside the cycle budget, and the bound is no longer than the upgrade
+// restart's (gt-0hsf6).
+func TestRebuildOMDrainBoundFitsTheCycleBudget(t *testing.T) {
+	t.Parallel()
+	around := rebuildOMGitTimeout + rebuildOMLockWait + rebuildOMInstallLockWait
+	if rebuildOMDrainBound+around >= rebuildOMRunBudget {
+		t.Errorf("drain bound %s plus %s of surrounding waits does not fit the %s cycle budget, so the timeout branch cannot fire",
+			rebuildOMDrainBound, around, rebuildOMRunBudget)
+	}
+	if rebuildOMDrainBound > postLandRestartCap {
+		t.Errorf("drain bound %s is longer than the upgrade restart's %s", rebuildOMDrainBound, postLandRestartCap)
+	}
+}

@@ -759,7 +759,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			d.clearAlerts(fmt.Sprintf("the landing of %s on %s is off the failing list", beadID, rigName),
 				failingLandingKey(rigName, beadID))
 		},
-		Draining: d.upgradeRestartDrains,
+		Draining: d.landingPassDraining,
 		Active: func(id string) {
 			// The Active callback is the landing-stuck item's clock: a bead
 			// entering flight is when its in-flight time starts, and leaving

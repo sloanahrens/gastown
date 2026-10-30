@@ -38,10 +38,10 @@ const (
 	rebuildOMStarveAfter = 30 * time.Minute
 
 	// rebuildOMRunBudget bounds one cycle: the clone, the fetch, the lock wait,
-	// the drain wait and the build behind them. The drain wait is part of it, so
-	// the budget never cuts a cycle inside the wait and leaves the timeout
-	// branch unreachable (gt-0hsf6).
-	rebuildOMRunBudget = 15*time.Minute + rebuildOMDrainBound
+	// the drain wait and the build behind them. It is unchanged by the drain:
+	// the drain bound and the steps around it fit inside it
+	// (TestRebuildOMDrainBoundFitsTheCycleBudget).
+	rebuildOMRunBudget = 15 * time.Minute
 
 	// defaultRebuildOMDrainAfter is how long a stale om may stay blocked by
 	// landing passes before the job holds new ones off: the default for
