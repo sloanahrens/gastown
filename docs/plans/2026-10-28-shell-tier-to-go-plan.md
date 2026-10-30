@@ -75,7 +75,7 @@ Tasks A1 to A11 share one package and run in order. A12 and the cutover tasks to
 
 **Interfaces:**
 - Consumes: `Entry`, `Manifest()` from A1.
-- Produces: `type Command struct { Dir string; Argv []string; Env []string }`; `type Exec func(ctx context.Context, c Command) (exitCode int, err error)`; `type Config struct { Entries []Entry; Root, LogDir string; Budget time.Duration; Exec Exec; Now func() time.Time; WithTimeout func(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) }`; `type Result struct { Passed, Failed, Skipped int; FailedNames []string; Elapsed time.Duration }`; `func Run(ctx context.Context, cfg Config) Result`.
+- Produces: `type Command struct { Dir string; Argv []string; Env []string; Log string }` (`Log` is the file Exec writes the combined output to: the runner names it per script, so Exec needs no naming rule of its own); `type Exec func(ctx context.Context, c Command) (exitCode int, err error)`; `type Config struct { Entries []Entry; Root, LogDir string; Budget time.Duration; Exec Exec; Now func() time.Time; WithTimeout func(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) }`; `type Result struct { Passed, Failed, Skipped int; FailedNames []string; Elapsed time.Duration }`; `func Run(ctx context.Context, cfg Config) Result`.
 - Behaviour: each entry runs `bash <path>` in `Root` with `GT_TEST_DOCKER=0` and `TMPDIR=<LogDir>/tmp/<entry log name>`, its combined output going to `<LogDir>/shell-<path with / as _>.log`; exit 0 is passed, non-zero or a timeout (the `Budget` context ends) is failed and its path is recorded in order.
 
 **Acceptance:**
