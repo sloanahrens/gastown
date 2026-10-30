@@ -261,9 +261,11 @@ func (s Signer) stdinExec() signing.StdinExec {
 	return runStdin
 }
 
-// runStdin runs name with stdin on its standard input, and returns what it
-// wrote. Its error names the command, its arguments (the keychain path) and the
-// exit status. It never carries stdin or the output, which hold the password.
+// runStdin runs name with stdin on its standard input. It returns what the
+// command wrote to standard output and standard error, which the unlock
+// discards. Its error names the command, its arguments (the keychain path) and
+// the exit status; it never includes stdin or that output, which can hold the
+// password.
 func runStdin(ctx context.Context, stdin, name string, args ...string) (string, string, error) {
 	return runStdinWith(ctx, func(cmd *exec.Cmd) error { return cmd.Run() }, stdin, name, args...)
 }

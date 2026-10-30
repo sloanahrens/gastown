@@ -43,11 +43,19 @@ func Bound(parent context.Context, now func() time.Time, limit time.Duration) (c
 	return context.WithDeadline(parent, now().Add(limit))
 }
 
+// ErrPasswordLineBreak is a password with a line break in it. security reads
+// one line from stdin, so the rest would be read as something else; the unlock
+// refuses it before any command runs. The error never names the password.
+var ErrPasswordLineBreak = errors.New("keychain password holds a line break")
+
 // Unlock unlocks keychain with password, bounded by ctx. The password goes to
 // security on stdin, as a line of its own, and never in argv: ps shows only
 // security unlock-keychain and the keychain path (gt-tpg0p.70). The unlock's
 // output is discarded, so the password is never printed.
 func Unlock(ctx context.Context, exec StdinExec, keychain, password string) error {
+	if strings.ContainsAny(password, "\r\n") {
+		return ErrPasswordLineBreak
+	}
 	_, _, err := exec(ctx, password+"\n", "security", "unlock-keychain", OptionSafe(keychain))
 	if err != nil && ctx.Err() == context.DeadlineExceeded {
 		return ErrUnlockTimeout

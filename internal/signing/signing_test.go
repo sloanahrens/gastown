@@ -124,7 +124,7 @@ func TestUnlockPassesThePathAsAnOptionSafeOperand(t *testing.T) {
 }
 
 // TestUnlockErrorNeverCarriesThePassword: a refused unlock returns an error that
-// names no password, even when the command's output names the keychain, and a
+// names no password, even when the command's output carries the password, and a
 // deadline that cut the unlock off still reads as ErrUnlockTimeout.
 func TestUnlockErrorNeverCarriesThePassword(t *testing.T) {
 	t.Parallel()
@@ -141,7 +141,9 @@ func TestUnlockErrorNeverCarriesThePassword(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			exec := &fakeExec{unlockErr: errRefused, stderr: "SecKeychainUnlock /keys/gt.keychain-db: wrong passphrase"}
+			// The fake's output echoes the password, so a Unlock that folded
+			// stderr into its error would fail here.
+			exec := &fakeExec{unlockErr: errRefused, stderr: "SecKeychainUnlock /keys/gt.keychain-db: " + password}
 			ctx, cancel := Bound(context.Background(), func() time.Time { return tc.now }, tc.limit)
 			defer cancel()
 			err := Unlock(ctx, exec.execStdin, "/keys/gt.keychain-db", password)
@@ -149,6 +151,37 @@ func TestUnlockErrorNeverCarriesThePassword(t *testing.T) {
 				t.Fatalf("Unlock() = %v, want %v", err, tc.wantErr)
 			}
 			if err != nil && strings.Contains(err.Error(), password) {
+				t.Errorf("Unlock() = %q carries the password", err)
+			}
+		})
+	}
+}
+
+// TestUnlockRefusesAPasswordWithALineBreakBeforeRunning: security reads one line
+// from stdin, so a password with a line break is refused before any command
+// runs, and the refusal names no part of the password.
+func TestUnlockRefusesAPasswordWithALineBreakBeforeRunning(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		password string
+	}{
+		{name: "line feed", password: "first\nsecond"},
+		{name: "carriage return", password: "first\rsecond"},
+		{name: "trailing line feed", password: "first\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			exec := &fakeExec{}
+			err := Unlock(context.Background(), exec.execStdin, "/keys/gt.keychain-db", tc.password)
+			if !errors.Is(err, ErrPasswordLineBreak) {
+				t.Fatalf("Unlock() = %v, want ErrPasswordLineBreak", err)
+			}
+			if len(exec.calls) != 0 {
+				t.Errorf("command ran %q; want none", exec.calls)
+			}
+			if strings.Contains(err.Error(), tc.password) {
 				t.Errorf("Unlock() = %q carries the password", err)
 			}
 		})

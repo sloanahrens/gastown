@@ -91,7 +91,10 @@ type Command struct {
 	Stdin string
 }
 
-// ExecFunc runs a Command and returns what it wrote to stdout and stderr.
+// ExecFunc runs a Command and returns what it wrote to stdout and stderr. An
+// implementation must write c.Stdin to the child's standard input: one that
+// drops it runs the keychain unlock with no password, which security refuses,
+// so the install fails rather than installing unsigned.
 type ExecFunc func(ctx context.Context, c Command) (stdout, stderr string, err error)
 
 // AcquireFunc takes the exclusive install lock on path, waiting up to wait, and
