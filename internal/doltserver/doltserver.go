@@ -3237,6 +3237,9 @@ func (h *host) initRemoteRig(townRoot, rigName string, config *Config) (InitRigR
 		InvalidateDBCache()
 	}
 
+	// metadata.json is local config, not the database: the daemon's
+	// EnsureAllMetadata pass rewrites it, and the local path warns the same
+	// way (gt-q0ppq).
 	if err := h.EnsureMetadata(townRoot, rigName); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: database on the remote Dolt has no metadata.json update: %v\n", err)
 	}

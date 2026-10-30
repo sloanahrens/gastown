@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -494,22 +495,35 @@ func TestRunInstallWritesTheTrackerEndpoint(t *testing.T) {
 }
 
 // recordingSteps are install steps that record what the install asked them to
-// do, so a test needs neither a Dolt server nor bd.
+// do, so a test needs neither a Dolt server nor bd. Every Dolt step the local
+// path runs is here, startDolt included, so the same recorder drives both
+// branches and the remote test can tell them apart (gt-q0ppq).
 type recordingSteps struct {
-	beadChecks  int
-	rigCalls    []string
-	townInits   []string
-	townConfigs []string
-	initRigErrs error
+	beadChecks      int
+	localDoltChecks int
+	identityChecks  int
+	portChecks      []int
+	rigCalls        []string
+	starts          []string
+	townInits       []string
+	townConfigs     []string
+	initRigErrs     error
 }
 
 func (r *recordingSteps) steps() installSteps {
 	return installSteps{
-		checkBeads: func() error { r.beadChecks++; return nil },
+		checkBeads:         func() error { r.beadChecks++; return nil },
+		ensureLocalDolt:    func() error { r.localDoltChecks++; return nil },
+		ensureDoltIdentity: func() error { r.identityChecks++; return nil },
+		checkDoltPort: func(port int) error {
+			r.portChecks = append(r.portChecks, port)
+			return nil
+		},
 		initRig: func(_, rigName string) (doltserver.InitRigResult, error) {
 			r.rigCalls = append(r.rigCalls, rigName)
 			return doltserver.InitRigResult{Created: true}, r.initRigErrs
 		},
+		startDolt:     func(townRoot string) error { r.starts = append(r.starts, townRoot); return nil },
 		initTownBeads: func(townRoot string) error { r.townInits = append(r.townInits, townRoot); return nil },
 		configureTownBeads: func(townRoot string) {
 			r.townConfigs = append(r.townConfigs, townRoot)
@@ -517,9 +531,33 @@ func (r *recordingSteps) steps() installSteps {
 	}
 }
 
+// ranLocalDolt names the local-Dolt steps r recorded, for a failure message
+// that says which one the install should not have run.
+func (r *recordingSteps) ranLocalDolt() []string {
+	var ran []string
+	if r.localDoltChecks > 0 {
+		ran = append(ran, "the dolt binary preflight")
+	}
+	if r.identityChecks > 0 {
+		ran = append(ran, "the dolt identity preflight")
+	}
+	if len(r.portChecks) > 0 {
+		ran = append(ran, "the port availability check")
+	}
+	if len(r.starts) > 0 {
+		ran = append(ran, fmt.Sprintf("a local Dolt start at %q", r.starts))
+	}
+	return ran
+}
+
 // An install with a Dolt host writes that endpoint to town.json, creates the hq
 // database on that server, and initializes the town's beads against it without
-// starting a local Dolt: a local server leaves .dolt-data/ behind (gt-q0ppq).
+// starting a local Dolt (gt-q0ppq).
+//
+// This test judges the install's wiring: which steps it runs, and that none of
+// the local-Dolt ones fire. What the real doltserver.InitRig does on that
+// wiring is judged against a fake SQL server and a recording process start in
+// TestInitRigRemoteCreatesTheDatabaseOnTheServer and its neighbours.
 func TestRunInstallDoltHostCreatesHQOnTheServer(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -561,8 +599,17 @@ func TestRunInstallDoltHostCreatesHQOnTheServer(t *testing.T) {
 			if rec.beadChecks != 1 {
 				t.Errorf("the install checked for bd %d time(s), want once: bd initializes the beads on the server", rec.beadChecks)
 			}
+			// The local-Dolt steps are what a remote install must not run:
+			// startDolt here is the only way the install starts a server, so
+			// a local start added back to this path is recorded and fails.
+			if ran := rec.ranLocalDolt(); len(ran) != 0 {
+				t.Errorf("gt install --dolt-host ran local Dolt work, want none: %v", ran)
+			}
 			if _, err := os.Stat(filepath.Join(hqPath, ".dolt-data")); !os.IsNotExist(err) {
 				t.Errorf("gt install --dolt-host left .dolt-data/ behind (err = %v)", err)
+			}
+			if matches, err := filepath.Glob(filepath.Join(hqPath, ".beads", "formulas", "*.toml")); err != nil || len(matches) == 0 {
+				t.Errorf("gt install --dolt-host provisioned %d formula(s) (err = %v), want the embedded set", len(matches), err)
 			}
 		})
 	}
@@ -588,6 +635,39 @@ func TestRunInstallDoltHostNamesAnUnreachableServer(t *testing.T) {
 	}
 	if len(rec.townInits) != 0 {
 		t.Errorf("the install initialized the town's beads at %q after the server refused, want none", rec.townInits)
+	}
+	if ran := rec.ranLocalDolt(); len(ran) != 0 {
+		t.Errorf("an unreachable remote server fell back to local Dolt work, want none: %v", ran)
+	}
+}
+
+// A local install keeps the setup a remote one skips: the dolt preflights, the
+// port check, the hq database and the server start (gt-q0ppq).
+func TestRunInstallKeepsLocalDoltSetup(t *testing.T) {
+	t.Parallel()
+	hqPath := filepath.Join(t.TempDir(), "hq")
+	rec := &recordingSteps{}
+
+	if err := runInstallWith(installOptions{steps: rec.steps()}, []string{hqPath}); err != nil {
+		t.Fatalf("gt install: %v", err)
+	}
+	if rec.localDoltChecks != 1 {
+		t.Errorf("the dolt binary preflight ran %d time(s), want once", rec.localDoltChecks)
+	}
+	if rec.identityChecks != 1 {
+		t.Errorf("the dolt identity preflight ran %d time(s), want once", rec.identityChecks)
+	}
+	if !reflect.DeepEqual(rec.portChecks, []int{doltserver.DefaultPort}) {
+		t.Errorf("the port check saw %v, want the default port %d", rec.portChecks, doltserver.DefaultPort)
+	}
+	if !reflect.DeepEqual(rec.rigCalls, []string{"hq"}) {
+		t.Errorf("databases created = %q, want the hq database alone", rec.rigCalls)
+	}
+	if !reflect.DeepEqual(rec.starts, []string{hqPath}) {
+		t.Errorf("local Dolt starts = %q, want one at %q", rec.starts, hqPath)
+	}
+	if !reflect.DeepEqual(rec.townInits, []string{hqPath}) {
+		t.Errorf("town beads initialized at %q, want %q", rec.townInits, hqPath)
 	}
 }
 

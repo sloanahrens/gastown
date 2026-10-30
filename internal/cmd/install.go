@@ -47,12 +47,21 @@ var (
 	installDoltHost   string
 )
 
-// installSteps are the install's external steps: the bd presence probe, and
-// the Dolt work beads needs. A nil field is the real step, which a test cannot
-// run without a server; a test sets the ones its install reaches.
+// installSteps are the install's external steps: the bd presence probe, the
+// Dolt work beads needs, and the long-running server a local install starts. A
+// nil field is the real step, which a test cannot run without a server; a test
+// sets the ones its install reaches.
+//
+// Every Dolt step a local install runs is here, startDolt included, so a test
+// can assert that a remote install ran none of them: a local start added back
+// to the remote path calls the recorded step and fails the test (gt-q0ppq).
 type installSteps struct {
 	checkBeads         func() error
+	ensureLocalDolt    func() error
+	ensureDoltIdentity func() error
+	checkDoltPort      func(port int) error
 	initRig            func(townRoot, rigName string) (doltserver.InitRigResult, error)
+	startDolt          func(townRoot string) error
 	initTownBeads      func(townRoot string) error
 	configureTownBeads func(townRoot string)
 }
@@ -62,8 +71,20 @@ func (s installSteps) resolved() installSteps {
 	if s.checkBeads == nil {
 		s.checkBeads = deps.EnsureBeads
 	}
+	if s.ensureLocalDolt == nil {
+		s.ensureLocalDolt = ensureInstallDoltReady
+	}
+	if s.ensureDoltIdentity == nil {
+		s.ensureDoltIdentity = doltserver.EnsureDoltIdentity
+	}
+	if s.checkDoltPort == nil {
+		s.checkDoltPort = doltserver.CheckPortAvailable
+	}
 	if s.initRig == nil {
 		s.initRig = doltserver.InitRig
+	}
+	if s.startDolt == nil {
+		s.startDolt = doltserver.Start
 	}
 	if s.initTownBeads == nil {
 		s.initTownBeads = initTownBeads
@@ -260,13 +281,13 @@ func runInstallWith(opts installOptions, args []string) error {
 		}
 	}
 	if !opts.noBeads && !remoteDolt {
-		if err := ensureInstallDoltReady(); err != nil {
+		if err := steps.ensureLocalDolt(); err != nil {
 			return err
 		}
 
 		// Preflight: ensure dolt identity before any workspace mutations.
 		// This prevents a partial install that can't be retried without --force.
-		if err := doltserver.EnsureDoltIdentity(); err != nil {
+		if err := steps.ensureDoltIdentity(); err != nil {
 			return fmt.Errorf("dolt identity setup failed (required for beads): %w\n\nTo fix, run:\n  dolt config --global --add user.name \"Your Name\"\n  dolt config --global --add user.email \"you@example.com\"", err)
 		}
 
@@ -284,7 +305,7 @@ func runInstallWith(opts installOptions, args []string) error {
 		}
 		installEndpointPort = port
 		externalTestDolt := useExternalTestDoltServer(port)
-		if err := doltserver.CheckPortAvailable(port); err != nil {
+		if err := steps.checkDoltPort(port); err != nil {
 			// Port is in use — but if a Dolt server is already running
 			// for this same town, we can reuse it instead of starting a new one.
 			if canReuseInstallDoltServer(absPath, port) || externalTestDolt {
@@ -449,7 +470,9 @@ func runInstallWith(opts installOptions, args []string) error {
 		// Dolt (gt-q0ppq).
 		res, err := steps.initRig(absPath, "hq")
 		if err != nil {
-			return fmt.Errorf("creating the hq database on the remote Dolt at %s:%d: %w", doltHost, installEndpointPort, err)
+			// "Preparing", not "creating": the step can fail reading the
+			// server's catalogue before any database is created (gt-q0ppq).
+			return fmt.Errorf("preparing the hq database on the remote Dolt at %s:%d: %w", doltHost, installEndpointPort, err)
 		}
 		if res.Created {
 			fmt.Printf("   ✓ Created the hq database on the remote Dolt at %s:%d (no local Dolt started)\n", doltHost, installEndpointPort)
@@ -467,14 +490,14 @@ func runInstallWith(opts installOptions, args []string) error {
 		// Identity was verified in preflight above.
 		// Create HQ database before starting server.
 		if !externalTestDolt {
-			if _, err := doltserver.InitRig(absPath, "hq"); err != nil {
+			if _, err := steps.initRig(absPath, "hq"); err != nil {
 				return fmt.Errorf("initializing HQ Dolt database: %w", err)
 			}
 
 			// Start the Dolt server — bd commands need a running server.
 			// The server stays running after install (it's lightweight infrastructure,
 			// like a database). Stop it with 'gt dolt stop' when not needed.
-			if err := doltserver.Start(absPath); err != nil {
+			if err := steps.startDolt(absPath); err != nil {
 				if !strings.Contains(err.Error(), "already running") {
 					return fmt.Errorf("starting Dolt server for beads: %w", err)
 				}

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -15,19 +14,6 @@ import (
 	"testing"
 
 	configpkg "github.com/steveyegge/gastown/internal/config"
-)
-
-// remoteFakeDriver is the one database/sql driver these tests register: a
-// second sql.Register of the same name panics, and the global registry cannot
-// drop a name back off.
-const remoteFakeDriver = "gt_doltserver_remote_fake"
-
-var (
-	remoteFakeOnce sync.Once
-	remoteFakeMu   sync.Mutex
-	// remoteFakeServers maps the name a test opens to its fake server, so
-	// parallel tests keep their answers apart without a second registration.
-	remoteFakeServers = map[string]*remoteFakeServer{}
 )
 
 // remoteFakeServer answers the two statements initRemoteRig issues, over the
@@ -45,15 +31,9 @@ type remoteFakeServer struct {
 	execErr       error
 }
 
-// open is the host's openDB seam for server: the driver it hands back answers
-// this server alone.
+// open is the host's openDB seam for server: the connector it hands back
+// answers this server alone, so parallel tests share no registry.
 func (s *remoteFakeServer) open(string) (*sql.DB, error) {
-	remoteFakeOnce.Do(func() { sql.Register(remoteFakeDriver, remoteFakeDriverType{}) })
-	id := fmt.Sprintf("remote-fake-%p", s)
-	remoteFakeMu.Lock()
-	remoteFakeServers[id] = s
-	remoteFakeMu.Unlock()
-
 	s.mu.Lock()
 	s.opens++
 	err := s.openErr
@@ -64,7 +44,7 @@ func (s *remoteFakeServer) open(string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sql.Open(remoteFakeDriver, id)
+	return sql.OpenDB(remoteFakeConnector{server: s}), nil
 }
 
 func (s *remoteFakeServer) snapshot() []string {
@@ -79,16 +59,20 @@ func (s *remoteFakeServer) openCount() int {
 	return s.opens
 }
 
+// remoteFakeConnector is database/sql's way in without a driver name: a
+// test's pool is built from its own server and never from a package registry.
+type remoteFakeConnector struct{ server *remoteFakeServer }
+
+func (c remoteFakeConnector) Connect(context.Context) (driver.Conn, error) {
+	return &remoteFakeConn{server: c.server}, nil
+}
+
+func (remoteFakeConnector) Driver() driver.Driver { return remoteFakeDriverType{} }
+
 type remoteFakeDriverType struct{}
 
-func (remoteFakeDriverType) Open(name string) (driver.Conn, error) {
-	remoteFakeMu.Lock()
-	server := remoteFakeServers[name]
-	remoteFakeMu.Unlock()
-	if server == nil {
-		return nil, fmt.Errorf("no fake server named %q", name)
-	}
-	return &remoteFakeConn{server: server}, nil
+func (remoteFakeDriverType) Open(string) (driver.Conn, error) {
+	return nil, errors.New("the fake connects through remoteFakeConnector, not a driver name")
 }
 
 type remoteFakeConn struct{ server *remoteFakeServer }
