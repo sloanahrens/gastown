@@ -1,5 +1,5 @@
-// Package uninstallgt resolves the directory the installed gt and bd binaries
-// are removed from, and refuses a directory a run must not touch.
+// Package uninstallgt removes exactly the installed gt and bd binaries from a
+// directory it names explicitly, and refuses a directory a run must not touch.
 //
 // The directory is named explicitly — --install-dir, $INSTALL_GT_BIN_DIR,
 // $INSTALL_DIR or the default $HOME/.local/bin — and never looked up on PATH:
