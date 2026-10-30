@@ -408,3 +408,22 @@ func withoutLocks(files map[string]string) map[string]string {
 	}
 	return files
 }
+
+// TestTheRingIsARegisteredSection: the machine file carries the town's signed
+// lease as a section the layout registers (internal/ring, gt-6mlik.1), and it
+// was never a file of its own, so no migration moves or retires one.
+func TestTheRingIsARegisteredSection(t *testing.T) {
+	t.Parallel()
+	host, ok := SectionHost("ring")
+	if !ok || host != MachineConfigFile {
+		t.Fatalf(`SectionHost("ring") = %q, %v; want %q, true`, host, ok, MachineConfigFile)
+	}
+	for _, rel := range LegacyConfigFiles() {
+		if rel == "mayor/ring.json" {
+			t.Fatalf("LegacyConfigFiles() lists %s; the ring was never a file", rel)
+		}
+	}
+	if host, ok := SectionHost("no-such-section"); ok || host != "" {
+		t.Errorf("SectionHost of an unregistered key = %q, %v; want no host", host, ok)
+	}
+}

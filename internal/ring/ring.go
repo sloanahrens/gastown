@@ -5,14 +5,17 @@
 // carrying the reason it could not be trusted.
 //
 // Sign and Verify cover HMAC-SHA256 with a key the caller supplies; this
-// package never reads one from the environment or from config. Nothing reads
-// the Ring for behavior yet (gt-6mlik.5).
+// package never reads one from the environment or from config. The bytes the
+// signature covers are unambiguous: every signed field is length-prefixed,
+// so no two records share a signed form (canonical). Nothing reads the Ring
+// for behavior yet (gt-6mlik.5).
 package ring
 
 import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -80,28 +83,58 @@ func Verify(rec Record, key []byte) error {
 
 // signature is rec's HMAC under key, hex encoded.
 func signature(rec Record, key []byte) string {
-	mac := hmac.New(sha256.New, key)
-	mac.Write(canonical(rec))
-	return hex.EncodeToString(mac.Sum(nil))
+	return mac(canonical(rec), key)
+}
+
+// signedFields is what a signature covers, in signing order: the three signed
+// fields, the times in UTC. A field added to Record has to be added here too,
+// or it would ride along unsigned.
+func signedFields(rec Record) []string {
+	return []string{
+		rec.ForgedAt.UTC().Format(time.RFC3339Nano),
+		rec.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		rec.ForgedBy,
+	}
 }
 
 // canonical is the exact bytes a signature covers, so Sign and Verify cannot
-// disagree: the three signed fields in a fixed order, one per line, in UTC. A
-// field added to Record has to be added here too, or it would ride along
-// unsigned.
+// disagree.
 func canonical(rec Record) []byte {
+	return encodeFields(signedFields(rec))
+}
+
+// encodeFields is canonical's form: each field prefixed by its length as an
+// unsigned varint, then the field's bytes. The length prefix is what makes
+// the form unambiguous. Concatenated bare, two records that split the same
+// bytes differently — one field ending where the next begins — would sign the
+// same input, and a caller need only move a boundary to change what a record
+// says while keeping its signature valid.
+func encodeFields(fields []string) []byte {
 	var b []byte
-	b = append(b, rec.ForgedAt.UTC().Format(time.RFC3339Nano)...)
-	b = append(b, '\n')
-	b = append(b, rec.ExpiresAt.UTC().Format(time.RFC3339Nano)...)
-	b = append(b, '\n')
-	b = append(b, rec.ForgedBy...)
+	for _, field := range fields {
+		b = binary.AppendUvarint(b, uint64(len(field)))
+		b = append(b, field...)
+	}
 	return b
 }
 
-// townPath is the machine-owned file the ring section lives in.
-func townPath(townRoot string) string {
-	return filepath.Join(townRoot, filepath.FromSlash(config.MachineConfigFile))
+// mac is key's HMAC-SHA256 over input, hex encoded.
+func mac(input, key []byte) string {
+	h := hmac.New(sha256.New, key)
+	h.Write(input)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// hostPath is the file the ring section lives in: the host the layout
+// registers for SectionKey. A layout that does not register the section is a
+// build that cannot store a ring, so Read and Write refuse rather than guess a
+// file.
+func hostPath(townRoot string, hostOf func(key string) (host string, ok bool)) (string, error) {
+	host, ok := hostOf(SectionKey)
+	if !ok {
+		return "", fmt.Errorf("ring: section %q is not registered in the config layout", SectionKey)
+	}
+	return filepath.Join(townRoot, filepath.FromSlash(host)), nil
 }
 
 // The distinct reasons an Absent or Waned State carries. One reason per way a
@@ -161,10 +194,20 @@ func absent(reason string) State {
 // section that is missing, unparseable, unsigned or tampered reads as Absent
 // with its reason, never as Valid.
 func Read(townRoot string, key []byte, now time.Time) (State, error) {
+	return read(townRoot, config.SectionHost, key, now)
+}
+
+// read is Read over a section lookup, so a test can drive the refusal no
+// build with the layout's registration in place can reach.
+func read(townRoot string, hostOf func(key string) (host string, ok bool), key []byte, now time.Time) (State, error) {
 	if len(key) == 0 {
 		return State{}, ErrNoKey
 	}
-	town, err := config.LoadTownConfig(townPath(townRoot))
+	path, err := hostPath(townRoot, hostOf)
+	if err != nil {
+		return State{}, err
+	}
+	town, err := config.LoadTownConfig(path)
 	if err != nil {
 		// A town whose config cannot be read is not a town with no ring: the
 		// caller has to act on it, so it is an error and not Absent.
@@ -198,6 +241,12 @@ func Read(townRoot string, key []byte, now time.Time) (State, error) {
 // Write stores rec as the town's ring section through the config kernel's
 // atomic writer, leaving every other section of mayor/town.json as it is.
 func Write(townRoot string, rec Record) error {
+	return write(townRoot, config.SectionHost, rec)
+}
+
+// write is Write over a section lookup, so a test can drive the refusal no
+// build with the layout's registration in place can reach.
+func write(townRoot string, hostOf func(key string) (host string, ok bool), rec Record) error {
 	if rec.ExpiresAt.IsZero() {
 		return ErrNoExpiry
 	}
@@ -208,7 +257,11 @@ func Write(townRoot string, rec Record) error {
 	if err != nil {
 		return fmt.Errorf("encoding the ring record: %w", err)
 	}
-	err = config.UpdateRawJSON(townPath(townRoot), func(tree map[string]any) (bool, error) {
+	path, err := hostPath(townRoot, hostOf)
+	if err != nil {
+		return err
+	}
+	err = config.UpdateRawJSON(path, func(tree map[string]any) (bool, error) {
 		tree[SectionKey] = json.RawMessage(data)
 		return true, nil
 	})

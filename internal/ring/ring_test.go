@@ -1,6 +1,7 @@
 package ring
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 	"time"
@@ -106,5 +107,49 @@ func TestStateString(t *testing.T) {
 	gone := absent(ReasonNoSection)
 	if got := gone.String(); got != "absent ("+ReasonNoSection+")" {
 		t.Errorf("Absent.String() = %q", got)
+	}
+}
+
+// TestCanonicalSeparatesAdjacentFields: the signed form length-prefixes every
+// field, so two records that split the same characters differently across a
+// boundary sign different bytes. Concatenated bare, these pairs are the same
+// input, and moving a boundary would change what a record says while its
+// signature still verified.
+func TestCanonicalSeparatesAdjacentFields(t *testing.T) {
+	t.Parallel()
+	const (
+		forged  = "2026-10-30T12:00:00Z"
+		expires = "2026-10-31T00:00:00Z"
+	)
+	cases := []struct {
+		name string
+		a, b []string
+	}{
+		{
+			name: "forged_by moved into the previous field",
+			a:    []string{forged, expires, "mayor"},
+			b:    []string{forged, expires + "mayor", ""},
+		},
+		{
+			name: "a boundary moved into forged_by's start",
+			a:    []string{forged, expires, "mayor"},
+			b:    []string{forged, expires + "ma", "yor"},
+		},
+		{
+			name: "a boundary between the two times",
+			a:    []string{forged, expires, "mayor"},
+			b:    []string{forged + "2026", "10-31T00:00:00Z", "mayor"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if bytes.Equal(encodeFields(tc.a), encodeFields(tc.b)) {
+				t.Fatalf("the canonical form is the same for %q and %q", tc.a, tc.b)
+			}
+			if mac(encodeFields(tc.a), testKey) == mac(encodeFields(tc.b), testKey) {
+				t.Errorf("two boundary-shifted field lists share a signature")
+			}
+		})
 	}
 }

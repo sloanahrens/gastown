@@ -72,15 +72,19 @@ func SaveTownConfig(path string, config *TownConfig) error {
 	return UpdateConfigJSON(path, 0o600, func(cur *TownConfig, _ bool) error {
 		registry, overseer, ring := cur.Registry, cur.Overseer, cur.Ring
 		*cur = *config
-		// The sections are written through their own paths (layout.go);
-		// a TownConfig read before gt config migrate must not drop them.
+		// The registry, the overseer and the ring are written through their
+		// own paths (layout.go for the first two, internal/ring for the
+		// ring), never through a TownConfig, so a save keeps whatever the
+		// file held and does not invent a section a town never had.
+		// UpdateConfigJSON's applyChanges is why: it deletes a key the file
+		// it decoded carried and the value it is handed dropped, and a
+		// TownConfig a caller built carries none of them.
 		if cur.Registry == nil {
 			cur.Registry = registry
 		}
 		if cur.Overseer == nil {
 			cur.Overseer = overseer
 		}
-		// The ring is written by internal/ring, never through a TownConfig.
 		if cur.Ring == nil {
 			cur.Ring = ring
 		}

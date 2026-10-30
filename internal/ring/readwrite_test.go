@@ -19,7 +19,7 @@ var now = time.Date(2026, 10, 30, 20, 0, 0, 0, time.UTC)
 func tempTown(t *testing.T, tree map[string]any) string {
 	t.Helper()
 	root := t.TempDir()
-	path := townPath(root)
+	path := mustTownPath(t, root)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -31,6 +31,17 @@ func tempTown(t *testing.T, tree map[string]any) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+// mustTownPath is the file the ring section lives in, for a test that has to
+// put something there itself.
+func mustTownPath(t *testing.T, root string) string {
+	t.Helper()
+	path, err := hostPath(root, config.SectionHost)
+	if err != nil {
+		t.Fatalf("resolving the ring's host file: %v", err)
+	}
+	return path
 }
 
 // townWith is tempTown plus a valid record stored through Write.
@@ -47,7 +58,7 @@ func townWith(t *testing.T, rec Record) string {
 // test can put something in it that Write refuses.
 func writeSection(t *testing.T, root string, raw any) {
 	t.Helper()
-	err := config.UpdateRawJSON(townPath(root), func(tree map[string]any) (bool, error) {
+	err := config.UpdateRawJSON(mustTownPath(t, root), func(tree map[string]any) (bool, error) {
 		tree[SectionKey] = raw
 		return true, nil
 	})
@@ -234,7 +245,7 @@ func TestReadRefusesAnUnreadableTown(t *testing.T) {
 	t.Run("unparseable town.json", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
-		path := townPath(root)
+		path := mustTownPath(t, root)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -296,8 +307,8 @@ func TestWriteDoesNotCreateTheTown(t *testing.T) {
 	if err := Write(root, rec); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Write into a town with no mayor/town.json = %v, want an os.IsNotExist error", err)
 	}
-	if _, err := os.Stat(townPath(root)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("Write created %s", townPath(root))
+	if _, err := os.Stat(mustTownPath(t, root)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Write created %s", mustTownPath(t, root))
 	}
 }
 
@@ -307,7 +318,7 @@ func TestWriteDoesNotCreateTheTown(t *testing.T) {
 func TestWriteRoundTripsAndKeepsEveryOtherSection(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	path := townPath(root)
+	path := mustTownPath(t, root)
 	town := &config.TownConfig{
 		Type:    "town",
 		Version: config.CurrentTownVersion,
@@ -357,7 +368,7 @@ func TestWriteRoundTripsAndKeepsEveryOtherSection(t *testing.T) {
 func TestWrittenSectionStillLoadsAsATown(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	path := townPath(root)
+	path := mustTownPath(t, root)
 	if err := config.WriteConfigJSON(path, &config.TownConfig{Type: "town", Version: config.CurrentTownVersion, Name: "gastown"}, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -378,11 +389,12 @@ func TestWrittenSectionStillLoadsAsATown(t *testing.T) {
 }
 
 // TestSaveTownConfigKeepsTheRing: a TownConfig built without the ring still
-// saves over a town that has one, as the registry and overseer sections do.
+// saves over a town that has one, as the registry and overseer sections do,
+// and the ring section reads back byte-for-byte as it was.
 func TestSaveTownConfigKeepsTheRing(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	path := townPath(root)
+	path := mustTownPath(t, root)
 	if err := config.WriteConfigJSON(path, &config.TownConfig{Type: "town", Version: config.CurrentTownVersion, Name: "gastown"}, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -393,11 +405,36 @@ func TestSaveTownConfigKeepsTheRing(t *testing.T) {
 	if err := Write(root, rec); err != nil {
 		t.Fatal(err)
 	}
+	before := sections(t, path)[SectionKey]
 	if err := config.SaveTownConfig(path, &config.TownConfig{Type: "town", Version: config.CurrentTownVersion, Name: "renamed"}); err != nil {
 		t.Fatalf("SaveTownConfig: %v", err)
 	}
+	after := sections(t, path)
+	if after[SectionKey] != before {
+		t.Errorf("the save changed the ring section:\nbefore: %s\nafter:  %s", before, after[SectionKey])
+	}
 	if st := mustState(t, root); st.Kind != Valid {
 		t.Fatalf("state after SaveTownConfig = %v, want valid", st)
+	}
+}
+
+// TestSaveTownConfigDoesNotInventARing: a town that never had a ring keeps
+// none, so a save does not hand it a forged-looking section.
+func TestSaveTownConfigDoesNotInventARing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := mustTownPath(t, root)
+	if err := config.WriteConfigJSON(path, &config.TownConfig{Type: "town", Version: config.CurrentTownVersion, Name: "gastown"}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveTownConfig(path, &config.TownConfig{Type: "town", Version: config.CurrentTownVersion, Name: "renamed"}); err != nil {
+		t.Fatalf("SaveTownConfig: %v", err)
+	}
+	if _, has := sections(t, path)[SectionKey]; has {
+		t.Fatal("the save invented a ring section")
+	}
+	if st := mustState(t, root); st.Kind != Absent || st.Reason != ReasonNoSection {
+		t.Fatalf("state after the save = %v, want absent (%s)", st, ReasonNoSection)
 	}
 }
 
@@ -419,4 +456,38 @@ func sections(t *testing.T, path string) map[string]string {
 		out[key] = string(data)
 	}
 	return out
+}
+
+// TestHostPathRefusesAnUnregisteredSection: the ring names its host through
+// the config layout, so a layout that does not register the section is a
+// refusal from Read and Write, never a ring put in a guessed file.
+func TestHostPathRefusesAnUnregisteredSection(t *testing.T) {
+	t.Parallel()
+	unregistered := func(string) (string, bool) { return "", false }
+	if _, err := hostPath(t.TempDir(), unregistered); err == nil {
+		t.Fatal("hostPath with no registered host = nil error, want a refusal")
+	}
+	if _, err := read(t.TempDir(), unregistered, testKey, now); err == nil {
+		t.Fatal("Read with no registered host = nil error, want a refusal")
+	}
+	rec, err := Sign(Record{ForgedAt: now, ExpiresAt: now.Add(Lease), ForgedBy: "mayor"}, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := write(t.TempDir(), unregistered, rec); err == nil {
+		t.Fatal("Write with no registered host = nil error, want a refusal")
+	}
+	root := t.TempDir()
+	path, err := hostPath(root, func(key string) (string, bool) {
+		if key != SectionKey {
+			t.Errorf("layout lookup for %q, want %q", key, SectionKey)
+		}
+		return config.MachineConfigFile, true
+	})
+	if err != nil {
+		t.Fatalf("hostPath: %v", err)
+	}
+	if want := filepath.Join(root, filepath.FromSlash(config.MachineConfigFile)); path != want {
+		t.Errorf("hostPath = %q, want %q", path, want)
+	}
 }
