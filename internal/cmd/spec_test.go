@@ -2305,6 +2305,19 @@ func TestSpecRetryTimedOutSlingFromFailures(t *testing.T) {
 	}
 }
 
+// A probe whose list fails is an error, not an empty retry set: a set the tick
+// could not read names no bead, so every labeled bead stays held instead of
+// being slung on a guess (gt-vaivp).
+func TestSpecTimedOutRetriesFromReportsAFailedList(t *testing.T) {
+	t.Parallel()
+	store := newCountingStore(beadsfake.New())
+	store.failBatch = true
+
+	if _, err := specTimedOutRetriesFrom(store); err == nil || !strings.Contains(err.Error(), "bd list: boom") {
+		t.Errorf("err = %v, want the failed list named", err)
+	}
+}
+
 // The probe is one list call for a rig, not a read per labeled bead: its cost
 // stays flat as beads pile up behind the failure label (gt-vaivp).
 func TestSpecTimedOutRetriesFromIsOneListCall(t *testing.T) {
