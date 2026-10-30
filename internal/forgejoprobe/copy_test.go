@@ -52,35 +52,71 @@ const testGitHubURL = "https://github.com/acme/rig.git"
 // workflow, one job.
 const gateWorkflow = "name: ci\non: push\njobs:\n  gate:\n    runs-on: ubuntu-latest\n"
 
-// TestCloneCopyIsFull pins the clone to git clone --quiet URL DEST, with no
-// --depth: Forgejo refuses a shallow push. A failing clone's error carries
-// git's own output.
+// TestCloneCopyIsFull pins the clone to git clone --quiet -- URL DEST, with no
+// --depth: Forgejo refuses a shallow push, and the -- keeps a URL from being
+// read as an option. A failing clone's error carries git's own output, and no
+// credential from the URL.
 func TestCloneCopyIsFull(t *testing.T) {
 	t.Parallel()
 	t.Run("the argv is a full quiet clone", func(t *testing.T) {
 		t.Parallel()
 		g := &fakeGit{answers: map[string]gitAnswer{
-			"clone --quiet " + testGitHubURL + " dest/copy": {},
+			"clone --quiet -- " + testGitHubURL + " dest/copy": {},
 		}}
 		if err := CloneCopy(g, testGitHubURL, "dest/copy"); err != nil {
 			t.Fatalf("CloneCopy: %v", err)
 		}
-		want := [][]string{{"clone", "--quiet", testGitHubURL, "dest/copy"}}
+		want := [][]string{{"clone", "--quiet", "--", testGitHubURL, "dest/copy"}}
 		if got := g.argvs(); !reflect.DeepEqual(got, want) {
 			t.Fatalf("git argv = %q, want %q", got, want)
 		}
 	})
-	t.Run("a failing clone names the URL and carries git's output", func(t *testing.T) {
+	t.Run("a failing clone carries git's output", func(t *testing.T) {
 		t.Parallel()
 		g := &fakeGit{answers: map[string]gitAnswer{
-			"clone --quiet " + testGitHubURL + " dest/copy": {err: errors.New("fatal: repository 'acme/rig' not found")},
+			"clone --quiet -- " + testGitHubURL + " dest/copy": {err: errors.New("fatal: repository 'acme/rig' not found")},
 		}}
 		err := CloneCopy(g, testGitHubURL, "dest/copy")
 		if err == nil {
 			t.Fatal("CloneCopy succeeded, want the clone's failure")
 		}
-		want := "git clone " + testGitHubURL + " failed: fatal: repository 'acme/rig' not found"
+		want := "git clone failed: fatal: repository 'acme/rig' not found"
 		if err.Error() != want {
+			t.Fatalf("error = %q, want %q", err.Error(), want)
+		}
+	})
+	t.Run("a failing clone does not echo the URL's credentials", func(t *testing.T) {
+		t.Parallel()
+		// git echoes a credentialed form of the URL, not the URL as passed.
+		g := &fakeGit{answers: map[string]gitAnswer{
+			"clone --quiet -- " + testGitHubURL + " dest/copy": {err: errors.New(
+				"fatal: unable to access 'https://ci:s3cret@github.com/acme/rig.git/': timed out")},
+		}}
+		err := CloneCopy(g, testGitHubURL, "dest/copy")
+		if err == nil {
+			t.Fatal("CloneCopy succeeded, want the clone's failure")
+		}
+		if strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "ci:") {
+			t.Fatalf("error %q carries the URL's credentials", err.Error())
+		}
+		if want := "git clone failed: fatal: unable to access 'https://<redacted>@github.com/acme/rig.git/': timed out"; err.Error() != want {
+			t.Fatalf("error = %q, want %q", err.Error(), want)
+		}
+	})
+	t.Run("a URL git prints whole is replaced by its name", func(t *testing.T) {
+		t.Parallel()
+		const withToken = "https://github.com/acme/rig.git?token=abc123"
+		g := &fakeGit{answers: map[string]gitAnswer{
+			"clone --quiet -- " + withToken + " dest/copy": {err: errors.New("fatal: repository '" + withToken + "' not found")},
+		}}
+		err := CloneCopy(g, withToken, "dest/copy")
+		if err == nil {
+			t.Fatal("CloneCopy succeeded, want the clone's failure")
+		}
+		if strings.Contains(err.Error(), "abc123") {
+			t.Fatalf("error %q carries the URL's token", err.Error())
+		}
+		if want := "git clone failed: fatal: repository '<repository URL>' not found"; err.Error() != want {
 			t.Fatalf("error = %q, want %q", err.Error(), want)
 		}
 	})
@@ -134,11 +170,13 @@ func TestGateIdentityDerivesTheContext(t *testing.T) {
 // TestGateIdentityRefusals refuses, before any SHA is read, a copy whose ref
 // has no gate file and a gate with two jobs or an unnamed job. The missing-file
 // refusal reads the file from the ref, never from the work tree, and names the
-// repository from the origin remote.
+// repository from the origin remote. A missing ref is its own refusal, not a
+// missing file.
 func TestGateIdentityRefusals(t *testing.T) {
 	t.Parallel()
 	const showRef = "show refs/remotes/origin/main:.forgejo/workflows/gate.yml"
 	const origin = "config --get remote.origin.url"
+	const revParse = "rev-parse --verify refs/remotes/origin/main^{commit}"
 	cases := []struct {
 		name    string
 		answers map[string]gitAnswer
@@ -147,26 +185,37 @@ func TestGateIdentityRefusals(t *testing.T) {
 		{
 			name: "a missing gate file",
 			answers: map[string]gitAnswer{
-				showRef: {err: errors.New("fatal: path does not exist")},
-				origin:  {out: testGitHubURL + "\n"},
+				showRef:  {err: errors.New("fatal: path does not exist")},
+				revParse: {out: "0123abcd\n"},
+				origin:   {out: testGitHubURL + "\n"},
 			},
 			want: "refusing: the copy of acme/rig's main has no .forgejo/workflows/gate.yml, so Forgejo would run the repo's .github/workflows and nothing would gate",
 		},
 		{
 			name: "a missing gate file with no origin to name",
 			answers: map[string]gitAnswer{
-				showRef: {err: errors.New("fatal: path does not exist")},
-				origin:  {err: errors.New("exit status 1")},
+				showRef:  {err: errors.New("fatal: path does not exist")},
+				revParse: {out: "0123abcd\n"},
+				origin:   {err: errors.New("exit status 1")},
 			},
 			want: "refusing: the copy of the repository's main has no .forgejo/workflows/gate.yml, so Forgejo would run the repo's .github/workflows and nothing would gate",
 		},
 		{
 			name: "a missing gate file with an origin that names no owner",
 			answers: map[string]gitAnswer{
-				showRef: {err: errors.New("fatal: path does not exist")},
-				origin:  {out: "rig.git\n"},
+				showRef:  {err: errors.New("fatal: path does not exist")},
+				revParse: {out: "0123abcd\n"},
+				origin:   {out: "rig.git\n"},
 			},
 			want: "refusing: the copy of the repository's main has no .forgejo/workflows/gate.yml, so Forgejo would run the repo's .github/workflows and nothing would gate",
+		},
+		{
+			name: "a missing ref is not a missing file",
+			answers: map[string]gitAnswer{
+				showRef:  {err: errors.New("fatal: invalid object name")},
+				revParse: {err: errors.New("fatal: Needed a single revision")},
+			},
+			want: "the copy has no refs/remotes/origin/main",
 		},
 		{
 			name: "two jobs",
@@ -197,9 +246,13 @@ func TestGateIdentityRefusals(t *testing.T) {
 			if got := g.calls[0]; got.dir != "work/copy" || !slices.Equal(got.args, []string{"show", "refs/remotes/origin/main:.forgejo/workflows/gate.yml"}) {
 				t.Errorf("first git call = dir %q args %q, want show of the ref in the copy", got.dir, got.args)
 			}
-			for _, c := range g.calls {
-				if slices.Contains(c.args, "rev-parse") {
-					t.Errorf("rev-parse ran on a refused copy: %q", c.args)
+			// A copy whose file reads is refused on its gate, so no ref is
+			// read. A failed show only asks whether the ref exists.
+			if tc.answers[showRef].err == nil {
+				for _, c := range g.calls {
+					if slices.Contains(c.args, "rev-parse") {
+						t.Errorf("rev-parse ran on a refused copy: %q", c.args)
+					}
 				}
 			}
 		})
