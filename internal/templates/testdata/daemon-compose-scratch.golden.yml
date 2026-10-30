@@ -48,7 +48,7 @@ services:
     networks:
       - scratch-internal
   scratch-dolt:
-    image: "dolthub/dolt-sql-server:2.3.2"
+    image: "dolthub/dolt-sql-server:2.3.2@sha256:38d5e900583267f35e36ad738e13f202e62860b351aa4c088dceaf7dbaed7ab6"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3306"]

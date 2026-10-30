@@ -33,11 +33,11 @@ const (
 
 	// DoltServerImage is the Dolt SQL server the scratch project runs, at the
 	// version DoltVersion names, so the scratch town's Dolt and the daemon
-	// image's client are one version. It is named by tag, not digest: the
-	// dolt-sql-server digest could not be read when this was written (no
-	// registry access), and DoltImageDigest does not carry over, since a digest
-	// names one repository and that one is dolthub/dolt. Pin it once the digest
-	// is read; only the scratch project uses it. The concatenation keeps the
-	// version in one place.
-	DoltServerImage = "dolthub/dolt-sql-server:" + DoltVersion
+	// image's client are one version. It is pinned by the digest of the image
+	// index of that tag, read from Docker Hub's registry API on 2026-10-30
+	// (docker-content-digest of dolthub/dolt-sql-server:2.3.2). DoltImageDigest
+	// does not carry over: a digest names one repository, and that one is
+	// dolthub/dolt. Moving DoltVersion means reading this tag's digest too. The
+	// tag stays in the reference for the reader; the digest is what docker pulls.
+	DoltServerImage = "dolthub/dolt-sql-server:" + DoltVersion + "@sha256:38d5e900583267f35e36ad738e13f202e62860b351aa4c088dceaf7dbaed7ab6"
 )

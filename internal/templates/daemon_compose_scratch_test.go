@@ -344,10 +344,11 @@ func TestRenderDaemonCompose_ScratchDoltImageTagIsDoltVersion(t *testing.T) {
 	_, f := render(t, scratchSpec())
 
 	image := f.Services["scratch-dolt"].Image
-	repo, tag, found := strings.Cut(image, ":")
+	repo, tagAndDigest, found := strings.Cut(image, ":")
 	if !found || repo != "dolthub/dolt-sql-server" {
-		t.Fatalf("scratch-dolt image = %q, want dolthub/dolt-sql-server:<tag>", image)
+		t.Fatalf("scratch-dolt image = %q, want dolthub/dolt-sql-server:<tag>@sha256:<digest>", image)
 	}
+	tag, _, _ := strings.Cut(tagAndDigest, "@")
 	if tag != templates.DoltVersion {
 		t.Errorf("scratch-dolt image tag = %q, want DoltVersion %q", tag, templates.DoltVersion)
 	}

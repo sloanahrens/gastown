@@ -620,6 +620,21 @@ func TestRenderDaemonCompose_EveryImageIsPinned(t *testing.T) {
 
 var doltVersionShape = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
+// The scratch project's Dolt server is pinned by digest like every other image
+// the renderer names, and by the version DoltVersion carries.
+func TestImages_ScratchDoltServerIsPinnedByDigest(t *testing.T) {
+	t.Parallel()
+	ref := templates.DoltServerImage
+	if !strings.HasPrefix(ref, "dolthub/dolt-sql-server:"+templates.DoltVersion+"@sha256:") {
+		t.Fatalf("DoltServerImage = %q, want dolthub/dolt-sql-server:%s@sha256:<digest>", ref, templates.DoltVersion)
+	}
+	if !dolt256.MatchString(ref[strings.Index(ref, "@sha256:")+len("@sha256:"):]) {
+		t.Fatalf("DoltServerImage = %q: the digest is not 64 lowercase hex characters", ref)
+	}
+}
+
+var dolt256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 func TestImages_NameAVersion(t *testing.T) {
 	t.Parallel()
 	if strings.HasSuffix(templates.DaemonBaseImage, ":latest") || !strings.Contains(templates.DaemonBaseImage, ":") {

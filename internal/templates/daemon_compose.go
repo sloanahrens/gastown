@@ -158,9 +158,11 @@ func scratchDaemonCommand() string {
 // the wait the engine's own healthcheck gives the daemon (gt-3bp5q): the port
 // is the Dolt server's default, 3306, which the service does not change.
 //
-// The probe runs bash's /dev/tcp, so it assumes bash in the image. That is not
-// verified: no image was pulled when this was written, so the L1 check confirms
-// it before the scratch project is trusted.
+// The probe runs bash's /dev/tcp, so it needs bash in the image. The pinned
+// DoltServerImage has it: a container run from that digest on 2026-10-30
+// (linux/arm64) printed /usr/bin/bash and /usr/local/bin/dolt on a Debian 12
+// base. The live L1 check still runs the probe before the scratch project is
+// trusted.
 const scratchDoltBody = `  %[1]s:
     image: %[2]q
     restart: unless-stopped
@@ -373,6 +375,12 @@ func (s ComposeSpec) validateScratch() error {
 // names the live town under another path. A path that cannot be resolved is
 // refused rather than taken as clear.
 func (s ComposeSpec) checkScratchRoot() error {
+	// Both roots must be absolute here as well as in validate: a relative path
+	// cannot be compared with an absolute one, and this check never takes "cannot
+	// compare" for "clear".
+	if !filepath.IsAbs(s.TownRoot) || !filepath.IsAbs(s.LiveTownRoot) {
+		return fmt.Errorf("compose spec: scratch TownRoot %q and LiveTownRoot %q must both be absolute for the root check", s.TownRoot, s.LiveTownRoot)
+	}
 	scratch, err := resolvePath(s.TownRoot)
 	if err != nil {
 		return fmt.Errorf("compose spec: resolving scratch TownRoot %q: %w", s.TownRoot, err)
@@ -392,10 +400,18 @@ func (s ComposeSpec) checkScratchRoot() error {
 
 // within reports whether path is root or lies under it. Letter case is folded,
 // as the default macOS volumes do, so the same directory spelled in another case
-// is still the same directory.
+// is still the same directory; on a case-sensitive filesystem that folding can
+// refuse two distinct directories whose names differ only by case, which is the
+// safe side of the error for a check that guards the live town. A pair that
+// cannot be compared (filepath.Rel errors when one path is absolute and the
+// other is not) counts as inside, so the caller refuses: the answer "cannot
+// tell" is never "clear".
 func within(path, root string) bool {
 	rel, err := filepath.Rel(strings.ToLower(root), strings.ToLower(path))
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	if err != nil {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // resolvePath returns path with its symlinks resolved. A path that does not
