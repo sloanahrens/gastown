@@ -69,7 +69,6 @@ None of this is scheduled. It is recorded so the words stay consistent when a pi
 
 | Today | Name | Note |
 |---|---|---|
-| a design session | morgoth | the agent name of the session that charted this; outside the town's dispatch, no ring, no town writes; the operator is never named in town records |
 | the overseer | Sauron | as a session name only, at turnover; the role word overseer stays in labels and code |
 | the nine birds | the Nazgûl | canon names two (Angmar, Khamûl); the rest are roleplaying lore (Dwar, Indûr, Akhôrahil, Hoarmûrath, Adûnaphel, Rên, Ûvatha); names pass with the mission seat, at turnover |
 | polecats | orcs | prose only; seat names unchanged |

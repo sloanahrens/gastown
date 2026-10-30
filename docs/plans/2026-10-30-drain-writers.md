@@ -26,7 +26,7 @@ Source: origin/main of gastown (clone crew/overseer), read with `git show`. Path
   - `triggerTierSweep` (tier_sweep.go) has no hold or ESTOP check.
   - `runTierSweep` (tier_sweep.go) creates beads via `bd.Create` (tier_sweep.go) and runs gate tiers in a private worktree.
 
-## Heartbeat steps (daemon.go-2159, loop at daemon.go `heartbeatWork`)
+## Heartbeat steps (`heartbeatSteps` in daemon.go, run by `heartbeatWork`)
 
 "ESTOP" means held through the lifecycle flag. Drain means hold only, standby means both set.
 
@@ -53,7 +53,7 @@ Source: origin/main of gastown (clone crew/overseer), read with `git show`. Path
 
 The 14 jev jobs: dedupe, attention, landing, submission, drift, logtriage, rework, dispatch, thrash, rules, conflict, progress, stale, notes.
 
-## Tickers and goroutines (daemon.go Run loop, 1472-1914)
+## Tickers and goroutines (started from `Run` in daemon.go)
 
 All start from `Run` and none are in `heartbeatSteps`, so the lifecycle skip does not cover them.
 
