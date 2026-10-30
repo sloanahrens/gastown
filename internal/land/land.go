@@ -236,6 +236,13 @@ type Lander struct {
 	CIFailure func(f CIFailure)
 
 	openRepo func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
+	// authorOf is the test seam for the head's author, for a handle that cannot
+	// record authors (gitfake). nil reads the author through the handle.
+	authorOf func(w Work) (Identity, error)
+	// landingEnv is the test seam that is told the environment the merge handle
+	// is opened with, so a unit test can assert the merge commit's identity even
+	// when openRepo replaces the handle (gt-vuv2n).
+	landingEnv func(env []string)
 }
 
 // Result describes a landing.
@@ -814,9 +821,49 @@ func (l *Lander) open(dir string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
 	}
-	// The merge candidate is a landing commit, so the handle its merge runs
-	// through carries the landing committer (gt-dc4y3).
 	return CommittingGit(dir)
+}
+
+// openLanding opens the merge candidate's worktree through a handle whose every
+// call carries env (CommittingEnv), so the merge commit's committer and author
+// are set explicitly (gt-dc4y3, gt-vuv2n).
+func (l *Lander) openLanding(dir string, env []string) Repo {
+	if l.landingEnv != nil {
+		l.landingEnv(env)
+	}
+	if l.openRepo != nil {
+		return l.openRepo(dir)
+	}
+	return git.NewGit(dir).WithEnv(env)
+}
+
+// landingCommitEnv is the environment the landing's merge commit is made under:
+// the landing committer and the author of the head, the seat that did the
+// work (gt-vuv2n). The author is read from the head commit itself, so a head
+// whose author is missing or unreadable is an error and no commit is made.
+// The landing never falls back to git config.
+func (l *Lander) landingCommitEnv(g Repo, w Work) ([]string, error) {
+	author, err := l.headAuthor(g, w)
+	if err != nil {
+		return nil, err
+	}
+	return CommittingEnv(author)
+}
+
+// headAuthor reads the author of the head commit through the handle.
+func (l *Lander) headAuthor(g Repo, w Work) (Identity, error) {
+	if l.authorOf != nil {
+		return l.authorOf(w)
+	}
+	ar, ok := g.(authorReader)
+	if !ok {
+		return Identity{}, fmt.Errorf("reading the author: the Git handle %T cannot read commit authors", g)
+	}
+	name, email, err := ar.CommitIdentity(w.Head)
+	if err != nil {
+		return Identity{}, fmt.Errorf("reading the author: %w", err)
+	}
+	return Identity{Name: name, Email: email}, nil
 }
 
 // rescoreMargin is how far below the rig's bar a rejection may score, with no
@@ -1325,13 +1372,19 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		})}, nil)
 	}
 
+	// The merge commit's identity is read before the worktree is cut, so an
+	// unreadable head author fails the landing with no commit made (gt-vuv2n).
+	env, err := l.landingCommitEnv(g, w)
+	if err != nil {
+		return Result{}, &InfraError{Stage: "head author", Err: fmt.Errorf("head %s: %w", shortSHA(w.Head), err)}
+	}
 	dir, id, cleanup, err := l.addWorktree(g, base)
 	if err != nil {
 		return Result{}, &InfraError{Stage: "worktree", Err: err}
 	}
 	defer cleanup()
 	ctx = WithLandingID(ctx, id)
-	wt := l.open(dir)
+	wt := l.openLanding(dir, env)
 
 	out, err := mergeWork(wt, w, base)
 	if err != nil {
@@ -1928,6 +1981,8 @@ func mergeWork(wt Repo, w Work, base string) (mergeOutcome, error) {
 	if err != nil {
 		return mergeOutcome{}, &InfraError{Stage: "inspect range", Err: err}
 	}
+	// Both merge commits are made through wt, which openLanding opened with
+	// CommittingEnv: the landing committer and the head's author (gt-vuv2n).
 	if hasAutoSave {
 		err = wt.MergeSquash(w.Head, msg)
 	} else {

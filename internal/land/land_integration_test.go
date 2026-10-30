@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // The unit tier lands through gitfake. These run the same landings through
@@ -19,9 +20,16 @@ import (
 
 func gitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	return gitAs(t, dir, "Test User", "test@example.com", args...)
+}
+
+// gitAs is gitT with the author and committer set to name and email: the seat
+// that did a branch's work.
+func gitAs(t *testing.T, dir, name, email string, args ...string) string {
+	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
-		"GIT_AUTHOR_NAME=Test User", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=Test User", "GIT_COMMITTER_EMAIL=test@example.com")
+		"GIT_AUTHOR_NAME="+name, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_NAME="+name, "GIT_COMMITTER_EMAIL="+email)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
@@ -66,7 +74,7 @@ func newRealLandFixture(t *testing.T) *landFixture {
 	gitT(t, seed, "checkout", "-q", "-b", fixtureBranch)
 	writeT(t, seed, "b.txt", "work\n")
 	gitT(t, seed, "add", "b.txt")
-	gitT(t, seed, "commit", "-q", "-m", "feat: add b")
+	gitAs(t, seed, "Seat Opal", "opal@gastown.local", "commit", "-q", "-m", "feat: add b")
 	gitT(t, seed, "push", "-q", "origin", fixtureBranch)
 	head := gitT(t, seed, "rev-parse", "HEAD")
 	gitT(t, seed, "checkout", "-q", "main")
@@ -234,14 +242,16 @@ func TestIntegrationLandPastADeadLandingsWorktree(t *testing.T) {
 	}
 }
 
-// TestIntegrationLandingCommitsAsTheAutomation: a real land's merge commit
-// carries the landing committer name and the clone's configured email, while
-// the author stays the range's and a GIT_COMMITTER_NAME inherited from the
-// process environment does not win (gt-dc4y3).
-func TestIntegrationLandingCommitsAsTheAutomation(t *testing.T) {
-	t.Setenv("GIT_AUTHOR_NAME", "Test Author")
-	t.Setenv("GIT_AUTHOR_EMAIL", "author@example.com")
+// TestIntegrationLandCommitIdentity: a real land's merge commit is committed by the landing
+// (gt-landing, its own address) and authored by the head's seat, whatever the
+// clone's git config and the process's GIT_* environment say. The ambient
+// identity an inherited environment carries does not reach the commit
+// (gt-dc4y3, gt-vuv2n).
+func TestIntegrationLandCommitIdentity(t *testing.T) {
+	t.Setenv("GIT_AUTHOR_NAME", "Ambient Author")
+	t.Setenv("GIT_AUTHOR_EMAIL", "ambient@example.com")
 	t.Setenv("GIT_COMMITTER_NAME", "Sloan Ahrens")
+	t.Setenv("GIT_COMMITTER_EMAIL", "sloan@example.com")
 	f := newRealLandFixture(t)
 	gitT(t, f.repo, "config", "user.name", "Configured User")
 	gitT(t, f.repo, "config", "user.email", "configured@example.com")
@@ -251,8 +261,33 @@ func TestIntegrationLandingCommitsAsTheAutomation(t *testing.T) {
 		t.Fatalf("Land: %v", err)
 	}
 	got := gitT(t, f.origin, "show", "-s", "--format=%cn%n%ce%n%an%n%ae", res.LandedCommit)
-	want := strings.Join([]string{LandingCommitterName, "configured@example.com", "Test Author", "author@example.com"}, "\n")
+	want := strings.Join([]string{LandingCommitterName, LandingCommitterEmail, "Seat Opal", "opal@gastown.local"}, "\n")
 	if got != want {
 		t.Fatalf("land commit identity:\n%s\nwant committer|email|author|email:\n%s", got, want)
 	}
+}
+
+// TestIntegrationHeadAuthorFailsClosed: the head's author is read from the head
+// commit through real git, and a head that cannot be read is an error, never a
+// fallback to git config (gt-vuv2n).
+func TestIntegrationHeadAuthorFailsClosed(t *testing.T) {
+	f := newRealLandFixture(t)
+	l := f.lander()
+	l.authorOf = nil
+	g := git.NewGit(f.repo)
+
+	t.Run("reads the seat that authored the head", func(t *testing.T) {
+		got, err := l.headAuthor(g, f.work)
+		if err != nil {
+			t.Fatalf("headAuthor: %v", err)
+		}
+		if want := (Identity{Name: "Seat Opal", Email: "opal@gastown.local"}); got != want {
+			t.Fatalf("headAuthor = %+v, want %+v", got, want)
+		}
+	})
+	t.Run("unreadable head is an error", func(t *testing.T) {
+		if _, err := l.headAuthor(g, Work{Head: "refs/heads/no-such-branch"}); err == nil {
+			t.Fatal("headAuthor over an unreadable head = nil error, want one")
+		}
+	})
 }

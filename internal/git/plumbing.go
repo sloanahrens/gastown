@@ -251,6 +251,17 @@ func (g *Git) CommitAuthorSubject(rev string) (author, subject string, err error
 	return strings.TrimSpace(author), strings.TrimSpace(subject), nil
 }
 
+// CommitIdentity reads one commit's author name and email in a single call;
+// the NUL keeps a name containing spaces apart from the address.
+func (g *Git) CommitIdentity(rev string) (name, email string, err error) {
+	out, err := g.runOutput("log", "-1", "--format=%an%x00%ae", rev)
+	if err != nil {
+		return "", "", err
+	}
+	name, email, _ = strings.Cut(out, "\x00")
+	return strings.TrimSpace(name), strings.TrimSpace(email), nil
+}
+
 // DiffStatThreeDot returns git diff --stat for base...head, the diff restricted
 // to what head introduces on top of the merge base (as opposed to the pair-wise
 // base..head range, which also reports base's own progress as a deletion).

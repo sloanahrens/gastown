@@ -407,6 +407,37 @@ func TestCommitAuthorSubjectUnknownCommit(t *testing.T) {
 	s.noUnscripted(t)
 }
 
+// CommitIdentity reads one commit's author name and email in a single call, so
+// a landing takes the head's author from that commit alone (gt-vuv2n).
+func TestCommitIdentity(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"log -1 --format=%an%x00%ae cccc": ok("Seat Opal\x00opal@gastown.local\n"),
+	})
+	g := newTestGit(t, s)
+
+	name, email, err := g.CommitIdentity("cccc")
+	if err != nil || name != "Seat Opal" || email != "opal@gastown.local" {
+		t.Fatalf("CommitIdentity = %q, %q, %v; want Seat Opal, opal@gastown.local, nil", name, email, err)
+	}
+	s.noUnscripted(t)
+}
+
+// An unknown commit is an error, never an empty identity a landing could sign
+// with (gt-vuv2n).
+func TestCommitIdentityUnknownCommit(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"log -1 --format=%an%x00%ae dead": fail(128, "fatal: bad revision 'dead'"),
+	})
+	g := newTestGit(t, s)
+
+	if _, _, err := g.CommitIdentity("dead"); err == nil {
+		t.Fatal("want an error for a commit the repo does not have")
+	}
+	s.noUnscripted(t)
+}
+
 // Each commit line is "<sha>NUL<author>NUL<email>NUL<subject>", newest first.
 // The subject may hold colons and spaces; an empty range has no summaries.
 func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {

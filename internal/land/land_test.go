@@ -122,6 +122,11 @@ func (f *landFixture) lander() *Lander {
 		Now: func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) }}
 	if f.git != nil {
 		l.openRepo = func(dir string) Repo { return f.git.Open(dir) }
+		// gitfake records no commit authors, so the fake landing's head reads as
+		// the seat that did the work (gt-vuv2n).
+		l.authorOf = func(Work) (Identity, error) {
+			return Identity{Name: "Seat Opal", Email: "opal@gastown.local"}, nil
+		}
 	}
 	return l
 }
