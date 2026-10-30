@@ -626,6 +626,23 @@ func getPolecatManager(rigName string) (*polecat.Manager, *rig.Rig, error) {
 	return mgr, r, nil
 }
 
+// preloadRigSeats warms the reads one rig's seat build makes, in ONE bd sql
+// round trip: the wisps table for the agent-bead join (gt-92zx) and the MR
+// index, and the issues table for the agent-bead and MR rows and the
+// active-work listing (gt-0hmt2), each carrying the dependency rows
+// ListMergeRequests hydrates from (gt-7dctf). They share a statement because
+// one caller wants all of it at once and each read is a subprocess (gt-59p7e).
+//
+// A failure is a warning on warn, never fatal to the list: every reader falls
+// back to its own per-call query. On a rig the route table puts on the tracker
+// there is nothing to warm and nothing is read, so nothing is warned — the
+// per-call path is that rig's only path (gt-p85pw.108).
+func preloadRigSeats(warn io.Writer, bd *beads.Beads, rigName string) {
+	if err := bd.PreloadBeads([]string{"gt:agent", "gt:merge-request"}, polecatSummaryWorkStatuses); err != nil {
+		fmt.Fprintf(warn, "warning: failed to preload beads in %s: %v\n", rigName, err)
+	}
+}
+
 // buildRigSeats gathers one rig's polecat rows for `gt polecat list`: a seat
 // per known worktree, plus a decided row for any zombie/foreign orphan tmux
 // session, in the same order the listing used to produce them when this was
@@ -664,17 +681,7 @@ func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.D
 
 	bd := beads.New(r.Path)
 
-	// ONE bd sql round trip per rig, the whole of this listing's reads: the
-	// wisps table for the agent-bead join (gt-92zx) and the MR index, and the
-	// issues table for the agent-bead and MR rows and the active-work listing
-	// (gt-0hmt2), each carrying the dependency rows ListMergeRequests hydrates
-	// from (gt-7dctf). They share a statement because one caller wants all of
-	// it at once and each read is a subprocess (gt-59p7e). A failed preload
-	// just means every reader falls back to its own per-call query — never
-	// fatal to the list.
-	if err := bd.PreloadBeads([]string{"gt:agent", "gt:merge-request"}, polecatSummaryWorkStatuses); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to preload beads in %s: %v\n", r.Name, err)
-	}
+	preloadRigSeats(os.Stderr, bd, r.Name)
 
 	// ONE merge-request query per rig, joined per polecat below — never a
 	// `bd show` per polecat (MRs are ephemeral wisps, and the per-id path is
