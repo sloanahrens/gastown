@@ -1,7 +1,6 @@
 package plugin
 
 import (
-	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -9,6 +8,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/beads/beadstest"
 )
 
 // newFakeRecorder is a Recorder over an in-memory beads database whose clock
@@ -201,25 +201,12 @@ func TestCountRunsSinceIgnoresRunsPastTheWindow(t *testing.T) {
 	}
 }
 
-// countingClient counts the List calls a Recorder makes against its store,
-// so a test can price a read.
-type countingClient struct {
-	beads.Client
-	lists int
-}
-
-func (c *countingClient) List(opts beads.ListOptions) ([]*beads.Issue, error) {
-	c.lists++
-	return c.Client.List(opts)
-}
-
 // A tick that gates N plugins costs one list of the run wisps, not one per
-// plugin: the ledger is read once and grouped in memory. Listing per plugin
-// is what put 84 bd calls in 60 minutes on the daemon's hot path (gt-3bqfy).
+// plugin: the ledger is read once and grouped in memory.
 func TestLoadRunLedgerCostsOneListForEveryPlugin(t *testing.T) {
 	t.Parallel()
 	recorder, fake, _ := newFakeRecorder(t, time.Now().UTC().Add(-30*time.Minute))
-	counting := &countingClient{Client: fake}
+	counting := &beadstest.Counting{Client: fake}
 	recorder.bd = counting
 
 	plugins := []string{"alpha", "beta", "gamma"}
@@ -242,15 +229,14 @@ func TestLoadRunLedgerCostsOneListForEveryPlugin(t *testing.T) {
 			t.Errorf("Count(%s, 1h) = %d, want 1: the receipt is inside the window", name, count)
 		}
 	}
-	if counting.lists != 1 {
+	if counting.Lists != 1 {
 		t.Errorf("%d list call(s) for %d plugins, want 1: one read answers every gate in the tick",
-			counting.lists, len(plugins))
+			counting.Lists, len(plugins))
 	}
 }
 
 // The ledger's grouped answers are the per-plugin queries' answers for the
-// same receipts: same count, same last run, a printed receipt buying no
-// cooldown in either.
+// same receipts: same count, a printed receipt buying no cooldown in either.
 func TestRunLedgerAnswersMatchPerPluginQueries(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
@@ -327,11 +313,12 @@ func TestRunLedgerAnswersMatchPerPluginQueries(t *testing.T) {
 	if wantLast == nil || wantLast.ID != success {
 		t.Fatalf("GetLastRun(alpha) = %+v, want the 20m-old run %s", wantLast, success)
 	}
-	if got := ledger.LastRun("alpha"); got == nil || got.ID != wantLast.ID {
-		t.Errorf("ledger.LastRun(alpha) = %+v, want %+v", got, wantLast)
+	last, err := recorder.GetLastRun("gamma")
+	if err != nil {
+		t.Fatalf("GetLastRun(gamma): %v", err)
 	}
-	if got := ledger.LastRun("gamma"); got != nil {
-		t.Errorf("ledger.LastRun(gamma) = %+v, want nil: the plugin never ran", got)
+	if last != nil {
+		t.Errorf("GetLastRun(gamma) = %+v, want nil: the plugin never ran", last)
 	}
 }
 
@@ -388,18 +375,11 @@ func TestLoadRunLedgerSkipsUnlabelledRuns(t *testing.T) {
 	}
 }
 
-// failingClient is a beads client whose reads fail.
-type failingClient struct{ beads.Client }
-
-func (failingClient) List(beads.ListOptions) ([]*beads.Issue, error) {
-	return nil, errors.New("bd: read failed")
-}
-
 // A failed read of the wisp ledger is returned, never read as a ledger with
 // no runs: an empty answer would open every cooldown gate it gates.
 func TestLoadRunLedgerReportsListFailure(t *testing.T) {
 	t.Parallel()
-	recorder := &Recorder{bd: failingClient{}}
+	recorder := &Recorder{bd: beadstest.Failing{}}
 	if _, err := recorder.LoadRunLedger(time.Hour); err == nil {
 		t.Fatal("LoadRunLedger over a failing store returned no error, want the read's error")
 	}

@@ -278,19 +278,6 @@ func (l *RunLedger) Count(pluginName string, window time.Duration) (int, error) 
 	return count, nil
 }
 
-// LastRun returns pluginName's most recent run in the ledger, nil when it has
-// none. Unlike GetLastRun it cannot see a run older than the span the ledger
-// was loaded with.
-func (l *RunLedger) LastRun(pluginName string) *PluginRunBead {
-	var last *PluginRunBead
-	for _, run := range l.runs[pluginName] {
-		if last == nil || run.CreatedAt.After(last.CreatedAt) {
-			last = run
-		}
-	}
-	return last
-}
-
 // CountRunsSince returns the count of runs for a plugin since the given
 // duration, for cooldown gate evaluation. A ResultPrinted receipt is
 // excluded: `gt plugin run` writes it for a merely-printed, not-yet-executed

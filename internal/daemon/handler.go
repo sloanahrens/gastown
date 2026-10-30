@@ -84,10 +84,9 @@ func (d *Daemon) dispatchPlugins(rigsConfig *config.RigsConfig) {
 		runs = recorderSource{plugin.NewRecorder(d.config.TownRoot)}
 	}
 
-	// One read of the run ledger answers every cooldown gate in this tick;
-	// listing per plugin cost one bd call per plugin per heartbeat (gt-3bqfy).
+	// One read of the run ledger answers every cooldown gate in this tick.
 	var ledger pluginRunLedger
-	if lookback := gateLookback(plugins); lookback > 0 {
+	if lookback := ledgerLookback(plugins); lookback > 0 {
 		ledger, err = runs.LoadRunLedger(lookback)
 		if err != nil {
 			// Fail closed: a gate whose ledger cannot be read is not known to
@@ -109,27 +108,24 @@ func (d *Daemon) dispatchPlugins(rigsConfig *config.RigsConfig) {
 		}
 
 		// Evaluate cooldown: skip if plugin ran recently.
-		if p.Gate.Duration != "" {
-			window, err := time.ParseDuration(p.Gate.Duration)
+		window, err := p.Gate.RunLedgerWindow()
+		if err != nil {
+			d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
+			continue
+		}
+		// A window that reaches no run holds nothing closed: the plugin runs
+		// without a ledger answer.
+		if window > 0 {
+			if ledger == nil {
+				continue // The tick logged why the ledger is unreadable.
+			}
+			count, err := ledger.Count(p.Name, window)
 			if err != nil {
 				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
 				continue
 			}
-			// A zero or negative window reaches back to now, so no run holds
-			// the gate closed and it asks nothing of the ledger: the plugin
-			// runs, as it did when CountRunsSince counted from now.
-			if window > 0 {
-				if ledger == nil {
-					continue // The tick logged why the ledger is unreadable.
-				}
-				count, err := ledger.Count(p.Name, window)
-				if err != nil {
-					d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
-					continue
-				}
-				if count > 0 {
-					continue // Still in cooldown
-				}
+			if count > 0 {
+				continue // Still in cooldown
 			}
 		}
 
@@ -147,16 +143,13 @@ func (d *Daemon) dispatchPlugins(rigsConfig *config.RigsConfig) {
 	}
 }
 
-// gateLookback is the span the run ledger must cover to answer every cooldown
-// gate in this tick: the longest window among the plugins that gate on it. 0
-// means no plugin reads the ledger, so a tick loads none.
-func gateLookback(plugins []*plugin.Plugin) time.Duration {
+// ledgerLookback is the span one tick's read of the run ledger must cover: the
+// longest window any plugin's gate reads, so every plugin is answered from
+// that one read. Zero means no gate reads the ledger and the tick loads none.
+func ledgerLookback(plugins []*plugin.Plugin) time.Duration {
 	var longest time.Duration
 	for _, p := range plugins {
-		if p.Gate == nil || p.Gate.Type != plugin.GateCooldown || p.Gate.Duration == "" {
-			continue
-		}
-		window, err := time.ParseDuration(p.Gate.Duration)
+		window, err := p.Gate.RunLedgerWindow()
 		if err != nil {
 			// The plugin is refused with a log line when its gate is
 			// evaluated; it sets no span for the rest of the tick.
