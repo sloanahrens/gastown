@@ -259,17 +259,26 @@ func (o *Options) checkValues() error {
 	if !plainPattern.MatchString(o.BotPrefix) {
 		return usagef("--bot-prefix '%s' must match [A-Za-z0-9._-]+", o.BotPrefix)
 	}
-	if !isHTTPURL(o.APIURL) {
-		return usagef("--api-url must be http:// or https:// (got '%s')", redactURL(o.APIURL))
-	}
-	// A credential in the URL would ride every request and show in the process list.
-	if u, err := url.Parse(o.APIURL); err != nil || u.User != nil {
-		return usagef("--api-url must be a URL with no credentials")
+	if err := checkBaseURL("--api-url", o.APIURL); err != nil {
+		return err
 	}
 	o.APIURL = strings.TrimSuffix(o.APIURL, "/")
 	// An empty web root is derived from the validated API root.
 	if o.WebURL == "" {
 		o.WebURL = strings.TrimSuffix(o.APIURL, "/api/v1")
+	}
+	return checkBaseURL("--web-url", o.WebURL)
+}
+
+// checkBaseURL refuses a root that is not http:// or https:// or that carries a
+// credential. The credential would ride every request and show in the process
+// list, so the refusal names the flag and never the value's text.
+func checkBaseURL(flag, raw string) error {
+	if !isHTTPURL(raw) {
+		return usagef("%s must be http:// or https:// (got '%s')", flag, redactURL(raw))
+	}
+	if u, err := url.Parse(raw); err != nil || u.User != nil {
+		return usagef("%s must be a URL with no credentials", flag)
 	}
 	return nil
 }
@@ -404,14 +413,15 @@ func branchNameProblem(name string) string {
 }
 
 // redactURL is raw as a message may show it: the credentials taken out. A value
-// that will not parse and holds an @ may carry one, so it is not shown at all.
+// that holds an @ and is not an http(s) URL may carry a credential that a parser
+// reads as a scheme or an opaque path, so it is not shown at all.
 func redactURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		if strings.Contains(raw, "@") {
-			return "(unparseable URL)"
-		}
+	if !strings.Contains(raw, "@") {
 		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !isHTTPURL(raw) {
+		return "[value not shown: holds an @]"
 	}
 	u.User = nil
 	return u.String()

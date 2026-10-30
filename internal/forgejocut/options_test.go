@@ -410,6 +410,9 @@ func TestParseNeverEchoesCredentials(t *testing.T) {
 		{name: "an http API root with a password", args: withRig("--api-url", "http://user:"+secret+"@forgejo.test/api/v1")},
 		{name: "a non-http API root with a password", args: withRig("--api-url", "ftp://user:"+secret+"@forgejo.test")},
 		{name: "a malformed non-http API root with an @", args: withRig("--api-url", "ftp://user:"+secret+"@forgejo test")},
+		{name: "a scheme-less API root with a password", args: withRig("--api-url", "user:"+secret+"@forgejo.test/api/v1")},
+		{name: "a web root with a password", args: withRig("--web-url", "https://user:"+secret+"@web.test")},
+		{name: "a scheme-less web root with a password", args: withRig("--web-url", "user:"+secret+"@web.test")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -464,6 +467,10 @@ func TestParseRejectsBadValues(t *testing.T) {
 		"api-url without a scheme":            {args: withRig("--api-url", "forgejo.test/api/v1"), message: "--api-url must be http:// or https:// (got 'forgejo.test/api/v1')"},
 		"api-url with ftp":                    {args: withRig("--api-url", "ftp://forgejo.test"), message: "--api-url must be http:// or https://"},
 		"api-url with no value":               {args: []string{"gastown", "--repo", "acme/gastown", "--api-url"}, message: "--api-url needs a value"},
+		"api-url with a scheme-less password": {args: withRig("--api-url", "user:hunter2@forgejo.test/api/v1"), message: "--api-url must be http:// or https:// (got '[value not shown: holds an @]')"},
+		"web-url without a scheme":            {args: withRig("--web-url", "web.test"), message: "--web-url must be http:// or https:// (got 'web.test')"},
+		"web-url with a password":             {args: withRig("--web-url", "https://user:hunter2@web.test"), message: "--web-url must be a URL with no credentials"},
+		"web-url with ftp":                    {args: withRig("--web-url", "ftp://web.test"), message: "--web-url must be http:// or https://"},
 		"town-root that is not a directory":   {args: withRig("--town-root", "/nowhere"), message: "--town-root '/nowhere' is not a directory"},
 		"town-root empty":                     {args: withRig("--town-root", ""), message: "--town-root '' is not a directory"},
 		"no HOME and no town root":            {args: withRig(), vars: map[string]string{"HOME": ""}, message: "--town-root '' is not a directory"},
