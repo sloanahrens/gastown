@@ -116,8 +116,9 @@ func (f *LandingsFile) landedAt(rec LandingRecord) time.Time {
 	return time.Now()
 }
 
-// closeAttempt ends seat's open attempt on beadID at the earlier of the
-// submission the host saw and capped (gt-8yk78).
+// closeAttempt ends seat's open attempt on beadID. The end is the earlier of the
+// seat's submission stamp, the host's first sight of the head and capped, and
+// the attempt stays open when the host never saw the submission (gt-8yk78).
 func (f *LandingsFile) closeAttempt(beadID, head, seat string, submitted, capped time.Time) {
 	// The end is the host's, not the seat's: the stamp is the seat's own word
 	// for when its turn ended, and a seat must not be able to write time into a

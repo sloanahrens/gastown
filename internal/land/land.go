@@ -2403,10 +2403,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.RecordErr = fmt.Errorf("reopening the bead: %w", err)
 		return rej
 	}
-	// A polecat's gt done is its turn end: the seat is released at submission
-	// and a rework opens a new attempt, so the refusal ends that attempt at the
-	// earlier of the submission stamp and the host's first sight, never at the
-	// refusal's own time (gt-8yk78, gt-fhjdh).
+	// Ends the polecat's attempt as the landing path does (closeAttempt).
 	if l.Landings != nil && !birdOwned {
 		l.Landings.closeAttempt(w.BeadID, w.Head, refusalSeat(w), w.Submitted, l.now())
 	}
