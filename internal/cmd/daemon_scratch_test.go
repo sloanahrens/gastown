@@ -608,3 +608,44 @@ func TestResolveThroughExisting(t *testing.T) {
 		t.Error("a path with no existing ancestor, not even the root, resolved")
 	}
 }
+
+// A live root or a compose file whose path cannot be resolved is refused, not
+// taken as clear: "cannot tell" is never "outside the live town".
+func TestDaemonScratchRefusesPathsItCannotResolve(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("permission denied")
+	for _, tc := range []struct {
+		name string
+		eval func(r *daemonScratchRig) func(string) (string, error)
+		want string
+	}{
+		{"the live root", func(r *daemonScratchRig) func(string) (string, error) {
+			return func(p string) (string, error) {
+				if p == r.flags.liveRoot {
+					return "", boom
+				}
+				return p, nil
+			}
+		}, "--live-root"},
+		{"the compose file", func(r *daemonScratchRig) func(string) (string, error) {
+			return func(p string) (string, error) {
+				if p == r.flags.liveRoot {
+					return p, nil
+				}
+				return "", boom
+			}
+		}, "--compose-file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newDaemonScratchRig(t)
+			r.deps.evalSymlinks = tc.eval(r)
+
+			err := refuseComposeFileInLiveRoot(r.flags, r.deps)
+
+			if err == nil || !errors.Is(err, boom) || !strings.Contains(err.Error(), tc.want+" ") || !strings.Contains(err.Error(), "cannot be resolved") {
+				t.Fatalf("refuseComposeFileInLiveRoot = %v, want a %s refusal wrapping the resolve error", err, tc.want)
+			}
+		})
+	}
+}
