@@ -16,10 +16,14 @@ import (
 // protection gt-vya0s exists for, which no fake can show. A host the kernel
 // does not grant the flag to skips with the reason.
 func TestIntegrationRunInstallsExecutableAndHoldsItImmutable(t *testing.T) {
-	_, _, _, supported := immutableSeams(t)
-	if !supported {
-		t.Skip("the kernel refuses the immutable flag (no CAP_LINUX_IMMUTABLE, or no chflags/chattr), so the real flag cannot be exercised here")
+	probe := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(probe, nil, 0o644); err != nil {
+		t.Fatalf("write probe: %v", err)
 	}
+	if err := setImmutable(probe); err != nil {
+		t.Skipf("the host refuses the immutable flag (no CAP_LINUX_IMMUTABLE, or no chflags/chattr), so the real flag cannot be exercised here: %v", err)
+	}
+	t.Cleanup(func() { _ = clearImmutable(probe) })
 	dir := t.TempDir()
 	src := writeSource(t, dir, "built-gt", []byte("built binary"))
 	destDir := filepath.Join(dir, "install-dir")

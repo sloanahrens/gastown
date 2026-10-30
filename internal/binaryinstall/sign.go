@@ -129,7 +129,9 @@ func (s Signer) Sign(tmp, src, name string) error {
 			return restoreErr
 		}
 		// The first line of codesign's output is a notice, not part of the
-		// error: the error names the step only.
+		// error: the error names the step only. codesign does not print the
+		// keychain password, and the unlock's own output was discarded above,
+		// so this one line holds no secret.
 		s.Installer.warnf("codesign failed: %s", firstLine(string(out)))
 		return signingError{"codesign failed"}
 	}
