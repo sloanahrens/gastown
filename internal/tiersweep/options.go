@@ -30,6 +30,7 @@ const (
 	EnvLogDir  = "TIER_SWEEP_LOGDIR"
 	EnvTrigger = "TIER_SWEEP_TRIGGER"
 	EnvTested  = "TIER_SWEEP_TESTED"
+	EnvTimings = "TIER_SWEEP_TIMINGS"
 )
 
 // The values a name takes when the environment leaves it unset.
@@ -69,6 +70,10 @@ type Options struct {
 	Trigger string
 	// Tested is TIER_SWEEP_TESTED, the commit a run tests.
 	Tested string
+	// TimingsFile is TIER_SWEEP_TIMINGS: a persistent file a run replaces with
+	// its own timings lines at the end, so the next run can read this one's.
+	// Empty names none.
+	TimingsFile string
 }
 
 // UnknownTierError is a command line naming a tier the sweep does not offer.
@@ -101,20 +106,32 @@ type Host struct {
 	// MkdirAll creates TIER_SWEEP_LOGDIR and its parents. It runs for the
 	// default directory too, where it finds the directory there.
 	MkdirAll func(path string, perm fs.FileMode) error
+	// WriteFile writes a file, as os.WriteFile does: it is how a run writes the
+	// temp file TIER_SWEEP_TIMINGS is replaced through. A nil WriteFile takes
+	// os.WriteFile in Run, as a nil Deps.ReadFile takes os.ReadFile.
+	WriteFile func(name string, data []byte, perm fs.FileMode) error
+	// Rename renames a file, as os.Rename does: it puts the temp file over
+	// TIER_SWEEP_TIMINGS, so a reader never sees a torn file. A nil Rename takes
+	// os.Rename in Run.
+	Rename func(oldpath, newpath string) error
 }
 
-// ProcessHost reads the running process.
-var ProcessHost = Host{Env: os.Getenv, MkdirTemp: os.MkdirTemp, MkdirAll: os.MkdirAll}
+// ProcessHost reads and writes the running process.
+var ProcessHost = Host{
+	Env: os.Getenv, MkdirTemp: os.MkdirTemp, MkdirAll: os.MkdirAll,
+	WriteFile: os.WriteFile, Rename: os.Rename,
+}
 
 // ParseOptions resolves one tier-sweep command line and the environment it
 // reads, creating the log directory so no run starts without one.
 func ParseOptions(args []string, host Host) (Options, error) {
 	opts := Options{
-		Tiers:    append([]string(nil), args...),
-		SkipList: host.Env(EnvSkip),
-		Timeout:  orDefault(host.Env(EnvTimeout), DefaultTimeout),
-		Trigger:  host.Env(EnvTrigger),
-		Tested:   host.Env(EnvTested),
+		Tiers:       append([]string(nil), args...),
+		SkipList:    host.Env(EnvSkip),
+		Timeout:     orDefault(host.Env(EnvTimeout), DefaultTimeout),
+		Trigger:     host.Env(EnvTrigger),
+		Tested:      host.Env(EnvTested),
+		TimingsFile: host.Env(EnvTimings),
 	}
 	if len(opts.Tiers) == 0 {
 		opts.Tiers = []string{TierShell, TierIntegration, TierRace}

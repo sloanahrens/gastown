@@ -32,6 +32,12 @@ type rig struct {
 	logDir      string
 	skip        string
 	trigger     string
+	// timingsFile is TIER_SWEEP_TIMINGS, empty when the run names none.
+	timingsFile string
+	// writes and renames record the file seams a persistent timings file goes
+	// through, in the order they ran.
+	writes  []string
+	renames [][2]string
 }
 
 func newRig(t *testing.T) *rig {
@@ -59,12 +65,21 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 	}
 	env := map[string]string{
 		EnvLogDir: r.logDir, EnvSkip: r.skip, EnvTrigger: r.trigger, EnvTimeout: "7m",
+		EnvTimings: r.timingsFile,
 	}
 	code = Run(args, &out, &errw, Deps{
 		Host: Host{
 			Env:       func(name string) string { return env[name] },
 			MkdirTemp: func(string, string) (string, error) { return r.logDir, nil },
 			MkdirAll:  func(string, fs.FileMode) error { return nil },
+			WriteFile: func(name string, data []byte, perm fs.FileMode) error {
+				r.writes = append(r.writes, name)
+				return os.WriteFile(name, data, perm)
+			},
+			Rename: func(oldpath, newpath string) error {
+				r.renames = append(r.renames, [2]string{oldpath, newpath})
+				return os.Rename(oldpath, newpath)
+			},
 		},
 		Exec:    exec,
 		Src:     r.repo,

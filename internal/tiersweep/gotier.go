@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Exec runs argv in dir with env (nil inherits the process's environment) and
@@ -56,6 +57,12 @@ type Runner struct {
 	Env []string
 	// Stderr receives the progress lines and the failure excerpts.
 	Stderr io.Writer
+	// Timings receives one line per package the runner starts, in run order. A
+	// package it skips, refuses or cannot log writes none. Nil writes no
+	// timings.
+	Timings *Timings
+	// Now is the clock a package's wall time is read from. Nil means time.Now.
+	Now func() time.Time
 }
 
 // Counts is one tier's tally: the packages that passed, failed and were
@@ -101,7 +108,9 @@ func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
 			argv = append(argv, "-skip", pattern)
 		}
 		argv = append(argv, pkg)
+		start := r.now()
 		code := r.Exec(dir, r.Env, argv, f)
+		r.addTiming(tier, name, start, code)
 		closeErr := f.Close()
 		if code == 0 && closeErr == nil {
 			c.Passed++
@@ -117,6 +126,27 @@ func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
 		}
 	}
 	return c
+}
+
+func (r *Runner) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// addTiming records one started package's line in the run's timings.
+func (r *Runner) addTiming(tier, name string, start time.Time, code int) {
+	if r.Timings == nil {
+		return
+	}
+	r.Timings.Add(Timing{
+		Tier:    tier,
+		Package: name,
+		WallMS:  r.now().Sub(start).Milliseconds(),
+		Exit:    code,
+		Start:   start.Format(time.RFC3339Nano),
+	})
 }
 
 // excerpt writes the first excerptLines failure lines of a log to stderr,

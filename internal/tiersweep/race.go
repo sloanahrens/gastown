@@ -25,6 +25,8 @@ func (s *Sweep) Race() (line string, red bool) {
 		SkipList: s.Opts.SkipList,
 		Env:      s.exportEnv(s.Opts.Tested, s.Opts.SkipList),
 		Stderr:   s.Stderr,
+		Timings:  s.Timings,
+		Now:      s.Now,
 	}
 	c := runner.Tier(TierRace, ".", slotPrefix(), raceArgs, []string{racePkg})
 	return Summary(TierRace, s.Opts.LogDir, c.Passed, c.Failed, c.Skipped, strings.Join(c.FailedNames, " "), elapsed())
