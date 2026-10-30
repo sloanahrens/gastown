@@ -1,300 +1,24 @@
 package main
 
 import (
-	"errors"
-	"io/fs"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testdb"
 )
 
-// TestCopyFixtureMakesAnIndependentCopy: a mutating row changes only its copy; the fixture keeps its
-// files, and removing the copy leaves the fixture in place.
-func TestCopyFixtureMakesAnIndependentCopy(t *testing.T) {
-	t.Parallel()
-	fixture := t.TempDir()
-	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
-	mustWrite(t, filepath.Join(fixture, ".beads", "nested", "data.txt"), "row data\n")
-	scratch := t.TempDir()
+// okBD answers every call with exit 0.
+func okBD([]string) ([]byte, int, error) { return nil, 0, nil }
 
-	dir, remove, err := copyFixture(fixture, scratch)()
-	if err != nil {
-		t.Fatalf("copyFixture: %v", err)
-	}
-	if got := readFile(t, filepath.Join(dir, ".beads", "nested", "data.txt")); got != "row data\n" {
-		t.Errorf("copied data.txt = %q, want the fixture's contents", got)
-	}
-	mustWrite(t, filepath.Join(dir, ".beads", "config.yaml"), "changed by a mutating row\n")
-	if got := readFile(t, filepath.Join(fixture, ".beads", "config.yaml")); got != "prefix: fx\n" {
-		t.Errorf("fixture config.yaml = %q after a change in the copy, want it untouched", got)
-	}
-	if err := remove(); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("copy still exists after remove: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(fixture, ".beads", "config.yaml")); err != nil {
-		t.Errorf("fixture gone after removing its copy: %v", err)
-	}
-}
+// okRun answers every bd call with exit 0.
+func okRun(string, []string) ([]byte, int, error) { return nil, 0, nil }
 
-// TestCopyFixtureRefusesASymlinkAndLeavesNoCopy: a symlink in the fixture could point the copy back
-// at the live town, so the copy is refused and the partial copy is removed.
-func TestCopyFixtureRefusesASymlinkAndLeavesNoCopy(t *testing.T) {
-	t.Parallel()
-	fixture := t.TempDir()
-	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
-	mustWrite(t, filepath.Join(fixture, "real.txt"), "data\n")
-	if err := os.Symlink(filepath.Join(fixture, "real.txt"), filepath.Join(fixture, "link.txt")); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-	scratch := t.TempDir()
-
-	_, _, err := copyFixture(fixture, scratch)()
-	if err == nil || !strings.Contains(err.Error(), "neither a directory nor a regular file") {
-		t.Fatalf("copyFixture over a symlink = %v, want the refusal", err)
-	}
-	if left := fileNames(t, scratch); len(left) != 0 {
-		t.Errorf("scratch holds %v after a refused copy, want nothing left", left)
-	}
-}
-
-// TestCopyFixtureFailsWhenScratchIsMissing: a copy cannot be made in a scratch directory that does
-// not exist; run creates it before the recording starts.
-func TestCopyFixtureFailsWhenScratchIsMissing(t *testing.T) {
-	t.Parallel()
-	fixture := t.TempDir()
-	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
-	if _, _, err := copyFixture(fixture, filepath.Join(t.TempDir(), "missing"))(); err == nil {
-		t.Error("copyFixture into a missing scratch = nil error, want an error")
-	}
-}
-
-// TestCopyFixtureReportsAScratchItCannotStat: a scratch path the OS cannot answer for is an error,
-// not a path declared outside the fixture.
-func TestCopyFixtureReportsAScratchItCannotStat(t *testing.T) {
-	t.Parallel()
-	fixture := t.TempDir()
-	blocker := filepath.Join(t.TempDir(), "blocker")
-	mustWrite(t, blocker, "a file\n")
-	if _, _, err := copyFixture(fixture, filepath.Join(blocker, "scratch"))(); err == nil {
-		t.Error("copyFixture with a scratch path under a file = nil error, want an error")
-	}
-}
-
-// TestCopyFixtureRefusesAScratchAtOrInsideTheFixture: a copy made inside the fixture sits in the tree
-// the next copy walks, so that walk would copy the copy into itself and never finish. The refusal
-// comes before anything is created, so the fixture is left as it was.
-func TestCopyFixtureRefusesAScratchAtOrInsideTheFixture(t *testing.T) {
-	t.Parallel()
-	fixture := t.TempDir()
-	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
-	tests := []struct {
-		name    string
-		scratch string
-	}{
-		{"scratch is the fixture", fixture},
-		{"scratch under the fixture", filepath.Join(fixture, "scratch")},
-		{"scratch deep under the fixture", filepath.Join(fixture, ".beads", "tmp")},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			before := fileNames(t, fixture)
-			if _, _, err := copyFixture(fixture, tc.scratch)(); err == nil {
-				t.Fatalf("copyFixture with %s = nil error, want the refusal", tc.name)
-			}
-			if after := fileNames(t, fixture); !reflect.DeepEqual(before, after) {
-				t.Errorf("fixture holds %v after a refused copy, want it untouched at %v", after, before)
-			}
-		})
-	}
-}
-
-// TestCopyFixtureAcceptsAScratchBesideOrAboveTheFixture: the refusal covers the tree the walk covers,
-// not the fixture's neighbours, so a sibling or a parent directory is a valid scratch.
-func TestCopyFixtureAcceptsAScratchBesideOrAboveTheFixture(t *testing.T) {
-	t.Parallel()
-	parent := t.TempDir()
-	fixture := filepath.Join(parent, "fixture")
-	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
-	mustWrite(t, filepath.Join(fixture, "a.txt"), "x\n")
-	tests := []struct {
-		name    string
-		scratch string
-	}{
-		{"sibling of the fixture", filepath.Join(parent, "scratch")},
-		{"parent of the fixture", parent},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if err := os.MkdirAll(tc.scratch, 0o755); err != nil {
-				t.Fatalf("make the scratch directory: %v", err)
-			}
-			dir, remove, err := copyFixture(fixture, tc.scratch)()
-			if err != nil {
-				t.Fatalf("copyFixture with %s: %v", tc.name, err)
-			}
-			if got := readFile(t, filepath.Join(dir, "a.txt")); got != "x\n" {
-				t.Errorf("copied a.txt = %q, want the fixture's contents", got)
-			}
-			if err := remove(); err != nil {
-				t.Errorf("remove: %v", err)
-			}
-		})
-	}
-}
-
-// TestCopyFixtureFailsWhenTheFixtureIsMissing: a fixture that is not there is an error, and the copy
-// made for it is removed.
-func TestCopyFixtureFailsWhenTheFixtureIsMissing(t *testing.T) {
-	t.Parallel()
-	scratch := t.TempDir()
-	if _, _, err := copyFixture(filepath.Join(t.TempDir(), "missing"), scratch)(); err == nil {
-		t.Fatal("copyFixture of a missing fixture = nil error, want an error")
-	}
-	if left := fileNames(t, scratch); len(left) != 0 {
-		t.Errorf("scratch holds %v after a failed copy, want nothing left", left)
-	}
-}
-
-// TestCopyTreeCopiesARelativelyNamedFixture: an operator names the fixture relative to where they
-// stand, and the copy must still hold the fixture's entries at its root. A copy that carried part of
-// the fixture's own path into it would leave bd answering from a database above the copy
-// (gt-p85pw.87).
-func TestCopyTreeCopiesARelativelyNamedFixture(t *testing.T) {
-	t.Parallel()
-	fixture := t.TempDir()
-	mustWrite(t, filepath.Join(fixture, ".beads", "config.yaml"), "prefix: fx\n")
-	mustWrite(t, filepath.Join(fixture, "notes.txt"), "row data\n")
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	rel, err := filepath.Rel(cwd, fixture)
-	if err != nil {
-		t.Fatalf("path to the fixture from %s: %v", cwd, err)
-	}
-	for _, src := range []string{rel, "." + string(filepath.Separator) + rel} {
-		t.Run(src, func(t *testing.T) {
-			t.Parallel()
-			dst := t.TempDir()
-			if err := copyTree(src, dst); err != nil {
-				t.Fatalf("copyTree(%q): %v", src, err)
-			}
-			if got := readFile(t, filepath.Join(dst, ".beads", "config.yaml")); got != "prefix: fx\n" {
-				t.Errorf("copy of %q holds %q at .beads/config.yaml, want the fixture's file there", src, got)
-			}
-			if got := readFile(t, filepath.Join(dst, "notes.txt")); got != "row data\n" {
-				t.Errorf("copy of %q holds %q at notes.txt, want the fixture's file there", src, got)
-			}
-			if got := fileNames(t, dst); !reflect.DeepEqual(got, []string{".beads", "notes.txt"}) {
-				t.Errorf("copy of %q holds %v at its root, want only the fixture's entries", src, got)
-			}
-		})
-	}
-}
-
-// TestCopyFixtureRefusesAFixtureWithoutADatabase: bd picks a database by walking up from the copy it
-// runs in, so a fixture that holds none would have the recording answered from a database above it.
-// The fixture is refused before a copy is made, so scratch stays empty.
-func TestCopyFixtureRefusesAFixtureWithoutADatabase(t *testing.T) {
-	t.Parallel()
-	fixture := t.TempDir()
-	mustWrite(t, filepath.Join(fixture, "notes.txt"), "row data\n")
-	scratch := t.TempDir()
-	_, _, err := copyFixture(fixture, scratch)()
-	if err == nil || !strings.Contains(err.Error(), fixtureDatabase) {
-		t.Fatalf("copyFixture of a fixture without %s = %v, want a refusal naming it", fixtureDatabase, err)
-	}
-	if left := fileNames(t, scratch); len(left) != 0 {
-		t.Errorf("scratch holds %v after a refused copy, want nothing left", left)
-	}
-}
-
-// TestCopyTreeFailsWhenTheCopyCannotBeOpened: a copy directory that is not there is an error, not a
-// copy that silently holds nothing.
-func TestCopyTreeFailsWhenTheCopyCannotBeOpened(t *testing.T) {
-	t.Parallel()
-	src := t.TempDir()
-	mustWrite(t, filepath.Join(src, "a.txt"), "x\n")
-	if err := copyTree(src, filepath.Join(t.TempDir(), "missing")); err == nil {
-		t.Error("copyTree into a missing copy directory = nil error, want an error")
-	}
-}
-
-// TestCopyFixtureFailsWhenTheFixtureIsMissing: a walk that cannot read the fixture at all fails the copy
-// instead of copying nothing and reporting success.
-func TestCopyTreeFailsWhenTheFixtureIsMissing(t *testing.T) {
-	t.Parallel()
-	if err := copyTree(filepath.Join(t.TempDir(), "missing"), t.TempDir()); err == nil {
-		t.Error("copyTree of a missing fixture = nil error, want an error")
-	}
-}
-
-// TestCopyTreeFailsWhenADirectoryCannotBeMade: a file in the way of a fixture directory stops the
-// copy with an error.
-func TestCopyTreeFailsWhenADirectoryCannotBeMade(t *testing.T) {
-	t.Parallel()
-	src := t.TempDir()
-	mustWrite(t, filepath.Join(src, "sub", "a.txt"), "x\n")
-	dst := t.TempDir()
-	mustWrite(t, filepath.Join(dst, "sub"), "a file where the directory goes\n")
-	if err := copyTree(src, dst); err == nil {
-		t.Error("copyTree with a file in the way of a directory = nil error, want an error")
-	}
-}
-
-// unreadableFS is a fixture whose file stops answering mid-copy, standing in for a disk that fails
-// the read a real fixture would finish.
-type unreadableFS struct{}
-
-func (unreadableFS) Open(string) (fs.File, error) { return unreadableFile{}, nil }
-
-type unreadableFile struct{}
-
-func (unreadableFile) Stat() (fs.FileInfo, error) { return nil, errors.New("stat: not a real file") }
-func (unreadableFile) Read([]byte) (int, error)   { return 0, errors.New("read: disk stopped answering") }
-func (unreadableFile) Close() error               { return nil }
-
-// TestCopyFileRefusesWhatItCannotCopy: a missing source, a destination that already exists, and a
-// source that stops answering mid-copy all fail it rather than leaving half a file in the copy.
-func TestCopyFileRefusesWhatItCannotCopy(t *testing.T) {
-	t.Parallel()
-	fixture := t.TempDir()
-	mustWrite(t, filepath.Join(fixture, "b.txt"), "x\n")
-	tests := []struct {
-		name    string
-		fixture fs.FS
-		already string // a file the copy holds before the write, if any
-	}{
-		{"missing source", os.DirFS(t.TempDir()), ""},
-		{"destination exists", os.DirFS(fixture), "b.txt"},
-		{"source cannot be read", unreadableFS{}, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			dst := t.TempDir()
-			if tc.already != "" {
-				mustWrite(t, filepath.Join(dst, tc.already), "already here\n")
-			}
-			root, err := os.OpenRoot(dst)
-			if err != nil {
-				t.Fatalf("open the copy: %v", err)
-			}
-			defer root.Close() //nolint:errcheck // a test's read of the copy, not a write whose loss matters
-			if err := copyFile(root, tc.fixture, "b.txt"); err == nil {
-				t.Errorf("copyFile(%s) = nil error, want an error", tc.name)
-			}
-		})
-	}
-}
-
+// mustWrite writes content to path, making its directory.
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -303,4 +27,484 @@ func mustWrite(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+// writeFixture writes a JSONL fixture holding one bead per id and returns its path.
+func writeFixture(t *testing.T, ids ...string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, id := range ids {
+		fmt.Fprintf(&b, "{\"id\":%q,\"title\":%q}\n", id, "bead "+id)
+	}
+	path := filepath.Join(t.TempDir(), "fixture.jsonl")
+	mustWrite(t, path, b.String())
+	return path
+}
+
+// initName returns the database a recorded bd init named.
+func initName(t *testing.T, args []string) string {
+	t.Helper()
+	for i, a := range args {
+		if a == "--database" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	t.Fatalf("bd ran %v with no --database", args)
+	return ""
+}
+
+// callIndices returns the indices of the calls whose first word is verb.
+func callIndices(bd *fakeBD, verb string) []int {
+	var found []int
+	for i, args := range bd.args {
+		if args[0] == verb {
+			found = append(found, i)
+		}
+	}
+	return found
+}
+
+// TestProvisionFixtureMakesADatabaseOfItsOwn: a copy is a fresh directory under scratch holding a
+// database bd init made under a test name, with the fixture imported into it, so no two copies can
+// share a store.
+func TestProvisionFixtureMakesADatabaseOfItsOwn(t *testing.T) {
+	t.Parallel()
+	fixture := writeFixture(t, fixtureIDs...)
+	scratch := t.TempDir()
+	bd := &fakeBD{out: okBD}
+	provision, err := provisionFixture(bd.Run, fixture, scratch)
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	dir, _, err := provision()
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if filepath.Dir(dir) != scratch {
+		t.Errorf("copy made at %s, want it under the scratch directory %s", dir, scratch)
+	}
+	if len(bd.args) != 2 {
+		t.Fatalf("bd ran %v, want the copy's init and import", bd.args)
+	}
+	name := initName(t, bd.args[0])
+	wantInit := []string{"init", "--database", name, "--prefix", fixturePrefix, "--non-interactive", "--skip-agents", "--skip-hooks"}
+	if !reflect.DeepEqual(bd.args[0], wantInit) {
+		t.Errorf("init ran %v, want %v", bd.args[0], wantInit)
+	}
+	if !strings.HasPrefix(name, testdb.MintPrefix) {
+		t.Errorf("database %q named, want one under the test prefix %q", name, testdb.MintPrefix)
+	}
+	if want := []string{"import", "-i", fixture}; !reflect.DeepEqual(bd.args[1], want) {
+		t.Errorf("import ran %v, want %v", bd.args[1], want)
+	}
+	for i, got := range bd.dirs {
+		if got != dir {
+			t.Errorf("call %v ran in %s, want the copy %s", bd.args[i], got, dir)
+		}
+	}
+}
+
+// TestProvisionFixtureGivesEachCopyADifferentDatabase: two copies never share a database, so a
+// mutating row in one cannot change what another reads.
+func TestProvisionFixtureGivesEachCopyADifferentDatabase(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: okBD}
+	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), t.TempDir())
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	var names []string
+	for range 2 {
+		if _, _, err := provision(); err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+	}
+	for _, i := range callIndices(bd, "init") {
+		names = append(names, initName(t, bd.args[i]))
+	}
+	if len(names) != 2 || names[0] == names[1] {
+		t.Errorf("copies were named %v, want a different database for each", names)
+	}
+}
+
+// TestProvisionFixtureDropsTheDatabaseAndRemovesTheDirectory: the removal drops the database the
+// copy's init made, then removes the directory.
+func TestProvisionFixtureDropsTheDatabaseAndRemovesTheDirectory(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: okBD}
+	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), t.TempDir())
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	dir, remove, err := provision()
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	name := initName(t, bd.args[0])
+	if err := remove(); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	drops := callIndices(bd, "sql")
+	if len(drops) != 1 {
+		t.Fatalf("bd ran %v, want one drop", bd.args)
+	}
+	want := []string{"sql", "DROP DATABASE IF EXISTS `" + name + "`"}
+	if got := bd.args[drops[0]]; !reflect.DeepEqual(got, want) {
+		t.Errorf("drop ran %v, want %v", got, want)
+	}
+	if got := bd.dirs[drops[0]]; got != dir {
+		t.Errorf("drop ran in %s, want the copy %s", got, dir)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("copy still exists after remove: %v", err)
+	}
+}
+
+// TestProvisionFixtureReportsAFailedInit: a copy whose database bd could not make fails, imports
+// nothing, and leaves no directory behind.
+func TestProvisionFixtureReportsAFailedInit(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: func(args []string) ([]byte, int, error) {
+		if args[0] == "init" {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}}
+	scratch := t.TempDir()
+	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), scratch)
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	_, _, err = provision()
+	if err == nil || !strings.Contains(err.Error(), "init the database") {
+		t.Fatalf("provision over a failed init = %v, want the init named", err)
+	}
+	if imports := callIndices(bd, "import"); len(imports) != 0 {
+		t.Errorf("bd ran %v, want no import over a database that was never made", bd.args)
+	}
+	if left := fileNames(t, scratch); len(left) != 0 {
+		t.Errorf("scratch holds %v after a failed copy, want nothing left", left)
+	}
+}
+
+// TestProvisionFixtureReportsAFailedImportAndDropsTheDatabase: a copy the import could not fill is
+// an error, and its database is dropped so a failed run leaves nothing on the server.
+func TestProvisionFixtureReportsAFailedImportAndDropsTheDatabase(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: func(args []string) ([]byte, int, error) {
+		if args[0] == "import" {
+			return nil, 3, nil
+		}
+		return nil, 0, nil
+	}}
+	scratch := t.TempDir()
+	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), scratch)
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	dir, _, err := provision()
+	if err == nil || !strings.Contains(err.Error(), "import the fixture") {
+		t.Fatalf("provision over a failed import = %v, want the import named", err)
+	}
+	if drops := callIndices(bd, "sql"); len(drops) != 1 {
+		t.Errorf("bd ran %v, want the copy's database dropped", bd.args)
+	}
+	if _, statErr := os.Stat(dir); statErr == nil {
+		t.Errorf("copy %s still exists after a failed import", dir)
+	}
+}
+
+// TestProvisionFixtureReportsACleanupThatCannotComplete: a drop that fails is reported, so a
+// database left on the server is never a clean run.
+func TestProvisionFixtureReportsACleanupThatCannotComplete(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: func(args []string) ([]byte, int, error) {
+		if args[0] == "sql" {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}}
+	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), t.TempDir())
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	dir, remove, err := provision()
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	err = remove()
+	if err == nil || !strings.Contains(err.Error(), "drop the database") {
+		t.Fatalf("remove over a failed drop = %v, want the drop named", err)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Errorf("copy still exists after remove: %v", statErr)
+	}
+}
+
+// TestProvisionFixtureRefusesAFixtureMissingABead: a fixture file that lacks a bead the table names
+// fails before any database is made, since its row would record bd's "not found" as the answer.
+func TestProvisionFixtureRefusesAFixtureMissingABead(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: okBD}
+	fixture := writeFixture(t, fixtureID, fixtureParent)
+	_, err := provisionFixture(bd.Run, fixture, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), fixtureDepID) {
+		t.Fatalf("provisionFixture of a fixture missing %s = %v, want an error naming it", fixtureDepID, err)
+	}
+	if len(bd.args) != 0 {
+		t.Errorf("bd ran %v for a refused fixture, want nothing run", bd.args)
+	}
+}
+
+// TestProvisionFixtureRefusesALineThatIsNotABead: a fixture line that is not JSON fails the
+// recording and names the line, since bd import would answer with its own error instead.
+func TestProvisionFixtureRefusesALineThatIsNotABead(t *testing.T) {
+	t.Parallel()
+	fixture := writeFixture(t, fixtureIDs...)
+	mustWrite(t, fixture, "{\"id\":\"fx-1\"}\nnot a bead\n")
+	_, err := provisionFixture(okRun, fixture, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("provisionFixture over a line that is not a bead = %v, want the line named", err)
+	}
+}
+
+// TestProvisionFixtureRefusesAMissingFixture: a fixture that is not there is an error, not a run
+// over an empty database.
+func TestProvisionFixtureRefusesAMissingFixture(t *testing.T) {
+	t.Parallel()
+	_, err := provisionFixture(okRun, filepath.Join(t.TempDir(), "missing.jsonl"), t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "open the fixture") {
+		t.Fatalf("provisionFixture of a missing fixture = %v, want an error naming it", err)
+	}
+}
+
+// TestProvisionFixtureNamesTheFixtureOutsideItsWorkingDirectory: bd import runs in the copy, so the
+// fixture has to reach it by a path that does not depend on the operator's working directory.
+func TestProvisionFixtureNamesTheFixtureOutsideItsWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	abs := writeFixture(t, fixtureIDs...)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	rel, err := filepath.Rel(cwd, abs)
+	if err != nil {
+		t.Fatalf("path to the fixture from %s: %v", cwd, err)
+	}
+	if rel == abs {
+		t.Fatalf("the fixture %s is named absolutely already", abs)
+	}
+	bd := &fakeBD{out: okBD}
+	provision, err := provisionFixture(bd.Run, rel, t.TempDir())
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	if _, _, err := provision(); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if want := []string{"import", "-i", abs}; !reflect.DeepEqual(bd.args[1], want) {
+		t.Errorf("import ran %v, want the fixture named absolutely: %v", bd.args[1], want)
+	}
+}
+
+// TestCaptureGivesEachMutatingRowItsOwnDatabase: with the provisioner in place, the read rows share
+// one copy and each mutating row gets a database of its own.
+func TestCaptureGivesEachMutatingRowItsOwnDatabase(t *testing.T) {
+	t.Parallel()
+	fixture := writeFixture(t, fixtureIDs...)
+	bd := &fakeBD{out: echoBD}
+	provision, err := provisionFixture(bd.Run, fixture, t.TempDir())
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	rows := sampleRows()
+	if _, err := (Recorder{Run: bd.Run, Copy: provision}).Capture(rows); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	inits := callIndices(bd, "init")
+	if len(inits) != 3 {
+		t.Fatalf("bd ran %d inits, want the shared copy and one per mutating row", len(inits))
+	}
+	shared := bd.dirs[inits[0]]
+	for _, row := range rows[:2] {
+		if got := rowDir(t, bd, row); got != shared {
+			t.Errorf("read row %v ran in %s, want the shared copy %s", row.Args(), got, shared)
+		}
+	}
+	first, second := bd.dirs[inits[1]], bd.dirs[inits[2]]
+	if first == shared || second == shared || first == second {
+		t.Fatalf("mutating rows ran in %s and %s, want a copy of their own, apart from %s", first, second, shared)
+	}
+	if got := rowDir(t, bd, rows[2]); got != first {
+		t.Errorf("mutating row %v ran in %s, want its own copy %s", rows[2].Args(), got, first)
+	}
+	if got := rowDir(t, bd, rows[3]); got != second {
+		t.Errorf("mutating row %v ran in %s, want its own copy %s", rows[3].Args(), got, second)
+	}
+	for i, call := range callIndices(bd, "import") {
+		if got := bd.dirs[call]; got != bd.dirs[inits[i]] {
+			t.Errorf("import %d ran in %s, want the copy its init made in %s", i, got, bd.dirs[inits[i]])
+		}
+	}
+}
+
+// TestCaptureDropsEveryDatabaseAfterTheRows: every copy a recording made is dropped and removed
+// once the rows that ran in it are done, so a recording leaves nothing on the server.
+func TestCaptureDropsEveryDatabaseAfterTheRows(t *testing.T) {
+	t.Parallel()
+	fixture := writeFixture(t, fixtureIDs...)
+	bd := &fakeBD{out: echoBD}
+	provision, err := provisionFixture(bd.Run, fixture, t.TempDir())
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	rows := sampleRows()
+	if _, err := (Recorder{Run: bd.Run, Copy: provision}).Capture(rows); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	inits := callIndices(bd, "init")
+	drops := callIndices(bd, "sql")
+	if len(drops) != len(inits) {
+		t.Fatalf("bd ran %d drops, want one per copy made (%d)", len(drops), len(inits))
+	}
+	dropped := make(map[string]bool, len(drops))
+	for _, call := range drops {
+		want := dbNameIn(bd.args[call])
+		dropped[want] = true
+		dir := bd.dirs[call]
+		if dir != bd.dirs[initFor(t, bd, want)] {
+			t.Errorf("drop of %s ran in %s, want the copy its init made", want, dir)
+		}
+		for _, row := range rows {
+			if at := callIndex(t, bd, row.Args()); bd.dirs[at] == dir && at > call {
+				t.Errorf("drop of %s ran at %d, before the row %v it ran in that copy (%s)", want, call, row.Args(), dir)
+			}
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("copy of %s still exists after Capture: %v", want, err)
+		}
+	}
+	for _, call := range inits {
+		if name := initName(t, bd.args[call]); !dropped[name] {
+			t.Errorf("database %s was never dropped", name)
+		}
+	}
+}
+
+// fixturePath is the fixture file the recording is made against, as the operator names it from the
+// command's directory.
+var fixturePath = filepath.Join("..", "bdshim", "testdata", "fixture.jsonl")
+
+// fixtureBead is the part of a fixture line the golden table and the preflight rely on.
+type fixtureBead struct {
+	ID     string   `json:"id"`
+	Title  string   `json:"title"`
+	Status string   `json:"status"`
+	Labels []string `json:"labels"`
+	Deps   []struct {
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+	} `json:"dependencies"`
+	Comments []struct {
+		Text string `json:"text"`
+	} `json:"comments"`
+}
+
+// readFixture parses every line of the fixture file as one bead.
+func readFixture(t *testing.T) map[string]fixtureBead {
+	t.Helper()
+	data, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read the fixture: %v", err)
+	}
+	beads := make(map[string]fixtureBead)
+	for i, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var bead fixtureBead
+		if err := json.Unmarshal([]byte(line), &bead); err != nil {
+			t.Fatalf("fixture line %d is not a bead: %v", i+1, err)
+		}
+		beads[bead.ID] = bead
+	}
+	return beads
+}
+
+// TestFixtureHoldsWhatTheTableAsksFor: every line of the fixture is a bead, and the fixture answers
+// the rows that name a bead or filter on one: the preflight's ids, a label, an agent bead, one
+// open bead, one closed one, a comment and a dependency.
+func TestFixtureHoldsWhatTheTableAsksFor(t *testing.T) {
+	t.Parallel()
+	beads := readFixture(t)
+	for _, id := range fixtureIDs {
+		if _, ok := beads[id]; !ok {
+			t.Errorf("fixture holds no bead %s, which the preflight asks bd for", id)
+		}
+	}
+	var open, closed, agent bool
+	for _, bead := range beads {
+		switch bead.Status {
+		case "open":
+			open = true
+		case "closed":
+			closed = true
+		}
+		for _, label := range bead.Labels {
+			if label == "gt:agent" {
+				agent = true
+			}
+		}
+	}
+	if !open || !closed {
+		t.Errorf("fixture holds open=%v closed=%v, want one bead of each so a list and a count differ", open, closed)
+	}
+	if !agent {
+		t.Error("fixture holds no bead labeled gt:agent, so the label-filtered list row has no answer")
+	}
+	named := beads[fixtureID]
+	if len(named.Comments) == 0 {
+		t.Errorf("fixture bead %s carries no comment, so the comments row has no answer", fixtureID)
+	}
+	if len(named.Deps) == 0 {
+		t.Errorf("fixture bead %s carries no dependency, so the dep list row has no answer", fixtureID)
+	}
+}
+
+// dbNameIn returns the database name a recorded drop names.
+func dbNameIn(args []string) string {
+	statement := args[len(args)-1]
+	_, name, _ := strings.Cut(statement, "`")
+	name, _, _ = strings.Cut(name, "`")
+	return name
+}
+
+// initFor returns the index of the init that made database name.
+func initFor(t *testing.T, bd *fakeBD, name string) int {
+	t.Helper()
+	for _, call := range callIndices(bd, "init") {
+		if initName(t, bd.args[call]) == name {
+			return call
+		}
+	}
+	t.Fatalf("no init made database %s", name)
+	return 0
+}
+
+// callIndex returns the index of the one call that ran args.
+func callIndex(t *testing.T, bd *fakeBD, args []string) int {
+	t.Helper()
+	for i, got := range bd.args {
+		if reflect.DeepEqual(got, args) {
+			return i
+		}
+	}
+	t.Fatalf("bd never ran %v", args)
+	return 0
+}
+
+// rowDir returns the directory the one call that ran row's arguments ran in.
+func rowDir(t *testing.T, bd *fakeBD, row Row) string {
+	t.Helper()
+	return bd.dirs[callIndex(t, bd, row.Args())]
 }

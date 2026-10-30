@@ -2,6 +2,10 @@ package main
 
 import "strings"
 
+// fixturePrefix is the issue prefix every copy's database is initialized with, the one the fixture
+// file's bead ids carry.
+const fixturePrefix = "fx"
+
 // The beads the fixture database must hold, since the table's rows name them. bd is asked for each
 // one before any row runs, so a fixture that is missing one fails the recording instead of being
 // recorded as bd's "not found".

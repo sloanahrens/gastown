@@ -18,12 +18,12 @@ import (
 // runner flagrecord walks bd's help through.
 type Runner = flagrecord.Runner
 
-// Copier makes a fresh copy of the fixture. It returns the copy's directory and the function that
-// removes it.
+// Copier makes a fresh copy of the fixture: a directory holding a database provisioned from it. It
+// returns the copy's directory and the function that removes the directory and its database.
 type Copier func() (dir string, remove func() error, err error)
 
-// Recorder runs rows against bd. Every row runs in a directory Copy makes, so the fixture itself is
-// reached only through the Copier that copies it, never by a row (gt-p85pw.87).
+// Recorder runs rows against bd. Every row runs in a copy Copy makes, so the fixture file itself is
+// read only by the Copier and never by a row (gt-p85pw.87, gt-p85pw.92).
 type Recorder struct {
 	Run  Runner
 	Copy Copier
