@@ -2149,6 +2149,99 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 	}
 }
 
+// A bead the spec-dispatch-failed label holds out because its sling was killed
+// at its bound is slung again while its retries remain: the read clears the
+// label, the bead is a candidate of this tick, and the tick says so. A labeled
+// bead the retry answers no for is still counted, not taken (gt-vaivp).
+func TestSpecCandidatesRetriesASlingKilledAtItsBound(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	board := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-retry", Type: "task", Status: "open", Priority: 2, Labels: []string{specdispatch.DispatchFailedLabel}},
+			{ID: "gt-other", Type: "task", Status: "open", Priority: 2, Labels: []string{specdispatch.DispatchFailedLabel}},
+		}, nil
+	}
+	retry := func(id string) (bool, error) { return id == "gt-retry", nil }
+
+	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry)
+	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-retry" {
+		t.Fatalf("candidates = %+v, want the retried bead alone", got.Candidates)
+	}
+	if got.LabeledFailed != 1 {
+		t.Errorf("LabeledFailed = %d, want the bead the retry did not clear", got.LabeledFailed)
+	}
+	if len(got.Retried) != 1 || !strings.Contains(got.Retried[0], "gt-retry") {
+		t.Errorf("Retried = %v, want the cleared bead named", got.Retried)
+	}
+}
+
+// A clear that fails is reported and the bead stays held: a label that could not
+// be read off is still holding the bead, so the tick must not sling it blind
+// (gt-vaivp).
+func TestSpecCandidatesReportsAFailedRetry(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	board := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{{ID: "gt-stuck", Type: "task", Status: "open", Priority: 2, Labels: []string{specdispatch.DispatchFailedLabel}}}, nil
+	}
+	retry := func(string) (bool, error) { return false, errors.New("dolt: connection refused") }
+
+	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry)
+	if len(got.Candidates) != 0 {
+		t.Errorf("candidates = %+v, want none for a bead whose label could not be cleared", got.Candidates)
+	}
+	if got.LabeledFailed != 1 {
+		t.Errorf("LabeledFailed = %d, want the bead still counted as held", got.LabeledFailed)
+	}
+	if len(got.Errors) != 1 || !strings.Contains(got.Errors[0], "dolt: connection refused") {
+		t.Errorf("errors = %v, want the failed clear named", got.Errors)
+	}
+}
+
+// specRetryTimedOutSlingFrom clears the label of a bead whose notes record a
+// sling killed at its bound and a retry left, and leaves every other failed
+// bead alone.
+func TestSpecRetryTimedOutSlingFrom(t *testing.T) {
+	t.Parallel()
+	timeoutNote := specdispatch.TimeoutNoteMarker + " sling killed at its 5m0s bound (attempt 1 of 3)"
+	cases := []struct {
+		name      string
+		labels    []string
+		notes     string
+		wantClear bool
+		wantHeld  bool
+	}{
+		{"a kill with retries left", []string{specdispatch.DispatchFailedLabel}, timeoutNote, true, false},
+		{"a failure of its own", []string{specdispatch.DispatchFailedLabel}, specDispatchNotePrefix + "gt-x: dispatch failed, left unassigned: boom", false, true},
+		{"the retries spent", []string{specdispatch.DispatchFailedLabel},
+			strings.Repeat(specdispatch.TimeoutNoteMarker+" an earlier kill\n", specdispatch.TimeoutRetries), false, true},
+		{"no label to clear", nil, timeoutNote, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New()
+			db.Seed(beads.Issue{ID: "gt-x", Status: "open", Labels: tc.labels, Notes: tc.notes})
+
+			cleared, err := specRetryTimedOutSlingFrom(db, "gt-x")
+			if err != nil {
+				t.Fatalf("specRetryTimedOutSlingFrom: %v", err)
+			}
+			if cleared != tc.wantClear {
+				t.Errorf("cleared = %v, want %v", cleared, tc.wantClear)
+			}
+			issue, err := db.Show("gt-x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if held := slices.Contains(issue.Labels, specdispatch.DispatchFailedLabel); held != tc.wantHeld {
+				t.Errorf("label held = %v, want %v", held, tc.wantHeld)
+			}
+		})
+	}
+}
+
 // A rig whose park state cannot be read is held out of the candidate set, and
 // the read says why. An unverified rig is reported as an error line, the way a
 // failed board read is, so the tick log shows it was held for lack of a

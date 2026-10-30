@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1303,6 +1304,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report.Errors = append(report.Errors, read.Errors...)
 	report.Candidates = len(read.Candidates)
 	report.LabeledFailed = read.LabeledFailed
+	report.Notices = append(report.Notices, read.Retried...)
 	// The read's own skips are the board-carried refusals: the tick and the
 	// dry run print them beside the ones the tick finds itself (gt-k1g3e).
 	report.Skipped = append(report.Skipped, read.Skipped...)
@@ -2380,9 +2382,12 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		PendingInstall: func(now time.Time) (*installpending.Marker, error) { return pendingInstall.Pending(now) },
 		StartupBackoff: func(id string) string { return dispatch.StartupBackoff(townRoot, id) },
 		Candidates: func() specBoardRead {
-			read := specCandidates(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
+			read := specCandidatesRetrying(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 				reads.call()
 				return specReadyBoard(rigPath)
+			}, IsRigParkedOrDocked, func(id string) (bool, error) {
+				reads.call()
+				return specRetryTimedOutSling(townRoot, id)
 			})
 			read = specBoardDetails(reads, func(rig string) beads.Client {
 				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
@@ -2648,8 +2653,16 @@ type specBoardRead struct {
 	// a reason the operator has to read, reported instead of dropped unseen
 	// (gt-k1g3e). The tick appends them to its own skip lines.
 	Skipped []specDispatchEntry
+	// Retried names the beads whose failure label the read cleared so they could
+	// be slung again (specFailedRetry). The tick logs them as notices.
+	Retried []string
 	Errors  []string
 }
+
+// specFailedRetry is the read's answer for a bead the spec-dispatch-failed label
+// holds out: it reports whether the label was cleared, which puts the bead back
+// in this tick's candidates. nil leaves every labeled bead held.
+type specFailedRetry func(id string) (cleared bool, err error)
 
 // specCandidates reads every operational rig's ready work beads and keeps the
 // eligible ones, ordered across rigs. A rig whose board cannot be read is
@@ -2664,6 +2677,13 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) specBoard
 // passed in, so a test can hand the read a verdict bd cannot be made to give
 // (gt-6d06g).
 func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string)) specBoardRead {
+	return specCandidatesRetrying(townRoot, maxPriority, board, rigStatus, nil)
+}
+
+// specCandidatesRetrying is specCandidatesWith plus retry, the answer for a
+// bead a killed-at-its-bound sling left labeled: the tick slings such a bead
+// again instead of waiting for a person (gt-vaivp).
+func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry specFailedRetry) specBoardRead {
 	var read specBoardRead
 	names, err := knownRigNames(townRoot)
 	if err != nil {
@@ -2699,10 +2719,25 @@ func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigSt
 			s := specFromIssue(issue)
 			// A bead the failed label is holding is counted, not taken: the
 			// count is what the health line surfaces, and Eligible would drop
-			// it from candidacy anyway (gt-q6zoo).
+			// it from candidacy anyway (gt-q6zoo). A bead slung again after the
+			// read cleared its label is a candidate of this tick.
 			if s.HasLabel(specdispatch.DispatchFailedLabel) {
-				labeled[s.ID] = true
-				continue
+				cleared := false
+				if retry != nil {
+					var rerr error
+					cleared, rerr = retry(s.ID)
+					if rerr != nil {
+						read.Errors = append(read.Errors, fmt.Sprintf("%s: cannot retry a sling killed at its bound: %v", s.ID, rerr))
+					}
+				}
+				if !cleared {
+					labeled[s.ID] = true
+					continue
+				}
+				// The row was read with the label on it, and Eligible refuses
+				// the label; the bead's store no longer carries it.
+				s.Labels = slices.DeleteFunc(s.Labels, func(l string) bool { return l == specdispatch.DispatchFailedLabel })
+				read.Retried = append(read.Retried, fmt.Sprintf("%s: cleared %s for a retry of a sling killed at its bound", s.ID, specdispatch.DispatchFailedLabel))
 			}
 			// The ready board is a snapshot: the full bead is re-read before
 			// any decision. A refusal is dropped here, and a refusal of a
@@ -2729,6 +2764,35 @@ func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigSt
 	}
 	read.LabeledFailed = len(labeled)
 	return read
+}
+
+// specRetryTimedOutSling clears the spec-dispatch-failed label of a bead whose
+// sling was killed at its bound while a retry is left: the kill is the host's
+// load, which clears by itself, so the label is what would keep the bead
+// waiting for a person (gt-vaivp). A label from any other failure, or one whose
+// retries are spent, stays.
+func specRetryTimedOutSling(townRoot, beadID string) (bool, error) {
+	return specRetryTimedOutSlingFrom(beads.NewPinned(resolveBeadDirFromTownRoot(townRoot, beadID)), beadID)
+}
+
+// specRetryTimedOutSlingFrom is specRetryTimedOutSling over a store the caller
+// supplies, so a test runs the decision and the clear against a fake instead of
+// a live bd.
+func specRetryTimedOutSlingFrom(b beads.Client, beadID string) (bool, error) {
+	issue, err := b.Show(beadID)
+	if err != nil {
+		return false, fmt.Errorf("reading the failed bead: %w", err)
+	}
+	if !slices.Contains(issue.Labels, specdispatch.DispatchFailedLabel) {
+		return false, nil
+	}
+	if _, retry := specdispatch.RetryAfterTimeout(issue.Notes); !retry {
+		return false, nil
+	}
+	if err := b.Update(beadID, beads.UpdateOptions{RemoveLabels: []string{specdispatch.DispatchFailedLabel}}); err != nil {
+		return false, fmt.Errorf("clearing the failed label: %w", err)
+	}
+	return true, nil
 }
 
 // specBoardDetails fills the two things a board row cannot: the design the lint

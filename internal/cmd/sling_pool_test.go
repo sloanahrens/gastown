@@ -1243,6 +1243,36 @@ func TestEachSpawnGetsItsOwnSeatClaimStore(t *testing.T) {
 	}
 }
 
+// The seat-decision lock is held only for the count-and-claim. Everything that
+// takes minutes under load — the worktree clone and the sandbox build — runs in
+// prepare, after the route has returned and the lock is back. A sling that held
+// it that long would make every other sling wait out its 5s lock bound and
+// route unreserved, and a sling that waited for the lock would spend its own
+// bound on another sling's clone (gt-vaivp).
+func TestTheSeatDecisionLockIsReleasedBeforeTheSpawnsSlowWork(t *testing.T) {
+	t.Parallel()
+	w := newTestPoolTown(cappedPool(2))
+	router := w.process()
+	lockedDuringPrepare := false
+	s := slingSeatSpawn{
+		backpressure: func(string, string, SlingSpawnOptions) error { return nil },
+		resolvePool:  func(_, requested string) (string, string, error) { return router.route(requested, true) },
+		releaseSeat:  router.seats.store.release,
+		prepare: func(_, rigName string, opts SlingSpawnOptions, _ slingStores) (*SpawnedPolecatInfo, error) {
+			lockedDuringPrepare = w.locked
+			return &SpawnedPolecatInfo{RigName: rigName, agent: opts.Agent}, nil
+		},
+	}
+
+	if _, err := s.spawn("/town", "gastown", SlingSpawnOptions{HookBead: "gt-a"}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if lockedDuringPrepare {
+		t.Error("the seat-decision lock was held across the spawn's slow work; every other sling waits on it")
+	}
+	w.decisionLockReleased(t)
+}
+
 // The claim a spawn makes travels on the spawn record, because that is what
 // both ends of the claim's life hold: StartSession, once the tmux session
 // exists and is the record of the seat, and the rollback, when no session ever

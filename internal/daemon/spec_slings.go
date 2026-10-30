@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // Background slings (gt-5h70s).
@@ -125,6 +128,25 @@ func (s *specSlings) newest() (time.Time, bool) {
 // the tick used to give a sling.
 func specSlingBound() time.Duration { return specDispatchTimeout }
 
+// specSlingContext is the context one background sling runs under: its own
+// bound nested in the daemon's context, so a sling cut by a shutdown and one
+// that ran out of time are told apart by their contexts. A test replaces it
+// (specSlingCtx) so the sling's bound is already spent when its process is run,
+// without a real wait (gt-vaivp).
+func (d *Daemon) specSlingContext() (context.Context, context.CancelFunc) {
+	if d.specSlingCtx != nil {
+		return d.specSlingCtx(d.ctx)
+	}
+	return context.WithTimeout(d.ctx, specSlingBound())
+}
+
+// specSlingTimeoutRetries bounds how many slings a bead whose process is killed
+// at its bound is given. A kill at the bound is the host's load reaching the
+// sling, not a defect in the bead, so the dispatcher clears the label this kill
+// writes and slings the bead again; past this many kills the load is not
+// clearing, and the label stays for a person (gt-vaivp).
+const specSlingTimeoutRetries = specdispatch.TimeoutRetries
+
 // specTickFlight is a running sling as the tick reads it: the bead, the seat it
 // occupies, and the start the stagger measures from (gt-vames). The job's file
 // and test lists stay out: the tick never reads them (gt-mx656).
@@ -219,7 +241,7 @@ func specSlingNotStartedEntry(bead, reason string) specDispatchTickEntry {
 // no report never reached those writes, so the daemon makes them
 // (failSpecSling).
 func (d *Daemon) runSpecSling(f specSlingFlight) {
-	ctx, cancel := context.WithTimeout(d.ctx, specSlingBound())
+	ctx, cancel := d.specSlingContext()
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.gtPath, "spec", "sling", "--job", string(f.job)) //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
@@ -229,8 +251,12 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 	elapsed := d.clk().Now().Sub(start).Round(time.Second)
 	if err != nil {
 		reason := fmt.Sprintf("sling process failed after %s of its %s bound: %v %s", elapsed, specSlingBound(), err, lastLine(string(stderr)))
+		// The sling's own deadline is what a kill at the bound reports: the
+		// daemon's ctx is untouched, so a cancelled sling is the shutdown
+		// path, which failSpecSling leaves alone.
+		killedAtBound := errors.Is(ctx.Err(), context.DeadlineExceeded)
 		d.logger.Printf("spec_dispatch: %s: %s", f.Bead, reason)
-		d.failSpecSling(f, reason)
+		d.failSpecSling(f, reason, killedAtBound)
 		d.feedSpecSlingOutcome(f, specSlingLost, specDispatchTickEntry{Bead: f.Bead, Rig: f.Rig,
 			Line: f.Bead + ": sling process failed, left unassigned: " + reason})
 		return
@@ -317,53 +343,71 @@ func (d *Daemon) correctDispatchTick(seq uint64, result specSlingResult) {
 
 // failSpecSling labels and annotates the bead of a sling whose process died
 // without reporting, as a failed foreground sling does: the label holds the
-// bead out of the queue until an operator clears it. A sling killed at its
-// bound may have hooked its bead and spawned the polecat first; that polecat
-// owns the work now, and nothing clears the label if it later dies, so the bead
-// is left unlabeled (gt-nosod). A daemon that is shutting down cut the sling
-// itself, so the bead stays ready for the next daemon.
-func (d *Daemon) failSpecSling(f specSlingFlight, reason string) {
+// bead out of the queue until an operator clears it.
+//
+// A kill at the sling's own bound is the host's load, not the bead: the note
+// records the kill as an attempt, and the dispatcher clears the label and slings
+// the bead again until specSlingTimeoutRetries kills have spent the retries
+// (gt-vaivp). A kill between the hook and the session start leaves a hook
+// nothing works, so the bead is unslung; a polecat with a session keeps its
+// bead, since nothing clears the label if that polecat later dies (gt-nosod). A
+// daemon shutting down cut the sling itself and leaves the bead as it is.
+func (d *Daemon) failSpecSling(f specSlingFlight, reason string, killedAtBound bool) {
 	if d.ctx.Err() != nil {
 		return
 	}
-	hooked, known := d.specSlingBeadHooked(f)
-	if !known {
+	issue, err := d.workBeads(d.workBeadsEnv(f.Rig), workBeadReadTimeout).Show(f.Bead)
+	if err != nil {
 		// The label is the one write nothing clears without an operator, so a
 		// read that failed withholds it: no read is no evidence the polecat
 		// does not own the bead (gt-nosod).
 		d.logger.Printf("spec_dispatch: %s: the bead could not be read before the failure label; leaving it unlabeled", f.Bead)
 		return
 	}
-	if hooked {
+	held, known := specSlingBeadHeld(issue)
+	if !known {
+		// An empty or unrecognized status is no answer: the label is the one
+		// write nothing clears, so only a status that says the bead is not held
+		// lets it be written (gt-nosod).
+		d.logger.Printf("spec_dispatch: %s: the bead's status is no answer for the failure label; leaving it unlabeled", f.Bead)
+		return
+	}
+	if held && !d.handBackHalfHooked(f, issue) {
 		d.logger.Printf("spec_dispatch: %s: sling died after hooking it; leaving the bead to its polecat and writing no %s label",
 			f.Bead, constants.LabelSpecDispatchFailed)
 		return
 	}
 	note := "spec-dispatch: " + reason + "; excluded from the queue until label " + constants.LabelSpecDispatchFailed + " is cleared"
+	if killedAtBound {
+		attempt := specdispatch.TimeoutAttempts(issue.Notes) + 1
+		note = fmt.Sprintf("%s sling killed at its %s bound (attempt %d of %d); %s: %s",
+			specdispatch.TimeoutNoteMarker, specSlingBound(), attempt, specSlingTimeoutRetries,
+			specSlingTimeoutNext(attempt), reason)
+	}
 	for _, args := range [][]string{
 		{"bead", "update", f.Bead, "--add-label", constants.LabelSpecDispatchFailed},
 		{"bead", "note", f.Bead, note},
 	} {
-		cmd := exec.CommandContext(d.ctx, d.gtPath, args...) //nolint:gosec // G204: gtPath resolved at daemon init
-		cmd.Dir = d.config.TownRoot
-		cmd.Env = daemonGTEnv(os.Environ())
-		if _, stderr, err := d.runCmd(cmd); err != nil {
-			d.logger.Printf("spec_dispatch: %s: gt %s failed: %v %s", f.Bead, args[1], err, lastLine(string(stderr)))
-		}
+		d.beadWrite(f, args...)
 	}
 }
 
-// specSlingBeadHooked reports whether the bead a dead sling was running is
-// hooked or in progress, so the failure label does not hold out work a polecat
-// owns, and whether that could be answered at all. A read that failed is not an
-// answer: known is false, which the caller must read as "leave the bead alone",
-// as a failed read is in workBeadStillSubmitted (gt-nosod).
-func (d *Daemon) specSlingBeadHooked(f specSlingFlight) (hooked, known bool) {
-	issue, err := d.workBeads(d.workBeadsEnv(f.Rig), workBeadReadTimeout).Show(f.Bead)
-	if err != nil {
-		d.logger.Printf("spec_dispatch: %s: reading the bead before the failure label: %v", f.Bead, err)
-		return false, false
+// specSlingTimeoutNext is what the note of attempt says happens next: the
+// dispatcher clears the label and slings the bead again while a retry is left,
+// and the label stays for a person once the retries are spent.
+func specSlingTimeoutNext(attempt int) string {
+	if attempt < specSlingTimeoutRetries {
+		return "the dispatcher clears this label and slings the bead again"
 	}
+	return "the retries are spent, so the label stays until an operator clears it"
+}
+
+// specSlingBeadHeld reports whether the bead a dead sling was running is hooked
+// or in progress, so the failure label does not hold out work a polecat owns,
+// and whether that could be answered at all. An empty or unrecognized status is
+// no answer: known is false, which the caller must read as "leave the bead
+// alone", as a failed read is in workBeadStillSubmitted (gt-nosod).
+func specSlingBeadHeld(issue *beads.Issue) (held, known bool) {
 	switch beads.IssueStatus(strings.TrimSpace(issue.Status)) {
 	case beads.IssueStatusHooked, beads.StatusInProgress:
 		return true, true
@@ -371,10 +415,64 @@ func (d *Daemon) specSlingBeadHooked(f specSlingFlight) (hooked, known bool) {
 		beads.IssueStatusPinned, beads.StatusTombstone:
 		return false, true
 	}
-	// An empty or unrecognized status is no answer: the label is the one write
-	// nothing clears, so only a status that says the bead is not held lets it be
-	// written (gt-nosod).
 	return false, false
+}
+
+// handBackHalfHooked unslings a bead a killed sling hooked without starting its
+// polecat's session, and reports whether the bead is no longer held. A polecat
+// that has a session owns its bead, and unslinging it would take work away from
+// an agent mid-task, so the release is gated on the session being gone. A
+// daemon with no tmux, or a tmux that cannot answer, hands nothing back: an
+// unanswered read is no proof the seat is dead, as the stale-hook reap reads it.
+func (d *Daemon) handBackHalfHooked(f specSlingFlight, issue *beads.Issue) bool {
+	holder := strings.TrimSpace(issue.Assignee)
+	parts := strings.Split(holder, "/")
+	if len(parts) != 3 || parts[1] != "polecats" {
+		return false
+	}
+	alive, known := d.polecatSessionAlive(parts[0], parts[2])
+	if !known {
+		d.logger.Printf("spec_dispatch: %s: cannot tell whether %s has a session; leaving the bead hooked", f.Bead, holder)
+		return false
+	}
+	if alive {
+		return false
+	}
+	cmd := exec.CommandContext(d.ctx, d.gtPath, "unsling", f.Bead, holder) //nolint:gosec // G204: gtPath resolved at daemon init
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = daemonGTEnv(os.Environ())
+	if _, stderr, err := d.runCmd(cmd); err != nil {
+		d.logger.Printf("spec_dispatch: %s: handing the bead back from %s failed: %v %s", f.Bead, holder, err, lastLine(string(stderr)))
+		return false
+	}
+	d.logger.Printf("spec_dispatch: %s: sling died after hooking it and before %s had a session; handed the bead back", f.Bead, holder)
+	return true
+}
+
+// polecatSessionAlive reports whether rig/polecats/name has a live session, and
+// whether tmux could be asked at all.
+func (d *Daemon) polecatSessionAlive(rig, polecat string) (alive, known bool) {
+	if d.tmux == nil {
+		return false, false
+	}
+	name := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rig), polecat)
+	alive, err := d.tmux.HasSession(name)
+	if err != nil {
+		return false, false
+	}
+	return alive, true
+}
+
+// beadWrite runs one gt bead verb for f in the town root and logs a failure. A
+// failed write is reported, not fatal: the sling is already out of the in-flight
+// set, and the next tick reads the bead as it stands.
+func (d *Daemon) beadWrite(f specSlingFlight, args ...string) {
+	cmd := exec.CommandContext(d.ctx, d.gtPath, args...) //nolint:gosec // G204: gtPath resolved at daemon init
+	cmd.Dir = d.config.TownRoot
+	cmd.Env = daemonGTEnv(os.Environ())
+	if _, stderr, err := d.runCmd(cmd); err != nil {
+		d.logger.Printf("spec_dispatch: %s: gt %s failed: %v %s", f.Bead, args[1], err, lastLine(string(stderr)))
+	}
 }
 
 // formatSpecSlingReport renders a sling's report as log lines: one per entry,
