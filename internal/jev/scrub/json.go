@@ -9,10 +9,11 @@ import (
 // ScrubJSON returns a JSON document with every string value scrubbed at any
 // depth, leaving keys, numbers and structure alone.
 //
-// A string under a credential-named key is replaced whole, the way the
-// assignment rule replaces NAME=value in text: the key is not written into the
-// output, but it is what tells the scrubber the value hides a secret. Input
-// that is not a JSON document is scrubbed as text, so nothing leaves unscrubbed.
+// A value under a credential-named key is replaced whole whatever its type — a
+// string, an object, an array or a number — the way the assignment rule
+// replaces NAME=value in text: the name stays, and it is what tells the
+// scrubber the value hides a secret. Input that is not a JSON document is
+// scrubbed as text, so nothing leaves unscrubbed.
 func (s *Scrubber) ScrubJSON(raw []byte) ([]byte, Report) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -44,11 +45,14 @@ func (s *Scrubber) scrubRawJSON(raw []byte) ([]byte, Report) {
 // scrubJSONValue scrubs one decoded value; key is the field holding it, empty
 // inside an array or at the top level.
 func (s *Scrubber) scrubJSONValue(key string, v any) (any, Report) {
+	if credentialName(key) {
+		// The whole value goes, not only its string leaves: a token object or
+		// a secret list under a credential name is as much a secret as a
+		// string, and a number beside the name is still the value it guards.
+		return marker(RuleAssignment), Report{counts: map[string]int{RuleAssignment: 1}}
+	}
 	switch val := v.(type) {
 	case string:
-		if credentialName(key) {
-			return marker(RuleAssignment), Report{counts: map[string]int{RuleAssignment: 1}}
-		}
 		text, report := s.Scrub(val)
 		return text, report
 	case map[string]any:

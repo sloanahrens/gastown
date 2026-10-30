@@ -6,6 +6,10 @@
 // made, so a caller can log which rules fired without logging what they
 // removed. Every rule is linear in the input and none panics, because the text
 // being scrubbed is untrusted (a transcript tail, a test log, a diff hunk).
+//
+// When a rule cannot tell whether a string is a secret, it redacts: a battery
+// that loses a little signal is recoverable, a secret sent to the hosted
+// service is not.
 package scrub
 
 import "sort"

@@ -136,12 +136,62 @@ func ruleCases() []ruleCase {
 			in:   "timeout=30",
 			want: "timeout=30",
 		},
+		{
+			name: "tokens used is a count", rule: RuleAssignment,
+			in:   "tokens_used=42",
+			want: "tokens_used=42",
+		},
+		{
+			name: "token count is a count", rule: RuleAssignment,
+			in:   "token_count: 12",
+			want: "token_count: 12",
+		},
+		{
+			name: "max tokens is a limit", rule: RuleAssignment,
+			in:   "max_tokens=4096",
+			want: "max_tokens=4096",
+		},
+		{
+			name: "secretary is not a secret", rule: RuleAssignment,
+			in:   "secretary=alice",
+			want: "secretary=alice",
+		},
+		{
+			name: "passwordless is a flag", rule: RuleAssignment,
+			in:   "passwordless=true",
+			want: "passwordless=true",
+		},
+		{
+			name: "monkey is not a key", rule: RuleAssignment,
+			in:   "monkey=bob",
+			want: "monkey=bob",
+		},
+		{
+			name: "author is not a credential", rule: RuleAssignment,
+			in:   "author=alice",
+			want: "author=alice",
+		},
+		{
+			name: "run together api key", rule: RuleAssignment,
+			in:   "apikey=abc123",
+			want: "apikey=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "camel case key", rule: RuleAssignment,
+			in:   "apiKey=abc123",
+			want: "apiKey=[REDACTED:assignment]", count: 1,
+		},
 
 		// long-token
 		{
 			name: "base64 run", rule: RuleLongToken,
 			in:   "prefix " + strings.Repeat("Q2VjcmV0", 6) + " suffix",
 			want: "prefix [REDACTED:long-token] suffix", count: 1,
+		},
+		{
+			name: "base64 blob", rule: RuleLongToken,
+			in:   "blob " + strings.Repeat("q8Zk3vX9pL", 4) + " end",
+			want: "blob [REDACTED:long-token] end", count: 1,
 		},
 		{
 			name: "long hex", rule: RuleLongToken,
@@ -159,9 +209,34 @@ func ruleCases() []ruleCase {
 			want: "commit " + hex64,
 		},
 		{
+			name: "sha256 digest", rule: RuleLongToken,
+			in:   "the sha256 digest is " + hex64,
+			want: "the sha256 digest is [REDACTED:long-token]", count: 1,
+		},
+		{
 			name: "slug", rule: RuleLongToken,
 			in:   "a-long-lowercase-slug-with-no-digits-anywhere",
 			want: "a-long-lowercase-slug-with-no-digits-anywhere",
+		},
+		{
+			name: "dated path", rule: RuleLongToken,
+			in:   "/2026/10/30/the-fix-for-the-dispatch-clock",
+			want: "/2026/10/30/the-fix-for-the-dispatch-clock",
+		},
+		{
+			name: "bead id", rule: RuleLongToken,
+			in:   "gt-tpg0p.43",
+			want: "gt-tpg0p.43",
+		},
+		{
+			name: "short commit id", rule: RuleLongToken,
+			in:   "landed in 1a2b3c4",
+			want: "landed in 1a2b3c4",
+		},
+		{
+			name: "version", rule: RuleLongToken,
+			in:   "v1.2.3-rc.1",
+			want: "v1.2.3-rc.1",
 		},
 
 		// email
@@ -348,12 +423,13 @@ func TestScrubSafe(t *testing.T) {
 }
 
 // checkDeadlineBudget fails when the work that started at start has used half
-// the time left before the test's deadline.
+// the time left before the test's deadline. A run without a deadline cannot
+// enforce the bound, so it fails rather than passing the check silently.
 func checkDeadlineBudget(t *testing.T, start time.Time) {
 	t.Helper()
 	deadline, ok := t.Deadline()
 	if !ok {
-		return
+		t.Fatal("the test has no deadline, so its time budget went unchecked; run go test with its default timeout")
 	}
 	if elapsed := time.Since(start); elapsed > deadline.Sub(start)/2 {
 		t.Fatalf("scrubbing took %s, more than half the %s left on the test deadline", elapsed, deadline.Sub(start))

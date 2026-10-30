@@ -79,6 +79,56 @@ func TestScrubJSON(t *testing.T) {
 	}
 }
 
+// TestScrubJSONCredentialValues checks that a credential-named key redacts its
+// whole value whatever its JSON type, so a secret nested under the key cannot
+// reach the output as structure, and that a look-alike field beside it is kept.
+func TestScrubJSONCredentialValues(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{
+  "token": {"refresh": "hunter2", "scopes": ["read"]},
+  "secret": ["hunter2", "hunter3"],
+  "password": 1234,
+  "api_key": true,
+  "nested": {"tokens_used": 12, "author": "alice", "items": [1, 2]}
+}`)
+
+	out, report := Default().ScrubJSON(raw)
+	if !json.Valid(out) {
+		t.Fatalf("scrubbed document is not valid JSON: %s", out)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("decode scrubbed document: %v", err)
+	}
+	for _, key := range []string{"token", "secret", "password", "api_key"} {
+		if got, want := doc[key], any(marker(RuleAssignment)); got != want {
+			t.Errorf("%s = %v, want the whole value %v", key, got, want)
+		}
+	}
+	if strings.Contains(string(out), "hunter") {
+		t.Errorf("a secret survived under a credential key: %s", out)
+	}
+
+	nested := doc["nested"].(map[string]any)
+	if got, want := nested["tokens_used"], any(float64(12)); got != want {
+		t.Errorf("nested.tokens_used = %v, want %v", got, want)
+	}
+	if got, want := nested["author"], any("alice"); got != want {
+		t.Errorf("nested.author = %v, want %v", got, want)
+	}
+	items := nested["items"].([]any)
+	if len(items) != 2 || items[0] != any(float64(1)) || items[1] != any(float64(2)) {
+		t.Errorf("nested.items = %v, want [1 2]", items)
+	}
+
+	if got, want := report.Count(RuleAssignment), 4; got != want {
+		t.Errorf("report counts assignment %d times, want %d", got, want)
+	}
+	if got, want := report.Total(), 4; got != want {
+		t.Errorf("report total %d, want %d", got, want)
+	}
+}
+
 // TestScrubJSONFallback checks that input which is not one JSON document is
 // scrubbed as text rather than passed through unscrubbed.
 func TestScrubJSONFallback(t *testing.T) {

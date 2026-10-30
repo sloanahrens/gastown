@@ -207,8 +207,8 @@ func assignmentValue(text string, pos int) (end int, quoted bool) {
 	return len(text), false
 }
 
-// credentialWords name a credential on their own; a name carrying one of them
-// is an assignment to a credential.
+// credentialWords name a credential on their own; a field name that contains
+// one of them as a word holds a credential.
 var credentialWords = map[string]bool{
 	"credential":  true,
 	"credentials": true,
@@ -223,11 +223,34 @@ var credentialWords = map[string]bool{
 	"tokens":      true,
 }
 
-// credentialSuffixes catch a run-together name ("apikey", "authtoken") whose
-// words never got separated. "keyboard" ends in none of them.
-var credentialSuffixes = []string{
-	"credential", "credentials", "key", "keys", "passwd", "password",
-	"passwords", "secret", "secrets", "token", "tokens",
+// compoundCredentialNames catch a run-together name ("apikey", "authtoken")
+// whose words never got separated. The list is explicit because a suffix test
+// would claim "monkey" for ending in "key".
+var compoundCredentialNames = map[string]bool{
+	"accesstoken":  true,
+	"apikey":       true,
+	"apikeys":      true,
+	"appsecret":    true,
+	"authkey":      true,
+	"authtoken":    true,
+	"clientsecret": true,
+	"dbpassword":   true,
+	"idtoken":      true,
+	"masterkey":    true,
+	"passphrase":   true,
+	"privatekey":   true,
+	"refreshtoken": true,
+	"secretkey":    true,
+	"signingkey":   true,
+	"userpassword": true,
+}
+
+// safeCredentialNames hold a credential word but count it or describe it rather
+// than hold it, so redacting them would replace signal with a marker.
+var safeCredentialNames = map[string]bool{
+	"max_tokens":  true,
+	"token_count": true,
+	"tokens_used": true,
 }
 
 // credentialName reports whether a field name names a credential, however its
@@ -237,14 +260,14 @@ func credentialName(name string) bool {
 	if len(words) == 0 {
 		return false
 	}
+	if safeCredentialNames[strings.ToLower(name)] {
+		return false
+	}
+	if len(words) == 1 && compoundCredentialNames[words[0]] {
+		return true
+	}
 	for _, w := range words {
 		if credentialWords[w] {
-			return true
-		}
-	}
-	runTogether := strings.Join(words, "")
-	for _, suffix := range credentialSuffixes {
-		if strings.HasSuffix(runTogether, suffix) {
 			return true
 		}
 	}
@@ -278,30 +301,48 @@ func nameWords(name string) []string {
 }
 
 // longRun matches a run long enough to be a bare key: 40 or more characters of
-// base64, base64url or hex alphabet.
+// base64, base64url or hex alphabet, or the separators a path or slug holds.
 var longRun = regexp.MustCompile(`[A-Za-z0-9+/=_-]{40,}`)
 
-// scrubLongTokens replaces long runs that look like key material. A run is kept
-// when it is a bare git commit id (40 or 64 hex characters), because the id is
-// signal a battery reads, and when it reads as a word or a slug.
+// scrubLongTokens replaces long runs shaped like key material and keeps the
+// ones that are signal: a path or slug, a bead id, and a git commit id (a bare
+// 40-hex run, or a 64-hex run the surrounding line presents as a commit).
 func scrubLongTokens(text string) (string, int) {
+	matches := longRun.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return text, 0
+	}
+	var b strings.Builder
+	b.Grow(len(text))
 	n := 0
-	out := longRun.ReplaceAllStringFunc(text, func(m string) string {
-		if !looksLikeLongSecret(m) {
-			return m
+	last := 0
+	for _, m := range matches {
+		run := text[m[0]:m[1]]
+		if isHex(run) {
+			if len(run) == 40 || (len(run) == 64 && commitContext(text, m[0])) {
+				continue
+			}
+		} else if !looksLikeLongSecret(run) {
+			continue
 		}
+		b.WriteString(text[last:m[0]])
+		b.WriteString(marker(RuleLongToken))
+		last = m[1]
 		n++
-		return marker(RuleLongToken)
-	})
-	return out, n
+	}
+	if n == 0 {
+		return text, 0
+	}
+	b.WriteString(text[last:])
+	return b.String(), n
 }
 
-// looksLikeLongSecret reports whether a long run is shaped like key material.
+// looksLikeLongSecret reports whether a long non-hex run is key material rather
+// than a path, slug or id. Mixed case or a base64 symbol is key material; a run
+// of lower-case words joined by separators is not.
 func looksLikeLongSecret(s string) bool {
-	if isHex(s) {
-		return len(s) != 40 && len(s) != 64
-	}
 	var upper, lower, digits int
+	base64Symbol := false
 	for _, r := range s {
 		switch {
 		case r >= 'A' && r <= 'Z':
@@ -310,15 +351,77 @@ func looksLikeLongSecret(s string) bool {
 			lower++
 		case r >= '0' && r <= '9':
 			digits++
+		case r == '+' || r == '=':
+			base64Symbol = true
 		}
 	}
-	if upper > 0 && lower > 0 {
+	if base64Symbol || (upper > 0 && lower > 0) {
 		return true
 	}
-	// An all-lower-case run is a word or a slug unless many digits say it is
-	// not; an all-upper-case run is a word too, and the vendor rule holds the
-	// upper-case key formats.
-	return upper == 0 && lower > 0 && digits >= 8
+	if pathShape(s) {
+		return false
+	}
+	// A single-case run with no separator: random key material carries digits,
+	// a long English word does not.
+	return digits >= 8
+}
+
+// pathShape reports whether a run reads as a path or slug: lower-case letters
+// and digits joined by separators.
+func pathShape(s string) bool {
+	separator := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '/' || r == '-' || r == '_':
+			separator = true
+		default:
+			return false
+		}
+	}
+	return separator
+}
+
+// commitWords make a 64-character hex run a git object id rather than a digest.
+var commitWords = map[string]bool{
+	"blob":     true,
+	"branch":   true,
+	"checkout": true,
+	"cherry":   true,
+	"commit":   true,
+	"commits":  true,
+	"git":      true,
+	"head":     true,
+	"merge":    true,
+	"object":   true,
+	"oid":      true,
+	"parent":   true,
+	"pick":     true,
+	"rebase":   true,
+	"rev":      true,
+	"revision": true,
+	"tag":      true,
+	"tree":     true,
+}
+
+// commitContext reports whether the line holding pos presents the run at pos as
+// a git object id. A digest written "sha256: <hex>" is not one: its word is
+// "sha256", which is not in commitWords.
+func commitContext(text string, pos int) bool {
+	start := pos - 80
+	if start < 0 {
+		start = 0
+	}
+	window := text[start:pos]
+	if i := strings.LastIndexByte(window, '\n'); i >= 0 {
+		window = window[i+1:]
+	}
+	for _, word := range nameWords(window) {
+		if commitWords[word] {
+			return true
+		}
+	}
+	return false
 }
 
 // isHex reports whether s is non-empty and made only of hex digits.
