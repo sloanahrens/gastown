@@ -1,4 +1,4 @@
-package jev_test
+package wiringtest
 
 import (
 	"os"
