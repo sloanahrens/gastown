@@ -22,9 +22,11 @@ import (
 	"github.com/steveyegge/gastown/internal/promote"
 )
 
-// The tier_sweep job runs scripts/tier-sweep.sh against origin/main on an
-// interval: the tiers `make gate` does not run, which landings gate only for
-// the submissions that can move them (gt-vsct7.5). It replaces the overseer's
+// The tier_sweep job runs origin/main's shell tests through the Go runner
+// (internal/shelltier) and its integration and race tiers through
+// scripts/tier-sweep.sh, on an interval: the tiers `make gate` does not run,
+// which landings gate only for the submissions that can move them
+// (gt-vsct7.5). It replaces the overseer's
 // hourly :37 cron, so it is silent while green and costs nothing while main is
 // unchanged.
 //
@@ -68,6 +70,12 @@ const (
 	// tree ships its own copy, so a sweep never runs a script main does not
 	// have.
 	tierSweepScript = "scripts/tier-sweep.sh"
+
+	// tierSweepShellRunner is the shell stage's command in place of the tier
+	// script: the Go runner that runs every shell test in the manifest
+	// (gt-u560q.4). It takes no per-script filter, so the sweep bead names it
+	// whatever unit is red.
+	tierSweepShellRunner = "go run ./internal/shelltier/cmd/shelltier --all"
 
 	// tierSweepRedLabel marks a bead the sweep filed for one failing unit. It
 	// is deliberately not landworker.LabelRedMain: the post-land runner's
@@ -389,6 +397,9 @@ type tierSweepStage struct {
 	// ["integration", "race"]. The run's verdicts are keyed by these.
 	tiers  []string
 	budget time.Duration
+	// runner, when set, is the command the stage runs in place of the tier
+	// script: the shell stage's Go runner.
+	runner string
 	// slot is true when the stage starts containers and so must run under the
 	// town's container-gate slot.
 	slot bool
@@ -401,6 +412,9 @@ type tierSweepStage struct {
 
 // command is the shell command the stage runs in the checked-out tree.
 func (s tierSweepStage) command() string {
+	if s.runner != "" {
+		return s.runner
+	}
 	return "bash " + tierSweepScript + " " + strings.Join(s.tiers, " ")
 }
 
@@ -891,6 +905,7 @@ func tierSweepStages(rig string) []tierSweepStage {
 	return []tierSweepStage{{
 		tiers:  []string{"shell"},
 		budget: tierSweepShellBudget,
+		runner: tierSweepShellRunner,
 		step:   "shell",
 	}, {
 		tiers:  []string{"integration", "race"},

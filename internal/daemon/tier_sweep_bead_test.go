@@ -779,9 +779,10 @@ func TestTierSweepBead_MissingLogFallsBack(t *testing.T) {
 	}
 }
 
-// The shell tier's unit is a script, so its check is the script the sweep ran,
-// not a go test filter.
-func TestTierSweepBead_ShellTierRunsTheScript(t *testing.T) {
+// The shell tier's check is the Go runner that runs every shell test, the
+// command the shell stage runs: it names the runner, never the one script the
+// sweep saw go red.
+func TestTierSweepBead_ShellTierNamesTheRunner(t *testing.T) {
 	t.Parallel()
 	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
 	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
@@ -798,8 +799,11 @@ func TestTierSweepBead_ShellTierRunsTheScript(t *testing.T) {
 	if v := lintTierSweepBead(opts); !v.Clean() {
 		t.Fatalf("the shell bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
 	}
-	if want := "`GT_TEST_DOCKER=0 bash scripts/test-makefile.sh` passes"; !strings.Contains(opts.Acceptance, want) {
+	if want := "`GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --all` passes"; !strings.Contains(opts.Acceptance, want) {
 		t.Errorf("acceptance = %q, want it to carry %q", opts.Acceptance, want)
+	}
+	if strings.Contains(opts.Acceptance, "test-makefile.sh") {
+		t.Errorf("acceptance = %q, want no reference to scripts/test-makefile.sh", opts.Acceptance)
 	}
 }
 

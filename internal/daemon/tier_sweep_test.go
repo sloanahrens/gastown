@@ -589,6 +589,27 @@ func TestTierSweepStages_EveryHourRunsEveryTier(t *testing.T) {
 	}
 }
 
+// TestTierSweepStages_ShellStageRunsTheGoRunner: the shell stage runs the Go
+// runner with --all, the integration and race stage keeps its script, and only
+// the integration stage holds the container-gate slot.
+func TestTierSweepStages_ShellStageRunsTheGoRunner(t *testing.T) {
+	t.Parallel()
+	stages := tierSweepStages("gastown")
+	if len(stages) != 2 {
+		t.Fatalf("stages = %+v, want shell then integration race", stages)
+	}
+	shell, integration := stages[0], stages[1]
+	if got, want := shell.command(), "go run ./internal/shelltier/cmd/shelltier --all"; got != want {
+		t.Errorf("shell command = %q, want %q", got, want)
+	}
+	if got, want := integration.command(), "bash scripts/tier-sweep.sh integration race"; got != want {
+		t.Errorf("integration command = %q, want %q", got, want)
+	}
+	if shell.slot || !integration.slot {
+		t.Errorf("slot: shell = %v, integration = %v; want only the integration stage to hold the slot", shell.slot, integration.slot)
+	}
+}
+
 func TestRunTierSweep_RunsEveryTierEveryCycle(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15) // odd
