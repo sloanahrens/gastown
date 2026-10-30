@@ -3,6 +3,7 @@ package forgejoresync
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -235,5 +236,28 @@ func TestEqualRefSets(t *testing.T) {
 	}
 	if !Equal(nil, nil) {
 		t.Fatal("Equal(nil, nil) = false, want true")
+	}
+}
+
+// TestExecRunnerErrorNamesCommandNotOutput drives the failure branch with a fake
+// process starter, so no process starts. The error wraps the starter's error and
+// names the program and subcommand, and the output the failed process wrote
+// stays out of it, since that output can carry a secret.
+func TestExecRunnerErrorNamesCommandNotOutput(t *testing.T) {
+	t.Parallel()
+	const secret = "token-value-abc"
+	boom := errors.New("exit status 128")
+	start := func(name string, args ...string) ([]byte, error) {
+		return []byte(secret), boom
+	}
+	_, err := execRunner(start)([]string{"git", "ls-remote", "--heads", "https://github.com/acme/gastown.git"})
+	if !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want it to wrap %v", err, boom)
+	}
+	if !strings.HasPrefix(err.Error(), "git ls-remote: ") {
+		t.Fatalf("error = %q, want it to name git ls-remote", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error %q carries the process output", err)
 	}
 }

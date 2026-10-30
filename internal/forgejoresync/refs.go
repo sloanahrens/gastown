@@ -97,14 +97,22 @@ func NewExecGit() ExecGit {
 	return ExecGit{Run: RunExec}
 }
 
-// RunExec starts the program in argv and returns its stdout. Its error names
-// the program and subcommand, never the output, which can carry a secret.
-func RunExec(argv []string) ([]byte, error) {
-	out, err := exec.Command(argv[0], argv[1:]...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", strings.Join(argv[:2], " "), err)
+// RunExec is the production Runner: it starts the program through os/exec.
+var RunExec Runner = execRunner(func(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).Output()
+})
+
+// execRunner wraps a process starter as a Runner. Its error names the program
+// and subcommand, never the output, which can carry a secret. The starter is a
+// seam: a test drives the failure branch without starting a process.
+func execRunner(start func(name string, args ...string) ([]byte, error)) Runner {
+	return func(argv []string) ([]byte, error) {
+		out, err := start(argv[0], argv[1:]...)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", strings.Join(argv[:2], " "), err)
+		}
+		return out, nil
 	}
-	return out, nil
 }
 
 // LsRemote lists the branches and tags of url.
