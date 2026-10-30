@@ -1,6 +1,6 @@
 package daemon
 
-// cache_trim applies the shared cache claim's trim from the disk_maintenance
+// cacheTrim applies the shared cache claim's trim from the disk_maintenance
 // patrol (gt-rm4am): in the patrol's window the pass reads the claim's listing,
 // builds the trim Job with internal/polecat/cachevol, and in apply mode applies
 // the manifest's documents in order, the shard ConfigMaps before the Job that
@@ -12,20 +12,25 @@ package daemon
 // trim and says so, because a listing read as empty would plan a trim of a
 // claim nothing looked at.
 //
+// The claim's namespace comes from the claim itself, not from a default or from
+// a pod: pods of the same claim name in two namespaces are two claims, and each
+// is judged by its own namespace's pods alone.
+//
 // The listing comes from the cluster, not from this host: the claim is mounted
 // only by pods, so the pass reads the pods that mount it with kubectl -- the way
-// the registry target's in-use provider reads pods -- counts the running ones as
-// PlanTrim's sandbox count, and asks one of them to print the listing with the
-// image's trim-list helper.
+// the registry target's in-use provider reads pods -- counts the ones holding
+// it as PlanTrim's sandbox count, and asks a running one of them to print the
+// listing with the image's trim-list helper.
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -55,9 +60,24 @@ const (
 	// then is reported and its shards are left for the next run.
 	cacheTrimWaitTimeout = 2 * time.Minute
 
+	// cacheTrimDeleteTimeout bounds the foreground delete of an earlier run's
+	// Job. kubectl returns once the Job and its pods are gone, so the name the
+	// rerun applies next is not racing that delete.
+	cacheTrimDeleteTimeout = 60 * time.Second
+
 	// cacheTrimKubeconfig is the town's sandbox kubeconfig, relative to the
 	// town root, the file the registry target reads the in-use pods through too.
 	cacheTrimKubeconfig = ".runtime/sbx-k8s/kubeconfig"
+
+	// cacheTrimJobNameMax is the most a Kubernetes object name holds. A Job
+	// name of a longer claim would be refused at apply, so it is shortened in
+	// one place (cacheTrimJobName) rather than at every caller.
+	cacheTrimJobNameMax = 63
+
+	// cacheTrimJobNameDigest is how many hex characters of the claim's SHA-256
+	// a shortened Job name ends with: enough that two long claims sharing a
+	// prefix still get two names.
+	cacheTrimJobNameDigest = 8
 )
 
 // cacheTrimClaimRE is the DNS-1123 label form a PersistentVolumeClaim's name
@@ -112,6 +132,10 @@ func cacheTrimClaims(profiles map[string]agentconfig.SandboxProfile) ([]cacheTri
 // a DNS-1123 label. The settings check the same form, and this pass checks it
 // again rather than trust a config built in code, since the name reaches a
 // kubectl argument.
+//
+// A claim failing this check is refused, never normalized: an uppercase letter
+// or an underscore stops the trim rather than becoming a hyphen, so the pass
+// never trims a claim other than the one the town named.
 func validTrimClaim(claim string) bool {
 	return len(claim) <= 63 && cacheTrimClaimRE.MatchString(claim)
 }
@@ -131,8 +155,30 @@ func cacheTrimCap(getenv func(string) string) (int64, error) {
 	return capBytes, nil
 }
 
+// cacheTrimJobName is a claim's trim Job name: the trim prefix and the claim
+// when the two fit a Kubernetes object name, and otherwise the prefix, as much
+// of the claim as fits, and eight hex characters of the claim's SHA-256, so two
+// long claims sharing a prefix still get two names.
+//
+// The claim reaches here after validTrimClaim, so it is already a DNS-1123
+// label; the shortening keeps that form because it cuts at a character
+// boundary and drops any hyphen the cut left at the end.
+func cacheTrimJobName(claim string) string {
+	name := cachevol.DefaultTrimJobName + "-" + claim
+	if len(name) <= cacheTrimJobNameMax {
+		return name
+	}
+	sum := sha256.Sum256([]byte(claim))
+	digest := hex.EncodeToString(sum[:])[:cacheTrimJobNameDigest]
+	prefix := cachevol.DefaultTrimJobName + "-"
+	keep := cacheTrimJobNameMax - len(prefix) - 1 - len(digest)
+	base := strings.TrimRight(claim[:keep], "-")
+	return prefix + base + "-" + digest
+}
+
 // cacheTrim is the pass's cache trim: each claim a kubernetes sandbox profile
-// mounts, trimmed in the mode the patrol runs in.
+// mounts, in each namespace that holds it, trimmed in the mode the patrol runs
+// in.
 func (d *Daemon) cacheTrim(ctx context.Context, mode string) {
 	s := d.diskMaintenanceSeams()
 	profiles, err := s.sandboxes()
@@ -153,40 +199,53 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) {
 		return
 	}
 	kubeconfig := filepath.Join(d.config.TownRoot, filepath.FromSlash(cacheTrimKubeconfig))
-	// trimmed is the namespace each claim this pass trims in. A trim's labels
+	namespaces, err := d.cacheTrimClaimNamespaces(ctx, kubeconfig)
+	if err != nil {
+		d.logger.Printf("disk_maintenance: cache trim: the cluster's claims could not be read: %v; nothing trimmed", err)
+		return
+	}
+	// trimmed is the claim each namespace this pass trims for. A trim's labels
 	// are the same for every claim, so two claims trimming in one namespace
 	// would delete each other's objects; the second is refused.
 	trimmed := map[string]string{}
 	for _, claim := range claims {
-		d.cacheTrimClaim(ctx, kubeconfig, claim, capBytes, mode == agentconfig.DiskMaintenanceModeApply, trimmed)
+		found := namespaces[claim.ClaimName]
+		if len(found) == 0 {
+			d.logger.Printf("disk_maintenance: cache trim %s: no claim of that name is in the cluster; nothing trimmed", claim.ClaimName)
+			continue
+		}
+		for _, namespace := range found {
+			d.cacheTrimClaim(ctx, kubeconfig, claim, namespace, capBytes, mode == agentconfig.DiskMaintenanceModeApply, trimmed)
+		}
 	}
 }
 
-// cacheTrimClaim trims one claim: it reads the listing through a pod that
-// mounts the claim, builds the trim, and in apply mode applies it. trimmed is
-// the namespace each claim this pass already trims in, which the claim joins.
-func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, capBytes int64, apply bool, trimmed map[string]string) {
-	running, sources, err := d.cacheTrimPods(ctx, kubeconfig, claim.ClaimName)
+// cacheTrimClaim trims one claim in one namespace: it reads the listing through
+// a pod that mounts the claim there, builds the trim, and in apply mode applies
+// it. trimmed is the namespace each claim this pass already trims in, which the
+// claim joins.
+func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, namespace string, capBytes int64, apply bool, trimmed map[string]string) {
+	sandboxes, sources, err := d.cacheTrimPods(ctx, kubeconfig, namespace, claim.ClaimName)
 	if err != nil {
-		d.logger.Printf("disk_maintenance: cache trim %s: the pods that mount it could not be read: %v; nothing trimmed", claim.ClaimName, err)
+		d.logger.Printf("disk_maintenance: cache trim %s in %s: the pods that mount it could not be read: %v; nothing trimmed", claim.ClaimName, namespace, err)
 		return
 	}
 	if len(sources) == 0 {
-		d.logger.Printf("disk_maintenance: cache trim %s: no running pod mounts it, so its listing cannot be read; nothing trimmed", claim.ClaimName)
+		d.logger.Printf("disk_maintenance: cache trim %s in %s: no running pod mounts it, so its listing cannot be read (%d pod(s) hold it); nothing trimmed", claim.ClaimName, namespace, sandboxes)
 		return
 	}
 	listing, err := d.cacheTrimListing(ctx, kubeconfig, sources[0])
 	if err != nil {
-		d.logger.Printf("disk_maintenance: cache trim %s: the listing could not be read: %v; nothing trimmed", claim.ClaimName, err)
+		d.logger.Printf("disk_maintenance: cache trim %s in %s: the listing could not be read: %v; nothing trimmed", claim.ClaimName, namespace, err)
 		return
 	}
 
-	// The Job is named after the claim so two claims in one namespace get two
-	// Jobs, and a rerun of a trim overwrites its own rather than a neighbour's.
-	jobName := cachevol.DefaultTrimJobName + "-" + claim.ClaimName
-	namespace := sources[0].Namespace
+	// The Job is named after the claim, in the claim's own namespace, so two
+	// claims get two Jobs and a rerun of a trim overwrites its own rather than a
+	// neighbour's.
+	jobName := cacheTrimJobName(claim.ClaimName)
 	if other, taken := trimmed[namespace]; taken {
-		d.logger.Printf("disk_maintenance: cache trim %s: the claim %s is trimmed in the same namespace (%s), and a trim's labels cannot tell the two sets of objects apart; nothing trimmed", claim.ClaimName, other, namespace)
+		d.logger.Printf("disk_maintenance: cache trim %s in %s: the claim %s is trimmed in the same namespace, and a trim's labels cannot tell the two sets of objects apart; nothing trimmed", claim.ClaimName, namespace, other)
 		return
 	}
 	trimmed[namespace] = claim.ClaimName
@@ -197,21 +256,21 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		ClaimName:        claim.ClaimName,
 		Listing:          listing,
 		CapBytes:         capBytes,
-		SandboxesRunning: running,
+		SandboxesRunning: sandboxes,
 	})
 	if err != nil {
-		d.logger.Printf("disk_maintenance: cache trim %s: %v; nothing trimmed", claim.ClaimName, err)
+		d.logger.Printf("disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
 		return
 	}
 	if !apply {
-		d.logger.Printf("disk_maintenance: cache trim %s dry_run: %s", claim.ClaimName, cacheTrimManifestLine(jobName, m))
+		d.logger.Printf("disk_maintenance: cache trim %s in %s dry_run: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
 		return
 	}
 	if err := d.cacheTrimApply(ctx, kubeconfig, namespace, jobName, m); err != nil {
-		d.logger.Printf("disk_maintenance: cache trim %s: the apply failed: %v", claim.ClaimName, err)
+		d.logger.Printf("disk_maintenance: cache trim %s in %s: the apply failed: %v", claim.ClaimName, namespace, err)
 		return
 	}
-	d.logger.Printf("disk_maintenance: cache trim %s applied: %s", claim.ClaimName, cacheTrimManifestLine(jobName, m))
+	d.logger.Printf("disk_maintenance: cache trim %s in %s applied: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
 }
 
 // cacheTrimManifestLine names what a trim applies: the shard ConfigMaps the
@@ -235,21 +294,41 @@ func cacheTrimManifestLine(jobName string, m *cachevol.TrimManifest) string {
 // shard, so a trim's leftovers go only through the selector the trim's own
 // objects carry (gt-ej1yz).
 func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobName string, m *cachevol.TrimManifest) error {
-	existing, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
+	existing, running, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
 	if err != nil {
 		return err
 	}
-	for _, stale := range cachevol.TrimStale(m, existing) {
-		kind := strings.ToLower(stale.Kind)
-		if _, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "delete", kind, stale.Name, "-n", namespace, "--ignore-not-found"); err != nil {
-			return fmt.Errorf("deleting the stale %s %s: %w", stale.Kind, stale.Name, err)
+	stale := cachevol.TrimStale(m, existing)
+	// An earlier Job that still runs is left alone, and this trim waits for the
+	// next pass: deleting it would stop the trim its own pods are in the middle
+	// of, and applying over it is refused because its template is immutable.
+	for _, o := range stale {
+		if o.Kind == "Job" && running[o.Name] {
+			return fmt.Errorf("the earlier trim Job %s is still running; its pods mount the claim, so it is left to finish", o.Name)
 		}
-		d.logger.Printf("disk_maintenance: cache trim %s: deleted the stale %s %s", jobName, stale.Kind, stale.Name)
+	}
+	for _, object := range stale {
+		kind := strings.ToLower(object.Kind)
+		args := []string{"delete", kind, object.Name, "-n", namespace, "--ignore-not-found"}
+		if kind == "job" {
+			// Foreground and bounded: kubectl returns once the Job and its pods
+			// are gone, so the same-named Job applied next does not race the
+			// delete (gt-tjhfe).
+			timeout := strconv.Itoa(int(cacheTrimDeleteTimeout.Seconds())) + "s"
+			args = append(args, "--wait=true", "--timeout="+timeout)
+		}
+		if _, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, args...); err != nil {
+			return fmt.Errorf("deleting the stale %s %s: %w", object.Kind, object.Name, err)
+		}
+		d.logger.Printf("disk_maintenance: cache trim %s: deleted the stale %s %s", jobName, object.Kind, object.Name)
 	}
 
 	docs := m.Documents()
 	for i, doc := range docs {
-		if _, err := d.cacheTrimKubectl(ctx, kubeconfig, doc, "apply", "-f", "-"); err != nil {
+		// -n names the namespace the document was built for; an apply that
+		// relied on the document alone would run in the caller's default
+		// namespace.
+		if _, err := d.cacheTrimKubectl(ctx, kubeconfig, doc, "apply", "-f", "-", "-n", namespace); err != nil {
 			return fmt.Errorf("applying document %d of %d: %w", i+1, len(docs), err)
 		}
 	}
@@ -270,8 +349,9 @@ func (d *Daemon) cacheTrimCleanShards(ctx context.Context, kubeconfig, namespace
 		return nil
 	}
 	timeout := strconv.Itoa(int(cacheTrimWaitTimeout.Seconds())) + "s"
-	if _, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "wait", "--for=condition=complete", "job/"+jobName, "-n", namespace, "--timeout="+timeout); err != nil {
-		d.logger.Printf("disk_maintenance: cache trim %s: the Job has not finished (%v); its shards stay for the next run", jobName, err)
+	_, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, nil, "wait", "--for=condition=complete", "job/"+jobName, "-n", namespace, "--timeout="+timeout)
+	if err != nil {
+		d.logger.Printf("disk_maintenance: cache trim %s: %s; its shards stay for the next run", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, stderr))
 		return nil
 	}
 	if _, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "delete", "configmap", "-n", namespace, "-l", cachevol.TrimSelector()); err != nil {
@@ -280,15 +360,62 @@ func (d *Daemon) cacheTrimCleanShards(ctx context.Context, kubeconfig, namespace
 	return nil
 }
 
+// cacheTrimWaitFailure says why the wait ended without the Job completing: the
+// Job failed, the wait timed out, or kubectl could not watch the Job. Each is a
+// different repair, so each is a different line.
+//
+// Every outcome leaves the shards in place, so a status that cannot be read
+// only costs the line its precision; it does not change what the pass does.
+func (d *Daemon) cacheTrimWaitFailure(ctx context.Context, kubeconfig, namespace, jobName string, stderr []byte) string {
+	if d.cacheTrimJobFailed(ctx, kubeconfig, namespace, jobName) {
+		return "the Job failed"
+	}
+	if bytes.Contains(stderr, []byte("timed out waiting for the condition")) {
+		return "the Job has not finished within the wait (timed out)"
+	}
+	return "the wait on the Job failed"
+}
+
+// cacheTrimJobFailed reports whether the Job's own status says it failed: a
+// failed count, or a Failed condition set true.
+func (d *Daemon) cacheTrimJobFailed(ctx context.Context, kubeconfig, namespace, jobName string) bool {
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "get", "job", jobName, "-n", namespace, "-o", "json")
+	if err != nil {
+		return false
+	}
+	var job struct {
+		Status struct {
+			Failed     int `json:"failed"`
+			Conditions []struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"conditions"`
+		} `json:"status"`
+	}
+	if json.Unmarshal(out, &job) != nil {
+		return false
+	}
+	if job.Status.Failed > 0 {
+		return true
+	}
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == "Failed" && condition.Status == "True" {
+			return true
+		}
+	}
+	return false
+}
+
 // cacheTrimExisting lists the objects a trim applies in namespace: the Jobs and
-// shard ConfigMaps carrying TrimSelector, the labels only a trim applies.
+// shard ConfigMaps carrying TrimSelector, the labels only a trim applies, and
+// which of the Jobs still run.
 //
 // A reply without an item list refuses: an unreadable answer would read as "no
 // trim ran here", and the next apply's Job would be refused by the running one.
-func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace string) ([]cachevol.TrimObject, error) {
+func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace string) ([]cachevol.TrimObject, map[string]bool, error) {
 	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "get", "job,configmap", "-n", namespace, "-l", cachevol.TrimSelector(), "-o", "json")
 	if err != nil {
-		return nil, fmt.Errorf("listing the trim's objects: %w", err)
+		return nil, nil, fmt.Errorf("listing the trim's objects: %w", err)
 	}
 	var list struct {
 		Items *[]struct {
@@ -297,19 +424,67 @@ func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace st
 				Name   string            `json:"name"`
 				Labels map[string]string `json:"labels"`
 			} `json:"metadata"`
+			Status struct {
+				Active int `json:"active"`
+			} `json:"status"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(out, &list); err != nil {
-		return nil, fmt.Errorf("decoding the trim's objects: %w", err)
+		return nil, nil, fmt.Errorf("decoding the trim's objects: %w", err)
 	}
 	if list.Items == nil {
-		return nil, errors.New("decoding the trim's objects: the reply names no object list")
+		return nil, nil, errors.New("decoding the trim's objects: the reply names no object list")
 	}
 	objects := make([]cachevol.TrimObject, 0, len(*list.Items))
+	running := map[string]bool{}
 	for _, item := range *list.Items {
 		objects = append(objects, cachevol.TrimObject{Kind: item.Kind, Name: item.Metadata.Name, Labels: item.Metadata.Labels})
+		if item.Kind == "Job" && item.Status.Active > 0 {
+			running[item.Metadata.Name] = true
+		}
 	}
-	return objects, nil
+	return objects, running, nil
+}
+
+// cacheTrimClaimNamespaces reads the cluster's PersistentVolumeClaims and
+// returns, per claim name, the namespaces that hold one, sorted. The namespace
+// a trim runs in is read from the claim item itself: a pod that mounts a claim
+// of the same name in another namespace is not this claim's sandbox.
+//
+// This is the pass's one cluster-wide read; every call after it names the
+// namespace it found here. A reply that cannot be decoded or names no item list
+// refuses: an unreadable answer would read as "no such claim", and the trim
+// would never run.
+func (d *Daemon) cacheTrimClaimNamespaces(ctx context.Context, kubeconfig string) (map[string][]string, error) {
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "get", "persistentvolumeclaim", "-A", "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	var list struct {
+		Items *[]struct {
+			Metadata struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("decoding the claim list: %w", err)
+	}
+	if list.Items == nil {
+		return nil, errors.New("decoding the claim list: the reply names no item list")
+	}
+	namespaces := map[string][]string{}
+	for _, item := range *list.Items {
+		if item.Metadata.Name == "" || item.Metadata.Namespace == "" {
+			return nil, errors.New("decoding the claim list: an item names no name or no namespace")
+		}
+		namespaces[item.Metadata.Name] = append(namespaces[item.Metadata.Name], item.Metadata.Namespace)
+	}
+	for _, found := range namespaces {
+		slices.Sort(found)
+	}
+	return namespaces, nil
 }
 
 // cacheTrimSource is a pod a listing can be read through: the container that
@@ -321,15 +496,20 @@ type cacheTrimSource struct {
 	Root      string
 }
 
-// cacheTrimPods reads the pods across the cluster that mount claim, and returns
-// how many of them are running -- PlanTrim's sandbox count -- with the pods a
-// listing can be read through, in a stable order.
+// cacheTrimPods reads the pods in namespace that mount claim, and returns how
+// many of them hold it -- PlanTrim's sandbox count -- with the pods a listing
+// can be read through, in a stable order.
 //
-// Only a running pod can answer an exec, so only a running pod is a source. A
-// reply that cannot be decoded or names no item list refuses: an unreadable
-// reply would read as no sandbox running, which is a claim of idle again.
-func (d *Daemon) cacheTrimPods(ctx context.Context, kubeconfig, claim string) (int, []cacheTrimSource, error) {
-	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "get", "pods", "-A", "-o", "json")
+// A pod that has finished holds nothing: it runs no sandbox and cannot be
+// exec'd, so it is neither counted nor a source. A Pending pod counts, because
+// a sandbox that has not started still holds the cache; only a running pod can
+// answer an exec, so only a running pod is a source.
+//
+// A reply that cannot be decoded, names no item list, or names a pod of another
+// namespace refuses: an unreadable reply would read as no sandbox running, which
+// is a claim of idle again.
+func (d *Daemon) cacheTrimPods(ctx context.Context, kubeconfig, namespace, claim string) (int, []cacheTrimSource, error) {
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, nil, "get", "pods", "-n", namespace, "-o", "json")
 	if err != nil {
 		return 0, nil, err
 	}
@@ -343,16 +523,22 @@ func (d *Daemon) cacheTrimPods(ctx context.Context, kubeconfig, claim string) (i
 		return 0, nil, errors.New("decoding the pod list: the reply names no item list")
 	}
 
-	running, sources := 0, []cacheTrimSource{}
+	sandboxes, sources := 0, []cacheTrimSource{}
 	for _, pod := range *list.Items {
+		if pod.Metadata.Namespace != "" && pod.Metadata.Namespace != namespace {
+			return 0, nil, fmt.Errorf("the pod list for namespace %s names the pod %s in %s", namespace, pod.Metadata.Name, pod.Metadata.Namespace)
+		}
 		volume := cacheTrimVolume(pod, claim)
 		if volume == "" {
 			continue
 		}
+		if pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
+			continue
+		}
+		sandboxes++
 		if pod.Status.Phase != "Running" {
 			continue
 		}
-		running++
 		if source, ok := cacheTrimPodSource(pod, volume); ok {
 			sources = append(sources, source)
 		}
@@ -366,7 +552,7 @@ func (d *Daemon) cacheTrimPods(ctx context.Context, kubeconfig, claim string) (i
 		}
 		return strings.Compare(a.Container, b.Container)
 	})
-	return running, sources, nil
+	return sandboxes, sources, nil
 }
 
 // cacheTrimPod is the part of a pod `kubectl get pods -o json` names that finds
@@ -493,6 +679,39 @@ func cacheTrimParseListing(out []byte) ([]cachevol.Entry, error) {
 	return listing, nil
 }
 
+// cacheTrimKubectlEnvKeys are the only variables a trim's kubectl runs with:
+// PATH and HOME for the binary and its cache, and KUBECONFIG for a config the
+// flag does not name.
+var cacheTrimKubectlEnvKeys = []string{"PATH", "HOME", "KUBECONFIG"}
+
+// cacheTrimKubectlEnv is the environment kubectl runs with. The daemon's whole
+// environment stays out: a cluster client has no use for the town's settings,
+// and every variable named here is one a kubeconfig and a binary need.
+//
+// The registry target's in-use read passes no variable of its own through the
+// same runner (internal/diskmaint/registry/inuse.go), so these three are the
+// whole contract.
+func cacheTrimKubectlEnv(environ []string) []string {
+	env := make([]string, 0, len(cacheTrimKubectlEnvKeys))
+	for _, key := range cacheTrimKubectlEnvKeys {
+		if value, ok := environValue(environ, key); ok {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}
+
+// environValue returns key's value in environ, the last entry winning as it
+// would for a process.
+func environValue(environ []string, key string) (string, bool) {
+	for _, kv := range slices.Backward(environ) {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v, true
+		}
+	}
+	return "", false
+}
+
 // cacheTrimKubectl runs one kubectl command through the daemon's exec seam, so
 // the unit tier never launches kubectl. stdin, when it is not nil, is the
 // document an apply reads.
@@ -500,15 +719,21 @@ func cacheTrimParseListing(out []byte) ([]cachevol.Entry, error) {
 // A failure names the command and its last stderr line, never its whole output,
 // which can hold a secret.
 func (d *Daemon) cacheTrimKubectl(ctx context.Context, kubeconfig string, stdin []byte, args ...string) ([]byte, error) {
-	argv := append([]string{"--kubeconfig", kubeconfig}, args...)
-	cmd := exec.CommandContext(ctx, "kubectl", argv...) //nolint:gosec // G204: a fixed program, fixed verbs, and a claim name validated as a DNS-1123 label
-	cmd.Env = os.Environ()
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-	stdout, stderr, err := d.runCmd(cmd)
+	stdout, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, stdin, args...)
 	if err != nil {
 		return nil, fmt.Errorf("kubectl %s: %w: %s", strings.Join(args, " "), err, lastLine(string(stderr)))
 	}
 	return stdout, nil
+}
+
+// cacheTrimKubectlRun runs one kubectl command and returns its streams too, for
+// the waiter that tells a timeout from a Job that failed.
+func (d *Daemon) cacheTrimKubectlRun(ctx context.Context, kubeconfig string, stdin []byte, args ...string) ([]byte, []byte, error) {
+	argv := append([]string{"--kubeconfig", kubeconfig}, args...)
+	cmd := exec.CommandContext(ctx, "kubectl", argv...) //nolint:gosec // G204: a fixed program, fixed verbs, and names validated as DNS-1123 labels
+	cmd.Env = cacheTrimKubectlEnv(d.diskMaintenanceSeams().environ())
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	return d.runCmd(cmd)
 }

@@ -87,6 +87,10 @@ type diskMaintSeams struct {
 	dfReaders map[string]DFReader
 	// getenv reads the plugin settings the target is built from.
 	getenv func(string) string
+	// environ is the daemon's own environment, the source of the few
+	// variables the cache trim's kubectl runs with (see cacheTrimKubectlEnv);
+	// nil reads the process environment.
+	environ func() []string
 	// sandboxes reads the town's sandbox profiles, which name the shared cache
 	// claims the pass trims and the image each trim Job runs; nil reads the
 	// town's settings.
@@ -117,6 +121,9 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
+	}
+	if s.environ == nil {
+		s.environ = os.Environ
 	}
 	if s.sandboxes == nil {
 		s.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
