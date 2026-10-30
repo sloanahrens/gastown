@@ -54,6 +54,8 @@ type seam struct {
 	renameErr error
 	clearErr  error
 	setErr    error
+	probeErr  error
+	unset     bool // the target never had the flag (the default is that it did)
 	lockErr   error
 	lockBusy  bool
 
@@ -121,6 +123,10 @@ func newSeam() *seam {
 			s.removed = append(s.removed, path)
 			return nil
 		},
+		IsImmutable: func(path string) (bool, error) {
+			s.log("is-immutable", path)
+			return !s.unset, s.probeErr
+		},
 		ClearImmutable: func(path string) error {
 			s.log("clear-immutable", path)
 			if s.clearErr != nil {
@@ -179,6 +185,7 @@ func TestReplaceInstallsTheSourceUnderTheTargetName(t *testing.T) {
 		"temp-file " + filepath.Join(testDestDir, ".gt.tmp.*"),
 		"copy " + temp + " <- " + testSrc,
 		"chmod " + temp,
+		"is-immutable " + testDest,
 		"clear-immutable " + testDest,
 		"rename " + temp + " -> " + testDest,
 		"set-immutable " + testDest,
@@ -503,6 +510,7 @@ func TestReplaceToleratesRestoreFailureWhenTheFlagCouldNotComeOff(t *testing.T) 
 	// Without CAP_LINUX_IMMUTABLE both directions fail, and there was never a
 	// flag to lose: the install must not fail for it.
 	s := newSeam()
+	s.unset = true
 	s.clearErr = errClear
 	s.setErr = errSet
 	if err := s.replace("gt"); err != nil {
@@ -663,4 +671,87 @@ func indexOf(calls []string, call string) int {
 		}
 	}
 	return -1
+}
+
+// TestReplaceRestoreFailureDependsOnTheFlagHavingBeenSet is the gt-pkgew table:
+// a failed restore is an error only when the probe found the flag set before
+// the clear. chattr -i on a plain file exits 0 on a host that never grants the
+// flag, so a clear that returned no error proves nothing.
+func TestReplaceRestoreFailureDependsOnTheFlagHavingBeenSet(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name     string
+		unset    bool
+		probeErr error
+		setErr   error
+		wantErr  bool
+		warnings int
+	}{
+		{"set before, restore fails", false, nil, errSet, true, 0},
+		{"not set before, restore refused", true, nil, errSet, false, 1},
+		{"probe error, restore refused", false, errors.New("lsattr unreadable"), errSet, false, 1},
+		{"set before, restore succeeds", false, nil, nil, false, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newSeam()
+			s.unset, s.probeErr, s.setErr = tt.unset, tt.probeErr, tt.setErr
+			err := s.replace("gt")
+			if tt.wantErr != errors.Is(err, errSet) {
+				t.Fatalf("Replace: %v, want an error naming the restore: %t", err, tt.wantErr)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Replace: %v, want success", err)
+			}
+			if s.renamed != testDest {
+				t.Fatal("the binary was not installed")
+			}
+			if len(s.warnings) != tt.warnings {
+				t.Fatalf("warnings %q, want %d", s.warnings, tt.warnings)
+			}
+		})
+	}
+}
+
+// TestIsImmutableReadsTheHostsReport is the table over a fake command runner:
+// macOS file flags and Linux lsattr output, set, not set and unparsable.
+func TestIsImmutableReadsTheHostsReport(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		goos    string
+		out     string
+		runErr  error
+		want    bool
+		wantErr bool
+	}{
+		{"darwin uchg set", "darwin", "2\n", nil, true, false},
+		{"darwin uchg among other flags", "darwin", "65538\n", nil, true, false},
+		{"darwin no flags", "darwin", "0\n", nil, false, false},
+		{"darwin hidden only", "darwin", "32768\n", nil, false, false},
+		{"darwin unparsable", "darwin", "not a number\n", nil, false, true},
+		{"darwin stat fails", "darwin", "", errors.New("exit 1"), false, true},
+		{"linux set", "linux", "----i---------e------- /usr/local/bin/gt\n", nil, true, false},
+		{"linux not set", "linux", "--------------e------- /usr/local/bin/gt\n", nil, false, false},
+		{"linux unparsable", "linux", "lsattr: Operation not supported While reading flags\n", nil, false, true},
+		{"linux empty", "linux", "", nil, false, true},
+		{"linux lsattr fails", "linux", "", errors.New("exit 1"), false, true},
+		{"other platform", "plan9", "", nil, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var ran []string
+			run := func(name string, args ...string) ([]byte, error) {
+				ran = append(ran, name+" "+strings.Join(args, " "))
+				return []byte(tt.out), tt.runErr
+			}
+			got, err := probeImmutable(run, tt.goos, "/usr/local/bin/gt")
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Fatalf("probeImmutable = %v, %v; want %v, error %t (ran %v)", got, err, tt.want, tt.wantErr, ran)
+			}
+			if tt.wantErr && got {
+				t.Fatalf("a probe that could not tell answered set")
+			}
+		})
+	}
 }

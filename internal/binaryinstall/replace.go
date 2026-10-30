@@ -21,6 +21,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +63,12 @@ type Files struct {
 	// the flag could not be touched at all, which is the answer on a platform
 	// that never grants it (chattr -i without CAP_LINUX_IMMUTABLE).
 	ClearImmutable func(path string) error
+	// IsImmutable reports whether path carries the OS-immutable flag right now.
+	// It is asked before the clear, because a clear that returns no error does
+	// not say the flag was there: chattr -i exits 0 on a plain file even where
+	// the host never grants the flag. An error means the flag could not be read
+	// (gt-pkgew).
+	IsImmutable func(path string) (bool, error)
 	// SetImmutable puts the flag back on path.
 	SetImmutable func(path string) error
 	// Lock takes path's exclusive lock, waiting for a peer that holds it, and
@@ -164,23 +172,25 @@ func (i Installer) Replace(src, destDir, name string) (err error) {
 	// The flag comes off here, at the rename it would block, and not a moment
 	// sooner, so the live binary is writable for no longer than the replace
 	// (gt-tqxdd).
+	wasSet, probeErr := f.isImmutable(dest)
 	clearErr := f.clearImmutable(dest)
 	// ... and it goes back on whichever way the rename ends. Restoring only
 	// after a successful rename left a failed replace with a writable binary,
-	// the window gt-vya0s exists to close. A restore that fails after a clear
-	// that failed too is the platform refusing the flag outright (chattr
-	// without CAP_LINUX_IMMUTABLE): nothing came off, so nothing is lost, and
-	// the install must not fail for a protection the platform will not grant,
-	// but it says so through Warnf. Every other failed restore is an error,
-	// because then the flag was there and is now gone.
+	// the window gt-vya0s exists to close. A failed restore is an error only
+	// when the probe said the flag was set before the clear: then it was there
+	// and is now gone. Otherwise (the probe said not set, or could not tell)
+	// the platform is refusing a flag the target never had (chattr without
+	// CAP_LINUX_IMMUTABLE, where chattr -i on a plain file still exits 0): the
+	// install must not fail for a protection the platform will not grant, and
+	// it says so through Warnf (gt-pkgew).
 	defer func() {
 		setErr := f.setImmutable(dest)
 		switch {
 		case setErr == nil:
-		case clearErr == nil:
+		case probeErr == nil && wasSet:
 			err = errors.Join(err, fmt.Errorf("binaryinstall: restore immutable flag on %s: %w", dest, setErr))
 		default:
-			i.warnf("binaryinstall: %s: the immutable flag is not available here (clear: %v; restore: %v)", dest, clearErr, setErr)
+			i.warnf("binaryinstall: %s: the immutable flag is not available here (set before: %t; probe: %v; clear: %v; restore: %v)", dest, wasSet, probeErr, clearErr, setErr)
 		}
 	}()
 	if renameErr := f.rename(tmp, dest); renameErr != nil {
@@ -266,6 +276,13 @@ func (f Files) clearImmutable(path string) error {
 	return clearImmutable(path)
 }
 
+func (f Files) isImmutable(path string) (bool, error) {
+	if f.IsImmutable != nil {
+		return f.IsImmutable(path)
+	}
+	return isImmutable(path)
+}
+
 func (f Files) setImmutable(path string) error {
 	if f.SetImmutable != nil {
 		return f.SetImmutable(path)
@@ -343,4 +360,51 @@ func setImmutable(path string) error {
 		return nil
 	}
 	return exec.Command("chattr", "+i", path).Run()
+}
+
+// commandRunner runs a command and returns its output; the seam under the real
+// IsImmutable, so its parsing is tested without a process (gt-pkgew).
+type commandRunner func(name string, args ...string) ([]byte, error)
+
+// ufImmutable is the user-immutable bit (UF_IMMUTABLE) of the file flags
+// `stat -f %f` prints on macOS; chflags uchg sets it.
+const ufImmutable = 0x2
+
+// isImmutable reads the flag from the host: the file flags on macOS, lsattr on
+// Linux.
+func isImmutable(path string) (bool, error) {
+	return probeImmutable(func(name string, args ...string) ([]byte, error) {
+		return exec.Command(name, args...).Output()
+	}, runtime.GOOS, path)
+}
+
+// probeImmutable answers whether path carries the immutable flag, asking run
+// for the host's own report. Anything it cannot read, an unparsable report or a
+// platform with neither tool included, is (false, err): the caller treats that
+// as "could not tell", never as "not set".
+func probeImmutable(run commandRunner, goos, path string) (bool, error) {
+	path = optionSafe(path)
+	switch goos {
+	case "darwin":
+		out, err := run("stat", "-f", "%f", path)
+		if err != nil {
+			return false, fmt.Errorf("stat flags of %s: %w", path, err)
+		}
+		flags, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
+		if err != nil {
+			return false, fmt.Errorf("stat flags of %s: unparsable %q", path, strings.TrimSpace(string(out)))
+		}
+		return flags&ufImmutable != 0, nil
+	case "linux":
+		out, err := run("lsattr", "-d", path)
+		if err != nil {
+			return false, fmt.Errorf("lsattr of %s: %w", path, err)
+		}
+		fields := strings.Fields(string(out))
+		if len(fields) == 0 || strings.Trim(fields[0], "-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+			return false, fmt.Errorf("lsattr of %s: unparsable %q", path, strings.TrimSpace(string(out)))
+		}
+		return strings.ContainsRune(fields[0], 'i'), nil
+	}
+	return false, fmt.Errorf("no immutable-flag probe for %s", goos)
 }
