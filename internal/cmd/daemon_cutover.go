@@ -201,6 +201,13 @@ func (p *cutoverPlan) newDaemonOwns() (*daemon.State, bool, string) {
 // the real one; the second keeps a state file that was not rewritten, or a
 // future daemon that carries its count over, from passing on beats the old
 // owner wrote.
+//
+// The two heartbeat times come from different clocks: the baseline is written
+// by the launchd daemon on the host, and the new record by the container, whose
+// clock is the Docker VM's. The later-than check assumes the two clocks agree
+// to within the heartbeat interval, which holds for Docker Desktop. A VM clock
+// that runs behind by more than the gap between the old daemon's last beat and
+// the new daemon's start makes a healthy cutover read as not proved.
 func (p *cutoverPlan) newDaemonBeats() (bool, string) {
 	st, ok, why := p.newDaemonOwns()
 	if !ok {
