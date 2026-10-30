@@ -4308,6 +4308,34 @@ function detailBlock(d) {
   return box;
 }
 
+// skipClass says what a tick's skip reason means to the operator (gt-qt0ym):
+// "waiting for a seat" when the reason begins "no seat" (the bead is fine and
+// every seat is taken or capped), "skipped" for any other reason, an empty one
+// included, which stays warning-coloured so a real defect is not hidden.
+function skipClass(reason) {
+  return /^no seat/.test(String(reason || "")) ? "waiting for a seat" : "skipped";
+}
+
+// isReadyToDispatch is the one "ready to dispatch" set: the beads the dispatcher
+// would slot plus those its last tick passed over (gt-qt0ym).
+function isReadyToDispatch(b) { return b.shape === "ok" || b.shape === "skipped"; }
+
+// seatPlaces maps each bead waiting for a seat to its place "N of M" in the
+// dispatch order: priority, then oldest created_at, then id, the order
+// specdispatch.Order uses. It is counted over every store in the ready list,
+// since the seats are the town's; a list the server capped counts only the rows
+// it sent.
+function seatPlaces(all) {
+  const waiting = all.filter(b => b.shape === "skipped" && skipClass(b.skip_reason || b.shape_note) === "waiting for a seat");
+  const t = b => { const n = Date.parse(b.created_at); return Number.isFinite(n) ? n : Infinity; };
+  // A missing or non-numeric priority sorts last, like an unparseable time.
+  const pri = b => (b.priority != null && Number.isFinite(Number(b.priority))) ? Number(b.priority) : 99;
+  waiting.sort((a, b) => pri(a) - pri(b) || (t(a) === t(b) ? 0 : t(a) < t(b) ? -1 : 1) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const places = {};
+  waiting.forEach((b, i) => { places[b.rig + "/" + b.id] = (i + 1) + " of " + waiting.length; });
+  return places;
+}
+
 // queueSkipLine is the dim line a ready row wears when the dispatcher's last
 // tick passed it over (gt-e2cif): the class the tick filed it under, how long
 // that verdict has stood — the time in the viewer's own clock, the tick count —
@@ -4358,10 +4386,6 @@ function drawQueueList(box, s) {
   if (!Object.keys(rigs).length) all.forEach(b => rigs[b.rig] = (rigs[b.rig] || 0) + 1);
   const rigNames = Object.keys(rigs).sort((a, b) => rigs[b] - rigs[a]);
   if (qRig !== "all" && !rigs[qRig]) qRig = "all";
-  // A stale ledger draws no skipped chip, so a filter left on it would keep
-  // hiding rows behind a control the page no longer draws: drop it and list
-  // everything (gt-e2cif).
-  if (stale && qShape === "skipped") qShape = "all";
   if (rigNames.length > 1 || qTab === "ready" || qTab === "blocked") {
     const f = el("div", "qtabs");
     const chip = (label, count, on, fn, tip) => { const b = el("button", "chip" + (on ? " on" : ""), label); if (tip) b.title = tip; b.append(el("b", "", String(count))); b.onclick = fn; f.append(b); };
@@ -4372,15 +4396,11 @@ function drawQueueList(box, s) {
     }
     if (qTab === "ready") {
       const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
-      const ok = inRig.filter(b => b.shape === "ok").length;
-      chip("dispatchable", ok, qShape === "ok", () => { qShape = qShape === "ok" ? "all" : "ok"; renderWork(state, true); });
-      // A bead the dispatcher passed over lints clean and still waits, so it
-      // is counted on a chip of its own rather than folded into a neighbour:
-      // the row that opens under it says why and since when (gt-e2cif). A
-      // stale ledger has no such count, so it draws no such chip.
-      if (!stale) chip("skipped by dispatcher", inRig.filter(b => b.shape === "skipped").length, qShape === "skipped",
-        () => { qShape = qShape === "skipped" ? "all" : "skipped"; renderWork(state, true); },
-        "the dispatcher's last real tick passed these over: shaped and unassigned, but not taken. The row says why and since when.");
+      // One chip: a bead the last tick passed over lints clean exactly like
+      // one it has not reached yet, so both are "ready to dispatch" and the
+      // row's tag says which kind (gt-qt0ym, gt-e2cif).
+      chip("ready to dispatch", inRig.filter(isReadyToDispatch).length, qShape === "ok", () => { qShape = qShape === "ok" ? "all" : "ok"; renderWork(state, true); },
+        "shaped, unassigned and in a rig that is not parked: the dispatcher takes these as seats free up");
       chip("needs shaping", inRig.filter(b => b.shape === "fix").length, qShape === "fix", () => { qShape = qShape === "fix" ? "all" : "fix"; renderWork(state, true); });
       chip("held", inRig.filter(b => b.shape === "held").length, qShape === "held", () => { qShape = qShape === "held" ? "all" : "held"; renderWork(state, true); });
     }
@@ -4407,24 +4427,17 @@ function drawQueueList(box, s) {
   // Only the bead rows scroll: the caption and the chips above stay in view.
   const rowsBox = el("div", "qrows");
   box.append(rowsBox);
-  const rows = all.filter(b => (qRig === "all" || b.rig === qRig) && (qTab !== "ready" || qShape === "all" || b.shape === qShape) && (qTab !== "blocked" || qWisp || !isWisp(b)));
+  const rows = all.filter(b => (qRig === "all" || b.rig === qRig) && (qTab !== "ready" || qShape === "all" || (qShape === "ok" ? isReadyToDispatch(b) : b.shape === qShape)) && (qTab !== "blocked" || qWisp || !isWisp(b)));
   if (!rows.length) {
     let msg;
-    // The pane opens on the dispatchable view, so an empty one reports what
-    // the beads are waiting on instead of "no filter matched" (gt-x9gk4).
+    // The pane opens on the ready-to-dispatch view, so an empty one reports
+    // what the beads are waiting on instead of "no filter matched" (gt-x9gk4).
     if (qTab === "ready" && qShape === "ok") {
       const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
       const shaping = inRig.filter(b => b.shape === "fix").length;
       const held = inRig.filter(b => b.shape === "held").length;
-      // A stale ledger's skip count says nothing about now, so the view names
-      // no skip at all (gt-e2cif).
-      const skipped = stale ? 0 : inRig.filter(b => b.shape === "skipped").length;
       const parts = [];
       if (inRig.length) {
-        // A skipped bead lints clean and is still waiting, which is the case
-        // an operator most needs named: without it a queue the dispatcher
-        // passed over in full reads as "0 need shaping, 0 are held".
-        if (skipped) parts.push(skipped === 1 ? "1 bead was skipped by the dispatcher" : skipped + " beads were skipped by the dispatcher");
         parts.push(shaping === 1 ? "1 bead needs shaping" : shaping + " beads need shaping");
         parts.push(held === 1 ? "1 bead is held" : held + " beads are held");
       }
@@ -4439,6 +4452,7 @@ function drawQueueList(box, s) {
     }
     rowsBox.append(el("div", "empty", msg));
   }
+  const places = seatPlaces(all);
   rows.forEach(b => {
     const id = b.rig + "/" + b.id;
     const open = qOpen.has(id);
@@ -4452,8 +4466,17 @@ function drawQueueList(box, s) {
     if (b.shape === "ok") { const g = el("span", "tag good", "ready"); g.title = "the spec dispatcher would slot this bead"; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "skipped") {
       // A stale ledger's skipped shape is left over from a tick the page
-      // cannot vouch for, so the row wears no skip tag (gt-e2cif).
-      if (!stale) { const g = el("span", "tag warnc", "skipped by dispatcher"); g.title = "the dispatcher's last real tick passed this bead over; the line below says why and since when"; t.append(document.createTextNode(" "), g); }
+      // cannot vouch for, so the row is only "ready" (gt-e2cif). A current one
+      // is told by cause (gt-qt0ym): no free seat is waiting, in line; any
+      // other reason stays a warning with the reason in the tag.
+      const reason = b.skip_reason || b.shape_note || "";
+      if (stale) { const g = el("span", "tag good", "ready"); g.title = "the spec dispatcher would slot this bead"; t.append(document.createTextNode(" "), g); }
+      else if (skipClass(reason) === "waiting for a seat") {
+        const place = places[id];
+        const g = el("span", "tag", "waiting for a seat" + (place ? " #" + place : ""));
+        g.title = "nothing is wrong with this bead: every seat is taken or capped, and it goes in the order shown (priority, then oldest). " + reason;
+        t.append(document.createTextNode(" "), g);
+      } else { const g = el("span", "tag warnc", reason ? "skipped: " + reason : "skipped"); g.title = "the dispatcher's last real tick passed this bead over; the line below says why and since when"; t.append(document.createTextNode(" "), g); }
     }
     else if (b.shape === "parked") { const g = el("span", "tag", "rig parked"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "held") { const g = el("span", "tag", "held"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
