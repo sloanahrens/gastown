@@ -246,6 +246,21 @@ func TestDaemonComposeWritePrint(t *testing.T) {
 	}
 }
 
+// The compose file's directory is made before the file is written, and a
+// directory the town cannot grow is the write's error, naming the file.
+func TestDaemonComposeWriteRefusesADirectoryItCannotMake(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	// daemon/ is a regular file, so daemon/container/ cannot be made.
+	if err := os.WriteFile(filepath.Join(r.town, "daemon"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := runDaemonCompose(r.flags, r.deps)
+	if err == nil || !strings.Contains(err.Error(), r.composePath()) {
+		t.Fatalf("error = %v, want it to name %s", err, r.composePath())
+	}
+}
+
 // A failed write is the command's error, and it names the file and the state
 // the old one is left in.
 func TestDaemonComposeWriteReportsAWriteFailure(t *testing.T) {

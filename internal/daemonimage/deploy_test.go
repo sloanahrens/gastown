@@ -562,6 +562,29 @@ func TestDeployRefusesAnIncompleteCall(t *testing.T) {
 	}
 }
 
+// TestImageTagRev: the tag reader beside ImageTag names the rev of a tag the
+// builder could have made, and refuses every other tag.
+func TestImageTagRev(t *testing.T) {
+	t.Parallel()
+	const rev = "0123456"
+	if got, err := ImageTagRev(ImageTag(rev)); err != nil || got != rev {
+		t.Errorf("ImageTagRev(ImageTag(%q)) = %q, %v; want the rev and no error", rev, got, err)
+	}
+	for _, tag := range []string{
+		"",
+		"gt-daemon:",
+		"gt-daemon:abc12",
+		"gt-daemon:012345g",
+		"gt-daemon:/0123456",
+		"daemon:0123456",
+		"gt-daemon:0123456789012345678901234567890123456789012",
+	} {
+		if got, err := ImageTagRev(tag); err == nil {
+			t.Errorf("ImageTagRev(%q) = %q, want a refusal", tag, got)
+		}
+	}
+}
+
 // TestDeployRefusesAComposePathItCannotName: the compose file's path must be
 // non-empty and absolute, because the supervisor's argv names it and docker
 // resolves a relative -f against its own directory.
