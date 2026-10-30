@@ -291,6 +291,8 @@ func TestContainerEntrypointRefusesADoltHostItCannotUse(t *testing.T) {
 		{"an empty host in the scratch town", scratchRig, "", "is empty"},
 		{"an empty host with no scratch flag", townRig, "", "is empty"},
 		{"a host of spaces", scratchRig, "  ", "is empty"},
+		{"a host beginning with a dash", scratchRig, "-scratch-dolt", "begins with a dash"},
+		{"a host beginning with a dash after spaces", scratchRig, "  -h", "begins with a dash"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -304,6 +306,78 @@ func TestContainerEntrypointRefusesADoltHostItCannotUse(t *testing.T) {
 			}
 			if len(r.calls) != 0 {
 				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
+	}
+}
+
+// A start that finds the town already installed runs no install, so the host
+// --dolt-host names would be written nowhere. One the town already names is the
+// host the install wrote, and the compose file's unchanged command line passes
+// it on every restart, so that restart goes on; any other host is refused
+// rather than dropped in silence. A town config that cannot be read or parsed
+// refuses too, since taking it as naming no host would drop the flag.
+func TestContainerEntrypointRefusesADoltHostTheInstalledTownDoesNotName(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		files   map[string]string
+		readErr error
+		wantMsg string
+	}{
+		{"a town naming another host", map[string]string{entrypointTownCfg: `{"dolt":{"host":"other-dolt","port":3306}}`}, nil, "is not the Dolt server"},
+		{"a town naming no host", map[string]string{entrypointTownCfg: `{"type":"town"}`}, nil, "names none"},
+		{"an unreadable town config", nil, errors.New("permission denied"), "read the town's"},
+		{"a town config that does not parse", map[string]string{entrypointTownCfg: `{"dolt":`}, nil, "parse the town's"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			r.kind[entrypointTownCfg] = entryRegular
+			r.files, r.readErr = tc.files, tc.readErr
+			r.doltHost, r.doltHostSet = "scratch-dolt", true
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if err == nil || !strings.Contains(err.Error(), config.DoltHostFlag) || !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("error = %v, want a refusal naming --%s and saying %q", err, config.DoltHostFlag, tc.wantMsg)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
+	}
+}
+
+// The scratch compose file passes --dolt-host scratch-dolt on every start, so
+// the restart after the install must go on: the host it passes is the one the
+// install wrote. Hostnames are compared without case, as DNS reads them.
+func TestContainerEntrypointTakesTheDoltHostTheInstalledTownNames(t *testing.T) {
+	t.Parallel()
+	for _, townCfg := range []string{
+		`{"dolt":{"host":"scratch-dolt","port":3306}}`,
+		`{"dolt":{"host":"Scratch-Dolt","port":3306}}`,
+	} {
+		t.Run(townCfg, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			r.kind[entrypointTownCfg] = entryRegular
+			r.files = map[string]string{entrypointTownCfg: townCfg}
+			r.doltHost, r.doltHostSet = "scratch-dolt", true
+
+			if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+				t.Fatalf("runContainerEntrypoint: %v", err)
+			}
+			want := [][]string{
+				{"git", "config", "--global", "user.name", "daemon"},
+				{"git", "config", "--global", "user.email", "daemon@example.invalid"},
+				{entrypointBin, "daemon", "run"},
+			}
+			if !reflect.DeepEqual(r.calls, want) {
+				t.Errorf("commands = %v, want %v", r.calls, want)
+			}
+			if n := r.installCalls(); n != 0 {
+				t.Errorf("recorded %d gt install argv, want none: the town is already there", n)
 			}
 		})
 	}
