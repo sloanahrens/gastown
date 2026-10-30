@@ -172,3 +172,101 @@ func TestWriteRecordFailures(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteRecordNamesAFailedTempRemoval makes the rename fail and the removal of
+// the temporary file fail too: the error names the file the removal left behind.
+func TestWriteRecordNamesAFailedTempRemoval(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	fsys := newRecordFS()
+	fsys.fail["rename"] = boom
+	fsys.fail["remove"] = boom
+	_, err := writeTestRecord(fsys)
+	if err == nil {
+		t.Fatal("WriteRecord returned no error with the rename and the removal failing")
+	}
+	if want := "could not remove the temporary probe record cfg/.probe-gastown.424242"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to name the temporary file: %q", err, want)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("error = %q does not wrap the failing step's own error", err)
+	}
+}
+
+// TestWriteRecordRigRule holds the rig to the rule the command line applies:
+// a rig it would refuse writes and makes nothing.
+func TestWriteRecordRigRule(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		rig string
+		ok  bool
+	}{
+		{rig: "good-rig", ok: true},
+		{rig: "a/b"},
+		{rig: ".."},
+		{rig: "."},
+		{rig: ""},
+		{rig: `a\b`},
+	} {
+		t.Run(tc.rig, func(t *testing.T) {
+			t.Parallel()
+			fsys := newRecordFS()
+			path, err := WriteRecord(fsys, &fakeClock{now: recordWhen}, "cfg", tc.rig, "acme/x", testSHA, "ctx")
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("WriteRecord(%q): %v", tc.rig, err)
+				}
+				if want := "cfg/probe-" + tc.rig + ".record"; path != want {
+					t.Errorf("path = %q, want %q", path, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("WriteRecord(%q) returned %q with no error", tc.rig, path)
+			}
+			if len(fsys.made) != 0 || len(fsys.files) != 0 {
+				t.Errorf("an invalid rig made %v and left %d files; it must write and make nothing", fsys.made, len(fsys.files))
+			}
+		})
+	}
+}
+
+func TestWriteRecordRemoveRecord(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name    string
+		present bool
+		rig     string
+		fail    bool
+		wantErr bool
+		removed bool
+	}{
+		{name: "a stale record is removed", present: true, rig: "gastown", removed: true},
+		{name: "an absent record is success", rig: "gastown"},
+		{name: "a failed removal is an error that names the path", present: true, rig: "gastown", fail: true, wantErr: true},
+		{name: "an invalid rig removes nothing", present: true, rig: "a/b", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newRecordFS()
+			if tc.present {
+				fsys.files[finishRecord] = &recordEntry{data: staleRecord, mode: 0o600}
+			}
+			if tc.fail {
+				fsys.fail["remove"] = boom
+			}
+			err := RemoveRecord(fsys, "cfg", tc.rig)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RemoveRecord error = %v, want error %v", err, tc.wantErr)
+			}
+			if tc.fail && (!strings.Contains(err.Error(), finishRecord) || !errors.Is(err, boom)) {
+				t.Errorf("error = %q, want it to name %s and wrap the removal's error", err, finishRecord)
+			}
+			_, stillThere := fsys.files[finishRecord]
+			if stillThere != (tc.present && !tc.removed) {
+				t.Errorf("record still present = %v, want %v", stillThere, tc.present && !tc.removed)
+			}
+		})
+	}
+}

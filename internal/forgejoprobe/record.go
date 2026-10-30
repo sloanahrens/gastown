@@ -40,8 +40,11 @@ func recordPath(configDir, rig string) string {
 // under configDir and returns the record's path. The lines go to a temporary
 // file that is renamed into place, so a cutover never reads a half-written
 // record. A failed step removes the temporary file and returns an error that
-// names the step.
+// names the step. A rig the command line would refuse writes nothing.
 func WriteRecord(fsys FS, clock Clock, configDir, rig, repo, sha, ctx string) (string, error) {
+	if err := requireRig(rig); err != nil {
+		return "", err
+	}
 	if err := fsys.MkdirAll(configDir, 0o700); err != nil {
 		return "", fmt.Errorf("could not create %s for the probe record: %w", configDir, err)
 	}
@@ -50,13 +53,36 @@ func WriteRecord(fsys FS, clock Clock, configDir, rig, repo, sha, ctx string) (s
 		return "", fmt.Errorf("could not create a probe record under %s: %w", configDir, err)
 	}
 	if err := writeLines(tmp, recordContent(clock.Now(), rig, repo, sha, ctx)); err != nil {
-		return "", fmt.Errorf("could not write the probe record under %s: %w", configDir, errors.Join(err, fsys.Remove(tmp.Name())))
+		return "", fmt.Errorf("could not write the probe record under %s: %w", configDir, errors.Join(err, removeTemp(fsys, tmp.Name())))
 	}
 	path := recordPath(configDir, rig)
 	if err := fsys.Rename(tmp.Name(), path); err != nil {
-		return "", fmt.Errorf("could not store the probe record at %s: %w", path, errors.Join(err, fsys.Remove(tmp.Name())))
+		return "", fmt.Errorf("could not store the probe record at %s: %w", path, errors.Join(err, removeTemp(fsys, tmp.Name())))
 	}
 	return path, nil
+}
+
+// RemoveRecord removes the rig's green record, so a run that did not prove green
+// leaves none for the cutover to read. A record that is already absent is success.
+// A rig the command line would refuse removes nothing.
+func RemoveRecord(fsys FS, configDir, rig string) error {
+	if err := requireRig(rig); err != nil {
+		return err
+	}
+	path := recordPath(configDir, rig)
+	if err := fsys.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("could not remove the probe record at %s: %w", path, err)
+	}
+	return nil
+}
+
+// removeTemp removes a temporary record file. A failed removal names the file
+// it left behind.
+func removeTemp(fsys FS, name string) error {
+	if err := fsys.Remove(name); err != nil {
+		return fmt.Errorf("could not remove the temporary probe record %s: %w", name, err)
+	}
+	return nil
 }
 
 // recordContent is the seven key=value lines of a green record, in the order the

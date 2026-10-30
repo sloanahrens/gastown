@@ -25,8 +25,15 @@ type Finisher interface {
 	Bare() string
 	// Record writes the green record and returns its path.
 	Record() (string, error)
+	// RecordPath is the path of the rig's record, named when it cannot be removed.
+	RecordPath() string
+	// RemoveRecord removes the rig's record left by an earlier run. A record
+	// that is already absent is not an error.
+	RemoveRecord() error
 	// RemoveWorkDir removes the probe's temporary directory.
 	RemoveWorkDir() error
+	// WorkDir is the probe's temporary directory, named when it cannot be removed.
+	WorkDir() string
 	// Logf writes one line of the verdict.
 	Logf(format string, args ...any)
 }
@@ -34,8 +41,11 @@ type Finisher interface {
 // Finish ends a probe run and returns its exit code. rc is the code the run has
 // so far. A worktree that will not come off, a branch that will not be deleted
 // or a record that will not be written fails the run, since a branch left
-// behind would be found by every later run. A green run whose push did not run
-// the rig's hooks exits ExitHooksNotExercised, not ExitOK.
+// behind would be found by every later run. A red verdict exits ExitFailure
+// whatever rc says. A green run whose push did not run the rig's hooks exits
+// ExitHooksNotExercised, not ExitOK. Only a run that proved green writes a
+// record; every other outcome removes the record an earlier run left, so the
+// cutover never reads a stale green.
 func Finish(f Finisher, green bool, mode PushMode, rc int) int {
 	if err := f.Cleanup(); err != nil {
 		rc = ExitFailure
@@ -43,11 +53,22 @@ func Finish(f Finisher, green bool, mode PushMode, rc int) int {
 	if f.BranchCreated() {
 		rc = finishBranch(f, rc)
 	}
+	recorded := false
 	if green && rc == ExitOK {
-		rc = finishGreen(f, mode)
+		rc, recorded = finishGreen(f, mode)
+	}
+	if !green && rc == ExitOK {
+		rc = ExitFailure
+	}
+	if !recorded {
+		rc = removeStaleRecord(f, rc)
 	}
 	if err := f.RemoveWorkDir(); err != nil {
-		f.Logf("warning: could not remove the probe's work directory (%v)", err)
+		// It stays a warning, and not a failed run, because Cleanup already
+		// removed the worktree's registration in the rig's repository before this
+		// runs, and a Cleanup failure has already failed the run. What is left is
+		// the copy, which holds no credential, so the path is named for removal by hand.
+		f.Logf("warning: could not remove the probe's work directory %s (%v); remove it by hand", f.WorkDir(), err)
 	}
 	return rc
 }
@@ -70,19 +91,35 @@ func finishBranch(f Finisher, rc int) int {
 }
 
 // finishGreen writes the green record only when the rig's hooks ran: the cutover
-// reads the record as the proof that they did.
-func finishGreen(f Finisher, mode PushMode) int {
+// reads the record as the proof that they did. It reports whether the record
+// was written.
+func finishGreen(f Finisher, mode PushMode) (int, bool) {
 	if !mode.HooksExercised() {
 		f.Logf("the probe is green, but the rig's hooks were NOT exercised: no rig repository at %s, so no record was written", f.Bare())
-		return ExitHooksNotExercised
+		return ExitHooksNotExercised, false
 	}
 	path, err := f.Record()
 	if err != nil {
 		f.Logf("%v", err)
-		return ExitFailure
+		return ExitFailure, false
 	}
 	f.Logf("recorded the green probe in %s", path)
-	return ExitOK
+	return ExitOK, true
+}
+
+// removeStaleRecord removes the record an earlier run left, since this run did not
+// write one. A removal that fails is named by its path, and a code that would
+// have been a success becomes a failure: the stale record would still be there.
+func removeStaleRecord(f Finisher, rc int) int {
+	err := f.RemoveRecord()
+	if err == nil {
+		return rc
+	}
+	f.Logf("warning: could not remove the stale probe record %s (%v)", f.RecordPath(), err)
+	if rc == ExitOK || rc == ExitHooksNotExercised {
+		return ExitFailure
+	}
+	return rc
 }
 
 // DryRunPlan is what a dry run would do, named by the values the run would use.
