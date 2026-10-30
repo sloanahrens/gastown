@@ -12,12 +12,13 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], forgejoprov.Env{Getenv: os.Getenv}, os.Stdout, os.Stderr))
 }
 
 // parseOptions is the seam runParse reads its command line through: Parse in
@@ -25,19 +26,19 @@ func main() {
 // not a usage error takes.
 type parseOptions func(args []string, getenv func(string) string) (*forgejoprov.Options, error)
 
-// run is the process minus os.Exit: a test hands it a command line, an
-// environment seam and the streams, and reads the code the process would have
-// exited with.
-func run(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	return runParse(args, getenv, stdout, stderr, forgejoprov.Parse)
+// run is the process minus os.Exit: a test hands it a command line, the Env seam
+// Run reads and writes through (its Getenv is the environment Parse reads too)
+// and the streams, and reads the code the process would have exited with.
+func run(args []string, env forgejoprov.Env, stdout, stderr io.Writer) int {
+	return runParse(args, env, stdout, stderr, forgejoprov.Parse)
 }
 
 // runParse turns what Parse returned into the script's exit codes: the help
 // request is the flag list and success, a refused command line is its message
 // and the usage hint, and any other error is a run that failed. A command line
 // that parses is handed to forgejoprov.Run.
-func runParse(args []string, getenv func(string) string, stdout, stderr io.Writer, parse parseOptions) int {
-	opts, err := parse(args, getenv)
+func runParse(args []string, env forgejoprov.Env, stdout, stderr io.Writer, parse parseOptions) int {
+	opts, err := parse(args, env.Getenv)
 	switch {
 	case errors.Is(err, forgejoprov.ErrHelp):
 		fmt.Fprintf(stdout, "%s", usage)
@@ -52,9 +53,12 @@ func runParse(args []string, getenv func(string) string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, "usage: forgejo-provision --help")
 		return forgejoprov.ExitUsage
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// An interrupt or a termination signal cancels the run's requests, so the
+	// run stops at the next request instead of being killed mid-write.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return forgejoprov.Run(ctx, opts, forgejoprov.Env{Getenv: getenv, Log: stderr})
+	env.Log = stderr
+	return forgejoprov.Run(ctx, opts, env)
 }
 
 // usage is the text -h prints. It lives here rather than in the shell script's

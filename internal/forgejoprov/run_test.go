@@ -62,6 +62,12 @@ type runResult struct {
 // writing its token files into files. No request leaves the process.
 func runProvisioning(t *testing.T, rt http.RoundTripper, files *memFiles, env map[string]string, args ...string) runResult {
 	t.Helper()
+	return runProvisioningCtx(context.Background(), t, rt, files, env, args...)
+}
+
+// runProvisioningCtx is runProvisioning under ctx, so a test can cancel the run.
+func runProvisioningCtx(ctx context.Context, t *testing.T, rt http.RoundTripper, files *memFiles, env map[string]string, args ...string) runResult {
+	t.Helper()
 	merged := baseEnv()
 	maps.Copy(merged, env)
 	getenv := func(name string) string { return merged[name] }
@@ -78,7 +84,7 @@ func runProvisioning(t *testing.T, rt http.RoundTripper, files *memFiles, env ma
 		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 	}
 	var logs strings.Builder
-	code := Run(context.Background(), opts, Env{
+	code := Run(ctx, opts, Env{
 		Getenv:   getenv,
 		ReadFile: readFile,
 		Log:      &logs,
@@ -120,6 +126,52 @@ func (r failingRoute) RoundTrip(req *http.Request) (*http.Response, error) {
 		Body:       io.NopCloser(strings.NewReader(`{"message":"internal failure"}`)),
 		Request:    req,
 	}, nil
+}
+
+// ctxRoute serves requests through next and honors the request context the way
+// net/http's transport does: a request whose context is already done is refused
+// before it reaches next. After it has served cancelAfter requests it calls cancel,
+// which is how a test cancels the run between two requests; a nil cancel never does.
+type ctxRoute struct {
+	next        http.RoundTripper
+	cancelAfter int
+	cancel      context.CancelFunc
+	served      int
+}
+
+// RoundTrip refuses a request under a done context, and otherwise serves it through next.
+func (c *ctxRoute) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
+	c.served++
+	if c.cancel != nil && c.served == c.cancelAfter {
+		c.cancel()
+	}
+	return c.next.RoundTrip(req)
+}
+
+// namedSecret is a value a run must never print, with the name a failure message
+// uses for it in place of the value.
+type namedSecret struct {
+	name  string
+	value string
+}
+
+// leakReport says where the first secret that output holds sits: its name, the byte
+// offset of its first match and the length of output. It never quotes output, since
+// output is what may hold the secret and a failure message gets pasted into a bead.
+// It returns "" when output holds none of the secrets.
+func leakReport(output string, secrets []namedSecret) string {
+	for _, s := range secrets {
+		if s.value == "" {
+			continue
+		}
+		if at := strings.Index(output, s.value); at >= 0 {
+			return fmt.Sprintf("output holds the %s at byte %d of %d (output not quoted)", s.name, at, len(output))
+		}
+	}
+	return ""
 }
 
 // nonGET returns the calls that were not reads.
@@ -460,12 +512,6 @@ func TestRunExitCodes(t *testing.T) {
 		wantLog string
 	}{
 		{
-			name:    "no admin token",
-			env:     map[string]string{"FORGEJO_ADMIN_ENV": ""},
-			args:    []string{"--repo", protectionRepo},
-			wantLog: "no admin token",
-		},
-		{
 			name:    "a 403 on the mint",
 			setup:   func(f *fakeForgejo) { f.adminless = true },
 			args:    []string{"--repo", protectionRepo},
@@ -502,18 +548,30 @@ func TestRunExitCodes(t *testing.T) {
 	}
 }
 
-// TestRunRefusesUsageBeforeRun: a refused command line never reaches Run. Parse returns
-// the usage error that the command maps to exit 2 (cmd/forgejo-provision's
-// TestMainUsageExitsTwo holds the mapping).
-func TestRunRefusesUsageBeforeRun(t *testing.T) {
+// TestRunRefusesUsageWithItsMessage: a refused command line never reaches Run. Parse
+// returns a *UsageError whose message names the value that failed, and the command
+// prints that message and exits 2 (cmd/forgejo-provision's TestMainUsageExitsTwo
+// holds the exit code for the same command lines).
+func TestRunRefusesUsageWithItsMessage(t *testing.T) {
 	t.Parallel()
-	for _, args := range [][]string{{"--repo", "gastown"}, {"--role", "admin"}, {"--nope"}} {
-		t.Run("usage refusal "+strings.Join(args, " "), func(t *testing.T) {
+	cases := map[string]struct {
+		args        []string
+		wantMessage string
+	}{
+		"unknown option":            {args: []string{"--nope"}, wantMessage: "unknown option: --nope"},
+		"unknown role":              {args: []string{"--role", "admin"}, wantMessage: "unknown role 'admin'"},
+		"--repo without OWNER/NAME": {args: []string{"--repo", "gastown"}, wantMessage: "--repo 'gastown' must be OWNER/NAME"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Parse(args, func(string) string { return "" })
+			_, err := Parse(tc.args, func(string) string { return "" })
 			var refused *UsageError
 			if !errors.As(err, &refused) {
-				t.Errorf("Parse(%v) = %v, want a usage refusal", args, err)
+				t.Fatalf("Parse(%v) = %v, want a usage refusal", tc.args, err)
+			}
+			if !strings.Contains(refused.Message, tc.wantMessage) {
+				t.Errorf("Parse(%v) message = %q, want it to hold %q", tc.args, refused.Message, tc.wantMessage)
 			}
 		})
 	}
@@ -750,11 +808,12 @@ func TestRunNeverPrintsATokenOrTouchesTheRealHome(t *testing.T) {
 			res := runProvisioning(t, f, files, sc.env, sc.args...)
 			logs += res.logs
 
-			secrets := append([]string{fixtureToken, decoyToken}, mintedValues(f)...)
-			for _, secret := range secrets {
-				if strings.Contains(logs, secret) {
-					t.Errorf("output holds a token value: %q", logs)
-				}
+			secrets := []namedSecret{{"admin token", fixtureToken}, {"decoy token", decoyToken}}
+			for i, minted := range mintedValues(f) {
+				secrets = append(secrets, namedSecret{fmt.Sprintf("minted token %d", i+1), minted})
+			}
+			if msg := leakReport(logs, secrets); msg != "" {
+				t.Error(msg)
 			}
 			for path := range files.files {
 				if !strings.HasPrefix(path, fixtureConfigDir+"/") {
@@ -767,5 +826,70 @@ func TestRunNeverPrintsATokenOrTouchesTheRealHome(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunLeakReportNeverQuotesOutput: the failure message of the no-token check names
+// the secret it found and where, and never quotes the output that holds it. A failing
+// assertion has to be safe to paste into a bead.
+func TestRunLeakReportNeverQuotesOutput(t *testing.T) {
+	t.Parallel()
+	secret := namedSecret{name: "minted token 1", value: "0123456789abcdef0123456789abcdef01234567"}
+	output := "forgejo-provision: prefix " + secret.value + " suffix"
+	msg := leakReport(output, []namedSecret{secret})
+	if msg == "" {
+		t.Fatalf("leakReport(output holding the secret) = \"\", want the leak named")
+	}
+	if strings.Contains(msg, secret.value) {
+		t.Errorf("leakReport message %q quotes the secret", msg)
+	}
+	if strings.Contains(msg, output) {
+		t.Errorf("leakReport message %q quotes the output", msg)
+	}
+	if !strings.Contains(msg, secret.name) {
+		t.Errorf("leakReport message %q does not name %q", msg, secret.name)
+	}
+	if clean := leakReport("forgejo-provision: provisioning complete", []namedSecret{secret}); clean != "" {
+		t.Errorf("leakReport(clean output) = %q, want none", clean)
+	}
+}
+
+// TestRunCancelledBeforeStartSendsNothing: a run whose context is already cancelled
+// fails at its first request and sends none: the fake records no call.
+func TestRunCancelledBeforeStartSendsNothing(t *testing.T) {
+	t.Parallel()
+	f := newFakeForgejo()
+	f.addRepo(protectionRepo)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res := runProvisioningCtx(ctx, t, &ctxRoute{next: f}, newMemFiles(), nil, "--repo", protectionRepo)
+	if res.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+	}
+	if !strings.Contains(res.logs, "request failed") {
+		t.Errorf("logs = %q, want the cancelled request failed", res.logs)
+	}
+	if calls := f.callLog(); len(calls) != 0 {
+		t.Errorf("requests reached the server under a cancelled context: %v", calls)
+	}
+}
+
+// TestRunCancelledBetweenTwoRequestsSendsNoMore: cancelled after the second request
+// is served, the run fails at the third, and the server records exactly two requests.
+func TestRunCancelledBetweenTwoRequestsSendsNoMore(t *testing.T) {
+	t.Parallel()
+	f := newFakeForgejo()
+	f.addRepo(protectionRepo)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res := runProvisioningCtx(ctx, t, &ctxRoute{next: f, cancelAfter: 2, cancel: cancel}, newMemFiles(), nil, "--repo", protectionRepo)
+	if res.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.logs)
+	}
+	if !strings.Contains(res.logs, "request failed") {
+		t.Errorf("logs = %q, want the request after the cancel failed", res.logs)
+	}
+	if calls := f.callLog(); len(calls) != 2 {
+		t.Errorf("the server recorded %d requests, want 2: the request after the cancel must not be sent", len(calls))
 	}
 }

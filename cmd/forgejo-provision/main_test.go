@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"io/fs"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -15,6 +17,22 @@ func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 // noEnv is the empty environment: every default these tests read is one no
 // variable moved.
 func noEnv(string) string { return "" }
+
+// emptyEnv is the Env of a command line that is refused or only asks for help:
+// the environment is empty, and no run reaches the seams beyond it.
+func emptyEnv() forgejoprov.Env { return forgejoprov.Env{Getenv: noEnv} }
+
+// countingRoute counts the requests a run sends and answers none of them.
+type countingRoute struct {
+	sent int
+}
+
+// RoundTrip records the request and refuses it, so a run that sends one fails
+// visibly and the count shows it.
+func (c *countingRoute) RoundTrip(*http.Request) (*http.Response, error) {
+	c.sent++
+	return nil, errors.New("request refused by the test")
+}
 
 // TestMainUsageExitsTwo holds the script's usage_die: the message names the
 // flag, the usage hint follows it, and the code is 2.
@@ -33,7 +51,7 @@ func TestMainUsageExitsTwo(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			if got := run(tc.args, noEnv, &stdout, &stderr); got != 2 {
+			if got := run(tc.args, emptyEnv(), &stdout, &stderr); got != 2 {
 				t.Fatalf("run(%v) = %d, want 2 (stderr: %s)", tc.args, got, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tc.stderr) {
@@ -57,7 +75,7 @@ func TestMainHelpExitsZero(t *testing.T) {
 		t.Run(flag, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			if got := run([]string{flag}, noEnv, &stdout, &stderr); got != 0 {
+			if got := run([]string{flag}, emptyEnv(), &stdout, &stderr); got != 0 {
 				t.Fatalf("run(%s) = %d, want 0 (stderr: %s)", flag, got, stderr.String())
 			}
 			// Each of these is read from the constant that holds the default, so
@@ -89,13 +107,40 @@ func TestMainHelpExitsZero(t *testing.T) {
 
 // TestMainWithoutAdminTokenExitsOne: a command line that parses but names no admin
 // token is a failed run (1), not a refused command line (2): the run stops at the
-// token, before any request, and says how to get one. The environment is empty, so
-// no request could reach a real server anyway.
+// token, before any request, and says how to get one. HOME, TMPDIR, the config dir
+// and the admin token file all sit under the test's temporary directory, and the
+// transport counts requests, so the run touches neither the real home nor a server.
 func TestMainWithoutAdminTokenExitsOne(t *testing.T) {
 	t.Parallel()
+	dir := t.TempDir()
+	vars := map[string]string{
+		"FORGEJO_API_URL":   "http://forgejo.invalid/api/v1",
+		"FORGEJO_ADMIN_ENV": dir + "/admin.env",
+		"HOME":              dir,
+		"TMPDIR":            dir,
+		"XDG_CONFIG_HOME":   dir + "/config",
+	}
+	var reads []string
+	route := &countingRoute{}
+	env := forgejoprov.Env{
+		Getenv: func(name string) string { return vars[name] },
+		ReadFile: func(path string) ([]byte, error) {
+			reads = append(reads, path)
+			return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+		},
+		HTTP: &http.Client{Transport: route},
+	}
 	var stdout, stderr strings.Builder
-	if got := run([]string{"--dry-run"}, noEnv, &stdout, &stderr); got != forgejoprov.ExitFailure {
+	if got := run([]string{"--dry-run"}, env, &stdout, &stderr); got != forgejoprov.ExitFailure {
 		t.Fatalf("run(--dry-run) = %d, want 1 (stderr: %s)", got, stderr.String())
+	}
+	if route.sent != 0 {
+		t.Errorf("run sent %d requests, want none: the run stops at the admin token", route.sent)
+	}
+	for _, path := range reads {
+		if !strings.HasPrefix(path, dir+"/") {
+			t.Errorf("run read %s, outside the test directory %s", path, dir)
+		}
 	}
 	if !strings.Contains(stderr.String(), "forgejo-provision: no admin token:") {
 		t.Errorf("stderr = %q, want the no admin token failure", stderr.String())
@@ -119,7 +164,7 @@ func TestMainParseFailureExitsOne(t *testing.T) {
 		return nil, errors.New("the admin token file is unreadable")
 	}
 	var stdout, stderr strings.Builder
-	if got := runParse(nil, noEnv, &stdout, &stderr, unreadable); got != forgejoprov.ExitFailure {
+	if got := runParse(nil, emptyEnv(), &stdout, &stderr, unreadable); got != forgejoprov.ExitFailure {
 		t.Fatalf("runParse = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "the admin token file is unreadable") {
