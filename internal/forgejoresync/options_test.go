@@ -21,8 +21,8 @@ func env(vars map[string]string) func(string) string {
 // against its literal value so a changed default fails here.
 func TestParseDefaultsTable(t *testing.T) {
 	t.Parallel()
-	// base is the empty environment with no flags and the repository acme/gastown:
-	// HOME is empty too, so the backup directory is the script's "/forgejo/backups".
+	// base is the environment with HOME set and no other variable, no flags and the
+	// repository acme/gastown: the backup directory is HOME's forgejo/backups.
 	base := Options{
 		Repo:       "acme/gastown",
 		APIURL:     "http://127.0.0.1:3000/api/v1",
@@ -30,7 +30,7 @@ func TestParseDefaultsTable(t *testing.T) {
 		GitHubURL:  "https://github.com/acme/gastown.git",
 		ForgejoURL: "http://127.0.0.1:3000/acme/gastown.git",
 		MainBranch: "main",
-		BackupDir:  "/forgejo/backups",
+		BackupDir:  "/home/test/forgejo/backups",
 	}
 	cases := []struct {
 		name   string
@@ -147,9 +147,13 @@ func TestParseDefaultsTable(t *testing.T) {
 			if tc.change != nil {
 				tc.change(&want)
 			}
+			vars := map[string]string{"HOME": "/home/test"}
+			for k, v := range tc.vars {
+				vars[k] = v
+			}
 			args := append([]string{}, tc.args...)
 			args = append(args, "acme/gastown")
-			got, err := Parse(args, env(tc.vars))
+			got, err := Parse(args, env(vars))
 			if err != nil {
 				t.Fatalf("Parse(%v) error = %v, want none", args, err)
 			}
@@ -167,11 +171,15 @@ func TestParseRejectsBadValues(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
 		args    []string
+		vars    map[string]string
 		message string
 	}{
 		"api-url without a scheme":         {args: []string{"--api-url", "forgejo.test/api/v1", "acme/gastown"}, message: "--api-url must be http:// or https://"},
 		"api-url with ftp":                 {args: []string{"--api-url", "ftp://forgejo.test", "acme/gastown"}, message: "--api-url must be http:// or https://"},
 		"api-url with no value":            {args: []string{"acme/gastown", "--api-url"}, message: "--api-url needs a value"},
+		"web-url without a scheme":         {args: []string{"--web-url", "web.test", "acme/gastown"}, message: "the web root (--web-url or FORGEJO_URL) must be http:// or https://"},
+		"web-url with ssh":                 {args: []string{"--web-url", "ssh://web.test", "acme/gastown"}, message: "the web root (--web-url or FORGEJO_URL) must be http:// or https://"},
+		"FORGEJO_URL without a scheme":     {args: []string{"acme/gastown"}, vars: map[string]string{"HOME": "/home/gt", "FORGEJO_URL": "web.test"}, message: "the web root (--web-url or FORGEJO_URL) must be http:// or https:// (got 'web.test')"},
 		"main-branch with a space":         {args: []string{"--main-branch", "ma in", "acme/gastown"}, message: "--main-branch 'ma in' must match"},
 		"main-branch with a quote":         {args: []string{"--main-branch", `"main"`, "acme/gastown"}, message: "--main-branch '\"main\"' must match"},
 		"main-branch empty":                {args: []string{"--main-branch", "", "acme/gastown"}, message: "--main-branch '' must match"},
@@ -179,17 +187,26 @@ func TestParseRejectsBadValues(t *testing.T) {
 		"repo with two slashes":            {args: []string{"acme/gastown/extra"}, message: "'acme/gastown/extra' must be OWNER/NAME"},
 		"repo with a leading slash":        {args: []string{"/gastown"}, message: "'/gastown' must be OWNER/NAME"},
 		"repo with a trailing slash":       {args: []string{"acme/"}, message: "'acme/' must be OWNER/NAME"},
+		"repo with a space":                {args: []string{"acme/git town"}, message: "'acme/git town' must be OWNER/NAME"},
+		"repo with a question mark":        {args: []string{"acme/gast?own"}, message: "'acme/gast?own' must be OWNER/NAME"},
+		"repo with a hash":                 {args: []string{"acme/gast#own"}, message: "'acme/gast#own' must be OWNER/NAME"},
+		"repo with a percent escape":       {args: []string{"acme/gas%2fown"}, message: "'acme/gas%2fown' must be OWNER/NAME"},
+		"repo with a dot-dot owner":        {args: []string{"../gastown"}, message: "'../gastown' must be OWNER/NAME"},
+		"repo with a dot-dot name":         {args: []string{"acme/.."}, message: "'acme/..' must be OWNER/NAME"},
+		"repo with a dot name":             {args: []string{"./gastown"}, message: "'./gastown' must be OWNER/NAME"},
 		"no repo at all":                   {args: []string{"--dry-run"}, message: "OWNER/NAME is required"},
 		"two repositories":                 {args: []string{"acme/gastown", "acme/devops"}, message: "one repository only"},
 		"unknown option":                   {args: []string{"--nope", "acme/gastown"}, message: "unknown option: --nope"},
 		"the removed --provision flag":     {args: []string{"--provision", "p.sh", "acme/gastown"}, message: "unknown option: --provision"},
 		"a flag written with its value":    {args: []string{"--main-branch=main", "acme/gastown"}, message: "unknown option: --main-branch=main"},
 		"a bare dash is an unknown option": {args: []string{"-", "acme/gastown"}, message: "unknown option: -"},
+		"no HOME and no backup directory":  {args: []string{"acme/gastown"}, message: "--backup-dir is required: HOME is unset"},
+		"an empty --backup-dir":            {args: []string{"--backup-dir", "", "acme/gastown"}, vars: map[string]string{"HOME": "/home/gt"}, message: "--backup-dir is required"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			got, err := Parse(tc.args, env(nil))
+			got, err := Parse(tc.args, env(tc.vars))
 			if got != nil {
 				t.Errorf("Parse(%v) = %+v, want no options", tc.args, *got)
 			}
@@ -201,6 +218,22 @@ func TestParseRejectsBadValues(t *testing.T) {
 				t.Errorf("Parse(%v) message = %q, want it to hold %q", tc.args, refused.Message, tc.message)
 			}
 		})
+	}
+}
+
+// TestParseAcceptsRepoNames: the characters a forge owner and repository name
+// may hold pass through to the URLs unchanged.
+func TestParseAcceptsRepoNames(t *testing.T) {
+	t.Parallel()
+	for _, repo := range []string{"acme/gastown", "Acme-Org/git_hub.mirror", "a.b/c.d", "owner/.hidden"} {
+		got, err := Parse([]string{repo}, env(map[string]string{"HOME": "/home/gt"}))
+		if err != nil {
+			t.Errorf("Parse(%q) error = %v, want none", repo, err)
+			continue
+		}
+		if got.Repo != repo {
+			t.Errorf("Parse(%q).Repo = %q, want it unchanged", repo, got.Repo)
+		}
 	}
 }
 
