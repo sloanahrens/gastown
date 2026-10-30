@@ -82,8 +82,9 @@ func isOctet(digits string) bool {
 }
 
 // Validate checks the options in the order the script checked them: the pinned
-// address, then the dolt name, then the forgejo name. The first refusal is
-// returned, naming the flag and the value it will not render.
+// address, then the dolt name, then the forgejo name, then the tracker name.
+// The first refusal is returned, naming the flag and the value it will not
+// render.
 func Validate(opts Options) error {
 	if !ValidIPv4(opts.AllowedIP) {
 		return &UsageError{Msg: fmt.Sprintf("%s: --allowed-ip must be an IPv4 address, got '%s'", Name, opts.AllowedIP)}
@@ -93,6 +94,9 @@ func Validate(opts Options) error {
 	}
 	if !ValidHost(opts.ForgejoHost) {
 		return &UsageError{Msg: fmt.Sprintf("%s: --forgejo-host must be a DNS name, got '%s'", Name, opts.ForgejoHost)}
+	}
+	if !ValidHost(opts.TrackerHost) {
+		return &UsageError{Msg: fmt.Sprintf("%s: --tracker-host must be a DNS name, got '%s'", Name, opts.TrackerHost)}
 	}
 	return nil
 }

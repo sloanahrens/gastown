@@ -1,6 +1,7 @@
 package k8spolicy
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -83,6 +84,45 @@ func TestValidIPv4Table(t *testing.T) {
 			t.Parallel()
 			if got := ValidIPv4(tc.addr); got != tc.ok {
 				t.Errorf("ValidIPv4(%q) = %t, want %t", tc.addr, got, tc.ok)
+			}
+		})
+	}
+}
+
+// TestValidateOrder checks Validate returns the first refusal in the order the
+// script checked: the pinned address, the dolt name, the forgejo name, the tracker
+// name, each naming its flag and the value it would not render.
+func TestValidateOrder(t *testing.T) {
+	t.Parallel()
+	good := Options{
+		DoltHost: DefaultDoltHost, ForgejoHost: DefaultForgejoHost,
+		TrackerHost: DefaultTrackerHost, AllowedIP: DefaultAllowedIP,
+	}
+	if err := Validate(good); err != nil {
+		t.Fatalf("Validate(defaults) = %v", err)
+	}
+	bad := func(o Options, change func(*Options)) Options { change(&o); return o }
+	cases := []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"the address alone", bad(good, func(o *Options) { o.AllowedIP = "1.2.3" }), "render-policy: --allowed-ip must be an IPv4 address, got '1.2.3'"},
+		{"the dolt host alone", bad(good, func(o *Options) { o.DoltHost = "dolt example" }), "render-policy: --dolt-host must be a DNS name, got 'dolt example'"},
+		{"the forgejo host alone", bad(good, func(o *Options) { o.ForgejoHost = "-bad.example" }), "render-policy: --forgejo-host must be a DNS name, got '-bad.example'"},
+		{"the tracker host alone", bad(good, func(o *Options) { o.TrackerHost = "track er.example" }), "render-policy: --tracker-host must be a DNS name, got 'track er.example'"},
+		{"an empty tracker host", bad(good, func(o *Options) { o.TrackerHost = "" }), "render-policy: --tracker-host must be a DNS name, got ''"},
+		{"all four: the address first", Options{AllowedIP: "x", DoltHost: "a b", ForgejoHost: "c d", TrackerHost: "e f"}, "render-policy: --allowed-ip must be an IPv4 address, got 'x'"},
+		{"three hosts: the dolt host first", Options{AllowedIP: DefaultAllowedIP, DoltHost: "a b", ForgejoHost: "c d", TrackerHost: "e f"}, "render-policy: --dolt-host must be a DNS name, got 'a b'"},
+		{"two hosts: the forgejo host first", Options{AllowedIP: DefaultAllowedIP, DoltHost: "ok.example", ForgejoHost: "c d", TrackerHost: "e f"}, "render-policy: --forgejo-host must be a DNS name, got 'c d'"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := Validate(tc.opts)
+			var usage *UsageError
+			if !errors.As(err, &usage) || usage.Msg != tc.want {
+				t.Errorf("Validate = %v, want a usage error %q", err, tc.want)
 			}
 		})
 	}
