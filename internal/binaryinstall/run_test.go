@@ -3,6 +3,8 @@ package binaryinstall
 import (
 	"bytes"
 	"context"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -19,6 +21,8 @@ type runRig struct {
 	codesign    [][]string
 	codesignOut []byte
 	codesignErr error
+	unlockErr   error
+	readErr     error
 	// renamedWhenSigned is the rename target at the moment codesign ran.
 	renamedWhenSigned string
 }
@@ -31,6 +35,9 @@ func (r *runRig) run(args ...string) int {
 	return Run(args, &r.stderr, Installer{Files: r.files}, Signer{
 		Exec: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			r.log("exec", name+" "+strings.Join(args, " "))
+			if name == "security" {
+				return nil, r.unlockErr
+			}
 			if name != "codesign" {
 				return nil, nil
 			}
@@ -38,8 +45,13 @@ func (r *runRig) run(args ...string) int {
 			r.renamedWhenSigned = r.renamed
 			return r.codesignOut, r.codesignErr
 		},
-		ReadFile: func(string) ([]byte, error) { return []byte(samplePassword + "\n"), nil },
-		Getenv:   func(key string) string { return r.env[key] },
+		ReadFile: func(string) ([]byte, error) {
+			if r.readErr != nil {
+				return nil, r.readErr
+			}
+			return []byte(samplePassword + "\n"), nil
+		},
+		Getenv: func(key string) string { return r.env[key] },
 	})
 }
 
@@ -177,25 +189,95 @@ func TestRunDefaultsNameToTheSourceBase(t *testing.T) {
 	}
 }
 
-func TestRunFailedSignInstallsTheBuiltBinaryWithOneWarning(t *testing.T) {
+// A signing that fails once the material is found exits 3 and installs nothing:
+// the temp copy is removed, the live path is never renamed onto, and the
+// immutable flag is not touched.
+func TestRunFailedSignExitsThreeAndInstallsNothing(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		setup  func(*runRig)
+		reason string
+	}{
+		{"codesign fails", func(r *runRig) {
+			r.codesignErr = errCodesignExit
+			r.codesignOut = []byte("bad signature\nsecond line\n")
+		}, "codesign failed"},
+		{"keychain unlock fails", func(r *runRig) { r.unlockErr = errUnlockRefused }, "cannot unlock " + keychainPath},
+		{"password file unreadable", func(r *runRig) { r.readErr = errReadPassword }, "cannot read " + passwordPath},
+		{"timeout is not seconds", func(r *runRig) { r.env["INSTALL_GT_SIGN_TIMEOUT"] = "soon" },
+			`INSTALL_GT_SIGN_TIMEOUT="soon" is not a positive number of seconds`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRunRig()
+			tc.setup(r)
+			if code := r.run(testSrc, testDestDir, "gt"); code != 3 {
+				t.Fatalf("Run = %d, want 3: a failed signing installs nothing (stderr: %s)", code, r.stderr.String())
+			}
+			if r.renamed != "" {
+				t.Errorf("renamed %q after a failed signing, want no rename", r.renamed)
+			}
+			if r.callIndex("remove "+signTmp) < 0 {
+				t.Errorf("the temp copy %s was not removed: %v", signTmp, r.calls)
+			}
+			if r.callIndex("clear-immutable ") >= 0 || r.callIndex("set-immutable ") >= 0 {
+				t.Errorf("a failed signing touched the immutable flag: %v", r.calls)
+			}
+			wantTail := "signing failed: " + tc.reason + "\n"
+			if !strings.HasSuffix(r.stderr.String(), wantTail) {
+				t.Errorf("stderr = %q, want it to end with the cause %q", r.stderr.String(), wantTail)
+			}
+		})
+	}
+}
+
+// A codesign that fails names the first line of its output once, as a notice,
+// and the error that stops the install names only the step.
+func TestRunFailedCodesignPrintsTheFirstLineOfItsOutputOnce(t *testing.T) {
 	t.Parallel()
 	r := newRunRig()
 	r.codesignErr = errCodesignExit
 	r.codesignOut = []byte("bad signature\nsecond line\n")
-	if code := r.run(testSrc, testDestDir, "gt"); code != 0 {
-		t.Fatalf("Run = %d, want 0: a failing codesign installs ad-hoc", code)
+	if code := r.run(testSrc, testDestDir, "gt"); code != 3 {
+		t.Fatalf("Run = %d, want 3", code)
 	}
-	if r.renamed != testDest {
-		t.Errorf("renamed to %q, want %q", r.renamed, testDest)
+	if n := strings.Count(r.stderr.String(), "bad signature"); n != 1 {
+		t.Errorf("the codesign output printed %d times, want once: %q", n, r.stderr.String())
 	}
-	want := "install-binary: installing ad-hoc: codesign failed: bad signature\n"
-	if r.stderr.String() != want {
-		t.Errorf("stderr = %q, want exactly one warning %q", r.stderr.String(), want)
+	if strings.Contains(r.stderr.String(), "second line") {
+		t.Errorf("stderr = %q, want the first line of the output only", r.stderr.String())
 	}
 	// The temp copy was rebuilt from the source after the failed codesign: one
 	// copy for the install, one for the restore.
 	if n := r.countCalls("copy " + signTmp + " <- " + testSrc); n != 2 {
 		t.Errorf("copied the source %d times, want 2 (install and restore)", n)
+	}
+}
+
+// A name Run must refuse is refused before anything is touched: a separator, or
+// a name that is the directory itself or its parent.
+func TestRunRefusesANameThatIsNotABareFileName(t *testing.T) {
+	t.Parallel()
+	names := []string{"a/b", "..", "."}
+	if os.PathSeparator == '\\' {
+		names = append(names, `a\b`)
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newRunRig()
+			if code := r.run(testSrc, testDestDir, name); code != 1 {
+				t.Fatalf("Run = %d, want 1", code)
+			}
+			want := "install-binary: name " + strconv.Quote(name) + " is not a bare file name\n"
+			if r.stderr.String() != want {
+				t.Errorf("stderr = %q, want %q", r.stderr.String(), want)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("a refused name touched the filesystem: %v", r.calls)
+			}
+		})
 	}
 }
 
@@ -214,6 +296,11 @@ func TestRunDoesNotRenameWhenTheRestoreAfterAFailedSignFails(t *testing.T) {
 	}
 	if code := r.run(testSrc, testDestDir, "gt"); code != 1 {
 		t.Fatalf("Run = %d, want 1: a restore that failed must not install", code)
+	}
+	// The injection must be the copy the restore runs through: a restore that
+	// bypassed it would not fail here, so the install would not be refused.
+	if copies != 2 {
+		t.Fatalf("the injected copy ran %d times, want 2 (install and restore): the restore did not reach it", copies)
 	}
 	if r.renamed != "" {
 		t.Errorf("renamed %q after a failed restore, want no rename", r.renamed)

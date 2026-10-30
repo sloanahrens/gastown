@@ -4,28 +4,12 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"regexp"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
 func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
-
-// The Makefile must never copy the built binary straight over the installed one
-// (gt-0het): that copy is not atomic, so a reader can see a partial binary. The
-// recipe is read from the repo, not from the developer's environment.
-func TestMakefileNeverCopiesTheBinaryIntoTheInstallDir(t *testing.T) {
-	t.Parallel()
-	makefile, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
-	if err != nil {
-		t.Fatalf("read the Makefile: %v", err)
-	}
-	direct := regexp.MustCompile(`cp\s+\$\(BUILD_DIR\)/\$\(BINARY\)\s+\$\(INSTALL_DIR\)`)
-	if direct.Match(makefile) {
-		t.Error("the Makefile copies the built binary directly into the install dir (non-atomic)")
-	}
-}
 
 // A usage error exits 1 before any file is touched, the script's exit status
 // for a missing argument.

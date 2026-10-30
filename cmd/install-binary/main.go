@@ -7,6 +7,10 @@
 //
 // The copy is written beside the target and renamed over it, so a concurrent
 // reader sees the old binary or the new one, never a partial copy (gt-0het).
+//
+// Exit status: 0 when the binary is installed, 1 for a usage error or a failed
+// install, and 3 when signing failed once the signing material was found, in
+// which case nothing is installed.
 package main
 
 import (
