@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -22,43 +21,12 @@ func TestMain(m *testing.M) {
 func TestRunRefusesAScratchDirectoryItCannotMake(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
-	args := []string{"-fixture", t.TempDir(), "-scratch", ""}
+	args := []string{"-fixture", writeFixture(t, fixtureIDs...), "-scratch", ""}
 	if code := run(args, &stdout, &stderr); code != 1 {
 		t.Errorf("run with an empty -scratch = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "make scratch directory") {
 		t.Errorf("stderr = %q, want the scratch directory failure reported", stderr.String())
-	}
-}
-
-// TestRunRefusesAScratchInsideTheFixture: a scratch directory the fixture tree contains would hold
-// copies the next copy walks, so the command refuses it before it makes anything.
-func TestRunRefusesAScratchInsideTheFixture(t *testing.T) {
-	t.Parallel()
-	fixture := t.TempDir()
-	tests := []struct {
-		name    string
-		scratch string
-	}{
-		{"scratch is the fixture", fixture},
-		{"scratch under the fixture", filepath.Join(fixture, "scratch")},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			before := fileNames(t, fixture)
-			var stdout, stderr bytes.Buffer
-			args := []string{"-fixture", fixture, "-scratch", tc.scratch}
-			if code := run(args, &stdout, &stderr); code != 2 {
-				t.Errorf("run with -scratch %s = %d, want 2", tc.name, code)
-			}
-			if !strings.Contains(stderr.String(), "inside the fixture") {
-				t.Errorf("stderr = %q, want the refusal reported", stderr.String())
-			}
-			if after := fileNames(t, fixture); !reflect.DeepEqual(before, after) {
-				t.Errorf("fixture holds %v after the refusal, want it untouched at %v", after, before)
-			}
-		})
 	}
 }
 
@@ -72,5 +40,33 @@ func TestRunRefusesAMissingFixture(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "-fixture is required") {
 		t.Errorf("stderr = %q, want the missing -fixture named", stderr.String())
+	}
+}
+
+// TestRunRefusesAFixtureFileThatIsNotThere: a -fixture that names no file stops the run before any
+// database is made.
+func TestRunRefusesAFixtureFileThatIsNotThere(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	missing := filepath.Join(t.TempDir(), "missing.jsonl")
+	if code := run([]string{"-fixture", missing, "-scratch", t.TempDir()}, &stdout, &stderr); code != 1 {
+		t.Errorf("run with a missing fixture file = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "open the fixture") {
+		t.Errorf("stderr = %q, want the fixture failure reported", stderr.String())
+	}
+}
+
+// TestRunRefusesAFixtureMissingABead: a fixture file that lacks a bead the table names stops the
+// run before any database is made, naming the bead.
+func TestRunRefusesAFixtureMissingABead(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	fixture := writeFixture(t, fixtureID, fixtureParent)
+	if code := run([]string{"-fixture", fixture, "-scratch", t.TempDir()}, &stdout, &stderr); code != 1 {
+		t.Errorf("run over a fixture missing %s = %d, want 1", fixtureDepID, code)
+	}
+	if !strings.Contains(stderr.String(), fixtureDepID) {
+		t.Errorf("stderr = %q, want the missing bead named", stderr.String())
 	}
 }
