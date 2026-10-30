@@ -239,6 +239,15 @@ func TestEnsureRuleJudgesEveryField(t *testing.T) {
 		{name: "status_check_contexts with one context missing", field: "status_check_contexts", value: []any{"om / review"}},
 		{name: "block_on_outdated_branch", field: "block_on_outdated_branch", value: false},
 	}
+	covered := map[string]bool{"rule_name": true}
+	for _, c := range cases {
+		covered[c.field] = true
+	}
+	for key := range MainRule(testOptions()) {
+		if !covered[key] {
+			t.Errorf("MainRule writes %q but no drift row changes it", key)
+		}
+	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -593,6 +602,119 @@ func TestEnsureNoRuleBranches(t *testing.T) {
 			}
 			if !strings.Contains(strings.Join(logs, "\n"), c.wantLog) {
 				t.Fatalf("logged %q, want a line containing %q", logs, c.wantLog)
+			}
+		})
+	}
+}
+
+// countTransport answers the rule list with getBody and counts every write.
+type countTransport struct {
+	getBody string
+	writes  int
+}
+
+func (c *countTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodGet {
+		return respond(req, http.StatusOK, c.getBody)
+	}
+	c.writes++
+	return respond(req, http.StatusInternalServerError, echoReply)
+}
+
+// TestEnsureRuleTreatsNullAndEmptyListAsTheSame checks that a rule whose empty list the
+// server answers as null, or leaves out, is not drift: Forgejo encodes "no entries"
+// either way, and a PATCH for it would repeat on every run.
+func TestEnsureRuleTreatsNullAndEmptyListAsTheSame(t *testing.T) {
+	t.Parallel()
+	opts := testOptions()
+	for _, shape := range []string{"null", "absent"} {
+		t.Run(shape, func(t *testing.T) {
+			t.Parallel()
+			held := servedRule(t, MainRule(opts))
+			if shape == "null" {
+				held["push_whitelist_usernames"] = nil
+			} else {
+				delete(held, "push_whitelist_usernames")
+			}
+			tr := &countTransport{getBody: listJSON(t, held)}
+			p := &Provisioner{Client: &Client{
+				API:   fakeAPIRoot + fakeAPIPath,
+				HTTP:  &http.Client{Transport: tr},
+				Token: newSecret(fixtureToken),
+				Log:   func(string) {},
+			}}
+			if err := p.EnsureRule(protectionRepo, opts); err != nil {
+				t.Fatalf("EnsureRule: %v", err)
+			}
+			if tr.writes != 0 {
+				t.Fatalf("sent %d writes for an empty list the server answered as %s, want none", tr.writes, shape)
+			}
+		})
+	}
+}
+
+// TestSameJSONNullIsOnlyTheEmptyList checks that null equals [] and nothing else: a
+// false flag or a one-entry list is not "no entries".
+func TestSameJSONNullIsOnlyTheEmptyList(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		a, b any
+		want bool
+	}{
+		{name: "null and empty list", a: nil, b: []string{}, want: true},
+		{name: "empty list and null", a: []string{}, b: nil, want: true},
+		{name: "null and false", a: nil, b: false, want: false},
+		{name: "null and one entry", a: nil, b: []string{"x"}, want: false},
+		{name: "equal lists", a: []any{"x"}, b: []string{"x"}, want: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sameJSON(c.a, c.b); got != c.want {
+				t.Fatalf("sameJSON(%v, %v) = %v, want %v", c.a, c.b, got, c.want)
+			}
+		})
+	}
+}
+
+// TestEnsureRuleRefusesANullRuleList checks that a literal null reply to the list is an
+// error, not an absent rule that would trigger a create.
+func TestEnsureRuleRefusesANullRuleList(t *testing.T) {
+	t.Parallel()
+	tr := &countTransport{getBody: "null"}
+	p := &Provisioner{Client: &Client{
+		API:   fakeAPIRoot + fakeAPIPath,
+		HTTP:  &http.Client{Transport: tr},
+		Token: newSecret(fixtureToken),
+		Log:   func(string) {},
+	}}
+	err := p.EnsureRule(protectionRepo, testOptions())
+	if err == nil || !strings.Contains(err.Error(), "reply is not a list of rules") {
+		t.Fatalf("EnsureRule = %v, want reply is not a list of rules", err)
+	}
+	if tr.writes != 0 {
+		t.Fatalf("sent %d writes after a null list, want none", tr.writes)
+	}
+}
+
+// TestRuleSegmentEscapesWhatEndsAPath checks that no character of a rule name can end the
+// path segment or start a query, while the glob's "*" stays as written.
+func TestRuleSegmentEscapesWhatEndsAPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, rule, want string }{
+		{name: "slash", rule: "release/*", want: "release%2F*"},
+		{name: "percent", rule: "a%b", want: "a%25b"},
+		{name: "question mark", rule: "a?b", want: "a%3Fb"},
+		{name: "hash", rule: "a#b", want: "a%23b"},
+		{name: "space", rule: "a b", want: "a%20b"},
+		{name: "plain", rule: "main", want: "main"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ruleSegment(c.rule); got != c.want {
+				t.Fatalf("ruleSegment(%q) = %q, want %q", c.rule, got, c.want)
 			}
 		})
 	}

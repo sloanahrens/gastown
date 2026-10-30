@@ -139,7 +139,7 @@ func (p *Provisioner) listRules(base string) ([]map[string]any, error) {
 		return nil, p.Client.Unexpected(http.MethodGet, base, status, resp)
 	}
 	var rules []map[string]any
-	if err := json.Unmarshal(resp, &rules); err != nil {
+	if err := json.Unmarshal(resp, &rules); err != nil || rules == nil {
 		return nil, fmt.Errorf("GET %s: reply is not a list of rules", base)
 	}
 	return rules, nil
@@ -166,12 +166,23 @@ func carries(have, want map[string]any) bool {
 }
 
 // sameJSON reports whether a and b encode to the same JSON, so a list the reply decodes
-// to compares with the list the body sent, and an empty list is not nil. A value that
-// cannot be encoded matches nothing.
+// to compares with the list the body sent. Forgejo answers an empty list as either null
+// or [], so those two are the same value. A value that cannot be encoded matches nothing.
 func sameJSON(a, b any) bool {
 	x, errA := json.Marshal(a)
 	y, errB := json.Marshal(b)
-	return errA == nil && errB == nil && bytes.Equal(x, y)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return bytes.Equal(emptyList(x), emptyList(y))
+}
+
+// emptyList maps the JSON null to the empty list, the one other encoding of "no entries".
+func emptyList(data []byte) []byte {
+	if string(data) == "null" {
+		return []byte("[]")
+	}
+	return data
 }
 
 // findRule returns the rule named name from rules, or nil when there is none.
@@ -186,7 +197,8 @@ func findRule(rules []map[string]any, name string) map[string]any {
 
 // ruleSegment escapes a rule name for the per-rule route. The name is a branch glob, and
 // the route takes it in the path, so "/" must arrive as %2F for Forgejo to rebuild the
-// name (go-gitea#21093). Only "/" is escaped: the glob's "*" stays as it is written.
+// name (go-gitea#21093); "%", "?", "#" and a space are escaped too, so no character of the
+// name can end the path or start a query. The glob's "*" stays as it is written.
 func ruleSegment(rule string) string {
-	return strings.ReplaceAll(rule, "/", "%2F")
+	return strings.ReplaceAll(url.PathEscape(rule), "%2A", "*")
 }
