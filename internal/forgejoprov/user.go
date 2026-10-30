@@ -38,6 +38,9 @@ type Provisioner struct {
 	ConfigDir string
 	// Rotate mints a new token where a token file exists, revoking the old one.
 	Rotate bool
+	// ViewerRequested says the run provisions the viewer role itself, so its role
+	// loop grants the viewer's repository access and EnsureViewerAccess does nothing.
+	ViewerRequested bool
 	// Files is the filesystem the token files are written through; nil means
 	// the real one.
 	Files Files
