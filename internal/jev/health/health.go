@@ -67,12 +67,19 @@ const (
 	// Unanswered means over UnansweredShare of its last day's lines carry no
 	// answers.
 	Unanswered Status = "unanswered"
+	// Unparseable means the battery's log holds lines and none of them parses:
+	// no count can say what it collected, and reading that as quiet would hide
+	// a schema change behind an empty row.
+	Unparseable Status = "unparseable"
+	// Unknown means the evidence a rule needs cannot be read: a battery only a
+	// landing writes, judged against a landing clock the town has not recorded.
+	Unknown Status = "unknown"
 )
 
 // Fails reports whether the status means an enabled battery is not collecting.
 func (s Status) Fails() bool {
 	switch s {
-	case Stale, Late, Low, Unanswered:
+	case Stale, Late, Low, Unanswered, Unparseable, Unknown:
 		return true
 	}
 	return false
@@ -217,6 +224,21 @@ type Input struct {
 	// Unparsed is how many of the log's non-blank lines did not parse: a line
 	// a schema change broke must be counted, not read as a quiet battery.
 	Unparsed int
+	// LogPresent is whether the log file exists at all. An absent log is a
+	// battery that has never written; a log that exists with no readable line
+	// is a schema change, and only this tells them apart.
+	LogPresent bool
+}
+
+// landingClockKnown is whether the landing battery's log can say when the town
+// last landed: one line per landing, and no readable line (or no file at all)
+// leaves a battery only a landing writes with no day to be quiet against.
+func landingClockKnown(in Input, now time.Time) bool {
+	if !in.LogPresent {
+		return false
+	}
+	_, ok := newestLine(in.Log, now)
+	return ok
 }
 
 // Line is the part of one log line health reads.
@@ -251,10 +273,12 @@ const landingsBattery = "landing"
 // Report judges every battery in Batteries, in table order, from each
 // battery's files in inputs and each caller's calls in the last day in ledger.
 func Report(cfg Config, inputs map[string]Input, ledger map[string]int, now time.Time) []Row {
-	landings24 := countBetween(inputs[landingsBattery].Log, now.Add(-Window), now)
+	landingInput := inputs[landingsBattery]
+	landings24 := countBetween(landingInput.Log, now.Add(-Window), now)
+	landingKnown := landingClockKnown(landingInput, now)
 	rows := make([]Row, 0, len(Batteries))
 	for _, b := range Batteries {
-		rows = append(rows, judge(b, cfg, inputs[b.Name], ledger, landings24, now))
+		rows = append(rows, judge(b, cfg, inputs[b.Name], ledger, landingKnown, landings24, now))
 	}
 	return rows
 }
@@ -271,7 +295,7 @@ func ExitFails(rows []Row) bool {
 }
 
 // judge builds one battery's row.
-func judge(b Battery, cfg Config, in Input, ledger map[string]int, landings24 int, now time.Time) Row {
+func judge(b Battery, cfg Config, in Input, ledger map[string]int, landingKnown bool, landings24 int, now time.Time) Row {
 	row := Row{
 		Name:          b.Name,
 		Enabled:       cfg.Enabled[b.ConfigKey],
@@ -282,11 +306,11 @@ func judge(b Battery, cfg Config, in Input, ledger map[string]int, landings24 in
 		NoAnswerShare: noAnswerShare(in.Log, now),
 		Unparsed:      in.Unparsed,
 	}
-	if t, ok := lastPass(in); ok {
+	if t, ok := lastPass(in, now); ok {
 		row.LastPass = &t
 	}
-	row.judgeStatus(b, cfg, landings24, now)
-	if row.Unparsed > 0 {
+	row.judgeStatus(b, cfg, in, landingKnown, landings24, now)
+	if row.Unparsed > 0 && row.Status != Unparseable {
 		row.Reason = reasonWith(row.Reason, fmt.Sprintf("%d log lines did not parse", row.Unparsed))
 	}
 	return row
@@ -303,7 +327,7 @@ func reasonWith(reason, note string) string {
 // judgeStatus sets the first rule the row breaks, reading the config and the
 // freshness of the last pass before the counts: a stale battery also logs
 // nothing, and naming the missed pass says more than naming the empty count.
-func (r *Row) judgeStatus(b Battery, cfg Config, landings24 int, now time.Time) {
+func (r *Row) judgeStatus(b Battery, cfg Config, in Input, landingKnown bool, landings24 int, now time.Time) {
 	switch {
 	case !r.Enabled:
 		r.Status, r.Reason = Disabled, "patrols."+b.ConfigKey+" is off"
@@ -317,8 +341,15 @@ func (r *Row) judgeStatus(b Battery, cfg Config, landings24 int, now time.Time) 
 		return
 	}
 
+	// A log that holds lines and parses none of them says nothing about the
+	// battery, so no freshness or count rule below can be read from it.
+	if in.LogPresent && len(in.Log) == 0 && in.Unparsed > 0 {
+		r.Status, r.Reason = Unparseable, "none of the log's lines parse"
+		return
+	}
+
 	if b.Cadence == OnLanding {
-		r.judgeLanding(landings24)
+		r.judgeLanding(landingKnown, landings24)
 		return
 	}
 
@@ -351,8 +382,13 @@ func (r *Row) judgeStatus(b Battery, cfg Config, landings24 int, now time.Time) 
 // judgeLanding judges a battery only a landing writes by whether the town kept
 // landing while the battery stopped logging: a day with landings and no line
 // here is a gate that stopped calling it, and a day with no landing is quiet.
-func (r *Row) judgeLanding(landings24 int) {
+// Without a landing clock there is no day to be quiet against, so the row says
+// so rather than passing as ok.
+func (r *Row) judgeLanding(landingKnown bool, landings24 int) {
 	switch {
+	case !landingKnown:
+		r.Status = Unknown
+		r.Reason = "no landing clock: the landing battery has logged no landing"
 	case landings24 == 0:
 		r.Status, r.Reason = OK, "no landing in the last day"
 	case r.Lines24 == 0:
@@ -380,12 +416,22 @@ func (r *Row) judgeCounts() {
 
 // lastPass is the time the battery last ran: its cursor file's modification
 // time, or the newest line of a battery that keeps no cursor or has none yet.
-func lastPass(in Input) (time.Time, bool) {
+func lastPass(in Input, now time.Time) (time.Time, bool) {
 	if in.HasCursor {
 		return in.Cursor, true
 	}
+	return newestLine(in.Log, now)
+}
+
+// newestLine is the newest line stamped before now. A line stamped in the
+// future names no pass that has happened, and the window excludes it too, so
+// the last pass cannot be read from it.
+func newestLine(lines []Line, now time.Time) (time.Time, bool) {
 	var last time.Time
-	for _, l := range in.Log {
+	for _, l := range lines {
+		if !l.TS.Before(now) {
+			continue
+		}
 		if l.TS.After(last) {
 			last = l.TS
 		}

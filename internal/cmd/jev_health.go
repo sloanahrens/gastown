@@ -62,12 +62,14 @@ patrols.<name>; idle by design, for the batteries only an event writes
 quiet log is expected; stale, for a continuous battery more than %s
 behind, or for a landing battery the town landed past without a line;
 late, for a weekly battery more than %s behind; low, when a battery with
-a median of %d or more lines a day wrote under %s of it; or unanswered,
-when over %s of its last day's lines carry no answers.
+a median of %d or more lines a day wrote under %s of it; unanswered,
+when over %s of its last day's lines carry no answers; unparseable, when
+its log holds lines and none of them parses; or unknown, when a landing
+battery has no landing clock to be judged against.
 
 The exit status is 1 when any enabled battery that is not idle by design is
-stale, late, low or unanswered, and 0 otherwise, so one command answers
-whether Jev is collecting today. --json prints the same rows.
+stale, late, low, unanswered, unparseable or unknown, and 0 otherwise, so one
+command answers whether Jev is collecting today. --json prints the same rows.
 
 Examples:
   gt jev health
@@ -143,28 +145,18 @@ func jevHealthReport(out io.Writer, townRoot string, asJSON bool, now time.Time)
 	return nil
 }
 
-// jevHealthConfig reads whether the town turned on each battery's patrol.
+// jevHealthConfig reads whether the town turned on each battery's patrol. Every
+// jev_* key is opt-in in daemon.IsPatrolEnabled, so an unset key reads off
+// there and nowhere else.
 func jevHealthConfig(cfg *daemon.DaemonPatrolConfig) health.Config {
 	out := health.Config{
 		Enabled:         make(map[string]bool, len(health.Batteries)),
 		ScheduledSlings: daemon.IsPatrolEnabled(cfg, "scheduled_slings"),
 	}
 	for _, b := range health.Batteries {
-		out.Enabled[b.ConfigKey] = jevBatteryEnabled(cfg, b.ConfigKey)
+		out.Enabled[b.ConfigKey] = daemon.IsPatrolEnabled(cfg, b.ConfigKey)
 	}
 	return out
-}
-
-// jevBatteryEnabled reads one patrol key's enabled flag; a key the config does
-// not set is off, because every Jev battery is opt-in. jev_targets is read here
-// rather than through IsPatrolEnabled: that function does not know the key,
-// and its unknown-key default is on, which would report a battery the config
-// leaves off as collecting.
-func jevBatteryEnabled(cfg *daemon.DaemonPatrolConfig, key string) bool {
-	if key == "jev_targets" {
-		return cfg != nil && cfg.Patrols != nil && cfg.Patrols.JevTargets != nil && cfg.Patrols.JevTargets.Enabled
-	}
-	return daemon.IsPatrolEnabled(cfg, key)
 }
 
 // jevHealthInputs reads every battery's files, keyed by battery name.
@@ -190,11 +182,12 @@ func jevHealthInput(townRoot string, b health.Battery) (health.Input, error) {
 		}
 		in.Cursor, in.HasCursor = t, ok
 	}
-	data, err := jevReadFile(b.LogPath(townRoot))
+	data, present, err := jevReadFile(b.LogPath(townRoot))
 	if err != nil {
 		return health.Input{}, err
 	}
 	in.Log, in.Unparsed = health.ParseLog(data)
+	in.LogPresent = present
 	return in, nil
 }
 
@@ -203,7 +196,7 @@ func jevHealthInput(townRoot string, b health.Battery) (health.Input, error) {
 func jevHealthLedger(townRoot string, now time.Time) (map[string]int, error) {
 	rep, err := jev.ReadSpend(jev.UsageLedgerPath(townRoot), now.Add(-health.Window), now, 0)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errJevHealthLedger, err)
+		return nil, fmt.Errorf("%w: %w", errJevHealthLedger, err)
 	}
 	calls := make(map[string]int, len(rep.ByCaller))
 	for caller, spend := range rep.ByCaller {
@@ -214,16 +207,17 @@ func jevHealthLedger(townRoot string, now time.Time) (map[string]int, error) {
 
 // jevReadFile reads a file a battery may not have written yet, where absent is
 // empty and any other error fails the command rather than reading a battery as
-// quiet.
-func jevReadFile(path string) ([]byte, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: the path is the town's Jev runtime directory
+// quiet. present is false only when the file does not exist, so a caller can
+// tell a battery that never wrote from one whose file holds nothing readable.
+func jevReadFile(path string) (data []byte, present bool, err error) {
+	data, err = os.ReadFile(path) //nolint:gosec // G304: the path is the town's Jev runtime directory
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
 	}
-	return data, nil
+	return data, true, nil
 }
 
 // jevFileModTime is a file's modification time, and false when it is absent.

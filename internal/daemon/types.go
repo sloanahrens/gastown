@@ -449,6 +449,15 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.JevNotes.Enabled
 	}
+	// jev_targets is opt-in for the same reason: each deep-review run it
+	// serves pays for Jev calls. It is called by the deep-review schedule, not
+	// on a ticker, so this key alone does not call it.
+	if patrol == "jev_targets" {
+		if config == nil || config.Patrols == nil || config.Patrols.JevTargets == nil {
+			return false
+		}
+		return config.Patrols.JevTargets.Enabled
+	}
 	// rebuild_om is opt-in: it swaps the om binary the landing worker execs,
 	// so only an explicit enabled:true turns it on (gt-0f228).
 	if patrol == "rebuild_om" {

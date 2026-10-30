@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/jev/health"
 )
@@ -42,21 +43,29 @@ func baselineLines(now time.Time, perDay int) []string {
 	return lines
 }
 
-// parseLines reads fixture log text into the lines a row is judged on.
-func parseLines(lines []string) []health.Line {
-	parsed, _ := health.ParseLog([]byte(strings.Join(lines, "\n")))
-	return parsed
+// parseLines reads fixture log text into the lines a row is judged on and how
+// many of them did not parse.
+func parseLines(lines []string) ([]health.Line, int) {
+	return health.ParseLog([]byte(strings.Join(lines, "\n")))
 }
 
-// cursorInput is one battery's input with a cursor written age ago.
+// cursorInput is one battery's input with a cursor written age ago and a log
+// file the fixture wrote.
 func cursorInput(now time.Time, age time.Duration, lines ...string) health.Input {
-	return health.Input{Cursor: now.Add(-age), HasCursor: true, Log: parseLines(lines)}
+	in := logInput(lines...)
+	in.Cursor, in.HasCursor = now.Add(-age), true
+	return in
 }
 
-// logInput is one battery's input for a battery that keeps no cursor.
+// logInput is one battery's input for a battery that keeps no cursor, with the
+// log file present.
 func logInput(lines ...string) health.Input {
-	return health.Input{Log: parseLines(lines)}
+	parsed, unparsed := parseLines(lines)
+	return health.Input{Log: parsed, Unparsed: unparsed, LogPresent: true}
 }
+
+// absentInput is a battery whose log file does not exist.
+func absentInput() health.Input { return health.Input{} }
 
 func enabled(keys ...string) map[string]bool {
 	out := make(map[string]bool, len(keys))
@@ -145,10 +154,9 @@ func TestHealthStatuses(t *testing.T) {
 		{
 			name:    "stale wins over low",
 			enabled: []string{"jev_dedupe"},
-			inputs: map[string]health.Input{"dedupe": {
-				Cursor: now.Add(-2 * time.Hour), HasCursor: true,
-				Log: parseLines(baselineLines(now, 100)),
-			}},
+			inputs: map[string]health.Input{
+				"dedupe": cursorInput(now, 2*time.Hour, baselineLines(now, 100)...),
+			},
 			want:  map[string]health.Status{"dedupe": health.Stale},
 			fails: true,
 		},
@@ -163,10 +171,10 @@ func TestHealthStatuses(t *testing.T) {
 		{
 			name:    "ok at a quarter of the median",
 			enabled: []string{"jev_dedupe"},
-			inputs: map[string]health.Input{"dedupe": {
-				Cursor: now.Add(-5 * time.Minute), HasCursor: true,
-				Log: parseLines(append(baselineLines(now, 100), answeredLines(now, 25)...)),
-			}},
+			inputs: map[string]health.Input{
+				"dedupe": cursorInput(now, 5*time.Minute,
+					append(baselineLines(now, 100), answeredLines(now, 25)...)...),
+			},
 			want: map[string]health.Status{"dedupe": health.OK},
 		},
 		{
@@ -186,9 +194,40 @@ func TestHealthStatuses(t *testing.T) {
 			fails:   true,
 		},
 		{
-			name:    "landing battery quiet when no landing happened",
+			name:    "landing battery quiet when no landing happened today",
 			enabled: []string{"jev_testsel"},
-			want:    map[string]health.Status{"testsel": health.OK},
+			inputs: map[string]health.Input{
+				"landing": logInput(answered(now, 3*health.Window)),
+			},
+			want: map[string]health.Status{"testsel": health.OK},
+		},
+		{
+			name:    "landing battery unknown when no landing log exists",
+			enabled: []string{"jev_testsel"},
+			inputs:  map[string]health.Input{"landing": absentInput()},
+			want:    map[string]health.Status{"testsel": health.Unknown},
+			fails:   true,
+		},
+		{
+			name:    "landing battery unknown when the landing log holds no line",
+			enabled: []string{"jev_testsel"},
+			inputs:  map[string]health.Input{"landing": logInput()},
+			want:    map[string]health.Status{"testsel": health.Unknown},
+			fails:   true,
+		},
+		{
+			name:    "landing battery unknown when the landing log does not parse",
+			enabled: []string{"jev_testsel"},
+			inputs:  map[string]health.Input{"landing": logInput(`{"ts":`)},
+			want:    map[string]health.Status{"testsel": health.Unknown},
+			fails:   true,
+		},
+		{
+			name:    "unparseable when no log line parses",
+			enabled: []string{"jev_dedupe"},
+			inputs:  map[string]health.Input{"dedupe": cursorInput(now, 5*time.Minute, `{"ts":`, `{"answers":{"q":"a"}}`)},
+			want:    map[string]health.Status{"dedupe": health.Unparseable},
+			fails:   true,
 		},
 		{
 			name:    "unanswered",
@@ -300,7 +339,10 @@ func TestUnparsedLinesAreReported(t *testing.T) {
 	assert.Equal(t, 2, unparsed, "the truncated line and the one with no stamp")
 
 	rows := health.Report(health.Config{Enabled: enabled("jev_dedupe")}, map[string]health.Input{
-		"dedupe": {Cursor: now.Add(-5 * time.Minute), HasCursor: true, Log: lines, Unparsed: unparsed},
+		"dedupe": {
+			Cursor: now.Add(-5 * time.Minute), HasCursor: true,
+			Log: lines, Unparsed: unparsed, LogPresent: true,
+		},
 	}, nil, now)
 
 	var dedupe health.Row
@@ -311,4 +353,51 @@ func TestUnparsedLinesAreReported(t *testing.T) {
 	}
 	assert.Equal(t, 2, dedupe.Unparsed, "the count reaches the row")
 	assert.Contains(t, dedupe.Reason, "2 log lines did not parse", "a drifting log is named, not read as quiet")
+	assert.NotEqual(t, health.Unparseable, dedupe.Status, "a log with a readable line is still judged")
+}
+
+// TestFutureLinesNameNoPass checks that a line stamped after now is left out of
+// the last pass as it is left out of the window: a clock-skewed line must not
+// make a silent battery look freshly run.
+func TestFutureLinesNameNoPass(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+
+	// notesRow judges a weekly battery over the given log lines.
+	notesRow := func(t *testing.T, lines ...string) health.Row {
+		t.Helper()
+		rows := health.Report(health.Config{Enabled: enabled("jev_notes")}, map[string]health.Input{
+			"notes": logInput(lines...),
+		}, nil, now)
+		for _, r := range rows {
+			if r.Name == "notes" {
+				return r
+			}
+		}
+		t.Fatal("no notes row")
+		return health.Row{}
+	}
+
+	t.Run("a future line alone names no pass", func(t *testing.T) {
+		t.Parallel()
+		notes := notesRow(t,
+			logLine(now.Add(time.Hour), `{"q":"a"}`),
+			logLine(now.Add(2*time.Hour), `{"q":"a"}`),
+		)
+		assert.Nil(t, notes.LastPass, "no line exists before now to name a pass")
+		assert.Equal(t, health.Late, notes.Status, "reason %q", notes.Reason)
+		assert.Equal(t, "no pass recorded", notes.Reason)
+	})
+
+	t.Run("a future line does not shadow a past one", func(t *testing.T) {
+		t.Parallel()
+		notes := notesRow(t,
+			logLine(now.Add(-9*health.Window), `{"q":"a"}`),
+			logLine(now.Add(time.Hour), `{"q":"a"}`),
+		)
+		require.NotNil(t, notes.LastPass)
+		assert.WithinDuration(t, now.Add(-9*health.Window), *notes.LastPass, time.Second)
+		assert.Equal(t, health.Late, notes.Status, "reason %q", notes.Reason)
+		assert.Equal(t, "last pass 9d ago", notes.Reason)
+	})
 }
