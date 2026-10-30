@@ -266,6 +266,19 @@ func TestSkipClass(t *testing.T) {
 		{"hold", "hold: ~/gt/seat-refill.hold is present", "skipped"},
 		{"overlap hold", "overlap hold: gt-okckk is in progress", "skipped"},
 		{"empty", "", "skipped"},
+		// The live reasons carry the bead id first (gt-fvtw7).
+		{"live no seat", "gt-vesnm: no seat: over the town total: 14/12 live polecats across every seat", "waiting for a seat"},
+		{"id-prefixed dotted id", "gt-tpg0p.70: no seat: over the town total", "waiting for a seat"},
+		{"id-prefixed not eligible", "gt-vesnm: not eligible (assigned to gastown/polecats/slit)", "skipped"},
+		{"id-prefixed unshaped", "gt-vesnm: unshaped: missing ## Gate", "skipped"},
+		{"id-prefixed held", "gt-vesnm: held: overlap with gt-okckk", "skipped"},
+		{"id-prefixed container", "gt-vesnm: container: open children", "skipped"},
+		{"id-prefixed rig hold", "gt-vesnm: rig hold: gastown is parked", "skipped"},
+		{"id-prefixed per-tick limit", "gt-vesnm: clean, per-tick limit 5", "skipped"},
+		{"id-prefixed startup backoff", "gt-vesnm: startup backoff: 3m left", "skipped"},
+		{"id-prefixed blocked", "gt-vesnm: blocked by gt-okckk", "skipped"},
+		// A reason word is not a bead id, so a bare reason is not cut.
+		{"held is not an id", "held: no seat is free", "skipped"},
 	} {
 		// Not parallel: the subtests share one goja VM, which is not safe for
 		// concurrent use.
@@ -289,7 +302,7 @@ func TestQueueSkipPageTagsByCause(t *testing.T) {
 	t.Parallel()
 
 	seat := func(id string, priority int, created string) map[string]any {
-		row := skippedRow(id, "2026-10-29T11:58:00Z", "no seat: over the town total", 4)
+		row := skippedRow(id, "2026-10-29T11:58:00Z", id+": no seat: over the town total: 14/12 live polecats across every seat", 4)
 		row["priority"] = priority
 		row["created_at"] = created
 		return row
@@ -298,7 +311,7 @@ func TestQueueSkipPageTagsByCause(t *testing.T) {
 		seat("gt-late1", 2, "2026-10-29T10:00:00Z"),
 		seat("gt-p1new", 1, "2026-10-29T11:00:00Z"),
 		seat("gt-early", 2, "2026-10-28T10:00:00Z"),
-		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "not eligible (assigned to gastown/polecats/slit)", 2),
+		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "gt-skpv2: not eligible (assigned to gastown/polecats/slit)", 2),
 	))
 
 	tags := map[string]queueRowDrawn{}
