@@ -1,7 +1,5 @@
 // Command check-deploy-source refuses to install a gt built from unmerged code
-// (gt-tpg0p.64). It is the Go port of scripts/check-deploy-source.sh, the
-// precondition of make install-local (gt-o848l); the Makefile still calls the
-// script until gt-tpg0p.65.
+// (gt-tpg0p.64). It is the precondition of make install-local (gt-o848l).
 package main
 
 import (
