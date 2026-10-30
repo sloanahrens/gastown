@@ -66,6 +66,24 @@ type poolGo struct {
 	inFlight int
 	serial   int
 	starts   []string
+	// begins is the order the pool hands commands to Exec, as Runner.Began
+	// reports it, recorded before the pool's handshake lets the next one start.
+	begins []string
+}
+
+// began records a package the pool has handed to Exec. It is the Runner.Began
+// hook, so a test compares the first wave against the order the pool keeps.
+func (f *poolGo) began(pkg string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.begins = append(f.begins, pkg)
+}
+
+// beginOrder is the order the pool handed its commands to Exec.
+func (f *poolGo) beginOrder() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.begins...)
 }
 
 func (f *poolGo) exec(_ string, _ []string, argv []string, out io.Writer) int {
@@ -726,9 +744,10 @@ func runTierInBackground(repo *fakeRepo, fake *poolGo, env map[string]string, st
 				Env:      func(name string) string { return env[name] },
 				MkdirAll: func(string, fs.FileMode) error { return nil },
 			},
-			Exec: fake.exec,
-			Src:  repo,
-			Now:  func() time.Time { return at },
+			Exec:  fake.exec,
+			Src:   repo,
+			Now:   func() time.Time { return at },
+			Began: fake.began,
 		})
 	}()
 	return done
@@ -788,11 +807,13 @@ func TestWorkersTimingsFileFallback(t *testing.T) {
 			stderr := &bytes.Buffer{}
 			done := runTierInBackground(taggedRepo(pkgs), fake, env, stderr)
 
-			first := make([]string, 0, 2)
+			// The order is read where the pool hands each command out, not where
+			// its Exec begins: the pool's handshake orders the first, so the
+			// record is complete once both commands have started.
 			for i := 0; i < 2; i++ {
-				first = append(first, waitOrFail(t, fake.started, "a command of the first wave to start"))
+				waitOrFail(t, fake.started, "a command of the first wave to start")
 			}
-			if !reflect.DeepEqual(first, tc.want[:2]) {
+			if first := fake.beginOrder(); !reflect.DeepEqual(first, tc.want[:2]) {
 				t.Errorf("the first wave started %q, want %q in that order", first, tc.want[:2])
 			}
 			for i := 2; i < len(tc.want); i++ {

@@ -77,10 +77,11 @@ func splitSerial(tasks []*task) (parallel, serial []*task) {
 // pool runs tasks on at most Jobs workers, starting them in the order given.
 // The dispatcher runs in its own goroutine: it takes a token, prints the
 // package's progress line and starts a worker, and it starts the next package
-// only once this one's command has begun, so the commands begin in plan order
-// even inside the first wave. The caller reports each package as its command
-// finishes, so a failure's excerpt appears while the rest of the pool still
-// runs (gt-0rtgc).
+// only once this one's command has been handed to Exec, so the commands are
+// handed out in plan order even inside the first wave. The Began hook runs
+// before that handshake, so its order is the plan order too. The caller reports
+// each package as its command finishes, so a failure's excerpt appears while
+// the rest of the pool still runs (gt-0rtgc).
 func (r *Runner) pool(tier, dir string, prefix, args []string, tasks []*task) {
 	if len(tasks) == 0 {
 		return
@@ -98,7 +99,12 @@ func (r *Runner) pool(tier, dir string, prefix, args []string, tasks []*task) {
 			wg.Add(1)
 			go func(t *task) {
 				defer wg.Done()
-				t.result = r.runPackage(tier, dir, prefix, args, t, func() { begun <- struct{}{} })
+				t.result = r.runPackage(tier, dir, prefix, args, t, func() {
+					if r.Began != nil {
+						r.Began(t.name)
+					}
+					begun <- struct{}{}
+				})
 				<-tokens
 				done <- t
 			}(t)
