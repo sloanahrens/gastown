@@ -76,13 +76,14 @@ type Input struct {
 // BuildPlan decides which backups may be removed. A config copy is removed
 // only when it is outside the newest configKeep copies of its file and older
 // than configYoung; its file is the name in its own directory, so the same
-// name under two directories is two files with two keep counts. A binary copy is removed only when it is outside the newest
-// binaryKeep copies of its binary. A bd.<sha> is removed only when the
-// installed bd is newer than it. An entry that is open is never removed, and
-// still counts toward its group's keep count. Everything not removed is kept
-// with the rule that kept it. A non-empty ReadErrs refuses the whole plan,
-// because a read that failed could hide a backup that must stay. The plan is
-// ordered by Path, so the same input always gives the same plan.
+// name under two directories is two files with two keep counts. A binary
+// copy is removed only when it is outside the newest binaryKeep copies of
+// its binary. A bd.<sha> is removed only when the installed bd is newer
+// than it. An entry that is open is never removed, and still counts toward
+// its group's keep count. Everything not removed is kept with the rule that
+// kept it. A non-empty ReadErrs refuses the whole plan, because a read that
+// failed could hide a backup that must stay. The plan is ordered by Path, so
+// the same input always gives the same plan.
 func BuildPlan(in Input) diskmaint.Plan {
 	if len(in.ReadErrs) > 0 {
 		return diskmaint.Plan{Target: planTarget, Refused: "unreadable backup state: " + strings.Join(in.ReadErrs, "; ")}
