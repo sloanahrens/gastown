@@ -6,8 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/git"
 )
 
 // A landing commit's identity is explicit on every variable: the landing
@@ -101,38 +99,35 @@ func TestHeadAuthorRefusesAHandleWithoutAuthors(t *testing.T) {
 	f := newLandFixture(t)
 	l := f.lander()
 	l.authorOf = nil
-	_, err := l.headAuthor(f.git.Open(f.repo), f.base, f.work)
+	_, err := l.headAuthor(f.git.Open(f.repo), f.work)
 	if err == nil || !strings.Contains(err.Error(), "cannot read commit authors") {
 		t.Fatalf("headAuthor on a handle without authors = %v, want a refusal", err)
 	}
 }
 
-// summariesRepo is a handle whose range read is answered by the test, so the
-// author read's failure and not-in-range paths run without a subprocess.
-type summariesRepo struct {
+// identityRepo is a handle whose head read is answered by the test, so the
+// author read's failure path runs without a subprocess.
+type identityRepo struct {
 	Repo
-	sums []git.CommitSummary
-	err  error
+	name, email string
+	err         error
 }
 
-func (r summariesRepo) FullRangeCommitSummaries(base, head string) ([]git.CommitSummary, error) {
-	return r.sums, r.err
+func (r identityRepo) CommitIdentity(rev string) (string, string, error) {
+	return r.name, r.email, r.err
 }
 
-// The head's author is the summary of the head commit itself: a read that
-// fails, or a range that does not list the head, is an error and names no one
-// (gt-vuv2n).
-func TestHeadAuthorReadsTheHeadsSummary(t *testing.T) {
+// The head's author is the author of the head commit itself: a read that fails
+// is an error and names no one (gt-vuv2n).
+func TestHeadAuthorReadsTheHeadCommit(t *testing.T) {
 	t.Parallel()
 	const head = "1111111111111111111111111111111111111111"
-	other := git.CommitSummary{SHA: "2222222222222222222222222222222222222222", Author: "Seat Ivy", Email: "ivy@gastown.local"}
-	seat := git.CommitSummary{SHA: head, Author: "Seat Opal", Email: "opal@gastown.local"}
 	w := Work{Head: head}
 	l := &Lander{}
 
-	t.Run("the head's own summary", func(t *testing.T) {
+	t.Run("the head's own author", func(t *testing.T) {
 		t.Parallel()
-		got, err := l.headAuthor(summariesRepo{sums: []git.CommitSummary{other, seat}}, "base", w)
+		got, err := l.headAuthor(identityRepo{name: "Seat Opal", email: "opal@gastown.local"}, w)
 		if err != nil {
 			t.Fatalf("headAuthor: %v", err)
 		}
@@ -140,17 +135,47 @@ func TestHeadAuthorReadsTheHeadsSummary(t *testing.T) {
 			t.Fatalf("headAuthor = %+v, want %+v", got, want)
 		}
 	})
-	t.Run("a failed range read is an error", func(t *testing.T) {
+	t.Run("a failed read is an error", func(t *testing.T) {
 		t.Parallel()
-		if _, err := l.headAuthor(summariesRepo{err: errors.New("git log: bad revision")}, "base", w); err == nil {
+		if _, err := l.headAuthor(identityRepo{err: errors.New("git log: bad revision")}, w); err == nil {
 			t.Fatal("headAuthor over a failed read = nil error, want one")
 		}
 	})
-	t.Run("a range without the head is an error", func(t *testing.T) {
-		t.Parallel()
-		_, err := l.headAuthor(summariesRepo{sums: []git.CommitSummary{other}}, "base", w)
-		if err == nil || !strings.Contains(err.Error(), "is not in") {
-			t.Fatalf("headAuthor without the head = %v, want a not-in-range error", err)
-		}
-	})
+}
+
+// The revert commit names the landing as author and committer, every variable
+// set, so no seat author or configured identity reaches it (gt-vuv2n).
+func TestRevertEnv(t *testing.T) {
+	t.Parallel()
+	want := []string{
+		"GIT_COMMITTER_NAME=gt-landing",
+		"GIT_COMMITTER_EMAIL=gt-landing@gastown.local",
+		"GIT_AUTHOR_NAME=gt-landing",
+		"GIT_AUTHOR_EMAIL=gt-landing@gastown.local",
+	}
+	if got := RevertEnv(); !slices.Equal(got, want) {
+		t.Fatalf("RevertEnv() = %q, want %q", got, want)
+	}
+}
+
+// The merge handle is opened with the landing environment even when a test
+// seam replaces the handle, so the unit tier asserts the merge commit's
+// identity (gt-vuv2n).
+func TestLandMergeHandleCarriesTheLandingIdentity(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	var got []string
+	l.landingEnv = func(env []string) { got = env }
+
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	want, err := CommittingEnv(Identity{Name: "Seat Opal", Email: "opal@gastown.local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("merge handle env = %q, want %q", got, want)
+	}
 }

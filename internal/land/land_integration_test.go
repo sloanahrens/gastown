@@ -267,9 +267,9 @@ func TestIntegrationLandCommitIdentity(t *testing.T) {
 	}
 }
 
-// TestIntegrationHeadAuthorFailsClosed: the head's author is read from
-// base..head through real git, and a range that cannot be read or a head that
-// is not in it is an error, never a fallback to git config (gt-vuv2n).
+// TestIntegrationHeadAuthorFailsClosed: the head's author is read from the head
+// commit through real git, and a head that cannot be read is an error, never a
+// fallback to git config (gt-vuv2n).
 func TestIntegrationHeadAuthorFailsClosed(t *testing.T) {
 	f := newRealLandFixture(t)
 	l := f.lander()
@@ -277,7 +277,7 @@ func TestIntegrationHeadAuthorFailsClosed(t *testing.T) {
 	g := git.NewGit(f.repo)
 
 	t.Run("reads the seat that authored the head", func(t *testing.T) {
-		got, err := l.headAuthor(g, f.base, f.work)
+		got, err := l.headAuthor(g, f.work)
 		if err != nil {
 			t.Fatalf("headAuthor: %v", err)
 		}
@@ -285,15 +285,9 @@ func TestIntegrationHeadAuthorFailsClosed(t *testing.T) {
 			t.Fatalf("headAuthor = %+v, want %+v", got, want)
 		}
 	})
-	t.Run("unreadable range is an error", func(t *testing.T) {
-		if _, err := l.headAuthor(g, "refs/heads/no-such-branch", f.work); err == nil {
-			t.Fatal("headAuthor over an unreadable range = nil error, want one")
-		}
-	})
-	t.Run("head outside the range is an error", func(t *testing.T) {
-		_, err := l.headAuthor(g, f.work.Head, f.work)
-		if err == nil || !strings.Contains(err.Error(), "is not in") {
-			t.Fatalf("headAuthor with the head already in base = %v, want a not-in-range error", err)
+	t.Run("unreadable head is an error", func(t *testing.T) {
+		if _, err := l.headAuthor(g, Work{Head: "refs/heads/no-such-branch"}); err == nil {
+			t.Fatal("headAuthor over an unreadable head = nil error, want one")
 		}
 	})
 }
