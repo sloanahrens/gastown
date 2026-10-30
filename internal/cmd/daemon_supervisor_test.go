@@ -2206,7 +2206,8 @@ func TestRestartDaemon_ContainerWaitPassesWhenTheNewStartAppears(t *testing.T) {
 	for _, runErr := range []error{nil, errors.New("docker: exit 1")} {
 		r := newContainerRestartRig(t, stale, stale, stale, stale, fresh)
 		if runErr != nil {
-			r.c.run = func(a []string) error { r.calls.argv = append(r.calls.argv, a); return runErr }
+			recorded := r.c.run
+			r.c.run = func(a []string) error { recorded(a); return runErr }
 		}
 		via, pid, err := r.c.restartDaemon(r.town)
 		if err != nil || via != config.SupervisorContainer || pid != 0 {
@@ -2224,7 +2225,8 @@ func TestRestartDaemon_ContainerFailedCommandAndNoNewStartIsAnError(t *testing.T
 	t.Parallel()
 	stale := stateReading{state: containerOwnerState(restartBaselineStart, true)}
 	r := newContainerRestartRig(t, stale)
-	r.c.run = func(a []string) error { r.calls.argv = append(r.calls.argv, a); return errors.New("docker: exit 1") }
+	recorded := r.c.run
+	r.c.run = func(a []string) error { recorded(a); return errors.New("docker: exit 1") }
 
 	_, _, err := r.c.restartDaemon(r.town)
 
