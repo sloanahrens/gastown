@@ -59,6 +59,13 @@ func TestIntegrationTrackerClientSatisfiesTheClientContract(t *testing.T) {
 	beadsfake.RunClientContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
 }
 
+// RunDepListUpContract names its own subtest, so the tracker run gets no
+// wrapper (as the fake and bd do). A wisp dependent it counts is the store's
+// Dependents fill, so a store that drops ephemeral rows fails this case.
+func TestIntegrationTrackerClientSatisfiesTheDepListUpContract(t *testing.T) {
+	beadsfake.RunDepListUpContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
+}
+
 // The show-text suite runs against the tracker: ShowText renders the id and
 // title, and a missing id is an error.
 func TestIntegrationTrackerClientShowText(t *testing.T) {
