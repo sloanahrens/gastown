@@ -166,21 +166,31 @@ RUN groupadd -g 10001 polecat \
 # need system headers the image lacks. The chmod for uid 10001 is in this same
 # RUN, as one in a later layer would copy every file again.
 #
-# Nested example modules are skipped: they belong to no rig's presubmit build,
-# so the seed has no use for them, and a stale go.sum in one fails the whole
-# image (gt-9yqcc). The failure log is kept at 40 lines so the first error lines
-# reach the install log, not only the tail of `go`'s report.
+# A rig's example modules are skipped and named in the install log: they belong
+# to no rig's presubmit build, and a stale go.sum in one fails the whole image
+# (gt-9yqcc). Only the examples directory directly under a rig is skipped; a
+# module inside the rig's own tree is built like any other. A failure shows the
+# first 40 lines of its log, where `go` writes the error that
+# caused it. Past 40 lines it adds the last 10, where a failed download or
+# toolchain error sits, so a log of 51 lines or more drops lines 41 up to its
+# last 10; the heading gives the log's total length (gt-vvu6d).
 ENV GOCACHE=/tmp/gocache \
     GOMODCACHE=/tmp/gomodcache
 RUN --mount=type=bind,source=seed,target=/seed \
     export PATH="/usr/local/go/bin:$PATH" GOFLAGS="-p=4 -modcacherw" \
     && mkdir -p "$GOCACHE" "$GOMODCACHE" \
-    && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' -not -path '*/examples/*' | sort); do \
+    && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' | sort); do \
+         rel=${gomod#/seed/}; rig=${rel%%/*}; \
+         case "$rel" in "$rig"/examples/*) \
+           echo "seed: skip $gomod: a rig's example module is in no presubmit build"; continue ;; \
+         esac; \
          dir=$(dirname "$gomod"); echo "seed: $dir"; \
          for step in "go mod download" "go build ./..." "go vet ./..." \
                      "go test -count=1 -run ^\$ ./..."; do \
            if ! (cd "$dir" && $step >/tmp/seed.log 2>&1); then \
-             echo "seed: '$step' failed in $dir:"; tail -n 40 /tmp/seed.log; \
+             n=$(wc -l < /tmp/seed.log); \
+             echo "seed: '$step' failed in $dir ($n lines):"; head -n 40 /tmp/seed.log; \
+             if [ "$n" -gt 40 ]; then echo "seed: last 10 of $n lines:"; tail -n 10 /tmp/seed.log; fi; \
              case "$step" in "go build ./..."|"go mod download") exit 1 ;; esac; \
            fi; \
          done; \

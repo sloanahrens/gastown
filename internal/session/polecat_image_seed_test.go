@@ -67,12 +67,14 @@ func seedRun(t *testing.T) string {
 	return seed
 }
 
-// The seed builds every module it finds under /seed. Nested example modules are
+// The seed builds every module it finds under /seed. A rig's example modules are
 // in no rig's presubmit build, so the seed has no use for them, and one whose
 // go.sum has drifted fails the whole image: the beads pin's
 // examples/library-usage and examples/bd-example-extension-go did, on every
-// install from 10:28 (gt-9yqcc). So the walk skips them, as it already skips
-// testdata.
+// install from 10:28 (gt-9yqcc). The walk skips testdata and the examples
+// directory directly under a rig, and names each module it skips: a module under
+// an examples directory inside the rig's own tree is built, and a skip never
+// happens silently (gt-vvu6d).
 func TestPolecatImageSeedSkipsExampleModules(t *testing.T) {
 	t.Parallel()
 	seed := seedRun(t)
@@ -85,17 +87,23 @@ func TestPolecatImageSeedSkipsExampleModules(t *testing.T) {
 	if j := strings.Index(find, "| sort"); j >= 0 {
 		find = find[:j]
 	}
-	for _, excluded := range []string{"*/testdata/*", "*/examples/*"} {
-		want := "-not -path '" + excluded + "'"
-		if !strings.Contains(find, want) {
-			t.Errorf("the seed's walk lacks %q, so it builds the modules under %s: one bad go.sum there fails every install (gt-9yqcc)\n%s", want, excluded, find)
-		}
+	if want := "-not -path '*/testdata/*'"; !strings.Contains(find, want) {
+		t.Errorf("the seed's walk lacks %q, so it builds the modules under testdata: one bad go.sum there fails every install (gt-9yqcc)\n%s", want, find)
 	}
-	// The RUN's only report is this tail. At 5 lines a `go build` failure shows
-	// the closing lines of its report and not the error that caused them, which is
-	// all the 10:28 install log had.
-	if !strings.Contains(seed, "tail -n 40 /tmp/seed.log") {
-		t.Errorf("the seed RUN does not tail 40 lines of its failure log, so the install log cannot show the failing step's first error lines:\n%s", seed)
+	// A path-name filter drops any module under a directory named examples,
+	// including one in the rig's own tree, and does so without a word in the log.
+	if strings.Contains(find, "*/examples/*") {
+		t.Errorf("the seed's walk excludes every path with an examples component, so it drops a module inside a rig's own tree without a trace (gt-vvu6d)\n%s", find)
+	}
+	for _, want := range []string{
+		`rel=${gomod#/seed/}`, // the rig is the first component under the seed root
+		`rig=${rel%%/*}`,
+		`case "$rel" in "$rig"/examples/*)`, // only that rig's own examples directory
+		`echo "seed: skip $gomod`,           // a skip is named in the install log
+	} {
+		if !strings.Contains(seed, want) {
+			t.Errorf("the seed RUN lacks %q, so its example-module skip is either too broad or silent (gt-vvu6d):\n%s", want, seed)
+		}
 	}
 }
 
