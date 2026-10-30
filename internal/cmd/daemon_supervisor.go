@@ -31,6 +31,11 @@ type daemonSupervisor struct {
 	// kind's settings refusal (containerComposeProject) comes before any
 	// command runs rather than after an argv built on the live town's default.
 	start func() ([]string, error)
+	// restart replaces a daemon that is running. A nil restart means the kind's
+	// start restarts in place (launchd kickstart -k, systemctl restart); the
+	// container kind sets it, because `up -d` does not recreate an unchanged
+	// service and so a restart on the same image would do nothing (gt-qpeei.39).
+	restart func() ([]string, error)
 	// stop leaves the job unloaded, so the daemon stays down: signaling the
 	// process alone leaves a KeepAlive job to respawn it (gt-sq9e).
 	stop func() ([]string, error)
@@ -411,8 +416,13 @@ func (c *daemonControl) containerSupervisor(composeFile string, cfg *config.Daem
 		project = "<compose_project>"
 	}
 	return &daemonSupervisor{
-		name:      config.SupervisorContainer,
-		start:     compose("up", "-d", "daemon"),
+		name:  config.SupervisorContainer,
+		start: compose("up", "-d", "daemon"),
+		// --force-recreate stops the old container on its stop_grace_period
+		// (SIGTERM, so a clean stop is recorded) and starts a new one that
+		// re-reads the compose file and its environment, under the same owner
+		// id. `compose restart` would keep the container and do neither.
+		restart:   compose("up", "-d", "--force-recreate", "daemon"),
 		stop:      compose("stop", "daemon"),
 		bootstrap: compose("up", "-d"),
 		load:      fmt.Sprintf("docker --context %s compose -p %s -f %s up -d daemon", c.dockerCLIContext(), project, composeFile),
@@ -1027,7 +1037,14 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 		// next stop this restart causes — and for every one after it.
 		runErr = sup.startFromFile()
 	} else {
-		runErr = sup.runArgv(sup.start)
+		// A kind with a restart verb of its own runs it; the others restart
+		// with their start (kickstart -k and systemctl restart replace the
+		// process in place).
+		restart := sup.start
+		if sup.restart != nil {
+			restart = sup.restart
+		}
+		runErr = sup.runArgv(restart)
 		if runErr != nil {
 			// kickstart reaches only a job the manager knows. The daemon that
 			// is up is then running outside its supervisor (the job was
