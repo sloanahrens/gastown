@@ -3,11 +3,14 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 )
@@ -100,5 +103,69 @@ func TestJevDatasetCommandUnknownQuestion(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(out, "fixture.nope.csv")); statErr == nil {
 		t.Error("the refused export wrote a file")
+	}
+}
+
+// A bad window, an unknown battery, an unreadable log and a refusing output
+// all fail the command rather than writing a partial export.
+func TestJevDatasetCommandErrors(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+
+	t.Run("a bad window", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeScorecardFixture(t, town)
+		err := jevDatasetWithFlags(context.Background(), io.Discard, town, scorecard.FixtureBattery, "needs", "nope", filepath.Join(town, "dataset"), now)
+		if err == nil || !strings.Contains(err.Error(), "--since") {
+			t.Errorf("err = %v, want the window refused", err)
+		}
+	})
+
+	t.Run("an unknown battery", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		err := jevDatasetWithFlags(context.Background(), io.Discard, town, "no-such-battery", "needs", "", filepath.Join(town, "dataset"), now)
+		if err == nil || !strings.Contains(err.Error(), "no-such-battery") {
+			t.Errorf("err = %v, want the battery refused", err)
+		}
+	})
+
+	t.Run("an unreadable log", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeScorecardFixture(t, town)
+		if err := os.Remove(scorecard.FixtureLogPath(town)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(scorecard.FixtureLogPath(town), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := jevDatasetWithFlags(context.Background(), io.Discard, town, scorecard.FixtureBattery, "needs", "", filepath.Join(town, "dataset"), now)
+		if err == nil || !strings.Contains(err.Error(), "reading the log") {
+			t.Errorf("err = %v, want the log refused", err)
+		}
+	})
+
+	t.Run("a refusing output", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeScorecardFixture(t, town)
+		err := jevDatasetWithFlags(context.Background(), failingWriter{}, town, scorecard.FixtureBattery, "needs", "", filepath.Join(town, "dataset"), now)
+		if err == nil {
+			t.Error("a refused write reported success")
+		}
+	})
+}
+
+// The command needs a town to find the battery in.
+func TestJevDatasetCommandNeedsTown(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("GT_TOWN_ROOT", "")
+	c := &cobra.Command{}
+	c.SetOut(io.Discard)
+	c.SetContext(context.Background())
+	if err := runJevDataset(c, nil); err == nil || !strings.Contains(err.Error(), "town root") {
+		t.Errorf("err = %v, want the missing town refused", err)
 	}
 }

@@ -1,11 +1,9 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -73,8 +71,8 @@ func runJevDataset(cmd *cobra.Command, _ []string) error {
 	return jevDatasetWithFlags(cmd.Context(), cmd.OutOrStdout(), townRoot, jevDatasetBattery, jevDatasetQuestion, jevDatasetSince, jevDatasetOut, time.Now())
 }
 
-// jevDatasetWithFlags reads the battery, builds the table and writes the CSV
-// and the dict, then names what it wrote.
+// jevDatasetWithFlags reads the battery, exports the question and names the
+// files it wrote.
 func jevDatasetWithFlags(ctx context.Context, w io.Writer, townRoot, battery, question, since, out string, now time.Time) error {
 	from, err := parseSince(since, now)
 	if err != nil {
@@ -88,60 +86,13 @@ func jevDatasetWithFlags(ctx context.Context, w io.Writer, townRoot, battery, qu
 	if err != nil {
 		return err
 	}
-	table, err := dataset.Build(read, scorecard.QuestionID(question))
-	if err != nil {
-		return err
-	}
-	if len(table.Rows) == 0 {
-		return fmt.Errorf("battery %q has no labeled rows for question %q; its log answers %s", battery, question, questionList(table.Questions))
-	}
 	if out == "" {
 		out = dataset.Dir(townRoot)
 	}
-	csvPath, dictPath, err := dataset.Paths(out, battery, scorecard.QuestionID(question))
+	csvPath, dictPath, rows, err := dataset.Export(read, battery, scorecard.QuestionID(question), out)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(out, 0o700); err != nil {
-		return fmt.Errorf("creating %s: %w", out, err)
-	}
-	if err := writeDatasetFile(csvPath, func(b *bytes.Buffer) error { return table.WriteCSV(b) }); err != nil {
-		return err
-	}
-	if err := writeDatasetFile(dictPath, func(b *bytes.Buffer) error {
-		return table.WriteDict(b, battery, scorecard.QuestionID(question))
-	}); err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(w, "wrote %s and %s (%d rows)\n", csvPath, dictPath, len(table.Rows))
+	_, err = fmt.Fprintf(w, "wrote %s and %s (%d rows)\n", csvPath, dictPath, rows)
 	return err
-}
-
-// writeDatasetFile renders one output file into a buffer and writes it whole,
-// so a render that fails leaves no partial file behind.
-func writeDatasetFile(path string, render func(*bytes.Buffer) error) error {
-	var b bytes.Buffer
-	if err := render(&b); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, b.Bytes(), 0o600); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	return nil
-}
-
-// questionList names the questions for an error, in the order the table holds
-// them.
-func questionList(ids []scorecard.QuestionID) string {
-	if len(ids) == 0 {
-		return "no question"
-	}
-	out := ""
-	for i, id := range ids {
-		if i > 0 {
-			out += ", "
-		}
-		out += string(id)
-	}
-	return out
 }

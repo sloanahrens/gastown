@@ -4,12 +4,13 @@
 package dataset
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"encoding/csv"
 	"encoding/hex"
 	"fmt"
-	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -335,25 +336,62 @@ func refText(v string) string {
 // shape mango parses as a number.
 func number(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
-// WriteCSV writes the header and the rows as CSV.
-func (t Table) WriteCSV(w io.Writer) error {
-	cw := csv.NewWriter(w)
-	if err := cw.Write(t.Columns); err != nil {
-		return err
+// Export builds the table for one battery question and writes the CSV and the
+// dict under dir, naming the files it wrote and the rows they hold.
+func Export(read scorecard.Reading, battery string, question scorecard.QuestionID, dir string) (csvPath, dictPath string, rows int, err error) {
+	table, err := Build(read, question)
+	if err != nil {
+		return "", "", 0, err
 	}
-	for _, r := range t.Rows {
-		if err := cw.Write(r); err != nil {
-			return err
-		}
+	if len(table.Rows) == 0 {
+		return "", "", 0, fmt.Errorf("battery %q has no labeled rows for question %q; its log answers %s", battery, question, questionNames(table.Questions))
 	}
-	cw.Flush()
-	return cw.Error()
+	csvPath, dictPath, err = Paths(dir, battery, question)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", 0, fmt.Errorf("creating %s: %w", dir, err)
+	}
+	if err := os.WriteFile(csvPath, table.CSV(), 0o600); err != nil {
+		return "", "", 0, fmt.Errorf("writing %s: %w", csvPath, err)
+	}
+	if err := os.WriteFile(dictPath, table.Dict(battery, question), 0o600); err != nil {
+		return "", "", 0, fmt.Errorf("writing %s: %w", dictPath, err)
+	}
+	return csvPath, dictPath, len(table.Rows), nil
 }
 
-// WriteDict writes the dict that explains the file: each column, the type
-// mango will infer it as from the leading rows, what it means, the row count,
-// the rows' date range and the columns left out.
-func (t Table) WriteDict(w io.Writer, battery string, question scorecard.QuestionID) error {
+// questionNames names the questions for an error, or says the log answers
+// none.
+func questionNames(ids []scorecard.QuestionID) string {
+	if len(ids) == 0 {
+		return "no question"
+	}
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		names = append(names, string(id))
+	}
+	return strings.Join(names, ", ")
+}
+
+// CSV is the file's bytes: the header and the rows. The encoder writes into
+// memory, whose writes cannot fail.
+func (t Table) CSV() []byte {
+	var b bytes.Buffer
+	cw := csv.NewWriter(&b)
+	_ = cw.Write(t.Columns)
+	for _, r := range t.Rows {
+		_ = cw.Write(r)
+	}
+	cw.Flush()
+	return b.Bytes()
+}
+
+// Dict is the dict's bytes: each column, the type mango will infer it as from
+// the leading rows, what it means, the row count, the rows' date range and the
+// columns left out.
+func (t Table) Dict(battery string, question scorecard.QuestionID) []byte {
 	first, last := t.dayRange()
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s.%s\n\n", battery, question)
@@ -380,8 +418,7 @@ func (t Table) WriteDict(w io.Writer, battery string, question scorecard.Questio
 			fmt.Fprintf(&b, "- %s: %s\n", d.Column, d.Reason)
 		}
 	}
-	_, err := io.WriteString(w, b.String())
-	return err
+	return []byte(b.String())
 }
 
 // dayRange returns the earliest and latest day the rows carry.

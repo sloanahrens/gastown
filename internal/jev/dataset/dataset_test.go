@@ -1,10 +1,11 @@
 package dataset
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -58,11 +59,7 @@ func ptr(v float64) *float64 { return &v }
 // writeCSV renders a table's CSV as a string.
 func writeCSV(t *testing.T, table Table) string {
 	t.Helper()
-	var b bytes.Buffer
-	if err := table.WriteCSV(&b); err != nil {
-		t.Fatal(err)
-	}
-	return b.String()
+	return string(table.CSV())
 }
 
 // The rows hold the labeled answers to the question, the other answers beside
@@ -226,12 +223,8 @@ func TestDatasetRefusesTextColumns(t *testing.T) {
 		if len(table.Dropped) != 1 || table.Dropped[0].Column != "model" {
 			t.Fatalf("dropped = %+v, want the model column", table.Dropped)
 		}
-		var dict bytes.Buffer
-		if err := table.WriteDict(&dict, "fixture", "needs"); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(dict.String(), "- model: 16 distinct values") {
-			t.Errorf("dict does not name the dropped model column:\n%s", dict.String())
+		if dict := string(table.Dict("fixture", "needs")); !strings.Contains(dict, "- model: 16 distinct values") {
+			t.Errorf("dict does not name the dropped model column:\n%s", dict)
 		}
 	})
 }
@@ -244,11 +237,7 @@ func TestDatasetDict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var dict bytes.Buffer
-	if err := table.WriteDict(&dict, "fixture", "needs"); err != nil {
-		t.Fatal(err)
-	}
-	got := dict.String()
+	got := string(table.Dict("fixture", "needs"))
 	for _, want := range []string{
 		"# fixture.needs\n",
 		"Rows: 2\n",
@@ -291,12 +280,8 @@ func TestDatasetDict(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var dict bytes.Buffer
-		if err := table.WriteDict(&dict, "fixture", "needs"); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(dict.String(), "| label_source | categorical |") {
-			t.Errorf("dict does not read a repeated label source as categorical:\n%s", dict.String())
+		if dict := string(table.Dict("fixture", "needs")); !strings.Contains(dict, "| label_source | categorical |") {
+			t.Errorf("dict does not read a repeated label source as categorical:\n%s", dict)
 		}
 	})
 }
@@ -319,4 +304,94 @@ func TestDatasetPathsRefuseEscapes(t *testing.T) {
 	if csvPath != "/d/fixture.needs.action.csv" || dictPath != "/d/fixture.needs.action.dict.md" {
 		t.Errorf("paths = %q, %q", csvPath, dictPath)
 	}
+}
+
+// Export writes both files under the directory and names them.
+func TestExportWritesFiles(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "out")
+	csvPath, dictPath, rows, err := Export(fixtureReading(), "fixture", "needs", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 || csvPath != filepath.Join(dir, "fixture.needs.csv") || dictPath != filepath.Join(dir, "fixture.needs.dict.md") {
+		t.Fatalf("export = %q, %q, %d rows", csvPath, dictPath, rows)
+	}
+	for _, path := range []string{csvPath, dictPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s: %v", path, err)
+		}
+	}
+}
+
+// Export refuses a reading it cannot export and a path it cannot write, and
+// leaves no file behind.
+func TestExportErrors(t *testing.T) {
+	t.Parallel()
+	denied := fixtureReading()
+	denied.Items[0].Answers["prompt"] = scorecard.Answer{Noul: ptr(0.4)}
+	denied.Labelings[0].Labels["prompt"] = true
+
+	t.Run("no labeled rows", func(t *testing.T) {
+		t.Parallel()
+		_, _, _, err := Export(scorecard.Reading{}, "fixture", "needs", t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "no labeled rows") {
+			t.Errorf("err = %v, want the empty reading refused", err)
+		}
+	})
+
+	t.Run("a question named for text", func(t *testing.T) {
+		t.Parallel()
+		_, _, _, err := Export(denied, "fixture", "needs", t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), `"prompt"`) {
+			t.Errorf("err = %v, want the prompt question refused", err)
+		}
+	})
+
+	t.Run("a name that is not a filename", func(t *testing.T) {
+		t.Parallel()
+		_, _, _, err := Export(fixtureReading(), "../fixture", "needs", t.TempDir())
+		if err == nil {
+			t.Error("a battery that names a path exported cleanly")
+		}
+	})
+
+	t.Run("a directory that cannot be made", func(t *testing.T) {
+		t.Parallel()
+		file := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(file, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, err := Export(fixtureReading(), "fixture", "needs", filepath.Join(file, "out"))
+		if err == nil || !strings.Contains(err.Error(), "creating") {
+			t.Errorf("err = %v, want the directory refused", err)
+		}
+	})
+
+	t.Run("a CSV path that is a directory", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "fixture.needs.csv"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, err := Export(fixtureReading(), "fixture", "needs", dir)
+		if err == nil || !strings.Contains(err.Error(), "fixture.needs.csv") {
+			t.Errorf("err = %v, want the CSV write refused", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, "fixture.needs.dict.md")); statErr == nil {
+			t.Error("the dict was written after the CSV write failed")
+		}
+	})
+
+	t.Run("a dict path that is a directory", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "fixture.needs.dict.md"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_, _, _, err := Export(fixtureReading(), "fixture", "needs", dir)
+		if err == nil || !strings.Contains(err.Error(), "fixture.needs.dict.md") {
+			t.Errorf("err = %v, want the dict write refused", err)
+		}
+	})
 }
