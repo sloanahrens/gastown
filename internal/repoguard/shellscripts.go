@@ -73,16 +73,12 @@ func ReadAllowlist(path string) (Allowlist, error) {
 // finding, so a line that lost its reason in a merge fails the guard instead
 // of reading as fine (gt-tpg0p.15).
 //
-// The reasons are closed:
-//
-//   - "platform: container entrypoint" admits docker-entrypoint.sh alone;
-//   - "platform: git hook" admits an extensionless file directly in .githooks,
-//     which git runs by name and never a .sh;
-//   - "port: <bead id>" names the bead that deletes the line.
-//
-// Each platform reason is bound to its path here, in Go, so letting a new file
-// stay without a port is a change a reviewer sees rather than a free-text line
-// (gt-tpg0p.15). The port id is judged by shape only: the guard runs with no
+// The reasons are closed. "port: <bead id>" names the bead that deletes the
+// line; every other reason says the file stays because the platform, the
+// Makefile or a neighboring project dictates it, and each is bound to the
+// paths it may exempt in boundReasons, so letting a new file stay without a
+// port is a change a reviewer sees rather than a free-text line (gt-tpg0p.15,
+// gt-tpg0p.25). The port id is judged by shape only: the guard runs with no
 // bead database, so whether the id exists is the landing's business, not this
 // parser's.
 //
@@ -127,29 +123,57 @@ func ParseAllowlist(r io.Reader) (Allowlist, error) {
 	return allowed, nil
 }
 
-// The two reasons a file may stay without a porting bead (gt-tpg0p decision
-// (d)): the container runtime names one entrypoint, and git runs hooks by
-// name from .githooks.
+// The reasons a file may stay without a porting bead: the platform, the
+// Makefile or a neighboring project dictates the file, so a port would be the
+// kind of rewrite that need not happen (gt-tpg0p decision (d), gt-tpg0p.25).
 const (
 	containerEntrypointReason = "platform: container entrypoint"
 	gitHookReason             = "platform: git hook"
+	setupHookReason           = "platform: polecat setup hook"
+	imageBuildReason          = "platform: image build step"
+	makefileGlueReason        = "glue: Makefile target"
+	modelEvalReason           = "project: gt-model-eval"
 )
+
+// reasonMenu is the closed list both rejection messages repeat: a line that
+// lost its reason shows the reader every reason it could have carried.
+const reasonMenu = `say "platform: container entrypoint", "platform: git hook", "platform: polecat setup hook", "platform: image build step", "glue: Makefile target", "project: gt-model-eval" or "port: <bead id>"`
 
 // portReason is the prefix of a reason that names the bead deleting the line.
 const portReason = "port:"
 
-// platformReasonFits reports whether a platform reason may exempt path. The
-// binding is the point: a reason is a claim about one path, so exempting a new
-// file needs a change here, not a line copied into the allowlist.
-func platformReasonFits(reason, path string) bool {
-	switch reason {
-	case containerEntrypointReason:
-		return path == "docker-entrypoint.sh"
-	case gitHookReason:
-		name, ok := strings.CutPrefix(path, ".githooks/")
-		return ok && name != "" && !strings.Contains(name, "/") && !strings.HasSuffix(name, ".sh")
-	}
-	return false
+// boundReasons is each reason that names a rule rather than a porting bead,
+// with the paths it may exempt. The binding is the point: a reason is a claim
+// about paths, so exempting a new file needs a change here, not a line copied
+// into the allowlist.
+var boundReasons = map[string]func(path string) bool{
+	containerEntrypointReason: func(path string) bool { return path == "docker-entrypoint.sh" },
+	gitHookReason: func(path string) bool {
+		name, ok := nameDirectlyIn(path, ".githooks/")
+		return ok && !strings.HasSuffix(name, ".sh")
+	},
+	// The rig runs every executable directly in .runtime/setup-hooks/
+	// (internal/rig/setuphooks.go), so the hook is the .sh file there.
+	setupHookReason: func(path string) bool {
+		name, ok := nameDirectlyIn(path, ".runtime/setup-hooks/")
+		return ok && strings.HasSuffix(name, ".sh")
+	},
+	imageBuildReason: func(path string) bool { return path == "deploy/polecat/go-floor.sh" },
+	makefileGlueReason: func(path string) bool {
+		return path == "scripts/lint-lock-wait.sh" || path == "scripts/refresh-bd-command-tree.sh"
+	},
+	modelEvalReason: func(path string) bool {
+		rest, ok := strings.CutPrefix(path, "gt-model-eval/")
+		return ok && rest != ""
+	},
+}
+
+// nameDirectlyIn returns the file name when path sits directly inside dir: a
+// hook is read from the top of its directory and never from a subdirectory, so
+// a nested .sh is not the hook.
+func nameDirectlyIn(path, dir string) (string, bool) {
+	name, ok := strings.CutPrefix(path, dir)
+	return name, ok && name != "" && !strings.Contains(name, "/")
 }
 
 // beadID matches the ids the bead store issues: a lettered prefix, a hyphen,
@@ -160,7 +184,7 @@ var beadID = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)+(\.[A-Za-z
 // reasonProblem returns why reason may not justify path, or "" when it may.
 func reasonProblem(path, reason string) string {
 	if reason == "" {
-		return `no reason; say "platform: container entrypoint", "platform: git hook" or "port: <bead id>"`
+		return "no reason; " + reasonMenu
 	}
 	if rest, ok := strings.CutPrefix(reason, portReason); ok {
 		id := strings.TrimSpace(rest)
@@ -169,12 +193,11 @@ func reasonProblem(path, reason string) string {
 		}
 		return ""
 	}
-	switch reason {
-	case containerEntrypointReason, gitHookReason:
-		if !platformReasonFits(reason, path) {
-			return fmt.Sprintf("%q does not fit this path; each platform reason is bound to the file it may exempt", reason)
+	if fits, known := boundReasons[reason]; known {
+		if fits(path) {
+			return ""
 		}
-		return ""
+		return fmt.Sprintf("%q does not fit this path; each reason is bound to the paths it may exempt, so exempting this file needs a change in shellscripts.go", reason)
 	}
-	return fmt.Sprintf("%q is not a reason the guard accepts; say \"platform: container entrypoint\", \"platform: git hook\" or \"port: <bead id>\"", reason)
+	return fmt.Sprintf("%q is not a reason the guard accepts; %s", reason, reasonMenu)
 }

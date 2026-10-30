@@ -18,11 +18,11 @@ const (
 	newScriptAlarm     = "no new .sh files; write Go (scripts are debt: see .om.json, scripts-are-debt)"
 	removedScriptAlarm = "allowlisted .sh file is no longer tracked; the shell-scripts.txt line is stale"
 
-	reasonMenu             = `say "platform: container entrypoint", "platform: git hook" or "port: <bead id>"`
-	allowlistNoReasonAlarm = "no reason; " + reasonMenu
+	expectedReasonMenu     = `say "platform: container entrypoint", "platform: git hook", "platform: polecat setup hook", "platform: image build step", "glue: Makefile target", "project: gt-model-eval" or "port: <bead id>"`
+	allowlistNoReasonAlarm = "no reason; " + expectedReasonMenu
 	badPortAlarm           = `%q is not a bead id; a port reason names the bead that deletes this line, as "port: gt-abc12"`
-	badFitsAlarm           = `%q does not fit this path; each platform reason is bound to the file it may exempt`
-	badReasonAlarm         = `%q is not a reason the guard accepts; ` + reasonMenu
+	badFitsAlarm           = `%q does not fit this path; each reason is bound to the paths it may exempt, so exempting this file needs a change in shellscripts.go`
+	badReasonAlarm         = `%q is not a reason the guard accepts; ` + expectedReasonMenu
 )
 
 // TestCheckShellScriptsFixtures drives each branch of the guard through an
@@ -133,8 +133,22 @@ func TestParseAllowlistRows(t *testing.T) {
 			name: "each accepted reason",
 			body: "docker-entrypoint.sh\tplatform: container entrypoint\n" +
 				".githooks/pre-push\tplatform: git hook\n" +
+				".runtime/setup-hooks/01-git-config.sh\tplatform: polecat setup hook\n" +
+				"deploy/polecat/go-floor.sh\tplatform: image build step\n" +
+				"scripts/lint-lock-wait.sh\tglue: Makefile target\n" +
+				"scripts/refresh-bd-command-tree.sh\tglue: Makefile target\n" +
+				"gt-model-eval/scripts/results-to-discussion.sh\tproject: gt-model-eval\n" +
 				"scripts/a.sh\tport: gt-tpg0p.15\n",
-			want: []string{".githooks/pre-push", "docker-entrypoint.sh", "scripts/a.sh"},
+			want: []string{
+				".githooks/pre-push",
+				".runtime/setup-hooks/01-git-config.sh",
+				"deploy/polecat/go-floor.sh",
+				"docker-entrypoint.sh",
+				"gt-model-eval/scripts/results-to-discussion.sh",
+				"scripts/a.sh",
+				"scripts/lint-lock-wait.sh",
+				"scripts/refresh-bd-command-tree.sh",
+			},
 		},
 		{
 			name: "the header and blank lines are not entries",
@@ -230,6 +244,112 @@ func TestParseAllowlistRows(t *testing.T) {
 				t.Errorf("Findings = %q, want %q", got.Findings, tc.findings)
 			}
 		})
+	}
+}
+
+// TestReasonsBoundToTheirPaths drives every reason that names no porting bead:
+// each admits the paths it is bound to and refuses every other one, and each
+// refusal is a finding that names the binding. Loosening a binding to admit
+// any path turns this red (gt-tpg0p.25).
+func TestReasonsBoundToTheirPaths(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		reason  string
+		admits  []string
+		refuses []string
+	}{
+		{
+			reason:  "platform: container entrypoint",
+			admits:  []string{"docker-entrypoint.sh"},
+			refuses: []string{"docker-entrypoint", "deploy/docker-entrypoint.sh", "scripts/a.sh"},
+		},
+		{
+			reason:  "platform: git hook",
+			admits:  []string{".githooks/pre-push", ".githooks/post-merge"},
+			refuses: []string{".githooks/pre-push.sh", ".githooks/lib/pre-push", "hooks/pre-push", ".githooks/"},
+		},
+		{
+			reason:  "platform: polecat setup hook",
+			admits:  []string{".runtime/setup-hooks/01-git-config.sh"},
+			refuses: []string{".runtime/setup-hooks/01-git-config", ".runtime/setup-hooks/lib/01-git-config.sh", "hooks/01-git-config.sh"},
+		},
+		{
+			reason:  "platform: image build step",
+			admits:  []string{"deploy/polecat/go-floor.sh"},
+			refuses: []string{"go-floor.sh", "deploy/polecat/go-floor_test.sh", "deploy/other/go-floor.sh"},
+		},
+		{
+			reason:  "glue: Makefile target",
+			admits:  []string{"scripts/lint-lock-wait.sh", "scripts/refresh-bd-command-tree.sh"},
+			refuses: []string{"scripts/lint-lock-wait_test.sh", "scripts/other.sh", "lint-lock-wait.sh"},
+		},
+		{
+			reason:  "project: gt-model-eval",
+			admits:  []string{"gt-model-eval/scripts/results-to-discussion.sh", "gt-model-eval/new.sh"},
+			refuses: []string{"gt-model-eval", "gt-model-eval.sh", "other/gt-model-eval/new.sh"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.reason, func(t *testing.T) {
+			t.Parallel()
+			for _, path := range tc.admits {
+				got, err := ParseAllowlist(strings.NewReader(path + "\t" + tc.reason + "\n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !got.Paths[path] {
+					t.Errorf("%q with %q admits nothing, want it admitted", path, tc.reason)
+				}
+				if len(got.Findings) != 0 {
+					t.Errorf("%q with %q yields findings %q, want none", path, tc.reason, got.Findings)
+				}
+			}
+			for _, path := range tc.refuses {
+				got, err := ParseAllowlist(strings.NewReader(path + "\t" + tc.reason + "\n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Paths[path] {
+					t.Errorf("%q with %q is admitted, want it refused", path, tc.reason)
+				}
+				want := []string{fmt.Sprintf("shell-scripts.txt:1: %s: %s", path, fmt.Sprintf(badFitsAlarm, tc.reason))}
+				if !reflect.DeepEqual(got.Findings, want) {
+					t.Errorf("%q with %q: findings = %q, want %q", path, tc.reason, got.Findings, want)
+				}
+			}
+		})
+	}
+}
+
+// TestUnknownReasonStillRefused: a reason outside the closed list admits
+// nothing, and its finding lists every reason the guard accepts, so a menu
+// that lost one fails here (gt-tpg0p.25).
+func TestUnknownReasonStillRefused(t *testing.T) {
+	t.Parallel()
+	const path = "scripts/a.sh"
+	got, err := ParseAllowlist(strings.NewReader(path + "\tproject: somewhere-else\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Paths[path] {
+		t.Errorf("Paths admits %q, want an unknown reason to admit nothing", path)
+	}
+	want := []string{"shell-scripts.txt:1: " + path + ": " + fmt.Sprintf(badReasonAlarm, "project: somewhere-else")}
+	if !reflect.DeepEqual(got.Findings, want) {
+		t.Fatalf("Findings = %q, want %q", got.Findings, want)
+	}
+	for _, reason := range []string{
+		"platform: container entrypoint",
+		"platform: git hook",
+		"platform: polecat setup hook",
+		"platform: image build step",
+		"glue: Makefile target",
+		"project: gt-model-eval",
+		"port: <bead id>",
+	} {
+		if !strings.Contains(got.Findings[0], `"`+reason+`"`) {
+			t.Errorf("the finding does not list the reason %q: %s", reason, got.Findings[0])
+		}
 	}
 }
 

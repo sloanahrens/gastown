@@ -4,22 +4,26 @@
 #   port: <bead id>                  the bead that deletes this line
 #   platform: container entrypoint   docker-entrypoint.sh, named by the runtime
 #   platform: git hook               an extensionless file in .githooks/
-# The guard binds each platform reason to the path it may exempt, so a file
-# that stays without a port needs a change in shellscripts.go, not a line here.
+#   platform: polecat setup hook     a .sh file directly in .runtime/setup-hooks/
+#   platform: image build step       deploy/polecat/go-floor.sh
+#   glue: Makefile target            the two scripts a Makefile target runs
+#   project: gt-model-eval           a file under gt-model-eval/
+# The guard binds each reason to the paths it may exempt, so a file that stays
+# without a port needs a change in shellscripts.go, not a line here.
 #
 # The list only shrinks: deleting a script deletes its line here in the same
 # change. TestIntegrationNoNewShellScripts fails on any tracked .sh file not
 # listed, on any listed file that is gone (gt-lpm8b, gt-tpg0p), and on any
-# line whose reason is missing or does not fit (gt-tpg0p.15).
+# line whose reason is missing or does not fit (gt-tpg0p.15, gt-tpg0p.25).
 .githooks/pre-push_test.sh	port: gt-tpg0p
-.runtime/setup-hooks/01-git-config.sh	port: gt-tpg0p
+.runtime/setup-hooks/01-git-config.sh	platform: polecat setup hook
 deploy/k8s/kind/common.sh	port: gt-tpg0p
 deploy/k8s/kind/down.sh	port: gt-tpg0p
 deploy/k8s/kind/kind_test.sh	port: gt-tpg0p
 deploy/k8s/kind/up.sh	port: gt-tpg0p
-deploy/polecat/go-floor.sh	port: gt-tpg0p
+deploy/polecat/go-floor.sh	platform: image build step
 docker-entrypoint.sh	platform: container entrypoint
-gt-model-eval/scripts/results-to-discussion.sh	port: gt-tpg0p
+gt-model-eval/scripts/results-to-discussion.sh	project: gt-model-eval
 scripts/check-install-path_test.sh	port: gt-tpg0p
 scripts/deep-review.sh	port: gt-tpg0p
 scripts/deep-review_test.sh	port: gt-tpg0p
@@ -34,12 +38,12 @@ scripts/forgejo-resync_test.sh	port: gt-tpg0p
 scripts/gate-vs-load_test.sh	port: gt-tpg0p
 scripts/install-local_test.sh	port: gt-tpg0p
 scripts/lib/install-gt-lib.sh	port: gt-tpg0p
-scripts/lint-lock-wait.sh	port: gt-tpg0p
+scripts/lint-lock-wait.sh	glue: Makefile target
 scripts/makefile-gate_test.sh	port: gt-tpg0p
 scripts/polecat-go-floor_test.sh	port: gt-tpg0p
 scripts/post-land-shell.sh	port: gt-tpg0p
 scripts/post-land-shell_test.sh	port: gt-tpg0p
-scripts/refresh-bd-command-tree.sh	port: gt-tpg0p
+scripts/refresh-bd-command-tree.sh	glue: Makefile target
 scripts/resource-sampler_test.sh	port: gt-tpg0p
 scripts/test-makefile.sh	port: gt-tpg0p
 scripts/town_metrics_test.sh	port: gt-tpg0p
