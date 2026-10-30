@@ -43,8 +43,8 @@ type harness struct {
 	root    string
 	env     map[string]string
 	replies map[string]reply
-	// jobs answers every run's jobs read, the way run.sh's stub did: a case
-	// never needs two runs' jobs in one rig's run.
+	// jobs answers every run's jobs read: a case never needs two runs' jobs in
+	// one rig's run.
 	jobs []byte
 	// status answers every read with that HTTP status, for the cases that turn
 	// the whole API red.
@@ -252,9 +252,9 @@ func runJSON(id int, workflow, status, prettyRef, sha, created string) string {
 }
 
 // gateCase is one input to the gate: the world before the run, and what the run
-// must do with it. The cases from run.sh's own suite appear here with the same
-// fixtures and the same expected lines, which is what holds the port to the
-// script's outputs and exit codes (gt-tpg0p.4).
+// must do with it. Each case pins the gate's output lines and exit code for one
+// fixture, so a change in the gate's behaviour shows up as a failing row
+// (gt-tpg0p.4).
 type gateCase struct {
 	name     string
 	setup    func(h *harness)
