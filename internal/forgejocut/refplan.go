@@ -79,11 +79,12 @@ func (g ExecRefGit) CommitsAhead(a, b string) string {
 }
 
 // Classify is the import's decision for one ref: the sha GitHub holds and the one
-// Forgejo holds, "" when Forgejo has no copy. ancestry answers whether its first
-// sha is the second or an ancestor of it. A tag follows the same rules as a
-// branch, and an ancestry neither side's sha satisfies is ActionDiverged; an
-// annotated tag whose sides differ lands there because the ancestry checks do not
-// hold for a tag object.
+// Forgejo holds, "" when Forgejo has no copy. ref is the name the decision is
+// about and does not change the answer, since a tag follows the same rules as a
+// branch. ancestry answers whether its first sha is the second or an ancestor of
+// it; an ancestry neither side's sha satisfies is ActionDiverged, where an
+// annotated tag whose sides differ lands because the ancestry checks do not hold
+// for a tag object.
 func Classify(ref, github, forgejo string, ancestry func(a, b string) bool) Action {
 	switch {
 	case forgejo == "":

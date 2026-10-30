@@ -134,6 +134,7 @@ func TestRefPlanSortedAndLogged(t *testing.T) {
 		{Name: "refs/heads/feature", SHA: shaMiddle},
 		{Name: "refs/heads/main", SHA: shaTip},
 		{Name: "refs/heads/stable", SHA: shaMiddle},
+		{Name: "refs/heads/retired", SHA: shaSide},
 		{Name: "refs/tags/v1", SHA: shaMiddle},
 	}
 	refs := &refGitFake{
