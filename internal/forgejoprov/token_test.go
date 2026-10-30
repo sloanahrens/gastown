@@ -686,3 +686,170 @@ func TestNoTokenInOutput(t *testing.T) {
 		t.Errorf("the token file does not hold the minted token")
 	}
 }
+
+// failingTemp is a temp file whose steps can be made to fail, and which records
+// whether it was written, closed and removed.
+type failingTemp struct {
+	name       string
+	chmodErr   error
+	writeErr   error
+	closeErr   error
+	wrote      bool
+	closeCalls int
+}
+
+func (f *failingTemp) Name() string            { return f.name }
+func (f *failingTemp) Chmod(fs.FileMode) error { return f.chmodErr }
+func (f *failingTemp) Close() error            { f.closeCalls++; return f.closeErr }
+func (f *failingTemp) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	f.wrote = true
+	return len(p), nil
+}
+
+// TestTokenFileWriteFailureLeavesNoTempFile makes each step of the atomic write fail
+// in turn and checks the error comes back, nothing is renamed over the target
+// after a failure, and the temp file is removed once it exists.
+func TestTokenFileWriteFailureLeavesNoTempFile(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("injected failure")
+	cases := []struct {
+		name       string
+		mkdirErr   error
+		createErr  error
+		temp       *failingTemp
+		renameErr  error
+		wantRemove bool
+		wantRename bool
+	}{
+		{name: "mkdir", mkdirErr: boom},
+		{name: "create temp", createErr: boom},
+		{name: "chmod temp", temp: &failingTemp{name: "/d/.forgejo-token.1", chmodErr: boom}, wantRemove: true},
+		{name: "write temp", temp: &failingTemp{name: "/d/.forgejo-token.1", writeErr: boom}, wantRemove: true},
+		{name: "close temp", temp: &failingTemp{name: "/d/.forgejo-token.1", closeErr: boom}, wantRemove: true},
+		{name: "rename", temp: &failingTemp{name: "/d/.forgejo-token.1"}, renameErr: boom, wantRemove: true, wantRename: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var removed []string
+			renamed := false
+			o := osFiles{
+				mkdirAll: func(string, fs.FileMode) error { return tc.mkdirErr },
+				createTemp: func(string, string) (tempFile, error) {
+					if tc.createErr != nil {
+						return nil, tc.createErr
+					}
+					return tc.temp, nil
+				},
+				rename: func(string, string) error { renamed = true; return tc.renameErr },
+				remove: func(p string) error { removed = append(removed, p); return nil },
+			}
+			err := o.WriteFileAtomic("/d/forgejo-polecat.env", []byte("x"), 0o600)
+			if !errors.Is(err, boom) {
+				t.Fatalf("err = %v, want the injected failure", err)
+			}
+			if tc.wantRemove != (len(removed) == 1) {
+				t.Errorf("removed = %v, want the temp file removed: %v", removed, tc.wantRemove)
+			}
+			if tc.wantRemove && removed[0] != tc.temp.name {
+				t.Errorf("removed %q, want %q", removed[0], tc.temp.name)
+			}
+			if renamed != tc.wantRename {
+				t.Errorf("renamed = %v, want %v", renamed, tc.wantRename)
+			}
+			if tc.temp != nil && tc.temp.closeCalls == 0 && tc.wantRemove {
+				t.Errorf("the temp file was never closed")
+			}
+		})
+	}
+}
+
+// TestEnsureTokenChmodFailures checks a chmod that fails on an existing file stops
+// the run before anything is minted, and one that fails on the new file is an
+// error naming the path.
+func TestEnsureTokenChmodFailures(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	t.Run("existing file", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeForgejo()
+		withBot(t, f, "polecat")
+		files := newMemFiles()
+		files.seed(path, "old", 0o644)
+		files.chmodErr = errors.New("operation not permitted")
+		before := len(f.writes())
+		var logs []string
+		err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat")
+		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "mode 600") {
+			t.Fatalf("err = %v, want an error naming %s and mode 600", err, path)
+		}
+		if len(f.writes()) != before {
+			t.Errorf("a token was minted though the file could not be secured: %v", f.writes())
+		}
+	})
+	t.Run("new file", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeForgejo()
+		withBot(t, f, "polecat")
+		files := newMemFiles()
+		files.chmodErr = errors.New("operation not permitted")
+		var logs []string
+		err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
+		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "mode 600") {
+			t.Fatalf("err = %v, want an error naming %s and mode 600", err, path)
+		}
+		if v := f.token("bot-polecat", DefaultTokenName); v != "" && strings.Contains(err.Error(), v) {
+			t.Errorf("the error carries the minted token")
+		}
+	})
+}
+
+// methodFailsTransport fails every request of one method as a broken connection
+// does, and passes the rest to next.
+type methodFailsTransport struct {
+	next   http.RoundTripper
+	method string
+}
+
+func (m methodFailsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == m.method {
+		return nil, errors.New("connection reset by peer")
+	}
+	return m.next.RoundTrip(req)
+}
+
+// TestEnsureTokenTransportFailures checks a request that never gets an answer fails
+// the run at each of its three calls, with no file written and no token in the
+// error.
+func TestEnsureTokenTransportFailures(t *testing.T) {
+	t.Parallel()
+	for _, method := range []string{http.MethodGet, http.MethodDelete, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeForgejo()
+			withBot(t, f, "polecat")
+			var logs []string
+			// A first mint makes the rotation list, delete and mint all happen.
+			if method != http.MethodPost {
+				if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
+					t.Fatalf("seed token: %v", err)
+				}
+			}
+			files := newMemFiles()
+			files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
+			err := tokenProvisioner(methodFailsTransport{next: f, method: method}, files, true, false, &logs).EnsureToken("polecat")
+			if err == nil || !strings.Contains(err.Error(), "request failed") {
+				t.Fatalf("err = %v, want a request failed error", err)
+			}
+			if string(files.files[filepath.Join(tokenDir, "forgejo-polecat.env")]) != "old" {
+				t.Errorf("the file changed though the %s failed", method)
+			}
+			if strings.Contains(err.Error(), fixtureToken) {
+				t.Errorf("the error carries the admin token")
+			}
+		})
+	}
+}

@@ -34,18 +34,62 @@ type Files interface {
 	Stat(path string) (fs.FileInfo, error)
 }
 
-// osFiles is the real filesystem.
-type osFiles struct{}
+// tempFile is the file WriteFileAtomic writes through: *os.File in production, a
+// fake whose steps fail in a test.
+type tempFile interface {
+	Name() string
+	Chmod(mode fs.FileMode) error
+	Write(p []byte) (int, error)
+	Close() error
+}
+
+// osFiles is the real filesystem. Its zero value runs on the real disk; a test
+// sets the function fields to make one step fail.
+type osFiles struct {
+	mkdirAll   func(path string, perm fs.FileMode) error
+	createTemp func(dir, pattern string) (tempFile, error)
+	rename     func(oldpath, newpath string) error
+	remove     func(path string) error
+}
+
+func (o osFiles) doMkdirAll(path string) error {
+	if o.mkdirAll != nil {
+		return o.mkdirAll(path, 0o700)
+	}
+	return os.MkdirAll(path, 0o700)
+}
+
+func (o osFiles) doCreateTemp(dir, pattern string) (tempFile, error) {
+	if o.createTemp != nil {
+		return o.createTemp(dir, pattern)
+	}
+	return os.CreateTemp(dir, pattern)
+}
+
+func (o osFiles) doRename(oldpath, newpath string) error {
+	if o.rename != nil {
+		return o.rename(oldpath, newpath)
+	}
+	return os.Rename(oldpath, newpath)
+}
+
+func (o osFiles) doRemove(path string) error {
+	if o.remove != nil {
+		return o.remove(path)
+	}
+	return os.Remove(path)
+}
 
 // WriteFileAtomic writes data through a temp file beside path and renames it
 // over path. The directory is created 0700 when it is missing, since it holds
-// credentials.
-func (osFiles) WriteFileAtomic(path string, data []byte, mode fs.FileMode) (err error) {
+// credentials. A step that fails removes the temp file, so no partial file is
+// left.
+func (o osFiles) WriteFileAtomic(path string, data []byte, mode fs.FileMode) (err error) {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := o.doMkdirAll(dir); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".forgejo-token.*")
+	tmp, err := o.doCreateTemp(dir, ".forgejo-token.*")
 	if err != nil {
 		return err
 	}
@@ -53,7 +97,7 @@ func (osFiles) WriteFileAtomic(path string, data []byte, mode fs.FileMode) (err 
 	defer func() {
 		if err != nil {
 			_ = tmp.Close()
-			_ = os.Remove(name)
+			_ = o.doRemove(name)
 		}
 	}()
 	// The mode is set before the value is written, so the temp file is never
@@ -67,7 +111,7 @@ func (osFiles) WriteFileAtomic(path string, data []byte, mode fs.FileMode) (err 
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	return o.doRename(name, path)
 }
 
 // Chmod sets the mode of path.
