@@ -77,14 +77,13 @@ func isCrewActor(actor string) bool {
 	return len(parts) == 3 && parts[0] != "" && parts[1] == "crew" && parts[2] != ""
 }
 
-// crewActorFromEnv is the identity a crew submission's bead writes carry, as
-// far as the session's environment names it: BEADS_ACTOR (the session's own
-// identity, what bd resolves an author from), then BD_ACTOR (what a spawned
-// session exports), then the crew member GT_ROLE names. "" means the session
-// names no agent, and the caller keeps the committer git user.name — the
-// human's identity when the human runs gt done by hand, which the landing
-// worker refuses to land (gt-i817y).
-func crewActorFromEnv(getenv func(string) string) string {
+// CrewActorFromEnv is the identity the session's environment names for a crew
+// submission, read by gt done and by gt land requeue: BEADS_ACTOR (the
+// session's own identity, what bd resolves an author from), then BD_ACTOR
+// (what a spawned session exports), then the crew member GT_ROLE names. ""
+// means the session names no agent; gt done then keeps the committer git
+// user.name, which the landing worker refuses to land (gt-i817y).
+func CrewActorFromEnv(getenv func(string) string) string {
 	for _, key := range []string{"BEADS_ACTOR", "BD_ACTOR"} {
 		if actor := strings.TrimSpace(getenv(key)); actor != "" {
 			return actor
@@ -224,12 +223,12 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 }
 
 // newCrewDoneRun is the run a crew submission runs as. Its sender is the
-// session's agent identity (crewActorFromEnv); only a session naming none
+// session's agent identity (CrewActorFromEnv); only a session naming none
 // falls back to the git committer, the human's identity when the human runs
 // gt done by hand (gt-i817y). gitUserName is read only on that fallback. A
 // sender left "" is refused by submitCrewForLanding.
 func newCrewDoneRun(getenv func(string) string, gitUserName func() string, gitRoot, townRoot, rigName, branch, issueID string) *doneRun {
-	actor := crewActorFromEnv(getenv)
+	actor := CrewActorFromEnv(getenv)
 	if actor == "" {
 		// Crew have no seat identity; the bead records the committer.
 		actor = strings.TrimSpace(gitUserName())

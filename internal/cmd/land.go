@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -110,19 +111,23 @@ func runLandRequeue(cmd *cobra.Command, args []string) error {
 	if reason == "" {
 		reason = "(no reason given)"
 	}
-	return requeueRejectedLanding(bd, repo, remote, beadID, reason, requeueActor(), cmd.OutOrStdout())
+	return requeueRejectedLanding(bd, repo, remote, beadID, reason, requeueActor(os.Getenv), cmd.OutOrStdout())
 }
 
-// requeueActor names the operator behind a re-queue for the durable record:
-// the polecat if one is driving the command, else the invoking user.
-func requeueActor() string {
-	if p := strings.TrimSpace(os.Getenv("GT_POLECAT")); p != "" {
+// requeueActor names the session behind a re-queue for the durable record:
+// the identity gt done would write for the same session (a crew session's
+// BEADS_ACTOR, BD_ACTOR or crew GT_ROLE), else the polecat driving the
+// command, else a placeholder. It never reads $USER or the git user.name: an
+// agent signs its work with its own name, and the host user's name is the
+// human's, not the agent's.
+func requeueActor(getenv func(string) string) string {
+	if actor := done.CrewActorFromEnv(getenv); actor != "" {
+		return actor
+	}
+	if p := strings.TrimSpace(getenv("GT_POLECAT")); p != "" {
 		return p
 	}
-	if user := strings.TrimSpace(os.Getenv("USER")); user != "" {
-		return user
-	}
-	return "operator"
+	return "unnamed-agent"
 }
 
 // requeueRejectedLanding is gt land requeue's decision, over the interfaces so

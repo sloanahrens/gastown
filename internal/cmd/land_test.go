@@ -222,3 +222,54 @@ func wantStillRejected(t *testing.T, bd *beadsfake.Fake) {
 		t.Errorf("a refused requeue wrote a comment: %+v", comments)
 	}
 }
+
+// requeueEnv is a getenv over a fixed map, so a case names only the variables
+// it cares about.
+func requeueEnv(env map[string]string) func(string) string {
+	return func(k string) string { return env[k] }
+}
+
+// TestRequeueActor: the re-queue comment records the session's agent identity,
+// resolved as gt done resolves one (gt-i817y) — BEADS_ACTOR, then BD_ACTOR,
+// then a crew GT_ROLE — and never the host user, whose name is the human's, not
+// the agent's. A session naming no agent writes the "unnamed-agent" placeholder
+// rather than borrow a name it was not given.
+func TestRequeueActor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"BEADS_ACTOR is the session's own identity",
+			map[string]string{"BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
+		{"BEADS_ACTOR leads BD_ACTOR and a crew GT_ROLE",
+			map[string]string{"BEADS_ACTOR": "town/crew/overseer", "BD_ACTOR": "gastown/crew/sloan", "GT_ROLE": "gastown/crew/dunlin"},
+			"town/crew/overseer"},
+		{"BD_ACTOR leads a crew GT_ROLE",
+			map[string]string{"BD_ACTOR": "town/crew/dunlin", "GT_ROLE": "gastown/crew/dunlin"},
+			"town/crew/dunlin"},
+		{"a crew GT_ROLE names its member",
+			map[string]string{"GT_ROLE": "gastown/crew/dunlin"}, "gastown/crew/dunlin"},
+		{"GT_POLECAT names the polecat when no crew identity is set",
+			map[string]string{"GT_POLECAT": "imperator", "GT_ROLE": "gastown/polecats/imperator"}, "imperator"},
+		{"a crew identity leads GT_POLECAT",
+			map[string]string{"BEADS_ACTOR": "town/crew/overseer", "GT_POLECAT": "imperator"}, "town/crew/overseer"},
+		{"no agent named is the placeholder",
+			map[string]string{}, "unnamed-agent"},
+		{"the host user is never the actor",
+			map[string]string{"USER": "sloan", "LOGNAME": "sloan"}, "unnamed-agent"},
+		{"the host user does not override a crew identity",
+			map[string]string{"USER": "sloan", "BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
+		{"a blank GT_POLECAT names no one",
+			map[string]string{"GT_POLECAT": "  ", "USER": "sloan"}, "unnamed-agent"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := requeueActor(requeueEnv(tc.env)); got != tc.want {
+				t.Errorf("requeueActor(%v) = %q, want %q", tc.env, got, tc.want)
+			}
+		})
+	}
+}
