@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -223,6 +224,81 @@ func TestGuardStartup(t *testing.T) {
 				t.Fatalf("guardStartup = %v, want a refusal containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestStartupCandidates pins the owners a legacy takeover must show stopped
+// (gt-kpan5): the launchd job always, and the town's container only when the
+// town's daemon settings name one, never from the default name.
+func TestStartupCandidates(t *testing.T) {
+	t.Parallel()
+	const named = "scratch-town-daemon-1"
+	cases := []struct {
+		name     string
+		settings string // written to PatrolConfigFile(town); "" writes no file
+		want     []Owner
+		wantErr  string // "" means the candidates are returned
+	}{
+		{
+			name: "a town that names its container adds it after launchd",
+			settings: `{"type":"daemon-patrol-config","version":1,` +
+				`"container_name":"` + named + `","compose_project":"scratch-town"}`,
+			want: []Owner{guardLaunchd, {Kind: agentconfig.SupervisorContainer, ID: named}},
+		},
+		{
+			// The default name could be another town's container, so settings
+			// that set other fields but no container_name name launchd alone.
+			name:     "settings that name no container leave launchd alone",
+			settings: `{"type":"daemon-patrol-config","version":1,"env":{"GT_SEAT_REFILL_MAX_PRIORITY":"50"}}`,
+			want:     []Owner{guardLaunchd},
+		},
+		{
+			name: "a town with no settings file names launchd alone",
+			want: []Owner{guardLaunchd},
+		},
+		{
+			name:     "a settings file that does not parse refuses",
+			settings: `{not json`,
+			wantErr:  "refusing to start: reading",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := guardTown(t)
+			if tc.settings != "" {
+				writeDaemonSettings(t, town, tc.settings)
+			}
+			got, err := startupCandidates(town)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("startupCandidates = %v, %v; want a refusal containing %q", got, err, tc.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("startupCandidates = %v with a refusal; want no candidates", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("startupCandidates = %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("startupCandidates = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// writeDaemonSettings writes body as the town's daemon settings file, in the
+// shape ReadPatrolConfig decodes.
+func writeDaemonSettings(t *testing.T, town, body string) {
+	t.Helper()
+	path := PatrolConfigFile(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
