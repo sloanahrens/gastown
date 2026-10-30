@@ -457,32 +457,31 @@ func runInstallWith(opts installOptions, args []string) error {
 			fmt.Printf("   • The hq database is already on the remote Dolt at %s:%d\n", doltHost, installEndpointPort)
 		}
 	}
-	if !opts.noBeads {
-		if !remoteDolt {
-			port := doltserver.DefaultConfig(absPath).Port
-			externalTestDolt := useExternalTestDoltServer(port)
+	if !opts.noBeads && !remoteDolt {
+		port := doltserver.DefaultConfig(absPath).Port
+		externalTestDolt := useExternalTestDoltServer(port)
 
-			// Set up Dolt: identity → init-rig hq → server start.
-			// This ordering works because InitRig falls through to `dolt init`
-			// when the server isn't running yet.
-			// Identity was verified in preflight above.
-			// Create HQ database before starting server.
-			if !externalTestDolt {
-				if _, err := doltserver.InitRig(absPath, "hq"); err != nil {
-					return fmt.Errorf("initializing HQ Dolt database: %w", err)
-				}
+		// Set up Dolt: identity → init-rig hq → server start.
+		// This ordering works because InitRig falls through to `dolt init`
+		// when the server isn't running yet.
+		// Identity was verified in preflight above.
+		// Create HQ database before starting server.
+		if !externalTestDolt {
+			if _, err := doltserver.InitRig(absPath, "hq"); err != nil {
+				return fmt.Errorf("initializing HQ Dolt database: %w", err)
+			}
 
-				// Start the Dolt server — bd commands need a running server.
-				// The server stays running after install (it's lightweight infrastructure,
-				// like a database). Stop it with 'gt dolt stop' when not needed.
-				if err := doltserver.Start(absPath); err != nil {
-					if !strings.Contains(err.Error(), "already running") {
-						return fmt.Errorf("starting Dolt server for beads: %w", err)
-					}
+			// Start the Dolt server — bd commands need a running server.
+			// The server stays running after install (it's lightweight infrastructure,
+			// like a database). Stop it with 'gt dolt stop' when not needed.
+			if err := doltserver.Start(absPath); err != nil {
+				if !strings.Contains(err.Error(), "already running") {
+					return fmt.Errorf("starting Dolt server for beads: %w", err)
 				}
 			}
 		}
-
+	}
+	if !opts.noBeads {
 		if err := steps.initTownBeads(absPath); err != nil {
 			return fmt.Errorf("initializing town beads: %w", err)
 		} else {
