@@ -129,11 +129,11 @@ func (r *fakeRepo) listRules() (int, string) {
 	return reply(http.StatusOK, out)
 }
 
-// createRule stores a rule the body names with rule_name, and answers 201 with it. A body
-// without a rule_name, or a rule already present for that name, is 422 and stores nothing.
-// createRule stores the rule the body names and answers 201 with it. When dropWhitelist
-// is set the body's merge_whitelist_usernames does not take, so the stored list is empty
-// and the answer shows it, as Forgejo drops a login that is not yet a collaborator.
+// createRule stores the rule the body names with rule_name and answers 201 with it. A
+// body without a rule_name, or a rule already present for that name, is 422 and stores
+// nothing. When dropWhitelist is set the body's merge_whitelist_usernames does not take,
+// so the stored list is empty and the answer shows it, as Forgejo drops a login that is
+// not yet a collaborator.
 func (r *fakeRepo) createRule(body []byte, dropWhitelist bool) (int, string) {
 	var in map[string]any
 	if err := json.Unmarshal(body, &in); err != nil {

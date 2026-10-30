@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 
@@ -51,7 +52,9 @@ func runParse(args []string, getenv func(string) string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, "usage: forgejo-provision --help")
 		return forgejoprov.ExitUsage
 	}
-	return forgejoprov.Run(context.Background(), opts, forgejoprov.Env{Getenv: getenv, Log: stderr})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	return forgejoprov.Run(ctx, opts, forgejoprov.Env{Getenv: getenv, Log: stderr})
 }
 
 // usage is the text -h prints. It lives here rather than in the shell script's

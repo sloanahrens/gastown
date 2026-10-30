@@ -480,7 +480,7 @@ func TestRunExitCodes(t *testing.T) {
 		{
 			name:    "a repo the instance does not hold",
 			args:    []string{"--repo", "acme/missing"},
-			wantLog: "acme/missing",
+			wantLog: "/repos/acme/missing/collaborators/bot-polecat: unexpected HTTP 404",
 		},
 	}
 	for _, tc := range cases {
@@ -500,8 +500,13 @@ func TestRunExitCodes(t *testing.T) {
 			}
 		})
 	}
-	// A refused command line never reaches Run: Parse returns the usage error that the
-	// command maps to exit 2 (TestMainUsageExitsTwo holds the mapping).
+}
+
+// TestRunRefusesUsageBeforeRun: a refused command line never reaches Run. Parse returns
+// the usage error that the command maps to exit 2 (cmd/forgejo-provision's
+// TestMainUsageExitsTwo holds the mapping).
+func TestRunRefusesUsageBeforeRun(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{{"--repo", "gastown"}, {"--role", "admin"}, {"--nope"}} {
 		t.Run("usage refusal "+strings.Join(args, " "), func(t *testing.T) {
 			t.Parallel()
@@ -644,10 +649,10 @@ func TestRunFailsWhenTheViewerReadFails(t *testing.T) {
 	}
 }
 
-// TestProvisionRepoRejectsAnUnknownRole: provisionRepo is the step that asks each role's
+// TestRunProvisionRepoRejectsAnUnknownRole: provisionRepo is the step that asks each role's
 // repository access, so a role it has no access for is refused before any request. A
 // command line never gets this far, since Parse refuses an unknown role first.
-func TestProvisionRepoRejectsAnUnknownRole(t *testing.T) {
+func TestRunProvisionRepoRejectsAnUnknownRole(t *testing.T) {
 	t.Parallel()
 	f := newFakeForgejo()
 	f.addRepo(protectionRepo)

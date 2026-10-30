@@ -1,7 +1,7 @@
 // Package forgejoprov is the command line of scripts/forgejo-provision.sh as a
 // Go type: its flags, defaults, validation and role table. Run (run.go) spends
 // them. The shell script stays in place, and green, until the port's last bead
-// deletes it (gt-tpg0p.26).
+// deletes it (gt-tpg0p.52).
 package forgejoprov
 
 import (

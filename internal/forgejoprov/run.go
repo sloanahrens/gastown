@@ -11,9 +11,9 @@ import (
 
 // Env is what Run reads and writes beside its options: the environment the admin
 // token and the defaults come from, the file the admin token is read through, the
-// progress lines, and the seams a test replaces. A zero field takes the production
-// value: the process environment, the real file, the real filesystem, crypto/rand
-// and the default HTTP client.
+// progress lines, and the seams a test replaces. Each nil field takes the production
+// value named on it: the process environment, the real file, the real filesystem,
+// crypto/rand and the default HTTP client. A nil Log discards the progress lines.
 type Env struct {
 	// Getenv reads the environment the admin token resolves from; nil means os.Getenv.
 	Getenv func(string) string
