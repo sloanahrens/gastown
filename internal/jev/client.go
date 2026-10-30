@@ -7,8 +7,9 @@
 // carries all three, paying the state's tokens and the output once.
 //
 // The API key comes from a 0600 key file (see KeyPaths) and appears in
-// neither errors nor logs; the client logs nothing, and request bodies are
-// never echoed. The usage ledger (WithLedger) records token counts alone.
+// neither errors nor logs. The usage ledger (WithLedger) records token counts
+// alone; the request log (WithRequests) records a hash and sizes per body
+// sent, never its text.
 package jev
 
 import (
@@ -21,6 +22,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +81,11 @@ type Client struct {
 	caller     string
 	warnings   io.Writer
 	ledger     *ledger
+
+	// requestsPath and requests configure the request log; requests is built
+	// from them by NewClient, and nil when no path is set.
+	requestsPath string
+	requests     *requestLog
 }
 
 // Option configures a Client.
@@ -122,6 +129,12 @@ func NewClient(opts ...Option) (*Client, error) {
 	}
 	if c.ledgerPath != "" {
 		c.ledger = &ledger{path: c.ledgerPath, caller: c.caller, warnings: c.warnings}
+		if c.requestsPath == "" {
+			c.requestsPath = filepath.Join(filepath.Dir(c.ledgerPath), requestsFile)
+		}
+	}
+	if c.requestsPath != "" {
+		c.requests = &requestLog{path: c.requestsPath, warnings: c.warnings}
 	}
 	if c.key != "" {
 		return c, nil
@@ -256,7 +269,8 @@ type response struct {
 // returns ErrUnauthorized, any other non-2xx returns a *StatusError, and a 2xx
 // that does not answer every question as asked returns ErrBadResponse. The
 // usage ledger records one line per call whose 2xx reply decodes, bad answers
-// included.
+// included; the request log records one line per call that reaches the
+// network, failed calls included.
 func (c *Client) Ask(ctx context.Context, state any, qs map[string]Question) (*Answers, error) {
 	if len(qs) == 0 {
 		return nil, errors.New("jev: Ask needs at least one question")
@@ -265,11 +279,16 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Question) (*A
 	if err != nil {
 		return nil, err
 	}
+	stateBytes, err := c.stateSize(state)
+	if err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(request{State: state, Model: Model, Questions: wire})
 	if err != nil {
 		return nil, fmt.Errorf("jev: encode request: %w", err)
 	}
-	data, err := c.post(ctx, body)
+	data, got, err := c.post(ctx, body)
+	c.requests.record(c.requestRecord(state, stateBytes, body, qs, got, err))
 	if err != nil {
 		return nil, err
 	}
@@ -306,37 +325,48 @@ func (c *Client) Choice(ctx context.Context, state any, instructions string, cri
 	}, nil
 }
 
-// post sends body to the endpoint and returns the 2xx response body, mapping
-// a failed round trip and every non-2xx status to the errors Ask documents.
-func (c *Client) post(ctx context.Context, body []byte) ([]byte, error) {
+// reply is what an HTTP response carried beyond its body, for the request
+// log.
+type reply struct {
+	// status is the HTTP status code, or zero when no response arrived.
+	status int
+	// requestID is the X-Request-Id header, empty when the server sent none.
+	requestID string
+}
+
+// post sends body to the endpoint and returns the 2xx response body, what the
+// reply carried, and the error Ask documents for a failed round trip or a
+// non-2xx status.
+func (c *Client) post(ctx context.Context, body []byte) ([]byte, reply, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, c.redact(fmt.Errorf("jev: build request: %w", err))
+		return nil, reply{}, c.redact(fmt.Errorf("jev: build request: %w", err))
 	}
 	req.Header.Set("Authorization", "Bearer "+c.key)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, c.transportErr(ctx, err)
+		return nil, reply{}, c.transportErr(ctx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	got := reply{status: resp.StatusCode, requestID: resp.Header.Get("X-Request-Id")}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
-		return nil, c.transportErr(ctx, err)
+		return nil, got, c.transportErr(ctx, err)
 	}
 
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return nil, &RateLimitError{RetryAfter: retryAfter(resp.Header)}
+		return nil, got, &RateLimitError{RetryAfter: retryAfter(resp.Header)}
 	case resp.StatusCode == http.StatusUnauthorized:
-		return nil, ErrUnauthorized
+		return nil, got, ErrUnauthorized
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return nil, &StatusError{Status: resp.StatusCode, Message: c.message(data)}
+		return nil, got, &StatusError{Status: resp.StatusCode, Message: c.message(data)}
 	}
-	return data, nil
+	return data, got, nil
 }
 
 // wireQuestions converts qs to the vendor's shape, rejecting a question it

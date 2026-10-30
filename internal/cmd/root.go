@@ -67,7 +67,7 @@ var beadsExemptCommands = map[string]bool{
 	"kill-all":    true, // Kill-all must work when Dolt is down
 	"signal":      true, // Hook signal handlers must be fast, handle beads internally
 	"metrics":     true, // Metrics reads local JSONL, no beads needed
-	"jev":         true, // Reads the local usage ledger; no beads needed
+	"jev":         true, // Reads the local usage and request logs; no beads needed
 	"heartbeat":   true, // Heartbeat state update — must be fast and dependency-free
 	"tail":        true, // Read-only stream; reports an unreachable bd per rig and continues
 	"report":      true, // Read-only summary; reports an unreachable bd per section and exits 0

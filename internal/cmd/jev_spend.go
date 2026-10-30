@@ -25,9 +25,11 @@ var jevCmd = &cobra.Command{
 	Use:     "jev",
 	GroupID: GroupDiag,
 	Short:   "Read Jev's usage ledger",
-	Long: `Read the town's Jev usage ledger, <town>/.runtime/jev/usage.jsonl, where
-every answered Jev call appends its token counts and the caller that spent
-them. The calls record themselves; gt jev only reads.`,
+	Long: `Read the town's Jev logs under <town>/.runtime/jev: the usage ledger,
+where every answered Jev call appends its token counts and the caller that
+spent them, and the request log, where every call that reaches the network
+appends what it sent as sizes and a hash. The calls record themselves; gt jev
+only reads.`,
 	RunE: requireSubcommand,
 }
 
