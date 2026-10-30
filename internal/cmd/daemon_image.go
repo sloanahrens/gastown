@@ -61,7 +61,7 @@ func realDaemonImageDeps(out io.Writer) daemonImageDeps {
 	return daemonImageDeps{
 		run:          execImageRunner,
 		git:          bdbuild.ExecGit,
-		fetch:        httpImageFetch,
+		fetch:        imageFetcher(&http.Client{Timeout: imageFetchCeiling}),
 		environ:      os.Environ(),
 		evalSymlinks: filepath.EvalSymlinks,
 		out:          out,
@@ -79,22 +79,31 @@ func execImageRunner(ctx context.Context, dir string, env, argv []string) error 
 	return c.Run()
 }
 
-// httpImageFetch downloads url and returns its body. A response that is not 200
-// is an error. daemonimage verifies what it returns against a pinned sha256.
-func httpImageFetch(ctx context.Context, url string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
+// httpDoer is the one call a fetch makes of an HTTP client; a test stands in a
+// fake, so no unit test reaches a network.
+type httpDoer interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+// imageFetcher is the daemonimage.Fetcher over client: it downloads url and
+// returns its body, and a response that is not 200 is an error. daemonimage
+// verifies what it returns against a pinned sha256.
+func imageFetcher(client httpDoer) daemonimage.Fetcher {
+	return func(ctx context.Context, url string) (io.ReadCloser, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
+		}
+		return resp.Body, nil
 	}
-	resp, err := (&http.Client{Timeout: imageFetchCeiling}).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
-	}
-	return resp.Body, nil
 }
 
 // newDaemonImageCmd builds `gt daemon image` over run, which receives the flags

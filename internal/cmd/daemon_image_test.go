@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -363,20 +362,23 @@ func TestDaemonImageFlagsAreWired(t *testing.T) {
 	}
 }
 
-// httpImageFetch returns the body of a 200 and an error for anything else, an
-// unreachable server and a URL that cannot be a request.
-func TestHTTPImageFetch(t *testing.T) {
-	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path == "/ok" {
-			_, _ = io.WriteString(w, "payload")
-			return
-		}
-		http.NotFound(w, req)
-	}))
-	defer srv.Close()
+// doerFunc is an HTTP client that is a function.
+type doerFunc func(*http.Request) (*http.Response, error)
 
-	body, err := httpImageFetch(context.Background(), srv.URL+"/ok")
+func (f doerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+// The fetcher returns the body of a 200 and an error for any other status, a
+// client that fails and a URL that cannot be a request. No network is reached:
+// the client is a fake.
+func TestImageFetcher(t *testing.T) {
+	t.Parallel()
+	respond := func(code int, body string) doerFunc {
+		return func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: code, Status: http.StatusText(code), Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+	}
+
+	body, err := imageFetcher(respond(http.StatusOK, "payload"))(context.Background(), "https://example.invalid/ok")
 	if err != nil {
 		t.Fatalf("200: %v", err)
 	}
@@ -385,13 +387,14 @@ func TestHTTPImageFetch(t *testing.T) {
 	if string(got) != "payload" {
 		t.Errorf("body = %q", got)
 	}
-	if _, err := httpImageFetch(context.Background(), srv.URL+"/absent"); err == nil || !strings.Contains(err.Error(), "404") {
+	if _, err := imageFetcher(respond(http.StatusNotFound, "no"))(context.Background(), "https://example.invalid/absent"); err == nil || !strings.Contains(err.Error(), "Not Found") {
 		t.Errorf("404 = %v, want an error naming the status", err)
 	}
-	if _, err := httpImageFetch(context.Background(), "http://127.0.0.1:1/"); err == nil {
-		t.Error("an unreachable server was not an error")
+	failing := doerFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("connection refused") })
+	if _, err := imageFetcher(failing)(context.Background(), "https://example.invalid/x"); err == nil {
+		t.Error("a failing client was not an error")
 	}
-	if _, err := httpImageFetch(context.Background(), "http://bad host/"); err == nil {
+	if _, err := imageFetcher(respond(http.StatusOK, ""))(context.Background(), "https://bad host/"); err == nil {
 		t.Error("a URL that cannot be a request was not an error")
 	}
 }
