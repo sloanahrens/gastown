@@ -23,16 +23,28 @@ type runRig struct {
 	codesignErr error
 	unlockErr   error
 	readErr     error
+	// absent names the signing material paths the rig reports as not there.
+	absent map[string]bool
 	// renamedWhenSigned is the rename target at the moment codesign ran.
 	renamedWhenSigned string
 }
 
 func newRunRig() *runRig {
-	return &runRig{seam: newSeam(), env: map[string]string{"INSTALL_GT_SIGN_DIR": keysDir}}
+	return &runRig{
+		seam:   newSeam(),
+		env:    map[string]string{"INSTALL_GT_SIGN_DIR": keysDir},
+		absent: map[string]bool{},
+	}
 }
 
 func (r *runRig) run(args ...string) int {
 	return Run(args, &r.stderr, Installer{Files: r.files}, Signer{
+		Lstat: func(path string) (os.FileInfo, error) {
+			if r.missing || r.absent[path] {
+				return nil, os.ErrNotExist
+			}
+			return fakeInfo{}, nil
+		},
 		Exec: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			r.log("exec", name+" "+strings.Join(args, " "))
 			if name == "security" {
@@ -328,32 +340,52 @@ func TestRunSkipsSigningWhenItIsDisabled(t *testing.T) {
 	}
 }
 
-func TestRunInstallsAdHocWhenASigningPieceIsMissing(t *testing.T) {
+func TestRunInstallsAdHocWhenNoSigningFileIsPresent(t *testing.T) {
+	t.Parallel()
+	r := newRunRig()
+	r.absent[keychainPath] = true
+	r.absent[passwordPath] = true
+	if code := r.run(testSrc, testDestDir, "gt"); code != 0 {
+		t.Fatalf("Run = %d, want 0: no signing material installs ad-hoc", code)
+	}
+	if want := "install-binary: installing ad-hoc: no signing keychain at " + keychainPath + "\n"; r.stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", r.stderr.String(), want)
+	}
+	if len(r.codesign) != 0 || r.callIndex("exec security") >= 0 {
+		t.Errorf("signing ran without its material: %v", r.calls)
+	}
+	if r.renamed != testDest {
+		t.Errorf("renamed to %q, want %q", r.renamed, testDest)
+	}
+}
+
+// One signing file without the other is a broken setup: the install exits 3
+// and installs nothing, rather than going ad-hoc over a signed binary.
+func TestRunFailsClosedWhenOnlyOneSigningFileIsPresent(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		missing string
-		notice  string
+		reason  string
 	}{
-		{"no keychain", keychainPath, "no signing keychain at " + keychainPath},
-		{"no password file", passwordPath, "no password file at " + passwordPath},
+		{"no keychain", keychainPath, "no signing keychain at " + keychainPath + ", but the password file " + passwordPath + " is present"},
+		{"no password file", passwordPath, "no password file at " + passwordPath + ", but the keychain " + keychainPath + " is present"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			r := newRunRig()
-			inner := r.files.IsFile
-			r.files.IsFile = func(path string) bool { return path != tc.missing && inner(path) }
-			if code := r.run(testSrc, testDestDir, "gt"); code != 0 {
-				t.Fatalf("Run = %d, want 0: missing signing material installs ad-hoc", code)
+			r.absent[tc.missing] = true
+			if code := r.run(testSrc, testDestDir, "gt"); code != exitSigningFailed {
+				t.Fatalf("Run = %d, want %d: a half-set signing setup fails the install", code, exitSigningFailed)
 			}
-			if want := "install-binary: installing ad-hoc: " + tc.notice + "\n"; r.stderr.String() != want {
-				t.Errorf("stderr = %q, want %q", r.stderr.String(), want)
+			if want := "signing failed: " + tc.reason; !strings.Contains(r.stderr.String(), want) {
+				t.Errorf("stderr = %q, want it to name %q", r.stderr.String(), want)
 			}
 			if len(r.codesign) != 0 || r.callIndex("exec security") >= 0 {
-				t.Errorf("signing ran without its material: %v", r.calls)
+				t.Errorf("signing ran on a half-set setup: %v", r.calls)
 			}
-			if r.renamed != testDest {
-				t.Errorf("renamed to %q, want %q", r.renamed, testDest)
+			if r.renamed != "" {
+				t.Errorf("renamed to %q, want nothing installed", r.renamed)
 			}
 		})
 	}

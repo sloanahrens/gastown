@@ -44,17 +44,21 @@ func (e signingError) Unwrap() error { return ErrSigningFailed }
 
 // Signer signs a copy of a binary with the town's identity before it replaces
 // the installed one (gt-ykots). None of the signing material is required: when
-// there is none, the copy is left unsigned and installs ad-hoc exactly as it
-// would with no signing at all, and the notice says why. Once the material is
-// found, a failing step fails the install (ErrSigningFailed), so a signing that
-// is set up but broken never installs an unsigned binary over a signed one.
+// neither the keychain nor its password file is there, the copy is left unsigned
+// and installs ad-hoc exactly as it would with no signing at all, and the notice
+// says why. Once either file is there, the material must be complete, both
+// regular files, or the install fails (ErrSigningFailed), so a signing that is
+// set up but broken never installs an unsigned binary over a signed one.
 type Signer struct {
-	// Installer supplies the Files seam Sign reads and restores through, and
-	// the Warnf that receives every notice the signing steps do not fail for.
+	// Installer supplies the Files seam Sign restores through, and the Warnf
+	// that receives every notice the signing steps do not fail for.
 	Installer Installer
 	// Exec runs a command and returns its combined output and its error. nil
 	// runs it with os/exec, with no stdin, so the command reads /dev/null.
 	Exec func(ctx context.Context, name string, args ...string) ([]byte, error)
+	// Lstat reports what is at a material path without following a symlink, so
+	// a symlink is found as itself and not as its target; nil is os.Lstat.
+	Lstat func(path string) (os.FileInfo, error)
 	// ReadFile reads the password file; nil is os.ReadFile.
 	ReadFile func(path string) ([]byte, error)
 	// Getenv reads the INSTALL_* settings and GT_TOWN_ROOT; nil is os.Getenv.
@@ -75,13 +79,14 @@ type Signer struct {
 // restores tmp from src before it returns, so the caller installs either the
 // signed copy or the unsigned one.
 //
-// With no signing material the step is skipped: one notice and a nil return,
-// which installs ad-hoc. Once the material is found, every failing step returns
-// ErrSigningFailed with the reason, and tmp holds the source's bytes or nothing
-// is installed. A restore that failed is returned as it is, not as a signing
-// failure, and tmp is then neither the signed copy nor the source. The caller
-// must not install it either way. INSTALL_BINARY_SIGN=0 skips the step entirely,
-// with no command run.
+// With neither the keychain nor its password file present the step is skipped:
+// one notice and a nil return, which installs ad-hoc. With either one present,
+// the material must be two regular files, and every failing step, a missing or
+// non-regular file included, returns ErrSigningFailed with the reason, and tmp
+// holds the source's bytes or nothing is installed. A restore that failed is
+// returned as it is, not as a signing failure, and tmp is then neither the
+// signed copy nor the source. The caller must not install it either way.
+// INSTALL_BINARY_SIGN=0 skips the step entirely, with no command run.
 func (s Signer) Sign(tmp, src, name string) error {
 	if s.getenv("INSTALL_BINARY_SIGN") == "0" {
 		return nil
@@ -97,13 +102,29 @@ func (s Signer) Sign(tmp, src, name string) error {
 	if identity == "" {
 		identity = defaultSignIdentity
 	}
-	if !s.Installer.Files.isFile(keychain) {
+	keyInfo, hasKeychain, err := s.material(keychain)
+	if err != nil {
+		return signingError{"cannot inspect " + keychain}
+	}
+	passInfo, hasPassword, err := s.material(passwordFile)
+	if err != nil {
+		return signingError{"cannot inspect " + passwordFile}
+	}
+	if !hasKeychain && !hasPassword {
 		s.adHoc("no signing keychain at " + keychain)
 		return nil
 	}
-	if !s.Installer.Files.isFile(passwordFile) {
-		s.adHoc("no password file at " + passwordFile)
-		return nil
+	if !hasKeychain {
+		return signingError{"no signing keychain at " + keychain + ", but the password file " + passwordFile + " is present"}
+	}
+	if !hasPassword {
+		return signingError{"no password file at " + passwordFile + ", but the keychain " + keychain + " is present"}
+	}
+	if !keyInfo.Mode().IsRegular() {
+		return signingError{keychain + " is not a regular file"}
+	}
+	if !passInfo.Mode().IsRegular() {
+		return signingError{passwordFile + " is not a regular file"}
 	}
 	limit, err := s.timeout()
 	if err != nil {
@@ -215,6 +236,27 @@ func (s Signer) run(ctx context.Context, name string, args ...string) ([]byte, e
 		return s.Exec(ctx, name, args...)
 	}
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// material reports whether anything is at path and what it is, without
+// following a symlink. A failure other than a missing entry is an error, never
+// absence, so material that cannot be inspected does not count as none.
+func (s Signer) material(path string) (os.FileInfo, bool, error) {
+	info, err := s.lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return info, true, nil
+}
+
+func (s Signer) lstat(path string) (os.FileInfo, error) {
+	if s.Lstat != nil {
+		return s.Lstat(path)
+	}
+	return os.Lstat(path)
 }
 
 func (s Signer) readFile(path string) ([]byte, error) {
