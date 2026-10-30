@@ -130,6 +130,17 @@ func TestResolvePrecedence(t *testing.T) {
 			want:  "/home/op/go/bin/om",
 		},
 		{
+			name:  "sign identity: INSTALL_OM_SIGN_IDENTITY beats the default",
+			env:   map[string]string{envSignIdent: "env-identity"},
+			field: func(c Config) string { return c.SignIdentity },
+			want:  "env-identity",
+		},
+		{
+			name:  "sign identity: the default is gastown-dev-unattended",
+			field: func(c Config) string { return c.SignIdentity },
+			want:  "gastown-dev-unattended",
+		},
+		{
 			name:  "town: GT_TOWN_ROOT beats the search",
 			cwd:   "/work/rig",
 			files: []string{"/work/mayor/town.json"},
