@@ -1,6 +1,7 @@
-// Package bumpversion is the part of bump-version that touches no repository:
-// its command line, its version rule and, in the slices after gt-tpg0p.71, the
-// version-file text edits. scripts/bump-version.sh is the port's specification.
+// Package bumpversion bumps the version across the release files: it parses the
+// command line, checks the version rule, edits the version files, verifies them,
+// and runs the git steps and the install check. The command in cmd/bump-version
+// wires the real seams into it.
 package bumpversion
 
 import (

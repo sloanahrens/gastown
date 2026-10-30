@@ -38,16 +38,12 @@ type Release struct {
 // --allow-dirty was given, which stands in for the script's interactive Continue
 // anyway? prompt. A git that fails for any other reason is an error, never clean.
 func CheckTree(g Git, root string, opts Options, out io.Writer) error {
-	code, err := g.Run(root, "diff-index", "--quiet", "HEAD", "--")
+	dirty, err := isDirty(g, root)
 	if err != nil {
-		return fmt.Errorf("git diff-index: %w", err)
+		return err
 	}
-	switch code {
-	case 0:
+	if !dirty {
 		return nil
-	case dirtyExit:
-	default:
-		return fmt.Errorf("git diff-index: exit %d", code)
 	}
 	fmt.Fprintln(out, "Warning: You have uncommitted changes")
 	if opts.Commit {
@@ -57,6 +53,23 @@ func CheckTree(g Git, root string, opts Options, out io.Writer) error {
 		return &Refusal{Msg: "Error: uncommitted changes (pass --allow-dirty to continue over them)"}
 	}
 	return nil
+}
+
+// isDirty reports whether the tree, or only paths when any are given, differs from
+// HEAD. A git that fails for any other reason is an error, never a clean tree.
+func isDirty(g Git, root string, paths ...string) (bool, error) {
+	args := append([]string{"diff-index", "--quiet", "HEAD", "--"}, paths...)
+	code, err := g.Run(root, args...)
+	if err != nil {
+		return false, fmt.Errorf("git diff-index: %w", err)
+	}
+	switch code {
+	case 0:
+		return false, nil
+	case dirtyExit:
+		return true, nil
+	}
+	return false, fmt.Errorf("git diff-index: exit %d", code)
 }
 
 // Commit stages the version files and commits them with the release message. The
@@ -169,11 +182,14 @@ func gitRun(g Git, root string, args ...string) error {
 
 // Installer is the seam for the install step. Exec runs make install in Root and
 // the installed gt. Executable reports whether path is an executable file. Home is
-// the user's home directory, under which make install puts gt in .local/bin.
+// the user's home directory, under which make install puts gt in .local/bin. HomeErr
+// says why Home is unknown: the check then reports unverified and looks nowhere, so
+// an empty Home never sends it to a relative path in the working copy.
 type Installer struct {
 	Exec       Exec
 	Executable func(path string) bool
 	Home       string
+	HomeErr    error
 	Root       string
 }
 
@@ -218,12 +234,15 @@ func (r InstallResult) Report(out io.Writer) {
 
 // Install runs make install in Root, then reads the version the installed gt reports
 // and compares it with want. The gt it reads is $Home/.local/bin/gt when that is
-// executable, else the gt on PATH, as the script does. The result says whether the
-// versions match, differ, or could not be read; the caller reports it. A failed make
-// install is an error whose text is fixed, so make's output never reaches the message.
+// executable, else the gt on PATH. The result says whether the versions match, differ,
+// or could not be read; the caller reports it. A failed make install is an error whose
+// text is fixed, so make's output never reaches the message.
 func (in Installer) Install(want string) (InstallResult, error) {
 	if _, _, err := in.Exec.Run(in.Root, nil, "make", "install"); err != nil {
 		return InstallResult{}, errors.New("make install failed")
+	}
+	if in.HomeErr != nil {
+		return InstallResult{Status: Unverified, Want: want, Reason: "home directory unknown: " + in.HomeErr.Error()}, nil
 	}
 
 	gt := "gt"
