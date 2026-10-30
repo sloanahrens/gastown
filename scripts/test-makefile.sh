@@ -15,8 +15,6 @@ bash -n scripts/lib/install-gt-lib.sh
 bash -n scripts/install-om.sh
 bash scripts/install-om_test.sh
 bash scripts/install-local_test.sh
-bash -n scripts/docs-lint.sh
-bash scripts/docs-lint_test.sh
 bash -n scripts/deep-review.sh
 bash scripts/deep-review_test.sh
 bash scripts/flake-sweep_test.sh

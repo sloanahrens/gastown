@@ -1,3 +1,0 @@
-# Polecat
-
-fine

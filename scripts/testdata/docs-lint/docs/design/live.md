@@ -1,3 +1,0 @@
-# Live architecture
-
-Still true.

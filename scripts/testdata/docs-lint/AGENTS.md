@@ -1,3 +1,0 @@
-# Agents
-
-Short and fine.

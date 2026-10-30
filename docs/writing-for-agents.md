@@ -11,7 +11,7 @@ Each rule is one checkable line. The paragraph under it says why. Rule ids are s
 - **Historical**: every file under `docs/plans` and `docs/research`, and any `docs/design` file whose first non-blank line is a `> Status:` header.
 - **Go**: doc comments on exported identifiers and inline comments in non-test `.go` files.
 
-The authoritative file lists are `scripts/docs-lint.sh --list <tier>`. This section describes them; it does not duplicate them.
+The authoritative file lists are `go run ./cmd/docs-lint --list <tier>`. This section describes them; it does not duplicate them.
 
 ## Rules
 
@@ -49,7 +49,7 @@ Adding feels safe and removing feels risky, so stale layers settle until the liv
 
 **R6. An agent-facing file over 1,500 words is split by branch, or its reference material moves behind a pointer.**
 
-Attention thins across a long file. Inline what every reader needs; push behind a pointer what only some readers reach. (`scripts/docs-lint.sh` gates the whole agent-facing tier, formulas included, at 1,500. Its `CEILING_EXEMPT` list names the few step-delivered formulas allowed over, each with its reason.)
+Attention thins across a long file. Inline what every reader needs; push behind a pointer what only some readers reach. (`go run ./cmd/docs-lint` gates the whole agent-facing tier, formulas included, at 1,500. Its `ceilingExempt` list (internal/docslint/tiers.go) names the few step-delivered formulas allowed over, each with its reason.)
 
 ### Completion criterion
 
@@ -81,7 +81,7 @@ Callers read the contract. Implementation detail belongs in the body.
 
 **R12. A historical doc starts with `> Status: historical (<YYYY-MM>). <Superseded by | Merged in | Abandoned>: <ref>. Not maintained.`**
 
-The header is what stops an agent citing a 900-line proposal as current truth, and it is the classifier `scripts/docs-lint.sh` uses for the tier.
+The header is what stops an agent citing a 900-line proposal as current truth, and it is the classifier `go run ./cmd/docs-lint` uses for the tier.
 
 ### The test
 

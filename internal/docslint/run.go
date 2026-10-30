@@ -44,7 +44,7 @@ type check struct {
 	run  func(FS, int) ([]Finding, error)
 }
 
-// checks lists the rules in the order the script ran them.
+// checks lists the rules in the order Run runs them and reports their errors.
 func checks() []check {
 	return []check{
 		{"dead links", func(f FS, _ int) ([]Finding, error) { return CheckDeadLinks(f) }},
@@ -158,7 +158,7 @@ func runChecks(fsys FS, ceiling int, stdout, stderr io.Writer) int {
 }
 
 // sortFindings orders findings by path bytewise, then by line number, then by
-// the rest of the line bytewise, as the script's `sort -t: -k1,1 -k2,2n` did.
+// the rest of the line bytewise, so the order is the same on every run and host.
 func sortFindings(findings []Finding) {
 	sort.SliceStable(findings, func(i, j int) bool {
 		a, b := findings[i], findings[j]
@@ -198,7 +198,7 @@ type request struct {
 }
 
 // parseArgs turns the words after the command's name into a request, or the
-// usage error that refuses them. Anything the script did not take is refused
+// usage error that refuses them. Anything that is not a documented option is refused
 // rather than ignored.
 func parseArgs(args []string) (request, error) {
 	if len(args) == 0 {

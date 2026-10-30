@@ -21,7 +21,6 @@ var trackedShellTests = []string{
 	"deploy/k8s/render-policy_test.sh",
 	"scripts/check-install-path_test.sh",
 	"scripts/deep-review_test.sh",
-	"scripts/docs-lint_test.sh",
 	"scripts/flake-sweep_test.sh",
 	"scripts/forgejo-cutover_test.sh",
 	"scripts/forgejo-probe_test.sh",

@@ -1,6 +1,6 @@
-// Package docslint is the Go port of scripts/docs-lint.sh: the tier lists the
-// doc audit slices from, and the checks that run over them. The rules the
-// checks enforce are docs/writing-for-agents.md.
+// Package docslint holds the tier lists the weekly doc audit slices from and the
+// checks that run over them, and Run, the docs-lint command. The rules the
+// checks enforce are in docs/writing-for-agents.md.
 package docslint
 
 import (
