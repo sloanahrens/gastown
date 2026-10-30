@@ -78,14 +78,14 @@ func isCrewActor(actor string) bool {
 }
 
 // crewActorFromEnv is the identity a crew submission's bead writes carry, as
-// far as the session's environment names it: BD_ACTOR (what a spawned session
-// exports), then BEADS_ACTOR (what bd itself resolves an author from), then
-// the crew member GT_ROLE names. "" means the session names no agent, and the
-// caller keeps the committer git user.name — the human's identity when the
-// human runs gt done by hand, which the landing worker refuses to land
-// (gt-i817y).
+// far as the session's environment names it: BEADS_ACTOR (the session's own
+// identity, what bd resolves an author from), then BD_ACTOR (what a spawned
+// session exports), then the crew member GT_ROLE names. "" means the session
+// names no agent, and the caller keeps the committer git user.name — the
+// human's identity when the human runs gt done by hand, which the landing
+// worker refuses to land (gt-i817y).
 func crewActorFromEnv(getenv func(string) string) string {
-	for _, key := range []string{"BD_ACTOR", "BEADS_ACTOR"} {
+	for _, key := range []string{"BEADS_ACTOR", "BD_ACTOR"} {
 		if actor := strings.TrimSpace(getenv(key)); actor != "" {
 			return actor
 		}
@@ -145,14 +145,9 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 	}
 
 	g := git.NewGit(gitRoot)
-	actor := crewActorFromEnv(getenv)
-	if actor == "" {
-		// Crew have no seat identity; the bead records the committer.
+	gitUserName := func() string {
 		name, _ := g.ConfigGet("user.name")
-		actor = strings.TrimSpace(name)
-		if actor == "" {
-			return fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
-		}
+		return name
 	}
 
 	branch, err := g.CurrentBranch()
@@ -178,16 +173,11 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		rigName = beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(issueID))
 	}
 
-	r := &doneRun{
-		g:             g,
-		cwd:           gitRoot,
-		townRoot:      townRoot,
-		rigName:       rigName,
-		sender:        actor,
-		branch:        branch,
-		issueID:       issueID,
-		defaultBranch: "main",
+	r, err := newCrewDoneRun(getenv, gitUserName, gitRoot, townRoot, rigName, branch, issueID)
+	if err != nil {
+		return err
 	}
+	r.g = g
 	if rigName != "" {
 		rigPath := filepath.Join(townRoot, rigName)
 		rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
@@ -206,9 +196,9 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 			// Route from the town, not the worktree: a crew worktree's own
 			// .beads may be the source repo's, not the town's.
 			// bd records the submission's label and notes as written by
-			// actor, the session's own identity (crewActorFromEnv).
+			// the run's sender, the session's own identity (gt-i817y).
 			info, err := resolveSubmitSourceIssueIn(townRoot, id, func(cwd, beadsDir string) beads.Client {
-				return beads.NewWithBeadsDir(cwd, beadsDir).ActingAs(actor)
+				return beads.NewWithBeadsDir(cwd, beadsDir).ActingAs(r.sender)
 			})
 			if err != nil {
 				return nil, nil, err
@@ -234,6 +224,30 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		enqueueNudge: nudge.Enqueue,
 	}
 	return submitCrewForLanding(r)
+}
+
+// newCrewDoneRun is the run a crew submission runs as. Its sender is the
+// session's agent identity (crewActorFromEnv); only a session naming none
+// falls back to the git committer, the human's identity when the human runs
+// gt done by hand (gt-i817y). gitUserName is read only on that fallback.
+func newCrewDoneRun(getenv func(string) string, gitUserName func() string, gitRoot, townRoot, rigName, branch, issueID string) (*doneRun, error) {
+	actor := crewActorFromEnv(getenv)
+	if actor == "" {
+		// Crew have no seat identity; the bead records the committer.
+		actor = strings.TrimSpace(gitUserName())
+		if actor == "" {
+			return nil, fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
+		}
+	}
+	return &doneRun{
+		cwd:           gitRoot,
+		townRoot:      townRoot,
+		rigName:       rigName,
+		sender:        actor,
+		branch:        branch,
+		issueID:       issueID,
+		defaultBranch: "main",
+	}, nil
 }
 
 // polecatAssigneeSeat maps a bead assignee to the tmux session of the polecat
