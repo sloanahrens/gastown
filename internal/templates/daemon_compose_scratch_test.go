@@ -236,13 +236,16 @@ func TestRenderDaemonCompose_ScratchSharesNoNameWithTheLiveRender(t *testing.T) 
 	}
 }
 
-// The scratch daemon's command is the entrypoint's flag, built from the one
-// constant the entrypoint registers, so the two cannot drift apart. The live
-// daemon passes nothing, so a live start never asks for an install.
-func TestRenderDaemonCompose_ScratchPassesTheScratchTownFlagAndTheLiveOneDoesNot(t *testing.T) {
+// The scratch daemon's command carries the entrypoint's flags, each built from
+// the one constant the entrypoint registers, so the two cannot drift apart. It
+// names the scratch project's own Dolt service, so the install writes that
+// server's endpoint instead of starting one inside the daemon container. The
+// live daemon passes nothing, so a live start never asks for an install.
+func TestRenderDaemonCompose_ScratchPassesTheEntrypointFlagsAndTheLiveOneDoesNot(t *testing.T) {
 	t.Parallel()
 	_, scratch := render(t, scratchSpec())
-	if got, want := scratch.Services["daemon"].Command, []string{"--" + config.ScratchTownFlag}; !slices.Equal(got, want) {
+	if got, want := scratch.Services["daemon"].Command,
+		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService}; !slices.Equal(got, want) {
 		t.Errorf("scratch daemon command = %q, want %q", got, want)
 	}
 
@@ -250,8 +253,21 @@ func TestRenderDaemonCompose_ScratchPassesTheScratchTownFlagAndTheLiveOneDoesNot
 	if got := live.Services["daemon"].Command; len(got) != 0 {
 		t.Errorf("live daemon command = %q, want none", got)
 	}
-	if strings.Contains(liveOut, config.ScratchTownFlag) {
-		t.Errorf("live render asks for a scratch install:\n%s", liveOut)
+	for _, flag := range []string{config.ScratchTownFlag, config.DoltHostFlag} {
+		if strings.Contains(liveOut, flag) {
+			t.Errorf("live render carries %q, which only the scratch project passes:\n%s", flag, liveOut)
+		}
+	}
+}
+
+// The forge golden is a second scratch spec, and its daemon command carries the
+// Dolt host too: the forge adds services and changes nothing about the install.
+func TestRenderDaemonCompose_ScratchForgePassesTheDoltHost(t *testing.T) {
+	t.Parallel()
+	_, f := render(t, forgeSpec())
+	if got, want := f.Services["daemon"].Command,
+		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService}; !slices.Equal(got, want) {
+		t.Errorf("scratch forge daemon command = %q, want %q", got, want)
 	}
 }
 
@@ -373,7 +389,11 @@ func TestRenderDaemonCompose_ScratchPassesTheOMTokenFile(t *testing.T) {
 	if out != string(golden) {
 		t.Errorf("rendered file differs from testdata/daemon-compose-scratch-omtoken.golden.yml\ngot:\n%s\nwant:\n%s", out, golden)
 	}
-	want := []string{"--" + config.ScratchTownFlag, "--" + config.OMTokenFileFlag, "/run/secrets/om-token"}
+	want := []string{
+		"--" + config.ScratchTownFlag,
+		"--" + config.DoltHostFlag, templates.ScratchDoltService,
+		"--" + config.OMTokenFileFlag, "/run/secrets/om-token",
+	}
 	if got := parsed.Services["daemon"].Command; !slices.Equal(got, want) {
 		t.Errorf("scratch daemon command = %q, want %q", got, want)
 	}

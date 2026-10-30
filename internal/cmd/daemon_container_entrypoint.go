@@ -40,6 +40,11 @@ const (
 type entrypointFlags struct {
 	scratch     bool   // --scratch-town
 	omTokenFile string // --om-token-file
+	// doltHost is --dolt-host, the Dolt server the scratch town's install uses,
+	// and doltHostSet says the flag was given: an empty value and no flag are
+	// not the same thing, since an empty host is refused.
+	doltHost    string
+	doltHostSet bool
 }
 
 // newDaemonContainerEntrypointCmd builds the command over run, which receives
@@ -61,9 +66,10 @@ turns into a fresh town:
     refuse.
   - mayor/town.json absent, --scratch-town not given: refuse.
   - mayor/town.json absent, --scratch-town given: run 'gt install <townRoot>
-    --git' once, only when the town root is a mount point, holds the scratch
-    marker that internal/config defines and the scratch runbook creates, and
-    holds nothing else; then exec 'gt daemon run'. Otherwise refuse.
+    --git' once, with --dolt-host <host> when that flag is given, only when the
+    town root is a mount point, holds the scratch marker that internal/config
+    defines and the scratch runbook creates, and holds nothing else; then exec
+    'gt daemon run'. Otherwise refuse.
   - an install-incomplete marker (see below) present, whatever else is there:
     refuse.
 
@@ -74,6 +80,11 @@ kept, the incomplete marker stays, and the command refuses; so does every later
 start, until the operator removes the incomplete marker (and anything the
 install left) from the host side of the scratch directory.
 
+With --dolt-host, the scratch town's install is given that host as its own
+--dolt-host, so the scratch town uses the Dolt server the scratch project runs
+instead of a local one. The flag is accepted only with --scratch-town, and an
+empty host is refused: the live project's command line stays empty.
+
 With --om-token-file, the file's contents (trimmed) become
 CLAUDE_CODE_OAUTH_TOKEN in the daemon's environment; an unreadable or empty file
 refuses. A container that sets ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is
@@ -82,7 +93,8 @@ refused, since either outranks the token and bills API rates.
 Every check runs before the first command, so a refusal runs nothing.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags.doltHostSet = cmd.Flags().Changed(config.DoltHostFlag)
 			return run(flags)
 		},
 	}
@@ -90,6 +102,8 @@ Every check runs before the first command, so a refusal runs nothing.`,
 		"Install a town at the town root when it holds only the scratch marker")
 	cmd.Flags().StringVar(&flags.omTokenFile, containerOMTokenFileFlag, "",
 		"Read the om subscription token from this file and give it to the daemon; the file's mode is not checked")
+	cmd.Flags().StringVar(&flags.doltHost, config.DoltHostFlag, "",
+		"Give this Dolt host to the scratch town's install; accepted only with --"+config.ScratchTownFlag)
 	return cmd
 }
 
@@ -116,6 +130,11 @@ type containerEntrypoint struct {
 	// omTokenFile is --om-token-file: the file the om subscription token is read
 	// from; "" loads no token.
 	omTokenFile string
+	// doltHost is --dolt-host, the Dolt server the scratch town's install uses;
+	// doltHostSet says the flag was given, since an empty host is refused and
+	// so must be told apart from no host at all.
+	doltHost    string
+	doltHostSet bool
 }
 
 // entryKind is what a path is, as Lstat reports it. A symbolic link is
@@ -144,6 +163,8 @@ func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 		remove:      os.RemoveAll,
 		scratch:     flags.scratch,
 		omTokenFile: flags.omTokenFile,
+		doltHost:    flags.doltHost,
+		doltHostSet: flags.doltHostSet,
 	})
 }
 
@@ -213,6 +234,11 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 		return fmt.Errorf("gt daemon container-entrypoint runs only in container mode (%s=%s); nothing was started",
 			config.ContainerModeEnv, config.SupervisorContainer)
 	}
+	// The Dolt host belongs to the scratch town's install alone, and an empty
+	// one names nothing: both are refused here, before any command runs.
+	if err := e.refuseDoltHost(); err != nil {
+		return err
+	}
 	// An API credential outranks the subscription token and bills API rates, so
 	// a container that carries one never starts: this runs before anything else
 	// does, and runs nothing.
@@ -253,6 +279,25 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	}
 	if err := e.exec([]string{self, "daemon", "run"}, daemonEnv); err != nil {
 		return fmt.Errorf("exec gt daemon run: %w", err)
+	}
+	return nil
+}
+
+// refuseDoltHost refuses a --dolt-host that no install would act on. Only the
+// scratch town's install takes a Dolt host, so one given without --scratch-town
+// is a mistake; and an empty host names nothing, which the flag alone cannot
+// tell from no host at all. A host of spaces is empty too, as `gt install`
+// reads it. Both refusals run before the first command.
+func (e containerEntrypoint) refuseDoltHost() error {
+	if !e.doltHostSet {
+		return nil
+	}
+	if strings.TrimSpace(e.doltHost) == "" {
+		return fmt.Errorf("--%s is empty; the scratch town's install needs the Dolt server's host, so nothing was started", config.DoltHostFlag)
+	}
+	if !e.scratch {
+		return fmt.Errorf("--%s is given without --%s; only the scratch town's install takes a Dolt host, and the live project's command line stays empty, so nothing was started",
+			config.DoltHostFlag, config.ScratchTownFlag)
 	}
 	return nil
 }
@@ -346,7 +391,7 @@ func (e containerEntrypoint) installScratchTown(self, townRoot string) error {
 		return fmt.Errorf("create the %s marker under %s: %w; nothing was installed or started",
 			config.ScratchInstallIncompleteMarker, townRoot, err)
 	}
-	if err := e.run([]string{self, "install", townRoot, "--git"}); err != nil {
+	if err := e.run(e.installArgv(self, townRoot)); err != nil {
 		return e.undoScratchInstall(townRoot, fmt.Errorf("install the scratch town at %s: %w", townRoot, err))
 	}
 	if err := e.remove(incomplete); err != nil {
@@ -354,6 +399,19 @@ func (e containerEntrypoint) installScratchTown(self, townRoot string) error {
 			"the next start refuses until it is removed, and nothing was started", townRoot, config.ScratchInstallIncompleteMarker, err)
 	}
 	return nil
+}
+
+// installArgv is the install the scratch town gets: the town root and --git
+// always, and --dolt-host with its value when the flag was given, so the town
+// writes that server's endpoint instead of starting a Dolt of its own. The
+// flag's name is the one the entrypoint registers and the render passes
+// (config.DoltHostFlag), so the two cannot drift.
+func (e containerEntrypoint) installArgv(self, townRoot string) []string {
+	argv := []string{self, "install", townRoot, "--git"}
+	if e.doltHostSet {
+		argv = append(argv, "--"+config.DoltHostFlag, e.doltHost)
+	}
+	return argv
 }
 
 // undoScratchInstall removes, on a best effort, every entry the failed install

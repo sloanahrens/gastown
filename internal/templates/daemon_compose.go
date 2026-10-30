@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -339,21 +340,27 @@ var scratchOperatorNote = []string{
 }
 
 // scratchDaemonCommand is the daemon's command in the scratch project: the
-// operator note, then the flags the container entrypoint is passed: --scratch-town,
-// the one way a container asks for its scratch town's install, and, when
-// omTokenFile is set, --om-token-file <path> beside it. The entrypoint is the
-// image's ENTRYPOINT, so the command carries its flags alone. The live project
-// passes nothing.
+// operator note, then the flags the container entrypoint is passed. --scratch-town
+// is the one way a container asks for its scratch town's install, and
+// --dolt-host ScratchDoltService rides beside it, so the install writes the
+// endpoint of the Dolt server this project runs rather than starting one inside
+// the daemon container. When omTokenFile is set, --om-token-file <path> follows
+// them. The entrypoint is the image's ENTRYPOINT, so the command carries its
+// flags alone. The live project passes nothing.
 func scratchDaemonCommand(omTokenFile string) string {
 	var b strings.Builder
 	for _, line := range scratchOperatorNote {
 		b.WriteString("    # " + line + "\n")
 	}
-	if omTokenFile == "" {
-		fmt.Fprintf(&b, "    command: [%q]\n", "--"+config.ScratchTownFlag)
-		return b.String()
+	argv := []string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, ScratchDoltService}
+	if omTokenFile != "" {
+		argv = append(argv, "--"+config.OMTokenFileFlag, composeLiteral(omTokenFile))
 	}
-	fmt.Fprintf(&b, "    command: [%q, %q, %q]\n", "--"+config.ScratchTownFlag, "--"+config.OMTokenFileFlag, composeLiteral(omTokenFile))
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		quoted[i] = strconv.Quote(arg)
+	}
+	fmt.Fprintf(&b, "    command: [%s]\n", strings.Join(quoted, ", "))
 	return b.String()
 }
 
