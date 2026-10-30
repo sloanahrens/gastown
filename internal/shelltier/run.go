@@ -100,7 +100,7 @@ func runOne(ctx context.Context, cfg Config, e Entry) (passed, timedOut bool) {
 }
 
 // logName is the stem of a script's log file and TMPDIR: its path with each
-// slash replaced by an underscore, the names scripts/tier-sweep.sh writes.
+// slash replaced by an underscore, the names the tier sweep writes.
 func logName(path string) string {
 	return "shell-" + strings.ReplaceAll(path, "/", "_")
 }

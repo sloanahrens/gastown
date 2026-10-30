@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
+	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
 // The bead the tier sweep files for a red tier is born shaped: the spec
@@ -35,7 +36,7 @@ const (
 	tierSweepBeadSize = "One worker, one landing."
 
 	// tierSweepGoBuildTag is the build tag the tagged Go tiers are built with
-	// (scripts/tier-sweep.sh runs `go test -tags integration` for the tagged
+	// (cmd/tier-sweep runs `go test -tags integration` for the tagged
 	// integration list and the race tier).
 	tierSweepGoBuildTag = "integration"
 
@@ -196,6 +197,11 @@ func tierSweepUnitLogPath(logDir, mtier, unit string) string {
 	if strings.TrimSpace(logDir) == "" || !tierSweepUnitIsName(unit) {
 		return ""
 	}
+	// A Go tier's package log is named by tiersweep.LogName; the shell
+	// tier's script log is "shell-" plus its path, read as the same _ form.
+	if mtier != tiersweep.TierShell {
+		return filepath.Join(logDir, tiersweep.LogName(mtier, unit))
+	}
 	base := strings.ReplaceAll(strings.TrimPrefix(unit, "./"), "/", "_")
 	return filepath.Join(logDir, mtier+"-"+base+".log")
 }
@@ -248,12 +254,11 @@ func tierSweepFindingTest(line string) (string, bool) {
 // order and deduplicated. The whole line is kept, because the bead quotes it;
 // the test name a -run filter uses is the one tierSweepFindingTest names.
 //
-// Every line of the log belongs to the unit the log is named for: the script
-// writes one unit's own output to its own file
-// (scripts/tier-sweep.sh: "$TIER_SWEEP_LOGDIR/$tier-<pkg>.log"). Nothing in a
-// line's spelling of a package is parsed or compared, so a finding cannot be
-// lost to a spelling this daemon does not know, and cannot be handed to another
-// unit either (gt-j6vlz).
+// Every line of the log belongs to the unit the log is named for: the sweep
+// writes one unit's own output to its own file (tiersweep.LogName: the tier,
+// the package with _ for /, then a hash). Nothing in a line's spelling of a
+// package is parsed or compared, so a finding cannot be lost to a spelling this
+// daemon does not know, and cannot be handed to another unit either (gt-j6vlz).
 func tierSweepSlowcheckFindings(log string) []string {
 	var lines []string
 	for _, line := range strings.Split(log, "\n") {
@@ -537,9 +542,9 @@ func tierSweepSectionBody(section, tier, subject, sha, item string) string {
 	case "constraints":
 		return fmt.Sprintf("- Fix the failure in %s; the sweep closes this bead by itself once the tier is green.\n", subject) +
 			"- Re-run with the narrow filter below, not the whole package: the polecat test guard refuses an unfiltered run of internal/cmd, internal/daemon and internal/polecat.\n" +
-			"- Leave scripts/tier-sweep.sh, its TIER_SWEEP_SKIP list and the sweep's schedule alone."
+			"- Leave cmd/tier-sweep, its TIER_SWEEP_SKIP list and the sweep's schedule alone."
 	case "out of scope":
-		return "The other tiers, the sweep's own scheduling, and any change to scripts/tier-sweep.sh."
+		return "The other tiers, the sweep's own scheduling, and any change to cmd/tier-sweep."
 	case "gate":
 		return "make gate, plus the check in ## Acceptance."
 	case "size":

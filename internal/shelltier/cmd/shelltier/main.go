@@ -102,7 +102,7 @@ func Main(args []string, out io.Writer, env Env) int {
 }
 
 // announce wraps exec so each script's line is written to w before the script
-// runs, the way scripts/tier-sweep.sh names each script it starts.
+// runs, the way the tier sweep names each script it starts.
 func announce(w io.Writer, exec shelltier.Exec) shelltier.Exec {
 	return func(ctx context.Context, c shelltier.Command) (int, error) {
 		fmt.Fprintf(w, "tier-sweep: shell %s ...\n", scriptPath(c))

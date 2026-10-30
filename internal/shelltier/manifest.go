@@ -65,7 +65,7 @@ func hasReason(s string) bool {
 }
 
 // Manifest lists every shell test in the order the runner runs them: the
-// scripts/test-makefile.sh order first, then the four tests tier-sweep.sh adds.
+// scripts/test-makefile.sh order first, then the tests the shell tier adds.
 func Manifest() []Entry {
 	return []Entry{
 		{Path: "scripts/check-install-path_test.sh", StubsGo: "none: names no go command"},
@@ -74,7 +74,6 @@ func Manifest() []Entry {
 		{Path: "scripts/deep-review_test.sh", StubsGo: "none: go test appears only in fixture text"},
 		{Path: "scripts/flake-sweep_test.sh", StubsGo: "stub: scripts/flake-sweep_test.sh:25 puts a fake go on PATH"},
 		{Path: "scripts/gate-vs-load_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/tier-sweep_test.sh", StubsGo: "stub: scripts/tier-sweep_test.sh:142 puts a fake go on PATH"},
 		{Path: "scripts/forgejo-provision_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/forgejo-probe_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/forgejo-resync_test.sh", StubsGo: "none: names no go command"},
@@ -85,7 +84,7 @@ func Manifest() []Entry {
 		{Path: "scripts/resource-sampler_test.sh", StubsGo: "none: go test appears only in a ps fixture line"},
 		{Path: "scripts/makefile-gate_test.sh", StubsGo: "stub: scripts/makefile-gate_test.sh:504 puts a fake go on PATH"},
 		{Path: ".githooks/pre-push_test.sh", StubsGo: "none: names no go command"},
-		{Path: "scripts/post-land-shell_test.sh", StubsGo: "none: stubs tier-sweep.sh, so no go runs"},
+		{Path: "scripts/post-land-shell_test.sh", StubsGo: "stub: scripts/post-land-shell_test.sh puts a fake go on PATH"},
 		{Path: "scripts/town_metrics_test.sh", StubsGo: "none: names no go command"},
 	}
 }

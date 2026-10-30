@@ -38,7 +38,9 @@ cmd/install-binary/**
 internal/uninstallgt/**
 cmd/uninstall-gt/**
 scripts/post-land-shell.sh
-scripts/tier-sweep.sh
+cmd/tier-sweep/**
+internal/tiersweep/**
+internal/shelltier/**
 Makefile
 .om.json
 .golangci.yml

@@ -2,7 +2,7 @@
 # post-land-shell.sh — the post-land check (merge_queue.post_land_command).
 #
 # The landing gate (make gate) runs every Go test on the merged tree; what it
-# does not run is the shell tier (scripts/tier-sweep.sh shell). Those tests
+# does not run is the shell tier (go run ./cmd/tier-sweep shell). Those tests
 # exercise shell scripts, plugins, the Makefile and the git hooks against
 # stubs; no Go change can move their verdict. Running them after every
 # landing cost 3-8 minutes a time, and a pending upgrade restart waits for
@@ -21,18 +21,20 @@
 #
 # INPUTS is every path a shell-tier verdict can move on, internal/cmd/
 # scheduler_integration_test.go included: scripts/makefile-gate_test.sh reads
-# schedulerTownSlots out of it (gt-tqxdd). internal/land's ShellTierInputs
-# mirrors this line — the post-land revert reads it — and
-# TestShellTierInputsMatchPostLandScript fails if the two drift.
+# schedulerTownSlots out of it (gt-tqxdd). internal/shelltier/ is the runner
+# the tier execs, and cmd/tier-sweep and internal/tiersweep are the command
+# and package that run it, so a change to any of them moves the verdict too.
+# internal/land's ShellTierInputs mirrors this line — the post-land revert
+# reads it — and TestShellTierInputsMatchPostLandScript fails if the two drift.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
 WINDOW=${POST_LAND_SHELL_WINDOW:-2 hours}
-INPUTS='^(scripts/|plugins/|\.githooks/|Makefile$|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)'
+INPUTS='^(scripts/|plugins/|\.githooks/|Makefile$|internal/shelltier/|cmd/tier-sweep/|internal/tiersweep/|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)'
 
 if ! changed=$(git log --first-parent --since="$WINDOW" --name-only --format= HEAD 2>/dev/null); then
   echo "post-land-shell: cannot read main's history; running the shell tier"
-  exec bash scripts/tier-sweep.sh shell
+  exec go run ./cmd/tier-sweep shell
 fi
 hits=$(printf '%s\n' "$changed" | grep -E "$INPUTS" | sort -u)
 if [ -z "$hits" ]; then
@@ -41,4 +43,4 @@ if [ -z "$hits" ]; then
 fi
 echo "post-land-shell: shell-test inputs changed on main in the last $WINDOW:"
 printf '%s\n' "$hits" | head -20 | sed 's/^/  /'
-exec bash scripts/tier-sweep.sh shell
+exec go run ./cmd/tier-sweep shell

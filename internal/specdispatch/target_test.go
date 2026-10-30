@@ -38,8 +38,8 @@ func TestLintChecksTheConstraintsPathsAgainstTheTargetBranch(t *testing.T) {
 	}{
 		{
 			name:   "a path the branch holds",
-			body:   "Change internal/cmd/spec.go and scripts/tier-sweep.sh.",
-			target: targetOf("internal/cmd/spec.go", "scripts/tier-sweep.sh"),
+			body:   "Change internal/cmd/spec.go and scripts/deploy.sh.",
+			target: targetOf("internal/cmd/spec.go", "scripts/deploy.sh"),
 		},
 		{
 			name:    "a path the branch does not hold",
@@ -164,7 +164,7 @@ func TestLintChecksTheConstraintsPathsAgainstTheTargetBranch(t *testing.T) {
 			if !strings.Contains(v.Reason, tc.missing) {
 				t.Errorf("Reason = %q, want the path %q named", v.Reason, tc.missing)
 			}
-			for _, clean := range []string{"internal/cmd/spec.go:", "scripts/tier-sweep.sh"} {
+			for _, clean := range []string{"internal/cmd/spec.go:", "scripts/deploy.sh"} {
 				if clean != tc.missing && strings.Contains(v.Reason, clean) {
 					t.Errorf("Reason = %q, names %q, which the branch holds", v.Reason, clean)
 				}

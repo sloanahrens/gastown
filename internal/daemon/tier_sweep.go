@@ -80,11 +80,8 @@ const (
 	// whatever unit is red.
 	tierSweepShellRunner = "go run ./internal/shelltier/cmd/shelltier --all"
 
-	// tierSweepShellScriptBudget is the per-script limit the runner takes as
-	// --budget: the TIER_SWEEP_TIMEOUT default the shell tier's scripts ran
-	// under (scripts/tier-sweep.sh), 10m, which is also the runner's own
-	// default. It bounds each script. tierSweepShellBudget bounds the whole
-	// stage, and the runner does not raise either.
+	// tierSweepShellScriptBudget is the --budget passed to the shell runner: the
+	// per-script limit, 10m. The whole stage is bounded by tierSweepShellBudget.
 	tierSweepShellScriptBudget = "10m"
 
 	// tierSweepShellCommand is the Go shell stage's full command. A red shell
@@ -1489,8 +1486,8 @@ func (d *Daemon) tierSweepWriteLog(rig, tier, output string) string {
 	return path
 }
 
-// tierSweepSummaryRE matches the script's one summary line per tier
-// (scripts/tier-sweep.sh), whose elapsed time trails the log marker:
+// tierSweepSummaryRE matches the sweep's one summary line per tier
+// (cmd/tier-sweep), whose elapsed time trails the log marker:
 //
 //	tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.aB12) in 2m14s
 //
@@ -1498,13 +1495,12 @@ func (d *Daemon) tierSweepWriteLog(rig, tier, output string) string {
 // duration, still parses.
 var tierSweepSummaryRE = regexp.MustCompile(`^tier-sweep: (\S+) (GREEN|RED) passed=(\d+) failed=(\d+) skipped=(\d+)(?: failed:(.*?))?(?: \(logs ([^)]*)\))?(?: in (\S+))?\s*$`)
 
-// tierSweepUnknownTierRE matches the line scripts/tier-sweep.sh prints for a
+// tierSweepUnknownTierRE matches the line cmd/tier-sweep prints for a
 // tier it does not offer, before exiting 2 without a summary for it (gt-qgrdy).
 var tierSweepUnknownTierRE = regexp.MustCompile(`^tier-sweep: unknown tier (\S+)`)
 
-// tierSweepDeclineExit is the exit status scripts/tier-sweep.sh uses at a tier
-// it does not offer: the `*)` branch of its tier loop prints the unknown-tier
-// line and ends with `exit 2`.
+// tierSweepDeclineExit is the exit status cmd/tier-sweep returns for a tier it
+// does not offer, after printing the unknown-tier line.
 const tierSweepDeclineExit = 2
 
 // parseTierSweepUnknownTiers reads the tiers a stage's output names as tiers

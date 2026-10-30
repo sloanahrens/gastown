@@ -86,7 +86,7 @@ func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
 			continue
 		}
 		fmt.Fprintf(r.Stderr, "%s: %s %s ...\n", Name, tier, name)
-		log := filepath.Join(r.LogDir, logName(tier, name))
+		log := filepath.Join(r.LogDir, LogName(tier, name))
 		f, err := os.Create(log)
 		if err != nil {
 			// Without a log the package cannot be run, and it is not passed.
@@ -174,12 +174,13 @@ func packageName(dir, pkg string) string {
 	return "./" + dir + "/" + strings.TrimPrefix(pkg, "./")
 }
 
-// logName is the log file for one package: the tier, the package name without
+// LogName is the log file for one package: the tier, the package name without
 // its leading ./ with each / read as _, then the first four bytes (eight hex
 // characters) of the name's sha256. The hash keeps names that read alike, such
 // as ./a/b_c and ./a_b/c, in separate files; the tier keeps a name that starts
-// with a dash from starting the file name with one.
-func logName(tier, name string) string {
+// with a dash from starting the file name with one. The daemon reads a Go
+// tier's failure log under this name (internal/daemon/tier_sweep_bead.go).
+func LogName(tier, name string) string {
 	sum := sha256.Sum256([]byte(name))
 	readable := strings.ReplaceAll(strings.TrimPrefix(name, "./"), "/", "_")
 	return fmt.Sprintf("%s-%s-%x.log", tier, readable, sum[:4])

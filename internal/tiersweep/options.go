@@ -1,7 +1,6 @@
 // Package tiersweep is the hourly tier sweep: the tiers `make gate` does not
 // run (shell, integration, race), each reported as one summary line the daemon
-// parses byte for byte. It is the Go port of scripts/tier-sweep.sh, which stays
-// until the deletion bead (gt-tpg0p.97, gt-tpg0p.104).
+// parses byte for byte.
 package tiersweep
 
 import (
@@ -33,21 +32,21 @@ const (
 	EnvTested  = "TIER_SWEEP_TESTED"
 )
 
-// The values the script supplies for a name it leaves unset.
+// The values a name takes when the environment leaves it unset.
 const (
 	// DefaultTimeout is TIER_SWEEP_TIMEOUT: the per-package go test timeout.
 	DefaultTimeout = "10m"
 	// DefaultTempDir is TMPDIR's stand-in when it is unset or empty.
 	DefaultTempDir = "/tmp"
-	// logDirPattern names the default log directory, the script's
-	// tier-sweep.XXXXXX under TMPDIR.
+	// logDirPattern names the default log directory: tier-sweep.XXXXXX under
+	// TMPDIR.
 	logDirPattern = "tier-sweep."
 )
 
 // UsageExit is the code the command exits for every refusal that is not a RED
 // tier: a tier it does not offer (reached once the tiers before it have printed
-// their summary lines, the script's 2), a command line it cannot read, and a log
-// directory it cannot make.
+// their summary lines), a command line it cannot read, and a log directory it
+// cannot make.
 const UsageExit = 2
 
 // Options is one tier-sweep invocation: the tiers a command line named and the
@@ -95,13 +94,12 @@ func KnownTier(name string) bool {
 // two directory calls the default log directory needs.
 type Host struct {
 	// Env reads an environment name. An empty value means the name is unset,
-	// the treatment the script's ${NAME:=default} gives one.
+	// so its default applies.
 	Env func(string) string
-	// MkdirTemp creates the default log directory, the script's
-	// `mktemp -d "$TMPDIR/tier-sweep.XXXXXX"`.
+	// MkdirTemp creates the default log directory under TMPDIR.
 	MkdirTemp func(dir, pattern string) (string, error)
-	// MkdirAll creates TIER_SWEEP_LOGDIR, the script's `mkdir -p`. It runs
-	// for the default directory too, where it finds the directory there.
+	// MkdirAll creates TIER_SWEEP_LOGDIR and its parents. It runs for the
+	// default directory too, where it finds the directory there.
 	MkdirAll func(path string, perm fs.FileMode) error
 }
 
@@ -156,8 +154,7 @@ func SkipFor(list, tier, pkg string) (whole bool, pattern string) {
 	return false, ""
 }
 
-// orDefault is the script's ${name:=fallback}: an empty value takes the
-// fallback.
+// orDefault returns fallback when value is empty.
 func orDefault(value, fallback string) string {
 	if value == "" {
 		return fallback
