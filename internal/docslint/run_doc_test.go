@@ -35,9 +35,33 @@ func restatedUsage(doc string) []string {
 	return got
 }
 
-// TestRunDocDoesNotRestateUsage holds the Run doc comment to the contract: the
-// option list is the command's usage output, and a comment that copies it goes
-// stale when the options change (docs/writing-for-agents.md R3).
+// TestCommandDocListsOptions holds the option list to one home: the cmd/docs-lint
+// package doc, the only place a reader of the command finds it. The command
+// refuses an unknown option on stderr and prints no usage block, so the doc names
+// the options without claiming the command prints them.
+func TestCommandDocListsOptions(t *testing.T) {
+	t.Parallel()
+	file, err := parser.ParseFile(token.NewFileSet(), "../../cmd/docs-lint/main.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse cmd/docs-lint/main.go: %v", err)
+	}
+	if file.Doc == nil {
+		t.Fatal("cmd/docs-lint has no package doc")
+	}
+	doc := file.Doc.Text()
+	for _, opt := range []string{"docs-lint --list <tier>", "docs-lint --slice N M", "docs-lint --words"} {
+		if !strings.Contains(doc, opt) {
+			t.Errorf("package doc does not document %q", opt)
+		}
+	}
+	if strings.Contains(strings.ToLower(doc), "usage") {
+		t.Error("package doc claims the command prints a usage block")
+	}
+}
+
+// TestRunDocDoesNotRestateUsage keeps the option list out of the Run doc comment:
+// it has one home, the package doc, and a second copy goes stale when the options
+// change (docs/writing-for-agents.md R2, R3).
 func TestRunDocDoesNotRestateUsage(t *testing.T) {
 	t.Parallel()
 	src, err := os.ReadFile("run.go")
