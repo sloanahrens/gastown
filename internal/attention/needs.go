@@ -42,3 +42,39 @@ func OrderByNeedsHuman(items []Item, scores Scores) []Item {
 	})
 	return out
 }
+
+// OrderByLandingRisk returns the queue ordered as OrderByNeedsHuman orders it,
+// with its risk-path items reordered among the places that order gave them by
+// the landing battery's risk answer, highest first.
+//
+// The landing risk ranks the risk-path items against each other; the needs_human
+// answer still says where those places sit, so every other kind keeps today's
+// order and one landing's risk never lifts it above another kind of condition.
+// A risk-path item the battery has not answered sorts after every answered one,
+// and an answered tie keeps today's order (needs_human highest first, then
+// oldest first_seen, then key): the answer ranks the items and removes nothing,
+// so the same items come out as go in. With no answers at all the queue is
+// exactly OrderByNeedsHuman's. The input slice is left as it is.
+func OrderByLandingRisk(items []Item, needs Scores, risks LandingRisks) []Item {
+	out := OrderByNeedsHuman(items, needs)
+	var slots []int
+	var risky []Item
+	for i, it := range out {
+		if it.Kind == KindRiskPath {
+			slots = append(slots, i)
+			risky = append(risky, it)
+		}
+	}
+	sort.SliceStable(risky, func(i, j int) bool {
+		a, aScored := risks[risky[i].Key]
+		b, bScored := risks[risky[j].Key]
+		if aScored != bScored {
+			return aScored
+		}
+		return aScored && a > b
+	})
+	for k, i := range slots {
+		out[i] = risky[k]
+	}
+	return out
+}

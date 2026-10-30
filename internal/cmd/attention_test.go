@@ -95,28 +95,73 @@ func TestAttentionTableOrdersByNeedsHumanScore(t *testing.T) {
 func writeAttentionScores(t *testing.T, town string, now time.Time) {
 	t.Helper()
 
-	dir := filepath.Join(town, ".runtime", "jev")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	lines := []attentionAnswer{
+	writeAttentionLines(t, town, []attentionAnswer{
 		{Key: "red-main:gastown", FirstSeen: now.Add(-30 * time.Minute), NeedsHuman: 0.90},
 		{Key: "esc:hq-3", FirstSeen: now.Add(-10 * time.Minute), NeedsHuman: 0.40},
 		{Key: "stall:gastown/opal", FirstSeen: now.Add(-5 * time.Minute), NeedsHuman: 0.20},
+	})
+}
+
+// writeAttentionLines appends answers to the town's answers log, one line each.
+func writeAttentionLines(t *testing.T, town string, lines []attentionAnswer) {
+	t.Helper()
+	out := make([]any, len(lines))
+	for i, l := range lines {
+		out[i] = l.line()
 	}
-	f, err := os.OpenFile(attention.AnswersPath(town), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	appendJSONLines(t, attention.AnswersPath(town), out)
+}
+
+// writeAttentionLandings appends landing answers to the town's landing log.
+func writeAttentionLandings(t *testing.T, town string, lines []attentionLanding) {
+	t.Helper()
+	out := make([]any, len(lines))
+	for i, l := range lines {
+		out[i] = l.line()
+	}
+	appendJSONLines(t, attention.LandingRiskPath(town), out)
+}
+
+// appendJSONLines appends one JSON line per value to path, creating the log's
+// directory first.
+func appendJSONLines(t *testing.T, path string, lines []any) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
 	for _, l := range lines {
-		raw, err := json.Marshal(l.line())
+		raw, err := json.Marshal(l)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := f.Write(append(raw, '\n')); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// attentionLanding is one landing-log line as the battery writes it, for the
+// fixtures: the queue reads the bead, the head and the risk answer from it.
+type attentionLanding struct {
+	Bead  string
+	Head  string
+	Score float64
+}
+
+func (l attentionLanding) line() map[string]any {
+	return map[string]any{
+		"ts":               time.Now(),
+		"bead":             l.Bead,
+		"rig":              "gastown",
+		"head":             l.Head,
+		"answers":          map[string]any{"risk": map[string]any{"score": l.Score, "confidence": 0.8}},
+		"question_version": 1,
+		"model":            "jev-test",
 	}
 }
 
@@ -239,6 +284,109 @@ func TestAttentionTableNamesAnAnswersLogItCannotRead(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("the table dropped %q whose scores could not be read:\n%s", key, out)
+		}
+	}
+}
+
+// The risk-path items are ranked by the landing battery's risk answer, highest
+// first, in the places the needs_human score gave them: the other kinds keep
+// their order and nothing leaves the table (gt-n8tmf).
+func TestAttentionTableOrdersRiskPathByLandingRisk(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+
+	const (
+		headA = "6cf8b456abcd0123456789abcdef0123456789ab"
+		headB = "0123456789abcdef0123456789abcdef01234567"
+		headC = "fedcba9876543210fedcba9876543210fedcba98"
+	)
+	keyA, keyB, keyC := "risk:gt-a:"+headA[:12], "risk:gt-b:"+headB[:12], "risk:gt-c:"+headC[:12]
+	town := attentionTown(t)
+	state := attention.State{
+		Updated: now,
+		Items: []attention.Item{
+			{Key: keyA, Kind: attention.KindRiskPath, Severity: attention.SeverityLow, Rig: "gastown", Bead: "gt-a", SHA: headA, Summary: "gt-a landed touching cmd", FirstSeen: now.Add(-30 * time.Minute), LastSeen: now},
+			{Key: keyB, Kind: attention.KindRiskPath, Severity: attention.SeverityLow, Rig: "gastown", Bead: "gt-b", SHA: headB, Summary: "gt-b landed touching cmd", FirstSeen: now.Add(-20 * time.Minute), LastSeen: now},
+			{Key: keyC, Kind: attention.KindRiskPath, Severity: attention.SeverityLow, Rig: "gastown", Bead: "gt-c", SHA: headC, Summary: "gt-c landed touching cmd", FirstSeen: now.Add(-10 * time.Minute), LastSeen: now},
+			{Key: "red-main:gastown", Kind: attention.KindRedMain, Severity: attention.SeverityHigh, Rig: "gastown", Bead: "gt-abc", Summary: "main is red", FirstSeen: now.Add(-40 * time.Minute), LastSeen: now},
+		},
+	}
+	if err := attention.WriteState(town, state); err != nil {
+		t.Fatal(err)
+	}
+	// All four items share one needs_human answer, so today's order is by age
+	// and only the landing risk can move the reviews.
+	writeAttentionLines(t, town, []attentionAnswer{
+		{Key: keyA, FirstSeen: now.Add(-30 * time.Minute), NeedsHuman: 0.90},
+		{Key: keyB, FirstSeen: now.Add(-20 * time.Minute), NeedsHuman: 0.90},
+		{Key: keyC, FirstSeen: now.Add(-10 * time.Minute), NeedsHuman: 0.90},
+		{Key: "red-main:gastown", FirstSeen: now.Add(-40 * time.Minute), NeedsHuman: 0.90},
+	})
+	writeAttentionLandings(t, town, []attentionLanding{
+		{Bead: "gt-a", Head: headA, Score: 1},
+		{Bead: "gt-b", Head: headB, Score: 3},
+		{Bead: "gt-c", Head: headC, Score: 2},
+	})
+
+	view, err := buildAttention(town, now)
+	if err != nil {
+		t.Fatalf("buildAttention: %v", err)
+	}
+	if view.RisksErr != nil {
+		t.Fatalf("the landing answers: %v", view.RisksErr)
+	}
+	var buf bytes.Buffer
+	if err := attentionReport(&buf, true, false, view, now); err != nil {
+		t.Fatalf("attentionReport: %v", err)
+	}
+	out := buf.String()
+
+	// red-main is oldest and keeps the lead; the reviews follow in landing risk
+	// order, gt-b (3) first and gt-a (1) last.
+	want := []string{"red-main:gastown", keyB, keyC, keyA}
+	at := -1
+	for _, key := range want {
+		i := strings.Index(out, key)
+		if i < 0 {
+			t.Fatalf("the table dropped %q:\n%s", key, out)
+		}
+		if i < at {
+			t.Fatalf("%q is out of the landing risk order:\n%s", key, out)
+		}
+		at = i
+	}
+}
+
+// A landing log the queue cannot read is named, and the table still prints: the
+// order it keeps is the last answers read, not this read's (gt-n8tmf).
+func TestAttentionTableNamesALandingLogItCannotRead(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	town, _ := attentionSet(t, now)
+
+	// The log exists and is not a file, so it stats, opens, and cannot be read.
+	if err := os.MkdirAll(attention.LandingRiskPath(town), 0o755); err != nil { //nolint:gosec // G301: a test's own temp town
+		t.Fatal(err)
+	}
+
+	view, err := buildAttention(town, now)
+	if err != nil {
+		t.Fatalf("buildAttention: %v", err)
+	}
+	if view.RisksErr == nil {
+		t.Fatalf("an unreadable landing log reported no error, answers %v", view.Risks)
+	}
+	var buf bytes.Buffer
+	if err := attentionReport(&buf, false, false, view, now); err != nil {
+		t.Fatalf("attentionReport: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "RISK unavailable") {
+		t.Errorf("the table did not name the landing log it could not read:\n%s", out)
+	}
+	for _, key := range []string{"red-main:gastown", "esc:hq-3"} {
+		if !strings.Contains(out, key) {
+			t.Errorf("the table dropped %q whose landing answers could not be read:\n%s", key, out)
 		}
 	}
 }

@@ -849,6 +849,12 @@ type Config struct {
 	// the scores are unreadable rather than drawing them as unanswered. A nil
 	// function, or a nil error with no answers, leaves every item unscored.
 	NeedsHuman func() (attention.Scores, error)
+	// LandingRisk returns the landing battery's risk level per risk-path item
+	// key (attention.NewLandingRiskReader), and the error of a log that exists
+	// but could not be read: the panel then keeps the last good answers, marks
+	// them stale and names the failed read. A nil function leaves every row
+	// without a landing risk.
+	LandingRisk func() (attention.LandingRisks, error)
 	// Models reads the header strip's models from the configs the town keeps.
 	Models func() *Models
 	// SeatRoster reads the occupancy the spec dispatcher counts, for the

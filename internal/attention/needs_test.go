@@ -113,6 +113,182 @@ func TestOrderByNeedsHumanLeavesTheInputOrder(t *testing.T) {
 	}
 }
 
+// riskPathItem is a landing review raised at raisedMin, the kind the risk-path
+// collector raises for a landing that touched the risk list.
+func riskPathItem(key string, raisedMin int) Item {
+	return Item{Key: key, Kind: KindRiskPath, FirstSeen: needsBase.Add(time.Duration(raisedMin) * time.Minute)}
+}
+
+// The landing risk ranks the risk-path items against each other, in the places
+// the needs_human order gave them: every other kind keeps today's order, and the
+// risk moves nothing off the queue.
+func TestOrderByLandingRisk(t *testing.T) {
+	t.Parallel()
+
+	const (
+		riskA = "risk:gt-a:aaaaaaaaaaaa"
+		riskB = "risk:gt-b:bbbbbbbbbbbb"
+		riskC = "risk:gt-c:cccccccccccc"
+	)
+	items := []Item{
+		riskPathItem(riskA, 0),
+		needsItem("red-main:gastown", 1),
+		riskPathItem(riskB, 2),
+		riskPathItem(riskC, 3),
+		needsItem("stall:gastown/opal", 4),
+	}
+	needs := score(nil, "red-main:gastown", 1, 0.95)
+	for _, at := range []struct {
+		key string
+		min int
+	}{{riskA, 0}, {riskB, 2}, {riskC, 3}} {
+		needs = score(needs, at.key, at.min, 0.90)
+	}
+	needs = score(needs, "stall:gastown/opal", 4, 0.50)
+	risks := LandingRisks{riskA: 1, riskB: 3, riskC: 2}
+
+	got := OrderByLandingRisk(items, needs, risks)
+	if len(got) != len(items) {
+		t.Fatalf("the order holds %d items, want all %d: the risk clears nothing", len(got), len(items))
+	}
+	if !sameItems(items, got) {
+		t.Fatalf("the order holds %v, want the same items as %v", keysOf(got), keysOf(items))
+	}
+	// The risk-path items lead by their landing risk, highest first, in the
+	// places today's order gave the kind.
+	wantRisky := []string{riskB, riskC, riskA}
+	if risky := riskPathKeys(got); !sameKeys(risky, wantRisky) {
+		t.Errorf("the risk-path items are %v, want the landing risk order %v", risky, wantRisky)
+	}
+	// Every other kind keeps the order needs_human alone gives it.
+	wantOther := otherKindKeys(OrderByNeedsHuman(items, needs))
+	if other := otherKindKeys(got); !sameKeys(other, wantOther) {
+		t.Errorf("the other kinds are %v, want today's order %v", other, wantOther)
+	}
+	want := []string{"red-main:gastown", riskB, riskC, riskA, "stall:gastown/opal"}
+	if !sameKeys(keysOf(got), want) {
+		t.Errorf("the queue is %v, want %v", keysOf(got), want)
+	}
+}
+
+// An item no landing answer names sorts after every answered risk-path item,
+// and an answered tie keeps today's order: needs_human highest first, then the
+// oldest first_seen, then the key.
+func TestOrderByLandingRiskUnansweredAndTies(t *testing.T) {
+	t.Parallel()
+
+	const (
+		riskX  = "risk:gt-x:xxxxxxxxxxxx"
+		riskY  = "risk:gt-y:yyyyyyyyyyyy"
+		riskZ  = "risk:gt-z:zzzzzzzzzzzz"
+		riskP  = "risk:gt-p:pppppppppppp"
+		riskQ  = "risk:gt-q:qqqqqqqqqqqq"
+		riskS  = "risk:gt-s:ssssssssssss"
+		riskK1 = "risk:gt-k1:111111111111"
+		riskK2 = "risk:gt-k2:222222222222"
+	)
+	tests := []struct {
+		name  string
+		items []Item
+		needs Scores
+		risks LandingRisks
+		want  []string
+	}{
+		{
+			name:  "an unanswered item sorts after every answered one",
+			items: []Item{riskPathItem(riskX, 0), riskPathItem(riskY, 1), riskPathItem(riskZ, 2)},
+			needs: score(score(score(nil, riskX, 0, 0.5), riskY, 1, 0.5), riskZ, 2, 0.5),
+			risks: LandingRisks{riskY: 1, riskZ: 2},
+			want:  []string{riskZ, riskY, riskX},
+		},
+		{
+			name:  "a risk of zero is an answer and still leads an unanswered item",
+			items: []Item{riskPathItem(riskX, 0), riskPathItem(riskY, 1)},
+			needs: score(score(nil, riskX, 0, 0.5), riskY, 1, 0.5),
+			risks: LandingRisks{riskY: 0},
+			want:  []string{riskY, riskX},
+		},
+		{
+			name:  "a tie falls back to needs_human and then the oldest first_seen",
+			items: []Item{riskPathItem(riskP, 0), riskPathItem(riskQ, 5), riskPathItem(riskS, 2)},
+			needs: score(score(score(nil, riskP, 0, 0.30), riskQ, 5, 0.70), riskS, 2, 0.70),
+			risks: LandingRisks{riskP: 2, riskQ: 2, riskS: 2},
+			want:  []string{riskS, riskQ, riskP},
+		},
+		{
+			name:  "a tie at one answer and one raise falls back to the key",
+			items: []Item{riskPathItem(riskK2, 0), riskPathItem(riskK1, 0)},
+			needs: score(score(nil, riskK1, 0, 0.5), riskK2, 0, 0.5),
+			risks: LandingRisks{riskK1: 2, riskK2: 2},
+			want:  []string{riskK1, riskK2},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := keysOf(OrderByLandingRisk(tc.items, tc.needs, tc.risks)); !sameKeys(got, tc.want) {
+				t.Errorf("the queue is %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// sameItems reports whether two orders hold the same items, neither dropping nor
+// duplicating one.
+func sameItems(a, b []Item) bool {
+	counts := map[string]int{}
+	for _, it := range b {
+		counts[it.Key]++
+	}
+	for _, it := range a {
+		counts[it.Key]--
+		if counts[it.Key] < 0 {
+			return false
+		}
+	}
+	for _, n := range counts {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// sameKeys reports whether two key lists name the same keys in the same order.
+func sameKeys(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// riskPathKeys is the order's risk-path items, in order.
+func riskPathKeys(items []Item) []string {
+	var out []string
+	for _, it := range items {
+		if it.Kind == KindRiskPath {
+			out = append(out, it.Key)
+		}
+	}
+	return out
+}
+
+// otherKindKeys is the order's items of every kind but risk-path, in order.
+func otherKindKeys(items []Item) []string {
+	var out []string
+	for _, it := range items {
+		if it.Kind != KindRiskPath {
+			out = append(out, it.Key)
+		}
+	}
+	return out
+}
+
 func keysOf(items []Item) []string {
 	out := make([]string, len(items))
 	for i, it := range items {

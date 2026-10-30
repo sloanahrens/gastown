@@ -88,6 +88,14 @@ type AttentionRow struct {
 	// across a failed read of Jev's answers log: the score is old, not current,
 	// so the panel marks it stale rather than drawing it as this read's answer.
 	NeedsHumanStale bool `json:"needs_human_stale,omitempty"`
+	// LandingRisk is the landing battery's risk level for a risk-path row (0,
+	// docs or text only, to 3, town machinery): nil when no answer names the
+	// landing, which is every row of another kind. It ranks the risk-path rows
+	// against each other inside their group and is drawn beside each one.
+	LandingRisk *float64 `json:"landing_risk,omitempty"`
+	// LandingRiskStale says LandingRisk is the last good answer for this landing,
+	// kept across a failed read of the landing log.
+	LandingRiskStale bool `json:"landing_risk_stale,omitempty"`
 	// Urgency orders the rows inside one owner and kind, lowest first: an
 	// escalation's severity, a question's priority, an item's alert level.
 	Urgency int `json:"-"`
@@ -142,6 +150,10 @@ type Attention struct {
 	ScoresFailed bool `json:"scores_failed,omitempty"`
 	// Pending names the readers that have not reported yet.
 	Pending []string `json:"pending,omitempty"`
+	// LandingRiskFailed says Jev's landing log exists and could not be read. The
+	// rows, their order and their groups stand, and a risk level drawn is the
+	// last good answer rather than this read's (gt-n8tmf).
+	LandingRiskFailed bool `json:"landing_risk_failed,omitempty"`
 }
 
 // AttentionQueue is what one read of the attention queue's state gave back: the
@@ -164,18 +176,28 @@ type ScoresRead struct {
 	Err    error
 }
 
+// LandingRiskRead is one read of the landing battery's risk answers: the risk
+// level per risk-path item key, and the error of a log that exists but could
+// not be read. As with ScoresRead, an error is not an empty set of answers: the
+// panel keeps the last good answers, marks them stale and names the failed
+// read.
+type LandingRiskRead struct {
+	Risks attention.LandingRisks
+	Err   error
+}
+
 // buildAttention merges the three readers into the one list. items are the
 // attention alerts that stand now (Alerter.Standing), queue the attention
 // queue's own items as the daemon last wrote them, scores the needs_human
-// answers by item life, and now is the read time the items' ages are taken
-// against.
+// answers by item life, risks the landing battery's risk answer per risk-path
+// item, and now is the read time the items' ages are taken against.
 //
 // A standing alert is matched to its queue item by key for the class, owner and
 // waiting-on the row carries. A key the queue does not hold — a cleared item
 // whose line has not arrived, or a state nobody could read — is act, so a
 // condition nobody could classify is seen rather than filed away. A read that
 // failed says so in Failed beside the rows it could not classify.
-func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue AttentionQueue, scores ScoresRead, now time.Time) *Attention {
+func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue AttentionQueue, scores ScoresRead, risks LandingRiskRead, now time.Time) *Attention {
 	byKey := make(map[string]attention.Item, len(queue.Items))
 	for _, it := range queue.Items {
 		byKey[it.Key] = it
@@ -188,6 +210,7 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue Atten
 		at.Failed = append(at.Failed, "attention queue")
 	}
 	at.ScoresFailed = scores.Err != nil
+	at.LandingRiskFailed = risks.Err != nil
 	if esc == nil {
 		at.Pending = append(at.Pending, "escalations")
 	}
@@ -273,10 +296,15 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, queue Atten
 			row.NeedsHuman = &score
 			row.NeedsHumanStale = scores.Err != nil
 		}
+		if risk, ok := risks.Risks[al.Key]; ok && al.Rule == attention.RuleRiskPath {
+			row.LandingRisk = &risk
+			row.LandingRiskStale = risks.Err != nil
+		}
 		at.Rows = append(at.Rows, row)
 	}
 
 	sort.SliceStable(at.Rows, func(i, j int) bool { return attentionBefore(at.Rows[i], at.Rows[j]) })
+	orderRiskPathRows(at.Rows)
 	at.NeedsYou = AttentionGroup{Rows: []AttentionRow{}}
 	at.Pipeline = AttentionGroup{Rows: []AttentionRow{}}
 	for _, r := range at.Rows {
@@ -325,7 +353,7 @@ func coveredByABead(rule string) bool {
 // The level leads because this is the page that raises alarms: a crit row must
 // not sink under a warn one, so the score orders each level and never buries or
 // hides a row (gt-b9j3o.2). The queue's own table has no alert levels and ranks
-// by the score alone (attention.OrderByNeedsHuman).
+// by the score alone (attention.OrderByLandingRisk).
 func attentionBefore(a, b AttentionRow) bool {
 	if a.Owner != b.Owner {
 		return ownerRank(a.Owner) < ownerRank(b.Owner)
@@ -347,6 +375,47 @@ func attentionBefore(a, b AttentionRow) bool {
 		return false
 	}
 	return ageOf(a.AgeSec) > ageOf(b.AgeSec)
+}
+
+// orderRiskPathRows reorders the risk-path rows among the places the panel's
+// order gave them, by the landing risk drawn on each, highest first.
+//
+// The risk ranks the rows against each other inside their group of one owner,
+// kind and alert level; the panel's own order still says where those places
+// sit, so nothing moves across a group and a crit row stays above a warn one. A
+// row the battery has not answered sorts after the answered ones in its group
+// and keeps the panel's order among them, and every row stays on the list: the
+// risk ranks the reviews and hides none of them (gt-n8tmf).
+func orderRiskPathRows(rows []AttentionRow) {
+	type group struct {
+		owner   string
+		kind    string
+		urgency int
+	}
+	slots := map[group][]int{}
+	for i, r := range rows {
+		if r.Rule != attention.RuleRiskPath {
+			continue
+		}
+		g := group{owner: r.Owner, kind: r.Kind, urgency: r.Urgency}
+		slots[g] = append(slots[g], i)
+	}
+	for _, idx := range slots {
+		risky := make([]AttentionRow, len(idx))
+		for k, i := range idx {
+			risky[k] = rows[i]
+		}
+		sort.SliceStable(risky, func(i, j int) bool {
+			a, b := risky[i].LandingRisk, risky[j].LandingRisk
+			if (a != nil) != (b != nil) {
+				return a != nil
+			}
+			return a != nil && *a > *b
+		})
+		for k, i := range idx {
+			rows[i] = risky[k]
+		}
+	}
 }
 
 // ownerRank orders the owners a row can carry: the human first, then the
