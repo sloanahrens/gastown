@@ -99,6 +99,26 @@ func TestMainValidCommandLineFailsUntilRunIsPorted(t *testing.T) {
 	}
 }
 
+// TestMainParseWithoutOptionsExitsOne: a parse seam that returns neither options
+// nor an error has no command line to run. It exits 1 and says so; reading the
+// missing options would panic instead of reporting the failed run.
+func TestMainParseWithoutOptionsExitsOne(t *testing.T) {
+	t.Parallel()
+	empty := func([]string, func(string) string) (*forgejoresync.Options, error) {
+		return nil, nil
+	}
+	var stdout, stderr strings.Builder
+	if got := runParse(nil, noEnv, &stdout, &stderr, empty); got != forgejoresync.ExitFailure {
+		t.Fatalf("runParse = %d, want 1 (stderr: %s)", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "the command line parsed to no options") {
+		t.Errorf("stderr = %q, want the missing options named", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing on a failed run", stdout.String())
+	}
+}
+
 // TestMainParseFailureExitsOne: a parse failure that is not a usage error is a
 // failed run (1) with its own line, not a refused command line (2) with the
 // usage hint. Parse reports no such failure today; the seam stands so a later
