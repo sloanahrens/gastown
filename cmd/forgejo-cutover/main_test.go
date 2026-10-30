@@ -59,12 +59,12 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 		"no rig":                     {args: []string{"--repo", "acme/gastown"}, stderr: "<rig> is required"},
 		"no repository":              {args: []string{"gastown"}, stderr: "--repo is required"},
 		"repository with no /":       {args: []string{"gastown", "--repo", "gastown"}, stderr: "--repo 'gastown' must be OWNER/NAME"},
-		"api-url without http":       {args: []string{"gastown", "--repo", "acme/gastown", "--api-url", "forgejo.test"}, stderr: "--api-url must be http:// or https://"},
+		"api-url without http":       {args: []string{"gastown", "--repo", "acme/gastown", "--api-url", "forgejo.test"}, stderr: "--api-url must be an http:// or https:// URL with a host and no credentials"},
 		"repository with a dot":      {args: []string{"gastown", "--repo", "acme/.."}, stderr: "--repo 'acme/..' must be OWNER/NAME"},
 		"main-branch with space":     {args: []string{"gastown", "--repo", "acme/gastown", "--main-branch", "ma in"}, stderr: "--main-branch 'ma in' must match"},
 		"main-branch with a dash":    {args: []string{"gastown", "--repo", "acme/gastown", "--main-branch", "-x"}, stderr: "--main-branch '-x' is not a branch name"},
 		"main-branch with a dot-dot": {args: []string{"gastown", "--repo", "acme/gastown", "--main-branch", "a..b"}, stderr: "--main-branch 'a..b' is not a branch name"},
-		"api-url with a password":    {args: []string{"gastown", "--repo", "acme/gastown", "--api-url", "https://user:hunter2@forgejo.test/api/v1"}, stderr: "--api-url must be a URL with no credentials"},
+		"api-url with a password":    {args: []string{"gastown", "--repo", "acme/gastown", "--api-url", "https://user:hunter2@forgejo.test/api/v1"}, stderr: "--api-url must be an http:// or https:// URL with a host and no credentials"},
 	}
 	for name, tc := range refusals {
 		t.Run(name, func(t *testing.T) {

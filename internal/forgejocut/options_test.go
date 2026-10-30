@@ -370,7 +370,6 @@ func TestParseProbeDefaultIsBesideTheBinary(t *testing.T) {
 		{name: "the binary in bin/", executable: "/repo/bin/forgejo-cutover", want: "/repo/scripts/forgejo-probe.sh"},
 		{name: "the binary's own directory wins", executable: "/repo/bin/forgejo-cutover", probes: []string{"/repo/bin/scripts/forgejo-probe.sh"}, want: "/repo/bin/scripts/forgejo-probe.sh"},
 		{name: "no probe beside the binary names the binary's directory", executable: "/usr/local/libexec/forgejo-cutover", want: "/usr/local/libexec/scripts/forgejo-probe.sh", refused: true},
-		{name: "no executable path falls back to the relative default", err: errors.New("no executable"), want: "scripts/forgejo-probe.sh"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -397,6 +396,28 @@ func TestParseProbeDefaultIsBesideTheBinary(t *testing.T) {
 	}
 }
 
+// TestParseNoExecutablePathNeedsAProbeFlag: with no path for the binary there is no
+// repository to look in, so the default probe is not guessed from the working
+// directory: the parse is refused until --probe names one.
+func TestParseNoExecutablePathNeedsAProbeFlag(t *testing.T) {
+	t.Parallel()
+	env := testEnv(homeVars(nil))
+	env.Executable = func() (string, error) { return "", errors.New("no executable") }
+	env.IsFile = func(p string) bool { return isTownFile(p) || p == "/probes/forgejo-probe.sh" }
+	_, err := Parse(withRig(), env)
+	var refused *UsageError
+	if !errors.As(err, &refused) || !strings.Contains(refused.Message, "--probe is required") {
+		t.Fatalf("Parse error = %v, want a usage error saying --probe is required", err)
+	}
+	got, err := Parse(withRig("--probe", "/probes/forgejo-probe.sh"), env)
+	if err != nil {
+		t.Fatalf("Parse with --probe error = %v, want none", err)
+	}
+	if got.Probe != "/probes/forgejo-probe.sh" {
+		t.Errorf("Probe = %q, want the --probe value", got.Probe)
+	}
+}
+
 // TestParseNeverEchoesCredentials: a URL that carries a password is refused, and
 // the password is in neither the message nor any other part of the error.
 func TestParseNeverEchoesCredentials(t *testing.T) {
@@ -404,25 +425,33 @@ func TestParseNeverEchoesCredentials(t *testing.T) {
 	const secret = "hunter2"
 	for _, tc := range []struct {
 		name string
-		args []string
+		flag string
+		url  string
 	}{
-		{name: "an https API root with a password", args: withRig("--api-url", "https://user:"+secret+"@forgejo.test/api/v1")},
-		{name: "an http API root with a password", args: withRig("--api-url", "http://user:"+secret+"@forgejo.test/api/v1")},
-		{name: "a non-http API root with a password", args: withRig("--api-url", "ftp://user:"+secret+"@forgejo.test")},
-		{name: "a malformed non-http API root with an @", args: withRig("--api-url", "ftp://user:"+secret+"@forgejo test")},
-		{name: "a scheme-less API root with a password", args: withRig("--api-url", "user:"+secret+"@forgejo.test/api/v1")},
-		{name: "a web root with a password", args: withRig("--web-url", "https://user:"+secret+"@web.test")},
-		{name: "a scheme-less web root with a password", args: withRig("--web-url", "user:"+secret+"@web.test")},
+		{name: "an https API root with a password", flag: "--api-url", url: "https://user:" + secret + "@forgejo.test/api/v1"},
+		{name: "an http API root with a password", flag: "--api-url", url: "http://user:" + secret + "@forgejo.test/api/v1"},
+		{name: "a non-http API root with a password", flag: "--api-url", url: "ftp://user:" + secret + "@forgejo.test"},
+		{name: "a malformed non-http API root with an @", flag: "--api-url", url: "ftp://user:" + secret + "@forgejo test"},
+		{name: "a scheme-less API root with a password", flag: "--api-url", url: "user:" + secret + "@forgejo.test/api/v1"},
+		{name: "an opaque API root with a password", flag: "--api-url", url: "https:user:" + secret + "@forgejo.test"},
+		{name: "a web root with a password", flag: "--web-url", url: "https://user:" + secret + "@web.test"},
+		{name: "a scheme-less web root with a password", flag: "--web-url", url: "user:" + secret + "@web.test"},
+		{name: "a GitHub URL with a password", flag: "--github-url", url: "https://user:" + secret + "@github.com/acme/gastown.git"},
+		{name: "a GitHub ssh URL with a password", flag: "--github-url", url: "ssh://git:" + secret + "@github.com/acme/gastown.git"},
+		{name: "a Forgejo URL with a password", flag: "--forgejo-url", url: "https://user:" + secret + "@forge.test/acme/gastown.git"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Parse(tc.args, testEnv(homeVars(nil)))
+			_, err := Parse(withRig(tc.flag, tc.url), testEnv(homeVars(nil)))
 			var refused *UsageError
 			if !errors.As(err, &refused) {
-				t.Fatalf("Parse error = %v, want a usage error", err)
+				t.Fatalf("Parse error = %v, want a usage error (exit %d)", err, ExitUsage)
 			}
-			if strings.Contains(err.Error(), secret) {
-				t.Errorf("Parse error = %q, want the password absent", err)
+			if !strings.Contains(refused.Message, tc.flag) {
+				t.Errorf("message = %q, want it to name %s", refused.Message, tc.flag)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), tc.url) {
+				t.Errorf("Parse error = %q, want neither the password nor the value", err)
 			}
 		})
 	}
@@ -464,13 +493,23 @@ func TestParseRejectsBadValues(t *testing.T) {
 		"main-branch has an @{":               {args: withRig("--main-branch", "a@{1}"), message: "--main-branch 'a@{1}' must match"},
 		"gate-workflow with a slash":          {args: withRig("--gate-workflow", "ci/gate"), message: "--gate-workflow 'ci/gate' must match [A-Za-z0-9._-]+"},
 		"bot-prefix with a space":             {args: withRig("--bot-prefix", "bot x"), message: "--bot-prefix 'bot x' must match [A-Za-z0-9._-]+"},
-		"api-url without a scheme":            {args: withRig("--api-url", "forgejo.test/api/v1"), message: "--api-url must be http:// or https:// (got 'forgejo.test/api/v1')"},
-		"api-url with ftp":                    {args: withRig("--api-url", "ftp://forgejo.test"), message: "--api-url must be http:// or https://"},
+		"api-url without a scheme":            {args: withRig("--api-url", "forgejo.test/api/v1"), message: "--api-url must be an http:// or https:// URL with a host and no credentials"},
+		"api-url with ftp":                    {args: withRig("--api-url", "ftp://forgejo.test"), message: "--api-url must be an http:// or https:// URL with a host and no credentials"},
+		"api-url with no host":                {args: withRig("--api-url", "https://"), message: "--api-url must be an http:// or https:// URL with a host and no credentials"},
+		"api-url with only a port":            {args: withRig("--api-url", "http://:3000/api/v1"), message: "--api-url must be an http:// or https:// URL with a host and no credentials"},
+		"api-url with an empty user and pass": {args: withRig("--api-url", "https://:pw@forgejo.test/api/v1"), message: "--api-url must be an http:// or https:// URL with a host and no credentials"},
+		"web-url with no host":                {args: withRig("--web-url", "http:///x"), message: "--web-url must be an http:// or https:// URL with a host and no credentials"},
+		"github-url with a password":          {args: withRig("--github-url", "https://user:hunter2@github.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
+		"github-url with an ssh password":     {args: withRig("--github-url", "ssh://git:hunter2@github.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
+		"github-url with an https user":       {args: withRig("--github-url", "https://token@github.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
+		"github-url with no host":             {args: withRig("--github-url", "https:///acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
+		"github-url with ftp":                 {args: withRig("--github-url", "ftp://github.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
+		"forgejo-url with a password":         {args: withRig("--forgejo-url", "https://user:hunter2@forge.test/acme/gastown.git"), message: "--forgejo-url must be an http(s) or ssh git URL"},
 		"api-url with no value":               {args: []string{"gastown", "--repo", "acme/gastown", "--api-url"}, message: "--api-url needs a value"},
-		"api-url with a scheme-less password": {args: withRig("--api-url", "user:hunter2@forgejo.test/api/v1"), message: "--api-url must be http:// or https:// (got '[value not shown: holds an @]')"},
-		"web-url without a scheme":            {args: withRig("--web-url", "web.test"), message: "--web-url must be http:// or https:// (got 'web.test')"},
-		"web-url with a password":             {args: withRig("--web-url", "https://user:hunter2@web.test"), message: "--web-url must be a URL with no credentials"},
-		"web-url with ftp":                    {args: withRig("--web-url", "ftp://web.test"), message: "--web-url must be http:// or https://"},
+		"api-url with a scheme-less password": {args: withRig("--api-url", "user:hunter2@forgejo.test/api/v1"), message: "--api-url must be an http:// or https:// URL with a host and no credentials"},
+		"web-url without a scheme":            {args: withRig("--web-url", "web.test"), message: "--web-url must be an http:// or https:// URL with a host and no credentials"},
+		"web-url with a password":             {args: withRig("--web-url", "https://user:hunter2@web.test"), message: "--web-url must be an http:// or https:// URL with a host and no credentials"},
+		"web-url with ftp":                    {args: withRig("--web-url", "ftp://web.test"), message: "--web-url must be an http:// or https:// URL with a host and no credentials"},
 		"town-root that is not a directory":   {args: withRig("--town-root", "/nowhere"), message: "--town-root '/nowhere' is not a directory"},
 		"town-root empty":                     {args: withRig("--town-root", ""), message: "--town-root '' is not a directory"},
 		"no HOME and no town root":            {args: withRig(), vars: map[string]string{"HOME": ""}, message: "--town-root '' is not a directory"},

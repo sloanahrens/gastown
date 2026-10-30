@@ -270,15 +270,52 @@ func (o *Options) checkValues() error {
 	return checkBaseURL("--web-url", o.WebURL)
 }
 
-// checkBaseURL refuses a root that is not http:// or https:// or that carries a
-// credential. The credential would ride every request and show in the process
-// list, so the refusal names the flag and never the value's text.
+// checkBaseURL refuses a root that is not an http:// or https:// URL with a host
+// and no credential. The credential would ride every request and show in the
+// process list. A refusal names the flag and the rule and never the value: no
+// parse of a value that may hold a password can be trusted to hide it.
 func checkBaseURL(flag, raw string) error {
-	if !isHTTPURL(raw) {
-		return usagef("%s must be http:// or https:// (got '%s')", flag, redactURL(raw))
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Hostname() == "" || u.User != nil {
+		return usagef("%s must be an http:// or https:// URL with a host and no credentials", flag)
 	}
-	if u, err := url.Parse(raw); err != nil || u.User != nil {
-		return usagef("%s must be a URL with no credentials", flag)
+	return nil
+}
+
+// scpForm is the user@host:path form of a git remote.
+var scpForm = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^\s]+$`)
+
+// checkRemoteURL refuses a git remote that carries a credential. It accepts an
+// http(s) URL with a host and no user, an ssh:// URL with a host and at most a
+// user name, the user@host:path form, and an absolute path. The refusal names the
+// flag and the rule, never the value.
+func checkRemoteURL(flag, raw string) error {
+	refuse := func() error {
+		return usagef("%s must be an http(s) or ssh git URL with a host and no password, or a path", flag)
+	}
+	if scpForm.MatchString(raw) {
+		return nil
+	}
+	if strings.HasPrefix(raw, "/") && !strings.Contains(raw, "://") {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return refuse()
+	}
+	switch u.Scheme {
+	case "http", "https":
+		if u.User != nil {
+			return refuse()
+		}
+	case "ssh":
+		if u.User != nil {
+			if _, hasPassword := u.User.Password(); hasPassword {
+				return refuse()
+			}
+		}
+	default:
+		return refuse()
 	}
 	return nil
 }
@@ -300,6 +337,9 @@ func (o *Options) resolveTown(town *string, env Env) error {
 	}
 	if !env.IsDir(o.TownRoot) {
 		return usagef("--town-root '%s' is not a directory", o.TownRoot)
+	}
+	if o.Probe == "" {
+		return usagef("--probe is required: the binary's own path is unknown, so the default probe cannot be found")
 	}
 	if !env.IsFile(o.Probe) {
 		return usagef("--probe '%s' is not a file", o.Probe)
@@ -336,6 +376,9 @@ func (o *Options) derive(env Env) error {
 	if err := requireJSONSafe("--forgejo-url", o.ForgejoURL); err != nil {
 		return err
 	}
+	if err := checkRemoteURL("--forgejo-url", o.ForgejoURL); err != nil {
+		return err
+	}
 
 	if o.GitHubURL == "" {
 		origin, err := env.Git.OriginURL(o.BareRepo)
@@ -345,6 +388,9 @@ func (o *Options) derive(env Env) error {
 		o.GitHubURL = origin
 	}
 	if err := requireJSONSafe("--github-url", o.GitHubURL); err != nil {
+		return err
+	}
+	if err := checkRemoteURL("--github-url", o.GitHubURL); err != nil {
 		return err
 	}
 
@@ -373,11 +419,14 @@ func (o *Options) derive(env Env) error {
 // root or in bin/, so the binary's directory and its parent are the candidates. The
 // shell script found the probe beside itself; a binary has no such file, so when no
 // candidate holds one, the path under the binary's directory is named, and the
-// refusal shows the operator the path that was looked at.
+// refusal shows the operator the path that was looked at. When the binary's own
+// path is unknown there is no repository to look in, and the result is empty: a
+// path relative to the working directory would name whatever directory the
+// operator stands in.
 func defaultProbe(env Env) string {
 	exe, err := env.Executable()
 	if err != nil {
-		return DefaultProbe
+		return ""
 	}
 	dir := filepath.Dir(exe)
 	for _, root := range []string{dir, filepath.Dir(dir)} {
@@ -410,21 +459,6 @@ func branchNameProblem(name string) string {
 		}
 	}
 	return ""
-}
-
-// redactURL is raw as a message may show it: the credentials taken out. A value
-// that holds an @ and is not an http(s) URL may carry a credential that a parser
-// reads as a scheme or an opaque path, so it is not shown at all.
-func redactURL(raw string) string {
-	if !strings.Contains(raw, "@") {
-		return raw
-	}
-	u, err := url.Parse(raw)
-	if err != nil || !isHTTPURL(raw) {
-		return "[value not shown: holds an @]"
-	}
-	u.User = nil
-	return u.String()
 }
 
 // configDir is the gt config directory the promote key lives in: $XDG_CONFIG_HOME/gt,
@@ -527,11 +561,6 @@ func requireJSONSafe(label, value string) error {
 		return usagef("%s may not be empty or hold a newline, quote or backslash", label)
 	}
 	return nil
-}
-
-// isHTTPURL reports whether u names an http:// or https:// root.
-func isHTTPURL(u string) bool {
-	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
 }
 
 // homeTown is the town under HOME, or "" when HOME is unset: joining an empty HOME
