@@ -272,6 +272,27 @@ func TestInstallNothingToDoWhenTheInstalledCommitMatches(t *testing.T) {
 	}
 }
 
+// TestInstallRebuildsWhenTheInstalledCommitIsOnlyAPrefix: an om that reports a
+// prefix of the built commit is not the built commit, so the run builds.
+func TestInstallRebuildsWhenTheInstalledCommitIsOnlyAPrefix(t *testing.T) {
+	t.Parallel()
+	r := newInstallRig(t)
+	r.files.files[installedOM] = []byte(versionOut(commitNew[:12]))
+
+	res, exit := Run(context.Background(), r.cfg)
+
+	if want := (Result{Event: "installed", Commit: commitNew, Prev: commitNew[:12]}); res != want {
+		t.Errorf("result = %+v, want %+v", res, want)
+	}
+	if exit != ExitInstalled {
+		t.Errorf("exit = %d, want %d", exit, ExitInstalled)
+	}
+	wantSteps := []string{"version", "build", "security", "codesign", "swap", "version"}
+	if !reflect.DeepEqual(r.steps, wantSteps) {
+		t.Errorf("steps = %v, want %v: a prefix is not the built commit, so it builds", r.steps, wantSteps)
+	}
+}
+
 func TestInstallHappyPath(t *testing.T) {
 	t.Parallel()
 	r := newInstallRig(t)
@@ -324,6 +345,9 @@ func TestInstallBusyWhenTheLockWaitRunsOut(t *testing.T) {
 	want := "[install-om] Another install held the lock for 300s; not installing."
 	if !containsLine(r.logs.lines, want) {
 		t.Errorf("logs = %q, want the busy message %q", r.logs.lines, want)
+	}
+	if got := r.receipts(t); !strings.Contains(got, `"event": "refused"`) || !strings.Contains(got, `"reason": "lock-busy"`) {
+		t.Errorf("receipts = %q, want one refused lock-busy receipt", got)
 	}
 }
 
@@ -467,6 +491,10 @@ func TestSmokeFailureRollsBackToThePreviousBinary(t *testing.T) {
 			setup: func(r *installRig) { r.swapBytes = versionOut(commitOther) },
 		},
 		{
+			name:  "the new om reports a prefix of the built commit",
+			setup: func(r *installRig) { r.swapBytes = versionOut(commitNew[:12]) },
+		},
+		{
 			name:  "the new om prints no version line",
 			setup: func(r *installRig) { r.swapBytes = "usage: om <command>\n" },
 		},
@@ -507,6 +535,30 @@ func TestSmokeFailureRollsBackToThePreviousBinary(t *testing.T) {
 				t.Errorf("logs = %q, want %q", r.logs.lines, want)
 			}
 		})
+	}
+}
+
+// TestSmokeFailureWhenTheProbeHasNoBound: with no SmokeWait there is no probe, so
+// the new om's commit is unknown. The run rolls back rather than reading it as in
+// force. Neither probe can say which commit om had, so prev is unknown too.
+func TestSmokeFailureWhenTheProbeHasNoBound(t *testing.T) {
+	t.Parallel()
+	r := newInstallRig(t)
+	r.cfg.SmokeWait = 0
+
+	res, exit := Run(context.Background(), r.cfg)
+
+	if want := (Result{Event: "rolled_back", Commit: commitNew, Reason: "smoke-failed"}); res != want {
+		t.Errorf("result = %+v, want %+v", res, want)
+	}
+	if exit != ExitFailed {
+		t.Errorf("exit = %d, want %d", exit, ExitFailed)
+	}
+	if got := string(r.files.files[installedOM]); got != versionOut(commitOld) {
+		t.Errorf("om = %q, want the previous om back in force", got)
+	}
+	if !strings.Contains(r.receipts(t), `"event": "rolled_back"`) {
+		t.Errorf("receipts = %q, want one rolled_back receipt", r.receipts(t))
 	}
 }
 
