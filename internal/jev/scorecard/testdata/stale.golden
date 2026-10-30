@@ -24,6 +24,7 @@ obsolete (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      1  0.900  1.000
+  calibration error 0.10, brier 0.01, monotone: yes
   verdict: not-yet
 
 priority_fit (score)
@@ -43,6 +44,7 @@ superseded (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      1  0.800  1.000
+  calibration error 0.15, brier 0.02, monotone: yes
   verdict: not-yet
 
 worth_doing (noul)
@@ -56,4 +58,5 @@ worth_doing (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      1  0.900  1.000
+  calibration error 0.10, brier 0.01, monotone: yes
   verdict: not-yet

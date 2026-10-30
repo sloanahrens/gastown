@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"slices"
 	"time"
@@ -56,6 +57,10 @@ const (
 	noulCut = 0.5
 	// nBins is the number of equal-width calibration bands over 0 to 1.
 	nBins = 5
+	// minMonotoneBand is how many labeled lines a band needs before the
+	// monotone flag reads its label rate: a rate measured on fewer moves with
+	// one label and is not a fall a reader can act on (gt-km2b8).
+	minMonotoneBand = 10
 )
 
 // sample is one labeled answer to one question.
@@ -279,6 +284,7 @@ func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[Questi
 	case KindNoul, KindChoice:
 		qr.Precision, qr.Recall = cutMetrics(kind, samples)
 		qr.Calibration = calibration(samples)
+		qr.ECE, qr.Brier, qr.CalibrationMonotone = calibrationMetrics(qr.Calibration, samples)
 		if qr.BestThreshold != nil {
 			qr.PrecisionAtBest, qr.FlaggedAtBest = precisionAtCut(samples, *qr.BestThreshold)
 		}
@@ -433,6 +439,48 @@ func calibration(samples []sample) []Bin {
 	return out
 }
 
+// calibrationMetrics reads the bins calibration returned for the same samples.
+// ece is the labeled-weighted mean gap between a band's mean value and its
+// label rate over every populated band; brier is the mean squared gap between
+// each value and its label. monotone is true when the label rate never falls
+// from one band of at least minMonotoneBand labeled lines to the next higher
+// one. All three are nil when no line is labeled.
+func calibrationMetrics(bins []Bin, samples []sample) (ece, brier *float64, monotone *bool) {
+	if len(samples) == 0 {
+		return nil, nil, nil
+	}
+	var squared float64
+	for _, s := range samples {
+		y := 0.0
+		if s.label {
+			y = 1
+		}
+		squared += (s.value - y) * (s.value - y)
+	}
+	var gap float64
+	for _, b := range bins {
+		if b.N == 0 {
+			continue
+		}
+		gap += float64(b.N) / float64(len(samples)) * math.Abs(*b.MeanValue-*b.LabelRate)
+	}
+
+	up := true
+	var prev float64
+	seen := false
+	for _, b := range bins {
+		if b.N < minMonotoneBand {
+			continue
+		}
+		if seen && *b.LabelRate < prev {
+			up = false
+			break
+		}
+		prev, seen = *b.LabelRate, true
+	}
+	return ptr(gap), ptr(squared / float64(len(samples))), boolPtr(up)
+}
+
 func binOf(v float64) int {
 	return max(0, min(int(v*nBins), nBins-1))
 }
@@ -489,3 +537,5 @@ func ratio(num, den int) *float64 {
 }
 
 func ptr(v float64) *float64 { return &v }
+
+func boolPtr(v bool) *bool { return &v }

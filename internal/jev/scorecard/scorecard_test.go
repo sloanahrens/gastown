@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -514,6 +515,209 @@ func TestScorecardFlaggedAtBest(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("text report has no %q:\n%s", want, out.String())
 		}
+	}
+}
+
+// obs is one labeled answer in a calibration fixture: the value the question
+// scored, and the label the adapter gave it.
+type obs struct {
+	value float64
+	label bool
+}
+
+// noulFixture builds a fixture log whose needs question answers obs, each line
+// labeled the way obs says.
+func noulFixture(t *testing.T, obs []obs) Report {
+	t.Helper()
+	town := t.TempDir()
+	lines := make([]string, 0, len(obs))
+	labels := make(map[string]map[QuestionID]bool, len(obs))
+	for i, o := range obs {
+		id := fmt.Sprintf("cal-%03d", i)
+		lines = append(lines, fmt.Sprintf(`{"ts":"2026-10-18T09:00:00Z","id":%q,"answers":{"needs":{"noul":%g}}}`, id, o.value))
+		labels[id] = map[QuestionID]bool{"needs": o.label}
+	}
+	writeFixture(t, town, lines, labels)
+	return buildFixture(t, town, time.Time{})
+}
+
+// TestCalibrationMetrics reads each fixture's calibration summary through
+// Build: a question whose bands match their label rate reads no calibration
+// error and a rising rate, and one whose bands invert reads a falling rate.
+func TestCalibrationMetrics(t *testing.T) {
+	t.Parallel()
+	// Ten lines at 0.1 with one positive and ten at 0.9 with nine: each band's
+	// mean value equals its label rate.
+	var calibrated []obs
+	for i := range 10 {
+		calibrated = append(calibrated, obs{value: 0.1, label: i == 0}, obs{value: 0.9, label: i != 0})
+	}
+	// The same shape inverted: the low band's rate is 0.8, the high band's 0.2.
+	var inverted []obs
+	for i := range 10 {
+		inverted = append(inverted, obs{value: 0.2, label: i < 8}, obs{value: 0.8, label: i < 2})
+	}
+	// logtriage needs_action's bands as read on 2026-10-29: the 0.6 to 0.8 band
+	// had a label rate of 0.46, the 0.8 to 1.0 band 0.35.
+	var headline []obs
+	for i := range 50 {
+		headline = append(headline, obs{value: 0.7, label: i < 23})
+	}
+	for i := range 100 {
+		headline = append(headline, obs{value: 0.9, label: i < 35})
+	}
+
+	cases := []struct {
+		name      string
+		obs       []obs
+		wantECE   float64
+		wantBrier float64
+		wantUp    bool
+	}{
+		{"a calibrated question has no calibration error and a rising rate", calibrated, 0, 0.09, true},
+		{"an inverted question has a falling rate", inverted, 0.60, 0.52, false},
+		{"logtriage needs_action on 29 October has a falling rate", headline, 0.44666666666666666, 0.45533333333333333, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			needs := question(t, noulFixture(t, tc.obs), "needs")
+			if needs.ECE == nil || needs.Brier == nil || needs.CalibrationMonotone == nil {
+				t.Fatalf("needs ece %v brier %v monotone %v, want all three set", needs.ECE, needs.Brier, needs.CalibrationMonotone)
+			}
+			if math.Abs(*needs.ECE-tc.wantECE) > 1e-9 {
+				t.Errorf("needs ece = %v, want %v", *needs.ECE, tc.wantECE)
+			}
+			if math.Abs(*needs.Brier-tc.wantBrier) > 1e-9 {
+				t.Errorf("needs brier = %v, want %v", *needs.Brier, tc.wantBrier)
+			}
+			if *needs.CalibrationMonotone != tc.wantUp {
+				t.Errorf("needs calibration_monotone = %v, want %v", *needs.CalibrationMonotone, tc.wantUp)
+			}
+		})
+	}
+}
+
+// A band's label rate is read for the monotone flag only on the lines the flag
+// can trust: a fall measured on six labeled lines is skipped, so the question
+// still reads monotone.
+func TestCalibrationMonotoneSkipsThinBands(t *testing.T) {
+	t.Parallel()
+	var thin []obs
+	for range 20 {
+		thin = append(thin, obs{value: 0.1, label: true}, obs{value: 0.5, label: true})
+	}
+	// Six labeled lines in the top band, all negative: read against the lower
+	// bands' rate of 1, that is a fall, but six lines is not enough to read it.
+	for range 6 {
+		thin = append(thin, obs{value: 0.9, label: false})
+	}
+	needs := question(t, noulFixture(t, thin), "needs")
+	if needs.CalibrationMonotone == nil || !*needs.CalibrationMonotone {
+		t.Errorf("calibration_monotone = %v, want true with the six-line band skipped", needs.CalibrationMonotone)
+	}
+}
+
+// TestCalibrationReport checks the JSON and the text: noul and choice
+// questions carry the three fields and print the line, a score question and a
+// question with no labeled lines carry none of it.
+func TestCalibrationReport(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var lines []string
+	labels := map[string]map[QuestionID]bool{}
+	for i := range 20 {
+		id := fmt.Sprintf("cr-%02d", i)
+		// graded follows the calibrated shape, route the inverted one.
+		gradedValue, gradedLabel := 0.1, i == 0
+		routeValue, routeLabel := 0.2, i < 8
+		if i >= 10 {
+			gradedValue, gradedLabel = 0.9, i < 19
+			routeValue, routeLabel = 0.8, i < 12
+		}
+		level, levelLabel := 1, i%2 == 1
+		if i%2 == 0 {
+			level = 3
+			levelLabel = true
+		}
+		lines = append(lines, fmt.Sprintf(`{"ts":"2026-10-18T09:00:00Z","id":%q,"answers":{"graded":{"noul":%g},"route":{"choice":"yes","probabilities":{"yes":%g,"no":%g},"positive":"yes"},"level":{"score":%d}}}`, id, gradedValue, routeValue, 1-routeValue, level))
+		labels[id] = map[QuestionID]bool{"graded": gradedLabel, "route": routeLabel, "level": levelLabel}
+	}
+	// Two lines answer a noul nothing labels, so that question has no samples.
+	lines = append(lines,
+		`{"ts":"2026-10-18T09:00:00Z","id":"cr-20","answers":{"ungraded":{"noul":0.6}}}`,
+		`{"ts":"2026-10-18T09:00:00Z","id":"cr-21","answers":{"ungraded":{"noul":0.7}}}`,
+	)
+	writeFixture(t, town, lines, labels)
+	rep := buildFixture(t, town, time.Time{})
+
+	data, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Questions []map[string]any `json:"questions"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("decoding the JSON report: %v\n%s", err, data)
+	}
+	byID := map[string]map[string]any{}
+	for _, q := range decoded.Questions {
+		id, _ := q["id"].(string)
+		byID[id] = q
+	}
+
+	for _, tc := range []struct {
+		id    string
+		ece   float64
+		brier float64
+		up    bool
+	}{
+		{"graded", 0, 0.09, true},
+		{"route", 0.60, 0.52, false},
+	} {
+		q := byID[tc.id]
+		if q == nil {
+			t.Fatalf("report has no %q question: %s", tc.id, data)
+		}
+		ece, ok := q["ece"].(float64)
+		if !ok || math.Abs(ece-tc.ece) > 1e-9 {
+			t.Errorf("%s ece = %v (present %v), want %v\n%s", tc.id, q["ece"], ok, tc.ece, data)
+		}
+		brier, ok := q["brier"].(float64)
+		if !ok || math.Abs(brier-tc.brier) > 1e-9 {
+			t.Errorf("%s brier = %v (present %v), want %v\n%s", tc.id, q["brier"], ok, tc.brier, data)
+		}
+		if got, ok := q["calibration_monotone"]; !ok || got != tc.up {
+			t.Errorf("%s calibration_monotone = %v (present %v), want %v\n%s", tc.id, got, ok, tc.up, data)
+		}
+	}
+	for _, id := range []string{"level", "ungraded"} {
+		q := byID[id]
+		if q == nil {
+			t.Fatalf("report has no %q question: %s", id, data)
+		}
+		for _, key := range []string{"ece", "brier", "calibration_monotone"} {
+			if v, ok := q[key]; ok {
+				t.Errorf("%s question printed %s %v, want it absent\n%s", id, key, v, data)
+			}
+		}
+	}
+
+	var out strings.Builder
+	if err := WriteText(&out, rep); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"  calibration error 0.00, brier 0.09, monotone: yes",
+		"  calibration error 0.60, brier 0.52, monotone: no",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("text report has no %q:\n%s", want, out.String())
+		}
+	}
+	if got := strings.Count(out.String(), "calibration error"); got != 2 {
+		t.Errorf("text report prints the calibration line %d times, want 2 (graded and route):\n%s", got, out.String())
 	}
 }
 
