@@ -292,6 +292,11 @@ type Gate struct {
 	// install stands (see pendingInstall). A nil field resolves through env.
 	installPending func(townRoot string) (*installpending.Marker, error)
 
+	// scratch is the documented scratch project's identity, which decides
+	// whether a container is a known holder rather than an unwrapped suite
+	// (see ScratchIdentity, gt-4gixm).
+	scratch ScratchIdentity
+
 	// probeOut carries the gate's `docker ps` and telemetry diagnostics, and
 	// debrisOut its verdicts on containers it walks past or removes.
 	probeOut  io.Writer
@@ -306,6 +311,11 @@ func WithRuntime(r ContainerRuntime) Option { return func(g *Gate) { g.runtime =
 
 // WithClock sets the clock the gate's waits and timestamps run on.
 func WithClock(c clockwork.Clock) Option { return func(g *Gate) { g.clock = c } }
+
+// WithScratchIdentity sets the documented scratch project's identity the gate
+// matches known holders against; the zero value exempts nothing. A test passes
+// its own scratch parent so it never reads the developer's home.
+func WithScratchIdentity(id ScratchIdentity) Option { return func(g *Gate) { g.scratch = id } }
 
 // WithPollInterval sets how often a timed Acquire retries after a blocked
 // pass. Values <= 0 keep DefaultPollInterval.
@@ -326,6 +336,7 @@ func NewGate(opts ...Option) *Gate {
 		env:          osEnv{},
 		pid:          os.Getpid(),
 		owner:        hostOwnerProbe(),
+		scratch:      HostScratchIdentity(),
 		probeOut:     os.Stderr,
 		debrisOut:    os.Stderr,
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/procid"
+	"github.com/steveyegge/gastown/internal/scratchtown"
 )
 
 // Pool describes how many container-gate slots the town hands out and how
@@ -650,7 +651,8 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 				return grant(i, unlock), nil
 			default:
 				var blocking []string
-				for _, verdict := range g.owner.classify(containers, g.clock.Now(), StaleContainerWindow) {
+				for _, verdict := range g.scratchVerdicts(
+					g.owner.classify(containers, g.clock.Now(), StaleContainerWindow)) {
 					if verdict.Blocks() {
 						blocking = append(blocking, verdict.Container.Display())
 						continue
@@ -779,6 +781,34 @@ func (g *Gate) pendingInstall(townRoot string) (*installpending.Marker, error) {
 		return g.installPending(townRoot)
 	}
 	return installpending.StoreForEnv(townRoot, g.env.Getenv).Pending(g.clock.Now())
+}
+
+// scratchVerdicts stamps the documented scratch project's containers with
+// their own verdicts (internal/scratch): a steadily running project container
+// is VerdictScratch, and one the project is mid-work on — docker creating or
+// restarting it, or a build for the project in flight — is
+// VerdictScratchBuild. Every other container keeps the classification it had,
+// so an unknown container and a name spoof behave exactly as they do today
+// (gt-4gixm).
+//
+// The whole project is a known holder of the host: the gate does not block on
+// it, wait behind it or reap it. What VerdictScratchBuild adds is the install's
+// refusal, which the quiet check reads from the report — an image build and a
+// Docker restart are what that check exists to keep an install out of.
+func (g *Gate) scratchVerdicts(verdicts []ContainerVerdict) []ContainerVerdict {
+	out := make([]ContainerVerdict, 0, len(verdicts))
+	for _, verdict := range verdicts {
+		switch verdict.Container.ScratchClass(g.scratch) {
+		case scratchtown.Holder:
+			verdict.Verdict = VerdictScratch
+			verdict.Reason = "the documented scratch project's container, which the gate does not wait behind or reap"
+		case scratchtown.Building:
+			verdict.Verdict = VerdictScratchBuild
+			verdict.Reason = "the documented scratch project is mid-work: docker is creating, restarting or building it"
+		}
+		out = append(out, verdict)
+	}
+	return out
 }
 
 // installInFlight reports whether a post-landing acquisition keeps out of the
@@ -988,12 +1018,19 @@ func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
 	containers, err := g.gateContainers()
 	if err != nil {
 		rep.DockerUnknown = true
+		rep.DockerError = err.Error()
 		return rep, nil
 	}
-	for _, verdict := range g.owner.classify(containers, g.clock.Now(), StaleContainerWindow) {
-		if verdict.Blocks() {
+	for _, verdict := range g.scratchVerdicts(
+		g.owner.classify(containers, g.clock.Now(), StaleContainerWindow)) {
+		switch {
+		case verdict.Verdict == VerdictScratch:
+			rep.ScratchContainers = append(rep.ScratchContainers, verdict.Container.Display())
+		case verdict.Verdict == VerdictScratchBuild:
+			rep.ScratchBuilding = append(rep.ScratchBuilding, verdict.Container.Display())
+		case verdict.Blocks():
 			rep.UnwrappedContainers = append(rep.UnwrappedContainers, verdict.Container.Display())
-		} else {
+		default:
 			rep.DebrisContainers = append(rep.DebrisContainers, verdict.Container.Display())
 		}
 	}
@@ -1045,7 +1082,8 @@ func (g *Gate) PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("listing the gate's containers: %w", err)
 		}
-		for _, verdict := range g.owner.classify(containers, g.clock.Now(), StaleContainerWindow) {
+		for _, verdict := range g.scratchVerdicts(
+			g.owner.classify(containers, g.clock.Now(), StaleContainerWindow)) {
 			if verdict.Blocks() {
 				return true, nil
 			}

@@ -370,13 +370,37 @@ volumes and the directory removed; `docker ps` equal to the baseline).
 Observed outside the runbook's steps: at 11:35:49, 31 minutes into the window, the
 daemon's doctor dog removed the `scratch-dolt` container
 (`daemon.log`: `doctor_dog: slot reap removed: dolthub/dolt-sql-server:2.3.2
-gt-scratch-scratch-dolt-1`), because the container gate treats a Dolt container
-outside the gate as an unwrapped container suite. The same predicate makes the
-post-landing suite and the tier sweep wait for the gate's slot and blocks the
-install's quiet check for as long as any `gt-scratch*` container runs. The town
-never used that container, so the window's checks were unaffected. One shared fix
-across the three call sites is gt-4gixm; until it lands, a scratch project holds
-installs and its Dolt container is reaped, and the L2 rehearsal waits for it.
+gt-scratch-scratch-dolt-1`), because the container gate then treated every Dolt
+container outside the gate as an unwrapped container suite. The town never used
+that container, so the window's checks were unaffected.
+
+The scratch project's containers are a known holder of the host (gt-4gixm). The
+project's name, its container names, the image repositories it renders and the
+directory its compose file lives under are the constants of
+`internal/scratchtown/scratchtown.go`; `scratchtown.Identity.Matches` grants the
+exemption only when all of them agree with what docker reports. The gate slot
+neither waits behind the project's containers nor reports them as an unwrapped
+suite, the slot reap never removes them, and `rebuild_gt` proceeds past a
+steadily running one and names it:
+
+```
+rebuild_gt: proceeding despite the documented scratch project's containers: ... (a known holder, not an unwrapped suite)
+```
+
+`rebuild_gt` still refuses while the project is mid-work
+(`scratchtown.Building`): a container docker is creating (the `compose up` that
+follows an image build), restarting, paused or removing, or a buildx builder
+container for the project — the one thing `docker ps` reports about a build in
+flight. The line is
+`rebuild_gt: not quiet: the documented scratch project is being built or
+restarted: ...`; an image build and a Docker restart are what the quiet check
+protects. A plain `docker build` creates no container, so the check first sees
+the build in the state the compose `up` leaves the container in.
+
+A docker listing that fails refuses the install as a VM that could not be read,
+except when docker itself says it cannot connect to its daemon: nothing can be
+running then. A container that only names itself `gt-scratch-*`, or any other
+unknown one, keeps the ordinary rule — the gate blocks until it is gone.
 
 The first start failed once before it passed: the image had no git identity, and
 the install's Dolt preflight refused (fixed by gt-33hr1).
@@ -438,8 +462,8 @@ observed](#what-l2-has-not-observed)).
 
 ### Before you start (L2)
 
-- gt-4gixm has landed (see L1's observed section: until then a running scratch
-  project blocks installs and has its Dolt container reaped).
+- gt-4gixm has landed (see L1's observed section): a running scratch project
+  no longer blocks installs and its containers are never reaped.
 - L1 is green and torn down, or its project is still running: Steps 1 to 5 of L1
   are redone below with the forge on, so a project from L1 is removed first with
   L1's Teardown.

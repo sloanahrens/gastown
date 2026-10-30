@@ -56,6 +56,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/schedulerrun"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -401,6 +402,12 @@ type Daemon struct {
 	// slot package, which shells out to docker. Tests answer both.
 	rebuildGTStaleFn func(repoRoot string) *version.StaleBinaryInfo
 	rebuildGTGateFn  func() (busy string, reservable bool)
+	// slotGate is the container gate the quiet check reads its report through;
+	// nil is slot.NewGate(), which lists the host's docker. A test supplies a
+	// gate over a fake runtime, so the quiet check's container classification
+	// (internal/scratch) runs through the same code the host's docker feeds
+	// rather than a report a test built by hand (gt-4gixm).
+	slotGate *slot.Gate
 	// rebuildGTInstallYieldFn answers the pool's install cap, the duration at
 	// which the job escalates a binary that stays due; nil is the town pool's
 	// Pool.InstallYield. Tests set a cap so the alarm can be driven at a value
