@@ -63,6 +63,7 @@ func (d *Daemon) runJevNotes() bool {
 		settings = jevnotes.Settings{
 			MaxUSDPerDay:        c.Patrols.JevNotes.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevNotes.USDPerBillionTokens,
+			Scrub:               c.Patrols.JevNotes.Scrub,
 		}
 	}
 	open := d.jevNotesOpen

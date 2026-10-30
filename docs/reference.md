@@ -1250,6 +1250,14 @@ use up the first one's room. `Cap.Allows` is whether today's spend is still
 under `MaxUSDPerDay`. The ledger stores tokens, so `USDPerBillionTokens` is
 required to price them.
 
+Every battery's patrol block takes one optional key, `scrub`, false unless it
+is set. When it is true the battery's client scrubs the state before the
+request leaves the machine: secret-shaped text and the account name are
+replaced (`internal/jev/scrub`), the questions go out as written, and the
+request log line gains `scrubbed: true` and `replacements`, a count per rule
+that fired and none of the text it replaced. The operator turns it on one
+battery at a time, after that battery's signal cost is measured.
+
 ### Collection health (`gt jev health`)
 
 `gt jev health` is the one command that answers whether Jev collected today: it

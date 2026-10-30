@@ -66,6 +66,10 @@ type Settings struct {
 	// USDPerBillionTokens prices the ledger's tokens. It is required: the
 	// ledger stores tokens, never dollars.
 	USDPerBillionTokens float64
+
+	// Scrub scrubs the state before it is sent: the patrol's scrub key
+	// sets it (gt-aqczg).
+	Scrub bool
 }
 
 // Pass is one run of the attention battery, with every dependency injected.
@@ -414,11 +418,7 @@ func open(townRoot string, s Settings, warnings io.Writer, extra ...jev.Option) 
 		return nil, fmt.Errorf("jev_attention.max_usd_per_day must be above zero, not %v", capUSD)
 	}
 
-	client, err := jev.NewClient(append([]jev.Option{
-		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
-		jev.WithCaller(Caller),
-		jev.WithWarnings(warnings),
-	}, extra...)...)
+	client, err := jev.NewClient(append(jev.BatteryOptions(townRoot, Caller, warnings, s.Scrub), extra...)...)
 	if err != nil {
 		return nil, fmt.Errorf("opening the Jev client: %w", err)
 	}

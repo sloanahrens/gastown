@@ -31,6 +31,10 @@ type Settings struct {
 	// USDPerBillionTokens prices the ledger's tokens. It is required: the
 	// ledger stores tokens, never dollars.
 	USDPerBillionTokens float64
+
+	// Scrub scrubs the state before it is sent: the patrol's scrub key
+	// sets it (gt-aqczg).
+	Scrub bool
 	// Rigs are the rigs whose submissions a pass reads.
 	Rigs []string
 }
@@ -66,11 +70,7 @@ func open(townRoot string, s Settings, warnings io.Writer,
 		return nil, fmt.Errorf("jev_rules.max_usd_per_day must be above zero, not %v", capUSD)
 	}
 
-	client, err := newClient(
-		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
-		jev.WithCaller(Caller),
-		jev.WithWarnings(warnings),
-	)
+	client, err := newClient(jev.BatteryOptions(townRoot, Caller, warnings, s.Scrub)...)
 	if err != nil {
 		return nil, fmt.Errorf("opening the Jev client: %w", err)
 	}
