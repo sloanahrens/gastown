@@ -899,8 +899,13 @@ func runDoltInitRig(cmd *cobra.Command, args []string) error {
 	rigDir := doltserver.RigDatabaseDir(townRoot, rigName)
 
 	if !created {
-		fmt.Printf("%s Rig database %q already exists (no-op)\n", style.Bold.Render("✓"), rigName)
-		fmt.Printf("  Location: %s\n", rigDir)
+		// A tracker rig gets no database, and InitRig has already said why. The
+		// directory is then absent, so there is no location to report and
+		// "already exists" would name a database this rig never had.
+		if _, err := os.Stat(rigDir); err == nil {
+			fmt.Printf("%s Rig database %q already exists (no-op)\n", style.Bold.Render("✓"), rigName)
+			fmt.Printf("  Location: %s\n", rigDir)
+		}
 		return nil
 	}
 

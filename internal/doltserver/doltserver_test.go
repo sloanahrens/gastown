@@ -2367,6 +2367,108 @@ func TestInitRig_InvalidCharacters(t *testing.T) {
 	}
 }
 
+// writeTownRoutes writes townRoot's route table, one row per line.
+func writeTownRoutes(t *testing.T, townRoot string, rows ...string) {
+	t.Helper()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join(rows, "\n")
+	if body != "" {
+		body += "\n"
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A rig whose route names the tracker backend keeps its beads in the tracker,
+// so InitRig makes no database for it: created is false, and no command runs,
+// so no server is asked for one (gt-p85pw.102).
+func TestInitRig_TrackerRouteCreatesNoDatabase(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().townPort(4551).on("dolt *", fakeReply{})
+	h := f.host()
+	townRoot := testTown(t)
+	writeTownRoutes(t, townRoot, `{"prefix":"ag-","path":"agrig/mayor/rig","backend":"tracker"}`)
+
+	running, created, err := h.InitRig(townRoot, "agrig")
+	if err != nil {
+		t.Fatalf("InitRig: %v", err)
+	}
+	if running || created {
+		t.Fatalf("InitRig = (running %v, created %v); want no server involved and nothing created", running, created)
+	}
+	if got := f.commands(); len(got) != 0 {
+		t.Errorf("commands run = %q, want none", got)
+	}
+	if len(f.started) != 0 {
+		t.Errorf("processes started = %d, want none", len(f.started))
+	}
+	if _, err := os.Stat(RigDatabaseDir(townRoot, "agrig")); !os.IsNotExist(err) {
+		t.Errorf("database directory for a tracker rig: %v, want it absent", err)
+	}
+}
+
+// A route table InitRig cannot read is an error, not a town whose rigs are all
+// on Dolt: reading it as "not on the tracker" would create the database the
+// table was there to refuse (gt-p85pw.102).
+func TestInitRig_UnreadableRouteTableIsAnError(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().on("dolt *", fakeReply{})
+	h := f.host()
+	townRoot := testTown(t)
+	// .beads as a regular file: the route table under it cannot be opened.
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads"), []byte("not a directory"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	running, created, err := h.InitRig(townRoot, "agrig")
+	if err == nil {
+		t.Fatalf("InitRig = (running %v, created %v); want an error for an unreadable route table", running, created)
+	}
+	if got := f.commands(); len(got) != 0 {
+		t.Errorf("commands run = %q, want none", got)
+	}
+}
+
+// A rig whose route names Dolt, and a rig the route table does not name, both
+// keep the create path InitRig had before the tracker backend existed.
+func TestInitRig_DoltAndAbsentRouteStillCreate(t *testing.T) {
+	t.Parallel()
+	const port = 4550
+	tests := []struct {
+		name   string
+		routes []string // nil writes no route table at all
+	}{
+		{name: "dolt route", routes: []string{`{"prefix":"tr-","path":"testrig/mayor/rig","backend":"dolt"}`}},
+		{name: "no route", routes: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeHost().townPort(port).on("dolt init", fakeReply{}).on("dolt *", fakeReply{})
+			f.onStart = func(pid int, _ *exec.Cmd) { f.listenOn(pid, port) } // the server comes up on its port
+			h := f.host()
+			h.readIssuePrefix = func(string, string) (string, error) { return "", nil }
+			h.writeIssuePrefix = func(_, _, _, _ string) error { return nil }
+			townRoot := testTown(t)
+			if tt.routes != nil {
+				writeTownRoutes(t, townRoot, tt.routes...)
+			}
+
+			running, created, err := h.InitRig(townRoot, "testrig")
+			if err != nil || running || !created {
+				t.Fatalf("InitRig = (running %v, created %v, err %v); want a new database on a stopped server", running, created, err)
+			}
+			if got := f.ranMatching("dolt init"); len(got) != 1 {
+				t.Errorf("dolt init calls = %q, want one", got)
+			}
+		})
+	}
+}
+
 func TestIssuePrefixForRigInit_PrefersRoutes(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()

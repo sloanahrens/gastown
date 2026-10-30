@@ -3084,7 +3084,8 @@ func jsonKeys(m map[string]json.RawMessage) []string {
 // If the Dolt server is running, it executes CREATE DATABASE to register the
 // database with the live server (avoiding the need for a restart).
 // Returns (serverWasRunning, created, err). created is false when the database
-// already existed on disk (idempotent no-op).
+// already existed on disk (idempotent no-op), or when the rig's route names the
+// tracker backend.
 func (h *host) InitRig(townRoot, rigName string) (serverWasRunning bool, created bool, err error) {
 	if rigName == "" {
 		return false, false, fmt.Errorf("rig name cannot be empty")
@@ -3097,6 +3098,21 @@ func (h *host) InitRig(townRoot, rigName string) (serverWasRunning bool, created
 		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
 			return false, false, fmt.Errorf("invalid rig name %q: must contain only alphanumeric, underscore, or dash", rigName)
 		}
+	}
+
+	// A rig whose route names the tracker backend keeps its beads in the
+	// tracker, so a database made here is one nothing reads: every
+	// data-directory walk still finds it and backs it up, measures it and
+	// reaps it as a leftover. Decide before the first server call, and read an
+	// unreadable route table as an error rather than as "not on the tracker"
+	// (docs/research/tracker/R9-direct-dolt-consumers.md, the InitRig row).
+	onTracker, err := beads.RigOnTracker(townRoot, rigName)
+	if err != nil {
+		return false, false, err
+	}
+	if onTracker {
+		fmt.Fprintf(os.Stderr, "Not creating a Dolt database for rig %q: its route names the %s backend\n", rigName, beads.BackendTracker)
+		return false, false, nil
 	}
 
 	rigDir := filepath.Join(config.DataDir, rigName)
