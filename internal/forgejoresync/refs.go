@@ -107,10 +107,14 @@ func NewExecGit(ctx context.Context) ExecGit {
 	return ExecGit{Context: ctx, Run: RunExec}
 }
 
-// runContext never returns nil, so a call's context.WithTimeout cannot panic.
-func (g ExecGit) runContext() context.Context {
-	if g.Context != nil {
-		return g.Context
+// runContext is the run's context for every call this Git makes.
+func (g ExecGit) runContext() context.Context { return orBackground(g.Context) }
+
+// orBackground returns ctx, or a background context when it is nil, so a call's
+// context.WithTimeout has a live parent instead of panicking on nil.
+func orBackground(ctx context.Context) context.Context {
+	if ctx != nil {
+		return ctx
 	}
 	return context.Background()
 }

@@ -295,9 +295,4 @@ func (r *Resync) git() Git {
 }
 
 // runContext never returns nil, so a stage's context cannot panic on it.
-func (r *Resync) runContext() context.Context {
-	if r.Context != nil {
-		return r.Context
-	}
-	return context.Background()
-}
+func (r *Resync) runContext() context.Context { return orBackground(r.Context) }

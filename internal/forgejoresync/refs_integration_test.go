@@ -25,8 +25,9 @@ import (
 // put there deterministically. Real git over a stalling remote is covered by the
 // internal/git integration tests.
 const (
-	standInEnv    = "FORGEJORESYNC_STANDIN"     // "holder", "escape", or "child"; unset outside the stand-in
-	standInPidEnv = "FORGEJORESYNC_STANDIN_PID" // file the stand-in writes the child's pid to
+	standInEnv      = "FORGEJORESYNC_STANDIN"       // "holder", "escape", or "child"; unset outside the stand-in
+	standInPidEnv   = "FORGEJORESYNC_STANDIN_PID"   // file the stand-in writes the child's pid to
+	standInReadyEnv = "FORGEJORESYNC_STANDIN_READY" // FIFO the stand-in writes the child's pid to once it is up
 )
 
 // standInBound is how long a stand-in call runs before the bound ends it. It must
@@ -57,8 +58,27 @@ func TestIntegrationHelperGitStandIn(t *testing.T) {
 		fmt.Fprintln(os.Stderr, "stand-in: write pid:", err)
 		os.Exit(1)
 	}
+	if ready := os.Getenv(standInReadyEnv); ready != "" {
+		if err := announceChild(ready, child.Process.Pid); err != nil {
+			fmt.Fprintln(os.Stderr, "stand-in: announce child:", err)
+			os.Exit(1)
+		}
+	}
 	// Hold the call open. The bound ends this process long before this sleep does.
 	time.Sleep(time.Minute)
+}
+
+// announceChild reports the child's pid to the test over the FIFO it made. The open
+// blocks until the test reads, so the write is a handshake: the test knows the child
+// is up before it cancels, without polling for the pid file.
+func announceChild(fifo string, pid int) error {
+	f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintln(f, pid)
+	return err
 }
 
 // TestIntegrationHelperStandInChild is the child the stand-in starts. It holds the pipes the
@@ -147,18 +167,27 @@ func TestIntegrationBoundedGitCallReturnsAfterBound(t *testing.T) {
 	}
 }
 
-// awaitStandInChild waits for the stand-in to record its child's pid, so the cancel
-// that follows lands on a call that is in flight.
-func awaitStandInChild(t *testing.T, pidFile string) {
+// awaitStandInChild waits for the stand-in to report its child's pid over the FIFO,
+// so the cancel that follows lands on a call that is in flight. The read blocks on
+// the stand-in's write, so the wait ends the moment the child is up rather than on a
+// poll, and awaitReceive bounds it.
+func awaitStandInChild(t *testing.T, fifo string) {
 	t.Helper()
-	deadline := time.Now().Add(standInBound)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(pidFile); err == nil {
+	reported := make(chan error, 1)
+	go func() {
+		f, err := os.OpenFile(fifo, os.O_RDONLY, 0)
+		if err != nil {
+			reported <- err
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		defer f.Close()
+		var pid int
+		_, err = fmt.Fscan(f, &pid)
+		reported <- err
+	}()
+	if err := awaitReceive(t, reported); err != nil {
+		t.Fatalf("the stand-in never reported its child's pid: %v", err)
 	}
-	t.Fatalf("the stand-in never started its child within %v", standInBound)
 }
 
 // TestIntegrationCanceledRunEndsTheGitCall pins that a signal canceling the run ends
@@ -168,21 +197,27 @@ func awaitStandInChild(t *testing.T, pidFile string) {
 // in under a second, so the cancellation, not the bound or the pipe, ended it.
 // Mutation: run the call under context.Background() and it stays up until its bound.
 func TestIntegrationCanceledRunEndsTheGitCall(t *testing.T) {
-	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	ready := filepath.Join(dir, "child.ready")
+	if err := syscall.Mkfifo(ready, 0o600); err != nil {
+		t.Fatalf("make the readiness fifo: %v", err)
+	}
 	t.Setenv(standInEnv, "holder")
 	t.Setenv(standInPidEnv, pidFile)
+	t.Setenv(standInReadyEnv, ready)
 	t.Cleanup(func() { killStandInChild(pidFile) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	start := time.Now()
 	go func() {
 		// A minute's bound: only the cancellation can end the call in the limit.
 		_, err := gitRunner(time.Minute)(ctx, []string{os.Args[0], "-test.run=^TestIntegrationHelperGitStandIn$"})
 		done <- err
 	}()
-	awaitStandInChild(t, pidFile)
+	awaitStandInChild(t, ready)
+	canceledAt := time.Now()
 	cancel()
 	select {
 	case err := <-done:
@@ -192,7 +227,7 @@ func TestIntegrationCanceledRunEndsTheGitCall(t *testing.T) {
 	case <-time.After(standInBound):
 		t.Fatalf("the call was still running %v after it was canceled: the run's context did not end it", standInBound)
 	}
-	if elapsed := time.Since(start); elapsed > standInBound {
-		t.Fatalf("the call took %v after cancellation, want under %v", elapsed.Round(10*time.Millisecond), standInBound)
+	if elapsed := time.Since(canceledAt); elapsed > standInBound {
+		t.Fatalf("the call took %v to end after cancellation, want under %v", elapsed.Round(10*time.Millisecond), standInBound)
 	}
 }
