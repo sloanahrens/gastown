@@ -1,8 +1,11 @@
 package templates
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -50,7 +53,28 @@ type ComposeSpec struct {
 	// because town.json's dolt.host may be empty, and an empty one means the
 	// local machine, which inside the container is the container itself; so is
 	// a loopback address, for the same reason.
+	//
+	// A scratch spec does not set DoltHost, and a scratch render ignores it. The
+	// scratch daemon's Dolt host comes from the scratch town's own settings under
+	// the bind mount, which the spec does not carry. The scratch render is tested
+	// to carry none of the live render's names, the live Dolt's among them.
 	DoltHost string
+
+	// Scratch renders the scratch project: its own engine, networks, volumes and
+	// Dolt server, and the --scratch-town flag that lets the container
+	// entrypoint install the scratch town. No name in it is one the live render
+	// carries.
+	Scratch bool
+
+	// ScratchDoltImage is the Dolt server image the scratch project runs. It is
+	// required when Scratch is set; the scratch spec passes DoltServerImage.
+	ScratchDoltImage string
+
+	// LiveTownRoot is the live town's root, which a scratch spec must not
+	// mount, nor mount anything under. It is required when Scratch is set, and
+	// absolute, so a scratch render is always checked against the live town it
+	// could otherwise reach.
+	LiveTownRoot string
 }
 
 // MinimumStopGrace is the shortest stop_grace_period RenderDaemonCompose
@@ -79,6 +103,83 @@ const (
 	defaultNetwork = "default"
 )
 
+// composeNames are the names one project's engine and networks take. The live
+// project's are the sweep names above. A scratch project takes its own, so no
+// name in its render is one the live render carries.
+type composeNames struct {
+	engine  string // the engine's service name, which DOCKER_HOST reaches
+	network string // the internal network the engine, the daemon and the scratch Dolt share
+	volume  string // the engine's data volume
+	egress  string // the network the daemon reaches the outside through
+}
+
+var (
+	liveNames    = composeNames{engine: dindService, network: dindNetwork, volume: dindVolume, egress: defaultNetwork}
+	scratchNames = composeNames{engine: "scratch-dind", network: "scratch-internal", volume: "scratch_dind_data", egress: "scratch-egress"}
+)
+
+// ScratchDoltService is the scratch Dolt server's name on the internal network,
+// and the only DoltHost a scratch spec may name: the live Dolt is on the Mac.
+const ScratchDoltService = "scratch-dolt"
+
+// The scratch project's Dolt server, which only the scratch render has. It
+// joins the internal network alone and publishes no port.
+const (
+	scratchDoltVolume   = "scratch_dolt_data"
+	scratchDoltDataPath = "/var/lib/dolt"
+)
+
+// scratchOperatorNote is what the scratch daemon's compose file tells the
+// operator about a failed install. It is written once, here: scratchDaemonCommand
+// turns each line into a YAML comment, so the file cannot carry a second copy
+// that drifts from this one.
+var scratchOperatorNote = []string{
+	"After a failed scratch install the entrypoint refuses every start until",
+	"the operator removes .gt-install-incomplete and what the install left,",
+	"from the host side of the scratch directory.",
+}
+
+// scratchDaemonCommand is the daemon's command in the scratch project: the
+// operator note, then the container entrypoint's flag, the one way a container
+// asks for its scratch town's install. The entrypoint is the image's ENTRYPOINT,
+// so the command carries its flags alone. The live project passes nothing.
+func scratchDaemonCommand() string {
+	var b strings.Builder
+	for _, line := range scratchOperatorNote {
+		b.WriteString("    # " + line + "\n")
+	}
+	fmt.Fprintf(&b, "    command: [%q]\n", "--"+config.ScratchTownFlag)
+	return b.String()
+}
+
+// scratchDoltBody is the scratch project's Dolt server service. It has no
+// ports, so the only way in is the internal network the daemon also joins. Its
+// healthcheck holds the daemon until the server accepts a connection, which is
+// the wait the engine's own healthcheck gives the daemon (gt-3bp5q): the port
+// is the Dolt server's default, 3306, which the service does not change.
+//
+// The probe runs bash's /dev/tcp, so it needs bash in the image. The pinned
+// DoltServerImage has it: a container run from that digest on 2026-10-30
+// (linux/arm64) printed /usr/bin/bash and /usr/local/bin/dolt on a Debian 12
+// base. The live L1 check still runs the probe before the scratch project is
+// trusted.
+const scratchDoltBody = `  %[1]s:
+    image: %[2]q
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3306"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - type: volume
+        source: %[3]s
+        target: %[4]s
+    networks:
+      - %[5]s
+`
+
 // daemonComposeBody renders the daemon service and the Docker engine its sweep
 // drives. Every spec value takes a %q, quoted so a town root with a space or a
 // colon cannot change the YAML's shape, and passes through composeLiteral so a
@@ -97,7 +198,8 @@ const (
 // the daemon an engine whose dockerd is not listening yet, and the first sweep
 // then fails on a connection refused. `docker info` answers only once dockerd
 // is up, so the health condition holds the daemon until the engine can take a
-// request.
+// request. A scratch daemon waits the same way on the scratch Dolt server, which
+// has its own healthcheck, so the daemon never starts before its Dolt answers.
 const daemonComposeBody = `# Generated by gt for the container supervisor; every deploy rewrites this file.
 services:
   daemon:
@@ -106,10 +208,10 @@ services:
     restart: unless-stopped
     stop_grace_period: %[3]q
     working_dir: %[4]q
-    depends_on:
+%[12]s    depends_on:
       %[5]s:
         condition: service_healthy
-    environment:
+%[15]s    environment:
       DOCKER_HOST: "tcp://%[5]s:2375"
       GT_DAEMON_CONTAINER_NAME: %[2]q
       GT_DAEMON_SUPERVISOR: %[6]q
@@ -141,13 +243,13 @@ services:
         target: %[10]s
     networks:
       - %[7]s
-networks:
+%[13]snetworks:
   %[11]s:
   %[7]s:
     internal: true
 volumes:
   %[9]s:
-`
+%[14]s`
 
 // RenderDaemonCompose renders the compose file the container supervisor
 // starts, stops and inspects: the daemon service and the Docker engine its
@@ -172,18 +274,38 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		return nil, err
 	}
 
+	names := liveNames
+	var command, dolt, doltVolume, doltWait string
+	if s.Scratch {
+		names = scratchNames
+		command = scratchDaemonCommand()
+		dolt = fmt.Sprintf(scratchDoltBody,
+			ScratchDoltService,
+			composeLiteral(s.ScratchDoltImage),
+			scratchDoltVolume,
+			scratchDoltDataPath,
+			names.network,
+		)
+		doltVolume = "  " + scratchDoltVolume + ":\n"
+		doltWait = "      " + ScratchDoltService + ":\n        condition: service_healthy\n"
+	}
+
 	out := fmt.Sprintf(daemonComposeBody,
 		composeLiteral(s.Image),
 		composeLiteral(s.ContainerName),
 		s.StopGrace.String(),
 		composeLiteral(s.TownRoot),
-		dindService,
+		names.engine,
 		config.SupervisorContainer,
-		dindNetwork,
+		names.network,
 		composeLiteral(DindImage),
-		dindVolume,
+		names.volume,
 		dindDataPath,
-		defaultNetwork,
+		names.egress,
+		command,
+		dolt,
+		doltVolume,
+		doltWait,
 	)
 	return []byte(out), nil
 }
@@ -215,10 +337,110 @@ func (s ComposeSpec) validate() error {
 	case s.StopGrace < MinimumStopGrace:
 		return fmt.Errorf("compose spec: StopGrace %s is below MinimumStopGrace %s; a shorter grace period SIGKILLs the daemon mid-shutdown",
 			s.StopGrace, MinimumStopGrace)
-	case s.DoltHost == "":
+	case !s.Scratch && s.DoltHost == "":
 		return fmt.Errorf("compose spec: DoltHost is empty; pass town.json's dolt.container_host or dolt.host resolved, and an empty dolt.host is the local machine, which inside the container is the container itself")
 	}
+	if s.Scratch {
+		return s.validateScratch()
+	}
 	return checkDoltHost(s.DoltHost)
+}
+
+// validateScratch refuses a scratch spec that could reach the live town: the
+// live town's root, container name or compose project. The container name and
+// project are the config defaults a live daemon runs under. The live root is the
+// caller's, passed as LiveTownRoot, because no constant names it, so an empty
+// one is refused rather than compared as "no root". The scratch spec carries no
+// DoltHost: its daemon's Dolt host comes from the scratch town's own settings.
+func (s ComposeSpec) validateScratch() error {
+	switch {
+	case s.LiveTownRoot == "":
+		return fmt.Errorf("compose spec: LiveTownRoot is empty; a scratch spec is checked against the live town root, so the live root must be named")
+	case !filepath.IsAbs(s.LiveTownRoot):
+		return fmt.Errorf("compose spec: LiveTownRoot %q is not absolute; the root check compares absolute paths", s.LiveTownRoot)
+	case s.ContainerName == config.DefaultContainerName:
+		return fmt.Errorf("compose spec: scratch ContainerName %q is the live daemon's container name", s.ContainerName)
+	case s.Project == config.DefaultComposeProject:
+		return fmt.Errorf("compose spec: scratch Project %q is the live compose project", s.Project)
+	case s.ScratchDoltImage == "":
+		return fmt.Errorf("compose spec: ScratchDoltImage is empty; the scratch project runs its own Dolt server, at DoltServerImage")
+	}
+	return s.checkScratchRoot()
+}
+
+// checkScratchRoot refuses a scratch town root that resolves to the live root, to
+// a path under it, or to an ancestor of it: mounting an ancestor exposes the live
+// town just as mounting it does. The check runs on resolved paths, because a
+// symlink to the live root, or a directory under one that does not exist yet,
+// names the live town under another path. A path that cannot be resolved is
+// refused rather than taken as clear.
+func (s ComposeSpec) checkScratchRoot() error {
+	// Both roots must be absolute here as well as in validate: a relative path
+	// cannot be compared with an absolute one, and this check never takes "cannot
+	// compare" for "clear".
+	if !filepath.IsAbs(s.TownRoot) || !filepath.IsAbs(s.LiveTownRoot) {
+		return fmt.Errorf("compose spec: scratch TownRoot %q and LiveTownRoot %q must both be absolute for the root check", s.TownRoot, s.LiveTownRoot)
+	}
+	scratch, err := resolvePath(s.TownRoot)
+	if err != nil {
+		return fmt.Errorf("compose spec: resolving scratch TownRoot %q: %w", s.TownRoot, err)
+	}
+	live, err := resolvePath(s.LiveTownRoot)
+	if err != nil {
+		return fmt.Errorf("compose spec: resolving LiveTownRoot %q: %w", s.LiveTownRoot, err)
+	}
+	if within(scratch, live) {
+		return fmt.Errorf("compose spec: scratch TownRoot %q is the live town root %q or lies under it; the scratch project mounts its own directory, never the live one", s.TownRoot, s.LiveTownRoot)
+	}
+	if within(live, scratch) {
+		return fmt.Errorf("compose spec: scratch TownRoot %q contains the live town root %q; mounting it would expose the live town, so the scratch project mounts its own directory", s.TownRoot, s.LiveTownRoot)
+	}
+	return nil
+}
+
+// within reports whether path is root or lies under it. Letter case is folded,
+// as the default macOS volumes do, so the same directory spelled in another case
+// is still the same directory; on a case-sensitive filesystem that folding can
+// refuse two distinct directories whose names differ only by case, which is the
+// safe side of the error for a check that guards the live town. A pair that
+// cannot be compared (filepath.Rel errors when one path is absolute and the
+// other is not) counts as inside, so the caller refuses: the answer "cannot
+// tell" is never "clear".
+func within(path, root string) bool {
+	rel, err := filepath.Rel(strings.ToLower(root), strings.ToLower(path))
+	if err != nil {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolvePath returns path with its symlinks resolved. A path that does not
+// exist yet resolves through its nearest existing ancestor and keeps the rest
+// of its name, so a directory a scratch install has not created yet, under a
+// link to the live root, still resolves to the live root. A dangling link is an
+// entry that exists but whose target does not, so it is an error, never a name
+// to keep lexically: its target could be the live root. Any other error stops
+// the resolution.
+func resolvePath(path string) (string, error) {
+	clean := filepath.Clean(path)
+	dir, rest := clean, ""
+	for {
+		_, err := os.Lstat(dir)
+		parent := filepath.Dir(dir)
+		if errors.Is(err, fs.ErrNotExist) && parent != dir {
+			rest = filepath.Join(filepath.Base(dir), rest)
+			dir = parent
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(resolved, rest), nil
+	}
 }
 
 // checkDoltHost refuses a loopback endpoint: the container's own loopback is

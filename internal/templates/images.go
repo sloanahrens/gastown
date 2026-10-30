@@ -30,4 +30,14 @@ const (
 	// It is the same digest the live Forgejo project's engine runs, so the
 	// sweep meets the engine its CI jobs already use.
 	DindImage = "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1"
+
+	// DoltServerImage is the Dolt SQL server the scratch project runs, at the
+	// version DoltVersion names, so the scratch town's Dolt and the daemon
+	// image's client are one version. It is pinned by the digest of the image
+	// index of that tag, read from Docker Hub's registry API on 2026-10-30
+	// (docker-content-digest of dolthub/dolt-sql-server:2.3.2). DoltImageDigest
+	// does not carry over: a digest names one repository, and that one is
+	// dolthub/dolt. Moving DoltVersion means reading this tag's digest too. The
+	// tag stays in the reference for the reader; the digest is what docker pulls.
+	DoltServerImage = "dolthub/dolt-sql-server:" + DoltVersion + "@sha256:38d5e900583267f35e36ad738e13f202e62860b351aa4c088dceaf7dbaed7ab6"
 )
