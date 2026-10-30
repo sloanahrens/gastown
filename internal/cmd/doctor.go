@@ -247,9 +247,8 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// Must run before infrastructure checks that might fail confusingly on full disks.
 	d.Register(doctor.NewDiskSpaceCheck())
 	d.Register(doctor.NewEventsLogCheck())
-	// bd call budgets: a caller that grows past its row in
-	// internal/beads/census_budgets.go is how the last hot path grew to 12.7
-	// calls a minute unnoticed (gt-gojo0).
+	// bd call budgets: a caller whose average passes its row in
+	// internal/beads/census_budgets.go fails the check (gt-gojo0).
 	d.Register(doctor.NewCensusBudgetCheck())
 
 	// Container-suite gate slot: informational check exposing the Docker

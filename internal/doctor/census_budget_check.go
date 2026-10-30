@@ -90,7 +90,7 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusSkipped,
 			Message: fmt.Sprintf("not enough data: %d census windows in %s, need %d", len(samples), logPath, censusBudgetMinWindows),
-			Details: censusIgnoredDetails(read.Ignored),
+			Details: censusNoteDetails(read),
 		}
 	}
 	if age := c.now().Sub(samples[len(samples)-1].At); age > censusBudgetStale {
@@ -99,7 +99,7 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("census stale: %s", age.Round(time.Second)),
 			Details: append([]string{fmt.Sprintf("the newest census record in %s is %s old, so the rates below it are not the town's", logPath, age.Round(time.Second))},
-				censusIgnoredDetails(read.Ignored)...),
+				censusNoteDetails(read)...),
 			FixHint: "Check that the daemon's census log still runs (gt daemon status, then daemon.log for its startup line)",
 		}
 	}
@@ -131,7 +131,7 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: fmt.Sprintf("%d bd caller(s) over budget in the last %d census windows", len(over), len(samples)),
-			Details: append(append(append([]string(nil), over...), unbudgeted...), censusIgnoredDetails(read.Ignored)...),
+			Details: append(append(append([]string(nil), over...), unbudgeted...), censusNoteDetails(read)...),
 			FixHint: "Cut the caller's bd calls, or raise its row in internal/beads/census_budgets.go (a data edit om reviews)",
 		}
 	case len(unbudgeted) > 0:
@@ -139,15 +139,24 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d bd caller(s) have no budget", len(unbudgeted)),
-			Details: append(unbudgeted, censusIgnoredDetails(read.Ignored)...),
+			Details: append(unbudgeted, censusNoteDetails(read)...),
 			FixHint: "Add each caller's average as a row in internal/beads/census_budgets.go",
+		}
+	}
+	if read.Torn > 0 {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("within budget, but %d torn census record(s) were ignored: the averages read low", read.Torn),
+			Details: censusNoteDetails(read),
+			FixHint: "Check the daemon log for a crash or a full disk around the torn lines",
 		}
 	}
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusOK,
 		Message: fmt.Sprintf("every bd caller is within budget across the last %d census windows", len(samples)),
-		Details: censusIgnoredDetails(read.Ignored),
+		Details: censusNoteDetails(read),
 	}
 }
 
@@ -164,6 +173,16 @@ func censusIgnoredDetails(ignored int) []string {
 		return nil
 	}
 	return []string{fmt.Sprintf("%d census record(s) ignored: each sits above the log's first stamped line, so it has no instant to be averaged over", ignored)}
+}
+
+// censusNoteDetails names what the read left out: records with no instant and
+// records the log tore. Both leave an average over data the operator cannot see.
+func censusNoteDetails(read censusRead) []string {
+	out := censusIgnoredDetails(read.Ignored)
+	if read.Torn > 0 {
+		out = append(out, fmt.Sprintf("%d torn census record(s) ignored: their minutes are in the span and their calls are not, so the averages read low", read.Torn))
+	}
+	return out
 }
 
 func (c *CensusBudgetCheck) now() time.Time {
@@ -195,6 +214,11 @@ type censusRead struct {
 	// written above the log's first stamped line; with no moment to sit at, its
 	// calls cannot be charged to a minute of the span.
 	Ignored int
+	// Torn is the lines that carry the census marker and do not parse: a record
+	// cut by a crash, a full disk or a concurrent writer. The span counts the
+	// minutes such a record sat in but not its calls, so every average is read
+	// low by what they held; the check says so and does not report a clean pass.
+	Torn int
 }
 
 // censusSamples returns the newest max census records in the town's daemon
@@ -213,6 +237,9 @@ func censusSamples(townRoot string, max int) (censusRead, error) {
 		at, text := parser.Parse(line)
 		window, ok := beads.ParseCensusLine(text)
 		if !ok {
+			if beads.IsCensusLine(text) {
+				read.Torn++
+			}
 			continue
 		}
 		if at.IsZero() {

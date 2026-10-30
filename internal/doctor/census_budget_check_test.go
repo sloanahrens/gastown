@@ -73,7 +73,7 @@ func TestCensusBudgetCheckFailsOneCallerOver(t *testing.T) {
 	if detail == "" {
 		t.Fatalf("details do not name the caller: %q", r.Details)
 	}
-	for _, want := range []string{"20.0", "15.9"} {
+	for _, want := range []string{"20.0", "12.7"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("detail %q must hold the average and the budget (%s)", detail, want)
 		}
@@ -442,5 +442,38 @@ func TestCensusBudgetCheckCountsTheRecordsItCannotPlace(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(r.Details, "\n"), "2 census record(s) ignored") {
 		t.Errorf("details %q must count the two records the read could not place", r.Details)
+	}
+}
+
+// TestCensusBudgetCheckWarnsOnTornRecords: a census line cut mid-record (it
+// carries the marker and does not parse) is counted and named, and a log that
+// is within budget only because of what it lost is a warning, never a clean
+// pass. The torn lines sit inside the span, so their minutes are counted and
+// their calls are not. Mutation: drop the torn count and the status reads OK.
+func TestCensusBudgetCheckWarnsOnTornRecords(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < 60; i++ {
+		stamp := censusLogStart.Add(time.Duration(i) * time.Minute).Format("2006/01/02 15:04:05")
+		if i%20 == 7 {
+			// Cut after the marker: three windows' worth of rows are gone.
+			fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@metrics.queueLa\n", stamp)
+			continue
+		}
+		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@landworker.RetryBeads.List=6\n", stamp)
+	}
+	writeDoctorTownFile(t, town, "daemon/daemon.log", b.String())
+
+	r := censusCheck().Run(&CheckContext{TownRoot: town})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %v (%s), want Warning for a census that lost records", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "3 torn census record(s)") {
+		t.Errorf("message = %q, want the three torn records counted", r.Message)
+	}
+	if censusDetail(r, "torn census record(s) ignored") == "" {
+		t.Errorf("details = %q, want the torn records named", r.Details)
 	}
 }

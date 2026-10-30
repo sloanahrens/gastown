@@ -1,7 +1,9 @@
 # The census baseline gt-gojo0's budget table is built from, taken at commit
 # b4f678ef on 2026-10-30.
 #
-# Source: the 60 one-minute census windows ending 2026-10-30 12:36 CDT, as the
+# Source: dipper's baseline table (the bead gt-p85pw tracker notes' census
+# ranking, kept at ~/gt/.runtime/overseer/backlog/bd-volume-20261030.md), taken
+# from the 60 one-minute census windows ending 2026-10-30 12:36 CDT, as the
 # hot-path beads quote them (gt-hw6ih, gt-r9pj9, gt-z0dcj, gt-pjcpb, gt-3bqfy).
 # A window logs only its eight busiest rows (censusLogRows), so a caller that
 # never ranks in a window is never named; over the baseline nine callers were
@@ -10,12 +12,13 @@
 # not call counts: 762 calls over 60 minutes is 12.7 a minute.
 #
 # Columns: calls per minute, caller, the hot-path bead that cuts it (- when no
-# bead does). A budget is the rate times 1.25, rounded up to the next
-# hundredth.
+# bead does). A budget is the rate itself, rounded up to the next hundredth,
+# for a caller a bead cuts (it is tightened after a post-install census), and
+# the rate times 1.25, rounded up, for a caller none cuts.
 12.7	metrics.queueLandingColumn	gt-hw6ih
 11.4	landworker.RetryBeads.Show	gt-r9pj9
 7.7	daemon.(*Daemon).showRigBead	gt-z0dcj
-6.9	landworker.RetryBeads.List	gt-r9pj9
+6.9	landworker.RetryBeads.List	-
 3.5	schedulerrun.listAllSlingContextRecords	gt-pjcpb
 3.3	landworker.RetryBeads.Children	gt-r9pj9
 2.1	landworker.RetryBeads.Comments	gt-r9pj9

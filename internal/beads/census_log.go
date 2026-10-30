@@ -168,6 +168,13 @@ type CensusWindow struct {
 	Rows    []CensusRow
 }
 
+// IsCensusLine reports whether a log line's text is a census record by its
+// marker, whether or not it parses: a record that carries the marker and does
+// not parse is torn, and a reader counts it instead of passing over it.
+func IsCensusLine(text string) bool {
+	return strings.Contains(text, censusLogMarker)
+}
+
 // ParseCensusLine reads the census record in one daemon log line and reports
 // false for a line that holds none, or holds a truncated or inconsistent one.
 // The record's own fields are checked against the rows it lists: the rows are

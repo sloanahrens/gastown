@@ -51,14 +51,18 @@ func readCensusBaseline(t *testing.T) []baselineCaller {
 	return rows
 }
 
-// budgetFor is the budget a baseline row allows: the rate times 1.25, rounded
-// up to the next hundredth.
-func budgetFor(rate float64) float64 {
-	return math.Ceil(rate*1.25*100) / 100
+// budgetFor is the budget a baseline row allows: the rate itself, rounded up to
+// the next hundredth, when a hot-path bead cuts the caller (the budget is
+// tightened after a post-install census), and the rate times 1.25 otherwise.
+func budgetFor(row baselineCaller) float64 {
+	if row.CutBy != "-" {
+		return math.Ceil(row.Rate*100) / 100
+	}
+	return math.Ceil(row.Rate*1.25*100) / 100
 }
 
 // TestCensusBudgetsAreTheBaseline: the shipped table names the baseline's
-// callers, in its order, at 1.25 times each one's rate (gt-gojo0). A table
+// callers, in its order, at each one's baseline rate when a hot-path bead cuts it and at 1.25 times it when none does (gt-gojo0). A table
 // that only counted sixteen rows would pass while naming the wrong sixteen or
 // holding a budget the baseline never allowed.
 func TestCensusBudgetsAreTheBaseline(t *testing.T) {
@@ -75,8 +79,8 @@ func TestCensusBudgetsAreTheBaseline(t *testing.T) {
 		if got.Caller != want.Caller {
 			t.Errorf("row %d names %q, the baseline ranks %q there", i+1, got.Caller, want.Caller)
 		}
-		if want := budgetFor(want.Rate); got.CallsPerMinute != want {
-			t.Errorf("%s: budget %v, want %v (%v a minute times 1.25, rounded up)", got.Caller, got.CallsPerMinute, want, baseline[i].Rate)
+		if wantBudget := budgetFor(want); got.CallsPerMinute != wantBudget {
+			t.Errorf("%s: budget %v, want %v (baseline %v a minute, cut by %q)", got.Caller, got.CallsPerMinute, wantBudget, want.Rate, want.CutBy)
 		}
 	}
 }

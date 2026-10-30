@@ -12,15 +12,18 @@ type CensusBudget struct {
 // minute (gt-gojo0). It is data rather than code on purpose: raising a budget
 // is an edit here that om reviews.
 //
-// A budget is the caller's baseline rate times 1.25, rounded up to the next
-// hundredth, so the gate fails on growth and never on the rate it measured. A
-// caller whose cutting bead has landed keeps its baseline rate until a
-// post-install census measures the cut; tightening the row to the landed rate
-// times 1.25 is a later edit, made against that measurement rather than
-// against a target rate in a bead. Each row's comment names its cutting bead.
+// A caller a hot-path bead cuts is budgeted at its baseline rate, so the gate
+// fails on any growth and never on the rate it measured; its budget is
+// tightened to the landed rate times 1.25 by a later edit, made against a
+// post-install census and not against a target in a bead. A caller no bead
+// cuts is budgeted at its baseline rate times 1.25, rounded up to the next
+// hundredth: its rate is what it will keep. Each row's comment names its
+// cutting bead, and the test that reads testdata/census-baseline-20261030.txt
+// pins both rules.
 //
 // Rows are in baseline order. The first nine carry the rate the baseline
-// recorded for that caller. A census window logs only its eight busiest rows,
+// recorded for that caller (a cut caller's row is that rate; List, which no bead
+// cuts, carries 1.25 times it). A census window logs only its eight busiest rows,
 // so a caller fast enough to rank was measured and a slower one was not: the
 // rows below the ninth sit at 1.0 a minute, the rate every caller the log left
 // out is bounded by. The split and the rounding are pinned by the test that
@@ -29,29 +32,29 @@ var censusCallerBudgets = []CensusBudget{
 	// Baseline 762 calls, 12.7 a minute: one ready-to-land list per rig per
 	// metrics sample (gt-hw6ih moves the column onto the landing worker's
 	// published count).
-	{Caller: "metrics.queueLandingColumn", CallsPerMinute: 15.88},
+	{Caller: "metrics.queueLandingColumn", CallsPerMinute: 12.70},
 	// Baseline 685 calls, 11.4 a minute: the landing worker re-reading every
 	// held bead each pass (gt-r9pj9).
-	{Caller: "landworker.RetryBeads.Show", CallsPerMinute: 14.25},
+	{Caller: "landworker.RetryBeads.Show", CallsPerMinute: 11.40},
 	// Baseline 462 calls, 7.7 a minute: each rig's identity bead, once a
 	// minute (gt-z0dcj).
-	{Caller: "daemon.(*Daemon).showRigBead", CallsPerMinute: 9.63},
+	{Caller: "daemon.(*Daemon).showRigBead", CallsPerMinute: 7.70},
 	// Baseline 414 calls, 6.9 a minute: the per-rig poll of ready-to-land,
 	// which stays (gt-r9pj9 leaves it alone).
 	{Caller: "landworker.RetryBeads.List", CallsPerMinute: 8.63},
 	// Baseline 207 calls, 3.5 a minute in bursts: the sling contexts read
 	// three times a dispatch cycle (gt-pjcpb).
-	{Caller: "schedulerrun.listAllSlingContextRecords", CallsPerMinute: 4.38},
+	{Caller: "schedulerrun.listAllSlingContextRecords", CallsPerMinute: 3.50},
 	// Baseline 198 calls, 3.3 a minute: the held beads' children (gt-r9pj9).
-	{Caller: "landworker.RetryBeads.Children", CallsPerMinute: 4.13},
+	{Caller: "landworker.RetryBeads.Children", CallsPerMinute: 3.30},
 	// Baseline 128 calls, 2.1 a minute: the held beads' comments (gt-r9pj9).
-	{Caller: "landworker.RetryBeads.Comments", CallsPerMinute: 2.63},
+	{Caller: "landworker.RetryBeads.Comments", CallsPerMinute: 2.10},
 	// Baseline 84 calls, 1.4 a minute: one plugin-run list per plugin per
 	// tick (gt-3bqfy).
-	{Caller: "plugin.(*Recorder).queryRuns", CallsPerMinute: 1.75},
+	{Caller: "plugin.(*Recorder).queryRuns", CallsPerMinute: 1.40},
 	// Baseline 60 calls, 1.0 a minute: the refusal annotation posted again
 	// each pass (gt-r9pj9).
-	{Caller: "landworker.RetryBeads.AddComment", CallsPerMinute: 1.25},
+	{Caller: "landworker.RetryBeads.AddComment", CallsPerMinute: 1.00},
 	// The ready note each landing writes, one call per landed bead.
 	{Caller: "landworker.RetryBeads.AppendNotes", CallsPerMinute: 1.25},
 	// The label write a landing makes, and the rework label's removal.
