@@ -1,0 +1,8 @@
+{"Time":"2026-10-30T10:00:00.000Z","Action":"start","Package":"example.com/fixture/d"}
+{"Time":"2026-10-30T10:00:00.001Z","Action":"run","Package":"example.com/fixture/d","Test":"TestAfterNoise"}
+{"Time":"2026-10-30T10:00:00.002Z","Action":"output","Package":"example.com/fixture/d","Test":"TestAfterNoise","Output":"=== RUN   TestAfterNoise\n"}
+ld: warning: stray tool output between two events
+{"Time":"2026-10-30T10:00:00.011Z","Action":"pass","Package":"example.com/fixture/d","Test":"TestAfterNoise","Elapsed":0.01}
+{"Time":"2026-10-30T10:00:00.012Z","Action":"output","Package":"example.com/fixture/d","Output":"PASS\n"}
+{"Time":"2026-10-30T10:00:00.013Z","Action":"output","Package":"example.com/fixture/d","Output":"ok  \texample.com/fixture/d\t0.05s\n"}
+{"Time":"2026-10-30T10:00:00.014Z","Action":"pass","Package":"example.com/fixture/d","Elapsed":0.05}
