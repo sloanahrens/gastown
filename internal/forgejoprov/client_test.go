@@ -260,7 +260,8 @@ func redactToken(s string) string {
 	return strings.ReplaceAll(s, fixtureToken, redacted)
 }
 
-// TestBodyTail covers the 300-byte cut, the newline to space rule and the empty body.
+// TestBodyTail covers the 300-byte cut, the newline to space rule, the JSON
+// credential mask and the empty body, on the formatter that knows no token.
 func TestBodyTail(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("a", 400)
@@ -270,19 +271,19 @@ func TestBodyTail(t *testing.T) {
 		want string
 	}{
 		{name: "empty body", resp: nil, want: ""},
-		{name: "short body", resp: []byte("nope"), want: " — nope"},
-		{name: "newlines become spaces", resp: []byte("a\nb\nc"), want: " — a b c"},
-		{name: "cut at 300 bytes", resp: []byte(long), want: " — " + strings.Repeat("a", 300)},
-		{name: "exactly 300 bytes kept", resp: []byte(strings.Repeat("b", 300)), want: " — " + strings.Repeat("b", 300)},
-		{name: "cut backs off a split UTF-8 sequence", resp: []byte(strings.Repeat("a", 299) + "é" + "b"), want: " — " + strings.Repeat("a", 299)},
-		{name: "minted token is masked", resp: []byte(`{"name":"bot","sha1":"` + fixtureToken + `"}`), want: ` — {"name":"bot","sha1":"[redacted]"}`},
-		{name: "password is masked", resp: []byte(`{"password": "hunter2"}`), want: ` — {"password": "[redacted]"}`},
+		{name: "short body", resp: []byte("nope"), want: " - nope"},
+		{name: "newlines become spaces", resp: []byte("a\nb\nc"), want: " - a b c"},
+		{name: "cut at 300 bytes", resp: []byte(long), want: " - " + strings.Repeat("a", 300)},
+		{name: "exactly 300 bytes kept", resp: []byte(strings.Repeat("b", 300)), want: " - " + strings.Repeat("b", 300)},
+		{name: "cut backs off a split UTF-8 sequence", resp: []byte(strings.Repeat("a", 299) + "é" + "b"), want: " - " + strings.Repeat("a", 299)},
+		{name: "minted token is masked", resp: []byte(`{"name":"bot","sha1":"` + fixtureToken + `"}`), want: ` - {"name":"bot","sha1":"[redacted]"}`},
+		{name: "password is masked", resp: []byte(`{"password": "hunter2"}`), want: ` - {"password": "[redacted]"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := BodyTail(tc.resp); got != tc.want {
-				t.Errorf("BodyTail = %q, want %q", got, tc.want)
+			if got := bodyTail(tc.resp); got != tc.want {
+				t.Errorf("bodyTail = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -291,12 +292,13 @@ func TestBodyTail(t *testing.T) {
 // TestUnexpectedFormat pins the exact text of an unexpected-status error.
 func TestUnexpectedFormat(t *testing.T) {
 	t.Parallel()
-	err := Unexpected("GET", "/users/bot-polecat", 500, []byte("boom\nline"))
-	want := "GET /users/bot-polecat: unexpected HTTP 500 — boom line"
+	c := &Client{Token: newSecret(fixtureToken)}
+	err := c.Unexpected("GET", "/users/bot-polecat", 500, []byte("boom\nline"))
+	want := "GET /users/bot-polecat: unexpected HTTP 500 - boom line"
 	if err.Error() != want {
 		t.Errorf("Unexpected = %q, want %q", err.Error(), want)
 	}
-	bare := Unexpected("DELETE", "/x", 404, nil)
+	bare := c.Unexpected("DELETE", "/x", 404, nil)
 	if want := "DELETE /x: unexpected HTTP 404"; bare.Error() != want {
 		t.Errorf("Unexpected with no body = %q, want %q", bare.Error(), want)
 	}
@@ -333,5 +335,70 @@ func TestFindObject(t *testing.T) {
 				t.Errorf("FindObject id = %v, want %v", obj["id"], tc.id)
 			}
 		})
+	}
+}
+
+// TestClientBodyTailScrubsTheEcho feeds the client replies that echo its own
+// token in each shape a server or proxy might, and checks none reaches the tail.
+func TestClientBodyTailScrubsTheEcho(t *testing.T) {
+	t.Parallel()
+	c := &Client{Token: newSecret(fixtureToken)}
+	cases := []struct {
+		name string
+		resp string
+	}{
+		{name: "plain text", resp: "invalid credential " + fixtureToken + " for user"},
+		{name: "authorization line", resp: "request headers:\nAuthorization: token " + fixtureToken + "\nAccept: application/json"},
+		{name: "authorization line, other case", resp: "authorization:token " + fixtureToken},
+		{name: "bearer text", resp: "rejected Bearer " + fixtureToken + " as expired"},
+		{name: "bearer text, other case", resp: "rejected BEARER " + fixtureToken},
+		{name: "twice", resp: fixtureToken + " and again " + fixtureToken},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tail := c.BodyTail([]byte(tc.resp))
+			if strings.Contains(tail, fixtureToken) {
+				t.Errorf("BodyTail carries the token: %q", redactToken(tail))
+			}
+			if !strings.Contains(tail, redacted) {
+				t.Errorf("BodyTail = %q, want the masked marker %q", tail, redacted)
+			}
+			err := c.Unexpected("GET", "/x", 500, []byte(tc.resp))
+			if strings.Contains(err.Error(), fixtureToken) {
+				t.Errorf("Unexpected carries the token: %q", redactToken(err.Error()))
+			}
+		})
+	}
+}
+
+// TestClientBodyTailScrubsBeforeTheCut puts the token across the 300-byte cut:
+// scrubbing the cut text instead of the whole reply would leave its first part
+// in the tail.
+func TestClientBodyTailScrubsBeforeTheCut(t *testing.T) {
+	t.Parallel()
+	c := &Client{Token: newSecret(fixtureToken)}
+	resp := strings.Repeat("x", 295) + fixtureToken + strings.Repeat("y", 50)
+	tail := c.BodyTail([]byte(resp))
+	for n := 4; n <= len(fixtureToken); n++ {
+		if strings.Contains(tail, fixtureToken[:n]) {
+			t.Fatalf("BodyTail keeps the first %d characters of the token across the cut: %q", n, tail[len(tail)-20:])
+		}
+	}
+	if got := len(tail) - len(" - "); got > bodyTailLimit {
+		t.Errorf("tail is %d bytes, want at most %d", got, bodyTailLimit)
+	}
+}
+
+// TestClientBodyTailEmptyAndAnonymous covers the empty reply and a client that
+// has no token to hide.
+func TestClientBodyTailEmptyAndAnonymous(t *testing.T) {
+	t.Parallel()
+	if got := (&Client{Token: newSecret(fixtureToken)}).BodyTail(nil); got != "" {
+		t.Errorf("BodyTail(nil) = %q, want empty", got)
+	}
+	anon := &Client{}
+	if got, want := anon.BodyTail([]byte("Authorization: token x")), " - Authorization: token x"; got != want {
+		t.Errorf("a client with no token changed the reply: %q, want %q", got, want)
 	}
 }
