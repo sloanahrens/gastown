@@ -183,6 +183,20 @@ func TestEveryEntryDeclaresItsGoUse(t *testing.T) {
 	}
 }
 
+func TestMakefileGateRunsOnShelltierChanges(t *testing.T) {
+	t.Parallel()
+	for _, e := range Manifest() {
+		if e.Path != "scripts/makefile-gate_test.sh" {
+			continue
+		}
+		if !slices.Contains(e.TriggersOrDefault(), "internal/") {
+			t.Fatalf("TriggersOrDefault() = %q, want internal/ so a Go change under internal/shelltier runs the script", e.TriggersOrDefault())
+		}
+		return
+	}
+	t.Fatal("scripts/makefile-gate_test.sh is not in the manifest")
+}
+
 func TestHasGoDeclarationNeedsTextAfterThePrefix(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
