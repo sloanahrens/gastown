@@ -352,8 +352,13 @@ func coveredByABead(rule string) bool {
 //
 // The level leads because this is the page that raises alarms: a crit row must
 // not sink under a warn one, so the score orders each level and never buries or
-// hides a row (gt-b9j3o.2). The queue's own table has no alert levels and ranks
-// by the score alone (attention.OrderByLandingRisk).
+// hides a row (gt-b9j3o.2). The queue's own table has no alert levels: it ranks
+// by the needs_human score, with its risk-path items re-ranked among themselves
+// by the landing risk (attention.OrderByLandingRisk).
+//
+// The landing risk is not part of this order. After the sort, orderRiskPathRows
+// re-ranks the risk-path rows inside each group of one owner, kind and level by
+// that risk, and leaves every other row where this order put it (gt-n8tmf).
 func attentionBefore(a, b AttentionRow) bool {
 	if a.Owner != b.Owner {
 		return ownerRank(a.Owner) < ownerRank(b.Owner)

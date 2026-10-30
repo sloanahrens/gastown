@@ -684,6 +684,45 @@ func TestAttentionKeepsTheLastLandingRiskOnAFailedRead(t *testing.T) {
 	}
 }
 
+// Risk-path rows that tie on the landing risk keep the order the panel gave
+// them: the risk ranks nothing between them, so the longest wait still leads,
+// and an unanswered row sorts after the answered ones in its group. Every row
+// stays on the list (gt-n8tmf).
+func TestAttentionKeepsThePanelOrderOnALandingRiskTie(t *testing.T) {
+	t.Parallel()
+
+	const (
+		riskOld = "risk:gt-a:aaaaaaaaaaaa"
+		riskMid = "risk:gt-b:bbbbbbbbbbbb"
+		riskNew = "risk:gt-c:cccccccccccc"
+		riskNil = "risk:gt-d:dddddddddddd"
+	)
+	riskPath := func(key string, at time.Time) Alert {
+		return Alert{ID: key, At: at, Level: LevelWarn, Key: key, Title: attention.RuleRiskPath,
+			Text: key + " landed touching cmd", Rule: attention.RuleRiskPath}
+	}
+	// The panel's age order is nil, mid, old, new; the tie ranks the answered
+	// three in that order and sends the unanswered one last.
+	items := []Alert{
+		riskPath(riskOld, attentionNow.Add(-4*time.Minute)),
+		riskPath(riskNil, attentionNow.Add(-6*time.Minute)),
+		riskPath(riskNew, attentionNow.Add(-3*time.Minute)),
+		riskPath(riskMid, attentionNow.Add(-5*time.Minute)),
+	}
+	risks := attention.LandingRisks{riskOld: 2, riskMid: 2, riskNew: 2}
+
+	at := buildAttention(nil, nil, items, AttentionQueue{}, ScoresRead{}, LandingRiskRead{Risks: risks}, attentionNow)
+	want := []string{riskMid, riskOld, riskNew, riskNil}
+	if len(at.Rows) != len(want) {
+		t.Fatalf("the panel holds %d rows, want all %d", len(at.Rows), len(want))
+	}
+	for i, id := range want {
+		if at.Rows[i].ID != id {
+			t.Fatalf("row %d is %q, want %q (rows %+v)", i, at.Rows[i].ID, id, at.Rows)
+		}
+	}
+}
+
 // An answers log that exists but could not be read is a state of its own: the
 // rows and the counts still stand, and the panel says the scores are missing
 // rather than drawing a queue Jev answered nothing about (gt-b9j3o.2).
