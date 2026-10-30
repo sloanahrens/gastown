@@ -3,20 +3,30 @@ package tiersweep
 import (
 	"fmt"
 	"os"
+	"path"
 	"reflect"
 	"testing"
 )
 
-// fakeSource is the Source a test injects. LsFiles returns the scripted tracked
-// list whatever the pattern, so each function filters its own input; ReadFile
-// returns the scripted contents, and an error for a name with none.
+// fakeSource is the Source a test injects. LsFiles returns the tracked files
+// whose final element matches the pattern, as the git pathspec does for the
+// patterns the code passes (*go.mod, *_test.go); ReadFile returns the scripted
+// contents, and an error for a name with none.
 type fakeSource struct {
 	tracked  []string
 	contents map[string]string
 }
 
-func (f *fakeSource) LsFiles(_, _ string) ([]string, error) {
-	return f.tracked, nil
+func (f *fakeSource) LsFiles(_, pattern string) ([]string, error) {
+	var out []string
+	for _, file := range f.tracked {
+		if ok, err := path.Match(pattern, path.Base(file)); err != nil {
+			return nil, err
+		} else if ok {
+			out = append(out, file)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeSource) ReadFile(name string) ([]byte, error) {
@@ -82,13 +92,26 @@ func TestNestedModulesTable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			src := &fakeSource{tracked: tc.tracked}
-			files, err := src.LsFiles(".", "*/go.mod")
+			files, err := src.LsFiles(".", "*go.mod")
 			if err != nil {
 				t.Fatal(err)
 			}
 			equalList(t, NestedModules(files), tc.want)
 		})
 	}
+}
+
+// TestNestedModulesLsFilesPattern: the listing passes its pattern through, so
+// a tracked file the pattern does not name never reaches NestedModules. The
+// fake holds a non-matching file that an ignored pattern would return.
+func TestNestedModulesLsFilesPattern(t *testing.T) {
+	t.Parallel()
+	src := &fakeSource{tracked: []string{"a/go.mod", "a/main.go", "a/go.sum"}}
+	got, err := src.LsFiles(".", "*go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	equalList(t, got, []string{"a/go.mod"})
 }
 
 // TestTaggedDirsTable: a test file whose //go:build line names integration is
@@ -186,31 +209,49 @@ func TestTaggedDirsTable(t *testing.T) {
 	}
 }
 
-// TestInsideModule: a module's own directory and anything below it are inside;
-// a sibling that shares its prefix is not.
+// TestInsideModule feeds InsideModule the list NestedModules returns for a
+// file list holding a nested module, a root module and a root package, so the
+// two helpers are checked against each other's real output. A module's own
+// directory and anything below it are inside, in either path form; a sibling
+// that shares its prefix is not, and the root is never inside.
 func TestInsideModule(t *testing.T) {
 	t.Parallel()
-	modules := []string{"./tracker", "./a/b"}
+	fixture := []string{"tracker/go.mod", "go.mod", "tracker/store/x_test.go", "cmd/gt/main.go"}
+	nested := NestedModules(fixture)
+	equalList(t, nested, []string{"tracker"})
+
 	cases := []struct {
 		name string
 		dir  string
 		want bool
 	}{
-		{name: "equal to a module", dir: "./tracker", want: true},
-		{name: "below a module", dir: "./tracker/store", want: true},
-		{name: "deep below a module", dir: "./a/b/c/d", want: true},
+		{name: "nested module, ./ form", dir: "./tracker/store", want: true},
+		{name: "nested module, bare form", dir: "tracker/store", want: true},
+		{name: "nested module, trailing slash", dir: "tracker/store/", want: true},
+		{name: "the module directory itself", dir: "./tracker", want: true},
 		{name: "sibling sharing a prefix", dir: "./tracker2", want: false},
-		{name: "parent of a module", dir: "./a", want: false},
-		{name: "unrelated directory", dir: "./internal/cmd", want: false},
+		{name: "root package", dir: "./cmd/gt", want: false},
+		{name: "root, ./ form", dir: "./", want: false},
+		{name: "root, dot form", dir: ".", want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := InsideModule(tc.dir, modules); got != tc.want {
-				t.Errorf("InsideModule(%q) = %v, want %v", tc.dir, got, tc.want)
+			if got := InsideModule(tc.dir, nested); got != tc.want {
+				t.Errorf("InsideModule(%q, NestedModules) = %v, want %v", tc.dir, got, tc.want)
 			}
 		})
 	}
+	t.Run("hand-written ./-prefixed modules", func(t *testing.T) {
+		t.Parallel()
+		modules := []string{"./tracker"}
+		if !InsideModule("tracker/store", modules) || !InsideModule("./tracker/store", modules) {
+			t.Error("a package below a ./-prefixed module is not inside it")
+		}
+		if InsideModule("./tracker2", modules) {
+			t.Error("./tracker2 is inside ./tracker")
+		}
+	})
 	t.Run("no modules, nothing inside", func(t *testing.T) {
 		t.Parallel()
 		if InsideModule("./tracker", nil) {

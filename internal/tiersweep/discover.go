@@ -75,16 +75,29 @@ func TaggedDirs(files []string, read func(string) ([]byte, error)) []string {
 	return sortedUnique(dirs)
 }
 
-// InsideModule reports whether dir is one of modules or below one. Both sides
-// are ./-relative, as NestedModules' callers and TaggedDirs print them, so
-// ./tracker2 is not inside ./tracker.
+// InsideModule reports whether dir is one of modules or below one. Both
+// arguments may be in either form: NestedModules prints a bare directory
+// (tracker) and TaggedDirs prints ./tracker, and both name the same place.
+// The root (./ or .) is inside no module, because NestedModules never lists
+// it. So ./tracker2 is not inside tracker, and ./tracker/sub is.
 func InsideModule(dir string, modules []string) bool {
+	d := cleanDir(dir)
+	if d == "." {
+		return false
+	}
 	for _, m := range modules {
-		if dir == m || strings.HasPrefix(dir, m+"/") {
+		mc := cleanDir(m)
+		if d == mc || strings.HasPrefix(d, mc+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+// cleanDir puts a directory in the bare form NestedModules prints: no leading
+// ./, no trailing slash, and path.Clean applied. The root comes back as ".".
+func cleanDir(p string) string {
+	return path.Clean(strings.TrimSuffix(strings.TrimPrefix(p, "./"), "/"))
 }
 
 // DockerPackages returns the packages a docker.txt lists, in file order, each
