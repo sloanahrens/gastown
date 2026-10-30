@@ -15,11 +15,12 @@ blocked_on_environment (noul)
   verdict: not-yet
 
 drifted_from_bead (noul)
-  logged 6, labeled 0, positives 0, negatives 0, base rate n/a
+  logged 6, labeled 1, positives 0, negatives 1, base rate 0.0%
   at 0.5: precision n/a, recall n/a
-  best F1 n/a at threshold n/a
+  best F1 0.000 at threshold 0.100
+  precision at the best F1 cut: 0.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
-    0.0-0.2      0  n/a  n/a
+    0.0-0.2      1  0.100  0.000
     0.2-0.4      0  n/a  n/a
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
@@ -27,11 +28,12 @@ drifted_from_bead (noul)
   verdict: not-yet
 
 looping (noul)
-  logged 6, labeled 0, positives 0, negatives 0, base rate n/a
-  at 0.5: precision n/a, recall n/a
-  best F1 n/a at threshold n/a
+  logged 6, labeled 2, positives 1, negatives 1, base rate 50.0%
+  at 0.5: precision n/a, recall 0.0%
+  best F1 0.667 at threshold 0.100
+  precision at the best F1 cut: 50.0% over 2 flagged
   calibration (band, labeled n, mean value, label rate):
-    0.0-0.2      0  n/a  n/a
+    0.0-0.2      2  0.100  0.500
     0.2-0.4      0  n/a  n/a
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a

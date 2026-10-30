@@ -72,6 +72,9 @@ type progressCase struct {
 	// notInStore keeps the bead out of the fake notes reader, so it reads as
 	// beads.ErrNotFound.
 	notInStore bool
+	// extra is note text a case needs beyond its landing record, such as a
+	// refused submission.
+	extra string
 	// want is the labels the adapter must set, nil when it must leave the item
 	// unlabeled; wantRule names the rule that sets them.
 	want     map[QuestionID]bool
@@ -125,6 +128,12 @@ func writeProgressTown(t *testing.T, town string, cases []progressCase) fakeProg
 		if !c.landed.IsZero() {
 			notes.notes[c.bead] = land.LandingRecord{LandedCommit: "abc123", LandedAt: c.landed}.NoteBlock()
 		}
+		if c.extra != "" {
+			if notes.notes[c.bead] != "" {
+				notes.notes[c.bead] += "\n"
+			}
+			notes.notes[c.bead] += c.extra
+		}
 		if !c.stop.StoppedAt.IsZero() || c.stop.GateSpent > 0 {
 			writeOverrunStop(t, town, c.bead, c.stop)
 		}
@@ -169,7 +178,7 @@ func TestProgressLabelRules(t *testing.T) {
 			bead:     "gt-p01",
 			nudge:    progressBase,
 			landed:   at(15 * time.Minute),
-			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true},
+			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true, qLooping: false, qDriftedFromBead: false},
 			wantRule: ruleProgressLanded,
 		},
 		{
@@ -177,7 +186,7 @@ func TestProgressLabelRules(t *testing.T) {
 			bead:     "gt-p02",
 			nudge:    progressBase,
 			landed:   at(20 * time.Minute),
-			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true},
+			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true, qLooping: false, qDriftedFromBead: false},
 			wantRule: ruleProgressLanded,
 		},
 		{
@@ -201,7 +210,7 @@ func TestProgressLabelRules(t *testing.T) {
 			bead:     "gt-p05",
 			nudge:    progressBase,
 			stop:     progressStop{StoppedAt: at(20 * time.Minute)},
-			want:     map[QuestionID]bool{qMakingProgress: false, qRemaining: false},
+			want:     map[QuestionID]bool{qMakingProgress: false, qRemaining: false, qLooping: true},
 			wantRule: ruleProgressNotLanded + "+" + ruleProgressStopped,
 		},
 		{
@@ -234,7 +243,7 @@ func TestProgressLabelRules(t *testing.T) {
 			nudge:    progressBase,
 			landed:   at(10 * time.Minute),
 			stop:     progressStop{GateSpent: time.Minute, GateSeenAt: at(2 * time.Minute)},
-			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true, qBlockedOnEnvironment: true},
+			want:     map[QuestionID]bool{qMakingProgress: true, qRemaining: true, qBlockedOnEnvironment: true, qLooping: false, qDriftedFromBead: false},
 			wantRule: ruleProgressLanded + "+" + ruleProgressGateWait,
 		},
 		{
@@ -278,6 +287,206 @@ func TestProgressLabelRules(t *testing.T) {
 				t.Errorf("label = %+v, want labels %v by rule %q", lab, c.want, c.wantRule)
 			}
 		})
+	}
+}
+
+// refusedNotes is the note text a refused submission leaves: a READY TO LAND
+// block stamped submitted, then the refusal that answers it. A zero submitted
+// leaves the stamp out, as a bead from before the block carried one.
+func refusedNotes(submitted time.Time, reason string) string {
+	return refusedBlock(submitted, "polecat/dag/gt-x", land.RejectionNote{Kind: "review", Reason: reason})
+}
+
+// refusedBlock is refusedNotes for a case about the refusal's other fields: the
+// branch the refused submission was on, and the findings or gate tail the
+// refusal carries.
+func refusedBlock(submitted time.Time, branch string, rej land.RejectionNote) string {
+	work := land.Work{Branch: branch, Head: "abc123", Target: "main", Worker: "dag", Submitted: submitted}
+	rej.Attempt, rej.Branch, rej.Target, rej.MR, rej.Head = 1, work.Branch, work.Target, "gt-x", work.Head
+	return land.FormatReadyNote(work) + "\n" + land.FormatRejectionNote(rej)
+}
+
+// probeLabel runs one case's line through the adapter and returns the label
+// the test is about, and whether the adapter set it.
+func probeLabel(t *testing.T, town string, notes fakeProgressNotes, c progressCase, id QuestionID) (bool, bool) {
+	t.Helper()
+	a := newProgressTestAdapter(town, notes, progressNow)
+	item, err := a.Parse(mustMarshal(t, progressLine(c)))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	lab, err := a.Label(context.Background(), item)
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	got, set := lab.Labels[id]
+	return got, set
+}
+
+// Looping reads the guard's stop record: a stop at or after the nudge that was
+// not charged to gate time is the seat repeating itself. A stop charged to gate
+// time is the environment's wait, so it leaves looping unlabeled rather than
+// false, and so does every stop record for a bead the store no longer holds:
+// there is no bead to read the stop against.
+func TestProgressLoopingLabel(t *testing.T) {
+	t.Parallel()
+	at := func(d time.Duration) time.Time { return progressBase.Add(d) }
+	cases := []struct {
+		c progressCase
+		// set reports whether looping must be labeled, want its value.
+		set, want bool
+	}{
+		{
+			c:   progressCase{name: "a stop at or after the nudge with no gate charge is looping", bead: "gt-l01", nudge: progressBase, stop: progressStop{StoppedAt: at(20 * time.Minute)}},
+			set: true, want: true,
+		},
+		{
+			c:   progressCase{name: "a landing in the window is not looping", bead: "gt-l02", nudge: progressBase, landed: at(10 * time.Minute)},
+			set: true, want: false,
+		},
+		{
+			c:   progressCase{name: "a stop charged to gate time leaves looping unlabeled", bead: "gt-l03", nudge: progressBase, stop: progressStop{StoppedAt: at(20 * time.Minute), GateSpent: 4 * time.Minute, GateSeenAt: at(5 * time.Minute)}},
+			set: false, want: false,
+		},
+		{
+			c:   progressCase{name: "a stop from an earlier sling leaves looping unlabeled", bead: "gt-l04", nudge: progressBase, stop: progressStop{StoppedAt: at(-time.Hour)}},
+			set: false, want: false,
+		},
+		{
+			c:   progressCase{name: "a young nudge leaves looping unlabeled", bead: "gt-l05", nudge: progressBase, stop: progressStop{StoppedAt: at(20 * time.Minute)}, logged: progressNow.Add(-10 * time.Minute)},
+			set: false, want: false,
+		},
+		{
+			c:   progressCase{name: "a missing bead leaves looping unlabeled even with a stop", bead: "gt-l06", nudge: progressBase, stop: progressStop{StoppedAt: at(20 * time.Minute)}, notInStore: true},
+			set: false, want: false,
+		},
+	}
+
+	town := t.TempDir()
+	fixtures := make([]progressCase, len(cases))
+	for i, tc := range cases {
+		fixtures[i] = tc.c
+	}
+	notes := writeProgressTown(t, town, fixtures)
+	for _, tc := range cases {
+		t.Run(tc.c.name, func(t *testing.T) {
+			got, set := probeLabel(t, town, notes, tc.c, qLooping)
+			if set != tc.set || (tc.set && got != tc.want) {
+				t.Errorf("looping = %v (labeled %v), want %v (labeled %v)", got, set, tc.want, tc.set)
+			}
+		})
+	}
+}
+
+// Drifted_from_bead reads a refusal the landing wrote after the nudge: a
+// MERGE REJECTION block whose own words name scope drift, as the whole words
+// scope, unrelated or beyond, is the cheap proxy for work that left the bead.
+// The refusal's structural fields and the gate output it quotes are not its
+// words, so a branch name or a path in that output never reads as drift. A bead
+// that landed in the window is labeled false, and a refusal whose submission
+// the notes cannot place in time is left unlabeled rather than guessed at: a
+// refusal that may predate the nudge is not evidence about the work after it.
+func TestProgressDriftedLabel(t *testing.T) {
+	t.Parallel()
+	at := func(d time.Duration) time.Time { return progressBase.Add(d) }
+	cases := []struct {
+		c progressCase
+		// set reports whether drifted_from_bead must be labeled, want its value.
+		set, want bool
+	}{
+		{
+			c:   progressCase{name: "a refusal after the nudge naming scope is drift", bead: "gt-d01", nudge: progressBase, extra: refusedNotes(at(5*time.Minute), "the diff adds a helper outside the bead's scope")},
+			set: true, want: true,
+		},
+		{
+			c:   progressCase{name: "the word unrelated matches", bead: "gt-d02", nudge: progressBase, extra: refusedNotes(at(5*time.Minute), "the diff touches unrelated files")},
+			set: true, want: true,
+		},
+		{
+			c:   progressCase{name: "the word beyond matches in either case", bead: "gt-d03", nudge: progressBase, extra: refusedNotes(at(5*time.Minute), "the work went BEYOND the acceptance")},
+			set: true, want: true,
+		},
+		{
+			c:   progressCase{name: "the word inside a longer word does not match", bead: "gt-d04", nudge: progressBase, extra: refusedNotes(at(5*time.Minute), "the change telescoped into three packages")},
+			set: false, want: false,
+		},
+		{
+			c:   progressCase{name: "a landing in the window is not drift", bead: "gt-d05", nudge: progressBase, landed: at(10 * time.Minute), extra: refusedNotes(at(5*time.Minute), "unrelated files")},
+			set: true, want: false,
+		},
+		{
+			c:   progressCase{name: "a refusal from a submission before the nudge leaves it unlabeled", bead: "gt-d06", nudge: progressBase, extra: refusedNotes(at(-5*time.Minute), "unrelated files")},
+			set: false, want: false,
+		},
+		{
+			c:   progressCase{name: "a refusal whose submission carries no stamp leaves it unlabeled", bead: "gt-d07", nudge: progressBase, extra: refusedNotes(time.Time{}, "unrelated files")},
+			set: false, want: false,
+		},
+		{
+			c:   progressCase{name: "no refusal and no landing leaves it unlabeled", bead: "gt-d08", nudge: progressBase},
+			set: false, want: false,
+		},
+		{
+			c: progressCase{name: "a finding title naming scope is drift", bead: "gt-d09", nudge: progressBase,
+				extra: refusedBlock(at(5*time.Minute), "polecat/dag/gt-x", land.RejectionNote{
+					Kind: "review", Reason: "om requested changes",
+					Findings: []land.Finding{{ID: "abc", Severity: "major", Path: "internal/x/y.go", Line: 42, Title: "the diff touches unrelated files"}},
+				})},
+			set: true, want: true,
+		},
+		{
+			c: progressCase{name: "a branch name holding the word is not the refusal's words", bead: "gt-d10", nudge: progressBase,
+				extra: refusedBlock(at(5*time.Minute), "polecat/scope/gt-x", land.RejectionNote{Kind: "review", Reason: "om requested changes"})},
+			set: false, want: false,
+		},
+		{
+			c: progressCase{name: "a word in the quoted gate output is not the refusal's words", bead: "gt-d11", nudge: progressBase,
+				extra: refusedBlock(at(5*time.Minute), "polecat/dag/gt-x", land.RejectionNote{
+					Kind: "gate", Reason: "the gate failed", GateTail: "FAIL\tinternal/scope/x_test.go"})},
+			set: false, want: false,
+		},
+	}
+
+	town := t.TempDir()
+	fixtures := make([]progressCase, len(cases))
+	for i, tc := range cases {
+		fixtures[i] = tc.c
+	}
+	notes := writeProgressTown(t, town, fixtures)
+	for _, tc := range cases {
+		t.Run(tc.c.name, func(t *testing.T) {
+			got, set := probeLabel(t, town, notes, tc.c, qDriftedFromBead)
+			if set != tc.set || (tc.set && got != tc.want) {
+				t.Errorf("drifted_from_bead = %v (labeled %v), want %v (labeled %v)", got, set, tc.want, tc.set)
+			}
+		})
+	}
+}
+
+// A refusal after the nudge is named by the rule the report prints, so a
+// labeled drift is never mistaken for a landing (gt-tpv79).
+func TestProgressDriftLabelNamesItsRule(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	c := progressCase{
+		name:  "a refusal naming scope",
+		bead:  "gt-d20",
+		nudge: progressBase,
+		extra: refusedNotes(progressBase.Add(5*time.Minute), "unrelated files"),
+	}
+	notes := writeProgressTown(t, town, []progressCase{c})
+	a := newProgressTestAdapter(town, notes, progressNow)
+	item, err := a.Parse(mustMarshal(t, progressLine(c)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lab, err := a.Label(context.Background(), item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ruleProgressNotLanded + "+" + ruleProgressScope
+	if lab.Rule != want {
+		t.Errorf("rule = %q, want %q", lab.Rule, want)
 	}
 }
 
