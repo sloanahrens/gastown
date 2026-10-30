@@ -63,14 +63,19 @@ func Finish(f Finisher, green bool, mode PushMode, rc int) int {
 	if !recorded {
 		rc = removeStaleRecord(f, rc)
 	}
+	removeWorkDir(f)
+	return rc
+}
+
+// removeWorkDir removes the probe's temporary directory. A failure is a warning,
+// not a failed run, because Cleanup already removed the worktree's registration
+// in the rig's repository before this runs, and a Cleanup failure has already
+// failed the run. What is left is the copy, which holds no credential, so the
+// path is named for removal by hand.
+func removeWorkDir(f Finisher) {
 	if err := f.RemoveWorkDir(); err != nil {
-		// It stays a warning, and not a failed run, because Cleanup already
-		// removed the worktree's registration in the rig's repository before this
-		// runs, and a Cleanup failure has already failed the run. What is left is
-		// the copy, which holds no credential, so the path is named for removal by hand.
 		f.Logf("warning: could not remove the probe's work directory %s (%v); remove it by hand", f.WorkDir(), err)
 	}
-	return rc
 }
 
 // finishBranch deletes the probe branch. A branch that is already gone counts as
