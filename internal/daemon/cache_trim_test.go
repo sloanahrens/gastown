@@ -387,9 +387,16 @@ func TestCacheTrimPodsCountsEveryHolderThatHasNotFinished(t *testing.T) {
 	}
 }
 
-// cacheTrimPodJSON is one pod of a fixture's pod list, mounting claim.
+// cacheTrimPodJSON is one pod of a fixture's pod list in the claim's
+// namespace, mounting claim.
 func cacheTrimPodJSON(name, phase, claim string) string {
-	return `{"metadata":{"name":"` + name + `","namespace":"` + cacheTrimNamespace + `"},` +
+	return cacheTrimPodJSONIn(name, phase, claim, cacheTrimNamespace)
+}
+
+// cacheTrimPodJSONIn is one pod of a fixture's pod list, in namespace,
+// mounting claim.
+func cacheTrimPodJSONIn(name, phase, claim, namespace string) string {
+	return `{"metadata":{"name":"` + name + `","namespace":"` + namespace + `"},` +
 		`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"/sandbox/.cache"}]}],` +
 		`"volumes":[{"name":"gt-cache","persistentVolumeClaim":{"claimName":"` + claim + `"}}]},` +
 		`"status":{"phase":"` + phase + `"}}`
@@ -553,12 +560,17 @@ func TestDiskMaintenanceCacheTrimStopsAtTheReadItCannotMake(t *testing.T) {
 			"the cluster's claims could not be read: decoding the claim list"},
 		{"the claim list names no items", map[string]cliReply{getClaims: {stdout: `{}`}},
 			"the cluster's claims could not be read: decoding the claim list: the reply names no item list"},
+		{"a claim item names no namespace", map[string]cliReply{getClaims: {stdout: `{"items":[{"metadata":{"name":"` + cacheTrimClaimName + `"}}]}`}},
+			"the cluster's claims could not be read: decoding the claim list: an item names no name or no namespace"},
 		{"the pod list fails", map[string]cliReply{getPods: {stderr: "the server is unavailable", code: 1}},
 			"the pods that mount it could not be read: kubectl"},
 		{"the pod list is not JSON", map[string]cliReply{getPods: {stdout: "not json"}},
 			"the pods that mount it could not be read: decoding the pod list"},
 		{"the pod list names no items", map[string]cliReply{getPods: {stdout: `{}`}},
 			"the pod list: the reply names no item list"},
+		{"the pod list names a pod of another namespace", map[string]cliReply{getPods: {stdout: `{"items":[` +
+			cacheTrimPodJSONIn("sbx-z", "Running", cacheTrimClaimName, "elsewhere") + `]}`}},
+			"the pod list for namespace " + cacheTrimNamespace + " names the pod sbx-z in elsewhere"},
 		{"the listing is not JSON", map[string]cliReply{execList: {stdout: "not json"}},
 			"the listing could not be read: decoding the trim listing"},
 		{"the object list fails", map[string]cliReply{getObjects: {stderr: "forbidden", code: 1}},
