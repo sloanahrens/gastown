@@ -1,6 +1,11 @@
 package beads
 
-import "github.com/steveyegge/gastown/internal/beadsql"
+import (
+	"fmt"
+	"path/filepath"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
+)
 
 // PreloadBeads warms this *Beads' wisps and issues snapshots, and the
 // dependency rows of both, from one bd sql round trip — the read behind `gt
@@ -17,7 +22,19 @@ import "github.com/steveyegge/gastown/internal/beadsql"
 // The caches never refresh — the same caveat as PreloadMergeRequests: don't
 // hold this instance across writes that could create or change those rows
 // mid-run.
+//
+// A rig the town's route table puts on the tracker backend has no bd to warm:
+// every reader there takes its own per-call seam query, so the preload would
+// be one failed read and one warning per rig and warm nothing (gt-p85pw.108).
 func (b *Beads) PreloadBeads(labels []string, statuses []IssueStatus) error {
+	onTracker, err := b.onTrackerRoute()
+	if err != nil {
+		return err
+	}
+	if onTracker {
+		return nil
+	}
+
 	statuses = uniqueStatuses(statuses)
 	statusNames := make([]string, len(statuses))
 	for i, status := range statuses {
@@ -67,6 +84,35 @@ func (b *Beads) PreloadBeads(labels []string, statuses []IssueStatus) error {
 	snap.details = newPreloadDetails(snap.issues, halves.issueDeps)
 	b.issueSnapshot = snap
 	return nil
+}
+
+// onTrackerRoute reports whether this wrapper's beads are a rig the town's
+// route table puts on the tracker backend — the rigs internal/beads/backend
+// opens without bd. It matches the way that package does: by the beads
+// directory the route names, resolved through the rig's redirect.
+//
+// A wrapper outside a town, and one whose beads directory no route names, is
+// not on the tracker and reads through bd as before. An unreadable route
+// table is an error, never a false answer: reading it as "not the tracker"
+// would send the caller's read into a store the table may have said is not
+// there.
+func (b *Beads) onTrackerRoute() (bool, error) {
+	townRoot := b.getTownRoot()
+	if townRoot == "" {
+		return false, nil
+	}
+	routes, err := LoadRoutes(GetTownBeadsPath(townRoot))
+	if err != nil {
+		return false, fmt.Errorf("reading the route table: %w", err)
+	}
+	store := filepath.Clean(resolveSymlinksBestEffort(b.getResolvedBeadsDir()))
+	for _, route := range routes {
+		dir := filepath.Clean(resolveSymlinksBestEffort(filepath.Join(townRoot, route.Path, ".beads")))
+		if dir == store {
+			return route.BackendName() == BackendTracker, nil
+		}
+	}
+	return false, nil
 }
 
 // preloadRows is one PreloadBeads read split into its four arms: the wisps and
