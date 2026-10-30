@@ -13,17 +13,34 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-var (
-	jevDatasetBattery  string
-	jevDatasetQuestion string
-	jevDatasetSince    string
-	jevDatasetOut      string
-)
+// jevDatasetDeps is what the dataset subcommand takes from the host: the town
+// whose batteries it reads. A test supplies the lookup, so no unit test needs a
+// working directory inside a town.
+type jevDatasetDeps struct {
+	findTownRoot func() (string, error)
+}
 
-var jevDatasetCmd = &cobra.Command{
-	Use:   "dataset",
-	Short: "Export a battery question's labeled answers as a flat CSV",
-	Long: `Read a battery's log through its registered adapter and write one row per
+// realJevDatasetDeps is jevDatasetDeps on this host.
+func realJevDatasetDeps() jevDatasetDeps {
+	return jevDatasetDeps{findTownRoot: workspace.FindFromCwdOrError}
+}
+
+// jevDatasetFlags is one dataset command's flags; a command owns its own so a
+// later run never inherits an earlier run's values.
+type jevDatasetFlags struct {
+	battery  string
+	question string
+	since    string
+	out      string
+}
+
+// newJevDatasetCmd builds `gt jev dataset`.
+func newJevDatasetCmd(d jevDatasetDeps) *cobra.Command {
+	var f jevDatasetFlags
+	cmd := &cobra.Command{
+		Use:   "dataset",
+		Short: "Export a battery question's labeled answers as a flat CSV",
+		Long: `Read a battery's log through its registered adapter and write one row per
 labeled item that answered --question, for the mango analysis to mine: where
 Jev disagrees with the label and what distinguishes its failures. The file
 holds ids and features only. Prompt text, passages, titles, transcripts and
@@ -48,27 +65,32 @@ what it means, the row count, the rows' date range and the dropped columns.
 Examples:
   gt jev dataset --battery logtriage --question needs_action --since 30d
   gt jev dataset --battery finding --question any_duplicate --out ./scratch`,
-	Args: cobra.NoArgs,
-	RunE: runJevDataset,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runJevDataset(cmd.Context(), cmd.OutOrStdout(), d, f, time.Now())
+		},
+	}
+	fl := cmd.Flags()
+	fl.StringVar(&f.battery, "battery", "", "Battery to export (required)")
+	fl.StringVar(&f.question, "question", "", "Question whose labeled answers become the rows (required)")
+	fl.StringVar(&f.since, "since", "", "Export only lines from this window ending now: Nd or a Go duration (default: all time)")
+	fl.StringVar(&f.out, "out", "", "Directory for the CSV and the dict (default: <town>/.runtime/jev-dataset)")
+	_ = cmd.MarkFlagRequired("battery")
+	_ = cmd.MarkFlagRequired("question")
+	return cmd
 }
 
 func init() {
-	f := jevDatasetCmd.Flags()
-	f.StringVar(&jevDatasetBattery, "battery", "", "Battery to export (required)")
-	f.StringVar(&jevDatasetQuestion, "question", "", "Question whose labeled answers become the rows (required)")
-	f.StringVar(&jevDatasetSince, "since", "", "Export only lines from this window ending now: Nd or a Go duration (default: all time)")
-	f.StringVar(&jevDatasetOut, "out", "", "Directory for the CSV and the dict (default: <town>/.runtime/jev-dataset)")
-	_ = jevDatasetCmd.MarkFlagRequired("battery")
-	_ = jevDatasetCmd.MarkFlagRequired("question")
-	jevCmd.AddCommand(jevDatasetCmd)
+	jevCmd.AddCommand(newJevDatasetCmd(realJevDatasetDeps()))
 }
 
-func runJevDataset(cmd *cobra.Command, _ []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
+// runJevDataset finds the town and exports the question out of it.
+func runJevDataset(ctx context.Context, w io.Writer, d jevDatasetDeps, f jevDatasetFlags, now time.Time) error {
+	townRoot, err := d.findTownRoot()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return jevDatasetWithFlags(cmd.Context(), cmd.OutOrStdout(), townRoot, jevDatasetBattery, jevDatasetQuestion, jevDatasetSince, jevDatasetOut, time.Now())
+	return jevDatasetWithFlags(ctx, w, townRoot, f.battery, f.question, f.since, f.out, now)
 }
 
 // jevDatasetWithFlags reads the battery, exports the question and names the

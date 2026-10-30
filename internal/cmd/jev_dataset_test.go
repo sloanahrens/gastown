@@ -3,14 +3,13 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 )
@@ -158,14 +157,23 @@ func TestJevDatasetCommandErrors(t *testing.T) {
 	})
 }
 
-// The command needs a town to find the battery in.
+// The command needs a town to find the battery in, and reports the lookup's
+// failure without writing anything.
 func TestJevDatasetCommandNeedsTown(t *testing.T) {
-	t.Chdir(t.TempDir())
-	t.Setenv("GT_TOWN_ROOT", "")
-	c := &cobra.Command{}
-	c.SetOut(io.Discard)
-	c.SetContext(context.Background())
-	if err := runJevDataset(c, nil); err == nil || !strings.Contains(err.Error(), "town root") {
+	t.Parallel()
+	cmd := newJevDatasetCmd(jevDatasetDeps{findTownRoot: func() (string, error) { return "", errors.New("no town here") }})
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--battery", "fixture", "--question", "needs"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.Execute()
+
+	if err == nil || !strings.Contains(err.Error(), "finding the town root") {
 		t.Errorf("err = %v, want the missing town refused", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("output = %q, want nothing", out.String())
 	}
 }
