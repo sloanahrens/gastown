@@ -1458,16 +1458,19 @@ func TestDaemonStatus_ContainerTownReadsItsOwnContainer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c, _ := stubContainerTown(t, tt.cfg)
-			c.statusLine = c.supervisedLine
 			var asked []string
 			c.dockerInspect = func(_ context.Context, argv []string) ([]byte, error) {
 				asked = argv
 				return []byte("running " + image + "\n"), nil
 			}
-			c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+			c.isRunning = func(string) (bool, int, error) {
+				t.Error("read the lock: a container town's daemon holds its flock in the container's namespace")
+				return false, 0, nil
+			}
+			town := containerDaemonTown(t, `{"running":true}`)
 
 			var out strings.Builder
-			if err := c.daemonStatus(&out, t.TempDir()); err != nil {
+			if err := c.daemonStatus(&out, town); err != nil {
 				t.Fatalf("daemonStatus: %v", err)
 			}
 			if want := inspectArgv(tt.finds); strings.Join(asked, " ") != strings.Join(want, " ") {
@@ -1476,6 +1479,104 @@ func TestDaemonStatus_ContainerTownReadsItsOwnContainer(t *testing.T) {
 			want := "Supervised: container " + tt.finds + " running " + image + "\n"
 			if !strings.Contains(out.String(), want) {
 				t.Errorf("status output = %q, want it to carry %q", out.String(), want)
+			}
+		})
+	}
+}
+
+// containerDaemonTown is a town root whose state.json holds body as given, ""
+// leaving the file out.
+func containerDaemonTown(t *testing.T, body string) string {
+	t.Helper()
+	town := t.TempDir()
+	if body == "" {
+		return town
+	}
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTownDaemonFile(t, town, "state.json", []byte(body))
+	return town
+}
+
+// gt-i2z9l: a container town's daemon holds its flock in the container's
+// namespace, so that lock is not visible from this host and answers nothing
+// about whether it runs. gt daemon status decides from the container's live
+// state together with state.json instead: running needs both, and a read that
+// failed is the failure, never the not-running text.
+func TestDaemonStatus_ContainerTownDecidesRunningFromTheContainer(t *testing.T) {
+	t.Parallel()
+	const image = "gt-daemon:abc123"
+	runningContainer := func(context.Context, []string) ([]byte, error) {
+		return []byte("running " + image + "\n"), nil
+	}
+	exitedContainer := func(context.Context, []string) ([]byte, error) {
+		return []byte("exited " + image + "\n"), nil
+	}
+	unreachableDocker := func(context.Context, []string) ([]byte, error) {
+		return nil, errors.New("Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+	}
+	tests := []struct {
+		name     string
+		inspect  templates.ContainerDocker
+		state    string // state.json's contents; "" leaves the file out
+		wantErr  string // a substring of the error; "" when status answers with output
+		wantExit int    // the exit code when the daemon does not run
+		wantRuns bool
+	}{
+		{"container running and state.json running", runningContainer,
+			`{"running":true,"heartbeat_count":7}`, "", 0, true},
+		{"container exited", exitedContainer, `{"running":true}`, "", 3, false},
+		{"state.json records not running", runningContainer, `{"running":false}`, "", 3, false},
+		{"state.json missing", runningContainer, "", "", 3, false},
+		{"container absent", absentContainer, `{"running":true}`, "", 3, false},
+		{"container state unreadable", unreachableDocker, `{"running":true}`, "Docker daemon", 0, false},
+		{"state.json unreadable", runningContainer, `{not json`, "state.json", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, _ := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
+			c.dockerInspect = tt.inspect
+			c.isRunning = func(string) (bool, int, error) {
+				t.Error("read the lock: a container town's daemon holds its flock in the container's namespace")
+				return false, 0, nil
+			}
+			town := containerDaemonTown(t, tt.state)
+
+			var out strings.Builder
+			err := c.daemonStatus(&out, town)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("status = %q, err = %v, want a failure naming %q", out.String(), err, tt.wantErr)
+				}
+				if strings.Contains(out.String(), "not running") {
+					t.Errorf("status output = %q, want a read that failed to say so, not that the daemon is down", out.String())
+				}
+				return
+			}
+			supervised := "Supervised: container scratch-daemon-1"
+			if tt.wantRuns {
+				if err != nil {
+					t.Fatalf("daemonStatus: %v", err)
+				}
+				if !strings.Contains(out.String(), "Daemon is ") || !strings.Contains(out.String(), "running") {
+					t.Errorf("status output = %q, want the running form", out.String())
+				}
+				if !strings.Contains(out.String(), supervised+" running "+image) {
+					t.Errorf("status output = %q, want the container line %q", out.String(), supervised)
+				}
+				return
+			}
+			var silent *SilentExitError
+			if !errors.As(err, &silent) || silent.Code != tt.wantExit {
+				t.Fatalf("err = %v, want SilentExitError code %d with output %q", err, tt.wantExit, out.String())
+			}
+			if !strings.Contains(out.String(), "Daemon is not running") {
+				t.Errorf("status output = %q, want the not-running form", out.String())
+			}
+			if !strings.Contains(out.String(), supervised) {
+				t.Errorf("status output = %q, want the container line %q", out.String(), supervised)
 			}
 		})
 	}
