@@ -1,7 +1,9 @@
 package baks
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -150,6 +152,51 @@ func TestGroupsArePerDirectoryAndName(t *testing.T) {
 				t.Fatalf("kept+removed = %d, want every file accounted for", got)
 			}
 		})
+	}
+}
+
+// TestGroupsHoldForDiscoveryBuiltPaths drives the grouping through Target.Plan,
+// so each entry and its Path come from readDir rather than a test literal. A
+// discovery that left the directory out of Path would merge the directories
+// into one group and remove the old copy each holds.
+func TestGroupsHoldForDiscoveryBuiltPaths(t *testing.T) {
+	t.Parallel()
+	dirA := filepath.Join(t.TempDir(), "settings")
+	dirB := filepath.Join(t.TempDir(), "settings")
+	dirC := filepath.Join(t.TempDir(), "settings")
+	mustMkdir(t, dirA)
+	mustMkdir(t, dirB)
+	mustMkdir(t, dirC)
+
+	// dirC holds a full keep count younger than the two old copies, so a group
+	// keyed on the name alone puts both old copies past its newest 30.
+	lsof := newFakeLsof(t)
+	for i := range configKeep {
+		lsof.closed(writeBackup(t, dirC, fmt.Sprintf("config.json.bak-%02d", i), time.Duration(i+1)*time.Hour, 10))
+	}
+	oldA := writeBackup(t, dirA, "config.json.bak-20261007", 22*24*time.Hour, 10)
+	oldB := writeBackup(t, dirB, "config.json.bak-20261021", 8*24*time.Hour, 10)
+	lsof.closed(oldA)
+	lsof.closed(oldB)
+
+	plan, err := NewTarget(Config{ConfigDirs: []string{dirA, dirB, dirC}, Run: lsof.run}).
+		Plan(context.Background(), diskmaint.Policy{Now: testNow})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Refused != "" {
+		t.Fatalf("Refused = %q, want a plan", plan.Refused)
+	}
+	if got := removed(plan); len(got) != 0 {
+		t.Fatalf("removed = %v, want none: each directory keeps its own newest 30", got)
+	}
+	if got := len(plan.Kept) + len(plan.Actions); got != configKeep+2 {
+		t.Fatalf("kept+removed = %d, want every one of the %d copies accounted for", got, configKeep+2)
+	}
+	for _, path := range []string{oldA, oldB} {
+		if rule, ok := keptRule(plan, path); !ok || rule != "newest 30 of config.json" {
+			t.Fatalf("rule for %s = %q (kept %v), want %q", path, rule, ok, "newest 30 of config.json")
+		}
 	}
 }
 
