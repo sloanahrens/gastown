@@ -135,6 +135,37 @@ func TestSelectSkipsARecordedRunUntilATriggerChanges(t *testing.T) {
 	}
 }
 
+func TestSelectRunsOnlyTheUnrecordedEntryInAMixedSweep(t *testing.T) {
+	t.Parallel()
+	recorded := noRunScript("scripts/recorded_test.sh")
+	fresh := noRunScript("scripts/fresh_test.sh")
+	st := tiertrigger.State{}
+	Record(st, recorded, "1111111111111111111111111111111111111111", utcAt(29, 9, 0))
+	run, skipped, unreadable := Select([]Entry{recorded, fresh}, st, fakeGit{}, utcAt(29, 12, 0), time.UTC)
+	if got := paths(run); !slices.Equal(got, []string{fresh.Path}) {
+		t.Fatalf("run = %v, want %s", got, fresh.Path)
+	}
+	if got := paths(skipped); !slices.Equal(got, []string{recorded.Path}) {
+		t.Fatalf("skipped = %v, want %s", got, recorded.Path)
+	}
+	if len(unreadable) != 0 {
+		t.Fatalf("unreadable = %v, want none", unreadable)
+	}
+}
+
+func TestSelectPanicsOnNilLocWhenAnEntryHasARecord(t *testing.T) {
+	t.Parallel()
+	entry := noRunScript("scripts/install-gt_test.sh", "scripts/install-gt.sh")
+	st := tiertrigger.State{}
+	Record(st, entry, "1111111111111111111111111111111111111111", utcAt(29, 9, 0))
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Select with a nil loc returned, want a panic")
+		}
+	}()
+	Select([]Entry{entry}, st, fakeGit{}, utcAt(29, 12, 0), nil)
+}
+
 func TestStatePathIsSeparateFromTheContainerState(t *testing.T) {
 	t.Parallel()
 	const town = "/town"
