@@ -246,7 +246,7 @@ func TestTierSweepBead_NamesASlowcheckOnlyRed(t *testing.T) {
 	t.Parallel()
 	const finding = "slowcheck: TestIntegrationX 42.5s in gt.local/devops/tests/host-rehearsal is over the 30s integration cap and is not in internal/testpolicy/slow.txt: it waits"
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "integration-tests_host-rehearsal.log"), []byte(finding+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "integration-tests_host-rehearsal-aaf08642.log"), []byte(finding+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration ./tests/host-rehearsal ...\n")
@@ -316,7 +316,7 @@ func TestTierSweepBead_QuotingDoesNotDependOnTheLineShape(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "integration-tests_host-rehearsal.log"), []byte(tc.finding+"\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "integration-tests_host-rehearsal-aaf08642.log"), []byte(tc.finding+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration "+pkg+" ...\n")
@@ -359,7 +359,7 @@ func TestTierSweepBead_FailAndFindingNameEachOnce(t *testing.T) {
 	unitLog := "" +
 		"slowcheck: TestAlpha 31.0s in github.com/steveyegge/gastown/internal/cmd is over the 30s integration cap and is not in internal/testpolicy/slow.txt: the test builds a container\n" +
 		"slowcheck: TestGamma 33.0s in github.com/steveyegge/gastown/internal/cmd is over the 30s integration cap and is not in internal/testpolicy/slow.txt: the test builds a container\n"
-	if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd.log"), []byte(unitLog), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd-9addf82b.log"), []byte(unitLog), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stageLog := tierSweepWriteTestLog(t, ""+
@@ -396,7 +396,7 @@ func TestTierSweepBead_UnreadableUnitLogFallsBack(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		pad := strings.Repeat("# filler\n", tierSweepLogReadLimit/len("# filler\n")+1)
-		if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd.log"), []byte(pad+finding), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd-9addf82b.log"), []byte(pad+finding), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return dir
@@ -452,7 +452,7 @@ func TestTierSweepBead_QuotedFindingLeavesNoResidue(t *testing.T) {
 	unitLog := "slowcheck: TestAlpha 31.0s in github.com/steveyegge/gastown/internal/cmd \x01\x02 is over the cap\n" +
 		"slowcheck: TestBeta 31.0s in github.com/steveyegge/gastown/internal/cmd is over the cap:  \x1b\n" +
 		long + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd.log"), []byte(unitLog), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd-9addf82b.log"), []byte(unitLog), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration "+pkg+" ...\n")
@@ -508,7 +508,7 @@ func TestTierSweepBead_QuotesFindingsBoundedAndSanitized(t *testing.T) {
 		finding("TestGamma", "the test builds a container") +
 		finding("TestDelta", "the test builds a container") +
 		finding("TestEpsilon", "the test builds a container")
-	if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd.log"), []byte(unitLog), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "integration-internal_cmd-9addf82b.log"), []byte(unitLog), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration "+pkg+" ...\n")
@@ -1009,7 +1009,7 @@ func TestTierSweepBead_CheckCommandNamesTheRanCommand(t *testing.T) {
 		want string
 	}{
 		{name: "go runner", ran: tierSweepStages("devops")[0].command(), want: "GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --all --budget 10m"},
-		{name: "rig script", ran: "bash scripts/tier-sweep.sh shell", want: "GT_TEST_DOCKER=0 bash scripts/tier-sweep.sh shell"},
+		{name: "rig script", ran: "bash " + tierSweepScriptPath + " shell", want: "GT_TEST_DOCKER=0 bash " + tierSweepScriptPath + " shell"},
 		{name: "nothing ran", ran: "", want: ""},
 	}
 	for _, tc := range tests {

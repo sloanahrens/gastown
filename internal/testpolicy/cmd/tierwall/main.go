@@ -5,11 +5,8 @@
 //	make test-integration-wall            # the report on a real tier run
 //	go test -json ./... | tierwall        # ad hoc
 //
-// It exists because scripts/tier-sweep.sh runs one package at a time and logs
-// only go test's ok line, so the tier's real wall under make test-integration
-// (every package at once, bounded by the go test -p cap) was never measured
-// (gt-ik4a1.4.5). make test-integration-wall feeds both of that target's go
-// test invocations into one run, so the tier line spans them.
+// make test-integration-wall feeds both of that target's go test invocations
+// into one run, so the tier line spans them.
 //
 // Failing tests keep their output and passing ones do not, so a red tier stays
 // readable. The exit code is go test's verdict: 1 when anything failed, 0

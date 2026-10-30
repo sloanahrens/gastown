@@ -589,8 +589,9 @@ test-integration:
 # (gt-ik4a1.4.5): the same two commands, each -json, both through one
 # internal/testpolicy/cmd/tierwall run, which prints a line per package,
 # slowest first, then the tier's own wall against the 90s the post-merge
-# cadence waits for (gt-ik4a1.4). scripts/tier-sweep.sh runs one package at a
-# time and logs only go test's ok line, so that wall was never measured.
+# cadence waits for (gt-ik4a1.4). The sweep (cmd/tier-sweep) runs packages one
+# at a time, so this target, not the sweep, measures the tier's wall under
+# make test-integration, where packages run together.
 #
 # Both commands also carry -count=1 (gt-gq4gl): the number decides the cadence
 # switch (gt-ik4a1.4), and without it a second run on unchanged source is

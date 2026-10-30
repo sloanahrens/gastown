@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Tests for scripts/post-land-shell.sh: the post-land check runs the shell
 # tier only when main changed a shell-test input inside the window (gt-8p8h7).
-# Each case builds a throwaway repo whose scripts/tier-sweep.sh is a stub
-# that records it ran.
+# Each case builds a throwaway repo. The shell tier runs as `go run
+# ./cmd/tier-sweep shell`, so a fake go on PATH records that it ran with the
+# tier's name and never builds anything.
 set -uo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)/post-land-shell.sh"
@@ -10,8 +11,13 @@ FAILS=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
 
-# new_repo prints a repo with the script under test, a stub tier-sweep and
-# one base commit dated well outside any window.
+FAKE_BIN=$(mktemp -d "${TMPDIR:-/tmp}/post-land-shell-bin.XXXXXX")
+printf '#!/usr/bin/env bash\necho TIER-RAN "${@: -1}"\n' > "$FAKE_BIN/go"
+chmod +x "$FAKE_BIN/go"
+export PATH="$FAKE_BIN:$PATH"
+
+# new_repo prints a repo with the script under test and one base commit dated
+# well outside any window.
 new_repo() {
   local r
   r=$(mktemp -d "${TMPDIR:-/tmp}/post-land-shell.XXXXXX")
@@ -21,7 +27,6 @@ new_repo() {
   git -C "$r" config core.hooksPath /dev/null
   mkdir -p "$r/scripts" "$r/internal/x"
   cp "$SRC" "$r/scripts/post-land-shell.sh"
-  printf '#!/usr/bin/env bash\necho TIER-RAN "$@"\n' > "$r/scripts/tier-sweep.sh"
   echo base > "$r/internal/x/x.go"
   git -C "$r" add -A
   GIT_COMMITTER_DATE="2020-01-01T00:00:00Z" GIT_AUTHOR_DATE="2020-01-01T00:00:00Z" \
@@ -53,10 +58,21 @@ else
 fi
 rm -rf "$R"
 
+# --- A sibling directory of the runner's is not the runner: the prefix ends in a slash ---
+R=$(new_repo)
+commit_at "$R" internal/shelltierx/x.go ""
+out=$(bash "$R/scripts/post-land-shell.sh" 2>&1); rc=$?
+if [ "$rc" = 0 ] && ! grep -q TIER-RAN <<<"$out" && grep -q "shell tier skipped" <<<"$out"; then
+  pass "sibling of the runner (internal/shelltierx): skipped"
+else
+  fail "sibling of the runner: rc=$rc out=$out"
+fi
+rm -rf "$R"
+
 # --- A recent change to each kind of input runs the tier ---
 # internal/cmd/scheduler_integration_test.go is Go but a shell-tier input
 # (gt-tqxdd): makefile-gate_test.sh reads schedulerTownSlots out of it.
-for path in scripts/install-local_test.sh plugins/p/run.sh .githooks/pre-push Makefile internal/testpolicy/docker.txt internal/cmd/scheduler_integration_test.go; do
+for path in scripts/install-local_test.sh plugins/p/run.sh .githooks/pre-push Makefile internal/shelltier/run.go cmd/tier-sweep/main.go internal/tiersweep/sweep.go internal/testpolicy/docker.txt internal/cmd/scheduler_integration_test.go; do
   R=$(new_repo)
   commit_at "$R" "$path" ""
   out=$(bash "$R/scripts/post-land-shell.sh" 2>&1); rc=$?
@@ -87,12 +103,13 @@ rm -rf "$R"
 
 # --- The tier's exit code is the script's ---
 R=$(new_repo)
-printf '#!/usr/bin/env bash\necho TIER-RAN; exit 3\n' > "$R/scripts/tier-sweep.sh"
+printf '#!/usr/bin/env bash\necho TIER-RAN; exit 3\n' > "$FAKE_BIN/go"
 commit_at "$R" scripts/a.sh ""
 bash "$R/scripts/post-land-shell.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" = 3 ] && pass "red tier: exit code passes through" || fail "red tier: rc=$rc, want 3"
 rm -rf "$R"
 
+rm -rf "$FAKE_BIN"
 if [ "$FAILS" -gt 0 ]; then
   echo "post-land-shell tests: $FAILS failure(s)"
   exit 1

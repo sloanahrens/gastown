@@ -14,8 +14,7 @@ const racePkg = "./internal/cmd"
 var raceArgs = []string{"-race", "-tags", "integration", "-run", "^TestCommandTreeWalkIsReadOnlyUnderParallelTests$"}
 
 // Race runs the race tier and returns its summary line and whether it is RED.
-// The run is one package in the root module, under the container slot, the
-// same as scripts/tier-sweep.sh's race branch.
+// The run is one package in the root module, under the container slot.
 func (s *Sweep) Race() (line string, red bool) {
 	start := s.Now()
 	elapsed := func() int { return int(s.Now().Sub(start) / time.Second) }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -417,6 +418,11 @@ func TestIntegrationTriggerSkipsAndRecord(t *testing.T) {
 			if !reflect.DeepEqual(fake.testRuns(), tc.wantRuns) {
 				t.Errorf("go test runs = %v, want %v", fake.testRuns(), tc.wantRuns)
 			}
+			// The sweep asks the trigger once which packages are due: a second
+			// skips call would decide twice.
+			if got := len(fake.triggerCalls("skips")); got != 1 {
+				t.Errorf("skips calls = %d, want 1", got)
+			}
 			if got := len(fake.triggerCalls("record")); got != tc.wantRecords {
 				t.Errorf("record calls = %d, want %d", got, tc.wantRecords)
 			}
@@ -440,6 +446,26 @@ func TestIntegrationTriggerSkipsAndRecord(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// triggerLogicWords name the trigger's state, its daily decision, its zone and
+// its git reads: the sweep names none of them.
+var triggerLogicWords = []string{"state.json", "DiffNameOnly", "DailyRunDue", "DailyZone", ".runtime", "GT_TOWN_ROOT", "git diff", "git log", "go list"}
+
+// TestIntegrationHoldsNoTriggerLogic pins that the sweep stays a thin caller of
+// the trigger: integration.go names none of its state or git reads, even in a
+// comment. If it fails, move that logic back into internal/tiertrigger.
+func TestIntegrationHoldsNoTriggerLogic(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("integration.go")
+	if err != nil {
+		t.Fatalf("read integration.go: %v", err)
+	}
+	for _, word := range triggerLogicWords {
+		if i := strings.Index(string(src), word); i >= 0 {
+			t.Errorf("integration.go mentions %q on line %d: the trigger's decision belongs to internal/tiertrigger", word, 1+strings.Count(string(src[:i]), "\n"))
+		}
 	}
 }
 

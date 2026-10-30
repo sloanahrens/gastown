@@ -385,7 +385,8 @@ type PatrolsConfig struct {
 	LandingInfra *LandingInfraConfig `json:"landing_infra,omitempty"`
 
 	// TierSweep runs the shell tier and the integration and race tiers (the
-	// Go command, cmd/tier-sweep) against origin/main on an interval, the tiers
+	// Go command, cmd/tier-sweep, and the shell runner it calls,
+	// internal/shelltier) against origin/main on an interval, the tiers
 	// `make gate` does not run (internal/daemon/tier_sweep.go, gt-vsct7.5).
 	// Opt-in: it runs the town's expensive suites.
 	TierSweep *TierSweepConfig `json:"tier_sweep,omitempty"`

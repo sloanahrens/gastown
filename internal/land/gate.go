@@ -60,7 +60,7 @@ type StepResult struct {
 	// landing says why where it is recorded.
 	Warnings []string
 	// ShellFailures are the scripts this step's own tier sweep reported red,
-	// in the order its summary line named them (scripts/tier-sweep.sh). A
+	// in the order its summary line named them (cmd/tier-sweep). A
 	// sweep names them whatever the step is called, so the post-land run's
 	// "test" step reads like the gate's "shell" step (gt-40so9). Empty when
 	// the step ran no sweep, or the sweep named no script.
@@ -283,8 +283,9 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 //
 // internal/cmd/scheduler_integration_test.go is a shell-tier input although it
 // is Go: scripts/makefile-gate_test.sh reads schedulerTownSlots out of it
-// (gt-tqxdd).
-const ShellTierInputs = `^(scripts/|plugins/|\.githooks/|Makefile$|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)`
+// (gt-tqxdd). internal/shelltier/ is the runner the tier execs, and
+// cmd/tier-sweep and internal/tiersweep are the command and package that run it.
+const ShellTierInputs = `^(scripts/|plugins/|\.githooks/|Makefile$|internal/shelltier/|cmd/tier-sweep/|internal/tiersweep/|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)`
 
 // ShellTierSummaryRE matches the shell tier's one summary line and captures
 // the scripts it names. The log directory trails the names, and the tier's

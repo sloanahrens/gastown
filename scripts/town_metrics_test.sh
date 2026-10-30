@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Unit tests for the town-metrics package (scripts/town_metrics/). Fixtures only: no
 # live bd, git, gt or network. Run directly or via the shell tier, which discovers
-# every *_test.sh script (scripts/tier-sweep.sh).
+# every *_test.sh script (the shell tier, internal/shelltier).
 set -euo pipefail
 
 cd "$(dirname "$0")"

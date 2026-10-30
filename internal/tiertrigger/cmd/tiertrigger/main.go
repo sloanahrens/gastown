@@ -1,18 +1,9 @@
-// Command tiertrigger tells the tier sweep which container packages are due
-// and records the commit a passing run tested (gt-e69b2).
+// Command tiertrigger reports which container packages are due and records the
+// commit a passing run tested. It reads GT_TOWN_ROOT, TIER_SWEEP_TESTED,
+// TIER_SWEEP_SKIP and TIER_SWEEP_TRIGGER, and a failing call exits 1.
 //
 //	go run ./internal/tiertrigger/cmd/tiertrigger skips integration-docker
 //	go run ./internal/tiertrigger/cmd/tiertrigger record integration-docker
-//
-// scripts/tier-sweep.sh calls it twice around the docker.txt run: skips feeds
-// TIER_SWEEP_SKIP with the packages that do not need to run, and record stamps
-// the commit after a passing run. Both read the sweep's own environment:
-// GT_TOWN_ROOT for the state files, TIER_SWEEP_TESTED for the commit the run
-// began at, TIER_SWEEP_SKIP for the packages that did not run, and
-// TIER_SWEEP_TRIGGER=0 to turn the trigger off entirely. A decision or record
-// that fails writes no answer, names the failure in the sweep's own words on
-// stderr and exits 1; the sweep runs every container package when skips fails,
-// so a broken trigger costs one full run instead of skipping one.
 package main
 
 import (

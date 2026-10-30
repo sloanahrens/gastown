@@ -250,8 +250,8 @@ func TestSweepGitSource(t *testing.T) {
 	}
 }
 
-// TestSweepCaseTable runs the cases of scripts/tier-sweep_test.sh through Run,
-// one subtest per section of that script, over the fakes: no go, gt or git runs.
+// TestSweepCaseTable runs the cases the old sweep script's shell test pinned
+// through Run, one subtest per case, over the fakes: no go, gt or git runs.
 // Each case reads the command's stdout line and, where the script did, its
 // stderr and the commands the fake saw.
 func TestSweepCaseTable(t *testing.T) {
@@ -309,6 +309,16 @@ func TestSweepCaseTable(t *testing.T) {
 			},
 			wantLine: "failed: ./tracker/store/pgtest",
 			wantCode: 1, wantRuns: []string{"tracker ./store/pgtest"},
+		},
+		{
+			name: "a root failure stays named beside a passing nested module", tier: "integration",
+			setup: func(r *rig) {
+				setTracker(r.repo)
+				r.repo.lists[". *_test.go"] = append(r.repo.lists[". *_test.go"], "r/r_test.go")
+				r.repo.files["r/r_test.go"] = taggedTest
+				r.tier.codes = map[string]int{". ./r": 1}
+			},
+			wantLine: "integration RED passed=1 failed=1 skipped=0 failed: ./r", wantCode: 1,
 		},
 		{
 			name: "a nested package takes the root list's skip entry", tier: "integration",
@@ -412,7 +422,7 @@ func TestSweepCaseTable(t *testing.T) {
 		{
 			name: "TIER_SWEEP_TRIGGER=0 reaches the trigger", tier: "integration",
 			setup:    func(r *rig) { r.repo.files[dockerList] = "internal/beads\n"; r.trigger = "0" },
-			wantLine: "integration GREEN passed=1",
+			wantLine: "integration GREEN passed=1", wantRuns: []string{". ./internal/beads"},
 		},
 		{
 			name: "the shell tier's line is the runner's, unchanged", tier: "shell",
