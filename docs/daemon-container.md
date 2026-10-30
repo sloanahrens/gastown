@@ -106,7 +106,7 @@ Run these from `<scratch-parent>`, a directory that is neither the live town nor
 the scratch town. `--live-root <live-town>` names the live town. It is read only
 to refuse a scratch root under or around it; nothing is run or written in the
 live town. `render` and `up` take `--live-root`, `--root`, `--compose-file`,
-`--image`, `--project` and `--container`.
+`--image`, `--project`, `--container` and `--om-token-file`.
 
 ```
 cd <scratch-parent>
@@ -292,8 +292,10 @@ project on the host.
      --project gt-scratch --container gt-scratch-daemon-1
    ```
 
-   `down` takes the same names as `up`, and `--project` and `--container` are
-   required. It refuses the live town's names before it runs anything. It then
+   `down` takes `--live-root`, `--compose-file`, `--project` and `--container`;
+   the last two are required. It does not read `--root`, `--image` or
+   `--om-token-file`, which only `render` and `up` read. It refuses
+   the live town's names before it runs anything. It then
    runs `docker --context desktop-linux compose -p gt-scratch -f <compose-file> down -v`
    in the compose file's directory. Expected: the three containers, the two
    networks and the volumes named `gt-scratch_*` are removed.
