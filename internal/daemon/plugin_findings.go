@@ -234,9 +234,27 @@ func (d *Daemon) cloudReportDir() string {
 	return config.CloudReportsDir()
 }
 
+// The reasons the daemon closes a plugin escalation with itself. A close that
+// carries one of them is the daemon tidying its own escalation, not an operator
+// who read the failure and closed it, so it never counts toward the reopen
+// window: a set that failed, was superseded, and failed again must page again
+// (gt-ggd75).
+const (
+	pluginCloseSupersededPrefix = "superseded by "
+	pluginCloseCleared          = "cleared: the plugin passed"
+)
+
+// daemonClosedEscalation reports whether an escalation was closed by the
+// daemon's own tidying (a superseded set, or a plugin that passed).
+func daemonClosedEscalation(reason string) bool {
+	return strings.HasPrefix(reason, pluginCloseSupersededPrefix) || reason == pluginCloseCleared
+}
+
 // pluginEscalationClosedRecently reports whether the escalation for key was
-// closed less than pluginEscalationReopenWindow ago, so a failure the operator
-// already closed does not page again until the window passes (gt-ggd75).
+// closed by an operator less than pluginEscalationReopenWindow ago, so a failure
+// the operator already closed does not page again until the window passes
+// (gt-ggd75). A close the daemon made itself (daemonClosedEscalation) is not an
+// operator's and does not suppress.
 //
 // An open escalation under key is a refresh, not a suppression. A read that
 // fails raises rather than suppresses: an unread escalation must not hide a
@@ -278,6 +296,9 @@ func (d *Daemon) pluginEscalationClosedRecently(key string) bool {
 		}
 		if !beads.IssueStatus(is.Status).IsTerminal() {
 			return false
+		}
+		if daemonClosedEscalation(is.CloseReason) {
+			continue
 		}
 		if t := beads.ParseIssueTime(is.ClosedAt); t.After(newest) {
 			newest = t

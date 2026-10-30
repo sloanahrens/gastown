@@ -541,7 +541,7 @@ func (d *Daemon) supersedePluginEscalations(name, key string) {
 	if len(superseded) == 0 {
 		return
 	}
-	if err := d.clearAlertsErr("superseded by "+key, superseded...); err != nil {
+	if err := d.clearAlertsErr(pluginCloseSupersededPrefix+key, superseded...); err != nil {
 		return
 	}
 	for _, old := range superseded {
@@ -559,7 +559,7 @@ func (d *Daemon) clearPluginFailure(p *plugin.Plugin) {
 	if len(keys) == 0 {
 		return
 	}
-	if err := d.clearAlertsErr("cleared: the plugin passed", keys...); err != nil {
+	if err := d.clearAlertsErr(pluginCloseCleared, keys...); err != nil {
 		return
 	}
 	for _, key := range keys {

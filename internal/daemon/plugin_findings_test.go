@@ -626,6 +626,11 @@ func TestPluginEscalationClosedRecently(t *testing.T) {
 			want: false,
 		},
 		{name: "still open", seed: seedOpenEscalation, want: false},
+		// The daemon's own closes are not an operator's: a set that failed, was
+		// superseded and fails again pages again.
+		{name: "closed as superseded by the daemon", seed: seedClosedBy(pluginCloseSupersededPrefix + "another-key"), want: false},
+		{name: "closed because the plugin passed", seed: seedClosedBy(pluginCloseCleared), want: false},
+		{name: "closed by an operator with their own reason", seed: seedClosedBy("known, tracked in gt-ggd75"), want: true},
 		{name: "the store cannot be read", seed: seedClosedEscalation, fail: true, want: false},
 	}
 	for _, tc := range cases {
@@ -668,6 +673,20 @@ func seedOpenEscalation(t *testing.T, bd *beadsfake.Fake, key string) {
 // closes it, as the operator's close leaves it.
 func seedClosedEscalation(t *testing.T, bd *beadsfake.Fake, key string) {
 	t.Helper()
+	seedClosedBy("tracked elsewhere")(t, bd, key)
+}
+
+// seedClosedBy returns a seed that files an escalation under key's fingerprint
+// label and closes it with reason.
+func seedClosedBy(reason string) func(t *testing.T, bd *beadsfake.Fake, key string) {
+	return func(t *testing.T, bd *beadsfake.Fake, key string) {
+		t.Helper()
+		seedClosedWith(t, bd, key, reason)
+	}
+}
+
+func seedClosedWith(t *testing.T, bd *beadsfake.Fake, key, reason string) {
+	t.Helper()
 	is, err := bd.Create(beads.CreateOptions{
 		Title:     "plugin:cloud-check: an earlier failure",
 		Labels:    []string{"gt:escalation", notify.FingerprintLabel(key)},
@@ -676,7 +695,7 @@ func seedClosedEscalation(t *testing.T, bd *beadsfake.Fake, key string) {
 	if err != nil {
 		t.Fatalf("seeding the escalation: %v", err)
 	}
-	if err := bd.CloseWithReason("tracked elsewhere", is.ID); err != nil {
+	if err := bd.CloseWithReason(reason, is.ID); err != nil {
 		t.Fatalf("closing the escalation: %v", err)
 	}
 }
@@ -701,5 +720,31 @@ func TestPluginFailureKeyIsUnchangedForOtherPlugins(t *testing.T) {
 	}
 	if strings.Contains(calls[0].Escalation.Reason, "cloud patrol findings") {
 		t.Errorf("another plugin's escalation carries the cloud findings:\n%s", calls[0].Escalation.Reason)
+	}
+}
+
+// A set that failed, was superseded by another and fails again pages again: the
+// store holds the first set's escalation closed with the daemon's own reason
+// ("superseded by ..."), which is not an operator's close, so the reopen window
+// does not suppress the set that is failing now. Mutation: counting every close
+// toward the window leaves the set unescalated and turns this red.
+func TestCloudCheckSetThatReturnsAfterBeingSupersededPagesAgain(t *testing.T) {
+	t.Parallel()
+
+	clk := newFixedClock()
+	dir := cloudReportsFixture(t, cloudFindingFixture("f0", "api_enabled"))
+	bd := beadsfake.New(beadsfake.WithClock(clk))
+	notes := notifyfake.New()
+	d := cloudCheckDaemon(t, dir, notes, clk, bd)
+	failing := scriptPlugin(t, cloudCheckPlugin, "exit 1\n")
+	rec := &fakeRecorder{}
+
+	first := findingSetKey(cloudCheckPlugin, []string{"f0"})
+	seedClosedBy(pluginCloseSupersededPrefix+"some-other-key")(t, bd, first)
+
+	d.startScriptPlugin(failing, rec)
+	d.scripts.wait()
+	if open := notes.OpenEscalations(first); len(open) != 1 {
+		t.Fatalf("a set the daemon had superseded and that fails again: open = %+v, want its escalation raised", open)
 	}
 }
