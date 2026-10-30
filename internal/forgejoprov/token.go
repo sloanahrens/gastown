@@ -165,14 +165,23 @@ func (p *Provisioner) EnsureToken(role string) error {
 		p.logf("would mint a '%s' token for %s and write %s", p.TokenName, user, path)
 		return nil
 	}
+	// A rotation revokes the old token BEFORE it mints: Forgejo refuses a second
+	// token of the same name, so the order cannot be reversed. A mint that then
+	// fails leaves the file holding a token that no longer works, and the error
+	// says so.
+	revoked := false
 	if p.Rotate {
-		if err := p.revokeOldToken(user); err != nil {
+		var err error
+		if revoked, err = p.revokeOldToken(user); err != nil {
 			return err
 		}
 	}
 
 	token, err := p.mintToken(user, scopes)
 	if err != nil {
+		if revoked {
+			return fmt.Errorf("%w; the previous '%s' token for %s was already revoked, so the token in %s no longer works: run again with --rotate to mint a new one", err, p.TokenName, user, path)
+		}
 		return err
 	}
 	data := []byte("FORGEJO_URL=" + p.WebURL + "\nFORGEJO_USER=" + user + "\nFORGEJO_TOKEN=" + token + "\n")
@@ -183,7 +192,9 @@ func (p *Provisioner) EnsureToken(role string) error {
 		return fmt.Errorf("minted a '%s' token for %s but could not write %s (%w); run again with --rotate to replace it", p.TokenName, user, path, err)
 	}
 	if err := p.files().Chmod(path, tokenFileMode); err != nil {
-		return fmt.Errorf("could not set mode 600 on %s: %w", path, err)
+		// The file was written, with mode 600 from its temp file, so the token is
+		// stored: say so, and what is left to do.
+		return fmt.Errorf("the '%s' token for %s IS stored in %s (it is not lost), but setting its mode to 600 afterwards failed (%w); check the file's mode by hand", p.TokenName, user, path, err)
 	}
 	p.logf("minted a '%s' token for %s as %s (mode 600)", p.TokenName, user, path)
 	return nil
@@ -240,28 +251,28 @@ func (p *Provisioner) mintToken(user string, scopes []string) (string, error) {
 // revokeOldToken removes the token of this run's name so a rotation does not
 // leave the previous credential live. A miss is a warning: the file may hold a
 // token the operator made by hand, and replacing the file is what matters.
-func (p *Provisioner) revokeOldToken(user string) error {
+func (p *Provisioner) revokeOldToken(user string) (revoked bool, err error) {
 	base := "/admin/users/" + url.PathEscape(user) + "/tokens"
 	status, resp, err := p.Client.Do(http.MethodGet, base, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if status != http.StatusOK {
 		p.logf("warning: cannot list %s's tokens (HTTP %d)%s; revoke the old '%s' token by hand", user, status, p.Client.BodyTail(resp), p.TokenName)
-		return nil
+		return false, nil
 	}
 	if _, found := FindObject(resp, "name", p.TokenName); !found {
 		p.logf("no token named '%s' to revoke; if the file held a token minted under another name, revoke it in the web UI", p.TokenName)
-		return nil
+		return false, nil
 	}
 	status, resp, err = p.Client.Do(http.MethodDelete, base+"/"+url.PathEscape(p.TokenName), nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if status == http.StatusNoContent {
 		p.logf("revoked the previous '%s' token", p.TokenName)
-		return nil
+		return true, nil
 	}
 	p.logf("warning: could not revoke the previous '%s' token (HTTP %d)%s; revoke it in the web UI", p.TokenName, status, p.Client.BodyTail(resp))
-	return nil
+	return false, nil
 }

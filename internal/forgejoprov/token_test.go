@@ -290,6 +290,14 @@ func TestTokenFileIsMode0600AndAtomic(t *testing.T) {
 			t.Errorf("a failed write left %s behind", e.Name())
 		}
 	}
+	// The mode argument is what the file gets, not a constant inside the writer.
+	odd := filepath.Join(dir, "forgejo-odd.env")
+	if err := (osFiles{}).WriteFileAtomic(odd, []byte("x"), 0o640); err != nil {
+		t.Fatalf("WriteFileAtomic with mode 0640: %v", err)
+	}
+	if info, err := os.Stat(odd); err != nil || info.Mode().Perm() != 0o640 {
+		t.Errorf("a write asked for mode 0640 produced %v %v", info, err)
+	}
 	// A missing directory is created, 0700.
 	nested := filepath.Join(t.TempDir(), "a", "b", "f.env")
 	if err := (osFiles{}).WriteFileAtomic(nested, []byte("x"), 0o600); err != nil {
@@ -300,8 +308,8 @@ func TestTokenFileIsMode0600AndAtomic(t *testing.T) {
 	}
 }
 
-// assertOnlyFile fails unless dir holds exactly the one file name (plus the
-// blocking directory a later step makes, which is not there yet).
+// assertOnlyFile fails unless dir holds exactly the one file name, so a temp file
+// left behind by the write shows up.
 func assertOnlyFile(t *testing.T, dir, name string) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -402,14 +410,23 @@ type failingRevokeTransport struct {
 	next       http.RoundTripper
 	listStatus int
 	delStatus  int
+	// body is the reply to the failed call; empty means echoReply.
+	body string
+}
+
+func (f failingRevokeTransport) reply() string {
+	if f.body != "" {
+		return f.body
+	}
+	return echoReply
 }
 
 func (f failingRevokeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Method == http.MethodDelete && f.delStatus != 0 {
-		return respond(req, f.delStatus, echoReply)
+		return respond(req, f.delStatus, f.reply())
 	}
 	if req.Method == http.MethodGet && f.listStatus != 0 && strings.HasSuffix(req.URL.Path, "/tokens") {
-		return respond(req, f.listStatus, echoReply)
+		return respond(req, f.listStatus, f.reply())
 	}
 	return f.next.RoundTrip(req)
 }
@@ -798,8 +815,11 @@ func TestEnsureTokenChmodFailures(t *testing.T) {
 		files.chmodErr = errors.New("operation not permitted")
 		var logs []string
 		err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
-		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "mode 600") {
-			t.Fatalf("err = %v, want an error naming %s and mode 600", err, path)
+		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "IS stored") || !strings.Contains(err.Error(), "not lost") {
+			t.Fatalf("err = %v, want an error saying the token IS stored in %s", err, path)
+		}
+		if _, ok := files.files[path]; !ok {
+			t.Errorf("the token file is not there though the error says it is stored")
 		}
 		if v := f.token("bot-polecat", DefaultTokenName); v != "" && strings.Contains(err.Error(), v) {
 			t.Errorf("the error carries the minted token")
@@ -852,4 +872,117 @@ func TestEnsureTokenTransportFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+// echoShapes are the ways a server or proxy might echo the admin token back in a
+// reply that is not JSON: as plain text, as an Authorization line, as a Bearer
+// credential.
+func echoShapes() map[string]string {
+	return map[string]string{
+		"plain text":         "invalid credential " + fixtureToken + " for user",
+		"authorization line": "request headers:\nAuthorization: token " + fixtureToken + "\nAccept: application/json",
+		"bearer":             "rejected Bearer " + fixtureToken + " as expired",
+	}
+}
+
+// TestMintAndRevokeRepliesAreScrubbed drives the 403 path, the unexpected-status
+// path and both revoke warnings with a reply that echoes the admin token in text
+// that is not JSON, and checks neither the error nor the warning carries it. The
+// replies go through the scrubbing Client methods from gt-3r55b (62531b83).
+func TestMintAndRevokeRepliesAreScrubbed(t *testing.T) {
+	t.Parallel()
+	for shape, body := range echoShapes() {
+		t.Run(shape, func(t *testing.T) {
+			t.Parallel()
+			check := func(t *testing.T, where, text string) {
+				t.Helper()
+				if strings.Contains(text, fixtureToken) {
+					t.Errorf("%s carries the admin token: %q", where, redactToken(text))
+				}
+				if !strings.Contains(text, redacted) {
+					t.Errorf("%s lacks the masked marker, so the reply was not quoted through the scrubber: %q", where, text)
+				}
+			}
+			for _, status := range []int{http.StatusForbidden, http.StatusInternalServerError} {
+				var logs []string
+				err := tokenProvisioner(noUsableTransport{status: status, body: body}, newMemFiles(), false, false, &logs).EnsureToken("polecat")
+				if err == nil {
+					t.Fatalf("status %d: no error", status)
+				}
+				check(t, "the mint error", err.Error())
+			}
+			for name, tr := range map[string]func(http.RoundTripper) http.RoundTripper{
+				"list": func(n http.RoundTripper) http.RoundTripper {
+					return failingRevokeTransport{next: n, listStatus: 500, body: body}
+				},
+				"delete": func(n http.RoundTripper) http.RoundTripper {
+					return failingRevokeTransport{next: n, delStatus: 500, body: body}
+				},
+			} {
+				f := newFakeForgejo()
+				withBot(t, f, "polecat")
+				var logs []string
+				if name == "delete" {
+					if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
+						t.Fatalf("seed token: %v", err)
+					}
+					logs = nil
+				}
+				files := newMemFiles()
+				files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
+				_ = tokenProvisioner(tr(f), files, true, false, &logs).EnsureToken("polecat")
+				warning := ""
+				for _, l := range logs {
+					if strings.HasPrefix(l, "warning:") {
+						warning = l
+					}
+				}
+				if warning == "" {
+					t.Fatalf("%s: no warning was logged: %v", name, logs)
+				}
+				check(t, name+" warning", warning)
+			}
+		})
+	}
+}
+
+// TestRotateMintFailureSaysTheOldTokenIsRevoked checks a mint that fails after the
+// old token was revoked says so, with the file path and what to do, and that a
+// mint failing with nothing revoked does not claim it.
+func TestRotateMintFailureSaysTheOldTokenIsRevoked(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	t.Run("revoked then mint fails", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeForgejo()
+		withBot(t, f, "polecat")
+		var logs []string
+		if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
+			t.Fatalf("seed token: %v", err)
+		}
+		files := newMemFiles()
+		files.seed(path, "old", 0o600)
+		err := tokenProvisioner(methodFailsTransport{next: f, method: http.MethodPost}, files, true, false, &logs).EnsureToken("polecat")
+		if err == nil || !strings.Contains(err.Error(), "already revoked") || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "run again with --rotate") {
+			t.Fatalf("err = %v, want the revoked-token explanation naming %s", err, path)
+		}
+		if string(files.files[path]) != "old" {
+			t.Errorf("the file changed though the mint failed")
+		}
+	})
+	t.Run("nothing revoked", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeForgejo()
+		withBot(t, f, "polecat")
+		files := newMemFiles()
+		files.seed(path, "old", 0o600)
+		var logs []string
+		err := tokenProvisioner(methodFailsTransport{next: f, method: http.MethodPost}, files, true, false, &logs).EnsureToken("polecat")
+		if err == nil {
+			t.Fatal("no error")
+		}
+		if strings.Contains(err.Error(), "already revoked") {
+			t.Errorf("the error claims a revoke that did not happen: %v", err)
+		}
+	})
 }
