@@ -10,6 +10,7 @@
 package ring
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -163,25 +164,20 @@ func Read(townRoot string, key []byte, now time.Time) (State, error) {
 	if len(key) == 0 {
 		return State{}, ErrNoKey
 	}
-	tree, err := config.ReadRawJSON(townPath(townRoot))
+	town, err := config.LoadTownConfig(townPath(townRoot))
 	if err != nil {
 		// A town whose config cannot be read is not a town with no ring: the
 		// caller has to act on it, so it is an error and not Absent.
 		return State{}, fmt.Errorf("reading the ring: %w", err)
 	}
-	raw, has := tree[SectionKey]
-	if !has {
+	if len(town.Ring) == 0 {
 		return absent(ReasonNoSection), nil
 	}
-	if raw == nil { // the section is JSON null
+	if bytes.Equal(bytes.TrimSpace(town.Ring), []byte("null")) {
 		return absent(ReasonUnparseable), nil
 	}
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return State{}, fmt.Errorf("reading the ring: %w", err)
-	}
 	var rec Record
-	if err := json.Unmarshal(data, &rec); err != nil {
+	if err := json.Unmarshal(town.Ring, &rec); err != nil {
 		return absent(ReasonUnparseable), nil
 	}
 	if rec.ExpiresAt.IsZero() {

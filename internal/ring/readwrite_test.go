@@ -221,8 +221,14 @@ func TestReadRefusesAnUnreadableTown(t *testing.T) {
 	t.Run("no town.json", func(t *testing.T) {
 		t.Parallel()
 		_, err := Read(t.TempDir(), testKey, now)
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("Read of a town with no mayor/town.json = %v, want an os.IsNotExist error", err)
+		if !errors.Is(err, config.ErrNotFound) {
+			t.Fatalf("Read of a town with no mayor/town.json = %v, want config.ErrNotFound", err)
+		}
+	})
+	t.Run("a town with no name", func(t *testing.T) {
+		t.Parallel()
+		if _, err := Read(tempTown(t, map[string]any{"type": "town", "version": 2}), testKey, now); err == nil {
+			t.Fatal("Read of a town.json that fails validation = nil error, want a refusal")
 		}
 	})
 	t.Run("unparseable town.json", func(t *testing.T) {
@@ -265,6 +271,13 @@ func TestWriteRefuses(t *testing.T) {
 	unsigned.HMAC = ""
 	if err := Write(root, unsigned); !errors.Is(err, ErrUnsigned) {
 		t.Errorf("Write of an unsigned record = %v, want ErrUnsigned", err)
+	}
+	// A forged_at outside the years JSON can carry is refused rather than
+	// stored as a record nothing can read back.
+	undatable := rec
+	undatable.ForgedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := Write(root, undatable); err == nil {
+		t.Error("Write of a record stamped outside the JSON year range = nil error, want a refusal")
 	}
 	if st := mustState(t, root); st.Kind != Absent || st.Reason != ReasonNoSection {
 		t.Errorf("a refused Write left %v behind, want absent (%s)", st, ReasonNoSection)
