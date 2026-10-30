@@ -49,6 +49,7 @@ func TestCurrentVersionTable(t *testing.T) {
 		{name: "golden version.go", text: fixture(t, "version.go.before"), want: "1.2.1"},
 		{name: "no Version line", text: "package cmd\n", want: ""},
 		{name: "unquoted value", text: "Version = 1.2.1\n", want: ""},
+		{name: "longer name ending in the marker", text: "DefaultVersion = \"9.9.9\"\n", want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,8 +62,8 @@ func TestCurrentVersionTable(t *testing.T) {
 }
 
 // TestSetFunctionsMatchGoldenFixtures: each Set function output is its golden
-// file byte for byte. The golden files are the script's own sed substitutions
-// run on the fixtures.
+// file byte for byte. Each golden holds the file's text after the 1.2.1 to 1.3.0
+// edit.
 func TestSetFunctionsMatchGoldenFixtures(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -87,7 +88,7 @@ func TestSetFunctionsMatchGoldenFixtures(t *testing.T) {
 }
 
 // TestSetReplacesEveryOccurrence: the flake fixture holds the version on two
-// lines, and both change, as the script's global substitution does.
+// lines, and both change.
 func TestSetReplacesEveryOccurrence(t *testing.T) {
 	t.Parallel()
 	got := SetFlakeVersion(fixture(t, "flake.nix.before"), "1.2.1", "1.3.0")
@@ -128,6 +129,7 @@ func TestUpdateChangelogCases(t *testing.T) {
 		wantWarning string
 	}{
 		{name: "normal", file: "CHANGELOG.md.before", wantFile: "CHANGELOG.md.after"},
+		{name: "two Unreleased heading lines", file: "CHANGELOG.md.twoheadings.before", wantFile: "CHANGELOG.md.twoheadings.after"},
 		{
 			name:        "no Unreleased section",
 			file:        "CHANGELOG.md.nounreleased",
@@ -160,6 +162,53 @@ func TestUpdateChangelogCases(t *testing.T) {
 			}
 			if want := fixture(t, tc.wantFile); got != want {
 				t.Errorf("CHANGELOG.md differs from golden %s\n--- got ---\n%s\n--- want ---\n%s", tc.wantFile, got, want)
+			}
+		})
+	}
+}
+
+// TestUpdateChangelogMatchesWholeLineOnly: the heading is a line of its own. A
+// line that merely contains the heading text is not moved, and a heading with
+// trailing spaces or a CRLF ending still is.
+func TestUpdateChangelogMatchesWholeLineOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		text        string
+		want        string
+		wantWarning string
+	}{
+		{
+			name:        "marker embedded in a longer line does not move",
+			text:        "see ## [Unreleased] here\n",
+			want:        "see ## [Unreleased] here\n",
+			wantWarning: "Warning: No [Unreleased] section in CHANGELOG.md\nYou may need to manually update CHANGELOG.md",
+		},
+		{
+			name: "exact heading line moves",
+			text: "## [Unreleased]\n",
+			want: "## [Unreleased]\n\n## [1.3.0] - 2026-10-30\n",
+		},
+		{
+			name: "heading with trailing spaces keeps them after the entry",
+			text: "## [Unreleased]  \n",
+			want: "## [Unreleased]\n\n## [1.3.0] - 2026-10-30  \n",
+		},
+		{
+			name: "heading with a CRLF ending keeps it",
+			text: "## [Unreleased]\r\n",
+			want: "## [Unreleased]\n\n## [1.3.0] - 2026-10-30\r\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, warning := UpdateChangelog(tc.text, "1.3.0", "2026-10-30")
+			if got != tc.want {
+				t.Errorf("UpdateChangelog text = %q, want %q", got, tc.want)
+			}
+			if warning != tc.wantWarning {
+				t.Errorf("warning = %q, want %q", warning, tc.wantWarning)
 			}
 		})
 	}

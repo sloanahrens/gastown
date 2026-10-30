@@ -42,21 +42,19 @@ func SetPackageJSON(text, oldVersion, newVersion string) string {
 }
 
 // SetFlakeVersion replaces every version = "old" in flake.nix with the new
-// version. A flake with two matching lines changes both, as the script's
-// global substitution does.
+// version. A flake with two matching lines changes both.
 func SetFlakeVersion(text, oldVersion, newVersion string) string {
 	return setQuoted(text, "version = ", oldVersion, newVersion)
 }
 
-// setQuoted replaces every prefix"old" with prefix"new", the literal form of
-// the script's s|prefix"old"|prefix"new"|g.
+// setQuoted replaces every prefix"old" with prefix"new". The match is literal
+// text, not a pattern, and it is not anchored to a line.
 func setQuoted(text, prefix, oldVersion, newVersion string) string {
 	return strings.ReplaceAll(text, prefix+`"`+oldVersion+`"`, prefix+`"`+newVersion+`"`)
 }
 
 // EditFile reads name through fsys, applies edit to its text and writes the
-// result back, as the script's update_file does with sed -i. A file that cannot
-// be read is an error: sed on a missing file stops the script.
+// result back. A file that cannot be read is an error, and nothing is written.
 func EditFile(fsys FS, name string, edit func(string) string) error {
 	data, err := fsys.ReadFile(name)
 	if err != nil {
@@ -65,18 +63,33 @@ func EditFile(fsys FS, name string, edit func(string) string) error {
 	return fsys.WriteFile(name, []byte(edit(string(data))))
 }
 
-// UpdateChangelog moves the [Unreleased] heading to a new [version] entry dated
-// date: the heading is replaced in place by "## [Unreleased]", a blank line and
-// "## [version] - date". Text with no [Unreleased] heading comes back unchanged
-// with the script's warning, which is the second return value; it is "" when
-// the heading was moved.
+// unreleasedHeading is the line UpdateChangelog looks for.
+const unreleasedHeading = "## [Unreleased]"
+
+// UpdateChangelog replaces every line that is the [Unreleased] heading with
+// "## [Unreleased]", a blank line and "## [version] - date", so the new entry sits
+// where the heading was. A line is a heading when it is the heading text, with
+// optional trailing spaces, tabs or carriage returns. Whatever follows the heading
+// text on that line stays after the new entry. A line that merely contains the
+// heading text, with other text around it, is left alone. Text with no heading
+// line comes back unchanged with
+// a warning as the second return value; the warning is "" when a heading was moved.
 func UpdateChangelog(text, version, date string) (string, string) {
-	const heading = "## [Unreleased]"
-	if !strings.Contains(text, heading) {
+	entry := unreleasedHeading + "\n\n## [" + version + "] - " + date
+	var out strings.Builder
+	moved := false
+	for _, line := range strings.SplitAfter(text, "\n") {
+		if strings.TrimRight(line, " \t\r\n") != unreleasedHeading {
+			out.WriteString(line)
+			continue
+		}
+		moved = true
+		out.WriteString(entry + line[len(unreleasedHeading):])
+	}
+	if !moved {
 		return text, "Warning: No [Unreleased] section in CHANGELOG.md\nYou may need to manually update CHANGELOG.md"
 	}
-	entry := heading + "\n\n## [" + version + "] - " + date
-	return strings.ReplaceAll(text, heading, entry), ""
+	return out.String(), ""
 }
 
 // UpdateChangelogFile applies UpdateChangelog to CHANGELOG.md through fsys. A
@@ -132,6 +145,7 @@ func (e *MismatchError) Error() string {
 // that is not a version is refused, so an empty want cannot match a file that
 // holds no version.
 func Verify(fsys FS, want string, nix bool) error {
+	// ValidateVersion is defined in options.go, in this package.
 	if err := ValidateVersion(want); err != nil {
 		return err
 	}
@@ -169,12 +183,12 @@ func readText(fsys FS, name string) (string, error) {
 }
 
 // quotedValue returns the text between the last two quotes on the first line
-// containing marker. That is the value the script's sed extracts with
-// s/.*"\(.*\)".*/\1/. It returns "" when no line holds marker or the line has
-// fewer than two quotes.
+// whose trimmed text starts with marker. It returns "" when no line starts with
+// marker or the line has fewer than two quotes. The marker is anchored so that a
+// longer name ending in it, such as DefaultVersion = , does not match.
 func quotedValue(text, marker string) string {
 	for _, line := range strings.Split(text, "\n") {
-		if !strings.Contains(line, marker) {
+		if !strings.HasPrefix(strings.TrimLeft(line, " \t"), marker) {
 			continue
 		}
 		last := strings.LastIndex(line, `"`)
