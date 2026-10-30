@@ -1,9 +1,13 @@
 package templates
 
 import (
+	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -401,10 +405,47 @@ func TestRenderLaunchdPlist_EscapesItsValues(t *testing.T) {
 				t.Fatalf("renderLaunchdPlist() error = %v", err)
 			}
 			assertWellFormedXML(t, got)
-			if strings.Contains(got, "<key>Injected</key>") {
-				t.Errorf("rendered plist carries a key the town root's author wrote:\n%s", got)
+
+			// The same data with a benign town root has the keys the template
+			// writes; the escaped values must not add or move any key.
+			benign := tt.data
+			benign.TownRoot = "/test/town"
+			want, err := renderLaunchdPlist(benign)
+			if err != nil {
+				t.Fatalf("renderLaunchdPlist(benign) error = %v", err)
+			}
+			if gotKeys, wantKeys := plistKeyNames(t, got), plistKeyNames(t, want); !slices.Equal(gotKeys, wantKeys) {
+				t.Errorf("rendered plist keys = %q, want %q (a value added or moved a key):\n%s", gotKeys, wantKeys, got)
 			}
 		})
+	}
+}
+
+// plistKeyNames returns the text of each <key> element in s, in document
+// order, read through the XML parser so markup in a value cannot pass for a key.
+func plistKeyNames(t *testing.T, s string) []string {
+	t.Helper()
+	var keys []string
+	dec := xml.NewDecoder(strings.NewReader(s))
+	inKey := false
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return keys
+		}
+		if err != nil {
+			t.Fatalf("rendered plist is not well-formed XML: %v", err)
+		}
+		switch tok := tok.(type) {
+		case xml.StartElement:
+			inKey = tok.Name.Local == "key"
+		case xml.EndElement:
+			inKey = false
+		case xml.CharData:
+			if inKey {
+				keys = append(keys, string(tok))
+			}
+		}
 	}
 }
 
@@ -418,8 +459,8 @@ func TestRenderLaunchdPlist_WorkingDirectoryReadsBackAsTheTownRoot(t *testing.T)
 	if err != nil {
 		t.Fatalf("renderLaunchdPlist() error = %v", err)
 	}
-	written, xmlText := supervisorWorkingDirectory(got)
-	if !xmlText {
+	written, isXMLText := supervisorWorkingDirectory(got)
+	if !isXMLText {
 		t.Errorf("supervisorWorkingDirectory read a plist as a unit's literal text")
 	}
 	decoded, err := decodeXMLEntities(written)
