@@ -186,6 +186,51 @@ func TestNewRigLandingWorker_PublishesIntoTheDaemonsQueueView(t *testing.T) {
 	}
 }
 
+// The worker's one first-sight hook carries both records a submission is owed:
+// the battery's, read from the clone, and the done event a sandbox seat could
+// not write into this town's log (gt-1m9gr). The done recorder is built with
+// the daemon's town root and an assignee reader, so the seat's own word for who
+// it is never reaches the actor unbound.
+func TestNewRigLandingWorker_WiresTheDoneEventRecorder(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "promote-gastown.key")
+	promoteRigConfig(t, townRoot, "gastown", keyFile)
+	writeRigsJSON(t, townRoot, []string{"gastown"})
+	d := newForgejoPromoteDaemon(t, townRoot, "")
+
+	w, err := d.newRigLandingWorker("gastown")
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	composite, ok := w.FirstSight.(*land.FirstSightComposite)
+	if !ok {
+		t.Fatalf("FirstSight = %T, want *land.FirstSightComposite", w.FirstSight)
+	}
+	var done *land.DoneEventRecorder
+	var submission *land.SubmissionRecorder
+	for _, rec := range composite.Recorders {
+		switch r := rec.(type) {
+		case *land.DoneEventRecorder:
+			done = r
+		case *land.SubmissionRecorder:
+			submission = r
+		}
+	}
+	if submission == nil {
+		t.Error("the composite has no submission recorder; the battery's first-sight record would be lost")
+	}
+	if done == nil {
+		t.Fatal("the composite has no done-event recorder; a sandbox seat's submission would leave no done event")
+	}
+	if done.TownRoot != townRoot {
+		t.Errorf("done recorder town root = %q, want the daemon's %q", done.TownRoot, townRoot)
+	}
+	if done.Assignee == nil {
+		t.Error("the done recorder has no assignee reader, so every seat's submission would be refused")
+	}
+}
+
 func TestLandingWorkerConfigDefaults(t *testing.T) {
 	t.Parallel()
 	if IsPatrolEnabled(nil, "landing_worker") {

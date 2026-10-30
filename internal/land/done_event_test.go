@@ -192,6 +192,12 @@ func TestDoneEventRecorderCapsTheStampAndSkipsCrew(t *testing.T) {
 		if _, err := rec.Record(w); err != nil {
 			t.Fatalf("Record: %v", err)
 		}
+		// The log cannot dedupe this one: the event it wrote is stamped now,
+		// before the future cutoff. The submission key is what stops the
+		// next pass writing it again.
+		if wrote, err := rec.Record(w); err != nil || wrote {
+			t.Fatalf("second Record = %v, %v for a future stamp; want false, nil", wrote, err)
+		}
 		lines := readEventLines(t, path)
 		if len(lines) != 1 {
 			t.Fatalf("events = %d lines, want 1", len(lines))
