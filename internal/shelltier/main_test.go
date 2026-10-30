@@ -13,13 +13,12 @@ func TestMain(m *testing.M) {
 }
 
 // trackedShellTests is `git ls-files '*_test.sh'` on the rig when the manifest
-// was written: the 26 scripts, in git's order, with no testdata fixtures.
+// was written: the 25 scripts, in git's order, with no testdata fixtures.
 var trackedShellTests = []string{
 	".githooks/pre-push_test.sh",
 	"deploy/gke-probe/probe_test.sh",
 	"deploy/k8s/kind/kind_test.sh",
 	"deploy/k8s/render-policy_test.sh",
-	"scripts/check-deploy-source_test.sh",
 	"scripts/check-install-path_test.sh",
 	"scripts/deep-review_test.sh",
 	"scripts/docs-lint_test.sh",

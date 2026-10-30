@@ -13,10 +13,9 @@ import (
 )
 
 // TestIntegrationRealRepoCases runs the check against throwaway repositories:
-// the cases scripts/check-deploy-source_test.sh built, one repository state
-// each, through ExecGit rather than a fake. It covers what a fake cannot —
-// git's own answers for an equal commit, a detached HEAD, a branch with no
-// upstream, the .beads pathspec — and the porcelain parsing.
+// one repository state per case, through ExecGit rather than a fake. It covers
+// what a fake cannot — git's own answers for an equal commit, a detached HEAD,
+// a branch with no upstream, the .beads pathspec — and the porcelain parsing.
 func TestIntegrationRealRepoCases(t *testing.T) {
 	// The user's git config must not change an answer: the check and the
 	// fixtures both run with the global and system files switched off.

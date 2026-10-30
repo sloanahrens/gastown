@@ -273,8 +273,9 @@ bd-command-tree:
 check-up-to-date:
 	@# Deploy merged code only (gt-o848l): HEAD must be in origin/main with no
 	@# tracked edits outside .beads/. ALLOW_UNMERGED=1 overrides loudly;
-	@# SKIP_UPDATE_CHECK=1 only skips the fetch (gt-9jax). See the script.
-	@bash $(CURDIR)/scripts/check-deploy-source.sh
+	@# SKIP_UPDATE_CHECK=1 only skips the fetch (gt-9jax). See
+	@# internal/deploysource/check.go for the rules.
+	@go run ./cmd/check-deploy-source
 
 # check-forward-only: Ensure HEAD is a descendant of the currently installed binary's commit.
 # Prevents rebuilding to an older or diverged commit, which caused a crash loop where

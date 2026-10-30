@@ -1,8 +1,7 @@
 // Package deploysource refuses to install a gt built from unmerged code
 // (gt-tpg0p.64). The installed gt is the one the daemon and every town
-// session run, so only code merged to main may reach it; this is the Go port
-// of scripts/check-deploy-source.sh, the precondition of make install-local
-// (gt-o848l).
+// session run, so only code merged to main may reach it; this is the
+// precondition of make install-local (gt-o848l).
 package deploysource
 
 import (
