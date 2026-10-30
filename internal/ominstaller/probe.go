@@ -11,15 +11,21 @@ import (
 // headSHA matches the full commit name git prints for HEAD.
 var headSHA = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
 
-// versionLine matches the "om version <sha>" line the smoke check reads, as the
-// script does.
+// versionLine matches the "om version <sha>" line the smoke check reads.
 var versionLine = regexp.MustCompile(`^\s*om version ([0-9a-f]{7,40})(\s|$)`)
 
-// gitRepo reports whether dir is inside a git work tree. An error means git
-// could not answer, and a caller refuses on it.
+// notARepo is the stderr git prints when dir is outside every work tree.
+const notARepo = "not a git repository"
+
+// gitRepo reports whether dir is inside a git work tree. Outside one, git exits
+// non-zero with notARepo on stderr, which is (false, nil). Any other failure
+// means git could not answer, and a caller refuses on that error.
 func (c Config) gitRepo(ctx context.Context, dir string) (bool, error) {
-	out, _, err := c.Exec(ctx, Command{Name: "git", Args: []string{"rev-parse", "--is-inside-work-tree"}, Dir: dir})
+	out, stderr, err := c.Exec(ctx, Command{Name: "git", Args: []string{"rev-parse", "--is-inside-work-tree"}, Dir: dir})
 	if err != nil {
+		if strings.Contains(stderr, notARepo) {
+			return false, nil
+		}
 		return false, fmt.Errorf("git cannot check for a work tree: %w", err)
 	}
 	return strings.TrimSpace(out) == "true", nil
