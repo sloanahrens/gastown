@@ -137,13 +137,13 @@ func TestLogtriageLabelRules(t *testing.T) {
 			name: "a critical escalation and an operator event are a follow-up that pages",
 			line: 0, now: logtriageNow, labeled: true,
 			labels: map[string]bool{"needs_action": true, "is_routine_noise": false, "auto_remediable": false, "severity": true},
-			rule:   ruleLogtriageFollowUp,
+			rule:   ruleLogtriageFollowUp + "+" + ruleLogtriageNotHealed,
 		},
 		{
 			name: "an event past the window and a cleared event are no follow-up",
 			line: 1, now: logtriageNow, labeled: true,
 			labels: map[string]bool{"needs_action": false, "is_routine_noise": true, "auto_remediable": false},
-			rule:   ruleLogtriageQuiet,
+			rule:   ruleLogtriageQuiet + "+" + ruleLogtriageNotHealed,
 		},
 		{
 			name: "a self-healed event sets auto_remediable and no action",
@@ -159,13 +159,13 @@ func TestLogtriageLabelRules(t *testing.T) {
 			name: "a medium escalation is a follow-up that is a review",
 			line: 4, now: logtriageNow, labeled: true,
 			labels: map[string]bool{"needs_action": true, "is_routine_noise": false, "auto_remediable": false, "severity": false},
-			rule:   ruleLogtriageFollowUp,
+			rule:   ruleLogtriageFollowUp + "+" + ruleLogtriageNotHealed,
 		},
 		{
 			name: "a group exactly an hour old is labeled",
 			line: 1, now: time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC), labeled: true,
 			labels: map[string]bool{"needs_action": false, "is_routine_noise": true, "auto_remediable": false},
-			rule:   ruleLogtriageQuiet,
+			rule:   ruleLogtriageQuiet + "+" + ruleLogtriageNotHealed,
 		},
 	}
 	for _, tc := range cases {
@@ -226,13 +226,13 @@ func TestLogtriageLabelsAFixtureOfGroups(t *testing.T) {
 			name:    "the event inside the dolt group's window is a follow-up",
 			labeled: true,
 			labels:  map[string]bool{"needs_action": true, "is_routine_noise": false, "auto_remediable": false},
-			rule:    ruleLogtriageFollowUp,
+			rule:    ruleLogtriageFollowUp + "+" + ruleLogtriageNotHealed,
 		},
 		{
 			name:    "the event after the polecat group's window is no follow-up",
 			labeled: true,
 			labels:  map[string]bool{"needs_action": false, "is_routine_noise": true, "auto_remediable": false},
-			rule:    ruleLogtriageQuiet,
+			rule:    ruleLogtriageQuiet + "+" + ruleLogtriageNotHealed,
 		},
 		{
 			name: "the gate group is younger than an hour and unlabeled",
@@ -405,6 +405,14 @@ func TestLogtriageUnreadableDataLeavesTheGroupUnlabeled(t *testing.T) {
 			}
 			if tc.labeled && lab.Labels[QuestionID(logtriage.QNeedsAction)] != tc.needsAction {
 				t.Errorf("needs_action %v, want %v", lab.Labels[QuestionID(logtriage.QNeedsAction)], tc.needsAction)
+			}
+			// is_routine_noise is true only for a quiet group whose data all
+			// read: an unreadable follow-up beside a readable one is a
+			// follow-up (false), and an unreadable one alone leaves it unset.
+			if tc.labeled {
+				if v, ok := lab.Labels[QuestionID(logtriage.QRoutineNoise)]; !ok || v != !tc.needsAction {
+					t.Errorf("is_routine_noise %v (set %v), want %v", v, ok, !tc.needsAction)
+				}
 			}
 			if !tc.labeled {
 				for _, q := range []string{logtriage.QRoutineNoise, logtriage.QAutoRemediate} {

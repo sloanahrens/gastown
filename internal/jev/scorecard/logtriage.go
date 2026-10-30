@@ -27,6 +27,7 @@ const (
 	ruleLogtriageFollowUp   = "logtriage:follow-up-within-hour"
 	ruleLogtriageQuiet      = "logtriage:no-follow-up-within-hour"
 	ruleLogtriageSelfHealed = "logtriage:self-healed"
+	ruleLogtriageNotHealed  = "logtriage:no-self-healed-follow-up"
 )
 
 // logtriageBeadID matches a bead id in a daemon line. It is the same pattern
@@ -223,6 +224,7 @@ func (a *logtriageAdapter) Label(_ context.Context, item Item) (Labeling, error)
 		rules = append(rules, ruleLogtriageSelfHealed)
 	} else if !unreadable {
 		labels[QuestionID(logtriage.QAutoRemediate)] = false
+		rules = append(rules, ruleLogtriageNotHealed)
 	}
 	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+")}, nil
 }
