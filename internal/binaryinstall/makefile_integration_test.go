@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -27,14 +28,19 @@ func TestIntegrationMakeInstallLocalRecipe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("make %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
-	want := "go run ./cmd/install-binary " + filepath.Join(buildDir, "gt") + " " + installDir + " gt"
+	// Compare tokens, not the raw line: the assertion is on the command and its
+	// operands in order, so spacing in the recipe can change without a failure.
+	want := []string{"go", "run", "./cmd/install-binary", filepath.Join(buildDir, "gt"), installDir, "gt"}
 	var lines []string
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.HasPrefix(line, "go run ./cmd/install-binary") {
 			lines = append(lines, line)
 		}
 	}
-	if len(lines) != 1 || lines[0] != want {
-		t.Errorf("make install-local printed the install lines %q\nwant exactly one: %q", lines, want)
+	if len(lines) != 1 {
+		t.Fatalf("make install-local printed %d install lines, want exactly one\n%s", len(lines), out)
+	}
+	if got := strings.Fields(lines[0]); !slices.Equal(got, want) {
+		t.Errorf("make install-local printed the install line %q\nwant tokens: %q", lines[0], want)
 	}
 }
