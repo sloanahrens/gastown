@@ -27,6 +27,21 @@ type memFS map[string]string
 
 func (m memFS) Exists(p string) bool { _, ok := m[p]; return ok }
 
+func (m memFS) FileExists(p string) (bool, error) { return m.Exists(p), nil }
+
+// PathExists is also true for a directory: some file lies under p.
+func (m memFS) PathExists(p string) (bool, error) {
+	if m.Exists(p) {
+		return true, nil
+	}
+	for f := range m {
+		if strings.HasPrefix(f, p+"/") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m memFS) ReadFile(p string) ([]byte, error) {
 	contents, ok := m[p]
 	if !ok {
@@ -238,6 +253,10 @@ func TestHistoricalUnreadableDesignDocIsAnError(t *testing.T) {
 type failingReadFS struct{}
 
 func (failingReadFS) Exists(p string) bool { return p == "docs/design/x.md" }
+
+func (failingReadFS) FileExists(p string) (bool, error) { return p == "docs/design/x.md", nil }
+
+func (failingReadFS) PathExists(p string) (bool, error) { return p == "docs/design/x.md", nil }
 
 func (failingReadFS) WalkFiles(dir string) ([]string, error) {
 	if dir == "docs" || dir == "docs/design" {
