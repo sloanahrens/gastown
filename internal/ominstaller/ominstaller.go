@@ -113,6 +113,10 @@ type Config struct {
 	Acquire AcquireFunc
 	// Files is the filesystem the sign and keep steps use. Nil is the real one.
 	Files Files
+	// Swap puts the build at src in place of dst, atomically. Nil is binaryinstall's
+	// Replace, over Exec and Acquire; a test replaces it, as the swap is tested in
+	// binaryinstall.
+	Swap func(src, dst string) error
 	// Now is the clock for the receipt timestamp and duration. Nil uses time.Now.
 	Now func() time.Time
 	// Logf receives the notices a run does not fail for. Nil discards them.
@@ -123,9 +127,6 @@ type Config struct {
 // its exit status. It writes one receipt for the outcome. It never panics: a
 // panic in a seam, or any path not anticipated here, is a failed run with the
 // reason "unexpected".
-//
-// The install steps arrive in later slices of gt-tpg0p.16; until then the body
-// reports the failure as unexpected.
 func Run(ctx context.Context, cfg Config) (res Result, exit Exit) {
 	start := cfg.now()
 	defer func() {
@@ -137,6 +138,7 @@ func Run(ctx context.Context, cfg Config) (res Result, exit Exit) {
 
 	release, err := cfg.Acquire(lockPath(cfg.DaemonDir), cfg.LockWait)
 	if errors.Is(err, installlock.ErrBusy) {
+		cfg.logf("[install-om] Another install held the lock for %ds; not installing.", int64(cfg.LockWait/time.Second))
 		return Result{Event: eventRefused, Reason: reasonLockBusy}, ExitBusy
 	}
 	if err != nil {
@@ -145,9 +147,7 @@ func Run(ctx context.Context, cfg Config) (res Result, exit Exit) {
 	}
 	defer release()
 
-	// The install steps arrive in later slices; until then the run reports
-	// the script's EXIT-trap result for a path nothing anticipated.
-	return Result{Event: eventFailed, Reason: reasonUnexpected}, ExitFailed
+	return install(ctx, cfg)
 }
 
 func lockPath(daemonDir string) string {

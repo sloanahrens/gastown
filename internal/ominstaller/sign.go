@@ -37,8 +37,8 @@ var errSigning = errors.New("signing failed")
 //
 // Material is judged by its own entry, a symbolic link counted as an entry, so a
 // dangling link is material and fails rather than reading as absent. The unlock
-// and codesign each get their own sign timeout, not one shared deadline. sign is
-// not called by Run yet: the install sequence (gt-tpg0p.16.4) wires it in.
+// and codesign each get their own sign timeout, not one shared deadline. install
+// calls it on the build before the previous om is kept.
 func sign(ctx context.Context, cfg Config, tmp string) error {
 	files := cfg.files()
 	keychain := filepath.Join(cfg.SignDir, keychainName)
