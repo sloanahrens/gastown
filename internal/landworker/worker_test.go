@@ -25,6 +25,9 @@ func TestMain(m *testing.M) {
 const (
 	noteHead = "1111111111111111111111111111111111111111"
 	tipHead  = "2222222222222222222222222222222222222222"
+	// seededRowAt is the updated_at a seeded bead's list row carries, the key
+	// the worker's outcome memo holds it by (gt-r9pj9).
+	seededRowAt = "2026-09-30T11:30:00Z"
 )
 
 type fakeRemote struct {
@@ -248,7 +251,7 @@ func (h *harness) seedReady(t *testing.T, id string) {
 	t.Helper()
 	w := land.Work{Branch: branch, Head: noteHead, Target: "main", Worker: "opal"}
 	h.bd.Seed(beads.Issue{ID: id, Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/polecats/opal",
-		Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(w)})
+		Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(w), UpdatedAt: seededRowAt})
 }
 
 // seedReadyAt seeds a ready bead carrying priority and the submission time
