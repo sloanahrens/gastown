@@ -37,7 +37,7 @@ func gitAt(t *testing.T, dir, date string, args ...string) {
 // recently committed first, docs then go files, ties by path.
 func TestIntegrationSliceOrdersByCommitDate(t *testing.T) {
 	root := t.TempDir()
-	for name, content := range shellFixture() {
+	for name, content := range fixtureTree() {
 		path := filepath.Join(root, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

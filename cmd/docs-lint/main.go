@@ -1,6 +1,5 @@
 // Command docs-lint runs the deterministic checks on the docs and comments
-// tiers and lists the tiers the weekly doc audit slices from (gt-tpg0p.113, the
-// port of the shell script, removed in gt-tpg0p.114).
+// tiers and lists the tiers the weekly doc audit slices from.
 //
 //	docs-lint                 run all checks; one line per finding (path:line:
 //	                          rule: message)

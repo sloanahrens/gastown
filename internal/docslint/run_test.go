@@ -11,9 +11,9 @@ import (
 // fence is a code fence, spelled out because a raw string cannot hold backticks.
 const fence = "```"
 
-// shellFixture is the tree the shell test ran over, as an in-memory
-// checkout: one violation per rule. The plugin is 2102 words, over the ceiling.
-func shellFixture() memFS {
+// fixtureTree is an in-memory checkout with one violation per rule, one clean
+// file per tier and a plugin of 2102 words, over the ceiling.
+func fixtureTree() memFS {
 	return memFS{
 		"AGENTS.md":           "# Agents\n\nShort and fine.\n",
 		"README.md":           "# Readme\n\nSee [the guide](docs/guides/guide.md).\n",
@@ -44,10 +44,9 @@ func shellFixture() memFS {
 	}
 }
 
-// cleanFixture is shellFixture with every violation removed or fixed, as the
-// shell test's second case leaves it.
+// cleanFixture is fixtureTree with every violation removed or fixed.
 func cleanFixture() memFS {
-	m := shellFixture()
+	m := fixtureTree()
 	delete(m, "plugins/p/plugin.md")
 	delete(m, "internal/formula/formulas/mol-release.formula.toml")
 	delete(m, "docs/guides/marked.md")
@@ -90,7 +89,7 @@ func TestRunFindingsAreSortedAndExitOne(t *testing.T) {
 	t.Parallel()
 	t.Run("one fixture tree, one violation per rule", func(t *testing.T) {
 		t.Parallel()
-		out, errOut, code := runDocsLint(t, shellFixture(), fakeGit{}, nil)
+		out, errOut, code := runDocsLint(t, fixtureTree(), fakeGit{}, nil)
 		want := `docs/guides/guide.md:4: dead-link: ../missing.md does not exist
 docs/guides/guide.md:6: dead-make-target: make nope is not a Makefile target
 docs/guides/marked.md:5: stray-markup: committed tool-call or merge-conflict markup
@@ -159,7 +158,7 @@ func TestRunCleanTreeExitsZero(t *testing.T) {
 	t.Run("formulas are held to the ceiling unless exempt", func(t *testing.T) {
 		t.Parallel()
 		m := cleanFixture()
-		big := shellFixture()["plugins/p/plugin.md"]
+		big := fixtureTree()["plugins/p/plugin.md"]
 		m["internal/formula/formulas/mol-big.formula.toml"] = big
 		m["internal/formula/formulas/mol-polecat-work.formula.toml"] = big
 		out, _, code := runDocsLint(t, m, fakeGit{}, nil)
@@ -207,7 +206,7 @@ func TestRunCheckThatCannotRunIsExitTwo(t *testing.T) {
 	t.Parallel()
 	t.Run("findings are printed, then exit 2", func(t *testing.T) {
 		t.Parallel()
-		fsys := readFailsFS{memFS: shellFixture(), path: "docs/HOOKS.md"}
+		fsys := readFailsFS{memFS: fixtureTree(), path: "docs/HOOKS.md"}
 		out, errOut, code := runDocsLint(t, fsys, fakeGit{}, nil)
 		if code != ExitFailed {
 			t.Errorf("exit = %d, want %d", code, ExitFailed)
@@ -269,7 +268,7 @@ func TestRunOptions(t *testing.T) {
 		"internal/templates/polecat-CLAUDE.md": mar, "plugins/p/plugin.md": mar,
 		"internal/formula/formulas/mol-release.formula.toml": mar, "internal/formula/formulas/mol-x.formula.toml": mar,
 	}
-	fsys := shellFixture()
+	fsys := fixtureTree()
 	t.Run("slice is least recently committed first, docs then go", func(t *testing.T) {
 		t.Parallel()
 		out, _, code := runDocsLint(t, fsys, dates, nil, "--slice", "2", "1")
@@ -357,14 +356,13 @@ func TestRunOptions(t *testing.T) {
 	})
 }
 
-// TestRunCaseTable is the rest of the shell test (removed in gt-tpg0p.114), one subtest per
-// section over the shared fixture tree: the tier listings and the word ceiling
-// and total. The locale sections need no case here: the count is
-// strings.Fields, so no locale can change it, and TestWordCountIsLocaleFree
-// pins that.
+// TestRunCaseTable runs the tier listings and the word ceiling and total over the
+// shared fixture tree, one subtest each. No locale case is needed: the count is
+// strings.Fields, so no locale can change it, and TestWordCountIsLocaleFree pins
+// that.
 func TestRunCaseTable(t *testing.T) {
 	t.Parallel()
-	fsys := shellFixture()
+	fsys := fixtureTree()
 	listings := []struct{ tier, want string }{
 		{"historical", "docs/design/old.md\ndocs/plans/conflict.md\ndocs/plans/old-plan.md\ndocs/research/survey.md\n"},
 		{"reference", "README.md\ndocs/design/live.md\ndocs/guides/guide.md\ndocs/guides/marked.md\n"},
@@ -398,7 +396,7 @@ func TestRunCaseTable(t *testing.T) {
 		m := memFS{"AGENTS.md": "# Agents\n\n" + fence + "\ncode\n" + fence + "\n\n[x](gone.md)\n"}
 		out, _, _ := runDocsLint(t, m, fakeGit{}, nil)
 		if want := "AGENTS.md:7: dead-link: gone.md does not exist\n"; out != want {
-			t.Errorf("finding = %q, want %q (the script numbered it 3)", out, want)
+			t.Errorf("finding = %q, want %q (its line in the file, not its line after the fence is removed)", out, want)
 		}
 	})
 }
@@ -411,5 +409,35 @@ func TestWithPrefix(t *testing.T) {
 	}
 	if got := withPrefix(errors.New("docs-lint: unknown tier 'x'")); got != "docs-lint: unknown tier 'x'" {
 		t.Errorf("withPrefix doubled the prefix: %q", got)
+	}
+}
+
+// TestRunCountFailureNamesTheFile checks a file whose words cannot be counted stops
+// each mode that counts: exit 2, nothing on stdout (no partial total, no finding
+// from the failing check), and a stderr line under the command's name that names
+// the file.
+func TestRunCountFailureNamesTheFile(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []struct {
+		name string
+		args []string
+	}{{"the lint", nil}, {"--words", []string{"--words"}}} {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Parallel()
+			// AGENTS.md sorts before docs/HOOKS.md, so the first file counts and
+			// the second does not: a run that carried on, or printed what it had,
+			// would show it.
+			fsys := readFailsFS{memFS: memFS{"AGENTS.md": "three words here\n", "docs/HOOKS.md": "# Hooks\n"}, path: "docs/HOOKS.md"}
+			out, errOut, code := runDocsLint(t, fsys, fakeGit{}, nil, mode.args...)
+			if code != ExitFailed {
+				t.Errorf("exit = %d, want %d", code, ExitFailed)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want nothing", out)
+			}
+			if !strings.HasPrefix(errOut, "docs-lint: ") || !strings.Contains(errOut, "docs/HOOKS.md") {
+				t.Errorf("stderr = %q, want a docs-lint: line naming docs/HOOKS.md", errOut)
+			}
+		})
 	}
 }

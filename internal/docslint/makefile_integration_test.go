@@ -11,8 +11,8 @@ import (
 
 // TestIntegrationMakeDocsLintRecipe runs `make -n docs-lint` from the repository
 // root and checks the recipe is the Go command, so `make lint` (which depends on
-// the docs-lint target) runs the command and not a script that is gone. make -n
-// executes no recipe line; the test reads the Makefile and writes nothing.
+// the docs-lint target) runs it. make -n executes no recipe line; the test reads
+// the Makefile and writes nothing.
 func TestIntegrationMakeDocsLintRecipe(t *testing.T) {
 	cmd := exec.Command("make", "-n", "--no-print-directory", "docs-lint")
 	cmd.Dir = "../.."

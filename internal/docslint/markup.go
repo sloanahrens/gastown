@@ -128,7 +128,7 @@ func CheckStrayMarkup(fsys FS) ([]Finding, error) {
 // polecat session cannot push main, so a formula that tells one to is advertising
 // a flow the guards refuse (gt-ibt8). plugin.md is exempt: the plugins that push
 // a default branch run from the daemon, which sets GT_ROLE=daemon/plugin and is
-// not a polecat caller (the shell implementation's own comment, in the history before gt-tpg0p.114).
+// not a polecat caller, so their instructions are correct as written.
 func CheckPolecatMainPush(fsys FS) ([]Finding, error) {
 	agentFacing, err := AgentFacing(fsys)
 	if err != nil {

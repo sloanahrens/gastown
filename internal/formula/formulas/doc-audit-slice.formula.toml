@@ -9,7 +9,8 @@ title = "Audit the slice against docs/writing-for-agents.md"
 description = """
 **1. Compute the slice. The command chooses; you do not.**
 ```bash
-go run ./cmd/docs-lint --slice {{slice_docs}} {{slice_go}} | tee /tmp/doc-audit-slice.txt
+go run ./cmd/docs-lint --slice {{slice_docs}} {{slice_go}} > /tmp/doc-audit-slice.txt && [ -s /tmp/doc-audit-slice.txt ] || { echo "docs-lint --slice failed or printed nothing: stop and report"; false; }
+cat /tmp/doc-audit-slice.txt
 go run ./cmd/docs-lint --words   # record as WORDS_BEFORE
 gt bead note {{issue}} "slice: $(tr '\\n' ' ' < /tmp/doc-audit-slice.txt)"
 ```
