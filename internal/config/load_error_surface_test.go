@@ -78,6 +78,28 @@ func TestOverseerDetectionKeepsAnUnparseableFile(t *testing.T) {
 	}
 }
 
+// TestOverseerDetectionKeepsAFailedCommandsError: a detection command that
+// fails on its own, with no deadline involved, is reported as the failure it
+// was — the deadline mapping only applies to a call the deadline ended
+// (gt-ddp7c).
+func TestOverseerDetectionKeepsAFailedCommandsError(t *testing.T) {
+	t.Parallel()
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		//testpolicy:allow no-skip — /bin/sh is the failing child; Windows has none
+		t.Skip("the failing child is a /bin/sh process")
+	}
+	_, err := runDetectionCommand(context.Background(), "", "/bin/sh", "-c", "exit 3")
+	if err == nil {
+		t.Fatal("runDetectionCommand(exit 3) = nil error, want the child's failure")
+	}
+	if !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("err = %v, want the child's own exit status", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the child's own failure, not a context error", err)
+	}
+}
+
 // TestOverseerDetectionCommandsAreTimeBounded: detection commands run inside
 // read-only paths, so a wedged one must not outlive its deadline (gt-ptysu).
 // The child records its pid and stops itself before the deadline, so the
