@@ -296,10 +296,10 @@ func TestWriteRoundTripsAndKeepsEveryOtherSection(t *testing.T) {
 	root := t.TempDir()
 	path := townPath(root)
 	town := &config.TownConfig{
-		Type:     "town",
-		Version:  config.CurrentTownVersion,
-		Name:     "gastown",
-		Dolt:     &config.DoltEndpoint{Port: 3307},
+		Type:    "town",
+		Version: config.CurrentTownVersion,
+		Name:    "gastown",
+		Dolt:    &config.DoltEndpoint{Port: 3307},
 		Registry: &config.RigsConfig{Version: config.CurrentRigsVersion, Rigs: map[string]config.RigEntry{
 			"gastown": {GitURL: "https://example.invalid/gastown.git", AddedAt: now},
 		}},
