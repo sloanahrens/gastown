@@ -43,18 +43,18 @@ Runs only in container mode. It starts the daemon on the town root in its
 environment and refuses everything else, so a missing or wrong bind mount never
 turns into a fresh town:
 
-  - mayor/town.json present: exec 'gt daemon run'.
+  - mayor/town.json present as a regular file: exec 'gt daemon run'.
+  - mayor/town.json present as any other kind of file, a symlink included:
+    refuse.
   - mayor/town.json absent, --scratch-town not given: refuse.
   - mayor/town.json absent, --scratch-town given: run 'gt install <townRoot>
     --git' once, only when the town root is a mount point, holds the scratch
     marker that internal/config defines and the scratch runbook creates, and
-    holds nothing else; then exec 'gt daemon run'. Otherwise refuse.
+    holds nothing else; then exec 'gt daemon run'. If that install fails, the
+    entries it wrote are removed, the marker is kept, and the command refuses.
+    Otherwise refuse.
 
-Every check runs before the first command, so a refusal runs nothing.
-
---scratch-town is for the scratch compose project, which passes it as this
-container's command; the live project passes no command. That compose line is
-gt-qpeei.29 (E1).`,
+Every check runs before the first command, so a refusal runs nothing.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
@@ -78,9 +78,21 @@ type containerEntrypoint struct {
 	exec      func(argv []string) error // replaces this process; returns only on error
 	mountinfo func() (string, error)    // text of /proc/self/mountinfo
 	dirNames  func(dir string) ([]string, error)
+	lstat     func(path string) (entryKind, error) // what sits at mayor/town.json, a link not followed
 	exists    func(path string) (bool, error)
-	scratch   bool // the scratch compose project asked for a scratch town
+	remove    func(path string) error // removes an entry and what it holds
+	scratch   bool                    // --scratch-town: the scratch project asked for a scratch town
 }
+
+// entryKind is what a path is, as Lstat reports it. A symbolic link is
+// entryOther: it is not the regular file the town needs.
+type entryKind int
+
+const (
+	entryAbsent entryKind = iota
+	entryRegular
+	entryOther
+)
 
 // runDaemonContainerEntrypoint runs the entrypoint with the real seams.
 func runDaemonContainerEntrypoint(scratch bool) error {
@@ -91,9 +103,27 @@ func runDaemonContainerEntrypoint(scratch bool) error {
 		exec:      execEntrypointArgv,
 		mountinfo: func() (string, error) { return readTextFile(containerMountinfo) },
 		dirNames:  listDirNames,
+		lstat:     entrypointLstat,
 		exists:    entrypointPathExists,
+		remove:    os.RemoveAll,
 		scratch:   scratch,
 	})
+}
+
+// entrypointLstat reports what sits at path without following a symbolic link.
+// A failure other than the path being absent is an error, not "absent".
+func entrypointLstat(path string) (entryKind, error) {
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return entryAbsent, nil
+	case err != nil:
+		return entryAbsent, err
+	case info.Mode().IsRegular():
+		return entryRegular, nil
+	default:
+		return entryOther, nil
+	}
 }
 
 // readTextFile returns the text of one file.
@@ -153,7 +183,7 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	}
 	if install {
 		if err := e.run([]string{self, "install", townRoot, "--git"}); err != nil {
-			return fmt.Errorf("install the scratch town at %s: %w", townRoot, err)
+			return e.undoScratchInstall(townRoot, fmt.Errorf("install the scratch town at %s: %w", townRoot, err))
 		}
 	}
 	if err := e.exec([]string{self, "daemon", "run"}); err != nil {
@@ -162,15 +192,40 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	return nil
 }
 
+// undoScratchInstall removes every entry the failed install left in the scratch
+// town except the marker. The directory held only the marker before the install,
+// so everything else is the install's own work. Without this, the next start
+// would find a half-written mayor/town.json and exec it without repair.
+func (e containerEntrypoint) undoScratchInstall(townRoot string, cause error) error {
+	names, err := e.dirNames(townRoot)
+	if err != nil {
+		return fmt.Errorf("%w; and could not list %s to remove the partial install: %v; remove every entry but %s by hand before the next start",
+			cause, townRoot, err, config.ScratchTownMarker)
+	}
+	for _, name := range names {
+		if name == config.ScratchTownMarker {
+			continue
+		}
+		if err := e.remove(filepath.Join(townRoot, name)); err != nil {
+			return fmt.Errorf("%w; and could not remove %s from the partial install: %v; remove every entry but %s by hand before the next start",
+				cause, name, err, config.ScratchTownMarker)
+		}
+	}
+	return fmt.Errorf("%w; the partial install was removed and nothing was started", cause)
+}
+
 // decideStart says whether this start installs the town first, or returns the
 // refusal. It runs no command, so every refusal records nothing.
 func (e containerEntrypoint) decideStart(townRoot string) (bool, error) {
-	hasTown, err := e.exists(filepath.Join(townRoot, "mayor", "town.json"))
+	kind, err := e.lstat(filepath.Join(townRoot, "mayor", "town.json"))
 	if err != nil {
 		return false, fmt.Errorf("read mayor/town.json under %s: %w; nothing was started", townRoot, err)
 	}
-	if hasTown {
+	switch kind {
+	case entryRegular:
 		return false, nil
+	case entryOther:
+		return false, fmt.Errorf("mayor/town.json under %s is not a regular file (a link or another kind of file), so nothing was started", townRoot)
 	}
 	if !e.scratch {
 		return false, fmt.Errorf("%s has no mayor/town.json, so the bind mount is missing or the path is wrong; a town is not installed here, and nothing was started", townRoot)

@@ -27,10 +27,14 @@ type entrypointRig struct {
 	mountinfo string
 	mountErr  error
 	exists    map[string]bool
-	// brokenPath makes its stat fail, to test the fail-closed read.
+	// kind is what Lstat finds at mayor/town.json; absent when not listed.
+	kind map[string]entryKind
+	// brokenPath makes its lstat and stat fail, to test the fail-closed read.
 	brokenPath string
 	dir        []string
 	dirErr     error
+	removed    []string
+	removeErr  error
 	scratch    bool
 	calls      [][]string
 }
@@ -47,6 +51,7 @@ func scratchRig() *entrypointRig {
 		},
 		mountinfo: entrypointGtMount,
 		exists:    map[string]bool{entrypointMarker: true},
+		kind:      map[string]entryKind{},
 		dir:       []string{config.ScratchTownMarker},
 		scratch:   true,
 	}
@@ -56,7 +61,7 @@ func scratchRig() *entrypointRig {
 func townRig() *entrypointRig {
 	r := scratchRig()
 	r.scratch = false
-	r.exists[entrypointTownCfg] = true
+	r.kind[entrypointTownCfg] = entryRegular
 	return r
 }
 
@@ -72,13 +77,47 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 		exec:      record,
 		mountinfo: func() (string, error) { return r.mountinfo, r.mountErr },
 		dirNames:  func(string) ([]string, error) { return r.dir, r.dirErr },
+		lstat: func(path string) (entryKind, error) {
+			if path == r.brokenPath {
+				return entryAbsent, errors.New("lstat failed")
+			}
+			return r.kind[path], nil
+		},
 		exists: func(path string) (bool, error) {
 			if path == r.brokenPath {
 				return false, errors.New("stat failed")
 			}
 			return r.exists[path], nil
 		},
+		remove: func(path string) error {
+			r.removed = append(r.removed, path)
+			return r.removeErr
+		},
 		scratch: r.scratch,
+	}
+}
+
+// execCalls counts the daemon exec argv recorded.
+func (r *entrypointRig) execCalls() int {
+	n := 0
+	for _, argv := range r.calls {
+		if len(argv) > 1 && argv[1] == "daemon" {
+			n++
+		}
+	}
+	return n
+}
+
+// failingInstall is a run seam whose gt install fails after after has changed
+// the rig, the way a partial install leaves the town root.
+func (r *entrypointRig) failingInstall(after func()) func(argv []string) error {
+	return func(argv []string) error {
+		r.calls = append(r.calls, append([]string{}, argv...))
+		if len(argv) > 1 && argv[1] == "install" {
+			after()
+			return errors.New("install failed")
+		}
+		return nil
 	}
 }
 
@@ -150,7 +189,7 @@ func TestContainerEntrypointRefusesTownRootThatIsNotAbsolute(t *testing.T) {
 			// absolute-path check stands between this start and the exec.
 			r := townRig()
 			r.env[containerTownRootEnv] = root
-			r.exists[filepath.Join(root, "mayor", "town.json")] = true
+			r.kind[filepath.Join(root, "mayor", "town.json")] = entryRegular
 			if err := runContainerEntrypoint(r.entrypoint()); err == nil {
 				t.Fatal("expected a refusal for a town root that is not absolute")
 			}
@@ -204,18 +243,106 @@ func TestContainerEntrypointEmptyGitIdentityLeavesGitConfigAlone(t *testing.T) {
 	}
 }
 
-func TestContainerEntrypointAbsentTownRefusesWithoutScratchFlag(t *testing.T) {
+// With mayor/town.json absent, only the flag and the marker together start an
+// install. Each row names its outcome; a refusal records no command.
+func TestContainerEntrypointAbsentTownTriggerIsTheFlagAndMarker(t *testing.T) {
 	t.Parallel()
-	// Every scratch condition holds, so the refusal is the only thing that
-	// stops an install. This is the live project's shape: no flag, no town.
-	r := scratchRig()
-	r.scratch = false
-	if err := runContainerEntrypoint(r.entrypoint()); err == nil {
-		t.Fatal("expected a refusal with no mayor/town.json and no scratch flag")
+	for _, tc := range []struct {
+		name    string
+		scratch bool
+		marker  bool
+		install bool
+	}{
+		{"neither flag nor marker refuses", false, false, false},
+		{"marker without the flag refuses", false, true, false},
+		{"flag without the marker refuses", true, false, false},
+		{"flag with the marker installs", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			r.scratch = tc.scratch
+			if !tc.marker {
+				delete(r.exists, entrypointMarker)
+				r.dir = nil
+			}
+			err := runContainerEntrypoint(r.entrypoint())
+			if !tc.install {
+				if err == nil {
+					t.Fatal("expected a refusal")
+				}
+				if len(r.calls) != 0 {
+					t.Errorf("recorded %d commands, want none: %v", len(r.calls), r.calls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runContainerEntrypoint: %v", err)
+			}
+			if n := r.installCalls(); n != 1 {
+				t.Errorf("recorded %d gt install argv, want exactly 1", n)
+			}
+		})
+	}
+}
+
+// A town file that is not a regular file is refused, whatever it is, and runs
+// nothing: no install argv, no daemon exec.
+func TestContainerEntrypointNonRegularTownJSONRefuses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		scratch bool
+	}{
+		{"with no scratch flag", false},
+		{"with the scratch flag and marker", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			r.scratch = tc.scratch
+			r.kind[entrypointTownCfg] = entryOther
+			if err := runContainerEntrypoint(r.entrypoint()); err == nil {
+				t.Fatal("expected a refusal for a mayor/town.json that is not a regular file")
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("recorded %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
+	}
+}
+
+// A symbolic link at mayor/town.json is refused, not followed. This runs the
+// real Lstat over a real directory: a check that follows links would see the
+// regular file the link names, start the daemon, and fail this test.
+func TestContainerEntrypointSymlinkedTownJSONRefuses(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(townRoot, "elsewhere.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(townRoot, "mayor", "town.json")); err != nil {
+		t.Skipf("symbolic links are unavailable here: %v", err)
+	}
+	r := townRig()
+	r.env[containerTownRootEnv] = townRoot
+	e := r.entrypoint()
+	e.lstat = entrypointLstat
+	if err := runContainerEntrypoint(e); err == nil {
+		t.Fatal("expected a refusal for a symlinked mayor/town.json")
 	}
 	if len(r.calls) != 0 {
 		t.Errorf("recorded %d commands, want none: %v", len(r.calls), r.calls)
 	}
+}
+
+// entrypointMountinfo is a mountinfo table in which dir is a bind mount.
+func entrypointMountinfo(dir string) string {
+	return "36 35 98:0 /srv/scratch " + dir + " rw,noatime - ext4 /dev/root rw\n"
 }
 
 func TestContainerEntrypointScratchTownRefusesWhenAConditionFails(t *testing.T) {
@@ -287,18 +414,119 @@ func TestContainerEntrypointScratchTownInstallsOnceBeforeDaemon(t *testing.T) {
 // the entrypoint runs must accept exactly that directory. This drives the real
 // install path at the seams the other install unit tests use (no beads and no
 // git, which need a live Dolt and a subprocess) and checks it writes
-// mayor/town.json rather than refusing the directory.
+// mayor/town.json rather than refusing the directory. The owner is passed, so
+// the install does not ask the host's git config for one; the directory is a
+// t.TempDir and nothing outside it is written.
 func TestScratchTownInstallAcceptsTheMarkerOnlyDirectory(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(townRoot, config.ScratchTownMarker), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runInstallWith(installOptions{noBeads: true}, []string{townRoot}); err != nil {
+	if err := runInstallWith(installOptions{noBeads: true, owner: "daemon@example.invalid"}, []string{townRoot}); err != nil {
 		t.Fatalf("gt install into a marker-only directory was refused: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(townRoot, "mayor", "town.json")); err != nil {
 		t.Fatalf("mayor/town.json after install: %v", err)
+	}
+}
+
+// A failed scratch install that wrote mayor/town.json must leave none behind:
+// the next start would exec a half-written town. This runs the real filesystem
+// seams over a t.TempDir, so the removal is what the disk shows.
+func TestContainerEntrypointFailedScratchInstallLeavesNoTownJSON(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	marker := filepath.Join(townRoot, config.ScratchTownMarker)
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := scratchRig()
+	r.env[containerTownRootEnv] = townRoot
+	r.mountinfo = entrypointMountinfo(townRoot)
+	e := r.entrypoint()
+	e.lstat = entrypointLstat
+	e.exists = entrypointPathExists
+	e.dirNames = listDirNames
+	e.remove = os.RemoveAll
+	e.run = func(argv []string) error {
+		r.calls = append(r.calls, append([]string{}, argv...))
+		if len(argv) > 1 && argv[1] == "install" {
+			// The install writes its town, then fails.
+			if err := os.Mkdir(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0o600); err != nil {
+				return err
+			}
+			return errors.New("install failed")
+		}
+		return nil
+	}
+	if err := runContainerEntrypoint(e); err == nil {
+		t.Fatal("expected the failed install to surface")
+	}
+	if _, err := os.Lstat(filepath.Join(townRoot, "mayor", "town.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("mayor/town.json after a failed install: err = %v, want it removed", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("the scratch marker was not kept: %v", err)
+	}
+	if n := r.execCalls(); n != 0 {
+		t.Errorf("recorded %d daemon exec argv after a failed install, want none: %v", n, r.calls)
+	}
+}
+
+// Each failure while cleaning up a failed install refuses, and the daemon is
+// not exec'd. The install here wrote mayor/ into the town root.
+func TestContainerEntrypointFailedInstallCleanupErrorsRefuse(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		mutate func(r *entrypointRig)
+	}{
+		{"the town root cannot be listed after the install", func(r *entrypointRig) {
+			r.dirErr = errors.New("list failed")
+		}},
+		{"a leftover entry cannot be removed", func(r *entrypointRig) {
+			r.removeErr = errors.New("remove failed")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			e := r.entrypoint()
+			e.run = r.failingInstall(func() {
+				r.dir = []string{config.ScratchTownMarker, "mayor"}
+				tc.mutate(r)
+			})
+			if err := runContainerEntrypoint(e); err == nil {
+				t.Fatal("expected the failed install to surface")
+			}
+			if n := r.execCalls(); n != 0 {
+				t.Errorf("recorded %d daemon exec argv, want none: %v", n, r.calls)
+			}
+		})
+	}
+}
+
+// A failed install removes each entry the install wrote and keeps the marker.
+func TestContainerEntrypointFailedInstallRemovesWhatItWrote(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	e := r.entrypoint()
+	e.run = r.failingInstall(func() {
+		r.dir = []string{config.ScratchTownMarker, "mayor", ".git"}
+	})
+	if err := runContainerEntrypoint(e); err == nil {
+		t.Fatal("expected the failed install to surface")
+	}
+	want := []string{filepath.Join(entrypointTown, "mayor"), filepath.Join(entrypointTown, ".git")}
+	if !reflect.DeepEqual(r.removed, want) {
+		t.Errorf("removed %v, want %v (the marker is kept)", r.removed, want)
+	}
+	if n := r.execCalls(); n != 0 {
+		t.Errorf("recorded %d daemon exec argv, want none: %v", n, r.calls)
 	}
 }
 
