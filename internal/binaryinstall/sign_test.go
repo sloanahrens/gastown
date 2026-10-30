@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -748,6 +749,24 @@ func TestRunStdinFeedsTheCommandAndNamesOnlyItsStatusOnFailure(t *testing.T) {
 				t.Errorf("error %q carries the password", err)
 			}
 		})
+	}
+}
+
+// TestRunStdinDetachesTheCommandFromItsTerminal: the unlock runs in its own
+// session, so security cannot read the password from the terminal instead of
+// the piped stdin. The run seam reads the command's attributes; nothing starts.
+func TestRunStdinDetachesTheCommandFromItsTerminal(t *testing.T) {
+	t.Parallel()
+	var attr *syscall.SysProcAttr
+	run := func(cmd *exec.Cmd) error {
+		attr = cmd.SysProcAttr
+		return nil
+	}
+	if _, _, err := runStdinWith(context.Background(), run, "s3cret-tty\n", "security", "unlock-keychain", keychainPath); err != nil {
+		t.Fatalf("runStdinWith() = %v, want nil", err)
+	}
+	if attr == nil || !attr.Setsid {
+		t.Fatalf("SysProcAttr = %+v, want Setsid so the command has no controlling terminal", attr)
 	}
 }
 

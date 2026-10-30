@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/signing"
@@ -271,9 +272,12 @@ func runStdin(ctx context.Context, stdin, name string, args ...string) (string, 
 }
 
 // runStdinWith is runStdin with its run step injected, so a test drives the
-// failure path without starting a process.
+// failure path without starting a process. The command gets its own session
+// with no controlling terminal: security would otherwise read the password
+// from /dev/tty and ignore the piped stdin (gt-quujm).
 func runStdinWith(ctx context.Context, run func(*exec.Cmd) error, stdin, name string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
