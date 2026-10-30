@@ -63,7 +63,7 @@ type logtriageAdapter struct {
 	esc    []logtriageEscalation
 
 	// matchWord runs one subject word's pattern, for the test that counts which
-	// texts reach it. nil uses the pattern's MatchString.
+	// texts reach it. nil runs the pattern's MatchString.
 	matchWord func(*regexp.Regexp, string) bool
 }
 
@@ -280,11 +280,15 @@ func newLogtriageEscalation(issue *beads.Issue) logtriageEscalation {
 // "gt-abc1" does not match "gt-abc12".
 type logtriageSubject struct {
 	words []*regexp.Regexp
-	// matchWord runs one word's pattern; nil uses the pattern's MatchString.
+	// matchWord runs one word's pattern. newLogtriageSubject fills it, so the
+	// scan is one loop whether or not the adapter sets a counter.
 	matchWord func(*regexp.Regexp, string) bool
 }
 
 func newLogtriageSubject(line logtriage.Line, matchWord func(*regexp.Regexp, string) bool) logtriageSubject {
+	if matchWord == nil {
+		matchWord = patternMatches
+	}
 	var words []string
 	if c := line.Answers[logtriage.QCategory].Choice; c != "" {
 		words = append(words, strings.ToLower(c))
@@ -305,6 +309,10 @@ func newLogtriageSubject(line logtriage.Line, matchWord func(*regexp.Regexp, str
 	return subject
 }
 
+// patternMatches runs a word's pattern. It is the subject's matchWord when the
+// adapter sets no counter.
+func patternMatches(re *regexp.Regexp, text string) bool { return re.MatchString(text) }
+
 // matches reports whether text contains one of the subject's words as a whole
 // token, without regard to case.
 func (s logtriageSubject) matches(text string) bool {
@@ -314,14 +322,6 @@ func (s logtriageSubject) matches(text string) bool {
 // matchesLowered is matches for a text already lowercased, so a text read once
 // pays the lowercase once.
 func (s logtriageSubject) matchesLowered(text string) bool {
-	if s.matchWord == nil {
-		for _, w := range s.words {
-			if w.MatchString(text) {
-				return true
-			}
-		}
-		return false
-	}
 	for _, w := range s.words {
 		if s.matchWord(w, text) {
 			return true

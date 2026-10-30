@@ -273,9 +273,15 @@ func TestDriftLabelBeadNamesWholeDocPath(t *testing.T) {
 	}
 }
 
-// driftItem is the item a drift line makes for one section. An empty kind
-// leaves drift_kind unanswered.
+// driftItem is the item a drift line makes for one section of
+// docs/reference.md. An empty kind leaves drift_kind unanswered.
 func driftItem(ask time.Time, heading, kind string) Item {
+	return driftItemFor(ask, "docs/reference.md", heading, kind)
+}
+
+// driftItemFor is driftItem for one doc, for a test that asks about more than
+// one.
+func driftItemFor(ask time.Time, doc, heading, kind string) Item {
 	answers := map[QuestionID]Answer{}
 	if kind != "" {
 		answers[qDriftKind] = Answer{Choice: kind, Positive: kind, Probabilities: map[string]float64{kind: 0.8}}
@@ -287,7 +293,7 @@ func driftItem(ask time.Time, heading, kind string) Item {
 		Refs: map[string]string{
 			refRig:     "gastown",
 			refBead:    "gt-a",
-			refDoc:     "docs/reference.md",
+			refDoc:     doc,
 			refSection: heading,
 		},
 	}
@@ -487,61 +493,98 @@ func TestNamesDoc(t *testing.T) {
 	}
 }
 
-// TestDriftLabelNamesTheDocWithOneCompile drives Label over many landed beads
-// and many texts, counting the doc's pattern compiles through the seam: one
-// compile per doc, however many beads its window holds.
-func TestDriftLabelNamesTheDocWithOneCompile(t *testing.T) {
+// TestNamesDocCompilesOncePerDoc drives namesDoc over many texts for two docs,
+// counting each doc's pattern compiles through the seam: one compile per doc,
+// however many texts ask, and each doc's pattern answers only its own texts.
+func TestNamesDocCompilesOncePerDoc(t *testing.T) {
+	t.Parallel()
+	compiles := map[string]int{}
+	names := newDocNameCache()
+	names.compile = func(doc string) *regexp.Regexp {
+		compiles[doc]++
+		return compileDocName(doc)
+	}
+	// Each text holds the doc's literal path without naming it, so every call
+	// reaches the pattern rather than the literal check's early return.
+	for i := 0; i < 20; i++ {
+		text := fmt.Sprintf("docs: touch old/docs/reference.md part %d", i)
+		if names.namesDoc(text, "docs/reference.md") {
+			t.Fatalf("namesDoc(%q) = true, want false", text)
+		}
+		text = fmt.Sprintf("docs: touch old/docs/scorecard.md part %d", i)
+		if names.namesDoc(text, "docs/scorecard.md") {
+			t.Fatalf("namesDoc(%q) = true, want false", text)
+		}
+	}
+	for _, doc := range []string{"docs/reference.md", "docs/scorecard.md"} {
+		if got := compiles[doc]; got != 1 {
+			t.Errorf("%s compiled %d times, want 1", doc, got)
+		}
+	}
+}
+
+// TestDriftLabelNamesEachDocWithOneCompile drives Label for two docs over many
+// landed beads, counting each doc's pattern compiles through the seam: one
+// compile per doc, however many beads its window holds, and one doc's cached
+// pattern does not answer the other's.
+func TestDriftLabelNamesEachDocWithOneCompile(t *testing.T) {
 	t.Parallel()
 	day := 24 * time.Hour
+	closedAt := driftAsk.Add(5 * day).Format(time.RFC3339Nano)
 	var issues []*beads.Issue
-	// Every bead but the last two holds the doc's text without naming it, so
-	// each Label runs the pattern for every bead before the naming one is
-	// reached.
+	// Every bead but the last two holds one doc's text without naming it, so
+	// each Label runs that doc's pattern for every bead before the naming one
+	// is reached.
 	for i := 0; i < 40; i++ {
 		issues = append(issues, &beads.Issue{
 			ID:          fmt.Sprintf("gt-%02d", i),
 			Title:       fmt.Sprintf("docs: touch old/docs/reference.md part %d", i),
 			Status:      statusClosed,
 			CloseReason: "Landed on main (abc123)",
-			ClosedAt:    driftAsk.Add(5 * day).Format(time.RFC3339Nano),
+			ClosedAt:    closedAt,
 		})
 	}
 	issues = append(issues,
 		&beads.Issue{
-			ID:          "gt-other",
+			ID:          "gt-scorecard",
 			Title:       "docs: fix docs/scorecard.md",
 			Status:      statusClosed,
 			CloseReason: "Landed on main (abc123)",
-			ClosedAt:    driftAsk.Add(5 * day).Format(time.RFC3339Nano),
+			ClosedAt:    closedAt,
 		},
 		&beads.Issue{
 			ID:          "gt-named",
 			Title:       "docs: refresh the drift section in docs/reference.md",
 			Status:      statusClosed,
 			CloseReason: "Landed on main (abc123)",
-			ClosedAt:    driftAsk.Add(5 * day).Format(time.RFC3339Nano),
+			ClosedAt:    closedAt,
 		},
 	)
 
-	compiles := 0
+	compiles := map[string]int{}
 	a := newDriftAdapter("", fakeDriftBeads{byRig: map[string][]*beads.Issue{"gastown": issues}}, fakeDocs{},
 		func() time.Time { return driftAsk.Add(40 * day) })
 	a.names.compile = func(doc string) *regexp.Regexp {
-		compiles++
+		compiles[doc]++
 		return compileDocName(doc)
 	}
 
+	docs := []string{"docs/reference.md", "docs/scorecard.md"}
 	for i := 0; i < 10; i++ {
-		lab, err := a.Label(context.Background(), driftItem(driftAsk, "Drift battery", ""))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !lab.Labeled || !lab.Labels[qDocNowStale] || lab.Rule != ruleDriftBeadLanded {
-			t.Fatalf("label = %+v, want doc_now_stale under %q", lab, ruleDriftBeadLanded)
+		for _, doc := range docs {
+			lab, err := a.Label(context.Background(), driftItemFor(driftAsk, doc, "Drift battery", ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !lab.Labeled || !lab.Labels[qDocNowStale] || lab.Rule != ruleDriftBeadLanded {
+				t.Fatalf("label for %s = %+v, want doc_now_stale under %q", doc, lab, ruleDriftBeadLanded)
+			}
 		}
 	}
-	if compiles != 1 {
-		t.Errorf("compiled the doc's pattern %d times, want 1", compiles)
+	for _, doc := range docs {
+		if got := compiles[doc]; got != 1 {
+			t.Errorf("%s compiled %d times, want 1", doc, got)
+		}
 	}
 }
 

@@ -416,8 +416,8 @@ func compileDocName(doc string) *regexp.Regexp {
 
 // namesDoc reports whether text names doc as a whole path. A longer path that
 // holds doc, such as old/docs/a.md or docs/a.md.bak, does not name it, and a
-// full stop or comma after the path does. It holds the doc's literal text only
-// if it names it, so the string check skips the pattern for most beads.
+// full stop or comma after the path does. A text without doc's literal path
+// cannot name it, so that string check skips the pattern for most beads.
 func (c *docNameCache) namesDoc(text, doc string) bool {
 	if !strings.Contains(text, doc) {
 		return false
