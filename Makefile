@@ -347,7 +347,7 @@ install-local: check-up-to-date check-forward-only build
 	@# Atomic replace (temp + rename). Do NOT go back to `rm -f` then `cp`:
 	@# that leaves the live path missing or holding a partial binary, and
 	@# exec'ing a partial Go binary is SIGKILLed on macOS (gt-0het).
-	@bash $(CURDIR)/scripts/install-binary.sh $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR) $(BINARY)
+	@go run ./cmd/install-binary $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR) $(BINARY)
 	@# Nuke any stale go-install binaries that shadow the canonical location,
 	@# but never the one just installed: INSTALL_DIR=$HOME/go/bin is supported,
 	@# and that path is the first entry of this list (gt-tqxdd).

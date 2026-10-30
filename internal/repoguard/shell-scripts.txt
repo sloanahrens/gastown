@@ -43,8 +43,6 @@ scripts/forgejo-provision_test.sh	port: gt-tpg0p
 scripts/forgejo-resync.sh	port: gt-tpg0p
 scripts/forgejo-resync_test.sh	port: gt-tpg0p
 scripts/gate-vs-load_test.sh	port: gt-tpg0p
-scripts/install-binary.sh	port: gt-tpg0p
-scripts/install-binary_test.sh	port: gt-tpg0p
 scripts/install-local_test.sh	port: gt-tpg0p
 scripts/install-om.sh	port: gt-tpg0p.16
 scripts/install-om_test.sh	port: gt-tpg0p.16

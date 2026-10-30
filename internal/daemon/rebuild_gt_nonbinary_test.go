@@ -116,7 +116,7 @@ func TestRebuildGTCycle_InstallsWhenAnEmbedSourceChanged(t *testing.T) {
 		"internal/cmdtree/bd-command-tree.json",
 		"internal/config/roles/worker.toml",
 		"internal/formula/formulas/polecat.formula.toml",
-		"scripts/install-binary.sh",
+		"cmd/install-binary/main.go",
 		"plugins/tool-updater/run.sh",
 	} {
 		t.Run(path, func(t *testing.T) {
@@ -203,7 +203,7 @@ func TestRebuildGTNonBinaryPath(t *testing.T) {
 		// Ordinary source, scripts and plugins. A markdown file in one of those
 		// trees is still markdown: it is not compiled into the binary.
 		{"internal/daemon/rebuild_gt.go", false},
-		{"scripts/install-binary.sh", false},
+		{"internal/binaryinstall/run.go", false},
 		{"plugins/tool-updater/run.sh", false},
 		{"plugins/README.md", true},
 		{"main.go", false},

@@ -56,7 +56,7 @@ rm -rf "$R"
 # --- A recent change to each kind of input runs the tier ---
 # internal/cmd/scheduler_integration_test.go is Go but a shell-tier input
 # (gt-tqxdd): makefile-gate_test.sh reads schedulerTownSlots out of it.
-for path in scripts/install-binary.sh plugins/p/run.sh .githooks/pre-push Makefile internal/testpolicy/docker.txt internal/cmd/scheduler_integration_test.go; do
+for path in scripts/install-local_test.sh plugins/p/run.sh .githooks/pre-push Makefile internal/testpolicy/docker.txt internal/cmd/scheduler_integration_test.go; do
   R=$(new_repo)
   commit_at "$R" "$path" ""
   out=$(bash "$R/scripts/post-land-shell.sh" 2>&1); rc=$?
