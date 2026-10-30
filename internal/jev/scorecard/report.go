@@ -76,6 +76,11 @@ type QuestionReport struct {
 	// BestThreshold and BestF1 are the cut with the best F1 on the labeled lines.
 	BestThreshold *float64 `json:"best_threshold"`
 	BestF1        *float64 `json:"best_f1"`
+	// PrecisionAtBest is the precision at BestThreshold: of the labeled lines
+	// that cut predicts yes, how many are positive. It is set for noul and
+	// choice questions only, since a score has no precision, and is omitted
+	// when the cut predicts no yes.
+	PrecisionAtBest *float64 `json:"precision_at_best,omitempty"`
 	// Calibration is set for noul and choice questions only.
 	Calibration []Bin `json:"calibration,omitempty"`
 	// MeanScorePositive and MeanScoreNegative are set for score questions only.
@@ -154,6 +159,9 @@ func WriteText(w io.Writer, rep Report) error {
 			ew.printf("  context, not scored: %s\n", contextText(q.Context))
 		}
 		ew.printf("  best F1 %s at threshold %s\n", num(q.BestF1), num(q.BestThreshold))
+		if q.PrecisionAtBest != nil {
+			ew.printf("  precision at the best F1 cut: %s\n", pct(q.PrecisionAtBest))
+		}
 		if len(q.Calibration) > 0 {
 			ew.printf("  calibration (band, labeled n, mean value, label rate):\n")
 			for _, b := range q.Calibration {
