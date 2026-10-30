@@ -14,8 +14,9 @@ below is a summary; the design doc is authoritative.
 - [L2](#l2-landing-through-a-throwaway-forgejo), below: the scratch town lands a
   bead through a throwaway Forgejo and runner. The dispatch half is not yet
   provable; see that section's first paragraph.
-- L3: the live launchd daemon is replaced by the container in a window the
-  operator chooses (a later section).
+- [L3](#l3-the-live-cutover-window): the live launchd daemon is replaced by the
+  container in a window the operator chooses, with launchd kept as the
+  rollback.
 
 ## L1: the scratch town
 
@@ -347,15 +348,16 @@ and the live daemon stay exactly as they were. The result is five things:
 5. The checks in [Checks that the live town was not touched](#checks-that-the-live-town-was-not-touched)
    all hold.
 
-**What L2 does not prove, and what blocks a run.** Two things stand between this
-page and a live run, and neither is hidden below.
+**What L2 does not prove, and what blocks a run.** One thing stands between this
+page and a full proof, and it is not hidden below.
 
-- **BLOCKED on gt-t6rkn.** `gt daemon scratch render` and `up` cannot yet turn the
-  throwaway Forgejo on: the template renders it (`ScratchForge`, landed in
-  gt-qpeei.32), but no command sets it. Step 1 names the flags the follow-up
-  adds, `--forge-http-port` and `--forge-ssh-port`. Do not hand-edit the compose
-  file to get around it: the render's refusals (the live Forgejo's ports 3000
-  and 2222, the live names) are the point of rendering it.
+- **The scratch commands take the forge ports.** gt-t6rkn landed
+  (`74424317`): `gt daemon scratch render` and `up` take `--forge-http-port` and
+  `--forge-ssh-port`. Both together turn the throwaway Forgejo on, neither leaves
+  it off, and one alone is refused. `up` then names the four forge services
+  beside `daemon`, because they are not dependencies of it. Do not hand-edit the
+  compose file instead: the render's refusals (the live Forgejo's ports 3000 and
+  2222, the live names) are the point of rendering it.
 - **The dispatch half is not provable here.** The scratch town has no polecat
   seat, and the container has no `openshell`, which is how sandbox seats are
   reached. L2 therefore proves the landing half (Step 9 submits the work by
@@ -415,10 +417,9 @@ observed](#what-l2-has-not-observed)).
 
 ### Steps (L2)
 
-**Step 1. Render and start the scratch project with the forge. BLOCKED on
-gt-t6rkn.**
+**Step 1. Render and start the scratch project with the forge.**
 
-Once gt-t6rkn has landed, from `<scratch-parent>`:
+From `<scratch-parent>`:
 
 ```
 gt daemon scratch render --live-root <live-town> --root <scratch-root> \
@@ -446,7 +447,7 @@ docker --context desktop-linux compose -p gt-scratch -f <compose-file> ps -a
 Expected: the forge services running, `scratch-forgejo-db` `healthy`, and
 `scratch-forge-runner` exited. The runner is `restart: "no"` and exits without a
 `config.yml`; Step 6 gives it one. If the forge services are absent, `up` was
-the old one that names only `daemon`: stop and check that gt-t6rkn landed.
+a `gt` built before gt-t6rkn, which names only `daemon`: stop and rebuild `gt`.
 
 **Step 2. Check the forge answers.**
 
@@ -769,3 +770,253 @@ likely to differ:
 - That `forgejo-provision.sh` run with these flags writes nothing outside
   `<scratch-root>/forge-tokens`: the flags say so, and the dry run in Step 5 is
   where to read it.
+
+## L3: the live cutover window
+
+L3 replaces the live launchd daemon with the container, in a window the operator
+chooses, and keeps launchd as the rollback. It is the only rung that touches the
+live town, so it runs only after L1 and L2 are recorded and every precondition
+below is ticked. Its outputs, like those of L1 and L2, are derived from the code
+on `main` and not yet observed (see [What L3 has not
+observed](#what-l3-has-not-observed)).
+
+**The launchd job stays installed throughout.** The cutover stops it with
+`launchctl bootout`, which unloads the job and leaves its plist file where it
+is. Nothing in this window removes the plist or the job's definition; that is
+what makes the rollback one command. Do not delete the plist or undo what `gt daemon
+enable-supervisor` set up during L3 or in the days after it.
+
+The operator runs this window with the overseer. Every `gt` command below runs
+with the live town as the working directory, and every Docker command names its
+context as in L1.
+
+### Preconditions
+
+Tick every box, and write the time against each on the program bead, before the
+window. A box that cannot be ticked moves the window; it is never waived on the
+day.
+
+- [ ] **L1 is recorded green** (the L1 runbook, gt-qpeei.31): the container
+      town's daemon stayed healthy for 30 minutes and refused a hand-started
+      daemon.
+- [ ] **L2 is recorded** (this page, gt-qpeei.33), including that its dispatch
+      half is recorded as not proven. The operator has accepted that: a polecat
+      dispatched from the container daemon has not been seen to land.
+- [ ] **The live `state.json` names an owner.** Read it:
+
+      ```
+      cat <live-town>/daemon/state.json
+      ```
+
+      Expected: an `owner` of kind `launchd` and id `com.gastown.daemon`, written
+      by the running live daemon. The cutover starts the container behind the
+      startup guard with no takeover, and the guard refuses a state with no
+      owner (rule 2 of `internal/daemon/takeover.go`), so a live daemon built
+      before the owner field (plan task A5) leaves the cutover refused at step 4
+      with the old daemon already stopped. If there is no `owner`, install a
+      current `gt` and let the live daemon restart on it first, then read the
+      file again.
+- [ ] **The `om` credential is decided and in place.** The subscription token
+      file is written with mode 0600; its `expires_at` sidecar is written
+      readable only by the daemon's user; both are mounted read-only into the
+      container; the token file's path is on the compose command line as
+      `--om-token-file <path>` (the entrypoint reads no `GT_` variable for it);
+      and the sidecar's path is the town setting `daemon.om_token_meta`, which
+      the `om-token-expiry` doctor check reads. That key is read by the strict
+      settings parser at boot, so it is set only in a scratch town's own
+      settings until the installed `gt` knows it, and never in a live
+      `settings/config.json` before then: a live file with a key the installed
+      `gt` does not know stops the daemon at boot. Neither `ANTHROPIC_API_KEY`
+      nor `ANTHROPIC_AUTH_TOKEN` is in the container's environment; the
+      entrypoint refuses to start with one. Do not paste a token or its path's
+      contents anywhere.
+- [ ] **`dolt.container_host` is set** in the live `town.json` and the
+      container reaches the loopback-bound Dolt through it. The connectivity
+      probe (research task R4, an overseer-owned live check) is recorded green.
+- [ ] **The image is built** at the commit being cut over to:
+      `gt daemon image --rev <rev> ... --apply` (L1 Step 2), and
+      `docker --context desktop-linux image inspect gt-daemon:<rev>` prints an
+      id.
+- [ ] **The live compose file is written.** BLOCKED on gt-kqhhi: no command
+      writes `<live-town>/daemon/container/compose.yml` yet. `gt daemon
+      compose write --image gt-daemon:<rev>`, which that bead adds, renders it
+      from the town's settings and starts nothing. The cutover starts the
+      container from that file, so the window cannot start before it exists.
+- [ ] **Both container fields are set in the live settings** while
+      `daemon.supervisor` stays `launchd`: `daemon.container_name` and
+      `daemon.compose_project`, never one without the other. The cutover builds
+      the container side from them and refuses a town that sets neither.
+- [ ] **The host agent runs for the live town.** `gt host agent run`, as in L1
+      Step 6 but with the live town as the working directory, is running in its
+      own terminal tab, and `<live-town>/.runtime/host/probes.json` was
+      modified in the last 180 seconds. The container daemon refuses a probe
+      file older than three intervals. A permanent service for it is not part of
+      this window.
+- [ ] **The dispatch hold is on.** The operator creates it, never an agent:
+      `<live-town>/seat-refill.hold` exists. The cutover only reads it. The
+      ESTOP files are the operator's too and are not touched.
+- [ ] **No install is pending.** `ls <live-town>/daemon/install-pending.json`
+      reports no such file. The marker is written while an install is in flight
+      and removed when the cycle reaches a verdict (`docs/INSTALLING.md`); a
+      marker that stands means an install is running, and the window waits for
+      it.
+- [ ] **The window is after any pending install.** Start it at least 30 minutes
+      after the last install that swapped a binary: a landing's install request
+      waits that long, so a window inside it can have an install begin under the
+      cutover. Check the last install's time before choosing the start.
+- [ ] **No `gt sling` is running and the container-gate slot is free.** The
+      cutover waits for both (below), but look first: a window that starts with
+      either busy spends its 30 minutes waiting.
+- [ ] **A recorded baseline.** Before starting, keep the output of
+      `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`,
+      `cat <live-town>/daemon/state.json`, and
+      `launchctl print gui/$(id -u)/com.gastown.daemon`, for the comparison at
+      the end and for the rollback.
+
+### The cutover
+
+From `<live-town>`:
+
+```
+gt daemon cutover --to container
+```
+
+It runs five steps, each with a budget, and prints what state the town is left
+in whenever one ends badly. Nothing is rolled back by itself.
+
+1. **Wait for a quiet town**, up to 30 minutes: the dispatch hold on, no
+   `gt sling` running, the container-gate slot free. This is the command's own
+   wait for a quiet gate; it reads the three and changes nothing. If it gives up
+   it prints `not cutting over to container, nothing was changed:` and names the
+   first blocker standing at the last read.
+2. **Check quiet again** immediately before touching the old daemon. If the town
+   stopped being quiet it ends with `the town stopped being quiet`, and nothing
+   was changed.
+3. **Stop the launchd daemon and wait for proof it stopped**: `state.json`
+   records a clean stop (`running` false) and the launchd job reads as not
+   loaded. If the proof does not come within a minute (the daemon's 30-second
+   shutdown budget and 30 seconds more), it
+   prints that the old daemon is not proven stopped and the restore command
+   (`launchctl bootstrap gui/<uid> <the job's plist>`), and does not start the
+   container.
+4. **Start the container through the startup guard** and wait 2 minutes for
+   `state.json` to name `container` and the container's name as owner. If the
+   guard refuses, it prints that the old daemon is stopped and the restore
+   command. If the container starts and never takes the town, it prints the
+   container's logs command and the rollback.
+5. **Wait for the container daemon's second heartbeat**, up to 6 minutes. If
+   there is none it reports the container unhealthy, with its logs command and
+   the rollback.
+
+Expected on success, last lines: `container owns the town and has beaten twice.`
+then `✓ Cutover to container done.`
+
+**The cutover does not switch `daemon.supervisor`.** After it reports success,
+set the setting to the new side. This is the operator's step, in the live
+settings: in `settings/config.json`'s `daemon` section (or `mayor/daemon.json`
+on an unmigrated town, whichever the daemon reads; L1 Step 5 says how to find
+it), set
+
+```
+"daemon": { "supervisor": "container" }
+```
+
+keeping the container name and compose project already there. Then, from
+`<live-town>`:
+
+```
+gt daemon status
+```
+
+Expected: the daemon running and a line `Supervised: container <name> running
+gt-daemon:<rev>`, naming the live container. Until the setting is switched, `gt
+daemon stop`, `start` and `status` still act on launchd; the window is not
+complete before this step. Do not add `daemon.om_token_meta` here unless the
+installed `gt` knows it (see the preconditions).
+
+### Checks during the first 24 hours
+
+Take the first three at the start of the window and every hour for the first
+six hours, then at 12 and 24 hours. Each reads and changes nothing.
+
+- [ ] `gt doctor --check daemon --check daemon-liveness --check daemon-job
+      --check daemon-respawn` report OK; for a container town they read the
+      container and `state.json`, not a pid.
+- [ ] `cat <live-town>/daemon/state.json` names owner `container` and the live
+      container's name, `"running": true`, and a `heartbeat_count` larger than
+      at the previous check (it counts from 0 in the new process).
+- [ ] `<live-town>/.runtime/host/probes.json` was modified in the last 180
+      seconds, and the host agent tab is still running.
+- [ ] `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
+      shows the live container and its engine up and not restarting, and
+      matches the baseline otherwise.
+- [ ] `gt doctor --check om-token-expiry` reports OK or a warning with a date
+      and the days left; it is skipped only while the setting is unset.
+- [ ] After the dispatch hold is lifted by the operator, one bead is dispatched
+      and lands. This is the first time a container daemon dispatches in the
+      live town and is not proven by L2: watch it end to end, and put the hold
+      back on at the first sign of trouble.
+- [ ] No second daemon: a hand-started `gt daemon run` is refused. Do not try it
+      on the live town during the window; L1 proved it, and a failed refusal
+      here would be the worst case. Instead read that `ps` shows no `gt daemon
+      run` process on the host: `pgrep -fl "gt daemon run"` prints nothing.
+
+If any check fails and the cause is not understood within minutes, roll back.
+
+### Rollback
+
+The rollback is the reverse cutover, and it is rehearsed here before the window
+because the window's safety rests on it:
+
+```
+gt daemon cutover --to launchd
+```
+
+Before it, these must be true:
+
+- The container daemon is the owner, or has just failed: `state.json` names
+  `container` as owner, or the container is down and `state.json` shows a clean
+  stop. A `state.json` that names launchd as owner needs no rollback.
+- The launchd job's plist is still on disk. This is why it stays installed:
+  `launchctl bootstrap` loads the job from that file, and the cutover's
+  restore command names it. Check: the plist file exists (`launchctl print
+  gui/$(id -u)/com.gastown.daemon` reports not found while the job is booted
+  out, which is expected).
+- The dispatch hold is still on, since the reverse cutover waits for the same
+  quiet town: no `gt sling` running and the container-gate slot free.
+- Run it from `<live-town>`. It stops the container, proves it stopped, starts
+  launchd through the startup guard, and waits for `state.json` to name
+  `launchd` / `com.gastown.daemon` and for the second heartbeat.
+
+Expected on success: `launchd owns the town and has beaten twice.` then
+`✓ Cutover to launchd done.` If a step fails, the command prints the state it
+left and the command to restore the other side, as it does going forward.
+
+**After the rollback, switch the setting back.** The rollback does not switch
+`daemon.supervisor` either: set `"supervisor": "launchd"` in the same live
+settings, keeping the container fields so a later window needs no edit, and run
+`gt daemon status`. Expected: a `Supervised:` line that names launchd. Then
+compare `docker --context desktop-linux ps` and `<live-town>/daemon/state.json`
+with the baseline recorded before the window. Leave the container's compose
+file and image in place; they cost nothing and the next window uses them.
+
+Record the rollback on the program bead whether it was rehearsed or used, with
+the time and the output.
+
+### What L3 has not observed
+
+Everything above is derived from reading the code on `main`; none of it has been
+seen in a live window. When L3 is run, correct this page with what was printed.
+The points most likely to differ:
+
+- The exact text the cutover prints at each step, and the `launchctl print`
+  output of a booted-out job.
+- That `gt daemon cutover --to launchd` works on a town the container has just
+  owned: the reverse direction is built from the same code and tested on fakes,
+  not run.
+- The format of the `Supervised:` line for launchd after the rollback.
+- Whether a freshly restarted live daemon writes the `owner` the first
+  precondition needs: the field is written by the code on `main`, and the
+  installed `gt` may be older.
+- That the live compose file written by gt-kqhhi's command, once it lands, is
+  what the cutover's start argv expects at `daemon/container/compose.yml`.
