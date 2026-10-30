@@ -130,14 +130,9 @@ func specSlingBound() time.Duration { return specDispatchTimeout }
 
 // specSlingContext is the context one background sling runs under: its own
 // bound nested in the daemon's context, so a sling cut by a shutdown and one
-// that ran out of time are told apart by their contexts. A test replaces it
-// (specSlingCtx) so the sling's bound is already spent when its process is run,
-// without a real wait (gt-vaivp).
-func (d *Daemon) specSlingContext() (context.Context, context.CancelFunc) {
-	if d.specSlingCtx != nil {
-		return d.specSlingCtx(d.ctx)
-	}
-	return context.WithTimeout(d.ctx, specSlingBound())
+// that ran out of time are told apart by their contexts (gt-vaivp).
+func specSlingContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, specSlingBound())
 }
 
 // specSlingTimeoutRetries bounds how many slings a bead whose process is killed
@@ -241,20 +236,23 @@ func specSlingNotStartedEntry(bead, reason string) specDispatchTickEntry {
 // no report never reached those writes, so the daemon makes them
 // (failSpecSling).
 func (d *Daemon) runSpecSling(f specSlingFlight) {
-	ctx, cancel := d.specSlingContext()
+	ctx, cancel := specSlingContext(d.ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, d.gtPath, "spec", "sling", "--job", string(f.job)) //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = daemonGTEnv(os.Environ())
 	start := d.clk().Now()
 	out, stderr, err := d.runCmd(cmd)
-	elapsed := d.clk().Now().Sub(start).Round(time.Second)
+	took := d.clk().Now().Sub(start)
+	elapsed := took.Round(time.Second)
 	if err != nil {
 		reason := fmt.Sprintf("sling process failed after %s of its %s bound: %v %s", elapsed, specSlingBound(), err, lastLine(string(stderr)))
-		// The sling's own deadline is what a kill at the bound reports: the
-		// daemon's ctx is untouched, so a canceled sling is the shutdown path,
-		// which failSpecSling leaves alone.
-		killedAtBound := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		// A process that ran out its whole bound was killed by the bound, not
+		// by the daemon: the daemon's ctx is untouched, so a canceled sling is
+		// the shutdown path, which failSpecSling leaves alone. The run is
+		// timed on the daemon's clock so the kill can be answered without
+		// waiting one out (gt-vaivp).
+		killedAtBound := errors.Is(ctx.Err(), context.DeadlineExceeded) || took >= specSlingBound()
 		d.logger.Printf("spec_dispatch: %s: %s", f.Bead, reason)
 		d.failSpecSling(f, reason, killedAtBound)
 		d.feedSpecSlingOutcome(f, specSlingLost, specDispatchTickEntry{Bead: f.Bead, Rig: f.Rig,
@@ -345,13 +343,17 @@ func (d *Daemon) correctDispatchTick(seq uint64, result specSlingResult) {
 // without reporting, as a failed foreground sling does: the label holds the
 // bead out of the queue until an operator clears it.
 //
-// A kill at the sling's own bound is the host's load, not the bead: the note
-// records the kill as an attempt, and the dispatcher clears the label and slings
-// the bead again until specSlingTimeoutRetries kills have spent the retries
-// (gt-vaivp). A kill between the hook and the session start leaves a hook
-// nothing works, so the bead is unslung; a polecat with a session keeps its
-// bead, since nothing clears the label if that polecat later dies (gt-nosod). A
-// daemon shutting down cut the sling itself and leaves the bead as it is.
+// A kill at the sling's own bound is the host's load, not the bead: the bead
+// wears the timeout label and a metadata count of the kills, which the
+// dispatcher reads to clear the failure label and sling the bead again until
+// specSlingTimeoutRetries kills have spent the retries (gt-vaivp). Every other
+// failure drops that pair, so its bead is not retried on a kill's retries.
+//
+// A kill between the hook and the session start leaves a hook nothing works, so
+// a timeout-killed bead is unslung before it is labeled; a polecat with a
+// session keeps its bead, since nothing clears the label if that polecat later
+// dies (gt-nosod), and a failure that is not the bound leaves the hook alone.
+// A daemon shutting down cut the sling itself and leaves the bead as it is.
 func (d *Daemon) failSpecSling(f specSlingFlight, reason string, killedAtBound bool) {
 	if d.ctx.Err() != nil {
 		return
@@ -372,24 +374,31 @@ func (d *Daemon) failSpecSling(f specSlingFlight, reason string, killedAtBound b
 		d.logger.Printf("spec_dispatch: %s: the bead's status is no answer for the failure label; leaving it unlabeled", f.Bead)
 		return
 	}
-	if held && !d.handBackHalfHooked(f, issue) {
+	if held && (!killedAtBound || !d.handBackHalfHooked(f, issue)) {
 		d.logger.Printf("spec_dispatch: %s: sling died after hooking it; leaving the bead to its polecat and writing no %s label",
 			f.Bead, constants.LabelSpecDispatchFailed)
 		return
 	}
-	note := "spec-dispatch: " + reason + "; excluded from the queue until label " + constants.LabelSpecDispatchFailed + " is cleared"
 	if killedAtBound {
-		attempt := specdispatch.TimeoutAttempts(issue.Notes) + 1
-		note = fmt.Sprintf("%s sling killed at its %s bound (attempt %d of %d); %s: %s",
-			specdispatch.TimeoutNoteMarker, specSlingBound(), attempt, specSlingTimeoutRetries,
-			specSlingTimeoutNext(attempt), reason)
+		attempt := specdispatch.TimeoutAttempts(issue.Metadata) + 1
+		note := fmt.Sprintf("spec-dispatch: sling killed at its %s bound (attempt %d of %d); %s: %s",
+			specSlingBound(), attempt, specSlingTimeoutRetries, specSlingTimeoutNext(attempt), reason)
+		d.beadWrite(f, "bead", "update", f.Bead,
+			"--add-label", constants.LabelSpecDispatchFailed,
+			"--add-label", specdispatch.TimeoutLabel,
+			"--set-metadata", fmt.Sprintf("%s=%d", specdispatch.TimeoutAttemptsKey, attempt))
+		d.beadWrite(f, "bead", "note", f.Bead, note)
+		return
 	}
-	for _, args := range [][]string{
-		{"bead", "update", f.Bead, "--add-label", constants.LabelSpecDispatchFailed},
-		{"bead", "note", f.Bead, note},
-	} {
-		d.beadWrite(f, args...)
-	}
+	note := "spec-dispatch: " + reason + "; excluded from the queue until label " + constants.LabelSpecDispatchFailed + " is cleared"
+	// The pair the timeout retry reads goes with this failure: a bead killed at
+	// its bound and then failing for a reason of its own is that reason's bead,
+	// and the retry must not sling it again.
+	d.beadWrite(f, "bead", "update", f.Bead,
+		"--add-label", constants.LabelSpecDispatchFailed,
+		"--remove-label", specdispatch.TimeoutLabel,
+		"--unset-metadata", specdispatch.TimeoutAttemptsKey)
+	d.beadWrite(f, "bead", "note", f.Bead, note)
 }
 
 // specSlingTimeoutNext is what the note of attempt says happens next: the

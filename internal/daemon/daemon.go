@@ -602,12 +602,6 @@ type Daemon struct {
 	// running in the background (spec_slings.go, gt-5h70s).
 	specSlings specSlings
 
-	// specSlingCtx, when set, is the context one background sling runs under,
-	// in place of specSlingBound()'s timeout nested in the daemon's context. A
-	// test sets it so a sling's bound is already spent when its process is
-	// run, without a real wait (gt-vaivp).
-	specSlingCtx func(parent context.Context) (context.Context, context.CancelFunc)
-
 	// specSeats is the seat settings the ticker read last, and specSeatHold
 	// remembers the read error it last saw, so a seat file that does not parse
 	// parks the ticker with one line per distinct error (spec_seats.go,

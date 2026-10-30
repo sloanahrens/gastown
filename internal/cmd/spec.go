@@ -1129,6 +1129,11 @@ type specDispatchEnv struct {
 	// comment starting with key, so each kind of note lands once.
 	Annotate func(beadID, key, text string) error
 	AddLabel func(beadID, label string) error
+	// DropTimeoutRetry removes the timeout label and the kill count a sling
+	// killed at its bound left on a bead. A failure of any other kind calls it,
+	// so the dispatcher does not sling that bead again on a kill's retries
+	// (gt-vaivp). Nil drops nothing.
+	DropTimeoutRetry func(beadID string) error
 	// BranchOnOrigin reports whether a bead's recorded resume branch still
 	// exists on the rig's origin. An error means the answer is unknown, and
 	// the candidate is left for the next tick (gt-gzhin.3).
@@ -1883,6 +1888,14 @@ func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSli
 		if err := env.AddLabel(o.entry.Bead, o.label); err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", o.entry.Bead, err))
 		}
+		// A failure that is not a kill at the bound spends the retries an
+		// earlier kill left on the bead: its label stays for a person, as any
+		// other failure's does (gt-vaivp).
+		if o.label == specdispatch.DispatchFailedLabel && env.DropTimeoutRetry != nil {
+			if err := env.DropTimeoutRetry(o.entry.Bead); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: dropping the timeout retry: %v", o.entry.Bead, err))
+			}
+		}
 	}
 	for _, n := range o.notes {
 		if err := env.Annotate(o.entry.Bead, n[0], n[1]); err != nil {
@@ -2382,13 +2395,23 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		PendingInstall: func(now time.Time) (*installpending.Marker, error) { return pendingInstall.Pending(now) },
 		StartupBackoff: func(id string) string { return dispatch.StartupBackoff(townRoot, id) },
 		Candidates: func() specBoardRead {
+			// A dry run writes nothing, so it reports the labeled beads as
+			// held: the clear is a real retry the run would make, and a preview
+			// must not leave the beads changed (gt-vaivp).
+			var retry *specTimeoutRetry
+			if !specDispatchDryRun {
+				retry = &specTimeoutRetry{
+					due: func(rigPath string) (map[string]bool, error) {
+						reads.call()
+						return specTimedOutRetriesIn(rigPath)
+					},
+					clear: specRetryTimedOutSling,
+				}
+			}
 			read := specCandidatesRetrying(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 				reads.call()
 				return specReadyBoard(rigPath)
-			}, IsRigParkedOrDocked, func(id string) (bool, error) {
-				reads.call()
-				return specRetryTimedOutSling(townRoot, id)
-			})
+			}, IsRigParkedOrDocked, retry)
 			read = specBoardDetails(reads, func(rig string) beads.Client {
 				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 			}, read)
@@ -2418,6 +2441,12 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		Annotate: annotations.annotate,
 		AddLabel: func(id, label string) error {
 			return poolBeadLabelAdd(townRoot, id, label)
+		},
+		DropTimeoutRetry: func(id string) error {
+			return beads.NewPinned(resolveBeadDirFromTownRoot(townRoot, id)).Update(id, beads.UpdateOptions{
+				RemoveLabels:  []string{specdispatch.TimeoutLabel},
+				UnsetMetadata: []string{specdispatch.TimeoutAttemptsKey},
+			})
 		},
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			return polecat.BranchOnOrigin(filepath.Join(townRoot, rig), branch)
@@ -2654,15 +2683,10 @@ type specBoardRead struct {
 	// (gt-k1g3e). The tick appends them to its own skip lines.
 	Skipped []specDispatchEntry
 	// Retried names the beads whose failure label the read cleared so they could
-	// be slung again (specFailedRetry). The tick logs them as notices.
+	// be slung again (specTimedOutRetries). The tick logs them as notices.
 	Retried []string
 	Errors  []string
 }
-
-// specFailedRetry is the read's answer for a bead the spec-dispatch-failed label
-// holds out: it reports whether the label was cleared, which puts the bead back
-// in this tick's candidates. nil leaves every labeled bead held.
-type specFailedRetry func(id string) (cleared bool, err error)
 
 // specCandidates reads every operational rig's ready work beads and keeps the
 // eligible ones, ordered across rigs. A rig whose board cannot be read is
@@ -2680,10 +2704,10 @@ func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigSt
 	return specCandidatesRetrying(townRoot, maxPriority, board, rigStatus, nil)
 }
 
-// specCandidatesRetrying is specCandidatesWith plus retry, the answer for a
-// bead a killed-at-its-bound sling left labeled: the tick slings such a bead
-// again instead of waiting for a person (gt-vaivp).
-func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry specFailedRetry) specBoardRead {
+// specCandidatesRetrying is specCandidatesWith plus retry, the read of a rig's
+// beads a killed-at-its-bound sling left labeled and whose retries remain: the
+// tick slings such a bead again instead of waiting for a person (gt-vaivp).
+func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry) specBoardRead {
 	var read specBoardRead
 	names, err := knownRigNames(townRoot)
 	if err != nil {
@@ -2715,6 +2739,11 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 			read.Errors = append(read.Errors, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
+		// The rig's retry set is read on the first labeled bead the board
+		// holds, once: a rig whose board holds none pays nothing for it.
+		var retries map[string]bool
+		var retryErr error
+		probed := false
 		for _, issue := range issues {
 			s := specFromIssue(issue)
 			// A bead the failed label is holding is counted, not taken: the
@@ -2722,15 +2751,22 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 			// it from candidacy anyway (gt-q6zoo). A bead slung again after the
 			// read cleared its label is a candidate of this tick.
 			if s.HasLabel(specdispatch.DispatchFailedLabel) {
-				cleared := false
-				if retry != nil {
-					var rerr error
-					cleared, rerr = retry(s.ID)
-					if rerr != nil {
-						read.Errors = append(read.Errors, fmt.Sprintf("%s: cannot retry a sling killed at its bound: %v", s.ID, rerr))
+				if retry != nil && !probed {
+					probed = true
+					retries, retryErr = retry.due(rigPath)
+					if retryErr != nil {
+						read.Errors = append(read.Errors, fmt.Sprintf("%s: cannot tell which beads a kill at the bound may retry: %v", name, retryErr))
 					}
 				}
-				if !cleared {
+				// A retry set that could not be read is no answer: only a bead
+				// the set names is slung again, so a failed read holds every
+				// labeled bead out rather than retrying on a guess.
+				if retryErr != nil || retry == nil || !retries[s.ID] {
+					labeled[s.ID] = true
+					continue
+				}
+				if err := retry.clear(rigPath, s.ID); err != nil {
+					read.Errors = append(read.Errors, fmt.Sprintf("%s: %v", s.ID, err))
 					labeled[s.ID] = true
 					continue
 				}
@@ -2766,33 +2802,56 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 	return read
 }
 
+// specTimeoutRetry is the read's answer for beads a sling killed at its bound
+// left labeled: due names, in one list call per rig, the beads whose retries
+// remain, and clear removes one such bead's failure label so it can be slung
+// again. Both are passed in, so a test drives the decision and the write
+// without a live bd. nil retries nothing and leaves every labeled bead held.
+type specTimeoutRetry struct {
+	due   func(rigPath string) (map[string]bool, error)
+	clear func(rigPath, beadID string) error
+}
+
+// specTimedOutRetriesIn is the retry probe over the rig's own store.
+func specTimedOutRetriesIn(rigPath string) (map[string]bool, error) {
+	return specTimedOutRetriesFrom(beads.NewPinned(beads.ResolveBeadsDir(rigPath)))
+}
+
+// specTimedOutRetriesFrom is specTimedOutRetriesIn over a store the caller
+// supplies, so a test runs the probe against a fake instead of a live bd.
+func specTimedOutRetriesFrom(b beads.Client) (map[string]bool, error) {
+	issues, err := b.List(beads.ListOptions{
+		Labels: []string{specdispatch.DispatchFailedLabel, specdispatch.TimeoutLabel},
+		Limit:  0,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing the beads a kill at the bound left labeled: %w", err)
+	}
+	retries := make(map[string]bool, len(issues))
+	for _, issue := range issues {
+		if _, retry := specdispatch.RetryAfterTimeout(issue.Labels, issue.Metadata); retry {
+			retries[issue.ID] = true
+		}
+	}
+	return retries, nil
+}
+
 // specRetryTimedOutSling clears the spec-dispatch-failed label of a bead whose
 // sling was killed at its bound while a retry is left: the kill is the host's
 // load, which clears by itself, so the label is what would keep the bead
-// waiting for a person (gt-vaivp). A label from any other failure, or one whose
-// retries are spent, stays.
-func specRetryTimedOutSling(townRoot, beadID string) (bool, error) {
-	return specRetryTimedOutSlingFrom(beads.NewPinned(resolveBeadDirFromTownRoot(townRoot, beadID)), beadID)
+// waiting for a person (gt-vaivp). The timeout label and the kill count stay,
+// so the next kill counts on from them.
+func specRetryTimedOutSling(rigPath, beadID string) error {
+	return specRetryTimedOutSlingFrom(beads.NewPinned(beads.ResolveBeadsDir(rigPath)), beadID)
 }
 
 // specRetryTimedOutSlingFrom is specRetryTimedOutSling over a store the caller
-// supplies, so a test runs the decision and the clear against a fake instead of
-// a live bd.
-func specRetryTimedOutSlingFrom(b beads.Client, beadID string) (bool, error) {
-	issue, err := b.Show(beadID)
-	if err != nil {
-		return false, fmt.Errorf("reading the failed bead: %w", err)
-	}
-	if !slices.Contains(issue.Labels, specdispatch.DispatchFailedLabel) {
-		return false, nil
-	}
-	if _, retry := specdispatch.RetryAfterTimeout(issue.Notes); !retry {
-		return false, nil
-	}
+// supplies, so a test runs the clear against a fake instead of a live bd.
+func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 	if err := b.Update(beadID, beads.UpdateOptions{RemoveLabels: []string{specdispatch.DispatchFailedLabel}}); err != nil {
-		return false, fmt.Errorf("clearing the failed label: %w", err)
+		return fmt.Errorf("clearing the failed label: %w", err)
 	}
-	return true, nil
+	return nil
 }
 
 // specBoardDetails fills the two things a board row cannot: the design the lint

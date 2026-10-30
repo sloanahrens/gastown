@@ -2162,7 +2162,18 @@ func TestSpecCandidatesRetriesASlingKilledAtItsBound(t *testing.T) {
 			{ID: "gt-other", Type: "task", Status: "open", Priority: 2, Labels: []string{specdispatch.DispatchFailedLabel}},
 		}, nil
 	}
-	retry := func(id string) (bool, error) { return id == "gt-retry", nil }
+	var listed []string
+	var cleared []string
+	retry := &specTimeoutRetry{
+		due: func(rigPath string) (map[string]bool, error) {
+			listed = append(listed, rigPath)
+			return map[string]bool{"gt-retry": true}, nil
+		},
+		clear: func(rigPath, beadID string) error {
+			cleared = append(cleared, beadID)
+			return nil
+		},
+	}
 
 	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry)
 	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-retry" {
@@ -2174,71 +2185,94 @@ func TestSpecCandidatesRetriesASlingKilledAtItsBound(t *testing.T) {
 	if len(got.Retried) != 1 || !strings.Contains(got.Retried[0], "gt-retry") {
 		t.Errorf("Retried = %v, want the cleared bead named", got.Retried)
 	}
+	if len(listed) != 1 {
+		t.Errorf("the retry probe ran %d time(s), want once for the rig", len(listed))
+	}
+	if len(cleared) != 1 || cleared[0] != "gt-retry" {
+		t.Errorf("cleared = %v, want gt-retry alone", cleared)
+	}
 }
 
-// A clear that fails is reported and the bead stays held: a label that could not
-// be read off is still holding the bead, so the tick must not sling it blind
-// (gt-vaivp).
-func TestSpecCandidatesReportsAFailedRetry(t *testing.T) {
+// A probe that cannot be read is reported and every labeled bead stays held:
+// a retry set that could not be read does not name a bead, so the tick must
+// not sling one blind (gt-vaivp).
+func TestSpecCandidatesReportsAFailedRetryProbe(t *testing.T) {
 	t.Parallel()
 	townRoot := specTown(t)
 	board := func(string) ([]*beads.Issue, error) {
 		return []*beads.Issue{{ID: "gt-stuck", Type: "task", Status: "open", Priority: 2, Labels: []string{specdispatch.DispatchFailedLabel}}}, nil
 	}
-	retry := func(string) (bool, error) { return false, errors.New("dolt: connection refused") }
+	var cleared int
+	retry := &specTimeoutRetry{
+		due:   func(string) (map[string]bool, error) { return nil, errors.New("dolt: connection refused") },
+		clear: func(string, string) error { cleared++; return nil },
+	}
 
 	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry)
 	if len(got.Candidates) != 0 {
-		t.Errorf("candidates = %+v, want none for a bead whose label could not be cleared", got.Candidates)
+		t.Errorf("candidates = %+v, want none for a bead whose retry set could not be read", got.Candidates)
 	}
 	if got.LabeledFailed != 1 {
 		t.Errorf("LabeledFailed = %d, want the bead still counted as held", got.LabeledFailed)
+	}
+	if len(got.Errors) != 1 || !strings.Contains(got.Errors[0], "dolt: connection refused") {
+		t.Errorf("errors = %v, want the failed probe named", got.Errors)
+	}
+	if cleared != 0 {
+		t.Errorf("%d label(s) cleared on a probe that could not be read", cleared)
+	}
+}
+
+// A clear that fails is reported and that bead stays held: a label that could
+// not be read off still holds the bead, so it is not slung blind (gt-vaivp).
+func TestSpecCandidatesReportsAFailedClear(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	board := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{{ID: "gt-stuck", Type: "task", Status: "open", Priority: 2, Labels: []string{specdispatch.DispatchFailedLabel}}}, nil
+	}
+	retry := &specTimeoutRetry{
+		due:   func(string) (map[string]bool, error) { return map[string]bool{"gt-stuck": true}, nil },
+		clear: func(string, string) error { return errors.New("dolt: connection refused") },
+	}
+
+	got := specCandidatesRetrying(townRoot, 2, board, func(string, string) (bool, string) { return false, "" }, retry)
+	if len(got.Candidates) != 0 || got.LabeledFailed != 1 {
+		t.Errorf("candidates = %+v, LabeledFailed = %d; want the bead held", got.Candidates, got.LabeledFailed)
 	}
 	if len(got.Errors) != 1 || !strings.Contains(got.Errors[0], "dolt: connection refused") {
 		t.Errorf("errors = %v, want the failed clear named", got.Errors)
 	}
 }
 
-// specRetryTimedOutSlingFrom clears the label of a bead whose notes record a
-// sling killed at its bound and a retry left, and leaves every other failed
-// bead alone.
+// specRetryTimedOutSlingFrom clears the failure label and nothing else: the
+// timeout label and the kill count stay, so the next kill counts on from them
+// rather than granting the bead a fresh set of retries (gt-vaivp).
 func TestSpecRetryTimedOutSlingFrom(t *testing.T) {
 	t.Parallel()
-	timeoutNote := specdispatch.TimeoutNoteMarker + " sling killed at its 5m0s bound (attempt 1 of 3)"
-	cases := []struct {
-		name      string
-		labels    []string
-		notes     string
-		wantClear bool
-		wantHeld  bool
-	}{
-		{"a kill with retries left", []string{specdispatch.DispatchFailedLabel}, timeoutNote, true, false},
-		{"a failure of its own", []string{specdispatch.DispatchFailedLabel}, specDispatchNotePrefix + "gt-x: dispatch failed, left unassigned: boom", false, true},
-		{"the retries spent", []string{specdispatch.DispatchFailedLabel},
-			strings.Repeat(specdispatch.TimeoutNoteMarker+" an earlier kill\n", specdispatch.TimeoutRetries), false, true},
-		{"no label to clear", nil, timeoutNote, false, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db := beadsfake.New()
-			db.Seed(beads.Issue{ID: "gt-x", Status: "open", Labels: tc.labels, Notes: tc.notes})
+	db := beadsfake.New()
+	db.Seed(beads.Issue{
+		ID:       "gt-x",
+		Status:   "open",
+		Labels:   []string{specdispatch.DispatchFailedLabel, specdispatch.TimeoutLabel},
+		Metadata: []byte(`{"spec_dispatch_timeout_attempts":"1"}`),
+	})
 
-			cleared, err := specRetryTimedOutSlingFrom(db, "gt-x")
-			if err != nil {
-				t.Fatalf("specRetryTimedOutSlingFrom: %v", err)
-			}
-			if cleared != tc.wantClear {
-				t.Errorf("cleared = %v, want %v", cleared, tc.wantClear)
-			}
-			issue, err := db.Show("gt-x")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if held := slices.Contains(issue.Labels, specdispatch.DispatchFailedLabel); held != tc.wantHeld {
-				t.Errorf("label held = %v, want %v", held, tc.wantHeld)
-			}
-		})
+	if err := specRetryTimedOutSlingFrom(db, "gt-x"); err != nil {
+		t.Fatalf("specRetryTimedOutSlingFrom: %v", err)
+	}
+	issue, err := db.Show("gt-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(issue.Labels, specdispatch.DispatchFailedLabel) {
+		t.Errorf("labels = %v, want the failure label gone", issue.Labels)
+	}
+	if !slices.Contains(issue.Labels, specdispatch.TimeoutLabel) {
+		t.Errorf("labels = %v, want the timeout label kept to count the next kill", issue.Labels)
+	}
+	if got := specdispatch.TimeoutAttempts(issue.Metadata); got != 1 {
+		t.Errorf("attempts = %d, want the count kept", got)
 	}
 }
 
@@ -2252,41 +2286,112 @@ type failingUpdate struct {
 
 func (f failingUpdate) Update(string, beads.UpdateOptions) error { return f.err }
 
-// A clear that cannot read or write answers no, with the error: the tick keeps
-// the bead held rather than dispatching one it could not free (gt-vaivp).
+// A clear whose write fails reports the error (gt-vaivp).
 func TestSpecRetryTimedOutSlingFromFailures(t *testing.T) {
 	t.Parallel()
-	timeoutNote := specdispatch.TimeoutNoteMarker + " sling killed at its 5m0s bound (attempt 1 of 3)"
-	seed := func() *beadsfake.Fake {
-		db := beadsfake.New()
-		db.Seed(beads.Issue{ID: "gt-x", Status: "open", Labels: []string{specdispatch.DispatchFailedLabel}, Notes: timeoutNote})
-		return db
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-x", Status: "open", Labels: []string{specdispatch.DispatchFailedLabel, specdispatch.TimeoutLabel}})
+
+	store := failingUpdate{Client: db, err: errors.New("dolt: connection refused")}
+	if err := specRetryTimedOutSlingFrom(store, "gt-x"); err == nil || !strings.Contains(err.Error(), "clearing the failed label") {
+		t.Errorf("err = %v, want the failed clear named", err)
 	}
+	issue, err := db.Show("gt-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(issue.Labels, specdispatch.DispatchFailedLabel) {
+		t.Errorf("labels = %v, want the label still held after a failed clear", issue.Labels)
+	}
+}
 
-	t.Run("the read fails", func(t *testing.T) {
-		t.Parallel()
-		db := seed()
-		db.FailWith("show", errors.New("dolt: connection refused"))
-		cleared, err := specRetryTimedOutSlingFrom(db, "gt-x")
-		if err == nil || !strings.Contains(err.Error(), "reading the failed bead") {
-			t.Errorf("err = %v, want the failed read named", err)
+// The probe is one list call for a rig, not a read per labeled bead: its cost
+// stays flat as beads pile up behind the failure label (gt-vaivp).
+func TestSpecTimedOutRetriesFromIsOneListCall(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	for _, id := range []string{"gt-a", "gt-b", "gt-c"} {
+		db.Seed(beads.Issue{
+			ID:       id,
+			Status:   "open",
+			Labels:   []string{specdispatch.DispatchFailedLabel, specdispatch.TimeoutLabel},
+			Metadata: []byte(`{"spec_dispatch_timeout_attempts":"1"}`),
+		})
+	}
+	// A bead killed at its bound for the last time, and one whose failure was
+	// not a kill: neither may be retried.
+	db.Seed(beads.Issue{ID: "gt-spent", Status: "open",
+		Labels:   []string{specdispatch.DispatchFailedLabel, specdispatch.TimeoutLabel},
+		Metadata: []byte(`{"spec_dispatch_timeout_attempts":"3"}`)})
+	db.Seed(beads.Issue{ID: "gt-other", Status: "open", Labels: []string{specdispatch.DispatchFailedLabel}})
+
+	store := newCountingStore(db)
+	due, err := specTimedOutRetriesFrom(store)
+	if err != nil {
+		t.Fatalf("specTimedOutRetriesFrom: %v", err)
+	}
+	if store.lists != 1 || len(store.shows) != 0 {
+		t.Errorf("the probe took %d list and %d show call(s), want one list call and no per-bead read", store.lists, len(store.shows))
+	}
+	want := []string{"gt-a", "gt-b", "gt-c"}
+	for _, id := range want {
+		if !due[id] {
+			t.Errorf("due[%s] = false, want the bead retried", id)
 		}
-		if cleared {
-			t.Error("a read that failed cleared nothing")
-		}
+	}
+	if len(due) != len(want) {
+		t.Errorf("due = %v, want the three beads with a retry left", due)
+	}
+}
+
+// A sling that fails for a reason of its own spends the retries an earlier kill
+// at the bound left on its bead: the failure label is written, and the timeout
+// label and the count go, so the dispatcher does not sling the bead again on
+// the kill's retries (gt-vaivp).
+func TestAFailedSlingDropsTheTimeoutRetry(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 2, "2026-09-29T12:00:00Z"))
+	var dropped []string
+	env := f.env()
+	env.DropTimeoutRetry = func(id string) error { dropped = append(dropped, id); return nil }
+
+	var report specDispatchReport
+	specApplyOutcome(env, &report, specSlingOutcome{
+		kind:  specSlingFailed,
+		entry: specDispatchEntry{Bead: "gt-a"},
+		label: specdispatch.DispatchFailedLabel,
 	})
 
-	t.Run("the write fails", func(t *testing.T) {
-		t.Parallel()
-		store := failingUpdate{Client: seed(), err: errors.New("dolt: connection refused")}
-		cleared, err := specRetryTimedOutSlingFrom(store, "gt-x")
-		if err == nil || !strings.Contains(err.Error(), "clearing the failed label") {
-			t.Errorf("err = %v, want the failed clear named", err)
-		}
-		if cleared {
-			t.Error("a write that failed cleared nothing")
-		}
+	if !slices.Equal(dropped, []string{"gt-a"}) {
+		t.Errorf("timeout retries dropped for %v, want gt-a", dropped)
+	}
+	if got := f.labels["gt-a"]; len(got) != 1 || got[0] != specdispatch.DispatchFailedLabel {
+		t.Errorf("labels = %v, want the failure label alone", got)
+	}
+}
+
+// A dropped retry that fails is reported, and the failure label is still on the
+// bead: the bead waits for a person either way, but the tick's log says the
+// retry state could not be cleared (gt-vaivp).
+func TestAFailedSlingReportsAFailedTimeoutDrop(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 2, "2026-09-29T12:00:00Z"))
+	env := f.env()
+	env.DropTimeoutRetry = func(string) error { return errors.New("dolt: connection refused") }
+
+	var report specDispatchReport
+	specApplyOutcome(env, &report, specSlingOutcome{
+		kind:  specSlingFailed,
+		entry: specDispatchEntry{Bead: "gt-a"},
+		label: specdispatch.DispatchFailedLabel,
 	})
+
+	if len(report.Errors) != 1 || !strings.Contains(report.Errors[0], "dolt: connection refused") {
+		t.Errorf("errors = %v, want the failed drop named", report.Errors)
+	}
+	if got := f.labels["gt-a"]; len(got) != 1 || got[0] != specdispatch.DispatchFailedLabel {
+		t.Errorf("labels = %v, want the failure label alone", got)
+	}
 }
 
 // A rig whose park state cannot be read is held out of the candidate set, and

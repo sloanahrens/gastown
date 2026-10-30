@@ -959,6 +959,17 @@ func (m *Manager) Add(name string) (*Polecat, error) {
 // (GH#2215) by holding the pool lock through directory creation, ensuring
 // no concurrent process can allocate the same name.
 func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
+	name, p, err := m.allocateAndAddPoolLocked(opts)
+	// The pruned worktree entries are git work, run after the lock is back: a
+	// spawn holds the pool lock for the count-and-claim only, so the other
+	// spawns of the rig do not wait out a git call of this one (gt-vaivp).
+	m.pruneWorktrees()
+	return name, p, err
+}
+
+// allocateAndAddPoolLocked is AllocateAndAdd under the pool lock, which it
+// releases before returning.
+func (m *Manager) allocateAndAddPoolLocked(opts AddOptions) (string, *Polecat, error) {
 	// Hold pool lock across allocation + directory creation to close the
 	// race window where a concurrent AllocateName could miss the pending
 	// marker and reallocate the same name.
@@ -2074,6 +2085,16 @@ func forceRemoveDir(dir string) error {
 // After allocation, kills any lingering tmux session for the name (gt-pqf9x)
 // to prevent "session already running" errors when reusing names from dead polecats.
 func (m *Manager) AllocateName() (string, error) {
+	name, err := m.allocateNamePoolLocked()
+	// The pruned worktree entries are git work, run after the lock is back:
+	// the lock is held for the count-and-claim only (gt-vaivp).
+	m.pruneWorktrees()
+	return name, err
+}
+
+// allocateNamePoolLocked is AllocateName under the pool lock, which it releases
+// before returning.
+func (m *Manager) allocateNamePoolLocked() (string, error) {
 	// Acquire pool lock to prevent concurrent allocations from racing
 	fl, err := m.lockPool()
 	if err != nil {
@@ -2876,24 +2897,24 @@ func (m *Manager) ReconcilePool() {
 	if err != nil {
 		return
 	}
-	defer func() { _ = fl.Unlock() }()
-
 	m.reconcilePoolInternal()
+	_ = fl.Unlock()
+	// The pruned worktree entries are git work, run after the lock is back:
+	// the lock is held for the count-and-claim only (gt-vaivp).
+	m.pruneWorktrees()
 }
 
 // reconcilePoolInternal performs pool reconciliation without acquiring the pool lock.
-// Called by ReconcilePool (which holds the lock) and AllocateName (which also holds it).
+// Called by ReconcilePool, allocateAndAddPoolLocked and allocateNamePoolLocked,
+// which all hold it.
+//
+// It reads the polecats directory, and nothing else: the names a directory
+// holds are the pool's in-use set, and List() would load every polecat's bead
+// state and session for names reconcile never reads. That read used to run
+// inside the pool lock every spawn takes, where a rig of a dozen polecats spent
+// another sling's wait on beats it did not need (gt-vaivp).
 func (m *Manager) reconcilePoolInternal() {
-	// Get polecats with existing directories
-	polecats, err := m.List()
-	if err != nil {
-		return
-	}
-
 	var namesWithDirs []string
-	for _, p := range polecats {
-		namesWithDirs = append(namesWithDirs, p.Name)
-	}
 
 	// Include names with pending reservation markers.
 	// A .pending file means AllocateName has claimed the name but AddWithOptions
@@ -2902,7 +2923,10 @@ func (m *Manager) reconcilePoolInternal() {
 	polecatsDir := filepath.Join(m.rig.Path, "polecats")
 	if entries, err := os.ReadDir(polecatsDir); err == nil {
 		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".pending") {
+			switch {
+			case e.IsDir() && !strings.HasPrefix(e.Name(), "."):
+				namesWithDirs = append(namesWithDirs, e.Name())
+			case !e.IsDir() && strings.HasSuffix(e.Name(), ".pending"):
 				namesWithDirs = append(namesWithDirs, strings.TrimSuffix(e.Name(), ".pending"))
 			}
 		}
@@ -2922,11 +2946,18 @@ func (m *Manager) reconcilePoolInternal() {
 	}
 
 	m.ReconcilePoolWith(namesWithDirs, namesWithSessions)
+}
 
-	// Prune any stale git worktree entries (handles manually deleted directories)
-	if repoGit, err := m.repoBase(); err == nil {
-		_ = repoGit.WorktreePrune()
+// pruneWorktrees drops git worktree entries whose directories are gone. It runs
+// after the pool lock is released, never inside it: it is a git subprocess, and
+// a lock that spans it makes every other spawn of the rig wait on git rather
+// than on the count-and-claim the lock is for (gt-vaivp).
+func (m *Manager) pruneWorktrees() {
+	repoGit, err := m.repoBase()
+	if err != nil {
+		return
 	}
+	_ = repoGit.WorktreePrune()
 }
 
 // ReconcilePoolWith reconciles the name pool given lists of names from different sources.

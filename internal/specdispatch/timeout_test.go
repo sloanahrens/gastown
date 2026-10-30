@@ -2,46 +2,69 @@ package specdispatch
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 )
 
-// A bead the spec-dispatch-failed label holds out is slung again only while its
-// notes say the last failure was a sling killed at its bound and a retry is
-// left: the label is the dispatcher's record of the kill, and clearing it after
-// a failure of another kind would retry a bead whose reason is not the host's
-// load (gt-vaivp).
+// A bead a failure left is slung again only while it wears both the failure
+// label and the timeout label — the second says the failure was a sling killed
+// at its bound, which every other failure clears — and while the metadata
+// count of those kills leaves a retry (gt-vaivp).
 func TestRetryAfterTimeout(t *testing.T) {
 	t.Parallel()
-	mark := TimeoutNoteMarker + " sling killed at its 5m0s bound (attempt %d of 3)"
-	timeouts := func(n int) string {
-		lines := make([]string, 0, n)
-		for i := 1; i <= n; i++ {
-			lines = append(lines, fmt.Sprintf(mark, i))
-		}
-		return strings.Join(lines, "\n")
+	failed := []string{DispatchFailedLabel}
+	timedOut := []string{DispatchFailedLabel, TimeoutLabel}
+	metadata := func(n int) []byte {
+		return []byte(fmt.Sprintf(`{"%s":"%d"}`, TimeoutAttemptsKey, n))
 	}
 	cases := []struct {
 		name    string
-		notes   string
+		labels  []string
+		meta    []byte
 		attempt int
 		retry   bool
 	}{
-		{"no notes", "", 0, false},
-		{"an unrelated note", "findings: the retry loop never resets", 0, false},
-		{"one bound kill", timeouts(1), 1, true},
-		{"the last retry left", timeouts(TimeoutRetries - 1), TimeoutRetries - 1, true},
-		{"retries spent", timeouts(TimeoutRetries), TimeoutRetries, false},
-		{"kills and then a failure of its own", timeouts(1) + "\nspec-dispatch: the bead has something wrong; excluded", 1, false},
-		{"the marker mid-line is no kill", "see " + TimeoutNoteMarker + " in the log", 0, false},
+		{"no labels", nil, metadata(1), 0, false},
+		{"the failure label alone", failed, metadata(1), 0, false},
+		{"both labels, no count", timedOut, nil, 0, false},
+		{"both labels, one kill", timedOut, metadata(1), 1, true},
+		{"both labels, the last retry left", timedOut, metadata(TimeoutRetries - 1), TimeoutRetries - 1, true},
+		{"both labels, the retries spent", timedOut, metadata(TimeoutRetries), TimeoutRetries, false},
+		{"a count written as a number", timedOut,
+			[]byte(fmt.Sprintf(`{"%s":%d}`, TimeoutAttemptsKey, TimeoutRetries)), TimeoutRetries, false},
+		{"metadata this package cannot read", timedOut, []byte("{not json"), 0, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			attempt, retry := RetryAfterTimeout(c.notes)
+			attempt, retry := RetryAfterTimeout(c.labels, c.meta)
 			if attempt != c.attempt || retry != c.retry {
-				t.Errorf("RetryAfterTimeout(%q) = attempt %d retry %v, want attempt %d retry %v",
-					c.notes, attempt, retry, c.attempt, c.retry)
+				t.Errorf("RetryAfterTimeout(%v, %s) = attempt %d retry %v, want attempt %d retry %v",
+					c.labels, c.meta, attempt, retry, c.attempt, c.retry)
+			}
+		})
+	}
+}
+
+// The count is read from metadata, not from the notes: a note that mentions a
+// count is prose, and another writer's metadata key is not this one's.
+func TestTimeoutAttemptsReadsOnlyItsOwnMetadataKey(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		meta []byte
+		want int
+	}{
+		{"its own key as a string", []byte(`{"spec_dispatch_timeout_attempts":"2"}`), 2},
+		{"its own key as a number", []byte(`{"spec_dispatch_timeout_attempts":2}`), 2},
+		{"another writer's key", []byte(`{"attempts":"5"}`), 0},
+		{"no metadata", nil, 0},
+		{"a count that is not a number", []byte(`{"spec_dispatch_timeout_attempts":"many"}`), 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := TimeoutAttempts(c.meta); got != c.want {
+				t.Errorf("TimeoutAttempts(%s) = %d, want %d", c.meta, got, c.want)
 			}
 		})
 	}

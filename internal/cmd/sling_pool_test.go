@@ -1243,12 +1243,12 @@ func TestEachSpawnGetsItsOwnSeatClaimStore(t *testing.T) {
 	}
 }
 
-// The seat-decision lock is held only for the count-and-claim. Everything that
-// takes minutes under load — the worktree clone and the sandbox build — runs in
-// prepare, after the route has returned and the lock is back. A sling that held
-// it that long would make every other sling wait out its 5s lock bound and
-// route unreserved, and a sling that waited for the lock would spend its own
-// bound on another sling's clone (gt-vaivp).
+// The seat-decision lock covers the count-and-claim and nothing else: the
+// worktree clone and the sandbox build, which take minutes under load, run in
+// prepare, after the route has returned and the lock is back. The scope is
+// what keeps the lock's 5s wait from growing with another sling's clone; it is
+// not what bounds a sling, whose 5m kill at its own bound is answered by the
+// dispatcher's retry (gt-vaivp).
 func TestTheSeatDecisionLockIsReleasedBeforeTheSpawnsSlowWork(t *testing.T) {
 	t.Parallel()
 	w := newTestPoolTown(cappedPool(2))

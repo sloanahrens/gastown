@@ -174,6 +174,10 @@ func beadUpdateOptions(f *pflag.FlagSet) beads.UpdateOptions {
 	}
 	opts.AddLabels, _ = f.GetStringArray("add-label")
 	opts.RemoveLabels, _ = f.GetStringArray("remove-label")
+	// The pairs go to bd as written: it reads "key=value" itself and refuses a
+	// pair it cannot, which is one rule for the flag and for the verbs.
+	opts.SetMetadata, _ = f.GetStringArray("set-metadata")
+	opts.UnsetMetadata, _ = f.GetStringArray("unset-metadata")
 	return opts
 }
 
@@ -293,6 +297,8 @@ func beadUpdateFlags(f *pflag.FlagSet) {
 	f.IntP("priority", "p", 0, "New priority 0-4")
 	f.StringArray("add-label", nil, "Label to add (repeatable)")
 	f.StringArray("remove-label", nil, "Label to remove (repeatable)")
+	f.StringArray("set-metadata", nil, "Metadata key=value to set (repeatable)")
+	f.StringArray("unset-metadata", nil, "Metadata key to remove (repeatable)")
 	f.String("acceptance", "", "New acceptance criteria, the whole block")
 }
 

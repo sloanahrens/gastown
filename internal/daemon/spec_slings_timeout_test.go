@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"os/exec"
 	"slices"
@@ -15,9 +14,10 @@ import (
 )
 
 // A sling killed at its own bound is the host's load reaching the sling, not a
-// defect in its bead: the daemon labels it as any failed sling and records the
-// kill as an attempt, which the dispatcher reads to clear the label and sling
-// the bead again while retries remain (gt-vaivp).
+// defect in its bead: the daemon labels it as any failed sling, records the
+// kill as an attempt in the bead's metadata and marks it with the timeout
+// label, which the dispatcher reads to clear the label and sling the bead again
+// while retries remain (gt-vaivp).
 func TestASlingKilledAtItsBoundRecordsTheAttempt(t *testing.T) {
 	t.Parallel()
 	fake, d, lines := boundKilledSling(t)
@@ -28,16 +28,20 @@ func TestASlingKilledAtItsBoundRecordsTheAttempt(t *testing.T) {
 	d.runSpecDispatch()
 	waitSlings(t, d)
 
-	if got := fake.argvs("bead", "update"); len(got) != 1 || !slices.Equal(got[0], []string{"bead", "update", "gt-z", "--add-label", "spec-dispatch-failed"}) {
-		t.Errorf("bead updates = %v, want gt-z labeled spec-dispatch-failed once", got)
+	want := []string{"bead", "update", "gt-z",
+		"--add-label", "spec-dispatch-failed",
+		"--add-label", specdispatch.TimeoutLabel,
+		"--set-metadata", "spec_dispatch_timeout_attempts=1"}
+	if got := fake.argvs("bead", "update"); len(got) != 1 || !slices.Equal(got[0], want) {
+		t.Errorf("bead updates = %v, want %v", got, want)
 	}
 	notes := fake.argvs("bead", "note", "gt-z")
 	if len(notes) != 1 {
 		t.Fatalf("notes = %v, want one recording the kill", notes)
 	}
 	note := notes[0][len(notes[0])-1]
-	if !strings.HasPrefix(note, specdispatch.TimeoutNoteMarker) || !strings.Contains(note, "attempt 1 of 3") {
-		t.Errorf("note = %q, want it headed by the timeout marker and naming attempt 1 of 3", note)
+	if !strings.Contains(note, "attempt 1 of 3") {
+		t.Errorf("note = %q, want it naming attempt 1 of 3", note)
 	}
 	if !strings.Contains(note, "the dispatcher clears this label") {
 		t.Errorf("note = %q, want it to say the dispatcher clears the label while retries remain", note)
@@ -47,8 +51,9 @@ func TestASlingKilledAtItsBoundRecordsTheAttempt(t *testing.T) {
 	}
 }
 
-// Each kill counts the ones before it, so the kill that spends the last retry
-// says so and leaves the label for a person (gt-vaivp).
+// Each kill counts the ones before it from the bead's metadata, so the kill
+// that spends the last retry says so and leaves the label for a person
+// (gt-vaivp).
 func TestASlingKilledAtItsBoundCountsTheAttemptsBeforeIt(t *testing.T) {
 	t.Parallel()
 	fake, d, _ := boundKilledSling(t)
@@ -57,8 +62,8 @@ func TestASlingKilledAtItsBoundCountsTheAttemptsBeforeIt(t *testing.T) {
 		ID:        "gt-z",
 		Status:    string(beads.StatusOpen),
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-		Labels:    []string{"spec-dispatch-failed"},
-		Notes:     strings.Repeat(specdispatch.TimeoutNoteMarker+" an earlier kill\n", specdispatch.TimeoutRetries-1),
+		Labels:    []string{specdispatch.DispatchFailedLabel, specdispatch.TimeoutLabel},
+		Metadata:  []byte(`{"spec_dispatch_timeout_attempts":"2"}`),
 	})
 	d.openWorkBeads = bd.open
 
@@ -72,6 +77,37 @@ func TestASlingKilledAtItsBoundCountsTheAttemptsBeforeIt(t *testing.T) {
 	note := notes[0][len(notes[0])-1]
 	if !strings.Contains(note, "attempt 3 of 3") || !strings.Contains(note, "the retries are spent") {
 		t.Errorf("note = %q, want attempt 3 of 3 and the retries spent", note)
+	}
+}
+
+// A failure that is not a kill at the bound drops the timeout label and the
+// count a kill may have left: the dispatcher would otherwise sling that bead
+// again on the kill's retries (gt-vaivp).
+func TestAFailureOfItsOwnDropsTheTimeoutRetry(t *testing.T) {
+	t.Parallel()
+	fake, d, _ := failedSling(t)
+	bd := newWorkBD(t)
+	bd.db.Seed(beads.Issue{
+		ID:        "gt-z",
+		Status:    string(beads.StatusOpen),
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Labels:    []string{specdispatch.TimeoutLabel},
+		Metadata:  []byte(`{"spec_dispatch_timeout_attempts":"1"}`),
+	})
+	d.openWorkBeads = bd.open
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	want := []string{"bead", "update", "gt-z",
+		"--add-label", "spec-dispatch-failed",
+		"--remove-label", specdispatch.TimeoutLabel,
+		"--unset-metadata", specdispatch.TimeoutAttemptsKey}
+	if got := fake.argvs("bead", "update"); len(got) != 1 || !slices.Equal(got[0], want) {
+		t.Errorf("bead updates = %v, want %v", got, want)
+	}
+	if got := fake.argvs("bead", "note", "gt-z"); len(got) != 1 {
+		t.Errorf("notes = %v, want one recording the failure", got)
 	}
 }
 
@@ -131,25 +167,146 @@ func TestASlingKilledAtItsBoundLeavesABeadItsPolecatIsWorking(t *testing.T) {
 	}
 }
 
+// A failure that is not a kill at the bound leaves the hook alone: the bound is
+// what makes a half-made sling certain, and unslinging on every failure takes a
+// bead away from a sling that may still be working (gt-vaivp).
+func TestAFailureOfItsOwnLeavesAHookedBeadHooked(t *testing.T) {
+	t.Parallel()
+	fake, d, _ := failedSling(t)
+	d.tmux = newFakeTmux(clockwork.NewRealClock())
+	bd := newWorkBD(t)
+	bd.db.Seed(beads.Issue{
+		ID:        "gt-z",
+		Status:    string(beads.IssueStatusHooked),
+		Assignee:  "gastown/polecats/p",
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	d.openWorkBeads = bd.open
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if got := fake.argvs("unsling"); len(got) != 0 {
+		t.Errorf("unsling calls = %v, want no hand-back for a failure that is not the bound", got)
+	}
+	if got := fake.argvs("bead", "update"); len(got) != 0 {
+		t.Errorf("bead updates = %v, want the bead left hooked to its polecat", got)
+	}
+}
+
+// A daemon with no tmux cannot tell a dead seat from a busy one, so a bead a
+// killed sling hooked is left as it is and the log says why: the unsling is one
+// way, and an unanswered session read is no proof the polecat is gone
+// (gt-vaivp).
+func TestASlingKilledAtItsBoundWithNoTmuxLeavesTheHookedBead(t *testing.T) {
+	t.Parallel()
+	fake, d, lines := boundKilledSling(t)
+	d.tmux = nil
+	bd := newWorkBD(t)
+	bd.db.Seed(beads.Issue{
+		ID:        "gt-z",
+		Status:    string(beads.IssueStatusHooked),
+		Assignee:  "gastown/polecats/p",
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	d.openWorkBeads = bd.open
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if got := fake.argvs("unsling"); len(got) != 0 {
+		t.Errorf("unsling calls = %v, want no hand-back without a tmux to prove the seat dead", got)
+	}
+	if got := fake.argvs("bead", "update"); len(got) != 0 {
+		t.Errorf("bead updates = %v, want the hooked bead left alone", got)
+	}
+	if n := countContaining(lines(), "cannot tell whether gastown/polecats/p has a session"); n != 1 {
+		t.Errorf("unanswered-session lines = %d, want one: %v", n, lines())
+	}
+}
+
+// A hand-back that fails leaves the bead hooked and says so once: the bead is
+// still on a hook nothing works, but the label is the one write only an
+// operator clears, and a polecat the daemon could not unsling may still own it
+// (gt-vaivp).
+func TestASlingKilledAtItsBoundReportsAFailedHandBack(t *testing.T) {
+	t.Parallel()
+	fake, d, lines := daemonWhoseSlingFailed(t, slingFailure{
+		took:       specSlingBound(),
+		unslingErr: errors.New("exit status 1"),
+	})
+	d.tmux = newFakeTmux(clockwork.NewRealClock())
+	bd := newWorkBD(t)
+	bd.db.Seed(beads.Issue{
+		ID:        "gt-z",
+		Status:    string(beads.IssueStatusHooked),
+		Assignee:  "gastown/polecats/p",
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	d.openWorkBeads = bd.open
+
+	d.runSpecDispatch()
+	waitSlings(t, d)
+
+	if got := fake.argvs("unsling"); len(got) != 1 {
+		t.Errorf("unsling calls = %v, want the hand-back tried once", got)
+	}
+	if n := countContaining(lines(), "handing the bead back from gastown/polecats/p failed"); n != 1 {
+		t.Errorf("hand-back failure lines = %d, want one: %v", n, lines())
+	}
+	if got := fake.argvs("bead", "update"); len(got) != 0 {
+		t.Errorf("bead updates = %v, want no label on a bead whose hand-back failed", got)
+	}
+}
+
 // boundKilledSling is a daemon whose sling is killed at its bound: the fake
-// answers the tick, and the sling's context is already spent when its process is
-// run and reports the kill the daemon's process-group kill leaves, so the bound
-// is what the daemon reads without a real wait.
+// answers the tick, and the fake clock is carried past the sling's whole bound
+// while the sling's process is run and reports the kill the daemon's
+// process-group kill leaves, so the daemon reads the kill's own timing without
+// waiting one out (gt-vaivp).
 func boundKilledSling(t *testing.T) (*fakeCLI, *Daemon, func() []string) {
+	t.Helper()
+	return daemonWhoseSlingFailed(t, slingFailure{took: specSlingBound()})
+}
+
+// failedSling is a daemon whose sling fails without running out of time: the
+// failure that must not be read as a kill at the bound.
+func failedSling(t *testing.T) (*fakeCLI, *Daemon, func() []string) {
+	t.Helper()
+	return daemonWhoseSlingFailed(t, slingFailure{})
+}
+
+// slingFailure is how one sling ends in these tests: took is how far the fake
+// clock is carried while its process runs, and unslingErr refuses the hand-back
+// of a bead the sling hooked.
+type slingFailure struct {
+	took       time.Duration
+	unslingErr error
+}
+
+// daemonWhoseSlingFailed is a daemon whose one sling exits with the error the
+// daemon's process-group kill leaves, after the clock is carried o.took: a
+// whole bound is a kill, and no time at all is a failure of its own.
+func daemonWhoseSlingFailed(t *testing.T, o slingFailure) (*fakeCLI, *Daemon, func() []string) {
 	t.Helper()
 	fake := newFakeCLI(func([]string) cliReply {
 		return cliReply{stdout: string(wireOut(plannedTick(slingJob("gt-z", "claude-sonnet"))))}
 	})
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
-	d.specSlingCtx = func(parent context.Context) (context.Context, context.CancelFunc) {
-		ctx, cancel := context.WithDeadline(parent, time.Now().Add(-time.Second))
-		return ctx, cancel
-	}
+	clock := clockwork.NewFakeClockAt(time.Now())
+	d.clock = clock
 	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
 		args := cmd.Args[1:]
-		if len(args) >= 2 && args[0] == "spec" && args[1] == "sling" {
+		switch {
+		case len(args) >= 2 && args[0] == "spec" && args[1] == "sling":
+			clock.Advance(o.took)
 			return nil, []byte("signal: terminated"), errors.New("signal: terminated")
+		case len(args) >= 1 && args[0] == "unsling" && o.unslingErr != nil:
+			// The fake records the call it answers, so the test can see the
+			// hand-back was tried before it is refused.
+			_, _, _ = fake.run(cmd)
+			return nil, []byte("the hand-back was refused"), o.unslingErr
 		}
 		return fake.run(cmd)
 	}
