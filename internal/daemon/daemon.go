@@ -116,6 +116,12 @@ type Daemon struct {
 	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
 	execCmd cmdRunFunc
 
+	// pluginRuns is the plugin run ledger dispatchPlugins reads cooldown gates
+	// from and records runs to; nil reads the town's beads database
+	// (plugin.NewRecorder). Tests set it to count a tick's ledger reads
+	// (gt-3bqfy).
+	pluginRuns pluginRunSource
+
 	// getenv reads the environment the start names its owner from
 	// (DetectSelf); nil reads the process environment. Tests set it so a
 	// start runs under an environment fixture.
