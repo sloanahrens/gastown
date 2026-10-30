@@ -18,34 +18,29 @@ func TestMain(m *testing.M) {
 	os.Exit(unittier.Main(m))
 }
 
-// fixture is one case's Env: two scripts, a fake Exec that records each
-// command and answers the given codes, and a clock 134 seconds apart.
+// fixture is one case's Env: a fake Exec that records each command, answers
+// the given codes and takes 67 seconds per script on a fake clock, so two
+// scripts run for 134 seconds however often the runner reads the clock.
 type fixture struct {
 	env      Env
 	out, err bytes.Buffer
 	cmds     []shelltier.Command
 	budgets  []time.Duration
 	made     []string
+	now      time.Time
 }
 
 func newFixture(codes map[string]int, entries ...shelltier.Entry) *fixture {
-	f := &fixture{}
-	start := time.Unix(0, 0)
-	calls := 0
+	f := &fixture{now: time.Unix(0, 0)}
 	f.env = Env{
 		Err:     &f.err,
 		Entries: entries,
 		Exec: func(_ context.Context, c shelltier.Command) (int, error) {
 			f.cmds = append(f.cmds, c)
+			f.now = f.now.Add(67 * time.Second)
 			return codes[c.Argv[len(c.Argv)-1]], nil
 		},
-		Now: func() time.Time {
-			calls++
-			if calls == 1 {
-				return start
-			}
-			return start.Add(134 * time.Second)
-		},
+		Now: func() time.Time { return f.now },
 		WithTimeout: func(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
 			f.budgets = append(f.budgets, d)
 			return context.WithCancel(ctx)
@@ -173,5 +168,21 @@ func TestMainFailsWhenTheLogDirCannotBeMade(t *testing.T) {
 	}
 	if len(f.cmds) != 0 {
 		t.Fatalf("ran %d scripts with no log dir, want 0", len(f.cmds))
+	}
+}
+
+func TestAnnounceRunsACommandWithNoArgvWithoutPanicking(t *testing.T) {
+	t.Parallel()
+	var w bytes.Buffer
+	ran := false
+	exec := announce(&w, func(context.Context, shelltier.Command) (int, error) {
+		ran = true
+		return 0, nil
+	})
+	if _, err := exec(t.Context(), shelltier.Command{}); err != nil {
+		t.Fatalf("error = %v, want nil from the fake exec", err)
+	}
+	if !ran {
+		t.Fatal("announce did not hand the command to exec")
 	}
 }

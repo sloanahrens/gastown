@@ -5,7 +5,7 @@
 //
 // Before each script it writes `tier-sweep: shell <path> ...` to stderr, and it
 // writes the summary line there last. It exits with the tier's verdict: 0 when
-// green, 1 when red, 2 on a usage error.
+// green, 1 when red, 2 on a usage error or when the log dir cannot be made.
 package main
 
 import (
@@ -105,7 +105,16 @@ func Main(args []string, out io.Writer, env Env) int {
 // runs, the way scripts/tier-sweep.sh names each script it starts.
 func announce(w io.Writer, exec shelltier.Exec) shelltier.Exec {
 	return func(ctx context.Context, c shelltier.Command) (int, error) {
-		fmt.Fprintf(w, "tier-sweep: shell %s ...\n", c.Argv[len(c.Argv)-1])
+		fmt.Fprintf(w, "tier-sweep: shell %s ...\n", scriptPath(c))
 		return exec(ctx, c)
 	}
+}
+
+// scriptPath is the script a command runs: the last element of its argv, or
+// empty for a command with no argv, which the exec then refuses to run.
+func scriptPath(c shelltier.Command) string {
+	if len(c.Argv) == 0 {
+		return ""
+	}
+	return c.Argv[len(c.Argv)-1]
 }

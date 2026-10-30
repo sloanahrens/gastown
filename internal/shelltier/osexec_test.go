@@ -129,3 +129,47 @@ func TestExecWithReportsASuccessfulStartAsCodeZero(t *testing.T) {
 		t.Fatalf("exit code = %d, error = %v, want 0 and nil", code, err)
 	}
 }
+
+func TestExecWithRefusesACommandWithNoArgvBeforeItTouchesTheFileSystem(t *testing.T) {
+	t.Parallel()
+	f := &fakeFiles{}
+	c := testCommand()
+	c.Argv = nil
+	code, err := execWith(t.Context(), c, f, fakeStart(f, nil))
+	if !errors.Is(err, errNoArgv) {
+		t.Fatalf("error = %v, want errNoArgv", err)
+	}
+	if code != 0 || len(f.calls) != 0 {
+		t.Fatalf("exit code = %d, calls = %q, want 0 and no calls", code, f.calls)
+	}
+}
+
+func TestExecWithReportsACommandWhoseContextEndedAsAnErrorNotACode(t *testing.T) {
+	t.Parallel()
+	f := &fakeFiles{}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	// The starter stands in for a command the budget killed: the context ends
+	// and the process reports no failure of its own.
+	start := func(context.Context, Command, io.Writer) error {
+		cancel()
+		return nil
+	}
+	code, err := execWith(ctx, testCommand(), f, start)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want one wrapping context.Canceled", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 when the context ended", code)
+	}
+}
+
+func TestExecWithKeepsTheStartErrorWhenTheLogAlsoFailsToClose(t *testing.T) {
+	t.Parallel()
+	f := &fakeFiles{closeErr: errDenied}
+	cannotStart := errors.New("cannot start")
+	_, err := execWith(t.Context(), testCommand(), f, fakeStart(f, cannotStart))
+	if !errors.Is(err, cannotStart) {
+		t.Fatalf("error = %v, want the start error", err)
+	}
+}
