@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,5 +141,39 @@ func TestReadBoundedRefusesALogPastItsBound(t *testing.T) {
 	got, err = ReadBounded(t.TempDir(), 1)
 	if err != nil || got != nil {
 		t.Errorf("ReadBounded on a town with no log = %v, %v; want no events and no error", got, err)
+	}
+}
+
+// TestReadBoundedReturnsTheEventsBeforeAnUnreadableLine: a line past the
+// scanner's ceiling makes the rest of the log unreadable, and the events before
+// it still come back with the error — a partial view beats none, and the caller
+// is told the view is partial rather than handed it as the whole log
+// (gt-v7ptp).
+func TestReadBoundedReturnsTheEventsBeforeAnUnreadableLine(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := LogFeedTo(townRoot, TypeWake, "gastown/polecats/shale", WakePayload("gastown", "first")); err != nil {
+		t.Fatalf("LogFeedTo: %v", err)
+	}
+	f, err := os.OpenFile(filepath.Join(townRoot, EventsFile), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open events file: %v", err)
+	}
+	// One line longer than the scanner's 1MiB ceiling: Read's own limit, and a
+	// log a writer never meant to produce.
+	if _, err := f.WriteString(strings.Repeat("x", 1<<20+1) + "\n"); err != nil {
+		_ = f.Close()
+		t.Fatalf("write an oversized line: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	got, err := ReadBounded(townRoot, 0)
+	if err == nil {
+		t.Fatal("ReadBounded read past an oversized line without an error")
+	}
+	if len(got) != 1 || got[0].Type != TypeWake {
+		t.Errorf("ReadBounded = %d events (%v), want the one written before the bad line", len(got), got)
 	}
 }
