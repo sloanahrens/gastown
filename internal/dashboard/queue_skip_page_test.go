@@ -41,7 +41,7 @@ function __qRows() {
     const leaves = [];
     __walk(r, k => {
       if (k.nodeType === 3 || k.children.length || String(k.textContent) === "") return;
-      leaves.push({tag: String(k.tagName).toLowerCase(), class: k.className, text: String(k.textContent)});
+      leaves.push({tag: String(k.tagName).toLowerCase(), class: k.className, text: String(k.textContent), title: String(k.title || "")});
     });
     out.push({text: String(r.textContent), leaves: leaves});
   }
@@ -84,6 +84,7 @@ type queueLeafDrawn struct {
 	Tag   string `json:"tag"`
 	Class string `json:"class"`
 	Text  string `json:"text"`
+	Title string `json:"title"`
 }
 
 // queueRowDrawn is one row of the queue as the page drew it: the text it reads
@@ -516,6 +517,54 @@ func TestQueueSkipPageSeatPlaceMissingPriority(t *testing.T) {
 						t.Errorf("%s wears %+v, want %q", id, l, tag)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestQueueSkipPageSeatPlaceCapped: the "of M" in a waiting row's tag is the
+// count of waiting beads the page holds, so when the server cut the ready list
+// (ready_total larger than the rows sent) it reads "of M+" and the title says
+// the list was cut; an uncapped list keeps the plain "of M".
+func TestQueueSkipPageSeatPlaceCapped(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		readyTotal int
+		wantTag    string
+		wantCut    bool
+	}{
+		{"every ready bead is on the page", 2, "waiting for a seat #1 of 2", false},
+		{"the list was cut by the server", 57, "waiting for a seat #1 of 2+", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			first := skippedRow("gt-first", "2026-10-29T11:58:00Z", "no seat: over the town total", 4)
+			first["created_at"] = "2026-10-27T10:00:00Z"
+			second := skippedRow("gt-second", "2026-10-29T11:58:00Z", "no seat: over the town total", 4)
+			second["created_at"] = "2026-10-28T10:00:00Z"
+			queue := queueRead(first, second)
+			queue["ready_total"] = tt.readyTotal
+			dom := drawQueuePage(t, queue)
+
+			var found bool
+			for _, r := range queueRows(t, dom) {
+				if !strings.Contains(r.Text, "gt-first") {
+					continue
+				}
+				l, ok := leafSaying(r, "tag", "waiting for a seat")
+				if !ok || l.Text != tt.wantTag {
+					t.Fatalf("gt-first wears %+v, want %q", l, tt.wantTag)
+				}
+				if cut := strings.Contains(l.Title, "list was cut"); cut != tt.wantCut {
+					t.Errorf("tag title %q: says the list was cut = %v, want %v", l.Title, cut, tt.wantCut)
+				}
+				found = true
+			}
+			if !found {
+				t.Fatal("the page drew no row for gt-first")
 			}
 		})
 	}

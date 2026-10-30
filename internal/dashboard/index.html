@@ -4324,15 +4324,16 @@ function isReadyToDispatch(b) { return b.shape === "ok" || b.shape === "skipped"
 // dispatch order: priority, then oldest created_at, then id, the order
 // specdispatch.Order uses. It is counted over every store in the ready list,
 // since the seats are the town's; a list the server capped counts only the rows
-// it sent.
-function seatPlaces(all) {
+// it sent, and then the places read "N of M+" (capped): the page cannot know
+// the true count, and a wrong "of M" is worse than none.
+function seatPlaces(all, capped) {
   const waiting = all.filter(b => b.shape === "skipped" && skipClass(b.skip_reason || b.shape_note) === "waiting for a seat");
   const t = b => { const n = Date.parse(b.created_at); return Number.isFinite(n) ? n : Infinity; };
   // A missing or non-numeric priority sorts last, like an unparseable time.
   const pri = b => (b.priority != null && Number.isFinite(Number(b.priority))) ? Number(b.priority) : 99;
   waiting.sort((a, b) => pri(a) - pri(b) || (t(a) === t(b) ? 0 : t(a) < t(b) ? -1 : 1) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const places = {};
-  waiting.forEach((b, i) => { places[b.rig + "/" + b.id] = (i + 1) + " of " + waiting.length; });
+  waiting.forEach((b, i) => { places[b.rig + "/" + b.id] = (i + 1) + " of " + waiting.length + (capped ? "+" : ""); });
   return places;
 }
 
@@ -4452,7 +4453,10 @@ function drawQueueList(box, s) {
     }
     rowsBox.append(el("div", "empty", msg));
   }
-  const places = seatPlaces(all);
+  // The ready list is capped when the page holds fewer ready rows than the
+  // server counted (queueMaxRows lives in the server, not here).
+  const seatsCapped = qTab === "ready" && all.length < (q.ready_total || 0);
+  const places = seatPlaces(all, seatsCapped);
   rows.forEach(b => {
     const id = b.rig + "/" + b.id;
     const open = qOpen.has(id);
@@ -4474,7 +4478,7 @@ function drawQueueList(box, s) {
       else if (skipClass(reason) === "waiting for a seat") {
         const place = places[id];
         const g = el("span", "tag", "waiting for a seat" + (place ? " #" + place : ""));
-        g.title = "nothing is wrong with this bead: every seat is taken or capped, and it goes in the order shown (priority, then oldest). " + reason;
+        g.title = "nothing is wrong with this bead: every seat is taken or capped, and it goes in the order shown (priority, then oldest). " + (seatsCapped ? "The ready list was cut, so the total is at least this many. " : "") + reason;
         t.append(document.createTextNode(" "), g);
       } else { const g = el("span", "tag warnc", reason ? "skipped: " + reason : "skipped"); g.title = "the dispatcher's last real tick passed this bead over; the line below says why and since when"; t.append(document.createTextNode(" "), g); }
     }
