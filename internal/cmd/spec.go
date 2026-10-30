@@ -576,12 +576,35 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 			for id, is := range group {
 				kids[id] = childSpecs(is)
 			}
+			if err == nil {
+				// bd keys every parent it was asked about and gives a childless
+				// one an empty list (beads.childrenGroups), so a parent missing
+				// from a successful read was not answered: it is read alone, and
+				// a read that still has nothing for it is an error. Reading the
+				// absence as "no children" would hide a held container's
+				// children from the container hold.
+				for _, id := range ids {
+					if _, answered := group[id]; answered {
+						continue
+					}
+					reads.call()
+					single, readErr := read(dir, []string{id})
+					if readErr != nil {
+						errs[id] = readErr
+						continue
+					}
+					is, ok := single[id]
+					if !ok {
+						errs[id] = fmt.Errorf("the children read answered nothing for %s", id)
+						continue
+					}
+					kids[id] = childSpecs(is)
+				}
+			}
 		}
 		if err := errs[beadID]; err != nil {
 			return nil, err
 		}
-		// A parent the grouped read answered with no children is absent from
-		// the map: the read itself is the answer, an empty child set.
 		return kids[beadID], nil
 	}
 }
@@ -2622,6 +2645,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		// the next tick's container hold (gt-km9jt).
 		Children: func(id string) ([]specdispatch.Child, error) {
 			if children == nil {
+				reads.call()
 				return specChildren(townRoot, id)
 			}
 			return children(id)
