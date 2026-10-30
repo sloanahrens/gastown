@@ -266,3 +266,48 @@ func TestSpecTickFailsClosedOnItsOccupancyRead(t *testing.T) {
 		t.Fatalf("report errors = %q, want exactly %q", r.Errors, want)
 	}
 }
+
+// TestSpecTickCountsAnInFlightSlingAndADrainingSessionOnce pins the tick total when a
+// sling is running for the same agent as a draining session: the roster's two
+// occupancies, the draining session the sling still counts, and the running sling
+// each enter the total once, so it is 4 and a town of four takes no more. An in-flight
+// sling carries an agent, not a session key, so it cannot suppress or duplicate a held
+// session; a sling that spawned between the two reads is the one overlap, and it
+// errs toward fewer slings (gt-97ppg). Mutation: skip a held session whose agent has
+// a sling in flight, and the total reads 3 and the candidates are slung.
+func TestSpecTickCountsAnInFlightSlingAndADrainingSessionOnce(t *testing.T) {
+	t.Parallel()
+	f := specGoldenTown()
+	f.maxTotal = 4
+	env := f.env()
+	env.InFlight = []specInFlight{{Bead: "gt-running", Agent: "claude-sonnet", Started: time.Now()}}
+	env.Roster = func() (specRoster, error) {
+		return specRosterStep(
+			func() (poolSeatSnapshot, error) { return poolSeatSnapshot{sessions: drainingTickRoster()}, nil },
+			nil,
+			func(poolSeatSnapshot) func() ([]poolSession, error) {
+				return func() ([]poolSession, error) { return drainingTickHeld(), nil }
+			},
+			func(poolSeatSnapshot) {},
+		)
+	}
+	r := runSpecDispatchCycle(env)
+
+	if len(f.slingRecords) != 0 {
+		t.Fatalf("slung %d bead(s) on a town at its total of 4, want none", len(f.slingRecords))
+	}
+	var total []string
+	for _, e := range r.Skipped {
+		if strings.Contains(e.Line, "over the town total") {
+			total = append(total, e.Line)
+		}
+	}
+	if len(total) == 0 {
+		t.Fatalf("no candidate was skipped on the town total; skipped = %q", r.Skipped)
+	}
+	for _, line := range total {
+		if !strings.Contains(line, ": no seat: over the town total: 4/4 live polecats across every seat") {
+			t.Errorf("skip line %q does not read the total 4/4 (2 roster + 1 draining + 1 in flight)", line)
+		}
+	}
+}
