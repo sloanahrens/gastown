@@ -273,6 +273,32 @@ func TestRulesPrefetchFailureLeavesTheLabelAsItWas(t *testing.T) {
 	}
 }
 
+// TestRulesPrefetchWarnsForAFailedRead pins the alarm the work item asks for: a
+// read that fails inside the pool is named with its bead and cause, and a read
+// that succeeds says nothing. The warning goes through the adapter's warn seam,
+// so the test reads it without touching os.Stderr.
+func TestRulesPrefetchWarnsForAFailedRead(t *testing.T) {
+	t.Parallel()
+	d0 := prefetchFixtureDoneAt
+	reader := newFakeCommentReader()
+	reader.fail[beadRef{"gastown", "gt-err"}] = errors.New("bd comments: boom")
+	a := newPrefetchAdapter(t.TempDir(), prefetchFixtureNow(), reader.read)
+	var warnings []string
+	a.warn = func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	}
+	items := parseRulesLines(t, a,
+		prefetchLine(t, "gastown", "gt-ok", "furiosa", d0),
+		prefetchLine(t, "gastown", "gt-err", "furiosa", d0))
+
+	a.Prefetch(context.Background(), items)
+
+	want := []string{"prefetching the comments of gastown/gt-err: bd comments: boom"}
+	if !reflect.DeepEqual(warnings, want) {
+		t.Errorf("warnings = %q, want %q: one for the failed read and none for gt-ok", warnings, want)
+	}
+}
+
 // TestRulesPrefetchWorkerCap checks the pool runs exactly rulesPrefetchWorkers
 // reads at once, and never more. Each read holds until the test releases it.
 // The count is taken at quiescence: synctest.Wait returns once every goroutine

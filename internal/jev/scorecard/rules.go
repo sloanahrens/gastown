@@ -76,6 +76,10 @@ type rulesAdapter struct {
 	// commentCache holds each bead's comments by commentKey, once read by
 	// Prefetch or by Label. A failed read is not kept.
 	commentCache map[string][]beads.Comment
+	// warn tells the operator about a failed prefetch read; nil means stderr
+	// through warnf. A test sets it to see the warning without swapping
+	// os.Stderr.
+	warn func(format string, args ...any)
 }
 
 // rulesPrefetchWorkers caps how many comment reads Prefetch runs at once. Each
@@ -229,10 +233,12 @@ func (a *rulesAdapter) windowClosed(line rules.Line) bool {
 }
 
 // Prefetch reads the comments of the beads Label will read, once per (rig,
-// bead), with a pool of rulesPrefetchWorkers reads. The set is exactly the one
-// Label reads: a parsed line whose window has closed. A read that fails is left
-// out of the cache, so Label reads that bead itself and answers as it always
-// did, and each failure is named on stderr.
+// bead), with a pool of rulesPrefetchWorkers reads. It reads the bead of every
+// parsed line whose window has closed, which covers each bead Label reads for a
+// line that reaches that read (Label can stop at an earlier check, so Prefetch
+// may read a bead Label never asks for). A read that fails is left out of the
+// cache, so Label reads that bead itself and answers as it always did, and each
+// failure is named on stderr.
 func (a *rulesAdapter) Prefetch(_ context.Context, items []Item) {
 	type pair struct{ rig, bead string }
 	var pairs []pair
@@ -275,9 +281,13 @@ func (a *rulesAdapter) Prefetch(_ context.Context, items []Item) {
 	close(jobs)
 	wg.Wait()
 
+	warn := a.warn
+	if warn == nil {
+		warn = warnf
+	}
 	for i, p := range pairs {
 		if results[i].err != nil {
-			warnf("prefetching the comments of %s/%s: %v", p.rig, p.bead, results[i].err)
+			warn("prefetching the comments of %s/%s: %v", p.rig, p.bead, results[i].err)
 			continue
 		}
 		a.cacheComments(p.rig, p.bead, results[i].comments)
