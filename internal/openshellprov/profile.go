@@ -53,6 +53,8 @@ type Gt struct {
 	Gateway string
 	// Root is the gt source checkout the policy paths are relative to, passed as --root.
 	Root string
+	// Err receives what gt writes to stderr, which is gt's explanation of a refusal.
+	Err io.Writer
 }
 
 // gateway is the --gateway name every call targets.
@@ -64,11 +66,16 @@ func (g Gt) gateway() string {
 }
 
 // endpoint runs one `gt sandbox endpoint` call with extra flags and returns what
-// it wrote to stdout. Its stderr is dropped, so no captured output can reach an
-// error built from this call.
+// it wrote to stdout. Its stderr goes to Err, where gt's refusal reaches the
+// operator, and never into an error built from this call.
 func (g Gt) endpoint(extra ...string) ([]byte, error) {
 	args := append([]string{"sandbox", "endpoint", "--gateway", g.gateway(), "--root", g.Root}, extra...)
-	stdout, _, err := g.Run.Run(gtBinary, args, nil, nil)
+	stdout, stderr, err := g.Run.Run(gtBinary, args, nil, nil)
+	if g.Err != nil {
+		if _, werr := g.Err.Write(stderr); werr != nil {
+			return stdout, fmt.Errorf("%s: writing gt's errors: %w", Name, werr)
+		}
+	}
 	return stdout, err
 }
 

@@ -23,6 +23,12 @@ func KeyValue(file, key string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s: reading key file: %w", Name, err)
 	}
+	return ParseKeyValue(data, key), nil
+}
+
+// ParseKeyValue is KeyValue over the bytes of the file, for a caller that reads
+// the file through its own Files seam and must parse it the same way.
+func ParseKeyValue(data []byte, key string) string {
 	value := ""
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -36,7 +42,7 @@ func KeyValue(file, key string) (string, error) {
 		}
 		value = unquote(strings.TrimSpace(assignment))
 	}
-	return value, nil
+	return value
 }
 
 // unquote strips one pair of matching single or double quotes around s. A lone
