@@ -1264,10 +1264,12 @@ fixed 2 percent of states (by the state's SHA-256) a successful call is
 followed by a second call with the scrubbed state and the same questions, in the
 background. Every request appends one line to `scrubcheck.jsonl` beside the
 usage ledger, with an `outcome`: `unsampled` (not chosen), `checked` (both
-answer sets, the rule counts and `state_sha256`), `failed` (the scrub or second
-call errored, with `error_class`, never the error text) or `capped` (the daily
+answer sets, the rule counts and `state_sha256`), `failed` (the state could not be
+encoded, or the cap check or second call errored, with `error_class`, never the
+error text) or `capped` (the daily
 cap refused the second call). Answers are scrubbed before they are logged, and
-no line holds state text. A scrub that changes nothing logs `checked` with
+no line holds state text. A command waits for its sampled checks before it exits,
+up to the Jev client's timeout, so a short-lived command does not lose their lines. A scrub that changes nothing logs `checked` with
 `unchanged: true` and sends no second call. The second call is billed under the
 caller name plus `-scrubcheck` and honors the daily cap. A capped day is said
 once in the warnings, with its count, when the next day's first capped check

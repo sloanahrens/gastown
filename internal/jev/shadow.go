@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/jev/scrub"
@@ -63,6 +64,35 @@ const (
 // caller name plus "-scrubcheck".
 func WithShadowScrub(percent int, allows func() (bool, error)) Option {
 	return func(c *Client) { c.shadowPercent, c.shadowAllows, c.shadowSet = percent, allows, true }
+}
+
+// shadowChecks counts the background checks every client in the process has
+// running, so the process can wait for them before it exits: a batteries'
+// command is a short-lived process, and a check still in flight when it ends
+// would lose its line. WaitShadowChecks is the one wait.
+var shadowChecks sync.WaitGroup
+
+// WaitShadowChecks blocks until every shadow check started in this process has
+// written its line, or ctx ends, and returns ctx's error in that case. The
+// command's exit path calls it so a sampled request's line is never lost to the
+// process ending first.
+func WaitShadowChecks(ctx context.Context) error { return waitGroup(ctx, &shadowChecks) }
+
+// WaitShadows is WaitShadowChecks for the checks this one client started.
+func (c *Client) WaitShadows(ctx context.Context) error { return waitGroup(ctx, &c.shadows) }
+
+func waitGroup(ctx context.Context, wg *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ShadowScrubbing reports whether the client was built with WithShadowScrub.
@@ -212,7 +242,9 @@ func (c *Client) shadowCheck(ctx context.Context, state any, qs map[string]Quest
 	// still gets its measurement, and post bounds the second call with the
 	// client's own timeout instead.
 	c.shadows.Add(1)
+	shadowChecks.Add(1)
 	go func() {
+		defer shadowChecks.Done()
 		defer c.shadows.Done()
 		c.finishShadow(context.WithoutCancel(ctx), rec, scrubbed, wire, qs)
 	}()

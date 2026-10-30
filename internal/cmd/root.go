@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/done"
+	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -351,12 +353,25 @@ func Execute() int {
 	installSessionGate()
 
 	strictCompletionCmd(rootCmd)
-	if err := rootCmd.Execute(); err != nil {
+	err := rootCmd.Execute()
+	finishJevChecks()
+	if err != nil {
 		// Silent and coded exits carry their own status; other errors were
 		// already printed by cobra and exit 1.
 		return exitCodeForError(err)
 	}
 	return 0
+}
+
+// finishJevChecks lets the Jev shadow scrub checks a command started write
+// their lines before the process ends, bounded by the Jev client's own timeout.
+// A command with no sampled request has nothing to wait for.
+func finishJevChecks() {
+	ctx, cancel := context.WithTimeout(context.Background(), jev.DefaultTimeout)
+	defer cancel()
+	if err := jev.WaitShadowChecks(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "gt: jev scrub checks still running at exit: %v\n", err)
+	}
 }
 
 // Command group IDs - used by subcommands to organize help output

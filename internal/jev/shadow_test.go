@@ -22,23 +22,12 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/scrub"
 )
 
-// shadowWaitGuard bounds waitShadows. A shadow call still running after it is a
-// bug, and the test fails with a message rather than hanging.
-const shadowWaitGuard = 10 * time.Second
-
-// waitShadows waits for the background shadow calls the client started.
+// waitShadows waits for the background shadow calls the client started. A
+// shadow call that never returns ends with the test's own context, not a timer.
 func waitShadows(t *testing.T, c *Client) {
 	t.Helper()
-	done := make(chan struct{})
-	go func() {
-		c.shadows.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	//testpolicy:allow no-sleep — the guard only bounds a shadow call that never returns; no test sleeps on it.
-	case <-time.After(shadowWaitGuard):
-		t.Fatalf("a shadow call did not finish within %v", shadowWaitGuard)
+	if err := c.WaitShadows(t.Context()); err != nil {
+		t.Fatalf("a shadow call did not finish: %v", err)
 	}
 }
 
@@ -515,4 +504,83 @@ func answerChoice(t *testing.T, set any) string {
 	require.True(t, ok, "question q in %v", choices)
 	choice, _ := q["choice"].(string)
 	return choice
+}
+
+// holdSecondCall answers the original call and holds the shadow call until the
+// test releases it, so a test can see a check in flight without a timer.
+type holdSecondCall struct {
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (h *holdSecondCall) RoundTrip(r *http.Request) (*http.Response, error) {
+	h.mu.Lock()
+	h.calls++
+	n := h.calls
+	h.mu.Unlock()
+	if n == 1 {
+		return httpReply(r, http.StatusOK, replyChoice("returns", 328)), nil
+	}
+	close(h.started)
+	<-h.release
+	return httpReply(r, http.StatusOK, replyChoice("billing", 300)), nil
+}
+
+// TestWaitShadowChecksHoldsTheProcessUntilTheLineIsWritten: the command's exit
+// path waits for the sampled checks of every client in the process, so a
+// short-lived command does not lose the line of a request it sampled. With the
+// shadow call held, a wait whose context has already ended reports that error
+// (the check is registered and in flight); once released, the wait returns and
+// the line is on disk (gt-jb20i).
+func TestWaitShadowChecksHoldsTheProcessUntilTheLineIsWritten(t *testing.T) {
+	t.Parallel()
+	rt := &holdSecondCall{started: make(chan struct{}), release: make(chan struct{})}
+	c, dir := shadowFixture(t, rt, 100, allowCap)
+
+	_, err := c.Choice(context.Background(), scrubState(), "Which team?", shoeCriteria)
+	require.NoError(t, err)
+	<-rt.started
+
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.ErrorIs(t, WaitShadowChecks(ended), context.Canceled, "a check in flight holds the process")
+
+	close(rt.release)
+	require.NoError(t, WaitShadowChecks(t.Context()))
+	lines := checkLines(t, filepath.Join(dir, scrubCheckFile))
+	require.Len(t, lines, 1, "the sampled request's line is written before the wait returns")
+	assert.Equal(t, outcomeChecked, lines[0]["outcome"])
+}
+
+// TestWaitShadowsEndsWithItsContext: a check that never finishes does not hold
+// the caller past its context, and the error says why (no timer: the context
+// is cancelled before the wait).
+func TestWaitShadowsEndsWithItsContext(t *testing.T) {
+	t.Parallel()
+	c := &Client{}
+	c.shadows.Add(1)
+	defer c.shadows.Done()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	assert.ErrorIs(t, c.WaitShadows(ctx), context.Canceled)
+}
+
+// TestShadowCheckLogsAnEncodeFailure: a state that cannot be marshaled writes
+// one failed line with the class encode and no second call, the same as every
+// other request's one line.
+func TestShadowCheckLogsAnEncodeFailure(t *testing.T) {
+	t.Parallel()
+	rt := &scriptedRT{}
+	c, dir := shadowFixture(t, rt, 100, allowCap)
+
+	c.shadowCheck(context.Background(), make(chan int), nil, nil, nil)
+
+	lines := checkLines(t, filepath.Join(dir, scrubCheckFile))
+	require.Len(t, lines, 1)
+	assert.Equal(t, outcomeFailed, lines[0]["outcome"])
+	assert.Equal(t, "encode", lines[0]["error_class"])
+	assert.Equal(t, 0, rt.count(), "no call is made for a state that cannot be encoded")
 }
