@@ -1,4 +1,4 @@
-package dataset_test
+package dataset
 
 import (
 	"bytes"
@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/jev/dataset"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 )
 
@@ -57,7 +56,7 @@ func fixtureReading() scorecard.Reading {
 func ptr(v float64) *float64 { return &v }
 
 // writeCSV renders a table's CSV as a string.
-func writeCSV(t *testing.T, table dataset.Table) string {
+func writeCSV(t *testing.T, table Table) string {
 	t.Helper()
 	var b bytes.Buffer
 	if err := table.WriteCSV(&b); err != nil {
@@ -70,7 +69,7 @@ func writeCSV(t *testing.T, table dataset.Table) string {
 // them and the allow-listed refs, and leave the unlabeled item out.
 func TestDatasetRows(t *testing.T) {
 	t.Parallel()
-	table, err := dataset.Build(fixtureReading(), "needs")
+	table, err := Build(fixtureReading(), "needs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +91,7 @@ func TestDatasetRows(t *testing.T) {
 // probability and the confidence in the choice, with the noul beside it.
 func TestDatasetChoiceQuestion(t *testing.T) {
 	t.Parallel()
-	table, err := dataset.Build(fixtureReading(), "route")
+	table, err := Build(fixtureReading(), "route")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,11 +109,11 @@ func TestDatasetChoiceQuestion(t *testing.T) {
 func TestDatasetShuffleIsDeterministic(t *testing.T) {
 	t.Parallel()
 	read := fixtureReading()
-	first, err := dataset.Build(read, "needs")
+	first, err := Build(read, "needs")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := dataset.Build(fixtureReading(), "needs")
+	second, err := Build(fixtureReading(), "needs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +162,7 @@ func TestDatasetRefusesTextColumns(t *testing.T) {
 		read := fixtureReading()
 		read.Items[0].Refs["title"] = "a prompt the file must not hold"
 		read.Items[0].Refs["samples"] = "a transcript"
-		table, err := dataset.Build(read, "needs")
+		table, err := Build(read, "needs")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -180,7 +179,7 @@ func TestDatasetRefusesTextColumns(t *testing.T) {
 		read := fixtureReading()
 		read.Items[0].Answers["prompt"] = scorecard.Answer{Noul: ptr(0.4)}
 		read.Labelings[0].Labels["prompt"] = true
-		_, err := dataset.Build(read, "needs")
+		_, err := Build(read, "needs")
 		if err == nil {
 			t.Fatal("a prompt question exported cleanly")
 		}
@@ -215,7 +214,7 @@ func TestDatasetRefusesTextColumns(t *testing.T) {
 				Rule:    "fixture-labels",
 			})
 		}
-		table, err := dataset.Build(read, "needs")
+		table, err := Build(read, "needs")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -241,7 +240,7 @@ func TestDatasetRefusesTextColumns(t *testing.T) {
 // range and the dropped columns.
 func TestDatasetDict(t *testing.T) {
 	t.Parallel()
-	table, err := dataset.Build(fixtureReading(), "needs")
+	table, err := Build(fixtureReading(), "needs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +287,7 @@ func TestDatasetDict(t *testing.T) {
 				Source:  "overseer",
 			})
 		}
-		table, err := dataset.Build(read, "needs")
+		table, err := Build(read, "needs")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -306,14 +305,14 @@ func TestDatasetDict(t *testing.T) {
 func TestDatasetPathsRefuseEscapes(t *testing.T) {
 	t.Parallel()
 	for _, q := range []scorecard.QuestionID{"../escape", "needs/action", "", ".."} {
-		if _, _, err := dataset.Paths(t.TempDir(), "fixture", q); err == nil {
+		if _, _, err := Paths(t.TempDir(), "fixture", q); err == nil {
 			t.Errorf("question %q named a path", q)
 		}
 	}
-	if _, _, err := dataset.Paths(t.TempDir(), "../fixture", "needs"); err == nil {
+	if _, _, err := Paths(t.TempDir(), "../fixture", "needs"); err == nil {
 		t.Error("a battery named a path")
 	}
-	csvPath, dictPath, err := dataset.Paths("/d", "fixture", "needs.action")
+	csvPath, dictPath, err := Paths("/d", "fixture", "needs.action")
 	if err != nil {
 		t.Fatal(err)
 	}
