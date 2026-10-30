@@ -8,9 +8,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 	"github.com/steveyegge/gastown/internal/tiersweep"
@@ -35,7 +37,7 @@ type harness struct {
 
 // newHarness wires a run: clone and sweep do what the case scripts, and every
 // other seam writes and reads a real t.TempDir().
-func newHarness(t *testing.T, clone func(repo, sha, work string) error, sweep func(args []string, overrides map[string]string, stdout io.Writer) int) *harness {
+func newHarness(t *testing.T, clone func(repo, sha, work string) error, sweep func(args []string, overrides map[string]string, stdout, stderr io.Writer) int) *harness {
 	t.Helper()
 	h := &harness{out: t.TempDir(), work: t.TempDir()}
 	start := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
@@ -48,13 +50,13 @@ func newHarness(t *testing.T, clone func(repo, sha, work string) error, sweep fu
 			}
 			return clone(repo, sha, work)
 		},
-		Sweep: func(args []string, overrides map[string]string, stdout, _ io.Writer) int {
+		Sweep: func(args []string, overrides map[string]string, stdout, stderr io.Writer) int {
 			h.sweepAt = args
 			h.overrides = overrides
 			if sweep == nil {
 				return 0
 			}
-			return sweep(args, overrides, stdout)
+			return sweep(args, overrides, stdout, stderr)
 		},
 		WriteResult: sweeprunner.Write,
 		MkdirTemp:   func(string, string) (string, error) { return h.work, nil },
@@ -88,7 +90,7 @@ func (h *harness) resultFileExists(t *testing.T) bool {
 // run exits 0.
 func TestRunWritesResultForAPassingSweep(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout io.Writer) int {
+	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
 		logDir := overrides[tiersweep.EnvLogDir]
 		fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=66 failed=0 skipped=0 (logs %s) in 2m0s\n", logDir)
 		fmt.Fprintf(stdout, "tier-sweep: race GREEN passed=3 failed=0 skipped=0 (logs %s) in 30s\n", logDir)
@@ -146,7 +148,7 @@ func TestRunWritesResultForAPassingSweep(t *testing.T) {
 // the command line, the run takes the values the rendered container sets.
 func TestRunReadsTheContainerEnvironment(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout io.Writer) int {
+	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
 		fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
 		return 0
 	})
@@ -182,7 +184,7 @@ func TestRunReportsRedAndStillExitsZero(t *testing.T) {
 
 	t.Run("a failing tier names its failed package in the result", func(t *testing.T) {
 		t.Parallel()
-		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout io.Writer) int {
+		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
 			fmt.Fprintf(stdout, "tier-sweep: integration RED passed=65 failed=1 skipped=4 failed: ./internal/daemon (logs %s) in 28m50s\n",
 				overrides[tiersweep.EnvLogDir])
 			return 1
@@ -209,7 +211,7 @@ func TestRunReportsRedAndStillExitsZero(t *testing.T) {
 		const gitErr = "fatal: '/repo.git' does not appear to be a git repository\n" +
 			"fatal: Could not read from remote repository.\x1b[0m"
 		h := newHarness(t, func(string, string, string) error { return errors.New(gitErr) },
-			func([]string, map[string]string, io.Writer) int {
+			func([]string, map[string]string, io.Writer, io.Writer) int {
 				t.Error("the sweep ran after the clone failed")
 				return 0
 			})
@@ -244,7 +246,7 @@ func TestRunReportsRedAndStillExitsZero(t *testing.T) {
 
 	t.Run("a tier the sweep printed no line for is RED", func(t *testing.T) {
 		t.Parallel()
-		h := newHarness(t, nil, func(_ []string, _ map[string]string, stdout io.Writer) int {
+		h := newHarness(t, nil, func(_ []string, _ map[string]string, stdout, _ io.Writer) int {
 			// A line too short to be a summary line, and nothing for race: the
 			// sweep was cut before it reached the tier.
 			fmt.Fprintln(stdout, "tier-sweep: race")
@@ -297,7 +299,7 @@ func TestRunRefusesBadArguments(t *testing.T) {
 					t.Error("the clone ran for a refused command line")
 					return nil
 				},
-				func([]string, map[string]string, io.Writer) int {
+				func([]string, map[string]string, io.Writer, io.Writer) int {
 					t.Error("the sweep ran for a refused command line")
 					return 0
 				})
@@ -396,7 +398,7 @@ func TestRunFailsWhenItCannotPrepareTheRun(t *testing.T) {
 // removal that fails is one stderr line and the result stands.
 func TestRunKeepsTheResultWhenCleanupFails(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout io.Writer) int {
+	h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
 		fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\n", overrides[tiersweep.EnvLogDir])
 		return 0
 	})
@@ -481,9 +483,11 @@ func TestEnvironWithAppendsTheOverridesInOrder(t *testing.T) {
 	}
 }
 
-// TestParseArgsHoldsTheRenderedSpecRules: every value the runner refuses is one
-// sweeprunner.Spec.Validate refuses, so the daemon cannot render a run the
-// entrypoint will not start.
+// TestParseArgsHoldsTheRenderedSpecRules: every rule sweeprunner.Spec.Validate
+// has over a field the entrypoint receives refuses both the spec and the
+// command line, so the daemon cannot render a run the entrypoint will not
+// start. The rules over the fields the container never passes (image, limits,
+// context, run id) have no flag; those are covered by sweeprunner's own tests.
 func TestParseArgsHoldsTheRenderedSpecRules(t *testing.T) {
 	t.Parallel()
 	valid := sweeprunner.Spec{
@@ -506,8 +510,20 @@ func TestParseArgsHoldsTheRenderedSpecRules(t *testing.T) {
 			[]string{"--rig", "gastown", "--sha", "abc123"}},
 		{"a tier the sweep does not offer", func(s *sweeprunner.Spec) { s.Tiers = []string{"integration", "nope"} },
 			[]string{"--rig", "gastown", "--sha", testSHA, "--tiers", "integration,nope"}},
+		{"a tier named twice", func(s *sweeprunner.Spec) { s.Tiers = []string{"integration", "integration"} },
+			[]string{"--rig", "gastown", "--sha", testSHA, "--tiers", "integration,integration"}},
 		{"zero jobs", func(s *sweeprunner.Spec) { s.Jobs = 0 },
 			[]string{"--rig", "gastown", "--sha", testSHA, "--jobs", "0"}},
+		{"more jobs than a spec renders", func(s *sweeprunner.Spec) { s.Jobs = 17 },
+			[]string{"--rig", "gastown", "--sha", testSHA, "--jobs", "17"}},
+		{"an output directory that is relative", func(s *sweeprunner.Spec) { s.OutDir = "out" },
+			[]string{"--rig", "gastown", "--sha", testSHA, "--out", "out", "--repo", sweeprunner.RepoMount}},
+		{"an output directory with a colon", func(s *sweeprunner.Spec) { s.OutDir = "/a:b" },
+			[]string{"--rig", "gastown", "--sha", testSHA, "--out", "/a:b", "--repo", sweeprunner.RepoMount}},
+		{"a repository that is relative", func(s *sweeprunner.Spec) { s.RepoDir = "repo" },
+			[]string{"--rig", "gastown", "--sha", testSHA, "--out", sweeprunner.OutputDir, "--repo", "repo"}},
+		{"a repository with a colon", func(s *sweeprunner.Spec) { s.RepoDir = "/a:b" },
+			[]string{"--rig", "gastown", "--sha", testSHA, "--out", sweeprunner.OutputDir, "--repo", "/a:b"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -517,8 +533,15 @@ func TestParseArgsHoldsTheRenderedSpecRules(t *testing.T) {
 			if err := bad.Validate(); err == nil {
 				t.Errorf("sweeprunner.Spec.Validate accepted %+v", bad)
 			}
-			if _, err := parseArgs(tc.args, nil); err == nil {
-				t.Errorf("parseArgs accepted %q", tc.args)
+			args := tc.args
+			if !slices.Contains(args, "--out") {
+				args = append(args, "--out", sweeprunner.OutputDir)
+			}
+			if !slices.Contains(args, "--repo") {
+				args = append(args, "--repo", sweeprunner.RepoMount)
+			}
+			if _, err := parseArgs(args, nil); err == nil {
+				t.Errorf("parseArgs accepted %q", args)
 			}
 		})
 	}
@@ -535,6 +558,198 @@ func TestRunFailsWhenTheResultCannotBeWritten(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), "disk full") {
 		t.Errorf("stderr = %q, want it to name the write failure", h.stderr.String())
+	}
+}
+
+// TestRunTakesTheVerdictFromTheSweepExit: the sweep's exit status is the
+// verdict and the summary line only supplies its counts. A GREEN line beside a
+// non-zero exit is RED, a tier the sweep never reported is RED with the sweep's
+// own complaint, and a sweep that produced no exit status at all is a run that
+// cannot report a result.
+func TestRunTakesTheVerdictFromTheSweepExit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a clean exit keeps the GREEN line", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=7 failed=0 skipped=0 (logs %s) in 1s\n",
+				overrides[tiersweep.EnvLogDir])
+			return 0
+		})
+		verdict, summary := runAndRead(t, h, "integration")
+		if verdict.Verdict != "GREEN" {
+			t.Errorf("integration = %+v, want GREEN", verdict)
+		}
+		if strings.Contains(summary, "sweep exited") {
+			t.Errorf("summary %q names a contradiction the run did not have", summary)
+		}
+	})
+
+	t.Run("a non-zero exit turns a GREEN line RED", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=7 failed=0 skipped=0 (logs %s) in 1s\n",
+				overrides[tiersweep.EnvLogDir])
+			return 1
+		})
+		verdict, summary := runAndRead(t, h, "integration")
+		if verdict.Verdict != "RED" {
+			t.Errorf("integration = %+v, want RED from the sweep's exit status", verdict)
+		}
+		if !strings.Contains(summary, "sweep exited 1") {
+			t.Errorf("summary %q does not record the exit status beside a GREEN line", summary)
+		}
+		// The counts the sweep printed are still the counts the result holds.
+		if verdict.Passed != 7 {
+			t.Errorf("passed = %d, want the printed 7", verdict.Passed)
+		}
+	})
+
+	t.Run("a non-zero exit with no line is RED with the sweep's words", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func(_ []string, _ map[string]string, _, stderr io.Writer) int {
+			fmt.Fprintln(stderr, "tier-sweep: could not count the integration packages")
+			return 1
+		})
+		verdict, summary := runAndRead(t, h, "integration")
+		if verdict.Verdict != "RED" {
+			t.Errorf("integration = %+v, want RED", verdict)
+		}
+		for _, want := range []string{"exit 1", "could not count the integration packages"} {
+			if !strings.Contains(summary, want) {
+				t.Errorf("summary %q does not hold %q", summary, want)
+			}
+		}
+	})
+
+	t.Run("a sweep that never exited is an error, not a verdict", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func([]string, map[string]string, io.Writer, io.Writer) int {
+			return sweepNoExit
+		})
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git"); code != FailureExit {
+			t.Fatalf("exit code = %d, want %d", code, FailureExit)
+		}
+		if !strings.Contains(h.stderr.String(), "did not exit") {
+			t.Errorf("stderr = %q, want it to name the sweep that did not exit", h.stderr.String())
+		}
+		if h.resultFileExists(t) {
+			t.Error("a run whose sweep never exited wrote a result")
+		}
+	})
+}
+
+// runAndRead runs one integration-tier sweep against h and returns its verdict
+// and stored summary line.
+func runAndRead(t *testing.T, h *harness, tier string) (sweeprunner.TierResult, string) {
+	t.Helper()
+	if code := h.run("--rig", "gastown", "--sha", testSHA, "--tiers", tier, "--out", h.out, "--repo", "/repo.git"); code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+	}
+	r, err := sweeprunner.Read(h.out, "gastown", testSHA)
+	if err != nil {
+		t.Fatalf("read the result: %v", err)
+	}
+	verdicts, err := sweeprunner.ToTierResults(r)
+	if err != nil {
+		t.Fatalf("convert the result: %v", err)
+	}
+	return verdicts[tier], r.Tiers[0].Summary
+}
+
+// TestRunSanitisesTheSweepOutput: whatever the sweep prints is data a reader is
+// shown and the daemon acts on, so the runner strips what a terminal would
+// interpret, caps what would cost memory, and takes the log path from its own
+// run directory rather than from the line (gt-dibnm).
+func TestRunSanitisesTheSweepOutput(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		line        string
+		wantVerdict string
+		check       func(t *testing.T, logDir, summary string)
+	}{
+		{
+			name:        "a terminal escape",
+			line:        "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) \x1b[31min 1s\x1b[0m\n",
+			wantVerdict: "GREEN",
+			check: func(t *testing.T, _, summary string) {
+				if strings.Contains(summary, "\x1b") {
+					t.Errorf("summary %q holds a terminal escape", summary)
+				}
+			},
+		},
+		{
+			name:        "a NUL byte",
+			line:        "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs %s) in 1s\x00\n",
+			wantVerdict: "GREEN",
+			check: func(t *testing.T, _, summary string) {
+				if strings.ContainsRune(summary, 0) {
+					t.Errorf("summary %q holds a NUL byte", summary)
+				}
+			},
+		},
+		{
+			name:        "a line larger than the cap",
+			line:        "tier-sweep: integration RED passed=0 failed=1 skipped=0 failed: " + strings.Repeat("x", 1<<20) + " (logs %s) in 1s\n",
+			wantVerdict: "RED",
+			check: func(t *testing.T, _, summary string) {
+				if len(summary) > maxSummaryBytes {
+					t.Errorf("summary is %d bytes, want at most %d", len(summary), maxSummaryBytes)
+				}
+			},
+		},
+		{
+			name:        "invalid UTF-8",
+			line:        "tier-sweep: integration RED passed=0 failed=1 skipped=0 failed: \xff\xfe (logs %s) in 1s\n",
+			wantVerdict: "RED",
+			check: func(t *testing.T, _, summary string) {
+				if !utf8.ValidString(summary) {
+					t.Errorf("summary %q is not valid UTF-8", summary)
+				}
+			},
+		},
+		{
+			name:        "a log path the sweep chose",
+			line:        "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs ../../etc) in 1s\n",
+			wantVerdict: "GREEN",
+			check: func(t *testing.T, logDir, summary string) {
+				if !strings.Contains(summary, "(logs "+logDir+")") {
+					t.Errorf("summary %q does not name the run's own log directory %q", summary, logDir)
+				}
+				if strings.Contains(summary, "../../etc") {
+					t.Errorf("summary %q keeps the path the sweep chose", summary)
+				}
+			},
+		},
+		{
+			name:        "a line that looks like JSON",
+			line:        "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 failed: {\"verdict\":\"RED\"} (logs %s) in 1s\n",
+			wantVerdict: "GREEN",
+			check: func(t *testing.T, logDir, summary string) {
+				// The payload stays the text it was, and the path is still the
+				// runner's own: nothing in the line is read as a document or a path.
+				if !strings.Contains(summary, "(logs "+logDir+")") {
+					t.Errorf("summary %q does not name the run's own log directory", summary)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+				fmt.Fprintf(stdout, tc.line, overrides[tiersweep.EnvLogDir])
+				return 0
+			})
+			verdict, summary := runAndRead(t, h, "integration")
+			// A line the runner leaves unsafe fails Read, which is the whole
+			// point: runAndRead would have failed the case already.
+			if verdict.Verdict != tc.wantVerdict {
+				t.Errorf("verdict = %q, want the line's own %q beside a clean exit", verdict.Verdict, tc.wantVerdict)
+			}
+			tc.check(t, filepath.Join(h.out, "logs"), summary)
+		})
 	}
 }
 
