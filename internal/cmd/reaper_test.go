@@ -466,11 +466,12 @@ func TestReaperDisarmFromConfig(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		cfg     *daemon.DaemonPatrolConfig
-		readErr error
-		want    bool
-		wantIn  []string
+		name     string
+		cfg      *daemon.DaemonPatrolConfig
+		readErr  error
+		want     bool
+		wantIn   []string
+		wantOnce string
 	}{
 		{
 			name: "absent config does not disarm",
@@ -504,6 +505,13 @@ func TestReaperDisarmFromConfig(t *testing.T) {
 			want:    true,
 			wantIn:  []string{source, "permission denied"},
 		},
+		{
+			name:     "an error that already names the source is not doubled",
+			readErr:  errors.New(source + ": read: connection reset"),
+			want:     true,
+			wantIn:   []string{source, "connection reset"},
+			wantOnce: source,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -518,6 +526,11 @@ func TestReaperDisarmFromConfig(t *testing.T) {
 			for _, want := range tt.wantIn {
 				if !strings.Contains(reason, want) {
 					t.Errorf("reason = %q, want it to contain %q", reason, want)
+				}
+			}
+			if tt.wantOnce != "" {
+				if n := strings.Count(reason, tt.wantOnce); n != 1 {
+					t.Errorf("reason = %q names %q %d times, want once", reason, tt.wantOnce, n)
 				}
 			}
 		})
