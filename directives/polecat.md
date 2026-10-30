@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-10-30 gt-o87rv: added rules 13-16 (cloud authority, cloud previews, console-only steps, cost and credentials); rule 14 points at the no-new-scripts town policy instead of restating it.
 - 2026-10-28 gt-9j9vu: bead text is one single-quoted argument on every `gt bead` verb that takes text (create, update, claim, note, comment, close; town policy section).
 - 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree".
 - 2026-10-27 gt-3vgbi: moved the town polecat policy into the repo from ~/gt/directives/polecat.md, with the twelve "What om rejects" rules from ~/gt/gastown/directives/polecat.md, text unchanged.
@@ -138,7 +139,7 @@ are debt" section of `~/.claude/docs/standards/test-engineering.md`.
 
 # What om rejects
 
-Read before you write code. Twelve rules. Today (2026-10-26) 70 beads were rejected in 138 blocks; 125 blocks (91 percent) had a major or critical finding. Each rule names om's finding and one example from today.
+Read before you write code. Sixteen rules. Today (2026-10-26) 70 beads were rejected in 138 blocks; 125 blocks (91 percent) had a major or critical finding. Each rule names om's finding and one example from today.
 
 ## 1. Failure is not success (fail-open)
 
@@ -219,3 +220,28 @@ Never put captured output in an error message: name the rule and the command ins
 - Example: a guard error that printed the whole command output.
 - Before: `fmt.Errorf("failed: %s", out)`. After: `fmt.Errorf("rule X: command failed")`.
 - Tick every acceptance box only after the named test exists. gt done and the landing policy refuse unticked boxes, and a box ticked early is a finding.
+
+## 13. Cloud authority widens only through a reviewed, visible diff
+
+Applies to any change that touches a cloud project, a role, a service account or an API list.
+- om flags: "role or permission added without a golden change", "role with an admin permission", "project-level grant", "enables an API the manifest does not list".
+- Reject outright: a role or permission list widened without the matching change to its reviewed golden — the test of rule 2, "Each criterion needs a test that fails without it" — and a bead comment saying why; any *.admin permission or roles/owner, roles/editor, or a predefined role where a custom role fits; serviceAccountTokenCreator, serviceAccountUser, actAs or impersonation granted on a project instead of one account, or with no named owner; a service account or key created with no owner, rotation and deletion path stated.
+- Before: a polecat adds iam.serviceAccounts.getAccessToken to a list. After: the permission is justified in the bead, the golden and the list change together, and dropping either one turns that test red.
+
+## 14. A cloud apply needs a preview the human reads
+
+"Cloud calls in a shell script" is refused by "No new scripts for testable logic (town policy, 2026-10-24)" and rule 8, "Do not add a shell or Python script"; this rule is what a cloud call adds on top of them.
+- om flags: "apply with confirmations disabled", "preview gated by a grep".
+- Reject outright: an apply, destroy or disable that runs without a preview step the code makes the human read; one that forces past that step (--yes, --force, --skip-preview, disableDependentServices); one with no typed confirmation; a destroy with no stated rollback.
+- Example: dv-honu.6 (apply with confirmations disabled; the red-flag preview gate is a weak grep).
+
+## 15. A step the diff cannot show must say what it creates
+
+- om flags: "console-only step with no reconciliation", "side effects outside the diff".
+- Reject outright: a bead or runbook that asks a human to click or run a provider flow (for example the console "add Firebase" step) without listing what the flow creates beyond the named result and the read-only command that reconciles it against the patrol.
+- Example: 2026-10-30, the console Firebase step enabled 28 APIs and created firebase-adminsdk-fbsvc with Token Creator.
+
+## 16. Cost and credentials are part of the change
+
+- om flags: "billing plan or budget not stated", "key file or token on a command line".
+- Reject outright: a new billable resource (VM, disk, address, SQL, load balancer, Blaze-only feature) with no budget alert named; a cloud credential a test requires or reads from its environment (rule 7, "Hermetic tests"), or one that is printed (rule 12, "Keep secrets out of errors; tick boxes last").

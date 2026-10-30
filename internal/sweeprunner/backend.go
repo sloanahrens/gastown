@@ -10,13 +10,18 @@ type Backend interface {
 	Render(spec Spec) (Plan, error)
 }
 
-// Plan is one rendered run: its steps in the order a caller runs them.
+// Plan is one rendered run: the object it applies, and the steps a caller runs
+// in the order it runs them.
 //
-// A caller runs the steps whose Teardown is false in order and stops at the
-// first failure, then runs Teardown whether or not a step before it failed. A
-// run that fails at its own start step has still made the network, the volume
-// and the sidecar, so a teardown that waited for success would leak them.
+// A caller applies Job when it is set, then runs the steps whose Teardown is
+// false in order and stops at the first failure, then runs Teardown whether or
+// not a step before it failed. A run that fails at its own start step has still
+// made the network, the volume and the sidecar, so a teardown that waited for
+// success would leak them.
 type Plan struct {
+	// Job is the batch/v1 Job a Kubernetes backend applies, and nil for a
+	// backend that renders argv alone.
+	Job *Job
 	// Steps are the run's own steps, then its teardown.
 	Steps []Step
 }
