@@ -1,0 +1,13 @@
+{
+  outputs = { self, nixpkgs }: {
+    packages.gt = pkgs.buildGoModule {
+      pname = "gt";
+      version = "1.2.1";
+      vendorHash = "sha256-mJzpsl4XnIm3ZSg7fFn0MOdQQW1bdOkAJ+TikiLMXJM=";
+    };
+    packages.gt-docs = pkgs.buildGoModule {
+      pname = "gt-docs";
+      version = "1.2.1";
+    };
+  };
+}
