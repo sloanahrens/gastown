@@ -99,13 +99,9 @@ func parsedOptions(src string) ([]string, error) {
 	return got, nil
 }
 
-// TestCommandDocHasNoOptionList keeps the option list out of the cmd/docs-lint
-// package doc. The list is a copy of parseArgs that goes stale when an option
-// changes, and the doc points at parseArgs instead (docs/writing-for-agents.md
-// R2, R3). The command refuses an unknown option on stderr and prints no usage
-// block, so the doc also makes no usage claim.
-func TestCommandDocHasNoOptionList(t *testing.T) {
-	t.Parallel()
+// commandPackageDoc is the package doc of cmd/docs-lint, as its text reads.
+func commandPackageDoc(t *testing.T) string {
+	t.Helper()
 	file, err := parser.ParseFile(token.NewFileSet(), "../../cmd/docs-lint/main.go", nil, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse cmd/docs-lint/main.go: %v", err)
@@ -113,12 +109,34 @@ func TestCommandDocHasNoOptionList(t *testing.T) {
 	if file.Doc == nil {
 		t.Fatal("cmd/docs-lint has no package doc")
 	}
-	doc := file.Doc.Text()
+	return file.Doc.Text()
+}
+
+// TestCommandDocHasNoOptionList keeps the option list out of the cmd/docs-lint
+// package doc. The list is a copy of parseArgs that goes stale when an option
+// changes, and the doc points at parseArgs instead (docs/writing-for-agents.md
+// R2, R3). The command refuses an unknown option on stderr and prints no usage
+// block, so the doc also makes no usage claim.
+func TestCommandDocHasNoOptionList(t *testing.T) {
+	t.Parallel()
+	doc := commandPackageDoc(t)
 	if got := docOptions(doc); len(got) > 0 {
 		t.Errorf("package doc restates the option list: %q", got)
 	}
 	if claimsUsageBlock(doc) {
 		t.Error("package doc claims the command prints a usage block")
+	}
+}
+
+// TestCommandDocStatesDefaultMode keeps the no-argument run in the package doc as
+// one plain sentence, so a reader learns what the bare command does without a
+// usage table to parse.
+func TestCommandDocStatesDefaultMode(t *testing.T) {
+	t.Parallel()
+	const want = "With no arguments it runs every check and prints one line per finding."
+	doc := strings.Join(strings.Fields(commandPackageDoc(t)), " ")
+	if !strings.Contains(doc, want) {
+		t.Errorf("package doc does not state the default mode as %q", want)
 	}
 }
 
