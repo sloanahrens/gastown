@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/forgejoresync"
 )
 
@@ -23,6 +24,14 @@ type Cutover struct {
 	// repository sits in; nil means os.MkdirTemp and os.RemoveAll.
 	MkdirTemp func(dir, pattern string) (string, error)
 	RemoveAll func(path string) error
+	// ProvisionRun is step 3's provisioning run; nil runs forgejoprov.Run in this
+	// process. A test replaces it to count the call and to force its exit code.
+	ProvisionRun ProvisionFunc
+	// ProvisionEnv is what that run reads: the environment the admin token resolves
+	// from, the token file reader and the Forgejo transport. Provision replaces its
+	// Log with the run's own, so a progress line reaches the operator the way every
+	// other step's lines do.
+	ProvisionEnv forgejoprov.Env
 }
 
 // errRefsMissing is the final comparison's refusal: Forgejo does not hold every
