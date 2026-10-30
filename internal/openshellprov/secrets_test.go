@@ -44,6 +44,8 @@ func TestKeyValueTable(t *testing.T) {
 		{name: "empty value", content: "DEEPSEEK_API_KEY=\n", want: ""},
 		{name: "mismatched quotes are kept", content: "DEEPSEEK_API_KEY=\"abc123'\n", want: "\"abc123'"},
 		{name: "lone quote is kept", content: "DEEPSEEK_API_KEY=\"\n", want: "\""},
+		{name: "CRLF line ending is not part of the value", content: "DEEPSEEK_API_KEY=abc123\r\n", want: "abc123"},
+		{name: "trailing spaces are not part of the value", content: "DEEPSEEK_API_KEY=abc123   \n", want: "abc123"},
 		{
 			name:       "command substitution stays literal",
 			content:    "DEEPSEEK_API_KEY=$(touch DIR/pwned)\n",
@@ -126,6 +128,9 @@ func TestMaskedReplacesEveryOccurrence(t *testing.T) {
 		{name: "regex metacharacters", secret: "a.*+?(b)[c]", chunks: []string{"a.*+?(b)[c] vs aXb"}, want: "*** vs aXb"},
 		{name: "split across writes", secret: "password", chunks: []string{"my pass", "word here"}, want: "my *** here"},
 		{name: "split one byte at a time", secret: "pass", chunks: []string{"p", "a", "s", "s"}, want: "***"},
+		{name: "overlapping occurrences are one mask", secret: "aba", chunks: []string{"ababa", "xx"}, want: "***xx"},
+		{name: "overlapping occurrences split across writes", secret: "aba", chunks: []string{"abab", "a", "xx"}, want: "***xx"},
+		{name: "overlapping occurrences one byte at a time", secret: "aba", chunks: []string{"a", "b", "a", "b", "a", "x"}, want: "***x"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,8 +185,11 @@ func TestMaskedWithAnEmptySecretPassesEverythingThrough(t *testing.T) {
 
 func TestMaskedReturnsTheUnderlyingWriteError(t *testing.T) {
 	t.Parallel()
-	_, err := Masked("s3cret", failingWriter{}).Write([]byte("no secret here"))
+	n, err := Masked("s3cret", failingWriter{}).Write([]byte("no secret here"))
 	if err == nil {
 		t.Fatal("Write to a failing writer error = nil, want the write error")
+	}
+	if n >= len("no secret here") {
+		t.Errorf("Write to a failing writer = %d, want fewer than %d bytes consumed", n, len("no secret here"))
 	}
 }
