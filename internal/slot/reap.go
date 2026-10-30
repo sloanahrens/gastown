@@ -94,7 +94,15 @@ func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 		return report, fmt.Errorf("listing gate containers: %w", err)
 	}
 
-	for _, verdict := range g.owner.classify(containers, g.clock.Now(), report.OlderThan) {
+	for _, verdict := range g.scratchVerdicts(g.owner.classify(containers, g.clock.Now(), report.OlderThan)) {
+		// The scratch project's containers are the documented L1/L2 town's,
+		// which no reap removes: removing one pulls the Dolt server out from
+		// under a window that is still running, and a container the project is
+		// restarting is the moment a reap would do the most damage (gt-4gixm).
+		if verdict.Verdict == VerdictScratch || verdict.Verdict == VerdictScratchBuild {
+			report.Kept = append(report.Kept, verdict)
+			continue
+		}
 		if verdict.Blocks() {
 			report.Kept = append(report.Kept, verdict)
 			continue
