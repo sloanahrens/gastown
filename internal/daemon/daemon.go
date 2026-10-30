@@ -57,6 +57,7 @@ import (
 	"github.com/steveyegge/gastown/internal/schedulerrun"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
+	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/townhealth"
@@ -124,6 +125,16 @@ type Daemon struct {
 	// hostnameOrOS); nil reads os.Hostname. Tests set it to drive the failed
 	// read, which refuses a manual start.
 	hostname func() (string, error)
+
+	// ownerProbe reads whether the owner a state.json records is running (see
+	// guardStartup); nil reads docker, launchd and systemd for real. Tests set
+	// it so a start never runs a supervisor command.
+	ownerProbe OwnerProbe
+
+	// logPreexisted is whether daemon.log existed before New wrote to it. New
+	// logs the patrol config and PATH before Run starts, so the startup guard
+	// reads this snapshot rather than the file's presence (gt-qpeei.27).
+	logPreexisted bool
 
 	// owner is what started this daemon (DetectSelf), named once at the start
 	// and stamped onto every state this process saves (see saveState), so no
@@ -1025,6 +1036,10 @@ func New(config *Config) (*Daemon, error) {
 	if err := os.MkdirAll(daemonDir, 0755); err != nil {
 		return nil, fmt.Errorf("creating daemon directory: %w", err)
 	}
+	// Taken before the first log line below, which creates daemon.log on a
+	// town that has none (gt-qpeei.27).
+	_, logStatErr := os.Stat(config.LogFile)
+	logPreexisted := !os.IsNotExist(logStatErr)
 
 	// Open log file with rotation (100MB max, 3 backups, 7 days, compressed)
 	logWriter := &lumberjack.Logger{
@@ -1172,6 +1187,7 @@ func New(config *Config) (*Daemon, error) {
 		disabledPatrols: disabledPatrols,
 		tmux:            tmux.NewTmux(),
 		logger:          logger,
+		logPreexisted:   logPreexisted,
 		ctx:             ctx,
 		cancel:          cancel,
 		doltServer:      doltServer,
@@ -1311,7 +1327,6 @@ func acquireDaemonLock(clk clockwork.Clock, lockPath string, budget, poll time.D
 // Run starts the daemon main loop.
 func (d *Daemon) Run() (err error) {
 	pid := os.Getpid()
-	d.logger.Printf("Daemon starting (PID %d)", pid)
 	startupComplete := false
 	defer func() {
 		if err == nil {
@@ -1331,7 +1346,21 @@ func (d *Daemon) Run() (err error) {
 	if err != nil {
 		return err
 	}
+
+	// Refuse a start another owner may still hold before any file is written.
+	// This runs ahead of the start line below, so the start writes no log line
+	// the guard could read as a prior run.
+	probe := d.ownerProbe
+	if probe == nil {
+		probe = startupOwnerProbe(templates.RunDockerInspect, d.hostnameOrOS)
+	}
+	takeover := d.env(agentconfig.TakeoverEnv) == "1"
+	if err := guardStartup(d.config.TownRoot, self, takeover, probe, d.clk().Now(), d.logPreexisted); err != nil {
+		return err
+	}
+
 	d.owner = &self
+	d.logger.Printf("Daemon starting (PID %d)", pid)
 	d.logger.Printf("Daemon owner: %s %q", self.Kind, self.ID)
 
 	// Acquire exclusive lock to prevent multiple daemons from running.
@@ -2126,13 +2155,13 @@ func DetectSelf(env func(string) string, hostname func() (string, error)) (Owner
 }
 
 // launchdJob returns the launchd job label that started this process, or ""
-// when launchd did not start it. launchd sets LaunchdJobEnv to the job label
-// for a job it starts, but macOS also sets it to "0" for a process in an
-// ordinary user session, so "0" means "no job" and never a label: a daemon
-// run by hand on the Mac must not be recorded as a launchd owner.
+// when launchd did not start it. Only the town's own job counts: macOS sets
+// LaunchdJobEnv to "0" in an ordinary user session, and an app-launched
+// process carries its own XPC service name, so either one recorded as a
+// launchd owner would name a job that is not the daemon's (gt-qpeei.27).
 func launchdJob(env func(string) string) string {
 	label := env(agentconfig.LaunchdJobEnv)
-	if label == "0" {
+	if label != templates.LaunchdLabel {
 		return ""
 	}
 	return label

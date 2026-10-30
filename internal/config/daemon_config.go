@@ -79,6 +79,11 @@ const (
 	// start, never a guessed id.
 	ContainerNameEnv = "GT_DAEMON_CONTAINER_NAME"
 
+	// TakeoverEnv is the variable the compose file passes through from the
+	// operator's `--takeover` start. A value of "1" lets the startup guard pass
+	// a recorded owner that the probe shows not running (gt-qpeei.27).
+	TakeoverEnv = "GT_DAEMON_TAKEOVER"
+
 	// LaunchdJobEnv is the variable launchd sets to the job label of the
 	// process it started; the label is the launchd owner's id (gt-qpeei.12).
 	LaunchdJobEnv = "XPC_SERVICE_NAME"
