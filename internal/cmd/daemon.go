@@ -97,6 +97,8 @@ from that container and daemon/state.json, and has no PID to show.
 
 Exits 0 when the daemon is running and 3 when it is not, so scripts can
 use it as a running check (for example: gt daemon status || gt daemon start).
+A state that cannot be read exits 3 too, and says unknown rather than
+not running: only exit 0 claims the daemon runs.
 
 Examples:
   gt daemon status`,
@@ -419,10 +421,16 @@ func (c *daemonControl) daemonStatus(w io.Writer, townRoot string) error {
 	// A container town's daemon lives in another namespace: the flock it takes
 	// on the bind-mounted town is not visible from this host, so the lock
 	// answers nothing about it (gt-i2z9l). Its container is asked instead.
-	// Settings that cannot be read, or name no kind this package knows, keep
-	// the lock reading every other town takes.
 	cfg, containerTown, settingsErr := c.townDaemonKind(townRoot)
-	if settingsErr == nil && containerTown {
+	switch {
+	case settingsErr != nil:
+		// The settings are what say whether the lock answers this town at all,
+		// so a read that failed is no license to fall back to it: for a
+		// container town the lock reads not running while its daemon runs.
+		// Neither reading is honest, so the state is unknown (gt-i2z9l).
+		return daemonStateUnknown(w, unverifiedSupervisorLine(settingsErr),
+			fmt.Errorf("cannot read daemon settings: %w", settingsErr))
+	case containerTown:
 		return c.containerDaemonStatus(w, townRoot, cfg)
 	}
 
@@ -484,12 +492,14 @@ func daemonNotRunning(w io.Writer, supervised string) error {
 }
 
 // daemonStateUnknown prints what status knows when a read that decides running
-// failed, and returns that failure: the daemon may well be up, so neither the
-// running nor the not-running form is honest.
+// failed, and fails with the code the not-running form uses: the daemon may
+// well be up, so neither the running nor the not-running form is honest, and a
+// script probing status must not read a failed check as running. The text is
+// what tells the two apart, and the wrapped error says which read failed.
 func daemonStateUnknown(w io.Writer, supervised string, err error) error {
 	fmt.Fprintf(w, "%s Daemon state is %s\n", style.Dim.Render("○"), "unknown")
 	fmt.Fprintf(w, "  Supervised: %s\n", supervised)
-	return err
+	return &ExitCodeError{Code: 3, Err: err}
 }
 
 // containerDaemonStatus is gt daemon status for a town whose daemon runs under

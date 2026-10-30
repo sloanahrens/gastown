@@ -1520,19 +1520,28 @@ func TestDaemonStatus_ContainerTownDecidesRunningFromTheContainer(t *testing.T) 
 		name     string
 		inspect  templates.ContainerDocker
 		state    string // state.json's contents; "" leaves the file out
-		wantErr  string // a substring of the error; "" when status answers with output
-		wantExit int    // the exit code when the daemon does not run
-		wantRuns bool
+		wantOut  string // the status line the row prints
+		wantExit int    // the exit code: 0 only when the daemon runs
+		wantErr  string // a substring the unknown form's error names; "" on the other two forms
 	}{
 		{"container running and state.json running", runningContainer,
-			`{"running":true,"heartbeat_count":7}`, "", 0, true},
-		{"container exited", exitedContainer, `{"running":true}`, "", 3, false},
-		{"state.json records not running", runningContainer, `{"running":false}`, "", 3, false},
-		{"state.json missing", runningContainer, "", "", 3, false},
-		{"container absent", absentContainer, `{"running":true}`, "", 3, false},
-		{"container state unreadable", unreachableDocker, `{"running":true}`, "Docker daemon", 0, false},
-		{"state.json unreadable", runningContainer, `{not json`, "state.json", 0, false},
+			`{"running":true,"heartbeat_count":7}`, "Daemon is running", 0, ""},
+		{"container exited", exitedContainer,
+			`{"running":true}`, "Daemon is not running", 3, ""},
+		{"state.json records not running", runningContainer,
+			`{"running":false}`, "Daemon is not running", 3, ""},
+		{"state.json missing", runningContainer,
+			"", "Daemon is not running", 3, ""},
+		{"container absent", absentContainer,
+			`{"running":true}`, "Daemon is not running", 3, ""},
+		{"container state unreadable", unreachableDocker,
+			`{"running":true}`, "Daemon state is unknown", 3, "Cannot connect to the Docker daemon"},
+		{"state.json unreadable", runningContainer,
+			`{not json`, "Daemon state is unknown", 3, "state.json"},
 	}
+	// Every row prints one of these three on its own: a row that carried two
+	// would leave the reader to guess which one decides.
+	forms := []string{"Daemon is running", "Daemon is not running", "Daemon state is unknown"}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -1546,40 +1555,52 @@ func TestDaemonStatus_ContainerTownDecidesRunningFromTheContainer(t *testing.T) 
 
 			var out strings.Builder
 			err := c.daemonStatus(&out, town)
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("status = %q, err = %v, want a failure naming %q", out.String(), err, tt.wantErr)
-				}
-				if strings.Contains(out.String(), "not running") {
-					t.Errorf("status output = %q, want a read that failed to say so, not that the daemon is down", out.String())
-				}
-				return
+
+			if got := statusExit(err); got != tt.wantExit {
+				t.Errorf("exit = %d, want %d (err = %v, status = %q)", got, tt.wantExit, err, out.String())
 			}
-			supervised := "Supervised: container scratch-daemon-1"
-			if tt.wantRuns {
+			if !strings.Contains(out.String(), tt.wantOut) {
+				t.Errorf("status = %q, want it to carry %q", out.String(), tt.wantOut)
+			}
+			for _, other := range forms {
+				if other != tt.wantOut && strings.Contains(out.String(), other) {
+					t.Errorf("status = %q, carries %q as well as %q", out.String(), other, tt.wantOut)
+				}
+			}
+			switch tt.wantOut {
+			case "Daemon is running":
 				if err != nil {
-					t.Fatalf("daemonStatus: %v", err)
+					t.Errorf("err = %v, want none", err)
 				}
-				if !strings.Contains(out.String(), "Daemon is ") || !strings.Contains(out.String(), "running") {
-					t.Errorf("status output = %q, want the running form", out.String())
+			case "Daemon is not running":
+				var silent *SilentExitError
+				if !errors.As(err, &silent) || silent.Code != tt.wantExit {
+					t.Errorf("err = %v, want the silent exit %d", err, tt.wantExit)
 				}
-				if !strings.Contains(out.String(), supervised+" running "+image) {
-					t.Errorf("status output = %q, want the container line %q", out.String(), supervised)
+			default: // the unknown form carries the read that failed
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("err = %v, want a failure naming %q", err, tt.wantErr)
 				}
-				return
 			}
-			var silent *SilentExitError
-			if !errors.As(err, &silent) || silent.Code != tt.wantExit {
-				t.Fatalf("err = %v, want SilentExitError code %d with output %q", err, tt.wantExit, out.String())
+			if supervised := "Supervised: container scratch-daemon-1"; !strings.Contains(out.String(), supervised) {
+				t.Errorf("status = %q, want the container line %q", out.String(), supervised)
 			}
-			if !strings.Contains(out.String(), "Daemon is not running") {
-				t.Errorf("status output = %q, want the not-running form", out.String())
-			}
-			if !strings.Contains(out.String(), supervised) {
-				t.Errorf("status output = %q, want the container line %q", out.String(), supervised)
+			if tt.wantOut == "Daemon is running" {
+				if want := "Supervised: container scratch-daemon-1 running " + image; !strings.Contains(out.String(), want) {
+					t.Errorf("status = %q, want the container line %q", out.String(), want)
+				}
 			}
 		})
 	}
+}
+
+// statusExit is the exit code gt gives a status call: 0 when it returned no
+// error, the error's own code otherwise.
+func statusExit(err error) int {
+	if err == nil {
+		return 0
+	}
+	return exitCodeForError(err)
 }
 
 // A container town whose settings do not name a container this binary may act
@@ -1628,20 +1649,40 @@ func TestDaemonStatus_ContainerTownWithoutNamesIsUnknown(t *testing.T) {
 // Settings that cannot be read leave the town's supervisor unknown: the file
 // reading describes the host's own manager, which a container town does not
 // run under, and "none" would claim the town has no supervisor (gt-qpeei.18).
+// They also decide whether the lock answers the town at all, so status fails
+// closed rather than reading it: for a container town the lock reads not
+// running while its daemon runs, and no test may be left guessing which of the
+// two a settings failure meant (gt-i2z9l).
 func TestDaemonStatus_UnreadableSettingsIsUnknown(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
+	// The daemon section whose supervisor is not a string: the town's settings
+	// exist and do not decode, which is the unreadable read the lock must not
+	// answer for.
+	writeLiveFile(t, town, "settings/config.json", `{"daemon": {"supervisor": 42}}`)
 	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
 	c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
-	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
-		return nil, errors.New("daemon.json: unexpected end of JSON input")
-	}
+	c.patrolConfig = daemon.ReadPatrolConfig
 	c.statusLine = c.supervisedLine
-	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
+	c.isRunning = func(string) (bool, int, error) {
+		t.Error("read the lock: the settings that say whether the lock answers this town could not be read")
+		return false, 0, nil
+	}
 
 	var out strings.Builder
-	if err := c.daemonStatus(&out, town); err != nil {
-		t.Fatalf("daemonStatus: %v", err)
+	err := c.daemonStatus(&out, town)
+	if got := statusExit(err); got != 3 {
+		t.Errorf("exit = %d, want 3 (err = %v, status = %q)", got, err, out.String())
+	}
+	if !strings.Contains(out.String(), "Daemon state is unknown") {
+		t.Errorf("status output = %q, want the unknown form", out.String())
+	}
+	if strings.Contains(out.String(), "Daemon is not running") {
+		t.Errorf("status output = %q, want settings that could not be read to say so, not that the daemon is down", out.String())
+	}
+	if err == nil || !strings.Contains(err.Error(), "cannot read daemon settings") ||
+		!strings.Contains(err.Error(), filepath.Join("settings", "config.json")) {
+		t.Errorf("err = %v, want a failure naming the settings file", err)
 	}
 	if !strings.Contains(out.String(), "Supervised: unknown (unverified - ") {
 		t.Errorf("status output = %q, want the supervisor line unverified", out.String())
