@@ -22,9 +22,11 @@ var errKeepPrevious = errors.New("cannot keep the previous om")
 // keepPrevious copies the installed om at omPath to om.prev beside it, so a failed
 // smoke check can put it back. The copy is written to a temp file and renamed into
 // place: om.prev is never partly written, and a failed copy leaves any earlier
-// om.prev as it was. With no installed om, a first install, it keeps nothing and
-// logs that it kept nothing. install calls it before the swap.
-func keepPrevious(cfg Config, omPath string) error {
+// om.prev as it was. It reports kept, true only when this call copied an om. With
+// no installed om, a first install, it keeps nothing, leaves any om.prev from an
+// earlier install alone, and logs that it kept nothing. install calls it before the
+// swap, and the rollback reads kept, never whether om.prev exists.
+func keepPrevious(cfg Config, omPath string) (bool, error) {
 	files := cfg.files()
 	dir := filepath.Dir(omPath)
 	prev := filepath.Join(dir, omPrevName)
@@ -33,20 +35,20 @@ func keepPrevious(cfg Config, omPath string) error {
 	perm, err := files.Stat(omPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		cfg.logf("[install-om] no om at %s to keep: first install, so there is nothing to roll back to", omPath)
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("%w: cannot read the mode of %s: %w", errKeepPrevious, omPath, err)
+		return false, fmt.Errorf("%w: cannot read the mode of %s: %w", errKeepPrevious, omPath, err)
 	}
 	data, err := files.ReadFile(omPath)
 	if err != nil {
-		return fmt.Errorf("%w: cannot read %s: %w", errKeepPrevious, omPath, err)
+		return false, fmt.Errorf("%w: cannot read %s: %w", errKeepPrevious, omPath, err)
 	}
 	if err := writeThenRename(files, tmp, prev, data, perm.Perm()); err != nil {
-		return fmt.Errorf("%w: cannot copy %s to %s: %w", errKeepPrevious, omPath, prev, err)
+		return false, fmt.Errorf("%w: cannot copy %s to %s: %w", errKeepPrevious, omPath, prev, err)
 	}
 	cfg.logf("[install-om] kept the previous om as %s", prev)
-	return nil
+	return true, nil
 }
 
 // writeThenRename writes data to tmp with perm, then renames tmp to dst. A failure

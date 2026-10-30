@@ -15,8 +15,9 @@ const newBinName = ".om.new"
 // The reasons install reports on the RESULT line. The names are the script's, so
 // the daemon's mapping holds for both.
 const (
-	eventInstalled = "installed"
-	eventNoop      = "noop"
+	eventInstalled  = "installed"
+	eventNoop       = "noop"
+	eventRolledBack = "rolled_back"
 
 	reasonNoSource         = "no-source"
 	reasonDirty            = "dirty"
@@ -26,13 +27,14 @@ const (
 	reasonKeepPrevious     = "keep-previous"
 	reasonSwapFailed       = "swap-failed"
 	reasonSmokeFailed      = "smoke-failed"
+	reasonRollbackFailed   = "rollback-failed"
 )
 
 // install runs the install under the lock Run holds. It refuses before anything
 // is written, does nothing when the installed om already is the built commit, and
 // otherwise builds, signs, keeps the previous om, swaps the build over om and
 // smoke-checks the result. Every failure before the swap leaves om as it was and
-// removes the build.
+// removes the build; a failed smoke check rolls the previous om back.
 func install(ctx context.Context, cfg Config) (Result, Exit) {
 	src := cfg.SrcDir
 	switch r := cfg.gitRepo(ctx, src); {
@@ -81,7 +83,8 @@ func install(ctx context.Context, cfg Config) (Result, Exit) {
 	if err := sign(ctx, cfg, tmp); err != nil {
 		return cfg.fail(tmp, reasonSign, err.Error(), commit, prev)
 	}
-	if err := keepPrevious(cfg, cfg.OMPath); err != nil {
+	kept, err := keepPrevious(cfg, cfg.OMPath)
+	if err != nil {
 		return cfg.fail(tmp, reasonKeepPrevious, err.Error(), commit, prev)
 	}
 	if err := cfg.swap(tmp, cfg.OMPath); err != nil {
@@ -92,7 +95,7 @@ func install(ctx context.Context, cfg Config) (Result, Exit) {
 	_ = files.Remove(tmp)
 
 	if got := cfg.probeVersion(ctx, cfg.OMPath); got == "" || !strings.HasPrefix(commit, got) {
-		return cfg.fail("", reasonSmokeFailed, cfg.OMPath+" does not report the built commit "+commit, commit, prev)
+		return cfg.smokeFailed(commit, prev, kept, cfg.OMPath+" does not report the built commit "+commit)
 	}
 
 	cfg.logf("[install-om] In force: %s -> %s.", orNone(prev), commit)

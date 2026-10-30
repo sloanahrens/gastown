@@ -47,8 +47,15 @@ type installRig struct {
 
 	buildErr error
 	swapErr  error
-	// swapBytes, when set, is what the swap leaves at om instead of the build.
+	// swaps counts the swaps, the first being the install's and any later one the
+	// rollback's.
+	swaps int
+	// rollbackErr fails the rollback's swap.
+	rollbackErr error
+	// swapBytes, when set, is what the install's swap leaves at om instead of the build.
 	swapBytes string
+	// versionErr fails the version probe that runs after the swap, as a hung om does.
+	versionErr error
 	// prevAtSwap is om.prev as the swap found it, so a test can see the previous
 	// om was kept before the swap.
 	prevAtSwap []byte
@@ -92,6 +99,9 @@ func (r *installRig) exec(ctx context.Context, c Command) (string, string, error
 	switch c.Name {
 	case r.cfg.OMPath:
 		r.steps = append(r.steps, "version")
+		if r.swaps > 0 && r.versionErr != nil {
+			return "", "", r.versionErr
+		}
 		data, ok := r.files.files[c.Name]
 		if !ok {
 			return "", "", notExist("exec", c.Name)
@@ -132,10 +142,20 @@ func (r *installRig) git(c Command) (string, string, error) {
 	return "", "", fmt.Errorf("unexpected git %v", c.Args)
 }
 
-// swap is the Replace seam: it records the step and what om.prev held, then puts
-// the build at dst, or the test's bytes for it, unless the test fails the swap.
+// swap is the Replace seam. The install's swap records what om.prev held, then puts
+// the build at dst, or the test's bytes for it, unless the test fails the swap. The
+// rollback's swap copies src to dst, unless the test fails it.
 func (r *installRig) swap(src, dst string) error {
 	r.steps = append(r.steps, "swap")
+	r.swaps++
+	if r.swaps > 1 {
+		if r.rollbackErr != nil {
+			return r.rollbackErr
+		}
+		r.files.files[dst] = r.files.files[src]
+		r.files.modes[dst] = 0o755
+		return nil
+	}
 	r.prevAtSwap = append([]byte(nil), r.files.files[keptPrev]...)
 	if r.swapErr != nil {
 		return r.swapErr
@@ -319,13 +339,6 @@ func TestInstallFailureBeforeTheSwapLeavesOMUntouched(t *testing.T) {
 		wantSteps  []string
 	}{
 		{
-			name:       "go build fails",
-			setup:      func(r *installRig) { r.buildErr = errors.New("exit status 2") },
-			wantReason: "build-failed",
-			wantPrev:   commitOld,
-			wantSteps:  []string{"version", "build"},
-		},
-		{
 			name:       "the build cannot be made executable",
 			setup:      func(r *installRig) { r.files.chmodErr = errors.New("permission denied") },
 			wantReason: "build-failed",
@@ -352,13 +365,6 @@ func TestInstallFailureBeforeTheSwapLeavesOMUntouched(t *testing.T) {
 			wantReason: "keep-previous",
 			wantPrev:   commitOld,
 			wantSteps:  []string{"version", "build", "security", "codesign"},
-		},
-		{
-			name:       "the rename fails",
-			setup:      func(r *installRig) { r.swapErr = errors.New("rename denied") },
-			wantReason: "swap-failed",
-			wantPrev:   commitOld,
-			wantSteps:  []string{"version", "build", "security", "codesign", "swap"},
 		},
 	}
 	for _, tc := range tests {
@@ -390,22 +396,232 @@ func TestInstallFailureBeforeTheSwapLeavesOMUntouched(t *testing.T) {
 	}
 }
 
-func TestInstallSmokeMismatchIsFailed(t *testing.T) {
+// commitOther is a commit the built om is not, for an om that reports the wrong sha.
+const commitOther = "2222222222222222222222222222222222222222"
+
+// TestBuildAndRenameFailuresLeavePathUntouched drives the two failures that stop the
+// swap from putting anything in force: a build that fails and a rename that is
+// refused. Each leaves om as it was, reports failed with its reason, exits 1 and
+// leaves no build behind.
+func TestBuildAndRenameFailuresLeavePathUntouched(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		setup      func(r *installRig)
+		wantReason string
+		wantSteps  []string
+	}{
+		{
+			name:       "go build fails",
+			setup:      func(r *installRig) { r.buildErr = errors.New("exit status 2") },
+			wantReason: "build-failed",
+			wantSteps:  []string{"version", "build"},
+		},
+		{
+			name:       "the rename fails",
+			setup:      func(r *installRig) { r.swapErr = errors.New("rename denied") },
+			wantReason: "swap-failed",
+			wantSteps:  []string{"version", "build", "security", "codesign", "swap"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newInstallRig(t)
+			tc.setup(r)
+			before := string(r.files.files[installedOM])
+
+			res, exit := Run(context.Background(), r.cfg)
+
+			if want := (Result{Event: "failed", Commit: commitNew, Prev: commitOld, Reason: tc.wantReason}); res != want {
+				t.Errorf("result = %+v, want %+v", res, want)
+			}
+			if exit != ExitFailed {
+				t.Errorf("exit = %d, want %d", exit, ExitFailed)
+			}
+			if !reflect.DeepEqual(r.steps, tc.wantSteps) {
+				t.Errorf("steps = %v, want %v: nothing after the failed step runs", r.steps, tc.wantSteps)
+			}
+			if got := string(r.files.files[installedOM]); got != before {
+				t.Errorf("om = %q, want it untouched", got)
+			}
+			if _, ok := r.files.files[r.tempPath()]; ok {
+				t.Error("the build temp file was left behind")
+			}
+		})
+	}
+}
+
+// TestSmokeFailureRollsBackToThePreviousBinary drives each way the smoke check can
+// fail after the swap: the new om reports another commit, prints no version line, or
+// its probe fails as a hung om's does. Each puts the previous om back over om through
+// the swap, reports rolled_back with smoke-failed and exits 1.
+func TestSmokeFailureRollsBackToThePreviousBinary(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(r *installRig)
+	}{
+		{
+			name:  "the new om reports another commit",
+			setup: func(r *installRig) { r.swapBytes = versionOut(commitOther) },
+		},
+		{
+			name:  "the new om prints no version line",
+			setup: func(r *installRig) { r.swapBytes = "usage: om <command>\n" },
+		},
+		{
+			name:  "the version probe fails",
+			setup: func(r *installRig) { r.versionErr = errBoom },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newInstallRig(t)
+			tc.setup(r)
+
+			res, exit := Run(context.Background(), r.cfg)
+
+			if want := (Result{Event: "rolled_back", Commit: commitNew, Prev: commitOld, Reason: "smoke-failed"}); res != want {
+				t.Errorf("result = %+v, want %+v", res, want)
+			}
+			if exit != ExitFailed {
+				t.Errorf("exit = %d, want %d", exit, ExitFailed)
+			}
+			// The safety order is the rollback's swap before the result is reported,
+			// so the swap is the last step.
+			if r.swaps != 2 || r.steps[len(r.steps)-1] != "swap" {
+				t.Errorf("steps = %v, want the rollback's swap as the last step after the install's swap", r.steps)
+			}
+			if got := string(r.files.files[installedOM]); got != versionOut(commitOld) {
+				t.Errorf("om = %q, want the previous om back in force", got)
+			}
+			if _, ok := r.files.files[r.tempPath()]; ok {
+				t.Error("the build temp file was left behind")
+			}
+			if !strings.Contains(r.receipts(t), `"event": "rolled_back"`) {
+				t.Errorf("receipts = %q, want one rolled_back receipt", r.receipts(t))
+			}
+			if want := "[install-om] Rolled back to " + commitOld + "."; !containsLine(r.logs.lines, want) {
+				t.Errorf("logs = %q, want %q", r.logs.lines, want)
+			}
+		})
+	}
+}
+
+// TestSmokeFailureOnAFirstInstallRemovesTheNewOM is the rollback with no previous
+// om: the new om is removed, so nothing broken is left in force, and the run is
+// rolled_back with no prev commit.
+func TestSmokeFailureOnAFirstInstallRemovesTheNewOM(t *testing.T) {
 	t.Parallel()
 	r := newInstallRig(t)
-	r.swapBytes = versionOut(commitOld)
+	delete(r.files.files, installedOM)
+	r.swapBytes = versionOut(commitOther)
 
 	res, exit := Run(context.Background(), r.cfg)
 
-	if want := (Result{Event: "failed", Commit: commitNew, Prev: commitOld, Reason: "smoke-failed"}); res != want {
+	if want := (Result{Event: "rolled_back", Commit: commitNew, Reason: "smoke-failed"}); res != want {
 		t.Errorf("result = %+v, want %+v", res, want)
 	}
 	if exit != ExitFailed {
 		t.Errorf("exit = %d, want %d", exit, ExitFailed)
 	}
-	wantSteps := []string{"version", "build", "security", "codesign", "swap", "version"}
-	if !reflect.DeepEqual(r.steps, wantSteps) {
-		t.Errorf("steps = %v, want %v", r.steps, wantSteps)
+	if _, ok := r.files.files[installedOM]; ok {
+		t.Error("the new om is still in force after a first-install rollback")
+	}
+	if r.swaps != 1 {
+		t.Errorf("swaps = %d, want 1: a first install rolls back by removal, not a swap", r.swaps)
+	}
+}
+
+// TestFirstInstallRollbackIgnoresAStaleOMPrev: a first install has no previous om from
+// this run, even when an om.prev from an earlier install sits beside om. The rollback
+// removes the new om and never swaps the stale om.prev in, so the stale copy is left
+// as it was and no message names it.
+func TestFirstInstallRollbackIgnoresAStaleOMPrev(t *testing.T) {
+	t.Parallel()
+	r := newInstallRig(t)
+	delete(r.files.files, installedOM)
+	stale := []byte("stale om.prev from an earlier install")
+	r.files.files[keptPrev] = stale
+	r.swapBytes = versionOut(commitOther)
+
+	res, exit := Run(context.Background(), r.cfg)
+
+	if want := (Result{Event: "rolled_back", Commit: commitNew, Reason: "smoke-failed"}); res != want {
+		t.Errorf("result = %+v, want %+v", res, want)
+	}
+	if exit != ExitFailed {
+		t.Errorf("exit = %d, want %d", exit, ExitFailed)
+	}
+	if _, ok := r.files.files[installedOM]; ok {
+		t.Error("the new om is still in force after a first-install rollback")
+	}
+	if got := string(r.files.files[keptPrev]); got != string(stale) {
+		t.Errorf("om.prev = %q, want the stale om.prev left untouched", got)
+	}
+	if r.swaps != 1 {
+		t.Errorf("swaps = %d, want 1: the stale om.prev must not be swapped in", r.swaps)
+	}
+	for _, line := range r.logs.lines {
+		if strings.Contains(line, keptPrev) {
+			t.Errorf("log line %q names the stale om.prev, want no message to name it", line)
+		}
+	}
+}
+
+// TestFirstInstallRollbackFailureIsReportedAsFailure: with no om.prev, a removal of
+// the broken new om that fails must not read as a rollback. The run is failed with
+// rollback-failed, and the removal error is named in the log.
+func TestFirstInstallRollbackFailureIsReportedAsFailure(t *testing.T) {
+	t.Parallel()
+	r := newInstallRig(t)
+	delete(r.files.files, installedOM)
+	r.swapBytes = versionOut(commitOther)
+	r.files.removeErr[installedOM] = errBoom
+
+	res, exit := Run(context.Background(), r.cfg)
+
+	if want := (Result{Event: "failed", Commit: commitNew, Reason: "rollback-failed"}); res != want {
+		t.Errorf("result = %+v, want %+v", res, want)
+	}
+	if exit != ExitFailed {
+		t.Errorf("exit = %d, want %d", exit, ExitFailed)
+	}
+	if !containsSubstring(r.logs.lines, "CRITICAL: rollback failed after") {
+		t.Errorf("logs = %q, want a CRITICAL line for the failed rollback", r.logs.lines)
+	}
+	if !containsSubstring(r.logs.lines, errBoom.Error()) {
+		t.Errorf("logs = %q, want the removal error %q named", r.logs.lines, errBoom.Error())
+	}
+	if !strings.Contains(r.receipts(t), `"reason": "rollback-failed"`) {
+		t.Errorf("receipts = %q, want a rollback-failed receipt", r.receipts(t))
+	}
+}
+
+// TestRollbackThatFailsReportsBothReasons: when the previous om cannot be put back,
+// the run is failed with rollback-failed, and the log names both the smoke failure
+// and the rollback failure on the one CRITICAL line.
+func TestRollbackThatFailsReportsBothReasons(t *testing.T) {
+	t.Parallel()
+	r := newInstallRig(t)
+	r.swapBytes = versionOut(commitOther)
+	r.rollbackErr = errBoom
+
+	res, exit := Run(context.Background(), r.cfg)
+
+	if want := (Result{Event: "failed", Commit: commitNew, Prev: commitOld, Reason: "rollback-failed"}); res != want {
+		t.Errorf("result = %+v, want %+v", res, want)
+	}
+	if exit != ExitFailed {
+		t.Errorf("exit = %d, want %d", exit, ExitFailed)
+	}
+	smoke := installedOM + " does not report the built commit " + commitNew
+	// The cause is the swap's own error, so the log names why the rename failed.
+	rollback := "cannot put " + keptPrev + " back over " + installedOM + ": " + errBoom.Error()
+	if !containsSubstring(r.logs.lines, "CRITICAL: rollback failed after "+smoke+": "+rollback) {
+		t.Errorf("logs = %q, want one CRITICAL line naming the smoke failure, the rollback failure and its cause", r.logs.lines)
 	}
 }
 
@@ -510,6 +726,16 @@ func TestReplaceFilesTakesItsLockWithTheRunsWait(t *testing.T) {
 func containsLine(lines []string, want string) bool {
 	for _, line := range lines {
 		if line == want {
+			return true
+		}
+	}
+	return false
+}
+
+// containsSubstring reports whether one of lines holds want.
+func containsSubstring(lines []string, want string) bool {
+	for _, line := range lines {
+		if strings.Contains(line, want) {
 			return true
 		}
 	}
