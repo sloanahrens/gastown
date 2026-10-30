@@ -468,6 +468,33 @@ func TestThePanelSaysALandingRiskLogItCannotRead(t *testing.T) {
 	}
 }
 
+// The panel draws the landing risk level beside each risk-path row, so a reader
+// can see why the row sits where it does. A row the landing log did not answer
+// draws no level at all: only risk-path rows carry one.
+func TestThePanelDrawsTheLandingRiskLevel(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
+		map[string]any{"kind": "item", "owner": "overseer", "id": "risk:gt-7:deadbeef", "title": "gt-7 landed touching internal/cmd",
+			"level": "warn", "rule": "landing.risk_path", "age_sec": 180, "landing_risk": 2},
+		map[string]any{"kind": "item", "owner": "overseer", "id": "red-main:gastown", "title": "main is red",
+			"level": "crit", "rule": "red-main", "age_sec": 30},
+	}}))
+	switchOwner(t, dom, "overseer")
+
+	rows := panelRows(t, dom)
+	if len(rows) != 2 {
+		t.Fatalf("the panel drew %d rows (%+v), want both queue items", len(rows), rows)
+	}
+	if !strings.Contains(rows[0].Text, "risk 2") || !panelCells(rows[0], "span lrisk") {
+		t.Errorf("the risk-path row reads %q with cells %v, want its level 2 drawn", rows[0].Text, rows[0].Cells)
+	}
+	if strings.Contains(rows[1].Text, "risk") || panelCells(rows[1], "span lrisk") {
+		t.Errorf("the row with no landing risk reads %q with cells %v, want no level drawn", rows[1].Text, rows[1].Cells)
+	}
+}
+
 // The panel draws the rows in the two groups the reader acts on: what needs a
 // person, then what is only waiting on work already in flight, with each
 // group's count in the panel's header. A pipeline row names who holds it and
