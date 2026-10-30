@@ -56,6 +56,7 @@ func TestParseOptions(t *testing.T) {
 	defaults := Options{
 		DoltHost:    DefaultDoltHost,
 		ForgejoHost: DefaultForgejoHost,
+		TrackerHost: DefaultTrackerHost,
 		AllowedIP:   DefaultAllowedIP,
 		Base:        filepath.Join(root, "deploy", "polecat", "policy.yaml"),
 	}
@@ -82,16 +83,27 @@ func TestParseOptions(t *testing.T) {
 			want: with(func(o *Options) { o.ForgejoHost = "forgejo.example" }),
 		},
 		{
+			name: "the tracker host",
+			args: []string{"--tracker-host", "tracker.example"},
+			want: with(func(o *Options) { o.TrackerHost = "tracker.example" }),
+		},
+		{
+			name:    "the tracker host with no value",
+			args:    []string{"--tracker-host"},
+			wantErr: "render-policy: --tracker-host needs a value",
+		},
+		{
 			name: "the pinned address",
 			args: []string{"--allowed-ip", "10.0.0.9"},
 			want: with(func(o *Options) { o.AllowedIP = "10.0.0.9" }),
 		},
 		{
 			name: "every flag together",
-			args: []string{"--dolt-host", "dolt.example", "--forgejo-host", "forgejo.example", "--allowed-ip", "10.0.0.9"},
+			args: []string{"--dolt-host", "dolt.example", "--forgejo-host", "forgejo.example", "--tracker-host", "tracker.example", "--allowed-ip", "10.0.0.9"},
 			want: with(func(o *Options) {
 				o.DoltHost = "dolt.example"
 				o.ForgejoHost = "forgejo.example"
+				o.TrackerHost = "tracker.example"
 				o.AllowedIP = "10.0.0.9"
 			}),
 		},

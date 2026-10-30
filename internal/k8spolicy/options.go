@@ -39,6 +39,8 @@ type Options struct {
 	DoltHost string
 	// ForgejoHost names the endpoint on port 3000.
 	ForgejoHost string
+	// TrackerHost names the endpoint on the tracker's port (DefaultTrackerPort).
+	TrackerHost string
 	// AllowedIP is the bare address pinned on each rewritten endpoint; the
 	// render adds the /32.
 	AllowedIP string
@@ -77,13 +79,14 @@ func Parse(args []string, h Host) (Options, error) {
 	opts := Options{
 		DoltHost:    DefaultDoltHost,
 		ForgejoHost: DefaultForgejoHost,
+		TrackerHost: DefaultTrackerHost,
 		AllowedIP:   DefaultAllowedIP,
 	}
 	namedBase := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
-		case arg == "--dolt-host" || arg == "--forgejo-host" || arg == "--allowed-ip":
+		case arg == "--dolt-host" || arg == "--forgejo-host" || arg == "--tracker-host" || arg == "--allowed-ip":
 			// Whatever follows the flag is its value, another flag included: the
 			// script's case took $2 the same way. Only a flag with nothing after
 			// it is refused, where the script died on an unbound variable
@@ -97,6 +100,8 @@ func Parse(args []string, h Host) (Options, error) {
 				opts.DoltHost = args[i]
 			case "--forgejo-host":
 				opts.ForgejoHost = args[i]
+			case "--tracker-host":
+				opts.TrackerHost = args[i]
 			case "--allowed-ip":
 				opts.AllowedIP = args[i]
 			}
