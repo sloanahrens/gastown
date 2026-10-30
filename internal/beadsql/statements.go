@@ -426,6 +426,18 @@ func JournalTail(since int64, limit int) Query {
 	return Query{text: text, args: []any{since}}
 }
 
+// ExternalMoleculesAttachedTo reads the open molecule wisps that block, or are
+// parented under, beadID through an external:<rig>:<id> target. It is the one
+// bond the tracker seam cannot return (DepListUp matches the local target id
+// only), so sling reads it here, next to the seam, until the tracker answers
+// external-target dependents (gt-etvxc). The statement is the removed
+// MoleculesAttachedTo narrowed to its external clauses; its local-target
+// clauses are read through DepListUp now.
+func ExternalMoleculesAttachedTo(beadID string) Query {
+	id := quote(beadID)
+	return declared(`SELECT DISTINCT wisp_dependencies.issue_id FROM wisp_dependencies JOIN wisps ON wisps.id = wisp_dependencies.issue_id WHERE wisps.issue_type = 'molecule' AND wisps.status NOT IN ('closed', 'tombstone') AND wisp_dependencies.type IN ('blocks', 'conditional-blocks', 'parent-child') AND (wisp_dependencies.depends_on_external = ` + id + ` OR depends_on_external LIKE ` + quote(externalSuffixPattern(beadID)) + ` ESCAPE '!')`)
+}
+
 // externalSuffixPattern matches an external:<prefix>:<id> target naming id,
 // escaping _ with ! (not valid in a bead ID) so it stays literal.
 func externalSuffixPattern(id string) string {

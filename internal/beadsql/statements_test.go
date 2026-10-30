@@ -12,26 +12,27 @@ import (
 func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 	t.Parallel()
 	for name, q := range map[string]Query{
-		"SchemaLevel":             SchemaLevel(),
-		"IssueCount":              IssueCount(),
-		"TableRowCount":           TableRowCount("hq", "wisps"),
-		"EphemeralIssues":         EphemeralIssues(),
-		"UnassignedInProgress":    UnassignedInProgress(),
-		"InProgressByAge":         InProgressByAge(),
-		"LabelPresent":            LabelPresent("gt-1", "gt:agent"),
-		"AllWisps":                AllWisps(),
-		"WispsWithLabels":         WispsWithLabels([]string{"gt:merge-request", "it's"}),
-		"PreloadedBeads":          PreloadedBeads([]string{"gt:agent"}, []string{"open", "hooked"}),
-		"PreloadedBeadsStatuses":  PreloadedBeads(nil, []string{"in_progress"}),
-		"PreloadedBeadsWispsOnly": PreloadedBeads(nil, nil),
-		"JournalHead":             JournalHead(),
-		"JournalTail":             JournalTail(6, 2),
-		"JournalTailUnbounded":    JournalTail(0, 0),
-		"RawDepsDown":             RawDeps("gt-1", "down", "tracks"),
-		"RawDepsUp":               RawDeps("gt-1", "up", ""),
-		"BackupIssues":            BackupIssues("hq", false, nil),
-		"BackupIssuesScrubbed":    BackupIssues("hq", true, []string{"testdb_"}),
-		"BackupTable":             BackupTable("hq", "labels"),
+		"SchemaLevel":                 SchemaLevel(),
+		"IssueCount":                  IssueCount(),
+		"TableRowCount":               TableRowCount("hq", "wisps"),
+		"EphemeralIssues":             EphemeralIssues(),
+		"UnassignedInProgress":        UnassignedInProgress(),
+		"InProgressByAge":             InProgressByAge(),
+		"LabelPresent":                LabelPresent("gt-1", "gt:agent"),
+		"AllWisps":                    AllWisps(),
+		"WispsWithLabels":             WispsWithLabels([]string{"gt:merge-request", "it's"}),
+		"PreloadedBeads":              PreloadedBeads([]string{"gt:agent"}, []string{"open", "hooked"}),
+		"PreloadedBeadsStatuses":      PreloadedBeads(nil, []string{"in_progress"}),
+		"PreloadedBeadsWispsOnly":     PreloadedBeads(nil, nil),
+		"ExternalMoleculesAttachedTo": ExternalMoleculesAttachedTo("gt-a_b"),
+		"JournalHead":                 JournalHead(),
+		"JournalTail":                 JournalTail(6, 2),
+		"JournalTailUnbounded":        JournalTail(0, 0),
+		"RawDepsDown":                 RawDeps("gt-1", "down", "tracks"),
+		"RawDepsUp":                   RawDeps("gt-1", "up", ""),
+		"BackupIssues":                BackupIssues("hq", false, nil),
+		"BackupIssuesScrubbed":        BackupIssues("hq", true, []string{"testdb_"}),
+		"BackupTable":                 BackupTable("hq", "labels"),
 	} {
 		s, err := q.Inline()
 		if err != nil {
@@ -92,6 +93,9 @@ func TestQuoteEscapesSQLLiterals(t *testing.T) {
 // The external-target match escapes _ with ! so it stays literal under LIKE.
 func TestExternalTargetsMatchLiterally(t *testing.T) {
 	t.Parallel()
+	if s := ExternalMoleculesAttachedTo("gt-a_b").String(); !strings.Contains(s, "depends_on_external LIKE '%:gt-a!_b' ESCAPE '!'") {
+		t.Errorf("ExternalMoleculesAttachedTo = %s", s)
+	}
 	if s := RawDeps("gt-a_b", "up", "").String(); !strings.Contains(s, "depends_on_external LIKE '%:gt-a!_b' ESCAPE '!'") {
 		t.Errorf("RawDeps(up) = %s", s)
 	}

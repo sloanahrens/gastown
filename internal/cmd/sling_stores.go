@@ -9,10 +9,16 @@ import (
 )
 
 // slingStore is the bead store surface sling's reads, rollback and molecule
-// burn use: the shared Client and the raw molecule-bond query. *beads.Beads
-// implements it.
+// burn use: the shared Client. *beads.Beads implements it, and so does the
+// tracker, which keeps no SQL.
 type slingStore interface {
 	beads.Client
+}
+
+// sqlStore is a slingStore that also answers declared SQL reads (bd's
+// database). Sling asks for SQL only through this interface, so a store with
+// no SQL, like the tracker, is never asked for it.
+type sqlStore interface {
 	SQLCSV(query beadsql.Query) ([][]string, error)
 }
 

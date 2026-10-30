@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -10,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads/trackerclient"
-	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/client"
 )
@@ -52,22 +50,10 @@ func (tr trackerRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
 	return rec.Result(), nil
 }
 
-// trackerSlingStore is a tracker-backed sling store: the tracker client with
-// the SQLCSV every sling store carries. The tracker keeps no SQL, so sling
-// reaching SQLCSV is a failure.
-type trackerSlingStore struct {
-	*trackerclient.Client
-	t *testing.T
-}
-
-func (s trackerSlingStore) SQLCSV(query beadsql.Query) ([][]string, error) {
-	s.t.Errorf("sling ran SQL against a tracker store: %s", query)
-	return nil, errors.New("tracker store has no SQL")
-}
-
 // TestMoleculeDepsOnATrackerStoreNeverReadsSQL: a bead in a tracker rig is
 // slung through the tracker's dependents. Its open molecules come back, and
-// sling never asks the tracker for SQL.
+// no SQL is needed: the tracker client has no SQLCSV, so sling never asks it
+// for one.
 func TestMoleculeDepsOnATrackerStoreNeverReadsSQL(t *testing.T) {
 	t.Parallel()
 	tc, err := client.New(client.Config{
@@ -89,7 +75,10 @@ func TestMoleculeDepsOnATrackerStoreNeverReadsSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := trackerSlingStore{trackerclient.New(tc, "gt"), t}
+	store := trackerclient.New(tc, "gt")
+	if _, ok := any(store).(sqlStore); ok {
+		t.Fatal("the tracker client answers SQL; this test no longer models a tracker store")
+	}
 	stores := slingStores{pinned: func(string) slingStore { return store }}
 
 	got, err := stores.moleculeDeps("gt-work", t.TempDir())

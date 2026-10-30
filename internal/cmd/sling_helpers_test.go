@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -128,12 +129,26 @@ func TestMoleculeDepsKeepsOpenMoleculesBondedToTheBead(t *testing.T) {
 		return beads.Issue{ID: id, Title: id, Status: "open", Type: issueType}
 	}
 	tests := []struct {
-		name   string
-		issues []beads.Issue
-		bonds  []moleculeBond
-		want   []string
+		name     string
+		issues   []beads.Issue
+		bonds    []moleculeBond
+		external []string
+		want     []string
 	}{
 		{name: "no molecule"},
+		{
+			name:     "one open molecule bonded through an external target",
+			issues:   []beads.Issue{open("gt-wisp-ext", "molecule")},
+			external: []string{"gt-wisp-ext"},
+			want:     []string{"gt-wisp-ext"},
+		},
+		{
+			name:     "molecule bonded locally and externally is listed once",
+			issues:   []beads.Issue{open("gt-wisp-live", "molecule")},
+			bonds:    []moleculeBond{{"gt-wisp-live", "blocks"}},
+			external: []string{"gt-wisp-live"},
+			want:     []string{"gt-wisp-live"},
+		},
 		{
 			name:   "one open molecule via blocks",
 			issues: []beads.Issue{open("gt-wisp-live", "molecule")},
@@ -216,6 +231,7 @@ func TestMoleculeDepsKeepsOpenMoleculesBondedToTheBead(t *testing.T) {
 					t.Fatalf("AddTypedDependency(%s): %v", bond.id, err)
 				}
 			}
+			externalBondRows(db, tt.external...)
 
 			got, err := fakeSlingStores(db).moleculeDeps("gt-work", t.TempDir())
 			if err != nil {
@@ -228,10 +244,20 @@ func TestMoleculeDepsKeepsOpenMoleculesBondedToTheBead(t *testing.T) {
 	}
 }
 
-// TestMoleculeDepsReadsDependentsNotSQL: the molecule set comes from the
-// store's dependents read, so sling runs no SQL against a bead store (the
-// tracker has no SQL to answer).
-func TestMoleculeDepsReadsDependentsNotSQL(t *testing.T) {
+// externalBondRows scripts db's SQL so the external-target statement answers
+// the given molecule ids under the issue_id header bd prints.
+func externalBondRows(db *beadsfake.Fake, ids ...string) {
+	rows := [][]string{{"issue_id"}}
+	for _, id := range ids {
+		rows = append(rows, []string{id})
+	}
+	db.OnSQL(func(string) ([][]string, error) { return rows, nil })
+}
+
+// TestMoleculeDepsReadsLocalBondsThroughTheSeamAndExternalByOneStatement: the
+// local-target bonds come from the dependents read, and the only SQL sling
+// runs is the external-target statement, nothing else.
+func TestMoleculeDepsReadsLocalBondsThroughTheSeamAndExternalByOneStatement(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
 	db.Seed(beads.Issue{ID: "gt-work", Title: "work", Status: "open", Type: "task"},
@@ -239,6 +265,7 @@ func TestMoleculeDepsReadsDependentsNotSQL(t *testing.T) {
 	if err := db.AddTypedDependency("gt-wisp-live", "gt-work", "blocks"); err != nil {
 		t.Fatalf("AddTypedDependency: %v", err)
 	}
+	externalBondRows(db)
 
 	got, err := fakeSlingStores(db).moleculeDeps("gt-work", t.TempDir())
 	if err != nil {
@@ -247,8 +274,47 @@ func TestMoleculeDepsReadsDependentsNotSQL(t *testing.T) {
 	if want := []string{"gt-wisp-live"}; !slices.Equal(got, want) {
 		t.Errorf("moleculeDeps() = %v, want %v", got, want)
 	}
-	if stmts := db.SQLStatements(); len(stmts) != 0 {
-		t.Errorf("moleculeDeps ran %d SQL statements, want none: %q", len(stmts), stmts)
+	want := []string{beadsql.ExternalMoleculesAttachedTo("gt-work").String()}
+	if stmts := db.SQLStatements(); !slices.Equal(stmts, want) {
+		t.Errorf("moleculeDeps ran SQL %q, want only the external-target statement %q", stmts, want)
+	}
+}
+
+// TestMoleculeDepsRefusesAFailedExternalRead: the external-target statement
+// failing is an error to the caller, never an empty set that lets sling skip
+// a bond it could not read.
+func TestMoleculeDepsRefusesAFailedExternalRead(t *testing.T) {
+	t.Parallel()
+	errRead := errors.New("bd sql: connection refused")
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-work", Title: "work", Status: "open", Type: "task"})
+	db.OnSQL(func(string) ([][]string, error) { return nil, errRead })
+
+	got, err := fakeSlingStores(db).moleculeDeps("gt-work", t.TempDir())
+	if !errors.Is(err, errRead) {
+		t.Fatalf("moleculeDeps() = %v, %v; want the external read error", got, err)
+	}
+}
+
+// TestMoleculeDepsExternalBondsFollowTheLocalOnes: a molecule bonded both ways
+// is listed once, in its local position; an external-only molecule trails.
+func TestMoleculeDepsExternalBondsFollowTheLocalOnes(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-work", Title: "work", Status: "open", Type: "task"},
+		beads.Issue{ID: "gt-wisp-a", Title: "a", Status: "open", Type: "molecule"},
+		beads.Issue{ID: "gt-wisp-b", Title: "b", Status: "open", Type: "molecule"})
+	if err := db.AddTypedDependency("gt-wisp-a", "gt-work", "blocks"); err != nil {
+		t.Fatalf("AddTypedDependency: %v", err)
+	}
+	externalBondRows(db, "gt-wisp-b", "gt-wisp-a")
+
+	got, err := fakeSlingStores(db).moleculeDeps("gt-work", t.TempDir())
+	if err != nil {
+		t.Fatalf("moleculeDeps: %v", err)
+	}
+	if want := []string{"gt-wisp-a", "gt-wisp-b"}; !slices.Equal(got, want) {
+		t.Errorf("moleculeDeps() = %v, want %v", got, want)
 	}
 }
 
@@ -334,6 +400,7 @@ func TestMoleculeDepsReadsAnOmittedCandidateAlone(t *testing.T) {
 	if err := db.AddTypedDependency("gt-wisp-live", "gt-work", "blocks"); err != nil {
 		t.Fatalf("AddTypedDependency: %v", err)
 	}
+	externalBondRows(db)
 
 	t.Run("single read answers", func(t *testing.T) {
 		t.Parallel()

@@ -16,6 +16,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -230,15 +231,17 @@ func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
 // molecule under any other relation is not attached to it.
 var moleculeBondTypes = map[string]bool{"blocks": true, "conditional-blocks": true, "parent-child": true}
 
-// moleculeDeps returns the open molecules bonded to beadID, in the order
-// DepListUp lists them (the store's creation order). The removed bd sql read
-// had no ORDER BY, so it promised no order; this one promises that one.
+// moleculeDeps returns the open molecules bonded to beadID. Local-target bonds
+// come from DepListUp, in the store's creation order, so a tracker rig (which
+// answers no SQL) can still be slung and its stale molecules burned. Bonds
+// held as an external:<rig>:<id> target are ones DepListUp cannot return; a
+// store with SQL reads them through ExternalMoleculesAttachedTo and appends
+// the ones not already listed. That statement has no ORDER BY, as the removed
+// bd sql read had none, so those trail the local bonds in no promised order.
 //
-// The dependents come from DepListUp, not bd sql, because a tracker rig
-// answers no SQL and sling must still be able to burn its stale molecules.
-// DepListUp matches only the local target id (the tracker's dependents read
-// and the fake do the same), so a bond held as an external:<rig>:<id> target
-// is not returned here and this read does not see it.
+// A store with no SQL (the tracker) cannot answer the external statement, so
+// its external-target bonds are not read here until the tracker answers
+// external-target dependents (gt-etvxc).
 func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	if beadID == "" {
 		return nil, nil
@@ -248,6 +251,52 @@ func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	}
 
 	store := s.pinnedAt(resolveBeadDirFromTownRoot(townRoot, beadID))
+	molecules, err := bondedMolecules(store, beadID)
+	if err != nil {
+		return nil, err
+	}
+	sql, ok := store.(sqlStore)
+	if !ok {
+		return molecules, nil
+	}
+	external, err := externalMolecules(sql, beadID)
+	if err != nil {
+		return nil, err
+	}
+	return appendUniqueMolecules(molecules, external...), nil
+}
+
+// externalMolecules returns the open molecules that bond to beadID through an
+// external:<rig>:<id> target, in the order the statement lists them.
+func externalMolecules(store sqlStore, beadID string) ([]string, error) {
+	rows, err := store.SQLCSV(beadsql.ExternalMoleculesAttachedTo(beadID))
+	if err != nil {
+		return nil, fmt.Errorf("reading external-target molecule bonds of %s: %w", beadID, err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	col := -1
+	for i, name := range rows[0] {
+		if name == "issue_id" {
+			col = i
+		}
+	}
+	if col < 0 {
+		return nil, fmt.Errorf("parsing external-target molecule bonds of %s: no issue_id column in %q", beadID, rows[0])
+	}
+	var molecules []string
+	for _, row := range rows[1:] {
+		if col < len(row) && row[col] != "" {
+			molecules = append(molecules, row[col])
+		}
+	}
+	return molecules, nil
+}
+
+// bondedMolecules is the local-target half of moleculeDeps: the open
+// molecules that block or parent beadID, read through the store's dependents.
+func bondedMolecules(store slingStore, beadID string) ([]string, error) {
 	dependents, err := store.DepListUp(beadID, "")
 	if err != nil {
 		return nil, err
