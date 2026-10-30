@@ -138,12 +138,28 @@ func refuseUnsafeToken(token string) error {
 	return nil
 }
 
-// noAdminTokenError is the script's error when no source holds a token. It
-// points the operator at the auth broker.
+// ErrNoAdminToken is the sentinel every no-source refusal wraps, so a caller can
+// tell "no source holds a token" from a token that was found and refused.
+var ErrNoAdminToken = errors.New("no admin token")
+
+// noAdminToken is the script's error when no source holds a token. Its text
+// points the operator at the auth broker, and it unwraps to ErrNoAdminToken.
+type noAdminToken struct {
+	text string
+}
+
+// Error returns the operator-facing text.
+func (e noAdminToken) Error() string { return e.text }
+
+// Unwrap returns ErrNoAdminToken, so errors.Is recognizes the case.
+func (e noAdminToken) Unwrap() error { return ErrNoAdminToken }
+
+// noAdminTokenError is the error ResolveAdminToken returns when no source holds
+// a token. It points the operator at the auth broker.
 func noAdminTokenError(tokenFile string) error {
 	standIn := ""
 	if tokenFile != "" {
 		standIn = fmt.Sprintf(" (or FORGEJO_ADMIN_TOKEN= in %s)", tokenFile)
 	}
-	return fmt.Errorf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run forgejo-provision -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", standIn)
+	return noAdminToken{text: fmt.Sprintf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run forgejo-provision -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", standIn)}
 }
