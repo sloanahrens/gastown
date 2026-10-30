@@ -525,18 +525,21 @@ func TestQueueSkipPageSeatPlaceMissingPriority(t *testing.T) {
 // TestQueueSkipPageSeatPlaceCapped: the "of M" in a waiting row's tag is the
 // count of waiting beads the page holds, so when the server cut the ready list
 // (ready_total larger than the rows sent) it reads "of M+" and the title says
-// the list was cut; an uncapped list keeps the plain "of M".
+// the list was cut; an uncapped list keeps the plain "of M". A reading that
+// carries no ready_total cannot show the list was not cut, so it reads "of M+"
+// too.
 func TestQueueSkipPageSeatPlaceCapped(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
 		name       string
-		readyTotal int
+		readyTotal any
 		wantTag    string
 		wantCut    bool
 	}{
 		{"every ready bead is on the page", 2, "waiting for a seat #1 of 2", false},
 		{"the list was cut by the server", 57, "waiting for a seat #1 of 2+", true},
+		{"the reading carries no ready_total", nil, "waiting for a seat #1 of 2+", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -546,7 +549,11 @@ func TestQueueSkipPageSeatPlaceCapped(t *testing.T) {
 			second := skippedRow("gt-second", "2026-10-29T11:58:00Z", "no seat: over the town total", 4)
 			second["created_at"] = "2026-10-28T10:00:00Z"
 			queue := queueRead(first, second)
-			queue["ready_total"] = tt.readyTotal
+			if tt.readyTotal == nil {
+				delete(queue, "ready_total")
+			} else {
+				queue["ready_total"] = tt.readyTotal
+			}
 			dom := drawQueuePage(t, queue)
 
 			var found bool
