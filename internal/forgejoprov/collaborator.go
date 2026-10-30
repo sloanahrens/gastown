@@ -15,7 +15,7 @@ const (
 // CollaboratorPermission is the repository access the role's bot is granted. The
 // boolean is false for a role that needs no repository access at all: the registry
 // bot pushes packages, not repository content. An unknown role is an error, so a
-// misspelt role cannot pass as one that needs nothing.
+// mistyped role cannot pass as one that needs nothing.
 func CollaboratorPermission(role string) (perm string, ok bool, err error) {
 	switch role {
 	case "polecat", "landing":
