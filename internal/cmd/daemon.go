@@ -180,6 +180,8 @@ Examples:
 var (
 	daemonLogLines  int
 	daemonLogFollow bool
+	// daemonStartTakeover is gt daemon start --takeover.
+	daemonStartTakeover bool
 )
 
 func init() {
@@ -193,6 +195,7 @@ func init() {
 	daemonCmd.AddCommand(daemonClearBackoffCmd)
 	daemonCmd.AddCommand(daemonRotateLogsCmd)
 
+	daemonStartCmd.Flags().BoolVar(&daemonStartTakeover, "takeover", false, "Start over a recorded owner whose heartbeat is still fresh, when that owner is shown not running (container and unsupervised starts only)")
 	daemonLogsCmd.Flags().IntVarP(&daemonLogLines, "lines", "n", 50, "Number of lines to show")
 	daemonLogsCmd.Flags().BoolVarP(&daemonLogFollow, "follow", "f", false, "Follow log output")
 	daemonRotateLogsCmd.Flags().BoolVar(&daemonRotateLogsForce, "force", false, "Rotate all logs regardless of size")
@@ -205,7 +208,7 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	via, pid, err := startDaemon(townRoot)
+	via, pid, err := realDaemonControl().startDaemonWith(townRoot, daemonStartTakeover)
 	if err != nil {
 		return err
 	}
@@ -236,9 +239,9 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 
 // spawnDaemonProcess starts 'gt daemon run' as a detached child of this
 // process — the right thing only when no supervisor is provisioned (see
-// startDaemon) — and returns the PID of the daemon now holding the lock
+// startDaemon), with env added to its environment — and returns the PID of the daemon now holding the lock
 // (ours, or a concurrent starter's that won the race).
-func spawnDaemonProcess(c *daemonControl, townRoot string) (int, error) {
+func spawnDaemonProcess(c *daemonControl, townRoot string, env []string) (int, error) {
 	// Start daemon in background
 	// We use 'gt daemon run' as the actual daemon process
 	gtPath, err := os.Executable()
@@ -248,6 +251,10 @@ func spawnDaemonProcess(c *daemonControl, townRoot string) (int, error) {
 
 	daemonCmd := exec.Command(gtPath, "daemon", "run")
 	daemonCmd.Dir = townRoot
+	if len(env) > 0 {
+		// --takeover: the child's own startup guard reads the variable.
+		daemonCmd.Env = append(os.Environ(), env...)
+	}
 
 	// Detach from terminal
 	daemonCmd.Stdin = nil
@@ -540,12 +547,19 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	return enableSupervisor(townRoot, templates.ProvisionSupervisor)
+	c := realDaemonControl()
+	return enableSupervisor(townRoot, templates.ProvisionSupervisor, func(townRoot string) error {
+		return c.guardStart(townRoot, c.hostSupervisorJob(), false)
+	})
 }
 
 // enableSupervisor installs the town's supervisor file through provision
 // (templates.ProvisionSupervisor) unless a daemon already runs.
-func enableSupervisor(townRoot string, provision func(townRoot string, shutdownBudget time.Duration) (string, error)) error {
+//
+// guard is the startup guard (gt-qpeei.28): provisioning loads a job with
+// RunAtLoad, which starts a daemon, so a town another owner holds is refused
+// before the file is written.
+func enableSupervisor(townRoot string, provision func(townRoot string, shutdownBudget time.Duration) (string, error), guard func(townRoot string) error) error {
 	// Refuse while a manual daemon holds the lock. RunAtLoad + KeepAlive.Crashed
 	// means launchd would immediately spawn a second daemon that loses the
 	// flock on daemon.lock and exits non-zero, then gets respawned every ~10s
@@ -556,6 +570,9 @@ func enableSupervisor(townRoot string, provision func(townRoot string, shutdownB
 	}
 	if running {
 		return fmt.Errorf("a daemon is already running — stop the running daemon first: gt daemon stop")
+	}
+	if err := guard(townRoot); err != nil {
+		return err
 	}
 
 	msg, err := provision(townRoot, daemon.ShutdownBudget)

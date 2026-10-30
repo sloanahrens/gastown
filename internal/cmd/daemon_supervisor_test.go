@@ -20,8 +20,11 @@ import (
 // supervisorCalls records what a stubbed supervisor path did.
 type supervisorCalls struct {
 	argv    [][]string // every argv handed to the supervisor, in order
+	envs    [][]string // the environment each argv ran with, parallel to argv; nil for the plain seam
 	spawned bool       // the direct spawn ran
-	stopped bool       // the direct stop ran
+	// spawnEnv is the environment the direct spawn was handed.
+	spawnEnv []string
+	stopped  bool // the direct stop ran
 }
 
 // last returns the most recent supervisor argv; nil when none ran.
@@ -51,6 +54,12 @@ func stubSupervisor(t *testing.T, goos, file string, state templates.SupervisorS
 		uid:       os.Getuid(),
 		run: func(a []string) error {
 			calls.argv = append(calls.argv, append([]string{}, a...))
+			calls.envs = append(calls.envs, nil)
+			return runErr
+		},
+		runEnv: func(a, env []string) error {
+			calls.argv = append(calls.argv, append([]string{}, a...))
+			calls.envs = append(calls.envs, append([]string{}, env...))
 			return runErr
 		},
 		// The host has no docker to read a container with unless a test says
@@ -64,7 +73,11 @@ func stubSupervisor(t *testing.T, goos, file string, state templates.SupervisorS
 			s.Kind = kind
 			return s
 		},
-		spawn:      func(townRoot string) (int, error) { calls.spawned = true; return 1234, nil },
+		spawn: func(townRoot string, env []string) (int, error) {
+			calls.spawned = true
+			calls.spawnEnv = env
+			return 1234, nil
+		},
 		stopDirect: func(townRoot string) error { calls.stopped = true; return nil },
 		install:    installSupervisorFile,
 		statusLine: func(string, int) string { return "none" },
@@ -522,7 +535,7 @@ func TestDaemonStatus_PrintsTheSupervisorLineForTheLockHolder(t *testing.T) {
 func stubRestart(t *testing.T, goos, file string, pids ...int) (*daemonControl, *supervisorCalls) {
 	t.Helper()
 	c, calls := stubSupervisor(t, goos, file, loadedJob(), nil)
-	c.spawn = func(string) (int, error) { calls.spawned = true; return 9999, nil }
+	c.spawn = func(string, []string) (int, error) { calls.spawned = true; return 9999, nil }
 	reads := 0
 	c.isRunning = func(string) (bool, int, error) {
 		pid := pids[min(reads, len(pids)-1)]
@@ -1701,7 +1714,7 @@ func productionContainerControl(cfg *config.DaemonPatrolConfig) (*daemonControl,
 		return nil, errors.New("docker: daemon unreachable")
 	}
 	c.stopDirect = func(string) error { calls.stopped = true; return nil }
-	c.spawn = func(string) (int, error) { calls.spawned = true; return 1234, nil }
+	c.spawn = func(string, []string) (int, error) { calls.spawned = true; return 1234, nil }
 	c.sleep = func(time.Duration) {}
 	return c, calls
 }

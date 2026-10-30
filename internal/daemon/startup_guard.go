@@ -48,6 +48,21 @@ func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, 
 	})
 }
 
+// GuardStart is the guard the CLI start paths call before they launch a daemon
+// (gt-qpeei.28): the same decision Run makes in the process that is about to
+// become the daemon, asked from the command that is about to start it. self is
+// the owner the started daemon will name (the CLI is not it); takeover is the
+// operator's --takeover; probe nil reads docker, launchd and systemd for real.
+// daemon.log existing is the prior-run evidence Run takes from New, since the
+// CLI has written nothing to it.
+func GuardStart(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time) error {
+	if probe == nil {
+		probe = startupOwnerProbe(templates.RunDockerInspect, os.Hostname)
+	}
+	_, err := os.Stat(DefaultConfig(townRoot).LogFile)
+	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist))
+}
+
 // readStartupState reads state.json for the guard: nil when the file is
 // missing, and an error when it cannot be read or does not parse.
 func readStartupState(townRoot string) (*State, error) {
