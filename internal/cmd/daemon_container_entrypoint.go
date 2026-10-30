@@ -24,16 +24,33 @@ const (
 	// containerMountinfo is the table of mounts this process sees.
 	containerMountinfo = "/proc/self/mountinfo"
 
+	// containerOMTokenFileFlag names the file holding the subscription token om
+	// authenticates with inside the container. It is a flag, not an environment
+	// variable: the GT_ environment-read guard forbids a new one, and the compose
+	// project's command line is where the scratch flag already travels. The
+	// entrypoint reads the file and puts the token into the environment of the
+	// daemon it execs as omTokenEnv; with the flag unset no token is loaded
+	// (gt-qpeei.36).
+	containerOMTokenFileFlag = "om-token-file" //nolint:gosec // a flag name, not a credential
+	// omTokenEnv is the variable the claude CLI reads a subscription token from.
+	omTokenEnv = "CLAUDE_CODE_OAUTH_TOKEN" //nolint:gosec // an environment variable name, not a credential
+
 	// containerScratchTownFlag lets the scratch compose project ask for the
 	// one install a container may run.
 	containerScratchTownFlag = "scratch-town"
 )
 
+// entrypointFlags are the values the command's flags parsed.
+type entrypointFlags struct {
+	scratch     bool   // --scratch-town
+	omTokenFile string // --om-token-file
+}
+
 // newDaemonContainerEntrypointCmd builds the command over run, which receives
-// the --scratch-town value the command parsed. A test passes a run that records
-// it, so the flag the shell sets is the value the decision reads.
-func newDaemonContainerEntrypointCmd(run func(scratch bool) error) *cobra.Command {
-	var scratch bool
+// the flag values the command parsed. A test passes a run that records them, so
+// the flags the shell sets are the values the decision reads.
+func newDaemonContainerEntrypointCmd(run func(flags entrypointFlags) error) *cobra.Command {
+	var flags entrypointFlags
 	cmd := &cobra.Command{
 		Use:   "container-entrypoint",
 		Short: "Start the daemon as the container's entrypoint (internal)",
@@ -61,15 +78,22 @@ kept, the incomplete marker stays, and the command refuses; so does every later
 start, until the operator removes the incomplete marker (and anything the
 install left) from the host side of the scratch directory.
 
+With --om-token-file, the file's contents (trimmed) become
+CLAUDE_CODE_OAUTH_TOKEN in the daemon's environment; an unreadable or empty file
+refuses. A container that sets ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is
+refused, since either outranks the token and bills API rates.
+
 Every check runs before the first command, so a refusal runs nothing.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
-			return run(scratch)
+			return run(flags)
 		},
 	}
-	cmd.Flags().BoolVar(&scratch, containerScratchTownFlag, false,
+	cmd.Flags().BoolVar(&flags.scratch, containerScratchTownFlag, false,
 		"Install a town at the town root when it holds only the scratch marker")
+	cmd.Flags().StringVar(&flags.omTokenFile, containerOMTokenFileFlag, "",
+		"Read the om subscription token from this file and give it to the daemon; the file's mode is not checked")
 	return cmd
 }
 
@@ -79,17 +103,23 @@ var daemonContainerEntrypointCmd = newDaemonContainerEntrypointCmd(runDaemonCont
 // runs goes through run or exec, so a test records the whole sequence and no
 // process starts. runDaemonContainerEntrypoint wires the real ones.
 type containerEntrypoint struct {
-	self      func() (string, error)    // the gt binary's path, argv[0] of each command it runs
-	getenv    func(key string) string   // the environment
-	run       func(argv []string) error // runs a command and waits for it
-	exec      func(argv []string) error // replaces this process; returns only on error
-	mountinfo func() (string, error)    // text of /proc/self/mountinfo
+	self   func() (string, error)    // the gt binary's path, argv[0] of each command it runs
+	getenv func(key string) string   // the environment
+	run    func(argv []string) error // runs a command and waits for it
+	// exec replaces this process with argv and env added to its environment;
+	// it returns only on error. The token travels in env, never in argv.
+	exec      func(argv []string, env []string) error
+	readFile  func(path string) (string, error) // reads a whole file
+	mountinfo func() (string, error)            // text of /proc/self/mountinfo
 	dirNames  func(dir string) ([]string, error)
 	lstat     func(path string) (entryKind, error) // what sits at mayor/town.json, a link not followed
 	exists    func(path string) (bool, error)
 	create    func(path string) error // creates an empty file, failing if the path exists (O_EXCL)
 	remove    func(path string) error // removes an entry and what it holds
 	scratch   bool                    // --scratch-town: the scratch project asked for a scratch town
+	// omTokenFile is --om-token-file: the file the om subscription token is read
+	// from; "" loads no token.
+	omTokenFile string
 }
 
 // entryKind is what a path is, as Lstat reports it. A symbolic link is
@@ -103,19 +133,21 @@ const (
 )
 
 // runDaemonContainerEntrypoint runs the entrypoint with the real seams.
-func runDaemonContainerEntrypoint(scratch bool) error {
+func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 	return runContainerEntrypoint(containerEntrypoint{
-		self:      os.Executable,
-		getenv:    os.Getenv,
-		run:       runEntrypointCommand,
-		exec:      execEntrypointArgv,
-		mountinfo: func() (string, error) { return readTextFile(containerMountinfo) },
-		dirNames:  listDirNames,
-		lstat:     entrypointLstat,
-		exists:    entrypointPathExists,
-		create:    entrypointCreateExclusive,
-		remove:    os.RemoveAll,
-		scratch:   scratch,
+		self:        os.Executable,
+		getenv:      os.Getenv,
+		run:         runEntrypointCommand,
+		exec:        execEntrypointArgv,
+		readFile:    readTextFile,
+		mountinfo:   func() (string, error) { return readTextFile(containerMountinfo) },
+		dirNames:    listDirNames,
+		lstat:       entrypointLstat,
+		exists:      entrypointPathExists,
+		create:      entrypointCreateExclusive,
+		remove:      os.RemoveAll,
+		scratch:     flags.scratch,
+		omTokenFile: flags.omTokenFile,
 	})
 }
 
@@ -185,6 +217,12 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 		return fmt.Errorf("gt daemon container-entrypoint runs only in container mode (%s=%s); nothing was started",
 			config.ContainerModeEnv, config.SupervisorContainer)
 	}
+	// An API credential outranks the subscription token and bills API rates, so
+	// a container that carries one never starts: this runs before anything else
+	// does, and runs nothing.
+	if err := e.refuseAPICredentials(); err != nil {
+		return err
+	}
 	townRoot := filepath.Clean(e.getenv(containerTownRootEnv))
 	if !filepath.IsAbs(townRoot) {
 		return fmt.Errorf("%s must name the town root as an absolute path; nothing was started", containerTownRootEnv)
@@ -192,6 +230,12 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	self, err := e.self()
 	if err != nil {
 		return fmt.Errorf("find the gt binary to exec: %w; nothing was started", err)
+	}
+	// The om token is read before any command runs, so an unreadable or empty
+	// file runs nothing. Its value goes only into the daemon's environment.
+	daemonEnv, err := e.omTokenEnv()
+	if err != nil {
+		return err
 	}
 	// First, before town.json is looked at: an earlier install that did not
 	// finish leaves the town unstartable, even when its cleanup failed and a
@@ -211,10 +255,68 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 			return err
 		}
 	}
-	if err := e.exec([]string{self, "daemon", "run"}); err != nil {
+	if err := e.exec([]string{self, "daemon", "run"}, daemonEnv); err != nil {
 		return fmt.Errorf("exec gt daemon run: %w", err)
 	}
 	return nil
+}
+
+// apiCredentialEnvs are the variables that outrank CLAUDE_CODE_OAUTH_TOKEN in
+// the claude CLI and bill API rates; the container carries neither.
+var apiCredentialEnvs = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+
+// refuseAPICredentials refuses a container environment that sets an API
+// credential, naming the variable and never its value. A variable set to the
+// empty string is not set: a compose pass-through of an unset host variable
+// arrives empty.
+func (e containerEntrypoint) refuseAPICredentials() error {
+	for _, name := range apiCredentialEnvs {
+		if e.getenv(name) != "" {
+			return fmt.Errorf("%s is set in the container environment; it outranks the subscription token and bills API rates, so nothing was started", name)
+		}
+	}
+	return nil
+}
+
+// omTokenEnv returns the environment the daemon is exec'd with beyond this
+// process's own: the subscription token from the file --om-token-file names, or
+// nothing when it is unset. The token is trimmed of surrounding whitespace and
+// is never put into an error, a message or an argv; an unreadable or empty file
+// is refused naming the path alone. The file's mode is not checked: a bind mount
+// through Docker Desktop reports ownership and modes unreliably.
+func (e containerEntrypoint) omTokenEnv() ([]string, error) {
+	path := e.omTokenFile
+	if path == "" {
+		return nil, nil
+	}
+	text, err := e.readFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read the om token file %s: it could not be read; nothing was started", path)
+	}
+	token := strings.TrimSpace(text)
+	if token == "" {
+		return nil, fmt.Errorf("the om token file %s is empty; nothing was started", path)
+	}
+	return []string{omTokenEnv + "=" + token}, nil
+}
+
+// mergeEnv returns base with every variable add names replaced by add's value,
+// so a token already in the environment never beats the one just loaded and no
+// name appears twice for the exec to choose between.
+func mergeEnv(base, add []string) []string {
+	replaced := make(map[string]bool, len(add))
+	for _, kv := range add {
+		name, _, _ := strings.Cut(kv, "=")
+		replaced[name] = true
+	}
+	merged := make([]string, 0, len(base)+len(add))
+	for _, kv := range base {
+		name, _, _ := strings.Cut(kv, "=")
+		if !replaced[name] {
+			merged = append(merged, kv)
+		}
+	}
+	return append(merged, add...)
 }
 
 // refuseIncompleteInstall refuses when the install-incomplete marker is there.
