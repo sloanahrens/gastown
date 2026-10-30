@@ -19,8 +19,8 @@ const fakeAPIRoot = "http://forgejo.fake.invalid"
 // fakeAPIPath is the API root every route sits under, as the live server has it.
 const fakeAPIPath = "/api/v1"
 
-// fakeCall is one request the fake answered: its method, its path (never the query
-// or the Authorization header) and the status it sent back.
+// fakeCall is one request the fake answered: its method, its escaped path (never the
+// query or the Authorization header) and the status it sent back.
 type fakeCall struct {
 	method string
 	path   string
@@ -55,8 +55,20 @@ type fakeForgejo struct {
 	tokenField string
 	// newToken is the random seam: it returns the value of the next token minted.
 	newToken func() string
+	// repoMissing makes every repository route answer 404, as a token that cannot see
+	// the repository does, whether or not the fake holds it.
+	repoMissing bool
+	// dropWhitelistEntry makes a branch-protection PATCH leave merge_whitelist_usernames
+	// as it was, so the write does not take.
+	dropWhitelistEntry bool
+	// protectedLandBranch makes each repository the fake adds start with a land/* rule.
+	protectedLandBranch bool
+	// viewerExists makes the viewer bot exist before any create call, as on an instance
+	// a viewer run has already provisioned.
+	viewerExists bool
 
 	users          map[string]*fakeUser
+	repos          map[string]*fakeRepo
 	calls          []fakeCall
 	violationCalls []fakeCall
 }
@@ -74,6 +86,7 @@ func newFakeForgejo() *fakeForgejo {
 			return fmt.Sprintf("%040x", minted)
 		},
 		users: map[string]*fakeUser{},
+		repos: map[string]*fakeRepo{},
 	}
 }
 
@@ -91,7 +104,8 @@ func (f *fakeForgejo) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	call := fakeCall{method: req.Method, path: req.URL.Path}
+	// The escaped path is routed on: a rule name's "/" arrives as %2F, which Path decodes.
+	call := fakeCall{method: req.Method, path: req.URL.EscapedPath()}
 	var reply string
 	if req.Header.Get("Authorization") == "token "+f.adminToken {
 		call.status, reply = f.serve(call.method, call.path, body)
@@ -131,13 +145,19 @@ func (f *fakeForgejo) serve(method, path string, body []byte) (int, string) {
 		}
 	case len(parts) == 5 && parts[0] == "admin" && parts[1] == "users" && parts[3] == "tokens" && method == http.MethodDelete:
 		return f.revokeToken(parts[2], parts[4])
+	case parts[0] == "repos":
+		return f.serveRepo(method, parts[1:], body)
 	}
 	return notFound()
 }
 
-// getUser answers whether a bot exists, with its email when it does.
+// getUser answers whether a bot exists, with its email when it does. The viewer bot
+// exists before any create call when viewerExists is set.
 func (f *fakeForgejo) getUser(name string) (int, string) {
 	u, ok := f.users[name]
+	if !ok && f.viewerExists && name == DefaultBotPrefix+"viewer" {
+		return reply(http.StatusOK, map[string]string{"username": name, "email": name + "@" + DefaultBotEmailDomain})
+	}
 	if !ok {
 		return refusal(http.StatusNotFound, "user does not exist")
 	}
@@ -285,12 +305,13 @@ func (f *fakeForgejo) violations() []fakeCall {
 	return slices.Clone(f.violationCalls)
 }
 
-// reset forgets every user, token, call and violation. The admin token and the
-// seams are kept.
+// reset forgets every user, repository, token, call and violation. The admin token and
+// the seams are kept.
 func (f *fakeForgejo) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.users = map[string]*fakeUser{}
+	f.repos = map[string]*fakeRepo{}
 	f.calls = nil
 	f.violationCalls = nil
 }
