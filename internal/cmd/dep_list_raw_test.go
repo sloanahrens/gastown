@@ -229,15 +229,47 @@ func TestDepListRawIDsOnATrackerRigWithNoTrackerConfigRefuses(t *testing.T) {
 	}
 }
 
-// A town that cannot be found is an error for a tracker rig, not a Dolt rig:
-// the raw path is never taken on a guess.
-func TestDepListRawIDsWhenTheTownCannotBeFoundIsAnError(t *testing.T) {
+// A Dolt rig keeps its Dolt answer when the tracker pre-check cannot read the
+// town or the route table: neither is a tracker route, so neither may stop the
+// Dolt read that bd rigs have always answered from.
+func TestDepListRawIDsOnADoltRigKeepsTheDoltAnswerWhenTheSeamCannotRead(t *testing.T) {
 	t.Parallel()
-	_, rig := trackerTown(t)
+	dolt := func(string, string, string, string) ([]string, error) { return []string{"gt-a"}, nil }
 	broken := func(string) (string, error) { return "", errors.New("the working directory is gone") }
-	_, err := depListRawIDsWith(rig, "tr-x", "down", "", trackerConfig(trackerFixture), broken, failIfDolt(t))
-	if err == nil || errors.Is(err, errNotOnTracker) {
-		t.Fatalf("depListRawIDsWith with no town = %v, want an error that is not errNotOnTracker", err)
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, townRoot string)
+		find  townRootFinder
+	}{
+		{"the town cannot be found", func(*testing.T, string) {}, broken},
+		{"the route table cannot be read", func(t *testing.T, townRoot string) {
+			// A directory where routes.jsonl should be opens but fails to read.
+			routes := filepath.Join(townRoot, ".beads", beads.RoutesFileName)
+			if err := os.Remove(routes); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(routes, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, workspace.Find},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot, _ := trackerTown(t)
+			tc.setup(t, townRoot)
+			gtRig := filepath.Join(townRoot, "gastown", "mayor", "rig")
+			if err := os.MkdirAll(filepath.Join(gtRig, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			got, err := depListRawIDsWith(gtRig, "gt-x", "down", "", backend.Config{}, tc.find, dolt)
+			if err != nil {
+				t.Fatalf("depListRawIDsWith on a Dolt rig = %v, want the Dolt answer", err)
+			}
+			if want := []string{"gt-a"}; !reflect.DeepEqual(got, want) {
+				t.Errorf("depListRawIDsWith = %v, want %v", got, want)
+			}
+		})
 	}
 }
 

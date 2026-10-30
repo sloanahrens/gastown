@@ -8,12 +8,12 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/backend"
-	"github.com/steveyegge/gastown/internal/beads/trackerclient"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -86,33 +86,35 @@ func depListRawIDsWith(dir, issueID, direction, depType string, cfg backend.Conf
 	return ids, nil
 }
 
-// errNotOnTracker means dir's rig is not on the tracker, so the Dolt and bd sql
-// path answers the query instead.
+// errNotOnTracker means dir's rig is not known to be on the tracker, so the
+// Dolt and bd sql path answers the query instead, as it always has.
 var errNotOnTracker = errors.New("rig is not on the tracker")
 
 // depListRawIDsOnTracker answers the dependency query from the tracker seam
-// when dir's rig is on the tracker, so no Dolt connection or bd sql call is
-// made. A Dolt rig returns errNotOnTracker and the caller runs the raw path.
-// Outside any town there is no route table, so that is errNotOnTracker too.
-// A town that cannot be found, or a tracker rig that cannot be opened, is an
-// error, not a fall back to Dolt: the backend never lets a tracker rig write to
-// Dolt.
+// when dir's route names the tracker, so no Dolt connection or bd sql call is
+// made. Anything short of a tracker route returns errNotOnTracker and the
+// caller runs the raw path unchanged: a dir outside any town, a town whose
+// route table cannot be read, and a rig with no route or a Dolt route. Only a
+// rig the route names as the tracker can fail here, and then it fails: a
+// tracker that cannot be opened is an error, never a fall back to Dolt, because
+// the backend never lets a tracker rig write to Dolt.
 func depListRawIDsOnTracker(dir, issueID, direction, depType string, cfg backend.Config, find townRootFinder) ([]string, error) {
+	// A town that cannot be found is treated as outside one, as depListRawUserInfo
+	// treats it, so a Dolt rig is never failed by this lookup.
 	townRoot, err := find(dir)
-	if err != nil {
-		return nil, fmt.Errorf("finding the town for %s: %w", issueID, err)
-	}
-	if townRoot == "" {
+	if err != nil || townRoot == "" {
 		return nil, errNotOnTracker
 	}
-	store, err := backend.Open(townRoot, beads.ResolveBeadsDir(dir), cfg)
-	if err != nil {
-		return nil, fmt.Errorf("opening beads for %s: %w", issueID, err)
-	}
-	if _, ok := store.(*trackerclient.Client); !ok {
+	beadsDir := beads.ResolveBeadsDir(dir)
+	onTracker, err := routedToTracker(townRoot, beadsDir)
+	if err != nil || !onTracker {
 		return nil, errNotOnTracker
 	}
 
+	store, err := backend.Open(townRoot, beadsDir, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("opening beads for %s: %w", issueID, err)
+	}
 	var deps []beads.IssueDep
 	if direction == "up" {
 		deps, err = store.DepListUp(issueID, depType)
@@ -122,23 +124,29 @@ func depListRawIDsOnTracker(dir, issueID, direction, depType string, cfg backend
 	if err != nil {
 		return nil, fmt.Errorf("tracker deps of %s: %w", issueID, err)
 	}
-	return depIssueIDs(deps), nil
+	raw := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		raw = append(raw, dep.ID)
+	}
+	return unwrapIssueIDs(raw), nil
 }
 
-// depIssueIDs is the deduplicated, unwrapped issue IDs of deps, in the order
-// the seam returned them, matching what queryRawDepIDs and parseRawDepRows
-// give for the same edges.
-func depIssueIDs(deps []beads.IssueDep) []string {
-	seen := make(map[string]bool, len(deps))
-	var ids []string
-	for _, dep := range deps {
-		id := beads.ExtractIssueID(dep.ID)
-		if id != "" && !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
+// routedToTracker reports whether the route table under townRoot names the
+// tracker for beadsDir. It matches a route the way backend.Open does, so the
+// two agree on which rig is which. A rig with no route, or a route with no
+// backend, is on Dolt.
+func routedToTracker(townRoot, beadsDir string) (bool, error) {
+	routes, err := beads.LoadRoutes(filepath.Join(townRoot, ".beads"))
+	if err != nil {
+		return false, err
+	}
+	want := filepath.Clean(beadsDir)
+	for _, r := range routes {
+		if filepath.Clean(filepath.Join(townRoot, r.Path, ".beads")) == want {
+			return r.BackendName() == beads.BackendTracker, nil
 		}
 	}
-	return ids
+	return false, nil
 }
 
 func depListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, error) {
@@ -208,6 +216,23 @@ func queryRawDepIDs(ctx context.Context, db *beadsql.DB, query beadsql.Query) ([
 	return ids, nil
 }
 
+// unwrapIssueIDs deduplicates raw dependency IDs and unwraps each one to its
+// issue ID (external:prefix:id → id), keeping the first-seen order. Every raw
+// dependency read in this file answers through it, so the rule lives in one
+// place.
+func unwrapIssueIDs(raw []string) []string {
+	seen := make(map[string]bool, len(raw))
+	var ids []string
+	for _, r := range raw {
+		id := beads.ExtractIssueID(r)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // parseRawDepRows reads the parseKey column of a bd sql --csv answer: a
 // header row, then one row per dependency.
 func parseRawDepRows(rows [][]string, parseKey string) ([]string, error) {
@@ -223,17 +248,12 @@ func parseRawDepRows(rows [][]string, parseKey string) ([]string, error) {
 	if col < 0 {
 		return nil, fmt.Errorf("no %s column in %q", parseKey, rows[0])
 	}
-	seen := make(map[string]bool, len(rows))
-	var ids []string
+	var raw []string
 	for _, row := range rows[1:] {
 		if col >= len(row) {
 			continue
 		}
-		id := beads.ExtractIssueID(row[col])
-		if id != "" && !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
+		raw = append(raw, row[col])
 	}
-	return ids, nil
+	return unwrapIssueIDs(raw), nil
 }
