@@ -15,6 +15,27 @@ func dispatchEv(typ, at, bead string) Event {
 	return e
 }
 
+// dispatchSlingEv builds a sling line written by actor to the seat it names,
+// so a test can tell the spec dispatcher's slings from anyone else's.
+func dispatchSlingEv(at, bead, actor, seat string) Event {
+	return Event{
+		Timestamp: at,
+		Type:      TypeSling,
+		Actor:     actor,
+		Payload:   SlingPayload(bead, seat),
+	}
+}
+
+// specSlingRun is the gt-3ga5l sequence: three spec-dispatch slings of one
+// bead to one seat whose run never wrote an end, then the sling that put the
+// bead on a second seat once the first had let it go back to the pool.
+var specSlingRun = []Event{
+	dispatchSlingEv("2026-10-30T12:10:59Z", "gt-a", specDispatchActor, "gastown/nux"),
+	dispatchSlingEv("2026-10-30T12:17:39Z", "gt-a", specDispatchActor, "gastown/nux"),
+	dispatchSlingEv("2026-10-30T12:23:46Z", "gt-a", specDispatchActor, "gastown/nux"),
+	dispatchSlingEv("2026-10-30T14:27:05Z", "gt-a", specDispatchActor, "gastown/capable"),
+}
+
 const (
 	t9  = "2026-10-27T09:00:00Z"
 	t10 = "2026-10-27T10:00:00Z"
@@ -322,5 +343,74 @@ func TestDispatchClockEndRunKeepsTheBoundary(t *testing.T) {
 	clock.EndRun("gt-a", mustTime(t, t9))
 	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, t11)) {
 		t.Errorf("start = %v, %v, want %s: an older end moved the boundary back", got, ok, t11)
+	}
+}
+
+// The spec dispatcher only slings a bead that is back in the pool, so no seat
+// holds the run its earlier sling began: a sling it writes starts a fresh
+// clock, and the time the held run spent is not the new seat's to answer for
+// (gt-3ga5l).
+func TestDispatchClockSpecDispatchSlingStartsNewRun(t *testing.T) {
+	t.Parallel()
+	clock := NewDispatchClock()
+	clock.Add(specSlingRun)
+	// The bead was submitted for landing at 12:20:47, between the two runs.
+	got, ok := clock.StartSince("gt-a", mustTime(t, "2026-10-30T12:20:47Z"))
+	if !ok || !got.Equal(mustTime(t, "2026-10-30T14:27:05Z")) {
+		t.Errorf("start = %v (%t), want 2026-10-30T14:27:05Z: the re-sling starts the new run", got, ok)
+	}
+}
+
+// Anyone but the spec dispatcher keeps today's rule: a bead slung from one
+// seat to another keeps the dispatch it first went out on, so moving between
+// seats cannot restart its clock.
+func TestDispatchClockOtherActorSlingKeepsTheRun(t *testing.T) {
+	t.Parallel()
+	clock := NewDispatchClock()
+	clock.Add([]Event{
+		dispatchSlingEv(t9, "gt-a", "hq-crew-egret", "gastown/nux"),
+		dispatchSlingEv(t11, "gt-a", "hq-crew-egret", "gastown/capable"),
+	})
+	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, t9)) {
+		t.Errorf("start = %v (%t), want %s: a seat-to-seat sling keeps the first dispatch", got, ok, t9)
+	}
+}
+
+// The spec-dispatch rule is both order and replay safe: folding the same lines
+// in twice, or folding in a run end for the run before the last sling, leaves
+// the new run's clock where that sling put it.
+func TestDispatchClockSpecDispatchSlingIsReplaySafe(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		chunks [][]Event
+	}{
+		{
+			name:   "the log in order",
+			chunks: [][]Event{specSlingRun},
+		},
+		{
+			name:   "the same lines folded twice",
+			chunks: [][]Event{specSlingRun, specSlingRun},
+		},
+		{
+			name: "the submitted run's end between the slings",
+			chunks: [][]Event{
+				specSlingRun[:3],
+				{dispatchEv(TypeDone, "2026-10-30T12:20:47Z", "gt-a")},
+				specSlingRun[3:],
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := NewDispatchClock()
+			for _, chunk := range tt.chunks {
+				clock.Add(chunk)
+			}
+			if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, "2026-10-30T14:27:05Z")) {
+				t.Errorf("start = %v (%t), want 2026-10-30T14:27:05Z", got, ok)
+			}
+		})
 	}
 }

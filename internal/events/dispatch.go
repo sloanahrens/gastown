@@ -5,6 +5,11 @@ import (
 	"time"
 )
 
+// specDispatchActor is the actor the spec dispatcher stamps its slings with,
+// repeating internal/cmd's specDispatchActor; it is named here because a sling
+// it wrote starts a fresh dispatch run (DispatchStart, gt-3ga5l).
+const specDispatchActor = "daemon/spec-dispatch"
+
 // DispatchStart returns when bead's current run was dispatched: the earliest
 // sling event for the bead at or after its last run-end event. The clock
 // belongs to the bead, not to one seat, so a bead handed from one seat to
@@ -14,7 +19,10 @@ import (
 // landed bead, whose landing follows its gt done), TypeBeadClosed, when the
 // bead was closed by hand, and TypeOverrunStop, when the overrun guard stopped
 // the seat and handed the bead back (a stop ends that run; the dispatch after
-// it is policed afresh).
+// it is policed afresh). A sling by the spec dispatcher ends the run before it
+// too, though no event recorded that end: it only slings a bead that is back in
+// the pool, so the run its earlier sling began has no seat and its time is not
+// the new seat's to answer for (gt-3ga5l).
 //
 // The second return is false when the log holds no such sling.
 func DispatchStart(evs []Event, bead string) (time.Time, bool) {
@@ -65,6 +73,9 @@ func (c *DispatchClock) Add(evs []Event) {
 			ts, err := eventTime(ev)
 			if err != nil {
 				continue
+			}
+			if ev.Actor == specDispatchActor {
+				c.EndRun(bead, ts)
 			}
 			c.addStart(bead, ts)
 		case TypeDone, TypeBeadClosed, TypeOverrunStop:
