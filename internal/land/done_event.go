@@ -72,8 +72,8 @@ func (r *DoneEventRecorder) Record(w Work) (bool, error) {
 	if r.TownRoot == "" {
 		return false, fmt.Errorf("done event for %s: no town root, so there is no log to write and the seat's turn would stay unrecorded", w.BeadID)
 	}
-	if err := r.checkSeat(w); err != nil {
-		return false, err
+	if !validSeatPart(w.Rig) || !validSeatPart(w.Worker) {
+		return false, fmt.Errorf("done event for %s: %q/%q is not a seat", w.BeadID, w.Rig, w.Worker)
 	}
 	if !validEventPayload(w.BeadID, eventBeadIDLimit) {
 		return false, fmt.Errorf("done event for %q: not a bead id", w.BeadID)
@@ -88,6 +88,9 @@ func (r *DoneEventRecorder) Record(w Work) (bool, error) {
 	if r.written[key] {
 		return false, nil
 	}
+	// The log is read before the assignee is because a bead whose done event
+	// is already there needs no write and no seat check, and its assignee may
+	// already be cleared.
 	at, cutoff := r.times(w)
 	if err := r.log.refresh(filepath.Join(r.TownRoot, events.EventsFile)); err != nil {
 		return false, err
@@ -100,6 +103,9 @@ func (r *DoneEventRecorder) Record(w Work) (bool, error) {
 		r.written[key] = true
 		return false, nil
 	}
+	if err := r.checkAssignee(w); err != nil {
+		return false, err
+	}
 	payload := events.DonePayload(w.BeadID, w.Branch)
 	payload["at"] = at.UTC().Format(time.RFC3339)
 	if err := r.append()(r.TownRoot, events.TypeDone, w.Rig+"/polecats/"+w.Worker, payload); err != nil {
@@ -109,14 +115,11 @@ func (r *DoneEventRecorder) Record(w Work) (bool, error) {
 	return true, nil
 }
 
-// checkSeat binds the submission's seat to the host's own record of what it
-// slung: a seat may name any Worker in its READY TO LAND block, and the actor
-// of a done event is what the crash detector and the feed read, so the note's
-// word alone would let one seat end another's turn.
-func (r *DoneEventRecorder) checkSeat(w Work) error {
-	if !validSeatPart(w.Rig) || !validSeatPart(w.Worker) {
-		return fmt.Errorf("done event for %s: %q/%q is not a seat", w.BeadID, w.Rig, w.Worker)
-	}
+// checkAssignee binds the submission's seat to the host's own record of what
+// it slung: a seat may name any Worker in its READY TO LAND block, and the
+// actor of a done event is what the crash detector and the feed read, so the
+// note's word alone would let one seat end another's turn.
+func (r *DoneEventRecorder) checkAssignee(w Work) error {
 	if r.Assignee == nil {
 		return fmt.Errorf("done event for %s: no assignee reader, so %s/%s cannot be bound to the host's record", w.BeadID, w.Rig, w.Worker)
 	}
