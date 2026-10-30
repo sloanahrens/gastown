@@ -30,13 +30,19 @@ import (
 // carries a section always wins over a leftover file of the old name.
 // gt config migrate (layout_migrate.go) moves a town from five files to two.
 
-// section is where a retired file lives in the two-file layout.
+// section is where a section of a host file lives in the two-file layout.
 type section struct {
-	// dir and file name the retired file: <townRoot>/<dir>/<file>.
+	// dir and file name the retired file: <townRoot>/<dir>/<file>. Both
+	// empty for a section its host has always carried under its own key
+	// (the ring), which never had a file of its own.
 	dir, file string
 	// host is the file holding it, relative to the town root, under key.
 	host, key string
 }
+
+// retired reports whether the section was a file of its own before the
+// two-file layout; a section the host always carried as a section never was.
+func (s section) retired() bool { return s.file != "" }
 
 // Host files of the two-file layout, relative to the town root.
 const (
@@ -44,20 +50,47 @@ const (
 	OperatorConfigFile = "settings/config.json"
 )
 
-// sections lists every retired file, in migration order.
+// sections registers every section the two-file layout knows, in migration
+// order: the retired files first, then the sections a host has always
+// carried. A walk that is about files (LegacyConfigFiles, DetectLayout, the
+// migration) skips the latter, which have no file to move or stat;
+// SectionHost names the host of either kind.
 var sections = []section{
 	{dir: "mayor", file: "rigs.json", host: MachineConfigFile, key: registryKey},
 	{dir: "mayor", file: "overseer.json", host: MachineConfigFile, key: "overseer"},
 	{dir: "mayor", file: "daemon.json", host: OperatorConfigFile, key: "daemon"},
 	{dir: "settings", file: "escalation.json", host: OperatorConfigFile, key: "escalation"},
+	// The town's signed lease (internal/ring, gt-6mlik.1) is not a retired
+	// file: the machine file carries it as a section by design.
+	{host: MachineConfigFile, key: ringKey},
+}
+
+// ringKey is the machine file's signed-lease section, the "ring" key
+// internal/ring.SectionKey names. A layout that does not register it makes
+// internal/ring refuse to read or write a ring.
+const ringKey = "ring"
+
+// SectionHost reports the file (relative to the town root) holding the
+// registered section with the given key, and false for a key no host
+// registers. A package that owns one section uses it to name its host
+// instead of hardcoding the file.
+func SectionHost(key string) (host string, ok bool) {
+	for _, s := range sections {
+		if s.key == key {
+			return s.host, true
+		}
+	}
+	return "", false
 }
 
 // LegacyConfigFiles lists the files the two-file layout retires, relative
-// to the town root.
+// to the town root. A section its host has always carried is not one.
 func LegacyConfigFiles() []string {
-	out := make([]string, len(sections))
-	for i, s := range sections {
-		out[i] = s.dir + "/" + s.file
+	out := make([]string, 0, len(sections))
+	for _, s := range sections {
+		if s.retired() {
+			out = append(out, s.dir+"/"+s.file)
+		}
 	}
 	return out
 }
@@ -67,7 +100,7 @@ func LegacyConfigFiles() []string {
 func sectionOf(path string) (s section, townRoot string, ok bool) {
 	dir := filepath.Dir(path)
 	for _, s := range sections {
-		if filepath.Base(path) == s.file && filepath.Base(dir) == s.dir {
+		if s.retired() && filepath.Base(path) == s.file && filepath.Base(dir) == s.dir {
 			return s, filepath.Dir(dir), true
 		}
 	}
@@ -323,6 +356,11 @@ func DetectLayout(townRoot string) (LayoutReport, error) {
 	var r LayoutReport
 	tops := map[string]map[string]json.RawMessage{}
 	for _, s := range sections {
+		if !s.retired() {
+			// A section the host has always carried: no file ever moved,
+			// and no file is left behind.
+			continue
+		}
 		top, seen := tops[s.host]
 		if !seen {
 			var err error
