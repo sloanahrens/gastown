@@ -130,10 +130,14 @@ func (d *Daemon) warnPressureScale(cpuThreshold float64) {
 }
 
 // hostCPUIdle is the host's CPU idle percent, or the reason it could not be
-// read. Tests answer it through d.cpuIdleFn.
+// read. Tests answer it through d.cpuIdleFn, or through d.hostTop when the
+// sample and parse of top's output is what they exercise.
 func (d *Daemon) hostCPUIdle() (float64, error) {
 	if d.cpuIdleFn != nil {
 		return d.cpuIdleFn()
+	}
+	if d.hostTop != nil {
+		return hoststat.SampleCPUIdleTop(context.Background(), d.hostTop)
 	}
 	return hoststat.SampleCPUIdle(context.Background())
 }

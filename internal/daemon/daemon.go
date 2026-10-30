@@ -146,6 +146,11 @@ type Daemon struct {
 	// reading that could not be taken.
 	cpuIdleFn func() (float64, error)
 
+	// hostTop replaces the top probe hostCPUIdle samples and parses; nil runs
+	// top on the host. A test injects a canned sample so its outcome does not
+	// depend on the host's load (gt-fbf5n).
+	hostTop func(context.Context) ([]byte, error)
+
 	// pressureScaleWarn makes checkPressure warn once that the configured
 	// CPU threshold is past the 1.0 a busy share can reach.
 	pressureScaleWarn sync.Once
