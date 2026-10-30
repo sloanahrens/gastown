@@ -2,12 +2,16 @@ package forgejoprobe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/forgejoprov"
 )
 
 // fixtureToken stands in for the admin token in every test. It is a placeholder,
@@ -77,18 +81,49 @@ func TestResolveTokenOrder(t *testing.T) {
 			}
 		})
 	}
+}
 
-	t.Run("all three unset names the broker command", func(t *testing.T) {
-		t.Parallel()
-		files := &fakeFiles{}
-		_, err := ResolveToken(envOf(nil), files.read, probeTokenFile)
-		if err == nil {
-			t.Fatal("ResolveToken with no source: want an error, got none")
-		}
-		if !strings.Contains(err.Error(), "gt-approve run") {
-			t.Fatalf("no-token error does not name the auth broker command: %q", err)
-		}
-	})
+// The no-token refusal, in full, with and without a named file. The probe's own
+// wording must reach the operator: the provisioner's text is never shown.
+const (
+	noTokenNoFile   = "no admin token: run forgejo-probe through the auth broker (sudo -u gt-forge gt-approve run forgejo-probe -- <its arguments>), or set FORGEJO_ADMIN_TOKEN for a stand-in"
+	noTokenWithFile = "no admin token: run forgejo-probe through the auth broker (sudo -u gt-forge gt-approve run forgejo-probe -- <its arguments>), or set FORGEJO_ADMIN_TOKEN (or FORGEJO_ADMIN_TOKEN= in <file>) for a stand-in"
+)
+
+// TestResolveTokenNoTokenMessage drives the no-source case with and without a
+// named file. The text is compared whole, the provisioner's wording is absent,
+// and the refusal still wraps forgejoprov.ErrNoAdminToken.
+func TestResolveTokenNoTokenMessage(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		tokenFile string
+		want      string
+	}{
+		{"no file named", "", noTokenNoFile},
+		{"file named but absent", probeTokenFile, noTokenWithFile},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files := &fakeFiles{}
+			_, err := ResolveToken(envOf(nil), files.read, tc.tokenFile)
+			if err == nil {
+				t.Fatal("ResolveToken with no source: want an error, got none")
+			}
+			if err.Error() != tc.want {
+				t.Fatalf("no-token text:\n got %q\nwant %q", err.Error(), tc.want)
+			}
+			for _, banned := range []string{"forgejo-provision", "this command"} {
+				if strings.Contains(err.Error(), banned) {
+					t.Fatalf("no-token text names %q, which is the provisioner's", banned)
+				}
+			}
+			if !errors.Is(err, forgejoprov.ErrNoAdminToken) {
+				t.Fatalf("no-token error does not wrap forgejoprov.ErrNoAdminToken: %v", err)
+			}
+		})
+	}
 }
 
 // TestResolveTokenFileParsing covers the file's line forms. The file is read
@@ -145,8 +180,13 @@ func TestResolveTokenFileParsing(t *testing.T) {
 	})
 }
 
+// unsafeRefusal is the refusal the spec names for a token holding whitespace, a
+// quote or a backslash. It names the rule, never the token.
+const unsafeRefusal = "the admin token holds whitespace, a quote or a backslash; refusing to use it"
+
 // TestResolveTokenRefusesUnsafe refuses a token holding whitespace, a quote or a
-// backslash, and the refusal does not echo the token.
+// backslash with the spec's text, the refusal does not echo the token, and it is
+// not mistaken for the no-token case.
 func TestResolveTokenRefusesUnsafe(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -166,63 +206,79 @@ func TestResolveTokenRefusesUnsafe(t *testing.T) {
 			if err == nil {
 				t.Fatalf("ResolveToken with a %s in the token: want a refusal, got none", tc.name)
 			}
+			if err.Error() != unsafeRefusal {
+				t.Fatalf("refusal text:\n got %q\nwant %q", err.Error(), unsafeRefusal)
+			}
 			if strings.Contains(err.Error(), tc.token) {
 				t.Fatalf("refusal echoes the token: %q", err)
+			}
+			if errors.Is(err, forgejoprov.ErrNoAdminToken) {
+				t.Fatalf("a refused token reads as no token: %v", err)
 			}
 		})
 	}
 }
 
 // TestTokenIsRedacted prints a Token every way a caller can, and asserts the
-// value appears in none of the output.
+// value appears in none of the output and every verb shows the marker. The
+// verbs share one call, one argument each, so no format string is single-arg.
 func TestTokenIsRedacted(t *testing.T) {
 	t.Parallel()
 	tok := Token(fixtureToken)
+	verbs := fmt.Sprintf("%s|%v|%+v|%#v|%q|%d|%x", tok, tok, tok, tok, tok, tok, tok)
 	outputs := map[string]string{
-		"%s":     fmt.Sprintf("%s", tok),
-		"%v":     fmt.Sprintf("%v", tok),
-		"%+v":    fmt.Sprintf("%+v", tok),
-		"%#v":    fmt.Sprintf("%#v", tok),
-		"%q":     fmt.Sprintf("%q", tok),
-		"%x":     fmt.Sprintf("%x", tok),
-		"%d":     fmt.Sprintf("%d", tok),
-		"err":    fmt.Errorf("wrapped: %v", tok).Error(),
+		"verbs":  verbs,
 		"Sprint": fmt.Sprint(tok),
+		"err":    fmt.Errorf("wrapped: %v", tok).Error(),
 	}
-	for verb, out := range outputs {
+	for name, out := range outputs {
 		if strings.Contains(out, fixtureToken) {
-			t.Errorf("%s printed the token value", verb)
+			t.Errorf("%s printed the token value", name)
 		}
 		if !strings.Contains(out, redacted) {
-			t.Errorf("%s did not show the redaction marker: %q", verb, out)
+			t.Errorf("%s did not show the redaction marker: %q", name, out)
+		}
+	}
+	for _, field := range strings.Split(verbs, "|") {
+		if field != redacted {
+			t.Errorf("a verb printed %q instead of the redaction marker", field)
 		}
 	}
 }
 
-// fakeTransport is the RoundTripper seam: it records each request and answers
-// every one with a fixed version body, so no socket is opened.
+// fakeTransport is the RoundTripper seam: it records each request and its body,
+// and answers every one with reply, so no socket is opened.
 type fakeTransport struct {
+	reply    string
 	requests []*http.Request
+	bodies   []string
 }
 
 func (f *fakeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.requests = append(f.requests, req)
+	body := ""
+	if req.Body != nil {
+		raw, _ := io.ReadAll(req.Body)
+		body = string(raw)
+	}
+	f.bodies = append(f.bodies, body)
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader(`{"version":"0.0.0-test"}`)),
+		Body:       io.NopCloser(strings.NewReader(f.reply)),
 		Request:    req,
 	}, nil
 }
 
-// TestNewClientSendsTheToken makes one call through the client and asserts the
-// token rides only in the Authorization header. An empty token is refused before
+// TestNewClientSendsTheToken makes calls through the client and asserts the
+// token rides only in the Authorization header. A call that sends a JSON body
+// checks the body and every other header too. An empty token is refused before
 // any request.
 func TestNewClientSendsTheToken(t *testing.T) {
 	t.Parallel()
 	t.Run("token is sent in the header only", func(t *testing.T) {
 		t.Parallel()
-		transport := &fakeTransport{}
+		transport := &fakeTransport{reply: `{"version":"0.0.0-test"}`}
 		client, err := NewClient("https://forgejo.example/api/v1", Token(fixtureToken), &http.Client{Transport: transport})
 		if err != nil {
 			t.Fatalf("NewClient: unexpected error %v", err)
@@ -243,11 +299,44 @@ func TestNewClientSendsTheToken(t *testing.T) {
 		if req.URL.RawQuery != "" && strings.Contains(req.URL.RawQuery, fixtureToken) {
 			t.Fatalf("token appears in the query: %s", req.URL.RawQuery)
 		}
-		if req.Body != nil && req.Body != http.NoBody {
-			body, _ := io.ReadAll(req.Body)
-			if strings.Contains(string(body), fixtureToken) {
-				t.Fatal("token appears in the request body")
+	})
+
+	t.Run("a JSON body and every other header are free of the token", func(t *testing.T) {
+		t.Parallel()
+		transport := &fakeTransport{reply: `{"context":"gate"}`}
+		client, err := NewClient("https://forgejo.example/api/v1", Token(fixtureToken), &http.Client{Transport: transport})
+		if err != nil {
+			t.Fatalf("NewClient: unexpected error %v", err)
+		}
+		req := forgejo.StatusRequest{State: forgejo.StateSuccess, Context: "gate"}
+		if _, err := client.PostStatus(context.Background(), "owner", "repo", "abc123", req); err != nil {
+			t.Fatalf("PostStatus: unexpected error %v", err)
+		}
+		if len(transport.requests) != 1 {
+			t.Fatalf("want one request, got %d", len(transport.requests))
+		}
+		sent := transport.requests[0]
+		if !strings.Contains(transport.bodies[0], `"context":"gate"`) {
+			t.Fatalf("the JSON body was not sent: %q", transport.bodies[0])
+		}
+		if strings.Contains(transport.bodies[0], fixtureToken) {
+			t.Fatal("token appears in the request body")
+		}
+		if strings.Contains(sent.URL.String(), fixtureToken) {
+			t.Fatalf("token appears in the request URL: %s", sent.URL)
+		}
+		for name, values := range sent.Header {
+			for _, v := range values {
+				if !strings.Contains(v, fixtureToken) {
+					continue
+				}
+				if name != "Authorization" || v != "token "+fixtureToken {
+					t.Fatalf("header %s carries the token outside the Authorization value", name)
+				}
 			}
+		}
+		if got := sent.Header.Get("Authorization"); got != "token "+fixtureToken {
+			t.Fatalf("Authorization header: got %q, want the admin token", got)
 		}
 	})
 

@@ -38,11 +38,35 @@ func (t Token) Format(f fmt.State, _ rune) {
 // Token, so it stays redacted from here on.
 func ResolveToken(getenv func(string) string, readFile func(string) ([]byte, error), tokenFile string) (Token, error) {
 	secret, err := forgejoprov.ResolveAdminToken(getenv, readFile, tokenFile)
+	if errors.Is(err, forgejoprov.ErrNoAdminToken) {
+		return "", noTokenError{tokenFile: tokenFile, cause: err}
+	}
 	if err != nil {
 		return "", err
 	}
 	return Token(secret.Reveal()), nil
 }
+
+// noTokenError is the probe's no-token refusal. Its text names forgejo-probe and
+// the probe's broker command, not the provisioner's. It unwraps to the
+// forgejoprov error, so errors.Is still recognises the case.
+type noTokenError struct {
+	tokenFile string
+	cause     error
+}
+
+// Error returns the operator-facing text. The file is named by its placeholder,
+// so no path is printed.
+func (e noTokenError) Error() string {
+	standIn := "FORGEJO_ADMIN_TOKEN"
+	if e.tokenFile != "" {
+		standIn = "FORGEJO_ADMIN_TOKEN (or FORGEJO_ADMIN_TOKEN= in <file>)"
+	}
+	return "no admin token: run forgejo-probe through the auth broker (sudo -u gt-forge gt-approve run forgejo-probe -- <its arguments>), or set " + standIn + " for a stand-in"
+}
+
+// Unwrap returns the forgejoprov error the refusal replaces.
+func (e noTokenError) Unwrap() error { return e.cause }
 
 // NewClient builds the Forgejo client the probe calls through, authenticated as
 // tok. The token travels only in the Authorization header: it is never put in

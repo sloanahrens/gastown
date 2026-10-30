@@ -276,3 +276,31 @@ func TestResolveAdminTokenRefusals(t *testing.T) {
 		}
 	}
 }
+
+// TestNoAdminTokenIsTheSentinel pins the no-source error: it wraps
+// ErrNoAdminToken with its provisioner text unchanged, and a token that was
+// found and refused does not wrap it.
+func TestNoAdminTokenIsTheSentinel(t *testing.T) {
+	t.Parallel()
+	t.Run("no source wraps the sentinel and keeps the provisioner text", func(t *testing.T) {
+		t.Parallel()
+		_, err := ResolveAdminToken(env(nil), (&fakeFiles{}).read, "")
+		if !errors.Is(err, ErrNoAdminToken) {
+			t.Fatalf("no-source error does not wrap ErrNoAdminToken: %v", err)
+		}
+		const want = "no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run forgejo-provision -- <its arguments>), or set FORGEJO_ADMIN_TOKEN for a stand-in"
+		if err.Error() != want {
+			t.Fatalf("no-source error text changed:\n got %q\nwant %q", err.Error(), want)
+		}
+	})
+	t.Run("an unsafe token does not wrap the sentinel", func(t *testing.T) {
+		t.Parallel()
+		_, err := ResolveAdminToken(env(map[string]string{adminTokenEnv: "sec ret"}), nil, "")
+		if err == nil {
+			t.Fatal("unsafe token resolved, want a refusal")
+		}
+		if errors.Is(err, ErrNoAdminToken) {
+			t.Fatalf("refused token wraps ErrNoAdminToken: %v", err)
+		}
+	})
+}
