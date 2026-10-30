@@ -1,0 +1,106 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "name": "gt-sweep-gastown-4f2a9c1e-mvv8asko"
+  },
+  "spec": {
+    "backoffLimit": 0,
+    "template": {
+      "spec": {
+        "priorityClassName": "gt-ci",
+        "restartPolicy": "Never",
+        "containers": [
+          {
+            "name": "runner",
+            "image": "gt-polecat:gt-74ix9",
+            "env": [
+              {
+                "name": "DOCKER_HOST",
+                "value": "tcp://127.0.0.1:2375"
+              },
+              {
+                "name": "GT_SWEEP_RIG",
+                "value": "gastown"
+              },
+              {
+                "name": "GT_SWEEP_SHA",
+                "value": "4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39"
+              },
+              {
+                "name": "GT_SWEEP_TIERS",
+                "value": "shell,integration,race"
+              },
+              {
+                "name": "GT_SWEEP_JOBS",
+                "value": "4"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "8",
+                "memory": "24Gi"
+              },
+              "limits": {
+                "cpu": "8",
+                "memory": "24Gi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "repo",
+                "mountPath": "/repo.git",
+                "readOnly": true
+              },
+              {
+                "name": "out",
+                "mountPath": "/out"
+              }
+            ]
+          },
+          {
+            "name": "dind",
+            "image": "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1",
+            "args": [
+              "--tls=false"
+            ],
+            "env": [
+              {
+                "name": "DOCKER_TLS_CERTDIR",
+                "value": ""
+              }
+            ],
+            "securityContext": {
+              "privileged": true
+            },
+            "volumeMounts": [
+              {
+                "name": "dind-data",
+                "mountPath": "/var/lib/docker"
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "repo",
+            "persistentVolumeClaim": {
+              "claimName": "gt-sweep-repo-gastown",
+              "readOnly": true
+            }
+          },
+          {
+            "name": "out",
+            "persistentVolumeClaim": {
+              "claimName": "gt-sweep-out-gastown-4f2a9c1e-mvv8asko"
+            }
+          },
+          {
+            "name": "dind-data",
+            "emptyDir": {}
+          }
+        ]
+      }
+    }
+  }
+}

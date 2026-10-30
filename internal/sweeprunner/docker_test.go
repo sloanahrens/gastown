@@ -180,43 +180,51 @@ func TestDockerRenderNeverMountsTheSocketAndOnlyDindIsPrivileged(t *testing.T) {
 	}
 }
 
+// specRow is one Spec a backend must refuse: the row's name, the field the
+// error names, and the change that makes it invalid.
+type specRow struct {
+	name  string
+	field string
+	set   func(*Spec)
+}
+
+// invalidSpecRows are the Specs every backend refuses, held in one table so a
+// row added for one backend is held to the other (gt-7zy61).
+var invalidSpecRows = []specRow{
+	{"rig escapes its directory", "rig", func(s *Spec) { s.Rig = "../x" }},
+	{"rig is empty", "rig", func(s *Spec) { s.Rig = "" }},
+	{"rig is dot-dot", "rig", func(s *Spec) { s.Rig = ".." }},
+	{"rig holds a backslash", "rig", func(s *Spec) { s.Rig = `gas\town` }},
+	{"rig reads as a flag", "rig", func(s *Spec) { s.Rig = "-x" }},
+	{"sha is short", "sha", func(s *Spec) { s.SHA = "4f2a9c1e" }},
+	{"sha is not hex", "sha", func(s *Spec) { s.SHA = strings.Repeat("z", 40) }},
+	{"cpus is 0", "cpus", func(s *Spec) { s.CPUs = 0 }},
+	{"cpus is 17", "cpus", func(s *Spec) { s.CPUs = 17 }},
+	{"memory is 1", "memoryGB", func(s *Spec) { s.MemoryGB = 1 }},
+	{"memory is 49", "memoryGB", func(s *Spec) { s.MemoryGB = 49 }},
+	{"jobs is 0", "jobs", func(s *Spec) { s.Jobs = 0 }},
+	{"jobs is 17", "jobs", func(s *Spec) { s.Jobs = 17 }},
+	{"image is empty", "image", func(s *Spec) { s.Image = "" }},
+	{"image reads as a flag", "image", func(s *Spec) { s.Image = "--rm" }},
+	{"image holds a space", "image", func(s *Spec) { s.Image = "gt-polecat gt-74ix9" }},
+	{"image holds a control character", "image", func(s *Spec) { s.Image = "gt-polecat:\n74ix9" }},
+	{"tier is not one the sweep offers", "tiers", func(s *Spec) { s.Tiers = []string{"weekly"} }},
+	{"tier appears twice", "tiers", func(s *Spec) { s.Tiers = []string{"shell", "shell"} }},
+	{"out dir is relative", "outDir", func(s *Spec) { s.OutDir = "out" }},
+	{"out dir holds a control character", "outDir", func(s *Spec) { s.OutDir = "/Users/ops/gt\n/out" }},
+	{"repo dir holds a colon", "repoDir", func(s *Spec) { s.RepoDir = "/Users/ops/gt:stale/.repo.git" }},
+	{"context is empty", "context", func(s *Spec) { s.Context = "" }},
+	{"context holds a colon", "context", func(s *Spec) { s.Context = "colima:gt-sbx" }},
+	{"run id is empty", "runID", func(s *Spec) { s.RunID = "" }},
+	{"run id is empty without dind", "runID", func(s *Spec) { s.Dind, s.RunID = false, "" }},
+	{"run id escapes its segment", "runID", func(s *Spec) { s.RunID = "a/b" }},
+}
+
 // TestSpecValidation refuses each bad field with an error that names it, through
 // both Validate and the render a caller reaches first.
 func TestSpecValidation(t *testing.T) {
 	t.Parallel()
-	for _, row := range []struct {
-		name  string
-		field string
-		set   func(*Spec)
-	}{
-		{"rig escapes its directory", "rig", func(s *Spec) { s.Rig = "../x" }},
-		{"rig is empty", "rig", func(s *Spec) { s.Rig = "" }},
-		{"rig is dot-dot", "rig", func(s *Spec) { s.Rig = ".." }},
-		{"rig holds a backslash", "rig", func(s *Spec) { s.Rig = `gas\town` }},
-		{"rig reads as a flag", "rig", func(s *Spec) { s.Rig = "-x" }},
-		{"sha is short", "sha", func(s *Spec) { s.SHA = "4f2a9c1e" }},
-		{"sha is not hex", "sha", func(s *Spec) { s.SHA = strings.Repeat("z", 40) }},
-		{"cpus is 0", "cpus", func(s *Spec) { s.CPUs = 0 }},
-		{"cpus is 17", "cpus", func(s *Spec) { s.CPUs = 17 }},
-		{"memory is 1", "memoryGB", func(s *Spec) { s.MemoryGB = 1 }},
-		{"memory is 49", "memoryGB", func(s *Spec) { s.MemoryGB = 49 }},
-		{"jobs is 0", "jobs", func(s *Spec) { s.Jobs = 0 }},
-		{"jobs is 17", "jobs", func(s *Spec) { s.Jobs = 17 }},
-		{"image is empty", "image", func(s *Spec) { s.Image = "" }},
-		{"image reads as a flag", "image", func(s *Spec) { s.Image = "--rm" }},
-		{"image holds a space", "image", func(s *Spec) { s.Image = "gt-polecat gt-74ix9" }},
-		{"image holds a control character", "image", func(s *Spec) { s.Image = "gt-polecat:\n74ix9" }},
-		{"tier is not one the sweep offers", "tiers", func(s *Spec) { s.Tiers = []string{"weekly"} }},
-		{"tier appears twice", "tiers", func(s *Spec) { s.Tiers = []string{"shell", "shell"} }},
-		{"out dir is relative", "outDir", func(s *Spec) { s.OutDir = "out" }},
-		{"out dir holds a control character", "outDir", func(s *Spec) { s.OutDir = "/Users/ops/gt\n/out" }},
-		{"repo dir holds a colon", "repoDir", func(s *Spec) { s.RepoDir = "/Users/ops/gt:stale/.repo.git" }},
-		{"context is empty", "context", func(s *Spec) { s.Context = "" }},
-		{"context holds a colon", "context", func(s *Spec) { s.Context = "colima:gt-sbx" }},
-		{"run id is empty", "runID", func(s *Spec) { s.RunID = "" }},
-		{"run id is empty without dind", "runID", func(s *Spec) { s.Dind, s.RunID = false, "" }},
-		{"run id escapes its segment", "runID", func(s *Spec) { s.RunID = "a/b" }},
-	} {
+	for _, row := range invalidSpecRows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 			spec := goldenSpec()

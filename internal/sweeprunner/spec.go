@@ -50,9 +50,10 @@ type Spec struct {
 	// name the same object and one run's teardown cannot remove another's
 	// (gt-74ix9).
 	RunID string
-	// Context is the Docker CLI context the steps run against (desktop-linux,
-	// colima-gt-sbx). It is a field so a render names its engine instead of
-	// taking whichever one the environment happens to select.
+	// Context is the context the steps run against on the backend's engine: the
+	// Docker CLI context (desktop-linux, colima-gt-sbx) or the kubectl context.
+	// It is a field so a render names its engine instead of taking whichever one
+	// the environment happens to select.
 	Context string
 }
 
