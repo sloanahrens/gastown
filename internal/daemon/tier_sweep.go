@@ -433,6 +433,9 @@ type tierSweepStage struct {
 	// ["integration", "race"]. The run's verdicts are keyed by these.
 	tiers  []string
 	budget time.Duration
+	// rig names the rig the stage sweeps; its timings and resume files live in
+	// the rig's directory under the town's runtime path.
+	rig string
 	// runner, when set, is the command the stage runs in place of the tier
 	// script: the shell stage's Go runner.
 	runner string
@@ -991,6 +994,7 @@ func tierSweepStages(rig string) []tierSweepStage {
 		budget: tierSweepShellBudget,
 		runner: tierSweepShellCommand,
 		goDir:  tierSweepShellDir,
+		rig:    rig,
 		step:   "shell",
 	}, {
 		tiers:  []string{"integration", "race"},
@@ -998,6 +1002,7 @@ func tierSweepStages(rig string) []tierSweepStage {
 		goDir:  tierSweepTierDir,
 		slot:   true,
 		role:   rig + "/tier-sweep",
+		rig:    rig,
 		step:   "test",
 	}}
 }
@@ -1473,13 +1478,8 @@ func tierSweepMainSHA(ctx context.Context, repo string) (string, error) {
 // reentrantly.
 func (d *Daemon) tierSweepRunStage(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult {
 	var buf bytes.Buffer
-	cg := land.CommandGate{
-		Steps: []land.Step{{Name: st.step, Command: st.command(), Timeout: st.budget}},
-		Out:   &buf,
-	}
-	if st.slot {
-		cg = land.WithSlot(cg, d.config.TownRoot, st.role)
-	}
+	cg := d.tierSweepGate(st)
+	cg.Out = &buf
 	res := cg.Run(ctx, dir)
 	if len(res.Steps) == 0 {
 		return tierSweepStageResult{exitCode: -1, err: res.Err}
@@ -1492,6 +1492,62 @@ func (d *Daemon) tierSweepRunStage(ctx context.Context, dir string, st tierSweep
 		ran:      true,
 		slotWait: step.SlotWait,
 	}
+}
+
+// tierSweepResumeEnableEnv is the daemon environment switch that lets a
+// Go-command stage resume a sweep cut by a restart. Resume carries a
+// correctness claim, so it stays off until the overseer has checked one live
+// sweep with timings; any value but "1" leaves it off.
+const tierSweepResumeEnableEnv = "TIER_SWEEP_RESUME_ENABLE"
+
+// tierSweepGate is the gate one stage runs: its one step with the stage's
+// budget and environment, held under the container-gate slot when the stage
+// starts containers.
+func (d *Daemon) tierSweepGate(st tierSweepStage) land.CommandGate {
+	cg := land.CommandGate{
+		Steps: []land.Step{{Name: st.step, Command: st.command(), Env: d.tierSweepStageEnv(st), Timeout: st.budget}},
+	}
+	if st.slot {
+		cg = land.WithSlot(cg, d.config.TownRoot, st.role)
+	}
+	return cg
+}
+
+// tierSweepStageEnv is the environment a stage's step runs with. A Go-command
+// stage gets TIER_SWEEP_TIMINGS, the rig's timings file, and TIER_SWEEP_RESUME,
+// the rig's resume file, only when the daemon's own environment sets
+// TIER_SWEEP_RESUME_ENABLE=1. The rig's script stage gets neither. A rig whose
+// name is not one path segment, or whose directory cannot be made, gets
+// neither, and the refusal is logged: the sweep then runs as it did before the
+// files existed.
+func (d *Daemon) tierSweepStageEnv(st tierSweepStage) []string {
+	if st.script {
+		return nil
+	}
+	dir, err := d.tierSweepRigStateDir(st.rig)
+	if err != nil {
+		d.logger.Printf("tier_sweep: %s: refusing the timings and resume paths: %v", st.rig, err)
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		d.logger.Printf("tier_sweep: %s: creating %s: %v; running without the timings and resume paths", st.rig, dir, err)
+		return nil
+	}
+	env := []string{"TIER_SWEEP_TIMINGS=" + filepath.Join(dir, "timings.jsonl")}
+	if d.env(tierSweepResumeEnableEnv) == "1" {
+		env = append(env, "TIER_SWEEP_RESUME="+filepath.Join(dir, "resume.jsonl"))
+	}
+	return env
+}
+
+// tierSweepRigStateDir is the directory a rig's timings and resume files live
+// in: <town>/.runtime/tier-sweep/<rig>. The rig name must be one path segment,
+// so no file the sweep writes lands outside that directory.
+func (d *Daemon) tierSweepRigStateDir(rig string) (string, error) {
+	if rig == "" || rig == "." || strings.Contains(rig, "..") || strings.ContainsAny(rig, `/\`) {
+		return "", fmt.Errorf("rig name %q is not one path segment", rig)
+	}
+	return filepath.Join(constants.TownRuntimePath(d.config.TownRoot), "tier-sweep", rig), nil
 }
 
 // tierSweepWriteLog writes one stage's whole output to a fixed path per rig and
