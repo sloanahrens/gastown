@@ -75,7 +75,7 @@ func TestResultReadRefusesNonRegularFiles(t *testing.T) {
 			if errors.Is(err, fs.ErrNotExist) {
 				t.Fatalf("the FIFO error %v reads as a missing file", err)
 			}
-		case <-time.After(resultReadyBound):
+		case <-time.After(resultReadyBound): //testpolicy:allow no-sleep — a hang guard only: Read refuses the FIFO through Lstat before it opens anything, so the assertion is the error the read returns, and only a regression that blocked would ever reach this branch
 			t.Fatalf("Read blocked on a FIFO for %s", resultReadyBound)
 		}
 	})

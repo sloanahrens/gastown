@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 )
@@ -272,18 +271,15 @@ func readResultFile(path string) ([]byte, error) {
 	// only ever reads a file this package published by rename (gt-u00wo).
 	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow|oNonBlock, 0) //nolint:gosec // G304: the caller's own run directory plus ResultFileName
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("sweeprunner: read result: no result file at %s: %w", path, err)
-		}
 		return nil, fmt.Errorf("sweeprunner: read result %s: %w", path, err)
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxResultBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("sweeprunner: read result %s: %w", path, err)
-	}
-	if len(data) > maxResultBytes {
-		return nil, fmt.Errorf("sweeprunner: read result %s: larger than %d bytes", path, maxResultBytes)
+	data, readErr := io.ReadAll(io.LimitReader(f, maxResultBytes+1))
+	if readErr != nil || len(data) > maxResultBytes {
+		if readErr == nil {
+			readErr = fmt.Errorf("larger than %d bytes", maxResultBytes)
+		}
+		return nil, fmt.Errorf("sweeprunner: read result %s: %w", path, readErr)
 	}
 	return data, nil
 }
@@ -363,9 +359,6 @@ func validateTierResult(tier string, result TierResult) error {
 func validateLogDir(dir string) error {
 	if dir == "" {
 		return nil
-	}
-	if strings.ContainsFunc(dir, unicode.IsControl) {
-		return errors.New("holds a control character")
 	}
 	if !filepath.IsAbs(dir) {
 		return errors.New("is not absolute")

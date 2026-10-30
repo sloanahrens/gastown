@@ -525,6 +525,49 @@ func TestResultReadRefusals(t *testing.T) {
 		}
 	})
 
+	// A result path that cannot even be inspected, because a parent is not a
+	// directory, is an error and not a result still to come.
+	t.Run("a result path under a file is an error", func(t *testing.T) {
+		t.Parallel()
+		parent := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(parent, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Read(parent, valid.Rig, valid.SHA)
+		if err == nil {
+			t.Fatal("Read accepted a result path under a file")
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("Read's unsearchable-path error %v reads as a missing file", err)
+		}
+		if !strings.Contains(err.Error(), "read result") {
+			t.Fatalf("error %q does not name the read it failed", err)
+		}
+	})
+
+	// A result this process may not open is an error, not a result that has not
+	// been written yet: the daemon polls, so the two must stay apart.
+	t.Run("a result the process may not read is an error", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := Write(dir, valid); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if err := os.Chmod(filepath.Join(dir, ResultFileName), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Read(dir, valid.Rig, valid.SHA)
+		if err == nil {
+			t.Fatal("Read read a result it has no permission to open")
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("Read's permission error %v reads as a missing file", err)
+		}
+		if !strings.Contains(err.Error(), "read result") {
+			t.Fatalf("error %q does not name the read it failed", err)
+		}
+	})
+
 	// A result path the kernel refuses to open, for a reason other than the file
 	// being absent, is an error and not a result still to come.
 	t.Run("a result path that cannot be opened is an error", func(t *testing.T) {
