@@ -1,8 +1,7 @@
 // Command forgejo-resync makes a Forgejo repository's refs match GitHub's and
-// restores main's branch protection (gt-fn9e6.29). This build parses the command
-// line and prints usage; the run is not ported yet, so a valid command line
-// fails rather than reporting a resync that never ran. It exits 0 for help, 1
-// when the run fails, and 2 when the command line is refused.
+// restores main's branch protection (gt-fn9e6.29). It exits 0 for help and for a
+// resync that converged, 1 when the run fails, and 2 when the command line is
+// refused.
 package main
 
 import (
@@ -33,7 +32,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 // runParse turns what Parse returned into the script's exit codes: the help
 // request is the usage text and success, a refused command line is its message
 // and the usage hint, and any other error is a run that failed. A command line
-// that parses has no run to hand to yet, so it fails with that said.
+// that parses is run, and its exit code is the run's.
 func runParse(args []string, getenv func(string) string, stdout, stderr io.Writer, parse parseOptions) int {
 	opts, err := parse(args, getenv)
 	switch {
@@ -54,8 +53,12 @@ func runParse(args []string, getenv func(string) string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, "forgejo-resync: the command line parsed to no options")
 		return forgejoresync.ExitFailure
 	}
-	fmt.Fprintf(stderr, "forgejo-resync: the run for %s is not ported yet; scripts/forgejo-resync.sh still performs it\n", opts.Repo)
-	return forgejoresync.ExitFailure
+	resync := &forgejoresync.Resync{
+		Opts:   opts,
+		Getenv: getenv,
+		Log:    func(line string) { fmt.Fprintf(stderr, "forgejo-resync: %s\n", line) },
+	}
+	return resync.Run()
 }
 
 // usage is the text -h prints. Every default it names is read from the constant
