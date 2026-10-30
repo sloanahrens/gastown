@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -23,6 +24,16 @@ func homeEnv(key string) string {
 		return "/home/test"
 	}
 	return ""
+}
+
+// noFiles is the file seam for a command line that must read no file: any read
+// fails the test, so a token file that no flag or variable named is never looked
+// for on the real filesystem.
+func noFiles(t *testing.T) func(string) ([]byte, error) {
+	return func(path string) ([]byte, error) {
+		t.Errorf("read %s: the command read a file no flag or variable named", path)
+		return nil, fs.ErrNotExist
+	}
 }
 
 // TestMainUsageExitsTwoAndHelpExitsZero holds the script's usage_die and its
@@ -49,7 +60,7 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			if got := run(tc.args, noEnv, &stdout, &stderr); got != forgejoresync.ExitUsage {
+			if got := run(tc.args, noEnv, noFiles(t), &stdout, &stderr); got != forgejoresync.ExitUsage {
 				t.Fatalf("run(%v) = %d, want 2 (stderr: %s)", tc.args, got, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tc.stderr) {
@@ -68,7 +79,7 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 		t.Run(flag, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			if got := run([]string{flag}, noEnv, &stdout, &stderr); got != forgejoresync.ExitOK {
+			if got := run([]string{flag}, noEnv, noFiles(t), &stdout, &stderr); got != forgejoresync.ExitOK {
 				t.Fatalf("run(%s) = %d, want 0 (stderr: %s)", flag, got, stderr.String())
 			}
 			// Each of these is read from the constant that holds the default, so a
@@ -94,10 +105,11 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 // TestMainValidCommandLineWithoutTokenExitsOne: a command line that parses and
 // reaches the run, with no admin token, is a failed run: exit 1, the broker
 // command named, and no usage hint, since the command line itself was valid.
+// No token file is named, so the run reads none.
 func TestMainValidCommandLineWithoutTokenExitsOne(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr strings.Builder
-	got := run([]string{"--dry-run", "acme/gastown"}, homeEnv, &stdout, &stderr)
+	got := run([]string{"--dry-run", "acme/gastown"}, homeEnv, noFiles(t), &stdout, &stderr)
 	if got != forgejoresync.ExitFailure {
 		t.Fatalf("run = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
@@ -112,9 +124,44 @@ func TestMainValidCommandLineWithoutTokenExitsOne(t *testing.T) {
 	}
 }
 
+// TestMainNamedTokenFileIsReadThroughTheSeam: a token file the environment names is
+// read through the file seam the command was given, not the process's own reader.
+// The fake returns a file with no token, so the run refuses for want of one and
+// names the file as the stand-in.
+func TestMainNamedTokenFileIsReadThroughTheSeam(t *testing.T) {
+	t.Parallel()
+	const tokenFile = "/fake/forgejo/admin.env"
+	getenv := func(key string) string {
+		switch key {
+		case "HOME":
+			return "/home/test"
+		case "FORGEJO_ADMIN_ENV":
+			return tokenFile
+		}
+		return ""
+	}
+	var reads []string
+	readFile := func(path string) ([]byte, error) {
+		reads = append(reads, path)
+		return []byte("# no token in this file\n"), nil
+	}
+	var stdout, stderr strings.Builder
+	got := run([]string{"--dry-run", "acme/gastown"}, getenv, readFile, &stdout, &stderr)
+	if got != forgejoresync.ExitFailure {
+		t.Fatalf("run = %d, want 1 (stderr: %s)", got, stderr.String())
+	}
+	if len(reads) != 1 || reads[0] != tokenFile {
+		t.Errorf("reads = %v, want exactly [%s]", reads, tokenFile)
+	}
+	if !strings.Contains(stderr.String(), "FORGEJO_ADMIN_TOKEN= in "+tokenFile) {
+		t.Errorf("stderr = %q, want the token file named as the stand-in", stderr.String())
+	}
+}
+
 // TestRunExitCodes pins the exit codes the command reports: help is 0, a refused
 // command line is 2, and a run that cannot start for want of an admin token is 1.
-// The token case stops before any git or HTTP call, so it is hermetic.
+// The token case stops before any git or HTTP call, and reads no file, so it is
+// hermetic.
 func TestRunExitCodes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -131,7 +178,7 @@ func TestRunExitCodes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			if got := run(tc.args, tc.getenv, &stdout, &stderr); got != tc.want {
+			if got := run(tc.args, tc.getenv, noFiles(t), &stdout, &stderr); got != tc.want {
 				t.Fatalf("run(%v) = %d, want %d (stderr: %s)", tc.args, got, tc.want, stderr.String())
 			}
 		})
@@ -147,7 +194,7 @@ func TestMainParseWithoutOptionsExitsOne(t *testing.T) {
 		return nil, nil
 	}
 	var stdout, stderr strings.Builder
-	if got := runParse(nil, noEnv, &stdout, &stderr, empty); got != forgejoresync.ExitFailure {
+	if got := runParse(nil, noEnv, noFiles(t), &stdout, &stderr, empty); got != forgejoresync.ExitFailure {
 		t.Fatalf("runParse = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "the command line parsed to no options") {
@@ -169,7 +216,7 @@ func TestMainParseFailureExitsOne(t *testing.T) {
 		return nil, errors.New("the admin token file is unreadable")
 	}
 	var stdout, stderr strings.Builder
-	if got := runParse(nil, noEnv, &stdout, &stderr, unreadable); got != forgejoresync.ExitFailure {
+	if got := runParse(nil, noEnv, noFiles(t), &stdout, &stderr, unreadable); got != forgejoresync.ExitFailure {
 		t.Fatalf("runParse = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "the admin token file is unreadable") {
