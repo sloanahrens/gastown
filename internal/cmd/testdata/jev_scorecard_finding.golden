@@ -5,7 +5,7 @@ any_duplicate (noul)
   logged 5, labeled 4, positives 1, negatives 3, base rate 25.0%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.900
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      2  0.100  0.000
     0.2-0.4      1  0.200  0.000
@@ -18,7 +18,7 @@ duplicate (choice)
   logged 5, labeled 4, positives 4, negatives 0, base rate 100.0%
   at the chosen option: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.900
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 4 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      0  n/a  n/a
@@ -31,7 +31,7 @@ fix_worthy (noul)
   logged 5, labeled 4, positives 2, negatives 2, base rate 50.0%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.800
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 2 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      2  0.250  0.000
@@ -44,7 +44,7 @@ report_only (noul)
   logged 5, labeled 3, positives 1, negatives 2, base rate 33.3%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.800
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      1  0.100  0.000
     0.2-0.4      1  0.200  0.000
