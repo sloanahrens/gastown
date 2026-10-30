@@ -165,6 +165,9 @@ func TestASlingKilledAtItsBoundLeavesABeadItsPolecatIsWorking(t *testing.T) {
 	if got := fake.argvs("bead", "update"); len(got) != 0 {
 		t.Errorf("bead updates = %v, want the bead left to its running polecat", got)
 	}
+	if got := fake.argvs("bead", "note", "gt-z"); len(got) != 0 {
+		t.Errorf("notes = %v, want none for a bead its live polecat owns: nothing is half-done", got)
+	}
 }
 
 // A failure that is not a kill at the bound leaves the hook alone: the bound is
@@ -192,13 +195,17 @@ func TestAFailureOfItsOwnLeavesAHookedBeadHooked(t *testing.T) {
 	if got := fake.argvs("bead", "update"); len(got) != 0 {
 		t.Errorf("bead updates = %v, want the bead left hooked to its polecat", got)
 	}
+	if got := fake.argvs("bead", "note", "gt-z"); len(got) != 0 {
+		t.Errorf("notes = %v, want none for a failure that is not the bound", got)
+	}
 }
 
-// A daemon with no tmux cannot tell a dead seat from a busy one, so a bead a
-// killed sling hooked is left as it is and the log says why: the unsling is one
-// way, and an unanswered session read is no proof the polecat is gone
-// (gt-vaivp).
-func TestASlingKilledAtItsBoundWithNoTmuxLeavesTheHookedBead(t *testing.T) {
+// A daemon with no tmux cannot tell a dead seat from a busy one, so the bead a
+// killed sling hooked is not unslung: an unanswered session read is no proof
+// the polecat is gone. The hook may still be a dead one, so the bead carries a
+// note saying so and how to clear it, and the label is left off because that
+// polecat may own the bead (gt-nosod, gt-vaivp).
+func TestASlingKilledAtItsBoundLeavesAHookedBeadNoted(t *testing.T) {
 	t.Parallel()
 	fake, d, lines := boundKilledSling(t)
 	d.tmux = nil
@@ -218,7 +225,18 @@ func TestASlingKilledAtItsBoundWithNoTmuxLeavesTheHookedBead(t *testing.T) {
 		t.Errorf("unsling calls = %v, want no hand-back without a tmux to prove the seat dead", got)
 	}
 	if got := fake.argvs("bead", "update"); len(got) != 0 {
-		t.Errorf("bead updates = %v, want the hooked bead left alone", got)
+		t.Errorf("bead updates = %v, want no label on a bead whose holder may own it", got)
+	}
+	notes := fake.argvs("bead", "note", "gt-z")
+	if len(notes) != 1 {
+		t.Fatalf("notes = %v, want one recording the unconfirmed hand-back", notes)
+	}
+	note := notes[0][len(notes[0])-1]
+	if !strings.Contains(note, "could not be handed back") {
+		t.Errorf("note = %q, want it to say the hand-back was not confirmed", note)
+	}
+	if !strings.Contains(note, "gt unsling gt-z gastown/polecats/p") {
+		t.Errorf("note = %q, want it to name the release a person can make", note)
 	}
 	if n := countContaining(lines(), "cannot tell whether gastown/polecats/p has a session"); n != 1 {
 		t.Errorf("unanswered-session lines = %d, want one: %v", n, lines())
@@ -228,8 +246,8 @@ func TestASlingKilledAtItsBoundWithNoTmuxLeavesTheHookedBead(t *testing.T) {
 // A hand-back that fails leaves the bead hooked and says so once: the bead is
 // still on a hook nothing works, but the label is the one write only an
 // operator clears, and a polecat the daemon could not unsling may still own it
-// (gt-vaivp).
-func TestASlingKilledAtItsBoundReportsAFailedHandBack(t *testing.T) {
+// (gt-nosod, gt-vaivp). The note is the record that the hook is half-done.
+func TestASlingKilledAtItsBoundNotesAFailedHandBack(t *testing.T) {
 	t.Parallel()
 	fake, d, lines := daemonWhoseSlingFailed(t, slingFailure{
 		took:       specSlingBound(),
@@ -256,6 +274,14 @@ func TestASlingKilledAtItsBoundReportsAFailedHandBack(t *testing.T) {
 	}
 	if got := fake.argvs("bead", "update"); len(got) != 0 {
 		t.Errorf("bead updates = %v, want no label on a bead whose hand-back failed", got)
+	}
+	notes := fake.argvs("bead", "note", "gt-z")
+	if len(notes) != 1 {
+		t.Fatalf("notes = %v, want one recording the refused hand-back", notes)
+	}
+	note := notes[0][len(notes[0])-1]
+	if !strings.Contains(note, "gt unsling refused it") {
+		t.Errorf("note = %q, want it to say the release was refused", note)
 	}
 }
 

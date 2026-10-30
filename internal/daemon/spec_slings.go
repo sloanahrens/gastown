@@ -353,7 +353,9 @@ func (d *Daemon) correctDispatchTick(seq uint64, result specSlingResult) {
 // a timeout-killed bead is unslung before it is labeled; a polecat with a
 // session keeps its bead, since nothing clears the label if that polecat later
 // dies (gt-nosod), and a failure that is not the bound leaves the hook alone.
-// A daemon shutting down cut the sling itself and leaves the bead as it is.
+// A bead the daemon could not release stays hooked and unlabeled, and a note on
+// it records the hook and the release a person can make (gt-vaivp). A daemon
+// shutting down cut the sling itself and leaves the bead as it is.
 func (d *Daemon) failSpecSling(f specSlingFlight, reason string, killedAtBound bool) {
 	if d.ctx.Err() != nil {
 		return
@@ -374,10 +376,25 @@ func (d *Daemon) failSpecSling(f specSlingFlight, reason string, killedAtBound b
 		d.logger.Printf("spec_dispatch: %s: the bead's status is no answer for the failure label; leaving it unlabeled", f.Bead)
 		return
 	}
-	if held && (!killedAtBound || !d.handBackHalfHooked(f, issue)) {
-		d.logger.Printf("spec_dispatch: %s: sling died after hooking it; leaving the bead to its polecat and writing no %s label",
-			f.Bead, constants.LabelSpecDispatchFailed)
-		return
+	if held {
+		if !killedAtBound {
+			d.logger.Printf("spec_dispatch: %s: sling died after hooking it; leaving the bead to its polecat and writing no %s label",
+				f.Bead, constants.LabelSpecDispatchFailed)
+			return
+		}
+		if released, unconfirmed := d.handBackHalfHooked(f, issue); !released {
+			if unconfirmed == "" {
+				d.logger.Printf("spec_dispatch: %s: sling died after hooking it; leaving the bead to its polecat and writing no %s label",
+					f.Bead, constants.LabelSpecDispatchFailed)
+				return
+			}
+			// The label is the one write nothing clears without an operator,
+			// and a polecat the daemon could not unsling may still own the
+			// bead (gt-nosod), so only a note records the unconfirmed hook and
+			// the release a person can make (gt-vaivp).
+			d.beadWrite(f, "bead", "note", f.Bead, specSlingHalfHookNote(f.Bead, issue, unconfirmed))
+			return
+		}
 	}
 	if killedAtBound {
 		attempt := specdispatch.TimeoutAttempts(issue.Metadata) + 1
@@ -433,29 +450,42 @@ func specSlingBeadHeld(issue *beads.Issue) (held, known bool) {
 // an agent mid-task, so the release is gated on the session being gone. A
 // daemon with no tmux, or a tmux that cannot answer, hands nothing back: an
 // unanswered read is no proof the seat is dead, as the stale-hook reap reads it.
-func (d *Daemon) handBackHalfHooked(f specSlingFlight, issue *beads.Issue) bool {
+//
+// A bead that stays held because nothing could be learned or the release was
+// refused comes back with the reason in unconfirmed, which the caller notes on
+// the bead; a live polecat's bead comes back with none (gt-vaivp).
+func (d *Daemon) handBackHalfHooked(f specSlingFlight, issue *beads.Issue) (released bool, unconfirmed string) {
 	holder := strings.TrimSpace(issue.Assignee)
 	parts := strings.Split(holder, "/")
 	if len(parts) != 3 || parts[1] != "polecats" {
-		return false
+		return false, fmt.Sprintf("%q is not a polecat seat", holder)
 	}
 	alive, known := d.polecatSessionAlive(parts[0], parts[2])
 	if !known {
 		d.logger.Printf("spec_dispatch: %s: cannot tell whether %s has a session; leaving the bead hooked", f.Bead, holder)
-		return false
+		return false, "the daemon could not read whether " + holder + " has a session"
 	}
 	if alive {
-		return false
+		return false, ""
 	}
 	cmd := exec.CommandContext(d.ctx, d.gtPath, "unsling", f.Bead, holder) //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = daemonGTEnv(os.Environ())
 	if _, stderr, err := d.runCmd(cmd); err != nil {
 		d.logger.Printf("spec_dispatch: %s: handing the bead back from %s failed: %v %s", f.Bead, holder, err, lastLine(string(stderr)))
-		return false
+		return false, "gt unsling refused it"
 	}
 	d.logger.Printf("spec_dispatch: %s: sling died after hooking it and before %s had a session; handed the bead back", f.Bead, holder)
-	return true
+	return true, ""
+}
+
+// specSlingHalfHookNote is the note a bead keeps when its sling was killed at
+// its bound after hooking it and the daemon could not confirm it released: the
+// bead is still hooked, so the note says how to free it (gt-vaivp).
+func specSlingHalfHookNote(bead string, issue *beads.Issue, unconfirmed string) string {
+	holder := strings.TrimSpace(issue.Assignee)
+	return fmt.Sprintf("spec-dispatch: sling killed at its %s bound after hooking this bead to %s, and the bead could not be handed back (%s); if nothing is running it, clear the hook with: gt unsling %s %s",
+		specSlingBound(), holder, unconfirmed, bead, holder)
 }
 
 // polecatSessionAlive reports whether rig/polecats/name has a live session, and

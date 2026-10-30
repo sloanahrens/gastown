@@ -672,6 +672,33 @@ func TestReconcilePoolWith(t *testing.T) {
 	}
 }
 
+// TestReconcilePool_UnreadablePolecatsDirFreesNothing verifies that reconcile
+// treats a polecats directory it could not read as an unknown pool, not an
+// empty one: the directory is the whole in-use set, so reconciling from an
+// empty read would hand a live polecat's name to the next spawn (gt-vaivp).
+func TestReconcilePool_UnreadablePolecatsDirFreesNothing(t *testing.T) {
+	t.Parallel()
+
+	rigPath := t.TempDir()
+	// A regular file where the polecats directory belongs: the read fails for a
+	// reason other than there being no polecats at all.
+	if err := os.WriteFile(filepath.Join(rigPath, "polecats"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestManager(&rig.Rig{Name: "myrig", Path: rigPath}, newWorld(), nil, newNoDatabaseDB())
+	m.namePool.MarkInUse("furiosa")
+
+	m.ReconcilePool()
+
+	name, err := m.namePool.Allocate()
+	if err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	if name == "furiosa" {
+		t.Error("reconcile read an unreadable polecats directory as an empty pool and freed a name that is in use")
+	}
+}
+
 func TestReconcilePoolWith_KeepsDirBackedStaleSession(t *testing.T) {
 	t.Parallel()
 

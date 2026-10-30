@@ -2913,6 +2913,11 @@ func (m *Manager) ReconcilePool() {
 // state and session for names reconcile never reads. That read used to run
 // inside the pool lock every spawn takes, where a rig of a dozen polecats spent
 // another sling's wait on beats it did not need (gt-vaivp).
+//
+// The directory is the whole in-use set, so a read that failed for any reason
+// but its absence returns before the pool is overwritten: reconciled from an
+// empty set, the next spawn hands a live polecat's name to a new one
+// (gt-vaivp).
 func (m *Manager) reconcilePoolInternal() {
 	var namesWithDirs []string
 
@@ -2921,14 +2926,19 @@ func (m *Manager) reconcilePoolInternal() {
 	// hasn't created the directory yet. Without this, Reconcile would see no
 	// directory and treat the name as available, causing a duplicate allocation.
 	polecatsDir := filepath.Join(m.rig.Path, "polecats")
-	if entries, err := os.ReadDir(polecatsDir); err == nil {
-		for _, e := range entries {
-			switch {
-			case e.IsDir() && !strings.HasPrefix(e.Name(), "."):
-				namesWithDirs = append(namesWithDirs, e.Name())
-			case !e.IsDir() && strings.HasSuffix(e.Name(), ".pending"):
-				namesWithDirs = append(namesWithDirs, strings.TrimSuffix(e.Name(), ".pending"))
-			}
+	entries, err := os.ReadDir(polecatsDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// A directory that is absent holds no polecat, so an empty set is its
+		// answer; any other failure has one this read cannot see, and the pool
+		// keeps the in-use set it has.
+		return
+	}
+	for _, e := range entries {
+		switch {
+		case e.IsDir() && !strings.HasPrefix(e.Name(), "."):
+			namesWithDirs = append(namesWithDirs, e.Name())
+		case !e.IsDir() && strings.HasSuffix(e.Name(), ".pending"):
+			namesWithDirs = append(namesWithDirs, strings.TrimSuffix(e.Name(), ".pending"))
 		}
 	}
 
