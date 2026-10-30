@@ -15,6 +15,8 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 
+// The stderr lines are copied from scripts/repo-guards.sh. TestRunMessages holds
+// the guards to them byte for byte, so a reworded message fails here.
 const (
 	replaceLine    = "replace example.com/y => ../y"
 	replaceStderr  = "repo-guards: go.mod contains replace directives; they break go install ...@latest (upstream #2230)\n"
@@ -38,22 +40,34 @@ func (f *fakeGit) LsFiles(root string, nul bool, pathspec ...string) ([]string, 
 	return f.files, nil
 }
 
+func (f *fakeGit) LsDeleted(root string, pathspec ...string) ([]string, error) {
+	f.roots = append(f.roots, root)
+	return nil, nil
+}
+
 func (f *fakeGit) IsTracked(root, path string) bool {
 	f.roots = append(f.roots, root)
 	return f.tracked[path]
 }
 
 // fakeExec answers the commands the guards run. toplevel is what git rev-parse
-// prints, or revErr is what it fails with. gofmt lists the files in unformatted
-// and fails with gofmtErr when set.
+// --show-toplevel prints, prefix what --show-prefix prints, or revErr is what
+// rev-parse fails with. gofmt lists the files in unformatted and fails with
+// gofmtErr when set. calls records every command, so a test can see what ran.
 type fakeExec struct {
 	toplevel    string
+	prefix      string
 	revErr      error
 	unformatted []string
 	gofmtErr    error
+	calls       []string
 }
 
 func (f *fakeExec) Run(dir string, name string, args ...string) (string, error) {
+	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
+	if name == "git" && slices.Contains(args, "--show-prefix") {
+		return f.prefix, nil
+	}
 	if name == "git" && slices.Contains(args, "rev-parse") {
 		return f.toplevel, f.revErr
 	}
@@ -248,4 +262,72 @@ func TestMainDefaultRoot(t *testing.T) {
 			t.Errorf("guards ran in a bad root: %q", g.roots)
 		}
 	})
+}
+
+// TestRunRootMustBeTopLevel holds an explicit root to the repository's top
+// level. From a subdirectory the guards would read that subtree, where a tracked
+// root file looks untracked, so the refusal must exit 2 before any guard runs.
+func TestRunRootMustBeTopLevel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		arg        string
+		prefix     string
+		wantExit   int
+		wantRoot   string
+		wantStderr string
+	}{
+		{
+			name:     "the top level is accepted and returned",
+			arg:      "/repo",
+			wantExit: 0,
+			wantRoot: "/repo",
+		},
+		{
+			name:     "a trailing slash on the top level is accepted",
+			arg:      "/repo/",
+			wantExit: 0,
+			wantRoot: "/repo",
+		},
+		{
+			name:       "a subdirectory is refused and no guard runs",
+			arg:        "/repo/sub",
+			prefix:     "sub/\n",
+			wantExit:   2,
+			wantStderr: "repo-guards: /repo/sub is not the top level of its repository (/repo)\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := &fakeGit{}
+			e := &fakeExec{toplevel: "/repo\n", prefix: tc.prefix}
+			var stdout, stderr bytes.Buffer
+			if got := run([]string{tc.arg}, fakeEnv(cleanGoMod, g, e, false), &stdout, &stderr); got != tc.wantExit {
+				t.Errorf("exit = %d, want %d; stderr %q", got, tc.wantExit, stderr.String())
+			}
+			if stderr.String() != tc.wantStderr {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
+			}
+			if tc.wantExit == 2 {
+				if len(g.roots) != 0 {
+					t.Errorf("guards ran in a refused root: %q", g.roots)
+				}
+				for _, call := range e.calls {
+					if !strings.Contains(call, "rev-parse") {
+						t.Errorf("command ran after the refusal: %q", call)
+					}
+				}
+				return
+			}
+			if len(g.roots) == 0 {
+				t.Fatal("no guard ran")
+			}
+			for _, root := range g.roots {
+				if root != tc.wantRoot {
+					t.Errorf("guard ran in %q, want %q", root, tc.wantRoot)
+				}
+			}
+		})
+	}
 }

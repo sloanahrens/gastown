@@ -15,13 +15,35 @@ import (
 // the exit status repo-guards returns. Cases that stage a file with git add
 // exercise the index, which is what the guards read.
 
+// guardEnviron is the environment git and gofmt run in here. It carries no
+// ambient git config and no repository variables from a hook, so the machine
+// the test runs on cannot change its answer. HOME is the test's own.
+func guardEnviron(t *testing.T) []string {
+	t.Helper()
+	return []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+	}
+}
+
 // liveEnv is the production wiring of Check: the git binary, gofmt from PATH,
-// and the real filesystem for go.mod.
-var liveEnv = Env{
-	Git:      CLIGit{},
-	Exec:     CLIExec{},
-	LookPath: exec.LookPath,
-	ReadFile: os.ReadFile,
+// and the real filesystem for go.mod. The commands run in guardEnviron.
+func liveEnv(t *testing.T) Env {
+	t.Helper()
+	ex := CLIExec{start: func(cmd *exec.Cmd) error {
+		cmd.Env = guardEnviron(t)
+		return cmd.Run()
+	}}
+	return Env{
+		Git:      CLIGit{ex: ex},
+		Exec:     ex,
+		LookPath: exec.LookPath,
+		ReadFile: os.ReadFile,
+	}
 }
 
 // newGuardRepo makes a git repository with a .beads directory and the go.mod
@@ -37,11 +59,12 @@ func newGuardRepo(t *testing.T) string {
 	return root
 }
 
-// gitIn runs git in root. Its output is not shown on failure: a git error
-// there can echo file contents.
+// gitIn runs git in root in guardEnviron. Its output is not shown on failure: a
+// git error there can echo file contents.
 func gitIn(t *testing.T, root string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+	cmd.Env = guardEnviron(t)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git %s: %v", args[0], err)
 	}
@@ -193,7 +216,7 @@ func TestIntegrationRepoGuardsCases(t *testing.T) {
 			t.Parallel()
 			root := newGuardRepo(t)
 			tc.setup(t, root)
-			if got := Check(root, liveEnv).Failed(); got != tc.fail {
+			if got := Check(root, liveEnv(t)).Failed(); got != tc.fail {
 				t.Errorf("guards failed = %v, want %v", got, tc.fail)
 			}
 		})
@@ -208,7 +231,7 @@ func TestIntegrationRepoGuardsMessages(t *testing.T) {
 		t.Parallel()
 		root := newGuardRepo(t)
 		appendGuardFile(t, root, "go.mod", "replace example.com/y => ../y\n")
-		rep := Check(root, liveEnv)
+		rep := Check(root, liveEnv(t))
 		wantLines := []string{"repo-guards: go.mod contains replace directives; they break go install ...@latest (upstream #2230)"}
 		assertProblems(t, rep, wantLines)
 		assertReplaces(t, rep, []string{"replace example.com/y => ../y"})
@@ -218,7 +241,7 @@ func TestIntegrationRepoGuardsMessages(t *testing.T) {
 		root := newGuardRepo(t)
 		writeGuardFile(t, root, ".beads/issues.jsonl", "{}\n")
 		gitIn(t, root, "add", ".beads/issues.jsonl")
-		assertProblems(t, Check(root, liveEnv), []string{
+		assertProblems(t, Check(root, liveEnv(t)), []string{
 			"repo-guards: .beads/issues.jsonl is tracked; the Dolt server is the only beads backend (git rm --cached it)",
 		})
 	})
@@ -227,7 +250,7 @@ func TestIntegrationRepoGuardsMessages(t *testing.T) {
 		root := newGuardRepo(t)
 		writeGuardFile(t, root, "a.go", "package x\n\nfunc  f( ) {}\n")
 		gitIn(t, root, "add", "a.go")
-		rep := Check(root, liveEnv)
+		rep := Check(root, liveEnv(t))
 		assertProblems(t, rep, []string{
 			"repo-guards: these files are not gofmt -s clean; run 'gofmt -s -w' on them:",
 			"a.go",

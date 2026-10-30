@@ -1,7 +1,9 @@
-// Command repo-guards runs the repository guards make lint runs (gt-tpg0p.107,
-// the port of scripts/repo-guards.sh): go.mod has no replace directive but the
-// tracker module's, .beads/issues.jsonl is not tracked, and every tracked .go
-// file outside testdata is gofmt -s clean. It exits 1 when any guard fails.
+// Command repo-guards runs the repository guards that make lint runs: go.mod has
+// no replace directive but the tracker module's, .beads/issues.jsonl is not
+// tracked, and every tracked .go file outside testdata is gofmt -s clean. It
+// exits 0 when every guard passes, 1 when a guard fails or the root is not a git
+// repository, and 2 when the arguments are wrong or the root is inside a
+// repository but is not its top level.
 package main
 
 import (
@@ -17,13 +19,18 @@ import (
 const usage = "repo-guards: usage: repo-guards [repo-root]"
 
 func main() {
-	env := repoguard.Env{
+	os.Exit(run(os.Args[1:], liveEnv(), os.Stdout, os.Stderr))
+}
+
+// liveEnv is the production wiring of the guards: the git binary, gofmt from
+// PATH, and the real filesystem for go.mod.
+func liveEnv() repoguard.Env {
+	return repoguard.Env{
 		Git:      repoguard.CLIGit{},
 		Exec:     repoguard.CLIExec{},
 		LookPath: exec.LookPath,
 		ReadFile: os.ReadFile,
 	}
-	os.Exit(run(os.Args[1:], env, os.Stdout, os.Stderr))
 }
 
 // run is main without the process: the arguments and the environment are
@@ -33,10 +40,10 @@ func run(args []string, env repoguard.Env, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, usage)
 		return 2
 	}
-	root, err := repoRoot(args, env)
+	root, code, err := repoRoot(args, env)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return 1
+		return code
 	}
 	rep := repoguard.Check(root, env)
 	for _, line := range rep.Replaces {
@@ -51,20 +58,32 @@ func run(args []string, env repoguard.Env, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// repoRoot is the repository to check: the argument as given, or the top level
-// of the repository the working directory is in. Either must be a git
-// repository. A root that is not one would otherwise list no files and pass.
-func repoRoot(args []string, env repoguard.Env) (string, error) {
+// repoRoot is the repository to check: the top level of the repository the
+// working directory is in, or the argument, which must itself be that top
+// level. Checked from a subdirectory the guards would read that subtree: go.mod
+// is missing there, and a tracked root file looks untracked, so a repository
+// could pass without being read. It returns the exit status to refuse with.
+func repoRoot(args []string, env repoguard.Env) (root string, code int, err error) {
 	dir := "."
 	if len(args) == 1 {
 		dir = args[0]
 	}
 	out, err := env.Exec.Run(dir, "git", "rev-parse", "--show-toplevel")
 	if err != nil {
-		return "", fmt.Errorf("repo-guards: %s is not a git repository", dir)
+		return "", 1, fmt.Errorf("repo-guards: %s is not a git repository", dir)
 	}
-	if len(args) == 1 {
-		return dir, nil
+	top := strings.TrimSpace(out)
+	if len(args) == 0 {
+		return top, 0, nil
 	}
-	return strings.TrimSpace(out), nil
+	// --show-prefix is empty exactly at the top level, so git decides what
+	// the path is and no symlink or trailing-slash handling is needed here.
+	prefix, err := env.Exec.Run(dir, "git", "rev-parse", "--show-prefix")
+	if err != nil {
+		return "", 1, fmt.Errorf("repo-guards: %s is not a git repository", dir)
+	}
+	if strings.TrimSpace(prefix) != "" {
+		return "", 2, fmt.Errorf("repo-guards: %s is not the top level of its repository (%s)", dir, top)
+	}
+	return top, 0, nil
 }
