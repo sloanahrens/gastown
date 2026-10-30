@@ -1353,7 +1353,7 @@ func TestIntegrationSchedulerInvalidJSONContextCleanup(t *testing.T) {
 	}
 
 	// Run scheduler dispatch (non-dry-run triggers cleanup before dispatch).
-	// cleanupStaleContexts is called before the dispatch cycle.
+	// closeStaleContexts runs on the cycle's one read of the contexts.
 	out := runGTCmdOutput(t, gtBinary, hqPath, env, "scheduler", "run")
 	t.Logf("scheduler run output:\n%s", out)
 

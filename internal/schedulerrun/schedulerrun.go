@@ -512,13 +512,12 @@ func (r *runner) buildPlan(townRoot string, batchOverride int, cleanup bool) (*s
 	}
 	spawnDelay := schedulerCfg.GetSpawnDelay()
 
-	if cleanup && !state.Paused && maxPolecats > 0 {
-		if err := cleanupStaleContexts(townRoot); err != nil {
-			return nil, fmt.Errorf("cleaning stale scheduler contexts: %w", err)
-		}
-	}
-
-	assessments, blockedErr := assessScheduledContexts(townRoot, r.errOut())
+	// One read of the open sling contexts serves the whole cycle: the cleanup
+	// closes the stale ones against it and the plan is built from what
+	// survives. A paused or direct-mode run skips the cleanup but still pays
+	// the one read, since the plan below needs it either way (gt-pjcpb).
+	cleanStale := cleanup && !state.Paused && maxPolecats > 0
+	assessments, blockedErr := cycleContexts(townRoot, cleanStale, contextStore{}, r.errOut())
 	if blockedErr != nil {
 		return nil, blockedErr
 	}

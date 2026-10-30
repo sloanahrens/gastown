@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
 func TestShouldFireCrossRigEscalation_Debounces(t *testing.T) {
@@ -285,5 +286,144 @@ func TestMergeReadyGateComposesWithStatusBasedGates(t *testing.T) {
 	}
 	if isScheduledWorkBeadMergeReady("gt-x", beadStatusInfo{Status: "open"}, true, map[string]bool{"gt-x": true}, nil, nil) {
 		t.Fatal("a blocked bead must not be ready")
+	}
+}
+
+// --- One sling-context read per dispatch cycle (gt-pjcpb) ----------------
+
+// townWithRigDirs builds a town root whose search dirs are the root plus one
+// per named rig, so a scan of it has one store per rig to read.
+func townWithRigDirs(t *testing.T, rigs ...string) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	dirs := []string{townRoot}
+	for _, rig := range rigs {
+		dirs = append(dirs, filepath.Join(townRoot, rig))
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatalf("mkdir beads dir for %s: %v", dir, err)
+		}
+	}
+	return townRoot
+}
+
+// contextRecordFixture is one open sling context of the named rig, carrying
+// the named work bead.
+func contextRecordFixture(t *testing.T, townRoot, rig, contextID, workBeadID string, failures int) contextRecord {
+	t.Helper()
+	dir := filepath.Join(townRoot, rig)
+	return contextRecord{
+		issue: &beads.Issue{
+			ID: contextID,
+			Description: beads.FormatSlingContextDescription(&capacity.SlingContextFields{
+				Version:          1,
+				WorkBeadID:       workBeadID,
+				TargetRig:        rig,
+				EnqueuedAt:       "2026-04-30T12:00:00Z",
+				DispatchFailures: failures,
+			}),
+		},
+		workDir:  dir,
+		beadsDir: filepath.Join(dir, ".beads"),
+	}
+}
+
+// A dispatch cycle reads the open sling contexts once, where each step used to
+// read them again. The production scan issues one store read (one bd query)
+// per search dir, so the cycle's query count is the rig count rather than a
+// multiple of it.
+func TestDispatchCycleReadsSlingContextsOnce(t *testing.T) {
+	t.Parallel()
+	townRoot := townWithRigDirs(t, "alpha", "beta")
+	dirs, err := beads.SlingContextSearchDirs(townRoot)
+	if err != nil {
+		t.Fatalf("search dirs: %v", err)
+	}
+	if len(dirs) != 3 {
+		t.Fatalf("search dirs = %v, want the town root and the two rigs", dirs)
+	}
+
+	queries := 0
+	store := contextStore{scan: func(string) ([]contextRecord, error) {
+		queries += len(dirs) // the production scan reads every search dir once
+		return nil, nil
+	}}
+
+	for _, cleanup := range []bool{true, false} {
+		queries = 0
+		if _, err := cycleContexts(townRoot, cleanup, store, nil); err != nil {
+			t.Fatalf("cycle (cleanup=%t): %v", cleanup, err)
+		}
+		if queries != len(dirs) {
+			t.Errorf("cycle (cleanup=%t) issued %d sling-context queries, want %d (one per search dir): the cycle reads the contexts once, not once per step",
+				cleanup, queries, len(dirs))
+		}
+	}
+}
+
+// The closes a cycle's cleanup makes are applied to that cycle's one read, so
+// the steps after the cleanup never see a context it closed.
+func TestDispatchCycleSkipsContextsTheCleanupClosed(t *testing.T) {
+	t.Parallel()
+	townRoot := townWithRigDirs(t, "alpha")
+	stale := contextRecordFixture(t, townRoot, "alpha", "gt-wisp-stale", "gt-stale", 0)
+
+	var closed []string
+	store := contextStore{
+		scan: func(string) ([]contextRecord, error) { return []contextRecord{stale}, nil },
+		status: func(string, []string) map[string]beadStatusInfo {
+			return map[string]beadStatusInfo{"gt-stale": {Status: "closed"}}
+		},
+		close: func(rec contextRecord, reason string) error {
+			closed = append(closed, rec.issue.ID+" "+reason)
+			return nil
+		},
+	}
+
+	assessments, err := cycleContexts(townRoot, true, store, nil)
+	if err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if len(closed) != 1 || closed[0] != "gt-wisp-stale stale-work-bead" {
+		t.Fatalf("closes = %v, want the stale context closed as stale-work-bead", closed)
+	}
+	if len(assessments) != 0 {
+		t.Fatalf("assessments = %+v, want none: a context the cleanup closed must not reach the later steps", assessments)
+	}
+}
+
+// The value the steps after the cleanup read is exactly the contexts the
+// cleanup left open: the closed one is out, its neighbour stays.
+func TestCloseStaleContextsReturnsOnlyTheSurvivors(t *testing.T) {
+	t.Parallel()
+	townRoot := townWithRigDirs(t, "alpha")
+	stale := contextRecordFixture(t, townRoot, "alpha", "gt-wisp-stale", "gt-stale", 0)
+	live := contextRecordFixture(t, townRoot, "alpha", "gt-wisp-live", "gt-live", 0)
+
+	var closed []string
+	store := contextStore{
+		status: func(_ string, ids []string) map[string]beadStatusInfo {
+			if len(ids) != 2 {
+				t.Fatalf("stale check read %v, want both work beads", ids)
+			}
+			return map[string]beadStatusInfo{
+				"gt-stale": {Status: "closed"},
+				"gt-live":  {Status: "open"},
+			}
+		},
+		close: func(rec contextRecord, reason string) error {
+			closed = append(closed, rec.issue.ID+" "+reason)
+			return nil
+		},
+	}
+
+	kept := closeStaleContexts(townRoot, []contextRecord{stale, live}, store)
+
+	if len(closed) != 1 || closed[0] != "gt-wisp-stale stale-work-bead" {
+		t.Fatalf("closes = %v, want only the stale context", closed)
+	}
+	if len(kept) != 1 || kept[0].issue.ID != "gt-wisp-live" {
+		t.Fatalf("kept = %+v, want only gt-wisp-live", kept)
 	}
 }

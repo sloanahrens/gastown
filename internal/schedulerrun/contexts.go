@@ -81,7 +81,11 @@ func beadsForContextRecord(rec contextRecord) beads.Client {
 // readiness to mark blocked status, and uses a batch fetch for work bead info
 // to avoid N+1 subprocess spawns.
 func ListScheduled(townRoot string) ([]ContextInfo, error) {
-	assessments, err := assessScheduledContexts(townRoot, nil)
+	contexts, err := listAllSlingContextRecords(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	assessments, err := assessScheduledContexts(townRoot, contexts, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -119,14 +123,75 @@ func listAllSlingContextRecords(townRoot string) ([]contextRecord, error) {
 	return records, nil
 }
 
-// cleanupStaleContexts closes invalid and stale sling context beads.
-// Called explicitly before the dispatch cycle to separate cleanup from querying.
-func cleanupStaleContexts(townRoot string) error {
-	contexts, err := listAllSlingContextRecords(townRoot)
-	if err != nil {
-		return err
-	}
+// contextScan reads every open sling context the town has. nil is the
+// production scan, which issues one store read per search dir.
+type contextScan func(townRoot string) ([]contextRecord, error)
 
+// workBeadInfoFetch reads the status of the named work beads, keyed by ID.
+// nil is the production batch fetch.
+type workBeadInfoFetch func(townRoot string, ids []string) map[string]beadStatusInfo
+
+// contextCloser closes one sling context with a reason. nil writes bd.
+type contextCloser func(rec contextRecord, reason string) error
+
+// contextStore is the sling-context surface one dispatch cycle touches: the
+// read at the top of the cycle and the closes the cleanup writes against that
+// same read. The zero value is production. A cycle builds the value once and
+// hands it to every step, so the steps cannot each read the town again.
+type contextStore struct {
+	scan   contextScan
+	status workBeadInfoFetch
+	close  contextCloser
+}
+
+func (s contextStore) readAll(townRoot string) ([]contextRecord, error) {
+	if s.scan != nil {
+		return s.scan(townRoot)
+	}
+	return listAllSlingContextRecords(townRoot)
+}
+
+func (s contextStore) workBeadInfo(townRoot string, ids []string) map[string]beadStatusInfo {
+	if s.status != nil {
+		return s.status(townRoot, ids)
+	}
+	return batchFetchBeadInfoByIDs(townRoot, ids)
+}
+
+func (s contextStore) closeContext(rec contextRecord, reason string) error {
+	if s.close != nil {
+		return s.close(rec, reason)
+	}
+	return beads.CloseSlingContext(beadsForContextRecord(rec), rec.issue.ID, reason)
+}
+
+// cycleContexts is one dispatch cycle's view of the open sling contexts: it
+// reads them once, lets the cleanup close the stale ones against that same
+// read, and assesses what survives. The read is shared, so a cycle costs one
+// sling-context scan (one store read per search dir) rather than one scan per
+// step (gt-pjcpb).
+//
+// Staleness is bounded by the cycle and nothing else: a context opened after
+// this read is not seen until the next cycle, and a context this cycle's
+// cleanup closed is gone from every step after it.
+func cycleContexts(townRoot string, cleanup bool, store contextStore, w io.Writer) ([]assessment, error) {
+	contexts, err := store.readAll(townRoot)
+	if err != nil {
+		if cleanup {
+			return nil, fmt.Errorf("cleaning stale scheduler contexts: %w", err)
+		}
+		return nil, err
+	}
+	if cleanup {
+		contexts = closeStaleContexts(townRoot, contexts, store)
+	}
+	return assessScheduledContexts(townRoot, contexts, w)
+}
+
+// closeStaleContexts closes the invalid, circuit-broken and stale contexts of
+// one cycle's read and returns the records that survive, which is what the
+// rest of that cycle reads.
+func closeStaleContexts(townRoot string, contexts []contextRecord, store contextStore) []contextRecord {
 	// First pass: close invalid and circuit-broken contexts, collect work bead IDs
 	// that need status checks for stale detection.
 	var staleCheckContexts []contextRecord
@@ -134,11 +199,11 @@ func cleanupStaleContexts(townRoot string) error {
 	for _, ctx := range contexts {
 		fields := beads.ParseSlingContextFields(ctx.issue.Description)
 		if fields == nil {
-			_ = beads.CloseSlingContext(beadsForContextRecord(ctx), ctx.issue.ID, "invalid-context")
+			_ = store.closeContext(ctx, "invalid-context")
 			continue
 		}
 		if fields.DispatchFailures >= MaxDispatchFailures {
-			_ = beads.CloseSlingContext(beadsForContextRecord(ctx), ctx.issue.ID, "circuit-broken")
+			_ = store.closeContext(ctx, "circuit-broken")
 			continue
 		}
 		staleCheckContexts = append(staleCheckContexts, ctx)
@@ -156,31 +221,31 @@ func cleanupStaleContexts(townRoot string) error {
 	}
 
 	// Batch-fetch work bead info for only the specific IDs we need
-	workBeadInfo := batchFetchBeadInfoByIDs(townRoot, workBeadIDs)
+	workBeadInfo := store.workBeadInfo(townRoot, workBeadIDs)
 
 	// Second pass: close contexts whose work beads are stale.
 	// Note: in_progress is intentionally excluded — the work bead is being
 	// actively worked, and bd ready won't return it, so the dispatch query
 	// already prevents re-dispatch. The context stays open until the polecat
 	// finishes and the bead transitions to closed/tombstone.
+	kept := make([]contextRecord, 0, len(staleCheckContexts))
 	for i, ctx := range staleCheckContexts {
 		fields := staleCheckFields[i]
 		info, found := workBeadInfo[fields.WorkBeadID]
 		if found && (info.Status == "hooked" || info.Status == "closed" || info.Status == "tombstone") {
-			_ = beads.CloseSlingContext(beadsForContextRecord(ctx), ctx.issue.ID, "stale-work-bead")
+			_ = store.closeContext(ctx, "stale-work-bead")
+			continue
 		}
+		kept = append(kept, ctx)
 	}
-	return nil
+	return kept
 }
 
-// assessScheduledContexts judges every open sling context against its work
-// bead: does the bead still exist, is it blocked, is a blocker's merge
-// request still open, and may it dispatch. w takes the warnings.
-func assessScheduledContexts(townRoot string, w io.Writer) ([]assessment, error) {
-	contexts, err := listAllSlingContextRecords(townRoot)
-	if err != nil {
-		return nil, err
-	}
+// assessScheduledContexts judges the given sling contexts against their work
+// beads: does the bead still exist, is it blocked, is a blocker's merge
+// request still open, and may it dispatch. It reads no contexts of its own;
+// its caller passes the one read of the cycle. w takes the warnings.
+func assessScheduledContexts(townRoot string, contexts []contextRecord, w io.Writer) ([]assessment, error) {
 	if len(contexts) == 0 {
 		return nil, nil
 	}
