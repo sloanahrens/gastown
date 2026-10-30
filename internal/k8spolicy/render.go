@@ -1,6 +1,7 @@
 package k8spolicy
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -21,13 +22,50 @@ const (
 
 // Params are the values Render writes into the policy: the in-cluster name of
 // each endpoint it rewrites, the tracker's port, and the address pinned on each
-// rewritten endpoint (without the /32, which Render adds).
+// rewritten endpoint (without the /32, which Render adds). Callers validate
+// them first (Options.Parse and Validate use ValidHost and ValidIPv4); Render
+// checks them again, because they are written into YAML and a value with a
+// newline, a colon and a space, or a quote would change what the file means.
 type Params struct {
 	DoltHost    string
 	ForgejoHost string
 	TrackerHost string
 	TrackerPort string
 	AllowedIP   string
+}
+
+// validate refuses a value that is not a DNS name, an IPv4 address or a port
+// number, so nothing written into the YAML can break out of its line.
+func (p Params) validate() error {
+	for _, h := range []struct{ field, value string }{
+		{"DoltHost", p.DoltHost}, {"ForgejoHost", p.ForgejoHost}, {"TrackerHost", p.TrackerHost},
+	} {
+		if !ValidHost(h.value) {
+			return fmt.Errorf("k8spolicy: %s %q is not a DNS name", h.field, h.value)
+		}
+	}
+	if !ValidIPv4(p.AllowedIP) {
+		return fmt.Errorf("k8spolicy: AllowedIP %q is not an IPv4 address", p.AllowedIP)
+	}
+	if !validPort(p.TrackerPort) {
+		return fmt.Errorf("k8spolicy: TrackerPort %q is not a port number", p.TrackerPort)
+	}
+	return nil
+}
+
+// validPort reports whether s is one to five decimal digits. The empty string is
+// not a port: an empty TrackerPort would otherwise match a `port:` line with no
+// value.
+func validPort(s string) bool {
+	if s == "" || len(s) > 5 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 var (
@@ -43,6 +81,8 @@ var (
 // endpoint on any other port is left as it is, and the first mention of
 // Docker Desktop's host alias on a line becomes "in-cluster Services". Every
 // line of the result ends in a newline, whether or not the input's last line did.
+// It returns an error, and no output, for a Params value that is not a DNS name,
+// an IPv4 address or a port number (see Params).
 //
 // It is a line state machine, the port of the awk program of
 // deploy/k8s/render-policy.sh. A host line is held, not printed, and the lines
@@ -62,7 +102,10 @@ var (
 // Known quirk, kept on purpose (gt-ywwf2): only those three ends a block, so a
 // host line with no list item after it captures a `port:` line from much later
 // in the file, and the lines between come out after the pin.
-func Render(base string, p Params) string {
+func Render(base string, p Params) (string, error) {
+	if err := p.validate(); err != nil {
+		return "", err
+	}
 	var out strings.Builder
 	emit := func(line string) {
 		out.WriteString(line)
@@ -130,7 +173,7 @@ func Render(base string, p Params) string {
 	if pending {
 		flush()
 	}
-	return out.String()
+	return out.String(), nil
 }
 
 // hostForPort is the in-cluster name for an endpoint port, or "" for a port
@@ -142,7 +185,7 @@ func hostForPort(port string, p Params) string {
 		return p.ForgejoHost
 	case port == "3307":
 		return p.DoltHost
-	case port == p.TrackerPort:
+	case p.TrackerPort != "" && port == p.TrackerPort:
 		return p.TrackerHost
 	}
 	return ""

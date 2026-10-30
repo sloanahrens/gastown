@@ -6,7 +6,9 @@ import (
 	"testing"
 )
 
-// defaultParams are the values a render with no options carries.
+// defaultParams are the values a render with no options carries. DefaultDoltHost,
+// DefaultForgejoHost and DefaultAllowedIP are defined in internal/k8spolicy/
+// options.go (lines 27-29, gt-tpg0p.81), which is not part of this change.
 func defaultParams() Params {
 	return Params{
 		DoltHost:    DefaultDoltHost,
@@ -15,6 +17,16 @@ func defaultParams() Params {
 		TrackerPort: DefaultTrackerPort,
 		AllowedIP:   DefaultAllowedIP,
 	}
+}
+
+// mustRender renders base and fails the test on an error.
+func mustRender(t *testing.T, base string, p Params) string {
+	t.Helper()
+	out, err := Render(base, p)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	return out
 }
 
 // readRepoFile reads a file of the repository by a path relative to this
@@ -71,14 +83,16 @@ func endpointOf(t *testing.T, out, port string) []string {
 }
 
 // TestRenderDefaultsOnTheDockerPolicy renders the checked-in Docker policy with
-// the defaults: no Docker host is left, the header names the route, and exactly
+// the defaults. It is the ONE test of this package that reads the live
+// deploy/polecat/policy.yaml (the work item allows one); every other test uses a
+// stored fixture under testdata: no Docker host is left, the header names the route, and exactly
 // 11 lines differ (the header line removed and added, and for each of the three
 // endpoints the host line removed and added and the pin added). Each endpoint
 // holds the name and the pin of its own port.
 func TestRenderDefaultsOnTheDockerPolicy(t *testing.T) {
 	t.Parallel()
 	base := readRepoFile(t, "../../deploy/polecat/policy.yaml")
-	out := Render(base, defaultParams())
+	out := mustRender(t, base, defaultParams())
 	if strings.Contains(out, "host.docker.internal") {
 		t.Errorf("host.docker.internal is left in the render")
 	}
@@ -112,8 +126,7 @@ func TestRenderDefaultsOnTheDockerPolicy(t *testing.T) {
 // rewritten endpoint.
 func TestRenderSeparateNamesAndPin(t *testing.T) {
 	t.Parallel()
-	base := readRepoFile(t, "../../deploy/polecat/policy.yaml")
-	out := Render(base, Params{
+	out := mustRender(t, readRepoFile(t, "testdata/three.yaml"), Params{
 		DoltHost: "dolt.example", ForgejoHost: "forgejo.example", TrackerHost: "tracker.example",
 		TrackerPort: "7433", AllowedIP: "10.0.0.9",
 	})
@@ -138,7 +151,7 @@ func TestRenderSeparateNamesAndPin(t *testing.T) {
 // host line that ends the file is kept.
 func TestRenderLeavesOtherEndpointsAlone(t *testing.T) {
 	t.Parallel()
-	got := Render(readRepoFile(t, "testdata/other.yaml"), defaultParams())
+	got := mustRender(t, readRepoFile(t, "testdata/other.yaml"), defaultParams())
 	want := `# Gas Town sandbox policy fixture: Dolt and Forgejo are reached through in-cluster Services.
 network_policies:
   golang:
@@ -167,7 +180,7 @@ network_policies:
 // port line, and an endpoint with no port stays intact.
 func TestRenderDoesNotDependOnLineOrder(t *testing.T) {
 	t.Parallel()
-	got := Render(readRepoFile(t, "testdata/order.yaml"), defaultParams())
+	got := mustRender(t, readRepoFile(t, "testdata/order.yaml"), defaultParams())
 	want := `network_policies:
   adjacent:
     endpoints:
@@ -203,7 +216,7 @@ func TestRenderQuirkPendingBlockSwallowsLaterPort(t *testing.T) {
 	t.Parallel()
 	in := "x:\n  - host: host.docker.internal\n\nk: v\nport: 3000\nz: 1\n"
 	want := "x:\n  - host: control-plane.openshell.svc.cluster.local\nallowed_ips: [\"192.168.5.2/32\"]\nport: 3000\n\nk: v\nz: 1\n"
-	if got := Render(in, defaultParams()); got != want {
+	if got := mustRender(t, in, defaultParams()); got != want {
 		t.Errorf("render = %q, want %q", got, want)
 	}
 }
@@ -223,7 +236,7 @@ func TestRenderEndOfInputFlushesPending(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := Render(tc.in, defaultParams()); got != tc.want {
+			if got := mustRender(t, tc.in, defaultParams()); got != tc.want {
 				t.Errorf("Render(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
@@ -252,7 +265,7 @@ func TestRenderPortParsing(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := Render(host+tc.portLine+"\n", defaultParams()); got != tc.want {
+			if got := mustRender(t, host+tc.portLine+"\n", defaultParams()); got != tc.want {
 				t.Errorf("render = %q, want %q", got, tc.want)
 			}
 		})
@@ -261,11 +274,11 @@ func TestRenderPortParsing(t *testing.T) {
 		t.Parallel()
 		p := defaultParams()
 		p.TrackerPort = "9999"
-		got := Render(host+"  port: 9999\n", p)
+		got := mustRender(t, host+"  port: 9999\n", p)
 		if want := renamed(DefaultTrackerHost, "  port: 9999"); got != want {
 			t.Errorf("port 9999 as the tracker's port: %q, want %q", got, want)
 		}
-		if got := Render(host+"  port: 7433\n", p); got != host+"  port: 7433\n" {
+		if got := mustRender(t, host+"  port: 7433\n", p); got != host+"  port: 7433\n" {
 			t.Errorf("7433 renamed though it is not the tracker's port now: %q", got)
 		}
 	})
@@ -287,9 +300,65 @@ func TestRenderTextRules(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := Render(tc.in, defaultParams()); got != tc.want {
+			if got := mustRender(t, tc.in, defaultParams()); got != tc.want {
 				t.Errorf("Render(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRenderRefusesParamsThatBreakTheYAML checks a value that is not a DNS name,
+// an IPv4 address or a port number is refused with an error and no output: a
+// newline, a colon and a space, or a quote would change what the rendered YAML
+// means. An empty TrackerPort is refused too, since it would match a `port:`
+// line with no value.
+func TestRenderRefusesParamsThatBreakTheYAML(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(*Params)
+		want   string
+	}{
+		{"newline in the Dolt host", func(p *Params) { p.DoltHost = "dolt.example\nport: 1" }, "DoltHost"},
+		{"colon and space in the Forgejo host", func(p *Params) { p.ForgejoHost = "forgejo: evil" }, "ForgejoHost"},
+		{"quote in the tracker host", func(p *Params) { p.TrackerHost = `tracker"x` }, "TrackerHost"},
+		{"empty host", func(p *Params) { p.DoltHost = "" }, "DoltHost"},
+		{"quote in the address", func(p *Params) { p.AllowedIP = `10.0.0.9"]` }, "AllowedIP"},
+		{"newline in the address", func(p *Params) { p.AllowedIP = "10.0.0.9\n" }, "AllowedIP"},
+		{"trailing dot address", func(p *Params) { p.AllowedIP = "1.2.3.4." }, "AllowedIP"},
+		{"empty tracker port", func(p *Params) { p.TrackerPort = "" }, "TrackerPort"},
+		{"tracker port with a letter", func(p *Params) { p.TrackerPort = "74x3" }, "TrackerPort"},
+		{"tracker port too long", func(p *Params) { p.TrackerPort = "123456" }, "TrackerPort"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := defaultParams()
+			tc.mutate(&p)
+			out, err := Render("  - host: host.docker.internal\n  port: 3307\n", p)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Render error = %v, want one naming %s", err, tc.want)
+			}
+			if out != "" {
+				t.Errorf("Render returned output with an error: %q", out)
+			}
+		})
+	}
+	// The defaults pass.
+	if _, err := Render("", defaultParams()); err != nil {
+		t.Errorf("Render with the defaults: %v", err)
+	}
+}
+
+// TestRenderEmptyPortValueIsNotTheTracker checks a `port:` line with no value
+// leaves the block unchanged: it must not match a tracker port.
+func TestRenderEmptyPortValueIsNotTheTracker(t *testing.T) {
+	t.Parallel()
+	in := "  - host: host.docker.internal\n  port:\n"
+	if got := mustRender(t, in, defaultParams()); got != in {
+		t.Errorf("render = %q, want the block unchanged: %q", got, in)
+	}
+	if got := hostForPort("", Params{TrackerHost: "tracker.example"}); got != "" {
+		t.Errorf("hostForPort(\"\") with an empty TrackerPort = %q, want no host", got)
 	}
 }
