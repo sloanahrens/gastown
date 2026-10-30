@@ -264,3 +264,76 @@ func TestJevLogtriagePassStopsBetweenCallsWhenEstopped(t *testing.T) {
 		t.Errorf("log = %q, want the pass to say it stopped for the E-stop", logs)
 	}
 }
+
+// A pass logs the repeats it skipped beside the groups it asked, through the
+// pass's own run: the summary line is the only place the repeats are visible.
+func TestJevLogtriageSummaryLogsTheRepeats(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	daemonLog := logtriage.DaemonLogPath(town)
+	if err := os.MkdirAll(filepath.Dir(daemonLog), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := "2026/10/21 03:34:00 kernel: WARNING: disk nearly full\n"
+	if err := os.WriteFile(daemonLog, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The pass's own check and the group's allow the ask; the first repeat
+	// finds the day's spend used up, so every repeat is skipped.
+	allowed := []bool{true, true, false}
+	logs := &bytes.Buffer{}
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevLogtriage: &JevLogtriageConfig{Enabled: true}},
+		},
+		jevLogtriageOpen: func(string, logtriage.Settings, io.Writer) (*logtriage.Pass, error) {
+			return &logtriage.Pass{
+				Asker:      batteryAsker{},
+				DaemonLog:  daemonLog,
+				LogPath:    logtriage.LogPath(town),
+				CursorPath: logtriage.CursorPath(town),
+				Allows: func() (bool, error) {
+					ok := allowed[0]
+					if len(allowed) > 1 {
+						allowed = allowed[1:]
+					}
+					return ok, nil
+				},
+				Sampled: func(string, int) bool { return true },
+			}, nil
+		},
+	}
+
+	d.runJevLogtriage()
+
+	if !strings.Contains(logs.String(), "asked 1 groups, 0 unanswered, 0 repeated, 5 repeats skipped") {
+		t.Errorf("log = %q, want the skipped repeats in the pass's line", logs)
+	}
+}
+
+// A count the pass kept always earns a line, and a pass that did nothing
+// leaves none.
+func TestJevLogtriageSummaryNamesEveryCount(t *testing.T) {
+	t.Parallel()
+	if line := jevLogtriageSummary(logtriage.Summary{}); line != "" {
+		t.Errorf("line = %q, want no line from a pass that did nothing", line)
+	}
+	for _, tc := range []struct {
+		name string
+		sum  logtriage.Summary
+	}{
+		{"asked groups", logtriage.Summary{Asked: 1}},
+		{"unanswered groups", logtriage.Summary{Unanswered: 1}},
+		{"deferred groups", logtriage.Summary{Deferred: 1}},
+		{"dropped groups", logtriage.Summary{Dropped: 1}},
+		{"repeats logged", logtriage.Summary{Repeated: 1}},
+		{"repeats skipped", logtriage.Summary{RepeatsSkipped: 1}},
+		{"the daily cap", logtriage.Summary{CapReached: true}},
+	} {
+		if line := jevLogtriageSummary(tc.sum); line == "" {
+			t.Errorf("a pass that only counted %s logged nothing", tc.name)
+		}
+	}
+}

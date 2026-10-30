@@ -53,10 +53,13 @@ const jevReply = `{
 }`
 
 // fakeJev is a transport that records each request body and answers with
-// body and status, so the test drives the real Jev client without a port.
+// body and status, so the test drives the real Jev client without a port. A
+// call numbered failCall answers a server error instead, so a test can fail one
+// call of a run.
 type fakeJev struct {
 	status   int
 	body     string
+	failCall int
 	requests [][]byte
 }
 
@@ -66,11 +69,15 @@ func (f *fakeJev) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	f.requests = append(f.requests, body)
-	rec := httptest.NewRecorder()
-	if f.status != 0 {
-		rec.WriteHeader(f.status)
+	status, reply := f.status, f.body
+	if f.failCall > 0 && len(f.requests) == f.failCall {
+		status, reply = http.StatusBadGateway, `{"error":"down"}`
 	}
-	_, _ = io.WriteString(rec, f.body)
+	rec := httptest.NewRecorder()
+	if status != 0 {
+		rec.WriteHeader(status)
+	}
+	_, _ = io.WriteString(rec, reply)
 	resp := rec.Result()
 	resp.Request = req
 	return resp, nil

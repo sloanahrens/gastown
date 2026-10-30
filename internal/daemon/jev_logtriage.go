@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/jev/logtriage"
@@ -85,8 +86,19 @@ func (d *Daemon) runJevLogtriage() {
 		d.logger.Printf("jev_logtriage: error: %v", err)
 		return
 	}
-	if sum.Asked > 0 || sum.Unanswered > 0 || sum.Deferred > 0 || sum.Dropped > 0 || sum.CapReached {
-		d.logger.Printf("jev_logtriage: asked %d groups, %d unanswered, %d deferred to the next pass, %d dropped from %d matched lines (daily cap reached: %v)",
-			sum.Asked, sum.Unanswered, sum.Deferred, sum.Dropped, sum.Matched, sum.CapReached)
+	if line := jevLogtriageSummary(sum); line != "" {
+		d.logger.Printf("jev_logtriage: %s", line)
 	}
+}
+
+// jevLogtriageSummary is the line a finished pass logs, or "" when the pass has
+// nothing to report. Every count the pass keeps is in it, repeats included, so
+// a pass that only skipped repeats still leaves a line.
+func jevLogtriageSummary(sum logtriage.Summary) string {
+	if sum.Asked == 0 && sum.Unanswered == 0 && sum.Deferred == 0 && sum.Dropped == 0 &&
+		sum.Repeated == 0 && sum.RepeatsSkipped == 0 && !sum.CapReached {
+		return ""
+	}
+	return fmt.Sprintf("asked %d groups, %d unanswered, %d repeated, %d repeats skipped, %d deferred to the next pass, %d dropped from %d matched lines (daily cap reached: %v)",
+		sum.Asked, sum.Unanswered, sum.Repeated, sum.RepeatsSkipped, sum.Deferred, sum.Dropped, sum.Matched, sum.CapReached)
 }

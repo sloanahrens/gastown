@@ -81,6 +81,10 @@ type Pass struct {
 	// asks it before the first call, and before every call after.
 	Allows func() (bool, error)
 
+	// Sampled says whether a group is asked again to measure answer noise. Nil
+	// means battery.Sampled.
+	Sampled func(key string, version int) bool
+
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
 }
@@ -96,6 +100,12 @@ type Summary struct {
 	// Unanswered is the number of groups that got a line with a reason and no
 	// answers.
 	Unanswered int
+	// Repeated is the number of repeat asks whose answers the pass logged to
+	// the repeat log.
+	Repeated int
+	// RepeatsSkipped is the number of repeat asks the pass did not log: those
+	// whose call failed, and those the cap, the deadline or an error stopped.
+	RepeatsSkipped int
 	// Deferred is the number of groups the pass's deadline ended before it asked
 	// about them. The next pass merges their lines into its own groups.
 	Deferred int
@@ -215,6 +225,8 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	now := p.now()
 	var lines []Line
 	var deferred []*group
+	var repeatsWanted []repeatAsk
+	var rep repeats
 	for i, g := range ordered {
 		if ctx.Err() != nil {
 			deferred = ordered[i:]
@@ -229,7 +241,8 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			sum.Dropped += len(ordered) - i
 			break
 		}
-		line, err := p.ask(ctx, g, now)
+		state := stateOf(g)
+		line, err := p.ask(ctx, g, state, now)
 		if err != nil {
 			deferred = ordered[i:]
 			break
@@ -240,6 +253,9 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			sum.Asked++
 		}
 		lines = append(lines, line)
+		if line.Reason == "" && p.sampled(g.key) {
+			repeatsWanted = append(repeatsWanted, repeatAsk{key: g.key, state: state})
+		}
 	}
 	sum.Deferred = len(deferred)
 
@@ -252,7 +268,18 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	if err := battery.WriteState(p.CursorPath, end); err != nil {
 		return sum, err
 	}
-	return sum, nil
+
+	// The repeats come last, once the pass's own lines and cursor are written,
+	// so no repeat's answer or failure can change either. Every repeat is
+	// billed, so this also keeps them from spending the pass's deadline on a
+	// group it has not asked about yet.
+	var repErr error
+	for _, r := range repeatsWanted {
+		if err := p.repeat(ctx, r, now, &rep, &sum); err != nil && repErr == nil {
+			repErr = err
+		}
+	}
+	return sum, repErr
 }
 
 // scan reads the daemon log from the cursor to its last complete line and adds
@@ -313,11 +340,23 @@ func (p *Pass) scan(groups map[string]*group, cur Cursor) (int, Cursor, error) {
 	return matched, Cursor{Inode: id, Offset: pos}, nil
 }
 
+// stateOf is the state one group's questions are asked about, the same for the
+// original ask and every repeat.
+func stateOf(g *group) groupState {
+	return groupState{
+		Key:     g.key,
+		Count:   g.count,
+		First:   formatTime(g.first),
+		Last:    formatTime(g.last),
+		Samples: g.samples,
+	}
+}
+
 // ask asks one group's question set in one Jev call and builds its line. A
 // call that got an unusable reply or no reply at all logs a reason and no
 // answers; the lines are not read again. Only a done context returns an error,
 // and the caller carries the group to the next pass.
-func (p *Pass) ask(ctx context.Context, g *group, now time.Time) (Line, error) {
+func (p *Pass) ask(ctx context.Context, g *group, state groupState, now time.Time) (Line, error) {
 	line := Line{
 		TS:              now,
 		Key:             g.key,
@@ -327,13 +366,6 @@ func (p *Pass) ask(ctx context.Context, g *group, now time.Time) (Line, error) {
 		Samples:         g.samples,
 		QuestionVersion: Version,
 		MatchedOn:       g.matchedOn,
-	}
-	state := groupState{
-		Key:     g.key,
-		Count:   g.count,
-		First:   formatTime(g.first),
-		Last:    formatTime(g.last),
-		Samples: g.samples,
 	}
 	qs := Questions()
 	got, err := p.Asker.Ask(ctx, state, qs)
@@ -352,6 +384,78 @@ func (p *Pass) ask(ctx context.Context, g *group, now time.Time) (Line, error) {
 	line.Model = got.Model
 	line.Answers = answersFrom(got)
 	return line, nil
+}
+
+// repeats is what a pass's groups share about repeating: once the cap, the
+// deadline or an error stops it, no later group repeats either.
+type repeats struct {
+	stopped bool
+}
+
+// sampled reports whether a group is asked again, through the injected seam
+// when a test sets one.
+func (p *Pass) sampled(key string) bool {
+	if p.Sampled == nil {
+		return battery.Sampled(key, Version)
+	}
+	return p.Sampled(key, Version)
+}
+
+// repeatAsk is one sampled group the pass repeats: the key its lines name and
+// the state its first ask sent.
+type repeatAsk struct {
+	key   string
+	state groupState
+}
+
+// repeat asks r.state battery.ReaskRepeats times through the same Asker,
+// appending every answer to the repeat log. A repeat measures how far Jev's
+// answers move when nothing changes, so a failed repeat is counted and skipped
+// without a retry. The pass writes its lines and cursor before any repeat runs,
+// so an error here ends the repeats for the rest of the pass and is returned for
+// the caller to log, after everything the pass writes has landed.
+func (p *Pass) repeat(ctx context.Context, r repeatAsk, now time.Time, rep *repeats, sum *Summary) error {
+	qs := Questions()
+	for n := 1; n <= battery.ReaskRepeats; n++ {
+		remaining := battery.ReaskRepeats - n + 1
+		if rep.stopped || ctx.Err() != nil {
+			rep.stopped = true
+			sum.RepeatsSkipped += remaining
+			return nil
+		}
+		allowed, err := p.Allows()
+		if err != nil {
+			rep.stopped = true
+			sum.RepeatsSkipped += remaining
+			return fmt.Errorf("reading today's spend: %w", err)
+		}
+		if !allowed {
+			rep.stopped = true
+			sum.CapReached = true
+			sum.RepeatsSkipped += remaining
+			return nil
+		}
+		got, err := p.Asker.Ask(ctx, r.state, qs)
+		if err != nil {
+			sum.RepeatsSkipped++
+			continue
+		}
+		line := battery.ReaskLine{
+			TS:              now,
+			Key:             r.key,
+			Repeat:          n,
+			QuestionVersion: Version,
+			Model:           got.Model,
+			Answers:         answersFrom(got),
+		}
+		if err := battery.AppendReask(p.LogPath, line); err != nil {
+			rep.stopped = true
+			sum.RepeatsSkipped += remaining
+			return fmt.Errorf("writing the repeat log: %w", err)
+		}
+		sum.Repeated++
+	}
+	return nil
 }
 
 // explain fills a bad_response line with the check the reply failed, the

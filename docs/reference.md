@@ -1476,6 +1476,21 @@ model, reason}`. The samples are the daemon's own lines, so the triage log is as
 sensitive as the daemon log it came from. The battery is log-only: it raises no
 attention item, suppresses no line and pages no one.
 
+A pass also asks a sample of its groups again, to measure how far Jev's answers
+move when nothing changes (`gt-sqyk5`). `internal/jev/battery` picks 2 percent of
+the groups by a hash of the key and the question version, and each sampled group
+whose first ask answered is asked five more times with the identical state. The
+repeats run after the pass has written the day's lines and cursor, so nothing
+they do changes either. Each answer appends one line to
+`.runtime/jev/logtriage.reask.jsonl`, beside the triage log:
+`{ts, key, repeat, question_version, model, answers}`. The repeats are never
+scored and nothing reads their answers back; only their counts reach the daemon
+log. A repeat that fails, or that finds the day's cap spent, is skipped and
+counted; a cap that closes during the repeats ends them for the rest of the
+pass. A repeat log the pass cannot write, or a spend read that fails, ends the
+repeats too, is counted, and is logged as the pass's error once its lines and
+cursor have landed.
+
 A pass asks about the 50 largest groups, ties by key. The rest are counted as
 dropped and their lines are not read again. The cursor is a byte offset plus the
 file's inode, so a rotated log starts again at its first line. A last line still
