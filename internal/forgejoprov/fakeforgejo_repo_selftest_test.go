@@ -177,10 +177,12 @@ func TestFakeRepoBranchProtections(t *testing.T) {
 	}
 }
 
-// TestFakeRepoRefusesWhatLiveRefuses checks that each request the live server refuses is
-// refused here with the same status: a body missing what the route needs, a rule name
-// already held, a rule or repository the fake lacks.
-func TestFakeRepoRefusesWhatLiveRefuses(t *testing.T) {
+// TestFakeRepoRefusesWhatTheModelRefuses checks that each request the fake's model refuses
+// is refused here with the status the model gives: a body missing what the route needs, a
+// rule name already held, a rule or repository the fake lacks. The statuses are the model's
+// own and no live server is consulted, so this checks the fake against its model, not
+// against the server.
+func TestFakeRepoRefusesWhatTheModelRefuses(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
@@ -231,6 +233,56 @@ func TestFakeRepoRefusesAnUnescapableSegment(t *testing.T) {
 	if status, _ := f.serveRepo(http.MethodDelete, segments, nil); status != http.StatusBadRequest {
 		t.Fatalf("DELETE of a segment that is not escaped text: status %d, want 400", status)
 	}
+}
+
+// TestFakeRoutesAndLogsTheEscapedPath checks that every route is answered on its escaped
+// path and logged under it: a rule name's "/" is sent as %2F and must stay in its segment,
+// and it shows as %2F in the call log and in the violation log. The routes are a repository
+// route, a user route, and a request that lacks the admin token.
+func TestFakeRoutesAndLogsTheEscapedPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		status int
+	}{
+		{"a rule route with its slash escaped", http.MethodDelete, ruleRoute(fixtureLandRule), http.StatusNoContent},
+		{"a user route", http.MethodGet, "/users/" + fixtureBot, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeForgejo()
+			f.protectedLandBranch = true
+			f.addRepo(fixtureRepo)
+			if status, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureBot))); status != http.StatusCreated {
+				t.Fatalf("create %s: status %d, want 201", fixtureBot, status)
+			}
+			before := len(f.callLog())
+			if status, _ := f.call(t, tc.method, tc.path, ""); status != tc.status {
+				t.Fatalf("%s %s: status %d, want %d", tc.method, tc.path, status, tc.status)
+			}
+			want := []fakeCall{{tc.method, fakeAPIPath + tc.path, tc.status}}
+			if got := f.callLog()[before:]; !slices.Equal(got, want) {
+				t.Fatalf("call log: got %v, want %v", got, want)
+			}
+		})
+	}
+
+	t.Run("a request without the admin token is logged as a violation under its escaped path", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeForgejo()
+		f.protectedLandBranch = true
+		f.addRepo(fixtureRepo)
+		if status, _ := f.send(t, "", http.MethodDelete, ruleRoute(fixtureLandRule), ""); status != http.StatusUnauthorized {
+			t.Fatalf("DELETE without the admin token: status %d, want 401", status)
+		}
+		want := []fakeCall{{http.MethodDelete, fakeAPIPath + ruleRoute(fixtureLandRule), http.StatusUnauthorized}}
+		if got := f.violations(); !slices.Equal(got, want) {
+			t.Fatalf("violations: got %v, want %v", got, want)
+		}
+	})
 }
 
 // TestFakeRepoSwitches checks that each switch changes exactly the behaviour it names:
@@ -342,6 +394,31 @@ func TestFakeRepoSwitches(t *testing.T) {
 				polecat, _ := f.call(t, http.MethodGet, "/users/"+fixtureBot, "")
 				if got := []int{viewer, polecat}; !slices.Equal(got, tc.want) {
 					t.Fatalf("statuses %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("viewerExists stores the viewer bot, so its tokens list and its create is refused", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name       string
+			exists     bool
+			wantTokens int
+			wantCreate int
+		}{
+			{"off: the viewer's tokens are 404 and its create is 201", false, http.StatusNotFound, http.StatusCreated},
+			{"on: the viewer's tokens list 200 and its create is 422", true, http.StatusOK, http.StatusUnprocessableEntity},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				f := newFakeForgejo()
+				f.viewerExists = tc.exists
+				tokens, _ := f.call(t, http.MethodGet, tokensRoute(fixtureViewerBot), "")
+				create, _ := f.call(t, http.MethodPost, "/admin/users", jsonBody(userMap(fixtureViewerBot)))
+				if got := []int{tokens, create}; !slices.Equal(got, []int{tc.wantTokens, tc.wantCreate}) {
+					t.Fatalf("statuses %v, want %v", got, []int{tc.wantTokens, tc.wantCreate})
 				}
 			})
 		}
