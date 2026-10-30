@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -54,6 +55,19 @@ func TestBuildBdInitOptions_ConfigYAMLWithoutTownJSONEndpoint(t *testing.T) {
 	}
 	if cfg := bdInitDoltConfig(townDir); cfg.Host != "127.0.0.2" {
 		t.Fatalf("bdInitDoltConfig host = %q, want 127.0.0.2 from config.yaml", cfg.Host)
+	}
+}
+
+// bd's own default host is 127.0.0.1, so a remote endpoint has to name its
+// host or bd init would initialise a database on this machine instead
+// (gt-q0ppq).
+func TestBuildBdInitOptions_RemoteEndpointNamesTheServer(t *testing.T) {
+	t.Parallel()
+	townDir := writeInstallTown(t, `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","dolt":{"host":"dolt.example","port":3307}}`, "")
+
+	want := beads.InitOptions{Prefix: "hq", ServerHost: "dolt.example", ServerPort: 3307}
+	if opts := buildBdInitOptions(townDir); opts != want {
+		t.Fatalf("buildBdInitOptions = %+v, want %+v", opts, want)
 	}
 }
 
@@ -479,10 +493,36 @@ func TestRunInstallWritesTheTrackerEndpoint(t *testing.T) {
 	}
 }
 
-// An install with a Dolt host writes that endpoint to town.json and starts no
-// local Dolt: a local server's data directory is .dolt-data, and its beads are
-// .beads/ (gt-i3ywa).
-func TestRunInstallDoltHostWritesTheRemoteEndpoint(t *testing.T) {
+// recordingSteps are install steps that record what the install asked them to
+// do, so a test needs neither a Dolt server nor bd.
+type recordingSteps struct {
+	beadChecks  int
+	rigCalls    []string
+	starts      int
+	townInits   []string
+	townConfigs []string
+	initRigErrs error
+}
+
+func (r *recordingSteps) steps() installSteps {
+	return installSteps{
+		checkBeads: func() error { r.beadChecks++; return nil },
+		initRig: func(_, rigName string) (doltserver.InitRigResult, error) {
+			r.rigCalls = append(r.rigCalls, rigName)
+			return doltserver.InitRigResult{Created: true}, r.initRigErrs
+		},
+		startServer:   func(string) error { r.starts++; return nil },
+		initTownBeads: func(townRoot string) error { r.townInits = append(r.townInits, townRoot); return nil },
+		configureTownBeads: func(townRoot string) {
+			r.townConfigs = append(r.townConfigs, townRoot)
+		},
+	}
+}
+
+// An install with a Dolt host writes that endpoint to town.json, creates the hq
+// database on that server, and initialises the town's beads against it without
+// starting a local Dolt: a local server leaves .dolt-data/ behind (gt-q0ppq).
+func TestRunInstallDoltHostCreatesHQOnTheServer(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
@@ -496,8 +536,9 @@ func TestRunInstallDoltHostWritesTheRemoteEndpoint(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			hqPath := filepath.Join(t.TempDir(), "hq")
+			rec := &recordingSteps{}
 
-			opts := installOptions{doltHost: "scratch-dolt", doltHostSet: true, doltPort: tt.doltPort}
+			opts := installOptions{doltHost: "scratch-dolt", doltHostSet: true, doltPort: tt.doltPort, steps: rec.steps()}
 			if err := runInstallWith(opts, []string{hqPath}); err != nil {
 				t.Fatalf("gt install --dolt-host scratch-dolt: %v", err)
 			}
@@ -510,12 +551,48 @@ func TestRunInstallDoltHostWritesTheRemoteEndpoint(t *testing.T) {
 			if town.Dolt == nil || *town.Dolt != want {
 				t.Fatalf("town.json dolt = %+v, want %+v", town.Dolt, want)
 			}
-			for _, rel := range []string{".dolt-data", ".beads"} {
-				if _, err := os.Stat(filepath.Join(hqPath, rel)); !os.IsNotExist(err) {
-					t.Errorf("gt install --dolt-host left %s/ behind (err = %v)", rel, err)
-				}
+			if !reflect.DeepEqual(rec.rigCalls, []string{"hq"}) {
+				t.Errorf("databases created = %q, want the hq database alone", rec.rigCalls)
+			}
+			if !reflect.DeepEqual(rec.townInits, []string{hqPath}) {
+				t.Errorf("town beads initialized at %q, want %q", rec.townInits, hqPath)
+			}
+			if !reflect.DeepEqual(rec.townConfigs, []string{hqPath}) {
+				t.Errorf("town beads configured at %q, want %q", rec.townConfigs, hqPath)
+			}
+			if rec.beadChecks != 1 {
+				t.Errorf("the install checked for bd %d time(s), want once: bd initialises the beads on the server", rec.beadChecks)
+			}
+			if rec.starts != 0 {
+				t.Errorf("the install started %d local Dolt servers, want none", rec.starts)
+			}
+			if _, err := os.Stat(filepath.Join(hqPath, ".dolt-data")); !os.IsNotExist(err) {
+				t.Errorf("gt install --dolt-host left .dolt-data/ behind (err = %v)", err)
 			}
 		})
+	}
+}
+
+// A server that cannot create the hq database fails the install with the host
+// and port named, and the town's beads are never initialised against it
+// (gt-q0ppq).
+func TestRunInstallDoltHostNamesAnUnreachableServer(t *testing.T) {
+	t.Parallel()
+	hqPath := filepath.Join(t.TempDir(), "hq")
+	rec := &recordingSteps{initRigErrs: errors.New("dial tcp: connection refused")}
+
+	opts := installOptions{doltHost: "scratch-dolt", doltHostSet: true, doltPort: 3310, steps: rec.steps()}
+	err := runInstallWith(opts, []string{hqPath})
+	if err == nil {
+		t.Fatal("gt install --dolt-host over an unreachable server succeeded, want an error")
+	}
+	for _, want := range []string{"scratch-dolt:3310", "connection refused"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+	if len(rec.townInits) != 0 {
+		t.Errorf("the install initialised the town's beads at %q after the server refused, want none", rec.townInits)
 	}
 }
 

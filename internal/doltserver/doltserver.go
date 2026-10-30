@@ -38,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 
 	"runtime"
 	"slices"
@@ -3129,6 +3130,13 @@ func (h *host) InitRig(townRoot, rigName string) (InitRigResult, error) {
 			rigName, route.Prefix, route.BackendName())}, nil
 	}
 
+	// A town whose Dolt is on another host keeps its databases there: the
+	// database is created over SQL, and no local data directory or server is
+	// involved (gt-q0ppq).
+	if config.IsRemote() {
+		return h.initRemoteRig(townRoot, rigName, config)
+	}
+
 	rigDir := filepath.Join(config.DataDir, rigName)
 
 	// Check if already exists on disk — idempotent for callers like gt install.
@@ -3206,6 +3214,99 @@ func (h *host) InitRig(townRoot, rigName string) (InitRigResult, error) {
 // InitRig is (*host).InitRig on the real machine.
 func InitRig(townRoot, rigName string) (InitRigResult, error) {
 	return std.InitRig(townRoot, rigName)
+}
+
+// initRemoteRig is InitRig's path for a town whose Dolt is on another host:
+// the database is created on that server over SQL, and the rig's beads config
+// is seeded against it. The server is somebody else's process, so there is no
+// local dolt init, no local server start, and no data directory.
+func (h *host) initRemoteRig(townRoot, rigName string, config *Config) (InitRigResult, error) {
+	ident, err := databaseIdentifier(rigName)
+	if err != nil {
+		return InitRigResult{}, err
+	}
+
+	exists, err := h.remoteDatabaseExists(config, rigName)
+	if err != nil {
+		return InitRigResult{}, fmt.Errorf("reading the database list of the remote Dolt at %s: %w", config.HostPort(), err)
+	}
+	if !exists {
+		if err := h.createRemoteDatabase(config, ident); err != nil {
+			return InitRigResult{}, fmt.Errorf("creating database %q on the remote Dolt at %s: %w", rigName, config.HostPort(), err)
+		}
+		InvalidateDBCache()
+	}
+
+	if err := h.EnsureMetadata(townRoot, rigName); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: database on the remote Dolt has no metadata.json update: %v\n", err)
+	}
+	// serverMode: the remote server is already up, so EnsureRigIssuePrefix
+	// must not start (and then stop) a local one around the seed.
+	if err := h.EnsureRigIssuePrefix(townRoot, rigName, true); err != nil {
+		return InitRigResult{ServerWasRunning: true, Created: !exists}, fmt.Errorf("ensuring issue_prefix for database %q: %w", rigName, err)
+	}
+
+	return InitRigResult{ServerWasRunning: true, Created: !exists}, nil
+}
+
+// remoteDatabaseExists reports whether name is a database on config's server.
+// name is a bind parameter, so a name that never passed databaseIdentifier
+// still cannot reach the statement as SQL.
+func (h *host) remoteDatabaseExists(config *Config, name string) (bool, error) {
+	db, err := h.openMySQL(config.tcpDSN())
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), remoteDoltTimeout)
+	defer cancel()
+
+	var count int
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", name).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// createRemoteDatabase runs CREATE DATABASE IF NOT EXISTS for ident on
+// config's server. ident comes from databaseIdentifier, the only way a name
+// reaches this statement.
+func (h *host) createRemoteDatabase(config *Config, ident string) error {
+	db, err := h.openMySQL(config.tcpDSN())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), remoteDoltTimeout)
+	defer cancel()
+	_, err = db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+ident)
+	return err
+}
+
+// remoteDoltTimeout bounds one statement against a remote server: a host on
+// the network either answers a catalogue read or a CREATE DATABASE in this
+// long, and the install reports the host and port rather than hanging.
+const remoteDoltTimeout = 10 * time.Second
+
+// databaseNameRE is the allowlist a name must match before it is written into
+// SQL: a lower-case letter, then up to 63 more of those, digits and
+// underscores (MySQL's identifier limit is 64).
+var databaseNameRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// databaseIdentifier returns name as a backtick-quoted SQL identifier, or an
+// error when name is not in databaseNameRE. CREATE DATABASE is built by
+// concatenation, so this is the only gate that keeps a name like
+// "hq; DROP DATABASE be" from running as a second statement.
+func databaseIdentifier(name string) (string, error) {
+	if !databaseNameRE.MatchString(name) {
+		return "", fmt.Errorf("refusing database name %q: it must match %s", name, databaseNameRE)
+	}
+	return "`" + name + "`", nil
 }
 
 // rigTrackerRoute returns the route that holds rigName's beads when it names
