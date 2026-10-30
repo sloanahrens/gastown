@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -17,6 +16,10 @@ func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 // variable moved.
 func noEnv(string) string { return "" }
 
+// emptyEnv is the Env of a command line that is refused or only asks for help:
+// the environment is empty, and no run reaches the seams beyond it.
+func emptyEnv() forgejoprov.Env { return forgejoprov.Env{Getenv: noEnv} }
+
 // TestMainUsageExitsTwo holds the script's usage_die: the message names the
 // flag, the usage hint follows it, and the code is 2.
 func TestMainUsageExitsTwo(t *testing.T) {
@@ -27,13 +30,14 @@ func TestMainUsageExitsTwo(t *testing.T) {
 	}{
 		"unknown option":            {args: []string{"--nope"}, stderr: "unknown option: --nope"},
 		"unknown role":              {args: []string{"--role", "admin"}, stderr: "unknown role 'admin'"},
+		"role with a slash":         {args: []string{"--role", "bad/role"}, stderr: "--role 'bad/role' must match"},
 		"--repo without OWNER/NAME": {args: []string{"--repo", "gastown"}, stderr: "--repo 'gastown' must be OWNER/NAME"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			if got := run(tc.args, noEnv, &stdout, &stderr); got != 2 {
+			if got := run(tc.args, emptyEnv(), &stdout, &stderr); got != 2 {
 				t.Fatalf("run(%v) = %d, want 2 (stderr: %s)", tc.args, got, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tc.stderr) {
@@ -57,7 +61,7 @@ func TestMainHelpExitsZero(t *testing.T) {
 		t.Run(flag, func(t *testing.T) {
 			t.Parallel()
 			var stdout, stderr strings.Builder
-			if got := run([]string{flag}, noEnv, &stdout, &stderr); got != 0 {
+			if got := run([]string{flag}, emptyEnv(), &stdout, &stderr); got != 0 {
 				t.Fatalf("run(%s) = %d, want 0 (stderr: %s)", flag, got, stderr.String())
 			}
 			// Each of these is read from the constant that holds the default, so
@@ -87,24 +91,6 @@ func TestMainHelpExitsZero(t *testing.T) {
 	}
 }
 
-// TestMainNotImplemented: a command line that passes every check must not exit 0
-// as though it had provisioned anything. The roles in the message are the
-// literals this test names, so a changed default role list shows up here.
-func TestMainNotImplemented(t *testing.T) {
-	t.Parallel()
-	var stdout, stderr strings.Builder
-	if got := run([]string{"--dry-run"}, noEnv, &stdout, &stderr); got != forgejoprov.ExitFailure {
-		t.Fatalf("run(--dry-run) = %d, want 1 (stderr: %s)", got, stderr.String())
-	}
-	want := fmt.Sprintf(notImplemented, "polecat landing registry", forgejoprov.DefaultAPIURL)
-	if got := strings.TrimSpace(stderr.String()); got != want {
-		t.Errorf("stderr = %q, want %q", got, want)
-	}
-	if stdout.Len() != 0 {
-		t.Errorf("stdout = %q, want nothing before the run lands", stdout.String())
-	}
-}
-
 // TestMainParseFailureExitsOne: a parse failure that is not a usage error is a
 // failed run (1) with its own line, not a refused command line (2) with the
 // usage hint. Parse reports no such failure today; the seam stands so a later
@@ -116,7 +102,7 @@ func TestMainParseFailureExitsOne(t *testing.T) {
 		return nil, errors.New("the admin token file is unreadable")
 	}
 	var stdout, stderr strings.Builder
-	if got := runParse(nil, noEnv, &stdout, &stderr, unreadable); got != forgejoprov.ExitFailure {
+	if got := runParse(nil, emptyEnv(), &stdout, &stderr, unreadable); got != forgejoprov.ExitFailure {
 		t.Fatalf("runParse = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "the admin token file is unreadable") {

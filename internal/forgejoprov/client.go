@@ -2,6 +2,7 @@ package forgejoprov
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,6 +42,8 @@ type Client struct {
 	DryRun bool
 	// Log receives the run's progress lines. Do itself logs nothing.
 	Log func(string)
+	// Ctx cancels the requests; nil means context.Background.
+	Ctx context.Context
 }
 
 // Do sends one request and returns its status and body. A dry run answers
@@ -58,7 +61,11 @@ func (c *Client) Do(method, path string, body any) (int, []byte, error) {
 		}
 		payload = bytes.NewReader(data)
 	}
-	req, err := http.NewRequest(method, url, payload)
+	ctx := c.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, payload)
 	if err != nil {
 		return 0, nil, fmt.Errorf("%s %s: %w", method, url, err)
 	}

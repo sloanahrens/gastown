@@ -71,7 +71,7 @@ func (f *fakeForgejo) serveRepo(method string, parts []string, body []byte) (int
 		case http.MethodGet:
 			return r.listRules()
 		case http.MethodPost:
-			return r.createRule(body)
+			return r.createRule(body, f.dropWhitelistEntry)
 		}
 	case len(segs) == 4 && segs[2] == "branch_protections":
 		switch method {
@@ -129,9 +129,12 @@ func (r *fakeRepo) listRules() (int, string) {
 	return reply(http.StatusOK, out)
 }
 
-// createRule stores a rule the body names with rule_name, and answers 201 with it. A body
-// without a rule_name, or a rule already present for that name, is 422 and stores nothing.
-func (r *fakeRepo) createRule(body []byte) (int, string) {
+// createRule stores the rule the body names with rule_name and answers 201 with it. A
+// body without a rule_name, or a rule already present for that name, is 422 and stores
+// nothing. When dropWhitelist is set the body's merge_whitelist_usernames does not take,
+// so the stored list is empty and the answer shows it, as Forgejo drops a login that is
+// not yet a collaborator.
+func (r *fakeRepo) createRule(body []byte, dropWhitelist bool) (int, string) {
 	var in map[string]any
 	if err := json.Unmarshal(body, &in); err != nil {
 		return refusal(http.StatusUnprocessableEntity, "the body must be a JSON object")
@@ -142,6 +145,9 @@ func (r *fakeRepo) createRule(body []byte) (int, string) {
 	}
 	if _, exists := r.rules[name]; exists {
 		return refusal(http.StatusUnprocessableEntity, "branch protection already exists")
+	}
+	if dropWhitelist {
+		in["merge_whitelist_usernames"] = []string{}
 	}
 	r.rules[name] = in
 	return reply(http.StatusCreated, in)
