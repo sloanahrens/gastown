@@ -32,6 +32,7 @@ const (
 	EnvLogDir  = "TIER_SWEEP_LOGDIR"
 	EnvTrigger = "TIER_SWEEP_TRIGGER"
 	EnvTested  = "TIER_SWEEP_TESTED"
+	EnvResume  = "TIER_SWEEP_RESUME"
 	EnvTimings = "TIER_SWEEP_TIMINGS"
 	EnvJobs    = "TIER_SWEEP_JOBS"
 )
@@ -88,6 +89,11 @@ type Options struct {
 	Trigger string
 	// Tested is TIER_SWEEP_TESTED, the commit a run tests.
 	Tested string
+	// ResumeFile is TIER_SWEEP_RESUME: the record a run appends each package it
+	// passed to, and reads the packages an earlier run at this commit and skip
+	// list already passed, so a sweep cut by a restart runs only what is left.
+	// It is the record file itself; empty names none.
+	ResumeFile string
 	// TimingsFile is TIER_SWEEP_TIMINGS: a persistent file a run replaces with
 	// its own timings lines at the end, so the next run can read this one's.
 	// Empty names none.
@@ -140,11 +146,21 @@ type Host struct {
 	// TIER_SWEEP_TIMINGS, so a reader never sees a torn file. A nil Rename takes
 	// os.Rename in Run.
 	Rename func(oldpath, newpath string) error
+	// AppendFile appends to a file, creating it when it is not there, as one
+	// O_APPEND write does: TIER_SWEEP_RESUME grows one line per passed package
+	// and is never rewritten. A nil AppendFile takes the process's filesystem in
+	// Run, as a nil ReadFile takes os.ReadFile.
+	AppendFile func(name string, data []byte) error
+	// Remove deletes one file, as os.Remove does: the resume record after a
+	// GREEN run, and nothing else. A directory is never removed through it, so a
+	// path that is not the record is a refusal, not a recursive delete (om
+	// b49f3e). A nil Remove leaves the record in place, named once.
+	Remove func(name string) error
 	// RemoveAll deletes a log directory and everything under it, as os.RemoveAll
 	// does: a GREEN run's own directory, and the old ones a prune deletes.
-	// RemoveAll, ReadDir and Lstat are the only way Run reaches a filesystem for
-	// cleanup, and it fills no os default for them: a host that leaves one nil
-	// has every cleanup skipped, named once on stderr (gt-xk9my).
+	// Remove, RemoveAll, ReadDir and Lstat are the only way Run reaches a
+	// filesystem for cleanup, and it fills no os default for them: a host that
+	// leaves one nil has every cleanup skipped, named once on stderr (gt-xk9my).
 	RemoveAll func(path string) error
 	// ReadDir lists a directory, as os.ReadDir does: the prune reads TMPDIR
 	// through it.
@@ -158,7 +174,9 @@ type Host struct {
 var ProcessHost = Host{
 	Env: os.Getenv, MkdirTemp: os.MkdirTemp, MkdirAll: os.MkdirAll,
 	WriteFile: os.WriteFile, ReadFile: os.ReadFile, Rename: os.Rename,
-	RemoveAll: os.RemoveAll, ReadDir: os.ReadDir, Lstat: os.Lstat,
+	AppendFile: appendToFile,
+	Remove:     os.Remove,
+	RemoveAll:  os.RemoveAll, ReadDir: os.ReadDir, Lstat: os.Lstat,
 }
 
 // ParseOptions resolves one tier-sweep command line and the environment it
@@ -170,6 +188,7 @@ func ParseOptions(args []string, host Host) (Options, error) {
 		Timeout:     orDefault(host.Env(EnvTimeout), DefaultTimeout),
 		Trigger:     host.Env(EnvTrigger),
 		Tested:      host.Env(EnvTested),
+		ResumeFile:  host.Env(EnvResume),
 		TimingsFile: host.Env(EnvTimings),
 	}
 	if len(opts.Tiers) == 0 {

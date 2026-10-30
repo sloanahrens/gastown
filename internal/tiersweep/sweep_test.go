@@ -34,6 +34,14 @@ type rig struct {
 	trigger     string
 	// timingsFile is TIER_SWEEP_TIMINGS, empty when the run names none.
 	timingsFile string
+	// tested is TIER_SWEEP_TESTED, and resumeFile TIER_SWEEP_RESUME: empty when
+	// the run names none.
+	tested     string
+	resumeFile string
+	// appendErr fails every append to resumeFile, as a full disk would, and
+	// goflags is the GOFLAGS the run's children inherit.
+	appendErr error
+	goflags   string
 	// writes and renames record the file seams a persistent timings file goes
 	// through, in the order they ran.
 	writes  []string
@@ -43,10 +51,13 @@ type rig struct {
 	ownLogDir bool
 	tmpDir    string
 	// prunes records the directory each prune listed, and removals each
-	// RemoveAll path; removeErrs fails the RemoveAll of one path.
+	// RemoveAll path; removeErrs fails the RemoveAll of one path. removes are the
+	// paths the single-file Remove saw, and removeErr fails every one of them.
 	prunes     []string
 	removals   []string
 	removeErrs map[string]error
+	removes    []string
+	removeErr  error
 	// listings and infos are the fake filesystem the prune reads: the entries
 	// ReadDir answers per directory, and the Lstat answer per path.
 	listings map[string][]fs.DirEntry
@@ -55,6 +66,9 @@ type rig struct {
 	// noCleanupSlots leaves ReadDir, Lstat and RemoveAll unset on the Host, as a
 	// caller that wired only the directory creation does.
 	noCleanupSlots bool
+	// noRemove leaves only the single-file Remove unset on the Host, as a caller
+	// that wired every cleanup but the record's removal does.
+	noRemove bool
 	// events records each stdout line printed and each directory removed, in
 	// the order they happened.
 	events []string
@@ -88,7 +102,7 @@ func newRig(t *testing.T) *rig {
 
 // run calls Run with args and returns the exit code, stdout and stderr.
 func (r *rig) run(args ...string) (code int, stdout, stderr string) {
-	r.events, r.prunes, r.removals = nil, nil, nil
+	r.events, r.prunes, r.removals, r.removes = nil, nil, nil, nil
 	out := &lineWriter{events: &r.events}
 	var errw bytes.Buffer
 	exec := func(dir string, env []string, argv []string, w io.Writer) int {
@@ -103,7 +117,8 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 	}
 	env := map[string]string{
 		EnvLogDir: r.logDir, EnvSkip: r.skip, EnvTrigger: r.trigger, EnvTimeout: "7m",
-		EnvTimings: r.timingsFile, "TMPDIR": r.tmpDir,
+		EnvTimings: r.timingsFile, EnvTested: r.tested, EnvResume: r.resumeFile,
+		"TMPDIR": r.tmpDir, "GOFLAGS": r.goflags,
 	}
 	if r.ownLogDir {
 		env[EnvLogDir] = ""
@@ -120,6 +135,12 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 			r.renames = append(r.renames, [2]string{oldpath, newpath})
 			return os.Rename(oldpath, newpath)
 		},
+		AppendFile: func(name string, data []byte) error {
+			if r.appendErr != nil {
+				return r.appendErr
+			}
+			return appendToFile(name, data)
+		},
 		ReadDir: func(dir string) ([]fs.DirEntry, error) {
 			r.prunes = append(r.prunes, dir)
 			if r.readErr != nil {
@@ -134,6 +155,13 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 			}
 			return info, nil
 		},
+		Remove: func(name string) error {
+			r.removes = append(r.removes, name)
+			return r.removeErr
+		},
+		// RemoveAll stays a recording fake: a rig that deleted for real would
+		// turn every test exercising a GREEN run into a deleter of real paths
+		// (om 9c1ffb). A test that proves a real removal builds its own host.
 		RemoveAll: func(path string) error {
 			r.removals = append(r.removals, path)
 			r.events = append(r.events, "removed "+path)
@@ -141,7 +169,10 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 		},
 	}
 	if r.noCleanupSlots {
-		host.ReadDir, host.Lstat, host.RemoveAll = nil, nil, nil
+		host.ReadDir, host.Lstat, host.RemoveAll, host.Remove = nil, nil, nil, nil
+	}
+	if r.noRemove {
+		host.Remove = nil
 	}
 	code = Run(args, out, &errw, Deps{
 		Host:    host,
