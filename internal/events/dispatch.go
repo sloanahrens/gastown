@@ -61,7 +61,8 @@ func NewDispatchClock() *DispatchClock {
 
 // Add folds evs into the clock, in log order. Adding the same events again
 // changes nothing: a sling already filed is not filed twice, and an end is
-// only a boundary.
+// only a boundary. A spec-dispatch sling ends the bead's run before it first,
+// so it dates the run it starts (DispatchStart).
 func (c *DispatchClock) Add(evs []Event) {
 	for _, ev := range evs {
 		bead := payloadBead(ev)
