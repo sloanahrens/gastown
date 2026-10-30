@@ -173,10 +173,7 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		rigName = beads.GetRigNameForPrefix(townRoot, beads.ExtractPrefix(issueID))
 	}
 
-	r, err := newCrewDoneRun(getenv, gitUserName, gitRoot, townRoot, rigName, branch, issueID)
-	if err != nil {
-		return err
-	}
+	r := newCrewDoneRun(getenv, gitUserName, gitRoot, townRoot, rigName, branch, issueID)
 	r.g = g
 	if rigName != "" {
 		rigPath := filepath.Join(townRoot, rigName)
@@ -229,15 +226,13 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 // newCrewDoneRun is the run a crew submission runs as. Its sender is the
 // session's agent identity (crewActorFromEnv); only a session naming none
 // falls back to the git committer, the human's identity when the human runs
-// gt done by hand (gt-i817y). gitUserName is read only on that fallback.
-func newCrewDoneRun(getenv func(string) string, gitUserName func() string, gitRoot, townRoot, rigName, branch, issueID string) (*doneRun, error) {
+// gt done by hand (gt-i817y). gitUserName is read only on that fallback. A
+// sender left "" is refused by submitCrewForLanding.
+func newCrewDoneRun(getenv func(string) string, gitUserName func() string, gitRoot, townRoot, rigName, branch, issueID string) *doneRun {
 	actor := crewActorFromEnv(getenv)
 	if actor == "" {
 		// Crew have no seat identity; the bead records the committer.
 		actor = strings.TrimSpace(gitUserName())
-		if actor == "" {
-			return nil, fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
-		}
 	}
 	return &doneRun{
 		cwd:           gitRoot,
@@ -247,7 +242,7 @@ func newCrewDoneRun(getenv func(string) string, gitUserName func() string, gitRo
 		branch:        branch,
 		issueID:       issueID,
 		defaultBranch: "main",
-	}, nil
+	}
 }
 
 // polecatAssigneeSeat maps a bead assignee to the tmux session of the polecat
@@ -310,6 +305,10 @@ func submitCrewForLanding(r *doneRun) error {
 	}
 	if r.issueID == "" {
 		return fmt.Errorf("crew branch %s names no bead; pass --bead <id>", r.branch)
+	}
+	if r.sender == "" {
+		// Nobody to attribute the submission to: refuse before any write.
+		return fmt.Errorf("gt done needs BD_ACTOR or git user.name to attribute the submission")
 	}
 	repo := r.deps.repo
 	workStatus, err := repo.CheckUncommittedWork()
