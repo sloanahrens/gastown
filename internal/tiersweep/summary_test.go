@@ -3,6 +3,7 @@ package tiersweep
 import (
 	"regexp"
 	"testing"
+	"time"
 )
 
 // summaryRE is a copy of the daemon's tierSweepSummaryRE
@@ -132,6 +133,20 @@ func TestFormatDurationTable(t *testing.T) {
 	for _, tc := range cases {
 		if got := FormatDuration(tc.seconds); got != tc.want {
 			t.Errorf("FormatDuration(%d) = %q, want %q", tc.seconds, got, tc.want)
+		}
+	}
+}
+
+// TestFormatDurationMatchesDurationString pins the doc comment's claim: the
+// daemon prints elapsed.Round(time.Second) with %s, so a whole second count
+// renders as time.Duration.String() renders it.
+func TestFormatDurationMatchesDurationString(t *testing.T) {
+	t.Parallel()
+	for _, seconds := range []int{0, 1, 45, 59, 60, 61, 134, 3599, 3600, 3601, 3661, 86400, 90061} {
+		want := (time.Duration(seconds) * time.Second).Round(time.Second).String()
+		if got := FormatDuration(seconds); got != want {
+			t.Errorf("FormatDuration(%d) = %q, want %q (time.Duration.String after Round(time.Second))",
+				seconds, got, want)
 		}
 	}
 }

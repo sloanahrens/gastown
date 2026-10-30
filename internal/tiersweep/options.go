@@ -137,7 +137,9 @@ func ParseOptions(args []string, host Host) (Options, error) {
 
 // SkipFor reports how TIER_SWEEP_SKIP treats one package in one tier: whole
 // for a package it skips entirely, or the -skip pattern for a package that
-// runs some of its tests.
+// runs some of its tests. The first entry that names a pattern wins. An entry
+// that stops at the third colon names none, so it changes nothing and a later
+// entry for the same package still applies (gt-jtyrs).
 func SkipFor(list, tier, pkg string) (whole bool, pattern string) {
 	prefix := tier + ":" + pkg
 	for _, entry := range strings.Fields(list) {
@@ -145,7 +147,9 @@ func SkipFor(list, tier, pkg string) (whole bool, pattern string) {
 		case entry == prefix:
 			return true, ""
 		case strings.HasPrefix(entry, prefix+":"):
-			return false, entry[len(prefix)+1:]
+			if rest := entry[len(prefix)+1:]; rest != "" {
+				return false, rest
+			}
 		}
 	}
 	return false, ""
