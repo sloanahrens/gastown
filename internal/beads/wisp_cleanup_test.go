@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -59,6 +60,26 @@ const fakeWispTreeBody = `if [ "$1" = "show" ]; then
       ;;
   esac
   echo '{"schema_version":1}'
+  exit 0
+fi
+exit 0
+`
+
+// fakeWispMachineTreeBody is fakeWispTreeBody answered the way bd 1.2.2 does
+// under BD_MACHINE=1: the flat child lists sit in the envelope's data member,
+// with pagination and error null (gt-8f6m4).
+const fakeWispMachineTreeBody = `if [ "$1" = "show" ]; then
+  case "$2" in
+    gt-wisp-root)
+      echo '{"schema_version":1,"contract_version":1,"data":{"gt-wisp-root":[{"id":"gt-wisp-root.1","status":"open"},{"id":"gt-wisp-root.2","status":"closed"}]},"pagination":null,"error":null}'
+      exit 0
+      ;;
+    gt-wisp-root.1)
+      echo '{"schema_version":1,"contract_version":1,"data":{"gt-wisp-root.1":[{"id":"gt-wisp-root.1.1","status":"in_progress"}]},"pagination":null,"error":null}'
+      exit 0
+      ;;
+  esac
+  echo '{"schema_version":1,"contract_version":1,"data":{"gt-wisp-root.2":[]},"pagination":null,"error":null}'
   exit 0
 fi
 exit 0
@@ -173,6 +194,41 @@ func TestWispTree_WalksAllEphemeralLevels(t *testing.T) {
 	}
 }
 
+// TestWispTree_ReadsMachineEnvelope reproduces the production read: wispCmd
+// runs bd in machine mode, so bd 1.2.2 answers `show --children --json` with
+// the envelope rather than the flat child lists. Unwrapped, every child must
+// still come back; a regression to parsing the envelope directly reports no
+// children or errors, and the patrol closes only the root (gt-8f6m4).
+//
+// The fake is a shell bd, like every other wisp test in this file (gt-da2x):
+// the subprocess path is what is under test — machine mode in the environment
+// and the Cmd layer's unwrapping — so an in-process seam would replace the
+// code this test exists to cover.
+func TestWispTree_ReadsMachineEnvelope(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	writeFakeBd(t, t.TempDir(), logPath, fakeWispMachineTreeBody)
+
+	tree, err := WispTree(context.Background(), t.TempDir(), os.Environ(), "gt-wisp-root")
+	if err != nil {
+		t.Fatalf("WispTree: %v", err)
+	}
+
+	want := []WispStep{
+		{ID: "gt-wisp-root"},
+		{ID: "gt-wisp-root.1", Status: "open"},
+		{ID: "gt-wisp-root.2", Status: "closed"},
+		{ID: "gt-wisp-root.1.1", Status: "in_progress"},
+	}
+	if len(tree) != len(want) {
+		t.Fatalf("WispTree() = %+v, want %+v", tree, want)
+	}
+	for i := range want {
+		if tree[i] != want[i] {
+			t.Fatalf("WispTree()[%d] = %+v, want %+v (full: %+v)", i, tree[i], want[i], tree)
+		}
+	}
+}
+
 // TestWispTree_StopsOnCycles guards the seen-set: a malformed tree whose child
 // points back at an ancestor must terminate instead of looping until the query
 // timeout.
@@ -261,6 +317,172 @@ func TestCloseWispTree_SkipsAlreadyClosedSteps(t *testing.T) {
 	if !containsCall(bdCalls(t, logPath), "close gt-wisp-root --force --reason dog done") {
 		t.Errorf("fake bd calls = %q, want a single close of the root", bdCalls(t, logPath))
 	}
+}
+
+// machineChildrenEnvelope is the shape `BD_MACHINE=1 bd show <id> --children
+// --json` printed on bd 1.2.2 (gt-8f6m4).
+const machineChildrenEnvelope = `{"schema_version":1,"contract_version":1,` +
+	`"data":{"gt-wisp-root":[{"id":"gt-wisp-root.1","status":"open"}]},` +
+	`"pagination":null,"error":null}`
+
+// machineChildrenEnvelopeShuffled is the same envelope with its members
+// written in a different order, so a case using it shows the parser's answer
+// comes from its sorted traversal rather than the bytes' order.
+const machineChildrenEnvelopeShuffled = `{"error":null,"data":{"gt-wisp-root":[{"id":"gt-wisp-root.1","status":"open"}]},` +
+	`"pagination":null,"schema_version":1,"contract_version":1}`
+
+// TestParseChildrenJSON_RefusesUnknownShape pins the parser's contract: the
+// flat payload is still read, and any object member that is not a child list —
+// a number, an object, null, or bd's machine envelope itself — is an error
+// naming the member rather than a silent "no children" (gt-8f6m4). Members
+// are visited in sorted order, so the cases that put the envelope's other
+// members first and last in the bytes answer identically.
+func TestParseChildrenJSON_RefusesUnknownShape(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantIDs []string
+		wantErr bool
+		wantKey string // member the error must name
+	}{
+		{
+			name:    "flat shape parses, metadata last",
+			body:    `{"gt-wisp-root":[{"id":"gt-wisp-root.1","status":"open"}],"schema_version":1}`,
+			wantIDs: []string{"gt-wisp-root.1"},
+		},
+		{
+			name:    "flat shape parses, metadata first",
+			body:    `{"schema_version":1,"gt-wisp-root":[{"id":"gt-wisp-root.1","status":"open"}]}`,
+			wantIDs: []string{"gt-wisp-root.1"},
+		},
+		{
+			name: "schema_version alone is no children",
+			body: `{"schema_version":1}`,
+		},
+		{
+			name:    "number member is refused",
+			body:    `{"contract_version":1}`,
+			wantErr: true,
+			wantKey: "contract_version",
+		},
+		{
+			name:    "null member is refused",
+			body:    `{"gt-wisp-root":null}`,
+			wantErr: true,
+			wantKey: "gt-wisp-root",
+		},
+		{
+			name:    "object member is refused",
+			body:    `{"gt-wisp-root":{"gt-wisp-root.1":[]}}`,
+			wantErr: true,
+			wantKey: "gt-wisp-root",
+		},
+		{
+			name:    "array of non-issues is refused",
+			body:    `{"gt-wisp-root":[1,2]}`,
+			wantErr: true,
+			wantKey: "gt-wisp-root",
+		},
+		{
+			name:    "two child lists are refused",
+			body:    `{"gt-wisp-a":[],"gt-wisp-b":[]}`,
+			wantErr: true,
+			wantKey: "2 child lists",
+		},
+		{
+			name:    "unknown member refused beside a child list",
+			body:    `{"a-null":null,"gt-wisp-root":[{"id":"gt-wisp-root.1","status":"open"}]}`,
+			wantErr: true,
+			wantKey: "a-null",
+		},
+		{
+			name:    "machine envelope is refused",
+			body:    machineChildrenEnvelope,
+			wantErr: true,
+			wantKey: "contract_version", // first member in sorted order
+		},
+		{
+			name:    "machine envelope is refused, members in another order",
+			body:    machineChildrenEnvelopeShuffled,
+			wantErr: true,
+			wantKey: "contract_version",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			children, err := parseChildrenJSON([]byte(tt.body))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseChildrenJSON = %v, nil; want an error", childIDs(children))
+				}
+				if !strings.Contains(err.Error(), tt.wantKey) {
+					t.Fatalf("error %q does not name %q", err, tt.wantKey)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseChildrenJSON: %v", err)
+			}
+			if got := childIDs(children); !slices.Equal(got, tt.wantIDs) {
+				t.Fatalf("parseChildrenJSON = %v, want %v", got, tt.wantIDs)
+			}
+		})
+	}
+}
+
+// TestParseChildrenMapJSON_ChildlessParent covers what a multi-parent read
+// does with a parent that has no children. Measured on bd 1.2.2, that parent
+// comes back as [] (processIssue initializes every resolved parent's list
+// before reading its dependents), so ChildrenOf must read it, find no
+// children, and drop it — not refuse the whole payload (gt-8f6m4).
+func TestParseChildrenMapJSON_ChildlessParent(t *testing.T) {
+	const withChildren = `{"id":"gt-wisp-a.1","status":"open"}`
+	for _, tt := range []struct{ name, body string }{
+		{"metadata last", `{"gt-wisp-a":[` + withChildren + `],"gt-wisp-b":[],"schema_version":1}`},
+		{"metadata first", `{"schema_version":1,"gt-wisp-b":[],"gt-wisp-a":[` + withChildren + `]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseChildrenMapJSON([]byte(tt.body))
+			if err != nil {
+				t.Fatalf("parseChildrenMapJSON: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("parseChildrenMapJSON = %v, want only the parent with children", got)
+			}
+			if children := got["gt-wisp-a"]; len(children) != 1 || children[0].ID != "gt-wisp-a.1" {
+				t.Fatalf("gt-wisp-a = %v, want its one child", children)
+			}
+			if children, ok := got["gt-wisp-b"]; ok {
+				t.Fatalf("childless gt-wisp-b kept: %v", children)
+			}
+		})
+	}
+}
+
+// TestParseChildrenMapJSON_RefusesUnknownShape covers the same rule on the
+// multi-parent reader: bd's envelope members that carry no child list are
+// errors naming the member, never silently dropped (gt-8f6m4).
+func TestParseChildrenMapJSON_RefusesUnknownShape(t *testing.T) {
+	for _, tt := range []struct{ name, body, wantKey string }{
+		{"machine envelope", machineChildrenEnvelope, "contract_version"},
+		{"null member", `{"gt-wisp-root":null}`, "gt-wisp-root"},
+		{"number member", `{"contract_version":1}`, "contract_version"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseChildrenMapJSON([]byte(tt.body)); err == nil || !strings.Contains(err.Error(), tt.wantKey) {
+				t.Fatalf("parseChildrenMapJSON(%s) error = %v, want an error naming %q", tt.body, err, tt.wantKey)
+			}
+		})
+	}
+}
+
+func childIDs(issues []*Issue) []string {
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	return ids
 }
 
 func containsCall(calls []string, want string) bool {

@@ -122,8 +122,16 @@ func WispTree(ctx context.Context, dir string, env []string, rootID string) ([]W
 }
 
 // wispChildren reads one level of a wisp tree.
+//
+// The read runs in machine mode (wispCmd), so bd answers with its envelope.
+// The Cmd layer already unwraps a buffered stdout; this unwraps again so the
+// parse does not depend on that layer. LegacyPayload passes an already-flat
+// payload through unchanged, so the second unwrap is a no-op when Cmd did its
+// job, and the strict parse behind it refuses an envelope rather than reading
+// one of its members as "no children" (gt-8f6m4).
 func wispChildren(ctx context.Context, dir string, env []string, parentID string) ([]*Issue, error) {
-	cmd := wispCmd(ctx, dir, env, "show", parentID, "--children", "--json")
+	args := []string{"show", parentID, "--children", "--json"}
+	cmd := wispCmd(ctx, dir, env, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -133,7 +141,7 @@ func wispChildren(ctx context.Context, dir string, env []string, parentID string
 		}
 		return nil, fmt.Errorf("bd show %s --children: %w", parentID, err)
 	}
-	return parseChildrenJSON(stdout.Bytes())
+	return parseChildrenJSON(LegacyPayload(args, stdout.Bytes()))
 }
 
 // CloseWispTree force-closes every step of tree that is not already closed,
