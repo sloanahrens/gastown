@@ -1,0 +1,201 @@
+{
+  "days": 7,
+  "window": {
+    "first": "2026-10-24",
+    "last": "2026-10-30",
+    "verdicts": 4,
+    "no_finding_text": 0
+  },
+  "prior": {
+    "first": "2026-10-17",
+    "last": "2026-10-23",
+    "verdicts": 2,
+    "no_finding_text": 1
+  },
+  "classes": [
+    {
+      "id": "fail-open",
+      "name": "an error reads as success",
+      "rule": 1,
+      "current": {
+        "findings": 1,
+        "beads": 1,
+        "rounds": 1
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "silent-drop",
+      "name": "a bad input is dropped without a word",
+      "rule": 1,
+      "current": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "missing-refusal-test",
+      "name": "a refusal branch has no test",
+      "rule": 3,
+      "current": {
+        "findings": 1,
+        "beads": 1,
+        "rounds": 2
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "no-red-when-removed",
+      "name": "no test goes red when the code is removed",
+      "rule": 2,
+      "current": {
+        "findings": 1,
+        "beads": 1,
+        "rounds": 2
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "wall-clock-wait",
+      "name": "a wait or sleep on the wall clock",
+      "current": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      },
+      "prior": {
+        "findings": 1,
+        "beads": 1,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "non-hermetic-test",
+      "name": "package state or a test on the host",
+      "rule": 7,
+      "current": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "doc-contradicts-code",
+      "name": "a doc says what the code does not do",
+      "current": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "comment-claim",
+      "name": "a comment carries a line number or an untrue claim",
+      "current": {
+        "findings": 1,
+        "beads": 1,
+        "rounds": 0
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "scope-widened",
+      "name": "the change reaches past its scope",
+      "rule": 9,
+      "current": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "secret-in-output",
+      "name": "a secret reaches output",
+      "rule": 12,
+      "current": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "script-holds-logic",
+      "name": "a new script holds the logic",
+      "rule": 8,
+      "current": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    },
+    {
+      "id": "unverified-claim",
+      "name": "a verification claim shows no output",
+      "rule": 6,
+      "current": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      },
+      "prior": {
+        "findings": 0,
+        "beads": 0,
+        "rounds": 0
+      }
+    }
+  ],
+  "unclassified": [
+    {
+      "title": "a finding from a class not yet seeded",
+      "current": 1,
+      "prior": 0
+    }
+  ]
+}
