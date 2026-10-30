@@ -252,7 +252,7 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 		// the shutdown path, which failSpecSling leaves alone. The run is
 		// timed on the daemon's clock so the kill can be answered without
 		// waiting one out (gt-vaivp).
-		killedAtBound := errors.Is(ctx.Err(), context.DeadlineExceeded) || took >= specSlingBound()
+		killedAtBound := errors.Is(ctx.Err(), context.DeadlineExceeded) || (took >= specSlingBound() && !exitedOnItsOwn(err))
 		d.logger.Printf("spec_dispatch: %s: %s", f.Bead, reason)
 		d.failSpecSling(f, reason, killedAtBound)
 		d.feedSpecSlingOutcome(f, specSlingLost, specDispatchTickEntry{Bead: f.Bead, Rig: f.Rig,
@@ -273,6 +273,15 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 	}
 	result, entry := specSlingResultOf(r, f.Bead)
 	d.feedSpecSlingOutcome(f, result, entry)
+}
+
+// exitedOnItsOwn reports whether err says the process exited by itself with a
+// status: a run that took its whole bound and then failed with a normal exit
+// code was not killed by the bound, so it is not a timeout kill. A signal death
+// has no exit code (-1) and an error that carries none is not a normal exit.
+func exitedOnItsOwn(err error) bool {
+	var coded interface{ ExitCode() int }
+	return errors.As(err, &coded) && coded.ExitCode() >= 0
 }
 
 // specSlingResultOf reads how one sling job ended out of its report: `gt spec

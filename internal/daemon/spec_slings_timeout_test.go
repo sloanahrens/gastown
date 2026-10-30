@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"slices"
 	"strings"
@@ -337,4 +338,36 @@ func daemonWhoseSlingFailed(t *testing.T, o slingFailure) (*fakeCLI, *Daemon, fu
 		return fake.run(cmd)
 	}
 	return fake, d, lines
+}
+
+// exitCoded is an error that carries a process exit code, as exec.ExitError does.
+type exitCoded struct{ code int }
+
+func (e exitCoded) Error() string { return "exit status" }
+func (e exitCoded) ExitCode() int { return e.code }
+
+// A run that took its whole bound and then failed with a normal exit code was
+// not killed by the bound; a signal death (no exit code) and a plain error are.
+func TestExitedOnItsOwnSeparatesANormalExitFromAKill(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"exit status 1", exitCoded{1}, true},
+		{"exit status 0 reported with an error", exitCoded{0}, true},
+		{"wrapped exit status 2", fmt.Errorf("sling: %w", exitCoded{2}), true},
+		{"killed by a signal (-1)", exitCoded{-1}, false},
+		{"a plain error", errors.New("signal: terminated"), false},
+		{"no error", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := exitedOnItsOwn(c.err); got != c.want {
+				t.Errorf("exitedOnItsOwn(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
 }

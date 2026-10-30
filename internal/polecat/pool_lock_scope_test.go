@@ -104,3 +104,29 @@ func fullPolecat(t *testing.T, rigPath, rigName, name string) {
 		t.Fatal(err)
 	}
 }
+
+// ReconcilePool's unlock is deferred: a panic inside the reconcile still
+// releases the pool lock, so no later spawn of the rig waits on a lock a dead
+// call holds (gt-vaivp).
+func TestReconcilePoolReleasesThePoolLockWhenTheReconcilePanics(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rigPath, "polecats"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &rig.Rig{Name: "myrig", Path: rigPath}
+	m := newTestManager(r, newWorld(), panickingProbe{}, newNoDatabaseDB())
+
+	lockPath := filepath.Join(rigPath, ".runtime", "locks", "polecat-pool.lock")
+	func() {
+		defer func() { _ = recover() }()
+		m.reconcilePoolLocked()
+	}()
+	if !poolLockIsFree(t, lockPath) {
+		t.Error("the pool lock stayed held after a panic inside the reconcile")
+	}
+}
+
+// panickingProbe is a session probe whose every method panics: the nil embedded
+// interface dereferences on the first call.
+type panickingProbe struct{ sessionProbe }

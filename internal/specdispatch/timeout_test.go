@@ -31,7 +31,7 @@ func TestRetryAfterTimeout(t *testing.T) {
 		{"both labels, the retries spent", timedOut, metadata(TimeoutRetries), TimeoutRetries, false},
 		{"a count written as a number", timedOut,
 			[]byte(fmt.Sprintf(`{"%s":%d}`, TimeoutAttemptsKey, TimeoutRetries)), TimeoutRetries, false},
-		{"metadata this package cannot read", timedOut, []byte("{not json"), 0, false},
+		{"metadata this package cannot read", timedOut, []byte("{not json"), TimeoutRetries, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -58,7 +58,8 @@ func TestTimeoutAttemptsReadsOnlyItsOwnMetadataKey(t *testing.T) {
 		{"its own key as a number", []byte(`{"spec_dispatch_timeout_attempts":2}`), 2},
 		{"another writer's key", []byte(`{"attempts":"5"}`), 0},
 		{"no metadata", nil, 0},
-		{"a count that is not a number", []byte(`{"spec_dispatch_timeout_attempts":"many"}`), 0},
+		{"a count that is not a number", []byte(`{"spec_dispatch_timeout_attempts":"many"}`), TimeoutRetries},
+		{"metadata that is not json", []byte("{not json"), TimeoutRetries},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

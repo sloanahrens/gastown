@@ -35,25 +35,33 @@ const TimeoutAttemptsKey = "spec_dispatch_timeout_attempts"
 // kill writes stays for a person.
 const TimeoutRetries = 3
 
-// TimeoutAttempts reads the bound-kill count a bead's metadata records, and 0
-// for metadata that holds none: a bead never killed at its bound, a metadata
-// blob another writer set, and one this package cannot parse all read as no
-// attempts, which grants the bead its retries rather than holding it out.
+// TimeoutAttempts reads the bound-kill count a bead's metadata records. Metadata
+// that holds no count (none at all, or another writer's keys) reads as 0: the
+// bead was never killed at its bound. A count that is present but unreadable
+// (metadata that is not JSON, a value that is not a number) reads as the retries
+// spent: a bead whose record cannot be trusted is held for a person rather than
+// granted retries without end.
 func TimeoutAttempts(metadata []byte) int {
-	var fields map[string]any
-	if err := json.Unmarshal(metadata, &fields); err != nil {
+	if len(metadata) == 0 {
 		return 0
 	}
-	switch v := fields[TimeoutAttemptsKey].(type) {
+	var fields map[string]any
+	if err := json.Unmarshal(metadata, &fields); err != nil {
+		return TimeoutRetries
+	}
+	raw, ok := fields[TimeoutAttemptsKey]
+	if !ok {
+		return 0
+	}
+	switch v := raw.(type) {
 	case float64:
 		return int(v)
 	case string:
-		n, err := strconv.Atoi(v)
-		if err == nil {
+		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
 	}
-	return 0
+	return TimeoutRetries
 }
 
 // RetryAfterTimeout reads a bead a failed sling left: attempt is the bound

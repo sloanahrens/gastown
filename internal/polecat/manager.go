@@ -2893,15 +2893,21 @@ func (m *Manager) killExistingPolecatSession(name, action string) error {
 // In addition to directory checks, this also kills orphaned tmux sessions
 // (sessions without directories are broken).
 func (m *Manager) ReconcilePool() {
+	m.reconcilePoolLocked()
+	// The pruned worktree entries are git work, run after the lock is back:
+	// the lock is held for the count-and-claim only (gt-vaivp).
+	m.pruneWorktrees()
+}
+
+// reconcilePoolLocked is ReconcilePool under the pool lock. The unlock is
+// deferred, so a panic inside the reconcile still releases the lock.
+func (m *Manager) reconcilePoolLocked() {
 	fl, err := m.lockPool()
 	if err != nil {
 		return
 	}
+	defer func() { _ = fl.Unlock() }()
 	m.reconcilePoolInternal()
-	_ = fl.Unlock()
-	// The pruned worktree entries are git work, run after the lock is back:
-	// the lock is held for the count-and-claim only (gt-vaivp).
-	m.pruneWorktrees()
 }
 
 // reconcilePoolInternal performs pool reconciliation without acquiring the pool lock.
