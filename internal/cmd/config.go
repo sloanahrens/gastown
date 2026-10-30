@@ -1001,7 +1001,7 @@ func configSet(e configCmdEnv, args []string) error {
 		}
 		// The endpoint lives in mayor/town.json (gt-y3pgh.3); gt dolt start
 		// writes the server's config.yaml from it.
-		if err := stampTownDoltPort(filepath.Join(townRoot, workspace.PrimaryMarker), port); err != nil {
+		if err := stampTownDoltEndpoint(filepath.Join(townRoot, workspace.PrimaryMarker), config.DoltEndpoint{Port: port}); err != nil {
 			return fmt.Errorf("saving town.json: %w", err)
 		}
 		fmt.Fprintf(e.out, "Set dolt.port = %s in mayor/town.json\n", style.Bold.Render(value))

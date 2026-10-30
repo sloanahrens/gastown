@@ -44,6 +44,7 @@ var (
 	installShell      bool
 	installSupervisor bool
 	installDoltPort   int
+	installDoltHost   string
 )
 
 var installCmd = &cobra.Command{
@@ -89,6 +90,7 @@ func init() {
 	installCmd.Flags().BoolVar(&installShell, "shell", false, "Install shell integration (sets GT_TOWN_ROOT/GT_RIG env vars)")
 	installCmd.Flags().BoolVar(&installSupervisor, "supervisor", false, "Configure launchd/systemd for daemon auto-restart")
 	installCmd.Flags().IntVar(&installDoltPort, "dolt-port", 0, "Dolt SQL server port (default 3307; set when another instance owns the default port)")
+	installCmd.Flags().StringVar(&installDoltHost, "dolt-host", "", "Host of the Dolt server the town uses; the install writes it to town.json and starts no local Dolt")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -107,6 +109,10 @@ type installOptions struct {
 	shell      bool
 	supervisor bool
 	doltPort   int
+	doltHost   string
+	// doltHostSet is whether the flag was given at all: an empty value is a
+	// refusal, and it cannot be told from no flag by the string alone.
+	doltHostSet bool
 }
 
 // installOptionsFromFlags is the options the command's flags describe.
@@ -123,11 +129,16 @@ func installOptionsFromFlags() installOptions {
 		shell:      installShell,
 		supervisor: installSupervisor,
 		doltPort:   installDoltPort,
+		doltHost:   installDoltHost,
 	}
 }
 
 func runInstall(cmd *cobra.Command, args []string) error {
-	return runInstallWith(installOptionsFromFlags(), args)
+	opts := installOptionsFromFlags()
+	if cmd != nil {
+		opts.doltHostSet = cmd.Flags().Changed("dolt-host")
+	}
+	return runInstallWith(opts, args)
 }
 
 // runInstallWith is runInstall's body over explicit options.
@@ -142,6 +153,20 @@ func runInstallWith(opts installOptions, args []string) error {
 	if targetPath == "" {
 		return fmt.Errorf("install path must not be empty")
 	}
+
+	// --dolt-host names the server the town's Dolt already is, so the install
+	// writes that endpoint and starts no server of its own (gt-i3ywa). Both
+	// refusals come before anything is written.
+	doltHost := strings.TrimSpace(opts.doltHost)
+	if opts.doltHostSet || doltHost != "" {
+		if opts.noBeads {
+			return fmt.Errorf("--dolt-host cannot be combined with --no-beads: the town's beads are what live on the remote Dolt")
+		}
+		if err := installDoltHostRefusal(doltHost); err != nil {
+			return err
+		}
+	}
+	remoteDolt := doltHost != ""
 
 	// Expand ~ and resolve to absolute path
 	if targetPath[0] == '~' {
@@ -181,9 +206,23 @@ func runInstallWith(opts installOptions, args []string) error {
 	// mayor/town.json; 0 when it sets up no Dolt (--no-beads without
 	// --dolt-port), which leaves the town without an endpoint.
 	installEndpointPort := opts.doltPort
+	if remoteDolt {
+		// The endpoint is a server elsewhere: the port is --dolt-port, else
+		// the one the town already names, else Dolt's server default. There is
+		// no local port to probe.
+		if installEndpointPort == 0 {
+			installEndpointPort = config.ResolveDoltPort(absPath)
+		}
+		if installEndpointPort == 0 {
+			installEndpointPort = doltserver.DefaultPort
+		}
+	}
 
-	// Ensure beads (bd) is available before proceeding
-	if !opts.noBeads {
+	// Ensure beads (bd) is available before proceeding. A remote endpoint
+	// leaves every step here to the machine that runs the server: bd and dolt
+	// are that machine's, and the identity, port and server start all belong
+	// to a local Dolt this town does not have.
+	if !opts.noBeads && !remoteDolt {
 		if err := deps.EnsureBeads(); err != nil {
 			return fmt.Errorf("beads dependency check failed: %w", err)
 		}
@@ -290,7 +329,7 @@ func runInstallWith(opts installOptions, args []string) error {
 		fmt.Printf("   • mayor/town.json already exists, preserving\n")
 	}
 	if installEndpointPort != 0 {
-		if err := stampTownDoltPort(townPath, installEndpointPort); err != nil {
+		if err := stampTownDoltEndpoint(townPath, config.DoltEndpoint{Host: doltHost, Port: installEndpointPort}); err != nil {
 			return fmt.Errorf("writing the Dolt endpoint to town.json: %w", err)
 		}
 	}
@@ -370,7 +409,12 @@ func runInstallWith(opts installOptions, args []string) error {
 	// Initialize town-level beads database (optional)
 	// Town beads (hq- prefix) stores town mail, cross-rig coordination, and handoffs.
 	// Rig beads are separate and have their own prefixes.
-	if !opts.noBeads {
+	// A remote endpoint's hq database and beads are created on the server
+	// itself (gt-q0ppq), so this install writes neither locally.
+	if remoteDolt {
+		fmt.Printf("   • Dolt endpoint %s:%d is remote: no local Dolt started, no local .beads/ created\n", doltHost, installEndpointPort)
+	}
+	if !opts.noBeads && !remoteDolt {
 		port := doltserver.DefaultConfig(absPath).Port
 		externalTestDolt := useExternalTestDoltServer(port)
 
@@ -502,7 +546,7 @@ func runInstallWith(opts installOptions, args []string) error {
 	step++
 	fmt.Printf("  %d. (Optional) Configure agents: %s\n", step, style.Dim.Render("gt config agent list"))
 	fmt.Println()
-	if !opts.noBeads {
+	if !opts.noBeads && !remoteDolt {
 		fmt.Printf("Note: Dolt server is running (stop with %s)\n", style.Dim.Render("gt dolt stop"))
 	}
 
@@ -670,14 +714,32 @@ func writeJSON(path string, data interface{}) error {
 	return os.WriteFile(path, content, 0644)
 }
 
-// stampTownDoltPort writes port as the town's Dolt endpoint port in
-// town.json, keeping the rest of the file (gt-y3pgh.3).
-func stampTownDoltPort(townPath string, port int) error {
+// installDoltHostRefusal is why host cannot name a remote Dolt, or nil. The
+// loopback literals are doltserver.Config.IsRemote's: a town whose Dolt is
+// itself has no use for --dolt-host, and would start no server either.
+func installDoltHostRefusal(host string) error {
+	switch strings.ToLower(host) {
+	case "":
+		return fmt.Errorf("--dolt-host needs a host: an empty host is this machine, which is the local Dolt the flag replaces")
+	case "localhost", "127.0.0.1", "::1", "[::1]":
+		return fmt.Errorf("--dolt-host %q is a loopback address, so it names a local Dolt; name the server that runs it instead", host)
+	}
+	return nil
+}
+
+// stampTownDoltEndpoint writes endpoint as the town's Dolt endpoint in
+// town.json, keeping the rest of the file (gt-y3pgh.3). An empty host is this
+// machine: it leaves a host the town already names alone, so a --force
+// re-install keeps the operator's endpoint.
+func stampTownDoltEndpoint(townPath string, endpoint config.DoltEndpoint) error {
 	return config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
 		if town.Dolt == nil {
 			town.Dolt = &config.DoltEndpoint{}
 		}
-		town.Dolt.Port = port
+		if endpoint.Host != "" {
+			town.Dolt.Host = endpoint.Host
+		}
+		town.Dolt.Port = endpoint.Port
 		return nil
 	})
 }
