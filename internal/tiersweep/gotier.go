@@ -72,6 +72,10 @@ type Runner struct {
 	// nil, or a package with no entry, keeps list order. A run of one job
 	// ignores Walls and keeps list order, so it prints what it always has.
 	Walls map[string]int64
+	// Began, when not nil, is told each package the pool is about to hand to
+	// Exec, before the pool starts the next one. The pool cannot see a command's
+	// own start, so a test reads the order the pool hands them out from here.
+	Began func(pkg string)
 	// stderr keeps the progress lines and the reports whole while a run of more
 	// than one job writes them from the dispatcher and the collector at once.
 	stderrMu sync.Mutex

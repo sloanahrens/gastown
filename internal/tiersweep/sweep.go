@@ -43,6 +43,9 @@ type Deps struct {
 	Environ []string
 	// Now is the clock a tier's elapsed time is read from.
 	Now func() time.Time
+	// Began is told each package the integration tier's pool hands to Exec, in
+	// the order it hands them out. Nil records nothing; a test reads the order.
+	Began func(pkg string)
 }
 
 // Run runs the tiers args names, in the order given, and returns the exit code.
@@ -119,7 +122,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		walls = readWalls(host, opts.TimingsFile, stderr)
 	}
 	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr,
-		Now: now, Timings: timings, Walls: walls}
+		Now: now, Timings: timings, Walls: walls, Began: d.Began}
 	code := runTiers(s, opts.Tiers, stdout, stderr)
 	if code == UsageExit {
 		timings.Close()
