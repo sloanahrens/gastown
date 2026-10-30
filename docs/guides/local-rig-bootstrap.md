@@ -8,8 +8,12 @@ existing shape, which makes it a poor fit for manually assembled local rigs wher
 
 Use the bootstrap command instead:
 
+`./cmd/bootstrap-local-rig` is a path inside the gastown source checkout. `-C` makes
+`go run` build from that checkout, so the command runs from any directory. Replace
+`<path-to-gastown>` with the absolute path of your gastown checkout before running it:
+
 ```bash
-go run ./cmd/bootstrap-local-rig \
+go run -C <path-to-gastown> ./cmd/bootstrap-local-rig \
   --town-root /gt \
   --rig nightrider_local \
   --local-repo /gt/nightRider \
