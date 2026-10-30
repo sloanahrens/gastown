@@ -25,6 +25,25 @@ const (
 	// one deploy/polecat/Dockerfile uses.
 	DaemonBaseImage = "ubuntu:24.04"
 
+	// ClaudeCLIVersion is the claude CLI the daemon image carries: the exact
+	// version om's reviewer backend runs (claude -p --model haiku). It is the
+	// version the operator's host runs, so the image and the host agree.
+	ClaudeCLIVersion = "2.1.314"
+
+	// ClaudeCLISHA256 is the sha256 of the linux-arm64 claude binary at
+	// ClaudeCLIVersion, taken from Anthropic's release manifest at
+	// https://downloads.claude.ai/claude-code-releases/2.1.314/manifest.json
+	// (fetched 2026-10-30, platform linux-arm64, the glibc build the ubuntu:24.04
+	// base needs). It is 64 lower-case hex digits; a fetch whose bytes differ is
+	// refused.
+	ClaudeCLISHA256 = "a66c0a8f5d0c87a439953d797985192bbcbaefbce2e0d7b2eaa8df30ef0f3ef2"
+
+	// ClaudeCLIURLFormat is the artifact URL the linux-arm64 claude binary is
+	// fetched from, with the version filled in: the manifest's own download path
+	// for the platform. Keep it beside ClaudeCLIVersion so a version bump reads
+	// the URL it changes.
+	ClaudeCLIURLFormat = "https://downloads.claude.ai/claude-code-releases/%s/linux-arm64/claude"
+
 	// DindImage is the Docker engine the daemon's tier sweep drives, pinned by
 	// digest rather than tag so a restart runs the engine the ladder proved.
 	// It is the same digest the live Forgejo project's engine runs, so the

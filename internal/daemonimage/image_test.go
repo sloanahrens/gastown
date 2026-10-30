@@ -15,13 +15,13 @@ import (
 )
 
 // imageBuilder is a Builder ready to build the image: the repo's Dockerfile, a
-// fresh directory holding the three binaries as the build context, and run.
+// fresh directory holding the four binaries as the build context, and run.
 func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 	t.Helper()
 	run := &fakeRunner{}
 	b := validBuilder(run, t.TempDir())
 	b.Dockerfile = repoFile(t, DockerfilePath)
-	for _, name := range []string{"gt", "bd", "om"} {
+	for _, name := range imageBinaryNames {
 		if err := os.WriteFile(filepath.Join(b.Out, name), []byte("binary"), 0o600); err != nil {
 			t.Fatalf("writing the %s binary: %v", name, err)
 		}
@@ -29,13 +29,17 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 	return b, run
 }
 
-// imageBinaries is the list BuildBinaries returns for b, in its order.
+// imageBinaryNames is the binaries the image copies from its build context.
+var imageBinaryNames = []string{"gt", "bd", "om", "claude"}
+
+// imageBinaries is the list of the image's binaries in b.Out, in the order
+// imageBinaryNames names them.
 func imageBinaries(b Builder) []string {
-	return []string{
-		filepath.Join(b.Out, "gt"),
-		filepath.Join(b.Out, "bd"),
-		filepath.Join(b.Out, "om"),
+	out := make([]string, 0, len(imageBinaryNames))
+	for _, name := range imageBinaryNames {
+		out = append(out, filepath.Join(b.Out, name))
 	}
+	return out
 }
 
 // repoFile returns the absolute path of a file of the repo this package lives
@@ -144,6 +148,9 @@ func TestBuildImageRefusesBeforeDockerRuns(t *testing.T) {
 		{name: "a binary missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
 			*bins = (*bins)[:2]
 		}, want: "no om binary"},
+		{name: "the claude CLI missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
+			*bins = (*bins)[:3]
+		}, want: "no claude binary"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -240,10 +247,10 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 
 // TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt: every COPY is one of two
 // kinds. The Dolt client is copied from the dolt stage, and nothing else is.
-// Each of gt, bd and om is copied from the build context by its bare name,
-// once each, and no other file is. A COPY from any other source, or a second
-// copy of a name, fails, so the image cannot ship a binary the deployer did not
-// build or miss one it did.
+// Each of gt, bd, om and claude is copied from the build context by its bare
+// name, once each, and no other file is. A COPY from any other source, or a
+// second copy of a name, fails, so the image cannot ship a binary the deployer
+// did not build or fetch, or miss one it did.
 func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 	t.Parallel()
 	doltCopies := 0
@@ -254,8 +261,8 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 		}
 		from, src, dst := copyOperands(in.args)
 		if from == "" {
-			if !slices.Contains([]string{"gt", "bd", "om"}, src) || dst != "/usr/local/bin/"+src {
-				t.Errorf("%s COPY %q reads %q from the build context; want one of gt, bd or om, by its bare name, to /usr/local/bin", DockerfilePath, in.args, src)
+			if !slices.Contains(imageBinaryNames, src) || dst != "/usr/local/bin/"+src {
+				t.Errorf("%s COPY %q reads %q from the build context; want one of gt, bd, om or claude, by its bare name, to /usr/local/bin", DockerfilePath, in.args, src)
 				continue
 			}
 			contextCopies[src]++
@@ -270,10 +277,34 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 	if doltCopies != 1 {
 		t.Errorf("%s COPYs the Dolt client %d times from the dolt stage, want once", DockerfilePath, doltCopies)
 	}
-	for _, name := range []string{"gt", "bd", "om"} {
+	for _, name := range imageBinaryNames {
 		if contextCopies[name] != 1 {
 			t.Errorf("%s COPYs %s from the build context %d times, want once", DockerfilePath, name, contextCopies[name])
 		}
+	}
+}
+
+// TestDaemonDockerfileCopiesTheClaudeCLIAndNothingFetchesIt: the claude CLI
+// arrives by one COPY from the build context, which the deployer's FetchClaudeCLI
+// has verified. No other instruction names it, and none downloads or installs
+// it, so the image can never run a binary the pin did not check.
+func TestDaemonDockerfileCopiesTheClaudeCLIAndNothingFetchesIt(t *testing.T) {
+	t.Parallel()
+	var copies []string
+	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
+		line := in.cmd + " " + strings.Join(in.args, " ")
+		if !strings.Contains(strings.ToLower(line), "claude") {
+			continue
+		}
+		if in.cmd != "COPY" {
+			t.Errorf("%s has %q naming the claude CLI; the only instruction that names it is its COPY", DockerfilePath, line)
+			continue
+		}
+		copies = append(copies, line)
+	}
+	want := []string{"COPY --chmod=0755 claude /usr/local/bin/claude"}
+	if !reflect.DeepEqual(copies, want) {
+		t.Errorf("%s names the claude CLI in %q, want exactly %q", DockerfilePath, copies, want)
 	}
 }
 
