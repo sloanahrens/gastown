@@ -165,6 +165,29 @@ func TestUpdateChangelogCases(t *testing.T) {
 	}
 }
 
+// readErrFS is the FS seam whose reads fail with err, a failure other than a
+// missing file.
+type readErrFS struct{ err error }
+
+func (f readErrFS) ReadFile(string) ([]byte, error) { return nil, f.err }
+
+func (f readErrFS) WriteFile(string, []byte) error { return errors.New("write must not run") }
+
+// TestUpdateChangelogReadErrorFails: a CHANGELOG.md that cannot be read for a
+// reason other than being absent is an error, not a warning, and the cause is
+// kept for the caller.
+func TestUpdateChangelogReadErrorFails(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("permission denied")
+	warning, err := UpdateChangelogFile(readErrFS{err: cause}, "1.3.0", "2026-10-30")
+	if !errors.Is(err, cause) {
+		t.Fatalf("UpdateChangelogFile error = %v, want it to wrap %v", err, cause)
+	}
+	if warning != "" {
+		t.Errorf("warning = %q, want none on a read error", warning)
+	}
+}
+
 // goldenTree returns a tree holding the three version files at 1.3.0, as the
 // script leaves them after a bump.
 func goldenTree(t *testing.T) map[string]string {
