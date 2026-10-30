@@ -363,6 +363,74 @@ func TestRenderLaunchdPlist_EnvironmentVariables(t *testing.T) {
 	}
 }
 
+// TestRenderLaunchdPlist_EscapesItsValues covers values holding XML syntax: the
+// plist has to parse, and a value crafted as markup must not add a key nobody
+// wrote.
+func TestRenderLaunchdPlist_EscapesItsValues(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		data SupervisorData
+	}{
+		{
+			name: "town root with ampersand and angle bracket",
+			data: SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: "/towns/a&b<c"},
+		},
+		{
+			name: "gt path with ampersand",
+			data: SupervisorData{GTPath: "/opt/a&b/gt", TownRoot: "/test/town"},
+		},
+		{
+			name: "env key and value with markup",
+			data: SupervisorData{
+				GTPath:   "/usr/local/bin/gt",
+				TownRoot: "/test/town",
+				Env:      map[string]string{"A&B": "x<y"},
+			},
+		},
+		{
+			name: "town root crafted as markup",
+			data: SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: "/towns/</string><key>Injected</key><string>x"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := renderLaunchdPlist(tt.data)
+			if err != nil {
+				t.Fatalf("renderLaunchdPlist() error = %v", err)
+			}
+			assertWellFormedXML(t, got)
+			if strings.Contains(got, "<key>Injected</key>") {
+				t.Errorf("rendered plist carries a key the town root's author wrote:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestRenderLaunchdPlist_WorkingDirectoryReadsBackAsTheTownRoot checks the
+// round trip the supervisor status and repair reads depend on: the escaped
+// WorkingDirectory decodes to the town root that was rendered into it.
+func TestRenderLaunchdPlist_WorkingDirectoryReadsBackAsTheTownRoot(t *testing.T) {
+	t.Parallel()
+	const townRoot = "/towns/a&b<c"
+	got, err := renderLaunchdPlist(SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: townRoot})
+	if err != nil {
+		t.Fatalf("renderLaunchdPlist() error = %v", err)
+	}
+	written, xmlText := supervisorWorkingDirectory(got)
+	if !xmlText {
+		t.Errorf("supervisorWorkingDirectory read a plist as a unit's literal text")
+	}
+	decoded, err := decodeXMLEntities(written)
+	if err != nil {
+		t.Fatalf("decodeXMLEntities read back an error: %v", err)
+	}
+	if decoded != townRoot {
+		t.Errorf("the WorkingDirectory read back is %q, want %q", decoded, townRoot)
+	}
+}
+
 // TestRenderSystemdUnit_EnvironmentVariables verifies that extra env vars
 // are rendered into the systemd unit as Environment= directives alongside
 // GT_TOWN_ROOT.

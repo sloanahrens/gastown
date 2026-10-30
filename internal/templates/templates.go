@@ -375,7 +375,7 @@ func renderLaunchdPlist(data SupervisorData) (string, error) {
 		return "", fmt.Errorf("reading launchd template: %w", err)
 	}
 
-	tmpl, err := template.New("launchd").Parse(string(templateContent))
+	tmpl, err := template.New("launchd").Funcs(template.FuncMap{"xml": xmlText}).Parse(string(templateContent))
 	if err != nil {
 		return "", fmt.Errorf("parsing launchd template: %w", err)
 	}
