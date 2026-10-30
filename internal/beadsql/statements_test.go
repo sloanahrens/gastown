@@ -24,7 +24,6 @@ func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 		"PreloadedBeads":          PreloadedBeads([]string{"gt:agent"}, []string{"open", "hooked"}),
 		"PreloadedBeadsStatuses":  PreloadedBeads(nil, []string{"in_progress"}),
 		"PreloadedBeadsWispsOnly": PreloadedBeads(nil, nil),
-		"MoleculesAttachedTo":     MoleculesAttachedTo("gt-a_b"),
 		"JournalHead":             JournalHead(),
 		"JournalTail":             JournalTail(6, 2),
 		"JournalTailUnbounded":    JournalTail(0, 0),
@@ -93,9 +92,6 @@ func TestQuoteEscapesSQLLiterals(t *testing.T) {
 // The external-target match escapes _ with ! so it stays literal under LIKE.
 func TestExternalTargetsMatchLiterally(t *testing.T) {
 	t.Parallel()
-	if s := MoleculesAttachedTo("gt-a_b").String(); !strings.Contains(s, "depends_on_external LIKE '%:gt-a!_b' ESCAPE '!'") {
-		t.Errorf("MoleculesAttachedTo = %s", s)
-	}
 	if s := RawDeps("gt-a_b", "up", "").String(); !strings.Contains(s, "depends_on_external LIKE '%:gt-a!_b' ESCAPE '!'") {
 		t.Errorf("RawDeps(up) = %s", s)
 	}

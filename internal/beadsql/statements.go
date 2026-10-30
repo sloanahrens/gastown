@@ -426,13 +426,6 @@ func JournalTail(since int64, limit int) Query {
 	return Query{text: text, args: []any{since}}
 }
 
-// MoleculesAttachedTo reads the open molecule wisps that block, or are
-// parented under, beadID by any of the typed dependency target columns.
-func MoleculesAttachedTo(beadID string) Query {
-	id := quote(beadID)
-	return declared(`SELECT DISTINCT wisp_dependencies.issue_id FROM wisp_dependencies JOIN wisps ON wisps.id = wisp_dependencies.issue_id WHERE wisps.issue_type = 'molecule' AND wisps.status NOT IN ('closed', 'tombstone') AND wisp_dependencies.type IN ('blocks', 'conditional-blocks', 'parent-child') AND (wisp_dependencies.depends_on_issue_id = ` + id + ` OR wisp_dependencies.depends_on_wisp_id = ` + id + ` OR wisp_dependencies.depends_on_external = ` + id + ` OR depends_on_external LIKE ` + quote(externalSuffixPattern(beadID)) + ` ESCAPE '!')`)
-}
-
 // externalSuffixPattern matches an external:<prefix>:<id> target naming id,
 // escaping _ with ! (not valid in a bead ID) so it stays literal.
 func externalSuffixPattern(id string) string {

@@ -16,7 +16,6 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -227,8 +226,13 @@ func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
 	return slingStores{}.moleculeDeps(beadID, townRoot)
 }
 
-// moleculeDeps returns the molecules bonded to beadID, read by one sql
-// query over the wisp dependency edges in the bead's database.
+// moleculeBondTypes are the relations that bond a molecule to a bead; a
+// molecule under any other relation is not attached to it.
+var moleculeBondTypes = map[string]bool{"blocks": true, "conditional-blocks": true, "parent-child": true}
+
+// moleculeDeps returns the open molecules bonded to beadID. It reads the
+// dependents through DepListUp, not bd sql, because a tracker rig answers no
+// SQL and sling must still be able to burn its stale molecules.
 func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	if beadID == "" {
 		return nil, nil
@@ -237,35 +241,38 @@ func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 		return nil, fmt.Errorf("invalid bead ID: %q", beadID)
 	}
 
-	rows, err := s.pinnedAt(resolveBeadDirFromTownRoot(townRoot, beadID)).SQLCSV(beadsql.MoleculesAttachedTo(beadID))
+	store := s.pinnedAt(resolveBeadDirFromTownRoot(townRoot, beadID))
+	dependents, err := store.DepListUp(beadID, "")
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
+	seen := make(map[string]bool, len(dependents))
+	var candidates []string
+	for _, dep := range dependents {
+		if !moleculeBondTypes[dep.DependencyType] || seen[dep.ID] {
+			continue
+		}
+		seen[dep.ID] = true
+		candidates = append(candidates, dep.ID)
+	}
+	if len(candidates) == 0 {
 		return nil, nil
 	}
-	col := -1
-	for i, name := range rows[0] {
-		if name == "issue_id" {
-			col = i
-		}
-	}
-	if col < 0 {
-		return nil, fmt.Errorf("parsing canonical molecule deps for %s: no issue_id column in %q", beadID, rows[0])
-	}
 
-	seen := make(map[string]bool, len(rows))
+	issues, err := store.ShowMultiple(candidates)
+	if err != nil {
+		return nil, err
+	}
 	var molecules []string
-	for _, row := range rows[1:] {
-		if col >= len(row) {
+	for _, id := range candidates {
+		issue := issues[id]
+		if issue == nil || issue.Type != "molecule" {
 			continue
 		}
-		moleculeID := row[col]
-		if moleculeID == "" || seen[moleculeID] {
+		if issue.Status == "closed" || issue.Status == "tombstone" {
 			continue
 		}
-		seen[moleculeID] = true
-		molecules = append(molecules, moleculeID)
+		molecules = append(molecules, id)
 	}
 	return molecules, nil
 }
