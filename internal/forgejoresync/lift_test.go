@@ -3,9 +3,12 @@ package forgejoresync
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -25,6 +28,9 @@ const (
 // liftNow is the clock the backup stamp is read from.
 var liftNow = time.Date(2026, time.October, 30, 6, 32, 7, 0, time.UTC)
 
+// liftFirstBackup is the backup name a lift of main at liftNow writes first.
+const liftFirstBackup = liftBackupDir + "/acme__rig__main.json.bak-20261030-063207"
+
 // liftRule is a protection rule as the provisioning run leaves it on main.
 func liftRule(name string) map[string]any {
 	return map[string]any{
@@ -38,8 +44,8 @@ func liftRule(name string) map[string]any {
 	}
 }
 
-// memFiles is an in-memory Files: it records each write and fails the step named
-// in failStep.
+// memFiles is an in-memory Files: it records each write, refuses to overwrite a taken
+// path as the real seam does, and fails the step named in failStep.
 type memFiles struct {
 	files    map[string][]byte
 	events   *[]string
@@ -55,11 +61,15 @@ func (m *memFiles) MkdirAll(path string, _ fs.FileMode) error {
 	return nil
 }
 
-// WriteFile stores data at path and fails when the test asks it to.
-func (m *memFiles) WriteFile(path string, data []byte, _ fs.FileMode) error {
+// CreateNew stores data at a path nothing holds yet, and fails with fs.ErrExist when
+// the path is taken. It fails outright when the test asks it to.
+func (m *memFiles) CreateNew(path string, data []byte, _ fs.FileMode) error {
 	*m.events = append(*m.events, "write "+path)
 	if m.failStep == "write" {
 		return errors.New("disk full")
+	}
+	if _, taken := m.files[path]; taken {
+		return fmt.Errorf("create %s: %w", path, fs.ErrExist)
 	}
 	m.files[path] = slices.Clone(data)
 	return nil
@@ -78,9 +88,10 @@ type liftTransport struct {
 }
 
 // RoundTrip answers req through the fake, or with the status a test set for its method.
+// Events carry the escaped path, the one the server routes on.
 func (lt *liftTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Method == http.MethodDelete {
-		*lt.events = append(*lt.events, "DELETE "+req.URL.Path)
+		*lt.events = append(*lt.events, "DELETE "+req.URL.EscapedPath())
 	}
 	if req.Method == lt.failMethod {
 		return nil, errors.New("connection reset by peer")
@@ -147,13 +158,22 @@ func newLiftFixture(t *testing.T, branch string, dryRun bool, rules ...map[strin
 	return fx
 }
 
-// assertNoToken fails when the admin token shows in any of the texts: the run's log,
-// its error, or the backup it wrote.
-func assertNoToken(t *testing.T, texts ...string) {
+// assertNoTokenIn fails when the admin token shows in any output the lift produced: its
+// progress log, the error it returned (nil when it returned none), or any file it wrote,
+// names and contents both. The failure names the output, never its text, so the message
+// cannot carry the token either.
+func assertNoTokenIn(t *testing.T, fx *liftFixture, err error) {
 	t.Helper()
+	texts := slices.Clone(fx.logs)
+	if err != nil {
+		texts = append(texts, err.Error())
+	}
+	for path, data := range fx.files.files {
+		texts = append(texts, path, string(data))
+	}
 	for _, text := range texts {
 		if strings.Contains(text, forgejotest.AdminToken) {
-			t.Fatalf("admin token leaked into output: %q", text)
+			t.Fatal("admin token leaked into the lift's output")
 		}
 	}
 }
@@ -163,13 +183,13 @@ func assertNoToken(t *testing.T, texts ...string) {
 func TestLiftSavesThenDeletes(t *testing.T) {
 	t.Parallel()
 	fx := newLiftFixture(t, "main", false, liftRule("main"))
-	if err := fx.resync.LiftProtection(); err != nil {
+	err := fx.resync.LiftProtection()
+	if err != nil {
 		t.Fatalf("LiftProtection: %v", err)
 	}
-	backup := liftBackupDir + "/acme__rig__main.json.bak-20261030-063207"
-	saved, ok := fx.files.files[backup]
+	saved, ok := fx.files.files[liftFirstBackup]
 	if !ok {
-		t.Fatalf("no backup written at %s; writes: %v", backup, fx.files.files)
+		t.Fatalf("no backup written at %s; writes: %v", liftFirstBackup, fx.files.files)
 	}
 	var got map[string]any
 	if err := json.Unmarshal(saved, &got); err != nil {
@@ -181,11 +201,11 @@ func TestLiftSavesThenDeletes(t *testing.T) {
 	if fx.fake.Rule(liftRepo, "main") != nil {
 		t.Fatal("rule still on the repository after the lift")
 	}
-	wantOrder := []string{"mkdir " + liftBackupDir, "write " + backup, "DELETE /api/v1/repos/acme/rig/branch_protections/main"}
+	wantOrder := []string{"mkdir " + liftBackupDir, "write " + liftFirstBackup, "DELETE /api/v1/repos/acme/rig/branch_protections/main"}
 	if !slices.Equal(fx.events, wantOrder) {
 		t.Fatalf("call order = %v, want %v", fx.events, wantOrder)
 	}
-	assertNoToken(t, fx.logs...)
+	assertNoTokenIn(t, fx, err)
 }
 
 // TestLiftNoRuleIsANoop checks a repository whose rules do not name main is left alone:
@@ -193,7 +213,8 @@ func TestLiftSavesThenDeletes(t *testing.T) {
 func TestLiftNoRuleIsANoop(t *testing.T) {
 	t.Parallel()
 	fx := newLiftFixture(t, "main", false, liftRule("land/*"))
-	if err := fx.resync.LiftProtection(); err != nil {
+	err := fx.resync.LiftProtection()
+	if err != nil {
 		t.Fatalf("LiftProtection: %v", err)
 	}
 	if len(fx.files.files) != 0 || len(fx.events) != 0 {
@@ -202,7 +223,7 @@ func TestLiftNoRuleIsANoop(t *testing.T) {
 	if !slices.ContainsFunc(fx.logs, func(l string) bool { return strings.Contains(l, "nothing to lift") }) {
 		t.Fatalf("logs %v do not say nothing to lift", fx.logs)
 	}
-	assertNoToken(t, fx.logs...)
+	assertNoTokenIn(t, fx, err)
 }
 
 // TestLiftTreats404AsAbsent checks a DELETE answered 404 is reported as already lifted,
@@ -211,17 +232,19 @@ func TestLiftTreats404AsAbsent(t *testing.T) {
 	t.Parallel()
 	fx := newLiftFixture(t, "main", false, liftRule("main"))
 	fx.resync.Client.HTTP = &http.Client{Transport: &liftTransport{fake: fx.fake, events: &fx.events, answer: map[string]int{http.MethodDelete: http.StatusNotFound}}}
-	if err := fx.resync.LiftProtection(); err != nil {
+	err := fx.resync.LiftProtection()
+	if err != nil {
 		t.Fatalf("LiftProtection: %v", err)
 	}
 	if !slices.ContainsFunc(fx.logs, func(l string) bool { return strings.HasSuffix(l, "(already absent)") }) {
 		t.Fatalf("logs %v do not report the rule already absent", fx.logs)
 	}
-	assertNoToken(t, fx.logs...)
+	assertNoTokenIn(t, fx, err)
 }
 
 // TestLiftFailsOnOtherStatus checks a status or reply the lift does not expect fails the
-// run, on the read and on the delete alike.
+// run, on the read and on the delete alike, and that the token shows in none of the
+// output the failed run left behind.
 func TestLiftFailsOnOtherStatus(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -234,7 +257,7 @@ func TestLiftFailsOnOtherStatus(t *testing.T) {
 		{"delete refused", http.MethodDelete, http.StatusInternalServerError, "", "DELETE /repos/acme/rig/branch_protections/main: unexpected HTTP 500"},
 		{"read refused", http.MethodGet, http.StatusInternalServerError, "", "GET /repos/acme/rig/branch_protections: unexpected HTTP 500"},
 		{"read is not a list", http.MethodGet, http.StatusOK, "", "GET /repos/acme/rig/branch_protections: reply is not a list of rules"},
-		{"read holds a non-object rule", http.MethodGet, http.StatusOK, `[1]`, "GET /repos/acme/rig/branch_protections: reply is not a list of rules"},
+		{"read holds a non-object rule", http.MethodGet, http.StatusOK, `[1]`, "GET /repos/acme/rig/branch_protections: reply is not a list of rules: json: cannot unmarshal number"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -247,7 +270,7 @@ func TestLiftFailsOnOtherStatus(t *testing.T) {
 			if !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("error %q does not contain %q", err, c.want)
 			}
-			assertNoToken(t, err.Error())
+			assertNoTokenIn(t, fx, err)
 		})
 	}
 }
@@ -260,7 +283,8 @@ func TestLiftStopsOnTransportFailure(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			fx := newLiftFixture(t, "main", false, liftRule("main"))
 			fx.resync.Client.HTTP = &http.Client{Transport: &liftTransport{fake: fx.fake, events: &fx.events, failMethod: method}}
-			if err := fx.resync.LiftProtection(); err == nil {
+			err := fx.resync.LiftProtection()
+			if err == nil {
 				t.Fatalf("LiftProtection succeeded with the %s failing in transport", method)
 			}
 			if fx.fake.Rule(liftRepo, "main") == nil {
@@ -269,6 +293,7 @@ func TestLiftStopsOnTransportFailure(t *testing.T) {
 			if slices.ContainsFunc(fx.logs, func(l string) bool { return strings.HasPrefix(l, "lifted ") }) {
 				t.Fatalf("logs %v report a lift that failed", fx.logs)
 			}
+			assertNoTokenIn(t, fx, err)
 		})
 	}
 }
@@ -291,14 +316,16 @@ func TestLiftRepoMissingMessage(t *testing.T) {
 	if len(fx.events) != 0 {
 		t.Fatalf("a missing repository still sent %v", fx.events)
 	}
+	assertNoTokenIn(t, fx, err)
 }
 
-// TestLiftDryRunWritesNothing checks a dry run logs the backup it would write, writes no
-// file and sends no DELETE: the rule stays on the repository.
+// TestLiftDryRunWritesNothing checks a dry run logs the backup it would write and the
+// DELETE it would send, writes no file and sends no DELETE: the rule stays on the repository.
 func TestLiftDryRunWritesNothing(t *testing.T) {
 	t.Parallel()
 	fx := newLiftFixture(t, "main", true, liftRule("main"))
-	if err := fx.resync.LiftProtection(); err != nil {
+	err := fx.resync.LiftProtection()
+	if err != nil {
 		t.Fatalf("LiftProtection: %v", err)
 	}
 	if len(fx.files.files) != 0 {
@@ -310,10 +337,14 @@ func TestLiftDryRunWritesNothing(t *testing.T) {
 	if len(fx.fake.Writes()) != 0 {
 		t.Fatalf("dry run sent writes %v", fx.fake.Writes())
 	}
-	if !slices.ContainsFunc(fx.logs, func(l string) bool { return strings.HasPrefix(l, "+ write the main rule to ") }) {
-		t.Fatalf("logs %v do not show the backup it would write", fx.logs)
+	want := []string{
+		"+ write the main rule to " + liftFirstBackup,
+		"+ DELETE /repos/acme/rig/branch_protections/main (dry run: not sent)",
 	}
-	assertNoToken(t, fx.logs...)
+	if !slices.Equal(fx.logs, want) {
+		t.Fatalf("dry-run logs = %q, want %q", fx.logs, want)
+	}
+	assertNoTokenIn(t, fx, err)
 }
 
 // TestLiftBackupPathEscapesSlash checks a branch with a slash gives %2F in the backup's
@@ -321,7 +352,8 @@ func TestLiftDryRunWritesNothing(t *testing.T) {
 func TestLiftBackupPathEscapesSlash(t *testing.T) {
 	t.Parallel()
 	fx := newLiftFixture(t, "release/1", false, liftRule("release/1"))
-	if err := fx.resync.LiftProtection(); err != nil {
+	err := fx.resync.LiftProtection()
+	if err != nil {
 		t.Fatalf("LiftProtection: %v", err)
 	}
 	backup := liftBackupDir + "/acme__rig__release%2F1.json.bak-20261030-063207"
@@ -331,6 +363,28 @@ func TestLiftBackupPathEscapesSlash(t *testing.T) {
 	if fx.fake.Rule(liftRepo, "release/1") != nil {
 		t.Fatal("rule release/1 still on the repository")
 	}
+	assertNoTokenIn(t, fx, err)
+}
+
+// TestLiftEscapesBranchInRoute checks a branch holding "/", "%" and a space reaches the
+// DELETE route as one escaped segment, and is the rule the fake then removes. Mutation:
+// join the branch without url.PathEscape and the route no longer names this rule.
+func TestLiftEscapesBranchInRoute(t *testing.T) {
+	t.Parallel()
+	const branch = "rel/a %b c"
+	fx := newLiftFixture(t, branch, false, liftRule(branch))
+	err := fx.resync.LiftProtection()
+	if err != nil {
+		t.Fatalf("LiftProtection: %v", err)
+	}
+	const want = "DELETE /api/v1/repos/acme/rig/branch_protections/rel%2Fa%20%25b%20c"
+	if !slices.Contains(fx.events, want) {
+		t.Fatalf("events %v do not hold %q", fx.events, want)
+	}
+	if fx.fake.Rule(liftRepo, branch) != nil {
+		t.Fatalf("rule %q still on the repository", branch)
+	}
+	assertNoTokenIn(t, fx, err)
 }
 
 // TestLiftBackupFailureSendsNoDelete checks a backup that cannot be written stops the lift
@@ -353,6 +407,71 @@ func TestLiftBackupFailureSendsNoDelete(t *testing.T) {
 					t.Fatalf("DELETE sent after a failed backup: %v", fx.events)
 				}
 			}
+			assertNoTokenIn(t, fx, err)
 		})
+	}
+}
+
+// TestLiftTwoLiftsInOneSecondKeepBoth checks two lifts of main in the same second keep both
+// copies of the rule: the second backup takes a counter name rather than the first's file.
+// Mutation: write the backup with a plain overwrite and the first copy is lost.
+func TestLiftTwoLiftsInOneSecondKeepBoth(t *testing.T) {
+	t.Parallel()
+	fx := newLiftFixture(t, "main", false, liftRule("main"))
+	if err := fx.resync.LiftProtection(); err != nil {
+		t.Fatalf("first LiftProtection: %v", err)
+	}
+	fx.fake.SeedRule(liftRepo, liftRule("main"))
+	err := fx.resync.LiftProtection()
+	if err != nil {
+		t.Fatalf("second LiftProtection: %v", err)
+	}
+	for _, path := range []string{liftFirstBackup, liftFirstBackup + ".1"} {
+		if _, ok := fx.files.files[path]; !ok {
+			t.Fatalf("no backup at %s; writes: %v", path, fx.files.files)
+		}
+	}
+	assertNoTokenIn(t, fx, err)
+}
+
+// TestLiftNeverOverwritesABackup checks a backup already on disk at the dated name is left
+// as it was: the lift writes its copy under a counter name instead.
+func TestLiftNeverOverwritesABackup(t *testing.T) {
+	t.Parallel()
+	fx := newLiftFixture(t, "main", false, liftRule("main"))
+	const earlier = `{"rule_name":"main","kept":"earlier copy"}` + "\n"
+	fx.files.files[liftFirstBackup] = []byte(earlier)
+	err := fx.resync.LiftProtection()
+	if err != nil {
+		t.Fatalf("LiftProtection: %v", err)
+	}
+	if got := string(fx.files.files[liftFirstBackup]); got != earlier {
+		t.Fatalf("existing backup overwritten: now %q", got)
+	}
+	if _, ok := fx.files.files[liftFirstBackup+".1"]; !ok {
+		t.Fatalf("lift wrote no counter backup; writes: %v", fx.files.files)
+	}
+	assertNoTokenIn(t, fx, err)
+}
+
+// TestOSFilesCreateNewRefusesExisting checks the real filesystem seam refuses to write over
+// a file that exists: the second create fails with fs.ErrExist and the first copy stays.
+// Mutation: drop O_EXCL from CreateNew and the second write replaces the first.
+func TestOSFilesCreateNewRefusesExisting(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "main.json.bak-20261030-063207")
+	if err := (osFiles{}).CreateNew(path, []byte("first\n"), 0o600); err != nil {
+		t.Fatalf("first CreateNew: %v", err)
+	}
+	err := (osFiles{}).CreateNew(path, []byte("second\n"), 0o600)
+	if !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("second CreateNew error = %v, want fs.ErrExist", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read backup: %v", readErr)
+	}
+	if string(got) != "first\n" {
+		t.Fatalf("existing backup overwritten: now %q", got)
 	}
 }
