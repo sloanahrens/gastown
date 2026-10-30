@@ -90,9 +90,11 @@ func TestCreateProviderSecretNeverInArgvOrOutput(t *testing.T) {
 			wantOut: "created provider deepseek with value=***\n",
 		},
 		{
+			// q is in no argv token the create call builds, so a substring match on
+			// it means the secret leaked into argv.
 			name:    "a one-character key",
-			secret:  "k",
-			printed: "value=k\n",
+			secret:  "q",
+			printed: "value=q\n",
 			wantOut: "value=***\n",
 		},
 	}
@@ -113,7 +115,7 @@ func TestCreateProviderSecretNeverInArgvOrOutput(t *testing.T) {
 					create = argv
 				}
 				for _, arg := range argv {
-					if arg == tc.secret {
+					if strings.Contains(arg, tc.secret) {
 						t.Errorf("argv %q carries the secret as an argument", argv)
 					}
 				}
