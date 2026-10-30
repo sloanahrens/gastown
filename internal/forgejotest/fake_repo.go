@@ -191,11 +191,12 @@ func (f *Fake) SeedRule(repo string, rule map[string]any) {
 	f.repos[repo].rules[rule["rule_name"].(string)] = rule
 }
 
-// Rule returns the named rule the repository holds, or nil when there is none.
+// Rule returns a copy of the named rule the repository holds, or nil when there is none. The
+// copy keeps a caller from changing the fake's state through the returned map.
 func (f *Fake) Rule(repo, name string) map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.repos[repo].rules[name]
+	return maps.Clone(f.repos[repo].rules[name])
 }
 
 // RuleNames returns the names of the rules the repository holds, sorted.

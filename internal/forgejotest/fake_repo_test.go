@@ -162,6 +162,25 @@ func TestFakeRepoBranchProtections(t *testing.T) {
 	}
 }
 
+// TestFakeRuleReturnsACopy checks that a rule read through Rule is a copy: a caller that
+// edits it does not change the rule the fake serves, and a rule the repository lacks is nil.
+func TestFakeRuleReturnsACopy(t *testing.T) {
+	t.Parallel()
+	f := New()
+	f.AddRepo(fixtureRepo)
+	if got := f.Rule(fixtureRepo, fixtureLandRule); got != nil {
+		t.Fatalf("a rule the repository lacks reads as %v, want nil", got)
+	}
+	if status, _ := f.Call(t, http.MethodPost, rulesRoute(), JSONBody(RuleBody(fixtureLandRule, []string{fixtureLandingBot}))); status != http.StatusCreated {
+		t.Fatalf("create %s: status %d, want 201", fixtureLandRule, status)
+	}
+
+	f.Rule(fixtureRepo, fixtureLandRule)["block_on_outdated_branch"] = false
+	if got := f.Rule(fixtureRepo, fixtureLandRule)["block_on_outdated_branch"]; got != true {
+		t.Fatalf("an edit to the copy reached the fake: block_on_outdated_branch = %v, want true", got)
+	}
+}
+
 // TestFakeRepoRefusesWhatTheModelRefuses checks that each request the fake's model refuses
 // is refused here with the status the model gives: a body missing what the route needs, a
 // rule name already held, a rule or repository the fake lacks. The statuses are the model's

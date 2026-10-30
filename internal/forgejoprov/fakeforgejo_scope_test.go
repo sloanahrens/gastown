@@ -11,7 +11,9 @@ import (
 
 // scopeDrift reports how a role table and a known scope list disagree: a role with no
 // scope, a scope a role uses that the list lacks, and a listed scope no role uses. An
-// empty table is a disagreement too, so the check cannot pass on nothing.
+// empty table is a disagreement too, so the check cannot pass on nothing. These checks stay
+// in forgejoprov, not forgejotest, because they read roleTable, which is unexported here;
+// forgejotest keeps its own scope list and cannot see the table.
 func scopeDrift(table []roleScopes, known []string) []string {
 	if len(table) == 0 {
 		return []string{"the role table is empty"}

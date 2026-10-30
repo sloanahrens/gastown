@@ -9,8 +9,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"testing"
 )
+
+// TB is the part of testing.TB the helpers use. It is declared here so this package does not
+// import testing; *testing.T satisfies it.
+type TB interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
 
 // AdminToken is the one admin token the fake accepts: a placeholder, never a real credential.
 const AdminToken = "fixture-admin-7f3a9c"
@@ -363,7 +369,7 @@ func (f *Fake) Token(user, name string) string {
 // Send makes one request through the fake, with the Authorization header value given
 // (empty sends none), and returns the status and the body. path is relative to the
 // API root, as the provisioning run writes it: "/users/bot-polecat".
-func (f *Fake) Send(t *testing.T, auth, method, path, body string) (int, string) {
+func (f *Fake) Send(t TB, auth, method, path, body string) (int, string) {
 	t.Helper()
 	req, err := http.NewRequest(method, APIRoot+APIPath+path, strings.NewReader(body))
 	if err != nil {
@@ -385,7 +391,7 @@ func (f *Fake) Send(t *testing.T, auth, method, path, body string) (int, string)
 }
 
 // Call sends one request carrying the admin token, as the provisioning run does.
-func (f *Fake) Call(t *testing.T, method, path, body string) (int, string) {
+func (f *Fake) Call(t TB, method, path, body string) (int, string) {
 	t.Helper()
 	return f.Send(t, "token "+f.adminToken, method, path, body)
 }
