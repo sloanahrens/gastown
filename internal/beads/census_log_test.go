@@ -3,6 +3,9 @@ package beads
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -228,4 +231,87 @@ func TestCensusLogStopsOnCancelAndChannelClose(t *testing.T) {
 		close(run.every)
 		run.waitDone(t)
 	})
+}
+
+// The census sink carries a process's rows to the process that logs them, as
+// the row text the log line uses, and reads back what it wrote (gt-139dp).
+func TestCensusSinkRoundTripsItsRows(t *testing.T) {
+	t.Parallel()
+	// A directory of its own that does not exist yet: the sink makes it.
+	path := filepath.Join(t.TempDir(), "daemon", "spec_census.txt")
+	want := []CensusRow{
+		{Verb: "mol wisp", Caller: "cmd.specRoster", Count: 30},
+		{Verb: "show", Caller: "cmd.specBoard", Count: 7},
+	}
+	if err := WriteCensusSink(path, want); err != nil {
+		t.Fatalf("WriteCensusSink: %v", err)
+	}
+	got, err := ReadCensusSink(path)
+	if err != nil {
+		t.Fatalf("ReadCensusSink: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rows read back = %+v, want %+v", got, want)
+	}
+	if total := CensusRowsTotal(got); total != 37 {
+		t.Errorf("total = %d, want 37", total)
+	}
+}
+
+// A row the reader cannot parse fails the read: a dropped row is a call count
+// the daemon never sees (gt-139dp).
+func TestCensusSinkFailsOnARowItCannotRead(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "spec_census.txt")
+	if err := os.WriteFile(path, []byte("show@cmd.a=2\nnot-a-row\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := ReadCensusSink(path); err == nil {
+		t.Fatalf("rows = %+v, want an error for the unreadable row", rows)
+	}
+	if _, err := ReadCensusSink(filepath.Join(t.TempDir(), "missing.txt")); err == nil {
+		t.Error("reading a missing sink succeeded")
+	}
+}
+
+// A sink whose directory the writer cannot make, or whose file it cannot open,
+// is an error: the tick that could not write its census says so rather than
+// reading as no calls (gt-139dp).
+func TestWriteCensusSinkFailsOnAPathItCannotWrite(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteCensusSink(filepath.Join(blocker, "census.txt"), nil); err == nil {
+		t.Error("writing the sink under a regular file succeeded")
+	}
+	asDir := filepath.Join(dir, "census.txt")
+	if err := os.Mkdir(asDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteCensusSink(asDir, []CensusRow{{Verb: "show", Caller: "cmd.a", Count: 1}}); err == nil {
+		t.Error("writing the sink over a directory succeeded")
+	}
+}
+
+// The top-rows text names the busiest censusLogRows and nothing of an empty
+// census (gt-139dp).
+func TestCensusTopRowsCapsItsRows(t *testing.T) {
+	t.Parallel()
+	if got := CensusTopRows(nil); got != "" {
+		t.Errorf("CensusTopRows(nil) = %q, want empty", got)
+	}
+	rows := make([]CensusRow, censusLogRows+1)
+	for i := range rows {
+		rows[i] = CensusRow{Verb: fmt.Sprintf("v%d", i), Caller: "cmd.a", Count: len(rows) - i}
+	}
+	got := CensusTopRows(rows)
+	if n := strings.Count(got, "@cmd.a="); n != censusLogRows {
+		t.Errorf("CensusTopRows names %d rows, want %d: %q", n, censusLogRows, got)
+	}
+	if !strings.HasPrefix(got, "top: v0@cmd.a=") {
+		t.Errorf("CensusTopRows = %q, want the busiest row first", got)
+	}
 }

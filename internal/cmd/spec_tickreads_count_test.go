@@ -2,13 +2,18 @@ package cmd
 
 import (
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -164,6 +169,151 @@ func TestSpecTickReads(t *testing.T) {
 	if line := specTickCost(reads, 1234*time.Millisecond, 0, 0); line != want {
 		t.Errorf("specTickCost = %q, want %q", line, want)
 	}
+}
+
+// A bd call is counted under the phase that was active when it was made: the
+// roster's reads count as roster, the board's as board, and a call made with no
+// phase current counts in the total alone (gt-139dp).
+func TestSpecTickReadsCountsEachCallUnderItsPhase(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-a"})
+	reads := newSpecTickReads()
+
+	reads.setPhase(specPhaseRoster)
+	reads.call()
+	reads.call()
+	if got := reads.endPhase(); got != 2 {
+		t.Errorf("roster phase counted %d calls, want 2", got)
+	}
+	// Between phases nothing is current, so this one is no phase's.
+	reads.call()
+	reads.setPhase(specPhaseBoard)
+	if _, err := reads.client(db).Show("gt-a"); err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	if got := reads.endPhase(); got != 1 {
+		t.Errorf("board phase counted %d calls, want 1", got)
+	}
+	// A phase that ended holds its count, not the calls made after it.
+	if got := reads.endPhase(); got != 0 {
+		t.Errorf("an ended phase counted %d more calls, want 0", got)
+	}
+	if got := reads.Calls(); got != 4 {
+		t.Errorf("Calls = %d, want the four calls of the tick", got)
+	}
+}
+
+// The tick reports each phase's bd calls through its ledger, counted as the
+// phase's own wiring made them (gt-139dp).
+func TestSpecDispatchReportsItsPhaseCalls(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 2, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	reads := newSpecTickReads()
+	env.Reads = reads
+	roster, board, children := env.Roster, env.Candidates, env.Children
+	env.Roster = func() (specRoster, error) {
+		reads.call()
+		reads.call()
+		return roster()
+	}
+	env.Candidates = func() specBoardRead {
+		reads.call()
+		return board()
+	}
+	env.Children = func(id string) ([]specdispatch.Child, error) {
+		reads.call()
+		return children(id)
+	}
+
+	r := runSpecDispatchCycle(env)
+
+	if len(r.Dispatched) != 1 {
+		t.Fatalf("dispatched %d, want the one clean candidate slung", len(r.Dispatched))
+	}
+	for _, c := range []struct {
+		phase string
+		got   int
+		want  int
+	}{
+		{specPhaseRoster, r.RosterCalls, 2},
+		{specPhaseBoard, r.BoardCalls, 1},
+		// gt-a's one children read; the candidate loop made no other.
+		{specPhaseCandidates, r.CandidatesCalls, 1},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s phase counted %d calls, want %d", c.phase, c.got, c.want)
+		}
+	}
+	// A call after the tick's last phase is no phase's, and still the tick's.
+	reads.call()
+	if got, want := reads.Calls(), r.RosterCalls+r.BoardCalls+r.CandidatesCalls+1; got != want {
+		t.Errorf("ledger counted %d calls, want the phases' %d and the one after them", got, want)
+	}
+}
+
+// A tick started by a daemon writes its bd census rows to the town's census
+// file, which the daemon logs; a tick run by hand has no owner to write for,
+// and a dry run is not the tick the daemon reports, so neither writes
+// (gt-139dp).
+func TestSpecDispatchAtWritesTheCensusOfADaemonsTick(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		owner  string
+		dryRun bool
+		writes bool
+	}{
+		{"a daemon's tick", "123.456", false, true},
+		{"a tick run by hand", "", false, false},
+		{"a dry run", "123.456", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := specTickTownWithHold(t)
+			if _, err := runSpecDispatchAtWith(root, tc.owner, tc.dryRun); err != nil {
+				t.Fatalf("runSpecDispatchAtWith: %v", err)
+			}
+			_, err := beads.ReadCensusSink(dispatch.SpecCensusPath(root))
+			switch {
+			case tc.writes && err != nil:
+				t.Errorf("no census at the town's path: %v", err)
+			case !tc.writes && !errors.Is(err, fs.ErrNotExist):
+				t.Errorf("ReadCensusSink = %v, want the file left absent", err)
+			}
+		})
+	}
+}
+
+// A census the tick cannot write is an error in its report, not a tick that
+// reads as having made no bd calls (gt-139dp).
+func TestSpecDispatchAtReportsACensusItCouldNotWrite(t *testing.T) {
+	t.Parallel()
+	root := specTickTownWithHold(t)
+	// A regular file where the town's daemon directory goes stops the write.
+	if err := os.WriteFile(filepath.Join(root, "daemon"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := runSpecDispatchAtWith(root, "123.456", false)
+	if err != nil {
+		t.Fatalf("runSpecDispatchAtWith: %v", err)
+	}
+	if want := "bd census rows not written"; !strings.Contains(strings.Join(report.Errors, "\n"), want) {
+		t.Errorf("report errors = %v, want one naming the lost census", report.Errors)
+	}
+}
+
+// specTickTownWithHold is a town the tick runs on with the operator's hold in
+// place: the hold stops the tick before it reads the roster, so a test of the
+// tick's own wiring needs no tmux server.
+func specTickTownWithHold(t *testing.T) string {
+	t.Helper()
+	root := poolTestTown(t, specTickSettings, specTickDaemon)
+	if err := os.WriteFile(dispatch.HoldFilePath(root), nil, 0o644); err != nil {
+		t.Fatalf("planting the operator hold: %v", err)
+	}
+	return root
 }
 
 // The roster the tick draws, through its production wiring over a fake, counts

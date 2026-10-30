@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -895,6 +896,91 @@ func TestSpecDispatchHeldTickLogsNoDuration(t *testing.T) {
 
 	if n := countContaining(lines(), "tick took"); n != 0 {
 		t.Errorf("tick took lines = %d for a held tick, want none: %v", n, lines())
+	}
+}
+
+// The 'tick took' line ends with the bd calls each phase made, after the times
+// it already named, so a phase that is slow is also read by what it cost
+// (gt-139dp).
+func TestSpecDispatchTickTookLineNamesItsPhaseCalls(t *testing.T) {
+	t.Parallel()
+	const report = `{"candidates": 3, "roster_ns": 1000000000, "board_ns": 2000000000,
+		"candidates_ns": 30000000000, "sling_ns": 5000000000,
+		"roster_calls": 41, "board_calls": 20, "candidates_calls": 15}`
+	r, err := parseSpecDispatchReport(wireOut(report))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := specDispatchTookLine(r, 40*time.Second)
+	const want = "tick took 40s (roster 1s, board 2s, candidates 3 30s, sling 5s); roster 41 calls, board 20 calls, candidates 15 calls"
+	if got != want {
+		t.Fatalf("tick took line = %q, want %q", got, want)
+	}
+	if !strings.HasSuffix(got, "roster 41 calls, board 20 calls, candidates 15 calls") {
+		t.Errorf("tick took line %q does not end with the phase calls", got)
+	}
+}
+
+// A tick's census file is logged once the tick returns, as the daemon's census
+// line, naming the busiest callers of the subprocess's bd reads (gt-139dp).
+func TestSpecDispatchLogsItsCensus(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLIFor(func(c cliCall) cliReply {
+		rows := []beads.CensusRow{
+			{Verb: "show", Caller: "cmd.specRoster", Count: 30},
+			{Verb: "mol wisp", Caller: "cmd.specBoard", Count: 12},
+		}
+		if err := beads.WriteCensusSink(dispatch.SpecCensusPath(c.dir), rows); err != nil {
+			t.Errorf("writing the tick's census: %v", err)
+		}
+		return cliReply{stdout: string(wireOut(`{"candidates": 1}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	d.runSpecDispatch()
+
+	const want = "spec_dispatch: bd census (spec dispatch): total=42 top: show@cmd.specRoster=30 mol wisp@cmd.specBoard=12"
+	if n := countContaining(lines(), want); n != 1 {
+		t.Errorf("census lines = %d, want one %q: %v", n, want, lines())
+	}
+}
+
+// The census file is this tick's alone: rows a killed tick left behind are
+// cleared before the next one runs, so a tick that wrote nothing logs nothing
+// rather than the last one's calls (gt-139dp).
+func TestSpecDispatchKilledTickLogsNoStaleCensus(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{code: 1, stderr: "signal: killed"} })
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	stale := []beads.CensusRow{{Verb: "show", Caller: "cmd.specRoster", Count: 9}}
+	if err := beads.WriteCensusSink(d.specDispatchCensusPath(), stale); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runSpecDispatch()
+
+	if n := countContaining(lines(), "bd census (spec dispatch)"); n != 0 {
+		t.Errorf("census lines = %d after a killed tick, want none: %v", n, lines())
+	}
+}
+
+// A clean tick that leaves no census file is reported: the tick is told where
+// to write, so a missing file is a census lost, not a tick that read nothing
+// (gt-139dp).
+func TestSpecDispatchReportsACensusItCannotRead(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply {
+		return cliReply{stdout: string(wireOut(`{"candidates": 1}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	d.runSpecDispatch()
+
+	if n := countContaining(lines(), "bd census unread after the tick"); n != 1 {
+		t.Errorf("census error lines = %d, want one: %v", n, lines())
 	}
 }
 

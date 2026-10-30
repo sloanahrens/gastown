@@ -3,13 +3,16 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -161,6 +164,11 @@ type specDispatchTickReport struct {
 	BoardNs      time.Duration `json:"board_ns,omitempty"`
 	CandidatesNs time.Duration `json:"candidates_ns,omitempty"`
 	SlingNs      time.Duration `json:"sling_ns,omitempty"`
+	// The bd reads each phase made, which the same line names after its times
+	// so a slow phase is also known by its call count (gt-139dp).
+	RosterCalls     int `json:"roster_calls,omitempty"`
+	BoardCalls      int `json:"board_calls,omitempty"`
+	CandidatesCalls int `json:"candidates_calls,omitempty"`
 	// seq is the daemon's own id for the tick, set after decoding: a
 	// background sling's outcome names the tick that planned it, which the
 	// tick's own report cannot (gt-pk2q8).
@@ -312,8 +320,16 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 		d.dispatchIdle.Reset()
 		return
 	}
+	// The census file holds this tick's rows and nothing else: a tick killed
+	// before it writes leaves the last one's, which were already logged, so the
+	// file is cleared first (gt-139dp).
+	censusPath := d.specDispatchCensusPath()
+	if rerr := os.Remove(censusPath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		d.logger.Printf("spec_dispatch: the census file could not be cleared, so this tick may be logged with the last one's rows: %v", rerr)
+	}
 	start := d.clk().Now()
 	out, err := d.runSpecDispatchCommand(bound, tickArgs...)
+	d.logSpecDispatchCensus(censusPath, err == nil)
 	if err != nil {
 		elapsed := d.clk().Now().Sub(start).Round(time.Second)
 		d.logger.Printf("spec_dispatch: tick failed after %s of its %s bound: %v", elapsed, bound, err)
@@ -364,10 +380,13 @@ func (d *Daemon) runSpecDispatchUnder(bound time.Duration) {
 // specDispatchTookLine is the one line a tick that decided something logs
 // about its own length: the whole tick as the daemon timed it, then the
 // phases the tick reported, so a slow tick is attributed to a phase (gt-bqch0).
+// The calls each phase made trail the times, after the fields that were there
+// first so a monitor parsing them reads the same text (gt-139dp).
 func specDispatchTookLine(r specDispatchTickReport, took time.Duration) string {
-	return fmt.Sprintf("tick took %s (roster %s, board %s, candidates %d %s, sling %s)",
+	return fmt.Sprintf("tick took %s (roster %s, board %s, candidates %d %s, sling %s); roster %d calls, board %d calls, candidates %d calls",
 		took.Round(time.Millisecond), r.RosterNs.Round(time.Millisecond), r.BoardNs.Round(time.Millisecond),
-		r.Candidates, r.CandidatesNs.Round(time.Millisecond), r.SlingNs.Round(time.Millisecond))
+		r.Candidates, r.CandidatesNs.Round(time.Millisecond), r.SlingNs.Round(time.Millisecond),
+		r.RosterCalls, r.BoardCalls, r.CandidatesCalls)
 }
 
 // recordedDispatchTick is one tick as townhealth reads it, tagged with the
@@ -537,6 +556,30 @@ func (d *Daemon) runSpecDispatchCommand(bound time.Duration, extra ...string) ([
 		return stdout, err
 	}
 	return stdout, nil
+}
+
+// specDispatchCensusPath is the file a tick writes its bd census rows to,
+// beside the cache the daemon's ticks keep across runs (gt-139dp).
+func (d *Daemon) specDispatchCensusPath() string {
+	return dispatch.SpecCensusPath(d.config.TownRoot)
+}
+
+// logSpecDispatchCensus logs the rows the tick's census file holds, busiest
+// caller first. The tick is told the path when it starts, so a file a clean
+// tick did not write is a census that was lost, not a tick that read nothing,
+// and is reported; a tick that failed may have written nothing at all
+// (gt-139dp).
+func (d *Daemon) logSpecDispatchCensus(path string, tickOK bool) {
+	rows, err := beads.ReadCensusSink(path)
+	if err != nil {
+		if tickOK {
+			d.logger.Printf("spec_dispatch: bd census unread after the tick: %v", err)
+		}
+		return
+	}
+	if total := beads.CensusRowsTotal(rows); total > 0 {
+		d.logger.Printf("spec_dispatch: bd census (spec dispatch): total=%d %s", total, beads.CensusTopRows(rows))
+	}
 }
 
 // specSlingsHooked counts the slings a tick's output shows hooked before the

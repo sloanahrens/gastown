@@ -349,19 +349,66 @@ type specTickReads struct {
 	mu    sync.Mutex
 	shows map[string]*beads.Issue
 	calls int
+	// phase is the phase the tick has entered (specPhase*), and phaseCalls the
+	// calls made under each one, so the daemon's 'tick took' line can name what
+	// a phase costs in bd calls as well as in time (gt-139dp).
+	phase      string
+	phaseCalls map[string]int
 }
 
+// The phases a tick counts its reads under, named as the 'tick took' line
+// names its times.
+const (
+	specPhaseRoster     = "roster"
+	specPhaseBoard      = "board"
+	specPhaseCandidates = "candidates"
+)
+
 func newSpecTickReads() *specTickReads {
-	return &specTickReads{shows: map[string]*beads.Issue{}}
+	return &specTickReads{shows: map[string]*beads.Issue{}, phaseCalls: map[string]int{}}
 }
 
 // call counts one bd call the tick issued outside show and the client below.
 func (r *specTickReads) call() {
-	if r != nil {
-		r.mu.Lock()
-		r.calls++
-		r.mu.Unlock()
+	if r == nil {
+		return
 	}
+	r.mu.Lock()
+	r.count()
+	r.mu.Unlock()
+}
+
+// count adds one call to the ledger. The caller holds the lock, or is the
+// tick's own goroutine, as show and the client below are.
+func (r *specTickReads) count() {
+	r.calls++
+	if r.phase != "" {
+		r.phaseCalls[r.phase]++
+	}
+}
+
+// setPhase makes name the phase the ledger counts calls under until the next
+// setPhase or endPhase. An empty name leaves calls uncounted by phase.
+func (r *specTickReads) setPhase(name string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.phase = name
+	r.mu.Unlock()
+}
+
+// endPhase leaves no phase current and returns how many calls were made under
+// the one that was.
+func (r *specTickReads) endPhase() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.phaseCalls[r.phase]
+	r.phase = ""
+	return n
 }
 
 // Calls is how many bd calls the tick has issued through the ledger.
@@ -384,7 +431,7 @@ func (r *specTickReads) show(id string, read func() (*beads.Issue, error)) (*bea
 		return issue, nil
 	}
 	issue, err := read()
-	r.calls++
+	r.count()
 	if err == nil && issue != nil {
 		r.shows[id] = issue
 	}
@@ -427,7 +474,7 @@ func (c specTickClient) ShowMultiple(ids []string) (map[string]*beads.Issue, err
 		return out, nil
 	}
 	found, err := c.Client.ShowMultiple(missing)
-	c.reads.calls++
+	c.reads.count()
 	for id, issue := range found {
 		out[id] = issue
 		if issue != nil {
@@ -438,12 +485,12 @@ func (c specTickClient) ShowMultiple(ids []string) (map[string]*beads.Issue, err
 }
 
 func (c specTickClient) List(opts beads.ListOptions) ([]*beads.Issue, error) {
-	c.reads.calls++
+	c.reads.count()
 	return c.Client.List(opts)
 }
 
 func (c specTickClient) Children(parentID string) ([]*beads.Issue, error) {
-	c.reads.calls++
+	c.reads.count()
 	return c.Client.Children(parentID)
 }
 
@@ -1036,7 +1083,13 @@ type specDispatchReport struct {
 	BoardTook      time.Duration `json:"board_ns,omitempty"`
 	CandidatesTook time.Duration `json:"candidates_ns,omitempty"`
 	SlingTook      time.Duration `json:"sling_ns,omitempty"`
-	Errors         []string      `json:"errors,omitempty"`
+	// The bd reads each phase made, counted by the tick's ledger; the daemon
+	// logs them on its 'tick took' line beside the phase times, so a slow
+	// phase is also known by how many calls it cost (gt-139dp).
+	RosterCalls     int      `json:"roster_calls,omitempty"`
+	BoardCalls      int      `json:"board_calls,omitempty"`
+	CandidatesCalls int      `json:"candidates_calls,omitempty"`
+	Errors          []string `json:"errors,omitempty"`
 }
 
 type specDispatchEntry struct {
@@ -1179,6 +1232,10 @@ type specDispatchEnv struct {
 	// lint's path check (gt-7t1im). Nil asks nothing, which is what a test of
 	// some other hold wants; the tick itself always wires it.
 	Target func(rig string) *specdispatch.TargetTree
+	// Reads is the ledger the tick's own reads go through, so the tick can
+	// name the phase each one was made under (gt-139dp). Nil counts no phase,
+	// which is what a test of what the tick decided wants.
+	Reads *specTickReads
 }
 
 // specLedgerFile is the verdict ledger's two file operations, so a test can
@@ -1270,9 +1327,11 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 		return report
 	}
+	env.Reads.setPhase(specPhaseRoster)
 	rosterAt := env.Now()
 	roster, err := env.Roster()
 	report.RosterTook = env.Now().Sub(rosterAt)
+	report.RosterCalls = env.Reads.endPhase()
 	if err != nil {
 		// A roster that cannot be counted is not an empty one: dispatching on
 		// it could exceed every cap.
@@ -1297,9 +1356,11 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			len(roster.Unrecorded), config.UnknownSeatAgent, strings.Join(roster.Unrecorded, ", ")))
 	}
 
+	env.Reads.setPhase(specPhaseBoard)
 	boardAt := env.Now()
 	read := env.Candidates()
 	report.BoardTook = env.Now().Sub(boardAt)
+	report.BoardCalls = env.Reads.endPhase()
 	report.Errors = append(report.Errors, read.Errors...)
 	report.Candidates = len(read.Candidates)
 	report.LabeledFailed = read.LabeledFailed
@@ -1328,6 +1389,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		inFlight[f.Bead] = true
 	}
 
+	env.Reads.setPhase(specPhaseCandidates)
 	candidatesAt := env.Now()
 	for _, c := range read.Candidates {
 		id := c.Spec.ID
@@ -1609,6 +1671,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		budget.Bump(seat.Agent, budget.Now)
 	}
 	report.CandidatesTook = env.Now().Sub(candidatesAt)
+	report.CandidatesCalls = env.Reads.endPhase()
 	slingAt := env.Now()
 	if env.Background {
 		specHandOffPendingSlings(pending, &report)
@@ -2331,6 +2394,13 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 // itself, with the town resolution and the output left to runSpecDispatch, so
 // the tick a seat file stops is the tick a test can run.
 func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
+	return runSpecDispatchAtWith(townRoot, os.Getenv(dispatch.SpecDetailOwnerEnv), specDispatchDryRun)
+}
+
+// runSpecDispatchAtWith is runSpecDispatchAt with the daemon that started the
+// tick and the dry-run flag given, so a test drives the census wiring without
+// the process environment (gt-139dp).
+func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchReport, error) {
 	start := time.Now()
 	inFlight, err := parseSpecInFlight(specDispatchInFlight)
 	if err != nil {
@@ -2361,10 +2431,10 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	// The tick's bd reads, kept for the tick alone (gt-u8rbh).
 	reads := newSpecTickReads()
 	// The pool's design and notes, kept across the daemon's ticks (gt-l0vlf).
-	details := specDetailCacheFor(townRoot, os.Getenv(dispatch.SpecDetailOwnerEnv))
+	details := specDetailCacheFor(townRoot, owner)
 	specDetailCache.Store(details)
 	// The held beads already annotated, kept across the daemon's ticks.
-	annotations := newSpecAnnotatedTick(townRoot, os.Getenv(dispatch.SpecDetailOwnerEnv), func(id string) beads.Client {
+	annotations := newSpecAnnotatedTick(townRoot, owner, func(id string) beads.Client {
 		reads.call()
 		return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
 	})
@@ -2435,10 +2505,12 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		Template: specdispatch.LoadTemplate(tmplPath),
 		Budget:   budget,
 		PerTick:  perTick,
-		DryRun:   specDispatchDryRun,
+		DryRun:   dryRun,
 		// The verdict ledger the dashboard reads, under this town's runtime
 		// directory (gt-8thox).
 		TownRoot: townRoot,
+
+		Reads: reads,
 
 		Background: specDispatchBackground,
 		InFlight:   inFlight,
@@ -2469,7 +2541,24 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		// its cost.
 		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start), report.SlingsRun, report.SlowestSling))
 	}
+	// The census is written for the daemon that started the tick, so it can log
+	// the subprocess's calls under its own census line; a failure to write it is
+	// reported rather than read as no calls (gt-139dp).
+	if err := specWriteCensus(townRoot, owner, dryRun); err != nil {
+		report.Errors = append(report.Errors, "bd census rows not written: "+err.Error())
+	}
 	return report, nil
+}
+
+// specWriteCensus writes the tick's bd census rows to the town's census file
+// (dispatch.SpecCensusPath) for the daemon that started it to log. A tick run by
+// hand has no owner to write for, and a dry run is not the tick whose calls the
+// daemon reports, so neither writes any (gt-139dp).
+func specWriteCensus(townRoot, owner string, dryRun bool) error {
+	if owner == "" || dryRun {
+		return nil
+	}
+	return beads.WriteCensusSink(dispatch.SpecCensusPath(townRoot), beads.CensusSnapshotAndReset())
 }
 
 // specTickCost is the tick's one cost line. It counts the reads the tick makes
