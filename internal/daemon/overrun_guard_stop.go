@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -80,7 +81,9 @@ const (
 //
 // submittedNow is read before step 1 and before step 4: a seat that has
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
-// that gained gt:ready-to-land mid-stop is not handed back.
+// that gained gt:ready-to-land mid-stop is not handed back. An active e-stop
+// (town or rig) is read before step 1 too: a stop that has not begun waits for
+// it to lift and parks nothing, since the supervisor would refuse the kill.
 //
 // A refused checkpoint fails step 3 and is retried once per tick. After
 // overrunCheckpointMaxAttempts failures the stop gives up on it: steps 4 and 5
@@ -142,6 +145,19 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// 1. Pause. The seat list is older than this call, so look again first: a
 	// seat that has begun gt done since is not stopped.
 	if st.StopBeganAt.IsZero() {
+		// The e-stop is read before the park. The supervisor refuses the kill
+		// under an e-stop, and the refusal clears the park, so parking first
+		// would park and un-park the seat on every tick the e-stop is up
+		// (gt-m5b31). Nothing is saved here, so the first tick after the
+		// e-stop lifts starts the stop from the top.
+		if on, err := estop.ActiveFor(d.config.TownRoot, seat.Rig); err != nil || on {
+			if err != nil {
+				d.logger.Printf("overrun_guard: stop %s on %s waits: cannot read the e-stop: %v", who, st.Bead, err)
+			} else {
+				d.logger.Printf("overrun_guard: stop %s on %s waits: e-stop active", who, st.Bead)
+			}
+			return
+		}
 		if s.submittedNow != nil && s.submittedNow(seat) {
 			d.logger.Printf("overrun_guard: %s on %s submitted before the stop; leaving it", who, st.Bead)
 			return

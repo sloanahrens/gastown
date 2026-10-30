@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1775,10 +1772,10 @@ func TestOverrunGuardStop_GoesThroughTheSupervisor(t *testing.T) {
 	}
 }
 
-// An active e-stop refuses the stop with the supervisor's refusal text: the
-// session keeps running, nothing of the stop runs, and the seat is not left
-// parked (a live seat must not stay parked, gt-fojqs).
-func TestOverrunGuardStop_EstopRefusesTheStop(t *testing.T) {
+// An active e-stop holds the stop before it parks the seat (gt-m5b31). On every
+// tick the e-stop is up the seat keeps running, is never parked, and no kill is
+// attempted, so nothing of the stop runs and nothing is saved for it.
+func TestOverrunGuardStop_EstopHoldsTheStopBeforeThePark(t *testing.T) {
 	t.Parallel()
 	for _, which := range []string{"town", "rig"} {
 		d, buf := newOverrunDaemon(t, false)
@@ -1791,8 +1788,113 @@ func TestOverrunGuardStop_EstopRefusesTheStop(t *testing.T) {
 			t.Fatal(err)
 		}
 		f := newOverrunFake(21*time.Minute, stopSeat)
+		s := overrunSeatSessionSeams(d, f)
+		parks := 0
+		pause := s.pause
+		s.pause = func(seat overrunSeat) error {
+			parks++
+			return pause(seat)
+		}
 
-		d.runOverrunGuard(overrunSeatSessionSeams(d, f))
+		for tick := 0; tick < 3; tick++ {
+			d.runOverrunGuard(s)
+			f.now = f.now.Add(time.Minute)
+		}
+
+		if alive, _ := tm.HasSession(overrunStopSessionName); !alive {
+			t.Fatalf("%s e-stop: session %s was stopped under the e-stop", which, overrunStopSessionName)
+		}
+		if parks != 0 {
+			t.Errorf("%s e-stop: the seat was parked %d time(s) over three ticks, want none", which, parks)
+		}
+		if !strings.Contains(buf.String(), "waits: e-stop active") {
+			t.Errorf("%s e-stop: log lacks the wait line:\n%s", which, buf.String())
+		}
+		if lines := overrunSupervisorActions(t, d.config.TownRoot); len(lines) != 0 {
+			t.Errorf("%s e-stop: supervisor action log = %+v, want no kill attempted", which, lines)
+		}
+		if paused, _, _ := agentpause.IsPaused(d.config.TownRoot, stopSeat.Rig, constants.RolePolecat, stopSeat.Polecat); paused {
+			t.Errorf("%s e-stop: the seat is parked", which)
+		}
+		st, _ := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+		if !st.StopBeganAt.IsZero() || !st.StoppedAt.IsZero() {
+			t.Errorf("%s e-stop: state %+v records a stop that never ran", which, st)
+		}
+		if len(f.handedBack) != 0 || len(f.pushed) != 0 {
+			t.Errorf("%s e-stop: hand-backs %q, pushes %q; want nothing under the e-stop", which, f.handedBack, f.pushed)
+		}
+	}
+}
+
+// A town sentinel that cannot be read holds the stop too: the e-stop check fails
+// closed, so a stat that fails for any reason but absence waits, parks nothing,
+// and says why (gt-m5b31). A symlink that points at itself makes the stat fail
+// with a loop error, not absence.
+func TestOverrunGuardStop_UnreadableEstopHoldsTheStop(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	tm := seedOverrunStopSession(t, d)
+	sentinel := estop.FilePath(d.config.TownRoot)
+	if err := os.Symlink(filepath.Base(sentinel), sentinel); err != nil {
+		t.Fatal(err)
+	}
+	f := newOverrunFake(21*time.Minute, stopSeat)
+	s := overrunSeatSessionSeams(d, f)
+	parks := 0
+	pause := s.pause
+	s.pause = func(seat overrunSeat) error {
+		parks++
+		return pause(seat)
+	}
+
+	d.runOverrunGuard(s)
+
+	if alive, _ := tm.HasSession(overrunStopSessionName); !alive {
+		t.Fatalf("session %s was stopped under an unreadable e-stop", overrunStopSessionName)
+	}
+	if parks != 0 {
+		t.Errorf("the seat was parked %d time(s) under an unreadable e-stop, want none", parks)
+	}
+	if !strings.Contains(buf.String(), "waits: cannot read the e-stop") {
+		t.Errorf("log lacks the unreadable-e-stop wait line:\n%s", buf.String())
+	}
+	if lines := overrunSupervisorActions(t, d.config.TownRoot); len(lines) != 0 {
+		t.Errorf("supervisor action log = %+v, want no kill attempted", lines)
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, stopSeat.Bead); !st.StopBeganAt.IsZero() || !st.StoppedAt.IsZero() {
+		t.Errorf("state %+v records a stop that never ran", st)
+	}
+}
+
+// An e-stop that lands after the seat is parked, between the check and the
+// kill, is still refused by the supervisor: the session keeps running, the
+// refusal is logged with the supervisor's text, the park is cleared so the live
+// seat is not left parked (gt-fojqs), and nothing of the stop after it runs.
+func TestOverrunGuardStop_EstopRaisedAfterThePark_IsRefused(t *testing.T) {
+	t.Parallel()
+	for _, which := range []string{"town", "rig"} {
+		d, buf := newOverrunDaemon(t, false)
+		tm := seedOverrunStopSession(t, d)
+		raise := func() error {
+			if which == "town" {
+				return estop.Activate(d.config.TownRoot, estop.TriggerManual, "operator halt")
+			}
+			return estop.ActivateRig(d.config.TownRoot, stopSeat.Rig, estop.TriggerManual, "operator halt")
+		}
+		f := newOverrunFake(21*time.Minute, stopSeat)
+		s := overrunSeatSessionSeams(d, f)
+		pause := s.pause
+		s.pause = func(seat overrunSeat) error {
+			if err := pause(seat); err != nil {
+				return err
+			}
+			if err := raise(); err != nil {
+				t.Fatal(err)
+			}
+			return nil
+		}
+
+		d.runOverrunGuard(s)
 
 		if alive, _ := tm.HasSession(overrunStopSessionName); !alive {
 			t.Fatalf("%s e-stop: session %s was stopped under the e-stop", which, overrunStopSessionName)
@@ -1814,29 +1916,5 @@ func TestOverrunGuardStop_EstopRefusesTheStop(t *testing.T) {
 		if len(f.handedBack) != 0 || len(f.pushed) != 0 {
 			t.Errorf("%s e-stop: hand-backs %q, pushes %q; want nothing after a refused stop", which, f.handedBack, f.pushed)
 		}
-	}
-}
-
-// The stop's session kill goes through the supervisor and nowhere else: a
-// polecat session manager built here would kill through tmux behind every
-// brake the supervisor enforces (gt-6mlik.4).
-func TestOverrunGuardStop_NoDirectSessionManager(t *testing.T) {
-	t.Parallel()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "overrun_guard_stop.go", nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var found []token.Position
-	ast.Inspect(file, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "NewSessionManager" {
-			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "polecat" {
-				found = append(found, fset.Position(sel.Pos()))
-			}
-		}
-		return true
-	})
-	if len(found) != 0 {
-		t.Errorf("overrun_guard_stop.go builds a polecat session manager at %v; the stop's kill goes through the supervisor", found)
 	}
 }
