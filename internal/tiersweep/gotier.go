@@ -1,6 +1,7 @@
 package tiersweep
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -68,6 +69,13 @@ func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
 	var c Counts
 	for _, pkg := range pkgs {
 		name := packageName(dir, pkg)
+		if strings.HasPrefix(pkg, "-") {
+			// go test would read it as a flag, so it fails closed and never runs.
+			c.Failed++
+			c.FailedNames = append(c.FailedNames, name)
+			fmt.Fprintf(r.Stderr, "%s: package argument starts with a dash\n", name)
+			continue
+		}
 		whole, pattern := SkipFor(r.SkipList, tier, name)
 		if whole {
 			c.Skipped++
@@ -109,20 +117,35 @@ func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
 }
 
 // excerpt writes the first excerptLines failure lines of a log to stderr,
-// indented, so the red package's cause shows without opening the log.
+// indented, so the red package's cause shows without opening the log. A log
+// with no failure line shows its last excerptLines lines instead: a command
+// that did not start leaves its reason there, not behind a failure marker.
 func (r *Runner) excerpt(log string) error {
 	data, err := os.ReadFile(log)
 	if err != nil {
 		return err
 	}
+	text := strings.TrimRight(string(data), "\n")
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
 	shown := 0
-	for _, line := range strings.Split(string(data), "\n") {
+	for _, line := range lines {
 		if shown == excerptLines {
 			break
 		}
 		if isFailureLine(line) {
 			fmt.Fprintf(r.Stderr, "    %s\n", line)
 			shown++
+		}
+	}
+	if shown == 0 {
+		if len(lines) > excerptLines {
+			lines = lines[len(lines)-excerptLines:]
+		}
+		for _, line := range lines {
+			fmt.Fprintf(r.Stderr, "    %s\n", line)
 		}
 	}
 	return nil
@@ -148,8 +171,13 @@ func packageName(dir, pkg string) string {
 	return "./" + dir + "/" + strings.TrimPrefix(pkg, "./")
 }
 
-// logName is the log file for one package: the tier, then the package name
-// without its leading ./ with each / read as _.
+// logName is the log file for one package: the tier, the package name without
+// its leading ./ with each / read as _, then the first four bytes (eight hex
+// characters) of the name's sha256. The hash keeps names that read alike, such
+// as ./a/b_c and ./a_b/c, in separate files; the tier keeps a name that starts
+// with a dash from starting the file name with one.
 func logName(tier, name string) string {
-	return tier + "-" + strings.ReplaceAll(strings.TrimPrefix(name, "./"), "/", "_") + ".log"
+	sum := sha256.Sum256([]byte(name))
+	readable := strings.ReplaceAll(strings.TrimPrefix(name, "./"), "/", "_")
+	return fmt.Sprintf("%s-%s-%x.log", tier, readable, sum[:4])
 }

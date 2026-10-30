@@ -242,9 +242,9 @@ func TestTierSkipsWholePackage(t *testing.T) {
 	}
 }
 
-// TestTierLogsAndFailureExcerpt: each package logs to tier-<name>.log with the
-// name's ./ dropped and / read as _, and a failing one shows its first five
-// failure lines on stderr, indented four spaces, out of seven matches.
+// TestTierLogsAndFailureExcerpt: each package logs to a file named for its tier
+// and name, and a failing one shows its first five failure lines on stderr,
+// indented four spaces, out of seven matches.
 func TestTierLogsAndFailureExcerpt(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -253,8 +253,8 @@ func TestTierLogsAndFailureExcerpt(t *testing.T) {
 		pkg     string
 		wantLog string
 	}{
-		{name: "a root package", dir: ".", pkg: "./internal/cmd", wantLog: "integration-internal_cmd.log"},
-		{name: "a nested module package", dir: "tracker", pkg: "./store", wantLog: "integration-tracker_store.log"},
+		{name: "a root package", dir: ".", pkg: "./internal/cmd", wantLog: "integration-internal_cmd-9addf82b.log"},
+		{name: "a nested module package", dir: "tracker", pkg: "./store", wantLog: "integration-tracker_store-182ef2eb.log"},
 	}
 	var wantExcerpt []string
 	for i := 1; i <= 5; i++ {
@@ -370,5 +370,140 @@ func TestTierFailedLogUnreadable(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "    read log ") {
 		t.Errorf("stderr does not report the unreadable log:\n%s", stderr)
+	}
+}
+
+// TestTierLogNamesDoNotCollide: two packages whose names read alike after / is
+// read as _ keep separate logs, each holding its own package's output.
+func TestTierLogNamesDoNotCollide(t *testing.T) {
+	t.Parallel()
+	fake := &fakeGo{output: map[string]string{
+		"./a/b_c": "output of a/b_c\n",
+		"./a_b/c": "output of a_b/c\n",
+	}}
+	r, _, logDir := newRunner(t, fake, "")
+	r.Tier(TierIntegration, ".", nil, nil, []string{"./a/b_c", "./a_b/c"})
+
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("%d log files, want 2", len(entries))
+	}
+	want := map[string]string{
+		"integration-a_b_c-cde08fe4.log": "output of a/b_c\n",
+		"integration-a_b_c-267757d8.log": "output of a_b/c\n",
+	}
+	for file, output := range want {
+		got, err := os.ReadFile(filepath.Join(logDir, file))
+		if err != nil {
+			t.Errorf("no log %s: %v", file, err)
+			continue
+		}
+		if string(got) != output {
+			t.Errorf("%s = %q, want %q", file, got, output)
+		}
+	}
+}
+
+// TestTierLogNameSafeWithLeadingDash: a package whose name reads as -x still
+// logs to a file whose name starts with the tier, not with a dash.
+func TestTierLogNameSafeWithLeadingDash(t *testing.T) {
+	t.Parallel()
+	fake := &fakeGo{}
+	r, _, logDir := newRunner(t, fake, "")
+	r.Tier(TierIntegration, ".", nil, nil, []string{"./-x"})
+
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "integration--x-631e4507.log" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("log files = %q, want [integration--x-631e4507.log]", names)
+	}
+}
+
+// TestTierSameNameSameLog: running one package again reuses its log file, so a
+// name's log is stable across runs and does not multiply files.
+func TestTierSameNameSameLog(t *testing.T) {
+	t.Parallel()
+	fake := &fakeGo{}
+	r, _, logDir := newRunner(t, fake, "")
+	r.Tier(TierIntegration, ".", nil, nil, []string{"./internal/a"})
+	r.Tier(TierIntegration, ".", nil, nil, []string{"./internal/a"})
+
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("%d log files after two runs of one package, want 1", len(entries))
+	}
+}
+
+// TestTierRefusesDashPackage: a package argument that starts with a dash would
+// be read by go test as a flag, so it is counted failed, named on stderr, and
+// never passed to Exec.
+func TestTierRefusesDashPackage(t *testing.T) {
+	t.Parallel()
+	for _, pkg := range []string{"-race", "--exec=x"} {
+		t.Run(pkg, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeGo{}
+			r, stderr, _ := newRunner(t, fake, "")
+			got := r.Tier(TierIntegration, ".", nil, nil, []string{pkg})
+			want := Counts{Failed: 1, FailedNames: []string{pkg}}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("Tier() = %+v, want %+v", got, want)
+			}
+			if len(fake.calls) != 0 {
+				t.Errorf("Exec ran %d times, want 0", len(fake.calls))
+			}
+			if !strings.Contains(stderr.String(), pkg+": package argument starts with a dash\n") {
+				t.Errorf("stderr does not refuse the argument:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// TestTierStartFailureReasonReachesStderr: a command that does not start leaves
+// its reason only in the log, so the failure excerpt shows that last line.
+func TestTierStartFailureReasonReachesStderr(t *testing.T) {
+	t.Parallel()
+	notFound := func(_ string, _ []string, _ []string, out io.Writer) int {
+		fmt.Fprint(out, "no-such-command: executable file not found\n")
+		return 127
+	}
+	r, stderr, _ := newRunner(t, &fakeGo{}, "")
+	r.Exec = notFound
+	got := r.Tier(TierIntegration, ".", nil, nil, []string{"./internal/a"})
+	want := Counts{Failed: 1, FailedNames: []string{"./internal/a"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Tier() = %+v, want %+v", got, want)
+	}
+	wantExcerpt := []string{"    no-such-command: executable file not found"}
+	if got := stderrLines(stderr); !reflect.DeepEqual(got, wantExcerpt) {
+		t.Errorf("excerpt = %q, want %q", got, wantExcerpt)
+	}
+}
+
+// TestProcessExecStartFailureFailsClosed: a command that cannot start returns
+// 127, never 0, and the writer names the command and the error. The path is
+// absolute and absent, so nothing is looked up on PATH and no program runs.
+func TestProcessExecStartFailureFailsClosed(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "no-such-command")
+	var out bytes.Buffer
+	code := ProcessExec(".", nil, []string{missing}, &out)
+	if code != 127 {
+		t.Errorf("ProcessExec() = %d, want 127", code)
+	}
+	if !strings.Contains(out.String(), missing+": ") {
+		t.Errorf("output does not name the command and its error:\n%s", out.String())
 	}
 }
