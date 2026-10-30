@@ -49,7 +49,7 @@ func ResolveToken(getenv func(string) string, readFile func(string) ([]byte, err
 
 // noTokenError is the probe's no-token refusal. Its text names forgejo-probe and
 // the probe's broker command, not the provisioner's. It unwraps to the
-// forgejoprov error, so errors.Is still recognises the case.
+// forgejoprov error, so errors.Is still recognizes the case.
 type noTokenError struct {
 	tokenFile string
 	cause     error

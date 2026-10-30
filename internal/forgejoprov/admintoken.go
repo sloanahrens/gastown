@@ -151,7 +151,7 @@ type noAdminToken struct {
 // Error returns the operator-facing text.
 func (e noAdminToken) Error() string { return e.text }
 
-// Unwrap returns ErrNoAdminToken, so errors.Is recognises the case.
+// Unwrap returns ErrNoAdminToken, so errors.Is recognizes the case.
 func (e noAdminToken) Unwrap() error { return ErrNoAdminToken }
 
 // noAdminTokenError is the error ResolveAdminToken returns when no source holds
