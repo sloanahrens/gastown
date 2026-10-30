@@ -2,6 +2,7 @@ package repoguard
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -13,11 +14,32 @@ type Exec interface {
 	Run(dir string, name string, args ...string) (stdout string, err error)
 }
 
-// CLIExec runs commands with os/exec. The zero value runs them for real. start
-// replaces the run step, so a unit test can answer a command without starting
-// a process (the seam internal/tmux uses).
+// CLIExec runs commands with os/exec. The zero value runs them for real, in the
+// environment GuardEnviron leaves. start replaces the run step, so a unit test
+// can answer a command without starting a process (the seam internal/tmux uses).
+// environ replaces the process environment the command inherits, so a test can
+// give it a polluted one without touching the process.
 type CLIExec struct {
-	start func(*exec.Cmd) error
+	start   func(*exec.Cmd) error
+	environ func() []string
+}
+
+// hookVariables are the git variables a hook sets to point git at the
+// repository that ran the hook. A guard that inherited them would read that
+// repository's index, not the one in dir.
+var hookVariables = []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"}
+
+// GuardEnviron returns environ without the hook variables, and with everything
+// else, PATH included.
+func GuardEnviron(environ []string) []string {
+	kept := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if !slices.Contains(hookVariables, name) {
+			kept = append(kept, kv)
+		}
+	}
+	return kept
 }
 
 // Run runs name in dir and returns its stdout. Stderr is discarded: a gofmt
@@ -28,8 +50,13 @@ func (e CLIExec) Run(dir string, name string, args ...string) (string, error) {
 	if start == nil {
 		start = (*exec.Cmd).Run
 	}
+	environ := e.environ
+	if environ == nil {
+		environ = os.Environ
+	}
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
+	cmd.Env = GuardEnviron(environ())
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	err := start(cmd)
