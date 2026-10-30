@@ -444,6 +444,24 @@ func (d *Daemon) refreshAuthorSeat(rigName, polecat string) error {
 	return d.gitAt(workDir).RefreshRemoteDefaultBranch("origin")
 }
 
+// seatAssignee is the bead's assignee reader the done-event recorder binds a
+// submission's Worker to: the sling wrote <rig>/polecats/<name> there, and the
+// seat's own note cannot change it. A bead that cannot be read is an error, so
+// the recorder fails closed rather than writing an event for a seat the host
+// cannot confirm it slung.
+func seatAssignee(reader beadReader) func(beadID string) (string, error) {
+	return func(beadID string) (string, error) {
+		issue, err := reader.Show(beadID)
+		if err != nil {
+			return "", err
+		}
+		if issue == nil {
+			return "", fmt.Errorf("bead %s not found", beadID)
+		}
+		return issue.Assignee, nil
+	}
+}
+
 // newRigLandingWorker wires the production collaborators for one rig.
 func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error) {
 	townRoot := d.config.TownRoot
@@ -775,14 +793,23 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		AgentBeadID: func(polecat string) string {
 			return beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, rigName), rigName, polecat)
 		},
-		// The first-sight record the submission battery asks from, read from the
-		// clone this worker lands through (gt-l7ciu).
-		FirstSight: &land.SubmissionRecorder{
-			Path: land.SubmissionsSeenPath(townRoot), Git: git.NewGit(repo), Remote: landingRemote,
-			Warn: func(format string, args ...any) {
-				d.logger.Printf("landing_worker: %s: %s", rigName, fmt.Sprintf(format, args...))
+		// The first-sight records the submission battery asks from, read from
+		// the clone this worker lands through (gt-l7ciu), and the done event a
+		// sandbox seat could not write into this town's log (gt-1m9gr). The
+		// seat's Worker is trusted only once the bead's own assignee, which the
+		// sling wrote, names it.
+		FirstSight: &land.FirstSightComposite{Recorders: []land.FirstSight{
+			&land.SubmissionRecorder{
+				Path: land.SubmissionsSeenPath(townRoot), Git: git.NewGit(repo), Remote: landingRemote,
+				Warn: func(format string, args ...any) {
+					d.logger.Printf("landing_worker: %s: %s", rigName, fmt.Sprintf(format, args...))
+				},
 			},
-		},
+			&land.DoneEventRecorder{
+				TownRoot: townRoot,
+				Assignee: seatAssignee(bd),
+			},
+		}},
 	}, nil
 }
 
