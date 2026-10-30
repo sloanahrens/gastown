@@ -19,7 +19,7 @@ needs_review_now (noul)
   labels by source: overseer 2 labels, 1 positive
   at 0.5: precision 50.0%, recall 100.0%
   best F1 0.667 at threshold 0.800
-  precision at the best F1 cut: 50.0%
+  precision at the best F1 cut: 50.0% over 2 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      0  n/a  n/a

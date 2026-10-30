@@ -10,7 +10,7 @@ likely_defect (noul)
   logged 10, labeled 7, positives 1, negatives 6, base rate 14.3%
   at 0.5: precision 25.0%, recall 100.0%
   best F1 0.500 at threshold 0.700
-  precision at the best F1 cut: 33.3%
+  precision at the best F1 cut: 33.3% over 3 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      2  0.250  0.000

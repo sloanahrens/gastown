@@ -5,7 +5,7 @@ clears_on_its_own (noul)
   logged 21, labeled 3, positives 3, negatives 0, base rate 100.0%
   at 0.5: precision n/a, recall 0.0%
   best F1 1.000 at threshold 0.200
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 3 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      3  0.200  1.000
@@ -18,7 +18,7 @@ needs_human (noul)
   logged 21, labeled 7, positives 5, negatives 2, base rate 71.4%
   at 0.5: precision 71.4%, recall 100.0%
   best F1 0.833 at threshold 0.700
-  precision at the best F1 cut: 71.4%
+  precision at the best F1 cut: 71.4% over 7 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      0  n/a  n/a
@@ -43,7 +43,7 @@ routine_action_fixes (noul)
   logged 3, labeled 3, positives 3, negatives 0, base rate 100.0%
   at 0.5: precision n/a, recall 0.0%
   best F1 1.000 at threshold 0.100
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 3 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      3  0.100  1.000
     0.2-0.4      0  n/a  n/a

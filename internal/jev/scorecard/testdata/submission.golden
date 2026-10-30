@@ -6,7 +6,7 @@ beyond_goal (noul)
   logged 4, labeled 1, positives 1, negatives 0, base rate 100.0%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.700
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      0  n/a  n/a
@@ -37,7 +37,7 @@ tests_cover_change (noul)
   logged 4, labeled 1, positives 0, negatives 1, base rate 0.0%
   at 0.5: precision n/a, recall n/a
   best F1 0.000 at threshold 0.400
-  precision at the best F1 cut: 0.0%
+  precision at the best F1 cut: 0.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      0  n/a  n/a
@@ -62,7 +62,7 @@ will_pass_review (noul)
   logged 4, labeled 3, positives 2, negatives 1, base rate 66.7%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.800
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 2 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      1  0.300  0.000

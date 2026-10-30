@@ -40,6 +40,8 @@ const (
 	minNegatives = 10
 	// minPrecisionAtBest is a judgement call, vetted 2026-10-29 as the floor for "not worth reading as a signal": finding.any_duplicate (0.018) and finding.report_only (0.053) read earning (gt-1nxhm).
 	minPrecisionAtBest = 0.3
+	// minFlaggedAtBest is the same judgement as minPositives, guarding the count a precision is measured on: finding.report_only read earning on a precision of 1.0 measured over one flagged item, and a precision over fewer than ten labeled items is an anecdote (gt-dx8t2).
+	minFlaggedAtBest = 10
 )
 
 const (
@@ -278,12 +280,12 @@ func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[Questi
 		qr.Precision, qr.Recall = cutMetrics(kind, samples)
 		qr.Calibration = calibration(samples)
 		if qr.BestThreshold != nil {
-			qr.PrecisionAtBest = precisionAtCut(samples, *qr.BestThreshold)
+			qr.PrecisionAtBest, qr.FlaggedAtBest = precisionAtCut(samples, *qr.BestThreshold)
 		}
 	case KindScore:
 		qr.MeanScorePositive, qr.MeanScoreNegative = meanByLabel(samples)
 	}
-	qr.Verdict = verdict(kind, qr.Positives, qr.Negatives, qr.Labeled, best, base, qr.PrecisionAtBest)
+	qr.Verdict = verdict(kind, qr.Positives, qr.Negatives, qr.Labeled, best, base, qr.PrecisionAtBest, qr.FlaggedAtBest)
 	qr.Context = contextCounts(contextLines)
 	return qr
 }
@@ -386,9 +388,10 @@ func cutMetrics(kind string, samples []sample) (precision, recall *float64) {
 }
 
 // precisionAtCut is the precision of a yes at or above thr, the same prediction
-// bestThreshold's sweep makes, over the same samples cutMetrics scores. It is
-// nil when the cut predicts no yes, since precision has no value then.
-func precisionAtCut(samples []sample, thr float64) *float64 {
+// bestThreshold's sweep makes, over the same samples cutMetrics scores, and
+// flagged is how many labeled items that cut predicts yes. Precision is nil
+// when the cut predicts no yes, since precision has no value then.
+func precisionAtCut(samples []sample, thr float64) (precision *float64, flagged int) {
 	var tp, fp int
 	for _, s := range samples {
 		if s.value < thr {
@@ -400,7 +403,7 @@ func precisionAtCut(samples []sample, thr float64) *float64 {
 			fp++
 		}
 	}
-	return ratio(tp, tp+fp)
+	return ratio(tp, tp+fp), tp + fp
 }
 
 // calibration bins the labeled values into equal bands. Mean value is over the
@@ -457,12 +460,16 @@ func meanByLabel(samples []sample) (positive, negative *float64) {
 
 // verdict holds earning back to a question whose labels are plentiful enough
 // to act on: too few positives or negatives is not-yet whatever the metrics
-// say, and a noul or choice whose precision at the best cut is under the floor
-// or cannot be read is no-signal, since a yes it answers cannot be trusted. A
+// say, and a noul or choice whose best cut flags too few labeled items to
+// measure a precision on is not-yet too, since that precision is an anecdote.
+// A noul or choice whose precision at the best cut is under the floor or
+// cannot be read is no-signal, since a yes it answers cannot be trusted. A
 // score kind has no precision, so only the count floors apply to it.
-func verdict(kind string, positives, negatives, labeled int, bestF1, baseRate float64, precisionAtBest *float64) string {
+func verdict(kind string, positives, negatives, labeled int, bestF1, baseRate float64, precisionAtBest *float64, flaggedAtBest int) string {
 	switch {
 	case positives < minPositives || negatives < minNegatives:
+		return VerdictNotYet
+	case kind != KindScore && precisionAtBest != nil && flaggedAtBest < minFlaggedAtBest:
 		return VerdictNotYet
 	case labeled < minLabeled:
 		return VerdictNotYet

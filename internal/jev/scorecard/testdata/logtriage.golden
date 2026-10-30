@@ -5,7 +5,7 @@ auto_remediable (noul)
   logged 5, labeled 4, positives 1, negatives 3, base rate 25.0%
   at 0.5: precision 100.0%, recall 100.0%
   best F1 1.000 at threshold 0.700
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 1 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      2  0.100  0.000
     0.2-0.4      1  0.200  0.000
@@ -18,7 +18,7 @@ is_routine_noise (noul)
   logged 5, labeled 4, positives 2, negatives 2, base rate 50.0%
   at 0.5: precision n/a, recall 0.0%
   best F1 1.000 at threshold 0.300
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 2 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      2  0.100  0.000
     0.2-0.4      1  0.300  1.000
@@ -31,7 +31,7 @@ needs_action (noul)
   logged 5, labeled 4, positives 2, negatives 2, base rate 50.0%
   at 0.5: precision 66.7%, recall 100.0%
   best F1 1.000 at threshold 0.800
-  precision at the best F1 cut: 100.0%
+  precision at the best F1 cut: 100.0% over 2 flagged
   calibration (band, labeled n, mean value, label rate):
     0.0-0.2      0  n/a  n/a
     0.2-0.4      1  0.200  0.000
