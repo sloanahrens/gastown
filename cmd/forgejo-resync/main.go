@@ -50,6 +50,10 @@ func runParse(args []string, getenv func(string) string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, "usage: forgejo-resync --help")
 		return forgejoresync.ExitUsage
 	}
+	if opts == nil {
+		fmt.Fprintln(stderr, "forgejo-resync: the command line parsed to no options")
+		return forgejoresync.ExitFailure
+	}
 	fmt.Fprintf(stderr, "forgejo-resync: the run for %s is not ported yet; scripts/forgejo-resync.sh still performs it\n", opts.Repo)
 	return forgejoresync.ExitFailure
 }
