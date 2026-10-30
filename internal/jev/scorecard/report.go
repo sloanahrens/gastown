@@ -87,6 +87,17 @@ type QuestionReport struct {
 	FlaggedAtBest int `json:"flagged_at_best,omitempty"`
 	// Calibration is set for noul and choice questions only.
 	Calibration []Bin `json:"calibration,omitempty"`
+	// ECE and Brier summarize the calibration table for noul and choice
+	// questions: the labeled-weighted gap between value and label rate, and
+	// the mean squared gap between value and label. They are absent for a
+	// score question and for a question with no labeled lines.
+	ECE   *float64 `json:"ece,omitempty"`
+	Brier *float64 `json:"brier,omitempty"`
+	// CalibrationMonotone is whether the label rate never falls across the
+	// bands large enough to read. It is set for noul and choice questions only,
+	// and is absent when no band holds enough labeled lines, so the report
+	// never answers from a rate nobody measured.
+	CalibrationMonotone *bool `json:"calibration_monotone,omitempty"`
 	// MeanScorePositive and MeanScoreNegative are set for score questions only.
 	MeanScorePositive *float64 `json:"mean_score_positive,omitempty"`
 	MeanScoreNegative *float64 `json:"mean_score_negative,omitempty"`
@@ -171,6 +182,9 @@ func WriteText(w io.Writer, rep Report) error {
 			for _, b := range q.Calibration {
 				ew.printf("    %.1f-%.1f  %5d  %s  %s\n", b.Lo, b.Hi, b.N, num(b.MeanValue), num(b.LabelRate))
 			}
+			if q.ECE != nil && q.Brier != nil {
+				ew.printf("  calibration error %.2f, brier %.2f, monotone: %s\n", *q.ECE, *q.Brier, monotoneText(q.CalibrationMonotone))
+			}
 		}
 		ew.printf("  verdict: %s\n", q.Verdict)
 	}
@@ -232,4 +246,16 @@ func num(v *float64) string {
 		return "n/a"
 	}
 	return fmt.Sprintf("%.3f", *v)
+}
+
+// monotoneText names the monotone flag, or n/a when no band held enough
+// labeled lines to read one (gt-km2b8).
+func monotoneText(v *bool) string {
+	switch {
+	case v == nil:
+		return "n/a"
+	case *v:
+		return "yes"
+	}
+	return "no"
 }

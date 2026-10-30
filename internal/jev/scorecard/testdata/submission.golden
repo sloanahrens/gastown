@@ -13,6 +13,7 @@ beyond_goal (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      1  0.700  1.000
     0.8-1.0      0  n/a  n/a
+  calibration error 0.30, brier 0.09, monotone: n/a
   verdict: not-yet
 
 commits_match_change (noul)
@@ -44,6 +45,7 @@ tests_cover_change (noul)
     0.4-0.6      1  0.400  0.000
     0.6-0.8      0  n/a  n/a
     0.8-1.0      0  n/a  n/a
+  calibration error 0.40, brier 0.16, monotone: n/a
   verdict: not-yet
 
 touches_town_machinery (noul)
@@ -69,4 +71,5 @@ will_pass_review (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      2  0.850  1.000
+  calibration error 0.20, brier 0.05, monotone: n/a
   verdict: not-yet

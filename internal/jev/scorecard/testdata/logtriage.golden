@@ -12,6 +12,7 @@ auto_remediable (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      1  0.700  1.000
     0.8-1.0      0  n/a  n/a
+  calibration error 0.18, brier 0.04, monotone: n/a
   verdict: not-yet
 
 is_routine_noise (noul)
@@ -25,6 +26,7 @@ is_routine_noise (noul)
     0.4-0.6      1  0.400  1.000
     0.6-0.8      0  n/a  n/a
     0.8-1.0      0  n/a  n/a
+  calibration error 0.38, brier 0.22, monotone: n/a
   verdict: not-yet
 
 needs_action (noul)
@@ -38,6 +40,7 @@ needs_action (noul)
     0.4-0.6      1  0.500  0.000
     0.6-0.8      0  n/a  n/a
     0.8-1.0      2  0.850  1.000
+  calibration error 0.25, brier 0.08, monotone: n/a
   verdict: not-yet
 
 severity (score)

@@ -12,6 +12,7 @@ clears_on_its_own (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      0  n/a  n/a
+  calibration error 0.80, brier 0.64, monotone: n/a
   verdict: not-yet
 
 needs_human (noul)
@@ -25,6 +26,7 @@ needs_human (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      7  0.700  0.714
     0.8-1.0      0  n/a  n/a
+  calibration error 0.01, brier 0.20, monotone: n/a
   verdict: not-yet
 
 repeats_open_item (noul)
@@ -50,6 +52,7 @@ routine_action_fixes (noul)
     0.4-0.6      0  n/a  n/a
     0.6-0.8      0  n/a  n/a
     0.8-1.0      0  n/a  n/a
+  calibration error 0.90, brier 0.81, monotone: n/a
   verdict: not-yet
 
 urgency (score)
