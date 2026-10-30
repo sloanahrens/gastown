@@ -65,20 +65,20 @@ func (r *LandingRiskReader) Risks() (LandingRisks, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	data, restart, err := r.tail.next()
+	got, err := r.tail.next()
 	if err != nil {
 		return r.copy(), err
 	}
-	if restart {
+	if got.restart {
 		r.risks = nil
 	}
-	if len(data) == 0 {
+	if len(got.data) == 0 {
 		return r.copy(), nil
 	}
 	if r.risks == nil {
 		r.risks = LandingRisks{}
 	}
-	for _, raw := range bytes.Split(data, []byte("\n")) {
+	for _, raw := range bytes.Split(got.data, []byte("\n")) {
 		var l landingLine
 		if err := json.Unmarshal(raw, &l); err != nil || l.Bead == "" || l.Head == "" ||
 			l.Answers == nil || l.Answers.Risk == nil || l.Answers.Risk.Score == nil {

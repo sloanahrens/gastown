@@ -71,20 +71,20 @@ func (r *ScoreReader) Scores() (Scores, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	data, restart, err := r.tail.next()
+	got, err := r.tail.next()
 	if err != nil {
 		return r.copy(), err
 	}
-	if restart {
+	if got.restart {
 		r.scores = nil
 	}
-	if len(data) == 0 {
+	if len(got.data) == 0 {
 		return r.copy(), nil
 	}
 	if r.scores == nil {
 		r.scores = Scores{}
 	}
-	for _, raw := range bytes.Split(data, []byte("\n")) {
+	for _, raw := range bytes.Split(got.data, []byte("\n")) {
 		var l answerLine
 		if err := json.Unmarshal(raw, &l); err != nil || l.Key == "" || l.FirstSeen.IsZero() || l.Answers == nil {
 			continue // a failed call has no answer to score with
@@ -122,9 +122,17 @@ type consumedTail struct {
 	stat os.FileInfo
 }
 
-// next returns the whole lines appended since the last call and whether the
-// read started over. A start-over means every offset read so far names a line
-// that is gone or changed under it, so the lines returned are the log from its
+// tailRead is one read of a consumed log: the whole lines appended since the
+// last read, and whether the read started over because the log shrank, was
+// replaced, or was missing.
+type tailRead struct {
+	data    []byte
+	restart bool
+}
+
+// next returns the lines appended since the last call and whether the read
+// started over. A start-over means every offset read so far names a line that
+// is gone or changed under it, so the lines returned are the log from its
 // first byte and the caller drops everything it kept from it. A missing log is
 // a start-over with no lines.
 //
@@ -132,13 +140,13 @@ type consumedTail struct {
 // position untouched, so a later call continues from the last good read. Only
 // whole lines are returned: a pass killed mid-write leaves its last line cut
 // short, and that line waits for the read after the write finished.
-func (t *consumedTail) next() (data []byte, restart bool, err error) {
+func (t *consumedTail) next() (tailRead, error) {
 	// The stat is the quiet check alone: a path it cannot stat is opened anyway,
 	// so the open's error is what names why the log could not be read.
 	fi, _ := os.Stat(t.path)
 	if fi != nil && t.stat != nil && os.SameFile(fi, t.stat) &&
 		fi.ModTime().Equal(t.stat.ModTime()) && fi.Size() == t.offset {
-		return nil, false, nil // nothing appended since the last read
+		return tailRead{}, nil // nothing appended since the last read
 	}
 
 	f, err := os.Open(t.path) //nolint:gosec // G304: the path is a town runtime file
@@ -146,19 +154,19 @@ func (t *consumedTail) next() (data []byte, restart bool, err error) {
 		if os.IsNotExist(err) {
 			// the battery has not run, or the log was removed: nothing it said holds
 			t.offset, t.tail, t.stat = 0, nil, nil
-			return nil, true, nil
+			return tailRead{restart: true}, nil
 		}
-		return nil, false, fmt.Errorf("reading %s: %w", t.path, err)
+		return tailRead{}, fmt.Errorf("reading %s: %w", t.path, err)
 	}
 	defer func() { _ = f.Close() }()
 
-	start := t.offset
+	start, restart := t.offset, false
 	if (fi != nil && fi.Size() < start) || !t.continues(f) {
 		start, restart = 0, true
 	}
 	all, err := io.ReadAll(io.NewSectionReader(f, start, math.MaxInt64))
 	if err != nil {
-		return nil, false, fmt.Errorf("reading %s: %w", t.path, err)
+		return tailRead{}, fmt.Errorf("reading %s: %w", t.path, err)
 	}
 	t.stat = fi
 	end := bytes.LastIndexByte(all, '\n') + 1
@@ -166,14 +174,14 @@ func (t *consumedTail) next() (data []byte, restart bool, err error) {
 		if restart {
 			t.offset, t.tail = start, nil
 		}
-		return nil, restart, nil
+		return tailRead{restart: restart}, nil
 	}
 	if restart {
 		t.tail = nil
 	}
 	t.offset = start + int64(end)
 	t.tail = lastBytes(append(t.tail, all[:end]...), answersTailBytes)
-	return all[:end], restart, nil
+	return tailRead{data: all[:end], restart: restart}, nil
 }
 
 // continues reports whether the bytes before the read offset are still the
