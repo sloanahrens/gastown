@@ -348,6 +348,7 @@ func TestDispatchPlugins_LedgerReadFailureSkipsGatedPlugins(t *testing.T) {
 // no run holds it closed: the plugin runs on every tick, as it did when
 // CountRunsSince counted from now, and it costs the tick no ledger read.
 func TestDispatchPlugins_ZeroCooldownRunsWithoutALedgerRead(t *testing.T) {
+	t.Parallel()
 	for _, duration := range []string{"0", "-5m"} {
 		t.Run(duration, func(t *testing.T) {
 			t.Parallel()
