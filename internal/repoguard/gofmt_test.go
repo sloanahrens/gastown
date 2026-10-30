@@ -273,27 +273,24 @@ func TestGuardEnvironDropsHookVariables(t *testing.T) {
 
 // TestCLIExecRunDropsHookVariables holds the production runner to GuardEnviron:
 // a command the guards start gets an environment of its own without the hook
-// variables, even when the process itself carries them. It sets the process
-// environment, so it is not parallel.
+// variables, even when the process it runs in carries them.
 func TestCLIExecRunDropsHookVariables(t *testing.T) {
-	t.Setenv("GIT_DIR", "/hook/.git")
-	t.Setenv("GIT_INDEX_FILE", "/hook/index")
+	t.Parallel()
 	var got *exec.Cmd
-	e := CLIExec{start: func(cmd *exec.Cmd) error {
-		got = cmd
-		return nil
-	}}
+	e := CLIExec{
+		start: func(cmd *exec.Cmd) error {
+			got = cmd
+			return nil
+		},
+		environ: func() []string {
+			return []string{"PATH=/usr/bin", "GIT_DIR=/hook/.git", "GIT_INDEX_FILE=/hook/index"}
+		},
+	}
 	if _, err := e.Run("/repo", "git", "ls-files"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if got.Env == nil {
-		t.Fatal("Env = nil, so the command inherits the hook variables")
-	}
-	for _, kv := range got.Env {
-		name, _, _ := strings.Cut(kv, "=")
-		if slices.Contains(hookVariables, name) {
-			t.Errorf("command environment carries %s", name)
-		}
+	if want := []string{"PATH=/usr/bin"}; !slices.Equal(got.Env, want) {
+		t.Errorf("command environment = %q, want %q", got.Env, want)
 	}
 }
 

@@ -17,8 +17,11 @@ type Exec interface {
 // CLIExec runs commands with os/exec. The zero value runs them for real, in the
 // environment GuardEnviron leaves. start replaces the run step, so a unit test
 // can answer a command without starting a process (the seam internal/tmux uses).
+// environ replaces the process environment the command inherits, so a test can
+// give it a polluted one without touching the process.
 type CLIExec struct {
-	start func(*exec.Cmd) error
+	start   func(*exec.Cmd) error
+	environ func() []string
 }
 
 // hookVariables are the git variables a hook sets to point git at the
@@ -47,9 +50,13 @@ func (e CLIExec) Run(dir string, name string, args ...string) (string, error) {
 	if start == nil {
 		start = (*exec.Cmd).Run
 	}
+	environ := e.environ
+	if environ == nil {
+		environ = os.Environ
+	}
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Env = GuardEnviron(os.Environ())
+	cmd.Env = GuardEnviron(environ())
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	err := start(cmd)
