@@ -170,9 +170,9 @@ func NewClient(opts ...Option) (*Client, error) {
 		err error
 	)
 	if c.keyPaths != nil {
-		key, err = readKeyFrom(c.keyPaths)
+		key, err = readKeyFrom(ReadKeyFile, c.keyPaths)
 	} else {
-		key, err = readKey()
+		key, err = ReadKey()
 	}
 	if err != nil {
 		return nil, err

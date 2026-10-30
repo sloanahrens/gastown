@@ -29,6 +29,20 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/thrash"
 )
 
+// writeKey puts a synthetic API key where the client's key search finds one, so
+// a battery opened here builds without reading a key from the host. The
+// hermetic harness points GT_TOWN_ROOT at its sandbox, and the key file sits
+// under it as a battery's would.
+func writeKey(t *testing.T) {
+	t.Helper()
+	town := os.Getenv("GT_TOWN_ROOT")
+	require.NotEmpty(t, town, "the hermetic harness sets GT_TOWN_ROOT to its sandbox town")
+	path := filepath.Join(town, "settings", "daemon.env")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte(jev.EnvKey+"=synthetic-test-key\n"), 0o600))
+	require.NoError(t, os.Chmod(path, 0o600))
+}
+
 // newTown lays out what a battery's Open reads from the town: the rig registry
 // naming the rig, and the rig's beads directory and repository directory. The
 // files are only checked for existence, so the contents stay minimal.
@@ -48,12 +62,11 @@ func newTown(t *testing.T) string {
 // that runs the shadow check exactly when its scrub_check setting is on. A
 // battery that drops the setting on its way to the client fails here.
 //
-// The key is synthetic: the test swaps the key reader, so no host key is read.
-//
-//testpolicy:allow parallel — swaps the process-wide key reader, which no other test may see mid-run; the cleanup restores it before the test returns.
+// The key is synthetic: writeKey puts one where the search looks, so no host key
+// is read.
 func TestShadowScrubWiredInEveryBattery(t *testing.T) {
-	restore := jev.SetKeyReaderForTest(func() (string, error) { return "synthetic-test-key", nil })
-	t.Cleanup(restore)
+	t.Parallel()
+	writeKey(t)
 
 	// open builds the battery's pass under town with scrub_check set to check
 	// and returns the client it asks through.
@@ -185,7 +198,11 @@ func TestShadowScrubWiredInEveryBattery(t *testing.T) {
 
 	for _, b := range batteries {
 		for _, check := range []bool{false, true} {
-			t.Run(b.name, func(t *testing.T) {
+			name := b.name + "/off"
+			if check {
+				name = b.name + "/on"
+			}
+			t.Run(name, func(t *testing.T) {
 				asker, err := b.open(newTown(t), check)
 				require.NoError(t, err)
 				client, ok := asker.(*jev.Client)

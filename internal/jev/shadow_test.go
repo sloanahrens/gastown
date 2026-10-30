@@ -440,6 +440,29 @@ func TestShadowScrubCapSaysOncePerWindow(t *testing.T) {
 	assert.Equal(t, want, warnings.String(), "the day is said once")
 }
 
+// TestShadowScrubWarnsWhenTheCheckLogCannotBeWritten: a check log that cannot be
+// appended to is a warning, and the caller's call still succeeds with its answer.
+func TestShadowScrubWarnsWhenTheCheckLogCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	var warnings bytes.Buffer
+	dir := filepath.Join(t.TempDir(), "jev")
+	require.NoError(t, os.WriteFile(dir, []byte("a file where the ledger's directory belongs"), 0o600))
+	rt := &scriptedRT{replies: []scriptedReply{{body: replyChoice("returns", 328)}}}
+	c := newTestClient(t, rt,
+		WithLedger(filepath.Join(dir, "usage.jsonl")),
+		WithCaller("testcaller"),
+		WithWarnings(&warnings),
+		WithShadowScrub(100, allowCap),
+	)
+
+	got, err := c.Choice(context.Background(), map[string]string{"title": "the gate stays red"}, "Which team?", shoeCriteria)
+	require.NoError(t, err, "a check log that cannot be written does not fail the call")
+	assert.Equal(t, "returns", got.Choice)
+	waitShadows(t, c)
+
+	assert.Contains(t, warnings.String(), "jev: scrub check log:", "the failed write is warned about")
+}
+
 // TestNewClientRefusesAShadowCheckItCannotHonor: a check that would sample a
 // share that is not a whole part of 100, spend without a cap check, or log
 // nowhere is a configuration error, not a client that quietly runs anyway.

@@ -52,6 +52,10 @@ const (
 // second call ran. The lines hold answers and rule counts, never state text. A
 // scrub that changes nothing sends no second call and logs unchanged.
 //
+// The file is append-only and grows by one line per request: the counts of a
+// measurement window are what it exists for, so nothing is rotated or sampled
+// out of the log itself.
+//
 // percent must divide 100 evenly. allows is the battery's daily cap check: a
 // second call is made only when it reports true. WithLedger is required, since
 // the check log sits beside the ledger. The second call runs in the background,
@@ -203,6 +207,10 @@ func (c *Client) shadowCheck(ctx context.Context, state any, qs map[string]Quest
 	} else {
 		rec.Replacements = ruleCounts(&report)
 	}
+	// The check outlives the caller's request: WithoutCancel drops the
+	// request's cancellation and its deadline, so a caller that gives up
+	// still gets its measurement, and post bounds the second call with the
+	// client's own timeout instead.
 	c.shadows.Add(1)
 	go func() {
 		defer c.shadows.Done()

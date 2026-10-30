@@ -45,32 +45,24 @@ func ReadKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return readKeyFrom(paths)
+	return readKeyFrom(ReadKeyFile, paths)
 }
 
-// readKey is the key NewClient reads when no WithKey or WithKeyPaths option gave
-// one. SetKeyReaderForTest swaps it.
-var readKey = ReadKey
-
-// SetKeyReaderForTest makes NewClient read its key from fn instead of the key
-// files, so a test can build a battery's client with no key on the host. It
-// changes the process-wide reader: call it from a test that does not run in
-// parallel, and invoke the returned restore func (typically via t.Cleanup).
-func SetKeyReaderForTest(fn func() (string, error)) (restore func()) {
-	prev := readKey
-	readKey = fn
-	return func() { readKey = prev }
-}
-
-// readKeyFrom is ReadKey over an explicit search list.
-func readKeyFrom(paths []string) (string, error) {
+// readKeyFrom is ReadKey over an explicit search list and key-file reader.
+// ReadKey passes ReadKeyFile; a test passes a fake and needs no file.
+func readKeyFrom(read func(path string) (string, error), paths []string) (string, error) {
 	for _, path := range paths {
-		key, err := ReadKeyFile(path)
+		key, err := read(path)
 		if errors.Is(err, errNoKey) || errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return "", err
+		}
+		if key == "" {
+			// A reader that succeeds with no key would send an empty
+			// Authorization header: keep looking, then refuse.
+			continue
 		}
 		return key, nil
 	}
