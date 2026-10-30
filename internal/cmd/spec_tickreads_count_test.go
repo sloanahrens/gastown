@@ -327,12 +327,35 @@ func TestSpecDispatchReportsItsPhaseCalls(t *testing.T) {
 	}
 }
 
+// specTickTestMu serializes the tests that run a whole tick, and every such
+// test goes through runSpecTickForTest or runSpecTickAtForTest below. A tick
+// defaults the package's sling actor on its first call, so two ticks in one
+// test process would race on it; the process that runs ticks runs one at a
+// time.
+var specTickTestMu sync.Mutex
+
+// runSpecTickForTest runs one tick with the tests' ticks serialized.
+func runSpecTickForTest(t *testing.T, root, owner string, dryRun bool) (specDispatchReport, error) {
+	t.Helper()
+	specTickTestMu.Lock()
+	defer specTickTestMu.Unlock()
+	return runSpecDispatchAtWith(root, owner, dryRun)
+}
+
+// runSpecTickAtForTest is runSpecDispatchAt with the tests' ticks serialized.
+func runSpecTickAtForTest(t *testing.T, townRoot string) (specDispatchReport, error) {
+	t.Helper()
+	specTickTestMu.Lock()
+	defer specTickTestMu.Unlock()
+	return runSpecDispatchAt(townRoot)
+}
+
 // A tick started by a daemon writes its bd census rows to the town's census
 // file, which the daemon logs; a tick run by hand has no owner to write for,
 // and a dry run is not the tick the daemon reports, so neither writes
-// (gt-139dp). The tick defaults the package's sling actor on its first call, so
-// two ticks in one process are run one after the other, not in parallel.
+// (gt-139dp).
 func TestSpecDispatchAtWritesTheCensusOfADaemonsTick(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		owner  string
@@ -344,9 +367,10 @@ func TestSpecDispatchAtWritesTheCensusOfADaemonsTick(t *testing.T) {
 		{"a dry run", "123.456", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			root := specTickTownWithHold(t)
-			if _, err := runSpecDispatchAtWith(root, tc.owner, tc.dryRun); err != nil {
-				t.Fatalf("runSpecDispatchAtWith: %v", err)
+			if _, err := runSpecTickForTest(t, root, tc.owner, tc.dryRun); err != nil {
+				t.Fatalf("runSpecTickForTest: %v", err)
 			}
 			_, err := beads.ReadCensusSink(dispatch.SpecCensusPath(root))
 			switch {
@@ -360,15 +384,15 @@ func TestSpecDispatchAtWritesTheCensusOfADaemonsTick(t *testing.T) {
 }
 
 // A census the tick cannot write is an error in its report, not a tick that
-// reads as having made no bd calls (gt-139dp). It runs beside the tick test
-// above and so, for the same reason, is not parallel.
+// reads as having made no bd calls (gt-139dp).
 func TestSpecDispatchAtReportsACensusItCouldNotWrite(t *testing.T) {
+	t.Parallel()
 	root := specTickTownWithHold(t)
 	// A regular file where the town's daemon directory goes stops the write.
 	if err := os.WriteFile(filepath.Join(root, "daemon"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := runSpecDispatchAtWith(root, "123.456", false)
+	report, err := runSpecTickForTest(t, root, "123.456", false)
 	if err != nil {
 		t.Fatalf("runSpecDispatchAtWith: %v", err)
 	}
