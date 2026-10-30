@@ -238,3 +238,20 @@ func TestMaskedReturnsTheUnderlyingWriteError(t *testing.T) {
 		t.Errorf("Write to a failing writer = %d, want 0 bytes consumed", n)
 	}
 }
+
+func TestMaskedCloseReturnsTheUnderlyingWriteError(t *testing.T) {
+	t.Parallel()
+	// "pa" is a held prefix of the secret, so Write writes nothing and Close is the
+	// first write to the failing writer.
+	w := Masked("pass", failingWriter{})
+	if n, err := w.Write([]byte("pa")); err != nil || n != 2 {
+		t.Fatalf("Write(%q) = %d, %v, want 2 and no error", "pa", n, err)
+	}
+	err := w.Close()
+	if err == nil {
+		t.Fatal("Close() of a held tail to a failing writer error = nil, want the write error")
+	}
+	if err.Error() != "disk full" {
+		t.Errorf("Close() error = %q, want the underlying %q", err, "disk full")
+	}
+}
