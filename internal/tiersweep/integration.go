@@ -52,6 +52,8 @@ type Sweep struct {
 	// TimingsKey. Run sets it from TIER_SWEEP_TIMINGS before the first package
 	// starts; nil starts the packages in list order.
 	Walls map[string]int64
+	// Began is handed to each parallel Runner as its Began; nil records nothing.
+	Began func(pkg string)
 }
 
 // integrationPlan is what the integration tier runs.
@@ -104,6 +106,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 		Now:      s.Now,
 		Jobs:     s.Opts.Jobs,
 		Walls:    s.Walls,
+		Began:    s.Began,
 	}
 	root := runner.Tier(TierIntegration, ".", slotPrefix(s.Opts.Nice), taggedArgs, plan.root)
 	docker := runner.Tier(TierDocker, ".", slotPrefix(s.Opts.Nice), nil, plan.docker)
