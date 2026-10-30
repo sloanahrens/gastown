@@ -58,8 +58,8 @@ type fakeForgejo struct {
 	// repoMissing makes every repository route answer 404, as a token that cannot see
 	// the repository does, whether or not the fake holds it.
 	repoMissing bool
-	// dropWhitelistEntry makes a branch-protection PATCH leave merge_whitelist_usernames
-	// as it was, so the write does not take.
+	// dropWhitelistEntry makes a branch-protection write leave merge_whitelist_usernames
+	// as it was (a PATCH) or empty (a POST), so the write does not take.
 	dropWhitelistEntry bool
 	// protectedLandBranch makes each repository the fake adds start with a land/* rule.
 	protectedLandBranch bool

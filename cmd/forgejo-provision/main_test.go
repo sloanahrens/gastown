@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -27,6 +26,7 @@ func TestMainUsageExitsTwo(t *testing.T) {
 	}{
 		"unknown option":            {args: []string{"--nope"}, stderr: "unknown option: --nope"},
 		"unknown role":              {args: []string{"--role", "admin"}, stderr: "unknown role 'admin'"},
+		"role with a slash":         {args: []string{"--role", "bad/role"}, stderr: "--role 'bad/role' must match"},
 		"--repo without OWNER/NAME": {args: []string{"--repo", "gastown"}, stderr: "--repo 'gastown' must be OWNER/NAME"},
 	}
 	for name, tc := range cases {
@@ -87,21 +87,24 @@ func TestMainHelpExitsZero(t *testing.T) {
 	}
 }
 
-// TestMainNotImplemented: a command line that passes every check must not exit 0
-// as though it had provisioned anything. The roles in the message are the
-// literals this test names, so a changed default role list shows up here.
-func TestMainNotImplemented(t *testing.T) {
+// TestMainWithoutAdminTokenExitsOne: a command line that parses but names no admin
+// token is a failed run (1), not a refused command line (2): the run stops at the
+// token, before any request, and says how to get one. The environment is empty, so
+// no request could reach a real server anyway.
+func TestMainWithoutAdminTokenExitsOne(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr strings.Builder
 	if got := run([]string{"--dry-run"}, noEnv, &stdout, &stderr); got != forgejoprov.ExitFailure {
 		t.Fatalf("run(--dry-run) = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
-	want := fmt.Sprintf(notImplemented, "polecat landing registry", forgejoprov.DefaultAPIURL)
-	if got := strings.TrimSpace(stderr.String()); got != want {
-		t.Errorf("stderr = %q, want %q", got, want)
+	if !strings.Contains(stderr.String(), "forgejo-provision: no admin token:") {
+		t.Errorf("stderr = %q, want the no admin token failure", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "usage: forgejo-provision --help") {
+		t.Errorf("stderr = %q, want no usage hint: this is not a refused command line", stderr.String())
 	}
 	if stdout.Len() != 0 {
-		t.Errorf("stdout = %q, want nothing before the run lands", stdout.String())
+		t.Errorf("stdout = %q, want nothing on a failed run", stdout.String())
 	}
 }
 

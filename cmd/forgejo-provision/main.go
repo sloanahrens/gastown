@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -32,7 +33,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 
 // runParse turns what Parse returned into the script's exit codes: the help
 // request is the flag list and success, a refused command line is its message
-// and the usage hint, and any other error is a run that failed.
+// and the usage hint, and any other error is a run that failed. A command line
+// that parses is handed to forgejoprov.Run.
 func runParse(args []string, getenv func(string) string, stdout, stderr io.Writer, parse parseOptions) int {
 	opts, err := parse(args, getenv)
 	switch {
@@ -49,15 +51,8 @@ func runParse(args []string, getenv func(string) string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, "usage: forgejo-provision --help")
 		return forgejoprov.ExitUsage
 	}
-	// The run that spends these options is the series' last bead
-	// (gt-tpg0p.35); until it lands, a command line that parses changes nothing.
-	fmt.Fprintf(stderr, notImplemented+"\n", strings.Join(opts.Roles, " "), opts.APIURL)
-	return forgejoprov.ExitFailure
+	return forgejoprov.Run(context.Background(), opts, forgejoprov.Env{Getenv: getenv, Log: stderr})
 }
-
-// notImplemented is what a command line that parses ends with until the run
-// lands: a run that wrote nothing must not exit 0 as though it had.
-const notImplemented = "forgejo-provision: the provisioning run is not implemented yet; nothing was changed (roles %s, api %s)"
 
 // usage is the text -h prints. It lives here rather than in the shell script's
 // header, which the port deletes with the script (gt-tpg0p.52), and every
