@@ -303,7 +303,7 @@ button.arow-head:hover{background:#19212b}
 .agroup{margin-top:6px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .agroup:first-child{margin-top:0}
 .arow .heldby{color:var(--dim)}
-.arow .nh{color:var(--dim);margin-right:6px}
+.arow .nh,.arow .lrisk{color:var(--dim);margin-right:6px}
 .arow .waiting{color:var(--blue)}
 .arow .badc{display:block}
 .arow .qcmd,.arow .qrec{margin-top:3px}
@@ -3058,6 +3058,14 @@ function attentionRow(r) {
     head.append(el("span", "nh", r.needs_human == null
       ? (attentionState && attentionState.attention && attentionState.attention.scores_failed ? "needs ?" : "needs –")
       : "needs " + r.needs_human.toFixed(2)));
+    // The landing battery's risk level is drawn beside a risk-path row, so a
+    // reader sees why the row sits where it does. Only a risk-path row carries
+    // one: a row no landing answer names draws none, not a dash.
+    if (r.landing_risk != null) {
+      const lr = el("span", "lrisk", "risk " + r.landing_risk);
+      lr.title = "landing battery risk level";
+      head.append(lr);
+    }
   } else {
     head.append(el("span", "bead", r.id || ""));
   }
