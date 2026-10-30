@@ -6,7 +6,29 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
+
+// receiveBound is the most a test waits for a seam to report. A regression fails the
+// test at this bound instead of hanging the package.
+const receiveBound = 10 * time.Second
+
+// awaitReceive reads one value from ch, failing the test when nothing arrives within
+// receiveBound. Every wait on a seam's channel goes through it, so a seam that stops
+// reporting fails fast.
+func awaitReceive[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), receiveBound)
+	defer cancel()
+	select {
+	case v := <-ch:
+		return v
+	case <-ctx.Done():
+		t.Fatalf("nothing arrived on the seam's channel within %v", receiveBound)
+	}
+	var zero T
+	return zero
+}
 
 // TestParseRefsSortsInByteOrder pins the order the script's LC_ALL=C sort gave:
 // uppercase before lowercase, branches before tags, and "v1.10" before "v1.9".
@@ -145,7 +167,7 @@ type fakeRunner struct {
 	err   error
 }
 
-func (f *fakeRunner) run(argv []string) ([]byte, error) {
+func (f *fakeRunner) run(_ context.Context, argv []string) ([]byte, error) {
 	f.calls = append(f.calls, slices.Clone(argv))
 	return f.out, f.err
 }
@@ -246,6 +268,65 @@ func TestGitCommandDisablesPrompt(t *testing.T) {
 	}
 }
 
+// TestGitExecCancelsAnInFlightCallWithTheRunContext drives the Runner seam: the
+// runner a call runs through is handed the run's context, so canceling the run ends
+// the call in flight. Mutation: run the call under context.Background() and the
+// call's context is never done, so the test fails at its bound.
+func TestGitExecCancelsAnInFlightCallWithTheRunContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	run := func(callCtx context.Context, _ []string) ([]byte, error) {
+		close(started)
+		<-callCtx.Done() // the run is canceled while this call is in flight
+		return nil, callCtx.Err()
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- ExecGit{Context: ctx, Run: run}.Fetch("scratch/refs.git", "https://github.com/acme/gastown.git", Refspecs...)
+	}()
+	awaitReceive(t, started)
+	cancel()
+	if err := awaitReceive(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Fetch error = %v, want context.Canceled", err)
+	}
+}
+
+// TestGitRunnerDerivesEachCallFromTheRunContext drives the production starter path
+// without a process: the call's context comes from the run's and carries its own
+// bound, so a canceled run ends the call and the call still cannot outlive the
+// bound. Mutation: derive the call's context from context.Background() and the
+// call never ends on the run's cancellation; drop the bound and the deadline check
+// goes red.
+func TestGitRunnerDerivesEachCallFromTheRunContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	callContexts := make(chan context.Context, 1)
+	start := func(callCtx context.Context, _ string, _ ...string) ([]byte, error) {
+		callContexts <- callCtx
+		<-callCtx.Done() // a call in flight ends with its context
+		return nil, callCtx.Err()
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := gitRunnerWith(time.Hour, start)(ctx, []string{"git", "fetch", "--quiet"})
+		done <- err
+	}()
+	callCtx := awaitReceive(t, callContexts)
+	if _, ok := callCtx.Deadline(); !ok {
+		t.Fatal("the call's context has no bound, want one derived from the git timeout")
+	}
+	cancel()
+	if err := awaitReceive(t, done); !errors.Is(err, context.Canceled) {
+		t.Fatalf("git fetch error = %v, want context.Canceled", err)
+	}
+	if err := callCtx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the call's context error = %v after the run was canceled, want context.Canceled", err)
+	}
+}
+
 // TestGitExecPropagatesRunnerError drives the refusal branch: a failed git
 // operation returns its error rather than passing as done.
 func TestGitExecPropagatesRunnerError(t *testing.T) {
@@ -298,10 +379,10 @@ func TestExecRunnerErrorNamesCommandNotOutput(t *testing.T) {
 	t.Parallel()
 	const secret = "token-value-abc"
 	boom := errors.New("exit status 128")
-	start := func(name string, args ...string) ([]byte, error) {
+	start := func(context.Context, string, ...string) ([]byte, error) {
 		return []byte(secret), boom
 	}
-	_, err := execRunner(start)([]string{"git", "ls-remote", "--heads", "https://github.com/acme/gastown.git"})
+	_, err := execRunner(start)(context.Background(), []string{"git", "ls-remote", "--heads", "https://github.com/acme/gastown.git"})
 	if !errors.Is(err, boom) {
 		t.Fatalf("error = %v, want it to wrap %v", err, boom)
 	}

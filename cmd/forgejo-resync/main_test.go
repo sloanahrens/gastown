@@ -1,15 +1,25 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/forgejoresync"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+// releaseBound is the most a test waits for the handler release. A run that holds it
+// fails the test at this bound instead of hanging.
+const releaseBound = 10 * time.Second
 
 func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 
@@ -182,6 +192,105 @@ func TestRunExitCodes(t *testing.T) {
 				t.Fatalf("run(%v) = %d, want %d (stderr: %s)", tc.args, got, tc.want, stderr.String())
 			}
 		})
+	}
+}
+
+// fakeNotify stands in for signal.NotifyContext: it reports the context the test
+// holds and records that the handler was released. released is closed once, so the
+// run's own release and the deferred one can both call it.
+type fakeNotify struct {
+	ctx      context.Context
+	caught   []os.Signal
+	released chan struct{}
+	once     sync.Once
+	calls    atomic.Int32 // how many times the handler was released
+}
+
+func (f *fakeNotify) notify(_ context.Context, signals ...os.Signal) (context.Context, context.CancelFunc) {
+	f.caught = append(f.caught, signals...)
+	return f.ctx, func() {
+		f.calls.Add(1)
+		f.once.Do(func() { close(f.released) })
+	}
+}
+
+// TestMainCatchesTheSignalsTheScriptCaught: the handler covers the three signals
+// bash ran the script's EXIT trap for, the run it starts is handed their context
+// (a canceled one stops the run before any token or git call), and the handler is
+// released. Mutation: drop a signal from the list and the signal check goes red;
+// drop the wiring and no call is recorded.
+func TestMainCatchesTheSignalsTheScriptCaught(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fake := &fakeNotify{ctx: ctx, released: make(chan struct{})}
+	opts := &forgejoresync.Options{Repo: "acme/gastown", MainBranch: "main"}
+	parse := func([]string, func(string) string) (*forgejoresync.Options, error) { return opts, nil }
+	var stdout, stderr strings.Builder
+	if got := runNotify(nil, noEnv, noFiles(t), &stdout, &stderr, parse, fake.notify); got != forgejoresync.ExitFailure {
+		t.Fatalf("runNotify = %d, want 1 (stderr: %s)", got, stderr.String())
+	}
+	want := []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+	if !slices.Equal(fake.caught, want) {
+		t.Fatalf("handler caught %v, want %v", fake.caught, want)
+	}
+	select {
+	case <-fake.released:
+	default:
+		t.Fatal("the signal handler was not released")
+	}
+	if !strings.Contains(stderr.String(), "run canceled") {
+		t.Errorf("stderr = %q, want the canceled run named", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing on a failed run", stdout.String())
+	}
+}
+
+// settle is how long the held-handler test waits for an asynchronous release that
+// must not come.
+const settle = 20 * time.Millisecond
+
+// TestMainKeepsTheHandlerThroughTheRestore: the restore can run for minutes after
+// the first signal, and a second signal during it must not kill the process and
+// skip the restore: the handler is held until the run returns, and released once,
+// by the deferred release. Releasing it at the first signal as well (a second
+// release call) is the defect. Mutation: add context.AfterFunc(ctx, stop) after the
+// notify call and the release count reads 2.
+func TestMainKeepsTheHandlerThroughTheRestore(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := &fakeNotify{ctx: ctx, released: make(chan struct{})}
+	var once sync.Once
+	getenv := func(string) string {
+		once.Do(func() {
+			cancel() // the first signal lands while the run is resolving its token
+			// A release made at the first signal would run on a goroutine
+			// context.AfterFunc starts; the settle gives it the time to run. The
+			// absence of a release cannot be observed without a bound, so the
+			// bound is short, and the count below is the second check.
+			select {
+			case <-fake.released:
+				t.Error("the signal handler was released at the first signal: a second signal would kill the process and skip the restore")
+			case <-time.After(settle): //testpolicy:allow no-sleep — a negative proof: nothing arrives on the release channel while the run is held; the bound is the settle for an asynchronous release, and the test does not depend on it for a pass of correct code
+			}
+		})
+		return ""
+	}
+	opts := &forgejoresync.Options{Repo: "acme/gastown", MainBranch: "main"}
+	parse := func([]string, func(string) string) (*forgejoresync.Options, error) { return opts, nil }
+	var stdout, stderr strings.Builder
+	if got := runNotify(nil, getenv, noFiles(t), &stdout, &stderr, parse, fake.notify); got != forgejoresync.ExitFailure {
+		t.Fatalf("runNotify = %d, want 1 (stderr: %s)", got, stderr.String())
+	}
+	select {
+	case <-fake.released:
+	default:
+		t.Fatal("the signal handler was not released when the run returned")
+	}
+	if got := fake.calls.Load(); got != 1 {
+		t.Errorf("the handler was released %d times, want once at the end of the run: an earlier release lets a second signal skip the restore", got)
 	}
 }
 

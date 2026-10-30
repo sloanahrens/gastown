@@ -1,6 +1,7 @@
 package forgejocut
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -309,7 +310,7 @@ type gitRunnerFake struct {
 	calls [][]string
 }
 
-func (f *gitRunnerFake) run(argv []string) ([]byte, error) {
+func (f *gitRunnerFake) run(_ context.Context, argv []string) ([]byte, error) {
 	f.calls = append(f.calls, argv)
 	return f.out, f.err
 }

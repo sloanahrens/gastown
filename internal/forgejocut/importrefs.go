@@ -1,6 +1,7 @@
 package forgejocut
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -198,10 +199,11 @@ func (c *Cutover) fetchBoth(scratch string) error {
 }
 
 // pushRefs sends specs from the scratch repository to url as a plain push, so a
-// ref Forgejo is ahead on cannot move.
+// ref Forgejo is ahead on cannot move. The cutover installs no signal handler, so
+// the push runs under the background context (gt-csjwi).
 func pushRefs(git forgejoresync.Runner, scratch, url string, specs []string) error {
 	argv := append([]string{"git", "-C", scratch, "push", "--quiet", "--", url}, specs...)
-	if _, err := git(argv); err != nil {
+	if _, err := git(context.Background(), argv); err != nil {
 		return fmt.Errorf("the push of %d ref(s) to the admin base failed: %w", len(specs), err)
 	}
 	return nil

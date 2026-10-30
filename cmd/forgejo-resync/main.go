@@ -5,10 +5,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/steveyegge/gastown/internal/forgejoresync"
 )
@@ -29,11 +32,20 @@ func run(args []string, getenv func(string) string, readFile func(string) ([]byt
 	return runParse(args, getenv, readFile, stdout, stderr, forgejoresync.Parse)
 }
 
+// notifySignals is signal.NotifyContext behind a seam, so a test hands the run one
+// that records the signals caught instead of installing a process-wide handler.
+type notifySignals func(ctx context.Context, signals ...os.Signal) (context.Context, context.CancelFunc)
+
 // runParse turns what Parse returned into the script's exit codes: the help
 // request is the usage text and success, a refused command line is its message
 // and the usage hint, and any other error is a run that failed. A command line
 // that parses is run, and its exit code is the run's.
 func runParse(args []string, getenv func(string) string, readFile func(string) ([]byte, error), stdout, stderr io.Writer, parse parseOptions) int {
+	return runNotify(args, getenv, readFile, stdout, stderr, parse, signal.NotifyContext)
+}
+
+// runNotify is runParse with the signal source injected.
+func runNotify(args []string, getenv func(string) string, readFile func(string) ([]byte, error), stdout, stderr io.Writer, parse parseOptions, notify notifySignals) int {
 	opts, err := parse(args, getenv)
 	switch {
 	case errors.Is(err, forgejoresync.ErrHelp):
@@ -53,8 +65,20 @@ func runParse(args []string, getenv func(string) string, readFile func(string) (
 		fmt.Fprintln(stderr, "forgejo-resync: the command line parsed to no options")
 		return forgejoresync.ExitFailure
 	}
+	// The script's EXIT trap ran the restore for an interrupt, a termination and a
+	// hangup alike, so all three cancel the run here: the git calls stop at their
+	// next cancel, and the protection restore still runs.
+	ctx, stop := notify(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	// The handler stays installed until the run returns, restore included. The
+	// first signal ends the run and starts the restore, which can take up to
+	// RestoreTimeout; a second signal during it is swallowed, as bash deferred a
+	// signal that arrived while the script's EXIT trap ran, because the restore
+	// is the one step an impatient second signal must not skip. The wait is
+	// bounded by RestoreTimeout, so a stuck restore ends by itself.
 	resync := &forgejoresync.Resync{
 		Opts:     opts,
+		Context:  ctx,
 		Getenv:   getenv,
 		ReadFile: readFile,
 		Log:      func(line string) { fmt.Fprintf(stderr, "forgejo-resync: %s\n", line) },
