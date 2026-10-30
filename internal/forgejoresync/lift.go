@@ -76,6 +76,9 @@ type Resync struct {
 	RestoreTimeout time.Duration
 	// Git runs the git calls the mirror makes; nil runs the git binary.
 	Git Git
+	// Context is the run's context: a signal cancels it in the command, and the
+	// git calls derive theirs from it. nil means context.Background().
+	Context context.Context
 	// MkdirTemp and RemoveAll make and remove the scratch directory the mirror is built in;
 	// nil means os.MkdirTemp and os.RemoveAll.
 	MkdirTemp func(dir, pattern string) (string, error)

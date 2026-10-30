@@ -1,6 +1,7 @@
 package forgejocut
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -58,7 +59,7 @@ func newImportGitFake(listings map[string][]lsReply) *importGitFake {
 	return &importGitFake{listings: listings, listed: make(map[string]int)}
 }
 
-func (f *importGitFake) run(argv []string) ([]byte, error) {
+func (f *importGitFake) run(_ context.Context, argv []string) ([]byte, error) {
 	f.calls = append(f.calls, slices.Clone(argv))
 	if len(argv) < 2 || argv[0] != "git" {
 		return nil, fmt.Errorf("not a git call: %q", argv)

@@ -1,6 +1,7 @@
 package forgejoresync
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -16,13 +17,19 @@ var errRefsDiffer = errors.New("refs differ after the push")
 
 // Run runs the stages in order and restores main's protection afterwards. The restore is
 // deferred once the admin token resolves, so every exit past that point runs it: a failed
-// stage, a panic, and success alike. A failed restore forces ExitFailure even when the stages
-// succeeded, because main is left unprotected until someone reruns the provisioner by hand.
-// The scratch directory goes after the restore, on every path that made one.
+// stage, a panic, and success alike. A canceled run context (a signal in the command) stops
+// the stages and returns ExitFailure once the restore has run; the restore keeps its own
+// context, so the cancellation cannot skip it. A failed restore forces ExitFailure even when
+// the stages succeeded, because main is left unprotected until someone reruns the provisioner
+// by hand. The scratch directory goes after the restore, on every path that made one.
 func (r *Resync) Run() (rc int) {
 	var token forgejoprov.Secret
 	ready := false
 	defer r.removeWork()
+	if err := r.runContext().Err(); err != nil {
+		r.logf("run canceled: %v", err)
+		return ExitFailure
+	}
 	defer func() {
 		if !ready {
 			return
@@ -50,6 +57,12 @@ func (r *Resync) Run() (rc int) {
 		r.logf("%v", err)
 		return ExitFailure
 	}
+	// A signal can arrive as the last stage ends: the restore still runs, and the
+	// run reports the cancellation rather than a convergence it did not see.
+	if err := r.runContext().Err(); err != nil {
+		r.logf("run canceled: %v", err)
+		return ExitFailure
+	}
 	return ExitOK
 }
 
@@ -63,13 +76,18 @@ func noAdminTokenLine(tokenFile string) string {
 	return fmt.Sprintf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run forgejo-resync -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", standIn)
 }
 
-// runSteps runs each stage in order and stops at the first error.
+// runSteps runs each stage in order and stops at the first error. A stage the
+// run's context was canceled before does not start: a signal must not lift main's
+// protection on its way out.
 func (r *Resync) runSteps() error {
 	steps := r.Steps
 	if steps == nil {
 		steps = r.productionSteps()
 	}
 	for _, step := range steps {
+		if err := r.runContext().Err(); err != nil {
+			return fmt.Errorf("%s not run: %w", step.Name, err)
+		}
 		if err := step.Run(); err != nil {
 			return fmt.Errorf("%s failed: %w", step.Name, err)
 		}
@@ -273,5 +291,13 @@ func (r *Resync) git() Git {
 	if r.Git != nil {
 		return r.Git
 	}
-	return NewExecGit()
+	return NewExecGit(r.runContext())
+}
+
+// runContext never returns nil, so a stage's context cannot panic on it.
+func (r *Resync) runContext() context.Context {
+	if r.Context != nil {
+		return r.Context
+	}
+	return context.Background()
 }

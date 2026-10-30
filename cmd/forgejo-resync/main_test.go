@@ -1,15 +1,24 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/forgejoresync"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+// releaseBound is the most a test waits for the handler release. A run that holds it
+// fails the test at this bound instead of hanging.
+const releaseBound = 10 * time.Second
 
 func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 
@@ -182,6 +191,88 @@ func TestRunExitCodes(t *testing.T) {
 				t.Fatalf("run(%v) = %d, want %d (stderr: %s)", tc.args, got, tc.want, stderr.String())
 			}
 		})
+	}
+}
+
+// fakeNotify stands in for signal.NotifyContext: it reports the context the test
+// holds and records that the handler was released. released is closed once, so the
+// run's own release and the deferred one can both call it.
+type fakeNotify struct {
+	ctx      context.Context
+	caught   []os.Signal
+	released chan struct{}
+	once     sync.Once
+}
+
+func (f *fakeNotify) notify(_ context.Context, signals ...os.Signal) (context.Context, context.CancelFunc) {
+	f.caught = append(f.caught, signals...)
+	return f.ctx, func() { f.once.Do(func() { close(f.released) }) }
+}
+
+// TestMainCatchesTheSignalsTheScriptCaught: the handler covers the three signals
+// bash ran the script's EXIT trap for, the run it starts is handed their context
+// (a canceled one stops the run before any token or git call), and the handler is
+// released. Mutation: drop a signal from the list and the signal check goes red;
+// drop the wiring and no call is recorded.
+func TestMainCatchesTheSignalsTheScriptCaught(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fake := &fakeNotify{ctx: ctx, released: make(chan struct{})}
+	opts := &forgejoresync.Options{Repo: "acme/gastown", MainBranch: "main"}
+	parse := func([]string, func(string) string) (*forgejoresync.Options, error) { return opts, nil }
+	var stdout, stderr strings.Builder
+	if got := runNotify(nil, noEnv, noFiles(t), &stdout, &stderr, parse, fake.notify); got != forgejoresync.ExitFailure {
+		t.Fatalf("runNotify = %d, want 1 (stderr: %s)", got, stderr.String())
+	}
+	want := []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+	if !slices.Equal(fake.caught, want) {
+		t.Fatalf("handler caught %v, want %v", fake.caught, want)
+	}
+	select {
+	case <-fake.released:
+	default:
+		t.Fatal("the signal handler was not released")
+	}
+	if !strings.Contains(stderr.String(), "run canceled") {
+		t.Errorf("stderr = %q, want the canceled run named", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing on a failed run", stdout.String())
+	}
+}
+
+// TestMainReleasesTheHandlerAtTheFirstSignal: the restore can run for minutes after
+// the first signal, and a second signal must act then (the default effect is the
+// process dies) instead of being swallowed until the run returns. The token read is
+// the hook: it cancels the signal source and then waits for the release while the
+// run is still going, so a handler held until the run returns fails this test rather
+// than passing. Mutation: drop the release after the notify call and the release
+// never arrives.
+func TestMainReleasesTheHandlerAtTheFirstSignal(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := &fakeNotify{ctx: ctx, released: make(chan struct{})}
+	var once sync.Once
+	getenv := func(string) string {
+		once.Do(func() {
+			cancel() // the signal lands while the run is resolving its token
+			waitCtx, stopWait := context.WithTimeout(context.Background(), releaseBound)
+			defer stopWait()
+			select {
+			case <-fake.released:
+			case <-waitCtx.Done():
+				t.Error("the signal handler was still held while the run went on: a second signal would be swallowed")
+			}
+		})
+		return ""
+	}
+	opts := &forgejoresync.Options{Repo: "acme/gastown", MainBranch: "main"}
+	parse := func([]string, func(string) string) (*forgejoresync.Options, error) { return opts, nil }
+	var stdout, stderr strings.Builder
+	if got := runNotify(nil, getenv, noFiles(t), &stdout, &stderr, parse, fake.notify); got != forgejoresync.ExitFailure {
+		t.Fatalf("runNotify = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
 }
 

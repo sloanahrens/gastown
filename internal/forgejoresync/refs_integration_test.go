@@ -3,6 +3,7 @@
 package forgejoresync
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -120,7 +121,7 @@ func TestIntegrationBoundedGitCallReturnsAfterBound(t *testing.T) {
 			done := make(chan error, 1)
 			start := time.Now()
 			go func() {
-				_, err := gitRunner(standInBound)([]string{os.Args[0], "-test.run=^TestIntegrationHelperGitStandIn$"})
+				_, err := gitRunner(standInBound)(context.Background(), []string{os.Args[0], "-test.run=^TestIntegrationHelperGitStandIn$"})
 				done <- err
 			}()
 			wait := tc.limit + 5*time.Second
@@ -143,5 +144,55 @@ func TestIntegrationBoundedGitCallReturnsAfterBound(t *testing.T) {
 			}
 			t.Logf("returned in %v (bound %v, limit %v)", elapsed.Round(10*time.Millisecond), standInBound, tc.limit)
 		})
+	}
+}
+
+// awaitStandInChild waits for the stand-in to record its child's pid, so the cancel
+// that follows lands on a call that is in flight.
+func awaitStandInChild(t *testing.T, pidFile string) {
+	t.Helper()
+	deadline := time.Now().Add(standInBound)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(pidFile); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the stand-in never started its child within %v", standInBound)
+}
+
+// TestIntegrationCanceledRunEndsTheGitCall pins that a signal canceling the run ends
+// a git call in flight, with its process group, rather than leaving it to finish. The
+// stand-in holds its call for a minute and its child holds the output pipe, which
+// only a group kill closes before gitWaitDelay (over three seconds); the call returns
+// in under a second, so the cancellation, not the bound or the pipe, ended it.
+// Mutation: run the call under context.Background() and it stays up until its bound.
+func TestIntegrationCanceledRunEndsTheGitCall(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv(standInEnv, "holder")
+	t.Setenv(standInPidEnv, pidFile)
+	t.Cleanup(func() { killStandInChild(pidFile) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		// A minute's bound: only the cancellation can end the call in the limit.
+		_, err := gitRunner(time.Minute)(ctx, []string{os.Args[0], "-test.run=^TestIntegrationHelperGitStandIn$"})
+		done <- err
+	}()
+	awaitStandInChild(t, pidFile)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("the call returned success; a canceled call must surface as an error")
+		}
+	case <-time.After(standInBound):
+		t.Fatalf("the call was still running %v after it was canceled: the run's context did not end it", standInBound)
+	}
+	if elapsed := time.Since(start); elapsed > standInBound {
+		t.Fatalf("the call took %v after cancellation, want under %v", elapsed.Round(10*time.Millisecond), standInBound)
 	}
 }

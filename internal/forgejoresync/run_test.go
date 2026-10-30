@@ -528,6 +528,155 @@ func TestRunGuardRefusesAPlanThatDeletesMain(t *testing.T) {
 	}
 }
 
+// TestRunCanceledMidStageRestoresAndFails cancels the run's context while a stage is
+// in flight: the call the stage waits on ends canceled, the stages after it never
+// run, the restore runs once and Run exits 1. Mutation: drop the restore defer and
+// the provisioner count goes red, which is the unprotected main this bead is about.
+func TestRunCanceledMidStageRestoresAndFails(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fx.resync.Context = ctx
+	ranAfter := false
+	fx.resync.Steps = []Step{
+		{Name: "list", Run: func() error {
+			cancel()         // the signal lands while the stage's call is in flight
+			return ctx.Err() // and the call ends with the run's context
+		}},
+		{Name: "push", Run: func() error { ranAfter = true; return nil }},
+	}
+	if rc := fx.resync.Run(); rc != ExitFailure {
+		t.Fatalf("Run = %d, want 1; logs %q", rc, fx.logs)
+	}
+	if ranAfter {
+		t.Fatal("a stage after the canceled one ran")
+	}
+	if len(fx.calls) != 1 || fx.lastEvent() != "restore" {
+		t.Fatalf("restore ran %d times, last event %q; want one restore last", len(fx.calls), fx.lastEvent())
+	}
+}
+
+// TestRunRestoresUnderItsOwnContextAfterCancellation pins that the cancellation does
+// not reach the restore: the provisioner runs under a live context with its own
+// bound, so a signal after the lift still puts main's protection back. Mutation:
+// derive the restore's context from the run's and the recorded error is
+// context.Canceled, the unprotected main this bead is about.
+func TestRunRestoresUnderItsOwnContextAfterCancellation(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fx.resync.Context = ctx
+	type restoreSeen struct {
+		ctxErr  error
+		bounded bool
+	}
+	seen := make(chan restoreSeen, 1)
+	fx.resync.Provision = func(provCtx context.Context, opts *forgejoprov.Options, env forgejoprov.Env) int {
+		_, bounded := provCtx.Deadline()
+		seen <- restoreSeen{ctxErr: provCtx.Err(), bounded: bounded}
+		fx.calls = append(fx.calls, restoreCall{opts: *opts, token: env.Getenv(restoreTokenEnv)})
+		return forgejoprov.ExitOK
+	}
+	fx.resync.Steps = []Step{
+		{Name: "list", Run: func() error {
+			cancel()
+			return ctx.Err()
+		}},
+	}
+	if rc := fx.resync.Run(); rc != ExitFailure {
+		t.Fatalf("Run = %d, want 1; logs %q", rc, fx.logs)
+	}
+	got := awaitReceive(t, seen)
+	if got.ctxErr != nil {
+		t.Fatalf("the restore's context error = %v, want nil: a canceled run must not cancel the restore", got.ctxErr)
+	}
+	if !got.bounded {
+		t.Fatal("the restore's context has no bound of its own, want the restore timeout")
+	}
+	if len(fx.calls) != 1 {
+		t.Fatalf("restore ran %d times, want 1", len(fx.calls))
+	}
+}
+
+// TestRunCanceledBetweenStagesRunsNoFurtherStage: a stage that cancels the run and
+// returns no error stops the stages after it, so a signal before the lift cannot
+// take main's protection away. Mutation: drop the check before each stage and the
+// push stage runs.
+func TestRunCanceledBetweenStagesRunsNoFurtherStage(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fx.resync.Context = ctx
+	ranAfter := false
+	fx.resync.Steps = []Step{
+		{Name: "list", Run: func() error { cancel(); return nil }},
+		{Name: "push", Run: func() error { ranAfter = true; return nil }},
+	}
+	if rc := fx.resync.Run(); rc != ExitFailure {
+		t.Fatalf("Run = %d, want 1; logs %q", rc, fx.logs)
+	}
+	if ranAfter {
+		t.Fatal("the stage after the canceled one ran")
+	}
+	if !slices.Contains(fx.logs, "push not run: context canceled") {
+		t.Fatalf("logs %q do not name the stage the cancellation stopped", fx.logs)
+	}
+	if len(fx.calls) != 1 {
+		t.Fatalf("restore ran %d times, want 1", len(fx.calls))
+	}
+}
+
+// TestRunCanceledOnTheLastStageStillFails: a cancellation the last stage leaves
+// behind makes the run report the cancellation rather than a convergence it did not
+// see, and the restore still runs. Mutation: drop the check after the stages and
+// Run returns 0.
+func TestRunCanceledOnTheLastStageStillFails(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fx.resync.Context = ctx
+	fx.resync.Steps = []Step{
+		{Name: "verify", Run: func() error { cancel(); return nil }},
+	}
+	if rc := fx.resync.Run(); rc != ExitFailure {
+		t.Fatalf("Run = %d, want 1; logs %q", rc, fx.logs)
+	}
+	if !slices.Contains(fx.logs, "run canceled: context canceled") {
+		t.Fatalf("logs %q do not name the cancellation", fx.logs)
+	}
+	if len(fx.calls) != 1 {
+		t.Fatalf("restore ran %d times, want 1", len(fx.calls))
+	}
+}
+
+// TestRunCanceledBeforeTheTokenSendsNothing: a run stopped before it starts reads no
+// token, sends no request and runs no stage, and its exit is still the failure a
+// signal asks for. Mutation: drop the opening check and the token is resolved and
+// the stages run.
+func TestRunCanceledBeforeTheTokenSendsNothing(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fx.resync.Context = ctx
+	if rc := fx.resync.Run(); rc != ExitFailure {
+		t.Fatalf("Run = %d, want 1; logs %q", rc, fx.logs)
+	}
+	if len(fx.events) != 0 || len(fx.auths) != 0 || len(fx.calls) != 0 {
+		t.Fatalf("a canceled run sent work: events %v, auths %v, calls %d", fx.events, fx.auths, len(fx.calls))
+	}
+	if len(fx.readPaths) != 0 {
+		t.Fatalf("a canceled run read %v", fx.readPaths)
+	}
+	if !slices.Contains(fx.logs, "run canceled: context canceled") {
+		t.Fatalf("logs %q do not name the cancellation", fx.logs)
+	}
+}
+
 // TestRunWithoutAnAdminTokenSendsNothing checks a run with no token refuses before any request,
 // any git call or the provisioner, names this command's broker rule, and reads no token file:
 // a token left in $HOME is not a source. Mutation: fall back to the home token file and the

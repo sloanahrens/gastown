@@ -89,17 +89,30 @@ type Git interface {
 	PushPrune(dir, url string, refspecs ...string) error
 }
 
-// Runner runs argv, argv[0] being the program, and returns its stdout.
-type Runner func(argv []string) ([]byte, error)
+// Runner runs argv, argv[0] being the program, and returns its stdout. ctx is the
+// run's context: a canceled ctx ends the call.
+type Runner func(ctx context.Context, argv []string) ([]byte, error)
 
-// ExecGit is Git backed by the git binary, run through Run.
+// ExecGit is Git backed by the git binary, run through Run under the run's
+// context.
 type ExecGit struct {
-	Run Runner
+	// Context is the run's context, which each call derives its own from; nil
+	// means context.Background().
+	Context context.Context
+	Run     Runner
 }
 
-// NewExecGit returns the Git the command uses in production.
-func NewExecGit() ExecGit {
-	return ExecGit{Run: RunExec}
+// NewExecGit returns the Git the command uses in production, running under ctx.
+func NewExecGit(ctx context.Context) ExecGit {
+	return ExecGit{Context: ctx, Run: RunExec}
+}
+
+// runContext never returns nil, so a call's context.WithTimeout cannot panic.
+func (g ExecGit) runContext() context.Context {
+	if g.Context != nil {
+		return g.Context
+	}
+	return context.Background()
 }
 
 // gitTimeout bounds one git call, so a stalled remote cannot hold the run open.
@@ -118,13 +131,22 @@ var gitWaitDelay = util.ProcessGroupKillGrace + 3*time.Second
 var RunExec Runner = gitRunner(gitTimeout)
 
 // gitRunner is the Runner that bounds each call to bound: the call's context
-// ends after bound and gitCommand kills the process group. A test passes a
-// short bound; RunExec passes gitTimeout.
+// ends after bound or when the run's context does, and gitCommand kills the
+// process group. RunExec passes gitTimeout; a test passes a short bound with
+// gitRunnerWith.
 func gitRunner(bound time.Duration) Runner {
-	return execRunner(func(name string, args ...string) ([]byte, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), bound)
-		defer cancel()
+	return gitRunnerWith(bound, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return gitCommand(ctx, name, args...).Output()
+	})
+}
+
+// gitRunnerWith is gitRunner with the process starter injected, the way execRunner
+// takes one: a test reads the context a call runs under without starting a process.
+func gitRunnerWith(bound time.Duration, start func(ctx context.Context, name string, args ...string) ([]byte, error)) Runner {
+	return execRunner(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(ctx, bound)
+		defer cancel()
+		return start(ctx, name, args...)
 	})
 }
 
@@ -144,9 +166,9 @@ func gitCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 // execRunner wraps a process starter as a Runner. Its error names the program
 // and subcommand, never the output, which can carry a secret. The starter is a
 // seam: a test drives the failure branch without starting a process.
-func execRunner(start func(name string, args ...string) ([]byte, error)) Runner {
-	return func(argv []string) ([]byte, error) {
-		out, err := start(argv[0], argv[1:]...)
+func execRunner(start func(ctx context.Context, name string, args ...string) ([]byte, error)) Runner {
+	return func(ctx context.Context, argv []string) ([]byte, error) {
+		out, err := start(ctx, argv[0], argv[1:]...)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", strings.Join(argv[:2], " "), err)
 		}
@@ -157,19 +179,19 @@ func execRunner(start func(name string, args ...string) ([]byte, error)) Runner 
 // LsRemote lists the branches and tags of url. The "--" ends the options, so a
 // url that starts with "-" is read as a repository, never as a git option.
 func (g ExecGit) LsRemote(url string) ([]byte, error) {
-	return g.Run([]string{"git", "ls-remote", "--heads", "--tags", "--refs", "--", url})
+	return g.Run(g.runContext(), []string{"git", "ls-remote", "--heads", "--tags", "--refs", "--", url})
 }
 
 // InitBare creates a bare repository at dir, the scratch the mirror is built in.
 func (g ExecGit) InitBare(dir string) error {
-	_, err := g.Run([]string{"git", "init", "--bare", "--quiet", dir})
+	_, err := g.Run(g.runContext(), []string{"git", "init", "--bare", "--quiet", dir})
 	return err
 }
 
 // Fetch fetches refspecs from url into the repository at dir. The "--" keeps a
 // url that starts with "-" from being read as a git option.
 func (g ExecGit) Fetch(dir, url string, refspecs ...string) error {
-	_, err := g.Run(append([]string{"git", "-C", dir, "fetch", "--quiet", "--", url}, refspecs...))
+	_, err := g.Run(g.runContext(), append([]string{"git", "-C", dir, "fetch", "--quiet", "--", url}, refspecs...))
 	return err
 }
 
@@ -177,7 +199,7 @@ func (g ExecGit) Fetch(dir, url string, refspecs ...string) error {
 // ref at url that the refspecs do not name. The "--" keeps a url that starts
 // with "-" from being read as a git option.
 func (g ExecGit) PushPrune(dir, url string, refspecs ...string) error {
-	_, err := g.Run(append([]string{"git", "-C", dir, "push", "--prune", "--quiet", "--", url}, refspecs...))
+	_, err := g.Run(g.runContext(), append([]string{"git", "-C", dir, "push", "--prune", "--quiet", "--", url}, refspecs...))
 	return err
 }
 
