@@ -121,29 +121,9 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	if b.Git == nil {
 		return nil, errors.New("daemonimage: no git to resolve the commits with")
 	}
-	if b.Out == "" {
-		return nil, errors.New("daemonimage: no output directory for the binaries")
-	}
-	if !filepath.IsAbs(b.Out) {
-		return nil, fmt.Errorf("daemonimage: output directory %q is not absolute; a build runs in a worktree, not in the caller's directory", b.Out)
-	}
-	if rev = strings.TrimSpace(rev); rev == "" {
-		return nil, errors.New("daemonimage: no rev to stamp gt with")
-	}
-	if !isCommit(rev) {
-		return nil, fmt.Errorf("daemonimage: rev %q is not a 7+ character hex commit", rev)
-	}
-	for _, src := range []struct{ name, dir string }{{"gt", b.GTSrc}, {"bd", b.BDSrc}, {"om", b.OMSrc}} {
-		if src.dir == "" {
-			return nil, fmt.Errorf("daemonimage: no %s source checkout named", src.name)
-		}
-	}
-	bdCommit := strings.TrimSpace(b.BDCommit)
-	if bdCommit == "" {
-		return nil, errors.New("daemonimage: no bd commit to stamp bd with")
-	}
-	if !isCommit(bdCommit) {
-		return nil, fmt.Errorf("daemonimage: bd commit %q is not a 7+ character hex commit", bdCommit)
+	rev, bdCommit, err := b.checkBuildInputs(rev)
+	if err != nil {
+		return nil, err
 	}
 	gtCommit, err := b.resolve(b.GTSrc, rev)
 	if err != nil {
@@ -184,6 +164,37 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	return paths, nil
 }
 
+// checkBuildInputs refuses the inputs BuildBinaries cannot build from, before
+// anything runs, and returns rev and the bd commit trimmed. It reads nothing
+// from the host, which is what lets Plan refuse exactly what a build would.
+func (b Builder) checkBuildInputs(rev string) (string, string, error) {
+	if b.Out == "" {
+		return "", "", errors.New("daemonimage: no output directory for the binaries")
+	}
+	if !filepath.IsAbs(b.Out) {
+		return "", "", fmt.Errorf("daemonimage: output directory %q is not absolute; a build runs in a worktree, not in the caller's directory", b.Out)
+	}
+	if rev = strings.TrimSpace(rev); rev == "" {
+		return "", "", errors.New("daemonimage: no rev to stamp gt with")
+	}
+	if !isCommit(rev) {
+		return "", "", fmt.Errorf("daemonimage: rev %q is not a 7+ character hex commit", rev)
+	}
+	for _, src := range []struct{ name, dir string }{{"gt", b.GTSrc}, {"bd", b.BDSrc}, {"om", b.OMSrc}} {
+		if src.dir == "" {
+			return "", "", fmt.Errorf("daemonimage: no %s source checkout named", src.name)
+		}
+	}
+	bdCommit := strings.TrimSpace(b.BDCommit)
+	if bdCommit == "" {
+		return "", "", errors.New("daemonimage: no bd commit to stamp bd with")
+	}
+	if !isCommit(bdCommit) {
+		return "", "", fmt.Errorf("daemonimage: bd commit %q is not a 7+ character hex commit", bdCommit)
+	}
+	return rev, bdCommit, nil
+}
+
 // build compiles one binary to stage/<name> at build.commit. The clean worktree
 // keeps uncommitted changes out of the binary, and it is removed whether or not
 // the compile succeeds.
@@ -193,15 +204,27 @@ func (b Builder) build(ctx context.Context, build binary, stage string, env []st
 		return fmt.Errorf("daemonimage: cannot check commit %s out of %s: %w", build.commit, build.src, err)
 	}
 	defer func() { _, _ = b.Git(build.src, "worktree", "remove", "--force", dir) }()
-	argv := []string{"go", "build", "-trimpath"}
-	if build.ldflags != "" {
-		argv = append(argv, "-ldflags", build.ldflags)
-	}
-	argv = append(argv, "-o", filepath.Join(stage, build.name), build.pkg)
+	argv := goBuildArgv(filepath.Join(stage, build.name), build.pkg, build.ldflags)
 	if err := b.Run(ctx, dir, env, argv); err != nil {
 		return fmt.Errorf("daemonimage: building %s from %s failed: %w", build.name, build.pkg, err)
 	}
 	return nil
+}
+
+// goBuildArgv is the compile of one binary to out: the same argv a build runs and
+// Plan prints.
+func goBuildArgv(out, pkg, ldflags string) []string {
+	argv := []string{"go", "build", "-trimpath"}
+	if ldflags != "" {
+		argv = append(argv, "-ldflags", ldflags)
+	}
+	return append(argv, "-o", out, pkg)
+}
+
+// imageArgv is the docker build of the image tagged tag from the context dir
+// context with dockerfile: the same argv BuildImage runs and Plan prints.
+func imageArgv(dockerfile, tag, context string) []string {
+	return []string{"docker", "--context", DockerContext, "build", "-f", dockerfile, "-t", tag, context}
 }
 
 // resolve returns the full sha commit names in src, and refuses one src does
@@ -226,6 +249,37 @@ func isCommit(s string) bool {
 		}
 	}
 	return true
+}
+
+// Plan returns the steps a full build of rev would run, one line each, and runs
+// none of them: it makes no worktree, resolves no commit, writes no file and
+// reaches no network. It refuses what a build would refuse of its inputs (an
+// empty or relative Out, a rev or bd commit that is not a commit, a missing
+// source or Dockerfile), so a plan that prints is one the build's own checks
+// pass. The commits in it are the ones named, not resolved: a build resolves
+// them against the source checkouts when it runs.
+func (b Builder) Plan(rev string) ([]string, error) {
+	rev, bdCommit, err := b.checkBuildInputs(rev)
+	if err != nil {
+		return nil, err
+	}
+	if b.Dockerfile == "" {
+		return nil, fmt.Errorf("daemonimage: no Dockerfile named; set Dockerfile to %s in the gt checkout", DockerfilePath)
+	}
+	if !filepath.IsAbs(b.Dockerfile) {
+		return nil, fmt.Errorf("daemonimage: Dockerfile %q is not absolute; docker resolves -f against the directory it runs in, not the caller's", b.Dockerfile)
+	}
+	if info, err := os.Stat(b.Dockerfile); err != nil || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("daemonimage: Dockerfile %s is not a file", b.Dockerfile)
+	}
+	tag := ImageTag(rev)
+	return []string{
+		fmt.Sprintf("build gt: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+rev), " "), b.GTSrc, rev),
+		fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdCommitFlag+bdCommit), " "), b.BDSrc, bdCommit),
+		fmt.Sprintf("build om: %s   (clean worktree of %s at HEAD)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), b.OMSrc),
+		fmt.Sprintf("fetch claude: GET %s -> %s   (sha256 %s)", fmt.Sprintf(templates.ClaudeCLIURLFormat, templates.ClaudeCLIVersion), filepath.Join(b.Out, claudeCLIName), templates.ClaudeCLISHA256),
+		fmt.Sprintf("image: %s", strings.Join(imageArgv(b.Dockerfile, tag, b.Out), " ")),
+	}, nil
 }
 
 // claudeCLIName is the file the claude CLI is written to in the build context;
@@ -376,7 +430,7 @@ func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (str
 		return "", err
 	}
 	tag := ImageTag(rev)
-	argv := []string{"docker", "--context", DockerContext, "build", "-f", b.Dockerfile, "-t", tag, b.Out}
+	argv := imageArgv(b.Dockerfile, tag, b.Out)
 	if err := b.Run(ctx, b.Out, dockerEnv(b.Environ), argv); err != nil {
 		return "", fmt.Errorf("daemonimage: building image %s failed: %w", tag, err)
 	}
