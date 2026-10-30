@@ -1,8 +1,10 @@
-> Status: decisions approved by the operator 2026-10-30 (wayfinder map claude-aq9, tickets .1 to .5); the theme sections are proposals held in the map's fog. Build epic gt-6mlik. Charted by morgoth.
+> Status: historical (2026-10). Merged in: gt-6mlik (the One's build epic) and wayfinder map claude-aq9, which hold the live decisions. Not maintained.
 
 # Mordor: the Rings as the town's kill switches, and a retheme in increments
 
 ## Scope as decided
+
+This is a snapshot of 2026-10-30. The live decisions are on wayfinder map claude-aq9 and build epic gt-6mlik.
 
 The operator set the scope on 2026-10-30. These hold for every bead that cites this document.
 
@@ -31,7 +33,7 @@ The town's power package (full, standby, off; claude-cl7.15) is the hinge. The O
 |---|---|
 | Lease | 36 hours. `gt ring renew` extends it from now. Renewal is a deliberate operator act, never automated. `gt power status` and the dashboard show the time to the wane; the daemon logs the wane an hour ahead and when it happens. |
 | Storage | A `ring` section of the machine-owned `mayor/town.json` (the two-file layout of D5, gt-y3pgh.7), fields forged_at, expires_at, forged_by, hmac. Written only by the `gt ring` verbs through the kernel writer. A missing section, bad signature or unparseable record reads as absent, with a reason, failing closed. |
-| Signing | HMAC-SHA256 over the canonical fields. The key is named by reference in the operator-owned `settings/config.json` (`ring.key` = a `${VAR}` reference) and resolved by the kernel's env expansion from `daemon.env`, never read by `os.Getenv`, never printed, logged, placed in a fixture or an error text. The key is absent from every agent's spawn environment, which is what makes operator-only hold. Every session on this machine runs as the operator's user, so the key is tamper-evidence against buggy or accidental writes, not a security boundary. |
+| Signing | HMAC-SHA256 over the canonical fields. The key is named by reference in the operator-owned `settings/config.json` (`ring.key` = a `${VAR}` reference) and resolved by the kernel's env expansion from `daemon.env`, never read by `os.Getenv`, never printed, logged, placed in a fixture or an error text. The key is kept out of every agent's spawn environment, so a careless or buggy agent cannot sign a record by accident. Every session on this machine runs as the operator's user and can read `daemon.env`, so the key is tamper-evidence, not a security boundary; operator-only is a handbook rule. |
 | States | Valid is full. Waned (expired) is standby, exactly today's standby with hold and ESTOP both set: no automatic dispatch, no manual sling, no restarts or kills through the supervisor, landings in flight finish, seats idle out, worktrees kept, housekeeping continues. Absent or badly signed is off: the standby drain, then the power package stops daemon, watchers and Forgejo. Nothing kills. `gt kill-all` stays the one explicit act (gt-4k3fj.4). |
 | Power verbs | `gt power standby`, `full` and `off` stay as the operator interface and are implemented on the Ring: standby sets the lease expired now, full renews, off removes the record and stops the parts. |
 | One predicate | Standby is a single check every job reads: the heartbeat lifecycle flag, the tier sweep, the scheduled maintenance Dolt gc, the dispatch hold, the sling path and the supervisor guard. The overrun guard stop is routed through the supervisor so it refuses under standby like every other kill. Named exceptions keep running during a drain: the landing worker, polecat health, idle reap, Dolt supervision, log rotation, townhealth and attention, the resource samplers. |
@@ -67,7 +69,7 @@ None of this is scheduled. It is recorded so the words stay consistent when a pi
 
 | Today | Name | Note |
 |---|---|---|
-| the operator | Morgoth | the one above Sauron; a morgoth session is the operator's design voice, outside the town, no ring, no town writes |
+| a design session | morgoth | the agent name of the session that charted this; outside the town's dispatch, no ring, no town writes; the operator is never named in town records |
 | the overseer | Sauron | as a session name only, at turnover; the role word overseer stays in labels and code |
 | the nine birds | the Nazgûl | canon names two (Angmar, Khamûl); the rest are roleplaying lore (Dwar, Indûr, Akhôrahil, Hoarmûrath, Adûnaphel, Rên, Ûvatha); names pass with the mission seat, at turnover |
 | polecats | orcs | prose only; seat names unchanged |

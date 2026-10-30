@@ -1,4 +1,4 @@
-> Status: research for wayfinder ticket claude-aq9.4, resolved 2026-10-30; read against origin/main 9c64ca5d. Companion to 2026-10-30-mordor-rings-design.md.
+> Status: historical (2026-10). Merged in: claude-aq9.4 (the resolution comment) and gt-6mlik, which hold the live decisions. Not maintained.
 
 # Drain-time writers in gastown (claude-aq9.4)
 
@@ -89,6 +89,8 @@ All start from `Run` and none are in `heartbeatSteps`, so the lifecycle skip doe
 
 ## Count
 
+The tables group jobs by family, so a row can stand for several jobs (the 14 jev passes are one row) and the rows do not add up to the job count. The counts below are the research agent's tally of 53 jobs; the sum is checked (28 + 3 + 21 + 1 = 53) but the 28/21 split was not recounted from the tables.
+
 - 53 jobs: 34 heartbeat steps and 19 tickers or goroutines. Three command paths are listed separately.
 - 28 read neither brake.
 - 3 read the hold and the ESTOP: spec dispatch, scheduled slings, the heartbeat dispatch step.
@@ -109,6 +111,7 @@ Keep running by design: Dolt supervision, log rotation, townhealth and attention
 
 ## Limits
 
+- Re-read against origin/main by the map's charter: `dispatch/hold.go:43`, `landing_worker.go:297`, `tier_sweep.go:1791` and `overrun_guard_stop.go:949`. The other citations are as the research agent reported them.
 - I did not read the claude-cl7.15 bead. I confirmed both claims from code only.
 - I did not read the plugin scripts that the plugins step runs, so their writes are unknown.
 - I did not find an image build job in `internal/daemon`. If one exists it lives in install tooling, not the daemon.
