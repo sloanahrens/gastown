@@ -1767,8 +1767,9 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 		return out, err
 	}
 	// buildRunEnv carries BD_MACHINE=1, so bd answered in the envelope; every
-	// caller of run parses the payload it printed before machine mode.
-	return LegacyPayload(args, out), nil
+	// caller of run parses the payload it printed before machine mode. A
+	// machine-exempt verb (bd sql) answers in the plain wrapper instead.
+	return unwrapPlainEnvelope(args, LegacyPayload(args, out)), nil
 }
 
 // applyAccessMode forces the Dolt auto-commit and read-only env a pinned

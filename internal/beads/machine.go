@@ -150,3 +150,31 @@ func LegacyPayload(args []string, out []byte) []byte {
 	}
 	return []byte(env.Data)
 }
+
+// unwrapPlainEnvelope returns the data of a machine-exempt call's answer when
+// bd printed the plain {"schema_version":1,"data":...} wrapper. The installed
+// bd wraps the --json output of bd sql in it outside machine mode, where
+// LegacyPayload only reads the contract envelope. Only that exact pair of keys
+// is unwrapped, and only for a machineExempt verb: any other object, and any
+// other verb's output, passes through untouched. args is the argv after "bd".
+func unwrapPlainEnvelope(args []string, out []byte) []byte {
+	if !machineExempt(args) {
+		return out
+	}
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return out
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(trimmed, &doc) != nil || len(doc) != 2 {
+		return out
+	}
+	if _, ok := doc["schema_version"]; !ok {
+		return out
+	}
+	data, ok := doc["data"]
+	if !ok {
+		return out
+	}
+	return data
+}
