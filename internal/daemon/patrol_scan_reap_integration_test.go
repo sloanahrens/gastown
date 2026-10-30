@@ -21,10 +21,18 @@ func TestIntegrationReapRecoveryBatchDeadlineKillsARunningGT(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		script     string
+		bound      time.Duration
 		wantKilled bool
 	}{
-		{"a gt still running at the bound is killed", "exec sleep 60", true},
-		{"a gt that fails on its own is not", "echo boom >&2\nexit 3", false},
+		// The bound belongs to the case, not to the test. A kill case wants it
+		// short so the case costs 300ms. The case that fails on its own wants
+		// no short bound at all: its property is that the error does not name a
+		// kill, so the deadline must never be what ends that process. At the
+		// kill case's scale a host that is merely busy can start a fresh script
+		// after the deadline, and the sweep failed this case for exactly that
+		// (gt-fbf5n) — the host's scheduler is not what this test judges.
+		{"a gt still running at the bound is killed", "exec sleep 60", 300 * time.Millisecond, true},
+		{"a gt that fails on its own is not", "echo boom >&2\nexit 3", time.Minute, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -36,7 +44,7 @@ func TestIntegrationReapRecoveryBatchDeadlineKillsARunningGT(t *testing.T) {
 			}
 
 			started := time.Now()
-			b := h.runRecoveryBatchWithin("gastown", 3, 300*time.Millisecond)
+			b := h.runRecoveryBatchWithin("gastown", 3, tc.bound)
 			if b.err == nil {
 				t.Fatal("the batch answered without error")
 			}
@@ -44,11 +52,11 @@ func TestIntegrationReapRecoveryBatchDeadlineKillsARunningGT(t *testing.T) {
 				t.Fatalf("batch error %q: names a kill = %v, want %v", b.err, got, tc.wantKilled)
 			}
 			if tc.wantKilled {
-				if !strings.Contains(b.err.Error(), "at the 300ms bound for 3 polecats") {
-					t.Fatalf("killed batch error %q, want the bound and the seat count", b.err)
+				if want := "at the " + tc.bound.String() + " bound for 3 polecats"; !strings.Contains(b.err.Error(), want) {
+					t.Fatalf("killed batch error %q, want the bound and the seat count (%q)", b.err, want)
 				}
 				if took := time.Since(started); took > 30*time.Second {
-					t.Fatalf("the deadline took %s to kill a 300ms-bound run", took)
+					t.Fatalf("the deadline took %s to kill a %s-bound run", took, tc.bound)
 				}
 			}
 		})
