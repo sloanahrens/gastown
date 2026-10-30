@@ -38,6 +38,42 @@ type rig struct {
 	// through, in the order they ran.
 	writes  []string
 	renames [][2]string
+	// ownLogDir leaves TIER_SWEEP_LOGDIR unset, so the run makes its own log
+	// directory through MkdirTemp; tmpDir is the TMPDIR it passes.
+	ownLogDir bool
+	tmpDir    string
+	// prunes records the directory each prune listed, and removals each
+	// RemoveAll path; removeErrs fails the RemoveAll of one path.
+	prunes     []string
+	removals   []string
+	removeErrs map[string]error
+	// listings and infos are the fake filesystem the prune reads: the entries
+	// ReadDir answers per directory, and the Lstat answer per path.
+	listings map[string][]fs.DirEntry
+	infos    map[string]fs.FileInfo
+	readErr  error
+	// noCleanupSlots leaves ReadDir, Lstat and RemoveAll unset on the Host, as a
+	// caller that wired only the directory creation does.
+	noCleanupSlots bool
+	// events records each stdout line printed and each directory removed, in
+	// the order they happened.
+	events []string
+}
+
+// lineWriter is Run's stdout in a test: the bytes, and one event per non-empty
+// line, so a test can see whether a cleanup ran after the last summary line.
+type lineWriter struct {
+	buf    bytes.Buffer
+	events *[]string
+}
+
+func (w *lineWriter) Write(p []byte) (int, error) {
+	for _, l := range strings.Split(strings.TrimSuffix(string(p), "\n"), "\n") {
+		if l != "" {
+			*w.events = append(*w.events, "line: "+l)
+		}
+	}
+	return w.buf.Write(p)
 }
 
 func newRig(t *testing.T) *rig {
@@ -52,7 +88,9 @@ func newRig(t *testing.T) *rig {
 
 // run calls Run with args and returns the exit code, stdout and stderr.
 func (r *rig) run(args ...string) (code int, stdout, stderr string) {
-	var out, errw bytes.Buffer
+	r.events, r.prunes, r.removals = nil, nil, nil
+	out := &lineWriter{events: &r.events}
+	var errw bytes.Buffer
 	exec := func(dir string, env []string, argv []string, w io.Writer) int {
 		if len(argv) > 2 && argv[1] == "run" && argv[2] == shellPkg {
 			fmt.Fprint(w, r.shellOut)
@@ -65,28 +103,54 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 	}
 	env := map[string]string{
 		EnvLogDir: r.logDir, EnvSkip: r.skip, EnvTrigger: r.trigger, EnvTimeout: "7m",
-		EnvTimings: r.timingsFile,
+		EnvTimings: r.timingsFile, "TMPDIR": r.tmpDir,
 	}
-	code = Run(args, &out, &errw, Deps{
-		Host: Host{
-			Env:       func(name string) string { return env[name] },
-			MkdirTemp: func(string, string) (string, error) { return r.logDir, nil },
-			MkdirAll:  func(string, fs.FileMode) error { return nil },
-			WriteFile: func(name string, data []byte, perm fs.FileMode) error {
-				r.writes = append(r.writes, name)
-				return os.WriteFile(name, data, perm)
-			},
-			Rename: func(oldpath, newpath string) error {
-				r.renames = append(r.renames, [2]string{oldpath, newpath})
-				return os.Rename(oldpath, newpath)
-			},
+	if r.ownLogDir {
+		env[EnvLogDir] = ""
+	}
+	host := Host{
+		Env:       func(name string) string { return env[name] },
+		MkdirTemp: func(string, string) (string, error) { return r.logDir, nil },
+		MkdirAll:  func(string, fs.FileMode) error { return nil },
+		WriteFile: func(name string, data []byte, perm fs.FileMode) error {
+			r.writes = append(r.writes, name)
+			return os.WriteFile(name, data, perm)
 		},
+		Rename: func(oldpath, newpath string) error {
+			r.renames = append(r.renames, [2]string{oldpath, newpath})
+			return os.Rename(oldpath, newpath)
+		},
+		ReadDir: func(dir string) ([]fs.DirEntry, error) {
+			r.prunes = append(r.prunes, dir)
+			if r.readErr != nil {
+				return nil, r.readErr
+			}
+			return r.listings[dir], nil
+		},
+		Lstat: func(name string) (fs.FileInfo, error) {
+			info, ok := r.infos[name]
+			if !ok {
+				return nil, fs.ErrNotExist
+			}
+			return info, nil
+		},
+		RemoveAll: func(path string) error {
+			r.removals = append(r.removals, path)
+			r.events = append(r.events, "removed "+path)
+			return r.removeErrs[path]
+		},
+	}
+	if r.noCleanupSlots {
+		host.ReadDir, host.Lstat, host.RemoveAll = nil, nil, nil
+	}
+	code = Run(args, out, &errw, Deps{
+		Host:    host,
 		Exec:    exec,
 		Src:     r.repo,
 		Environ: []string{"PATH=/fake/bin"},
 		Now:     r.clock.now,
 	})
-	return code, out.String(), errw.String()
+	return code, out.buf.String(), errw.String()
 }
 
 // shellLine is the shell-tier runner's summary line with the verdict given.
