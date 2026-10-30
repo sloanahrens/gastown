@@ -42,9 +42,10 @@ const (
 	// cutoverPoll is how often a wait reads state.json and the job state.
 	cutoverPoll = 5 * time.Second
 
-	// cutoverSecondHeartbeat is the heartbeat count that proves the new daemon
-	// is beating on its own interval, not just that it wrote its start state.
-	cutoverSecondHeartbeat = 2
+	// cutoverHeartbeatsAfterStart is how many heartbeats step 5 needs the new
+	// daemon to have written since the baseline: the second one proves it beats
+	// on its own interval, not just that it wrote its start state.
+	cutoverHeartbeatsAfterStart = 2
 )
 
 // cutoverSide is one end of a cutover: a daemon supervisor and what the
@@ -84,6 +85,9 @@ type cutoverPlan struct {
 	guard func(side cutoverSide) error
 	// rollback is the command that undoes the cutover; it is printed, never run.
 	rollback string
+	// baseline is state.json as step 3 last read it, the old daemon's clean
+	// stop. Step 5 measures the new daemon's heartbeats against it.
+	baseline *daemon.State
 }
 
 // execute runs the five steps. Every ending that is not success is an error
@@ -104,7 +108,7 @@ func (p *cutoverPlan) execute(ctx context.Context) error {
 		return fmt.Errorf("stopping the %s daemon failed, so %s was not started: %w; check its state before trying again", p.from.name, p.to.name, err)
 	}
 	if proven, why := p.waitFor(ctx, cutoverStopBudget, p.oldDaemonStopped); !proven {
-		p.say("The %s job is stopped but the old daemon is not proven stopped (%s). %s was not started.", p.from.name, why, p.to.name)
+		p.say("The %s stop command ran without error, but the old daemon is not proven stopped: last read, %s. %s was not started.", p.from.name, why, p.to.name)
 		p.say("To restore the %s job: %s", p.from.name, p.from.restore)
 		return fmt.Errorf("the old %s daemon is not proven stopped after %s: %s", p.from.name, cutoverStopBudget, why)
 	}
@@ -124,14 +128,14 @@ func (p *cutoverPlan) execute(ctx context.Context) error {
 			return fmt.Errorf("starting %s failed: %w", p.to.name, err)
 		}
 	}
-	if took, why := p.waitFor(ctx, cutoverTakeBudget, func() (bool, string) { return p.newDaemonOwns(1) }); !took {
+	if took, why := p.waitFor(ctx, cutoverTakeBudget, func() (bool, string) { _, ok, why := p.newDaemonOwns(); return ok, why }); !took {
 		p.say("%s started but never took the town (%s). Its logs: %s", p.to.name, why, p.to.diagnose)
 		p.say("To go back: %s", p.rollback)
 		return fmt.Errorf("%s never took the town within %s: %s", p.to.name, cutoverTakeBudget, why)
 	}
 
 	// Step 5: a second heartbeat, so the new daemon is known to keep beating.
-	if beat, why := p.waitFor(ctx, cutoverHeartbeatBudget, func() (bool, string) { return p.newDaemonOwns(cutoverSecondHeartbeat) }); !beat {
+	if beat, why := p.waitFor(ctx, cutoverHeartbeatBudget, p.newDaemonBeats); !beat {
 		p.say("%s owns the town but is unhealthy: no second heartbeat (%s). Its logs: %s", p.to.name, why, p.to.diagnose)
 		p.say("To go back: %s", p.rollback)
 		return fmt.Errorf("%s owns the town but wrote no second heartbeat within %s: %s", p.to.name, cutoverHeartbeatBudget, why)
@@ -153,7 +157,7 @@ func (p *cutoverPlan) oldDaemonStopped() (bool, string) {
 	case st == nil:
 		return false, "state.json is missing, so no clean stop is recorded"
 	case st.Running:
-		return false, "state.json still records the daemon running"
+		return false, "state.json still records the daemon running (running=true)"
 	}
 	job := p.from.job()
 	switch {
@@ -162,24 +166,57 @@ func (p *cutoverPlan) oldDaemonStopped() (bool, string) {
 	case !p.from.stopped(job):
 		return false, fmt.Sprintf("the %s job still reads as running", p.from.name)
 	}
+	p.baseline = st
 	return true, ""
 }
 
-// newDaemonOwns is what steps 4 and 5 wait for: state.json names the new side
-// as the owner, running, with at least beats heartbeats written.
-func (p *cutoverPlan) newDaemonOwns(beats int64) (bool, string) {
+// newDaemonOwns is what step 4 waits for: state.json names the new side as the
+// owner and records it running. A heartbeat is step 5's wait, not this one's.
+// It returns the state it read so step 5 can measure it.
+func (p *cutoverPlan) newDaemonOwns() (*daemon.State, bool, string) {
 	st, err := p.state()
 	switch {
 	case err != nil:
-		return false, fmt.Sprintf("state.json cannot be read: %v", err)
+		return nil, false, fmt.Sprintf("state.json cannot be read: %v", err)
 	case st == nil:
-		return false, "state.json is missing"
+		return nil, false, "state.json is missing"
 	case st.Owner == nil || *st.Owner != p.to.owner:
-		return false, fmt.Sprintf("state.json names owner %s, not %s %q", ownerText(st.Owner), p.to.owner.Kind, p.to.owner.ID)
+		return st, false, fmt.Sprintf("state.json names owner %s, not %s %q", ownerText(st.Owner), p.to.owner.Kind, p.to.owner.ID)
 	case !st.Running:
-		return false, "state.json records the daemon not running"
-	case st.HeartbeatCount < beats:
-		return false, fmt.Sprintf("%d of %d heartbeats written", st.HeartbeatCount, beats)
+		return st, false, "state.json records the daemon not running"
+	}
+	return st, true, ""
+}
+
+// newDaemonBeats is what step 5 waits for: the new side owns the town and has
+// written cutoverHeartbeatsAfterStart heartbeats of its own, measured against
+// the baseline step 3 read before the start, with a heartbeat time later than
+// the baseline's.
+//
+// A daemon's heartbeat count starts at 0 in every process (startState builds a
+// fresh record; it never loads the old file), so a record from a new process
+// counts from 0 and needs the count itself to reach the threshold. A record
+// that is the baseline's own process (same StartedAt) carries the baseline's
+// count, so it needs the baseline's count plus the threshold. The first case is
+// the real one; the second keeps a state file that was not rewritten, or a
+// future daemon that carries its count over, from passing on beats the old
+// owner wrote.
+func (p *cutoverPlan) newDaemonBeats() (bool, string) {
+	st, ok, why := p.newDaemonOwns()
+	if !ok {
+		return false, why
+	}
+	need := int64(cutoverHeartbeatsAfterStart)
+	if b := p.baseline; b != nil {
+		if st.StartedAt.Equal(b.StartedAt) {
+			need += b.HeartbeatCount
+		}
+		if !st.LastHeartbeat.After(b.LastHeartbeat) {
+			return false, fmt.Sprintf("the last heartbeat (%s) is not later than the old daemon's (%s)", st.LastHeartbeat.Format(time.RFC3339), b.LastHeartbeat.Format(time.RFC3339))
+		}
+	}
+	if st.HeartbeatCount < need {
+		return false, fmt.Sprintf("%d heartbeats counted, %d needed", st.HeartbeatCount, need)
 	}
 	return true, ""
 }
@@ -381,10 +418,8 @@ side, so gt daemon stop, start and status act on it.`,
 	RunE: runDaemonCutover,
 }
 
-var daemonCutoverTo string
-
 func init() {
-	daemonCutoverCmd.Flags().StringVar(&daemonCutoverTo, "to", "", "Supervisor to move the daemon to: container or launchd")
+	daemonCutoverCmd.Flags().String("to", "", "Supervisor to move the daemon to: container or launchd")
 	_ = daemonCutoverCmd.MarkFlagRequired("to")
 	daemonCmd.AddCommand(daemonCutoverCmd)
 }
@@ -398,14 +433,18 @@ func runDaemonCutover(cmd *cobra.Command, args []string) error {
 // without a town on disk or a real daemon.
 func cutoverRunE(find func() (string, error), cutover func(ctx context.Context, out io.Writer, townRoot, to string) error) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
+		to, err := cmd.Flags().GetString("to")
+		if err != nil {
+			return err
+		}
 		townRoot, err := find()
 		if err != nil {
 			return fmt.Errorf("not in a Gas Town workspace: %w", err)
 		}
-		if err := cutover(cmd.Context(), cmd.OutOrStdout(), townRoot, daemonCutoverTo); err != nil {
+		if err := cutover(cmd.Context(), cmd.OutOrStdout(), townRoot, to); err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s Cutover to %s done.\n", style.Bold.Render("✓"), daemonCutoverTo)
+		fmt.Fprintf(cmd.OutOrStdout(), "%s Cutover to %s done.\n", style.Bold.Render("✓"), to)
 		return nil
 	}
 }

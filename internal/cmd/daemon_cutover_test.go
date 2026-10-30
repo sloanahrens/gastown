@@ -88,7 +88,8 @@ func toContainerRig() *cutoverRig {
 // beatsFrom makes state.json read as owner running with one heartbeat for each
 // minute that has passed on the clock since from.
 func (r *cutoverRig) beatsFrom(from time.Time, owner *daemon.Owner) {
-	r.state = &daemon.State{Running: true, Owner: owner}
+	// A new process: its own start time, its heartbeat time from the start on.
+	r.state = &daemon.State{Running: true, Owner: owner, StartedAt: from, LastHeartbeat: from.Add(time.Second)}
 	r.beat = func() int64 { return int64(r.clk.Since(from) / time.Minute) }
 }
 
@@ -272,7 +273,8 @@ func TestCutoverNotQuietRunsNothing(t *testing.T) {
 // are each not proof, and a stopped heartbeat alone is never accepted.
 func TestCutoverOldDaemonStoppedNeedsBothProofs(t *testing.T) {
 	t.Parallel()
-	stale := time.Now().Add(-time.Hour)
+	// A heartbeat that stopped an hour before the cutover's own clock reads.
+	stale := quietTestEpoch.Add(-time.Hour)
 	for _, tc := range []struct {
 		name  string
 		state *daemon.State
@@ -280,8 +282,9 @@ func TestCutoverOldDaemonStoppedNeedsBothProofs(t *testing.T) {
 		want  bool
 	}{
 		{"clean stop and the job unloaded", &daemon.State{Running: false, Owner: &cutoverLaunchd}, templates.SupervisorState{}, true},
-		{"a stale heartbeat with the state still running and the job unloaded", &daemon.State{Running: true, LastHeartbeat: stale, Owner: &cutoverLaunchd}, templates.SupervisorState{}, false},
-		{"a stale heartbeat with the state still running and the job loaded", &daemon.State{Running: true, LastHeartbeat: stale, Owner: &cutoverLaunchd}, templates.SupervisorState{Loaded: true, PID: 7}, false},
+		{"a heartbeat that stopped an hour ago, state still running, job unloaded", &daemon.State{Running: true, LastHeartbeat: stale, Owner: &cutoverLaunchd}, templates.SupervisorState{}, false},
+		{"a heartbeat that stopped an hour ago, state still running, job loaded", &daemon.State{Running: true, LastHeartbeat: stale, Owner: &cutoverLaunchd}, templates.SupervisorState{Loaded: true, PID: 7}, false},
+		{"a clean stop whose heartbeat is an hour old is still proof", &daemon.State{Running: false, LastHeartbeat: stale, Owner: &cutoverLaunchd}, templates.SupervisorState{}, true},
 		{"a clean stop but the job still loaded", &daemon.State{Running: false, Owner: &cutoverLaunchd}, templates.SupervisorState{Loaded: true, PID: 7}, false},
 		{"a clean stop but the job state unknown", &daemon.State{Running: false, Owner: &cutoverLaunchd}, templates.SupervisorState{Err: errors.New("launchctl: boom")}, false},
 		{"no state.json", nil, templates.SupervisorState{}, false},
@@ -311,39 +314,69 @@ func TestCutoverUnreadableStateIsNoProof(t *testing.T) {
 	if ok, why := p.oldDaemonStopped(); ok || !strings.Contains(why, "read failed") {
 		t.Errorf("oldDaemonStopped = (%v, %q), want not proven and the read error named", ok, why)
 	}
-	if ok, why := p.newDaemonOwns(1); ok || !strings.Contains(why, "read failed") {
+	if _, ok, why := p.newDaemonOwns(); ok || !strings.Contains(why, "read failed") {
 		t.Errorf("newDaemonOwns = (%v, %q), want not owned and the read error named", ok, why)
+	}
+	if ok, why := p.newDaemonBeats(); ok || !strings.Contains(why, "read failed") {
+		t.Errorf("newDaemonBeats = (%v, %q), want no beat and the read error named", ok, why)
 	}
 }
 
 // Step 3 times out when the old daemon is never proven stopped: the container
-// is not started, the budget on the fake clock is used up, and the command that
-// restores the launchd job is printed.
+// is not started, the budget on the fake clock is used up, the message says what
+// was last read for that reason and not that the job is stopped, and the command
+// that restores the launchd job is printed.
 func TestCutoverStopTimeoutNeverStartsTheNewSide(t *testing.T) {
 	t.Parallel()
-	r := toContainerRig()
-	// The job is booted out but state.json keeps saying running: a hung daemon.
-	r.onStop = func(r *cutoverRig) { r.fromJob = templates.SupervisorState{Loaded: false, LastExit: -1} }
+	for _, tc := range []struct {
+		name     string
+		onStop   func(r *cutoverRig)
+		wantRead string // what the message must say was read
+	}{
+		{"state still running, job unloaded (a hung daemon)", func(r *cutoverRig) {
+			r.fromJob = templates.SupervisorState{Loaded: false, LastExit: -1}
+		}, "running=true"},
+		{"clean stop recorded, job still loaded", func(r *cutoverRig) {
+			r.state = &daemon.State{Running: false, Owner: &cutoverLaunchd}
+		}, "still reads as running"},
+		{"clean stop recorded, job state unreadable", func(r *cutoverRig) {
+			r.state = &daemon.State{Running: false, Owner: &cutoverLaunchd}
+			r.fromJob = templates.SupervisorState{Err: errors.New("launchctl: boom")}
+		}, "cannot be read"},
+		{"state.json missing", func(r *cutoverRig) {
+			r.state = nil
+			r.fromJob = templates.SupervisorState{Loaded: false, LastExit: -1}
+		}, "state.json is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := toContainerRig()
+			r.onStop = tc.onStop
 
-	err := r.plan(config.SupervisorContainer).execute(context.Background())
+			err := r.plan(config.SupervisorContainer).execute(context.Background())
 
-	if err == nil || !strings.Contains(err.Error(), "not proven stopped") {
-		t.Fatalf("error = %v, want the old daemon not proven stopped", err)
-	}
-	if got := strings.Join(r.calls, "\n"); got != "launchctl bootout gui/501/com.gastown.daemon" {
-		t.Errorf("commands = %v, want only the bootout", r.calls)
-	}
-	if r.elapsed() < cutoverStopBudget {
-		t.Errorf("the wait ended after %s, want it to run to %s", r.elapsed(), cutoverStopBudget)
-	}
-	out := r.out.String()
-	for _, want := range []string{"not proven stopped", "launchctl bootstrap gui/501 /plist"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output lacks %q:\n%s", want, out)
-		}
-	}
-	if len(r.guarded) != 0 {
-		t.Errorf("guard asked before the old daemon was proven stopped: %v", r.guarded)
+			if err == nil || !strings.Contains(err.Error(), "not proven stopped") || !strings.Contains(err.Error(), tc.wantRead) {
+				t.Fatalf("error = %v, want the old daemon not proven stopped with %q read", err, tc.wantRead)
+			}
+			if got := strings.Join(r.calls, "\n"); got != "launchctl bootout gui/501/com.gastown.daemon" {
+				t.Errorf("commands = %v, want only the bootout", r.calls)
+			}
+			if r.elapsed() < cutoverStopBudget {
+				t.Errorf("the wait ended after %s, want it to run to %s", r.elapsed(), cutoverStopBudget)
+			}
+			out := r.out.String()
+			for _, want := range []string{"not proven stopped", tc.wantRead, "launchctl bootstrap gui/501 /plist"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("output lacks %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "job is stopped") {
+				t.Errorf("output asserts the job is stopped whatever was read:\n%s", out)
+			}
+			if len(r.guarded) != 0 {
+				t.Errorf("guard asked before the old daemon was proven stopped: %v", r.guarded)
+			}
+		})
 	}
 }
 
@@ -396,7 +429,7 @@ func TestCutoverHeartbeatTimeoutReportsUnhealthy(t *testing.T) {
 	r := toContainerRig()
 	// The container takes the town and writes its first heartbeat, then stops.
 	r.onStart = func(r *cutoverRig) {
-		r.state = &daemon.State{Running: true, Owner: &cutoverContainer}
+		r.beatsFrom(r.clk.Now(), &cutoverContainer)
 		r.beat = func() int64 { return 1 }
 	}
 
@@ -483,7 +516,7 @@ func TestCutoverCommandFailuresStopTheCutover(t *testing.T) {
 }
 
 // A canceled context ends a wait as not done rather than polling on.
-func TestCutoverWaitEndsOnACancelledContext(t *testing.T) {
+func TestCutoverWaitEndsOnACanceledContext(t *testing.T) {
 	t.Parallel()
 	r := toContainerRig()
 	p := r.plan(config.SupervisorContainer)
@@ -720,31 +753,51 @@ func TestRunCutoverErrorPaths(t *testing.T) {
 	}
 }
 
-// The command reports a town it cannot find, passes a cutover's error through,
-// and prints the done line only on success.
+// The command reads --to from its own flag, reports a town it cannot find and a
+// missing flag, passes a cutover's error through, and prints the done line only
+// on success, naming the side it was given.
 func TestCutoverRunE(t *testing.T) {
 	t.Parallel()
-	ok := func(context.Context, io.Writer, string, string) error { return nil }
 	boom := errors.New("cutover failed")
 	cases := []struct {
-		name    string
-		find    func() (string, error)
-		cutover func(context.Context, io.Writer, string, string) error
-		wantErr string
-		wantOut bool
+		name     string
+		withFlag bool
+		find     func() (string, error)
+		cutover  func(gotTo *string) func(context.Context, io.Writer, string, string) error
+		wantErr  string
+		wantOut  string
 	}{
-		{"no town", func() (string, error) { return "", errors.New("no town") }, ok, "not in a Gas Town workspace", false},
-		{"the cutover fails", func() (string, error) { return "/town", nil }, func(context.Context, io.Writer, string, string) error { return boom }, "cutover failed", false},
-		{"success", func() (string, error) { return "/town", nil }, ok, "", true},
+		{"no flag registered", false, func() (string, error) { return "/town", nil },
+			func(*string) func(context.Context, io.Writer, string, string) error {
+				return func(context.Context, io.Writer, string, string) error { return nil }
+			}, "to", ""},
+		{"no town", true, func() (string, error) { return "", errors.New("no town") },
+			func(*string) func(context.Context, io.Writer, string, string) error {
+				return func(context.Context, io.Writer, string, string) error { return nil }
+			}, "not in a Gas Town workspace", ""},
+		{"the cutover fails", true, func() (string, error) { return "/town", nil },
+			func(*string) func(context.Context, io.Writer, string, string) error {
+				return func(context.Context, io.Writer, string, string) error { return boom }
+			}, "cutover failed", ""},
+		{"success", true, func() (string, error) { return "/town", nil },
+			func(gotTo *string) func(context.Context, io.Writer, string, string) error {
+				return func(_ context.Context, _ io.Writer, _ string, to string) error { *gotTo = to; return nil }
+			}, "", "Cutover to container done."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// daemonCutoverTo is the flag's variable, so these do not run in
-			// parallel with each other.
+			t.Parallel()
 			var out bytes.Buffer
 			cmd := &cobra.Command{}
 			cmd.SetOut(&out)
-			err := cutoverRunE(tc.find, tc.cutover)(cmd, nil)
+			if tc.withFlag {
+				cmd.Flags().String("to", "", "")
+				if err := cmd.Flags().Set("to", config.SupervisorContainer); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var gotTo string
+			err := cutoverRunE(tc.find, tc.cutover(&gotTo))(cmd, nil)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
@@ -752,9 +805,98 @@ func TestCutoverRunE(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("error = %v", err)
 			}
-			if got := strings.Contains(out.String(), "Cutover to"); got != tc.wantOut {
-				t.Errorf("done line printed = %v, want %v (output %q)", got, tc.wantOut, out.String())
+			if tc.wantOut == "" && out.Len() != 0 {
+				t.Errorf("output on a failure = %q, want none", out.String())
+			}
+			if tc.wantOut != "" {
+				if !strings.Contains(out.String(), tc.wantOut) {
+					t.Errorf("output = %q, want it to contain %q", out.String(), tc.wantOut)
+				}
+				if gotTo != config.SupervisorContainer {
+					t.Errorf("the cutover was given --to %q, want %q", gotTo, config.SupervisorContainer)
+				}
 			}
 		})
+	}
+}
+
+// Step 5 measures the new daemon's heartbeats against the baseline step 3 read
+// before the start. A daemon's count starts at 0 in every process (startState
+// builds a fresh record and never loads the old file), so a record from a new
+// process is judged on its own count (two proves it) and a record that is the
+// baseline's own process must be two past the baseline's count. Either way the
+// heartbeat time must be later than the baseline's.
+func TestCutoverSecondHeartbeatIsMeasuredAgainstTheBaseline(t *testing.T) {
+	t.Parallel()
+	t0 := quietTestEpoch
+	baseline := &daemon.State{Running: false, Owner: &cutoverLaunchd, StartedAt: t0.Add(-24 * time.Hour), LastHeartbeat: t0, HeartbeatCount: 50}
+	newer := t0.Add(time.Hour)
+	cases := []struct {
+		name  string
+		base  *daemon.State
+		state *daemon.State
+		want  bool
+	}{
+		{"a carried-over count one past the baseline is not proof", baseline,
+			&daemon.State{Running: true, Owner: &cutoverContainer, StartedAt: baseline.StartedAt, LastHeartbeat: newer, HeartbeatCount: 51}, false},
+		{"a carried-over count two past the baseline is proof", baseline,
+			&daemon.State{Running: true, Owner: &cutoverContainer, StartedAt: baseline.StartedAt, LastHeartbeat: newer, HeartbeatCount: 52}, true},
+		{"a new process whose count restarted at 2 is proof", baseline,
+			&daemon.State{Running: true, Owner: &cutoverContainer, StartedAt: t0.Add(time.Minute), LastHeartbeat: newer, HeartbeatCount: 2}, true},
+		{"a new process whose count is 1 is not proof", baseline,
+			&daemon.State{Running: true, Owner: &cutoverContainer, StartedAt: t0.Add(time.Minute), LastHeartbeat: newer, HeartbeatCount: 1}, false},
+		{"a heartbeat no later than the baseline's is not proof, whatever the count", baseline,
+			&daemon.State{Running: true, Owner: &cutoverContainer, StartedAt: t0.Add(time.Minute), LastHeartbeat: t0, HeartbeatCount: 9}, false},
+		{"a heartbeat older than the baseline's is not proof", baseline,
+			&daemon.State{Running: true, Owner: &cutoverContainer, StartedAt: t0.Add(time.Minute), LastHeartbeat: t0.Add(-time.Hour), HeartbeatCount: 9}, false},
+		{"the old owner is not the new side", baseline,
+			&daemon.State{Running: true, Owner: &cutoverLaunchd, StartedAt: t0.Add(time.Minute), LastHeartbeat: newer, HeartbeatCount: 9}, false},
+		{"a new owner not running is not proof", baseline,
+			&daemon.State{Running: false, Owner: &cutoverContainer, StartedAt: t0.Add(time.Minute), LastHeartbeat: newer, HeartbeatCount: 9}, false},
+		{"with no baseline the count alone is judged", nil,
+			&daemon.State{Running: true, Owner: &cutoverContainer, StartedAt: t0, LastHeartbeat: newer, HeartbeatCount: 2}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newCutoverRig()
+			r.state = tc.state
+			p := r.plan(config.SupervisorContainer)
+			p.baseline = tc.base
+			got, why := p.newDaemonBeats()
+			if got != tc.want {
+				t.Errorf("newDaemonBeats = %v (%s), want %v", got, why, tc.want)
+			}
+			if !got && why == "" {
+				t.Error("a refusal names no reason")
+			}
+		})
+	}
+}
+
+// The baseline is the clean-stop record step 3 read, taken only when the proof
+// passed, and step 4 does not wait for a heartbeat: owner and running are all it
+// needs.
+func TestCutoverTakesTheBaselineFromTheProvenStop(t *testing.T) {
+	t.Parallel()
+	r := toContainerRig()
+	p := r.plan(config.SupervisorContainer)
+	if err := p.execute(context.Background()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if p.baseline == nil || p.baseline.Running || p.baseline.HeartbeatCount != 40 {
+		t.Errorf("baseline = %+v, want the old daemon's clean-stop record (count 40)", p.baseline)
+	}
+	// Step 4 on its own: owner and running, no beat.
+	r2 := newCutoverRig()
+	r2.state = &daemon.State{Running: true, Owner: &cutoverContainer}
+	if _, ok, why := r2.plan(config.SupervisorContainer).newDaemonOwns(); !ok {
+		t.Errorf("step 4 wanted a heartbeat as well as the owner: %s", why)
+	}
+	// A proof that did not pass takes no baseline.
+	r3 := newCutoverRig()
+	p3 := r3.plan(config.SupervisorContainer)
+	if ok, _ := p3.oldDaemonStopped(); ok || p3.baseline != nil {
+		t.Errorf("an unproven stop took baseline %+v", p3.baseline)
 	}
 }
