@@ -2010,13 +2010,13 @@ func enforceHandoffCooldown() {
 	if err != nil {
 		return
 	}
-	enforceHandoffCooldownIn(os.Stdout, os.Getenv("GT_ROLE"), cwd, clockwork.NewRealClock().Sleep)
+	enforceHandoffCooldownIn(os.Stdout, os.Getenv("GT_ROLE"), cwd, time.Now, clockwork.NewRealClock().Sleep)
 }
 
 // enforceHandoffCooldownIn is enforceHandoffCooldown for a session whose
-// GT_ROLE is role, recording handoffs under dir, with the wait passed in so
-// tests can see how long it would sleep without sleeping.
-func enforceHandoffCooldownIn(w io.Writer, role, dir string, sleep func(time.Duration)) {
+// GT_ROLE is role, recording handoffs under dir, with now and the wait passed
+// in so tests can name the remaining cooldown without a wall clock or a sleep.
+func enforceHandoffCooldownIn(w io.Writer, role, dir string, now func() time.Time, sleep func(time.Duration)) {
 	if role != "" {
 		parsed, _, _ := parseRoleString(role)
 		switch parsed {
@@ -2025,7 +2025,7 @@ func enforceHandoffCooldownIn(w io.Writer, role, dir string, sleep func(time.Dur
 		}
 	}
 
-	age, ok := lastHandoffAge(dir)
+	age, ok := lastHandoffAge(dir, now())
 	if !ok || age >= constants.MinHandoffCooldown {
 		return
 	}
@@ -2072,25 +2072,27 @@ func recordHandoffState(plan restartPlan, cwd, session, reason string) {
 		return
 	}
 	writeHandoffMarker(dir, session, reason)
-	recordHandoffTimeIn(dir)
+	recordHandoffTimeIn(dir, time.Now())
 }
 
-// lastHandoffAge reports how long ago the last handoff recorded in dir was.
-// ok is false when none has been recorded there.
-func lastHandoffAge(dir string) (age time.Duration, ok bool) {
+// lastHandoffAge reports how long before now the last handoff recorded in dir
+// was. ok is false when none has been recorded there.
+func lastHandoffAge(dir string, now time.Time) (age time.Duration, ok bool) {
 	info, err := os.Stat(filepath.Join(dir, constants.DirRuntime, constants.FileLastHandoffTS))
 	if err != nil {
 		return 0, false
 	}
-	return time.Since(info.ModTime()), true
+	return now.Sub(info.ModTime()), true
 }
 
-// recordHandoffTimeIn writes the handoff cooldown timestamp under dir.
-func recordHandoffTimeIn(dir string) {
+// recordHandoffTimeIn writes the handoff cooldown timestamp under dir, dating
+// it at now so the recorded age and the file's mtime cannot disagree.
+func recordHandoffTimeIn(dir string, now time.Time) {
 	runtimeDir := filepath.Join(dir, constants.DirRuntime)
 	_ = os.MkdirAll(runtimeDir, 0755)
-	_ = os.WriteFile(filepath.Join(runtimeDir, constants.FileLastHandoffTS),
-		[]byte(fmt.Sprintf("%d", time.Now().Unix())), 0644)
+	tsPath := filepath.Join(runtimeDir, constants.FileLastHandoffTS)
+	_ = os.WriteFile(tsPath, []byte(fmt.Sprintf("%d", now.Unix())), 0644)
+	_ = os.Chtimes(tsPath, now, now)
 }
 
 // writeHandoffMarker tells the successor's gt prime it is post-handoff.

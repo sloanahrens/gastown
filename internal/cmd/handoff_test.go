@@ -859,20 +859,21 @@ func TestCollectGitState(t *testing.T) {
 }
 
 // TestRecordHandoffTime verifies that recordHandoffTime creates the
-// timestamp file in .runtime/ with a recent modification time.
+// timestamp file in .runtime/ dated at the now it is given.
 func TestRecordHandoffTime(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 
-	recordHandoffTimeIn(tmpDir)
+	recordHandoffTimeIn(tmpDir, now)
 
 	tsPath := filepath.Join(tmpDir, constants.DirRuntime, constants.FileLastHandoffTS)
 	info, err := os.Stat(tsPath)
 	if err != nil {
 		t.Fatalf("expected last_handoff_ts file to exist: %v", err)
 	}
-	if time.Since(info.ModTime()) > 5*time.Second {
-		t.Errorf("expected recent modification time, got %v ago", time.Since(info.ModTime()))
+	if !info.ModTime().Equal(now) {
+		t.Errorf("mtime = %v, want the injected now %v", info.ModTime(), now)
 	}
 }
 
@@ -888,7 +889,7 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		tmpDir := t.TempDir()
 
 		var elapsed time.Duration
-		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
+		enforceHandoffCooldownIn(io.Discard, role, tmpDir, time.Now, func(d time.Duration) { elapsed += d })
 
 		// Should return almost immediately (no file to check)
 		if elapsed != 0 {
@@ -911,7 +912,7 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		os.Chtimes(tsPath, oldTime, oldTime)
 
 		var elapsed time.Duration
-		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
+		enforceHandoffCooldownIn(io.Discard, role, tmpDir, time.Now, func(d time.Duration) { elapsed += d })
 
 		if elapsed != 0 {
 			t.Errorf("expected no cooldown for old handoff, but waited %v", elapsed)
@@ -922,25 +923,23 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		t.Parallel()
 		role := "gastown/witness"
 		tmpDir := t.TempDir()
+		now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 
 		// Create a last_handoff_ts file with very recent mtime
 		runtimeDir := filepath.Join(tmpDir, constants.DirRuntime)
 		os.MkdirAll(runtimeDir, 0755)
 		tsPath := filepath.Join(runtimeDir, constants.FileLastHandoffTS)
 		os.WriteFile(tsPath, []byte("now"), 0644)
-		// Set mtime to (MinHandoffCooldown - 1s) ago so remaining is ~1s
-		recentTime := time.Now().Add(-(constants.MinHandoffCooldown - 1*time.Second))
+		// One second short of the cooldown as of the injected now, so the
+		// remaining wait is exactly that second.
+		recentTime := now.Add(-(constants.MinHandoffCooldown - time.Second))
 		os.Chtimes(tsPath, recentTime, recentTime)
 
 		var elapsed time.Duration
-		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
+		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func() time.Time { return now }, func(d time.Duration) { elapsed += d })
 
-		// Should wait approximately 1 second (the remaining cooldown)
-		if elapsed < 500*time.Millisecond {
-			t.Errorf("expected cooldown sleep of ~1s, but only waited %v", elapsed)
-		}
-		if elapsed > 1500*time.Millisecond {
-			t.Errorf("expected cooldown sleep of ~1s, but waited %v", elapsed)
+		if want := time.Second; elapsed != want {
+			t.Errorf("cooldown sleep = %v, want the remaining %v", elapsed, want)
 		}
 	})
 
@@ -956,7 +955,7 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		os.WriteFile(tsPath, []byte("now"), 0644)
 
 		var elapsed time.Duration
-		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
+		enforceHandoffCooldownIn(io.Discard, role, tmpDir, time.Now, func(d time.Duration) { elapsed += d })
 
 		if elapsed != 0 {
 			t.Errorf("crew should be exempt from cooldown, but waited %v", elapsed)
@@ -1255,11 +1254,11 @@ func TestBuildRestartCommand_WorkerAgentPinSurvivesHandoff(t *testing.T) {
 func TestLastHandoffAge(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	if _, ok := lastHandoffAge(dir); ok {
+	if _, ok := lastHandoffAge(dir, time.Now()); ok {
 		t.Fatal("lastHandoffAge reported a handoff in an empty dir")
 	}
-	recordHandoffTimeIn(dir)
-	age, ok := lastHandoffAge(dir)
+	recordHandoffTimeIn(dir, time.Now())
+	age, ok := lastHandoffAge(dir, time.Now())
 	if !ok {
 		t.Fatal("lastHandoffAge found no handoff after recordHandoffTimeIn")
 	}
