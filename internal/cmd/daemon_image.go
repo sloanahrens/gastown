@@ -228,22 +228,9 @@ func validateDaemonImageFlags(f daemonImageFlags, evalSymlinks func(string) (str
 		if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
 			return fmt.Errorf("%s %q is not an existing directory", p.flag, p.value)
 		}
-		if insideCanonicalClone(resolved) {
+		if daemonimage.IsCanonicalClone(resolved) {
 			return fmt.Errorf("%s %q is or lies inside a canonical clone (.../mayor/rig): the build adds worktrees to its sources and the canonical clone is never touched", p.flag, p.value)
 		}
 	}
 	return nil
-}
-
-// insideCanonicalClone reports whether path is a rig's canonical clone,
-// <town>/<rig>/mayor/rig, or lies under one.
-func insideCanonicalClone(path string) bool {
-	for p := filepath.Clean(path); ; p = filepath.Dir(p) {
-		if filepath.Base(p) == "rig" && filepath.Base(filepath.Dir(p)) == "mayor" {
-			return true
-		}
-		if parent := filepath.Dir(p); parent == p {
-			return false
-		}
-	}
 }
