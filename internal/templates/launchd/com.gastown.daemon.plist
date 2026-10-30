@@ -7,13 +7,13 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>{{.GTPath}}</string>
+        <string>{{xml .GTPath}}</string>
         <string>daemon</string>
         <string>run</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>{{.TownRoot}}</string>
+    <string>{{xml .TownRoot}}</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -32,18 +32,18 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>{{.TownRoot}}/daemon/daemon.log</string>
+    <string>{{xml .TownRoot}}/daemon/daemon.log</string>
 
     <key>StandardErrorPath</key>
-    <string>{{.TownRoot}}/daemon/daemon.log</string>
+    <string>{{xml .TownRoot}}/daemon/daemon.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>GT_TOWN_ROOT</key>
-        <string>{{.TownRoot}}</string>
+        <string>{{xml .TownRoot}}</string>
         {{- range $key, $value := .Env }}
-        <key>{{$key}}</key>
-        <string>{{$value}}</string>
+        <key>{{xml $key}}</key>
+        <string>{{xml $value}}</string>
         {{- end }}
     </dict>
 
