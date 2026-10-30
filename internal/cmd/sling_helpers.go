@@ -231,17 +231,15 @@ func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
 // molecule under any other relation is not attached to it.
 var moleculeBondTypes = map[string]bool{"blocks": true, "conditional-blocks": true, "parent-child": true}
 
-// moleculeDeps returns the open molecules bonded to beadID. Local-target bonds
-// come from DepListUp, in the store's creation order, so a tracker rig (which
-// answers no SQL) can still be slung and its stale molecules burned. Bonds
-// held as an external:<rig>:<id> target are ones DepListUp cannot return; a
-// store with SQL reads them through ExternalMoleculesAttachedTo and appends
-// the ones not already listed. That statement has no ORDER BY, as the removed
-// bd sql read had none, so those trail the local bonds in no promised order.
+// moleculeDeps returns the open molecules bonded to beadID: local-target bonds
+// first, in the order DepListUp lists their dependents (the store's creation
+// order), then bonds held only as an external:<rig>:<id> target, in the order
+// ExternalMoleculesAttachedTo lists them, which has no ORDER BY. A molecule
+// bonded both ways is listed once, at its local position.
 //
-// A store with no SQL (the tracker) cannot answer the external statement, so
-// its external-target bonds are not read here until the tracker answers
-// external-target dependents (gt-etvxc).
+// External-target bonds cannot be matched on a tracker store until gt-etvxc;
+// the SQL store keeps the statement, and a store without SQL reads its local
+// bonds and warns once, naming the bead.
 func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	if beadID == "" {
 		return nil, nil
@@ -257,6 +255,7 @@ func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	}
 	sql, ok := store.(sqlStore)
 	if !ok {
+		s.warnTrackerBondSkipOnce(beadID)
 		return molecules, nil
 	}
 	external, err := externalMolecules(sql, beadID)
@@ -267,7 +266,8 @@ func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 }
 
 // externalMolecules returns the open molecules that bond to beadID through an
-// external:<rig>:<id> target, in the order the statement lists them.
+// external:<rig>:<id> target, in the order the statement lists them. The
+// statement joins wisps itself, so its ids need no further read.
 func externalMolecules(store sqlStore, beadID string) ([]string, error) {
 	rows, err := store.SQLCSV(beadsql.ExternalMoleculesAttachedTo(beadID))
 	if err != nil {

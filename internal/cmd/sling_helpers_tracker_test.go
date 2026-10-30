@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads/trackerclient"
@@ -50,12 +51,13 @@ func (tr trackerRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
 	return rec.Result(), nil
 }
 
-// TestMoleculeDepsOnATrackerStoreNeverReadsSQL: a bead in a tracker rig is
-// slung through the tracker's dependents. Its open molecules come back, and
-// no SQL is needed: the tracker client has no SQLCSV, so sling never asks it
-// for one.
-func TestMoleculeDepsOnATrackerStoreNeverReadsSQL(t *testing.T) {
+// TestMoleculeDepsOnATrackerStoreReadsLocalBondsAndWarnsOnce: the tracker
+// answers a bead's local-target dependents but no SQL, so sling reads those,
+// runs no SQL statement, and says once per process that the external-target
+// bonds went unread (gt-etvxc).
+func TestMoleculeDepsOnATrackerStoreReadsLocalBondsAndWarnsOnce(t *testing.T) {
 	t.Parallel()
+	var warn strings.Builder
 	tc, err := client.New(client.Config{
 		BaseURL:     "http://127.0.0.1:1",
 		Token:       "t",
@@ -79,13 +81,27 @@ func TestMoleculeDepsOnATrackerStoreNeverReadsSQL(t *testing.T) {
 	if _, ok := any(store).(sqlStore); ok {
 		t.Fatal("the tracker client answers SQL; this test no longer models a tracker store")
 	}
-	stores := slingStores{pinned: func(string) slingStore { return store }}
-
-	got, err := stores.moleculeDeps("gt-work", t.TempDir())
-	if err != nil {
-		t.Fatalf("moleculeDeps: %v", err)
+	stores := slingStores{
+		pinned: func(string) slingStore { return store },
+		warn:   &warn,
+		warned: new(sync.Once),
 	}
-	if want := []string{"gt-wisp-live"}; !slices.Equal(got, want) {
-		t.Errorf("moleculeDeps() = %v, want %v", got, want)
+
+	for i := 0; i < 2; i++ {
+		got, err := stores.moleculeDeps("gt-work", t.TempDir())
+		if err != nil {
+			t.Fatalf("moleculeDeps: %v", err)
+		}
+		if want := []string{"gt-wisp-live"}; !slices.Equal(got, want) {
+			t.Errorf("moleculeDeps() = %v, want the same-database molecule %v", got, want)
+		}
+	}
+	if lines := strings.Count(warn.String(), "\n"); lines != 1 {
+		t.Errorf("skip warning printed %d lines over two reads, want 1:\n%s", lines, warn.String())
+	}
+	for _, want := range []string{"gt-work", "gt-etvxc"} {
+		if !strings.Contains(warn.String(), want) {
+			t.Errorf("skip warning %q does not name %q", warn.String(), want)
+		}
 	}
 }

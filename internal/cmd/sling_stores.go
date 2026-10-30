@@ -2,11 +2,36 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"sync"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+// trackerBondSkipWarned makes the molecule-bond skip line one per process: the
+// daemon slings many beads and the skip is the same every time.
+var trackerBondSkipWarned sync.Once
+
+// warnTrackerBondSkipOnce says, the first time a no-SQL store is asked for
+// molecule bonds, that its external-target bonds go unread.
+func (s slingStores) warnTrackerBondSkipOnce(beadID string) {
+	once := s.warned
+	if once == nil {
+		once = &trackerBondSkipWarned
+	}
+	w := s.warn
+	if w == nil {
+		w = os.Stderr
+	}
+	once.Do(func() {
+		style.FprintWarning(w,
+			"molecule bonds of %s: external-target bonds cannot be matched on a tracker store until gt-etvxc; the SQL store keeps the statement", beadID)
+	})
+}
 
 // slingStore is the bead store surface sling's reads, rollback and molecule
 // burn use: the shared Client. *beads.Beads implements it, and so does the
@@ -16,14 +41,15 @@ type slingStore interface {
 }
 
 // sqlStore is a slingStore that also answers declared SQL reads (bd's
-// database). Sling asks for SQL only through this interface, so a store with
-// no SQL, like the tracker, is never asked for it.
+// database). Sling asks for SQL only through this interface: one bond read has
+// no seam equivalent (ExternalMoleculesAttachedTo), so a store with no SQL
+// skips that read and says so once (gt-etvxc).
 type sqlStore interface {
 	SQLCSV(query beadsql.Query) ([][]string, error)
 }
 
 // slingStores opens the bead stores sling works in. The zero value is bd;
-// unit tests answer from beadsfake databases.
+// unit tests answer from beadsfake databases and carry their own warning sink.
 type slingStores struct {
 	// pinned opens the database in beadsDir alone, with no prefix routing;
 	// nil is beads.NewPinned.
@@ -31,6 +57,10 @@ type slingStores struct {
 	// routed opens a store at dir that routes each ID by its prefix; nil is
 	// beads.NewWithBeadsDir.
 	routed func(dir string) slingStore
+	// warn takes the molecule-bond skip line; nil is os.Stderr.
+	warn io.Writer
+	// warned makes that line one per process; nil is the package's once.
+	warned *sync.Once
 }
 
 // pinnedDB is the database in beadsDir alone.
