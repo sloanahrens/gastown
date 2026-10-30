@@ -376,3 +376,20 @@ func TestRingDoesNotChangeTheDerivedState(t *testing.T) {
 		})
 	}
 }
+
+// TestRealSeamsReportsTheRingKeyless: until gt ring names the key's reference,
+// the production wiring reads no key, so the report says so even when a valid
+// Ring is on disk.
+func TestRealSeamsReportsTheRingKeyless(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	ringtest.Valid(t, f.town, testRingKey, f.now)
+	o, _, _ := f.optsWithOut()
+	o.RingKey = nil
+	RealSeams(&o)
+	got := f.statusOutput(t, o)
+	if !slices.Contains(strings.Split(got, "\n"), "ring: key unavailable") {
+		t.Errorf("the production wiring read a key the report should not have:\n%s", got)
+	}
+}
