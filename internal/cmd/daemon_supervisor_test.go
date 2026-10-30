@@ -881,7 +881,7 @@ func TestRestartDaemon_SupervisedRestartsInPlace(t *testing.T) {
 func TestRestartDaemon_SystemdNamesTheRunningInvocation(t *testing.T) {
 	t.Parallel()
 	running := daemon.Owner{Kind: config.SupervisorSystemd, ID: "inv-2"}
-	const restartCmd = "ran systemctl --user restart gastown-daemon.service"
+	const restartCmd = "systemctl --user restart gastown-daemon.service"
 	rows := []struct {
 		name string
 		// allowed is the owner the guard accepts, standing in for the one
@@ -893,7 +893,7 @@ func TestRestartDaemon_SystemdNamesTheRunningInvocation(t *testing.T) {
 		wantCalls []string
 	}{
 		{name: "the guard sees the unit's running invocation", allowed: running, wantOK: true,
-			wantCalls: []string{"read state", restartCmd}},
+			wantCalls: []string{"read state", "ran " + restartCmd}},
 		{name: "a guard refusing a different owner refuses the restart", allowed: daemon.Owner{Kind: config.SupervisorSystemd, ID: "inv-9"},
 			wantCalls: []string{"read state"}},
 	}
@@ -945,7 +945,7 @@ func TestRestartDaemon_SystemdNamesTheRunningInvocation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("restartDaemon: %v", err)
 			}
-			if got := calls.joined(); got != "systemctl --user restart gastown-daemon.service" {
+			if got := calls.joined(); got != restartCmd {
 				t.Errorf("supervisor command = %q, want the systemctl restart", got)
 			}
 			if via != config.SupervisorSystemd {
