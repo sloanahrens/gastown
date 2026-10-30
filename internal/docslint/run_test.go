@@ -11,7 +11,7 @@ import (
 // fence is a code fence, spelled out because a raw string cannot hold backticks.
 const fence = "```"
 
-// shellFixture is the tree scripts/docs-lint_test.sh runs over, as an in-memory
+// shellFixture is the tree the shell test ran over, as an in-memory
 // checkout: one violation per rule. The plugin is 2102 words, over the ceiling.
 func shellFixture() memFS {
 	return memFS{
@@ -357,7 +357,7 @@ func TestRunOptions(t *testing.T) {
 	})
 }
 
-// TestRunCaseTable is the rest of scripts/docs-lint_test.sh, one subtest per
+// TestRunCaseTable is the rest of the shell test (removed in gt-tpg0p.114), one subtest per
 // section over the shared fixture tree: the tier listings and the word ceiling
 // and total. The locale sections need no case here: the count is
 // strings.Fields, so no locale can change it, and TestWordCountIsLocaleFree

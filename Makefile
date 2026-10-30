@@ -262,7 +262,7 @@ lint: docs-lint
 # Deterministic docs and comments checks (docs/writing-for-agents.md).
 # Also the tier lists the weekly doc audit slices from.
 docs-lint:
-	bash scripts/docs-lint.sh
+	@go run ./cmd/docs-lint
 
 # Regenerate the bd command surface the command-tree lint (internal/cmdtree,
 # gt-fcxe9.5) checks bd invocations against. BEADS_SRC is a beads fork

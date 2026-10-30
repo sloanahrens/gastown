@@ -1,4 +1,4 @@
-// Package docslint is the Go port of scripts/docs-lint.sh: the tier lists the
+// Package docslint is the Go port of the shell docs-lint (removed in gt-tpg0p.114): the tier lists the
 // doc audit slices from, and the checks that run over them. The rules the
 // checks enforce are docs/writing-for-agents.md.
 package docslint

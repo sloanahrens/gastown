@@ -7,10 +7,10 @@ version = 1
 id = "audit"
 title = "Audit the slice against docs/writing-for-agents.md"
 description = """
-**1. Compute the slice. The script chooses; you do not.**
+**1. Compute the slice. The command chooses; you do not.**
 ```bash
-bash scripts/docs-lint.sh --slice {{slice_docs}} {{slice_go}} | tee /tmp/doc-audit-slice.txt
-bash scripts/docs-lint.sh --words   # record as WORDS_BEFORE
+go run ./cmd/docs-lint --slice {{slice_docs}} {{slice_go}} | tee /tmp/doc-audit-slice.txt
+go run ./cmd/docs-lint --words   # record as WORDS_BEFORE
 gt bead note {{issue}} "slice: $(tr '\\n' ' ' < /tmp/doc-audit-slice.txt)"
 ```
 
@@ -42,7 +42,7 @@ editing this block, follow the bead-text rule in directives/polecat.md.
 gt bead comment {{issue}} 'doc-audit run
 files: <one per line, with the rule ids applied or clean>
 findings per rule: <one R<id>=<n> per rule in docs/writing-for-agents.md>
-words agent-facing: before=<WORDS_BEFORE> after=<docs-lint.sh --words now>
+words agent-facing: before=<WORDS_BEFORE> after=<go run ./cmd/docs-lint --words now>
 proposals:
 - <deletion | out-of-slice rot | R6 split | rule to sharpen>: <path or rule> — <evidence>'
 ```

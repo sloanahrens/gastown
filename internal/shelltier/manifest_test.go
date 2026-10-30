@@ -83,7 +83,6 @@ func TestManifestOrderIsToday(t *testing.T) {
 		"scripts/polecat-go-floor_test.sh",
 		"scripts/install-om_test.sh",
 		"scripts/install-local_test.sh",
-		"scripts/docs-lint_test.sh",
 		"scripts/deep-review_test.sh",
 		"scripts/flake-sweep_test.sh",
 		"scripts/gate-vs-load_test.sh",
