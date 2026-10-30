@@ -161,8 +161,8 @@ func TestCrewActorFromEnv(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := crewActorFromEnv(crewEnv(tc.env)); got != tc.want {
-				t.Errorf("crewActorFromEnv(%v) = %q, want %q", tc.env, got, tc.want)
+			if got := CrewActorFromEnv(crewEnv(tc.env)); got != tc.want {
+				t.Errorf("CrewActorFromEnv(%v) = %q, want %q", tc.env, got, tc.want)
 			}
 		})
 	}
