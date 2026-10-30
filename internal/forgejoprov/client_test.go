@@ -2,6 +2,7 @@ package forgejoprov
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -27,6 +28,26 @@ type failingTransport struct{}
 
 func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("dial tcp: connection refused")
+}
+
+// brokenBodyTransport answers every request with a 200 whose body fails on read, so
+// the client's reply read has an error to report.
+type brokenBodyTransport struct{}
+
+func (brokenBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(brokenReader{}),
+		Request:    req,
+	}, nil
+}
+
+// brokenReader is a reply body whose read fails part way through.
+type brokenReader struct{}
+
+func (brokenReader) Read([]byte) (int, error) {
+	return 0, errors.New("connection reset by peer")
 }
 
 // clientFor returns a client over the fake, with the admin token and the log
@@ -138,6 +159,81 @@ func TestClientTransportErrorHasNoToken(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), fixtureToken) {
 		t.Errorf("transport error carries the token")
+	}
+}
+
+// TestClientRefusesAnUnencodableBody checks that a body JSON cannot encode is refused
+// before any request is sent.
+func TestClientRefusesAnUnencodableBody(t *testing.T) {
+	t.Parallel()
+	rec := &recordingTransport{next: newFakeForgejo()}
+	c := &Client{
+		API:   fakeAPIRoot + fakeAPIPath,
+		HTTP:  &http.Client{Transport: rec},
+		Token: newSecret(fixtureToken),
+	}
+
+	status, body, err := c.Do(http.MethodPost, "/admin/users", make(chan int))
+	if err == nil {
+		t.Fatal("an unencodable body returned no error")
+	}
+	if !strings.Contains(err.Error(), "POST "+fakeAPIRoot+fakeAPIPath+"/admin/users: encode body") {
+		t.Errorf("error = %q, want the method, URL and encode-body rule", err.Error())
+	}
+	if status != 0 || body != nil {
+		t.Errorf("Do returned status %d, body %q with the error; want 0 and no body", status, body)
+	}
+	if len(rec.urls) != 0 {
+		t.Errorf("an unencodable body still sent %d request(s)", len(rec.urls))
+	}
+}
+
+// TestClientRefusesABadURL checks that a request the client cannot build is
+// reported, with no token in the text, and that nothing is sent.
+func TestClientRefusesABadURL(t *testing.T) {
+	t.Parallel()
+	rec := &recordingTransport{next: newFakeForgejo()}
+	c := &Client{
+		API:   "http://[::1",
+		HTTP:  &http.Client{Transport: rec},
+		Token: newSecret(fixtureToken),
+	}
+	_, _, err := c.Do(http.MethodGet, "/users/bot-polecat", nil)
+	if err == nil {
+		t.Fatal("a malformed API root returned no error")
+	}
+	if !strings.Contains(err.Error(), "GET http://[::1/users/bot-polecat:") {
+		t.Errorf("error = %q, want the method and URL", err.Error())
+	}
+	if strings.Contains(err.Error(), fixtureToken) {
+		t.Errorf("request-build error carries the token")
+	}
+	if len(rec.urls) != 0 {
+		t.Errorf("a request that could not be built still reached the transport")
+	}
+}
+
+// TestClientReportsAReplyReadError checks that a reply body that fails on read is an
+// error, not an empty reply that looks like success.
+func TestClientReportsAReplyReadError(t *testing.T) {
+	t.Parallel()
+	c := &Client{
+		API:   fakeAPIRoot + fakeAPIPath,
+		HTTP:  &http.Client{Transport: brokenBodyTransport{}},
+		Token: newSecret(fixtureToken),
+	}
+	status, body, err := c.Do(http.MethodGet, "/users/bot-polecat", nil)
+	if err == nil {
+		t.Fatal("a reply that fails on read returned no error")
+	}
+	if !strings.Contains(err.Error(), "GET "+fakeAPIRoot+fakeAPIPath+"/users/bot-polecat: read reply") {
+		t.Errorf("error = %q, want the method, URL and read-reply rule", err.Error())
+	}
+	if status != 0 || body != nil {
+		t.Errorf("Do returned status %d, body %q with the error; want 0 and no body", status, body)
+	}
+	if strings.Contains(err.Error(), fixtureToken) {
+		t.Errorf("read error carries the token")
 	}
 }
 
