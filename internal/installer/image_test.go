@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/imagebuild"
+	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
 // imageRun is a run whose checkout holds the polecat-image program and the
@@ -192,6 +193,117 @@ func TestImageStepFailsTheInstallWhenTheBuildFails(t *testing.T) {
 	}
 	if got := ir.fingerprint(); got != "install-gt:build-failed" {
 		t.Errorf("escalation fingerprint = %q, want install-gt:build-failed", got)
+	}
+}
+
+// Without a SlingDeferral seam the sling is asked of pgrep for SlingPattern, and
+// the exit status decides: no match builds, a match defers to the bound, and a
+// pgrep that cannot answer defers too, so it fails closed (gt-jie3d).
+func TestImageSlingProbeUsesPgrep(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		pgrepExit int
+		wantExit  Exit
+		wantBuilt bool
+	}{
+		{name: "no sling matches: built", pgrepExit: 1, wantExit: ExitOK, wantBuilt: true},
+		{name: "a sling matches: deferred past the bound", pgrepExit: 0, wantExit: ExitFailed},
+		{name: "pgrep cannot answer: deferred past the bound", pgrepExit: 2, wantExit: ExitFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ir := newImageRun(t)
+			ir.Run.SlingDeferral = nil
+			ir.respond = func(string, string, []string) ([]byte, []byte, int) {
+				return nil, nil, tc.pgrepExit
+			}
+
+			if code := ir.step(t); code != tc.wantExit {
+				t.Fatalf("ImageStep() = %d, want %d:\n%s", code, tc.wantExit, ir.output())
+			}
+			if len(ir.cmds) == 0 {
+				t.Fatal("no pgrep was run, so the sling was not asked")
+			}
+			want := []string{"pgrep", "-f", polecatimage.SlingPattern}
+			for i, got := range ir.cmds {
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("command %d = %q, want %q", i, got, want)
+				}
+			}
+			if built := len(ir.builds) == 1; built != tc.wantBuilt {
+				t.Errorf("builds = %d, want built = %v", len(ir.builds), tc.wantBuilt)
+			}
+		})
+	}
+}
+
+// The sling wait comes out of the build's alarm: a build before the swap runs
+// within INSTALL_GT_IMAGE_ALARM as a whole, so the wait cannot run the install
+// past the window the alarm names. A wait that leaves no time fails the step,
+// since an alarm of zero would leave the build with no bound (gt-jie3d).
+func TestImageSlingWaitIsWithinAlarm(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		alarm         string
+		deferredReads int
+		wantExit      Exit
+		wantAlarm     time.Duration
+		wantSleeps    int
+		// wantLog is the line a failed step logs, when it fails.
+		wantLog string
+	}{
+		{name: "no wait keeps the whole alarm", alarm: "", deferredReads: 0, wantExit: ExitOK,
+			wantAlarm: 1200 * time.Second, wantSleeps: 0},
+		{name: "a wait comes out of the alarm", alarm: "900", deferredReads: 2, wantExit: ExitOK,
+			wantAlarm: 870 * time.Second, wantSleeps: 2},
+		{name: "a wait that clears inside the alarm leaves the rest", alarm: "60", deferredReads: 2, wantExit: ExitOK,
+			wantAlarm: 30 * time.Second, wantSleeps: 2},
+		{name: "a wait still deferred at the alarm fails", alarm: "60", deferredReads: -1, wantExit: ExitFailed,
+			wantSleeps: 4, wantLog: "sandbox sling in progress after 1m0s; the build is not run"},
+		{name: "a wait that clears exactly at the alarm fails", alarm: "60", deferredReads: 4, wantExit: ExitFailed,
+			wantSleeps: 4, wantLog: "the sling wait used the whole alarm of 1m0s; the build is not run"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ir := newImageRun(t)
+			ir.GetEnv(map[string]string{"INSTALL_GT_IMAGE_ALARM": tc.alarm})
+			reads := 0
+			ir.Run.SlingDeferral = func() string {
+				reads++
+				if tc.deferredReads < 0 || reads <= tc.deferredReads {
+					return "sandbox sling in progress"
+				}
+				return ""
+			}
+			var sleeps []time.Duration
+			ir.Run.ImageSleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+
+			if code := ir.step(t); code != tc.wantExit {
+				t.Fatalf("ImageStep() = %d, want %d:\n%s", code, tc.wantExit, ir.output())
+			}
+			if len(sleeps) != tc.wantSleeps {
+				t.Fatalf("sleeps = %v, want %d polls", sleeps, tc.wantSleeps)
+			}
+			if tc.wantExit == ExitFailed {
+				if len(ir.builds) != 0 {
+					t.Errorf("builds = %d, want none once the wait used the alarm", len(ir.builds))
+				}
+				if !ir.has(tc.wantLog) {
+					t.Errorf("output lacks %q:\n%s", tc.wantLog, ir.output())
+				}
+				return
+			}
+			if len(ir.builds) != 1 {
+				t.Fatalf("builds = %d, want 1", len(ir.builds))
+			}
+			if got := ir.builds[0].Alarm; got != tc.wantAlarm {
+				t.Errorf("build alarm = %v, want %v", got, tc.wantAlarm)
+			}
+		})
 	}
 }
 
