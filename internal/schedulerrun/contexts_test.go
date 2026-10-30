@@ -1,9 +1,11 @@
 package schedulerrun
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -425,5 +427,34 @@ func TestCloseStaleContextsReturnsOnlyTheSurvivors(t *testing.T) {
 	}
 	if len(kept) != 1 || kept[0].issue.ID != "gt-wisp-live" {
 		t.Fatalf("kept = %+v, want only gt-wisp-live", kept)
+	}
+}
+
+// A cycle whose read fails reports it, and a cleaning cycle names the cleanup
+// it could not do: a plan built on an unreadable context list would miss the
+// stale contexts it is meant to close.
+func TestDispatchCycleReportsAFailedSlingContextRead(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	scanErr := errors.New("dolt unavailable")
+	store := contextStore{scan: func(string) ([]contextRecord, error) { return nil, scanErr }}
+
+	for _, cleanup := range []bool{true, false} {
+		_, err := cycleContexts(townRoot, cleanup, store, nil)
+		if !errors.Is(err, scanErr) {
+			t.Fatalf("cycle (cleanup=%t) error = %v, want the scan failure", cleanup, err)
+		}
+		if cleanup != strings.Contains(err.Error(), "cleaning stale scheduler contexts") {
+			t.Fatalf("cycle (cleanup=%t) error = %v, want the cleanup named only when it ran", cleanup, err)
+		}
+	}
+}
+
+// ListScheduled reports a scan it could not make rather than an empty queue,
+// which reads as "nothing scheduled".
+func TestListScheduledReportsAFailedScan(t *testing.T) {
+	t.Parallel()
+	if _, err := ListScheduled(filepath.Join(t.TempDir(), "no-such-town")); err == nil {
+		t.Fatal("ListScheduled on an unreadable town root = nil error, want the scan failure")
 	}
 }
