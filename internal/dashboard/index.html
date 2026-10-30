@@ -3249,9 +3249,9 @@ function drawOverseerQueue(panel, s) {
 
 // The Usage part of the Cost panel: what the town spent over the last day, from
 // the records the usage scan writes. Each block is a fold of its own, closed by
-// default, with a one-line summary on its heading; the Cost panel's header
-// carries today's spend across the providers, the DeepSeek estimate, and, as a
-// badge, how many beads ran over twenty minutes. Read-only.
+// default, with a one-line summary on its heading; the Cost panel's expanded
+// line above the table carries today's spend across the providers, the DeepSeek
+// estimate, and, as a badge, how many beads ran over twenty minutes. Read-only.
 //
 // Money and tokens are in separate columns: Spend ($) holds dollars and is
 // "est." for DeepSeek rows only, since the scan estimates no cost for Claude
@@ -3287,16 +3287,14 @@ function costTable(heads, rows) {
   return t;
 }
 // costUsage draws the part into box from the usage payload u and the whole
-// state s, and returns whether the reading is a warning (warn) or a failure
-// (bad), which colours the Cost panel's header.
+// state s. Its figures and problems are in the expanded panel, not the header.
 function costUsage(box, u, s) {
-  if (!u) { box.append(el("div", "empty", "reading…")); return {}; }
+  if (!u) { box.append(el("div", "empty", "reading…")); return; }
   if (u.unavailable) {
     box.append(el("div", "badc", "usage records unreadable"));
-    return {bad: true};
+    return;
   }
   const byClass = u.by_class_model || [], deep = u.deep_review_runs || [], top = u.top_beads || [], over = u.over20 || [];
-  const glance = {warn: over.length > 0};
 
   const win = u.window || "24h";
   const table = costTable;
@@ -3378,7 +3376,6 @@ function costUsage(box, u, s) {
     quality.body.append(el("div", "empty" + (old ? " warnc" : ""), "records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")));
   }
   quality.body.append(el("div", "empty", counts));
-  return glance;
 }
 
 // costFolds keeps each fold of the Cost panel's usage part by its key, built once
@@ -4329,13 +4326,9 @@ function renderCost(s) {
   const charts = s.cost_charts || {};
   costChartFold(spendBox, "daily", charts.daily, s.cost_providers);
   costChartFold(spendBox, "hourly", charts.hourly, s.cost_providers);
-  const usage = costUsage(box, u, s);
+  costUsage(box, u, s);
   costJevFold(box, s);
   costRework(box, s.rework);
-  // A stale or failed spend read has already coloured the header, and the usage
-  // glance has coloured the part it draws; the header only takes a colour of
-  // its own when it has none.
-  if (note.className === "r" && (usage.bad || usage.warn)) note.className = "r " + (usage.bad ? "badc" : "warnc");
 }
 
 // An escalation's severity is why a row is where it is, so the panel colours

@@ -336,14 +336,23 @@ func TestCostSummaryHoldsTheFiguresTheHeaderLeftOut(t *testing.T) {
 	}
 }
 
-// An unreadable usage scan says so in the expanded panel, in the failure colour.
+// An unreadable usage scan says so in the expanded panel, in the failure colour,
+// and leaves the collapsed header's colour to its own spend read.
 func TestCostSummaryNamesAnUnreadableUsageScan(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	drawCostOn(t, dom, jsonValue(t, map[string]any{"spend": liveSpend(), "usage": map[string]any{"unavailable": true}}))
+	drawCostOn(t, dom, jsonValue(t, map[string]any{
+		"spend":          liveSpend(),
+		"reads":          freshSpendRead(nil),
+		"cost_providers": []any{deepSeekRow(), claudeRow()},
+		"usage":          map[string]any{"unavailable": true},
+	}))
 	_, parts := summaryLine(t, dom)
 	if got := partByText(t, parts, "usage unreadable"); got.Class != "badc" {
 		t.Errorf("an unreadable usage scan wears %q, want the failure colour", got.Class)
+	}
+	if note := dom.element(t, "costnote"); note.Class != "r" {
+		t.Errorf("an unreadable usage scan coloured the header %q; the header is coloured by its spend read only", note.Class)
 	}
 }
