@@ -82,9 +82,9 @@ func TestDirectiveFilesOpenWithACitedChangelog(t *testing.T) {
 	}
 }
 
-// polecat.md carries the twelve "What om rejects" rules, numbered 1 to 12 in
-// order and each once, and no probe line (gt-dabdh).
-func TestPolecatDirectiveHasTwelveRules(t *testing.T) {
+// polecat.md carries the sixteen "What om rejects" rules, numbered 1 to 16 in
+// order and each once, and no probe line (gt-dabdh, gt-o87rv).
+func TestPolecatDirectiveHasSixteenRules(t *testing.T) {
 	t.Parallel()
 	text := readDirective(t, "polecat.md")
 	var got []string
@@ -94,11 +94,11 @@ func TestPolecatDirectiveHasTwelveRules(t *testing.T) {
 		}
 	}
 	var want []string
-	for n := 1; n <= 12; n++ {
+	for n := 1; n <= 16; n++ {
 		want = append(want, fmt.Sprint(n))
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("polecat.md rule headings = %v, want 1 to 12 in order", got)
+		t.Errorf("polecat.md rule headings = %v, want 1 to 16 in order", got)
 	}
 	if strings.Contains(text, "Probe word") {
 		t.Error("polecat.md still carries the probe line")

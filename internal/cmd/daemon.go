@@ -92,9 +92,13 @@ var daemonStatusCmd = &cobra.Command{
 
 Displays whether the daemon is running, its PID, uptime, heartbeat
 count, and whether the binary has been rebuilt since the daemon started.
+A town whose daemon runs under the container supervisor reads running
+from that container and daemon/state.json, and has no PID to show.
 
 Exits 0 when the daemon is running and 3 when it is not, so scripts can
 use it as a running check (for example: gt daemon status || gt daemon start).
+A state that cannot be read exits 3 too, and says unknown rather than
+not running: only exit 0 claims the daemon runs.
 
 Examples:
   gt daemon status`,
@@ -412,8 +416,29 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 }
 
 // daemonStatus reports townRoot's daemon and its supervisor to w, and exits 3
-// when no daemon runs.
+// when no daemon runs or when a read that decides running failed — only exit 0
+// claims the daemon runs.
 func (c *daemonControl) daemonStatus(w io.Writer, townRoot string) error {
+	// A container town's daemon lives in another namespace: the flock it takes
+	// on the bind-mounted town is not visible from this host, so the lock
+	// answers nothing about it (gt-i2z9l). Its container is asked instead.
+	cfg, containerTown, settingsErr := c.townDaemonKind(townRoot)
+	switch {
+	case settingsErr != nil:
+		// A container town's lock reads not running while its daemon runs, so
+		// it fails closed; every other town's lock still answers, and keeps
+		// the reading it had. The compose file a container install writes is
+		// the marker, and MayBeContainerTown reads it without the settings
+		// that just failed (gt-i2z9l).
+		if !config.MayBeContainerTown(townRoot) {
+			break
+		}
+		return daemonStateUnknown(w, unverifiedSupervisorLine(settingsErr),
+			fmt.Errorf("cannot read daemon settings: %w", settingsErr))
+	case containerTown:
+		return c.containerDaemonStatus(w, townRoot, cfg)
+	}
+
 	running, pid, err := c.isRunning(townRoot)
 	if err != nil {
 		return fmt.Errorf("checking daemon status: %w", err)
@@ -451,17 +476,92 @@ func (c *daemonControl) daemonStatus(w io.Writer, townRoot string) error {
 			}
 		}
 	} else {
-		fmt.Fprintf(w, "%s Daemon is %s\n",
-			style.Dim.Render("○"),
-			"not running")
-		fmt.Fprintf(w, "  Supervised: %s\n", c.statusLine(townRoot, 0))
-		fmt.Fprintf(w, "\nStart with: %s\n", style.Dim.Render("gt daemon start"))
-		// Exit 3 (LSB "program is not running") so scripts can use status as
-		// the running probe: make install restarts only a running daemon and
-		// mol-gastown-boot runs `status || start` (gt-o848l).
-		return NewSilentExit(3)
+		return daemonNotRunning(w, c.statusLine(townRoot, 0))
 	}
 
+	return nil
+}
+
+// daemonNotRunning prints the not-running form of gt daemon status, with the
+// Supervised: value the caller read, and is the exit-3 result that form ends
+// in. Exit 3 (LSB "program is not running") so scripts can use status as the
+// running probe: make install restarts only a running daemon and
+// mol-gastown-boot runs `status || start` (gt-o848l).
+func daemonNotRunning(w io.Writer, supervised string) error {
+	fmt.Fprintf(w, "%s Daemon is %s\n",
+		style.Dim.Render("○"),
+		"not running")
+	fmt.Fprintf(w, "  Supervised: %s\n", supervised)
+	fmt.Fprintf(w, "\nStart with: %s\n", style.Dim.Render("gt daemon start"))
+	return NewSilentExit(3)
+}
+
+// daemonStateUnknown prints what status knows when a read that decides running
+// failed, and fails with the code the not-running form uses: the daemon may
+// well be up, so neither the running nor the not-running form is honest, and a
+// script probing status must not read a failed check as running. The text is
+// what tells the two apart, and the wrapped error says which read failed.
+func daemonStateUnknown(w io.Writer, supervised string, err error) error {
+	fmt.Fprintf(w, "%s Daemon state is %s\n", style.Dim.Render("○"), "unknown")
+	fmt.Fprintf(w, "  Supervised: %s\n", supervised)
+	return &ExitCodeError{Code: 3, Err: err}
+}
+
+// containerDaemonStatus is gt daemon status for a town whose daemon runs under
+// the container supervisor. The container's live state, together with
+// state.json, decides running: the daemon's flock on the bind-mounted town is
+// taken in the container's namespace and is not visible from this host, so it
+// is never read here (gt-i2z9l). A container state that could not be read, and
+// a state.json that could not be, are errors that name what failed — an
+// unreadable read is not a daemon that is not running, and neither is a
+// container restarting or paused, which may hold a live daemon.
+func (c *daemonControl) containerDaemonStatus(w io.Writer, townRoot string, cfg *config.DaemonPatrolConfig) error {
+	job := c.containerJobState(cfg)(config.SupervisorContainer)
+	switch {
+	case job.Err != nil:
+		return daemonStateUnknown(w, job.StatusLine(0), fmt.Errorf("checking the daemon's container: %w", job.Err))
+	case containerStopped(job):
+		// No container of that name is the town's daemon not running, and so
+		// is one docker reports created, exited or dead: no process of its is
+		// running (containerStopped is the package's reading of that).
+		return daemonNotRunning(w, job.StatusLine(0))
+	case job.Status != "running":
+		// Restarting or paused: the container exists and may hold a live
+		// daemon, so not running would be a claim this read cannot make. Only
+		// docker's explicit running goes on to state.json, and only exit 0
+		// claims the daemon runs.
+		return daemonStateUnknown(w, job.StatusLine(0),
+			fmt.Errorf("container state: %s", job.Status))
+	}
+
+	read := c.readState
+	if read == nil {
+		read = readCutoverState
+	}
+	state, err := read(townRoot)
+	if err != nil {
+		return daemonStateUnknown(w, job.StatusLine(0), fmt.Errorf("reading state.json: %w", err))
+	}
+	// The container up is not the daemon up: state.json is where the daemon in
+	// it records that it runs, and a container whose daemon has not recorded a
+	// run yet runs none.
+	if state == nil || !state.Running {
+		return daemonNotRunning(w, job.StatusLine(0))
+	}
+
+	fmt.Fprintf(w, "%s Daemon is %s\n",
+		style.Bold.Render("●"),
+		style.Bold.Render("running"))
+	fmt.Fprintf(w, "  Town: %s\n", townRoot)
+	fmt.Fprintf(w, "  Supervised: %s\n", job.StatusLine(0))
+	if !state.StartedAt.IsZero() {
+		fmt.Fprintf(w, "  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
+	}
+	if !state.LastHeartbeat.IsZero() {
+		fmt.Fprintf(w, "  Last heartbeat: %s (#%d)\n",
+			state.LastHeartbeat.Format("15:04:05"),
+			state.HeartbeatCount)
+	}
 	return nil
 }
 
