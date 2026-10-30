@@ -452,8 +452,10 @@ const fmtDur = s => {
 // "00m", which a column of one kind of duration does not want. A positive
 // reading under a second reads "<1s" rather than a rounded zero. Null or zero
 // is a dash: a crew landing, or a record written before the reading existed
-// (gt-90wi1).
-const polecatDur = (secs, lower) => {
+// (gt-90wi1). A lower bound carries a trailing "+" (the figure may understate
+// the time) and an upper bound a leading "≤" (it was read from the bead's
+// dispatch, so it may overstate it) (gt-v7ptp).
+const polecatDur = (secs, lower, upper) => {
   if (secs == null || !(secs > 0)) return "–";
   const s = Math.round(secs);
   let out;
@@ -463,7 +465,7 @@ const polecatDur = (secs, lower) => {
     const m = Math.round(s / 60), h = Math.floor(m / 60);
     out = h + "h" + (m % 60 ? String(m % 60).padStart(2, "0") + "m" : "");
   }
-  return lower ? out + "+" : out;
+  return upper ? "≤" + out : lower ? out + "+" : out;
 };
 const age = iso => iso ? fmtDur((Date.now() - new Date(iso).getTime()) / 1000) : "–";
 // fmtMS is a span in minutes and seconds, the form the om rework table draws a
@@ -1408,7 +1410,7 @@ function landingTable(s, names, rows, waiting) {
   const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
   const tbl = el("table", "ltable");
   const hr = el("tr");
-  [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Polecat", "the time the bead's polecat seats spent hooked on it, read from the spans log; hover for each attempt, and + marks a reading that may understate the time", 1], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+  [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Polecat", "the time the bead's polecat seats spent hooked on it, read from the spans log; hover for each attempt, + marks a reading that may understate the time, and ≤ one read from the bead's dispatch, which may overstate it", 1], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
   tbl.append(hr);
   const today = new Date().toDateString();
   // No stage has run yet, so the cost columns are dashes and the wait is
@@ -1472,9 +1474,9 @@ function landingTable(s, names, rows, waiting) {
     // (gt-90wi1).
     // A crew session's landing has no polecat, so its cell says crew rather than
     // reading as a dash, which would look like missing data (gt-kmp7c).
-    const pc = el("td", "n", r.crew ? "crew" : polecatDur(r.polecat_secs, r.polecat_lower_bound));
+    const pc = el("td", "n", r.crew ? "crew" : polecatDur(r.polecat_secs, r.polecat_lower_bound, r.polecat_upper_bound));
     const pa = r.polecat_attempts || [];
-    if (pa.length) pc.title = pa.length + (pa.length === 1 ? " attempt: " : " attempts: ") + pa.map(a => a.secs > 0 ? polecatDur(a.secs, a.lower_bound) : "open").join(" + ");
+    if (pa.length) pc.title = pa.length + (pa.length === 1 ? " attempt: " : " attempts: ") + pa.map(a => a.secs > 0 ? polecatDur(a.secs, a.lower_bound, a.upper_bound) : "open").join(" + ");
     tr.append(pc);
     tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
     tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));

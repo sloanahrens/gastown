@@ -39,6 +39,12 @@ type LandingsFile struct {
 	// that could not write its own; the seat's submission stamp may pull that
 	// end earlier, never later (gt-8yk78).
 	FirstSeen func(bead, head string) (time.Time, error)
+	// SlungAt, when set, answers when the run the bead was working under at end
+	// was dispatched and the seat that dispatch named, read from the town's
+	// event log (SlungAtIn). It is the start a record falls back on when the
+	// seat wrote no start event at all, so no clock in the span log can time it
+	// (gt-v7ptp).
+	SlungAt func(bead string, end time.Time) (time.Time, string, error)
 
 	write func(*os.File, []byte) (int, error) // test seam: writes one record; nil means the file's own Write
 	now   func() time.Time                    // test seam: the landing's clock; nil means time.Now
@@ -57,6 +63,7 @@ func RigLandingsFile(townRoot, rig string) (*LandingsFile, error) {
 	return &LandingsFile{
 		Path:      filepath.Join(constants.TownRuntimePath(townRoot), "landings", rig+".jsonl"),
 		FirstSeen: FirstSeenIn(SubmissionsSeenPath(townRoot)),
+		SlungAt:   SlungAtIn(townRoot),
 	}, nil
 }
 
@@ -93,9 +100,23 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 // its turn ended sooner. A seat that already ended the attempt writes nothing
 // here (gt-8yk78).
 func (f *LandingsFile) AppendSubmitted(rec LandingRecord, seat string, submitted time.Time) error {
-	if rec.PolecatSecs == 0 && len(rec.PolecatAttempts) == 0 && !rec.PolecatLowerBound {
-		f.closeAttempt(rec.BeadID, rec.Head, seat, submitted, f.landedAt(rec))
+	if rec.PolecatSecs == 0 && len(rec.PolecatAttempts) == 0 && !rec.PolecatLowerBound && !rec.PolecatUpperBound {
+		// One read of the first-sight record serves both clocks this landing may
+		// write: the end of the seat's own attempt, and the end of the dispatch
+		// floor when the seat left no start at all (gt-v7ptp).
+		var end time.Time
+		var ok bool
+		if f.Spans != nil || f.SlungAt != nil {
+			end, ok = f.attemptEnd(rec.BeadID, rec.Head, seat, submitted, f.landedAt(rec))
+		}
+		f.closeAttempt(rec.BeadID, seat, end, ok)
 		rec.PolecatSecs, rec.PolecatAttempts, rec.PolecatLowerBound = f.PolecatTime(rec.BeadID, time.Time{})
+		// Only a log that was read and holds no start is timed from the
+		// dispatch: an unreadable log keeps the lower bound it already has,
+		// rather than trading a missing measurement for a different clock.
+		if len(rec.PolecatAttempts) == 0 && !rec.PolecatLowerBound {
+			f.fillDispatchFloor(&rec, seat, end, ok)
+		}
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
@@ -116,33 +137,28 @@ func (f *LandingsFile) landedAt(rec LandingRecord) time.Time {
 	return time.Now()
 }
 
-// closeAttempt ends seat's open attempt on beadID. The end is the earlier of the
-// seat's submission stamp, the host's first sight of the head and capped, and
-// the attempt stays open when the host never saw the submission (gt-8yk78).
-func (f *LandingsFile) closeAttempt(beadID, head, seat string, submitted, capped time.Time) {
-	// The end is the host's, not the seat's: the stamp is the seat's own word
-	// for when its turn ended, and a seat must not be able to write time into a
-	// landing it did not work, so the stamp may only pull the end earlier. With
-	// no first-sight record the host has seen no submission at all and the
-	// attempt stays open — no credit is better than the seat's word for it. A
-	// read or write that fails is logged and the caller carries on: a landing
-	// is never worth failing over the time, and an attempt left open is what
-	// leaves the reading a lower bound (gt-yxl22).
-	if f.Spans == nil || f.FirstSeen == nil || seat == "" || submitted.IsZero() || !spans.ValidBeadID(beadID) {
-		return
+// attemptEnd is the end a landing writes for a submission: the earlier of the
+// seat's submission stamp and the host's first sight of the head, capped by the
+// landing's own time. ok is false, with the reason logged once for the landing,
+// when there is no end to trust.
+//
+// The end is the host's, not the seat's: the stamp is the seat's own word for
+// when its turn ended, and a seat must not be able to write time into a landing
+// it did not work, so the stamp may only pull the end earlier. With no
+// first-sight record the host has seen no submission at all and no end is
+// written — no credit is better than the seat's word for it (gt-8yk78).
+func (f *LandingsFile) attemptEnd(beadID, head, seat string, submitted, capped time.Time) (time.Time, bool) {
+	if f.FirstSeen == nil || seat == "" || submitted.IsZero() || !spans.ValidBeadID(beadID) {
+		return time.Time{}, false
 	}
 	seen, err := f.FirstSeen(beadID, head)
 	if err != nil {
-		if f.Logf != nil {
-			f.Logf("landings file %s: no first-sight record to bound %s on %s: %v", f.Path, seat, beadID, err)
-		}
-		return
+		f.logf("landings file %s: no first-sight record to bound %s on %s: %v", f.Path, seat, beadID, err)
+		return time.Time{}, false
 	}
 	if seen.IsZero() {
-		if f.Logf != nil {
-			f.Logf("landings file %s: no first-sight record for %s, so %s's end is not written and its time stays a lower bound", f.Path, beadID, seat)
-		}
-		return
+		f.logf("landings file %s: no first-sight record for %s, so no end is written for %s", f.Path, beadID, seat)
+		return time.Time{}, false
 	}
 	end := submitted
 	if seen.Before(end) {
@@ -151,10 +167,110 @@ func (f *LandingsFile) closeAttempt(beadID, head, seat string, submitted, capped
 	if capped.Before(end) {
 		end = capped
 	}
+	return end, true
+}
+
+// closeAttempt ends seat's open attempt on beadID at end, the time the landing
+// trusts for the submission (attemptEnd). ok false means there is no such end,
+// so the attempt stays open and the reading stays a lower bound (gt-8yk78). A
+// write that fails is logged and the caller carries on: a landing is never
+// worth failing over the time (gt-yxl22).
+func (f *LandingsFile) closeAttempt(beadID, seat string, end time.Time, ok bool) {
+	if !ok || f.Spans == nil {
+		return
+	}
 	if _, err := f.Spans.EndOpen(beadID, seat, spans.ReasonDone, end); err != nil {
-		if f.Logf != nil {
-			f.Logf("landings file %s: no end for %s on %s: %v", f.Path, seat, beadID, err)
-		}
+		f.logf("landings file %s: no end for %s on %s: %v", f.Path, seat, beadID, err)
+	}
+}
+
+// fillDispatchFloor times a bead whose seat wrote no start event at all from
+// the bead's dispatch to the end the landing trusts for its submission, and
+// names that clock on the attempt (PolecatFromSling).
+//
+// The dispatch is the earliest the seat can have been given the bead, not the
+// seat's own clock: the session starts after the sling, so the interval is
+// longer than the time the seat spent on the bead. The record therefore marks
+// it an upper bound. Why the start went missing is not in the tree — the one
+// writer lets a failed start pass as a warning (gt-v7ptp) — so the record says
+// what it timed from instead.
+//
+// Nothing is written without both ends: attemptEnd has already logged a
+// submission the host never saw (gt-8yk78), a bead the event log never
+// dispatched has no start, and a sling that names another seat is not this
+// record's clock. A read that fails is logged and costs the time, as an
+// unreadable span log does (gt-yxl22).
+func (f *LandingsFile) fillDispatchFloor(rec *LandingRecord, seat string, end time.Time, ok bool) {
+	if f.SlungAt == nil || seat == "" || !ok || !spans.ValidBeadID(rec.BeadID) {
+		return
+	}
+	start, slungSeat, err := f.SlungAt(rec.BeadID, end)
+	if err != nil {
+		f.logf("landings file %s: no dispatch floor for %s on %s: %v", f.Path, seat, rec.BeadID, err)
+		return
+	}
+	if start.IsZero() {
+		f.logf("landings file %s: %s wrote no span start for %s and the event log holds no sling for it, so its record carries no polecat time",
+			f.Path, seat, rec.BeadID)
+		return
+	}
+	if slungSeat == "" {
+		f.logf("landings file %s: the sling for %s names no seat, so its interval is not %s's time",
+			f.Path, rec.BeadID, seat)
+		return
+	}
+	if !sameSeat(slungSeat, seat) {
+		f.logf("landings file %s: %s's run was dispatched to %q, not to %s, so that interval is not its time",
+			f.Path, rec.BeadID, slungSeat, seat)
+		return
+	}
+	if !start.Before(end) {
+		f.logf("landings file %s: no dispatch floor for %s on %s: the sling at %s is not before the end at %s",
+			f.Path, seat, rec.BeadID, start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339))
+		return
+	}
+	secs := end.Sub(start).Seconds()
+	rec.PolecatSecs = secs
+	rec.PolecatUpperBound = true
+	rec.PolecatAttempts = []PolecatAttempt{{Seat: seat, Secs: secs, UpperBound: true, From: PolecatFromSling}}
+	f.logf("landings file %s: %s wrote no span start for %s; its polecat time is the dispatch interval from the sling at %s, an upper bound",
+		f.Path, seat, rec.BeadID, start.UTC().Format(time.RFC3339))
+}
+
+// sameSeat reports whether two spellings name the same seat: the event log
+// writes "rig/polecats/name" and a landing's branch gives "rig/name". A name
+// that cannot be read as a rig and a seat is never a match, so an unreadable
+// one cannot confirm that a dispatch is a record's clock.
+func sameSeat(a, b string) bool {
+	ra, na, ok := splitSeat(a)
+	if !ok {
+		return false
+	}
+	rb, nb, ok := splitSeat(b)
+	return ok && strings.EqualFold(ra, rb) && strings.EqualFold(na, nb)
+}
+
+// splitSeat reads a seat's rig and its last component: "gastown/nux" and
+// "gastown/polecats/nux" both read as rig "gastown", seat "nux".
+func splitSeat(s string) (rig, seat string, ok bool) {
+	rig, rest, found := strings.Cut(s, "/")
+	if !found || rig == "" || rest == "" {
+		return "", "", false
+	}
+	seat = rest[strings.LastIndex(rest, "/")+1:]
+	if seat == "" || seat == "polecats" || seat == "crew" {
+		return "", "", false
+	}
+	return rig, seat, true
+}
+
+// logf passes one line to Logf, and nothing when no logger is set: a reader
+// that builds its own landings file per poll leaves Logf nil rather than repeat
+// the same warning every few seconds (LandingsFile.Logf). The record is written
+// either way, so a nil Logf costs the reason and not the landing.
+func (f *LandingsFile) logf(format string, args ...any) {
+	if f.Logf != nil {
+		f.Logf(format, args...)
 	}
 }
 

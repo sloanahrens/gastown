@@ -3,6 +3,7 @@ package events
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,5 +95,61 @@ func TestReadSkipsMalformedLines(t *testing.T) {
 	}
 	if got[0].Type != TypeWake || got[1].Type != TypeKill {
 		t.Errorf("types = %q, %q; want %q, %q", got[0].Type, got[1].Type, TypeWake, TypeKill)
+	}
+}
+
+// TestReadTailReadsAtMostItsBound: a reader that asks for a bounded tail gets
+// the newest events and is told the file was not read whole, so it cannot take
+// a window that begins inside the log for the log (gt-v7ptp).
+func TestReadTailReadsAtMostItsBound(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, reason := range []string{"first", "second", "third"} {
+		if err := LogFeedTo(townRoot, TypeWake, "gastown/polecats/shale", WakePayload("gastown", reason)); err != nil {
+			t.Fatalf("LogFeedTo %s: %v", reason, err)
+		}
+	}
+	path := filepath.Join(townRoot, EventsFile)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	// Whole file within the bound: every event, and whole true.
+	got, whole, err := ReadTail(townRoot, info.Size())
+	if err != nil {
+		t.Fatalf("ReadTail whole: %v", err)
+	}
+	if !whole || len(got) != 3 {
+		t.Fatalf("ReadTail whole = %d events, whole %v; want 3 and true", len(got), whole)
+	}
+
+	// A window over the last line alone: the newest event, and whole false.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	lastLine := int64(len(data) - strings.LastIndex(string(data[:len(data)-1]), "\n") - 1)
+	got, whole, err = ReadTail(townRoot, lastLine)
+	if err != nil {
+		t.Fatalf("ReadTail bounded: %v", err)
+	}
+	if whole {
+		t.Error("whole = true for a read that started inside the file")
+	}
+	if len(got) != 1 || got[0].Type != TypeWake {
+		t.Fatalf("ReadTail bounded = %d events (%v), want the newest one", len(got), got)
+	}
+	if context, _ := got[0].Payload["context"].(string); context != "third" {
+		t.Errorf("newest event context = %q, want third", context)
+	}
+
+	// A log no larger than the bound is still read whole.
+	got, whole, err = ReadTail(townRoot, info.Size()+1)
+	if err != nil {
+		t.Fatalf("ReadTail above the file's size: %v", err)
+	}
+	if !whole || len(got) != 3 {
+		t.Errorf("ReadTail = %d events, whole %v; want 3 and true", len(got), whole)
 	}
 }
