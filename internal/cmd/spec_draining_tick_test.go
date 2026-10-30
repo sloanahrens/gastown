@@ -5,7 +5,13 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // drainingTickRoster is the roster read of the gt-97ppg tick: capable is a live
@@ -28,12 +34,12 @@ func drainingTickHeld() []poolSession {
 	}
 }
 
-// TestSpecTickTownTotalSkipsOnceAcrossCandidates drives a tick over the golden
-// board, with a town of three where the roster reads two and the sling-side
-// read holds three. The occupancy is read exactly once for the whole tick, not
-// once per candidate, and every candidate that reaches a seat is skipped on the
-// town total with the exact line; nothing is slung.
-func TestSpecTickTownTotalSkipsOnceAcrossCandidates(t *testing.T) {
+// TestSpecTickSlingSideReadsOnceAndSkipsOnTownTotal drives a tick over the
+// golden board, with a town of three where the roster reads two and the
+// sling-side read holds three. The occupancy is read exactly once for the whole
+// tick, not once per candidate, and every candidate that reaches a seat is
+// skipped on the town total with the exact line; nothing is slung.
+func TestSpecTickSlingSideReadsOnceAndSkipsOnTownTotal(t *testing.T) {
 	t.Parallel()
 	f := specGoldenTown()
 	f.maxTotal = 3
@@ -141,5 +147,122 @@ func TestSpecTickRosterFailsClosed(t *testing.T) {
 				t.Fatalf("report errors = %q, want the line %q", r.Errors, tc.want)
 			}
 		})
+	}
+}
+
+// tickListing is the tmux listing one tick reads twice: the seat snapshot lists
+// first and the sling-side occupancy lists after it. joins are the sessions
+// that spawn between the two reads, and failAt is the listing call that fails
+// (0 for none).
+type tickListing struct {
+	*fakeLister
+	joins  map[string]map[string]string
+	reads  int
+	failAt int
+}
+
+func (l *tickListing) ListSessions() ([]string, error) {
+	l.reads++
+	if l.reads == l.failAt {
+		return nil, errors.New("tmux down")
+	}
+	if l.reads == 2 {
+		for name, env := range l.joins {
+			l.sessions[name] = env
+		}
+	}
+	return l.fakeLister.ListSessions()
+}
+
+// TestSpecTickRosterReadsSlingSideOnceAndCountsTheSpawn runs the production
+// roster wiring (specDispatchRoster) over fakes. One tick lists the seats once and
+// reads the sling-side occupancy once, and a session that spawned between the
+// two reads counts as draining, as the sling counts it. A failed occupancy read
+// fails the roster, so the tick dispatches nothing on it.
+func TestSpecTickRosterReadsSlingSideOnceAndCountsTheSpawn(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	db := beadsfake.New()
+	ts := &config.TownSettings{PolecatPool: seatPool("claude-sonnet", 5)}
+	store := func(string) beads.Client { return db }
+	capable := map[string]string{"GT_ROLE": "gastown/polecats/capable", "GT_AGENT": "claude-sonnet"}
+	spawn := map[string]string{"GT_ROLE": "gastown/polecats/spawn", "GT_AGENT": "claude-sonnet"}
+	cases := []struct {
+		name         string
+		failAt       int
+		wantDraining int
+		wantErr      string
+	}{
+		{name: "the spawn between the two reads is draining", wantDraining: 1},
+		{name: "a failed occupancy read fails the roster", failAt: 2, wantErr: "counting the seats a sling will see"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lister := &tickListing{
+				fakeLister: &fakeLister{
+					sessions: map[string]map[string]string{"gt-capable": capable},
+					created:  map[string]time.Time{"gt-capable": time.Now().Add(-time.Hour)},
+				},
+				joins:  map[string]map[string]string{"gt-spawn": spawn},
+				failAt: tc.failAt,
+			}
+			var snap atomic.Pointer[poolSeatSnapshot]
+			roster := specDispatchRoster(newSpecTickReads(), town, ts, func() sessionLister { return lister }, store, &snap)
+			got, err := roster()
+
+			if tc.failAt == 0 && lister.reads != 2 {
+				t.Fatalf("the tick listed the sessions %d times, want 2: the seat snapshot and the sling-side occupancy once each", lister.reads)
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("roster error = %v, want it to contain %q", err, tc.wantErr)
+				}
+				if snap.Load() == nil {
+					t.Fatal("the seat snapshot is not kept for the slings when the occupancy read fails")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("roster: %v", err)
+			}
+			if got.Live["claude-sonnet"] != 1 {
+				t.Fatalf("roster live = %d, want 1 (gt-capable)", got.Live["claude-sonnet"])
+			}
+			if got.Draining["claude-sonnet"] != tc.wantDraining {
+				t.Fatalf("draining = %d, want %d: gt-spawn is counted by the sling and not the roster", got.Draining["claude-sonnet"], tc.wantDraining)
+			}
+		})
+	}
+}
+
+// TestSpecTickFailsClosedOnItsOccupancyRead runs the production roster wiring
+// through the tick's cycle: when the sling-side read fails, the tick logs the
+// fail-closed line and starts no sling, on the golden board that would
+// otherwise dispatch.
+func TestSpecTickFailsClosedOnItsOccupancyRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	ts := &config.TownSettings{PolecatPool: seatPool("claude-sonnet", 5)}
+	lister := &tickListing{
+		fakeLister: &fakeLister{sessions: map[string]map[string]string{
+			"gt-capable": {"GT_ROLE": "gastown/polecats/capable", "GT_AGENT": "claude-sonnet"},
+		}},
+		failAt: 2,
+	}
+	var snap atomic.Pointer[poolSeatSnapshot]
+	f := specGoldenTown()
+	env := f.env()
+	env.Roster = specDispatchRoster(newSpecTickReads(), town, ts, func() sessionLister { return lister }, func(string) beads.Client { return beadsfake.New() }, &snap)
+	r := runSpecDispatchCycle(env)
+
+	if len(f.slingRecords) != 0 {
+		t.Fatalf("slung %d bead(s) on an unreadable occupancy, want none", len(f.slingRecords))
+	}
+	const want = "roster unreadable, not dispatching: counting the seats a sling will see: tmux down"
+	if len(r.Errors) != 1 || r.Errors[0] != want {
+		t.Fatalf("report errors = %q, want exactly %q", r.Errors, want)
 	}
 }

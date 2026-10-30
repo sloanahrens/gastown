@@ -125,3 +125,26 @@ func TestSpecDrainingSessions(t *testing.T) {
 		})
 	}
 }
+
+// TestSpecSlingSideOccupancyHoldsNoClaim pins why a running sling's claim never
+// reaches the draining term: the sling-side occupancy holds no seat claim, even
+// when the roster read holds one. The roster counts the claim, and the in-flight
+// list counts the running sling once through specLiveWithInFlight, so a claim
+// the occupancy held would be the double count the review named (gt-97ppg).
+func TestSpecSlingSideOccupancyHoldsNoClaim(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	seats := poolSeatSnapshot{
+		sessions: []poolSession{{name: "pool-claim/c1", agent: "deepseek-flash"}},
+		released: map[string]bool{},
+		at:       at.Add(-time.Minute),
+	}
+	lister := &fakeLister{sessions: map[string]map[string]string{}}
+	held, err := snapshotOccupied(seats, func() sessionLister { return lister }, nil, func() time.Time { return at })()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(held) != 0 {
+		t.Fatalf("sling-side occupancy = %+v, want no entry: the claim is in the roster and the in-flight list, not the occupancy", held)
+	}
+}
