@@ -72,10 +72,10 @@ type Builder struct {
 	// the ones that would change what is compiled.
 	Environ []string
 	// Out is the absolute directory the binaries are written to, and the claude
-	// CLI FetchClaudeCLI places there. git and go
-	// resolve a relative path against the worktree a build runs in, not the
-	// caller's directory, so BuildBinaries refuses a relative Out. Out must
-	// already exist: the staging directory is made inside it.
+	// CLI FetchClaudeCLI places there. Git and go resolve a relative path against
+	// the worktree a build runs in, not the caller's directory, so BuildBinaries
+	// refuses a relative Out. Out must already exist: the staging directory is
+	// made inside it.
 	Out string
 	// GTSrc is the gt checkout gt is built from, at rev. The build runs in a clean
 	// worktree of rev, so uncommitted changes in GTSrc never reach the binary.
@@ -300,8 +300,12 @@ var claudeSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // an error and leaves no file in b.Out.
 func (b Builder) FetchClaudeCLI(ctx context.Context) (string, error) {
 	version := templates.ClaudeCLIVersion
-	return b.fetchClaudeCLI(ctx, fmt.Sprintf(templates.ClaudeCLIURLFormat, version), version, templates.ClaudeCLISHA256)
+	return b.fetchClaudeCLI(ctx, fmt.Sprintf(templates.ClaudeCLIURLFormat, version), version, templates.ClaudeCLISHA256, claudeCLIMaxBytes)
 }
+
+// claudeCLIMaxBytes bounds the claude CLI download. The pinned binary is far
+// smaller, so a stream over the bound is refused rather than written to the disk.
+const claudeCLIMaxBytes = 1 << 30
 
 // claudeTemp is the temporary file the download is written to. *os.File is one;
 // a test stands in a file whose Close fails, to drive that failure.
@@ -320,15 +324,15 @@ func createClaudeTemp(dir, pattern string) (claudeTemp, error) {
 	return f, nil
 }
 
-// fetchClaudeCLI is FetchClaudeCLI with the URL and the pin injected, so a test
-// can hand it bytes whose sha256 it has computed.
-func (b Builder) fetchClaudeCLI(ctx context.Context, url, version, want string) (string, error) {
-	return b.fetchClaudeCLIWith(ctx, url, version, want, createClaudeTemp)
+// fetchClaudeCLI is FetchClaudeCLI with the URL, the pin and the size bound
+// injected, so a test can hand it bytes whose sha256 it has computed.
+func (b Builder) fetchClaudeCLI(ctx context.Context, url, version, want string, max int64) (string, error) {
+	return b.fetchClaudeCLIWith(ctx, url, version, want, max, createClaudeTemp)
 }
 
 // fetchClaudeCLIWith is fetchClaudeCLI with the temporary file's source injected,
 // so each step's failure can be driven.
-func (b Builder) fetchClaudeCLIWith(ctx context.Context, url, version, want string, create func(dir, pattern string) (claudeTemp, error)) (string, error) {
+func (b Builder) fetchClaudeCLIWith(ctx context.Context, url, version, want string, max int64, create func(dir, pattern string) (claudeTemp, error)) (string, error) {
 	if b.Fetch == nil {
 		return "", errors.New("daemonimage: no fetcher to download the claude CLI with")
 	}
@@ -359,9 +363,16 @@ func (b Builder) fetchClaudeCLIWith(ctx context.Context, url, version, want stri
 		}
 	}()
 	sum := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmp, sum), body); err != nil {
+	// The copy reads at most max+1 bytes: a stream that reaches max+1 is over the
+	// bound, and nothing past max+1 is read.
+	n, err := io.Copy(io.MultiWriter(tmp, sum), io.LimitReader(body, max+1))
+	if err != nil {
 		_ = tmp.Close()
 		return "", fmt.Errorf("daemonimage: cannot download the claude CLI from %s: %w", url, err)
+	}
+	if n > max {
+		_ = tmp.Close()
+		return "", fmt.Errorf("daemonimage: the claude CLI from %s is over the %d-byte bound; nothing was written to %s", url, max, b.Out)
 	}
 	if err := tmp.Close(); err != nil {
 		return "", fmt.Errorf("daemonimage: cannot write the claude CLI in %s: %w", b.Out, err)
