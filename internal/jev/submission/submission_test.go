@@ -216,6 +216,253 @@ func TestJevSubmissionPassLogsOneLinePerNewSubmission(t *testing.T) {
 	}
 }
 
+// waitingEntry is the submission as its READY TO LAND block lists it, for a
+// bead the landing worker has not written a first-sight record for yet.
+func waitingEntry(t *testing.T, issue *beads.Issue) Entry {
+	t.Helper()
+	w, ok := land.ParseReadyNote(issue.Notes)
+	if !ok {
+		t.Fatalf("%s carries no READY TO LAND block", issue.ID)
+	}
+	w.BeadID = issue.ID
+	return Entry{Issue: issue, Work: w, Seen: w.Submitted}
+}
+
+// recordEntry is the same submission as its first-sight record lists it, first
+// seen at seen, with the commits the landing worker read.
+func recordEntry(issue *beads.Issue, head string, seen time.Time) Entry {
+	return Entry{
+		Issue: issue,
+		Work: land.Work{
+			BeadID: issue.ID, Rig: RigName, Branch: "polecat/opal/" + issue.ID,
+			Head: head, Target: "main", Submitted: seen.Add(-time.Minute),
+		},
+		Seen:     seen,
+		Subjects: []string{"fix: a thing (" + issue.ID + ")"},
+		Numstat:  "1\t0\tinternal/x.go\n",
+	}
+}
+
+// logLine appends one submission-log line for bead at head at a question
+// version, as an earlier pass would have.
+func (r *rig) logLine(t *testing.T, bead, head string, version int) {
+	t.Helper()
+	if err := battery.Append(r.pass.LogPath, Line{TS: t0, Bead: bead, Head: head, QuestionVersion: version}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A submission asked from its waiting bead is not asked again when the landing
+// worker's first-sight record for it reaches the next pass: the record is the
+// same bead at the same head, listed under a later seen time (gt-v419b).
+func TestJevSubmissionPassDoesNotAskTwiceForOneSubmission(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	issue := r.ready("gt-a", time.Minute)
+
+	// The landing worker has not reached the bead yet, so the pass lists it
+	// from its READY TO LAND block.
+	r.submissions.entries = []Entry{waitingEntry(t, issue)}
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Asked != 1 || sum.Repeated != 0 {
+		t.Fatalf("first pass = %+v, want the waiting bead asked", sum)
+	}
+
+	// The record the landing worker wrote afterwards holds the same submission
+	// (same bead, head and submitted stamp) and is seen past the cursor, so it
+	// reaches this pass as a new submission.
+	rec := waitingEntry(t, issue)
+	rec.Seen = t0.Add(6 * time.Minute)
+	rec.Subjects = []string{"fix: do the thing (gt-a)"}
+	rec.Numstat = "10\t2\tinternal/x.go\n"
+	r.submissions.entries = []Entry{rec}
+	sum, err = r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Asked != 0 || sum.Repeated != 1 {
+		t.Fatalf("second pass = %+v, want the record passed over as repeated", sum)
+	}
+	if len(r.asker.states) != 1 {
+		t.Errorf("Jev was asked %d times, want once", len(r.asker.states))
+	}
+	lines := readLines(t, r.pass.LogPath)
+	if len(lines) != 1 || lines[0].Bead != "gt-a" || lines[0].Head != "head-gt-a" {
+		t.Fatalf("log lines = %+v, want one line for gt-a at head-gt-a", lines)
+	}
+}
+
+// A line at the current question version keeps the pass from asking that bead
+// at that head again; the same bead at a new head is a new submission and is
+// asked, and a line at an older question version does not block.
+func TestJevSubmissionRepeatedSubmissionIsSkipped(t *testing.T) {
+	t.Parallel()
+	t.Run("the same head at the current version is skipped", func(t *testing.T) {
+		t.Parallel()
+		r := newRig(t)
+		issue := r.ready("gt-a", time.Minute)
+		r.logLine(t, "gt-a", "head-gt-a", Version)
+		r.submissions.entries = []Entry{
+			recordEntry(issue, "head-gt-a", t0.Add(2*time.Minute)),
+			recordEntry(issue, "head-gt-a2", t0.Add(3*time.Minute)),
+		}
+
+		sum, err := r.pass.Run(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sum.Asked != 1 || sum.Repeated != 1 {
+			t.Fatalf("summary = %+v, want the logged head repeated and the new head asked", sum)
+		}
+		lines := readLines(t, r.pass.LogPath)
+		if len(lines) != 2 || lines[1].Head != "head-gt-a2" {
+			t.Fatalf("log lines = %+v, want the seeded line then head-gt-a2", lines)
+		}
+	})
+
+	t.Run("a line at an older version does not block", func(t *testing.T) {
+		t.Parallel()
+		r := newRig(t)
+		issue := r.ready("gt-b", time.Minute)
+		r.logLine(t, "gt-b", "head-gt-b", Version-1)
+		r.submissions.entries = []Entry{recordEntry(issue, "head-gt-b", t0.Add(2*time.Minute))}
+
+		sum, err := r.pass.Run(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sum.Asked != 1 || sum.Repeated != 0 {
+			t.Fatalf("summary = %+v, want the submission asked under the current version", sum)
+		}
+		lines := readLines(t, r.pass.LogPath)
+		if len(lines) != 2 || lines[1].Head != "head-gt-b" {
+			t.Fatalf("log lines = %+v, want the seeded line then head-gt-b", lines)
+		}
+	})
+}
+
+// A pass that cannot read today's spend stops before it asks, and the cursor
+// stays where it was.
+func TestJevSubmissionSpendReadErrorStopsThePass(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.submissions.issues = []*beads.Issue{r.ready("gt-a", time.Minute)}
+	r.allows = func() (bool, error) { return false, errors.New("ledger unreadable") }
+
+	sum, err := r.pass.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "reading today's spend") {
+		t.Fatalf("err = %v, want the spend read named", err)
+	}
+	if sum.Asked != 0 || len(r.asker.states) != 0 {
+		t.Errorf("a pass with no spend reading asked %d submissions", sum.Asked)
+	}
+	cur, ok, err := battery.ReadCursor(r.pass.CursorPath)
+	if err != nil || !ok || !cur.Time.Equal(t0) {
+		t.Errorf("cursor = %+v ok=%v err=%v, want it left at t0", cur, ok, err)
+	}
+}
+
+// A failed call that is not an unusable response stops the pass, so the
+// submission waits for the next pass rather than passing for an answer.
+func TestJevSubmissionCallFailureStopsThePass(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.submissions.issues = []*beads.Issue{r.ready("gt-a", time.Minute), r.ready("gt-b", 2*time.Minute)}
+	r.asker.errs = []error{errors.New("connection reset")}
+
+	if _, err := r.pass.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("err = %v, want the call's failure returned", err)
+	}
+	if _, statErr := os.Stat(r.pass.LogPath); !os.IsNotExist(statErr) {
+		t.Errorf("a pass stopped by a failed call wrote a log line: %v", statErr)
+	}
+	cur, ok, _ := battery.ReadCursor(r.pass.CursorPath)
+	if !ok || !cur.Time.Equal(t0) {
+		t.Errorf("cursor = %+v ok=%v, want it left at t0 so the next pass asks gt-a again", cur, ok)
+	}
+}
+
+// A log the pass cannot append to stops it with the cursor unmoved, so a
+// submission whose answer was never written is asked again rather than
+// missing from the log that scores it.
+func TestJevSubmissionAppendFailureStopsThePass(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	// The log is a link into a directory that does not exist: reading it reads
+	// as a missing log, and the append cannot create the file behind it.
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone", "submission.jsonl"), r.pass.LogPath); err != nil {
+		t.Fatal(err)
+	}
+	r.submissions.issues = []*beads.Issue{r.ready("gt-a", time.Minute)}
+
+	if _, err := r.pass.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "creating the log") {
+		t.Fatalf("err = %v, want the failed append returned", err)
+	}
+	cur, ok, _ := battery.ReadCursor(r.pass.CursorPath)
+	if !ok || !cur.Time.Equal(t0) {
+		t.Errorf("cursor = %+v ok=%v, want it left at t0 so the next pass asks gt-a again", cur, ok)
+	}
+}
+
+// A log the pass cannot read stops it before it asks anything: without the
+// lines already there, the pass cannot tell a submission it has asked from a
+// new one, so asking could repeat a whole pass's worth of calls.
+func TestJevSubmissionUnreadableLogStopsThePass(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	// A directory where the log belongs opens, and then fails to read.
+	if err := os.Mkdir(r.pass.LogPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r.submissions.issues = []*beads.Issue{r.ready("gt-a", time.Minute)}
+
+	sum, err := r.pass.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "reading the submission log") {
+		t.Fatalf("err = %v, want the unreadable log named", err)
+	}
+	if sum.Asked != 0 || len(r.asker.states) != 0 {
+		t.Errorf("a pass with no readable log asked %d submissions", sum.Asked)
+	}
+	cur, ok, err := battery.ReadCursor(r.pass.CursorPath)
+	if err != nil || !ok || !cur.Time.Equal(t0) {
+		t.Errorf("cursor = %+v ok=%v err=%v, want it left at t0", cur, ok, err)
+	}
+}
+
+// The summary counts a submission the log already holds apart from one the
+// pass could not read, so the daemon line reports what each cost.
+func TestJevSubmissionSummaryCountsRepeated(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	old := r.ready("gt-old", time.Minute)
+	bad := r.ready("gt-bad", 2*time.Minute)
+	fresh := r.ready("gt-new", 3*time.Minute)
+	r.logLine(t, "gt-old", "head-gt-old", Version)
+	r.git.err = errors.New("bad object")
+	badEntry := recordEntry(bad, "head-gt-bad", t0.Add(3*time.Minute))
+	badEntry.Subjects = nil
+	r.submissions.entries = []Entry{
+		recordEntry(old, "head-gt-old", t0.Add(2*time.Minute)),
+		badEntry,
+		recordEntry(fresh, "head-gt-new", t0.Add(4*time.Minute)),
+	}
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Asked != 1 || sum.Skipped != 1 || sum.Repeated != 1 {
+		t.Fatalf("summary = %+v, want 1 asked, 1 skipped and 1 repeated", sum)
+	}
+	lines := readLines(t, r.pass.LogPath)
+	if len(lines) != 2 || lines[1].Bead != "gt-new" {
+		t.Fatalf("log lines = %+v, want the seeded line then gt-new", lines)
+	}
+}
+
 // The line holds exactly the documented keys, with the submission's own
 // fields, the model the API returned and the question version.
 func TestJevSubmissionLineShape(t *testing.T) {

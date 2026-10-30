@@ -369,6 +369,36 @@ func TestJevSubmissionRunReportsTheSubmissionsAsked(t *testing.T) {
 	}
 }
 
+// A submission the log already holds a line for at the current question
+// version is passed over rather than asked twice, and the pass's line says how
+// many it passed over.
+func TestJevSubmissionRunReportsRepeatedSubmissions(t *testing.T) {
+	t.Parallel()
+	r := newJevSubmissionRig(t)
+	cursor := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	r.seedCursor(t, cursor)
+	r.pass.Submissions = stubSubmissions{issues: []*beads.Issue{
+		submitted("gt-new", time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)),
+	}}
+
+	r.d.runJevSubmission()
+	// The same submission reaches a second pass, as it does when a later
+	// first-sight record of it falls past the cursor.
+	r.seedCursor(t, cursor)
+	r.d.runJevSubmission()
+
+	if r.asker.n != 1 {
+		t.Errorf("Jev was asked %d times, want once", r.asker.n)
+	}
+	if !strings.Contains(r.logs.String(), "repeated 1") {
+		t.Errorf("log = %q, want the repeated count", r.logs)
+	}
+	lines, err := submission.ReadRecent(r.pass.LogPath, 5)
+	if err != nil || len(lines) != 1 {
+		t.Errorf("log lines = %+v, %v, want one", lines, err)
+	}
+}
+
 // When the cap check says the day's spend is used up, the pass asks nothing,
 // logs nothing and says the cap was reached; the submissions wait for a later
 // pass.

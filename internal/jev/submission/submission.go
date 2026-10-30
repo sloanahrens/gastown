@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -137,6 +138,12 @@ type Summary struct {
 	// judge a change nobody described, so no line is written, and one such
 	// submission does not hold up the ones behind it.
 	Skipped int
+	// Repeated is the number of entries passed over because the log already
+	// held a line for their bead and head at the current question version. One
+	// submission reaches a pass twice when it is asked from its waiting bead
+	// before the landing worker has written its first-sight record, and the
+	// record is listed again by a later pass (gt-v419b).
+	Repeated int
 	// CapReached is true when the pass stopped because the day's cap was
 	// spent. The submissions it did not reach wait for the next pass.
 	CapReached bool
@@ -152,9 +159,12 @@ var ErrFetch = errors.New("the bare clone could not be fetched")
 
 // Run does one pass. Entries are taken oldest first, and each is logged and the
 // cursor advanced before the next, so a pass stopped partway never asks about
-// a submission twice. An entry whose Ask fails for any reason but an unusable
-// response stops the pass with that error and is asked again by the next one.
-// Run returns ErrBusy when another pass holds the run lock.
+// a submission twice. An entry the log already holds a line for at the current
+// question version is passed over instead of asked, and counted as Repeated: a
+// submission listed under two seen times is asked once (gt-v419b). An entry
+// whose Ask fails for any reason but an unusable response stops the pass with
+// that error and is asked again by the next one. Run returns ErrBusy when
+// another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -176,6 +186,10 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return sum, fmt.Errorf("listing submissions since %s: %w", cur.Time.Format(time.RFC3339), err)
 	}
+	asked, err := askedIn(p.LogPath)
+	if err != nil {
+		return sum, fmt.Errorf("reading the submission log: %w", err)
+	}
 	synced := false
 	fetch := func(ctx context.Context) error {
 		if synced {
@@ -191,34 +205,58 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
 		}
-		allowed, err := p.Allows()
-		if err != nil {
-			return sum, fmt.Errorf("reading today's spend: %w", err)
-		}
-		if !allowed {
-			sum.CapReached = true
-			break
-		}
-		line, err := p.ask(ctx, e, fetch)
-		switch {
-		case errors.Is(err, errUnreadable), errors.Is(err, errNoCommits), errors.Is(err, jev.ErrBadResponse):
-			if p.Warnings != nil {
-				fmt.Fprintf(p.Warnings, "jev submission: skipping %s at %s: %v\n", e.Issue.ID, e.Work.Head, err)
+		key := land.SubmissionKey(e.Issue.ID, e.Work.Head)
+		if asked[key] {
+			sum.Repeated++
+		} else {
+			allowed, err := p.Allows()
+			if err != nil {
+				return sum, fmt.Errorf("reading today's spend: %w", err)
 			}
-			sum.Skipped++
-		case err != nil:
-			return sum, err
-		default:
-			if err := battery.Append(p.LogPath, line); err != nil {
+			if !allowed {
+				sum.CapReached = true
+				break
+			}
+			line, err := p.ask(ctx, e, fetch)
+			switch {
+			case errors.Is(err, errUnreadable), errors.Is(err, errNoCommits), errors.Is(err, jev.ErrBadResponse):
+				if p.Warnings != nil {
+					fmt.Fprintf(p.Warnings, "jev submission: skipping %s at %s: %v\n", e.Issue.ID, e.Work.Head, err)
+				}
+				sum.Skipped++
+			case err != nil:
 				return sum, err
+			default:
+				if err := battery.Append(p.LogPath, line); err != nil {
+					return sum, err
+				}
+				sum.Asked++
+				asked[key] = true
 			}
-			sum.Asked++
 		}
 		if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: e.Seen, ID: e.Issue.ID}); err != nil {
 			return sum, err
 		}
 	}
 	return sum, nil
+}
+
+// askedIn returns the bead-and-head keys the log at path holds a line for at
+// the current question version. A line from an older version answered a
+// different question set, so it does not name this battery's ask and does not
+// count.
+func askedIn(path string) (map[string]bool, error) {
+	lines, err := ReadRecent(path, math.MaxInt)
+	if err != nil {
+		return nil, err
+	}
+	keys := make(map[string]bool, len(lines))
+	for _, l := range lines {
+		if l.QuestionVersion == Version {
+			keys[land.SubmissionKey(l.Bead, l.Head)] = true
+		}
+	}
+	return keys, nil
 }
 
 // pending keeps the entries after the cursor, oldest first, and drops an entry

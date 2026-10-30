@@ -92,9 +92,9 @@ func runJevSubmissionPass(out, errw io.Writer, townRoot string) error {
 	case sum.Started:
 		fmt.Fprintln(out, "jev submission: first pass; cursor set to now, no submissions asked")
 	case sum.CapReached:
-		fmt.Fprintf(out, "jev submission: asked %d submissions; the daily cap was reached, the rest wait for the next pass\n", sum.Asked)
+		fmt.Fprintf(out, "jev submission: asked %d submissions, repeated %d; the daily cap was reached, the rest wait for the next pass\n", sum.Asked, sum.Repeated)
 	default:
-		fmt.Fprintf(out, "jev submission: asked %d submissions, skipped %d\n", sum.Asked, sum.Skipped)
+		fmt.Fprintf(out, "jev submission: asked %d submissions, skipped %d, repeated %d\n", sum.Asked, sum.Skipped, sum.Repeated)
 	}
 	return nil
 }
