@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/imagebuild"
+	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
 const (
@@ -50,6 +51,15 @@ const (
 	// is told: an image the registry does not hold must not let the install
 	// through, while a detached rebuild has nothing left to fail.
 	imageFailClosedEnv = "POLECAT_IMAGE_FAIL_CLOSED"
+
+	// imageSlingBound is how long a build before the swap waits for an in-flight
+	// gt sling to finish before the install fails. The dispatcher slings most
+	// minutes, so a build that fails on the first deferral fails most installs
+	// (gt-rfwr4).
+	imageSlingBound = 3 * time.Minute
+
+	// imageSlingPoll is how often that wait reads whether a sling still runs.
+	imageSlingPoll = 15 * time.Second
 )
 
 // wholeSeconds is an alarm that leaves the build a bound: a whole number of
@@ -158,6 +168,12 @@ func (r *Run) imageStep(detached bool) Exit {
 		r.C.Log("polecat image: no build output at " + bin + ", so the image was not built")
 		return r.imageNotBuilt(detached, "no build output at "+bin)
 	}
+	// A build before the swap is the one that fails the install, so it waits out
+	// a sling in flight rather than failing on the first deferral (gt-rfwr4).
+	// The detached build cannot fail the install and defers on its own.
+	if !detached && !r.waitForSling() {
+		return r.imageFail()
+	}
 	alarm := r.imageAlarm()
 	logPath := r.imageLog()
 	if logPath != os.DevNull {
@@ -204,6 +220,51 @@ func (r *Run) imageStep(detached bool) Exit {
 	}
 	r.tailImageLog(logPath)
 	return r.imageFail()
+}
+
+// waitForSling reports whether the build before the swap may run now. It reads
+// the sling deferral first and returns at once when none is in flight, so a
+// build that is not deferred never polls. Otherwise it reads again every
+// imageSlingPoll until the deferral clears or imageSlingBound has passed; past
+// the bound it logs why and reports false, and the caller fails the install
+// with the image's own error. The reading is the same one the plugin defers
+// on (polecatimage.SlingDeferReason), so the build does not start into a sling
+// the plugin would refuse (gt-rfwr4).
+func (r *Run) waitForSling() bool {
+	reason := r.slingDeferral()
+	if reason == "" {
+		return true
+	}
+	r.C.Log("polecat image: " + reason + "; waiting up to " + imageSlingBound.String() +
+		" for it to finish before the build")
+	for waited := time.Duration(0); waited < imageSlingBound; waited += imageSlingPoll {
+		r.imageSleep(imageSlingPoll)
+		if reason = r.slingDeferral(); reason == "" {
+			r.C.Log("polecat image: no sling is running, so the build goes ahead")
+			return true
+		}
+	}
+	r.C.Log("polecat image: " + reason + " after " + imageSlingBound.String() + "; the build is not run")
+	return false
+}
+
+// slingDeferral is the reason a gt sling defers the build, "" when none runs.
+// Without the seam it asks pgrep, and a pgrep that cannot answer defers too.
+func (r *Run) slingDeferral() string {
+	if r.SlingDeferral != nil {
+		return r.SlingDeferral()
+	}
+	_, _, code := r.Cmd.run("", "pgrep", "-f", polecatimage.SlingPattern)
+	return polecatimage.SlingDeferReason(code, "pgrep")
+}
+
+// imageSleep waits d on the clock the run was given, or the real one.
+func (r *Run) imageSleep(d time.Duration) {
+	if r.ImageSleep != nil {
+		r.ImageSleep(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 // imageNotBuilt is the answer to a build whose preflight could not pass (why

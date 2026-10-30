@@ -3,6 +3,7 @@ package installer
 import (
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/imagebuild"
 )
@@ -38,6 +39,13 @@ type Run struct {
 	// check what a build before the swap is started with without starting it
 	// (gt-tpg0p.12).
 	ImageSupervisor func(imagebuild.Config) int
+	// SlingDeferral reads whether a gt sling runs, the reason a build before the
+	// swap waits on: "" when none does. Nil asks pgrep through Cmd. A test sets
+	// it so no process is started (gt-rfwr4).
+	SlingDeferral func() string
+	// ImageSleep is the clock the wait between sling reads runs on; nil uses
+	// time.Sleep (gt-rfwr4).
+	ImageSleep func(time.Duration)
 }
 
 // NewRun is a run against the real checkout at paths.RigDir, the real
