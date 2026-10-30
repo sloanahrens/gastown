@@ -1767,7 +1767,9 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 		return out, err
 	}
 	// buildRunEnv carries BD_MACHINE=1, so bd answered in the envelope; every
-	// caller of run parses the payload it printed before machine mode.
+	// caller of run parses the payload it printed before machine mode. A
+	// machine-exempt verb (bd sql) answers in the plain wrapper instead, which
+	// LegacyPayload reads too.
 	return LegacyPayload(args, out), nil
 }
 
@@ -2861,6 +2863,9 @@ func wispRowsToIssues(rows []bdSQLIssueRow) []*Issue {
 
 // queryIssueRows runs one bd sql SELECT over the wisps or issues table and
 // decodes its rows, guarding against bd printing something that is not JSON.
+// The answer may be a bare array (older bd), the plain {schema_version, data}
+// wrapper (installed bd, outside machine mode) or the contract document machine
+// mode prints; run hands it to LegacyPayload, which yields the rows in each case.
 func (b *Beads) queryIssueRows(query beadsql.Query) ([]bdSQLIssueRow, error) {
 	args, err := query.BdArgs("--json")
 	if err != nil {
