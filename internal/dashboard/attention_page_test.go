@@ -493,6 +493,17 @@ func TestThePanelDrawsTheLandingRiskLevel(t *testing.T) {
 	if strings.Contains(rows[1].Text, "risk") || panelCells(rows[1], "span lrisk") {
 		t.Errorf("the row with no landing risk reads %q with cells %v, want no level drawn", rows[1].Text, rows[1].Cells)
 	}
+
+	// Level 0 is a real answer (docs or text only), so it is drawn, not dropped
+	// as an empty value.
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
+		map[string]any{"kind": "item", "owner": "overseer", "id": "risk:gt-8:cafef00d", "title": "gt-8 landed touching docs",
+			"level": "info", "rule": "landing.risk_path", "age_sec": 90, "landing_risk": 0},
+	}}))
+	rows = panelRows(t, dom)
+	if len(rows) != 1 || !strings.Contains(rows[0].Text, "risk 0") || !panelCells(rows[0], "span lrisk") {
+		t.Errorf("the level-0 row drew %+v, want its level 0 drawn", rows)
+	}
 }
 
 // The panel draws the rows in the two groups the reader acts on: what needs a
