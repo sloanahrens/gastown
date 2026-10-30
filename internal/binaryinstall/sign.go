@@ -1,0 +1,230 @@
+package binaryinstall
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// signIdentifier is the designated-requirement identifier the installed binary
+// is signed under. A Developer Tools grant is keyed on it, not on the binary's
+// hash, so one stable identity survives every install path (gt-ykots).
+const signIdentifier = "com.gastown.gt"
+
+// The script's defaults for the signing settings the environment does not set.
+const (
+	defaultSignIdentity = "gastown-dev-unattended"
+	defaultSignTimeout  = 30 * time.Second
+	// maxSignSeconds is the largest timeout a time.Duration holds, so a
+	// configured value cannot overflow into a negative deadline.
+	maxSignSeconds = float64(math.MaxInt64 / int64(time.Second))
+)
+
+// Signer signs a copy of a binary with the town's identity before it replaces
+// the installed one (gt-ykots). None of the signing material is required, and
+// every way it can be missing or broken leaves the copy unsigned, which installs
+// ad-hoc exactly as it would with no signing at all: the notices say why, and
+// no failure of the signing steps fails the install.
+type Signer struct {
+	// Installer supplies the Files seam Sign reads and restores through, and
+	// the Warnf that receives every notice the signing steps do not fail for.
+	Installer Installer
+	// Exec runs a command and returns its combined output and its error. nil
+	// runs it with os/exec, with no stdin, so the command reads /dev/null.
+	Exec func(ctx context.Context, name string, args ...string) ([]byte, error)
+	// ReadFile reads the password file; nil is os.ReadFile.
+	ReadFile func(path string) ([]byte, error)
+	// Getenv reads the INSTALL_* settings and GT_TOWN_ROOT; nil is os.Getenv.
+	Getenv func(key string) string
+	// Home is the user's home directory, the town root's fallback when
+	// GT_TOWN_ROOT is unset; nil is os.UserHomeDir.
+	Home func() (string, error)
+	// Now is the clock the codesign timeout is measured from; nil is time.Now.
+	Now func() time.Time
+	// Notef receives the success line; nil writes it to standard error.
+	Notef func(format string, args ...any)
+}
+
+// Sign signs tmp, the copy of src that is about to replace the installed binary
+// name, with the town's identity. tmp is the file the replace will rename into
+// place, so it is signed in place and never the installed binary itself: a
+// codesign that dies mid-write leaves its half-written bytes in tmp, and Sign
+// restores tmp from src before it returns, so the caller installs either the
+// signed copy or the unsigned one.
+//
+// Every failure of the signing steps is one notice and a nil return, which
+// installs ad-hoc. The one error is a restore that failed: tmp is then neither
+// the signed copy nor the source, and the caller must not install it.
+// INSTALL_BINARY_SIGN=0 skips the step entirely, with no command run.
+func (s Signer) Sign(tmp, src, name string) error {
+	if s.getenv("INSTALL_BINARY_SIGN") == "0" {
+		return nil
+	}
+	dir, ok := s.signDir()
+	if !ok {
+		s.adHoc("no signing material directory (no town found; set INSTALL_GT_SIGN_DIR)")
+		return nil
+	}
+	keychain := filepath.Join(dir, "gastown-signing.keychain-db")
+	passwordFile := filepath.Join(dir, "keychain.pass")
+	identity := s.getenv("INSTALL_GT_SIGN_IDENTITY")
+	if identity == "" {
+		identity = defaultSignIdentity
+	}
+	limit, err := s.timeout()
+	if err != nil {
+		s.adHoc(err.Error())
+		return nil
+	}
+	if !s.Installer.Files.isFile(keychain) {
+		s.adHoc("no signing keychain at " + keychain)
+		return nil
+	}
+	if !s.Installer.Files.isFile(passwordFile) {
+		s.adHoc("no password file at " + passwordFile)
+		return nil
+	}
+	data, err := s.readFile(passwordFile)
+	if err != nil {
+		s.adHoc("cannot read " + passwordFile)
+		return nil
+	}
+	password := strings.TrimRight(string(data), "\n")
+	// The password travels in this call's argv, where ps can see it for as long
+	// as the unlock takes. That is the script's behavior, kept as it is: moving
+	// the unlock off argv is a separate decision (gt-tpg0p.70). Its output is
+	// discarded, so the password is never printed.
+	if _, err := s.run(context.Background(), "security", "unlock-keychain", "-p", password, optionSafe(keychain)); err != nil {
+		s.adHoc("cannot unlock " + keychain)
+		return nil
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), s.now().Add(limit))
+	defer cancel()
+	out, err := s.run(ctx, "codesign", "--force", "--keychain", optionSafe(keychain), "-s", identity, "-i", signIdentifier, optionSafe(tmp))
+	if err != nil {
+		if restoreErr := s.restore(tmp, src); restoreErr != nil {
+			return restoreErr
+		}
+		s.adHoc("codesign failed: " + firstLine(string(out)))
+		return nil
+	}
+	s.notef("signed %s as %s", name, signIdentifier)
+	return nil
+}
+
+// signDir is the directory holding the keychain and its password file:
+// INSTALL_GT_SIGN_DIR, else the town's .runtime/signing, the town being
+// GT_TOWN_ROOT or ~/gt. It reports false when there is no such directory to
+// name, and an empty directory must not become a relative one that reads the
+// keychain out of the working directory.
+func (s Signer) signDir() (string, bool) {
+	if dir := s.getenv("INSTALL_GT_SIGN_DIR"); dir != "" {
+		return dir, true
+	}
+	town := s.getenv("GT_TOWN_ROOT")
+	if town == "" {
+		home, err := s.home()
+		if err != nil || home == "" {
+			return "", false
+		}
+		town = filepath.Join(home, "gt")
+	}
+	return filepath.Join(town, ".runtime", "signing"), true
+}
+
+// timeout is the codesign limit in seconds from INSTALL_GT_SIGN_TIMEOUT, else
+// 30. A value that is not a positive number of seconds is an error, not a
+// silent default: the notice names it and the install is ad-hoc.
+func (s Signer) timeout() (time.Duration, error) {
+	raw := s.getenv("INSTALL_GT_SIGN_TIMEOUT")
+	if raw == "" {
+		return defaultSignTimeout, nil
+	}
+	secs, err := strconv.ParseFloat(raw, 64)
+	if err != nil || !(secs > 0) || secs > maxSignSeconds {
+		return 0, fmt.Errorf("INSTALL_GT_SIGN_TIMEOUT=%q is not a positive number of seconds", raw)
+	}
+	return time.Duration(secs * float64(time.Second)), nil
+}
+
+// restore puts tmp back to src's bytes and mode, the state a failed codesign
+// can leave it out of. The mode falls back to go build's 0755 when src's cannot
+// be read, as the replace does.
+func (s Signer) restore(tmp, src string) error {
+	files := s.Installer.Files
+	if err := files.copy(tmp, src); err != nil {
+		return fmt.Errorf("binaryinstall: restore %s from %s after codesign failed: %w", tmp, src, err)
+	}
+	perm := os.FileMode(0o755)
+	if mode, modeErr := files.mode(src); modeErr == nil {
+		perm = mode
+	}
+	if err := files.chmod(tmp, perm); err != nil {
+		return fmt.Errorf("binaryinstall: set mode %#o on %s: %w", perm, tmp, err)
+	}
+	return nil
+}
+
+// adHoc is the notice for a signing step that fell back to an unsigned install.
+func (s Signer) adHoc(reason string) {
+	s.Installer.warnf("installing ad-hoc: %s", reason)
+}
+
+func (s Signer) run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if s.Exec != nil {
+		return s.Exec(ctx, name, args...)
+	}
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+func (s Signer) readFile(path string) ([]byte, error) {
+	if s.ReadFile != nil {
+		return s.ReadFile(path)
+	}
+	return os.ReadFile(path)
+}
+
+func (s Signer) getenv(key string) string {
+	if s.Getenv != nil {
+		return s.Getenv(key)
+	}
+	return os.Getenv(key)
+}
+
+func (s Signer) home() (string, error) {
+	if s.Home != nil {
+		return s.Home()
+	}
+	return os.UserHomeDir()
+}
+
+func (s Signer) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+func (s Signer) notef(format string, args ...any) {
+	if s.Notef != nil {
+		s.Notef(format, args...)
+		return
+	}
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+}
+
+// firstLine is the first line of what a command said, the script's `head -1`,
+// so one log line names what codesign objected to without a wall of text.
+func firstLine(s string) string {
+	if s == "" {
+		return "no output"
+	}
+	line, _, _ := strings.Cut(s, "\n")
+	return line
+}
