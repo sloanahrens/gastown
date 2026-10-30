@@ -57,9 +57,9 @@ type Runner struct {
 	Env []string
 	// Stderr receives the progress lines and the failure excerpts.
 	Stderr io.Writer
-	// Timings receives one line per package the runner starts, in start order.
-	// A package it skips, refuses or cannot log writes none. Nil writes no
-	// timings.
+	// Timings receives one line per package the runner starts, in the order
+	// their commands finished, which is list order for a run of one. A package
+	// it skips, refuses or cannot log writes none. Nil writes no timings.
 	Timings *Timings
 	// Now is the clock a package's wall time is read from. Nil means time.Now.
 	Now func() time.Time
@@ -67,8 +67,9 @@ type Runner struct {
 	// time in list order; more runs them on that many workers (gt-0rtgc).
 	Jobs int
 	// Walls is the previous run's wall time per tier and package, keyed by
-	// TimingsKey. A run starts the longest packages first; nil, or a package
-	// with no entry, keeps list order.
+	// TimingsKey. A run of more than one job starts the longest packages first;
+	// nil, or a package with no entry, keeps list order. A run of one job
+	// ignores Walls and keeps list order, so it prints what it always has.
 	Walls map[string]int64
 }
 
@@ -83,22 +84,11 @@ type Counts struct {
 // args, and tallies the results. A package's name is the one the skip list and
 // the log use, so a failure in a nested module reads ./tracker/store/pgtest.
 // The counts and the failed names follow pkgs' order whatever order the
-// packages ran in; the progress lines print in start order.
+// packages ran in; a run with Jobs of one or less prints each package's line
+// where the package is listed, as the sweep always has.
 func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
 	tasks := r.tasks(tier, dir, pkgs)
-	var run []*task
-	for _, t := range tasks {
-		switch {
-		case t.refuse:
-			// go test would read it as a flag, so it fails closed and never runs.
-			fmt.Fprintf(r.Stderr, "%s: package argument starts with a dash\n", t.name)
-		case t.skip:
-			fmt.Fprintf(r.Stderr, "%s: %s %s SKIPPED (%s)\n", Name, tier, t.name, EnvSkip)
-		default:
-			run = append(run, t)
-		}
-	}
-	r.runTasks(tier, dir, prefix, args, run)
+	r.runTasks(tier, dir, prefix, args, tasks)
 	return tally(tasks)
 }
 
@@ -143,23 +133,50 @@ func (r *Runner) tasks(tier, dir string, pkgs []string) []*task {
 	return tasks
 }
 
-// runTasks runs the packages that have a command to run, in start order: one at
-// a time when Jobs is one, on a bounded pool when it names more.
+// runTasks prints each package's line and runs the ones with a command to run,
+// one at a time in list order when Jobs is one, on a bounded pool in start
+// order when it names more.
 func (r *Runner) runTasks(tier, dir string, prefix, args []string, tasks []*task) {
-	ordered := startOrder(tasks, r.Walls, tier)
 	if r.jobs() <= 1 {
-		for _, t := range ordered {
-			r.runOne(tier, dir, prefix, args, t)
+		// The serial run keeps the sweep's original lines byte for byte: a
+		// package is announced, skipped or refused where it is listed, and the
+		// previous run's walls never reorder it (gt-0rtgc).
+		for _, t := range tasks {
+			if r.announce(tier, t) {
+				r.runOne(tier, dir, prefix, args, t)
+			}
 		}
 		return
 	}
+	var run []*task
+	for _, t := range tasks {
+		if r.announce(tier, t) {
+			run = append(run, t)
+		}
+	}
 	// A serial package runs after the pool has drained, so it is the only child
 	// in flight while it runs (gt-0rtgc).
-	parallel, serial := splitSerial(ordered)
+	parallel, serial := splitSerial(startOrder(run, r.Walls, tier))
 	r.pool(tier, dir, prefix, args, parallel)
 	for _, t := range serial {
 		r.runOne(tier, dir, prefix, args, t)
 	}
+}
+
+// announce prints the line a package earns before it runs and reports whether
+// it has a command to run: a refused or skipped package prints its line and
+// runs nothing.
+func (r *Runner) announce(tier string, t *task) bool {
+	switch {
+	case t.refuse:
+		// go test would read it as a flag, so it fails closed and never runs.
+		fmt.Fprintf(r.Stderr, "%s: package argument starts with a dash\n", t.name)
+	case t.skip:
+		fmt.Fprintf(r.Stderr, "%s: %s %s SKIPPED (%s)\n", Name, tier, t.name, EnvSkip)
+	default:
+		return true
+	}
+	return false
 }
 
 // jobs is how many packages may run at once; the zero value runs one.

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -16,156 +15,172 @@ import (
 	"time"
 )
 
-// concurrentGo is the Exec a concurrency test injects. It records the commands
-// in flight, sends each start on started when a test wired one, and waits on
-// the channel hold names for that package before it returns.
-type concurrentGo struct {
-	codes   map[string]int
-	output  map[string]string
-	hold    func(pkg string) (chan struct{}, bool)
-	started chan string
-	// finished, when a test wires one, receives each package whose command
-	// returned.
-	finished chan string
-	// jobs and t fail the run the moment one command too many starts, whatever
-	// the scheduling.
+// waitBound is how long a worker test waits for the pool to reach the state it
+// is driving. It is a hang guard, not the behaviour under test: a correct pool
+// reaches every state at once, and a regressed one fails here instead of
+// hanging the suite.
+const waitBound = 10 * time.Second
+
+// waitOrFail is how these tests wait: the next value on ch, or a failure naming
+// what never arrived. No test waits on a channel without this bound.
+func waitOrFail[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(waitBound): //testpolicy:allow no-sleep — a hang guard only: the event is what the test waits for, and a pool that never reaches it fails here rather than hanging the suite
+	}
+	t.Fatalf("waited %s for %s", waitBound, what)
+	var zero T
+	return zero
+}
+
+// poolGo is the Exec a worker test injects. A command for a watched package
+// records its start, reports it on started, waits for its release and reports
+// its return on finished, so the test drives the pool one event at a time with
+// no polling and no scheduler yields.
+//
+// The fake also holds the pool's own invariants at the moment a command begins:
+// no more than jobs in flight, a package that must run alone with nothing
+// beside it, and nothing starting beside it while it runs. A breach fails the
+// test at that start, so the failure does not depend on when the test looks.
+type poolGo struct {
+	// jobs is the most commands that may be in flight at once, 0 for no bound.
 	jobs int
-	t    *testing.T
+	// alone names the packages that must run alone, as serial.txt does.
+	alone func(pkg string) bool
+	// hold returns the channel a watched package's command waits on; nil runs
+	// it at once.
+	hold func(pkg string) <-chan struct{}
+	// watch names the packages the fake records. A command for any other
+	// package, such as git, returns its scripted code and is not one of the
+	// run's children; nil watches every command.
+	watch    map[string]bool
+	codes    map[string]int
+	output   map[string]string
+	started  chan string
+	finished chan string
+	t        *testing.T
 
-	mu        sync.Mutex
-	inFlight  int
-	max       int
-	completed int
-	starts    []startedCall
-}
-
-// startedCall is one Exec start: the package, the commands in flight before it
-// began and the commands that had finished by then.
-type startedCall struct {
-	pkg      string
+	mu       sync.Mutex
 	inFlight int
-	finished int
+	serial   int
+	starts   []string
 }
 
-func (f *concurrentGo) exec(_ string, _ []string, argv []string, out io.Writer) int {
+func (f *poolGo) exec(_ string, _ []string, argv []string, out io.Writer) int {
 	pkg := argv[len(argv)-1]
-	f.mu.Lock()
-	f.inFlight++
-	if f.inFlight > f.max {
-		f.max = f.inFlight
+	if f.watch != nil && !f.watch[pkg] {
+		return f.codes[pkg]
 	}
-	over, now, limit := f.jobs > 0 && f.inFlight > f.jobs, f.inFlight, f.jobs
-	f.starts = append(f.starts, startedCall{pkg: pkg, inFlight: f.inFlight - 1, finished: f.completed})
-	f.mu.Unlock()
-	if over && f.t != nil {
-		f.t.Errorf("%d commands in flight at once, want at most %d", now, limit)
-	}
+	f.enter(pkg)
 	if f.started != nil {
 		f.started <- pkg
 	}
 	if f.hold != nil {
-		if gate, ok := f.hold(pkg); ok {
+		if gate := f.hold(pkg); gate != nil {
 			<-gate
 		}
 	}
 	fmt.Fprint(out, f.output[pkg])
-	f.mu.Lock()
-	f.inFlight--
-	f.completed++
-	f.mu.Unlock()
+	f.leave(pkg)
 	if f.finished != nil {
 		f.finished <- pkg
 	}
 	return f.codes[pkg]
 }
 
-// maxInFlight is the most commands the fake ever saw in flight at once.
-func (f *concurrentGo) maxInFlight() int {
+// enter records a command's start and fails the test when the start breaks an
+// invariant of the pool.
+func (f *poolGo) enter(pkg string) {
+	f.mu.Lock()
+	inFlight, serial := f.inFlight, f.serial
+	alone := f.alone != nil && f.alone(pkg)
+	f.inFlight++
+	if alone {
+		f.serial++
+	}
+	f.starts = append(f.starts, pkg)
+	f.mu.Unlock()
+	switch {
+	case f.jobs > 0 && inFlight >= f.jobs:
+		f.t.Errorf("%s started with %d commands already in flight, want at most %d at once", pkg, inFlight, f.jobs)
+	case alone && inFlight > 0:
+		f.t.Errorf("%s must run alone, but started with %d commands in flight", pkg, inFlight)
+	case !alone && serial > 0:
+		f.t.Errorf("%s started while a serial package ran, want a serial package alone", pkg)
+	}
+}
+
+// leave records a command's end.
+func (f *poolGo) leave(pkg string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.max
+	f.inFlight--
+	if f.alone != nil && f.alone(pkg) {
+		f.serial--
+	}
+}
+
+// startOrder lists the packages in the order their commands began, as the fake
+// itself recorded them.
+func (f *poolGo) startOrder() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.starts...)
 }
 
 // ranPackages lists the packages the fake ran, sorted, so a test compares the
 // set whatever order the workers took them in.
-func (f *concurrentGo) ranPackages() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var pkgs []string
-	for _, s := range f.starts {
-		pkgs = append(pkgs, s.pkg)
-	}
+func (f *poolGo) ranPackages() []string {
+	pkgs := f.startOrder()
 	sort.Strings(pkgs)
 	return pkgs
 }
 
-// record is the start the fake recorded for pkg.
-func (f *concurrentGo) record(pkg string) (startedCall, bool) {
+// lineFeed is a Runner's stderr in a test: it keeps the text and reports each
+// write on lines, so a test can wait for the line a package's report printed
+// without polling.
+type lineFeed struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	lines chan string
+}
+
+func newLineFeed() *lineFeed { return &lineFeed{lines: make(chan string, 64)} }
+
+func (f *lineFeed) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	n, err := f.buf.Write(p)
+	f.mu.Unlock()
+	f.lines <- string(p)
+	return n, err
+}
+
+func (f *lineFeed) String() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, s := range f.starts {
-		if s.pkg == pkg {
-			return s, true
+	return f.buf.String()
+}
+
+// waitForLine waits until a stderr write holds want.
+func waitForLine(t *testing.T, lines <-chan string, want string) {
+	t.Helper()
+	for {
+		if line := waitOrFail(t, lines, "a stderr line holding "+want); strings.Contains(line, want) {
+			return
 		}
 	}
-	return startedCall{}, false
 }
 
 // newWorkerRunner is a Runner over exec with jobs workers, logging into a fresh
-// temporary directory.
+// temporary directory and timed by a clock that never moves.
 func newWorkerRunner(t *testing.T, exec Exec, jobs int) *Runner {
 	t.Helper()
 	at := time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC)
 	return &Runner{Exec: exec, LogDir: t.TempDir(), Timeout: "7m", Stderr: io.Discard,
 		Jobs: jobs, Now: func() time.Time { return at }}
 }
-
-// TestWorkersNeverExceedJobs: Jobs bounds the packages in flight, and every
-// package still completes once the held ones are released.
-func TestWorkersNeverExceedJobs(t *testing.T) {
-	t.Parallel()
-	const jobs = 3
-	pkgs := workerPackages(8)
-	release := make(chan struct{})
-	fake := &concurrentGo{
-		started: make(chan string, len(pkgs)),
-		hold:    func(string) (chan struct{}, bool) { return release, true },
-		jobs:    jobs,
-		t:       t,
-	}
-	r := newWorkerRunner(t, fake.exec, jobs)
-
-	finished := make(chan Counts, 1)
-	go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, pkgs) }()
-
-	// Every command is held, so the pool is full after its first three. Let
-	// the scheduler hand the other goroutines their turns before the release:
-	// a pool with one worker too many starts a fourth here, while a bounded one
-	// starts nothing until a slot frees.
-	for i := 0; i < jobs; i++ {
-		<-fake.started
-	}
-	for i := 0; i < releaseYields; i++ {
-		runtime.Gosched()
-	}
-	if max := fake.maxInFlight(); max != jobs {
-		t.Fatalf("commands in flight at once = %d, want %d", max, jobs)
-	}
-	close(release)
-	got := <-finished
-
-	if want := (Counts{Passed: len(pkgs)}); !reflect.DeepEqual(got, want) {
-		t.Errorf("Tier() = %+v, want %+v", got, want)
-	}
-	if ran := fake.ranPackages(); !reflect.DeepEqual(ran, workerPackages(len(pkgs))) {
-		t.Errorf("ran %q, want each of %q once", ran, pkgs)
-	}
-}
-
-// releaseYields is how many scheduler turns a bound test gives the pool before
-// it reads the commands in flight. Yielding is not a wait: a worker the pool
-// started takes its turn within a few of them.
-const releaseYields = 10000
 
 // workerPackages is n package names a fake run uses, sorted.
 func workerPackages(n int) []string {
@@ -176,21 +191,261 @@ func workerPackages(n int) []string {
 	return pkgs
 }
 
+// gates is one channel per package a test releases by hand, and a release that
+// may be called twice for an already released package.
+type gates struct {
+	byPkg    map[string]chan struct{}
+	released map[string]bool
+}
+
+func newGates(pkgs []string) *gates {
+	g := &gates{byPkg: map[string]chan struct{}{}, released: map[string]bool{}}
+	for _, pkg := range pkgs {
+		g.byPkg[pkg] = make(chan struct{})
+	}
+	return g
+}
+
+func (g *gates) channel(pkg string) <-chan struct{} { return g.byPkg[pkg] }
+
+func (g *gates) release(pkg string) {
+	if !g.released[pkg] {
+		g.released[pkg] = true
+		close(g.byPkg[pkg])
+	}
+}
+
+func (g *gates) releaseAll() {
+	for pkg := range g.byPkg {
+		g.release(pkg)
+	}
+}
+
+// TestWorkersNeverExceedJobs: Jobs bounds the packages in flight, and every
+// package still completes once the held ones are released.
+func TestWorkersNeverExceedJobs(t *testing.T) {
+	t.Parallel()
+	const jobs = 3
+	pkgs := workerPackages(8)
+	gates := newGates(pkgs)
+	fake := &poolGo{
+		jobs:     jobs,
+		t:        t,
+		hold:     gates.channel,
+		started:  make(chan string, len(pkgs)),
+		finished: make(chan string, len(pkgs)),
+	}
+	r := newWorkerRunner(t, fake.exec, jobs)
+
+	finished := make(chan Counts, 1)
+	go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, pkgs) }()
+
+	// Fill the pool: the first Jobs commands start together and are held, so a
+	// pool that ran them one at a time never reaches Jobs and fails here.
+	held := make([]string, 0, jobs)
+	for i := 0; i < jobs; i++ {
+		held = append(held, waitOrFail(t, fake.started, "a command of the first wave to start"))
+	}
+	// Keep it full: each release frees a slot and the pool starts the next
+	// package into it, so a pool that handed out one worker too many starts it
+	// beside Jobs held commands and the fake fails that start.
+	for i := jobs; i < len(pkgs); i++ {
+		gates.release(held[0])
+		held = append(held[1:], waitOrFail(t, fake.started, "a command to take the freed slot"))
+		waitOrFail(t, fake.finished, "the released command to finish")
+	}
+	gates.releaseAll()
+	for range held {
+		waitOrFail(t, fake.finished, "a command to finish")
+	}
+
+	if got := waitOrFail(t, finished, "the tier to count its packages"); !reflect.DeepEqual(got, Counts{Passed: len(pkgs)}) {
+		t.Errorf("Tier() = %+v, want all %d passed", got, len(pkgs))
+	}
+	if ran := fake.ranPackages(); !reflect.DeepEqual(ran, pkgs) {
+		t.Errorf("ran %q, want each of %q once", ran, pkgs)
+	}
+}
+
+// TestWorkersOneAtATime: a run of one job starts one package at a time, and
+// every package completes once its own command is released.
+func TestWorkersOneAtATime(t *testing.T) {
+	t.Parallel()
+	pkgs := workerPackages(3)
+	gates := newGates(pkgs)
+	fake := &poolGo{
+		jobs:     1,
+		t:        t,
+		hold:     gates.channel,
+		started:  make(chan string, len(pkgs)),
+		finished: make(chan string, len(pkgs)),
+	}
+	r := newWorkerRunner(t, fake.exec, 1)
+
+	finished := make(chan Counts, 1)
+	go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, pkgs) }()
+
+	// A second command starting while the first is held fails in the fake.
+	for range pkgs {
+		gates.release(waitOrFail(t, fake.started, "the next command to start"))
+		waitOrFail(t, fake.finished, "the command to finish")
+	}
+
+	if got := waitOrFail(t, finished, "the tier to count its packages"); !reflect.DeepEqual(got, Counts{Passed: len(pkgs)}) {
+		t.Errorf("Tier() = %+v, want all %d passed", got, len(pkgs))
+	}
+	if got := fake.startOrder(); !reflect.DeepEqual(got, pkgs) {
+		t.Errorf("start order = %q, want the list order %q", got, pkgs)
+	}
+}
+
+// TestWorkersOneJobKeepsTheSerialOutput: a run of one job prints and starts
+// every package where it is listed — announced, skipped or refused — as the
+// sweep's serial run always has, whatever walls the last run left, so the
+// daemon's parse and the log order do not change under the default.
+func TestWorkersOneJobKeepsTheSerialOutput(t *testing.T) {
+	t.Parallel()
+	pkgs := []string{"./a", "-weird", "./blocked", "./c"}
+	fake := &poolGo{jobs: 1, t: t}
+	r := newWorkerRunner(t, fake.exec, 1)
+	r.SkipList = "integration:./blocked"
+	r.Walls = map[string]int64{
+		TimingsKey(TierIntegration, "./a"):    1000,
+		TimingsKey(TierIntegration, "./c"):    50000,
+		TimingsKey(TierIntegration, "./okay"): 9000,
+	}
+	stderr := &bytes.Buffer{}
+	r.Stderr = stderr
+
+	got := r.Tier(TierIntegration, ".", nil, nil, pkgs)
+
+	want := "tier-sweep: integration ./a ...\n" +
+		"-weird: package argument starts with a dash\n" +
+		"tier-sweep: integration ./blocked SKIPPED (TIER_SWEEP_SKIP)\n" +
+		"tier-sweep: integration ./c ...\n"
+	if stderr.String() != want {
+		t.Errorf("stderr =\n%s\nwant the serial run's lines\n%s", stderr, want)
+	}
+	if want := []string{"./a", "./c"}; !reflect.DeepEqual(fake.startOrder(), want) {
+		t.Errorf("start order = %q, want the list order %q, not the walls'", fake.startOrder(), want)
+	}
+	if want := (Counts{Passed: 2, Skipped: 1, Failed: 1, FailedNames: []string{"-weird"}}); !reflect.DeepEqual(got, want) {
+		t.Errorf("Tier() = %+v, want %+v", got, want)
+	}
+}
+
+// TestWorkersStartLongestFirst: a run given the previous walls starts the
+// longest packages first, and a run given none starts them in list order. The
+// first wave starts together, so its order is read as the set the plan names;
+// every command after it starts alone as a slot frees, so its place is read
+// exactly from the fake's own record of the starts.
+func TestWorkersStartLongestFirst(t *testing.T) {
+	t.Parallel()
+	const jobs = 3
+	cases := []struct {
+		name  string
+		pkgs  []string
+		walls map[string]int64
+		want  []string
+	}{
+		{
+			name: "walls start the longest first",
+			pkgs: []string{"./a", "./b", "./c", "./d", "./e"},
+			walls: wallsFor(map[string]int64{
+				"./a": 5000, "./b": 50000, "./c": 20000, "./d": 1000, "./e": 30000,
+			}),
+			want: []string{"./b", "./e", "./c", "./a", "./d"},
+		},
+		{
+			name: "no walls keep the list order",
+			pkgs: []string{"./d", "./c", "./b", "./a", "./e"},
+			want: []string{"./d", "./c", "./b", "./a", "./e"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gates := newGates(tc.pkgs)
+			fake := &poolGo{
+				jobs:     jobs,
+				t:        t,
+				hold:     gates.channel,
+				started:  make(chan string, len(tc.pkgs)),
+				finished: make(chan string, len(tc.pkgs)),
+			}
+			r := newWorkerRunner(t, fake.exec, jobs)
+			r.Walls = tc.walls
+
+			finished := make(chan Counts, 1)
+			go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, tc.pkgs) }()
+
+			first := make([]string, 0, jobs)
+			for i := 0; i < jobs; i++ {
+				first = append(first, waitOrFail(t, fake.started, "a command of the first wave to start"))
+			}
+			if got, want := sorted(first), sorted(tc.want[:jobs]); !reflect.DeepEqual(got, want) {
+				t.Errorf("the first wave started %q, want the longest %q", got, want)
+			}
+
+			// Freeing a slot starts the next package the plan names, one at a
+			// time, so each later place is the fake's own record.
+			for i := jobs; i < len(tc.want); i++ {
+				gates.release(tc.want[i-jobs])
+				pkg := waitOrFail(t, fake.started, fmt.Sprintf("start %d", i+1))
+				if pkg != tc.want[i] {
+					t.Errorf("start %d = %s, want %s", i+1, pkg, tc.want[i])
+					break
+				}
+			}
+			gates.releaseAll()
+			if got := waitOrFail(t, finished, "the tier to count its packages"); !reflect.DeepEqual(got, Counts{Passed: len(tc.pkgs)}) {
+				t.Errorf("Tier() = %+v, want all %d passed", got, len(tc.pkgs))
+			}
+		})
+	}
+}
+
+// wallsFor keys each package's wall as the run reads it: by the tier and the
+// package name together.
+func wallsFor(walls map[string]int64) map[string]int64 {
+	out := make(map[string]int64, len(walls))
+	for pkg, ms := range walls {
+		out[TimingsKey(TierIntegration, pkg)] = ms
+	}
+	return out
+}
+
+// sorted returns a sorted copy of items.
+func sorted(items []string) []string {
+	out := append([]string(nil), items...)
+	sort.Strings(out)
+	return out
+}
+
 // TestSerialPackagesRunAlone: a package serial.txt names starts only once no
-// other command is in flight.
+// other command is in flight. The fake fails the start if anything runs beside
+// it, so the test only has to drive the run to the state where a package that
+// shared the workers would have started.
 func TestSerialPackagesRunAlone(t *testing.T) {
 	t.Parallel()
 	const serial = "./internal/cmd"
-	gate := make(chan struct{})
-	serialGate := make(chan struct{})
-	fake := &concurrentGo{
-		started: make(chan string, 3),
-		hold: func(pkg string) (chan struct{}, bool) {
+	if !serialPackage(serial) {
+		t.Fatalf("%s is not on serial.txt, so the run has no serial package to keep alone", serial)
+	}
+	parallel := make(chan struct{})
+	alone := make(chan struct{})
+	fake := &poolGo{
+		jobs:  3,
+		t:     t,
+		alone: serialPackage,
+		hold: func(pkg string) <-chan struct{} {
 			if pkg == serial {
-				return serialGate, true
+				return alone
 			}
-			return gate, true
+			return parallel
 		},
+		started:  make(chan string, 3),
+		finished: make(chan string, 3),
 	}
 	r := newWorkerRunner(t, fake.exec, 3)
 	pkgs := []string{"./a", serial, "./b"}
@@ -199,32 +454,28 @@ func TestSerialPackagesRunAlone(t *testing.T) {
 	go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, pkgs) }()
 
 	// The two packages beside it are held, so a serial package that shared
-	// their workers would start now, with two commands in flight.
+	// their workers would start now, beside two commands in flight.
 	for i := 0; i < len(pkgs)-1; i++ {
-		<-fake.started
+		waitOrFail(t, fake.started, "a package beside the serial one to start")
 	}
-	for i := 0; i < releaseYields; i++ {
-		runtime.Gosched()
+	close(parallel)
+	if pkg := waitOrFail(t, fake.started, "the serial package to start"); pkg != serial {
+		t.Errorf("started %s after the parallel drain, want the serial package %s", pkg, serial)
 	}
-	if _, ok := fake.record(serial); ok {
-		t.Fatalf("%s started while %d commands were in flight, want it alone", serial, fake.maxInFlight())
+	close(alone)
+	for range pkgs {
+		waitOrFail(t, fake.finished, "a command to finish")
 	}
-	close(gate)
-	<-fake.started
 
-	record, ok := fake.record(serial)
-	if !ok {
-		t.Fatal("the serial package never started")
-	}
-	if record.inFlight != 0 {
-		t.Errorf("%s started with %d commands in flight, want alone", serial, record.inFlight)
-	}
-	if record.finished != len(pkgs)-1 {
-		t.Errorf("%s started after %d commands finished, want %d", serial, record.finished, len(pkgs)-1)
-	}
-	close(serialGate)
-	if got := <-finished; !reflect.DeepEqual(got, Counts{Passed: len(pkgs)}) {
+	if got := waitOrFail(t, finished, "the tier to count its packages"); !reflect.DeepEqual(got, Counts{Passed: len(pkgs)}) {
 		t.Errorf("Tier() = %+v, want all %d passed", got, len(pkgs))
+	}
+	// The two beside it start together, in either order; the serial package
+	// starts after both.
+	order := fake.startOrder()
+	wantOrder := []string{"./a", "./b"}
+	if len(order) != len(pkgs) || !reflect.DeepEqual(sorted(order[:2]), wantOrder) || order[2] != serial {
+		t.Errorf("start order = %q, want %q in either order and then %s", order, wantOrder, serial)
 	}
 }
 
@@ -241,7 +492,7 @@ func TestWorkersKeepTheSerialResult(t *testing.T) {
 			repo.files[f] = taggedTest
 		}
 		repo.files[dockerList] = "d\n"
-		fake := &concurrentGo{codes: map[string]int{"./b": 1, "./d": 1}}
+		fake := &poolGo{codes: map[string]int{"./b": 1, "./d": 1}}
 		s := &Sweep{
 			Opts:    Options{Jobs: jobs, SkipList: "integration:./c", Timeout: "7m", LogDir: logDir},
 			Exec:    fake.exec,
@@ -269,11 +520,18 @@ func TestWorkersKeepTheSerialResult(t *testing.T) {
 func TestWorkersKeepTheFailureOrder(t *testing.T) {
 	t.Parallel()
 	gate := make(chan struct{})
-	fake := &concurrentGo{
-		codes:    map[string]int{"./b": 1, "./e": 1},
+	fake := &poolGo{
+		jobs:  3,
+		t:     t,
+		codes: map[string]int{"./b": 1, "./e": 1},
+		hold: func(pkg string) <-chan struct{} {
+			if pkg == "./b" {
+				return gate
+			}
+			return nil
+		},
 		started:  make(chan string, 3),
 		finished: make(chan string, 3),
-		hold:     func(pkg string) (chan struct{}, bool) { return gate, pkg == "./b" },
 	}
 	r := newWorkerRunner(t, fake.exec, 3)
 	pkgs := []string{"./a", "./b", "./e"}
@@ -282,16 +540,15 @@ func TestWorkersKeepTheFailureOrder(t *testing.T) {
 	go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, pkgs) }()
 
 	// ./e finishes first though ./b is listed before it.
-	for pkg := range fake.finished {
-		if pkg == "./e" {
+	for {
+		if pkg := waitOrFail(t, fake.finished, "./e to finish ahead of ./b"); pkg == "./e" {
 			break
 		}
 	}
 	close(gate)
-	got := <-finished
 
 	want := Counts{Passed: 1, Failed: 2, FailedNames: []string{"./b", "./e"}}
-	if !reflect.DeepEqual(got, want) {
+	if got := waitOrFail(t, finished, "the tier to count its packages"); !reflect.DeepEqual(got, want) {
 		t.Errorf("Tier() = %+v, want %+v", got, want)
 	}
 }
@@ -325,7 +582,7 @@ func TestWorkersReportFailures(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fake := &concurrentGo{codes: map[string]int{"./bad": 1}, output: tc.output}
+			fake := &poolGo{jobs: 2, t: t, codes: map[string]int{"./bad": 1}, output: tc.output}
 			stderr := &bytes.Buffer{}
 			r := newWorkerRunner(t, fake.exec, 2)
 			r.LogDir = tc.logDir(t)
@@ -341,181 +598,289 @@ func TestWorkersReportFailures(t *testing.T) {
 	}
 }
 
+// TestWorkersKeepEachPackagesLogAndTiming: three packages on three workers each
+// write their own output to their own log, and each records its own line in the
+// timings file in the order its command finished.
+func TestWorkersKeepEachPackagesLogAndTiming(t *testing.T) {
+	t.Parallel()
+	pkgs := []string{"./a", "./b", "./c"}
+	codes := map[string]int{"./a": 1, "./b": 1, "./c": 1}
+	output := map[string]string{
+		"./a": "--- FAIL: TestA (0.00s)\n",
+		"./b": "--- FAIL: TestB (0.00s)\n",
+		"./c": "--- FAIL: TestC (0.00s)\n",
+	}
+	gates := newGates(pkgs)
+	fake := &poolGo{
+		jobs:     3,
+		t:        t,
+		codes:    codes,
+		output:   output,
+		hold:     gates.channel,
+		started:  make(chan string, len(pkgs)),
+		finished: make(chan string, len(pkgs)),
+	}
+	logDir := t.TempDir()
+	feed := newLineFeed()
+	at := time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC)
+	r := &Runner{
+		Exec: fake.exec, LogDir: logDir, Timeout: "7m", Stderr: feed,
+		Timings: OpenTimings(filepath.Join(logDir, TimingsName), feed),
+		Now:     func() time.Time { return at }, Jobs: 3,
+		// The plan starts ./a, ./b, ./c in that order; the test finishes them
+		// the other way round, so the file's order is read as completion order.
+		Walls: wallsFor(map[string]int64{"./a": 30000, "./b": 20000, "./c": 10000}),
+	}
+
+	finished := make(chan Counts, 1)
+	go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, pkgs) }()
+	for range pkgs {
+		waitOrFail(t, fake.started, "a command to start")
+	}
+
+	// Each package's excerpt is printed after its timings line is recorded, so
+	// releasing them one at a time reads the completion order the file holds.
+	order := []string{"./a", "./c", "./b"}
+	for _, pkg := range order {
+		gates.release(pkg)
+		waitForLine(t, feed.lines, strings.TrimSpace(output[pkg]))
+	}
+	if got := waitOrFail(t, finished, "the tier to count its packages"); got.Failed != len(pkgs) {
+		t.Errorf("Tier() = %+v, want every package failed", got)
+	}
+	r.Timings.Close()
+
+	var timed []string
+	for _, tm := range readTimings(t, filepath.Join(logDir, TimingsName)) {
+		timed = append(timed, tm.Package)
+		if tm.Tier != TierIntegration || tm.Exit != codes[tm.Package] {
+			t.Errorf("timing %+v does not name its own tier and exit code", tm)
+		}
+	}
+	if !reflect.DeepEqual(timed, order) {
+		t.Errorf("timings order = %q, want the completion order %q", timed, order)
+	}
+	for _, pkg := range pkgs {
+		data, err := os.ReadFile(filepath.Join(logDir, LogName(TierIntegration, pkg)))
+		if err != nil {
+			t.Fatalf("read %s's log: %v", pkg, err)
+		}
+		if got := string(data); got != output[pkg] {
+			t.Errorf("%s's log holds %q, want only its own %q", pkg, got, output[pkg])
+		}
+	}
+}
+
 // timingsText is a timings file's lines for walls, keyed by package.
-func timingsText(walls map[string]int64) string {
+func timingsText(walls map[string]int64, pkgs []string) string {
 	var out strings.Builder
-	for _, pkg := range []string{"./a", "./b", "./c", "./d"} {
+	for _, pkg := range pkgs {
 		fmt.Fprintf(&out, `{"tier":%q,"package":%q,"wall_ms":%d,"exit":0,"start":"2026-10-30T00:00:00Z"}`+"\n",
 			TierIntegration, pkg, walls[pkg])
 	}
 	return out.String()
 }
 
-// progressPackages lists the packages a run announced, in the order it started
-// them: the stderr progress lines the dispatcher prints.
-func progressPackages(stderr string) []string {
-	var pkgs []string
-	for _, line := range strings.Split(stderr, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 4 && fields[0] == Name+":" && fields[3] == "..." {
-			pkgs = append(pkgs, fields[2])
-		}
-	}
-	return pkgs
-}
-
-// TestWorkersStartLongestFirst: a run whose timings file gives walls starts the
-// longest packages first, and a run without one starts them in list order.
-func TestWorkersStartLongestFirst(t *testing.T) {
-	t.Parallel()
-	pkgs := []string{"./a", "./b", "./c", "./d"}
-	walls := map[string]int64{"./a": 5000, "./b": 50000, "./c": 20000, "./d": 1000}
-	cases := []struct {
-		name string
-		file string
-		want []string
-	}{
-		{name: "a timings file starts the longest first", file: timingsText(walls),
-			want: []string{"./b", "./c", "./a", "./d"}},
-		{name: "no timings file keeps the list order", want: pkgs},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := workerRun(t, pkgs, tc.file); !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("start order = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-// workerRun runs the integration tier of a fake repository on four packages of
-// one directory, with the timings file file when it names one, and returns the
-// packages' start order.
-func workerRun(t *testing.T, pkgs []string, timings string) []string {
-	t.Helper()
-	logDir := t.TempDir()
-	env := map[string]string{EnvLogDir: logDir, EnvJobs: "3", EnvTimeout: "7m"}
-	if timings != "" {
-		path := filepath.Join(t.TempDir(), "timings.jsonl")
-		if err := os.WriteFile(path, []byte(timings), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		env[EnvTimings] = path
-	}
+// taggedRepo is a fake repository whose integration tier discovers each of
+// pkgs as a tagged package.
+func taggedRepo(pkgs []string) *fakeRepo {
 	repo := baseRepo()
 	var files []string
 	for _, pkg := range pkgs {
-		name := strings.TrimPrefix(pkg, "./")
-		files = append(files, name+"/x_test.go")
-		repo.files[name+"/x_test.go"] = taggedTest
+		name := strings.TrimPrefix(pkg, "./") + "/x_test.go"
+		files = append(files, name)
+		repo.files[name] = taggedTest
 	}
 	repo.lists[". *_test.go"] = files
-	fake := &concurrentGo{}
-	var stderr bytes.Buffer
-	code := Run([]string{TierIntegration}, io.Discard, &stderr, Deps{
-		Host: Host{
-			Env:      func(name string) string { return env[name] },
-			MkdirAll: func(string, fs.FileMode) error { return nil },
-		},
-		Exec: fake.exec,
-		Src:  repo,
-	})
-	if code != 0 {
-		t.Fatalf("Run exit = %d, want 0:\n%s", code, stderr.String())
-	}
-	return progressPackages(stderr.String())
+	return repo
 }
 
-// TestWorkersTimingsFileFallback: a timings file that is not there starts the
-// packages in list order and prints nothing, and one that cannot be read prints
-// one line and does the same, so the instrument never decides the verdict.
+// runTierInBackground runs the integration tier of repo through Run on the
+// environment env, timed by a clock that never moves, and returns the exit code
+// it ends with.
+func runTierInBackground(repo *fakeRepo, fake *poolGo, env map[string]string, stderr io.Writer) <-chan int {
+	done := make(chan int, 1)
+	at := time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC)
+	go func() {
+		done <- Run([]string{TierIntegration}, io.Discard, stderr, Deps{
+			Host: Host{
+				Env:      func(name string) string { return env[name] },
+				MkdirAll: func(string, fs.FileMode) error { return nil },
+			},
+			Exec: fake.exec,
+			Src:  repo,
+			Now:  func() time.Time { return at },
+		})
+	}()
+	return done
+}
+
+// TestWorkersTimingsFileFallback: a run on two workers starts the longest
+// packages first when TIER_SWEEP_TIMINGS names a file it can read, and keeps
+// the list order when the file is the first run's or cannot be read, naming the
+// latter once, so the instrument never decides the order.
 func TestWorkersTimingsFileFallback(t *testing.T) {
 	t.Parallel()
-	pkgs := []string{"./a", "./b"}
+	pkgs := []string{"./a", "./b", "./c", "./d"}
+	walls := map[string]int64{"./a": 5000, "./b": 1000, "./c": 50000, "./d": 20000}
 	cases := []struct {
 		name     string
 		path     func(t *testing.T) string
+		want     []string
 		wantLine bool
 	}{
 		{
 			name: "a file that is not there is the first run",
 			path: func(t *testing.T) string { return filepath.Join(t.TempDir(), "timings.jsonl") },
+			want: pkgs,
 		},
 		{
 			name:     "a file that cannot be read is named once",
 			path:     func(t *testing.T) string { return t.TempDir() },
+			want:     pkgs,
 			wantLine: true,
+		},
+		{
+			name: "the file's walls start the longest first",
+			path: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "timings.jsonl")
+				if err := os.WriteFile(path, []byte(timingsText(walls, pkgs)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+			want: []string{"./c", "./d", "./a", "./b"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			path := tc.path(t)
-			var stderr bytes.Buffer
-			repo := baseRepo()
-			repo.lists[". *_test.go"] = []string{"a/x_test.go", "b/x_test.go"}
-			for _, f := range repo.lists[". *_test.go"] {
-				repo.files[f] = taggedTest
+			gates := newGates(pkgs)
+			fake := &poolGo{
+				jobs:     2,
+				t:        t,
+				watch:    watchAll(pkgs),
+				hold:     gates.channel,
+				started:  make(chan string, len(pkgs)),
+				finished: make(chan string, len(pkgs)),
 			}
 			env := map[string]string{EnvLogDir: t.TempDir(), EnvJobs: "2", EnvTimings: path}
-			code := Run([]string{TierIntegration}, io.Discard, &stderr, Deps{
-				Host: Host{
-					Env:      func(name string) string { return env[name] },
-					MkdirAll: func(string, fs.FileMode) error { return nil },
-				},
-				Exec: (&concurrentGo{}).exec,
-				Src:  repo,
-			})
-			if code != 0 {
-				t.Fatalf("Run exit = %d, want 0:\n%s", code, stderr.String())
+			stderr := &bytes.Buffer{}
+			done := runTierInBackground(taggedRepo(pkgs), fake, env, stderr)
+
+			first := make([]string, 0, 2)
+			for i := 0; i < 2; i++ {
+				first = append(first, waitOrFail(t, fake.started, "a command of the first wave to start"))
 			}
-			if got := progressPackages(stderr.String()); !reflect.DeepEqual(got, pkgs) {
-				t.Errorf("start order = %q, want the list order %q", got, pkgs)
+			if got, want := sorted(first), sorted(tc.want[:2]); !reflect.DeepEqual(got, want) {
+				t.Errorf("the first wave started %q, want %q", got, want)
 			}
-			named := strings.Contains(stderr.String(), "timings: read "+path)
-			if named != tc.wantLine {
-				t.Errorf("stderr names the timings file = %t, want %t:\n%s", named, tc.wantLine, stderr.String())
+			for i := 2; i < len(tc.want); i++ {
+				gates.release(tc.want[i-2])
+				pkg := waitOrFail(t, fake.started, fmt.Sprintf("start %d", i+1))
+				if pkg != tc.want[i] {
+					t.Errorf("start %d = %s, want %s", i+1, pkg, tc.want[i])
+					break
+				}
+			}
+			gates.releaseAll()
+			if code := waitOrFail(t, done, "the run to exit"); code != 0 {
+				t.Errorf("Run exit = %d, want 0:\n%s", code, stderr)
+			}
+			if named := strings.Contains(stderr.String(), "timings: read "+path); named != tc.wantLine {
+				t.Errorf("stderr names the timings file = %t, want %t:\n%s", named, tc.wantLine, stderr)
+			}
+			if got := len(fake.startOrder()); got != len(pkgs) {
+				t.Errorf("ran %d packages, want %d: %q", got, len(pkgs), fake.startOrder())
 			}
 		})
 	}
 }
 
-// TestSerialListNamesOnlyDiscoveredPackages: every package serial.txt names has
-// an integration-tagged test where discovery looks for one, so a renamed or
-// deleted package cannot silently drop out of the list that keeps it alone.
+// watchAll is the set of packages a Run-level fake records.
+func watchAll(pkgs []string) map[string]bool {
+	watch := make(map[string]bool, len(pkgs))
+	for _, pkg := range pkgs {
+		watch[pkg] = true
+	}
+	return watch
+}
+
+// TestSerialListNamesOnlyDiscoveredPackages: every package serial.txt names is
+// one the integration tier's own plan discovers, so a renamed or deleted
+// package cannot silently drop out of the list that keeps it alone.
 func TestSerialListNamesOnlyDiscoveredPackages(t *testing.T) {
 	t.Parallel()
+	found := discoveredPackages(t, worktree{root: filepath.Join("..", "..")})
 	for _, pkg := range SerialPackages() {
-		dir := filepath.Join("..", "..", pkg)
-		if !discoversIntegrationTest(dir) {
-			t.Errorf("serial.txt names %s, which the sweep does not discover: no integration-tagged test under %s", pkg, pkg)
+		if !found[pkg] {
+			t.Errorf("serial.txt names %s, which the integration plan does not run: no integration-tagged test under it", pkg)
 		}
 	}
-	// The check fails a package that has only a plain test.
-	plain := t.TempDir()
-	if err := os.WriteFile(filepath.Join(plain, "x_test.go"), []byte(plainTest), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if discoversIntegrationTest(plain) {
+	// The same plan leaves a package whose test carries no integration tag out.
+	plain := baseRepo()
+	plain.lists[". *_test.go"] = []string{"a/x_test.go"}
+	plain.files["a/x_test.go"] = plainTest
+	if discoveredPackages(t, plain)["a"] {
 		t.Error("a package with only a plain test reads as discovered")
 	}
 }
 
-// discoversIntegrationTest reports whether dir holds a test file the
-// integration build tag selects, read through the discovery the sweep uses.
-func discoversIntegrationTest(dir string) bool {
-	entries, err := os.ReadDir(dir)
+// discoveredPackages is the set of packages the integration tier's plan runs,
+// by the name serial.txt uses: the plan's own discovery, not a re-reading of
+// it.
+func discoveredPackages(t *testing.T, src Source) map[string]bool {
+	t.Helper()
+	plan, err := (&Sweep{Src: src}).planIntegration()
 	if err != nil {
-		return false
+		t.Fatalf("plan the integration tier: %v", err)
 	}
-	var files []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			files = append(files, e.Name())
+	found := make(map[string]bool)
+	for _, pkg := range plan.root {
+		found[strings.TrimPrefix(pkg, "./")] = true
+	}
+	for _, m := range plan.modules {
+		for _, pkg := range m.pkgs {
+			found[strings.TrimPrefix(packageName(m.dir, pkg), "./")] = true
 		}
 	}
-	return len(TaggedDirs(files, func(name string) ([]byte, error) {
-		return os.ReadFile(filepath.Join(dir, name))
-	})) > 0
+	return found
+}
+
+// worktree is the Source the guard reads this checkout through: the files under
+// a directory that match the pattern, listed from disk and read from disk. The
+// plan lists through git in production, and a unit test may not run git, so the
+// listing comes from the directory tree the checkout is.
+type worktree struct{ root string }
+
+func (w worktree) LsFiles(dir, pattern string) ([]string, error) {
+	base := filepath.Join(w.root, filepath.FromSlash(dir))
+	suffix := strings.TrimPrefix(pattern, "*")
+	var files []string
+	err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" && path != base {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, suffix) {
+			return nil
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	return files, err
+}
+
+func (w worktree) ReadFile(name string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(w.root, filepath.FromSlash(name)))
 }
