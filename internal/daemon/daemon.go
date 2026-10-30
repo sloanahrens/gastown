@@ -922,6 +922,12 @@ type Daemon struct {
 	burst      *burstSampler
 	burstMu    sync.Mutex
 	burstSeams burstSamplerSeams
+	// landingQueue is the ready-to-land count each rig's landing worker
+	// published at the top of its last pass, which the burst sampler reads in
+	// place of listing every rig's board on every sample (landing_worker.go,
+	// gt-hw6ih).
+	landingQueue landingQueueState
+
 	// containerMode says this daemon runs inside the town's container, where
 	// top and ps read the container's own process tree rather than the host's.
 	// New settles it once from config.ContainerModeEnv (the rendered compose

@@ -164,6 +164,28 @@ func TestNewRigLandingWorker_RefusesAnEmptyGateLogDir(t *testing.T) {
 	}
 }
 
+// The daemon's workers publish into the one view the burst sampler reads, so a
+// sample reports the count the rig's last pass listed (gt-hw6ih).
+func TestNewRigLandingWorker_PublishesIntoTheDaemonsQueueView(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "promote-gastown.key")
+	promoteRigConfig(t, townRoot, "gastown", keyFile)
+	writeRigsJSON(t, townRoot, []string{"gastown"})
+	d := newForgejoPromoteDaemon(t, townRoot, "")
+
+	w, err := d.newRigLandingWorker("gastown")
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	if w.Queue == nil {
+		t.Fatal("the worker has no queue view; nothing it lists would reach the burst row")
+	}
+	if w.Queue != d.landingQueueView() {
+		t.Fatal("the worker publishes into a view of its own; the burst sampler reads the daemon's one view")
+	}
+}
+
 func TestLandingWorkerConfigDefaults(t *testing.T) {
 	t.Parallel()
 	if IsPatrolEnabled(nil, "landing_worker") {

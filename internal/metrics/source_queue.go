@@ -22,8 +22,10 @@ import (
 // The queue group: how much work the town holds, and what the spec dispatcher
 // did with it in the last hour.
 //
-// Each bead column is one store read per registered rig, summed. The rigs come
-// from mayor/rigs.json, or from the registry section of mayor/town.json on the
+// Each bead column is one store read per registered rig, summed, except
+// waiting_to_land, which a rig's landing worker's published count answers
+// while that count is fresh (queueLandingColumn). The rigs come from
+// mayor/rigs.json, or from the registry section of mayor/town.json on the
 // two-file layout (internal/config/layout.go). Each read goes through a store
 // opened for the rig's own directory, which is the scoping `bd -C <town>/<rig>`
 // gave, and the filters each column asks for are queueBeadColumns' own.
@@ -105,6 +107,11 @@ var queueSeatRe = regexp.MustCompile(`^([^\s]+) (\d+)/(\d+)`)
 type queueBeadColumn struct {
 	column string
 	read   func(BeadStore) ([]*beads.Issue, error)
+	// published, when set, is where a count someone else read the same board
+	// for answers this column: the landing worker's own list, which the sample
+	// can report instead of repeating it (gt-hw6ih). It returns the counts
+	// fresh as of now, and a rig it leaves out is read from the store.
+	published func(env Env, now time.Time) map[string]int
 	// skipEphemeral leaves out the rows bd marks ephemeral (infrastructure
 	// wisps, not work).
 	skipEphemeral bool
@@ -146,6 +153,11 @@ func queueBeadColumns() []queueBeadColumn {
 // submitted and waiting to land. The burst row counts the same board
 // (BurstRow).
 //
+// The landing worker lists this board at the top of every pass anyway, so a
+// sample reads the count that pass published (Env.LandingQueue) and lists the
+// board only for a rig whose count is stale or was never published
+// (gt-hw6ih).
+//
 // List adds no status filter of its own, so the label and bd's default list
 // scope are the whole query, as they were for the pre-seam `bd list`; Limit 0
 // asks for the whole board rather than bd's default page, which is what the
@@ -153,6 +165,12 @@ func queueBeadColumns() []queueBeadColumn {
 func queueLandingColumn() queueBeadColumn {
 	return queueBeadColumn{
 		column: "waiting_to_land",
+		published: func(env Env, now time.Time) map[string]int {
+			if env.LandingQueue == nil {
+				return nil
+			}
+			return env.LandingQueue(now)
+		},
 		read: func(s BeadStore) ([]*beads.Issue, error) {
 			return s.List(beads.ListOptions{Label: "gt:ready-to-land", Limit: 0})
 		},
@@ -240,8 +258,13 @@ func queueSumBeads(ctx context.Context, env Env, rigs []string, col queueBeadCol
 
 // queueSumCount is queueSumBeads's reading as a number and a flag: ok is false
 // when any rig failed, so a caller that needs the count cannot mistake a
-// failed read for an empty queue.
+// failed read for an empty queue. A rig the column's published count answers
+// costs no store read; the rigs it does not answer are read as before.
 func queueSumCount(ctx context.Context, env Env, rigs []string, col queueBeadColumn) (int, bool) {
+	var published map[string]int
+	if col.published != nil {
+		published = col.published(env, env.now())
+	}
 	type result struct {
 		n   int
 		err error
@@ -250,6 +273,10 @@ func queueSumCount(ctx context.Context, env Env, rigs []string, col queueBeadCol
 	sem := make(chan struct{}, queueRigParallel)
 	var wg sync.WaitGroup
 	for i, rig := range rigs {
+		if n, ok := published[rig]; ok {
+			results[i] = result{n: n}
+			continue
+		}
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(i int, rig string) {
