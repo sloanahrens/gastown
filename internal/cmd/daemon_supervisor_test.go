@@ -2303,3 +2303,26 @@ func TestContainerSupervisorRestartRefusesAnUnsetTown(t *testing.T) {
 		t.Errorf("restartDaemon on an unset town ran %v", calls.argv)
 	}
 }
+
+// The restart proof needs the owner the restarted daemon will name, and a town
+// that sets neither container field has none: the proof is refused rather than
+// built on the live container's default name. (restartDaemon asks the guard
+// first, which refuses the same town, so this reaches the function directly.)
+func TestContainerRestartProofRefusesAnUnsetTown(t *testing.T) {
+	t.Parallel()
+	town := startGuardTown(t)
+	writeComposeFile(t, town)
+	c, _ := stubContainerTown(t, &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer})
+	sup, err := c.detectDaemonSupervisor(town)
+	if err != nil || sup == nil {
+		t.Fatalf("detectDaemonSupervisor = (%v, %v), want the container supervisor", sup, err)
+	}
+	c.readState = func(string) (*daemon.State, error) {
+		t.Error("state.json was read for a town whose container the settings do not name")
+		return nil, nil
+	}
+
+	if _, err := c.containerRestartProofFor(town, sup); !errors.Is(err, errContainerSettingsUnset) {
+		t.Fatalf("containerRestartProofFor error = %v, want the unset-settings refusal", err)
+	}
+}
