@@ -16,6 +16,7 @@ const (
 	envOMPath    = "INSTALL_OM_PATH"
 	envSrcDir    = "INSTALL_OM_SRC_DIR"
 	envSignDir   = "INSTALL_OM_SIGN_DIR"
+	envSignIdent = "INSTALL_OM_SIGN_IDENTITY"
 	envLockWait  = "INSTALL_OM_LOCK_WAIT"
 	envSignWait  = "INSTALL_OM_SIGN_TIMEOUT"
 	envSmokeWait = "INSTALL_OM_SMOKE_TIMEOUT"
@@ -25,6 +26,8 @@ const (
 	defaultLockWait  = 300 * time.Second
 	defaultSignWait  = 30 * time.Second
 	defaultSmokeWait = 30 * time.Second
+	// defaultSignIdentity is the keychain identity the gt installer signs gt with.
+	defaultSignIdentity = "gastown-dev-unattended"
 )
 
 // resolveConfig fills each unset path and wait in cfg from the environment, then
@@ -69,6 +72,12 @@ func resolveConfig(cfg Config, cwd string, getenv func(string) string, exists fu
 	}
 	if cfg.SignDir == "" {
 		cfg.SignDir = filepath.Join(cfg.TownRoot, ".runtime", "signing")
+	}
+	if cfg.SignIdentity == "" {
+		cfg.SignIdentity = getenv(envSignIdent)
+	}
+	if cfg.SignIdentity == "" {
+		cfg.SignIdentity = defaultSignIdentity
 	}
 
 	var err error

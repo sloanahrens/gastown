@@ -90,6 +90,9 @@ type Config struct {
 	// SignDir holds the signing identity. Empty takes INSTALL_OM_SIGN_DIR, else
 	// <town>/.runtime/signing.
 	SignDir string
+	// SignIdentity is the keychain identity om is signed with. Empty takes
+	// INSTALL_OM_SIGN_IDENTITY, else gastown-dev-unattended.
+	SignIdentity string
 
 	// DaemonDir holds the install lock and install-om-receipts.jsonl.
 	DaemonDir string
@@ -108,6 +111,8 @@ type Config struct {
 	Exec ExecFunc
 	// Acquire takes the install lock: the real one is installlock.Acquire.
 	Acquire AcquireFunc
+	// Files is the filesystem the sign and keep steps use. Nil is the real one.
+	Files Files
 	// Now is the clock for the receipt timestamp and duration. Nil uses time.Now.
 	Now func() time.Time
 	// Logf receives the notices a run does not fail for. Nil discards them.
