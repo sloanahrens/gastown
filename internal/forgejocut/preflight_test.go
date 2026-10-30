@@ -3,6 +3,8 @@ package forgejocut
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -279,31 +281,78 @@ func TestProbeArgsAndOutcome(t *testing.T) {
 	}
 }
 
-// adminMarker stands in for the bytes of an admin token. The probe is handed the
-// token as a file path, so no argv word, log line or returned error may carry the
-// value, and the fakes below return it in their errors to tempt a wrap.
+// adminMarker is the value of an admin token. It is written into a real token
+// file, so the assertions below run against the token's bytes rather than a
+// string that never leaves the test.
 const adminMarker = "tok-9f3a1c-marker"
 
-func TestProbeKeepsAdminMarkerOutOfArgvLogsAndErrors(t *testing.T) {
+// stageTokenFile writes FORGEJO_ADMIN_TOKEN=<marker> to a fresh file and returns
+// its path: the value the preflight is handed, never the token itself.
+func stageTokenFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "admin.env")
+	if err := os.WriteFile(path, []byte("FORGEJO_ADMIN_TOKEN="+adminMarker+"\n"), 0o600); err != nil {
+		t.Fatalf("stage the token file: %v", err)
+	}
+	return path
+}
+
+// probeArgvWithToken is the exact probe argv for a rig whose admin token file is
+// path. Nothing may be added to it: an extra word is what a leaked token looks
+// like, and the slice comparison below turns that red.
+func probeArgvWithToken(path string) []string {
+	return []string{"bash", probeScript, "gastown",
+		"--repo", "acme/gastown",
+		"--main-branch", "main",
+		"--town-root", "/srv/town",
+		"--api-url", probeAPIURL,
+		"--web-url", probeWebURL,
+		"--admin-token-file", path,
+		"--github-url", probeGitHub,
+		"--git-url", probeAdminGit,
+	}
+}
+
+func TestProbeKeepsAdminTokenOutOfArgvLogsAndErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		probe bool // true runs ProbeGreen; false runs RefuseIfLandingInFlight
-		out   string
-		err   error
+		name     string
+		probe    bool // true runs ProbeGreen; false runs RefuseIfLandingInFlight
+		out      string
+		runErr   error
+		wantArgv func(tokenPath string) []string
 	}{
-		{name: "green probe", probe: true},
-		{name: "probe fails and its exit error echoes the marker", probe: true, err: fmt.Errorf("exit status 1: %s", adminMarker)},
-		{name: "probe cannot start with the marker in its error", probe: true, err: errors.New("fork/exec /usr/bin/bash: " + adminMarker)},
-		{name: "landing in flight refusal", out: "1\n"},
+		{
+			name:     "green probe",
+			probe:    true,
+			wantArgv: probeArgvWithToken,
+		},
+		{
+			name:     "probe fails and its exit error echoes the token",
+			probe:    true,
+			runErr:   fmt.Errorf("exit status 1: %s", adminMarker),
+			wantArgv: probeArgvWithToken,
+		},
+		{
+			name:     "probe cannot start with the token in its error",
+			probe:    true,
+			runErr:   errors.New("fork/exec /usr/bin/bash: " + adminMarker),
+			wantArgv: probeArgvWithToken,
+		},
+		{
+			name:     "landing in flight refusal",
+			out:      "1\n",
+			wantArgv: func(string) []string { return queueArgv },
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			tokenPath := stageTokenFile(t)
 			o := probeOptions()
 			o.RigRoot = queueRoot
-			o.AdminTokenFile = probeTokenFile
-			run := &fakeRunner{out: []byte(tt.out), err: tt.err}
+			o.AdminTokenFile = tokenPath
+			run := &fakeRunner{out: []byte(tt.out), err: tt.runErr}
 			var logs []string
 			log := func(s string) { logs = append(logs, s) }
 			var err error
@@ -312,21 +361,44 @@ func TestProbeKeepsAdminMarkerOutOfArgvLogsAndErrors(t *testing.T) {
 			} else {
 				err = RefuseIfLandingInFlight(run, o, log)
 			}
-			// Failure messages name the surface, never the value: the bead forbids the
-			// token in any test output.
+			// The token travels as a file path and nowhere else: the recorded argv is
+			// the exact slice, and the token's bytes are in no argv word, log line or
+			// returned error. Failure messages name the surface, never the value: the
+			// bead forbids the token in any test output.
+			wantArgv := tt.wantArgv(tokenPath)
+			if len(run.calls) != 1 || !slices.Equal(run.calls[0], wantArgv) {
+				t.Fatal("a recorded argv is not the exact expected argv")
+			}
 			for _, argv := range run.calls {
 				if strings.Contains(commandText(argv), adminMarker) {
-					t.Fatal("a recorded argv carries the admin token marker")
+					t.Fatal("a recorded argv carries the admin token")
 				}
 			}
 			for _, line := range logs {
 				if strings.Contains(line, adminMarker) {
-					t.Fatal("a log line carries the admin token marker")
+					t.Fatal("a log line carries the admin token")
 				}
 			}
 			if err != nil && strings.Contains(err.Error(), adminMarker) {
-				t.Fatal("the returned error carries the admin token marker")
+				t.Fatal("the returned error carries the admin token")
 			}
 		})
+	}
+}
+
+// TestProbeNeverReadsTheAdminTokenFile pins the other half of the secret rule: the
+// preflight hands the path to the probe and never opens the file itself. A path
+// that does not exist is therefore still green, which is observable proof of the
+// no-read claim without a filesystem seam to count.
+func TestProbeNeverReadsTheAdminTokenFile(t *testing.T) {
+	t.Parallel()
+	o := probeOptions()
+	o.AdminTokenFile = filepath.Join(t.TempDir(), "absent.env")
+	run := &fakeRunner{}
+	if err := ProbeGreen(run, o, func(string) {}); err != nil {
+		t.Fatalf("ProbeGreen with an absent token file = %v, want nil", err)
+	}
+	if len(run.calls) != 1 || !slices.Equal(run.calls[0], probeArgvWithToken(o.AdminTokenFile)) {
+		t.Fatalf("ProbeGreen ran %q, want one call of %q", run.calls, probeArgvWithToken(o.AdminTokenFile))
 	}
 }
