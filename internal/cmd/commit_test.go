@@ -65,17 +65,40 @@ func TestCommitAuthorEnvIsTheSeatAddress(t *testing.T) {
 	}
 }
 
-// TestCommitHelpNamesTheSeatAddress checks the help's identity mapping shows the
-// seat's own name and address, as seatForCommit derives them for the same seat.
+// TestCommitHelpNamesTheSeatAddress pins the literal lines the help shows for the
+// seat gastown/crew/jack. The expected lines are written out here, not derived
+// from seatForCommit, so a change to the help text fails this test.
 func TestCommitHelpNamesTheSeatAddress(t *testing.T) {
 	t.Parallel()
-	seat := seatForCommit("gastown/crew/jack")
-	long := commitCmd.Long
-	for _, line := range []string{"Name: " + seat.Name + "\n", "Email: " + seat.Email + "\n"} {
-		if !strings.Contains(long, line) {
-			t.Errorf("help does not show %q:\n%s", strings.TrimSpace(line), long)
+	const (
+		addressLine = "   address, <name>@gastown.local"
+		agentLine   = "  Agent: gastown/crew/jack  →  Name: jack"
+		emailLine   = "                                Email: jack@gastown.local"
+	)
+	lines := strings.Split(commitCmd.Long, "\n")
+	for _, want := range []string{addressLine, agentLine, emailLine} {
+		if !commitHelpHasLine(lines, want) {
+			t.Errorf("help has no line %q (help is %d lines)", want, len(lines))
 		}
 	}
+	for _, stale := range []string{"is refused", "worktree's user.email"} {
+		for _, line := range lines {
+			if strings.Contains(line, stale) {
+				t.Errorf("help still says %q (help is %d lines)", stale, len(lines))
+			}
+		}
+	}
+}
+
+// commitHelpHasLine reports whether one of lines equals want once trailing spaces
+// are trimmed, so the match is anchored to a whole line.
+func commitHelpHasLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if strings.TrimRight(line, " ") == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCommitIdentity(t *testing.T) {
