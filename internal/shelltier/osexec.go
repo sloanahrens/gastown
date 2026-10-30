@@ -6,11 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // errNoArgv is the error for a command with no command line to run.
@@ -22,8 +19,8 @@ var errNoArgv = errors.New("command has no argv")
 // in c.Env before it starts the command.
 //
 // A command that exits with a code returns that code and a nil error. A command
-// that cannot start returns the error, and so does one whose context ends: a
-// kill by the context is not an exit code.
+// that cannot start returns the error, and so does one whose context ends or
+// that a signal ended: neither is an exit code.
 func OSExec(ctx context.Context, c Command) (int, error) {
 	return execWith(ctx, c, osFiles{}, startProcess)
 }
@@ -64,36 +61,29 @@ func execWith(ctx context.Context, c Command, fsys files, start starter) (int, e
 	if err != nil {
 		return 0, fmt.Errorf("create log: %w", err)
 	}
+	script := c.Argv[len(c.Argv)-1]
 	err = start(ctx, c, log)
 	// A log that will not close may have lost output, so its error fails a
 	// command that would otherwise pass; an exit code still wins.
 	if closeErr := log.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
-	// A process the context killed exits by signal, and its ExitCode is -1: the
-	// kill, not the script, decided the result, so it is an error.
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && ctx.Err() == nil {
+	// A context that ended decided the result, whatever the process reported:
+	// the kill is not the script's own outcome.
+	if ctx.Err() != nil {
+		return 0, fmt.Errorf("%s ended with its context: %w", script, ctx.Err())
+	}
+	var exitErr interface {
+		error
+		ExitCode() int
+	}
+	if errors.As(err, &exitErr) {
+		// A signal the context did not send exits with code -1: it is not a
+		// result the script reported, so it is an error.
+		if exitErr.ExitCode() == -1 {
+			return 0, fmt.Errorf("%s ended by a signal: %w", script, err)
+		}
 		return exitErr.ExitCode(), nil
 	}
-	if err != nil {
-		return 0, err
-	}
-	if ctx.Err() != nil {
-		return 0, fmt.Errorf("command ended with its context: %w", ctx.Err())
-	}
-	return 0, nil
-}
-
-// startProcess runs c with os/exec and returns what cmd.Run returned. The
-// command gets its own process group, so when its context ends the kill reaches
-// the scripts and tools it started, not only the shell that was named.
-func startProcess(ctx context.Context, c Command, log io.Writer) error {
-	cmd := exec.CommandContext(ctx, c.Argv[0], c.Argv[1:]...)
-	util.SetProcessGroup(cmd)
-	cmd.Dir = c.Dir
-	cmd.Env = append(os.Environ(), c.Env...)
-	cmd.Stdout = log
-	cmd.Stderr = log
-	return cmd.Run()
+	return 0, err
 }

@@ -4,12 +4,24 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 )
 
 // errDenied is the failure a fake file system or starter returns.
 var errDenied = errors.New("denied")
+
+// fakeExit is an error with an exit code, standing in for *exec.ExitError: a
+// code of -1 is a process that a signal ended.
+type fakeExit struct {
+	code int
+}
+
+func (e fakeExit) Error() string { return "fake: killed" }
+
+func (e fakeExit) ExitCode() int { return e.code }
 
 // fakeFiles is the file system a case runs against: it fails the directories
 // and the create it is told to, and records every call in order.
@@ -161,6 +173,51 @@ func TestExecWithReportsACommandWhoseContextEndedAsAnErrorNotACode(t *testing.T)
 	}
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 when the context ended", code)
+	}
+}
+
+func TestExecWithClassifiesHowTheCommandEnded(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		err      error // what the starter returns
+		endCtx   bool  // the context ends while the command runs
+		wantCode int
+		wantErr  error  // errors.Is target, when non-nil
+		wantText string // a substring the error text must hold, when non-empty
+	}{
+		{name: "exit code with a live context", err: fakeExit{code: 3}, wantCode: 3},
+		{name: "signal the context did not send", err: fakeExit{code: -1}, wantText: "fake: killed"},
+		{name: "exit code after the context ended", err: fakeExit{code: 3}, endCtx: true, wantErr: context.Canceled},
+		{name: "signal after the context ended", err: fakeExit{code: -1}, endCtx: true, wantErr: context.Canceled},
+		{name: "output held past the wait delay", err: exec.ErrWaitDelay, wantErr: exec.ErrWaitDelay},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeFiles{}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			start := func(context.Context, Command, io.Writer) error {
+				if tc.endCtx {
+					cancel()
+				}
+				return tc.err
+			}
+			code, err := execWith(ctx, testCommand(), f, start)
+			if code != tc.wantCode {
+				t.Fatalf("exit code = %d, want %d", code, tc.wantCode)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want one wrapping %v", err, tc.wantErr)
+			}
+			if tc.wantText != "" && (err == nil || !strings.Contains(err.Error(), tc.wantText)) {
+				t.Fatalf("error = %v, want its text to contain %q", err, tc.wantText)
+			}
+			if tc.wantErr == nil && tc.wantText == "" && err != nil {
+				t.Fatalf("error = %v, want nil", err)
+			}
+		})
 	}
 }
 

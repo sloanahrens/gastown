@@ -5,12 +5,16 @@ package shelltier
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 func TestIntegrationOSExecReportsTheExitCode(t *testing.T) {
@@ -110,49 +114,101 @@ func TestIntegrationOSExecReportsABudgetKillAsAnErrorNotACode(t *testing.T) {
 	}
 }
 
+// TestIntegrationBudgetKillTakesTheScriptsChildren runs a script whose child
+// holds a FIFO's write end open. The test's open of the read end returns only
+// once that child has the FIFO, so it is the ready signal: no sleep, no poll.
+// After the budget ends the command, EOF on the read means every process that
+// held the write end is gone. A child the kill missed keeps it open, and the
+// read times out.
 func TestIntegrationBudgetKillTakesTheScriptsChildren(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "child.pid")
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	fifo := filepath.Join(dir, "child.fifo")
+	pidFile := filepath.Join(dir, "group.pid")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The script leads its own process group, so the pid it records is the
+	// group id. Cleanup kills that group if the run failed before the budget did.
+	t.Cleanup(func() { killRecordedGroup(t, pidFile) })
+
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	_, err := OSExec(ctx, Command{
-		Dir:  dir,
-		Argv: []string{"sh", "-c", `sleep 30 & echo $! > "$PIDFILE"; wait`},
-		Env:  []string{"PIDFILE=" + pidFile},
-		Log:  filepath.Join(dir, "logs", "run.log"),
-	})
-	if err == nil {
-		t.Fatal("error = nil, want the budget kill reported")
+	done := make(chan error, 1)
+	go func() {
+		_, err := OSExec(ctx, Command{
+			Dir:  dir,
+			Argv: []string{"sh", "-c", `echo $$ > "$PIDFILE"; sleep 60 3>"$FIFO" & wait`},
+			Env:  []string{"PIDFILE=" + pidFile, "FIFO=" + fifo},
+			Log:  filepath.Join(dir, "logs", "run.log"),
+		})
+		done <- err
+	}()
+
+	type opened struct {
+		f   *os.File
+		err error
 	}
-	raw, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("the script did not record its child's pid: %v", err)
+	ready := make(chan opened, 1)
+	go func() {
+		f, err := os.OpenFile(fifo, os.O_RDONLY, 0)
+		ready <- opened{f, err}
+	}()
+	var reader *os.File
+	select {
+	case o := <-ready:
+		if o.err != nil {
+			t.Fatalf("open the FIFO's read end: %v", o.err)
+		}
+		reader = o.f
+	case err := <-done:
+		t.Fatalf("the script ended before its child opened the FIFO: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the child never opened the FIFO")
 	}
-	pid := strings.TrimSpace(string(raw))
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		state := processState(t, pid)
-		if state == "" || strings.HasPrefix(state, "Z") {
-			return
+	defer reader.Close()
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want one wrapping context.Canceled", err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("child %s still running (state %q) after the budget killed its script", pid, state)
+	case <-time.After(30 * time.Second):
+		t.Fatal("OSExec did not return after the budget ended the command")
+	}
+
+	// The read runs in its own goroutine so a surviving child cannot hang the test.
+	eof := make(chan error, 1)
+	go func() {
+		_, err := reader.Read(make([]byte, 1))
+		eof <- err
+	}()
+	select {
+	case err := <-eof:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("read after the budget kill = %v, want EOF: a child still holds the FIFO open", err)
 		}
-		time.Sleep(50 * time.Millisecond)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a child still holds the FIFO open after the budget killed its script")
 	}
 }
 
-// processState is the ps state of pid, or empty when no such process exists.
-func processState(t *testing.T, pid string) string {
+// killRecordedGroup kills the process group whose id a script recorded in
+// pidFile. A missing file means the script never ran, and an empty group means
+// the kill already happened: both are no-ops.
+func killRecordedGroup(t *testing.T, pidFile string) {
 	t.Helper()
-	out, err := exec.Command("ps", "-o", "stat=", "-p", pid).Output()
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return "" // ps exits 1 when no process has the pid
-	}
+	raw, err := os.ReadFile(pidFile)
 	if err != nil {
-		t.Fatalf("ps: %v", err)
+		return
 	}
-	return strings.TrimSpace(string(out))
+	pgid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Logf("pid file %s does not hold a pid: %v", pidFile, err)
+		return
+	}
+	if err := util.KillProcessGroupID(pgid); err != nil {
+		t.Logf("kill process group %d: %v", pgid, err)
+	}
 }
