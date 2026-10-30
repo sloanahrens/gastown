@@ -203,6 +203,10 @@ type driftAdapter struct {
 	edits map[string][]docEdit
 	// closed holds each rig's closed beads, read once.
 	closed map[string][]*beads.Issue
+	// names holds each doc's whole-path pattern, compiled once: a section's
+	// window covers every landed bead, so the compile must not repeat per bead
+	// (gt-f65wb).
+	names *docNameCache
 }
 
 func newDriftAdapter(log string, b driftBeads, docs docHistory, now func() time.Time) *driftAdapter {
@@ -213,6 +217,7 @@ func newDriftAdapter(log string, b driftBeads, docs docHistory, now func() time.
 		now:    now,
 		edits:  map[string][]docEdit{},
 		closed: map[string][]*beads.Issue{},
+		names:  newDocNameCache(),
 	}
 }
 
@@ -387,18 +392,41 @@ func (a *driftAdapter) beadLanded(item Item) (bool, error) {
 		if !stale.IsLandedReason(is.CloseReason) {
 			continue
 		}
-		if namesDoc(is.Title+"\n"+is.Description, doc) {
+		if a.names.namesDoc(is.Title+"\n"+is.Description, doc) {
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
+// docNameCache answers a doc's whole-path question from a pattern compiled
+// once. compile is the seam a test counts compiles through.
+type docNameCache struct {
+	compile func(doc string) *regexp.Regexp
+	byDoc   map[string]*regexp.Regexp
+}
+
+func newDocNameCache() *docNameCache {
+	return &docNameCache{compile: compileDocName, byDoc: map[string]*regexp.Regexp{}}
+}
+
+func compileDocName(doc string) *regexp.Regexp {
+	return regexp.MustCompile(`(^|[^\w./-])` + regexp.QuoteMeta(doc) + `($|[^\w./-]|\.($|\s))`)
+}
+
 // namesDoc reports whether text names doc as a whole path. A longer path that
 // holds doc, such as old/docs/a.md or docs/a.md.bak, does not name it, and a
-// full stop or comma after the path does.
-func namesDoc(text, doc string) bool {
-	re := regexp.MustCompile(`(^|[^\w./-])` + regexp.QuoteMeta(doc) + `($|[^\w./-]|\.($|\s))`)
+// full stop or comma after the path does. It holds the doc's literal text only
+// if it names it, so the string check skips the pattern for most beads.
+func (c *docNameCache) namesDoc(text, doc string) bool {
+	if !strings.Contains(text, doc) {
+		return false
+	}
+	re, ok := c.byDoc[doc]
+	if !ok {
+		re = c.compile(doc)
+		c.byDoc[doc] = re
+	}
 	return re.MatchString(text)
 }
 

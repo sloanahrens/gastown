@@ -60,7 +60,11 @@ type logtriageAdapter struct {
 
 	loaded bool
 	attn   []attention.Event
-	esc    []*beads.Issue
+	esc    []logtriageEscalation
+
+	// matchWord runs one subject word's pattern, for the test that counts which
+	// texts reach it. nil uses the pattern's MatchString.
+	matchWord func(*regexp.Regexp, string) bool
 }
 
 func newLogtriageAdapter(log string, events func() ([]attention.Event, error), escalations func() ([]*beads.Issue, error), now func() time.Time) *logtriageAdapter {
@@ -148,8 +152,8 @@ func (a *logtriageAdapter) Label(_ context.Context, item Item) (Labeling, error)
 		return Labeling{}, err
 	}
 
-	subject := newLogtriageSubject(line)
-	if len(subject) == 0 {
+	subject := newLogtriageSubject(line, a.matchWord)
+	if len(subject.words) == 0 {
 		return Labeling{}, nil
 	}
 	end := last.Add(logtriageWindow)
@@ -157,14 +161,17 @@ func (a *logtriageAdapter) Label(_ context.Context, item Item) (Labeling, error)
 
 	var followUp, selfHealed, escalated, page, unreadable bool
 	for _, e := range a.attn {
-		if e.State != attention.EventNew || !subject.matches(e.Text) {
+		// A readable time outside the window cannot be the follow-up, so it is
+		// skipped before the pattern runs. A time that will not read could fall
+		// inside, so it still matches first and sets unreadable.
+		if !e.TS.IsZero() && !inWindow(e.TS) {
+			continue
+		}
+		if !subject.matches(e.Text) {
 			continue
 		}
 		if e.TS.IsZero() {
 			unreadable = true
-			continue
-		}
-		if !inWindow(e.TS) {
 			continue
 		}
 		if e.Handled == attention.HandledSelfHealed {
@@ -173,20 +180,19 @@ func (a *logtriageAdapter) Label(_ context.Context, item Item) (Labeling, error)
 		}
 		followUp = true
 	}
-	for _, issue := range a.esc {
-		if !subject.matches(issue.Title) {
+	for _, e := range a.esc {
+		if e.readable && !inWindow(e.at) {
 			continue
 		}
-		at, ok := escalationRaised(issue)
-		if !ok {
+		if !subject.matchesLowered(e.title) {
+			continue
+		}
+		if !e.readable {
 			unreadable = true
 			continue
 		}
-		if !inWindow(at) {
-			continue
-		}
 		followUp, escalated = true, true
-		if isPageSeverity(beads.ParseEscalationFields(issue.Description).Severity) {
+		if isPageSeverity(e.severity) {
 			page = true
 		}
 	}
@@ -212,7 +218,10 @@ func (a *logtriageAdapter) Label(_ context.Context, item Item) (Labeling, error)
 	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+")}, nil
 }
 
-// load reads the attention events and the escalation beads once.
+// load reads the attention events and the escalation beads once, and shapes
+// them for the per-group loop: a state that is not new is skipped there for
+// every group, so it is dropped here, and an escalation's time, severity and
+// lowercased title are read once rather than once per group (gt-f65wb).
 func (a *logtriageAdapter) load() error {
 	if a.loaded {
 		return nil
@@ -221,23 +230,61 @@ func (a *logtriageAdapter) load() error {
 	if err != nil {
 		return fmt.Errorf("reading the attention events: %w", err)
 	}
-	esc, err := a.escalations()
+	escalations, err := a.escalations()
 	if err != nil {
 		return fmt.Errorf("reading the escalation beads: %w", err)
 	}
-	a.attn = events
-	a.esc = esc
+	a.attn = make([]attention.Event, 0, len(events))
+	for _, e := range events {
+		if e.State == attention.EventNew {
+			a.attn = append(a.attn, e)
+		}
+	}
+	a.esc = make([]logtriageEscalation, 0, len(escalations))
+	for _, issue := range escalations {
+		a.esc = append(a.esc, newLogtriageEscalation(issue))
+	}
 	a.loaded = true
 	return nil
+}
+
+// logtriageEscalation is an escalation as Label reads it: its raised time when
+// that reads, and the rest of what the loop needs, read once.
+type logtriageEscalation struct {
+	at       time.Time
+	readable bool
+	title    string
+	severity string
+}
+
+// newLogtriageEscalation reads an escalation's raised time from its own
+// escalated_at, or the bead's creation when the description has none.
+func newLogtriageEscalation(issue *beads.Issue) logtriageEscalation {
+	fields := beads.ParseEscalationFields(issue.Description)
+	raw := fields.EscalatedAt
+	if raw == "" {
+		raw = issue.CreatedAt
+	}
+	at, err := time.Parse(time.RFC3339, raw)
+	return logtriageEscalation{
+		at:       at,
+		readable: err == nil,
+		title:    strings.ToLower(issue.Title),
+		severity: fields.Severity,
+	}
 }
 
 // logtriageSubject is the words a follow-up's text must share: the group's
 // category word and each bead id its samples name. Each word is a pattern that
 // matches it only as a whole token, so "dolt" does not match "doltish" and
 // "gt-abc1" does not match "gt-abc12".
-type logtriageSubject []*regexp.Regexp
+type logtriageSubject struct {
+	words []*regexp.Regexp
+	// matchWord runs one word's pattern; nil uses the pattern's MatchString.
+	matchWord func(*regexp.Regexp, string) bool
+}
 
-func newLogtriageSubject(line logtriage.Line) logtriageSubject {
+func newLogtriageSubject(line logtriage.Line, matchWord func(*regexp.Regexp, string) bool) logtriageSubject {
 	var words []string
 	if c := line.Answers[logtriage.QCategory].Choice; c != "" {
 		words = append(words, strings.ToLower(c))
@@ -251,9 +298,9 @@ func newLogtriageSubject(line logtriage.Line) logtriageSubject {
 			}
 		}
 	}
-	subject := make(logtriageSubject, 0, len(words))
+	subject := logtriageSubject{words: make([]*regexp.Regexp, 0, len(words)), matchWord: matchWord}
 	for _, w := range words {
-		subject = append(subject, regexp.MustCompile(`(?:^|[^a-z0-9_-])`+regexp.QuoteMeta(w)+`(?:$|[^a-z0-9_-])`))
+		subject.words = append(subject.words, regexp.MustCompile(`(?:^|[^a-z0-9_-])`+regexp.QuoteMeta(w)+`(?:$|[^a-z0-9_-])`))
 	}
 	return subject
 }
@@ -261,24 +308,26 @@ func newLogtriageSubject(line logtriage.Line) logtriageSubject {
 // matches reports whether text contains one of the subject's words as a whole
 // token, without regard to case.
 func (s logtriageSubject) matches(text string) bool {
-	lower := strings.ToLower(text)
-	for _, w := range s {
-		if w.MatchString(lower) {
+	return s.matchesLowered(strings.ToLower(text))
+}
+
+// matchesLowered is matches for a text already lowercased, so a text read once
+// pays the lowercase once.
+func (s logtriageSubject) matchesLowered(text string) bool {
+	if s.matchWord == nil {
+		for _, w := range s.words {
+			if w.MatchString(text) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, w := range s.words {
+		if s.matchWord(w, text) {
 			return true
 		}
 	}
 	return false
-}
-
-// escalationRaised is when an escalation was raised: its escalated_at, or the
-// bead's creation when the description has none.
-func escalationRaised(issue *beads.Issue) (time.Time, bool) {
-	raw := beads.ParseEscalationFields(issue.Description).EscalatedAt
-	if raw == "" {
-		raw = issue.CreatedAt
-	}
-	at, err := time.Parse(time.RFC3339, raw)
-	return at, err == nil
 }
 
 // isPageSeverity reports whether an escalation severity pages the operator. A

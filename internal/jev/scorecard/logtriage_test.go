@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -54,12 +55,12 @@ func logtriageFixtureEvents() []attention.Event {
 // critical for the landing group and one medium for the config group.
 func logtriageFixtureEscalations() []*beads.Issue {
 	return []*beads.Issue{
-		logtriageEscalation("gt-esc1", "Landing stuck on gt-abc12", "critical", time.Date(2026, 10, 21, 10, 15, 0, 0, time.UTC)),
-		logtriageEscalation("gt-esc2", "Config: rig settings missing", "medium", time.Date(2026, 10, 21, 9, 10, 0, 0, time.UTC)),
+		logtriageFixtureEscalation("gt-esc1", "Landing stuck on gt-abc12", "critical", time.Date(2026, 10, 21, 10, 15, 0, 0, time.UTC)),
+		logtriageFixtureEscalation("gt-esc2", "Config: rig settings missing", "medium", time.Date(2026, 10, 21, 9, 10, 0, 0, time.UTC)),
 	}
 }
 
-func logtriageEscalation(id, title, severity string, at time.Time) *beads.Issue {
+func logtriageFixtureEscalation(id, title, severity string, at time.Time) *beads.Issue {
 	return &beads.Issue{
 		ID:          id,
 		Title:       title,
@@ -196,6 +197,107 @@ func TestLogtriageLabelRules(t *testing.T) {
 	}
 }
 
+// TestLogtriageLabelsAFixtureOfGroups labels the fixture's groups against one
+// set of events and escalations, and compares every label and rule with the
+// stored expectation. The set holds a zero-timestamp event, a readable event
+// inside a window, one after it, and an escalation whose raised time does not
+// parse.
+func TestLogtriageLabelsAFixtureOfGroups(t *testing.T) {
+	t.Parallel()
+	events := []attention.Event{
+		{Text: "landing gt-abc12 stuck in flight", State: attention.EventNew, Handled: attention.HandledOperatorAction},
+		{TS: time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC), Text: "dolt connection refused", State: attention.EventNew, Handled: attention.HandledOperatorAction},
+		{TS: time.Date(2026, 10, 21, 10, 30, 0, 0, time.UTC), Text: "polecat capable hook empty for gt-pq7", State: attention.EventNew, Handled: attention.HandledOperatorAction},
+	}
+	escalations := []*beads.Issue{
+		{ID: "gt-esc-bad", Title: "Config rig settings missing", CreatedAt: "not a time"},
+	}
+	// The stored result, one line per fixture group.
+	want := []struct {
+		name    string
+		labeled bool
+		labels  map[string]bool
+		rule    string
+	}{
+		{
+			name: "the zero-timestamp event names the landing group, so it could fall in the window and the group is unlabeled",
+		},
+		{
+			name:    "the event inside the dolt group's window is a follow-up",
+			labeled: true,
+			labels:  map[string]bool{"needs_action": true, "is_routine_noise": false},
+			rule:    ruleLogtriageFollowUp,
+		},
+		{
+			name:    "the event after the polecat group's window is no follow-up",
+			labeled: true,
+			labels:  map[string]bool{"needs_action": false},
+			rule:    ruleLogtriageQuiet,
+		},
+		{
+			name: "the gate group is younger than an hour and unlabeled",
+		},
+		{
+			name: "the escalation whose raised time does not parse names the config group, so the group is unlabeled",
+		},
+	}
+	a := logtriageAdapterWith(logtriageNow, events, escalations)
+	items := parseLogtriageFixture(t, a)
+	if len(items) != len(want) {
+		t.Fatalf("fixture has %d groups, want %d", len(items), len(want))
+	}
+	for i, w := range want {
+		w := w
+		item := items[i]
+		t.Run(w.name, func(t *testing.T) {
+			lab, err := a.Label(context.Background(), item)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lab.Labeled != w.labeled {
+				t.Fatalf("labeled %v, want %v (rule %q)", lab.Labeled, w.labeled, lab.Rule)
+			}
+			if !w.labeled {
+				return
+			}
+			got := map[string]bool{}
+			for id, v := range lab.Labels {
+				got[string(id)] = v
+			}
+			if !reflect.DeepEqual(got, w.labels) {
+				t.Errorf("labels %v, want %v", got, w.labels)
+			}
+			if lab.Rule != w.rule {
+				t.Errorf("rule %q, want %q", lab.Rule, w.rule)
+			}
+		})
+	}
+}
+
+// TestLogtriageSkipsTheMatchForAnEventOutsideTheWindow shows the window check
+// runs before the subject pattern: an event after the window whose text names
+// the group never reaches the pattern, while an in-window event that does not
+// match does reach it. The dolt fixture group has one subject word, "dolt".
+func TestLogtriageSkipsTheMatchForAnEventOutsideTheWindow(t *testing.T) {
+	t.Parallel()
+	events := []attention.Event{
+		{TS: time.Date(2026, 10, 21, 10, 30, 0, 0, time.UTC), Text: "dolt connection refused", State: attention.EventNew, Handled: attention.HandledOperatorAction},
+		{TS: time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC), Text: "unrelated notice", State: attention.EventNew, Handled: attention.HandledOperatorAction},
+	}
+	a := logtriageAdapterWith(logtriageNow, events, nil)
+	matches := 0
+	a.matchWord = func(re *regexp.Regexp, text string) bool {
+		matches++
+		return re.MatchString(text)
+	}
+	if _, err := a.Label(context.Background(), parseLogtriageLine(t, a, logtriageFixtureLog[1])); err != nil {
+		t.Fatal(err)
+	}
+	if matches != 1 {
+		t.Errorf("the pattern ran %d times, want once, for the in-window event only", matches)
+	}
+}
+
 // TestLogtriageSkipsAGroupWithoutAnswersOrFromAnotherQuestionSet checks that a
 // group whose call failed, or one logged under another question set, is skipped.
 func TestLogtriageSkipsAGroupWithoutAnswersOrFromAnotherQuestionSet(t *testing.T) {
@@ -247,7 +349,7 @@ func TestLogtriageSubjectMatchesWholeWordsOnly(t *testing.T) {
 	subject := newLogtriageSubject(logtriage.Line{
 		Answers: map[string]logtriage.Answer{logtriage.QCategory: {Choice: "dolt"}},
 		Samples: []string{"2026/10/21 08:00:00 error: dolt query for gt-abc12 timed out"},
-	})
+	}, nil)
 	cases := []struct {
 		text string
 		want bool
@@ -342,7 +444,7 @@ func TestLogtriageSeverityPagesOnlyCriticalAndHigh(t *testing.T) {
 	} {
 		t.Run(tc.severity, func(t *testing.T) {
 			t.Parallel()
-			esc := logtriageEscalation("gt-esc5", "Dolt query timeout after 5s", tc.severity, time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC))
+			esc := logtriageFixtureEscalation("gt-esc5", "Dolt query timeout after 5s", tc.severity, time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC))
 			a := logtriageAdapterWith(logtriageNow, nil, []*beads.Issue{esc})
 			lab, err := a.Label(context.Background(), parseLogtriageLine(t, a, logtriageFixtureLog[1]))
 			if err != nil {

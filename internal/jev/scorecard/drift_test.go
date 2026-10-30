@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -450,6 +451,97 @@ func TestDriftLabelBeadLandedNamingTheDoc(t *testing.T) {
 				t.Errorf("rule = %q, want %q", lab.Rule, tc.rule)
 			}
 		})
+	}
+}
+
+// TestNamesDoc checks the answers the whole-path rule has always given, so the
+// faster path keeps them: the exact path names the doc, a longer path does not,
+// a full stop or comma after it does, and a doc's regexp metacharacters are
+// matched literally.
+func TestNamesDoc(t *testing.T) {
+	t.Parallel()
+	names := newDocNameCache()
+	cases := []struct {
+		name string
+		text string
+		doc  string
+		want bool
+	}{
+		{"the exact path", "docs: refresh the drift section in docs/reference.md", "docs/reference.md", true},
+		{"the path alone", "docs/reference.md", "docs/reference.md", true},
+		{"a longer path with a prefix directory", "docs: move old/docs/reference.md", "docs/reference.md", false},
+		{"a longer path with a .bak suffix", "docs: back up docs/reference.md.bak", "docs/reference.md", false},
+		{"a full stop after the path", "see docs/reference.md.", "docs/reference.md", true},
+		{"a comma after the path", "see docs/reference.md, then docs/scorecard.md", "docs/reference.md", true},
+		{"a text that does not hold the doc", "docs: fix docs/scorecard.md", "docs/reference.md", false},
+		{"a doc with regexp metacharacters", "see docs/a+b(c).md for the flags", "docs/a+b(c).md", true},
+		{"a text that is not the metacharactered doc", "see docs/ab(c)Xmd for the flags", "docs/a+b(c).md", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := names.namesDoc(tc.text, tc.doc); got != tc.want {
+				t.Errorf("namesDoc(%q, %q) = %v, want %v", tc.text, tc.doc, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDriftLabelNamesTheDocWithOneCompile drives Label over many landed beads
+// and many texts, counting the doc's pattern compiles through the seam: one
+// compile per doc, however many beads its window holds.
+func TestDriftLabelNamesTheDocWithOneCompile(t *testing.T) {
+	t.Parallel()
+	day := 24 * time.Hour
+	var issues []*beads.Issue
+	// Every bead but the last two holds the doc's text without naming it, so
+	// each Label runs the pattern for every bead before the naming one is
+	// reached.
+	for i := 0; i < 40; i++ {
+		issues = append(issues, &beads.Issue{
+			ID:          fmt.Sprintf("gt-%02d", i),
+			Title:       fmt.Sprintf("docs: touch old/docs/reference.md part %d", i),
+			Status:      statusClosed,
+			CloseReason: "Landed on main (abc123)",
+			ClosedAt:    driftAsk.Add(5 * day).Format(time.RFC3339Nano),
+		})
+	}
+	issues = append(issues,
+		&beads.Issue{
+			ID:          "gt-other",
+			Title:       "docs: fix docs/scorecard.md",
+			Status:      statusClosed,
+			CloseReason: "Landed on main (abc123)",
+			ClosedAt:    driftAsk.Add(5 * day).Format(time.RFC3339Nano),
+		},
+		&beads.Issue{
+			ID:          "gt-named",
+			Title:       "docs: refresh the drift section in docs/reference.md",
+			Status:      statusClosed,
+			CloseReason: "Landed on main (abc123)",
+			ClosedAt:    driftAsk.Add(5 * day).Format(time.RFC3339Nano),
+		},
+	)
+
+	compiles := 0
+	a := newDriftAdapter("", fakeDriftBeads{byRig: map[string][]*beads.Issue{"gastown": issues}}, fakeDocs{},
+		func() time.Time { return driftAsk.Add(40 * day) })
+	a.names.compile = func(doc string) *regexp.Regexp {
+		compiles++
+		return compileDocName(doc)
+	}
+
+	for i := 0; i < 10; i++ {
+		lab, err := a.Label(context.Background(), driftItem(driftAsk, "Drift battery", ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !lab.Labeled || !lab.Labels[qDocNowStale] || lab.Rule != ruleDriftBeadLanded {
+			t.Fatalf("label = %+v, want doc_now_stale under %q", lab, ruleDriftBeadLanded)
+		}
+	}
+	if compiles != 1 {
+		t.Errorf("compiled the doc's pattern %d times, want 1", compiles)
 	}
 }
 
