@@ -504,6 +504,20 @@ func TestStartupOwnerProbeSystemd(t *testing.T) {
 			state: templates.SupervisorState{Kind: "systemd", Loaded: true, PID: 1234, InvocationID: "0123456789abcdef0123456789abcdef"},
 		},
 		{
+			name: "a stopped unit with no invocation is stopped", owner: owner,
+			state: templates.SupervisorState{Kind: "systemd", Loaded: true},
+			known: true,
+		},
+		{
+			name: "a stopped unit that ran a different invocation is stopped", owner: owner,
+			state: templates.SupervisorState{Kind: "systemd", Loaded: true, InvocationID: "0123456789abcdef0123456789abcdef"},
+			known: true,
+		},
+		{
+			name: "a stopped unit whose state cannot be read is unknown", owner: owner,
+			state: templates.SupervisorState{Kind: "systemd", Loaded: true, Err: errors.New("systemctl failed")},
+		},
+		{
 			name: "the unit's invocation cannot be read", owner: owner,
 			state: templates.SupervisorState{Kind: "systemd", Loaded: true, PID: 1234, Err: errors.New("systemctl failed")},
 		},
