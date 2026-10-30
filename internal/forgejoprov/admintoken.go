@@ -114,14 +114,14 @@ func adminTokenFromFile(readFile func(string) ([]byte, error), path string) (str
 	return token, nil
 }
 
-// unquote drops one leading and one trailing single or double quote, as the
-// script's sed does.
+// unquote drops one pair of matching single or double quotes around value. A
+// value whose two ends are different quotes, or that has only one, keeps them,
+// and refuseUnsafeToken then refuses it: a mismatched pair is a broken line, not
+// a token to guess at. Whitespace after the value is not trimmed either, so a
+// trailing space is refused the same way.
 func unquote(value string) string {
-	if value != "" && (value[0] == '\'' || value[0] == '"') {
-		value = value[1:]
-	}
-	if value != "" && (value[len(value)-1] == '\'' || value[len(value)-1] == '"') {
-		value = value[:len(value)-1]
+	if len(value) >= 2 && (value[0] == '\'' || value[0] == '"') && value[len(value)-1] == value[0] {
+		return value[1 : len(value)-1]
 	}
 	return value
 }

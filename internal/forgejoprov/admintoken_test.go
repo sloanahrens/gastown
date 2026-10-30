@@ -137,6 +137,7 @@ func TestResolveAdminTokenFile(t *testing.T) {
 		{name: "bare key", body: "FORGEJO_ADMIN_TOKEN=x\n", want: "x"},
 		{name: "export with single quotes", body: "export FORGEJO_ADMIN_TOKEN='x'\n", want: "x"},
 		{name: "double quotes", body: "FORGEJO_ADMIN_TOKEN=\"x\"\n", want: "x"},
+		{name: "export with double quotes", body: "export FORGEJO_ADMIN_TOKEN=\"x\"\n", want: "x"},
 		{name: "indented export", body: "  export FORGEJO_ADMIN_TOKEN=x\n", want: "x"},
 		{
 			name: "key given twice, the last line wins",
@@ -229,6 +230,20 @@ func TestResolveAdminTokenRefusals(t *testing.T) {
 			files:     map[string][]byte{adminFile: []byte("FORGEJO_ADMIN_TOKEN=\"sec\"ret\"\n")},
 			wantErr:   "refusing to use it",
 			leak:      "sec\"ret",
+		},
+		{
+			name:      "mismatched quotes around a file value are refused without echoing it",
+			tokenFile: adminFile,
+			files:     map[string][]byte{adminFile: []byte("FORGEJO_ADMIN_TOKEN='secret\"\n")},
+			wantErr:   "refusing to use it",
+			leak:      "secret",
+		},
+		{
+			name:      "a trailing space after a file value is refused, not trimmed",
+			tokenFile: adminFile,
+			files:     map[string][]byte{adminFile: []byte("FORGEJO_ADMIN_TOKEN=secret \n")},
+			wantErr:   "refusing to use it",
+			leak:      "secret",
 		},
 		{
 			name:    "$HOME/forgejo/.env is never read",
