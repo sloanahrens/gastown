@@ -18,14 +18,8 @@ const SlingPattern = `^([^ ]*/)?gt sling `
 // A probe that cannot answer is a deferral too, so "nothing running" and "the
 // probe failed" never read alike.
 func (r *Run) DeferReason() string {
-	sling := r.call(r.Cfg.Pgrep, "-f", SlingPattern)
-	switch sling.exit {
-	case 0:
-		return "sandbox sling in progress"
-	case 1:
-		// pgrep ran and matched nothing.
-	default:
-		return fmt.Sprintf("cannot check for a running gt sling (%s exited %d)", r.Cfg.Pgrep, sling.exit)
+	if reason := SlingDeferReason(r.call(r.Cfg.Pgrep, "-f", SlingPattern).exit, r.Cfg.Pgrep); reason != "" {
+		return reason
 	}
 	list := r.call(r.Cfg.Openshell, "sandbox", "list")
 	if list.failed() {
@@ -63,6 +57,21 @@ func (r *Run) DeferReason() string {
 		return "cannot read the sandbox listing (no NAME header)"
 	}
 	return ""
+}
+
+// SlingDeferReason is the sling half of DeferReason, given the status pgrep
+// exited with for SlingPattern: "" when no gt sling runs, the reason otherwise.
+// A pgrep that could not answer defers too, as DeferReason always has.
+func SlingDeferReason(pgrepExit int, pgrep string) string {
+	switch pgrepExit {
+	case 0:
+		return "sandbox sling in progress"
+	case 1:
+		// pgrep ran and matched nothing.
+		return ""
+	default:
+		return fmt.Sprintf("cannot check for a running gt sling (%s exited %d)", pgrep, pgrepExit)
+	}
 }
 
 // isPlainName reports a name that is one path element, so a name the gateway

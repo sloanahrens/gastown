@@ -46,6 +46,10 @@ func newImageRun(t *testing.T) *imageRun {
 		ir.builds = append(ir.builds, b)
 		return ir.code, ir.err
 	}
+	// No sling runs and the clock does not wait, so no case starts pgrep or
+	// sleeps unless it says so (gt-rfwr4).
+	ir.Run.SlingDeferral = func() string { return "" }
+	ir.Run.ImageSleep = func(time.Duration) {}
 	return ir
 }
 
@@ -188,6 +192,72 @@ func TestImageStepFailsTheInstallWhenTheBuildFails(t *testing.T) {
 	}
 	if got := ir.fingerprint(); got != "install-gt:build-failed" {
 		t.Errorf("escalation fingerprint = %q, want install-gt:build-failed", got)
+	}
+}
+
+// A build before the swap waits out a gt sling in flight instead of failing on
+// the first deferral. The sling reads are the clock's only input: a build that
+// is not deferred never polls, one deferred twice builds after the second poll,
+// and one still deferred past imageSlingBound fails with the image's own error
+// and runs no build (gt-rfwr4).
+func TestImageWaitsForSling(t *testing.T) {
+	t.Parallel()
+	const deferred = "sandbox sling in progress"
+	cases := []struct {
+		name string
+		// deferredReads is how many sling reads answer deferred before one
+		// answers clear; -1 never clears.
+		deferredReads int
+		wantExit      Exit
+		wantBuilds    int
+		wantSleeps    int
+	}{
+		{name: "built first time: no poll", deferredReads: 0, wantExit: ExitOK, wantBuilds: 1, wantSleeps: 0},
+		{name: "deferred twice then built", deferredReads: 2, wantExit: ExitOK, wantBuilds: 1, wantSleeps: 2},
+		{name: "deferred past the bound fails", deferredReads: -1, wantExit: ExitFailed, wantBuilds: 0,
+			wantSleeps: int(imageSlingBound / imageSlingPoll)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ir := newImageRun(t)
+			reads := 0
+			ir.Run.SlingDeferral = func() string {
+				reads++
+				if tc.deferredReads < 0 || reads <= tc.deferredReads {
+					return deferred
+				}
+				return ""
+			}
+			var sleeps []time.Duration
+			ir.Run.ImageSleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+
+			if code := ir.step(t); code != tc.wantExit {
+				t.Fatalf("ImageStep() = %d, want %d:\n%s", code, tc.wantExit, ir.output())
+			}
+			if len(ir.builds) != tc.wantBuilds {
+				t.Errorf("builds = %d, want %d", len(ir.builds), tc.wantBuilds)
+			}
+			if len(sleeps) != tc.wantSleeps {
+				t.Fatalf("sleeps = %v, want %d polls of %v", sleeps, tc.wantSleeps, imageSlingPoll)
+			}
+			for _, d := range sleeps {
+				if d != imageSlingPoll {
+					t.Errorf("slept %v, want %v", d, imageSlingPoll)
+				}
+			}
+			if tc.wantExit == ExitFailed {
+				if !ir.has("FAILED: the sandbox image for c2222222 was not built and published") {
+					t.Errorf("output lacks the image's fail-closed error:\n%s", ir.output())
+				}
+				if !ir.has("sandbox sling in progress after 3m0s; the build is not run") {
+					t.Errorf("output does not say the wait ran out:\n%s", ir.output())
+				}
+				if got := ir.fingerprint(); got != "install-gt:build-failed" {
+					t.Errorf("escalation fingerprint = %q, want install-gt:build-failed", got)
+				}
+			}
+		})
 	}
 }
 
