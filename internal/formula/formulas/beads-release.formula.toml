@@ -95,7 +95,7 @@ Sections:
 - ### Fixed
 - ### Documentation
 
-The bump script will stamp the date automatically.
+The bump command will stamp the date automatically.
 """
 
 [[steps]]
@@ -122,13 +122,13 @@ Focus on workflow-impacting changes agents need to know.
 
 [[steps]]
 id = "run-bump-script"
-title = "Run bump-version.sh"
+title = "Run bump-version"
 needs = ["update-info-go"]
 description = """
 Update all component versions atomically.
 
 ```bash
-./scripts/bump-version.sh {{version}}
+go run ./cmd/bump-version {{version}}
 ```
 
 This updates:

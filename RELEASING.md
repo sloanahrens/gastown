@@ -21,18 +21,22 @@ Use the release formula, which handles all steps:
 gt mol wisp create gastown-release --var version=X.Y.Z
 ```
 
-### Option B: Bump script
+### Option B: Bump command
 
 ```bash
 cd gastown/mayor/rig
-./scripts/bump-version.sh X.Y.Z --commit --tag --push --install
+go run ./cmd/bump-version X.Y.Z --commit --tag --install
 ```
+
+The command never pushes. It commits and tags locally; the push of `main` and
+the tag is a separate step, run by the operator or the landing path. A `--push`
+argument is refused by `Parse` in `internal/bumpversion/options.go`.
 
 ### Option C: Manual
 
 1. Update CHANGELOG.md `[Unreleased]` section
 2. Update `internal/cmd/info.go` `versionChanges` slice
-3. Run `./scripts/bump-version.sh X.Y.Z` (updates version.go, package.json, CHANGELOG header)
+3. Run `go run ./cmd/bump-version X.Y.Z` (updates version.go, package.json, CHANGELOG header)
 4. Commit, tag, push:
 
 ```bash
@@ -72,7 +76,7 @@ make check-version-tag
 
 The target is a no-op on untagged HEADs, so it's safe to run on any checkout.
 It only fails when HEAD is tagged `vX.Y.Z` and the `Version` constant doesn't
-match. Run it after `scripts/bump-version.sh` and before pushing the tag if you
+match. Run it after `go run ./cmd/bump-version` and before pushing the tag if you
 want to catch drift before CI does.
 
 ## Homebrew tap (`gastownhall/gastown`)

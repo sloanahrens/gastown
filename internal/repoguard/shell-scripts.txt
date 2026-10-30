@@ -25,7 +25,6 @@ gt-model-eval/scripts/results-to-discussion.sh	port: gt-tpg0p
 plugins/app-promote/run.sh	port: gt-tpg0p
 plugins/polecat-image/run.sh	port: gt-tpg0p
 plugins/tool-updater/run.sh	port: gt-tpg0p
-scripts/bump-version.sh	port: gt-tpg0p
 scripts/check-install-path_test.sh	port: gt-tpg0p
 scripts/deep-review.sh	port: gt-tpg0p
 scripts/deep-review_test.sh	port: gt-tpg0p
@@ -41,7 +40,6 @@ scripts/forgejo-resync.sh	port: gt-tpg0p
 scripts/forgejo-resync_test.sh	port: gt-tpg0p
 scripts/gate-vs-load_test.sh	port: gt-tpg0p
 scripts/install-local_test.sh	port: gt-tpg0p
-scripts/lib/common.sh	port: gt-tpg0p
 scripts/lib/install-gt-lib.sh	port: gt-tpg0p
 scripts/lint-lock-wait.sh	port: gt-tpg0p
 scripts/makefile-gate_test.sh	port: gt-tpg0p
@@ -60,4 +58,3 @@ scripts/test-makefile.sh	port: gt-tpg0p
 scripts/tier-sweep.sh	port: gt-tpg0p
 scripts/tier-sweep_test.sh	port: gt-tpg0p
 scripts/town_metrics_test.sh	port: gt-tpg0p
-scripts/update-nix-flake.sh	port: gt-tpg0p

@@ -377,9 +377,9 @@ required = true
 
 [[steps]]
 id = "run-bump-script"
-title = "Run bump-version.sh"
+title = "Run bump-version"
 needs = ["update-changelog"]
-description = "Run ./scripts/bump-version.sh {{version}}"
+description = "Run go run ./cmd/bump-version {{version}}"
 
 [[steps]]
 id = "create-tag"
