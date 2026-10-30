@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -29,7 +30,8 @@ type Deps struct {
 	// Src lists and reads the repository's files. When nil, the run lists with
 	// `git ls-files` through Exec and reads files through ReadFile.
 	Src Source
-	// ReadFile reads a file for the git-backed Src, as os.ReadFile does.
+	// ReadFile reads a file for the git-backed Src, as os.ReadFile does, which a
+	// nil ReadFile defaults to. The run joins the root onto the name first.
 	ReadFile func(name string) ([]byte, error)
 	// Environ is the whole process environment, handed to the children the sweep
 	// starts.
@@ -49,12 +51,12 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	root, tiers, err := splitRoot(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n%s\n", Name, err, usage)
-		return UnknownTierExit
+		return UsageExit
 	}
 	opts, err := ParseOptions(tiers, d.Host)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return UnknownTierExit
+		return UsageExit
 	}
 	exec := d.Exec
 	if root != DefaultRoot {
@@ -62,7 +64,11 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	}
 	src := d.Src
 	if src == nil {
-		src = gitSource{exec: exec, read: func(name string) ([]byte, error) { return d.ReadFile(filepath.Join(root, name)) }}
+		read := d.ReadFile
+		if read == nil {
+			read = os.ReadFile
+		}
+		src = gitSource{exec: exec, read: func(name string) ([]byte, error) { return read(filepath.Join(root, name)) }}
 	}
 	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr, Now: d.Now}
 	red := false
@@ -78,7 +84,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 			line, tierRed = s.Race()
 		default:
 			fmt.Fprintln(stderr, (&UnknownTierError{Tier: tier}).Error())
-			return UnknownTierExit
+			return UsageExit
 		}
 		fmt.Fprintln(stdout, line)
 		red = red || tierRed

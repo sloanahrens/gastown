@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -30,9 +31,12 @@ func TestMainProcessDepsAreWired(t *testing.T) {
 	}
 }
 
-// TestMainOutputStreams: through the command's wiring, a summary line is written
-// to stdout only, and the progress line and the unknown-tier line to stderr
-// only. The process's host and clock are replaced; nothing starts a process.
+// TestMainOutputStreams: through the command's wiring, summary lines are written
+// to stdout only, and the progress lines and the unknown-tier line to stderr
+// only. The process's host, clock and file reads are replaced, and the fake Exec
+// answers each command by its argv: `git ls-files` with the listing, a go test
+// (gt slot run) and the container trigger with success. Any other command fails
+// the test, so nothing runs unannounced.
 func TestMainOutputStreams(t *testing.T) {
 	t.Parallel()
 	logDir := t.TempDir()
@@ -43,22 +47,36 @@ func TestMainOutputStreams(t *testing.T) {
 		MkdirAll:  func(string, os.FileMode) error { return nil },
 	}
 	d.Now = func() time.Time { return time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC) }
-	d.Exec = func(dir string, env []string, argv []string, out io.Writer) int {
-		if argv[0] == "gt" {
-			return 0 // the race package passes
+	d.ReadFile = func(name string) ([]byte, error) {
+		if strings.HasSuffix(name, "r/r_test.go") {
+			return []byte("//go:build integration\n\npackage r\n"), nil
 		}
+		return []byte("# no container packages\n"), nil // docker.txt
+	}
+	d.Exec = func(dir string, env []string, argv []string, out io.Writer) int {
+		switch {
+		case argv[0] == "git" && argv[1] == "ls-files":
+			if argv[len(argv)-1] == "*_test.go" {
+				fmt.Fprintln(out, "r/r_test.go")
+			}
+			return 0
+		case argv[0] == "git", argv[0] == "gt", argv[0] == "go":
+			return 0 // rev-parse, the go tests and the trigger
+		}
+		t.Errorf("unexpected command %q", argv)
 		return 1
 	}
 	var stdout, stderr bytes.Buffer
-	code := tiersweep.Run([]string{"race", "nope"}, &stdout, &stderr, d)
+	code := tiersweep.Run([]string{"integration", "race", "nope"}, &stdout, &stderr, d)
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2 (stderr %q)", code, stderr.String())
 	}
-	wantLine := "tier-sweep: race GREEN passed=1 failed=0 skipped=0 (logs " + logDir + ") in 0s\n"
-	if stdout.String() != wantLine {
-		t.Errorf("stdout = %q, want %q", stdout.String(), wantLine)
+	wantOut := "tier-sweep: integration GREEN passed=1 failed=0 skipped=0 (logs " + logDir + ") in 0s\n" +
+		"tier-sweep: race GREEN passed=1 failed=0 skipped=0 (logs " + logDir + ") in 0s\n"
+	if stdout.String() != wantOut {
+		t.Errorf("stdout = %q, want %q", stdout.String(), wantOut)
 	}
-	for _, want := range []string{"tier-sweep: race ./internal/cmd ...", "tier-sweep: unknown tier nope (want shell, integration or race)"} {
+	for _, want := range []string{"tier-sweep: integration ./r ...", "tier-sweep: race ./internal/cmd ...", "tier-sweep: unknown tier nope (want shell, integration or race)"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 		}
@@ -66,7 +84,7 @@ func TestMainOutputStreams(t *testing.T) {
 	if strings.Contains(stdout.String(), "...") || strings.Contains(stdout.String(), "unknown") {
 		t.Errorf("progress or an error reached stdout: %q", stdout.String())
 	}
-	if strings.Contains(stderr.String(), "race GREEN") {
+	if strings.Contains(stderr.String(), "GREEN") {
 		t.Errorf("a summary line reached stderr: %q", stderr.String())
 	}
 }

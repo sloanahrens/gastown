@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -586,5 +588,45 @@ func TestSweepFailingGitListingIsRed(t *testing.T) {
 	}
 	if len(p.tierDirs) != 0 {
 		t.Errorf("go test ran in %v, want nothing run", p.tierDirs)
+	}
+}
+
+// TestSweepDefaultsReadFileToTheDisk: a Deps with no Src and no ReadFile still
+// reads the repository's files, from under the root on disk, and does not panic.
+func TestSweepDefaultsReadFileToTheDisk(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for name, text := range map[string]string{"r/r_test.go": taggedTest, dockerList: noDocker} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logDir := t.TempDir()
+	var out, errw bytes.Buffer
+	code := Run([]string{"--root", root, "integration"}, &out, &errw, Deps{
+		Host: Host{
+			Env: func(name string) string {
+				if name == EnvLogDir {
+					return logDir
+				}
+				return ""
+			},
+			MkdirTemp: func(string, string) (string, error) { return logDir, nil },
+			MkdirAll:  func(string, fs.FileMode) error { return nil },
+		},
+		Exec: func(dir string, env []string, argv []string, w io.Writer) int {
+			if argv[0] == "git" && argv[1] == "ls-files" && argv[len(argv)-1] == "*_test.go" {
+				fmt.Fprintln(w, "r/r_test.go")
+			}
+			return 0
+		},
+		Now: func() time.Time { return time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC) },
+	})
+	if code != 0 || !strings.Contains(out.String(), "integration GREEN passed=1") {
+		t.Errorf("code %d, stdout %q, stderr %q, want GREEN passed=1", code, out.String(), errw.String())
 	}
 }
