@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,12 +16,14 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
 // stopSeat is the seat the stop tests act on.
@@ -1678,5 +1681,240 @@ func TestStillOursSeamReportsAnUnreadableBead(t *testing.T) {
 	}
 	if _, err := seams.stillOurs(stopSeat); err == nil {
 		t.Fatal("stillOurs read a bead with no bd to run as one it could read")
+	}
+}
+
+// overrunSeatSessionSeams is the fake's seams with the three steps that touch
+// the seat itself (pause, clear-pause, stop) in their production form: the
+// park the stop writes and the supervisor's kill, over the daemon's fake tmux.
+// The rest stay the fake's, so the stop runs its whole sequence without git,
+// bd or a real town.
+func overrunSeatSessionSeams(d *Daemon, f *overrunFake) overrunSeams {
+	s := f.seams()
+	prod := d.overrunStopSeams(overrunSeams{})
+	s.pause, s.clearPause, s.stopSession = prod.pause, prod.clearPause, prod.stopSession
+	return s
+}
+
+// overrunStopPrefix is the rig prefix the stop's supervisor tests pin for the
+// seat's rig, so the session they seed is the one the kill must reach. The
+// process-wide registry the daemon would otherwise read is shared with every
+// parallel test.
+const overrunStopPrefix = "gt"
+
+// overrunStopSessionName is the tmux session of stopSeat under that prefix.
+var overrunStopSessionName = overrunStopPrefix + "-" + stopSeat.Polecat
+
+// seedOverrunStopSession pins the daemon's rig prefix and seeds the seat's
+// session, returning the tmux the stop's kill must reach.
+func seedOverrunStopSession(t *testing.T, d *Daemon) *fakeTmux {
+	t.Helper()
+	reg := session.NewPrefixRegistry()
+	reg.Register(stopSeat.Rig, overrunStopPrefix)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	tm := newFakeTmux(newFixedClock())
+	tm.addSession(overrunStopSessionName, "", overrunSlung)
+	d.tmux = tm
+	return tm
+}
+
+// overrunSupervisorActions reads the supervisor's action log.
+func overrunSupervisorActions(t *testing.T, townRoot string) []supervisor.ActionLine {
+	t.Helper()
+	data, err := os.ReadFile(supervisor.ActionLogPath(townRoot))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatal(err)
+	}
+	var out []supervisor.ActionLine
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var l supervisor.ActionLine
+		if err := json.Unmarshal([]byte(line), &l); err != nil {
+			t.Fatalf("action log line %q: %v", line, err)
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// The stop goes through the supervisor, the town's one kill path: the kill is
+// recorded with the overrun guard's actor and the rule as its reason, and the
+// park the stop wrote itself does not refuse it.
+func TestOverrunGuardStop_GoesThroughTheSupervisor(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	tm := seedOverrunStopSession(t, d)
+	f := newOverrunFake(21*time.Minute, stopSeat)
+
+	d.runOverrunGuard(overrunSeatSessionSeams(d, f))
+
+	if alive, _ := tm.HasSession(overrunStopSessionName); alive {
+		t.Fatalf("session %s still running after the stop: %s", overrunStopSessionName, buf.String())
+	}
+	wantReason := "overrun (20 minute rule) on " + stopSeat.Bead
+	lines := overrunSupervisorActions(t, d.config.TownRoot)
+	if len(lines) != 1 {
+		t.Fatalf("supervisor action log = %+v, want one kill line", lines)
+	}
+	got := lines[0]
+	if got.Verb != "kill" || got.Actor != overrunActor || got.Outcome != "done" ||
+		got.Reason != wantReason || got.Session != overrunStopSessionName {
+		t.Errorf("action line = %+v, want a done kill of %s by %s for %q", got, overrunStopSessionName, overrunActor, wantReason)
+	}
+	// The stop ran to its end: the bead was handed back with its branch.
+	if len(f.handedBack) != 1 || !strings.HasPrefix(f.handedBack[0], stopSeat.Bead+" "+stopSeat.Branch) {
+		t.Errorf("hand-backs = %q, want the bead and its branch", f.handedBack)
+	}
+}
+
+// An active e-stop holds the stop before it parks the seat (gt-m5b31). On every
+// tick the e-stop is up the seat keeps running, is never parked, and no kill is
+// attempted, so nothing of the stop runs and nothing is saved for it.
+func TestOverrunGuardStop_EstopHoldsTheStopBeforeThePark(t *testing.T) {
+	t.Parallel()
+	for _, which := range []string{"town", "rig"} {
+		d, buf := newOverrunDaemon(t, false)
+		tm := seedOverrunStopSession(t, d)
+		if which == "town" {
+			if err := estop.Activate(d.config.TownRoot, estop.TriggerManual, "operator halt"); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := estop.ActivateRig(d.config.TownRoot, stopSeat.Rig, estop.TriggerManual, "operator halt"); err != nil {
+			t.Fatal(err)
+		}
+		f := newOverrunFake(21*time.Minute, stopSeat)
+		s := overrunSeatSessionSeams(d, f)
+		parks := 0
+		pause := s.pause
+		s.pause = func(seat overrunSeat) error {
+			parks++
+			return pause(seat)
+		}
+
+		for tick := 0; tick < 3; tick++ {
+			d.runOverrunGuard(s)
+			f.now = f.now.Add(time.Minute)
+		}
+
+		if alive, _ := tm.HasSession(overrunStopSessionName); !alive {
+			t.Fatalf("%s e-stop: session %s was stopped under the e-stop", which, overrunStopSessionName)
+		}
+		if parks != 0 {
+			t.Errorf("%s e-stop: the seat was parked %d time(s) over three ticks, want none", which, parks)
+		}
+		if !strings.Contains(buf.String(), "waits: e-stop active") {
+			t.Errorf("%s e-stop: log lacks the wait line:\n%s", which, buf.String())
+		}
+		if lines := overrunSupervisorActions(t, d.config.TownRoot); len(lines) != 0 {
+			t.Errorf("%s e-stop: supervisor action log = %+v, want no kill attempted", which, lines)
+		}
+		if paused, _, _ := agentpause.IsPaused(d.config.TownRoot, stopSeat.Rig, constants.RolePolecat, stopSeat.Polecat); paused {
+			t.Errorf("%s e-stop: the seat is parked", which)
+		}
+		st, _ := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+		if !st.StopBeganAt.IsZero() || !st.StoppedAt.IsZero() {
+			t.Errorf("%s e-stop: state %+v records a stop that never ran", which, st)
+		}
+		if len(f.handedBack) != 0 || len(f.pushed) != 0 {
+			t.Errorf("%s e-stop: hand-backs %q, pushes %q; want nothing under the e-stop", which, f.handedBack, f.pushed)
+		}
+	}
+}
+
+// A town sentinel that cannot be read holds the stop too: the e-stop check fails
+// closed, so a stat that fails for any reason but absence waits, parks nothing,
+// and says why (gt-m5b31). A symlink that points at itself makes the stat fail
+// with a loop error, not absence.
+func TestOverrunGuardStop_UnreadableEstopHoldsTheStop(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	tm := seedOverrunStopSession(t, d)
+	sentinel := estop.FilePath(d.config.TownRoot)
+	if err := os.Symlink(filepath.Base(sentinel), sentinel); err != nil {
+		t.Fatal(err)
+	}
+	f := newOverrunFake(21*time.Minute, stopSeat)
+	s := overrunSeatSessionSeams(d, f)
+	parks := 0
+	pause := s.pause
+	s.pause = func(seat overrunSeat) error {
+		parks++
+		return pause(seat)
+	}
+
+	d.runOverrunGuard(s)
+
+	if alive, _ := tm.HasSession(overrunStopSessionName); !alive {
+		t.Fatalf("session %s was stopped under an unreadable e-stop", overrunStopSessionName)
+	}
+	if parks != 0 {
+		t.Errorf("the seat was parked %d time(s) under an unreadable e-stop, want none", parks)
+	}
+	if !strings.Contains(buf.String(), "waits: cannot read the e-stop") {
+		t.Errorf("log lacks the unreadable-e-stop wait line:\n%s", buf.String())
+	}
+	if lines := overrunSupervisorActions(t, d.config.TownRoot); len(lines) != 0 {
+		t.Errorf("supervisor action log = %+v, want no kill attempted", lines)
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, stopSeat.Bead); !st.StopBeganAt.IsZero() || !st.StoppedAt.IsZero() {
+		t.Errorf("state %+v records a stop that never ran", st)
+	}
+}
+
+// An e-stop that lands after the seat is parked, between the check and the
+// kill, is still refused by the supervisor: the session keeps running, the
+// refusal is logged with the supervisor's text, the park is cleared so the live
+// seat is not left parked (gt-fojqs), and nothing of the stop after it runs.
+func TestOverrunGuardStop_EstopRaisedAfterThePark_IsRefused(t *testing.T) {
+	t.Parallel()
+	for _, which := range []string{"town", "rig"} {
+		d, buf := newOverrunDaemon(t, false)
+		tm := seedOverrunStopSession(t, d)
+		raise := func() error {
+			if which == "town" {
+				return estop.Activate(d.config.TownRoot, estop.TriggerManual, "operator halt")
+			}
+			return estop.ActivateRig(d.config.TownRoot, stopSeat.Rig, estop.TriggerManual, "operator halt")
+		}
+		f := newOverrunFake(21*time.Minute, stopSeat)
+		s := overrunSeatSessionSeams(d, f)
+		pause := s.pause
+		s.pause = func(seat overrunSeat) error {
+			if err := pause(seat); err != nil {
+				return err
+			}
+			if err := raise(); err != nil {
+				t.Fatal(err)
+			}
+			return nil
+		}
+
+		d.runOverrunGuard(s)
+
+		if alive, _ := tm.HasSession(overrunStopSessionName); !alive {
+			t.Fatalf("%s e-stop: session %s was stopped under the e-stop", which, overrunStopSessionName)
+		}
+		if !strings.Contains(buf.String(), stopSeat.Bead+" refused: supervisor refused: e-stop is active") {
+			t.Errorf("%s e-stop: log lacks the refusal line with the supervisor's text:\n%s", which, buf.String())
+		}
+		lines := overrunSupervisorActions(t, d.config.TownRoot)
+		if len(lines) != 1 || lines[0].Outcome != "refused" || lines[0].Verb != "kill" || lines[0].Actor != overrunActor {
+			t.Errorf("%s e-stop: supervisor action log = %+v, want one refused kill by %s", which, lines, overrunActor)
+		}
+		if paused, _, _ := agentpause.IsPaused(d.config.TownRoot, stopSeat.Rig, constants.RolePolecat, stopSeat.Polecat); paused {
+			t.Errorf("%s e-stop: the refused stop left the seat parked", which)
+		}
+		st, _ := readOverrunState(d.config.TownRoot, stopSeat.Bead)
+		if !st.StopBeganAt.IsZero() || !st.StoppedAt.IsZero() {
+			t.Errorf("%s e-stop: state %+v records a stop that never ran", which, st)
+		}
+		if len(f.handedBack) != 0 || len(f.pushed) != 0 {
+			t.Errorf("%s e-stop: hand-backs %q, pushes %q; want nothing after a refused stop", which, f.handedBack, f.pushed)
+		}
 	}
 }

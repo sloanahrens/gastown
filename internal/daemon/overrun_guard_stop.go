@@ -12,13 +12,13 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
-	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
 const (
@@ -81,7 +81,9 @@ const (
 //
 // submittedNow is read before step 1 and before step 4: a seat that has
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
-// that gained gt:ready-to-land mid-stop is not handed back.
+// that gained gt:ready-to-land mid-stop is not handed back. An active e-stop
+// (town or rig) is read before step 1 too: a stop that has not begun waits for
+// it to lift and parks nothing, since the supervisor would refuse the kill.
 //
 // A refused checkpoint fails step 3 and is retried once per tick. After
 // overrunCheckpointMaxAttempts failures the stop gives up on it: steps 4 and 5
@@ -143,6 +145,19 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// 1. Pause. The seat list is older than this call, so look again first: a
 	// seat that has begun gt done since is not stopped.
 	if st.StopBeganAt.IsZero() {
+		// The e-stop is read before the park. The supervisor refuses the kill
+		// under an e-stop, and the refusal clears the park, so parking first
+		// would park and un-park the seat on every tick the e-stop is up
+		// (gt-m5b31). Nothing is saved here, so the first tick after the
+		// e-stop lifts starts the stop from the top.
+		if on, err := estop.ActiveFor(d.config.TownRoot, seat.Rig); err != nil || on {
+			if err != nil {
+				d.logger.Printf("overrun_guard: stop %s on %s waits: cannot read the e-stop: %v", who, st.Bead, err)
+			} else {
+				d.logger.Printf("overrun_guard: stop %s on %s waits: e-stop active", who, st.Bead)
+			}
+			return
+		}
 		if s.submittedNow != nil && s.submittedNow(seat) {
 			d.logger.Printf("overrun_guard: %s on %s submitted before the stop; leaving it", who, st.Bead)
 			return
@@ -180,7 +195,15 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			}
 		}
 		if err := s.stopSession(seat); err != nil {
-			d.logger.Printf("overrun_guard: stop %s on %s: session stop failed: %v", who, st.Bead, err)
+			// A refusal is the brakes (an e-stop, or a hold this stop did not
+			// write), logged with the supervisor's own text; anything else is
+			// a stop that could not run. Both clear the pause: a live seat
+			// must not stay parked, and the next tick starts the stop over.
+			if errors.Is(err, supervisor.ErrRefused) {
+				d.logRefusal(fmt.Sprintf("overrun_guard: stop %s on %s refused", who, st.Bead), err)
+			} else {
+				d.logger.Printf("overrun_guard: stop %s on %s: session stop failed: %v", who, st.Bead, err)
+			}
 			if cerr := s.clearPause(seat); cerr != nil {
 				// Keep the stop pending: the next tick tries the stop again.
 				d.logger.Printf("overrun_guard: WARNING: %s: pause marker not cleared: %v", who, cerr)
@@ -944,19 +967,23 @@ func (d *Daemon) overrunSubmittedNow(seat overrunSeat) bool {
 	return known && still
 }
 
-// overrunStopSession stops the seat's session through the polecat session
-// manager. A session that is already gone is a stop that has happened.
+// overrunStopSession stops the seat's session through the supervisor, the
+// town's one kill path (gt-4k3fj.4): a town or rig e-stop refuses the stop,
+// as it refuses every other automatic kill, with the supervisor's refusal
+// text, and the seat's record gets the action line every stop writes. The
+// park this stop wrote itself (step 1) does not refuse it — that park is
+// what keeps scanners off the seat while the stop runs. A session that is
+// already gone is a stop that has happened: killing a missing session
+// succeeds.
 func (d *Daemon) overrunStopSession(seat overrunSeat) error {
-	t, ok := d.tmux.(*tmux.Tmux)
-	if !ok {
-		return errors.New("daemon tmux is not the real tmux; cannot build a polecat session manager")
-	}
-	r := &rig.Rig{Name: seat.Rig, Path: filepath.Join(d.config.TownRoot, seat.Rig)}
-	err := polecat.NewSessionManager(t, r, d.prefixRegistry()).Stop(seat.Polecat, false)
-	if errors.Is(err, polecat.ErrSessionNotFound) {
-		return nil
-	}
-	return err
+	supSeat := supervisor.SeatIn(d.prefixRegistry(), seat.Rig, constants.RolePolecat, seat.Polecat)
+	return d.sup().KillOwnPark(supSeat, overrunStopReason(seat), overrunActor)
+}
+
+// overrunStopReason is what the supervisor's action log records for the kill:
+// the rule, and the bead it stops the seat over.
+func overrunStopReason(seat overrunSeat) string {
+	return fmt.Sprintf("%s on %s", overrunPauseReason, seat.Bead)
 }
 
 // collectOverrunStopped raises one low item per bead the guard handed back and

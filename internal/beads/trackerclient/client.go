@@ -231,6 +231,23 @@ func (c *Client) DepList(id, depType string) ([]beads.IssueDep, error) {
 	return deps(d), nil
 }
 
+// DepListUp returns the issues that depend on id with relation depType ("" for
+// any). The store fills Dependents on every issue it reads, wisps included, so
+// one Show answers the read; a missing issue is the error Show returns.
+func (c *Client) DepListUp(id, depType string) ([]beads.IssueDep, error) {
+	a, err := c.tc.Show(ctx(), id)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := []beads.IssueDep{}
+	for _, d := range deps(a.Dependents) {
+		if depType == "" || d.DependencyType == depType {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
 // RemoveDependency removes that dependency, whatever its type.
 func (c *Client) RemoveDependency(issue, dependsOn string) error {
 	return mapErr(c.tc.RemoveDependency(ctx(), issue, dependsOn))

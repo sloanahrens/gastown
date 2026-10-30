@@ -106,6 +106,50 @@ func pruneExcept(host Host, dir string, now time.Time, maxAge time.Duration, ski
 	return removed, firstErr
 }
 
+// RemoveListed deletes the entries of one earlier listing and nothing else. It
+// never lists a directory: the operator approved these paths, so a directory
+// that appeared after the listing is out of reach by construction. Each path
+// is checked again with an Lstat before it goes, by the rule PruneCandidates
+// applies, because the listing may be minutes old: a path that vanished, was
+// replaced by a symlink or a file, was touched since (younger than maxAge) or
+// whose name is not a log directory's is left alone and returned in stale.
+// An Lstat that fails for another reason is an error and the path stays. Every
+// path is tried; the first error is returned beside what was removed.
+func RemoveListed(host Host, listed []PruneEntry, now time.Time, maxAge time.Duration) (removed, stale []string, err error) {
+	var firstErr error
+	note := func(e error) {
+		if firstErr == nil {
+			firstErr = e
+		}
+	}
+	for _, entry := range listed {
+		path := filepath.Clean(entry.Path)
+		if !isLogDirName(filepath.Base(path)) {
+			stale = append(stale, entry.Path)
+			continue
+		}
+		info, lerr := host.Lstat(path)
+		if errors.Is(lerr, fs.ErrNotExist) {
+			stale = append(stale, entry.Path)
+			continue
+		}
+		if lerr != nil {
+			note(lerr)
+			continue
+		}
+		if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() || now.Sub(info.ModTime()) <= maxAge {
+			stale = append(stale, entry.Path)
+			continue
+		}
+		if rerr := host.RemoveAll(path); rerr != nil {
+			note(rerr)
+			continue
+		}
+		removed = append(removed, entry.Path)
+	}
+	return removed, stale, firstErr
+}
+
 // isLogDirName reports whether name is a default log directory's: the pattern
 // followed by at least one character, and no path separator, so a listing can
 // never point the prune outside dir.

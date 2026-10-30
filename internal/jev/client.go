@@ -9,7 +9,7 @@
 // The API key comes from a 0600 key file (see KeyPaths) and appears in
 // neither errors nor logs. The usage ledger (WithLedger) records token counts
 // alone; the request log (WithRequests) records a hash and sizes per body
-// sent, never its text.
+// sent, never its text, and which scrubbing rules fired (WithScrub).
 package jev
 
 import (
@@ -26,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/jev/scrub"
 )
 
 const (
@@ -86,6 +88,12 @@ type Client struct {
 	// from them by NewClient, and nil when no path is set.
 	requestsPath string
 	requests     *requestLog
+
+	// scrub, when set, scrubs the state before the body is built; nil sends
+	// the state as the caller passed it. scrubSet records that WithScrub was
+	// given, so NewClient can refuse a nil scrubber.
+	scrub    *scrub.Scrubber
+	scrubSet bool
 }
 
 // Option configures a Client.
@@ -120,6 +128,9 @@ func NewClient(opts ...Option) (*Client, error) {
 	c := &Client{httpClient: http.DefaultClient, baseURL: defaultBaseURL, timeout: DefaultTimeout}
 	for _, o := range opts {
 		o(c)
+	}
+	if c.scrubSet && c.scrub == nil {
+		return nil, errors.New("jev: WithScrub needs a scrubber; a nil one would send the state unscrubbed")
 	}
 	if c.httpClient == nil {
 		c.httpClient = http.DefaultClient
@@ -279,17 +290,17 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Question) (*A
 	if err != nil {
 		return nil, err
 	}
-	stateBytes, err := c.stateSize(state)
+	sent, stateBytes, report, err := c.sentState(state)
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(request{State: state, Model: Model, Questions: wire})
+	body, err := json.Marshal(request{State: sent, Model: Model, Questions: wire})
 	if err != nil {
 		return nil, fmt.Errorf("jev: encode request: %w", err)
 	}
 	data, got, err := c.post(ctx, body)
 	if c.requests != nil && got.sent {
-		c.requests.record(c.requestRecord(state, stateBytes, body, qs, got, err))
+		c.requests.record(c.requestRecord(state, stateBytes, body, qs, got, err, report))
 	}
 	if err != nil {
 		return nil, err

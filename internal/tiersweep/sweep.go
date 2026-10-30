@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,9 @@ type Deps struct {
 	Environ []string
 	// Now is the clock a tier's elapsed time is read from.
 	Now func() time.Time
+	// Began is told each package the integration tier's pool hands to Exec, in
+	// the order it hands them out. Nil records nothing; a test reads the order.
+	Began func(pkg string)
 }
 
 // Run runs the tiers args names, in the order given, and returns the exit code.
@@ -55,7 +59,8 @@ type Deps struct {
 // Every run leaves <logdir>/timings.jsonl, one line per package it started, and
 // replaces TIER_SWEEP_TIMINGS with those lines when the environment names one.
 // A timings file that cannot be written is named on stderr once and changes no
-// verdict.
+// verdict. TIER_SWEEP_JOBS above 1 runs that many packages at once, longest
+// first by the file's walls, with each package serial.txt names run alone.
 //
 // A run that made its own log directory first prunes the old ones beside it
 // (PruneMaxAge), and removes its own after the last summary line when every
@@ -110,7 +115,14 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		src = gitSource{exec: exec, read: func(name string) ([]byte, error) { return read(filepath.Join(root, name)) }}
 	}
 	timings := OpenTimings(filepath.Join(opts.LogDir, TimingsName), stderr)
-	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr, Now: now, Timings: timings}
+	// A parallel run starts the longest packages first, so it reads the last
+	// run's walls before the first package starts (gt-0rtgc).
+	var walls map[string]int64
+	if opts.Jobs > 1 && opts.TimingsFile != "" {
+		walls = readWalls(host, opts.TimingsFile, stderr)
+	}
+	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr,
+		Now: now, Timings: timings, Walls: walls, Began: d.Began}
 	code := runTiers(s, opts.Tiers, stdout, stderr)
 	if code == UsageExit {
 		timings.Close()
@@ -131,6 +143,25 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		}
 	}
 	return 0
+}
+
+// readWalls reads the previous run's timings file. A file that is not there is
+// the first run, and no line is printed; any other failure is one stderr line.
+// Either way the run keeps its list order and goes on (gt-0rtgc).
+func readWalls(host Host, path string, stderr io.Writer) map[string]int64 {
+	read := host.ReadFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	data, err := read(path)
+	if err == nil {
+		return ParseWalls(data)
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	fmt.Fprintf(stderr, "%s: timings: read %s: %v (%s)\n", Name, path, err, timingsGoesOn)
+	return nil
 }
 
 // cleanupReady reports whether host can list a directory, describe an entry and

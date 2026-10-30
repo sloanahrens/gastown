@@ -251,9 +251,8 @@ the run it ceded to named. Package-scoped suites (`go test ./internal/x/...`, a
 `-run`-filtered run, `make presubmit`) are unaffected. The landing gate is never capped,
 never counted against the cap and never waits on it: a gate is not full-suite class, so
 it takes its own slot — a gate-reserved one where the pool reserves any, any free one
-otherwise — and a gate started while a whole-tree run holds a slot proceeds at once. The daemon's tier sweep already
-takes the token as `<rig>/tier-sweep`; run the flake sweep as
-`gt slot run --role <rig>/flake-sweep -- bash scripts/flake-sweep.sh [ITER] [CONC]`.
+otherwise — and a gate started while a whole-tree run holds a slot proceeds at once.
+The daemon's tier sweep already takes the token as `<rig>/tier-sweep`.
 
 **A post-landing suite yields to an install in flight (gt-t135z).** The post-landing
 suite — `<rig>/post-land`, the red-main detector a landing runs once merged — is the one
@@ -405,6 +404,7 @@ environment knobs and one key under `daemon` in `settings/config.json`:
 |------|---------|---------|
 | `POLECAT_IMAGE_REGISTRY_KEEP` | `5` | the newest per-commit tags kept by the plugin's retention, `gt maint` and the patrol |
 | `POLECAT_IMAGE_REGISTRY_PRUNE` | `dry-run` | the `polecat-image` plugin only: `off`, `dry-run` or `apply` |
+| `POLECAT_CACHE_CAP` | `10GB` | the size each per-rig cache volume is trimmed under, and the size the patrol trims the shared cache claim under (`internal/daemon/cache_trim.go`) |
 | `daemon.patrols.disk_maintenance` | disabled; once enabled, `{"interval": "daily", "window": "04:30", "mode": "dry_run", "targets": {"civol": {"interval": "2h"}}}` (`mode` may be `apply`) | the daemon patrol |
 
 A `targets` entry gives one target a cadence of its own, such as civol's `2h`
@@ -1250,6 +1250,14 @@ local midnight whatever the line's `caller`, so a second battery's calls today
 use up the first one's room. `Cap.Allows` is whether today's spend is still
 under `MaxUSDPerDay`. The ledger stores tokens, so `USDPerBillionTokens` is
 required to price them.
+
+Every battery's patrol block takes one optional key, `scrub`, false unless it
+is set. When it is true the battery's client scrubs the state before the
+request leaves the machine: secret-shaped text and the account name are
+replaced (`internal/jev/scrub`), the questions go out as written, and the
+request log line gains `scrubbed: true` and `replacements`, a count per rule
+that fired and none of the text it replaced. The operator turns it on one
+battery at a time, after that battery's signal cost is measured.
 
 ### Collection health (`gt jev health`)
 

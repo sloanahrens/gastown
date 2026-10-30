@@ -440,3 +440,50 @@ func TestShowTextRefusesAFlagWithoutARequest(t *testing.T) {
 		t.Errorf("ShowText with a flag sent %d requests, want none", asked)
 	}
 }
+
+// DepListUp answers from one Show of the issue: the dependents the tracker
+// carries, narrowed to one relation when depType names one.
+func TestDepListUpReadsTheDependentsOfOneShowFilteredByRelation(t *testing.T) {
+	t.Parallel()
+	var asked int
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		asked++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"gt-x","title":"target","status":"open","priority":2,"dependents":[` +
+			`{"id":"gt-b","title":"blocked","status":"open","priority":2,"issue_type":"task","dependency_type":"blocks"},` +
+			`{"id":"gt-k","title":"kid","status":"open","priority":2,"issue_type":"task","dependency_type":"parent-child"}]}`))
+	})
+	any, err := c.DepListUp("gt-x", "")
+	if err != nil || len(any) != 2 || any[0].ID != "gt-b" || any[0].DependencyType != "blocks" || any[1].ID != "gt-k" || any[1].DependencyType != "parent-child" {
+		t.Errorf("DepListUp(any) = %+v, %v; want gt-b blocks and gt-k parent-child", any, err)
+	}
+	blocks, err := c.DepListUp("gt-x", "blocks")
+	if err != nil || len(blocks) != 1 || blocks[0].ID != "gt-b" {
+		t.Errorf("DepListUp(blocks) = %+v, %v; want only gt-b", blocks, err)
+	}
+	if asked != 2 {
+		t.Errorf("DepListUp sent %d requests for two reads, want one Show each", asked)
+	}
+}
+
+// A missing issue is ErrNotFound, and a failed read is an error: neither may
+// come back as an empty list, which a caller reads as "no dependents".
+func TestDepListUpRefusesAMissingIssueAndAFailedRead(t *testing.T) {
+	t.Parallel()
+	missing := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"kind":"not_found","message":"no such issue"}`))
+	})
+	if deps, err := missing.DepListUp("gt-missing", ""); !errors.Is(err, beads.ErrNotFound) || deps != nil {
+		t.Errorf("DepListUp of a missing issue = %+v, %v; want nil and ErrNotFound", deps, err)
+	}
+	down := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"kind":"unavailable","message":"database does not answer"}`))
+	})
+	if deps, err := down.DepListUp("gt-x", ""); err == nil || deps != nil {
+		t.Errorf("DepListUp on a failed read = %+v, %v; want nil and an error", deps, err)
+	}
+}

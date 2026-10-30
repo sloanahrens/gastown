@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-10-30 gt-wfohy: added rule 16 (rework: answer every open finding, never loosen a test, limit or allowlist to land) and rewrote rule 9's flags from the 2026-10-28..30 findings, where scope was filed as an edit outside the bead's Constraints rather than a dependency bump or rename (sixteen rules).
 - 2026-10-30 gt-u3hr0: rules 1, 3, 10, 11 rewritten from the 2026-10-28..30 rejection record; rule 1 now names the forms om flags, old rule 11 (matcher and platform-file errors) merges into rule 1, the guard-mutation bullet moves from rule 10 to rule 3, and the rules after it renumber (fifteen rules).
 - 2026-10-30 gt-o87rv: added rules 13-16 (cloud authority, cloud previews, console-only steps, cost and credentials); rule 14 points at the no-new-scripts town policy instead of restating it.
 - 2026-10-28 gt-9j9vu: bead text is one single-quoted argument on every `gt bead` verb that takes text (create, update, claim, note, comment, close; town policy section).
@@ -140,7 +141,7 @@ are debt" section of `~/.claude/docs/standards/test-engineering.md`.
 
 # What om rejects
 
-Read before you write code. Fifteen rules. Today (2026-10-26) 70 beads were rejected in 138 blocks; 125 blocks (91 percent) had a major or critical finding. Each rule names om's finding and one example from today.
+Read before you write code. Sixteen rules. Today (2026-10-26) 70 beads were rejected in 138 blocks; 125 blocks (91 percent) had a major or critical finding. Each rule names om's finding and one example from today.
 
 ## 1. Failure is not success (fail-open)
 
@@ -202,7 +203,7 @@ Logic goes in Go with unit tests. A new .sh or .py file is refused.
 ## 9. Stay in scope
 
 Change only what the bead asks for. Unrelated files, dependency bumps and renames are findings.
-- om flags: "unexplained transitive dependency bumps"; "change touches files outside the stated scope". Before: a go.mod bump with a fix. After: the fix alone, or a rationale line for the bump.
+- om flags: "edit to a file outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency bumps". Earlier rounds quoted "change touches files outside the stated scope"; it still counts under this rule. Before: a fix that also rewrites an existing test. After: the fix alone, or a bead comment saying why the other file had to change.
 
 ## 10. Test the call site, not the helper
 
@@ -243,3 +244,9 @@ Applies to any change that touches a cloud project, a role, a service account or
 
 - om flags: "billing plan or budget not stated", "key file or token on a command line".
 - Reject outright: a new billable resource (VM, disk, address, SQL, load balancer, Blaze-only feature) with no budget alert named; a cloud credential a test requires or reads from its environment (rule 7, "Hermetic tests"), or one that is printed (rule 11, "Keep secrets out of errors; tick boxes last").
+
+## 16. Rework: answer every open finding
+
+A bead that comes back has a MERGE REJECTION block in its notes listing om's findings. Fix every one before you submit again, including any marked "still open" from an earlier round: om repeats them and the bead burns another round (35 findings in three days). Never loosen a test or a limit to land the fix (10 findings; the test-ratchet policy is in `~/.claude/docs/standards/test-engineering.md`). If a finding is wrong, say why on the bead with the evidence, and fix the others.
+- om flags: "still open", "claimed resolved but not changed by the diff", "ratchet floor lowered to land the change", "existing test edited to fit the new behaviour".
+- Before: delete the failing assertion, or lower the floor. After: fix the code, or comment on the bead why the finding is wrong.

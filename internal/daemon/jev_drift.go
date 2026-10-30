@@ -53,6 +53,7 @@ func (d *Daemon) runJevDrift() {
 		settings = drift.Settings{
 			MaxUSDPerDay:        c.Patrols.JevDrift.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevDrift.USDPerBillionTokens,
+			Scrub:               c.Patrols.JevDrift.Scrub,
 		}
 	}
 	open := d.jevDriftOpen

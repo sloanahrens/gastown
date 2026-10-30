@@ -72,7 +72,7 @@ func TestSpecBoardDetailsReadsEveryCandidateOncePerRig(t *testing.T) {
 		{Spec: specdispatch.Spec{ID: "gt-b2"}, Rig: "beta"},
 	}}
 	reads := newSpecTickReads()
-	got := specBoardDetails(reads, storeFor, read)
+	got := specBoardDetails(reads, storeFor, read, nil)
 
 	ids := make([]string, 0, len(got.Candidates))
 	for _, c := range got.Candidates {
@@ -129,7 +129,7 @@ func TestSpecBoardDetailsDropsCandidatesWhenTheBatchFails(t *testing.T) {
 		{Spec: specdispatch.Spec{ID: "gt-c2", Design: "row design"}, Rig: "alpha"},
 	}}
 	reads := newSpecTickReads()
-	got := specBoardDetails(reads, storeFor, read)
+	got := specBoardDetails(reads, storeFor, read, nil)
 
 	if len(got.Candidates) != 0 {
 		t.Errorf("candidates = %v, want the whole batch dropped", got.Candidates)

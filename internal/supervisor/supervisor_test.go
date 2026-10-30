@@ -128,6 +128,21 @@ func (h *harness) pause(t *testing.T) {
 	}
 }
 
+// parkAs parks the seat as pausedBy would, the way the overrun guard parks
+// the seat it is about to stop.
+func (h *harness) parkAs(t *testing.T, pausedBy string) {
+	t.Helper()
+	if _, err := intent.Update(h.town, IntentSeat(flint), func(r *intent.Record) error {
+		r.Desired = intent.DesiredPark
+		r.Reason = "overrun (20 minute rule)"
+		r.PausedBy = pausedBy
+		r.PausedAt = h.now
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPausedSeatRefusesKillAndRestart(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -146,6 +161,112 @@ func TestPausedSeatRefusesKillAndRestart(t *testing.T) {
 	lines := h.actions(t)
 	if len(lines) != 2 || lines[0].Actor != "daemon/idle-reaper" || lines[0].Outcome != "refused" || !strings.Contains(lines[0].Detail, "operator inspecting") {
 		t.Fatalf("action log = %+v, want two refusals naming actor and hold", lines)
+	}
+}
+
+// KillOwnPark is the automatic kill for a seat whose park the caller wrote
+// itself — the overrun guard's stop, which parks the seat it is about to end
+// so no scanner restarts it. The caller's own park passes; the record keeps
+// it, and the action log names the kill, its actor and its reason.
+func TestKillOwnPark_EndsTheSeatItParked(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.parkAs(t, "overrun_guard")
+	s := h.sup()
+
+	if err := s.KillOwnPark(flint, "overrun (20 minute rule) on gt-aaa11", "overrun_guard"); err != nil {
+		t.Fatalf("KillOwnPark on the seat it parked = %v, want the kill", err)
+	}
+	if got := h.tmux.kills(); len(got) != 1 || got[0] != flint.SessionName() {
+		t.Fatalf("kills = %v, want [%s]", got, flint.SessionName())
+	}
+	rec, err := intent.Read(h.town, IntentSeat(flint))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Held() {
+		t.Errorf("record desired=%q: the kill dropped the park the stop is still relying on", rec.Desired)
+	}
+	if rec.LastAction == nil || rec.LastAction.Verb != "kill" || rec.LastAction.Actor != "overrun_guard" ||
+		rec.LastAction.Reason != "overrun (20 minute rule) on gt-aaa11" || rec.LastAction.Outcome != "done" {
+		t.Errorf("record last action = %+v, want the kill with its actor and reason", rec.LastAction)
+	}
+	lines := h.actions(t)
+	if len(lines) != 1 || lines[0].Verb != "kill" || lines[0].Actor != "overrun_guard" ||
+		lines[0].Outcome != "done" || lines[0].Reason != "overrun (20 minute rule) on gt-aaa11" {
+		t.Fatalf("action log = %+v, want one done kill naming the actor and reason", lines)
+	}
+}
+
+// The exemption is the caller's own park and nothing else: another actor's
+// park, an operator's, still refuses the kill.
+func TestKillOwnPark_RefusesAnotherActorsPark(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.pause(t) // the operator's park: desired=park with no paused_by
+	s := h.sup()
+
+	err := s.KillOwnPark(flint, "overrun (20 minute rule) on gt-aaa11", "overrun_guard")
+	if !errors.Is(err, ErrRefused) || !errors.Is(err, ErrPaused) {
+		t.Fatalf("KillOwnPark on an operator's park = %v, want ErrPaused", err)
+	}
+	if kills := h.tmux.kills(); len(kills) != 0 {
+		t.Fatalf("kills = %v, want none", kills)
+	}
+	lines := h.actions(t)
+	if len(lines) != 1 || lines[0].Outcome != "refused" || lines[0].Actor != "overrun_guard" ||
+		!strings.Contains(lines[0].Detail, "operator inspecting") {
+		t.Fatalf("action log = %+v, want one refusal naming the operator's hold", lines)
+	}
+}
+
+// A freeze is not a park the caller wrote, even with the same paused_by: it
+// is the supervisor's restart budget and nothing ends it but an operator.
+func TestKillOwnPark_RefusesAFreeze(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.parkAs(t, "overrun_guard")
+	if _, err := intent.Update(h.town, IntentSeat(flint), func(r *intent.Record) error {
+		r.Frozen = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := h.sup().KillOwnPark(flint, "overrun (20 minute rule) on gt-aaa11", "overrun_guard")
+	if !errors.Is(err, ErrRefused) || !errors.Is(err, ErrFrozen) {
+		t.Fatalf("KillOwnPark on a frozen seat = %v, want ErrFrozen", err)
+	}
+	if kills := h.tmux.kills(); len(kills) != 0 {
+		t.Fatalf("kills = %v, want none", kills)
+	}
+}
+
+// The e-stop outranks the caller's own park: an automatic stop does not run
+// over the town's brakes, which is the whole point of routing it through the
+// supervisor (gt-4k3fj.4).
+func TestKillOwnPark_RefusesUnderAnEstop(t *testing.T) {
+	t.Parallel()
+	for _, which := range []string{"town", "rig"} {
+		h := newHarness(t)
+		h.parkAs(t, "overrun_guard")
+		if which == "town" {
+			_ = estop.Activate(h.town, estop.TriggerManual, "x")
+		} else {
+			_ = estop.ActivateRig(h.town, "gastown", estop.TriggerManual, "x")
+		}
+
+		err := h.sup().KillOwnPark(flint, "overrun (20 minute rule) on gt-aaa11", "overrun_guard")
+		if !errors.Is(err, ErrRefused) || !errors.Is(err, ErrEstop) {
+			t.Errorf("%s estop: KillOwnPark = %v, want ErrEstop", which, err)
+		}
+		if kills := h.tmux.kills(); len(kills) != 0 {
+			t.Errorf("%s estop: kills = %v, want none", which, kills)
+		}
+		lines := h.actions(t)
+		if len(lines) != 1 || lines[0].Outcome != "refused" || !strings.Contains(lines[0].Detail, "e-stop") {
+			t.Errorf("%s estop: action log = %+v, want one refusal naming the e-stop", which, lines)
+		}
 	}
 }
 

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
@@ -138,12 +140,17 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 	return seats
 }
 
-// poolSeatBatch answers the seat reads of one tick from two batched reads per
-// rig: the polecats' agent beads and the rig's assigned work (gt-u8rbh). The
-// per-seat read spends two bd calls on every polecat directory, idle ones
-// included. A polecat the batch did not answer, or a rig whose batch failed,
-// is read per seat through the rig's own store, so a failure costs calls and
-// never changes a seat's count. It holds what it read: build one per tick.
+// poolSeatBatch answers the seat reads of one tick from one batched read per
+// rig: the rig's assigned work, which also answers the agent beads it carries
+// (gt-u8rbh, gt-4efmk). The per-seat read spends two bd calls on every polecat
+// directory, idle ones included. A polecat the batch did not answer, or a rig
+// whose batch failed, is read per seat through the rig's own store, so a
+// failure costs calls and never changes a seat's count. It holds what it read:
+// build one per tick.
+//
+// A bead is answered from the batch only in a form the seat read can use whole:
+// an agent bead is complete (listedAgentBeadComplete) or read live by id, and an
+// id two rigs' lists carry is answered in a fixed order (heldIssue).
 type poolSeatBatch struct {
 	townRoot string
 	store    func(rigName string) beads.Client
@@ -152,23 +159,26 @@ type poolSeatBatch struct {
 }
 
 // rigSeatBatch is one rig's reads. store is the rig's client, which the
-// per-seat fallback reads too. agents, parsed and assigned are nil when their
-// batch failed or was not made. held holds the hook and source-issue beads the
-// batch read, by id; an id it does not hold is read live, as the per-seat read
-// does.
+// per-seat fallback reads too. assigned and held come from the rig's work list,
+// and are nil when that read failed; agents is nil when no agent bead was
+// answered. A rig whose work list failed falls back to the per-seat reads: its
+// agent beads cost one batch and its assignments one live read each. held holds
+// the work beads by id — those the list returned, plus the hook and source-issue
+// beads a later batch added — and an id it does not hold is read live, as the
+// per-seat read does.
 type rigSeatBatch struct {
 	store    beads.Client
-	asked    map[string]bool         // agent bead ids the batch asked for
+	asked    map[string]bool         // agent bead ids the batch answered (found or not)
 	agents   map[string]*beads.Issue // the agent beads that exist among them
 	parsed   map[string]parsedAgent  // each agent bead's parse, once, by id
 	assigned map[string]*beads.Issue // assignee -> the issue GetAssignedIssue picks
-	held     map[string]*beads.Issue // hook and source-issue beads, by id
+	held     map[string]*beads.Issue // work, hook and source-issue beads, by id
 }
 
 // parsedAgent is one batched agent bead's parse: what a live read of the bead
-// would have returned. The batch asks for the same bead twice — first the
-// references it follows (readSourceIssues) and then the seat read itself
-// (agentBead) — so the description is parsed once, here.
+// would have returned. The batch parses each bead once and answers both the
+// references it follows (readSourceIssues) and the seat read itself (agentBead)
+// from that parse.
 type parsedAgent struct {
 	fields *beads.AgentFields
 	err    error
@@ -213,6 +223,60 @@ func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState,
 	return poolPolecatSeatStateWith(b.townRoot, rigName, polecatName, reads)
 }
 
+// landingWork is the poolSeatWorkFunc the landing seats are confirmed with: the
+// beads the tick's batch already holds, and one town-level ShowMultiple for the
+// rest. A landing bead is live work in its rig's database, so a rig whose work
+// list the tick has already read answers it with no read of its own (gt-4efmk).
+// A rig the tick has not asked about yet is not searched — the landing read runs
+// before every seat is asked, so which rigs are in the batch depends on the seat
+// order — and its bead, like one of another database (an hq- bead slung from the
+// town), is read by town, which routes it. The saving is therefore only for the
+// rigs already reached; a tick that reaches none of them pays the town read, as
+// before.
+func (b *poolSeatBatch) landingWork(town beads.Client) poolSeatWorkFunc {
+	return func(ids []string) (map[string]*beads.Issue, error) {
+		out := make(map[string]*beads.Issue, len(ids))
+		var rest []string
+		for _, id := range ids {
+			if issue, ok := b.heldIssue(id); ok {
+				out[id] = issue
+				continue
+			}
+			rest = append(rest, id)
+		}
+		if len(rest) == 0 {
+			return out, nil
+		}
+		more, err := town.ShowMultiple(rest)
+		if err != nil {
+			// A bead that could not be read is not a bead that landed.
+			return nil, err
+		}
+		for id, issue := range more {
+			out[id] = issue
+		}
+		return out, nil
+	}
+}
+
+// heldIssue answers a bead id from the batches made so far. One bead is one
+// bead whichever rig's list carried it, so the rigs are searched in name order:
+// a bead two rigs hold is answered by the same rig on every run, where a walk
+// over the map would answer by whichever rig the iteration reached first.
+func (b *poolSeatBatch) heldIssue(id string) (*beads.Issue, bool) {
+	names := make([]string, 0, len(b.rigs))
+	for name := range b.rigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if issue, ok := b.rigs[name].held[id]; ok {
+			return issue, true
+		}
+	}
+	return nil, false
+}
+
 // rig reads a rig's batches the first time one of its polecats is asked about.
 func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 	if rb, ok := b.rigs[rigName]; ok {
@@ -229,26 +293,194 @@ func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 	for _, name := range names {
 		ids = append(ids, beads.PolecatBeadIDWithPrefix(prefix, rigName, name))
 	}
-	if agents, err := rb.store.ShowMultiple(ids); err == nil {
-		rb.agents = agents
-		rb.asked = make(map[string]bool, len(ids))
-		rb.parsed = make(map[string]parsedAgent, len(agents))
-		for _, id := range ids {
-			rb.asked[id] = true
-		}
-		for id, agent := range agents {
-			// The shared agent-bead read, over a store that holds this one issue,
-			// so the bead is validated and parsed exactly as a live read would.
-			_, fields, err := beads.GetAgentBead(heldIssueStore{Client: rb.store, issue: agent}, id)
-			rb.parsed[id] = parsedAgent{fields: fields, err: err}
-		}
-	}
+	// The work list is made first, so the agent beads it carries cost no read
+	// of their own: an agent bead is a bead like any other, filed open and
+	// carrying its fields in the description the list returns.
 	work, err := rb.store.List(beads.ListOptions{Status: strings.Join(assignedStatuses, ","), Priority: -1})
 	if err == nil {
 		rb.assigned = assignedByAssignee(work)
+		rb.held = make(map[string]*beads.Issue, len(work))
+		for _, issue := range work {
+			rb.held[issue.ID] = issue
+		}
 	}
-	rb.readSourceIssues(work)
+	rb.readAgents(ids)
+	rb.readSourceIssues()
 	return rb
+}
+
+// readAgents answers the polecats' agent beads from the work list and, for the
+// beads that list does not carry — one filed closed, deferred or pinned, none
+// of which an assigned-work list asks for, or one whose list record is not
+// whole (listedAgentBeadComplete) — one ShowMultiple. An agent bead the batch
+// asked for and did not find does not exist; one it could not ask about goes to
+// the live per-seat read, so a failed read costs calls and never changes a
+// seat's count.
+func (rb *rigSeatBatch) readAgents(ids []string) {
+	agents := make(map[string]*beads.Issue, len(ids))
+	asked := make(map[string]bool, len(ids))
+	var missing []string
+	for _, id := range ids {
+		if issue, ok := rb.held[id]; ok && listedAgentBeadComplete(issue) {
+			agents[id] = issue
+			asked[id] = true
+			continue
+		}
+		missing = append(missing, id)
+	}
+	if len(missing) > 0 {
+		if found, err := rb.store.ShowMultiple(missing); err == nil {
+			for _, id := range missing {
+				asked[id] = true
+			}
+			for id, issue := range found {
+				agents[id] = issue
+			}
+		}
+	}
+	if len(asked) == 0 {
+		return
+	}
+	rb.asked = asked
+	rb.agents = agents
+	rb.parsed = make(map[string]parsedAgent, len(agents))
+	for id, agent := range agents {
+		// The shared agent-bead read, over a store that holds this one issue,
+		// so the bead is validated and parsed exactly as a live read would.
+		_, fields, err := beads.GetAgentBead(heldIssueStore{Client: rb.store, issue: agent}, id)
+		rb.parsed[id] = parsedAgent{fields: fields, err: err}
+	}
+}
+
+// rosterAgentField is one description key the seat read takes from an agent
+// bead, and whether a whole record always carries the line: always marks the
+// keys beads.FormatAgentDescription writes on every agent bead, whatever their
+// value ("hook_bead: null" is a line an idle agent has); the rest are written
+// only when they carry a value, so their absence is not a gap.
+type rosterAgentField struct {
+	key    string
+	always bool
+}
+
+// rosterAgentFields is the one list of description keys the seat read takes
+// from an agent bead (poolPolecatSeatStateWith and readSourceIssues): the role
+// and state it reads the disposition from, the hook and source-issue references
+// it follows, and the cleanup, MR, branch and agent facts it feeds the
+// workstate classifier. A field the seat read starts taking is added here, and
+// listedAgentBeadComplete gates on the list, so there is no second list to
+// drift.
+var rosterAgentFields = []rosterAgentField{
+	{key: "role_type", always: true},
+	{key: "rig", always: true},
+	{key: "agent_state", always: true},
+	{key: "hook_bead", always: true},
+	{key: "cleanup_status", always: true},
+	{key: "active_mr", always: true},
+	{key: "notification_level", always: true},
+	{key: "agent"},
+	{key: "branch"},
+	{key: "last_source_issue"},
+	{key: "mr_failed"},
+	{key: "push_failed"},
+}
+
+// listedAgentBeadComplete reports whether a work-list record is one the seat
+// read can answer whole: an agent bead whose id and status are set, whose
+// description parses a role and a state, and which carries every line a whole
+// agent description has (rosterAgentFields). A record that lost a line was
+// truncated, and answering from it would read the hook, the agent or the state
+// as empty and the seat as free, so readAgents asks the store for that bead by
+// id instead. TestListedAgentBeadCarriesTheShowFields holds a recorded bd list
+// and bd show of one bead to this: the list form is whole.
+func listedAgentBeadComplete(issue *beads.Issue) bool {
+	if issue == nil || !beads.IsAgentBead(issue) {
+		return false
+	}
+	if strings.TrimSpace(issue.ID) == "" || strings.TrimSpace(issue.Status) == "" {
+		return false
+	}
+	fields := beads.ParseAgentFields(issue.Description)
+	if strings.TrimSpace(fields.RoleType) == "" || strings.TrimSpace(fields.AgentState) == "" {
+		return false
+	}
+	present := agentDescriptionKeys(issue.Description)
+	for _, field := range rosterAgentFields {
+		if field.always && !present[field.key] {
+			return false
+		}
+	}
+	// The always-written lines prove the record reaches notification_level, not
+	// that it reaches the end: the lines after it are written only when they
+	// carry a value, so a cut there loses a value and leaves no gap. Two checks
+	// stand in for the end. The last line must be a whole "key: value" line of
+	// a key an agent description holds (a cut inside a line, or in anything but
+	// a known line, fails it), and a seat that is live (an agent_state other than
+	// idle, done or nuked) always records its agent, so a live record without
+	// one lost it. A cut exactly between two optional lines of a dormant seat is
+	// the one loss neither can see; the recorded list and show of one bead
+	// (TestListedAgentBeadCarriesTheShowFields) are the evidence the list form
+	// returns the description whole.
+	if !endsOnAKnownLine(issue.Description) {
+		return false
+	}
+	if agentStateIsLive(fields.AgentState) && !present["agent"] {
+		return false
+	}
+	return true
+}
+
+// endsOnAKnownLine reports whether the last non-empty line of an agent
+// description is a whole "key: value" line of a key the seat read knows.
+func endsOnAKnownLine(description string) bool {
+	lines := strings.Split(strings.TrimRight(description, " \t\r\n"), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	key, value, ok := strings.Cut(last, ":")
+	if !ok || strings.TrimSpace(value) == "" {
+		return false
+	}
+	return knownAgentKeys()[strings.ToLower(strings.TrimSpace(key))]
+}
+
+// knownAgentKeys is every key beads.FormatAgentDescription can write, found by
+// formatting a description whose every string field is set and every flag true. The list comes from
+// the formatter, so a key it starts writing is known here without an edit.
+var knownAgentKeys = sync.OnceValue(func() map[string]bool {
+	var fields beads.AgentFields
+	v := reflect.ValueOf(&fields).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		switch f := v.Field(i); {
+		case !f.CanSet():
+		case f.Kind() == reflect.String:
+			f.SetString("x")
+		case f.Kind() == reflect.Bool:
+			f.SetBool(true)
+		}
+	}
+	return agentDescriptionKeys(beads.FormatAgentDescription("t", &fields))
+})
+
+// agentStateIsLive reports whether an agent_state names a seat that is doing or
+// about to do work, one whose agent line a whole record always carries.
+func agentStateIsLive(state string) bool {
+	switch beads.AgentState(strings.TrimSpace(state)) {
+	case beads.AgentStateIdle, beads.AgentStateDone, beads.AgentStateNuked, "":
+		return false
+	}
+	return true
+}
+
+// agentDescriptionKeys names the keys an agent description's lines carry, in
+// the lower-case form beads.ParseAgentFields reads them by.
+func agentDescriptionKeys(description string) map[string]bool {
+	keys := map[string]bool{}
+	for _, line := range strings.Split(description, "\n") {
+		key, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		keys[strings.ToLower(strings.TrimSpace(key))] = true
+	}
+	return keys
 }
 
 // readSourceIssues reads the beads the polecats' hook references and source-issue
@@ -256,14 +488,13 @@ func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 // every live one (open, in progress or hooked), so only the rest, the closed
 // ones a polecat last worked, cost a read: one batched read for them, which a
 // failure leaves out so each is read live. A rig whose agent beads did not batch
-// reads nothing here. work is nil when the work list failed.
-func (rb *rigSeatBatch) readSourceIssues(work []*beads.Issue) {
+// reads nothing here.
+func (rb *rigSeatBatch) readSourceIssues() {
 	if rb.agents == nil {
 		return
 	}
-	rb.held = make(map[string]*beads.Issue, len(work))
-	for _, issue := range work {
-		rb.held[issue.ID] = issue
+	if rb.held == nil {
+		rb.held = map[string]*beads.Issue{}
 	}
 	var missing []string
 	seen := map[string]bool{}

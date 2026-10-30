@@ -47,6 +47,54 @@ var (
 	installDoltHost   string
 )
 
+// installSteps are the install's external steps: the bd presence probe, the
+// Dolt work beads needs, and the long-running server a local install starts. A
+// nil field is the real step, which a test cannot run without a server; a test
+// sets the ones its install reaches.
+//
+// Every Dolt step a local install runs is here, startDolt included, so a test
+// can assert that a remote install ran none of them: a local start added back
+// to the remote path calls the recorded step and fails the test (gt-q0ppq).
+type installSteps struct {
+	checkBeads         func() error
+	ensureLocalDolt    func() error
+	ensureDoltIdentity func() error
+	checkDoltPort      func(port int) error
+	initRig            func(townRoot, rigName string) (doltserver.InitRigResult, error)
+	startDolt          func(townRoot string) error
+	initTownBeads      func(townRoot string) error
+	configureTownBeads func(townRoot string)
+}
+
+// resolved fills in every step the caller left nil.
+func (s installSteps) resolved() installSteps {
+	if s.checkBeads == nil {
+		s.checkBeads = deps.EnsureBeads
+	}
+	if s.ensureLocalDolt == nil {
+		s.ensureLocalDolt = ensureInstallDoltReady
+	}
+	if s.ensureDoltIdentity == nil {
+		s.ensureDoltIdentity = doltserver.EnsureDoltIdentity
+	}
+	if s.checkDoltPort == nil {
+		s.checkDoltPort = doltserver.CheckPortAvailable
+	}
+	if s.initRig == nil {
+		s.initRig = doltserver.InitRig
+	}
+	if s.startDolt == nil {
+		s.startDolt = doltserver.Start
+	}
+	if s.initTownBeads == nil {
+		s.initTownBeads = initTownBeads
+	}
+	if s.configureTownBeads == nil {
+		s.configureTownBeads = configureTownBeads
+	}
+	return s
+}
+
 var installCmd = &cobra.Command{
 	Use:     "install [path]",
 	GroupID: GroupWorkspace,
@@ -113,6 +161,9 @@ type installOptions struct {
 	// doltHostSet is whether the flag was given at all: an empty value is a
 	// refusal, and it cannot be told from no flag by the string alone.
 	doltHostSet bool
+	// steps are the install's external steps; the zero value runs the real
+	// ones (see installSteps).
+	steps installSteps
 }
 
 // installOptionsFromFlags is the options the command's flags describe.
@@ -143,6 +194,8 @@ func runInstall(cmd *cobra.Command, args []string) error {
 
 // runInstallWith is runInstall's body over explicit options.
 func runInstallWith(opts installOptions, args []string) error {
+	steps := opts.steps.resolved()
+
 	// Determine target path
 	targetPath := "."
 	if len(args) > 0 {
@@ -218,21 +271,23 @@ func runInstallWith(opts installOptions, args []string) error {
 		}
 	}
 
-	// Ensure beads (bd) is available before proceeding. A remote endpoint
-	// leaves every step here to the machine that runs the server: bd and dolt
-	// are that machine's, and the identity, port and server start all belong
-	// to a local Dolt this town does not have.
-	if !opts.noBeads && !remoteDolt {
-		if err := deps.EnsureBeads(); err != nil {
+	// Ensure beads (bd) is available before proceeding. bd runs on this
+	// machine even when the server is elsewhere: it is what initializes the hq
+	// database's beads on the server. A local Dolt — its binary, identity and
+	// port — belongs to the machine that serves it (gt-q0ppq).
+	if !opts.noBeads {
+		if err := steps.checkBeads(); err != nil {
 			return fmt.Errorf("beads dependency check failed: %w", err)
 		}
-		if err := ensureInstallDoltReady(); err != nil {
+	}
+	if !opts.noBeads && !remoteDolt {
+		if err := steps.ensureLocalDolt(); err != nil {
 			return err
 		}
 
 		// Preflight: ensure dolt identity before any workspace mutations.
 		// This prevents a partial install that can't be retried without --force.
-		if err := doltserver.EnsureDoltIdentity(); err != nil {
+		if err := steps.ensureDoltIdentity(); err != nil {
 			return fmt.Errorf("dolt identity setup failed (required for beads): %w\n\nTo fix, run:\n  dolt config --global --add user.name \"Your Name\"\n  dolt config --global --add user.email \"you@example.com\"", err)
 		}
 
@@ -250,7 +305,7 @@ func runInstallWith(opts installOptions, args []string) error {
 		}
 		installEndpointPort = port
 		externalTestDolt := useExternalTestDoltServer(port)
-		if err := doltserver.CheckPortAvailable(port); err != nil {
+		if err := steps.checkDoltPort(port); err != nil {
 			// Port is in use — but if a Dolt server is already running
 			// for this same town, we can reuse it instead of starting a new one.
 			if canReuseInstallDoltServer(absPath, port) || externalTestDolt {
@@ -409,10 +464,21 @@ func runInstallWith(opts installOptions, args []string) error {
 	// Initialize town-level beads database (optional)
 	// Town beads (hq- prefix) stores town mail, cross-rig coordination, and handoffs.
 	// Rig beads are separate and have their own prefixes.
-	// A remote endpoint's hq database and beads are created on the server
-	// itself (gt-q0ppq), so this install writes neither locally.
 	if remoteDolt {
-		fmt.Printf("   • Dolt endpoint %s:%d is remote: no local Dolt started, no local .beads/ created\n", doltHost, installEndpointPort)
+		// The hq database lives on the server: create it there over SQL, then
+		// initialize the town's beads against it. Neither step makes a local
+		// Dolt (gt-q0ppq).
+		res, err := steps.initRig(absPath, "hq")
+		if err != nil {
+			// "Preparing", not "creating": the step can fail reading the
+			// server's catalog before any database is created (gt-q0ppq).
+			return fmt.Errorf("preparing the hq database on the remote Dolt at %s:%d: %w", doltHost, installEndpointPort, err)
+		}
+		if res.Created {
+			fmt.Printf("   ✓ Created the hq database on the remote Dolt at %s:%d (no local Dolt started)\n", doltHost, installEndpointPort)
+		} else {
+			fmt.Printf("   • The hq database is already on the remote Dolt at %s:%d\n", doltHost, installEndpointPort)
+		}
 	}
 	if !opts.noBeads && !remoteDolt {
 		port := doltserver.DefaultConfig(absPath).Port
@@ -424,21 +490,22 @@ func runInstallWith(opts installOptions, args []string) error {
 		// Identity was verified in preflight above.
 		// Create HQ database before starting server.
 		if !externalTestDolt {
-			if _, err := doltserver.InitRig(absPath, "hq"); err != nil {
+			if _, err := steps.initRig(absPath, "hq"); err != nil {
 				return fmt.Errorf("initializing HQ Dolt database: %w", err)
 			}
 
 			// Start the Dolt server — bd commands need a running server.
 			// The server stays running after install (it's lightweight infrastructure,
 			// like a database). Stop it with 'gt dolt stop' when not needed.
-			if err := doltserver.Start(absPath); err != nil {
+			if err := steps.startDolt(absPath); err != nil {
 				if !strings.Contains(err.Error(), "already running") {
 					return fmt.Errorf("starting Dolt server for beads: %w", err)
 				}
 			}
 		}
-
-		if err := initTownBeads(absPath); err != nil {
+	}
+	if !opts.noBeads {
+		if err := steps.initTownBeads(absPath); err != nil {
 			return fmt.Errorf("initializing town beads: %w", err)
 		} else {
 			fmt.Printf("   ✓ Initialized .beads/ (town-level beads with hq- prefix)\n")
@@ -453,16 +520,7 @@ func runInstallWith(opts installOptions, args []string) error {
 			fmt.Printf("   ✓ Provisioned %d formulas\n", count)
 		}
 
-		// Set beads routing mode to explicit (required by gt doctor).
-		townBd := beads.NewPlain(absPath, withBeadsDirEnv(filepath.Join(absPath, ".beads")))
-		if err := townBd.ConfigSet("routing.mode", "explicit"); err != nil {
-			fmt.Printf("   %s Could not set routing.mode: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
-		}
-
-		// gt tail reads the events journal (gt-7iwy0.7).
-		if err := townBd.ConfigSet(beads.EventsJournalKey, "true"); err != nil {
-			fmt.Printf("   %s Could not turn on the events journal: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
-		}
+		steps.configureTownBeads(absPath)
 	}
 
 	// Detect and save overseer identity
@@ -800,11 +858,17 @@ func ensureEscalationConfig(path string) (bool, error) {
 }
 
 // buildBdInitOptions returns the `bd init` options for the town, with the
-// --server-port from the town's Dolt endpoint.
-// A town without an endpoint passes no port.
+// --server-port and --server-host from the town's Dolt endpoint. A town
+// without an endpoint passes no port.
 func buildBdInitOptions(townPath string) beads.InitOptions {
 	// gt install --force preserves town state; bd reinit flags would destroy town beads.
-	return beads.InitOptions{Prefix: "hq", ServerPort: bdInitDoltConfig(townPath).Port}
+	cfg := bdInitDoltConfig(townPath)
+	opts := beads.InitOptions{Prefix: "hq", ServerPort: cfg.Port}
+	// bd's own default is 127.0.0.1, so only a remote endpoint names a host.
+	if cfg.IsRemote() {
+		opts.ServerHost = cfg.Host
+	}
+	return opts
 }
 
 // bdInitDoltConfig is the town's Dolt server config, endpoint included
@@ -907,6 +971,20 @@ func initTownBeads(townPath string) error {
 	}
 
 	return nil
+}
+
+// configureTownBeads turns on the two bd settings the town needs: explicit
+// routing (gt doctor requires it) and the events journal (gt tail reads it,
+// gt-7iwy0.7). Both are reported, not fatal: the database is already
+// initialized, and gt doctor names either one when it is off.
+func configureTownBeads(townPath string) {
+	townBd := beads.NewPlain(townPath, withBeadsDirEnv(filepath.Join(townPath, ".beads")))
+	if err := townBd.ConfigSet("routing.mode", "explicit"); err != nil {
+		fmt.Printf("   %s Could not set routing.mode: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
+	}
+	if err := townBd.ConfigSet(beads.EventsJournalKey, "true"); err != nil {
+		fmt.Printf("   %s Could not turn on the events journal: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
+	}
 }
 
 // withBeadsDirEnv returns the hardened bd mutation environment pinned to the

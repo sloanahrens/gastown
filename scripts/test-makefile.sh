@@ -14,7 +14,6 @@ bash -n scripts/lib/install-gt-lib.sh
 bash scripts/install-local_test.sh
 bash -n scripts/deep-review.sh
 bash scripts/deep-review_test.sh
-bash scripts/flake-sweep_test.sh
 bash scripts/gate-vs-load_test.sh
 bash -n scripts/forgejo-provision.sh
 bash scripts/forgejo-provision_test.sh

@@ -1,6 +1,7 @@
 package forgejocut
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -59,13 +60,19 @@ type ExecRefGit struct {
 	Run forgejoresync.Runner // runs one git argv; forgejoresync.RunExec in production
 }
 
+// run runs one git argv. The cutover installs no signal handler, so every call
+// runs under the background context (gt-csjwi).
+func (g ExecRefGit) run(argv []string) ([]byte, error) {
+	return g.Run(context.Background(), argv)
+}
+
 // Peel returns the commit sha names: the sha itself, or the commit an annotated
 // tag object points at.
 func (g ExecRefGit) Peel(sha string) (string, error) {
 	if !objectIDPattern.MatchString(sha) {
 		return "", errors.New("ref plan: rev-parse --verify: sha is not an object id")
 	}
-	out, err := g.Run([]string{"git", "-C", g.Dir, "rev-parse", "--verify", sha + "^{commit}"})
+	out, err := g.run([]string{"git", "-C", g.Dir, "rev-parse", "--verify", sha + "^{commit}"})
 	if err != nil {
 		return "", fmt.Errorf("ref plan: rev-parse --verify: %w", err)
 	}
@@ -83,7 +90,7 @@ func (g ExecRefGit) IsAncestor(a, b string) (bool, error) {
 	if !objectIDPattern.MatchString(a) || !objectIDPattern.MatchString(b) {
 		return false, errors.New("ref plan: merge-base --is-ancestor: sha is not an object id")
 	}
-	_, err := g.Run([]string{"git", "-C", g.Dir, "merge-base", "--is-ancestor", a, b})
+	_, err := g.run([]string{"git", "-C", g.Dir, "merge-base", "--is-ancestor", a, b})
 	if err == nil {
 		return true, nil
 	}
@@ -100,7 +107,7 @@ func (g ExecRefGit) CommitsAhead(a, b string) string {
 	if !objectIDPattern.MatchString(a) || !objectIDPattern.MatchString(b) {
 		return "?"
 	}
-	out, err := g.Run([]string{"git", "-C", g.Dir, "rev-list", "--count", a + ".." + b})
+	out, err := g.run([]string{"git", "-C", g.Dir, "rev-list", "--count", a + ".." + b})
 	if err != nil {
 		return "?"
 	}

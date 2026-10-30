@@ -54,6 +54,7 @@ Infrastructure checks:
   - dolt-commit-rate         Warn when a Dolt database made more commits in 24h than the configured limit
   - dolt-pause-marker        Warn on a stale or unreadable daemon/dolt.pause marker
   - tracker                  Check the town tracker answers ready (database ping and write probe)
+  - census-budget            Check every bd caller stays within its calls-per-minute budget
 
 Cleanup checks (fixable):
   - orphan-sessions          Detect orphaned tmux sessions
@@ -246,6 +247,9 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	// Must run before infrastructure checks that might fail confusingly on full disks.
 	d.Register(doctor.NewDiskSpaceCheck())
 	d.Register(doctor.NewEventsLogCheck())
+	// bd call budgets: a caller whose average passes its row in
+	// internal/beads/census_budgets.go fails the check (gt-gojo0).
+	d.Register(doctor.NewCensusBudgetCheck())
 
 	// Container-suite gate slot: informational check exposing the Docker
 	// VM's CPU/memory bound so operators can see why container-backed

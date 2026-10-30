@@ -53,6 +53,7 @@ func (d *Daemon) runJevAttention() {
 		settings = jevattention.Settings{
 			MaxUSDPerDay:        c.Patrols.JevAttention.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevAttention.USDPerBillionTokens,
+			Scrub:               c.Patrols.JevAttention.Scrub,
 		}
 	}
 	open := d.jevAttentionOpen

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -17,6 +18,9 @@ type cliCall struct {
 	args []string
 	dir  string
 	env  []string
+	// stdin is what the call was fed, for a command that reads a document on
+	// its standard input.
+	stdin string
 }
 
 // getenv returns the value of key in the call's environment.
@@ -72,6 +76,10 @@ func (f *fakeCLI) run(cmd *exec.Cmd) ([]byte, []byte, error) {
 	c := cliCall{name: filepath.Base(cmd.Path), dir: cmd.Dir, env: slices.Clone(cmd.Env)}
 	if len(cmd.Args) > 1 {
 		c.args = slices.Clone(cmd.Args[1:])
+	}
+	if cmd.Stdin != nil {
+		feed, _ := io.ReadAll(cmd.Stdin)
+		c.stdin = string(feed)
 	}
 	f.mu.Lock()
 	f.calls = append(f.calls, c)
