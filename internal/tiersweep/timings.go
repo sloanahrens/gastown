@@ -19,13 +19,30 @@ const timingsGoesOn = "the sweep goes on"
 
 // Timing is one package's line in timings.jsonl. WallMS is the time the
 // package's command took, Exit the code it returned, and Start the clock
-// reading taken before it started, in RFC 3339 with nanoseconds.
+// reading taken before it started, in RFC 3339 with nanoseconds. Kind is empty
+// on a package line and names the line's sort on any other, so a reader that
+// wants walls cannot mistake a test line for one (gt-juo5e).
 type Timing struct {
+	Kind    string `json:"kind,omitempty"`
 	Tier    string `json:"tier"`
 	Package string `json:"package"`
 	WallMS  int64  `json:"wall_ms"`
 	Exit    int    `json:"exit"`
 	Start   string `json:"start"`
+}
+
+// kindTest is the kind of a slow test's line in timings.jsonl.
+const kindTest = "test"
+
+// TestTiming is one slow test's line in timings.jsonl: the package the sweep
+// ran, the test's own name and how long it took. It names no wall time, since
+// the test's time is inside the package's (gt-juo5e).
+type TestTiming struct {
+	Kind      string `json:"kind"`
+	Tier      string `json:"tier"`
+	Package   string `json:"package"`
+	Test      string `json:"test"`
+	ElapsedMS int64  `json:"elapsed_ms"`
 }
 
 // TimingsKey is the key a timing is held under: the tier and the package name
@@ -43,6 +60,11 @@ func ParseWalls(data []byte) map[string]int64 {
 		}
 		var tm Timing
 		if err := json.Unmarshal([]byte(line), &tm); err != nil {
+			continue
+		}
+		if tm.Kind != "" {
+			// A slow test's line names its package too, and its elapsed time is
+			// not the package's wall (gt-juo5e).
 			continue
 		}
 		walls[TimingsKey(tm.Tier, tm.Package)] = tm.WallMS
@@ -84,8 +106,16 @@ func OpenTimings(path string, stderr io.Writer) *Timings {
 // not start records nothing. A write that fails drops the file, so the failure
 // is named once rather than once per package, and the line is still kept for
 // the persistent file.
-func (t *Timings) Add(tm Timing) {
-	line, err := json.Marshal(tm)
+func (t *Timings) Add(tm Timing) { t.write(tm) }
+
+// AddTest records one slow test's line beside the package lines, in the order
+// the run's packages finished, so a timings file names the tests that carry a
+// package's minutes (gt-juo5e). A write that fails is Add's failure.
+func (t *Timings) AddTest(tt TestTiming) { t.write(tt) }
+
+// write appends one line in timings.jsonl's format.
+func (t *Timings) write(v any) {
+	line, err := json.Marshal(v)
 	if err != nil {
 		t.report(err)
 		return

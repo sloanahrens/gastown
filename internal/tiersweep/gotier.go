@@ -42,11 +42,19 @@ var ProcessExec Exec = func(dir string, env []string, argv []string, out io.Writ
 // enough to name the failure, few enough that a red tier stays readable.
 const excerptLines = 5
 
+// slowTest is the shortest test a -json run writes to timings.jsonl: below it a
+// test is noise beside the package's wall, and a per-test cap is slowcheck's
+// job, not the sweep's (gt-juo5e).
+const slowTest = 5 * time.Second
+
 // Runner runs one tier's packages, one at a time unless Jobs names more, so no
 // single go test outlives its timeout and a red package is named on its own.
 type Runner struct {
 	// Exec runs each package's command. ProcessExec in production.
 	Exec Exec
+	// CreateLog opens one package's log file. os.Create in production; a test
+	// injects a writer whose write fails, the way a full disk does.
+	CreateLog func(path string) (io.WriteCloser, error)
 	// LogDir holds one log per package, named by tier and package.
 	LogDir string
 	// Timeout is the per-package go test timeout, as go test takes it.
@@ -80,6 +88,11 @@ type Runner struct {
 	// commit and skip list: a package it names counts as passed and is not run,
 	// and each package that passes is appended to it (gt-loqew).
 	Resume *Resume
+	// JSON makes each package's command print go test's -json stream: the log
+	// holds the plain text the same run would print, and every top-level test
+	// that took slowTest or longer is written to Timings as a test line
+	// (gt-juo5e). False keeps the command's own output as it comes.
+	JSON bool
 	// stderr keeps the progress lines and the reports whole while a run of more
 	// than one job writes them from the dispatcher and the collector at once.
 	stderrMu sync.Mutex
@@ -128,7 +141,8 @@ type task struct {
 }
 
 // packageResult is what one package's command left behind: the log, the exit
-// code, the clock reading before it started, and the failures to report.
+// code, the clock reading before it started, the failures to report, and the
+// tests a -json stream ended.
 type packageResult struct {
 	ran       bool
 	code      int
@@ -136,6 +150,12 @@ type packageResult struct {
 	log       string
 	createErr error
 	closeErr  error
+	// logErr is a failure to read the -json stream or to write its plain text to
+	// the log. Like a close, it leaves the package not passed: its log cannot be
+	// read, so nothing vouches for what ran.
+	logErr error
+	// tests are the top-level tests the stream ended, for the slow-test lines.
+	tests []TestTime
 }
 
 // tasks resolves each package's fate before anything runs. A skipped package
@@ -247,13 +267,16 @@ func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task, be
 	}
 	defer beganOnce()
 	log := filepath.Join(r.LogDir, LogName(tier, t.name))
-	f, err := os.Create(log)
+	f, err := r.createLog(log)
 	if err != nil {
 		// Without a log the package cannot be run, and it is not passed.
 		beganOnce()
 		return packageResult{log: log, createErr: err}
 	}
 	argv := append(append([]string{}, prefix...), "go", "test", "-count=1", "-timeout", r.Timeout)
+	if r.JSON {
+		argv = append(argv, "-json")
+	}
 	argv = append(argv, args...)
 	if t.pattern != "" {
 		argv = append(argv, "-skip", t.pattern)
@@ -261,9 +284,55 @@ func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task, be
 	argv = append(argv, t.pkg)
 	start := r.now()
 	beganOnce()
-	code := r.Exec(dir, r.Env, argv, f)
+	code, tests, logErr := r.execLogged(dir, argv, f)
 	closeErr := f.Close()
-	return packageResult{ran: true, code: code, start: start, log: log, closeErr: closeErr}
+	return packageResult{ran: true, code: code, start: start, log: log, closeErr: closeErr, logErr: logErr, tests: tests}
+}
+
+// createLog opens one package's log: the injected seam when a test names one, a
+// new file at path otherwise.
+func (r *Runner) createLog(path string) (io.WriteCloser, error) {
+	if r.CreateLog != nil {
+		return r.CreateLog(path)
+	}
+	return os.Create(path)
+}
+
+// execLogged runs one package's command with its output going to w. A run
+// without JSON writes the command's output there as it comes. A -json run writes
+// the plain text the same run would print, and returns the stream's terminal
+// events for the slow-test lines. A stream that cannot be read or captured
+// leaves the command's exit code alone and returns that error, so the caller can
+// fail a package whose log does not vouch for what ran (gt-juo5e).
+func (r *Runner) execLogged(dir string, argv []string, w io.Writer) (int, []TestTime, error) {
+	if !r.JSON {
+		return r.Exec(dir, r.Env, argv, w), nil, nil
+	}
+	pr, pw := io.Pipe()
+	type parsed struct {
+		tests []TestTime
+		err   error
+	}
+	done := make(chan parsed, 1)
+	go func() {
+		text, tests, err := ParseTestJSON(pr)
+		if err == nil {
+			_, err = io.WriteString(w, text)
+		}
+		if err != nil {
+			err = fmt.Errorf("capture -json output: %w", err)
+		}
+		done <- parsed{tests: tests, err: err}
+	}()
+	code := r.Exec(dir, r.Env, argv, pw)
+	// The command is done, so the stream ends here whatever it wrote. A
+	// PipeWriter's Close returns nil: the read half carries any failure.
+	_ = pw.Close()
+	p := <-done
+	if p.err != nil {
+		return code, p.tests, p.err
+	}
+	return code, p.tests, nil
 }
 
 // report writes the failure a package's result names and records its timing.
@@ -276,13 +345,17 @@ func (r *Runner) report(tier string, t *task) {
 		return
 	}
 	r.addTiming(tier, t.name, res.start, res.code)
+	r.addSlowTests(tier, t.name, res.tests)
 	if res.passed() {
 		r.recordPass(tier, t.name)
 	}
 	if res.closeErr != nil {
 		fmt.Fprintf(r.Stderr, "    close log %s: %v\n", res.log, res.closeErr)
 	}
-	if res.code != 0 || res.closeErr != nil {
+	if res.logErr != nil {
+		fmt.Fprintf(r.Stderr, "    log %s: %v\n", res.log, res.logErr)
+	}
+	if res.code != 0 || res.closeErr != nil || res.logErr != nil {
 		if err := r.excerpt(res.log); err != nil {
 			fmt.Fprintf(r.Stderr, "    read log %s: %v\n", res.log, err)
 		}
@@ -290,9 +363,9 @@ func (r *Runner) report(tier string, t *task) {
 }
 
 // passed reports whether a package's result is one the tier counts as passed:
-// its command ran, its log was opened and closed, and it exited zero.
+// its command ran, its log was opened, written and closed, and it exited zero.
 func (res packageResult) passed() bool {
-	return res.ran && res.createErr == nil && res.code == 0 && res.closeErr == nil
+	return res.ran && res.createErr == nil && res.code == 0 && res.closeErr == nil && res.logErr == nil
 }
 
 // tally counts the run in the caller's package-list order, so a failure is
@@ -344,6 +417,28 @@ func (r *Runner) addTiming(tier, name string, start time.Time, code int) {
 		Exit:    code,
 		Start:   start.Format(time.RFC3339Nano),
 	})
+}
+
+// addSlowTests writes one test line per top-level test that took slowTest or
+// longer, so the next sweep can name the tests inside a slow package
+// (gt-juo5e). A test's time is recorded even when the package failed: the test
+// that took the minutes is the one to look at.
+func (r *Runner) addSlowTests(tier, name string, tests []TestTime) {
+	if r.Timings == nil {
+		return
+	}
+	for _, tt := range tests {
+		if tt.Elapsed < slowTest.Seconds() {
+			continue
+		}
+		r.Timings.AddTest(TestTiming{
+			Kind:      kindTest,
+			Tier:      tier,
+			Package:   name,
+			Test:      tt.Test,
+			ElapsedMS: int64(tt.Elapsed*1000 + 0.5),
+		})
+	}
 }
 
 // excerpt writes the first excerptLines failure lines of a log to stderr,
