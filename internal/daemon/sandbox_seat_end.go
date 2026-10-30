@@ -9,6 +9,8 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/jev/battery"
+	jevrules "github.com/steveyegge/gastown/internal/jev/rules"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -16,19 +18,25 @@ import (
 
 // A sandbox seat is single-use. Its work lives in the sandbox: the sling's host
 // worktree is a snapshot the seat's commits never reach, and once the sandbox
-// is gone and the work has landed nothing on the host will read that copy
-// again. The step below removes it, so finished seats stop leaving a polecat
-// directory apiece behind (gt-sefzt). A tmux seat keeps its worktree and is
-// never touched here.
+// is gone and the work has landed the only host reader left is the rules
+// battery, which asks about the session by reading its transcript. The step
+// below removes the worktree, so finished seats stop leaving a polecat
+// directory apiece behind, and waits for that last ask (gt-sefzt, gt-381oj). A
+// tmux seat keeps its worktree and is never touched here.
 
 // sandboxSeatLanding is the landing that finished a sandbox seat: the bead, the
-// branch its work was on, and whether the rig's landing record proves that
-// work landed. A landing the record does not prove is unlanded work, which
-// keeps the seat.
+// branch its work was on, when the seat submitted it, and whether the rig's
+// landing record proves that work landed. A landing the record does not prove
+// is unlanded work, which keeps the seat.
 type sandboxSeatLanding struct {
 	BeadID string
 	Branch string
-	Landed bool
+	// Submitted is when the seat submitted the bead for landing: the landing
+	// worker already holds it, and it is the stamp the rules battery's cursor
+	// is compared against (gt-381oj). Zero when the bead carries no
+	// submission stamp.
+	Submitted time.Time
+	Landed    bool
 }
 
 // sandboxSeatEnd is what the daemon measured about a seat before deciding
@@ -58,6 +66,10 @@ type sandboxSeatEnd struct {
 	CleanupStatus polecat.CleanupStatus
 	// PushFailed is the push failure gt done recorded.
 	PushFailed bool
+	// RulesPending is whether the jev_rules patrol may still ask about the
+	// seat's last submission: the battery reads the transcript out of the
+	// host worktree this step removes (gt-381oj).
+	RulesPending bool
 }
 
 // keepReason names why the seat's host directories must stay, or "" when they
@@ -77,6 +89,8 @@ func (e sandboxSeatEnd) keepReason() string {
 		return "cleanup_status=" + orMissing(e.CleanupStatus) + ": unpushed or unrecorded work keeps the seat"
 	case e.PushFailed:
 		return "push_failed=true: the seat's branch never reached origin"
+	case e.RulesPending:
+		return "jev_rules has not yet asked about this submission"
 	case strings.TrimSpace(e.HookBead) != "":
 		return "hook_bead=" + e.HookBead + " is still set"
 	case strings.TrimSpace(e.Branch) == "" || strings.TrimSpace(e.LandedBranch) == "":
@@ -227,7 +241,38 @@ func (h *patrolScanHost) measureSandboxSeatEnd(rig, name string, landing sandbox
 		return sandboxSeatEnd{}, "cannot read its intent record: " + err.Error()
 	}
 	end.Retired = !rec.Held() && rec.EffectiveDesired() == intent.DesiredStop
+	end.RulesPending = h.rulesPending(landing.Submitted)
 	return end, ""
+}
+
+// rulesPendingWindow is how long after its submission a seat waits for the
+// rules battery to ask about it. Past it the seat goes whatever the cursor
+// says, so a stuck rules patrol cannot leave directories behind for ever
+// (gt-381oj).
+const rulesPendingWindow = time.Hour
+
+// rulesPending reports whether the jev_rules patrol may still ask about a
+// submission stamped submitted: the patrol is on, the submission is inside
+// rulesPendingWindow, and the battery's cursor has not reached it. The battery
+// reads the transcript out of the host worktree, so a submission it has not
+// asked about yet is the only thing that worktree is still wanted for
+// (gt-381oj).
+//
+// A submission with no stamp, and a cursor this town cannot read or has not
+// written yet, are not pending: the seat is kept only on a fact it measured,
+// never on the absence of one.
+func (h *patrolScanHost) rulesPending(submitted time.Time) bool {
+	if submitted.IsZero() || !h.d.isPatrolActive("jev_rules") {
+		return false
+	}
+	if h.d.clk().Now().Sub(submitted) >= rulesPendingWindow {
+		return false
+	}
+	cur, ok, err := battery.ReadCursor(jevrules.CursorPath(h.town()))
+	if err != nil || !ok {
+		return false
+	}
+	return cur.Time.Before(submitted)
 }
 
 // seatAgentFields reads the polecat's agent bead. A bead that does not exist is
@@ -352,7 +397,7 @@ func (d *Daemon) runSandboxSeatEnd(rigName string, landings *land.LandingsFile, 
 		return
 	}
 	d.sandboxSeatEnder()(rigName, name, sandboxSeatLanding{
-		BeadID: w.BeadID, Branch: w.Branch, Landed: landed,
+		BeadID: w.BeadID, Branch: w.Branch, Submitted: w.Submitted, Landed: landed,
 	})
 }
 

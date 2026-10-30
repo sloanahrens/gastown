@@ -12,10 +12,13 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/jev/battery"
+	jevrules "github.com/steveyegge/gastown/internal/jev/rules"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
@@ -535,6 +538,9 @@ func TestSandboxSeatEndKeepReasons(t *testing.T) {
 		{"uncommitted", func(e *sandboxSeatEnd) { e.CleanupStatus = polecat.CleanupUncommitted }, "has_uncommitted", false},
 		{"missing status", func(e *sandboxSeatEnd) { e.CleanupStatus = "" }, "<missing>", false},
 		{"push failed", func(e *sandboxSeatEnd) { e.PushFailed = true }, "push_failed=true", false},
+		{"rules ask pending", func(e *sandboxSeatEnd) { e.RulesPending = true }, "jev_rules has not yet asked about this submission", false},
+		{"unlanded with the rules ask pending", func(e *sandboxSeatEnd) { e.Landed = false; e.RulesPending = true }, "unlanded", false},
+		{"unpushed with the rules ask pending", func(e *sandboxSeatEnd) { e.CleanupStatus = polecat.CleanupUnpushed; e.RulesPending = true }, "has_unpushed", false},
 		{"hook set", func(e *sandboxSeatEnd) { e.HookBead = endBead }, "hook_bead=" + endBead, false},
 		{"another branch", func(e *sandboxSeatEnd) { e.Branch = "polecat/agate/gt-other+x1" }, "not the landed", false},
 		{"seat branch unrecorded", func(e *sandboxSeatEnd) { e.Branch = "" }, "branch=<missing>", false},
@@ -548,6 +554,94 @@ func TestSandboxSeatEndKeepReasons(t *testing.T) {
 			tt.mut(&e)
 			if why := e.keepReason(); !strings.Contains(why, tt.want) {
 				t.Errorf("keepReason = %q, want it to name %q", why, tt.want)
+			}
+		})
+	}
+}
+
+// The rules ask is measured: the seat keeps its host directories while the
+// jev_rules patrol is on, the submission is inside the one-hour window, and the
+// battery's cursor has not reached that submission. Every way of not knowing —
+// the patrol off, no cursor, an unreadable cursor, no submission stamp —
+// leaves the seat to the other facts (gt-381oj).
+func TestSandboxSeatEndRulesPending(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	submitted := now.Add(-10 * time.Minute)
+	at := func(t time.Time) *time.Time { return &t }
+	tests := []struct {
+		name          string
+		patrol        bool
+		submitted     time.Time
+		cursor        *time.Time
+		cursorGarbled bool
+		wantPending   bool
+	}{
+		{
+			name: "a cursor before the submission is pending", patrol: true, submitted: submitted,
+			cursor: at(submitted.Add(-5 * time.Minute)), wantPending: true,
+		},
+		{
+			name: "a cursor past the submission is not pending", patrol: true, submitted: submitted,
+			cursor: at(submitted.Add(time.Minute)),
+		},
+		{
+			name: "a submission past the window is not pending", patrol: true,
+			submitted: now.Add(-rulesPendingWindow - time.Minute),
+			cursor:    at(now.Add(-rulesPendingWindow - 5*time.Minute)),
+		},
+		{
+			name: "a town with the patrol off is not pending", submitted: submitted,
+			cursor: at(submitted.Add(-5 * time.Minute)),
+		},
+		{
+			name: "a cursor that cannot be read is not pending", patrol: true, submitted: submitted,
+			cursorGarbled: true,
+		},
+		{
+			name: "a cursor never written is not pending", patrol: true, submitted: submitted,
+		},
+		{
+			name: "a submission with no stamp is not pending", patrol: true,
+			cursor: at(submitted.Add(-5 * time.Minute)),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			d := f.host.d
+			d.clock = clockwork.NewFakeClockAt(now)
+			if tt.patrol {
+				d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+					JevRules: &JevRulesConfig{Enabled: true},
+				}}
+			}
+			cursorPath := jevrules.CursorPath(f.town)
+			switch {
+			case tt.cursorGarbled:
+				if err := os.MkdirAll(filepath.Dir(cursorPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(cursorPath, []byte("{not a cursor"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case tt.cursor != nil:
+				if err := battery.WriteCursor(cursorPath, battery.Cursor{Time: *tt.cursor}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			landing := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: tt.submitted, Landed: true}
+
+			end, unmeasured := f.host.measureSandboxSeatEnd(endRig, endPolecat, landing)
+
+			if unmeasured != "" {
+				t.Fatalf("the seat was left unmeasured: %s", unmeasured)
+			}
+			if end.RulesPending != tt.wantPending {
+				t.Errorf("RulesPending = %v, want %v", end.RulesPending, tt.wantPending)
 			}
 		})
 	}
@@ -609,6 +703,58 @@ func TestSandboxSeatEnderDefaultPathEndsTheSeat(t *testing.T) {
 	}
 	if len(f.gwAsked) != 1 {
 		t.Errorf("gateway asked %v, want one question", f.gwAsked)
+	}
+}
+
+// A seat the daemon ends through its own path keeps its host directories while
+// the rules battery has not asked about its submission, and the same seat goes
+// once the cursor has passed that submission (gt-381oj).
+func TestSandboxSeatEnderDefaultPathKeepsASeatUntilTheRulesAsk(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	const head = "0123456789abcdef"
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	submitted := now.Add(-10 * time.Minute)
+
+	d := f.host.d
+	d.clock = clockwork.NewFakeClockAt(now)
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		JevRules: &JevRulesConfig{Enabled: true},
+	}}
+	d.sandboxExists = f.host.sandboxExists
+	d.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+	d.endSandboxSeat = nil
+	landings := &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
+	if err := landings.Append(land.LandingRecord{BeadID: endBead, Head: head, Branch: endBranch}); err != nil {
+		t.Fatal(err)
+	}
+	cursorPath := jevrules.CursorPath(f.town)
+	if err := battery.WriteCursor(cursorPath, battery.Cursor{Time: submitted.Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	work := land.Work{BeadID: endBead, Head: head, Branch: endBranch, Worker: endPolecat, Submitted: submitted}
+
+	d.runSandboxSeatEnd(endRig, landings, work)
+
+	if !dirExists(t, dirs.PolecatDir) || !dirExists(t, dirs.PromptFile) {
+		t.Fatal("the seat went before the rules battery asked about its submission")
+	}
+	if got := logs.String(); !strings.Contains(got, "kept: jev_rules has not yet asked about this submission") {
+		t.Errorf("log %q does not name the rules ask as the reason the seat stayed", got)
+	}
+
+	if err := battery.WriteCursor(cursorPath, battery.Cursor{Time: submitted.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	d.runSandboxSeatEnd(endRig, landings, work)
+
+	if dirExists(t, dirs.PolecatDir) || dirExists(t, dirs.PromptFile) {
+		t.Error("the seat stayed after the cursor passed its submission")
 	}
 }
 
