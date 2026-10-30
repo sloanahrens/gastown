@@ -151,6 +151,16 @@ func buildListQuery(f api.ListFilter, cur *listCursor, limit int) (string, []any
 	return q, args, nil
 }
 
+// buildCountQuery counts the whole match the list's WHERE clause selects: no
+// order and no limit, since a page is what the count refuses.
+func buildCountQuery(f api.ListFilter) (string, []any, error) {
+	where, args, err := buildListWhere(f, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	return "SELECT count(*) FROM tracker.issues WHERE " + where, args, nil
+}
+
 // ListIssues returns one page of issues matching f, ordered by priority,
 // creation time and id, with comment and dependency counts filled in.
 func (p *Postgres) ListIssues(ctx context.Context, f api.ListFilter) (api.IssuePage, error) {
@@ -197,12 +207,11 @@ func (p *Postgres) CountIssues(ctx context.Context, f api.ListFilter) (int, erro
 	if err := api.ValidateCount(f); err != nil {
 		return 0, err
 	}
-	where, args, err := buildListWhere(f, nil)
+	q, args, err := buildCountQuery(f)
 	if err != nil {
 		return 0, err
 	}
 	var n int
-	q := "SELECT count(*) FROM tracker.issues WHERE " + where
 	if err := p.pool.QueryRow(ctx, q, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: count issues: %w", err)
 	}

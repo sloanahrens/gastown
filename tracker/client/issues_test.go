@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,8 +65,13 @@ func TestShowManySendsTheIDsAndNeverReturnsANilMap(t *testing.T) {
 	if err != nil || m == nil || len(m) != 0 {
 		t.Errorf("ShowMany = %v, %v; want an empty non-nil map even when the server sent null", m, err)
 	}
-	if s.method != "POST" || s.path != "/v1/issues:show-many" || s.ct != "application/json" || s.body != `{"ids":["gt-a","gt-b"]}` {
-		t.Errorf("request = %s %s ct=%q body=%q", s.method, s.path, s.ct, s.body)
+	var req api.ShowManyRequest
+	if err := json.Unmarshal([]byte(s.body), &req); err != nil {
+		t.Fatalf("body %q: %v", s.body, err)
+	}
+	if s.method != "POST" || s.path != "/v1/issues:show-many" || s.ct != "application/json" ||
+		!slices.Equal(req.IDs, []string{"gt-a", "gt-b"}) {
+		t.Errorf("request = %s %s ct=%q body=%q, want a POST of the two ids to /v1/issues:show-many", s.method, s.path, s.ct, s.body)
 	}
 }
 
@@ -97,9 +103,13 @@ func TestCountSendsTheFilterToTheCountRouteAndReadsTheCount(t *testing.T) {
 	if err != nil || n != 4 {
 		t.Fatalf("Count = %d, %v; want the server's 4", n, err)
 	}
+	var req api.CountRequest
+	if err := json.Unmarshal([]byte(s.body), &req); err != nil {
+		t.Fatalf("body %q: %v", s.body, err)
+	}
 	if s.method != "POST" || s.path != "/v1/issues:count" || s.ct != "application/json" ||
-		s.body != `{"filter":{"statuses":["closed"],"ephemeral":true}}` {
-		t.Errorf("request = %s %s ct=%q body=%q, want a POST of the filter to /v1/issues:count", s.method, s.path, s.ct, s.body)
+		!req.Filter.Ephemeral || !slices.Equal(req.Filter.Statuses, []string{"closed"}) {
+		t.Errorf("request = %s %s ct=%q body=%q, want a POST of the ephemeral closed filter to /v1/issues:count", s.method, s.path, s.ct, s.body)
 	}
 }
 

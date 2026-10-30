@@ -45,7 +45,7 @@ type ListFilter struct {
 	// CreatedAfter and CreatedBefore bound creation the same way.
 	CreatedAfter  time.Time `json:"created_after,omitzero"`
 	CreatedBefore time.Time `json:"created_before,omitzero"`
-	// Limit and Cursor page a list. A count carries neither: see ValidateCount.
+	// Limit and Cursor page a list.
 	Limit  int    `json:"limit,omitempty"`
 	Cursor string `json:"cursor,omitempty"`
 }

@@ -187,18 +187,17 @@ type AssignedPage struct {
 	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
-// CountRequest asks how many issues match its filter. A count covers the
-// whole match, so it carries no page: Validate refuses one that asks for it.
+// CountRequest asks how many issues match its filter.
 type CountRequest struct {
 	Filter ListFilter `json:"filter"`
 }
 
-// Validate refuses the paging fields: a count is of every issue the filter
-// matches, and a caller that wants a page reads the list.
+// Validate applies ValidateCount to the request's filter.
 func (r CountRequest) Validate() error { return ValidateCount(r.Filter) }
 
-// ValidateCount refuses a filter that carries a page, naming the field, so a
-// caller that read NextCursor is told the count answers a different question.
+// ValidateCount refuses a filter that carries a page, naming the field: a
+// count is of every issue the filter matches, so a caller holding a page has
+// the list's answer, not this one's.
 func ValidateCount(f ListFilter) error {
 	if f.Limit != 0 {
 		return Invalid("count takes no limit; it counts every issue the filter matches")
