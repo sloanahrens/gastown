@@ -4,8 +4,8 @@
 // it refuses is the gate in plugin.md beside this program; README.md there is
 // the operator's manual.
 //
-// It is the entry point plugin.md's [execution] block names, and run.sh beside
-// it is the exec shim. A run exits 0 with or without a promotion, and exits 1
+// It is the entry point plugin.md's [execution] block names, and the daemon
+// execs it directly. A run exits 0 with or without a promotion, and exits 1
 // with one line of cause on stderr, which is what the plugin contract records
 // and escalates (internal/daemon/plugin_script.go).
 package main

@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1468,41 +1467,4 @@ func TestPromoteResult(t *testing.T) {
 	if want := exec.ErrNotFound.Error(); out != want {
 		t.Errorf("promoteResult(a program that cannot start) = %q, want %q", out, want)
 	}
-}
-
-// TestRunShForwarding holds run.sh, the shim beside this program, to its one
-// job: exec the binary plugin.md's [execution] block declares, forwarding every
-// argument unchanged. The daemon execs that binary directly, so the shim serves
-// a hand run; with run_test.sh gone this is what keeps the two files naming one
-// program. The shim is four lines of shell, and the unit tier starts no
-// subprocess, so the assertion is over the text it runs.
-func TestRunShForwarding(t *testing.T) {
-	t.Parallel()
-	script, err := os.ReadFile("run.sh")
-	if err != nil {
-		t.Fatalf("reading run.sh: %v", err)
-	}
-	manifest, err := os.ReadFile("plugin.md")
-	if err != nil {
-		t.Fatalf("reading plugin.md: %v", err)
-	}
-	binary := declaredBinary(string(manifest))
-	if binary == "" {
-		t.Fatal("plugin.md's [execution] block declares no binary, so no shim can name it")
-	}
-	if want := `exec "$(dirname "$0")/` + binary + `" "$@"`; !strings.Contains(string(script), want) {
-		t.Errorf("run.sh does not hold %q; it holds:\n%s", want, script)
-	}
-}
-
-// binaryLine matches the binary plugin.md's [execution] block names.
-var binaryLine = regexp.MustCompile(`(?m)^[ \t]*binary[ \t]*=[ \t]*"([^"]*)"`)
-
-// declaredBinary is the binary plugin.md's [execution] block names, or "" when
-// the block names none.
-func declaredBinary(manifest string) string {
-	if m := binaryLine.FindStringSubmatch(manifest); m != nil {
-		return m[1]
-	}
-	return ""
 }
