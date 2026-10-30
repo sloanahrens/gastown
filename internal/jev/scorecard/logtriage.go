@@ -27,6 +27,7 @@ const (
 	ruleLogtriageFollowUp   = "logtriage:follow-up-within-hour"
 	ruleLogtriageQuiet      = "logtriage:no-follow-up-within-hour"
 	ruleLogtriageSelfHealed = "logtriage:self-healed"
+	ruleLogtriageNotHealed  = "logtriage:no-self-healed-follow-up"
 )
 
 // logtriageBeadID matches a bead id in a daemon line. It is the same pattern
@@ -132,7 +133,8 @@ func (a *logtriageAdapter) Parse(raw []byte) (Item, error) {
 //     page), false otherwise (a review);
 //  3. a self_healed attention event that shares the subject sets
 //     auto_remediable true, and needs_action only if rule 1 also matched;
-//  4. no matching follow-up sets needs_action false.
+//     without one, auto_remediable is false;
+//  4. no matching follow-up sets needs_action false and is_routine_noise true.
 //
 // A group whose last line is younger than an hour is unlabeled, because its
 // window is still open. So is a group with no timestamp, which has no window.
@@ -200,10 +202,14 @@ func (a *logtriageAdapter) Label(_ context.Context, item Item) (Labeling, error)
 		return Labeling{}, nil
 	}
 
-	labels := map[QuestionID]bool{QuestionID(logtriage.QNeedsAction): followUp}
+	// is_routine_noise is needs_action's mirror: it is true exactly when no
+	// follow-up matched, so the two scores are one piece of evidence, not two.
+	labels := map[QuestionID]bool{
+		QuestionID(logtriage.QNeedsAction):  followUp,
+		QuestionID(logtriage.QRoutineNoise): !followUp,
+	}
 	var rules []string
 	if followUp {
-		labels[QuestionID(logtriage.QRoutineNoise)] = false
 		rules = append(rules, ruleLogtriageFollowUp)
 	} else {
 		rules = append(rules, ruleLogtriageQuiet)
@@ -211,9 +217,14 @@ func (a *logtriageAdapter) Label(_ context.Context, item Item) (Labeling, error)
 	if escalated {
 		labels[QuestionID(logtriage.QSeverity)] = page
 	}
+	// A follow-up whose time would not read could have been self-healed, so
+	// auto_remediable is not labeled false while one is unresolved.
 	if selfHealed {
 		labels[QuestionID(logtriage.QAutoRemediate)] = true
 		rules = append(rules, ruleLogtriageSelfHealed)
+	} else if !unreadable {
+		labels[QuestionID(logtriage.QAutoRemediate)] = false
+		rules = append(rules, ruleLogtriageNotHealed)
 	}
 	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+")}, nil
 }

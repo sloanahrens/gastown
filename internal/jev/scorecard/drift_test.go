@@ -717,6 +717,35 @@ func TestDriftParseLinesReadsOneItemPerSection(t *testing.T) {
 	}
 }
 
+// TestDriftParseLinesOmitsNeedsNewSection checks that the question with no
+// label rule never reaches the scorecard, while the two that have one stay.
+func TestDriftParseLinesOmitsNeedsNewSection(t *testing.T) {
+	t.Parallel()
+	a := newDriftAdapter("", &fakeDriftBeads{}, fakeDocs{}, time.Now)
+	line := `{"ts":"2026-09-02T00:00:00Z","bead":"gt-a","rig":"gastown","model":"m1","question_version":1,
+		"sections":[{"doc":"docs/reference.md","heading":"Drift battery","answers":{
+			"doc_now_stale":{"noul":0.9},
+			"needs_new_section":{"noul":0.2},
+			"drift_kind":{"choice":"flag","probabilities":{"flag":0.8,"none":0.2}}}}]}`
+	items, err := a.ParseLines([]byte(line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	answers := items[0].Answers
+	if _, ok := answers[QuestionID(drift.QNeedsNewSection)]; ok {
+		t.Errorf("needs_new_section is scored: %+v", answers)
+	}
+	if _, ok := answers[qDocNowStale]; !ok {
+		t.Errorf("doc_now_stale is missing: %+v", answers)
+	}
+	if _, ok := answers[qDriftKind]; !ok {
+		t.Errorf("drift_kind is missing: %+v", answers)
+	}
+}
+
 func TestDriftParseLinesSkipsWholeBadLines(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{

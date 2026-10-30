@@ -1512,8 +1512,13 @@ sets them is named in `--json`:
   or unset. The scorecard judges a score by the mean score of each label.
 - a `self_healed` attention event that shares the subject: `auto_remediable` true
   (`logtriage:self-healed`). It does not set `needs_action` on its own.
-- no such follow-up: `needs_action` false (`logtriage:no-follow-up-within-hour`).
-  `auto_remediable` is left unlabeled unless a self-healed event matched.
+- no such follow-up: `needs_action` false and `is_routine_noise` true
+  (`logtriage:no-follow-up-within-hour`). `is_routine_noise` mirrors `needs_action`, so
+  the two scores are one piece of evidence. It is set only when the window has closed
+  and every matching record's time was readable.
+- no `self_healed` event matched: `auto_remediable` false
+  (`logtriage:no-self-healed-follow-up`), unless a matching follow-up's time could not
+  be read, which leaves it unlabeled.
 - a group whose last line is less than an hour old is logged but unlabeled, since
   its window is still open. So is a group with no timestamp, and a group with no
   `category` and no bead id in its samples. A cleared event never counts.
