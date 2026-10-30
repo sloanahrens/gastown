@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,6 +98,29 @@ func TestRecordingEnvPinsTheIdentityAndDropsTheStoreSelectors(t *testing.T) {
 		if values := got[key]; len(values) != 0 {
 			t.Errorf("%s = %v, want the store selector dropped", key, values)
 		}
+	}
+}
+
+// TestBDCommandCarriesTheRecordingEnvironment: the command execBD runs is the one that pins the
+// identity, so a golden's owner and created_by read the same on every machine rather than carrying
+// the operator's (gt-p85pw.103). It checks the command execBD builds, since a unit test may not
+// start bd.
+func TestBDCommandCarriesTheRecordingEnvironment(t *testing.T) {
+	t.Setenv("BEADS_ACTOR", "operator@example.com")
+	t.Setenv("BEADS_DIR", "/home/operator/gt/.beads")
+	cmd := bdCommand(context.Background(), "bd", "/tmp/copy", []string{"show", "fx-1"})
+	if cmd.Dir != "/tmp/copy" {
+		t.Errorf("command runs in %q, want the copy /tmp/copy", cmd.Dir)
+	}
+	if want := []string{"bd", "show", "fx-1"}; !reflect.DeepEqual(cmd.Args, want) {
+		t.Errorf("command = %v, want %v", cmd.Args, want)
+	}
+	got := envEntries(cmd.Env)
+	if values := got["BEADS_ACTOR"]; len(values) != 1 || values[0] != "bdshim-record" {
+		t.Errorf("BEADS_ACTOR = %v, want exactly [bdshim-record]", values)
+	}
+	if values := got["BEADS_DIR"]; len(values) != 0 {
+		t.Errorf("BEADS_DIR = %v, want the store selector dropped from the run", values)
 	}
 }
 

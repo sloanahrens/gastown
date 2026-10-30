@@ -23,6 +23,22 @@ var timestampFields = map[string]bool{
 	"closed_at":  true,
 }
 
+// beadIDFields are the fields bd writes a bead's id under. Only a value here is replaced by
+// createdBeadID: a title or a description that happens to begin with the fixture prefix is fixture
+// text, and rewriting it would hide a difference a golden exists to show (gt-p85pw.103).
+var beadIDFields = map[string]bool{
+	"id":            true,
+	"issue_id":      true,
+	"depends_on_id": true,
+	"bead_id":       true,
+	"parent_id":     true,
+	"child_id":      true,
+	"parent":        true,
+	"blocked_by":    true,
+	"blocks":        true,
+	"ids":           true,
+}
+
 // normalizeGolden rewrites one row's JSON stdout into the form the committed goldens hold: the id bd
 // minted for a bead the row created becomes createdBeadID, every RFC 3339 timestamp under
 // created_at, updated_at or closed_at becomes fixedTimestamp, and every revision number becomes 0.
@@ -34,23 +50,29 @@ func normalizeGolden(stdout []byte, keep map[string]bool) []byte {
 	if !ok {
 		return stdout
 	}
-	normalized, changed := normalizeValue(value, keep)
+	normalized, changed := normalizeValue(value, keep, "")
 	if !changed {
 		return stdout
 	}
-	out, err := json.MarshalIndent(normalized, "", "  ")
-	if err != nil {
-		return stdout
-	}
-	return append(out, '\n')
+	return append(appendJSONValue(nil, normalized, ""), '\n')
 }
+
+// jsonMember is one member of a JSON object, kept in the order bd printed it.
+type jsonMember struct {
+	key   string
+	value any
+}
+
+// jsonObject is a decoded JSON object in bd's member order. A Go map would sort the keys on the way
+// out, so the golden would no longer read the way bd answers (gt-p85pw.103).
+type jsonObject []jsonMember
 
 // decodeJSON returns the one JSON value stdout holds, and whether it holds exactly one.
 func decodeJSON(stdout []byte) (any, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(stdout))
 	decoder.UseNumber() // a number keeps its digits, so a golden holds what bd printed
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, err := decodeOrdered(decoder)
+	if err != nil {
 		return nil, false
 	}
 	if _, err := decoder.Token(); err != io.EOF {
@@ -59,20 +81,79 @@ func decodeJSON(stdout []byte) (any, bool) {
 	return value, true
 }
 
+// decodeOrdered reads the next JSON value keep index order. Objects become jsonObject, arrays
+// become []any, and every scalar is the decoder's own value, so a number keeps its digits.
+func decodeOrdered(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return token, nil
+	}
+	switch delim {
+	case '{':
+		object := jsonObject{}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, errNotAnObjectKey
+			}
+			value, err := decodeOrdered(decoder)
+			if err != nil {
+				return nil, err
+			}
+			object = append(object, jsonMember{key: key, value: value})
+		}
+		_, err := decoder.Token() // the closing brace
+		return object, err
+	case '[':
+		array := []any{}
+		for decoder.More() {
+			item, err := decodeOrdered(decoder)
+			if err != nil {
+				return nil, err
+			}
+			array = append(array, item)
+		}
+		_, err := decoder.Token() // the closing bracket
+		return array, err
+	}
+	return nil, errNotADelimiter
+}
+
+// errNotAnObjectKey and errNotADelimiter are what a decoder that is not walking a value json
+// produced gets, so normalization leaves the bytes as they are rather than guessing at them.
+var (
+	errNotAnObjectKey = decodeError("a JSON object member has no key")
+	errNotADelimiter  = decodeError("a JSON value opens with a delimiter that closes nothing")
+)
+
+// decodeError is a decode failure that carries its own words.
+type decodeError string
+
+func (e decodeError) Error() string { return string(e) }
+
 // normalizeValue rewrites the values bd decides at run time inside one decoded JSON value, and
-// reports whether it changed any.
-func normalizeValue(value any, keep map[string]bool) (any, bool) {
+// reports whether it changed any. key is the member name value was printed under, so a bead id is
+// told apart from fixture text that reads the same.
+func normalizeValue(value any, keep map[string]bool, key string) (any, bool) {
 	switch v := value.(type) {
-	case map[string]any:
+	case jsonObject:
 		changed := false
-		for key, field := range v {
-			if rewritten, ok := normalizeField(key, field); ok {
-				v[key] = rewritten
+		for i, member := range v {
+			if rewritten, ok := normalizeField(member.key, member.value); ok {
+				v[i].value = rewritten
 				changed = true
 				continue
 			}
-			if rewritten, ok := normalizeValue(field, keep); ok {
-				v[key] = rewritten
+			if rewritten, ok := normalizeValue(member.value, keep, member.key); ok {
+				v[i].value = rewritten
 				changed = true
 			}
 		}
@@ -80,14 +161,14 @@ func normalizeValue(value any, keep map[string]bool) (any, bool) {
 	case []any:
 		changed := false
 		for i, item := range v {
-			if rewritten, ok := normalizeValue(item, keep); ok {
+			if rewritten, ok := normalizeValue(item, keep, key); ok {
 				v[i] = rewritten
 				changed = true
 			}
 		}
 		return v, changed
 	case string:
-		if isCreatedBeadID(v, keep) {
+		if beadIDFields[key] && isCreatedBeadID(v, keep) {
 			return createdBeadID, true
 		}
 	}
@@ -120,4 +201,71 @@ func normalizeField(key string, value any) (any, bool) {
 // fixture's prefix that the fixture file does not hold itself.
 func isCreatedBeadID(s string, keep map[string]bool) bool {
 	return strings.HasPrefix(s, fixturePrefix+"-") && !keep[s]
+}
+
+// appendJSONValue writes value as JSON indented by two spaces per level, in the order it was
+// decoded, and leaves <, > and & as bd printed them. Encoding/json's own marshal would sort the
+// keys and escape those characters, so the golden would stop being bd's answer (gt-p85pw.103).
+func appendJSONValue(dst []byte, value any, indent string) []byte {
+	inner := indent + "  "
+	switch v := value.(type) {
+	case jsonObject:
+		if len(v) == 0 {
+			return append(dst, "{}"...)
+		}
+		dst = append(dst, '{')
+		for i, member := range v {
+			if i > 0 {
+				dst = append(dst, ',')
+			}
+			dst = append(dst, '\n')
+			dst = append(dst, inner...)
+			dst = appendJSONString(dst, member.key)
+			dst = append(dst, ':', ' ')
+			dst = appendJSONValue(dst, member.value, inner)
+		}
+		dst = append(dst, '\n')
+		dst = append(dst, indent...)
+		return append(dst, '}')
+	case []any:
+		if len(v) == 0 {
+			return append(dst, "[]"...)
+		}
+		dst = append(dst, '[')
+		for i, item := range v {
+			if i > 0 {
+				dst = append(dst, ',')
+			}
+			dst = append(dst, '\n')
+			dst = append(dst, inner...)
+			dst = appendJSONValue(dst, item, inner)
+		}
+		dst = append(dst, '\n')
+		dst = append(dst, indent...)
+		return append(dst, ']')
+	case string:
+		return appendJSONString(dst, v)
+	case json.Number:
+		return append(dst, v.String()...)
+	case bool:
+		if v {
+			return append(dst, "true"...)
+		}
+		return append(dst, "false"...)
+	case nil:
+		return append(dst, "null"...)
+	}
+	return dst
+}
+
+// appendJSONString appends s as a JSON string without HTML escaping, so a title bd printed with a
+// literal & or < keeps it.
+func appendJSONString(dst []byte, s string) []byte {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(s); err != nil { // a string always encodes; the bytes are the answer
+		return dst
+	}
+	return append(dst, bytes.TrimSuffix(buf.Bytes(), []byte("\n"))...)
 }

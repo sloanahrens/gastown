@@ -125,10 +125,10 @@ func TestCaptureNormalisesTheGoldenItMakes(t *testing.T) {
 		t.Fatalf("Capture: %v", err)
 	}
 	want := `{
-  "created_at": "2026-01-01T00:00:00Z",
   "id": "fx-new",
-  "owner": "bdshim-record",
-  "revision": 0
+  "created_at": "2026-01-01T00:00:00Z",
+  "revision": 0,
+  "owner": "bdshim-record"
 }
 `
 	if len(goldens) != 1 || string(goldens[0].Stdout) != want {

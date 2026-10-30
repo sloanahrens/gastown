@@ -175,6 +175,66 @@ func TestRunRefusesAScratchUnderAWorkspace(t *testing.T) {
 	}
 }
 
+// TestRunRefusesASymlinkedScratchUnderAWorkspace: bd follows the symlinks on its way to a directory,
+// so a -scratch whose lexical path never passes a workspace but whose symlink leads into one is
+// refused too (gt-p85pw.103). Nothing is made and the workspace is untouched.
+func TestRunRefusesASymlinkedScratchUnderAWorkspace(t *testing.T) {
+	t.Parallel()
+	tree := t.TempDir()
+	metadata := filepath.Join(tree, ".beads", "metadata.json")
+	mustWrite(t, metadata, `{"dolt_database":"hq"}`)
+	before := readFile(t, metadata)
+	inside := filepath.Join(tree, "inside")
+	if err := os.Mkdir(inside, 0o755); err != nil {
+		t.Fatalf("make the directory the link leads to: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "clean-looking")
+	if err := os.Symlink(inside, link); err != nil {
+		t.Skipf("this filesystem makes no symlink: %v", err)
+	}
+	scratch := filepath.Join(link, "scratch")
+	out := filepath.Join(t.TempDir(), "golden")
+	var stdout, stderr bytes.Buffer
+	args := []string{
+		"-fixture", writeFixture(t, fixtureIDs...),
+		"-scratch", scratch,
+		"-out", out,
+		"-bd", filepath.Join(t.TempDir(), "no-such-bd"),
+	}
+	if code := runIn(safeCwd(t), args, &stdout, &stderr); code != 1 {
+		t.Fatalf("run with -scratch behind a symlink into a workspace = %d, want 1\nstderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "beads workspace") {
+		t.Errorf("stderr = %q, want the workspace named", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "no such file") {
+		t.Errorf("stderr = %q, want no bd run attempted", stderr.String())
+	}
+	if after := readFile(t, metadata); after != before {
+		t.Errorf("%s = %q after the refused run, want %q", metadata, after, before)
+	}
+	if _, err := os.Stat(inside); err != nil {
+		t.Errorf("the linked directory stat = %v, want the refused run to make nothing", err)
+	}
+	if entries, err := os.ReadDir(out); err == nil && len(entries) > 0 {
+		t.Errorf("goldens written under a workspace: %v", entries)
+	}
+}
+
+// TestGuardRunAcceptsASymlinkedScratchOutsideAWorkspace: resolving the link must not turn a clear
+// scratch directory into a refusal, or the guard would block the recording it exists to protect.
+func TestGuardRunAcceptsASymlinkedScratchOutsideAWorkspace(t *testing.T) {
+	t.Parallel()
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("this filesystem makes no symlink: %v", err)
+	}
+	if err := guardRun(safeCwd(t), filepath.Join(link, "scratch")); err != nil {
+		t.Errorf("guardRun over a symlink to %s = %v, want it accepted", target, err)
+	}
+}
+
 // TestRunRefusesAWorkingDirectoryUnderAWorkspace: the recorder's own working directory is checked
 // too, since a recorder started inside a beads worktree is where the incident began.
 func TestRunRefusesAWorkingDirectoryUnderAWorkspace(t *testing.T) {

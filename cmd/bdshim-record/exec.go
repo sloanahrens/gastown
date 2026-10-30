@@ -33,16 +33,24 @@ func execBD(bin string) Runner {
 	return func(dir string, args []string) ([]byte, int, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), runLimit)
 		defer cancel()
-		c := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin is the bd binary the operator names; args are the recording's fixed rows
-		c.Dir = dir
-		c.Env = recordingEnv(os.Environ())
-		c.WaitDelay = time.Second
+		c := bdCommand(ctx, bin, dir, args)
 		var stdout bytes.Buffer
 		c.Stdout = &stdout
 		c.Stderr = os.Stderr
 		err := c.Run()
 		return exitResult(stdout.Bytes(), err, errors.Is(ctx.Err(), context.DeadlineExceeded))
 	}
+}
+
+// bdCommand returns the command one bd run is: bin with args, run in dir, carrying the recording
+// environment, so bd works on the copy it runs in and records the recorder as the author of every
+// bead it writes (gt-p85pw.103).
+func bdCommand(ctx context.Context, bin, dir string, args []string) *exec.Cmd {
+	c := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin is the bd binary the operator names; args are the recording's fixed rows
+	c.Dir = dir
+	c.Env = recordingEnv(os.Environ())
+	c.WaitDelay = time.Second
+	return c
 }
 
 // storeSelectors are the variables that name the store bd works on, as a .beads directory, a
