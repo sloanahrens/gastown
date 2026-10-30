@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/guard"
 )
 
 // headSHA matches the full commit name git prints for HEAD.
@@ -17,18 +19,21 @@ var versionLine = regexp.MustCompile(`^\s*om version ([0-9a-f]{7,40})(\s|$)`)
 // notARepo is the stderr git prints when dir is outside every work tree.
 const notARepo = "not a git repository"
 
-// gitRepo reports whether dir is inside a git work tree. Outside one, git exits
-// non-zero with notARepo on stderr, which is (false, nil). Any other failure
-// means git could not answer, and a caller refuses on that error.
-func (c Config) gitRepo(ctx context.Context, dir string) (bool, error) {
+// gitRepo reports whether dir is inside a git work tree: Pass when it is, Fail when
+// git ran and dir is outside every work tree (git exits non-zero with notARepo on
+// stderr), and Unknown when git could not answer. A caller refuses on Unknown.
+func (c Config) gitRepo(ctx context.Context, dir string) guard.Result {
 	out, stderr, err := c.Exec(ctx, Command{Name: "git", Args: []string{"rev-parse", "--is-inside-work-tree"}, Dir: dir})
 	if err != nil {
 		if strings.Contains(stderr, notARepo) {
-			return false, nil
+			return guard.Fail("not inside a git work tree")
 		}
-		return false, fmt.Errorf("git cannot check for a work tree: %w", err)
+		return guard.Unknown(fmt.Errorf("git cannot check for a work tree: %w", err))
 	}
-	return strings.TrimSpace(out) == "true", nil
+	if strings.TrimSpace(out) != "true" {
+		return guard.Fail("not inside a git work tree")
+	}
+	return guard.Pass()
 }
 
 // gitHead returns the commit HEAD names in dir. A HEAD that cannot be read is an

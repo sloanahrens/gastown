@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/guard"
 )
 
 // fakeExec answers every command with out, stderr and err. No process starts.
@@ -89,36 +91,43 @@ func TestGitHeadRefusesAnUnreadableHead(t *testing.T) {
 	}
 }
 
+// verdict names the state of a guard.Result for a table row.
+func verdict(r guard.Result) string {
+	switch {
+	case r.IsPass():
+		return "pass"
+	case r.IsFail():
+		return "fail"
+	default:
+		return "unknown"
+	}
+}
+
 func TestGitRepo(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		out     string
-		stderr  string
-		err     error
-		want    bool
-		wantErr bool
+		name   string
+		out    string
+		stderr string
+		err    error
+		want   string
 	}{
-		{name: "inside a work tree", out: "true\n", want: true},
-		{name: "inside a git directory, not a work tree", out: "false\n", want: false},
+		{name: "inside a work tree passes", out: "true\n", want: "pass"},
+		{name: "inside a git directory, not a work tree, fails", out: "false\n", want: "fail"},
 		{
-			name:   "outside every repository is false, not an error",
+			name:   "outside every repository fails, and is not unknown",
 			stderr: "fatal: not a git repository (or any of the parent directories): .git\n",
 			err:    errors.New("exit status 128"),
-			want:   false,
+			want:   "fail",
 		},
-		{name: "git could not run", err: errors.New("exec: git: not found"), wantErr: true},
-		{name: "git failed for another reason", stderr: "fatal: index file corrupt\n", err: errors.New("exit status 128"), wantErr: true},
+		{name: "git could not run is unknown", err: errors.New("exec: git: not found"), want: "unknown"},
+		{name: "git failed for another reason is unknown", stderr: "fatal: index file corrupt\n", err: errors.New("exit status 128"), want: "unknown"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := (&fakeExec{out: tc.out, stderr: tc.stderr, err: tc.err}).config()
-			got, err := cfg.gitRepo(context.Background(), "/clone")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("gitRepo error = %v, want error %v", err, tc.wantErr)
-			}
-			if got != tc.want {
-				t.Errorf("gitRepo = %v, want %v", got, tc.want)
+			if got := verdict(cfg.gitRepo(context.Background(), "/clone")); got != tc.want {
+				t.Errorf("gitRepo = %s, want %s", got, tc.want)
 			}
 		})
 	}
