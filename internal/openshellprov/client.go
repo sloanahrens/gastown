@@ -58,13 +58,14 @@ func (c Client) args(subcommand ...string) []string {
 }
 
 // ProviderExists reports whether the gateway lists a provider named name. A
-// list that fails reads as absent, which is how the script's `|| true` treats it.
-func (c Client) ProviderExists(name string) bool {
+// list that fails is an error: read as absent, a provider the gateway already
+// holds would be created again and fail with a clash that hides the cause.
+func (c Client) ProviderExists(name string) (bool, error) {
 	stdout, _, err := c.Run.Run(openshellBinary, c.args("provider", "list"), nil, nil)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("%s: openshell provider list failed, so whether provider %s exists is unknown", Name, name)
 	}
-	return firstColumnIs(stdout, name)
+	return firstColumnIs(stdout, name), nil
 }
 
 // ProfileExists reports whether the gateway lists a global profile with id. A
@@ -81,8 +82,9 @@ func (c Client) ProfileExists(id string) (bool, error) {
 // ExportProfile writes the global profile id the gateway holds to out. A failed
 // export writes nothing and is an error: guessing whether the profile binds the
 // gateway's endpoint would either keep a stale profile or update a current one.
+// The -- ends option parsing, so an id that starts with a dash is read as an id.
 func (c Client) ExportProfile(id string, out io.Writer) error {
-	stdout, stderr, err := c.Run.Run(openshellBinary, c.args("profile", "export", "--global", id), nil, nil)
+	stdout, stderr, err := c.Run.Run(openshellBinary, c.args("profile", "export", "--global", "--", id), nil, nil)
 	if err != nil {
 		return fmt.Errorf("%s: openshell profile export --global %s failed, so whether it binds the gateway's endpoint is unknown:\n%s", Name, id, stderr)
 	}
