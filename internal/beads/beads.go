@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -3597,60 +3598,84 @@ func (b *Beads) ChildrenOf(parentIDs ...string) (map[string][]*Issue, error) {
 	return parseChildrenMapJSON(out)
 }
 
-// parseChildrenJSON parses `bd show <id> --children --json` output. bd
-// returns a map keyed by (resolved) parent ID plus envelope metadata, e.g.
-// {"gt-wisp-abc": [{...}, ...], "schema_version": 1}. Since Children always
-// queries a single parent, take the sole non-metadata key's array rather
-// than requiring it to match the ID passed in (bd may resolve a partial or
-// routed ID differently than what was given).
-func parseChildrenJSON(raw []byte) ([]*Issue, error) {
+// childrenGroups splits the top-level object of a `bd show --children --json`
+// payload into child lists keyed by the parent ID bd reported. schema_version
+// is the only metadata member bd writes; every other member must be a JSON
+// array of issues, and one that is not — a number, an object, null — is an
+// error naming that member.
+//
+// A null or otherwise non-array member is an error rather than "no children":
+// callers read an empty list as a finished wisp, and bd emits [] for a childless
+// parent (measured on bd 1.2.2: show_children.go initializes every parent to
+// []). Keys are visited in sorted order, so neither the answer nor the error
+// depends on map iteration order.
+func childrenGroups(raw []byte) (map[string][]*Issue, error) {
+	groups := make(map[string][]*Issue)
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
-		return nil, nil
+		return groups, nil
 	}
-
 	var wrapped map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &wrapped); err != nil {
 		return nil, fmt.Errorf("parsing bd show --children output: %w", err)
 	}
-
-	for key, group := range wrapped {
-		if key == "schema_version" {
-			continue
+	keys := make([]string, 0, len(wrapped))
+	for key := range wrapped {
+		if key != "schema_version" {
+			keys = append(keys, key)
 		}
-		if len(bytes.TrimSpace(group)) == 0 {
-			continue
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		group := bytes.TrimSpace(wrapped[key])
+		if len(group) == 0 || group[0] != '[' {
+			return nil, fmt.Errorf("parsing bd show --children output: %s is not a child list", key)
 		}
 		var children []*Issue
 		if err := json.Unmarshal(group, &children); err != nil {
-			return nil, fmt.Errorf("parsing bd show --children entries: %w", err)
+			return nil, fmt.Errorf("parsing bd show --children output: %s: %w", key, err)
 		}
-		return children, nil
+		groups[key] = children
 	}
-
-	return nil, nil
+	return groups, nil
 }
 
-// parseChildrenMapJSON parses `bd show <ids...> --children --json`: one
-// array per resolved parent ID. Parents with no children are dropped.
+// parseChildrenJSON parses `bd show <id> --children --json` output. bd
+// returns a map keyed by (resolved) parent ID plus a schema_version, e.g.
+// {"gt-wisp-abc": [{...}, ...], "schema_version": 1}. Since Children always
+// queries a single parent, take the sole child list rather than requiring its
+// key to match the ID passed in (bd may resolve a partial or routed ID
+// differently than what was given).
+func parseChildrenJSON(raw []byte) ([]*Issue, error) {
+	groups, err := childrenGroups(raw)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	switch len(keys) {
+	case 0:
+		return nil, nil
+	case 1:
+		return groups[keys[0]], nil
+	default:
+		return nil, fmt.Errorf("parsing bd show --children output: %d child lists (%s), want one", len(keys), strings.Join(keys, ", "))
+	}
+}
+
+// parseChildrenMapJSON parses `bd show <ids...> --children --json`: one array
+// per resolved parent ID, with childless parents dropped. A null member is an
+// error (see childrenGroups).
 func parseChildrenMapJSON(raw []byte) (map[string][]*Issue, error) {
-	out := make(map[string][]*Issue)
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return out, nil
+	groups, err := childrenGroups(raw)
+	if err != nil {
+		return nil, err
 	}
-	var wrapped map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &wrapped); err != nil {
-		return nil, fmt.Errorf("parsing bd show --children output: %w", err)
-	}
-	for key, group := range wrapped {
-		if key == "schema_version" || len(bytes.TrimSpace(group)) == 0 {
-			continue
-		}
-		var children []*Issue
-		if err := json.Unmarshal(group, &children); err != nil {
-			return nil, fmt.Errorf("parsing bd show --children entries for %s: %w", key, err)
-		}
+	out := make(map[string][]*Issue, len(groups))
+	for key, children := range groups {
 		if len(children) > 0 {
 			out[key] = children
 		}
