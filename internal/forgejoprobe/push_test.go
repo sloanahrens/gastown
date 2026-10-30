@@ -1,0 +1,349 @@
+package forgejoprobe
+
+import (
+	"errors"
+	"io/fs"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// rigCall is one Run the code under test made: the directory, the variables
+// added to the child's environment and the argv.
+type rigCall struct {
+	dir  string
+	env  []string
+	args []string
+}
+
+// rigGit models the git side of a push. The rig's pre-push hook runs only for a
+// push from the worktree, where core.hooksPath resolves to the rig's hooks:
+// refused is the hook's answer there, and nil lets the push through. Every other
+// call is answered from answers, keyed by argv joined with spaces, and an argv
+// it does not name fails.
+type rigGit struct {
+	answers  map[string]gitAnswer
+	wt       string
+	refused  error
+	calls    []rigCall
+	hookRuns []string
+}
+
+func (g *rigGit) Run(dir string, env []string, args ...string) (string, error) {
+	g.calls = append(g.calls, rigCall{dir: dir, env: slices.Clone(env), args: slices.Clone(args)})
+	if args[0] == "push" && dir == g.wt {
+		g.hookRuns = append(g.hookRuns, dir)
+		if g.refused != nil {
+			return "", g.refused
+		}
+	}
+	a, ok := g.answers[strings.Join(args, " ")]
+	if !ok {
+		return "", errors.New("rigGit: no answer for " + strings.Join(args, " "))
+	}
+	return a.out, a.err
+}
+
+// pushes returns the directory of every push the code under test made, in order.
+func (g *rigGit) pushes() []string {
+	var dirs []string
+	for _, c := range g.calls {
+		if c.args[0] == "push" {
+			dirs = append(dirs, c.dir)
+		}
+	}
+	return dirs
+}
+
+const (
+	testBare    = "rig/.repo.git"
+	testWork    = "work"
+	testWT      = "work/wt"
+	testCopy    = "work/copy"
+	testSHA     = "0123abcd"
+	testMain    = "main"
+	testBranch  = "land/probe-rig"
+	testPushURL = "https://forgejo.example/acme/rig.git"
+)
+
+// worktreeAnswers are the git answers of a push that cuts a worktree and is
+// accepted by the hook.
+func worktreeAnswers() map[string]gitAnswer {
+	return map[string]gitAnswer{
+		"rev-parse --verify --quiet " + testSHA + "^{commit}":                                  {out: testSHA + "\n"},
+		"worktree add --detach " + testWT + " " + testSHA:                                      {},
+		"push --quiet --force -- " + testPushURL + " " + testSHA + ":refs/heads/" + testBranch: {},
+		"worktree remove --force " + testWT:                                                    {},
+	}
+}
+
+// pushPusher is a Pusher over the test paths, with the rig's repository present
+// or absent as present says, and its log lines collected into logs. The Stat
+// seam returns no FileInfo: only its error is read.
+func pushPusher(g Git, present bool, logs *[]string) *Pusher {
+	return &Pusher{
+		Git:        g,
+		Bare:       testBare,
+		Copy:       testCopy,
+		Work:       testWork,
+		GitURL:     testPushURL,
+		MainBranch: testMain,
+		Branch:     testBranch,
+		Stat: func(name string) (fs.FileInfo, error) {
+			if present {
+				return nil, nil
+			}
+			return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+		},
+		Log: func(msg string) { *logs = append(*logs, msg) },
+	}
+}
+
+// TestPushFromWorktreeRunsTheHook pins the push that makes the rig's hook run: a
+// push from the worktree of the rig's repository. A push from anywhere else
+// runs no hook, so a refusal that does not come from the worktree is no proof.
+func TestPushFromWorktreeRunsTheHook(t *testing.T) {
+	t.Parallel()
+	t.Run("a refusing hook fails the push with its text and nothing else is pushed", func(t *testing.T) {
+		t.Parallel()
+		const hookText = "pre-push: refusing refs/heads/land/probe-rig"
+		g := &rigGit{answers: worktreeAnswers(), wt: testWT, refused: errors.New("exit status 1: " + hookText)}
+		var logs []string
+		p := pushPusher(g, true, &logs)
+		err := p.Push(testSHA)
+		if err == nil || !strings.Contains(err.Error(), hookText) {
+			t.Fatalf("Push = %v, want the hook's refusal text", err)
+		}
+		if got, want := g.pushes(), []string{testWT}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("pushes ran in %q, want only %q", got, want)
+		}
+		if err := p.Cleanup(); err != nil {
+			t.Fatalf("Cleanup: %v", err)
+		}
+		last := g.calls[len(g.calls)-1]
+		if want := []string{"worktree", "remove", "--force", testWT}; last.dir != testBare || !slices.Equal(last.args, want) {
+			t.Errorf("last call = dir %q args %q, want dir %q args %q", last.dir, last.args, testBare, want)
+		}
+	})
+	t.Run("an allowing hook records that it ran in the worktree", func(t *testing.T) {
+		t.Parallel()
+		g := &rigGit{answers: worktreeAnswers(), wt: testWT}
+		var logs []string
+		p := pushPusher(g, true, &logs)
+		if err := p.Push(testSHA); err != nil {
+			t.Fatalf("Push: %v", err)
+		}
+		if want := []string{testWT}; !reflect.DeepEqual(g.hookRuns, want) {
+			t.Errorf("hook ran in %q, want %q", g.hookRuns, want)
+		}
+		if want := []string{testWT}; !reflect.DeepEqual(g.pushes(), want) {
+			t.Errorf("pushes ran in %q, want %q", g.pushes(), want)
+		}
+		add := g.calls[1]
+		if !slices.Contains(add.env, "GIT_LFS_SKIP_SMUDGE=1") {
+			t.Errorf("worktree add env = %q, want GIT_LFS_SKIP_SMUDGE=1", add.env)
+		}
+	})
+}
+
+// TestPushFallsBackToTheCloneLoudly pins the push with no rig repository: the
+// exact warning, the copy's refspec, no worktree and no hook.
+func TestPushFallsBackToTheCloneLoudly(t *testing.T) {
+	t.Parallel()
+	g := &rigGit{answers: map[string]gitAnswer{
+		"push --quiet --force -- " + testPushURL + " refs/remotes/origin/main:refs/heads/" + testBranch: {},
+	}}
+	var logs []string
+	p := pushPusher(g, false, &logs)
+	if err := p.Push(testSHA); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	want := "warning: no rig repository at rig/.repo.git, so the probe pushes from the clone and the rig's hooks were not exercised"
+	if !reflect.DeepEqual(logs, []string{want}) {
+		t.Errorf("log = %q, want %q", logs, []string{want})
+	}
+	if len(g.calls) != 1 || g.calls[0].dir != testCopy {
+		t.Fatalf("calls = %+v, want one push from %q", g.calls, testCopy)
+	}
+	if len(g.hookRuns) != 0 {
+		t.Errorf("the hook ran for a push from the clone")
+	}
+	if err := p.Cleanup(); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if len(g.calls) != 1 {
+		t.Errorf("Cleanup made calls %+v with no worktree to remove", g.calls[1:])
+	}
+}
+
+// TestPushRefusesAnUnheldCommit pins the refusal of a rig repository that does
+// not hold the commit: nothing is pushed and no worktree is cut.
+func TestPushRefusesAnUnheldCommit(t *testing.T) {
+	t.Parallel()
+	g := &rigGit{answers: map[string]gitAnswer{
+		"rev-parse --verify --quiet " + testSHA + "^{commit}": {err: errors.New("exit status 1")},
+	}}
+	var logs []string
+	err := pushPusher(g, true, &logs).Push(testSHA)
+	want := "the rig repository rig/.repo.git has no 0123abcd, the main the probe would push; fetch main in rig/.repo.git and run the probe again, since the hooks it must exercise live there"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Push = %v, want %q", err, want)
+	}
+	if len(g.calls) != 1 || g.calls[0].dir != testBare {
+		t.Errorf("calls = %+v, want only the rev-parse in %q", g.calls, testBare)
+	}
+}
+
+// TestPushRefusesADashValue pins the refusal of a value git would read as an
+// option, before any git runs.
+func TestPushRefusesADashValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		sha   string
+		apply func(p *Pusher)
+	}{
+		{name: "a commit", sha: "-x", apply: func(p *Pusher) {}},
+		{name: "a git URL", sha: testSHA, apply: func(p *Pusher) { p.GitURL = "--upload-pack=sh" }},
+		{name: "a main branch", sha: testSHA, apply: func(p *Pusher) { p.MainBranch = "-main" }},
+		{name: "a branch", sha: testSHA, apply: func(p *Pusher) { p.Branch = "-land" }},
+		{name: "a worktree path", sha: testSHA, apply: func(p *Pusher) { p.Work = "-work" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := &rigGit{answers: worktreeAnswers(), wt: testWT}
+			var logs []string
+			p := pushPusher(g, true, &logs)
+			tc.apply(p)
+			if err := p.Push(tc.sha); err == nil || !strings.Contains(err.Error(), "starts with -") {
+				t.Fatalf("Push = %v, want a refusal of the dash value", err)
+			}
+			if len(g.calls) != 0 {
+				t.Errorf("git ran %+v for a refused value", g.calls)
+			}
+		})
+	}
+}
+
+// TestPushFailsClosedOnStatError pins that a stat failure other than a missing
+// path stops the probe rather than reading as an absent rig repository.
+func TestPushFailsClosedOnStatError(t *testing.T) {
+	t.Parallel()
+	g := &rigGit{answers: map[string]gitAnswer{}}
+	var logs []string
+	p := pushPusher(g, true, &logs)
+	p.Stat = func(string) (fs.FileInfo, error) { return nil, errors.New("permission denied") }
+	if err := p.Push(testSHA); err == nil || !strings.Contains(err.Error(), "could not stat the rig repository rig/.repo.git") {
+		t.Fatalf("Push = %v, want a stat refusal", err)
+	}
+	if len(g.calls) != 0 || len(logs) != 0 {
+		t.Errorf("calls %+v and logs %q, want neither after a stat failure", g.calls, logs)
+	}
+}
+
+// TestPushReportsItsFailures pins the two failures of the worktree path: a
+// worktree that cannot be cut, and a push that is refused. A refused push
+// carries git's output with the credentials of the URL removed.
+func TestPushReportsItsFailures(t *testing.T) {
+	t.Parallel()
+	t.Run("a worktree that cannot be cut is named and nothing is pushed", func(t *testing.T) {
+		t.Parallel()
+		answers := worktreeAnswers()
+		answers["worktree add --detach "+testWT+" "+testSHA] = gitAnswer{err: errors.New("fatal: already exists")}
+		g := &rigGit{answers: answers, wt: testWT}
+		var logs []string
+		p := pushPusher(g, true, &logs)
+		err := p.Push(testSHA)
+		if want := "could not add a worktree of rig/.repo.git at 0123abcd under work/wt"; err == nil || err.Error() != want {
+			t.Fatalf("Push = %v, want %q", err, want)
+		}
+		if len(g.pushes()) != 0 {
+			t.Errorf("pushes ran %q after the worktree failed", g.pushes())
+		}
+		if err := p.Cleanup(); err != nil {
+			t.Fatalf("Cleanup: %v", err)
+		}
+		for _, c := range g.calls {
+			if slices.Contains(c.args, "remove") {
+				t.Errorf("Cleanup removed a worktree the failed add never made: %+v", c)
+			}
+		}
+	})
+	t.Run("a refused push names the redacted URL and not its credentials", func(t *testing.T) {
+		t.Parallel()
+		const credURL = "https://ci:s3cret@forgejo.example/acme/rig.git"
+		answers := worktreeAnswers()
+		delete(answers, "push --quiet --force -- "+testPushURL+" "+testSHA+":refs/heads/"+testBranch)
+		answers["push --quiet --force -- "+credURL+" "+testSHA+":refs/heads/"+testBranch] = gitAnswer{}
+		g := &rigGit{answers: answers, wt: testWT, refused: errors.New(
+			"exit status 128: fatal: unable to access '" + credURL + "/': refused")}
+		var logs []string
+		p := pushPusher(g, true, &logs)
+		p.GitURL = credURL
+		err := p.Push(testSHA)
+		if err == nil {
+			t.Fatal("Push succeeded, want the refusal")
+		}
+		if strings.Contains(err.Error(), "s3cret") {
+			t.Fatalf("error %q carries the URL's password", err.Error())
+		}
+		want := "git push of main (0123abcd) to https://ci:xxxxx@forgejo.example/acme/rig.git as land/probe-rig failed from work/wt: exit status 128: fatal: unable to access '<repository URL>/': refused"
+		if err.Error() != want {
+			t.Fatalf("error = %q, want %q", err.Error(), want)
+		}
+	})
+}
+
+// TestCleanupRemovesNeverPrunes pins Cleanup: it removes the worktree and never
+// prunes, a failed remove names the prune remedy in its warning, and a second
+// call does nothing.
+func TestCleanupRemovesNeverPrunes(t *testing.T) {
+	t.Parallel()
+	t.Run("the worktree is removed and nothing is pruned", func(t *testing.T) {
+		t.Parallel()
+		g := &rigGit{answers: worktreeAnswers(), wt: testWT}
+		var logs []string
+		p := pushPusher(g, true, &logs)
+		if err := p.Push(testSHA); err != nil {
+			t.Fatalf("Push: %v", err)
+		}
+		if err := p.Cleanup(); err != nil {
+			t.Fatalf("Cleanup: %v", err)
+		}
+		for _, c := range g.calls {
+			if slices.Contains(c.args, "prune") {
+				t.Errorf("a call pruned the rig repository: %+v", c)
+			}
+		}
+		last := g.calls[len(g.calls)-1]
+		if want := []string{"worktree", "remove", "--force", testWT}; last.dir != testBare || !slices.Equal(last.args, want) {
+			t.Errorf("Cleanup call = dir %q args %q, want dir %q args %q", last.dir, last.args, testBare, want)
+		}
+	})
+	t.Run("a failing remove names the prune remedy and a second call does nothing", func(t *testing.T) {
+		t.Parallel()
+		answers := worktreeAnswers()
+		answers["worktree remove --force "+testWT] = gitAnswer{err: errors.New("fatal: locked")}
+		g := &rigGit{answers: answers, wt: testWT}
+		var logs []string
+		p := pushPusher(g, true, &logs)
+		if err := p.Push(testSHA); err != nil {
+			t.Fatalf("Push: %v", err)
+		}
+		if err := p.Cleanup(); err == nil {
+			t.Fatal("Cleanup succeeded, want the remove's failure")
+		}
+		if len(logs) == 0 || !strings.Contains(logs[len(logs)-1], "run 'git -C rig/.repo.git worktree prune' to clear the registration") {
+			t.Fatalf("log = %q, want the prune remedy", logs)
+		}
+		before := len(g.calls)
+		if err := p.Cleanup(); err != nil {
+			t.Fatalf("second Cleanup: %v", err)
+		}
+		if len(g.calls) != before {
+			t.Errorf("second Cleanup made calls %+v", g.calls[before:])
+		}
+	})
+}
