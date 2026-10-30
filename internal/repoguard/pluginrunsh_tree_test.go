@@ -110,14 +110,32 @@ func TestPluginRunShTree(t *testing.T) {
 	}
 }
 
-// TestPluginRunShTreeRefusesAnUnreadableTree: a staged tree with no plugin
-// run.sh is an error, never a clean tree, so a moved plugins directory cannot
-// pass by matching nothing.
+// TestPluginRunShTreeAcceptsAPluginsDirWithNoShim: once every shim is ported
+// the plugins directory holds no run.sh, and that is the clean end state the
+// allowlist shrinks toward, not an unreadable tree. The guard reads it through
+// its production caller and finds nothing (gt-tpg0p.22).
+func TestPluginRunShTreeAcceptsAPluginsDirWithNoShim(t *testing.T) {
+	t.Parallel()
+	root := stagePluginTree(t, map[string]string{
+		"plugins/app-promote/plugin.md": pluginMD(""),
+	})
+	findings, err := CheckPluginRunSh(PluginRunShTree(root), map[string]string{})
+	if err != nil {
+		t.Fatalf("CheckPluginRunSh(plugins with no run.sh) error = %v, want none", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("CheckPluginRunSh(plugins with no run.sh) findings = %q, want none", findings)
+	}
+}
+
+// TestPluginRunShTreeRefusesAnUnreadableTree: a root with no plugins directory
+// is an error, never a clean tree, so a moved plugins directory cannot pass by
+// matching nothing.
 func TestPluginRunShTreeRefusesAnUnreadableTree(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	if _, err := PluginRunShTree(root)(); err == nil {
-		t.Fatal("PluginRunShTree(empty tree) = no error, want one")
+		t.Fatal("PluginRunShTree(no plugins directory) = no error, want one")
 	}
 }
 
@@ -146,12 +164,28 @@ func TestPluginRunShTreeRefusesARunShItCannotRead(t *testing.T) {
 	}
 }
 
+// TestPluginRunShTreeRefusesAPluginsPathThatIsAFile: a plugins entry that is
+// not a directory is an error, never an empty tree, since the glob under it
+// would match nothing and the guard would read that as clean.
+func TestPluginRunShTreeRefusesAPluginsPathThatIsAFile(t *testing.T) {
+	t.Parallel()
+	root := stagePluginTree(t, map[string]string{"plugins": "not a directory\n"})
+	if _, err := PluginRunShTree(root)(); err == nil {
+		t.Fatal("PluginRunShTree(plugins is a file) = no error, want one")
+	}
+}
+
 // TestPluginRunShTreeRefusesAnUnreadableRoot: a root that makes the pattern
 // itself invalid is an error, since the lister would otherwise report an
-// unread tree as an empty one.
+// unread tree as an empty one. The plugins directory exists, so the refusal
+// comes from the glob and not from the directory check.
 func TestPluginRunShTreeRefusesAnUnreadableRoot(t *testing.T) {
 	t.Parallel()
-	if _, err := PluginRunShTree(filepath.Join(t.TempDir(), "["))(); err == nil {
+	root := filepath.Join(t.TempDir(), "[")
+	if err := os.MkdirAll(filepath.Join(root, "plugins"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PluginRunShTree(root)(); err == nil {
 		t.Fatal("PluginRunShTree(root with a bad glob) = no error, want one")
 	}
 }

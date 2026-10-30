@@ -101,17 +101,23 @@ func ReadPluginRunShAllowlist(name string) (map[string]string, error) {
 }
 
 // PluginRunShTree is the lister over a checkout: every plugins/<name>/run.sh
-// under root, with the binary its plugin.md declares. A tree with no run.sh, a
-// run.sh with no plugin.md beside it and an unreadable file are errors, never
-// an empty tree: the guard reads an empty map as clean.
+// under root, with the binary its plugin.md declares. A root with no plugins
+// directory, a run.sh with no plugin.md beside it and an unreadable file are
+// errors, never an empty tree: the guard reads an empty map as clean. A plugins
+// directory with no run.sh is the clean end state, every shim ported.
 func PluginRunShTree(root string) PluginRunShLister {
 	return func() (map[string]PluginRunSh, error) {
-		paths, err := filepath.Glob(filepath.Join(root, "plugins", "*", "run.sh"))
+		dir := filepath.Join(root, "plugins")
+		info, err := os.Stat(dir)
+		if err != nil {
+			return nil, fmt.Errorf("reading plugins under %s: %w", root, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("%s is not a directory", dir)
+		}
+		paths, err := filepath.Glob(filepath.Join(dir, "*", "run.sh"))
 		if err != nil {
 			return nil, fmt.Errorf("globbing plugins/*/run.sh under %s: %w", root, err)
-		}
-		if len(paths) == 0 {
-			return nil, fmt.Errorf("no plugins/*/run.sh under %s", root)
 		}
 		scripts := make(map[string]PluginRunSh, len(paths))
 		for _, p := range paths {
