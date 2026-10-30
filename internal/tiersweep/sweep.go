@@ -47,13 +47,25 @@ type Deps struct {
 // package cannot read, a log directory it cannot make, or a tier it does not
 // offer, reached after the tiers before it have printed their lines. The daemon
 // reads the lines byte for byte (internal/daemon/tier_sweep.go).
+//
+// Every run leaves <logdir>/timings.jsonl, one line per package it started, and
+// replaces TIER_SWEEP_TIMINGS with those lines when the environment names one.
+// A timings file that cannot be written is named on stderr once and changes no
+// verdict.
 func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	root, tiers, err := splitRoot(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n%s\n", Name, err, usage)
 		return UsageExit
 	}
-	opts, err := ParseOptions(tiers, d.Host)
+	host := d.Host
+	if host.WriteFile == nil {
+		host.WriteFile = os.WriteFile
+	}
+	if host.Rename == nil {
+		host.Rename = os.Rename
+	}
+	opts, err := ParseOptions(tiers, host)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return UsageExit
@@ -70,7 +82,9 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		}
 		src = gitSource{exec: exec, read: func(name string) ([]byte, error) { return read(filepath.Join(root, name)) }}
 	}
-	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr, Now: d.Now}
+	timings := OpenTimings(filepath.Join(opts.LogDir, TimingsName), stderr)
+	defer timings.Close()
+	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr, Now: d.Now, Timings: timings}
 	red := false
 	for _, tier := range opts.Tiers {
 		var line string
@@ -88,6 +102,9 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		}
 		fmt.Fprintln(stdout, line)
 		red = red || tierRed
+	}
+	if opts.TimingsFile != "" {
+		timings.Replace(opts.TimingsFile, host)
 	}
 	if red {
 		return 1

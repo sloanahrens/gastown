@@ -41,8 +41,12 @@ type Sweep struct {
 	// Stderr receives the progress lines, the failure excerpts and the
 	// trigger's own failure lines.
 	Stderr io.Writer
-	// Now is the clock a tier's elapsed time is read from.
+	// Now is the clock a tier's elapsed time is read from, and the one each
+	// package's wall time is read from.
 	Now func() time.Time
+	// Timings receives one line per package a tier runs, and holds the lines for
+	// TIER_SWEEP_TIMINGS. Run sets it; nil writes no timings.
+	Timings *Timings
 }
 
 // integrationPlan is what the integration tier runs.
@@ -91,6 +95,8 @@ func (s *Sweep) Integration() (line string, red bool) {
 		SkipList: skipList,
 		Env:      s.exportEnv(tested, skipList),
 		Stderr:   s.Stderr,
+		Timings:  s.Timings,
+		Now:      s.Now,
 	}
 	root := runner.Tier(TierIntegration, ".", slotPrefix(), taggedArgs, plan.root)
 	docker := runner.Tier(TierDocker, ".", slotPrefix(), nil, plan.docker)
