@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
@@ -651,5 +653,200 @@ func TestIsRigOperational_ConcurrentCallers(t *testing.T) {
 	}
 	if entry := f.memoized(t, f.rigName); entry.failed != "" {
 		t.Errorf("memoized read after the race is a failure (%q), want the answered verdict", entry.failed)
+	}
+}
+
+// TestIsRigOperational_MemoServesTheVerdictForFiveMinutes pins the window
+// gt-z0dcj widened: a rig is docked or undocked a few times a month, so the
+// identity bead does not need reading once a minute. The verdict read at t=0 is
+// served for the whole window and the bead is read again after it, which is what
+// bounds a label edited by hand rather than through gt.
+func TestIsRigOperational_MemoServesTheVerdictForFiveMinutes(t *testing.T) {
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
+
+	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatalf("rig starts operational, got %q", reason)
+	}
+	if got := f.showCount(t); got != 1 {
+		t.Fatalf("stub bd served %d reads on the first call, want 1", got)
+	}
+
+	// Just inside the five-minute window: still the same read. The literal, not
+	// rigOperationalCacheTTL, so widening or narrowing the constant has to
+	// answer to this test.
+	f.clock.Advance(5*time.Minute - time.Second)
+	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatalf("within the window the memoized verdict must still answer, got %q", reason)
+	}
+	if got := f.showCount(t); got != 1 {
+		t.Errorf("stub bd served %d reads inside the window, want 1", got)
+	}
+
+	// Past it: the bead is read again.
+	f.clock.Advance(2 * time.Second)
+	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatalf("after the window the rig is still operational, got %q", reason)
+	}
+	if got := f.showCount(t); got != 2 {
+		t.Errorf("stub bd served %d reads after the window, want 2: the memo must expire", got)
+	}
+}
+
+// TestIsRigOperational_DockStampDropsTheMemo covers the other half of widening
+// the window: `gt rig dock` and `gt rig undock` stamp the rig, and a stamp newer
+// than the memoized read means the verdict no longer holds. Without it a dock
+// would be invisible to the daemon for the whole window.
+func TestIsRigOperational_DockStampDropsTheMemo(t *testing.T) {
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
+
+	// t=0: the rig is active, and that verdict is memoized.
+	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatalf("rig starts operational, got %q", reason)
+	}
+	if got := f.showCount(t); got != 1 {
+		t.Fatalf("stub bd served %d reads, want 1", got)
+	}
+
+	// `gt rig dock` lands: the label is on the bead and the rig is stamped.
+	f.setShow(rigShowDocked)
+	if err := rig.TouchDockStamp(f.townRoot, f.rigName, time.Now()); err != nil {
+		t.Fatalf("stamping the dock: %v", err)
+	}
+
+	if operational, reason := f.daemon.isRigOperational(f.rigName); operational {
+		t.Fatalf("a docked rig read as operational from a memo that predates the dock")
+	} else if reason != "rig is docked (global)" {
+		t.Errorf("reason = %q, want the docked verdict", reason)
+	}
+	if got := f.showCount(t); got != 2 {
+		t.Errorf("stub bd served %d reads after the stamp, want 2: the stamp must drop the memo", got)
+	}
+
+	// `gt rig undock` lands the same way, in the other direction: the daemon
+	// must see the rig start again on the next evaluation, not on the next
+	// expiry.
+	f.setShow(rigShowOperational)
+	if err := rig.TouchDockStamp(f.townRoot, f.rigName, time.Now()); err != nil {
+		t.Fatalf("stamping the undock: %v", err)
+	}
+	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatalf("an undocked rig must read as operational on the next evaluation, got %q", reason)
+	}
+	if got := f.showCount(t); got != 3 {
+		t.Errorf("stub bd served %d reads after the undock stamp, want 3", got)
+	}
+}
+
+// TestIsRigOperational_NineRigsOverTenMinutesInEighteenReads is the call count
+// gt-z0dcj asked for: the cache census logged show@daemon.showRigBead 462 times
+// in 60 one-minute windows (7.7 a minute) against a window of 60s, so nine rigs
+// over ten simulated minutes cost 90 reads. A five-minute window with the dock
+// stamp as the invalidation is at most two per rig over that span.
+func TestIsRigOperational_NineRigsOverTenMinutesInEighteenReads(t *testing.T) {
+	t.Parallel()
+	const rigCount = 9
+	townRoot := t.TempDir()
+	clk := newFixedClock()
+
+	rigs := make(map[string]string, rigCount)
+	for i := 0; i < rigCount; i++ {
+		name := fmt.Sprintf("rig%d", i)
+		prefix := fmt.Sprintf("r%d", i)
+		rigs[name] = prefix
+		rigPath := filepath.Join(townRoot, name)
+		if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+			t.Fatalf("creating rig dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(fmt.Sprintf(`{"beads":{"prefix":%q}}`, prefix)), 0o644); err != nil {
+			t.Fatalf("writing rig config.json: %v", err)
+		}
+	}
+	registerTestRigs(t, townRoot, rigs)
+
+	var shows int
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+		clock:  clk,
+	}
+	d.rigBeadShowFn = func(_, id string) (*beads.Issue, error) {
+		shows++
+		return &beads.Issue{ID: id}, nil
+	}
+
+	// One minute of the daemon's heartbeat per iteration: every rig's state is
+	// evaluated, as the patrol filters and witness and refinery auto-start do.
+	for minute := 0; minute < 10; minute++ {
+		for name := range rigs {
+			if operational, reason := d.isRigOperational(name); !operational {
+				t.Fatalf("minute %d: rig %s reported not operational: %q", minute, name, reason)
+			}
+		}
+		clk.Advance(time.Minute)
+	}
+
+	// Two reads per rig: one at t=0 and one when the window turns over at t=5.
+	if shows > 2*rigCount {
+		t.Errorf("%d bd reads for %d rigs over 10 simulated minutes, want at most %d (one per rig per five-minute window)",
+			shows, rigCount, 2*rigCount)
+	}
+}
+
+// TestIsRigOperational_UnreadableDockStampReReads: the stamp is the evidence
+// that the memoized verdict still holds, so a stamp that cannot be read cannot
+// vouch for it. Reading a failed stat as "no dock happened" would keep a verdict
+// the daemon can no longer justify - the fail-open direction - so the bead is
+// read again instead, and the memo picks back up once the stamp is readable.
+func TestIsRigOperational_UnreadableDockStampReReads(t *testing.T) {
+	t.Parallel()
+	f := newRigStatusFakeFixture(t, rigShowOperational)
+
+	if operational, reason := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatalf("rig starts operational, got %q", reason)
+	}
+	if got := f.showCount(t); got != 1 {
+		t.Fatalf("stub bd served %d reads, want 1", got)
+	}
+
+	// A regular file where the rig's runtime directory belongs: the stamp's
+	// stat now fails with something that is not "no stamp".
+	rigRuntime := filepath.Dir(rig.DockStampPath(f.townRoot, f.rigName))
+	if err := os.MkdirAll(filepath.Dir(rigRuntime), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigRuntime, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if operational, _ := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatal("the rig is still active on its bead")
+	}
+	if got := f.showCount(t); got != 2 {
+		t.Errorf("stub bd served %d reads with an unreadable stamp, want 2: the memo cannot be trusted", got)
+	}
+	if logged := f.logBuf.String(); !strings.Contains(logged, "cannot read the dock stamp") {
+		t.Errorf("an unreadable stamp must be logged, got:\n%s", logged)
+	}
+
+	// Clear the obstruction: the first call re-reads once more (the entry
+	// stored under the unreadable stamp carries the zero stamp, and the real
+	// one is newer), and from there the memo works again.
+	if err := os.Remove(rigRuntime); err != nil {
+		t.Fatal(err)
+	}
+	if operational, _ := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatal("the rig is still active on its bead")
+	}
+	settled := f.showCount(t)
+	if settled != 3 {
+		t.Fatalf("stub bd served %d reads on the call that could read the stamp, want 3", settled)
+	}
+	if operational, _ := f.daemon.isRigOperational(f.rigName); !operational {
+		t.Fatal("the rig is still active on its bead")
+	}
+	if got := f.showCount(t); got != settled {
+		t.Errorf("stub bd served %d reads after recovery, want %d: the memo must work again", got, settled)
 	}
 }

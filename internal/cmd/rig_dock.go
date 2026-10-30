@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -82,7 +84,7 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get rig
-	_, r, err := getRig(rigName)
+	townRoot, r, err := getRig(rigName)
 	if err != nil {
 		return err
 	}
@@ -120,7 +122,7 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 	// Stop polecat sessions if any: an operator stop, the supervisor's Stop,
 	// logged (gt-4k3fj.4.1).
 	polecatMgr := supervisedPolecatSessions(t, r, "rig dock", operatorActor("gt rig dock"))
-	stoppedAgents, err := stopAndDockRig(bd, rigBead.ID, polecatMgr)
+	stoppedAgents, err := stopAndDockRig(townRoot, rigName, bd, rigBead.ID, polecatMgr)
 	if err != nil {
 		return err
 	}
@@ -143,11 +145,12 @@ type dockPolecatSessions interface {
 	StopAll(force bool) error
 }
 
-// stopAndDockRig stops the rig's polecat sessions and then sets the docked
-// label on its identity bead. The label is written only after the stop
-// succeeded: a rig labeled docked while its sessions still run is one the
-// daemon will not restart and nobody is watching.
-func stopAndDockRig(bd beads.Client, rigBeadID string, m dockPolecatSessions) ([]string, error) {
+// stopAndDockRig stops the rig's polecat sessions, sets the docked label on its
+// identity bead, and stamps the rig so a running daemon drops its memoized
+// bead read. The label is written only after the stop succeeded: a rig labeled
+// docked while its sessions still run is one the daemon will not restart and
+// nobody is watching.
+func stopAndDockRig(townRoot, rigName string, bd beads.Client, rigBeadID string, m dockPolecatSessions) ([]string, error) {
 	stopped, err := stopDockedPolecats(m)
 	if err != nil {
 		return nil, err
@@ -157,7 +160,22 @@ func stopAndDockRig(bd beads.Client, rigBeadID string, m dockPolecatSessions) ([
 	}); err != nil {
 		return nil, fmt.Errorf("setting docked label: %w", err)
 	}
+	if err := stampRigDockState(townRoot, rigName); err != nil {
+		return nil, err
+	}
 	return stopped, nil
+}
+
+// stampRigDockState tells a running daemon that the rig's dock state changed
+// (internal/rig.DockStamp). The label on the identity bead is the state; this is
+// the notice that drops the daemon's memoized read. The command's own work is
+// already done when this runs, so a failure here is reported as what it is: the
+// dock stands, and the daemon keeps its verdict until its window expires.
+func stampRigDockState(townRoot, rigName string) error {
+	if err := rig.TouchDockStamp(townRoot, rigName, time.Now()); err != nil {
+		return fmt.Errorf("%s's dock state is recorded, but the daemon will not see it until it re-reads the bead: %w", rigName, err)
+	}
+	return nil
 }
 
 // stopDockedPolecats stops the polecat sessions of a rig being docked and
@@ -194,7 +212,7 @@ func runRigUndock(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get rig and town root
-	_, r, err := getRig(rigName)
+	townRoot, r, err := getRig(rigName)
 	if err != nil {
 		return err
 	}
@@ -207,14 +225,15 @@ func runRigUndock(cmd *cobra.Command, args []string) error {
 
 	// Find the rig identity bead
 	rigBeadID := beads.RigBeadIDWithPrefix(prefix, rigName)
-	return undockRig(beads.New(r.BeadsPath()), rigBeadID, rigName)
+	return undockRig(townRoot, beads.New(r.BeadsPath()), rigBeadID, rigName)
 }
 
-// undockRig removes the docked label from the rig identity bead. Only
-// beads.ErrNotFound means there is no identity bead to be docked. Any other
-// read failure is returned: the rig's state is unknown, and reporting "not
-// docked" would leave the daemon treating it as docked.
-func undockRig(bd beads.Client, rigBeadID, rigName string) error {
+// undockRig removes the docked label from the rig identity bead, and stamps the
+// rig so a running daemon drops its memoized read. Only beads.ErrNotFound means
+// there is no identity bead to be docked. Any other read failure is returned:
+// the rig's state is unknown, and reporting "not docked" would leave the daemon
+// treating it as docked.
+func undockRig(townRoot string, bd beads.Client, rigBeadID, rigName string) error {
 	rigBead, err := bd.Show(rigBeadID)
 	if errors.Is(err, beads.ErrNotFound) {
 		// Rig identity bead doesn't exist (legacy rig) - can't be docked
@@ -243,6 +262,9 @@ func undockRig(bd beads.Client, rigBeadID, rigName string) error {
 		RemoveLabels: []string{RigDockedLabel},
 	}); err != nil {
 		return fmt.Errorf("removing docked label: %w", err)
+	}
+	if err := stampRigDockState(townRoot, rigName); err != nil {
+		return err
 	}
 
 	fmt.Printf("%s Rig %s undocked\n", style.Success.Render("✓"), rigName)
