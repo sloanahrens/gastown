@@ -2166,27 +2166,55 @@ func specRosterOf(seats poolSeatSnapshot, ts *config.TownSettings, occupied func
 	return roster, nil
 }
 
+// specRosterStep is a tick's Roster step: the seat snapshot is read once and
+// kept for the tick's slings through keep, and the roster is counted over one
+// sling-side occupancy read that occupied builds from that snapshot. The read
+// happens once per tick, not once per candidate: specRosterOf calls it exactly
+// once, and the cycle calls this once (gt-97ppg). A failed read is an error, so
+// the tick reports it and dispatches nothing on it.
+func specRosterStep(read func() (poolSeatSnapshot, error), ts *config.TownSettings, occupied func(poolSeatSnapshot) func() ([]poolSession, error), keep func(poolSeatSnapshot)) (specRoster, error) {
+	seats, err := read()
+	if err != nil {
+		return specRoster{}, fmt.Errorf("listing polecat seats: %w", err)
+	}
+	keep(seats)
+	return specRosterOf(seats, ts, occupied(seats))
+}
+
 // specDrainingSessions is the sling-side occupancy beyond the roster: each held
-// session whose seat the roster did not count. A seat is one seat by its rig and
-// polecat name, so a seat the roster counted dead-hooked and the listing now
-// shows live is counted once, and a seat claim the roster holds (which names no
-// seat, and which the sling's own ledger counts apart) is not drawn from held
-// at all. What remains is the draining session the roster released and the
-// sling still counts, and any session new since the roster read (gt-97ppg).
+// session the roster did not already count. Both reads name an occupancy the
+// same way (specOccupancyKey), so one occupancy is counted once however many
+// entries describe it: a seat the roster counted dead-hooked and the listing
+// now shows live, a seat claim the roster holds, and a polecat session whose
+// role names no seat. What remains is the draining session the roster released
+// and the sling still counts, and any session new since the roster read
+// (gt-97ppg).
 func specDrainingSessions(rosterSeats, held []poolSession) []poolSession {
 	counted := map[string]bool{}
 	for _, s := range rosterSeats {
-		if key := s.seatKey(); key != "" {
-			counted[key] = true
-		}
+		counted[specOccupancyKey(s)] = true
 	}
 	var out []poolSession
 	for _, s := range held {
-		if key := s.seatKey(); key == "" || !counted[key] {
-			out = append(out, s)
+		key := specOccupancyKey(s)
+		if counted[key] {
+			continue
 		}
+		counted[key] = true
+		out = append(out, s)
 	}
 	return out
+}
+
+// specOccupancyKey names what a session holds, the same way on the roster and on
+// the sling's read: its pool seat, or, for a session that names no seat (a seat
+// claim, or a polecat whose GT_ROLE does not parse), its own name. A key of ""
+// would let every such session collide with every other one.
+func specOccupancyKey(s poolSession) string {
+	if key := s.seatKey(); key != "" {
+		return "seat " + key
+	}
+	return "session " + s.name
 }
 
 // loadSpecDispatchConfig returns daemon.json's patrols.spec_dispatch, or nil.
@@ -2354,17 +2382,17 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			// live sessions, in-flight claims, and seats mid-landing. Two
 			// pictures of one pool is how the dispatcher ends up slinging into
 			// a seat the nudge just called free (gt-thy6r).
-			seats, err := specRosterSnapshot(reads, townRoot, ts.PolecatPool)
-			if err != nil {
-				return specRoster{}, fmt.Errorf("listing polecat seats: %w", err)
-			}
-			// Kept for the slings: each one's seat decision reads this
-			// snapshot plus the live sessions and claims of its moment
-			// (snapshotOccupied) instead of every polecat directory again.
-			snapshot.Store(&seats)
-			return specRosterOf(seats, ts, func() ([]poolSession, error) {
-				return snapshotOccupied(seats, newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)()
-			})
+			return specRosterStep(
+				func() (poolSeatSnapshot, error) { return specRosterSnapshot(reads, townRoot, ts.PolecatPool) },
+				ts,
+				func(seats poolSeatSnapshot) func() ([]poolSession, error) {
+					return snapshotOccupied(seats, newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)
+				},
+				// Kept for the slings: each one's seat decision reads this
+				// snapshot plus the live sessions and claims of its moment
+				// (snapshotOccupied) instead of every polecat directory again.
+				func(seats poolSeatSnapshot) { snapshot.Store(&seats) },
+			)
 		},
 		Annotate: annotations.annotate,
 		AddLabel: func(id, label string) error {

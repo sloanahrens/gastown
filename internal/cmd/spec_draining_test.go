@@ -68,14 +68,16 @@ func TestSpecRosterCountsWhatTheSlingHolds(t *testing.T) {
 	}
 }
 
-// TestSpecDrainingSessions: draining is the held sessions whose seat the roster
-// did not count. A seat is counted once, and a seat claim is not a held session.
+// TestSpecDrainingSessions: draining is the held sessions the roster did not
+// already count. An occupancy is counted once however many entries describe it:
+// a seat, a claim, or a polecat session whose role names no seat.
 func TestSpecDrainingSessions(t *testing.T) {
 	t.Parallel()
 	rosterSeats := []poolSession{
 		{name: "gt-capable", agent: "claude-sonnet", rig: "gastown", polecat: "capable"},
 		{name: "dead/gastown/revived", agent: "claude-sonnet", rig: "gastown", polecat: "revived", deadHooked: true},
 		{name: "pool-claim/abc", agent: "claude-sonnet"},
+		{name: "gt-unparsed", agent: "deepseek-flash"},
 	}
 	cases := []struct {
 		name string
@@ -89,10 +91,26 @@ func TestSpecDrainingSessions(t *testing.T) {
 		{"a dead seat the listing now shows live is counted once", []poolSession{
 			{name: "gt-revived", agent: "claude-sonnet", rig: "gastown", polecat: "revived"},
 		}, nil},
-		{"a claim the roster holds is not drawn from the sling's listing", nil, nil},
+		{"a seat the roster counted is not draining", []poolSession{
+			{name: "gt-capable", agent: "claude-sonnet", rig: "gastown", polecat: "capable"},
+		}, nil},
+		{"a claim the roster holds is counted once, not again from the listing", []poolSession{
+			{name: "pool-claim/abc", agent: "claude-sonnet"},
+		}, nil},
+		{"a polecat session the roster holds with no seat is counted once", []poolSession{
+			{name: "gt-unparsed", agent: "deepseek-flash"},
+		}, nil},
+		{"a claim only the sling holds is counted once", []poolSession{
+			{name: "pool-claim/new", agent: "claude-sonnet"},
+		}, []string{"pool-claim/new"}},
+		{"two held entries with one identity are counted once", []poolSession{
+			{name: "gt-new", agent: "deepseek-flash", rig: "gastown", polecat: "new"},
+			{name: "gt-new", agent: "deepseek-flash", rig: "gastown", polecat: "new"},
+		}, []string{"gt-new"}},
 		{"a session new since the roster read is counted", []poolSession{
 			{name: "gt-new", agent: "deepseek-flash", rig: "gastown", polecat: "new"},
 		}, []string{"gt-new"}},
+		{"a roster session the sling does not hold is not draining", nil, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
