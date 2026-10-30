@@ -60,9 +60,10 @@ func StripFences(text string) []Line {
 }
 
 // CheckDeadLinks reports each relative link in the agent-facing, reference and
-// historical tiers whose target does not exist. Links inside fences are not
-// judged. A template renders at the repository root, so its links resolve
-// from there rather than from the directory it lives in.
+// historical tiers whose target does not exist, and each target that leaves the
+// repository, which is never probed. Links inside fences are not judged. A
+// template renders at the repository root, so its links resolve from there
+// rather than from the directory it lives in.
 func CheckDeadLinks(fsys FS) ([]Finding, error) {
 	files, err := linkedFiles(fsys)
 	if err != nil {
@@ -85,7 +86,23 @@ func CheckDeadLinks(fsys FS) ([]Finding, error) {
 				if !judged {
 					continue
 				}
-				if !fsys.PathExists(path.Join(base, target)) {
+				dest, confined := resolveLink(base, target)
+				if !confined {
+					out = append(out, Finding{
+						File:    f,
+						Line:    line.No,
+						Rule:    RuleDeadLink,
+						Message: target + " points outside the repository",
+					})
+					continue
+				}
+				exists, err := fsys.PathExists(dest)
+				if err != nil {
+					// An unstattable target is not a dead link, so it is not
+					// reported as one.
+					return nil, err
+				}
+				if !exists {
 					out = append(out, Finding{
 						File:    f,
 						Line:    line.No,
@@ -104,7 +121,11 @@ func CheckDeadLinks(fsys FS) ([]Finding, error) {
 // not stripped: a make line in a code block is still an instruction. With no
 // Makefile there is nothing to match against, so there are no findings.
 func CheckDeadMakeTargets(fsys FS) ([]Finding, error) {
-	if !fsys.Exists("Makefile") {
+	hasMakefile, err := fsys.FileExists("Makefile")
+	if err != nil {
+		return nil, err
+	}
+	if !hasMakefile {
 		return nil, nil
 	}
 	makefile, err := fsys.ReadFile("Makefile")
@@ -195,6 +216,21 @@ func linkTarget(match string) (string, bool) {
 		return "", false
 	}
 	return target, true
+}
+
+// resolveLink is the repo-relative path a judged target names from base. It
+// reports false when the target leaves the repository: an absolute target is
+// never joined onto base, and a joined path that climbs above the root is not
+// probed at all.
+func resolveLink(base, target string) (string, bool) {
+	if path.IsAbs(target) {
+		return "", false
+	}
+	dest := path.Join(base, target)
+	if dest == ".." || strings.HasPrefix(dest, "../") {
+		return "", false
+	}
+	return dest, true
 }
 
 // splitLines splits text into its lines, without the empty element a final

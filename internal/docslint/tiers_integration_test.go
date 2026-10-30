@@ -3,6 +3,8 @@
 package docslint
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -42,8 +44,11 @@ func TestIntegrationOSFilesReadsACheckout(t *testing.T) {
 		t.Error("Exists reported a path that is not a regular file")
 	}
 	// PathExists reports a directory as well: a link may point at one.
-	if !fsys.PathExists("docs/design") || fsys.PathExists("docs/missing") {
-		t.Error("PathExists did not report a directory that exists and a path that does not")
+	if dir, err := fsys.PathExists("docs/design"); err != nil || !dir {
+		t.Errorf("PathExists(docs/design) = %v, %v; want true, nil", dir, err)
+	}
+	if missing, err := fsys.PathExists("docs/missing"); err != nil || missing {
+		t.Errorf("PathExists(docs/missing) = %v, %v; want false, nil", missing, err)
 	}
 	if data, err := fsys.ReadFile("docs/design/live.md"); err != nil || string(data) != "# live\n" {
 		t.Errorf("ReadFile(docs/design/live.md) = %q, %v", data, err)
@@ -120,5 +125,36 @@ func TestIntegrationWalkFilesReportsAnUnreadableSubtree(t *testing.T) {
 	}
 	if got, err := Reference(fsys); err == nil {
 		t.Errorf("Reference() over an unreadable subtree = %q, nil; want an error", got)
+	}
+}
+
+// TestIntegrationOSFilesUnstatablePath pins the stat failure on a real tree: a
+// Makefile under a directory the process may not search is not a Makefile that
+// is absent, so the Makefile check fails rather than passing over it.
+func TestIntegrationOSFilesUnstatablePath(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root searches a 0000 directory, so the stat cannot fail")
+	}
+	root := t.TempDir()
+	locked := filepath.Join(root, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "Makefile"), []byte("build:\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// Restored before t.TempDir's own cleanup runs, which could not enter it.
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	fsys := OSFiles{Root: root}
+	if ok, err := fsys.FileExists("locked/Makefile"); !errors.Is(err, fs.ErrPermission) || ok {
+		t.Errorf("FileExists(locked/Makefile) = %v, %v; want false and a permission error", ok, err)
+	}
+	if ok, err := fsys.PathExists("locked/Makefile"); !errors.Is(err, fs.ErrPermission) || ok {
+		t.Errorf("PathExists(locked/Makefile) = %v, %v; want false and a permission error", ok, err)
 	}
 }

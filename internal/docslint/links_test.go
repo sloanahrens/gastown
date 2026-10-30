@@ -1,9 +1,12 @@
 package docslint
 
 import (
+	"errors"
 	"io/fs"
 	"reflect"
+	"syscall"
 	"testing"
+	"testing/fstest"
 )
 
 // oneUnreadableFS is memFS with one file every read of which fails, the way a
@@ -402,5 +405,185 @@ func TestDeadMakeTargetsDocReadErrorIsReturned(t *testing.T) {
 	}
 	if _, err := CheckDeadMakeTargets(files); err == nil {
 		t.Fatal("CheckDeadMakeTargets() with an unreadable document returned no error")
+	}
+}
+
+// probeFS is memFS that records each path the dead-link check probes, so a test
+// can show a target was never handed to the filesystem.
+type probeFS struct {
+	memFS
+	probed []string
+}
+
+func (p *probeFS) PathExists(name string) (bool, error) {
+	p.probed = append(p.probed, name)
+	return p.memFS.PathExists(name)
+}
+
+// statErrFS is memFS whose stat of one path fails with err, the way a path the
+// process may not stat fails on disk.
+type statErrFS struct {
+	memFS
+	path string
+	err  error
+}
+
+func (s statErrFS) FileExists(p string) (bool, error) {
+	if p == s.path {
+		return false, s.err
+	}
+	return s.memFS.FileExists(p)
+}
+
+func (s statErrFS) PathExists(p string) (bool, error) {
+	if p == s.path {
+		return false, s.err
+	}
+	return s.memFS.PathExists(p)
+}
+
+func TestDeadLinksConfinedTargets(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		files      memFS
+		want       []string
+		wantProbed []string
+	}{
+		{
+			name:  "a target that climbs above the root from the repository root is not probed",
+			files: memFS{"AGENTS.md": "[x](../x)\n"},
+			want:  []string{"AGENTS.md:1: dead-link: ../x points outside the repository"},
+		},
+		{
+			name:  "a target that climbs above the root from a nested doc is not probed",
+			files: memFS{"docs/guide.md": "[x](../../etc/passwd)\n"},
+			want:  []string{"docs/guide.md:1: dead-link: ../../etc/passwd points outside the repository"},
+		},
+		{
+			name:  "a target that climbs out after a directory is not probed",
+			files: memFS{"AGENTS.md": "[x](docs/../../x)\n"},
+			want:  []string{"AGENTS.md:1: dead-link: docs/../../x points outside the repository"},
+		},
+		{
+			name:  "an absolute target is not joined onto its base or probed",
+			files: memFS{"docs/guide.md": "[x](/etc/hosts)\n"},
+			want:  []string{"docs/guide.md:1: dead-link: /etc/hosts points outside the repository"},
+		},
+		{
+			name:  "a template climbing above the root is not probed",
+			files: memFS{"internal/templates/polecat-CLAUDE.md": "[x](../../x)\n"},
+			want:  []string{"internal/templates/polecat-CLAUDE.md:1: dead-link: ../../x points outside the repository"},
+		},
+		{
+			name:       "a target that climbs and returns inside the repository is still probed",
+			files:      memFS{"AGENTS.md": "[r](docs/../README.md)\n", "README.md": "# r\n"},
+			wantProbed: []string{"README.md"},
+		},
+		{
+			name:       "a parent-directory target that stays inside is still probed",
+			files:      memFS{"docs/guide.md": "[x](../x.md)\n", "x.md": "# x\n"},
+			wantProbed: []string{"x.md"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files := &probeFS{memFS: tc.files}
+			got, err := CheckDeadLinks(files)
+			if err != nil {
+				t.Fatalf("CheckDeadLinks(): %v", err)
+			}
+			if gotStrings := findingStrings(got); !reflect.DeepEqual(gotStrings, tc.want) {
+				t.Errorf("CheckDeadLinks() = %q, want %q", gotStrings, tc.want)
+			}
+			if !reflect.DeepEqual(files.probed, tc.wantProbed) {
+				t.Errorf("PathExists was called for %q, want %q", files.probed, tc.wantProbed)
+			}
+		})
+	}
+}
+
+func TestDeadLinksProbeErrorIsReturned(t *testing.T) {
+	t.Parallel()
+	// A target that cannot be stat'ed is neither a live link nor a dead one, so
+	// the check fails rather than reporting "does not exist".
+	files := statErrFS{
+		memFS: memFS{"docs/guide.md": "[g](gone.md)\n"},
+		path:  "docs/gone.md",
+		err:   fs.ErrPermission,
+	}
+	got, err := CheckDeadLinks(files)
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("CheckDeadLinks() error = %v, want the stat's %v", err, fs.ErrPermission)
+	}
+	if got != nil {
+		t.Errorf("CheckDeadLinks() findings = %q alongside the error, want none", findingStrings(got))
+	}
+}
+
+func TestDeadMakeTargetsStatError(t *testing.T) {
+	t.Parallel()
+	// A Makefile that cannot be stat'ed is not a Makefile that is absent. Taking
+	// it for absent would pass every reference unjudged.
+	files := statErrFS{
+		memFS: memFS{"Makefile": "build:\n", "AGENTS.md": "`make build`\n"},
+		path:  "Makefile",
+		err:   fs.ErrPermission,
+	}
+	got, err := CheckDeadMakeTargets(files)
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("CheckDeadMakeTargets() error = %v, want the stat's %v", err, fs.ErrPermission)
+	}
+	if got != nil {
+		t.Errorf("CheckDeadMakeTargets() findings = %q alongside the error, want none", findingStrings(got))
+	}
+}
+
+// TestDeadLinksStatMapping drives the stat results OSFiles turns into the
+// (bool, error) answers both checks rely on. The stat is a seam over an
+// in-memory tree, so no real path is touched.
+func TestDeadLinksStatMapping(t *testing.T) {
+	t.Parallel()
+	tree := fstest.MapFS{"file.md": {}, "dir/x.md": {}}
+	denied := func(name string) (fs.FileInfo, error) {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
+	}
+	notDir := func(name string) (fs.FileInfo, error) {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: syscall.ENOTDIR}
+	}
+	tests := []struct {
+		name     string
+		path     string
+		stat     func(string) (fs.FileInfo, error)
+		wantFile bool
+		wantPath bool
+		wantErr  bool
+	}{
+		{name: "a regular file", path: "file.md", stat: tree.Stat, wantFile: true, wantPath: true},
+		{name: "a directory exists but is not a file", path: "dir", stat: tree.Stat, wantPath: true},
+		{name: "an absent path", path: "gone.md", stat: tree.Stat},
+		{name: "a path under a file is absent", path: "file.md/x", stat: notDir},
+		{name: "a permission failure is an error, not absence", path: "gone.md", stat: denied, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := OSFiles{stat: tc.stat}
+			file, fileErr := fsys.FileExists(tc.path)
+			if file != tc.wantFile || (fileErr != nil) != tc.wantErr {
+				t.Errorf("FileExists(%s) = %v, %v; want %v, error %v", tc.path, file, fileErr, tc.wantFile, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(fileErr, fs.ErrPermission) {
+				t.Errorf("FileExists(%s) error = %v, want the stat's %v", tc.path, fileErr, fs.ErrPermission)
+			}
+			found, pathErr := fsys.PathExists(tc.path)
+			if found != tc.wantPath || (pathErr != nil) != tc.wantErr {
+				t.Errorf("PathExists(%s) = %v, %v; want %v, error %v", tc.path, found, pathErr, tc.wantPath, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(pathErr, fs.ErrPermission) {
+				t.Errorf("PathExists(%s) error = %v, want the stat's %v", tc.path, pathErr, fs.ErrPermission)
+			}
+		})
 	}
 }

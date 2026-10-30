@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // FS is the checkout as the tiers see it. Every path is repo-relative and
@@ -27,9 +28,14 @@ type FS interface {
 	WalkFiles(dir string) ([]string, error)
 	ReadFile(path string) ([]byte, error)
 	Exists(path string) bool
+	// FileExists reports whether p is a regular file. A stat that fails for any
+	// reason but absence is an error: a Makefile the process cannot stat is not
+	// the same as no Makefile.
+	FileExists(path string) (bool, error)
 	// PathExists reports whether p exists as a file or a directory. A link may
 	// point at a directory, so the dead-link check asks this rather than Exists.
-	PathExists(path string) bool
+	// A stat that fails for any reason but absence is an error, never "missing".
+	PathExists(path string) (bool, error)
 }
 
 // The tier names `--list` accepts.
@@ -257,22 +263,50 @@ func sortedUnique(paths []string) []string {
 // paths are resolved against.
 type OSFiles struct {
 	Root string
-	// walk is filepath.WalkDir. A unit test replaces it to reach the branches a
-	// real tree takes only through a directory it may not read, which the unit
-	// tier cannot build (docs/testing.md).
+	// walk is filepath.WalkDir and stat is os.Stat. A unit test replaces them to
+	// reach the branches a real tree takes only through a path the unit tier
+	// cannot build (docs/testing.md).
 	walk func(root string, fn fs.WalkDirFunc) error
+	stat func(name string) (fs.FileInfo, error)
 }
 
 // Exists reports whether p is a regular file under Root.
 func (o OSFiles) Exists(p string) bool {
-	info, err := os.Stat(o.abspath(p))
-	return err == nil && info.Mode().IsRegular()
+	info, found, err := o.statPath(p)
+	return err == nil && found && info.Mode().IsRegular()
+}
+
+// FileExists reports whether p is a regular file under Root.
+func (o OSFiles) FileExists(p string) (bool, error) {
+	info, found, err := o.statPath(p)
+	if err != nil {
+		return false, err
+	}
+	return found && info.Mode().IsRegular(), nil
 }
 
 // PathExists reports whether p exists under Root, as a file or a directory.
-func (o OSFiles) PathExists(p string) bool {
-	_, err := os.Stat(o.abspath(p))
-	return err == nil
+func (o OSFiles) PathExists(p string) (bool, error) {
+	_, found, err := o.statPath(p)
+	return found, err
+}
+
+// statPath stats p under Root. Absence, and a path whose parent is a file, are
+// a missing path. Any other failure is an error that names p: a path the
+// process cannot stat is not a path that does not exist.
+func (o OSFiles) statPath(p string) (fs.FileInfo, bool, error) {
+	stat := o.stat
+	if stat == nil {
+		stat = os.Stat
+	}
+	info, err := stat(o.abspath(p))
+	switch {
+	case err == nil:
+		return info, true, nil
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+		return nil, false, nil
+	}
+	return nil, false, fmt.Errorf("docs-lint: cannot stat %s: %w", p, err)
 }
 
 // ReadFile reads p under Root.
