@@ -66,9 +66,10 @@ type Deps struct {
 // one line is appended for each package that passes, and a package already
 // recorded at this TIER_SWEEP_TESTED commit, skip list and GOFLAGS is counted as
 // passed and not run, so a sweep a restart cut finishes the work it had left. The
-// variable takes effect only when it names exactly ResumeRecordPath of the run's
-// log root; any other value is named once and ignored. A GREEN run deletes that
-// record, one regular file, and a run that names no commit resumes nothing.
+// variable names the record file and the run uses it. A GREEN run deletes that
+// record only when it is one regular file, in a real directory, made of resume
+// records; anything else the variable names is left alone and named once. A run
+// that names no commit resumes nothing.
 //
 // A run that made its own log directory first prunes the old ones beside it
 // (PruneMaxAge), and removes its own after the last summary line when every

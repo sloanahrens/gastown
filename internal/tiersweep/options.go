@@ -92,8 +92,7 @@ type Options struct {
 	// ResumeFile is TIER_SWEEP_RESUME: the record a run appends each package it
 	// passed to, and reads the packages an earlier run at this commit and skip
 	// list already passed, so a sweep cut by a restart runs only what is left.
-	// It counts only when it names ResumeRecordPath of the run's log root; empty
-	// names none.
+	// It is the record file itself; empty names none.
 	ResumeFile string
 	// TimingsFile is TIER_SWEEP_TIMINGS: a persistent file a run replaces with
 	// its own timings lines at the end, so the next run can read this one's.
