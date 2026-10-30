@@ -363,7 +363,7 @@ page and a live run, and neither is hidden below.
   seat, or dispatch is proven another way, is the overseer's decision and is not
   made on this page.
 
-Every Docker command names its context, `--context desktop-linux`. Every `gt`
+Docker commands name their context as in L1. Every `gt`
 command that needs the scratch town's beads runs inside the container with
 `docker --context desktop-linux exec`, because the scratch Dolt is on an
 internal network and publishes no port, so the host cannot reach it. Every `gt`
@@ -406,6 +406,12 @@ observed](#what-l2-has-not-observed)).
 
   Keep the output. The `ls -l` prints sizes and times, never a token; do not
   `cat` those files.
+- Start the baseline for the modification-time check, once, before Step 1 of L2
+  and never again during it:
+
+  ```
+  mkdir -p <scratch-parent> && touch <scratch-parent>/.l2-start
+  ```
 
 ### Steps (L2)
 
@@ -425,15 +431,12 @@ gt daemon scratch up --live-root <live-town> --root <scratch-root> \
   --forge-http-port 3100 --forge-ssh-port 2322
 ```
 
-(Do Step 1 of L1 first if the scratch root does not exist.) Expected in the
-render, by the names of the golden
-`internal/templates/testdata/daemon-compose-scratch-forge.golden.yml`: the L1
-services `daemon`, `scratch-dind` and `scratch-dolt`, and `scratch-forgejo-db`,
-`scratch-forgejo`, `scratch-forge-dind` and `scratch-forge-runner`; the forge
-publishing exactly `127.0.0.1:3100:3000` and `127.0.0.1:2322:22`; no service,
-volume or network named as the live Forgejo project names them (`db`, `forgejo`,
-`docker-in-docker`, `runner-register`, `runner-daemon`, `pgdata`,
-`forgejo_data`, `runner_data`, `docker_certs`, `dind_data`). A port of 3000 or
+(Do Step 1 of L1 first if the scratch root does not exist.) Expected in the render: the golden
+`internal/templates/testdata/daemon-compose-scratch-forge.golden.yml` is the
+authority for its contents, and the things to read for here are the forge's
+ports, `127.0.0.1:3100:3000` and `127.0.0.1:2322:22`, and no name the live
+Forgejo project declares (the list is `liveForge*` in
+`internal/templates/daemon_compose_scratch_forge_test.go`). A port of 3000 or
 2222 is refused with a message that names it, and nothing is run.
 
 ```
@@ -488,8 +491,10 @@ curl -sS -H @<scratch-parent>/forge/admin.hdr -H 'Content-Type: application/json
 ```
 
 Expected: a JSON object that begins with an `id` and a `name` of `l2rig`. The
-repo is public so the container can clone it with no credentials; the bots push
-with their tokens. Next, a clone on the host holding the gate workflow, which the
+repo is public so the container can clone it with no credentials, which is
+acceptable only because the scratch Forgejo publishes on `127.0.0.1` alone, has
+registration disabled, and holds nothing but scratch data; the bots push with
+their tokens. Next, a clone on the host holding the gate workflow, which the
 landing worker's candidate branch `land/<bead>` triggers (the same file name and
 context the live gate uses, `.forgejo/workflows/gate.yml`, `ci / gate (push)`):
 
@@ -511,12 +516,13 @@ jobs:
 YAML
 git add .forgejo/workflows/gate.yml
 git commit -m "scratch: the gate"
-git -c "http.extraHeader=$(cat <scratch-parent>/forge/admin.hdr)" push origin main
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader \
+  GIT_CONFIG_VALUE_0="$(cat <scratch-parent>/forge/admin.hdr)" git push origin main
 ```
 
 The workflow runs one echo and checks nothing out, so it needs no network beyond
-the runner's own image pull. The push puts the admin token on this one command's
-argv, on loopback, for a throwaway token. Expected: the push reports
+the runner's own image pull. The header reaches git through its environment, so the token is on no
+command line. Expected: the push reports
 `main -> main`. The main branch is not yet protected; Step 5 protects it.
 
 **Step 5. Provision the bots against the scratch Forgejo.**
@@ -695,20 +701,41 @@ writes nothing; none runs a `gt` command in the live town.
 - [ ] The live daemon was not touched: `cat <live-town>/daemon/state.json` shows
       the same owner as before, `"running": true`, and a `heartbeat_count` that
       has only advanced by the live daemon's own beats.
-- [ ] No path under `<live-town>` was written by this run: nothing under it has
-      a modification time inside the L2 window except what the live daemon
-      writes itself (`daemon/`, its logs and `.runtime`).
+- [ ] The live town's configuration was not written during L2. This prints
+      nothing, where `<scratch-parent>/.l2-start` is the marker from Before you
+      start: `find <live-town>/settings <live-town>/mayor -maxdepth 2 -type f
+      -newer <scratch-parent>/.l2-start`. It looks only at the configuration
+      directories, because the live daemon writes `daemon/`, its logs and
+      `.runtime` itself, and a find over the whole town is slow and proves
+      nothing about them.
 
 L2 is green when Steps 1 to 9 passed as described and every box above is
 true. Record each step and box on the program bead, with the time.
+
+**If any box is false, L2 has failed and the live town may have been touched.**
+Do this at once, in order, and do not run Teardown until the evidence is saved:
+
+1. Stop. Do not run another L2 step and run no command in the live town that
+   changes anything: do not restart, repair or revert anything there.
+2. Save the evidence: the output of every check above, the recorded baseline
+   from Before you start, and `docker --context desktop-linux ps -a`.
+3. Run Teardown, which removes only the `gt-scratch` project.
+4. Write `FAIL` on the L2 record on the program bead, with the time and the
+   first box that was false.
+5. File a P1 bead naming that box and the saved output, and tell the overseer.
+   Do not paste a token or any secret. L2 is not repeated until the cause is
+   found and fixed.
 
 ### Teardown (L2)
 
 Use L1's [Teardown](#teardown). Its `down` removes every service, network and
 volume of the `gt-scratch` project, the forge's included, so no separate
 command is needed for them. Then remove `<scratch-parent>`, which now also holds
-`forge`, the admin token files, after checking that it holds only `build`,
-`forge`, `l2rig-src`, `<scratch-root>` and `<compose-file>`. The bots' token
+`forge`, the admin token files. First check that it is the path chosen in
+Before you start and outside the live town: `realpath <scratch-parent>` prints
+`~/gt-scratch.noindex/l1` spelled out, and neither it nor `<scratch-root>` is
+`<live-town>`, under it or above it. Then check that it holds only `build`,
+`forge`, `l2rig-src`, `<scratch-root>`, `<compose-file>` and `.l2-start`. The bots' token
 files are inside `<scratch-root>` and go with it. Run the checks above once more
 after Teardown: the live containers and volumes are the recorded ones and
 nothing named `gt-scratch*` is left.
@@ -726,6 +753,13 @@ likely to differ:
 - The runner registration of Step 6, including that the generated `config.yml`
   needs no other edit for a gate that runs one echo; the live project edits more
   (its labels, capacity, network and volumes) because its jobs build Go.
+- That the keys of Steps 7 and 8 sit where the runbook puts them. Their names
+  are read from the code (`patrols.landing_worker` with `enabled`, `rigs`,
+  `review` and `forgejo.token_dir` in `internal/config/daemon_config.go`;
+  `merge_queue.forgejo` with `remote_url`, `gate_workflow` and `bots` in
+  `internal/config/types.go`); which file holds each in a freshly installed
+  scratch town is not, and the daemon's settings parser is strict about daemon
+  keys, so a misplaced one is refused at boot.
 - Whether the scratch town needs more than Step 7 and Step 8 for the landing
   worker to take the rig: a `merge_queue` key the rig's root `config.json` also
   sets, or a daemon restart rather than the `up`.
