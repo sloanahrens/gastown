@@ -40,6 +40,8 @@ type Config struct {
 // Result counts the outcomes of one run.
 type Result struct {
 	Passed, Failed, Skipped int
+	// TimedOut counts the failed scripts whose context ended, which is their Budget running out.
+	TimedOut int
 	// FailedNames are the paths of the failed scripts, in manifest order.
 	FailedNames []string
 	Elapsed     time.Duration
@@ -53,20 +55,25 @@ func Run(ctx context.Context, cfg Config) Result {
 	start := cfg.Now()
 	var r Result
 	for _, e := range cfg.Entries {
-		if runOne(ctx, cfg, e) {
+		passed, timedOut := runOne(ctx, cfg, e)
+		if passed {
 			r.Passed++
 			continue
 		}
 		r.Failed++
+		if timedOut {
+			r.TimedOut++
+		}
 		r.FailedNames = append(r.FailedNames, e.Path)
 	}
 	r.Elapsed = cfg.Now().Sub(start)
 	return r
 }
 
-// runOne runs one entry under its own Budget and reports whether it passed.
-// A script whose budget ran out fails even when Exec reports success.
-func runOne(ctx context.Context, cfg Config, e Entry) bool {
+// runOne runs one entry under its own Budget and reports whether it passed and
+// whether its Budget ran out. A script whose budget ran out fails even when
+// Exec reports success.
+func runOne(ctx context.Context, cfg Config, e Entry) (passed, timedOut bool) {
 	name := logName(e.Path)
 	sctx, cancel := cfg.WithTimeout(ctx, cfg.Budget)
 	defer cancel()
@@ -79,7 +86,8 @@ func runOne(ctx context.Context, cfg Config, e Entry) bool {
 		},
 		Log: filepath.Join(cfg.LogDir, name+".log"),
 	})
-	return err == nil && code == 0 && sctx.Err() == nil
+	timedOut = sctx.Err() != nil
+	return !timedOut && err == nil && code == 0, timedOut
 }
 
 // logName is the stem of a script's log file and TMPDIR: its path with each
