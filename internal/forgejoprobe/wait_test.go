@@ -16,17 +16,27 @@ const (
 )
 
 // fakeClock is a Clock whose Sleep advances Now, so a poll loop finishes at
-// once and the sleeps it made are on record.
+// once and the sleeps it made are on record. onSleep, when set, runs after each
+// sleep, so a test can cancel the wait during one.
 type fakeClock struct {
-	now    time.Time
-	sleeps []time.Duration
+	now     time.Time
+	sleeps  []time.Duration
+	onSleep func()
 }
 
 func (c *fakeClock) Now() time.Time { return c.now }
 
-func (c *fakeClock) Sleep(d time.Duration) {
+// Sleep returns at once, unrecorded, when ctx is already done, as the real sleep
+// does.
+func (c *fakeClock) Sleep(ctx context.Context, d time.Duration) {
+	if ctx.Err() != nil {
+		return
+	}
 	c.sleeps = append(c.sleeps, d)
 	c.now = c.now.Add(d)
+	if c.onSleep != nil {
+		c.onSleep()
+	}
 }
 
 // fakeStatuses is an in-process Statuses. Each method answers from its field;
@@ -145,6 +155,39 @@ func TestWaitPollsUntilItReports(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWaitHonoursCancellation holds a canceled wait: a cancel during a sleep or a
+// read ends it as Interrupted, not as Unreadable, and no read follows the cancel.
+func TestWaitHonoursCancellation(t *testing.T) {
+	t.Parallel()
+	t.Run("canceled during the sleep reads no further", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := &fakeClock{now: time.Unix(1000, 0), onSleep: cancel}
+		st := &fakeStatuses{combined: answers(reporting(status(1, testContext, forgejo.StatePending)))}
+		v := Wait(ctx, st, clock, "acme", "rig", testSHA, testContext, time.Minute, 5*time.Second)
+		if v.Outcome != Interrupted {
+			t.Fatalf("outcome = %v, want Interrupted", v.Outcome)
+		}
+		if st.reads != 1 {
+			t.Errorf("reads = %d, want 1: a canceled wait reads the status no further", st.reads)
+		}
+	})
+	t.Run("canceled during a read is interrupted, not unreadable", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		st := &fakeStatuses{combined: func(int) (*forgejo.CombinedStatus, error) {
+			cancel()
+			return nil, context.Canceled
+		}}
+		v := Wait(ctx, st, &fakeClock{now: time.Unix(1000, 0)}, "acme", "rig", testSHA, testContext, time.Minute, 5*time.Second)
+		if v.Outcome != Interrupted {
+			t.Fatalf("outcome = %v, want Interrupted", v.Outcome)
+		}
+	})
 }
 
 func TestWaitNewestStatusWins(t *testing.T) {

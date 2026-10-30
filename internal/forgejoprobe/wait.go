@@ -27,7 +27,8 @@ var _ Statuses = (*forgejo.Client)(nil)
 // runs without waiting in tests.
 type Clock interface {
 	Now() time.Time
-	Sleep(d time.Duration)
+	// Sleep waits d, or until ctx is done, whichever comes first.
+	Sleep(ctx context.Context, d time.Duration)
 }
 
 // Outcome is how a Wait ended.
@@ -42,9 +43,13 @@ const (
 	TimedOut
 	// Unreadable means the combined status could not be read.
 	Unreadable
+	// Interrupted means the wait's context was canceled before a verdict: the
+	// run was stopped by a signal.
+	Interrupted
 )
 
-// Verdict is how a Wait ended. State is set for Red and Err for Unreadable.
+// Verdict is how a Wait ended. State is set for Red, and Err for Unreadable and
+// Interrupted.
 type Verdict struct {
 	Outcome Outcome
 	State   forgejo.CommitState
@@ -60,6 +65,8 @@ func (v Verdict) Line(rig, contextName, sha string, timeout time.Duration) strin
 		return fmt.Sprintf("timeout %s reported nothing on %s within %ds", contextName, sha, int(timeout.Seconds()))
 	case Red:
 		return fmt.Sprintf("other %s is %s on %s", contextName, v.State, sha)
+	case Interrupted:
+		return fmt.Sprintf("interrupted before %s reported on %s (%v)", contextName, sha, v.Err)
 	default:
 		return fmt.Sprintf("other %s is unreadable (%v) on %s", contextName, v.Err, sha)
 	}
@@ -67,12 +74,20 @@ func (v Verdict) Line(rig, contextName, sha string, timeout time.Duration) strin
 
 // Wait polls the combined status of sha until contextName settles, or until
 // timeout passes, and returns how it ended. It reads at once, then every poll.
+// A canceled ctx ends the wait as Interrupted, whether it was canceled during
+// a read or a sleep, and no verdict read after the cancellation is trusted.
 func Wait(ctx context.Context, st Statuses, c Clock, owner, repo, sha, contextName string, timeout, poll time.Duration) Verdict {
 	deadline := c.Now().Add(timeout)
 	for {
+		if err := ctx.Err(); err != nil {
+			return Verdict{Outcome: Interrupted, Err: err}
+		}
 		callCtx, cancel := context.WithDeadline(ctx, c.Now().Add(callTimeout))
 		cs, err := st.CombinedStatus(callCtx, owner, repo, sha)
 		cancel()
+		if ctx.Err() != nil {
+			return Verdict{Outcome: Interrupted, Err: ctx.Err()}
+		}
 		if err != nil {
 			return Verdict{Outcome: Unreadable, Err: err}
 		}
@@ -91,7 +106,7 @@ func Wait(ctx context.Context, st Statuses, c Clock, owner, repo, sha, contextNa
 		if !now.Before(deadline) {
 			return Verdict{Outcome: TimedOut}
 		}
-		c.Sleep(min(deadline.Sub(now), poll))
+		c.Sleep(ctx, min(deadline.Sub(now), poll))
 	}
 }
 

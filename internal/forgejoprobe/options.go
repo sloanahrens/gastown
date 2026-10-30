@@ -29,9 +29,9 @@ const (
 	// ExitHooksNotExercised is a green run whose push did not run the rig's
 	// hooks. It writes no record, so a script cannot take the run for the proof.
 	ExitHooksNotExercised = 3
-	// ExitNotWired is a command line that parsed while the probe run is not
-	// implemented: a run that probed nothing must not exit as though it had.
-	ExitNotWired = 70
+	// ExitInterrupted is a run stopped by SIGINT or SIGTERM before a verdict. It
+	// is 128 plus SIGINT, the shell's convention for an interrupted command.
+	ExitInterrupted = 130
 )
 
 // ErrHelp reports -h or --help: the caller prints the usage text and exits
