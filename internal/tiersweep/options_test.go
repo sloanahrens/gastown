@@ -1,11 +1,14 @@
 package tiersweep
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
@@ -92,6 +95,7 @@ func TestParseOptions(t *testing.T) {
 		LogDir:       madeDir,
 		OwnsLogDir:   true,
 		LogDirParent: DefaultTempDir,
+		Jobs:         1,
 	}
 	defaultTemps := []tempCall{{dir: DefaultTempDir, pattern: logDirPattern}}
 	cases := []struct {
@@ -112,7 +116,7 @@ func TestParseOptions(t *testing.T) {
 			name: "the tiers keep the order given",
 			args: []string{TierRace, TierShell},
 			want: Options{Tiers: []string{TierRace, TierShell}, Timeout: DefaultTimeout, LogDir: madeDir,
-				OwnsLogDir: true, LogDirParent: DefaultTempDir},
+				OwnsLogDir: true, LogDirParent: DefaultTempDir, Jobs: 1},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
@@ -120,7 +124,7 @@ func TestParseOptions(t *testing.T) {
 			name: "an unknown tier stays in the list for the run to report",
 			args: []string{TierShell, "bogus", TierRace},
 			want: Options{Tiers: []string{TierShell, "bogus", TierRace}, Timeout: DefaultTimeout, LogDir: madeDir,
-				OwnsLogDir: true, LogDirParent: DefaultTempDir},
+				OwnsLogDir: true, LogDirParent: DefaultTempDir, Jobs: 1},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
@@ -128,7 +132,7 @@ func TestParseOptions(t *testing.T) {
 			name: "TMPDIR names the default log directory's parent",
 			env:  map[string]string{"TMPDIR": "/var/tmp"},
 			want: Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir,
-				OwnsLogDir: true, LogDirParent: "/var/tmp"},
+				OwnsLogDir: true, LogDirParent: "/var/tmp", Jobs: 1},
 			wantTmp: []tempCall{{dir: "/var/tmp", pattern: logDirPattern}},
 			wantMk:  []string{madeDir},
 		},
@@ -142,7 +146,7 @@ func TestParseOptions(t *testing.T) {
 		{
 			name:   "TIER_SWEEP_LOGDIR is created and used as given",
 			env:    map[string]string{EnvLogDir: "/logs/sweep"},
-			want:   Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: "/logs/sweep"},
+			want:   Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: "/logs/sweep", Jobs: 1},
 			wantMk: []string{"/logs/sweep"},
 		},
 		{
@@ -156,7 +160,7 @@ func TestParseOptions(t *testing.T) {
 			name: "TIER_SWEEP_SKIP is the skip list",
 			env:  map[string]string{EnvSkip: "integration:./a race:./b:^TestC$"},
 			want: Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir,
-				OwnsLogDir: true, LogDirParent: DefaultTempDir,
+				OwnsLogDir: true, LogDirParent: DefaultTempDir, Jobs: 1,
 				SkipList: "integration:./a race:./b:^TestC$"},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
@@ -172,7 +176,7 @@ func TestParseOptions(t *testing.T) {
 			name: "TIER_SWEEP_TIMEOUT is the per-package timeout",
 			env:  map[string]string{EnvTimeout: "30m"},
 			want: Options{Tiers: defaults.Tiers, Timeout: "30m", LogDir: madeDir,
-				OwnsLogDir: true, LogDirParent: DefaultTempDir},
+				OwnsLogDir: true, LogDirParent: DefaultTempDir, Jobs: 1},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
@@ -187,7 +191,7 @@ func TestParseOptions(t *testing.T) {
 			name: "TIER_SWEEP_TRIGGER is passed through as given",
 			env:  map[string]string{EnvTrigger: "0"},
 			want: Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir,
-				OwnsLogDir: true, LogDirParent: DefaultTempDir, Trigger: "0"},
+				OwnsLogDir: true, LogDirParent: DefaultTempDir, Trigger: "0", Jobs: 1},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
@@ -195,7 +199,7 @@ func TestParseOptions(t *testing.T) {
 			name: "TIER_SWEEP_TESTED is the commit a run tests",
 			env:  map[string]string{EnvTested: "abc123"},
 			want: Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir,
-				OwnsLogDir: true, LogDirParent: DefaultTempDir, Tested: "abc123"},
+				OwnsLogDir: true, LogDirParent: DefaultTempDir, Tested: "abc123", Jobs: 1},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
@@ -273,6 +277,69 @@ func TestParseOptionsLogDirFailures(t *testing.T) {
 			}
 			if opts.LogDir != "" || opts.Tiers != nil {
 				t.Errorf("ParseOptions returned options %+v beside %v, want none", opts, err)
+			}
+		})
+	}
+}
+
+// TestParseOptionsJobsAccepts: TIER_SWEEP_JOBS unset is one package at a time,
+// and each value the range allows parses as that count.
+func TestParseOptionsJobsAccepts(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		value string
+		want  int
+	}{
+		{value: "", want: 1},
+		{value: "1", want: 1},
+		{value: "4", want: 4},
+		{value: "16", want: MaxJobs},
+	}
+	for _, tc := range cases {
+		t.Run("value "+tc.value, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeHost{env: map[string]string{EnvJobs: tc.value}, tmpDir: madeDir}
+			opts, err := ParseOptions(nil, f.host())
+			if err != nil {
+				t.Fatalf("ParseOptions(EnvJobs=%q): %v", tc.value, err)
+			}
+			if opts.Jobs != tc.want {
+				t.Errorf("Jobs = %d, want %d", opts.Jobs, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseOptionsJobsRefusals: a count outside 1 to 16, or one that is not a
+// whole number, is a usage error that names the variable and the value, so a
+// typo never changes how many tests run at once.
+func TestParseOptionsJobsRefusals(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"0", "-1", "17", "abc", "2.0", "1 0"} {
+		t.Run("value "+value, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeHost{env: map[string]string{EnvJobs: value}, tmpDir: madeDir}
+			opts, err := ParseOptions(nil, f.host())
+			if err == nil {
+				t.Fatalf("ParseOptions(EnvJobs=%q): no error, options %+v", value, opts)
+			}
+			if opts.Jobs != 0 {
+				t.Errorf("ParseOptions returned Jobs %d beside %v, want none", opts.Jobs, err)
+			}
+			for _, want := range []string{EnvJobs, value} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to name %q", err, want)
+				}
+			}
+			// The same refusal through the command: the usage exit, and no
+			// log directory made on the way.
+			var stderr bytes.Buffer
+			code := Run(nil, io.Discard, &stderr, Deps{Host: f.host()})
+			if code != UsageExit {
+				t.Errorf("Run exit = %d, want the usage exit %d", code, UsageExit)
+			}
+			if len(f.mkdirs) != 0 || len(f.temps) != 0 {
+				t.Errorf("a refused value made directories: %v %v", f.temps, f.mkdirs)
 			}
 		})
 	}

@@ -33,6 +33,7 @@ const (
 	EnvTrigger = "TIER_SWEEP_TRIGGER"
 	EnvTested  = "TIER_SWEEP_TESTED"
 	EnvTimings = "TIER_SWEEP_TIMINGS"
+	EnvJobs    = "TIER_SWEEP_JOBS"
 )
 
 // The values a name takes when the environment leaves it unset.
@@ -41,6 +42,9 @@ const (
 	DefaultTimeout = "10m"
 	// DefaultTempDir is TMPDIR's stand-in when it is unset or empty.
 	DefaultTempDir = "/tmp"
+	// MaxJobs is the most packages TIER_SWEEP_JOBS may run at once: a sweep is
+	// sized for the one host it runs on, and a typo must not swamp it.
+	MaxJobs = 16
 	// logDirPattern names the default log directory: tier-sweep.XXXXXX under
 	// TMPDIR.
 	logDirPattern = "tier-sweep."
@@ -88,6 +92,9 @@ type Options struct {
 	// its own timings lines at the end, so the next run can read this one's.
 	// Empty names none.
 	TimingsFile string
+	// Jobs is TIER_SWEEP_JOBS: how many packages the sweep runs at once, 1 to
+	// MaxJobs. Unset is 1, one package at a time, the sweep's original shape.
+	Jobs int
 }
 
 // UnknownTierError is a command line naming a tier the sweep does not offer.
@@ -109,8 +116,9 @@ func KnownTier(name string) bool {
 	return false
 }
 
-// Host is what ParseOptions reads the process through: its environment and the
-// two directory calls the default log directory needs.
+// Host is what a run reads and writes the machine through: its environment, the
+// directory calls the log directory and the prune need, and the file calls the
+// timings files go through.
 type Host struct {
 	// Env reads an environment name. An empty value means the name is unset,
 	// so its default applies.
@@ -124,6 +132,10 @@ type Host struct {
 	// temp file TIER_SWEEP_TIMINGS is replaced through. A nil WriteFile takes
 	// os.WriteFile in Run, as a nil Deps.ReadFile takes os.ReadFile.
 	WriteFile func(name string, data []byte, perm fs.FileMode) error
+	// ReadFile reads a file, as os.ReadFile does: it is how a parallel run
+	// reads the previous run's lines from TIER_SWEEP_TIMINGS. A nil ReadFile
+	// takes os.ReadFile in Run.
+	ReadFile func(name string) ([]byte, error)
 	// Rename renames a file, as os.Rename does: it puts the temp file over
 	// TIER_SWEEP_TIMINGS, so a reader never sees a torn file. A nil Rename takes
 	// os.Rename in Run.
@@ -145,7 +157,7 @@ type Host struct {
 // ProcessHost reads and writes the running process.
 var ProcessHost = Host{
 	Env: os.Getenv, MkdirTemp: os.MkdirTemp, MkdirAll: os.MkdirAll,
-	WriteFile: os.WriteFile, Rename: os.Rename,
+	WriteFile: os.WriteFile, ReadFile: os.ReadFile, Rename: os.Rename,
 	RemoveAll: os.RemoveAll, ReadDir: os.ReadDir, Lstat: os.Lstat,
 }
 
@@ -168,6 +180,11 @@ func ParseOptions(args []string, host Host) (Options, error) {
 		return Options{}, err
 	}
 	opts.Nice = nice
+	jobs, err := parseJobs(host.Env(EnvJobs))
+	if err != nil {
+		return Options{}, err
+	}
+	opts.Jobs = jobs
 	logDir := host.Env(EnvLogDir)
 	if logDir == "" {
 		parent := orDefault(host.Env("TMPDIR"), DefaultTempDir)
@@ -218,6 +235,20 @@ func parseNice(value string) (*int, error) {
 		return nil, fmt.Errorf("%s: %s=%q: want a whole number from 0 to 19", Name, EnvNice, value)
 	}
 	return &nice, nil
+}
+
+// parseJobs reads TIER_SWEEP_JOBS: unset is one package at a time, and anything
+// else is a whole number from 1 to MaxJobs, so a typo never changes how many
+// go test children run at once.
+func parseJobs(value string) (int, error) {
+	if value == "" {
+		return 1, nil
+	}
+	jobs, err := strconv.Atoi(value)
+	if err != nil || jobs < 1 || jobs > MaxJobs {
+		return 0, fmt.Errorf("%s: %s=%q: want a whole number from 1 to %d", Name, EnvJobs, value, MaxJobs)
+	}
+	return jobs, nil
 }
 
 // orDefault returns fallback when value is empty.

@@ -27,6 +27,8 @@ func (s *Sweep) Race() (line string, red bool) {
 		Stderr:   s.Stderr,
 		Timings:  s.Timings,
 		Now:      s.Now,
+		Jobs:     s.Opts.Jobs,
+		Walls:    s.Walls,
 	}
 	c := runner.Tier(TierRace, ".", slotPrefix(s.Opts.Nice), raceArgs, []string{racePkg})
 	return Summary(TierRace, s.Opts.LogDir, c.Passed, c.Failed, c.Skipped, strings.Join(c.FailedNames, " "), elapsed())

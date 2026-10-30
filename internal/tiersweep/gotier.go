@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,8 +42,8 @@ var ProcessExec Exec = func(dir string, env []string, argv []string, out io.Writ
 // enough to name the failure, few enough that a red tier stays readable.
 const excerptLines = 5
 
-// Runner runs one tier's packages one at a time, so no single go test outlives
-// its timeout and a red package is named on its own.
+// Runner runs one tier's packages, one at a time unless Jobs names more, so no
+// single go test outlives its timeout and a red package is named on its own.
 type Runner struct {
 	// Exec runs each package's command. ProcessExec in production.
 	Exec Exec
@@ -57,12 +58,23 @@ type Runner struct {
 	Env []string
 	// Stderr receives the progress lines and the failure excerpts.
 	Stderr io.Writer
-	// Timings receives one line per package the runner starts, in run order. A
-	// package it skips, refuses or cannot log writes none. Nil writes no
-	// timings.
+	// Timings receives one line per package the runner starts, in the order
+	// their commands finished, which is list order for a run of one. A package
+	// it skips, refuses or cannot log writes none. Nil writes no timings.
 	Timings *Timings
 	// Now is the clock a package's wall time is read from. Nil means time.Now.
 	Now func() time.Time
+	// Jobs is how many packages run at once. Zero or one runs them one at a
+	// time in list order; more runs them on that many workers (gt-0rtgc).
+	Jobs int
+	// Walls is the previous run's wall time per tier and package, keyed by
+	// TimingsKey. A run of more than one job starts the longest packages first;
+	// nil, or a package with no entry, keeps list order. A run of one job
+	// ignores Walls and keeps list order, so it prints what it always has.
+	Walls map[string]int64
+	// stderr keeps the progress lines and the reports whole while a run of more
+	// than one job writes them from the dispatcher and the collector at once.
+	stderrMu sync.Mutex
 }
 
 // Counts is one tier's tally: the packages that passed, failed and were
@@ -75,54 +87,196 @@ type Counts struct {
 // Tier runs go test for each package in pkgs, in dir, under prefix and before
 // args, and tallies the results. A package's name is the one the skip list and
 // the log use, so a failure in a nested module reads ./tracker/store/pgtest.
+// The counts and the failed names follow pkgs' order whatever order the
+// packages ran in; a run with Jobs of one or less prints each package's line
+// where the package is listed, as the sweep always has.
 func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
-	var c Counts
+	tasks := r.tasks(tier, dir, pkgs)
+	r.runTasks(tier, dir, prefix, args, tasks)
+	return tally(tasks)
+}
+
+// task is one package's place in a tier run: the package, the name the skip
+// list and the log use, the -skip pattern, and what running it produced. Tasks
+// keep the caller's list order, which is the order the counts are taken in.
+type task struct {
+	pkg     string
+	name    string
+	pattern string
+	skip    bool
+	refuse  bool
+	result  packageResult
+}
+
+// packageResult is what one package's command left behind: the log, the exit
+// code, the clock reading before it started, and the failures to report.
+type packageResult struct {
+	ran       bool
+	code      int
+	start     time.Time
+	log       string
+	createErr error
+	closeErr  error
+}
+
+// tasks resolves each package's fate before anything runs.
+func (r *Runner) tasks(tier, dir string, pkgs []string) []*task {
+	tasks := make([]*task, 0, len(pkgs))
 	for _, pkg := range pkgs {
-		name := packageName(dir, pkg)
-		if strings.HasPrefix(pkg, "-") {
-			// go test would read it as a flag, so it fails closed and never runs.
-			c.Failed++
-			c.FailedNames = append(c.FailedNames, name)
-			fmt.Fprintf(r.Stderr, "%s: package argument starts with a dash\n", name)
-			continue
+		t := &task{pkg: pkg, name: packageName(dir, pkg)}
+		switch whole, pattern := SkipFor(r.SkipList, tier, t.name); {
+		case strings.HasPrefix(pkg, "-"):
+			t.refuse = true
+		case whole:
+			t.skip = true
+		default:
+			t.pattern = pattern
 		}
-		whole, pattern := SkipFor(r.SkipList, tier, name)
-		if whole {
+		tasks = append(tasks, t)
+	}
+	return tasks
+}
+
+// runTasks prints each package's line and runs the ones with a command to run,
+// one at a time in list order when Jobs is one, on a bounded pool in start
+// order when it names more.
+func (r *Runner) runTasks(tier, dir string, prefix, args []string, tasks []*task) {
+	if r.jobs() <= 1 {
+		// The serial run keeps the sweep's original lines byte for byte: a
+		// package is announced, skipped or refused where it is listed, and the
+		// previous run's walls never reorder it (gt-0rtgc).
+		for _, t := range tasks {
+			if r.announce(tier, t) {
+				r.runOne(tier, dir, prefix, args, t)
+			}
+		}
+		return
+	}
+	var run []*task
+	for _, t := range tasks {
+		if r.announce(tier, t) {
+			run = append(run, t)
+		}
+	}
+	// A serial package runs after the pool has drained, so it is the only child
+	// in flight while it runs (gt-0rtgc).
+	parallel, serial := splitSerial(startOrder(run, r.Walls, tier))
+	r.pool(tier, dir, prefix, args, parallel)
+	for _, t := range serial {
+		r.runOne(tier, dir, prefix, args, t)
+	}
+}
+
+// announce prints the line a package earns before it runs and reports whether
+// it has a command to run: a refused or skipped package prints its line and
+// runs nothing.
+func (r *Runner) announce(tier string, t *task) bool {
+	switch {
+	case t.refuse:
+		// go test would read it as a flag, so it fails closed and never runs.
+		fmt.Fprintf(r.Stderr, "%s: package argument starts with a dash\n", t.name)
+	case t.skip:
+		fmt.Fprintf(r.Stderr, "%s: %s %s SKIPPED (%s)\n", Name, tier, t.name, EnvSkip)
+	default:
+		return true
+	}
+	return false
+}
+
+// jobs is how many packages may run at once; the zero value runs one.
+func (r *Runner) jobs() int {
+	if r.Jobs < 1 {
+		return 1
+	}
+	return r.Jobs
+}
+
+// runOne runs one package in this goroutine and reports it.
+func (r *Runner) runOne(tier, dir string, prefix, args []string, t *task) {
+	r.start(tier, t)
+	t.result = r.runPackage(tier, dir, prefix, args, t, nil)
+	r.report(tier, t)
+}
+
+// start prints the progress line a package's command is announced with.
+func (r *Runner) start(tier string, t *task) {
+	r.stderrMu.Lock()
+	defer r.stderrMu.Unlock()
+	fmt.Fprintf(r.Stderr, "%s: %s %s ...\n", Name, tier, t.name)
+}
+
+// runPackage creates one package's log, runs its command and closes the log.
+// begin, when not nil, reports that the command has begun; a pool hands the
+// next package out only once it has heard that, so commands start in plan
+// order. A package whose log cannot be created calls it too, so the pool is
+// never left waiting on a command that never runs.
+func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task, begin func()) packageResult {
+	began := false
+	beganOnce := func() {
+		if !began {
+			began = true
+			if begin != nil {
+				begin()
+			}
+		}
+	}
+	defer beganOnce()
+	log := filepath.Join(r.LogDir, LogName(tier, t.name))
+	f, err := os.Create(log)
+	if err != nil {
+		// Without a log the package cannot be run, and it is not passed.
+		beganOnce()
+		return packageResult{log: log, createErr: err}
+	}
+	argv := append(append([]string{}, prefix...), "go", "test", "-count=1", "-timeout", r.Timeout)
+	argv = append(argv, args...)
+	if t.pattern != "" {
+		argv = append(argv, "-skip", t.pattern)
+	}
+	argv = append(argv, t.pkg)
+	start := r.now()
+	beganOnce()
+	code := r.Exec(dir, r.Env, argv, f)
+	closeErr := f.Close()
+	return packageResult{ran: true, code: code, start: start, log: log, closeErr: closeErr}
+}
+
+// report writes the failure a package's result names and records its timing.
+func (r *Runner) report(tier string, t *task) {
+	r.stderrMu.Lock()
+	defer r.stderrMu.Unlock()
+	res := t.result
+	if res.createErr != nil {
+		fmt.Fprintf(r.Stderr, "    create log %s: %v\n", res.log, res.createErr)
+		return
+	}
+	r.addTiming(tier, t.name, res.start, res.code)
+	if res.closeErr != nil {
+		fmt.Fprintf(r.Stderr, "    close log %s: %v\n", res.log, res.closeErr)
+	}
+	if res.code != 0 || res.closeErr != nil {
+		if err := r.excerpt(res.log); err != nil {
+			fmt.Fprintf(r.Stderr, "    read log %s: %v\n", res.log, err)
+		}
+	}
+}
+
+// tally counts the run in the caller's package-list order, so a failure is
+// named where the package was listed whatever order it ran in.
+func tally(tasks []*task) Counts {
+	var c Counts
+	for _, t := range tasks {
+		switch {
+		case t.refuse:
+			c.Failed++
+			c.FailedNames = append(c.FailedNames, t.name)
+		case t.skip:
 			c.Skipped++
-			fmt.Fprintf(r.Stderr, "%s: %s %s SKIPPED (%s)\n", Name, tier, name, EnvSkip)
-			continue
-		}
-		fmt.Fprintf(r.Stderr, "%s: %s %s ...\n", Name, tier, name)
-		log := filepath.Join(r.LogDir, LogName(tier, name))
-		f, err := os.Create(log)
-		if err != nil {
-			// Without a log the package cannot be run, and it is not passed.
-			c.Failed++
-			c.FailedNames = append(c.FailedNames, name)
-			fmt.Fprintf(r.Stderr, "    create log %s: %v\n", log, err)
-			continue
-		}
-		argv := append(append([]string{}, prefix...), "go", "test", "-count=1", "-timeout", r.Timeout)
-		argv = append(argv, args...)
-		if pattern != "" {
-			argv = append(argv, "-skip", pattern)
-		}
-		argv = append(argv, pkg)
-		start := r.now()
-		code := r.Exec(dir, r.Env, argv, f)
-		r.addTiming(tier, name, start, code)
-		closeErr := f.Close()
-		if code == 0 && closeErr == nil {
+		case t.result.ran && t.result.createErr == nil && t.result.code == 0 && t.result.closeErr == nil:
 			c.Passed++
-			continue
-		}
-		c.Failed++
-		c.FailedNames = append(c.FailedNames, name)
-		if closeErr != nil {
-			fmt.Fprintf(r.Stderr, "    close log %s: %v\n", log, closeErr)
-		}
-		if err := r.excerpt(log); err != nil {
-			fmt.Fprintf(r.Stderr, "    read log %s: %v\n", log, err)
+		default:
+			c.Failed++
+			c.FailedNames = append(c.FailedNames, t.name)
 		}
 	}
 	return c
