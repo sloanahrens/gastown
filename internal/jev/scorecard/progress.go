@@ -126,11 +126,12 @@ func (a *progressAdapter) Parse(raw []byte) (Item, error) {
 //     no remaining label, since its state cannot be read;
 //  3. else an overrun stop at or after the nudge sets making_progress false,
 //     and looping true unless the stop was charged to gate time: a stop the
-//     environment caused says nothing about the seat repeating itself;
+//     environment caused says nothing about the seat repeating itself. A bead
+//     the store no longer holds takes no looping label either;
 //  4. an overrun record whose gate time was charged at or after the nudge sets
 //     blocked_on_environment true;
-//  5. a MERGE REJECTION block written after the nudge whose text names scope
-//     drift sets drifted_from_bead true.
+//  5. a MERGE REJECTION block written after the nudge whose own words name
+//     scope drift sets drifted_from_bead true.
 //
 // Rules 1 and 3 are exclusive: a landing in the window is progress, so a stop
 // cannot also be the answer for the same nudge. The rule that set each label is
@@ -173,7 +174,10 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 		if !stop.StoppedAt.IsZero() && !stop.StoppedAt.Before(nudged) {
 			labels[qMakingProgress] = false
 			rules = append(rules, ruleProgressStopped)
-			if !gateCharged(stop, nudged) {
+			// A bead the store no longer holds takes no looping label: the
+			// record cannot be read against the bead, so the stop is not
+			// charged to the seat repeating itself.
+			if !missing && !gateCharged(stop, nudged) {
 				labels[qLooping] = true
 			}
 		}
@@ -210,28 +214,50 @@ func gateCharged(stop progressStop, nudged time.Time) bool {
 var scopeDriftRE = regexp.MustCompile(`(?i)\b(scope|unrelated|beyond)\b`)
 
 // rejectionNamesScope reports whether notes hold a MERGE REJECTION block
-// written after nudged whose text names scope drift.
+// written after nudged whose own words name scope drift.
 func rejectionNamesScope(notes string, nudged time.Time) bool {
 	for _, rej := range progressRejections(notes) {
+		// A refusal is placed by the submission it answers. One answering a
+		// submission made before the nudge has no time of its own to place,
+		// so it stays unlabeled: a refusal that may predate the nudge is not
+		// evidence about the seat's work after it.
 		if rej.submitted.IsZero() || rej.submitted.Before(nudged) {
 			continue
 		}
-		if scopeDriftRE.MatchString(rej.text) {
+		if scopeDriftRE.MatchString(rej.words) {
 			return true
 		}
 	}
 	return false
 }
 
-// progressRejection is one MERGE REJECTION block in a bead's notes, and the
-// submission it answers.
+// progressRejection is one MERGE REJECTION block in a bead's notes, the
+// submission it answers, and the words the refusal itself wrote.
 type progressRejection struct {
 	// submitted is the Submitted stamp of the READY TO LAND block the refusal
 	// answers, the last one the notes hold before it. Zero when that block
 	// carries no readable stamp.
 	submitted time.Time
-	// text runs from the block's header to the line before the next block.
-	text string
+	// words is the refusal's reason and each finding title, the text it
+	// argued in. The block's structural fields and its quoted gate tail are
+	// left out, so a branch name or a file path in output the refusal quoted
+	// never reads as drift (gt-tpv79).
+	words string
+}
+
+// rejectionWords reads the words a refusal wrote, through land's own parser:
+// its reason, then each finding's title.
+func rejectionWords(block string) string {
+	rej, ok := land.ParseRejectionNote(block)
+	if !ok {
+		return ""
+	}
+	words := make([]string, 0, len(rej.Findings)+1)
+	words = append(words, rej.Reason)
+	for _, f := range rej.Findings {
+		words = append(words, f.Title)
+	}
+	return strings.Join(words, "\n")
 }
 
 // progressRejections returns the notes' MERGE REJECTION blocks in the order
@@ -252,7 +278,8 @@ func progressRejections(notes string) []progressRejection {
 			for i+1 < len(lines) && !opensNoteBlock(lines[i+1]) {
 				i++
 			}
-			out = append(out, progressRejection{submitted: submitted, text: strings.Join(lines[start:i+1], "\n")})
+			block := strings.Join(lines[start:i+1], "\n")
+			out = append(out, progressRejection{submitted: submitted, words: rejectionWords(block)})
 		}
 	}
 	return out
