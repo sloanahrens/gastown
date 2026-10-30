@@ -394,7 +394,7 @@ check-version-tag:
 		echo "  git tag at HEAD:          $$TAG (expects Version=$$TAG_VERSION)"; \
 		echo "  internal/cmd/version.go:  Version=$$CODE_VERSION"; \
 		echo ""; \
-		echo "Run scripts/bump-version.sh before tagging, or re-tag HEAD correctly."; \
+		echo "Run go run ./cmd/bump-version <version> before tagging, or re-tag HEAD correctly."; \
 		echo "See gh#3459 for background."; \
 		exit 1; \
 	fi; \

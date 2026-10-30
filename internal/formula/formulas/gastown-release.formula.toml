@@ -176,13 +176,13 @@ The bump script will automatically create the version header with today's date.
 
 [[steps]]
 id = "run-bump-script"
-title = "Run bump-version.sh"
+title = "Run bump-version"
 needs = ["update-changelog"]
 description = """
 Update all component versions atomically.
 
 ```bash
-./scripts/bump-version.sh {{version}}
+go run ./cmd/bump-version {{version}}
 ```
 
 This updates:
@@ -190,10 +190,10 @@ This updates:
 - npm-package/package.json - npm package version
 - CHANGELOG.md - Creates [{{version}}] header with date
 
-Review the changes shown by the script.
+Review the changes shown by the command.
 
 ## On failure:
-If the script fails (e.g., version already exists, format error):
+If the command fails (e.g., version already exists, format error):
 - **Crew**: Debug and fix, or ask user
 - **Unattended**: Escalate with error details
 """
