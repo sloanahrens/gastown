@@ -3250,8 +3250,8 @@ function drawOverseerQueue(panel, s) {
 // The Usage part of the Cost panel: what the town spent over the last day, from
 // the records the usage scan writes. Each block is a fold of its own, closed by
 // default, with a one-line summary on its heading; the Cost panel's header
-// carries the day's DeepSeek estimate and how many beads ran over twenty
-// minutes. Read-only.
+// carries today's spend across the providers and, as a badge, how many beads ran
+// over twenty minutes. Read-only.
 //
 // Money and tokens are in separate columns: Spend ($) holds dollars and is
 // "est." for DeepSeek rows only, since the scan estimates no cost for Claude
@@ -3260,7 +3260,6 @@ function drawOverseerQueue(panel, s) {
 // goes through el(), which writes textContent: a bead id or model name is text
 // and never markup.
 const USAGE_STALE_SEC = 3 * 3600;
-const isDeepSeek = model => /^deepseek/i.test(model || "");
 const fmtTokens = n => {
   n = Number(n) || 0;
   if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
@@ -3287,21 +3286,16 @@ function costTable(heads, rows) {
   return t;
 }
 // costUsage draws the part into box from the usage payload u and the whole
-// state s, and returns what the panel's caption says of it: text, the tooltip
-// that explains the text, and whether it is a warning (warn) or a failure (bad).
+// state s, and returns whether the reading is a warning (warn) or a failure
+// (bad), which colours the Cost panel's header.
 function costUsage(box, u, s) {
   if (!u) { box.append(el("div", "empty", "reading…")); return {}; }
   if (u.unavailable) {
     box.append(el("div", "badc", "usage records unreadable"));
-    return {text: "usage unreadable", bad: true};
+    return {bad: true};
   }
   const byClass = u.by_class_model || [], deep = u.deep_review_runs || [], top = u.top_beads || [], over = u.over20 || [];
-  const est = byClass.filter(r => isDeepSeek(r.model)).reduce((sum, r) => sum + (r.est_cost_usd || 0), 0);
-  const caption = {
-    text: "DeepSeek est. " + money(est) + " · " + over.length + (over.length === 1 ? " bead" : " beads") + " over 20m",
-    title: "DeepSeek spend estimated from the usage records over the last " + (u.window || "24h") + "; beads that ran over twenty minutes in the last 48 hours",
-    warn: over.length > 0,
-  };
+  const glance = {warn: over.length > 0};
 
   const win = u.window || "24h";
   const table = costTable;
@@ -3383,7 +3377,7 @@ function costUsage(box, u, s) {
     quality.body.append(el("div", "empty" + (old ? " warnc" : ""), "records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")));
   }
   quality.body.append(el("div", "empty", counts));
-  return caption;
+  return glance;
 }
 
 // costFolds keeps each fold of the Cost panel's usage part by its key, built once
@@ -4198,6 +4192,94 @@ function costChartFold(box, kind, chart, providers) {
   box.append(f.sec);
 }
 
+// costHeaderParts is the Cost panel's header line: the few figures the operator
+// reads first, each in the colour the providers table gives the row it comes
+// from — today's spend across the providers, DeepSeek's runway, the week's
+// Claude percent with the day its limit is reached, and the GCP budget's
+// percent. Every figure is one a row already computed, so the header and the
+// table cannot disagree; one a row does not carry is left out of the line, and
+// is never drawn as a zero. The over-twenty-minute bead count is a badge, and
+// only when there is one to count.
+function costHeaderParts(s) {
+  const num = v => v == null || isNaN(Number(v)) ? null : Number(v);
+  const rows = (Array.isArray(s.cost_providers) ? s.cost_providers : [])
+    .filter(p => p && typeof p === "object" && !p.why);
+  const parts = [];
+
+  let today = null;
+  for (const p of rows) {
+    const v = num(p.today);
+    if (v != null) today = (today || 0) + v;
+  }
+  if (today != null) parts.push({text: "today " + money(today)});
+
+  const byId = id => rows.find(p => p.id === id);
+  const deep = byId("deepseek"), runway = deep && num(deep.runway_days);
+  if (runway != null) {
+    parts.push({text: (deep.label || "DeepSeek") + " " + runway.toFixed(1) + "d runway", cls: COST_STATUS_CLASS[deep.status] || ""});
+  }
+  const claude = byId("claude"), planPct = claude && num(claude.plan_pct);
+  if (planPct != null) {
+    parts.push({
+      text: (claude.label || "Claude") + " " + Math.round(planPct) + "% (wk)" + (claude.status_text ? " " + claude.status_text : ""),
+      cls: COST_STATUS_CLASS[claude.status] || "",
+    });
+  }
+  const gcp = costBudgetFigure(s.cloud);
+  if (gcp) parts.push(gcp);
+
+  const u = s.usage || {};
+  if (u.unavailable) parts.push({text: "usage unreadable", cls: "badc"});
+  else {
+    const over = (u.over20 || []).length;
+    if (over > 0) {
+      parts.push({
+        badge: over + (over === 1 ? " bead" : " beads") + " over 20m",
+        title: "beads that ran over twenty minutes in the last 48 hours",
+      });
+    }
+  }
+  return parts;
+}
+
+// costBudgetFigure is the header's GCP figure, read from the same budget_alert
+// findings the GCP line under the table draws, so the two cannot tell different
+// budgets. The percent goes with the budget it is a percent of; the worst alert
+// is the one that speaks for the projects, and an alert whose sentence does not
+// carry the figures is left to the line below rather than guessed at here. Its
+// colour is the table's: red for a budget spent past its whole, else the
+// finding's own severity — the alert is the patrol saying the project is near
+// its budget.
+const COST_SEV_CLASS = {urgent: "badc", normal: "warnc"};
+function costBudgetFigure(c) {
+  if (!c || (c.state !== "fresh" && c.state !== "overdue")) return null;
+  let worst = null, worstPct = -1, severity = "";
+  for (const f of (c.findings || []).filter(f => f.kind === "budget_alert")) {
+    const spent = BUDGET_SPENT.exec(f.detail || ""), pct = BUDGET_PCT.exec(f.detail || "");
+    if (spent && pct && Number(pct[1]) > worstPct) { worst = spent; worstPct = Number(pct[1]); severity = f.severity || ""; }
+  }
+  if (!worst) return null;
+  const amount = Number(String(worst[3]).replace(/,/g, ""));
+  const budget = isNaN(amount) ? worst[3] : "$" + (Number.isInteger(amount) ? amount : amount.toFixed(2));
+  return {text: "GCP " + (Number.isInteger(worstPct) ? worstPct : worstPct.toFixed(1)) + "% of " + budget,
+    cls: worstPct >= 100 ? "badc" : (COST_SEV_CLASS[severity] || ""),
+    // A figure from a patrol that is overdue is its last report's, which the
+    // GCP line under the table says in words; the header says it on hover.
+    title: c.state === "overdue" ? "the cloud patrol is overdue, so this is its last report" : ""};
+}
+
+// paintCostHeader writes the header parts into note, one span each so a part
+// wears its own status colour, joined by the page's " · ".
+function paintCostHeader(note, parts) {
+  note.replaceChildren();
+  parts.forEach((p, i) => {
+    if (i) note.append(document.createTextNode(" · "));
+    const span = el("span", p.badge ? "badge warnc" : p.cls || "", p.badge || p.text);
+    if (p.title) span.title = p.title;
+    note.append(span);
+  });
+}
+
 // renderCost draws the Cost panel. The table draws even without a spend report,
 // since its rows come from the other readers too. It sits outside the part a
 // stale spend read greys, so only the DeepSeek row, whose money that read feeds,
@@ -4207,8 +4289,19 @@ function costChartFold(box, kind, chart, providers) {
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
-  note.className = "r"; note.textContent = ""; note.title = "";
+  note.className = "r"; note.title = "";
   const d = s.spend, u = s.usage, r = readOf(s, "spend");
+  // The header reads the rows the table draws below it. The ledger time and the
+  // read's age, which the operator wants only when asking why the figures are
+  // old, go in its tooltip; a read that is not current still says so in the
+  // line, since grey figures alone must not pass as live ones.
+  const parts = costHeaderParts(s);
+  if (r && r.stale) parts.push({text: r.error ? "read failed" : "stale", cls: r.error ? "badc" : "warnc"});
+  paintCostHeader(note, parts);
+  note.title = [
+    d && d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null,
+    r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null,
+  ].filter(Boolean).join(" · ");
   costProviders(box, s.cost_providers, !!(r && r.stale));
   costGCP(box, s.cloud);
   const spendBox = el("div", "spendpart");
@@ -4223,13 +4316,9 @@ function renderCost(s) {
   const usage = costUsage(box, u, s);
   costJevFold(box, s);
   costRework(box, s.rework);
-  // The caption carries the spend report's ledger sample and its read age,
-  // which the table's hover does not, beside the usage glance.
-  const spendWords = [d && d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null];
-  note.textContent = readCaption(r, [usage.text || null].concat(spendWords));
-  note.title = usage.title || "";
-  // A stale or failed spend read has already coloured the caption; the usage
-  // part only colours one that is otherwise plain.
+  // A stale or failed spend read has already coloured the header, and the usage
+  // glance has coloured the part it draws; the header only takes a colour of
+  // its own when it has none.
   if (note.className === "r" && (usage.bad || usage.warn)) note.className = "r " + (usage.bad ? "badc" : "warnc");
 }
 

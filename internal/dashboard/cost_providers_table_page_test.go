@@ -831,8 +831,10 @@ func TestCostHeaderSummaryIsEmptyWithoutProviders(t *testing.T) {
 	}
 }
 
-// The closed Cost section shows its summary on its heading, drawn from the same
-// reading the table is, and the summary is empty when the array is not sent.
+// The closed Cost section shows its summary on its heading — the header line
+// the panel draws, from the same reading the table is — and a row with no
+// figure of its own still names itself there rather than leaving the heading
+// bare.
 func TestCostHeaderShowsItsSummaryWhenClosed(t *testing.T) {
 	t.Parallel()
 
@@ -845,8 +847,23 @@ func TestCostHeaderShowsItsSummaryWhenClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the Cost heading: %v", err)
 	}
-	if !strings.Contains(v.String(), "DeepSeek $27.45 3.0d runway") {
-		t.Errorf("the closed Cost heading does not show the providers' summary: %s", v.String())
+	if !strings.Contains(v.String(), "today $1.20 · DeepSeek 3.0d runway") {
+		t.Errorf("the closed Cost heading does not show the header line: %s", v.String())
+	}
+
+	// A row that carries a balance but none of the header's figures leaves the
+	// header empty, and the fold's own summary names the providers instead.
+	dom = newPageDOM(t)
+	dom.call(t, "renderCost", costPanelState([]map[string]any{{"id": "deepseek", "label": "DeepSeek", "kind": "cash", "balance": 27.45}}, nil))
+	if _, err := dom.vm.RunString(`state = ` + mustJSONString(t, costPanelState([]map[string]any{{"id": "deepseek", "label": "DeepSeek", "kind": "cash", "balance": 27.45}}, nil)) + `; (() => { const f = folds.filter(f => f.key === "cost")[0]; f.closed = true; paintFolds(state); })()`); err != nil {
+		t.Fatalf("closing the Cost section: %v", err)
+	}
+	v, err = dom.vm.RunString(`JSON.stringify(__foldRead("cost"))`)
+	if err != nil {
+		t.Fatalf("reading the Cost heading: %v", err)
+	}
+	if !strings.Contains(v.String(), `"summary":"DeepSeek $27.45"`) {
+		t.Errorf("the closed Cost heading has no summary of its provider: %s", v.String())
 	}
 }
 

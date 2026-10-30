@@ -194,12 +194,16 @@ func TestCostPanelEmptyStateAndCaption(t *testing.T) {
 		t.Errorf("empty panel with an alert = %+v, want the providers line, the alert under it, then the spend report line", lines)
 	}
 
-	// Usage not yet answered beside a spend report: the caption is the report's
-	// own words, with no undefined in it.
+	// Usage not yet answered beside a spend report: the report's ledger sample
+	// names the reading in the header's tooltip, which is where the age of the
+	// figures lives, and the line itself says no number it was not given.
 	spend := map[string]any{"balance": 12.5, "last_sample": "2026-10-15T10:00:00", "live": map[string]any{"ok": true}}
 	_, note = drawCost(t, map[string]any{"spend": spend})
-	if strings.Contains(note.Text, "undefined") || strings.Contains(note.Text, "null") || !strings.Contains(note.Text, "ledger 2026-10-15 10:00:00") {
-		t.Errorf("caption with usage absent = %q", note.Text)
+	if strings.Contains(note.Text, "undefined") || strings.Contains(note.Text, "null") || strings.Contains(note.Title, "undefined") || !strings.Contains(note.Title, "ledger 2026-10-15 10:00:00") {
+		t.Errorf("caption with usage absent = %q (tooltip %q)", note.Text, note.Title)
+	}
+	if note.Text != "" {
+		t.Errorf("a spend report with no provider row drew a headline figure: %q", note.Text)
 	}
 
 	// Unreadable usage reaches the caption in the page's failure colour.
