@@ -32,8 +32,8 @@ func LandingCount(run Runner, rigRoot string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%s failed: %w", commandText(argv), err)
 	}
-	// The shell read the answer through $(...), which strips trailing newlines and
-	// nothing else, so a count with a space or a sign around it is refused.
+	// Command substitution strips trailing newlines and nothing else, so a count
+	// with a space or a sign around it is refused.
 	text := strings.TrimRight(string(out), "\n")
 	if !countPattern.MatchString(text) {
 		return 0, fmt.Errorf("%s printed no plain count", commandText(argv))

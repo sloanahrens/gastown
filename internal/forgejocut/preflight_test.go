@@ -2,6 +2,7 @@ package forgejocut
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -237,6 +238,16 @@ func TestProbeArgsAndOutcome(t *testing.T) {
 				"(dry run: the probe was not run)",
 			},
 		},
+		{
+			name:      "dry run with a token file prints the token path and runs nothing",
+			tokenFile: probeTokenFile,
+			dryRun:    true,
+			wantArgv:  nil,
+			wantLog: []string{
+				"+ " + strings.Join(withToken, " "),
+				"(dry run: the probe was not run)",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -263,6 +274,58 @@ func TestProbeArgsAndOutcome(t *testing.T) {
 			}
 			if !slices.Equal(logs, tt.wantLog) {
 				t.Fatalf("logs = %q, want %q", logs, tt.wantLog)
+			}
+		})
+	}
+}
+
+// adminMarker stands in for the bytes of an admin token. The probe is handed the
+// token as a file path, so no argv word, log line or returned error may carry the
+// value, and the fakes below return it in their errors to tempt a wrap.
+const adminMarker = "tok-9f3a1c-marker"
+
+func TestProbeKeepsAdminMarkerOutOfArgvLogsAndErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		probe bool // true runs ProbeGreen; false runs RefuseIfLandingInFlight
+		out   string
+		err   error
+	}{
+		{name: "green probe", probe: true},
+		{name: "probe fails and its exit error echoes the marker", probe: true, err: fmt.Errorf("exit status 1: %s", adminMarker)},
+		{name: "probe cannot start with the marker in its error", probe: true, err: errors.New("fork/exec /usr/bin/bash: " + adminMarker)},
+		{name: "landing in flight refusal", out: "1\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			o := probeOptions()
+			o.RigRoot = queueRoot
+			o.AdminTokenFile = probeTokenFile
+			run := &fakeRunner{out: []byte(tt.out), err: tt.err}
+			var logs []string
+			log := func(s string) { logs = append(logs, s) }
+			var err error
+			if tt.probe {
+				err = ProbeGreen(run, o, log)
+			} else {
+				err = RefuseIfLandingInFlight(run, o, log)
+			}
+			// Failure messages name the surface, never the value: the bead forbids the
+			// token in any test output.
+			for _, argv := range run.calls {
+				if strings.Contains(commandText(argv), adminMarker) {
+					t.Fatal("a recorded argv carries the admin token marker")
+				}
+			}
+			for _, line := range logs {
+				if strings.Contains(line, adminMarker) {
+					t.Fatal("a log line carries the admin token marker")
+				}
+			}
+			if err != nil && strings.Contains(err.Error(), adminMarker) {
+				t.Fatal("the returned error carries the admin token marker")
 			}
 		})
 	}
