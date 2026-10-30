@@ -45,11 +45,14 @@ receipt read the same for either entry point.
 The daemon heartbeat is the only scheduler: it reads every plugin's gate on
 each heartbeat and runs the ones whose gate is open — a script-type plugin
 (`[execution] type = "script"` with a `run.sh` or a `binary`) in-process,
-recording a plugin-run receipt. A failed run is logged and escalated with `gt escalate`
-under the fingerprint `plugin:<name>:failed`; the plugin's next good run
-(success or skipped) closes it. Nothing runs markdown-instruction ("agent")
-plugins any more: a cooldown plugin without a script `run.sh` is logged as
-skipped every heartbeat. No patrol schedules plugins: one the daemon dispatches runs twice if
+recording a plugin-run receipt. A failed run is logged and escalated with
+`gt escalate` under the fingerprint `plugin:<name>:failed`; the plugin's next
+good run (success or skipped) closes it. The cloud-check plugin keys this by
+its finding set instead; before changing how a failure is keyed, read the
+cloud-check paragraph of docs/design/plugin-system.md. Nothing runs
+markdown-instruction ("agent") plugins any more: a cooldown plugin without a
+script `run.sh` is logged as skipped every heartbeat. No patrol schedules
+plugins: one the daemon dispatches runs twice if
 a patrol step also runs it (gt-o1z7).
 
 A `manual` gate parks a plugin off the automatic path, by design: the daemon
