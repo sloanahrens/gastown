@@ -51,6 +51,9 @@ type Runner struct {
 	Timeout string
 	// SkipList is TIER_SWEEP_SKIP, read by SkipFor.
 	SkipList string
+	// Env is the environment each package's command runs in. Nil inherits the
+	// process's environment.
+	Env []string
 	// Stderr receives the progress lines and the failure excerpts.
 	Stderr io.Writer
 }
@@ -98,7 +101,7 @@ func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
 			argv = append(argv, "-skip", pattern)
 		}
 		argv = append(argv, pkg)
-		code := r.Exec(dir, nil, argv, f)
+		code := r.Exec(dir, r.Env, argv, f)
 		closeErr := f.Close()
 		if code == 0 && closeErr == nil {
 			c.Passed++
