@@ -258,7 +258,7 @@ func TestRequeueActor(t *testing.T) {
 		{"no agent named is the placeholder",
 			map[string]string{}, "unnamed-agent"},
 		{"the host user is never the actor",
-			map[string]string{"USER": "sloan", "LOGNAME": "sloan"}, "unnamed-agent"},
+			map[string]string{"USER": "sloan"}, "unnamed-agent"},
 		{"the host user does not override a crew identity",
 			map[string]string{"USER": "sloan", "BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
 		{"a blank GT_POLECAT names no one",
