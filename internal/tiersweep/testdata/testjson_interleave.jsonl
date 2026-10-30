@@ -1,0 +1,18 @@
+{"Time":"2026-10-30T10:00:00.000Z","Action":"start","Package":"example.com/fixture/c"}
+{"Time":"2026-10-30T10:00:00.001Z","Action":"run","Package":"example.com/fixture/c","Test":"TestSlow"}
+{"Time":"2026-10-30T10:00:00.002Z","Action":"output","Package":"example.com/fixture/c","Test":"TestSlow","Output":"=== RUN   TestSlow\n"}
+{"Time":"2026-10-30T10:00:00.003Z","Action":"pause","Package":"example.com/fixture/c","Test":"TestSlow"}
+{"Time":"2026-10-30T10:00:00.004Z","Action":"run","Package":"example.com/fixture/c","Test":"TestFast"}
+{"Time":"2026-10-30T10:00:00.005Z","Action":"output","Package":"example.com/fixture/c","Test":"TestFast","Output":"=== RUN   TestFast\n"}
+{"Time":"2026-10-30T10:00:00.105Z","Action":"pass","Package":"example.com/fixture/c","Test":"TestFast","Elapsed":0.1}
+{"Time":"2026-10-30T10:00:00.106Z","Action":"cont","Package":"example.com/fixture/c","Test":"TestSlow"}
+{"Time":"2026-10-30T10:00:00.107Z","Action":"output","Package":"example.com/fixture/c","Test":"TestSlow","Output":"=== CONT  TestSlow\n"}
+{"Time":"2026-10-30T10:00:00.108Z","Action":"run","Package":"example.com/fixture/c","Test":"TestSlow/inner"}
+{"Time":"2026-10-30T10:00:00.109Z","Action":"output","Package":"example.com/fixture/c","Test":"TestSlow/inner","Output":"    slow_test.go:9: waiting\n"}
+{"Time":"2026-10-30T10:00:00.609Z","Action":"pass","Package":"example.com/fixture/c","Test":"TestSlow/inner","Elapsed":0.5}
+{"Time":"2026-10-30T10:00:00.610Z","Action":"run","Package":"example.com/fixture/c","Test":"TestSkipped"}
+{"Time":"2026-10-30T10:00:00.611Z","Action":"skip","Package":"example.com/fixture/c","Test":"TestSkipped","Elapsed":0}
+{"Time":"2026-10-30T10:00:02.600Z","Action":"pass","Package":"example.com/fixture/c","Test":"TestSlow","Elapsed":2.5}
+{"Time":"2026-10-30T10:00:02.601Z","Action":"output","Package":"example.com/fixture/c","Output":"PASS\n"}
+{"Time":"2026-10-30T10:00:02.602Z","Action":"output","Package":"example.com/fixture/c","Output":"ok  \texample.com/fixture/c\t2.6s\n"}
+{"Time":"2026-10-30T10:00:02.603Z","Action":"pass","Package":"example.com/fixture/c","Elapsed":2.6}

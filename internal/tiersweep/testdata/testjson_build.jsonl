@@ -1,0 +1,6 @@
+{"Time":"2026-10-30T10:00:00.000Z","Action":"start","Package":"example.com/fixture/e"}
+{"Time":"2026-10-30T10:00:00.100Z","Action":"output","Package":"example.com/fixture/e","Output":"# example.com/fixture/e\n"}
+{"Time":"2026-10-30T10:00:00.101Z","Action":"output","Package":"example.com/fixture/e","Output":"./e.go:3:2: undefined: missing\n"}
+{"Time":"2026-10-30T10:00:00.102Z","Action":"output","Package":"example.com/fixture/e","Output":"FAIL\texample.com/fixture/e [build failed]\n"}
+{"Time":"2026-10-30T10:00:00.103Z","Action":"output","Package":"example.com/fixture/e","Output":"FAIL\n"}
+{"Time":"2026-10-30T10:00:00.310Z","Action":"fail","Package":"example.com/fixture/e","Elapsed":0.31}

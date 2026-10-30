@@ -1,0 +1,12 @@
+{"Time":"2026-10-30T10:00:00.000Z","Action":"start","Package":"example.com/fixture/b"}
+{"Time":"2026-10-30T10:00:00.001Z","Action":"run","Package":"example.com/fixture/b","Test":"TestBoom"}
+{"Time":"2026-10-30T10:00:00.002Z","Action":"output","Package":"example.com/fixture/b","Test":"TestBoom","Output":"=== RUN   TestBoom\n"}
+{"Time":"2026-10-30T10:00:00.010Z","Action":"output","Package":"example.com/fixture/b","Test":"TestBoom","Output":"--- FAIL: TestBoom (0.01s)\n"}
+{"Time":"2026-10-30T10:00:00.011Z","Action":"output","Package":"example.com/fixture/b","Test":"TestBoom","Output":"panic: boom\n"}
+{"Time":"2026-10-30T10:00:00.012Z","Action":"output","Package":"example.com/fixture/b","Test":"TestBoom","Output":"\n"}
+{"Time":"2026-10-30T10:00:00.013Z","Action":"output","Package":"example.com/fixture/b","Test":"TestBoom","Output":"goroutine 7 [running]:\n"}
+{"Time":"2026-10-30T10:00:00.014Z","Action":"output","Package":"example.com/fixture/b","Test":"TestBoom","Output":"\tb_test.go:8 +0x2c\n"}
+{"Time":"2026-10-30T10:00:00.015Z","Action":"fail","Package":"example.com/fixture/b","Test":"TestBoom","Elapsed":0.01}
+{"Time":"2026-10-30T10:00:00.016Z","Action":"output","Package":"example.com/fixture/b","Output":"FAIL\n"}
+{"Time":"2026-10-30T10:00:00.017Z","Action":"output","Package":"example.com/fixture/b","Output":"FAIL\texample.com/fixture/b\t0.02s\n"}
+{"Time":"2026-10-30T10:00:00.018Z","Action":"fail","Package":"example.com/fixture/b","Elapsed":0.02}
