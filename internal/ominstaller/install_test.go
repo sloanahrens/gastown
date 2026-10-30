@@ -36,6 +36,8 @@ type installRig struct {
 	steps []string
 	// ldflags is the -ldflags value the build was run with.
 	ldflags string
+	// buildDir is the working directory the build ran in.
+	buildDir string
 
 	// git answers: repoErr fails the work-tree check (repoStderr names a
 	// non-repository), headErr fails HEAD, statusOut and statusErr answer status.
@@ -110,6 +112,7 @@ func (r *installRig) exec(ctx context.Context, c Command) (string, string, error
 	case "go":
 		r.steps = append(r.steps, "build")
 		r.ldflags = c.Args[1]
+		r.buildDir = c.Dir
 		if r.buildErr != nil {
 			return "", "", r.buildErr
 		}
@@ -323,6 +326,59 @@ func TestInstallHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(r.receipts(t), `"prev_commit": "`+commitOld+`"`) {
 		t.Errorf("receipts = %q, want the previous commit recorded", r.receipts(t))
+	}
+}
+
+// TestInstallBuildsInsideTheJobClone pins the build's working directory: ./cmd/om
+// resolves against the clone the job keeps, so the build must run there.
+func TestInstallBuildsInsideTheJobClone(t *testing.T) {
+	t.Parallel()
+	r := newInstallRig(t)
+
+	if _, exit := Run(context.Background(), r.cfg); exit != ExitInstalled {
+		t.Fatalf("exit = %d, want %d: %v", exit, ExitInstalled, r.logs.lines)
+	}
+	if r.buildDir != installSrc {
+		t.Errorf("go build ran in %q, want the job's clone %q", r.buildDir, installSrc)
+	}
+}
+
+// TestInstallKeepsTheKeychainPasswordOutOfItsOutput pins that the keychain password
+// reaches no log line, result or receipt, on a signed install and on each signing
+// failure that carries an error. The check reports that the password was found and
+// never prints it, so a failing test cannot leak it either.
+func TestInstallKeepsTheKeychainPasswordOutOfItsOutput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(r *installRig)
+	}{
+		{name: "signed", setup: func(*installRig) {}},
+		{
+			name:  "unlock fails",
+			setup: func(r *installRig) { r.run.unlockErr = errors.New("security: unlock failed") },
+		},
+		{
+			name: "codesign fails",
+			setup: func(r *installRig) {
+				r.run.codesignErr = errors.New("exit status 1")
+				r.run.codesignStderr = "no identity found"
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newInstallRig(t)
+			tc.setup(r)
+
+			res, _ := Run(context.Background(), r.cfg)
+
+			out := strings.Join(r.logs.lines, "\n") + "\n" + res.Line() + "\n" + r.receipts(t)
+			if strings.Contains(out, password) {
+				t.Error("the keychain password reached the install's logs, result or receipt")
+			}
+		})
 	}
 }
 
