@@ -138,12 +138,13 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 	return seats
 }
 
-// poolSeatBatch answers the seat reads of one tick from two batched reads per
-// rig: the polecats' agent beads and the rig's assigned work (gt-u8rbh). The
-// per-seat read spends two bd calls on every polecat directory, idle ones
-// included. A polecat the batch did not answer, or a rig whose batch failed,
-// is read per seat through the rig's own store, so a failure costs calls and
-// never changes a seat's count. It holds what it read: build one per tick.
+// poolSeatBatch answers the seat reads of one tick from one batched read per
+// rig: the rig's assigned work, which also answers the agent beads it carries
+// (gt-u8rbh, gt-4efmk). The per-seat read spends two bd calls on every polecat
+// directory, idle ones included. A polecat the batch did not answer, or a rig
+// whose batch failed, is read per seat through the rig's own store, so a
+// failure costs calls and never changes a seat's count. It holds what it read:
+// build one per tick.
 type poolSeatBatch struct {
 	townRoot string
 	store    func(rigName string) beads.Client
@@ -152,10 +153,11 @@ type poolSeatBatch struct {
 }
 
 // rigSeatBatch is one rig's reads. store is the rig's client, which the
-// per-seat fallback reads too. agents, parsed and assigned are nil when their
-// batch failed or was not made. held holds the hook and source-issue beads the
-// batch read, by id; an id it does not hold is read live, as the per-seat read
-// does.
+// per-seat fallback reads too. agents and assigned are nil when their read
+// failed or was not made; an agent bead the batch did not answer is read live,
+// as the per-seat read does. held holds the work beads the list read and the
+// hook and source-issue beads a later batch added, by id; an id it does not
+// hold is read live, as the per-seat read does.
 type rigSeatBatch struct {
 	store    beads.Client
 	asked    map[string]bool         // agent bead ids the batch asked for
@@ -213,6 +215,49 @@ func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState,
 	return poolPolecatSeatStateWith(b.townRoot, rigName, polecatName, reads)
 }
 
+// landingWork is the poolSeatWorkFunc the landing seats are confirmed with: the
+// beads the tick's batch already holds, and one town-level ShowMultiple for the
+// rest. A landing bead is live work in its rig's database, so the rig's work
+// list carries it and the tick spends no read to confirm it (gt-4efmk); a bead
+// of another database — one slung from the town, carrying the hq- prefix — is
+// not in any rig's list and is read by town, which routes it, as before.
+func (b *poolSeatBatch) landingWork(town beads.Client) poolSeatWorkFunc {
+	return func(ids []string) (map[string]*beads.Issue, error) {
+		out := make(map[string]*beads.Issue, len(ids))
+		var rest []string
+		for _, id := range ids {
+			if issue, ok := b.heldIssue(id); ok {
+				out[id] = issue
+				continue
+			}
+			rest = append(rest, id)
+		}
+		if len(rest) == 0 {
+			return out, nil
+		}
+		more, err := town.ShowMultiple(rest)
+		if err != nil {
+			// A bead that could not be read is not a bead that landed.
+			return nil, err
+		}
+		for id, issue := range more {
+			out[id] = issue
+		}
+		return out, nil
+	}
+}
+
+// heldIssue answers a bead id from the batches made so far. One bead is one
+// bead whichever rig's list carried it, so the rigs are searched in turn.
+func (b *poolSeatBatch) heldIssue(id string) (*beads.Issue, bool) {
+	for _, rb := range b.rigs {
+		if issue, ok := rb.held[id]; ok {
+			return issue, true
+		}
+	}
+	return nil, false
+}
+
 // rig reads a rig's batches the first time one of its polecats is asked about.
 func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 	if rb, ok := b.rigs[rigName]; ok {
@@ -229,26 +274,62 @@ func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 	for _, name := range names {
 		ids = append(ids, beads.PolecatBeadIDWithPrefix(prefix, rigName, name))
 	}
-	if agents, err := rb.store.ShowMultiple(ids); err == nil {
-		rb.agents = agents
-		rb.asked = make(map[string]bool, len(ids))
-		rb.parsed = make(map[string]parsedAgent, len(agents))
-		for _, id := range ids {
-			rb.asked[id] = true
-		}
-		for id, agent := range agents {
-			// The shared agent-bead read, over a store that holds this one issue,
-			// so the bead is validated and parsed exactly as a live read would.
-			_, fields, err := beads.GetAgentBead(heldIssueStore{Client: rb.store, issue: agent}, id)
-			rb.parsed[id] = parsedAgent{fields: fields, err: err}
-		}
-	}
+	// The work list is made first, so the agent beads it carries cost no read
+	// of their own: an agent bead is a bead like any other, filed open and
+	// carrying its fields in the description the list returns.
 	work, err := rb.store.List(beads.ListOptions{Status: strings.Join(assignedStatuses, ","), Priority: -1})
 	if err == nil {
 		rb.assigned = assignedByAssignee(work)
+		rb.held = make(map[string]*beads.Issue, len(work))
+		for _, issue := range work {
+			rb.held[issue.ID] = issue
+		}
 	}
-	rb.readSourceIssues(work)
+	rb.readAgents(ids)
+	rb.readSourceIssues()
 	return rb
+}
+
+// readAgents answers the polecats' agent beads from the work list and, for the
+// beads that list does not carry — one filed closed, deferred or pinned, none
+// of which an assigned-work list asks for — one ShowMultiple. An agent bead the
+// batch asked for and did not find does not exist; one it could not ask about
+// goes to the live per-seat read, so a failed read costs calls and never
+// changes a seat's count.
+func (rb *rigSeatBatch) readAgents(ids []string) {
+	agents := make(map[string]*beads.Issue, len(ids))
+	asked := make(map[string]bool, len(ids))
+	var missing []string
+	for _, id := range ids {
+		if issue, ok := rb.held[id]; ok {
+			agents[id] = issue
+			asked[id] = true
+			continue
+		}
+		missing = append(missing, id)
+	}
+	if len(missing) > 0 {
+		if found, err := rb.store.ShowMultiple(missing); err == nil {
+			for _, id := range missing {
+				asked[id] = true
+			}
+			for id, issue := range found {
+				agents[id] = issue
+			}
+		}
+	}
+	if len(asked) == 0 {
+		return
+	}
+	rb.asked = asked
+	rb.agents = agents
+	rb.parsed = make(map[string]parsedAgent, len(agents))
+	for id, agent := range agents {
+		// The shared agent-bead read, over a store that holds this one issue,
+		// so the bead is validated and parsed exactly as a live read would.
+		_, fields, err := beads.GetAgentBead(heldIssueStore{Client: rb.store, issue: agent}, id)
+		rb.parsed[id] = parsedAgent{fields: fields, err: err}
+	}
 }
 
 // readSourceIssues reads the beads the polecats' hook references and source-issue
@@ -256,14 +337,13 @@ func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 // every live one (open, in progress or hooked), so only the rest, the closed
 // ones a polecat last worked, cost a read: one batched read for them, which a
 // failure leaves out so each is read live. A rig whose agent beads did not batch
-// reads nothing here. work is nil when the work list failed.
-func (rb *rigSeatBatch) readSourceIssues(work []*beads.Issue) {
+// reads nothing here.
+func (rb *rigSeatBatch) readSourceIssues() {
 	if rb.agents == nil {
 		return
 	}
-	rb.held = make(map[string]*beads.Issue, len(work))
-	for _, issue := range work {
-		rb.held[issue.ID] = issue
+	if rb.held == nil {
+		rb.held = map[string]*beads.Issue{}
 	}
 	var missing []string
 	seen := map[string]bool{}

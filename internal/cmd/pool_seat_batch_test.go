@@ -83,10 +83,11 @@ func batchOverStore(town string, store beads.Client) *poolSeatBatch {
 }
 
 // TestPoolSeatBatchReadsIdlePolecatsInBatches is the roster over 25 polecat
-// directories: the seats counted are the per-seat read's, and the reads are one
-// batched agent-bead call and one batched assigned-work call for the rig, where
-// the per-seat read spent two on every polecat. The idle polecats with no
-// session and no hooked work cost nothing of their own (gt-u8rbh).
+// directories: the seats counted are the per-seat read's, and the read is one
+// batched assigned-work list for the rig, which also answers the agent beads it
+// carries, where the per-seat read spent two on every polecat. The idle
+// polecats with no session and no hooked work cost nothing of their own
+// (gt-u8rbh, gt-4efmk).
 func TestPoolSeatBatchReadsIdlePolecatsInBatches(t *testing.T) {
 	t.Parallel()
 	town, db, lister := seatTown(t, 25)
@@ -118,15 +119,15 @@ func TestPoolSeatBatchReadsIdlePolecatsInBatches(t *testing.T) {
 		}
 	}
 
-	if len(store.multis) != 1 || len(store.multis[0]) != 25 {
-		t.Errorf("agent bead reads = %v, want one batch of the 25 polecats", store.multis)
+	if len(store.multis) != 0 {
+		t.Errorf("batched reads = %v, want none: the work list answers every agent bead", store.multis)
 	}
 	if store.lists != 1 || store.assigned != 0 {
 		t.Errorf("assigned-work reads = %d lists and %d per-polecat, want one list", store.lists, store.assigned)
 	}
 	for id, n := range store.shows {
 		if strings.Contains(id, "polecat") {
-			t.Errorf("agent bead %s read singly %d times, want only the batch", id, n)
+			t.Errorf("agent bead %s read singly %d times, want only the work list", id, n)
 		}
 		if n > 1 {
 			t.Errorf("bead %s read %d times", id, n)
@@ -173,15 +174,15 @@ func TestPoolShowLiveReadsTheRigInBatches(t *testing.T) {
 	if want := []string{filepath.Join(town, "gastown")}; !reflect.DeepEqual(dirs, want) {
 		t.Errorf("stores opened at %v, want the rig's own directory %v", dirs, want)
 	}
-	if len(store.multis) == 0 || len(store.multis[0]) != 20 {
-		t.Errorf("agent bead reads = %v, want one batch of the 20 polecats first", store.multis)
+	if len(store.multis) != 0 {
+		t.Errorf("batched reads = %v, want none: the work list answers the agent beads", store.multis)
 	}
 	if store.lists != 1 || store.assigned != 0 {
 		t.Errorf("assigned-work reads = %d lists and %d per-polecat, want one list", store.lists, store.assigned)
 	}
 	for id, n := range store.shows {
 		if strings.Contains(id, "polecat") {
-			t.Errorf("agent bead %s read singly %d times, want only the batch", id, n)
+			t.Errorf("agent bead %s read singly %d times, want only the work list", id, n)
 		}
 	}
 }
@@ -377,8 +378,8 @@ func TestPoolSeatBatchReadsClosedSourceIssuesInOneBatch(t *testing.T) {
 	names := polecatNames(20)
 	assertSameSeatVerdicts(t, town, db, names)
 
-	if len(store.multis) != 2 || len(store.multis[0]) != 20 || len(store.multis[1]) != 20 {
-		t.Errorf("batched reads = %v, want the 20 agent beads, then the 20 source issues", store.multis)
+	if len(store.multis) != 1 || len(store.multis[0]) != 20 {
+		t.Errorf("batched reads = %v, want the 20 source issues: the work list answers the agent beads", store.multis)
 	}
 	if len(store.shows) != 0 {
 		t.Errorf("live reads = %v, want none: every source issue came from the batch", store.shows)
@@ -407,7 +408,7 @@ func TestPoolSeatBatchReadsSourceIssuesLiveWhenTheBatchFails(t *testing.T) {
 		t.Fatalf("per-seat roster: %v", err)
 	}
 
-	store := &secondBatchFails{countingStore: newCountingStore(db)}
+	store := &sourceBatchFails{countingStore: newCountingStore(db)}
 	got, err := poolSeatSessionsWith(lister, town, batchOverStore(town, store).disposition, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
@@ -529,14 +530,14 @@ func TestPoolSeatBatchAnswersHookBeads(t *testing.T) {
 	if n := poolSeatCount("deepseek-flash", got); n != 2 {
 		t.Errorf("seat count = %d, want p01's hooked seat and p03's unreadable one (%+v)", n, got)
 	}
-	// The work list answers p01's hook; the second batch asks for the three
-	// references it does not hold, so p02's hook costs no more than its hint
-	// does and neither pays a live read.
-	if len(store.multis) != 2 {
-		t.Fatalf("batched reads = %v, want the 3 agent beads, then the references the work list does not hold", store.multis)
+	// The work list holds the agent beads and p01's hook; the batch asks for the
+	// three references it does not hold, so p02's hook costs no more than its
+	// hint does and neither pays a live read.
+	if len(store.multis) != 1 {
+		t.Fatalf("batched reads = %v, want only the references the work list does not hold", store.multis)
 	}
-	if got := sortedCopy(store.multis[1]); strings.Join(got, ",") != "gt-absent,gt-closed-hook,gt-old-p02" {
-		t.Errorf("second batch = %v, want p02's hint and hook and p03's hook", store.multis[1])
+	if got := sortedCopy(store.multis[0]); strings.Join(got, ",") != "gt-absent,gt-closed-hook,gt-old-p02" {
+		t.Errorf("reference batch = %v, want p02's hint and hook and p03's hook", store.multis[0])
 	}
 	if store.shows["gt-hooked"] != 0 || store.shows["gt-closed-hook"] != 0 || store.shows["gt-old-p02"] != 0 {
 		t.Errorf("live reads = %v, want none: the batch answers every reference it holds", store.shows)
@@ -572,17 +573,12 @@ func TestPoolSeatBatchReportsABeadThatIsNotAnAgentBead(t *testing.T) {
 	}
 }
 
-// secondBatchFails is a rig store whose second batched read fails: the agent
-// beads answer, and the source issues it would batch do not.
-type secondBatchFails struct {
+// sourceBatchFails is a rig store whose one batched read, the source issues the
+// work list does not hold, fails. The work list still answers the agent beads.
+type sourceBatchFails struct {
 	*countingStore
-	calls int
 }
 
-func (s *secondBatchFails) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
-	s.calls++
-	if s.calls == 2 {
-		return nil, errors.New("bd show: boom")
-	}
-	return s.countingStore.ShowMultiple(ids)
+func (s *sourceBatchFails) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	return nil, errors.New("bd show: boom")
 }

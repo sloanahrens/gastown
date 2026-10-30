@@ -2102,8 +2102,9 @@ func TestPoolPolecatSeatStateLandedLookupFailureStaysUnpushed(t *testing.T) {
 
 // TestPoolRouterReadsSeatsThroughTheBatch is the sling's seat picture over two
 // rigs of three idle polecat directories each. The router reads them through
-// the rig batch: two bd calls per rig, where the per-seat read spent two on
-// each of the six. The idle polecats hold no seat, so the count is empty.
+// the rig batch: one bd call per rig, the assigned-work list that also answers
+// the agent beads it carries, where the per-seat read spent two on each of the
+// six. The idle polecats hold no seat, so the count is empty (gt-4efmk).
 func TestPoolRouterReadsSeatsThroughTheBatch(t *testing.T) {
 	t.Parallel()
 	town, db := seatBatchTown(t)
@@ -2117,8 +2118,8 @@ func TestPoolRouterReadsSeatsThroughTheBatch(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("idle polecats with no session hold no seat, got %+v", got)
 	}
-	if calls := reads.Calls(); calls != 4 {
-		t.Fatalf("bd calls = %d, want 4 (agent beads and assigned work, once per rig)", calls)
+	if calls := reads.Calls(); calls != 2 {
+		t.Fatalf("bd calls = %d, want 2 (one assigned-work list per rig)", calls)
 	}
 }
 
@@ -2405,7 +2406,7 @@ func seatBatchRouter(town string, db *beadsfake.Fake, reads *specTickReads, list
 
 // TestPoolRouterCountsSeatHoldersThroughTheBatch is the seat picture with one
 // polecat holding its seat on a live session. The router counts it from the
-// same batched reads the idle polecats cost (gt-rcktb).
+// same one assignment list per rig the idle polecats cost (gt-rcktb, gt-4efmk).
 func TestPoolRouterCountsSeatHoldersThroughTheBatch(t *testing.T) {
 	t.Parallel()
 	town, db := seatBatchTown(t)
@@ -2422,8 +2423,8 @@ func TestPoolRouterCountsSeatHoldersThroughTheBatch(t *testing.T) {
 	if len(got) != 1 || got[0].rig != "gastown" || got[0].polecat != "p01" {
 		t.Fatalf("seat holders = %+v, want gastown/p01 alone", got)
 	}
-	if calls := reads.Calls(); calls != 4 {
-		t.Fatalf("bd calls = %d, want 4 (agent beads and assigned work, once per rig)", calls)
+	if calls := reads.Calls(); calls != 2 {
+		t.Fatalf("bd calls = %d, want 2 (one assigned-work list per rig)", calls)
 	}
 }
 
