@@ -7,7 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 
 // writeTree writes files under a new temp directory and returns it.
 func writeTree(t *testing.T, files map[string]string) string {
