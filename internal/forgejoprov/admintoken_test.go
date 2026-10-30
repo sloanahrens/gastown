@@ -304,3 +304,33 @@ func TestNoAdminTokenIsTheSentinel(t *testing.T) {
 		}
 	})
 }
+
+// TestSecretScrub covers what Scrub masks and what it leaves alone.
+func TestSecretScrub(t *testing.T) {
+	t.Parallel()
+	tok := newSecret(fixtureToken)
+	cases := []struct {
+		name   string
+		secret Secret
+		text   string
+		want   string
+	}{
+		{name: "value present twice", secret: tok, text: fixtureToken + " then " + fixtureToken, want: redacted + " then " + redacted},
+		{name: "value absent", secret: tok, text: "nothing to hide", want: "nothing to hide"},
+		{name: "empty secret", secret: newSecret(""), text: "Authorization: token abc", want: "Authorization: token abc"},
+		{name: "zero secret", secret: Secret{}, text: "Bearer abc", want: "Bearer abc"},
+		{name: "authorization line", secret: tok, text: "a\nAuthorization: token " + fixtureToken + "\nb", want: "a\nAuthorization: " + redacted + "\nb"},
+		{name: "authorization line, lower case", secret: tok, text: "authorization: other-scheme xyz", want: "authorization: " + redacted},
+		{name: "bearer text", secret: tok, text: "got Bearer abc.DEF-123 back", want: "got Bearer " + redacted + " back"},
+		{name: "bearer text, upper case", secret: tok, text: "BEARER abc123", want: "BEARER " + redacted},
+		{name: "value is a prefix of other text", secret: newSecret("abc"), text: "abcdef", want: redacted + "def"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.secret.Scrub(tc.text); got != tc.want {
+				t.Errorf("Scrub(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}

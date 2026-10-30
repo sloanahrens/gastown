@@ -70,6 +70,27 @@ func (s Secret) Reveal() string {
 	return s.v.token
 }
 
+// authorizationLine matches an Authorization header echoed into text, from its
+// name to the end of the line, whatever scheme the value uses.
+var authorizationLine = regexp.MustCompile(`(?i)(authorization:[ \t]*)[^\r\n]*`)
+
+// bearerText matches a Bearer credential echoed into text.
+var bearerText = regexp.MustCompile(`(?i)(bearer[ \t]+)[A-Za-z0-9._~+/=-]+`)
+
+// Scrub returns text with the token masked wherever it was echoed: every
+// occurrence of the value, the rest of any Authorization line, and the
+// credential after "Bearer". A zero or empty Secret has nothing to hide and
+// returns text unchanged.
+func (s Secret) Scrub(text string) string {
+	value := s.Reveal()
+	if value == "" {
+		return text
+	}
+	text = strings.ReplaceAll(text, value, redacted)
+	text = authorizationLine.ReplaceAllString(text, "${1}"+redacted)
+	return bearerText.ReplaceAllString(text, "${1}"+redacted)
+}
+
 // ResolveAdminToken finds the site-admin token the way the script does. The
 // first of these that is set wins: $GT_AUTH_FORGEJO_TOKEN (the broker's), then
 // $FORGEJO_ADMIN_TOKEN, then the FORGEJO_ADMIN_TOKEN= line of tokenFile, where

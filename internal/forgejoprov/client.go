@@ -90,11 +90,28 @@ func (c *Client) httpClient() *http.Client {
 	return defaultHTTP
 }
 
-// BodyTail renders the start of a response body for an error message: an
-// em dash (as the script's body_tail prints it) and the first 300 bytes with
-// newlines as spaces, or "" for no body. Credential values are masked first,
-// and the cut never splits a UTF-8 sequence.
-func BodyTail(resp []byte) string {
+// BodyTail renders the start of the client's reply for an error message: a
+// hyphen and the first 300 bytes with newlines as spaces, or "" for no body.
+// The client's own token is scrubbed from the whole reply first, then the JSON
+// credential fields are masked, and only then is the reply cut, so a token that
+// straddles the cut cannot leave its first part behind. The cut never splits a
+// UTF-8 sequence.
+func (c *Client) BodyTail(resp []byte) string {
+	if len(resp) == 0 {
+		return ""
+	}
+	return bodyTail([]byte(c.Token.Scrub(string(resp))))
+}
+
+// Unexpected is the error for a status the run did not expect, quoting the
+// reply through the client's BodyTail so the token never reaches the message.
+func (c *Client) Unexpected(method, path string, status int, resp []byte) error {
+	return fmt.Errorf("%s %s: unexpected HTTP %d%s", method, path, status, c.BodyTail(resp))
+}
+
+// bodyTail masks the JSON credential fields of resp and cuts it for an error
+// message. It knows no token, so callers go through Client.BodyTail.
+func bodyTail(resp []byte) string {
 	if len(resp) == 0 {
 		return ""
 	}
@@ -106,13 +123,7 @@ func BodyTail(resp []byte) string {
 			cut--
 		}
 	}
-	return " — " + strings.ReplaceAll(string(body[:cut]), "\n", " ")
-}
-
-// Unexpected is the error for a status the run did not expect, quoting the
-// reply through BodyTail.
-func Unexpected(method, path string, status int, resp []byte) error {
-	return fmt.Errorf("%s %s: unexpected HTTP %d%s", method, path, status, BodyTail(resp))
+	return " - " + strings.ReplaceAll(string(body[:cut]), "\n", " ")
 }
 
 // FindObject returns the first object of the JSON array list whose key is the

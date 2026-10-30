@@ -47,7 +47,7 @@ func (p *Provisioner) EnsureUser(role string) error {
 		return nil
 	case http.StatusNotFound:
 	default:
-		return Unexpected(http.MethodGet, path, status, resp)
+		return p.Client.Unexpected(http.MethodGet, path, status, resp)
 	}
 	// A dry run draws no password: it reports the create and sends none.
 	if p.Client.DryRun {
@@ -78,7 +78,7 @@ func (p *Provisioner) EnsureUser(role string) error {
 	case http.StatusUnprocessableEntity:
 		p.logf("user %s exists", user)
 	default:
-		return Unexpected(http.MethodPost, "/admin/users", status, resp)
+		return p.Client.Unexpected(http.MethodPost, "/admin/users", status, resp)
 	}
 	return nil
 }
