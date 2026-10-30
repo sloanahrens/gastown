@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
@@ -340,8 +341,14 @@ func TestADeadBackgroundSlingProcessLabelsItsBead(t *testing.T) {
 	d.runSpecDispatch()
 	waitSlings(t, d)
 
-	if got := fake.argvs("bead", "update"); len(got) != 1 || !slices.Equal(got[0], []string{"bead", "update", "gt-z", "--add-label", "spec-dispatch-failed"}) {
-		t.Errorf("label calls = %v, want gt-z labeled spec-dispatch-failed once", got)
+	// The label goes on, and the retry state a kill at the bound would leave
+	// goes off: this failure is not that kill (gt-vaivp).
+	want := []string{"bead", "update", "gt-z",
+		"--add-label", "spec-dispatch-failed",
+		"--remove-label", specdispatch.TimeoutLabel,
+		"--unset-metadata", specdispatch.TimeoutAttemptsKey}
+	if got := fake.argvs("bead", "update"); len(got) != 1 || !slices.Equal(got[0], want) {
+		t.Errorf("label calls = %v, want %v", got, want)
 	}
 	notes := fake.argvs("bead", "note", "gt-z")
 	if len(notes) != 1 || !strings.Contains(notes[0][len(notes[0])-1], "sling process failed") || !strings.Contains(notes[0][len(notes[0])-1], "spec-dispatch-failed is cleared") {
