@@ -82,6 +82,21 @@ type ComposeSpec struct {
 	// absolute, so a scratch render is always checked against the live town it
 	// could otherwise reach.
 	LiveTownRoot string
+
+	// ScratchForge adds a throwaway Forgejo stack to the scratch project: the
+	// forge, its Postgres, a runner and the engine the runner drives, for the L2
+	// window. Only a scratch spec takes it. Its names and volumes are the scratch
+	// project's own, and its two host ports are the fields below, so the stack
+	// never takes the live Forgejo's 3000 and 2222.
+	ScratchForge bool
+
+	// ScratchForgeHTTPPort and ScratchForgeSSHPort are the host ports the scratch
+	// Forgejo publishes, on 127.0.0.1 as the live project does. They are required
+	// when ScratchForge is set, must be valid, distinct ports, and may not be the
+	// live Forgejo's 3000 and 2222: a start on those ports would fight the live
+	// forge for them, or worse, find it already there.
+	ScratchForgeHTTPPort int
+	ScratchForgeSSHPort  int
 }
 
 // MinimumStopGrace is the shortest stop_grace_period RenderDaemonCompose
@@ -135,6 +150,148 @@ const (
 	scratchDoltVolume   = "scratch_dolt_data"
 	scratchDoltDataPath = "/var/lib/dolt"
 )
+
+// The live Forgejo project's host ports. A scratch forge may take neither.
+const (
+	liveForgeHTTPPort = 3000
+	liveForgeSSHPort  = 2222
+)
+
+// The scratch Forgejo stack's names. Each is the scratch project's own: none is a
+// name the live Forgejo project (~/forgejo/compose.yml: db, forgejo,
+// docker-in-docker, runner-register, runner-daemon; volumes pgdata, forgejo_data,
+// runner_data, docker_certs, dind_data) declares, and the compose project scopes
+// them again.
+const (
+	ScratchForgejoService = "scratch-forgejo"
+	scratchForgeDBService = "scratch-forgejo-db"
+	scratchForgeDind      = "scratch-forge-dind"
+	scratchForgeRunner    = "scratch-forge-runner"
+	scratchForgeNetwork   = "scratch-forge"
+
+	scratchForgeDBVolume     = "scratch_forgejo_pgdata"
+	scratchForgeDataVolume   = "scratch_forgejo_data"
+	scratchForgeCertsVolume  = "scratch_forge_certs"
+	scratchForgeDindVolume   = "scratch_forge_dind_data"
+	scratchForgeRunnerVolume = "scratch_forge_runner_data"
+)
+
+// scratchForgeBody is the throwaway Forgejo stack. %[1]d and %[2]d are the host
+// ports for http and ssh, bound to 127.0.0.1 as the live project binds its own.
+//
+// The forge and its Postgres share an internal network, so the database has no
+// way in or out but the forge. Postgres trusts connections on that network
+// because the stack holds nothing but scratch data, and a password would be one
+// more secret for the render to carry or interpolate. The forge, the runner and
+// the runner's engine join the scratch project's egress network, where the
+// scratch daemon is too, so the daemon and the runner both reach the forge by
+// its service name. The runner's engine speaks TLS with its own certs volume,
+// as the live one does, so reaching it from the shared network still needs the
+// client certificates.
+//
+// The runner is written to run and register against this forge only: the one
+// URL the file names is http://scratch-forgejo:3000/. It starts only after the L2
+// window has registered it and written its config.yml into its data volume, so
+// it is not restarted: without that file it exits, which is the right state
+// until then.
+const scratchForgeBody = `  ` + scratchForgeDBService + `:
+    image: %[3]q
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: forgejo
+      POSTGRES_DB: forgejo
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgejo -d forgejo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - type: volume
+        source: ` + scratchForgeDBVolume + `
+        target: /var/lib/postgresql/data
+    networks:
+      - ` + scratchForgeNetwork + `
+  ` + ScratchForgejoService + `:
+    image: %[4]q
+    restart: unless-stopped
+    depends_on:
+      ` + scratchForgeDBService + `:
+        condition: service_healthy
+    environment:
+      FORGEJO__database__DB_TYPE: postgres
+      FORGEJO__database__HOST: ` + scratchForgeDBService + `:5432
+      FORGEJO__database__NAME: forgejo
+      FORGEJO__database__USER: forgejo
+      FORGEJO__server__DOMAIN: ` + ScratchForgejoService + `
+      FORGEJO__server__ROOT_URL: http://` + ScratchForgejoService + `:3000/
+      FORGEJO__server__SSH_DOMAIN: ` + ScratchForgejoService + `
+      FORGEJO__server__SSH_PORT: "%[2]d"
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__actions__ENABLED: "true"
+      FORGEJO__repository__DEFAULT_REPO_UNITS: "repo.code,repo.actions,repo.pulls,repo.issues"
+    volumes:
+      - type: volume
+        source: ` + scratchForgeDataVolume + `
+        target: /data
+    ports:
+      - "127.0.0.1:%[1]d:3000"
+      - "127.0.0.1:%[2]d:22"
+    networks:
+      - ` + scratchForgeNetwork + `
+      - %[6]s
+  ` + scratchForgeDind + `:
+    image: %[5]q
+    restart: unless-stopped
+    privileged: true
+    hostname: docker
+    command: ["--insecure-registry=` + ScratchForgejoService + `:3000"]
+    environment:
+      DOCKER_TLS_CERTDIR: /certs
+    volumes:
+      - type: volume
+        source: ` + scratchForgeCertsVolume + `
+        target: /certs
+      - type: volume
+        source: ` + scratchForgeDindVolume + `
+        target: /var/lib/docker
+    networks:
+      - %[6]s
+  ` + scratchForgeRunner + `:
+    image: %[7]q
+    restart: "no"
+    depends_on:
+      ` + ScratchForgejoService + `:
+        condition: service_started
+      ` + scratchForgeDind + `:
+        condition: service_started
+    working_dir: /data
+    command: ["forgejo-runner", "--config", "config.yml", "daemon"]
+    environment:
+      DOCKER_HOST: tcp://docker:2376
+      DOCKER_CERT_PATH: /certs/client
+      DOCKER_TLS_VERIFY: "1"
+    volumes:
+      - type: volume
+        source: ` + scratchForgeRunnerVolume + `
+        target: /data
+      - type: volume
+        source: ` + scratchForgeCertsVolume + `
+        target: /certs
+    networks:
+      - %[6]s
+`
+
+// scratchForgeNetworkDecl and scratchForgeVolumeDecls are the stack's entries in
+// the file's networks and volumes sections.
+const scratchForgeNetworkDecl = "  " + scratchForgeNetwork + ":\n    internal: true\n"
+
+var scratchForgeVolumeDecls = "  " + scratchForgeDBVolume + ":\n" +
+	"  " + scratchForgeDataVolume + ":\n" +
+	"  " + scratchForgeCertsVolume + ":\n" +
+	"  " + scratchForgeDindVolume + ":\n" +
+	"  " + scratchForgeRunnerVolume + ":\n"
 
 // scratchOperatorNote is what the scratch daemon's compose file tells the
 // operator about a failed install. It is written once, here: scratchDaemonCommand
@@ -260,7 +417,7 @@ services:
   %[11]s:
   %[7]s:
     internal: true
-volumes:
+%[16]svolumes:
   %[9]s:
 %[14]s`
 
@@ -288,7 +445,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 	}
 
 	names := liveNames
-	var command, dolt, doltVolume, doltWait string
+	var command, dolt, doltVolume, doltWait, forgeNetwork string
 	if s.Scratch {
 		names = scratchNames
 		command = scratchDaemonCommand(s.OMTokenFile)
@@ -301,6 +458,19 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		)
 		doltVolume = "  " + scratchDoltVolume + ":\n"
 		doltWait = "      " + ScratchDoltService + ":\n        condition: service_healthy\n"
+		if s.ScratchForge {
+			dolt += fmt.Sprintf(scratchForgeBody,
+				s.ScratchForgeHTTPPort,
+				s.ScratchForgeSSHPort,
+				composeLiteral(ForgePostgresImage),
+				composeLiteral(ForgejoImage),
+				composeLiteral(DindImage),
+				names.egress,
+				composeLiteral(ForgejoRunnerImage),
+			)
+			doltVolume += scratchForgeVolumeDecls
+			forgeNetwork = scratchForgeNetworkDecl
+		}
 	}
 
 	out := fmt.Sprintf(daemonComposeBody,
@@ -319,6 +489,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		dolt,
 		doltVolume,
 		doltWait,
+		forgeNetwork,
 	)
 	return []byte(out), nil
 }
@@ -350,6 +521,8 @@ func (s ComposeSpec) validate() error {
 	case s.StopGrace < MinimumStopGrace:
 		return fmt.Errorf("compose spec: StopGrace %s is below MinimumStopGrace %s; a shorter grace period SIGKILLs the daemon mid-shutdown",
 			s.StopGrace, MinimumStopGrace)
+	case !s.Scratch && (s.ScratchForge || s.ScratchForgeHTTPPort != 0 || s.ScratchForgeSSHPort != 0):
+		return fmt.Errorf("compose spec: the scratch forge is set on a live spec; only the scratch render carries a throwaway Forgejo")
 	case s.OMTokenFile != "" && !s.Scratch:
 		return fmt.Errorf("compose spec: OMTokenFile is set on a live spec; only the scratch render passes --%s, and the live project's command line stays empty", config.OMTokenFileFlag)
 	case s.OMTokenFile != "" && !filepath.IsAbs(s.OMTokenFile):
@@ -384,7 +557,39 @@ func (s ComposeSpec) validateScratch() error {
 	case s.ScratchDoltImage == "":
 		return fmt.Errorf("compose spec: ScratchDoltImage is empty; the scratch project runs its own Dolt server, at DoltServerImage")
 	}
+	if err := s.checkScratchForge(); err != nil {
+		return err
+	}
 	return s.checkScratchRoot()
+}
+
+// checkScratchForge refuses a forge spec whose ports would reach, or collide
+// with, the live Forgejo: the live ports themselves, a port that is not one, or
+// one port named for both services. Ports set without ScratchForge are refused
+// too, because a render that ignored them would let a caller believe a forge was
+// running on them.
+func (s ComposeSpec) checkScratchForge() error {
+	if !s.ScratchForge {
+		if s.ScratchForgeHTTPPort != 0 || s.ScratchForgeSSHPort != 0 {
+			return fmt.Errorf("compose spec: scratch forge ports are set but ScratchForge is not; the render would ignore them")
+		}
+		return nil
+	}
+	for _, p := range []struct {
+		name string
+		port int
+	}{{"ScratchForgeHTTPPort", s.ScratchForgeHTTPPort}, {"ScratchForgeSSHPort", s.ScratchForgeSSHPort}} {
+		switch {
+		case p.port < 1 || p.port > 65535:
+			return fmt.Errorf("compose spec: %s %d is not a port; a scratch forge names both its host ports", p.name, p.port)
+		case p.port == liveForgeHTTPPort || p.port == liveForgeSSHPort:
+			return fmt.Errorf("compose spec: %s %d is a host port the live Forgejo publishes (%d and %d); the scratch forge takes its own", p.name, p.port, liveForgeHTTPPort, liveForgeSSHPort)
+		}
+	}
+	if s.ScratchForgeHTTPPort == s.ScratchForgeSSHPort {
+		return fmt.Errorf("compose spec: ScratchForgeHTTPPort and ScratchForgeSSHPort are both %d; the two services need different host ports", s.ScratchForgeHTTPPort)
+	}
+	return nil
 }
 
 // checkScratchRoot refuses a scratch town root that resolves to the live root, to
