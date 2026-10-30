@@ -968,8 +968,8 @@ func TestIsMountPoint(t *testing.T) {
 // failure message below prints it or any other environment value.
 const omTokenFixture = "fixture-om-token-0000"
 
-// The compose project's command line carries --om-token-file, and the live
-// project's passes none, so no token is loaded there.
+// The entrypoint parses --om-token-file into the flags it acts on, and with the
+// flag absent it names no token file.
 func TestContainerEntrypointOMTokenFlagIsWired(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
