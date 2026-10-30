@@ -302,11 +302,26 @@ func writeDaemonSettings(t *testing.T, town, body string) {
 	}
 }
 
+// unreadJob fails the test if the probe reads a service manager job for an
+// owner that is not judged from one.
+func unreadJob(t *testing.T) templates.SupervisorReader {
+	return func(kind string) templates.SupervisorState {
+		t.Errorf("probe read the %s job, but this owner is not judged from it", kind)
+		return templates.SupervisorState{Kind: kind, LastExit: -1, Err: errors.New("unexpected job read")}
+	}
+}
+
+// jobAnswers is a service manager reader that reports st for any job.
+func jobAnswers(st templates.SupervisorState) templates.SupervisorReader {
+	return func(string) templates.SupervisorState { return st }
+}
+
 // TestStartupOwnerProbe pins what the guard's probe reports for each kind of
 // recorded owner. Unknown never reads as stopped.
 func TestStartupOwnerProbe(t *testing.T) {
 	t.Parallel()
 	container := Owner{Kind: agentconfig.SupervisorContainer, ID: "scratch-town-daemon-1"}
+	launchd := guardLaunchd
 	dockerAnswers := func(out string, err error) templates.ContainerDocker {
 		return func(context.Context, []string) ([]byte, error) { return []byte(out), err }
 	}
@@ -320,6 +335,7 @@ func TestStartupOwnerProbe(t *testing.T) {
 		owner   Owner
 		docker  templates.ContainerDocker
 		host    func() (string, error)
+		job     templates.SupervisorReader // nil: the job must not be read
 		running bool
 		known   bool
 	}{
@@ -329,9 +345,68 @@ func TestStartupOwnerProbe(t *testing.T) {
 			running: true, known: true,
 		},
 		{
+			name: "a restarting container is running", owner: container,
+			docker: dockerAnswers("restarting gastown:latest", nil), host: host,
+			running: true, known: true,
+		},
+		{
+			name: "a paused container is running", owner: container,
+			docker: dockerAnswers("paused gastown:latest", nil), host: host,
+			running: true, known: true,
+		},
+		{
 			name: "an exited container is stopped", owner: container,
 			docker: dockerAnswers("exited gastown:latest", nil), host: host,
 			known: true,
+		},
+		{
+			name: "a created container that never ran is stopped", owner: container,
+			docker: dockerAnswers("created gastown:latest", nil), host: host,
+			known: true,
+		},
+		{
+			name: "a dead container is stopped", owner: container,
+			docker: dockerAnswers("dead gastown:latest", nil), host: host,
+			known: true,
+		},
+		{
+			name: "a launchd job with a pid is running", owner: launchd,
+			docker: dockerAnswers("", nil), host: host,
+			job:     jobAnswers(templates.SupervisorState{Kind: "launchd", Loaded: true, PID: 4242, LastExit: -1}),
+			running: true, known: true,
+		},
+		{
+			name: "a loaded launchd job without a pid is stopped", owner: launchd,
+			docker: dockerAnswers("", nil), host: host,
+			job:   jobAnswers(templates.SupervisorState{Kind: "launchd", Loaded: true, LastExit: 0}),
+			known: true,
+		},
+		{
+			name: "a launchd job the manager does not know is stopped", owner: launchd,
+			docker: dockerAnswers("", nil), host: host,
+			job:   jobAnswers(templates.SupervisorState{Kind: "launchd", LastExit: -1}),
+			known: true,
+		},
+		{
+			name: "a launchd job the probe cannot read is unknown", owner: launchd,
+			docker: dockerAnswers("", nil), host: host,
+			job: jobAnswers(templates.SupervisorState{Kind: "launchd", LastExit: -1, Err: errors.New("launchctl unavailable")}),
+		},
+		{
+			name:   "a manual owner whose host cannot be named is unknown",
+			owner:  Owner{Kind: OwnerKindManual, ID: fmt.Sprintf("fixture-host:%d", os.Getpid())},
+			docker: dockerAnswers("", nil),
+			host:   func() (string, error) { return "", errors.New("no hostname") },
+		},
+		{
+			name:  "a manual owner whose pid is not a number is unknown",
+			owner: Owner{Kind: OwnerKindManual, ID: "fixture-host:abc"},
+			host:  host,
+		},
+		{
+			name:  "a manual owner whose pid is zero is unknown",
+			owner: Owner{Kind: OwnerKindManual, ID: "fixture-host:0"},
+			host:  host,
 		},
 		{
 			name: "a container docker does not know is stopped", owner: container,
@@ -378,7 +453,11 @@ func TestStartupOwnerProbe(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			probe := startupOwnerProbe(tc.docker, tc.host, nil)
+			job := tc.job
+			if job == nil {
+				job = unreadJob(t)
+			}
+			probe := startupOwnerProbe(tc.docker, tc.host, job)
 			running, known := probe(tc.owner)
 			if running != tc.running || known != tc.known {
 				t.Fatalf("probe(%+v) = running %v known %v, want running %v known %v",
@@ -559,6 +638,70 @@ func TestRunRefusesAnUnparsableStateWithoutReadingAnOwner(t *testing.T) {
 	if got, _ := os.ReadFile(StateFile(town)); !bytes.Equal(got, before) {
 		t.Errorf("Run changed state.json before refusing")
 	}
+}
+
+// runCanceledStart runs a start on town with env and probe under a canceled
+// context, so a start that gets past the guard ends at its first select.
+func runCanceledStart(t *testing.T, town string, env map[string]string, probe OwnerProbe) error {
+	t.Helper()
+	d := &Daemon{
+		config:     DefaultConfig(town),
+		logger:     log.New(io.Discard, "", 0),
+		getenv:     ownerEnv(env),
+		hostname:   fixtureHostname("fixture-host"),
+		clock:      clockwork.NewFakeClockAt(guardNow),
+		ownerProbe: probe,
+	}
+	d.ctx, d.cancel = context.WithCancel(context.Background())
+	d.cancel()
+	return d.Run()
+}
+
+// GT_DAEMON_TAKEOVER reaches the guard from Run: set to "1", a fresh heartbeat
+// whose owner the probe shows stopped starts, and one whose owner still runs
+// refuses. Unset, the guard refuses before it reads any owner (gt-qpeei.27).
+func TestRunTakeoverEnvReachesTheGuard(t *testing.T) {
+	t.Parallel()
+	fresh := State{Running: true, Owner: ownedBy(guardLaunchd), LastHeartbeat: guardNow.Add(-time.Minute)}
+
+	t.Run("takeover with the owner stopped starts", func(t *testing.T) {
+		t.Parallel()
+		town := guardTown(t)
+		seedGuardState(t, town, fresh)
+		_, finish := startParkedRunIn(t, town, map[string]string{agentconfig.TakeoverEnv: "1"}, func(Owner) (bool, bool) { return false, true })
+		defer func() { _ = finish() }()
+
+		state, err := LoadState(town)
+		if err != nil {
+			t.Fatalf("LoadState after the start = %v", err)
+		}
+		if state.Owner == nil || state.Owner.Kind != OwnerKindManual {
+			t.Fatalf("state.json owner = %+v after the takeover, want the hand-run owner that started", state.Owner)
+		}
+	})
+
+	t.Run("takeover with the owner still running refuses", func(t *testing.T) {
+		t.Parallel()
+		town := guardTown(t)
+		before := seedGuardState(t, town, fresh)
+		err := runCanceledStart(t, town, map[string]string{agentconfig.TakeoverEnv: "1"}, func(Owner) (bool, bool) { return true, true })
+		if err == nil || !strings.Contains(err.Error(), "still running") {
+			t.Fatalf("Run = %v, want the probe's refusal that the owner is still running", err)
+		}
+		if got, _ := os.ReadFile(StateFile(town)); !bytes.Equal(got, before) {
+			t.Errorf("Run changed state.json before refusing")
+		}
+	})
+
+	t.Run("without takeover the guard refuses before reading the owner", func(t *testing.T) {
+		t.Parallel()
+		town := guardTown(t)
+		seedGuardState(t, town, fresh)
+		err := runCanceledStart(t, town, nil, unreachableProbe(t))
+		if err == nil || !strings.Contains(err.Error(), "takeover window") {
+			t.Fatalf("Run = %v, want the takeover-window refusal without the takeover env", err)
+		}
+	})
 }
 
 // A start after a clean stop by another owner that the probe shows not
