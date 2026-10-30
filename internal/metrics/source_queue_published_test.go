@@ -135,7 +135,9 @@ func queueLandingPage(_ string, args []string) ([]byte, []byte, error) {
 
 // Ten samples of the landing board with fresh counts published make no bd call,
 // and the same ten without one make the one list per rig per sample the sampler
-// paid before gt-hw6ih. The census is process-wide, so this test runs alone.
+// paid before gt-hw6ih.
+//
+//testpolicy:allow parallel - the census counts bd calls process-wide, so another test making one mid-run would read as this test's
 func TestQueueLandingColumnMakesNoBdCallForAFreshView(t *testing.T) {
 	beads.CensusSnapshotAndReset()
 	t.Cleanup(func() { beads.CensusSnapshotAndReset() })
