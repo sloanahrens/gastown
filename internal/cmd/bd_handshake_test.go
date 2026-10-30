@@ -4,25 +4,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/townconfig"
+	"github.com/steveyegge/gastown/tracker/api"
 )
 
 // testTownStartGate is a gate over a fixed town whose config check and
 // handshake are fn and config, counting the handshakes it runs.
-func testTownStartGate(handshake func(ctx context.Context) (*deps.BDHandshake, error), config func() error) (*townStartGate, *int) {
+func testTownStartGate(handshake func(ctx context.Context) error, config func() error) (*townStartGate, *int) {
 	calls := 0
 	g := &townStartGate{
 		townRoot: func() string { return "/town" },
 		config:   func(string) error { return config() },
-		handshake: func(ctx context.Context, _ string) (*deps.BDHandshake, error) {
+		handshake: func(ctx context.Context, _ string) error {
 			calls++
 			return handshake(ctx)
 		},
@@ -85,7 +91,7 @@ func TestBDHandshakeGate_OnlyTownRunningCommands(t *testing.T) {
 func TestPersistentPreRunRefusesGatedCommandOnFailedHandshake(t *testing.T) {
 	t.Parallel()
 	refusal := fmt.Errorf("%w: no contract_version", deps.ErrBDHandshake)
-	g, calls := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) { return nil, refusal }, configOK)
+	g, calls := testTownStartGate(func(context.Context) error { return refusal }, configOK)
 
 	err := gateTownCommand(findCommand(t, "gt up"), g)
 	if !errors.Is(err, deps.ErrBDHandshake) {
@@ -102,11 +108,11 @@ func TestPersistentPreRunRefusesGatedCommandOnFailedHandshake(t *testing.T) {
 func TestRequireBDHandshakeCachesOnlySuccess(t *testing.T) {
 	t.Parallel()
 	fail := true
-	g, calls := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) {
+	g, calls := testTownStartGate(func(context.Context) error {
 		if fail {
-			return nil, fmt.Errorf("%w: store unavailable", deps.ErrBDHandshake)
+			return fmt.Errorf("%w: store unavailable", deps.ErrBDHandshake)
 		}
-		return &deps.BDHandshake{DBSchema: 66}, nil
+		return nil
 	}, configOK)
 	if err := g.requireHandshake(); err == nil {
 		t.Fatal("first call: want refusal")
@@ -126,8 +132,8 @@ func TestRequireBDHandshakeCachesOnlySuccess(t *testing.T) {
 
 func TestPersistentPreRunSkipsHandshakeForReadOnlyCommands(t *testing.T) {
 	t.Parallel()
-	g, calls := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) {
-		return nil, errors.New("must not run")
+	g, calls := testTownStartGate(func(context.Context) error {
+		return errors.New("must not run")
 	}, configOK)
 	if err := gateTownCommand(findCommand(t, "gt hook"), g); err != nil {
 		t.Fatalf("gateTownCommand(gt hook) = %v", err)
@@ -164,9 +170,7 @@ func TestBDHandshakeClassifiesEveryTownVerb(t *testing.T) {
 
 	// Every gated command also refuses an unparseable town config file, and
 	// does so before the handshake runs (gt-fcxe9.10).
-	g, handshakes := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) {
-		return &deps.BDHandshake{DBSchema: 66}, nil
-	}, brokenTownConfig)
+	g, handshakes := testTownStartGate(func(context.Context) error { return nil }, brokenTownConfig)
 	for path := range bdHandshakeGatedCommands {
 		if err := gateTownCommand(findCommand(t, path), g); !errors.Is(err, config.ErrUnparseable) {
 			t.Errorf("%q with an unparseable town config: gateTownCommand = %v, want the config refusal", path, err)
@@ -178,13 +182,13 @@ func TestBDHandshakeClassifiesEveryTownVerb(t *testing.T) {
 }
 
 // TestDefaultBDHandshakeRefusesOutsideATown: with no town root the handshake
-// has no town database to read, so it refuses rather than reading whatever
+// has no town store to read, so it refuses rather than reading whatever
 // database the working directory resolves to.
 func TestDefaultBDHandshakeRefusesOutsideATown(t *testing.T) {
 	t.Parallel()
-	_, err := runBDHandshake(context.Background(), "")
+	err := runTownStartHandshake(context.Background(), "")
 	if !errors.Is(err, deps.ErrBDHandshake) || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
-		t.Fatalf("runBDHandshake outside a town = %v", err)
+		t.Fatalf("runTownStartHandshake outside a town = %v", err)
 	}
 }
 
@@ -194,7 +198,7 @@ func TestDefaultBDHandshakeRefusesOutsideATown(t *testing.T) {
 func TestSessionGateRefusesAnUnparseableTownConfig(t *testing.T) {
 	t.Parallel()
 	broken := false
-	g, _ := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) { return &deps.BDHandshake{DBSchema: 66}, nil }, func() error {
+	g, _ := testTownStartGate(func(context.Context) error { return nil }, func() error {
 		if broken {
 			return brokenTownConfig()
 		}
@@ -272,5 +276,441 @@ func TestDefaultTownConfigCheckRefusesARootWithoutTownJSON(t *testing.T) {
 	})
 	if err := checkTownConfig(town); !errors.Is(err, townconfig.ErrNotATown) {
 		t.Fatalf("checkTownConfig without town.json = %v, want ErrNotATown", err)
+	}
+}
+
+// townOnTracker writes a town whose own route names the tracker backend and
+// whose town.json points at baseURL, so the gate asks that server.
+func townOnTracker(t *testing.T, baseURL string) string {
+	t.Helper()
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("baseURL %q has no port: %v", baseURL, err)
+	}
+	return writeTownFiles(t, map[string]string{
+		"mayor/town.json":     fmt.Sprintf(`{"type":"town","version":2,"name":"t","tracker":{"host":%q,"port":%d}}`, u.Hostname(), port),
+		".beads/routes.jsonl": `{"path":".","prefix":"hq-","backend":"tracker"}` + "\n",
+	})
+}
+
+// neverRuns is a handshake that fails the test if the gate runs it.
+func neverRuns(t *testing.T, name string) func(context.Context, string) error {
+	return func(context.Context, string) error {
+		t.Errorf("the gate ran the %s handshake, want the other one", name)
+		return nil
+	}
+}
+
+// trackerTownURL is the endpoint a tracker town's town.json names. The fake
+// transport answers it in process, so no test dials it.
+const trackerTownURL = "http://127.0.0.1:7433"
+
+// trackerAnswer is what the probe's transport answers: a status and body, a
+// body that fails mid-read, or a connection that cannot be made.
+type trackerAnswer struct {
+	status  int
+	body    string
+	cutBody bool
+	down    bool
+}
+
+// readyAnswer is a tracker that answers ready at the level this gt speaks.
+func readyAnswer() trackerAnswer {
+	return trackerAnswer{status: http.StatusOK, body: fmt.Sprintf(`{"status":"ready","schema_level":%d}`, api.SchemaLevel)}
+}
+
+func (a trackerAnswer) RoundTrip(*http.Request) (*http.Response, error) {
+	if a.down {
+		return nil, errors.New("dial tcp 127.0.0.1:7433: connect: connection refused")
+	}
+	var body io.ReadCloser = io.NopCloser(strings.NewReader(a.body))
+	if a.cutBody {
+		body = io.NopCloser(bodyFails{})
+	}
+	return &http.Response{StatusCode: a.status, Body: body, Header: http.Header{}}, nil
+}
+
+// bodyFails is a response body that fails on its first read, as a connection
+// dropped mid-answer does.
+type bodyFails struct{}
+
+func (bodyFails) Read([]byte) (int, error) { return 0, errors.New("connection reset by peer") }
+
+// trackerHandshakeAs is the production tracker handshake with the probe's
+// transport answering a, so the gate is driven end to end without a socket
+// and through the client the probe builds for production.
+func trackerHandshakeAs(a trackerAnswer) func(context.Context, string) error {
+	return func(ctx context.Context, townRoot string) error {
+		return trackerTownHandshakeWith(ctx, townRoot, a)
+	}
+}
+
+// TestTownStartHandshakeTrackerTownPasses: the gate a tracker town runs asks
+// trackerd for readiness and its schema level, and a reachable, migrated
+// trackerd passes it (gt-p85pw.110).
+func TestTownStartHandshakeTrackerTownPasses(t *testing.T) {
+	t.Parallel()
+	err := townHandshakeFor(context.Background(), townOnTracker(t, trackerTownURL),
+		neverRuns(t, "bd"), trackerHandshakeAs(readyAnswer()), io.Discard)
+	if err != nil {
+		t.Fatalf("a tracker town with a reachable, migrated trackerd refused the gate: %v", err)
+	}
+}
+
+// TestTownStartHandshakeTrackerRefusals: every way a tracker town's store can
+// fail the gate refuses, names the tracker and its URL, and is an
+// ErrTrackerHandshake rather than a bd refusal.
+func TestTownStartHandshakeTrackerRefusals(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		answer trackerAnswer
+		wants  []string
+	}{
+		{
+			name:   "unreachable",
+			answer: trackerAnswer{down: true},
+			wants:  []string{"did not answer"},
+		},
+		{
+			name: "answered not ready",
+			answer: trackerAnswer{status: http.StatusServiceUnavailable,
+				body: `{"kind":"unavailable","message":"database does not accept writes"}`},
+			wants: []string{"not ready", "database does not accept writes"},
+		},
+		{
+			name:   "a status code with no reason",
+			answer: trackerAnswer{status: http.StatusBadGateway, body: `{}`},
+			wants:  []string{"answered 502"},
+		},
+		{
+			name:   "a body that is not the readiness report",
+			answer: trackerAnswer{status: http.StatusOK, body: "ok\n"},
+			wants:  []string{"not its readiness report"},
+		},
+		{
+			name:   "a body cut short",
+			answer: trackerAnswer{status: http.StatusOK, cutBody: true},
+			wants:  []string{"answer could not be read"},
+		},
+		{
+			name:   "answered 200 but its report is not ready",
+			answer: trackerAnswer{status: http.StatusOK, body: `{"status":"degraded","schema_level":2}`},
+			wants:  []string{`"degraded"`, `not "ready"`},
+		},
+		{
+			name:   "answered 200 with no status in its report",
+			answer: trackerAnswer{status: http.StatusOK, body: `{"schema_level":2}`},
+			wants:  []string{`""`, `not "ready"`},
+		},
+		{
+			name:   "ready with no schema level",
+			answer: trackerAnswer{status: http.StatusOK, body: `{"status":"ready","schema_level":0}`},
+			wants:  []string{"no schema level"},
+		},
+		{
+			name: "a tracker at another schema level",
+			answer: trackerAnswer{status: http.StatusOK,
+				body: fmt.Sprintf(`{"status":"ready","schema_level":%d}`, api.SchemaLevel+1)},
+			wants: []string{"schema level", strconv.Itoa(api.SchemaLevel + 1), strconv.Itoa(api.SchemaLevel)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := townOnTracker(t, trackerTownURL)
+			err := townHandshakeFor(context.Background(), town, neverRuns(t, "bd"), trackerHandshakeAs(tc.answer), io.Discard)
+			if !errors.Is(err, deps.ErrTrackerHandshake) {
+				t.Fatalf("gate = %v, want an ErrTrackerHandshake", err)
+			}
+			if errors.Is(err, deps.ErrBDHandshake) {
+				t.Errorf("a tracker refusal reads as a bd refusal: %v", err)
+			}
+			if !strings.Contains(err.Error(), trackerTownURL) {
+				t.Errorf("refusal does not name the tracker URL %s:\n%s", trackerTownURL, err)
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal does not say %q:\n%s", want, err)
+				}
+			}
+		})
+	}
+}
+
+// roundTripFunc is a transport that answers with fn, so a test drives the
+// probe's production client without opening a socket.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestTrackerProbeReadIsBounded: a probe read goes through the client
+// trackerProbeClient builds, whose timeout bounds a tracker that accepts a
+// connection and then stalls. The transport a caller passes cannot supply that
+// bound, so the request carries a deadline only because the production client
+// set it; a probe that built a client with no timeout turns this red.
+func TestTrackerProbeReadIsBounded(t *testing.T) {
+	t.Parallel()
+	var carriesDeadline bool
+	probe := townTrackerProbe{url: trackerTownURL, transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		carriesDeadline = r.Context().Done() != nil
+		return readyAnswer().RoundTrip(r)
+	})}
+	level, err := probe.Readyz(context.Background())
+	if err != nil {
+		t.Fatalf("Readyz = %v, want the ready answer", err)
+	}
+	if level != api.SchemaLevel {
+		t.Errorf("Readyz level = %d, want %d", level, api.SchemaLevel)
+	}
+	if !carriesDeadline {
+		t.Error("the probe's request carries no deadline, so a stalling tracker is not bounded by trackerProbeTimeout")
+	}
+	// The deadline is the production timeout, not merely some deadline: the
+	// client the probe uses carries exactly trackerProbeTimeout. Read from the
+	// client, so no clock is involved.
+	if got := trackerProbeClient(nil).Timeout; got != trackerProbeTimeout {
+		t.Errorf("the probe client's timeout is %s, want trackerProbeTimeout %s", got, trackerProbeTimeout)
+	}
+}
+
+// TestTownStartHandshakeDoltTownKeepsTheBDHandshake: a town whose own store is
+// Dolt runs the bd handshake and returns its verdict unchanged, whatever a
+// rig's route names — a bd rig's gate is the gate it always was.
+func TestTownStartHandshakeDoltTownKeepsTheBDHandshake(t *testing.T) {
+	t.Parallel()
+	refusal := fmt.Errorf("%w: bd not found on PATH", deps.ErrBDHandshake)
+	for _, tc := range []struct {
+		name   string
+		routes string
+	}{
+		{"no route table at all", ""},
+		{"an empty route table", "# no routes\n"},
+		// internal/beads.LoadRoutes skips a line that is not JSON and reports
+		// it itself, so the gate sees a table with no route and takes Dolt.
+		{"a route table with a line that is not JSON", "not a route\n"},
+		{"the town's own route on Dolt", `{"path":".","prefix":"hq-"}` + "\n"},
+		{
+			name:   "a rig on the tracker while the town's own store is Dolt",
+			routes: `{"path":".","prefix":"hq-"}` + "\n" + `{"path":"rig/mayor/rig","prefix":"rg-","backend":"tracker"}` + "\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.routes != "" {
+				town = writeTownFiles(t, map[string]string{".beads/routes.jsonl": tc.routes})
+			}
+			bdRuns := 0
+			err := townHandshakeFor(context.Background(), town,
+				func(context.Context, string) error { bdRuns++; return refusal },
+				neverRuns(t, "tracker"), io.Discard)
+			if !errors.Is(err, refusal) {
+				t.Fatalf("gate = %v, want the bd handshake's refusal", err)
+			}
+			if bdRuns != 1 {
+				t.Errorf("bd handshake ran %d times, want 1", bdRuns)
+			}
+		})
+	}
+}
+
+// TestTownStartHandshakeRefusesABackendNeitherStoreSpeaks: a route table that
+// parses and names a backend that is neither Dolt nor the tracker refuses, and
+// neither handshake runs. The backend was written down, so the gate does not
+// guess what it speaks.
+func TestTownStartHandshakeRefusesABackendNeitherStoreSpeaks(t *testing.T) {
+	t.Parallel()
+	town := writeTownFiles(t, map[string]string{
+		".beads/routes.jsonl": `{"path":".","prefix":"hq-","backend":"postgres"}` + "\n",
+	})
+	err := townHandshakeFor(context.Background(), town, neverRuns(t, "bd"), neverRuns(t, "tracker"), io.Discard)
+	if err == nil {
+		t.Fatal("want a refusal, got nil")
+	}
+	for _, want := range []string{"postgres", "dolt", "tracker"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not say %q:\n%s", want, err)
+		}
+	}
+}
+
+// TestTownStartHandshakeFallsBackToTheBDHandshakeForAnUnreadableRoute: a route
+// table the gate cannot read does not refuse a town. The town runs the bd
+// handshake it ran before a route could name the tracker, so its verdict is
+// the gate's verdict, and the read error is reported once instead of being
+// dropped (gt-p85pw.110).
+func TestTownStartHandshakeFallsBackToTheBDHandshakeForAnUnreadableRoute(t *testing.T) {
+	t.Parallel()
+	refusal := fmt.Errorf("%w: bd not found on PATH", deps.ErrBDHandshake)
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, ".beads", "routes.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bdRuns := 0
+	bd := func(context.Context, string) error { bdRuns++; return refusal }
+	var warned strings.Builder
+	err := townHandshakeFor(context.Background(), town, bd, neverRuns(t, "tracker"), &warned)
+	if !errors.Is(err, refusal) {
+		t.Fatalf("gate = %v, want the bd handshake's refusal", err)
+	}
+	if bdRuns != 1 {
+		t.Errorf("bd handshake ran %d times, want 1", bdRuns)
+	}
+	msg := warned.String()
+	if !strings.Contains(msg, "cannot be read") || !strings.Contains(msg, "routes.jsonl") {
+		t.Errorf("the unreadable route table is not reported:\n%s", msg)
+	}
+	// The gate re-runs a failing handshake on every command; the warning is
+	// reported once per town, not once per command.
+	warned.Reset()
+	if err := townHandshakeFor(context.Background(), town, bd, neverRuns(t, "tracker"), &warned); !errors.Is(err, refusal) {
+		t.Fatalf("second gate = %v, want the bd handshake's refusal", err)
+	}
+	if warned.Len() != 0 {
+		t.Errorf("the same unreadable route table is reported twice:\n%s", warned.String())
+	}
+}
+
+// TestTownStartHandshakeRefusesAnUnaskableTracker: a tracker town whose
+// town.json names an endpoint that cannot be asked, or that cannot be read at
+// all, refuses instead of passing.
+func TestTownStartHandshakeRefusesAnUnaskableTracker(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		town string
+		want string
+	}{
+		{
+			name: "a host that is not a URL host",
+			town: `{"type":"town","version":2,"name":"t","tracker":{"host":"bad host","port":7433}}`,
+			want: "cannot be asked",
+		},
+		{
+			name: "a town.json that does not parse",
+			town: `{"type":"town","version":2,"name":"t","tracker":{"port":"not-a-port"}}`,
+			want: "tracker endpoint cannot be read",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := runTownStartHandshake(context.Background(), writeTownFiles(t, map[string]string{
+				"mayor/town.json":     tc.town,
+				".beads/routes.jsonl": `{"path":".","prefix":"hq-","backend":"tracker"}` + "\n",
+			}))
+			if !errors.Is(err, deps.ErrTrackerHandshake) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("gate = %v, want an ErrTrackerHandshake saying %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// fakeBDStore answers the bd handshake's two reads from a report a test writes,
+// so the gate's bd path runs no bd subprocess (gt-pxlg).
+type fakeBDStore struct {
+	info beads.VersionInfo
+}
+
+func (f fakeBDStore) Version() (beads.VersionInfo, error) { return f.info, nil }
+
+func (f fakeBDStore) SchemaLevel() (int, error) { return f.info.DBSchemaVersion, nil }
+
+// TestTownStartHandshakeDoltTownRefusesAnUpstreamBD: the bd handshake still
+// decides a Dolt town's gate, and an upstream bd build refuses it.
+func TestTownStartHandshakeDoltTownRefusesAnUpstreamBD(t *testing.T) {
+	t.Parallel()
+	upstream := fakeBDStore{info: beads.VersionInfo{Version: "1.0.5", Build: "release"}}
+	err := checkTownBDHandshake(context.Background(), upstream)
+	if !errors.Is(err, deps.ErrBDHandshake) || !strings.Contains(err.Error(), "no build_id") {
+		t.Fatalf("checkTownBDHandshake with an upstream bd = %v, want the bd handshake's refusal", err)
+	}
+}
+
+// TestTrackerRefusalRemedyNamesACommandInTheTree: a tracker refusal tells the
+// operator to check the tracker with a gt command, so that command must be the
+// one the tree holds. A rename of gt tracker status turns this red rather than
+// leaving a refusal that sends the operator to a command that is gone.
+func TestTrackerRefusalRemedyNamesACommandInTheTree(t *testing.T) {
+	t.Parallel()
+	findCommand(t, deps.TrackerStatusCommand)
+}
+
+// A route table the gate cannot read decides nothing: the bd handshake always
+// runs, and a town whose town.json configures a tracker must ALSO pass the
+// tracker handshake, because the bd handshake alone can pass without asking
+// trackerd. A plain Dolt town (no tracker configured) is gated by bd alone.
+// Mutation: dropping the configured branch turns the configured rows red.
+func TestTownStartHandshakeAnUnreadableRouteAsksTheTrackerOfATrackerTown(t *testing.T) {
+	t.Parallel()
+	trackerRefusal := fmt.Errorf("%w: the tracker did not answer", deps.ErrTrackerHandshake)
+	bdRefusal := fmt.Errorf("%w: bd not found on PATH", deps.ErrBDHandshake)
+	cases := []struct {
+		name       string
+		configured bool
+		bdErr      error
+		trackerErr error
+		wantErr    error
+		wantBD     int
+		wantTr     int
+	}{
+		{name: "a Dolt town: bd alone decides", configured: false, wantBD: 1},
+		{name: "a Dolt town whose bd refuses", configured: false, bdErr: bdRefusal, wantErr: bdRefusal, wantBD: 1},
+		{name: "a tracker town: both pass", configured: true, wantBD: 1, wantTr: 1},
+		{name: "a tracker town whose tracker refuses", configured: true, trackerErr: trackerRefusal, wantErr: trackerRefusal, wantBD: 1, wantTr: 1},
+		{name: "a tracker town whose bd refuses: the tracker is not asked", configured: true, bdErr: bdRefusal, wantErr: bdRefusal, wantBD: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(town, ".beads", "routes.jsonl"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			bdRuns, trRuns := 0, 0
+			bd := func(context.Context, string) error { bdRuns++; return tc.bdErr }
+			tracker := func(context.Context, string) error { trRuns++; return tc.trackerErr }
+			var warned strings.Builder
+			err := townHandshakeWith(context.Background(), town, bd, tracker, func(string) bool { return tc.configured }, &warned)
+			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Errorf("gate = %v, want %v", err, tc.wantErr)
+			}
+			if bdRuns != tc.wantBD || trRuns != tc.wantTr {
+				t.Errorf("bd ran %d times and the tracker %d, want %d and %d", bdRuns, trRuns, tc.wantBD, tc.wantTr)
+			}
+		})
+	}
+}
+
+// trackerConfiguredIn answers from town.json's tracker section: no file and no
+// section are "no tracker", a section is a tracker, and a file that cannot be
+// read counts as configured (an unreadable answer is never "no tracker").
+func TestTrackerConfiguredInReadsTheTownsTrackerSection(t *testing.T) {
+	t.Parallel()
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		town := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return town
+	}
+	if trackerConfiguredIn(t.TempDir()) {
+		t.Error("a town with no town.json reads as configuring a tracker")
+	}
+	if trackerConfiguredIn(write(t, `{"type":"town","version":2,"name":"t"}`)) {
+		t.Error("a town.json with no tracker section reads as configuring a tracker")
+	}
+	if !trackerConfiguredIn(write(t, `{"type":"town","version":2,"name":"t","tracker":{"port":7777}}`)) {
+		t.Error("a town.json with a tracker section reads as configuring none")
+	}
+	if !trackerConfiguredIn(write(t, `{not json`)) {
+		t.Error("a town.json that cannot be read reads as configuring no tracker")
 	}
 }

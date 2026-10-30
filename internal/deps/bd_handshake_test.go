@@ -695,3 +695,62 @@ func TestCheckBDHandshake_DeadlineThroughTheStore(t *testing.T) {
 		t.Errorf("refusal does not name the budget:\n%s", err)
 	}
 }
+
+// fakeTracker answers the tracker handshake's one read.
+type fakeTracker struct {
+	url   string
+	level int
+	err   error
+}
+
+func (f fakeTracker) URL() string { return f.url }
+
+func (f fakeTracker) Readyz(context.Context) (int, error) { return f.level, f.err }
+
+// TestCheckTrackerHandshake: a tracker at the schema level the caller asks
+// for passes, and a tracker that did not answer ready or is at another level
+// refuses, naming the tracker and its URL (gt-p85pw.110).
+func TestCheckTrackerHandshake(t *testing.T) {
+	t.Parallel()
+	const url = "http://127.0.0.1:7433"
+	const wantLevel = 7
+	for _, tc := range []struct {
+		name    string
+		tracker fakeTracker
+		wants   []string
+	}{
+		{"ready at the level the caller asks for", fakeTracker{url: url, level: wantLevel}, nil},
+		{
+			name:    "did not answer ready",
+			tracker: fakeTracker{url: url, err: errors.New("the tracker did not answer: connection refused")},
+			wants:   []string{"connection refused"},
+		},
+		{
+			name:    "at another schema level",
+			tracker: fakeTracker{url: url, level: wantLevel + 1},
+			wants:   []string{"schema level", "7"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := CheckTrackerHandshake(context.Background(), tc.tracker, wantLevel)
+			if tc.wants == nil {
+				if err != nil {
+					t.Fatalf("CheckTrackerHandshake = %v, want a pass", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrTrackerHandshake) {
+				t.Fatalf("CheckTrackerHandshake = %v, want an ErrTrackerHandshake", err)
+			}
+			if !strings.Contains(err.Error(), url) || !strings.Contains(err.Error(), trackerFixHint) {
+				t.Errorf("refusal does not name the tracker and its remedy:\n%s", err)
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal does not say %q:\n%s", want, err)
+				}
+			}
+		})
+	}
+}

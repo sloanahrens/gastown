@@ -42,6 +42,11 @@ type TownConfig struct {
 	// Overseer is the overseer identity document: mayor/town.json's
 	// "overseer" section on the two-file layout.
 	Overseer *OverseerConfig `json:"overseer,omitempty"`
+	// Ring is the town's signed lease, mayor/town.json's "ring" section
+	// (gt-6mlik.1). It is held opaquely so this package does not depend on
+	// internal/ring; read and write it with internal/ring, which goes through
+	// ReadRawJSON and UpdateRawJSON.
+	Ring json.RawMessage `json:"ring,omitempty"`
 }
 
 // DoltEndpoint is where the town's Dolt sql-server listens. An empty Host is

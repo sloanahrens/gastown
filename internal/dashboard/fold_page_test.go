@@ -367,10 +367,10 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 	if got, want := dom.fold(t, "attention").Summary, "nothing needs you"; got != want {
 		t.Errorf("the closed attention section with no rows reads %q, want %q", got, want)
 	}
-	// The Cost panel's inner blocks are a later bead; until then a closed Cost
-	// section carries no line of its own.
-	if got := dom.fold(t, "cost"); got.Summary != "" || !got.SummaryHidden {
-		t.Errorf("the closed cost section draws a summary line %q it has none for", got.Summary)
+	// A closed Cost section's summary is the Cost header's line. This reading has
+	// no spend report, so the header names that, last, rather than going quiet.
+	if got := dom.fold(t, "cost"); !strings.HasSuffix(got.Summary, "no spend read") || got.SummaryHidden {
+		t.Errorf("the closed cost section's summary is %q, want the header naming the missing spend report", got.Summary)
 	}
 }
 

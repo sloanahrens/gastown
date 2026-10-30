@@ -98,8 +98,9 @@ func PlanLayoutMigration(townRoot string) ([]LayoutStep, error) {
 // hosts win for every reader and a rerun finishes the removal. A second run
 // on a migrated town is ErrAlreadyMigrated.
 func MigrateLayout(townRoot string) ([]LayoutStep, error) {
+	retired := LegacyConfigFiles()
 	var locked []string
-	for _, rel := range LegacyConfigFiles() {
+	for _, rel := range retired {
 		locked = append(locked, filepath.Join(townRoot, filepath.FromSlash(rel)))
 	}
 	locked = append(locked,
@@ -147,7 +148,7 @@ func MigrateLayout(townRoot string) ([]LayoutStep, error) {
 	}
 	// A writer waiting on a retired file's lock re-checks after taking it
 	// and follows the file to its section; nothing needs the lock again.
-	for _, p := range locked[:len(sections)] {
+	for _, p := range locked[:len(retired)] {
 		_ = os.Remove(p + ".lock")
 	}
 	for _, dir := range []string{"mayor", "settings"} {
@@ -179,6 +180,11 @@ func readMigrationState(root string) (*migrationState, error) {
 	st.hosts[MachineConfigFile], st.hosts[OperatorConfigFile] = machine, operator
 
 	for _, s := range sections {
+		if !s.retired() {
+			// A section the host always carried: there is no file to move
+			// into it or retire.
+			continue
+		}
 		rel := s.dir + "/" + s.file
 		host := st.hosts[s.host]
 		inHost, has := host.top[s.key]
