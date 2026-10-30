@@ -194,7 +194,7 @@ func ownerText(o *daemon.Owner) string {
 
 // waitFor polls cond once at once and then every cutoverPoll until it reports
 // done or budget runs out on the plan's clock, and returns the last reason cond
-// gave when it never did. A cancelled context ends the wait as not done.
+// gave when it never did. A canceled context ends the wait as not done.
 func (p *cutoverPlan) waitFor(ctx context.Context, budget time.Duration, cond func() (bool, string)) (bool, string) {
 	deadline := p.clk.Now().Add(budget)
 	for {

@@ -480,7 +480,7 @@ func TestCutoverCommandFailuresStopTheCutover(t *testing.T) {
 	})
 }
 
-// A cancelled context ends a wait as not done rather than polling on.
+// A canceled context ends a wait as not done rather than polling on.
 func TestCutoverWaitEndsOnACancelledContext(t *testing.T) {
 	t.Parallel()
 	r := toContainerRig()
