@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1096,7 +1097,7 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 		// the name gt done's rework lease compares; the compound address made
 		// every commit after the respawn read as another seat's divergence
 		// (gt-7a955).
-		envMap["GIT_AUTHOR_NAME"] = git.SeatIdentityFor(gtRole, "").Name
+		maps.Copy(envMap, config.GitIdentityEnv(git.SeatIdentityFor(gtRole, "").Name))
 		if runtimeConfig.Session != nil && runtimeConfig.Session.SessionIDEnv != "" {
 			envMap["GT_SESSION_ID_ENV"] = runtimeConfig.Session.SessionIDEnv
 		}

@@ -4,11 +4,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-)
 
-// seatLocalDomain is the domain of a seat's own author address: a seat named
-// "gastown/polecats/coma" authors as coma@gastown.local.
-const seatLocalDomain = "gastown.local"
+	"github.com/steveyegge/gastown/internal/config"
+)
 
 // SeatIdentity is the git author identity a Gas Town seat's commits carry.
 type SeatIdentity struct {
@@ -36,11 +34,7 @@ func SeatIdentityFor(seat, worktreeEmail string) SeatIdentity {
 // with the name SeatIdentityFor derives from the compound address. It is ""
 // when the address names no seat, so an empty name never becomes "@gastown.local".
 func SeatLocalEmail(seat string) string {
-	name := SeatIdentityFor(seat, "").Name
-	if name == "" {
-		return ""
-	}
-	return name + "@" + seatLocalDomain
+	return config.SeatLocalEmail(SeatIdentityFor(seat, "").Name)
 }
 
 // GlobalAuthorEmail returns the host's global git user.email, "" when unset or

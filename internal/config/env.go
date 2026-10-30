@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -49,6 +50,36 @@ func seatEnvGOFLAGS(current string) string {
 	return current + " " + capFlag
 }
 
+// SeatLocalDomain is the domain of a seat's own author address.
+const SeatLocalDomain = "gastown.local"
+
+// SeatLocalEmail returns a seat's own author address, <name>@gastown.local, for
+// the seat's bare agent name, and "" for an empty name so an empty name never
+// becomes "@gastown.local". git.SeatLocalEmail and the seat's spawn environment
+// both build the address here, so the format has one source.
+func SeatLocalEmail(name string) string {
+	if name == "" {
+		return ""
+	}
+	return name + "@" + SeatLocalDomain
+}
+
+// GitIdentityEnv returns the git identity variables a seat is spawned with: the
+// bare agent name as author and committer name, and the seat's own address as
+// author and committer email. git reads these from the environment, so no git
+// config is written, and a polecat worktree (a linked worktree of the shared rig
+// repository) cannot overwrite another seat's identity. An empty name sets
+// GIT_AUTHOR_NAME alone, as the spawn has always done.
+func GitIdentityEnv(name string) map[string]string {
+	env := map[string]string{"GIT_AUTHOR_NAME": name}
+	if email := SeatLocalEmail(name); email != "" {
+		env["GIT_AUTHOR_EMAIL"] = email
+		env["GIT_COMMITTER_NAME"] = name
+		env["GIT_COMMITTER_EMAIL"] = email
+	}
+	return env
+}
+
 // IdentityEnvVars are agent identity env vars that must not leak across
 // process or session boundaries. Used by daemon sanitization (clearing
 // inherited vars), tmux global cleanup, and prime session env repair.
@@ -56,6 +87,7 @@ func seatEnvGOFLAGS(current string) string {
 var IdentityEnvVars = []string{
 	"GT_ROLE", "GT_RIG", "GT_CREW", "GT_POLECAT", "GT_DOG_NAME",
 	"GT_SESSION", EnvAgent, EnvAgentOverride, "BD_ACTOR", "GIT_AUTHOR_NAME", "BEADS_AGENT_NAME",
+	"GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 }
 
 var bdTargetSelectorEnvVars = []string{
@@ -157,7 +189,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		env["GT_RIG"] = cfg.Rig
 		env["GT_POLECAT"] = cfg.AgentName
 		env["BD_ACTOR"] = fmt.Sprintf("%s/polecats/%s", cfg.Rig, cfg.AgentName)
-		env["GIT_AUTHOR_NAME"] = cfg.AgentName
+		maps.Copy(env, GitIdentityEnv(cfg.AgentName))
 		// Disable Dolt auto-commit for polecats. With branch-per-polecat,
 		// individual commits are pointless — all changes merge at gt done time
 		// via DOLT_MERGE. Without this, concurrent polecats cause manifest
@@ -178,7 +210,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		env["GT_RIG"] = cfg.Rig
 		env["GT_CREW"] = cfg.AgentName
 		env["BD_ACTOR"] = fmt.Sprintf("%s/crew/%s", cfg.Rig, cfg.AgentName)
-		env["GIT_AUTHOR_NAME"] = cfg.AgentName
+		maps.Copy(env, GitIdentityEnv(cfg.AgentName))
 
 	}
 

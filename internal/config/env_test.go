@@ -198,7 +198,8 @@ func TestIdentityEnvVars_CoversAgentEnvOutput(t *testing.T) {
 		"GT_ROLE": true, "GT_RIG": true, "GT_CREW": true,
 		"GT_POLECAT": true, "GT_DOG_NAME": true, "GT_SESSION": true,
 		"GT_AGENT": true, "BD_ACTOR": true, "GIT_AUTHOR_NAME": true,
-		"BEADS_AGENT_NAME": true,
+		"BEADS_AGENT_NAME": true, "GIT_AUTHOR_EMAIL": true,
+		"GIT_COMMITTER_NAME": true, "GIT_COMMITTER_EMAIL": true,
 	}
 
 	have := make(map[string]bool, len(IdentityEnvVars))
@@ -1497,4 +1498,63 @@ func envOf(kv ...string) func(string) string {
 		m[kv[i]] = kv[i+1]
 	}
 	return func(key string) string { return m[key] }
+}
+
+// gitIdentityVars are the four variables a seat is spawned with so git authors
+// and commits as the seat without any git config.
+var gitIdentityVars = []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
+
+// TestAgentEnv_SeatGitIdentity checks each role that sets GIT_AUTHOR_NAME also
+// sets the author email and the committer name and email to the same bare name
+// and the seat's own gastown.local address, and a role that sets none still sets
+// none.
+func TestAgentEnv_SeatGitIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		role string
+		seat string
+		set  bool
+	}{
+		{"polecat", "polecat", "coma", true},
+		{"crew", "crew", "max", true},
+		{"a role with no case sets none", "witness", "witness", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := AgentEnv(AgentEnvConfig{Role: tt.role, Rig: "gastown", AgentName: tt.seat, TownRoot: "/town"})
+			for _, key := range gitIdentityVars {
+				got, ok := env[key]
+				if !tt.set {
+					if ok {
+						t.Errorf("%s sets %s=%q, want it unset", tt.role, key, got)
+					}
+					continue
+				}
+				want := tt.seat
+				if strings.HasSuffix(key, "_EMAIL") {
+					want = tt.seat + "@gastown.local"
+				}
+				if got != want {
+					t.Errorf("%s: %s = %q, want %q", tt.role, key, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestSeatLocalEmail checks the address has the one format and an empty name
+// never becomes "@gastown.local".
+func TestSeatLocalEmail(t *testing.T) {
+	t.Parallel()
+	if got := SeatLocalEmail("coma"); got != "coma@gastown.local" {
+		t.Errorf("SeatLocalEmail(coma) = %q", got)
+	}
+	if got := SeatLocalEmail(""); got != "" {
+		t.Errorf("SeatLocalEmail(\"\") = %q, want empty", got)
+	}
+	if env := GitIdentityEnv(""); len(env) != 1 || env["GIT_AUTHOR_NAME"] != "" {
+		t.Errorf("GitIdentityEnv(\"\") = %v, want only an empty GIT_AUTHOR_NAME", env)
+	}
 }
