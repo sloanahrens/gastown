@@ -65,6 +65,9 @@ var gtEnvInvocation = map[string]bool{
 	// seat runs inside the sandbox, so its gt done reads the marker from the
 	// environment it was started with (gt-g0u8g).
 	"GT_SESSION_BACKEND": true,
+	// The site-admin token is set by the auth broker run act (devops cmd/gt-approve)
+	// on the one process it launches; read by internal/forgejoprov/admintoken.go.
+	"GT_AUTH_FORGEJO_TOKEN": true,
 }
 
 // gtEnvTestHarness are the GT_ variables internal/testutil — or the Makefile,
