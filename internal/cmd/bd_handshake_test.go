@@ -469,6 +469,12 @@ func TestTrackerProbeReadIsBounded(t *testing.T) {
 	if !carriesDeadline {
 		t.Error("the probe's request carries no deadline, so a stalling tracker is not bounded by trackerProbeTimeout")
 	}
+	// The deadline is the production timeout, not merely some deadline: the
+	// client the probe uses carries exactly trackerProbeTimeout. Read from the
+	// client, so no clock is involved.
+	if got := trackerProbeClient(nil).Timeout; got != trackerProbeTimeout {
+		t.Errorf("the probe client's timeout is %s, want trackerProbeTimeout %s", got, trackerProbeTimeout)
+	}
 }
 
 // TestTownStartHandshakeDoltTownKeepsTheBDHandshake: a town whose own store is
@@ -631,4 +637,80 @@ func TestTownStartHandshakeDoltTownRefusesAnUpstreamBD(t *testing.T) {
 func TestTrackerRefusalRemedyNamesACommandInTheTree(t *testing.T) {
 	t.Parallel()
 	findCommand(t, deps.TrackerStatusCommand)
+}
+
+// A route table the gate cannot read decides nothing: the bd handshake always
+// runs, and a town whose town.json configures a tracker must ALSO pass the
+// tracker handshake, because the bd handshake alone can pass without asking
+// trackerd. A plain Dolt town (no tracker configured) is gated by bd alone.
+// Mutation: dropping the configured branch turns the configured rows red.
+func TestTownStartHandshakeAnUnreadableRouteAsksTheTrackerOfATrackerTown(t *testing.T) {
+	t.Parallel()
+	trackerRefusal := fmt.Errorf("%w: the tracker did not answer", deps.ErrTrackerHandshake)
+	bdRefusal := fmt.Errorf("%w: bd not found on PATH", deps.ErrBDHandshake)
+	cases := []struct {
+		name       string
+		configured bool
+		bdErr      error
+		trackerErr error
+		wantErr    error
+		wantBD     int
+		wantTr     int
+	}{
+		{name: "a Dolt town: bd alone decides", configured: false, wantBD: 1},
+		{name: "a Dolt town whose bd refuses", configured: false, bdErr: bdRefusal, wantErr: bdRefusal, wantBD: 1},
+		{name: "a tracker town: both pass", configured: true, wantBD: 1, wantTr: 1},
+		{name: "a tracker town whose tracker refuses", configured: true, trackerErr: trackerRefusal, wantErr: trackerRefusal, wantBD: 1, wantTr: 1},
+		{name: "a tracker town whose bd refuses: the tracker is not asked", configured: true, bdErr: bdRefusal, wantErr: bdRefusal, wantBD: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(town, ".beads", "routes.jsonl"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			bdRuns, trRuns := 0, 0
+			bd := func(context.Context, string) error { bdRuns++; return tc.bdErr }
+			tracker := func(context.Context, string) error { trRuns++; return tc.trackerErr }
+			var warned strings.Builder
+			err := townHandshakeWith(context.Background(), town, bd, tracker, func(string) bool { return tc.configured }, &warned)
+			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Errorf("gate = %v, want %v", err, tc.wantErr)
+			}
+			if bdRuns != tc.wantBD || trRuns != tc.wantTr {
+				t.Errorf("bd ran %d times and the tracker %d, want %d and %d", bdRuns, trRuns, tc.wantBD, tc.wantTr)
+			}
+		})
+	}
+}
+
+// trackerConfiguredIn answers from town.json's tracker section: no file and no
+// section are "no tracker", a section is a tracker, and a file that cannot be
+// read counts as configured (an unreadable answer is never "no tracker").
+func TestTrackerConfiguredInReadsTheTownsTrackerSection(t *testing.T) {
+	t.Parallel()
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		town := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return town
+	}
+	if trackerConfiguredIn(t.TempDir()) {
+		t.Error("a town with no town.json reads as configuring a tracker")
+	}
+	if trackerConfiguredIn(write(t, `{"type":"town","version":2,"name":"t"}`)) {
+		t.Error("a town.json with no tracker section reads as configuring a tracker")
+	}
+	if !trackerConfiguredIn(write(t, `{"type":"town","version":2,"name":"t","tracker":{"port":7777}}`)) {
+		t.Error("a town.json with a tracker section reads as configuring none")
+	}
+	if !trackerConfiguredIn(write(t, `{not json`)) {
+		t.Error("a town.json that cannot be read reads as configuring no tracker")
+	}
 }

@@ -80,8 +80,9 @@ const bdHandshakeTimeout = 30 * time.Second
 // budget.
 const trackerProbeTimeout = 5 * time.Second
 
-// trackerProbeBodyLimit bounds the readiness body read: the answer is two
-// fields, and a probe is never a way to pull a large body through the gate.
+// trackerProbeBodyLimit bounds the readiness body read: the answer is a small
+// JSON object (its schema level and a status), and a probe is never a way to
+// pull a large body through the gate.
 const trackerProbeBodyLimit = 64 << 10
 
 // trackerReadyStatus is the status trackerd reports when it is ready. The
@@ -132,7 +133,29 @@ func runTownStartHandshake(ctx context.Context, townRoot string) error {
 // a test drives the route decision with neither a bd nor a tracker, and with
 // w taking the warning for a route table the gate cannot read.
 func townHandshakeFor(ctx context.Context, townRoot string, bd, tracker func(context.Context, string) error, w io.Writer) error {
-	backend := townRouteBackend(townRoot, w)
+	return townHandshakeWith(ctx, townRoot, bd, tracker, trackerConfiguredIn, w)
+}
+
+// townHandshakeWith is townHandshakeFor with the question "does this town
+// configure a tracker" passed in too.
+//
+// A route table that parses decides the backend. One that cannot be read decides
+// nothing, and the gate answers it by what the town ITSELF configures, not by the
+// table: the bd handshake always runs (a Dolt town keeps the gate it had before a
+// route could name the tracker, so a corrupt routes.jsonl is not an outage), and a
+// town whose town.json configures a tracker must ALSO pass the tracker handshake,
+// because the bd handshake alone can pass without asking trackerd (gt-p85pw.110).
+func townHandshakeWith(ctx context.Context, townRoot string, bd, tracker func(context.Context, string) error, configured func(townRoot string) bool, w io.Writer) error {
+	backend, unreadable := townRouteBackend(townRoot, w)
+	if unreadable {
+		if err := bd(ctx, townRoot); err != nil {
+			return err
+		}
+		if configured(townRoot) {
+			return tracker(ctx, townRoot)
+		}
+		return nil
+	}
 	switch backend {
 	case beads.BackendDolt:
 		return bd(ctx, townRoot)
@@ -143,34 +166,41 @@ func townHandshakeFor(ctx context.Context, townRoot string, bd, tracker func(con
 		backend, beads.BackendDolt, beads.BackendTracker)
 }
 
+// trackerConfiguredIn reports whether townRoot's town.json configures a tracker
+// (a "tracker" section). The gate has already refused a town whose config files
+// do not parse (checkTownConfig), so a read that fails here counts as configured:
+// an unreadable answer must not read as "no tracker".
+func trackerConfiguredIn(townRoot string) bool {
+	town, err := config.LoadTownConfig(filepath.Join(townRoot, "mayor", "town.json"))
+	if errors.Is(err, config.ErrNotFound) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	return town.Tracker != nil
+}
+
 // townRouteBackend is the backend the town's own route names: the route whose
 // .beads directory is the town's, read here as internal/beads/backend reads a
 // rig's. A table that names no such route is Dolt, as a rig the table does not
 // name is Dolt, and a town with no route table at all has always been Dolt: a
-// missing table is not a broken one.
-//
-// A table that cannot be read is Dolt as well, with the read error going to w:
-// a town whose routes.jsonl is corrupt keeps the gate it had before a route
-// could name the tracker, instead of being refused for every town-running
-// command. That is not a hole, because the Dolt path is the bd handshake, so a
-// tracker town behind an unreadable table still fails closed, refused for a
-// missing bd build rather than for the table. Only a table that parses and
-// names a backend that is neither Dolt nor the tracker is returned as written,
-// and the caller refuses it: that backend was written down, and this gate does
-// not know what it speaks.
-func townRouteBackend(townRoot string, w io.Writer) string {
+// missing table is not a broken one. unreadable reports a table that exists and
+// could not be read: it names no backend, and townHandshakeWith decides by what
+// the town configures, with the read error going to w once.
+func townRouteBackend(townRoot string, w io.Writer) (backend string, unreadable bool) {
 	routes, err := beads.LoadRoutes(beads.GetTownBeadsPath(townRoot))
 	if err != nil {
 		warnUnreadableRouteOnce(w, townRoot, err)
-		return beads.BackendDolt
+		return beads.BackendDolt, true
 	}
 	townBeads := filepath.Clean(beads.GetTownBeadsPath(townRoot))
 	for _, r := range routes {
 		if filepath.Clean(filepath.Join(townRoot, r.Path, ".beads")) == townBeads {
-			return r.BackendName()
+			return r.BackendName(), false
 		}
 	}
-	return beads.BackendDolt
+	return beads.BackendDolt, false
 }
 
 // unreadableRouteWarned records the towns whose unreadable route table this
@@ -179,13 +209,14 @@ func townRouteBackend(townRoot string, w io.Writer) string {
 var unreadableRouteWarned sync.Map
 
 // warnUnreadableRouteOnce writes the route table read error to w, once per
-// town. The gate falls back to the bd handshake for such a town, so the
-// warning is the only place the read error is visible.
+// town. The gate runs the bd handshake for such a town (and the tracker's too when
+// the town configures one), so the warning is the only place the read error is
+// visible.
 func warnUnreadableRouteOnce(w io.Writer, townRoot string, err error) {
 	if _, seen := unreadableRouteWarned.LoadOrStore(filepath.Clean(townRoot), struct{}{}); seen {
 		return
 	}
-	fmt.Fprintf(w, "Warning: the route table at %s cannot be read (%v); the start gate runs the bd handshake, as it did before a route could name the tracker\n",
+	fmt.Fprintf(w, "Warning: the route table at %s cannot be read (%v); the start gate runs the bd handshake, and the tracker's too when the town configures one\n",
 		filepath.Join(beads.GetTownBeadsPath(townRoot), beads.RoutesFileName), err)
 }
 
