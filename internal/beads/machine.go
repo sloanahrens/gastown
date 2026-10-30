@@ -133,9 +133,19 @@ func machineEnvForCall(dir string, env, args []string) []string {
 // machine mode and the error path (whose envelope the typed-failure code in
 // bd_failure.go reads) behave as they did. args is the argv after "bd".
 //
+// A machine-exempt verb (bd sql) runs outside machine mode, so bd answers in
+// the plain wrapper instead; its data array is the payload. This is the only
+// envelope reader in this package: every caller of run reads bd output through
+// here, which keeps the gt-g5xgg decision that LegacyPayload is the one reader.
+//
 // One command changes shape rather than wrapping: create --silent printed the
 // bare id and, under machine mode, prints the created issue.
 func LegacyPayload(args []string, out []byte) []byte {
+	if machineExempt(args) {
+		if rows, ok := plainWrapperRows(out); ok {
+			return rows
+		}
+	}
 	env, ok, err := decodeMachineEnvelope(out, "bd")
 	if err != nil || !ok || len(env.Data) == 0 {
 		return out
@@ -151,30 +161,31 @@ func LegacyPayload(args []string, out []byte) []byte {
 	return []byte(env.Data)
 }
 
-// unwrapPlainEnvelope returns the data of a machine-exempt call's answer when
-// bd printed the plain {"schema_version":1,"data":...} wrapper. The installed
-// bd wraps the --json output of bd sql in it outside machine mode, where
-// LegacyPayload only reads the contract envelope. Only that exact pair of keys
-// is unwrapped, and only for a machineExempt verb: any other object, and any
-// other verb's output, passes through untouched. args is the argv after "bd".
-func unwrapPlainEnvelope(args []string, out []byte) []byte {
-	if !machineExempt(args) {
-		return out
-	}
+// plainWrapperRows returns the data array of out when out is exactly the plain
+// {"schema_version":..,"data":..} wrapper and data is a JSON array. The
+// installed bd wraps the --json output of bd sql in it outside machine mode,
+// where decodeMachineEnvelope reads only the contract envelope. Anything else
+// reports false and is returned as it was, so the caller's decode fails: a
+// wrapper whose data is null, an object or a string is never read as no rows.
+func plainWrapperRows(out []byte) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(out)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return out
+		return nil, false
 	}
 	var doc map[string]json.RawMessage
 	if json.Unmarshal(trimmed, &doc) != nil || len(doc) != 2 {
-		return out
+		return nil, false
 	}
 	if _, ok := doc["schema_version"]; !ok {
-		return out
+		return nil, false
 	}
-	data, ok := doc["data"]
+	raw, ok := doc["data"]
 	if !ok {
-		return out
+		return nil, false
 	}
-	return data
+	data := bytes.TrimSpace(raw)
+	if len(data) == 0 || data[0] != '[' {
+		return nil, false
+	}
+	return data, true
 }

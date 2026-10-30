@@ -8,10 +8,8 @@ import (
 	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
-// queryIssueRows decodes the rows of a bd sql answer whatever envelope the
-// installed bd wrapped it in: a bare array (older bd), the plain
-// {schema_version, data} wrapper (installed bd, which runs bd sql outside
-// machine mode), or the contract document machine mode prints.
+// TestQueryIssueRows drives queryIssueRows through the recorder seam, one bd
+// answer per row, under each envelope the installed bd can print.
 func TestQueryIssueRows(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -23,6 +21,11 @@ func TestQueryIssueRows(t *testing.T) {
 		{"bare array", `[{"id":"gt-1"}]`, []string{"gt-1"}, ""},
 		{"plain wrapper", `{"data":[{"id":"gt-1"}],"schema_version":1}`, []string{"gt-1"}, ""},
 		{"contract document", envelopeArray, []string{"gt-1"}, ""},
+		{"plain wrapper with an empty array", `{"data":[],"schema_version":1}`, nil, ""},
+		{"plain wrapper with null data", `{"data":null,"schema_version":1}`, nil, "parsing bd sql output"},
+		{"plain wrapper with object data", `{"data":{"id":"gt-1"},"schema_version":1}`, nil, "parsing bd sql output"},
+		{"plain wrapper with string data", `{"data":"gt-1","schema_version":1}`, nil, "parsing bd sql output"},
+		{"plain wrapper with an extra key", `{"data":[{"id":"gt-1"}],"schema_version":1,"note":"x"}`, nil, "parsing bd sql output"},
 		{"two keys that are not the wrapper", `{"data":[{"id":"gt-1"}],"note":"x"}`, nil, "parsing bd sql output"},
 	}
 	for _, tt := range tests {
