@@ -99,13 +99,9 @@ func parsedOptions(src string) ([]string, error) {
 	return got, nil
 }
 
-// TestCommandDocListsOptions holds the option list to one home: the cmd/docs-lint
-// package doc, the only place a reader of the command finds it. Its options must
-// be the ones parseArgs accepts. The command refuses an unknown option on stderr
-// and prints no usage block, so the doc names the options without claiming the
-// command prints them.
-func TestCommandDocListsOptions(t *testing.T) {
-	t.Parallel()
+// commandPackageDoc is the package doc of cmd/docs-lint, as its text reads.
+func commandPackageDoc(t *testing.T) string {
+	t.Helper()
 	file, err := parser.ParseFile(token.NewFileSet(), "../../cmd/docs-lint/main.go", nil, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse cmd/docs-lint/main.go: %v", err)
@@ -113,28 +109,34 @@ func TestCommandDocListsOptions(t *testing.T) {
 	if file.Doc == nil {
 		t.Fatal("cmd/docs-lint has no package doc")
 	}
-	src, err := os.ReadFile("run.go")
-	if err != nil {
-		t.Fatalf("read run.go: %v", err)
-	}
-	parsed, err := parsedOptions(string(src))
-	if err != nil {
-		t.Fatalf("run.go: %v", err)
-	}
-	doc := file.Doc.Text()
-	documented := docOptions(doc)
-	for _, opt := range parsed {
-		if !slices.Contains(documented, opt) {
-			t.Errorf("parseArgs accepts %q, package doc does not document it", opt)
-		}
-	}
-	for _, opt := range documented {
-		if !slices.Contains(parsed, opt) {
-			t.Errorf("package doc documents %q, parseArgs refuses it", opt)
-		}
+	return file.Doc.Text()
+}
+
+// TestCommandDocHasNoOptionList keeps the option list out of the cmd/docs-lint
+// package doc. The list is a copy of parseArgs that goes stale when an option
+// changes, and the doc points at parseArgs instead (docs/writing-for-agents.md
+// R2, R3). The command refuses an unknown option on stderr and prints no usage
+// block, so the doc also makes no usage claim.
+func TestCommandDocHasNoOptionList(t *testing.T) {
+	t.Parallel()
+	doc := commandPackageDoc(t)
+	if got := docOptions(doc); len(got) > 0 {
+		t.Errorf("package doc restates the option list: %q", got)
 	}
 	if claimsUsageBlock(doc) {
 		t.Error("package doc claims the command prints a usage block")
+	}
+}
+
+// TestCommandDocStatesDefaultMode keeps the no-argument run in the package doc as
+// one plain sentence, so a reader learns what the bare command does without a
+// usage table to parse.
+func TestCommandDocStatesDefaultMode(t *testing.T) {
+	t.Parallel()
+	const want = "With no arguments it runs every check and prints one line per finding."
+	doc := strings.Join(strings.Fields(commandPackageDoc(t)), " ")
+	if !strings.Contains(doc, want) {
+		t.Errorf("package doc does not state the default mode as %q", want)
 	}
 }
 
