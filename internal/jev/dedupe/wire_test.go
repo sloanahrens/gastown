@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/jev/jevtest"
 )
 
 // hmJSON is the shape `hm query --json` prints: a bead hit matched on its
@@ -231,6 +233,54 @@ func TestJevDedupeOpenAllowsCountsAnotherCallersSpend(t *testing.T) {
 			got, err := p.Allows()
 			if err != nil || got != tt.want {
 				t.Errorf("Allows = %v, %v, want %v and no error", got, err, tt.want)
+			}
+		})
+	}
+}
+
+// Open hands the scrub setting to the client: set, the pass's Asker sends the
+// state scrubbed; left out, the state goes as the battery built it.
+func TestJevDedupeOpenScrubsStateWhenSettingsSaySo(t *testing.T) {
+	t.Parallel()
+	const token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+	tests := []struct {
+		name      string
+		scrub     bool
+		wantToken bool
+	}{
+		{name: "no scrub setting, the state is sent whole", wantToken: true},
+		{name: "scrub setting on, the token is replaced", scrub: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sink := &jevtest.PostedBody{}
+			town := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(town, RigName, ".beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			client := func(opts ...jev.Option) (*jev.Client, error) {
+				return jev.NewClient(append(opts,
+					jev.WithKey("test-key"),
+					jev.WithBaseURL("http://jev.test/v1/systemone"),
+					jev.WithHTTPClient(&http.Client{Transport: sink}))...)
+			}
+			p, err := open(town, Settings{USDPerBillionTokens: 4, Scrub: tt.scrub}, nil, client)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			_, err = p.Asker.Ask(context.Background(), map[string]string{"log": "pushed with " + token}, map[string]jev.Question{
+				"q": {Type: "choice", Instructions: "Which team?", Options: map[string]string{"returns": "Exchanges"}},
+			})
+			var status *jev.StatusError
+			if !errors.As(err, &status) || status.Status != http.StatusBadGateway {
+				t.Fatalf("Ask error = %v, want the 502 the transport answers", err)
+			}
+			if sink.Calls != 1 {
+				t.Fatalf("transport received %d requests, want 1", sink.Calls)
+			}
+			if got := strings.Contains(sink.Body, token); got != tt.wantToken {
+				t.Errorf("posted body holds the token = %v, want %v", got, tt.wantToken)
 			}
 		})
 	}

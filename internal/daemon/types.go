@@ -159,6 +159,7 @@ type (
 	JevProgressConfig          = agentconfig.JevProgressConfig
 	JevStaleConfig             = agentconfig.JevStaleConfig
 	JevNotesConfig             = agentconfig.JevNotesConfig
+	JevScrub                   = agentconfig.JevScrub
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
 	LandingWorkerConfig        = agentconfig.LandingWorkerConfig

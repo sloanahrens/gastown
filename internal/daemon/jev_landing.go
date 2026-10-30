@@ -53,6 +53,7 @@ func (d *Daemon) runJevLanding() {
 		settings = landing.Settings{
 			MaxUSDPerDay:        c.Patrols.JevLanding.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevLanding.USDPerBillionTokens,
+			Scrub:               c.Patrols.JevLanding.Scrub,
 		}
 	}
 	open := d.jevLandingOpen

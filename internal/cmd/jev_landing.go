@@ -105,6 +105,7 @@ func jevLandingSettings(townRoot string) (landing.Settings, error) {
 	return landing.Settings{
 		MaxUSDPerDay:        c.MaxUSDPerDay,
 		USDPerBillionTokens: c.USDPerBillionTokens,
+		Scrub:               c.Scrub,
 	}, nil
 }
 
