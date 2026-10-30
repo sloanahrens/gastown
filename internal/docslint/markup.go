@@ -19,9 +19,13 @@ const statusPrefix = "> Status:"
 
 // pushDefaultPattern is a command that sends work to main or master. The
 // refspec's destination decides: "main:polecat/x" reads from main and is not a
-// push to it, while "HEAD:main" and ":main" are. It is matched per line, so a
-// push cannot be spliced together from two lines.
+// push to it, while "HEAD:main" and ":main" are. It is matched against the
+// whole file, so a push split across lines is still a push.
 var pushDefaultPattern = regexp.MustCompile(`git[[:space:]]+(-[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)*push([[:space:]]+-[^[:space:]]+)*[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]*:)?(refs/heads/)?(main|master)([^[:alnum:]:_-]|$)`)
+
+// continuationPattern is a backslash that ends a line, which the shell joins to
+// the next line.
+var continuationPattern = regexp.MustCompile(`\\[ \t]*\r?\n`)
 
 // slingPolecatPattern is an assignment to a polecat.
 var slingPolecatPattern = regexp.MustCompile(`\bsling[[:space:]]+[^[:space:]]*polecats/`)
@@ -123,7 +127,8 @@ func CheckStrayMarkup(fsys FS) ([]Finding, error) {
 // default branch and also offers a polecat, on each line that offers one. A
 // polecat session cannot push main, so a formula that tells one to is advertising
 // a flow the guards refuse (gt-ibt8). plugin.md is exempt: the plugins that push
-// a default branch run from the daemon, which is not a polecat caller.
+// a default branch run from the daemon, which sets GT_ROLE=daemon/plugin and is
+// not a polecat caller (scripts/docs-lint.sh:198-200).
 func CheckPolecatMainPush(fsys FS) ([]Finding, error) {
 	agentFacing, err := AgentFacing(fsys)
 	if err != nil {
@@ -138,11 +143,13 @@ func CheckPolecatMainPush(fsys FS) ([]Finding, error) {
 		if err != nil {
 			return nil, fmt.Errorf("docs-lint: reading %s: %w", f, err)
 		}
-		lines := splitLines(string(data))
-		if !pushesDefaultBranch(lines) {
+		content := string(data)
+		if !pushesDefaultBranch(content) {
 			continue
 		}
-		for i, text := range lines {
+		// Sling lines are numbered in the file, so they are found on the original
+		// lines, not on the joined text the push is matched against.
+		for i, text := range splitLines(content) {
 			if slingPolecatPattern.MatchString(text) {
 				out = append(out, Finding{
 					File:    f,
@@ -198,12 +205,9 @@ func hasStrayMarkup(line string) bool {
 	return strings.HasPrefix(line, "<<<<<<< ") || strings.HasPrefix(line, ">>>>>>> ")
 }
 
-// pushesDefaultBranch reports whether any line of a file pushes main or master.
-func pushesDefaultBranch(lines []string) bool {
-	for _, text := range lines {
-		if pushDefaultPattern.MatchString(text) {
-			return true
-		}
-	}
-	return false
+// pushesDefaultBranch reports whether a file pushes main or master anywhere in
+// its text, with backslash continuations joined so a push wrapped in a shell
+// command is matched whole.
+func pushesDefaultBranch(content string) bool {
+	return pushDefaultPattern.MatchString(continuationPattern.ReplaceAllString(content, " "))
 }

@@ -1,7 +1,9 @@
 package docslint
 
 import (
+	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -206,37 +208,44 @@ func TestStrayMarkupReadErrorIsReturned(t *testing.T) {
 	}
 }
 
+// TestPolecatMainPushTable runs each formula through the whole-file push match.
+// wantLine is the line of the sling finding, 0 for none. A push split over
+// lines moves the sling line down, so the rows state the line rather than
+// assume it.
 func TestPolecatMainPushTable(t *testing.T) {
 	t.Parallel()
-	const sling = "gt sling rig/polecats/p1 --formula mol-release\n"
+	const polecat = "gt sling rig/polecats/p1 --formula mol-release"
 	tests := []struct {
-		name string
-		push string
-		want bool
+		name     string
+		content  string
+		wantLine int
 	}{
-		{name: "push of HEAD to main", push: "git push origin HEAD:main", want: true},
-		{name: "push of main", push: "git push origin main", want: true},
-		{name: "push of master", push: "git push origin master", want: true},
-		{name: "push with -C and a delete refspec", push: "git -C dir push origin :main", want: true},
-		{name: "push with --force to a full ref", push: "git push --force origin refs/heads/main", want: true},
-		{name: "push of a local main as a source is not a push to main", push: "git push origin main:polecat/x", want: false},
-		{name: "push of a feature branch", push: "git push origin feature", want: false},
-		{name: "no push line", push: "", want: false},
+		{name: "push of HEAD to main", content: "git push origin HEAD:main\n" + polecat, wantLine: 2},
+		{name: "push of main", content: "git push origin main\n" + polecat, wantLine: 2},
+		{name: "push of master", content: "git push origin master\n" + polecat, wantLine: 2},
+		{name: "push with -C and a delete refspec", content: "git -C dir push origin :main\n" + polecat, wantLine: 2},
+		{name: "push with --force to a full ref", content: "git push --force origin refs/heads/main\n" + polecat, wantLine: 2},
+		{name: "push split by a backslash continuation", content: "git push origin \\\n  main\n" + polecat, wantLine: 3},
+		{name: "push split by a plain newline", content: "git push origin\nmain\n" + polecat, wantLine: 3},
+		{name: "push with -C split before the refspec", content: "git -C dir push origin \\\n  HEAD:main\n" + polecat, wantLine: 3},
+		{name: "push of a local main as a source is not a push to main", content: "git push origin main:polecat/x\n" + polecat, wantLine: 0},
+		{name: "push of a feature branch", content: "git push origin feature\n" + polecat, wantLine: 0},
+		{name: "push of a branch named main-fix", content: "git push origin main-fix\n" + polecat, wantLine: 0},
+		{name: "push of a feature branch under a main path", content: "git push origin feature/main\n" + polecat, wantLine: 0},
+		{name: "a comment that says push main is not a push", content: "# push main\n" + polecat, wantLine: 0},
+		{name: "a push with no polecat line flags nothing", content: "git push origin main\n", wantLine: 0},
+		{name: "no push line", content: polecat, wantLine: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			content := sling
-			if tc.push != "" {
-				content = tc.push + "\n" + sling
-			}
-			files := memFS{"internal/formula/formulas/mol-a.formula.toml": content}
+			files := memFS{"internal/formula/formulas/mol-a.formula.toml": tc.content + "\n"}
 			got, err := CheckPolecatMainPush(files)
 			if err != nil {
 				t.Fatalf("CheckPolecatMainPush(): %v", err)
 			}
 			want := []string(nil)
-			if tc.want {
-				want = []string{"internal/formula/formulas/mol-a.formula.toml:2: polecat-main-push: pushes main/master and offers a polecat; the guards refuse a polecat session (gt-ibt8)"}
+			if tc.wantLine != 0 {
+				want = []string{fmt.Sprintf("internal/formula/formulas/mol-a.formula.toml:%d: polecat-main-push: pushes main/master and offers a polecat; the guards refuse a polecat session (gt-ibt8)", tc.wantLine)}
 			}
 			if gotStrings := findingStrings(got); !reflect.DeepEqual(gotStrings, want) {
 				t.Errorf("CheckPolecatMainPush() = %q, want %q", gotStrings, want)
@@ -313,10 +322,28 @@ func TestMarkupAndCeilingWalkErrorsAreReturned(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fsys := walkErrorFS{memFS: files, failDir: tc.failDir}
+			var walked []string
+			fsys := walkRecorder{walkErrorFS: walkErrorFS{memFS: files, failDir: tc.failDir}, walked: &walked}
 			if err := tc.check(fsys); err == nil {
 				t.Errorf("walk of %s failed, but the check returned no error", tc.failDir)
 			}
+			// The error must come from the walk the row names. A check that never
+			// walks that directory would pass the error check above for no reason.
+			if !slices.Contains(walked, tc.failDir) {
+				t.Errorf("the check never walked %s (walked %q)", tc.failDir, walked)
+			}
 		})
 	}
+}
+
+// walkRecorder is walkErrorFS that also records each directory a walk is asked
+// for, so a test can tell a walk that failed from a walk that never ran.
+type walkRecorder struct {
+	walkErrorFS
+	walked *[]string
+}
+
+func (w walkRecorder) WalkFiles(dir string) ([]string, error) {
+	*w.walked = append(*w.walked, dir)
+	return w.walkErrorFS.WalkFiles(dir)
 }
