@@ -3,13 +3,17 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/backend"
+	"github.com/steveyegge/gastown/internal/beads/trackerclient"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -30,6 +34,19 @@ import (
 //
 // It returns deduplicated, unwrapped issue IDs (external:prefix:id → id).
 func depListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
+	return depListRawIDsWith(dir, issueID, direction, depType, backend.FromEnv(os.Getenv), workspace.Find, depListRawIDsViaDolt)
+}
+
+// rawDepDolt is the Dolt read the raw path tries first.
+type rawDepDolt func(dir, issueID, direction, depType string) ([]string, error)
+
+// townRootFinder is workspace.Find: the town root above dir, or "" outside a town.
+type townRootFinder func(startDir string) (string, error)
+
+// depListRawIDsWith is depListRawIDs with the tracker settings, the town
+// lookup and the Dolt read passed in, so a test can supply them without reading
+// the environment or opening Dolt.
+func depListRawIDsWith(dir, issueID, direction, depType string, cfg backend.Config, find townRootFinder, dolt rawDepDolt) ([]string, error) {
 	// Bead IDs are system-generated alphanumeric strings with hyphens, dots,
 	// and underscores — validate to prevent injection before interpolating below.
 	if !beads.IsValidBeadID(issueID) {
@@ -46,7 +63,15 @@ func depListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
 		return nil, fmt.Errorf("invalid dep type: %q", depType)
 	}
 
-	if ids, err := depListRawIDsViaDolt(dir, issueID, direction, depType); err == nil {
+	ids, err := depListRawIDsOnTracker(dir, issueID, direction, depType, cfg, find)
+	if err == nil {
+		return ids, nil
+	}
+	if !errors.Is(err, errNotOnTracker) {
+		return nil, err
+	}
+
+	if ids, err := dolt(dir, issueID, direction, depType); err == nil {
 		return ids, nil
 	}
 
@@ -54,11 +79,66 @@ func depListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd sql for deps of %s: %w", issueID, err)
 	}
-	ids, err := parseRawDepRows(rows, parseKey)
+	ids, err = parseRawDepRows(rows, parseKey)
 	if err != nil {
 		return nil, fmt.Errorf("parsing dep sql for %s: %w", issueID, err)
 	}
 	return ids, nil
+}
+
+// errNotOnTracker means dir's rig is not on the tracker, so the Dolt and bd sql
+// path answers the query instead.
+var errNotOnTracker = errors.New("rig is not on the tracker")
+
+// depListRawIDsOnTracker answers the dependency query from the tracker seam
+// when dir's rig is on the tracker, so no Dolt connection or bd sql call is
+// made. A Dolt rig returns errNotOnTracker and the caller runs the raw path.
+// Outside any town there is no route table, so that is errNotOnTracker too.
+// A town that cannot be found, or a tracker rig that cannot be opened, is an
+// error, not a fall back to Dolt: the backend never lets a tracker rig write to
+// Dolt.
+func depListRawIDsOnTracker(dir, issueID, direction, depType string, cfg backend.Config, find townRootFinder) ([]string, error) {
+	townRoot, err := find(dir)
+	if err != nil {
+		return nil, fmt.Errorf("finding the town for %s: %w", issueID, err)
+	}
+	if townRoot == "" {
+		return nil, errNotOnTracker
+	}
+	store, err := backend.Open(townRoot, beads.ResolveBeadsDir(dir), cfg)
+	if err != nil {
+		return nil, fmt.Errorf("opening beads for %s: %w", issueID, err)
+	}
+	if _, ok := store.(*trackerclient.Client); !ok {
+		return nil, errNotOnTracker
+	}
+
+	var deps []beads.IssueDep
+	if direction == "up" {
+		deps, err = store.DepListUp(issueID, depType)
+	} else {
+		deps, err = store.DepList(issueID, depType)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tracker deps of %s: %w", issueID, err)
+	}
+	return depIssueIDs(deps), nil
+}
+
+// depIssueIDs is the deduplicated, unwrapped issue IDs of deps, in the order
+// the seam returned them, matching what queryRawDepIDs and parseRawDepRows
+// give for the same edges.
+func depIssueIDs(deps []beads.IssueDep) []string {
+	seen := make(map[string]bool, len(deps))
+	var ids []string
+	for _, dep := range deps {
+		id := beads.ExtractIssueID(dep.ID)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func depListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, error) {
