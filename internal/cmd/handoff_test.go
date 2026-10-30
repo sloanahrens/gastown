@@ -1534,6 +1534,62 @@ func TestRestartPlanExportsBareGitAuthorName(t *testing.T) {
 	}
 }
 
+// TestHandoffEnvIdentity checks the respawn exports the same four git identity
+// variables the first spawn does: the seat's bare name as author and committer
+// name and <name>@gastown.local as author and committer email, for a compound
+// gtRole such as gastown/polecats/coma. They ride the environment, so no git
+// config is written, and the compound address is never exported as the name.
+func TestHandoffEnvIdentity(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	tests := []struct {
+		name    string
+		role    string
+		rig     string
+		seat    string
+		session func(prefix, seat string) string
+	}{
+		{"polecat", constants.RolePolecat, "gastown", "coma", session.PolecatSessionName},
+		{"crew", constants.RoleCrew, "gastown", "max", session.CrewSessionName},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := restartOpts(townRoot, map[string]string{})
+			opts.Registry = reg
+			plan, err := buildRestartPlan(tt.session(reg.PrefixForRig(tt.rig), tt.seat), opts)
+			if err != nil {
+				t.Fatalf("buildRestartPlan: %v", err)
+			}
+			// First spawn's export is the criterion the respawn must meet.
+			first := config.AgentEnv(config.AgentEnvConfig{Role: tt.role, Rig: tt.rig, AgentName: tt.seat})
+			for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+				want := first[key]
+				if want == "" {
+					t.Fatalf("config.AgentEnv does not export %s for a %s", key, tt.role)
+				}
+				if !strings.Contains(plan.Command, key+"="+want+" ") {
+					t.Errorf("respawn command does not carry %s=%s:\n%s", key, want, plan.Command)
+				}
+			}
+			if want := tt.seat + "@gastown.local"; first["GIT_AUTHOR_EMAIL"] != want || first["GIT_COMMITTER_EMAIL"] != want {
+				t.Errorf("first spawn emails = %q and %q, want %q", first["GIT_AUTHOR_EMAIL"], first["GIT_COMMITTER_EMAIL"], want)
+			}
+			compound := tt.rig + "/polecats/" + tt.seat
+			if tt.role == constants.RoleCrew {
+				compound = tt.rig + "/crew/" + tt.seat
+			}
+			for _, key := range []string{"GIT_COMMITTER_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"} {
+				if bad := key + "=" + compound; strings.Contains(plan.Command, bad) {
+					t.Errorf("respawn command carries the compound address in %s:\n%s", key, plan.Command)
+				}
+			}
+		})
+	}
+}
+
 // The plan's workDir wins; without one the state stays in cwd, and with
 // neither there is no directory to write under.
 func TestHandoffStateDir(t *testing.T) {
