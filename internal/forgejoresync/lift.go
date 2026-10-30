@@ -1,6 +1,7 @@
 package forgejoresync
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,6 +61,15 @@ type Resync struct {
 	Files  Files
 	Now    func() time.Time
 	Log    func(string)
+	// Getenv and ReadFile resolve the admin token; nil means the process's own.
+	Getenv   func(string) string
+	ReadFile func(string) ([]byte, error)
+	// Steps are the run's ordered stages; nil runs the stubs. Provision re-runs the
+	// provisioner; nil runs forgejoprov.Run.
+	Steps     []Step
+	Provision func(context.Context, *forgejoprov.Options, forgejoprov.Env) int
+	// RestoreTimeout bounds the protection restore; zero means the default.
+	RestoreTimeout time.Duration
 }
 
 // LiftProtection removes the protection rule on MainBranch so the admin push
