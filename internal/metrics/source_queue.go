@@ -368,7 +368,7 @@ func queueStoreCounts(ctx context.Context, env Env, rigs []queueRig, col queueBe
 // them, and every other rig is read from its own store, queueRigParallel at a
 // time. A rig left unanswered is a failed read. The cross-rig request has one
 // deadline of its own; each bd rig has one too, started when its read runs
-// (queueRigLister), so a rig read late in the batch is not charged for the
+// (queueRigStore), so a rig read late in the batch is not charged for the
 // rigs read before it. A hung store costs its column, and the group's own
 // deadline still caps the whole.
 func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.ListOptions, read beads.AcrossRead) (map[string]int, bool) {
@@ -447,8 +447,8 @@ func (r queueRigStore) with(read beads.AcrossRead) ([]*beads.Issue, error) {
 	return read(store)
 }
 
-// List is refused: ListAcross hands a rig's read to queueListCounts, which
-// opens the store with with. A direct List would run without the deadline.
+// List is refused: a rig's store is opened by with, under its deadline, and
+// only the column's read reaches it. A direct List would run with no deadline.
 func (r queueRigStore) List(beads.ListOptions) ([]*beads.Issue, error) {
 	return nil, fmt.Errorf("queue: rig %s is read through its column's read", r.path)
 }
