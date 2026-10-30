@@ -650,12 +650,11 @@ func TestTierSweepCommand_ArgvPerTier(t *testing.T) {
 }
 
 // TestTierSweepCommand_ExitOverrulesGreen: the integration and race stage reads
-// its output line by line, and its exit status withholds a GREEN line only when
-// nothing in the output accounts for the failure. A RED line does: the run is
-// one command for both tiers, so a RED integration leaves the race tier's GREEN
-// standing (gt-xyigz). A non-zero exit with no RED line behind it still
-// withholds GREEN, as does a decline the rig's script is alone in making
-// (gt-qgrdy).
+// its output line by line, and only the RED exit (1, cmd/tier-sweep/main.go:8-10)
+// is excused by a RED line in that output: the run is one command for both
+// tiers, so a RED integration leaves the race tier's GREEN standing (gt-xyigz).
+// Exit 2, a signal's -1 and exit 1 with no RED line behind it all withhold
+// GREEN, as does a decline the rig's script is alone in making (gt-qgrdy).
 func TestTierSweepCommand_ExitOverrulesGreen(t *testing.T) {
 	t.Parallel()
 	const (
@@ -680,6 +679,14 @@ func TestTierSweepCommand_ExitOverrulesGreen(t *testing.T) {
 		{name: "a RED line stands and leaves the other tier's GREEN standing", output: red + race, exitCode: 1,
 			want: map[string]string{"integration": tierSweepRed, "race": tierSweepGreen}},
 		{name: "a RED line leaves an unreported tier unreported", output: red, exitCode: 1,
+			want: map[string]string{"integration": tierSweepRed}},
+		{name: "a RED line at exit 0 stands beside the other tier's GREEN", output: red + race, exitCode: 0,
+			want: map[string]string{"integration": tierSweepRed, "race": tierSweepGreen}},
+		{name: "a RED line at exit 2 does not excuse the run's own failure", output: red + race, exitCode: 2,
+			want: map[string]string{"integration": tierSweepRed}},
+		{name: "a RED line at a signal's exit -1 does not excuse it", output: red + race, exitCode: -1,
+			want: map[string]string{"integration": tierSweepRed}},
+		{name: "a RED line at exit 137 does not excuse it", output: red + race, exitCode: 137,
 			want: map[string]string{"integration": tierSweepRed}},
 		{name: "go command: a decline line at exit 1 excuses nothing", output: green + decl, exitCode: 1,
 			want: map[string]string{}},
@@ -2133,24 +2140,38 @@ func TestTierSweepRigCycleTierTheScriptDoesNotOffer(t *testing.T) {
 	}
 }
 
+// gastownIntegrationLog is the shape of one integration stage log from the
+// sweep's own directory (~/gt/.runtime/tier-sweep/logs/gastown/integration.log),
+// sanitized: that log is not in this sandbox, so the package names, counts and
+// log directories stand in for the recorded run's. The stage log is the step's
+// stdout and stderr together (internal/land/gate.go:744-745), so it carries the
+// sweep's progress lines (stderr) beside its summary lines (stdout,
+// cmd/tier-sweep/main.go:6-8). One command runs the integration tier and then
+// the race tier, so a RED integration's exit 1 arrives with the race tier's
+// GREEN line after it — the input that was recorded as race "no verdict line
+// (exit 1)" and filed this bead (gt-xyigz).
+const gastownIntegrationLog = "" +
+	"tier-sweep: integration ./internal/cmd ...\n" +
+	"tier-sweep: integration ./internal/daemon ...\n" +
+	"tier-sweep: integration ./internal/repoguard ...\n" +
+	"tier-sweep: integration RED passed=124 failed=1 skipped=0 failed: ./internal/repoguard (logs /tmp/tier-sweep.2f9c)\n" +
+	"tier-sweep: race ./internal/cmd ...\n" +
+	"tier-sweep: race GREEN passed=1 failed=0 skipped=0 (logs /tmp/tier-sweep.71bd)\n"
+
 // gt-xyigz: the Go command runs the integration and race tiers in one process
 // and exits 1 when either is RED. The GREEN line of the tier that passed is
 // that tier's verdict, so a red integration files no race bead and no race
 // attention item beside its own.
 func TestTierSweepRigCycleGreenRaceBesideRedIntegration(t *testing.T) {
 	t.Parallel()
-	const (
-		shellSummary       = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
-		integrationSummary = "tier-sweep: integration RED passed=4 failed=1 skipped=0 failed: ./internal/repoguard (logs /tmp/tier-sweep.y)\n"
-		raceSummary        = "tier-sweep: race GREEN passed=1 failed=0 skipped=0 (logs /tmp/tier-sweep.z)\n"
-	)
+	const shellSummary = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
 	now := atHour(time.Now(), 15)
 	d, rec, bd, _ := newTierSweepDaemon(t, now, "gastown")
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	rec.result = func(st tierSweepStage) tierSweepStageResult {
 		if st.slot {
-			return tierSweepStageResult{output: integrationSummary + raceSummary, exitCode: 1, ran: true}
+			return tierSweepStageResult{output: gastownIntegrationLog, exitCode: tierSweepRedExit, ran: true}
 		}
 		return tierSweepStageResult{output: shellSummary, exitCode: 0, ran: true}
 	}
@@ -2161,10 +2182,14 @@ func TestTierSweepRigCycleGreenRaceBesideRedIntegration(t *testing.T) {
 	}
 
 	st := tierSweepTestState(t, d, "gastown")
-	if race, ok := st.Tiers["race"]; !ok || race.Verdict != tierSweepGreen {
-		t.Errorf("race = %+v (present = %v), want GREEN: its own line reported it", race, ok)
+	race, ok := st.Tiers["race"]
+	if !ok || race.Verdict != tierSweepGreen {
+		t.Fatalf("race = %+v (present = %v), want GREEN: its own line reported it", race, ok)
 	}
-	if in := st.Tiers["integration"]; in.Verdict != tierSweepRed {
+	if slices.Contains(race.FailedNames, "no verdict line (exit 1)") {
+		t.Errorf("race failed names = %q, want none: that record is what this bead was filed for", race.FailedNames)
+	}
+	if in := st.Tiers["integration"]; in.Verdict != tierSweepRed || !slices.Contains(in.FailedNames, "./internal/repoguard") {
 		t.Errorf("integration = %+v, want RED from the line that named ./internal/repoguard", in)
 	}
 	if st.LastGreenSHA == "tips1" {
@@ -3177,9 +3202,9 @@ func TestTierSweepTreeHas_ReadsTheTree(t *testing.T) {
 
 // TestTierSweepRig_ScriptTreeReadsTheScriptVerdict: a tree that ships only
 // scripts/tier-sweep.sh runs it with the tiers, and its summary lines are the
-// tiers' verdicts. The script exits 1 when any tier was RED, so a GREEN line
-// stands beside that RED, and lines it cannot account for are withheld
-// (gt-xyigz).
+// tiers' verdicts. The script reports a RED tier with exit 1, so a GREEN line
+// stands beside that RED, and any other status withholds GREEN whatever the
+// script printed (gt-xyigz).
 func TestTierSweepRig_ScriptTreeReadsTheScriptVerdict(t *testing.T) {
 	t.Parallel()
 	const (
@@ -3188,15 +3213,16 @@ func TestTierSweepRig_ScriptTreeReadsTheScriptVerdict(t *testing.T) {
 	)
 	for _, tc := range []struct {
 		name            string
-		integration     string // the line the script printed for the integration tier
-		exitCode        int
+		integrationLine string // the summary line the script printed for the integration tier
+		exitCode        int    // the integration and race stage's status
 		wantIntegration string
 		wantRace        string
-		wantGreen       bool
+		wantLastGreen   bool // whether the tree's sha is recorded green
 	}{
-		{name: "exit 0", integration: green, exitCode: 0, wantIntegration: tierSweepGreen, wantRace: tierSweepGreen, wantGreen: true},
-		{name: "exit 1 over a red integration", integration: red, exitCode: 1, wantIntegration: tierSweepRed, wantRace: tierSweepGreen},
-		{name: "exit 1 over GREEN lines alone is withheld", integration: green, exitCode: 1, wantIntegration: tierSweepRed, wantRace: tierSweepRed},
+		{name: "exit 0", integrationLine: green, exitCode: 0, wantIntegration: tierSweepGreen, wantRace: tierSweepGreen, wantLastGreen: true},
+		{name: "exit 1 over a red integration", integrationLine: red, exitCode: 1, wantIntegration: tierSweepRed, wantRace: tierSweepGreen},
+		{name: "exit 1 over GREEN lines alone is withheld", integrationLine: green, exitCode: 1, wantIntegration: tierSweepRed, wantRace: tierSweepRed},
+		{name: "exit 2 over a red integration is withheld", integrationLine: red, exitCode: 2, wantIntegration: tierSweepRed, wantRace: tierSweepRed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -3209,7 +3235,7 @@ func TestTierSweepRig_ScriptTreeReadsTheScriptVerdict(t *testing.T) {
 				var b strings.Builder
 				for _, tier := range st.tiers {
 					if tier == "integration" {
-						fmt.Fprintf(&b, tc.integration, tier)
+						fmt.Fprintf(&b, tc.integrationLine, tier)
 						continue
 					}
 					fmt.Fprintf(&b, green, tier)
@@ -3245,8 +3271,8 @@ func TestTierSweepRig_ScriptTreeReadsTheScriptVerdict(t *testing.T) {
 			if got := st.Tiers["shell"].Verdict; got != tierSweepGreen {
 				t.Errorf("shell verdict = %q, want GREEN from its own stage", got)
 			}
-			if got := st.LastGreenSHA == "abc123"; got != tc.wantGreen {
-				t.Errorf("LastGreenSHA = %q, want recorded green = %v", st.LastGreenSHA, tc.wantGreen)
+			if got := st.LastGreenSHA == "abc123"; got != tc.wantLastGreen {
+				t.Errorf("LastGreenSHA = %q, want recorded green = %v", st.LastGreenSHA, tc.wantLastGreen)
 			}
 			if got := st.Tiers["shell"].Command; got != "bash scripts/tier-sweep.sh shell" {
 				t.Errorf("shell command on the record = %q, want the script the tree ran", got)

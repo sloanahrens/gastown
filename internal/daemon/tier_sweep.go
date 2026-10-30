@@ -1610,13 +1610,14 @@ func parseTierSweepSummaries(output string) map[string]tierSweepTierResult {
 // or log-dir failure). That GREEN line is withheld, so the tier is unreported,
 // and the caller records a tier with no verdict as RED.
 //
-// The integration and race stage is read the same way, with two exceptions. A
-// non-zero exit beside a RED line stands: the command exits 1 when any tier it
-// ran was RED, so that RED is what the exit reports and the GREEN line beside
-// it is the other tier's verdict (gt-xyigz). And the rig's script exits 2 at a
-// tier it does not offer, after the tiers before it have printed their
-// verdicts, and those verdicts stand (gt-qgrdy). Any other exit withholds
-// GREEN, and so does an unknown-tier line under exit 0 (tierSweepExitStands).
+// The integration and race stage is read the same way, with two exceptions.
+// The RED exit (tierSweepRedExit) beside a RED line stands: the command exits 1
+// when any tier it ran was RED, so that RED is what the exit reports and the
+// GREEN line beside it is the other tier's verdict (gt-xyigz). And the rig's
+// script exits 2 at a tier it does not offer, after the tiers before it have
+// printed their verdicts, and those verdicts stand (gt-qgrdy). Any other exit
+// withholds GREEN, and so does an unknown-tier line under exit 0
+// (tierSweepExitStands).
 func tierSweepStageReported(st tierSweepStage, res tierSweepStageResult) map[string]tierSweepTierResult {
 	if st.runner == "" {
 		reported := parseTierSweepSummaries(res.output)
@@ -1633,19 +1634,29 @@ func tierSweepStageReported(st tierSweepStage, res tierSweepStageResult) map[str
 	return reported
 }
 
+// tierSweepRedExit is the one exit status cmd/tier-sweep reports for a tier that
+// came back RED: it returns 1 after the last tier's line when any tier was RED,
+// and takes 2 only for a command line, log directory or tier it cannot handle
+// (cmd/tier-sweep/main.go:8-10, internal/tiersweep/sweep.go:87-94,
+// internal/tiersweep/options.go:50). The rig's own script follows the same two
+// codes. Any other status, a signal's -1 included, is not a tier's verdict.
+const tierSweepRedExit = 1
+
 // tierSweepExitStands reports whether a non-shell stage's exit leaves its GREEN
-// verdicts standing. A declined stage stands (tierSweepDeclined), and so does a
-// non-zero exit the output accounts for with a RED line: the run is one command
-// for two tiers, so exiting 1 over a RED integration says nothing about the
-// race tier that reported GREEN (gt-xyigz). With no RED line to account for it,
-// only exit 0 stands, and only when the output names no unknown tier: the
-// script declines by exiting 2, so a script that prints the decline line and
-// exits 0 is not the decline shape, and its GREEN verdicts are withheld.
+// verdicts standing. A declined stage stands (tierSweepDeclined), and so does
+// the RED exit when the output accounts for it with a RED line: the stage is one
+// command for two tiers, so tierSweepRedExit over a RED integration says nothing
+// about the race tier that reported GREEN beside it (gt-xyigz). Only that status
+// counts as the RED exit; 2 and a signal's -1 withhold GREEN whatever the output
+// printed. With no RED line to account for it, only exit 0 stands, and only when
+// the output names no unknown tier: the script declines by exiting 2, so a
+// script that prints the decline line and exits 0 is not the decline shape, and
+// its GREEN verdicts are withheld.
 func tierSweepExitStands(st tierSweepStage, res tierSweepStageResult, reported map[string]tierSweepTierResult) bool {
 	if len(tierSweepDeclined(st, res)) > 0 {
 		return true
 	}
-	if res.exitCode != 0 && tierSweepAnyRed(reported) {
+	if res.exitCode == tierSweepRedExit && tierSweepAnyRed(reported) {
 		return true
 	}
 	return res.exitCode == 0 && len(parseTierSweepUnknownTiers(res.output)) == 0
