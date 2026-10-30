@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -570,11 +571,13 @@ func TestSpecCandidateVerdictsWithoutAnOwnerAreNotRemembered(t *testing.T) {
 	}
 }
 
-// A parent missing from a SUCCESSFUL grouped read was not answered (bd keys every
-// parent, an empty list for a childless one), so it is read alone and never read
-// as "no children": a held container's children must not vanish from the
-// container hold. A read that still has nothing for it is an error. Mutation:
-// treating the absence as an empty child set turns the first two rows red.
+// A parent missing from a SUCCESSFUL grouped read is read alone and never read
+// as "no children" from the group: a held container's children must not vanish
+// from the container hold. beads.ChildrenOf drops a childless parent, so a single
+// read that succeeds and has no entry for the parent means it has none
+// (gt-k3me9); only a failed read is an error. Mutation: taking the grouped
+// absence as an empty child set turns the first row red; reading the single
+// read's absence as an error turns the last row red.
 func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -608,7 +611,9 @@ func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 		t.Errorf("an answered childless parent = %v, %v; want the empty set", kids, err)
 	}
 
-	// The read has nothing for the parent even alone: an error, not no children.
+	// The read has nothing for the parent even alone, as beads.ChildrenOf answers
+	// for a childless parent: no children and no error. Without this the whole
+	// dispatcher stalls on every childless candidate (gt-k3me9).
 	silent := specCandidateChildren(root, newSpecTickReads(), read.Candidates, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
 		out := make(map[string][]*beads.Issue, len(ids))
 		for _, id := range ids {
@@ -618,7 +623,27 @@ func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 		}
 		return out, nil
 	})
-	if _, err := silent(parent); err == nil || !strings.Contains(err.Error(), "answered nothing") {
-		t.Errorf("a parent no read answers = %v, want an error naming it", err)
+	if kids, err := silent(parent); err != nil || len(kids) != 0 {
+		t.Errorf("a parent the read drops as childless = %v, %v; want no children and no error", kids, err)
+	}
+
+	// A failed single read is that bead's error, and only that bead's.
+	failing := specCandidateChildren(root, newSpecTickReads(), read.Candidates, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+		out := make(map[string][]*beads.Issue, len(ids))
+		for _, id := range ids {
+			if id == parent && len(ids) == 1 {
+				return nil, errors.New("bd show: database locked")
+			}
+			if id != parent {
+				out[id] = []*beads.Issue{}
+			}
+		}
+		return out, nil
+	})
+	if _, err := failing(parent); err == nil || !strings.Contains(err.Error(), "database locked") {
+		t.Errorf("a parent whose single read fails = %v, want that error", err)
+	}
+	if kids, err := failing("gt-cand-00"); err != nil || len(kids) != 0 {
+		t.Errorf("a neighbour of the failing parent = %v, %v; want the empty set", kids, err)
 	}
 }

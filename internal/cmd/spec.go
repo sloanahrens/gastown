@@ -577,12 +577,14 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 				kids[id] = childSpecs(is)
 			}
 			if err == nil {
-				// bd keys every parent it was asked about and gives a childless
-				// one an empty list (beads.childrenGroups), so a parent missing
-				// from a successful read was not answered: it is read alone, and
-				// a read that still has nothing for it is an error. Reading the
-				// absence as "no children" would hide a held container's
-				// children from the container hold.
+				// ChildrenOf drops a childless parent from its answer
+				// (beads.parseChildrenMapJSON), so a parent missing from the
+				// grouped read is either childless or was left out. It is read
+				// alone: a read of the one parent that succeeds and still has no
+				// entry for it means bd has no children for it, and a failed
+				// read is that bead's error. Reading the grouped absence as "no
+				// children" would hide a held container's children from the
+				// container hold (gt-k3me9).
 				for _, id := range ids {
 					if _, answered := group[id]; answered {
 						continue
@@ -593,12 +595,7 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 						errs[id] = readErr
 						continue
 					}
-					is, ok := single[id]
-					if !ok {
-						errs[id] = fmt.Errorf("the children read answered nothing for %s", id)
-						continue
-					}
-					kids[id] = childSpecs(is)
+					kids[id] = childSpecs(single[id])
 				}
 			}
 		}
