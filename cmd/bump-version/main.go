@@ -1,7 +1,9 @@
-// Command bump-version bumps the version across the Gas Town release files. It is
-// the Go port of scripts/bump-version.sh: the command line and its rules are in
-// internal/bumpversion, and this file wires the real git, process, file and clock
-// seams into the run.
+// Command bump-version bumps the version across the Gas Town release files: the gt
+// version, the npm package, flake.nix when nix is on PATH, and CHANGELOG.md. It runs
+// from the repository root. With --commit it commits the edits, with --tag it tags the
+// commit, and with --install it rebuilds gt and checks the installed version. It never
+// pushes. The command line and its rules are in internal/bumpversion; this file wires
+// the real git, process, file and clock seams into the run.
 package main
 
 import (
@@ -11,13 +13,21 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/bumpversion"
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], systemEnv(), os.Stderr))
+	// The working directory is the repository root the run edits. It is resolved once
+	// here, as an absolute path, and every later file and process call is made under it.
+	root, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(run(os.Args[1:], systemEnv(root), os.Stderr))
 }
 
 // run is the command with its seams and error stream injected, so main_test.go can
@@ -44,29 +54,36 @@ func run(args []string, env bumpversion.Env, errw io.Writer) int {
 	return 1
 }
 
-// systemEnv is the run against the working copy the command was started in: files
-// are read relative to it, git runs in it, and make and gt are the real tools.
-func systemEnv() bumpversion.Env {
-	home, _ := os.UserHomeDir()
+// systemEnv is the run against the repository at root, an absolute path. Files are
+// read and written under root, git runs in it, and make and gt are the real tools.
+// The home directory is resolved here too, and a failure to resolve it is carried to
+// the install check rather than replaced with an empty path.
+func systemEnv(root string) bumpversion.Env {
+	home, homeErr := os.UserHomeDir()
 	return bumpversion.Env{
-		FS:         diskFS{},
+		FS:         diskFS{root: root},
 		Git:        bumpversion.Git{Run: runGit},
 		Exec:       bumpversion.Exec{Run: runProcess, LookPath: exec.LookPath, MkdirTemp: os.MkdirTemp},
-		Root:       ".",
+		Root:       root,
 		Home:       home,
+		HomeErr:    homeErr,
 		Date:       time.Now().Format("2006-01-02"),
 		Executable: isExecutable,
 		Out:        os.Stdout,
 	}
 }
 
-// diskFS reads and writes files relative to the working directory.
-type diskFS struct{}
+// diskFS reads and writes files under root. Every name is joined onto root, so no file
+// is found through the working directory.
+type diskFS struct{ root string }
 
-func (diskFS) ReadFile(name string) ([]byte, error) { return os.ReadFile(name) } //nolint:gosec // G304: the version files named by the command, relative to the repository root
+// path is the absolute location of name, a slash-separated path relative to root.
+func (d diskFS) path(name string) string { return filepath.Join(d.root, name) }
 
-func (diskFS) WriteFile(name string, data []byte) error {
-	return os.WriteFile(name, data, 0o644) //nolint:gosec // G306: rewrites an existing version file, so its mode is kept; the mode applies only to a file that is created
+func (d diskFS) ReadFile(name string) ([]byte, error) { return os.ReadFile(d.path(name)) } //nolint:gosec // G304: the version files named by the command, under the repository root
+
+func (d diskFS) WriteFile(name string, data []byte) error {
+	return os.WriteFile(d.path(name), data, 0o644) //nolint:gosec // G306: rewrites an existing version file, so its mode is kept; the mode applies only to a file that is created
 }
 
 // newCmd builds the command a runner starts. The runners take it as a parameter, so a
@@ -115,8 +132,8 @@ func runProcessWith(command newCmd, dir string, env []string, name string, args 
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
-// isExecutable reports whether path is a regular file with an execute bit set, the
-// test the script's -x makes.
+// isExecutable reports whether path is a regular file with an execute bit set. The
+// install check uses it to choose the gt in the home directory over the gt on PATH.
 func isExecutable(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0

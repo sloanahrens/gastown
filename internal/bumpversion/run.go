@@ -5,18 +5,21 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"strings"
 )
 
 // Env is every seam the run touches: the tree it edits, git, the processes it
 // starts, the install location, the release date and the output stream. The command
 // wires the real ones; the tests wire fakes over a fixture tree, so no run touches
-// the working copy or a real tool.
+// the working copy or a real tool. Root is the repository root. The command makes it
+// absolute once, so no step depends on the directory the command was started in.
 type Env struct {
 	FS         FS
 	Git        Git
 	Exec       Exec
 	Root       string
 	Home       string
+	HomeErr    error  // why Home is unknown; the install check then reports unverified
 	Date       string // the release date, YYYY-MM-DD, written to CHANGELOG.md
 	Executable func(path string) bool
 	Out        io.Writer
@@ -24,10 +27,23 @@ type Env struct {
 
 // Run is the command after its command line is read. It edits the version files,
 // checks they hold the new version, installs when asked, then makes the commit and
-// tag under --commit and --tag. The order is the script's. Each step that fails
-// returns before any later step, so a refused run leaves no commit and no tag behind.
+// tag under --commit and --tag. Each step that fails returns before any later step, so
+// a refused run leaves no commit and no tag behind. A run that fails after its first
+// edit prints one line naming the edited files and the command that restores them.
 // Run never pushes.
-func Run(env Env, opts Options) error {
+//
+// ACCEPTED-RISK: a mismatch or an unverified gt after make install is a warning, and
+// the run still commits and tags (gt-tpg0p.74). A hard stop there would leave the edits
+// uncommitted over a problem the operator can read, so the summary repeats the warning
+// as the last lines the command prints.
+func Run(env Env, opts Options) (err error) {
+	var edited []string
+	defer func() {
+		if err != nil && len(edited) > 0 {
+			fmt.Fprintf(env.Out, "Edited before this failure. Restore with: git checkout -- %s\n", strings.Join(edited, " "))
+		}
+	}()
+
 	out := env.Out
 	versionGo, err := env.FS.ReadFile(VersionGoPath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -53,18 +69,21 @@ func Run(env Env, opts Options) error {
 	if err := EditFile(env.FS, VersionGoPath, func(t string) string { return SetVersionGo(t, old, newVersion) }); err != nil {
 		return err
 	}
+	edited = append(edited, VersionGoPath)
 	fmt.Fprintln(out, "  • "+PackageJSONPath)
 	if err := EditFile(env.FS, PackageJSONPath, func(t string) string { return SetPackageJSON(t, old, newVersion) }); err != nil {
 		return err
 	}
+	edited = append(edited, PackageJSONPath)
 	if nix {
 		fmt.Fprintln(out, "  • flake.nix (version)")
 		if err := EditFile(env.FS, FlakePath, func(t string) string { return SetFlakeVersion(t, old, newVersion) }); err != nil {
 			return err
 		}
+		edited = append(edited, FlakePath)
 		fmt.Fprintln(out, "  • flake.nix (vendorHash)")
 		if _, err := UpdateVendorHash(env.FS, env.Exec, env.Root, out); err != nil {
-			return fmt.Errorf("Failed to update vendorHash: %w", err)
+			return fmt.Errorf("failed to update vendorHash: %w", err)
 		}
 	} else {
 		fmt.Fprintln(out, "  • "+NixSkippedNote)
@@ -76,6 +95,8 @@ func Run(env Env, opts Options) error {
 	}
 	if warning != "" {
 		fmt.Fprintln(out, warning)
+	} else {
+		edited = append(edited, ChangelogPath)
 	}
 
 	fmt.Fprintf(out, "\n✓ Version updated to %s\n\n", newVersion)
@@ -93,9 +114,10 @@ func Run(env Env, opts Options) error {
 	}
 	fmt.Fprintf(out, "✓ All versions match: %s\n\n", newVersion)
 
+	var installed InstallResult
 	if opts.Install {
 		fmt.Fprintln(out, "Rebuilding and installing gt...")
-		inst := Installer{Exec: env.Exec, Executable: env.Executable, Home: env.Home, Root: env.Root}
+		inst := Installer{Exec: env.Exec, Executable: env.Executable, Home: env.Home, HomeErr: env.HomeErr, Root: env.Root}
 		res, err := inst.Install(newVersion)
 		if err != nil {
 			return err
@@ -103,20 +125,48 @@ func Run(env Env, opts Options) error {
 		fmt.Fprintln(out, "✓ gt installed")
 		res.Report(out)
 		fmt.Fprintln(out)
+		installed = res
 	}
 
 	if opts.Commit {
-		return Finish(env.Git, env.FS, env.Root, opts, Release{Old: old, New: newVersion, Nix: nix}, out)
+		if err := Finish(env.Git, env.FS, env.Root, opts, Release{Old: old, New: newVersion, Nix: nix}, out); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintln(out, "Review the changes above.")
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "To commit and release:")
+		fmt.Fprintf(out, "  bump-version %s --commit --tag --install\n", newVersion)
 	}
-	fmt.Fprintln(out, "Review the changes above.")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "To commit and release:")
-	fmt.Fprintf(out, "  bump-version %s --commit --tag --install\n", newVersion)
+	if opts.Install {
+		summary(out, opts, newVersion, installed)
+	}
 	return nil
 }
 
-// hasNix reports whether nix is on PATH, which is what the script's command -v nix
-// checks. It decides whether flake.nix is edited and named in the commit.
+// summary is the block printed last when the run installs. It repeats a mismatch or an
+// unverified install, so the warning is the final thing the operator reads, and it says
+// whether the run made a commit and a tag.
+func summary(out io.Writer, opts Options, version string, installed InstallResult) {
+	fmt.Fprintln(out, "Summary:")
+	switch installed.Status {
+	case Mismatch:
+		fmt.Fprintf(out, "⚠ installed gt reports %s, wanted %s\n", installed.Got, installed.Want)
+	case Unverified:
+		fmt.Fprintf(out, "⚠ installed gt unverified (%s), wanted %s\n", installed.Reason, installed.Want)
+	}
+	switch {
+	case opts.Commit && opts.Tag:
+		fmt.Fprintf(out, "Committed and tagged v%s.\n", version)
+	case opts.Commit:
+		fmt.Fprintf(out, "Committed %s; no tag made.\n", version)
+	default:
+		fmt.Fprintln(out, "No commit or tag made.")
+	}
+}
+
+// hasNix reports whether nix is on PATH. It decides whether flake.nix is edited and
+// named in the commit.
 func hasNix(run Exec) bool {
 	_, err := run.LookPath("nix")
 	return err == nil

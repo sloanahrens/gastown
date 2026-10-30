@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -171,6 +172,29 @@ func TestMainRunsTheCommand(t *testing.T) {
 				t.Errorf("version.go after run(%v) = %q, want Version = \"1.3.0\"", tc.args, got)
 			}
 		})
+	}
+}
+
+// TestSystemEnvResolvesEveryPathUnderTheRoot: the production seams take the repository
+// root the command was given and place every file the run edits under it, and the root
+// the git and make calls run in is that same path. No file or process depends on the
+// directory the command was started in.
+func TestSystemEnvResolvesEveryPathUnderTheRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	env := systemEnv(root)
+	if env.Root != root {
+		t.Fatalf("env.Root = %q, want %q", env.Root, root)
+	}
+	fsys, ok := env.FS.(diskFS)
+	if !ok {
+		t.Fatalf("env.FS is %T, want diskFS", env.FS)
+	}
+	for _, name := range []string{bumpversion.VersionGoPath, bumpversion.PackageJSONPath, bumpversion.FlakePath, bumpversion.ChangelogPath} {
+		got := fsys.path(name)
+		if !filepath.IsAbs(got) || !strings.HasPrefix(got, root+string(filepath.Separator)) {
+			t.Errorf("path(%q) = %q, want an absolute path under %q", name, got, root)
+		}
 	}
 }
 

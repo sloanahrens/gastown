@@ -169,11 +169,14 @@ func gitRun(g Git, root string, args ...string) error {
 
 // Installer is the seam for the install step. Exec runs make install in Root and
 // the installed gt. Executable reports whether path is an executable file. Home is
-// the user's home directory, under which make install puts gt in .local/bin.
+// the user's home directory, under which make install puts gt in .local/bin. HomeErr
+// says why Home is unknown: the check then reports unverified and looks nowhere, so
+// an empty Home never sends it to a relative path in the working copy.
 type Installer struct {
 	Exec       Exec
 	Executable func(path string) bool
 	Home       string
+	HomeErr    error
 	Root       string
 }
 
@@ -218,12 +221,15 @@ func (r InstallResult) Report(out io.Writer) {
 
 // Install runs make install in Root, then reads the version the installed gt reports
 // and compares it with want. The gt it reads is $Home/.local/bin/gt when that is
-// executable, else the gt on PATH, as the script does. The result says whether the
-// versions match, differ, or could not be read; the caller reports it. A failed make
-// install is an error whose text is fixed, so make's output never reaches the message.
+// executable, else the gt on PATH. The result says whether the versions match, differ,
+// or could not be read; the caller reports it. A failed make install is an error whose
+// text is fixed, so make's output never reaches the message.
 func (in Installer) Install(want string) (InstallResult, error) {
 	if _, _, err := in.Exec.Run(in.Root, nil, "make", "install"); err != nil {
 		return InstallResult{}, errors.New("make install failed")
+	}
+	if in.HomeErr != nil {
+		return InstallResult{Status: Unverified, Want: want, Reason: "home directory unknown: " + in.HomeErr.Error()}, nil
 	}
 
 	gt := "gt"
