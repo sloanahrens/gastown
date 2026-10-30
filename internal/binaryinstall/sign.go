@@ -265,12 +265,18 @@ func (s Signer) stdinExec() signing.StdinExec {
 // wrote. Its error names the command, its arguments (the keychain path) and the
 // exit status. It never carries stdin or the output, which hold the password.
 func runStdin(ctx context.Context, stdin, name string, args ...string) (string, string, error) {
+	return runStdinWith(ctx, func(cmd *exec.Cmd) error { return cmd.Run() }, stdin, name, args...)
+}
+
+// runStdinWith is runStdin with its run step injected, so a test drives the
+// failure path without starting a process.
+func runStdinWith(ctx context.Context, run func(*exec.Cmd) error, stdin, name string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errOut bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
-	if err := cmd.Run(); err != nil {
+	if err := run(cmd); err != nil {
 		return out.String(), errOut.String(), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return out.String(), errOut.String(), nil

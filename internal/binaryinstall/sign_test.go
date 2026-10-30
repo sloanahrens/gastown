@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -694,6 +696,56 @@ func TestSignResolvesTheSigningDirectory(t *testing.T) {
 			}
 			if len(unlock) == 1 && unlock[0].stdin != samplePassword+"\n" {
 				t.Errorf("unlock stdin = %q, want the password and a newline", unlock[0].stdin)
+			}
+		})
+	}
+}
+
+// TestRunStdinFeedsTheCommandAndNamesOnlyItsStatusOnFailure: the production
+// runner hands the password to the command on stdin, and a refused run's error
+// names the command, its arguments and the exit status, never the password.
+func TestRunStdinFeedsTheCommandAndNamesOnlyItsStatusOnFailure(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cret-stdin"
+	cases := []struct {
+		name    string
+		run     error
+		wantErr string
+	}{
+		{name: "the command ran", run: nil},
+		{
+			name:    "the command exited with a status",
+			run:     errors.New("exit status 51"),
+			wantErr: "security unlock-keychain " + keychainPath + ": exit status 51",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var fed string
+			run := func(cmd *exec.Cmd) error {
+				data, err := io.ReadAll(cmd.Stdin)
+				if err != nil {
+					t.Errorf("read stdin: %v", err)
+				}
+				fed = string(data)
+				return tc.run
+			}
+			_, _, err := runStdinWith(context.Background(), run, secret+"\n", "security", "unlock-keychain", keychainPath)
+			if fed != secret+"\n" {
+				t.Errorf("stdin = %q, want the password and a newline", fed)
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("runStdinWith() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("runStdinWith() = %v, want %q", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error %q carries the password", err)
 			}
 		})
 	}
