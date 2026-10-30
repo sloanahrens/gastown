@@ -37,6 +37,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	issueFor := fs.String("issue-token", "", "create a token for this actor, then exit (needs -token-file)")
 	scopeFlag := fs.String("scope", string(api.ScopeSeat), "scope of an issued token: seat, or admin for the daemon and operators")
 	tokenFile := fs.String("token-file", "", "file to write an issued token to, mode 0600, created exclusively")
+	reapEvery := fs.Duration("reap-every", time.Hour, "how often the wisp reaper runs a pass; 0 turns it off")
+	maxAge := fs.Duration("reap-max-age", store.DefaultReapMaxAge, "close an open wisp created longer ago than this")
+	purgeAge := fs.Duration("reap-purge-age", store.DefaultReapPurgeAge, "delete a closed wisp closed longer ago than this")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -46,6 +49,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	scope := api.Scope(*scopeFlag)
 	if !scope.Valid() {
 		return fmt.Errorf("-scope must be seat or admin, got %q", *scopeFlag)
+	}
+	if *reapEvery < 0 || *maxAge <= 0 || *purgeAge <= 0 {
+		return errors.New("-reap-every must not be negative, and -reap-max-age and -reap-purge-age must be positive")
 	}
 	if err := server.RequireLoopback(*listen); err != nil {
 		return err
@@ -84,11 +90,23 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	if want := store.SchemaLevel(); level != want {
 		return fmt.Errorf("database is at schema level %d, this binary needs %d; run trackerd -migrate", level, want)
 	}
-	srv := server.New(server.Config{Store: pg, Auth: pg, Health: pg, SchemaLevel: store.SchemaLevel(), Log: log.New(stderr, "trackerd: ", log.LstdFlags)})
+	srv := server.New(server.Config{
+		Store: pg, Auth: pg, Health: pg, SchemaLevel: store.SchemaLevel(),
+		Log:  log.New(stderr, "trackerd: ", log.LstdFlags),
+		Reap: store.ReapPolicy{MaxAge: *maxAge, PurgeAge: *purgeAge},
+	})
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+	// The reaper is stopped and joined before the pool closes, so no pass
+	// runs against a closed database.
+	reapCtx, stopReaper := context.WithCancel(ctx)
+	reaped := srv.StartReaper(reapCtx, *reapEvery)
+	defer func() {
+		stopReaper()
+		<-reaped
+	}()
 	httpSrv := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: headerTimeout}
 	done := make(chan error, 1)
 	go func() { done <- httpSrv.Serve(ln) }()
