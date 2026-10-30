@@ -218,7 +218,7 @@ func TestCostHeaderColoursAStaleOrFailedSpendRead(t *testing.T) {
 	}{
 		{"live", nil, "r", "good", "read 4m ago", ""},
 		{"stale", map[string]any{"stale": true}, "r warnc", "warnc", "read 4m ago · stale", "warnc"},
-		{"failed", map[string]any{"stale": true, "error": true}, "r badc", "badc", "read failed", "badc"},
+		{"failed", map[string]any{"stale": true, "error": true}, "r badc", "badc", "read 4m ago · read failed", "badc"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -259,8 +259,44 @@ func TestCostHeaderNamesTheReasonAFailedReadLeftBehind(t *testing.T) {
 			map[string]any{"id": "deepseek", "label": "DeepSeek", "kind": "cash", "why": "the balance export failed"},
 		},
 	}))
-	if got := partByText(t, headerParts(t, dom), "read failed"); got.Text != "read failed: the balance export failed" || got.Class != "badc" {
-		t.Errorf("a failed read reads %q in %q, want the reason in the failure colour", got.Text, got.Class)
+	got := partByText(t, headerParts(t, dom), "read failed")
+	if !strings.HasPrefix(got.Text, "read ") || !strings.Contains(got.Text, " ago") || !strings.HasSuffix(got.Text, "read failed: the balance export failed") || got.Class != "badc" {
+		t.Errorf("a failed read reads %q in %q, want its age and the reason in the failure colour", got.Text, got.Class)
+	}
+}
+
+// The header's colour is this render's own: a stale read draws amber, and the
+// next render with a live read draws none, on the heading element and on every
+// part, whatever the render before it painted. Mutation: drop the class reset at
+// the top of renderCost and the element keeps its stale class after the live
+// render, so the second half goes red.
+func TestCostHeaderColourIsEachRendersOwn(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	state := func(read map[string]any) map[string]any {
+		return jsonValue(t, map[string]any{
+			"spend":          liveSpend(),
+			"reads":          freshSpendRead(read),
+			"cost_providers": []any{deepSeekRow(), claudeRow()},
+		})
+	}
+	_, note := drawCostOn(t, dom, state(map[string]any{"stale": true}))
+	if note.Class != "r warnc" {
+		t.Fatalf("a stale read draws the heading in %q, want %q", note.Class, "r warnc")
+	}
+	_, note = drawCostOn(t, dom, state(nil))
+	if note.Class != "r" {
+		t.Errorf("the next, live render left the heading in %q, want %q", note.Class, "r")
+	}
+	for _, p := range headerParts(t, dom) {
+		if strings.Contains(p.Class, "warnc") || strings.Contains(p.Class, "badc") {
+			t.Errorf("the live render left part %q in %q", p.Text, p.Class)
+		}
+	}
+	_, note = drawCostOn(t, dom, state(map[string]any{"stale": true, "error": true}))
+	if note.Class != "r badc" {
+		t.Errorf("a failed read draws the heading in %q, want %q", note.Class, "r badc")
 	}
 }
 

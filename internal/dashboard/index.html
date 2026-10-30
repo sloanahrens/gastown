@@ -4227,7 +4227,7 @@ function costHeaderParts(s, d, r) {
     });
   }
   const ago = r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : "read ?";
-  if (r && r.stale && r.error) parts.push({text: "read failed" + (deep && deep.why ? ": " + deep.why : ""), cls: "badc"});
+  if (r && r.stale && r.error) parts.push({text: ago + " · read failed" + (deep && deep.why ? ": " + deep.why : ""), cls: "badc"});
   else if (!d) parts.push({text: "no spend read", cls: "warnc"});
   else if (r && r.stale) parts.push({text: ago + " · stale", cls: "warnc"});
   else parts.push({text: ago});
@@ -4248,7 +4248,7 @@ function paintCostHeader(note, parts) {
   note.replaceChildren();
   parts.forEach((p, i) => {
     if (i) note.append(document.createTextNode("\u00a0\u00a0\u00a0"));
-    const span = el("span", p.badge ? "badge warnc" : p.cls || "", p.badge || p.text);
+    const span = el("span", p.cls || "", p.text);
     if (p.title) span.title = p.title;
     note.append(span);
   });
@@ -4307,6 +4307,10 @@ function costSummary(box, s, d, u) {
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
+  // The header starts every render with no status class: the colour is whatever
+  // this render's read earns, so a stale or failed read of the last render
+  // cannot outlast it.
+  note.className = "r";
   const d = s.spend, u = s.usage, r = readOf(s, "spend");
   // The header is the collapsed line: DeepSeek's balance and hourly spend, the
   // Claude week and its hourly spend, and the read's age. The ledger time goes
