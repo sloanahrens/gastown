@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/tiertrigger"
 )
 
 // checkErr fails unless err is nil when want is empty, or is non-nil and names want.
@@ -184,16 +186,30 @@ func TestEveryEntryDeclaresItsGoUse(t *testing.T) {
 
 func TestMakefileGateRunsOnShelltierChanges(t *testing.T) {
 	t.Parallel()
+	// The selection is the production matcher's: a change to a Go file under
+	// internal/shelltier must run the go: row and must not run a none: row.
+	goChange := []string{"internal/shelltier/manifest.go"}
+	var gateSeen, exemptSeen bool
 	for _, e := range Manifest() {
-		if e.Path != "scripts/makefile-gate_test.sh" {
-			continue
+		switch {
+		case e.Path == "scripts/makefile-gate_test.sh":
+			if !tiertrigger.Runs(e.TriggersOrDefault(), goChange, false) {
+				t.Fatalf("a change to %s does not run %s (triggers %q)", goChange[0], e.Path, e.TriggersOrDefault())
+			}
+			gateSeen = true
+		case strings.HasPrefix(e.StubsGo, "none:") && hasReason(e.StubsGo):
+			if tiertrigger.Runs(e.TriggersOrDefault(), goChange, false) {
+				t.Errorf("%s is exempt (%q) but runs on a change to %s", e.Path, e.StubsGo, goChange[0])
+			}
+			exemptSeen = true
 		}
-		if !slices.Contains(e.TriggersOrDefault(), "internal/") {
-			t.Fatalf("TriggersOrDefault() = %q, want internal/ so a Go change under internal/shelltier runs the script", e.TriggersOrDefault())
-		}
-		return
 	}
-	t.Fatal("scripts/makefile-gate_test.sh is not in the manifest")
+	if !gateSeen {
+		t.Fatal("scripts/makefile-gate_test.sh is not in the manifest")
+	}
+	if !exemptSeen {
+		t.Fatal("no none: entry in the manifest, so the exemption is not shown")
+	}
 }
 
 func TestHasGoDeclarationNeedsTextAfterThePrefix(t *testing.T) {
