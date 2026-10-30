@@ -66,3 +66,61 @@ func TestIntegrationSliceOrdersByCommitDate(t *testing.T) {
 		t.Errorf("--slice 2 1 = %q exit %d stderr %q, want %q", out.String(), code, errb.String(), want)
 	}
 }
+
+// useFixtureEnv makes the process environment the fixture environment for the
+// rest of t: every GIT_ variable removed, and git's global and system config
+// off. The production GitLog runner inherits the process environment, so this
+// keeps its lookups on the fixture repository whatever the caller exported.
+func useFixtureEnv(t *testing.T) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(key, "GIT_") {
+			t.Setenv(key, "")
+			os.Unsetenv(key)
+		}
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+}
+
+// TestIntegrationProductionGitLogAsksGit runs the production GitLog, the exec
+// path the docs-lint command takes, against a fixture repository. The other
+// integration tests inject their own runner, so without this nothing runs the
+// default runner's exec.
+func TestIntegrationProductionGitLogAsksGit(t *testing.T) {
+	root := t.TempDir()
+	gitAt(t, root, "2026-01-01T00:00:00Z", "init", "-q")
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitAt(t, root, "2026-01-01T00:00:00Z", "add", "--", "a.go")
+	gitAt(t, root, "2026-01-01T00:00:00Z", "commit", "-q", "-m", "a.go")
+	useFixtureEnv(t)
+
+	git := GitLog{Root: root}
+	committed, err := git.LastCommit("a.go")
+	if err != nil {
+		t.Fatalf("LastCommit(a.go): %v", err)
+	}
+	if want := int64(1767225600); committed != want {
+		t.Errorf("LastCommit(a.go) = %d, want %d", committed, want)
+	}
+	untouched, err := git.LastCommit("never.go")
+	if err != nil {
+		t.Fatalf("LastCommit(never.go): %v", err)
+	}
+	if untouched != 0 {
+		t.Errorf("LastCommit(never.go) = %d, want 0 for a file no commit touched", untouched)
+	}
+}
+
+// TestIntegrationProductionGitLogFailsOutsideRepo checks the production runner
+// reports an error, not a 0, when git cannot answer: a directory that is not a
+// repository.
+func TestIntegrationProductionGitLogFailsOutsideRepo(t *testing.T) {
+	useFixtureEnv(t)
+	if _, err := (GitLog{Root: t.TempDir()}).LastCommit("a.go"); err == nil {
+		t.Error("LastCommit outside a repository = nil error, want an error")
+	}
+}
