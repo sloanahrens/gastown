@@ -62,6 +62,10 @@ const (
 // URL path and on git's command line, so a name outside this class is refused.
 var mainBranchPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
+// repoPattern is what each side of OWNER/NAME may hold. Both sides land unescaped
+// in URL and API paths, so a space, ?, # or % would address another resource.
+var repoPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
+
 // valueFlags maps each flag that reads the next word to where the word goes, so
 // a flag can neither take a value nowhere nor take none. A flag absent here
 // takes no value: either a switch in parseFlags or an unknown option.
@@ -87,7 +91,7 @@ func Parse(args []string, getenv func(string) string) (*Options, error) {
 		APIURL:         firstNonEmpty(getenv("FORGEJO_API_URL"), DefaultAPIURL),
 		WebURL:         getenv("FORGEJO_URL"),
 		AdminTokenFile: getenv("FORGEJO_ADMIN_ENV"),
-		BackupDir:      firstNonEmpty(getenv("FORGEJO_BACKUP_DIR"), getenv("HOME")+"/forgejo/backups"),
+		BackupDir:      firstNonEmpty(getenv("FORGEJO_BACKUP_DIR"), homeBackupDir(getenv("HOME"))),
 		MainBranch:     DefaultMainBranch,
 	}
 	if err := o.parseFlags(args); err != nil {
@@ -142,12 +146,20 @@ func (o *Options) validate() error {
 	if !validRepo(o.Repo) {
 		return usagef("'%s' must be OWNER/NAME", o.Repo)
 	}
-	if !strings.HasPrefix(o.APIURL, "http://") && !strings.HasPrefix(o.APIURL, "https://") {
+	if !isHTTPURL(o.APIURL) {
 		return usagef("--api-url must be http:// or https:// (got '%s')", o.APIURL)
 	}
 	o.APIURL = strings.TrimSuffix(o.APIURL, "/")
 	if !mainBranchPattern.MatchString(o.MainBranch) {
 		return usagef("--main-branch '%s' must match [A-Za-z0-9._/-]+", o.MainBranch)
+	}
+	// An empty WebURL is derived from the validated API root, so only a value
+	// the operator named can fail here.
+	if o.WebURL != "" && !isHTTPURL(o.WebURL) {
+		return usagef("the web root (--web-url or FORGEJO_URL) must be http:// or https:// (got '%s')", o.WebURL)
+	}
+	if o.BackupDir == "" {
+		return usagef("--backup-dir is required: HOME is unset and FORGEJO_BACKUP_DIR is empty")
 	}
 	return nil
 }
@@ -166,11 +178,32 @@ func (o *Options) applyDefaults() {
 	}
 }
 
-// validRepo reports whether repo is OWNER/NAME: exactly one slash, with a name
-// on each side of it.
+// validRepo reports whether repo is OWNER/NAME over repoPattern, with neither
+// side "." or "..": those would climb out of /repos/ in the API path.
 func validRepo(repo string) bool {
-	owner, name, found := strings.Cut(repo, "/")
-	return found && owner != "" && name != "" && !strings.Contains(name, "/")
+	if !repoPattern.MatchString(repo) {
+		return false
+	}
+	for _, part := range strings.Split(repo, "/") {
+		if part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// isHTTPURL reports whether u names an http:// or https:// root.
+func isHTTPURL(u string) bool {
+	return strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://")
+}
+
+// homeBackupDir is the backup directory under HOME, or "" when HOME is unset:
+// joining an empty HOME would name the root-level /forgejo/backups.
+func homeBackupDir(home string) string {
+	if home == "" {
+		return ""
+	}
+	return home + "/forgejo/backups"
 }
 
 // firstNonEmpty is the first argument that is not the empty string, else "".

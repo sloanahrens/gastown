@@ -16,6 +16,15 @@ func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 // variable moved.
 func noEnv(string) string { return "" }
 
+// homeEnv is the environment with only HOME set, for the command lines that must
+// reach the backup directory's default.
+func homeEnv(key string) string {
+	if key == "HOME" {
+		return "/home/test"
+	}
+	return ""
+}
+
 // TestMainUsageExitsTwoAndHelpExitsZero holds the script's usage_die and its
 // -h: a refused command line exits 2 with the problem named and the usage hint,
 // and the help request exits 0 with the flag list on stdout and nothing on
@@ -31,6 +40,9 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 		"repository with slash":  {args: []string{"gastown"}, stderr: "'gastown' must be OWNER/NAME"},
 		"api-url without http":   {args: []string{"--api-url", "forgejo.test", "acme/gastown"}, stderr: "--api-url must be http:// or https://"},
 		"main-branch with space": {args: []string{"--main-branch", "ma in", "acme/gastown"}, stderr: "--main-branch 'ma in' must match"},
+		"repository with space":  {args: []string{"acme/git town"}, stderr: "'acme/git town' must be OWNER/NAME"},
+		"web-url without http":   {args: []string{"--web-url", "web.test", "acme/gastown"}, stderr: "the web root (--web-url or FORGEJO_URL) must be http:// or https://"},
+		"no HOME, no backup dir": {args: []string{"acme/gastown"}, stderr: "--backup-dir is required"},
 	}
 	for name, tc := range refusals {
 		t.Run(name, func(t *testing.T) {
@@ -84,7 +96,7 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 func TestMainValidCommandLineFailsUntilRunIsPorted(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr strings.Builder
-	got := run([]string{"--dry-run", "acme/gastown"}, noEnv, &stdout, &stderr)
+	got := run([]string{"--dry-run", "acme/gastown"}, homeEnv, &stdout, &stderr)
 	if got != forgejoresync.ExitFailure {
 		t.Fatalf("run = %d, want 1 (stderr: %s)", got, stderr.String())
 	}
