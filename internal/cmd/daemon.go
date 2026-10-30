@@ -416,7 +416,8 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 }
 
 // daemonStatus reports townRoot's daemon and its supervisor to w, and exits 3
-// when no daemon runs.
+// when no daemon runs or when a read that decides running failed — only exit 0
+// claims the daemon runs.
 func (c *daemonControl) daemonStatus(w io.Writer, townRoot string) error {
 	// A container town's daemon lives in another namespace: the flock it takes
 	// on the bind-mounted town is not visible from this host, so the lock
