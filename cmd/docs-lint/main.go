@@ -1,12 +1,6 @@
 // Command docs-lint runs the deterministic checks on the docs and comments
 // tiers and lists the tiers the weekly doc audit slices from.
 //
-//	docs-lint                 run all checks; one line per finding (path:line:
-//	                          rule: message)
-//	docs-lint --list <tier>   agent-facing | reference | historical | go
-//	docs-lint --slice N M     N docs and M go files, least recently committed first
-//	docs-lint --words         total words across the agent-facing tier
-//
 // It exits 0 when clean, 1 when a rule is broken, and 2 for a refused command
 // line (an unknown option, a missing argument, a DOCS_LINT_CEILING that is not a
 // number) or a check that could not run; the reason is on stderr. Environment:
