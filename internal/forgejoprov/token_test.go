@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/forgejotest"
 )
 
 // memInfo is the fs.FileInfo of an in-memory file.
@@ -129,20 +131,13 @@ func tokenProvisioner(transport http.RoundTripper, files Files, rotate, dryRun b
 }
 
 // fakeTokenScopes returns the scopes of the token the fake holds for user.
-func fakeTokenScopes(f *fakeForgejo, user, name string) ([]string, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	u, ok := f.users[user]
-	if !ok {
-		return nil, false
-	}
-	tok, ok := u.tokens[name]
-	return tok.scopes, ok
+func fakeTokenScopes(f *forgejotest.Fake, user, name string) ([]string, bool) {
+	return f.TokenScopes(user, name)
 }
 
 // withBot makes the fake hold the bot account of role, as a run that already
 // created the user leaves it.
-func withBot(t *testing.T, f *fakeForgejo, role string) {
+func withBot(t *testing.T, f *forgejotest.Fake, role string) {
 	t.Helper()
 	var logs []string
 	if err := userProvisioner(f, false, &logs).EnsureUser(role); err != nil {
@@ -163,7 +158,7 @@ func TestEnsureTokenMintsWithTheRoleScopes(t *testing.T) {
 	for _, role := range []string{"polecat", "landing", "registry", "viewer"} {
 		t.Run(role, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
+			f := forgejotest.New()
 			withBot(t, f, role)
 			files := newMemFiles()
 			var logs []string
@@ -181,7 +176,7 @@ func TestEnsureTokenMintsWithTheRoleScopes(t *testing.T) {
 				t.Errorf("%s was minted with scopes %v, want %v", role, got, want)
 			}
 			path := filepath.Join(tokenDir, "forgejo-"+role+".env")
-			value := f.token(user, DefaultTokenName)
+			value := f.Token(user, DefaultTokenName)
 			compareSecretText(t, "token file", string(files.files[path]), tokenFileText(user, value))
 		})
 	}
@@ -191,8 +186,8 @@ func TestEnsureTokenMintsWithTheRoleScopes(t *testing.T) {
 // "token" instead of "sha1".
 func TestEnsureTokenAcceptsTheTokenField(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.tokenField = "token"
+	f := forgejotest.New()
+	f.TokenField = "token"
 	withBot(t, f, "polecat")
 	files := newMemFiles()
 	var logs []string
@@ -200,7 +195,7 @@ func TestEnsureTokenAcceptsTheTokenField(t *testing.T) {
 		t.Fatalf("EnsureToken: %v", masked(errString(err)))
 	}
 	path := filepath.Join(tokenDir, "forgejo-polecat.env")
-	compareSecretText(t, "token file", string(files.files[path]), tokenFileText("bot-polecat", f.token("bot-polecat", DefaultTokenName)))
+	compareSecretText(t, "token file", string(files.files[path]), tokenFileText("bot-polecat", f.Token("bot-polecat", DefaultTokenName)))
 }
 
 // TestEnsureTokenRefusesWhatItCannotStore covers an unknown role and a directory
@@ -209,46 +204,46 @@ func TestEnsureTokenRefusesWhatItCannotStore(t *testing.T) {
 	t.Parallel()
 	t.Run("unknown role", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		var logs []string
 		err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("../etc/passwd")
 		if err == nil || !strings.Contains(err.Error(), "unknown role") {
 			t.Errorf("err = %v, want an unknown role error", masked(errString(err)))
 		}
-		if len(f.callLog()) != 0 {
-			t.Errorf("an unknown role reached the server: %v", f.callLog())
+		if len(f.CallLog()) != 0 {
+			t.Errorf("an unknown role reached the server: %v", f.CallLog())
 		}
 	})
 	t.Run("directory at the path", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		files := newMemFiles()
 		files.dirs[filepath.Join(tokenDir, "forgejo-polecat.env")] = true
-		before := len(f.writes())
+		before := len(f.Writes())
 		var logs []string
 		err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
 		if err == nil || !strings.Contains(err.Error(), "is a directory") {
 			t.Errorf("err = %v, want a directory error", masked(errString(err)))
 		}
-		if len(f.writes()) != before {
-			t.Errorf("a token was minted though nothing could store it: %v", f.writes())
+		if len(f.Writes()) != before {
+			t.Errorf("a token was minted though nothing could store it: %v", f.Writes())
 		}
 	})
 	t.Run("stat fails", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		files := newMemFiles()
 		files.statErr = fs.ErrPermission
-		before := len(f.writes())
+		before := len(f.Writes())
 		var logs []string
 		err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat")
 		if err == nil || !errors.Is(err, fs.ErrPermission) {
 			t.Errorf("err = %v, want the permission error", masked(errString(err)))
 		}
-		if len(f.writes()) != before {
-			t.Errorf("a token was minted though the file could not be examined: %v", f.writes())
+		if len(f.Writes()) != before {
+			t.Errorf("a token was minted though the file could not be examined: %v", f.Writes())
 		}
 	})
 }
@@ -257,7 +252,7 @@ func TestEnsureTokenRefusesWhatItCannotStore(t *testing.T) {
 // write and again on the final path.
 func TestTokenFileIsMode0600ThroughTheSeam(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	withBot(t, f, "polecat")
 	files := newMemFiles()
 	var logs []string
@@ -363,12 +358,12 @@ func assertOnlyFile(t *testing.T, dir, name string) {
 // is chmod'ed 0600 and nothing else is written or minted.
 func TestEnsureTokenLeavesAnExistingFile(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	withBot(t, f, "polecat")
 	files := newMemFiles()
 	path := filepath.Join(tokenDir, "forgejo-polecat.env")
 	files.seed(path, "kept", 0o644)
-	writesBefore := len(f.writes())
+	writesBefore := len(f.Writes())
 	var logs []string
 	if err := tokenProvisioner(f, files, false, false, &logs).EnsureToken("polecat"); err != nil {
 		t.Fatalf("EnsureToken: %v", masked(errString(err)))
@@ -382,8 +377,8 @@ func TestEnsureTokenLeavesAnExistingFile(t *testing.T) {
 	if want := []string{"chmod " + path + " -rw-------"}; strings.Join(files.ops, "|") != strings.Join(want, "|") {
 		t.Errorf("file calls = %v, want only the chmod", files.ops)
 	}
-	if len(f.writes()) != writesBefore {
-		t.Errorf("the server was written to: %v", f.writes())
+	if len(f.Writes()) != writesBefore {
+		t.Errorf("the server was written to: %v", f.Writes())
 	}
 	if len(logs) != 1 || logs[0] != "token "+path+" exists; leaving it (--rotate mints a new one)" {
 		t.Errorf("logs = %v", masked(strings.Join(logs, " | ")))
@@ -394,7 +389,7 @@ func TestEnsureTokenLeavesAnExistingFile(t *testing.T) {
 // minted, and the file is replaced.
 func TestRotateRevokesThenMints(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	withBot(t, f, "polecat")
 	files := newMemFiles()
 	var logs []string
@@ -402,20 +397,20 @@ func TestRotateRevokesThenMints(t *testing.T) {
 	if err := p.EnsureToken("polecat"); err != nil {
 		t.Fatalf("first mint: %v", masked(errString(err)))
 	}
-	first := f.token("bot-polecat", DefaultTokenName)
-	f.calls = nil
+	first := f.Token("bot-polecat", DefaultTokenName)
+	f.ClearCalls()
 	p.Rotate = true
 	logs = nil
 	if err := p.EnsureToken("polecat"); err != nil {
 		t.Fatalf("rotate: %v", masked(errString(err)))
 	}
-	second := f.token("bot-polecat", DefaultTokenName)
+	second := f.Token("bot-polecat", DefaultTokenName)
 	if first == second || second == "" {
 		t.Fatalf("rotation kept the token (both %d characters)", len(first))
 	}
 	var order []string
-	for _, c := range f.callLog() {
-		order = append(order, c.method+" "+c.path)
+	for _, c := range f.CallLog() {
+		order = append(order, c.Method+" "+c.Path)
 	}
 	want := []string{
 		"GET /api/v1/admin/users/bot-polecat/tokens",
@@ -488,7 +483,7 @@ func TestRotateRevokeFailuresAreWarnings(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
+			f := forgejotest.New()
 			withBot(t, f, "polecat")
 			files := newMemFiles()
 			path := filepath.Join(tokenDir, "forgejo-polecat.env")
@@ -500,19 +495,19 @@ func TestRotateRevokeFailuresAreWarnings(t *testing.T) {
 				logs = nil
 			}
 			files.seed(path, "old", 0o600)
-			f.calls = nil
+			f.ClearCalls()
 			err := tokenProvisioner(tc.tr(f), files, true, false, &logs).EnsureToken("polecat")
 			if !strings.Contains(strings.Join(logs, "\n"), tc.want) {
 				t.Errorf("logs lack %q: %v", tc.want, masked(strings.Join(logs, " | ")))
 			}
 			posted := false
-			for _, c := range f.callLog() {
-				if c.method == http.MethodPost {
+			for _, c := range f.CallLog() {
+				if c.Method == http.MethodPost {
 					posted = true
 				}
 			}
 			if !posted {
-				t.Errorf("the mint was not attempted after the warning: %v", f.callLog())
+				t.Errorf("the mint was not attempted after the warning: %v", f.CallLog())
 			}
 			if tc.wantErr == "" {
 				if err != nil {
@@ -549,7 +544,7 @@ func errString(err error) string {
 // TestRotateNoTokenNamed checks the log when the user holds no token of that name.
 func TestRotateNoTokenNamed(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	withBot(t, f, "polecat")
 	files := newMemFiles()
 	files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
@@ -561,8 +556,8 @@ func TestRotateNoTokenNamed(t *testing.T) {
 	if !strings.Contains(strings.Join(logs, "\n"), want) {
 		t.Errorf("logs lack %q: %v", want, masked(strings.Join(logs, " | ")))
 	}
-	for _, c := range f.callLog() {
-		if c.method == http.MethodDelete {
+	for _, c := range f.CallLog() {
+		if c.Method == http.MethodDelete {
 			t.Errorf("a DELETE was sent though no token had that name: %v", c)
 		}
 	}
@@ -579,14 +574,14 @@ func TestEnsureTokenDryRun(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
+			f := forgejotest.New()
 			withBot(t, f, "polecat")
 			files := newMemFiles()
 			path := filepath.Join(tokenDir, "forgejo-polecat.env")
 			if existing {
 				files.seed(path, "old", 0o644)
 			}
-			writesBefore := len(f.writes())
+			writesBefore := len(f.Writes())
 			var logs []string
 			if err := tokenProvisioner(f, files, existing, true, &logs).EnsureToken("polecat"); err != nil {
 				t.Fatalf("EnsureToken: %v", masked(errString(err)))
@@ -594,8 +589,8 @@ func TestEnsureTokenDryRun(t *testing.T) {
 			if len(files.ops) != 0 {
 				t.Errorf("a dry run touched the files: %v", files.ops)
 			}
-			if len(f.writes()) != writesBefore {
-				t.Errorf("a dry run wrote to the server: %v", f.writes())
+			if len(f.Writes()) != writesBefore {
+				t.Errorf("a dry run wrote to the server: %v", f.Writes())
 			}
 			want := "would mint a 'gt-provision' token for bot-polecat and write " + path
 			if !strings.Contains(strings.Join(logs, "\n"), want) {
@@ -622,8 +617,8 @@ func TestMintFailures(t *testing.T) {
 	t.Parallel()
 	t.Run("403", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
-		f.adminless = true
+		f := forgejotest.New()
+		f.Adminless = true
 		withBot(t, f, "polecat")
 		files := newMemFiles()
 		var logs []string
@@ -673,7 +668,7 @@ func TestMintFailures(t *testing.T) {
 	})
 	t.Run("write fails", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		files := newMemFiles()
 		files.writeErr = errors.New("disk full")
@@ -683,7 +678,7 @@ func TestMintFailures(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "disk full") || !strings.Contains(err.Error(), "--rotate") {
 			t.Fatalf("err = %v, want the path, the cause and the --rotate hint", masked(errString(err)))
 		}
-		if v := f.token("bot-polecat", DefaultTokenName); v != "" && strings.Contains(err.Error(), v) {
+		if v := f.Token("bot-polecat", DefaultTokenName); v != "" && strings.Contains(err.Error(), v) {
 			t.Errorf("the error carries the minted token")
 		}
 	})
@@ -694,17 +689,17 @@ func TestMintFailures(t *testing.T) {
 // field or any file call; the minted token is only in the token file's content.
 func TestNoTokenInOutput(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	withBot(t, f, "polecat")
 	files := newMemFiles()
 	var logs []string
 	p := tokenProvisioner(f, files, false, false, &logs)
 	var errs []error
 	errs = append(errs, p.EnsureToken("polecat"))
-	first := f.token("bot-polecat", DefaultTokenName)
+	first := f.Token("bot-polecat", DefaultTokenName)
 	p.Rotate = true
 	errs = append(errs, p.EnsureToken("polecat"))
-	second := f.token("bot-polecat", DefaultTokenName)
+	second := f.Token("bot-polecat", DefaultTokenName)
 	secrets := []string{fixtureToken, first, second}
 	for _, s := range secrets {
 		if s == "" {
@@ -718,12 +713,12 @@ func TestNoTokenInOutput(t *testing.T) {
 			surfaces = append(surfaces, e.Error())
 		}
 	}
-	for _, c := range f.callLog() {
-		surfaces = append(surfaces, c.method+" "+c.path)
+	for _, c := range f.CallLog() {
+		surfaces = append(surfaces, c.Method+" "+c.Path)
 	}
 	surfaces = append(surfaces, files.ops...)
-	for _, v := range f.violations() {
-		surfaces = append(surfaces, v.method+" "+v.path)
+	for _, v := range f.Violations() {
+		surfaces = append(surfaces, v.Method+" "+v.Path)
 	}
 	for _, line := range surfaces {
 		for i, s := range secrets {
@@ -826,24 +821,24 @@ func TestEnsureTokenChmodFailures(t *testing.T) {
 	path := filepath.Join(tokenDir, "forgejo-polecat.env")
 	t.Run("existing file", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		files := newMemFiles()
 		files.seed(path, "old", 0o644)
 		files.chmodErr = errors.New("operation not permitted")
-		before := len(f.writes())
+		before := len(f.Writes())
 		var logs []string
 		err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat")
 		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "mode 600") {
 			t.Fatalf("err = %v, want an error naming %s and mode 600", masked(errString(err)), path)
 		}
-		if len(f.writes()) != before {
-			t.Errorf("a token was minted though the file could not be secured: %v", f.writes())
+		if len(f.Writes()) != before {
+			t.Errorf("a token was minted though the file could not be secured: %v", f.Writes())
 		}
 	})
 	t.Run("new file", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		files := newMemFiles()
 		files.chmodErr = errors.New("operation not permitted")
@@ -855,7 +850,7 @@ func TestEnsureTokenChmodFailures(t *testing.T) {
 		if _, ok := files.files[path]; !ok {
 			t.Errorf("the token file is not there though the error says it is stored")
 		}
-		if v := f.token("bot-polecat", DefaultTokenName); v != "" && strings.Contains(err.Error(), v) {
+		if v := f.Token("bot-polecat", DefaultTokenName); v != "" && strings.Contains(err.Error(), v) {
 			t.Errorf("the error carries the minted token")
 		}
 	})
@@ -905,7 +900,7 @@ func TestRotateRevokeFailuresAreWarningsAndTheMintIsAttempted(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
+			f := forgejotest.New()
 			withBot(t, f, "polecat")
 			var logs []string
 			if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
@@ -914,19 +909,19 @@ func TestRotateRevokeFailuresAreWarningsAndTheMintIsAttempted(t *testing.T) {
 			logs = nil
 			files := newMemFiles()
 			files.seed(path, "old", 0o600)
-			f.calls = nil
+			f.ClearCalls()
 			err := tokenProvisioner(tc.tr(f), files, true, false, &logs).EnsureToken("polecat")
 			if !strings.Contains(strings.Join(logs, "\n"), tc.warn) {
 				t.Errorf("logs lack %q: %v", tc.warn, masked(strings.Join(logs, " | ")))
 			}
 			posted := false
-			for _, c := range f.callLog() {
-				if c.method == http.MethodPost {
+			for _, c := range f.CallLog() {
+				if c.Method == http.MethodPost {
 					posted = true
 				}
 			}
 			if !posted {
-				t.Errorf("the mint was not attempted after the warning: %v", f.callLog())
+				t.Errorf("the mint was not attempted after the warning: %v", f.CallLog())
 			}
 			if err == nil || !strings.Contains(err.Error(), "may still be live") || !strings.Contains(err.Error(), path) {
 				t.Errorf("err = %v, want the may-still-be-live explanation naming %s", masked(errString(err)), path)
@@ -938,7 +933,7 @@ func TestRotateRevokeFailuresAreWarningsAndTheMintIsAttempted(t *testing.T) {
 	}
 	t.Run("transport error on the list with nothing to collide with", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		files := newMemFiles()
 		files.seed(path, "old", 0o600)
@@ -960,7 +955,7 @@ func TestRotateRevokeFailuresAreWarningsAndTheMintIsAttempted(t *testing.T) {
 // an error with no file written and no token in the text.
 func TestEnsureTokenMintTransportFailure(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	withBot(t, f, "polecat")
 	files := newMemFiles()
 	path := filepath.Join(tokenDir, "forgejo-polecat.env")
@@ -1014,17 +1009,17 @@ func (p *pagedTokens) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestRotateTokenListPaging(t *testing.T) {
 	t.Parallel()
 	query := func(page int) string { return fmt.Sprintf("page=%d&limit=%d", page, tokenPageSize) }
-	run := func(t *testing.T, pt *pagedTokens) ([]string, []fakeCall) {
+	run := func(t *testing.T, pt *pagedTokens) ([]string, []forgejotest.LoggedCall) {
 		t.Helper()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		pt.next = f
 		files := newMemFiles()
 		files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
 		var logs []string
-		f.calls = nil
+		f.ClearCalls()
 		_ = tokenProvisioner(pt, files, true, false, &logs).EnsureToken("polecat")
-		return logs, f.callLog()
+		return logs, f.CallLog()
 	}
 	t.Run("two pages, the token is on the second", func(t *testing.T) {
 		t.Parallel()
@@ -1035,7 +1030,7 @@ func TestRotateTokenListPaging(t *testing.T) {
 		}
 		deleted := false
 		for _, c := range calls {
-			if c.method == http.MethodDelete {
+			if c.Method == http.MethodDelete {
 				deleted = true
 			}
 		}
@@ -1071,7 +1066,7 @@ func TestRotateTokenListPaging(t *testing.T) {
 		}
 		posted := false
 		for _, c := range calls {
-			if c.method == http.MethodPost {
+			if c.Method == http.MethodPost {
 				posted = true
 			}
 		}
@@ -1081,7 +1076,7 @@ func TestRotateTokenListPaging(t *testing.T) {
 	})
 	t.Run("a list that is not a JSON array is a warning", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		files := newMemFiles()
 		files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
@@ -1139,7 +1134,7 @@ func TestMintAndRevokeRepliesAreScrubbed(t *testing.T) {
 					return failingRevokeTransport{next: n, delStatus: 500, body: body}
 				},
 			} {
-				f := newFakeForgejo()
+				f := forgejotest.New()
 				withBot(t, f, "polecat")
 				var logs []string
 				if name == "delete" {
@@ -1174,7 +1169,7 @@ func TestRotateMintFailureSaysTheOldTokenIsRevoked(t *testing.T) {
 	path := filepath.Join(tokenDir, "forgejo-polecat.env")
 	t.Run("revoked then mint fails", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		var logs []string
 		if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {
@@ -1192,7 +1187,7 @@ func TestRotateMintFailureSaysTheOldTokenIsRevoked(t *testing.T) {
 	})
 	t.Run("nothing revoked", func(t *testing.T) {
 		t.Parallel()
-		f := newFakeForgejo()
+		f := forgejotest.New()
 		withBot(t, f, "polecat")
 		files := newMemFiles()
 		files.seed(path, "old", 0o600)
@@ -1212,7 +1207,7 @@ func TestRotateMintFailureSaysTheOldTokenIsRevoked(t *testing.T) {
 // error says the file is missing and to rerun with --rotate.
 func TestEnsureTokenLostFileDuplicate(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	withBot(t, f, "polecat")
 	var logs []string
 	if err := tokenProvisioner(f, newMemFiles(), false, false, &logs).EnsureToken("polecat"); err != nil {

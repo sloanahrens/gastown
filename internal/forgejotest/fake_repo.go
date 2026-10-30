@@ -1,4 +1,4 @@
-package forgejoprov
+package forgejotest
 
 import (
 	"encoding/json"
@@ -15,23 +15,23 @@ type fakeRepo struct {
 	rules         map[string]map[string]any
 }
 
-// fakeLandBranch is the rule protectedLandBranch seeds on each repository the fake adds.
+// fakeLandBranch is the rule ProtectedLandBranch seeds on each repository the fake adds.
 const fakeLandBranch = "land/*"
 
-// addRepo makes a repository the fake holds, with no collaborator. When protectedLandBranch
+// AddRepo makes a repository the fake holds, with no collaborator. When ProtectedLandBranch
 // is set it also starts with a land/* rule. A repository added again starts over.
-func (f *fakeForgejo) addRepo(repo string) {
+func (f *Fake) AddRepo(repo string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r := &fakeRepo{collaborators: map[string]string{}, rules: map[string]map[string]any{}}
-	if f.protectedLandBranch {
+	if f.ProtectedLandBranch {
 		r.rules[fakeLandBranch] = map[string]any{"rule_name": fakeLandBranch}
 	}
 	f.repos[repo] = r
 }
 
-// permission returns the access the user holds on the repository, or "" when none is stored.
-func (f *fakeForgejo) permission(repo, user string) string {
+// Permission returns the access the user holds on the repository, or "" when none is stored.
+func (f *Fake) Permission(repo, user string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r, ok := f.repos[repo]
@@ -44,8 +44,8 @@ func (f *fakeForgejo) permission(repo, user string) string {
 // serveRepo answers a repository route. parts is the path after /repos, escaped, so
 // owner, name and each argument are decoded one segment at a time: a rule name's "/"
 // arrives as %2F and must stay inside its segment. A repository the fake does not hold,
-// or any repository while repoMissing is set, is a 404.
-func (f *fakeForgejo) serveRepo(method string, parts []string, body []byte) (int, string) {
+// or any repository while RepoMissing is set, is a 404.
+func (f *Fake) serveRepo(method string, parts []string, body []byte) (int, string) {
 	if len(parts) < 3 {
 		return notFound()
 	}
@@ -58,7 +58,7 @@ func (f *fakeForgejo) serveRepo(method string, parts []string, body []byte) (int
 		segs[i] = s
 	}
 	r, ok := f.repos[segs[0]+"/"+segs[1]]
-	if !ok || f.repoMissing {
+	if !ok || f.RepoMissing {
 		return refusal(http.StatusNotFound, "the repository does not exist, or the token cannot see it")
 	}
 	switch {
@@ -71,12 +71,12 @@ func (f *fakeForgejo) serveRepo(method string, parts []string, body []byte) (int
 		case http.MethodGet:
 			return r.listRules()
 		case http.MethodPost:
-			return r.createRule(body, f.dropWhitelistEntry)
+			return r.createRule(body, f.DropWhitelistEntry)
 		}
 	case len(segs) == 4 && segs[2] == "branch_protections":
 		switch method {
 		case http.MethodPatch:
-			return r.patchRule(segs[3], f.dropWhitelistEntry, body)
+			return r.patchRule(segs[3], f.DropWhitelistEntry, body)
 		case http.MethodDelete:
 			return r.deleteRule(segs[3])
 		}
@@ -181,4 +181,50 @@ func (r *fakeRepo) deleteRule(name string) (int, string) {
 	}
 	delete(r.rules, name)
 	return http.StatusNoContent, ""
+}
+
+// SeedRule puts rule on repo, as an earlier run would have left it. The repository must
+// already be held: AddRepo first.
+func (f *Fake) SeedRule(repo string, rule map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.repos[repo].rules[rule["rule_name"].(string)] = rule
+}
+
+// Rule returns a copy of the named rule the repository holds, or nil when there is none. The
+// copy keeps a caller from changing the fake's state through the returned map.
+func (f *Fake) Rule(repo, name string) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return maps.Clone(f.repos[repo].rules[name])
+}
+
+// RuleNames returns the names of the rules the repository holds, sorted.
+func (f *Fake) RuleNames(repo string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Sorted(maps.Keys(f.repos[repo].rules))
+}
+
+// SeedCollaborator gives user access to the repository at level, as an earlier run would
+// have left it. The repository must already be held: AddRepo first.
+func (f *Fake) SeedCollaborator(repo, user, level string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.repos[repo].collaborators[user] = level
+}
+
+// RuleBody is the rule the provisioning run writes, with the given merge whitelist.
+func RuleBody(name string, whitelist []string) map[string]any {
+	return map[string]any{
+		"rule_name":                  name,
+		"enable_push":                false,
+		"apply_to_admins":            true,
+		"push_whitelist_deploy_keys": false,
+		"enable_merge_whitelist":     true,
+		"merge_whitelist_usernames":  whitelist,
+		"enable_status_check":        true,
+		"status_check_contexts":      []string{"ci/test"},
+		"block_on_outdated_branch":   true,
+	}
 }

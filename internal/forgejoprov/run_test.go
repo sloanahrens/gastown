@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/forgejotest"
 )
 
 // decoyToken is an admin-looking value no run may present. The fake accepts only
@@ -42,7 +44,7 @@ func fixtureTokenFile(role string) string {
 // it changes, and an empty value is an unset variable.
 func baseEnv() map[string]string {
 	return map[string]string{
-		"FORGEJO_API_URL":   fakeAPIRoot + fakeAPIPath,
+		"FORGEJO_API_URL":   forgejotest.APIRoot + forgejotest.APIPath,
 		"FORGEJO_ADMIN_ENV": fixtureAdminFile,
 		"XDG_CONFIG_HOME":   "/fixture/config",
 		"HOME":              "/fixture/home",
@@ -116,10 +118,10 @@ func runProvisioningCtx(ctx context.Context, t *testing.T, rt http.RoundTripper,
 
 // holdDriftedMain creates the main rule on protectionRepo with a gate context that is
 // not the one a run requires, so the run finds it drifted and patches it.
-func holdDriftedMain(t *testing.T, f *fakeForgejo) {
+func holdDriftedMain(t *testing.T, f *forgejotest.Fake) {
 	t.Helper()
-	body := jsonBody(ruleBody(fixtureMainRule, nil))
-	if status, _ := f.call(t, http.MethodPost, "/repos/"+protectionRepo+"/branch_protections", body); status != http.StatusCreated {
+	body := forgejotest.JSONBody(forgejotest.RuleBody(fixtureMainRule, nil))
+	if status, _ := f.Call(t, http.MethodPost, "/repos/"+protectionRepo+"/branch_protections", body); status != http.StatusCreated {
 		t.Fatalf("create the drifted %s rule: status %d, want 201", fixtureMainRule, status)
 	}
 }
@@ -196,10 +198,10 @@ func leakReport(output string, secrets []namedSecret) string {
 }
 
 // nonGET returns the calls that were not reads.
-func nonGET(calls []fakeCall) []fakeCall {
-	var out []fakeCall
+func nonGET(calls []forgejotest.LoggedCall) []forgejotest.LoggedCall {
+	var out []forgejotest.LoggedCall
 	for _, c := range calls {
-		if c.method != http.MethodGet {
+		if c.Method != http.MethodGet {
 			out = append(out, c)
 		}
 	}
@@ -207,10 +209,10 @@ func nonGET(calls []fakeCall) []fakeCall {
 }
 
 // countCalls counts the calls with the method whose escaped path holds pathPart.
-func countCalls(calls []fakeCall, method, pathPart string) int {
+func countCalls(calls []forgejotest.LoggedCall, method, pathPart string) int {
 	n := 0
 	for _, c := range calls {
-		if c.method == method && strings.Contains(c.path, pathPart) {
+		if c.Method == method && strings.Contains(c.Path, pathPart) {
 			n++
 		}
 	}
@@ -219,16 +221,8 @@ func countCalls(calls []fakeCall, method, pathPart string) int {
 
 // mintedValues returns every token value the fake minted, so a test can search output
 // for any of them.
-func mintedValues(f *fakeForgejo) []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []string
-	for _, u := range f.users {
-		for _, tok := range u.tokens {
-			out = append(out, tok.value)
-		}
-	}
-	return out
+func mintedValues(f *forgejotest.Fake) []string {
+	return f.MintedValues()
 }
 
 // TestRunFirstThenSecondRunIsIdempotent: the first run creates the bots, their tokens and
@@ -236,8 +230,8 @@ func mintedValues(f *fakeForgejo) []string {
 // token file.
 func TestRunFirstThenSecondRunIsIdempotent(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	files := newMemFiles()
 
 	first := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
@@ -252,12 +246,12 @@ func TestRunFirstThenSecondRunIsIdempotent(t *testing.T) {
 	}
 	tokens := maps.Clone(files.files)
 
-	before := len(f.callLog())
+	before := len(f.CallLog())
 	second := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
 	if second.code != ExitOK {
 		t.Fatalf("second run = %d, want %d (logs: %s)", second.code, ExitOK, second.shown())
 	}
-	if writes := nonGET(f.callLog()[before:]); len(writes) != 0 {
+	if writes := nonGET(f.CallLog()[before:]); len(writes) != 0 {
 		t.Errorf("second run sent writes %v, want none", writes)
 	}
 	for path, data := range tokens {
@@ -276,16 +270,16 @@ func TestRunFirstThenSecondRunIsIdempotent(t *testing.T) {
 // the repository, mints it no token, and a repeat sends no collaborator write.
 func TestRunOverAnExistingViewerBot(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.viewerExists = true
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.ViewerExists = true
+	f.AddRepo(protectionRepo)
 	files := newMemFiles()
 
 	first := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
 	if first.code != ExitOK {
 		t.Fatalf("first run = %d, want %d (logs: %s)", first.code, ExitOK, first.shown())
 	}
-	if got := f.permission(protectionRepo, "bot-viewer"); got != permissionRead {
+	if got := f.Permission(protectionRepo, "bot-viewer"); got != permissionRead {
 		t.Errorf("viewer permission = %q, want %q", got, permissionRead)
 	}
 	if !strings.Contains(first.logs, "granted bot-viewer read access to acme/rig") {
@@ -295,12 +289,12 @@ func TestRunOverAnExistingViewerBot(t *testing.T) {
 		t.Errorf("viewer token file written, want none: the viewer grant mints no token")
 	}
 
-	before := len(f.callLog())
+	before := len(f.CallLog())
 	second := runProvisioning(t, f, files, nil, "--repo", protectionRepo)
 	if second.code != ExitOK {
 		t.Fatalf("second run = %d, want %d (logs: %s)", second.code, ExitOK, second.shown())
 	}
-	if writes := nonGET(f.callLog()[before:]); len(writes) != 0 {
+	if writes := nonGET(f.CallLog()[before:]); len(writes) != 0 {
 		t.Errorf("second run sent writes %v, want none", writes)
 	}
 	if !strings.Contains(second.logs, "bot-viewer already has read access to acme/rig") {
@@ -312,16 +306,16 @@ func TestRunOverAnExistingViewerBot(t *testing.T) {
 // again, and the run says so.
 func TestRunDriftIsRepaired(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	holdDriftedMain(t, f)
-	before := len(f.callLog())
+	before := len(f.CallLog())
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitOK {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
-	calls := f.callLog()[before:]
+	calls := f.CallLog()[before:]
 	if got := countCalls(calls, http.MethodPatch, "/branch_protections/main"); got != 1 {
 		t.Errorf("PATCHes of main = %d, want 1", got)
 	}
@@ -337,15 +331,15 @@ func TestRunDriftIsRepaired(t *testing.T) {
 // through its encoded name, and main is created, not touched.
 func TestRunRemovesCandidateBranchRule(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.protectedLandBranch = true
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.ProtectedLandBranch = true
+	f.AddRepo(protectionRepo)
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitOK {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
-	writes := f.writes()
+	writes := f.Writes()
 	if got := countCalls(writes, http.MethodDelete, "/branch_protections/land%2F"); got != 1 {
 		t.Errorf("DELETEs of the land/* rule = %d, want 1", got)
 	}
@@ -361,26 +355,26 @@ func TestRunRemovesCandidateBranchRule(t *testing.T) {
 // mints a new one, and the token file holds the new value.
 func TestRunRotateReplacesToken(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	files := newMemFiles()
 	if first := runProvisioning(t, f, files, nil, "--repo", protectionRepo); first.code != ExitOK {
 		t.Fatalf("first run = %d, want %d (logs: %s)", first.code, ExitOK, first.shown())
 	}
 
-	before := len(f.callLog())
+	before := len(f.CallLog())
 	res := runProvisioning(t, f, files, nil, "--repo", protectionRepo, "--rotate")
 	if res.code != ExitOK {
 		t.Fatalf("rotate run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
-	calls := f.callLog()[before:]
+	calls := f.CallLog()[before:]
 	if got := countCalls(calls, http.MethodDelete, "/admin/users/"+fixtureLandingBot+"/tokens/"+DefaultTokenName); got != 1 {
 		t.Errorf("DELETEs of the previous landing token = %d, want 1", got)
 	}
 	if got := countCalls(calls, http.MethodPost, "/tokens"); got != 3 {
 		t.Errorf("token mints = %d, want 3", got)
 	}
-	want := "FORGEJO_TOKEN=" + f.token(fixtureLandingBot, DefaultTokenName) + "\n"
+	want := "FORGEJO_TOKEN=" + f.Token(fixtureLandingBot, DefaultTokenName) + "\n"
 	if got := string(files.files[fixtureTokenFile("landing")]); !strings.Contains(got, want) {
 		t.Errorf("landing token file = %q, want it to hold the new token", got)
 	}
@@ -401,13 +395,13 @@ func TestRunAdminTokenSources(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			f.addRepo(protectionRepo)
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
 			res := runProvisioning(t, f, newMemFiles(), tc.env, "--repo", protectionRepo)
 			if res.code != ExitOK {
 				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 			}
-			if v := f.violations(); len(v) != 0 {
+			if v := f.Violations(); len(v) != 0 {
 				t.Errorf("requests without the accepted token: %v", v)
 			}
 		})
@@ -429,8 +423,8 @@ func TestRunWithoutAdminToken(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			f.addRepo(protectionRepo)
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
 			res := runProvisioning(t, f, newMemFiles(), tc.env, "--repo", protectionRepo)
 			if res.code != ExitFailure {
 				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
@@ -438,7 +432,7 @@ func TestRunWithoutAdminToken(t *testing.T) {
 			if !strings.Contains(res.logs, "no admin token") || !strings.Contains(res.logs, tc.wantLog) {
 				t.Errorf("logs = %q, want the no admin token failure naming %q", res.shown(), tc.wantLog)
 			}
-			if calls := f.callLog(); len(calls) != 0 {
+			if calls := f.CallLog(); len(calls) != 0 {
 				t.Errorf("requests sent without a token: %v", calls)
 			}
 		})
@@ -449,8 +443,8 @@ func TestRunWithoutAdminToken(t *testing.T) {
 // other source the run fails and the decoy stays unread.
 func TestRunIgnoresHomeEnvToken(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	res := runProvisioning(t, f, newMemFiles(), map[string]string{"FORGEJO_ADMIN_ENV": ""}, "--repo", protectionRepo)
 	if res.code != ExitFailure {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
@@ -460,7 +454,7 @@ func TestRunIgnoresHomeEnvToken(t *testing.T) {
 			t.Errorf("the run read %s, which holds a token it must not use", path)
 		}
 	}
-	if calls := f.callLog(); len(calls) != 0 {
+	if calls := f.CallLog(); len(calls) != 0 {
 		t.Errorf("requests sent with the decoy available: %v", calls)
 	}
 }
@@ -469,15 +463,15 @@ func TestRunIgnoresHomeEnvToken(t *testing.T) {
 // it would send as a would line, creates no user, writes no token file and sends no write.
 func TestRunDryRunSendsNoWriteAndSaysWould(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	files := newMemFiles()
 
 	res := runProvisioning(t, f, files, nil, "--repo", protectionRepo, "--dry-run")
 	if res.code != ExitOK {
 		t.Fatalf("dry run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
-	if writes := f.writes(); len(writes) != 0 {
+	if writes := f.Writes(); len(writes) != 0 {
 		t.Errorf("dry run sent writes %v, want none", writes)
 	}
 	if got := len(files.files); got != 0 {
@@ -500,16 +494,16 @@ func TestRunDryRunSendsNoWriteAndSaysWould(t *testing.T) {
 // viewer read, and still sends no write.
 func TestRunDryRunReportsRemovalAndViewerGrant(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.viewerExists = true
-	f.protectedLandBranch = true
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.ViewerExists = true
+	f.ProtectedLandBranch = true
+	f.AddRepo(protectionRepo)
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo, "--dry-run")
 	if res.code != ExitOK {
 		t.Fatalf("dry run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
-	if writes := f.writes(); len(writes) != 0 {
+	if writes := f.Writes(); len(writes) != 0 {
 		t.Errorf("dry run sent writes %v, want none", writes)
 	}
 	for _, want := range []string{
@@ -527,20 +521,20 @@ func TestRunExitCodes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
-		setup   func(f *fakeForgejo)
+		setup   func(f *forgejotest.Fake)
 		env     map[string]string
 		args    []string
 		wantLog string
 	}{
 		{
 			name:    "a 403 on the mint",
-			setup:   func(f *fakeForgejo) { f.adminless = true },
+			setup:   func(f *forgejotest.Fake) { f.Adminless = true },
 			args:    []string{"--repo", protectionRepo},
 			wantLog: "site-administrator",
 		},
 		{
 			name:    "a dropped whitelist entry",
-			setup:   func(f *fakeForgejo) { f.dropWhitelistEntry = true },
+			setup:   func(f *forgejotest.Fake) { f.DropWhitelistEntry = true },
 			args:    []string{"--role", "registry", "--repo", protectionRepo},
 			wantLog: "the write for main on acme/rig did not take",
 		},
@@ -553,8 +547,8 @@ func TestRunExitCodes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
-			f.addRepo(protectionRepo)
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
 			if tc.setup != nil {
 				tc.setup(f)
 			}
@@ -603,9 +597,9 @@ func TestParseRefusesUsageWithItsMessage(t *testing.T) {
 // behind, so a later run is not fooled into thinking a token exists.
 func TestRunDeniedMintWritesNoTokenFile(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.adminless = true
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.Adminless = true
+	f.AddRepo(protectionRepo)
 	files := newMemFiles()
 	if res := runProvisioning(t, f, files, nil, "--repo", protectionRepo); res.code != ExitFailure {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
@@ -619,14 +613,14 @@ func TestRunDeniedMintWritesNoTokenFile(t *testing.T) {
 // main rule, created.
 func TestRunUnprotectedRepoProvisions(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 
 	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitOK {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
-	writes := f.writes()
+	writes := f.Writes()
 	if got := countCalls(writes, http.MethodPost, "/branch_protections"); got != 1 {
 		t.Errorf("POSTs of a branch protection = %d, want 1 (main only)", got)
 	}
@@ -640,17 +634,17 @@ func TestRunUnprotectedRepoProvisions(t *testing.T) {
 // collaborator (gt-fn9e6.23).
 func TestRunGrantsAccessBeforeProtection(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	if res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo); res.code != ExitOK {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
 	grant, protect := -1, -1
-	for i, c := range f.writes() {
-		if c.method == http.MethodPut && strings.Contains(c.path, "/collaborators/") && grant < 0 {
+	for i, c := range f.Writes() {
+		if c.Method == http.MethodPut && strings.Contains(c.Path, "/collaborators/") && grant < 0 {
 			grant = i
 		}
-		if c.method == http.MethodPost && strings.Contains(c.path, "/branch_protections") && protect < 0 {
+		if c.Method == http.MethodPost && strings.Contains(c.Path, "/branch_protections") && protect < 0 {
 			protect = i
 		}
 	}
@@ -663,11 +657,11 @@ func TestRunGrantsAccessBeforeProtection(t *testing.T) {
 // and gives no write to the polecat bot that the run does not name.
 func TestRunViewerRoleReadsOnly(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	// The landing bot already holds write access, or the protection's whitelist entry is
 	// dropped and the run fails (gt-fn9e6.23).
-	if status, _ := f.call(t, http.MethodPut, "/repos/"+protectionRepo+"/collaborators/"+fixtureLandingBot, jsonBody(map[string]string{"permission": permissionWrite})); status != http.StatusNoContent {
+	if status, _ := f.Call(t, http.MethodPut, "/repos/"+protectionRepo+"/collaborators/"+fixtureLandingBot, forgejotest.JSONBody(map[string]string{"permission": permissionWrite})); status != http.StatusNoContent {
 		t.Fatalf("grant %s write: status %d, want 204", fixtureLandingBot, status)
 	}
 
@@ -675,13 +669,13 @@ func TestRunViewerRoleReadsOnly(t *testing.T) {
 	if res.code != ExitOK {
 		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
 	}
-	if got := f.permission(protectionRepo, "bot-viewer"); got != permissionRead {
+	if got := f.Permission(protectionRepo, "bot-viewer"); got != permissionRead {
 		t.Errorf("viewer permission = %q, want %q", got, permissionRead)
 	}
-	if got := f.permission(protectionRepo, "bot-polecat"); got != "" {
+	if got := f.Permission(protectionRepo, "bot-polecat"); got != "" {
 		t.Errorf("polecat permission = %q, want none: the viewer run names no polecat", got)
 	}
-	if got := f.token("bot-viewer", DefaultTokenName); got == "" {
+	if got := f.Token("bot-viewer", DefaultTokenName); got == "" {
 		t.Errorf("viewer holds no token, want one minted for the viewer role")
 	}
 }
@@ -690,8 +684,8 @@ func TestRunViewerRoleReadsOnly(t *testing.T) {
 // stops the run at that role, before any token is minted or any repository is touched.
 func TestRunFailsWhenAUserReadFails(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	files := newMemFiles()
 
 	res := runProvisioning(t, failingRoute{next: f, match: "/users/bot-polecat", status: http.StatusInternalServerError}, files, nil, "--repo", protectionRepo)
@@ -704,7 +698,7 @@ func TestRunFailsWhenAUserReadFails(t *testing.T) {
 	if got := len(files.files); got != 0 {
 		t.Errorf("failed read wrote %d token files, want none", got)
 	}
-	if writes := f.writes(); len(writes) != 0 {
+	if writes := f.Writes(); len(writes) != 0 {
 		t.Errorf("failed read sent writes %v, want none", writes)
 	}
 }
@@ -714,8 +708,8 @@ func TestRunFailsWhenAUserReadFails(t *testing.T) {
 // the grant.
 func TestRunFailsWhenTheViewerReadFails(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 
 	res := runProvisioning(t, failingRoute{next: f, match: "/users/bot-viewer", status: http.StatusInternalServerError}, newMemFiles(), nil, "--repo", protectionRepo)
 	if res.code != ExitFailure {
@@ -724,7 +718,7 @@ func TestRunFailsWhenTheViewerReadFails(t *testing.T) {
 	if !strings.Contains(res.logs, "GET /users/bot-viewer: unexpected HTTP 500") {
 		t.Errorf("logs = %q, want the failed viewer read named", res.shown())
 	}
-	if got := f.permission(protectionRepo, "bot-viewer"); got != "" {
+	if got := f.Permission(protectionRepo, "bot-viewer"); got != "" {
 		t.Errorf("viewer permission = %q, want none: the grant was never reached", got)
 	}
 }
@@ -734,10 +728,10 @@ func TestRunFailsWhenTheViewerReadFails(t *testing.T) {
 // command line never gets this far, since Parse refuses an unknown role first.
 func TestRunProvisionRepoRejectsAnUnknownRole(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	p := &Provisioner{
-		Client:    &Client{API: fakeAPIRoot + fakeAPIPath, HTTP: &http.Client{Transport: f}, Token: newSecret(fixtureToken)},
+		Client:    &Client{API: forgejotest.APIRoot + forgejotest.APIPath, HTTP: &http.Client{Transport: f}, Token: newSecret(fixtureToken)},
 		BotPrefix: DefaultBotPrefix,
 	}
 
@@ -745,7 +739,7 @@ func TestRunProvisionRepoRejectsAnUnknownRole(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "widget") {
 		t.Fatalf("provisionRepo = %v, want the unknown role named", err)
 	}
-	if calls := f.callLog(); len(calls) != 0 {
+	if calls := f.CallLog(); len(calls) != 0 {
 		t.Errorf("requests sent for an unknown role: %v", calls)
 	}
 }
@@ -757,62 +751,62 @@ func TestRunNeverPrintsATokenOrTouchesTheRealHome(t *testing.T) {
 	t.Parallel()
 	scenarios := []struct {
 		name  string
-		setup func(t *testing.T, f *fakeForgejo)
+		setup func(t *testing.T, f *forgejotest.Fake)
 		env   map[string]string
 		prime []string
 		args  []string
 	}{
 		{
 			name: "a fresh provision",
-			setup: func(t *testing.T, f *fakeForgejo) {
-				f.addRepo(protectionRepo)
+			setup: func(t *testing.T, f *forgejotest.Fake) {
+				f.AddRepo(protectionRepo)
 			},
 			args: []string{"--repo", protectionRepo},
 		},
 		{
 			name: "a drifted rule",
-			setup: func(t *testing.T, f *fakeForgejo) {
-				f.addRepo(protectionRepo)
+			setup: func(t *testing.T, f *forgejotest.Fake) {
+				f.AddRepo(protectionRepo)
 				holdDriftedMain(t, f)
 			},
 			args: []string{"--repo", protectionRepo},
 		},
 		{
 			name: "a rotation",
-			setup: func(t *testing.T, f *fakeForgejo) {
-				f.addRepo(protectionRepo)
+			setup: func(t *testing.T, f *forgejotest.Fake) {
+				f.AddRepo(protectionRepo)
 			},
 			prime: []string{"--repo", protectionRepo},
 			args:  []string{"--repo", protectionRepo, "--rotate"},
 		},
 		{
 			name: "the broker's token",
-			setup: func(t *testing.T, f *fakeForgejo) {
-				f.addRepo(protectionRepo)
+			setup: func(t *testing.T, f *forgejotest.Fake) {
+				f.AddRepo(protectionRepo)
 			},
 			env:  map[string]string{"GT_AUTH_FORGEJO_TOKEN": fixtureToken, "FORGEJO_ADMIN_ENV": ""},
 			args: []string{"--repo", protectionRepo},
 		},
 		{
 			name: "a dry run",
-			setup: func(t *testing.T, f *fakeForgejo) {
-				f.addRepo(protectionRepo)
+			setup: func(t *testing.T, f *forgejotest.Fake) {
+				f.AddRepo(protectionRepo)
 			},
 			args: []string{"--repo", protectionRepo, "--dry-run"},
 		},
 		{
 			name: "a refused mint",
-			setup: func(t *testing.T, f *fakeForgejo) {
-				f.adminless = true
-				f.addRepo(protectionRepo)
+			setup: func(t *testing.T, f *forgejotest.Fake) {
+				f.Adminless = true
+				f.AddRepo(protectionRepo)
 			},
 			args: []string{"--repo", protectionRepo},
 		},
 		{
 			name: "a dropped whitelist entry",
-			setup: func(t *testing.T, f *fakeForgejo) {
-				f.dropWhitelistEntry = true
-				f.addRepo(protectionRepo)
+			setup: func(t *testing.T, f *forgejotest.Fake) {
+				f.DropWhitelistEntry = true
+				f.AddRepo(protectionRepo)
 			},
 			args: []string{"--role", "registry", "--repo", protectionRepo},
 		},
@@ -820,7 +814,7 @@ func TestRunNeverPrintsATokenOrTouchesTheRealHome(t *testing.T) {
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
+			f := forgejotest.New()
 			sc.setup(t, f)
 			files := newMemFiles()
 			var logs string
@@ -880,8 +874,8 @@ func TestRunLeakReportNeverQuotesOutput(t *testing.T) {
 // fails at its first request and sends none: the fake records no call.
 func TestRunCancelledBeforeStartSendsNothing(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	res := runProvisioningCtx(ctx, t, &ctxRoute{next: f}, newMemFiles(), nil, "--repo", protectionRepo)
@@ -891,7 +885,7 @@ func TestRunCancelledBeforeStartSendsNothing(t *testing.T) {
 	if !strings.Contains(res.logs, "request failed") {
 		t.Errorf("logs = %q, want the cancelled request failed", res.shown())
 	}
-	if calls := f.callLog(); len(calls) != 0 {
+	if calls := f.CallLog(); len(calls) != 0 {
 		t.Errorf("requests reached the server under a cancelled context: %v", calls)
 	}
 }
@@ -901,8 +895,8 @@ func TestRunCancelledBeforeStartSendsNothing(t *testing.T) {
 // the server records exactly two requests.
 func TestRunCancelledBetweenTwoRequestsSendsNoMore(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	res := runProvisioningCtx(ctx, t, &ctxRoute{next: f, cancelAfter: 2, cancel: cancel}, newMemFiles(), nil, "--repo", protectionRepo)
@@ -912,7 +906,7 @@ func TestRunCancelledBetweenTwoRequestsSendsNoMore(t *testing.T) {
 	if !strings.Contains(res.logs, "request failed") {
 		t.Errorf("logs = %q, want the request after the cancel failed", res.shown())
 	}
-	if calls := f.callLog(); len(calls) != 2 {
+	if calls := f.CallLog(); len(calls) != 2 {
 		t.Errorf("the server recorded %d requests, want 2: the request after the cancel must not be sent", len(calls))
 	}
 }

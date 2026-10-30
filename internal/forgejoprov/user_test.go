@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/forgejotest"
 )
 
 // countingPassword is the password countingRandom draws first: the alphabet's
@@ -111,7 +113,7 @@ func respond(req *http.Request, status int, body string) (*http.Response, error)
 func userProvisioner(transport http.RoundTripper, dryRun bool, logs *[]string) *Provisioner {
 	return &Provisioner{
 		Client: &Client{
-			API:    fakeAPIRoot + fakeAPIPath,
+			API:    forgejotest.APIRoot + forgejotest.APIPath,
 			HTTP:   &http.Client{Transport: transport},
 			Token:  newSecret(fixtureToken),
 			DryRun: dryRun,
@@ -128,7 +130,7 @@ func userProvisioner(transport http.RoundTripper, dryRun bool, logs *[]string) *
 // create body and in no log line.
 func TestEnsureUserCreatesWhenMissing(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	bodies := &bodyTransport{next: f}
 	var logs []string
 	p := userProvisioner(bodies, false, &logs)
@@ -136,18 +138,18 @@ func TestEnsureUserCreatesWhenMissing(t *testing.T) {
 	if err := p.EnsureUser("polecat"); err != nil {
 		t.Fatalf("EnsureUser on a missing user: unexpected error: %v", err)
 	}
-	writes := f.writes()
-	if len(writes) != 1 || writes[0].method != http.MethodPost || writes[0].path != fakeAPIPath+"/admin/users" || writes[0].status != http.StatusCreated {
+	writes := f.Writes()
+	if len(writes) != 1 || writes[0].Method != http.MethodPost || writes[0].Path != forgejotest.APIPath+"/admin/users" || writes[0].Status != http.StatusCreated {
 		t.Fatalf("writes = %+v, want one POST /admin/users answered 201", writes)
 	}
-	if u, ok := f.users["bot-polecat"]; !ok || u.email != "bot-polecat@"+DefaultBotEmailDomain {
-		t.Errorf("fake user = %+v, want bot-polecat with its bot email", u)
+	if email, ok := f.UserEmail("bot-polecat"); !ok || email != "bot-polecat@"+DefaultBotEmailDomain {
+		t.Errorf("fake user email = %q, want bot-polecat with its bot email", email)
 	}
 
 	if err := p.EnsureUser("polecat"); err != nil {
 		t.Fatalf("EnsureUser on an existing user: unexpected error: %v", err)
 	}
-	if n := len(f.writes()); n != 1 {
+	if n := len(f.Writes()); n != 1 {
 		t.Errorf("two EnsureUser runs wrote %d time(s), want 1: an existing user takes no write", n)
 	}
 	if want := []string{"created user bot-polecat", "user bot-polecat exists"}; !slices.Equal(logs, want) {
@@ -173,8 +175,8 @@ func TestEnsureUserCreatesWhenMissing(t *testing.T) {
 // no write and draws no password.
 func TestEnsureUserLeavesAnExistingUser(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.users["bot-polecat"] = &fakeUser{email: "bot-polecat@" + DefaultBotEmailDomain, tokens: map[string]fakeToken{}}
+	f := forgejotest.New()
+	f.SeedUser("bot-polecat", "bot-polecat@"+DefaultBotEmailDomain)
 	var logs []string
 	p := userProvisioner(f, false, &logs)
 	p.Random = brokenReader{}
@@ -182,7 +184,7 @@ func TestEnsureUserLeavesAnExistingUser(t *testing.T) {
 	if err := p.EnsureUser("polecat"); err != nil {
 		t.Fatalf("EnsureUser on an existing user: unexpected error: %v", err)
 	}
-	if writes := f.writes(); len(writes) != 0 {
+	if writes := f.Writes(); len(writes) != 0 {
 		t.Errorf("existing user took %d write(s), want none: %+v", len(writes), writes)
 	}
 	if want := []string{"user bot-polecat exists"}; !slices.Equal(logs, want) {
@@ -194,8 +196,8 @@ func TestEnsureUserLeavesAnExistingUser(t *testing.T) {
 // concurrent run made first: the run logs it as existing and carries on.
 func TestEnsureUserTreats422AsExisting(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.users["bot-polecat"] = &fakeUser{email: "bot-polecat@" + DefaultBotEmailDomain, tokens: map[string]fakeToken{}}
+	f := forgejotest.New()
+	f.SeedUser("bot-polecat", "bot-polecat@"+DefaultBotEmailDomain)
 	var logs []string
 	bodies := &bodyTransport{next: staleReadTransport{next: f}}
 	p := userProvisioner(bodies, false, &logs)
@@ -203,8 +205,8 @@ func TestEnsureUserTreats422AsExisting(t *testing.T) {
 	if err := p.EnsureUser("polecat"); err != nil {
 		t.Fatalf("EnsureUser with a 422 create: unexpected error: %v", err)
 	}
-	writes := f.writes()
-	if len(writes) != 1 || writes[0].status != http.StatusUnprocessableEntity {
+	writes := f.Writes()
+	if len(writes) != 1 || writes[0].Status != http.StatusUnprocessableEntity {
 		t.Fatalf("writes = %+v, want one create answered 422", writes)
 	}
 	if want := []string{"user bot-polecat exists"}; !slices.Equal(logs, want) {
@@ -275,7 +277,7 @@ func TestEnsureUserFailsOnOtherStatus(t *testing.T) {
 // made.
 func TestEnsureUserStopsWhenTheCreateGetsNoReply(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	var logs []string
 	p := userProvisioner(createDropsTransport{next: f}, false, &logs)
 
@@ -295,7 +297,7 @@ func TestEnsureUserStopsWhenTheCreateGetsNoReply(t *testing.T) {
 // sends no write, and draws no password.
 func TestEnsureUserDryRun(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	var logs []string
 	p := userProvisioner(f, true, &logs)
 	p.Random = brokenReader{}
@@ -303,13 +305,13 @@ func TestEnsureUserDryRun(t *testing.T) {
 	if err := p.EnsureUser("polecat"); err != nil {
 		t.Fatalf("EnsureUser in a dry run: unexpected error: %v", err)
 	}
-	if writes := f.writes(); len(writes) != 0 {
+	if writes := f.Writes(); len(writes) != 0 {
 		t.Errorf("dry run reached the fake with %d write(s): %+v", len(writes), writes)
 	}
-	if _, ok := f.users["bot-polecat"]; ok {
+	if _, ok := f.UserEmail("bot-polecat"); ok {
 		t.Errorf("dry run created bot-polecat")
 	}
-	if got := len(f.callLog()); got != 1 {
+	if got := len(f.CallLog()); got != 1 {
 		t.Errorf("fake answered %d request(s), want only the read", got)
 	}
 	if want := []string{"would create user bot-polecat"}; !slices.Equal(logs, want) {
@@ -321,7 +323,7 @@ func TestEnsureUserDryRun(t *testing.T) {
 // the run before any create is sent.
 func TestEnsureUserStopsOnRandomFailure(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
+	f := forgejotest.New()
 	var logs []string
 	p := userProvisioner(f, false, &logs)
 	p.Random = brokenReader{}
@@ -330,7 +332,7 @@ func TestEnsureUserStopsOnRandomFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "read random password") {
 		t.Fatalf("EnsureUser with a failing source: error = %v, want one naming the read", err)
 	}
-	if writes := f.writes(); len(writes) != 0 {
+	if writes := f.Writes(); len(writes) != 0 {
 		t.Errorf("failed draw still sent %d write(s): %+v", len(writes), writes)
 	}
 }

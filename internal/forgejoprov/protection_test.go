@@ -2,15 +2,23 @@ package forgejoprov
 
 import (
 	"encoding/json"
-	"maps"
 	"net/http"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/forgejotest"
 )
 
 // protectionRepo is the repository the branch protection tests protect.
 const protectionRepo = "acme/rig"
+
+// fixtureMainRule and fixtureLandingBot name the rule the run protects and the landing bot it
+// whitelists, as the provisioning run does.
+const (
+	fixtureMainRule   = "main"
+	fixtureLandingBot = DefaultBotPrefix + "landing"
+)
 
 // testOptions is the command line the protection tests run with: the defaults, with a
 // landing bot and the default gate contexts.
@@ -39,18 +47,14 @@ func servedRule(t *testing.T, rule map[string]any) map[string]any {
 }
 
 // seedRule puts rule on repo in the fake, as an earlier run would have left it.
-func seedRule(t *testing.T, f *fakeForgejo, repo string, rule map[string]any) {
+func seedRule(t *testing.T, f *forgejotest.Fake, repo string, rule map[string]any) {
 	t.Helper()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.repos[repo].rules[rule["rule_name"].(string)] = rule
+	f.SeedRule(repo, rule)
 }
 
 // ruleNames returns the names of the rules repo holds in the fake, sorted.
-func ruleNames(f *fakeForgejo, repo string) []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Sorted(maps.Keys(f.repos[repo].rules))
+func ruleNames(f *forgejotest.Fake, repo string) []string {
+	return f.RuleNames(repo)
 }
 
 // listJSON encodes rules as the list reply the route answers with.
@@ -173,8 +177,8 @@ func TestEnsureRuleCreateConvergeAndIdempotent(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			opts := testOptions()
-			f := newFakeForgejo()
-			f.addRepo(protectionRepo)
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
 			if c.seed != nil {
 				seedRule(t, f, protectionRepo, c.seed(t, opts))
 			}
@@ -187,11 +191,11 @@ func TestEnsureRuleCreateConvergeAndIdempotent(t *testing.T) {
 			if c.wantMethod == "" {
 				wantWrites = 0
 			}
-			if n := len(f.writes()); n != wantWrites {
+			if n := len(f.Writes()); n != wantWrites {
 				t.Fatalf("first run sent %d writes, want %d", n, wantWrites)
 			}
-			if wantWrites == 1 && f.writes()[0].method != c.wantMethod {
-				t.Fatalf("first run sent %s, want %s", f.writes()[0].method, c.wantMethod)
+			if wantWrites == 1 && f.Writes()[0].Method != c.wantMethod {
+				t.Fatalf("first run sent %s, want %s", f.Writes()[0].Method, c.wantMethod)
 			}
 			if !strings.Contains(strings.Join(logs, "\n"), c.wantLog) {
 				t.Fatalf("first run logged %q, want a line containing %q", logs, c.wantLog)
@@ -200,7 +204,7 @@ func TestEnsureRuleCreateConvergeAndIdempotent(t *testing.T) {
 			if err != nil {
 				t.Fatalf("encode rule: %v", err)
 			}
-			got, err := json.Marshal(f.repos[protectionRepo].rules["main"])
+			got, err := json.Marshal(f.Rule(protectionRepo, "main"))
 			if err != nil {
 				t.Fatalf("encode stored rule: %v", err)
 			}
@@ -210,7 +214,7 @@ func TestEnsureRuleCreateConvergeAndIdempotent(t *testing.T) {
 			if err := p.EnsureRule(protectionRepo, opts); err != nil {
 				t.Fatalf("second run: %v", err)
 			}
-			if n := len(f.writes()); n != wantWrites {
+			if n := len(f.Writes()); n != wantWrites {
 				t.Fatalf("second run sent %d writes in all, want the first run's %d and no more", n, wantWrites)
 			}
 		})
@@ -252,8 +256,8 @@ func TestEnsureRuleJudgesEveryField(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			opts := testOptions()
-			f := newFakeForgejo()
-			f.addRepo(protectionRepo)
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
 			drifted := servedRule(t, MainRule(opts))
 			drifted[c.field] = c.value
 			seedRule(t, f, protectionRepo, drifted)
@@ -262,8 +266,8 @@ func TestEnsureRuleJudgesEveryField(t *testing.T) {
 			if err := p.EnsureRule(protectionRepo, opts); err != nil {
 				t.Fatalf("EnsureRule: %v", err)
 			}
-			writes := f.writes()
-			if len(writes) != 1 || writes[0].method != http.MethodPatch {
+			writes := f.Writes()
+			if len(writes) != 1 || writes[0].Method != http.MethodPatch {
 				t.Fatalf("sent %d writes, want one PATCH", len(writes))
 			}
 		})
@@ -275,9 +279,9 @@ func TestEnsureRuleJudgesEveryField(t *testing.T) {
 func TestEnsureRuleFailsWhenTheWriteDoesNotTake(t *testing.T) {
 	t.Parallel()
 	opts := testOptions()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
-	f.dropWhitelistEntry = true
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	f.DropWhitelistEntry = true
 	drifted := servedRule(t, MainRule(opts))
 	drifted["enable_push"] = true
 	drifted["merge_whitelist_usernames"] = []any{}
@@ -294,18 +298,18 @@ func TestEnsureRuleFailsWhenTheWriteDoesNotTake(t *testing.T) {
 // fails with the message that names the API root and the token, and sends no write.
 func TestEnsureRuleMissingRepoIs404Message(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
-	f.repoMissing = true
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	f.RepoMissing = true
 	var logs []string
 	p := userProvisioner(f, false, &logs)
 	err := p.EnsureRule(protectionRepo, testOptions())
 	want := "GET /repos/acme/rig/branch_protections returned 404: the repository is not on " +
-		fakeAPIRoot + fakeAPIPath + ", or the admin token cannot see it"
+		forgejotest.APIRoot + forgejotest.APIPath + ", or the admin token cannot see it"
 	if err == nil || !strings.HasPrefix(err.Error(), want) {
 		t.Fatalf("EnsureRule = %v, want a message starting %q", err, want)
 	}
-	if n := len(f.writes()); n != 0 {
+	if n := len(f.Writes()); n != 0 {
 		t.Fatalf("a missing repository sent %d writes, want none", n)
 	}
 }
@@ -360,7 +364,7 @@ func TestEnsureRuleRefusesEachFailingBranch(t *testing.T) {
 			t.Parallel()
 			var logs []string
 			p := &Provisioner{Client: &Client{
-				API:   fakeAPIRoot + fakeAPIPath,
+				API:   forgejotest.APIRoot + forgejotest.APIPath,
 				HTTP:  &http.Client{Transport: c.transport},
 				Token: newSecret(fixtureToken),
 				Log:   func(line string) { logs = append(logs, line) },
@@ -380,14 +384,14 @@ func TestEnsureRuleRefusesEachFailingBranch(t *testing.T) {
 // write.
 func TestEnsureRuleDryRunSendsNoWrite(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	var logs []string
 	p := userProvisioner(f, true, &logs)
 	if err := p.EnsureRule(protectionRepo, testOptions()); err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
-	if n := len(f.writes()); n != 0 {
+	if n := len(f.Writes()); n != 0 {
 		t.Fatalf("dry run sent %d writes, want none", n)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "would create branch protection main") {
@@ -399,9 +403,9 @@ func TestEnsureRuleDryRunSendsNoWrite(t *testing.T) {
 // its name escaped as land%2F*, and that the main rule is left as it was.
 func TestEnsureNoRuleRemovesOnlyTheLandPattern(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.protectedLandBranch = true
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.ProtectedLandBranch = true
+	f.AddRepo(protectionRepo)
 	opts := testOptions()
 	seedRule(t, f, protectionRepo, servedRule(t, MainRule(opts)))
 	var logs []string
@@ -409,12 +413,12 @@ func TestEnsureNoRuleRemovesOnlyTheLandPattern(t *testing.T) {
 	if err := p.EnsureNoRule(protectionRepo, DefaultLandBranch); err != nil {
 		t.Fatalf("EnsureNoRule: %v", err)
 	}
-	writes := f.writes()
-	if len(writes) != 1 || writes[0].method != http.MethodDelete {
+	writes := f.Writes()
+	if len(writes) != 1 || writes[0].Method != http.MethodDelete {
 		t.Fatalf("sent %v, want one DELETE", writes)
 	}
-	if !strings.HasSuffix(writes[0].path, "/branch_protections/land%2F*") {
-		t.Fatalf("DELETE path = %q, want it to end with land%%2F*", writes[0].path)
+	if !strings.HasSuffix(writes[0].Path, "/branch_protections/land%2F*") {
+		t.Fatalf("DELETE path = %q, want it to end with land%%2F*", writes[0].Path)
 	}
 	if got := ruleNames(f, protectionRepo); !slices.Equal(got, []string{"main"}) {
 		t.Fatalf("rules after the run = %v, want only main", got)
@@ -428,14 +432,14 @@ func TestEnsureNoRuleRemovesOnlyTheLandPattern(t *testing.T) {
 // write and says so.
 func TestEnsureNoRuleAcceptsAnAbsentRule(t *testing.T) {
 	t.Parallel()
-	f := newFakeForgejo()
-	f.addRepo(protectionRepo)
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
 	var logs []string
 	p := userProvisioner(f, false, &logs)
 	if err := p.EnsureNoRule(protectionRepo, DefaultLandBranch); err != nil {
 		t.Fatalf("EnsureNoRule: %v", err)
 	}
-	if n := len(f.writes()); n != 0 {
+	if n := len(f.Writes()); n != 0 {
 		t.Fatalf("sent %d writes, want none", n)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "no branch protection land/* on acme/rig: the main rule is the only protected branch") {
@@ -506,7 +510,7 @@ func TestProtectionStopsOnARefusedRequest(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			p := &Provisioner{Client: &Client{
-				API:   fakeAPIRoot + fakeAPIPath,
+				API:   forgejotest.APIRoot + forgejotest.APIPath,
 				HTTP:  &http.Client{Transport: c.transport},
 				Token: newSecret(fixtureToken),
 			}}
@@ -533,13 +537,13 @@ func TestProtectionRefusesABadRepoBeforeAnyRequest(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFakeForgejo()
+			f := forgejotest.New()
 			var logs []string
 			p := userProvisioner(f, false, &logs)
 			if err := c.run(p); err == nil {
 				t.Fatalf("%s accepted a repository name with no owner", c.name)
 			}
-			if n := len(f.callLog()); n != 0 {
+			if n := len(f.CallLog()); n != 0 {
 				t.Fatalf("%s sent %d requests, want none", c.name, n)
 			}
 		})
@@ -581,7 +585,7 @@ func TestEnsureNoRuleBranches(t *testing.T) {
 			t.Parallel()
 			var logs []string
 			p := &Provisioner{Client: &Client{
-				API:    fakeAPIRoot + fakeAPIPath,
+				API:    forgejotest.APIRoot + forgejotest.APIPath,
 				HTTP:   &http.Client{Transport: c.transport},
 				Token:  newSecret(fixtureToken),
 				DryRun: c.dryRun,
@@ -638,7 +642,7 @@ func TestEnsureRuleTreatsNullAndEmptyListAsTheSame(t *testing.T) {
 			}
 			tr := &countTransport{getBody: listJSON(t, held)}
 			p := &Provisioner{Client: &Client{
-				API:   fakeAPIRoot + fakeAPIPath,
+				API:   forgejotest.APIRoot + forgejotest.APIPath,
 				HTTP:  &http.Client{Transport: tr},
 				Token: newSecret(fixtureToken),
 				Log:   func(string) {},
@@ -684,7 +688,7 @@ func TestEnsureRuleRefusesANullRuleList(t *testing.T) {
 	t.Parallel()
 	tr := &countTransport{getBody: "null"}
 	p := &Provisioner{Client: &Client{
-		API:   fakeAPIRoot + fakeAPIPath,
+		API:   forgejotest.APIRoot + forgejotest.APIPath,
 		HTTP:  &http.Client{Transport: tr},
 		Token: newSecret(fixtureToken),
 		Log:   func(string) {},
