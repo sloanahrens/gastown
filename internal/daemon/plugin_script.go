@@ -80,9 +80,12 @@ const scriptSkippedMarker = "[plugin-result skipped]"
 // It also remembers the keys each plugin has an escalation open under, so a
 // good run closes them and a plugin that never failed costs no
 // `gt escalate clear`. The keys are a set because a plugin's alert key moves
-// with its finding set: a recovery closes every key this daemon raised.
+// with its finding set: the run that raises a new key closes the ones it
+// replaces, and a recovery closes every key this daemon raised.
 // The memory is the daemon's: after a restart an open escalation stays open
-// until the operator closes it or the plugin fails and recovers again.
+// until the operator closes it or the plugin fails and recovers again, so a
+// set that changed across a restart leaves the old escalation for the
+// operator rather than closing it unasked.
 type scriptRunner struct {
 	mu        sync.Mutex
 	running   map[string]time.Time
@@ -114,6 +117,28 @@ func (r *scriptRunner) takeEscalated(name string) []string {
 	out := make([]string, 0, len(keys))
 	for key := range keys {
 		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// takeEscalatedExcept is takeEscalated for the keys other than keep: a run
+// that raised keep supersedes every other escalation this daemon has open for
+// name, and hands back those keys to close.
+func (r *scriptRunner) takeEscalatedExcept(name, keep string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keys := r.escalated[name]
+	out := make([]string, 0, len(keys))
+	for key := range keys {
+		if key == keep {
+			continue
+		}
+		out = append(out, key)
+		delete(keys, key)
+	}
+	if len(keys) == 0 {
+		delete(r.escalated, name)
 	}
 	sort.Strings(out)
 	return out
@@ -470,14 +495,24 @@ func pluginTarget(p *plugin.Plugin) string {
 // plugin_findings.go): an unchanged set refreshes one escalation, a changed
 // set raises another, and a set whose escalation was closed recently waits out
 // pluginEscalationReopenWindow.
+//
+// A run that raised or refreshed the escalation for one key supersedes every
+// other escalation the plugin has open: the finding set key moves with the
+// set, so leaving the previous key open would put two escalations in the
+// attention queue for one plugin, which is the accumulation this key exists to
+// end (gt-ggd75). The old ones close only once the new raise has landed; a
+// raise that failed leaves them open rather than trading one alarm for none.
 func (d *Daemon) escalatePluginFailure(p *plugin.Plugin, res scriptResult, townRoot string) {
 	key := pluginFailureAlertKey(p.Name)
 	summary := ""
-	if ids, kinds := d.cloudCheckFindings(p); len(ids) > 0 {
-		key = findingSetKey(p.Name, ids)
-		summary = findingSummary(kinds)
+	if alertKey, alertSummary := d.cloudCheckAlert(p); alertKey != "" {
+		key, summary = alertKey, alertSummary
 	}
 	if p.Name == cloudCheckPlugin && d.pluginEscalationClosedRecently(key) {
+		// The current set's escalation was closed by hand, so nothing is
+		// raised for it; an older set's open escalation is still stale, and
+		// closes here so the queue is left with what the operator decided.
+		d.supersedePluginEscalations(p.Name, key)
 		d.logger.Printf("Handler: script plugin %s failed (%s); its escalation was closed within %s, not raising another",
 			p.Name, res.status(), pluginEscalationReopenWindow)
 		return
@@ -491,7 +526,19 @@ func (d *Daemon) escalatePluginFailure(p *plugin.Plugin, res scriptResult, townR
 	if err := d.escalateAlertErr(key, "plugin:"+p.Name, msg); err != nil {
 		return
 	}
+	d.supersedePluginEscalations(p.Name, key)
 	d.scripts.markEscalated(p.Name, key)
+}
+
+// supersedePluginEscalations closes the escalations this daemon has open for
+// name under any key but key, the one the run just raised or refreshed. Their
+// finding sets are gone: the report now describes key's set.
+func (d *Daemon) supersedePluginEscalations(name, key string) {
+	superseded := d.scripts.takeEscalatedExcept(name, key)
+	if len(superseded) == 0 {
+		return
+	}
+	d.clearAlerts("superseded by "+key, superseded...)
 }
 
 // clearPluginFailure closes the failure escalations this daemon raised under
@@ -501,7 +548,7 @@ func (d *Daemon) escalatePluginFailure(p *plugin.Plugin, res scriptResult, townR
 func (d *Daemon) clearPluginFailure(p *plugin.Plugin) {
 	keys := d.scripts.takeEscalated(p.Name)
 	if len(keys) > 0 {
-		d.clearAlerts(fmt.Sprintf("plugin %s ran clean", p.Name), keys...)
+		d.clearAlerts("cleared: the plugin passed", keys...)
 	}
 }
 

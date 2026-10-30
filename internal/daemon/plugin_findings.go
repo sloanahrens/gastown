@@ -23,8 +23,9 @@ import (
 // fresh escalation and the attention queue never drained (gt-ggd75).
 //
 // The key below is the sorted set of urgent finding ids, so an unchanged set
-// refreshes the open escalation and a changed one raises a new escalation. A
-// set whose escalation the operator closed stays quiet for
+// refreshes the open escalation and a changed one raises a new escalation,
+// closing the previous set's (see escalatePluginFailure in plugin_script.go).
+// A set whose escalation the operator closed stays quiet for
 // pluginEscalationReopenWindow, then pages again if it is still there. The
 // exit code and the dashboard pill are untouched: this is the escalation path
 // only.
@@ -44,6 +45,12 @@ const (
 	// cloudUrgent is the report's worst severity: the findings at it are the
 	// ones the check fails over.
 	cloudUrgent = "urgent"
+
+	// cloudUnreadableKey is the finding set a run that cannot read the report
+	// is keyed by. It gets its own escalation rather than landing on the plain
+	// plugin key, so a report this daemon could not read is one item an
+	// operator closes once, and it comes back only after the reopen window.
+	cloudUnreadableKey = "unreadable-report"
 
 	// cloudKindMax caps a finding kind in the escalation text, in runes.
 	cloudKindMax = 40
@@ -187,18 +194,25 @@ func findingSummary(kinds map[string]int) string {
 	return fmt.Sprintf("cloud patrol findings making the check fail: %d urgent (%s)", total, strings.Join(parts, ", "))
 }
 
-// cloudCheckFindings returns the urgent finding ids behind p's failure, or nil
-// when p is not the cloud-check plugin or its report is not there to read.
-func (d *Daemon) cloudCheckFindings(p *plugin.Plugin) (ids []string, kinds map[string]int) {
+// cloudCheckAlert returns the alert key and reason summary for p's failure.
+// Both are empty for a plugin that is not the cloud check, whose plain plugin
+// key is its own. A report that cannot be read is a finding set of its own
+// (cloudUnreadableKey), so a broken report does not hide behind — or collide
+// with — the key of a real finding set.
+func (d *Daemon) cloudCheckAlert(p *plugin.Plugin) (key, summary string) {
 	if p == nil || p.Name != cloudCheckPlugin {
-		return nil, nil
+		return "", ""
 	}
 	rep, err := readCloudReport(d.cloudReportDir())
 	if err != nil {
-		d.logger.Printf("Handler: cloud-check: %v; keying the escalation by plugin alone", err)
-		return nil, nil
+		d.logger.Printf("Handler: cloud-check: %v; keying the escalation by the unreadable report", err)
+		return pluginFailureAlertKey(p.Name) + ":" + cloudUnreadableKey, ""
 	}
-	return urgentFindingIDs(rep)
+	ids, kinds := urgentFindingIDs(rep)
+	if len(ids) == 0 {
+		return "", ""
+	}
+	return findingSetKey(p.Name, ids), findingSummary(kinds)
 }
 
 // cloudReportDir is the patrol's reports directory: the test's own when one is

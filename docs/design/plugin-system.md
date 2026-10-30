@@ -87,8 +87,9 @@ Daemon heartbeat
    The plugin's next good run (success or skipped) closes that escalation.
    The cloud-check plugin's fingerprint adds a hash of the urgent finding ids
    in the patrol's report, so an unchanged finding set refreshes one
-   escalation, a changed set raises a new one, and a set whose escalation was
-   closed stays quiet for 24 hours (gt-ggd75).
+   escalation, a changed set raises its own and closes the previous set's as
+   superseded, and a set whose escalation was closed stays quiet for 24 hours
+   (gt-ggd75).
 ```
 
 A cooldown plugin that is not a script plugin with a `run.sh` is logged as

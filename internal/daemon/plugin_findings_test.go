@@ -272,7 +272,7 @@ func TestCloudCheckEscalationRefreshesTheSameFindingSet(t *testing.T) {
 }
 
 // A changed finding set raises a new escalation rather than refreshing the
-// old one.
+// old one, and supersedes the old one in the same run.
 func TestCloudCheckEscalationKeysOnTheChangedFindingSet(t *testing.T) {
 	t.Parallel()
 
@@ -301,8 +301,11 @@ func TestCloudCheckEscalationKeysOnTheChangedFindingSet(t *testing.T) {
 	if len(calls) != 2 || calls[0].Escalation.Fingerprint != first || calls[1].Escalation.Fingerprint != second {
 		t.Fatalf("escalations = %+v, want one per finding set", calls)
 	}
-	if len(notes.OpenEscalations(first)) != 1 || len(notes.OpenEscalations(second)) != 1 {
-		t.Errorf("each finding set must have its own escalation")
+	if len(notes.OpenEscalations(second)) != 1 {
+		t.Errorf("the new set has no open escalation")
+	}
+	if open := notes.OpenEscalations(first); len(open) != 0 {
+		t.Errorf("the old set's escalation is still open: %+v", open)
 	}
 }
 
@@ -359,6 +362,232 @@ func TestClearPluginFailureClosesEveryRaisedKey(t *testing.T) {
 	want := []string{"plugin:cloud-check:failed:aa", "plugin:cloud-check:failed:bb"}
 	if !slices.Equal(clears[0].Fingerprints, want) {
 		t.Errorf("cleared %v, want %v", clears[0].Fingerprints, want)
+	}
+	if clears[0].Reason != "cleared: the plugin passed" {
+		t.Errorf("clear reason = %q, want the pass that resolved it", clears[0].Reason)
+	}
+}
+
+// A run over a changed finding set leaves exactly one escalation open for the
+// plugin: the new set's. The previous set's closes as superseded, a passing
+// run clears the current one, and a set whose escalation the operator closed
+// after that stays quiet inside the reopen window.
+func TestCloudCheckEscalationSupersedesAChangedFindingSet(t *testing.T) {
+	t.Parallel()
+
+	clk := newFixedClock()
+	dir := cloudReportsFixture(t, cloudFindingFixture("f0", "api_enabled"))
+	bd := beadsfake.New(beadsfake.WithClock(clk))
+	notes := notifyfake.New()
+	d := cloudCheckDaemon(t, dir, notes, clk, bd)
+	failing := scriptPlugin(t, cloudCheckPlugin, "exit 1\n")
+	rec := &fakeRecorder{}
+
+	// Run A: the first set opens one escalation.
+	d.startScriptPlugin(failing, rec)
+	d.scripts.wait()
+	first := findingSetKey(cloudCheckPlugin, []string{"f0"})
+	if open := notes.OpenEscalations(first); len(open) != 1 {
+		t.Fatalf("run A: open = %+v, want the first set's escalation", open)
+	}
+
+	// Run B: a changed set raises its own and closes the first as superseded.
+	writeCloudReport(t, dir,
+		cloudFindingFixture("f0", "api_enabled"),
+		cloudFindingFixture("f1", "service_account"),
+	)
+	d.startScriptPlugin(failing, rec)
+	d.scripts.wait()
+	second := findingSetKey(cloudCheckPlugin, []string{"f0", "f1"})
+	if first == second {
+		t.Fatal("the changed set kept the key")
+	}
+	if open := notes.OpenEscalations(second); len(open) != 1 {
+		t.Errorf("run B: open for the new set = %+v, want one", open)
+	}
+	if open := notes.OpenEscalations(first); len(open) != 0 {
+		t.Errorf("run B: the superseded set's escalation is still open: %+v", open)
+	}
+	if got := clearReason(notes, first); got != "superseded by "+second {
+		t.Errorf("run B: superseded clear reason = %q, want %q", got, "superseded by "+second)
+	}
+
+	// Run C: a passing run clears what is left, so nothing stays open.
+	d.execCmd = scriptBash(cliReply{stdout: "the patrol found nothing urgent\n"}).run
+	d.startScriptPlugin(failing, rec)
+	d.scripts.wait()
+	if open := notes.OpenEscalations(second); len(open) != 0 {
+		t.Errorf("run C: the pass left an escalation open: %+v", open)
+	}
+	if got := clearReason(notes, second); got != "cleared: the plugin passed" {
+		t.Errorf("run C: clear reason = %q, want the pass", got)
+	}
+
+	// Run D: the operator's close is in the store, and the same set inside the
+	// window raises nothing.
+	seedClosedEscalation(t, bd, second)
+	raised := len(notes.Escalations())
+	d.execCmd = scriptBash(cliReply{stderr: "the patrol holds urgent findings\n", code: 1}).run
+	d.startScriptPlugin(failing, rec)
+	d.scripts.wait()
+	if got := len(notes.Escalations()); got != raised {
+		t.Errorf("run D: %d escalations, want the %d raised before it", got, raised)
+	}
+	if open := notes.OpenEscalations(second); len(open) != 0 {
+		t.Errorf("run D: a set closed minutes ago is open again: %+v", open)
+	}
+}
+
+// A raise that fails leaves the previous set's escalation open: the daemon
+// trades neither alarm for none, and the next run raises the new set again.
+func TestCloudCheckSupersedeWaitsForTheNewRaise(t *testing.T) {
+	t.Parallel()
+
+	clk := newFixedClock()
+	dir := cloudReportsFixture(t, cloudFindingFixture("f0", "api_enabled"))
+	notes := notifyfake.New()
+	d := cloudCheckDaemon(t, dir, notes, clk, nil)
+	p := scriptPlugin(t, cloudCheckPlugin, "exit 1\n")
+	rec := &fakeRecorder{}
+
+	runOnClock(t, clk, time.Second, func() {
+		d.startScriptPlugin(p, rec)
+		d.scripts.wait()
+	})
+	first := findingSetKey(cloudCheckPlugin, []string{"f0"})
+
+	writeCloudReport(t, dir,
+		cloudFindingFixture("f0", "api_enabled"),
+		cloudFindingFixture("f1", "service_account"),
+	)
+	second := findingSetKey(cloudCheckPlugin, []string{"f0", "f1"})
+	notes.Fail(notifyfake.KindEscalate, errors.New("gt escalate: dolt is unreachable"))
+	runOnClock(t, clk, time.Second, func() {
+		d.startScriptPlugin(p, rec)
+		d.scripts.wait()
+	})
+	notes.Fail(notifyfake.KindEscalate, nil)
+
+	if open := notes.OpenEscalations(first); len(open) != 1 {
+		t.Errorf("the old set's escalation closed although the new raise failed: %+v", open)
+	}
+	if open := notes.OpenEscalations(second); len(open) != 0 {
+		t.Errorf("a raise that failed left an escalation open: %+v", open)
+	}
+
+	runOnClock(t, clk, time.Second, func() {
+		d.startScriptPlugin(p, rec)
+		d.scripts.wait()
+	})
+	if open := notes.OpenEscalations(second); len(open) != 1 {
+		t.Errorf("the retried raise is not open: %+v", open)
+	}
+	if open := notes.OpenEscalations(first); len(open) != 0 {
+		t.Errorf("the retried raise did not supersede the old set: %+v", open)
+	}
+}
+
+// clearReason returns the reason of the clear that closed key, or "".
+func clearReason(notes *notifyfake.Recorder, key string) string {
+	label := notify.FingerprintLabel(key)
+	for _, c := range notes.Clears() {
+		for _, fp := range c.Fingerprints {
+			if notify.FingerprintLabel(fp) == label {
+				return c.Reason
+			}
+		}
+	}
+	return ""
+}
+
+// A report the daemon cannot read is its own finding set: one escalation,
+// held off for the reopen window after the operator closes it, so a broken
+// report does not page every run either.
+func TestCloudCheckEscalationForAnUnreadableReport(t *testing.T) {
+	t.Parallel()
+
+	clk := newFixedClock()
+	notes := notifyfake.New()
+	bd := beadsfake.New(beadsfake.WithClock(clk))
+	d := cloudCheckDaemon(t, t.TempDir(), notes, clk, bd) // no report.json in it
+	p := scriptPlugin(t, cloudCheckPlugin, "exit 1\n")
+	rec := &fakeRecorder{}
+	key := pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudUnreadableKey
+
+	d.startScriptPlugin(p, rec)
+	d.scripts.wait()
+	calls := notes.Escalations()
+	if len(calls) != 1 || calls[0].Escalation.Fingerprint != key {
+		t.Fatalf("escalations = %+v, want one under %q", calls, key)
+	}
+
+	seedClosedEscalation(t, bd, key)
+	d.startScriptPlugin(p, rec)
+	d.scripts.wait()
+	if calls := notes.Escalations(); len(calls) != 1 {
+		t.Errorf("an unreadable report closed minutes ago was raised again: %+v", calls)
+	}
+}
+
+// pluginEscalationClosedRecently answers from the escalation store: an open
+// escalation is a refresh rather than a suppression, a close inside the window
+// suppresses, a close outside it does not, and a store that cannot be read
+// raises rather than suppresses.
+func TestPluginEscalationClosedRecently(t *testing.T) {
+	t.Parallel()
+
+	key := findingSetKey(cloudCheckPlugin, []string{"f0"})
+	cases := []struct {
+		name string
+		seed func(t *testing.T, bd *beadsfake.Fake, key string)
+		adv  time.Duration
+		fail bool
+		want bool
+	}{
+		{name: "nothing filed", want: false},
+		{name: "closed a minute ago", seed: seedClosedEscalation, want: true},
+		{
+			name: "closed before the window opened",
+			seed: seedClosedEscalation,
+			adv:  pluginEscalationReopenWindow + time.Minute,
+			want: false,
+		},
+		{name: "still open", seed: seedOpenEscalation, want: false},
+		{name: "the store cannot be read", seed: seedClosedEscalation, fail: true, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			clk := newFixedClock()
+			bd := beadsfake.New(beadsfake.WithClock(clk))
+			if tc.seed != nil {
+				tc.seed(t, bd, key)
+			}
+			clk.Advance(tc.adv)
+
+			var reader workBeadReader = bd
+			if tc.fail {
+				reader = &labelBeads{failFor: "gt:escalation"}
+			}
+			d := cloudCheckDaemon(t, t.TempDir(), notifyfake.New(), clk, reader)
+			if got := d.pluginEscalationClosedRecently(key); got != tc.want {
+				t.Errorf("pluginEscalationClosedRecently = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// seedOpenEscalation files an escalation under key's fingerprint label and
+// leaves it open, as a repeat firing finds it.
+func seedOpenEscalation(t *testing.T, bd *beadsfake.Fake, key string) {
+	t.Helper()
+	if _, err := bd.Create(beads.CreateOptions{
+		Title:     "plugin:cloud-check: a failure still open",
+		Labels:    []string{"gt:escalation", notify.FingerprintLabel(key)},
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("seeding the escalation: %v", err)
 	}
 }
 
