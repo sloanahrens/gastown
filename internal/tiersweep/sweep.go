@@ -14,6 +14,10 @@ import (
 // usage is the line a command line this package cannot read prints.
 const usage = "usage: tier-sweep [--root dir] [shell] [integration] [race]"
 
+// sweepGoesOn ends a cleanup failure's stderr line: the run's verdict is its
+// tiers', never its log directory's (gt-xk9my).
+const sweepGoesOn = "the sweep goes on"
+
 // DefaultRoot is the repository root a run works from when --root names none:
 // the working directory. The script changed to its own parent directory; the
 // command takes the root from a flag instead.
@@ -52,6 +56,11 @@ type Deps struct {
 // replaces TIER_SWEEP_TIMINGS with those lines when the environment names one.
 // A timings file that cannot be written is named on stderr once and changes no
 // verdict.
+//
+// A run that made its own log directory first prunes the old ones beside it
+// (PruneMaxAge), and removes its own after the last summary line when every
+// tier was GREEN; a RED run keeps it for diagnosis. A prune or removal that
+// fails is one stderr line and changes no verdict (gt-xk9my).
 func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	root, tiers, err := splitRoot(args)
 	if err != nil {
@@ -65,10 +74,26 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	if host.Rename == nil {
 		host.Rename = os.Rename
 	}
+	if host.RemoveAll == nil {
+		host.RemoveAll = os.RemoveAll
+	}
+	if host.ReadDir == nil {
+		host.ReadDir = os.ReadDir
+	}
+	if host.Lstat == nil {
+		host.Lstat = os.Lstat
+	}
+	now := d.Now
+	if now == nil {
+		now = time.Now
+	}
 	opts, err := ParseOptions(tiers, host)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return UsageExit
+	}
+	if opts.OwnsLogDir {
+		pruneOldLogDirs(host, opts.LogDirParent, now, stderr)
 	}
 	exec := d.Exec
 	if root != DefaultRoot {
@@ -84,7 +109,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	}
 	timings := OpenTimings(filepath.Join(opts.LogDir, TimingsName), stderr)
 	defer timings.Close()
-	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr, Now: d.Now, Timings: timings}
+	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr, Now: now, Timings: timings}
 	red := false
 	for _, tier := range opts.Tiers {
 		var line string
@@ -109,7 +134,27 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 	if red {
 		return 1
 	}
+	timings.Close()
+	if opts.OwnsLogDir {
+		if err := host.RemoveAll(opts.LogDir); err != nil {
+			fmt.Fprintf(stderr, "%s: remove %s: %v (%s)\n", Name, opts.LogDir, err, sweepGoesOn)
+		}
+	}
 	return 0
+}
+
+// pruneOldLogDirs deletes the finished runs' log directories under dir and
+// names each one on stderr, so a host does not accumulate a directory per
+// sweep. A failure is one stderr line: the run's verdicts are its tiers'.
+func pruneOldLogDirs(host Host, dir string, now func() time.Time, stderr io.Writer) {
+	removed, err := Prune(host, dir, now(), PruneMaxAge)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: prune %s: %v (%s)\n", Name, dir, err, sweepGoesOn)
+		return
+	}
+	for _, path := range removed {
+		fmt.Fprintf(stderr, "%s: pruned %s\n", Name, path)
+	}
 }
 
 // splitRoot takes --root (as "--root dir" or "--root=dir") out of args and

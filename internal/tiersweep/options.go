@@ -71,6 +71,14 @@ type Options struct {
 	// LogDir is TIER_SWEEP_LOGDIR: the directory the run writes one log per
 	// package into, created when a run reads its options.
 	LogDir string
+	// OwnsLogDir reports whether the run made LogDir itself, the default
+	// tier-sweep.XXXXXX under TMPDIR, rather than taking a caller's
+	// TIER_SWEEP_LOGDIR. A GREEN run removes a directory it owns.
+	OwnsLogDir bool
+	// LogDirParent is the directory LogDir was made in when OwnsLogDir, TMPDIR
+	// or DefaultTempDir: the directory a run prunes old log directories from.
+	// Empty when the caller named LogDir.
+	LogDirParent string
 	// Trigger is TIER_SWEEP_TRIGGER as given; "0" turns the container trigger
 	// off, and every other value (including the default) leaves it on.
 	Trigger string
@@ -120,12 +128,24 @@ type Host struct {
 	// TIER_SWEEP_TIMINGS, so a reader never sees a torn file. A nil Rename takes
 	// os.Rename in Run.
 	Rename func(oldpath, newpath string) error
+	// RemoveAll deletes a log directory and everything under it, as os.RemoveAll
+	// does: a GREEN run's own directory, and the old ones a prune deletes. A nil
+	// RemoveAll takes os.RemoveAll in Run.
+	RemoveAll func(path string) error
+	// ReadDir lists a directory, as os.ReadDir does: the prune reads TMPDIR
+	// through it. A nil ReadDir takes os.ReadDir in Run.
+	ReadDir func(name string) ([]fs.DirEntry, error)
+	// Lstat describes a path without following a symlink, as os.Lstat does:
+	// the prune never deletes a link, only the directory it finds there. A nil
+	// Lstat takes os.Lstat in Run.
+	Lstat func(name string) (fs.FileInfo, error)
 }
 
 // ProcessHost reads and writes the running process.
 var ProcessHost = Host{
 	Env: os.Getenv, MkdirTemp: os.MkdirTemp, MkdirAll: os.MkdirAll,
 	WriteFile: os.WriteFile, Rename: os.Rename,
+	RemoveAll: os.RemoveAll, ReadDir: os.ReadDir, Lstat: os.Lstat,
 }
 
 // ParseOptions resolves one tier-sweep command line and the environment it
@@ -149,11 +169,14 @@ func ParseOptions(args []string, host Host) (Options, error) {
 	opts.Nice = nice
 	logDir := host.Env(EnvLogDir)
 	if logDir == "" {
-		dir, err := host.MkdirTemp(orDefault(host.Env("TMPDIR"), DefaultTempDir), logDirPattern)
+		parent := orDefault(host.Env("TMPDIR"), DefaultTempDir)
+		dir, err := host.MkdirTemp(parent, logDirPattern)
 		if err != nil {
 			return Options{}, fmt.Errorf("%s: create the default log directory: %w", Name, err)
 		}
 		logDir = dir
+		opts.OwnsLogDir = true
+		opts.LogDirParent = parent
 	}
 	if err := host.MkdirAll(logDir, 0o755); err != nil {
 		return Options{}, fmt.Errorf("%s: create log directory %s: %w", Name, logDir, err)

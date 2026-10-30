@@ -23,6 +23,16 @@ type fakeHost struct {
 	mkdirErr error
 	temps    []tempCall
 	mkdirs   []string
+	// readDirs records each directory a prune listed. listings is what ReadDir
+	// answers per directory (a directory it does not name is empty), and infos
+	// what Lstat answers per path (a path it does not name does not exist).
+	// removed records each RemoveAll path, and removeErr fails one of them.
+	readDirs  []string
+	listings  map[string][]fs.DirEntry
+	infos     map[string]fs.FileInfo
+	readErr   error
+	removed   []string
+	removeErr map[string]error
 }
 
 // tempCall is one MkdirTemp call: the parent and the pattern it took.
@@ -42,6 +52,24 @@ func (f *fakeHost) host() Host {
 			f.mkdirs = append(f.mkdirs, path)
 			return f.mkdirErr
 		},
+		ReadDir: func(dir string) ([]fs.DirEntry, error) {
+			f.readDirs = append(f.readDirs, dir)
+			if f.readErr != nil {
+				return nil, f.readErr
+			}
+			return f.listings[dir], nil
+		},
+		Lstat: func(name string) (fs.FileInfo, error) {
+			info, ok := f.infos[name]
+			if !ok {
+				return nil, fs.ErrNotExist
+			}
+			return info, nil
+		},
+		RemoveAll: func(path string) error {
+			f.removed = append(f.removed, path)
+			return f.removeErr[path]
+		},
 	}
 }
 
@@ -55,9 +83,11 @@ const madeDir = "/tmp/tier-sweep.aB12"
 func TestParseOptions(t *testing.T) {
 	t.Parallel()
 	defaults := Options{
-		Tiers:   []string{TierShell, TierIntegration, TierRace},
-		Timeout: DefaultTimeout,
-		LogDir:  madeDir,
+		Tiers:        []string{TierShell, TierIntegration, TierRace},
+		Timeout:      DefaultTimeout,
+		LogDir:       madeDir,
+		OwnsLogDir:   true,
+		LogDirParent: DefaultTempDir,
 	}
 	defaultTemps := []tempCall{{dir: DefaultTempDir, pattern: logDirPattern}}
 	cases := []struct {
@@ -75,23 +105,26 @@ func TestParseOptions(t *testing.T) {
 			wantMk:  []string{madeDir},
 		},
 		{
-			name:    "the tiers keep the order given",
-			args:    []string{TierRace, TierShell},
-			want:    Options{Tiers: []string{TierRace, TierShell}, Timeout: DefaultTimeout, LogDir: madeDir},
+			name: "the tiers keep the order given",
+			args: []string{TierRace, TierShell},
+			want: Options{Tiers: []string{TierRace, TierShell}, Timeout: DefaultTimeout, LogDir: madeDir,
+				OwnsLogDir: true, LogDirParent: DefaultTempDir},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
 		{
-			name:    "an unknown tier stays in the list for the run to report",
-			args:    []string{TierShell, "bogus", TierRace},
-			want:    Options{Tiers: []string{TierShell, "bogus", TierRace}, Timeout: DefaultTimeout, LogDir: madeDir},
+			name: "an unknown tier stays in the list for the run to report",
+			args: []string{TierShell, "bogus", TierRace},
+			want: Options{Tiers: []string{TierShell, "bogus", TierRace}, Timeout: DefaultTimeout, LogDir: madeDir,
+				OwnsLogDir: true, LogDirParent: DefaultTempDir},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
 		{
-			name:    "TMPDIR names the default log directory's parent",
-			env:     map[string]string{"TMPDIR": "/var/tmp"},
-			want:    defaults,
+			name: "TMPDIR names the default log directory's parent",
+			env:  map[string]string{"TMPDIR": "/var/tmp"},
+			want: Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir,
+				OwnsLogDir: true, LogDirParent: "/var/tmp"},
 			wantTmp: []tempCall{{dir: "/var/tmp", pattern: logDirPattern}},
 			wantMk:  []string{madeDir},
 		},
@@ -119,6 +152,7 @@ func TestParseOptions(t *testing.T) {
 			name: "TIER_SWEEP_SKIP is the skip list",
 			env:  map[string]string{EnvSkip: "integration:./a race:./b:^TestC$"},
 			want: Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir,
+				OwnsLogDir: true, LogDirParent: DefaultTempDir,
 				SkipList: "integration:./a race:./b:^TestC$"},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
@@ -131,9 +165,10 @@ func TestParseOptions(t *testing.T) {
 			wantMk:  []string{madeDir},
 		},
 		{
-			name:    "TIER_SWEEP_TIMEOUT is the per-package timeout",
-			env:     map[string]string{EnvTimeout: "30m"},
-			want:    Options{Tiers: defaults.Tiers, Timeout: "30m", LogDir: madeDir},
+			name: "TIER_SWEEP_TIMEOUT is the per-package timeout",
+			env:  map[string]string{EnvTimeout: "30m"},
+			want: Options{Tiers: defaults.Tiers, Timeout: "30m", LogDir: madeDir,
+				OwnsLogDir: true, LogDirParent: DefaultTempDir},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
@@ -145,16 +180,18 @@ func TestParseOptions(t *testing.T) {
 			wantMk:  []string{madeDir},
 		},
 		{
-			name:    "TIER_SWEEP_TRIGGER is passed through as given",
-			env:     map[string]string{EnvTrigger: "0"},
-			want:    Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir, Trigger: "0"},
+			name: "TIER_SWEEP_TRIGGER is passed through as given",
+			env:  map[string]string{EnvTrigger: "0"},
+			want: Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir,
+				OwnsLogDir: true, LogDirParent: DefaultTempDir, Trigger: "0"},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
 		{
-			name:    "TIER_SWEEP_TESTED is the commit a run tests",
-			env:     map[string]string{EnvTested: "abc123"},
-			want:    Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir, Tested: "abc123"},
+			name: "TIER_SWEEP_TESTED is the commit a run tests",
+			env:  map[string]string{EnvTested: "abc123"},
+			want: Options{Tiers: defaults.Tiers, Timeout: DefaultTimeout, LogDir: madeDir,
+				OwnsLogDir: true, LogDirParent: DefaultTempDir, Tested: "abc123"},
 			wantTmp: defaultTemps,
 			wantMk:  []string{madeDir},
 		},
