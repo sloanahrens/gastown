@@ -523,16 +523,16 @@ Remove the installed binaries from a gastown clone:
 make uninstall             # the directory comes from INSTALL_DIR
 ```
 
-`make uninstall` runs `scripts/uninstall-gt.sh`, which removes `<INSTALL_DIR>/gt`
+`make uninstall` runs `go run ./cmd/uninstall-gt`, which removes `<INSTALL_DIR>/gt`
 and `<INSTALL_DIR>/bd` and nothing else. The directory is named, never looked
 up: `command -v` answers what runs if you type `gt`, and in a running town that
 is the live install every agent on the host runs from — which is how the recipe
 this replaces resolved to the town's own binaries and deleted them (gt-acdfp).
-Before running the script directly, read its header for the flags that name the
-directory.
+Before running the command directly, run `go run ./cmd/uninstall-gt --help` for
+the flags that name the directory.
 
 Handed the live install of a town — `$HOME/.local/bin` with a town at or above
-the clone — the script refuses, exits 2 and names the town. Removing the
+the clone — the command refuses, exits 2 and names the town. Removing the
 binaries a running town runs from is a decommission, not a test, and it has to
 be asked for: `FORCE=1`, after `gt daemon stop`, is how you ask. To exercise an
 uninstall without risking the install the town is using, name a scratch

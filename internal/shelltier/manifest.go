@@ -72,7 +72,6 @@ func Manifest() []Entry {
 		{Path: "scripts/install-binary_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/polecat-go-floor_test.sh", StubsGo: "stub: scripts/polecat-go-floor_test.sh:66 defines fake GO_BIN binaries"},
 		{Path: "scripts/install-om_test.sh", StubsGo: "stub: scripts/install-om_test.sh:32 defines stubs/go"},
-		{Path: "scripts/uninstall-gt_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/install-local_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/docs-lint_test.sh", StubsGo: "none: the go in its text is a --list tier name"},
 		{Path: "scripts/deep-review_test.sh", StubsGo: "none: go test appears only in fixture text"},

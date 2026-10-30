@@ -178,10 +178,9 @@ else
 fi
 list="$ROOT/scripts/test-makefile.sh"
 missing=""
-for t in scripts/uninstall-gt_test.sh scripts/repo-guards_test.sh; do
+for t in scripts/repo-guards_test.sh; do
   grep -q -F "bash $t" "$list" || missing="$missing $t"
 done
-grep -q -F 'bash -n scripts/uninstall-gt.sh' "$list" || missing="$missing -n:scripts/uninstall-gt.sh"
 if [[ -z "$missing" ]]; then
   pass "the shell-test list runs the scripts the old hand list skipped (gt-tqxdd)"
 else

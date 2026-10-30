@@ -14,8 +14,6 @@ bash scripts/polecat-go-floor_test.sh
 bash -n scripts/lib/install-gt-lib.sh
 bash -n scripts/install-om.sh
 bash scripts/install-om_test.sh
-bash -n scripts/uninstall-gt.sh
-bash scripts/uninstall-gt_test.sh
 bash scripts/install-local_test.sh
 bash -n scripts/docs-lint.sh
 bash scripts/docs-lint_test.sh

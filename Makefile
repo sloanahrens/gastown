@@ -361,14 +361,14 @@ install-local: check-up-to-date check-forward-only build
 	@$(MAKE) --no-print-directory check-install-path
 
 # uninstall: THE way to remove the installed gt and bd binaries (gt-acdfp).
-# Runs scripts/uninstall-gt.sh on $(INSTALL_DIR) — an explicit path, never
+# Runs cmd/uninstall-gt (go run) on $(INSTALL_DIR) — an explicit path, never
 # `command -v`, which resolves to the live install and is what deleted the
 # town's binaries on 2026-09-30. It refuses when $(INSTALL_DIR) is a town's
 # live install; FORCE=1 is the override for a real decommission. It removes
 # the binaries only: deleting the workspace is a separate act, and one this
 # target will not perform. Point INSTALL_DIR at a scratch directory to test it.
 uninstall:
-	@bash $(CURDIR)/scripts/uninstall-gt.sh --install-dir "$(INSTALL_DIR)" $(if $(filter 1,$(FORCE)),--force)
+	@go run ./cmd/uninstall-gt --install-dir "$(INSTALL_DIR)" $(if $(filter 1,$(FORCE)),--force)
 
 # check-version-tag: Verify that if HEAD is tagged vX.Y.Z, the Version constant
 # in internal/cmd/version.go equals X.Y.Z. No-op when HEAD is untagged, so it is
