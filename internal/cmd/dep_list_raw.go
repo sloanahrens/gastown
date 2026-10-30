@@ -92,22 +92,26 @@ var errNotOnTracker = errors.New("rig is not on the tracker")
 
 // depListRawIDsOnTracker answers the dependency query from the tracker seam
 // when dir's route names the tracker, so no Dolt connection or bd sql call is
-// made. Anything short of a tracker route returns errNotOnTracker and the
-// caller runs the raw path unchanged: a dir outside any town, a town whose
-// route table cannot be read, and a rig with no route or a Dolt route. Only a
-// rig the route names as the tracker can fail here, and then it fails: a
-// tracker that cannot be opened is an error, never a fall back to Dolt, because
-// the backend never lets a tracker rig write to Dolt.
+// made. A dir outside any town, and a rig with no route or a Dolt route, return
+// errNotOnTracker and the caller runs the raw path unchanged. A town or route
+// table that cannot be read is an error, never errNotOnTracker: without it the
+// seam cannot tell a tracker rig from a Dolt rig, and a Dolt read for a tracker
+// rig is the second store the backend exists to prevent. A tracker that cannot
+// be opened is an error too.
 func depListRawIDsOnTracker(dir, issueID, direction, depType string, cfg backend.Config, find townRootFinder) ([]string, error) {
-	// A town that cannot be found is treated as outside one, as depListRawUserInfo
-	// treats it, so a Dolt rig is never failed by this lookup.
 	townRoot, err := find(dir)
-	if err != nil || townRoot == "" {
+	if err != nil {
+		return nil, fmt.Errorf("finding the town for %s: %w", issueID, err)
+	}
+	if townRoot == "" {
 		return nil, errNotOnTracker
 	}
 	beadsDir := beads.ResolveBeadsDir(dir)
 	onTracker, err := routedToTracker(townRoot, beadsDir)
-	if err != nil || !onTracker {
+	if err != nil {
+		return nil, fmt.Errorf("reading the route table for %s: %w", issueID, err)
+	}
+	if !onTracker {
 		return nil, errNotOnTracker
 	}
 

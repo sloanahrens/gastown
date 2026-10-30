@@ -3,6 +3,8 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/backend"
@@ -153,7 +156,7 @@ func trackerFixture(w http.ResponseWriter, r *http.Request) {
 // fails the test.
 func failIfDolt(t *testing.T) rawDepDolt {
 	return func(string, string, string, string) ([]string, error) {
-		t.Error("a tracker rig reached the Dolt read")
+		t.Error("the query reached the Dolt read for a rig the seam must answer or refuse")
 		return nil, errors.New("the Dolt read was reached")
 	}
 }
@@ -192,26 +195,78 @@ func TestDepListRawIDsOnATrackerRigAnswersFromTheSeam(t *testing.T) {
 	}
 }
 
-// A tracker rig is answered by the seam and never reaches the Dolt read: the
-// fake counts any call to it.
+// A tracker rig never opens a Dolt connection, even with a Dolt server listening
+// at the port its metadata names. The listener counts every connection the raw
+// path makes, and a sentinel connection made after the call marks the end:
+// connections are accepted in the order they were made, so any connection
+// before the sentinel came from the call.
 func TestDepListRawIDsOnATrackerRigNeverOpensDolt(t *testing.T) {
 	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan string, 16)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c.RemoteAddr().String()
+			_ = c.Close()
+		}
+	}()
+
 	_, rig := trackerTown(t)
-	doltReads := 0
-	dolt := func(string, string, string, string) ([]string, error) {
-		doltReads++
-		return nil, errors.New("the Dolt read was reached")
+	writeDoltRuntime(t, filepath.Join(rig, ".beads"), ln.Addr().(*net.TCPAddr).Port)
+	got, callErr := depListRawIDsWith(rig, "tr-x", "down", "", trackerConfig(trackerFixture), workspace.Find, depListRawIDsViaDolt)
+
+	sentinel, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sentinel.Close()
+	for addr, want := "", sentinel.LocalAddr().String(); addr != want; {
+		select {
+		case addr = <-accepted:
+			if addr != want {
+				t.Errorf("the tracker rig opened a Dolt connection from %s", addr)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the sentinel connection was never accepted")
+		}
 	}
 
-	got, err := depListRawIDsWith(rig, "tr-x", "down", "", trackerConfig(trackerFixture), workspace.Find, dolt)
-	if err != nil {
-		t.Fatalf("depListRawIDsWith: %v", err)
+	if callErr != nil {
+		t.Fatalf("depListRawIDsWith: %v", callErr)
 	}
 	if want := []string{"tr-a", "tr-b", "tr-c"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("depListRawIDsWith = %v, want %v", got, want)
 	}
-	if doltReads != 0 {
-		t.Errorf("the tracker rig reached the Dolt read %d time(s), want none", doltReads)
+}
+
+// writeDoltRuntime gives beadsDir the Dolt server metadata the raw path reads its
+// host, port and database from, so a Dolt read would dial port.
+func writeDoltRuntime(t *testing.T, beadsDir string, port int) {
+	t.Helper()
+	meta := fmt.Sprintf(`{"backend":"dolt","dolt_mode":"server","database":"trk","dolt_server_host":"127.0.0.1","dolt_server_port":%d}`, port)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// unreadableRoutes replaces the route table with a directory: it opens, but it
+// cannot be read as a file.
+func unreadableRoutes(t *testing.T, townRoot string) {
+	t.Helper()
+	routes := filepath.Join(townRoot, ".beads", beads.RoutesFileName)
+	if err := os.Remove(routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(routes, 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -229,45 +284,39 @@ func TestDepListRawIDsOnATrackerRigWithNoTrackerConfigRefuses(t *testing.T) {
 	}
 }
 
-// A Dolt rig keeps its Dolt answer when the tracker pre-check cannot read the
-// town or the route table: neither is a tracker route, so neither may stop the
-// Dolt read that bd rigs have always answered from.
-func TestDepListRawIDsOnADoltRigKeepsTheDoltAnswerWhenTheSeamCannotRead(t *testing.T) {
+// When the town or the route table cannot be read, the seam cannot tell a
+// tracker rig from a Dolt rig, so it refuses: a Dolt read on a guess could
+// answer a tracker rig from a store it no longer writes to. This holds for a
+// Dolt rig too, as the rest of gt already refuses such a rig: backend.Open fails
+// on the same unreadable table. The Dolt read is never reached.
+func TestDepListRawIDsRefusesWhenTheSeamCannotReadTheTownOrRoutes(t *testing.T) {
 	t.Parallel()
-	dolt := func(string, string, string, string) ([]string, error) { return []string{"gt-a"}, nil }
 	broken := func(string) (string, error) { return "", errors.New("the working directory is gone") }
 	cases := []struct {
-		name  string
-		setup func(t *testing.T, townRoot string)
-		find  townRootFinder
+		name    string
+		tracker bool
+		setup   func(t *testing.T, townRoot string)
+		find    townRootFinder
 	}{
-		{"the town cannot be found", func(*testing.T, string) {}, broken},
-		{"the route table cannot be read", func(t *testing.T, townRoot string) {
-			// A directory where routes.jsonl should be opens but fails to read.
-			routes := filepath.Join(townRoot, ".beads", beads.RoutesFileName)
-			if err := os.Remove(routes); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(routes, 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}, workspace.Find},
+		{"a Dolt rig whose town cannot be found", false, func(*testing.T, string) {}, broken},
+		{"a Dolt rig whose route table cannot be read", false, unreadableRoutes, workspace.Find},
+		{"a tracker rig whose route table cannot be read", true, unreadableRoutes, workspace.Find},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			townRoot, _ := trackerTown(t)
+			townRoot, trackerRig := trackerTown(t)
 			tc.setup(t, townRoot)
-			gtRig := filepath.Join(townRoot, "gastown", "mayor", "rig")
-			if err := os.MkdirAll(filepath.Join(gtRig, ".beads"), 0o755); err != nil {
+			rig := filepath.Join(townRoot, "gastown", "mayor", "rig")
+			if tc.tracker {
+				rig = trackerRig
+			}
+			if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			got, err := depListRawIDsWith(gtRig, "gt-x", "down", "", backend.Config{}, tc.find, dolt)
-			if err != nil {
-				t.Fatalf("depListRawIDsWith on a Dolt rig = %v, want the Dolt answer", err)
-			}
-			if want := []string{"gt-a"}; !reflect.DeepEqual(got, want) {
-				t.Errorf("depListRawIDsWith = %v, want %v", got, want)
+			ids, err := depListRawIDsWith(rig, "gt-x", "down", "", backend.Config{}, tc.find, failIfDolt(t))
+			if err == nil || errors.Is(err, errNotOnTracker) {
+				t.Fatalf("depListRawIDsWith = %v, %v; want a refusal", ids, err)
 			}
 		})
 	}
