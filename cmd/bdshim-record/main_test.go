@@ -221,6 +221,21 @@ func TestRunRefusesASymlinkedScratchUnderAWorkspace(t *testing.T) {
 	}
 }
 
+// TestGuardRunRefusesAScratchItCannotResolve: a -scratch whose symlinks loop cannot be followed, so
+// the recorder cannot tell which workspace bd init would reach and refuses rather than guessing.
+func TestGuardRunRefusesAScratchItCannotResolve(t *testing.T) {
+	t.Parallel()
+	tree := t.TempDir()
+	loop := filepath.Join(tree, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatalf("make the symlink loop: %v", err)
+	}
+	err := guardRun(safeCwd(t), filepath.Join(loop, "scratch"))
+	if err == nil || !strings.Contains(err.Error(), "resolve") {
+		t.Fatalf("guardRun over a symlink loop = %v, want the resolve failure reported", err)
+	}
+}
+
 // TestGuardRunAcceptsASymlinkedScratchOutsideAWorkspace: resolving the link must not turn a clear
 // scratch directory into a refusal, or the guard would block the recording it exists to protect.
 func TestGuardRunAcceptsASymlinkedScratchOutsideAWorkspace(t *testing.T) {

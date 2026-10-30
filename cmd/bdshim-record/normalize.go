@@ -71,8 +71,8 @@ type jsonObject []jsonMember
 func decodeJSON(stdout []byte) (any, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(stdout))
 	decoder.UseNumber() // a number keeps its digits, so a golden holds what bd printed
-	value, err := decodeOrdered(decoder)
-	if err != nil {
+	value, ok := decodeOrdered(decoder)
+	if !ok {
 		return nil, false
 	}
 	if _, err := decoder.Token(); err != io.EOF {
@@ -81,16 +81,18 @@ func decodeJSON(stdout []byte) (any, bool) {
 	return value, true
 }
 
-// decodeOrdered reads the next JSON value keep index order. Objects become jsonObject, arrays
-// become []any, and every scalar is the decoder's own value, so a number keeps its digits.
-func decodeOrdered(decoder *json.Decoder) (any, error) {
+// decodeOrdered reads the next JSON value and reports whether it read one, so the one caller that
+// decides between bd's bytes and a normalized golden hears "not JSON" rather than a syntax error.
+// Objects become jsonObject, arrays become []any, and every scalar is the decoder's own value, so a
+// number keeps its digits.
+func decodeOrdered(decoder *json.Decoder) (any, bool) {
 	token, err := decoder.Token()
 	if err != nil {
-		return nil, err
+		return nil, false
 	}
 	delim, ok := token.(json.Delim)
 	if !ok {
-		return token, nil
+		return token, true
 	}
 	switch delim {
 	case '{':
@@ -98,46 +100,38 @@ func decodeOrdered(decoder *json.Decoder) (any, error) {
 		for decoder.More() {
 			keyToken, err := decoder.Token()
 			if err != nil {
-				return nil, err
+				return nil, false
 			}
 			key, ok := keyToken.(string)
 			if !ok {
-				return nil, errNotAnObjectKey
+				return nil, false
 			}
-			value, err := decodeOrdered(decoder)
-			if err != nil {
-				return nil, err
+			value, ok := decodeOrdered(decoder)
+			if !ok {
+				return nil, false
 			}
 			object = append(object, jsonMember{key: key, value: value})
 		}
-		_, err := decoder.Token() // the closing brace
-		return object, err
+		if _, err := decoder.Token(); err != nil { // the closing brace
+			return nil, false
+		}
+		return object, true
 	case '[':
 		array := []any{}
 		for decoder.More() {
-			item, err := decodeOrdered(decoder)
-			if err != nil {
-				return nil, err
+			item, ok := decodeOrdered(decoder)
+			if !ok {
+				return nil, false
 			}
 			array = append(array, item)
 		}
-		_, err := decoder.Token() // the closing bracket
-		return array, err
+		if _, err := decoder.Token(); err != nil { // the closing bracket
+			return nil, false
+		}
+		return array, true
 	}
-	return nil, errNotADelimiter
+	return nil, false
 }
-
-// errNotAnObjectKey and errNotADelimiter are what a decoder that is not walking a value json
-// produced gets, so normalization leaves the bytes as they are rather than guessing at them.
-var (
-	errNotAnObjectKey = decodeError("a JSON object member has no key")
-	errNotADelimiter  = decodeError("a JSON value opens with a delimiter that closes nothing")
-)
-
-// decodeError is a decode failure that carries its own words.
-type decodeError string
-
-func (e decodeError) Error() string { return string(e) }
 
 // normalizeValue rewrites the values bd decides at run time inside one decoded JSON value, and
 // reports whether it changed any. key is the member name value was printed under, so a bead id is

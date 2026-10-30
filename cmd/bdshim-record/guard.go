@@ -67,8 +67,8 @@ func realPath(path string) (string, error) {
 			return "", err
 		}
 		parent := filepath.Dir(path)
-		if parent == path {
-			return "", err
+		if parent == path { // the root is not there, so nothing above it can be either
+			return filepath.Join(path, missing), nil
 		}
 		missing = filepath.Join(filepath.Base(path), missing)
 		path = parent
