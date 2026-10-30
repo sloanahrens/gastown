@@ -57,6 +57,7 @@ func deployTestSpec() templates.ComposeSpec {
 // builder returns for the same town settings, and the builder's own argv is
 // the one the deploy runs (gt-qpeei.25 acceptance).
 func TestDaemonDeploy_RecordsTheStartBuilderArgv(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	compose := writeComposeFile(t, town)
 	c, _ := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
@@ -90,6 +91,7 @@ func TestDaemonDeploy_RecordsTheStartBuilderArgv(t *testing.T) {
 // builder, and the deploy returns that refusal with the compose file untouched
 // and no command run (gt-qpeei.25 acceptance).
 func TestDaemonDeploy_UnsetSettingsAreTheBuildersRefusal(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	compose := writeComposeFile(t, town)
 	c, _ := stubContainerTown(t, &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer})
@@ -120,6 +122,7 @@ func TestDaemonDeploy_UnsetSettingsAreTheBuildersRefusal(t *testing.T) {
 // refused with the compose file untouched and no command run: the start builder
 // would recreate the town's container, not the one the render describes.
 func TestDaemonDeploy_RefusesARenderForTheTownsOtherContainer(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	compose := writeComposeFile(t, town)
 	c, _ := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
