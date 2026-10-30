@@ -20,7 +20,8 @@ const blanks = " \t\r\v\f"
 // the name the gateway reports a clash under. Only a line that starts with "id:"
 // at the start of the line counts, so a nested "- id:" inside credentials is not
 // mistaken for it. A quoted id returns without its quotes; an unquoted one ends
-// at the first space or comment. A profile with no such line returns "".
+// at the first space or comment. A quote never closed returns "", not the rest
+// of the line read as an id. A profile with no such line returns "".
 func ProfileID(yaml []byte) string {
 	for _, line := range strings.Split(string(yaml), "\n") {
 		rest, ok := strings.CutPrefix(line, "id:")
@@ -29,9 +30,11 @@ func ProfileID(yaml []byte) string {
 		}
 		rest = strings.TrimLeft(rest, blanks)
 		if len(rest) > 0 && (rest[0] == '"' || rest[0] == '\'') {
-			if end := strings.IndexByte(rest[1:], rest[0]); end >= 0 {
-				return rest[1 : 1+end]
+			end := strings.IndexByte(rest[1:], rest[0])
+			if end < 0 {
+				return ""
 			}
+			return rest[1 : 1+end]
 		}
 		if end := strings.IndexAny(rest, blanks+"#"); end >= 0 {
 			return rest[:end]
@@ -100,7 +103,7 @@ func (g Gt) Render(file string, out io.Writer, exportFile string) error {
 // not bind the gateway's endpoint: the reason after "stale:" in gt's answer. It
 // returns "" when the profile binds the endpoint. A failed check, or an answer
 // that is neither bound nor stale with a reason, is an error that names the
-// profile. The answer itself is not echoed into the error.
+// profile and gives the answer.
 func (g Gt) StaleReason(id, exportFile string) (string, error) {
 	stdout, err := g.endpoint("--check", exportFile)
 	if err != nil {
@@ -115,5 +118,5 @@ func (g Gt) StaleReason(id, exportFile string) (string, error) {
 			return reason, nil
 		}
 	}
-	return "", fmt.Errorf("%s: gt sandbox endpoint --check answered neither bound nor stale for %s", Name, id)
+	return "", fmt.Errorf("%s: gt sandbox endpoint --check answered neither bound nor stale for %s: %s", Name, id, verdict)
 }

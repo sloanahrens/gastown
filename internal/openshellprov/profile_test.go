@@ -22,6 +22,12 @@ func TestProfileIDTable(t *testing.T) {
 		{"nested id ignored", "credentials:\n  - id: nested\n", ""},
 		{"nested id before the top-level one", "credentials:\n  - id: nested\nid: forgejo-polecat\n", "forgejo-polecat"},
 		{"no id", "name: forgejo-polecat\n", ""},
+		{"CRLF plain", "id: forgejo-polecat\r\n", "forgejo-polecat"},
+		{"CRLF double quoted", "id: \"forgejo-polecat\"\r\n", "forgejo-polecat"},
+		{"tab after the key", "id:\tforgejo-polecat\n", "forgejo-polecat"},
+		{"tab before the comment", "id: forgejo-polecat\t# the polecat profile\n", "forgejo-polecat"},
+		{"unterminated double quote", "id: \"forgejo-polecat\n", ""},
+		{"unterminated single quote", "id: 'forgejo-polecat\n", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,6 +111,19 @@ func TestRenderWriteFailureIsAnError(t *testing.T) {
 	fake := &fakeRunner{stdout: []byte("rendered")}
 	if err := (Gt{Run: fake}).Render("p.yaml", failingWriter{}, ""); err == nil {
 		t.Fatal("Render into a failing writer = nil error, want the write failure")
+	}
+}
+
+func TestStaleReasonUnrecognisedAnswerNamesTheVerdict(t *testing.T) {
+	t.Parallel()
+	fake := &fakeRunner{stdout: []byte("maybe\n")}
+	_, err := (Gt{Run: fake}).StaleReason("forgejo-polecat", "e.yaml")
+	if err == nil {
+		t.Fatal("StaleReason(maybe) = nil error, want an error")
+	}
+	want := "neither bound nor stale for forgejo-polecat: maybe"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
 	}
 }
 
