@@ -19,8 +19,6 @@ deploy/k8s/kind/common.sh	port: gt-tpg0p
 deploy/k8s/kind/down.sh	port: gt-tpg0p
 deploy/k8s/kind/kind_test.sh	port: gt-tpg0p
 deploy/k8s/kind/up.sh	port: gt-tpg0p
-deploy/k8s/render-policy.sh	port: gt-tpg0p
-deploy/k8s/render-policy_test.sh	port: gt-tpg0p
 deploy/polecat/go-floor.sh	port: gt-tpg0p
 docker-entrypoint.sh	platform: container entrypoint
 gt-model-eval/scripts/results-to-discussion.sh	port: gt-tpg0p
