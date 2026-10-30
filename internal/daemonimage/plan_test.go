@@ -2,6 +2,7 @@ package daemonimage
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -46,34 +47,43 @@ func planBuilder(t *testing.T) Builder {
 	}
 }
 
-// Plan names each step a full build runs, with the same argv the build runs, and
-// runs, writes and fetches nothing.
+// Plan names each step a full build runs, in order, with the argv the build runs,
+// and runs, writes and fetches nothing. The claude step names the URL that
+// FetchClaudeCLI requests, taken from the fetch itself.
 func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	t.Parallel()
 	b := planBuilder(t)
+	var fetched string
+	b.Fetch = func(_ context.Context, url string) (io.ReadCloser, error) {
+		fetched = url
+		return nil, errors.New("fetch stubbed: Plan must print the URL, not fetch it")
+	}
+	if _, err := b.FetchClaudeCLI(context.Background()); err == nil {
+		t.Fatal("FetchClaudeCLI with a stubbed fetch returned no error")
+	}
+	if fetched == "" {
+		t.Fatal("FetchClaudeCLI requested no URL")
+	}
 
 	lines, err := b.Plan(testRev)
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
 
-	joined := strings.Join(lines, "\n")
-	for _, want := range []string{
-		"build gt: " + strings.Join(goBuildArgv(filepath.Join(b.Out, "gt"), GTPackage, gtCommitFlag+testRev), " "),
-		"build bd: " + strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdCommitFlag+testBDCommit), " "),
-		"build om: " + strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "),
-		"image: docker --context " + DockerContext + " build -f " + b.Dockerfile + " -t " + ImageTag(testRev) + " " + b.Out,
-		"fetch claude: GET " + strings.Replace(templates.ClaudeCLIURLFormat, "%s", templates.ClaudeCLIVersion, 1),
-		templates.ClaudeCLISHA256,
-		"clean worktree of /src/gt at " + testRev,
-		"clean worktree of /src/om at HEAD",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("plan lacks %q:\n%s", want, joined)
-		}
+	steps := []struct{ label, names string }{
+		{"build gt: ", "go build -trimpath -ldflags " + gtCommitFlag + testRev + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
+		{"build bd: ", "go build -trimpath -ldflags " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage},
+		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at HEAD)"},
+		{"fetch claude: ", "GET " + fetched + " -> " + filepath.Join(b.Out, claudeCLIName) + "   (sha256 " + templates.ClaudeCLISHA256 + ")"},
+		{"image: ", "docker --context " + DockerContext + " build -f " + b.Dockerfile + " -t " + ImageTag(testRev) + " " + b.Out},
 	}
-	if len(lines) != 5 {
-		t.Errorf("plan has %d lines, want 5 (gt, bd, om, claude, image):\n%s", len(lines), joined)
+	if len(lines) != len(steps) {
+		t.Fatalf("plan has %d lines, want %d:\n%s", len(lines), len(steps), strings.Join(lines, "\n"))
+	}
+	for i, step := range steps {
+		if !strings.HasPrefix(lines[i], step.label) || !strings.Contains(lines[i], step.names) {
+			t.Errorf("plan line %d = %q; want the %s step naming %q", i, lines[i], step.label, step.names)
+		}
 	}
 	entries, err := os.ReadDir(b.Out)
 	if err != nil || len(entries) != 0 {
@@ -81,8 +91,8 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	}
 }
 
-// Plan refuses what a build refuses of its inputs, plus a Dockerfile BuildImage
-// would refuse, so a plan that prints is one the build's own checks pass.
+// Plan refuses each input the build's own checks refuse before it runs anything,
+// and a refused call prints no step.
 func TestPlanRefusesWhatABuildRefuses(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
