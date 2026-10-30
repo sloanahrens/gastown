@@ -1,0 +1,57 @@
+[
+  {
+    "id": "zz-polecat-alice",
+    "title": "zz-polecat-alice",
+    "description": "zz-polecat-alice\n\nrole_type: polecat\nrig: zzrig\nagent_state: spawning\nhook_bead: zz-work-42\ncleanup_status: null\nactive_mr: null\nnotification_level: null\nagent: zz-test-agent",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.invalid",
+    "created_at": "2026-01-02T03:04:05Z",
+    "created_by": "daemon",
+    "updated_at": "2026-01-02T04:05:06Z",
+    "labels": [
+      "gt:agent"
+    ],
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0,
+    "revision": 1
+  },
+  {
+    "id": "zz-work-42",
+    "title": "zz-work-42: an invented work bead",
+    "description": "An invented work bead, filed only for the shape of its list record.",
+    "status": "hooked",
+    "priority": 2,
+    "issue_type": "task",
+    "assignee": "zzrig/polecats/alice",
+    "owner": "owner@example.invalid",
+    "created_at": "2026-01-02T03:04:05Z",
+    "created_by": "town/crew/bob",
+    "updated_at": "2026-01-02T04:05:06Z",
+    "labels": [
+      "gt:ready-to-land"
+    ],
+    "dependencies": [
+      {
+        "id": "zz-epic-1",
+        "title": "an invented epic",
+        "description": "An invented epic, filed only for the shape of a parent record.",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "epic",
+        "owner": "owner@example.invalid",
+        "created_at": "2026-01-01T00:00:00Z",
+        "created_by": "town/crew/bob",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "dependency_type": "parent-child"
+      }
+    ],
+    "parent": "zz-epic-1",
+    "dependent_count": 1,
+    "dependency_count": 1,
+    "comment_count": 0,
+    "revision": 2
+  }
+]

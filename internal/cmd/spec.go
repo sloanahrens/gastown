@@ -2670,9 +2670,10 @@ func specRosterSnapshotWith(reads *specTickReads, townRoot string, pool *config.
 	batch := newPoolSeatBatch(townRoot,
 		func(rigName string) beads.Client { return store(filepath.Join(townRoot, rigName)) },
 		func(bd beads.Client, id string) (*beads.Issue, error) { return bd.Show(id) })
-	work := func(ids []string) (map[string]*beads.Issue, error) {
-		return store(townRoot).ShowMultiple(ids)
-	}
+	// The landing seats' beads are read from the batch where it already holds
+	// them, so a tick with a seat mid-landing spends no town-wide read on it
+	// (gt-4efmk).
+	work := batch.landingWork(store(townRoot))
 	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, work, pool, now)
 }
 
