@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,8 +65,13 @@ func TestShowManySendsTheIDsAndNeverReturnsANilMap(t *testing.T) {
 	if err != nil || m == nil || len(m) != 0 {
 		t.Errorf("ShowMany = %v, %v; want an empty non-nil map even when the server sent null", m, err)
 	}
-	if s.method != "POST" || s.path != "/v1/issues:show-many" || s.ct != "application/json" || s.body != `{"ids":["gt-a","gt-b"]}` {
-		t.Errorf("request = %s %s ct=%q body=%q", s.method, s.path, s.ct, s.body)
+	var req api.ShowManyRequest
+	if err := json.Unmarshal([]byte(s.body), &req); err != nil {
+		t.Fatalf("body %q: %v", s.body, err)
+	}
+	if s.method != "POST" || s.path != "/v1/issues:show-many" || s.ct != "application/json" ||
+		!slices.Equal(req.IDs, []string{"gt-a", "gt-b"}) {
+		t.Errorf("request = %s %s ct=%q body=%q, want a POST of the two ids to /v1/issues:show-many", s.method, s.path, s.ct, s.body)
 	}
 }
 
@@ -83,6 +89,37 @@ func TestListSendsTheFilterAndMapsInvalid(t *testing.T) {
 	var f api.ListFilter
 	if json.Unmarshal([]byte(s.body), &f) != nil || f.Assignee != "me" || f.Limit != 3 || f.Cursor != "c" || s.path != "/v1/issues:list" {
 		t.Errorf("sent %s %q, want the filter in the body", s.path, s.body)
+	}
+}
+
+func TestCountSendsTheFilterToTheCountRouteAndReadsTheCount(t *testing.T) {
+	t.Parallel()
+	var s seen
+	c, _ := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.record(r)
+		_, _ = w.Write([]byte(`{"count":4}`))
+	}), nil)
+	n, err := c.Count(t.Context(), api.ListFilter{Ephemeral: true, Statuses: []string{"closed"}})
+	if err != nil || n != 4 {
+		t.Fatalf("Count = %d, %v; want the server's 4", n, err)
+	}
+	var req api.CountRequest
+	if err := json.Unmarshal([]byte(s.body), &req); err != nil {
+		t.Fatalf("body %q: %v", s.body, err)
+	}
+	if s.method != "POST" || s.path != "/v1/issues:count" || s.ct != "application/json" ||
+		!req.Filter.Ephemeral || !slices.Equal(req.Filter.Statuses, []string{"closed"}) {
+		t.Errorf("request = %s %s ct=%q body=%q, want a POST of the ephemeral closed filter to /v1/issues:count", s.method, s.path, s.ct, s.body)
+	}
+}
+
+func TestCountOfAFilterThatCarriesAPageIsInvalid(t *testing.T) {
+	t.Parallel()
+	c, _ := newClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeErr(w, 400, api.Invalid("count takes no limit; it counts every issue the filter matches"))
+	}), nil)
+	if _, err := c.Count(t.Context(), api.ListFilter{Ephemeral: true, Limit: 1}); !errors.Is(err, api.ErrInvalid) {
+		t.Errorf("Count with a limit = %v, want errors.Is api.ErrInvalid", err)
 	}
 }
 

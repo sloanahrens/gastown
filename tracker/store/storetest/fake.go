@@ -131,6 +131,9 @@ func unimplemented(method string) error {
 func (*Fake) ListIssues(context.Context, api.ListFilter) (api.IssuePage, error) {
 	return api.IssuePage{}, unimplemented("ListIssues")
 }
+func (*Fake) CountIssues(context.Context, api.ListFilter) (int, error) {
+	return 0, unimplemented("CountIssues")
+}
 func (*Fake) Assigned(context.Context, api.AssignedRequest) (api.AssignedPage, error) {
 	return api.AssignedPage{}, unimplemented("Assigned")
 }

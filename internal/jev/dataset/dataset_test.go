@@ -229,6 +229,66 @@ func TestDatasetRefusesTextColumns(t *testing.T) {
 	})
 }
 
+// A reading whose labelings do not pair one-to-one with its items is refused
+// rather than read as if they did: too few would run off the end of the slice,
+// and too many is a reading the export cannot read either.
+func TestBuildRefusesMismatchedLabelings(t *testing.T) {
+	t.Parallel()
+	for name, labelings := range map[string][]scorecard.Labeling{
+		"fewer labelings than items": fixtureReading().Labelings[:2],
+		"more labelings than items":  append(fixtureReading().Labelings, scorecard.Labeling{}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			read := fixtureReading()
+			read.Labelings = labelings
+			if _, err := Build(read, "needs"); err == nil {
+				t.Fatal("a reading whose labelings do not match its items exported cleanly")
+			}
+		})
+	}
+}
+
+// A battery with no log yet is refused for the reason it has: an empty item
+// list would otherwise export as a battery that labeled nothing, and the error
+// names the battery so the reader knows which log is missing.
+func TestBuildRefusesMissingLog(t *testing.T) {
+	t.Parallel()
+	read := fixtureReading()
+	read.LogMissing = true
+	if _, err := Build(read, "needs"); err == nil || !strings.Contains(err.Error(), "log is missing") {
+		t.Fatalf("Build err = %v, want the missing log refused", err)
+	}
+	_, _, _, err := Export(read, "fixture", "needs", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "log is missing") || !strings.Contains(err.Error(), `"fixture"`) {
+		t.Errorf("Export err = %v, want the missing log refused and the battery named", err)
+	}
+}
+
+// A labeling's rule or source reaches the file verbatim, so one that names the
+// item's bead or a deny-listed name is refused rather than written.
+func TestBuildRefusesLabelValues(t *testing.T) {
+	t.Parallel()
+	t.Run("a rule that names the bead", func(t *testing.T) {
+		t.Parallel()
+		read := fixtureReading()
+		read.Labelings[0].Rule = "labeled-from:" + read.Items[0].ID
+		_, err := Build(read, "needs")
+		if err == nil || !strings.Contains(err.Error(), "label_rule") {
+			t.Fatalf("err = %v, want the bead-naming rule refused", err)
+		}
+	})
+	t.Run("a source on the deny-list", func(t *testing.T) {
+		t.Parallel()
+		read := fixtureReading()
+		read.Labelings[0].Source = "prompt"
+		_, err := Build(read, "needs")
+		if err == nil || !strings.Contains(err.Error(), "label_source") {
+			t.Fatalf("err = %v, want the deny-listed source refused", err)
+		}
+	})
+}
+
 // The dict names every column's type and meaning, the row count, the date
 // range and the dropped columns.
 func TestDatasetDict(t *testing.T) {
@@ -247,6 +307,10 @@ func TestDatasetDict(t *testing.T) {
 		"| ans_route | text |",
 		"| confidence | empty |",
 		"Dropped columns: none.\n",
+		// The band's meaning names the scorecard's own bands and says what the
+		// right-open top band does with 1.0.
+		scorecard.Band(0) + " through " + scorecard.Band(1),
+		"half-open on the right so 1.0 falls in the top one",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("dict does not hold %q:\n%s", want, got)
@@ -392,6 +456,9 @@ func TestExportErrors(t *testing.T) {
 		_, _, _, err := Export(fixtureReading(), "fixture", "needs", dir)
 		if err == nil || !strings.Contains(err.Error(), "fixture.needs.dict.md") {
 			t.Errorf("err = %v, want the dict write refused", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, "fixture.needs.csv")); statErr == nil {
+			t.Error("a failed dict write left the CSV behind as a partial export")
 		}
 	})
 }

@@ -85,7 +85,6 @@ type doctorBeads interface {
 	beads.Client
 	bdRepairer
 	ListAgentBeads() (map[string]*beads.Issue, error)
-	ListAgentBeadsFromWisps() (map[string]*beads.Issue, error)
 	ListWispIDs() (map[string]bool, error)
 	CreateAgentBead(id, title string, fields *beads.AgentFields) (*beads.Issue, error)
 }
