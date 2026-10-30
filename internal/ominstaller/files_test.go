@@ -16,8 +16,9 @@ type fakeFiles struct {
 	files map[string][]byte
 	modes map[string]fs.FileMode
 
-	statErr map[string]error
-	readErr map[string]error
+	statErr   map[string]error
+	readErr   map[string]error
+	removeErr map[string]error
 
 	writeErr  error
 	chmodErr  error
@@ -32,10 +33,11 @@ type fakeFiles struct {
 
 func newFakeFiles() *fakeFiles {
 	return &fakeFiles{
-		files:   map[string][]byte{},
-		modes:   map[string]fs.FileMode{},
-		statErr: map[string]error{},
-		readErr: map[string]error{},
+		files:     map[string][]byte{},
+		modes:     map[string]fs.FileMode{},
+		statErr:   map[string]error{},
+		readErr:   map[string]error{},
+		removeErr: map[string]error{},
 	}
 }
 
@@ -114,6 +116,9 @@ func (f *fakeFiles) Rename(oldpath, newpath string) error {
 }
 
 func (f *fakeFiles) Remove(path string) error {
+	if err := f.removeErr[path]; err != nil {
+		return err
+	}
 	if _, ok := f.files[path]; !ok {
 		return notExist("remove", path)
 	}
