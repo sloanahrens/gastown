@@ -420,6 +420,11 @@ func TestIntegrationTriggerSkipsAndRecord(t *testing.T) {
 			if got := len(fake.triggerCalls("record")); got != tc.wantRecords {
 				t.Errorf("record calls = %d, want %d", got, tc.wantRecords)
 			}
+			for _, c := range fake.triggerCalls("record") {
+				if !reflect.DeepEqual(c.argv, triggerArgv("record")) {
+					t.Errorf("record argv = %v, want %v", c.argv, triggerArgv("record"))
+				}
+			}
 			if !strings.Contains(line, tc.wantFrag) {
 				t.Errorf("summary = %q, want it to contain %q", line, tc.wantFrag)
 			}
@@ -435,6 +440,74 @@ func TestIntegrationTriggerSkipsAndRecord(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestIntegrationUnnamedHeadRecordsNothing: when git cannot name HEAD, the
+// trigger is not asked which packages are due and nothing is recorded, so no
+// record is stamped with an empty commit. Every container package runs and the
+// tier stays GREEN.
+func TestIntegrationUnnamedHeadRecordsNothing(t *testing.T) {
+	t.Parallel()
+	repo := baseRepo()
+	repo.files[dockerList] = "internal/beads\ninternal/testutil\n"
+	fake := &fakeTier{headFails: true, skipsOut: "integration-docker:./internal/beads\n"}
+	s, _ := newIntegration(t, repo, fake, "", "")
+	line, red := s.Integration()
+	if got := len(fake.triggerCalls("skips")); got != 0 {
+		t.Errorf("skips calls = %d, want 0", got)
+	}
+	if got := len(fake.triggerCalls("record")); got != 0 {
+		t.Errorf("record calls = %d, want 0", got)
+	}
+	if want := []string{". ./internal/beads", ". ./internal/testutil"}; !reflect.DeepEqual(fake.testRuns(), want) {
+		t.Errorf("go test runs = %v, want %v", fake.testRuns(), want)
+	}
+	if !strings.Contains(line, "integration GREEN passed=2 failed=0 skipped=0") || red {
+		t.Errorf("Integration() = %q, %v; want GREEN with both packages passed", line, red)
+	}
+}
+
+// TestIntegrationSkipListHasNoLeadingSpace: a due skip added to an empty base
+// list is the whole TIER_SWEEP_SKIP value, with no leading space, in the test
+// runs' environment.
+func TestIntegrationSkipListHasNoLeadingSpace(t *testing.T) {
+	t.Parallel()
+	repo := baseRepo()
+	repo.files[dockerList] = "internal/beads\ninternal/testutil\n"
+	fake := &fakeTier{head: "abc123", skipsOut: "integration-docker:./internal/beads\n"}
+	s, _ := newIntegration(t, repo, fake, "", "")
+	s.Integration()
+	const want = "TIER_SWEEP_SKIP=integration-docker:./internal/beads"
+	for _, c := range fake.calls {
+		if c.argv[0] == "gt" && !envHas(c.env, want) {
+			t.Errorf("test run %v env lacks %q", c.argv, want)
+		}
+	}
+}
+
+// TestIntegrationExportReachesTestRuns: the commit under test and the skip list
+// are exported to every go test run, as the script exports them, not only to
+// the trigger's children.
+func TestIntegrationExportReachesTestRuns(t *testing.T) {
+	t.Parallel()
+	repo := baseRepo()
+	repo.files[dockerList] = "internal/beads\n"
+	fake := &fakeTier{head: "abc123"}
+	s, _ := newIntegration(t, repo, fake, "integration:./internal/x", "")
+	s.Integration()
+	runs := 0
+	for _, c := range fake.calls {
+		if c.argv[0] != "gt" {
+			continue
+		}
+		runs++
+		if !envHas(c.env, "TIER_SWEEP_TESTED=abc123") || !envHas(c.env, "TIER_SWEEP_SKIP=integration:./internal/x") {
+			t.Errorf("test run %v env = %v, want the exported commit and skip list", c.argv, c.env)
+		}
+	}
+	if runs == 0 {
+		t.Fatal("no go test run was made")
 	}
 }
 

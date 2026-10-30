@@ -70,8 +70,12 @@ func (s *Sweep) Integration() (line string, red bool) {
 	elapsed := func() int { return int(s.Now().Sub(start) / time.Second) }
 	tested := s.headCommit()
 	skipList := s.Opts.SkipList
-	if due := s.dueSkips(tested); due != "" {
-		skipList += " " + due
+	// Without a commit to name, no container package can be shown as due, so
+	// the trigger is not asked and every container package runs.
+	if tested != "" {
+		if due := s.dueSkips(tested); due != "" {
+			skipList = strings.TrimSpace(skipList + " " + due)
+		}
 	}
 	plan, err := s.planIntegration()
 	if err != nil {
@@ -85,13 +89,15 @@ func (s *Sweep) Integration() (line string, red bool) {
 		LogDir:   s.Opts.LogDir,
 		Timeout:  s.Opts.Timeout,
 		SkipList: skipList,
+		Env:      s.exportEnv(tested, skipList),
 		Stderr:   s.Stderr,
 	}
 	root := runner.Tier(TierIntegration, ".", slotPrefix(), taggedArgs, plan.root)
 	docker := runner.Tier(TierDocker, ".", slotPrefix(), nil, plan.docker)
-	// Only a passing container run earns the record. A red one leaves the
-	// state alone, so the next sweep runs those packages again.
-	if docker.Failed == 0 {
+	// Only a passing container run at a named commit earns the record. A red
+	// one leaves the state alone, so the next sweep runs those packages again,
+	// and a commit that cannot be named is never stamped.
+	if docker.Failed == 0 && tested != "" {
 		s.record(tested, skipList)
 	}
 	passed := root.Passed + docker.Passed
@@ -171,8 +177,7 @@ func (s *Sweep) planModule(dir string, modules []string) (moduleRun, error) {
 	return run, nil
 }
 
-// headCommit is the commit the run tests, empty when git cannot name it. The
-// record stamps it, so an empty value stamps nothing that can match later.
+// headCommit is the commit the run tests, empty when git cannot name it.
 func (s *Sweep) headCommit() string {
 	var out bytes.Buffer
 	if s.Exec(".", nil, []string{"git", "rev-parse", "HEAD"}, &out) != 0 {
@@ -199,12 +204,20 @@ func (s *Sweep) record(tested, skipList string) {
 	s.Exec(".", s.triggerEnv(tested, skipList), triggerArgv("record"), s.Stderr)
 }
 
-// triggerEnv is the environment a trigger child runs in: the process's, with
-// the commit under test, the skip list and TIER_SWEEP_TRIGGER added. The
-// trigger's exit code and output are its own; this only sets its inputs.
-func (s *Sweep) triggerEnv(tested, skipList string) []string {
+// exportEnv is the environment the sweep exports to its children, as the script
+// exports TIER_SWEEP_TESTED and TIER_SWEEP_SKIP: the process's, with the commit
+// under test and the skip list added. Test runs and trigger children both
+// inherit it.
+func (s *Sweep) exportEnv(tested, skipList string) []string {
 	env := append([]string(nil), s.Environ...)
-	env = append(env, EnvTested+"="+tested, EnvSkip+"="+skipList)
+	return append(env, EnvTested+"="+tested, EnvSkip+"="+skipList)
+}
+
+// triggerEnv is the environment a trigger child runs in: the exported one, with
+// TIER_SWEEP_TRIGGER added. The trigger's exit code and output are its own;
+// this only sets its inputs.
+func (s *Sweep) triggerEnv(tested, skipList string) []string {
+	env := s.exportEnv(tested, skipList)
 	if s.Opts.Trigger != "" {
 		env = append(env, EnvTrigger+"="+s.Opts.Trigger)
 	}
