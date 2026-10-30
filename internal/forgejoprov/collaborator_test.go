@@ -143,13 +143,30 @@ func TestEnsureCollaboratorRefusesAnUnexpectedStatus(t *testing.T) {
 }
 
 // TestEnsureCollaboratorStopsOnTransportFailure checks a read that never reaches the
-// server is returned as an error and no grant follows it.
+// server is returned as the client's transport error, and no grant follows it.
 func TestEnsureCollaboratorStopsOnTransportFailure(t *testing.T) {
 	t.Parallel()
 	var logs []string
 	p := userProvisioner(failingTransport{}, false, &logs)
-	if err := p.EnsureCollaborator("polecat", testRepo, "write"); err == nil {
-		t.Fatal("EnsureCollaborator returned nil when the server was unreachable")
+	err := p.EnsureCollaborator("polecat", testRepo, "write")
+	if err == nil || !strings.Contains(err.Error(), "request failed") {
+		t.Fatalf("EnsureCollaborator error = %v, want the transport failure", err)
+	}
+}
+
+// TestEnsureCollaboratorStopsOnAFailedGrant checks a grant whose request gets no reply
+// is returned as the client's transport error and logs no grant.
+func TestEnsureCollaboratorStopsOnAFailedGrant(t *testing.T) {
+	t.Parallel()
+	tr := &statusTransport{status: map[string]int{"GET": http.StatusNotFound}}
+	var logs []string
+	p := userProvisioner(createDropsTransport{next: tr}, false, &logs)
+	err := p.EnsureCollaborator("polecat", testRepo, "write")
+	if err == nil || !strings.Contains(err.Error(), "request failed") {
+		t.Fatalf("EnsureCollaborator error = %v, want the transport failure", err)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("logged %q for a grant that failed, want no line", logs)
 	}
 }
 
@@ -250,5 +267,17 @@ func TestEnsureViewerAccessRefusesWhatItCannotRead(t *testing.T) {
 	}
 	if !slices.Equal(tr.methods, []string{"GET"}) {
 		t.Fatalf("requests %v, want only the read of the viewer user", tr.methods)
+	}
+}
+
+// TestEnsureViewerAccessStopsOnTransportFailure checks a viewer user read that never
+// reaches the server is returned as the client's transport error.
+func TestEnsureViewerAccessStopsOnTransportFailure(t *testing.T) {
+	t.Parallel()
+	var logs []string
+	p := userProvisioner(failingTransport{}, false, &logs)
+	err := p.EnsureViewerAccess(testRepo)
+	if err == nil || !strings.Contains(err.Error(), "request failed") {
+		t.Fatalf("EnsureViewerAccess error = %v, want the transport failure", err)
 	}
 }
