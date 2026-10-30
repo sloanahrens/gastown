@@ -215,13 +215,14 @@ func TestDaemonDockerfileHasNoBuildStep(t *testing.T) {
 }
 
 // TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages: the image is
-// config, so no instruction downloads anything over the network and the one RUN
-// installs exactly ca-certificates, git and tmux. The Dolt client arrives by COPY
-// from the official Dolt image, whose registry layers the daemon verifies by
-// digest, rather than by a download inside a RUN that no checksum would guard.
+// config, so no instruction downloads anything over the network and the only RUN
+// that is not a git identity command installs exactly ca-certificates, git and
+// tmux. The Dolt client arrives by COPY from the official Dolt image, whose
+// registry layers the daemon verifies by digest, rather than by a download inside
+// a RUN that no checksum would guard.
 func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) {
 	t.Parallel()
-	var runs []string
+	var installs []string
 	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
 		line := in.cmd + " " + strings.Join(in.args, " ")
 		for _, banned := range []string{"curl", "wget", "http://", "https://", "git clone", "tar -", "install -m"} {
@@ -229,20 +230,83 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 				t.Errorf("%s has %q in %q; the image fetches and installs nothing but the three packages", DockerfilePath, banned, line)
 			}
 		}
-		if in.cmd == "RUN" {
-			runs = append(runs, line)
+		if in.cmd != "RUN" {
+			continue
 		}
+		if _, _, ok := gitConfigGlobal(in); ok {
+			continue
+		}
+		installs = append(installs, line)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("%s has %d RUN instructions, want the one package install: %q", DockerfilePath, len(runs), runs)
+	if len(installs) != 1 {
+		t.Fatalf("%s has %d RUN instructions that are not a git identity command, want the one package install: %q", DockerfilePath, len(installs), installs)
 	}
-	got, problem := aptInstalls(runs[0])
+	got, problem := aptInstalls(installs[0])
 	if problem != "" {
 		t.Fatalf("%s: %s", DockerfilePath, problem)
 	}
 	if want := []string{"ca-certificates", "git", "tmux"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("%s installs %q, want %q", DockerfilePath, got, want)
 	}
+}
+
+// TestDaemonDockerfileSetsTheGenericGitIdentity: the image carries the git
+// identity dolt's preflight copies, because a container has no host identity to
+// read. Both values are the daemon's, never a person's, each is set once, and
+// both are set in the final stage, the one the container runs.
+func TestDaemonDockerfileSetsTheGenericGitIdentity(t *testing.T) {
+	t.Parallel()
+	ins := dockerfileInstructions(t, readDockerfile(t))
+	lastStage := 0
+	for _, in := range ins {
+		if in.cmd == "FROM" {
+			lastStage++
+		}
+	}
+	want := map[string]string{"user.name": "gt-daemon", "user.email": "gt-daemon@gastown.local"}
+	got := map[string]string{}
+	stage := 0
+	for _, in := range ins {
+		if in.cmd == "FROM" {
+			stage++
+			continue
+		}
+		key, value, ok := gitConfigGlobal(in)
+		if !ok {
+			continue
+		}
+		if _, seen := got[key]; seen {
+			t.Errorf("%s sets git %s twice; the image carries one value per key", DockerfilePath, key)
+		}
+		got[key] = value
+		if stage != lastStage {
+			t.Errorf("%s sets git %s in stage %d, want the final stage %d, the one the container runs", DockerfilePath, key, stage, lastStage)
+		}
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("%s sets git %s to %q, want %q", DockerfilePath, key, got[key], value)
+		}
+	}
+	for key := range got {
+		if _, ok := want[key]; !ok {
+			t.Errorf("%s sets git %s, want only user.name and user.email", DockerfilePath, key)
+		}
+	}
+}
+
+// gitConfigGlobal reads a `git config --global` RUN as the key it sets and its
+// value, and reports whether the RUN is exactly that one command. A second
+// command in the RUN — another config, an install — makes it read as no identity
+// line, so nothing can do its work beside one.
+func gitConfigGlobal(in dockerfileInstruction) (key, value string, ok bool) {
+	if in.cmd != "RUN" || len(in.args) != 5 {
+		return "", "", false
+	}
+	if !slices.Equal(in.args[:3], []string{"git", "config", "--global"}) {
+		return "", "", false
+	}
+	return in.args[3], in.args[4], true
 }
 
 // TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt: every COPY is one of two
