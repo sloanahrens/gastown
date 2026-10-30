@@ -116,19 +116,17 @@ func (f *LandingsFile) landedAt(rec LandingRecord) time.Time {
 	return time.Now()
 }
 
-// closeAttempt ends seat's open attempt on a bead whose submission the host
-// saw, at the earlier of the submission stamp and that first sight, capped by
-// capped (gt-8yk78).
-//
-// The end is the host's, not the seat's: the stamp is the seat's own word for
-// when its turn ended, and a seat must not be able to write time into a landing
-// it did not work, so the stamp may only pull the end earlier. With no
-// first-sight record the host has seen no submission at all and the attempt
-// stays open — no credit is better than the seat's word for it. A read or write
-// that fails is logged and the caller carries on: a landing is never worth
-// failing over the time, and an attempt left open is what leaves the reading a
-// lower bound (gt-yxl22).
+// closeAttempt ends seat's open attempt on beadID at the earlier of the
+// submission the host saw and capped (gt-8yk78).
 func (f *LandingsFile) closeAttempt(beadID, head, seat string, submitted, capped time.Time) {
+	// The end is the host's, not the seat's: the stamp is the seat's own word
+	// for when its turn ended, and a seat must not be able to write time into a
+	// landing it did not work, so the stamp may only pull the end earlier. With
+	// no first-sight record the host has seen no submission at all and the
+	// attempt stays open — no credit is better than the seat's word for it. A
+	// read or write that fails is logged and the caller carries on: a landing
+	// is never worth failing over the time, and an attempt left open is what
+	// leaves the reading a lower bound (gt-yxl22).
 	if f.Spans == nil || f.FirstSeen == nil || seat == "" || submitted.IsZero() || !spans.ValidBeadID(beadID) {
 		return
 	}
