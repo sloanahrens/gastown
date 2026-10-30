@@ -240,7 +240,7 @@ func TestRunSeparatesABudgetExpiryFromAParentCancel(t *testing.T) {
 			wantFailed: entries,
 		},
 		{
-			name:        "a parent already cancelled runs nothing",
+			name:        "a parent already canceled runs nothing",
 			cancelFirst: true,
 			parentEnds:  -1,
 			wantRan:     0,

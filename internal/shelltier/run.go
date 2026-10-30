@@ -80,7 +80,7 @@ func Run(ctx context.Context, cfg Config) Result {
 // runOne runs one entry under its own Budget and reports whether it passed and
 // whether its Budget ran out. A script whose context ended fails even when
 // Exec reports success; it is timed out only when the parent context is still
-// live, so a cancelled parent is not counted as a budget expiry.
+// live, so a canceled parent is not counted as a budget expiry.
 func runOne(ctx context.Context, cfg Config, e Entry) (passed, timedOut bool) {
 	name := logName(e.Path)
 	sctx, cancel := cfg.WithTimeout(ctx, cfg.Budget)
