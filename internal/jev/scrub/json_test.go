@@ -119,10 +119,9 @@ func TestScrubJSONCredentialValues(t *testing.T) {
 	for key, want := range map[string]any{
 		"input_tokens": float64(900),
 		"maxTokens":    float64(4096),
-		"key":          "cache-key-1",
 	} {
 		if got := nested[key]; got != want {
-			t.Errorf("nested.%s = %v, want the count or map key %v", key, got, want)
+			t.Errorf("nested.%s = %v, want the count %v", key, got, want)
 		}
 	}
 	items := nested["items"].([]any)
@@ -130,10 +129,14 @@ func TestScrubJSONCredentialValues(t *testing.T) {
 		t.Errorf("nested.items = %v, want [1 2]", items)
 	}
 
-	if got, want := report.Count(RuleAssignment), 4; got != want {
+	if got, want := nested["key"], any(marker(RuleAssignment)); got != want {
+		t.Errorf("nested.key = %v, want a bare key redacted as %v", got, want)
+	}
+
+	if got, want := report.Count(RuleAssignment), 5; got != want {
 		t.Errorf("report counts assignment %d times, want %d", got, want)
 	}
-	if got, want := report.Total(), 4; got != want {
+	if got, want := report.Total(), 5; got != want {
 		t.Errorf("report total %d, want %d", got, want)
 	}
 }

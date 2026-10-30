@@ -179,9 +179,49 @@ func ruleCases() []ruleCase {
 			want: "prompt_tokens: 800",
 		},
 		{
-			name: "bare key is a map key", rule: RuleAssignment,
+			name: "bare key is a credential", rule: RuleAssignment,
 			in:   "key=cache-key-1",
-			want: "key=cache-key-1",
+			want: "key=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "cli flag", rule: RuleAssignment,
+			in:   "run --api-key=abcd1234efgh --token=zzzz9999",
+			want: "run --api-key=[REDACTED:assignment] --token=[REDACTED:assignment]", count: 2,
+		},
+		{
+			name: "query string", rule: RuleAssignment,
+			in:   "GET /v1/items?id=7&api_key=abcd1234efgh&page=2",
+			want: "GET /v1/items?id=7&api_key=[REDACTED:assignment]&page=2", count: 1,
+		},
+		{
+			name: "run-together names", rule: RuleAssignment,
+			in:   "accesskey=AAAA1111 webhooksecret=BBBB2222 sessiontoken=CCCC3333",
+			want: "accesskey=[REDACTED:assignment] webhooksecret=[REDACTED:assignment] sessiontoken=[REDACTED:assignment]", count: 3,
+		},
+		{
+			name: "forty hex after credential word", rule: RuleLongToken,
+			in:   "token0123456789abcdef0123456789abcdef01234567 and token: 0123456789abcdef0123456789abcdef01234567",
+			want: "[REDACTED:long-token] and token: [REDACTED:long-token]", count: 2,
+		},
+		{
+			name: "forty hex commit id kept", rule: RuleLongToken,
+			in:   "commit 0123456789abcdef0123456789abcdef01234567",
+			want: "commit 0123456789abcdef0123456789abcdef01234567",
+		},
+		{
+			name: "bearer prose kept", rule: RuleAuthHeader,
+			in:   "the bearer of good news arrived",
+			want: "the bearer of good news arrived",
+		},
+		{
+			name: "home path in backticks brackets and file url", rule: RuleHomePath,
+			in:   "see `/Users/lucy/app` and [/home/lucy/x] and file:///Users/lucy/y and <</Users/lucy/z>",
+			want: "see `/~/app` and [/~/x] and file:///~/y and <</~/z>", count: 4,
+		},
+		{
+			name: "non-ascii account name removed whole", rule: RuleHomePath,
+			in:   "open /Users/josé/app now",
+			want: "open /~/app now", count: 1,
 		},
 		{
 			name: "json colon password", rule: RuleAssignment,
@@ -450,20 +490,20 @@ func TestScrubSafe(t *testing.T) {
 		}
 	})
 
-	t.Run("five megabytes", func(t *testing.T) {
+	t.Run("ten megabytes", func(t *testing.T) {
 		t.Parallel()
-		const size = 5 << 20
+		const size = 10 << 20
 		line := "Authorization: Bearer abcdefgh12345678 mail alice@example.com at /Users/lucy/app\n"
 		in := strings.Repeat(line, size/len(line)+1)[:size]
 		start := time.Now()
 		got, report := s.Scrub(in)
 		checkDeadlineBudget(t, start)
 		if report.Total() == 0 {
-			t.Error("5 MB input reported no replacements")
+			t.Error("10 MB input reported no replacements")
 		}
 		for _, leaked := range []string{"abcdefgh12345678", "alice@example.com", "/Users/lucy"} {
 			if strings.Contains(got, leaked) {
-				t.Errorf("5 MB output still holds %q", leaked)
+				t.Errorf("10 MB output still holds %q", leaked)
 			}
 		}
 	})

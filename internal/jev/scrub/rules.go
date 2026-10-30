@@ -88,10 +88,31 @@ func scrubAuthHeaders(text string) (string, int) {
 		return authHeaderValue.FindStringSubmatch(m)[1] + marker(RuleAuthHeader)
 	})
 	out = bearerValue.ReplaceAllStringFunc(out, func(m string) string {
+		sm := bearerValue.FindStringSubmatch(m)
+		if !tokenish(m[len(sm[1]):]) {
+			return m // ordinary prose after the word "bearer"
+		}
 		n++
-		return bearerValue.FindStringSubmatch(m)[1] + marker(RuleAuthHeader)
+		return sm[1] + marker(RuleAuthHeader)
 	})
 	return out, n
+}
+
+// tokenish reports whether a word after "Bearer" reads as a token rather than
+// prose: it holds a digit, a token symbol, or both letter cases.
+func tokenish(v string) bool {
+	var upper, lower bool
+	for _, r := range v {
+		switch {
+		case r >= '0' && r <= '9', r == '.' || r == '_' || r == '~' || r == '+' || r == '/' || r == '=' || r == '-':
+			return true
+		case r >= 'A' && r <= 'Z':
+			upper = true
+		case r >= 'a' && r <= 'z':
+			lower = true
+		}
+	}
+	return upper && lower
 }
 
 // urlUserInfo matches the user:password part between a URL scheme and its host.
@@ -137,10 +158,12 @@ func scrubVendorKeys(text string) (string, int) {
 }
 
 // assignmentStart matches the NAME and the separator of a NAME=value or
-// NAME: value assignment. The value is consumed separately, so an innocent
+// NAME: value assignment. The name may follow a space, a delimiter, a query
+// string's ? or &, a bracket or backtick, or the dashes of a command-line flag
+// (--api-key=VALUE). The value is consumed separately, so an innocent
 // name whose quoted value holds a secret ("config": "password: x") does not
 // swallow it.
-var assignmentStart = regexp.MustCompile(`(^|[\s;,&("'])(["']?)([A-Za-z0-9_][A-Za-z0-9_.\-]*)(["']?)([ \t]*[:=][ \t]*)`)
+var assignmentStart = regexp.MustCompile("(^|[\\s;,&?(\\[{`\"'-])([\"']?)([A-Za-z0-9_][A-Za-z0-9_.\\-]*)([\"']?)([ \\t]*[:=][ \\t]*)")
 
 // scrubAssignments replaces the value of an assignment whose name contains a
 // credential word, and keeps the name.
@@ -208,10 +231,9 @@ func assignmentValue(text string, pos int) (end int, quoted bool) {
 }
 
 // credentialWords name a credential on their own; a field name that contains
-// one of them as a word holds a credential. "key" is absent on purpose: a bare
-// key field is as often a map key, cache key or sort key as a credential, while
-// a compound ("api_key", "secret-key") is listed here or in
-// compoundCredentialNames.
+// one of them as a word holds a credential. A bare "key" is a credential too
+// (keyWords): a map key or cache key loses its value to a marker, which is the
+// cost of never letting a secret named "key" leave the machine.
 var credentialWords = map[string]bool{
 	"credential":  true,
 	"credentials": true,
@@ -228,27 +250,38 @@ var credentialWords = map[string]bool{
 // whose words never got separated. The list is explicit because a suffix test
 // would claim "monkey" for ending in "key".
 var compoundCredentialNames = map[string]bool{
-	"accesstoken":  true,
-	"apikey":       true,
-	"apikeys":      true,
-	"appsecret":    true,
-	"authkey":      true,
-	"authtoken":    true,
-	"clientsecret": true,
-	"dbpassword":   true,
-	"idtoken":      true,
-	"masterkey":    true,
-	"passphrase":   true,
-	"privatekey":   true,
-	"refreshtoken": true,
-	"secretkey":    true,
-	"signingkey":   true,
-	"userpassword": true,
+	"accesskey":       true,
+	"apisecret":       true,
+	"apitoken":        true,
+	"authsecret":      true,
+	"bearertoken":     true,
+	"clientkey":       true,
+	"encryptionkey":   true,
+	"secretaccesskey": true,
+	"sessiontoken":    true,
+	"signingsecret":   true,
+	"sshkey":          true,
+	"webhooksecret":   true,
+	"accesstoken":     true,
+	"apikey":          true,
+	"apikeys":         true,
+	"appsecret":       true,
+	"authkey":         true,
+	"authtoken":       true,
+	"clientsecret":    true,
+	"dbpassword":      true,
+	"idtoken":         true,
+	"masterkey":       true,
+	"passphrase":      true,
+	"privatekey":      true,
+	"refreshtoken":    true,
+	"secretkey":       true,
+	"signingkey":      true,
+	"userpassword":    true,
 }
 
-// keyWords name a key. A compound name that holds one ("api_key", "secret-key")
-// is a credential; the bare name is a map key, cache key or sort key too often
-// to redact, so it is kept.
+// keyWords name a key: "key", "keys" and any name that holds one as a word
+// ("api_key", "secret-key") are credentials.
 var keyWords = map[string]bool{"key": true, "keys": true}
 
 // counterWords count something rather than hold it. A name built from a
@@ -314,7 +347,7 @@ func credentialName(name string) bool {
 		return false
 	}
 	if len(words) == 1 {
-		return compoundCredentialNames[words[0]] || credentialWords[words[0]]
+		return compoundCredentialNames[words[0]] || credentialWords[words[0]] || keyWords[words[0]]
 	}
 	for _, w := range words {
 		if credentialWords[w] || keyWords[w] {
@@ -369,7 +402,7 @@ func scrubLongTokens(text string) (string, int) {
 	for _, m := range matches {
 		run := text[m[0]:m[1]]
 		if isHex(run) {
-			if len(run) == 40 || (len(run) == 64 && commitContext(text, m[0])) {
+			if (len(run) == 40 || (len(run) == 64 && commitContext(text, m[0]))) && !credentialBefore.MatchString(text[:m[0]]) {
 				continue
 			}
 		} else if !looksLikeLongSecret(run) {
@@ -386,6 +419,11 @@ func scrubLongTokens(text string) (string, int) {
 	b.WriteString(text[last:])
 	return b.String(), n
 }
+
+// credentialBefore matches a credential word directly before a run, with only
+// separators between them: a commit-id-shaped run after "token: " or "key " is
+// a secret, not a commit.
+var credentialBefore = regexp.MustCompile(`(?i)(?:key|token|secret|password|passwd|credential|auth)[\s"'=:_-]*$`)
 
 // looksLikeLongSecret reports whether a long non-hex run is key material rather
 // than a path, slug or id. Mixed case or a base64 symbol is key material, and
@@ -501,8 +539,11 @@ func scrubEmails(text string) (string, int) {
 }
 
 // homePath matches an absolute home-directory path only at a boundary, so a
-// URL's /home/ segment is not mistaken for a home directory.
-var homePath = regexp.MustCompile(`(^|[\s"'(=:,;])/(?:Users|home)/[A-Za-z0-9._-]+/?`)
+// URL's /home/ segment is not mistaken for a home directory. The boundary is
+// white space, an opening quote, bracket, backtick or angle bracket, a pipe, a
+// separator, or a file:// scheme; the account name is every character up to the
+// next delimiter, so a non-ASCII name is removed whole.
+var homePath = regexp.MustCompile("(^|[\\s\"'(=:,;`\\[{<>|]|file://)/(?:Users|home)/[^/\\s\"'`)\\]}>,;:]+/?")
 
 // scrubHomePaths rewrites a home-directory path to /~/ and drops the account
 // name, keeping the rest of the path readable.
