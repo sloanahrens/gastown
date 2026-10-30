@@ -119,6 +119,10 @@ type Settings struct {
 	// Scrub scrubs the state before it is sent: the patrol's scrub key
 	// sets it (gt-aqczg).
 	Scrub bool
+
+	// ScrubCheck runs the shadow scrub check on a sample of requests. The
+	// scrub_check key sets it (gt-jb20i).
+	ScrubCheck bool
 }
 
 // DefaultMaxUSDPerDay is the daily cap when the config names none. The cap is

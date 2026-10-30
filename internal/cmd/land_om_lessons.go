@@ -102,8 +102,7 @@ func landOmLessonsReportFrom(findTown func() (string, error), out io.Writer, now
 	if asJSON {
 		return writeLandOmLessonsJSON(out, report)
 	}
-	writeLandOmLessonsTable(out, report)
-	return nil
+	return writeLandOmLessonsTable(out, report)
 }
 
 // landOmLessonsRecordsPath fills an empty --records with the town's review
@@ -151,11 +150,14 @@ func writeLandOmLessonsJSON(w io.Writer, report omlessons.Report) error {
 }
 
 // writeLandOmLessonsTable prints a row per class with the current window first
-// and the prior one beside it, then the titles no class matched.
-func writeLandOmLessonsTable(w io.Writer, report omlessons.Report) {
-	fmt.Fprintf(w, "om lessons: %s (%d days), against %s\n",
+// and the prior one beside it, then the titles no class matched. The table is
+// built in a strings.Builder, which cannot fail, and written to w once, so a
+// refused write to w is the run's error.
+func writeLandOmLessonsTable(w io.Writer, report omlessons.Report) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "om lessons: %s (%d days), against %s\n",
 		landOmLessonsRange(report.Window), report.Days, landOmLessonsRange(report.Prior))
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "Class\tRule\tFindings\tBeads\tRounds\tPrior findings\tPrior beads\tPrior rounds")
 	for _, c := range report.Classes {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\n", c.Name, landOmLessonsRule(c.Rule),
@@ -165,21 +167,23 @@ func writeLandOmLessonsTable(w io.Writer, report omlessons.Report) {
 	_ = tw.Flush()
 
 	if len(report.Unclassified) > 0 {
-		fmt.Fprintln(w, "\nUnclassified")
-		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(&b, "\nUnclassified")
+		tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "Findings\tPrior\tTitle")
 		for _, u := range report.Unclassified {
-			title := u.Title
-			if title == "" {
-				title = "(no title)"
+			title := "(no title)"
+			if u.Title != "" {
+				title = terminalSafe(u.Title)
 			}
 			fmt.Fprintf(tw, "%d\t%d\t%s\n", u.Current, u.Prior, title)
 		}
 		_ = tw.Flush()
 	}
 
-	fmt.Fprintf(w, "\n%d verdict(s) in the window, %d in the prior; %d and %d carry no finding text\n",
+	fmt.Fprintf(&b, "\n%d verdict(s) in the window, %d in the prior; %d and %d carry no finding text\n",
 		report.Window.Verdicts, report.Prior.Verdicts, report.Window.NoFindingText, report.Prior.NoFindingText)
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 func landOmLessonsRange(window omlessons.Window) string {

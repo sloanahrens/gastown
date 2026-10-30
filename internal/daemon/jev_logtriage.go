@@ -56,6 +56,7 @@ func (d *Daemon) runJevLogtriage() {
 			MaxUSDPerDay:        c.Patrols.JevLogtriage.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevLogtriage.USDPerBillionTokens,
 			Scrub:               c.Patrols.JevLogtriage.Scrub,
+			ScrubCheck:          c.Patrols.JevLogtriage.ScrubCheck,
 		}
 	}
 	open := d.jevLogtriageOpen

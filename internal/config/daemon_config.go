@@ -898,6 +898,11 @@ func (c *HMSyncConfig) UnmarshalJSON(data []byte) error {
 type JevScrub struct {
 	// Scrub replaces the state's secrets and account name before it is sent.
 	Scrub bool `json:"scrub,omitempty"`
+
+	// ScrubCheck samples a share of the battery's requests and logs both the
+	// unscrubbed and the scrubbed answers to scrubcheck.jsonl, so the signal
+	// cost of Scrub is measured before the battery switches to it (gt-jb20i).
+	ScrubCheck bool `json:"scrub_check,omitempty"`
 }
 
 // JevDedupeConfig switches on the duplicate-finding pass and prices its Jev

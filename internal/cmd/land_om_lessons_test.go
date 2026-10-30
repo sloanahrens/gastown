@@ -178,14 +178,15 @@ func TestLandOmLessonsNamedRecordsMustExist(t *testing.T) {
 }
 
 // TestLandOmLessonsReadsTheTownDefault: with no --records, the report reads
-// the town's own review log.
+// the town's own review log, which a town keeps under .runtime/landings.
 func TestLandOmLessonsReadsTheTownDefault(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	path := writeLandOmLessonsRecords(t, townRuntimeLandings(t, town), omLessonsFixtureRecords(t))
-	if path == "" {
-		t.Fatal("no town records path")
+	landings := filepath.Join(town, ".runtime", "landings")
+	if err := os.MkdirAll(landings, 0o700); err != nil {
+		t.Fatal(err)
 	}
+	writeLandOmLessonsRecords(t, landings, omLessonsFixtureRecords(t))
 	var out bytes.Buffer
 	if err := landOmLessonsReportFrom(func() (string, error) { return town, nil },
 		&out, landOmLessonsNow, "", omlessons.DefaultDays, "", false); err != nil {
@@ -269,6 +270,38 @@ func TestLandOmLessonsReportsAWriteFailure(t *testing.T) {
 	}
 }
 
+// TestLandOmLessonsReportsATableWriteFailure: the table is the default output,
+// so a refused write is the run's error there too, not a silent report.
+func TestLandOmLessonsReportsATableWriteFailure(t *testing.T) {
+	t.Parallel()
+	path, _ := landOmLessonsFixture(t)
+	if err := landOmLessonsReport(failingWriter{}, landOmLessonsNow, "", omlessons.DefaultDays, path, false); err == nil {
+		t.Fatal("no error for a refused table write")
+	}
+}
+
+// TestLandOmLessonsEscapesAnUnclassifiedTitle: a title is om's text, so an
+// escape sequence in it prints as visible text, not as a terminal command.
+func TestLandOmLessonsEscapesAnUnclassifiedTitle(t *testing.T) {
+	t.Parallel()
+	path := writeLandOmLessonsRecords(t, t.TempDir(), []land.ReviewRecord{{
+		BeadID: "gt-x", Rig: "gastown", Attempt: 1, Score: 0.4,
+		Verdict: land.VerdictRequestChanges, At: time.Date(2026, 10, 28, 10, 0, 0, 0, time.Local),
+		FindingText: []land.ReviewFindingText{{ID: "f-7", Severity: "minor",
+			Title: "\x1b[2J\x1b]0;owned\a a finding from a class not yet seeded"}},
+	}})
+	var out bytes.Buffer
+	if err := landOmLessonsReport(&out, landOmLessonsNow, "", omlessons.DefaultDays, path, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(out.String(), "\x1b\a") {
+		t.Errorf("output carries a raw control byte:\n%q", out.String())
+	}
+	if !strings.Contains(out.String(), `\x1b[2J\x1b]0;owned\x07 a finding from a class not yet seeded`) {
+		t.Errorf("output does not show the escaped title:\n%s", out.String())
+	}
+}
+
 // TestLandOmLessonsRejectsAnEmptyWindow: --days names the window's length, so
 // a length under one is an error.
 func TestLandOmLessonsRejectsAnEmptyWindow(t *testing.T) {
@@ -295,14 +328,4 @@ func TestLandOmLessonsRejectsABadSince(t *testing.T) {
 	if !strings.Contains(err.Error(), "YYYY-MM-DD") {
 		t.Errorf("error = %v, want it to name the accepted form", err)
 	}
-}
-
-// townRuntimeLandings makes a town's landings directory and returns it.
-func townRuntimeLandings(t *testing.T, town string) string {
-	t.Helper()
-	dir := filepath.Dir(land.TownReviewsFile(town).Path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return dir
 }

@@ -60,3 +60,7 @@ func (c Cap) Allows(clock func() time.Time) (bool, error) {
 	}
 	return spent < c.MaxUSDPerDay, nil
 }
+
+// AllowsNow is Allows on the wall clock. Every battery hands this one method
+// to its client and its pass as the cap check, so the cap is read one way.
+func (c Cap) AllowsNow() (bool, error) { return c.Allows(time.Now) }

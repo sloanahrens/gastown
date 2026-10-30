@@ -45,18 +45,24 @@ func ReadKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return readKeyFrom(paths)
+	return readKeyFrom(ReadKeyFile, paths)
 }
 
-// readKeyFrom is ReadKey over an explicit search list.
-func readKeyFrom(paths []string) (string, error) {
+// readKeyFrom is ReadKey over an explicit search list and key-file reader.
+// ReadKey passes ReadKeyFile; a test passes a fake and needs no file.
+func readKeyFrom(read func(path string) (string, error), paths []string) (string, error) {
 	for _, path := range paths {
-		key, err := ReadKeyFile(path)
+		key, err := read(path)
 		if errors.Is(err, errNoKey) || errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return "", err
+		}
+		if key == "" {
+			// A reader that succeeds with no key would send an empty
+			// Authorization header: keep looking, then refuse.
+			continue
 		}
 		return key, nil
 	}
