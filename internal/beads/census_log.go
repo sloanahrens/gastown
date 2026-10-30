@@ -154,9 +154,14 @@ func parseCensusSinkRow(line string) (CensusRow, bool) {
 	return CensusRow{Verb: line[:at], Caller: line[at+1 : eq], Count: count}, true
 }
 
-// CensusWindow is one census record read back from the log: the calls it
-// counted, over the window its Seconds field names, with the rows the record
-// lists (the busiest censusLogRows, not necessarily every caller).
+// censusMaxWindowSeconds is the longest window a census record may claim: the
+// daemon logs a record a minute, so anything above an hour is a line the
+// writer never produced.
+const censusMaxWindowSeconds = 3600
+
+// CensusWindow is one census record read back from the log: the calls the
+// daemon counted in the window, how long that window ran, and the rows the
+// record lists (its busiest censusLogRows, not every caller).
 type CensusWindow struct {
 	Total   int
 	Seconds int
@@ -164,7 +169,10 @@ type CensusWindow struct {
 }
 
 // ParseCensusLine reads the census record in one daemon log line and reports
-// false for a line that holds none, or holds a truncated one.
+// false for a line that holds none, or holds a truncated or inconsistent one.
+// The record's own fields are checked against the rows it lists: the rows are
+// a sample of the window's calls, so a row sum above the total means the line
+// is torn, and its rates would be built on a number the daemon never wrote.
 func ParseCensusLine(line string) (CensusWindow, bool) {
 	_, rest, found := strings.Cut(line, censusLogMarker)
 	if !found {
@@ -179,7 +187,7 @@ func ParseCensusLine(line string) (CensusWindow, bool) {
 		return CensusWindow{}, false
 	}
 	seconds, ok := censusWindowSeconds(fields[1])
-	if !ok {
+	if !ok || seconds > censusMaxWindowSeconds {
 		return CensusWindow{}, false
 	}
 
@@ -198,6 +206,9 @@ func ParseCensusLine(line string) (CensusWindow, bool) {
 			return CensusWindow{}, false
 		}
 		window.Rows = append(window.Rows, row)
+	}
+	if CensusRowsTotal(window.Rows) > window.Total {
+		return CensusWindow{}, false
 	}
 	return window, true
 }

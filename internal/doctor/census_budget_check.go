@@ -60,19 +60,37 @@ func NewCensusBudgetCheck() *CensusBudgetCheck {
 }
 
 // Run measures the newest census records in <town>/daemon/daemon.log.
+//
+// The four ways the log can say nothing — absent, unreadable, too short, and
+// stopped — are four different messages, because only one of them is a hook
+// that has never run. None of them passes.
 func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
-	samples, err := censusSamples(ctx.TownRoot, censusBudgetWindows)
+	logPath := censusLogPath(ctx.TownRoot)
+	read, err := censusSamples(ctx.TownRoot, censusBudgetWindows)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return &CheckResult{Name: c.Name(), Status: StatusSkipped, Message: "no daemon log to read: not enough data"}
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusSkipped,
+				Message: fmt.Sprintf("no daemon log at %s: not enough data", logPath),
+				FixHint: "Start the daemon so it logs a census record a minute (gt daemon start)",
+			}
 		}
-		return &CheckResult{Name: c.Name(), Status: StatusSkipped, Message: fmt.Sprintf("cannot read daemon.log: %v: not enough data", err)}
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("cannot read the census in %s: %v", logPath, err),
+			Details: []string{"an unreadable log is not a clean census: the callers it holds were never measured"},
+			FixHint: "Check the log's permissions and that the daemon is writing it",
+		}
 	}
+	samples := read.Samples
 	if len(samples) < censusBudgetMinWindows {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusSkipped,
-			Message: fmt.Sprintf("not enough data: %d census windows in the log, need %d", len(samples), censusBudgetMinWindows),
+			Message: fmt.Sprintf("not enough data: %d census windows in %s, need %d", len(samples), logPath, censusBudgetMinWindows),
+			Details: censusIgnoredDetails(read.Ignored),
 		}
 	}
 	if age := c.now().Sub(samples[len(samples)-1].At); age > censusBudgetStale {
@@ -80,7 +98,8 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("census stale: %s", age.Round(time.Second)),
-			Details: []string{fmt.Sprintf("the newest census record in daemon.log is %s old, so the rates below it are not the town's", age.Round(time.Second))},
+			Details: append([]string{fmt.Sprintf("the newest census record in %s is %s old, so the rates below it are not the town's", logPath, age.Round(time.Second))},
+				censusIgnoredDetails(read.Ignored)...),
 			FixHint: "Check that the daemon's census log still runs (gt daemon status, then daemon.log for its startup line)",
 		}
 	}
@@ -112,7 +131,7 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: fmt.Sprintf("%d bd caller(s) over budget in the last %d census windows", len(over), len(samples)),
-			Details: append(append([]string(nil), over...), unbudgeted...),
+			Details: append(append(append([]string(nil), over...), unbudgeted...), censusIgnoredDetails(read.Ignored)...),
 			FixHint: "Cut the caller's bd calls, or raise its row in internal/beads/census_budgets.go (a data edit om reviews)",
 		}
 	case len(unbudgeted) > 0:
@@ -120,7 +139,7 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d bd caller(s) have no budget", len(unbudgeted)),
-			Details: unbudgeted,
+			Details: append(unbudgeted, censusIgnoredDetails(read.Ignored)...),
 			FixHint: "Add each caller's average as a row in internal/beads/census_budgets.go",
 		}
 	}
@@ -128,7 +147,23 @@ func (c *CensusBudgetCheck) Run(ctx *CheckContext) *CheckResult {
 		Name:    c.Name(),
 		Status:  StatusOK,
 		Message: fmt.Sprintf("every bd caller is within budget across the last %d census windows", len(samples)),
+		Details: censusIgnoredDetails(read.Ignored),
 	}
+}
+
+// censusLogPath is the file the daemon writes its census to.
+func censusLogPath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", daemonlog.FileName)
+}
+
+// censusIgnoredDetails names the census records the read could not place,
+// because an average taken over a window that silently dropped records is an
+// average over data the operator cannot see.
+func censusIgnoredDetails(ignored int) []string {
+	if ignored == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("%d census record(s) ignored: each sits above the log's first stamped line, so it has no instant to be averaged over", ignored)}
 }
 
 func (c *CensusBudgetCheck) now() time.Time {
@@ -151,36 +186,45 @@ type censusSample struct {
 	Window beads.CensusWindow
 }
 
+// censusRead is what a log tail yielded: the census records that carry an
+// instant, and how many could not be placed.
+type censusRead struct {
+	Samples []censusSample
+	// Ignored is the records the read left out. A census record is one line,
+	// and the log stamps every line, so a record without an instant is one
+	// written above the log's first stamped line; with no moment to sit at, its
+	// calls cannot be charged to a minute of the span.
+	Ignored int
+}
+
 // censusSamples returns the newest max census records in the town's daemon
 // log, oldest first, because a burst older than the window must leave the
 // measurement.
-func censusSamples(townRoot string, max int) ([]censusSample, error) {
-	lines, err := readLogTail(filepath.Join(townRoot, "daemon", daemonlog.FileName), censusBudgetTailBytes)
+func censusSamples(townRoot string, max int) (censusRead, error) {
+	lines, err := readLogTail(censusLogPath(townRoot), censusBudgetTailBytes)
 	if err != nil {
-		return nil, err
+		return censusRead{}, err
 	}
 	// The log's stamps are local time with no zone, so the parser reads them
 	// in the zone the staleness guard compares against.
 	parser := daemonlog.Parser{Loc: time.Local}
-	var samples []censusSample
+	var read censusRead
 	for _, line := range lines {
 		at, text := parser.Parse(line)
 		window, ok := beads.ParseCensusLine(text)
 		if !ok {
 			continue
 		}
-		// A record with no stamp of its own cannot be placed on the span, and
-		// dropping it can only shorten the span, which raises every rate: the
-		// omission fails toward an error, never toward a pass.
 		if at.IsZero() {
+			read.Ignored++
 			continue
 		}
-		samples = append(samples, censusSample{At: at, Window: window})
-		if len(samples) > max {
-			samples = samples[1:]
+		read.Samples = append(read.Samples, censusSample{At: at, Window: window})
+		if len(read.Samples) > max {
+			read.Samples = read.Samples[1:]
 		}
 	}
-	return samples, nil
+	return read, nil
 }
 
 // censusCallerCalls folds the windows into each caller's call count. A window

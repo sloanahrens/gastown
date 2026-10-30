@@ -1,13 +1,59 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/doctor"
 )
+
+// TestDoctorRegistersCensusBudgetCheck drives the registered check itself, not
+// a fresh one: a check that is registered but never reached is a check no
+// operator sees, and an Error status is the only one that fails a gate
+// (gt-gojo0).
+func TestDoctorRegistersCensusBudgetCheck(t *testing.T) {
+	t.Parallel()
+	var check *doctor.CensusBudgetCheck
+	for _, c := range newDoctorForCommand("").Checks() {
+		if census, ok := c.(*doctor.CensusBudgetCheck); ok {
+			check = census
+		}
+	}
+	if check == nil {
+		t.Fatal("the census-budget check is not in the default doctor set")
+	}
+
+	// A town whose daemon logged an hour of census records, one caller far
+	// above any row the table can carry.
+	town := t.TempDir()
+	log := filepath.Join(town, "daemon", "daemon.log")
+	if err := os.MkdirAll(filepath.Dir(log), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 10, 30, 12, 0, 0, 0, time.Local)
+	var body strings.Builder
+	for i := 0; i < 60; i++ {
+		fmt.Fprintf(&body, "%s bd census: total=99 window=60s top: list@metrics.queueLandingColumn=99\n",
+			start.Add(time.Duration(i)*time.Minute).Format("2006/01/02 15:04:05"))
+	}
+	if err := os.WriteFile(log, []byte(body.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check.Now = func() time.Time { return start.Add(60 * time.Minute) }
+
+	r := check.Run(&doctor.CheckContext{TownRoot: town})
+
+	if r.Status != doctor.StatusError {
+		t.Fatalf("status = %v (%s), want Error from the registered check", r.Status, r.Message)
+	}
+	if !strings.Contains(strings.Join(r.Details, "\n"), "metrics.queueLandingColumn") {
+		t.Errorf("details %q must name the caller over budget", r.Details)
+	}
+}
 
 func TestDoctorDoesNotRegisterDoltConfigCheck(t *testing.T) {
 	t.Parallel()

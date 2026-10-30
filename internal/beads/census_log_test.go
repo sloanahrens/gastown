@@ -257,17 +257,38 @@ func TestParseCensusLineReadsWhatTheLoggerWrites(t *testing.T) {
 	}
 }
 
-func TestParseCensusLineRejectsOtherLines(t *testing.T) {
+// TestParseCensusLineRejectsWhatItCannotTrust: a line holding no record, a
+// truncated one, and a record whose own fields disagree with its rows are
+// refusals rather than rates built on a number the daemon never wrote. The
+// rows are a sample of the window's calls, so a row sum above the record's
+// total means the line was torn (gt-gojo0).
+func TestParseCensusLineRejectsWhatItCannotTrust(t *testing.T) {
 	for _, line := range []string{
 		"2026/10/30 12:36:00 patrol: nothing to do",
 		"2026/10/30 12:36:00 bd census: total=2 window=60s",
 		"2026/10/30 12:36:00 bd census: total=2 window=60s top: list@x",
 		"2026/10/30 12:36:00 bd census: total=x window=60s top: list@x=1",
 		"2026/10/30 12:36:00 bd census: total=2 window=60 top: list@x=1",
+		"2026/10/30 12:36:00 bd census: total=2 window=3601s top: list@x=1",
+		"2026/10/30 12:36:00 bd census: total=1 window=60s top: list@x=2",
+		"2026/10/30 12:36:00 bd census: total=2 window=60s top: list@x=-1",
 	} {
 		if _, ok := ParseCensusLine(line); ok {
 			t.Errorf("parsed %q, want a rejection", line)
 		}
+	}
+}
+
+// TestParseCensusLineKeepsTheCallsItsRowsDoNot: a record's total counts calls
+// its eight rows leave out, so a row sum at the total parses and both numbers
+// survive for a reader that wants them (gt-gojo0).
+func TestParseCensusLineKeepsTheCallsItsRowsDoNot(t *testing.T) {
+	window, ok := ParseCensusLine("2026/10/30 12:36:00 bd census: total=9 window=60s top: list@a=4 show@b=3 create@c=2")
+	if !ok {
+		t.Fatal("parser rejected a well-formed record")
+	}
+	if got := CensusRowsTotal(window.Rows); got != 9 || window.Total != 9 {
+		t.Errorf("rows total %d, record total %d, want 9 and 9", got, window.Total)
 	}
 }
 

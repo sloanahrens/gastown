@@ -59,8 +59,8 @@ func TestCensusBudgetCheckFailsOneCallerOver(t *testing.T) {
 	town := t.TempDir()
 	writeCensusLog(t, town, 60, func(int) []string {
 		return []string{
-			"list@metrics.queueLandingColumn=14",
-			"list@landworker.(*RetryBeads).List=6",
+			"list@metrics.queueLandingColumn=20",
+			"list@landworker.RetryBeads.List=6",
 		}
 	})
 
@@ -73,12 +73,12 @@ func TestCensusBudgetCheckFailsOneCallerOver(t *testing.T) {
 	if detail == "" {
 		t.Fatalf("details do not name the caller: %q", r.Details)
 	}
-	for _, want := range []string{"14.0", "3.0"} {
+	for _, want := range []string{"20.0", "15.9"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("detail %q must hold the average and the budget (%s)", detail, want)
 		}
 	}
-	if got := censusDetail(r, "landworker.(*RetryBeads).List"); got != "" {
+	if got := censusDetail(r, "landworker.RetryBeads.List"); got != "" {
 		t.Errorf("a caller within budget is reported: %q", got)
 	}
 }
@@ -137,12 +137,12 @@ func TestCensusBudgetCheckNamesACallerTheTableDropped(t *testing.T) {
 	writeCensusLog(t, town, 60, func(int) []string {
 		return []string{
 			"list@metrics.queueLandingColumn=1",
-			"list@landworker.(*RetryBeads).List=1",
+			"list@landworker.RetryBeads.List=1",
 		}
 	})
 
 	chk := censusCheck()
-	chk.Budgets = []beads.CensusBudget{{Caller: "landworker.(*RetryBeads).List", CallsPerMinute: 6.9}}
+	chk.Budgets = []beads.CensusBudget{{Caller: "landworker.RetryBeads.List", CallsPerMinute: 6.9}}
 
 	r := chk.Run(&CheckContext{TownRoot: town})
 
@@ -153,7 +153,7 @@ func TestCensusBudgetCheckNamesACallerTheTableDropped(t *testing.T) {
 	if detail == "" || !strings.Contains(detail, "no budget") {
 		t.Fatalf("details %q must name the dropped caller as unbudgeted", r.Details)
 	}
-	if got := censusDetail(r, "landworker.(*RetryBeads).List"); got != "" {
+	if got := censusDetail(r, "landworker.RetryBeads.List"); got != "" {
 		t.Errorf("a budgeted caller with no calls in the log is reported: %q", got)
 	}
 }
@@ -165,7 +165,7 @@ func TestCensusBudgetCheckPassesWithinBudget(t *testing.T) {
 	writeCensusLog(t, town, 60, func(int) []string {
 		return []string{
 			"list@metrics.queueLandingColumn=2",
-			"list@landworker.(*RetryBeads).List=6",
+			"list@landworker.RetryBeads.List=6",
 		}
 	})
 
@@ -215,7 +215,7 @@ func TestCensusBudgetCheckMeasuresOnlyTheNewestWindows(t *testing.T) {
 	}
 	for i := 0; i < censusBudgetWindows; i++ {
 		stamp := censusLogStart.Add(time.Duration(i) * time.Minute)
-		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@metrics.queueLandingColumn=14\n", stamp.Format("2006/01/02 15:04:05"))
+		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@metrics.queueLandingColumn=20\n", stamp.Format("2006/01/02 15:04:05"))
 	}
 	writeDoctorTownFile(t, town, "daemon/daemon.log", b.String())
 
@@ -224,7 +224,7 @@ func TestCensusBudgetCheckMeasuresOnlyTheNewestWindows(t *testing.T) {
 	if r.Status != StatusError {
 		t.Fatalf("status = %v (%s), want Error from the newest windows", r.Status, r.Message)
 	}
-	if detail := censusDetail(r, "metrics.queueLandingColumn"); !strings.Contains(detail, "14.0") {
+	if detail := censusDetail(r, "metrics.queueLandingColumn"); !strings.Contains(detail, "20.0") {
 		t.Errorf("detail %q must measure only the newest windows", detail)
 	}
 }
@@ -241,7 +241,7 @@ func TestCensusBudgetCheckAveragesOverTheSpanNotTheLoggedMinutes(t *testing.T) {
 	for i := 0; i <= 20; i++ {
 		rows := "list@daemon.showRigBead=1"
 		if i == 10 {
-			rows = "list@landworker.(*RetryBeads).AppendNotes=60"
+			rows = "list@landworker.RetryBeads.AppendNotes=60"
 		}
 		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: %s\n",
 			censusLogStart.Add(time.Duration(i)*3*time.Minute).Format("2006/01/02 15:04:05"), rows)
@@ -251,7 +251,7 @@ func TestCensusBudgetCheckAveragesOverTheSpanNotTheLoggedMinutes(t *testing.T) {
 	chk := censusCheck()
 	chk.Now = func() time.Time { return censusLogStart.Add(time.Hour + 30*time.Second) }
 	chk.Budgets = []beads.CensusBudget{
-		{Caller: "landworker.(*RetryBeads).AppendNotes", CallsPerMinute: 1.5},
+		{Caller: "landworker.RetryBeads.AppendNotes", CallsPerMinute: 1.5},
 		{Caller: "daemon.showRigBead", CallsPerMinute: 1.0},
 	}
 
@@ -378,9 +378,10 @@ func TestTailLinesReportsEveryReadFailure(t *testing.T) {
 	}
 }
 
-// TestCensusBudgetCheckSkipsAnUnreadableLog: a log the check cannot read is
-// data it does not have, so the check skips instead of passing.
-func TestCensusBudgetCheckSkipsAnUnreadableLog(t *testing.T) {
+// TestCensusBudgetCheckWarnsOnAnUnreadableLog: a log that exists and cannot be
+// read is a fault in the town, not a census that has not run yet, so it warns
+// with its own message rather than sharing the no-data skip (gt-gojo0).
+func TestCensusBudgetCheckWarnsOnAnUnreadableLog(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	// A directory where the log should be: it opens, and reading it fails.
@@ -390,20 +391,56 @@ func TestCensusBudgetCheckSkipsAnUnreadableLog(t *testing.T) {
 
 	r := censusCheck().Run(&CheckContext{TownRoot: town})
 
-	if r.Status != StatusSkipped {
-		t.Fatalf("status = %v (%s), want Skipped", r.Status, r.Message)
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %v (%s), want Warning", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "not enough data") {
-		t.Errorf("message %q must not read as a pass", r.Message)
+	if !strings.Contains(r.Message, "cannot read the census") {
+		t.Errorf("message %q must say the log could not be read", r.Message)
+	}
+	if strings.Contains(r.Message, "not enough data") {
+		t.Errorf("message %q reads as a census that has not run, not as an unreadable one", r.Message)
 	}
 }
 
-// TestCensusBudgetCheckSkipsAMissingLog: no daemon log is no data, not a pass.
+// TestCensusBudgetCheckSkipsAMissingLog: no daemon log is no data, not a pass,
+// and its message names the file so the operator knows which log is missing.
 func TestCensusBudgetCheckSkipsAMissingLog(t *testing.T) {
 	t.Parallel()
-	r := censusCheck().Run(&CheckContext{TownRoot: t.TempDir()})
+	town := t.TempDir()
+
+	r := censusCheck().Run(&CheckContext{TownRoot: town})
 
 	if r.Status != StatusSkipped {
 		t.Fatalf("status = %v (%s), want Skipped", r.Status, r.Message)
+	}
+	if want := filepath.Join(town, "daemon", "daemon.log"); !strings.Contains(r.Message, want) {
+		t.Errorf("message %q must name the missing log %s", r.Message, want)
+	}
+}
+
+// TestCensusBudgetCheckCountsTheRecordsItCannotPlace: a census record written
+// above the log's first stamped line has no instant to be averaged over. The
+// read leaves it out and says how many it left out, so a rate is never taken
+// over records the operator cannot see (gt-gojo0).
+func TestCensusBudgetCheckCountsTheRecordsItCannotPlace(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < 2; i++ {
+		b.WriteString("bd census: total=99 window=60s top: list@metrics.queueLandingColumn=1\n")
+	}
+	for i := 0; i < censusBudgetWindows; i++ {
+		fmt.Fprintf(&b, "%s bd census: total=99 window=60s top: list@metrics.queueLandingColumn=2\n",
+			censusLogStart.Add(time.Duration(i)*time.Minute).Format("2006/01/02 15:04:05"))
+	}
+	writeDoctorTownFile(t, town, "daemon/daemon.log", b.String())
+
+	r := censusCheck().Run(&CheckContext{TownRoot: town})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %v (%s), want OK: the placed records are within budget", r.Status, r.Message)
+	}
+	if !strings.Contains(strings.Join(r.Details, "\n"), "2 census record(s) ignored") {
+		t.Errorf("details %q must count the two records the read could not place", r.Details)
 	}
 }
