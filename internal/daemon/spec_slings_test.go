@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/steveyegge/gastown/internal/beads"
-	"io"
 	"log"
 	"maps"
 	"slices"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
@@ -341,8 +341,14 @@ func TestADeadBackgroundSlingProcessLabelsItsBead(t *testing.T) {
 	d.runSpecDispatch()
 	waitSlings(t, d)
 
-	if got := fake.argvs("bead", "update"); len(got) != 1 || !slices.Equal(got[0], []string{"bead", "update", "gt-z", "--add-label", "spec-dispatch-failed"}) {
-		t.Errorf("label calls = %v, want gt-z labeled spec-dispatch-failed once", got)
+	// The label goes on, and the retry state a kill at the bound would leave
+	// goes off: this failure is not that kill (gt-vaivp).
+	want := []string{"bead", "update", "gt-z",
+		"--add-label", "spec-dispatch-failed",
+		"--remove-label", specdispatch.TimeoutLabel,
+		"--unset-metadata", specdispatch.TimeoutAttemptsKey}
+	if got := fake.argvs("bead", "update"); len(got) != 1 || !slices.Equal(got[0], want) {
+		t.Errorf("label calls = %v, want %v", got, want)
 	}
 	notes := fake.argvs("bead", "note", "gt-z")
 	if len(notes) != 1 || !strings.Contains(notes[0][len(notes[0])-1], "sling process failed") || !strings.Contains(notes[0][len(notes[0])-1], "spec-dispatch-failed is cleared") {
@@ -727,19 +733,10 @@ func TestUpgradeRestartGoesWhenTheRunningSlingsReturn(t *testing.T) {
 	}
 }
 
-// statusBeads answers Show with one status, for the failure-label decision.
-type statusBeads struct{ status string }
-
-func (s statusBeads) Show(id string) (*beads.Issue, error) {
-	return &beads.Issue{ID: id, Status: s.status}, nil
-}
-
-func (s statusBeads) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
-
 // gt-nosod: only a status that says whether the bead is held answers the
 // failure-label question. An empty or unrecognized status is no answer, so the
 // label is withheld rather than written.
-func TestSpecSlingBeadHookedAnswersOnlyKnownStatuses(t *testing.T) {
+func TestSpecSlingBeadHeldAnswersOnlyKnownStatuses(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		status           string
@@ -753,14 +750,9 @@ func TestSpecSlingBeadHookedAnswersOnlyKnownStatuses(t *testing.T) {
 		{"something-new", false, false},
 	}
 	for _, c := range cases {
-		d := &Daemon{
-			config:        &Config{TownRoot: t.TempDir()},
-			logger:        log.New(io.Discard, "", 0),
-			openWorkBeads: func([]string, time.Duration) workBeadReader { return statusBeads{status: c.status} },
-		}
-		hooked, known := d.specSlingBeadHooked(specSlingFlight{Bead: "gt-x", Rig: "gastown"})
+		hooked, known := specSlingBeadHeld(&beads.Issue{ID: "gt-x", Status: c.status})
 		if hooked != c.wantHooked || known != c.know {
-			t.Errorf("status %q: hooked=%v known=%v, want hooked=%v known=%v", c.status, hooked, known, c.wantHooked, c.know)
+			t.Errorf("status %q: held=%v known=%v, want held=%v known=%v", c.status, hooked, known, c.wantHooked, c.know)
 		}
 	}
 }

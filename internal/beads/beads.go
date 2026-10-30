@@ -900,6 +900,14 @@ type UpdateOptions struct {
 	RemoveLabels []string // Labels to remove
 	SetLabels    []string // Labels to set (replaces all existing)
 
+	// SetMetadata writes metadata keys as bd's own "key=value" pairs (bd
+	// update --set-metadata). A pair bd cannot read is bd's to refuse, so a
+	// caller hands over what it wants written rather than a parsed map.
+	SetMetadata []string
+	// UnsetMetadata removes metadata keys (bd update --unset-metadata). A key
+	// the bead does not carry is not an error.
+	UnsetMetadata []string
+
 	// Acceptance replaces the acceptance criteria block, bd's own
 	// --acceptance semantics: ticking one line means resending the block
 	// with '- [x]' on it (gt-n623a).
@@ -4040,6 +4048,12 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 	if opts.AppendNotes != "" {
 		// The joined form takes a dash-leading note as the value (gt-1q9nl).
 		args = append(args, "--append-notes="+opts.AppendNotes)
+	}
+	for _, pair := range opts.SetMetadata {
+		args = append(args, "--set-metadata="+pair)
+	}
+	for _, key := range opts.UnsetMetadata {
+		args = append(args, "--unset-metadata="+key)
 	}
 	// Label operations: set-labels replaces all, otherwise use add/remove
 	if len(opts.SetLabels) > 0 {
