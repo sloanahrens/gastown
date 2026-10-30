@@ -483,6 +483,8 @@ func TestTownStartHandshakeDoltTownKeepsTheBDHandshake(t *testing.T) {
 	}{
 		{"no route table at all", ""},
 		{"an empty route table", "# no routes\n"},
+		// internal/beads.LoadRoutes skips a line that is not JSON and reports
+		// it itself, so the gate sees a table with no route and takes Dolt.
 		{"a route table with a line that is not JSON", "not a route\n"},
 		{"the town's own route on Dolt", `{"path":".","prefix":"hq-"}` + "\n"},
 		{
