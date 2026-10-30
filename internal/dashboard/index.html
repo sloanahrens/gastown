@@ -4320,12 +4320,21 @@ function detailBlock(d) {
   return box;
 }
 
+// skipWhy is a tick's skip reason without the "<bead id>: " the dispatcher
+// writes in front of it ("gt-vesnm: no seat: over the town total"). Only a
+// bead-id shape is cut: "held: ..." and "unshaped: ..." are reasons, not ids
+// (gt-fvtw7).
+function skipWhy(reason) {
+  return String(reason || "").replace(/^[a-z]{1,6}-[a-z0-9]+(?:\.[a-z0-9]+)*: /, "");
+}
+
 // skipClass says what a tick's skip reason means to the operator (gt-qt0ym):
-// "waiting for a seat" when the reason begins "no seat" (the bead is fine and
-// every seat is taken or capped), "skipped" for any other reason, an empty one
-// included, which stays warning-coloured so a real defect is not hidden.
+// "waiting for a seat" when the reason begins "no seat" once the bead id is cut
+// (the bead is fine and every seat is taken or capped), "skipped" for any other
+// reason, an empty one included, which stays warning-coloured so a real defect
+// is not hidden.
 function skipClass(reason) {
-  return /^no seat/.test(String(reason || "")) ? "waiting for a seat" : "skipped";
+  return /^no seat/.test(skipWhy(reason)) ? "waiting for a seat" : "skipped";
 }
 
 // isReadyToDispatch is the one "ready to dispatch" set: the beads the dispatcher
@@ -4494,7 +4503,7 @@ function drawQueueList(box, s) {
         const g = el("span", "tag", "waiting for a seat" + (place ? " #" + place : ""));
         g.title = "nothing is wrong with this bead: every seat is taken or capped, and it goes in the order shown (priority, then oldest). " + (seatsCapped ? "The ready list was cut, so the total is at least this many. " : "") + reason;
         t.append(document.createTextNode(" "), g);
-      } else { const g = el("span", "tag warnc", reason ? "skipped: " + reason : "skipped"); g.title = "the dispatcher's last real tick passed this bead over; the line below says why and since when"; t.append(document.createTextNode(" "), g); }
+      } else { const g = el("span", "tag warnc", skipWhy(reason) ? "skipped: " + skipWhy(reason) : "skipped"); g.title = "the dispatcher's last real tick passed this bead over; the line below says why and since when"; t.append(document.createTextNode(" "), g); }
     }
     else if (b.shape === "parked") { const g = el("span", "tag", "rig parked"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "held") { const g = el("span", "tag", "held"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
