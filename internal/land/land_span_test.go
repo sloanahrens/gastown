@@ -3,9 +3,11 @@ package land
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 )
 
@@ -192,5 +194,208 @@ func TestLandLeavesTheAttemptOpenWithoutAFirstSightRecord(t *testing.T) {
 	}
 	if len(sum.Attempts) != 1 || !sum.Attempts[0].Open {
 		t.Errorf("summary = %+v, want the attempt left open", sum)
+	}
+}
+
+// reseed writes w's ready note onto the fixture's bead, so the block carries
+// the submission stamp a refusal reads; mutate, when set, shapes the bead
+// further for the kind of refusal the test drives.
+func (f *landFixture) reseed(w Work, mutate func(*beads.Issue)) {
+	f.t.Helper()
+	is := beads.Issue{ID: "gt-abc", Title: "add b", Status: "hooked", Type: "task",
+		Assignee: "gastown/polecats/opal", Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(w)}
+	if mutate != nil {
+		mutate(&is)
+	}
+	f.bd.Seed(is)
+}
+
+// refusedFixture opens a seat's attempt on the fixture's bead and stamps the
+// submission the refusal answers.
+func refusedFixture(t *testing.T) (*landFixture, *spans.Store) {
+	t.Helper()
+	f := newLandFixture(t)
+	store := spans.New(spans.DefaultDir(f.town), &spanClock{at: spanEpoch})
+	if err := store.Start("gt-abc", "gastown/opal"); err != nil {
+		t.Fatalf("start span: %v", err)
+	}
+	f.work.Submitted = spanEpoch.Add(3 * time.Minute)
+	f.reseed(f.work, nil)
+	return f, store
+}
+
+// TestRefusedLandingEndsTheSeatsAttempt: a refusal returns the bead to its
+// author, so the submission it answers was the seat's turn end, and the attempt
+// its gt done left open is ended at the submission the host first saw. The
+// Landings pane reads a rejected row the way it reads a landed one, so the row
+// carries the seat's seconds instead of a dash (gt-fhjdh).
+func TestRefusedLandingEndsTheSeatsAttempt(t *testing.T) {
+	t.Parallel()
+	f, store := refusedFixture(t)
+	seedFirstSight(t, f.town, "gt-abc", f.work.Head, spanEpoch.Add(3*time.Minute+30*time.Second))
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+	}
+
+	l := f.lander()
+	l.Landings.Spans = store
+	l.Now = func() time.Time { return spanEpoch.Add(5 * time.Minute) }
+	_, err := l.Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectGate, LabelRework)
+
+	// The reading the pane gives a rejected row: zero asOf, a landed record's
+	// own reading (gt-kmp7c).
+	secs, attempts, lower := l.Landings.PolecatTime("gt-abc", time.Time{})
+	if secs != 180 || lower {
+		t.Errorf("rejected row reads %v secs (lower bound %v), want the seat's 180 and no bound", secs, lower)
+	}
+	if len(attempts) != 1 || attempts[0].Seat != "gastown/opal" || attempts[0].Secs != 180 {
+		t.Errorf("attempts = %+v, want the seat's 180", attempts)
+	}
+	sum, err := store.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if len(sum.Attempts) != 1 || sum.Attempts[0].Open || sum.Skipped != 0 {
+		t.Errorf("summary = %+v, want one attempt closed by the refusal", sum)
+	}
+}
+
+// TestRefusedLandingLeavesTheAttemptOpenWithoutAFirstSight: a refusal is not a
+// turn end when the host holds no record of seeing the submission, and an end
+// nothing vouches for is not written. The attempt stays open and the pane reads
+// it as a lower bound, for every kind of refusal (gt-fhjdh).
+func TestRefusedLandingLeavesTheAttemptOpenWithoutAFirstSight(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		kind   RejectionKind
+		mutate func(*beads.Issue)
+		drive  func(*landFixture)
+	}{
+		{
+			name: "conflict",
+			kind: RejectConflict,
+			drive: func(f *landFixture) {
+				f.base = f.pushMain("b.txt", "main's b\n")
+			},
+		},
+		{
+			name: "gate",
+			kind: RejectGate,
+			drive: func(f *landFixture) {
+				f.gate.fn = func(string) GateResult {
+					return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+				}
+			},
+		},
+		{
+			name: "policy",
+			kind: RejectPolicy,
+			mutate: func(is *beads.Issue) {
+				is.AcceptanceCriteria = "- [x] one\n- [ ] two\n"
+			},
+		},
+		{
+			name: "review",
+			kind: RejectReview,
+			drive: func(f *landFixture) {
+				f.review.fn = func(string) (Verdict, error) {
+					return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, store := refusedFixture(t)
+			if tc.mutate != nil {
+				f.reseed(f.work, tc.mutate)
+			}
+			if tc.drive != nil {
+				tc.drive(f)
+			}
+			l := f.lander()
+			l.Landings.Spans = store
+			l.Now = func() time.Time { return spanEpoch.Add(5 * time.Minute) }
+			_, err := l.Land(context.Background(), f.work)
+			f.assertRejected(t, err, tc.kind, LabelRework)
+
+			secs, _, lower := l.Landings.PolecatTime("gt-abc", time.Time{})
+			if secs != 0 || !lower {
+				t.Errorf("rejected row reads %v secs (lower bound %v), want no seconds and a lower bound", secs, lower)
+			}
+			sum, err := store.Summarize("gt-abc")
+			if err != nil {
+				t.Fatalf("Summarize: %v", err)
+			}
+			if len(sum.Attempts) != 1 || !sum.Attempts[0].Open {
+				t.Errorf("summary = %+v, want the seat's attempt left open", sum)
+			}
+		})
+	}
+}
+
+// TestRefusedLandingLeavesTheAttemptOpenWhenTheFirstSightCannotBeRead: an
+// unreadable first-sight log is not a sighting, so the refusal writes no end
+// and the attempt stays open (gt-fhjdh).
+func TestRefusedLandingLeavesTheAttemptOpenWhenTheFirstSightCannotBeRead(t *testing.T) {
+	t.Parallel()
+	f, store := refusedFixture(t)
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+	}
+
+	l := f.lander()
+	l.Landings.Spans = store
+	l.Landings.FirstSeen = func(string, string) (time.Time, error) {
+		return time.Time{}, errors.New("unreadable first-sight log")
+	}
+	l.Now = func() time.Time { return spanEpoch.Add(5 * time.Minute) }
+	_, err := l.Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectGate, LabelRework)
+
+	sum, err := store.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if len(sum.Attempts) != 1 || !sum.Attempts[0].Open {
+		t.Errorf("summary = %+v, want the seat's attempt left open", sum)
+	}
+}
+
+// TestRefusedLandingLeavesTheAttemptOpenWhenTheBeadChangedHands: the bead was
+// taken by someone else while the landing ran, so the refusal is noted and the
+// bead left as it is. Whoever holds it now may keep working, so the attempt
+// stays open rather than ending a turn that has not ended (gt-fhjdh).
+func TestRefusedLandingLeavesTheAttemptOpenWhenTheBeadChangedHands(t *testing.T) {
+	t.Parallel()
+	f, store := refusedFixture(t)
+	seedFirstSight(t, f.town, "gt-abc", f.work.Head, spanEpoch.Add(3*time.Minute+30*time.Second))
+	const other = "gastown/polecats/nux"
+	assignee := other
+	f.gate.fn = func(string) GateResult {
+		if err := f.bd.Update("gt-abc", beads.UpdateOptions{Assignee: &assignee}); err != nil {
+			t.Errorf("handing the bead to %s: %v", other, err)
+		}
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+	}
+
+	l := f.lander()
+	l.Landings.Spans = store
+	l.Now = func() time.Time { return spanEpoch.Add(5 * time.Minute) }
+	_, err := l.Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr == nil {
+		t.Fatalf("Land = %T %v, want a gate rejection noting the bead changed hands", err, err)
+	}
+
+	sum, err := store.Summarize("gt-abc")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if len(sum.Attempts) != 1 || !sum.Attempts[0].Open {
+		t.Errorf("summary = %+v, want the seat's attempt left open", sum)
 	}
 }

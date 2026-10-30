@@ -94,7 +94,7 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 // here (gt-8yk78).
 func (f *LandingsFile) AppendSubmitted(rec LandingRecord, seat string, submitted time.Time) error {
 	if rec.PolecatSecs == 0 && len(rec.PolecatAttempts) == 0 && !rec.PolecatLowerBound {
-		f.closeSubmittedSpan(rec, seat, submitted)
+		f.closeAttempt(rec.BeadID, rec.Head, seat, submitted, f.landedAt(rec))
 		rec.PolecatSecs, rec.PolecatAttempts, rec.PolecatLowerBound = f.PolecatTime(rec.BeadID, time.Time{})
 	}
 	line, err := json.Marshal(rec)
@@ -116,32 +116,32 @@ func (f *LandingsFile) landedAt(rec LandingRecord) time.Time {
 	return time.Now()
 }
 
-// closeSubmittedSpan ends seat's open attempt on rec's bead. A read or write
-// that fails is logged and the record is written anyway: the landing is never
-// worth failing over the time, and the attempt staying open is exactly what
-// leaves the record a lower bound (gt-yxl22).
+// closeAttempt ends seat's open attempt on a bead whose submission the host
+// saw, at the earlier of the submission stamp and that first sight, capped by
+// capped (gt-8yk78).
 //
-// The end is the host's, not the seat's. The submission stamp is the seat's own
-// word for when its turn ended, and a seat must not be able to write time into
-// a landing record it did not work, so the stamp may only pull the end earlier:
-// the end is the earlier of the stamp and the host's first sight of the
-// submission, and the landing's own time caps both. With no first-sight record
-// the host has seen no submission at all, and the attempt stays open — no
-// credit is better than the seat's word for it (gt-8yk78).
-func (f *LandingsFile) closeSubmittedSpan(rec LandingRecord, seat string, submitted time.Time) {
-	if f.Spans == nil || f.FirstSeen == nil || seat == "" || submitted.IsZero() || !spans.ValidBeadID(rec.BeadID) {
+// The end is the host's, not the seat's: the stamp is the seat's own word for
+// when its turn ended, and a seat must not be able to write time into a landing
+// it did not work, so the stamp may only pull the end earlier. With no
+// first-sight record the host has seen no submission at all and the attempt
+// stays open — no credit is better than the seat's word for it. A read or write
+// that fails is logged and the caller carries on: a landing is never worth
+// failing over the time, and an attempt left open is what leaves the reading a
+// lower bound (gt-yxl22).
+func (f *LandingsFile) closeAttempt(beadID, head, seat string, submitted, capped time.Time) {
+	if f.Spans == nil || f.FirstSeen == nil || seat == "" || submitted.IsZero() || !spans.ValidBeadID(beadID) {
 		return
 	}
-	seen, err := f.FirstSeen(rec.BeadID, rec.Head)
+	seen, err := f.FirstSeen(beadID, head)
 	if err != nil {
 		if f.Logf != nil {
-			f.Logf("landings file %s: no first-sight record to bound %s on %s: %v", f.Path, seat, rec.BeadID, err)
+			f.Logf("landings file %s: no first-sight record to bound %s on %s: %v", f.Path, seat, beadID, err)
 		}
 		return
 	}
 	if seen.IsZero() {
 		if f.Logf != nil {
-			f.Logf("landings file %s: no first-sight record for %s, so %s's end is not written and its time stays a lower bound", f.Path, rec.BeadID, seat)
+			f.Logf("landings file %s: no first-sight record for %s, so %s's end is not written and its time stays a lower bound", f.Path, beadID, seat)
 		}
 		return
 	}
@@ -149,12 +149,12 @@ func (f *LandingsFile) closeSubmittedSpan(rec LandingRecord, seat string, submit
 	if seen.Before(end) {
 		end = seen
 	}
-	if landed := f.landedAt(rec); landed.Before(end) {
-		end = landed
+	if capped.Before(end) {
+		end = capped
 	}
-	if _, err := f.Spans.EndOpen(rec.BeadID, seat, spans.ReasonDone, end); err != nil {
+	if _, err := f.Spans.EndOpen(beadID, seat, spans.ReasonDone, end); err != nil {
 		if f.Logf != nil {
-			f.Logf("landings file %s: no end for %s on %s: %v", f.Path, seat, rec.BeadID, err)
+			f.Logf("landings file %s: no end for %s on %s: %v", f.Path, seat, beadID, err)
 		}
 	}
 }

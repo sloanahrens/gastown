@@ -2403,6 +2403,16 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.RecordErr = fmt.Errorf("reopening the bead: %w", err)
 		return rej
 	}
+	// The bead is back with its author or a person, so the submission this
+	// refusal answered was the seat's turn end and the attempt its gt done left
+	// open is ended here, under the conditions the landing path ends one: the
+	// seat, the ready note's stamp and the host's first sight of that head. A
+	// refusal that is not a turn end — a bead that changed hands above, or a
+	// submission the host never saw — leaves the attempt open, and the pane
+	// keeps reading its time as a lower bound (gt-fhjdh).
+	if l.Landings != nil {
+		l.Landings.closeAttempt(w.BeadID, w.Head, w.seat(), w.Submitted, l.now())
+	}
 	return rej
 }
 
