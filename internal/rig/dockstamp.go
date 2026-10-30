@@ -63,18 +63,34 @@ func DockStamp(townRoot, rigName string) (time.Time, error) {
 // a second rather than a nanosecond so it survives a filesystem that stores
 // whole seconds.
 func TouchDockStamp(townRoot, rigName string, now time.Time) error {
+	return touchDockStamp(townRoot, rigName, now, osDockStampFS)
+}
+
+// dockStampFS is the filesystem TouchDockStamp writes through, so a test can take
+// the failure paths a writable host does not offer: the caller has to report a
+// dock it could not announce rather than swallow it.
+type dockStampFS struct {
+	mkdirAll  func(path string, perm os.FileMode) error
+	writeFile func(path string, data []byte, perm os.FileMode) error
+	chtimes   func(path string, atime, mtime time.Time) error
+}
+
+var osDockStampFS = dockStampFS{mkdirAll: os.MkdirAll, writeFile: os.WriteFile, chtimes: os.Chtimes}
+
+// touchDockStamp is TouchDockStamp through fsys.
+func touchDockStamp(townRoot, rigName string, now time.Time, fsys dockStampFS) error {
 	path := DockStampPath(townRoot, rigName)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := fsys.mkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating the runtime directory for rig %s: %w", rigName, err)
 	}
 	stamp := now
 	if fi, err := os.Stat(path); err == nil && !stamp.After(fi.ModTime()) {
 		stamp = fi.ModTime().Add(time.Second)
 	}
-	if err := os.WriteFile(path, []byte(stamp.UTC().Format(time.RFC3339Nano)+"\n"), 0o644); err != nil {
+	if err := fsys.writeFile(path, []byte(stamp.UTC().Format(time.RFC3339Nano)+"\n"), 0o644); err != nil {
 		return fmt.Errorf("writing the dock stamp for rig %s: %w", rigName, err)
 	}
-	if err := os.Chtimes(path, stamp, stamp); err != nil {
+	if err := fsys.chtimes(path, stamp, stamp); err != nil {
 		return fmt.Errorf("stamping the dock file for rig %s: %w", rigName, err)
 	}
 	return nil

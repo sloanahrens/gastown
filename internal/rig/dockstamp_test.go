@@ -1,8 +1,10 @@
 package rig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,5 +120,60 @@ func TestDockStamp_UnreadableStampIsAnError(t *testing.T) {
 
 	if got, err := DockStamp(townRoot, "gastown"); err == nil {
 		t.Errorf("DockStamp with an unreadable path = %v, nil; want an error", got)
+	}
+}
+
+// TestTouchDockStamp_FailuresAreReported: each step of writing the stamp can
+// fail, and none may pass silently. The dock itself has already happened by the
+// time gt calls this, so an announced failure is the only signal an operator
+// gets that the daemon will keep its old verdict until its window expires.
+func TestTouchDockStamp_FailuresAreReported(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	boom := errors.New("disk full")
+	tests := []struct {
+		name    string
+		fsys    dockStampFS
+		wantErr string
+	}{
+		{
+			name: "runtime directory cannot be made",
+			fsys: dockStampFS{
+				mkdirAll:  func(string, os.FileMode) error { return boom },
+				writeFile: os.WriteFile,
+				chtimes:   os.Chtimes,
+			},
+			wantErr: "creating the runtime directory",
+		},
+		{
+			name: "stamp cannot be written",
+			fsys: dockStampFS{
+				mkdirAll:  func(string, os.FileMode) error { return nil },
+				writeFile: func(string, []byte, os.FileMode) error { return boom },
+				chtimes:   os.Chtimes,
+			},
+			wantErr: "writing the dock stamp",
+		},
+		{
+			name: "stamp cannot be dated",
+			fsys: dockStampFS{
+				mkdirAll:  os.MkdirAll,
+				writeFile: os.WriteFile,
+				chtimes:   func(string, time.Time, time.Time) error { return boom },
+			},
+			wantErr: "stamping the dock file",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := touchDockStamp(t.TempDir(), "gastown", at, tc.fsys)
+			if !errors.Is(err, boom) {
+				t.Fatalf("touchDockStamp = %v, want it to wrap %v", err, boom)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("touchDockStamp = %q, want it to name %q", err, tc.wantErr)
+			}
+		})
 	}
 }

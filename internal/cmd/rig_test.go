@@ -592,3 +592,29 @@ func TestStopAndDockRig(t *testing.T) {
 		})
 	}
 }
+
+// TestStopAndDockRig_StampFailureIsReported: the docked label is written, but a
+// dock stamp that could not be written is reported rather than swallowed, because
+// a running daemon will not see the dock until it re-reads the bead.
+func TestStopAndDockRig_StampFailureIsReported(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	// A regular file where the rig's runtime directory belongs, so the stamp
+	// cannot be created.
+	rigRuntime := filepath.Dir(rig.DockStampPath(townRoot, "gastown"))
+	if err := os.MkdirAll(filepath.Dir(rigRuntime), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigRuntime, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bd := &recordingUpdateBeads{}
+	stub := &stubDockPolecatSessions{}
+
+	if _, err := stopAndDockRig(townRoot, "gastown", bd, "gt-gastown", stub); err == nil {
+		t.Fatal("stopAndDockRig with an unwritable dock stamp = nil; want the failure reported")
+	}
+	if !slices.Equal(bd.updates, []string{"gt-gastown"}) {
+		t.Errorf("Update calls = %q; want the dock itself still written", bd.updates)
+	}
+}
