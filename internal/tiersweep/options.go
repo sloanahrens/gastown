@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -27,6 +28,7 @@ const (
 const (
 	EnvSkip    = "TIER_SWEEP_SKIP"
 	EnvTimeout = "TIER_SWEEP_TIMEOUT"
+	EnvNice    = "TIER_SWEEP_NICE"
 	EnvLogDir  = "TIER_SWEEP_LOGDIR"
 	EnvTrigger = "TIER_SWEEP_TRIGGER"
 	EnvTested  = "TIER_SWEEP_TESTED"
@@ -62,6 +64,10 @@ type Options struct {
 	SkipList string
 	// Timeout is TIER_SWEEP_TIMEOUT, the per-package go test timeout.
 	Timeout string
+	// Nice is TIER_SWEEP_NICE parsed: the CPU niceness each package's
+	// `gt slot run` takes, 0 to 19. Nil means the variable was unset, and the
+	// sweep passes no --nice, leaving gt slot run its own default.
+	Nice *int
 	// LogDir is TIER_SWEEP_LOGDIR: the directory the run writes one log per
 	// package into, created when a run reads its options.
 	LogDir string
@@ -136,6 +142,11 @@ func ParseOptions(args []string, host Host) (Options, error) {
 	if len(opts.Tiers) == 0 {
 		opts.Tiers = []string{TierShell, TierIntegration, TierRace}
 	}
+	nice, err := parseNice(host.Env(EnvNice))
+	if err != nil {
+		return Options{}, err
+	}
+	opts.Nice = nice
 	logDir := host.Env(EnvLogDir)
 	if logDir == "" {
 		dir, err := host.MkdirTemp(orDefault(host.Env("TMPDIR"), DefaultTempDir), logDirPattern)
@@ -169,6 +180,20 @@ func SkipFor(list, tier, pkg string) (whole bool, pattern string) {
 		}
 	}
 	return false, ""
+}
+
+// parseNice reads TIER_SWEEP_NICE: nil when the variable is unset, and
+// otherwise a whole number from 0 to 19. Anything else is the caller's usage
+// error, so a typo never reaches a package as a changed niceness.
+func parseNice(value string) (*int, error) {
+	if value == "" {
+		return nil, nil
+	}
+	nice, err := strconv.Atoi(value)
+	if err != nil || nice < 0 || nice > 19 {
+		return nil, fmt.Errorf("%s: %s=%q: want a whole number from 0 to 19", Name, EnvNice, value)
+	}
+	return &nice, nil
 }
 
 // orDefault returns fallback when value is empty.

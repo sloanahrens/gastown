@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -98,8 +99,8 @@ func (s *Sweep) Integration() (line string, red bool) {
 		Timings:  s.Timings,
 		Now:      s.Now,
 	}
-	root := runner.Tier(TierIntegration, ".", slotPrefix(), taggedArgs, plan.root)
-	docker := runner.Tier(TierDocker, ".", slotPrefix(), nil, plan.docker)
+	root := runner.Tier(TierIntegration, ".", slotPrefix(s.Opts.Nice), taggedArgs, plan.root)
+	docker := runner.Tier(TierDocker, ".", slotPrefix(s.Opts.Nice), nil, plan.docker)
 	// Only a passing container run at a named commit earns the record. A red
 	// one leaves the state alone, so the next sweep runs those packages again,
 	// and a commit that cannot be named is never stamped.
@@ -112,7 +113,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 	var names []string
 	names = append(names, root.FailedNames...)
 	for _, m := range plan.modules {
-		c := runner.Tier(TierIntegration, m.dir, slotPrefix(), taggedArgs, m.pkgs)
+		c := runner.Tier(TierIntegration, m.dir, slotPrefix(s.Opts.Nice), taggedArgs, m.pkgs)
 		passed += c.Passed
 		failed += c.Failed
 		skipped += c.Skipped
@@ -235,7 +236,13 @@ func triggerArgv(verb string) []string {
 	return []string{"go", "run", triggerPkg, verb, TierDocker}
 }
 
-// slotPrefix runs a package under gt slot run with the container tests on.
-func slotPrefix() []string {
-	return []string{"gt", "slot", "run", "--", "env", "GT_TEST_DOCKER=1"}
+// slotPrefix runs a package under gt slot run with the container tests on, and
+// with --nice when TIER_SWEEP_NICE set one. A nil nice passes no flag, so gt
+// slot run keeps its own default.
+func slotPrefix(nice *int) []string {
+	prefix := []string{"gt", "slot", "run"}
+	if nice != nil {
+		prefix = append(prefix, "--nice", strconv.Itoa(*nice))
+	}
+	return append(prefix, "--", "env", "GT_TEST_DOCKER=1")
 }
