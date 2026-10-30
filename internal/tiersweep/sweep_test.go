@@ -72,7 +72,7 @@ func (r *rig) run(args ...string) (code int, stdout, stderr string) {
 	return code, out.String(), errw.String()
 }
 
-// shellGreen is the runner's summary line for a passing shell tier.
+// shellLine is the shell-tier runner's summary line with the verdict given.
 func shellLine(verdict string) string {
 	return "tier-sweep: shell " + verdict + " passed=2 failed=0 skipped=0 (logs /l) in 3s\n"
 }
@@ -206,7 +206,7 @@ func TestSweepLogDirFailureExitsTwo(t *testing.T) {
 			MkdirAll:  func(string, fs.FileMode) error { return nil },
 		},
 		Exec: func(string, []string, []string, io.Writer) int { t.Error("a command ran"); return 0 },
-		Now:  time.Now,
+		Now:  func() time.Time { return time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC) },
 	})
 	if code != 2 || out.Len() != 0 || !strings.Contains(errw.String(), "disk full") {
 		t.Errorf("code %d, stdout %q, stderr %q, want exit 2, no line and the cause", code, out.String(), errw.String())
@@ -261,7 +261,13 @@ func TestSweepCaseTable(t *testing.T) {
 		wantLine string // a fragment of the tier's stdout line
 		wantCode int
 		wantRuns []string
-		wantErr  []string
+		// wantErr are fragments stderr must hold. The progress and SKIPPED lines
+		// are asserted as text because the operator and the daemon's log read
+		// them as written (the script's wording); the summary on stdout is the
+		// byte-for-byte contract (internal/daemon tierSweepSummaryRE).
+		wantErr []string
+		// noErr are names stderr must not mention: a module with no tagged
+		// package must not appear in the log at all.
 		noErr    []string
 		noRecord bool // the integration tier recorded nothing; by default it records once
 	}{
@@ -317,7 +323,7 @@ func TestSweepCaseTable(t *testing.T) {
 				oneTagged(r.repo)
 			},
 			wantLine: "integration GREEN passed=1", wantRuns: []string{". ./r"},
-			noErr: []string{"other", "dirname"},
+			noErr: []string{"other"},
 		},
 		{
 			name: "a tagged file at the module root runs in that module", tier: "integration",
@@ -462,5 +468,123 @@ func TestSweepRootTestdataPinned(t *testing.T) {
 	_, stdout, _ := r.run("integration")
 	if !strings.Contains(stdout, "integration GREEN passed=1") || !reflect.DeepEqual(r.tier.testRuns(), []string{". ./testdata"}) {
 		t.Errorf("stdout %q, runs %v: a root testdata package should run", stdout, r.tier.testRuns())
+	}
+}
+
+// productionRun runs Run with NO Src injected, as the command does, over a fake
+// Exec that records every call and a ReadFile that records every name. git
+// ls-files answers from lists (keyed by the directory it ran in); every other
+// command succeeds with no output. It returns the code, stdout and stderr.
+type productionRun struct {
+	dirs      []string // the directory each git ls-files ran in
+	reads     []string // each name ReadFile was asked for
+	tierDirs  []string // the directory each go test ran in
+	gitExit   int
+	listings  map[string]string // dir -> git ls-files output
+	fileTexts map[string]string // name -> contents
+}
+
+func (p *productionRun) run(t *testing.T, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	logDir := t.TempDir()
+	var out, errw bytes.Buffer
+	code = Run(args, &out, &errw, Deps{
+		Host: Host{
+			Env: func(name string) string {
+				if name == EnvLogDir {
+					return logDir
+				}
+				return ""
+			},
+			MkdirTemp: func(string, string) (string, error) { return logDir, nil },
+			MkdirAll:  func(string, fs.FileMode) error { return nil },
+		},
+		Exec: func(dir string, env []string, argv []string, w io.Writer) int {
+			switch {
+			case argv[0] == "git" && argv[1] == "ls-files":
+				p.dirs = append(p.dirs, dir)
+				if p.gitExit != 0 {
+					fmt.Fprintln(w, "fatal: not a git repository")
+					return p.gitExit
+				}
+				fmt.Fprint(w, p.listings[dir])
+			case argv[0] == "gt":
+				p.tierDirs = append(p.tierDirs, dir)
+			}
+			return 0
+		},
+		ReadFile: func(name string) ([]byte, error) {
+			p.reads = append(p.reads, name)
+			text, ok := p.fileTexts[name]
+			if !ok {
+				return nil, fmt.Errorf("no such file: %s", name)
+			}
+			return []byte(text), nil
+		},
+		Environ: []string{"PATH=/fake/bin"},
+		Now:     func() time.Time { return time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC) },
+	})
+	return code, out.String(), errw.String()
+}
+
+// TestSweepProductionWiringHonorsRoot: with no Src injected, --root reaches the
+// git listing (the directory each ls-files ran in, a nested module's included)
+// and ReadFile (every name read is under the root), and the tier's go test runs
+// from the root.
+func TestSweepProductionWiringHonorsRoot(t *testing.T) {
+	t.Parallel()
+	const root = "/the/repo"
+	// The fake git answers by the directory it ran in: the root's one listing is
+	// the same for every pattern, so it holds the tagged test file and no go.mod.
+	p := &productionRun{
+		listings: map[string]string{root: "r/r_test.go\n"},
+		fileTexts: map[string]string{
+			root + "/r/r_test.go":   taggedTest,
+			root + "/" + dockerList: noDocker,
+		},
+	}
+	code, stdout, stderr := p.run(t, "--root", root, "integration")
+	if code != 0 || !strings.Contains(stdout, "integration GREEN passed=1") {
+		t.Fatalf("code %d, stdout %q, stderr %q, want GREEN passed=1", code, stdout, stderr)
+	}
+	if len(p.dirs) == 0 {
+		t.Fatal("git ls-files never ran")
+	}
+	for _, d := range p.dirs {
+		if d != root {
+			t.Errorf("git ls-files ran in %q, want the root %q", d, root)
+		}
+	}
+	if len(p.reads) == 0 {
+		t.Fatal("no file was read")
+	}
+	for _, name := range p.reads {
+		if !strings.HasPrefix(name, root+"/") {
+			t.Errorf("ReadFile(%q) is outside the root %q", name, root)
+		}
+	}
+	if !reflect.DeepEqual(p.tierDirs, []string{root}) {
+		t.Errorf("go test ran in %v, want only the root", p.tierDirs)
+	}
+}
+
+// TestSweepFailingGitListingIsRed: a root that is not a git repository (git
+// ls-files fails) is a RED integration tier with no names and exit 1, never an
+// empty list read as a clean tier, and the cause reaches stderr.
+func TestSweepFailingGitListingIsRed(t *testing.T) {
+	t.Parallel()
+	p := &productionRun{gitExit: 128}
+	code, stdout, stderr := p.run(t, "--root", "/not/a/repo", "integration")
+	if code != 1 || !strings.Contains(stdout, "integration RED passed=0 failed=0 skipped=0") {
+		t.Errorf("code %d, stdout %q, want exit 1 and a RED line with no counts", code, stdout)
+	}
+	if strings.Contains(stdout, "failed:") {
+		t.Errorf("stdout %q names failures; the tier ran nothing", stdout)
+	}
+	if !strings.Contains(stderr, "not a git repository") {
+		t.Errorf("stderr = %q, want the git error in it", stderr)
+	}
+	if len(p.tierDirs) != 0 {
+		t.Errorf("go test ran in %v, want nothing run", p.tierDirs)
 	}
 }
