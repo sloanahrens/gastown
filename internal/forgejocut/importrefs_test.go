@@ -37,6 +37,10 @@ func lsOK(out string) lsReply { return lsReply{out: out} }
 // lsFails is an ls-remote call that fails, so a test drives the read's refusal.
 func lsFails(err error) lsReply { return lsReply{err: err} }
 
+// errNoAncestor is git answering no: merge-base --is-ancestor exits 1, and the
+// plan reads an exit status, not any error, as a no rather than a failed read.
+var errNoAncestor error = exitStatus(1)
+
 // importGitFake is the Runner seam the import runs through. It answers each git
 // call from what a test staged and records every argv, so a test pins what ran as
 // well as what did not.
@@ -45,6 +49,7 @@ type importGitFake struct {
 	listed   map[string]int       // how many of each url's answers were handed out
 	ancestor map[string]bool      // "a>b" -> a is b or an ancestor of b
 	ahead    map[string]string    // "a>b" -> the commits b has that a lacks
+	peeled   map[string]string    // sha -> the commit it names; absent means itself
 	calls    [][]string
 	fail     map[string]error // subcommand -> the error its call answers with
 }
@@ -80,11 +85,17 @@ func (f *importGitFake) run(argv []string) ([]byte, error) {
 		return []byte(reply.out), reply.err
 	case "init", "fetch", "push":
 		return nil, nil
+	case "rev-parse":
+		sha := strings.TrimSuffix(rest[1], "^{commit}")
+		if commit, ok := f.peeled[sha]; ok {
+			return []byte(commit + "\n"), nil
+		}
+		return []byte(sha + "\n"), nil
 	case "merge-base":
 		if f.ancestor[rest[1]+">"+rest[2]] {
 			return nil, nil
 		}
-		return nil, errExit
+		return nil, errNoAncestor
 	case "rev-list":
 		a, b, ok := strings.Cut(rest[1], "..")
 		if !ok {
@@ -529,6 +540,13 @@ func TestImportFailedGitCallStops(t *testing.T) {
 			want:   "could not list the refs at",
 			reads:  4,
 			pushes: 1,
+		},
+		{
+			name:   "an ancestry read git cannot answer",
+			fail:   "merge-base",
+			want:   "ref plan: merge-base --is-ancestor",
+			reads:  2,
+			pushes: 0,
 		},
 		{
 			name:  "the scratch repository cannot be made",

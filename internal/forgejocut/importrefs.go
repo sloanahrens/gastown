@@ -64,7 +64,11 @@ func (c *Cutover) ImportRefs() error {
 		return err
 	}
 
-	specs, diverged := c.importSpecs(Plan(githubBefore, forgejoBefore, ExecRefGit{Dir: scratch, Run: c.git()}))
+	plan, err := Plan(githubBefore, forgejoBefore, ExecRefGit{Dir: scratch, Run: c.git()})
+	if err != nil {
+		return err
+	}
+	specs, diverged := c.importSpecs(plan)
 	if len(diverged) > 0 && !o.AcceptDiverged {
 		c.logf("ERROR: %d ref(s) have diverged between GitHub and Forgejo:", len(diverged))
 		for _, ref := range diverged {
@@ -100,9 +104,9 @@ func (c *Cutover) importSpecs(plan []Decision) (specs, diverged []string) {
 		c.logf("%s", d.Line)
 		switch d.Action {
 		case ActionPush, ActionFastForward:
-			specs = append(specs, d.Ref.Name+":"+d.Ref.Name)
+			specs = append(specs, d.Ref+":"+d.Ref)
 		case ActionDiverged:
-			diverged = append(diverged, d.Ref.Name)
+			diverged = append(diverged, d.Ref)
 		}
 	}
 	return specs, diverged
