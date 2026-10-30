@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/daemonimage"
@@ -668,5 +670,91 @@ func TestCutoverBudgetsAreTheStatedOnes(t *testing.T) {
 		if tc.got != tc.want {
 			t.Errorf("%s: budget is %s, want %s", tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+// A cutover to a target that is not a side, or of a town whose compose file is
+// missing, is refused before any command is built; the compose file is the
+// container side's.
+func TestCutoverRefusesBeforeBuildingAnything(t *testing.T) {
+	t.Parallel()
+	town := startGuardTown(t)
+	c, _ := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	c.plistPath = func() (string, error) { return plist, nil }
+
+	if _, _, err := c.cutoverSides(town); err == nil {
+		t.Error("cutoverSides accepted a container town with no compose file")
+	}
+	if _, err := c.cutoverTo(town, config.SupervisorContainer, QuietProbes{}, clockwork.NewFakeClockAt(quietTestEpoch), &bytes.Buffer{}); err == nil {
+		t.Error("cutoverTo accepted a container town with no compose file")
+	}
+}
+
+// runCutover refuses a relative town root (the quiet probes would read the hold
+// from the wrong directory), refuses an unknown target, and ends a town that is
+// never quiet at its budget on the fake clock with nothing run.
+func TestRunCutoverErrorPaths(t *testing.T) {
+	t.Parallel()
+	town := startGuardTown(t)
+	writeComposeFile(t, town)
+	c, calls := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
+	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	c.plistPath = func() (string, error) { return plist, nil }
+	clk := autoClock{clockwork.NewFakeClockAt(quietTestEpoch)}
+	// The hold file is absent, so the town is never quiet.
+	noHold := QuietProbeDeps{Stat: func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }}
+
+	if err := runCutover(context.Background(), &bytes.Buffer{}, "relative/town", config.SupervisorContainer, c, clk, noHold); err == nil || !strings.Contains(err.Error(), "absolute town root") {
+		t.Errorf("runCutover on a relative town root = %v, want the absolute-root refusal", err)
+	}
+	if err := runCutover(context.Background(), &bytes.Buffer{}, town, "systemd", c, clk, noHold); err == nil || !strings.Contains(err.Error(), "--to must be") {
+		t.Errorf("runCutover on an unknown target = %v, want the target refusal", err)
+	}
+	err := runCutover(context.Background(), &bytes.Buffer{}, town, config.SupervisorContainer, c, clk, noHold)
+	if err == nil || !strings.Contains(err.Error(), "the dispatch hold is not on") {
+		t.Errorf("runCutover on a town that is never quiet = %v, want the dispatch hold named", err)
+	}
+	if len(calls.argv) != 0 {
+		t.Errorf("a cutover that never found a quiet town ran %v", calls.argv)
+	}
+}
+
+// The command reports a town it cannot find, passes a cutover's error through,
+// and prints the done line only on success.
+func TestCutoverRunE(t *testing.T) {
+	t.Parallel()
+	ok := func(context.Context, io.Writer, string, string) error { return nil }
+	boom := errors.New("cutover failed")
+	cases := []struct {
+		name    string
+		find    func() (string, error)
+		cutover func(context.Context, io.Writer, string, string) error
+		wantErr string
+		wantOut bool
+	}{
+		{"no town", func() (string, error) { return "", errors.New("no town") }, ok, "not in a Gas Town workspace", false},
+		{"the cutover fails", func() (string, error) { return "/town", nil }, func(context.Context, io.Writer, string, string) error { return boom }, "cutover failed", false},
+		{"success", func() (string, error) { return "/town", nil }, ok, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// daemonCutoverTo is the flag's variable, so these do not run in
+			// parallel with each other.
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+			err := cutoverRunE(tc.find, tc.cutover)(cmd, nil)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("error = %v", err)
+			}
+			if got := strings.Contains(out.String(), "Cutover to"); got != tc.wantOut {
+				t.Errorf("done line printed = %v, want %v (output %q)", got, tc.wantOut, out.String())
+			}
+		})
 	}
 }

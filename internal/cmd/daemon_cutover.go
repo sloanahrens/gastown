@@ -390,23 +390,45 @@ func init() {
 }
 
 func runDaemonCutover(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	return cutoverRunE(workspace.FindFromCwdOrError, cutoverCommand)(cmd, args)
+}
+
+// cutoverRunE is the command's RunE over its two seams, the town finder and the
+// cutover itself, so a test drives the command's own error and success paths
+// without a town on disk or a real daemon.
+func cutoverRunE(find func() (string, error), cutover func(ctx context.Context, out io.Writer, townRoot, to string) error) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		townRoot, err := find()
+		if err != nil {
+			return fmt.Errorf("not in a Gas Town workspace: %w", err)
+		}
+		if err := cutover(cmd.Context(), cmd.OutOrStdout(), townRoot, daemonCutoverTo); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s Cutover to %s done.\n", style.Bold.Render("✓"), daemonCutoverTo)
+		return nil
 	}
-	quiet, err := NewQuietProbes(townRoot, QuietProbeDeps{})
+}
+
+// cutoverCommand runs one cutover of townRoot's daemon to the side named to on
+// the real control, with the host's quiet probes read through deps and the
+// waits on clk.
+func cutoverCommand(ctx context.Context, out io.Writer, townRoot, to string) error {
+	return runCutover(ctx, out, townRoot, to, realDaemonControl(), clockwork.NewRealClock(), QuietProbeDeps{})
+}
+
+// runCutover is cutoverCommand over its seams: the control, the clock and the
+// quiet probes' host reads.
+func runCutover(ctx context.Context, out io.Writer, townRoot, to string, c *daemonControl, clk clockwork.Clock, deps QuietProbeDeps) error {
+	quiet, err := NewQuietProbes(townRoot, deps)
 	if err != nil {
 		return err
 	}
-	p, err := realDaemonControl().cutoverTo(townRoot, daemonCutoverTo, quiet, clockwork.NewRealClock(), cmd.OutOrStdout())
+	p, err := c.cutoverTo(townRoot, to, quiet, clk, out)
 	if err != nil {
 		return err
 	}
-	if err := p.execute(cmd.Context()); err != nil {
-		return err
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "%s Cutover to %s done.\n", style.Bold.Render("✓"), p.to.name)
-	return nil
+	return p.execute(ctx)
 }
 
 // containerDeploySupervisor is the production daemonimage.Supervisor: the
