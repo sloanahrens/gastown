@@ -3289,7 +3289,7 @@ func (h *host) createRemoteDatabase(config *Config, ident string) error {
 }
 
 // remoteDoltTimeout bounds one statement against a remote server: a host on
-// the network either answers a catalogue read or a CREATE DATABASE in this
+// the network either answers a catalog read or a CREATE DATABASE in this
 // long, and the install reports the host and port rather than hanging.
 const remoteDoltTimeout = 10 * time.Second
 

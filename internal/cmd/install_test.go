@@ -59,7 +59,7 @@ func TestBuildBdInitOptions_ConfigYAMLWithoutTownJSONEndpoint(t *testing.T) {
 }
 
 // bd's own default host is 127.0.0.1, so a remote endpoint has to name its
-// host or bd init would initialise a database on this machine instead
+// host or bd init would initialize a database on this machine instead
 // (gt-q0ppq).
 func TestBuildBdInitOptions_RemoteEndpointNamesTheServer(t *testing.T) {
 	t.Parallel()
@@ -520,7 +520,7 @@ func (r *recordingSteps) steps() installSteps {
 }
 
 // An install with a Dolt host writes that endpoint to town.json, creates the hq
-// database on that server, and initialises the town's beads against it without
+// database on that server, and initializes the town's beads against it without
 // starting a local Dolt: a local server leaves .dolt-data/ behind (gt-q0ppq).
 func TestRunInstallDoltHostCreatesHQOnTheServer(t *testing.T) {
 	t.Parallel()
@@ -561,7 +561,7 @@ func TestRunInstallDoltHostCreatesHQOnTheServer(t *testing.T) {
 				t.Errorf("town beads configured at %q, want %q", rec.townConfigs, hqPath)
 			}
 			if rec.beadChecks != 1 {
-				t.Errorf("the install checked for bd %d time(s), want once: bd initialises the beads on the server", rec.beadChecks)
+				t.Errorf("the install checked for bd %d time(s), want once: bd initializes the beads on the server", rec.beadChecks)
 			}
 			if rec.starts != 0 {
 				t.Errorf("the install started %d local Dolt servers, want none", rec.starts)
@@ -574,7 +574,7 @@ func TestRunInstallDoltHostCreatesHQOnTheServer(t *testing.T) {
 }
 
 // A server that cannot create the hq database fails the install with the host
-// and port named, and the town's beads are never initialised against it
+// and port named, and the town's beads are never initialized against it
 // (gt-q0ppq).
 func TestRunInstallDoltHostNamesAnUnreachableServer(t *testing.T) {
 	t.Parallel()
@@ -592,7 +592,7 @@ func TestRunInstallDoltHostNamesAnUnreachableServer(t *testing.T) {
 		}
 	}
 	if len(rec.townInits) != 0 {
-		t.Errorf("the install initialised the town's beads at %q after the server refused, want none", rec.townInits)
+		t.Errorf("the install initialized the town's beads at %q after the server refused, want none", rec.townInits)
 	}
 }
 

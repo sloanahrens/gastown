@@ -255,7 +255,7 @@ func runInstallWith(opts installOptions, args []string) error {
 	}
 
 	// Ensure beads (bd) is available before proceeding. bd runs on this
-	// machine even when the server is elsewhere: it is what initialises the hq
+	// machine even when the server is elsewhere: it is what initializes the hq
 	// database's beads on the server. A local Dolt — its binary, identity and
 	// port — belongs to the machine that serves it (gt-q0ppq).
 	if !opts.noBeads {
@@ -449,7 +449,7 @@ func runInstallWith(opts installOptions, args []string) error {
 	// Rig beads are separate and have their own prefixes.
 	if remoteDolt {
 		// The hq database lives on the server: create it there over SQL, then
-		// initialise the town's beads against it. Neither step makes a local
+		// initialize the town's beads against it. Neither step makes a local
 		// Dolt (gt-q0ppq).
 		res, err := steps.initRig(absPath, "hq")
 		if err != nil {
@@ -958,7 +958,7 @@ func initTownBeads(townPath string) error {
 // configureTownBeads turns on the two bd settings the town needs: explicit
 // routing (gt doctor requires it) and the events journal (gt tail reads it,
 // gt-7iwy0.7). Both are reported, not fatal: the database is already
-// initialised, and gt doctor names either one when it is off.
+// initialized, and gt doctor names either one when it is off.
 func configureTownBeads(townPath string) {
 	townBd := beads.NewPlain(townPath, withBeadsDirEnv(filepath.Join(townPath, ".beads")))
 	if err := townBd.ConfigSet("routing.mode", "explicit"); err != nil {
