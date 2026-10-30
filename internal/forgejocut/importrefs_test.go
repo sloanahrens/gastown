@@ -24,19 +24,32 @@ func lsAnswer(entries ...string) string {
 	return strings.Join(entries, "\n") + "\n"
 }
 
+// lsReply is one staged ls-remote answer: an output, or the error the call
+// fails with.
+type lsReply struct {
+	out string
+	err error
+}
+
+// lsOK is an ls-remote answer the call succeeds with.
+func lsOK(out string) lsReply { return lsReply{out: out} }
+
+// lsFails is an ls-remote call that fails, so a test drives the read's refusal.
+func lsFails(err error) lsReply { return lsReply{err: err} }
+
 // importGitFake is the Runner seam the import runs through. It answers each git
 // call from what a test staged and records every argv, so a test pins what ran as
 // well as what did not.
 type importGitFake struct {
-	listings map[string][]string // url -> its ls-remote answers, in call order
-	listed   map[string]int      // how many of each url's answers were handed out
-	ancestor map[string]bool     // "a>b" -> a is b or an ancestor of b
-	ahead    map[string]string   // "a>b" -> the commits b has that a lacks
+	listings map[string][]lsReply // url -> its ls-remote answers, in call order
+	listed   map[string]int       // how many of each url's answers were handed out
+	ancestor map[string]bool      // "a>b" -> a is b or an ancestor of b
+	ahead    map[string]string    // "a>b" -> the commits b has that a lacks
 	calls    [][]string
 	fail     map[string]error // subcommand -> the error its call answers with
 }
 
-func newImportGitFake(listings map[string][]string) *importGitFake {
+func newImportGitFake(listings map[string][]lsReply) *importGitFake {
 	return &importGitFake{listings: listings, listed: make(map[string]int)}
 }
 
@@ -62,9 +75,9 @@ func (f *importGitFake) run(argv []string) ([]byte, error) {
 		if len(answers) == 0 {
 			return nil, fmt.Errorf("no listing staged for %s", url)
 		}
-		answer := answers[min(f.listed[url], len(answers)-1)]
+		reply := answers[min(f.listed[url], len(answers)-1)]
 		f.listed[url]++
-		return []byte(answer), nil
+		return []byte(reply.out), reply.err
 	case "init", "fetch", "push":
 		return nil, nil
 	case "merge-base":
@@ -133,31 +146,46 @@ func newImportCutover(t *testing.T, git *importGitFake, opts Options) (*Cutover,
 	}, logs
 }
 
-// convergedListings are the answers a run needs for the plan in
-// TestImportNeverForces, before and after its push.
-func convergedListings(opts Options) map[string][]string {
+// importAnswers are the four listings one run reads: GitHub and the admin base
+// before the plan, then both again for the final comparison.
+type importAnswers struct {
+	github, forgejo, githubAfter, forgejoAfter string
+}
+
+// stagedAnswers is a rig whose import creates feature and fast-forwards main,
+// beside a ref to keep and a ref both sides hold.
+func stagedAnswers() importAnswers {
 	github := lsAnswer(
 		shaMiddle+" refs/heads/stable",
 		shaTip+" refs/heads/feature",
 		shaTip+" refs/heads/main",
 		shaSide+" refs/tags/v1",
 	)
-	forgejo := lsAnswer(
-		shaMiddle+" refs/heads/main",
-		shaTip+" refs/heads/stable",
-		shaSide+" refs/tags/v1",
-		shaTip+" refs/heads/retired",
-	)
-	imported := lsAnswer(
-		shaTip+" refs/heads/feature",
-		shaTip+" refs/heads/main",
-		shaTip+" refs/heads/retired",
-		shaTip+" refs/heads/stable",
-		shaSide+" refs/tags/v1",
-	)
-	return map[string][]string{
-		opts.GitHubURL:   {github, github},
-		opts.AdminGitURL: {forgejo, imported},
+	return importAnswers{
+		github: github,
+		forgejo: lsAnswer(
+			shaMiddle+" refs/heads/main",
+			shaTip+" refs/heads/stable",
+			shaSide+" refs/tags/v1",
+			shaTip+" refs/heads/retired",
+		),
+		githubAfter: github,
+		forgejoAfter: lsAnswer(
+			shaTip+" refs/heads/feature",
+			shaTip+" refs/heads/main",
+			shaTip+" refs/heads/retired",
+			shaTip+" refs/heads/stable",
+			shaSide+" refs/tags/v1",
+		),
+	}
+}
+
+// convergedListings stages stagedAnswers as the fake's per-url answers.
+func convergedListings(opts Options) map[string][]lsReply {
+	a := stagedAnswers()
+	return map[string][]lsReply{
+		opts.GitHubURL:   {lsOK(a.github), lsOK(a.githubAfter)},
+		opts.AdminGitURL: {lsOK(a.forgejo), lsOK(a.forgejoAfter)},
 	}
 }
 
@@ -227,17 +255,17 @@ func TestImportDivergedStopsOrSkips(t *testing.T) {
 			t.Parallel()
 			opts := importOpts()
 			opts.AcceptDiverged = tt.accept
-			git := newImportGitFake(map[string][]string{
-				opts.GitHubURL: {lsAnswer(
+			git := newImportGitFake(map[string][]lsReply{
+				opts.GitHubURL: {lsOK(lsAnswer(
 					shaSide+" refs/heads/diverge",
 					shaTip+" refs/heads/feature",
-				)},
+				))},
 				opts.AdminGitURL: {
-					lsAnswer(shaTip + " refs/heads/diverge"),
-					lsAnswer(
+					lsOK(lsAnswer(shaTip + " refs/heads/diverge")),
+					lsOK(lsAnswer(
 						shaTip+" refs/heads/diverge",
 						shaTip+" refs/heads/feature",
-					),
+					)),
 				},
 			})
 			c, logs := newImportCutover(t, git, opts)
@@ -286,11 +314,11 @@ func TestImportDivergedStopsOrSkips(t *testing.T) {
 func TestImportIdempotent(t *testing.T) {
 	t.Parallel()
 	opts := importOpts()
-	git := newImportGitFake(map[string][]string{
-		opts.GitHubURL: {lsAnswer(shaTip + " refs/heads/main")},
+	git := newImportGitFake(map[string][]lsReply{
+		opts.GitHubURL: {lsOK(lsAnswer(shaTip + " refs/heads/main"))},
 		opts.AdminGitURL: {
-			lsAnswer(shaMiddle + " refs/heads/main"),
-			lsAnswer(shaTip + " refs/heads/main"),
+			lsOK(lsAnswer(shaMiddle + " refs/heads/main")),
+			lsOK(lsAnswer(shaTip + " refs/heads/main")),
 		},
 	})
 	git.ancestor = map[string]bool{shaMiddle + ">" + shaTip: true}
@@ -322,12 +350,12 @@ func TestImportDryRunPushesNothingAndPrintsThePlan(t *testing.T) {
 	t.Parallel()
 	opts := importOpts()
 	opts.DryRun = true
-	git := newImportGitFake(map[string][]string{
-		opts.GitHubURL: {lsAnswer(
+	git := newImportGitFake(map[string][]lsReply{
+		opts.GitHubURL: {lsOK(lsAnswer(
 			shaTip+" refs/heads/feature",
 			shaTip+" refs/heads/main",
-		)},
-		opts.AdminGitURL: {lsAnswer(shaMiddle + " refs/heads/main")},
+		))},
+		opts.AdminGitURL: {lsOK(lsAnswer(shaMiddle + " refs/heads/main"))},
 	})
 	git.ancestor = map[string]bool{shaMiddle + ">" + shaTip: true}
 	c, logs := newImportCutover(t, git, opts)
@@ -417,9 +445,9 @@ func TestImportFinalComparison(t *testing.T) {
 			opts := importOpts()
 			opts.AcceptDiverged = true
 			github := lsAnswer(shaTip+" refs/heads/main", shaSide+" refs/tags/v1")
-			git := newImportGitFake(map[string][]string{
-				opts.GitHubURL:   {github, github},
-				opts.AdminGitURL: {lsAnswer(shaTip + " refs/heads/main"), tt.imported},
+			git := newImportGitFake(map[string][]lsReply{
+				opts.GitHubURL:   {lsOK(github), lsOK(github)},
+				opts.AdminGitURL: {lsOK(lsAnswer(shaTip + " refs/heads/main")), lsOK(tt.imported)},
 			})
 			c, logs := newImportCutover(t, git, opts)
 
@@ -451,40 +479,126 @@ func TestImportFinalComparison(t *testing.T) {
 // the run instead of reading as an empty plan. Dropping a wrap turns the case red.
 func TestImportFailedGitCallStops(t *testing.T) {
 	t.Parallel()
+	a := stagedAnswers()
+	opts := importOpts()
 	tests := []struct {
-		name  string
-		fail  string
-		want  string
-		reads int // listings the run makes before it stops
+		name     string
+		listings map[string][]lsReply // nil stages the converged run
+		fail     string               // the subcommand that fails, "" for none
+		want     string
+		reads    int // listings the run makes before it stops
+		pushes   int // pushes the run makes before it stops
 	}{
-		{name: "the GitHub listing fails", fail: "ls-remote", want: "could not list the refs at", reads: 1},
-		{name: "the scratch repository cannot be made", fail: "init", want: "could not make the scratch repository", reads: 2},
-		{name: "a fetch fails", fail: "fetch", want: "could not fetch", reads: 2},
-		{name: "the push fails", fail: "push", want: "the push of 2 ref(s) to the admin base failed", reads: 2},
+		{
+			name:     "the GitHub listing fails",
+			listings: map[string][]lsReply{opts.GitHubURL: {lsFails(errExit)}},
+			want:     "could not list the refs at",
+			reads:    1,
+		},
+		{
+			name: "the admin base's listing fails",
+			listings: map[string][]lsReply{
+				opts.GitHubURL:   {lsOK(a.github)},
+				opts.AdminGitURL: {lsFails(errExit)},
+			},
+			want:  "could not list the refs at",
+			reads: 2,
+		},
+		{
+			name:     "a listing that is not ref pairs is refused",
+			listings: map[string][]lsReply{opts.GitHubURL: {lsOK("refs/heads/main\n")}},
+			want:     "could not read the ref listing at",
+			reads:    1,
+		},
+		{
+			name: "the GitHub listing after the push fails",
+			listings: map[string][]lsReply{
+				opts.GitHubURL:   {lsOK(a.github), lsFails(errExit)},
+				opts.AdminGitURL: {lsOK(a.forgejo), lsOK(a.forgejoAfter)},
+			},
+			want:   "could not list the refs at",
+			reads:  3,
+			pushes: 1,
+		},
+		{
+			name: "the admin base's listing after the push fails",
+			listings: map[string][]lsReply{
+				opts.GitHubURL:   {lsOK(a.github), lsOK(a.githubAfter)},
+				opts.AdminGitURL: {lsOK(a.forgejo), lsFails(errExit)},
+			},
+			want:   "could not list the refs at",
+			reads:  4,
+			pushes: 1,
+		},
+		{
+			name:  "the scratch repository cannot be made",
+			fail:  "init",
+			want:  "could not make the scratch repository",
+			reads: 2,
+		},
+		{
+			name:  "a fetch fails",
+			fail:  "fetch",
+			want:  "could not fetch",
+			reads: 2,
+		},
+		{
+			name:   "the push fails",
+			fail:   "push",
+			want:   "the push of 2 ref(s) to the admin base failed",
+			reads:  2,
+			pushes: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			opts := importOpts()
-			git := newImportGitFake(convergedListings(opts))
+			listings := tt.listings
+			if listings == nil {
+				listings = convergedListings(opts)
+			}
+			git := newImportGitFake(listings)
 			git.ancestor = map[string]bool{shaMiddle + ">" + shaTip: true}
 			git.ahead = map[string]string{shaMiddle + ">" + shaTip: "2"}
-			git.fail = map[string]error{tt.fail: errExit}
+			if tt.fail != "" {
+				git.fail = map[string]error{tt.fail: errExit}
+			}
 			c, logs := newImportCutover(t, git, opts)
 
 			err := c.ImportRefs()
 			if err == nil {
-				t.Fatalf("a failed %s call did not stop the import; logs %q", tt.fail, *logs)
+				t.Fatalf("the failed call did not stop the import; logs %q", *logs)
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error %q does not carry %q", err, tt.want)
 			}
-			if fail := tt.fail; fail != "push" && git.count("push") != 0 {
-				t.Fatalf("the run pushed after the %s call failed", fail)
+			if got := git.count("push"); got != tt.pushes {
+				t.Fatalf("the run pushed %d time(s), want %d before it stopped", got, tt.pushes)
 			}
 			if got := git.count("ls-remote"); got != tt.reads {
 				t.Fatalf("the run read %d listings, want %d before it stopped", got, tt.reads)
 			}
 		})
+	}
+}
+
+// TestImportScratchDirFailureStops pins that a scratch directory that cannot be
+// made stops the run, rather than running git in a path that does not exist.
+func TestImportScratchDirFailureStops(t *testing.T) {
+	t.Parallel()
+	opts := importOpts()
+	git := newImportGitFake(convergedListings(opts))
+	c, logs := newImportCutover(t, git, opts)
+	c.MkdirTemp = func(_, _ string) (string, error) { return "", errExit }
+
+	err := c.ImportRefs()
+	if err == nil {
+		t.Fatalf("a scratch directory that cannot be made did not stop the import; logs %q", *logs)
+	}
+	if !strings.Contains(err.Error(), "could not make the scratch directory") {
+		t.Fatalf("error %q does not carry the refusal", err)
+	}
+	if got := git.count("init"); got != 0 {
+		t.Fatalf("the run made %d scratch repositories without a directory", got)
 	}
 }
