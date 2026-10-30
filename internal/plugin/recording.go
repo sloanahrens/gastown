@@ -56,7 +56,13 @@ type Recorder struct {
 // database, pinned so the receipts land in the town's ledger and nowhere the
 // prefix router might send them.
 func NewRecorder(townRoot string) *Recorder {
-	return &Recorder{bd: beads.NewPinned(beads.ResolveBeadsDir(townRoot))}
+	return NewRecorderOn(beads.NewPinned(beads.ResolveBeadsDir(townRoot)))
+}
+
+// NewRecorderOn returns a Recorder over an existing beads client, for a caller
+// that already resolved the store.
+func NewRecorderOn(client beads.Client) *Recorder {
+	return &Recorder{bd: client}
 }
 
 // RecordRun creates an ephemeral bead for a plugin run.

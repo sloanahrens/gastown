@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -378,5 +379,22 @@ func TestLoadRunLedgerSkipsUnlabelledRuns(t *testing.T) {
 	}
 	if got, err := ledger.Count("alpha", time.Hour); err != nil || got != 1 {
 		t.Errorf("Count(alpha, 1h) = %d, %v; want 1", got, err)
+	}
+}
+
+// failingClient is a beads client whose reads fail.
+type failingClient struct{ beads.Client }
+
+func (failingClient) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("bd: read failed")
+}
+
+// A failed read of the wisp ledger is returned, never read as a ledger with
+// no runs: an empty answer would open every cooldown gate it gates.
+func TestLoadRunLedgerReportsListFailure(t *testing.T) {
+	t.Parallel()
+	recorder := &Recorder{bd: failingClient{}}
+	if _, err := recorder.LoadRunLedger(time.Hour); err == nil {
+		t.Fatal("LoadRunLedger over a failing store returned no error, want the read's error")
 	}
 }

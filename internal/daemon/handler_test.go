@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/plugin"
 )
@@ -132,19 +135,34 @@ func writeTestCooldownScriptPlugin(t *testing.T, townRoot, name, duration string
 	}
 }
 
-// fakeRunSource is the tick's plugin run ledger: it hands back canned gate
-// answers and records the reads a tick made.
-type fakeRunSource struct {
-	loads   []time.Duration
-	ledger  *fakeRunLedger
-	loadErr error
+// countingClient counts the List calls a Recorder makes, so a test can price
+// a tick's ledger reads.
+type countingClient struct {
+	beads.Client
+	lists   int
+	cutoffs []time.Time
 }
 
-func (s *fakeRunSource) LoadRunLedger(since time.Duration) (pluginRunLedger, error) {
-	s.loads = append(s.loads, since)
-	if s.loadErr != nil {
-		return nil, s.loadErr
-	}
+func (c *countingClient) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	c.lists++
+	c.cutoffs = append(c.cutoffs, opts.CreatedAfter)
+	return c.Client.List(opts)
+}
+
+// failingClient is a beads client whose reads fail.
+type failingClient struct{ beads.Client }
+
+func (failingClient) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("bd: read failed")
+}
+
+// fakeRunSource is the tick's plugin run ledger with canned gate answers, for
+// the failure a real ledger cannot produce: a Count error.
+type fakeRunSource struct {
+	ledger *fakeRunLedger
+}
+
+func (s *fakeRunSource) LoadRunLedger(time.Duration) (pluginRunLedger, error) {
 	return s.ledger, nil
 }
 
@@ -190,36 +208,40 @@ func TestDispatchPlugins_OneLedgerReadAnswersEveryCooldownGate(t *testing.T) {
 		cancel() // the daemon stopped mid-run: an abort writes no run record
 		return cliReply{code: 1}
 	})
-	source := &fakeRunSource{ledger: &fakeRunLedger{}}
+	runs := &countingClient{Client: beadsfake.New()}
 	d := &Daemon{
 		config:     &Config{TownRoot: townRoot},
 		logger:     log.New(logs, "", 0),
 		ctx:        ctx,
 		execCmd:    bash.run,
-		pluginRuns: source,
+		pluginRuns: recorderSource{plugin.NewRecorderOn(runs)},
 	}
 
 	writeTestCooldownScriptPlugin(t, townRoot, "gate-30m", "30m")
 	writeTestCooldownScriptPlugin(t, townRoot, "gate-1h", "1h")
 	writeTestCooldownScriptPlugin(t, townRoot, "gate-2h", "2h")
 
+	before := time.Now()
 	d.dispatchPlugins(nil)
 	d.scripts.wait()
 
-	if want := []time.Duration{2 * time.Hour}; !slices.Equal(source.loads, want) {
-		t.Fatalf("tick loaded the ledger with %v, want one read at %v: the longest window answers every shorter one",
-			source.loads, want)
+	if runs.lists != 1 {
+		t.Errorf("%d ledger list(s) for 3 gated plugins, want 1", runs.lists)
+	}
+	if len(runs.cutoffs) != 1 {
+		t.Fatalf("%d ledger reads, want 1", len(runs.cutoffs))
+	}
+	if want := before.Add(-2 * time.Hour); runs.cutoffs[0].Before(want.Add(-time.Minute)) || runs.cutoffs[0].After(want.Add(time.Minute)) {
+		t.Errorf("ledger read back to %s, want the longest gate's 2h before the tick (%s)", runs.cutoffs[0], want)
 	}
 	if ran := startedPlugins(bash.recorded()); !slices.Equal(ran, []string{"gate-1h", "gate-2h", "gate-30m"}) {
 		t.Errorf("started %v, want all three gate-open plugins:\n%s", ran, logs.String())
 	}
 }
 
-// A gate the ledger answers with a run in its window holds the plugin, and a
-// gate the ledger cannot answer holds it too: a cooldown whose state is
-// unknown is not known to be open. A cooldown gate with no duration reads
-// nothing and runs.
-func TestDispatchPlugins_CooldownGateHoldsPluginAndUnreadableGateFailsClosed(t *testing.T) {
+// A plugin with a run inside its cooldown window is held for this tick; the
+// plugin with an empty ledger runs.
+func TestDispatchPlugins_CooldownGateHoldsPluginWithARecentRun(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	logs := &lockedBuffer{}
@@ -229,10 +251,43 @@ func TestDispatchPlugins_CooldownGateHoldsPluginAndUnreadableGateFailsClosed(t *
 		cancel()
 		return cliReply{code: 1}
 	})
-	source := &fakeRunSource{ledger: &fakeRunLedger{
-		counts: map[string]int{"cooling": 1},
-		errs:   map[string]error{"broken": errors.New("bd: read failed")},
-	}}
+	clock := clockwork.NewFakeClockAt(time.Now().UTC())
+	recorder := plugin.NewRecorderOn(beadsfake.New(beadsfake.WithClock(clock)))
+	if _, err := recorder.RecordRun(plugin.PluginRunRecord{PluginName: "cooling", Result: plugin.ResultSuccess}); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+	d := &Daemon{
+		config:     &Config{TownRoot: townRoot},
+		logger:     log.New(logs, "", 0),
+		ctx:        ctx,
+		execCmd:    bash.run,
+		pluginRuns: recorderSource{recorder},
+	}
+
+	writeTestCooldownScriptPlugin(t, townRoot, "cooling", "1h")
+	writeTestCooldownScriptPlugin(t, townRoot, "due", "1h")
+
+	d.dispatchPlugins(nil)
+	d.scripts.wait()
+
+	if ran, want := startedPlugins(bash.recorded()), []string{"due"}; !slices.Equal(ran, want) {
+		t.Errorf("started %v, want %v: cooling ran inside its window, due did not", ran, want)
+	}
+}
+
+// A gate the ledger cannot answer holds its plugin too: a cooldown whose
+// state is unknown is not known to be open.
+func TestDispatchPlugins_UnreadableGateFailsClosed(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	logs := &lockedBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bash := newFakeCLIFor(func(cliCall) cliReply {
+		cancel()
+		return cliReply{code: 1}
+	})
+	source := &fakeRunSource{ledger: &fakeRunLedger{errs: map[string]error{"broken": errors.New("bd: read failed")}}}
 	d := &Daemon{
 		config:     &Config{TownRoot: townRoot},
 		logger:     log.New(logs, "", 0),
@@ -241,15 +296,13 @@ func TestDispatchPlugins_CooldownGateHoldsPluginAndUnreadableGateFailsClosed(t *
 		pluginRuns: source,
 	}
 
-	writeTestCooldownScriptPlugin(t, townRoot, "cooling", "1h")
 	writeTestCooldownScriptPlugin(t, townRoot, "broken", "1h")
 	writeTestCooldownScriptPlugin(t, townRoot, "due", "1h")
-	writeTestScriptPlugin(t, townRoot, "always") // cooldown gate, no duration: nothing to gate on
 
 	d.dispatchPlugins(nil)
 	d.scripts.wait()
 
-	if ran, want := startedPlugins(bash.recorded()), []string{"always", "due"}; !slices.Equal(ran, want) {
+	if ran, want := startedPlugins(bash.recorded()), []string{"due"}; !slices.Equal(ran, want) {
 		t.Errorf("started %v, want %v:\n%s", ran, want, logs.String())
 	}
 	if !strings.Contains(logs.String(), "error checking cooldown for plugin broken") {
@@ -269,17 +322,16 @@ func TestDispatchPlugins_LedgerReadFailureSkipsGatedPlugins(t *testing.T) {
 		cancel()
 		return cliReply{code: 1}
 	})
-	source := &fakeRunSource{loadErr: errors.New("bd: connection refused")}
 	d := &Daemon{
 		config:     &Config{TownRoot: townRoot},
 		logger:     log.New(logs, "", 0),
 		ctx:        ctx,
 		execCmd:    bash.run,
-		pluginRuns: source,
+		pluginRuns: recorderSource{plugin.NewRecorderOn(failingClient{})},
 	}
 
 	writeTestCooldownScriptPlugin(t, townRoot, "gated", "1h")
-	writeTestScriptPlugin(t, townRoot, "always")
+	writeTestScriptPlugin(t, townRoot, "always") // cooldown gate, no duration: nothing to gate on
 
 	d.dispatchPlugins(nil)
 	d.scripts.wait()
