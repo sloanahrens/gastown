@@ -2548,7 +2548,7 @@ function costProviders(box, list, spendStale) {
     const cell = (text, cls) => tr.append(el("td", cls || "", text));
     cell(p.label || p.id || "–");
     cell(p.kind || "–");
-    cell(p.kind === "plan" ? (p.plan_pct == null ? "–" : Math.round(p.plan_pct) + "% of week") : money(p.balance), "n");
+    cell(p.kind === "plan" ? (p.plan_pct == null ? "–" : Math.round(p.plan_pct) + "% (wk)") : money(p.balance), "n");
     cell(money(p.today), "n");
     cell(money(p.yesterday), "n");
     cell(money(p.avg_7d), "n");
@@ -2571,7 +2571,7 @@ function costHeadline(list) {
   const parts = list.filter(p => p && typeof p === "object").map(p => {
     if (p.why) return (p.label || p.id) + " unavailable";
     const figure = p.kind === "plan"
-      ? (p.plan_pct == null ? null : Math.round(p.plan_pct) + "% of week")
+      ? (p.plan_pct == null ? null : Math.round(p.plan_pct) + "% (wk)")
       : (p.balance != null ? money(p.balance) : (p.today != null ? money(p.today) + " today" : null));
     return [p.label || p.id, figure, p.status_text].filter(Boolean).join(" ");
   });
@@ -3433,34 +3433,81 @@ function costJevFold(box, s) {
 
 // The om rework part of the Cost panel: what each review bar costs in rework,
 // from the landing worker's review log, for the last seven days and the seven
-// before them, in one table with a row per window and bar. A bead counts under
-// the bar in force at its first review in the window. A bar of 0 is a tree that
-// named none and reads "?". A read that failed is a named state, never an empty
-// week, and a window with no bars says so under the table. The om time column is
-// the mean of the landed beads' own totals, each the sum of every review that
-// bead had before it landed; a bar no bead has a time for draws a dash.
+// before them, in one table with a row per window and bar, folded closed like
+// its siblings with the latest window's share and loops out on the heading. A
+// bead counts under the bar in force at its first review in the window. A bar
+// of 0 is a tree that named none and reads "?". A row whose bar saw a single
+// review is not drawn: one review is 1/1 and 0%, which says nothing beside a
+// window that carries enough reviews to speak. A read that failed is a named
+// state, never an empty week, and a window with no bars says so under the
+// table. The om time column is the mean of the landed beads' own totals, each
+// the sum of every review that bead had before it landed; a bar no bead has a
+// time for draws a dash.
 function costRework(box, r) {
-  if (!r) { box.append(el("div", "empty", "om rework · reading…")); return; }
-  if (r.unavailable) { box.append(el("div", "badc", "om rework · review log unreadable")); return; }
+  const f = costFold(box, "cost.rework", "om rework", reworkLine(r));
+  if (!r) { f.body.append(el("div", "empty", "om rework · reading…")); return; }
+  if (r.unavailable) { f.body.append(el("div", "badc", "om rework · review log unreadable")); return; }
   const heads = [["Window"], ["Bar", 1], ["Reviews", 1], ["First try", 1], ["Rework", 1], ["Reviews per landed", 1], ["Mean om time", 1], ["Loops out", 1], ["Mean score", 1]];
-  if (r.om_unavailable) box.append(el("div", "badc", "om rework · om times unavailable: the daemon log could not be read"));
+  if (r.om_unavailable) f.body.append(el("div", "badc", "om rework · om times unavailable: the daemon log could not be read"));
   const rows = [], empty = [];
   for (const w of r.windows || []) {
-    const bars = w.bars || [];
-    if (!bars.length) { empty.push(w.name); continue; }
-    for (const b of bars) rows.push([
-      [w.name],
-      [b.bar ? b.bar.toFixed(2) : "?", "n"],
-      [String(b.reviews), "n"],
-      [b.first_try + "/" + b.beads, "n"],
-      [Math.round(100 * b.rejected / b.reviews) + "%", "n"],
-      [b.landed ? b.reviews_per_landed.toFixed(2) : "–", "n"],
-      [b.om_beads ? fmtMS(b.mean_om_secs) : "–", "n", omTimeHover(b)],
-      [String(b.loops_out), "n" + (b.loops_out ? " badc" : "")],
-      [b.mean_score.toFixed(2), "n"]]);
+    const bars = w.bars || [], name = reworkWindowLabel(w);
+    if (!bars.length) { empty.push(name); continue; }
+    for (const b of bars) {
+      if (!reworkRowDrawn(b)) continue;
+      rows.push([
+        [name],
+        [b.bar ? b.bar.toFixed(2) : "?", "n"],
+        [String(b.reviews), "n"],
+        [b.first_try + "/" + b.beads, "n"],
+        [Math.round(100 * b.rejected / b.reviews) + "%", "n"],
+        [b.landed ? b.reviews_per_landed.toFixed(2) : "–", "n"],
+        [b.om_beads ? fmtMS(b.mean_om_secs) : "–", "n", omTimeHover(b)],
+        [String(b.loops_out), "n" + (b.loops_out ? " badc" : "")],
+        [b.mean_score.toFixed(2), "n"]]);
+    }
   }
-  if (rows.length) box.append(el("h3", "sub", "om rework"), costTable(heads, rows));
-  for (const name of empty) box.append(el("div", "empty", name + ": no om reviews"));
+  if (rows.length) f.body.append(costTable(heads, rows));
+  for (const name of empty) f.body.append(el("div", "empty", name + ": no om reviews"));
+}
+
+// reworkRowDrawn says whether a window's bar gets a row: one review is noise
+// (1/1, 0%) beside the bars that carry enough reviews to say something.
+function reworkRowDrawn(b) { return Number(b && b.reviews) > 1; }
+
+// reworkLine is the om rework fold's closed line: the latest window's rework
+// share and loops out, so the heading says what rework cost before the fold is
+// opened. The share counts every review in the window, a dropped single-review
+// bar included, since the line is what the week cost rather than a sum of the
+// rows. A read that failed or has not arrived says so rather than reading as a
+// week with no rework.
+function reworkLine(r) {
+  if (!r) return "reading…";
+  if (r.unavailable) return "review log unreadable";
+  const w = (r.windows || [])[0];
+  if (!w) return "no om reviews";
+  const bars = w.bars || [];
+  const sum = k => bars.reduce((n, b) => n + (Number(b && b[k]) || 0), 0);
+  const reviews = sum("reviews");
+  if (!reviews) return "no om reviews, " + reworkWindowLabel(w);
+  const loops = sum("loops_out");
+  return reworkWindowLabel(w) + ": " + Math.round(100 * sum("rejected") / reviews) + "% rework · " + loops + (loops === 1 ? " loop out" : " loops out");
+}
+
+// reworkWindowLabel dates a window by its own span, since the reader names both
+// older stretches "the 7 days before" and two rows cannot share one name. A
+// window whose span is missing, unreadable or reversed keeps the reader's name
+// rather than draw a guess. now is the clock, in epoch milliseconds, so a caller
+// can pass a fixed time; it defaults to the page's own clock.
+function reworkWindowLabel(w, now) {
+  const from = Date.parse(String((w && w.from) || "").replace(/\.\d+/, ""));
+  const to = Date.parse(String((w && w.to) || "").replace(/\.\d+/, ""));
+  if (isNaN(from) || isNaN(to)) return (w && w.name) || "";
+  const day = 86400000, at = now == null ? Date.now() : now;
+  const toDays = Math.round((at - to) / day), fromDays = Math.round((at - from) / day);
+  if (fromDays <= toDays) return (w && w.name) || "";
+  if (toDays <= 0) return fromDays > 0 ? "last " + fromDays + " days" : ((w && w.name) || "");
+  return toDays + "-" + fromDays + " days ago";
 }
 
 // omTimeHover is what the Mean om time cell says behind the figure: how many
@@ -4154,27 +4201,25 @@ function costChartFold(box, kind, chart, providers) {
 // renderCost draws the Cost panel. The table draws even without a spend report,
 // since its rows come from the other readers too. It sits outside the part a
 // stale spend read greys, so only the DeepSeek row, whose money that read feeds,
-// greys inside the table; the Claude and Jev rows stay clear. The charts stay in
-// the greyed part.
+// greys inside the table; the Claude and Jev rows stay clear. The GCP budget
+// line goes directly under the table, above the folded spend part, and the
+// charts stay in the greyed part.
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
   note.className = "r"; note.textContent = ""; note.title = "";
   const d = s.spend, u = s.usage, r = readOf(s, "spend");
   costProviders(box, s.cost_providers, !!(r && r.stale));
+  costGCP(box, s.cloud);
   const spendBox = el("div", "spendpart");
   box.append(spendBox);
   paintsRead(spendBox, note, r);
   // A usage scan that has not answered yet is reading, not missing.
   if (!d) spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + (u ? "" : "; usage still reading…")));
-  if (!d && !u) {
-    costGCP(box, s.cloud);
-    return;
-  }
+  if (!d && !u) return;
   const charts = s.cost_charts || {};
   costChartFold(spendBox, "daily", charts.daily, s.cost_providers);
   costChartFold(spendBox, "hourly", charts.hourly, s.cost_providers);
-  costGCP(box, s.cloud);
   const usage = costUsage(box, u, s);
   costJevFold(box, s);
   costRework(box, s.rework);

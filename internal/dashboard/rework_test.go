@@ -143,6 +143,39 @@ func TestAggregateReworkWindowEdges(t *testing.T) {
 	}
 }
 
+// Each window reaches the page with its own span under the keys the page dates
+// it by, since the reader names both older stretches "the 7 days before" and the
+// page can only tell them apart from from/to.
+func TestReworkWindowsCarryTheirSpan(t *testing.T) {
+	t.Parallel()
+
+	raw, err := json.Marshal(AggregateRework(nil, reworkNow))
+	if err != nil {
+		t.Fatalf("marshalling the table: %v", err)
+	}
+	var payload struct {
+		Windows []map[string]any `json:"windows"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("reading the table: %v", err)
+	}
+	want := []struct{ from, to string }{
+		{"2026-10-07T12:00:00Z", "2026-10-14T12:00:00Z"},
+		{"2026-09-30T12:00:00Z", "2026-10-07T12:00:00Z"},
+	}
+	if len(payload.Windows) != len(want) {
+		t.Fatalf("payload = %s, want %d windows", raw, len(want))
+	}
+	for i, w := range want {
+		if got := payload.Windows[i]["from"]; got != w.from {
+			t.Errorf("window %d from = %v, want %s", i, got, w.from)
+		}
+		if got := payload.Windows[i]["to"]; got != w.to {
+			t.Errorf("window %d to = %v, want %s", i, got, w.to)
+		}
+	}
+}
+
 // The state the page reads carries the table, and a read that failed reaches it
 // as itself.
 func TestReworkReachesTheAPI(t *testing.T) {

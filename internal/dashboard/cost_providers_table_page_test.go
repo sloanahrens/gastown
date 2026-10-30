@@ -231,7 +231,7 @@ func TestCostProvidersTableDrawsOneRowPerProviderWithNineColumns(t *testing.T) {
 	}
 	wantRows := [][]string{
 		{"DeepSeek", "cash", "$27.45", "$1.20", "$3.40", "$2.50", "$0.05", "$0.10", "3.0d runway"},
-		{"Claude", "plan", "6% of week", "$0.80", "$1.10", "$0.90", "$0.02", "$0.03", "limit in 5.7d"},
+		{"Claude", "plan", "6% (wk)", "$0.80", "$1.10", "$0.90", "$0.02", "$0.03", "limit in 5.7d"},
 		{"Jev", "cash", "–", "$0.50", "–", "–", "–", "$0.02", "–"},
 	}
 	for i, want := range wantRows {
@@ -809,7 +809,7 @@ func TestCostHeaderSummaryIsBuiltFromTheProvidersArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the header summary: %v", err)
 	}
-	if want := "DeepSeek $27.45 3.0d runway · Claude 6% of week limit in 5.7d"; v.String() != want {
+	if want := "DeepSeek $27.45 3.0d runway · Claude 6% (wk) limit in 5.7d"; v.String() != want {
 		t.Errorf("the header summary is %q, want %q", v.String(), want)
 	}
 }
@@ -852,7 +852,9 @@ func TestCostHeaderShowsItsSummaryWhenClosed(t *testing.T) {
 
 // The page no longer draws the markup the table replaces: the DeepSeek tiles and
 // prose, the Claude headline and plan line, the Jev prose line, and the limit
-// label over the chart.
+// label over the chart. Where the table and the budget line sit in the panel is
+// asserted on the drawn panel by TestCostPanelDrawsGCPUnderTheProviderRows,
+// which reads the rendered order rather than renderCost's source text.
 func TestCostPageDropsTheMarkupTheTableReplaces(t *testing.T) {
 	t.Parallel()
 
@@ -865,14 +867,6 @@ func TestCostPageDropsTheMarkupTheTableReplaces(t *testing.T) {
 		if strings.Contains(page, gone) {
 			t.Errorf("index.html still carries %q, which the providers table replaces", gone)
 		}
-	}
-	cost := pageFunc(t, "renderCost")
-	if i, j := strings.Index(cost, "costProviders("), strings.Index(cost, "costChartFold(spendBox, \"daily\""); i < 0 || j < 0 || i > j {
-		t.Error("renderCost does not draw the providers table before the daily chart")
-	}
-	// The budget line is drawn last of the three in the full panel, so the last call.
-	if i, j := strings.Index(cost, "costChartFold(spendBox, \"hourly\""), strings.LastIndex(cost, "costGCP("); i < 0 || j < 0 || i > j {
-		t.Error("renderCost does not draw the hourly chart before the GCP budget line")
 	}
 }
 
