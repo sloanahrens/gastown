@@ -6,7 +6,8 @@ launchd. The design is in
 and the tasks in
 [plans/2026-10-28-daemon-container-plan.md](plans/2026-10-28-daemon-container-plan.md).
 This page is the operator's side: the ladder of live checks, one section per
-rung. Run a rung only after the one before it is recorded green.
+rung. Run a rung only after the one before it is recorded green. The list
+below is a summary; the design doc is authoritative.
 
 - L1, below: a scratch town's daemon starts in a container and stays healthy for
   30 minutes. Nothing in it touches the live daemon.
@@ -26,8 +27,8 @@ L1 proves four things, and only these four are the result:
 4. A daemon started by hand in the scratch town is refused.
 
 L1 runs beside the live daemon. Every `gt` command below runs with the scratch
-town as the working directory, never the live town, and no step runs a
-`gt daemon` command in the live town. Every Docker command names its context.
+town or `<scratch-parent>` (defined below) as the working directory, never the
+live town, and no step runs a `gt daemon` command in the live town. Every Docker command names its context.
 
 ### Before you start
 
@@ -38,8 +39,10 @@ town as the working directory, never the live town, and no step runs a
 
   | | value |
   |---|---|
-  | scratch root | an absolute directory under the operator's crew area that does not exist yet, for example `~/gt/gastown/crew/overseer-l1-town` (written `<scratch-root>` below) |
-  | compose file | an absolute path that is not inside the scratch root, for example `~/gt/gastown/crew/overseer-l1-compose/compose.yml` (`<compose-file>`) |
+  | live town | the live town's root, for example `~/gt` (written `<live-town>` below); it is only ever named to be refused, nothing is run or written in it |
+  | scratch root | an absolute directory that does not exist yet and is neither under `<live-town>` nor an ancestor of it, for example `~/gt-scratch.noindex/l1/town` beside the live tree (written `<scratch-root>`); the scratch render refuses a root under the live town root, so a directory in the crew area, which is under it, cannot be used |
+  | compose file | an absolute path that is not inside the scratch root and not under `<live-town>`, for example `~/gt-scratch.noindex/l1/compose.yml` (`<compose-file>`) |
+  | scratch parent | the scratch root's parent directory, `~/gt-scratch.noindex/l1` (`<scratch-parent>`); the commands that must not run from either town run from here |
   | project | `gt-scratch` |
   | container | `gt-scratch-daemon-1` |
   | image | `gt-daemon:<rev>`, where `<rev>` is the 7-or-more character commit the image is built from (`<rev>`) |
@@ -67,7 +70,7 @@ observed in a live run (see [What has not been observed](#what-has-not-been-obse
 **Step 1. Create the scratch root and its marker.**
 
 ```
-mkdir <scratch-root>
+mkdir -p <scratch-root> <scratch-parent>/build
 touch <scratch-root>/.gt-scratch-town
 ls -A <scratch-root>
 ```
@@ -81,7 +84,8 @@ Bead gt-nlpe6 adds `gt daemon image`; this step is written from that bead's
 text and must be checked against the landed command before it is run.
 
 ```
-gt daemon image --rev <rev> --out <absolute build dir> --gt-src <gt checkout> \
+cd <scratch-parent>
+gt daemon image --rev <rev> --out <scratch-parent>/build --gt-src <gt checkout> \
   --bd-src <beads checkout> --bd-commit <beads commit> --om-src <om checkout>
 ```
 
@@ -94,21 +98,28 @@ canonical `mayor/rig` clone.
 
 **Step 3. Render and start the scratch project. BLOCKED: the command does not
 exist yet.** Bead gt-e7wxs adds `gt daemon scratch render|up|down`, and
-depends on gt-nlpe6. Run these from the live town's directory, because the
-command takes the live town root from there to prove the scratch root is not
-inside it, and it runs nothing against the live daemon.
+depends on gt-nlpe6. It takes the live town's root as the required flag
+`--live-root <live-town>`, which it reads only to refuse a scratch root under
+or around it; it is not the working directory, and nothing is run or written in
+the live town. Run these from `<scratch-parent>`, a directory that is neither
+town.
 
 ```
-gt daemon scratch render --root <scratch-root> --compose-file <compose-file> \
-  --image gt-daemon:<rev> --project gt-scratch --container gt-scratch-daemon-1
-gt daemon scratch up --root <scratch-root> --compose-file <compose-file> \
-  --image gt-daemon:<rev> --project gt-scratch --container gt-scratch-daemon-1
+cd <scratch-parent>
+gt daemon scratch render --live-root <live-town> --root <scratch-root> \
+  --compose-file <compose-file> --image gt-daemon:<rev> \
+  --project gt-scratch --container gt-scratch-daemon-1
+gt daemon scratch up --live-root <live-town> --root <scratch-root> \
+  --compose-file <compose-file> --image gt-daemon:<rev> \
+  --project gt-scratch --container gt-scratch-daemon-1
 ```
 
-`render` prints the compose file and writes nothing. Expected in it: the
-container name `gt-scratch-daemon-1`, the command `["--scratch-town"]`, a
-`scratch-dolt` service with no published ports, and a bind mount of
-`<scratch-root>` and nothing of the live town. `up` writes `<compose-file>`
+`render` prints the compose file and writes nothing. Expected in it, by the
+names of the rendered golden `internal/templates/testdata/daemon-compose-scratch.golden.yml`:
+the three services `daemon`, `scratch-dind` and `scratch-dolt`, the container
+name `gt-scratch-daemon-1`, the command `["--scratch-town"]`, a `scratch-dolt`
+service with no published ports, and a bind mount of `<scratch-root>` and
+nothing of the live town. `up` writes `<compose-file>`
 and starts the project. If the daemon should run with the om token loaded, add
 `--om-token-file <path in the container>` to both commands.
 
@@ -118,8 +129,8 @@ After `up`:
 docker --context desktop-linux compose -p gt-scratch -f <compose-file> ps
 ```
 
-Expected: `daemon`, `scratch-dolt` and `scratch-dind` all running, the last two
-`healthy`. The daemon starts only after both are healthy. If `scratch-dolt`
+Expected: the golden's three services, `daemon`, `scratch-dind` and
+`scratch-dolt`, all running, the last two `healthy`. The daemon starts only after both are healthy. If `scratch-dolt`
 never becomes healthy, its healthcheck uses `bash` in the pinned image; run
 `docker --context desktop-linux compose -p gt-scratch -f <compose-file> exec scratch-dolt bash -c 'exec 3<>/dev/tcp/127.0.0.1/3306'`
 and stop here with its output if it fails.
@@ -220,10 +231,29 @@ refused before the guard (a message about the bd version or the town config,
 not `takeover window`), that does not show condition 4: note it and treat the
 condition as not met.
 
+**If the hand-started daemon is not refused, L1 has failed.** That is the case
+`takeover window` is absent from the output, or the command keeps running
+instead of exiting, or `state.json` changed. A second daemon on the town root
+is the worst failure this program guards against. Do this at once, in order,
+and do not continue to the checklist:
+
+1. If `gt daemon run` is still running, press Ctrl-C in its tab.
+2. From the scratch root: `gt daemon stop`. It stops the scratch container
+   through the supervisor and reads nothing of the live town.
+3. Run the whole Teardown below.
+4. Write `FAIL` on the L1 record on the program bead, with the time.
+5. File a P1 bead naming the exact output seen from `gt daemon run` and the
+   `state.json` before and after, so the guard can be fixed. Do not paste a
+   token or any secret.
+
+The window is not green and L1 is not repeated until that bead is fixed and
+landed.
+
 ### Green
 
-L1 is green only when every box is true. Record each on the program bead with
-its time.
+L1 is green only when every box is true. There are five: the four things L1
+proves, in order, and a check that nothing else changed. Record each on the
+program bead with its time.
 
 - [ ] The container is up: `compose ps` shows `daemon`, `scratch-dolt` and
       `scratch-dind` running, and `gt daemon status` in the scratch town prints
@@ -238,8 +268,9 @@ its time.
 
 ### Teardown
 
-This removes the scratch project's containers and volumes and nothing else.
-Never use `docker system prune` or `docker volume prune`: they reach every
+Step 2 below removes the scratch project's containers, networks and volumes
+and nothing else; the scratch root and the compose file's directory are removed
+by hand in Step 4. Never use `docker system prune` or `docker volume prune`: they reach every
 project on the host.
 
 1. Stop the host agent (Ctrl-C in its tab).
@@ -261,9 +292,11 @@ project on the host.
    ```
 
    Expected: both print only their header.
-4. Remove the scratch directories, after checking each path is the one chosen in
-   [Before you start](#before-you-start) and that `<scratch-root>` still holds
-   `.gt-scratch-town`: `<scratch-root>` and the directory of `<compose-file>`.
+4. Remove the scratch directories by hand, after checking that
+   `<scratch-parent>` is the path chosen in
+   [Before you start](#before-you-start), that it holds only `build`,
+   `<scratch-root>` and `<compose-file>`, and that `<scratch-root>` still holds
+   `.gt-scratch-town`: remove `<scratch-parent>`.
 5. Compare `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
    with the list recorded before Step 1: identical.
 
