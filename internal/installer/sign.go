@@ -139,9 +139,11 @@ func (r *Run) Sign() {
 	}
 	// The password reaches security on stdin and nowhere else: it is never in
 	// the unlock's argv, where ps shows it for as long as the unlock takes, and
-	// never logged, never echoed and never handed to codesign (gt-4ucnp). That is
-	// why this unlock does not use signing.Unlock, whose argv carries the password;
-	// gt-tpg0p.70 moves the shared one off argv.
+	// never logged, never echoed and never handed to codesign (gt-4ucnp). The
+	// shared signing.Unlock now sends the password on stdin too (gt-tpg0p.70), so
+	// this unlock keeps its own security -i form: that is the form the macOS
+	// integration test pins (gt-4ucnp), and moving onto signing.Unlock is a
+	// separate decision.
 	//
 	// A status of 0 is not taken as proof the keychain opened: what security -i
 	// reports for the command it reads is undocumented, and the macOS form is
