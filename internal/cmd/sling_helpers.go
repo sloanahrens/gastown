@@ -227,8 +227,19 @@ func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
 	return slingStores{}.moleculeDeps(beadID, townRoot)
 }
 
-// moleculeDeps returns the molecules bonded to beadID, read by one sql
-// query over the wisp dependency edges in the bead's database.
+// moleculeBondTypes are the relations that bond a molecule to a bead; a
+// molecule under any other relation is not attached to it.
+var moleculeBondTypes = map[string]bool{"blocks": true, "conditional-blocks": true, "parent-child": true}
+
+// moleculeDeps returns the open molecules bonded to beadID: local-target bonds
+// first, in the order DepListUp lists their dependents (the store's creation
+// order), then bonds held only as an external:<rig>:<id> target, in the order
+// ExternalMoleculesAttachedTo lists them, which has no ORDER BY. A molecule
+// bonded both ways is listed once, at its local position.
+//
+// External-target bonds cannot be matched on a tracker store until gt-etvxc;
+// the SQL store keeps the statement, and a store without SQL reads its local
+// bonds and warns once, naming the bead.
 func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	if beadID == "" {
 		return nil, nil
@@ -237,9 +248,30 @@ func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 		return nil, fmt.Errorf("invalid bead ID: %q", beadID)
 	}
 
-	rows, err := s.pinnedAt(resolveBeadDirFromTownRoot(townRoot, beadID)).SQLCSV(beadsql.MoleculesAttachedTo(beadID))
+	store := s.pinnedAt(resolveBeadDirFromTownRoot(townRoot, beadID))
+	molecules, err := bondedMolecules(store, beadID)
 	if err != nil {
 		return nil, err
+	}
+	sql, ok := store.(sqlStore)
+	if !ok {
+		s.warnTrackerBondSkipOnce(beadID)
+		return molecules, nil
+	}
+	external, err := externalMolecules(sql, beadID)
+	if err != nil {
+		return nil, err
+	}
+	return appendUniqueMolecules(molecules, external...), nil
+}
+
+// externalMolecules returns the open molecules that bond to beadID through an
+// external:<rig>:<id> target, in the order the statement lists them. The
+// statement joins wisps itself, so its ids need no further read.
+func externalMolecules(store sqlStore, beadID string) ([]string, error) {
+	rows, err := store.SQLCSV(beadsql.ExternalMoleculesAttachedTo(beadID))
+	if err != nil {
+		return nil, fmt.Errorf("reading external-target molecule bonds of %s: %w", beadID, err)
 	}
 	if len(rows) == 0 {
 		return nil, nil
@@ -251,21 +283,66 @@ func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 		}
 	}
 	if col < 0 {
-		return nil, fmt.Errorf("parsing canonical molecule deps for %s: no issue_id column in %q", beadID, rows[0])
+		return nil, fmt.Errorf("parsing external-target molecule bonds of %s: no issue_id column in %q", beadID, rows[0])
 	}
-
-	seen := make(map[string]bool, len(rows))
 	var molecules []string
 	for _, row := range rows[1:] {
-		if col >= len(row) {
+		if col < len(row) && row[col] != "" {
+			molecules = append(molecules, row[col])
+		}
+	}
+	return molecules, nil
+}
+
+// bondedMolecules is the local-target half of moleculeDeps: the open
+// molecules that block or parent beadID, read through the store's dependents.
+func bondedMolecules(store slingStore, beadID string) ([]string, error) {
+	dependents, err := store.DepListUp(beadID, "")
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(dependents))
+	var candidates []string
+	for _, dep := range dependents {
+		if !moleculeBondTypes[dep.DependencyType] || seen[dep.ID] {
 			continue
 		}
-		moleculeID := row[col]
-		if moleculeID == "" || seen[moleculeID] {
+		seen[dep.ID] = true
+		candidates = append(candidates, dep.ID)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	issues, err := store.ShowMultiple(candidates)
+	if err != nil {
+		return nil, err
+	}
+	var molecules []string
+	for _, id := range candidates {
+		issue := issues[id]
+		if issue == nil {
+			// An id the batch omits is an unanswered read, not a non-molecule:
+			// read it alone, and refuse when it is still unanswered.
+			issue, err = store.Show(id)
+			if err != nil {
+				return nil, fmt.Errorf("reading bond candidate %s of %s: %w", id, beadID, err)
+			}
+			if issue == nil {
+				return nil, fmt.Errorf("reading bond candidate %s of %s: store gave no answer", id, beadID)
+			}
+		}
+		// The old statement joined the wisps table: only an ephemeral
+		// molecule instance is attached to a bead, and a persistent
+		// molecule-typed issue under the same relation is not (burning it
+		// would close real work).
+		if issue.Type != "molecule" || !issue.Ephemeral {
 			continue
 		}
-		seen[moleculeID] = true
-		molecules = append(molecules, moleculeID)
+		if issue.Status == "closed" || issue.Status == "tombstone" {
+			continue
+		}
+		molecules = append(molecules, id)
 	}
 	return molecules, nil
 }
