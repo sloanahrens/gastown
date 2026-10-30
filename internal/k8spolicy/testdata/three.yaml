@@ -1,0 +1,21 @@
+# Gas Town polecat sandbox policy fixture. Dolt on :3307 and Forgejo on :3000
+# are reached through Docker Desktop's host alias.
+network_policies:
+  forgejo:
+    endpoints:
+      - host: host.docker.internal
+        port: 3000
+        protocol: rest
+        enforcement: enforce
+  dolt:
+    endpoints:
+      - host: host.docker.internal
+        port: 3307
+        protocol: tcp
+        tls: skip
+  tracker:
+    endpoints:
+      - host: host.docker.internal
+        port: 7433
+        protocol: tcp
+        tls: skip

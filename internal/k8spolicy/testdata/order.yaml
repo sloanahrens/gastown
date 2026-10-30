@@ -1,0 +1,19 @@
+network_policies:
+  adjacent:
+    endpoints:
+      - host: host.docker.internal
+      - host: host.docker.internal
+        port: 3307
+        protocol: tcp
+        tls: skip
+  between:
+    endpoints:
+      - host: host.docker.internal
+        protocol: tcp
+        port: 3000
+        tls: skip
+  noport:
+    endpoints:
+      - host: host.docker.internal
+        tls: skip
+      - path: /usr/bin/git
