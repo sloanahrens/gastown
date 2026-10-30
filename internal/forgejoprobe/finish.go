@@ -108,18 +108,16 @@ func finishGreen(f Finisher, mode PushMode) (int, bool) {
 }
 
 // removeStaleRecord removes the record an earlier run left, since this run did not
-// write one. A removal that fails is named by its path, and a code that would
-// have been a success becomes a failure: the stale record would still be there.
+// write one. A removal that fails is named by its path and fails the run whatever
+// rc was: the stale record would still be there for the cutover to read, and a
+// refused command line's exit 2 would not say so.
 func removeStaleRecord(f Finisher, rc int) int {
 	err := f.RemoveRecord()
 	if err == nil {
 		return rc
 	}
 	f.Logf("warning: could not remove the stale probe record %s (%v)", f.RecordPath(), err)
-	if rc == ExitOK || rc == ExitHooksNotExercised {
-		return ExitFailure
-	}
-	return rc
+	return ExitFailure
 }
 
 // DryRunPlan is what a dry run would do, named by the values the run would use.

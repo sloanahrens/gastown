@@ -381,10 +381,10 @@ func TestFinishNamesAFailedRecordRemoval(t *testing.T) {
 			want: ExitFailure,
 		},
 		{
-			name: "a refused run keeps its exit 2",
+			name: "a refused run's stale record that will not go becomes exit 1, not 2",
 			f:    finisher{created: false},
 			rc:   ExitUsage,
-			want: ExitUsage,
+			want: ExitFailure,
 		},
 		{
 			name:  "a clone-only green run becomes exit 1, not 3",
