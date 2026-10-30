@@ -2,36 +2,18 @@ package shelltier
 
 import (
 	"bytes"
+	"context"
 	"errors"
-	"io/fs"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/shelltier/shelltiertest"
 	"github.com/steveyegge/gastown/internal/tiertrigger"
 )
 
-// memFiles is tiertrigger.Files over a map, so no case touches the disk.
-type memFiles map[string][]byte
-
-func (m memFiles) ReadFile(path string) ([]byte, error) {
-	data, ok := m[path]
-	if !ok {
-		return nil, fs.ErrNotExist
-	}
-	return data, nil
-}
-
-func (m memFiles) WriteFile(path string, data []byte) error {
-	m[path] = data
-	return nil
-}
-
-func (m memFiles) RemoveFile(path string) error {
-	delete(m, path)
-	return nil
-}
+type memFiles = shelltiertest.MemFiles
 
 // failingWrites is a Files whose writes fail, so a save error can be driven.
 type failingWrites struct{ memFiles }
@@ -40,7 +22,7 @@ func (failingWrites) WriteFile(string, []byte) error { return errors.New("disk f
 
 const (
 	oldCommit  = "1111111111111111111111111111111111111111"
-	headCommit = "2222222222222222222222222222222222222222"
+	headCommit = shelltiertest.HeadCommit
 	town       = "/town"
 )
 
@@ -219,4 +201,133 @@ func TestAllPlanRunsEverythingAndRecordsNothing(t *testing.T) {
 		t.Fatalf("skipped = %d, want 0", plan.Skipped)
 	}
 	plan.Finish(Result{Passed: 1}, utcAt(29, 12, 5), &bytes.Buffer{})
+}
+
+func TestSinceGreenRecordsNothingWhenTheResultDoesNotAccountForEveryEntry(t *testing.T) {
+	t.Parallel()
+	a := noRunScript("scripts/a_test.sh")
+	b := noRunScript("scripts/b_test.sh")
+	tests := []struct {
+		name string
+		res  Result
+	}{
+		{"an entry neither passed nor failed", Result{Passed: 1}},
+		{"a failed name outside the run", Result{Passed: 1, Failed: 1, FailedNames: []string{"scripts/x_test.sh"}}},
+		{"a failed name listed twice", Result{Failed: 2, FailedNames: []string{a.Path, a.Path}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files := memFiles{}
+			var errw bytes.Buffer
+			plan := PlanSinceGreen([]Entry{a, b}, town, files, sinceCheckout(headCommit, fakeGit{}), utcZone, utcAt(29, 12, 0), &errw)
+			plan.Finish(tc.res, utcAt(29, 12, 5), &errw)
+			if _, ok := files[StatePath(town)]; ok {
+				t.Fatal("state file was written from a result that does not account for every entry")
+			}
+			if !strings.Contains(errw.String(), "does not account for every entry") {
+				t.Fatalf("error stream = %q, want the inconsistent result named", errw.String())
+			}
+		})
+	}
+}
+
+func TestSinceGreenDoesNotRecordAnEntryThatTimedOut(t *testing.T) {
+	t.Parallel()
+	a := noRunScript("scripts/a_test.sh")
+	b := noRunScript("scripts/b_test.sh")
+	files := memFiles{}
+	var errw bytes.Buffer
+	plan := PlanSinceGreen([]Entry{a, b}, town, files, sinceCheckout(headCommit, fakeGit{}), utcZone, utcAt(29, 12, 0), &errw)
+
+	// The second script's budget has already run out, so its context is done
+	// when Exec returns 0: the runner counts it as timed out, not passed.
+	calls := 0
+	withTimeout := func(ctx context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		calls++
+		if calls == 2 {
+			c, cancel := context.WithCancel(ctx)
+			cancel()
+			return c, cancel
+		}
+		return context.WithCancel(ctx)
+	}
+	res := Run(context.Background(), Config{
+		Entries:     plan.Run,
+		Root:        ".",
+		LogDir:      "/logs",
+		Budget:      time.Minute,
+		Exec:        func(context.Context, Command) (int, error) { return 0, nil },
+		Now:         func() time.Time { return utcAt(29, 12, 5) },
+		WithTimeout: withTimeout,
+	})
+	if res.Passed != 1 || res.TimedOut != 1 {
+		t.Fatalf("result = %+v, want one pass and one timeout", res)
+	}
+	plan.Finish(res, utcAt(29, 12, 5), &errw)
+
+	got := loadState(t, files)
+	if rec, ok := got[a.Path]; !ok || rec.Commit != headCommit {
+		t.Fatalf("record for the passing %s = %+v, want commit %s", a.Path, rec, headCommit)
+	}
+	if _, ok := got[b.Path]; ok {
+		t.Fatalf("the timed-out %s was recorded as green", b.Path)
+	}
+}
+
+func TestSinceGreenKeepsRecordsWrittenWhileTheRunWent(t *testing.T) {
+	t.Parallel()
+	a := noRunScript("scripts/a_test.sh")
+	b := noRunScript("scripts/b_test.sh")
+	const otherCommit = "3333333333333333333333333333333333333333"
+	tests := []struct {
+		name    string
+		written string
+		at      time.Time
+		wantA   string
+	}{
+		{"a record for another entry is kept", b.Path, utcAt(29, 12, 2), headCommit},
+		{"a newer record for this entry wins", a.Path, utcAt(29, 12, 10), otherCommit},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			files := memFiles{}
+			var errw bytes.Buffer
+			plan := PlanSinceGreen([]Entry{a}, town, files, sinceCheckout(headCommit, fakeGit{}), utcZone, utcAt(29, 12, 0), &errw)
+
+			// Another run records tc.written after this plan read the state.
+			other := tiertrigger.State{}
+			other.Ran(tc.written, otherCommit, tc.at)
+			seedState(t, files, other)
+
+			plan.Finish(Result{Passed: 1}, utcAt(29, 12, 5), &errw)
+			got := loadState(t, files)
+			if rec := got[tc.written]; rec.Commit != otherCommit {
+				t.Fatalf("record for %s = %q, want the other run's %s kept", tc.written, rec.Commit, otherCommit)
+			}
+			if rec := got[a.Path]; rec.Commit != tc.wantA {
+				t.Fatalf("record for %s = %q, want %s", a.Path, rec.Commit, tc.wantA)
+			}
+		})
+	}
+}
+
+func TestSinceGreenRecordsNothingWhenTheStateCannotBeReread(t *testing.T) {
+	t.Parallel()
+	a := noRunScript("scripts/a_test.sh")
+	files := memFiles{}
+	var errw bytes.Buffer
+	plan := PlanSinceGreen([]Entry{a}, town, files, sinceCheckout(headCommit, fakeGit{}), utcZone, utcAt(29, 12, 0), &errw)
+
+	// The state file is corrupted while the run goes on: it must be left alone.
+	corrupt := []byte("{not json")
+	files[StatePath(town)] = corrupt
+	plan.Finish(Result{Passed: 1}, utcAt(29, 12, 5), &errw)
+	if got := files[StatePath(town)]; !bytes.Equal(got, corrupt) {
+		t.Fatalf("state file = %q, want the unreadable file left as it was", got)
+	}
+	if !strings.Contains(errw.String(), "re-read the shell state") {
+		t.Fatalf("error stream = %q, want the re-read failure named", errw.String())
+	}
 }

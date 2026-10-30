@@ -25,7 +25,6 @@ type Plan struct {
 	recordable bool
 	head       string
 	store      tiertrigger.Store
-	st         tiertrigger.State
 }
 
 // AllEntries is the plan for a run that ignores the state: every entry runs,
@@ -71,34 +70,74 @@ func PlanSinceGreen(entries []Entry, town string, files tiertrigger.Files, co Ch
 		recordable: true,
 		head:       head,
 		store:      store,
-		st:         st,
 	}
 }
 
 // Finish records each entry of the plan that passed in res, at the commit the
 // run tested, and saves the state when anything was recorded. A failed entry
-// keeps its older record, so it runs again on the next sweep. A state that
-// cannot be saved is said on errw; the verdict in res stands.
+// keeps its older record, so it runs again on the next sweep.
+//
+// res must account for every entry the plan ran: each one passed or is named in
+// FailedNames. A result that does not is not trusted as green, so Finish
+// records nothing and says why on errw. The state is read again just before the
+// save, so records another run wrote meanwhile are kept, and a record for an
+// entry that is newer than this run's stays. Finish assumes one writer at a
+// time: the daemon's tier sweep is serialized per rig. A state that cannot be
+// read or saved is said on errw; the verdict in res stands.
 func (p Plan) Finish(res Result, now time.Time, errw io.Writer) {
 	if !p.recordable {
+		return
+	}
+	if !accounts(res, p.Run) {
+		fmt.Fprintf(errw, "shelltier: the run's result does not account for every entry: recording none\n")
 		return
 	}
 	failed := make(map[string]bool, len(res.FailedNames))
 	for _, name := range res.FailedNames {
 		failed[name] = true
 	}
+	st, err := p.store.Load()
+	if err != nil {
+		fmt.Fprintf(errw, "shelltier: re-read the shell state: %v: recording none\n", err)
+		return
+	}
 	recorded := false
 	for _, e := range p.Run {
 		if failed[e.Path] {
 			continue
 		}
-		Record(p.st, e, p.head, now)
+		if rec, ok := st[e.Path]; ok && rec.At.After(now) {
+			continue
+		}
+		Record(st, e, p.head, now)
 		recorded = true
 	}
 	if !recorded {
 		return
 	}
-	if err := p.store.Save(p.st); err != nil {
+	if err := p.store.Save(st); err != nil {
 		fmt.Fprintf(errw, "shelltier: save the shell state: %v\n", err)
 	}
+}
+
+// accounts reports whether res names every entry of run exactly once: each one
+// passed or is in FailedNames, and no name is failed twice or is outside run.
+// Run sets FailedNames for every entry that did not pass (shelltier.Run in
+// run.go), so a result that does not add up was not produced by Run.
+func accounts(res Result, run []Entry) bool {
+	if res.Passed+len(res.FailedNames) != len(run) {
+		return false
+	}
+	inRun := make(map[string]bool, len(run))
+	for _, e := range run {
+		inRun[e.Path] = true
+	}
+	failed := make(map[string]bool, len(res.FailedNames))
+	for _, name := range res.FailedNames {
+		if !inRun[name] || failed[name] {
+			return false
+		}
+		failed[name] = true
+	}
+	return true
 }

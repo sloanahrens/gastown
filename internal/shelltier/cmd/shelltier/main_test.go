@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/shelltier"
+	"github.com/steveyegge/gastown/internal/shelltier/shelltiertest"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 	"github.com/steveyegge/gastown/internal/tiertrigger"
 )
@@ -21,26 +21,7 @@ func TestMain(m *testing.M) {
 	os.Exit(unittier.Main(m))
 }
 
-// memFiles is tiertrigger.Files over a map, so no case touches the disk.
-type memFiles map[string][]byte
-
-func (m memFiles) ReadFile(path string) ([]byte, error) {
-	data, ok := m[path]
-	if !ok {
-		return nil, fs.ErrNotExist
-	}
-	return data, nil
-}
-
-func (m memFiles) WriteFile(path string, data []byte) error {
-	m[path] = data
-	return nil
-}
-
-func (m memFiles) RemoveFile(path string) error {
-	delete(m, path)
-	return nil
-}
+type memFiles = shelltiertest.MemFiles
 
 // noChanges is a repository with no change since any record and no uncommitted path.
 type noChanges struct{}
@@ -49,7 +30,7 @@ func (noChanges) DiffNameOnly(_, _ string) ([]string, error) { return nil, nil }
 
 func (noChanges) Worktree() ([]string, error) { return nil, nil }
 
-const headCommit = "2222222222222222222222222222222222222222"
+const headCommit = shelltiertest.HeadCommit
 
 // fixture is one case's Env: a fake Exec that records each command, answers
 // the given codes and takes 67 seconds per script on a fake clock, so two
@@ -332,5 +313,73 @@ func TestWorktreeGitReportsAFailedStatus(t *testing.T) {
 	}
 	if paths != nil {
 		t.Fatalf("paths = %v with a failed status, want none", paths)
+	}
+}
+
+func TestSinceGreenRunsEveryEntryWhenTheWorktreeCannotBeRead(t *testing.T) {
+	t.Parallel()
+	f := newFixture(nil, twoScripts()...)
+	// Both entries hold a record from earlier today, so neither is due by its
+	// window: only the unreadable worktree can make them run.
+	st := tiertrigger.State{}
+	for _, e := range twoScripts() {
+		st.Ran(e.Path, "1111111111111111111111111111111111111111", time.Date(2026, time.October, 29, 9, 0, 0, 0, time.UTC))
+	}
+	if err := (tiertrigger.Store{Path: shelltier.StatePath("/town"), Files: f.files}).Save(st); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	statusErr := errors.New("index is locked")
+	f.env.Checkout = func(string) shelltier.Checkout {
+		return shelltier.Checkout{
+			Head: func() (string, error) { return headCommit, nil },
+			Git: worktreeGit{
+				diff:   func(string, string) ([]string, error) { return nil, nil },
+				status: func() (*git.GitStatus, error) { return nil, statusErr },
+			},
+		}
+	}
+	code := Main([]string{"--since-green", "--town", "/town", "--logdir", "/logs"}, &f.out, f.env)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if len(f.cmds) != 2 {
+		t.Fatalf("ran %d scripts with an unreadable worktree, want every entry (2)", len(f.cmds))
+	}
+	for _, path := range []string{"scripts/a_test.sh", "scripts/b_test.sh"} {
+		if !strings.Contains(f.err.String(), path+": its record cannot be read") {
+			t.Fatalf("error stream = %q, want %s named as unreadable", f.err.String(), path)
+		}
+	}
+	if !strings.Contains(f.err.String(), "read the working tree: index is locked") {
+		t.Fatalf("error stream = %q, want the status failure surfaced", f.err.String())
+	}
+	if want := "tier-sweep: shell GREEN passed=2 failed=0 skipped=0 (logs /logs) in 2m14s"; lastLine(f.err.String()) != want {
+		t.Fatalf("summary = %q, want %q", lastLine(f.err.String()), want)
+	}
+}
+
+func TestSinceGreenRefusesAMissingTownValue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"--town given with no value", []string{"--since-green", "--town"}},
+		{"--town given as an empty value", []string{"--since-green", "--town", ""}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(nil, twoScripts()...)
+			if code := Main(tc.args, &f.out, f.env); code != 2 {
+				t.Fatalf("exit = %d, want 2", code)
+			}
+			if !strings.Contains(f.err.String(), "usage: shelltier [--all]") {
+				t.Fatalf("stderr = %q, want the usage line", f.err.String())
+			}
+			if len(f.cmds) != 0 {
+				t.Fatalf("ran %d scripts without a town, want 0", len(f.cmds))
+			}
+		})
 	}
 }
