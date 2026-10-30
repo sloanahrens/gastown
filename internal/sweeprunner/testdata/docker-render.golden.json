@@ -1,0 +1,123 @@
+[
+  {
+    "argv": [
+      "docker",
+      "--context",
+      "colima-gt-sbx",
+      "network",
+      "create",
+      "--internal",
+      "gt-sweep-net-gastown-4f2a9c1e"
+    ]
+  },
+  {
+    "argv": [
+      "docker",
+      "--context",
+      "colima-gt-sbx",
+      "volume",
+      "create",
+      "gt-sweep-dind-data-gastown-4f2a9c1e-mvv8asko"
+    ]
+  },
+  {
+    "argv": [
+      "docker",
+      "--context",
+      "colima-gt-sbx",
+      "run",
+      "-d",
+      "--name",
+      "gt-sweep-dind-gastown-4f2a9c1e",
+      "--privileged",
+      "--network",
+      "gt-sweep-net-gastown-4f2a9c1e",
+      "--network-alias",
+      "sweep-dind",
+      "--env",
+      "DOCKER_TLS_CERTDIR=",
+      "--volume",
+      "gt-sweep-dind-data-gastown-4f2a9c1e-mvv8asko:/var/lib/docker",
+      "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1",
+      "--tls=false"
+    ]
+  },
+  {
+    "argv": [
+      "docker",
+      "--context",
+      "colima-gt-sbx",
+      "run",
+      "-d",
+      "--name",
+      "gt-sweep-gastown-4f2a9c1e",
+      "--platform",
+      "linux/arm64",
+      "--cpus",
+      "8",
+      "--memory",
+      "24G",
+      "--network",
+      "gt-sweep-net-gastown-4f2a9c1e",
+      "--env",
+      "DOCKER_HOST=tcp://sweep-dind:2375",
+      "--volume",
+      "/Users/ops/gt/gastown/.repo.git:/repo.git:ro",
+      "--volume",
+      "/Users/ops/gt/.runtime/sweep/out:/out",
+      "--env",
+      "GT_SWEEP_RIG=gastown",
+      "--env",
+      "GT_SWEEP_SHA=4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39",
+      "--env",
+      "GT_SWEEP_TIERS=shell,integration,race",
+      "--env",
+      "GT_SWEEP_JOBS=4",
+      "gt-polecat:gt-74ix9"
+    ]
+  },
+  {
+    "argv": [
+      "docker",
+      "--context",
+      "colima-gt-sbx",
+      "rm",
+      "-f",
+      "gt-sweep-gastown-4f2a9c1e"
+    ],
+    "teardown": true
+  },
+  {
+    "argv": [
+      "docker",
+      "--context",
+      "colima-gt-sbx",
+      "rm",
+      "-f",
+      "gt-sweep-dind-gastown-4f2a9c1e"
+    ],
+    "teardown": true
+  },
+  {
+    "argv": [
+      "docker",
+      "--context",
+      "colima-gt-sbx",
+      "volume",
+      "rm",
+      "gt-sweep-dind-data-gastown-4f2a9c1e-mvv8asko"
+    ],
+    "teardown": true
+  },
+  {
+    "argv": [
+      "docker",
+      "--context",
+      "colima-gt-sbx",
+      "network",
+      "rm",
+      "gt-sweep-net-gastown-4f2a9c1e"
+    ],
+    "teardown": true
+  }
+]
