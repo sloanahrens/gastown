@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,6 +168,26 @@ func TestSpecRosterSeatDispositionsAreUnchanged(t *testing.T) {
 			}
 			assertSameSeatVerdicts(t, town, db, names)
 		})
+	}
+}
+
+// TestSpecRosterFailsOnALandingReadItLoses is the failure branch of the
+// landing read: a landing bead the batch does not hold is read by town, and a
+// town read that fails fails the roster rather than reading the seat as free.
+func TestSpecRosterFailsOnALandingReadItLoses(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
+	db := beadsfake.New()
+	seedPolecatAgentBead(db, town, "gastown", "ruby", "")
+	db.Seed(beads.Issue{ID: "gt-ruby", Status: string(beads.StatusPinned), Labels: []string{land.LabelReadyToLand}})
+	store := &sourceBatchFails{countingStore: newCountingStore(db)}
+
+	_, err := specRosterSnapshotWith(newSpecTickReads(), town, seatPool("deepseek-flash", 30),
+		&fakeLister{sessions: map[string]map[string]string{}}, func(string) beads.Client { return store }, time.Now)
+	if err == nil || !strings.Contains(err.Error(), "reading landing seats' work beads") {
+		t.Fatalf("roster = %v, want the failed landing read reported", err)
 	}
 }
 
