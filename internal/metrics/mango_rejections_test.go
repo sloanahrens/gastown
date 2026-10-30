@@ -67,8 +67,8 @@ var rejectionFixtures = []struct {
 	{"a go.mod bump with an unexplained transitive dependency", "out_of_scope"},
 	{"a test that calls the helper directly", "call_site_untested"},
 	{"the test calls the helper, so deleting the call site leaves it green", "call_site_untested"},
-	{"an error branch treated as a file that does not apply", "helper_fail_open"},
-	{"a matcher error read as excluded, so the check does not fail closed", "helper_fail_open"},
+	{"an error branch treated as a file that does not apply", "fail_open"},
+	{"a build-constraint matcher error is read as a file that does not apply", "fail_open"},
 	{"an error that echoes captured command output", "secrets_in_errors"},
 	{"the error puts the captured output in its message", "secrets_in_errors"},
 }
@@ -103,12 +103,12 @@ func TestEveryRejectionPatternHasAFixture(t *testing.T) {
 // the package directory.
 const omRulesFile = "../../directives/polecat.md"
 
-// omRulesHeading opens the directive's list of the twelve rules, each naming
-// the finding om files for it.
+// omRulesHeading opens the directive's list of rules, each naming the finding
+// om files for it.
 const omRulesHeading = "# What om rejects"
 
-// omRuleBlocks is the directive's twelve rules' text by rule number: the
-// section's "## <n>. …" heading and the lines under it, to the next heading.
+// omRuleBlocks is the directive's rules' text by rule number: the section's
+// "## <n>. …" heading and the lines under it, to the next heading.
 func omRuleBlocks(t *testing.T, directive string) map[int]string {
 	t.Helper()
 	start := strings.Index(directive, omRulesHeading)

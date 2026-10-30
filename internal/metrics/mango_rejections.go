@@ -61,7 +61,7 @@ type rejectionPattern struct {
 // The kind word a note's header opens with (conflict, gate, review) is a
 // different axis: this table reads why om refused, from the finding's wording.
 var rejectionPatterns = []rejectionPattern{
-	{Name: "fail_open", Rule: 1, Phrases: []string{"fail-open"}},
+	{Name: "fail_open", Rule: 1, Phrases: []string{"fail-open", "does not apply"}},
 	{Name: "criterion_untested", Rule: 2, Phrases: []string{"has no test"}},
 	{Name: "refusal_untested", Rule: 3, Phrases: []string{"failing branch", "branch has no assertion"}},
 	{Name: "forged_authority", Rule: 4, Phrases: []string{"prefix alone", "can forge", "authority is granted by"}},
@@ -71,8 +71,7 @@ var rejectionPatterns = []rejectionPattern{
 	{Name: "script", Rule: 8, Phrases: []string{"shell script", "python script"}},
 	{Name: "out_of_scope", Rule: 9, Phrases: []string{"outside the stated scope", "unexplained transitive dependency"}},
 	{Name: "call_site_untested", Rule: 10, Phrases: []string{"helper directly", "call site"}},
-	{Name: "helper_fail_open", Rule: 11, Phrases: []string{"does not apply", "fail closed"}},
-	{Name: "secrets_in_errors", Rule: 12, Phrases: []string{"captured output", "captured command output"}},
+	{Name: "secrets_in_errors", Rule: 11, Phrases: []string{"captured output", "captured command output"}},
 }
 
 // classifyRejectionPattern names the pattern findings match: the first rule in

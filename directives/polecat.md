@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-10-30 gt-u3hr0: rules 1, 3, 10, 11 rewritten from the 2026-10-28..30 rejection record; rule 1 now names the forms om flags, old rule 11 (matcher and platform-file errors) merges into rule 1, the guard-mutation bullet moves from rule 10 to rule 3, and the rules after it renumber (fifteen rules).
 - 2026-10-30 gt-o87rv: added rules 13-16 (cloud authority, cloud previews, console-only steps, cost and credentials); rule 14 points at the no-new-scripts town policy instead of restating it.
 - 2026-10-28 gt-9j9vu: bead text is one single-quoted argument on every `gt bead` verb that takes text (create, update, claim, note, comment, close; town policy section).
 - 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree".
@@ -139,11 +140,15 @@ are debt" section of `~/.claude/docs/standards/test-engineering.md`.
 
 # What om rejects
 
-Read before you write code. Sixteen rules. Today (2026-10-26) 70 beads were rejected in 138 blocks; 125 blocks (91 percent) had a major or critical finding. Each rule names om's finding and one example from today.
+Read before you write code. Fifteen rules. Today (2026-10-26) 70 beads were rejected in 138 blocks; 125 blocks (91 percent) had a major or critical finding. Each rule names om's finding and one example from today.
 
 ## 1. Failure is not success (fail-open)
 
-A failed or unreadable read must stop or escalate, never pass as clean.
+A failed, unreadable or unwired input must stop, refuse or escalate, never pass as clean. This is the most common major finding. The forms om flags:
+- an unreadable file, record or status read as absent, empty or clean (also an error from a build-constraint matcher or parser read as "does not apply");
+- a refusal that returns the same value as a healthy answer (0, the base value, a nil error, exit 0): return a distinct error;
+- a guard whose input is not wired defaults to allow ("PushInFlight gate is a constant false"): unknown denies;
+- an error dropped silently, logged only, or reported as "skipped" where the caller has to act.
 - om flags: "unreadable main status suppresses escalation (fail-open gate)".
 - Example: gt-42ulv (critical). A missing red-main status read as green, so no escalation fired.
 - Before: `if err != nil { return nil }`. After: return the error, or record the state as unknown and escalate.
@@ -161,6 +166,7 @@ Every error or refusal branch in the diff needs a test that drives it.
 - om flags: "failing branch has no assertion", "alarm and refusal branches lack tests".
 - Example: a new error return in internal/cmd with only the success case tested.
 - Before: one test for the success path. After: one table row per refusal, each asserting the error.
+- Before gt done, mutate each new guard yourself: delete its branch or flip its condition, and confirm a test goes red. A guard no test turns red is the commonest reason a head is rejected (56 findings in three days); if no test goes red, write the test.
 
 ## 4. Untrusted input is not trusted by its prefix or its text
 
@@ -204,16 +210,8 @@ A test must run the production function that makes the call, so deleting the cal
 - om flags: a test that passes with the logging call deleted.
 - Example: gt-uoo5j. The hash-line test passed with the logging call removed.
 - Before: a test that calls the helper directly. After: a test through the production caller, red when the call is deleted.
-- Mutate each new guard yourself before submitting: change its condition, delete its branch, and confirm a test goes red. Several first heads had survivors.
 
-## 11. Fail closed on helper errors and on platform files
-
-An error from a build-constraint matcher, parser or reader is not "excluded" or "absent".
-- om flags: an error branch treated as a file that does not apply.
-- Example: gt-b9j3o.5, the MatchFile error branch; a check on a Linux polecat must not fail on _darwin.go or //go:build files it cannot build.
-- Before: `if err != nil { return false }`. After: return the error, or report the file as unjudged.
-
-## 12. Keep secrets out of errors; tick boxes last
+## 11. Keep secrets out of errors; tick boxes last
 
 Never put captured output in an error message: name the rule and the command instead, since output can hold a secret.
 - om flags: an error that echoes captured command output.
@@ -221,27 +219,27 @@ Never put captured output in an error message: name the rule and the command ins
 - Before: `fmt.Errorf("failed: %s", out)`. After: `fmt.Errorf("rule X: command failed")`.
 - Tick every acceptance box only after the named test exists. gt done and the landing policy refuse unticked boxes, and a box ticked early is a finding.
 
-## 13. Cloud authority widens only through a reviewed, visible diff
+## 12. Cloud authority widens only through a reviewed, visible diff
 
 Applies to any change that touches a cloud project, a role, a service account or an API list.
 - om flags: "role or permission added without a golden change", "role with an admin permission", "project-level grant", "enables an API the manifest does not list".
 - Reject outright: a role or permission list widened without the matching change to its reviewed golden — the test of rule 2, "Each criterion needs a test that fails without it" — and a bead comment saying why; any *.admin permission or roles/owner, roles/editor, or a predefined role where a custom role fits; serviceAccountTokenCreator, serviceAccountUser, actAs or impersonation granted on a project instead of one account, or with no named owner; a service account or key created with no owner, rotation and deletion path stated.
 - Before: a polecat adds iam.serviceAccounts.getAccessToken to a list. After: the permission is justified in the bead, the golden and the list change together, and dropping either one turns that test red.
 
-## 14. A cloud apply needs a preview the human reads
+## 13. A cloud apply needs a preview the human reads
 
 "Cloud calls in a shell script" is refused by "No new scripts for testable logic (town policy, 2026-10-24)" and rule 8, "Do not add a shell or Python script"; this rule is what a cloud call adds on top of them.
 - om flags: "apply with confirmations disabled", "preview gated by a grep".
 - Reject outright: an apply, destroy or disable that runs without a preview step the code makes the human read; one that forces past that step (--yes, --force, --skip-preview, disableDependentServices); one with no typed confirmation; a destroy with no stated rollback.
 - Example: dv-honu.6 (apply with confirmations disabled; the red-flag preview gate is a weak grep).
 
-## 15. A step the diff cannot show must say what it creates
+## 14. A step the diff cannot show must say what it creates
 
 - om flags: "console-only step with no reconciliation", "side effects outside the diff".
 - Reject outright: a bead or runbook that asks a human to click or run a provider flow (for example the console "add Firebase" step) without listing what the flow creates beyond the named result and the read-only command that reconciles it against the patrol.
 - Example: 2026-10-30, the console Firebase step enabled 28 APIs and created firebase-adminsdk-fbsvc with Token Creator.
 
-## 16. Cost and credentials are part of the change
+## 15. Cost and credentials are part of the change
 
 - om flags: "billing plan or budget not stated", "key file or token on a command line".
-- Reject outright: a new billable resource (VM, disk, address, SQL, load balancer, Blaze-only feature) with no budget alert named; a cloud credential a test requires or reads from its environment (rule 7, "Hermetic tests"), or one that is printed (rule 12, "Keep secrets out of errors; tick boxes last").
+- Reject outright: a new billable resource (VM, disk, address, SQL, load balancer, Blaze-only feature) with no budget alert named; a cloud credential a test requires or reads from its environment (rule 7, "Hermetic tests"), or one that is printed (rule 11, "Keep secrets out of errors; tick boxes last").
