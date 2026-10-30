@@ -589,6 +589,15 @@ func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
 	return agentBeadsFromWisps(wisps), nil
 }
 
+// AgentBeadsFromWisps classifies wisps as agent beads, keyed by ID, by the test
+// the bd path applies. A caller that reads the wisps through its own Client
+// (a tracker store, which has no wisp SQL) needs the same classification. The
+// wisps must be the unfiltered wisp read: the ID-shape and type-only fallbacks
+// keep wisps that a gt:agent label filter would drop.
+func AgentBeadsFromWisps(wisps []*Issue) map[string]*Issue {
+	return agentBeadsFromWisps(wisps)
+}
+
 // isAgentBeadByID detects agent beads by their ID naming convention.
 // Agent bead IDs follow two patterns:
 //   - Full form (prefix != rig): prefix-rig-role[-name] (e.g., gt-gastown-crew-max)
