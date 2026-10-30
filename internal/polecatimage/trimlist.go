@@ -201,14 +201,11 @@ func trimListing(root string, walk fileWalk) ([]trimListEntry, error) {
 	}
 	out := make([]trimListEntry, 0, len(listing))
 	for _, e := range listing {
-		var cache string
-		switch e.Cache {
-		case cachevol.BuildCache:
-			cache = TrimListCacheBuild
-		case cachevol.ModuleCache:
+		// claimListing names one of the two caches; the module cache is the one
+		// its walk sets explicitly, and everything else is the build cache's tree.
+		cache := TrimListCacheBuild
+		if e.Cache == cachevol.ModuleCache {
 			cache = TrimListCacheModule
-		default:
-			return nil, fmt.Errorf("the claim at %s holds %q under the cache %d, which no rule knows", root, e.Path, int(e.Cache))
 		}
 		out = append(out, trimListEntry{Path: e.Path, Cache: cache, Size: e.Size, Atime: e.Atime, Mtime: e.Mtime})
 	}

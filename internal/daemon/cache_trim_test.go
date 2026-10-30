@@ -341,6 +341,59 @@ func TestDiskMaintenanceCacheTrimRefusesASecondClaimInOneNamespace(t *testing.T)
 	}
 }
 
+// TestDiskMaintenanceCacheTrimStopsAtTheReadItCannotMake pins each read the
+// trim depends on: one that fails, or answers something this pass cannot
+// decode, stops the trim where it happened and the log names it. A reply it
+// reads as "nothing to trim" or as an empty object list would apply a manifest
+// over an object it never saw.
+func TestDiskMaintenanceCacheTrimStopsAtTheReadItCannotMake(t *testing.T) {
+	t.Parallel()
+	const (
+		getPods    = "get pods -A -o json"
+		execList   = "exec -n openshell sbx-a -c agent -- /usr/local/bin/polecat-image trim-list --root /sandbox/.cache"
+		getObjects = "get job,configmap -n openshell -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim -o json"
+		deleteJob  = "delete job " + cacheTrimJobName + " -n openshell --ignore-not-found"
+		apply      = "apply -f -"
+		deleteCM   = "delete configmap -n openshell -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim"
+	)
+	tests := []struct {
+		name     string
+		override map[string]cliReply
+		want     string
+	}{
+		{"the pod list fails", map[string]cliReply{getPods: {stderr: "the server is unavailable", code: 1}},
+			"the pods that mount it could not be read: kubectl"},
+		{"the pod list is not JSON", map[string]cliReply{getPods: {stdout: "not json"}},
+			"the pods that mount it could not be read: decoding the pod list"},
+		{"the pod list names no items", map[string]cliReply{getPods: {stdout: `{}`}},
+			"the pod list: the reply names no item list"},
+		{"the listing is not JSON", map[string]cliReply{execList: {stdout: "not json"}},
+			"the listing could not be read: decoding the trim listing"},
+		{"the object list fails", map[string]cliReply{getObjects: {stderr: "forbidden", code: 1}},
+			"the apply failed: listing the trim's objects"},
+		{"the object list is not JSON", map[string]cliReply{getObjects: {stdout: "not json"}},
+			"the apply failed: decoding the trim's objects"},
+		{"the object list names no items", map[string]cliReply{getObjects: {stdout: `{}`}},
+			"the trim's objects: the reply names no object list"},
+		{"the stale delete fails", map[string]cliReply{deleteJob: {stderr: "forbidden", code: 1}},
+			"the apply failed: deleting the stale Job"},
+		{"an apply fails", map[string]cliReply{apply: {stderr: "invalid manifest", code: 1}},
+			"the apply failed: applying document 1 of"},
+		{"the shard delete fails", map[string]cliReply{deleteCM: {stderr: "forbidden", code: 1}},
+			"the apply failed: deleting the trim's shards"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, tc.override)
+			f.d.runDiskMaintenance()
+			if logged := f.log.String(); !strings.Contains(logged, tc.want) {
+				t.Errorf("the log does not name the refusal %q: %s", tc.want, logged)
+			}
+		})
+	}
+}
+
 // TestCacheTrimClaimsPicksTheClaimsWithAManifest pins which profiles a pass
 // trims: only a kubernetes profile that mounts a claim, keyed by claim, with the
 // image that profile runs; a claim two profiles name with different images is

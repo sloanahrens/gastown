@@ -660,8 +660,12 @@ func TestTrimListMainPrintsTheListing(t *testing.T) {
 // exit 3 with the reason, since an empty listing would plan a trim of a claim nothing looked at.
 func TestTrimListMainRefusesAClaimItCannotRead(t *testing.T) {
 	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := trimListing(missing, filepath.Walk); err == nil {
+		t.Error("trimListing read a claim root that is not there")
+	}
 	var stdout, stderr bytes.Buffer
-	code := trimListMain([]string{"--root", filepath.Join(t.TempDir(), "missing")}, &stdout, &stderr)
+	code := trimListMain([]string{"--root", missing}, &stdout, &stderr)
 	if code != 3 {
 		t.Fatalf("trim-list exit = %d, want 3", code)
 	}
