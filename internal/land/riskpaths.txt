@@ -36,7 +36,6 @@ scripts/lib/install-gt-lib.sh
 scripts/install-binary.sh
 internal/uninstallgt/**
 cmd/uninstall-gt/**
-scripts/uninstall-gt.sh
 scripts/post-land-shell.sh
 scripts/tier-sweep.sh
 Makefile

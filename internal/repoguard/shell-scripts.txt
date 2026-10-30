@@ -71,6 +71,4 @@ scripts/test-makefile.sh	port: gt-tpg0p
 scripts/tier-sweep.sh	port: gt-tpg0p
 scripts/tier-sweep_test.sh	port: gt-tpg0p
 scripts/town_metrics_test.sh	port: gt-tpg0p
-scripts/uninstall-gt.sh	port: gt-tpg0p
-scripts/uninstall-gt_test.sh	port: gt-tpg0p
 scripts/update-nix-flake.sh	port: gt-tpg0p
