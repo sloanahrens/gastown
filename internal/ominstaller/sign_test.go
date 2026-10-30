@@ -126,6 +126,30 @@ func TestSignUsesTheTownIdentity(t *testing.T) {
 	}
 }
 
+// TestSignKeepsADashLeadingSignDirFromReadingAsAnOption: a relative sign dir that
+// starts with a dash would make security and codesign read the keychain path as
+// an option, so the keychain is passed from the current directory.
+func TestSignKeepsADashLeadingSignDirFromReadingAsAnOption(t *testing.T) {
+	t.Parallel()
+	const dir = "-signing"
+	keychain := dir + "/gastown-signing.keychain-db"
+	rig := newSignRig()
+	rig.cfg.SignDir = dir
+	rig.files.files[keychain] = []byte("keychain")
+	rig.files.files[dir+"/keychain.pass"] = []byte(password + "\n")
+
+	if err := sign(context.Background(), rig.cfg, omBuild); err != nil {
+		t.Fatalf("sign = %v, want nil", err)
+	}
+	want := []Command{
+		{Name: "security", Args: []string{"unlock-keychain", "-p", password, "./" + keychain}},
+		{Name: "codesign", Args: []string{"--force", "--keychain", "./" + keychain, "-s", "gastown-dev-unattended", "-i", "com.gastown.om", omBuild}},
+	}
+	if !reflect.DeepEqual(rig.run.calls, want) {
+		t.Errorf("commands = %+v, want %+v", rig.run.calls, want)
+	}
+}
+
 func TestSignFallsBackAdHocWithOneWarning(t *testing.T) {
 	t.Parallel()
 	rig := newSignRig()
