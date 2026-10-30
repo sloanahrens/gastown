@@ -45,7 +45,7 @@ func TestManifestCoversEveryTrackedShellTest(t *testing.T) {
 		{"a tracked script with no entry is named", func() ([]string, error) {
 			return append(slices.Clone(trackedShellTests), "scripts/new_test.sh"), nil
 		}, Manifest(), "scripts/new_test.sh"},
-		{"a deleted entry leaves its script uncovered", trackedLister, without(Manifest(), "scripts/install-om_test.sh"), "scripts/install-om_test.sh"},
+		{"a deleted entry leaves its script uncovered", trackedLister, without(Manifest(), "scripts/install-local_test.sh"), "scripts/install-local_test.sh"},
 		{"a lister error is reported, not read as covered", failingLister, Manifest(), "boom"},
 		{"an empty listing is an error, not covered", func() ([]string, error) { return nil, nil }, Manifest(), "no tracked shell tests listed"},
 	}
@@ -75,12 +75,11 @@ func TestManifestEntriesExist(t *testing.T) {
 
 func TestManifestOrderIsToday(t *testing.T) {
 	t.Parallel()
-	// The first 19 are the scripts/test-makefile.sh order, ending with
+	// The first 18 are the scripts/test-makefile.sh order, ending with
 	// makefile-gate_test.sh; the last three are the extras tier-sweep.sh adds.
 	want := []string{
 		"scripts/check-install-path_test.sh",
 		"scripts/polecat-go-floor_test.sh",
-		"scripts/install-om_test.sh",
 		"scripts/install-local_test.sh",
 		"scripts/deep-review_test.sh",
 		"scripts/flake-sweep_test.sh",

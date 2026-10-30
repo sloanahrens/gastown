@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/ominstaller"
 )
 
 const (
@@ -19,30 +21,29 @@ const (
 	rebuildOMHeadSHA  = "2222222222222222222222222222222222222222"
 )
 
-// rebuildOMTown is a town with a gt source checkout holding the installer stub,
-// an om clone already in place, the installed om one commit behind the clone's
-// origin/main, a quiet gate, and a fake clock. Nothing it does starts a process.
+// rebuildOMTown is a town with an om clone already in place, the installed om
+// one commit behind the clone's origin/main, a quiet gate, and a fake clock.
+// Nothing it does starts a process. An install the test did not ask for fails
+// the test: a test that expects one replaces the install with fakeOMInstall.
 func rebuildOMTown(t *testing.T) (*Daemon, *notifyfake.Recorder, *clockwork.FakeClock) {
 	t.Helper()
 	d, rec := daemonWithRecorder(t)
 	clk := newFixedClock()
 	d.clock = clk
-	repoRoot := filepath.Join(d.config.TownRoot, "gastown")
-	mkdirs(t, filepath.Join(repoRoot, "cmd", "gt"), filepath.Join(repoRoot, "scripts"),
-		filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
-	writeFile(t, filepath.Join(repoRoot, "cmd", "gt", "main.go"), "package main\n")
-	// Inert text for the same reason as the install-gt stub: the fake CLI answers
-	// the call, and a shebang would make this look like an executable.
-	writeFile(t, filepath.Join(repoRoot, "scripts", "install-om.sh"), "stub: the fake CLI answers this call\n")
+	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
 
 	d.omVersionFn = func(string) (string, error) { return rebuildOMStaleSHA, nil }
 	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	d.rebuildOMInstallFn = func(context.Context, ominstaller.Config) (ominstaller.Result, ominstaller.Exit) {
+		t.Error("an install ran that this test did not expect")
+		return ominstaller.Result{}, ominstaller.ExitFailed
+	}
 	return d, rec, clk
 }
 
 // rebuildOMCli answers the git reads a cycle makes with head as origin/main's
-// tip, and every bash call with the installer's reply.
-func rebuildOMCli(t *testing.T, d *Daemon, head string, installer cliReply) *fakeCLI {
+// tip. Everything unrecognized succeeds with no output.
+func rebuildOMCli(t *testing.T, d *Daemon, head string) *fakeCLI {
 	t.Helper()
 	return withRebuildGTCli(t, d, func(c cliCall) cliReply {
 		switch {
@@ -50,15 +51,28 @@ func rebuildOMCli(t *testing.T, d *Daemon, head string, installer cliReply) *fak
 			return cliReply{stdout: head + "\n"}
 		case gitSub(c, "remote"):
 			return cliReply{stdout: "https://example.invalid/om.git\n"}
-		case c.name == "bash":
-			return installer
 		}
 		return cliReply{}
 	})
 }
 
-func omInstalled(commit string) cliReply {
-	return cliReply{stdout: "building om\ninstall-om: RESULT installed " + commit + " " + rebuildOMStaleSHA + " -\n"}
+// omInstall is an install the cycle runs in process. It records each config it
+// is run with and answers res and exit, so no build, sign or swap runs.
+type omInstall struct {
+	runs []ominstaller.Config
+	res  ominstaller.Result
+	exit ominstaller.Exit
+}
+
+// fakeOMInstall makes the cycle's install answer res and exit, and returns the
+// record of the runs it is given.
+func fakeOMInstall(d *Daemon, res ominstaller.Result, exit ominstaller.Exit) *omInstall {
+	inst := &omInstall{res: res, exit: exit}
+	d.rebuildOMInstallFn = func(_ context.Context, cfg ominstaller.Config) (ominstaller.Result, ominstaller.Exit) {
+		inst.runs = append(inst.runs, cfg)
+		return inst.res, inst.exit
+	}
+	return inst
 }
 
 // gitCalls returns the git argv of every call whose subcommand is sub.
@@ -81,39 +95,40 @@ func escalationKeys(rec *notifyfake.Recorder) []string {
 }
 
 // TestRebuildOMCycle_StaleAndQuietInstallsOnce is the case the job exists for:
-// an om behind origin/main, a quiet town, one install through the town's script
-// that builds the job's clone and replaces the om the landing worker uses.
+// an om behind origin/main, a quiet town, one install in process that builds
+// the job's clone and replaces the om the landing worker uses.
 func TestRebuildOMCycle_StaleAndQuietInstallsOnce(t *testing.T) {
 	t.Parallel()
 	d, rec, _ := rebuildOMTown(t)
-	cli := rebuildOMCli(t, d, rebuildOMHeadSHA, omInstalled(rebuildOMHeadSHA))
+	inst := fakeOMInstall(d, ominstaller.Result{Event: "installed", Commit: rebuildOMHeadSHA, Prev: rebuildOMStaleSHA}, ominstaller.ExitInstalled)
+	cli := rebuildOMCli(t, d, rebuildOMHeadSHA)
 
 	if settled := d.runRebuildOM(); !settled {
 		t.Fatal("a completed install must hold the interval, not retry the next heartbeat")
 	}
 
-	installs := installCalls(cli)
-	if len(installs) != 1 {
-		t.Fatalf("install calls = %v, want exactly one", installs)
+	if len(inst.runs) != 1 {
+		t.Fatalf("installs = %d, want exactly one", len(inst.runs))
 	}
-	argv := strings.Join(installs[0], " ")
-	for _, want := range []string{"install-om.sh", "--source rebuild-om", "--om-path "} {
-		if !strings.Contains(argv, want) {
-			t.Errorf("install argv %q does not carry %q", argv, want)
-		}
-	}
+	cfg := inst.runs[0]
 	src := filepath.Join(d.config.TownRoot, rebuildOMSrcDir)
-	var env cliCall
-	for _, c := range cli.recorded() {
-		if c.name == "bash" {
-			env = c
-		}
+	if cfg.OMPath != d.omSkewPath() {
+		t.Errorf("OMPath = %q, want the om the landing worker resolves, %q", cfg.OMPath, d.omSkewPath())
 	}
-	if got := env.getenv("INSTALL_OM_SRC_DIR"); got != src {
-		t.Errorf("INSTALL_OM_SRC_DIR = %q, want the job's clone %q", got, src)
+	if cfg.SrcDir != src {
+		t.Errorf("SrcDir = %q, want the job's clone %q", cfg.SrcDir, src)
 	}
-	if got := env.getenv("GT_TOWN_ROOT"); got != d.config.TownRoot {
-		t.Errorf("GT_TOWN_ROOT = %q, want %q", got, d.config.TownRoot)
+	if cfg.TownRoot != d.config.TownRoot {
+		t.Errorf("TownRoot = %q, want %q", cfg.TownRoot, d.config.TownRoot)
+	}
+	if want := filepath.Join(d.config.TownRoot, "daemon"); cfg.DaemonDir != want {
+		t.Errorf("DaemonDir = %q, want %q", cfg.DaemonDir, want)
+	}
+	if cfg.Source != "rebuild-om" {
+		t.Errorf("Source = %q, want rebuild-om", cfg.Source)
+	}
+	if cfg.LockWait != 60*time.Second {
+		t.Errorf("LockWait = %v, want the job's 60s install-lock wait", cfg.LockWait)
 	}
 	if mb := gitCalls(cli, "merge-base"); len(mb) != 1 {
 		t.Errorf("ancestry checks = %v, want one before the install (the installed om is an ancestor of origin/main)", mb)
@@ -141,14 +156,13 @@ func TestRebuildOMCycle_InstalledOmNotBehindIsLeftInPlace(t *testing.T) {
 			t.Parallel()
 			d, rec, clk := rebuildOMTown(t)
 			d.landingPasses.Store(1) // a busy town must not age this into a starved alert
+			inst := fakeOMInstall(d, ominstaller.Result{}, ominstaller.ExitFailed)
 			cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
 				switch {
 				case gitSub(c, "merge-base"):
 					return ancestry
 				case gitSub(c, "rev-parse"):
 					return cliReply{stdout: rebuildOMHeadSHA + "\n"}
-				case c.name == "bash":
-					return omInstalled(rebuildOMHeadSHA)
 				}
 				return cliReply{}
 			})
@@ -160,8 +174,8 @@ func TestRebuildOMCycle_InstalledOmNotBehindIsLeftInPlace(t *testing.T) {
 				}
 			}
 
-			if installs := installCalls(cli); len(installs) != 0 {
-				t.Errorf("an om that is not behind origin/main was replaced: %v", installs)
+			if len(inst.runs) != 0 {
+				t.Errorf("an om that is not behind origin/main was replaced: %d installs", len(inst.runs))
 			}
 			if merges := gitCalls(cli, "merge"); len(merges) != 0 {
 				t.Errorf("a skipped cycle moved the clone's checkout: %v", merges)
@@ -199,14 +213,13 @@ func TestRebuildOMCycle_AncestryCheckFailureDefers(t *testing.T) {
 			d, rec, clk := rebuildOMTown(t)
 			var logs strings.Builder
 			d.logger = log.New(&logs, "", 0)
+			inst := fakeOMInstall(d, ominstaller.Result{}, ominstaller.ExitFailed)
 			cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
 				switch {
 				case gitSub(c, "merge-base"):
 					return tc.reply
 				case gitSub(c, "rev-parse"):
 					return cliReply{stdout: rebuildOMHeadSHA + "\n"}
-				case c.name == "bash":
-					return omInstalled(rebuildOMHeadSHA)
 				}
 				return cliReply{}
 			})
@@ -219,8 +232,8 @@ func TestRebuildOMCycle_AncestryCheckFailureDefers(t *testing.T) {
 			if len(gitCalls(cli, "merge-base")) == 0 {
 				t.Fatal("no ancestry check ran")
 			}
-			if installs := installCalls(cli); len(installs) != 0 {
-				t.Errorf("an om not shown to be behind was replaced: %v", installs)
+			if len(inst.runs) != 0 {
+				t.Errorf("an om not shown to be behind was replaced: %d installs", len(inst.runs))
 			}
 			if age, open := d.rebuildOMBlock.openFor(clk.Now()); !open || age != time.Hour {
 				t.Errorf("block = (%v, open=%v), want it left open at its hour", age, open)
@@ -241,15 +254,16 @@ func TestRebuildOMCycle_FreshOmClearsEveryAlert(t *testing.T) {
 	t.Parallel()
 	d, rec, clk := rebuildOMTown(t)
 	d.omVersionFn = func(string) (string, error) { return rebuildOMHeadSHA, nil }
-	cli := rebuildOMCli(t, d, rebuildOMHeadSHA, cliReply{})
+	inst := fakeOMInstall(d, ominstaller.Result{}, ominstaller.ExitFailed)
+	rebuildOMCli(t, d, rebuildOMHeadSHA)
 	d.rebuildOMBlock.open(clk.Now().Add(-time.Hour))
 
 	if settled := d.runRebuildOM(); !settled {
 		t.Fatal("a fresh om is a verdict and holds the interval")
 	}
 
-	if installs := installCalls(cli); len(installs) != 0 {
-		t.Errorf("a fresh om ran the installer: %v", installs)
+	if len(inst.runs) != 0 {
+		t.Errorf("a fresh om ran the installer: %d runs", len(inst.runs))
 	}
 	if _, open := d.rebuildOMBlock.openFor(clk.Now()); open {
 		t.Error("the starvation episode stayed open over a fresh om")
@@ -282,13 +296,14 @@ func TestRebuildOMCycle_BusyTownDefersThenEscalatesStarved(t *testing.T) {
 			t.Parallel()
 			d, rec, clk := rebuildOMTown(t)
 			makeBusy(d)
-			cli := rebuildOMCli(t, d, rebuildOMHeadSHA, omInstalled(rebuildOMHeadSHA))
+			inst := fakeOMInstall(d, ominstaller.Result{}, ominstaller.ExitFailed)
+			cli := rebuildOMCli(t, d, rebuildOMHeadSHA)
 
 			if settled := d.runRebuildOM(); settled {
 				t.Fatal("a deferral accomplished nothing and must retry next heartbeat")
 			}
-			if installs := installCalls(cli); len(installs) != 0 {
-				t.Fatalf("a busy town ran the installer: %v", installs)
+			if len(inst.runs) != 0 {
+				t.Fatalf("a busy town ran the installer: %d runs", len(inst.runs))
 			}
 			if merges := gitCalls(cli, "merge"); len(merges) != 0 {
 				t.Errorf("a deferred cycle moved the clone's checkout: %v", merges)
@@ -308,31 +323,39 @@ func TestRebuildOMCycle_BusyTownDefersThenEscalatesStarved(t *testing.T) {
 	}
 }
 
-// TestRebuildOMCycle_InstallOutcomes maps each install-om.sh exit to what the
-// job does: a verdict holds the interval, a busy lock retries, and only a
-// failure raises the keyed alert.
+// TestRebuildOMCycle_InstallOutcomes maps each install exit to what the job
+// does: a verdict holds the interval, a busy lock retries, and only a failure
+// raises the keyed alert.
 func TestRebuildOMCycle_InstallOutcomes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name        string
-		reply       cliReply
+		res         ominstaller.Result
+		exit        ominstaller.Exit
 		wantSettled bool
 		wantAlerts  []string
 	}{
-		{"noop is in force", cliReply{stdout: "install-om: RESULT noop " + rebuildOMHeadSHA + " " + rebuildOMHeadSHA + " already-installed\n"}, true, nil},
-		{"refused holds the interval", cliReply{stdout: "install-om: RESULT refused - - dirty\n", code: 2}, true, nil},
-		{"busy retries", cliReply{stdout: "install-om: RESULT refused - - lock-busy\n", code: 3}, false, nil},
-		{"build failed keeps the old om and alerts once", cliReply{stdout: "install-om: RESULT failed " + rebuildOMHeadSHA + " " + rebuildOMStaleSHA + " build-failed\n", code: 1},
-			true, []string{alertKeyRebuildOMInstallFail}},
-		{"rolled back alerts once", cliReply{stdout: "install-om: RESULT rolled_back " + rebuildOMHeadSHA + " " + rebuildOMStaleSHA + " smoke-failed\n", code: 1},
-			true, []string{alertKeyRebuildOMInstallFail}},
-		{"no result line alerts once", cliReply{stdout: "boom\n", code: 1}, true, []string{alertKeyRebuildOMInstallFail}},
+		{"installed holds the interval",
+			ominstaller.Result{Event: "installed", Commit: rebuildOMHeadSHA, Prev: rebuildOMStaleSHA}, ominstaller.ExitInstalled, true, nil},
+		{"noop is in force",
+			ominstaller.Result{Event: "noop", Commit: rebuildOMHeadSHA, Prev: rebuildOMHeadSHA, Reason: "already-installed"}, ominstaller.ExitInstalled, true, nil},
+		{"refused holds the interval",
+			ominstaller.Result{Event: "refused", Reason: "dirty"}, ominstaller.ExitRefused, true, nil},
+		{"busy retries",
+			ominstaller.Result{Event: "refused", Reason: "lock-busy"}, ominstaller.ExitBusy, false, nil},
+		{"build failed keeps the old om and alerts once",
+			ominstaller.Result{Event: "failed", Commit: rebuildOMHeadSHA, Prev: rebuildOMStaleSHA, Reason: "build-failed"}, ominstaller.ExitFailed, true, []string{alertKeyRebuildOMInstallFail}},
+		{"rolled back alerts once",
+			ominstaller.Result{Event: "rolled_back", Commit: rebuildOMHeadSHA, Prev: rebuildOMStaleSHA, Reason: "smoke-failed"}, ominstaller.ExitFailed, true, []string{alertKeyRebuildOMInstallFail}},
+		{"a failure with no reason alerts once",
+			ominstaller.Result{}, ominstaller.ExitFailed, true, []string{alertKeyRebuildOMInstallFail}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			d, rec, _ := rebuildOMTown(t)
-			rebuildOMCli(t, d, rebuildOMHeadSHA, tc.reply)
+			rebuildOMCli(t, d, rebuildOMHeadSHA)
+			fakeOMInstall(d, tc.res, tc.exit)
 
 			if settled := d.runRebuildOM(); settled != tc.wantSettled {
 				t.Errorf("settled = %v, want %v", settled, tc.wantSettled)
@@ -344,12 +367,97 @@ func TestRebuildOMCycle_InstallOutcomes(t *testing.T) {
 	}
 }
 
+// TestRebuildOMCycle_InstallCutOffByBudgetIsNoVerdict pins that an install the
+// cycle's budget cut off holds no verdict, even when the install reports a
+// failure: nothing alerts, the interval is not held, and the next heartbeat asks
+// again.
+func TestRebuildOMCycle_InstallCutOffByBudgetIsNoVerdict(t *testing.T) {
+	t.Parallel()
+	d, rec, _ := rebuildOMTown(t)
+	rebuildOMCli(t, d, rebuildOMHeadSHA)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.rebuildOMInstallFn = func(context.Context, ominstaller.Config) (ominstaller.Result, ominstaller.Exit) {
+		cancel() // the budget runs out while the install is running
+		return ominstaller.Result{Event: "failed", Reason: "build-failed"}, ominstaller.ExitFailed
+	}
+	cycle := d.startDogCycle("rebuild_om")
+	defer cycle.close()
+
+	if settled := d.rebuildOMCycle(ctx, cycle); settled {
+		t.Fatal("an install cut off by the budget must retry on the next heartbeat")
+	}
+	if keys := escalationKeys(rec); len(keys) != 0 {
+		t.Errorf("a cut-off install alerted: %v", keys)
+	}
+}
+
+// TestRebuildOMRunInstall_UnresolvableSettingsFailWithoutRunning pins that a
+// config that does not resolve fails the install before any command runs.
+func TestRebuildOMRunInstall_UnresolvableSettingsFailWithoutRunning(t *testing.T) {
+	t.Parallel()
+	d, _ := daemonWithRecorder(t)
+	cli := withRebuildGTCli(t, d, func(cliCall) cliReply { return cliReply{} })
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+
+	// Every path is set, so resolution reads nothing from the environment and
+	// stops at the negative wait.
+	res, exit := d.runOMInstall(context.Background(), ominstaller.Config{
+		OMPath:       filepath.Join(d.config.TownRoot, "om"),
+		TownRoot:     d.config.TownRoot,
+		SrcDir:       filepath.Join(d.config.TownRoot, rebuildOMSrcDir),
+		SignDir:      filepath.Join(d.config.TownRoot, "signing"),
+		SignIdentity: "gastown-test",
+		DaemonDir:    filepath.Join(d.config.TownRoot, "daemon"),
+		LockWait:     -time.Second,
+	})
+
+	if exit != ominstaller.ExitFailed || res.Reason != "unexpected" {
+		t.Errorf("result = %+v exit %d, want an unexpected failure", res, exit)
+	}
+	if calls := cli.recorded(); len(calls) != 0 {
+		t.Errorf("an install whose settings did not resolve ran commands: %v", calls)
+	}
+	if !strings.Contains(logs.String(), "do not resolve") {
+		t.Errorf("log does not say the settings did not resolve:\n%s", logs.String())
+	}
+}
+
+// TestRebuildOMInstallExec_RunsThroughTheDaemonSeam pins the command runner the
+// install uses: each command runs in the directory the install names, through
+// the daemon's command seam, and its output comes back.
+func TestRebuildOMInstallExec_RunsThroughTheDaemonSeam(t *testing.T) {
+	t.Parallel()
+	d, _ := daemonWithRecorder(t)
+	cli := withRebuildGTCli(t, d, func(cliCall) cliReply {
+		return cliReply{stdout: "built\n", stderr: "warn\n"}
+	})
+
+	stdout, stderr, err := d.omInstallExec(context.Background(), ominstaller.Command{
+		Name: "go",
+		Args: []string{"build", "./cmd/om"},
+		Dir:  "/src/om",
+	})
+	if err != nil {
+		t.Fatalf("omInstallExec: %v", err)
+	}
+	calls := cli.recorded()
+	if len(calls) != 1 || calls[0].name != "go" || calls[0].dir != "/src/om" || !slices.Equal(calls[0].args, []string{"build", "./cmd/om"}) {
+		t.Errorf("calls = %+v, want one go build in /src/om", calls)
+	}
+	if stdout != "built\n" || stderr != "warn\n" {
+		t.Errorf("stdout, stderr = %q, %q, want the command's output", stdout, stderr)
+	}
+}
+
 // TestRebuildOMCycle_FailedInstallThenFreshOmClearsTheAlert: the alert the
 // failure raised closes on the cycle that finds om current.
 func TestRebuildOMCycle_FailedInstallThenFreshOmClearsTheAlert(t *testing.T) {
 	t.Parallel()
 	d, rec, _ := rebuildOMTown(t)
-	rebuildOMCli(t, d, rebuildOMHeadSHA, cliReply{stdout: "install-om: RESULT failed - - build-failed\n", code: 1})
+	rebuildOMCli(t, d, rebuildOMHeadSHA)
+	inst := fakeOMInstall(d, ominstaller.Result{Event: "failed", Commit: rebuildOMHeadSHA, Prev: rebuildOMStaleSHA, Reason: "build-failed"}, ominstaller.ExitFailed)
 	d.runRebuildOM()
 	if keys := escalationKeys(rec); len(keys) != 1 {
 		t.Fatalf("escalations = %v, want one", keys)
@@ -358,6 +466,9 @@ func TestRebuildOMCycle_FailedInstallThenFreshOmClearsTheAlert(t *testing.T) {
 	// The operator installs by hand; the next cycle sees om at origin's tip.
 	d.omVersionFn = func(string) (string, error) { return rebuildOMHeadSHA, nil }
 	d.runRebuildOM()
+	if len(inst.runs) != 1 {
+		t.Errorf("installs = %d, want only the first cycle's", len(inst.runs))
+	}
 
 	clears := rec.Clears()
 	if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, alertKeyRebuildOMInstallFail) {
@@ -392,13 +503,14 @@ func TestRebuildOMCycle_DetectionFailuresDeferSoftly(t *testing.T) {
 			d, rec, _ := rebuildOMTown(t)
 			answer := func(c cliCall) cliReply { return cliReply{stdout: rebuildOMHeadSHA + "\n"} }
 			breakIt(d, &answer)
-			cli := withRebuildGTCli(t, d, answer)
+			withRebuildGTCli(t, d, answer)
+			inst := fakeOMInstall(d, ominstaller.Result{}, ominstaller.ExitFailed)
 
 			if settled := d.runRebuildOM(); settled {
 				t.Error("a detection failure accomplished nothing and must retry next heartbeat")
 			}
-			if installs := installCalls(cli); len(installs) != 0 {
-				t.Errorf("a detection failure ran the installer: %v", installs)
+			if len(inst.runs) != 0 {
+				t.Errorf("a detection failure ran the installer: %d runs", len(inst.runs))
 			}
 			if calls := rec.Calls(); len(calls) != 0 {
 				t.Errorf("a detection failure touched the alert state: %+v", calls)
@@ -420,7 +532,8 @@ func TestRebuildOMCycle_ClonesAndFetchesOnlyUnderOMSrc(t *testing.T) {
 	if err := os.RemoveAll(src); err != nil {
 		t.Fatal(err)
 	}
-	cli := rebuildOMCli(t, d, rebuildOMHeadSHA, omInstalled(rebuildOMHeadSHA))
+	cli := rebuildOMCli(t, d, rebuildOMHeadSHA)
+	fakeOMInstall(d, ominstaller.Result{Event: "installed", Commit: rebuildOMHeadSHA, Prev: rebuildOMStaleSHA}, ominstaller.ExitInstalled)
 
 	d.runRebuildOM()
 
@@ -465,7 +578,8 @@ func TestRebuildOMPatrol_DisabledByDefaultAndDoesNothing(t *testing.T) {
 	}
 
 	d, rec, _ := rebuildOMTown(t)
-	cli := rebuildOMCli(t, d, rebuildOMHeadSHA, omInstalled(rebuildOMHeadSHA))
+	cli := rebuildOMCli(t, d, rebuildOMHeadSHA)
+	inst := fakeOMInstall(d, ominstaller.Result{Event: "installed", Commit: rebuildOMHeadSHA, Prev: rebuildOMStaleSHA}, ominstaller.ExitInstalled)
 	d.patrolConfig = patrols(&PatrolConfig{Enabled: false})
 	d.triggerRebuildOM()
 	if calls := cli.recorded(); len(calls) != 0 || d.rebuildOMRunning.Load() {
@@ -484,8 +598,8 @@ func TestRebuildOMPatrol_DisabledByDefaultAndDoesNothing(t *testing.T) {
 	for d.rebuildOMRunning.Load() {
 		<-cycleEnd
 	}
-	if installs := installCalls(cli); len(installs) != 1 {
-		t.Fatalf("an enabled patrol ran %d installs, want 1", len(installs))
+	if len(inst.runs) != 1 {
+		t.Fatalf("an enabled patrol ran %d installs, want 1", len(inst.runs))
 	}
 	// The verdict held the interval: the next heartbeat does nothing.
 	before := len(cli.recorded())
@@ -532,25 +646,6 @@ func TestRebuildOMInForce(t *testing.T) {
 	} {
 		if got := rebuildOMInForce(tc.installed, tc.head); got != tc.want {
 			t.Errorf("rebuildOMInForce(%q, %q) = %v, want %v", tc.installed, tc.head, got, tc.want)
-		}
-	}
-}
-
-func TestParseOMInstallResult(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name, out string
-		want      rebuildGTInstallResult
-	}{
-		{"installed", "log\ninstall-om: RESULT installed abc def -\n", rebuildGTInstallResult{"installed", "abc", "def", ""}},
-		{"dashes are empty", "install-om: RESULT refused - - no-source\n", rebuildGTInstallResult{"refused", "", "", "no-source"}},
-		{"short line pads", "install-om: RESULT noop\n", rebuildGTInstallResult{event: "noop"}},
-		{"last line wins", "install-om: RESULT installed a b -\ninstall-om: RESULT failed a b x\n", rebuildGTInstallResult{"failed", "a", "b", "x"}},
-		{"install-gt's line is not om's", "install-gt: RESULT installed a b -\n", rebuildGTInstallResult{}},
-		{"no line", "boom\n", rebuildGTInstallResult{}},
-	} {
-		if got := parseOMInstallResult(tc.out); got != tc.want {
-			t.Errorf("%s: result = %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
 }

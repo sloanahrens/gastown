@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install-gt-lib.sh — helpers for install-om.sh.
+# install-gt-lib.sh — helpers from the gt install script, kept until gt-tpg0p ports them.
 # Sourced, never run. Callers set DAEMON_DIR and SOURCE before using igt_receipt.
 
 # igt_receipt EVENT COMMIT PREV REASON MERGED_AT_EPOCH START_EPOCH

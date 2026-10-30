@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -29,6 +30,21 @@ const (
 	// defaultSignIdentity is the keychain identity the gt installer signs gt with.
 	defaultSignIdentity = "gastown-dev-unattended"
 )
+
+// Resolve returns cfg with each unset path and wait filled in from the
+// environment, then from the default. The town comes from cfg, else
+// GT_TOWN_ROOT, else the directory above the working directory that holds
+// mayor/town.json. A caller runs Run only on the resolved config, since Run
+// takes the paths and waits as they are.
+func Resolve(cfg Config) (Config, error) {
+	return resolveConfig(cfg, ".", os.Getenv, fileExists, filepath.Abs)
+}
+
+// fileExists reports whether path can be stat'ed.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 // resolveConfig fills each unset path and wait in cfg from the environment, then
 // from the default. getenv reads the environment, exists reports whether a file

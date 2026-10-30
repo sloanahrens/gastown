@@ -521,7 +521,7 @@ func TestOMSkewIgnoresCommitsThatCannotChangeTheBinary(t *testing.T) {
 		{name: "a Go source file beside .om.json", changed: []string{".om.json", "cmd/om/main.go"}, alert: true},
 		{name: "go.mod", changed: []string{"go.mod"}, alert: true},
 		{name: "go.sum", changed: []string{"go.sum"}, alert: true},
-		{name: "the install script", changed: []string{"scripts/install-om.sh"}, alert: true},
+		{name: "the installer", changed: []string{"internal/ominstaller/install.go"}, alert: true},
 		{name: "the Makefile", changed: []string{"Makefile"}, alert: true},
 		{name: "a path no list names", changed: []string{"assets/prompt.txt"}, alert: true},
 		{name: "the clone lacks a sha", diffErr: &failed, alert: true},

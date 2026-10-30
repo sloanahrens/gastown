@@ -203,10 +203,10 @@ func TestRunAppendsOneReceiptForItsOutcome(t *testing.T) {
 	}
 }
 
-func TestReceiptLineMatchesTheScript(t *testing.T) {
+func TestReceiptLineFormat(t *testing.T) {
 	t.Parallel()
-	// The goldens are the bytes scripts/install-om.sh's om_receipt appends:
-	// Python's json.dumps with sort_keys, absent fields as null.
+	// The goldens are the bytes each receipt line holds: Python's json.dumps
+	// with sort_keys, absent fields as null, so the receipts file reads the same.
 	tests := []struct {
 		name string
 		rec  receipt

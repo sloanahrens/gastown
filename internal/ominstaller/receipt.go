@@ -15,7 +15,7 @@ import (
 const receiptName = "install-om-receipts.jsonl"
 
 // receipt is one line of the receipts file. An empty string field is written as
-// JSON null, as the script does; the event is always written.
+// JSON null; the event is always written.
 type receipt struct {
 	event  string
 	commit string
@@ -57,13 +57,13 @@ func appendLine(path, dir, line string) error {
 	return errors.Join(werr, f.Close())
 }
 
-// receiptLine is the receipt as the script writes it: a JSON object with its
+// receiptLine is the receipt as it is written: a JSON object with its
 // keys sorted and Python's separators, ended by a newline. The timestamp is now
 // in UTC, and duration_s is whole seconds from the start to now.
 func receiptLine(r receipt, now time.Time) string {
 	duration := "null"
 	if !r.start.IsZero() {
-		// The script's start is whole seconds, so the duration is measured from them.
+		// The start is whole seconds, so the duration is measured from them.
 		elapsed := now.Sub(time.Unix(r.start.Unix(), 0))
 		duration = strconv.FormatInt(int64(elapsed/time.Second), 10)
 	}
