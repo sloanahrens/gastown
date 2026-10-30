@@ -3490,15 +3490,17 @@ function reworkLine(r) {
 }
 
 // reworkWindowLabel dates a window by its own span, since the reader names both
-// older stretches "the 7 days before" and two rows cannot share one name; a
-// window whose span is missing or unreadable keeps the reader's name rather than
-// draw a guess.
-function reworkWindowLabel(w) {
+// older stretches "the 7 days before" and two rows cannot share one name. A
+// window whose span is missing, unreadable or reversed keeps the reader's name
+// rather than draw a guess. now is the clock, in epoch milliseconds, so a caller
+// can pass a fixed time; it defaults to the page's own clock.
+function reworkWindowLabel(w, now) {
   const from = Date.parse(String((w && w.from) || "").replace(/\.\d+/, ""));
   const to = Date.parse(String((w && w.to) || "").replace(/\.\d+/, ""));
   if (isNaN(from) || isNaN(to)) return (w && w.name) || "";
-  const day = 86400000, at = Date.now();
+  const day = 86400000, at = now == null ? Date.now() : now;
   const toDays = Math.round((at - to) / day), fromDays = Math.round((at - from) / day);
+  if (fromDays <= toDays) return (w && w.name) || "";
   if (toDays <= 0) return fromDays > 0 ? "last " + fromDays + " days" : ((w && w.name) || "");
   return toDays + "-" + fromDays + " days ago";
 }

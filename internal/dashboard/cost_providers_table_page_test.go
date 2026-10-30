@@ -852,7 +852,9 @@ func TestCostHeaderShowsItsSummaryWhenClosed(t *testing.T) {
 
 // The page no longer draws the markup the table replaces: the DeepSeek tiles and
 // prose, the Claude headline and plan line, the Jev prose line, and the limit
-// label over the chart.
+// label over the chart. Where the table and the budget line sit in the panel is
+// asserted on the drawn panel by TestCostPanelDrawsGCPUnderTheProviderRows,
+// which reads the rendered order rather than renderCost's source text.
 func TestCostPageDropsTheMarkupTheTableReplaces(t *testing.T) {
 	t.Parallel()
 
@@ -865,15 +867,6 @@ func TestCostPageDropsTheMarkupTheTableReplaces(t *testing.T) {
 		if strings.Contains(page, gone) {
 			t.Errorf("index.html still carries %q, which the providers table replaces", gone)
 		}
-	}
-	cost := pageFunc(t, "renderCost")
-	if i, j := strings.Index(cost, "costProviders("), strings.Index(cost, "costChartFold(spendBox, \"daily\""); i < 0 || j < 0 || i > j {
-		t.Error("renderCost does not draw the providers table before the daily chart")
-	}
-	// The budget line sits directly under the provider rows, above the spend part
-	// that holds the charts.
-	if i, j := strings.Index(cost, "costGCP(box, s.cloud)"), strings.Index(cost, "box.append(spendBox)"); i < 0 || j < 0 || i > j {
-		t.Error("renderCost does not draw the GCP budget line under the provider rows, above the daily chart")
 	}
 }
 

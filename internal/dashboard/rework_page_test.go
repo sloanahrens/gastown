@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -229,6 +230,42 @@ func TestCostPanelNamesTheWindowEndingNow(t *testing.T) {
 	}
 	if got := tables[0][1][0]; got != "last 2 days" {
 		t.Errorf("window column = %q, want last 2 days", got)
+	}
+}
+
+// The label dates a span against the clock it is handed, so a caller can pin the
+// day boundary instead of reading the wall clock, and a span whose end precedes
+// its start keeps the reader's name rather than drawing "14-7 days ago".
+func TestCostPanelWindowLabelUsesTheClockItIsGiven(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	at := time.Date(2024, 3, 15, 12, 0, 0, 0, time.UTC)
+	day := 24 * time.Hour
+	for _, tc := range []struct {
+		name string
+		w    map[string]any
+		want string
+	}{
+		{"ends now", reworkWindowReading(at, 2*day, 0, 3), "last 2 days"},
+		{"one week back", reworkWindowReading(at, 14*day, 7*day, 3), "7-14 days ago"},
+		{"reversed span", map[string]any{
+			"name": "the 7 days before",
+			"from": at.Add(-7 * day).UTC().Format(time.RFC3339),
+			"to":   at.Add(-14 * day).UTC().Format(time.RFC3339),
+		}, "the 7 days before"},
+	} {
+		js, err := json.Marshal(tc.w)
+		if err != nil {
+			t.Fatalf("%s: encoding the window: %v", tc.name, err)
+		}
+		v, err := dom.vm.RunString("reworkWindowLabel(" + string(js) + ", " + strconv.FormatInt(at.UnixMilli(), 10) + ")")
+		if err != nil {
+			t.Fatalf("%s: labelling the window: %v", tc.name, err)
+		}
+		if got := v.String(); got != tc.want {
+			t.Errorf("%s: label = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
