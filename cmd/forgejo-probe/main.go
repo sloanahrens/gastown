@@ -1,9 +1,10 @@
 // Command forgejo-probe proves a rig's gate runs green in the real Forgejo
 // runner before the rig is cut over (gt-tpg0p.85).
 //
-// It exits 0 for -h, 1 when the run cannot start (git is not on PATH), 2 for a
-// refused command line, and 70 while the probe run itself is not wired
-// (gt-tpg0p.92).
+// It exits 0 for -h or a proven green, 1 when the run cannot start (git is not
+// on PATH) or the probe failed, 2 for a refused command line, 3 for a green run
+// whose push did not run the rig's hooks, and 70 while the probe run itself is
+// not wired (gt-tpg0p.92).
 package main
 
 import (
@@ -90,6 +91,13 @@ var usage = fmt.Sprintf(`Usage: forgejo-probe <rig> --repo OWNER/NAME [options]
   --poll-interval SEC    wait between status reads (default: %d)
   --dry-run              read but never write: no push, no branch deletion
   -h, --help             this text
+
+Exit codes:
+  0    help, or a green probe whose record was written
+  1    the run failed, or the probe was red
+  2    a refused command line
+  3    green, but the rig's hooks were not exercised, so no record was written
+  70   not wired yet
 `,
 	forgejoprobe.DefaultAPIURL,
 	forgejoprobe.DefaultMainBranch,

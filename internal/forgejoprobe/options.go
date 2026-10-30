@@ -26,6 +26,9 @@ const (
 	ExitFailure = 1
 	// ExitUsage is a command line the validation refused.
 	ExitUsage = 2
+	// ExitHooksNotExercised is a green run whose push did not run the rig's
+	// hooks. It writes no record, so a script cannot take the run for the proof.
+	ExitHooksNotExercised = 3
 	// ExitNotWired is a command line that parsed while the probe run is not
 	// implemented: a run that probed nothing must not exit as though it had.
 	ExitNotWired = 70
@@ -88,7 +91,7 @@ func (o *Options) Bare() string {
 // Record is the file a green run leaves for the cutover to read:
 // <config-dir>/probe-<rig>.record.
 func (o *Options) Record() string {
-	return filepath.Join(o.ConfigDir, "probe-"+o.Rig+".record")
+	return recordPath(o.ConfigDir, o.Rig)
 }
 
 // Branch is the probe branch pushed to the rig's Forgejo copy.

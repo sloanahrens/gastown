@@ -50,6 +50,8 @@ func TestMainUsageAndHelp(t *testing.T) {
 				"(default: " + forgejoprobe.DefaultMainBranch + ")",
 				"(default: 1200)",
 				"(default: 15)",
+				"Exit codes:",
+				"3    green, but the rig's hooks were not exercised, so no record was written",
 			} {
 				if !strings.Contains(stdout.String(), want) {
 					t.Errorf("run(%s) stdout = %q, want it to hold %q", flag, stdout.String(), want)
