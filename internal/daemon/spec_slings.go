@@ -252,8 +252,8 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 	if err != nil {
 		reason := fmt.Sprintf("sling process failed after %s of its %s bound: %v %s", elapsed, specSlingBound(), err, lastLine(string(stderr)))
 		// The sling's own deadline is what a kill at the bound reports: the
-		// daemon's ctx is untouched, so a cancelled sling is the shutdown
-		// path, which failSpecSling leaves alone.
+		// daemon's ctx is untouched, so a canceled sling is the shutdown path,
+		// which failSpecSling leaves alone.
 		killedAtBound := errors.Is(ctx.Err(), context.DeadlineExceeded)
 		d.logger.Printf("spec_dispatch: %s: %s", f.Bead, reason)
 		d.failSpecSling(f, reason, killedAtBound)

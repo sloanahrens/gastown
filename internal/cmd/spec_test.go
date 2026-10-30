@@ -2242,6 +2242,53 @@ func TestSpecRetryTimedOutSlingFrom(t *testing.T) {
 	}
 }
 
+// failingUpdate is a store whose write fails while its reads work: the clear's
+// write path has to report the failure rather than let the tick sling a bead
+// whose label is still on it (gt-vaivp).
+type failingUpdate struct {
+	beads.Client
+	err error
+}
+
+func (f failingUpdate) Update(string, beads.UpdateOptions) error { return f.err }
+
+// A clear that cannot read or write answers no, with the error: the tick keeps
+// the bead held rather than dispatching one it could not free (gt-vaivp).
+func TestSpecRetryTimedOutSlingFromFailures(t *testing.T) {
+	t.Parallel()
+	timeoutNote := specdispatch.TimeoutNoteMarker + " sling killed at its 5m0s bound (attempt 1 of 3)"
+	seed := func() *beadsfake.Fake {
+		db := beadsfake.New()
+		db.Seed(beads.Issue{ID: "gt-x", Status: "open", Labels: []string{specdispatch.DispatchFailedLabel}, Notes: timeoutNote})
+		return db
+	}
+
+	t.Run("the read fails", func(t *testing.T) {
+		t.Parallel()
+		db := seed()
+		db.FailWith("show", errors.New("dolt: connection refused"))
+		cleared, err := specRetryTimedOutSlingFrom(db, "gt-x")
+		if err == nil || !strings.Contains(err.Error(), "reading the failed bead") {
+			t.Errorf("err = %v, want the failed read named", err)
+		}
+		if cleared {
+			t.Error("a read that failed cleared nothing")
+		}
+	})
+
+	t.Run("the write fails", func(t *testing.T) {
+		t.Parallel()
+		store := failingUpdate{Client: seed(), err: errors.New("dolt: connection refused")}
+		cleared, err := specRetryTimedOutSlingFrom(store, "gt-x")
+		if err == nil || !strings.Contains(err.Error(), "clearing the failed label") {
+			t.Errorf("err = %v, want the failed clear named", err)
+		}
+		if cleared {
+			t.Error("a write that failed cleared nothing")
+		}
+	})
+}
+
 // A rig whose park state cannot be read is held out of the candidate set, and
 // the read says why. An unverified rig is reported as an error line, the way a
 // failed board read is, so the tick log shows it was held for lack of a
