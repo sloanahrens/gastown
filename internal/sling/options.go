@@ -62,9 +62,11 @@ type Options struct {
 	TownRoot         string
 	BeadsDir         string
 
-	// Steps times the spawn path's stages (gt-llg8). Nil is no timer. A caller
-	// that owns its own log — the daemon, which reports per tick — passes its
-	// own; the cobra command leaves it to this process's timer.
+	// Steps times the dispatch's stages, and is handed to the spawn path for its
+	// own (gt-llg8, gt-7nctk). Nil is no timer: the engine names nothing and the
+	// spawn falls back to this process's timer, which is what a hand-run
+	// `gt sling` wants. The spec dispatcher passes its sling trace, so every
+	// stage of a tick's sling lands on the line that tick logs.
 	Steps func(name string)
 
 	// Deliberate marks a hand dispatch, which clears the bead's respawn count

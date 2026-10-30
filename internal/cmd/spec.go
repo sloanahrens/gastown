@@ -2676,11 +2676,15 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			return verifyFormulaExists(formula, filepath.Join(townRoot, rig), townRoot)
 		},
 		Sling: func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
+			// The trace starts on the job's first line, so everything the sling
+			// does — the seat picture it reads, the engine's stages, the spawn's
+			// seat claim and the sandbox's phases — is timed on one timeline
+			// (gt-7nctk). A nil trace here would leave the pre-sling work out.
+			trace := session.NewSandboxTrace(time.Now)
 			var occupied func() ([]poolSession, error)
 			if seats := snapshot.Load(); seats != nil {
 				occupied = snapshotOccupied(*seats, newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)
 			}
-			trace := session.NewSandboxTrace(time.Now)
 			name, err := slingSpec(townRoot, c, resumeBranch, seat, occupied, trace)
 			slingTraces.add(specSlingTraceLine(c.Spec.ID, seat.Agent, trace, err))
 			return name, err
@@ -3284,14 +3288,18 @@ func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, resume
 // The agent is explicit, so it wins over the bead's route:* labels in the
 // pool; the pool still enforces its own caps and may refuse. occupied, when
 // set, is the seat occupancy read the pool decision uses (the tick's
-// snapshot); nil reads the town. trace times the sandbox phases of the start;
-// nil times nothing.
+// snapshot); nil reads the town. trace times every stage of the sling, from the
+// seat picture it reads to the end of the session start; nil times nothing.
 func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice, occupied func() ([]poolSession, error), trace *session.SandboxTrace) (string, error) {
 	targetBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, c.Rig)
 	if !ok {
 		return "", fmt.Errorf("cannot resolve rig %q beads database for %s", c.Rig, c.Spec.ID)
 	}
 	params := specSlingParams(townRoot, targetBeadsDir, resolveFormula("", false, townRoot, c.Rig), c, resumeBranch, seat)
+	// The engine and the spawner name each stage they run on this trace, so the
+	// note's total is the sling's own time rather than the sandbox's share of
+	// it (gt-7nctk).
+	params.Steps = trace.Steps()
 	d := realSlingDeps()
 	d.beadInfoInTown = refuseOpenBlockers(d.beadInfoInTown)
 	d.spawnPolecat = specSlingSpawn(d.spawnPolecat, occupied, trace)

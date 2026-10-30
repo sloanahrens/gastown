@@ -62,6 +62,45 @@ func TestSandboxTraceSummaryIsEmptyUntilAPhaseRuns(t *testing.T) {
 	}
 }
 
+// The time between the trace's start and its first mark, and after its last
+// one, is a phase of its own: without it the note's phases would fall short of
+// its total by exactly the time nothing named (gt-7nctk).
+func TestSandboxTraceSummaryCarriesTheUnnamedTimeAsOther(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	clock.Advance(2 * time.Second)
+	trace.Mark("guards")
+	clock.Advance(3 * time.Second)
+	trace.Mark("hook")
+	clock.Advance(5 * time.Second)
+
+	if got, want := trace.Summary(), "guards 2s, hook 3s, other 5s, total 10s"; got != want {
+		t.Fatalf("Summary() = %q, want %q: the time no phase named is reported rather than lost", got, want)
+	}
+}
+
+// Steps hands the trace's Mark down a call chain, so a stage a caller reports
+// lands on the same timeline as the phases the start times itself.
+func TestSandboxTraceStepsRecordsOnTheTrace(t *testing.T) {
+	t.Parallel()
+	clock := newTraceClock()
+	trace := NewSandboxTrace(clock.Now)
+	steps := trace.Steps()
+	clock.Advance(2 * time.Second)
+	steps("seat decision")
+	clock.Advance(3 * time.Second)
+	steps("hook")
+
+	if got, want := trace.Summary(), "seat decision 2s, hook 3s, total 5s"; got != want {
+		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+	var nilTrace *SandboxTrace
+	if nilTrace.Steps() != nil {
+		t.Error("(*SandboxTrace)(nil).Steps() returned a sink, want nil so a caller can pass it on unguarded")
+	}
+}
+
 func TestSandboxTraceNilRunsThePhaseButTimesNothing(t *testing.T) {
 	t.Parallel()
 	var trace *SandboxTrace

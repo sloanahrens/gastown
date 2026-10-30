@@ -48,7 +48,17 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// scheduler callers keep the process alive afterwards, where a leaked
 	// claim would hold its seat for the pool's claim TTL (gt-t8q5).
 	defer func() { d.ReleaseSeat(result.SpawnInfo) }()
+	// Every stage below ends with st.end(), and the deferred end names the stage
+	// a dispatch stopped in, so a sink that times from its own last mark — the
+	// spec dispatcher's sling trace — accounts for the whole dispatch and not
+	// only the steps inside the sandbox (gt-7nctk).
+	st := newStageTimer(opts.Steps)
+	defer st.end()
 
+	// A caller that started timing before it got here — the spec dispatcher
+	// starts the trace on the sling job's first line — has that setup in this
+	// first stage, which is why it names the setup as well as the guards.
+	st.begin("setup and guards")
 	townRoot := opts.TownRoot
 	if townRoot == "" {
 		var err error
@@ -174,6 +184,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 			dispatch.SlingRefusalMarker, opts.BeadID, reason)
 	}
 
+	st.end()
+
+	st.begin("duplicate check")
 	// Content duplicate check (gt-mcq): refuse a bead whose named tests and
 	// files already appear on open or recently-closed work in this rig. Placed
 	// after the already-hooked guard so an idempotent re-sling of the same bead
@@ -206,6 +219,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
+	st.end()
+
+	st.begin("blocked-work admission")
 	if opts.RigName != "" {
 		if err := d.VerifyInTargetRig(opts.BeadID, opts.RigName, townRoot); err != nil {
 			result.ErrMsg = err.Error()
@@ -257,6 +273,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
+	st.end()
+
+	st.begin("molecule burn")
 	// 2. Burn stale molecules (if formula applies)
 	// Settle the formula here, not at the top: resolving it reads the rig's
 	// config, and a dispatch the guards above refuse should not pay for that.
@@ -299,6 +318,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
+	st.end()
+
+	st.begin("spawn")
 	// 3. Spawn polecat
 	// Last boundary before the dispatch gets expensive: a spawn allocates a
 	// worktree and a session, and everything past it has to be rolled back.
@@ -333,6 +355,10 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	result.SpawnInfo = spawnInfo
 	result.PolecatName = spawnInfo.PolecatName
 	spawnInfo.OriginalHold = &Hold{Status: info.Status, Assignee: info.Assignee}
+	// The spawn is over on its success path too: the size of the polecat and the
+	// seat it claimed are its own stages, which it reported, and what is left of
+	// it ends here rather than running into the formula's time (gt-7nctk).
+	st.end()
 
 	targetAgent := spawnInfo.AgentID()
 	hookWorkDir := spawnInfo.ClonePath
@@ -349,6 +375,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
+	st.begin("formula cook")
 	// 4. Cook formula (unless SkipCook)
 	// Past the spawn now, so every exit below rolls the polecat back.
 	if err := canceled(ctx); err != nil {
@@ -372,6 +399,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
+	st.end()
+
+	st.begin("formula")
 	// 5. Instantiate formula on bead (wisp + bond)
 	beadToHook := opts.BeadID
 	attachedMoleculeID := ""
@@ -443,6 +473,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
+	st.end()
+
+	st.begin("hook")
 	// 6. Hook bead with retry
 	if err := canceled(ctx); err != nil {
 		rollbackSpawnedPolecat(beadToHook, "Dispatch canceled")
@@ -555,6 +588,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		d.UpdateAgentMode(targetAgent, opts.Mode, hookWorkDir, beadsDir)
 	}
 
+	st.end()
+
+	st.begin("session start")
 	// 10. Start polecat session
 	if err := canceled(ctx); err != nil {
 		rollbackSpawnedPolecat(beadToHook, "Dispatch canceled")
@@ -569,6 +605,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		return result, fmt.Errorf("starting polecat session: %w", err)
 	}
 	fmt.Fprintf(d.out(), "  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
+	// The sandbox's own phases were reported from inside the start, so this
+	// names what is left of it — the runtime wait and the pane read (gt-7nctk).
+	st.end()
 	_ = pane
 	// The attempt starts now, not at the sling call: the work is the session's
 	// time on the bead, and the spawn before it is dispatch overhead (gt-liseq).

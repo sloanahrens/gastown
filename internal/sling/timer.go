@@ -58,3 +58,39 @@ func (t *Timer) Steps() func(name string) {
 	}
 	return t.Step
 }
+
+// stageTimer names the stages of one dispatch on the caller's step sink, so a
+// sink that times from its own last mark accounts for the whole run instead of
+// only the steps inside a sandbox (gt-7nctk). A stage is named when it ends,
+// which is what its interval since the previous mark measures. A nil sink
+// times nothing, so a caller that wants no timing keeps today's silence.
+type stageTimer struct {
+	sink func(name string)
+	name string
+}
+
+// newStageTimer times stages on sink; a nil sink times nothing.
+func newStageTimer(sink func(string)) *stageTimer {
+	if sink == nil {
+		sink = func(string) {}
+	}
+	return &stageTimer{sink: sink}
+}
+
+// begin names the stage about to run, replacing any stage still open.
+func (t *stageTimer) begin(name string) { t.name = name }
+
+// end records the open stage and is a no-op when none is open. A dispatch that
+// returns from inside a stage leaves it open for the deferred end, so the step
+// it stopped in keeps its time on every exit path.
+//
+// A stage whose inside reports steps of its own — the spawn's sizes and the
+// session start's sandbox phases — is named here for what is left of it after
+// those steps, so nothing between two marks goes unnamed.
+func (t *stageTimer) end() {
+	if t.name == "" {
+		return
+	}
+	t.sink(t.name)
+	t.name = ""
+}
