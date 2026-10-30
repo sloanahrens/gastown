@@ -657,10 +657,15 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// Create server-side database for this rig BEFORE initializing beads.
 	// InitBeads runs bd init --server which writes metadata.json, but the actual
 	// database in .dolt-data/ must exist first for bd config commands to work.
+	// A rig whose route names the tracker backend has no database to create
+	// here: InitRig makes none and rig add says why (gt-p85pw.102).
 	if !opts.SkipDoltCheck {
 		if _, err := exec.LookPath("dolt"); err == nil {
-			if _, _, err := doltserver.InitRig(m.townRoot, opts.Name); err != nil {
+			result, err := doltserver.InitRig(m.townRoot, opts.Name)
+			if err != nil {
 				fmt.Printf("  Warning: Could not create rig database: %v\n", err)
+			} else if result.SkipReason != "" {
+				fmt.Printf("  %s\n", result.SkipReason)
 			}
 		}
 	}

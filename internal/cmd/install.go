@@ -380,7 +380,7 @@ func runInstallWith(opts installOptions, args []string) error {
 		// Identity was verified in preflight above.
 		// Create HQ database before starting server.
 		if !externalTestDolt {
-			if _, _, err := doltserver.InitRig(absPath, "hq"); err != nil {
+			if _, err := doltserver.InitRig(absPath, "hq"); err != nil {
 				return fmt.Errorf("initializing HQ Dolt database: %w", err)
 			}
 

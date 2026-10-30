@@ -3080,14 +3080,30 @@ func jsonKeys(m map[string]json.RawMessage) []string {
 	return keys
 }
 
+// InitRigResult is what InitRig did for a rig.
+type InitRigResult struct {
+	// ServerWasRunning says the town's Dolt server was up while InitRig ran.
+	ServerWasRunning bool
+	// Created says InitRig made the rig's database. It is false when the
+	// database already existed on disk (idempotent no-op) and when the rig
+	// keeps its beads somewhere else.
+	Created bool
+	// SkipReason is the line the caller reports when InitRig made no database
+	// for a rig that has none: its route names the tracker backend. It is
+	// empty whenever Created is true or the database already existed, so a
+	// caller can tell those cases apart without looking at the filesystem
+	// (gt-p85pw.102).
+	SkipReason string
+}
+
 // InitRig initializes a new rig database in the data directory.
 // If the Dolt server is running, it executes CREATE DATABASE to register the
 // database with the live server (avoiding the need for a restart).
-// Returns (serverWasRunning, created, err). created is false when the database
-// already existed on disk (idempotent no-op).
-func (h *host) InitRig(townRoot, rigName string) (serverWasRunning bool, created bool, err error) {
+// A rig whose route names the tracker backend makes no database and reaches no
+// server: the result carries a SkipReason, which the caller prints.
+func (h *host) InitRig(townRoot, rigName string) (InitRigResult, error) {
 	if rigName == "" {
-		return false, false, fmt.Errorf("rig name cannot be empty")
+		return InitRigResult{}, fmt.Errorf("rig name cannot be empty")
 	}
 
 	config := h.DefaultConfig(townRoot)
@@ -3095,8 +3111,22 @@ func (h *host) InitRig(townRoot, rigName string) (serverWasRunning bool, created
 	// Validate rig name (simple alphanumeric + underscore/dash)
 	for _, r := range rigName {
 		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
-			return false, false, fmt.Errorf("invalid rig name %q: must contain only alphanumeric, underscore, or dash", rigName)
+			return InitRigResult{}, fmt.Errorf("invalid rig name %q: must contain only alphanumeric, underscore, or dash", rigName)
 		}
+	}
+
+	// A rig whose route names the tracker backend keeps its beads there, so a
+	// database made here is one nothing reads: every data-directory walk still
+	// finds it, backs it up, measures it and reaps it as a leftover
+	// (gt-p85pw.102).
+	route, err := rigTrackerRoute(townRoot, rigName)
+	if err != nil {
+		return InitRigResult{}, err
+	}
+	if route != nil {
+		return InitRigResult{SkipReason: fmt.Sprintf(
+			"Not creating a Dolt database for rig %q: its route %s names the %s backend",
+			rigName, route.Prefix, route.BackendName())}, nil
 	}
 
 	rigDir := filepath.Join(config.DataDir, rigName)
@@ -3109,9 +3139,9 @@ func (h *host) InitRig(townRoot, rigName string) (serverWasRunning bool, created
 			fmt.Fprintf(os.Stderr, "Warning: metadata.json update failed for existing database %q: %v\n", rigName, err)
 		}
 		if err := h.EnsureRigIssuePrefix(townRoot, rigName, running); err != nil {
-			return running, false, fmt.Errorf("ensuring issue_prefix for existing database %q: %w", rigName, err)
+			return InitRigResult{ServerWasRunning: running}, fmt.Errorf("ensuring issue_prefix for existing database %q: %w", rigName, err)
 		}
-		return running, false, nil
+		return InitRigResult{ServerWasRunning: running}, nil
 	}
 
 	// Check if server is running
@@ -3132,7 +3162,7 @@ func (h *host) InitRig(townRoot, rigName string) (serverWasRunning bool, created
 		// Server is running: use CREATE DATABASE which both creates the
 		// directory and registers the database with the live server.
 		if err := h.serverExecSQL(townRoot, fmt.Sprintf("CREATE DATABASE `%s`", rigName)); err != nil {
-			return true, false, fmt.Errorf("creating database on running server: %w", err)
+			return InitRigResult{ServerWasRunning: true}, fmt.Errorf("creating database on running server: %w", err)
 		}
 		// Wait for the new database to appear in the server's in-memory catalog.
 		// CREATE DATABASE returns before the catalog is fully updated, so
@@ -3147,7 +3177,7 @@ func (h *host) InitRig(townRoot, rigName string) (serverWasRunning bool, created
 		// Server not running: create directory and init manually.
 		// The database will be picked up when the server starts.
 		if err := os.MkdirAll(rigDir, 0755); err != nil {
-			return false, false, fmt.Errorf("creating rig directory: %w", err)
+			return InitRigResult{}, fmt.Errorf("creating rig directory: %w", err)
 		}
 
 		cmd := exec.Command("dolt", "init")
@@ -3155,7 +3185,7 @@ func (h *host) InitRig(townRoot, rigName string) (serverWasRunning bool, created
 		setProcessGroup(cmd)
 		output, err := h.execCombined(cmd)
 		if err != nil {
-			return false, false, fmt.Errorf("initializing Dolt database: %w\n%s", err, output)
+			return InitRigResult{}, fmt.Errorf("initializing Dolt database: %w\n%s", err, output)
 		}
 	}
 
@@ -3167,15 +3197,80 @@ func (h *host) InitRig(townRoot, rigName string) (serverWasRunning bool, created
 		fmt.Fprintf(os.Stderr, "Warning: database initialized but metadata.json update failed: %v\n", err)
 	}
 	if err := h.EnsureRigIssuePrefix(townRoot, rigName, running); err != nil {
-		return running, true, fmt.Errorf("ensuring issue_prefix for database %q: %w", rigName, err)
+		return InitRigResult{ServerWasRunning: running, Created: true}, fmt.Errorf("ensuring issue_prefix for database %q: %w", rigName, err)
 	}
 
-	return running, true, nil
+	return InitRigResult{ServerWasRunning: running, Created: true}, nil
 }
 
 // InitRig is (*host).InitRig on the real machine.
-func InitRig(townRoot, rigName string) (serverWasRunning bool, created bool, err error) {
+func InitRig(townRoot, rigName string) (InitRigResult, error) {
 	return std.InitRig(townRoot, rigName)
+}
+
+// rigTrackerRoute returns the route that holds rigName's beads when it names
+// the tracker backend, and nil when the rig is on Dolt or the table names it
+// with no route. The table is keyed by prefix, so the rig is resolved to its
+// prefixes first: every route whose path starts with the rig's name (the way
+// beads.GetPrefixForRig reads it), and the beads prefix mayor/rigs.json records
+// for the rig. A table that cannot be read is an error, never nil: reading it
+// as "not on the tracker" would create the database the route refuses
+// (gt-p85pw.102).
+func rigTrackerRoute(townRoot, rigName string) (*beads.Route, error) {
+	routes, err := beads.LoadRoutes(beads.GetTownBeadsPath(townRoot))
+	if err != nil {
+		return nil, fmt.Errorf("reading the route table: %w", err)
+	}
+
+	prefixes, err := rigRoutePrefixes(townRoot, rigName, routes)
+	if err != nil {
+		return nil, err
+	}
+	for i := range routes {
+		if routes[i].BackendName() != beads.BackendTracker || routes[i].Prefix == "" {
+			continue
+		}
+		for _, prefix := range prefixes {
+			if sameRoutePrefix(routes[i].Prefix, prefix) {
+				return &routes[i], nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+// rigRoutePrefixes returns the route prefixes that can name rigName's beads: the
+// prefix of each route whose path starts with the rig's name, then the prefix
+// mayor/rigs.json records for it. A rig neither source names contributes none,
+// so a rig with no route keeps the Dolt path InitRig always had. A registry that
+// exists but cannot be read is an error, never "the rig has no prefix": the
+// prefix is what selects the route whose backend decides the rig's store.
+func rigRoutePrefixes(townRoot, rigName string, routes []beads.Route) ([]string, error) {
+	var prefixes []string
+	for _, r := range routes {
+		if first, _, _ := strings.Cut(r.Path, "/"); first == rigName && r.Prefix != "" {
+			prefixes = append(prefixes, r.Prefix)
+		}
+	}
+	rigsConfig, err := configpkg.LoadRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil && !errors.Is(err, configpkg.ErrNotFound) {
+		return nil, fmt.Errorf("reading the rig registry: %w", err)
+	}
+	if err == nil {
+		if entry, ok := rigsConfig.Rigs[rigName]; ok && entry.BeadsConfig != nil {
+			if prefix := strings.TrimSpace(entry.BeadsConfig.Prefix); prefix != "" {
+				prefixes = append(prefixes, prefix)
+			}
+		}
+	}
+	return prefixes, nil
+}
+
+// sameRoutePrefix compares two route prefixes, which differ only in the trailing
+// hyphen: the table writes "ag-", mayor/rigs.json writes "ag".
+func sameRoutePrefix(a, b string) bool {
+	trimmed := strings.TrimSuffix(a, "-")
+	return trimmed != "" && trimmed == strings.TrimSuffix(b, "-")
 }
 
 // EnsureRigIssuePrefix initializes the beads schema for a rig database and
@@ -4053,11 +4148,14 @@ func (h *host) RepairWorkspace(townRoot string, ws BrokenWorkspace) (string, err
 	}
 
 	// No local data — create a fresh database
-	_, created, err := h.InitRig(townRoot, ws.ConfiguredDB)
+	result, err := h.InitRig(townRoot, ws.ConfiguredDB)
 	if err != nil {
 		return "", fmt.Errorf("creating database for %s: %w", ws.RigName, err)
 	}
-	if !created {
+	if result.SkipReason != "" {
+		return result.SkipReason, nil
+	}
+	if !result.Created {
 		return "database already exists (no-op)", nil
 	}
 	return "created new database", nil
