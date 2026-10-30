@@ -12,17 +12,16 @@ import (
 )
 
 // Supervisor is the daemon supervisor that replaces a container town's daemon.
-// It offers its start argv the way the landed supervisor does (gt-qpeei.10), as
-// a builder called when needed rather than a fixed slice: the container
-// supervisor refuses a town that does not set both daemon.container_name and
-// daemon.compose_project there, and Deploy asks for the argv before it writes
-// anything, so a town that would act on the live container is refused with its
-// compose file untouched.
+// Deploy asks it for the start argv before it writes anything, so a town its
+// settings refuse is refused with its compose file untouched.
 type Supervisor interface {
 	// StartArgv builds the argv that starts the daemon's container. `up -d
 	// daemon` also recreates the container, which is how a new image reaches
 	// it; nothing removes the old container first.
 	StartArgv() ([]string, error)
+	// ContainerName is the container the town's settings name, the one
+	// StartArgv recreates. A render for any other container is refused.
+	ContainerName() string
 }
 
 // Deployer replaces a container town's daemon with a freshly built image: it
@@ -43,9 +42,11 @@ type Deployer struct {
 // it, and the rename happens before the command runs, so a container that
 // starts always starts from the file on disk, never from a half-written one.
 //
-// The start command must name composePath as its only compose file, since that
-// is the file written here; a command that named another would start a
-// container this deploy never rendered.
+// The start command must name composePath as its only compose file and spec's
+// Project as its only compose project, and spec's ContainerName must be the
+// container the supervisor's settings name. A command or render that disagrees
+// would start or replace a container this deploy did not render for, so each
+// mismatch is refused before anything is written.
 //
 // The start argv is asked for first and run last. Asking first is what makes a
 // refused town harmless: an unset daemon.container_name or daemon.compose_project
@@ -69,8 +70,15 @@ func (d Deployer) Deploy(ctx context.Context, sup Supervisor, composePath string
 	if err != nil {
 		return fmt.Errorf("daemonimage: the supervisor refused to start the container: %w", err)
 	}
-	if files := composeFiles(argv); len(files) != 1 || files[0] != composePath {
+	files, projects := composeGlobals(argv)
+	if len(files) != 1 || files[0] != composePath {
 		return fmt.Errorf("daemonimage: the start command must name %s as its only compose file, the one Deploy writes; nothing was written or started", composePath)
+	}
+	if len(projects) != 1 || projects[0] != spec.Project {
+		return fmt.Errorf("daemonimage: the start command must run compose project %q, the project the render is for; nothing was written or started", spec.Project)
+	}
+	if container := sup.ContainerName(); spec.ContainerName != container {
+		return fmt.Errorf("daemonimage: the render is for container %q but the town's settings name %q; nothing was written or started", spec.ContainerName, container)
 	}
 	content, err := templates.RenderDaemonCompose(spec)
 	if err != nil {
@@ -85,34 +93,56 @@ func (d Deployer) Deploy(ctx context.Context, sup Supervisor, composePath string
 	return nil
 }
 
-// composeFiles returns the compose files argv names: the value of each -f or
-// --file flag, whether the value follows the flag or is joined to it with =.
-// A flag with no value yields an empty name, which no compose file matches.
-func composeFiles(argv []string) []string {
-	var files []string
-	for i := 0; i < len(argv); i++ {
-		switch a := argv[i]; {
+// composeGlobals returns the compose files and projects argv names before its
+// compose subcommand: the value of each -f or --file, and of each -p or
+// --project-name, whether the value follows the flag or is joined to it with =.
+// Flags after the subcommand belong to it and are not read. A flag with no value
+// yields an empty name, which matches no file or project.
+func composeGlobals(argv []string) (files, projects []string) {
+	i := 0
+	for ; i < len(argv) && argv[i] != "compose"; i++ {
+		if argv[i] == "--context" {
+			i++
+		}
+	}
+	for i++; i < len(argv); i++ {
+		a := argv[i]
+		switch {
 		case a == "-f" || a == "--file":
-			name := ""
-			if i+1 < len(argv) {
-				name = argv[i+1]
-			}
-			files = append(files, name)
+			files = append(files, valueAfter(argv, i))
 			i++
 		case strings.HasPrefix(a, "--file="):
 			files = append(files, strings.TrimPrefix(a, "--file="))
 		case strings.HasPrefix(a, "-f="):
 			files = append(files, strings.TrimPrefix(a, "-f="))
+		case a == "-p" || a == "--project-name":
+			projects = append(projects, valueAfter(argv, i))
+			i++
+		case strings.HasPrefix(a, "--project-name="):
+			projects = append(projects, strings.TrimPrefix(a, "--project-name="))
+		case strings.HasPrefix(a, "-p="):
+			projects = append(projects, strings.TrimPrefix(a, "-p="))
+		default:
+			return files, projects
 		}
 	}
-	return files
+	return files, projects
+}
+
+// valueAfter is the argument after the flag at argv[i], or empty when the flag
+// is the last argument.
+func valueAfter(argv []string, i int) string {
+	if i+1 < len(argv) {
+		return argv[i+1]
+	}
+	return ""
 }
 
 // writeComposeFile replaces path with content in one rename, so a reader of the
 // file sees either the old render or the new one, never a partly written file.
-// The render goes to a new temporary file beside path, since a rename is atomic
-// only within one filesystem, and the name is unique so concurrent writers never
-// share it. The temporary file is removed unless the rename puts it in place.
+// The render is written to a temporary file beside path, because a rename is
+// atomic only within one filesystem; its unique name keeps concurrent writers
+// apart. The temporary file is removed unless the rename puts it in place.
 func writeComposeFile(path string, content []byte) error {
 	return writeComposeFileWith(path, content, createComposeTemp)
 }

@@ -12,14 +12,23 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
+// deployProject and deployContainer are the project and container a town's
+// settings name. The spec renders for them and the start argv runs under them.
+const (
+	deployProject   = "scratch"
+	deployContainer = "scratch-daemon-1"
+)
+
 // fakeSupervisor is a container supervisor whose start argv is fixed, or whose
 // build refuses the way the landed one does for a town that does not set both
-// container settings (gt-qpeei.10). It counts the builds, so a test can prove a
-// refusal came before the argv was ever asked for.
+// container settings (gt-qpeei.10). It names the container its settings give.
+// It counts the builds, so a test can prove a refusal came before the argv was
+// ever asked for.
 type fakeSupervisor struct {
-	argv   []string
-	refuse error
-	built  int
+	argv      []string
+	refuse    error
+	container string
+	built     int
 }
 
 func (s *fakeSupervisor) StartArgv() ([]string, error) {
@@ -29,6 +38,8 @@ func (s *fakeSupervisor) StartArgv() ([]string, error) {
 	}
 	return append([]string(nil), s.argv...), nil
 }
+
+func (s *fakeSupervisor) ContainerName() string { return s.container }
 
 // deployRunner records each command it is given, and the compose file's content
 // at the moment it ran (nil when the file was absent), so a test can prove the
@@ -60,8 +71,8 @@ func (r *deployRunner) run(_ context.Context, dir string, env, argv []string) er
 // host reachable from inside the container. Every field passes RenderDaemonCompose.
 func deploySpec() templates.ComposeSpec {
 	return templates.ComposeSpec{
-		Project:       "scratch",
-		ContainerName: "scratch-daemon-1",
+		Project:       deployProject,
+		ContainerName: deployContainer,
 		Image:         ImageTag(testRev),
 		TownRoot:      "/tmp/scratch-town",
 		StopGrace:     templates.MinimumStopGrace,
@@ -74,7 +85,12 @@ func deploySpec() templates.ComposeSpec {
 // composePath. It is a fixture for Deploy's own behaviour; that the real builder
 // returns this argv is pinned by the test beside the supervisor in internal/cmd.
 func containerStartArgv(composePath string) []string {
-	return []string{"docker", "--context", "desktop-linux", "compose", "-p", "scratch", "-f", composePath, "up", "-d", "daemon"}
+	return composeArgvFor(deployProject, composePath)
+}
+
+// composeArgvFor is containerStartArgv for a given project and compose file.
+func composeArgvFor(project, composePath string) []string {
+	return []string{"docker", "--context", "desktop-linux", "compose", "-p", project, "-f", composePath, "up", "-d", "daemon"}
 }
 
 // composePathIn makes the directory a town's compose file lives in and returns
@@ -135,7 +151,7 @@ func TestDeployWritesTheComposeFileBeforeItStartsTheContainer(t *testing.T) {
 	path := composePathIn(t)
 	writeOldCompose(t, path)
 	run := &deployRunner{composePath: path}
-	sup := &fakeSupervisor{argv: containerStartArgv(path)}
+	sup := &fakeSupervisor{container: deployContainer, argv: containerStartArgv(path)}
 	d := Deployer{
 		Run:     run.run,
 		Environ: []string{"PATH=/usr/bin:/bin", "HOME=/home/builder", "DOCKER_HOST=tcp://elsewhere:2375", "DOCKER_CONTEXT=elsewhere"},
@@ -182,7 +198,7 @@ func TestDeployRenderErrorLeavesTheOldComposeFileAndRunsNothing(t *testing.T) {
 	path := composePathIn(t)
 	writeOldCompose(t, path)
 	run := &deployRunner{composePath: path}
-	sup := &fakeSupervisor{argv: containerStartArgv(path)}
+	sup := &fakeSupervisor{container: deployContainer, argv: containerStartArgv(path)}
 	spec := deploySpec()
 	spec.Image = ""
 	err := Deployer{Run: run.run}.Deploy(context.Background(), sup, path, spec)
@@ -207,7 +223,7 @@ func TestDeploySupervisorRefusalLeavesTheOldComposeFileAndRunsNothing(t *testing
 	writeOldCompose(t, path)
 	run := &deployRunner{composePath: path}
 	refusal := errors.New("daemon.supervisor is container, but the town does not set both daemon.container_name and daemon.compose_project")
-	sup := &fakeSupervisor{refuse: refusal}
+	sup := &fakeSupervisor{container: deployContainer, refuse: refusal}
 	err := Deployer{Run: run.run}.Deploy(context.Background(), sup, path, deploySpec())
 	if !errors.Is(err, refusal) {
 		t.Errorf("Deploy error = %v, want the start builder's refusal", err)
@@ -228,7 +244,7 @@ func TestDeployStartFailureIsReturned(t *testing.T) {
 	writeOldCompose(t, path)
 	failure := errors.New("docker: no such context")
 	run := &deployRunner{composePath: path, fail: failure}
-	sup := &fakeSupervisor{argv: containerStartArgv(path)}
+	sup := &fakeSupervisor{container: deployContainer, argv: containerStartArgv(path)}
 	err := Deployer{Run: run.run}.Deploy(context.Background(), sup, path, deploySpec())
 	if !errors.Is(err, failure) {
 		t.Errorf("Deploy error = %v, want the start command's failure", err)
@@ -274,7 +290,7 @@ func TestDeployWriteErrorLeavesNothingBehindAndRunsNothing(t *testing.T) {
 			dir := t.TempDir()
 			path := tt.setup(t, dir)
 			run := &deployRunner{composePath: path}
-			sup := &fakeSupervisor{argv: containerStartArgv(path)}
+			sup := &fakeSupervisor{container: deployContainer, argv: containerStartArgv(path)}
 			if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err == nil {
 				t.Fatal("Deploy reported success writing where it cannot")
 			}
@@ -376,14 +392,15 @@ func TestDeployRefusesAStartCommandThatNamesOtherComposeFiles(t *testing.T) {
 		argv []string
 	}{
 		{name: "another file", argv: containerStartArgv(other)},
-		{name: "the file and another", argv: []string{"docker", "compose", "-f", path, "-f", other, "up", "-d", "daemon"}},
-		{name: "no file", argv: []string{"docker", "compose", "up", "-d", "daemon"}},
-		{name: "a file flag with no value", argv: []string{"docker", "compose", "up", "-d", "daemon", "-f"}},
+		{name: "the file and another", argv: []string{"docker", "compose", "-p", deployProject, "-f", path, "-f", other, "up", "-d", "daemon"}},
+		{name: "no file", argv: []string{"docker", "compose", "-p", deployProject, "up", "-d", "daemon"}},
+		{name: "a file flag with no value", argv: []string{"docker", "compose", "-p", deployProject, "up", "-d", "daemon", "-f"}},
+		{name: "a file flag after the subcommand", argv: []string{"docker", "compose", "-p", deployProject, "up", "-d", "daemon", "-f", path}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			run := &deployRunner{composePath: path}
-			sup := &fakeSupervisor{argv: tt.argv}
+			sup := &fakeSupervisor{container: deployContainer, argv: tt.argv}
 			if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err == nil {
 				t.Fatalf("Deploy accepted the start command %q", tt.argv)
 			}
@@ -397,24 +414,101 @@ func TestDeployRefusesAStartCommandThatNamesOtherComposeFiles(t *testing.T) {
 	}
 }
 
-// TestDeployAcceptsTheComposeFileInEitherFlagForm: -f and --file name the file
-// whether the value follows the flag or is joined to it with =.
-func TestDeployAcceptsTheComposeFileInEitherFlagForm(t *testing.T) {
+// TestDeployAcceptsTheComposeFileAndProjectInEitherFlagForm: -f and --file name
+// the file, and -p and --project-name name the project, whether each value
+// follows its flag or is joined to it with =.
+func TestDeployAcceptsTheComposeFileAndProjectInEitherFlagForm(t *testing.T) {
 	t.Parallel()
 	path := composePathIn(t)
 	for _, argv := range [][]string{
-		{"docker", "compose", "--file", path, "up", "-d", "daemon"},
-		{"docker", "compose", "--file=" + path, "up", "-d", "daemon"},
-		{"docker", "compose", "-f=" + path, "up", "-d", "daemon"},
+		{"docker", "compose", "--project-name", deployProject, "--file", path, "up", "-d", "daemon"},
+		{"docker", "compose", "--project-name=" + deployProject, "--file=" + path, "up", "-d", "daemon"},
+		{"docker", "compose", "-p=" + deployProject, "-f=" + path, "up", "-d", "daemon"},
 	} {
 		run := &deployRunner{composePath: path}
-		sup := &fakeSupervisor{argv: argv}
+		sup := &fakeSupervisor{container: deployContainer, argv: argv}
 		if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err != nil {
 			t.Errorf("Deploy(%q): %v", argv, err)
 		}
 		if len(run.calls) != 1 {
 			t.Errorf("Deploy(%q) recorded %d commands, want the start command", argv, len(run.calls))
 		}
+	}
+}
+
+// TestDeployRefusesAStartCommandForAnotherProject: the start command must run
+// the one compose project the render is for. A command that runs another, several,
+// or none would recreate a container this render does not describe, so it is
+// refused before anything is written or run.
+func TestDeployRefusesAStartCommandForAnotherProject(t *testing.T) {
+	t.Parallel()
+	path := composePathIn(t)
+	writeOldCompose(t, path)
+	tests := []struct {
+		name string
+		argv []string
+	}{
+		{name: "another project", argv: composeArgvFor("live", path)},
+		{name: "two projects", argv: []string{"docker", "compose", "-p", deployProject, "-p", "live", "-f", path, "up", "-d", "daemon"}},
+		{name: "no project", argv: []string{"docker", "compose", "-f", path, "up", "-d", "daemon"}},
+		{name: "a project flag with no value", argv: []string{"docker", "compose", "-p", "-f", path, "up", "-d", "daemon"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := &deployRunner{composePath: path}
+			sup := &fakeSupervisor{container: deployContainer, argv: tt.argv}
+			if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err == nil {
+				t.Fatalf("Deploy accepted the start command %q", tt.argv)
+			}
+			if len(run.calls) != 0 {
+				t.Errorf("recorded %d commands, want none for a command that runs another project", len(run.calls))
+			}
+			if got := readCompose(t, path); !reflect.DeepEqual(got, oldCompose) {
+				t.Errorf("the compose file = %q, want the old one unchanged", got)
+			}
+		})
+	}
+}
+
+// TestDeployRefusesARenderForAnotherContainer: the render names the container the
+// town's settings name, which is the one the start command recreates. A render
+// for any other container would leave that container running the old image while
+// the file describes a new one, so it is refused before anything is written.
+func TestDeployRefusesARenderForAnotherContainer(t *testing.T) {
+	t.Parallel()
+	path := composePathIn(t)
+	writeOldCompose(t, path)
+	run := &deployRunner{composePath: path}
+	sup := &fakeSupervisor{container: deployContainer, argv: containerStartArgv(path)}
+	spec := deploySpec()
+	spec.ContainerName = "live-daemon-1"
+	if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, spec); err == nil {
+		t.Fatal("Deploy accepted a render for a container the town's settings do not name")
+	}
+	if len(run.calls) != 0 {
+		t.Errorf("recorded %d commands, want none for a render for another container", len(run.calls))
+	}
+	if got := readCompose(t, path); !reflect.DeepEqual(got, oldCompose) {
+		t.Errorf("the compose file = %q, want the old one unchanged", got)
+	}
+	onlyFileIn(t, filepath.Dir(path), filepath.Base(path))
+}
+
+// TestDeployReadsOnlyTheFlagsBeforeTheSubcommand: the compose flags a command
+// carries belong before its subcommand. A file flag after `up` is the
+// subcommand's own argument, so it does not count as a second compose file.
+func TestDeployReadsOnlyTheFlagsBeforeTheSubcommand(t *testing.T) {
+	t.Parallel()
+	path := composePathIn(t)
+	run := &deployRunner{composePath: path}
+	sup := &fakeSupervisor{container: deployContainer, argv: []string{
+		"docker", "compose", "-p", deployProject, "-f", path, "up", "-d", "daemon", "-f", filepath.Join(filepath.Dir(path), "other.yml"),
+	}}
+	if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(run.calls) != 1 {
+		t.Errorf("recorded %d commands, want the start command", len(run.calls))
 	}
 }
 
@@ -430,7 +524,7 @@ func TestDeployLeavesOtherFilesBesideTheComposeFileAlone(t *testing.T) {
 		t.Fatalf("writing a neighbouring file: %v", err)
 	}
 	run := &deployRunner{composePath: path}
-	sup := &fakeSupervisor{argv: containerStartArgv(path)}
+	sup := &fakeSupervisor{container: deployContainer, argv: containerStartArgv(path)}
 	if err := (Deployer{Run: run.run}).Deploy(context.Background(), sup, path, deploySpec()); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -450,7 +544,7 @@ func TestDeployRefusesAnIncompleteCall(t *testing.T) {
 		d    Deployer
 		sup  Supervisor
 	}{
-		{name: "no runner", d: Deployer{}, sup: &fakeSupervisor{argv: containerStartArgv(path)}},
+		{name: "no runner", d: Deployer{}, sup: &fakeSupervisor{container: deployContainer, argv: containerStartArgv(path)}},
 		{name: "no supervisor", d: Deployer{Run: func(context.Context, string, []string, []string) error { return nil }}},
 	}
 	for _, tt := range tests {
@@ -476,7 +570,7 @@ func TestDeployRefusesAComposePathItCannotName(t *testing.T) {
 	path := composePathIn(t)
 	writeOldCompose(t, path)
 	for _, bad := range []string{"", "  ", "daemon/container/compose.yml"} {
-		sup := &fakeSupervisor{argv: containerStartArgv(path)}
+		sup := &fakeSupervisor{container: deployContainer, argv: containerStartArgv(path)}
 		err := Deployer{Run: func(context.Context, string, []string, []string) error { return nil }}.Deploy(context.Background(), sup, bad, deploySpec())
 		if err == nil {
 			t.Errorf("Deploy accepted compose path %q", bad)

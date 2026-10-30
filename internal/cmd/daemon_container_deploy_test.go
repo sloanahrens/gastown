@@ -12,11 +12,33 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
-// startBuilderSupervisor offers a container town's start builder to a deploy
-// as its supervisor: the argv is the builder's own, built when the deploy asks.
-type startBuilderSupervisor func() ([]string, error)
+// deploySupervisor offers a container town's start builder and the container its
+// settings name to a deploy as its supervisor. The argv is the builder's own,
+// built when the deploy asks.
+type deploySupervisor struct {
+	start     func() ([]string, error)
+	container string
+}
 
-func (b startBuilderSupervisor) StartArgv() ([]string, error) { return b() }
+func (s deploySupervisor) StartArgv() ([]string, error) { return s.start() }
+
+func (s deploySupervisor) ContainerName() string { return s.container }
+
+// townDeploySupervisor is the deploy supervisor for town: the container
+// supervisor's start builder, and the container name read from the same settings
+// the builder reads.
+func townDeploySupervisor(t *testing.T, c *daemonControl, town string) deploySupervisor {
+	t.Helper()
+	sup, err := c.detectDaemonSupervisor(town)
+	if err != nil || sup == nil {
+		t.Fatalf("detectDaemonSupervisor = (%v, %v), want the container supervisor", sup, err)
+	}
+	cfg, err := c.townDaemonConfig(town)
+	if err != nil {
+		t.Fatalf("reading the town's daemon settings: %v", err)
+	}
+	return deploySupervisor{start: sup.start, container: cfg.ContainerName()}
+}
 
 // deployTestSpec is a spec for the scratch town's render, in the shape the
 // renderer accepts.
@@ -35,15 +57,11 @@ func deployTestSpec() templates.ComposeSpec {
 // builder returns for the same town settings, and the builder's own argv is
 // the one the deploy runs (gt-qpeei.25 acceptance).
 func TestDaemonDeploy_RecordsTheStartBuilderArgv(t *testing.T) {
-	t.Parallel()
 	town := t.TempDir()
 	compose := writeComposeFile(t, town)
 	c, _ := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
-	sup, err := c.detectDaemonSupervisor(town)
-	if err != nil || sup == nil {
-		t.Fatalf("detectDaemonSupervisor = (%v, %v), want the container supervisor", sup, err)
-	}
-	builderArgv, err := sup.start()
+	sup := townDeploySupervisor(t, c, town)
+	builderArgv, err := sup.StartArgv()
 	if err != nil {
 		t.Fatalf("start builder: %v", err)
 	}
@@ -60,7 +78,7 @@ func TestDaemonDeploy_RecordsTheStartBuilderArgv(t *testing.T) {
 		},
 		Environ: []string{"PATH=/usr/bin:/bin"},
 	}
-	if err := d.Deploy(context.Background(), startBuilderSupervisor(sup.start), compose, deployTestSpec()); err != nil {
+	if err := d.Deploy(context.Background(), sup, compose, deployTestSpec()); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	if !reflect.DeepEqual(recorded, builderArgv) {
@@ -72,26 +90,53 @@ func TestDaemonDeploy_RecordsTheStartBuilderArgv(t *testing.T) {
 // builder, and the deploy returns that refusal with the compose file untouched
 // and no command run (gt-qpeei.25 acceptance).
 func TestDaemonDeploy_UnsetSettingsAreTheBuildersRefusal(t *testing.T) {
-	t.Parallel()
 	town := t.TempDir()
 	compose := writeComposeFile(t, town)
 	c, _ := stubContainerTown(t, &config.DaemonPatrolConfig{Supervisor: config.SupervisorContainer})
-	sup, err := c.detectDaemonSupervisor(town)
-	if err != nil || sup == nil {
-		t.Fatalf("detectDaemonSupervisor = (%v, %v), want the container supervisor", sup, err)
-	}
+	sup := townDeploySupervisor(t, c, town)
 
 	ran := false
 	d := daemonimage.Deployer{Run: func(context.Context, string, []string, []string) error {
 		ran = true
 		return nil
 	}}
-	err = d.Deploy(context.Background(), startBuilderSupervisor(sup.start), compose, deployTestSpec())
+	err := d.Deploy(context.Background(), sup, compose, deployTestSpec())
 	if !errors.Is(err, errContainerSettingsUnset) {
 		t.Errorf("Deploy error = %v, want the start builder's refusal", err)
 	}
 	if ran {
 		t.Error("the deploy ran a command after the start builder refused")
+	}
+	got, err := os.ReadFile(compose)
+	if err != nil {
+		t.Fatalf("reading the compose file: %v", err)
+	}
+	if string(got) != "services: {}\n" {
+		t.Errorf("the compose file = %q, want the town's own file unchanged", got)
+	}
+}
+
+// A render for a container other than the one the town's settings name is
+// refused with the compose file untouched and no command run: the start builder
+// would recreate the town's container, not the one the render describes.
+func TestDaemonDeploy_RefusesARenderForTheTownsOtherContainer(t *testing.T) {
+	town := t.TempDir()
+	compose := writeComposeFile(t, town)
+	c, _ := stubContainerTown(t, containerTownConfig("scratch-daemon-1", "scratch"))
+	sup := townDeploySupervisor(t, c, town)
+
+	ran := false
+	spec := deployTestSpec()
+	spec.ContainerName = "live-daemon-1"
+	d := daemonimage.Deployer{Run: func(context.Context, string, []string, []string) error {
+		ran = true
+		return nil
+	}}
+	if err := d.Deploy(context.Background(), sup, compose, spec); err == nil {
+		t.Fatal("Deploy accepted a render for a container the town's settings do not name")
+	}
+	if ran {
+		t.Error("the deploy ran a command for a render the town's settings refuse")
 	}
 	got, err := os.ReadFile(compose)
 	if err != nil {
