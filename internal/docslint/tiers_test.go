@@ -254,8 +254,8 @@ func TestWalkErrorsAreReturned(t *testing.T) {
 	// managed to see: the checks would report a clean slice of a tree they
 	// never finished reading.
 	files := memFS{
-		"AGENTS.md":                                "# agents\n",
-		"plugins/p/plugin.md":                      "# plugin\n",
+		"AGENTS.md":           "# agents\n",
+		"plugins/p/plugin.md": "# plugin\n",
 		"internal/formula/formulas/f.formula.toml": "description = \"f\"\n",
 		"docs/design/retired.md":                   "> Status: historical\n",
 		"docs/guides/guide.md":                     "# guide\n",
