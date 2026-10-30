@@ -43,7 +43,11 @@ type daemonSupervisor struct {
 	// state a stop leaves behind on macOS, where bootout unloads and
 	// kickstart then cannot reach the job.
 	bootstrap func() ([]string, error)
-	load      string // how to load the job when start says it is not loaded
+	// logs is the command that shows why the daemon did not come up, for the
+	// kinds whose restart is proven by state.json rather than a pid (the
+	// container).
+	logs string
+	load string // how to load the job when start says it is not loaded
 	// fallback ends the start and restart errors, after load: how the
 	// operator gets back to a hand-run daemon. A file kind has a file to
 	// remove; the container kind has a town setting to unset.
@@ -146,6 +150,10 @@ type daemonControl struct {
 	// name. nil reads as the real guard, so a control built without one can
 	// never skip it.
 	guard func(townRoot string, self daemon.Owner, takeover bool) error
+	// readState reads state.json for the container restart's wait: nil when the
+	// file is missing, an error when it cannot be read or does not parse. nil
+	// reads the real file (readCutoverState).
+	readState func(townRoot string) (*daemon.State, error)
 	// syncFile brings the supervisor file up to date and reports whether it
 	// rewrote it (syncSupervisorFile); nil reads as that. Only start reads it
 	// through this seam, so a test can say the file was rewritten.
@@ -427,6 +435,7 @@ func (c *daemonControl) containerSupervisor(composeFile string, cfg *config.Daem
 		bootstrap: compose("up", "-d"),
 		load:      fmt.Sprintf("docker --context %s compose -p %s -f %s up -d daemon", c.dockerCLIContext(), project, composeFile),
 		fallback:  "or unset daemon.supervisor to run the daemon by hand",
+		logs:      fmt.Sprintf("docker --context %s logs %s", c.dockerCLIContext(), cfg.ContainerName()),
 		state:     c.containerJobState(cfg),
 		owner: func() (daemon.Owner, error) {
 			if _, err := containerComposeProject(cfg); err != nil {
@@ -1030,6 +1039,17 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 	if err := c.guardStart(townRoot, sup, false); err != nil {
 		return "", 0, err
 	}
+	// A container's lock pid is from the container's own pid namespace (a
+	// recreated daemon is pid 1 again), so whether the restart worked is read
+	// from state.json instead: the start time recorded before the restart is
+	// the one the new daemon has to be later than (gt-qpeei.40).
+	var proof *containerRestartProof
+	if sup.name == config.SupervisorContainer {
+		var err error
+		if proof, err = c.containerRestartProofFor(townRoot, sup); err != nil {
+			return "", 0, err
+		}
+	}
 	var runErr error
 	if c.syncSupervisorFile(townRoot) {
 		// This is the restart the ExitTimeOut it carries exists for: the job
@@ -1062,17 +1082,108 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 		// that is not the old one is what the caller asked for either way. A
 		// refusal is not that: nothing ran.
 		if !errors.Is(runErr, errSupervisorRefused) {
-			if pid, waitErr := c.waitForRestart(townRoot, oldPID); waitErr == nil {
+			if pid, waitErr := c.waitForRestartOf(townRoot, oldPID, proof); waitErr == nil {
 				return sup.name, pid, nil
 			}
 		}
 		return sup.name, 0, fmt.Errorf("%s is provisioned for this town but could not restart the daemon: %v\n  load it with: %s\n  %s", sup.name, runErr, sup.load, sup.fallback)
 	}
-	pid, err = c.waitForRestart(townRoot, oldPID)
+	pid, err = c.waitForRestartOf(townRoot, oldPID, proof)
 	if err != nil {
 		return sup.name, 0, fmt.Errorf("daemon did not come back under %s: %w", sup.name, err)
 	}
 	return sup.name, pid, nil
+}
+
+// containerRestartProof is what a container restart is judged against: the
+// owner the restarted daemon will name, the start time state.json recorded
+// before the restart, and the supervisor that reads the container and names its
+// logs command.
+type containerRestartProof struct {
+	owner daemon.Owner
+	since time.Time
+	sup   *daemonSupervisor
+}
+
+// containerRestartProofFor records, before a container restart, what state.json
+// says: a missing file records no start time, and one that cannot be read
+// refuses the restart, since the new daemon could not then be told from the old.
+func (c *daemonControl) containerRestartProofFor(townRoot string, sup *daemonSupervisor) (*containerRestartProof, error) {
+	owner, err := sup.owner()
+	if err != nil {
+		return nil, err
+	}
+	read := c.readState
+	if read == nil {
+		read = readCutoverState
+	}
+	st, err := read(townRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading state.json before the restart: %w; nothing was restarted", err)
+	}
+	proof := &containerRestartProof{owner: owner, sup: sup}
+	if st != nil {
+		proof.since = st.StartedAt
+	}
+	return proof, nil
+}
+
+// waitForRestartOf waits for the restarted daemon: by its recorded start for a
+// container (and then there is no pid to return), by its lock pid for the rest.
+func (c *daemonControl) waitForRestartOf(townRoot string, oldPID int, proof *containerRestartProof) (int, error) {
+	if proof == nil {
+		return c.waitForRestart(townRoot, oldPID)
+	}
+	return 0, c.waitForContainerRestart(townRoot, proof)
+}
+
+// waitForContainerRestart polls, within the restart budget, until the container
+// has taken the town: state.json names it as the owner, records it running
+// with a start time later than the one recorded before the restart, and docker
+// reports the container running. A reading that cannot be taken (state.json
+// unreadable, the container's state unknown) is a wait that goes on and ends in
+// the timeout, never success.
+func (c *daemonControl) waitForContainerRestart(townRoot string, proof *containerRestartProof) error {
+	last := "no reading was taken"
+	for range restartWaitAttempts {
+		c.sleep(c.pollInterval)
+		ok, why := c.containerTookTheTown(townRoot, proof)
+		if ok {
+			return nil
+		}
+		last = why
+	}
+	return fmt.Errorf("the container did not take the town within %s: %s\n  its logs: %s", restartWaitBudget, last, proof.sup.logs)
+}
+
+// containerTookTheTown is one reading of the restart's proof, with the reason it
+// fails.
+func (c *daemonControl) containerTookTheTown(townRoot string, proof *containerRestartProof) (bool, string) {
+	read := c.readState
+	if read == nil {
+		read = readCutoverState
+	}
+	st, err := read(townRoot)
+	switch {
+	case err != nil:
+		return false, fmt.Sprintf("state.json cannot be read: %v", err)
+	case st == nil:
+		return false, "state.json is missing"
+	case st.Owner == nil || *st.Owner != proof.owner:
+		return false, fmt.Sprintf("state.json names owner %s, not %s %q", ownerText(st.Owner), proof.owner.Kind, proof.owner.ID)
+	case !st.Running:
+		return false, "state.json records the daemon not running"
+	case !st.StartedAt.After(proof.since):
+		return false, fmt.Sprintf("state.json still records the start of %s, not a later one", proof.since.Format(time.RFC3339))
+	}
+	job := proof.sup.jobState()
+	switch {
+	case job.Err != nil:
+		return false, fmt.Sprintf("the container's state cannot be read: %v", job.Err)
+	case !job.Loaded || job.Status != "running":
+		return false, fmt.Sprintf("docker does not report the container running (loaded %v, status %q)", job.Loaded, job.Status)
+	}
+	return true, ""
 }
 
 // replaceUnsupervisedDaemon stops the daemon holding daemon.lock outside its
