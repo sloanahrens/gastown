@@ -54,7 +54,7 @@ func TestK8sRenderGolden(t *testing.T) {
 // TestK8sRenderPriorityAndSafety holds the Job to the cluster's rules: it runs at
 // the CI priority, one attempt with no restart, off a read-only repo claim into
 // its own output claim, with no host path and no privileged container but the
-// dind sidecar.
+// dind sidecar, which is bounded and bound to the pod's loopback.
 func TestK8sRenderPriorityAndSafety(t *testing.T) {
 	t.Parallel()
 	plan, err := Kubernetes{}.Render(goldenSpec())
@@ -84,6 +84,19 @@ func TestK8sRenderPriorityAndSafety(t *testing.T) {
 	}
 	if got, want := privilegedContainers(plan.Job), []string{dindContainerName}; !slices.Equal(got, want) {
 		t.Errorf("privileged containers = %v, want only the dind sidecar %v", got, want)
+	}
+	dind, ok := containerNamed(plan.Job, dindContainerName)
+	if !ok {
+		t.Fatalf("the Job renders no %q container", dindContainerName)
+	}
+	if got, want := dind.Args, []string{"--host=tcp://127.0.0.1:" + dindPort, "--tls=false"}; !slices.Equal(got, want) {
+		t.Errorf("dind args = %v, want %v: an engine bound to any other address answers at the pod IP, where every pod on the cluster can drive it", got, want)
+	}
+	if dind.Resources == nil {
+		t.Fatalf("the %q container renders no resources, so the sidecar competes for the node's CPU and memory without a bound", dindContainerName)
+	}
+	if requests, limits := dind.Resources.Requests, dind.Resources.Limits; requests != limits {
+		t.Errorf("dind requests %+v differ from its limits %+v: the sidecar's share is bounded like the runner's", requests, limits)
 	}
 	repo, ok := volumeMountNamed(plan.Job, repoVolume)
 	if !ok {
@@ -136,6 +149,57 @@ func TestK8sRenderPriorityAndSafety(t *testing.T) {
 			t.Errorf("a run without dind has priorityClassName %q, want the CI class", got)
 		}
 	})
+}
+
+// TestK8sJobLifeIsBounded holds the Job to a deadline and a TTL, so a run that
+// hangs gives its share back and a Job nobody tore down does not outlive its
+// run.
+func TestK8sJobLifeIsBounded(t *testing.T) {
+	t.Parallel()
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	if plan.Job == nil {
+		t.Fatal("the Kubernetes plan renders no Job")
+	}
+	deadline := plan.Job.Spec.ActiveDeadlineSeconds
+	if deadline == nil || *deadline <= 0 {
+		t.Errorf("activeDeadlineSeconds = %v, want a positive ceiling: a pod hung on one package holds its share forever", deadline)
+	}
+	ttl := plan.Job.Spec.TTLSecondsAfterFinished
+	if ttl == nil || *ttl <= 0 {
+		t.Errorf("ttlSecondsAfterFinished = %v, want the finished Job removed by the cluster", ttl)
+	}
+}
+
+// TestK8sPriorityClassIsDeclared holds the class the Job runs at to the class
+// the cluster's manifest declares, so a rename there fails here rather than at
+// apply time (deploy/k8s/priority-classes.yaml).
+func TestK8sPriorityClassIsDeclared(t *testing.T) {
+	t.Parallel()
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "deploy", "k8s", "priority-classes.yaml"))
+	if err != nil {
+		t.Fatalf("reading the cluster's priority classes: %v", err)
+	}
+	classes := declaredPriorityClasses(string(manifest))
+	if !slices.Contains(classes, PriorityClass) {
+		t.Errorf("the Job runs at %q, which deploy/k8s/priority-classes.yaml does not declare; it declares %v", PriorityClass, classes)
+	}
+}
+
+// priorityClassDecl is the manifest's `metadata: {name: <class>}` in the flow
+// style the file writes it in.
+var priorityClassDecl = regexp.MustCompile(`(?m)^metadata:\s*\{\s*name:\s*([a-z0-9-]+)`)
+
+// declaredPriorityClasses returns the names the manifest declares, in file
+// order.
+func declaredPriorityClasses(manifest string) []string {
+	var names []string
+	for _, match := range priorityClassDecl.FindAllStringSubmatch(manifest, -1) {
+		names = append(names, match[1])
+	}
+	return names
 }
 
 // TestBackendsShareValidation holds both backends to one table: every Spec the
@@ -199,14 +263,35 @@ func TestK8sNamesFitTheObjectRules(t *testing.T) {
 	if OutClaimName(other) == OutClaimName(spec) {
 		t.Errorf("two runs with different ids share the output claim %q", OutClaimName(spec))
 	}
+
+	// Ids a label cannot hold as written must not read the same once sanitised:
+	// two runs that did would share a Job and an output claim, and one run's
+	// teardown would remove the other's.
+	for _, pair := range [][2]string{
+		{"run.1", "run-1"},
+		{"run_1", "run-1"},
+		{"Run-1", "run-1"},
+		{"-run-1", "run-1"},
+		{"..", "-"},
+	} {
+		left, right := goldenSpec(), goldenSpec()
+		left.RunID, right.RunID = pair[0], pair[1]
+		if got := JobName(left); got == JobName(right) {
+			t.Errorf("run ids %q and %q share the Job name %q", pair[0], pair[1], got)
+		}
+		if got := OutClaimName(left); got == OutClaimName(right) {
+			t.Errorf("run ids %q and %q share the output claim %q", pair[0], pair[1], got)
+		}
+	}
 }
 
 // TestK8sRenderTeardownRemovesTheJobItRenders points the plan's removal at the
-// object it rendered, so a caller that applies the Job and stops still leaves
-// nothing behind.
+// objects the run made — the Job and the output claim — so a caller that applies
+// the Job and stops still leaves nothing behind.
 func TestK8sRenderTeardownRemovesTheJobItRenders(t *testing.T) {
 	t.Parallel()
-	plan, err := Kubernetes{}.Render(goldenSpec())
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
 	if err != nil {
 		t.Fatalf("rendering the golden spec: %v", err)
 	}
@@ -214,14 +299,20 @@ func TestK8sRenderTeardownRemovesTheJobItRenders(t *testing.T) {
 		t.Errorf("the plan renders %d steps beside the teardown; the Job is the run's whole start", got)
 	}
 	teardown := plan.Teardown()
-	if len(teardown) != 1 {
-		t.Fatalf("the plan renders %d teardown steps, want the Job's removal: %v", len(teardown), teardown)
+	if len(teardown) != 2 {
+		t.Fatalf("the plan renders %d teardown steps, want the Job's removal and the output claim's: %v", len(teardown), teardown)
 	}
 	if !slices.Contains(teardown[0].Argv, plan.Job.Metadata.Name) {
 		t.Errorf("the teardown %v does not name the Job %q", teardown[0].Argv, plan.Job.Metadata.Name)
 	}
 	if !slices.Contains(teardown[0].Argv, "job") {
 		t.Errorf("the teardown %v does not remove a Job", teardown[0].Argv)
+	}
+	if !slices.Contains(teardown[1].Argv, OutClaimName(spec)) {
+		t.Errorf("the teardown %v does not name the output claim %q, so every run's claim is left behind", teardown[1].Argv, OutClaimName(spec))
+	}
+	if !slices.Contains(teardown[1].Argv, "persistentvolumeclaim") {
+		t.Errorf("the teardown %v does not remove a claim", teardown[1].Argv)
 	}
 }
 

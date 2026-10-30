@@ -6,6 +6,8 @@
   },
   "spec": {
     "backoffLimit": 0,
+    "activeDeadlineSeconds": 10800,
+    "ttlSecondsAfterFinished": 3600,
     "template": {
       "spec": {
         "priorityClassName": "gt-ci",
@@ -62,6 +64,7 @@
             "name": "dind",
             "image": "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1",
             "args": [
+              "--host=tcp://127.0.0.1:2375",
               "--tls=false"
             ],
             "env": [
@@ -70,6 +73,16 @@
                 "value": ""
               }
             ],
+            "resources": {
+              "requests": {
+                "cpu": "2",
+                "memory": "4Gi"
+              },
+              "limits": {
+                "cpu": "2",
+                "memory": "4Gi"
+              }
+            },
             "securityContext": {
               "privileged": true
             },

@@ -41,11 +41,34 @@ const (
 	dindVolume = "dind-data"
 
 	// dindAddress is where the runner reaches the sidecar: the pod's own network
-	// namespace, so nothing outside the pod reaches the engine.
+	// namespace, so nothing outside the pod reaches the engine. The sidecar binds
+	// this address too; a bind on 0.0.0.0 would answer at the pod IP, where every
+	// other pod in the cluster could drive the privileged engine (gt-7zy61).
 	dindAddress = "127.0.0.1"
+
+	// dindCPU and dindMemory are the sidecar's share, requested and limited like
+	// the runner's: an unbounded nested engine competes with the run it serves
+	// and with the node's other pods.
+	dindCPU    = "2"
+	dindMemory = "4Gi"
+
+	// jobDeadlineSeconds stops a run that hangs on one package, so the share it
+	// holds returns to the cluster and the daemon reads the missing result.json
+	// as RED. It is a ceiling no healthy sweep approaches, far above the plan's
+	// 15-minute loaded target for a whole sweep.
+	jobDeadlineSeconds = int64(3 * 60 * 60)
+
+	// jobTTLSeconds removes the finished Job, pods included, an hour after it
+	// ends, so a caller that died before its teardown leaks no job. The run's
+	// result lives on the output claim, not in the Job.
+	jobTTLSeconds = int32(60 * 60)
 
 	// maxNameLength is the most characters a Kubernetes object's name may hold.
 	maxNameLength = 63
+
+	// partDigestLength is how much of a sanitised name part's digest the name
+	// carries: enough that two ids a label cannot tell apart stay apart.
+	partDigestLength = 8
 )
 
 // Job is a sweep run as the document kubectl applies: a batch/v1 Job whose pod
@@ -62,10 +85,13 @@ type ObjectMeta struct {
 	Name string `json:"name"`
 }
 
-// JobSpec is the Job's single attempt and the pod template it starts.
+// JobSpec is the Job's single attempt, the deadline it runs under, and the pod
+// template it starts.
 type JobSpec struct {
-	BackoffLimit *int32      `json:"backoffLimit,omitempty"`
-	Template     PodTemplate `json:"template"`
+	BackoffLimit            *int32      `json:"backoffLimit,omitempty"`
+	ActiveDeadlineSeconds   *int64      `json:"activeDeadlineSeconds,omitempty"`
+	TTLSecondsAfterFinished *int32      `json:"ttlSecondsAfterFinished,omitempty"`
+	Template                PodTemplate `json:"template"`
 }
 
 // PodTemplate is the template of the one pod the Job starts.
@@ -142,8 +168,9 @@ type ClaimRef struct {
 // EmptyDirVolumeSource is scratch space that lives as long as the pod.
 type EmptyDirVolumeSource struct{}
 
-// Render returns the run as a Job and the step that removes it, or the Validate
-// error that refuses the Spec.
+// Render returns the run as a Job and the steps that remove it, or the Validate
+// error that refuses the Spec. The caller reads the result from the output claim
+// before it runs the teardown, because the teardown removes the claim too.
 func (Kubernetes) Render(spec Spec) (Plan, error) {
 	if err := spec.Validate(); err != nil {
 		return Plan{}, err
@@ -151,10 +178,19 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	job := renderJob(spec)
 	return Plan{
 		Job: job,
-		Steps: []Step{{
-			Argv:     []string{kubectl, "--context", spec.Context, "delete", "job", job.Metadata.Name, "--ignore-not-found"},
-			Teardown: true,
-		}},
+		Steps: []Step{
+			{
+				Argv:     []string{kubectl, "--context", spec.Context, "delete", "job", job.Metadata.Name, "--ignore-not-found"},
+				Teardown: true,
+			},
+			{
+				// The run's output claim is the caller's to create and its teardown
+				// removes it: a Job-only teardown leaves every run's claim behind
+				// (gt-7zy61).
+				Argv:     []string{kubectl, "--context", spec.Context, "delete", "persistentvolumeclaim", OutClaimName(spec), "--ignore-not-found"},
+				Teardown: true,
+			},
+		},
 	}, nil
 }
 
@@ -191,7 +227,9 @@ func renderJob(spec Spec) *Job {
 			// A failed run reports itself once: the result the runner did not
 			// write is what the daemon reads as RED, and a retried pod would
 			// repeat the same failure until the Job's own limit ran out.
-			BackoffLimit: int32Ptr(0),
+			BackoffLimit:            int32Ptr(0),
+			ActiveDeadlineSeconds:   int64Ptr(jobDeadlineSeconds),
+			TTLSecondsAfterFinished: int32Ptr(jobTTLSeconds),
 			Template: PodTemplate{Spec: PodSpec{
 				PriorityClassName: PriorityClass,
 				RestartPolicy:     "Never",
@@ -230,13 +268,21 @@ func runnerContainer(spec Spec) Container {
 }
 
 // dindContainer is the sidecar the packages that need a Docker API reach: the
-// pod's only privileged container, on plain TCP over the pod's loopback.
+// pod's only privileged container, bound to the pod's loopback so no other pod
+// in the cluster can drive the engine.
 func dindContainer() Container {
+	share := ResourceList{CPU: dindCPU, Memory: dindMemory}
 	return Container{
-		Name:            dindContainerName,
-		Image:           templates.DindImage,
-		Args:            []string{"--tls=false"},
+		Name:  dindContainerName,
+		Image: templates.DindImage,
+		Args: []string{
+			// Without an explicit host dockerd binds 0.0.0.0, which is the pod IP
+			// and a privileged Docker API for every pod on the cluster network.
+			"--host=tcp://" + dindAddress + ":" + dindPort,
+			"--tls=false",
+		},
 		Env:             []EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: ""}},
+		Resources:       &Resources{Requests: share, Limits: share},
 		SecurityContext: &SecurityContext{Privileged: true},
 		VolumeMounts:    []VolumeMount{{Name: dindVolume, MountPath: dindDataPath}},
 	}
@@ -278,10 +324,14 @@ func k8sName(parts ...string) string {
 
 // k8sPart is one part of a name: lowercased, with every character a label
 // cannot hold turned into a dash, and with the dashes a label cannot start or
-// end with trimmed off.
+// end with trimmed off. A part that is not its own label as written carries a
+// digest of the value it was made from, so two ids a label cannot tell apart
+// once lowercased and dashed ("a.b" and "a-b", "Run" and "run") keep their own
+// names and neither run's teardown can remove the other's objects (gt-7zy61).
 func k8sPart(v string) string {
+	lowered := strings.ToLower(v)
 	var b strings.Builder
-	for _, r := range strings.ToLower(v) {
+	for _, r := range lowered {
 		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' {
 			b.WriteRune(r)
 		} else {
@@ -290,9 +340,18 @@ func k8sPart(v string) string {
 	}
 	part := strings.Trim(b.String(), "-")
 	if part == "" {
-		return "x"
+		return "x-" + partDigest(v)
 	}
-	return part
+	if part == v {
+		return part
+	}
+	return part + "-" + partDigest(v)
+}
+
+// partDigest is the short digest a name part that sanitising changed carries.
+func partDigest(v string) string {
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:])[:partDigestLength]
 }
 
 // shortSHA is the sha's first eight characters, or all of a sha too short to
@@ -308,3 +367,7 @@ func shortSHA(sha string) string {
 // int32Ptr returns a pointer to v, for the fields a Job's absent value differs
 // from its zero one.
 func int32Ptr(v int32) *int32 { return &v }
+
+// int64Ptr returns a pointer to v, for the fields a Job's absent value differs
+// from its zero one.
+func int64Ptr(v int64) *int64 { return &v }
