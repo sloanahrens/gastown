@@ -135,6 +135,25 @@ func NextSteps(out io.Writer, version string, tagged bool) {
 	fmt.Fprintf(out, "  git push origin v%s\n", version)
 }
 
+// Finish runs the git steps after the version edits, in the order the command runs
+// them: the commit under --commit, the tag under --tag, then the next-step lines. It
+// is the one place the command's git calls are made, so no push can be added to the
+// flow without it showing here. It never pushes.
+func Finish(g Git, fsys FS, root string, opts Options, r Release, out io.Writer) error {
+	if opts.Commit {
+		if err := Commit(g, fsys, root, r); err != nil {
+			return err
+		}
+	}
+	if opts.Tag {
+		if err := Tag(g, root, r.New); err != nil {
+			return err
+		}
+	}
+	NextSteps(out, r.New, opts.Tag)
+	return nil
+}
+
 // gitRun runs one git step and reports a non-zero exit by its status alone. git's
 // output is not in the error, since it can hold anything the commit or tag printed.
 func gitRun(g Git, root string, args ...string) error {
@@ -162,30 +181,66 @@ type Installer struct {
 // grep -oE takes it.
 var semverInText = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+`)
 
+// InstallStatus is what the version check after make install found.
+type InstallStatus int
+
+const (
+	// Verified: the installed gt reports the version that was installed.
+	Verified InstallStatus = iota
+	// Mismatch: the installed gt reports a different version.
+	Mismatch
+	// Unverified: no version could be read from the installed gt.
+	Unverified
+)
+
+// InstallResult is the outcome of the version check. Want is the version installed.
+// Got is the version the installed gt reported, set for Mismatch. Reason says why
+// the version could not be read, set for Unverified.
+type InstallResult struct {
+	Status InstallStatus
+	Want   string
+	Got    string
+	Reason string
+}
+
+// Report writes the verification line for r. A mismatch or an unverified gt is a
+// warning, not an error, since the install itself succeeded.
+func (r InstallResult) Report(out io.Writer) {
+	switch r.Status {
+	case Verified:
+		fmt.Fprintf(out, "✓ Verified: gt version %s\n", r.Want)
+	case Mismatch:
+		fmt.Fprintf(out, "⚠ gt reports %s (expected %s)\n", r.Got, r.Want)
+	case Unverified:
+		fmt.Fprintf(out, "⚠ cannot verify the installed gt: %s\n", r.Reason)
+	}
+}
+
 // Install runs make install in Root, then reads the version the installed gt reports
 // and compares it with want. The gt it reads is $Home/.local/bin/gt when that is
-// executable, else the gt on PATH, as the script does. A match prints Verified. A
-// mismatch prints a warning with both versions and is not an error, since the
-// install itself succeeded. A failed make install is an error whose text is fixed,
-// so make's output never reaches the message.
-func (in Installer) Install(want string, out io.Writer) error {
+// executable, else the gt on PATH, as the script does. The result says whether the
+// versions match, differ, or could not be read; the caller reports it. A failed make
+// install is an error whose text is fixed, so make's output never reaches the message.
+func (in Installer) Install(want string) (InstallResult, error) {
 	if _, _, err := in.Exec.Run(in.Root, nil, "make", "install"); err != nil {
-		return errors.New("make install failed")
+		return InstallResult{}, errors.New("make install failed")
 	}
-	fmt.Fprintln(out, "✓ gt installed")
 
 	gt := "gt"
 	if local := filepath.Join(in.Home, ".local", "bin", "gt"); in.Executable(local) {
 		gt = local
 	}
-	// The exit status is not checked, as in the script: a gt that prints no version
-	// leaves got empty, which is reported as a mismatch.
-	stdout, stderr, _ := in.Exec.Run(in.Root, nil, gt, "version")
+	// The exit status is not checked, as in the script: a gt that prints a version
+	// is read whatever it exits with. Only a missing version line is unverified.
+	stdout, stderr, err := in.Exec.Run(in.Root, nil, gt, "version")
 	got := semverInText.FindString(string(stdout) + string(stderr))
-	if got == want {
-		fmt.Fprintf(out, "✓ Verified: gt version %s\n", got)
-		return nil
+	switch {
+	case got == "" && err != nil:
+		return InstallResult{Status: Unverified, Want: want, Reason: "gt version did not run"}, nil
+	case got == "":
+		return InstallResult{Status: Unverified, Want: want, Reason: "gt version printed no version"}, nil
+	case got != want:
+		return InstallResult{Status: Mismatch, Want: want, Got: got}, nil
 	}
-	fmt.Fprintf(out, "⚠ gt reports %s (expected %s)\n", got, want)
-	return nil
+	return InstallResult{Status: Verified, Want: want, Got: got}, nil
 }

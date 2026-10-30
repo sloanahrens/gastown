@@ -286,8 +286,10 @@ func TestNextStepsPrintsButNeverPushes(t *testing.T) {
 }
 
 // TestNeverPushes: across every flag combination the command can take, and both
-// tree states, no git call is a push. The steps run as the command runs them, with
-// the commit guarded by --commit and the tag by --tag.
+// tree states, no git call is a push. The flow is Finish, the function the command
+// calls after the edits, so the test drives the production steps, not a copy of them.
+// Each case also checks the steps it promises ran, so a Finish that does nothing
+// cannot pass.
 func TestNeverPushes(t *testing.T) {
 	t.Parallel()
 	bools := []bool{false, true}
@@ -311,17 +313,20 @@ func TestNeverPushes(t *testing.T) {
 									files[ChangelogPath] = "x"
 								}
 								var out bytes.Buffer
-								if err := CheckTree(f.git(), "/root", opts, &out); err == nil && opts.Commit {
-									if err := Commit(f.git(), &memFS{files: files}, "/root", releaseFor(nix)); err != nil {
-										t.Fatalf("Commit(%+v): %v", opts, err)
+								if err := CheckTree(f.git(), "/root", opts, &out); err == nil {
+									if err := Finish(f.git(), &memFS{files: files}, "/root", opts, releaseFor(nix), &out); err != nil {
+										t.Fatalf("Finish(%+v): %v", opts, err)
 									}
-									if opts.Tag {
-										if err := Tag(f.git(), "/root", "0.2.0"); err != nil {
-											t.Fatalf("Tag(%+v): %v", opts, err)
-										}
+									if opts.Commit && f.callWith("commit") == nil {
+										t.Errorf("options %+v dirty=%v: Finish made no commit", opts, dirty)
+									}
+									if opts.Tag && f.callWith("tag") == nil {
+										t.Errorf("options %+v dirty=%v: Finish made no tag", opts, dirty)
 									}
 								}
-								NextSteps(&out, "0.2.0", opts.Tag)
+								if !strings.Contains(out.String(), "git push origin main") && !strings.Contains(out.String(), "Warning") {
+									t.Errorf("options %+v dirty=%v: no next-step lines or warning were printed", opts, dirty)
+								}
 								for _, sub := range f.subcommands() {
 									if sub == "push" {
 										t.Errorf("options %+v dirty=%v nix=%v flake=%v log=%v: git push was run", opts, dirty, nix, hasFlake, hasLog)
@@ -419,10 +424,12 @@ func TestDirtyTreeRules(t *testing.T) {
 }
 
 // fakeRun is the process seam for the install step. makeErr is what make install
-// returns, and gtOut is what the installed gt prints for its version line.
+// returns. gtOut is what the installed gt prints for its version line, and gtErr is
+// what running it returns.
 type fakeRun struct {
 	makeErr error
 	gtOut   string
+	gtErr   error
 	calls   []fakeCall
 }
 
@@ -432,14 +439,15 @@ func (f *fakeRun) exec() Exec {
 		if name == "make" {
 			return nil, nil, f.makeErr
 		}
-		return []byte(f.gtOut), nil, nil
+		return []byte(f.gtOut), nil, f.gtErr
 	}}
 }
 
 // TestInstallVerifiesTheInstalledVersion: the version read is the one the installed
 // gt reports. It is $HOME/.local/bin/gt when that is executable, else the gt on PATH.
-// A match verifies, a mismatch warns with both versions, and a failed make install is
-// an error whose text is fixed. Home and Executable are fakes, so no real binary is
+// A match is Verified, a different version is Mismatch with both versions, and a gt
+// whose version cannot be read is Unverified with the reason. A failed make install
+// is an error, and no result. Home and Executable are fakes, so no real binary is
 // consulted.
 func TestInstallVerifiesTheInstalledVersion(t *testing.T) {
 	t.Parallel()
@@ -450,33 +458,60 @@ func TestInstallVerifiesTheInstalledVersion(t *testing.T) {
 		run        fakeRun
 		executable bool
 		wantGt     string
-		wantOut    string
+		wantStatus InstallStatus
+		wantGot    string
+		wantReason string
+		wantReport string
 		wantErr    string
 	}{
 		{
-			name:    "match via PATH",
-			run:     fakeRun{gtOut: "gt version 0.2.0 (abc1234)\n"},
-			wantGt:  "gt",
-			wantOut: "✓ gt installed\n✓ Verified: gt version 0.2.0\n",
+			name:       "match via PATH",
+			run:        fakeRun{gtOut: "gt version 0.2.0 (abc1234)\n"},
+			wantGt:     "gt",
+			wantStatus: Verified,
+			wantGot:    "0.2.0",
+			wantReport: "✓ Verified: gt version 0.2.0\n",
 		},
 		{
 			name:       "match via the local install",
 			run:        fakeRun{gtOut: "gt version 0.2.0\n"},
 			executable: true,
 			wantGt:     local,
-			wantOut:    "✓ gt installed\n✓ Verified: gt version 0.2.0\n",
+			wantStatus: Verified,
+			wantGot:    "0.2.0",
+			wantReport: "✓ Verified: gt version 0.2.0\n",
 		},
 		{
-			name:    "mismatch warns with both versions",
-			run:     fakeRun{gtOut: "gt version 0.1.0\n"},
-			wantGt:  "gt",
-			wantOut: "✓ gt installed\n⚠ gt reports 0.1.0 (expected 0.2.0)\n",
+			name:       "exit status is not read when a version prints",
+			run:        fakeRun{gtOut: "gt version 0.2.0\n", gtErr: errors.New("exit status 2")},
+			wantGt:     "gt",
+			wantStatus: Verified,
+			wantGot:    "0.2.0",
+			wantReport: "✓ Verified: gt version 0.2.0\n",
 		},
 		{
-			name:    "no version line warns with an empty version",
-			run:     fakeRun{gtOut: "boom\n"},
-			wantGt:  "gt",
-			wantOut: "✓ gt installed\n⚠ gt reports  (expected 0.2.0)\n",
+			name:       "mismatch reports both versions",
+			run:        fakeRun{gtOut: "gt version 0.1.0\n"},
+			wantGt:     "gt",
+			wantStatus: Mismatch,
+			wantGot:    "0.1.0",
+			wantReport: "⚠ gt reports 0.1.0 (expected 0.2.0)\n",
+		},
+		{
+			name:       "no version line is unverified",
+			run:        fakeRun{gtOut: "boom\n"},
+			wantGt:     "gt",
+			wantStatus: Unverified,
+			wantReason: "gt version printed no version",
+			wantReport: "⚠ cannot verify the installed gt: gt version printed no version\n",
+		},
+		{
+			name:       "gt that does not run is unverified",
+			run:        fakeRun{gtErr: errors.New("exec: gt: not found")},
+			wantGt:     "gt",
+			wantStatus: Unverified,
+			wantReason: "gt version did not run",
+			wantReport: "⚠ cannot verify the installed gt: gt version did not run\n",
 		},
 		{
 			name:    "make install failure is an error with fixed text",
@@ -498,11 +533,13 @@ func TestInstallVerifiesTheInstalledVersion(t *testing.T) {
 				Home: home,
 				Root: "/fake/root",
 			}
-			var out bytes.Buffer
-			err := in.Install("0.2.0", &out)
+			res, err := in.Install("0.2.0")
 			if tc.wantErr != "" {
 				if err == nil || err.Error() != tc.wantErr {
 					t.Fatalf("Install error = %v, want exactly %q", err, tc.wantErr)
+				}
+				if res != (InstallResult{}) {
+					t.Errorf("Install result after make failed = %+v, want none", res)
 				}
 				if len(run.calls) != 1 || run.calls[0].name != "make" {
 					t.Errorf("Install ran %v after make failed, want make alone", run.calls)
@@ -512,8 +549,16 @@ func TestInstallVerifiesTheInstalledVersion(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Install: %v", err)
 			}
-			if out.String() != tc.wantOut {
-				t.Errorf("Install wrote %q, want %q", out.String(), tc.wantOut)
+			if res.Status != tc.wantStatus || res.Got != tc.wantGot || res.Reason != tc.wantReason {
+				t.Errorf("Install = %+v, want status %v got %q reason %q", res, tc.wantStatus, tc.wantGot, tc.wantReason)
+			}
+			if res.Want != "0.2.0" {
+				t.Errorf("Install Want = %q, want 0.2.0", res.Want)
+			}
+			var out bytes.Buffer
+			res.Report(&out)
+			if out.String() != tc.wantReport {
+				t.Errorf("Report wrote %q, want %q", out.String(), tc.wantReport)
 			}
 			if len(run.calls) < 2 || run.calls[0].name != "make" || !reflect.DeepEqual(run.calls[0].args, []string{"install"}) {
 				t.Fatalf("first call = %+v, want make install", run.calls)
