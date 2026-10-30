@@ -43,9 +43,5 @@ scripts/post-land-shell.sh	port: gt-tpg0p
 scripts/post-land-shell_test.sh	port: gt-tpg0p
 scripts/refresh-bd-command-tree.sh	port: gt-tpg0p
 scripts/resource-sampler_test.sh	port: gt-tpg0p
-scripts/test-capacity/dolt-gate-metrics.sh	port: gt-tpg0p
-scripts/test-capacity/paired-run.sh	port: gt-tpg0p
-scripts/test-capacity/run-gate.sh	port: gt-tpg0p
-scripts/test-capacity/sample-capacity.sh	port: gt-tpg0p
 scripts/test-makefile.sh	port: gt-tpg0p
 scripts/town_metrics_test.sh	port: gt-tpg0p
