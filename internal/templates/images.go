@@ -59,4 +59,14 @@ const (
 	// dolthub/dolt. Moving DoltVersion means reading this tag's digest too. The
 	// tag stays in the reference for the reader; the digest is what docker pulls.
 	DoltServerImage = "dolthub/dolt-sql-server:" + DoltVersion + "@sha256:38d5e900583267f35e36ad738e13f202e62860b351aa4c088dceaf7dbaed7ab6"
+
+	// ForgejoImage, ForgePostgresImage and ForgejoRunnerImage are the throwaway
+	// Forgejo stack the scratch project runs for the L2 window, at the versions
+	// the operator's live Forgejo compose project (~/forgejo/compose.yml) runs,
+	// so the ladder proves the daemon against the forge it will meet. They are
+	// tags, as the live project names them; the scratch project's engine for the
+	// runner is DindImage, the digest the live project runs.
+	ForgejoImage       = "data.forgejo.org/forgejo/forgejo:16.0.5"
+	ForgePostgresImage = "postgres:17.11"
+	ForgejoRunnerImage = "data.forgejo.org/forgejo/runner:13.2.0"
 )
