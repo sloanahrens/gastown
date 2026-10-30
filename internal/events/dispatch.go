@@ -5,10 +5,11 @@ import (
 	"time"
 )
 
-// specDispatchActor is the actor the spec dispatcher stamps its slings with,
-// repeating internal/cmd's specDispatchActor; it is named here because a sling
+// SpecDispatchActor is the actor the spec dispatcher stamps its slings with,
+// repeating internal/cmd's SpecDispatchActor (a test in internal/cmd holds the
+// two equal); it is named here because a sling
 // it wrote starts a fresh dispatch run (DispatchStart, gt-3ga5l).
-const specDispatchActor = "daemon/spec-dispatch"
+const SpecDispatchActor = "daemon/spec-dispatch"
 
 // DispatchStart returns when bead's current run was dispatched: the earliest
 // sling event for the bead at or after its last run-end event. The clock
@@ -19,10 +20,12 @@ const specDispatchActor = "daemon/spec-dispatch"
 // landed bead, whose landing follows its gt done), TypeBeadClosed, when the
 // bead was closed by hand, and TypeOverrunStop, when the overrun guard stopped
 // the seat and handed the bead back (a stop ends that run; the dispatch after
-// it is policed afresh). A sling by the spec dispatcher ends the run before it
-// too, though no event recorded that end: it only slings a bead that is back in
-// the pool, so the run its earlier sling began has no seat and its time is not
-// the new seat's to answer for (gt-3ga5l).
+// it is policed afresh). A sling by the spec dispatcher to a DIFFERENT
+// seat than the bead's last sling ends the run before it too, though no event
+// recorded that end: the bead moved, so the run its earlier sling began has no
+// seat and its time is not the new seat's to answer for (gt-3ga5l). A repeat
+// sling to the seat that already holds the bead is the same run and keeps its
+// first dispatch, so repeating a sling cannot restart the clock.
 //
 // The second return is false when the log holds no such sling.
 func DispatchStart(evs []Event, bead string) (time.Time, bool) {
@@ -43,7 +46,8 @@ func DispatchStarts(evs []Event) map[string]time.Time {
 // holds what DispatchStart reads, one event at a time, so a reader that polls
 // the log can keep the clock current from the lines appended since its last
 // read instead of re-reading the whole file (the dashboard's summary poll,
-// gt-tzbtf).
+// gt-tzbtf). The run a bead's clock dates ends at a done, a close or an overrun
+// stop, and when the spec dispatcher moves the bead to another seat.
 type DispatchClock struct {
 	// ends is each bead's latest run end. starts holds the slings since it, in
 	// time order: the earliest is the clock, and a later one is what a run end
@@ -52,17 +56,21 @@ type DispatchClock struct {
 	// whose runs are not ended, which is a handful for any bead the log keeps.
 	ends   map[string]time.Time
 	starts map[string][]time.Time
+	// targets is the seat each bead was last slung to, so a spec-dispatch sling
+	// to a different seat can be told from a repeat to the seat that holds it.
+	targets map[string]string
 }
 
 // NewDispatchClock returns an empty clock.
 func NewDispatchClock() *DispatchClock {
-	return &DispatchClock{ends: map[string]time.Time{}, starts: map[string][]time.Time{}}
+	return &DispatchClock{ends: map[string]time.Time{}, starts: map[string][]time.Time{}, targets: map[string]string{}}
 }
 
 // Add folds evs into the clock, in log order. Adding the same events again
 // changes nothing: a sling already filed is not filed twice, and an end is
-// only a boundary. A spec-dispatch sling ends the bead's run before it first,
-// so it dates the run it starts (DispatchStart).
+// only a boundary. A spec-dispatch sling to a different seat than the bead's
+// last one ends the bead's run before it first, so it dates the run it starts
+// (DispatchStart); a repeat to the same seat does not.
 func (c *DispatchClock) Add(evs []Event) {
 	for _, ev := range evs {
 		bead := payloadBead(ev)
@@ -75,8 +83,12 @@ func (c *DispatchClock) Add(evs []Event) {
 			if err != nil {
 				continue
 			}
-			if ev.Actor == specDispatchActor {
+			target, _ := ev.Payload["target"].(string)
+			if prev, ok := c.targets[bead]; ev.Actor == SpecDispatchActor && ok && target != "" && prev != target {
 				c.EndRun(bead, ts)
+			}
+			if target != "" {
+				c.targets[bead] = target
 			}
 			c.addStart(bead, ts)
 		case TypeDone, TypeBeadClosed, TypeOverrunStop:

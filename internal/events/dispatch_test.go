@@ -30,10 +30,10 @@ func dispatchSlingEv(at, bead, actor, seat string) Event {
 // bead to one seat whose run never wrote an end, then the sling that put the
 // bead on a second seat once the first had let it go back to the pool.
 var specSlingRun = []Event{
-	dispatchSlingEv("2026-10-30T12:10:59Z", "gt-a", specDispatchActor, "gastown/nux"),
-	dispatchSlingEv("2026-10-30T12:17:39Z", "gt-a", specDispatchActor, "gastown/nux"),
-	dispatchSlingEv("2026-10-30T12:23:46Z", "gt-a", specDispatchActor, "gastown/nux"),
-	dispatchSlingEv("2026-10-30T14:27:05Z", "gt-a", specDispatchActor, "gastown/capable"),
+	dispatchSlingEv("2026-10-30T12:10:59Z", "gt-a", SpecDispatchActor, "gastown/nux"),
+	dispatchSlingEv("2026-10-30T12:17:39Z", "gt-a", SpecDispatchActor, "gastown/nux"),
+	dispatchSlingEv("2026-10-30T12:23:46Z", "gt-a", SpecDispatchActor, "gastown/nux"),
+	dispatchSlingEv("2026-10-30T14:27:05Z", "gt-a", SpecDispatchActor, "gastown/capable"),
 }
 
 const (
@@ -412,5 +412,35 @@ func TestDispatchClockSpecDispatchSlingIsReplaySafe(t *testing.T) {
 				t.Errorf("start = %v (%t), want 2026-10-30T14:27:05Z", got, ok)
 			}
 		})
+	}
+}
+
+// A repeat spec-dispatch sling to the seat that already holds the bead is the
+// same run: it must not restart the clock, or a repeated sling could keep a
+// runaway bead from ever being stopped.
+func TestDispatchClockSpecDispatchRepeatToTheSameSeatKeepsTheRun(t *testing.T) {
+	t.Parallel()
+	clock := NewDispatchClock()
+	clock.Add([]Event{
+		dispatchSlingEv("2026-10-30T12:00:00Z", "gt-a", SpecDispatchActor, "gastown/nux"),
+		dispatchSlingEv("2026-10-30T12:10:00Z", "gt-a", SpecDispatchActor, "gastown/nux"),
+	})
+	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, "2026-10-30T12:00:00Z")) {
+		t.Errorf("start = %v (%t), want 12:00:00Z: a repeat to the same seat keeps the first dispatch", got, ok)
+	}
+}
+
+// A same-seat sling after a real stop is a new run, because the stop wrote its
+// own run end.
+func TestDispatchClockStopThenSameSeatSlingStartsNewRun(t *testing.T) {
+	t.Parallel()
+	clock := NewDispatchClock()
+	clock.Add([]Event{
+		dispatchSlingEv("2026-10-30T12:00:00Z", "gt-a", SpecDispatchActor, "gastown/nux"),
+		dispatchEv(TypeOverrunStop, "2026-10-30T12:30:00Z", "gt-a"),
+		dispatchSlingEv("2026-10-30T13:00:00Z", "gt-a", SpecDispatchActor, "gastown/nux"),
+	})
+	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, "2026-10-30T13:00:00Z")) {
+		t.Errorf("start = %v (%t), want 13:00:00Z: a stop ends the run, so the next sling starts a new one", got, ok)
 	}
 }
