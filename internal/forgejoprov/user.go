@@ -40,6 +40,8 @@ type Provisioner struct {
 	Rotate bool
 	// ViewerRequested says the run provisions the viewer role itself, so its role
 	// loop grants the viewer's repository access and EnsureViewerAccess does nothing.
+	// Nothing in this package sets it: the run command (gt-tpg0p.35) sets it from the
+	// roles it was asked to provision.
 	ViewerRequested bool
 	// Files is the filesystem the token files are written through; nil means
 	// the real one.

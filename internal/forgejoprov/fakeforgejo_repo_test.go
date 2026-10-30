@@ -64,6 +64,8 @@ func (f *fakeForgejo) serveRepo(method string, parts []string, body []byte) (int
 	switch {
 	case len(segs) == 4 && segs[2] == "collaborators":
 		return r.collaborator(method, segs[3], body)
+	case len(segs) == 5 && segs[2] == "collaborators" && segs[4] == "permission":
+		return r.permissionOf(method, segs[3])
 	case len(segs) == 3 && segs[2] == "branch_protections":
 		switch method {
 		case http.MethodGet:
@@ -102,6 +104,19 @@ func (r *fakeRepo) collaborator(method, user string, body []byte) (int, string) 
 		return http.StatusNoContent, ""
 	}
 	return notFound()
+}
+
+// permissionOf answers the level the user holds, as the collaborator permission route
+// does: "none" for a user with no access, and 200 whatever the level.
+func (r *fakeRepo) permissionOf(method, user string) (int, string) {
+	if method != http.MethodGet {
+		return notFound()
+	}
+	level, ok := r.collaborators[user]
+	if !ok {
+		level = "none"
+	}
+	return reply(http.StatusOK, map[string]any{"permission": level})
 }
 
 // listRules answers every rule the repository holds, sorted by name. The array is empty
