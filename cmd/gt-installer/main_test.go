@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/installer"
+	"github.com/steveyegge/gastown/internal/polecatimage"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
@@ -361,8 +362,12 @@ func TestRunInstallsEndToEnd(t *testing.T) {
 	// codesign's last argument is the mktemp copy beside the binary, whose name
 	// nothing can predict, so the first rows are a prefix and that one row's
 	// path is checked by its shape.
+	// The pgrep sits between the build and the swap: the image step before the
+	// swap asks whether a gt sling is in flight, and the fake answers no match
+	// (exit 1), so the build goes ahead at once (gt-rfwr4).
 	prefix := [][]string{
 		{"make", "SKIP_UPDATE_CHECK=1", "build"},
+		{"pgrep", "-f", polecatimage.SlingPattern},
 		{"make", "SKIP_UPDATE_CHECK=1", "INSTALL_DIR=" + binDir, "install-local"},
 		{"security", "-i"},
 		{"codesign", "--force", "--keychain", keychain, "-s", "gastown-dev-unattended", "-i", "com.gastown.gt"},
