@@ -211,8 +211,10 @@ func TestRunCheckThatCannotRunIsExitTwo(t *testing.T) {
 		if code != ExitFailed {
 			t.Errorf("exit = %d, want %d", code, ExitFailed)
 		}
-		// The dead-link and dead-make-target checks read docs/HOOKS.md, so they are
-		// the checks that could not run; the others did, and their findings print.
+		// The dead-link, dead-make-target, status-conflict, stray-markup and
+		// word-ceiling checks read docs/HOOKS.md, so they are the checks that could
+		// not run; status-header and polecat-main-push never open it, and their
+		// findings print.
 		for _, want := range []string{
 			"docs/plans/old-plan.md:1: status-header:",
 			"internal/formula/formulas/mol-release.formula.toml:12: polecat-main-push:",
@@ -278,9 +280,16 @@ func TestRunOptions(t *testing.T) {
 	})
 	t.Run("words is the agent-facing total", func(t *testing.T) {
 		t.Parallel()
-		out, _, code := runDocsLint(t, fsys, dates, nil, "--words")
-		if code != ExitClean || strings.TrimSpace(out) == "" || strings.Trim(out, "0123456789\n") != "" {
-			t.Errorf("--words = %q exit %d, want a number", out, code)
+		// Three words in AGENTS.md and two in docs/HOOKS.md are counted; the four
+		// in a reference doc are not, so the total is 5.
+		m := memFS{
+			"AGENTS.md":            "one two three\n",
+			"docs/HOOKS.md":        "four five\n",
+			"docs/guides/guide.md": "six seven eight nine\n",
+		}
+		out, _, code := runDocsLint(t, m, dates, nil, "--words")
+		if want := "5\n"; out != want || code != ExitClean {
+			t.Errorf("--words = %q exit %d, want %q", out, code, want)
 		}
 	})
 	t.Run("refusals are exit 2 with the reason", func(t *testing.T) {
