@@ -79,9 +79,7 @@ Expected: `ls -A` prints exactly `.gt-scratch-town`. The container installs the
 scratch town only into a directory that holds this marker and nothing else, so
 put nothing else here.
 
-**Step 2. Build the image. BLOCKED: the command does not exist yet.**
-Bead gt-nlpe6 adds `gt daemon image`; this step is written from that bead's
-text and must be checked against the landed command before it is run.
+**Step 2. Build the image.**
 
 ```
 cd <scratch-parent>
@@ -89,20 +87,26 @@ gt daemon image --rev <rev> --out <scratch-parent>/build --gt-src <gt checkout> 
   --bd-src <beads checkout> --bd-commit <beads commit> --om-src <om checkout>
 ```
 
-Without `--apply` it prints the commands it would run and runs none. Read that
-output, then run it again with `--apply`. Expected: it prints the tag
-`gt-daemon:<rev>`, and
+Every flag is required. Each path must be absolute and an existing directory;
+`--rev` and `--bd-commit` are 7 or more hex characters. Without `--apply` it
+validates the flags, prints the commands it would run, ends with
+`dry run: nothing was run. Pass --apply to build.`, and writes nothing. Read
+that output, then run the same command with `--apply`. With `--apply` it builds
+gt, bd and om for linux/arm64 in clean worktrees of the commits named, downloads
+the pinned claude CLI, and builds the image with the `desktop-linux` context. The
+Dockerfile is read from `--gt-src`'s working tree. Expected: the last line it
+prints is the tag `gt-daemon:<rev>`, and
 `docker --context desktop-linux image inspect gt-daemon:<rev> --format '{{.Id}}'`
-prints an image id. Never point `--gt-src`, `--bd-src` or `--om-src` at a
-canonical `mayor/rig` clone.
+prints an image id. Never point `--gt-src`, `--bd-src`, `--om-src` or `--out` at
+a canonical `mayor/rig` clone: the command refuses one.
 
-**Step 3. Render and start the scratch project. BLOCKED: the command does not
-exist yet.** Bead gt-e7wxs adds `gt daemon scratch render|up|down`, and
-depends on gt-nlpe6. It takes the live town's root as the required flag
-`--live-root <live-town>`, which it reads only to refuse a scratch root under
-or around it; it is not the working directory, and nothing is run or written in
-the live town. Run these from `<scratch-parent>`, a directory that is neither
-town.
+**Step 3. Render and start the scratch project.**
+
+Run these from `<scratch-parent>`, a directory that is neither the live town nor
+the scratch town. `--live-root <live-town>` names the live town. It is read only
+to refuse a scratch root under or around it; nothing is run or written in the
+live town. `render` and `up` take `--live-root`, `--root`, `--compose-file`,
+`--image`, `--project` and `--container`.
 
 ```
 cd <scratch-parent>
@@ -114,13 +118,20 @@ gt daemon scratch up --live-root <live-town> --root <scratch-root> \
   --project gt-scratch --container gt-scratch-daemon-1
 ```
 
-`render` prints the compose file and writes nothing. Expected in it, by the
-names of the rendered golden `internal/templates/testdata/daemon-compose-scratch.golden.yml`:
+`render` prints the compose file to stdout and writes nothing. Expected in it,
+by the names of the rendered golden `internal/templates/testdata/daemon-compose-scratch.golden.yml`:
 the three services `daemon`, `scratch-dind` and `scratch-dolt`, the container
 name `gt-scratch-daemon-1`, the command `["--scratch-town"]`, a `scratch-dolt`
 service with no published ports, and a bind mount of `<scratch-root>` and
-nothing of the live town. `up` writes `<compose-file>`
-and starts the project. If the daemon should run with the om token loaded, add
+nothing of the live town.
+
+`up` first checks that `<scratch-root>` exists and holds `.gt-scratch-town`
+(Step 1). It then writes `<compose-file>` and runs
+`docker --context desktop-linux compose -p gt-scratch -f <compose-file> up -d daemon`,
+which starts the daemon and the two services it depends on. `up` does not run
+the first-start check. The container's entrypoint installs the scratch town
+when the daemon starts, and Step 4 is where that install is checked. If the
+daemon should run with the om token loaded, add
 `--om-token-file <path in the container>` to both commands.
 
 After `up`:
@@ -274,16 +285,18 @@ by hand in Step 4. Never use `docker system prune` or `docker volume prune`: the
 project on the host.
 
 1. Stop the host agent (Ctrl-C in its tab).
-2. Remove the project and its volumes. This exists today as plain Docker; once
-   gt-e7wxs has landed, `gt daemon scratch down` with the same flags runs the
-   same command:
+2. Remove the project and its volumes. From `<scratch-parent>`:
 
    ```
-   docker --context desktop-linux compose -p gt-scratch -f <compose-file> down -v
+   gt daemon scratch down --live-root <live-town> --compose-file <compose-file> \
+     --project gt-scratch --container gt-scratch-daemon-1
    ```
 
-   Expected: the three containers, the two networks and the volumes named
-   `gt-scratch_*` are removed.
+   `down` takes the same names as `up`, and `--project` and `--container` are
+   required. It refuses the live town's names before it runs anything. It then
+   runs `docker --context desktop-linux compose -p gt-scratch -f <compose-file> down -v`
+   in the compose file's directory. Expected: the three containers, the two
+   networks and the volumes named `gt-scratch_*` are removed.
 3. Check:
 
    ```
@@ -312,5 +325,3 @@ printed. The points most likely to differ:
 - Whether `gt daemon run` in the scratch town reaches the startup guard on a
   host where `bd` and the scratch town's config pass the town-running gate
   (Step 8 says what to do if it does not).
-- The commands of Steps 2 and 3, which are specified by their beads, not yet
-  written.
