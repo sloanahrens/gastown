@@ -120,10 +120,12 @@ func TestRunBoundsAScriptThatNeverReturns(t *testing.T) {
 		// already run out, so a runner that bounds it returns at once. A runner
 		// that does not bound it leaves the script blocked; the guard then fails
 		// the test instead of hanging it. The guard never fires on a bounded run.
+		guard, stop := context.WithTimeout(t.Context(), hangGuard)
+		defer stop()
 		select {
 		case <-ctx.Done():
 			return -1, ctx.Err()
-		case <-time.After(hangGuard):
+		case <-guard.Done():
 			t.Error("the hanging script's context never ended: the runner did not bound it")
 			return -1, nil
 		}
