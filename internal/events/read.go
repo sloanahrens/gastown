@@ -3,7 +3,9 @@ package events
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,23 @@ import (
 // genuinely corrupt line is invisible here — internal/doctor's test-leak check
 // is what reports those.
 func Read(townRoot string) ([]Event, error) {
+	return ReadBounded(townRoot, 0)
+}
+
+// ErrEventsLogTooLarge is ReadBounded's refusal of a log past its bound.
+var ErrEventsLogTooLarge = errors.New("the events log is larger than the read bound")
+
+// ReadBounded returns the town's events log in append order, the way Read does,
+// but refuses a log larger than maxBytes with ErrEventsLogTooLarge rather than
+// read it. maxBytes at or below zero reads whatever is there.
+//
+// It is for a reader that needs the whole log and must not pay for an unbounded
+// one — a landing that asks when a bead was dispatched, say. Such a reader
+// cannot use a window of the log: one that starts inside a bead's run would
+// date the bead from a repeat sling and answer short of the truth, so a log
+// past the bound is an error and not a partial view. A missing log is no
+// events and no error, as Read has it.
+func ReadBounded(townRoot string, maxBytes int64) ([]Event, error) {
 	if townRoot == "" {
 		return nil, nil
 	}
@@ -32,11 +51,45 @@ func Read(townRoot string) ([]Event, error) {
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
-	var events []Event
-	scanner := bufio.NewScanner(f)
+	// One byte past the bound is what proves the log is larger, and the read
+	// stops there rather than scanning a file of any size.
+	var body io.Reader = f
+	counted := &countingReader{r: f}
+	if maxBytes > 0 {
+		body = io.LimitReader(counted, maxBytes+1)
+	} else {
+		body = counted
+	}
+	events, err := readFrom(body)
+	if err != nil {
+		return events, err
+	}
+	if maxBytes > 0 && counted.n > maxBytes {
+		return nil, fmt.Errorf("%w: over %d bytes", ErrEventsLogTooLarge, maxBytes)
+	}
+	return events, nil
+}
+
+// countingReader counts the bytes read through it, so a bounded read can tell a
+// log that fit from one that ran past the bound.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// readFrom decodes every event from r.
+func readFrom(r io.Reader) ([]Event, error) {
+	scanner := bufio.NewScanner(r)
 	// Event lines carry message bodies, so the default 64KiB token is not
 	// enough for a long nudge. 1MiB is the ceiling the daemon's prune shares.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	var events []Event
 	for scanner.Scan() {
 		if event, ok := decodeEventLine(scanner.Text()); ok {
 			events = append(events, event)

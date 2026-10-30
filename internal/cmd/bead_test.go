@@ -242,6 +242,27 @@ func TestBeadFlagMapping(t *testing.T) {
 			t.Errorf("labels to add %v, remove %v", opts.AddLabels, opts.RemoveLabels)
 		}
 	})
+	t.Run("update passes metadata pairs through to bd", func(t *testing.T) {
+		f := newUpdateFlags()
+		for _, pair := range []string{"spec_dispatch_timeout_attempts=2", "other=a=b"} {
+			if err := f.Set("set-metadata", pair); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := f.Set("unset-metadata", "stale"); err != nil {
+			t.Fatal(err)
+		}
+		opts := beadUpdateOptions(f)
+		// The pair is bd's to read: a value holding '=' must reach it whole
+		// rather than being split here (gt-vaivp).
+		want := []string{"spec_dispatch_timeout_attempts=2", "other=a=b"}
+		if !reflect.DeepEqual(opts.SetMetadata, want) {
+			t.Errorf("metadata set = %v, want %v", opts.SetMetadata, want)
+		}
+		if !reflect.DeepEqual(opts.UnsetMetadata, []string{"stale"}) {
+			t.Errorf("metadata unset = %v, want [stale]", opts.UnsetMetadata)
+		}
+	})
 
 	newCreateFlags := func() *pflag.FlagSet {
 		f := pflag.NewFlagSet("create", pflag.ContinueOnError)

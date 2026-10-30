@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -542,5 +543,50 @@ func TestRefusedLandingLeavesTheAttemptOpenWhenTheWorkerLineDisagrees(t *testing
 	}
 	if len(sum.Attempts) != 1 || !sum.Attempts[0].Open {
 		t.Errorf("summary = %+v, want the seat's attempt left open", sum)
+	}
+}
+
+// TestLandFloorsTheTimeASeatWithNoSpanStartLeft: gt-p85pw.92's shape — the seat
+// wrote no span start at all, so the span log holds no clock for it. The
+// landing times the record from the bead's sling in the event log to the
+// submission it trusts, marked an upper bound rather than left a dash: the
+// sling precedes the seat's session, so the interval may overstate its time but
+// cannot understate it (gt-v7ptp).
+func TestLandFloorsTheTimeASeatWithNoSpanStartLeft(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	seedSling(t, f.town, "gt-abc", spanEpoch)
+	f.work.Submitted = spanEpoch.Add(20 * time.Minute)
+	seedFirstSight(t, f.town, "gt-abc", f.work.Head, spanEpoch.Add(30*time.Minute))
+
+	l := f.lander()
+	// A span store the seat never wrote to.
+	l.Landings.Spans = spans.New(spans.DefaultDir(f.town), nil)
+	l.Reviewer = SkipReviewer{}
+	l.Now = func() time.Time { return spanEpoch.Add(40 * time.Minute) }
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+
+	lines := f.landingLines()
+	if len(lines) != 1 {
+		t.Fatalf("landing records = %q, want one", lines)
+	}
+	var rec LandingRecord
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("decoding the landing record: %v", err)
+	}
+	if rec.PolecatSecs != 20*60 {
+		t.Errorf("polecat_secs = %v, want the 1200s from the sling to the submission", rec.PolecatSecs)
+	}
+	if !rec.PolecatUpperBound {
+		t.Error("polecat_upper_bound unset on a time read from the dispatch")
+	}
+	if rec.PolecatLowerBound {
+		t.Error("polecat_lower_bound set on a dispatch interval, which can overstate the seat's time")
+	}
+	want := []PolecatAttempt{{Seat: "gastown/opal", Secs: 20 * 60, UpperBound: true, From: PolecatFromSling}}
+	if !reflect.DeepEqual(rec.PolecatAttempts, want) {
+		t.Errorf("polecat_attempts = %+v, want %+v", rec.PolecatAttempts, want)
 	}
 }

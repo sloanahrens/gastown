@@ -53,6 +53,15 @@ const LabelTownHealth = "gt:townhealth"
 // that package's imports.
 const LabelSpecDispatchFailed = "spec-dispatch-failed"
 
+// LabelSpecDispatchTimeout is written with LabelSpecDispatchFailed when the
+// sling that failed was killed at its own bound, which is the host's load
+// rather than the bead's defect: the dispatcher clears the failure label and
+// slings such a bead again while its retries remain, and a failure of any other
+// kind removes this label (gt-vaivp). It lives beside LabelSpecDispatchFailed
+// because the daemon writes and the dispatcher reads the two as one pair, and
+// the labels are spelled outside internal/specdispatch.
+const LabelSpecDispatchTimeout = "spec-dispatch-timeout"
+
 // NonDispatchableBeadLabels are the "gt:" labels that mark a bead as a member
 // of a runtime family, regardless of the issue_type it carries. An escalation
 // waits on the operator, a message on its recipient, an agent
