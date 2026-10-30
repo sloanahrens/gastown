@@ -103,6 +103,39 @@ func newRecorder(t *testing.T, bd *fakeBD) (Recorder, *fakeCopies) {
 	return Recorder{Run: bd.Run, Copy: copies.Copy}, copies
 }
 
+// TestCaptureNormalizesTheGoldenItMakes: a golden the recorder makes carries the normalized text,
+// so the id bd minted, the timestamps and the revision a run decides never reach a committed golden.
+func TestCaptureNormalisesTheGoldenItMakes(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: func(args []string) ([]byte, int, error) {
+		if args[0] == "create" {
+			return []byte(`{"id":"fx-a1b2c3","created_at":"2026-10-30T18:59:04Z","revision":7,"owner":"bdshim-record"}`), 0, nil
+		}
+		return nil, 0, nil
+	}}
+	copies := &fakeCopies{base: t.TempDir()}
+	keep := map[string]bool{fixtureID: true}
+	rc := Recorder{
+		Run:       bd.Run,
+		Copy:      copies.Copy,
+		Normalize: func(stdout []byte) []byte { return normalizeGolden(stdout, keep) },
+	}
+	goldens, err := rc.Capture([]Row{{Verb: "create", Flags: []string{"--json"}, Mutates: true}})
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	want := `{
+  "id": "fx-new",
+  "created_at": "2026-01-01T00:00:00Z",
+  "revision": 0,
+  "owner": "bdshim-record"
+}
+`
+	if len(goldens) != 1 || string(goldens[0].Stdout) != want {
+		t.Errorf("Capture = %v, want the golden normalized to:\n%s", goldens, want)
+	}
+}
+
 // TestCaptureRefusesCollidingGoldenNames: two rows that would write the same golden are refused
 // before bd runs, so no run is spent on a table that would overwrite itself.
 func TestCaptureRefusesCollidingGoldenNames(t *testing.T) {
