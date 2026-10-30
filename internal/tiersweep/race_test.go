@@ -22,6 +22,7 @@ func raceSweep(t *testing.T, fake *fakeTier) *Sweep {
 }
 
 func TestRaceCommandLine(t *testing.T) {
+	t.Parallel()
 	fake := &fakeTier{}
 	s := raceSweep(t, fake)
 	s.Race()
@@ -41,6 +42,7 @@ func TestRaceCommandLine(t *testing.T) {
 }
 
 func TestRaceSummary(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		code int
@@ -62,6 +64,7 @@ func TestRaceSummary(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			fake := &fakeTier{codes: map[string]int{". ./internal/cmd": c.code}}
 			s := raceSweep(t, fake)
 			line, red := s.Race()

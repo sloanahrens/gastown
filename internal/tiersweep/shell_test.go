@@ -36,6 +36,7 @@ func shellSweep(t *testing.T, fake *fakeShell) *Sweep {
 }
 
 func TestShellCommandLine(t *testing.T) {
+	t.Parallel()
 	fake := &fakeShell{}
 	s := shellSweep(t, fake)
 	s.Shell()
@@ -49,6 +50,7 @@ func TestShellCommandLine(t *testing.T) {
 }
 
 func TestShellReturnsTheRunnersLine(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		// out is the runner's output; %[1]s is the log directory it prints.
@@ -87,6 +89,7 @@ func TestShellReturnsTheRunnersLine(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			fake := &fakeShell{code: c.code}
 			s := shellSweep(t, fake)
 			fake.out = fmt.Sprintf(c.out, s.Opts.LogDir)
@@ -100,6 +103,7 @@ func TestShellReturnsTheRunnersLine(t *testing.T) {
 }
 
 func TestShellWithoutSummaryLineIsRed(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		out  string
@@ -128,6 +132,7 @@ func TestShellWithoutSummaryLineIsRed(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			fake := &fakeShell{out: c.out, code: c.code}
 			s := shellSweep(t, fake)
 			line, red := s.Shell()
