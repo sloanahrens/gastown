@@ -13,8 +13,6 @@
 # line whose reason is missing or does not fit (gt-tpg0p.15).
 .githooks/pre-push_test.sh	port: gt-tpg0p
 .runtime/setup-hooks/01-git-config.sh	port: gt-tpg0p
-deploy/gke-probe/probe.sh	port: gt-tpg0p
-deploy/gke-probe/probe_test.sh	port: gt-tpg0p
 deploy/k8s/kind/common.sh	port: gt-tpg0p
 deploy/k8s/kind/down.sh	port: gt-tpg0p
 deploy/k8s/kind/kind_test.sh	port: gt-tpg0p
