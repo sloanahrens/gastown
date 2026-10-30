@@ -431,14 +431,20 @@ func (c *docNameCache) namesDoc(text, doc string) bool {
 	if !strings.Contains(text, doc) {
 		return false
 	}
+	return c.patternFor(doc).MatchString(text)
+}
+
+// patternFor returns doc's pattern, compiling it on first use. The deferred
+// unlock releases mu even when compile panics, so a later caller is not blocked.
+func (c *docNameCache) patternFor(doc string) *regexp.Regexp {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	re, ok := c.byDoc[doc]
 	if !ok {
 		re = c.compile(doc)
 		c.byDoc[doc] = re
 	}
-	c.mu.Unlock()
-	return re.MatchString(text)
+	return re
 }
 
 // closedIn returns the rig's closed beads closed at or after the earliest ask,
