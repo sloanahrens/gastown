@@ -116,8 +116,25 @@ func TestRenderDaemonCompose_ScratchRefusesTheLiveRootThroughALink(t *testing.T)
 	}
 }
 
-// The control for the link rows: a scratch root beside the live root, reached
-// through a link that points elsewhere, is not refused.
+// A root that cannot be resolved, because a path component is a file, is refused
+// rather than taken as clear: the check cannot tell where it would mount.
+func TestRenderDaemonCompose_ScratchRefusesARootThatCannotBeResolved(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	file := filepath.Join(base, "file")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := scratchSpec()
+	spec.LiveTownRoot = filepath.Join(base, "live")
+	spec.TownRoot = filepath.Join(file, "scratch")
+	if _, err := templates.RenderDaemonCompose(spec); err == nil {
+		t.Errorf("scratch TownRoot %q under a file rendered, want a refusal", spec.TownRoot)
+	}
+}
+
+// The control for the refusals above: a scratch root beside the live root is
+// not refused.
 func TestRenderDaemonCompose_ScratchAcceptsARootBesideTheLiveRoot(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
