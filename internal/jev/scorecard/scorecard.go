@@ -70,31 +70,60 @@ type sample struct {
 	label  bool
 }
 
+// Reading is the parse-and-label pass over a battery's log: the items the log
+// holds and what the adapter labels each one, before any question is scored.
+type Reading struct {
+	// Items are the log's items stamped at or after the window's start, in the
+	// order the log wrote them.
+	Items []Item
+	// Labelings holds item i's labeling at index i.
+	Labelings []Labeling
+	// LinesSkipped counts the log lines that did not parse.
+	LinesSkipped int
+	// LogMissing is set when the battery has no log yet.
+	LogMissing bool
+}
+
+// Read parses the adapter's log and labels every item, the pass Build scores
+// and a caller that needs the answers themselves reads instead.
+func Read(ctx context.Context, a Adapter, since time.Time) (Reading, error) {
+	items, skipped, found, err := readItems(a.LogPath(), parseLines(a), since)
+	if err != nil {
+		return Reading{}, err
+	}
+	if p, ok := a.(Prefetcher); ok {
+		p.Prefetch(ctx, items)
+	}
+	labelings := make([]Labeling, len(items))
+	for i, it := range items {
+		lab, err := a.Label(ctx, it)
+		if err != nil {
+			return Reading{}, fmt.Errorf("labeling item %s: %w", it.ID, err)
+		}
+		labelings[i] = lab
+	}
+	return Reading{Items: items, Labelings: labelings, LinesSkipped: skipped, LogMissing: !found}, nil
+}
+
 // Build reads the adapter's log, keeps the items stamped at or after since (a
 // zero since keeps all), and reports each question. A line that does not parse
 // is skipped and counted; a missing log is an empty report that says so.
 func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
-	items, skipped, found, err := readItems(a.LogPath(), parseLines(a), since)
+	read, err := Read(ctx, a, since)
 	if err != nil {
 		return Report{}, err
 	}
-	rep := Report{Battery: a.Battery(), Items: len(items), LinesSkipped: skipped, LogMissing: !found, Questions: []QuestionReport{}}
+	items, labelings := read.Items, read.Labelings
+	rep := Report{Battery: a.Battery(), Items: len(items), LinesSkipped: read.LinesSkipped, LogMissing: read.LogMissing, Questions: []QuestionReport{}}
 	if !since.IsZero() {
 		rep.Since = &since
-	}
-
-	if p, ok := a.(Prefetcher); ok {
-		p.Prefetch(ctx, items)
 	}
 
 	labels := make([]map[QuestionID]bool, len(items))
 	sources := make([]string, len(items))
 	rep.Lines = make([]LineReport, 0, len(items))
 	for i, it := range items {
-		lab, err := a.Label(ctx, it)
-		if err != nil {
-			return Report{}, fmt.Errorf("labeling item %s: %w", it.ID, err)
-		}
+		lab := labelings[i]
 		if lab.Labeled {
 			labels[i] = lab.Labels
 			sources[i] = lab.Source
@@ -488,6 +517,13 @@ func calibrationMetrics(bins []Bin, samples []sample) (ece, brier *float64, mono
 
 func binOf(v float64) int {
 	return max(0, min(int(v*nBins), nBins-1))
+}
+
+// Band names the calibration band a scored value falls in, such as "0.2-0.4":
+// the bands the calibration reports, each [Lo, Hi).
+func Band(v float64) string {
+	i := binOf(v)
+	return fmt.Sprintf("%.1f-%.1f", float64(i)/nBins, float64(i+1)/nBins)
 }
 
 func meanByLabel(samples []sample) (positive, negative *float64) {

@@ -841,3 +841,19 @@ func TestScorecardFixtureMissingLabelsFails(t *testing.T) {
 		t.Fatalf("Build error = %v, want the missing fixture labels", err)
 	}
 }
+
+// Read reports a log it cannot read, rather than reading it as an empty one.
+func TestScorecardReadFailsOnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(FixtureLogPath(town), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(FixtureBattery, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(context.Background(), a, time.Time{}); err == nil || !strings.Contains(err.Error(), "reading the log") {
+		t.Fatalf("Read error = %v, want the unreadable log", err)
+	}
+}
