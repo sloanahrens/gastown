@@ -379,6 +379,11 @@ type patrolScanHost struct {
 	// cannot start git (gt-sefzt). It reports whether any directory was
 	// deleted, so a removal that fails halfway is logged as one.
 	removeSandboxSeatDirs func(rigPath, rigName, name string) (bool, error)
+	// writePendingSeatEnd is writePendingSandboxSeatEnd when nil: it records a
+	// seat kept for the jev_rules ask so a later pass offers its end again
+	// (gt-381oj). A seam for the write that fails, which a town's filesystem
+	// need not produce.
+	writePendingSeatEnd func(townRoot, rig, name string, landing sandboxSeatLanding) error
 	// sandboxRecordBudget is the records one record pass may check, each a tmux
 	// probe and, unless a live session answers, a gateway question: 20
 	// (sandboxRecordsPerTick) when zero. A seam so the bound test writes few
