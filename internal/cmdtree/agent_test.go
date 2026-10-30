@@ -199,7 +199,6 @@ func TestAgentFacing(t *testing.T) {
 		"AGENTS.md": true,
 		"internal/formula/formulas/mol-polecat-work.formula.toml": true,
 		"internal/templates/roles/polecat.md.tmpl":                true,
-		"plugins/tool-updater/run.sh":                             true,
 		"plugins/tool-updater/run_test.sh":                        false,
 		".claude/skills/pr-sheriff/skill.md":                      true,
 		"internal/cmd/prime_output.go":                            true,

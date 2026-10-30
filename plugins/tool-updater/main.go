@@ -1,9 +1,9 @@
 // Command tool-updater reports which Homebrew tools are outdated and changes
 // nothing. Why upgrades stay manual: plugin.md, "Upgrades are manual".
 //
-// It is the entry point plugin.md's [execution] block names, and run.sh beside
-// it is the manual shim. A report exits 0, a missing brew or an unreadable
-// probe exits 1, so a broken brew never prints the false all-clear (gt-th5it).
+// It is the entry point plugin.md's [execution] block names, and the daemon
+// execs it directly. A report exits 0, a missing brew or an unreadable probe
+// exits 1, so a broken brew never prints the false all-clear (gt-th5it).
 package main
 
 import (
@@ -157,10 +157,9 @@ func (f formula) versions() (installed, available string) {
 // report: the all-clear is the one verdict an unreadable probe must not earn
 // (gt-th5it).
 //
-// One entry that is not an object fails the whole parse, where run.sh's
-// per-tool lookup called a method on it and read the resulting error as that
-// tool being up to date. Calling a tool current on an entry nothing could read
-// is the false all-clear this function refuses (gt-tpg0p.3).
+// One entry that is not an object fails the whole parse. Calling a tool current
+// on an entry nothing could read is the false all-clear this function refuses
+// (gt-tpg0p.3).
 func parseOutdated(probe string) ([]formula, error) {
 	var report struct {
 		Formulae json.RawMessage `json:"formulae"`
