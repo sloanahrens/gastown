@@ -24,8 +24,8 @@ import (
 )
 
 // The tier_sweep job runs origin/main's shell tests through the Go runner
-// (internal/shelltier) and its integration and race tiers through
-// scripts/tier-sweep.sh, on an interval: the tiers `make gate` does not run,
+// (internal/shelltier) and its integration and race tiers through the Go
+// command (cmd/tier-sweep), on an interval: the tiers `make gate` does not run,
 // which landings gate only for the submissions that can move them
 // (gt-vsct7.5). It replaces the overseer's
 // hourly :37 cron, so it is silent while green and costs nothing while main is
@@ -45,7 +45,7 @@ import (
 // revert. It does not write `red-main` beads: that label's close-on-green is
 // the post-land runner's, so a sweep bead under it would be closed by an
 // unrelated green landing. It does not hold a gate-class slot: the sweep's own
-// role is <rig>/tier-sweep, and the script's inner `gt slot run` calls inherit
+// role is <rig>/tier-sweep, and the command's inner `gt slot run` calls inherit
 // that role and ride the one hold reentrantly instead of taking a slot each.
 
 const (
@@ -67,10 +67,12 @@ const (
 	// keeps. The whole log is written to the state file's log path.
 	tierSweepLogTailLines = 20
 
-	// tierSweepScript is the tier entry point inside the checked-out tree. The
-	// tree ships its own copy, so a sweep never runs a script main does not
-	// have.
-	tierSweepScript = "scripts/tier-sweep.sh"
+	// tierSweepTierCommand runs the integration and race tiers, taking the tier
+	// names as arguments (gt-tpg0p.102). It is the Go port of the script it
+	// replaces, so its summary, progress and unknown-tier lines keep the
+	// script's text and the parsers below read them unchanged. The command is
+	// resolved in the checked-out tree, so a sweep runs the Go source main has.
+	tierSweepTierCommand = "go run ./cmd/tier-sweep"
 
 	// tierSweepShellRunner is the shell stage's command in place of the tier
 	// script: the Go runner that runs every shell test in the manifest
@@ -427,7 +429,7 @@ func (s tierSweepStage) command() string {
 	if s.runner != "" {
 		return s.runner
 	}
-	return "bash " + tierSweepScript + " " + strings.Join(s.tiers, " ")
+	return tierSweepTierCommand + " " + strings.Join(s.tiers, " ")
 }
 
 // tierSweepStageResult is what one stage run produced.
@@ -1470,18 +1472,36 @@ func parseTierSweepSummaries(output string) map[string]tierSweepTierResult {
 // non-zero exit overrules a GREEN summary line (the runner's exit 2 is a usage
 // or log-dir failure). That GREEN line is withheld, so the tier is unreported,
 // and the caller records a tier with no verdict as RED.
+//
+// The integration and race stage is read the same way, with one exception: the
+// command exits 2 at a tier it does not offer, after the tiers before it have
+// printed their verdicts, and those verdicts stand (gt-qgrdy). Only that decline
+// is excused. Any other non-zero exit withholds GREEN.
 func tierSweepStageReported(st tierSweepStage, res tierSweepStageResult) map[string]tierSweepTierResult {
 	if st.runner == "" {
-		return parseTierSweepSummaries(res.output)
+		reported := parseTierSweepSummaries(res.output)
+		declined := len(parseTierSweepUnknownTiers(res.output)) > 0
+		if res.exitCode != 0 && !declined {
+			withholdTierSweepGreen(reported)
+		}
+		return reported
 	}
 	summary, _, red := tiersweep.ShellVerdict(res.output, res.exitCode)
 	reported := parseTierSweepSummaries(summary)
+	if red {
+		withholdTierSweepGreen(reported)
+	}
+	return reported
+}
+
+// withholdTierSweepGreen drops every GREEN verdict from reported, so the tiers
+// they named are unreported and the caller records them RED.
+func withholdTierSweepGreen(reported map[string]tierSweepTierResult) {
 	for tier, ts := range reported {
-		if red && ts.Verdict == tierSweepGreen {
+		if ts.Verdict == tierSweepGreen {
 			delete(reported, tier)
 		}
 	}
-	return reported
 }
 
 // tierSweepBeadPrefix keys an open sweep bead for one rig and tier.

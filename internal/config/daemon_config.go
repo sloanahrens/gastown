@@ -379,9 +379,10 @@ type PatrolsConfig struct {
 	// where no rig carries merge_queue.forgejo.
 	LandingInfra *LandingInfraConfig `json:"landing_infra,omitempty"`
 
-	// TierSweep runs scripts/tier-sweep.sh against origin/main on an interval,
-	// the tiers `make gate` does not run (internal/daemon/tier_sweep.go,
-	// gt-vsct7.5). Opt-in: it runs the town's expensive suites.
+	// TierSweep runs the shell tier and the integration and race tiers (the
+	// Go command, cmd/tier-sweep) against origin/main on an interval, the tiers
+	// `make gate` does not run (internal/daemon/tier_sweep.go, gt-vsct7.5).
+	// Opt-in: it runs the town's expensive suites.
 	TierSweep *TierSweepConfig `json:"tier_sweep,omitempty"`
 
 	// DoltBackup is retired: the 15-minute dolt_backup patrol (dolt backup

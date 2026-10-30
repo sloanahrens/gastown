@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -604,11 +606,78 @@ func TestTierSweepStages_ShellStageRunsTheGoRunner(t *testing.T) {
 	if got, want := shell.command(), "go run ./internal/shelltier/cmd/shelltier --all --budget 10m"; got != want {
 		t.Errorf("shell command = %q, want %q", got, want)
 	}
-	if got, want := integration.command(), "bash scripts/tier-sweep.sh integration race"; got != want {
+	if got, want := integration.command(), "go run ./cmd/tier-sweep integration race"; got != want {
 		t.Errorf("integration command = %q, want %q", got, want)
 	}
 	if shell.slot || !integration.slot {
 		t.Errorf("slot: shell = %v, integration = %v; want only the integration stage to hold the slot", shell.slot, integration.slot)
+	}
+}
+
+// TestTierSweepCommand_ArgvPerTier: the integration and race stage runs the Go
+// command with the tiers it names as arguments, one tier or both, and never the
+// script. Restoring the script path turns this red.
+func TestTierSweepCommand_ArgvPerTier(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		tiers []string
+		want  []string
+	}{
+		{tiers: []string{"integration"}, want: []string{"go", "run", "./cmd/tier-sweep", "integration"}},
+		{tiers: []string{"race"}, want: []string{"go", "run", "./cmd/tier-sweep", "race"}},
+		{tiers: []string{"integration", "race"}, want: []string{"go", "run", "./cmd/tier-sweep", "integration", "race"}},
+	}
+	for _, tc := range tests {
+		st := tierSweepStage{tiers: tc.tiers}
+		if got := strings.Fields(st.command()); !slices.Equal(got, tc.want) {
+			t.Errorf("tiers %v: argv = %q, want %q", tc.tiers, got, tc.want)
+		}
+	}
+}
+
+// TestTierSweepCommand_ExitOverrulesGreen: the integration and race stage reads
+// its output with the shell stage's fail-closed rule. A non-zero exit withholds
+// a GREEN line, and a RED line stays RED. The one exception is the command's
+// decline: an exit 2 that names the tier it does not offer leaves the verdicts
+// before it standing (gt-qgrdy).
+func TestTierSweepCommand_ExitOverrulesGreen(t *testing.T) {
+	t.Parallel()
+	const (
+		green = "tier-sweep: integration GREEN passed=4 failed=0 skipped=0 (logs /tmp/tier-sweep.y)\n"
+		red   = "tier-sweep: integration RED passed=4 failed=1 skipped=0 failed: pkg/x (logs /tmp/tier-sweep.y)\n"
+		race  = "tier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs /tmp/tier-sweep.z)\n"
+		decl  = "tier-sweep: unknown tier race (want shell, integration or race)\n"
+	)
+	integration := tierSweepStage{tiers: []string{"integration", "race"}}
+	tests := []struct {
+		name     string
+		output   string
+		exitCode int
+		want     map[string]string // tier -> verdict; a tier absent here has no verdict
+	}{
+		{name: "GREEN, exit 0", output: green + race, exitCode: 0,
+			want: map[string]string{"integration": tierSweepGreen, "race": tierSweepGreen}},
+		{name: "GREEN, exit 1 is withheld", output: green + race, exitCode: 1,
+			want: map[string]string{}},
+		{name: "GREEN, exit 2 with no decline line is withheld", output: green, exitCode: 2,
+			want: map[string]string{}},
+		{name: "RED stays RED", output: red + race, exitCode: 1,
+			want: map[string]string{"integration": tierSweepRed}},
+		{name: "decline leaves the GREEN before it standing", output: green + decl, exitCode: 2,
+			want: map[string]string{"integration": tierSweepGreen}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reported := tierSweepStageReported(integration, tierSweepStageResult{output: tc.output, exitCode: tc.exitCode, ran: true})
+			got := map[string]string{}
+			for tier, ts := range reported {
+				got[tier] = ts.Verdict
+			}
+			if !maps.Equal(got, tc.want) {
+				t.Errorf("reported = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
