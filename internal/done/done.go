@@ -1650,9 +1650,10 @@ func pushBranchForLanding(r *doneRun, sourceBD beads.Client, sourceIssue *beads.
 	seatAddress := role.Actor(role.Polecat, r.rigName, r.polecatName)
 	seat := git.SeatIdentityFor(seatAddress, seatEmail)
 	// The legacy address is the host's global email, read through the seam so a
-	// unit test can set it; a nil seam reads as unset.
+	// unit test can set it; a nil seam reads as unset. Only a rework lease can
+	// match it, so a push that is not a rework never reads it.
 	legacyEmail := ""
-	if r.deps.globalEmail != nil {
+	if r.deps.globalEmail != nil && sourceIssue != nil && beads.HasLabel(sourceIssue, land.LabelRework) {
 		legacyEmail = r.deps.globalEmail()
 	}
 	rework := reworkPushFor(sourceIssue, seat.Name, seat.Email, git.SeatLocalEmail(seatAddress), legacyEmail)

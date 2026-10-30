@@ -92,6 +92,24 @@ func TestSubmitReworkUnderLegacyEmailWithUnsetGlobalRefusesFromBead(t *testing.T
 	}
 }
 
+// A push that is not a rework never consults the host's global email: only a
+// rework lease can match it, so the read is skipped for every other push.
+func TestSubmitNonReworkPushDoesNotReadGlobalEmail(t *testing.T) {
+	t.Parallel()
+	h := newSubmitHarness(t)
+	reads := 0
+	h.r.deps.globalEmail = func() string {
+		reads++
+		return "host@test.com"
+	}
+	if err := h.submit(); err != nil {
+		t.Fatalf("submit = %v, want the plain push to land", err)
+	}
+	if reads != 0 {
+		t.Errorf("globalEmail read %d time(s) on a non-rework push, want 0", reads)
+	}
+}
+
 func TestSubmitReworkOfRejectedHeadPushesUnderLeaseFromBead(t *testing.T) {
 	t.Parallel()
 	h := reworkWiringHarness(t, reworkWiringSeat, reworkWiringEmail)
