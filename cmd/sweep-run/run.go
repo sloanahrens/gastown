@@ -161,7 +161,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		// No tier ran, so every requested tier is RED with the reason: a run
 		// that could not start must never leave a tier it did not test looking
 		// GREEN (gt-dibnm).
-		res.Tiers = redTiers(opts.Tiers, opts.logDir(), sanitise(err.Error(), maxSummaryBytes))
+		res.Tiers = redTiers(opts.Tiers, opts.logDir(), sanitize(err.Error(), maxSummaryBytes))
 	} else {
 		overrides := map[string]string{
 			tiersweep.EnvLogDir: opts.logDir(),
@@ -323,7 +323,7 @@ func tiersFrom(tiers []string, stdout, stderrText string, code int, logDir strin
 	}
 	lines := make(map[string]string, len(tiers))
 	for _, raw := range strings.Split(stdout, "\n") {
-		line := sanitise(raw, maxSummaryBytes)
+		line := sanitize(raw, maxSummaryBytes)
 		tier, ok := summaryTier(line)
 		if !ok {
 			continue
@@ -341,7 +341,7 @@ func tiersFrom(tiers []string, stdout, stderrText string, code int, logDir strin
 		case !ok:
 			line = generated(tier, logDir, reason)
 		case code != 0:
-			line = redOnFailure(line, tier, code, logDir)
+			line = redOnFailure(line, tier, code)
 		}
 		out = append(out, sweeprunner.Tier{Tier: tier, Summary: line})
 	}
@@ -363,7 +363,7 @@ func redTiers(tiers []string, logDir, reason string) []sweeprunner.Tier {
 // generated is a RED summary line the runner writes itself: one failing unit
 // named by reason, in the sweep's own format, capped like a printed line.
 func generated(tier, logDir, reason string) string {
-	line, _ := tiersweep.Summary(tier, logDir, 0, 1, 0, sanitise(reason, maxSummaryBytes), 0)
+	line, _ := tiersweep.Summary(tier, logDir, 0, 1, 0, sanitize(reason, maxSummaryBytes), 0)
 	return capRunes(line, maxSummaryBytes)
 }
 
@@ -389,7 +389,7 @@ func withLogDir(line, logDir string) string {
 // the exit status is the verdict, and a GREEN line beside it is a contradiction
 // the result records rather than hides. The counts and names stay as printed;
 // the contradiction joins the failed names so the daemon shows why.
-func redOnFailure(line, tier string, code int, logDir string) string {
+func redOnFailure(line, tier string, code int) string {
 	prefix := tiersweep.Name + ": " + tier + " "
 	rest, ok := strings.CutPrefix(line, prefix)
 	if !ok || !strings.HasPrefix(rest, "GREEN") {
@@ -414,7 +414,7 @@ func tailOf(text string) string {
 	if len(text) > maxStderrTail {
 		text = text[len(text)-maxStderrTail:]
 	}
-	return sanitise(text, maxStderrTail)
+	return sanitize(text, maxStderrTail)
 }
 
 // summaryTier reports the tier a sweep summary line names. A line needs the
@@ -563,17 +563,17 @@ func oneLine(text string) string {
 	return strings.Join(strings.Fields(clean), " ")
 }
 
-// ansiRE matches the escape sequences a terminal colours text with: a CSI
+// ansiRE matches the escape sequences a terminal colors text with: a CSI
 // sequence (ESC [ parameters final) and a two-character escape. They carry no
 // meaning into a result and would only be quoted back at a reader.
 var ansiRE = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\\\^_]")
 
-// sanitise makes text of unknown provenance safe to store: ANSI escapes
+// sanitize makes text of unknown provenance safe to store: ANSI escapes
 // removed, invalid UTF-8 replaced, control characters read as spaces, runs of
 // whitespace collapsed, and the whole cut to max bytes without splitting a
 // character. The sweep is the untrusted side of the boundary, so nothing it
 // prints reaches a result unchanged (gt-dibnm).
-func sanitise(text string, max int) string {
+func sanitize(text string, max int) string {
 	text = ansiRE.ReplaceAllString(text, "")
 	text = strings.ToValidUTF8(text, "�")
 	return capRunes(oneLine(text), max)
