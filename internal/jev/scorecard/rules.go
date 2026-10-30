@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
@@ -43,10 +44,11 @@ const (
 func init() {
 	Register(RulesBattery, func(townRoot string) Adapter {
 		stores := &townNotes{town: townRoot, stores: map[string]*beads.Beads{}}
+		var storesMu sync.Mutex
 		return &rulesAdapter{
 			town: townRoot,
 			comments: func(rig, bead string) ([]beads.Comment, error) {
-				return beadComments(stores, rig, bead)
+				return beadComments(stores, &storesMu, rig, bead)
 			},
 			lines: map[string]rules.Line{},
 			now:   time.Now,
@@ -71,6 +73,23 @@ type rulesAdapter struct {
 	refusalsRead bool
 	// sessionsRead counts the sessions whose bead comments Label read.
 	sessionsRead int
+	// commentCache holds each bead's comments by commentKey, once read by
+	// Prefetch or by Label. A failed read is not kept.
+	commentCache map[string][]beads.Comment
+	// warn tells the operator about a failed prefetch read; nil means stderr
+	// through warnf. A test sets it to see the warning without swapping
+	// os.Stderr.
+	warn func(format string, args ...any)
+}
+
+// rulesPrefetchWorkers caps how many comment reads Prefetch runs at once. Each
+// read is a bd subprocess, and the host is shared, so the pool stays small.
+const rulesPrefetchWorkers = 4
+
+// commentKey names a bead's comments in the cache. Parse rejects a slash in a
+// bead id, so the last slash in a key divides its rig from its bead.
+func commentKey(rig, bead string) string {
+	return rig + "/" + bead
 }
 
 func (a *rulesAdapter) Battery() string { return RulesBattery }
@@ -129,14 +148,14 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	if !ok {
 		return Labeling{}, fmt.Errorf("item %s was not parsed by the rules adapter", item.ID)
 	}
-	if a.now().Sub(line.DoneAt) < ruleWindow {
+	if !a.windowClosed(line) {
 		return Labeling{}, nil
 	}
 	refusals, err := a.readRefusals()
 	if err != nil {
 		return Labeling{}, err
 	}
-	comments, err := a.comments(line.Rig, line.Bead)
+	comments, err := a.commentsOf(line.Rig, line.Bead)
 	// A bead the store does not hold has no comments to read, so its stand-down
 	// records are unreadable, not absent.
 	unreadable := errors.Is(err, beads.ErrNotFound)
@@ -207,6 +226,96 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	return Labeling{Labeled: true, Labels: map[QuestionID]bool{qBrokeStandingRule: true}, Rule: strings.Join(sources, "+")}, nil
 }
 
+// windowClosed reports whether a line's window has passed, so Label reads its
+// bead. A line still inside the window stays unlabeled.
+func (a *rulesAdapter) windowClosed(line rules.Line) bool {
+	return a.now().Sub(line.DoneAt) >= ruleWindow
+}
+
+// Prefetch reads the comments of the beads Label will read, once per (rig,
+// bead), with a pool of rulesPrefetchWorkers reads. It reads the bead of every
+// parsed line whose window has closed, which covers each bead Label reads for a
+// line that reaches that read (Label can stop at an earlier check, so Prefetch
+// may read a bead Label never asks for). A read that fails is left out of the
+// cache, so Label reads that bead itself and answers as it always did, and each
+// failure is named on stderr.
+func (a *rulesAdapter) Prefetch(_ context.Context, items []Item) {
+	type pair struct{ rig, bead string }
+	var pairs []pair
+	seen := map[string]bool{}
+	for _, it := range items {
+		line, ok := a.lines[it.ID]
+		if !ok || !a.windowClosed(line) {
+			continue
+		}
+		key := commentKey(line.Rig, line.Bead)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		pairs = append(pairs, pair{line.Rig, line.Bead})
+	}
+
+	type result struct {
+		comments []beads.Comment
+		err      error
+	}
+	// Each worker writes only the results index it was handed, so the results
+	// need no lock, and the cache is filled below in pair order, not in the order
+	// the reads finished.
+	results := make([]result, len(pairs))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range min(rulesPrefetchWorkers, len(pairs)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				results[i].comments, results[i].err = a.comments(pairs[i].rig, pairs[i].bead)
+			}
+		}()
+	}
+	for i := range pairs {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	warn := a.warn
+	if warn == nil {
+		warn = warnf
+	}
+	for i, p := range pairs {
+		if results[i].err != nil {
+			warn("prefetching the comments of %s/%s: %v", p.rig, p.bead, results[i].err)
+			continue
+		}
+		a.cacheComments(p.rig, p.bead, results[i].comments)
+	}
+}
+
+// commentsOf returns a bead's comments from the cache, or reads them and keeps
+// them. A failed read is not kept, so the next Label tries the bead again.
+func (a *rulesAdapter) commentsOf(rig, bead string) ([]beads.Comment, error) {
+	if c, ok := a.commentCache[commentKey(rig, bead)]; ok {
+		return c, nil
+	}
+	comments, err := a.comments(rig, bead)
+	if err != nil {
+		return nil, err
+	}
+	a.cacheComments(rig, bead, comments)
+	return comments, nil
+}
+
+// cacheComments keeps one bead's comments for the labels that follow.
+func (a *rulesAdapter) cacheComments(rig, bead string, comments []beads.Comment) {
+	if a.commentCache == nil {
+		a.commentCache = map[string][]beads.Comment{}
+	}
+	a.commentCache[commentKey(rig, bead)] = comments
+}
+
 // Context says which guard sources the labels were read from, and which rule
 // has no record. The report prints these lines beside the metrics.
 func (a *rulesAdapter) Context() []string {
@@ -254,9 +363,13 @@ func isOwnSubmission(ref attention.Refusal, line rules.Line) bool {
 
 // beadComments reads a bead's comments from its rig's store. A bead the store
 // does not hold returns beads.ErrNotFound, so Label leaves its session
-// unlabeled rather than reading it as having no record.
-func beadComments(stores *townNotes, rig, bead string) ([]beads.Comment, error) {
+// unlabeled rather than reading it as having no record. The store map is
+// filled lazily, so mu covers the lookup, and the comment read runs outside it:
+// Prefetch's workers read in parallel.
+func beadComments(stores *townNotes, mu *sync.Mutex, rig, bead string) ([]beads.Comment, error) {
+	mu.Lock()
 	b, err := stores.store(rig)
+	mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
