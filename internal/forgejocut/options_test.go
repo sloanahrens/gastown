@@ -3,6 +3,7 @@ package forgejocut
 import (
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -34,9 +35,17 @@ func isTownDir(p string) bool {
 	return false
 }
 
-// isTownFile reports whether p is a test town's marker, or a probe under scripts/.
+// testBinary is the path of the running binary the test seams report: at the root
+// of testRepo, as a build without bin/ puts it.
+const (
+	testBinary = "/repo/forgejo-cutover"
+	testProbe  = "/repo/scripts/forgejo-probe.sh"
+)
+
+// isTownFile reports whether p is a test town's marker, the test repository's
+// probe, or a probe under scripts/.
 func isTownFile(p string) bool {
-	if strings.HasPrefix(p, "scripts/") {
+	if strings.HasPrefix(p, "scripts/") || p == testProbe {
 		return true
 	}
 	for _, t := range testTowns {
@@ -52,11 +61,12 @@ func isTownFile(p string) bool {
 // reads as "" unless a test sets it.
 func testEnv(vars map[string]string) Env {
 	return Env{
-		Getenv: func(key string) string { return vars[key] },
-		IsDir:  isTownDir,
-		IsFile: isTownFile,
-		Town:   func() string { return "" },
-		Git:    fakeGit{origin: "https://github.com/acme/gastown.git"},
+		Getenv:     func(key string) string { return vars[key] },
+		IsDir:      isTownDir,
+		IsFile:     isTownFile,
+		Town:       func() string { return "" },
+		Executable: func() (string, error) { return testBinary, nil },
+		Git:        fakeGit{origin: "https://github.com/acme/gastown.git"},
 	}
 }
 
@@ -94,7 +104,7 @@ func baseOptions() Options {
 		BotPrefix:     "bot-",
 		APIURL:        "http://127.0.0.1:3000/api/v1",
 		WebURL:        "http://127.0.0.1:3000",
-		Probe:         "scripts/forgejo-probe.sh",
+		Probe:         testProbe,
 		GT:            "gt",
 	}
 }
@@ -235,6 +245,11 @@ func TestParseDefaultsTable(t *testing.T) {
 			change: func(o *Options) { o.DryRun = true },
 		},
 		{
+			name:   "--main-branch takes a slashed name",
+			args:   []string{"--main-branch", "release/1"},
+			change: func(o *Options) { o.MainBranch = "release/1" },
+		},
+		{
 			name:   "--probe names the probe",
 			args:   []string{"--probe", "scripts/other-probe.sh"},
 			change: func(o *Options) { o.Probe = "scripts/other-probe.sh" },
@@ -337,6 +352,79 @@ func TestParseTownRootChain(t *testing.T) {
 	}
 }
 
+// TestParseProbeDefaultIsBesideTheBinary: with no --probe, the probe is the one
+// under the repository the binary sits in, the binary's directory or its parent.
+// Where the binary's location names no probe, the path under its directory is
+// named, so the refusal shows what was looked at.
+func TestParseProbeDefaultIsBesideTheBinary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		executable string
+		err        error
+		probes     []string // files beside the binary, besides the test repository's probe
+		want       string   // the probe path the command names
+		refused    bool     // the probe is missing, so the parse refuses it
+	}{
+		{name: "the binary at the repository root", executable: "/repo/forgejo-cutover", want: "/repo/scripts/forgejo-probe.sh"},
+		{name: "the binary in bin/", executable: "/repo/bin/forgejo-cutover", want: "/repo/scripts/forgejo-probe.sh"},
+		{name: "the binary's own directory wins", executable: "/repo/bin/forgejo-cutover", probes: []string{"/repo/bin/scripts/forgejo-probe.sh"}, want: "/repo/bin/scripts/forgejo-probe.sh"},
+		{name: "no probe beside the binary names the binary's directory", executable: "/usr/local/libexec/forgejo-cutover", want: "/usr/local/libexec/scripts/forgejo-probe.sh", refused: true},
+		{name: "no executable path falls back to the relative default", err: errors.New("no executable"), want: "scripts/forgejo-probe.sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := testEnv(homeVars(nil))
+			env.Executable = func() (string, error) { return tc.executable, tc.err }
+			env.IsFile = func(p string) bool {
+				return isTownFile(p) || slices.Contains(tc.probes, p)
+			}
+			got, err := Parse(withRig(), env)
+			if tc.refused {
+				var refused *UsageError
+				if !errors.As(err, &refused) || !strings.Contains(refused.Message, "--probe '"+tc.want+"' is not a file") {
+					t.Fatalf("Parse error = %v, want a usage error naming probe %q", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse error = %v, want none", err)
+			}
+			if got.Probe != tc.want {
+				t.Errorf("Probe = %q, want %q", got.Probe, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseNeverEchoesCredentials: a URL that carries a password is refused, and
+// the password is in neither the message nor any other part of the error.
+func TestParseNeverEchoesCredentials(t *testing.T) {
+	t.Parallel()
+	const secret = "hunter2"
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "an https API root with a password", args: withRig("--api-url", "https://user:"+secret+"@forgejo.test/api/v1")},
+		{name: "an http API root with a password", args: withRig("--api-url", "http://user:"+secret+"@forgejo.test/api/v1")},
+		{name: "a non-http API root with a password", args: withRig("--api-url", "ftp://user:"+secret+"@forgejo.test")},
+		{name: "a malformed non-http API root with an @", args: withRig("--api-url", "ftp://user:"+secret+"@forgejo test")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse(tc.args, testEnv(homeVars(nil)))
+			var refused *UsageError
+			if !errors.As(err, &refused) {
+				t.Fatalf("Parse error = %v, want a usage error", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("Parse error = %q, want the password absent", err)
+			}
+		})
+	}
+}
+
 // TestParseRejectsBadValues holds each refusal the script's usage_die raised: the
 // usage error names the flag or the value it refused, so the operator can fix the
 // right word. Each row is a command line that must not parse.
@@ -359,6 +447,18 @@ func TestParseRejectsBadValues(t *testing.T) {
 		"repo with a question mark":           {args: []string{"gastown", "--repo", "acme/gast?own"}, message: "--repo 'acme/gast?own' must be OWNER/NAME"},
 		"main-branch with a space":            {args: withRig("--main-branch", "ma in"), message: "--main-branch 'ma in' must match [A-Za-z0-9._/-]+"},
 		"main-branch empty":                   {args: withRig("--main-branch", ""), message: "--main-branch '' must match"},
+		"main-branch starts with a dash":      {args: withRig("--main-branch", "-x"), message: "--main-branch '-x' is not a branch name: it starts with '-'"},
+		"main-branch is an option with value": {args: withRig("--main-branch", "--upload-pack=x"), message: "--main-branch '--upload-pack=x' must match"},
+		"main-branch has a dot-dot":           {args: withRig("--main-branch", "a..b"), message: "--main-branch 'a..b' is not a branch name: it contains '..'"},
+		"main-branch has a double slash":      {args: withRig("--main-branch", "a//b"), message: "--main-branch 'a//b' is not a branch name: it contains '//'"},
+		"main-branch starts with a slash":     {args: withRig("--main-branch", "/a"), message: "--main-branch '/a' is not a branch name: it starts or ends with '/'"},
+		"main-branch ends with a slash":       {args: withRig("--main-branch", "a/"), message: "--main-branch 'a/' is not a branch name: it starts or ends with '/'"},
+		"main-branch ends with .lock":         {args: withRig("--main-branch", "a.lock"), message: "--main-branch 'a.lock' is not a branch name: it ends with '.' or '.lock'"},
+		"main-branch ends with a dot":         {args: withRig("--main-branch", "a."), message: "--main-branch 'a.' is not a branch name: it ends with '.' or '.lock'"},
+		"main-branch component starts a dot":  {args: withRig("--main-branch", "a/.b"), message: "--main-branch 'a/.b' is not a branch name: it has a component that starts with '.'"},
+		"main-branch is the single @":         {args: withRig("--main-branch", "@"), message: "--main-branch '@' must match [A-Za-z0-9._/-]+"},
+		"main-branch has a tilde":             {args: withRig("--main-branch", "a~1"), message: "--main-branch 'a~1' must match"},
+		"main-branch has an @{":               {args: withRig("--main-branch", "a@{1}"), message: "--main-branch 'a@{1}' must match"},
 		"gate-workflow with a slash":          {args: withRig("--gate-workflow", "ci/gate"), message: "--gate-workflow 'ci/gate' must match [A-Za-z0-9._-]+"},
 		"bot-prefix with a space":             {args: withRig("--bot-prefix", "bot x"), message: "--bot-prefix 'bot x' must match [A-Za-z0-9._-]+"},
 		"api-url without a scheme":            {args: withRig("--api-url", "forgejo.test/api/v1"), message: "--api-url must be http:// or https:// (got 'forgejo.test/api/v1')"},

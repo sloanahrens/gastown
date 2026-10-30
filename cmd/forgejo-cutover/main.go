@@ -72,8 +72,9 @@ func liveEnv() forgejocut.Env {
 			fi, err := os.Stat(path)
 			return err == nil && fi.Mode().IsRegular()
 		},
-		Town: townFromCwd,
-		Git:  bareGit{},
+		Town:       townFromCwd,
+		Executable: os.Executable,
+		Git:        bareGit{},
 	}
 }
 
@@ -117,7 +118,7 @@ var usage = fmt.Sprintf(`Usage: forgejo-cutover <rig> --repo OWNER/NAME [options
                          $FORGEJO_URL, else --api-url less /api/v1)
   --admin-token-file F   file holding FORGEJO_ADMIN_TOKEN=... (default
                          $FORGEJO_ADMIN_ENV, else no file is read)
-  --probe PATH           probe run before the cutover, from the gastown repo
+  --probe PATH           probe run before the cutover, found beside the binary
                          (default: %s)
   --gt PATH              gt binary for the daemon restart (default: %s)
   --dry-run              read and print, never write

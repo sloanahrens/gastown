@@ -7,6 +7,7 @@ package forgejocut
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -45,8 +46,8 @@ const (
 	DefaultGateWorkflow = "gate"
 	// DefaultBotPrefix is the bot login prefix; each role gets one bot.
 	DefaultBotPrefix = "bot-"
-	// DefaultProbe is the probe run before the cutover. The command runs from the
-	// gastown repository, where scripts/ holds it.
+	// DefaultProbe is the probe run before the cutover, relative to the repository
+	// the binary sits in. defaultProbe resolves it.
 	DefaultProbe = "scripts/forgejo-probe.sh"
 	// DefaultGT is the gt binary the daemon restart runs. The run resolves the name
 	// with exec.LookPath; no environment variable names another binary.
@@ -63,6 +64,9 @@ var plainPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // mainBranchPattern is what --main-branch may hold. The branch name lands in a
 // URL path and on git's command line, so a name outside this class is refused.
+// The class also keeps out the characters git's ref rules forbid (space, ~ ^ : ?
+// * [ \, control bytes, and the { of @{), so branchNameProblem only adds the
+// structural rules.
 var mainBranchPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
 // repoPattern is what each side of OWNER/NAME may hold. Both sides land unescaped
@@ -120,7 +124,10 @@ type Env struct {
 	// Town is the town root the working directory is in, "" when there is none. It
 	// is read only when neither --town-root nor GT_TOWN_ROOT names one.
 	Town func() string
-	Git  Git
+	// Executable is the path of the running binary. The probe default is found
+	// beside it.
+	Executable func() (string, error)
+	Git        Git
 }
 
 // valueFlags maps each flag that reads the next word to where the word goes, so
@@ -155,7 +162,7 @@ func Parse(args []string, env Env) (*Options, error) {
 		MainBranch:     DefaultMainBranch,
 		GateWorkflow:   DefaultGateWorkflow,
 		BotPrefix:      DefaultBotPrefix,
-		Probe:          DefaultProbe,
+		Probe:          defaultProbe(env),
 		GT:             DefaultGT,
 	}
 	town, err := o.parseFlags(args)
@@ -243,6 +250,9 @@ func (o *Options) checkValues() error {
 	if !mainBranchPattern.MatchString(o.MainBranch) {
 		return usagef("--main-branch '%s' must match [A-Za-z0-9._/-]+", o.MainBranch)
 	}
+	if problem := branchNameProblem(o.MainBranch); problem != "" {
+		return usagef("--main-branch '%s' is not a branch name: it %s", o.MainBranch, problem)
+	}
 	if !plainPattern.MatchString(o.GateWorkflow) {
 		return usagef("--gate-workflow '%s' must match [A-Za-z0-9._-]+", o.GateWorkflow)
 	}
@@ -250,7 +260,11 @@ func (o *Options) checkValues() error {
 		return usagef("--bot-prefix '%s' must match [A-Za-z0-9._-]+", o.BotPrefix)
 	}
 	if !isHTTPURL(o.APIURL) {
-		return usagef("--api-url must be http:// or https:// (got '%s')", o.APIURL)
+		return usagef("--api-url must be http:// or https:// (got '%s')", redactURL(o.APIURL))
+	}
+	// A credential in the URL would ride every request and show in the process list.
+	if u, err := url.Parse(o.APIURL); err != nil || u.User != nil {
+		return usagef("--api-url must be a URL with no credentials")
 	}
 	o.APIURL = strings.TrimSuffix(o.APIURL, "/")
 	// An empty web root is derived from the validated API root.
@@ -343,6 +357,64 @@ func (o *Options) derive(env Env) error {
 		return usagef("--github-url does not name OWNER/NAME")
 	}
 	return nil
+}
+
+// defaultProbe is the probe --probe names when it names none: scripts/forgejo-probe.sh
+// in the repository the binary sits in. A build puts the binary at the repository
+// root or in bin/, so the binary's directory and its parent are the candidates. The
+// shell script found the probe beside itself; a binary has no such file, so when no
+// candidate holds one, the path under the binary's directory is named, and the
+// refusal shows the operator the path that was looked at.
+func defaultProbe(env Env) string {
+	exe, err := env.Executable()
+	if err != nil {
+		return DefaultProbe
+	}
+	dir := filepath.Dir(exe)
+	for _, root := range []string{dir, filepath.Dir(dir)} {
+		if probe := filepath.Join(root, DefaultProbe); env.IsFile(probe) {
+			return probe
+		}
+	}
+	return filepath.Join(dir, DefaultProbe)
+}
+
+// branchNameProblem names the first rule of git check-ref-format --branch the name
+// breaks, after the character class has passed it. It returns "" for a name git
+// accepts.
+func branchNameProblem(name string) string {
+	switch {
+	case strings.HasPrefix(name, "-"):
+		return "starts with '-', which git reads as an option"
+	case strings.Contains(name, ".."):
+		return "contains '..'"
+	case strings.Contains(name, "//"):
+		return "contains '//'"
+	case strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/"):
+		return "starts or ends with '/'"
+	case strings.HasSuffix(name, ".") || strings.HasSuffix(name, ".lock"):
+		return "ends with '.' or '.lock'"
+	}
+	for _, component := range strings.Split(name, "/") {
+		if strings.HasPrefix(component, ".") {
+			return "has a component that starts with '.'"
+		}
+	}
+	return ""
+}
+
+// redactURL is raw as a message may show it: the credentials taken out. A value
+// that will not parse and holds an @ may carry one, so it is not shown at all.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		if strings.Contains(raw, "@") {
+			return "(unparseable URL)"
+		}
+		return raw
+	}
+	u.User = nil
+	return u.String()
 }
 
 // configDir is the gt config directory the promote key lives in: $XDG_CONFIG_HOME/gt,

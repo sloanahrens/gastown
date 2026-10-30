@@ -36,11 +36,12 @@ func (stubGit) OriginURL(string) (string, error) {
 // directory and a file, so no test touches the real filesystem.
 func stubEnv(getenv func(string) string) forgejocut.Env {
 	return forgejocut.Env{
-		Getenv: getenv,
-		IsDir:  func(string) bool { return true },
-		IsFile: func(string) bool { return true },
-		Town:   func() string { return "" },
-		Git:    stubGit{},
+		Getenv:     getenv,
+		IsDir:      func(string) bool { return true },
+		IsFile:     func(string) bool { return true },
+		Town:       func() string { return "" },
+		Executable: func() (string, error) { return "/repo/forgejo-cutover", nil },
+		Git:        stubGit{},
 	}
 }
 
@@ -53,14 +54,17 @@ func TestMainUsageExitsTwoAndHelpExitsZero(t *testing.T) {
 		args   []string
 		stderr string
 	}{
-		"unknown option":         {args: []string{"gastown", "--repo", "acme/gastown", "--nope"}, stderr: "unknown option: --nope"},
-		"the dropped --mirror":   {args: []string{"gastown", "--repo", "acme/gastown", "--mirror"}, stderr: "unknown option: --mirror"},
-		"no rig":                 {args: []string{"--repo", "acme/gastown"}, stderr: "<rig> is required"},
-		"no repository":          {args: []string{"gastown"}, stderr: "--repo is required"},
-		"repository with no /":   {args: []string{"gastown", "--repo", "gastown"}, stderr: "--repo 'gastown' must be OWNER/NAME"},
-		"api-url without http":   {args: []string{"gastown", "--repo", "acme/gastown", "--api-url", "forgejo.test"}, stderr: "--api-url must be http:// or https://"},
-		"repository with a dot":  {args: []string{"gastown", "--repo", "acme/.."}, stderr: "--repo 'acme/..' must be OWNER/NAME"},
-		"main-branch with space": {args: []string{"gastown", "--repo", "acme/gastown", "--main-branch", "ma in"}, stderr: "--main-branch 'ma in' must match"},
+		"unknown option":             {args: []string{"gastown", "--repo", "acme/gastown", "--nope"}, stderr: "unknown option: --nope"},
+		"the dropped --mirror":       {args: []string{"gastown", "--repo", "acme/gastown", "--mirror"}, stderr: "unknown option: --mirror"},
+		"no rig":                     {args: []string{"--repo", "acme/gastown"}, stderr: "<rig> is required"},
+		"no repository":              {args: []string{"gastown"}, stderr: "--repo is required"},
+		"repository with no /":       {args: []string{"gastown", "--repo", "gastown"}, stderr: "--repo 'gastown' must be OWNER/NAME"},
+		"api-url without http":       {args: []string{"gastown", "--repo", "acme/gastown", "--api-url", "forgejo.test"}, stderr: "--api-url must be http:// or https://"},
+		"repository with a dot":      {args: []string{"gastown", "--repo", "acme/.."}, stderr: "--repo 'acme/..' must be OWNER/NAME"},
+		"main-branch with space":     {args: []string{"gastown", "--repo", "acme/gastown", "--main-branch", "ma in"}, stderr: "--main-branch 'ma in' must match"},
+		"main-branch with a dash":    {args: []string{"gastown", "--repo", "acme/gastown", "--main-branch", "-x"}, stderr: "--main-branch '-x' is not a branch name"},
+		"main-branch with a dot-dot": {args: []string{"gastown", "--repo", "acme/gastown", "--main-branch", "a..b"}, stderr: "--main-branch 'a..b' is not a branch name"},
+		"api-url with a password":    {args: []string{"gastown", "--repo", "acme/gastown", "--api-url", "https://user:hunter2@forgejo.test/api/v1"}, stderr: "--api-url must be a URL with no credentials"},
 	}
 	for name, tc := range refusals {
 		t.Run(name, func(t *testing.T) {
