@@ -541,14 +541,21 @@ func containerComposeProject(cfg *config.DaemonPatrolConfig) (string, error) {
 var errContainerSettingsUnset = errors.New("daemon.supervisor is container, but the town does not set both daemon.container_name and daemon.compose_project: set both, so a scratch town cannot act on the live daemon's container")
 
 // supervisorState reads one supervisor job's live state through this control's
-// state seam, and through the host's own reader when none is set, so a test
-// that fakes the state never runs systemctl.
+// state seam. A control built without one answers unknown and runs nothing:
+// the host's own read from there is a live read the caller cannot see, and
+// realDaemonControl is the one control gt builds, so it always carries the
+// seam (gt-83faz).
 func (c *daemonControl) supervisorState(kind string) templates.SupervisorState {
 	if c.stateFor == nil {
-		return supervisorJobState(kind)
+		return templates.SupervisorState{Kind: kind, LastExit: -1, Err: errNoSupervisorStateSeam}
 	}
 	return c.stateFor(kind)
 }
+
+// errNoSupervisorStateSeam is the state of a control carrying no state seam.
+// The systemd owner func names no invocation id for it, as it does for a state
+// the host cannot answer.
+var errNoSupervisorStateSeam = errors.New("this daemon control carries no supervisor state seam")
 
 // fileSupervisor is the launchd or systemd supervisor, whose argv are fixed
 // once the file path is known.

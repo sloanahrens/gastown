@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -331,11 +332,33 @@ func TestSystemdSupervisorOwner(t *testing.T) {
 	}
 }
 
+// A control built without a state seam answers unknown and runs nothing: the
+// host's own systemctl read from there is a live read its caller cannot see,
+// and the owner func names no invocation id for it, as it does for a state the
+// host cannot answer (gt-83faz).
+func TestSystemdSupervisorOwnerWithoutAStateSeam(t *testing.T) {
+	t.Parallel()
+	const kind = config.SupervisorSystemd
+	c := &daemonControl{goos: "linux"}
+	if st := c.supervisorState(kind); !errors.Is(st.Err, errNoSupervisorStateSeam) {
+		t.Errorf("supervisorState without a seam = %+v, want the unknown state errNoSupervisorStateSeam, not the host's answer", st)
+	}
+	owner, err := c.fileSupervisor("/unit", kind).owner()
+	if err != nil {
+		t.Fatalf("owner: %v", err)
+	}
+	if want := (daemon.Owner{Kind: kind}); owner != want {
+		t.Errorf("owner = %+v, want %+v", owner, want)
+	}
+}
+
 // The owner the systemd supervisor reports is the one the real guard judges:
 // state.json naming the invocation the unit runs now, under a fresh
 // heartbeat, is this unit restarting itself, and any other id is refused
-// (gt-h7iy7).
-func TestSystemdRestartOwnerPassesTheRealTakeoverGuard(t *testing.T) {
+// (gt-h7iy7). The TestRestartDaemon_Systemd prefix keeps it inside the narrow
+// -run filter the restart tests are gated with, which named TestSystemd alone
+// and so skipped this test (gt-83faz).
+func TestRestartDaemon_SystemdOwnerPassesTheRealTakeoverGuard(t *testing.T) {
 	t.Parallel()
 	const running = "inv-2"
 	c := &daemonControl{
@@ -858,15 +881,21 @@ func TestRestartDaemon_SupervisedRestartsInPlace(t *testing.T) {
 func TestRestartDaemon_SystemdNamesTheRunningInvocation(t *testing.T) {
 	t.Parallel()
 	running := daemon.Owner{Kind: config.SupervisorSystemd, ID: "inv-2"}
+	const restartCmd = "ran systemctl --user restart gastown-daemon.service"
 	rows := []struct {
 		name string
 		// allowed is the owner the guard accepts, standing in for the one
 		// state.json records when CheckTakeover reads it.
 		allowed daemon.Owner
 		wantOK  bool
+		// wantCalls is what ran, in order: the unit's state read before
+		// anything that touches the job.
+		wantCalls []string
 	}{
-		{name: "the guard sees the unit's running invocation", allowed: running, wantOK: true},
-		{name: "a guard refusing a different owner refuses the restart", allowed: daemon.Owner{Kind: config.SupervisorSystemd, ID: "inv-9"}},
+		{name: "the guard sees the unit's running invocation", allowed: running, wantOK: true,
+			wantCalls: []string{"read state", restartCmd}},
+		{name: "a guard refusing a different owner refuses the restart", allowed: daemon.Owner{Kind: config.SupervisorSystemd, ID: "inv-9"},
+			wantCalls: []string{"read state"}},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -874,8 +903,19 @@ func TestRestartDaemon_SystemdNamesTheRunningInvocation(t *testing.T) {
 			town := t.TempDir()
 			unit := writeSupervisorFile(t, "gastown-daemon.service", town)
 			c, calls := stubRestart(t, "linux", unit, 1111, 1111, 4242)
+			var ran []string
 			c.stateFor = func(kind string) templates.SupervisorState {
+				ran = append(ran, "read state")
 				return templates.SupervisorState{Kind: kind, Loaded: true, PID: 4242, LastExit: -1, InvocationID: "inv-2"}
+			}
+			run, runEnv := c.run, c.runEnv
+			c.run = func(argv []string) error {
+				ran = append(ran, "ran "+strings.Join(argv, " "))
+				return run(argv)
+			}
+			c.runEnv = func(argv, env []string) error {
+				ran = append(ran, "ran "+strings.Join(argv, " "))
+				return runEnv(argv, env)
 			}
 			var guarded daemon.Owner
 			c.guard = func(townRoot string, self daemon.Owner, takeover bool) error {
@@ -887,6 +927,9 @@ func TestRestartDaemon_SystemdNamesTheRunningInvocation(t *testing.T) {
 			}
 
 			via, _, err := c.restartDaemon(town)
+			if !slices.Equal(ran, row.wantCalls) {
+				t.Errorf("calls = %q, want %q: the invocation id is read before the job is touched", ran, row.wantCalls)
+			}
 			if guarded != running {
 				t.Errorf("guard was asked about %+v, want %+v", guarded, running)
 			}
