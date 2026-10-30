@@ -3,11 +3,14 @@
 package bdbuild
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestIntegrationCompileRefusesACommitTheCheckoutDoesNotHold pins the refusal
@@ -97,11 +100,76 @@ func initScratchRepo(t *testing.T, dir, marker string) string {
 // git to its own last stderr line. It runs real git, so it lives in the
 // integration tier (gt-6uid9).
 func TestIntegrationExecGitReturnsGitsLastStderrLine(t *testing.T) {
+	isolateGitConfig(t)
 	_, err := ExecGit(t.TempDir(), "rev-parse", "HEAD")
 	if err == nil || !strings.Contains(err.Error(), "not a git repository") {
 		t.Errorf("ExecGit in a directory that is not a checkout: err = %v, want git's own \"not a git repository\"", err)
 	}
 }
+
+// TestIntegrationRunGitStopsACommandItsContextEnds runs a live command through
+// the kill path behind ExecGit's ceiling and watches the context stop it,
+// whether the deadline passed or the run was canceled (gt-6uid9, gt-qivx4).
+// ExecGit owns a five-minute ceiling no test can wait out, so the test hands
+// runGit, which is the code that applies it, a deadline it can wait for. The
+// stand-in writes a marker before it blocks, so an error naming the context is
+// one a run of it produced, not a command that never started.
+func TestIntegrationRunGitStopsACommandItsContextEnds(t *testing.T) {
+	standIn := t.TempDir()
+	started := filepath.Join(t.TempDir(), "started")
+	script := "#!/bin/sh\n: > \"" + started + "\"\nexec /bin/sleep " + strconv.Itoa(int(standInBlocks/time.Second)) + "\n"
+	if err := os.WriteFile(filepath.Join(standIn, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing the blocking stand-in: %v", err)
+	}
+	t.Setenv("PATH", standIn)
+
+	ceiling := 200 * time.Millisecond
+	tests := []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		want string
+	}{
+		{
+			name: "a deadline passed",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), ceiling)
+			},
+			want: "git timed out after the " + gitCeiling.String() + " ceiling",
+		},
+		{
+			name: "a canceled run",
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				time.AfterFunc(2*time.Second, cancel)
+				return ctx, cancel
+			},
+			want: "git was canceled",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			start := time.Now()
+			_, err := runGit(ctx, t.TempDir(), "--version")
+			elapsed := time.Since(start)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("runGit under %s: err = %v, want one naming %q", tc.name, err, tc.want)
+			}
+			if _, statErr := os.Stat(started); statErr != nil {
+				t.Errorf("the stand-in never started (%v), so the run never reached a live command", statErr)
+			}
+			if elapsed >= standInBlocks/2 {
+				t.Errorf("runGit returned after %s, so it did not stop a command that blocks for %s", elapsed, standInBlocks)
+			}
+		})
+	}
+}
+
+// standInBlocks is how long the stand-in blocks: past the deadline and the
+// cancellation the test sets, and short enough that a runner which fails to
+// stop it is seen returning late.
+const standInBlocks = 10 * time.Second
 
 func scratchGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
@@ -114,7 +182,32 @@ func scratchGit(t *testing.T, dir string, args ...string) {
 // the picture, so a machine's commit.gpgsign, hooks or default branch cannot
 // change the fixture.
 func isolatedGit(dir string, args ...string) ([]byte, error) {
+	home, err := os.MkdirTemp("", "git-home-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(home)
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull)
+	cmd.Env = append(os.Environ(), gitConfigOff(home)...)
 	return cmd.Output()
+}
+
+// isolateGitConfig gives the test process's git the empty configuration
+// isolatedGit gives a fixture, for a caller whose git reads the process's own
+// environment instead of one it passes in (ExecGit).
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	for _, kv := range gitConfigOff(home) {
+		key, value, _ := strings.Cut(kv, "=")
+		t.Setenv(key, value)
+	}
+}
+
+// gitConfigOff reports the environment that puts the host's git configuration
+// out of a fixture's way: HOME and XDG_CONFIG_HOME name an empty directory the
+// caller owns, and GIT_CONFIG_NOSYSTEM drops /etc/gitconfig. Naming the global
+// file instead takes GIT_CONFIG_GLOBAL, which only git 2.32 reads (gt-qivx4).
+func gitConfigOff(home string) []string {
+	return []string{"HOME=" + home, "XDG_CONFIG_HOME=" + home, "GIT_CONFIG_NOSYSTEM=1"}
 }
