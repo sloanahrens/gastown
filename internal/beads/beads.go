@@ -3604,11 +3604,11 @@ func (b *Beads) ChildrenOf(parentIDs ...string) (map[string][]*Issue, error) {
 // array of issues, and one that is not — a number, an object, null — is an
 // error naming that member.
 //
-// Refusing instead of skipping matters because the callers read "no children"
-// as a finished wisp: a null pagination or contract_version member in bd's
-// machine envelope, read as a child list, silently abandoned every step wisp
-// under it (gt-8f6m4). Keys are visited in sorted order so the answer and the
-// error never depend on Go's map iteration order.
+// A null or otherwise non-array member is an error rather than "no children":
+// callers read an empty list as a finished wisp, and bd emits [] for a childless
+// parent (measured on bd 1.2.2: show_children.go initializes every parent to
+// []). Keys are visited in sorted order, so neither the answer nor the error
+// depends on map iteration order.
 func childrenGroups(raw []byte) (map[string][]*Issue, error) {
 	groups := make(map[string][]*Issue)
 	raw = bytes.TrimSpace(raw)
@@ -3667,8 +3667,8 @@ func parseChildrenJSON(raw []byte) ([]*Issue, error) {
 }
 
 // parseChildrenMapJSON parses `bd show <ids...> --children --json`: one array
-// per resolved parent ID, with childless parents dropped. A null member is
-// refused, not read as no children (gt-8f6m4).
+// per resolved parent ID, with childless parents dropped. A null member is an
+// error (see childrenGroups).
 func parseChildrenMapJSON(raw []byte) (map[string][]*Issue, error) {
 	groups, err := childrenGroups(raw)
 	if err != nil {
