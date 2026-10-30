@@ -10,10 +10,14 @@ import (
 )
 
 // mainRuleChecks names the fields an existing main rule must carry to be left alone:
-// the fields the script's main_checks names. A live rule that has converged is not
-// patched on every run, so these are the only fields a drift is judged on.
+// the fields the script's main_checks names, plus the push whitelist, which the script
+// leaves unjudged. A live rule with a push whitelist would otherwise pass as set. A
+// live rule that has converged is not patched on every run, so these are the only
+// fields a drift is judged on.
 var mainRuleChecks = []string{
 	"enable_push",
+	"enable_push_whitelist",
+	"push_whitelist_usernames",
 	"apply_to_admins",
 	"push_whitelist_deploy_keys",
 	"enable_merge_whitelist",

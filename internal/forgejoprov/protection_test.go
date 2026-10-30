@@ -143,6 +143,27 @@ func TestEnsureRuleCreateConvergeAndIdempotent(t *testing.T) {
 			wantLog:    "updated branch protection main",
 		},
 		{
+			name: "drifted push whitelist is patched",
+			seed: func(t *testing.T, opts Options) map[string]any {
+				rule := servedRule(t, MainRule(opts))
+				rule["enable_push_whitelist"] = true
+				rule["push_whitelist_usernames"] = []any{"someone"}
+				return rule
+			},
+			wantMethod: http.MethodPatch,
+			wantLog:    "updated branch protection main",
+		},
+		{
+			name: "drifted push whitelist entry alone is patched",
+			seed: func(t *testing.T, opts Options) map[string]any {
+				rule := servedRule(t, MainRule(opts))
+				rule["push_whitelist_usernames"] = []any{"someone"}
+				return rule
+			},
+			wantMethod: http.MethodPatch,
+			wantLog:    "updated branch protection main",
+		},
+		{
 			name:    "identical sends no write",
 			seed:    func(t *testing.T, opts Options) map[string]any { return servedRule(t, MainRule(opts)) },
 			wantLog: "already set",
@@ -369,9 +390,6 @@ func TestEnsureNoRuleAcceptsAnAbsentRule(t *testing.T) {
 	}
 }
 
-// TestEnsureNoRuleBranches drives the delete branches of EnsureNoRule that the fake does
-// not reach: a rule removed by another run between the read and the delete, a refused
-// delete, and a dry run that names the removal and sends none.
 // listThenFailTransport answers the rule list with list and fails every write at the
 // transport, so a test reaches a write's own transport error.
 type listThenFailTransport struct {
@@ -475,6 +493,9 @@ func TestProtectionRefusesABadRepoBeforeAnyRequest(t *testing.T) {
 	}
 }
 
+// TestEnsureNoRuleBranches drives the delete branches of EnsureNoRule that the fake does
+// not reach: a rule removed by another run between the read and the delete, a refused
+// delete, and a dry run that names the removal and sends none.
 func TestEnsureNoRuleBranches(t *testing.T) {
 	t.Parallel()
 	landList := listJSON(t, map[string]any{"rule_name": DefaultLandBranch})
