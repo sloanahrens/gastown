@@ -2,10 +2,10 @@
 # image uses, running `gt daemon run` as a container (gt-qpeei.16).
 #
 # Built by internal/daemonimage's Builder.BuildImage, which passes this file with
-# -f, the directory of the three binaries as the context, and the tag
-# gt-daemon:<rev>. Nothing is compiled here: the deployer cross-compiles the
-# binaries on this Mac and COPYs them in, so the image is exactly the code the
-# tag's rev names.
+# -f, the directory of the binaries (gt, bd, om and claude) as the context, and
+# the tag gt-daemon:<rev>. Nothing is compiled here: the deployer cross-compiles
+# gt, bd and om on this Mac and fetches the pinned claude CLI, then COPYs them
+# in, so the image is exactly the code the tag's rev names.
 #
 # The base image and the Dolt version are internal/templates/images.go's
 # DaemonBaseImage and DoltVersion. TestDaemonDockerfileMatchesTheImageTable fails
@@ -41,6 +41,17 @@ COPY --from=dolt /usr/local/bin/dolt /usr/local/bin/dolt
 COPY --chmod=0755 gt /usr/local/bin/gt
 COPY --chmod=0755 bd /usr/local/bin/bd
 COPY --chmod=0755 om /usr/local/bin/om
+
+# The claude CLI om's reviewer runs, at the version templates.ClaudeCLIVersion
+# names. The deployer's FetchClaudeCLI downloads it, verifies its sha256 against
+# templates.ClaudeCLISHA256, and places it in the build context; nothing here
+# downloads it or runs an install script for it.
+COPY --chmod=0755 claude /usr/local/bin/claude
+
+# The claude CLI om's reviewer runs, at the version templates.ClaudeCLIVersion
+# names. The deployer's FetchClaudeCLI downloads it, verifies its sha256 against
+# templates.ClaudeCLISHA256, and places it in the build context; nothing here
+# downloads it or runs an install script for it.
 
 # The entrypoint is a gt subcommand rather than a shell script: it refuses to
 # start without a town on the bind mount, so a missing mount never turns into a

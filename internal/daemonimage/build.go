@@ -1,20 +1,26 @@
 // Package daemonimage builds the gastown daemon's container artifacts on the
-// host: the linux/arm64 gt, bd and om binaries the image runs (gt-qpeei.9), and
-// the image built from them (gt-qpeei.16). Every command it runs is one injected
-// call, so the gate proves what a build runs without Docker, a running daemon or
-// a cluster.
+// host: the linux/arm64 gt, bd and om binaries the image runs (gt-qpeei.9), the
+// pinned claude CLI om's reviewer runs (gt-qpeei.35), and the image built from
+// them (gt-qpeei.16). Every command it runs and every download it makes is one
+// injected call, so the gate proves what a build runs without Docker, a running
+// daemon, a cluster or the network.
 package daemonimage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // DockerfilePath is the image's Dockerfile in the gt checkout, relative to the
@@ -49,6 +55,11 @@ const (
 // is the package's only way to run anything.
 type Runner func(ctx context.Context, dir string, env, argv []string) error
 
+// Fetcher downloads url and returns its body, which the caller closes; it is the
+// package's only way to reach the network, as Runner is the only way to run a
+// command. A test stands a fake in for it.
+type Fetcher func(ctx context.Context, url string) (io.ReadCloser, error)
+
 // Builder builds the daemon image's binaries.
 type Builder struct {
 	// Run runs every build.
@@ -60,7 +71,8 @@ type Builder struct {
 	// host's. bdbuild.Env keeps the variables that locate the toolchain and drops
 	// the ones that would change what is compiled.
 	Environ []string
-	// Out is the absolute directory the three binaries are written to. git and go
+	// Out is the absolute directory the binaries are written to, and the claude
+	// CLI FetchClaudeCLI places there. git and go
 	// resolve a relative path against the worktree a build runs in, not the
 	// caller's directory, so BuildBinaries refuses a relative Out. Out must
 	// already exist: the staging directory is made inside it.
@@ -82,6 +94,9 @@ type Builder struct {
 	// the gt checkout, as an absolute path. It must be absolute for the same
 	// reason Out must: docker resolves -f against the directory it runs in.
 	Dockerfile string
+	// Fetch downloads the claude CLI FetchClaudeCLI places in Out; nil refuses
+	// that fetch.
+	Fetch Fetcher
 }
 
 // ImageTag is the tag the daemon image for rev is built with: gt-daemon:<rev>.
@@ -213,6 +228,116 @@ func isCommit(s string) bool {
 	return true
 }
 
+// claudeCLIName is the file the claude CLI is written to in the build context;
+// the Dockerfile's COPY reads it by this name.
+const claudeCLIName = "claude"
+
+// claudeVersion is an exact dotted version such as 2.1.314: digits and dots, so
+// a floating tag such as latest or stable cannot match.
+var claudeVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+)+$`)
+
+// claudeSHA256 is the form a sha256 sum prints in: 64 lower-case hex digits.
+var claudeSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// FetchClaudeCLI downloads the pinned linux/arm64 claude CLI, verifies its sha256
+// against templates.ClaudeCLISHA256, and writes it to b.Out/claude, the build
+// context the Dockerfile COPYs from. It returns that path. The bytes are verified
+// before the file takes its name, so a fetch that fails or does not match returns
+// an error and leaves no file in b.Out.
+func (b Builder) FetchClaudeCLI(ctx context.Context) (string, error) {
+	version := templates.ClaudeCLIVersion
+	return b.fetchClaudeCLI(ctx, fmt.Sprintf(templates.ClaudeCLIURLFormat, version), version, templates.ClaudeCLISHA256)
+}
+
+// claudeTemp is the temporary file the download is written to. *os.File is one;
+// a test stands in a file whose Close fails, to drive that failure.
+type claudeTemp interface {
+	io.Writer
+	Close() error
+	Name() string
+}
+
+// createClaudeTemp makes the temporary file fetchClaudeCLIWith writes through.
+func createClaudeTemp(dir, pattern string) (claudeTemp, error) {
+	f, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// fetchClaudeCLI is FetchClaudeCLI with the URL and the pin injected, so a test
+// can hand it bytes whose sha256 it has computed.
+func (b Builder) fetchClaudeCLI(ctx context.Context, url, version, want string) (string, error) {
+	return b.fetchClaudeCLIWith(ctx, url, version, want, createClaudeTemp)
+}
+
+// fetchClaudeCLIWith is fetchClaudeCLI with the temporary file's source injected,
+// so each step's failure can be driven.
+func (b Builder) fetchClaudeCLIWith(ctx context.Context, url, version, want string, create func(dir, pattern string) (claudeTemp, error)) (string, error) {
+	if b.Fetch == nil {
+		return "", errors.New("daemonimage: no fetcher to download the claude CLI with")
+	}
+	if b.Out == "" {
+		return "", errors.New("daemonimage: no build context for the claude CLI; Out is the directory the binaries are in")
+	}
+	if !filepath.IsAbs(b.Out) {
+		return "", fmt.Errorf("daemonimage: build context %q is not absolute; the claude CLI is written there for the Dockerfile's COPY", b.Out)
+	}
+	if err := checkClaudePin(version, want); err != nil {
+		return "", err
+	}
+	body, err := b.Fetch(ctx, url)
+	if err != nil {
+		return "", fmt.Errorf("daemonimage: cannot download the claude CLI %s from %s: %w", version, url, err)
+	}
+	defer func() { _ = body.Close() }()
+	tmp, err := create(b.Out, "."+claudeCLIName+"-*")
+	if err != nil {
+		return "", fmt.Errorf("daemonimage: cannot stage the claude CLI in %s: %w", b.Out, err)
+	}
+	// The download is written under a temporary name and takes the claude name
+	// only once it verifies; any other exit removes the temporary file.
+	placed := false
+	defer func() {
+		if !placed {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	sum := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, sum), body); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("daemonimage: cannot download the claude CLI from %s: %w", url, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("daemonimage: cannot write the claude CLI in %s: %w", b.Out, err)
+	}
+	if got := hex.EncodeToString(sum.Sum(nil)); got != want {
+		return "", fmt.Errorf("daemonimage: the claude CLI from %s has sha256 %s, not the pinned %s; nothing was written to %s", url, got, want, b.Out)
+	}
+	// The Dockerfile's COPY sets the binary's mode, so the file keeps the
+	// temporary file's.
+	path := filepath.Join(b.Out, claudeCLIName)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return "", fmt.Errorf("daemonimage: cannot move the claude CLI into %s: %w", b.Out, err)
+	}
+	placed = true
+	return path, nil
+}
+
+// checkClaudePin refuses a claude CLI pin that is not an exact version and a
+// sha256 in the form a sum prints, so a build never fetches a moving target or
+// checks against a value that cannot match.
+func checkClaudePin(version, sha string) error {
+	if !claudeVersion.MatchString(version) {
+		return fmt.Errorf("daemonimage: claude CLI version %q is not an exact dotted version such as 2.1.314; a floating tag would fetch a binary the pin does not name", version)
+	}
+	if !claudeSHA256.MatchString(sha) {
+		return fmt.Errorf("daemonimage: claude CLI sha256 %q is not 64 lower-case hex digits", sha)
+	}
+	return nil
+}
+
 // BuildImage builds the daemon image from the binaries in b.Out and returns its
 // tag, ImageTag(rev). The build context is b.Out itself, so each COPY in
 // b.Dockerfile reads the binary BuildBinaries wrote there, and the image runs
@@ -259,16 +384,16 @@ func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (str
 }
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
-// not read: gt, bd and om once each, as files in the build context. Docker would
-// report a missing or misplaced one only after the package install ran, so it is
-// caught here first, against what the caller passed.
+// not read: gt, bd, om and claude once each, as files in the build context. Docker
+// would report a missing or misplaced one only after the package install ran, so
+// it is caught here first, against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
-	want := []string{"gt", "bd", "om"}
+	want := []string{"gt", "bd", "om", claudeCLIName}
 	seen := make(map[string]bool, len(want))
 	for _, p := range bins {
 		name := filepath.Base(p)
 		if !slices.Contains(want, name) {
-			return fmt.Errorf("daemonimage: %q is not one of the image's binaries gt, bd and om", p)
+			return fmt.Errorf("daemonimage: %q is not one of the image's binaries gt, bd, om and claude", p)
 		}
 		if filepath.Dir(filepath.Clean(p)) != filepath.Clean(b.Out) {
 			return fmt.Errorf("daemonimage: %q is outside the build context %s, so the Dockerfile's COPY %s reads nothing", p, b.Out, name)
@@ -283,7 +408,7 @@ func (b Builder) checkImageBinaries(bins []string) error {
 	}
 	for _, name := range want {
 		if !seen[name] {
-			return fmt.Errorf("daemonimage: no %s binary among the %d given; the image copies gt, bd and om", name, len(bins))
+			return fmt.Errorf("daemonimage: no %s binary among the %d given; the image copies gt, bd, om and claude", name, len(bins))
 		}
 	}
 	return nil
