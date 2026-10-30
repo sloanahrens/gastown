@@ -89,6 +89,16 @@ gt daemon image --rev <rev> --out <scratch-parent>/build --gt-src <gt checkout> 
   --bd-src <beads checkout> --bd-commit <beads commit> --om-src <om checkout>
 ```
 
+Run it with a `gt` built by `make build` in a checkout of `main`: a binary built
+with plain `go build` refuses to run ("use 'make build' instead"). The three
+source paths are checkouts, not the canonical `mayor/rig` clones, which the
+command refuses: make each with a local clone of the canonical repo's objects
+(`git clone --no-checkout <canonical> <new dir>`, which reads the canonical clone
+and never fetches in it) and check out the commit to build. `--om-src` has no
+commit flag: om is built at the checkout's `HEAD`. Observed: in the L1 run the
+running `bd` and `om` commits were not in those clones, so the clones' `HEAD`
+commits were built instead, which is fine for L1.
+
 Every flag is required. Each path must be absolute and an existing directory;
 `--rev` and `--bd-commit` are 7 or more hex characters. Without `--apply` it
 validates the flags, prints the commands it would run, ends with
@@ -120,7 +130,9 @@ gt daemon scratch up --live-root <live-town> --root <scratch-root> \
   --project gt-scratch --container gt-scratch-daemon-1
 ```
 
-`render` prints the compose file to stdout and writes nothing. Expected in it,
+`render` prints the compose file to stdout and writes nothing. It also prints
+a `gt binary is N commits behind origin/main` warning on stderr when the `gt`
+is not at the tip of `main`; that is not a failure. Expected in it,
 by the names of the rendered golden `internal/templates/testdata/daemon-compose-scratch.golden.yml`:
 the three services `daemon`, `scratch-dind` and `scratch-dolt`, the container
 name `gt-scratch-daemon-1`, the command `["--scratch-town"]`, a `scratch-dolt`
@@ -142,8 +154,10 @@ After `up`:
 docker --context desktop-linux compose -p gt-scratch -f <compose-file> ps
 ```
 
-Expected: the golden's three services, `daemon`, `scratch-dind` and
-`scratch-dolt`, all running, the last two `healthy`. The daemon starts only after both are healthy. If `scratch-dolt`
+Expected, and observed in the L1 run: the golden's three services, `daemon`,
+`scratch-dind` and `scratch-dolt`, all running, the last two `healthy`. Their
+containers are named `gt-scratch-daemon-1`, `gt-scratch-scratch-dind-1` and
+`gt-scratch-scratch-dolt-1`. The daemon starts only after both are healthy. If `scratch-dolt`
 never becomes healthy, its healthcheck uses `bash` in the pinned image; run
 `docker --context desktop-linux compose -p gt-scratch -f <compose-file> exec scratch-dolt bash -c 'exec 3<>/dev/tcp/127.0.0.1/3306'`
 and stop here with its output if it fails.
@@ -155,10 +169,24 @@ docker --context desktop-linux logs gt-scratch-daemon-1
 ls <scratch-root>/mayor/town.json
 ```
 
-Expected in the log, in this order: a line that the town was installed, then
-`Daemon starting (PID 1)` and `Daemon owner: container "gt-scratch-daemon-1"`.
-`ls` prints the path: the entrypoint installed the town into the marker-only
-directory. Expected to be absent from the log: any mention of the live town's
+Expected in `docker logs`: the install's own output, `Creating Gas Town HQ at
+<scratch-root>` through `HQ created successfully!`. The daemon's own lines are
+in the town's log file, not in `docker logs`:
+`grep -E 'Daemon (starting|owner)' <scratch-root>/daemon/daemon.log` prints
+`Daemon starting (PID 1)` and `Daemon owner: container "gt-scratch-daemon-1"`
+(observed). `ls` prints the path: the entrypoint installed the town into the
+marker-only directory. `<scratch-root>/daemon/state.json` then names owner
+`container` and `gt-scratch-daemon-1`, `"running": true`.
+
+Two things the L1 run saw that are not yet fixed on `main`. The install started
+a Dolt server inside the daemon container (`docker exec gt-scratch-daemon-1 ps`
+shows `dolt sql-server --config <scratch-root>/.dolt-data/config.yaml`), so the
+`scratch-dolt` service is up and unused; the planned change is gt-fwoso's
+three beads (`gt install --dolt-host`, the remote `hq` set-up, the entrypoint and
+render flag). A container without an init also collects defunct children under
+PID 1 (16 after four minutes, 45 after 35; `docker exec gt-scratch-daemon-1 sh -c
+'ps -eo stat | grep -c Z'`); gt-4pdud adds `init: true` and has landed, so an
+image built from a `main` after it should show none. Expected to be absent from the log: any mention of the live town's
 path or container.
 
 If the install failed, the entrypoint removed what it wrote, kept the marker and
@@ -168,17 +196,17 @@ side. Stop here, read the log, remove the incomplete marker and everything but
 `.gt-scratch-town` from `<scratch-root>`, and start again.
 
 **Step 5. Point the scratch town's settings at its container.**
-The scratch town has settings only after the install. From the scratch root,
-find the file the daemon reads: `settings/config.json` (its `daemon` section) on
-a current town, or `mayor/daemon.json` on an unmigrated one. In that file, in
-the scratch town only, set:
+The scratch town has settings only after the install. Observed: a fresh scratch
+install writes `mayor/daemon.json` and no `settings/config.json`, so the file is
+`<scratch-root>/mayor/daemon.json`, and in it the three keys are top level, next
+to `heartbeat` and `patrols`, not under a `daemon` key. (In a
+`settings/config.json` they would sit in its `daemon` section.) In the scratch
+town only, add:
 
 ```
-"daemon": {
-  "supervisor": "container",
-  "container_name": "gt-scratch-daemon-1",
-  "compose_project": "gt-scratch"
-}
+"supervisor": "container",
+"container_name": "gt-scratch-daemon-1",
+"compose_project": "gt-scratch"
 ```
 
 Both container fields must be set; a town that sets one inherits the live
@@ -190,10 +218,16 @@ Then, with the scratch root as the working directory:
 gt daemon status
 ```
 
-Expected: the daemon is running and a line
-`Supervised: container gt-scratch-daemon-1 running <image>`, where the image is
-`gt-daemon:<rev>`. This is green condition 1. If it names the live container,
-stop: the settings were read from the wrong town.
+Expected: a line `Supervised: container gt-scratch-daemon-1 running <image>`,
+where the image is `gt-daemon:<rev>` (observed). This is green condition 1. If it
+names the live container, stop: the settings were read from the wrong town.
+Observed, and a defect until gt-i2z9l lands: on the host, `gt daemon status`
+also prints `Daemon is not running` and exits 3 for a running container daemon,
+because it decides by the `daemon.lock` flock and a lock taken inside the
+container is not visible across the mount (shown directly: the container's
+`/proc/locks` holds it and a host `flock` on the same file succeeds). Until that
+is fixed, read "running" from the Supervised line and from the checks in Step 7,
+which read the container and `state.json` and were correct.
 
 **Step 6. Start the host agent for the scratch town.**
 In its own terminal tab, with the scratch root as the working directory, leave
@@ -216,7 +250,9 @@ cat <scratch-root>/daemon/state.json
 ```
 
 Expected, each sample: the four checks report OK (for a container town they
-read the container and `state.json`, not a pid); `probes.json` was modified in
+read the container and `state.json`, not a pid; the first sample of a run
+reports `daemon-liveness` as `unknown: no baseline yet` and records one, which is
+a skip, not a failure); `probes.json` was modified in
 the last 180 seconds (the daemon refuses a file older than three intervals);
 `state.json` names owner `container` / `gt-scratch-daemon-1`, `"running": true`,
 and `heartbeat_count` larger than in the previous sample. Once, at any sample:
@@ -236,8 +272,11 @@ live town:
 gt daemon run
 ```
 
-Expected: it exits non-zero without starting, with a message that contains
-`refusing to start` and `takeover window` and names the container's owner.
+Expected, and observed: it exits 1 without starting, with a message such as
+`container owner "gt-scratch-daemon-1" and its heartbeat was 2m35s old (2
+minutes), under the 12m0s takeover window; refusing to start manual owner
+"<host>:<pid>" beside it`, which contains `refusing to start` and `takeover
+window` and names the container's owner.
 Afterward `state.json` is unchanged: still owner `container`, still running,
 heartbeat count still advancing from the container alone. If the command is
 refused before the guard (a message about the bd version or the town config,
@@ -317,18 +356,41 @@ project on the host.
 5. Compare `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
    with the list recorded before Step 1: identical.
 
-### What has not been observed
+### What has been observed, and what has not
 
-Every expected output above comes from reading the code on `main`; none has been
-seen in a live run. When L1 is run, correct this page with what was actually
-printed. The points most likely to differ:
+The L1 window was run on 2026-10-30 at `main` 1bf9f540d, with the host's load
+between 19 and 52. Observed and now written into the steps above: the marker, the
+image build (24 to 39 seconds), the render and `up` of the three services, the
+install and the daemon's start as owner `container`, the location of the daemon's
+log lines, the `mayor/daemon.json` keys, the four checks at seven samples over 30
+minutes (all OK; probe file age 2 to 51 seconds; heartbeat count 1, 3, 5, 6, 8,
+10, 11), the refusal of a hand-started daemon, and Teardown (containers, networks,
+volumes and the directory removed; `docker ps` equal to the baseline).
 
-- The exact log lines of the install and of the first start (Step 4).
-- Whether a fresh scratch install writes `settings/config.json` or leaves
-  `mayor/daemon.json`, which decides where Step 5 edits (Step 5 says to look).
-- Whether `gt daemon run` in the scratch town reaches the startup guard on a
-  host where `bd` and the scratch town's config pass the town-running gate
-  (Step 8 says what to do if it does not).
+Observed outside the runbook's steps: at 11:35:49, 31 minutes into the window, the
+daemon's doctor dog removed the `scratch-dolt` container
+(`daemon.log`: `doctor_dog: slot reap removed: dolthub/dolt-sql-server:2.3.2
+gt-scratch-scratch-dolt-1`), because the container gate treats a Dolt container
+outside the gate as an unwrapped container suite. The same predicate makes the
+post-landing suite and the tier sweep wait for the gate's slot and blocks the
+install's quiet check for as long as any `gt-scratch*` container runs. The town
+never used that container, so the window's checks were unaffected. One shared fix
+across the three call sites is gt-4gixm; until it lands, a scratch project holds
+installs and its Dolt container is reaped, and the L2 rehearsal waits for it.
+
+The first start failed once before it passed: the image had no git identity, and
+the install's Dolt preflight refused (fixed by gt-33hr1).
+
+Still not observed:
+
+- `gt daemon status` printing the running form for a container town (gt-i2z9l).
+- The scratch town using the `scratch-dolt` service instead of a local Dolt
+  (gt-fwoso's three beads).
+- The first-sample `daemon-liveness` result when the count has a baseline from an
+  earlier run on the same town.
+- The behaviour of the probe file when the host agent is stopped for more than
+  three intervals.
+- `gt daemon scratch up` with `--om-token-file`.
 
 ## L2: landing through a throwaway Forgejo
 
@@ -376,6 +438,8 @@ observed](#what-l2-has-not-observed)).
 
 ### Before you start (L2)
 
+- gt-4gixm has landed (see L1's observed section: until then a running scratch
+  project blocks installs and has its Dolt container reaped).
 - L1 is green and torn down, or its project is still running: Steps 1 to 5 of L1
   are redone below with the forge on, so a project from L1 is removed first with
   L1's Teardown.
