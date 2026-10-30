@@ -650,8 +650,9 @@ func TestTierSweepCommand_ArgvPerTier(t *testing.T) {
 }
 
 // TestTierSweepCommand_ExitOverrulesGreen: the integration and race stage reads
-// its output line by line, and only the RED exit (1, cmd/tier-sweep/main.go:8-10)
-// is excused by a RED line in that output: the run is one command for both
+// its output line by line, and only the RED exit (1, which cmd/tier-sweep
+// reports when any tier it ran was RED) is excused by a RED line in that
+// output: the run is one command for both
 // tiers, so a RED integration leaves the race tier's GREEN standing (gt-xyigz).
 // Exit 2, a signal's -1 and exit 1 with no RED line behind it all withhold
 // GREEN, as does a decline the rig's script is alone in making (gt-qgrdy).
@@ -2140,15 +2141,16 @@ func TestTierSweepRigCycleTierTheScriptDoesNotOffer(t *testing.T) {
 	}
 }
 
-// gastownIntegrationLog is the shape of one integration stage log from the
-// sweep's own directory (~/gt/.runtime/tier-sweep/logs/gastown/integration.log),
-// sanitized: that log is not in this sandbox, so the package names, counts and
-// log directories stand in for the recorded run's. The stage log is the step's
-// stdout and stderr together (internal/land/gate.go:744-745), so it carries the
-// sweep's progress lines (stderr) beside its summary lines (stdout,
-// cmd/tier-sweep/main.go:6-8). One command runs the integration tier and then
-// the race tier, so a RED integration's exit 1 arrives with the race tier's
-// GREEN line after it — the input that was recorded as race "no verdict line
+// gastownIntegrationLog is a synthetic log shaped like a real integration stage
+// log from the sweep's own directory (~/gt/.runtime/tier-sweep/logs/gastown/
+// integration.log). That log is not in this sandbox, so the package names,
+// counts and log directories here are invented stand-ins, not a copy of a
+// recorded run. The stage log holds the step's stdout and stderr in one buffer
+// (internal/land/gate.go), so it carries the sweep's progress lines (stderr)
+// beside its summary lines (stdout, where cmd/tier-sweep writes one line per
+// tier as the tier ends). One command runs the integration tier and then the
+// race tier, so a RED integration's exit 1 arrives with the race tier's GREEN
+// line after it — the input that was recorded as race "no verdict line
 // (exit 1)" and filed this bead (gt-xyigz).
 const gastownIntegrationLog = "" +
 	"tier-sweep: integration ./internal/cmd ...\n" +

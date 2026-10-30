@@ -1635,11 +1635,14 @@ func tierSweepStageReported(st tierSweepStage, res tierSweepStageResult) map[str
 }
 
 // tierSweepRedExit is the one exit status cmd/tier-sweep reports for a tier that
-// came back RED: it returns 1 after the last tier's line when any tier was RED,
-// and takes 2 only for a command line, log directory or tier it cannot handle
-// (cmd/tier-sweep/main.go:8-10, internal/tiersweep/sweep.go:87-94,
-// internal/tiersweep/options.go:50). The rig's own script follows the same two
-// codes. Any other status, a signal's -1 included, is not a tier's verdict.
+// came back RED. The contract, as the command's package doc and tiersweep.Run
+// state it: each tier's summary line is written as the tier ends, the run exits
+// 0 when every tier was GREEN and 1 when any was RED, and refuses with
+// tiersweep.UsageExit (2) for a command line, log directory or tier it cannot
+// handle, which it reaches only after the tiers before it have printed. The
+// rig's own script follows the same two codes: the RED exit for a tier that
+// failed, UsageExit for a tier it does not offer. Any other status, a signal's
+// -1 included, is not a tier's verdict.
 const tierSweepRedExit = 1
 
 // tierSweepExitStands reports whether a non-shell stage's exit leaves its GREEN
