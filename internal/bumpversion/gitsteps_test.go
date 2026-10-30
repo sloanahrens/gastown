@@ -182,6 +182,13 @@ func TestCommitFailuresRefuse(t *testing.T) {
 			wantRuns: nil,
 		},
 		{
+			name:     "CHANGELOG.md unreadable without nix",
+			fsys:     readErrFS{err: errors.New("disk on fire")},
+			nix:      false,
+			wantErr:  "read " + ChangelogPath,
+			wantRuns: nil,
+		},
+		{
 			name:     "git add exits non-zero",
 			fsys:     &memFS{files: map[string]string{}},
 			git:      fakeGit{codes: map[string]int{"add": 128}},
