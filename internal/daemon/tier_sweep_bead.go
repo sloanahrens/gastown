@@ -339,20 +339,24 @@ func tierSweepUnique(names []string) []string {
 }
 
 // tierSweepCheckCommand is the narrow command that re-runs one failing unit:
-// the shell runner for the shell tier, and `go test` filtered to the failing
-// tests for a Go tier. A filtered run is what the polecat test guard allows on
-// a heavy package, and a whole package is what it refuses. The shell runner
-// takes no filter, so it runs every shell test. The Go command keeps the
-// sweep's own wrapper: GT_TEST_DOCKER=1, or the container tests skip and a
-// green tick proves nothing, and gt slot run around it, or the container-suite
-// guard refuses it. Empty when no command can be named from what the sweep
-// knows, so the caller falls back to the log.
-func tierSweepCheckCommand(tier, unit string, red tierSweepUnitRed) string {
+// for the shell tier, the command that ran for the rig (ranCmd: the Go runner,
+// or the rig's own script), and `go test` filtered to the failing tests for a
+// Go tier. A filtered run is what the polecat test guard allows on a heavy
+// package, and a whole package is what it refuses. The shell command takes no
+// filter, so it runs every shell test. The Go command keeps the sweep's own
+// wrapper: GT_TEST_DOCKER=1, or the container tests skip and a green tick
+// proves nothing, and gt slot run around it, or the container-suite guard
+// refuses it. Empty when no command can be named from what the sweep knows, so
+// the caller falls back to the log.
+func tierSweepCheckCommand(tier, unit, ranCmd string, red tierSweepUnitRed) string {
 	if !tierSweepUnitIsName(unit) {
 		return ""
 	}
 	if tier == "shell" {
-		return "GT_TEST_DOCKER=0 " + tierSweepShellCommand
+		if ranCmd == "" {
+			return ""
+		}
+		return "GT_TEST_DOCKER=0 " + ranCmd
 	}
 	// A finding names its test in its own line, so the filter it earns is the
 	// one a FAIL line earns. A test with both is named once.
@@ -400,7 +404,7 @@ func tierSweepUnitSubject(tier, unit string) string {
 // to read the log and re-run the test, which is still a check one worker can
 // do alone.
 func tierSweepAcceptanceItem(tier, unit string, ts tierSweepTierResult, red tierSweepUnitRed) string {
-	if cmd := tierSweepCheckCommand(tier, unit, red); cmd != "" {
+	if cmd := tierSweepCheckCommand(tier, unit, ts.Command, red); cmd != "" {
 		item := "- [ ] `" + cmd + "` passes on a worktree rebased onto main."
 		if tier != "shell" {
 			// A -run filter taken from a log line can match no test, and go test

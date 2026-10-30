@@ -788,7 +788,7 @@ func TestTierSweepBead_ShellTierNamesTheRunner(t *testing.T) {
 	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
 
 	red := map[string]tierSweepTierResult{
-		"shell": {Verdict: tierSweepRed, Passed: 5, Failed: 1, FailedNames: []string{"scripts/test-makefile.sh"}},
+		"shell": {Verdict: tierSweepRed, Passed: 5, Failed: 1, FailedNames: []string{"scripts/test-makefile.sh"}, Command: tierSweepStages("gastown")[0].command()},
 	}
 	d.tierSweepRecordBeads("gastown", "abc1234", red)
 
@@ -812,7 +812,7 @@ func TestTierSweepBead_ShellTierNamesTheRunner(t *testing.T) {
 func TestTierSweepBead_ShellCheckCommandIsTheStageCommand(t *testing.T) {
 	t.Parallel()
 	want := "GT_TEST_DOCKER=0 " + tierSweepStages("gastown")[0].command()
-	if got := tierSweepCheckCommand("shell", "scripts/test-makefile.sh", tierSweepUnitRed{}); got != want {
+	if got := tierSweepCheckCommand("shell", "scripts/test-makefile.sh", tierSweepStages("gastown")[0].command(), tierSweepUnitRed{}); got != want {
 		t.Errorf("check command = %q, want the shell stage's command %q", got, want)
 	}
 }
@@ -938,5 +938,30 @@ func TestTierSweepClipReadsWhitespaceControlsAsSpaces(t *testing.T) {
 		if got := tierSweepClip(tc.in, 200); got != tc.want {
 			t.Errorf("%s: tierSweepClip(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
 		}
+	}
+}
+
+// The shell check command names the command that ran in the rig's tree: the Go
+// runner where the tree ships it, the rig's own script where it does not, and
+// nothing where neither ran (gt-j0wki). A check that always names the Go runner
+// turns the script row red.
+func TestTierSweepBead_CheckCommandNamesTheRanCommand(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		ran  string
+		want string
+	}{
+		{name: "go runner", ran: tierSweepStages("devops")[0].command(), want: "GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --all --budget 10m"},
+		{name: "rig script", ran: "bash scripts/tier-sweep.sh shell", want: "GT_TEST_DOCKER=0 bash scripts/tier-sweep.sh shell"},
+		{name: "nothing ran", ran: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tierSweepCheckCommand("shell", "scripts/test-makefile.sh", tc.ran, tierSweepUnitRed{}); got != tc.want {
+				t.Errorf("check command = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
