@@ -52,12 +52,19 @@ const envJobs = "TIER_SWEEP_JOBS"
 const (
 	// maxSummaryBytes bounds one summary line in the result.
 	maxSummaryBytes = 4 << 10
-	// maxCaptureBytes bounds what the run keeps of the sweep's streams. The
-	// whole stream still reaches the process's own stdout and stderr; only the
-	// copy the result is built from is bounded.
+	// maxCaptureBytes bounds the END of the sweep's stdout the summary lines are
+	// scanned out of. The summary lines come last, so a sweep that prints
+	// megabytes of progress before its verdicts still has them found.
 	maxCaptureBytes = 64 << 10
+	// maxStderrCapture bounds the END of the sweep's stderr kept: the progress
+	// lines and failure excerpts come before the complaint, so the end is the
+	// part a reason is quoted from.
+	maxStderrCapture = 8 << 10
 	// maxStderrTail bounds the sweep's own words quoted in a RED reason.
 	maxStderrTail = 512
+	// failedLabel opens the group a summary line carries its reasons in, as
+	// tiersweep.Summary writes it and the daemon reads it.
+	failedLabel = " failed: "
 )
 
 // sweepNoExit is what the Sweep seam returns when the sweep produced no exit
@@ -172,11 +179,11 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		// container's log reads like a host sweep's, and captured for the result.
 		// The capture is bounded and the echo is not: the sweep's whole output
 		// reaches the container log, and only the copy the result is built from
-		// is capped (gt-dibnm).
-		var captured, sweepErrs bytes.Buffer
+		// is capped, at its end (gt-dibnm).
+		captured, sweepErrs := newTail(maxCaptureBytes), newTail(maxStderrCapture)
 		code := d.Sweep(sweepArgs(work, opts.Tiers), overrides,
-			io.MultiWriter(stdout, newCapture(&captured, maxCaptureBytes)),
-			io.MultiWriter(stderr, newCapture(&sweepErrs, maxCaptureBytes)))
+			io.MultiWriter(stdout, captured),
+			io.MultiWriter(stderr, sweepErrs))
 		// No exit status is no verdict: a sweep that was killed or never started
 		// did not produce one, so the run reports that it could not produce a
 		// result rather than recording a tier it does not know about (gt-dibnm).
@@ -184,7 +191,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 			fmt.Fprintf(stderr, "%s: the sweep did not exit (%d): it was killed or never started\n", name, code)
 			return FailureExit
 		}
-		res.Tiers = tiersFrom(opts.Tiers, captured.String(), sweepErrs.String(), code, opts.logDir())
+		res.Tiers = tiersFrom(opts.Tiers, reportOf(captured, sweepErrs), code, opts.logDir())
 	}
 	res.Finished = now()
 	if err := d.WriteResult(opts.Out, res); err != nil {
@@ -304,6 +311,29 @@ func sweepArgs(work string, tiers []string) []string {
 	return append([]string{"--root", work}, tiers...)
 }
 
+// sweepReport is what a run holds of the sweep's output: the end of each stream,
+// and the note naming what was dropped from their heads.
+type sweepReport struct {
+	// stdout is the kept end of the sweep's summary stream, stderr the kept end
+	// of its progress and complaints.
+	stdout string
+	stderr string
+	// dropped is the note a result carries when the runner had to discard
+	// output, and empty when it kept everything the sweep printed.
+	dropped string
+}
+
+// reportOf reads the captures back once the sweep has exited. What the sweep
+// printed beyond the caps is gone, and a run that lost part of its evidence says
+// so in the result rather than reading as if it saw everything (gt-dibnm).
+func reportOf(stdout, stderrTail *tail) sweepReport {
+	rep := sweepReport{stdout: stdout.text(), stderr: stderrTail.text()}
+	if dropped := stdout.dropped + stderrTail.dropped; dropped > 0 {
+		rep.dropped = fmt.Sprintf("output truncated: %d bytes dropped from the head", dropped)
+	}
+	return rep
+}
+
 // tiersFrom turns the sweep's output into the result's tiers: one entry per
 // requested tier, in the requested order.
 //
@@ -313,25 +343,27 @@ func sweepArgs(work string, tiers []string) []string {
 // reached it, or refused its arguments — is RED with the status and the tail of
 // the sweep's own complaint, because a tier that did not run is not a tier that
 // passed.
-func tiersFrom(tiers []string, stdout, stderrText string, code int, logDir string) []sweeprunner.Tier {
-	// The log group the runner adds is part of the line's cap, so a line that
-	// arrived at the limit still ends in a whole group.
+func tiersFrom(tiers []string, rep sweepReport, code int, logDir string) []sweeprunner.Tier {
+	// The log group the runner adds, and the note it may add beside it, are part
+	// of the line's cap, so a line that arrived at the limit still ends in a
+	// whole group and the daemon still parses it.
 	group := " (logs " + logDir + ")"
-	room := maxSummaryBytes - len(group)
+	budget := lineBudget(rep.dropped)
+	room := budget - len(group)
 	if room < 1 {
 		room = 1
 	}
 	lines := make(map[string]string, len(tiers))
-	for _, raw := range strings.Split(stdout, "\n") {
+	for _, raw := range strings.Split(rep.stdout, "\n") {
 		line := sanitize(raw, maxSummaryBytes)
 		tier, ok := summaryTier(line)
 		if !ok {
 			continue
 		}
-		lines[tier] = withLogDir(capRunes(line, room), logDir)
+		lines[tier] = withFailedNote(withLogDir(capRunes(line, room), logDir), rep.dropped)
 	}
 	reason := fmt.Sprintf("no summary line (exit %d)", code)
-	if tail := tailOf(stderrText); tail != "" {
+	if tail := tailOf(rep.stderr); tail != "" {
 		reason += ": " + tail
 	}
 	out := make([]sweeprunner.Tier, 0, len(tiers))
@@ -339,13 +371,38 @@ func tiersFrom(tiers []string, stdout, stderrText string, code int, logDir strin
 		line, ok := lines[tier]
 		switch {
 		case !ok:
-			line = generated(tier, logDir, reason)
+			line = withFailedNote(generated(tier, logDir, reason, budget), rep.dropped)
 		case code != 0:
 			line = redOnFailure(line, tier, code)
 		}
 		out = append(out, sweeprunner.Tier{Tier: tier, Summary: line})
 	}
 	return out
+}
+
+// lineBudget is what a whole summary line may take once note is added to it.
+func lineBudget(note string) int {
+	if note == "" {
+		return maxSummaryBytes
+	}
+	return maxSummaryBytes - len(note) - len(", ")
+}
+
+// withFailedNote adds a note to a summary line's reasons, which is the only free
+// text the daemon reads out of a result; a line with no reason group gains one.
+// The note never reaches the log path, which stays the runner's own.
+func withFailedNote(line, note string) string {
+	if note == "" {
+		return line
+	}
+	i := strings.Index(line, " (logs ")
+	if i < 0 {
+		return line
+	}
+	if strings.Contains(line[:i], failedLabel) {
+		return line[:i] + ", " + note + line[i:]
+	}
+	return line[:i] + failedLabel + note + line[i:]
 }
 
 // redTiers is every requested tier RED for reason: the run could not start, so
@@ -355,16 +412,23 @@ func tiersFrom(tiers []string, stdout, stderrText string, code int, logDir strin
 func redTiers(tiers []string, logDir, reason string) []sweeprunner.Tier {
 	out := make([]sweeprunner.Tier, 0, len(tiers))
 	for _, tier := range tiers {
-		out = append(out, sweeprunner.Tier{Tier: tier, Summary: generated(tier, logDir, reason)})
+		out = append(out, sweeprunner.Tier{Tier: tier, Summary: generated(tier, logDir, reason, maxSummaryBytes)})
 	}
 	return out
 }
 
 // generated is a RED summary line the runner writes itself: one failing unit
-// named by reason, in the sweep's own format, capped like a printed line.
-func generated(tier, logDir, reason string) string {
-	line, _ := tiersweep.Summary(tier, logDir, 0, 1, 0, sanitize(reason, maxSummaryBytes), 0)
-	return capRunes(line, maxSummaryBytes)
+// named by reason, in the sweep's own format, with the whole line bounded at
+// budget bytes so its log group and duration are never the part cut off.
+func generated(tier, logDir, reason string, budget int) string {
+	// The line's fixed parts, then what the reason may take of the rest.
+	bare, _ := tiersweep.Summary(tier, logDir, 0, 1, 0, "", 0)
+	room := budget - len(bare) - len(failedLabel)
+	if room < 1 {
+		room = 1
+	}
+	line, _ := tiersweep.Summary(tier, logDir, 0, 1, 0, capRunes(sanitize(reason, room), room), 0)
+	return capRunes(line, budget)
 }
 
 // withLogDir replaces a summary line's "(logs ...)" group with logDir, or adds
@@ -507,19 +571,33 @@ func runGit(dir string, args ...string) (int, string) {
 // the sweep's own option reads through the host and its children through the
 // environment, without mutating the process's environment.
 func processSweep(args []string, overrides map[string]string, stdout, stderr io.Writer) int {
+	return sweepWith(tiersweep.Run, args, overrides, os.Getenv, os.Environ(), os.ReadFile, time.Now, stdout, stderr)
+}
+
+// sweepRunner runs one sweep: tiersweep.Run in the container, and a fake in a
+// test that holds what the sweep was handed.
+type sweepRunner func(args []string, stdout, stderr io.Writer, d tiersweep.Deps) int
+
+// sweepWith is processSweep over the runner and the process reads it is given,
+// so the wiring is a value a test can hold: the overrides answer the sweep's own
+// option reads before the process environment does, and reach each child through
+// the environment it is started with.
+func sweepWith(run sweepRunner, args []string, overrides map[string]string,
+	getenv func(string) string, environ []string, readFile func(string) ([]byte, error), now func() time.Time,
+	stdout, stderr io.Writer) int {
 	host := tiersweep.ProcessHost
 	host.Env = func(key string) string {
 		if value, ok := overrides[key]; ok {
 			return value
 		}
-		return os.Getenv(key)
+		return getenv(key)
 	}
-	return tiersweep.Run(args, stdout, stderr, tiersweep.Deps{
+	return run(args, stdout, stderr, tiersweep.Deps{
 		Host:     host,
 		Exec:     tiersweep.ProcessExec,
-		ReadFile: os.ReadFile,
-		Environ:  environWith(os.Environ(), overrides),
-		Now:      time.Now,
+		ReadFile: readFile,
+		Environ:  environWith(environ, overrides),
+		Now:      now,
 	})
 }
 
@@ -591,25 +669,38 @@ func capRunes(text string, max int) string {
 	return strings.TrimRight(cut, " ")
 }
 
-// capture is a bounded copy of a stream the sweep writes. It keeps the first
-// max bytes and discards the rest while reporting every byte written, so the
+// tail is a bounded copy of the END of a stream the sweep writes: once max bytes
+// are held, each write drops the oldest bytes and counts them. The verdicts and
+// the complaint come last, so the end is the part a result is built from; the
 // writer it is paired with (the process's own stdout or stderr) still receives
-// the whole stream.
-type capture struct {
-	buf *bytes.Buffer
-	max int
+// the whole stream, and Write always reports every byte as written.
+type tail struct {
+	keep    []byte
+	max     int
+	dropped int64
 }
 
-func newCapture(buf *bytes.Buffer, max int) *capture { return &capture{buf: buf, max: max} }
+func newTail(max int) *tail { return &tail{max: max} }
 
-// Write keeps what fits and accepts the rest without storing it.
-func (c *capture) Write(p []byte) (int, error) {
-	if room := c.max - c.buf.Len(); room > 0 {
-		keep := p
-		if len(keep) > room {
-			keep = keep[:room]
-		}
-		c.buf.Write(keep)
+// Write keeps the end of what has been written and accepts the rest.
+func (t *tail) Write(p []byte) (int, error) {
+	t.keep = append(t.keep, p...)
+	if over := len(t.keep) - t.max; over > 0 {
+		t.keep = t.keep[over:]
+		t.dropped += int64(over)
 	}
 	return len(p), nil
+}
+
+// text is the tail as a string. When bytes were dropped the head was cut
+// mid-line, so the first line is a fragment of a line the sweep printed and is
+// left out: a summary line is read from its start.
+func (t *tail) text() string {
+	if t.dropped == 0 {
+		return string(t.keep)
+	}
+	if i := bytes.IndexByte(t.keep, '\n'); i >= 0 {
+		return string(t.keep[i+1:])
+	}
+	return ""
 }

@@ -697,6 +697,12 @@ func TestRunSanitisesTheSweepOutput(t *testing.T) {
 				if len(summary) > maxSummaryBytes {
 					t.Errorf("summary is %d bytes, want at most %d", len(summary), maxSummaryBytes)
 				}
+				// A line longer than the capture cannot be kept whole, so the run
+				// records what it lost rather than passing the fragment off as a
+				// verdict.
+				if !strings.Contains(summary, "output truncated:") {
+					t.Errorf("summary %q does not record the output the run dropped", summary)
+				}
 			},
 		},
 		{
@@ -751,6 +757,144 @@ func TestRunSanitisesTheSweepOutput(t *testing.T) {
 			tc.check(t, filepath.Join(h.out, "logs"), summary)
 		})
 	}
+}
+
+// TestRunKeepsTheEndOfTheSweepOutput: the verdicts and the sweep's own complaint
+// come last, so the runner keeps the end of each stream — a verdict printed
+// after megabytes of progress is still read, and a reason is quoted from the
+// sweep's last words — and says in the result what it had to drop (gt-dibnm).
+func TestRunKeepsTheEndOfTheSweepOutput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a verdict after more than the cap is still found", func(t *testing.T) {
+		t.Parallel()
+		progress := "go: downloading example.com/x v1.2.3 (100%)\n"
+		noise := strings.Repeat(progress, 3*maxCaptureBytes/len(progress)+1)
+		var printed int
+		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			line := fmt.Sprintf("tier-sweep: integration GREEN passed=7 failed=0 skipped=0 (logs %s) in 1s\n",
+				overrides[tiersweep.EnvLogDir])
+			io.WriteString(stdout, noise)
+			io.WriteString(stdout, line)
+			printed = len(noise) + len(line)
+			return 0
+		})
+		verdict, summary := runAndRead(t, h, "integration")
+		if verdict.Verdict != "GREEN" {
+			t.Errorf("integration = %+v, want the GREEN line printed after %d bytes of progress", verdict, len(noise))
+		}
+		want := fmt.Sprintf("output truncated: %d bytes dropped from the head", printed-maxCaptureBytes)
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary %q does not hold %q", summary, want)
+		}
+	})
+
+	t.Run("output under the cap is kept whole", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, func(_ []string, overrides map[string]string, stdout, _ io.Writer) int {
+			fmt.Fprintln(stdout, "tier-sweep: integration: 66 packages")
+			fmt.Fprintf(stdout, "tier-sweep: integration GREEN passed=66 failed=0 skipped=0 (logs %s) in 2m0s\n",
+				overrides[tiersweep.EnvLogDir])
+			return 0
+		})
+		verdict, summary := runAndRead(t, h, "integration")
+		if verdict.Verdict != "GREEN" || verdict.Passed != 66 {
+			t.Errorf("integration = %+v, want GREEN with the printed 66", verdict)
+		}
+		if strings.Contains(summary, "output truncated:") {
+			t.Errorf("summary %q reports dropped output the run kept whole", summary)
+		}
+	})
+
+	t.Run("stderr over the cap keeps its last lines", func(t *testing.T) {
+		t.Parallel()
+		progress := "internal/daemon: package still building\n"
+		noise := strings.Repeat(progress, maxStderrCapture/len(progress)+1)
+		const complaint = "tier-sweep: could not count the integration packages\n"
+		var printed int
+		h := newHarness(t, nil, func(_ []string, _ map[string]string, _, stderr io.Writer) int {
+			io.WriteString(stderr, noise)
+			io.WriteString(stderr, complaint)
+			printed = len(noise) + len(complaint)
+			return 1
+		})
+		verdict, summary := runAndRead(t, h, "integration")
+		if verdict.Verdict != "RED" {
+			t.Errorf("integration = %+v, want RED", verdict)
+		}
+		if !strings.Contains(summary, "could not count the integration packages") {
+			t.Errorf("summary %q does not quote the sweep's last line", summary)
+		}
+		want := fmt.Sprintf("output truncated: %d bytes dropped from the head", printed-maxStderrCapture)
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary %q does not hold %q", summary, want)
+		}
+	})
+}
+
+// TestProcessSweepHandsTheSweepItsOverrides: the overrides the entrypoint passes
+// are what the sweep's own option reads answer with, before the process
+// environment, and what every child it starts inherits; a key with no override
+// still reads the process (gt-dibnm).
+func TestProcessSweepHandsTheSweepItsOverrides(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an override answers before the process", func(t *testing.T) {
+		t.Parallel()
+		overrides := map[string]string{
+			tiersweep.EnvLogDir: "/out/logs",
+			tiersweep.EnvTested: testSHA,
+			envJobs:             "4",
+		}
+		base := []string{"PATH=/bin", tiersweep.EnvLogDir + "=/elsewhere"}
+		args := []string{"--root", "/work", "integration"}
+		var gotArgs, gotEnv []string
+		var logDir, unset string
+		var ran bool
+		run := func(args []string, stdout, _ io.Writer, d tiersweep.Deps) int {
+			ran = true
+			gotArgs, gotEnv = args, d.Environ
+			logDir = d.Host.Env(tiersweep.EnvLogDir)
+			unset = d.Host.Env("GT_SWEEP_NOT_SET")
+			return 0
+		}
+		var stdout, stderr bytes.Buffer
+		code := sweepWith(run, args, overrides, func(string) string { return "from the process" }, base,
+			os.ReadFile, time.Now, &stdout, &stderr)
+		if code != 0 || !ran {
+			t.Fatalf("code = %d, ran = %v: the overrides did not reach a sweep", code, ran)
+		}
+		if !equal(gotArgs, args) {
+			t.Errorf("sweep args = %q, want %q", gotArgs, args)
+		}
+		if logDir != "/out/logs" {
+			t.Errorf("the sweep read %s = %q, want the override %q", tiersweep.EnvLogDir, logDir, "/out/logs")
+		}
+		if unset != "from the process" {
+			t.Errorf("a key with no override read %q, want the process's own value", unset)
+		}
+		// The children inherit the process environment with the overrides after
+		// it, in a fixed order.
+		want := append(append([]string{}, base...),
+			envJobs+"=4", tiersweep.EnvLogDir+"=/out/logs", tiersweep.EnvTested+"="+testSHA)
+		if !equal(gotEnv, want) {
+			t.Errorf("child environment = %q, want %q", gotEnv, want)
+		}
+	})
+
+	t.Run("with no override the sweep reads the process", func(t *testing.T) {
+		t.Parallel()
+		var logDir string
+		run := func(_ []string, _, _ io.Writer, d tiersweep.Deps) int {
+			logDir = d.Host.Env(tiersweep.EnvLogDir)
+			return 0
+		}
+		sweepWith(run, nil, nil, func(string) string { return "/process/logs" }, nil,
+			os.ReadFile, time.Now, io.Discard, io.Discard)
+		if logDir != "/process/logs" {
+			t.Errorf("the sweep read %s = %q, want the process's own %q", tiersweep.EnvLogDir, logDir, "/process/logs")
+		}
+	})
 }
 
 // equal reports whether two string slices hold the same entries in order.
