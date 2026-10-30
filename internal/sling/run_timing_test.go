@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,15 +174,39 @@ func TestTimerNamesEveryStageOfTheRun(t *testing.T) {
 			t.Errorf("Summary() = %q, want a phase named %q", summary, name)
 		}
 	}
-	if share := timedShare(t, summary); share < 0.95 {
-		t.Errorf("Summary() = %q records %.0f%% of the total, want at least 95%%: the rest of the sling is untimed", summary, share*100)
+	// The property is how little the phases leave unnamed, not that named plus
+	// unnamed is the total (that holds by construction): every step here is
+	// marked, so "other" must be under 5% of the total.
+	b := trace.Breakdown()
+	if b.Total <= 0 {
+		t.Fatalf("Breakdown() = %+v, want a positive total", b)
 	}
-	phases, total := parseTraceSummary(t, summary)
-	if got, want := phases["seat decision"], 30*time.Second; got != want {
+	if share := float64(b.Named()) / float64(b.Total); share < 0.95 {
+		t.Errorf("Summary() = %q names %.0f%% of the total, want at least 95%%: the rest of the sling is untimed", summary, share*100)
+	}
+	if got, want := b.Took("seat decision"), 30*time.Second; got != want {
 		t.Errorf("seat decision = %v, want %v: the seat decision is a stage of its own, not folded into the spawn", got, want)
 	}
-	if sum := phaseSum(phases); sum != total {
-		t.Errorf("phases sum to %v of a %v total, want the whole dispatch: every interval is named", sum, total)
+}
+
+// TestTimerOtherCarriesAGapNoStepNamed: the check above can fail. A clock that
+// advances between two marks with no stage open leaves that time in "other",
+// and the named share drops below the floor, so an unmarked step cannot hide
+// behind the remainder.
+func TestTimerOtherCarriesAGapNoStepNamed(t *testing.T) {
+	t.Parallel()
+	clock := newTimingClock()
+	trace := session.NewSandboxTrace(clock.Now)
+	clock.spend(time.Second)
+	trace.Mark("named")
+	clock.spend(9 * time.Second) // no phase names this
+
+	b := trace.Breakdown()
+	if b.Other != 9*time.Second || b.Named() != time.Second || b.Total != 10*time.Second {
+		t.Fatalf("Breakdown() = %+v, want 1s named, 9s other, 10s total", b)
+	}
+	if share := float64(b.Named()) / float64(b.Total); share >= 0.95 {
+		t.Errorf("named share = %.2f, want it below the 95%% floor so the coverage check can fail", share)
 	}
 }
 
@@ -199,15 +222,14 @@ func TestTimerNamesTheStageThatFails(t *testing.T) {
 		t.Fatal("a dispatch whose hook failed must fail")
 	}
 
-	summary := trace.Summary()
-	phases, total := parseTraceSummary(t, summary)
+	b := trace.Breakdown()
 	// The hook stage holds the write that failed and the hold re-read the
 	// dispatch makes under the same stage, so its floor is the write's own time.
-	if phases["hook"] < 2*time.Second {
-		t.Errorf("Summary() = %q, want the failed stage's own time under hook", summary)
+	if b.Took("hook") < 2*time.Second {
+		t.Errorf("Summary() = %q, want the failed stage's own time under hook", trace.Summary())
 	}
-	if sum := phaseSum(phases); sum != total {
-		t.Errorf("phases sum to %v of a %v total, want the whole dispatch on the failure path too", sum, total)
+	if share := float64(b.Named()) / float64(b.Total); share < 0.95 {
+		t.Errorf("Summary() = %q names %.0f%% of the total on the failure path, want at least 95%%", trace.Summary(), share*100)
 	}
 }
 
@@ -231,56 +253,4 @@ func TestTimerWithoutASinkNamesNoStage(t *testing.T) {
 	if got := trace.Summary(); strings.Contains(got, "setup and guards") || strings.Contains(got, "spawn") {
 		t.Errorf("Summary() = %q, want no engine stage: the caller passed no sink", got)
 	}
-}
-
-// parseTraceSummary reads a trace summary into its phases and its total.
-func parseTraceSummary(t *testing.T, summary string) (map[string]time.Duration, time.Duration) {
-	t.Helper()
-	parts := strings.Split(summary, ", ")
-	if len(parts) == 0 || !strings.HasPrefix(parts[len(parts)-1], "total ") {
-		t.Fatalf("Summary() = %q, want a trailing total", summary)
-	}
-	total := parseTraceDuration(t, strings.TrimPrefix(parts[len(parts)-1], "total "))
-	phases := make(map[string]time.Duration, len(parts)-1)
-	for _, p := range parts[:len(parts)-1] {
-		// A phase name may hold spaces of its own, so the duration is the part
-		// after the last one.
-		cut := strings.LastIndex(p, " ")
-		if cut <= 0 {
-			t.Fatalf("Summary() = %q, want every phase to name a duration", summary)
-		}
-		phases[p[:cut]] = parseTraceDuration(t, p[cut+1:])
-	}
-	return phases, total
-}
-
-func phaseSum(phases map[string]time.Duration) time.Duration {
-	var sum time.Duration
-	for _, took := range phases {
-		sum += took
-	}
-	return sum
-}
-
-// timedShare reports the share of a trace summary's total that its phases
-// account for.
-func timedShare(t *testing.T, summary string) float64 {
-	t.Helper()
-	phases, total := parseTraceSummary(t, summary)
-	if total <= 0 {
-		t.Fatalf("Summary() = %q, want a positive total", summary)
-	}
-	return float64(phaseSum(phases)) / float64(total)
-}
-
-func parseTraceDuration(t *testing.T, s string) time.Duration {
-	t.Helper()
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		if nanos, nerr := strconv.ParseInt(strings.TrimSuffix(s, "ns"), 10, 64); nerr == nil && strings.HasSuffix(s, "ns") {
-			return time.Duration(nanos)
-		}
-		t.Fatalf("cannot parse %q as a duration: %v", s, err)
-	}
-	return d
 }
