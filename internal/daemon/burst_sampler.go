@@ -144,7 +144,15 @@ func (d *Daemon) burstSampler() *burstSampler {
 		s.seams.run = metrics.RunBurst
 	}
 	if s.seams.env == nil {
-		s.seams.env = metrics.OSEnv
+		// The town's own Env, plus the landing workers' published counts, so a
+		// sample reads the ready-to-land column from memory while a worker's
+		// count is fresh instead of listing every rig's board (gt-hw6ih).
+		view := d.landingQueueView()
+		s.seams.env = func(town string) metrics.Env {
+			env := metrics.OSEnv(town)
+			env.LandingQueue = view.Counts
+			return env
+		}
 	}
 	if s.seams.wait == nil {
 		s.seams.wait = s.wait

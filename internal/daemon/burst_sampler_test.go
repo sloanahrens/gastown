@@ -1093,3 +1093,28 @@ func TestBurstSamplerLogsAProbeFailureAgainAfterRecovery(t *testing.T) {
 		t.Errorf("host_age_s = %v on the sample after recovery, want 120: the file was two minutes old there", rows[1].HostAgeS)
 	}
 }
+
+// A sample's Env carries the landing workers' published counts, and reads the
+// view live rather than a copy: a count published after the Env was built still
+// answers the sample, which is what lets a pass' own list reach the queue
+// column (gt-hw6ih).
+func TestBurstSamplerEnvReadsTheLandingQueueView(t *testing.T) {
+	t.Parallel()
+	clock := clockwork.NewFakeClockAt(time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC))
+	d := burstTestDaemon(t, t.TempDir(), clock, io.Discard)
+	d.landingQueueView().Publish("gastown", 3)
+	env, err := d.burstSampler().sampleEnv()
+	if err != nil {
+		t.Fatalf("sampleEnv: %v", err)
+	}
+	if env.LandingQueue == nil {
+		t.Fatal("the sample's Env carries no landing queue; the burst row would list every rig's board")
+	}
+	if got := env.LandingQueue(clock.Now()); got["gastown"] != 3 {
+		t.Fatalf("the sample read %v; want the published gastown 3", got)
+	}
+	d.landingQueueView().Publish("gastown", 5)
+	if got := env.LandingQueue(clock.Now()); got["gastown"] != 5 {
+		t.Fatalf("the sample read %v after a second publish; want gastown 5", got)
+	}
+}

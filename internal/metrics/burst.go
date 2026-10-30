@@ -555,9 +555,12 @@ func burstLivePolecats(roster string, at, now time.Time) *int {
 const burstLandingTimeout = BurstFastInterval
 
 // burstLandingQueue counts the beads waiting to land, summed over the rigs the
-// way the queue group's waiting_to_land column counts them. nil is a registry
-// or a rig that could not be read: a partial sum would read as a queue that
-// shrank.
+// way the queue group's waiting_to_land column counts them: from the count
+// each rig's landing worker published while it is fresh, and from the board
+// itself for a rig whose count is stale or missing, because a sample this
+// frequent must not re-list a board another pass read a moment ago
+// (gt-hw6ih). nil is a registry or a rig that could not be read: a partial sum
+// would read as a queue that shrank.
 func burstLandingQueue(ctx context.Context, env Env) *int {
 	if env.Beads == nil || env.ReadFile == nil {
 		return nil

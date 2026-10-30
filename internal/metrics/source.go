@@ -125,6 +125,12 @@ type Env struct {
 	// the board. A source that needs it treats nil as a wiring error and
 	// reports it rather than counting an empty board.
 	Beads BeadStores
+	// LandingQueue returns the ready-to-land counts the daemon's landing
+	// workers published, keyed by rig, as of now: only the rigs whose count is
+	// fresh enough to answer for the queue now are in it, and a rig it leaves
+	// out is read from its store. nil reads every rig from its store, which is
+	// what a process with no landing worker (gt metrics snapshot) does.
+	LandingQueue func(now time.Time) map[string]int
 	// Now is the time the snapshot is taken; Collect writes it as the record's
 	// ts. nil means the wall clock.
 	Now func() time.Time

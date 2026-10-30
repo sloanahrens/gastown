@@ -221,8 +221,14 @@ type Worker struct {
 	// which is what the dashboard and town health read them from. nil leaves
 	// them in the log alone.
 	Backoff BackoffWriter
-	Logf    func(format string, args ...any)
-	Now     func() time.Time
+	// Queue, when set, receives this rig's ready-to-land count after each
+	// pass's list of the board, which is where a metrics sample reads the
+	// queue from instead of listing it again (gt-hw6ih). A list that failed
+	// publishes nothing: a count no pass read is not an empty queue. nil
+	// skips it.
+	Queue *LandingQueueView
+	Logf  func(format string, args ...any)
+	Now   func() time.Time
 
 	state map[string]*beadState
 	// escWG lets a test wait for Escalate goroutines.
@@ -398,6 +404,10 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		rep.Failed++
 		return rep
 	}
+	// The count the queue reads until this rig's next pass (gt-hw6ih). It is
+	// the whole list, not the beads this pass still has to land, because the
+	// column it answers counts what waits.
+	w.Queue.Publish(w.Rig, len(issues))
 	sortByLandingOrder(issues)
 	for _, issue := range issues {
 		if ctx.Err() != nil {

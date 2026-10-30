@@ -212,6 +212,23 @@ type landingWorkers struct {
 	running map[string]bool
 }
 
+// landingQueueState is the daemon's one landing-queue view, built on its first
+// use: the workers publish into it and the burst sampler's Env reads it.
+type landingQueueState struct {
+	once sync.Once
+	view *landworker.LandingQueueView
+}
+
+// landingQueueView is the view where each rig's worker publishes its count and
+// the burst sampler reads the queue from (gt-hw6ih). It takes the daemon's
+// clock, so one clock decides when a published count goes stale.
+func (d *Daemon) landingQueueView() *landworker.LandingQueueView {
+	d.landingQueue.once.Do(func() {
+		d.landingQueue.view = landworker.NewLandingQueueView(func() time.Time { return d.clk().Now() })
+	})
+	return d.landingQueue.view
+}
+
 // startLandingWorkers starts the manager that keeps one worker goroutine per
 // rig. It returns at once; everything stops with d.ctx.
 func (d *Daemon) startLandingWorkers() {
@@ -695,6 +712,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Lander:     lander,
 		Landings:   landings,
 		Backoff:    backoff,
+		Queue:      d.landingQueueView(),
 		PostLand:   postLand,
 		// The landing merges on the remote, which moves main there and leaves
 		// the author seat's remote-tracking ref for it stale (gt-fn9e6.55).
