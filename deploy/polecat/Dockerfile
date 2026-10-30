@@ -169,10 +169,12 @@ RUN groupadd -g 10001 polecat \
 # A rig's example modules are skipped and named in the install log: they belong
 # to no rig's presubmit build, and a stale go.sum in one fails the whole image
 # (gt-9yqcc). Only the examples directory directly under a rig is skipped; a
-# module inside the rig's own tree is built like any other. A failure shows the
-# first 40 lines of its log, where `go` writes the error that caused it, and the
-# last 10 once the log runs past those 40, where a failed download or toolchain
-# error sits (gt-vvu6d).
+# module inside the rig's own tree is built like any other. This rewrites the
+# walk's `-not -path */examples/*` filter that 813632d4 added (gt-vvu6d). A
+# failure shows the first 40 lines of its log, where `go` writes the error that
+# caused it. Past 40 lines it adds the last 10, where a failed download or
+# toolchain error sits, so a log of 51 lines or more drops lines 41 up to its
+# last 10; the heading gives the log's total length (gt-vvu6d).
 ENV GOCACHE=/tmp/gocache \
     GOMODCACHE=/tmp/gomodcache
 RUN --mount=type=bind,source=seed,target=/seed \

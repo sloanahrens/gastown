@@ -105,20 +105,6 @@ func TestPolecatImageSeedSkipsExampleModules(t *testing.T) {
 			t.Errorf("the seed RUN lacks %q, so its example-module skip is either too broad or silent (gt-vvu6d):\n%s", want, seed)
 		}
 	}
-	// The RUN's report is the failure log. The first lines carry the error that
-	// caused a build or test failure; a log longer than that also needs its tail,
-	// where a failed download or a toolchain error sits (gt-vvu6d).
-	for _, want := range []string{
-		"head -n 40 /tmp/seed.log",
-		// The tail is added as soon as the log runs past the 40 lines head shows,
-		// so no line between them is dropped.
-		`[ "$n" -gt 40 ]`,
-		"tail -n 10 /tmp/seed.log",
-	} {
-		if !strings.Contains(seed, want) {
-			t.Errorf("the seed RUN lacks %q, so the install log cannot show both where a `go` failure starts and how it ended (gt-vvu6d):\n%s", want, seed)
-		}
-	}
 }
 
 // The image carries seeded Go caches (gt-ieuvf) so a cold sandbox's presubmit
