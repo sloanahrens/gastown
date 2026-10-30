@@ -175,13 +175,17 @@ func (s *Server) StartReaper(ctx context.Context, every time.Duration) <-chan st
 }
 
 // reapLoop runs one pass for each tick until ctx ends. A failed pass is logged
-// and the loop goes on: the next tick is the retry.
+// and the loop goes on: the next tick is the retry. A tick that arrives after
+// ctx ends starts no pass.
 func (s *Server) reapLoop(ctx context.Context, ticks <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticks:
+		}
+		if ctx.Err() != nil {
+			return
 		}
 		s.reapOnce(ctx)
 	}
@@ -192,6 +196,11 @@ func (s *Server) reapOnce(ctx context.Context) {
 	defer cancel()
 	res, err := store.ReapPass(passCtx, s.cfg.Store, s.now(), s.cfg.Reap)
 	if err != nil {
+		if ctx.Err() != nil {
+			// Shutdown cut the pass short. Nothing failed, and the next start
+			// runs a fresh pass, so there is nothing to report.
+			return
+		}
 		s.cfg.Log.Printf("reaper pass: failed: %v", err)
 		return
 	}
