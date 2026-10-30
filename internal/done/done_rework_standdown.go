@@ -82,8 +82,9 @@ type reworkPush struct {
 	// forgery; the lease pinned to the rejected head is what limits the
 	// overwrite.
 	seatAuthor string
-	// seatEmail is the worktree's user.email, the address this seat's commits
-	// carried before the seat identity moved to its own address.
+	// seatEmail is the worktree's user.email. gt commit and the spawn
+	// environment author under seatLocalEmail, so this address matches only
+	// commits made under the worktree's own git config.
 	seatEmail string
 	// seatLocalEmail is the seat's own address, <name>@gastown.local
 	// (git.SeatLocalEmail). Empty adds nothing.
