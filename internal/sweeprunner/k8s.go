@@ -66,7 +66,7 @@ const (
 	// maxNameLength is the most characters a Kubernetes object's name may hold.
 	maxNameLength = 63
 
-	// partDigestLength is how much of a sanitised name part's digest the name
+	// partDigestLength is how much of a sanitized name part's digest the name
 	// carries: enough that two ids a label cannot tell apart stay apart.
 	partDigestLength = 8
 )
@@ -348,7 +348,7 @@ func k8sPart(v string) string {
 	return part + "-" + partDigest(v)
 }
 
-// partDigest is the short digest a name part that sanitising changed carries.
+// partDigest is the short digest a name part that sanitizing changed carries.
 func partDigest(v string) string {
 	sum := sha256.Sum256([]byte(v))
 	return hex.EncodeToString(sum[:])[:partDigestLength]
