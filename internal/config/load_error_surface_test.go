@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -74,20 +78,109 @@ func TestOverseerDetectionKeepsAnUnparseableFile(t *testing.T) {
 	}
 }
 
+// TestOverseerDetectionKeepsAFailedCommandsError: a detection command that
+// fails on its own, with no deadline involved, is reported as the failure it
+// was — the deadline mapping only applies to a call the deadline ended
+// (gt-ddp7c).
+func TestOverseerDetectionKeepsAFailedCommandsError(t *testing.T) {
+	t.Parallel()
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		//testpolicy:allow no-skip — /bin/sh is the failing child; Windows has none
+		t.Skip("the failing child is a /bin/sh process")
+	}
+	_, err := runDetectionCommand(context.Background(), "", "/bin/sh", "-c", "exit 3")
+	if err == nil {
+		t.Fatal("runDetectionCommand(exit 3) = nil error, want the child's failure")
+	}
+	if !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("err = %v, want the child's own exit status", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the child's own failure, not a context error", err)
+	}
+}
+
 // TestOverseerDetectionCommandsAreTimeBounded: detection commands run inside
-// read-only paths, so a wedged one must not outlive its deadline (gt-ptysu).
-// The 100ms deadline stands in for overseerDetectTimeout, which
-// runOverseerDetection installs, so the proof costs 100ms rather than 5s.
+// read-only paths, so a wedged one must not outlive its context (gt-ptysu). No
+// deadline is timed here: the wedged child records its pid and stops itself,
+// the test cancels the context only once that pid is on disk, and the proof is
+// that the call returned the context's error and the child is gone, however
+// slow the host is to start it (gt-ddp7c).
 func TestOverseerDetectionCommandsAreTimeBounded(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		//testpolicy:allow no-skip — /bin/sh is the wedged child; Windows has none
+		t.Skip("the wedged child is a /bin/sh process")
+	}
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	start := time.Now()
-	if _, err := runDetectionCommand(ctx, "", "/bin/sleep", "3"); err == nil {
-		t.Fatal("runDetectionCommand(ctx, sleep 3) = nil error, want the deadline to cut it")
+	done := make(chan error, 1)
+	go func() {
+		// The pid file is the script's first argument, so no path is ever
+		// spliced into the shell text.
+		_, err := runDetectionCommand(ctx, "", "/bin/sh", "-c", `echo $$ > "$1"; kill -STOP $$`, "sh", pidFile)
+		done <- err
+	}()
+
+	pid := waitForPid(t, pidFile, done)
+	cancel()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second): //testpolicy:allow no-sleep — a hang guard only: it bounds a helper that never returns, so a broken kill fails in seconds, and it is not the behaviour under test
+		t.Fatal("runDetectionCommand never returned: the wedged command was not killed when its context ended")
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("took %v, want it cut off at the 100ms deadline", elapsed)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runDetectionCommand = %v, want the context's error", err)
+	}
+	// A stopped process still answers signal 0; only a kill makes it answer
+	// ESRCH, so this is the cancellation having killed the child rather than
+	// the call returning beside it.
+	if sigErr := syscall.Kill(pid, 0); !errors.Is(sigErr, syscall.ESRCH) {
+		t.Fatalf("the wedged child %d was not killed when its context ended (signal 0 = %v)", pid, sigErr)
+	}
+}
+
+// waitForPid returns the pid the wedged child wrote once it has written a whole
+// number, and fails the test if the call returned first or the child never
+// recorded one. The wait is a condition, not a duration: it ends as soon as the
+// child has run its first line, and the bound only stops a child that never
+// starts.
+func waitForPid(t *testing.T, pidFile string, done <-chan error) int {
+	t.Helper()
+	deadline := time.After(30 * time.Second) //testpolicy:allow no-sleep — a bound on a child that never starts; the wait itself ends on the pid file, not on this
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if text, err := os.ReadFile(pidFile); err == nil {
+			if pid, convErr := strconv.Atoi(strings.TrimSpace(string(text))); convErr == nil && pid > 0 {
+				return pid
+			}
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("runDetectionCommand returned (%v) before the wedged child recorded its pid", err)
+		case <-deadline:
+			t.Fatal("the wedged child never recorded its pid")
+		case <-tick.C:
+		}
+	}
+}
+
+// TestOverseerDetectionReportsAnEndedDeadlineAsTheDeadline: a call whose
+// context deadline has passed reports context.DeadlineExceeded, not the kill
+// signal exec returns for the child, so a read-only path can tell a deadline
+// from a failing command. The deadline is already in the past, so nothing is
+// timed (gt-ddp7c).
+func TestOverseerDetectionReportsAnEndedDeadlineAsTheDeadline(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, err := runDetectionCommand(ctx, "", "git", "--version")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runDetectionCommand with an ended deadline = %v, want context.DeadlineExceeded", err)
 	}
 }
