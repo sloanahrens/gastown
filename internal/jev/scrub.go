@@ -9,8 +9,11 @@ import (
 // WithScrub makes the client scrub the state of every request before it is
 // sent: Ask marshals the state, passes the JSON through s, and posts the
 // result. The questions are the caller's own text and go out unchanged.
-// Without this option the body is what Ask has always sent.
-func WithScrub(s *scrub.Scrubber) Option { return func(c *Client) { c.scrub = s } }
+// Without this option the body is what Ask has always sent. A nil s is a
+// configuration error: NewClient refuses it rather than send unscrubbed state.
+func WithScrub(s *scrub.Scrubber) Option {
+	return func(c *Client) { c.scrub, c.scrubSet = s, true }
+}
 
 // BatteryOptions returns the client options every Jev battery builds its
 // client with: the town's usage ledger, the caller's name and warnings, and

@@ -32,11 +32,12 @@ type Settings struct {
 	// ledger stores tokens, never dollars.
 	USDPerBillionTokens float64
 
+	// Rigs are the rigs whose submissions a pass reads.
+	Rigs []string
+
 	// Scrub scrubs the state before it is sent: the patrol's scrub key
 	// sets it (gt-aqczg).
 	Scrub bool
-	// Rigs are the rigs whose submissions a pass reads.
-	Rigs []string
 }
 
 // beadLister is the part of *beads.Beads the lister uses. It is an interface

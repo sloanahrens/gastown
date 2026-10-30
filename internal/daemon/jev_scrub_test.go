@@ -5,7 +5,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
+	"github.com/steveyegge/gastown/internal/jev/jevtest"
 )
 
 // The synthetic secrets a scrub test's state carries.
@@ -84,10 +84,12 @@ func jevDedupeSettingsFrom(t *testing.T, config *JevDedupeConfig) dedupe.Setting
 
 // patrolBody sends a state holding both test secrets through the client the
 // daemon builds from settings, and returns the body the client posted. The
-// transport answers a 502, which the test ignores: the body is what it checks.
+// transport answers 502, so the call must fail with that status and the
+// transport must have received exactly one request: a client that sends
+// nothing fails here, not in the body checks.
 func patrolBody(t *testing.T, settings dedupe.Settings) string {
 	t.Helper()
-	sink := &postedBody{}
+	sink := &jevtest.PostedBody{}
 	opts := append(jev.BatteryOptions(t.TempDir(), dedupe.Caller, nil, settings.Scrub),
 		jev.WithKey("test-key"),
 		jev.WithBaseURL("http://jev.test/v1/systemone"),
@@ -96,24 +98,11 @@ func patrolBody(t *testing.T, settings dedupe.Settings) string {
 	require.NoError(t, err)
 
 	state := map[string]string{"log": "pushed with " + scrubTestToken + " from " + scrubTestHome + "/src"}
-	_, _ = c.Choice(t.Context(), state, "Which team should handle this?", map[string]string{"returns": "Exchanges"})
-	return sink.body
-}
-
-// postedBody stands in for the network: it keeps the body the client sent and
-// answers a status the test ignores.
-type postedBody struct{ body string }
-
-func (p *postedBody) RoundTrip(r *http.Request) (*http.Response, error) {
-	b, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, err
-	}
-	p.body = string(b)
-	return &http.Response{
-		StatusCode: http.StatusBadGateway,
-		Header:     http.Header{},
-		Body:       io.NopCloser(strings.NewReader("")),
-		Request:    r,
-	}, nil
+	_, err = c.Choice(t.Context(), state, "Which team should handle this?", map[string]string{"returns": "Exchanges"})
+	var status *jev.StatusError
+	require.ErrorAs(t, err, &status)
+	require.Equal(t, http.StatusBadGateway, status.Status)
+	require.Equal(t, 1, sink.Calls, "the state must reach the transport once")
+	require.NotEmpty(t, sink.Body)
+	return sink.Body
 }

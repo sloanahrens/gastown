@@ -60,7 +60,8 @@ type RequestRecord struct {
 	// RequestID is the response's X-Request-Id header, empty when the server
 	// sent none.
 	RequestID string `json:"request_id"`
-	// StateBytes is the size of the state as the client marshaled it.
+	// StateBytes is the size of the state as sent: the scrubbed text's size
+	// when a scrubber is set, else the state as marshaled.
 	StateBytes int `json:"state_bytes"`
 	// BodyBytes is the exact size of the body posted.
 	BodyBytes int `json:"body_bytes"`

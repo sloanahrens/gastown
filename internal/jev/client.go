@@ -90,8 +90,10 @@ type Client struct {
 	requests     *requestLog
 
 	// scrub, when set, scrubs the state before the body is built; nil sends
-	// the state as the caller passed it.
-	scrub *scrub.Scrubber
+	// the state as the caller passed it. scrubSet records that WithScrub was
+	// given, so NewClient can refuse a nil scrubber.
+	scrub    *scrub.Scrubber
+	scrubSet bool
 }
 
 // Option configures a Client.
@@ -126,6 +128,9 @@ func NewClient(opts ...Option) (*Client, error) {
 	c := &Client{httpClient: http.DefaultClient, baseURL: defaultBaseURL, timeout: DefaultTimeout}
 	for _, o := range opts {
 		o(c)
+	}
+	if c.scrubSet && c.scrub == nil {
+		return nil, errors.New("jev: WithScrub needs a scrubber; a nil one would send the state unscrubbed")
 	}
 	if c.httpClient == nil {
 		c.httpClient = http.DefaultClient

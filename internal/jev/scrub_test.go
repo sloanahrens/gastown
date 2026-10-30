@@ -63,8 +63,9 @@ func TestClientScrubsState(t *testing.T) {
 }
 
 // TestClientWithoutScrubIsUnchanged: without WithScrub the client posts the
-// bytes recorded in ask_request_body.json, which is what it sent before the
-// option existed.
+// bytes recorded in ask_request_body.json. That file is what the Ask of
+// origin/main at c9233a49f, before WithScrub existed, posts for shoeState and
+// askQuestions, so the test pins the behaviour the option must leave alone.
 func TestClientWithoutScrubIsUnchanged(t *testing.T) {
 	t.Parallel()
 	rs := &respond{body: readTestdata(t, "ask_response.json")}
@@ -113,4 +114,47 @@ func TestClientScrubRecordsCountsNotText(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(line), testVendorKey, "the line never carries the token")
 	assert.NotContains(t, string(line), testHomeDir, "the line never carries the account name")
+}
+
+// TestClientStateBytesAreTheStateSent: a request line's state_bytes is the size
+// of the state the body carries, scrubbed when a scrubber is set.
+func TestClientStateBytesAreTheStateSent(t *testing.T) {
+	t.Parallel()
+	raw, err := json.Marshal(scrubState())
+	require.NoError(t, err)
+	scrubbed, _ := scrub.Default().ScrubJSON(raw)
+	tests := []struct {
+		name string
+		opts []Option
+		want int
+	}{
+		{name: "no scrubber, the state as marshaled", want: len(raw)},
+		{name: "scrubber set, the scrubbed state", opts: []Option{WithScrub(scrub.Default())}, want: len(scrubbed)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := filepath.Join(t.TempDir(), "jev")
+			rs := &respond{body: readTestdata(t, "choice_response.json")}
+			opts := append([]Option{WithLedger(filepath.Join(dir, "usage.jsonl"))}, tt.opts...)
+			c := newTestClient(t, rs, opts...)
+
+			_, err := c.Choice(context.Background(), scrubState(), "Which team?", shoeCriteria)
+			require.NoError(t, err)
+
+			fields := requestFields(t, filepath.Join(dir, "requests.jsonl"), 0)
+			assert.EqualValues(t, tt.want, fields["state_bytes"])
+		})
+	}
+}
+
+// TestNewClientRefusesANilScrubber: WithScrub(nil) is a configuration error,
+// not a client that quietly sends the state unscrubbed.
+func TestNewClientRefusesANilScrubber(t *testing.T) {
+	t.Parallel()
+	c, err := NewClient(WithKey(testKey), WithScrub(nil))
+
+	require.Error(t, err)
+	assert.Nil(t, c)
+	assert.Contains(t, err.Error(), "WithScrub")
 }
