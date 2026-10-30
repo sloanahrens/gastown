@@ -224,60 +224,104 @@ func localClock(t *testing.T, dom *pageDOM, iso string) string {
 	return v.String()
 }
 
-// The dispatchable chip counts the beads the dispatcher would slot, and a bead
-// it passed over is not one of them: that bead is counted on a chip of its own,
-// which opens its row (gt-e2cif). Both chips say what they mean.
-func TestQueueSkipPageChip(t *testing.T) {
+// One "ready to dispatch" chip counts the beads the dispatcher would slot and
+// the beads its last tick passed over together, and its filter lists both; the
+// old "dispatchable" and "skipped by dispatcher" chips are gone (gt-qt0ym).
+func TestQueueSkipPageOneReadyToDispatchChip(t *testing.T) {
 	t.Parallel()
 
 	dom := drawQueuePage(t, queueRead(
 		readyRow("gt-okckk", "ok"),
 		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "overlap hold: gt-okckk is in progress", 12),
+		skippedRow("gt-seat1", "2026-10-29T11:58:00Z", "no seat: over the town total", 4),
 	))
 
 	chips := queueChips(t, dom)
-	if got := chipNamed(t, chips, "dispatchable"); got.Count != "1" {
-		t.Errorf("the dispatchable chip counts %s, want only the shaped bead (1): a skipped bead is not one the dispatcher slots", got.Count)
+	if got := chipNamed(t, chips, "ready to dispatch"); got.Count != "3" || !got.On {
+		t.Errorf("the ready to dispatch chip reads %+v, want count 3 (1 shaped + 2 skipped) and open on a fresh page", got)
 	}
-	skipped := chipNamed(t, chips, "skipped by dispatcher")
-	if skipped.Count != "1" {
-		t.Errorf("the skipped chip counts %s, want the one bead the dispatcher passed over", skipped.Count)
-	}
-	if !strings.Contains(skipped.Title, "dispatcher") {
-		t.Errorf("the skipped chip's tooltip reads %q, want it to say whose verdict it counts", skipped.Title)
-	}
-	if skipped.On {
-		t.Error("the skipped chip is the open filter on a fresh page, which opens on the dispatchable view")
-	}
-
-	// The page opens on the dispatchable view, and the skipped bead is not in
-	// it: it is one chip away.
-	for _, r := range queueRows(t, dom) {
-		if strings.Contains(r.Text, "gt-skpv2") {
-			t.Errorf("the dispatchable view draws the skipped bead: %q", r.Text)
+	for _, c := range chips {
+		if strings.HasPrefix(c.Label, "dispatchable") || strings.HasPrefix(c.Label, "skipped by dispatcher") {
+			t.Errorf("the queue still draws the old chip %q", c.Label)
 		}
 	}
-	clickQueueChip(t, dom, "skipped by dispatcher")
-	rows := queueRows(t, dom)
-	if len(rows) != 1 || !strings.Contains(rows[0].Text, "gt-skpv2") {
-		t.Fatalf("the skipped chip draws %+v, want the one skipped bead", rows)
+	if rows := queueRows(t, dom); len(rows) != 3 {
+		t.Fatalf("the ready to dispatch view draws %d rows, want all 3: %+v", len(rows), rows)
 	}
 }
 
-// A ready list the dispatcher skipped in full leaves the dispatchable view
-// empty, so that view names the skips instead of reporting that nothing needs
-// shaping and nothing is held (gt-e2cif).
-func TestQueueSkipPageEmptyDispatchableView(t *testing.T) {
+// skipClass maps a tick's skip reason to the words an operator reads: a reason
+// beginning "no seat" is a bead waiting for a seat, every other reason, an
+// empty one included, is a skip that stays visible as a warning (gt-qt0ym).
+func TestSkipClass(t *testing.T) {
 	t.Parallel()
 
+	dom := newPageDOM(t)
+	for _, tt := range []struct{ name, reason, want string }{
+		{"no seat", "no seat: over the town total", "waiting for a seat"},
+		{"no seat for the model", "no seat free for deepseek-flash", "waiting for a seat"},
+		{"not eligible", "not eligible (assigned to gastown/polecats/slit)", "skipped"},
+		{"unshaped", "unshaped: missing ## Gate", "skipped"},
+		{"hold", "hold: ~/gt/seat-refill.hold is present", "skipped"},
+		{"overlap hold", "overlap hold: gt-okckk is in progress", "skipped"},
+		{"empty", "", "skipped"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			v, err := dom.vm.RunString("skipClass(" + quoteJS(tt.reason) + ")")
+			if err != nil {
+				t.Fatalf("skipClass(%q): %v", tt.reason, err)
+			}
+			if got := v.String(); got != tt.want {
+				t.Errorf("skipClass(%q) = %q, want %q", tt.reason, got, tt.want)
+			}
+		})
+	}
+}
+
+// A bead skipped for want of a seat wears the dim tag "waiting for a seat #N of
+// M", N being its place in the dispatch order (priority, then oldest, then id)
+// over every waiting bead; any other skip keeps the warning tag with its
+// reason, and the card body still carries the full reason line (gt-qt0ym).
+func TestQueueSkipPageTagsByCause(t *testing.T) {
+	t.Parallel()
+
+	seat := func(id string, priority int, created string) map[string]any {
+		row := skippedRow(id, "2026-10-29T11:58:00Z", "no seat: over the town total", 4)
+		row["priority"] = priority
+		row["created_at"] = created
+		return row
+	}
 	dom := drawQueuePage(t, queueRead(
-		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "overlap hold: gt-okckk is in progress", 12),
+		seat("gt-late1", 2, "2026-10-29T10:00:00Z"),
+		seat("gt-p1new", 1, "2026-10-29T11:00:00Z"),
+		seat("gt-early", 2, "2026-10-28T10:00:00Z"),
+		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "not eligible (assigned to gastown/polecats/slit)", 2),
 	))
 
-	var msg string
-	queueReadBack(t, dom, "__qEmpty()", &msg)
-	if want := "1 bead was skipped by the dispatcher"; !strings.Contains(msg, want) {
-		t.Errorf("the empty dispatchable view reads %q, want it to name the skip (%q)", msg, want)
+	tags := map[string]queueRowDrawn{}
+	for _, r := range queueRows(t, dom) {
+		for _, id := range []string{"gt-late1", "gt-p1new", "gt-early", "gt-skpv2"} {
+			if strings.Contains(r.Text, id) {
+				tags[id] = r
+			}
+		}
+	}
+	for id, want := range map[string]string{
+		"gt-p1new": "waiting for a seat #1 of 3",
+		"gt-early": "waiting for a seat #2 of 3",
+		"gt-late1": "waiting for a seat #3 of 3",
+	} {
+		if l, ok := leafSaying(tags[id], "tag", "waiting for a seat"); !ok || l.Text != want {
+			t.Errorf("%s wears %+v, want the tag %q", id, l, want)
+		}
+	}
+	l, ok := leafSaying(tags["gt-skpv2"], "tag warnc", "skipped: ")
+	if !ok || l.Text != "skipped: not eligible (assigned to gastown/polecats/slit)" {
+		t.Errorf("gt-skpv2 wears %+v, want a warning tag with the reason", l)
+	}
+	if _, ok := leafSaying(tags["gt-skpv2"], "qsub", "not eligible"); !ok {
+		t.Errorf("gt-skpv2's card body lost the full reason line: %+v", tags["gt-skpv2"].Leaves)
 	}
 }
 
@@ -291,11 +335,10 @@ func TestQueueSkipPageRowReason(t *testing.T) {
 	dom := drawQueuePage(t, queueRead(
 		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "overlap hold: gt-okckk is in progress", 12),
 	))
-	clickQueueChip(t, dom, "skipped by dispatcher")
 
 	rows := queueRows(t, dom)
 	if len(rows) != 1 {
-		t.Fatalf("the skipped chip draws %d rows, want the one bead: %+v", len(rows), rows)
+		t.Fatalf("the ready to dispatch view draws %d rows, want the one bead: %+v", len(rows), rows)
 	}
 	want := "skipped since " + localClock(t, dom, "2026-10-29T11:58:00Z") + " for 12 ticks: overlap hold: gt-okckk is in progress"
 	line, ok := leafSaying(rows[0], "qsub", "overlap hold")
@@ -308,14 +351,13 @@ func TestQueueSkipPageRowReason(t *testing.T) {
 	if line.Tag != "span" {
 		t.Errorf("the reason line is a <%s>, want the row's own dim span", line.Tag)
 	}
-	// The chip that opens the row says what the bead is, so the row need not be
-	// read twice to find out.
+	// The tag says what the bead is, so the row need not be read twice.
 	for _, l := range rows[0].Leaves {
-		if l.Class == "tag warnc" && l.Text == "skipped by dispatcher" {
+		if l.Class == "tag warnc" && l.Text == "skipped: overlap hold: gt-okckk is in progress" {
 			return
 		}
 	}
-	t.Errorf("the skipped row carries no %q tag; its cells are %+v", "skipped by dispatcher", rows[0].Leaves)
+	t.Errorf("the skipped row carries no warning tag with the reason; its cells are %+v", rows[0].Leaves)
 }
 
 // A reason is text another agent wrote, so the page writes it as text: markup
@@ -327,11 +369,10 @@ func TestQueueSkipPageReasonIsTextNotMarkup(t *testing.T) {
 	dom := drawQueuePage(t, queueRead(
 		skippedRow("gt-evilv", "2026-10-29T11:58:00Z", reason, 1),
 	))
-	clickQueueChip(t, dom, "skipped by dispatcher")
 
 	rows := queueRows(t, dom)
 	if len(rows) != 1 {
-		t.Fatalf("the skipped chip draws %d rows, want the one bead: %+v", len(rows), rows)
+		t.Fatalf("the ready to dispatch view draws %d rows, want the one bead: %+v", len(rows), rows)
 	}
 	want := "skipped since " + localClock(t, dom, "2026-10-29T11:58:00Z") + " for 1 tick: " + reason
 	line, ok := leafSaying(rows[0], "qsub", "<b>held</b>")
@@ -375,18 +416,8 @@ func TestQueueSkipPageStaleVerdicts(t *testing.T) {
 		t.Errorf("the stale note reads %q, want it to say %q", notes[0], want)
 	}
 
-	// The chip is the ledger's claim in miniature, so a stale ledger draws no
-	// chip counting a skip it cannot back.
-	for _, c := range queueChips(t, dom) {
-		if strings.HasPrefix(c.Label, "skipped by dispatcher") {
-			t.Errorf("a stale ledger still draws the %q chip, counting %s skips it cannot back", c.Label, c.Count)
-		}
-	}
-
-	// Nor does any row claim one. The dispatchable view opens on the shaped
-	// bead, so turn its filter off to see the row the reading gave shape
-	// "skipped": it draws neither the tag nor the reason line.
-	clickQueueChip(t, dom, "dispatchable")
+	// No row claims a skip either: the row the reading gave shape "skipped" is
+	// only "ready", with neither the skip tag nor the reason line.
 	rows := queueRows(t, dom)
 	if len(rows) != 2 {
 		t.Fatalf("the stale ledger draws %d rows, want both beads of the reading: %+v", len(rows), rows)
@@ -396,53 +427,10 @@ func TestQueueSkipPageStaleVerdicts(t *testing.T) {
 			t.Errorf("a row claims a skip the stale ledger cannot back: %q", r.Text)
 		}
 		for _, l := range r.Leaves {
-			if l.Text == "skipped by dispatcher" {
+			if strings.HasPrefix(l.Text, "skipped") || strings.HasPrefix(l.Text, "waiting for a seat") {
 				t.Errorf("a row wears the skipped tag while the ledger is stale: %q", r.Text)
 			}
 		}
-	}
-}
-
-// A stale ledger names no skip anywhere, the empty dispatchable view included:
-// with every ready bead passed over the view is empty, and it must not report a
-// count of skips the page cannot back (gt-e2cif).
-func TestQueueSkipPageStaleEmptyViewNamesNoSkip(t *testing.T) {
-	t.Parallel()
-
-	read := queueRead(
-		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "overlap hold: gt-okckk is in progress", 12),
-	)
-	read["verdicts_stale"] = true
-	dom := drawQueuePage(t, read)
-
-	var msg string
-	queueReadBack(t, dom, "__qEmpty()", &msg)
-	if strings.Contains(msg, "skipped") {
-		t.Errorf("the empty dispatchable view reports skips on a stale ledger: %q", msg)
-	}
-}
-
-// A filter left on the skipped chip when the ledger goes stale would keep
-// hiding rows behind a control the page no longer draws, so the page drops the
-// filter and lists every row the reading holds (gt-e2cif).
-func TestQueueSkipPageStaleDropsTheSkippedFilter(t *testing.T) {
-	t.Parallel()
-
-	dom := drawQueuePage(t, queueRead(
-		readyRow("gt-okckk", "ok"),
-		skippedRow("gt-skpv2", "2026-10-29T11:58:00Z", "overlap hold: gt-okckk is in progress", 12),
-	))
-	// The operator is looking at the skipped view when the dispatcher's ledger
-	// ages out: the chip was pressed while the verdicts were still current.
-	clickQueueChip(t, dom, "skipped by dispatcher")
-	if _, err := dom.vm.RunString(`state.queue.verdicts_stale = true; renderWork(state, true);`); err != nil {
-		t.Fatalf("ageing the ledger under the skipped view: %v", err)
-	}
-
-	// The list is no longer narrowed to the shape the dropped chip filtered to:
-	// both beads of the reading are listed, the shaped one included.
-	if rows := queueRows(t, dom); len(rows) != 2 {
-		t.Fatalf("the stale ledger draws %d rows, want both beads of the reading: %+v", len(rows), rows)
 	}
 }
 
