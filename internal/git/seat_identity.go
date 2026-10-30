@@ -1,6 +1,14 @@
 package git
 
-import "strings"
+import (
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// seatLocalDomain is the domain of a seat's own author address: a seat named
+// "gastown/polecats/coma" authors as coma@gastown.local.
+const seatLocalDomain = "gastown.local"
 
 // SeatIdentity is the git author identity a Gas Town seat's commits carry.
 type SeatIdentity struct {
@@ -22,4 +30,37 @@ func SeatIdentityFor(seat, worktreeEmail string) SeatIdentity {
 		Name:  seat[strings.LastIndex(seat, "/")+1:],
 		Email: strings.TrimSpace(worktreeEmail),
 	}
+}
+
+// SeatLocalEmail returns the seat's own author address, <name>@gastown.local,
+// with the name SeatIdentityFor derives from the compound address. It is ""
+// when the address names no seat, so an empty name never becomes "@gastown.local".
+func SeatLocalEmail(seat string) string {
+	name := SeatIdentityFor(seat, "").Name
+	if name == "" {
+		return ""
+	}
+	return name + "@" + seatLocalDomain
+}
+
+// GlobalAuthorEmail returns the host's global git user.email, "" when unset or
+// unreadable. It runs with only HOME and PATH, so a repository's or an ambient
+// GIT_* setting does not decide the answer.
+func GlobalAuthorEmail() string {
+	return globalAuthorEmailFrom(func(name string, args ...string) ([]byte, error) {
+		cmd := exec.Command(name, args...) //nolint:gosec // G204: fixed command
+		cmd.Env = []string{"HOME=" + os.Getenv("HOME"), "PATH=" + os.Getenv("PATH")}
+		return cmd.Output()
+	})
+}
+
+// globalAuthorEmailFrom asks run for `git config --global user.email` and
+// returns the trimmed answer, "" when git fails. run is the seam that keeps the
+// subprocess out of the unit test.
+func globalAuthorEmailFrom(run func(name string, args ...string) ([]byte, error)) string {
+	out, err := run("git", "config", "--global", "user.email")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

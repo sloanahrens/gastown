@@ -48,6 +48,50 @@ func reworkWiringHarness(t *testing.T, author, email string) *submitHarness {
 	return h
 }
 
+// The rejected submission's commit was authored under the seat's own
+// gastown.local address: the rework lease accepts it, as it accepts the
+// worktree's email.
+func TestSubmitReworkUnderSeatLocalAddressPushesFromBead(t *testing.T) {
+	t.Parallel()
+	h := reworkWiringHarness(t, reworkWiringSeat, reworkWiringSeat+"@gastown.local")
+	if err := h.submit(); err != nil {
+		t.Fatalf("submit = %v, want the rework to land over the gastown.local commit", err)
+	}
+	if got := h.repo.origin[doneTestBranch]; got != reworkWiringLocal {
+		t.Errorf("origin %s = %s, want the rework %s", doneTestBranch, got, reworkWiringLocal)
+	}
+}
+
+// The rejected submission's commit was authored under the host's global email,
+// the legacy address. The lease accepts it only because the globalEmail seam
+// reports it.
+func TestSubmitReworkUnderLegacyGlobalEmailPushesFromBead(t *testing.T) {
+	t.Parallel()
+	const legacy = "host@test.com"
+	h := reworkWiringHarness(t, reworkWiringSeat, legacy)
+	h.r.deps.globalEmail = func() string { return legacy }
+	if err := h.submit(); err != nil {
+		t.Fatalf("submit = %v, want the rework to land over the legacy-email commit", err)
+	}
+	if got := h.repo.origin[doneTestBranch]; got != reworkWiringLocal {
+		t.Errorf("origin %s = %s, want the rework %s", doneTestBranch, got, reworkWiringLocal)
+	}
+}
+
+// With no global email to read (the seam reports unset), the same legacy-email
+// commit is another address and the rework is refused.
+func TestSubmitReworkUnderLegacyEmailWithUnsetGlobalRefusesFromBead(t *testing.T) {
+	t.Parallel()
+	h := reworkWiringHarness(t, reworkWiringSeat, "host@test.com")
+	h.r.deps.globalEmail = func() string { return "" }
+	if err := h.submit(); err == nil {
+		t.Fatal("submit succeeded over a commit under an address the seat does not own")
+	}
+	if got := h.repo.origin[doneTestBranch]; got != reworkWiringRejected {
+		t.Errorf("origin %s = %s, want it untouched at %s", doneTestBranch, got, reworkWiringRejected)
+	}
+}
+
 func TestSubmitReworkOfRejectedHeadPushesUnderLeaseFromBead(t *testing.T) {
 	t.Parallel()
 	h := reworkWiringHarness(t, reworkWiringSeat, reworkWiringEmail)

@@ -1647,8 +1647,15 @@ func pushBranchForLanding(r *doneRun, sourceBD beads.Client, sourceIssue *beads.
 	// The seat's address comes from role.Actor rather than a hand-built copy,
 	// so the name gt commit authors under and the name this lease compares
 	// cannot be spelled differently here (gt-y5duc).
-	seat := git.SeatIdentityFor(role.Actor(role.Polecat, r.rigName, r.polecatName), seatEmail)
-	rework := reworkPushFor(sourceIssue, seat.Name, seat.Email)
+	seatAddress := role.Actor(role.Polecat, r.rigName, r.polecatName)
+	seat := git.SeatIdentityFor(seatAddress, seatEmail)
+	// The legacy address is the host's global email, read through the seam so a
+	// unit test can set it; a nil seam reads as unset.
+	legacyEmail := ""
+	if r.deps.globalEmail != nil {
+		legacyEmail = r.deps.globalEmail()
+	}
+	rework := reworkPushFor(sourceIssue, seat.Name, seat.Email, git.SeatLocalEmail(seatAddress), legacyEmail)
 	var lastPushErr error
 	attempt := func() error {
 		lastPushErr = pushBranchToOrigin(r.deps.repo, remote, r.townRoot, r.rigName, r.branch, head, baseRef, rework)
