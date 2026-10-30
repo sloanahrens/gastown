@@ -56,7 +56,13 @@ type Recorder struct {
 // database, pinned so the receipts land in the town's ledger and nowhere the
 // prefix router might send them.
 func NewRecorder(townRoot string) *Recorder {
-	return &Recorder{bd: beads.NewPinned(beads.ResolveBeadsDir(townRoot))}
+	return NewRecorderOn(beads.NewPinned(beads.ResolveBeadsDir(townRoot)))
+}
+
+// NewRecorderOn returns a Recorder over an existing beads client, for a caller
+// that already resolved the store.
+func NewRecorderOn(client beads.Client) *Recorder {
+	return &Recorder{bd: client}
 }
 
 // RecordRun creates an ephemeral bead for a plugin run.
@@ -142,32 +148,134 @@ func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*Plu
 		return nil, fmt.Errorf("querying plugin runs: %w", err)
 	}
 
-	// Convert to PluginRunBead with parsed result
 	runs := make([]*PluginRunBead, 0, len(issues))
 	for _, issue := range issues {
-		run := &PluginRunBead{
-			ID:     issue.ID,
-			Title:  issue.Title,
-			Labels: issue.Labels,
-		}
-
-		// Parse created_at
-		if t, err := time.Parse(time.RFC3339, issue.CreatedAt); err == nil {
-			run.CreatedAt = t
-		}
-
-		// Extract result from labels
-		for _, label := range issue.Labels {
-			if result, ok := strings.CutPrefix(label, "result:"); ok {
-				run.Result = RunResult(result)
-				break
-			}
-		}
-
-		runs = append(runs, run)
+		runs = append(runs, runFromIssue(issue))
 	}
 
 	return runs, nil
+}
+
+// runFromIssue reads one receipt from the ledger: its ID, title and labels,
+// created_at parsed and the result taken from the result: label.
+func runFromIssue(issue *beads.Issue) *PluginRunBead {
+	run := &PluginRunBead{
+		ID:     issue.ID,
+		Title:  issue.Title,
+		Labels: issue.Labels,
+	}
+	if t, err := time.Parse(time.RFC3339, issue.CreatedAt); err == nil {
+		run.CreatedAt = t
+	}
+	for _, label := range issue.Labels {
+		if result, ok := strings.CutPrefix(label, "result:"); ok {
+			run.Result = RunResult(result)
+			break
+		}
+	}
+	return run
+}
+
+// RunLedger is one read of the plugin-run wisps, grouped by plugin name, so a
+// sweep that gates many plugins lists the ledger once instead of once per
+// plugin (gt-3bqfy).
+type RunLedger struct {
+	// loadedAt is the instant the ledger's cutoffs are measured from, so every
+	// answer a sweep draws from one ledger agrees on what "since" means.
+	loadedAt time.Time
+	// since is the span the ledger was read back through; 0 is every run the
+	// wisps hold. A longer per-plugin window cannot be answered from it.
+	since time.Duration
+	// runs holds each plugin's receipts newest first, as bd returns them.
+	runs map[string][]*PluginRunBead
+}
+
+// LoadRunLedger lists the plugin-run wisps once, back through since, and
+// groups them by their plugin: label. The caller passes the longest cooldown
+// window it will ask about — every shorter window is answered from the same
+// read. since 0 reads every receipt the wisps plane holds.
+//
+// Receipts are ephemeral, so like queryRuns this reads the wisps plane.
+func (r *Recorder) LoadRunLedger(since time.Duration) (*RunLedger, error) {
+	if since < 0 {
+		return nil, fmt.Errorf("loading plugin run ledger: negative window %s", since)
+	}
+	opts := beads.ListOptions{
+		Status:    "all", // Include closed receipts too
+		Labels:    []string{"type:plugin-run"},
+		Ephemeral: true,
+		Priority:  -1, // any priority
+	}
+	loadedAt := time.Now()
+	if since > 0 {
+		opts.CreatedAfter = loadedAt.Add(-since).UTC()
+	}
+
+	issues, err := r.bd.List(opts)
+	if err != nil {
+		return nil, fmt.Errorf("querying plugin runs: %w", err)
+	}
+
+	ledger := &RunLedger{
+		loadedAt: loadedAt,
+		since:    since,
+		runs:     make(map[string][]*PluginRunBead, len(issues)),
+	}
+	for _, issue := range issues {
+		name := pluginLabel(issue.Labels)
+		if name == "" {
+			// A run wisp with no plugin label belongs to no plugin's gate.
+			continue
+		}
+		ledger.runs[name] = append(ledger.runs[name], runFromIssue(issue))
+	}
+	return ledger, nil
+}
+
+// pluginLabel is the plugin name a receipt's labels carry, "" when it has
+// none.
+func pluginLabel(labels []string) string {
+	for _, label := range labels {
+		if name, ok := strings.CutPrefix(label, "plugin:"); ok {
+			return name
+		}
+	}
+	return ""
+}
+
+// checkWindow refuses a window the ledger cannot answer. A longer one than the
+// ledger was loaded with would count a prefix of the runs and read as fewer
+// runs than happened, which opens a cooldown gate that should be closed.
+//
+// A window of zero or less asks nothing of the ledger — no run is inside a
+// span that ends now or in the future — so any ledger answers it.
+func (l *RunLedger) checkWindow(window time.Duration) error {
+	if l.since == 0 || window <= 0 || window <= l.since {
+		return nil
+	}
+	return fmt.Errorf("plugin run ledger: window %s is not within the %s it was loaded with", window, l.since)
+}
+
+// Count returns the number of pluginName's runs within window, printed
+// receipts excluded — the same number CountRunsSince returns for the same
+// ledger and window (gt-o1z7: a printed receipt buys no cooldown).
+func (l *RunLedger) Count(pluginName string, window time.Duration) (int, error) {
+	if err := l.checkWindow(window); err != nil {
+		return 0, err
+	}
+	if window <= 0 {
+		// CountRunsSince reads back from now for a zero or negative window, so
+		// it finds no run; a span that ends at or before now holds none.
+		return 0, nil
+	}
+	cutoff := l.loadedAt.Add(-window)
+	count := 0
+	for _, run := range l.runs[pluginName] {
+		if !run.CreatedAt.Before(cutoff) && run.Result != ResultPrinted {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // CountRunsSince returns the count of runs for a plugin since the given

@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/beads/beadstest"
 )
 
 // newFakeRecorder is a Recorder over an in-memory beads database whose clock
@@ -196,5 +198,189 @@ func TestCountRunsSinceIgnoresRunsPastTheWindow(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("CountRunsSince = %d, want 0: a run outside the window must not gate", count)
+	}
+}
+
+// A tick that gates N plugins costs one list of the run wisps, not one per
+// plugin: the ledger is read once and grouped in memory.
+func TestLoadRunLedgerCostsOneListForEveryPlugin(t *testing.T) {
+	t.Parallel()
+	recorder, fake, _ := newFakeRecorder(t, time.Now().UTC().Add(-30*time.Minute))
+	counting := &beadstest.Counting{Client: fake}
+	recorder.bd = counting
+
+	plugins := []string{"alpha", "beta", "gamma"}
+	for _, name := range plugins {
+		if _, err := recorder.RecordRun(PluginRunRecord{PluginName: name, Result: ResultSuccess}); err != nil {
+			t.Fatalf("RecordRun(%s): %v", name, err)
+		}
+	}
+
+	ledger, err := recorder.LoadRunLedger(2 * time.Hour)
+	if err != nil {
+		t.Fatalf("LoadRunLedger: %v", err)
+	}
+	for _, name := range plugins {
+		count, err := ledger.Count(name, time.Hour)
+		if err != nil {
+			t.Fatalf("Count(%s, 1h): %v", name, err)
+		}
+		if count != 1 {
+			t.Errorf("Count(%s, 1h) = %d, want 1: the receipt is inside the window", name, count)
+		}
+	}
+	if counting.Lists != 1 {
+		t.Errorf("%d list call(s) for %d plugins, want 1: one read answers every gate in the tick",
+			counting.Lists, len(plugins))
+	}
+}
+
+// The ledger's grouped answers are the per-plugin queries' answers for the
+// same receipts: same count, a printed receipt buying no cooldown in either.
+func TestRunLedgerAnswersMatchPerPluginQueries(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	recorder, _, clock := newFakeRecorder(t, now.Add(-4*time.Hour))
+
+	if _, err := recorder.RecordRun(PluginRunRecord{PluginName: "alpha", Result: ResultSuccess}); err != nil {
+		t.Fatalf("RecordRun alpha (4h old): %v", err)
+	}
+	clock.Advance(2 * time.Hour) // now-2h
+	if _, err := recorder.RecordRun(PluginRunRecord{PluginName: "beta", Result: ResultFailure}); err != nil {
+		t.Fatalf("RecordRun beta: %v", err)
+	}
+	clock.Advance(90 * time.Minute) // now-30m: a printed receipt, no work done
+	if _, err := recorder.RecordRun(PluginRunRecord{PluginName: "alpha", Result: ResultPrinted}); err != nil {
+		t.Fatalf("RecordRun alpha (printed): %v", err)
+	}
+	clock.Advance(10 * time.Minute) // now-20m
+	success, err := recorder.RecordRun(PluginRunRecord{PluginName: "alpha", Result: ResultSuccess})
+	if err != nil {
+		t.Fatalf("RecordRun alpha (20m old): %v", err)
+	}
+
+	ledger, err := recorder.LoadRunLedger(5 * time.Hour)
+	if err != nil {
+		t.Fatalf("LoadRunLedger: %v", err)
+	}
+
+	cases := []struct {
+		plugin string
+		window string
+		count  int
+	}{
+		// The old success is outside a 1h window; the printed receipt inside
+		// it is not work, so one run counts.
+		{"alpha", "1h", 1},
+		{"alpha", "3h", 1},
+		// A 5h window reaches the old success too.
+		{"alpha", "5h", 2},
+		{"beta", "1h", 0},
+		{"beta", "3h", 1},
+		// A window of zero or less ends at or before now, so it holds no run.
+		{"alpha", "0", 0},
+		{"alpha", "-5m", 0},
+		// A plugin with no runs counts 0 and has no last run.
+		{"gamma", "1h", 0},
+		{"gamma", "5h", 0},
+	}
+	for _, tc := range cases {
+		window, err := time.ParseDuration(tc.window)
+		if err != nil {
+			t.Fatalf("ParseDuration(%q): %v", tc.window, err)
+		}
+		want, err := recorder.CountRunsSince(tc.plugin, tc.window)
+		if err != nil {
+			t.Fatalf("CountRunsSince(%s, %s): %v", tc.plugin, tc.window, err)
+		}
+		if want != tc.count {
+			t.Fatalf("CountRunsSince(%s, %s) = %d per the ledger, want %d: the table is built on it",
+				tc.plugin, tc.window, want, tc.count)
+		}
+		got, err := ledger.Count(tc.plugin, window)
+		if err != nil {
+			t.Fatalf("ledger.Count(%s, %s): %v", tc.plugin, tc.window, err)
+		}
+		if got != want {
+			t.Errorf("ledger.Count(%s, %s) = %d, CountRunsSince = %d", tc.plugin, tc.window, got, want)
+		}
+	}
+
+	wantLast, err := recorder.GetLastRun("alpha")
+	if err != nil {
+		t.Fatalf("GetLastRun(alpha): %v", err)
+	}
+	if wantLast == nil || wantLast.ID != success {
+		t.Fatalf("GetLastRun(alpha) = %+v, want the 20m-old run %s", wantLast, success)
+	}
+	last, err := recorder.GetLastRun("gamma")
+	if err != nil {
+		t.Fatalf("GetLastRun(gamma): %v", err)
+	}
+	if last != nil {
+		t.Errorf("GetLastRun(gamma) = %+v, want nil: the plugin never ran", last)
+	}
+}
+
+// A window longer than the ledger was loaded with is refused: answering it
+// from the shorter read would count a prefix of the runs and open a gate that
+// should be closed.
+func TestRunLedgerRefusesWindowItWasNotLoadedWith(t *testing.T) {
+	t.Parallel()
+	recorder, _, _ := newFakeRecorder(t, time.Now().UTC())
+
+	ledger, err := recorder.LoadRunLedger(time.Hour)
+	if err != nil {
+		t.Fatalf("LoadRunLedger: %v", err)
+	}
+	if _, err := ledger.Count("alpha", 24*time.Hour); err == nil {
+		t.Error("ledger.Count with a 24h window on a 1h ledger returned no error, want a refusal")
+	}
+	if _, err := ledger.Count("alpha", time.Hour); err != nil {
+		t.Errorf("ledger.Count at its own window: %v", err)
+	}
+	if got, err := ledger.Count("alpha", 0); err != nil || got != 0 {
+		t.Errorf("ledger.Count with a zero window = %d, %v; want 0, nil: a span ending now holds no run, so any ledger answers it", got, err)
+	}
+	if _, err := recorder.LoadRunLedger(-time.Minute); err == nil {
+		t.Error("LoadRunLedger with a negative window returned no error")
+	}
+}
+
+// A run wisp with no plugin label belongs to no plugin's gate: it is left out
+// rather than grouped under an empty name.
+func TestLoadRunLedgerSkipsUnlabelledRuns(t *testing.T) {
+	t.Parallel()
+	recorder, fake, _ := newFakeRecorder(t, time.Now().UTC().Add(-10*time.Minute))
+	if _, err := fake.Create(beads.CreateOptions{
+		Title:     "Plugin run: unlabelled",
+		Labels:    []string{"type:plugin-run", "result:success"},
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := recorder.RecordRun(PluginRunRecord{PluginName: "alpha", Result: ResultSuccess}); err != nil {
+		t.Fatalf("RecordRun: %v", err)
+	}
+
+	ledger, err := recorder.LoadRunLedger(time.Hour)
+	if err != nil {
+		t.Fatalf("LoadRunLedger: %v", err)
+	}
+	if got, err := ledger.Count("", time.Hour); err != nil || got != 0 {
+		t.Errorf("Count(\"\", 1h) = %d, %v; want 0, nil: an unlabelled run belongs to no plugin", got, err)
+	}
+	if got, err := ledger.Count("alpha", time.Hour); err != nil || got != 1 {
+		t.Errorf("Count(alpha, 1h) = %d, %v; want 1", got, err)
+	}
+}
+
+// A failed read of the wisp ledger is returned, never read as a ledger with
+// no runs: an empty answer would open every cooldown gate it gates.
+func TestLoadRunLedgerReportsListFailure(t *testing.T) {
+	t.Parallel()
+	recorder := &Recorder{bd: beadstest.Failing{}}
+	if _, err := recorder.LoadRunLedger(time.Hour); err == nil {
+		t.Fatal("LoadRunLedger over a failing store returned no error, want the read's error")
 	}
 }

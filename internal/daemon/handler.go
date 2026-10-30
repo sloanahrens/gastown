@@ -2,10 +2,42 @@ package daemon
 
 import (
 	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/plugin"
 )
+
+// pluginRunSource is where a tick reads its cooldown gates and records the
+// runs it starts. recorderSource over the town's *plugin.Recorder is the
+// production one; a test injects a fake to see what a tick asks it.
+type pluginRunSource interface {
+	LoadRunLedger(since time.Duration) (pluginRunLedger, error)
+	RecordRun(rec plugin.PluginRunRecord) (string, error)
+}
+
+// pluginRunLedger answers one plugin's cooldown gate from a single read of the
+// run ledger (plugin.RunLedger).
+type pluginRunLedger interface {
+	Count(pluginName string, window time.Duration) (int, error)
+}
+
+// recorderSource adapts the town's *plugin.Recorder to pluginRunSource.
+type recorderSource struct {
+	recorder *plugin.Recorder
+}
+
+func (s recorderSource) LoadRunLedger(since time.Duration) (pluginRunLedger, error) {
+	ledger, err := s.recorder.LoadRunLedger(since)
+	if err != nil {
+		return nil, err
+	}
+	return ledger, nil
+}
+
+func (s recorderSource) RecordRun(rec plugin.PluginRunRecord) (string, error) {
+	return s.recorder.RecordRun(rec)
+}
 
 // handlePlugins runs every due cooldown plugin. This is the main entry point
 // called from heartbeat.
@@ -47,7 +79,21 @@ func (d *Daemon) dispatchPlugins(rigsConfig *config.RigsConfig) {
 		return
 	}
 
-	recorder := plugin.NewRecorder(d.config.TownRoot)
+	runs := d.pluginRuns
+	if runs == nil {
+		runs = recorderSource{plugin.NewRecorder(d.config.TownRoot)}
+	}
+
+	// One read of the run ledger answers every cooldown gate in this tick.
+	var ledger pluginRunLedger
+	if lookback := ledgerLookback(plugins); lookback > 0 {
+		ledger, err = runs.LoadRunLedger(lookback)
+		if err != nil {
+			// Fail closed: a gate whose ledger cannot be read is not known to
+			// be open, so no cooldown-gated plugin runs this tick.
+			d.logger.Printf("Handler: failed to read the plugin run ledger, skipping cooldown-gated plugins: %v", err)
+		}
+	}
 
 	for _, p := range plugins {
 		// Never auto-dispatch manual-gate plugins — they require an explicit trigger.
@@ -62,8 +108,18 @@ func (d *Daemon) dispatchPlugins(rigsConfig *config.RigsConfig) {
 		}
 
 		// Evaluate cooldown: skip if plugin ran recently.
-		if p.Gate.Duration != "" {
-			count, err := recorder.CountRunsSince(p.Name, p.Gate.Duration)
+		window, err := p.Gate.RunLedgerWindow()
+		if err != nil {
+			d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
+			continue
+		}
+		// A window that reaches no run holds nothing closed: the plugin runs
+		// without a ledger answer.
+		if window > 0 {
+			if ledger == nil {
+				continue // The tick logged why the ledger is unreadable.
+			}
+			count, err := ledger.Count(p.Name, window)
 			if err != nil {
 				d.logger.Printf("Handler: error checking cooldown for plugin %s: %v", p.Name, err)
 				continue
@@ -83,8 +139,27 @@ func (d *Daemon) dispatchPlugins(rigsConfig *config.RigsConfig) {
 			d.logger.Printf("Handler: skipping plugin %s (not a script plugin with a run.sh; nothing runs it)", p.Name)
 			continue
 		}
-		d.startScriptPlugin(p, recorder)
+		d.startScriptPlugin(p, runs)
 	}
+}
+
+// ledgerLookback is the span one tick's read of the run ledger must cover: the
+// longest window any plugin's gate reads, so every plugin is answered from
+// that one read. Zero means no gate reads the ledger and the tick loads none.
+func ledgerLookback(plugins []*plugin.Plugin) time.Duration {
+	var longest time.Duration
+	for _, p := range plugins {
+		window, err := p.Gate.RunLedgerWindow()
+		if err != nil {
+			// The plugin is refused with a log line when its gate is
+			// evaluated; it sets no span for the rest of the tick.
+			continue
+		}
+		if window > longest {
+			longest = window
+		}
+	}
+	return longest
 }
 
 // loadRigsConfig loads the rigs configuration from mayor/rigs.json.
