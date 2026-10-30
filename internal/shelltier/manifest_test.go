@@ -157,6 +157,11 @@ func TestTriggersOrDefault(t *testing.T) {
 			Entry{StubsGo: "stub:   "},
 			append(slices.Clone(DefaultTriggers), GoTriggers...),
 		},
+		{
+			"a go: declaration is no exemption and runs on every Go change",
+			Entry{StubsGo: "go: the case runs the real go"},
+			append(slices.Clone(DefaultTriggers), GoTriggers...),
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,14 +172,35 @@ func TestTriggersOrDefault(t *testing.T) {
 	}
 }
 
-func TestEveryEntryCarriesAStubsGoReason(t *testing.T) {
+func TestEveryEntryDeclaresItsGoUse(t *testing.T) {
 	t.Parallel()
 	for _, e := range Manifest() {
 		t.Run(e.Path, func(t *testing.T) {
-			if !hasReason(e.StubsGo) {
-				t.Fatalf("StubsGo = %q, want a reason starting none: or stub: followed by text", e.StubsGo)
+			if !hasReason(e.StubsGo) && !hasGoDeclaration(e.StubsGo) {
+				t.Fatalf("StubsGo = %q, want a none: or stub: reason or a go: declaration, each followed by text", e.StubsGo)
 			}
 		})
+	}
+}
+
+func TestHasGoDeclarationNeedsTextAfterThePrefix(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		s    string
+		want bool
+	}{
+		{"", false},
+		{"go:", false},
+		{"go:   ", false},
+		{"go: x", true},
+		{"none: x", false},
+		{"stub: x", false},
+		{"whatever", false},
+	}
+	for _, tc := range tests {
+		if got := hasGoDeclaration(tc.s); got != tc.want {
+			t.Errorf("hasGoDeclaration(%q) = %v, want %v", tc.s, got, tc.want)
+		}
 	}
 }
 

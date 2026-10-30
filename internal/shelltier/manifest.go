@@ -28,7 +28,8 @@ type Entry struct {
 	Mode     Mode
 	// StubsGo is the exemption and its reason in one field: "none: ..." when the
 	// script names no go command, "stub: file:line ..." when a fake go is defined
-	// there. Empty means the script may run a real go, so it runs on Go changes.
+	// there. "go: ..." declares that the script runs the real go, so it runs on Go
+	// changes. Empty is not a declaration, and it also runs on Go changes.
 	StubsGo string
 }
 
@@ -64,6 +65,14 @@ func hasReason(s string) bool {
 	return false
 }
 
+// hasGoDeclaration reports whether s declares that the script runs the real go:
+// a "go:" prefix followed by text. Such an entry is not exempt, so it runs on
+// every Go change. A bare prefix, or any other text, is not a declaration.
+func hasGoDeclaration(s string) bool {
+	rest, ok := strings.CutPrefix(s, "go:")
+	return ok && strings.TrimSpace(rest) != ""
+}
+
 // Manifest lists every shell test in the order the runner runs them: the
 // scripts/test-makefile.sh order first, then the tests the shell tier adds.
 func Manifest() []Entry {
@@ -82,7 +91,7 @@ func Manifest() []Entry {
 		{Path: "deploy/gke-probe/probe_test.sh", StubsGo: "none: names no go command"},
 		{Path: "deploy/k8s/kind/kind_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/resource-sampler_test.sh", StubsGo: "none: go test appears only in a ps fixture line"},
-		{Path: "scripts/makefile-gate_test.sh", StubsGo: "stub: scripts/makefile-gate_test.sh:504 puts a fake go on PATH"},
+		{Path: "scripts/makefile-gate_test.sh", StubsGo: "go: the shell-test list case runs the real shelltier through go run (gt-chlve)"},
 		{Path: ".githooks/pre-push_test.sh", StubsGo: "none: names no go command"},
 		{Path: "scripts/post-land-shell_test.sh", StubsGo: "stub: scripts/post-land-shell_test.sh puts a fake go on PATH"},
 		{Path: "scripts/town_metrics_test.sh", StubsGo: "none: names no go command"},
