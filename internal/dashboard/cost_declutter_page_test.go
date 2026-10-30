@@ -216,8 +216,9 @@ func TestCostUnitsSplitDollarsFromTokens(t *testing.T) {
 }
 
 // The rework table holds one row per window and bar, in the window's order, and
-// keeps a bar that reviewed many times. The screenshot's data is three rows: the
-// last seven days hold one bar and the seven days before them hold two.
+// keeps a bar that reviewed many times. The screenshot's data is three bars: the
+// last seven days hold one and the seven days before them hold two, the one that
+// saw a single review dropping out of the table.
 func TestCostReworkDrawsOneRowPerWindowAndBar(t *testing.T) {
 	t.Parallel()
 
@@ -234,14 +235,9 @@ func TestCostReworkDrawsOneRowPerWindowAndBar(t *testing.T) {
 				"mean_om_secs": 900.0, "om_beads": 250, "median_om_secs": 800.0, "slowest_om_secs": 3000.0, "slowest_om_bead": "gt-y"},
 		}},
 	}}
-	kids, _ := drawCostChildren(t, s)
-
-	var tables [][][]string
-	for _, k := range kids {
-		if k.Tag == "TABLE" {
-			tables = append(tables, k.Rows)
-		}
-	}
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", s)
+	tables := costFoldTables(t, dom, "cost.rework")
 	if len(tables) != 1 {
 		t.Fatalf("drew %d tables, want one for both windows", len(tables))
 	}
@@ -251,11 +247,10 @@ func TestCostReworkDrawsOneRowPerWindowAndBar(t *testing.T) {
 	rows := tables[0][1:]
 	want := [][]string{
 		{"last 7 days", "0.80", "3"},
-		{"the 7 days before", "0.60", "1"},
 		{"the 7 days before", "0.75", "1046"},
 	}
 	if len(rows) != len(want) {
-		t.Fatalf("rows = %v, want one per window and bar", rows)
+		t.Fatalf("rows = %v, want one per window and bar with more than one review", rows)
 	}
 	for i := range want {
 		if got := rows[i][:3]; strings.Join(got, "|") != strings.Join(want[i], "|") {

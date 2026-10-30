@@ -94,7 +94,7 @@ func TestUsagePanelBlocksAreFoldsUnderTheirOwnKeys(t *testing.T) {
 	if err := json.Unmarshal([]byte(v.String()), &keys); err != nil {
 		t.Fatalf("reading the Cost panel's folds: %v", err)
 	}
-	want := []string{"cost.byclass", "cost.deepreview", "cost.topbeads", "cost.over20", "cost.quality", "cost.jev"}
+	want := []string{"cost.byclass", "cost.deepreview", "cost.topbeads", "cost.over20", "cost.quality", "cost.jev", "cost.rework"}
 	if strings.Join(keys, "|") != strings.Join(want, "|") {
 		t.Errorf("Cost panel folds = %v, want one per usage block: %v", keys, want)
 	}

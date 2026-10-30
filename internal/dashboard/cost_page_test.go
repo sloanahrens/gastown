@@ -142,6 +142,34 @@ func TestCostPanelGCPLineByCloudState(t *testing.T) {
 	}
 }
 
+// The budget line renders directly under the provider rows and above the spend
+// part the daily chart folds into, so the alarm is read before the money.
+func TestCostPanelDrawsGCPUnderTheProviderRows(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", map[string]any{
+		"spend":          map[string]any{"balance": 12.5, "live": map[string]any{"ok": true}},
+		"usage":          map[string]any{"window": "24h"},
+		"cloud":          map[string]any{"state": "fresh", "findings": []any{budgetFinding("urgent")}},
+		"cost_providers": []any{map[string]any{"id": "deepseek", "label": "DeepSeek", "kind": "cash", "balance": 27.45}},
+	})
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c =>
+		c.className === "spendpart" ? "spendpart"
+			: c.textContent.indexOf("GCP budget") === 0 ? "gcp"
+			: c.tagName === "TABLE" ? "providers" : "other"))`)
+	if err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	var order []string
+	if err := json.Unmarshal([]byte(v.String()), &order); err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	if len(order) < 3 || strings.Join(order[:3], "|") != "providers|gcp|spendpart" {
+		t.Errorf("panel order = %v, want the provider rows, then the budget line, then the spend part", order)
+	}
+}
+
 // With neither a spend report nor usage there is one line naming them, under the
 // providers line; the cloud's budget alert still shows, and the caption never
 // says "undefined".
@@ -159,10 +187,11 @@ func TestCostPanelEmptyStateAndCaption(t *testing.T) {
 		t.Errorf("empty panel caption = %q, want none", note.Text)
 	}
 
-	// The same panel with a budget alert keeps the alert.
+	// The same panel with a budget alert keeps the alert, directly under the
+	// provider rows and above the line naming the spend report.
 	lines, _ = drawCost(t, map[string]any{"cloud": map[string]any{"state": "fresh", "findings": []any{budgetFinding("urgent")}}})
-	if len(lines) != 3 || !strings.HasPrefix(lines[2].Text, "GCP budget") {
-		t.Errorf("empty panel with an alert = %+v, want the lines and the alert last", lines)
+	if len(lines) != 3 || !strings.HasPrefix(lines[1].Text, "GCP budget") || !strings.Contains(lines[2].Text, "no spend report") {
+		t.Errorf("empty panel with an alert = %+v, want the providers line, the alert under it, then the spend report line", lines)
 	}
 
 	// Usage not yet answered beside a spend report: the caption is the report's
