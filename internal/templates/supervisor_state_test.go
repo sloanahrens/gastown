@@ -109,6 +109,45 @@ func TestSupervisorJobState_ProbeFailureIsAnError(t *testing.T) {
 	}
 }
 
+// The systemd job state takes the unit's invocation id from the same
+// 'systemctl show' call that reads the rest of the job, so an owner is matched
+// to the run the unit is in (gt-nirga).
+func TestSupervisorInvocationID(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		out     string
+		err     error
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "the unit reports its invocation",
+			out:  "LoadState=loaded\nMainPID=1234\nNRestarts=0\nExecMainStatus=0\nInvocationID=8f3c0a1e2b4d4c6e9a7f1b2c3d4e5f60\n",
+			want: "8f3c0a1e2b4d4c6e9a7f1b2c3d4e5f60",
+		},
+		{
+			name: "the unit reports no invocation",
+			out:  "LoadState=not-found\nMainPID=0\nNRestarts=0\nExecMainStatus=0\nInvocationID=\n",
+		},
+		{
+			name: "the probe fails", out: "", err: errors.New("exit status 1"), wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := probeAnswers(fakeHost(t, "linux"), tc.out, tc.err).jobState("systemd")
+			if st.InvocationID != tc.want {
+				t.Errorf("InvocationID = %q, want %q", st.InvocationID, tc.want)
+			}
+			if (st.Err != nil) != tc.wantErr {
+				t.Errorf("Err = %v, want an error: %v", st.Err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestStatusLine(t *testing.T) {
 	t.Parallel()
 	failing := SupervisorState{Kind: "launchd", Loaded: true, Runs: 58, LastExit: 1}

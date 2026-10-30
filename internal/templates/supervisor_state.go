@@ -55,6 +55,11 @@ type SupervisorState struct {
 	Container string
 	Status    string
 	Image     string
+
+	// InvocationID is the systemd unit's current invocation id, the id of the
+	// process the unit last started (gt-nirga). Empty where the unit reports
+	// none and for every other kind.
+	InvocationID string
 }
 
 // supervisorHost is what the supervisor readings take from the host: its OS,
@@ -107,8 +112,17 @@ func (h supervisorHost) jobState(kind string) SupervisorState {
 		return probeSupervisorJob(h.probe, kind, argv, parseLaunchdPrint, launchdJobIsMissing)
 	case "systemd":
 		argv := []string{"systemctl", "--user", "show",
-			"-p", "LoadState", "-p", "MainPID", "-p", "NRestarts", "-p", "ExecMainStatus", SystemdUnit}
-		return probeSupervisorJob(h.probe, kind, argv, parseSystemctlShow, systemdJobIsMissing)
+			"-p", "LoadState", "-p", "MainPID", "-p", "NRestarts", "-p", "ExecMainStatus", "-p", "InvocationID", SystemdUnit}
+		// The parse callback keeps the invocation id from the same output the
+		// rest of the state is read from, so the probe runs once.
+		var invocation string
+		parse := func(out string) (bool, int, int, int) {
+			invocation = parseSystemctlInvocation(out)
+			return parseSystemctlShow(out)
+		}
+		st := probeSupervisorJob(h.probe, kind, argv, parse, systemdJobIsMissing)
+		st.InvocationID = invocation
+		return st
 	}
 	return SupervisorState{Kind: kind, LastExit: -1}
 }
@@ -387,6 +401,17 @@ func parseSystemctlShow(out string) (loaded bool, pid, runs, lastExit int) {
 		}
 	}
 	return loaded, pid, runs, lastExit
+}
+
+// parseSystemctlInvocation reads the InvocationID line of 'systemctl show'
+// output, "" when the unit reports none.
+func parseSystemctlInvocation(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "InvocationID="); ok {
+			return value
+		}
+	}
+	return ""
 }
 
 // systemdJobIsMissing reports whether systemctl failed because it has no such
