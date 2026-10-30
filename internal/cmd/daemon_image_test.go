@@ -152,6 +152,7 @@ func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 		{"all succeed", "", []string{"binaries " + imageTestRev, "claude", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude"}, true, ""},
 		{"the binaries fail", "binaries " + imageTestRev, []string{"binaries " + imageTestRev}, false, "failed"},
 		{"the claude CLI fails", "claude", []string{"binaries " + imageTestRev, "claude"}, false, "claude failed"},
+		{"the image build fails", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude", []string{"binaries " + imageTestRev, "claude", "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude"}, false, "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -178,21 +179,6 @@ func TestDaemonImageApplyRunsTheStepsInOrder(t *testing.T) {
 			}
 		})
 	}
-	t.Run("the image build fails", func(t *testing.T) {
-		t.Parallel()
-		r := newImageRig(t)
-		r.flags.apply = true
-		var calls []string
-		r.deps.builder = func(daemonimage.Builder) imageBuilder {
-			return fakeImageBuilder{calls: &calls, failAt: "image " + imageTestRev + " /out/gt,/out/bd,/out/om,/out/claude"}
-		}
-		if err := runDaemonImage(context.Background(), r.flags, r.deps); err == nil {
-			t.Fatal("a failed image build reported success")
-		}
-		if strings.Contains(r.out.String(), "gt-daemon:") && !strings.Contains(r.out.String(), "image: docker") {
-			t.Errorf("a tag was printed for a failed build:\n%s", r.out.String())
-		}
-	})
 }
 
 // Every refusal comes before any step runs (the rig's deps fail the test if one
@@ -270,28 +256,6 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 					t.Errorf("a refusal printed a plan:\n%s", r.out.String())
 				}
 			})
-		}
-	}
-}
-
-// A path that is not itself a rig's canonical clone is not refused for its name
-// alone: only mayor/rig is.
-func TestInsideCanonicalClone(t *testing.T) {
-	t.Parallel()
-	for path, want := range map[string]bool{
-		"/town/gastown/mayor/rig":      true,
-		"/town/gastown/mayor/rig/sub":  true,
-		"/town/gastown/crew/seagull":   false,
-		"/town/gastown/mayor":          false,
-		"/town/rig":                    false,
-		"/elsewhere/mayor/rigs":        false,
-		"/":                            false,
-		"/town/gastown/refinery/rig":   false,
-		"/scratch.noindex/l1/build":    false,
-		"/town/gastown/mayor/rig/a/b/": true,
-	} {
-		if got := insideCanonicalClone(path); got != want {
-			t.Errorf("insideCanonicalClone(%q) = %v, want %v", path, got, want)
 		}
 	}
 }

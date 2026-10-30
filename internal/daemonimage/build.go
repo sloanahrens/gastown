@@ -185,6 +185,11 @@ func (b Builder) checkBuildInputs(rev string) (string, string, error) {
 			return "", "", fmt.Errorf("daemonimage: no %s source checkout named", src.name)
 		}
 	}
+	for _, p := range []struct{ name, dir string }{{"output directory", b.Out}, {"gt source", b.GTSrc}, {"bd source", b.BDSrc}, {"om source", b.OMSrc}} {
+		if err := refuseCanonicalClone(p.name, p.dir); err != nil {
+			return "", "", err
+		}
+	}
 	bdCommit := strings.TrimSpace(b.BDCommit)
 	if bdCommit == "" {
 		return "", "", errors.New("daemonimage: no bd commit to stamp bd with")
@@ -193,6 +198,37 @@ func (b Builder) checkBuildInputs(rev string) (string, string, error) {
 		return "", "", fmt.Errorf("daemonimage: bd commit %q is not a 7+ character hex commit", bdCommit)
 	}
 	return rev, bdCommit, nil
+}
+
+// IsCanonicalClone reports whether path is a rig's canonical clone,
+// <town>/<rig>/mayor/rig, or lies under one. It reads the name only: a caller
+// that must catch a symlink to the clone resolves path first.
+func IsCanonicalClone(path string) bool {
+	for p := filepath.Clean(path); ; p = filepath.Dir(p) {
+		if filepath.Base(p) == "rig" && filepath.Base(filepath.Dir(p)) == "mayor" {
+			return true
+		}
+		if parent := filepath.Dir(p); parent == p {
+			return false
+		}
+	}
+}
+
+// refuseCanonicalClone refuses dir when it is a canonical clone or lies inside
+// one, as written or with its symlinks resolved. A build adds worktrees to its
+// sources and never touches the canonical clone. A path that does not resolve is
+// judged as written: a link to the clone resolves, so one that does not is not.
+func refuseCanonicalClone(what, dir string) error {
+	paths := []string{dir}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		paths = append(paths, resolved)
+	}
+	for _, p := range paths {
+		if IsCanonicalClone(p) {
+			return fmt.Errorf("daemonimage: %s %q is or lies inside a canonical clone (.../mayor/rig): the build adds worktrees to its sources and the canonical clone is never touched", what, dir)
+		}
+	}
+	return nil
 }
 
 // build compiles one binary to stage/<name> at build.commit. The clean worktree
@@ -255,7 +291,8 @@ func isCommit(s string) bool {
 // none of them: it makes no worktree, resolves no commit, writes no file and
 // reaches no network. It refuses the inputs a build refuses before it runs
 // anything (an empty or relative Out, a rev or bd commit that is not a commit,
-// an unnamed source, a Dockerfile that is not an absolute regular file). It does
+// an unnamed source, a canonical clone as any input, a Dockerfile that is not an
+// absolute regular file). It does
 // not check the claude CLI pin, and it does not check that a commit exists in its
 // checkout: a build checks both when it runs, so a plan that prints can still
 // fail there. The commits in it are the ones named, not resolved.
@@ -428,6 +465,9 @@ func (b Builder) BuildImage(ctx context.Context, rev string, bins []string) (str
 	}
 	if !filepath.IsAbs(b.Out) {
 		return "", fmt.Errorf("daemonimage: build context %q is not absolute; docker resolves the context and -f against the directory it runs in", b.Out)
+	}
+	if err := refuseCanonicalClone("build context", b.Out); err != nil {
+		return "", err
 	}
 	if b.Dockerfile == "" {
 		return "", fmt.Errorf("daemonimage: no Dockerfile named; set Dockerfile to %s in the gt checkout", DockerfilePath)
