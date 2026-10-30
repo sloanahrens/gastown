@@ -36,9 +36,8 @@ func (c *Client) List(ctx context.Context, f api.ListFilter) (api.IssuePage, err
 	return out, err
 }
 
-// Count returns how many issues f matches in all. It sends f as given, so a
-// filter that carries a limit or a cursor comes back as an api.ErrInvalid from
-// the server rather than as a count of one page.
+// Count returns how many issues f matches in all. It sends f as given; see
+// api.ValidateCount for the filters the server accepts.
 func (c *Client) Count(ctx context.Context, f api.ListFilter) (int, error) {
 	var out api.CountResponse
 	if err := c.do(ctx, http.MethodPost, "/v1/issues:count", api.CountRequest{Filter: f}, &out, true); err != nil {

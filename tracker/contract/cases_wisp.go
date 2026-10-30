@@ -51,6 +51,16 @@ func wispReadByAgeAndStatus(t *testing.T, s store.Store) {
 	sameSet(t, "open wisps created before a bound before them",
 		ids(mustList(t, s, api.ListFilter{Ephemeral: true, CreatedBefore: past})))
 
+	// A zero bound is no bound: the wisp read over every status returns all
+	// three of them.
+	sameSet(t, "every wisp, with no bound at all",
+		ids(mustList(t, s, api.ListFilter{Ephemeral: true, Statuses: []string{"all"}})), open.ID, closedA.ID, closedB.ID)
+
+	// The flag pins both directions: the durable read never returns a wisp,
+	// so a wisp can only come back when Ephemeral is set.
+	sameSet(t, "durable issues closed before a bound after them",
+		ids(mustList(t, s, api.ListFilter{Statuses: []string{"closed"}, ClosedBefore: future})), durable.ID)
+
 	// The page walk: one row at a time, no gap and no repeat, and the open
 	// wisp stays out of a closed read on every page.
 	var paged []string

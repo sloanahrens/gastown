@@ -29,8 +29,8 @@ type Store interface {
 	GetIssues(ctx context.Context, ids []string) (map[string]api.Issue, error)
 	// ListIssues returns the page of issues matching f.
 	ListIssues(ctx context.Context, f api.ListFilter) (api.IssuePage, error)
-	// CountIssues returns how many issues match f, the whole match: a filter
-	// that carries a limit or a cursor is refused rather than counted.
+	// CountIssues returns how many issues f matches in all; ValidateCount says
+	// which filters it holds.
 	CountIssues(ctx context.Context, f api.ListFilter) (int, error)
 	// Assigned returns one page of the issues whose assignee is in
 	// req.Assignees and whose status is in req.Statuses, keyed by assignee.

@@ -151,8 +151,8 @@ func buildListQuery(f api.ListFilter, cur *listCursor, limit int) (string, []any
 	return q, args, nil
 }
 
-// buildCountQuery counts the whole match the list's WHERE clause selects: no
-// order and no limit, since a page is what the count refuses.
+// buildCountQuery counts the whole match the list's WHERE clause selects: the
+// same conditions, with no order and no limit to drop a row from the total.
 func buildCountQuery(f api.ListFilter) (string, []any, error) {
 	where, args, err := buildListWhere(f, nil)
 	if err != nil {
@@ -201,8 +201,7 @@ func (p *Postgres) ListIssues(ctx context.Context, f api.ListFilter) (api.IssueP
 	return page, nil
 }
 
-// CountIssues counts the whole match, so a page in f is refused rather than
-// read as the total.
+// CountIssues counts every issue f matches.
 func (p *Postgres) CountIssues(ctx context.Context, f api.ListFilter) (int, error) {
 	if err := api.ValidateCount(f); err != nil {
 		return 0, err

@@ -1,13 +1,10 @@
 package server
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -74,68 +71,34 @@ func TestClientReadsAgreeWithTheRoutes(t *testing.T) {
 	}
 }
 
-// wispFixture is the set of rows both reads in the agreement test serve,
-// chosen so every field the filter sets excludes at least one of them: an
-// open wisp, a closed wisp inside the age cutoff, two closed wisps past it,
-// and a durable issue at the same status and age that no wisp read may return.
-func wispFixture(now time.Time) []api.Issue {
-	closedAt := func(d time.Duration) *time.Time {
-		at := now.Add(-d)
-		return &at
-	}
-	return []api.Issue{
-		{ID: "gt-wisp-open", Title: "open wisp", Status: "open", Priority: 1, Ephemeral: true, CreatedAt: now.Add(-3 * time.Hour)},
-		{ID: "gt-wisp-fresh", Title: "freshly closed wisp", Status: "closed", Priority: 1, Ephemeral: true, CreatedAt: now.Add(-4 * time.Hour), ClosedAt: closedAt(5 * time.Minute)},
-		{ID: "gt-wisp-old", Title: "old wisp", Status: "closed", Priority: 2, Ephemeral: true, CreatedAt: now.Add(-20 * time.Hour), ClosedAt: closedAt(10 * time.Hour)},
-		{ID: "gt-wisp-older", Title: "older wisp", Status: "closed", Priority: 3, Ephemeral: true, CreatedAt: now.Add(-40 * time.Hour), ClosedAt: closedAt(30 * time.Hour)},
-		{ID: "gt-durable", Title: "durable issue", Status: "closed", Priority: 2, CreatedAt: now.Add(-5 * time.Hour), ClosedAt: closedAt(2 * time.Hour)},
-	}
+// wispQuery keys a filter by the fields a wisp read sets, so a stub answer is
+// served only to the exact question it was written for; an instant is keyed by
+// value, not by its rendering.
+func wispQuery(f api.ListFilter) string {
+	return fmt.Sprintf("ephemeral=%v statuses=%v closed_before=%d created_before=%d",
+		f.Ephemeral, f.Statuses, f.ClosedBefore.UnixNano(), f.CreatedBefore.UnixNano())
 }
 
-// wispMatch applies the filter to a row the way the store does over these
-// rows: the ephemeral flag exactly, statuses ORed (none means not closed,
-// "all" means every status), and each upper age bound strictly before a time
-// the row must have.
-func wispMatch(f api.ListFilter, is api.Issue) bool {
-	if is.Ephemeral != f.Ephemeral {
-		return false
-	}
-	switch {
-	case len(f.Statuses) == 0:
-		if is.Status == "closed" {
-			return false
+// wispStore answers the list and count routes from rows keyed by wispQuery: a
+// filter it holds no answer for is api.ErrInvalid, so a count asked a
+// different question than the list it stands beside fails here rather than
+// agreeing with itself. Which rows a filter matches is the store's question,
+// and the contract suite proves it against Postgres. A page is the row offset
+// its cursor names, at most f.Limit rows.
+func wispStore(answers map[string][]api.Issue) store.Store {
+	rows := func(f api.ListFilter) ([]api.Issue, error) {
+		got, ok := answers[wispQuery(f)]
+		if !ok {
+			return nil, api.Invalid("the test holds no answer for filter %+v", f)
 		}
-	case !slices.Contains(f.Statuses, "all") && !slices.Contains(f.Statuses, is.Status):
-		return false
-	}
-	if !f.ClosedBefore.IsZero() && (is.ClosedAt == nil || !is.ClosedAt.Before(f.ClosedBefore)) {
-		return false
-	}
-	if !f.CreatedBefore.IsZero() && !is.CreatedAt.Before(f.CreatedBefore) {
-		return false
-	}
-	return true
-}
-
-// wispStore serves the list and count routes from wispFixture through
-// wispMatch, so the two only answer alike when the client asks them the same
-// question. A page is the row offset the cursor names, at most f.Limit rows.
-func wispStore(rows []api.Issue) store.Store {
-	matched := func(f api.ListFilter) []api.Issue {
-		var out []api.Issue
-		for _, is := range rows {
-			if wispMatch(f, is) {
-				out = append(out, is)
-			}
-		}
-		slices.SortFunc(out, func(a, b api.Issue) int {
-			return cmp.Or(cmp.Compare(a.Priority, b.Priority), a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
-		})
-		return out
+		return got, nil
 	}
 	return issueStub{
 		list: func(_ context.Context, f api.ListFilter) (api.IssuePage, error) {
-			all := matched(f)
+			all, err := rows(f)
+			if err != nil {
+				return api.IssuePage{}, err
+			}
 			start := 0
 			if f.Cursor != "" {
 				n, err := strconv.Atoi(f.Cursor)
@@ -155,26 +118,50 @@ func wispStore(rows []api.Issue) store.Store {
 			return page, nil
 		},
 		count: func(_ context.Context, f api.ListFilter) (int, error) {
-			if err := api.ValidateCount(f); err != nil {
+			all, err := rows(f)
+			if err != nil {
 				return 0, err
 			}
-			return len(matched(f)), nil
+			return len(all), nil
 		},
 	}
 }
 
 // TestClientCountAgreesWithTheListItCounts pins the pair the wisp reaper sizes
-// its work with: over one store, Count answers for every row List walks. The
-// fixture separates on each field the filter sets, so a count asked a
-// different question than the list — a dropped ephemeral flag, status or
-// cutoff — is a number the walking list does not reach.
+// its work with: asked one filter, Count answers for every row List walks. The
+// stub holds a separate answer per filter, so a count sent a filter the list
+// was not — a dropped ephemeral flag, status or cutoff — is a different
+// question, and the numbers below stop lining up.
 func TestClientCountAgreesWithTheListItCounts(t *testing.T) {
 	t.Parallel()
 	now := time.Now().Truncate(time.Second)
-	ts := stubServer(t, wispStore(wispFixture(now)))
-	c := agreeClient(t, ts.URL)
+	closedAt := func(d time.Duration) *time.Time {
+		at := now.Add(-d)
+		return &at
+	}
+	old := api.Issue{ID: "gt-wisp-old", Title: "old wisp", Status: "closed", Priority: 2, Ephemeral: true,
+		CreatedAt: now.Add(-20 * time.Hour), ClosedAt: closedAt(10 * time.Hour)}
+	older := api.Issue{ID: "gt-wisp-older", Title: "older wisp", Status: "closed", Priority: 3, Ephemeral: true,
+		CreatedAt: now.Add(-40 * time.Hour), ClosedAt: closedAt(30 * time.Hour)}
+	durable := api.Issue{ID: "gt-durable", Title: "durable issue", Status: "closed", Priority: 2,
+		CreatedAt: now.Add(-5 * time.Hour), ClosedAt: closedAt(2 * time.Hour)}
 
 	f := api.ListFilter{Ephemeral: true, Statuses: []string{"closed"}, ClosedBefore: now.Add(-time.Hour)}
+	byCreation := f
+	byCreation.CreatedBefore = now.Add(-25 * time.Hour)
+	durableOnly := f
+	durableOnly.Ephemeral = false
+
+	ts := stubServer(t, wispStore(map[string][]api.Issue{
+		wispQuery(f):           {old, older},
+		wispQuery(byCreation):  {older},
+		wispQuery(durableOnly): {durable},
+	}))
+	c := agreeClient(t, ts.URL)
+
+	// Two rows over two one-row pages: the count of the unpaged read is the
+	// length of the walk, and the durable issue at that status and age is in
+	// neither.
 	walked := f
 	walked.Limit = 1
 	got, err := c.ListAll(t.Context(), walked)
@@ -186,13 +173,21 @@ func TestClientCountAgreesWithTheListItCounts(t *testing.T) {
 		t.Errorf("Count = %d, %v; want %d, the length of the list it counts", n, err, len(got))
 	}
 
-	// The fixture separates on the ephemeral flag: the same read with it
-	// dropped counts the one durable issue at that status and age instead of
-	// the two wisps. A count that dropped the flag would answer 1 against a
-	// list of 2, which is the disagreement this test is for.
-	durableOnly := f
-	durableOnly.Ephemeral = false
+	// The creation bound is part of the question too: the same read narrowed
+	// by created_before walks one row, and its count says one.
+	byCreationWalked := byCreation
+	byCreationWalked.Limit = 1
+	got, err = c.ListAll(t.Context(), byCreationWalked)
+	if err != nil || len(got) != 1 || got[0].ID != "gt-wisp-older" {
+		t.Fatalf("ListAll narrowed by created_before = %v, %v; want only gt-wisp-older", got, err)
+	}
+	if n, err := c.Count(t.Context(), byCreation); err != nil || n != len(got) {
+		t.Errorf("Count narrowed by created_before = %d, %v; want %d, the length of the list it counts", n, err, len(got))
+	}
+
+	// The same read without the ephemeral flag asks about the durable issue at
+	// that status and age instead: one row, not the two wisps.
 	if n, err := c.Count(t.Context(), durableOnly); err != nil || n != 1 {
-		t.Errorf("Count of the same read without the ephemeral flag = %d, %v; want 1, so the flag is what the agreement above turns on", n, err)
+		t.Errorf("Count of the same read without the ephemeral flag = %d, %v; want 1, the one durable issue at that status and age", n, err)
 	}
 }
