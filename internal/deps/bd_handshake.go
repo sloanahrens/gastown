@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/tracker/api"
 )
 
 // KnownBDContractVersions are the bd JSON contract versions (bd version
@@ -29,6 +30,11 @@ var ErrBDHandshake = errors.New("bd handshake failed")
 // not answer. The bd is not the problem, so the operator's remedy is to start
 // Dolt, not to reinstall bd.
 var ErrDoltUnreachable = errors.New("Dolt is not reachable")
+
+// ErrTrackerHandshake marks a refusal to run the town against a store whose
+// route names the tracker backend. It is not an ErrBDHandshake: no bd took
+// part, so the remedy is the tracker's, never a bd install.
+var ErrTrackerHandshake = errors.New("tracker handshake failed")
 
 // bdStoreRetryWait is the pause between attempts to read the database
 // migration level while the store is unavailable (gt-2gctr).
@@ -172,6 +178,46 @@ func checkBDHandshakeClock(bdPath string, store Store, storeRetryWait time.Durat
 		return nil, refuseBD(hs, true, fmt.Sprintf("the database is at schema %d but this gt's SQL reads are written for %d (beadsql.SchemaVersion)", level, beadsql.SchemaVersion))
 	}
 	return hs, nil
+}
+
+// Tracker is the tracker's part of the startup handshake for a store whose
+// route names the tracker backend: it names itself for a refusal and answers
+// one readiness read, which carries the schema level trackerd reports.
+// internal/cmd asks the town's endpoint over /readyz, which takes no token; a
+// test passes its own.
+type Tracker interface {
+	// URL names the tracker, without credentials.
+	URL() string
+	// Readyz reports the tracker ready at the schema level its store is at. A
+	// tracker that did not answer, or answered that it is not ready, is an
+	// error.
+	Readyz(ctx context.Context) (schemaLevel int, err error)
+}
+
+// CheckTrackerHandshake decides whether the town may run against trackerd, the
+// store a tracker route names. No bd build and no Dolt database are behind such
+// a route, so the bd checks do not apply: the town may run when the tracker
+// answers ready at the schema level this gt speaks, api.SchemaLevel. Every
+// refusal wraps ErrTrackerHandshake and names the tracker and its URL.
+func CheckTrackerHandshake(ctx context.Context, tr Tracker) error {
+	level, err := tr.Readyz(ctx)
+	if err != nil {
+		return refuseTracker(tr.URL(), err.Error())
+	}
+	if level != api.SchemaLevel {
+		return refuseTracker(tr.URL(), fmt.Sprintf("the tracker is at schema level %d but this gt speaks level %d (api.SchemaLevel)", level, api.SchemaLevel))
+	}
+	return nil
+}
+
+// trackerFixHint is the remedy a tracker refusal names: trackerd serves from
+// Postgres, so the bd install hint would send the operator down the wrong path.
+const trackerFixHint = "check the tracker with `gt tracker status`, and that trackerd and its Postgres are running"
+
+// refuseTracker is the refusal for a store on the tracker, where the bd
+// messages' "install bd" remedy would be wrong.
+func refuseTracker(url, reason string) error {
+	return fmt.Errorf("%w: %s\n  found:    tracker at %s\n  fix:      %s", ErrTrackerHandshake, reason, url, trackerFixHint)
 }
 
 // readSchemaLevelWaiting reads the database migration level, waiting out a
