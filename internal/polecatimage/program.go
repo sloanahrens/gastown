@@ -1,6 +1,7 @@
 package polecatimage
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -130,8 +131,9 @@ func Main(args []string) int {
 }
 
 // runProgram answers Main: no arguments runs one plugin run, and "trim-cache",
-// "trim-paths", "trim-list-write", "seed-clone" and "seed-cache" are the helpers a
-// container of the image runs in the seed and trim Jobs.
+// "trim-paths", "trim-list", "trim-list-write", "seed-clone" and "seed-cache" are the
+// helpers a container of the image runs: in the seed and trim Jobs, or through a kubectl
+// exec into a pod that mounts the claim.
 func runProgram(args []string, stdout, stderr io.Writer, get func(string) string) int {
 	if len(args) > 0 {
 		switch args[0] {
@@ -139,6 +141,8 @@ func runProgram(args []string, stdout, stderr io.Writer, get func(string) string
 			return trimCacheMain(args[1:], stdout, stderr)
 		case "trim-paths":
 			return trimPathsMain(args[1:], stdout, stderr)
+		case "trim-list":
+			return trimListMain(args[1:], stdout, stderr)
 		case "trim-list-write":
 			return trimListWriteMain(args[1:], stdout, stderr)
 		case "seed-clone":
@@ -292,6 +296,36 @@ func trimListWriteMain(args []string, stdout, stderr io.Writer) int {
 		return 3
 	}
 	fmt.Fprintf(stdout, "wrote %d paths %s %s\n", len(paths), cachevol.TrimClaimListPath, digest)
+	return 0
+}
+
+// trimListMain runs the reader: it prints the claim's listing under --root as JSON, the input a
+// caller builds a trim manifest from without mounting the claim itself. The disk_maintenance
+// patrol's trim is the caller, reading it through a kubectl exec into a pod that mounts the claim
+// (gt-rm4am).
+//
+// Exit 3 with a reason on stderr means the listing could not be read whole: a partial listing would
+// plan a trim of a claim it never saw.
+func trimListMain(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("trim-list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	root := flags.String("root", cachevol.SeedCacheRoot, "the claim whose cache files the listing names")
+	if err := flags.Parse(args); err != nil {
+		return 3
+	}
+	listing, err := trimListing(*root, filepath.Walk)
+	if err != nil {
+		fmt.Fprintf(stderr, "trim-list: %v\n", err)
+		return 3
+	}
+	if listing == nil {
+		// The encoder prints a nil slice as null; an empty claim is a list of no entries.
+		listing = []trimListEntry{}
+	}
+	if err := json.NewEncoder(stdout).Encode(listing); err != nil {
+		fmt.Fprintf(stderr, "trim-list: %v\n", err)
+		return 3
+	}
 	return 0
 }
 

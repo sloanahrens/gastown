@@ -87,6 +87,14 @@ type diskMaintSeams struct {
 	dfReaders map[string]DFReader
 	// getenv reads the plugin settings the target is built from.
 	getenv func(string) string
+	// environ is the daemon's own environment, the source of the few
+	// variables the cache trim's kubectl runs with (see cacheTrimKubectlEnv);
+	// nil reads the process environment.
+	environ func() []string
+	// sandboxes reads the town's sandbox profiles, which name the shared cache
+	// claims the pass trims and the image each trim Job runs; nil reads the
+	// town's settings.
+	sandboxes func() (map[string]agentconfig.SandboxProfile, error)
 	// homeDir locates the colima docker socket's home.
 	homeDir func() (string, error)
 	// dispatch runs a pass off the calling goroutine, so a slow registry does
@@ -113,6 +121,18 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.getenv == nil {
 		s.getenv = os.Getenv
+	}
+	if s.environ == nil {
+		s.environ = os.Environ
+	}
+	if s.sandboxes == nil {
+		s.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+			ts, err := agentconfig.LoadTownSettings(agentconfig.TownSettingsPath(d.config.TownRoot))
+			if err != nil || ts == nil {
+				return nil, err
+			}
+			return ts.Sandboxes, nil
+		}
 	}
 	if s.homeDir == nil {
 		s.homeDir = os.UserHomeDir
@@ -383,6 +403,11 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// pruning, or a keep the patrol cannot decide, must not silence them.
 	readings := s.readDisks(ctx)
 	d.applyDiskAlerts(readings)
+
+	// The cache trim is independent of the targets: it trims the claim the
+	// sandbox profiles mount, so it runs in the window's pass whether or not a
+	// maintenance target publishes here (gt-rm4am).
+	d.cacheTrim(ctx, mode)
 
 	keep, err := diskMaintenanceKeep(s.getenv, readings)
 	if err != nil {

@@ -404,6 +404,7 @@ environment knobs and one key under `daemon` in `settings/config.json`:
 |------|---------|---------|
 | `POLECAT_IMAGE_REGISTRY_KEEP` | `5` | the newest per-commit tags kept by the plugin's retention, `gt maint` and the patrol |
 | `POLECAT_IMAGE_REGISTRY_PRUNE` | `dry-run` | the `polecat-image` plugin only: `off`, `dry-run` or `apply` |
+| `POLECAT_CACHE_CAP` | `10GB` | the size each per-rig cache volume is trimmed under, and the size the patrol trims the shared cache claim under (`internal/daemon/cache_trim.go`) |
 | `daemon.patrols.disk_maintenance` | disabled; once enabled, `{"interval": "daily", "window": "04:30", "mode": "dry_run", "targets": {"civol": {"interval": "2h"}}}` (`mode` may be `apply`) | the daemon patrol |
 
 A `targets` entry gives one target a cadence of its own, such as civol's `2h`

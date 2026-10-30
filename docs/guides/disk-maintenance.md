@@ -125,6 +125,30 @@ as settled, so the next pass is the next day's. A deferred apply is the one
 conclusion that leaves the window open, because the push holding the lock is
 what to wait for.
 
+## The shared cache claim
+
+The patrol also trims the shared cache claim a kubernetes sandbox profile
+mounts, once per window and behind the same mode:
+
+- A claim's namespace comes from the claim itself, and every pod read, listing
+  exec and apply, delete or wait names it. A claim of the same name in another
+  namespace is another claim, read and counted from its own namespace's pods.
+- The claim's listing is read through a running pod that mounts it, with the
+  polecat image's `trim-list` helper. Every pod that mounts the claim and has
+  not finished counts as a sandbox; with no running one there is no listing,
+  and the pass logs that it trims nothing rather than guessing one.
+- `dry_run` logs the Job and its shard ConfigMaps; `apply` deletes what an
+  earlier run left behind, applies the shards before the Job that mounts them,
+  and deletes the shards once the Job has finished. An earlier Job that is
+  still running is left to finish, and the pass applies nothing that window.
+  A Job still running when the wait ends keeps its shards for the next run.
+- The cap is `POLECAT_CACHE_CAP`, the knob in the
+  [configuration reference](../reference.md#disk-maintenance), read here for the
+  shared claim and by the plugin for each per-rig volume.
+- The pass trims nothing when two profiles mount one claim with different
+  images, or when two claims are mounted in one namespace: a trim's labels
+  cannot tell one claim's objects from the other's.
+
 ## Rollback
 
 A wrong delete costs a rebuild, not data: any per-commit image is rebuilt from
