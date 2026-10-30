@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,13 +18,58 @@ func TestMain(m *testing.M) {
 	os.Exit(testutil.HermeticMain(m))
 }
 
+// safeCwd is the working directory runIn is given by a test that is not about the guard: a temp
+// directory whose parents hold no beads workspace.
+func safeCwd(t *testing.T) func() (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	return func() (string, error) { return dir, nil }
+}
+
+// TestGuardRunRefusesWhatItCannotCheck: a working directory the process cannot name, or a marker it
+// cannot read, refuses the run rather than being taken for a safe tree.
+func TestGuardRunRefusesWhatItCannotCheck(t *testing.T) {
+	t.Parallel()
+	t.Run("a working directory it cannot name", func(t *testing.T) {
+		t.Parallel()
+		unnamed := func() (string, error) { return "", errors.New("getwd: i/o error") }
+		err := guardRun(unnamed, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "i/o error") {
+			t.Fatalf("guardRun with no working directory = %v, want the getwd failure reported", err)
+		}
+	})
+	t.Run("a marker it cannot read", func(t *testing.T) {
+		t.Parallel()
+		// A marker symlinked to itself fails the stat with ELOOP, which is neither a workspace nor a
+		// missing marker.
+		tree := t.TempDir()
+		if err := os.Symlink(".beads", filepath.Join(tree, ".beads")); err != nil {
+			t.Fatalf("make the marker loop: %v", err)
+		}
+		err := guardRun(safeCwd(t), tree)
+		if err == nil || !strings.Contains(err.Error(), "check for a beads workspace") {
+			t.Fatalf("guardRun over an unreadable marker = %v, want the read failure reported", err)
+		}
+	})
+}
+
+// TestGuardRunAcceptsAClearScratchDirectory: a -scratch that is not there yet passes, since run
+// makes it after the check; nothing above it holds a workspace.
+func TestGuardRunAcceptsAClearScratchDirectory(t *testing.T) {
+	t.Parallel()
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	if err := guardRun(safeCwd(t), scratch); err != nil {
+		t.Fatalf("guardRun with a clear scratch directory = %v, want it accepted", err)
+	}
+}
+
 // TestRunRefusesAScratchDirectoryItCannotMake: fixture copies need a scratch directory, and when it
 // cannot be made the command stops with the failure reported, before bd runs.
 func TestRunRefusesAScratchDirectoryItCannotMake(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	args := []string{"-fixture", writeFixture(t, fixtureIDs...), "-scratch", ""}
-	if code := run(args, &stdout, &stderr); code != 1 {
+	if code := runIn(safeCwd(t), args, &stdout, &stderr); code != 1 {
 		t.Errorf("run with an empty -scratch = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "make scratch directory") {
@@ -35,7 +82,7 @@ func TestRunRefusesAScratchDirectoryItCannotMake(t *testing.T) {
 func TestRunRefusesAMissingFixture(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
-	if code := run(nil, &stdout, &stderr); code != 2 {
+	if code := runIn(safeCwd(t), nil, &stdout, &stderr); code != 2 {
 		t.Errorf("run with no -fixture = %d, want 2", code)
 	}
 	if !strings.Contains(stderr.String(), "-fixture is required") {
@@ -49,7 +96,7 @@ func TestRunRefusesAFixtureFileThatIsNotThere(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	missing := filepath.Join(t.TempDir(), "missing.jsonl")
-	if code := run([]string{"-fixture", missing, "-scratch", t.TempDir()}, &stdout, &stderr); code != 1 {
+	if code := runIn(safeCwd(t), []string{"-fixture", missing, "-scratch", t.TempDir()}, &stdout, &stderr); code != 1 {
 		t.Errorf("run with a missing fixture file = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "open the fixture") {
@@ -63,10 +110,105 @@ func TestRunRefusesAFixtureMissingABead(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	fixture := writeFixture(t, fixtureID, fixtureParent)
-	if code := run([]string{"-fixture", fixture, "-scratch", t.TempDir()}, &stdout, &stderr); code != 1 {
+	if code := runIn(safeCwd(t), []string{"-fixture", fixture, "-scratch", t.TempDir()}, &stdout, &stderr); code != 1 {
 		t.Errorf("run over a fixture missing %s = %d, want 1", fixtureDepID, code)
 	}
 	if !strings.Contains(stderr.String(), fixtureDepID) {
 		t.Errorf("stderr = %q, want the missing bead named", stderr.String())
+	}
+}
+
+// TestRunRefusesAScratchUnderAWorkspace: bd init walks up from the copy it runs in, and a copy under
+// a tree that holds a beads workspace would make it rewrite that workspace's store (gt-p85pw.103).
+// The run is refused before bd runs and before anything is written, so the workspace is untouched.
+func TestRunRefusesAScratchUnderAWorkspace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		marker func(t *testing.T, tree string) string // returns the file the tree must keep byte for byte
+	}{
+		{"a .beads directory", func(t *testing.T, tree string) string {
+			metadata := filepath.Join(tree, ".beads", "metadata.json")
+			mustWrite(t, metadata, `{"dolt_database":"hq"}`)
+			return metadata
+		}},
+		{"a metadata.json", func(t *testing.T, tree string) string {
+			metadata := filepath.Join(tree, "metadata.json")
+			mustWrite(t, metadata, `{"dolt_database":"hq"}`)
+			return metadata
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tree := t.TempDir()
+			metadata := tc.marker(t, tree)
+			before := readFile(t, metadata)
+			scratch := filepath.Join(tree, "scratch")
+			out := filepath.Join(t.TempDir(), "golden")
+			var stdout, stderr bytes.Buffer
+			args := []string{
+				"-fixture", writeFixture(t, fixtureIDs...),
+				"-scratch", scratch,
+				"-out", out,
+				"-bd", filepath.Join(t.TempDir(), "no-such-bd"),
+			}
+			if code := runIn(safeCwd(t), args, &stdout, &stderr); code != 1 {
+				t.Fatalf("run with -scratch under a workspace = %d, want 1\nstderr: %s", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "beads workspace") {
+				t.Errorf("stderr = %q, want the workspace named", stderr.String())
+			}
+			if strings.Contains(stderr.String(), "no such file") {
+				t.Errorf("stderr = %q, want no bd run attempted", stderr.String())
+			}
+			if after := readFile(t, metadata); after != before {
+				t.Errorf("%s = %q after the refused run, want %q", metadata, after, before)
+			}
+			if _, err := os.Stat(scratch); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("scratch %s stat = %v, want the refused run to make nothing", scratch, err)
+			}
+			if entries, err := os.ReadDir(out); err == nil && len(entries) > 0 {
+				t.Errorf("goldens written under a workspace: %v", entries)
+			}
+		})
+	}
+}
+
+// TestRunRefusesAWorkingDirectoryUnderAWorkspace: the recorder's own working directory is checked
+// too, since a recorder started inside a beads worktree is where the incident began.
+func TestRunRefusesAWorkingDirectoryUnderAWorkspace(t *testing.T) {
+	t.Parallel()
+	tree := t.TempDir()
+	metadata := filepath.Join(tree, ".beads", "metadata.json")
+	mustWrite(t, metadata, `{"dolt_database":"hq"}`)
+	before := readFile(t, metadata)
+	work := filepath.Join(tree, "work")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatalf("make the working directory: %v", err)
+	}
+	out := filepath.Join(t.TempDir(), "golden")
+	var stdout, stderr bytes.Buffer
+	args := []string{
+		"-fixture", writeFixture(t, fixtureIDs...),
+		"-scratch", t.TempDir(),
+		"-out", out,
+		"-bd", filepath.Join(t.TempDir(), "no-such-bd"),
+	}
+	inWorkspace := func() (string, error) { return work, nil }
+	if code := runIn(inWorkspace, args, &stdout, &stderr); code != 1 {
+		t.Fatalf("run from a working directory under a workspace = %d, want 1\nstderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "beads workspace") {
+		t.Errorf("stderr = %q, want the workspace named", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "no such file") {
+		t.Errorf("stderr = %q, want no bd run attempted", stderr.String())
+	}
+	if after := readFile(t, metadata); after != before {
+		t.Errorf("%s = %q after the refused run, want %q", metadata, after, before)
+	}
+	if entries, err := os.ReadDir(out); err == nil && len(entries) > 0 {
+		t.Errorf("goldens written under a workspace: %v", entries)
 	}
 }

@@ -13,11 +13,18 @@
 // own, made with bd init and filled from -fixture. The read rows share one copy and each mutating
 // row gets one of its own, so no row sees another's writes; each copy's database is dropped and its
 // directory removed before the command exits. bd reaches the Dolt server through the environment
-// (BEADS_DOLT_SERVER_PORT and friends), which passes through to every run. Before any row, bd is
-// asked for each bead the fixture must hold and each verb the table names, so a fixture or a table
-// bd cannot answer fails the run. With -check the table runs again and the goldens that differ, and
-// those of rows the table no longer has, are listed on stdout; nothing is written, and the exit
-// code is 1 when any are listed.
+// (BEADS_DOLT_SERVER_PORT and friends), which passes through to every run, and a container server
+// needs BEADS_TEST_SERVER=1 there as bd itself does. Before any row, bd is asked for each bead the
+// fixture must hold and each verb the table names, so a fixture or a table bd cannot answer fails
+// the run. With -check the table runs again and the goldens that differ, and those of rows the table
+// no longer has, are listed on stdout; nothing is written, and the exit code is 1 when any are
+// listed.
+//
+// -scratch must sit outside any .beads tree. bd init walks up from the copy it runs in, refuses a
+// tree that already holds a workspace, and on the way rewrites the first store it finds, so the
+// recorder refuses to run when its working directory or the scratch directory sits in one
+// (gt-p85pw.103). A scratch directory that is its own git repository works, since no directory above
+// it holds a workspace.
 package main
 
 import (
@@ -43,6 +50,12 @@ type options struct {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runIn(os.Getwd, args, stdout, stderr)
+}
+
+// runIn is run with the working directory injected, so a test puts the recorder in a tree of its own
+// without changing the process's directory.
+func runIn(getwd func() (string, error), args []string, stdout, stderr io.Writer) int {
 	var opts options
 	flags := flag.NewFlagSet("bdshim-record", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -54,6 +67,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.BoolVar(&opts.flags, "flags", false, "record the value flags bd documents per command, not the goldens")
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+	scratch := opts.scratch
+	if opts.flags {
+		scratch = "" // a flags recording makes no copies, so it has no scratch directory to guard
+	}
+	if err := guardRun(getwd, scratch); err != nil {
+		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
+		return 1
 	}
 	runner := execBD(opts.bd)
 	if opts.flags {
@@ -69,7 +90,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "bdshim-record: -fixture is required")
 		return 2
 	}
-	provision, err := provisionFixture(runner, opts.fixture, opts.scratch)
+	provision, keep, err := provisionFixtureFrom(getwd, runner, opts.fixture, opts.scratch)
 	if err != nil {
 		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
 		return 1
@@ -78,7 +99,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "bdshim-record: make scratch directory %q: %v\n", opts.scratch, err)
 		return 1
 	}
-	rc := Recorder{Run: runner, Copy: provision}
+	rc := Recorder{
+		Run:       runner,
+		Copy:      provision,
+		Normalize: func(stdout []byte) []byte { return normalizeGolden(stdout, keep) },
+	}
 	return execute(opts, rc, Table(), stdout, stderr)
 }
 

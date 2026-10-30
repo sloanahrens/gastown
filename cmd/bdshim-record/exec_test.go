@@ -60,6 +60,59 @@ func TestExitResultKeepsAnExitAndRefusesARunThatNeverFinished(t *testing.T) {
 	}
 }
 
+// TestRecordingEnvPinsTheIdentityAndDropsTheStoreSelectors: every bd run sees the recorder's actor
+// and git identity in place of the operator's, so a golden's owner and created_by read the same on
+// every machine, while the store selectors still go so bd works on the copy it runs in.
+func TestRecordingEnvPinsTheIdentityAndDropsTheStoreSelectors(t *testing.T) {
+	t.Parallel()
+	env := recordingEnv([]string{
+		"PATH=/usr/bin",
+		"BEADS_DOLT_SERVER_PORT=3307",
+		"BEADS_DIR=/home/operator/gt/.beads",
+		"BEADS_DOLT_SERVER_DATABASE=hq",
+		"BEADS_ACTOR=operator@example.com",
+		"BD_ACTOR=operator",
+		"GIT_AUTHOR_NAME=Operator",
+		"GIT_AUTHOR_EMAIL=operator@example.com",
+		"GIT_COMMITTER_NAME=Operator",
+		"GIT_COMMITTER_EMAIL=operator@example.com",
+	})
+	got := envEntries(env)
+	want := map[string]string{
+		"BEADS_ACTOR":            "bdshim-record",
+		"BD_ACTOR":               "bdshim-record",
+		"GIT_AUTHOR_NAME":        "bdshim-record",
+		"GIT_AUTHOR_EMAIL":       "bdshim-record@example.invalid",
+		"GIT_COMMITTER_NAME":     "bdshim-record",
+		"GIT_COMMITTER_EMAIL":    "bdshim-record@example.invalid",
+		"PATH":                   "/usr/bin",
+		"BEADS_DOLT_SERVER_PORT": "3307", // the server address still passes through
+	}
+	for key, value := range want {
+		if values := got[key]; len(values) != 1 || values[0] != value {
+			t.Errorf("%s = %v, want exactly [%q]", key, values, value)
+		}
+	}
+	for _, key := range []string{"BEADS_DIR", "BEADS_DOLT_SERVER_DATABASE"} {
+		if values := got[key]; len(values) != 0 {
+			t.Errorf("%s = %v, want the store selector dropped", key, values)
+		}
+	}
+}
+
+// envEntries returns each variable's values in the order the environment holds them.
+func envEntries(env []string) map[string][]string {
+	entries := make(map[string][]string, len(env))
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		entries[key] = append(entries[key], value)
+	}
+	return entries
+}
+
 // okBD answers every call with exit 0.
 func okBD([]string) ([]byte, int, error) { return nil, 0, nil }
 
@@ -120,7 +173,7 @@ func TestProvisionFixtureMakesADatabaseOfItsOwn(t *testing.T) {
 	fixture := writeFixture(t, fixtureIDs...)
 	scratch := t.TempDir()
 	bd := &fakeBD{out: okBD}
-	provision, err := provisionFixture(bd.Run, fixture, scratch)
+	provision, _, err := provisionFixture(bd.Run, fixture, scratch)
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -157,7 +210,7 @@ func TestProvisionFixtureMakesADatabaseOfItsOwn(t *testing.T) {
 func TestProvisionFixtureGivesEachCopyADifferentDatabase(t *testing.T) {
 	t.Parallel()
 	bd := &fakeBD{out: okBD}
-	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), t.TempDir())
+	provision, _, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), t.TempDir())
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -180,7 +233,7 @@ func TestProvisionFixtureGivesEachCopyADifferentDatabase(t *testing.T) {
 func TestProvisionFixtureDropsTheDatabaseAndRemovesTheDirectory(t *testing.T) {
 	t.Parallel()
 	bd := &fakeBD{out: okBD}
-	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), t.TempDir())
+	provision, _, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), t.TempDir())
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -219,7 +272,7 @@ func TestProvisionFixtureReportsAFailedInit(t *testing.T) {
 		return nil, 0, nil
 	}}
 	scratch := t.TempDir()
-	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), scratch)
+	provision, _, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), scratch)
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -246,7 +299,7 @@ func TestProvisionFixtureReportsAFailedImportAndDropsTheDatabase(t *testing.T) {
 		return nil, 0, nil
 	}}
 	scratch := t.TempDir()
-	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), scratch)
+	provision, _, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), scratch)
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -272,7 +325,7 @@ func TestProvisionFixtureReportsACleanupThatCannotComplete(t *testing.T) {
 		}
 		return nil, 0, nil
 	}}
-	provision, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), t.TempDir())
+	provision, _, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), t.TempDir())
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -295,7 +348,7 @@ func TestProvisionFixtureRefusesAFixtureMissingABead(t *testing.T) {
 	t.Parallel()
 	bd := &fakeBD{out: okBD}
 	fixture := writeFixture(t, fixtureID, fixtureParent)
-	_, err := provisionFixture(bd.Run, fixture, t.TempDir())
+	_, _, err := provisionFixture(bd.Run, fixture, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), fixtureDepID) {
 		t.Fatalf("provisionFixture of a fixture missing %s = %v, want an error naming it", fixtureDepID, err)
 	}
@@ -310,7 +363,7 @@ func TestProvisionFixtureRefusesALineThatIsNotABead(t *testing.T) {
 	t.Parallel()
 	fixture := writeFixture(t, fixtureIDs...)
 	mustWrite(t, fixture, "{\"id\":\"fx-1\"}\nnot a bead\n")
-	_, err := provisionFixture(okRun, fixture, t.TempDir())
+	_, _, err := provisionFixture(okRun, fixture, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "line 2") {
 		t.Fatalf("provisionFixture over a line that is not a bead = %v, want the line named", err)
 	}
@@ -320,7 +373,7 @@ func TestProvisionFixtureRefusesALineThatIsNotABead(t *testing.T) {
 // when the scratch path cannot hold one the run stops naming the directory.
 func TestProvisionFixtureReportsAScratchItCannotMake(t *testing.T) {
 	t.Parallel()
-	provision, err := provisionFixture(okRun, writeFixture(t, fixtureIDs...), filepath.Join(t.TempDir(), "missing"))
+	provision, _, err := provisionFixture(okRun, writeFixture(t, fixtureIDs...), filepath.Join(t.TempDir(), "missing"))
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -334,7 +387,7 @@ func TestProvisionFixtureReportsAScratchItCannotMake(t *testing.T) {
 func TestProvisionFixtureReportsAFixtureItCannotRead(t *testing.T) {
 	t.Parallel()
 	// A directory opens as a file but fails the first read, on Linux and macOS alike.
-	_, err := provisionFixture(okRun, t.TempDir(), t.TempDir())
+	_, _, err := provisionFixture(okRun, t.TempDir(), t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "read the fixture") {
 		t.Fatalf("provisionFixture of a fixture that cannot be read = %v, want an error naming the read", err)
 	}
@@ -345,7 +398,7 @@ func TestProvisionFixtureReportsAFixtureItCannotRead(t *testing.T) {
 func TestProvisionFixtureReportsAWorkingDirectoryItCannotRead(t *testing.T) {
 	t.Parallel()
 	getwd := func() (string, error) { return "", errors.New("getwd: i/o error") }
-	_, err := provisionFixtureFrom(getwd, okRun, "fixture.jsonl", t.TempDir())
+	_, _, err := provisionFixtureFrom(getwd, okRun, "fixture.jsonl", t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "i/o error") {
 		t.Fatalf("provisionFixtureFrom without a working directory = %v, want the getwd failure reported", err)
 	}
@@ -355,7 +408,7 @@ func TestProvisionFixtureReportsAWorkingDirectoryItCannotRead(t *testing.T) {
 // over an empty database.
 func TestProvisionFixtureRefusesAMissingFixture(t *testing.T) {
 	t.Parallel()
-	_, err := provisionFixture(okRun, filepath.Join(t.TempDir(), "missing.jsonl"), t.TempDir())
+	_, _, err := provisionFixture(okRun, filepath.Join(t.TempDir(), "missing.jsonl"), t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "open the fixture") {
 		t.Fatalf("provisionFixture of a missing fixture = %v, want an error naming it", err)
 	}
@@ -378,7 +431,7 @@ func TestProvisionFixtureNamesTheFixtureOutsideItsWorkingDirectory(t *testing.T)
 		t.Fatalf("the fixture %s is named absolutely already", abs)
 	}
 	bd := &fakeBD{out: okBD}
-	provision, err := provisionFixture(bd.Run, rel, t.TempDir())
+	provision, _, err := provisionFixture(bd.Run, rel, t.TempDir())
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -396,7 +449,7 @@ func TestCaptureGivesEachMutatingRowItsOwnDatabase(t *testing.T) {
 	t.Parallel()
 	fixture := writeFixture(t, fixtureIDs...)
 	bd := &fakeBD{out: echoBD}
-	provision, err := provisionFixture(bd.Run, fixture, t.TempDir())
+	provision, _, err := provisionFixture(bd.Run, fixture, t.TempDir())
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -437,7 +490,7 @@ func TestCaptureDropsEveryDatabaseAfterTheRows(t *testing.T) {
 	t.Parallel()
 	fixture := writeFixture(t, fixtureIDs...)
 	bd := &fakeBD{out: echoBD}
-	provision, err := provisionFixture(bd.Run, fixture, t.TempDir())
+	provision, _, err := provisionFixture(bd.Run, fixture, t.TempDir())
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
