@@ -50,12 +50,25 @@ func Unlock(ctx context.Context, exec Exec, keychain, password string) error {
 	return err
 }
 
+// Attempt runs one codesign and reports its output and error. A caller bounds it
+// as it needs: Codesign uses a context deadline, the installer uses timeout(1)
+// argv.
+type Attempt func() (stdout, stderr string, err error)
+
 // Codesign signs path under identifier with identity, bounded by ctx. A failed
 // codesign runs restore before it returns, because a codesign that dies
 // mid-write leaves half a binary at path. A failed restore is returned as it
 // is, with path in neither state, and the caller must not install it.
 func Codesign(ctx context.Context, exec Exec, keychain, identity, identifier, path string, restore func() error) error {
-	stdout, stderr, err := exec(ctx, "codesign", "--force", "--keychain", OptionSafe(keychain), "-s", identity, "-i", identifier, OptionSafe(path))
+	return CodesignWith(func() (string, string, error) {
+		return exec(ctx, "codesign", "--force", "--keychain", OptionSafe(keychain), "-s", identity, "-i", identifier, OptionSafe(path))
+	}, restore)
+}
+
+// CodesignWith is Codesign over a caller-bounded attempt: a failed attempt runs
+// restore before it returns, and is reported as a CodesignError.
+func CodesignWith(attempt Attempt, restore func() error) error {
+	stdout, stderr, err := attempt()
 	if err == nil {
 		return nil
 	}
