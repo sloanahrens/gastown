@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/townconfig"
+	"github.com/steveyegge/gastown/tracker/api"
 )
 
 // bdHandshakeGatedCommands are the commands that run the town: they start
@@ -83,6 +84,11 @@ const trackerProbeTimeout = 5 * time.Second
 // fields, and a probe is never a way to pull a large body through the gate.
 const trackerProbeBodyLimit = 64 << 10
 
+// trackerReadyStatus is the status trackerd reports when it is ready. The
+// status field decides, not the status code: a 200 whose report says anything
+// else is a trackerd that answers but is not ready, and it is refused.
+const trackerReadyStatus = "ready"
+
 // townStartGate is the startup gate for town-running commands and agent
 // session starts: the town config files must parse (checked on every call,
 // so a file broken while the daemon runs stops its next session start), then
@@ -143,7 +149,14 @@ func townHandshakeFor(ctx context.Context, townRoot string, bd, tracker func(con
 // townRouteBackend is the backend the town's own route names: the route whose
 // .beads directory is the town's, read here as internal/beads/backend reads a
 // rig's. A table that names no such route is Dolt, as a rig the table does not
-// name is Dolt; a table that cannot be read is an error, never Dolt.
+// name is Dolt, and a town with no route table at all has always been Dolt.
+//
+// A table that cannot be read is an error, never Dolt: the backend is then
+// unknown, and unknown denies. That is the one place this gate is stricter
+// than the bd-only gate it replaces (such a town used to reach the bd
+// handshake without the route table being read at all), and it denies rather
+// than guesses because a tracker town read as Dolt would be asked for a bd
+// build and a Dolt schema that do not exist there.
 func townRouteBackend(townRoot string) (string, error) {
 	routes, err := beads.LoadRoutes(beads.GetTownBeadsPath(townRoot))
 	if err != nil {
@@ -186,7 +199,7 @@ func trackerTownHandshakeWith(ctx context.Context, townRoot string, httpClient *
 	if err != nil {
 		return fmt.Errorf("%w: the town's tracker endpoint cannot be read: %w", deps.ErrTrackerHandshake, err)
 	}
-	return deps.CheckTrackerHandshake(ctx, townTrackerProbe{url: endpoint.URL(), http: httpClient})
+	return deps.CheckTrackerHandshake(ctx, townTrackerProbe{url: endpoint.URL(), http: httpClient}, api.SchemaLevel)
 }
 
 // townTrackerProbe reads the town tracker's readiness over /readyz, the probe
@@ -225,6 +238,7 @@ func (p townTrackerProbe) Readyz(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("the tracker's answer could not be read: %w", err)
 	}
 	var answer struct {
+		Status      string `json:"status"`
 		SchemaLevel int    `json:"schema_level"`
 		Message     string `json:"message"`
 	}
@@ -236,6 +250,10 @@ func (p townTrackerProbe) Readyz(ctx context.Context) (int, error) {
 			return 0, fmt.Errorf("the tracker is not ready: %s", answer.Message)
 		}
 		return 0, fmt.Errorf("the tracker answered %d to its readiness probe", resp.StatusCode)
+	}
+	if answer.Status != trackerReadyStatus {
+		return 0, fmt.Errorf("the tracker answered %d but its readiness report says %q, not %q",
+			resp.StatusCode, answer.Status, trackerReadyStatus)
 	}
 	if answer.SchemaLevel <= 0 {
 		return 0, errors.New("the tracker reported no schema level")

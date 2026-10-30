@@ -398,6 +398,16 @@ func TestTownStartHandshakeTrackerRefusals(t *testing.T) {
 			wants:  []string{"answer could not be read"},
 		},
 		{
+			name:   "answered 200 but its report is not ready",
+			answer: trackerAnswer{status: http.StatusOK, body: `{"status":"degraded","schema_level":2}`},
+			wants:  []string{`"degraded"`, `not "ready"`},
+		},
+		{
+			name:   "answered 200 with no status in its report",
+			answer: trackerAnswer{status: http.StatusOK, body: `{"schema_level":2}`},
+			wants:  []string{`""`, `not "ready"`},
+		},
+		{
 			name:   "ready with no schema level",
 			answer: trackerAnswer{status: http.StatusOK, body: `{"status":"ready","schema_level":0}`},
 			wants:  []string{"no schema level"},
@@ -472,6 +482,12 @@ func TestTownStartHandshakeDoltTownKeepsTheBDHandshake(t *testing.T) {
 // TestTownStartHandshakeRefusesAnUnknownOrUnreadableRoute: a route table the
 // gate cannot read, and a backend that is neither Dolt nor the tracker, both
 // refuse rather than falling back to Dolt, and neither handshake runs.
+//
+// The unreadable table is the one place this gate refuses where the bd-only
+// gate it replaces would have run the bd handshake, because that gate never
+// read the route table. It denies because the backend is then unknown, and
+// unknown denies: a tracker town guessed to be Dolt would be asked for a bd
+// build and a Dolt schema that do not exist there (gt-p85pw.110).
 func TestTownStartHandshakeRefusesAnUnknownOrUnreadableRoute(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -489,6 +505,9 @@ func TestTownStartHandshakeRefusesAnUnknownOrUnreadableRoute(t *testing.T) {
 			want: []string{"postgres", "dolt", "tracker"},
 		},
 		{
+			// A town whose store would have been Dolt: with no readable route
+			// table the backend is unknown, so the gate refuses rather than
+			// running the bd handshake as it did before this change.
 			name: "a route table that cannot be read",
 			setUp: func(t *testing.T) string {
 				town := t.TempDir()
@@ -569,4 +588,13 @@ func TestTownStartHandshakeDoltTownRefusesAnUpstreamBD(t *testing.T) {
 	if !errors.Is(err, deps.ErrBDHandshake) || !strings.Contains(err.Error(), "no build_id") {
 		t.Fatalf("checkTownBDHandshake with an upstream bd = %v, want the bd handshake's refusal", err)
 	}
+}
+
+// TestTrackerRefusalRemedyNamesACommandInTheTree: a tracker refusal tells the
+// operator to check the tracker with a gt command, so that command must be the
+// one the tree holds. A rename of gt tracker status turns this red rather than
+// leaving a refusal that sends the operator to a command that is gone.
+func TestTrackerRefusalRemedyNamesACommandInTheTree(t *testing.T) {
+	t.Parallel()
+	findCommand(t, deps.TrackerStatusCommand)
 }

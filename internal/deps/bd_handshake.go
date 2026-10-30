@@ -12,7 +12,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
-	"github.com/steveyegge/gastown/tracker/api"
 )
 
 // KnownBDContractVersions are the bd JSON contract versions (bd version
@@ -197,22 +196,29 @@ type Tracker interface {
 // CheckTrackerHandshake decides whether the town may run against trackerd, the
 // store a tracker route names. No bd build and no Dolt database are behind such
 // a route, so the bd checks do not apply: the town may run when the tracker
-// answers ready at the schema level this gt speaks, api.SchemaLevel. Every
-// refusal wraps ErrTrackerHandshake and names the tracker and its URL.
-func CheckTrackerHandshake(ctx context.Context, tr Tracker) error {
+// answers ready at the schema level this gt speaks, which the caller passes as
+// wantLevel (internal/cmd passes tracker/api.SchemaLevel; this package holds no
+// tracker client). Every refusal wraps ErrTrackerHandshake and names the
+// tracker and its URL.
+func CheckTrackerHandshake(ctx context.Context, tr Tracker, wantLevel int) error {
 	level, err := tr.Readyz(ctx)
 	if err != nil {
 		return refuseTracker(tr.URL(), err.Error())
 	}
-	if level != api.SchemaLevel {
-		return refuseTracker(tr.URL(), fmt.Sprintf("the tracker is at schema level %d but this gt speaks level %d (api.SchemaLevel)", level, api.SchemaLevel))
+	if level != wantLevel {
+		return refuseTracker(tr.URL(), fmt.Sprintf("the tracker is at schema level %d but this gt speaks level %d", level, wantLevel))
 	}
 	return nil
 }
 
+// TrackerStatusCommand is the gt command the remedy names, so a test can pin
+// that it is a command in the tree rather than a name from memory.
+const TrackerStatusCommand = "gt tracker status"
+
 // trackerFixHint is the remedy a tracker refusal names: trackerd serves from
 // Postgres, so the bd install hint would send the operator down the wrong path.
-const trackerFixHint = "check the tracker with `gt tracker status`, and that trackerd and its Postgres are running"
+// TestTrackerStatusRemedyNamesACommandInTheTree (internal/cmd) pins the command.
+const trackerFixHint = "check the tracker with `" + TrackerStatusCommand + "`, and that trackerd and its Postgres are running"
 
 // refuseTracker is the refusal for a store on the tracker, where the bd
 // messages' "install bd" remedy would be wrong.
