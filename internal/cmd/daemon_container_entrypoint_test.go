@@ -41,8 +41,15 @@ type entrypointRig struct {
 	// created records the paths the create seam made; createErr fails it.
 	created   []string
 	createErr error
-	scratch   bool
-	calls     [][]string
+	// execEnv is the environment the daemon exec was handed; files are the
+	// files readFile can read (readErr fails every read); omTokenFile is the
+	// --om-token-file value.
+	execEnv     []string
+	files       map[string]string
+	readErr     error
+	omTokenFile string
+	scratch     bool
+	calls       [][]string
 }
 
 // scratchRig is a container whose town root is the scratch town: every
@@ -77,10 +84,24 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 		return nil
 	}
 	return containerEntrypoint{
-		self:      func() (string, error) { return entrypointBin, nil },
-		getenv:    func(key string) string { return r.env[key] },
-		run:       record,
-		exec:      record,
+		self:   func() (string, error) { return entrypointBin, nil },
+		getenv: func(key string) string { return r.env[key] },
+		run:    record,
+		exec: func(argv []string, env []string) error {
+			r.calls = append(r.calls, append([]string{}, argv...))
+			r.execEnv = env
+			return nil
+		},
+		readFile: func(path string) (string, error) {
+			if r.readErr != nil {
+				return "", r.readErr
+			}
+			text, ok := r.files[path]
+			if !ok {
+				return "", errors.New("no such file")
+			}
+			return text, nil
+		},
 		mountinfo: func() (string, error) { return r.mountinfo, r.mountErr },
 		dirNames:  func(string) ([]string, error) { return r.dir, r.dirErr },
 		lstat: func(path string) (entryKind, error) {
@@ -106,7 +127,8 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 			r.removed = append(r.removed, path)
 			return r.removeErr
 		},
-		scratch: r.scratch,
+		scratch:     r.scratch,
+		omTokenFile: r.omTokenFile,
 	}
 }
 
@@ -160,8 +182,8 @@ func TestContainerEntrypointScratchFlagIsWired(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var got bool
-			c := newDaemonContainerEntrypointCmd(func(scratch bool) error {
-				got = scratch
+			c := newDaemonContainerEntrypointCmd(func(flags entrypointFlags) error {
+				got = flags.scratch
 				return nil
 			})
 			c.SetArgs(tc.args)
@@ -217,7 +239,7 @@ func TestContainerEntrypointReturnsDaemonExecError(t *testing.T) {
 	t.Parallel()
 	r := townRig()
 	e := r.entrypoint()
-	e.exec = func(argv []string) error { return errors.New("exec failed") }
+	e.exec = func([]string, []string) error { return errors.New("exec failed") }
 	if err := runContainerEntrypoint(e); err == nil {
 		t.Fatal("expected the exec failure to surface")
 	}
@@ -939,5 +961,187 @@ func TestIsMountPoint(t *testing.T) {
 				t.Errorf("isMountPoint(%q) = %v, want %v", tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+// omTokenFixture stands in for a subscription token: it is not a secret, and no
+// failure message below prints it or any other environment value.
+const omTokenFixture = "fixture-om-token-0000"
+
+// The compose project's command line carries --om-token-file, and the live
+// project's passes none, so no token is loaded there.
+func TestContainerEntrypointOMTokenFlagIsWired(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no flag", []string{}, ""},
+		{"the flag", []string{"--om-token-file", "/run/secrets/om-token"}, "/run/secrets/om-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			c := newDaemonContainerEntrypointCmd(func(flags entrypointFlags) error {
+				got = flags.omTokenFile
+				return nil
+			})
+			c.SetArgs(tc.args)
+			c.SilenceUsage, c.SilenceErrors = true, true
+			if err := c.Execute(); err != nil {
+				t.Fatalf("execute container-entrypoint %v: %v", tc.args, err)
+			}
+			if got != tc.want {
+				t.Errorf("--om-token-file parsed as %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// An API credential in the container environment outranks the subscription
+// token and bills API rates, so the entrypoint refuses before anything runs,
+// scratch or not, naming the variable and never its value. An empty value is
+// not set (a compose pass-through of an unset host variable arrives empty).
+func TestContainerEntrypointRefusesAPICredentials(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+		for _, rigOf := range []struct {
+			kind string
+			rig  func() *entrypointRig
+		}{{"a town", townRig}, {"a scratch town", scratchRig}} {
+			t.Run(name+" in "+rigOf.kind, func(t *testing.T) {
+				t.Parallel()
+				r := rigOf.rig()
+				r.env[name] = "credential-fixture-value"
+				r.omTokenFile = "/run/secrets/om-token"
+				r.files = map[string]string{"/run/secrets/om-token": omTokenFixture}
+
+				err := runContainerEntrypoint(r.entrypoint())
+
+				if err == nil || !strings.Contains(err.Error(), name) {
+					t.Fatalf("error = %v, want a refusal naming %s", err, name)
+				}
+				if strings.Contains(err.Error(), "credential-fixture-value") {
+					t.Error("the refusal printed the credential's value")
+				}
+				if len(r.calls) != 0 {
+					t.Errorf("a refusal ran %d commands, want none", len(r.calls))
+				}
+			})
+		}
+	}
+	t.Run("an empty value is not set", func(t *testing.T) {
+		t.Parallel()
+		r := townRig()
+		r.env["ANTHROPIC_API_KEY"] = ""
+		r.env["ANTHROPIC_AUTH_TOKEN"] = ""
+		if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+			t.Fatalf("an empty credential variable refused the start: %v", err)
+		}
+	})
+}
+
+// The token file's trimmed contents become CLAUDE_CODE_OAUTH_TOKEN in the exec'd
+// daemon's environment and nowhere else: not in an argv, not in the environment
+// of the install or git commands, which run through the argv seam.
+func TestContainerEntrypointLoadsTheOMToken(t *testing.T) {
+	t.Parallel()
+	for _, rigOf := range []struct {
+		kind string
+		rig  func() *entrypointRig
+	}{{"a town", townRig}, {"a scratch town", scratchRig}} {
+		t.Run(rigOf.kind, func(t *testing.T) {
+			t.Parallel()
+			r := rigOf.rig()
+			r.omTokenFile = "/run/secrets/om-token"
+			r.files = map[string]string{"/run/secrets/om-token": "  " + omTokenFixture + " \n"}
+
+			if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+				t.Fatalf("runContainerEntrypoint: %v", err)
+			}
+
+			if len(r.execEnv) != 1 || r.execEnv[0] != "CLAUDE_CODE_OAUTH_TOKEN="+omTokenFixture {
+				t.Errorf("daemon environment additions = %d entries, want exactly CLAUDE_CODE_OAUTH_TOKEN set to the trimmed token (values not printed)", len(r.execEnv))
+			}
+			for _, argv := range r.calls {
+				if strings.Contains(strings.Join(argv, " "), omTokenFixture) {
+					t.Errorf("an argv carries the token: %v", argv[:2])
+				}
+			}
+			if n := r.execCalls(); n != 1 {
+				t.Errorf("recorded %d daemon exec argv, want 1", n)
+			}
+		})
+	}
+}
+
+// With the flag unset no token is loaded and nothing refuses.
+func TestContainerEntrypointWithoutTheTokenFileLoadsNoToken(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	r.files = map[string]string{"/run/secrets/om-token": omTokenFixture}
+	r.readErr = errors.New("a read was attempted")
+
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	if len(r.execEnv) != 0 {
+		t.Errorf("daemon environment additions = %d entries, want none", len(r.execEnv))
+	}
+}
+
+// An unreadable file, an empty one and a whitespace-only one each refuse,
+// naming the path alone; nothing runs; and neither the read error's own text
+// nor the token reaches the message.
+func TestContainerEntrypointRefusesAnUnusableTokenFile(t *testing.T) {
+	t.Parallel()
+	const path = "/run/secrets/om-token"
+	for _, tc := range []struct {
+		name    string
+		files   map[string]string
+		readErr error
+		want    string
+	}{
+		{"unreadable", map[string]string{path: omTokenFixture}, errors.New("boom " + omTokenFixture), "could not be read"},
+		{"missing", map[string]string{}, nil, "could not be read"},
+		{"empty", map[string]string{path: ""}, nil, "is empty"},
+		{"whitespace only", map[string]string{path: " \n\t "}, nil, "is empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			r.omTokenFile = path
+			r.files, r.readErr = tc.files, tc.readErr
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want a refusal naming the path and saying %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), omTokenFixture) {
+				t.Error("the refusal carries the token or the read error's own text")
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("a refusal ran %d commands, want none", len(r.calls))
+			}
+		})
+	}
+}
+
+// mergeEnv replaces a variable the additions name, so no name appears twice for
+// the exec to choose between, and keeps everything else in order.
+func TestMergeEnv(t *testing.T) {
+	t.Parallel()
+	got := mergeEnv(
+		[]string{"A=1", "CLAUDE_CODE_OAUTH_TOKEN=old", "B=2"},
+		[]string{"CLAUDE_CODE_OAUTH_TOKEN=new", "C=3"},
+	)
+	want := []string{"A=1", "B=2", "CLAUDE_CODE_OAUTH_TOKEN=new", "C=3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("mergeEnv = %v, want %v", got, want)
+	}
+	if got := mergeEnv([]string{"A=1"}, nil); !reflect.DeepEqual(got, []string{"A=1"}) {
+		t.Errorf("mergeEnv with no additions = %v, want the base", got)
 	}
 }
