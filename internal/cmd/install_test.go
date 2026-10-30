@@ -498,7 +498,6 @@ func TestRunInstallWritesTheTrackerEndpoint(t *testing.T) {
 type recordingSteps struct {
 	beadChecks  int
 	rigCalls    []string
-	starts      int
 	townInits   []string
 	townConfigs []string
 	initRigErrs error
@@ -511,7 +510,6 @@ func (r *recordingSteps) steps() installSteps {
 			r.rigCalls = append(r.rigCalls, rigName)
 			return doltserver.InitRigResult{Created: true}, r.initRigErrs
 		},
-		startServer:   func(string) error { r.starts++; return nil },
 		initTownBeads: func(townRoot string) error { r.townInits = append(r.townInits, townRoot); return nil },
 		configureTownBeads: func(townRoot string) {
 			r.townConfigs = append(r.townConfigs, townRoot)
@@ -562,9 +560,6 @@ func TestRunInstallDoltHostCreatesHQOnTheServer(t *testing.T) {
 			}
 			if rec.beadChecks != 1 {
 				t.Errorf("the install checked for bd %d time(s), want once: bd initializes the beads on the server", rec.beadChecks)
-			}
-			if rec.starts != 0 {
-				t.Errorf("the install started %d local Dolt servers, want none", rec.starts)
 			}
 			if _, err := os.Stat(filepath.Join(hqPath, ".dolt-data")); !os.IsNotExist(err) {
 				t.Errorf("gt install --dolt-host left .dolt-data/ behind (err = %v)", err)

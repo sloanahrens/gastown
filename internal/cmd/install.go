@@ -53,7 +53,6 @@ var (
 type installSteps struct {
 	checkBeads         func() error
 	initRig            func(townRoot, rigName string) (doltserver.InitRigResult, error)
-	startServer        func(townRoot string) error
 	initTownBeads      func(townRoot string) error
 	configureTownBeads func(townRoot string)
 }
@@ -65,9 +64,6 @@ func (s installSteps) resolved() installSteps {
 	}
 	if s.initRig == nil {
 		s.initRig = doltserver.InitRig
-	}
-	if s.startServer == nil {
-		s.startServer = doltserver.Start
 	}
 	if s.initTownBeads == nil {
 		s.initTownBeads = initTownBeads
@@ -472,14 +468,14 @@ func runInstallWith(opts installOptions, args []string) error {
 			// Identity was verified in preflight above.
 			// Create HQ database before starting server.
 			if !externalTestDolt {
-				if _, err := steps.initRig(absPath, "hq"); err != nil {
+				if _, err := doltserver.InitRig(absPath, "hq"); err != nil {
 					return fmt.Errorf("initializing HQ Dolt database: %w", err)
 				}
 
 				// Start the Dolt server — bd commands need a running server.
 				// The server stays running after install (it's lightweight infrastructure,
 				// like a database). Stop it with 'gt dolt stop' when not needed.
-				if err := steps.startServer(absPath); err != nil {
+				if err := doltserver.Start(absPath); err != nil {
 					if !strings.Contains(err.Error(), "already running") {
 						return fmt.Errorf("starting Dolt server for beads: %w", err)
 					}

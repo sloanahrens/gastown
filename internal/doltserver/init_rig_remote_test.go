@@ -38,8 +38,11 @@ type remoteFakeServer struct {
 	statements []string
 	opens      int
 	openErr    error
-	queryErr   error
-	execErr    error
+	// failOpenAfter fails every open after the first failOpenAfter ones, so a
+	// test can let the existence read through and refuse the create.
+	failOpenAfter int
+	queryErr      error
+	execErr       error
 }
 
 // open is the host's openDB seam for server: the driver it hands back answers
@@ -54,6 +57,9 @@ func (s *remoteFakeServer) open(string) (*sql.DB, error) {
 	s.mu.Lock()
 	s.opens++
 	err := s.openErr
+	if s.failOpenAfter > 0 && s.opens > s.failOpenAfter {
+		err = errors.New("dial tcp: connect: connection refused")
+	}
 	s.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -245,6 +251,52 @@ func TestInitRigRemoteNamesAnUnreachableServer(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(townRoot, ".dolt-data")); !os.IsNotExist(statErr) {
 		t.Errorf("InitRig left a .dolt-data/ after the remote one refused (err = %v)", statErr)
+	}
+}
+
+// Every way the server can refuse the work is an error the caller sees, named
+// with the host and port, and none of them falls back to a local Dolt
+// (gt-q0ppq).
+func TestInitRigRemoteReportsServerFailures(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		server *remoteFakeServer
+		prefix func(*testing.T) func(string, string) (string, error)
+		want   string
+	}{
+		{"the existence read fails", &remoteFakeServer{queryErr: errors.New("Unknown database 'information_schema'")}, nil, "reading the database list"},
+		{"the create fails", &remoteFakeServer{execErr: errors.New("Access denied for user")}, nil, "creating database"},
+		{"the server refuses the second connection", &remoteFakeServer{failOpenAfter: 1}, nil, "creating database"},
+		{"the issue prefix cannot be written", &remoteFakeServer{}, func(t *testing.T) func(string, string) (string, error) {
+			return func(string, string) (string, error) { return "", errors.New("bd config get failed") }
+		}, "ensuring issue_prefix"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f, h, townRoot := remoteRigHost(t, tt.server)
+			if tt.prefix != nil {
+				h.readIssuePrefix = tt.prefix(t)
+				h.writeIssuePrefix = func(string, string, string, string) error {
+					return errors.New("bd rename-prefix failed")
+				}
+			}
+
+			_, err := h.InitRig(townRoot, "hq")
+			if err == nil {
+				t.Fatalf("InitRig over a server that refused the work succeeded, want an error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not name %q", err, tt.want)
+			}
+			if starts := f.startedCommands(); len(starts) != 0 {
+				t.Errorf("InitRig started a local Dolt after the remote refused: %v", starts)
+			}
+			if _, statErr := os.Stat(filepath.Join(townRoot, ".dolt-data")); !os.IsNotExist(statErr) {
+				t.Errorf("InitRig left a .dolt-data/ after the remote refused (err = %v)", statErr)
+			}
+		})
 	}
 }
 
