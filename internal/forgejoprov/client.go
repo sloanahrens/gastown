@@ -6,19 +6,34 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 // bodyTailLimit is how many response bytes an error message quotes, as the
 // script's body_tail cuts them.
 const bodyTailLimit = 300
 
+// requestTimeout bounds one request on the default client, so a stalled Forgejo
+// cannot hold the run open forever.
+const requestTimeout = 30 * time.Second
+
+// defaultHTTP sends the requests of a Client whose HTTP is nil.
+var defaultHTTP = &http.Client{Timeout: requestTimeout}
+
+// sensitiveField matches a JSON string value under a key that carries a
+// credential: a minted token's sha1, a token, or a password. A reply can echo
+// one, so BodyTail masks it before quoting the reply.
+var sensitiveField = regexp.MustCompile(`("(?:sha1|token|access_token|password)"\s*:\s*)"[^"]*"`)
+
 // Client is the Forgejo API the provisioning run writes through. Every request
 // carries Token in its Authorization header and nowhere else.
 type Client struct {
 	// API is the API root, joined to each request path as given.
 	API string
-	// HTTP sends the requests; nil means http.DefaultClient.
+	// HTTP sends the requests; nil means a default client with a timeout.
 	HTTP *http.Client
 	// Token is the site-admin token, or a bot token once minted.
 	Token Secret
@@ -52,11 +67,7 @@ func (c *Client) Do(method, path string, body any) (int, []byte, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := c.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		// The cause is left out: it can name the request in more detail than
 		// the run's log should carry.
@@ -70,17 +81,32 @@ func (c *Client) Do(method, path string, body any) (int, []byte, error) {
 	return resp.StatusCode, data, nil
 }
 
+// httpClient returns the client a request goes through: the caller's HTTP when
+// it set one, otherwise the default client that times out.
+func (c *Client) httpClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return defaultHTTP
+}
+
 // BodyTail renders the start of a response body for an error message: an
-// em dash and the first 300 bytes with newlines as spaces, or "" for no body.
+// em dash (as the script's body_tail prints it) and the first 300 bytes with
+// newlines as spaces, or "" for no body. Credential values are masked first,
+// and the cut never splits a UTF-8 sequence.
 func BodyTail(resp []byte) string {
 	if len(resp) == 0 {
 		return ""
 	}
-	head := resp
-	if len(head) > bodyTailLimit {
-		head = head[:bodyTailLimit]
+	body := sensitiveField.ReplaceAll(resp, []byte(`${1}"`+redacted+`"`))
+	cut := len(body)
+	if cut > bodyTailLimit {
+		cut = bodyTailLimit
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
 	}
-	return " — " + strings.ReplaceAll(string(head), "\n", " ")
+	return " — " + strings.ReplaceAll(string(body[:cut]), "\n", " ")
 }
 
 // Unexpected is the error for a status the run did not expect, quoting the

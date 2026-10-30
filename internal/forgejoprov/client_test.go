@@ -131,10 +131,28 @@ func TestClientSendsTheTokenOnlyInTheHeader(t *testing.T) {
 	if n := len(f.violations()); n != 0 {
 		t.Errorf("fake refused %d request(s) that should have carried the token", n)
 	}
+	// Do logs nothing of its own, so any line here would be one it should not
+	// have written; a line that carries the token is the leak this test hunts.
+	if len(logs) != 0 {
+		t.Errorf("Do wrote %d log line(s); it should log nothing", len(logs))
+	}
 	for _, line := range logs {
 		if strings.Contains(line, fixtureToken) {
 			t.Errorf("log line carries the token: %s", strings.ReplaceAll(line, fixtureToken, redacted))
 		}
+	}
+}
+
+// TestClientDefaultHTTPIsBounded checks that a client with no HTTP set sends through
+// a client that times out, and that a caller's own client is used as given.
+func TestClientDefaultHTTPIsBounded(t *testing.T) {
+	t.Parallel()
+	if got := (&Client{}).httpClient().Timeout; got <= 0 {
+		t.Errorf("default client Timeout = %v, want a bound so a stalled server cannot hold the run", got)
+	}
+	own := &http.Client{}
+	if got := (&Client{HTTP: own}).httpClient(); got != own {
+		t.Errorf("caller's client was replaced")
 	}
 }
 
@@ -256,6 +274,9 @@ func TestBodyTail(t *testing.T) {
 		{name: "newlines become spaces", resp: []byte("a\nb\nc"), want: " — a b c"},
 		{name: "cut at 300 bytes", resp: []byte(long), want: " — " + strings.Repeat("a", 300)},
 		{name: "exactly 300 bytes kept", resp: []byte(strings.Repeat("b", 300)), want: " — " + strings.Repeat("b", 300)},
+		{name: "cut backs off a split UTF-8 sequence", resp: []byte(strings.Repeat("a", 299) + "é" + "b"), want: " — " + strings.Repeat("a", 299)},
+		{name: "minted token is masked", resp: []byte(`{"name":"bot","sha1":"` + fixtureToken + `"}`), want: ` — {"name":"bot","sha1":"[redacted]"}`},
+		{name: "password is masked", resp: []byte(`{"password": "hunter2"}`), want: ` — {"password": "[redacted]"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
