@@ -1610,15 +1610,18 @@ func parseTierSweepSummaries(output string) map[string]tierSweepTierResult {
 // or log-dir failure). That GREEN line is withheld, so the tier is unreported,
 // and the caller records a tier with no verdict as RED.
 //
-// The integration and race stage is read the same way, with one exception: the
-// rig's script exits 2 at a tier it does not offer, after the tiers before it
-// have printed their verdicts, and those verdicts stand (gt-qgrdy). Only that
-// decline is excused (tierSweepDeclined). Any other exit withholds GREEN, and
-// so does an unknown-tier line under exit 0 (tierSweepExitStands).
+// The integration and race stage is read the same way, with two exceptions.
+// The RED exit (tierSweepRedExit) beside a RED line stands: the command exits 1
+// when any tier it ran was RED, so that RED is what the exit reports and the
+// GREEN line beside it is the other tier's verdict (gt-xyigz). And the rig's
+// script exits 2 at a tier it does not offer, after the tiers before it have
+// printed their verdicts, and those verdicts stand (gt-qgrdy). Any other exit
+// withholds GREEN, and so does an unknown-tier line under exit 0
+// (tierSweepExitStands).
 func tierSweepStageReported(st tierSweepStage, res tierSweepStageResult) map[string]tierSweepTierResult {
 	if st.runner == "" {
 		reported := parseTierSweepSummaries(res.output)
-		if !tierSweepExitStands(st, res) {
+		if !tierSweepExitStands(st, res, reported) {
 			withholdTierSweepGreen(reported)
 		}
 		return reported
@@ -1631,16 +1634,45 @@ func tierSweepStageReported(st tierSweepStage, res tierSweepStageResult) map[str
 	return reported
 }
 
+// tierSweepRedExit is the one exit status cmd/tier-sweep reports for a tier that
+// came back RED. The contract, as the command's package doc and tiersweep.Run
+// state it: each tier's summary line is written as the tier ends, the run exits
+// 0 when every tier was GREEN and 1 when any was RED, and refuses with
+// tiersweep.UsageExit (2) for a command line, log directory or tier it cannot
+// handle, which it reaches only after the tiers before it have printed. The
+// rig's own script follows the same two codes: the RED exit for a tier that
+// failed, UsageExit for a tier it does not offer. Any other status, a signal's
+// -1 included, is not a tier's verdict.
+const tierSweepRedExit = 1
+
 // tierSweepExitStands reports whether a non-shell stage's exit leaves its GREEN
-// verdicts standing. A declined stage stands (tierSweepDeclined). Otherwise only
-// exit 0 stands, and only when the output names no unknown tier: the script
-// declines by exiting 2, so a script that prints the decline line and exits 0
-// is not the decline shape, and its GREEN verdicts are withheld.
-func tierSweepExitStands(st tierSweepStage, res tierSweepStageResult) bool {
+// verdicts standing. A declined stage stands (tierSweepDeclined), and so does
+// the RED exit when the output accounts for it with a RED line: the stage is one
+// command for two tiers, so tierSweepRedExit over a RED integration says nothing
+// about the race tier that reported GREEN beside it (gt-xyigz). Only that status
+// counts as the RED exit; 2 and a signal's -1 withhold GREEN whatever the output
+// printed. With no RED line to account for it, only exit 0 stands, and only when
+// the output names no unknown tier: the script declines by exiting 2, so a
+// script that prints the decline line and exits 0 is not the decline shape, and
+// its GREEN verdicts are withheld.
+func tierSweepExitStands(st tierSweepStage, res tierSweepStageResult, reported map[string]tierSweepTierResult) bool {
 	if len(tierSweepDeclined(st, res)) > 0 {
 		return true
 	}
+	if res.exitCode == tierSweepRedExit && tierSweepAnyRed(reported) {
+		return true
+	}
 	return res.exitCode == 0 && len(parseTierSweepUnknownTiers(res.output)) == 0
+}
+
+// tierSweepAnyRed reports whether a tier's own line came back RED.
+func tierSweepAnyRed(reported map[string]tierSweepTierResult) bool {
+	for _, ts := range reported {
+		if ts.Verdict == tierSweepRed {
+			return true
+		}
+	}
+	return false
 }
 
 // withholdTierSweepGreen drops every GREEN verdict from reported, so the tiers
