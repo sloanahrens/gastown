@@ -113,8 +113,28 @@ func composeFiles(argv []string) []string {
 // The render goes to a new temporary file beside path, since a rename is atomic
 // only within one filesystem, and the name is unique so concurrent writers never
 // share it. The temporary file is removed unless the rename puts it in place.
-func writeComposeFile(path string, content []byte) (err error) {
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+func writeComposeFile(path string, content []byte) error {
+	return writeComposeFileWith(path, content, createComposeTemp)
+}
+
+// composeTemp is the temporary file a render is written to. *os.File is one;
+// a test stands in a file that fails a step, to drive that step's failure.
+type composeTemp interface {
+	Write(p []byte) (int, error)
+	Chmod(mode os.FileMode) error
+	Close() error
+	Name() string
+}
+
+// createComposeTemp makes the temporary file writeComposeFile writes through.
+func createComposeTemp(dir, pattern string) (composeTemp, error) {
+	return os.CreateTemp(dir, pattern)
+}
+
+// writeComposeFileWith is writeComposeFile with the temporary file's source
+// injected, so each step's failure can be driven.
+func writeComposeFileWith(path string, content []byte, create func(dir, pattern string) (composeTemp, error)) (err error) {
+	f, err := create(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
 	}
@@ -128,10 +148,11 @@ func writeComposeFile(path string, content []byte) (err error) {
 		_ = f.Close()
 		return err
 	}
-	if err = f.Close(); err != nil {
+	if err = f.Chmod(0o644); err != nil {
+		_ = f.Close()
 		return err
 	}
-	if err = os.Chmod(tmp, 0o644); err != nil {
+	if err = f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

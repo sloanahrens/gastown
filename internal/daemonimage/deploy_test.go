@@ -296,6 +296,72 @@ func TestDeployWriteErrorLeavesNothingBehindAndRunsNothing(t *testing.T) {
 	}
 }
 
+// faultyTemp is a real temporary file that fails the step named: its write, its
+// mode change or its close. The file is still created and closed for real, so
+// a failure leaves the same files a real one would.
+type faultyTemp struct {
+	*os.File
+	write, chmod, close error
+}
+
+func (f faultyTemp) Write(p []byte) (int, error) {
+	if f.write != nil {
+		return 0, f.write
+	}
+	return f.File.Write(p)
+}
+
+func (f faultyTemp) Chmod(mode os.FileMode) error {
+	if f.chmod != nil {
+		return f.chmod
+	}
+	return f.File.Chmod(mode)
+}
+
+func (f faultyTemp) Close() error {
+	err := f.File.Close()
+	if f.close != nil {
+		return f.close
+	}
+	return err
+}
+
+// TestWriteComposeFileKeepsTheOldRenderWhenAStepFails: a write, a mode change or
+// a close that fails leaves the old compose file as it was and no temporary file
+// behind, and the failure is what the caller gets.
+func TestWriteComposeFileKeepsTheOldRenderWhenAStepFails(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("injected failure")
+	tests := []struct {
+		name                string
+		write, chmod, close error
+	}{
+		{name: "the write fails", write: failure},
+		{name: "the mode change fails", chmod: failure},
+		{name: "the close fails", close: failure},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := composePathIn(t)
+			writeOldCompose(t, path)
+			create := func(dir, pattern string) (composeTemp, error) {
+				f, err := os.CreateTemp(dir, pattern)
+				if err != nil {
+					return nil, err
+				}
+				return faultyTemp{File: f, write: tt.write, chmod: tt.chmod, close: tt.close}, nil
+			}
+			if err := writeComposeFileWith(path, []byte("services: {}\n"), create); !errors.Is(err, failure) {
+				t.Errorf("writeComposeFileWith error = %v, want the injected failure", err)
+			}
+			if got := readCompose(t, path); !reflect.DeepEqual(got, oldCompose) {
+				t.Errorf("the compose file = %q, want the old one unchanged", got)
+			}
+			onlyFileIn(t, filepath.Dir(path), filepath.Base(path))
+		})
+	}
+}
+
 // TestDeployRefusesAStartCommandThatNamesOtherComposeFiles: the start command
 // must name the one compose file Deploy writes, and only that one. A command
 // that names another, several, or none would start a container from a file this
