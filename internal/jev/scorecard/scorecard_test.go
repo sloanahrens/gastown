@@ -2,6 +2,7 @@ package scorecard
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -208,28 +209,200 @@ func TestScorecardEarningOnSeparatedLog(t *testing.T) {
 
 func TestScorecardVerdictBoundaries(t *testing.T) {
 	t.Parallel()
+	prec := func(v float64) *float64 { return &v }
 	cases := []struct {
-		name    string
-		labeled int
-		bestF1  float64
-		base    float64
-		want    string
+		name      string
+		kind      string
+		positives int
+		negatives int
+		labeled   int
+		bestF1    float64
+		base      float64
+		precision *float64
+		want      string
 	}{
-		{"one line short of 30 is not-yet even when F1 is perfect", 29, 1, 0.5, VerdictNotYet},
-		{"exactly 30 with the margin met earns, though 0.6 - 0.5 is not exactly 0.1", 30, 0.6, 0.5, VerdictEarning},
-		{"exactly 30 with the margin just missed is no-signal", 30, 0.5999, 0.5, VerdictNoSignal},
-		{"an F1 equal to the base rate is no-signal", 30, 0.5, 0.5, VerdictNoSignal},
-		{"a margin of 0.15 earns on 100 lines", 100, 0.95, 0.8, VerdictEarning},
-		{"a margin of 0.1 on 100 lines earns, though 0.85 - 0.75 is not exactly 0.1", 100, 0.85, 0.75, VerdictEarning},
-		{"a margin just under 0.1 on 100 lines is no-signal", 100, 0.8499, 0.75, VerdictNoSignal},
+		{"one line short of 30 is not-yet even when F1 is perfect", KindNoul, 14, 15, 29, 1, 0.5, prec(1), VerdictNotYet},
+		{"exactly 30 with the margin met earns, though 0.6 - 0.5 is not exactly 0.1", KindNoul, 15, 15, 30, 0.6, 0.5, prec(0.6), VerdictEarning},
+		{"exactly 30 with the margin just missed is no-signal", KindNoul, 15, 15, 30, 0.5999, 0.5, prec(0.6), VerdictNoSignal},
+		{"an F1 equal to the base rate is no-signal", KindNoul, 15, 15, 30, 0.5, 0.5, prec(0.5), VerdictNoSignal},
+		{"a margin of 0.15 earns on 100 lines", KindNoul, 50, 50, 100, 0.95, 0.8, prec(0.95), VerdictEarning},
+		{"a margin of 0.1 on 100 lines earns, though 0.85 - 0.75 is not exactly 0.1", KindNoul, 50, 50, 100, 0.85, 0.75, prec(0.8), VerdictEarning},
+		{"a margin just under 0.1 on 100 lines is no-signal", KindNoul, 50, 50, 100, 0.8499, 0.75, prec(0.8), VerdictNoSignal},
+		{"nine positives is not-yet however well the metrics read", KindNoul, 9, 21, 30, 1, 0.3, prec(1), VerdictNotYet},
+		{"ten positives is not held back", KindNoul, 10, 20, 30, 0.9, 0.33, prec(0.9), VerdictEarning},
+		{"nine negatives is not-yet however well the metrics read", KindNoul, 21, 9, 30, 1, 0.7, prec(1), VerdictNotYet},
+		{"ten negatives is not held back", KindNoul, 20, 10, 30, 0.9, 0.67, prec(0.9), VerdictEarning},
+		{"precision just under 0.3 at the best cut is no-signal", KindNoul, 20, 20, 40, 1, 0.5, prec(0.2999), VerdictNoSignal},
+		{"precision exactly 0.3 at the best cut earns", KindNoul, 20, 20, 40, 1, 0.5, prec(0.3), VerdictEarning},
+		{"a score with nine positives is not-yet", KindScore, 9, 21, 30, 1, 0.3, nil, VerdictNotYet},
+		{"a score with ten positives is not held back", KindScore, 10, 20, 30, 0.9, 0.3, nil, VerdictEarning},
+		{"a score with nine negatives is not-yet", KindScore, 21, 9, 30, 1, 0.7, nil, VerdictNotYet},
+		{"a score with ten negatives skips the precision rule and earns", KindScore, 20, 10, 30, 0.9, 0.6, nil, VerdictEarning},
+		{"a score ignores a precision handed to it, since a score has none", KindScore, 20, 20, 40, 1, 0.5, prec(0.1), VerdictEarning},
+		{"a noul with no precision to read is judged on the margin alone", KindNoul, 20, 20, 40, 1, 0.5, nil, VerdictEarning},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := verdict(tc.labeled, tc.bestF1, tc.base); got != tc.want {
-				t.Errorf("verdict(%d, %v, %v) = %s, want %s", tc.labeled, tc.bestF1, tc.base, got, tc.want)
+			if got := verdict(tc.kind, tc.positives, tc.negatives, tc.labeled, tc.bestF1, tc.base, tc.precision); got != tc.want {
+				t.Errorf("verdict(%s, %d positives, %d negatives, %d labeled, F1 %v, base %v, precision %s) = %s, want %s",
+					tc.kind, tc.positives, tc.negatives, tc.labeled, tc.bestF1, tc.base, num(tc.precision), got, tc.want)
 			}
 		})
+	}
+}
+
+// finding.any_duplicate read earning on 615 labeled lines with 3 positives, so
+// a log shaped like it must read not-yet, even though its best F1 clears the
+// margin against the base rate.
+func TestScorecardVerdictRarePositivesStayNotYet(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var lines []string
+	labels := map[string]map[QuestionID]bool{}
+	for i := range 600 {
+		id := fmt.Sprintf("rare-%03d", i)
+		value, label := "0.1", false
+		if i < 3 {
+			value, label = "0.9", true
+		}
+		lines = append(lines, fmt.Sprintf(`{"ts":"2026-10-18T09:00:00Z","id":%q,"answers":{"needs":{"noul":%s}}}`, id, value))
+		labels[id] = map[QuestionID]bool{"needs": label}
+	}
+	writeFixture(t, town, lines, labels)
+
+	needs := question(t, buildFixture(t, town, time.Time{}), "needs")
+	if needs.Labeled != 600 || needs.Positives != 3 || needs.Negatives != 597 {
+		t.Fatalf("needs labeled %d positives %d negatives %d, want 600, 3 and 597", needs.Labeled, needs.Positives, needs.Negatives)
+	}
+	if needs.BestF1 == nil || needs.BaseRate == nil || *needs.BestF1-*needs.BaseRate < earnMargin {
+		t.Fatalf("fixture does not clear the F1 margin, so not-yet would say nothing: F1 %s base %s", num(needs.BestF1), num(needs.BaseRate))
+	}
+	if needs.Verdict != VerdictNotYet {
+		t.Errorf("needs verdict = %s, want not-yet on 3 positives", needs.Verdict)
+	}
+}
+
+// Enough positives can still answer yes wrongly most of the time: at the best
+// cut this log is 20 true against 180 false, so it reads no-signal.
+func TestScorecardVerdictPrecisionFloorHoldsEarningBack(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var lines []string
+	labels := map[string]map[QuestionID]bool{}
+	for i := range 600 {
+		id := fmt.Sprintf("noisy-%03d", i)
+		// 20 positives and 180 negatives share the top value, so the best cut
+		// carries 200 yes answers of which 20 are right; the rest rank low.
+		value, label := "0.1", false
+		if i < 200 {
+			value = "0.9"
+		}
+		if i < 20 {
+			label = true
+		}
+		lines = append(lines, fmt.Sprintf(`{"ts":"2026-10-18T09:00:00Z","id":%q,"answers":{"needs":{"noul":%s}}}`, id, value))
+		labels[id] = map[QuestionID]bool{"needs": label}
+	}
+	writeFixture(t, town, lines, labels)
+
+	needs := question(t, buildFixture(t, town, time.Time{}), "needs")
+	if needs.Positives != 20 || needs.Negatives != 580 {
+		t.Fatalf("needs positives %d negatives %d, want 20 and 580", needs.Positives, needs.Negatives)
+	}
+	if needs.BestF1 == nil || needs.BaseRate == nil || *needs.BestF1-*needs.BaseRate < earnMargin {
+		t.Fatalf("fixture does not clear the F1 margin, so no-signal would not show the precision rule: F1 %s base %s", num(needs.BestF1), num(needs.BaseRate))
+	}
+	if needs.PrecisionAtBest == nil || *needs.PrecisionAtBest != 0.1 {
+		t.Fatalf("precision_at_best = %s, want 0.1", num(needs.PrecisionAtBest))
+	}
+	if needs.Verdict != VerdictNoSignal {
+		t.Errorf("needs verdict = %s, want no-signal at 0.1 precision", needs.Verdict)
+	}
+}
+
+// A score has no precision, so the precision floor never holds it back: 20
+// positives and 20 negatives on a separated score log earn.
+func TestScorecardVerdictScoreKindSkipsPrecisionRule(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var lines []string
+	labels := map[string]map[QuestionID]bool{}
+	for i := range 40 {
+		id := fmt.Sprintf("level-%02d", i)
+		score := 0
+		if i%2 == 0 {
+			score = 3
+		}
+		lines = append(lines, fmt.Sprintf(`{"ts":"2026-10-18T09:%02d:00Z","id":%q,"answers":{"level":{"score":%d}}}`, i, id, score))
+		labels[id] = map[QuestionID]bool{"level": i%2 == 0}
+	}
+	writeFixture(t, town, lines, labels)
+
+	level := question(t, buildFixture(t, town, time.Time{}), "level")
+	if level.Labeled != 40 || level.Positives != 20 || level.Negatives != 20 {
+		t.Fatalf("level labeled %d positives %d negatives %d, want 40, 20 and 20", level.Labeled, level.Positives, level.Negatives)
+	}
+	if level.PrecisionAtBest != nil {
+		t.Errorf("a score question printed precision_at_best %s", num(level.PrecisionAtBest))
+	}
+	if level.Verdict != VerdictEarning {
+		t.Errorf("level verdict = %s, want earning on 20 positives and 20 negatives", level.Verdict)
+	}
+}
+
+// precision_at_best is printed where there is a best cut to read and a
+// precision to read there, and the key it adds moves none of the keys the
+// report already printed.
+func TestScorecardPrecisionAtBest(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	lines := []string{
+		`{"ts":"2026-10-18T09:00:00Z","id":"pb-1","answers":{"graded":{"noul":0.9},"ungraded":{"noul":0.8},"level":{"score":3}}}`,
+		`{"ts":"2026-10-18T09:01:00Z","id":"pb-2","answers":{"graded":{"noul":0.2},"ungraded":{"noul":0.1},"level":{"score":1}}}`,
+	}
+	labels := map[string]map[QuestionID]bool{
+		"pb-1": {"graded": true, "level": true},
+		"pb-2": {"graded": false, "level": false},
+	}
+	writeFixture(t, town, lines, labels)
+
+	data, err := json.Marshal(buildFixture(t, town, time.Time{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		Questions []map[string]any `json:"questions"`
+	}
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatalf("decoding the JSON report: %v\n%s", err, data)
+	}
+	byID := map[string]map[string]any{}
+	for _, q := range rep.Questions {
+		id, _ := q["id"].(string)
+		byID[id] = q
+	}
+
+	graded := byID["graded"]
+	if graded == nil {
+		t.Fatalf("report has no graded question: %s", data)
+	}
+	// The best cut is 0.9, where one labeled line is predicted yes and is right.
+	got, ok := graded["precision_at_best"]
+	if !ok || got != 1.0 {
+		t.Errorf("graded precision_at_best = %v (present %v), want 1\n%s", got, ok, data)
+	}
+	for _, key := range []string{"id", "kind", "logged", "labeled", "positives", "negatives", "base_rate", "precision", "recall", "best_threshold", "best_f1", "verdict"} {
+		if _, ok := graded[key]; !ok {
+			t.Errorf("graded question no longer prints the %q key: %s", key, data)
+		}
+	}
+	for _, id := range []string{"level", "ungraded"} {
+		if q := byID[id]; q == nil {
+			t.Errorf("report has no %q question: %s", id, data)
+		} else if v, ok := q["precision_at_best"]; ok {
+			t.Errorf("%s question printed precision_at_best %v, want it absent", id, v)
+		}
 	}
 }
 
