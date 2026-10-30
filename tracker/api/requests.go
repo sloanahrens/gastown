@@ -187,6 +187,32 @@ type AssignedPage struct {
 	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
+// CountRequest asks how many issues match its filter.
+type CountRequest struct {
+	Filter ListFilter `json:"filter"`
+}
+
+// Validate applies ValidateCount to the request's filter.
+func (r CountRequest) Validate() error { return ValidateCount(r.Filter) }
+
+// ValidateCount refuses a filter that carries a page, naming the field: a
+// count is of every issue the filter matches, so a caller holding a page has
+// the list's answer, not this one's.
+func ValidateCount(f ListFilter) error {
+	if f.Limit != 0 {
+		return Invalid("count takes no limit; it counts every issue the filter matches")
+	}
+	if f.Cursor != "" {
+		return Invalid("count takes no cursor; it counts every issue the filter matches")
+	}
+	return nil
+}
+
+// CountResponse is how many issues match a filter.
+type CountResponse struct {
+	Count int `json:"count"`
+}
+
 // DispatchBoardRequest asks for everything one dispatch tick reads about the
 // work board: per rig the ready issues, the issues a seat holds and the
 // children of the ready issues, plus the status of a few named issues.

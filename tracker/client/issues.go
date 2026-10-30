@@ -36,6 +36,16 @@ func (c *Client) List(ctx context.Context, f api.ListFilter) (api.IssuePage, err
 	return out, err
 }
 
+// Count returns how many issues f matches in all. It sends f as given; see
+// api.ValidateCount for the filters the server accepts.
+func (c *Client) Count(ctx context.Context, f api.ListFilter) (int, error) {
+	var out api.CountResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/issues:count", api.CountRequest{Filter: f}, &out, true); err != nil {
+		return 0, err
+	}
+	return out.Count, nil
+}
+
 // Assigned returns one page of the issues assigned to req.Assignees in one of
 // req.Statuses, keyed by assignee; pass the page's NextCursor in req.Cursor
 // for the next one. The map is never nil.

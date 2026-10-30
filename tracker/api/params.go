@@ -26,21 +26,28 @@ type CreateParams struct {
 // ANDed. Limit 0 means no limit (a page is still bounded by the server, and
 // NextCursor says so).
 type ListFilter struct {
-	Statuses     []string  `json:"statuses,omitempty"`
-	Labels       []string  `json:"labels,omitempty"`
-	Priority     *int      `json:"priority,omitempty"`
-	Parent       string    `json:"parent,omitempty"`
-	Assignee     string    `json:"assignee,omitempty"`
-	NoAssignee   bool      `json:"no_assignee,omitempty"`
-	IssueType    string    `json:"issue_type,omitempty"`
-	Rig          string    `json:"rig,omitempty"`
-	IDs          []string  `json:"ids,omitempty"`
-	Ephemeral    bool      `json:"ephemeral,omitempty"`
-	IncludeInfra bool      `json:"include_infra,omitempty"`
+	Statuses     []string `json:"statuses,omitempty"`
+	Labels       []string `json:"labels,omitempty"`
+	Priority     *int     `json:"priority,omitempty"`
+	Parent       string   `json:"parent,omitempty"`
+	Assignee     string   `json:"assignee,omitempty"`
+	NoAssignee   bool     `json:"no_assignee,omitempty"`
+	IssueType    string   `json:"issue_type,omitempty"`
+	Rig          string   `json:"rig,omitempty"`
+	IDs          []string `json:"ids,omitempty"`
+	Ephemeral    bool     `json:"ephemeral,omitempty"`
+	IncludeInfra bool     `json:"include_infra,omitempty"`
+	// ClosedAfter and ClosedBefore keep the issues closed at or after, and
+	// before, those instants; an issue that is not closed has no close time,
+	// so neither bound matches one.
 	ClosedAfter  time.Time `json:"closed_after,omitzero"`
-	CreatedAfter time.Time `json:"created_after,omitzero"`
-	Limit        int       `json:"limit,omitempty"`
-	Cursor       string    `json:"cursor,omitempty"`
+	ClosedBefore time.Time `json:"closed_before,omitzero"`
+	// CreatedAfter and CreatedBefore bound creation the same way.
+	CreatedAfter  time.Time `json:"created_after,omitzero"`
+	CreatedBefore time.Time `json:"created_before,omitzero"`
+	// Limit and Cursor page a list.
+	Limit  int    `json:"limit,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
 }
 
 // UpdatePatch changes the fields it sets. A nil pointer leaves a field alone.

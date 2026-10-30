@@ -8,17 +8,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/tracker/api"
 	"github.com/steveyegge/gastown/tracker/store"
 )
 
-// issueStub answers the three read methods; any other method panics on the
-// nil embedded interface, which a test would show as a failure.
+// issueStub answers the read methods; any other method panics on the nil
+// embedded interface, which a test would show as a failure.
 type issueStub struct {
 	store.Store
-	get  func(ctx context.Context, ids []string) (map[string]api.Issue, error)
-	list func(ctx context.Context, f api.ListFilter) (api.IssuePage, error)
+	get   func(ctx context.Context, ids []string) (map[string]api.Issue, error)
+	list  func(ctx context.Context, f api.ListFilter) (api.IssuePage, error)
+	count func(ctx context.Context, f api.ListFilter) (int, error)
 }
 
 func (s issueStub) GetIssues(ctx context.Context, ids []string) (map[string]api.Issue, error) {
@@ -27,6 +29,10 @@ func (s issueStub) GetIssues(ctx context.Context, ids []string) (map[string]api.
 
 func (s issueStub) ListIssues(ctx context.Context, f api.ListFilter) (api.IssuePage, error) {
 	return s.list(ctx, f)
+}
+
+func (s issueStub) CountIssues(ctx context.Context, f api.ListFilter) (int, error) {
+	return s.count(ctx, f)
 }
 
 func stubServer(t *testing.T, st store.Store) *httptest.Server {
@@ -106,6 +112,68 @@ func TestListPassesTheFilterAndReturnsAnEmptyArrayNotNull(t *testing.T) {
 	}
 }
 
+func TestCountPassesTheWholeFilterAndAnswersTheStoreCount(t *testing.T) {
+	t.Parallel()
+	var got api.ListFilter
+	ts := stubServer(t, issueStub{count: func(_ context.Context, f api.ListFilter) (int, error) {
+		got = f
+		return 7, nil
+	}})
+	code, body := call(t, "POST", ts.URL+"/v1/issues:count",
+		`{"filter":{"ephemeral":true,"statuses":["closed"],"closed_before":"2026-10-30T12:00:00Z"}}`)
+	var resp api.CountResponse
+	if code != 200 || json.Unmarshal([]byte(body), &resp) != nil || resp.Count != 7 {
+		t.Errorf("count = %d %q, want 200 with the store's count of 7", code, body)
+	}
+	want := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	if !got.Ephemeral || len(got.Statuses) != 1 || got.Statuses[0] != "closed" || !got.ClosedBefore.Equal(want) {
+		t.Errorf("the store got filter %+v, want every field passed through", got)
+	}
+}
+
+func TestCountRefusesAFilterThatCarriesAPageAndWritesNothing(t *testing.T) {
+	t.Parallel()
+	called := false
+	ts := stubServer(t, issueStub{count: func(_ context.Context, f api.ListFilter) (int, error) {
+		called = true
+		return 0, nil
+	}})
+	for name, body := range map[string]string{
+		"a limit":  `{"filter":{"limit":10}}`,
+		"a cursor": `{"filter":{"cursor":"c1"}}`,
+	} {
+		code, resp := call(t, "POST", ts.URL+"/v1/issues:count", body)
+		if e := decodeErr(t, resp); code != 400 || e.Kind != api.KindInvalid {
+			t.Errorf("%s: %d %q, want 400 invalid", name, code, resp)
+		}
+	}
+	if called {
+		t.Error("a count with a page reached the store; the route must refuse it first")
+	}
+}
+
+func TestCountPassesStoreInvalidThrough400AndHidesInternalErrors(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		err    error
+		status int
+		kind   api.Kind
+		leak   string
+	}{
+		"invalid filter": {api.Invalid("bad filter"), 400, api.KindInvalid, ""},
+		"internal":       {context.DeadlineExceeded, 503, api.KindUnavailable, "deadline"},
+	} {
+		ts := stubServer(t, issueStub{count: func(context.Context, api.ListFilter) (int, error) { return 0, tc.err }})
+		code, body := call(t, "POST", ts.URL+"/v1/issues:count", `{"filter":{}}`)
+		if e := decodeErr(t, body); code != tc.status || e.Kind != tc.kind {
+			t.Errorf("%s: %d %q, want %d %s", name, code, body, tc.status, tc.kind)
+		}
+		if tc.leak != "" && strings.Contains(body, tc.leak) {
+			t.Errorf("%s: the response leaks the cause: %q", name, body)
+		}
+	}
+}
+
 func TestListPassesStoreInvalidThrough400AndHidesInternalErrors(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -131,7 +199,7 @@ func TestListPassesStoreInvalidThrough400AndHidesInternalErrors(t *testing.T) {
 func TestReadRoutesRefuseBadBodiesAsInvalid(t *testing.T) {
 	t.Parallel()
 	ts := stubServer(t, issueStub{})
-	for _, path := range []string{"/v1/issues:list", "/v1/issues:show-many"} {
+	for _, path := range []string{"/v1/issues:list", "/v1/issues:show-many", "/v1/issues:count"} {
 		for name, body := range map[string]string{"empty": "", "unknown field": `{"surprise":1}`, "not json": `{`, "trailing data": `{}{}`} {
 			code, resp := call(t, "POST", ts.URL+path, body)
 			if e := decodeErr(t, resp); code != 400 || e.Kind != api.KindInvalid {
