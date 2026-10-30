@@ -217,7 +217,7 @@ const TrackerStatusCommand = "gt tracker status"
 
 // trackerFixHint is the remedy a tracker refusal names: trackerd serves from
 // Postgres, so the bd install hint would send the operator down the wrong path.
-// TestTrackerStatusRemedyNamesACommandInTheTree (internal/cmd) pins the command.
+// TestTrackerRefusalRemedyNamesACommandInTheTree (internal/cmd) pins the command.
 const trackerFixHint = "check the tracker with `" + TrackerStatusCommand + "`, and that trackerd and its Postgres are running"
 
 // refuseTracker is the refusal for a store on the tracker, where the bd
