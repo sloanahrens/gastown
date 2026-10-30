@@ -27,7 +27,6 @@ gt-model-eval/scripts/results-to-discussion.sh	port: gt-tpg0p
 plugins/app-promote/run.sh	port: gt-tpg0p
 plugins/polecat-image/run.sh	port: gt-tpg0p
 plugins/tool-updater/run.sh	port: gt-tpg0p
-scripts/bootstrap-local-rig.sh	port: gt-tpg0p
 scripts/bump-version.sh	port: gt-tpg0p
 scripts/check-install-path_test.sh	port: gt-tpg0p
 scripts/deep-review.sh	port: gt-tpg0p

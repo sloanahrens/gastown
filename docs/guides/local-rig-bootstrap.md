@@ -6,10 +6,10 @@ For a NightRider-style local setup, prefer a clean bootstrap over `gt rig add --
 existing shape, which makes it a poor fit for manually assembled local rigs where
 `.repo.git`, worktrees, and metadata may already be inconsistent.
 
-Use the bootstrap script instead:
+Use the bootstrap command instead:
 
 ```bash
-./scripts/bootstrap-local-rig.sh \
+go run ./cmd/bootstrap-local-rig \
   --town-root /gt \
   --rig nightrider_local \
   --local-repo /gt/nightRider \
@@ -17,7 +17,7 @@ Use the bootstrap script instead:
   --polecat-agent claude
 ```
 
-If you omit `--remote`, the script registers the rig with `file://<local-repo>`.
+If you omit `--remote`, the command registers the rig with `file://<local-repo>`.
 That is usually the right choice for local-only or private repos inside the
 Gastown container, where the upstream remote may not be reachable or authenticated.
 
