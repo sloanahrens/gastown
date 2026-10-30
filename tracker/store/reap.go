@@ -10,9 +10,9 @@ import (
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
-// The wisp age policy: the old internal/reaper rules, ported to the tracker.
-// Classify holds every rule; ReapPass and PurgeWisps only gather facts from the
-// Store and act on the verdicts. The bead's first comment lists the rules.
+// The wisp age policy, ported from the internal/reaper rules. Classify holds
+// every rule and TestClassifyWisp has one row per rule. ReapPass and PurgeWisps
+// only gather facts from the Store and act on the verdicts.
 
 // ReapPolicy holds the two ages the policy measures from now. A zero age takes
 // its default.
