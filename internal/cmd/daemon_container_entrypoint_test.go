@@ -326,7 +326,7 @@ func TestContainerEntrypointSymlinkedTownJSONRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, filepath.Join(townRoot, "mayor", "town.json")); err != nil {
-		t.Skipf("symbolic links are unavailable here: %v", err)
+		t.Fatalf("make the symlinked mayor/town.json: %v", err)
 	}
 	r := townRig()
 	r.env[containerTownRootEnv] = townRoot
