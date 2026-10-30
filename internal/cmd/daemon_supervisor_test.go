@@ -1503,7 +1503,8 @@ func containerDaemonTown(t *testing.T, body string) string {
 // namespace, so that lock is not visible from this host and answers nothing
 // about whether it runs. gt daemon status decides from the container's live
 // state together with state.json instead: running needs both, and a read that
-// failed is the failure, never the not-running text.
+// failed is the failure, never the not-running text. A container docker reports
+// restarting or paused may hold a live daemon, so it reads as unknown too.
 func TestDaemonStatus_ContainerTownDecidesRunningFromTheContainer(t *testing.T) {
 	t.Parallel()
 	const image = "gt-daemon:abc123"
@@ -1512,6 +1513,12 @@ func TestDaemonStatus_ContainerTownDecidesRunningFromTheContainer(t *testing.T) 
 	}
 	exitedContainer := func(context.Context, []string) ([]byte, error) {
 		return []byte("exited " + image + "\n"), nil
+	}
+	restartingContainer := func(context.Context, []string) ([]byte, error) {
+		return []byte("restarting " + image + "\n"), nil
+	}
+	pausedContainer := func(context.Context, []string) ([]byte, error) {
+		return []byte("paused " + image + "\n"), nil
 	}
 	unreachableDocker := func(context.Context, []string) ([]byte, error) {
 		return nil, errors.New("Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
@@ -1538,6 +1545,10 @@ func TestDaemonStatus_ContainerTownDecidesRunningFromTheContainer(t *testing.T) 
 			`{"running":true}`, "Daemon state is unknown", 3, "Cannot connect to the Docker daemon"},
 		{"state.json unreadable", runningContainer,
 			`{not json`, "Daemon state is unknown", 3, "state.json"},
+		{"container restarting", restartingContainer,
+			`{"running":true}`, "Daemon state is unknown", 3, "container state: restarting"},
+		{"container paused", pausedContainer,
+			`{"running":true}`, "Daemon state is unknown", 3, "container state: paused"},
 	}
 	// Every row prints one of these three on its own: a row that carried two
 	// would leave the reader to guess which one decides.
@@ -1649,46 +1660,75 @@ func TestDaemonStatus_ContainerTownWithoutNamesIsUnknown(t *testing.T) {
 // Settings that cannot be read leave the town's supervisor unknown: the file
 // reading describes the host's own manager, which a container town does not
 // run under, and "none" would claim the town has no supervisor (gt-qpeei.18).
-// They also decide whether the lock answers the town at all, so status fails
-// closed rather than reading it: for a container town the lock reads not
-// running while its daemon runs, and no test may be left guessing which of the
-// two a settings failure meant (gt-i2z9l).
-func TestDaemonStatus_UnreadableSettingsIsUnknown(t *testing.T) {
+// They also leave the kind unknown, and the kind is what says whether the lock
+// answers the town at all: a town carrying the container install's compose file
+// has a daemon whose lock is not visible here, so status fails closed rather
+// than read it (gt-i2z9l). A town carrying no such marker is a town the lock
+// does answer, and keeps the reading it had before this change (gt-i2z9l).
+func TestDaemonStatus_UnreadableSettings(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	// The daemon section whose supervisor is not a string: the town's settings
-	// exist and do not decode, which is the unreadable read the lock must not
-	// answer for.
-	writeLiveFile(t, town, "settings/config.json", `{"daemon": {"supervisor": 42}}`)
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
-	c.patrolConfig = daemon.ReadPatrolConfig
-	c.statusLine = c.supervisedLine
-	c.isRunning = func(string) (bool, int, error) {
-		t.Error("read the lock: the settings that say whether the lock answers this town could not be read")
-		return false, 0, nil
+	tests := []struct {
+		name      string
+		container bool // the town carries the compose file a container install writes
+	}{
+		{"container-marked town is unknown", true},
+		{"town with no container marker keeps the lock reading", false},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			// The daemon section whose supervisor is not a string: the town's
+			// settings exist and do not decode, which is the unreadable read.
+			writeLiveFile(t, town, "settings/config.json", `{"daemon": {"supervisor": 42}}`)
+			if tt.container {
+				writeComposeFile(t, town)
+			}
+			plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+			c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+			c.patrolConfig = daemon.ReadPatrolConfig
+			c.statusLine = c.supervisedLine
+			readLock := false
+			c.isRunning = func(string) (bool, int, error) {
+				readLock = true
+				return true, 4242, nil
+			}
 
-	var out strings.Builder
-	err := c.daemonStatus(&out, town)
-	if got := statusExit(err); got != 3 {
-		t.Errorf("exit = %d, want 3 (err = %v, status = %q)", got, err, out.String())
-	}
-	if !strings.Contains(out.String(), "Daemon state is unknown") {
-		t.Errorf("status output = %q, want the unknown form", out.String())
-	}
-	if strings.Contains(out.String(), "Daemon is not running") {
-		t.Errorf("status output = %q, want settings that could not be read to say so, not that the daemon is down", out.String())
-	}
-	if err == nil || !strings.Contains(err.Error(), "cannot read daemon settings") ||
-		!strings.Contains(err.Error(), filepath.Join("settings", "config.json")) {
-		t.Errorf("err = %v, want a failure naming the settings file", err)
-	}
-	if !strings.Contains(out.String(), "Supervised: unknown (unverified - ") {
-		t.Errorf("status output = %q, want the supervisor line unverified", out.String())
-	}
-	if strings.Contains(out.String(), config.SupervisorLaunchd) {
-		t.Errorf("status output = %q, reads the host's launchd for a town whose settings could not be read", out.String())
+			var out strings.Builder
+			err := c.daemonStatus(&out, town)
+
+			if want := !tt.container; readLock != want {
+				t.Errorf("read the lock = %v, want %v: only a town carrying no container marker has a lock that answers it", readLock, want)
+			}
+			if !strings.Contains(out.String(), "Supervised: unknown (unverified - ") {
+				t.Errorf("status output = %q, want the supervisor line unverified", out.String())
+			}
+			if strings.Contains(out.String(), config.SupervisorLaunchd) {
+				t.Errorf("status output = %q, reads the host's launchd for a town whose settings could not be read", out.String())
+			}
+			if !tt.container {
+				if err != nil {
+					t.Errorf("err = %v, want none: a town with no container marker keeps the lock reading", err)
+				}
+				if !strings.Contains(out.String(), "Daemon is running") {
+					t.Errorf("status output = %q, want the lock reading it had before", out.String())
+				}
+				return
+			}
+			if got := statusExit(err); got != 3 {
+				t.Errorf("exit = %d, want 3 (err = %v, status = %q)", got, err, out.String())
+			}
+			if !strings.Contains(out.String(), "Daemon state is unknown") {
+				t.Errorf("status output = %q, want the unknown form", out.String())
+			}
+			if strings.Contains(out.String(), "Daemon is not running") {
+				t.Errorf("status output = %q, want settings that could not be read to say so, not that the daemon is down", out.String())
+			}
+			if err == nil || !strings.Contains(err.Error(), "cannot read daemon settings") ||
+				!strings.Contains(err.Error(), filepath.Join("settings", "config.json")) {
+				t.Errorf("err = %v, want a failure naming the settings file", err)
+			}
+		})
 	}
 }
 

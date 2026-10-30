@@ -425,10 +425,14 @@ func (c *daemonControl) daemonStatus(w io.Writer, townRoot string) error {
 	cfg, containerTown, settingsErr := c.townDaemonKind(townRoot)
 	switch {
 	case settingsErr != nil:
-		// The settings are what say whether the lock answers this town at all,
-		// so a read that failed is no license to fall back to it: for a
-		// container town the lock reads not running while its daemon runs.
-		// Neither reading is honest, so the state is unknown (gt-i2z9l).
+		// A container town's lock reads not running while its daemon runs, so
+		// it fails closed; every other town's lock still answers, and keeps
+		// the reading it had. The compose file a container install writes is
+		// the marker, and MayBeContainerTown reads it without the settings
+		// that just failed (gt-i2z9l).
+		if !config.MayBeContainerTown(townRoot) {
+			break
+		}
 		return daemonStateUnknown(w, unverifiedSupervisorLine(settingsErr),
 			fmt.Errorf("cannot read daemon settings: %w", settingsErr))
 	case containerTown:
@@ -509,14 +513,25 @@ func daemonStateUnknown(w io.Writer, supervised string, err error) error {
 // taken in the container's namespace and is not visible from this host, so it
 // is never read here (gt-i2z9l). A container state that could not be read, and
 // a state.json that could not be, are errors that name what failed — an
-// unreadable read is not a daemon that is not running.
+// unreadable read is not a daemon that is not running, and neither is a
+// container restarting or paused, which may hold a live daemon.
 func (c *daemonControl) containerDaemonStatus(w io.Writer, townRoot string, cfg *config.DaemonPatrolConfig) error {
 	job := c.containerJobState(cfg)(config.SupervisorContainer)
-	if job.Err != nil {
+	switch {
+	case job.Err != nil:
 		return daemonStateUnknown(w, job.StatusLine(0), fmt.Errorf("checking the daemon's container: %w", job.Err))
-	}
-	if !job.Loaded || job.Status != "running" {
+	case containerStopped(job):
+		// No container of that name is the town's daemon not running, and so
+		// is one docker reports created, exited or dead: no process of its is
+		// running (containerStopped is the package's reading of that).
 		return daemonNotRunning(w, job.StatusLine(0))
+	case job.Status != "running":
+		// Restarting or paused: the container exists and may hold a live
+		// daemon, so not running would be a claim this read cannot make. Only
+		// docker's explicit running goes on to state.json, and only exit 0
+		// claims the daemon runs.
+		return daemonStateUnknown(w, job.StatusLine(0),
+			fmt.Errorf("container state: %s", job.Status))
 	}
 
 	read := c.readState
