@@ -70,7 +70,7 @@ func SaveTownConfig(path string, config *TownConfig) error {
 	}
 
 	return UpdateConfigJSON(path, 0o600, func(cur *TownConfig, _ bool) error {
-		registry, overseer := cur.Registry, cur.Overseer
+		registry, overseer, ring := cur.Registry, cur.Overseer, cur.Ring
 		*cur = *config
 		// The sections are written through their own paths (layout.go);
 		// a TownConfig read before gt config migrate must not drop them.
@@ -79,6 +79,10 @@ func SaveTownConfig(path string, config *TownConfig) error {
 		}
 		if cur.Overseer == nil {
 			cur.Overseer = overseer
+		}
+		// The ring is written by internal/ring, never through a TownConfig.
+		if cur.Ring == nil {
+			cur.Ring = ring
 		}
 		return nil
 	})
