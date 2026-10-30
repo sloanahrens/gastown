@@ -161,7 +161,7 @@ func atHour(t time.Time, hour int) time.Time {
 func TestRunTierSweep_SkipsWhileAnUpgradeRestartIsPending(t *testing.T) {
 	t.Parallel()
 	d, rec, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
 		t.Fatal("a skipped cycle must not read origin/main")
 		return "", nil
@@ -201,7 +201,7 @@ func TestTriggerTierSweep_PendingRestartDefersWithoutConsumingTheHour(t *testing
 	rec.green()
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 
 	d.triggerTierSweep()
 	waitTierSweepIdle(t, d)
@@ -215,7 +215,7 @@ func TestTriggerTierSweep_PendingRestartDefersWithoutConsumingTheHour(t *testing
 		t.Fatalf("stages = %+v, want none while a restart is pending", rec.stages)
 	}
 
-	d.upgradeRestartPending.Store(false)
+	d.landingHolds.release(landingHoldUpgradeRestart)
 	d.triggerTierSweep()
 	waitTierSweepIdle(t, d)
 	if len(rec.stages) == 0 {
@@ -250,7 +250,7 @@ func TestRunTierSweep_StaleSweepRunsWhileARestartIsPending(t *testing.T) {
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	withTierSweepLastRun(t, d, "gastown", now.Add(-defaultTierSweepStaleAfter-time.Minute))
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 
 	if !d.runTierSweep() {
 		t.Fatal("a sweep past the stale bound must not defer to the pending restart")
@@ -270,7 +270,7 @@ func TestRunTierSweep_YoungSweepStillDefersToTheRestart(t *testing.T) {
 	now := atHour(time.Now(), 15)
 	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
 	withTierSweepLastRun(t, d, "gastown", now.Add(-20*time.Minute))
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 
 	if d.runTierSweep() {
 		t.Fatal("a deferred cycle accomplished nothing and must report no verdict, so the job stays due")
@@ -326,7 +326,7 @@ func TestRunTierSweep_QuietRigDoesNotRetireTheRestartDeferral(t *testing.T) {
 			if err := writeTierSweepState(d.config.TownRoot, "quiet", quiet); err != nil {
 				t.Fatal(err)
 			}
-			d.upgradeRestartPending.Store(true)
+			d.landingHolds.hold(landingHoldUpgradeRestart)
 
 			if got := d.tierSweepDeferForRestart(now); got != tc.wantDefer {
 				t.Fatalf("defer = %v, want %v", got, tc.wantDefer)
@@ -371,7 +371,7 @@ func TestTierSweepDeferForRestart_StaleBound(t *testing.T) {
 			if tc.record {
 				withTierSweepLastRun(t, d, "gastown", now.Add(-tc.age))
 			}
-			d.upgradeRestartPending.Store(true)
+			d.landingHolds.hold(landingHoldUpgradeRestart)
 
 			if got := d.tierSweepDeferForRestart(now); got != tc.wantDef {
 				t.Fatalf("defer = %v, want %v:\n%s", got, tc.wantDef, logs.String())
@@ -394,7 +394,7 @@ func TestTierSweepDeferForRestart_ConfiguredBound(t *testing.T) {
 	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
 	d.patrolConfig.Patrols.TierSweep.RestartStaleAfterStr = "5m"
 	withTierSweepLastRun(t, d, "gastown", now.Add(-10*time.Minute))
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 
 	if d.tierSweepDeferForRestart(now) {
 		t.Fatal("a sweep past the configured 5m bound must not defer to the pending restart")
@@ -408,7 +408,7 @@ func TestTriggerTierSweep_SkipLoggedOncePerPendingRestart(t *testing.T) {
 	d, _, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
 	count := func() int { return strings.Count(logs.String(), "an upgrade restart is pending") }
 
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 	for i := 0; i < 3; i++ {
 		d.triggerTierSweep()
 		waitTierSweepIdle(t, d)
@@ -418,12 +418,12 @@ func TestTriggerTierSweep_SkipLoggedOncePerPendingRestart(t *testing.T) {
 	}
 
 	// The flag clears (a heartbeat sees it clear), then a second restart.
-	d.upgradeRestartPending.Store(false)
+	d.landingHolds.release(landingHoldUpgradeRestart)
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	d.triggerTierSweep()
 	waitTierSweepIdle(t, d)
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 	// The sweep above recorded the hour; step past the interval so it is due,
 	// and no further: a sweep past tierSweepStaleAfter runs despite the
 	// restart instead of logging the skip (gt-zvqn8).
@@ -443,7 +443,7 @@ func TestTierSweepStaleRunLogIsNotSuppressedByTheDeferralSkipLatch(t *testing.T)
 	now := atHour(time.Now(), 15)
 	d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
 	withTierSweepLastRun(t, d, "gastown", now.Add(-20*time.Minute))
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 
 	if !d.tierSweepDeferForRestart(now) {
 		t.Fatal("a sweep inside the bound must defer to the pending restart")
@@ -475,7 +475,7 @@ func TestTierSweepDeferForRestart_StaleLatch(t *testing.T) {
 		t.Parallel()
 		d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
 		withTierSweepLastRun(t, d, "gastown", now.Add(-20*time.Minute))
-		d.upgradeRestartPending.Store(true)
+		d.landingHolds.hold(landingHoldUpgradeRestart)
 		d.tierSweepDeferForRestart(now)
 		if got := strings.Count(logs.String(), skipLine); got != 1 {
 			t.Fatalf("skip line logged %d times, want 1:\n%s", got, logs.String())
@@ -491,7 +491,7 @@ func TestTierSweepDeferForRestart_StaleLatch(t *testing.T) {
 		t.Parallel()
 		d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
 		withTierSweepLastRun(t, d, "gastown", now.Add(-2*time.Hour))
-		d.upgradeRestartPending.Store(true)
+		d.landingHolds.hold(landingHoldUpgradeRestart)
 		if d.tierSweepDeferForRestart(now) {
 			t.Fatal("a sweep past the bound must not defer")
 		}
@@ -512,7 +512,7 @@ func TestTierSweepDeferForRestart_StaleLatch(t *testing.T) {
 		t.Parallel()
 		d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
 		withTierSweepLastRun(t, d, "gastown", now.Add(-2*time.Hour))
-		d.upgradeRestartPending.Store(true)
+		d.landingHolds.hold(landingHoldUpgradeRestart)
 		d.tierSweepDeferForRestart(now)
 		if !d.tierSweepStaleLogged.Load() {
 			t.Fatal("the stale run did not latch its line")
@@ -523,7 +523,7 @@ func TestTierSweepDeferForRestart_StaleLatch(t *testing.T) {
 		if !d.tierSweepSkipLogged.Load() {
 			t.Fatal("the deferral did not latch its skip line")
 		}
-		d.upgradeRestartPending.Store(false)
+		d.landingHolds.release(landingHoldUpgradeRestart)
 		d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
 		d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 		d.triggerTierSweep()
@@ -552,7 +552,7 @@ func TestTierSweepAgeCountsFromWhenTheSweepBecameOwed(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 
 	d.triggerTierSweep()
 	waitTierSweepIdle(t, d)
@@ -2714,7 +2714,7 @@ func TestTierSweepDeferredCycleDoesNotRestartTheOwedClock(t *testing.T) {
 	if !st.OwedSince.Equal(owedSince) {
 		t.Fatalf("OwedSince = %v after a deferred cycle, want the unchanged %v", st.OwedSince, owedSince)
 	}
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 	if age, swept, _ := d.tierSweepAge(now); !swept || age < defaultTierSweepStaleAfter {
 		t.Fatalf("owed age = %s (swept = %v), want past the %s bound", age, swept, defaultTierSweepStaleAfter)
 	}
@@ -2751,7 +2751,7 @@ func TestTierSweepRedCycleDoesNotRestartTheOwedClock(t *testing.T) {
 	if !st.OwedSince.Equal(owedSince) {
 		t.Fatalf("OwedSince = %v after a RED cycle, want the unchanged %v: only a green cycle ends the interval", st.OwedSince, owedSince)
 	}
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 	if age, swept, _ := d.tierSweepAge(now); !swept || age < defaultTierSweepStaleAfter {
 		t.Fatalf("owed age = %s (swept = %v), want past the %s bound", age, swept, defaultTierSweepStaleAfter)
 	}
@@ -2785,7 +2785,7 @@ func TestTierSweepAgeReadsWithoutDatingTheOwedClock(t *testing.T) {
 		t.Fatalf("OwedSince = %v after the read alone, want the record untouched", st.OwedSince)
 	}
 
-	d.upgradeRestartPending.Store(true)
+	d.landingHolds.hold(landingHoldUpgradeRestart)
 	d.tierSweepDeferForRestart(now)
 	if st := tierSweepTestState(t, d, "gastown"); !st.OwedSince.Equal(now) {
 		t.Fatalf("OwedSince = %v, want %v: the deferral check dates what the read saw", st.OwedSince, now)
@@ -2806,7 +2806,7 @@ func TestTierSweepDeferForRestartDatesAPreStampRecord(t *testing.T) {
 		t.Parallel()
 		d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
 		withTierSweepLastRun(t, d, "gastown", now.Add(-lastRun))
-		d.upgradeRestartPending.Store(true)
+		d.landingHolds.hold(landingHoldUpgradeRestart)
 
 		if d.tierSweepDeferForRestart(now) {
 			t.Fatal("a sweep owed past the stale bound must run rather than defer")
@@ -2832,7 +2832,7 @@ func TestTierSweepDeferForRestartDatesAPreStampRecord(t *testing.T) {
 			t.Fatal(err)
 		}
 		d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "", errors.New("no ref") }
-		d.upgradeRestartPending.Store(true)
+		d.landingHolds.hold(landingHoldUpgradeRestart)
 
 		// The last run measures the age, as it does for a record the read can
 		// date from nothing else.
