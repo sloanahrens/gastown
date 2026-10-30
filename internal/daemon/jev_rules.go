@@ -79,6 +79,7 @@ func (d *Daemon) runJevRules() {
 	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevRules != nil {
 		settings.MaxUSDPerDay = c.Patrols.JevRules.MaxUSDPerDay
 		settings.USDPerBillionTokens = c.Patrols.JevRules.USDPerBillionTokens
+		settings.Scrub = c.Patrols.JevRules.Scrub
 	}
 	open := d.jevRulesOpen
 	if open == nil {

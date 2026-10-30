@@ -97,6 +97,7 @@ func jevAttentionSettings(townRoot string) (jevattention.Settings, error) {
 	return jevattention.Settings{
 		MaxUSDPerDay:        c.MaxUSDPerDay,
 		USDPerBillionTokens: c.USDPerBillionTokens,
+		Scrub:               c.Scrub,
 	}, nil
 }
 

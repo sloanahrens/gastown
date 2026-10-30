@@ -115,6 +115,10 @@ type Settings struct {
 	// USDPerBillionTokens prices the ledger's tokens. It is required: the
 	// ledger stores tokens, never dollars.
 	USDPerBillionTokens float64
+
+	// Scrub scrubs the state before it is sent: the patrol's scrub key
+	// sets it (gt-aqczg).
+	Scrub bool
 }
 
 // DefaultMaxUSDPerDay is the daily cap when the config names none. The cap is

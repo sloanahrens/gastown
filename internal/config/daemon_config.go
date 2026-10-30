@@ -889,6 +889,17 @@ func (c *HMSyncConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// JevScrub turns on the state scrubber for one Jev battery: secret-shaped text
+// and the operator's identity are replaced in the state before it leaves the
+// machine (internal/jev/scrub), and the request log counts the rules that
+// fired. It is embedded in every battery's config so the key has one
+// definition, and an operator flips it on one battery at a time once that
+// battery's signal cost is measured (gt-aqczg).
+type JevScrub struct {
+	// Scrub replaces the state's secrets and account name before it is sent.
+	Scrub bool `json:"scrub,omitempty"`
+}
+
 // JevDedupeConfig switches on the duplicate-finding pass and prices its Jev
 // spend. The pass is off unless Enabled is true, and an enabled pass needs
 // USDPerBillionTokens: the usage ledger stores tokens, not dollars.
@@ -901,6 +912,8 @@ type JevDedupeConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevAttentionConfig switches on the attention-item pass and prices its Jev
@@ -915,6 +928,8 @@ type JevAttentionConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevLandingConfig switches on the landing battery and prices its Jev spend.
@@ -929,6 +944,8 @@ type JevLandingConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevSubmissionConfig switches on the submission battery and prices its Jev
@@ -943,6 +960,8 @@ type JevSubmissionConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevDriftConfig switches on the drift battery and prices its Jev spend. The
@@ -957,6 +976,8 @@ type JevDriftConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevLogtriageConfig switches on the daemon-log triage battery and prices its
@@ -971,6 +992,8 @@ type JevLogtriageConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevTestselConfig switches on the test-selection shadow battery and prices its
@@ -985,6 +1008,8 @@ type JevTestselConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevFailcauseConfig switches on the failing-test cause battery and prices its
@@ -999,6 +1024,8 @@ type JevFailcauseConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevProgressConfig switches on the polecat progress battery and prices its Jev
@@ -1013,6 +1040,8 @@ type JevProgressConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevStaleConfig switches on the stale-bead read and prices its Jev spend. The
@@ -1027,6 +1056,8 @@ type JevStaleConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevNotesConfig switches on the notes read and prices its Jev spend. The read
@@ -1041,6 +1072,8 @@ type JevNotesConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevReworkConfig switches on the refused-review cause battery and prices its
@@ -1055,6 +1088,8 @@ type JevReworkConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevTargetsConfig switches on the review-targeting battery and prices its Jev
@@ -1069,6 +1104,8 @@ type JevTargetsConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevDispatchConfig switches on the dispatch battery and prices its Jev spend.
@@ -1083,6 +1120,8 @@ type JevDispatchConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevThrashConfig switches on the thrash battery and prices its Jev spend. The
@@ -1097,6 +1136,8 @@ type JevThrashConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevRulesConfig switches on the rules battery and prices its Jev spend. The
@@ -1111,6 +1152,8 @@ type JevRulesConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // JevConflictConfig switches on the conflict battery and prices its Jev spend.
@@ -1125,6 +1168,8 @@ type JevConflictConfig struct {
 
 	// USDPerBillionTokens prices input and output tokens alike.
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+
+	JevScrub
 }
 
 // EventsPruneConfig bounds the town's raw event log, .events.jsonl, which

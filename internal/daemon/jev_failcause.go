@@ -18,6 +18,7 @@ func (d *Daemon) jevFailcauseCandidate(rigName string, gate land.Candidate) land
 		settings = failcause.Settings{
 			MaxUSDPerDay:        c.Patrols.JevFailcause.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevFailcause.USDPerBillionTokens,
+			Scrub:               c.Patrols.JevFailcause.Scrub,
 		}
 	}
 	open := d.jevFailcauseOpen

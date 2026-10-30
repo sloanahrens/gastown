@@ -25,11 +25,7 @@ func Open(townRoot string, q *Queue, s Settings, warnings io.Writer) (*Pass, err
 		return nil, fmt.Errorf("jev_progress: %w", err)
 	}
 
-	client, err := jev.NewClient(
-		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
-		jev.WithCaller(Caller),
-		jev.WithWarnings(warnings),
-	)
+	client, err := jev.NewClient(jev.BatteryOptions(townRoot, Caller, warnings, s.Scrub)...)
 	if err != nil {
 		return nil, fmt.Errorf("opening the Jev client: %w", err)
 	}
