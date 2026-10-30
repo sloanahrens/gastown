@@ -90,6 +90,18 @@ type row struct {
 // row per labeled item that answered the question, ids and features only. An
 // error refuses a column whose name may carry text.
 func Build(read scorecard.Reading, question scorecard.QuestionID) (Table, error) {
+	// A labeling belongs to the item at its index, so a reading whose two
+	// slices differ in length would pair an item with another item's labels (or
+	// run off the end), and its rows would be wrong rather than absent.
+	if len(read.Labelings) != len(read.Items) {
+		return Table{}, fmt.Errorf("reading has %d items but %d labelings: a labeling belongs to the item at its index, so the two must match", len(read.Items), len(read.Labelings))
+	}
+	// A missing log reads as an empty item list, which would export as "no
+	// labeled rows" and hide the real cause: there is no log to export from.
+	if read.LogMissing {
+		return Table{}, fmt.Errorf("the battery's log is missing, so there is nothing to export")
+	}
+
 	kinds := map[scorecard.QuestionID]string{}
 	for _, it := range read.Items {
 		for id, ans := range it.Answers {
@@ -119,6 +131,16 @@ func Build(read scorecard.Reading, question scorecard.QuestionID) (Table, error)
 		kind := ans.Kind()
 		if !answered || kind == "" {
 			continue
+		}
+		// The rule and the source reach the file verbatim, so the export's
+		// promise that it names no bead and carries no text has to cover them
+		// too: an adapter that spells either from its inputs is refused rather
+		// than allowed to write one.
+		if err := refuseLabelValue(colLabelRule, lab.Rule, it.ID); err != nil {
+			return Table{}, err
+		}
+		if err := refuseLabelValue(colLabelSource, lab.Source, it.ID); err != nil {
+			return Table{}, err
 		}
 		when := it.Time.UTC()
 		cells := map[string]string{
@@ -217,6 +239,23 @@ func Build(read scorecard.Reading, question scorecard.QuestionID) (Table, error)
 func refuseName(name string) error {
 	if denyNames[strings.ToLower(name)] {
 		return fmt.Errorf("refusing question %q: it would be an ans_ column for text, and the dataset holds ids and features only", name)
+	}
+	return nil
+}
+
+// refuseLabelValue refuses a labeling's rule or source when it would carry
+// what the file never writes: the labeled item's bead id, or a name on the
+// deny-list. Both values are adapter-supplied and reach the file as text, so
+// they get the check the file's other text gets.
+func refuseLabelValue(field, value, beadID string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.Contains(value, beadID) {
+		return fmt.Errorf("refusing %s %q: it names the item's bead, and the dataset holds no bead ids", field, value)
+	}
+	if denyNames[strings.ToLower(value)] {
+		return fmt.Errorf("refusing %s %q: it is on the deny-list of names that may carry the text Jev judged", field, value)
 	}
 	return nil
 }
@@ -341,7 +380,7 @@ func number(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 func Export(read scorecard.Reading, battery string, question scorecard.QuestionID, dir string) (csvPath, dictPath string, rows int, err error) {
 	table, err := Build(read, question)
 	if err != nil {
-		return "", "", 0, err
+		return "", "", 0, fmt.Errorf("battery %q: %w", battery, err)
 	}
 	if len(table.Rows) == 0 {
 		return "", "", 0, fmt.Errorf("battery %q has no labeled rows for question %q; its log answers %s", battery, question, questionNames(table.Questions))
@@ -357,6 +396,10 @@ func Export(read scorecard.Reading, battery string, question scorecard.QuestionI
 		return "", "", 0, fmt.Errorf("writing %s: %w", csvPath, err)
 	}
 	if err := os.WriteFile(dictPath, table.Dict(battery, question), 0o600); err != nil {
+		// The CSV is already on disk, and half a pair would read as a whole
+		// export: take it back. The dict write's failure is the one the caller
+		// acts on, so a failed removal is not reported as a second error.
+		_ = os.Remove(csvPath)
 		return "", "", 0, fmt.Errorf("writing %s: %w", dictPath, err)
 	}
 	return csvPath, dictPath, len(table.Rows), nil
@@ -506,7 +549,10 @@ func meaning(column string, question scorecard.QuestionID) string {
 	case colAnswer:
 		return fmt.Sprintf("Jev's answer to %s: a noul probability, a score or the choice name", question)
 	case colAnswerBand:
-		return "the scorecard's calibration band of the scored value, 0.0-0.2 through 0.8-1.0, or the score level"
+		// Named from the scorecard's own bands, so a change to them changes the
+		// dict, and the top band is stated to hold 1.0 because a band is
+		// [Lo, Hi).
+		return fmt.Sprintf("the scorecard's calibration band of the scored value, %s through %s, each band half-open on the right so 1.0 falls in the top one, or the score level", scorecard.Band(0), scorecard.Band(1))
 	case colConfidence:
 		return "the probability of the choice Jev picked, empty when the answer carries none"
 	case colLabel:
