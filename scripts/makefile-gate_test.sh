@@ -46,16 +46,16 @@ fi
 lint=$(line_of "$out" "golangci-lint run")
 build=$(line_of "$out" "go build ./...")
 unit=$(line_of "$out" "go test -timeout 20m ./...")
-shell=$(line_of "$out" "scripts/test-makefile.sh")
+shell=$(line_of "$out" "internal/shelltier/cmd/shelltier")
 if [[ -n "$lint" && -n "$build" && -n "$unit" && "$lint" -lt "$build" && "$build" -lt "$unit" ]]; then
   pass "gate runs lint, then go build ./..., then the cached unit tier"
 else
   fail "gate runs lint, then go build ./..., then the cached unit tier (lines: lint=$lint build=$build unit=$unit)" "$out"
 fi
 if [[ -z "$shell" ]]; then
-  pass "gate leaves the shell tests (scripts/test-makefile.sh) to test-slow"
+  pass "gate leaves the shell tests (the shelltier runner) to test-slow"
 else
-  fail "gate leaves the shell tests (scripts/test-makefile.sh) to test-slow" "$out"
+  fail "gate leaves the shell tests (the shelltier runner) to test-slow" "$out"
 fi
 # gt-s1vff: the gate's unit tier is plain go test, so the test result cache
 # reruns only the packages a landing can affect; the budget runner's -exec
@@ -152,27 +152,40 @@ else
   fail "make -n test-slow exits 0" "$sout"
 fi
 sgate=$(line_of "$sout" "go test -timeout 20m ./...")
-sshell=$(line_of "$sout" "GT_TEST_DOCKER=0 bash scripts/test-makefile.sh")
+sshell=$(line_of "$sout" "GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --all")
 if [[ -n "$sgate" && -n "$sshell" && "$sgate" -lt "$sshell" ]] && grep -q -F 'go test -timeout 20m ./...' <<<"$sout" && ! grep -q -E 'GT_TEST_DOCKER=[^0]|slot +run' <<<"$sout"; then
   pass "test-slow runs the gate, then the shell tests, containers off, no slot"
 else
   fail "test-slow runs the gate, then the shell tests, containers off, no slot (lines: gate=$sgate shell=$sshell)" "$sout"
 fi
 
-# The shell tests have one list (gt-tqxdd): test-makefile runs
-# scripts/test-makefile.sh, the same file and env test-slow runs. A hand-written
-# list drifted from the script once, so the delegation is checked.
+# The shell tests have one runner (gt-tqxdd): test-makefile runs the shelltier
+# command the same way test-slow does, with no script of its own. A hand-written
+# list drifted from the runner once, so the delegation is checked.
 echo "test-makefile"
 if mout=$(dry test-makefile); then
   pass "make -n test-makefile exits 0"
 else
   fail "make -n test-makefile exits 0" "$mout"
 fi
-mtests=$(grep -o -E 'bash [^[:space:]]+' <<<"$mout" | awk '{print $2}' | sort -u | tr '\n' ' ' | sed 's/ $//')
-if [[ "$mtests" = "scripts/test-makefile.sh" ]] && grep -q -F 'GT_TEST_DOCKER=0 bash scripts/test-makefile.sh' <<<"$mout"; then
-  pass "test-makefile runs the script alone, as test-slow does (gt-tqxdd)"
+mbash=$(grep -o -E 'bash [^[:space:]]+' <<<"$mout" || true)
+if [[ -z "$mbash" ]] && grep -q -F 'GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --all' <<<"$mout"; then
+  pass "test-makefile runs the shelltier runner alone, as test-slow does (gt-tqxdd)"
 else
-  fail "test-makefile runs the script alone, as test-slow does (gt-tqxdd)" "invoked: $mtests"
+  fail "test-makefile runs the shelltier runner alone, as test-slow does (gt-tqxdd)" "$mout"
+fi
+
+# The shell-test list is the runner's manifest (gt-u560q.6). The three entries
+# the old hand list never ran must be in it, and no Makefile line names the
+# old script.
+echo "shell-test list"
+missing=$(for s in .githooks/pre-push_test.sh scripts/post-land-shell_test.sh scripts/town_metrics_test.sh; do
+  grep -q -F "Path: \"$s\"" "$ROOT/internal/shelltier/manifest.go" || echo "$s"
+done)
+if [[ -z "$missing" ]] && ! grep -q -F 'test-makefile.sh' "$ROOT/Makefile"; then
+  pass "the shelltier manifest runs the scripts the old hand list skipped, and the Makefile names no hand list"
+else
+  fail "the shelltier manifest runs the scripts the old hand list skipped, and the Makefile names no hand list" "missing from manifest: $missing"
 fi
 
 # The OpenShell polecat sandbox targets (claude-q3f.9): an operator runs them
@@ -746,6 +759,7 @@ echo "golangci-lint $*" >>"$STUB_LOG"
 exit 0
 STUB
 cat >"$TMP/shell-tests.sh" <<'STUB'
+#!/usr/bin/env bash
 echo "shell-tests" >>"$STUB_LOG"
 [[ -n "${STUB_SHELL_FAIL:-}" ]] && exit 1
 exit 0
@@ -761,7 +775,7 @@ if [[ -n "${EXEC_TAX_WARN:-}" ]]; then
 fi
 exit 0
 STUB
-chmod +x "$TMP/bin/go" "$TMP/bin/golangci-lint" "$TMP/preflight.sh"
+chmod +x "$TMP/bin/go" "$TMP/bin/golangci-lint" "$TMP/preflight.sh" "$TMP/shell-tests.sh"
 
 # run_gate [make flags] -- VAR=value... runs the real gate recipe against the
 # stubs, with an inherited GT_TEST_DOCKER=1 the recipe must override, and
