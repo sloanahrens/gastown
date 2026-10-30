@@ -150,7 +150,7 @@ func createFreshSetupIssue(t *testing.T, dir string, env []string, title string)
 	t.Helper()
 	out := runFreshSetupOutputCmd(t, dir, env, "bd", "create", "--json", "--title", title, "--type", "task", "--priority", "2", "--description", "Fresh setup integration test issue")
 	var issue freshSetupIssue
-	if err := json.Unmarshal([]byte(out), &issue); err != nil {
+	if err := json.Unmarshal(unwrapFreshSetupJSON([]byte(out)), &issue); err != nil {
 		t.Fatalf("parse bd create output: %v\n%s", err, out)
 	}
 	if issue.ID == "" {
@@ -162,13 +162,14 @@ func createFreshSetupIssue(t *testing.T, dir string, env []string, title string)
 func showFreshSetupIssue(t *testing.T, dir string, env []string, id string) freshSetupIssue {
 	t.Helper()
 	out := runFreshSetupOutputCmd(t, dir, env, "bd", "show", id, "--json")
+	payload := unwrapFreshSetupJSON([]byte(out))
 	var issue freshSetupIssue
-	if err := json.Unmarshal([]byte(out), &issue); err == nil {
+	if err := json.Unmarshal(payload, &issue); err == nil {
 		return issue
 	}
 
 	var issues []freshSetupIssue
-	if err := json.Unmarshal([]byte(out), &issues); err != nil {
+	if err := json.Unmarshal(payload, &issues); err != nil {
 		t.Fatalf("parse bd show output: %v\n%s", err, out)
 	}
 	if len(issues) != 1 {
