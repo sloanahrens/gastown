@@ -40,8 +40,9 @@ var (
 // faked immutable flag that the rename ignored would let the concurrency bug
 // through unseen (gt-tpg0p.66).
 type seam struct {
-	calls []string
-	files Files
+	warnings []string // the notices a replace did not fail for
+	calls    []string
+	files    Files
 
 	flags map[string]bool
 
@@ -157,7 +158,10 @@ func newSeam() *seam {
 func (s *seam) log(call, arg string) { s.calls = append(s.calls, call+" "+arg) }
 
 func (s *seam) replace(name string) error {
-	return Installer{Files: s.files}.Replace(testSrc, testDestDir, name)
+	return Installer{
+		Files: s.files,
+		Warnf: func(format string, args ...any) { s.warnings = append(s.warnings, fmt.Sprintf(format, args...)) },
+	}.Replace(testSrc, testDestDir, name)
 }
 
 func TestReplaceInstallsTheSourceUnderTheTargetName(t *testing.T) {
@@ -506,6 +510,48 @@ func TestReplaceToleratesRestoreFailureWhenTheFlagCouldNotComeOff(t *testing.T) 
 	}
 	if s.renamed != testDest {
 		t.Fatal("the binary was not installed")
+	}
+	// Tolerated is not silent: the install says the flag is unavailable and why.
+	if len(s.warnings) != 1 || !strings.Contains(s.warnings[0], testDest) ||
+		!strings.Contains(s.warnings[0], errClear.Error()) || !strings.Contains(s.warnings[0], errSet.Error()) {
+		t.Fatalf("warnings %q, want one naming %s and both flag errors", s.warnings, testDest)
+	}
+}
+
+// TestReplaceWarnsOnlyWhenTheFlagCouldNotComeOff pins that the notice belongs to
+// the unsupported-flag case alone: a restore that fails after a clear that
+// worked is an error and gives no warning, and a clean replace gives neither.
+func TestReplaceWarnsOnlyWhenTheFlagCouldNotComeOff(t *testing.T) {
+	t.Parallel()
+	failed := newSeam()
+	failed.setErr = errSet
+	if err := failed.replace("gt"); !errors.Is(err, errSet) {
+		t.Fatalf("Replace: %v, want the restore error", err)
+	}
+	if len(failed.warnings) != 0 {
+		t.Fatalf("a failed restore after a good clear also warned: %q", failed.warnings)
+	}
+	clean := newSeam()
+	if err := clean.replace("gt"); err != nil || len(clean.warnings) != 0 {
+		t.Fatalf("a clean replace returned %v with warnings %q", err, clean.warnings)
+	}
+}
+
+// TestOptionSafeKeepsADashPathFromReadingAsAnOption: chflags and chattr take
+// the path as an operand, so a path that starts with a dash is handed over as
+// a path from the current directory.
+func TestOptionSafeKeepsADashPathFromReadingAsAnOption(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"-i":              "./-i",
+		"-bin/gt":         "./-bin/gt",
+		"/usr/local/gt":   "/usr/local/gt",
+		"bin/gt":          "bin/gt",
+		"./-already-safe": "./-already-safe",
+	} {
+		if got := optionSafe(in); got != want {
+			t.Errorf("optionSafe(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

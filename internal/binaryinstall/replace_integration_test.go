@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/installlock"
 )
@@ -69,9 +70,9 @@ func immutableSeams(t *testing.T) (clear, set func(string) error, rename func(st
 // two installers replace the same target at once. It is the property the unit
 // tests cannot show: rename(2) inside a directory publishes a whole file, so a
 // reader sees an old complete binary or a new complete one, never a partial
-// copy (gt-0het). The per-target lock means the loser of a concurrent pair is
-// refused with ErrReplaceInProgress rather than sharing the critical section
-// (gt-tpg0p.66).
+// copy (gt-0het). The per-target lock means the second of a concurrent pair
+// waits for the first and then installs too: both succeed, one after the other,
+// instead of sharing the critical section (gt-tpg0p.66).
 func TestIntegrationConcurrentReadersNeverSeeAPartialBinary(t *testing.T) {
 	dir := t.TempDir()
 	destDir := filepath.Join(dir, "bin")
@@ -85,6 +86,9 @@ func TestIntegrationConcurrentReadersNeverSeeAPartialBinary(t *testing.T) {
 	srcSecond := writeSource(t, dir, "gt-second", second)
 
 	clear, set, rename, _ := immutableSeams(t)
+	// On a host that grants the real flag the installed binary is immutable when
+	// the test ends, and an immutable file blocks the temp directory's removal.
+	t.Cleanup(func() { _ = clear(dest) })
 	installer := Installer{Files: Files{
 		ClearImmutable: clear,
 		SetImmutable:   set,
@@ -137,14 +141,16 @@ func TestIntegrationConcurrentReadersNeverSeeAPartialBinary(t *testing.T) {
 		t.Fatal(readErr)
 	}
 
-	// Hold the target's real lock as a peer install would: the replace must be
-	// refused at once, not wait for it and not interlace with it.
+	// Hold the target's real lock as a stuck peer install would: a replace
+	// waits for it (a short wait here) and is then refused, never interlaced.
 	lockPath := filepath.Join(destDir, ".gt.replace.lock")
 	peer, err := installlock.Acquire(lockPath, 0)
 	if err != nil {
 		t.Fatalf("take the peer lock %s: %v", lockPath, err)
 	}
-	if err := installer.Replace(srcFirst, destDir, "gt"); !errors.Is(err, ErrReplaceInProgress) {
+	impatient := installer
+	impatient.LockWait = 50 * time.Millisecond
+	if err := impatient.Replace(srcFirst, destDir, "gt"); !errors.Is(err, ErrReplaceInProgress) {
 		peer()
 		t.Fatalf("Replace while a peer holds the lock: %v, want ErrReplaceInProgress", err)
 	}
@@ -161,8 +167,8 @@ func TestIntegrationConcurrentReadersNeverSeeAPartialBinary(t *testing.T) {
 	}
 	installers.Wait()
 	for i, err := range errs {
-		if err != nil && !errors.Is(err, ErrReplaceInProgress) {
-			t.Fatalf("concurrent replace %d: %v", i, err)
+		if err != nil {
+			t.Fatalf("concurrent replace %d: %v, want both installs to succeed", i, err)
 		}
 	}
 
