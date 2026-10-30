@@ -569,6 +569,27 @@ func TestRunFailureAfterEditsNamesTheFilesToRestore(t *testing.T) {
 	}
 }
 
+// TestRunCommitFailureStopsBeforeTheTagAndRestoresTheEdits: a git commit that exits
+// non-zero stops the run before the tag, returns the commit's status, and prints the
+// restore line for the four files the run edited.
+func TestRunCommitFailureStopsBeforeTheTagAndRestoresTheEdits(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	w.gitCodes = map[string]int{"commit": 1}
+	err := w.run(Options{Version: "1.3.0", Commit: true, Tag: true})
+	if err == nil || !strings.Contains(err.Error(), "git commit: exit 1") {
+		t.Fatalf("Run error = %v, want it to contain %q", err, "git commit: exit 1")
+	}
+	if got := w.steps(); !reflect.DeepEqual(got, []string{"git add", "git commit"}) {
+		t.Errorf("steps = %q, want the staging and the failed commit only", got)
+	}
+	want := "Edited before this failure. Restore with: git checkout -- " +
+		VersionGoPath + " " + PackageJSONPath + " " + FlakePath + " " + ChangelogPath + "\n"
+	if !strings.Contains(w.out.String(), want) {
+		t.Errorf("output lacks the restore line %q:\n%s", want, w.out.String())
+	}
+}
+
 // TestRunInstallWithUnknownHomeIsUnverifiedAndRunsNoGT: when the home directory cannot
 // be resolved, the install check reports unverified with that reason and runs no gt. A
 // gt that would verify is on hand, so a run that looked for gt anyway would show it.
