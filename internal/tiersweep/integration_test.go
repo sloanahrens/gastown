@@ -471,6 +471,21 @@ func TestIntegrationUnreadableListIsRed(t *testing.T) {
 			want: "list nested modules",
 		},
 		{
+			name: "the root test file list fails",
+			setup: func(r *fakeRepo) {
+				r.listErr[". *_test.go"] = errors.New("ls-files broke")
+			},
+			want: "list test files: ls-files broke",
+		},
+		{
+			name: "a nested module's test file list fails",
+			setup: func(r *fakeRepo) {
+				setTracker(r)
+				r.listErr["tracker *_test.go"] = errors.New("ls-files broke")
+			},
+			want: "list test files in tracker",
+		},
+		{
 			name: "docker.txt is missing",
 			setup: func(r *fakeRepo) {
 				delete(r.files, dockerList)
