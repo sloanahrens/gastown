@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -202,11 +203,15 @@ type fakeNotify struct {
 	caught   []os.Signal
 	released chan struct{}
 	once     sync.Once
+	calls    atomic.Int32 // how many times the handler was released
 }
 
 func (f *fakeNotify) notify(_ context.Context, signals ...os.Signal) (context.Context, context.CancelFunc) {
 	f.caught = append(f.caught, signals...)
-	return f.ctx, func() { f.once.Do(func() { close(f.released) }) }
+	return f.ctx, func() {
+		f.calls.Add(1)
+		f.once.Do(func() { close(f.released) })
+	}
 }
 
 // TestMainCatchesTheSignalsTheScriptCaught: the handler covers the three signals
@@ -242,14 +247,17 @@ func TestMainCatchesTheSignalsTheScriptCaught(t *testing.T) {
 	}
 }
 
-// TestMainReleasesTheHandlerAtTheFirstSignal: the restore can run for minutes after
-// the first signal, and a second signal must act then (the default effect is the
-// process dies) instead of being swallowed until the run returns. The token read is
-// the hook: it cancels the signal source and then waits for the release while the
-// run is still going, so a handler held until the run returns fails this test rather
-// than passing. Mutation: drop the release after the notify call and the release
-// never arrives.
-func TestMainReleasesTheHandlerAtTheFirstSignal(t *testing.T) {
+// settle is how long the held-handler test waits for an asynchronous release that
+// must not come.
+const settle = 20 * time.Millisecond
+
+// TestMainKeepsTheHandlerThroughTheRestore: the restore can run for minutes after
+// the first signal, and a second signal during it must not kill the process and
+// skip the restore: the handler is held until the run returns, and released once,
+// by the deferred release. Releasing it at the first signal as well (a second
+// release call) is the defect. Mutation: add context.AfterFunc(ctx, stop) after the
+// notify call and the release count reads 2.
+func TestMainKeepsTheHandlerThroughTheRestore(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -257,13 +265,15 @@ func TestMainReleasesTheHandlerAtTheFirstSignal(t *testing.T) {
 	var once sync.Once
 	getenv := func(string) string {
 		once.Do(func() {
-			cancel() // the signal lands while the run is resolving its token
-			waitCtx, stopWait := context.WithTimeout(context.Background(), releaseBound)
-			defer stopWait()
+			cancel() // the first signal lands while the run is resolving its token
+			// A release made at the first signal would run on a goroutine
+			// context.AfterFunc starts; the settle gives it the time to run. The
+			// absence of a release cannot be observed without a bound, so the
+			// bound is short, and the count below is the second check.
 			select {
 			case <-fake.released:
-			case <-waitCtx.Done():
-				t.Error("the signal handler was still held while the run went on: a second signal would be swallowed")
+				t.Error("the signal handler was released at the first signal: a second signal would kill the process and skip the restore")
+			case <-time.After(settle): //testpolicy:allow no-sleep — a negative proof: nothing arrives on the release channel while the run is held; the bound is the settle for an asynchronous release, and the test does not depend on it for a pass of correct code
 			}
 		})
 		return ""
@@ -273,6 +283,14 @@ func TestMainReleasesTheHandlerAtTheFirstSignal(t *testing.T) {
 	var stdout, stderr strings.Builder
 	if got := runNotify(nil, getenv, noFiles(t), &stdout, &stderr, parse, fake.notify); got != forgejoresync.ExitFailure {
 		t.Fatalf("runNotify = %d, want 1 (stderr: %s)", got, stderr.String())
+	}
+	select {
+	case <-fake.released:
+	default:
+		t.Fatal("the signal handler was not released when the run returned")
+	}
+	if got := fake.calls.Load(); got != 1 {
+		t.Errorf("the handler was released %d times, want once at the end of the run: an earlier release lets a second signal skip the restore", got)
 	}
 }
 

@@ -70,11 +70,12 @@ func runNotify(args []string, getenv func(string) string, readFile func(string) 
 	// next cancel, and the protection restore still runs.
 	ctx, stop := notify(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
-	// The first signal ends the run and starts the restore, which can take up to
-	// RestoreTimeout. Releasing the handler then means a second signal during the
-	// restore has the default effect (the process dies) instead of being swallowed
-	// until the run returns.
-	context.AfterFunc(ctx, stop)
+	// The handler stays installed until the run returns, restore included. The
+	// first signal ends the run and starts the restore, which can take up to
+	// RestoreTimeout; a second signal during it is swallowed, as bash deferred a
+	// signal that arrived while the script's EXIT trap ran, because the restore
+	// is the one step an impatient second signal must not skip. The wait is
+	// bounded by RestoreTimeout, so a stuck restore ends by itself.
 	resync := &forgejoresync.Resync{
 		Opts:     opts,
 		Context:  ctx,
