@@ -208,7 +208,7 @@ func (r *Run) Sign() {
 // prefix, not a signing.Bound context, so the install keeps the script's guard.
 func (r *Run) codesign(path string) (string, error) {
 	name := "codesign"
-	args := []string{"--force", "--keychain", r.Signing.Keychain(), "-s", r.Signing.Identity, "-i", signIdentifier, path}
+	args := signing.CodesignArgs(r.Signing.Keychain(), r.Signing.Identity, signIdentifier, path)
 	switch {
 	case r.found("timeout"):
 		name = "timeout"

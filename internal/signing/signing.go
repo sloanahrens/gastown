@@ -61,8 +61,17 @@ type Attempt func() (stdout, stderr string, err error)
 // is, with path in neither state, and the caller must not install it.
 func Codesign(ctx context.Context, exec Exec, keychain, identity, identifier, path string, restore func() error) error {
 	return CodesignWith(func() (string, string, error) {
-		return exec(ctx, "codesign", "--force", "--keychain", OptionSafe(keychain), "-s", identity, "-i", identifier, OptionSafe(path))
+		return exec(ctx, "codesign", CodesignArgs(keychain, identity, identifier, path)...)
 	}, restore)
+}
+
+// CodesignArgs is the argv of one codesign of path under identifier with
+// identity, the arguments after the command name. Both codesign calls, the
+// shared one and the installer's argv-bounded one, build their argv here, so the
+// keychain and the path reach codesign through OptionSafe whichever bound wraps
+// them.
+func CodesignArgs(keychain, identity, identifier, path string) []string {
+	return []string{"--force", "--keychain", OptionSafe(keychain), "-s", identity, "-i", identifier, OptionSafe(path)}
 }
 
 // CodesignWith is Codesign over a caller-bounded attempt: a failed attempt runs
