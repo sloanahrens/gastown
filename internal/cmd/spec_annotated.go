@@ -23,16 +23,24 @@ import (
 // board still shows that count no comment has been added since, so the note is
 // still there and the read is skipped.
 //
+// The same file carries the shape and label verdicts of the candidates the
+// scan read (specCandidateVerdict), for the same reason: a candidate whose
+// board row has not moved answers the same label and shape verdict without
+// deciding them again, and a refused one costs no details read at all
+// (gt-km9jt).
+//
 // The memory lasts as long as the daemon does (the owner is the one the detail
 // cache uses), and a missing, unreadable or foreign file is an empty memory:
 // the next tick reads as before, and annotateSpecOnce's read-before-write
 // still writes the note once.
 
 // specAnnotatedFile is the memory's file: for each bead, the comment_count
-// recorded under the digest of each note key.
+// recorded under the digest of each note key, and the shape-and-label verdict
+// the candidate scan last reached (specCandidateVerdict).
 type specAnnotatedFile struct {
-	Owner string                    `json:"owner"`
-	Beads map[string]map[string]int `json:"beads"`
+	Owner    string                          `json:"owner"`
+	Beads    map[string]map[string]int       `json:"beads"`
+	Verdicts map[string]specCandidateVerdict `json:"verdicts,omitempty"`
 }
 
 type specAnnotated struct {
@@ -45,6 +53,9 @@ type specAnnotated struct {
 	owner string
 
 	seen map[string]map[string]int
+	// verdicts is each candidate's shape-and-label verdict as the tick that
+	// read it decided, keyed by bead id.
+	verdicts map[string]specCandidateVerdict
 	// counts is this tick's board comment_count for each candidate; a bead
 	// absent from it is not remembered or skipped.
 	counts map[string]int
@@ -57,7 +68,12 @@ type specAnnotated struct {
 // loadSpecAnnotated loads the memory at path for the daemon named by owner. A
 // tick no daemon started (owner "") keeps nothing between runs.
 func loadSpecAnnotated(path, owner string) *specAnnotated {
-	a := &specAnnotated{owner: owner, seen: map[string]map[string]int{}, counts: map[string]int{}}
+	a := &specAnnotated{
+		owner:    owner,
+		seen:     map[string]map[string]int{},
+		verdicts: map[string]specCandidateVerdict{},
+		counts:   map[string]int{},
+	}
 	if owner == "" {
 		return a
 	}
@@ -71,6 +87,9 @@ func loadSpecAnnotated(path, owner string) *specAnnotated {
 		return a
 	}
 	a.seen = f.Beads
+	if f.Verdicts != nil {
+		a.verdicts = f.Verdicts
+	}
 	return a
 }
 
@@ -82,6 +101,9 @@ type specAnnotatedTick struct {
 	observe  func(specBoardRead)
 	annotate func(beadID, key, text string) error
 	save     func()
+	// memory is the value behind the wiring, which the candidate scan keeps its
+	// verdicts in.
+	memory *specAnnotated
 }
 
 // newSpecAnnotatedTick loads the memory the town's annotated path keeps for the
@@ -92,6 +114,7 @@ func newSpecAnnotatedTick(townRoot, owner string, storeFor func(beadID string) b
 	a := loadSpecAnnotated(dispatch.SpecAnnotatedPath(townRoot), owner)
 	return &specAnnotatedTick{
 		observe: a.observe,
+		memory:  a,
 		annotate: func(beadID, key, text string) error {
 			return a.once(beadID, key, func() (bool, error) {
 				return annotateSpecWrote(storeFor(beadID), beadID, key, text)
@@ -164,13 +187,19 @@ func (a *specAnnotated) save() {
 				a.dirty = true
 			}
 		}
+		for id := range a.verdicts {
+			if _, listed := a.counts[id]; !listed {
+				delete(a.verdicts, id)
+				a.dirty = true
+			}
+		}
 	}
 	if !a.dirty {
 		return
 	}
 	err := os.MkdirAll(filepath.Dir(a.path), 0o700)
 	if err == nil {
-		err = atomicfile.WriteJSONWithPerm(a.path, specAnnotatedFile{Owner: a.owner, Beads: a.seen}, 0o600)
+		err = atomicfile.WriteJSONWithPerm(a.path, specAnnotatedFile{Owner: a.owner, Beads: a.seen, Verdicts: a.verdicts}, 0o600)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: spec annotated set not saved: %v\n", err)

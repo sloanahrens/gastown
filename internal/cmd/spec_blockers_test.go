@@ -65,7 +65,7 @@ func TestSpecDispatchAdmitsOnTheEdgesTheBoardDetailsReadFilled(t *testing.T) {
 			env := f.env()
 			board := env.Candidates
 			env.Candidates = func() specBoardRead {
-				return specBoardDetails(newSpecTickReads(), func(string) beads.Client { return store }, board())
+				return specBoardDetails(newSpecTickReads(), func(string) beads.Client { return store }, board(), nil)
 			}
 
 			r := runSpecDispatchCycle(env)
