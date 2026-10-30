@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Ref is one branch or tag of a repository and the sha it points at.
@@ -101,26 +103,40 @@ func NewExecGit() ExecGit {
 }
 
 // gitTimeout bounds one git call, so a stalled remote cannot hold the run open.
+// It is long on purpose: one full fetch of a large repository over a slow link
+// can take many minutes, and a shorter bound would fail a healthy transfer.
 const gitTimeout = 30 * time.Minute
 
-// RunExec is the production Runner: it starts the program through os/exec, under
-// gitContext and with the environment gitCommand sets.
-var RunExec Runner = execRunner(func(name string, args ...string) ([]byte, error) {
-	ctx, cancel := gitContext()
-	defer cancel()
-	return gitCommand(ctx, name, args...).Output()
-})
+// gitWaitDelay caps how long a killed git call waits for its output pipes to
+// close. A remote helper git spawned can hold stdout open. The group kill reaches
+// a helper that is still in the call's group, but not one that has left it, and
+// without this cap Output would wait on that helper past the bound. It matches
+// the wait internal/git gives a timed-out command.
+var gitWaitDelay = util.ProcessGroupKillGrace + 3*time.Second
 
-// gitContext is the context one git call runs under: it ends after gitTimeout.
-func gitContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), gitTimeout)
+// RunExec is the production Runner: each git call is bounded by gitTimeout.
+var RunExec Runner = gitRunner(gitTimeout)
+
+// gitRunner is the Runner that bounds each call to bound: the call's context
+// ends after bound and gitCommand kills the process group. A test passes a
+// short bound; RunExec passes gitTimeout.
+func gitRunner(bound time.Duration) Runner {
+	return execRunner(func(name string, args ...string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), bound)
+		defer cancel()
+		return gitCommand(ctx, name, args...).Output()
+	})
 }
 
 // gitCommand builds the process for one git call without starting it. It turns
 // terminal prompting off, so a credential prompt fails the call instead of
-// blocking the run on a terminal nobody reads, and it is killed when ctx ends.
+// blocking the run on a terminal nobody reads. It runs in its own process group
+// and ctx ending kills the whole group, so a remote helper git spawned goes too;
+// WaitDelay then stops Output waiting on a pipe a helper outside the group holds.
 func gitCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = gitWaitDelay
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	return cmd
 }

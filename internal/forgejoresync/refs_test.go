@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestParseRefsSortsInByteOrder pins the order the script's LC_ALL=C sort gave:
@@ -244,22 +243,6 @@ func TestGitCommandDisablesPrompt(t *testing.T) {
 	}
 	if !slices.Contains(cmd.Env, "GIT_TERMINAL_PROMPT=0") {
 		t.Fatal("gitCommand environment lacks GIT_TERMINAL_PROMPT=0, so a credential prompt could block the run")
-	}
-}
-
-// TestGitContextIsBounded pins that a git call's context ends at gitTimeout, so
-// a stalled remote cannot hold the run open. The deadline is read, not waited on.
-func TestGitContextIsBounded(t *testing.T) {
-	t.Parallel()
-	before := time.Now()
-	ctx, cancel := gitContext()
-	defer cancel()
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		t.Fatal("gitContext has no deadline, so a stalled git call would never end")
-	}
-	if deadline.Before(before.Add(gitTimeout)) || deadline.After(before.Add(gitTimeout+time.Minute)) {
-		t.Fatalf("gitContext deadline = %v, want %v after the call starts", deadline.Sub(before), gitTimeout)
 	}
 }
 
