@@ -857,3 +857,59 @@ func TestLandingsFileAppendKeepsCallerSuppliedPolecatTime(t *testing.T) {
 		t.Errorf("Summarize called for a record that already carried its time: %q", store.read)
 	}
 }
+
+// fixedSpans is a SpanSummarizer that answers every read with one summary, the
+// shape of a bead whose seats are one closed attempt and one still hooked.
+type fixedSpans struct {
+	sum spans.Summary
+}
+
+func (f *fixedSpans) Summarize(string) (spans.Summary, error) { return f.sum, nil }
+
+func (f *fixedSpans) EndOpen(string, string, spans.Reason, time.Time) (bool, error) {
+	return false, nil
+}
+
+// TestLandingsFilePolecatTimeAsOfCountsAnOpenAttemptToThatTime: a landed record
+// counts an attempt its seat never ended as nothing, but a landing still
+// running reads the time so far: the open attempt counts up to the as-of time,
+// and that reading is a lower bound because the attempt is still open. The
+// summary's own lower-bound flag is left off, as a store that only knows the
+// closed attempts would, so the running reading's floor can only come from the
+// open attempt itself (gt-kmp7c).
+func TestLandingsFilePolecatTimeAsOfCountsAnOpenAttemptToThatTime(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 26, 13, 50, 0, 0, time.UTC)
+	asOf := start.Add(10 * time.Minute)
+	f := &LandingsFile{Spans: &fixedSpans{sum: spans.Summary{
+		Secs: 600,
+		Attempts: []spans.Attempt{
+			{Seat: "gastown/opal", Secs: 600},
+			{Seat: "gastown/onyx", StartedAt: start, Open: true},
+		},
+	}}}
+
+	for _, tc := range []struct {
+		name      string
+		asOf      time.Time
+		wantSecs  float64
+		wantOpen  float64
+		wantLower bool
+	}{
+		{name: "a landed record adds no time for the open attempt", asOf: time.Time{}, wantSecs: 600, wantOpen: 0},
+		{name: "a running landing counts the open attempt up to now", asOf: asOf, wantSecs: 1200, wantOpen: 600, wantLower: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			secs, attempts, lower := f.PolecatTime("gt-abc", tc.asOf)
+			if secs != tc.wantSecs {
+				t.Errorf("secs = %v, want %v", secs, tc.wantSecs)
+			}
+			if len(attempts) != 2 || attempts[1].Secs != tc.wantOpen {
+				t.Errorf("attempts = %+v, want the open attempt at %v secs", attempts, tc.wantOpen)
+			}
+			if lower != tc.wantLower {
+				t.Errorf("lower bound = %v, want %v: a running read counts an attempt that is still open", lower, tc.wantLower)
+			}
+		})
+	}
+}
