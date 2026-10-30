@@ -49,6 +49,10 @@ type pruneFake struct {
 	removeErrs map[string]error
 	readDirs   []string
 	removed    []string
+	// goneAfter makes a path vanish once it has been described that many times:
+	// 1 means the listing sees it and the recheck before deletion does not.
+	goneAfter map[string]int
+	lstats    map[string]int
 }
 
 func (f *pruneFake) host() tiersweep.Host {
@@ -66,6 +70,13 @@ func (f *pruneFake) host() tiersweep.Host {
 			return f.listings[i], nil
 		},
 		Lstat: func(name string) (fs.FileInfo, error) {
+			if f.lstats == nil {
+				f.lstats = map[string]int{}
+			}
+			f.lstats[name]++
+			if n, ok := f.goneAfter[name]; ok && f.lstats[name] > n {
+				return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrNotExist}
+			}
 			info, ok := f.infos[name]
 			if !ok {
 				return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrNotExist}
@@ -409,22 +420,20 @@ func TestPruneReportsFailure(t *testing.T) {
 	})
 	t.Run("a listed directory another sweep removed first", func(t *testing.T) {
 		t.Parallel()
-		// The second listing is the one Prune sees, after another sweep removed
-		// tier-sweep.bbb: no error is raised, and the list the operator read is
+		// bbb is on the list the operator read and is gone when the deletion
+		// checks it again: no error is raised, and the list the operator read is
 		// still not what happened, so the exit is 1 and bbb is named.
 		f := &pruneFake{
 			env: map[string]string{"TMPDIR": "/tmp"},
-			listings: [][]fs.DirEntry{
-				{
-					fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld)),
-					fs.FileInfoToDirEntry(dirInfo("tier-sweep.bbb", 4096, pruneOld)),
-				},
-				{fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld))},
-			},
+			listings: [][]fs.DirEntry{{
+				fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld)),
+				fs.FileInfoToDirEntry(dirInfo("tier-sweep.bbb", 4096, pruneOld)),
+			}},
 			infos: map[string]fs.FileInfo{
 				"/tmp/tier-sweep.aaa": dirInfo("tier-sweep.aaa", 4096, pruneOld),
 				"/tmp/tier-sweep.bbb": dirInfo("tier-sweep.bbb", 4096, pruneOld),
 			},
+			goneAfter: map[string]int{"/tmp/tier-sweep.bbb": 1},
 		}
 		code, stdout, stderr := runPruneFake(t, f, "--apply")
 		if code != pruneErrorExit {
@@ -437,38 +446,84 @@ func TestPruneReportsFailure(t *testing.T) {
 		if !strings.Contains(stdout, "removed 1 of 2") {
 			t.Errorf("stdout = %q, want the count of what was removed", stdout)
 		}
-	})
-	t.Run("a directory the list did not name", func(t *testing.T) {
-		t.Parallel()
-		// A sweep starts between the listing and the deletion and leaves a
-		// directory of its own: the prune's rule removes it, and the operator
-		// hears that the list above was not the whole of it.
-		f := &pruneFake{
-			env: map[string]string{"TMPDIR": "/tmp"},
-			listings: [][]fs.DirEntry{
-				{fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld))},
-				{
-					fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld)),
-					fs.FileInfoToDirEntry(dirInfo("tier-sweep.bbb", 4096, pruneOld)),
-				},
-			},
-			infos: map[string]fs.FileInfo{
-				"/tmp/tier-sweep.aaa": dirInfo("tier-sweep.aaa", 4096, pruneOld),
-				"/tmp/tier-sweep.bbb": dirInfo("tier-sweep.bbb", 4096, pruneOld),
-			},
-		}
-		code, stdout, stderr := runPruneFake(t, f, "--apply")
-		if code != pruneErrorExit {
-			t.Errorf("exit = %d, want %d for a deletion the list did not name", code, pruneErrorExit)
-		}
-		want := "tier-sweep: prune /tmp/tier-sweep.bbb: removed although the list above did not name it"
-		if !strings.Contains(stderr, want) {
-			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
-		}
-		if !strings.Contains(stdout, "removed 1 of 1") {
-			t.Errorf("stdout = %q, want the count over the listed directories, not every deletion", stdout)
+		if want := []string{"/tmp/tier-sweep.aaa"}; !reflect.DeepEqual(f.removed, want) {
+			t.Errorf("RemoveAll saw %q, want only %q", f.removed, want)
 		}
 	})
+}
+
+// TestPruneApplyNeverListsAgain: --apply deletes the paths the run printed and
+// reads the directory once. A directory that appears after the listing is not
+// on the list the operator read, and it survives. The fake would show a second
+// listing with tier-sweep.bbb in it, and the apply never asks for it.
+// Mutation: list again inside the apply (the old tiersweep.Prune call) and
+// RemoveAll sees bbb and the read count is 2.
+func TestPruneApplyNeverListsAgain(t *testing.T) {
+	t.Parallel()
+	f := &pruneFake{
+		env: map[string]string{"TMPDIR": "/tmp"},
+		listings: [][]fs.DirEntry{
+			{fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld))},
+			{
+				fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld)),
+				fs.FileInfoToDirEntry(dirInfo("tier-sweep.bbb", 4096, pruneOld)),
+			},
+		},
+		infos: map[string]fs.FileInfo{
+			"/tmp/tier-sweep.aaa": dirInfo("tier-sweep.aaa", 4096, pruneOld),
+			"/tmp/tier-sweep.bbb": dirInfo("tier-sweep.bbb", 4096, pruneOld),
+		},
+	}
+	code, stdout, stderr := runPruneFake(t, f, "--apply")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr: %s)", code, stderr)
+	}
+	if want := []string{"/tmp/tier-sweep.aaa"}; !reflect.DeepEqual(f.removed, want) {
+		t.Errorf("RemoveAll saw %q, want only the listed %q", f.removed, want)
+	}
+	if len(f.readDirs) != 1 {
+		t.Errorf("the directory was read %d times, want once (the listing the operator read)", len(f.readDirs))
+	}
+	if !strings.Contains(stdout, "removed 1 of 1") {
+		t.Errorf("stdout = %q, want removed 1 of 1", stdout)
+	}
+}
+
+// A listed directory swapped for a symlink between the listing and the apply is
+// not deleted through the link: the recheck sees the link and leaves it.
+func TestPruneApplySkipsAListedDirectoryThatBecameALink(t *testing.T) {
+	t.Parallel()
+	f := &pruneFake{
+		env: map[string]string{"TMPDIR": "/tmp"},
+		listings: [][]fs.DirEntry{{
+			fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld)),
+		}},
+		infos: map[string]fs.FileInfo{
+			"/tmp/tier-sweep.aaa": dirInfo("tier-sweep.aaa", 4096, pruneOld),
+		},
+	}
+	// The listing's own Lstat sees a directory; the second description sees a link.
+	calls := 0
+	h := f.host()
+	base := h.Lstat
+	h.Lstat = func(name string) (fs.FileInfo, error) {
+		calls++
+		if calls > 1 {
+			return fakeInfo{name: "tier-sweep.aaa", mode: fs.ModeSymlink | fs.ModeDir | 0o777, modTime: pruneOld}, nil
+		}
+		return base(name)
+	}
+	var out, errOut bytes.Buffer
+	code := runPrune([]string{"--apply"}, &out, &errOut, tiersweep.Deps{Host: h, Now: func() time.Time { return pruneNow }})
+	if code != pruneErrorExit {
+		t.Errorf("exit = %d, want %d for a listed directory that became a link", code, pruneErrorExit)
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("RemoveAll saw %q, want nothing deleted through a link", f.removed)
+	}
+	if !strings.Contains(errOut.String(), "no longer matches the list") {
+		t.Errorf("stderr = %q, want the changed directory named", errOut.String())
+	}
 }
 
 // TestRunDispatchesPruneAndSweep: "prune" as the first argument reaches the

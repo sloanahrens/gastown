@@ -407,3 +407,60 @@ func TestPruneFailureIsNotAVerdict(t *testing.T) {
 		})
 	}
 }
+
+// RemoveListed deletes the listed paths that still qualify and reads no
+// directory: a path that vanished, became a link, was touched since, or is not a
+// log directory's name is left alone and reported as stale, and the unlisted
+// directory in the fake's listing is never reached (gt-g6xz7).
+func TestRemoveListedDeletesOnlyTheListAndRechecksEachPath(t *testing.T) {
+	t.Parallel()
+	f := pruneFake(t,
+		fs.FileInfoToDirEntry(dirInfo("tier-sweep.aaa", 4096, pruneOld)),
+		fs.FileInfoToDirEntry(dirInfo("tier-sweep.bbb", 8192, pruneOld)),
+	)
+	f.infos["/tmp/tier-sweep.touched"] = dirInfo("tier-sweep.touched", 4096, pruneNow.Add(-time.Hour))
+	listed := []PruneEntry{
+		{Path: "/tmp/tier-sweep.aaa"},
+		{Path: "/tmp/tier-sweep.gone"},
+		{Path: "/tmp/tier-sweep.link"},
+		{Path: "/tmp/tier-sweep.touched"},
+		{Path: "/tmp/other-dir"},
+		{Path: "/tmp/tier-sweep.file"},
+	}
+	removed, stale, err := RemoveListed(f.host(), listed, pruneNow, PruneMaxAge)
+	if err != nil {
+		t.Fatalf("RemoveListed: %v", err)
+	}
+	if want := []string{"/tmp/tier-sweep.aaa"}; !reflect.DeepEqual(removed, want) {
+		t.Errorf("removed = %q, want %q", removed, want)
+	}
+	wantStale := []string{"/tmp/tier-sweep.gone", "/tmp/tier-sweep.link", "/tmp/tier-sweep.touched", "/tmp/other-dir", "/tmp/tier-sweep.file"}
+	if !reflect.DeepEqual(stale, wantStale) {
+		t.Errorf("stale = %q, want %q", stale, wantStale)
+	}
+	if !reflect.DeepEqual(f.removed, []string{"/tmp/tier-sweep.aaa"}) {
+		t.Errorf("RemoveAll saw %q, want only the listed directory that still qualifies", f.removed)
+	}
+	if len(f.readDirs) != 0 {
+		t.Errorf("RemoveListed read %q, want no directory listing at all", f.readDirs)
+	}
+}
+
+// A failing Lstat that is not "does not exist" is an error and the path stays;
+// a failing RemoveAll is an error and the rest are still tried.
+func TestRemoveListedReportsFailuresAndTriesTheRest(t *testing.T) {
+	t.Parallel()
+	f := pruneFake(t)
+	f.infoErrs = map[string]error{"/tmp/tier-sweep.aaa": errors.New("permission denied")}
+	listed := []PruneEntry{{Path: "/tmp/tier-sweep.aaa"}, {Path: "/tmp/tier-sweep.bbb"}}
+	removed, stale, err := RemoveListed(f.host(), listed, pruneNow, PruneMaxAge)
+	if err == nil {
+		t.Fatal("RemoveListed = nil error, want the Lstat failure")
+	}
+	if want := []string{"/tmp/tier-sweep.bbb"}; !reflect.DeepEqual(removed, want) {
+		t.Errorf("removed = %q, want %q (the rest are still tried)", removed, want)
+	}
+	if len(stale) != 0 {
+		t.Errorf("stale = %q, want none: a failed Lstat is an error, not a stale path", stale)
+	}
+}

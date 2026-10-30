@@ -29,8 +29,9 @@ type pruneOptions struct {
 	dir string
 	// maxAge is the age a directory must exceed to be listed.
 	maxAge time.Duration
-	// apply deletes the listed directories. Without it the prune only lists
-	// them: a directory goes once an operator has read its name (gt-g6xz7).
+	// apply deletes the directories the run listed, and only those: it does not
+	// list again. Without it the prune only lists them: a directory goes once
+	// an operator has read its name (gt-g6xz7).
 	apply bool
 }
 
@@ -78,23 +79,30 @@ func runPrune(args []string, stdout, stderr io.Writer, d tiersweep.Deps) int {
 		fmt.Fprintf(stdout, "%s: %s: nothing removed (--apply deletes them)\n", tiersweep.Name, summary)
 		return 0
 	}
-	removed, err := tiersweep.Prune(host, dir, at, opts.maxAge)
+	// Only the listed paths are deleted, each after a fresh Lstat: the command
+	// does not list the directory a second time, so nothing that appeared after
+	// the operator read the list can be removed (gt-g6xz7).
+	removed, stale, err := tiersweep.RemoveListed(host, candidates, at, opts.maxAge)
 	code := 0
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: prune %s: %v\n", tiersweep.Name, dir, err)
 		code = pruneErrorExit
 	}
-	// The list is what an operator approved, so a deletion of anything else is
-	// a failure as much as a listed directory left behind: the count in the
-	// total line is the listed ones that went, never len(removed).
-	notRemoved, extra := missing(candidates, removed), strays(candidates, removed)
+	// A listed directory that went away, changed or failed to delete is a list
+	// that did not come true: it is named and the exit is 1.
+	notRemoved := missing(candidates, removed)
+	staleSet := make(map[string]bool, len(stale))
+	for _, path := range stale {
+		staleSet[path] = true
+	}
 	for _, path := range notRemoved {
+		if staleSet[path] {
+			fmt.Fprintf(stderr, "%s: prune %s: not removed: it no longer matches the list (gone, changed or younger)\n", tiersweep.Name, path)
+			continue
+		}
 		fmt.Fprintf(stderr, "%s: prune %s: not removed\n", tiersweep.Name, path)
 	}
-	for _, path := range extra {
-		fmt.Fprintf(stderr, "%s: prune %s: removed although the list above did not name it\n", tiersweep.Name, path)
-	}
-	if len(notRemoved) > 0 || len(extra) > 0 {
+	if len(notRemoved) > 0 {
 		code = pruneErrorExit
 	}
 	fmt.Fprintf(stdout, "%s: %s: removed %d of %d\n", tiersweep.Name, summary, len(candidates)-len(notRemoved), len(candidates))
@@ -120,23 +128,6 @@ func missing(candidates []tiersweep.PruneEntry, removed []string) []string {
 	for _, c := range candidates {
 		if !gone[c.Path] {
 			out = append(out, c.Path)
-		}
-	}
-	return out
-}
-
-// strays is the removed paths the list did not name, in removal order: a
-// directory that appeared between the listing and the deletion is removed by
-// the sweep's own rule, and the operator hears about it.
-func strays(candidates []tiersweep.PruneEntry, removed []string) []string {
-	listed := make(map[string]bool, len(candidates))
-	for _, c := range candidates {
-		listed[c.Path] = true
-	}
-	var out []string
-	for _, path := range removed {
-		if !listed[path] {
-			out = append(out, path)
 		}
 	}
 	return out
