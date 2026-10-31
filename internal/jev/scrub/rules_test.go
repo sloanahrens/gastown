@@ -77,6 +77,11 @@ func ruleCases() []ruleCase {
 			want: "Set-Cookie: sid=[REDACTED:cookie-header]; Path=/; HttpOnly", count: 1,
 		},
 		{
+			name: "request cookie named like an attribute", rule: RuleCookieHeader,
+			in:   "Cookie: path=abcdef1234567890",
+			want: "Cookie: path=[REDACTED:cookie-header]", count: 1,
+		},
+		{
 			name: "two cookies", rule: RuleCookieHeader,
 			in:   "Cookie: sid=abcdef1234567890; theme=dark",
 			want: "Cookie: sid=[REDACTED:cookie-header]; theme=[REDACTED:cookie-header]", count: 2,
@@ -164,6 +169,44 @@ func ruleCases() []ruleCase {
 			name: "unterminated marker", rule: RuleAssignment,
 			in:   "token=[REDACTED:vendor-key",
 			want: "token=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "quoted marker keeps its earlier marker", rule: RuleAssignment,
+			in:   `API_TOKEN="[REDACTED:jwt]"`,
+			want: `API_TOKEN="[REDACTED:jwt]"`,
+		},
+		{
+			name: "unterminated quote holding a marker", rule: RuleAssignment,
+			in:   `API_TOKEN="[REDACTED:jwt]`,
+			want: "API_TOKEN=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "fused suffix, one word", rule: RuleAssignment,
+			in:   "GITHUBTOKEN=abc123def456",
+			want: "GITHUBTOKEN=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "fused suffix, two words", rule: RuleAssignment,
+			in:   "SLACK_BOTTOKEN=abc123def456",
+			want: "SLACK_BOTTOKEN=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "fused suffix, three words", rule: RuleAssignment,
+			in:   "MY_APP_PGPASSWORD=hunter2hunter2",
+			want: "MY_APP_PGPASSWORD=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "fused suffix, mixed case", rule: RuleAssignment,
+			in:   "mySlackBOTTOKEN=abc123def456",
+			want: "mySlackBOTTOKEN=[REDACTED:assignment]", count: 1,
+		},
+		{
+			// Kept redacted on purpose: a fused word cannot be told from a
+			// vendor-prefixed credential by its shape, and a scrubber that
+			// misses a secret is worse than one that over-redacts.
+			name: "fused suffix, near miss is redacted", rule: RuleAssignment,
+			in:   "page_nexttoken=abc123def456",
+			want: "page_nexttoken=[REDACTED:assignment]", count: 1,
 		},
 		{
 			name: "keyboard is not a key", rule: RuleAssignment,
@@ -539,6 +582,21 @@ func TestScrubRules(t *testing.T) {
 	}
 }
 
+// TestScrubAssignmentSplitMarker checks a bracket that is not a whole marker. The
+// value it starts is still a value: its text must go, the name must stay, and
+// the assignment marker must stand in for it. The leftover bytes after the
+// space are not pinned.
+func TestScrubAssignmentSplitMarker(t *testing.T) {
+	t.Parallel()
+	got, _ := New(ruleNamed(t, RuleAssignment)).Scrub("token=[REDACTED:x y]")
+	if !strings.Contains(got, "token=[REDACTED:assignment]") {
+		t.Errorf("Scrub = %q, want the name kept and the assignment marker written", got)
+	}
+	if strings.Contains(got, "[REDACTED:x") {
+		t.Errorf("Scrub = %q, still holds the value it should replace", got)
+	}
+}
+
 // ruleNamed returns the default rule called name, so each row runs the rule the
 // default list holds.
 func ruleNamed(t *testing.T, name string) Rule {
@@ -627,6 +685,12 @@ func TestScrubDefaultOneMarkerPerValue(t *testing.T) {
 			in:   "API_TOKEN=" + syntheticJWT,
 			want: "API_TOKEN=[REDACTED:jwt]",
 			rule: RuleJWT,
+		},
+		{
+			name: "quoted vendor key under a credential name",
+			in:   `export DEEPSEEK_API_KEY="sk-fixture-value-not-a-real-credential"`,
+			want: `export DEEPSEEK_API_KEY="[REDACTED:vendor-key]"`,
+			rule: RuleVendorKey,
 		},
 	}
 	for _, c := range cases {
