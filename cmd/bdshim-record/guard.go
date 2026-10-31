@@ -46,10 +46,11 @@ type Resolver func(dir string, env []string) (string, error)
 // The child environment is also refused when it aims the scratch's bd runs at the town's Dolt
 // server, whose database the init would then create as cruft no cleanup owns (gt-p85pw.115).
 //
-// The recorder's own working directory is checked as before, since a recorder started inside a
-// workspace is where the incident began. Every refusal comes before anything is recorded, and the
-// bd calls the guard makes are the init that gives the scratch its workspace and the read-only
-// where that answers with it.
+// The recorder's own working directory is refused only when it is a workspace root itself, where bd
+// init would rewrite that workspace's store; a directory that merely sits under one passes, since
+// work lives under the town and the scratch's own resolved workspace is the test (gt-p85pw.116).
+// Every refusal comes before anything is recorded, and the bd calls the guard makes are the init
+// that gives the scratch its workspace and the read-only where that answers with it.
 func guardRun(getwd func() (string, error), scratch string, child childBD) error {
 	cwd, err := getwd()
 	if err != nil {
@@ -59,16 +60,16 @@ func guardRun(getwd func() (string, error), scratch string, child childBD) error
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", cwd, err)
 	}
-	workspace, found, err := enclosingWorkspace(real)
+	root, err := workspaceRootAt(real)
 	if err != nil {
 		return err
 	}
-	if found {
+	if root {
 		where := cwd
 		if real != cwd {
 			where = fmt.Sprintf("%s (that is %s)", cwd, real)
 		}
-		return fmt.Errorf("%s sits in or under the beads workspace %s, where bd init would rewrite that workspace's store; run the recorder outside any .beads tree", where, workspace)
+		return fmt.Errorf("%s is itself a beads workspace root, where bd init would rewrite that workspace's store; run the recorder from a directory that holds no .beads of its own", where)
 	}
 	if scratch == "" {
 		return nil // a flags recording makes no copies, so it has no scratch directory to give a workspace
@@ -285,6 +286,24 @@ func realPath(path string) (string, error) {
 		missing = filepath.Join(filepath.Base(path), missing)
 		path = parent
 	}
+}
+
+// workspaceRootAt reports whether dir is a beads workspace root itself, holding .beads or
+// metadata.json directly. A directory that only sits under one is not a root: work lives under the
+// town, so refusing every directory below a workspace leaves the recorder nowhere to run
+// (gt-p85pw.116). A marker it cannot read is an error rather than an absent one.
+func workspaceRootAt(dir string) (bool, error) {
+	for _, marker := range workspaceMarkers {
+		path := filepath.Join(dir, marker)
+		_, err := os.Stat(path)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, fmt.Errorf("check for a beads workspace at %s: %w", path, err)
+		}
+	}
+	return false, nil
 }
 
 // enclosingWorkspace returns the nearest directory at or above dir that holds a workspace marker.

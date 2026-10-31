@@ -26,8 +26,8 @@
 // workspace it resolves there, under the environment every child is given, and passes only when the
 // answer is inside the scratch. That workspace exists for the check alone: its database is dropped
 // and its directory removed as soon as the guard passes. A scratch behind a symlink is refused, and
-// so is a recorder whose working directory sits in a workspace: at that point its own tree is not one
-// the recorder made (gt-p85pw.103, gt-p85pw.115).
+// so is a recorder whose working directory is a workspace root itself; one that merely sits under a
+// workspace passes, since work lives under the town (gt-p85pw.103, gt-p85pw.116).
 //
 // The environment must name a throwaway Dolt server, and the recorder refuses one that names the
 // town's: the town's port, a host that is not this machine, or no port at all, which leaves bd with
