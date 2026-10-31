@@ -659,8 +659,8 @@ run creates no user, so the check it makes for the grant cannot pass, and it
 never prints `dry run: no write was sent`. Read the action lines it printed
 (every URL is the scratch Forgejo's, every path is under
 `<scratch-root>/forge-tokens`); the abort is expected, not a failure. The check
-that counts is the real run below and the `ls -l` after it: then run the same command without `--dry-run`. Expected: it ends with
-`provisioning complete`, and
+that counts is the real run: run the same command without `--dry-run`. Expected:
+it ends with `provisioning complete`, and
 `ls -l <scratch-root>/forge-tokens` shows `forgejo-polecat.env` and
 `forgejo-landing.env`, each `-rw-------`. The only gate context required is the
 one the scratch runner produces: the default second context, `om / review`, is
@@ -852,7 +852,11 @@ live town): `touch <scratch-parent>/.l2-end`. The window is the time between
       has only advanced by the live daemon's own beats.
 - [ ] The live town's configuration was not written during L2. This prints
       nothing, where `<scratch-parent>/.l2-start` is the marker from Before you
-      start: `find <live-town>/settings <live-town>/mayor -maxdepth 2 -type f
+      start and `<scratch-parent>/.l2-end` is the marker you `touch` when L2
+      ends. Run `test -f <scratch-parent>/.l2-end || echo "NO .l2-end: this check is not valid"`
+      first: without the end marker `find` prints an error and nothing else, and
+      empty output must not be read as a pass. Then
+      `find <live-town>/settings <live-town>/mayor -maxdepth 2 -type f
       -newer <scratch-parent>/.l2-start ! -newer <scratch-parent>/.l2-end`. It looks only at the configuration
       directories, because the live daemon writes `daemon/`, its logs and
       `.runtime` itself, and a find over the whole town is slow and proves
