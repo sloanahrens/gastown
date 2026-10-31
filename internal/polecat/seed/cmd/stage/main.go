@@ -1,9 +1,8 @@
-// Command stage writes the seed sources deploy/polecat/seed-pins names: the rig
-// a build runs in, at its build commit, and every other rig at its pin
-// (gt-1rz2r). `make polecat-seed-stage` runs it. The polecat image no longer
-// reads the directory (it carries no Go caches, gt-nly1g); the shared cache
-// Job (make polecat-caches) clones the pins itself, and this stage is retired
-// by gt-hu9bj.
+// Command stage writes the polecat image's seed sources: the rig the image is
+// built at, at the build commit, and every rig deploy/polecat/seed-pins pins,
+// at its pin (gt-1rz2r). `make polecat-seed-stage` runs it, and the Dockerfile
+// bind-mounts the directory it writes for the seed RUN that builds the image's
+// Go caches.
 package main
 
 import (

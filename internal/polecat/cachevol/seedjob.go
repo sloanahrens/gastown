@@ -18,9 +18,9 @@ const (
 	SeedCacheRoot = "/cache"
 	// SeedSourceRoot is where the Job's init container checks the pinned commits out.
 	SeedSourceRoot = "/seed"
-	// SeedBuildCacheDir and SeedModuleCacheDir name GOCACHE and GOMODCACHE inside the claim. The
-	// openshell backend points a claim-mounted sandbox's GOCACHE and GOMODCACHE at these two, so the
-	// entries a sandbox compiles against are the ones the seed wrote (gt-nly1g).
+	// SeedBuildCacheDir and SeedModuleCacheDir name GOCACHE and GOMODCACHE inside the claim. They
+	// match the Dockerfile seed RUN's directories, so the entries a sandbox compiles against are the
+	// ones the seed wrote.
 	SeedBuildCacheDir  = "gocache"
 	SeedModuleCacheDir = "gomodcache"
 	// SeedMarkerName is the file, in the claim, that records the pins the claim was seeded from: a
@@ -332,8 +332,8 @@ func cloneContainer(image, pins string) Container {
 }
 
 // seedContainer runs the PlanSeed steps per rig, hands the claim to SeedUserID, and writes the
-// marker. Its image carries the Go toolchain, and GOFLAGS matches the presubmits', so the cache
-// keys a sandbox compiles against are the ones the seed wrote.
+// marker. Its image carries the Go toolchain, and GOFLAGS matches the Dockerfile seed RUN's, so the
+// entries a sandbox compiles against are the ones the image build used to write.
 func seedContainer(image, pins string) Container {
 	return Container{
 		Name:    "seed",

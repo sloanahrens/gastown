@@ -157,10 +157,11 @@ BD_COMMIT ?=
 # POLE_RIG_GO_MODS names the files; override it to read other checkouts.
 POLE_TOWN ?= $(HOME)/gt
 POLE_RIG_GO_MODS ?= $(wildcard $(POLE_TOWN)/*/mayor/rig/go.mod)
-# The rigs whose Go build and module caches the shared cache claim is seeded
-# with (gt-ieuvf, gt-nly1g). A pinned sha, not the rig's moving HEAD, keeps the
-# claim's seed stable until the pins change: `make polecat-seed-pins` re-pins to
-# each rig's current canonical checkout, weekly or when a go.sum changes.
+# The rigs whose Go build and module caches the image is seeded with (gt-ieuvf).
+# A pinned sha, not the rig's moving HEAD, keeps the seed layer's cache key (and
+# so the image publish time) stable until the pins change: `make
+# polecat-seed-pins` re-pins to each rig's current canonical checkout, weekly or
+# when a go.sum changes.
 # beads is seeded because internal/storage/uow's tests import
 # github.com/DATA-DOG/go-sqlmock, and a beads polecat's presubmit has no
 # network (hq-smfiv).
@@ -189,6 +190,7 @@ polecat-image:
 	@bd_commit=$$(go run ./internal/polecat/bdbuild/cmd/build -src "$(BD_SRC)" -out $(CURDIR)/deploy/polecat/bin/bd -commit "$(BD_COMMIT)") || { echo "polecat-image: the bd build failed, so the image has no bd commit to label" >&2; exit 2; }; \
 	test -n "$$bd_commit" || { echo "polecat-image: the bd build printed no commit, so the image's bd cannot be labelled" >&2; exit 2; }; \
 	printf '%s\n' "$$bd_commit" > deploy/polecat/bin/bd.commit
+	@$(MAKE) --no-print-directory polecat-seed-stage
 	bd_commit=$$(cat deploy/polecat/bin/bd.commit) || { echo "polecat-image: no bd commit recorded, so the image's bd cannot be labelled; the bd build did not finish" >&2; exit 2; }; \
 	test -n "$$bd_commit" || { echo "polecat-image: the bd commit file is empty, so the image's bd cannot be labelled" >&2; exit 2; }; \
 	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
@@ -198,11 +200,9 @@ ifeq ($(POLE_NODE_PRUNE),1)
 endif
 
 # polecat-seed-stage writes POLE_SEED_DIR: each pinned rig at its pin, and
-# POLE_SEED_BUILD_RIG at POLE_COMMIT. Nothing consumes the directory since the
-# image stopped seeding Go caches (gt-nly1g); the seed now runs as the cache
-# claim's Job (`make polecat-caches`). The stage and this target are retired by
-# gt-hu9bj. Before changing the recipe, read scripts/makefile-gate_test.sh,
-# which runs this target against a fixture town.
+# POLE_SEED_BUILD_RIG at POLE_COMMIT. The Dockerfile bind-mounts the directory for
+# its seed RUN and copies none of it into the image. Before changing the recipe,
+# read scripts/makefile-gate_test.sh, which runs this target against a fixture town.
 polecat-seed-stage:
 	@test -s $(POLE_SEED_PINS) || { echo "polecat-image: $(POLE_SEED_PINS) is missing or empty; run make polecat-seed-pins and commit it" >&2; exit 2; }
 	@rm -rf "$(POLE_SEED_DIR)" && mkdir -p "$(POLE_SEED_DIR)"
@@ -220,10 +220,9 @@ polecat-node-prune:
 	@go run ./cmd/nodeprune -keep "$${POLECAT_IMAGE_KEEP:-3}" || echo "polecat-image: node prune failed; the old images stay on the sandbox nodes" >&2
 
 # polecat-seed-pins rewrites deploy/polecat/seed-pins to each seeded rig's
-# canonical checkout HEAD. Commit the result; the next make polecat-caches
-# reseeds the shared cache claim.
+# canonical checkout HEAD. Commit the result; the next polecat-image reseeds.
 polecat-seed-pins:
-	@tmp=$$(mktemp); printf '%s\n' "# <rig> <commit>: the sources the shared cache claim is seeded from." "# Each commit must exist in that rig's canonical checkout under POLE_TOWN; make polecat-seed-pins rewrites this file." "# gastown is seeded from the commit a build runs in, not from a line here (gt-1rz2r)." > "$$tmp"; for rig in $(POLE_SEED_RIGS); do \
+	@tmp=$$(mktemp); printf '%s\n' "# <rig> <commit>: the sources the polecat image's Go cache is seeded from." "# Each commit must exist in that rig's canonical checkout under POLE_TOWN; make polecat-seed-pins rewrites this file." "# gastown is seeded from the commit the image is built at, not from a line here (gt-1rz2r)." > "$$tmp"; for rig in $(POLE_SEED_RIGS); do \
 		sha=$$(git -C "$(POLE_TOWN)/$$rig/mayor/rig" rev-parse HEAD) || { rm -f "$$tmp"; echo "polecat-seed-pins: cannot read $(POLE_TOWN)/$$rig/mayor/rig" >&2; exit 2; }; \
 		echo "$$rig $$sha" >> "$$tmp"; \
 	done; mv "$$tmp" $(POLE_SEED_PINS); cat $(POLE_SEED_PINS)

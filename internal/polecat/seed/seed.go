@@ -1,7 +1,6 @@
-// Package seed reads deploy/polecat/seed-pins and plans and stages the rig
-// checkouts it names: the rig a build runs in, at its build commit, and every
-// other rig at its pin (gt-1rz2r, gt-ieuvf). The pins parser is what
-// cmd/polecatcaches reads for the shared cache claim's seed Job.
+// Package seed plans and stages the sources the polecat image's Go caches are
+// built from: the rig the image is built at, at the build commit, and every
+// other rig at the commit deploy/polecat/seed-pins names (gt-1rz2r, gt-ieuvf).
 package seed
 
 import (

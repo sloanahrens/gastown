@@ -21,7 +21,7 @@ type Pin struct {
 }
 
 // Step is one seed command run in a module directory. Required steps fail the seed when they fail;
-// the others are logged and skipped, since they may need system headers the seed image lacks.
+// the others are logged and skipped (the Dockerfile's seed RUN, minus its darwin step).
 type Step struct {
 	Argv     []string
 	Required bool
@@ -58,8 +58,8 @@ func PlanSeed(pins []Pin) ([]RigSeed, error) {
 	return out, nil
 }
 
-// seedSteps are the commands that fill the claim for one module, in the order a presubmit runs
-// them. go mod download runs first, because a linux build fetches only the modules linux imports.
+// seedSteps are the Dockerfile seed RUN's commands for one module, in its order. go mod download
+// runs first, because a linux build fetches only the modules linux imports.
 func seedSteps() []Step {
 	return []Step{
 		{Argv: []string{"go", "mod", "download"}, Required: true},
