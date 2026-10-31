@@ -110,7 +110,9 @@ var (
 	sandboxSecretsEnvScriptNamedRe = regexp.MustCompile(`process\.env\.([A-Za-z_]\w*)|(?:os\.environ(?:\.get)?[(\[]|os\.getenv\(|process\.env\[|\bENV(?:\.fetch\(|\[)|\bENVIRON\[)\s*['"]([A-Za-z_]\w*)['"]|\$ENV\{\s*['"]?([A-Za-z_]\w*)`)
 	// sandboxSecretsCredentialPathRe matches a one-liner payload naming a credential file,
 	// the tracker token file among them by its path or by the variable that names it.
-	sandboxSecretsCredentialPathRe = regexp.MustCompile(`\.claude\.json|\.netrc|git-credentials|\.tracker/token|TRACKER_TOKEN_FILE`)
+	// The tracker path is a whole name, so a name that merely starts or ends with
+	// .tracker/token, as .tracker/tokenizer does, is not this file (gt-brsfk).
+	sandboxSecretsCredentialPathRe = regexp.MustCompile(`\.claude\.json|\.netrc|git-credentials|(?:^|[^\w.])\.tracker/token(?:[^\w.]|$)|TRACKER_TOKEN_FILE`)
 )
 
 // sandboxSecretsNameWords are the words, between underscores, that make a variable name
@@ -1386,17 +1388,52 @@ func sandboxSecretsIsSecretFile(word string) bool {
 		sandboxSecretsIsTrackerTokenFile(word)
 }
 
+// sandboxSecretsTrackerTokenName is the variable that carries the tracker token
+// file's path.
+const sandboxSecretsTrackerTokenName = "TRACKER_TOKEN_FILE"
+
 // sandboxSecretsIsTrackerTokenFile reports whether the word names the tracker
 // seat's token file. The runtime archive stages it at /sandbox/.tracker/token,
 // the path TRACKER_TOKEN_FILE carries, so the file is judged by its .tracker
 // parent: the base name token alone is too common to block, while .tracker/token
-// under any parent, or the variable that names it, is this file.
+// under any parent, or a word that expands the variable that names it, is this
+// file.
 func sandboxSecretsIsTrackerTokenFile(word string) bool {
 	w := strings.Trim(word, `"'`)
-	if w == "$TRACKER_TOKEN_FILE" || w == "${TRACKER_TOKEN_FILE}" {
+	if sandboxSecretsExpandsTrackerTokenFile(w) {
 		return true
 	}
 	return filepath.Base(w) == "token" && filepath.Base(filepath.Dir(w)) == ".tracker"
+}
+
+// sandboxSecretsExpandsTrackerTokenFile reports whether the word expands
+// TRACKER_TOKEN_FILE: the bare $TRACKER_TOKEN_FILE and every parameter expansion
+// of it, such as ${TRACKER_TOKEN_FILE}, ${TRACKER_TOKEN_FILE:?},
+// ${TRACKER_TOKEN_FILE:-/sandbox/.tracker/token} or ${TRACKER_TOKEN_FILE%.*}.
+// A substitution derives the path from the same file, so reading it reads the
+// token (gt-brsfk). Text that continues the name, as $TRACKER_TOKEN_FILE.bak or
+// ${TRACKER_TOKEN_FILE_2}, and a length or an indirection of it,
+// ${#TRACKER_TOKEN_FILE} and ${!TRACKER_TOKEN_FILE}, name another value.
+func sandboxSecretsExpandsTrackerTokenFile(word string) bool {
+	if word == "$"+sandboxSecretsTrackerTokenName {
+		return true
+	}
+	inner, braced := strings.CutPrefix(word, "${")
+	if !braced || !strings.HasSuffix(inner, "}") {
+		return false
+	}
+	rest, found := strings.CutPrefix(strings.TrimSuffix(inner, "}"), sandboxSecretsTrackerTokenName)
+	if !found {
+		return false
+	}
+	// The operator that follows the name starts the expansion's own text.
+	return rest == "" || !sandboxSecretsIsNameByte(rest[0])
+}
+
+// sandboxSecretsIsNameByte reports whether c continues a variable name, as the
+// letters, digits and underscore of sandboxSecretsVarRefRe do.
+func sandboxSecretsIsNameByte(c byte) bool {
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
 // sandboxSecretsIsEnvTemplate reports whether the word names the dotenv template the
