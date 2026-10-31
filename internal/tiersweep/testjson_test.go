@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"testing/iotest"
 )
@@ -146,6 +147,87 @@ func TestParseTestJSONBuildFailureAndNoise(t *testing.T) {
 			t.Errorf("tests = %+v, want %+v", tests, wantTests)
 		}
 	})
+}
+
+// TestParseTestJSONUnfinishedTest: a top-level test that starts and prints but
+// never reaches a terminal event is not listed, its output stays in the text,
+// and a sibling that does finish is still listed.
+func TestParseTestJSONUnfinishedTest(t *testing.T) {
+	t.Parallel()
+	stream := strings.Join([]string{
+		`{"Action":"run","Package":"example.com/fixture/f","Test":"TestDone"}`,
+		`{"Action":"pass","Package":"example.com/fixture/f","Test":"TestDone","Elapsed":0.2}`,
+		`{"Action":"run","Package":"example.com/fixture/f","Test":"TestHang"}`,
+		`{"Action":"output","Package":"example.com/fixture/f","Test":"TestHang","Output":"=== RUN   TestHang\n"}`,
+		"",
+	}, "\n")
+	text, tests, err := ParseTestJSON(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("ParseTestJSON: %v", err)
+	}
+	if want := "=== RUN   TestHang\n"; text != want {
+		t.Errorf("text = %q, want %q", text, want)
+	}
+	wantTests := []TestTime{
+		{Test: "TestDone", Package: "example.com/fixture/f", Elapsed: 0.2, Action: "pass"},
+	}
+	if !reflect.DeepEqual(tests, wantTests) {
+		t.Errorf("tests = %+v, want %+v", tests, wantTests)
+	}
+}
+
+// TestParseTestJSONMalformedEvent: a line that is a valid JSON object but not a
+// well-formed event fails the parse and names its line, so its text is never
+// echoed raw and a missing terminal event never reads as a clean run.
+func TestParseTestJSONMalformedEvent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		line string
+	}{
+		{
+			name: "field of the wrong type",
+			line: `{"Action":"pass","Package":"example.com/fixture/g","Test":"TestX","Elapsed":"fast"}`,
+		},
+		{
+			name: "object without an action",
+			line: `{"Time":"2026-10-30T10:00:00.000Z","Package":"example.com/fixture/g"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			good := `{"Action":"output","Package":"example.com/fixture/g","Output":"PASS\n"}`
+			text, tests, err := ParseTestJSON(strings.NewReader(good + "\n" + tc.line + "\n"))
+			if err == nil {
+				t.Fatalf("err = nil, want a malformed-event error; text = %q", text)
+			}
+			if !strings.Contains(err.Error(), "line 2") {
+				t.Errorf("err = %q, want it to name line 2", err)
+			}
+			if text != "" || tests != nil {
+				t.Errorf("text = %q, tests = %+v, want none", text, tests)
+			}
+		})
+	}
+}
+
+// TestParseTestJSONBraceLineNotJSON: a line that starts with a brace but is not
+// complete JSON is not an envelope, so it is kept in the text unchanged and does
+// not fail the parse.
+func TestParseTestJSONBraceLineNotJSON(t *testing.T) {
+	t.Parallel()
+	const brace = "{ build cache: miss"
+	stream := `{"Action":"output","Package":"example.com/fixture/h","Output":"PASS\n"}` + "\n" +
+		brace + "\n" +
+		`{"Action":"output","Package":"example.com/fixture/h","Output":"ok  \texample.com/fixture/h\t0.01s\n"}` + "\n"
+	text, _, err := ParseTestJSON(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("ParseTestJSON: %v", err)
+	}
+	if want := "PASS\n" + brace + "\n" + "ok  \texample.com/fixture/h\t0.01s\n"; text != want {
+		t.Errorf("text = %q, want %q", text, want)
+	}
 }
 
 // TestParseTestJSONReadError: a reader that fails returns that error with no
