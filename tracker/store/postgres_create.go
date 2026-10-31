@@ -226,8 +226,8 @@ func (p *Postgres) GetIssues(ctx context.Context, ids []string) (map[string]api.
 		return nil, err
 	}
 	for id, is := range out {
-		// A named read answers an empty dependents list as [], so a client can
-		// tell it from a read that never filled the field.
+		// A named read fills Dependents even when nothing depends on the issue
+		// (api.Issue.Dependents), so the answer is [], never unfilled.
 		is.Dependents = []api.IssueDep{}
 		out[id] = is
 	}

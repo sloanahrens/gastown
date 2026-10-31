@@ -48,6 +48,55 @@ func TestIssueUsesBeadsJSONNames(t *testing.T) {
 	}
 }
 
+// A named read fills Dependents, so its empty answer is [] on the wire and a
+// field no encoder filled stays off it: a client tells "none" from "not read".
+func TestEmptyDependentsAreAnArrayOnlyWhenFilled(t *testing.T) {
+	t.Parallel() // unit tier: pure marshalling
+	cases := []struct {
+		name string
+		deps []IssueDep
+		want string
+	}{
+		{"unfilled", nil, ""},
+		{"filled and empty", []IssueDep{}, `"dependents":[]`},
+		{"filled", []IssueDep{{ID: "gt-w", Title: "w", Status: "open", DependencyType: "tracks"}}, `"dependents":[{"id":"gt-w"`},
+	}
+	for _, c := range cases {
+		b, err := json.Marshal(Issue{ID: "gt-1", Dependents: c.deps})
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		got := strings.Contains(string(b), `"dependents"`)
+		if c.want == "" {
+			if got {
+				t.Errorf("%s: Issue wire %s carries dependents, want the field absent: nothing filled it", c.name, b)
+			}
+			continue
+		}
+		if !strings.Contains(string(b), c.want) {
+			t.Errorf("%s: Issue wire %s lacks %s", c.name, b, c.want)
+		}
+	}
+
+	for name, tc := range map[string]struct {
+		wire    string
+		filled  bool
+		wantLen int
+	}{
+		"absent":      {`{"id":"gt-1"}`, false, 0},
+		"null":        {`{"id":"gt-1","dependents":null}`, false, 0},
+		"empty array": {`{"id":"gt-1","dependents":[]}`, true, 0},
+	} {
+		var is Issue
+		if err := json.Unmarshal([]byte(tc.wire), &is); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if filled := is.Dependents != nil; filled != tc.filled || len(is.Dependents) != tc.wantLen {
+			t.Errorf("%s: decoded Dependents = %#v, want filled=%v with %d entries", name, is.Dependents, tc.filled, tc.wantLen)
+		}
+	}
+}
+
 func TestEventPayloadIsRawJSON(t *testing.T) {
 	t.Parallel()
 	b, err := json.Marshal(Event{Seq: 3, Op: "created", IssueID: "gt-1", Payload: json.RawMessage(`{"a":1}`)})
