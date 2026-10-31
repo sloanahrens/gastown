@@ -749,6 +749,21 @@ func TestRunInstallLocalDropsTheRemoteHostOfATown(t *testing.T) {
 	}
 }
 
+// A local install that cannot clear the remote host from town.json fails rather
+// than reporting an endpoint it did not set (gt-i3ywa).
+func TestRunInstallFailsWhenItCannotClearTheRemoteHost(t *testing.T) {
+	t.Parallel()
+	hqPath := filepath.Join(t.TempDir(), "hq")
+	rec := &recordingSteps{}
+	steps := rec.steps()
+	steps.clearTownDoltHost = func(string) error { return errors.New("disk full") }
+
+	err := runInstallWith(installOptions{steps: steps}, []string{hqPath})
+	if err == nil || !strings.Contains(err.Error(), "writing the Dolt endpoint to town.json") || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("gt install with the host clear failing = %v, want an error naming the Dolt endpoint and the cause", err)
+	}
+}
+
 // A --dolt-host that is not a bare host name or IP address is refused before
 // the install writes anything. A port, a scheme or a path would otherwise go
 // into town.json as the host (gt-i3ywa).

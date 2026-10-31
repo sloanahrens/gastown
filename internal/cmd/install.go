@@ -65,6 +65,7 @@ type installSteps struct {
 	startDolt          func(townRoot string) error
 	initTownBeads      func(townRoot string) error
 	configureTownBeads func(townRoot string)
+	clearTownDoltHost  func(townPath string) error
 }
 
 // resolved fills in every step the caller left nil.
@@ -92,6 +93,9 @@ func (s installSteps) resolved() installSteps {
 	}
 	if s.configureTownBeads == nil {
 		s.configureTownBeads = configureTownBeads
+	}
+	if s.clearTownDoltHost == nil {
+		s.clearTownDoltHost = clearTownDoltHost
 	}
 	return s
 }
@@ -396,7 +400,7 @@ func runInstallWith(opts installOptions, args []string) error {
 	// still names would be dialed with the local port (gt-i3ywa). This runs
 	// after the tracker write, so a torn town.json still reports that first.
 	if !remoteDolt {
-		if err := clearTownDoltHost(townPath); err != nil {
+		if err := steps.clearTownDoltHost(townPath); err != nil {
 			return fmt.Errorf("writing the Dolt endpoint to town.json: %w", err)
 		}
 	}
