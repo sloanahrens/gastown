@@ -390,6 +390,67 @@ func TestDaemonDockerfileHasNoRepeatedCommentLine(t *testing.T) {
 	}
 }
 
+// TestDaemonDockerfileRunsAsRootWhereItsIdentityIs: the git identity RUNs write
+// root's config, and the container runs as root, so the two agree only while the
+// final stage has no USER instruction. A USER before the identity RUNs would make
+// them write another user's home; one after would leave the identity in root's
+// home for a container that runs as someone else.
+func TestDaemonDockerfileRunsAsRootWhereItsIdentityIs(t *testing.T) {
+	t.Parallel()
+	if problems := imageUserProblems(t, readDockerfile(t)); len(problems) != 0 {
+		t.Errorf("%s: %s", DockerfilePath, strings.Join(problems, "; "))
+	}
+}
+
+// TestDaemonDockerfileUserInstructionFailsTheRootCheck: a USER line inserted into
+// the final stage, before or after the identity RUNs, is refused by the same
+// check the real file passes, so that check cannot pass on any placement.
+func TestDaemonDockerfileUserInstructionFailsTheRootCheck(t *testing.T) {
+	t.Parallel()
+	body := readDockerfile(t)
+	for _, tc := range []struct {
+		name, anchor string
+	}{
+		{name: "before the identity RUNs", anchor: "RUN git config --global user.name gt-daemon\n"},
+		{name: "after the identity RUNs", anchor: "ENTRYPOINT ["},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if n := strings.Count(body, tc.anchor); n != 1 {
+				t.Fatalf("%s has %d lines at %q, want the one the USER line goes before", DockerfilePath, n, tc.anchor)
+			}
+			mutated := strings.Replace(body, tc.anchor, "USER gt-daemon\n"+tc.anchor, 1)
+			if problems := imageUserProblems(t, mutated); len(problems) == 0 {
+				t.Errorf("a USER line %s passed the root check, want it refused", tc.name)
+			}
+		})
+	}
+}
+
+// imageUserProblems returns a problem for each USER instruction in the image's
+// final stage, the stage the container runs. Earlier stages build other images,
+// so their USER lines never reach the container.
+func imageUserProblems(t *testing.T, body string) []string {
+	t.Helper()
+	ins := dockerfileInstructions(t, body)
+	last := -1
+	for i, in := range ins {
+		if in.cmd == "FROM" {
+			last = i
+		}
+	}
+	if last < 0 {
+		t.Fatalf("%s has no FROM, so no final stage", DockerfilePath)
+	}
+	var problems []string
+	for _, in := range ins[last+1:] {
+		if in.cmd == "USER" {
+			problems = append(problems, fmt.Sprintf("USER %s runs the container as another user, but the git identity RUNs write root's config", strings.Join(in.args, " ")))
+		}
+	}
+	return problems
+}
+
 // copyOperands returns a COPY's --from stage, and its source and destination
 // operands, with its --flag entries dropped. A COPY with no --from reads the
 // build context, so its from is empty.
