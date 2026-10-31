@@ -28,7 +28,6 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
-	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/installpending"
@@ -599,6 +598,13 @@ type Daemon struct {
 	// changes, or lifts rather than on every tick (gt-ifijm).
 	scheduledSlingsHold dispatch.HoldLatch
 	queuedWorkHold      dispatch.HoldLatch
+
+	// standbyHeartbeat, standbyTierSweep and standbyMaintenance remember the
+	// standby (standby.go) each site last saw, so a standby is logged once when
+	// it appears and once when it lifts, per site (gt-6mlik.6).
+	standbyHeartbeat   dispatch.HoldLatch
+	standbyTierSweep   dispatch.HoldLatch
+	standbyMaintenance dispatch.HoldLatch
 
 	// specDispatchRunning / specDispatchCycles are the spec_dispatch ticker's
 	// single-flight guard and cycle count (gt-4k3fj.5, spec_dispatch.go), and
@@ -1967,14 +1973,13 @@ func (d *Daemon) heartbeat(state *State) {
 		return
 	}
 
-	// The town E-stop holds dispatch and restarts, not upkeep: Dolt stays
-	// supervised and the logs keep rotating while it is on (gt-4k3fj.8).
-	// The steps it holds are the lifecycle ones in heartbeatSteps. No plugin
-	// script kills or restarts a session any more (the stuck-agent dog was
-	// deleted in 339ac0ce), and every daemon kill and restart goes through
-	// the supervisor, which refuses them under the e-stop as well.
-	if estop.IsActive(d.config.TownRoot) {
-		d.logger.Println("E-STOP active, holding dispatch and restarts; Dolt and upkeep still run")
+	// The standby (the town E-stop or a Waned Ring) holds dispatch and
+	// restarts, not upkeep: Dolt stays supervised and the logs keep rotating
+	// (gt-4k3fj.8). It holds the lifecycle steps in heartbeatSteps; the
+	// operator's hold file does not, since the drain runs on that alone.
+	reason := d.standbyReason(d.clk().Now(), false)
+	d.logStandby(&d.standbyHeartbeat, "heartbeat", reason)
+	if reason != "" {
 		d.seams.runHeartbeatWork(d, state, false)
 		return
 	}

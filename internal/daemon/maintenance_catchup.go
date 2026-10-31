@@ -196,6 +196,13 @@ func (d *Daemon) maybeCatchUpGC(now time.Time) {
 	if last := d.catchUpGCAttemptAt.Load(); last != 0 && now.Sub(time.Unix(0, last)) < maintenanceCatchUpRetry {
 		return
 	}
+	// A standby (the hold file, the town ESTOP or a Waned Ring) starts no
+	// catch-up gc. The catch-up backup above is not held by it.
+	reason := d.standbyReason(now, true)
+	d.logStandby(&d.standbyMaintenance, "scheduled_maintenance", reason)
+	if reason != "" {
+		return
+	}
 	// Every condition below is one maybeCatchUpBackup looks at on this same
 	// tick and reports itself — a backup root it cannot read, a backup list it
 	// cannot parse, a backup too old, an external server, no databases — so the

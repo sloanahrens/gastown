@@ -571,6 +571,13 @@ func (d *Daemon) triggerTierSweep() {
 		d.tierSweepStaleLogged.Store(false)
 	}
 	now := d.clk().Now()
+	// The standby (the operator's hold file, the town ESTOP or a Waned Ring)
+	// starts no cycle and creates no bead; a cycle already running finishes.
+	reason := d.standbyReason(now, true)
+	d.logStandby(&d.standbyTierSweep, "tier_sweep", reason)
+	if reason != "" {
+		return
+	}
 	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last(), now, tierSweepInterval(d.patrolConfig))
 	// Inside the interval, a rig whose last cycle was red may still be due early
 	// (gt-giai1). The state files pick the candidates; the bead store and

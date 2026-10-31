@@ -47,6 +47,12 @@ func OperatorHold(townRoot string) string {
 	return operatorHold(townRoot, ring.TownKey(os.Getenv), time.Now())
 }
 
+// OperatorHoldWithKey is OperatorHold with the Ring's key resolver and clock
+// supplied by the caller.
+func OperatorHoldWithKey(townRoot string, key ring.KeyFunc, now time.Time) string {
+	return operatorHold(townRoot, key, now)
+}
+
 // operatorHold is OperatorHold over the Ring's key resolver and clock, so a
 // test judges the Ring without reading the process environment.
 func operatorHold(townRoot string, key ring.KeyFunc, now time.Time) string {
