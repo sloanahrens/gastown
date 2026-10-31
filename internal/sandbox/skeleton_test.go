@@ -656,12 +656,12 @@ func TestLooksLikeCredential(t *testing.T) {
 
 	credential := []string{
 		"http://bot:s3cret@forgejo:3000/sloan/gastown.git",
-		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.fixture-signature-not-a-real-token",
 		"sk-abcdefghijklmnopqrstuvwx",
-		"ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+		"ghp_abcdefghijklmnopqrstuvwxyz",
 		"github_pat_11ABCDEFGHIJKLMNOPQRSTUV",
 		"glpat-abcdefghijklmnopqrst",
-		"xoxb-123456789012-abcdefghijkl",
+		"xoxb-fixture-not-a-real-token",
 		"AKIAIOSFODNN7EXAMPLE",
 		"AIzaSyA1234567890abcdefghijklmnopqrstuv",
 		"dckr_pat_abcdefghijklmnopqrstuvwx",
