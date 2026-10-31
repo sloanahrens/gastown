@@ -2113,8 +2113,9 @@ The labels come from the bead's `LANDING RECORD` note and the overrun guard's
 - `drifted_from_bead` true when a MERGE REJECTION block answering a submission
   made at or after the nudge names scope, unrelated or beyond as a whole word in
   its reason or a finding title (`progress:rejection-names-scope`). The block's
-  branch, target, MR and quoted gate tail are not read. A landing in the window
-  labels it false.
+  attempt, kind, branch, target, MR, head, receipt, conflicting files, quoted
+  gate tail and gate log are not read. A landing in the window labels it
+  false.
 
 The rules are in `internal/jev/scorecard/progress.go`.
 
