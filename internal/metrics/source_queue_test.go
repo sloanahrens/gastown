@@ -61,6 +61,17 @@ func queueTestRigs(names ...string) map[string]string {
 	return map[string]string{filepath.Join(queueTestTown, "mayor", "rigs.json"): b.String()}
 }
 
+// queueTestRigList is the rigs named, each with itself as its prefix: the
+// registry queueTestRigs builds records no beads prefix, so a rig's prefix is
+// its name.
+func queueTestRigList(names ...string) []queueRig {
+	rigs := make([]queueRig, len(names))
+	for i, name := range names {
+		rigs[i] = queueRig{name: name, prefix: name}
+	}
+	return rigs
+}
+
 // queueStores is the fake bead store the queue tests read: one rig's reads
 // answered from a table of issue counts, ephemeral counts and failures keyed
 // "<rig>/<column>", with every read recorded.
@@ -69,22 +80,18 @@ type queueStores struct {
 	wisp map[string]int  // how many of those issues are ephemeral
 	fail map[string]bool // a read that fails the way a dead store does
 
-	mu              sync.Mutex
-	calls           []string
-	dirs            []string
-	deadlineMissing bool
+	mu        sync.Mutex
+	calls     []string
+	dirs      []string
+	staleRead bool // a read ran on a store whose context had already ended
 }
 
-// open hands out one rig's store and records the directory and deadline it was
-// asked for.
+// open hands out one rig's store and records the directory it was asked for.
 func (q *queueStores) open(ctx context.Context, dir string) BeadStore {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if _, ok := ctx.Deadline(); !ok {
-		q.deadlineMissing = true
-	}
 	q.dirs = append(q.dirs, dir)
-	return &queueStore{owner: q, rig: filepath.Base(dir)}
+	return &queueStore{owner: q, rig: filepath.Base(dir), ctx: ctx}
 }
 
 // queueStore serves one rig, naming the column by the seam call the source
@@ -92,6 +99,7 @@ func (q *queueStores) open(ctx context.Context, dir string) BeadStore {
 type queueStore struct {
 	owner *queueStores
 	rig   string
+	ctx   context.Context
 }
 
 func (s *queueStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {
@@ -124,6 +132,9 @@ func (s *queueStore) serve(column string) ([]*beads.Issue, error) {
 	o.mu.Lock()
 	o.calls = append(o.calls, key)
 	failed, n, wisps := o.fail[key], o.rows[key], o.wisp[key]
+	if s.ctx.Err() != nil {
+		o.staleRead = true
+	}
 	o.mu.Unlock()
 	if failed {
 		return nil, fmt.Errorf("bd %s: no Dolt server", key)
@@ -184,8 +195,8 @@ func TestSourceQueueSumsBeadCountsOverRigs(t *testing.T) {
 	queueWantColumns(t, cols, map[string]any{
 		"ready": 8, "dispatchable": 2, "waiting_to_land": 2, "blocked": 6,
 	})
-	if fake.deadlineMissing {
-		t.Error("a bead read ran without a deadline; every call takes queueBdTimeout")
+	if fake.staleRead {
+		t.Error("a bead read ran on a store whose deadline had already run out; each read's deadline starts when the read does")
 	}
 	if want := 2 * len(queueBeadColumns()); len(fake.calls) != want {
 		t.Errorf("bead reads = %d, want one per rig per column (%d):\n%s", len(fake.calls), want, strings.Join(fake.calls, "\n"))

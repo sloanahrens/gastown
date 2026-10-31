@@ -96,9 +96,15 @@ type Event struct {
 
 // IssuePage is one page of a list. NextCursor is empty on the last page; a
 // list never stops silently at a cap.
+//
+// RigErrors is set on a list that named several rigs (ListFilter.Rigs): each
+// rig the tracker does not hold is in it with why, and the issues answer every
+// other rig. It is the per-rig channel the board's Errors is for, so one
+// unknown rig does not refuse the rest.
 type IssuePage struct {
-	Issues     []Issue `json:"issues"`
-	NextCursor string  `json:"next_cursor,omitempty"`
+	Issues     []Issue           `json:"issues"`
+	NextCursor string            `json:"next_cursor,omitempty"`
+	RigErrors  map[string]string `json:"rig_errors,omitempty"`
 }
 
 // EventsPage is one page of the events feed after a seq. NextAfter is the seq

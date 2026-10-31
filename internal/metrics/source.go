@@ -125,6 +125,14 @@ type Env struct {
 	// the board. A source that needs it treats nil as a wiring error and
 	// reports it rather than counting an empty board.
 	Beads BeadStores
+	// BeadTimeout is one bead store read's deadline. Zero is the queue group's
+	// default; a test sets it shorter so a deadline can run out inside a unit
+	// test.
+	BeadTimeout time.Duration
+	// BeadAfter arms a bead read's deadline: it runs f once d has passed and
+	// returns a stop function. nil is time.AfterFunc; a test supplies a clock
+	// it can run by hand.
+	BeadAfter func(d time.Duration, f func()) (stop func() bool)
 	// LandingQueue returns the ready-to-land counts the daemon's landing
 	// workers published, keyed by rig, as of now: only the rigs whose count is
 	// fresh enough to answer for the queue now are in it, and a rig it leaves

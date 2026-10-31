@@ -17,6 +17,7 @@ func init() {
 	register(Case{Name: "list statuses: none means not closed, all means everything, a list is an OR", Run: listStatuses})
 	register(Case{Name: "list created_after and an invalid cursor", Run: listCreatedAfterAndBadCursor})
 	register(Case{Name: "list refuses assignee together with no_assignee", Run: listAssigneeConflict})
+	register(Case{Name: "list scopes to several rigs at once and reports a rig it does not hold", Run: listRigs})
 }
 
 func ids(page api.IssuePage) []string {
@@ -143,5 +144,44 @@ func listCreatedAfterAndBadCursor(t *testing.T, s store.Store) {
 func listAssigneeConflict(t *testing.T, s store.Store) {
 	if _, err := s.ListIssues(ctx(), api.ListFilter{Assignee: "me", NoAssignee: true}); !errors.Is(err, api.ErrInvalid) {
 		t.Errorf("assignee with no_assignee = %v, want api.ErrInvalid", err)
+	}
+}
+
+func listRigs(t *testing.T, s store.Store) {
+	gt := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "gt task"})
+	hq := mustCreate(t, s, api.CreateParams{Rig: "hq", Title: "hq task"})
+	sameSet(t, "gt and hq", ids(mustList(t, s, api.ListFilter{Rigs: []string{"gt", "hq"}})), gt.ID, hq.ID)
+	sameSet(t, "hq alone", ids(mustList(t, s, api.ListFilter{Rigs: []string{"hq"}})), hq.ID)
+	sameSet(t, "hq twice", ids(mustList(t, s, api.ListFilter{Rigs: []string{"hq", "hq"}})), hq.ID)
+	for name, f := range map[string]api.ListFilter{
+		"rig and rigs together":             {Rig: "gt", Rigs: []string{"hq"}},
+		"a rigs list of empty strings only": {Rigs: []string{"", ""}},
+	} {
+		if _, err := s.ListIssues(ctx(), f); !errors.Is(err, api.ErrInvalid) {
+			t.Errorf("%s: ListIssues = %v, want api.ErrInvalid", name, err)
+		}
+		// The count answers for the same rows the list reads, so it refuses
+		// the same filter rather than reporting a rig's queue as empty.
+		if n, err := s.CountIssues(ctx(), f); !errors.Is(err, api.ErrInvalid) {
+			t.Errorf("%s: CountIssues = %d, %v; want api.ErrInvalid", name, n, err)
+		}
+	}
+	// A rig the tracker does not hold is reported on its own entry: the rigs
+	// it does hold still answer, and the unknown one is never an empty rig.
+	page := mustList(t, s, api.ListFilter{Rigs: []string{"gt", "nope"}})
+	sameSet(t, "gt beside an unknown rig", ids(page), gt.ID)
+	if _, ok := page.RigErrors["nope"]; !ok || len(page.RigErrors) != 1 {
+		t.Errorf("RigErrors = %v, want an entry for nope alone", page.RigErrors)
+	}
+	page = mustList(t, s, api.ListFilter{Rigs: []string{"nope"}})
+	if len(page.Issues) != 0 || len(page.RigErrors) != 1 {
+		t.Errorf("only an unknown rig asked: issues %v, RigErrors %v; want none and an entry for nope", ids(page), page.RigErrors)
+	}
+	// The count refuses an unknown rig rather than answering it as empty.
+	if n, err := s.CountIssues(ctx(), api.ListFilter{Rigs: []string{"gt", "nope"}}); !errors.Is(err, api.ErrInvalid) {
+		t.Errorf("count with an unknown rig = %d, %v; want api.ErrInvalid", n, err)
+	}
+	if n, err := s.CountIssues(ctx(), api.ListFilter{Rigs: []string{"gt", "hq"}}); err != nil || n != 2 {
+		t.Errorf("count of gt and hq = %d, %v; want 2", n, err)
 	}
 }

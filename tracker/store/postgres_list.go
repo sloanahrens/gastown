@@ -115,6 +115,9 @@ func buildListWhere(f api.ListFilter, cur *listCursor) (string, []any, error) {
 	if f.Rig != "" {
 		where = append(where, "issues.rig = "+arg(f.Rig))
 	}
+	if len(f.Rigs) > 0 {
+		where = append(where, "issues.rig = ANY("+arg(f.Rigs)+")")
+	}
 	if len(f.IDs) > 0 {
 		where = append(where, "issues.id = ANY("+arg(f.IDs)+")")
 	}
@@ -161,9 +164,73 @@ func buildCountQuery(f api.ListFilter) (string, []any, error) {
 	return "SELECT count(*) FROM tracker.issues WHERE " + where, args, nil
 }
 
+// rigScope is f.Rigs split into the rigs the tracker holds and the rigs it does
+// not. A rig it does not hold is never answered with no issues, which would
+// read as a rig whose queue emptied: the list reports it in RigErrors and the
+// count refuses it.
+func (p *Postgres) rigScope(ctx context.Context, f api.ListFilter) (held, unknown []string, err error) {
+	if len(f.Rigs) == 0 {
+		return nil, nil, nil
+	}
+	if f.Rig != "" {
+		return nil, nil, api.Invalid("rig and rigs cannot both be set")
+	}
+	rigs := uniqueStrings(f.Rigs)
+	if len(rigs) == 0 {
+		return nil, nil, api.Invalid("rigs holds no rig")
+	}
+	rows, err := p.pool.Query(ctx, "SELECT prefix FROM tracker.rigs WHERE prefix = ANY($1)", rigs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: list rigs: %w", err)
+	}
+	defer rows.Close()
+	known := map[string]bool{}
+	for rows.Next() {
+		var rig string
+		if err := rows.Scan(&rig); err != nil {
+			return nil, nil, fmt.Errorf("store: list rigs: %w", err)
+		}
+		known[rig] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("store: list rigs: %w", err)
+	}
+	for _, rig := range rigs {
+		if known[rig] {
+			held = append(held, rig)
+		} else {
+			unknown = append(unknown, rig)
+		}
+	}
+	return held, unknown, nil
+}
+
+// unknownRigErrors is the RigErrors of a list: each rig it does not hold, with
+// why. nil when every rig asked for is held.
+func unknownRigErrors(unknown []string) map[string]string {
+	if len(unknown) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(unknown))
+	for _, rig := range unknown {
+		out[rig] = "unknown rig " + rig
+	}
+	return out
+}
+
 // ListIssues returns one page of issues matching f, ordered by priority,
 // creation time and id, with comment and dependency counts filled in.
 func (p *Postgres) ListIssues(ctx context.Context, f api.ListFilter) (api.IssuePage, error) {
+	held, unknown, err := p.rigScope(ctx, f)
+	if err != nil {
+		return api.IssuePage{}, err
+	}
+	refused := unknownRigErrors(unknown)
+	if len(held) == 0 && len(refused) > 0 {
+		// Every rig asked for is unknown, so there is nothing to read.
+		return api.IssuePage{RigErrors: refused}, nil
+	}
+	f.Rigs = held
 	cur, err := decodeListCursor(f.Cursor)
 	if err != nil {
 		return api.IssuePage{}, err
@@ -189,7 +256,7 @@ func (p *Postgres) ListIssues(ctx context.Context, f api.ListFilter) (api.IssueP
 	if err := rows.Err(); err != nil {
 		return api.IssuePage{}, fmt.Errorf("store: list issues: %w", err)
 	}
-	page := api.IssuePage{Issues: issues}
+	page := api.IssuePage{Issues: issues, RigErrors: refused}
 	if len(issues) > size {
 		page.Issues = issues[:size]
 		last := page.Issues[size-1]
@@ -206,6 +273,14 @@ func (p *Postgres) CountIssues(ctx context.Context, f api.ListFilter) (int, erro
 	if err := api.ValidateCount(f); err != nil {
 		return 0, err
 	}
+	held, unknown, err := p.rigScope(ctx, f)
+	if err != nil {
+		return 0, err
+	}
+	if len(unknown) > 0 {
+		return 0, api.Invalid("unknown rig %s", strings.Join(unknown, ", "))
+	}
+	f.Rigs = held
 	q, args, err := buildCountQuery(f)
 	if err != nil {
 		return 0, err

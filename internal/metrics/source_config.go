@@ -91,8 +91,8 @@ func (s configSource) Collect(ctx context.Context, env Env) (map[string]any, err
 		failures++
 	} else {
 		for _, rig := range rigs {
-			value, ok := configOmThreshold(env, rig)
-			cols["om_threshold_"+rig] = value
+			value, ok := configOmThreshold(env, rig.name)
+			cols["om_threshold_"+rig.name] = value
 			if !ok {
 				failures++
 			}
