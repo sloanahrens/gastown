@@ -250,10 +250,14 @@ func TestKillOwnPark_RefusesUnderAnEstop(t *testing.T) {
 	for _, which := range []string{"town", "rig"} {
 		h := newHarness(t)
 		h.parkAs(t, "overrun_guard")
+		var eerr error
 		if which == "town" {
-			_ = estop.Activate(h.town, estop.TriggerManual, "x")
+			eerr = estop.Activate(h.town, estop.TriggerManual, "x")
 		} else {
-			_ = estop.ActivateRig(h.town, "gastown", estop.TriggerManual, "x")
+			eerr = estop.ActivateRig(h.town, "gastown", estop.TriggerManual, "x")
+		}
+		if eerr != nil {
+			t.Fatalf("%s estop: activating the e-stop: %v", which, eerr)
 		}
 
 		err := h.sup().KillOwnPark(flint, "overrun (20 minute rule) on gt-aaa11", "overrun_guard")
