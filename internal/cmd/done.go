@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/done"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -127,24 +128,26 @@ func init() {
 }
 
 func runDone(cmd *cobra.Command, args []string) error {
-	return done.Run(done.Options{
-		Status:              doneStatus,
-		Issue:               doneIssue,
-		CleanupStatus:       doneCleanupStatus,
-		Target:              doneTarget,
-		Bead:                doneBead,
-		AllowReverts:        doneAllowReverts,
-		AllowThrowawayPaths: doneAllowThrowawayPaths,
-		PreVerified:         donePreVerified,
-		Env:                 os.Getenv,
-		Getwd:               os.Getwd,
-		Detect:              detectDoneAgent,
-		RecordAgentState: func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
-			return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID, pending)
-		},
-		LocalGate:   doneLocalGate,
-		RetryDelays: pushLandingRetryDelays,
-		Sleep:       doneRetrySleep,
+	return submitWithStaleBaseWarning(os.Stderr, git.NewGit("."), func() error {
+		return done.Run(done.Options{
+			Status:              doneStatus,
+			Issue:               doneIssue,
+			CleanupStatus:       doneCleanupStatus,
+			Target:              doneTarget,
+			Bead:                doneBead,
+			AllowReverts:        doneAllowReverts,
+			AllowThrowawayPaths: doneAllowThrowawayPaths,
+			PreVerified:         donePreVerified,
+			Env:                 os.Getenv,
+			Getwd:               os.Getwd,
+			Detect:              detectDoneAgent,
+			RecordAgentState: func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
+				return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID, pending)
+			},
+			LocalGate:   doneLocalGate,
+			RetryDelays: pushLandingRetryDelays,
+			Sleep:       doneRetrySleep,
+		})
 	})
 }
 
