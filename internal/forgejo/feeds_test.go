@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"testing"
 
@@ -62,6 +63,24 @@ func TestListUserReposReadsEveryPage(t *testing.T) {
 	require.Len(t, repos, userReposLimit+1)
 	assert.Equal(t, "sloan/repo-0", repos[0].FullName)
 	assert.Equal(t, "sloan/last", repos[userReposLimit].FullName)
+}
+
+// A page the client cannot read fails the whole list: reporting the pages it
+// did read as the whole list is what the size report must not be built from
+// (gt-nlrpk).
+func TestListUserReposPageFailureFails(t *testing.T) {
+	t.Parallel()
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = w.Write(golden(t, "user_repos.json"))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"boom"}`)
+	})
+	_, err := newTestClient(t, h).ListUserRepos(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
 }
 
 // A server that never runs out of repositories is a fault the read reports,
