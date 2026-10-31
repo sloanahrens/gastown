@@ -580,6 +580,14 @@ func seedStopSandbox(t *testing.T, d *Daemon) {
 	reg := session.NewPrefixRegistry()
 	reg.Register(overrunStopPrefix, stopSeat.Rig)
 	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	seedStopSandboxRecord(t, d)
+}
+
+// seedStopSandboxRecord writes the record of stopSeat's sandboxed session. It
+// does not touch the registry, so the lookup for a rig the registry lacks finds
+// it by the rig and polecat the record names.
+func seedStopSandboxRecord(t *testing.T, d *Daemon) {
+	t.Helper()
 	rec := session.SandboxRecord{Session: overrunStopSessionName, Rig: stopSeat.Rig, Polecat: stopSeat.Polecat, Branch: stopSeat.Branch}
 	if err := session.WriteSandboxRecord(d.config.TownRoot, rec); err != nil {
 		t.Fatal(err)
@@ -714,8 +722,9 @@ func TestStop_SandboxedSeatIsPushedAndRemovedBeforeTheHandBack(t *testing.T) {
 }
 
 // overrunRemoveSandbox is the production sandbox step: push, then delete; a
-// refused push keeps the sandbox. No record found (a host seat, or a rig the
-// registry does not list) has nothing to remove, so the stop proceeds.
+// refused push keeps the sandbox. A seat on a rig the registry does not list is
+// found by its record; no record at all (a host seat) has nothing to remove, so
+// the stop proceeds.
 func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -731,6 +740,8 @@ func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *tes
 		{name: "push_then_delete", sandboxed: true, wantCalls: []string{"push", "delete"}},
 		{name: "gone_sandbox_has_nothing_to_push_and_is_still_removed", sandboxed: true, pushErr: session.ErrNothingToPush, wantCalls: []string{"push", "delete"}},
 		{name: "refused_push_keeps_the_sandbox_and_names_it", sandboxed: true, pushErr: errors.New("rejected by origin"), wantCalls: []string{"push"}, wantRecord: true, wantErr: "sandbox " + overrunStopSessionName},
+		{name: "unknown_rig_sandbox_is_pushed_then_removed", sandboxed: true, unknownRig: true, wantCalls: []string{"push", "delete"}},
+		{name: "unknown_rig_refused_push_keeps_the_sandbox_and_names_it", sandboxed: true, unknownRig: true, pushErr: errors.New("rejected by origin"), wantCalls: []string{"push"}, wantRecord: true, wantErr: "sandbox " + overrunStopSessionName},
 		{name: "host_seat_has_no_sandbox", wantCalls: nil},
 		{name: "host_seat_on_unknown_rig_has_nothing_to_remove", unknownRig: true, wantCalls: nil, wantWarning: true},
 	}
@@ -738,14 +749,13 @@ func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *tes
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			d, logBuf := newOverrunDaemon(t, false)
+			reg := session.NewPrefixRegistry()
+			if !tt.unknownRig {
+				reg.Register(overrunStopPrefix, stopSeat.Rig)
+			}
+			d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
 			if tt.sandboxed {
-				seedStopSandbox(t, d)
-			} else {
-				reg := session.NewPrefixRegistry()
-				if !tt.unknownRig {
-					reg.Register(overrunStopPrefix, stopSeat.Rig)
-				}
-				d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+				seedStopSandboxRecord(t, d)
 			}
 			var calls []string
 			push := func(string, session.SandboxRecord) error {
@@ -882,6 +892,100 @@ func TestOverrunRemoveSandbox_UnreadableRecordHoldsInsteadOfGivingUp(t *testing.
 	}
 	if len(calls) != 0 {
 		t.Errorf("calls = %q, want none for an unreadable record", calls)
+	}
+}
+
+// A seat on a rig the registry does not list is found by the records that name
+// it. When the lookup cannot tell which record is the seat's, it holds: nothing
+// is pushed or removed, since the seat's commits may be unpushed.
+func TestOverrunRemoveSandbox_UnlistedRigHoldsWhenItCannotTellTheRecord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, townRoot string)
+	}{
+		{name: "registry_is_not_a_directory", setup: func(t *testing.T, townRoot string) {
+			dir := session.SandboxRegistryDir(townRoot)
+			if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "another_records_does_not_parse", setup: func(t *testing.T, townRoot string) {
+			dir := session.SandboxRegistryDir(townRoot)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "gt-other.json"), []byte("{not json"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "two_records_name_the_seat", setup: func(t *testing.T, townRoot string) {
+			for _, name := range []string{overrunStopSessionName, "old-" + stopSeat.Polecat} {
+				rec := session.SandboxRecord{Session: name, Rig: stopSeat.Rig, Polecat: stopSeat.Polecat}
+				if err := session.WriteSandboxRecord(townRoot, rec); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
+			tt.setup(t, d.config.TownRoot)
+			var calls []string
+			err := d.overrunRemoveSandbox(stopSeat,
+				func(string, session.SandboxRecord) error {
+					calls = append(calls, "push")
+					return nil
+				},
+				func(string, session.SandboxRecord) error {
+					calls = append(calls, "delete")
+					return nil
+				})
+			if err == nil {
+				t.Fatal("overrunRemoveSandbox = nil, want a hold")
+			}
+			if len(calls) != 0 {
+				t.Errorf("calls = %q, want none while the seat's record is unknown", calls)
+			}
+		})
+	}
+}
+
+// A session name the sandbox record rule rejects has no record to read, so the
+// sandbox step is skipped for it; the skip is logged, not silent.
+func TestOverrunRemoveSandbox_InvalidSessionNameSkipsTheStepWithALog(t *testing.T) {
+	t.Parallel()
+	d, logBuf := newOverrunDaemon(t, false)
+	reg := session.NewPrefixRegistry()
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	seat := stopSeat
+	seat.Polecat = "cap able"
+	var calls []string
+	err := d.overrunRemoveSandbox(seat,
+		func(string, session.SandboxRecord) error {
+			calls = append(calls, "push")
+			return nil
+		},
+		func(string, session.SandboxRecord) error {
+			calls = append(calls, "delete")
+			return nil
+		})
+
+	if err != nil {
+		t.Fatalf("overrunRemoveSandbox = %v, want nil for an invalid session name", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("calls = %q, want none", calls)
+	}
+	if !strings.Contains(logBuf.String(), "not a sandbox record name") {
+		t.Errorf("log %q does not say the sandbox step was skipped", logBuf.String())
 	}
 }
 
