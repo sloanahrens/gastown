@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -208,26 +209,26 @@ func TestRingForgeWithoutAKeyExitsOneAndWritesNothing(t *testing.T) {
 	}
 }
 
-// TestRingVerbsNeverPrintTheKey runs every verb through a full cycle and
-// checks the key value appears in none of their stdout or error text.
+// TestRingVerbsNeverPrintTheKey runs every verb through its cobra command, with
+// the key in the process environment, and checks the key value appears in none
+// of the stdout, stderr or error text it produces. It sets the environment, so
+// it cannot run in parallel.
 func TestRingVerbsNeverPrintTheKey(t *testing.T) {
-	t.Parallel()
 	root := ringTestTown(t)
+	t.Setenv("GT_RING_KEY", ringTestKey)
+	find := func() (string, error) { return root, nil }
 	var all strings.Builder
-	steps := []struct {
-		run func(ringDeps, io.Writer) error
-		at  time.Time
-	}{
-		{runRingStatus, ringTestNow},
-		{runRingForge, ringTestNow},
-		{runRingStatus, ringTestNow},
-		{runRingStatus, ringTestNow.Add(37 * time.Hour)},
-		{runRingRenew, ringTestNow.Add(37 * time.Hour)},
-		{runRingRemove, ringTestNow.Add(37 * time.Hour)},
-		{runRingStatus, ringTestNow.Add(37 * time.Hour)},
+	steps := []func(ringDeps, io.Writer) error{
+		runRingStatus,
+		runRingForge,
+		runRingStatus,
+		runRingRenew,
+		runRingRemove,
+		runRingStatus,
+		runRingRenew, // no Ring left: refused, so the refusal reaches stderr
 	}
-	for _, s := range steps {
-		out, err := ringRun(s.run, ringTestDeps(root, ringTestEnv, s.at))
+	for _, run := range steps {
+		out, err := ringRunCobra(find, run)
 		all.WriteString(out)
 		if err != nil {
 			all.WriteString(err.Error())
@@ -236,6 +237,47 @@ func TestRingVerbsNeverPrintTheKey(t *testing.T) {
 	if strings.Contains(all.String(), ringTestKey) {
 		t.Fatalf("a verb printed the signing key (output redacted):\n%s", strings.ReplaceAll(all.String(), ringTestKey, "<key>"))
 	}
+}
+
+// ringHelpStdout runs gt ring's help, the func the --help flag calls, and
+// returns what it wrote to os.Stdout. The help func prints there directly, so
+// the test points os.Stdout at a pipe for the call.
+func ringHelpStdout(t *testing.T) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
+	done := make(chan string)
+	go func() {
+		var b bytes.Buffer
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+	helpErr := ringCmd.Help()
+	os.Stdout = old
+	_ = w.Close()
+	help := <-done
+	if helpErr != nil {
+		t.Fatalf("gt ring --help: %v", helpErr)
+	}
+	return help
+}
+
+// ringRunCobra runs a verb as its cobra command does: the wrapper finds the
+// town, and cobra prints the error to stderr. It returns what cobra wrote to
+// stdout and stderr, and the error.
+func ringRunCobra(find func() (string, error), run func(ringDeps, io.Writer) error) (string, error) {
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{Use: "verb", RunE: ringVerb(find, run), SilenceUsage: true}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	return out.String() + errOut.String(), err
 }
 
 // TestRingVerbRefusesOutsideATown: a verb run where no town is found refuses
@@ -327,19 +369,21 @@ func TestRingRenewAndStatusRefuseAnUnreadableRing(t *testing.T) {
 	}
 }
 
-// TestRingHelpListsEveryVerb: gt ring --help names forge, renew, status and
-// remove, each with its one-line summary. The help func prints to the process
-// stdout, so the test reads the usage text it is built from.
+// TestRingHelpListsEveryVerb: gt ring --help lists forge, renew, status and
+// remove under Available Commands, each with its one-line summary. It reads the
+// help the --help flag prints to stdout, so it swaps os.Stdout and cannot run in
+// parallel. The line must start with the verb name, so the Long text, which
+// names the verbs inside a sentence-like line, cannot satisfy it.
 func TestRingHelpListsEveryVerb(t *testing.T) {
-	t.Parallel()
-	help := ringCmd.UsageString()
+	help := ringHelpStdout(t)
 	for _, verb := range []struct{ name, short string }{
 		{ringForgeCmd.Name(), ringForgeCmd.Short},
 		{ringRenewCmd.Name(), ringRenewCmd.Short},
 		{ringStatusCmd.Name(), ringStatusCmd.Short},
 		{ringRemoveCmd.Name(), ringRemoveCmd.Short},
 	} {
-		if !strings.Contains(help, verb.name) || !strings.Contains(help, verb.short) {
+		listed := regexp.MustCompile(`(?m)^\s+` + regexp.QuoteMeta(verb.name) + `\s+` + regexp.QuoteMeta(verb.short) + `$`)
+		if !listed.MatchString(help) {
 			t.Errorf("gt ring --help does not list %q with %q:\n%s", verb.name, verb.short, help)
 		}
 	}
