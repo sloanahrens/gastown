@@ -141,28 +141,39 @@ func failingEventsExport(err error) jsonlTableExporter {
 	return func(string, beadsql.Query, string, string, time.Duration) (int, error) { return 0, err }
 }
 
-// readOnlyDir makes dir refuse writes and restores the bit, so a test can drive
-// the branch a failed write takes.
-func readOnlyDir(t *testing.T, dir string) {
-	t.Helper()
-	//testpolicy:allow no-exec-files — the fixture directory: a read-only dir needs its search bit
-	if err := os.Chmod(dir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	//testpolicy:allow no-exec-files — restores the write bit so t.TempDir can clean up
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+// The failing ops below are the export's real filesystem work with one call
+// replaced by an error. A mode that refuses a write to a normal user still
+// accepts it from a process running as root, so the failure branches are
+// driven by an injected error instead (gt-l7eeb).
+
+// eventsOpsWithWriteFile is osEventsExportOps with every write failing.
+func eventsOpsWithWriteFile(err error) eventsExportOps {
+	ops := osEventsExportOps()
+	ops.writeFile = func(string, []byte, os.FileMode) error { return err }
+	return ops
 }
 
-// readOnlyFile makes a file that exists refuse a write, which is how a shard
-// already in the export fails to be rewritten.
-func readOnlyFile(t *testing.T, path string) {
-	t.Helper()
-	//testpolicy:allow no-exec-files — the fixture file: a read-only file needs no search bit, and the mode carries none
-	if err := os.Chmod(path, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	//testpolicy:allow no-exec-files — restores the write bit so t.TempDir can clean up
-	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+// eventsOpsWithRename is osEventsExportOps with every rename failing.
+func eventsOpsWithRename(err error) eventsExportOps {
+	ops := osEventsExportOps()
+	ops.rename = func(string, string) error { return err }
+	return ops
+}
+
+// eventsOpsWithRemoveAll is osEventsExportOps with every recursive removal
+// failing.
+func eventsOpsWithRemoveAll(err error) eventsExportOps {
+	ops := osEventsExportOps()
+	ops.removeAll = func(string) error { return err }
+	return ops
+}
+
+// eventsOpsWithMkdirAll is osEventsExportOps with every directory creation
+// failing.
+func eventsOpsWithMkdirAll(err error) eventsExportOps {
+	ops := osEventsExportOps()
+	ops.mkdirAll = func(string, os.FileMode) error { return err }
+	return ops
 }
 
 func TestEventsExportStateRoundTrip(t *testing.T) {
@@ -263,8 +274,8 @@ func TestClearEventsScratchReportsAFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeEventsShard(t, stage, "events.jsonl", eventsLine("e1", "2026-10-31 10:00:00"))
-	readOnlyDir(t, dir)
-	if err := clearEventsScratch(dir); err == nil {
+	ops := eventsOpsWithRemoveAll(errors.New("the staging dir is busy"))
+	if err := clearEventsScratchWith(ops, dir); err == nil {
 		t.Error("a staging dir it cannot remove was cleared silently")
 	}
 
@@ -278,8 +289,7 @@ func TestClearEventsScratchReportsAFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeEventsShard(t, otherStage, "events.jsonl", eventsLine("e1", "2026-10-31 10:00:00"))
-	readOnlyDir(t, other)
-	if _, err := d.exportEventsToJsonl("hq", other, t.TempDir(), time.Minute, stagedEventsExport()); err == nil {
+	if _, err := d.exportEventsToJsonlWith(ops, "hq", other, t.TempDir(), time.Minute, stagedEventsExport()); err == nil {
 		t.Error("an export whose scratch could not be cleared appended to it")
 	}
 }
@@ -290,15 +300,13 @@ func TestAppendNewEventsReportsItsFailures(t *testing.T) {
 	t.Parallel()
 	newRow := eventsLine("e2", "2026-10-31 10:02:00")
 	for _, tt := range []struct {
-		name string
-		// setup runs after the export is seeded, with the state in hand.
-		setup   func(t *testing.T, dir string)
-		export  jsonlTableExporter
-		wantErr string
+		name   string
+		ops    eventsExportOps
+		export jsonlTableExporter
 	}{
 		{
 			name:   "staged read cannot be created",
-			setup:  func(t *testing.T, dir string) { readOnlyDir(t, dir) },
+			ops:    eventsOpsWithMkdirAll(errors.New("the export dir is full")),
 			export: stagedEventsExport(newRow),
 		},
 		{
@@ -318,12 +326,8 @@ func TestAppendNewEventsReportsItsFailures(t *testing.T) {
 			export: stagedEventsExport(`{"id":"e9"}`),
 		},
 		{
-			name: "the boundary cannot be recorded",
-			setup: func(t *testing.T, dir string) {
-				if err := os.MkdirAll(eventsExportStatePath(dir)+".tmp", 0755); err != nil {
-					t.Fatal(err)
-				}
-			},
+			name:   "the boundary cannot be recorded",
+			ops:    eventsOpsWithRename(errors.New("the state cannot be replaced")),
 			export: stagedEventsExport(newRow),
 		},
 	} {
@@ -337,14 +341,44 @@ func TestAppendNewEventsReportsItsFailures(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reading the seeded state: %v", err)
 			}
-			if tt.setup != nil {
-				tt.setup(t, dir)
+			ops := tt.ops
+			if ops.writeFile == nil {
+				// The zero value is the real filesystem work.
+				ops = osEventsExportOps()
 			}
-			if _, err := d.appendNewEvents("hq", dir, t.TempDir(), time.Minute, tt.export, state); err == nil {
+			if _, err := d.appendNewEventsWith(ops, "hq", dir, t.TempDir(), time.Minute, tt.export, state); err == nil {
 				t.Errorf("%s: the read reported no failure", tt.name)
 			}
 		})
 	}
+}
+
+// TestExportEventsSkipsTheFallbackWhenTheIncrementalReadSpendsItsBudget: a
+// read that used the whole budget leaves nothing for the whole-table retry, so
+// the cycle fails with the export and its state as they were rather than start
+// a read it cannot finish (gt-l7eeb).
+func TestExportEventsSkipsTheFallbackWhenTheIncrementalReadSpendsItsBudget(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	clk := clockwork.NewFakeClockAt(eventsFailureNow)
+	d.clock = clk
+	dir := t.TempDir()
+	seedEventsExport(t, dir, eventsTestRow{"e1", "2026-10-31 10:00:00"})
+	before := snapshotEventsExport(t, dir)
+	budget := 2 * time.Minute
+	spends := func(string, beadsql.Query, string, string, time.Duration) (int, error) {
+		clk.Advance(budget)
+		return 0, errors.New("the read was killed at its bound")
+	}
+
+	_, err := d.exportEventsToJsonl("hq", dir, t.TempDir(), budget, spends)
+	if err == nil {
+		t.Fatal("an export whose budget was spent reported success")
+	}
+	if !strings.Contains(err.Error(), "full fallback skipped this cycle") {
+		t.Errorf("error = %v, want the spent-budget fallback named", err)
+	}
+	before.assertHeld(t, dir)
 }
 
 // TestExportAllEventsReportsItsFailures: a whole-table read that fails is an
@@ -358,11 +392,8 @@ func TestExportAllEventsReportsItsFailures(t *testing.T) {
 		t.Error("a failed whole-table read was reported as an export")
 	}
 
-	dir := t.TempDir()
-	if err := os.MkdirAll(eventsExportStatePath(dir)+".tmp", 0755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.exportAllEventsToJsonl("hq", dir, t.TempDir(), time.Minute, stagedEventsExport(eventsLine("e1", "2026-10-31 10:00:00"))); err == nil {
+	ops := eventsOpsWithRename(errors.New("the state cannot be replaced"))
+	if _, err := d.exportAllEventsToJsonlWith(ops, "hq", t.TempDir(), t.TempDir(), time.Minute, stagedEventsExport(eventsLine("e1", "2026-10-31 10:00:00"))); err == nil {
 		t.Error("an export whose boundary could not be recorded was reported as done")
 	}
 }
@@ -472,8 +503,8 @@ func TestAppendEventRowsReportsItsFailures(t *testing.T) {
 		seedEventsExport(t, dir, eventsTestRow{"e1", "2026-10-31 10:00:00"})
 		before := snapshotEventsExport(t, dir)
 		st := state(1)
-		readOnlyFile(t, filepath.Join(dir, "events.jsonl"))
-		if _, err := appendEventRows(dir, []json.RawMessage{newRow}, st, jsonlShardMaxBytes, jsonlShardHardLimit); err == nil {
+		ops := eventsOpsWithWriteFile(errors.New("the disk is full"))
+		if _, err := appendEventRowsWith(ops, dir, []json.RawMessage{newRow}, st, jsonlShardMaxBytes, jsonlShardHardLimit); err == nil {
 			t.Error("an append that could not write the shard reported success")
 		}
 		before.assertHeld(t, dir)
@@ -564,11 +595,10 @@ func TestEventsExportBoundaryReportsItsFailures(t *testing.T) {
 
 func TestPublishEventShardsReportsAFailedWrite(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	readOnlyDir(t, dir)
 	shards := newShardBuilder(1024)
 	shards.add([]byte("{}\n"))
-	if err := publishEventShards(dir, 1, shards.shards()); err == nil {
+	ops := eventsOpsWithWriteFile(errors.New("the disk is full"))
+	if err := publishEventShardsWith(ops, t.TempDir(), 1, shards.shards()); err == nil {
 		t.Error("a shard that could not be written was reported as published")
 	}
 }

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,12 +25,10 @@ type eventsTestRow struct {
 
 // eventsTableFake stands in for a database's events table: rows is what the
 // table holds, and each export writes in created_at, id order the rows its
-// query's bound admits, as Dolt would. always are rows the bound does not
-// admit but the read still returns, the way a row inserted with an older
-// timestamp arrives after the export passed that second.
+// query's bound admits, as Dolt would. Every row goes through the bound, so a
+// row stamped before it is not returned however it arrived in the table.
 type eventsTableFake struct {
 	rows    []eventsTestRow
-	always  []eventsTestRow
 	queries []string
 }
 
@@ -55,7 +54,6 @@ func (f *eventsTableFake) exporter(t *testing.T, others map[string]int) jsonlTab
 			}
 			read = append(read, row)
 		}
-		read = append(read, f.always...)
 		sort.SliceStable(read, func(i, j int) bool {
 			if read[i].createdAt != read[j].createdAt {
 				return read[i].createdAt < read[j].createdAt
@@ -431,14 +429,89 @@ func TestAppendEventRowsRefusesABoundaryRunAcrossShards(t *testing.T) {
 	}
 }
 
-// TestExportEventsFallsBackWhenARowPredatesTheBoundary: a row that arrives
-// stamped earlier than the boundary cannot be appended at the end of the file
-// without breaking its order, so the export is rebuilt from the whole table
-// instead of dropping or misfiling it (gt-l7eeb).
-func TestExportEventsFallsBackWhenARowPredatesTheBoundary(t *testing.T) {
+// TestAppendNewEventsRefusesARowOlderThanTheBoundary covers the defensive
+// guard alone: Dolt's bound does not return a row stamped before it, but a
+// staged read that did would be unplaceable at the end of the file, so the
+// append refuses it and leaves the export as it was (gt-l7eeb).
+func TestAppendNewEventsRefusesARowOlderThanTheBoundary(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	d.clock = clockwork.NewFakeClockAt(eventsFailureNow)
+	dir := t.TempDir()
+	seedEventsExport(t, dir, eventsTestRow{"e1", "2026-10-31 10:00:00"})
+	before := snapshotEventsExport(t, dir)
+	state, err := readEventsExportState(dir)
+	if err != nil {
+		t.Fatalf("reading the seeded state: %v", err)
+	}
+
+	_, err = d.appendNewEvents("hq", dir, t.TempDir(), time.Minute,
+		stagedEventsExport(eventsLine("e0", "2026-10-31 09:00:00")), state)
+	if err == nil {
+		t.Fatal("the append accepted a row stamped before the boundary")
+	}
+	if !strings.Contains(err.Error(), "older than the boundary") {
+		t.Errorf("error = %v, want it to say the row is older than the boundary", err)
+	}
+	before.assertHeld(t, dir)
+}
+
+// TestExportEventsRebuildsTheWholeTableWhenTheAppendFails: an incremental read
+// that fails cannot be built on, so the cycle reads the whole table with what
+// is left of its budget and replaces the export (gt-l7eeb).
+func TestExportEventsRebuildsTheWholeTableWhenTheAppendFails(t *testing.T) {
 	t.Parallel()
 	d, _ := backupTestDaemon(t)
 	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 10, 31, 10, 5, 0, 0, time.UTC))
+	fake := &eventsTableFake{rows: []eventsTestRow{
+		{"e1", "2026-10-31 10:00:00"},
+		{"e2", "2026-10-31 10:01:00"},
+	}}
+	base := fake.exporter(t, nil)
+	killIncremental := true
+	d.jsonlTableExportFn = func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
+		if table == "events" && killIncremental {
+			text, err := q.Inline()
+			if err != nil {
+				t.Fatalf("events query: %v", err)
+			}
+			if _, bounded := eventsQueryBound(text); bounded {
+				killIncremental = false
+				return 0, errors.New("the incremental read was killed")
+			}
+		}
+		return base(table, q, dir, dataDir, budget)
+	}
+	gitRepo := t.TempDir()
+	dbDir := filepath.Join(gitRepo, "hq")
+	dataDir := t.TempDir()
+
+	if _, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	if _, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false); err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	if len(fake.queries) != 2 {
+		t.Fatalf("the events table was read %d times, want 2", len(fake.queries))
+	}
+	if bound, ok := eventsQueryBound(fake.queries[1]); ok {
+		t.Errorf("the fallback still read from bound %q, want the whole table", bound)
+	}
+	if got, want := eventsExportIDs(t, dbDir), []string{"e1", "e2"}; !slices.Equal(got, want) {
+		t.Errorf("the export holds %v, want the whole table %v", got, want)
+	}
+}
+
+// TestFullExportCatchesALateCommittedRow: a row that commits after the export
+// passed its second, carrying an older created_at, is not returned by the
+// incremental read; the daily whole-table pass is what includes it, exactly
+// once (gt-l7eeb).
+func TestFullExportCatchesALateCommittedRow(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 31, 10, 5, 0, 0, time.UTC))
+	d.clock = clk
 	fake := &eventsTableFake{rows: []eventsTestRow{
 		{"e1", "2026-10-31 10:00:00"},
 		{"e2", "2026-10-31 10:01:00"},
@@ -451,17 +524,29 @@ func TestExportEventsFallsBackWhenARowPredatesTheBoundary(t *testing.T) {
 	if _, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false); err != nil {
 		t.Fatalf("first export: %v", err)
 	}
-	// A row inserted with an older timestamp than the boundary.
-	fake.always = append(fake.always, eventsTestRow{"e0", "2026-10-31 09:00:00"})
+	// A row commits late with a created_at older than the recorded boundary.
+	fake.rows = append(fake.rows, eventsTestRow{"late", "2026-10-31 09:30:00"})
 
 	if _, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false); err != nil {
-		t.Fatalf("second export: %v", err)
+		t.Fatalf("incremental export: %v", err)
 	}
-	if bound, ok := eventsQueryBound(fake.queries[len(fake.queries)-1]); ok {
-		t.Errorf("the export still read from bound %q, want the whole table after the older row", bound)
+	if bound, ok := eventsQueryBound(fake.queries[1]); !ok || bound != "2026-10-31 10:01:00" {
+		t.Errorf("the incremental export read from bound %q (bounded %v), want 2026-10-31 10:01:00", bound, ok)
 	}
-	if got, want := eventsExportIDs(t, dbDir), []string{"e0", "e1", "e2"}; !slices.Equal(got, want) {
-		t.Errorf("the export holds %v, want %v", got, want)
+	if got := eventsExportIDs(t, dbDir); slices.Contains(got, "late") {
+		t.Errorf("the incremental export holds %v, want the late row left to the full pass", got)
+	}
+
+	clk.Advance(eventsFullExportEvery)
+	if _, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false); err != nil {
+		t.Fatalf("daily export: %v", err)
+	}
+	if bound, ok := eventsQueryBound(fake.queries[2]); ok {
+		t.Errorf("the daily export read from bound %q, want the whole table", bound)
+	}
+	want := []string{"late", "e1", "e2"}
+	if got := eventsExportIDs(t, dbDir); !slices.Equal(got, want) {
+		t.Errorf("the export holds %v after the full pass, want %v", got, want)
 	}
 }
 

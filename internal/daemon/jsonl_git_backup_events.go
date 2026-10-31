@@ -45,6 +45,29 @@ const (
 // on into the one before it, so their merge point is not in one file.
 var errEventsBoundarySpansShards = errors.New("the boundary rows span shards")
 
+// eventsExportOps is the filesystem work an events export does. Production
+// passes the os package; a test that drives a failing write passes its own,
+// since a mode that refuses a write to a normal user still accepts it when the
+// tests run as root (gt-l7eeb).
+type eventsExportOps struct {
+	writeFile func(name string, data []byte, perm os.FileMode) error
+	rename    func(oldpath, newpath string) error
+	remove    func(path string) error
+	removeAll func(path string) error
+	mkdirAll  func(path string, perm os.FileMode) error
+}
+
+// osEventsExportOps is the export's real filesystem work.
+func osEventsExportOps() eventsExportOps {
+	return eventsExportOps{
+		writeFile: os.WriteFile,
+		rename:    os.Rename,
+		remove:    os.Remove,
+		removeAll: os.RemoveAll,
+		mkdirAll:  os.MkdirAll,
+	}
+}
+
 // eventsExportState is what the next events export appends from: the newest
 // created_at already in the file, the ids that share it (a re-read of that
 // second must not add a row twice), the rows the file holds, and when the
@@ -101,13 +124,17 @@ func eventsExportStateJSON(st eventsExportState) []byte {
 // mid-write leaves the previous state, and the row count it records no longer
 // matches the file the killed append touched, so the next export is full.
 func writeEventsExportState(dir string, st eventsExportState) error {
+	return writeEventsExportStateWith(osEventsExportOps(), dir, st)
+}
+
+func writeEventsExportStateWith(ops eventsExportOps, dir string, st eventsExportState) error {
 	path := eventsExportStatePath(dir)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, eventsExportStateJSON(st), 0644); err != nil {
+	if err := ops.writeFile(tmp, eventsExportStateJSON(st), 0644); err != nil {
 		return fmt.Errorf("writing %s: %w", filepath.Base(tmp), err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := ops.rename(tmp, path); err != nil {
+		_ = ops.remove(tmp)
 		return fmt.Errorf("publishing %s: %w", filepath.Base(path), err)
 	}
 	return nil
@@ -155,40 +182,53 @@ func eventsExportNeedsFull(dir string, st *eventsExportState, stateErr error, no
 //
 // The returned count is the rows the file holds after the export, so the
 // cycle's count stays comparable across a full and an incremental cycle.
+//
+// A row that commits after a cycle recorded a later boundary but carries an
+// older created_at is not read by the incremental cycles; the next full pass,
+// at most eventsFullExportEvery later, includes it.
 func (d *Daemon) exportEventsToJsonl(db, dir, dataDir string, budget time.Duration, exportTable jsonlTableExporter) (int, error) {
+	return d.exportEventsToJsonlWith(osEventsExportOps(), db, dir, dataDir, budget, exportTable)
+}
+
+func (d *Daemon) exportEventsToJsonlWith(ops eventsExportOps, db, dir, dataDir string, budget time.Duration, exportTable jsonlTableExporter) (int, error) {
 	// A staged read and a temp shard a killed cycle left are cleared before
 	// either path runs, so the commit never carries them (gt-fhcwe, gt-1911b).
-	if err := clearEventsScratch(dir); err != nil {
+	if err := clearEventsScratchWith(ops, dir); err != nil {
 		return 0, err
 	}
 
 	state, stateErr := readEventsExportState(dir)
 	if full, why := eventsExportNeedsFull(dir, state, stateErr, d.clk().Now()); full {
 		d.logger.Printf("jsonl_git_backup: %s/events: full export — %s", db, why)
-		return d.exportAllEventsToJsonl(db, dir, dataDir, budget, exportTable)
+		return d.exportAllEventsToJsonlWith(ops, db, dir, dataDir, budget, exportTable)
 	}
 
-	start := time.Now()
-	total, err := d.appendNewEvents(db, dir, dataDir, budget, exportTable, state)
+	start := d.clk().Now()
+	total, err := d.appendNewEventsWith(ops, db, dir, dataDir, budget, exportTable, state)
 	if err == nil {
 		return total, nil
 	}
 	// A half-appended file, or one whose boundary rows cannot be merged in
 	// order, is not a file to keep building on: reading the whole table
 	// replaces it and records a fresh boundary. It gets what is left of the
-	// table's budget, and a spent one fails the export rather than run past it.
+	// table's budget; a spent one fails the export, leaving the files and the
+	// state as they were, rather than start a read it cannot finish.
 	d.logger.Printf("jsonl_git_backup: %s/events: the append failed (%v) — reading the whole table instead", db, err)
-	return d.exportAllEventsToJsonl(db, dir, dataDir, budget-time.Since(start), exportTable)
+	remaining := budget - d.clk().Now().Sub(start)
+	if remaining <= 0 {
+		return 0, errors.New("events incremental export spent its budget; full fallback skipped this cycle")
+	}
+	return d.exportAllEventsToJsonlWith(ops, db, dir, dataDir, remaining, exportTable)
 }
 
-// clearEventsScratch removes what a killed cycle left beside the export: the
-// staged read, and a temp shard whose write it did not finish.
-func clearEventsScratch(dir string) error {
-	err := os.RemoveAll(filepath.Join(dir, eventsIncomingDir))
+// clearEventsScratchWith removes what a killed cycle left beside the export:
+// the staged read, and a temp shard whose write it did not finish.
+func clearEventsScratchWith(ops eventsExportOps, dir string) error {
+	err := ops.removeAll(filepath.Join(dir, eventsIncomingDir))
 	if err != nil {
 		err = fmt.Errorf("clearing %s: %w", eventsIncomingDir, err)
 	}
-	if tempErr := removeShardTemps(os.RemoveAll, dir, "events"); tempErr != nil {
+	if tempErr := removeShardTemps(ops.removeAll, dir, "events"); tempErr != nil {
 		err = errors.Join(err, fmt.Errorf("clearing events temp files: %w", tempErr))
 	}
 	return err
@@ -197,11 +237,15 @@ func clearEventsScratch(dir string) error {
 // appendNewEvents reads the events created since state's boundary and appends
 // them to the export in dir.
 func (d *Daemon) appendNewEvents(db, dir, dataDir string, budget time.Duration, exportTable jsonlTableExporter, state *eventsExportState) (int, error) {
+	return d.appendNewEventsWith(osEventsExportOps(), db, dir, dataDir, budget, exportTable, state)
+}
+
+func (d *Daemon) appendNewEventsWith(ops eventsExportOps, db, dir, dataDir string, budget time.Duration, exportTable jsonlTableExporter, state *eventsExportState) (int, error) {
 	stage := filepath.Join(dir, eventsIncomingDir)
-	if err := os.MkdirAll(stage, 0755); err != nil {
+	if err := ops.mkdirAll(stage, 0755); err != nil {
 		return 0, fmt.Errorf("creating %s: %w", eventsIncomingDir, err)
 	}
-	defer os.RemoveAll(stage)
+	defer func() { _ = ops.removeAll(stage) }()
 
 	if _, err := exportTable("events", beadsql.BackupEvents(db, state.LastCreatedAt), stage, dataDir, budget); err != nil {
 		return 0, err
@@ -214,14 +258,14 @@ func (d *Daemon) appendNewEvents(db, dir, dataDir string, budget time.Duration, 
 		return 0, fmt.Errorf("a row stamped %s is older than the boundary %s", before, state.LastCreatedAt)
 	}
 
-	appended, err := appendEventRows(dir, rows, state, jsonlShardMaxBytes, jsonlShardHardLimit)
+	appended, err := appendEventRowsWith(ops, dir, rows, state, jsonlShardMaxBytes, jsonlShardHardLimit)
 	if err != nil {
 		return 0, err
 	}
 	if appended == 0 {
 		return state.Rows, nil
 	}
-	if err := writeEventsExportState(dir, *state); err != nil {
+	if err := writeEventsExportStateWith(ops, dir, *state); err != nil {
 		return 0, fmt.Errorf("recording the events export boundary: %w", err)
 	}
 	return state.Rows, nil
@@ -231,6 +275,10 @@ func (d *Daemon) appendNewEvents(db, dir, dataDir string, budget time.Duration, 
 // export, and records the boundary the new file ends at. exportTable is the
 // cycle's table exporter, the seam a test drives.
 func (d *Daemon) exportAllEventsToJsonl(db, dir, dataDir string, budget time.Duration, exportTable jsonlTableExporter) (int, error) {
+	return d.exportAllEventsToJsonlWith(osEventsExportOps(), db, dir, dataDir, budget, exportTable)
+}
+
+func (d *Daemon) exportAllEventsToJsonlWith(ops eventsExportOps, db, dir, dataDir string, budget time.Duration, exportTable jsonlTableExporter) (int, error) {
 	n, err := exportTable("events", beadsql.BackupEvents(db, ""), dir, dataDir, budget)
 	if err != nil {
 		return 0, err
@@ -248,7 +296,7 @@ func (d *Daemon) exportAllEventsToJsonl(db, dir, dataDir string, budget time.Dur
 			state.LastCreatedAt, state.BoundaryIDs = boundary, ids
 		}
 	}
-	if err := writeEventsExportState(dir, state); err != nil {
+	if err := writeEventsExportStateWith(ops, dir, state); err != nil {
 		return 0, fmt.Errorf("recording the events export: %w", err)
 	}
 	return n, nil
@@ -335,6 +383,10 @@ func parseEventRow(line string) (eventsRow, error) {
 // returning the number of rows appended. Rows the state's boundary ids already
 // hold are dropped, so re-reading the boundary second adds each row once.
 func appendEventRows(dir string, rows []json.RawMessage, state *eventsExportState, maxBytes int, hardLimit int64) (int, error) {
+	return appendEventRowsWith(osEventsExportOps(), dir, rows, state, maxBytes, hardLimit)
+}
+
+func appendEventRowsWith(ops eventsExportOps, dir string, rows []json.RawMessage, state *eventsExportState, maxBytes int, hardLimit int64) (int, error) {
 	paths, err := jsonlShardPaths(dir, "events")
 	if err != nil {
 		return 0, fmt.Errorf("listing the events export: %w", err)
@@ -413,7 +465,7 @@ func appendEventRows(dir string, rows []json.RawMessage, state *eventsExportStat
 		return 0, err
 	}
 	total := state.Rows + len(fresh)
-	if err := publishEventShards(dir, lastNum, shards); err != nil {
+	if err := publishEventShardsWith(ops, dir, lastNum, shards); err != nil {
 		return 0, err
 	}
 	if err := verifyJsonlShards(dir, "events", total, hardLimit); err != nil {
@@ -576,14 +628,14 @@ func eventsExportBoundary(dir string) (string, []string, error) {
 	return boundary, ids, nil
 }
 
-// publishEventShards writes the export's shards from firstNum up. A write that
-// fails part way leaves a file the recorded row count no longer matches, which
-// sends the next export to the whole table; nothing is left to clean up but the
-// export itself, which that read replaces.
-func publishEventShards(dir string, firstNum int, shards []*bytes.Buffer) error {
+// publishEventShardsWith writes the export's shards from firstNum up. A write
+// that fails part way leaves a file the recorded row count no longer matches,
+// which sends the next export to the whole table; nothing is left to clean up
+// but the export itself, which that read replaces.
+func publishEventShardsWith(ops eventsExportOps, dir string, firstNum int, shards []*bytes.Buffer) error {
 	for i, shard := range shards {
 		path := filepath.Join(dir, jsonlShardName("events", firstNum+i))
-		if err := os.WriteFile(path, shard.Bytes(), 0644); err != nil {
+		if err := ops.writeFile(path, shard.Bytes(), 0644); err != nil {
 			return fmt.Errorf("writing %s: %w", filepath.Base(path), err)
 		}
 	}
