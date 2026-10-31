@@ -153,7 +153,17 @@ func routedToTracker(townRoot, beadsDir string) (bool, error) {
 	return false, nil
 }
 
+// doltOpener opens the connection the raw Dolt read queries through. beadsql.Open
+// is the one place this file dials Dolt.
+type doltOpener func(ctx context.Context, dsn, database string) (*beadsql.DB, error)
+
 func depListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, error) {
+	return depListRawIDsViaDoltWith(dir, issueID, direction, depType, beadsql.Open)
+}
+
+// depListRawIDsViaDoltWith is depListRawIDsViaDolt with the connection opener
+// passed in, so a test can count the connections the read opens without dialing.
+func depListRawIDsViaDoltWith(dir, issueID, direction, depType string, open doltOpener) ([]string, error) {
 	beadsDir := beads.ResolveBeadsDir(dir)
 	cfg, ok := doltserver.ReadBeadsRuntimeConfig(beadsDir)
 	if !ok || cfg.Database == "" || cfg.Port == 0 {
@@ -167,7 +177,7 @@ func depListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, er
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	db, err := beadsql.Open(ctx, dsn, cfg.Database)
+	db, err := open(ctx, dsn, cfg.Database)
 	if err != nil {
 		return nil, err
 	}

@@ -1,10 +1,9 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,10 +11,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/backend"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"github.com/steveyegge/gastown/tracker/api"
@@ -195,63 +194,62 @@ func TestDepListRawIDsOnATrackerRigAnswersFromTheSeam(t *testing.T) {
 	}
 }
 
-// A tracker rig never opens a Dolt connection, even with a Dolt server listening
-// at the port its metadata names. The listener counts every connection the raw
-// path makes, and a sentinel connection made after the call marks the end:
-// connections are accepted in the order they were made, so any connection
-// before the sentinel came from the call.
+// A tracker rig never opens a Dolt connection, even when its metadata names a
+// Dolt server. The opener is the one place the raw path dials Dolt: it counts
+// each attempt and refuses it, so nothing is dialed in the unit tier.
 func TestDepListRawIDsOnATrackerRigNeverOpensDolt(t *testing.T) {
 	t.Parallel()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	accepted := make(chan string, 16)
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			accepted <- c.RemoteAddr().String()
-			_ = c.Close()
-		}
-	}()
-
 	_, rig := trackerTown(t)
-	writeDoltRuntime(t, filepath.Join(rig, ".beads"), ln.Addr().(*net.TCPAddr).Port)
-	got, callErr := depListRawIDsWith(rig, "tr-x", "down", "", trackerConfig(trackerFixture), workspace.Find, depListRawIDsViaDolt)
+	writeDoltRuntime(t, filepath.Join(rig, ".beads"))
+	opens := 0
+	dolt := func(dir, issueID, direction, depType string) ([]string, error) {
+		return depListRawIDsViaDoltWith(dir, issueID, direction, depType, countingOpener(&opens))
+	}
 
-	sentinel, err := net.Dial("tcp", ln.Addr().String())
+	got, err := depListRawIDsWith(rig, "tr-x", "down", "", trackerConfig(trackerFixture), workspace.Find, dolt)
+	if opens != 0 {
+		t.Errorf("the tracker rig opened %d Dolt connection(s), want none", opens)
+	}
 	if err != nil {
-		t.Fatal(err)
-	}
-	defer sentinel.Close()
-	for addr, want := "", sentinel.LocalAddr().String(); addr != want; {
-		select {
-		case addr = <-accepted:
-			if addr != want {
-				t.Errorf("the tracker rig opened a Dolt connection from %s", addr)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("the sentinel connection was never accepted")
-		}
-	}
-
-	if callErr != nil {
-		t.Fatalf("depListRawIDsWith: %v", callErr)
+		t.Fatalf("depListRawIDsWith: %v", err)
 	}
 	if want := []string{"tr-a", "tr-b", "tr-c"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("depListRawIDsWith = %v, want %v", got, want)
 	}
 }
 
+// The zero above means something only if the counter is wired: a Dolt read
+// reaches the opener exactly once.
+func TestDepListRawIDsViaDoltOpensOneConnection(t *testing.T) {
+	t.Parallel()
+	townRoot, _ := trackerTown(t)
+	gtRig := filepath.Join(townRoot, "gastown", "mayor", "rig")
+	if err := os.MkdirAll(filepath.Join(gtRig, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeDoltRuntime(t, filepath.Join(gtRig, ".beads"))
+	opens := 0
+	if _, err := depListRawIDsViaDoltWith(gtRig, "gt-x", "down", "", countingOpener(&opens)); err == nil {
+		t.Fatal("depListRawIDsViaDoltWith with a refused connection = nil error, want the refusal")
+	}
+	if opens != 1 {
+		t.Errorf("the Dolt read opened %d connection(s), want 1", opens)
+	}
+}
+
+// countingOpener refuses every connection and counts the attempts.
+func countingOpener(opens *int) doltOpener {
+	return func(context.Context, string, string) (*beadsql.DB, error) {
+		*opens++
+		return nil, errors.New("connection refused in the unit tier")
+	}
+}
+
 // writeDoltRuntime gives beadsDir the Dolt server metadata the raw path reads its
-// host, port and database from, so a Dolt read would dial port.
-func writeDoltRuntime(t *testing.T, beadsDir string, port int) {
+// host, port and database from, so a Dolt read would get as far as the opener.
+func writeDoltRuntime(t *testing.T, beadsDir string) {
 	t.Helper()
-	meta := fmt.Sprintf(`{"backend":"dolt","dolt_mode":"server","database":"trk","dolt_server_host":"127.0.0.1","dolt_server_port":%d}`, port)
+	meta := `{"backend":"dolt","dolt_mode":"server","database":"trk","dolt_server_host":"127.0.0.1","dolt_server_port":3307}`
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0o600); err != nil {
 		t.Fatal(err)
 	}
