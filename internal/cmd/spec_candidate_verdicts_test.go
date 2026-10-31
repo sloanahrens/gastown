@@ -486,6 +486,34 @@ func TestSpecCandidateChildrenReadGrouped(t *testing.T) {
 	}
 }
 
+// Fifty childless candidates cost one grouped read when the grouped answer keys
+// every parent with an empty list, as specChildrenRead does for the ids that
+// exist. A grouped answer that leaves them out leaves every one of them
+// unanswered, so the scan reads each alone: fifty extra bd calls (gt-4u2gt).
+func TestSpecCandidateChildrenChildlessCandidatesCostOneRead(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	read := specCandidateBoardRead(t, specCandidateFixture()[:50])
+
+	var calls int
+	children := specCandidateChildren(root, newSpecTickReads(), read.Candidates, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+		calls++
+		out := make(map[string][]*beads.Issue, len(ids))
+		for _, id := range ids {
+			out[id] = []*beads.Issue{}
+		}
+		return out, nil
+	})
+	for _, c := range read.Candidates {
+		if kids, err := children(c.Spec.ID); err != nil || len(kids) != 0 {
+			t.Fatalf("children(%s) = %v, %v; want no children", c.Spec.ID, kids, err)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("fifty childless candidates cost %d children reads, want one", calls)
+	}
+}
+
 // The memory outlives a tick through the annotations file: a verdict saved by
 // one tick is served to the next, and a bead the board no longer lists is
 // dropped (gt-km9jt).
@@ -573,11 +601,13 @@ func TestSpecCandidateVerdictsWithoutAnOwnerAreNotRemembered(t *testing.T) {
 
 // A parent missing from a SUCCESSFUL grouped read is read alone and never read
 // as "no children" from the group: a held container's children must not vanish
-// from the container hold. beads.ChildrenOf drops a childless parent, so a single
-// read that succeeds and has no entry for the parent means it has none
-// (gt-k3me9); only a failed read is an error. Mutation: taking the grouped
-// absence as an empty child set turns the first row red; reading the single
-// read's absence as an error turns the last row red.
+// from the container hold. The read keys a resolved childless parent with an
+// empty list (specChildrenRead), so an absent key is an id bd did not resolve; a
+// single read that succeeds and still has no entry for the parent means it has
+// none (gt-k3me9), and only a failed read is an error.
+// Mutation: taking the grouped absence as an empty child set turns the first
+// row red; reading the single read's absence as an error turns the last row
+// red.
 func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -587,6 +617,9 @@ func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 
 	var singles []string
 	children := specCandidateChildren(root, newSpecTickReads(), read.Candidates, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+		if len(ids) == 1 {
+			singles = append(singles, ids[0])
+		}
 		out := make(map[string][]*beads.Issue, len(ids))
 		for _, id := range ids {
 			if id == parent && len(ids) > 1 {
@@ -595,7 +628,6 @@ func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 			out[id] = []*beads.Issue{}
 		}
 		if len(ids) == 1 && ids[0] == parent {
-			singles = append(singles, ids[0])
 			out[parent] = []*beads.Issue{child}
 		}
 		return out, nil
@@ -604,8 +636,8 @@ func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 	if err != nil || len(kids) != 1 || kids[0].ID != "gt-child-1" {
 		t.Fatalf("children(%s) = %v, %v; want the child the single read found, not an empty set", parent, kids, err)
 	}
-	if len(singles) != 1 {
-		t.Errorf("the absent parent was read alone %d times, want once", len(singles))
+	if len(singles) != 1 || singles[0] != parent {
+		t.Errorf("the single reads = %v, want the absent parent alone once", singles)
 	}
 	if kids, err := children("gt-cand-00"); err != nil || len(kids) != 0 {
 		t.Errorf("an answered childless parent = %v, %v; want the empty set", kids, err)
