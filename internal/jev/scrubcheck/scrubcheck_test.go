@@ -256,6 +256,44 @@ func TestScrubcheckVerdicts(t *testing.T) {
 	}
 }
 
+// TestScrubcheckMostlyMissingIsNotFree: when the scrubbed call left more of the
+// question's answers missing than it measured, the pairs that came back are not
+// most of it, so a crossing share of zero must not read as free.
+func TestScrubcheckMostlyMissingIsNotFree(t *testing.T) {
+	t.Parallel()
+	const caller = "jev-logtriage"
+	tests := []struct {
+		name    string
+		pairs   int
+		missing int
+		want    string
+	}{
+		{"a majority missing is too few even when the pairs read free", MinPairs + 10, MinPairs + 11, VerdictTooFew},
+		{"exactly half missing still judges the pairs", MinPairs + 10, MinPairs + 10, VerdictFree},
+		{"a minority missing still judges the pairs", MinPairs + 10, 5, VerdictFree},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lines := pairLines(caller, tc.pairs, 0)
+			for range tc.missing {
+				lines = append(lines, Line{
+					Caller:   caller,
+					Outcome:  outcomeChecked,
+					Original: &Answers{Noul: map[string]float64{qNeeds: 0.3}},
+					Scrubbed: &Answers{Noul: map[string]float64{}},
+				})
+			}
+			base := map[string]map[string]float64{caller: {qNeeds: 0.5}}
+			rep, err := Compute(lines, Options{Cut: 0.5}, base)
+			require.NoError(t, err)
+			r := onlyRow(t, rep)
+			assert.Equal(t, tc.missing, r.Missing)
+			assert.Equal(t, tc.want, r.Verdict)
+		})
+	}
+}
+
 // TestScrubcheckRefusals: a log or repeat data that cannot be read, or a question
 // answered as two kinds, fails the report instead of reading as clean.
 func TestScrubcheckRefusals(t *testing.T) {

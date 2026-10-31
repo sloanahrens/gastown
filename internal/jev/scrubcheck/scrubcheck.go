@@ -308,17 +308,19 @@ func (m *measure) row(k key, base *float64) Row {
 		share = float64(m.crossings) / float64(r.Pairs)
 		r.MeanChange, r.MaxChange, r.Crossing = &mean, &maxChange, &share
 	}
-	r.Verdict = verdict(r.Pairs, share, base)
+	r.Verdict = verdict(r.Pairs, r.Missing, share, base)
 	return r
 }
 
 // verdict judges a scrub's crossing share against the repeat baseline. Too few
-// pairs comes first: no baseline can make a thin measure count. The excess is
-// rounded so a share exactly the margin above the baseline sits on the margin,
-// not past it, whatever the float arithmetic of the two shares.
-func verdict(pairs int, crossing float64, baseline *float64) string {
+// pairs comes first: no baseline can make a thin measure count. A scrub that
+// left more answers missing than it measured is too few as well: the pairs that
+// came back are not most of the question, so their share does not stand for it.
+// The excess is rounded so a share exactly the margin above the baseline sits on
+// the margin, not past it, whatever the float arithmetic of the two shares.
+func verdict(pairs, missing int, crossing float64, baseline *float64) string {
 	switch {
-	case pairs < MinPairs:
+	case pairs < MinPairs, missing > pairs:
 		return VerdictTooFew
 	case baseline == nil:
 		return VerdictNoBaseline
