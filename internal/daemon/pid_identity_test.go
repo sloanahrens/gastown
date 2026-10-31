@@ -208,6 +208,25 @@ func TestEnsureRunningIdentityFailureUsesKillImpostersSeam(t *testing.T) {
 	}
 }
 
+// The pause before the identity-failure restart sleeps through the manager's
+// sleep seam, not the raw clock: a test that stubs only the seam must not wait
+// the pause out in real time (gt-2nh54).
+func TestEnsureRunningIdentityFailureSleepsThroughTheSeam(t *testing.T) {
+	t.Parallel()
+	m := newTestManager(t)
+	m.runningFn = func() (int, bool) { return 1234, true }
+	m.identityCheckFn = func() error { return errors.New("imposter") }
+	var slept []time.Duration
+	m.sleepFn = func(d time.Duration) { slept = append(slept, d) }
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if len(slept) == 0 || slept[0] != 500*time.Millisecond {
+		t.Fatalf("sleep seam calls = %v, want the 500ms identity-failure pause first", slept)
+	}
+}
+
 // newTestManager must never fall through to the real KillImposters.
 func TestNewTestManagerStubsKillImposters(t *testing.T) {
 	t.Parallel()

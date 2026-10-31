@@ -392,7 +392,13 @@ func TestCheckStaleMaintenanceGCRetriesAFailedRaiseOnALaterTick(t *testing.T) {
 	discoverStaleGCDatabases(d, "gt")
 
 	rec.Fail(notifyfake.KindEscalate, errors.New("dolt is slow"))
-	d.checkStaleMaintenanceGC(gcTestNow)
+	// The retry backoff (1s, then 2s) sleeps on the daemon clock, which is the
+	// real one for a Daemon a test built by hand: drive a fake clock through it
+	// so the three failed attempts cost no wall time, as the raised state below
+	// is what this test is about (gt-2nh54).
+	clk := newFixedClock()
+	d.clock = clk
+	runOnClock(t, clk, time.Second, func() { d.checkStaleMaintenanceGC(gcTestNow) })
 	st, err := loadMaintenanceGCState(town)
 	if err != nil {
 		t.Fatalf("load state: %v", err)
