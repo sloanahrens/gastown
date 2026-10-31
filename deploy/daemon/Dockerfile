@@ -52,8 +52,9 @@ COPY --chmod=0755 claude /usr/local/bin/claude
 # user.name and user.email into dolt's config, and fails the install without them
 # (internal/cmd/install.go). A host has a person's identity to copy; an image has
 # none, so the image carries one. It is the daemon's, never a person's name or
-# address, and because no USER instruction sets one, these write root's config:
-# root is the user the container runs as.
+# address. Each RUN writes the config of the user it builds as, which is root
+# while no USER instruction is set; the container runs as that same user, so a
+# USER added later would leave the identity in a home the container does not read.
 RUN git config --global user.name gt-daemon
 RUN git config --global user.email gt-daemon@gastown.local
 
