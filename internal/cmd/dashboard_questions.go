@@ -10,10 +10,10 @@ import (
 )
 
 // The question rows of the dashboard's Attention panel: the questions the
-// overseer has filed for Sloan, so he can see what is waiting on him and answer
-// it from a terminal. It reads the town's own beads database, which is where a
-// question is filed — a reader that listed from a rig worktree would see that
-// rig's beads alone.
+// overseer has filed for the operator, so the operator can see what is
+// waiting on it and answer it from a terminal. It reads the town's own beads
+// database, which is where a question is filed — a reader that listed from a
+// rig worktree would see that rig's beads alone.
 //
 // A read that fails is a named state rather than an empty list, because "the
 // overseer has asked nothing" and "the answer could not be read" are different

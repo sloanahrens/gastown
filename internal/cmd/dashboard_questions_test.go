@@ -214,8 +214,8 @@ func TestQuestionsKeepsARowWhoseDescriptionIsMalformed(t *testing.T) {
 	}
 }
 
-// A question is answered once Sloan replies: the newest comment is what decides
-// it, and the overseer's own comments are the ones that do not.
+// A question is answered once the operator replies: the newest comment is what
+// decides it, and the overseer's own comments are the ones that do not.
 func TestQuestionsReadsAnsweredAndAwaitingFromTheNewestComment(t *testing.T) {
 	t.Parallel()
 
@@ -229,14 +229,14 @@ func TestQuestionsReadsAnsweredAndAwaitingFromTheNewestComment(t *testing.T) {
 		{"the overseer's own comment", []beads.Comment{
 			comment("[overseer] which way?", late),
 		}, dashboard.QuestionAwaiting},
-		{"Sloan's reply", []beads.Comment{
+		{"the operator's reply", []beads.Comment{
 			comment("yes, do that", late),
 		}, dashboard.QuestionAnswered},
-		{"Sloan's reply after the overseer asked again", []beads.Comment{
+		{"the operator's reply after the overseer asked again", []beads.Comment{
 			comment("[overseer] which way?", early),
 			comment("yes, do that", late),
 		}, dashboard.QuestionAnswered},
-		{"the overseer asking again after Sloan's reply", []beads.Comment{
+		{"the overseer asking again after the operator's reply", []beads.Comment{
 			comment("yes, do that", early),
 			comment("[overseer] one more thing", late),
 		}, dashboard.QuestionAwaiting},
