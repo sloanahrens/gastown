@@ -286,12 +286,11 @@ button.jvfold:hover{color:var(--text)}
 .sweepico{font-weight:700}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
-#toasts{position:fixed;top:54px;right:16px;z-index:5;display:flex;flex-direction:column;gap:6px;width:min(420px,90vw)}
-.toast{display:flex;gap:8px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--dim);border-radius:6px;padding:7px 9px}
-.toast.info{border-left-color:var(--blue)}.toast.warn{border-left-color:var(--amber)}.toast.crit{border-left-color:var(--red)}
-.toast .tt{font-weight:700;overflow-wrap:anywhere}
-.toast .tx{color:var(--dim);overflow-wrap:anywhere}
-.toast button{margin-left:auto;background:none;border:0;color:var(--dim);font:inherit;cursor:pointer}
+#events{max-height:40vh;overflow:auto;padding:4px 0}
+.evrow{display:grid;grid-template-columns:62px auto auto 1fr;gap:8px;padding:2px 12px;overflow-wrap:anywhere}
+.evrow .t,.evrow .b,.evrow .x{color:var(--dim)}
+.evrow .k{font-weight:700}
+.evrow.info .k{color:var(--blue)}.evrow.warn .k{color:var(--amber)}.evrow.crit .k{color:var(--red)}
 .alvl{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid currentColor;margin-right:6px}
 .alvl.info{color:var(--blue)}.alvl.warn{color:var(--amber)}.alvl.crit{color:var(--red)}
 .arow{border-top:1px solid var(--line);padding:4px 0;overflow-wrap:anywhere}
@@ -405,11 +404,10 @@ a.hrow:hover{background:#19212b}
 
 <div id="modelspanel" hidden></div>
 
-<div id="toasts"></div>
-
 <div class="grid">
   <div class="col">
     <section data-fold="attention"><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
+    <section id="eventssec" data-fold="events" data-default-collapsed><h2>EVENTS <span class="r" id="eventsnote"></span></h2><div class="body" id="events"></div></section>
     <section data-fold="overseer"><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
@@ -4340,10 +4338,11 @@ function renderCost(s) {
 const SEV_CLASS = {critical: "sev-critical", high: "sev-high", medium: "sev-medium", low: "sev-low"};
 
 // Alerts. The server decides what needs attention and pushes each new one as an
-// "alert" event; the page shows a toast, marks the title, and (when the browser
-// allows it) raises a notification — but only while the operator has alerts on.
-// What is waiting rather than merely noticed is the Attention panel's, and a
-// routine line such as a rejected landing is the feed's.
+// "alert" event. Every one lands in the EVENTS panel, the history the operator
+// opens when they want it. The alerts switch controls what reaches past the page
+// (a title marker, and a browser notification when the browser allows it), and
+// only while the operator has alerts on. What is waiting rather than merely
+// noticed is the Attention panel's.
 const BASE_TITLE = document.title;
 let alertsOn = false;
 try { alertsOn = localStorage.getItem("gt-alerts") === "on"; } catch (e) { alertsOn = false; }
@@ -4354,27 +4353,63 @@ function syncAlertCtl() {
   b.className = alertsOn ? "on" : "";
   b.textContent = "alerts: " + (alertsOn ? "on" : "off");
   b.title = alertsOn
-    ? "alerts are on: a toast, a title marker, and a browser notification while the tab is in the background"
-    : "turn alerts on: a toast, a title marker, and a browser notification while the tab is in the background";
+    ? "alerts are on: a title marker and a browser notification while the tab is in the background"
+    : "turn alerts on: a title marker and a browser notification while the tab is in the background";
 }
 
 function markTitle() {
   document.title = alertsOn && unreadAlerts > 0 && !document.hasFocus() ? "(!) " + BASE_TITLE : BASE_TITLE;
 }
 
-function showToast(a) {
-  const box = $("toasts");
-  const t = el("div", "toast " + a.level);
-  const body = el("div");
-  body.append(el("div", "tt", a.title || "alert"), el("div", "tx", a.text || ""));
-  const x = el("button", "", "✕");
-  x.type = "button";
-  x.title = "dismiss";
-  x.onclick = () => t.remove();
-  t.append(body, x);
-  box.prepend(t);
-  while (box.children.length > 5) box.lastChild.remove();
+// EVENTS is the alerts' history: every alert the page has been told of, newest
+// first, the last EVENTS_KEPT. Nothing overlays the page and nothing needs
+// dismissing. An alert reaches the page on the stream and again in the state's
+// recent list, so the feed keeps each id once. While the panel is shut its header
+// counts what is unread; opening the panel reads it.
+const EVENTS_KEPT = 100;
+const eventIDs = new Set();
+let eventLines = [];      // newest first
+let eventsUnread = 0;
+let eventsPrimed = false; // the first reading is a baseline: what was raised before the page opened is read
+
+function eventsOpen() { const s = $("eventssec"); return !!s && !s.classList.contains("collapsed"); }
+// takeEvent adds one alert to the feed unless it is there already, and reports
+// whether it did. fresh says whether it is news: an alert off the stream always
+// is, and a reading's alerts are once the baseline has been taken.
+function takeEvent(a, fresh) {
+  if (!a || eventIDs.has(a.id)) return false;
+  eventIDs.add(a.id);
+  eventLines.unshift(a);
+  // The hub's recent list holds fewer alerts than the feed keeps, so an alert
+  // that has left the feed is never sent again and its id can go.
+  while (eventLines.length > EVENTS_KEPT) eventIDs.delete(eventLines.pop().id);
+  if (fresh && !eventsOpen()) eventsUnread++;
+  return true;
 }
+function eventRow(a) {
+  const r = el("div", "evrow " + (a.level || "info"));
+  r.append(el("span", "t", clock(a.at)), el("span", "k", a.title || "alert"), el("span", "b", a.bead || ""), el("span", "x", a.text || ""));
+  return r;
+}
+// paintEvents draws the feed and its header count. The count sits in the header's
+// note, which the fold hides while the panel is shut and shows as its summary.
+function paintEvents() {
+  const box = $("events");
+  box.replaceChildren(...eventLines.map(eventRow));
+  if (!eventLines.length) box.append(el("div", "empty", "no events yet"));
+  $("eventsnote").textContent = eventsUnread ? eventsUnread + " unread" : "";
+  paintFolds(state);
+}
+// renderEvents takes the state's recent alerts into the feed, oldest first so the
+// newest ends up at the top. The state repeats alerts the stream has already
+// delivered, which takeEvent drops.
+function renderEvents(s) {
+  ((s && s.alerts) || []).forEach(a => takeEvent(a, eventsPrimed));
+  eventsPrimed = true;
+  paintEvents();
+}
+// eventsRead is the operator opening the panel: what it held is read.
+function eventsRead() { eventsUnread = 0; paintEvents(); }
 
 function notify(a) {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
@@ -4382,8 +4417,8 @@ function notify(a) {
 }
 
 function onAlert(a) {
+  if (takeEvent(a, true)) paintEvents();
   if (!alertsOn) return;
-  showToast(a);
   notify(a);
   if (!document.hasFocus()) { unreadAlerts++; markTitle(); }
 }
@@ -4400,8 +4435,6 @@ function initAlerts() {
       if (typeof Notification !== "undefined" && Notification.permission === "default") {
         try { const p = Notification.requestPermission(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
       }
-    } else {
-      $("toasts").replaceChildren();
     }
   };
   window.addEventListener("focus", () => { unreadAlerts = 0; markTitle(); });
@@ -4687,7 +4720,7 @@ function drawQueueList(box, s) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); paintFolds(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); paintFolds(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 // The feed's class chips: every class but "plain" is on until the reader turns
@@ -4846,6 +4879,9 @@ const FOLD_SUMMARY = {
   // The Cost panel's providers, one figure and status each, in the array's order.
   cost: s => costHeadline(s && s.cost_providers),
 };
+// FOLD_ON_TOGGLE is what a section does when its reader opens or closes it, for
+// the one section whose unread count is cleared by opening it.
+const FOLD_ON_TOGGLE = {events: closed => { if (!closed) eventsRead(); }};
 // foldStore is the saved choices, keyed as FOLD_KEY holds them. Storage that
 // throws — a locked-down browser, private mode — reads as no choice at all, so
 // the defaults apply and folding still works for the session.
@@ -4884,6 +4920,8 @@ function paintFolds(s) { for (const f of folds) f.paint(s); }
 //   defaultOpen whether a reader with no saved choice sees it open
 //   legacy      the title its choice was saved under before keys existed, so
 //               an entry written then still applies
+//   onToggle    called with the section's closed state after a reader opens or
+//               closes it
 //
 // A section with no heading or no key is left unfolded rather than given a fold
 // nothing can remember.
@@ -4930,6 +4968,7 @@ function foldable(root, opts) {
     fold.closed = !fold.closed;
     fold.paint(state);
     foldSave(key, fold.closed);
+    if (opts.onToggle) opts.onToggle(fold.closed);
   };
   head.addEventListener("click", ev => {
     if (ev && ev.target && ev.target.closest && ev.target.closest("button, .chips, a")) return;
@@ -4964,6 +5003,7 @@ function setupCollapse() {
       summary: FOLD_SUMMARY[key],
       defaultOpen: FOLD_DEFAULT_OPEN.indexOf(key) >= 0,
       legacy: foldLegacyTitle(head),
+      onToggle: FOLD_ON_TOGGLE[key],
     });
   });
 }

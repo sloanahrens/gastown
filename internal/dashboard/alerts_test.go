@@ -270,6 +270,28 @@ func TestRejectionEntriesAlertOnce(t *testing.T) {
 	}
 }
 
+// An alert about a bead names the bead on its own field, so the EVENTS feed can
+// show it as a column: a rejected landing and a polecat holding work both do.
+func TestAlertsNameTheBeadTheyAreAbout(t *testing.T) {
+	t.Parallel()
+	a := NewAlerter(func() time.Time { return alertBase })
+	got := a.Observe(State{}, State{}, []Entry{
+		{Seq: 20, At: alertBase, Kind: "daemon", Text: "landing_worker: [land] gt-7: rejected (review): score 0.4"},
+	})
+	if len(got) != 1 || got[0].Bead != "gt-7" {
+		t.Fatalf("rejection -> %+v, want one alert naming gt-7", got)
+	}
+
+	b := NewAlerter(func() time.Time { return alertBase })
+	healthy := State{Polecats: []Polecat{{Rig: "gastown", Name: "ace", Bead: "gt-8", State: StateWorking}}}
+	b.Observe(State{}, healthy, nil)
+	stalled := State{Polecats: []Polecat{{Rig: "gastown", Name: "ace", Bead: "gt-8", State: StateStalled}}}
+	stall := b.Observe(healthy, stalled, nil)
+	if len(stall) != 1 || stall[0].Bead != "gt-8" {
+		t.Fatalf("stalled polecat -> %+v, want one alert naming gt-8", stall)
+	}
+}
+
 // A queue stuck past half an hour alerts once per jam, and the cooldown holds a
 // repeat back until it expires once the jam clears and returns.
 func TestStuckQueueAlertsOnceAndRearms(t *testing.T) {
@@ -427,10 +449,10 @@ func TestHubCapsRecentAlerts(t *testing.T) {
 	}
 }
 
-// The page carries the alert controls the operator uses. The alerts are the
-// page's toasts and browser notifications, not a panel: what is waiting rather
-// than merely noticed is the Attention panel's (gt-bi6w0). There is no JS
-// harness, so this is a presence check.
+// The page carries the alert controls the operator uses. Every alert lands in the
+// EVENTS feed (gt-wpgga), and the switch controls the title marker and browser
+// notifications; what is waiting rather than merely noticed is the Attention
+// panel's (gt-bi6w0). There is no JS harness, so this is a presence check.
 func TestPageCarriesTheAlertControls(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
@@ -439,7 +461,7 @@ func TestPageCarriesTheAlertControls(t *testing.T) {
 	NewHub(Config{}).Handler().ServeHTTP(rec, req)
 	page := rec.Body.String()
 	for _, want := range []string{
-		`id="alertsctl"`, `id="toasts"`, `id="attention"`,
+		`id="alertsctl"`, `id="events"`, `id="attention"`,
 		`localStorage.getItem("gt-alerts")`,          // persisted, default off
 		`"(!) " + BASE_TITLE`,                        // the title marker
 		`es.addEventListener("alert"`,                // the server's alert event
