@@ -182,6 +182,26 @@ func TestIntegrationNewGitFastForwardsACleanMain(t *testing.T) {
 	}
 }
 
+// A failed fetch is reported by the command that failed, never by git's own
+// output: a remote URL can carry a credential in its path, so the error must
+// not repeat it (gt-vpj84).
+func TestIntegrationNewGitErrorsDoNotRepeatGitsOutput(t *testing.T) {
+	f := newCloneFixture(t)
+	const secret = "token-do-not-print-4f2a"
+	gitT(t, f.clone, "remote", "set-url", "origin", filepath.Join(t.TempDir(), secret, "missing.git"))
+
+	err := NewGit(f.clone).Fetch(time.Minute)
+	if err == nil {
+		t.Fatal("Fetch = nil error, want the failed fetch")
+	}
+	if want := "git fetch origin main"; !strings.Contains(err.Error(), want) {
+		t.Errorf("Fetch error = %q, want it to name %q", err, want)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("Fetch error repeats git's output, which names the remote path %q: %q", secret, err)
+	}
+}
+
 // A clone with local changes, on another branch, or with its own commit on
 // main is left exactly where it was, HEAD and files alike (gt-vpj84).
 func TestIntegrationNewGitMovesNothingWhenDirtyOrOnABranchOrDiverged(t *testing.T) {

@@ -18,14 +18,13 @@ const testDir = "/crew/clone"
 // case set and records every argv it was given.
 type fakeCommand struct {
 	stdout string
-	stderr string
 	err    error
 	argvs  [][]string
 }
 
-func (f *fakeCommand) run(_ context.Context, argv []string) (string, string, error) {
+func (f *fakeCommand) run(_ context.Context, argv []string) (string, error) {
 	f.argvs = append(f.argvs, argv)
-	return f.stdout, f.stderr, f.err
+	return f.stdout, f.err
 }
 
 // exitError is a command failure that exited with a status, which is what git
@@ -268,24 +267,9 @@ func TestGitFastForwardMergesOriginMainFastForwardOnly(t *testing.T) {
 	wantArgv(t, command, "git", "-C", testDir, "merge", "--ff-only", "origin/main")
 }
 
-// What git said is in the error, so a caller can tell a missing remote from a
-// lock (gt-vpj84).
-func TestGitCommandErrorIncludesWhatGitSaid(t *testing.T) {
-	t.Parallel()
-	command := &fakeCommand{stderr: "fatal: could not read from remote\n", err: errors.New("exit status 128")}
-
-	err := scriptedGit(command).Fetch(time.Minute)
-	if err == nil {
-		t.Fatal("Fetch = nil error, want one")
-	}
-	if !strings.Contains(err.Error(), "could not read from remote") {
-		t.Errorf("Fetch error = %q, want it to include git's stderr", err)
-	}
-}
-
-// A failure git said nothing about still names the command that failed
-// (gt-vpj84).
-func TestGitCommandErrorWithoutStderrNamesTheCommand(t *testing.T) {
+// A failure names the command that failed and wraps the failure, so a caller
+// can tell a missing remote from a lock with errors.Is (gt-vpj84).
+func TestGitCommandErrorNamesTheCommandAndWrapsTheFailure(t *testing.T) {
 	t.Parallel()
 	command := &fakeCommand{err: errors.New("boom")}
 

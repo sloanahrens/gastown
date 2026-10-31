@@ -1,7 +1,6 @@
 package crewfresh
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,25 +10,17 @@ import (
 	"time"
 )
 
-// gitCommand runs git's argv and returns what it wrote to stdout and stderr.
-type gitCommand func(ctx context.Context, argv []string) (stdout, stderr string, err error)
+// gitCommand runs git's argv and returns what it wrote to stdout.
+type gitCommand func(ctx context.Context, argv []string) (stdout string, err error)
 
-// realGit runs git's argv as a process.
-func realGit(ctx context.Context, argv []string) (string, string, error) {
+// realGit runs git's argv as a process and returns its standard output. Git's
+// standard error is deliberately not returned: it can quote a remote URL that
+// carries a credential, so a failure is named by its command and exit status
+// only (internal/deploysource makes the same choice).
+func realGit(ctx context.Context, argv []string) (string, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: fixed git subcommand; the directory came from NewGit
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	return runCaptured(cmd, &stdout, &stderr)
-}
-
-// runCaptured runs cmd and returns what it wrote to the two buffers and its
-// failure. The buffers are read after the process exits, and the spawn is the
-// one branch the unit tier cannot drive: a unit test starts no process, so the
-// integration tier is where this failure is exercised.
-func runCaptured(cmd *exec.Cmd, stdout, stderr *bytes.Buffer) (string, string, error) {
-	run := cmd.Run()
-	return stdout.String(), stderr.String(), run
+	out, err := cmd.Output()
+	return string(out), err
 }
 
 // gitExec is the Git of one clone, answered by running the git binary there.
@@ -124,23 +115,21 @@ func (g *gitExec) run(ctx context.Context, args ...string) (string, error) {
 	if command == nil {
 		command = realGit
 	}
-	stdout, stderr, err := command(ctx, argv)
+	stdout, err := command(ctx, argv)
 	if err == nil {
 		return stdout, nil
 	}
-	return stdout, gitCommandError(args, stderr, err, ctx.Err())
+	return stdout, gitCommandError(args, err, ctx.Err())
 }
 
-// gitCommandError is the error for a git command that failed: what ran, what
-// git said, and the failure itself, wrapped so errors.Is and errors.As still
-// read it.
-func gitCommandError(args []string, stderr string, err, ctxErr error) error {
+// gitCommandError is the error for a git command that failed: what ran and
+// the failure itself, wrapped so errors.Is and errors.As still read it. It
+// does not repeat git's output, which can carry a credential-bearing remote
+// URL.
+func gitCommandError(args []string, err, ctxErr error) error {
 	name := "git " + strings.Join(args, " ")
 	if ctxErr != nil {
 		return fmt.Errorf("%s: %w", name, ctxErr)
-	}
-	if detail := strings.TrimSpace(stderr); detail != "" {
-		return fmt.Errorf("%s: %s: %w", name, detail, err)
 	}
 	return fmt.Errorf("%s: %w", name, err)
 }
