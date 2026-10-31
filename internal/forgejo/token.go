@@ -49,6 +49,39 @@ func ReadToken(role string) (string, error) {
 // ReadTokenFile reads the token from path and refuses a file group or other
 // can read, so a token on disk stays private.
 func ReadTokenFile(path string) (string, error) {
+	data, err := readPrivateFile(path)
+	if err != nil {
+		return "", err
+	}
+	token, ok := parseToken(data)
+	if !ok {
+		return "", fmt.Errorf("forgejo: token file %s has no %s line", path, EnvKey)
+	}
+	return token, nil
+}
+
+// ReadCredentialFile reads the bot's login and token from path, under the same
+// rules as ReadTokenFile: a regular file with no group or other permission bit.
+// Neither value appears in an error.
+func ReadCredentialFile(path string) (user, token string, err error) {
+	data, err := readPrivateFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	token, ok := parseToken(data)
+	if !ok {
+		return "", "", fmt.Errorf("forgejo: token file %s has no %s line", path, EnvKey)
+	}
+	user, ok = parseKey(data, UserKey)
+	if !ok || user == "" {
+		return "", "", fmt.Errorf("forgejo: token file %s has no %s line", path, UserKey)
+	}
+	return user, token, nil
+}
+
+// readPrivateFile returns the content of a regular file that group and other
+// cannot read, the only kind a token may live in.
+func readPrivateFile(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", fmt.Errorf("forgejo: token file: %w", err)
@@ -63,30 +96,7 @@ func ReadTokenFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("forgejo: read token file: %w", err)
 	}
-	token, ok := parseToken(string(data))
-	if !ok {
-		return "", fmt.Errorf("forgejo: token file %s has no %s line", path, EnvKey)
-	}
-	return token, nil
-}
-
-// ReadCredentialFile reads the bot's login and token from path, under the same
-// rules as ReadTokenFile: a regular file with no group or other permission bit.
-// Neither value appears in an error.
-func ReadCredentialFile(path string) (user, token string, err error) {
-	token, err = ReadTokenFile(path)
-	if err != nil {
-		return "", "", err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", "", fmt.Errorf("forgejo: read token file: %w", err)
-	}
-	user, ok := parseKey(string(data), UserKey)
-	if !ok || user == "" {
-		return "", "", fmt.Errorf("forgejo: token file %s has no %s line", path, UserKey)
-	}
-	return user, token, nil
+	return string(data), nil
 }
 
 // parseToken returns the value of the FORGEJO_TOKEN line: its first

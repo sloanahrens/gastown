@@ -65,3 +65,21 @@ func TestReadCredentialFile(t *testing.T) {
 		})
 	}
 }
+
+// A file nobody can read passes the permission check (no group or other bit)
+// and then fails the read; the error names the read and not the token.
+func TestReadCredentialFileRefusesAnUnreadableFile(t *testing.T) {
+	t.Parallel()
+	path := writeCredentialFile(t, "FORGEJO_USER=bot-landing\nFORGEJO_TOKEN="+credentialFileSecret+"\n", 0o000)
+	if f, err := os.Open(path); err == nil {
+		f.Close()
+		t.Skip("this process can read a mode 000 file (running as root), so the read cannot fail")
+	}
+	user, token, err := ReadCredentialFile(path)
+	if err == nil || !strings.Contains(err.Error(), "read token file") {
+		t.Fatalf("ReadCredentialFile(mode 000) = %q, %q, %v; want a read error", user, token, err)
+	}
+	if strings.Contains(err.Error(), credentialFileSecret) {
+		t.Errorf("the error carries the token: %v", err)
+	}
+}
