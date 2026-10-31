@@ -383,7 +383,8 @@ func TestCostJevFoldLeavesTheDollarsToTheProviderRow(t *testing.T) {
 	dom.call(t, "renderCost", usageReading(time.Now()))
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const t = __byId["cost"].children.filter(c => c.className === "costprov")[0];
+		const wrap = __byId["cost"].children.filter(c => c.className === "costscroll")[0];
+		const t = wrap && wrap.children.filter(c => c.className === "costprov")[0];
 		if (!t) return null;
 		return t.children.slice(1).map(r => r.children.map(c => c.textContent)).filter(r => r[0] === "Jev");
 	})())`)

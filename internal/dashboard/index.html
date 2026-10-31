@@ -179,6 +179,9 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
 .lrows{max-height:70vh;overflow:auto}
 .lrows th{position:sticky;top:0;background:var(--panel)}
 .costchip{border:1px solid currentColor;border-radius:999px;padding:0 7px;font-size:11px;white-space:nowrap;color:var(--dim)}
+/* The providers table is nine columns wide, so a narrow panel scrolls it
+   sideways instead of clipping the Status cell against the panel edge. */
+.costscroll{overflow-x:auto}
 .costprov tr.dimrow td{color:var(--dim)}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 /* The JEV panel's chips. A chip is inline-block, so a battery's questions wrap
@@ -2577,7 +2580,12 @@ function costProviders(box, list, spendStale) {
     tr.append(status);
     t.append(tr);
   }
-  box.append(t);
+  // The table is nine columns wide and its chips never break, so at a narrow
+  // panel width it is wider than the panel. The wrapper scrolls it sideways
+  // rather than letting the panel hide the last column.
+  const scroll = el("div", "costscroll");
+  scroll.append(t);
+  box.append(scroll);
   for (const p of rows) for (const w of p.warnings || []) box.append(el("div", "badc", (p.label || p.id) + " · " + w));
 }
 // costHeadline is the Cost section's closed line. It is built from the same

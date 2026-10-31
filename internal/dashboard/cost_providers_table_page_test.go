@@ -41,7 +41,8 @@ func costTable(t *testing.T, dom *pageDOM) []costTableRow {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const tbl = __byId["cost"].children.filter(c => c.className === "costprov")[0];
+		const wrap = __byId["cost"].children.filter(c => c.className === "costscroll")[0];
+		const tbl = wrap && wrap.children.filter(c => c.className === "costprov")[0];
 		if (!tbl) return null;
 		return tbl.children.map(tr => ({
 			class: tr.className, title: tr.title || "",
@@ -111,7 +112,7 @@ func costFoldChildren(t *testing.T, dom *pageDOM, key string) []costElem {
 func costTableDrawn(t *testing.T, dom *pageDOM) bool {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`__byId["cost"].children.some(c => c.className === "costprov")`)
+	v, err := dom.vm.RunString(`__byId["cost"].children.some(c => c.className === "costscroll" && c.children.some(t => t.className === "costprov"))`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
 	}
@@ -455,9 +456,9 @@ func TestCostProvidersTableGreysOnlyTheDeepSeekRowForAStaleSpendRead(t *testing.
 		const cost = __byId["cost"];
 		const spend = cost.children.filter(c => c.className.split(" ").indexOf("spendpart") >= 0)[0];
 		return {
-			tableOnPanel: cost.children.some(c => c.className === "costprov"),
+			tableOnPanel: cost.children.some(c => c.className === "costscroll" && c.children.some(t => t.className === "costprov")),
 			spendGreyed: spend.className.split(" ").indexOf("stale") >= 0,
-			tableInSpend: spend.children.some(c => c.className === "costprov")
+			tableInSpend: spend.children.some(c => c.className === "costprov" || c.children.some(t => t.className === "costprov"))
 		};
 	})())`)
 	if err != nil {
@@ -885,6 +886,47 @@ func TestCostPageDropsTheMarkupTheTableReplaces(t *testing.T) {
 		if strings.Contains(page, gone) {
 			t.Errorf("index.html still carries %q, which the providers table replaces", gone)
 		}
+	}
+}
+
+// The providers table is nine columns of nowrap chips, so it is wider than a
+// narrow Cost panel. It is drawn inside a wrapper the stylesheet lets scroll
+// sideways, so a narrow panel scrolls the table instead of clipping its Status
+// column: without the wrapper or the overflow rule the last column is cut.
+func TestCostProvidersTableScrollsSidewaysInsteadOfClipping(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", costPanelState([]map[string]any{deepSeekProvider(), claudeProvider()}, map[string]any{"spend": spendReading()}))
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const cost = __byId["cost"];
+		const wrap = cost.children.filter(c => c.className === "costscroll")[0];
+		return {
+			wrapper: Boolean(wrap),
+			tableInWrapper: Boolean(wrap) && wrap.children.some(c => c.tagName === "TABLE" && c.className === "costprov"),
+			tableAtPanel: cost.children.some(c => c.className === "costprov")
+		};
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	var got struct {
+		Wrapper        bool `json:"wrapper"`
+		TableInWrapper bool `json:"tableInWrapper"`
+		TableAtPanel   bool `json:"tableAtPanel"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	if !got.Wrapper {
+		t.Fatal("the Cost panel drew no costscroll wrapper, so a narrow panel clips the table's last column")
+	}
+	if !got.TableInWrapper || got.TableAtPanel {
+		t.Errorf("the table is in the wrapper %v and at the panel's level %v, want the table inside the wrapper only", got.TableInWrapper, got.TableAtPanel)
+	}
+
+	if got := cssDecls(t, "costscroll")["overflow-x"]; got != "auto" {
+		t.Errorf("the .costscroll rule has overflow-x %q, want auto so a narrow panel scrolls the table instead of clipping it", got)
 	}
 }
 
