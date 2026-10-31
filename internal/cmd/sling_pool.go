@@ -1512,10 +1512,12 @@ func (r *poolRouter) occupied() func() ([]poolSession, error) {
 //
 // The read has to happen here because it is the slow half of the count: a bd
 // round trip per rig for the seats' agent beads and their assigned work, plus
-// one for the landing seats' work beads. Taken under the lock, it serialized
-// concurrent slings — the seat decision averaged 9.6s over 40 slings on
-// 2026-10-31 against a 5s lock timeout, and every sling that timed out routed
-// unreserved and could overfill the cap (gt-crkhv, gt-u0zq0).
+// one for the landing seats' work beads. Taken under the lock it would
+// serialize concurrent slings (gt-crkhv, gt-u0zq0).
+//
+// A picture that cannot be read degrades the count to the live sessions alone,
+// which can admit a sling past the cap while a seat is mid-landing, the same gap
+// as gt-3o7zk.
 //
 // The count and the claim stay one atom (gt-8o35b). The count is still taken
 // under the lock, and what it must be atomic against is a live session: a sling

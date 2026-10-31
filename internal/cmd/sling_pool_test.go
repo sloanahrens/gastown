@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -721,6 +722,16 @@ func TestPoolListsUnderTheDecisionLockWhenTheListerFails(t *testing.T) {
 // waiting on it cannot wait forever, and trips the violation channel the helper
 // fails on: the failure is reported at the lock, when it happens, by neither a
 // timer nor the package timeout.
+//
+// Every wait here is bounded, so a hang fails the test that caused it. The
+// bounds are hang detectors, not synchronisation: a passing run never waits on
+// them. seatReadBarrierBound limits one read's wait on the others, and
+// seatDecisionsBound limits the helper's wait for every decision to finish.
+const (
+	seatReadBarrierBound = 20 * time.Second
+	seatDecisionsBound   = 30 * time.Second
+)
+
 type seatReadBarrier struct {
 	want int
 
@@ -730,6 +741,7 @@ type seatReadBarrier struct {
 	open      chan struct{}
 	violation chan struct{}
 	early     []int
+	stuck     []int
 }
 
 func newSeatReadBarrier(want int) *seatReadBarrier {
@@ -742,9 +754,11 @@ func newSeatReadBarrier(want int) *seatReadBarrier {
 }
 
 // arrive records decision i's seat-state read and waits for the other decisions
-// to start theirs. Nothing bounds that wait: a read cannot be the last one
-// missing without the decision holding the lock, and aboutToLock opens the
-// barrier for exactly that case.
+// to start theirs. A read cannot be the last one missing without the decision
+// holding the lock, and aboutToLock opens the barrier for exactly that case. If
+// neither happens within seatReadBarrierBound the decision is recorded as stuck
+// and the barrier opens, so no read waits forever and the helper fails the test
+// naming the decisions that never saw the others start.
 func (b *seatReadBarrier) arrive(i int) {
 	b.mu.Lock()
 	if !b.arrived[i] {
@@ -756,7 +770,16 @@ func (b *seatReadBarrier) arrive(i int) {
 	}
 	open := b.open
 	b.mu.Unlock()
-	<-open
+	ctx, cancel := context.WithTimeout(context.Background(), seatReadBarrierBound)
+	defer cancel()
+	select {
+	case <-open:
+	case <-ctx.Done():
+		b.mu.Lock()
+		b.stuck = append(b.stuck, i)
+		b.openLocked()
+		b.mu.Unlock()
+	}
 }
 
 // aboutToLock records decision i reaching the seat-decision lock. Reaching it
@@ -791,6 +814,14 @@ func (b *seatReadBarrier) earlyDecisions() []int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]int(nil), b.early...)
+}
+
+// stuckDecisions names the decisions whose seat read gave up waiting for the
+// others to start theirs.
+func (b *seatReadBarrier) stuckDecisions() []int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]int(nil), b.stuck...)
 }
 
 // reads hands out one seat-state read per decision, each blocked on its first
@@ -845,12 +876,20 @@ func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool
 			out[i].agent, out[i].reason, out[i].err = r.route("", true)
 		}(i)
 	}
-	for range reads {
+	hangCtx, cancelHang := context.WithTimeout(context.Background(), seatDecisionsBound)
+	defer cancelHang()
+	for done := 0; done < len(reads); {
 		select {
 		case <-finished:
+			done++
 		case <-barrier.violation:
 			t.Fatalf("%v took the seat-decision lock before its seat read: the read is inside the lock, which serializes concurrent slings (gt-crkhv)", barrier.earlyDecisions())
+		case <-hangCtx.Done():
+			t.Fatalf("%d of %d decisions finished within %v: a decision returned without reaching its seat read or the seat-decision lock, or stopped inside one (stuck reads %v)", done, len(reads), seatDecisionsBound, barrier.stuckDecisions())
 		}
+	}
+	if stuck := barrier.stuckDecisions(); len(stuck) != 0 {
+		t.Fatalf("decisions %v waited %v for the others' seat reads to start and none did: the reads cannot overlap", stuck, seatReadBarrierBound)
 	}
 	if early := barrier.earlyDecisions(); len(early) != 0 {
 		t.Fatalf("decisions %v read the seat state only after taking the lock: the read is inside the lock, which serializes concurrent slings (gt-crkhv)", early)
@@ -869,11 +908,8 @@ func townClaims(t *testing.T, town string) []poolSeatClaim {
 }
 
 // A sling reads the pool's occupancy outside the seat-decision lock, so two
-// concurrent slings read it at the same time (gt-crkhv). The bd-backed read is
-// the slow half of the count — 9.6s on average over 40 slings on 2026-10-31,
-// four times the 5s lock timeout — and taking it under the lock serialized the
-// slings behind each other: the ones that timed out routed unreserved, with no
-// claim, and could overfill the cap (gt-u0zq0).
+// concurrent slings read it at the same time (gt-crkhv, gt-u0zq0). The bd-backed
+// read is the slow half of the count; under the lock it would serialize them.
 //
 // Both reads here wait for the other to start. Read under the lock, the first
 // decision blocks holding it and the second's read cannot start; read before it,
@@ -989,6 +1025,42 @@ func TestSeatDecisionHoldsTheLockAcrossNoBdRead(t *testing.T) {
 	}
 	if held {
 		t.Error("the seat-decision lock is still held after the route was decided")
+	}
+}
+
+// A degraded count that has room admits the sling, and the admitted decision
+// carries the notice that the seat picture could not be read, so the route never
+// reads as a counted one (gt-crkhv).
+func TestRouteNamesTheFailedSeatPictureWhenTheDegradedCountAdmits(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "p01")
+	writeLandingSeat(t, town, "gastown", "p02", "gt-landing")
+
+	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return beadsfake.New() })
+	r.pool = func() *config.PolecatPool { return cappedPool(2) }
+	r.sessions = func() sessionLister {
+		return &fakeLister{
+			sessions: map[string]map[string]string{
+				"gt-live": {"GT_ROLE": "gastown/polecats/p01", "GT_AGENT": claimAgent},
+			},
+			created: map[string]time.Time{"gt-live": poolTestNow.Add(-time.Hour)},
+		}
+	}
+	r.disposition = func(string, string) (poolSeatState, error) { return poolSeatState{}, nil }
+	r.work = func([]string) (map[string]*beads.Issue, error) { return nil, errors.New("dolt unreachable") }
+	r.now = func() time.Time { return poolTestNow }
+
+	agent, reason, err := r.route("", true)
+	if err != nil || agent != claimAgent {
+		t.Fatalf("one live session in a pool of two leaves room, so the degraded count admits: got %q (%s) %v", agent, reason, err)
+	}
+	if !strings.Contains(reason, "cannot read the seat picture") || !strings.Contains(reason, "dolt unreachable") {
+		t.Errorf("the admitted reason names the failed picture and its cause: %q", reason)
+	}
+	if claims := townClaims(t, town); len(claims) != 1 {
+		t.Errorf("an admitted sling claims one seat, got %v", claims)
 	}
 }
 
