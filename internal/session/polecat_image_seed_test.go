@@ -68,13 +68,11 @@ func seedRun(t *testing.T) string {
 }
 
 // The seed builds every module it finds under /seed. A rig's example modules are
-// in no rig's presubmit build, so the seed has no use for them, and one whose
-// go.sum has drifted fails the whole image: the beads pin's
-// examples/library-usage and examples/bd-example-extension-go did, on every
-// install from 10:28 (gt-9yqcc). The walk skips testdata and the examples
-// directory directly under a rig, and names each module it skips: a module under
-// an examples directory inside the rig's own tree is built, and a skip never
-// happens silently (gt-vvu6d).
+// in no rig's presubmit build, so the seed does not need them, and a go.sum that
+// has drifted in one fails the whole image (gt-9yqcc). The walk therefore skips
+// testdata and the examples directory directly under a rig, and names each module
+// it skips so the skip is never silent. A module under an examples directory inside
+// the rig's own tree is still built.
 func TestPolecatImageSeedSkipsExampleModules(t *testing.T) {
 	t.Parallel()
 	seed := seedRun(t)
