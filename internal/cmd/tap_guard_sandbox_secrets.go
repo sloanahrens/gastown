@@ -32,7 +32,8 @@ Blocked, in any chain, launcher, shell -c payload, eval or command substitution:
   - curl, wget or http sending a credential file (-d @file, -K, --post-file), or
     an argument that expands a variable assigned a secret, or a ${!name} indirection
   - any read of /proc/<pid>/environ
-  - reading ~/.claude.json, a .env file, ~/.netrc or ~/.git-credentials
+  - reading ~/.claude.json, a .env file, ~/.netrc, ~/.git-credentials or the
+    tracker token file /sandbox/.tracker/token (TRACKER_TOKEN_FILE)
   - git credential fill, and the git credential helper run directly
   - a python/node/ruby/perl/awk one-liner, or a heredoc body that one runs as
     code, that reads the whole environment, a secret-like variable, or a
@@ -107,8 +108,9 @@ var (
 	// is in whichever of its three groups the form uses; a dynamic key
 	// (os.environ[k]) names none.
 	sandboxSecretsEnvScriptNamedRe = regexp.MustCompile(`process\.env\.([A-Za-z_]\w*)|(?:os\.environ(?:\.get)?[(\[]|os\.getenv\(|process\.env\[|\bENV(?:\.fetch\(|\[)|\bENVIRON\[)\s*['"]([A-Za-z_]\w*)['"]|\$ENV\{\s*['"]?([A-Za-z_]\w*)`)
-	// sandboxSecretsCredentialPathRe matches a one-liner payload naming a credential file.
-	sandboxSecretsCredentialPathRe = regexp.MustCompile(`\.claude\.json|\.netrc|git-credentials`)
+	// sandboxSecretsCredentialPathRe matches a one-liner payload naming a credential file,
+	// the tracker token file among them by its path or by the variable that names it.
+	sandboxSecretsCredentialPathRe = regexp.MustCompile(`\.claude\.json|\.netrc|git-credentials|\.tracker/token|TRACKER_TOKEN_FILE`)
 )
 
 // sandboxSecretsNameWords are the words, between underscores, that make a variable name
@@ -293,9 +295,11 @@ func sandboxSecretsPipelineArgvs(tokens []string) [][]string {
 	return argvs
 }
 
-// sandboxSecretsEnvReaders are the commands that print a file's contents.
+// sandboxSecretsEnvReaders are the commands that print a file's contents. cp
+// reads the files it copies and writes them where an agent can print them, so
+// it is judged by the same file arguments.
 var sandboxSecretsEnvReaders = map[string]bool{
-	"cat": true, "head": true, "tail": true, "less": true, "more": true, "bat": true,
+	"cat": true, "head": true, "tail": true, "less": true, "more": true, "bat": true, "cp": true,
 	"jq": true, "grep": true, "egrep": true, "fgrep": true, "rg": true, "awk": true,
 	"sed": true, "strings": true, "xxd": true, "od": true, "cut": true, "tr": true, "nl": true,
 	"base64": true, "sort": true, "uniq": true, "fold": true, "rev": true, "column": true,
@@ -1375,10 +1379,24 @@ func sandboxSecretsHasAssignment(args []string) bool {
 }
 
 // sandboxSecretsIsSecretFile reports whether the word names a file that holds
-// credentials or account data: ~/.claude.json, a dotenv file, ~/.netrc or
-// ~/.git-credentials.
+// credentials or account data: ~/.claude.json, a dotenv file, ~/.netrc,
+// ~/.git-credentials or the tracker seat's token (gt-6t83w).
 func sandboxSecretsIsSecretFile(word string) bool {
-	return sandboxSecretsIsClaudeJSONPath(word) || sandboxSecretsIsCredentialFile(word)
+	return sandboxSecretsIsClaudeJSONPath(word) || sandboxSecretsIsCredentialFile(word) ||
+		sandboxSecretsIsTrackerTokenFile(word)
+}
+
+// sandboxSecretsIsTrackerTokenFile reports whether the word names the tracker
+// seat's token file. The runtime archive stages it at /sandbox/.tracker/token,
+// the path TRACKER_TOKEN_FILE carries, so the file is judged by its .tracker
+// parent: the base name token alone is too common to block, while .tracker/token
+// under any parent, or the variable that names it, is this file.
+func sandboxSecretsIsTrackerTokenFile(word string) bool {
+	w := strings.Trim(word, `"'`)
+	if w == "$TRACKER_TOKEN_FILE" || w == "${TRACKER_TOKEN_FILE}" {
+		return true
+	}
+	return filepath.Base(w) == "token" && filepath.Base(filepath.Dir(w)) == ".tracker"
 }
 
 // sandboxSecretsIsEnvTemplate reports whether the word names the dotenv template the
