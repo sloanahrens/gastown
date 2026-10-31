@@ -1398,9 +1398,10 @@ type SpecDispatchConfig struct {
 	MaxHookless   json.RawMessage `json:"max_hookless,omitempty"`
 
 	// MaxPerTick is a ceiling on slings per tick. Zero or absent means as
-	// many as there are free seats, which the tick slings concurrently; a set
-	// value still binds (the interim 5 of 2026-10-21 came off with the
-	// parallel slings).
+	// many as there are free seats; a set value still binds (the interim 5 of
+	// 2026-10-21 came off with the parallel slings). How many of those slings
+	// run at once is MaxInFlight, not this: a tick's candidates past the cap
+	// wait for a slot (gt-16pqa).
 	MaxPerTick int `json:"max_per_tick,omitempty"`
 
 	// MaxInFlight is how many slings run at once: a sling past it waits for a

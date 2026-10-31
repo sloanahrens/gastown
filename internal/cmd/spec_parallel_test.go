@@ -1,10 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +12,25 @@ import (
 
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
+
+// specSlingDoorWait bounds the test's check that no sling starts while the
+// cap's slots are full. The check is for absence, so a short bound is what
+// makes it: a cap-less tick starts a sling at once and fails the test, while a
+// capped one ends the wait at the bound. A context, not time.After, is the
+// unit tier's way to bound a wait.
+const specSlingDoorWait = 250 * time.Millisecond
+
+// assertNoSlingStarts fails when a sling starts before the bound passes.
+func assertNoSlingStarts(t *testing.T, starts <-chan string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), specSlingDoorWait)
+	defer cancel()
+	select {
+	case id := <-starts:
+		t.Fatalf("%s started while every in-flight slot was held", id)
+	case <-ctx.Done():
+	}
+}
 
 // The tick slings its candidates concurrently, bounded by the free seats
 // (design: docs/plans/2026-10-21-dispatcher-throughput-design.md section 2).
@@ -156,17 +175,10 @@ func TestSpecDispatchCapsSlingsInFlight(t *testing.T) {
 		id := <-starts
 		started[id] = true
 	}
-	// Let every goroutine the tick launched reach its blocking point. The ones
-	// past the cap wait for a slot, so a start here is the cap missing.
-	for range cands {
-		runtime.Gosched()
-	}
-	mu.Lock()
-	peakAtDoor := peak
-	mu.Unlock()
-	if peakAtDoor > inFlight {
-		t.Fatalf("the fake starter saw %d slings running at once, cap %d", peakAtDoor, inFlight)
-	}
+	// The candidates past the cap wait for a slot, so no further sling may
+	// start while both slots are held. The bound fails a cap-less tick rather
+	// than hanging the test.
+	assertNoSlingStarts(t, starts)
 	// Each freed slot lets the next waiting sling start, until the tick has
 	// run them all.
 	for range cands - inFlight {
