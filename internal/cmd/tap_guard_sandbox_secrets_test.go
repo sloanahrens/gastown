@@ -1037,6 +1037,32 @@ func TestSandboxSecretsHelpNamesTrackerToken(t *testing.T) {
 	}
 }
 
+// A tracker-routed seat's token reaches a sandbox as a file, so the guard
+// refuses both ways to read it: the path the runtime archive stages it at and
+// the variable that carries that path (gt-rh8ak).
+func TestSandboxSecretsGuardBlocksTrackerToken(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		command string
+		rule    string
+	}{
+		{"cat /sandbox/.tracker/token", "it reads /sandbox/.tracker/token, which holds credentials or account data"},
+		{"cat .tracker/token", "it reads .tracker/token, which holds credentials or account data"},
+		{"cat \"${TRACKER_TOKEN_FILE}\"", "it reads ${TRACKER_TOKEN_FILE}, which holds credentials or account data"},
+		{"printenv TRACKER_TOKEN_FILE", "printenv TRACKER_TOKEN_FILE prints a secret"},
+		{"echo \"$TRACKER_TOKEN_FILE\"", "echo of a secret variable"},
+	} {
+		blocked, out := runSandboxSecretsGuard(t, "openshell", tc.command)
+		if !blocked {
+			t.Errorf("not blocked in a sandbox: %q", tc.command)
+			continue
+		}
+		if !strings.Contains(out, "("+tc.rule+")") {
+			t.Errorf("block for %q does not name its rule %q: %q", tc.command, tc.rule, out)
+		}
+	}
+}
+
 // A payload that cannot be read is allowed, as with the other tap guards: a guard
 // that cannot read the command cannot judge it.
 func TestSandboxSecretsGuardAllowsUnreadablePayload(t *testing.T) {

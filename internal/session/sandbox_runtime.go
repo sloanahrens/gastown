@@ -137,12 +137,14 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	logSystemPrompt(promptLog, spec.Polecat, promptBytes)
 
 	// A tracker-routed seat's token travels as a file: the archive holds it at
-	// 0600 in a 0700 directory, and no other entry of the archive, no
-	// environment value and no settings file holds it (gt-p85pw.84).
+	// 0400 in a 0700 directory, owner-read-only, and no other entry of the
+	// archive, no environment value and no settings file holds it
+	// (gt-p85pw.84). The sandbox only ever reads the file, so the owner has no
+	// write bit and group and world have none (gt-rh8ak).
 	if tracker.on() {
 		files = append(files,
 			runtimeFile{path.Dir(runtimeTrackerToken), nil, 0o700, true},
-			runtimeFile{runtimeTrackerToken, tracker.token, 0o600, false},
+			runtimeFile{runtimeTrackerToken, tracker.token, 0o400, false},
 		)
 	}
 	// The bytes are kept by hash so a rejection can be joined to the prompt its

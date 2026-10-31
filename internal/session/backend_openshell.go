@@ -1101,7 +1101,7 @@ func (b *openshellBackend) controlPlaneHost() string {
 
 // sandboxTrackerTokenFile is where a tracker-routed sandbox reads its seat
 // token, the value TRACKER_TOKEN_FILE carries. The runtime archive stages the
-// file there 0600; nothing else in the sandbox holds the token.
+// file there 0400, owner-read-only; nothing else in the sandbox holds the token.
 const sandboxTrackerTokenFile = sandboxHome + "/" + runtimeTrackerToken
 
 // sandboxTracker is the tracker a sandbox's rig is routed to, as the sandbox
