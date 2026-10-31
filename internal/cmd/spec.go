@@ -3180,7 +3180,7 @@ func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Clie
 	var fresh []int
 	remembered := map[int]specCandidateVerdict{}
 	for i, c := range read.Candidates {
-		if _, refused := verdicts.refusal(c); refused {
+		if verdicts.refused(c) {
 			continue
 		}
 		if entry, ok := verdicts.lookUp(c); ok {

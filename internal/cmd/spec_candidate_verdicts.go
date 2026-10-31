@@ -159,15 +159,12 @@ func (v *specCandidateVerdicts) lookUp(c specCandidate) (specCandidateVerdict, b
 	return entry, true
 }
 
-// refusal answers c's stored label refusal when its board row and the tick's
-// knobs still match, and false otherwise. Only a refusal may skip the details
-// read: the bead is never slung, so it needs neither its design nor its edges.
-func (v *specCandidateVerdicts) refusal(c specCandidate) (specCandidateVerdict, bool) {
+// refused reports whether the memory holds c's label refusal for its board row
+// and the tick's knobs. Only a refusal may skip the details read: the bead is
+// never slung, so it needs neither its design nor its edges.
+func (v *specCandidateVerdicts) refused(c specCandidate) bool {
 	entry, ok := v.lookUp(c)
-	if !ok || entry.Eligible {
-		return specCandidateVerdict{}, false
-	}
-	return entry, true
+	return ok && !entry.Eligible
 }
 
 // childrenWanted reports whether c's children are read this tick. Every
@@ -175,8 +172,7 @@ func (v *specCandidateVerdicts) refusal(c specCandidate) (specCandidateVerdict, 
 // childless parent, does not move the parent's row (see the file comment). A
 // refused candidate never reaches the container hold, so it is not read.
 func (v *specCandidateVerdicts) childrenWanted(c specCandidate) bool {
-	_, refused := v.refusal(c)
-	return !refused
+	return !v.refused(c)
 }
 
 // record keeps the verdict the tick reached for c, at the row it decided from,
