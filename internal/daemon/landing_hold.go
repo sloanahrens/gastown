@@ -86,6 +86,9 @@ func (h *landingHolds) passesIdle() {
 // waits for; a refused pass gives its slot back at once (gt-0hsf6).
 func (d *Daemon) beginLandingPass() bool {
 	d.landingPasses.Add(1)
+	if d.landingPassWindowFn != nil {
+		d.landingPassWindowFn()
+	}
 	if !d.landingHolds.held() {
 		return true
 	}

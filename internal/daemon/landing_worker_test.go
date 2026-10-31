@@ -1762,3 +1762,77 @@ func TestNeedsOverseerLandingPersonKeyNamesThePersonLabel(t *testing.T) {
 		})
 	}
 }
+
+// startRefusedLoop runs a landing loop whose first pass is refused by a hold
+// that goes on in the window beginLandingPass's recheck closes: the loop saw no
+// hold, then one came on before the count was checked. It returns the daemon,
+// the pass-body counter, the channel closed once the refusal has given its
+// in-flight count back (passesIdle wakes the hold), and the pass counter the
+// loop's pass seam feeds. The hold is still on when it returns; the test
+// releases it.
+func startRefusedLoop(t *testing.T) (*Daemon, *atomic.Int32, <-chan struct{}, *passDone) {
+	t.Helper()
+	d, _ := landingDrainDaemon(t)
+	var passes atomic.Int32
+	pass := func(context.Context) landworker.Report {
+		passes.Add(1)
+		return landworker.Report{}
+	}
+	taken := make(chan (<-chan struct{}), 1)
+	var windows atomic.Int32
+	d.landingPassWindowFn = func() {
+		if windows.Add(1) == 1 {
+			taken <- d.landingHolds.hold(landingHoldRebuildOM)
+		}
+	}
+	done := countPasses(d)
+	// A nanosecond interval lets the loop come round again once the hold is
+	// released; the default hour would end the test after the refusal.
+	go d.landingWorkerLoop("gastown", time.Nanosecond, pass)
+	return d, &passes, <-taken, done
+}
+
+// TestLandingWorkerLoopRefusedPassDoesNotRunTheBody pins the refused branch: a
+// pass whose recheck finds a hold does not run the landing pass body, so
+// nothing claims beads while the rebuild_om hold waits for the town to go
+// quiet (gt-0hsf6).
+func TestLandingWorkerLoopRefusedPassDoesNotRunTheBody(t *testing.T) {
+	t.Parallel()
+	d, passes, refused, _ := startRefusedLoop(t)
+	<-refused
+	defer d.landingHolds.release(landingHoldRebuildOM)
+
+	if got := passes.Load(); got != 0 {
+		t.Fatalf("the pass body ran %d time(s) under a hold that refused it, want 0", got)
+	}
+}
+
+// TestLandingWorkerLoopRefusedPassGivesTheCountBack pins the slot a refused
+// pass takes: the refusal leaves the in-flight count at zero, so the holder's
+// wait ends and the upgrade or rebuild does not stall on a pass that never ran
+// (gt-0hsf6).
+func TestLandingWorkerLoopRefusedPassGivesTheCountBack(t *testing.T) {
+	t.Parallel()
+	d, _, refused, _ := startRefusedLoop(t)
+	<-refused
+	defer d.landingHolds.release(landingHoldRebuildOM)
+
+	if got := d.landingPasses.Load(); got != 0 {
+		t.Fatalf("in-flight count = %d after the refusal, want 0", got)
+	}
+}
+
+// TestLandingWorkerLoopRefusedPassResumesAfterRelease pins the loop's way back
+// out of the refused branch: once the hold is released, the next pass runs
+// rather than the loop idling for good behind a hold that is gone.
+func TestLandingWorkerLoopRefusedPassResumesAfterRelease(t *testing.T) {
+	t.Parallel()
+	d, passes, refused, done := startRefusedLoop(t)
+	<-refused
+	d.landingHolds.release(landingHoldRebuildOM)
+
+	settlePasses(t, done, 1)
+	if got := passes.Load(); got < 1 {
+		t.Fatalf("pass body ran %d time(s) after the release, want at least 1", got)
+	}
+}
