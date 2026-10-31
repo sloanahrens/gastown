@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,6 +24,10 @@ import (
 // daemon's getenv seam (withStandbyRingKey), so no test reads the process
 // environment.
 var standbyKey = []byte("standby-ring-key")
+
+// standbyTestNow is the fixed hour these cases run on: the Ring record and the
+// daemon's clock both read it, so they do not shift with the wall clock.
+var standbyTestNow = time.Date(2026, 10, 31, 15, 0, 0, 0, time.UTC)
 
 // withStandbyRingKey writes a town settings file that names the Ring key and
 // gives d the environment that resolves it.
@@ -178,6 +183,85 @@ func TestStandbyHeartbeatLogsOnceAsTheRingWanesAndRenews(t *testing.T) {
 	}
 }
 
+// The tier sweep site logs its standby once when it appears and once when it
+// lifts, over a Ring that wanes and is then renewed (gt-6mlik.6).
+func TestStandbyTierSweepLogsOnceAsTheRingWanesAndRenews(t *testing.T) {
+	t.Parallel()
+	now := standbyTestNow
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	rec.green()
+	tierCycleStarts(d)
+	withStandbyRingKey(t, d)
+
+	ringtest.Waned(t, d.config.TownRoot, standbyKey, now)
+	for i := 0; i < 3; i++ {
+		d.triggerTierSweep()
+	}
+	if n := strings.Count(logs.String(), "tier_sweep: standing by"); n != 1 {
+		t.Errorf("waned Ring logged %d times over 3 triggers, want once; log: %s", n, logs.String())
+	}
+
+	ringtest.Valid(t, d.config.TownRoot, standbyKey, now)
+	for i := 0; i < 3; i++ {
+		d.triggerTierSweep()
+	}
+	waitTierSweepIdle(t, d)
+	if n := strings.Count(logs.String(), "tier_sweep: standby lifted"); n != 1 {
+		t.Errorf("standby lift logged %d times over 3 triggers, want once; log: %s", n, logs.String())
+	}
+}
+
+// The scheduled maintenance site logs its standby once when it appears and
+// once when it lifts, over an operator hold written and then removed. The
+// ticks keep reaching the site because a town with no databases to back up
+// leaves the window unconsumed.
+func TestStandbyMaintenanceLogsOnceAsTheHoldAppearsAndLifts(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	withGCFakes(t, d)
+	d.patrolConfig = gcModeConfig()
+	d.maint.now = func() time.Time { return gcTestNow }
+
+	writeOperatorHold(t, d.config.TownRoot)
+	for i := 0; i < 3; i++ {
+		d.runScheduledMaintenance()
+	}
+	if n := strings.Count(logs.String(), "scheduled_maintenance: standing by"); n != 1 {
+		t.Errorf("hold file logged %d times over 3 ticks, want once; log: %s", n, logs.String())
+	}
+
+	if err := os.Remove(filepath.Join(d.config.TownRoot, "seat-refill.hold")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		d.runScheduledMaintenance()
+	}
+	if n := strings.Count(logs.String(), "scheduled_maintenance: standby lifted"); n != 1 {
+		t.Errorf("standby lift logged %d times over 3 ticks, want once; log: %s", n, logs.String())
+	}
+}
+
+// A standby backup whose database discovery fails says so: the backup does
+// not run, and the error is logged rather than dropped.
+func TestStandbyBackupLogsDiscoveryFailure(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	d.patrolConfig = gcModeConfig()
+	d.maint.now = func() time.Time { return gcTestNow }
+	d.maint.gcDatabases = func(string) ([]string, error) { return nil, errors.New("dolt is not answering") }
+	writeOperatorHold(t, d.config.TownRoot)
+
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 0 {
+		t.Errorf("a backup ran with no databases discovered: %v", f.backupCalls)
+	}
+	if n := countContaining(strings.Split(strings.TrimSpace(logs.String()), "\n"), "standby backup", "dolt is not answering"); n != 1 {
+		t.Errorf("the discovery failure was logged %d times, want once; log: %s", n, logs.String())
+	}
+}
+
 // tierCycleStarts makes d's cycle record that it started: the first seam a
 // cycle reads origin/main through (on both the due and the early path) counts
 // the call, and the worktree seam is stubbed so no real checkout is taken.
@@ -195,7 +279,7 @@ func tierCycleStarts(d *Daemon) *int {
 // none of them a due cycle starts.
 func TestStandbyTierSweep(t *testing.T) {
 	t.Parallel()
-	now := atHour(time.Now(), 15)
+	now := standbyTestNow
 	for _, c := range standbyConditions {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -359,19 +443,39 @@ func TestStandbyExceptions(t *testing.T) {
 
 	t.Run("landing worker passes run under a waned Ring", func(t *testing.T) {
 		t.Parallel()
+		now := standbyTestNow
 		d, _ := landingDrainDaemon(t)
+		d.clock = clockwork.NewFakeClockAt(now)
 		withStandbyRingKey(t, d)
-		ringtest.Waned(t, d.config.TownRoot, standbyKey, time.Now())
+		ringtest.Waned(t, d.config.TownRoot, standbyKey, now)
 		var passes atomic.Int32
 		pass := func(context.Context) landworker.Report {
 			passes.Add(1)
 			return landworker.Report{}
 		}
 
-		go d.landingWorkerLoop("gastown", time.Hour, pass)
-
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
+
+		// The loop stops when d.ctx is canceled, so the test owns that context
+		// and joins the goroutine it started instead of leaving it running past
+		// the test (the hour interval is abandoned with the context).
+		loopCtx, stopLoop := context.WithCancel(d.ctx)
+		d.ctx = loopCtx
+		loopDone := make(chan struct{})
+		go func() {
+			defer close(loopDone)
+			d.landingWorkerLoop("gastown", time.Hour, pass)
+		}()
+		defer func() {
+			stopLoop()
+			select {
+			case <-loopDone:
+			case <-ctx.Done():
+				t.Error("the landing worker loop did not stop after its context was canceled")
+			}
+		}()
+
 		for passes.Load() == 0 {
 			if ctx.Err() != nil {
 				t.Fatal("the landing worker ran no pass under a waned Ring")
