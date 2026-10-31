@@ -263,14 +263,26 @@ func TestRenderDaemonCompose_ScratchPassesTheEntrypointFlagsAndTheLiveOneDoesNot
 }
 
 // The forge golden is a second scratch spec, and its daemon command carries the
-// Dolt host too: the forge adds services and changes nothing about the install.
+// Dolt host too, then the forge host and the landing bot's token file so the
+// daemon's git can authenticate its pushes (gt-2d6f2). The plain scratch render
+// has no forge and so carries neither forge flag.
 func TestRenderDaemonCompose_ScratchForgePassesTheDoltHost(t *testing.T) {
 	t.Parallel()
-	_, f := render(t, forgeSpec())
-	if got, want := f.Services["daemon"].Command,
-		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService,
-			"--" + config.DoltPortFlag, strconv.Itoa(templates.ScratchDoltPort)}; !slices.Equal(got, want) {
+	spec := forgeSpec()
+	_, f := render(t, spec)
+	want := []string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService,
+		"--" + config.DoltPortFlag, strconv.Itoa(templates.ScratchDoltPort),
+		"--" + config.ForgeHostFlag, templates.ScratchForgejoService + ":3000",
+		"--" + config.ForgeTokenFileFlag, spec.TownRoot + "/" + templates.ScratchForgeTokenDir + "/forgejo-landing.env"}
+	if got := f.Services["daemon"].Command; !slices.Equal(got, want) {
 		t.Errorf("scratch forge daemon command = %q, want %q", got, want)
+	}
+
+	out, _ := render(t, scratchSpec())
+	for _, flag := range []string{config.ForgeHostFlag, config.ForgeTokenFileFlag} {
+		if strings.Contains(out, "--"+flag) {
+			t.Errorf("the scratch render without a forge carries --%s", flag)
+		}
 	}
 }
 

@@ -55,7 +55,12 @@ type entrypointRig struct {
 	doltHostSet bool
 	doltPort    int
 	doltPortSet bool
-	calls       [][]string
+
+	forgeHost         string
+	forgeHostSet      bool
+	forgeTokenFile    string
+	forgeTokenFileSet bool
+	calls             [][]string
 }
 
 // scratchRig is a container whose town root is the scratch town: every
@@ -139,6 +144,11 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 		doltHostSet: r.doltHostSet,
 		doltPort:    r.doltPort,
 		doltPortSet: r.doltPortSet,
+
+		forgeHost:         r.forgeHost,
+		forgeHostSet:      r.forgeHostSet,
+		forgeTokenFile:    r.forgeTokenFile,
+		forgeTokenFileSet: r.forgeTokenFileSet,
 	}
 }
 
@@ -1486,5 +1496,134 @@ func TestContainerEntrypointChecksTheDefaultDoltPortWhenTheFlagIsOmitted(t *test
 				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
 			}
 		})
+	}
+}
+
+const (
+	forgeTestHost  = "scratch-forgejo:3000"
+	forgeTestToken = "/towns/scratch/forge-tokens/forgejo-landing.env"
+)
+
+// With both forge flags the container's git is told to ask the credential
+// helper for the forge host, before the install, so the landing worker's push
+// carries the bot's token. The config line carries the token file's path, never
+// a token. Dropping the git config call turns this red (gt-2d6f2).
+func TestContainerEntrypointWritesTheForgeCredentialHelper(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	r.forgeHost, r.forgeHostSet = forgeTestHost, true
+	r.forgeTokenFile, r.forgeTokenFileSet = forgeTestToken, true
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	helper := "!" + entrypointBin + " " + config.GitCredentialForgejoCommand + " --host " + forgeTestHost + " --token-file " + forgeTestToken
+	want := []string{"git", "config", "--global", "credential.http://" + forgeTestHost + ".helper", helper}
+	at, install := -1, -1
+	for i, c := range r.calls {
+		if reflect.DeepEqual(c, want) {
+			at = i
+		}
+		if len(c) > 1 && c[1] == "install" {
+			install = i
+		}
+	}
+	if at < 0 {
+		t.Fatalf("commands = %v, want one running %v", r.calls, want)
+	}
+	if install >= 0 && at > install {
+		t.Errorf("the credential helper was set at command %d, after the install at %d; the install's own git use needs it first", at, install)
+	}
+}
+
+// Without the flags the entrypoint sets no credential helper at all.
+func TestContainerEntrypointWithoutForgeFlagsSetsNoCredentialHelper(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	for _, c := range r.calls {
+		if strings.Contains(strings.Join(c, " "), "credential") {
+			t.Errorf("a command mentions a credential helper without the flags: %v", c)
+		}
+	}
+}
+
+// A flag no start could use is refused before the first command runs.
+func TestContainerEntrypointRefusesAForgeCredentialItCannotUse(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		rig       func() *entrypointRig
+		host      string
+		hostSet   bool
+		token     string
+		tokenSet  bool
+		wantInErr string
+	}{
+		{"a host without a token file", scratchRig, forgeTestHost, true, "", false, "together or not at all"},
+		{"a token file without a host", scratchRig, "", false, forgeTestToken, true, "together or not at all"},
+		{"both without the scratch flag", townRig, forgeTestHost, true, forgeTestToken, true, "without --" + config.ScratchTownFlag},
+		{"an empty host", scratchRig, "", true, forgeTestToken, true, "not a bare host:port"},
+		{"a host with a scheme", scratchRig, "http://scratch-forgejo:3000", true, forgeTestToken, true, "not a bare host:port"},
+		{"a host with no port", scratchRig, "scratch-forgejo", true, forgeTestToken, true, "not a bare host:port"},
+		{"a relative token file", scratchRig, forgeTestHost, true, "forge-tokens/forgejo-landing.env", true, "absolute path"},
+		{"an empty token file", scratchRig, forgeTestHost, true, "", true, "absolute path"},
+		{"a token file path with a shell metacharacter", scratchRig, forgeTestHost, true, "/towns/$(id)/forgejo-landing.env", true, "absolute path"},
+		{"a token file path with a space", scratchRig, forgeTestHost, true, "/towns/my town/forgejo-landing.env", true, "absolute path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := tc.rig()
+			r.forgeHost, r.forgeHostSet = tc.host, tc.hostSet
+			r.forgeTokenFile, r.forgeTokenFileSet = tc.token, tc.tokenSet
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if err == nil || !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Fatalf("error = %v, want a refusal saying %q", err, tc.wantInErr)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
+	}
+}
+
+// The entrypoint parses both flags into the values it acts on.
+func TestContainerEntrypointForgeFlagsAreWired(t *testing.T) {
+	t.Parallel()
+	var got entrypointFlags
+	c := newDaemonContainerEntrypointCmd(func(flags entrypointFlags) error {
+		got = flags
+		return nil
+	})
+	c.SetArgs([]string{"--forge-host", forgeTestHost, "--forge-token-file", forgeTestToken})
+	c.SilenceUsage, c.SilenceErrors = true, true
+	if err := c.Execute(); err != nil {
+		t.Fatalf("execute container-entrypoint: %v", err)
+	}
+	if got.forgeHost != forgeTestHost || !got.forgeHostSet || got.forgeTokenFile != forgeTestToken || !got.forgeTokenFileSet {
+		t.Errorf("parsed %+v, want the host and token file with both marked set", got)
+	}
+}
+
+// A helper command failing is an error, not a start without credentials.
+func TestContainerEntrypointReportsAFailedCredentialHelperSetup(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	r.forgeHost, r.forgeHostSet = forgeTestHost, true
+	r.forgeTokenFile, r.forgeTokenFileSet = forgeTestToken, true
+	e := r.entrypoint()
+	base := e.run
+	e.run = func(argv []string) error {
+		if len(argv) > 3 && argv[0] == "git" && strings.HasPrefix(argv[3], "credential.") {
+			return errors.New("git: cannot write config")
+		}
+		return base(argv)
+	}
+	err := runContainerEntrypoint(e)
+	if err == nil || !strings.Contains(err.Error(), "credential helper") {
+		t.Errorf("error = %v, want one naming the credential helper", err)
 	}
 }

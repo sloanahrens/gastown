@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -52,6 +53,13 @@ type entrypointFlags struct {
 	// from no port at all.
 	doltPort    int
 	doltPortSet bool
+	// forgeHost and forgeTokenFile are --forge-host and --forge-token-file; each
+	// Set says its flag was given, since an empty value is refused and so must be
+	// told apart from no flag.
+	forgeHost         string
+	forgeHostSet      bool
+	forgeTokenFile    string
+	forgeTokenFileSet bool
 }
 
 // newDaemonContainerEntrypointCmd builds the command over run, which receives
@@ -105,6 +113,8 @@ Every check runs before the first command, so a refusal runs nothing.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			flags.doltHostSet = cmd.Flags().Changed(config.DoltHostFlag)
 			flags.doltPortSet = cmd.Flags().Changed(config.DoltPortFlag)
+			flags.forgeHostSet = cmd.Flags().Changed(config.ForgeHostFlag)
+			flags.forgeTokenFileSet = cmd.Flags().Changed(config.ForgeTokenFileFlag)
 			return run(flags)
 		},
 	}
@@ -116,6 +126,10 @@ Every check runs before the first command, so a refusal runs nothing.`,
 		"Give this Dolt host to the scratch town's install; accepted only with --"+config.ScratchTownFlag)
 	cmd.Flags().IntVar(&flags.doltPort, config.DoltPortFlag, 0,
 		"Give this port of that Dolt host to the scratch town's install; accepted only with --"+config.DoltHostFlag)
+	cmd.Flags().StringVar(&flags.forgeHost, config.ForgeHostFlag, "",
+		"Make git ask the forge credential helper for this Forgejo host:port; accepted only with --"+config.ScratchTownFlag+" and --"+config.ForgeTokenFileFlag)
+	cmd.Flags().StringVar(&flags.forgeTokenFile, config.ForgeTokenFileFlag, "",
+		"The landing bot's token file the credential helper reads at push time (absolute path); accepted only with --"+config.ForgeHostFlag)
 	return cmd
 }
 
@@ -151,6 +165,12 @@ type containerEntrypoint struct {
 	// the flag was given.
 	doltPort    int
 	doltPortSet bool
+	// forgeHost and forgeTokenFile are --forge-host and --forge-token-file, and
+	// each Set says its flag was given.
+	forgeHost         string
+	forgeHostSet      bool
+	forgeTokenFile    string
+	forgeTokenFileSet bool
 }
 
 // entryKind is what a path is, as Lstat reports it. A symbolic link is
@@ -183,6 +203,11 @@ func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 		doltHostSet: flags.doltHostSet,
 		doltPort:    flags.doltPort,
 		doltPortSet: flags.doltPortSet,
+
+		forgeHost:         flags.forgeHost,
+		forgeHostSet:      flags.forgeHostSet,
+		forgeTokenFile:    flags.forgeTokenFile,
+		forgeTokenFileSet: flags.forgeTokenFileSet,
 	})
 }
 
@@ -257,6 +282,9 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	if err := e.refuseDoltHost(); err != nil {
 		return err
 	}
+	if err := e.refuseForgeCredential(); err != nil {
+		return err
+	}
 	// An API credential outranks the subscription token and bills API rates, so
 	// a container that carries one never starts: this runs before anything else
 	// does, and runs nothing.
@@ -293,6 +321,9 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 		}
 	}
 	if err := e.setGitIdentity(); err != nil {
+		return err
+	}
+	if err := e.setForgeCredentialHelper(self); err != nil {
 		return err
 	}
 	if install {
@@ -638,4 +669,60 @@ func unescapeMountPoint(s string) string {
 		b.WriteByte(s[i])
 	}
 	return b.String()
+}
+
+// forgeCredentialPathRe is what a forge token file path may hold. The path is
+// written into a git config helper line that git runs through a shell, so it
+// carries no space, quote or shell metacharacter.
+var forgeCredentialPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+
+// forgeCredentialHostRe is a bare host:port: DNS-name characters, a colon and
+// digits.
+var forgeCredentialHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]+:[0-9]{1,5}$`)
+
+// refuseForgeCredential refuses a --forge-host or --forge-token-file no start
+// could use: one without the other, one without --scratch-town (the live
+// project's command line stays empty), an empty value, a host that is not a
+// bare host:port, and a token file path that is not absolute or holds a
+// character a shell would read. Every refusal runs before the first command.
+func (e containerEntrypoint) refuseForgeCredential() error {
+	if !e.forgeHostSet && !e.forgeTokenFileSet {
+		return nil
+	}
+	if e.forgeHostSet != e.forgeTokenFileSet {
+		return fmt.Errorf("--%s and --%s are given together or not at all, so nothing was started",
+			config.ForgeHostFlag, config.ForgeTokenFileFlag)
+	}
+	if !e.scratch {
+		return fmt.Errorf("--%s is given without --%s; only the scratch town's git takes a forge credential helper, and the live project's command line stays empty, so nothing was started",
+			config.ForgeHostFlag, config.ScratchTownFlag)
+	}
+	host := strings.TrimSpace(e.forgeHost)
+	if !forgeCredentialHostRe.MatchString(host) {
+		return fmt.Errorf("--%s %q is not a bare host:port (no scheme, path, login or space), so nothing was started",
+			config.ForgeHostFlag, e.forgeHost)
+	}
+	if !forgeCredentialPathRe.MatchString(e.forgeTokenFile) {
+		return fmt.Errorf("--%s %q must be an absolute path of letters, digits, dot, dash, underscore and slash, since git runs the helper line through a shell, so nothing was started",
+			config.ForgeTokenFileFlag, e.forgeTokenFile)
+	}
+	return nil
+}
+
+// setForgeCredentialHelper tells the container's git to ask `gt
+// git-credential-forgejo` for the credentials of the forge host, so the daemon's
+// pushes (the landing worker's land/<bead> candidates) carry the landing bot's
+// token. The config line names the token file's path and never a token; the
+// helper reads the file when git asks, so the file may not exist yet at start
+// (the runbook provisions it after the first start). No flag, no change.
+func (e containerEntrypoint) setForgeCredentialHelper(self string) error {
+	if !e.forgeHostSet {
+		return nil
+	}
+	host := strings.TrimSpace(e.forgeHost)
+	helper := "!" + self + " " + config.GitCredentialForgejoCommand + " --host " + host + " --token-file " + e.forgeTokenFile
+	if err := e.run([]string{"git", "config", "--global", "credential.http://" + host + ".helper", helper}); err != nil {
+		return fmt.Errorf("set the git credential helper for %s: %w", host, err)
+	}
+	return nil
 }

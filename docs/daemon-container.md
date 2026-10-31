@@ -482,6 +482,14 @@ observed](#what-l2-has-not-observed)).
   | forge ssh port | `2322` (`<forge-ssh>`), not the live 2222 |
   | forge directory | `<scratch-parent>/forge`, for the admin token files; never under `<scratch-root>` and never under the live town |
   | token directory | `<scratch-root>/forge-tokens`, where the bots' token files go; the container sees it at the same path |
+
+  The daemon's git pushes (the landing worker's `land/<bead>` candidates) are
+  authenticated by `gt git-credential-forgejo`, which the entrypoint sets as the
+  container's credential helper for `scratch-forgejo:3000` when the render passes
+  `--forge-host` and `--forge-token-file` (the forge golden shows both). The
+  helper reads `<scratch-root>/forge-tokens/forgejo-landing.env` when git asks, so
+  the file need not exist at the first start; it refuses a file that group or
+  others can read.
   | repo | `scratch-admin/l2rig`, and the rig is named `l2rig` |
 
 - The two ports are free on the host. Expected: this prints nothing.
