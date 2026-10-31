@@ -363,9 +363,11 @@ func TestWorkersOneJobKeepsTheSerialOutput(t *testing.T) {
 }
 
 // TestWorkersStartLongestFirst: a run given the previous walls starts the
-// longest packages first, in that order even inside the first wave, and a run
-// given none starts them in list order. Each place is the fake's own record of
-// the command's start.
+// longest packages first, and a run given none starts them in list order. The
+// first wave's workers start concurrently, so what the runner owes there is the
+// set of the longest packages, not the order their starts are recorded in; every
+// later start follows the plan one release at a time, and each place is the
+// fake's own record of the command's start (gt-br6gd).
 func TestWorkersStartLongestFirst(t *testing.T) {
 	t.Parallel()
 	const jobs = 3
@@ -410,8 +412,12 @@ func TestWorkersStartLongestFirst(t *testing.T) {
 			for i := 0; i < jobs; i++ {
 				first = append(first, waitOrFail(t, fake.started, "a command of the first wave to start"))
 			}
-			if !reflect.DeepEqual(first, tc.want[:jobs]) {
-				t.Errorf("the first wave started %q, want the longest %q in that order", first, tc.want[:jobs])
+			sortedFirst := append([]string(nil), first...)
+			sort.Strings(sortedFirst)
+			wantFirst := append([]string(nil), tc.want[:jobs]...)
+			sort.Strings(wantFirst)
+			if !reflect.DeepEqual(sortedFirst, wantFirst) {
+				t.Errorf("the first wave started %q, want the longest %q (as a set: concurrent starts have no order)", first, tc.want[:jobs])
 			}
 
 			// Freeing a slot starts the next package the plan names, one at a
