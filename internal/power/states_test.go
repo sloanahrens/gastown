@@ -3,6 +3,7 @@ package power
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -261,22 +262,35 @@ type ringCase struct {
 var ringCases = []ringCase{
 	{"no ring section", func(t *testing.T, f *fake) {
 		f.writeTownJSON(t, `{"type":"town","version":1,"name":"test"}`)
-	}, "ring: absent (" + ring.ReasonNoSection + ")"},
+	}, "absent (" + ring.ReasonNoSection + ")"},
 	{"valid", func(t *testing.T, f *fake) {
 		// Forged 5h before now with a 36h lease: 31h of it is left.
 		ringtest.Valid(t, f.town, testRingKey, f.now.Add(-5*time.Hour))
-	}, "ring: valid, wanes in 31h"},
+	}, "valid, wanes in 31h"},
+	{"valid under an hour", func(t *testing.T, f *fake) {
+		// Forged 36h less 42m30s before now: 42m30s of the lease is left.
+		ringtest.Valid(t, f.town, testRingKey, f.now.Add(-36*time.Hour+42*time.Minute+30*time.Second))
+	}, "valid, wanes in 42m30s"},
+	{"valid under a minute", func(t *testing.T, f *fake) {
+		// Forged 36h less 45s before now: 45s of the lease is left.
+		ringtest.Valid(t, f.town, testRingKey, f.now.Add(-36*time.Hour+45*time.Second))
+	}, "valid, wanes in 45s"},
 	{"waned", func(t *testing.T, f *fake) {
-		// The lease ended 2h before now: the record expires at now-2h.
+		// Waned mints its lease to end a minute before the time it is given,
+		// so this argument ends the lease 2h before now.
 		ringtest.Waned(t, f.town, testRingKey, f.now.Add(-2*time.Hour+time.Minute))
-	}, "ring: waned 2h ago"},
+	}, "waned 2h ago"},
+	{"waned under an hour", func(t *testing.T, f *fake) {
+		// As above: the lease ends 42m30s before now.
+		ringtest.Waned(t, f.town, testRingKey, f.now.Add(-42*time.Minute-30*time.Second+time.Minute))
+	}, "waned 42m30s ago"},
 	{"tampered", func(t *testing.T, f *fake) {
 		ringtest.Tampered(t, f.town, testRingKey, f.now)
-	}, "ring: absent (" + ring.ReasonBadSignature + ")"},
+	}, "absent (" + ring.ReasonBadSignature + ")"},
 	{"key unavailable", func(t *testing.T, f *fake) {
 		ringtest.Valid(t, f.town, testRingKey, f.now)
 		f.ringKey = nil
-	}, "ring: key unavailable"},
+	}, "key unavailable (no ring key in the fake)"},
 }
 
 // statusWithRing runs the status report on a healthy fake whose part is set up
@@ -298,8 +312,9 @@ func TestStatusPrintsTheRingLine(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := statusWithRing(t, healthy, tt)
-			if !slices.Contains(strings.Split(got, "\n"), tt.line) {
-				t.Errorf("status output has no line %q:\n%s", tt.line, got)
+			want := statusLine("ring:", tt.line)
+			if !slices.Contains(strings.Split(got, "\n"), want) {
+				t.Errorf("status output has no line %q:\n%s", want, got)
 			}
 		})
 	}
@@ -314,9 +329,24 @@ func TestStatusReadsAnUnreadableRingAsUnreadable(t *testing.T) {
 	o, _, _ := f.optsWithOut()
 	got := f.statusOutput(t, o)
 	if !slices.ContainsFunc(strings.Split(got, "\n"), func(l string) bool {
-		return strings.HasPrefix(l, "ring: unreadable (")
+		return strings.HasPrefix(l, statusLine("ring:", "unreadable ("))
 	}) {
 		t.Errorf("a town config that cannot be parsed did not read as an unreadable ring:\n%s", got)
+	}
+}
+
+// TestStatusReportsTheKeyReadError: a key the reader fails to read leaves the
+// Ring keyless and says why, so the report does not read as a missing key.
+func TestStatusReportsTheKeyReadError(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	ringtest.Valid(t, f.town, testRingKey, f.now)
+	o, _, _ := f.optsWithOut()
+	o.RingKey = func(string) ([]byte, error) { return nil, errors.New("keyring is locked") }
+	got := f.statusOutput(t, o)
+	if want := statusLine("ring:", "key unavailable (keyring is locked)"); !slices.Contains(strings.Split(got, "\n"), want) {
+		t.Errorf("status output has no line %q:\n%s", want, got)
 	}
 }
 
@@ -389,7 +419,9 @@ func TestRealSeamsReportsTheRingKeyless(t *testing.T) {
 	o.RingKey = nil
 	RealSeams(&o)
 	got := f.statusOutput(t, o)
-	if !slices.Contains(strings.Split(got, "\n"), "ring: key unavailable") {
+	if !slices.ContainsFunc(strings.Split(got, "\n"), func(l string) bool {
+		return strings.HasPrefix(l, statusLine("ring:", "key unavailable"))
+	}) {
 		t.Errorf("the production wiring read a key the report should not have:\n%s", got)
 	}
 }
