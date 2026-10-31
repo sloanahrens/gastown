@@ -202,3 +202,23 @@ func TestJevScrubcheckRefusals(t *testing.T) {
 		assert.Empty(t, out.String())
 	})
 }
+
+// TestJevScrubcheckHelpNamesConstants asserts the help output names the
+// threshold constants rather than restating their values, so the help cannot
+// go stale when the operator changes a margin.
+func TestJevScrubcheckHelpNamesConstants(t *testing.T) {
+	t.Parallel()
+	cmd := newJevScrubcheckCmd(jevScrubcheckDeps{})
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{"--help"})
+	require.NoError(t, cmd.Execute())
+	help := buf.String()
+
+	for _, name := range []string{"MinPairs", "FreeMargin", "CostlyMargin"} {
+		assert.Contains(t, help, name)
+	}
+	for _, restated := range []string{"two points", "five points", "30 pairs", "fewer than 30"} {
+		assert.NotContains(t, help, restated)
+	}
+}

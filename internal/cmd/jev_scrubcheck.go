@@ -53,10 +53,10 @@ counts that replaced text in those states.
 
 The baseline is the repeat noise of the same caller and question, read from the
 repeat log beside logtriage's battery log. A scrub is free when its crossing
-share is at most two points above that baseline, borderline up to five points
-above, and costly beyond. A question with fewer than 30 pairs is too few, and one
-without repeat data has no baseline. The margins and the minimum are named
-constants the operator reviews.
+share is at most FreeMargin above that baseline, borderline up to CostlyMargin
+above, and costly beyond. A question with fewer pairs than MinPairs is too few,
+and one without repeat data has no baseline. The three constants live in
+internal/jev/scrubcheck, which the operator reviews.
 
 --caller keeps one caller's lines. --since keeps the lines in the window ending
 now, given as Nd for days or a Go duration such as 36h, and the baseline reads
