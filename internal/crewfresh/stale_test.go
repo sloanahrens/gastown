@@ -14,6 +14,8 @@ var staleNow = time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
 const staleDay = 24 * time.Hour
 
 func TestStaleListsClonesPastTheLimitOldestFirst(t *testing.T) {
+	t.Parallel()
+
 	// The paths name each case, so a failure prints which reading it got.
 	clones := []Clone{
 		{Path: "/crew/23h", LastFetch: staleNow.Add(-23 * time.Hour)},
@@ -35,6 +37,8 @@ func TestStaleListsClonesPastTheLimitOldestFirst(t *testing.T) {
 }
 
 func TestStaleKeepsUnreadableClones(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name string
 		// clone is the checkout the case reads; only one is passed, so the
@@ -61,6 +65,8 @@ func TestStaleKeepsUnreadableClones(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			got := Stale([]Clone{tc.clone}, staleNow, staleDay)
 			if !slices.Equal(got, tc.want) {
 				t.Fatalf("Stale listed %+v, want %+v", got, tc.want)
@@ -70,6 +76,8 @@ func TestStaleKeepsUnreadableClones(t *testing.T) {
 }
 
 func TestStaleOrdersSameFetchByPath(t *testing.T) {
+	t.Parallel()
+
 	// Both rows have the same age, so only their paths can order them.
 	old := staleNow.Add(-5 * staleDay)
 	got := Stale([]Clone{
