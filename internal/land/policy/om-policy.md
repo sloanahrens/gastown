@@ -20,7 +20,7 @@ exception holds only where the bead states it: a thin wrapper that only execs a
 Go binary, Makefile glue, a bootstrap that must run before Go exists, or a file
 the platform dictates.
 
-Source: test standard, "Scripts are debt" and "No new shell scripts" (same file).
+Source: test standard, "Scripts are debt", and the polecat directive's town-policy section "No new scripts for testable logic".
 
 ## A test has a tier and a cost
 

@@ -220,7 +220,7 @@ Applies to any change that touches a cloud project, a role, a service account or
 
 ## 13. A cloud apply needs a preview the human reads
 
-"Cloud calls in a shell script" is refused by "No new scripts for testable logic (town policy, 2026-10-24)" and rule 8, "Do not add a shell or Python script"; this rule is what a cloud call adds on top of them.
+"Cloud calls in a shell script" is refused by the town-policy section "No new scripts for testable logic" and rule 8, "Do not add a shell or Python script"; this rule is what a cloud call adds on top of them.
 - om flags: "apply with confirmations disabled", "preview gated by a grep".
 - Reject outright: an apply, destroy or disable that runs without a preview step the code makes the human read; one that forces past that step (--yes, --force, --skip-preview, disableDependentServices); one with no typed confirmation; a destroy with no stated rollback.
 - Example: dv-honu.6 (apply with confirmations disabled; the red-flag preview gate is a weak grep).
