@@ -128,6 +128,57 @@ func TestPolecatPool_MaxTotal(t *testing.T) {
 	}
 }
 
+// cpus is the sandbox CPU count the seat sizing divides (gt-3ueid): the pool
+// block decodes it under strict decoding, a key beside it the pool does not
+// name is refused, and a written value below 1 is refused with the key named
+// rather than sizing a seat from nothing.
+func TestSandboxPoolCPUsStrict(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cpus decodes and validates", func(t *testing.T) {
+		t.Parallel()
+		var ts TownSettings
+		err := DecodeJSONFile("settings/config.json", []byte(`{"type":"town-settings","version":1,
+			"polecat_pool":{"seats":{"deepseek-flash":{"cap":3},"claude-haiku":{"cap":1}},"cpus":12}}`), &ts)
+		if err != nil {
+			t.Fatalf("DecodeJSONFile: %v", err)
+		}
+		if got := ts.PolecatPool.GetCPUs(); got != 12 {
+			t.Errorf("GetCPUs() = %d, want 12", got)
+		}
+		if got := ts.PolecatPool.SeatTotal(); got != 4 {
+			t.Errorf("SeatTotal() = %d, want 4 (the sum of the seat caps)", got)
+		}
+		if err := ts.PolecatPool.Validate(); err != nil {
+			t.Fatalf("a set cpus must validate: %v", err)
+		}
+	})
+
+	t.Run("an unknown key beside cpus is refused", func(t *testing.T) {
+		t.Parallel()
+		var ts TownSettings
+		err := DecodeJSONFile("settings/config.json", []byte(`{"type":"town-settings","version":1,
+			"polecat_pool":{"cpus":12,"nonsense":1}}`), &ts)
+		if err == nil || !strings.Contains(err.Error(), "nonsense") {
+			t.Fatalf("err = %v, want an unknown-key error naming nonsense", err)
+		}
+	})
+
+	t.Run("cpus 0 is refused with the key named", func(t *testing.T) {
+		t.Parallel()
+		var ts TownSettings
+		err := DecodeJSONFile("settings/config.json", []byte(`{"type":"town-settings","version":1,
+			"polecat_pool":{"cpus":0}}`), &ts)
+		if err != nil {
+			t.Fatalf("DecodeJSONFile: %v", err)
+		}
+		err = ts.PolecatPool.Validate()
+		if err == nil || !strings.Contains(err.Error(), "polecat_pool.cpus") {
+			t.Fatalf("err = %v, want a refusal naming polecat_pool.cpus", err)
+		}
+	})
+}
+
 func TestPolecatPool_ValidateSeatRefillPolicy(t *testing.T) {
 	t.Parallel()
 	neg := -1

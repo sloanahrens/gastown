@@ -49,7 +49,7 @@ func TestAgentEnv_Polecat(t *testing.T) {
 	assertEnv(t, env, "CLAUDECODE", "")             // cleared to prevent nested session detection
 }
 
-// A polecat seat's go commands plan for seatGOFLAGSParallelism packages so
+// A polecat seat's go commands plan for seatGOFLAGSDefaultParallelism packages so
 // several seats plus the landing gate share the host (gt-5lyns). The
 // spawning environment's GOFLAGS is the operator's say: a value that already
 // caps -p wins outright, any other value keeps its flags and gains the cap.
@@ -116,6 +116,73 @@ func TestAgentEnv_PolecatGOFLAGSAgentEnv(t *testing.T) {
 				TownRoot:     "/town",
 				AgentGOFLAGS: tt.agent,
 				Getenv:       func(string) string { return process },
+			})
+			assertEnv(t, env, "GOFLAGS", tt.want)
+		})
+	}
+}
+
+// seatGoParallelism shares the pool's CPUs among its seats, floored at 2 and
+// capped at the default 8; either number absent or not positive is the town
+// saying nothing, and the default stands (gt-3ueid).
+func TestSeatGoParallelismClamps(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		cpus  int
+		seats int
+		want  int
+	}{
+		{"a share of the pool", 12, 6, 2},
+		{"a larger share", 12, 3, 4},
+		{"more than the cap allows", 12, 1, 8},
+		{"fewer than the floor allows", 2, 6, 2},
+		{"no cpus configured", 0, 6, 8},
+		{"no seats configured", 12, 0, 8},
+		{"neither configured", 0, 0, 8},
+		{"negative cpus", -4, 6, 8},
+		{"negative seats", 12, -2, 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := seatGoParallelism(tt.cpus, tt.seats); got != tt.want {
+				t.Errorf("seatGoParallelism(%d, %d) = %d, want %d", tt.cpus, tt.seats, got, tt.want)
+			}
+		})
+	}
+}
+
+// The seat env carries the pool-sized cap, not the constant 8, and an
+// operator value that already names -p is left alone as before (gt-3ueid).
+func TestSeatEnvGOFLAGSUsesTheSizedCap(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cpus    int
+		seats   int
+		current string
+		want    string
+	}{
+		{"the pool's share", 12, 6, "", "-p=2"},
+		{"the pool's share with other operator flags", 12, 4, "-mod=mod", "-mod=mod -p=3"},
+		{"an operator's -p is left alone", 12, 6, "-p=4", "-p=4"},
+		{"a pool that states nothing keeps the default", 0, 0, "", "-p=8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			current := tt.current
+			env := AgentEnv(AgentEnvConfig{
+				Role:      "polecat",
+				Rig:       "myrig",
+				AgentName: "Toast",
+				TownRoot:  "/town",
+				SeatCPUs:  tt.cpus,
+				SeatCount: tt.seats,
+				Getenv:    func(string) string { return current },
 			})
 			assertEnv(t, env, "GOFLAGS", tt.want)
 		})

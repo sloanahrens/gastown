@@ -111,6 +111,8 @@ type SessionManager struct {
 	// through the process environment, so a test that must not depend on the
 	// shell supplies its own.
 	hostSeatIssuer func(townRoot string) (seattoken.Issuer, error)
+	// seatPool reads the pool a seat shares; nil reads the town settings.
+	seatPool func(townRoot string) (*config.PolecatPool, error)
 }
 
 // The two variables a seat on a tracker rig carries. The tracker client reads
@@ -194,8 +196,9 @@ func NewSessionManager(t *tmux.Tmux, r *rig.Rig, prefixes *session.PrefixRegistr
 // polecatAgentEnvConfig is the AgentEnv input for a polecat's session. The
 // resolved agent's own GOFLAGS rides along so the seat's -p cap follows what
 // the agent env says instead of replacing it (a session backend applies this
-// map after the agent preset env).
-func polecatAgentEnvConfig(rig, polecat, townRoot, sessionID string, opts SessionStartOptions, rc *config.RuntimeConfig) config.AgentEnvConfig {
+// map after the agent preset env). The pool carries the numbers the cap is
+// sized from; a nil pool leaves the default cap.
+func polecatAgentEnvConfig(rig, polecat, townRoot, sessionID string, opts SessionStartOptions, rc *config.RuntimeConfig, pool *config.PolecatPool) config.AgentEnvConfig {
 	cfg := config.AgentEnvConfig{
 		Role:             "polecat",
 		Rig:              rig,
@@ -204,11 +207,30 @@ func polecatAgentEnvConfig(rig, polecat, townRoot, sessionID string, opts Sessio
 		RuntimeConfigDir: opts.RuntimeConfigDir,
 		Agent:            opts.Agent,
 		SessionName:      sessionID,
+		SeatCPUs:         pool.GetCPUs(),
+		SeatCount:        pool.SeatTotal(),
 	}
 	if rc != nil {
 		cfg.AgentGOFLAGS = rc.Env["GOFLAGS"]
 	}
 	return cfg
+}
+
+// launchSeatPool returns the pool a launch sizes its seat's go parallelism
+// from. A settings file that will not load is an error and not an empty pool:
+// the seat's backend comes from those same settings and a spawn refuses
+// without them, so failing here keeps one rule for a town config gt cannot
+// read (gt-3ueid) instead of handing every seat the default -p the operator's
+// cpus was there to lower.
+func (m *SessionManager) launchSeatPool(townRoot string) (*config.PolecatPool, error) {
+	if m.seatPool != nil {
+		return m.seatPool(townRoot)
+	}
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return nil, err
+	}
+	return ts.PolecatPool, nil
 }
 
 // SessionStartOptions configures polecat session startup.
@@ -691,6 +713,14 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		return fmt.Errorf("resolving agent config for %s: %w", opts.Agent, err)
 	}
 
+	// The pool's CPUs and seat total size this seat's go parallelism
+	// (config's seatGoParallelism, gt-3ueid). Read once and given to both env
+	// configs below, the session's and the startup command's.
+	pool, err := m.launchSeatPool(townRoot)
+	if err != nil {
+		return fmt.Errorf("sizing %s's go parallelism: %w", polecat, err)
+	}
+
 	// Prepare the workspace (settings, folder trust) before the session starts.
 	if err := m.ensureRuntimeWorkspace(polecat, workDir, opts.RuntimeConfigDir, runtimeConfig); err != nil {
 		return err
@@ -725,7 +755,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		}
 		polecatGitBranch = branch
 	}
-	envVars := config.AgentEnv(polecatAgentEnvConfig(m.rig.Name, polecat, townRoot, sessionID, opts, runtimeConfig))
+	envVars := config.AgentEnv(polecatAgentEnvConfig(m.rig.Name, polecat, townRoot, sessionID, opts, runtimeConfig, pool))
 	// AgentEnv already sets GT_ROLE, GT_RIG, GT_POLECAT, BD_ACTOR,
 	// BD_DOLT_AUTO_COMMIT, etc. Layer in polecat-session-specific vars.
 	envVars["GT_POLECAT_PATH"] = workDir
@@ -775,6 +805,10 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		AgentName:   polecat,
 		TownRoot:    townRoot,
 		SessionName: sessionID,
+		// The startup command exports GOFLAGS into the pane, after the session
+		// environment is set, so it carries the same pool-sized cap.
+		SeatCPUs:  pool.GetCPUs(),
+		SeatCount: pool.SeatTotal(),
 	}
 	if b := opts.Backend; b != nil && b.Name() != session.BackendTmux {
 		fh, ok := b.(forgejoHoster)
