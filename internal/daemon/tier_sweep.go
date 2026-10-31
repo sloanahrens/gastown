@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/promote"
+	"github.com/steveyegge/gastown/internal/sweeprunner"
 	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
@@ -125,6 +127,25 @@ const (
 	// tierSweepNoName stands in for the failing unit when a RED summary named
 	// none.
 	tierSweepNoName = "(no failing unit named)"
+
+	// tierSweepRunnerNoResult is the RED reason a tier takes when the runner
+	// wrote no result the daemon could read: a launch that failed, a stage
+	// budget that passed with no file, or a file it cannot read. It is never
+	// GREEN: a run whose result never arrived judged nothing (gt-z4ppb).
+	tierSweepRunnerNoResult = "runner: no result"
+
+	// tierSweepRunnerPollInterval is how long the daemon waits between reads of
+	// a running run's result.json. The file appears by rename when the run
+	// ends, so the read is cheap and the interval only bounds the latency of a
+	// finished run showing up.
+	tierSweepRunnerPollInterval = 5 * time.Second
+
+	// tierSweepRunnerTeardownBudget bounds the steps that remove a run's
+	// containers, network and volume once its result is read. A teardown that
+	// outlives it leaves objects behind, which the next sweep's names do not
+	// collide with (the run id is in every name) but the operator has to
+	// remove by hand; it never fails the stage, whose verdict is already in.
+	tierSweepRunnerTeardownBudget = 5 * time.Minute
 )
 
 // The tier verdicts, the words the script's summary line uses.
@@ -533,6 +554,11 @@ type tierSweepSeams struct {
 	worktree func(ctx context.Context, repo, dir, sha string) (func(), error)
 	// run executes one stage in dir.
 	run func(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult
+	// launch starts the rendered run of one off-host stage and returns its
+	// teardown. The daemon then polls the Spec's output directory for the
+	// result, so a test fakes the launch by writing one there. Nil resolves to
+	// the daemon's own launcher over the configured backend.
+	launch func(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch
 	// treeHas reports whether the checked-out tree at dir ships rel, a file or a
 	// directory, and an error when the tree cannot be read. Each stage's command
 	// is picked from it before the stage runs.
@@ -1487,12 +1513,25 @@ func tierSweepMainSHA(ctx context.Context, repo string) (string, error) {
 	return strings.TrimSpace(sha), nil
 }
 
-// tierSweepRunStage runs one stage in dir. The shell stage runs as its own
-// step. The integration stage is named "test" so land.WithSlot holds the town's
-// container-gate slot around it under the sweep's non-gate role: the script's
-// inner `gt slot run` calls inherit that role and ride the one hold
-// reentrantly.
+// tierSweepRunStage runs one stage in dir. A stage the runner config moves off
+// the host is rendered as a Spec, launched detached and read back from its
+// result.json; every other stage runs in dir as its own step.
+//
+// The host stage: the shell stage runs as its own step. The integration stage
+// is named "test" so land.WithSlot holds the town's container-gate slot around
+// it under the sweep's non-gate role: the script's inner `gt slot run` calls
+// inherit that role and ride the one hold reentrantly.
 func (d *Daemon) tierSweepRunStage(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult {
+	spec, offHost, err := d.tierSweepRunnerSpec(st)
+	switch {
+	case err != nil:
+		// A runner the config names but no backend can render is RED: falling
+		// back to the host would answer the sweep for a machine the operator
+		// moved it off (gt-z4ppb).
+		return tierSweepStageResult{output: err.Error() + "\n", exitCode: -1, ran: true, reason: err.Error()}
+	case offHost:
+		return d.tierSweepRunRunner(ctx, st, spec)
+	}
 	var buf bytes.Buffer
 	cg := d.tierSweepGate(st)
 	cg.Out = &buf
@@ -1508,6 +1547,459 @@ func (d *Daemon) tierSweepRunStage(ctx context.Context, dir string, st tierSweep
 		ran:      true,
 		slotWait: step.SlotWait,
 	}
+}
+
+// tierSweepRunnerRunID names the run a stage starts: the rig, the commit it
+// tests and the tiers it runs, and nothing else. A cycle that defers, or a
+// daemon that restarts while a run is going, names the same output directory
+// again and adopts the run there instead of starting a second engine beside it
+// (gt-z4ppb). Every container, network and volume the run makes carries this
+// name, so two stages that ran different tiers never remove each other's
+// objects.
+func tierSweepRunnerRunID(rig, sha string, tiers []string) string {
+	return rig + "-" + shortSHA(sha) + "-" + strings.Join(tiers, "-")
+}
+
+// tierSweepRunnerSpec returns the Spec a stage renders off-host, and whether
+// the runner takes the stage at all. Only the stage that starts containers
+// leaves the host, and only when the config names a runner and the stage runs
+// the Go sweep command: the shell stage stays on the host, and so does a rig's
+// own script, which cmd/sweep-run does not run.
+//
+// An error is a runner the config names whose Spec cannot be rendered: the
+// stage is then RED, never run on the host instead.
+func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool, error) {
+	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	if cfg == nil || !st.slot || st.script {
+		return sweeprunner.Spec{}, false, nil
+	}
+	runID := tierSweepRunnerRunID(st.rig, st.tested, st.tiers)
+	spec := sweeprunner.Spec{
+		Rig:      st.rig,
+		SHA:      st.tested,
+		Image:    cfg.Image,
+		CPUs:     cfg.CPUs,
+		MemoryGB: cfg.Memory,
+		Tiers:    append([]string(nil), st.tiers...),
+		Jobs:     cfg.Jobs,
+		OutDir:   filepath.Join(cfg.OutputRoot, st.rig, runID),
+		RepoDir:  filepath.Join(d.config.TownRoot, st.rig, ".repo.git"),
+		Dind:     cfg.Dind,
+		RunID:    runID,
+		Context:  cfg.Context,
+	}
+	if err := spec.Validate(); err != nil {
+		return sweeprunner.Spec{}, false, err
+	}
+	return spec, true, nil
+}
+
+// tierSweepRunnerConfig returns the runner block the sweep's config names, or
+// nil when the tiers run on the host.
+func tierSweepRunnerConfig(patrols *DaemonPatrolConfig) *config.TierSweepRunnerConfig {
+	if patrols == nil || patrols.Patrols == nil || patrols.Patrols.TierSweep == nil {
+		return nil
+	}
+	return patrols.Patrols.TierSweep.Runner
+}
+
+// tierSweepRunnerRecordName is the launch record's name in the run's output
+// directory, beside result.json. A launch writes it once the run is going, and
+// its teardown removes it; the next cycle reads it to tell a run that is still
+// going from a directory nothing is writing (gt-z4ppb).
+const tierSweepRunnerRecordName = "launch.json"
+
+// tierSweepRunnerRecord is what a launch leaves in the run's output directory:
+// the run it started and when. The start is the origin its budget is measured
+// from, so a cycle that adopts an adopted run's own wait is never restarted.
+type tierSweepRunnerRecord struct {
+	RunID   string    `json:"run_id"`
+	Started time.Time `json:"started"`
+}
+
+// tierSweepWriteRunnerRecord records a started run in dir. It is written whole
+// by rename, so a reader sees a record or none (gt-z4ppb).
+func tierSweepWriteRunnerRecord(dir string, rec tierSweepRunnerRecord) error {
+	if rec.RunID == "" || rec.Started.IsZero() {
+		return errors.New("the launch record names no run")
+	}
+	path := filepath.Join(dir, tierSweepRunnerRecordName)
+	if err := atomicfile.WriteJSON(path, rec); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// tierSweepReadRunnerRecord reads dir's launch record. A missing one is
+// fs.ErrNotExist, which the stage reads as "nothing was launched here"; one it
+// cannot decode is an error, because an unreadable record must not read as "no
+// run": that would start a second engine beside a live one (gt-z4ppb).
+func tierSweepReadRunnerRecord(dir string) (tierSweepRunnerRecord, error) {
+	path := filepath.Join(dir, tierSweepRunnerRecordName)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the daemon's own run output directory
+	if err != nil {
+		return tierSweepRunnerRecord{}, err
+	}
+	var rec tierSweepRunnerRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return tierSweepRunnerRecord{}, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if rec.RunID == "" || rec.Started.IsZero() {
+		return tierSweepRunnerRecord{}, fmt.Errorf("reading %s: the record names no run", path)
+	}
+	return rec, nil
+}
+
+// tierSweepLaunch is what starting one rendered run reported: the start steps'
+// combined output and the status of the step that failed, the function that
+// takes the run down (nil when nothing was made), and the error that stopped
+// it starting at all.
+type tierSweepLaunch struct {
+	output   string
+	exitCode int
+	stop     func()
+	err      error
+}
+
+// tierSweepRunRunner runs one stage through the runner: it starts the rendered
+// run detached, polls the run's output directory for result.json until the
+// stage's budget passes, and folds the tiers the result names into the stage's
+// output in the shape the cycle already reads. The record, the log and the
+// attention items then come from the same code a host stage's do.
+//
+// The run outlives a cycle that ends its wait, and a cycle that finds a run in
+// its directory adopts it rather than starting a second engine beside it. The
+// directory is named after what the run tests (tierSweepRunnerRunID), so a
+// deferral or a daemon restart arrives at the same one: a result there is
+// folded without a launch, a launch record younger than the stage budget is
+// waited on, and one older than it is a run that died with its daemon, removed
+// and replaced (gt-z4ppb).
+//
+// A launch that failed, a budget that passed with no result, and a result the
+// daemon cannot read are all RED with tierSweepRunnerNoResult, never GREEN.
+// The run starts its own engine, so the stage takes no container-gate slot:
+// this path builds no gate and no step, and the stage handed to it has its slot
+// flag cleared.
+func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepStageResult {
+	st.slot = false
+	// A stage that asked for no tier can fold nothing, and a run started for
+	// it would write a result refusing to convert: RED before anything runs
+	// (gt-z4ppb).
+	if len(st.tiers) == 0 {
+		return tierSweepRunnerNoResultStage(tierSweepLaunch{exitCode: -1}, errors.New("no tiers asked for"), false)
+	}
+	// The run writes its result and logs here, and the container mounts the
+	// directory: it has to exist before the run starts.
+	if err := os.MkdirAll(spec.OutDir, 0o700); err != nil {
+		return tierSweepRunnerNoResultStage(tierSweepLaunch{exitCode: -1}, fmt.Errorf("creating the run's output directory: %w", err), false)
+	}
+	// stop takes the run down once this stage has a verdict about it, and only
+	// then: a cycle that ends the wait early leaves the run going in its
+	// containers, which is what the next cycle adopts (gt-z4ppb).
+	stop := func() { d.tierSweepRunnerStop(ctx, spec) }
+	var started tierSweepLaunch
+
+	// A result already in the run's directory answers this stage with no
+	// launch: a cycle that died between the run finishing and folding its
+	// result reads it here, and the run is not started a second time.
+	if res, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA); err == nil {
+		stop()
+		return d.tierSweepRunnerStageResult(st, spec, res, started)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		// The file is there and is not a result this run can use, and results
+		// are published by rename: nothing will rewrite it, so the verdict is
+		// this one, taken now rather than at the budget.
+		stop()
+		return tierSweepRunnerNoResultStage(started, err, false)
+	}
+
+	// A launch record for this same run means a cycle already started it, and
+	// the start its budget is measured from is the record's, not this cycle's.
+	var wait time.Duration
+	rec, err := tierSweepReadRunnerRecord(spec.OutDir)
+	switch {
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		// A record the daemon cannot read must not read as "no run": that
+		// would start a second engine beside one that may be going.
+		stop()
+		return tierSweepRunnerNoResultStage(started, err, false)
+	case err == nil && rec.RunID == spec.RunID:
+		if remaining := rec.Started.Add(st.budget).Sub(d.clk().Now()); remaining > 0 {
+			wait = min(remaining, st.budget)
+		} else {
+			// The run outlived its own budget with no result to show: it is
+			// dead with the daemon that started it, so this stage removes what
+			// it left and starts its own.
+			d.logger.Printf("tier_sweep: %s: run %s outlived its %s budget with no result; removing it", spec.Rig, spec.RunID, st.budget)
+			stop()
+		}
+	}
+
+	if wait == 0 {
+		launch := d.tierSweepSeams.launch
+		if launch == nil {
+			launch = d.tierSweepLaunchRunner
+		}
+		started = launch(ctx, st, spec)
+		if started.stop != nil {
+			stop = started.stop
+		}
+		if started.err != nil {
+			stop()
+			return tierSweepRunnerNoResultStage(started, started.err, false)
+		}
+		// The record is what the next cycle reads to adopt this run: the run id,
+		// and the start its budget is measured from.
+		if err := tierSweepWriteRunnerRecord(spec.OutDir, tierSweepRunnerRecord{RunID: spec.RunID, Started: d.clk().Now()}); err != nil {
+			// Without it the next cycle starts a second engine beside this one,
+			// so the run is taken down rather than left unrecorded.
+			stop()
+			return tierSweepRunnerNoResultStage(started, fmt.Errorf("writing the run's launch record: %w", err), false)
+		}
+		wait = st.budget
+	}
+
+	// The stage's own budget bounds the wait for the result, apart from the
+	// cycle's: the two end the wait differently. A budget that passes with no
+	// result judged nothing, so it is RED; a cycle that ends the wait learned
+	// nothing about the tree, so the cycle defers and retries.
+	budget := time.NewTimer(wait)
+	defer budget.Stop()
+	tick := time.NewTicker(tierSweepRunnerPollInterval)
+	defer tick.Stop()
+	for {
+		res, err := sweeprunner.Read(spec.OutDir, spec.Rig, spec.SHA)
+		if err == nil {
+			stop()
+			return d.tierSweepRunnerStageResult(st, spec, res, started)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			stop()
+			return tierSweepRunnerNoResultStage(started, err, false)
+		}
+		select {
+		case <-budget.C:
+			stop()
+			why := fmt.Errorf("no result in %s after %s", spec.OutDir, st.budget)
+			return tierSweepRunnerNoResultStage(started, why, true)
+		case <-ctx.Done():
+			// The cycle's own deadline ended the wait. The run keeps going in
+			// its containers, so nothing was learned about the tree: the stage
+			// did not run, and the cycle defers it. Its teardown is not run.
+			return tierSweepStageResult{exitCode: -1, err: ctx.Err()}
+		case <-tick.C:
+		}
+	}
+}
+
+// tierSweepRunnerNoResultStage is the stage result of a run whose result the
+// daemon never read: the tiers take tierSweepRunnerNoResult as their reason and
+// the output says why, so the log the daemon writes explains the RED. The exit
+// code is -1 because no tier exit produced it, and a timedOut marks a budget
+// the stage's own deadline ended rather than the cycle's.
+func tierSweepRunnerNoResultStage(started tierSweepLaunch, why error, timedOut bool) tierSweepStageResult {
+	var b strings.Builder
+	b.WriteString("sweep-run: " + why.Error() + "\n")
+	if started.output != "" {
+		b.WriteString(started.output)
+		if !strings.HasSuffix(started.output, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	return tierSweepStageResult{
+		output:   b.String(),
+		exitCode: -1,
+		timedOut: timedOut,
+		ran:      true,
+		reason:   tierSweepRunnerNoResult,
+	}
+}
+
+// tierSweepRunnerStageResult folds one read result into the stage result the
+// cycle judges: the summary line of each tier the stage asked for, in the
+// stage's order, and an exit code that says whether any of them was RED. A
+// result that names a tier the stage did not ask for, or names none of them, is
+// refused as a whole: a partial fold would record a wrong verdict, not a
+// smaller one (gt-z4ppb).
+func (d *Daemon) tierSweepRunnerStageResult(st tierSweepStage, spec sweeprunner.Spec, res sweeprunner.Result, started tierSweepLaunch) tierSweepStageResult {
+	// A stage that asked for no tier folds nothing, and an empty fold reads to
+	// the cycle as a clean sweep of nothing: it is RED (gt-z4ppb).
+	if len(st.tiers) == 0 {
+		return tierSweepRunnerNoResultStage(started, errors.New("no tiers asked for"), false)
+	}
+	converted, err := sweeprunner.ToTierResults(res)
+	if err != nil {
+		return tierSweepRunnerNoResultStage(started, fmt.Errorf("reading %s: %w", spec.OutDir, err), false)
+	}
+	want := make(map[string]bool, len(st.tiers))
+	for _, tier := range st.tiers {
+		want[tier] = true
+	}
+	summaries := make(map[string]string, len(res.Tiers))
+	for _, tier := range res.Tiers {
+		summaries[tier.Tier] = tier.Summary
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "sweep-run: %s@%s in %s finished at %s\n", spec.Rig, shortSHA(spec.SHA), spec.Image, res.Finished.Format(time.RFC3339))
+	anyRed := false
+	for _, tier := range st.tiers {
+		ts, ok := converted[tier]
+		if !ok {
+			return tierSweepRunnerNoResultStage(started, fmt.Errorf("the result in %s names no %s tier", spec.OutDir, tier), false)
+		}
+		if ts.Verdict == tierSweepRed {
+			anyRed = true
+		}
+		b.WriteString(summaries[tier])
+		if !strings.HasSuffix(summaries[tier], "\n") {
+			b.WriteString("\n")
+		}
+	}
+	for tier := range converted {
+		if !want[tier] {
+			return tierSweepRunnerNoResultStage(started, fmt.Errorf("the result in %s names %s, which this stage did not ask for", spec.OutDir, tier), false)
+		}
+	}
+	exitCode := 0
+	if anyRed {
+		// The sweep's own RED exit, so a RED line beside a GREEN one stands:
+		// tierSweepExitStands reads the pair exactly as it reads the host
+		// command's (gt-z4ppb).
+		exitCode = tierSweepRedExit
+	}
+	return tierSweepStageResult{output: b.String(), exitCode: exitCode, ran: true}
+}
+
+// tierSweepRunnerBackend builds the backend the config names. A backend the
+// daemon cannot launch is refused rather than replaced: running the tiers on
+// the host instead would answer for a machine the operator took the sweep off
+// (gt-z4ppb).
+func tierSweepRunnerBackend(name string) (sweeprunner.Backend, error) {
+	switch name {
+	case sweeprunner.Docker{}.Name():
+		return sweeprunner.Docker{}, nil
+	case sweeprunner.Kubernetes{}.Name():
+		// R2 renders the Job, but its result lands on the run's output claim,
+		// which the caller creates and reads back; the daemon has no copy-out
+		// for a Job's result yet.
+		return nil, fmt.Errorf("runner backend %q: the daemon cannot read a Job's result yet; use %q", name, sweeprunner.Docker{}.Name())
+	}
+	return nil, fmt.Errorf("runner backend %q: want %q or %q", name, sweeprunner.Docker{}.Name(), sweeprunner.Kubernetes{}.Name())
+}
+
+// tierSweepLaunchRunner renders spec through the configured backend and starts
+// it detached: the plan's start steps run in order and stop at the first
+// failure, and the plan's teardown comes back for the caller to run once it has
+// read the result. A start that failed still returns the teardown, so a
+// network, volume or sidecar an earlier step made is removed.
+func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
+	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	if cfg == nil {
+		return tierSweepLaunch{exitCode: -1, err: errors.New("no runner is configured")}
+	}
+	backend, err := tierSweepRunnerBackend(cfg.Backend)
+	if err != nil {
+		return tierSweepLaunch{exitCode: -1, err: err}
+	}
+	d.logger.Printf("tier_sweep: %s: launching %s on %s (run %s)", spec.Rig, strings.Join(st.tiers, ", "), cfg.Backend, spec.RunID)
+	plan, err := backend.Render(spec)
+	if err != nil {
+		return tierSweepLaunch{exitCode: -1, err: err}
+	}
+	if plan.Job != nil {
+		// Only the Kubernetes backend renders a Job, and tierSweepRunnerBackend
+		// refuses it: a Job this path applied would leave every run's output
+		// claim behind and its result unread.
+		return tierSweepLaunch{exitCode: -1, err: fmt.Errorf("runner backend %q: a Job is not launched here", cfg.Backend)}
+	}
+	// Only the plan's start steps run here: the teardown steps in the same plan
+	// run once the caller has read the result, and running them at launch would
+	// take the run down the moment it started (gt-z4ppb).
+	start := make([]sweeprunner.Step, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		if !step.Teardown {
+			start = append(start, step)
+		}
+	}
+	out, code := tierSweepRunSteps(ctx, d, start)
+	launch := tierSweepLaunch{output: out, exitCode: code}
+	launch.stop = func() { d.tierSweepRunnerStop(ctx, spec) }
+	if code != 0 {
+		launch.err = fmt.Errorf("the run did not start (exit %d)", code)
+	}
+	return launch
+}
+
+// tierSweepRunnerStop takes the run in spec.OutDir down: it renders the Spec
+// through the configured backend again and runs the plan's teardown, then
+// removes the launch record so no later cycle adopts a run that is gone. It
+// reports nothing: the verdict it is called for is already taken, so a
+// teardown that fails is logged with its last lines and retried by the next
+// cycle, which still finds the record (gt-z4ppb).
+func (d *Daemon) tierSweepRunnerStop(ctx context.Context, spec sweeprunner.Spec) {
+	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	if cfg == nil {
+		return
+	}
+	backend, err := tierSweepRunnerBackend(cfg.Backend)
+	if err != nil {
+		d.logger.Printf("tier_sweep: %s: taking run %s down: %v", spec.Rig, spec.RunID, err)
+		return
+	}
+	plan, err := backend.Render(spec)
+	if err != nil {
+		d.logger.Printf("tier_sweep: %s: taking run %s down: %v", spec.Rig, spec.RunID, err)
+		return
+	}
+	d.tierSweepRunnerTeardown(ctx, spec, plan.Teardown())
+}
+
+// tierSweepRunnerTeardown runs a run's teardown steps on a context of its own,
+// so a stage budget that expired, or a cycle that was canceled, does not leave
+// the containers behind for an operator to remove by hand. Only a teardown that
+// finished removes the launch record: while anything is left, the record is the
+// truth that the run is still there.
+func (d *Daemon) tierSweepRunnerTeardown(ctx context.Context, spec sweeprunner.Spec, steps []sweeprunner.Step) {
+	if len(steps) > 0 {
+		tdCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tierSweepRunnerTeardownBudget)
+		defer cancel()
+		if tdOut, tdCode := tierSweepRunSteps(tdCtx, d, steps); tdCode != 0 {
+			d.logger.Printf("tier_sweep: %s: removing the run's objects (exit %d); last lines:\n%s",
+				spec.Rig, tdCode, lastLines(tdOut, tierSweepLogTailLines))
+			return
+		}
+	}
+	path := filepath.Join(spec.OutDir, tierSweepRunnerRecordName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		d.logger.Printf("tier_sweep: %s: removing run %s's launch record: %v", spec.Rig, spec.RunID, err)
+	}
+}
+
+// tierSweepRunSteps runs a plan's steps in order, stopping at the first that
+// fails, and returns their combined output and that step's status. A step that
+// could not be started at all reports -1: it never ran, which is a different
+// thing to investigate than a command that ran and failed.
+func tierSweepRunSteps(ctx context.Context, d *Daemon, steps []sweeprunner.Step) (string, int) {
+	var b strings.Builder
+	for _, step := range steps {
+		if len(step.Argv) == 0 {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
+		stdout, stderr, err := d.runCmd(cmd)
+		b.Write(stdout)
+		b.Write(stderr)
+		if err != nil {
+			code := -1
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				code = exitErr.ExitCode()
+			}
+			fmt.Fprintf(&b, "sweep-run: %s failed (exit %d): %v\n", strings.Join(step.Argv, " "), code, err)
+			return b.String(), code
+		}
+	}
+	return b.String(), 0
 }
 
 // tierSweepResumeEnableEnv is the daemon environment switch that lets a
