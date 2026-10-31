@@ -145,7 +145,7 @@ func SandboxSeatOriginBranch(fields *beads.AgentFields) (branch, unknownReason s
 // no-changes close is not a landing), an issue that cannot be read, an origin
 // that cannot be asked, or a branch for the issue still on origin. Every
 // caller reports a non-empty reason as an unknown git state, which is the
-// verdict this case got before the landed case was recognised.
+// verdict this case got before the landed case was recognized.
 //
 // originBranch reports the most recent generated polecat branch on origin that
 // encodes issueID, "" when there is none. Such a branch is named for the seat
