@@ -280,17 +280,10 @@ func TestCaptureFailureReleasesTheCommand(t *testing.T) {
 		return unreadable{pr}, pw
 	}
 	r := &Runner{Exec: exec, LogDir: t.TempDir(), Timeout: "7m", Stderr: &bytes.Buffer{}, JSON: true, Stream: stream}
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		r.Tier(TierIntegration, ".", nil, nil, []string{pkg})
-	}()
-	select {
-	case <-finished:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the package did not finish: its command blocked writing a stream nothing reads")
-	}
-	if err := <-wrote; err == nil {
+	finished := make(chan Counts, 1)
+	go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, []string{pkg}) }()
+	waitOrFail(t, finished, "the package to finish: its command blocked writing a stream nothing reads")
+	if err := waitOrFail(t, wrote, "the command's write to return"); err == nil {
 		t.Error("the command's write into the abandoned stream succeeded, want an error")
 	}
 }
