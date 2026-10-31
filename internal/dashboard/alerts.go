@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"regexp"
@@ -103,6 +105,9 @@ const rejectionFreshWithin = 10 * time.Minute
 type Alerter struct {
 	now func() time.Time
 
+	// instance names this alerter in the id of every alert it raises, so the id
+	// stays unique across a hub restart (see newAlertInstance).
+	instance string
 	// seq numbers the alerts this alerter raises.
 	seq int64
 
@@ -160,10 +165,29 @@ func NewAlerter(now func() time.Time) *Alerter {
 	}
 	return &Alerter{
 		now:        now,
+		instance:   newAlertInstance(),
 		rejectSeen: map[int64]bool{},
 		cooldown:   map[string]time.Time{},
 		standing:   map[string]standingAttention{},
 	}
+}
+
+// newAlertInstance names one hub in the id of the alerts it raises. The page
+// keeps each EVENTS line once, keyed by the alert's id, and the numbering starts
+// over with every hub process: without the instance the page would take the first
+// alerts after a restart for ones it already shows and drop them (gt-wpgga).
+func newAlertInstance() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// alertID names the next alert this alerter raises.
+func (a *Alerter) alertID() string {
+	a.seq++
+	return fmt.Sprintf("alert-%s-%d", a.instance, a.seq)
 }
 
 // Baseline forgets the run lengths and baselines of the rules. The hub calls it
@@ -217,8 +241,7 @@ func (a *Alerter) fire(now time.Time, level, key, title, text string) (Alert, bo
 		return Alert{}, false
 	}
 	a.cooldown[key] = now
-	a.seq++
-	return Alert{ID: fmt.Sprintf("alert-%d", a.seq), At: now, Level: level, Key: key, Title: title, Text: text}, true
+	return Alert{ID: a.alertID(), At: now, Level: level, Key: key, Title: title, Text: text}, true
 }
 
 // healthAlert reads the health rule off next.Health. A reading is fresh when
@@ -540,8 +563,7 @@ func (a *Alerter) ObserveAttention(evs []attention.Event, acks attention.Acks) (
 			if title == "" {
 				title = string(e.Class)
 			}
-			a.seq++
-			al := Alert{ID: fmt.Sprintf("alert-%d", a.seq), At: e.TS, Level: attentionLevel(e.Severity), Key: e.Key, Title: title, Text: e.Text, Rule: e.Rule}
+			al := Alert{ID: a.alertID(), At: e.TS, Level: attentionLevel(e.Severity), Key: e.Key, Title: title, Text: e.Text, Rule: e.Rule}
 			if al.At.IsZero() {
 				al.At = now
 			}

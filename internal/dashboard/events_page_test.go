@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
 )
 
 // The EVENTS panel is the page's history of the alerts that used to stack over
@@ -237,5 +239,29 @@ func TestAlertsRaisedBeforeThePageOpenedAreReadNotUnread(t *testing.T) {
 	}
 	if got := eventsHeaderNote(t, dom); got != "" {
 		t.Errorf("the header reads %q for alerts raised before the page opened, want no count", got)
+	}
+}
+
+// A page outlives the hub it reads: the hub is restarted under it and the new
+// process numbers its alerts from one again. The page shows an alert once by id,
+// so each hub names its alerts with its own instance; a restart that reused the
+// old ids would have the page take the new hub's first alerts for repeats and
+// drop them (gt-wpgga).
+func TestAlertsFromARestartedHubAreNotTakenForRepeats(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	ev := wakeEvent(attention.RuleSlotHeld, "slot:gastown", "slot held 3h", attention.SeverityHigh)
+	for i, hub := range []*Alerter{NewAlerter(nil), NewAlerter(nil)} {
+		raised, _ := hub.ObserveAttention([]attention.Event{ev}, attention.Acks{})
+		if len(raised) != 1 {
+			t.Fatalf("hub %d raised %d alerts for one wake line, want 1", i, len(raised))
+		}
+		streamAlert(t, dom, raised[0])
+	}
+
+	lines := feedLines(t, dom)
+	if len(lines) != 2 {
+		t.Fatalf("the feed holds %d lines for one alert from each of two hubs, want 2: %+v", len(lines), lines)
 	}
 }
