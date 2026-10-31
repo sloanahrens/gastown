@@ -1715,6 +1715,53 @@ func TestTierSweepStateRecordsSlotWait(t *testing.T) {
 	}
 }
 
+// TestTierSweepLogNoteNeedsTheSlot: the finished line names a wait only for a
+// stage that held the slot, the same gate the record uses. The shell stage
+// never takes the slot, so a wait reported beside it is not its own and its
+// line must not name it (gt-xr24i). Mutation: drop the st.slot gate from the
+// waitNote condition and the shell row goes red.
+func TestTierSweepLogNoteNeedsTheSlot(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	clk := clockwork.NewFakeClockAt(now)
+	d.clock = clk
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		clk.Advance(time.Minute)
+		var b strings.Builder
+		for _, tier := range st.tiers {
+			fmt.Fprintf(&b, "tier-sweep: %s GREEN passed=3 failed=0 skipped=0 in 4m23s\n", tier)
+		}
+		// Every stage reports a wait, slot or not.
+		return tierSweepStageResult{output: b.String(), exitCode: 0, ran: true, slotWait: 22*time.Minute + 27*time.Second}
+	}
+	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+	if !d.runTierSweep() {
+		t.Fatal("runTierSweep deferred; want a verdict")
+	}
+	var shellLine, integrationLine string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		switch {
+		case strings.HasPrefix(line, "tier_sweep: gastown: shell finished"):
+			shellLine = line
+		case strings.HasPrefix(line, "tier_sweep: gastown: integration finished"):
+			integrationLine = line
+		}
+	}
+	if shellLine == "" || integrationLine == "" {
+		t.Fatalf("want a finished line for shell and integration; got:\n%s", logs.String())
+	}
+	if strings.Contains(shellLine, "slot wait") {
+		t.Errorf("shell stage never held the slot but its line names a wait: %s", shellLine)
+	}
+	if !strings.Contains(integrationLine, "(slot wait 22m27s)") {
+		t.Errorf("integration held the slot but its line names no wait: %s", integrationLine)
+	}
+}
+
 // TestRunTierSweep_LogsSweepStarted: the cycle's start names the rig's sha and
 // every tier the cycle will run, so the dashboard's Tier sweeps pane reads an
 // exact running state instead of inferring it (gt-rntre).

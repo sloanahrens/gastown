@@ -1178,9 +1178,10 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			results[tier] = ts
 		}
 		waitNote := ""
-		// Under a second reads as no wait, and the line is about the sweep, not
-		// a clock tick.
-		if res.slotWait >= time.Second {
+		// Only a stage that held the slot has a wait, the gate the record uses
+		// too. Under a second reads as no wait, and the line is about the sweep,
+		// not a clock tick.
+		if st.slot && res.slotWait >= time.Second {
 			waitNote = fmt.Sprintf(" (slot wait %s)", res.slotWait.Round(time.Second))
 		}
 		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s%s; last lines:\n%s",
