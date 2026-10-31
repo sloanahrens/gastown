@@ -61,6 +61,13 @@ const (
 	// re-filed; beyond it, overlap is more likely to be coincidence.
 	duplicateLookback = 72 * time.Hour
 
+	// duplicateRecentlyClosed is how recently a bead must have closed to have
+	// its design and notes read for the pool. An older closed bead is compared
+	// on its list row alone; its design and notes are read only for a candidate
+	// whose own refs overlap that row (enrichOverlapping), so the pool never
+	// shows the hundreds of closed beads that share nothing with it.
+	duplicateRecentlyClosed = 24 * time.Hour
+
 	// duplicatePoolTTL is how long a fetched pool is reused. Dispatches arrive
 	// in bursts (batch sling, the scheduler's batch) and a pool fetch costs two
 	// bd list round-trips, so a short TTL collapses a burst into one fetch. The
@@ -316,6 +323,7 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 	if err != nil {
 		return candidate, nil, fmt.Errorf("duplicate check skipped: %w", err)
 	}
+	pool = p.enrichOverlapping(beadsDir, *candidate, pool)
 	matches := findDuplicateMatches(*candidate, pool)
 	matches = dropRelatedMatches(*candidate, pool, matches)
 	return candidate, p.resolvePeerHolds(townRoot, beadsDir, *candidate, pool, matches), nil
@@ -495,9 +503,13 @@ type duplicatePools struct {
 	// the peer's pool row and the pool rather than asking bd about the bead
 	// again (gt-mknmb). A nil resolver is the conservative reading: no peer is
 	// known to be held, so each still holds the sling on its rank.
-	held  func(townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string
-	mu    sync.Mutex
-	cache map[string]*duplicatePoolEntry
+	held func(townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string
+	// details reads the design and notes of the named pool beads, for the
+	// closed beads whose list row overlaps a candidate (enrichOverlapping). Nil
+	// reads none: those beads keep the refs of their list row.
+	details func(beadsDir string, ids []string) (map[string]duplicateDetail, error)
+	mu      sync.Mutex
+	cache   map[string]*duplicatePoolEntry
 }
 
 func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error), held func(townRoot, beadsDir string, peer duplicateCandidate, pool []duplicateCandidate) string) *duplicatePools {
@@ -505,7 +517,13 @@ func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error)
 }
 
 // slingDuplicatePools is the process-wide cache, read from the bd on PATH.
-var slingDuplicatePools = newDuplicatePools(fetchDuplicatePool, specPeerHeldPinned)
+var slingDuplicatePools = func() *duplicatePools {
+	p := newDuplicatePools(fetchDuplicatePool, specPeerHeldPinned)
+	p.details = func(beadsDir string, ids []string) (map[string]duplicateDetail, error) {
+		return fetchDuplicateDetails(slingStores{}.pinnedAt(beadsDir), ids)
+	}
+	return p
+}()
 
 // poolFor returns the comparison pool for a rig, reusing a snapshot taken
 // within duplicatePoolTTL. Returns a slice shared with the cache; callers must
@@ -581,7 +599,9 @@ func fetchDuplicatePoolWith(store beads.Client, warn func(beadsDir string, err e
 	}
 	known := append(append(append([]*beads.Issue(nil), activeRows...), closedRows...), customRows...)
 	active, activeDeferred, activeErr := duplicateCandidatesOf(store, beadsDir, activeRows, details, known)
-	closed, closedDeferred, closedErr := duplicateCandidatesOf(store, beadsDir, closedRows, details, known)
+	recentRows, olderRows := splitClosedByAge(closedRows, time.Now())
+	recent, closedDeferred, closedErr := duplicateCandidatesOf(store, beadsDir, recentRows, details, known)
+	closed := append(recent, listOnlyCandidates(olderRows)...)
 	if details != nil {
 		listed := make(map[string]bool, len(known))
 		for _, row := range known {
@@ -667,22 +687,97 @@ func duplicateCandidatesOf(store beads.Client, beadsDir string, rows []*beads.Is
 		if row.ID == "" {
 			continue
 		}
-		detail := detailsByID[row.ID]
-		candidates = append(candidates, duplicateCandidate{
-			ID:        row.ID,
-			Title:     row.Title,
-			Status:    row.Status,
-			ClosedAt:  row.ClosedAt,
-			IssueType: row.Type,
-			Priority:  row.Priority,
-			CreatedAt: row.CreatedAt,
-			Blockers:  detail.Blockers,
-			Ready:     readinessOf(row, detail),
-			Refs: extractOverlapRefs(row.Title, row.Description, row.CloseReason,
-				detail.Design, detail.Notes),
-		})
+		candidates = append(candidates, candidateOfRow(row, detailsByID[row.ID]))
 	}
 	return candidates, deferred, detailErr
+}
+
+// candidateOfRow is one listed bead as a pool entry, with the design, notes and
+// blockers detail carries (the zero detail for a bead whose show was not read).
+func candidateOfRow(row *beads.Issue, detail duplicateDetail) duplicateCandidate {
+	return duplicateCandidate{
+		ID:        row.ID,
+		Title:     row.Title,
+		Status:    row.Status,
+		ClosedAt:  row.ClosedAt,
+		IssueType: row.Type,
+		Priority:  row.Priority,
+		CreatedAt: row.CreatedAt,
+		Blockers:  detail.Blockers,
+		Ready:     readinessOf(row, detail),
+		Refs: extractOverlapRefs(row.Title, row.Description, row.CloseReason,
+			detail.Design, detail.Notes),
+	}
+}
+
+// splitClosedByAge separates the beads closed within duplicateRecentlyClosed of
+// now from the older ones. A row whose close time is missing or unreadable
+// counts as recent: its design and notes are read, as before this split.
+func splitClosedByAge(rows []*beads.Issue, now time.Time) (recent, older []*beads.Issue) {
+	cutoff := now.Add(-duplicateRecentlyClosed)
+	for _, row := range rows {
+		closed, err := time.Parse(time.RFC3339, row.ClosedAt)
+		if err != nil || !closed.Before(cutoff) {
+			recent = append(recent, row)
+			continue
+		}
+		older = append(older, row)
+	}
+	return recent, older
+}
+
+// listOnlyCandidates are rows as pool entries with the refs of their list row
+// and no detail read, marked ListOnly.
+func listOnlyCandidates(rows []*beads.Issue) []duplicateCandidate {
+	out := make([]duplicateCandidate, 0, len(rows))
+	for _, row := range rows {
+		if row.ID == "" {
+			continue
+		}
+		c := candidateOfRow(row, duplicateDetail{})
+		c.ListOnly = true
+		out = append(out, c)
+	}
+	return out
+}
+
+// enrichOverlapping returns pool with the design and notes read for each
+// ListOnly bead whose list-row refs share a test or file with candidate. The
+// pool is shared with the cache and is not mutated: an enriched row is a copy
+// in a new slice. A bead that shares nothing with the candidate is never shown,
+// so a closed bead older than duplicateRecentlyClosed whose only overlap is in
+// its design or notes is not seen. A failed read leaves the pool as it was.
+func (p *duplicatePools) enrichOverlapping(beadsDir string, candidate duplicateCandidate, pool []duplicateCandidate) []duplicateCandidate {
+	if p.details == nil {
+		return pool
+	}
+	var ids []string
+	for _, other := range pool {
+		if !other.ListOnly {
+			continue
+		}
+		if len(intersectTests(candidate.Refs.Tests, other.Refs.Tests)) > 0 || len(intersectStrings(candidate.Refs.Files, other.Refs.Files)) > 0 {
+			ids = append(ids, other.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return pool
+	}
+	got, err := p.details(beadsDir, ids)
+	if err != nil || len(got) == 0 {
+		return pool
+	}
+	out := append([]duplicateCandidate(nil), pool...)
+	for i := range out {
+		detail, ok := got[out[i].ID]
+		if !ok || !out[i].ListOnly {
+			continue
+		}
+		out[i].Refs = extractOverlapRefs(out[i].Refs.Text, detail.Design, detail.Notes)
+		out[i].Blockers = detail.Blockers
+		out[i].ListOnly = false
+	}
+	return out
 }
 
 // readinessOf reduces one listed bead to the fields the readiness question

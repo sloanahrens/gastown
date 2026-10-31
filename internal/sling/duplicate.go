@@ -54,6 +54,9 @@ type Duplicate struct {
 	// would sling a peer costs no read of its own (gt-mknmb).
 	Ready Readiness
 	Refs  ContentRefs
+	// ListOnly marks a bead whose Refs were extracted from its list row alone
+	// (title, description, close reason): its design and notes were not read.
+	ListOnly bool
 	// Blockers lists the IDs this bead has a blocking dependency on, as far as
 	// the caller could read them from bd. The overlap guard walks these edges
 	// to tell a bead of the candidate's own chain from a duplicate: a chain's
