@@ -2019,6 +2019,10 @@ type PolecatPool struct {
 	// agents each inside their own cap then exceed what the town wants (5 live
 	// where 3 was meant), which is what this key bounds.
 	MaxTotal *int `json:"max_total,omitempty"`
+	// CPUs is the CPU count of the sandbox the pool's seats share (the gt-sbx
+	// VM, measured with `colima list`), one input to seatGoParallelism's
+	// sizing rule; Validate refuses a written value below 1 (gt-3ueid).
+	CPUs *int `json:"cpus,omitempty"`
 	// Seats is the seat map: agent name -> cap, window, names (gt-mukgk).
 	Seats map[string]SeatConfig `json:"seats,omitempty"`
 	// Timezone is the IANA zone the seats' closed windows are read in.
@@ -2138,6 +2142,28 @@ func (p *PolecatPool) GetMaxTotal() int {
 	return intOr(p.MaxTotal, 0)
 }
 
+// GetCPUs returns the sandbox CPU count the pool's seats share, or 0 when the
+// town does not say.
+func (p *PolecatPool) GetCPUs() int {
+	if p == nil {
+		return 0
+	}
+	return intOr(p.CPUs, 0)
+}
+
+// SeatTotal returns the pool's total seat capacity, the divisor
+// seatGoParallelism shares the CPUs over: the sum of its seats' caps.
+func (p *PolecatPool) SeatTotal() int {
+	if p == nil {
+		return 0
+	}
+	total := 0
+	for _, s := range p.Seats {
+		total += s.Cap
+	}
+	return total
+}
+
 // GetMode returns how an empty seat is filled, or its default.
 func (p *PolecatPool) GetMode() string {
 	if p == nil || p.Mode == "" {
@@ -2156,11 +2182,11 @@ func (p *PolecatPool) GetShapeGate() string {
 }
 
 // Validate reports the dispatch policy values the dispatcher cannot act on: a
-// count below zero, a nudge naming no candidates, a mode outside sling|nudge,
-// or a shape gate outside off|warn|refuse. gt config set refuses a value it
-// rejects, and the config kernel checks the same method at load, so a
-// hand-edited settings/config.json stops the daemon instead of dispatching on a
-// value the dispatcher would silently ignore.
+// count below zero, a cpus below 1, a nudge naming no candidates, a mode
+// outside sling|nudge, or a shape gate outside off|warn|refuse. gt config set
+// refuses a value it rejects, and the config kernel checks the same method at
+// load, so a hand-edited settings/config.json stops the daemon instead of
+// dispatching on a value the dispatcher would silently ignore.
 func (p *PolecatPool) Validate() error {
 	if p == nil {
 		return nil
@@ -2179,6 +2205,9 @@ func (p *PolecatPool) Validate() error {
 		if k.v != nil && *k.v < 0 {
 			errs = append(errs, fmt.Errorf("polecat_pool.%s = %d: must be >= 0", k.key, *k.v))
 		}
+	}
+	if p.CPUs != nil && *p.CPUs < 1 {
+		errs = append(errs, fmt.Errorf("polecat_pool.cpus = %d: must be >= 1", *p.CPUs))
 	}
 	seatAgents := make([]string, 0, len(p.Seats))
 	for agent := range p.Seats {

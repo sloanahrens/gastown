@@ -57,9 +57,17 @@ func (refusingCreateTmux) NewSessionWithCommandAndEnv(string, string, string, ma
 // routing at that town, so it belongs only to tests that run alone.
 func sandboxLaunchTown(t *testing.T) (town, rigPath, workDir string, w *world) {
 	t.Helper()
-	town = t.TempDir()
+	town, rigPath, workDir, w = launchTown(t)
 	session.ResetSandboxRoutingForTest(town)
 	t.Cleanup(func() { session.ResetSandboxRoutingForTest("") })
+	return town, rigPath, workDir, w
+}
+
+// launchTown is sandboxLaunchTown's town without the process-wide sandbox
+// routing: a host launch reads no routing, so a parallel test can run in it.
+func launchTown(t *testing.T) (town, rigPath, workDir string, w *world) {
+	t.Helper()
+	town = t.TempDir()
 	rigPath = filepath.Join(town, "gastown")
 	settings := filepath.Join(rigPath, "settings")
 	if err := os.MkdirAll(settings, 0o755); err != nil {
@@ -243,6 +251,18 @@ type envCapturingTmux struct {
 func (c envCapturingTmux) NewSessionWithCommandAndEnv(_, _, _ string, env map[string]string) error {
 	*c.env = env
 	return errors.New("tmux: captured")
+}
+
+// recordingCreateTmux records that a session was created and refuses it, so a
+// test asserts that no session exists rather than what the refusal said.
+type recordingCreateTmux struct {
+	*fakeSessionTmux
+	created *bool
+}
+
+func (c recordingCreateTmux) NewSessionWithCommandAndEnv(_, _, _ string, _ map[string]string) error {
+	*c.created = true
+	return errors.New("tmux: no session")
 }
 
 // The sandbox session's tmux environment names no host path: the agent

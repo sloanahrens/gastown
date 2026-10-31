@@ -652,7 +652,7 @@ func TestPolecatAgentEnvConfigCarriesTheAgentGOFLAGS(t *testing.T) {
 	t.Parallel()
 
 	rc := &config.RuntimeConfig{Env: map[string]string{"GOFLAGS": "-p=4", "OTHER": "x"}}
-	cfg := polecatAgentEnvConfig("myrig", "Toast", "/town", "gt-Toast", SessionStartOptions{Agent: "a"}, rc)
+	cfg := polecatAgentEnvConfig("myrig", "Toast", "/town", "gt-Toast", SessionStartOptions{Agent: "a"}, rc, nil)
 	if cfg.AgentGOFLAGS != "-p=4" {
 		t.Errorf("AgentGOFLAGS = %q, want -p=4 from the agent env", cfg.AgentGOFLAGS)
 	}
@@ -663,7 +663,7 @@ func TestPolecatAgentEnvConfigCarriesTheAgentGOFLAGS(t *testing.T) {
 	if got := env["GOFLAGS"]; got != "-p=4" {
 		t.Errorf("session GOFLAGS = %q, want -p=4 (the agent env's cap, not the default 8)", got)
 	}
-	if got := polecatAgentEnvConfig("r", "p", "/t", "s", SessionStartOptions{}, nil).AgentGOFLAGS; got != "" {
+	if got := polecatAgentEnvConfig("r", "p", "/t", "s", SessionStartOptions{}, nil, nil).AgentGOFLAGS; got != "" {
 		t.Errorf("a nil runtime config gave AgentGOFLAGS %q, want empty", got)
 	}
 }
@@ -702,6 +702,103 @@ func TestLaunchGivesTheSessionTheAgentConfigGOFLAGS(t *testing.T) {
 	}
 	if got["GOFLAGS"] != "-p=4" {
 		t.Errorf("session GOFLAGS = %q, want -p=4 from the agent config", got["GOFLAGS"])
+	}
+}
+
+// The seat's -p is its share of the pool launch reads: 12 cpus over 6 seats
+// plan 2 packages each instead of the default 8 (gt-3ueid). A launch that
+// stops passing the pool leaves the session at 8 and fails here.
+func TestLaunchSizesTheSeatFromThePool(t *testing.T) {
+	t.Parallel()
+
+	town, rigPath, workDir, w := launchTown(t)
+	// The agent env names GOFLAGS without -p, so the session's -p can come
+	// from the pool sizing alone and not from the spawning environment.
+	fileSettings := config.NewTownSettings()
+	fileSettings.Agents = map[string]*config.RuntimeConfig{
+		"seat-pool": {Command: "claude", Args: []string{"--dangerously-skip-permissions"}, Env: map[string]string{"GOFLAGS": "-mod=mod"}},
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(town), fileSettings); err != nil {
+		t.Fatal(err)
+	}
+	cpus := 12
+	pool := &config.PolecatPool{
+		CPUs:  &cpus,
+		Seats: map[string]config.SeatConfig{"seat-a": {Cap: 4}, "seat-b": {Cap: 2}},
+	}
+
+	var got map[string]string
+	m := &SessionManager{
+		tmux:     envCapturingTmux{newFakeSessionTmux(), &got},
+		rig:      &rig.Rig{Name: "gastown", Path: rigPath},
+		gits:     w.opener(),
+		seatPool: func(string) (*config.PolecatPool, error) { return pool, nil },
+	}
+
+	err := m.launch("box", m.SessionName("box"), SessionStartOptions{WorkDir: workDir, Agent: "seat-pool"})
+	if err == nil {
+		t.Fatal("launch succeeded; the capturing fake never creates a session")
+	}
+	want := "-mod=mod -p=2"
+	if got["GOFLAGS"] != want {
+		t.Errorf("session GOFLAGS = %q, want %q (12 cpus over 6 seats)", got["GOFLAGS"], want)
+	}
+}
+
+// The production pool read takes the polecat_pool block from the town
+// settings, and a file it cannot parse is an error and not an empty pool
+// (gt-3ueid): an empty pool would hand every seat the default -p.
+func TestLaunchSeatPoolReadsTownSettings(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	path := config.TownSettingsPath(town)
+	cpus := 12
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{CPUs: &cpus, Seats: map[string]config.SeatConfig{"seat-a": {Cap: 2}}}
+	if err := config.SaveTownSettings(path, ts); err != nil {
+		t.Fatal(err)
+	}
+
+	var m SessionManager // nil seatPool reads the town settings
+	pool, err := m.launchSeatPool(town)
+	if err != nil {
+		t.Fatalf("launchSeatPool: %v", err)
+	}
+	if pool.GetCPUs() != cpus || pool.SeatTotal() != 2 {
+		t.Errorf("pool = %d cpus over %d seats, want %d over 2", pool.GetCPUs(), pool.SeatTotal(), cpus)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"type":"town-settings",`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.launchSeatPool(town); err == nil {
+		t.Fatal("a settings file that does not parse must be refused, not read as an empty pool")
+	}
+}
+
+// A pool that will not load refuses the launch before a session exists,
+// rather than starting the seat on the default -p the operator's cpus was
+// there to lower (gt-3ueid).
+func TestLaunchRefusesWhenTheSeatPoolWillNotLoad(t *testing.T) {
+	t.Parallel()
+
+	_, rigPath, workDir, w := launchTown(t)
+	errPool := errors.New("town settings: unreadable")
+	created := false
+	m := &SessionManager{
+		tmux:     recordingCreateTmux{newFakeSessionTmux(), &created},
+		rig:      &rig.Rig{Name: "gastown", Path: rigPath},
+		gits:     w.opener(),
+		seatPool: func(string) (*config.PolecatPool, error) { return nil, errPool },
+	}
+
+	err := m.launch("box", m.SessionName("box"), SessionStartOptions{WorkDir: workDir})
+	if !errors.Is(err, errPool) {
+		t.Fatalf("launch error = %v, want it to carry the pool read's failure", err)
+	}
+	if created {
+		t.Fatal("the launch created a session after the pool read failed")
 	}
 }
 

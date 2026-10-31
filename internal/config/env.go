@@ -24,20 +24,33 @@ const EnvAgent = "GT_AGENT"
 // override is not a snapshot of that config and must survive (gt-di8p).
 const EnvAgentOverride = "GT_AGENT_OVERRIDE"
 
-// seatGOFLAGSParallelism is the -p a polecat session's go commands plan for
-// when the session does not already cap it. Without a cap each seat's `go
-// test` plans for every core on the host, so a few seats plus the landing
+// seatGOFLAGSDefaultParallelism is the -p a polecat session's go commands
+// plan for when the pool it shares is not sized. Without a cap each seat's
+// `go test` plans for every core on the host, so a few seats plus the landing
 // gate oversubscribe it: measured 2026-10-03 16:48-19:48, two to four
 // concurrent runs took 8-17 cores at load 25-43, and the gate went from about
 // 30s to 5m02s at load 45-55 (gt-v4r0x). Eight packages leaves the gate its
 // share (gt-5lyns).
-const seatGOFLAGSParallelism = 8
+const seatGOFLAGSDefaultParallelism = 8
+
+// seatGoParallelism is the one place the seat sizing rule is written: cpus
+// shared among seats, clamped to [2, 8], and the default when either number is
+// absent or not positive. Six seats on a 12-CPU sandbox plan 2 packages each
+// instead of 8, so a burst of compiles fits the CPUs there are (gt-3ueid).
+// SeatCPUs and SeatCount exist to carry its two inputs here.
+func seatGoParallelism(cpus, seats int) int {
+	if cpus <= 0 || seats <= 0 {
+		return seatGOFLAGSDefaultParallelism
+	}
+	return min(max(cpus/seats, 2), seatGOFLAGSDefaultParallelism)
+}
 
 // seatEnvGOFLAGS caps a polecat seat's go parallelism in current, the
-// operator's GOFLAGS for this spawn. An operator value that already names -p
-// is returned unchanged; any other value keeps its flags and gains the cap.
-func seatEnvGOFLAGS(current string) string {
-	capFlag := "-p=" + strconv.Itoa(seatGOFLAGSParallelism)
+// operator's GOFLAGS for this spawn, at parallelism (seatGoParallelism's
+// result). An operator value that already names -p is returned unchanged; any
+// other value keeps its flags and gains the cap.
+func seatEnvGOFLAGS(current string, parallelism int) string {
+	capFlag := "-p=" + strconv.Itoa(parallelism)
 	current = strings.TrimSpace(current)
 	if current == "" {
 		return capFlag
@@ -160,6 +173,13 @@ type AgentEnvConfig struct {
 	// without this value would silently replace the agent's own -p.
 	AgentGOFLAGS string
 
+	// SeatCPUs and SeatCount are the sandbox pool a polecat seat shares: its
+	// CPU count (polecat_pool.cpus) and its seat total. seatGoParallelism
+	// sizes the seat's -p from them, and a town that sets neither reads as it
+	// always did (gt-3ueid).
+	SeatCPUs  int
+	SeatCount int
+
 	// Getenv reads the environment the agent's variables are resolved from
 	// (Dolt endpoint, cost tier, passthrough credentials). Nil
 	// reads the process environment.
@@ -203,7 +223,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		if strings.TrimSpace(cfg.AgentGOFLAGS) != "" {
 			operatorGOFLAGS = cfg.AgentGOFLAGS
 		}
-		env["GOFLAGS"] = seatEnvGOFLAGS(operatorGOFLAGS)
+		env["GOFLAGS"] = seatEnvGOFLAGS(operatorGOFLAGS, seatGoParallelism(cfg.SeatCPUs, cfg.SeatCount))
 
 	case constants.RoleCrew:
 		env["GT_ROLE"] = fmt.Sprintf("%s/crew/%s", cfg.Rig, cfg.AgentName)
