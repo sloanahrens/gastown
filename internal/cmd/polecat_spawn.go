@@ -977,7 +977,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 		return nil, fmt.Errorf("admission control: %w", err)
 	}
 
-	if err := slingBlocked(townRoot, rigName, estop.ActiveFor, IsRigParkedOrDocked); err != nil {
+	if err := slingBlocked(townRoot, rigName, ringHoldNow, estop.ActiveFor, IsRigParkedOrDocked); err != nil {
 		return nil, err
 	}
 

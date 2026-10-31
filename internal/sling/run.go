@@ -93,7 +93,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// 0. Refuse an e-stopped, parked or docked rig before dispatching
 	// (gt-4k3fj.4, gt-4owfd.1, gt-11y).
 	if opts.RigName != "" {
-		if label, err := Blocked(townRoot, opts.RigName, d.EstopOn, d.RigParked); err != nil {
+		if label, err := Blocked(townRoot, opts.RigName, d.RingHold, d.EstopOn, d.RigParked); err != nil {
 			result.ErrMsg = label
 			return result, err
 		}
@@ -717,9 +717,13 @@ func (e *rigUnavailableError) Is(target error) bool { return target == ErrRigUna
 const RigStatusUnverified = "unverified"
 
 // Blocked refuses a dispatch to a rig that is e-stopped, parked or docked, or
-// whose status cannot be verified. It returns a short label naming the state,
-// and the refusal to hand back.
-func Blocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) (string, error) {
+// whose status cannot be verified, and a dispatch under a Waned Ring (ringHold
+// names the reason, "" when the Ring does not hold). It returns a short label
+// naming the state, and the refusal to hand back.
+func Blocked(townRoot, rigName string, ringHold func(townRoot string) string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) (string, error) {
+	if reason := ringHold(townRoot); reason != "" {
+		return "e-stop", &rigUnavailableError{msg: fmt.Sprintf(dispatch.RigUnavailableMarker+"rig %q: %s\nRenew the Ring with: gt ring renew", rigName, reason)}
+	}
 	if on, err := estopOn(townRoot, rigName); on {
 		why := "E-stop active"
 		if err != nil {

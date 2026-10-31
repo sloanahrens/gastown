@@ -18,14 +18,14 @@ import (
 func TestIsSlingRefusal(t *testing.T) {
 	t.Parallel()
 
-	_, blockedErr := sling.Blocked("/town", "gastown",
+	_, blockedErr := sling.Blocked("/town", "gastown", func(string) string { return "" },
 		func(string, string) (bool, error) { return true, nil },
 		func(string, string) (bool, string) { return false, "" })
 
-	_, parkedErr := sling.Blocked("/town", "gastown",
+	_, parkedErr := sling.Blocked("/town", "gastown", func(string) string { return "" },
 		func(string, string) (bool, error) { return false, nil },
 		func(string, string) (bool, string) { return true, "parked" })
-	_, dockedErr := sling.Blocked("/town", "gastown",
+	_, dockedErr := sling.Blocked("/town", "gastown", func(string) string { return "" },
 		func(string, string) (bool, error) { return false, nil },
 		func(string, string) (bool, string) { return true, "docked" })
 

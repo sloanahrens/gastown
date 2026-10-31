@@ -28,6 +28,7 @@ type Deps struct {
 	ReleaseSeat func(spawn *Spawn)
 
 	// Rig and bead guards.
+	RingHold           func(townRoot string) string
 	EstopOn            func(townRoot, rigName string) (bool, error)
 	RigParked          func(townRoot, rigName string) (bool, string)
 	BeadInfoInTown     func(townRoot, beadID string) (*Bead, error)

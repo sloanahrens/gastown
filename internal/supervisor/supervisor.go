@@ -13,6 +13,8 @@
 //     `gt kill-all`, and Stop, from the operator's stop verbs, bypass it and
 //     the seat's hold; Respawn, the in-place restart behind explicit verbs,
 //     is refused like Restart);
+//   - the Ring: a Waned Ring refuses Restart and KillStray, as the town
+//     sentinel does (ring.Hold; an Absent Ring refuses nothing yet);
 //   - shutdown: a `gt down` in progress refuses Restart;
 //   - the restart budget: Budget restarts per seat per Window (3 per hour),
 //     persisted in the intent record; the next one freezes the seat, writes it
@@ -42,6 +44,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/ring"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -134,6 +137,9 @@ type Options struct {
 	Logf func(format string, args ...any)
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// RingKey resolves the key the Ring is checked under. Nil defaults to the
+	// daemon environment's key (ring.TownKey).
+	RingKey ring.KeyFunc
 	// Budget and Window default to DefaultBudget per DefaultWindow.
 	Budget int
 	Window time.Duration
@@ -152,6 +158,9 @@ func New(o Options) *Supervisor {
 	}
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.RingKey == nil {
+		o.RingKey = ring.TownKey(os.Getenv)
 	}
 	if o.Budget <= 0 {
 		o.Budget = DefaultBudget
@@ -511,6 +520,9 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 	if err := s.guard(seat, l); err != nil {
 		return err
 	}
+	if held := s.ringHold(); held != "" {
+		return s.refuseSeat(seat, l, ErrEstop, held)
+	}
 	if ShutdownInProgress(s.o.TownRoot) {
 		return s.refuse(l, ErrShutdown, "")
 	}
@@ -606,6 +618,12 @@ func (s *Supervisor) Restart(seat Seat, reason, actor string) error {
 	return nil
 }
 
+// ringHold is the Ring's refusal for the automatic verbs: why the Ring holds
+// the town, or "" when it does not. Restart and KillStray refuse under it.
+func (s *Supervisor) ringHold() string {
+	return ring.Hold(s.o.TownRoot, s.o.RingKey, s.o.Now())
+}
+
 // KillStray ends a session that belongs to no seat (a ghost with a stale
 // prefix, a duplicate on the wrong tmux socket, a session for a rig the town
 // no longer has). It honors the town e-stop and is logged like Kill; there is
@@ -623,6 +641,9 @@ func (s *Supervisor) KillStray(sessionName, reason, actor string) error {
 			detail = err.Error()
 		}
 		return s.refuse(l, ErrEstop, detail)
+	}
+	if held := s.ringHold(); held != "" {
+		return s.refuse(l, ErrEstop, held)
 	}
 	if err := s.o.Tmux.KillSessionWithProcesses(sessionName); err != nil {
 		l.Outcome, l.Detail = outcomeFailed, err.Error()

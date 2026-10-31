@@ -43,6 +43,7 @@ type slingHarness struct {
 	hookedFormulas map[string]*beads.Issue // agent -> formula wisp hooked to it
 	batchOpts      slingOptions            // what the last batch path was handed
 	estops         map[string]bool         // e-stopped rigs; "" is the town sentinel
+	ringReason     string                  // why the Ring holds the town; "" when it does not
 	// pendingMarkerPath is the install-pending marker the run reads: a test
 	// writes a marker there, or leaves it absent (gt-2rp64).
 	pendingMarkerPath string
@@ -157,6 +158,11 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			return func() { h.record("unlock assignee %s", agent) }, nil
 		},
 		rigParked: func(string, string) (bool, string) { return false, "" },
+		ringHold: func(string) string {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return h.ringReason
+		},
 		estopOn: func(_, rig string) (bool, error) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
