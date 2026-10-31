@@ -114,12 +114,14 @@ func TestParseOptionsNiceRefusals(t *testing.T) {
 	}
 }
 
-// TestIntegrationAndRaceUseTheNiceOption: a parsed TIER_SWEEP_NICE reaches every
-// gt slot run the tiers start, whichever package and directory it runs.
-func TestIntegrationAndRaceUseTheNiceOption(t *testing.T) {
-	t.Parallel()
+// tierSlotRuns runs the integration and race tiers over a repository with a
+// test in every tier, with env as the host's environment, and returns the argv
+// of each gt slot run they started.
+func tierSlotRuns(t *testing.T, env map[string]string) [][]string {
+	t.Helper()
 	logDir := t.TempDir()
-	host := &fakeHost{env: map[string]string{EnvNice: "0", EnvLogDir: logDir}, tmpDir: logDir}
+	env[EnvLogDir] = logDir
+	host := &fakeHost{env: env, tmpDir: logDir}
 	opts, err := ParseOptions(nil, host.host())
 	if err != nil {
 		t.Fatalf("ParseOptions: %v", err)
@@ -144,7 +146,6 @@ func TestIntegrationAndRaceUseTheNiceOption(t *testing.T) {
 	}
 	s.Integration()
 	s.Race()
-	want := []string{"gt", "slot", "run", "--nice", "0", "--", "env", "GT_TEST_DOCKER=1"}
 	var runs [][]string
 	for _, c := range fake.calls {
 		if c.argv[0] == "gt" {
@@ -154,7 +155,27 @@ func TestIntegrationAndRaceUseTheNiceOption(t *testing.T) {
 	if len(runs) != 4 {
 		t.Fatalf("gt slot run calls = %d, want 4 (root, docker, module, race): %q", len(runs), runs)
 	}
-	for _, argv := range runs {
+	return runs
+}
+
+// TestIntegrationAndRaceUseTheNiceOption: a parsed TIER_SWEEP_NICE reaches every
+// gt slot run the tiers start, whichever package and directory it runs.
+func TestIntegrationAndRaceUseTheNiceOption(t *testing.T) {
+	t.Parallel()
+	want := []string{"gt", "slot", "run", "--nice", "0", "--", "env", "GT_TEST_DOCKER=1"}
+	for _, argv := range tierSlotRuns(t, map[string]string{EnvNice: "0"}) {
+		if len(argv) < len(want) || !reflect.DeepEqual(argv[:len(want)], want) {
+			t.Errorf("go test invocation %q does not begin with %q", argv, want)
+		}
+	}
+}
+
+// TestIntegrationAndRaceUnsetNiceKeepsTheDefaultArgv: with TIER_SWEEP_NICE unset,
+// every gt slot run the tiers start has today's argv, with no --nice at all.
+func TestIntegrationAndRaceUnsetNiceKeepsTheDefaultArgv(t *testing.T) {
+	t.Parallel()
+	want := []string{"gt", "slot", "run", "--", "env", "GT_TEST_DOCKER=1"}
+	for _, argv := range tierSlotRuns(t, map[string]string{}) {
 		if len(argv) < len(want) || !reflect.DeepEqual(argv[:len(want)], want) {
 			t.Errorf("go test invocation %q does not begin with %q", argv, want)
 		}
