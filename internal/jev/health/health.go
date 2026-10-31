@@ -557,9 +557,10 @@ func carriesAnswers(raw json.RawMessage) bool {
 }
 
 // sectionsCarryAnswers reports whether a log line's sections field holds an
-// answer. The drift battery writes no top-level answers: it nests one answers
-// object per doc section it asked about, and a line whose sections are empty,
-// all null or all empty carries none.
+// answer. Any battery's line may nest one answers object per section it asked
+// about instead of writing a top-level answers field, and drift is the one that
+// does today, so the rule is read for every battery. A line whose sections are
+// empty, all null or all empty carries none.
 func sectionsCarryAnswers(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
