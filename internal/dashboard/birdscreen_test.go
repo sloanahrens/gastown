@@ -29,6 +29,7 @@ var birdSecretRows = []struct {
 	{"apikey assignment", "apikey=" + strings.Repeat("n", 16), "credential-assignment"},
 	{"PGPASSWORD assignment", "PGPASSWORD=" + strings.Repeat("p", 16), "credential-assignment"},
 	{"Authorization Bearer header", "Authorization: Bearer " + strings.Repeat("z", 16), "credential-assignment"},
+	{"REDACTED inside a real value", "password=" + strings.Repeat("k", 4) + "REDACTED" + strings.Repeat("k", 4), "credential-assignment"},
 	{"URL with a password", "https://deploy:" + strings.Repeat("p", 12) + "@git.example.com", "url-credential"},
 	{"postgres URL with a password", "postgres://app:" + strings.Repeat("9", 12) + "@db.internal:5432/main", "url-credential"},
 }
@@ -50,6 +51,8 @@ var birdOrdinaryRows = []struct {
 	{"masked URL password", "https://deploy:***@git.example.com"},
 	{"sk- prefix one character short", "sk-" + strings.Repeat("a", 15)},
 	{"word that ends in sk-", "risk-assessment-framework"},
+	{"masked REDACTED value", "password=***REDACTED***"},
+	{"keyword before a plain word", "token authentication flow"},
 }
 
 func TestBirdScreenWithholdsEachSecretShape(t *testing.T) {
@@ -84,23 +87,26 @@ func TestBirdScreenLeavesOrdinaryReportText(t *testing.T) {
 	}
 }
 
+// birdClasses is the closed set of labels screenSecret may return. The labels are
+// constants, so a substring check against the input can never fail; set
+// membership does, if a label ever carries input bytes.
+var birdClasses = map[string]bool{
+	"private-key":           true,
+	"token-prefix":          true,
+	"credential-assignment": true,
+	"url-credential":        true,
+}
+
 func TestBirdScreenNeverEchoesTheMatch(t *testing.T) {
 	t.Parallel()
 
-	const runLen = 8
 	for _, row := range birdSecretRows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 
 			class, _ := screenSecret([]byte(row.text))
-			if strings.Contains(class, row.text) {
-				t.Fatalf("class %q contains the whole input", class)
-			}
-			for i := 0; i+runLen <= len(row.text); i++ {
-				run := row.text[i : i+runLen]
-				if strings.Contains(class, run) {
-					t.Errorf("class %q contains the %d-byte run %q of the input", class, runLen, run)
-				}
+			if !birdClasses[class] {
+				t.Errorf("screenSecret(%s) class = %q, not a known label; it may echo the input", row.name, class)
 			}
 		})
 	}
