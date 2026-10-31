@@ -1772,6 +1772,25 @@ func TestNeedsOverseerLandingPersonKeyNamesThePersonLabel(t *testing.T) {
 // releases it.
 func startRefusedLoop(t *testing.T) (*Daemon, *atomic.Int32, <-chan struct{}, *passDone) {
 	t.Helper()
+	// The loop leaves through its select on d.ctx.Done(), so the fixture's
+	// cancel is its stop path; this wait has to run after that cancel, and
+	// cleanups run last-registered first, so it is registered before the
+	// fixture builds the context. A loop that still has not returned 10s after
+	// the cancel fails the test rather than hanging the package (gt-n3yyz).
+	loopDone := make(chan struct{})
+	started := false
+	t.Cleanup(func() {
+		if !started {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		select {
+		case <-loopDone:
+		case <-ctx.Done():
+			t.Error("the landing loop kept running after the daemon's context was canceled")
+		}
+	})
 	d, _ := landingDrainDaemon(t)
 	var passes atomic.Int32
 	pass := func(context.Context) landworker.Report {
@@ -1787,8 +1806,15 @@ func startRefusedLoop(t *testing.T) (*Daemon, *atomic.Int32, <-chan struct{}, *p
 	}
 	done := countPasses(d)
 	// A nanosecond interval lets the loop come round again once the hold is
-	// released; the default hour would end the test after the refusal.
-	go d.landingWorkerLoop("gastown", time.Nanosecond, pass)
+	// released; the default hour would end the test after the refusal. The
+	// interval is also the longest the loop ever waits: once canceled it
+	// returns from the pass start or from the select below it, so the join
+	// above is a signal that it returned, not a wait for work.
+	started = true
+	go func() {
+		defer close(loopDone)
+		d.landingWorkerLoop("gastown", time.Nanosecond, pass)
+	}()
 	return d, &passes, <-taken, done
 }
 
