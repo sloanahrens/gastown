@@ -53,6 +53,12 @@ type runtimeFile struct {
 // extracts under /sandbox: the path TRACKER_TOKEN_FILE names.
 const runtimeTrackerToken = ".tracker/token"
 
+// SandboxTrackerPlaceholder is the value a tracker-routed sandbox's token file
+// holds when the spawn asks for a placeholder instead of the seat's real token;
+// the client sends it as its bearer value and the supervisor swaps in the real
+// token once the per-seat provider is attached (gt-874y8). It is not a secret.
+const SandboxTrackerPlaceholder = "gt-seat-token-placeholder"
+
 // promptCommentStore is the bd surface a spawn's prompt stamp writes through;
 // *beads.Beads is the production store, a test passes a fake.
 type promptCommentStore interface {
@@ -68,7 +74,8 @@ type promptCommentStore interface {
 // town root rewritten. The agent command names settings.json and the system
 // prompt, so a missing one is an error. A rig or polecat name that is not one
 // path segment is an error too. A tracker-routed seat's archive also carries
-// its token as .tracker/token, 0600.
+// its token file at .tracker/token, 0400, holding SandboxTrackerPlaceholder
+// when the spec asks for it.
 //
 // The spawn log, the renderer and the comment store are seams: the production
 // caller passes its own, and a test captures the uploaded prompt's hash line
@@ -140,11 +147,17 @@ func buildRuntimeArchiveLogging(spec SpawnSpec, gitEmail string, promptLog io.Wr
 	// 0400 in a 0700 directory, owner-read-only, and no other entry of the
 	// archive, no environment value and no settings file holds it
 	// (gt-p85pw.84). The sandbox only ever reads the file, so the owner has no
-	// write bit and group and world have none (gt-rh8ak).
+	// write bit and group and world have none (gt-rh8ak). A spawn that asks
+	// for the placeholder stages that instead, keeping the real token off
+	// every archive entry (gt-874y8).
 	if tracker.on() {
+		token := tracker.token
+		if spec.TrackerTokenPlaceholder {
+			token = []byte(SandboxTrackerPlaceholder)
+		}
 		files = append(files,
 			runtimeFile{path.Dir(runtimeTrackerToken), nil, 0o700, true},
-			runtimeFile{runtimeTrackerToken, tracker.token, 0o400, false},
+			runtimeFile{runtimeTrackerToken, token, 0o400, false},
 		)
 	}
 	// The bytes are kept by hash so a rejection can be joined to the prompt its

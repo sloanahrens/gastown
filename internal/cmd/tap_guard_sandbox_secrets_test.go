@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hooks"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // sandboxSecretsBrokenReader is a hook payload that cannot be read.
@@ -1060,6 +1061,22 @@ func TestSandboxSecretsGuardBlocksTrackerToken(t *testing.T) {
 		if !strings.Contains(out, "("+tc.rule+")") {
 			t.Errorf("block for %q does not name its rule %q: %q", tc.command, tc.rule, out)
 		}
+	}
+}
+
+// The placeholder a tracker sandbox stages sits at the same path as the real
+// token, so the guard judges that path the same way: the file is refused by
+// the path the runtime archive writes, whatever it holds (gt-874y8).
+func TestSandboxSecretsGuardBlocksTheTrackerPlaceholderFile(t *testing.T) {
+	t.Parallel()
+	command := "cat " + session.SandboxTrackerTokenFile
+	blocked, out := runSandboxSecretsGuard(t, "openshell", command)
+	if !blocked {
+		t.Fatalf("not blocked: %s is readable, so a seat can print the placeholder", session.SandboxTrackerTokenFile)
+	}
+	rule := "it reads " + session.SandboxTrackerTokenFile + ", which holds credentials or account data"
+	if !strings.Contains(out, "("+rule+")") {
+		t.Errorf("block for %q does not name its rule %q: %q", command, rule, out)
 	}
 }
 

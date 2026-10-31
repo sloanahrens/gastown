@@ -1068,7 +1068,7 @@ func (b *openshellBackend) contract(spec SpawnSpec, tracker sandboxTracker) map[
 		// here: the whole contract reaches the gateway's process environment.
 		env["TRACKER_URL"] = tracker.URL
 		env["TRACKER_ALLOW_HTTP_HOST"] = tracker.AllowHTTPHost
-		env["TRACKER_TOKEN_FILE"] = sandboxTrackerTokenFile
+		env["TRACKER_TOKEN_FILE"] = SandboxTrackerTokenFile
 	}
 	return env
 }
@@ -1107,10 +1107,9 @@ func (b *openshellBackend) controlPlaneHost() string {
 	return defaultControlPlaneHost
 }
 
-// sandboxTrackerTokenFile is where a tracker-routed sandbox reads its seat
-// token, the value TRACKER_TOKEN_FILE carries. The runtime archive stages the
-// file there 0400, owner-read-only; nothing else in the sandbox holds the token.
-const sandboxTrackerTokenFile = sandboxHome + "/" + runtimeTrackerToken
+// SandboxTrackerTokenFile is the path a tracker-routed sandbox reads its seat
+// token from, the value TRACKER_TOKEN_FILE carries (gt-874y8).
+const SandboxTrackerTokenFile = sandboxHome + "/" + runtimeTrackerToken
 
 // sandboxTracker is the tracker a sandbox's rig is routed to, as the sandbox
 // reaches it: the town tracker's port on the control-plane host, that host as
