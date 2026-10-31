@@ -185,10 +185,10 @@ func TestBondLockWaitIsBounded(t *testing.T) {
 	}
 }
 
-// TestBondRefusesWhenTheLockCannotBeOpened: a town whose lock directory cannot
-// be made fails the bond rather than bonding without the lock, which would be
-// the race the lock is there to stop.
-func TestBondRefusesWhenTheLockCannotBeOpened(t *testing.T) {
+// TestBondRefusesWhenTheLockDirCannotBeMade: a town whose lock directory
+// cannot be made fails the bond rather than bonding without the lock, which
+// would be the race the lock is there to stop.
+func TestBondRefusesWhenTheLockDirCannotBeMade(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(townRoot, ".runtime"), []byte("a file where the lock dir belongs"), 0644); err != nil {
@@ -205,6 +205,37 @@ func TestBondRefusesWhenTheLockCannotBeOpened(t *testing.T) {
 	}
 	if errors.Is(err, ErrBondLockTimeout) {
 		t.Errorf("err = %v, want the directory failure, not a timeout", err)
+	}
+	if n := len(fake.called("mol bond ")); n != 0 {
+		t.Errorf("bond ran %d attempts without the lock, want 0", n)
+	}
+}
+
+// TestBondRefusesWhenTheLockFileWillNotOpen: a lock file the kernel refuses to
+// open fails the bond too, rather than reading as contention and waiting out
+// the whole bound for a lock nobody holds.
+func TestBondRefusesWhenTheLockFileWillNotOpen(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	// A directory where the lock file belongs is the one open failure the test
+	// can stage without changing permissions of the tree it runs in.
+	if err := os.MkdirAll(bondLockPath(townRoot), 0755); err != nil {
+		t.Fatalf("plant the lock path: %v", err)
+	}
+
+	clock := newBondFakeClock(t)
+	fake := formulaBDFake(`{"result_id":"gt-wisp-x"}`)
+
+	_, err := bondBD(fake, clock).bond(
+		"mol-polecat-work", "mol-polecat-work", "gt-x", townRoot, townRoot, []string{"feature=t"})
+	if err == nil {
+		t.Fatal("bond ran without the town lock")
+	}
+	if errors.Is(err, ErrBondLockTimeout) {
+		t.Errorf("err = %v, want the open failure, not a timeout", err)
+	}
+	if waited := clock.waited(); waited != 0 {
+		t.Errorf("waited %s on an open failure, want no wait", waited)
 	}
 	if n := len(fake.called("mol bond ")); n != 0 {
 		t.Errorf("bond ran %d attempts without the lock, want 0", n)
