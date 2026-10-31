@@ -20,8 +20,16 @@ func realGit(ctx context.Context, argv []string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.String(), stderr.String(), err
+	return runCaptured(cmd, &stdout, &stderr)
+}
+
+// runCaptured runs cmd and returns what it wrote to the two buffers and its
+// failure. The buffers are read after the process exits, and the spawn is the
+// one branch the unit tier cannot drive: a unit test starts no process, so the
+// integration tier is where this failure is exercised.
+func runCaptured(cmd *exec.Cmd, stdout, stderr *bytes.Buffer) (string, string, error) {
+	run := cmd.Run()
+	return stdout.String(), stderr.String(), run
 }
 
 // gitExec is the Git of one clone, answered by running the git binary there.
