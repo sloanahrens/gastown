@@ -332,16 +332,15 @@ fi
 rm -rf "$SEEDTMP"
 phony="$(sed -n '1p' "$ROOT/Makefile")"
 missing=""
-# The pin-drift guard (gt-n3ewt) runs inside the stage, and the stage runs before
-# the image build: a stale committed pin stops the image before it is built, and
-# nothing is staged.
+# The image carries no Go caches (gt-nly1g): the seed is the cache claim's Job
+# (`make polecat-caches`), so the image build stages no seed sources. A stage
+# line back in polecat-image would be the old image seed returning.
 if od=$(dry polecat-image BD_SRC=/somewhere/else) \
-  && stage_line=$(grep -n 'internal/polecat/seed/cmd/stage' <<<"$od" | head -1 | cut -d: -f1) \
-  && build_line=$(grep -n 'docker build' <<<"$od" | head -1 | cut -d: -f1) \
-  && [[ -n "$stage_line" && -n "$build_line" && "$stage_line" -lt "$build_line" ]]; then
-  pass "polecat-image runs the seed stage, with the pin-drift guard, before docker build"
+  && ! grep -q -F 'internal/polecat/seed/cmd/stage' <<<"$od" \
+  && ! grep -q -F 'polecat-seed-stage' <<<"$od"; then
+  pass "polecat-image stages no seed sources: the image carries no Go caches (gt-nly1g)"
 else
-  fail "polecat-image runs the seed stage, with the pin-drift guard, before docker build" "$od"
+  fail "polecat-image stages no seed sources: the image carries no Go caches (gt-nly1g)" "$od"
 fi
 gtown2="$SEEDTMP/behindtown"
 mkdir -p "$gtown2/fx/mayor/rig"

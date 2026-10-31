@@ -22,7 +22,7 @@ func at(h int) time.Time { return base.Add(time.Duration(h) * time.Hour) }
 
 const sha = "0123456789abcdef0123456789abcdef01234567"
 
-// TestPlanSeedListsTheLinuxStepsForEachPin: each pin gets the four seed commands in the Dockerfile's
+// TestPlanSeedListsTheLinuxStepsForEachPin: each pin gets the four seed commands in the presubmit's
 // order, go mod download and go build required; no step names darwin or a GOOS other than linux.
 func TestPlanSeedListsTheLinuxStepsForEachPin(t *testing.T) {
 	t.Parallel()

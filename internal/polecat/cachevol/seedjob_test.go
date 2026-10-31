@@ -92,7 +92,7 @@ func TestBuildSeedJobMountsTheClaimAndPutsTheCachesUnderIt(t *testing.T) {
 		t.Errorf("env = %v, want the two caches under /cache", env)
 	}
 	if env["GOFLAGS"] != "-p=4 -modcacherw" {
-		t.Errorf("GOFLAGS = %q, want the Dockerfile seed RUN's flags so cache keys match", env["GOFLAGS"])
+		t.Errorf("GOFLAGS = %q, want the presubmits' flags so cache keys match", env["GOFLAGS"])
 	}
 	if got, want := seed.Args[0], "--pins"; got != want {
 		t.Errorf("seed args = %v, want the pins first", seed.Args)

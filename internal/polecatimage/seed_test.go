@@ -189,8 +189,8 @@ func TestSeedPassStopsOnARequiredStepAndWritesNoMarker(t *testing.T) {
 	}
 }
 
-// TestSeedPassLogsAndSkipsAnOptionalStep: the Dockerfile seed RUN logs a failing vet or test
-// compile and carries on, and so does the Job.
+// TestSeedPassLogsAndSkipsAnOptionalStep: the seed logs a failing vet or test compile and
+// carries on, since only a required step stops it.
 func TestSeedPassLogsAndSkipsAnOptionalStep(t *testing.T) {
 	t.Parallel()
 	h := newSeedHarness(t)

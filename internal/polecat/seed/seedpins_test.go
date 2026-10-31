@@ -11,9 +11,9 @@ import (
 )
 
 // TestSeedPinsNameEverySeededRig: the Makefile's POLE_SEED_RIGS default and
-// deploy/polecat/seed-pins name the same rigs. The image's seed RUN and the
-// shared cache's seed Job both read the pins file alone, so a rig the default
-// names without a pin line is a rig neither seeds (hq-smfiv).
+// deploy/polecat/seed-pins name the same rigs. The shared cache's seed Job reads
+// the pins file alone, so a rig the default names without a pin line is a rig the
+// cache does not seed (hq-smfiv).
 func TestSeedPinsNameEverySeededRig(t *testing.T) {
 	t.Parallel()
 	root := seedRepoRoot(t)
@@ -31,7 +31,7 @@ func TestSeedPinsNameEverySeededRig(t *testing.T) {
 	}
 	for _, rig := range rigs {
 		if _, ok := pinned[rig]; !ok {
-			t.Errorf("rig %q is in the Makefile's POLE_SEED_RIGS default but has no line in deploy/polecat/seed-pins, so neither the image nor the shared cache seeds its modules", rig)
+			t.Errorf("rig %q is in the Makefile's POLE_SEED_RIGS default but has no line in deploy/polecat/seed-pins, so the shared cache does not seed its modules", rig)
 		}
 	}
 	for _, p := range pins {
