@@ -100,11 +100,10 @@ func TestIntegrationSeedRunFailsTheImageWhenTheBuildFails(t *testing.T) {
 	}
 }
 
-// An example module that does not build is not the seed's problem: examples are
-// in no rig's presubmit build, and the beads rig's two nested ones failed every
-// install from 10:28 with a drifted go.sum (gt-9yqcc). The good root module must
-// still seed, so the RUN exits 0, names the example once as skipped (gt-vvu6d)
-// and never builds it.
+// An example module that does not build must not fail the image: examples are in
+// no rig's presubmit build, so nothing else depends on them. The good root module
+// still seeds, so the RUN exits 0, names the example once as skipped, and never
+// builds it.
 func TestIntegrationSeedRunSkipsExampleModules(t *testing.T) {
 	t.Parallel()
 	out, err, cache, _ := runSeed(t, map[string]string{
