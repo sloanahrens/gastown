@@ -190,3 +190,35 @@ func TestCancelledContextStopsEveryMethod(t *testing.T) {
 		t.Errorf("Destroy with a canceled context = %v, want context.Canceled", err)
 	}
 }
+
+func TestRevisionsListsSurvivorsAscendingWithState(t *testing.T) {
+	t.Parallel()
+	f := NewFake()
+	ctx := context.Background()
+	first := put(t, f, "ws", "api-key", "v1")
+	second := put(t, f, "ws", "api-key", "v2")
+	third := put(t, f, "ws", "api-key", "v3")
+	if err := f.Disable(ctx, "ws", "api-key", first); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	if err := f.Destroy(ctx, "ws", "api-key", second); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	got, err := f.Revisions(ctx, "ws", "api-key")
+	if err != nil {
+		t.Fatalf("Revisions: %v", err)
+	}
+	want := []RevisionInfo{{Revision: first, Enabled: false}, {Revision: third, Enabled: true}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Revisions = %v, want %v (the destroyed revision gone, the disabled one marked)", got, want)
+	}
+}
+
+func TestRevisionsOfAnUnknownKeyIsEmptyNotAnError(t *testing.T) {
+	t.Parallel()
+	got, err := NewFake().Revisions(context.Background(), "ws", "never-written")
+	if err != nil || len(got) != 0 {
+		t.Errorf("Revisions of an unknown key = %v, %v; want an empty list and no error", got, err)
+	}
+}
