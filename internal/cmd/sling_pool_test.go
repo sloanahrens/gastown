@@ -697,6 +697,158 @@ func TestPoolListsUnderTheDecisionLockWhenTheListerFails(t *testing.T) {
 	w.decisionLockReleased(t)
 }
 
+// ── The occupancy read, outside the decision lock (gt-crkhv) ────────────────
+
+// seatDecisionBound bounds how long two decisions are given to finish. It is a
+// failure bound, not a wait: a decision that blocks on another one's read never
+// finishes at all, and a test that hangs says nothing.
+const seatDecisionBound = 20 * time.Second
+
+// overlappingSeatReads hands out n seat-state reads, one per decision, and each
+// decision's read blocks on its first call until every one of them has made
+// that call. A decision that takes the state under the seat-decision lock never
+// makes its first call while another decision holds the lock blocked here, so
+// the barrier stays shut and the decisions do not finish. A decision that reads
+// the state before the lock makes the call alongside the others, and they go on
+// together.
+func overlappingSeatReads(n int) func() polecatDispositionFunc {
+	var started sync.WaitGroup
+	started.Add(n)
+	all := make(chan struct{})
+	go func() {
+		started.Wait()
+		close(all)
+	}()
+	return func() polecatDispositionFunc {
+		var once sync.Once
+		return func(string, string) (poolSeatState, error) {
+			once.Do(func() {
+				started.Done()
+				<-all
+			})
+			return poolSeatState{}, nil
+		}
+	}
+}
+
+// seatDecision is what one concurrent `gt sling` decided.
+type seatDecision struct {
+	agent  string
+	reason string
+	err    error
+}
+
+// concurrentSeatDecisions runs two live slings against one town, each its own
+// process (own claim store, own router), and returns what each decided. The two
+// read the town's seat state through overlappingSeatReads, so both are inside
+// their first read before either can decide.
+func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool, reads func() polecatDispositionFunc) []seatDecision {
+	t.Helper()
+	db := beadsfake.New()
+	lister := &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
+	now := func() time.Time { return poolTestNow }
+	out := make([]seatDecision, 2)
+	var wg sync.WaitGroup
+	wg.Add(len(out))
+	for i := range out {
+		go func(i int) {
+			defer wg.Done()
+			r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return db })
+			r.pool = func() *config.PolecatPool { return pool }
+			r.sessions = func() sessionLister { return lister }
+			r.disposition = reads()
+			r.now = now
+			out[i].agent, out[i].reason, out[i].err = r.route("", true)
+		}(i)
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(seatDecisionBound):
+		t.Fatalf("two seat decisions did not finish within %s: one is blocked reading the seat state the other holds the decision lock for", seatDecisionBound)
+	}
+	return out
+}
+
+// townClaims reads the seat claims a town's slings wrote.
+func townClaims(t *testing.T, town string) []poolSeatClaim {
+	t.Helper()
+	claims, err := poolSeatLedgerFor(town, newPoolSeatClaimStore()).read()
+	if err != nil {
+		t.Fatalf("reading seat claims: %v", err)
+	}
+	return claims
+}
+
+// A sling reads the pool's occupancy outside the seat-decision lock, so two
+// concurrent slings read it at the same time (gt-crkhv). The bd-backed read is
+// the slow half of the count — 9.6s on average over 40 slings on 2026-10-31,
+// four times the 5s lock timeout — and taking it under the lock serialized the
+// slings behind each other: the ones that timed out routed unreserved, with no
+// claim, and could overfill the cap (gt-u0zq0).
+//
+// Both reads here block until the other has started. Read under the lock, the
+// first decision blocks holding it and the second's read never starts; read
+// before it, both start and both finish, each taking its own claim.
+func TestSeatDecisionOverlapsOccupancyReads(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "p01")
+
+	got := concurrentSeatDecisions(t, town, cappedPool(2), overlappingSeatReads(2))
+	for i, d := range got {
+		if d.err != nil || d.agent != claimAgent {
+			t.Fatalf("decision %d: want the seat, got %q (%s) %v", i+1, d.agent, d.reason, d.err)
+		}
+		if strings.Contains(d.reason, "seat not reserved") {
+			t.Errorf("decision %d decided without the lock: %q", i+1, d.reason)
+		}
+	}
+	if claims := townClaims(t, town); len(claims) != 2 {
+		t.Fatalf("each decision that read the state before the lock takes its own claim, got %v", claims)
+	}
+	seats := got[0].reason + " " + got[1].reason
+	if !strings.Contains(seats, "seat 1/2") || !strings.Contains(seats, "seat 2/2") {
+		t.Errorf("the two decisions must see the pool one seat apart, got %q and %q", got[0].reason, got[1].reason)
+	}
+}
+
+// The occupancy read moved out of the lock; the count and the claim did not move
+// apart (gt-8o35b). Both decisions read the same empty pool before either takes
+// the lock, and the claim the first writes under the lock is what the second
+// counts under it, so one seat admits one sling and the other is refused.
+func TestSeatDecisionStillAtomicCountAndClaim(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "p01")
+
+	got := concurrentSeatDecisions(t, town, cappedPool(1), overlappingSeatReads(2))
+	admitted, refused := 0, 0
+	for i, d := range got {
+		var bp *poolBackpressureError
+		switch {
+		case d.err == nil && d.agent == claimAgent:
+			admitted++
+		case errors.As(d.err, &bp) && strings.Contains(d.reason, "pool: full (1/1)"):
+			refused++
+		default:
+			t.Fatalf("decision %d: unexpected outcome %q (%s) %v", i+1, d.agent, d.reason, d.err)
+		}
+	}
+	if admitted != 1 || refused != 1 {
+		t.Fatalf("a one-seat pool admitted %d and refused %d of two concurrent slings, want 1 and 1", admitted, refused)
+	}
+	if claims := townClaims(t, town); len(claims) != 1 {
+		t.Fatalf("one seat admits one claim, got %v", claims)
+	}
+}
+
 // ── Seat claims (gt-eoi9) ───────────────────────────────────────────────────
 
 // claimAgent is the pool's agent in the seat-claim tests.

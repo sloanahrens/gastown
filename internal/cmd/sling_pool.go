@@ -935,8 +935,10 @@ const (
 	// waiting for the TTL.
 	poolSeatClaimTTL = 30 * time.Minute
 
-	// poolDecisionLockTimeout bounds the wait for the decision lock. The
-	// critical section is a directory read and one small file write.
+	// poolDecisionLockTimeout bounds the wait for the decision lock. Its
+	// critical section is the cheap half of the count — a tmux listing, the
+	// town's polecat directories and the claim directory — and one small file
+	// write; the bd-backed seat state is read before the lock (gt-crkhv).
 	poolDecisionLockTimeout = 5 * time.Second
 )
 
@@ -1092,9 +1094,10 @@ type poolSeatDecision struct {
 // window between an unlocked read and the lock appears in neither, so the count
 // names a seat free that the other sling already took and the pool runs one
 // over its cap (gt-8o35b). Locking both reads together is what makes the count
-// and the claims one atom. The move does not lengthen the read — one agent-bead
-// read per live session and per polecat directory, one batched work-bead read —
-// so the store calls the lock covers stay bounded by the town's seats.
+// and the claims one atom. That lock is held for the cheap half of the read
+// only: the bd-backed seat state is read before it (poolRouter.preloadSeatState,
+// gt-crkhv), and the batch the count reads through answers it from memory here
+// so the lock is not held across bd.
 //
 // A dry run reads the same seats and claims — so it prints the route a real
 // sling would take — but neither cleans up nor claims: a preview must not
@@ -1483,10 +1486,56 @@ func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.
 // occupied is the count the pool decides from: the live sessions and the seats
 // mid-landing, read through this router's sources and the pool as it is read
 // now. route passes it to begin, not calling it, because begin runs it under the
-// seat-decision lock, which is where the count has to be taken (gt-8o35b).
+// seat-decision lock, which is where the count has to be taken (gt-8o35b). The
+// bd-backed half of it — each seat's agent bead and its rig's assigned work —
+// is read before that lock by preloadSeatState (gt-crkhv), so the read under the
+// lock is answered from this router's batch instead of from bd.
 func (r *poolRouter) occupied() func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
 		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
+	}
+}
+
+// preloadSeatState reads the bd-backed half of the pool's occupied seats before
+// the seat decision takes its lock: every polecat directory's agent bead and its
+// rig's assigned work, through this router's one seat batch.
+//
+// That read is the slow half of the count — a bd round trip per rig, plus one
+// per agent bead the rig's work list does not carry — and it was spent under the
+// decision lock, so a concurrent sling waited out the first sling's bd reads and
+// gave up on the lock at poolDecisionLockTimeout (5s). The seat decision measured
+// 9.6s on average over 40 slings on 2026-10-31, so the slings that timed out
+// routed unreserved and could overfill the cap (gt-crkhv, gt-u0zq0). Read here,
+// the bd reads of concurrent slings overlap instead of serializing.
+//
+// The count and the claim stay one atom (gt-8o35b): the count still runs under
+// the lock, and only its bd-backed state moved earlier. The batch holds what it
+// read, so the count's second read of the same seats is answered from memory,
+// and what the lock covers is the cheap half — the tmux listing, the polecat
+// directories, the intent records and the claim directory — plus the one batched
+// work-bead read a seat mid-landing costs. A session that starts in the window
+// between this read and the lock is still listed under the lock, so it is the
+// session or its claim and never neither (TestPoolCountsASessionThatAppearsBeforeTheDecisionLock).
+//
+// A read that fails here is not reported: the count makes the same read under
+// the lock and answers for it there, so this pass has no result of its own to
+// lose, and its failure costs the wall clock the count would have spent anyway.
+func (r *poolRouter) preloadSeatState() {
+	if r.disposition == nil || r.townRoot == "" {
+		return
+	}
+	rigs, err := knownRigNames(r.townRoot)
+	if err != nil {
+		return
+	}
+	for _, rigName := range rigs {
+		names, err := listPolecatDirectoryNames(filepath.Join(r.townRoot, rigName))
+		if err != nil {
+			continue
+		}
+		for _, name := range names {
+			_, _ = r.disposition(rigName, name)
+		}
 	}
 }
 
@@ -1619,7 +1668,14 @@ func (s poolSession) seatKey() string {
 // seat-decision lock begin takes (gt-8o35b). A polecat that submitted and left
 // its seat to land still holds it, so a second sling admits into a full pool
 // only when the pool has room (gt-3o7zk).
+//
+// The count's bd-backed state is read before that lock (preloadSeatState,
+// gt-crkhv): a live decision is the only one that takes the lock, so it is the
+// only one that has a lock to keep short.
 func (r *poolRouter) route(requested string, live bool) (agent, reason string, err error) {
+	if live {
+		r.preloadSeatState()
+	}
 	return r.routeWith(requested, live, r.occupied())
 }
 
