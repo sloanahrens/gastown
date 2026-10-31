@@ -398,6 +398,7 @@ func init() {
 	crewCmd.AddCommand(crewRenameCmd)
 	crewCmd.AddCommand(crewPristineCmd)
 	crewCmd.AddCommand(crewRestartCmd)
+	crewCmd.AddCommand(crewFreshCmd)
 
 	// Add --session flag to next/prev commands for tmux key binding support
 	// When run via run-shell, tmux session context may be wrong, so we pass it explicitly
