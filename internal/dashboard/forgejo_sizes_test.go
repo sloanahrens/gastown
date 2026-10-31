@@ -1,8 +1,10 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -219,4 +221,103 @@ func TestForgejoSizeNoTownRootFails(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no town root")
+}
+
+// A repository that is not owner/name names no rig to read, so it is refused as
+// the operator's mistake rather than reported under a made-up name.
+func TestForgejoSizeRepoWithoutOwnerFails(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[{"full_name":"gastown","size":1280}]`)
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "repo is not owner/name")
+}
+
+// A rig the registry holds without a beads prefix names no workspace, so its
+// repositories are refused rather than charged to the town default.
+func TestForgejoSizePrefixlessRigIsUnmapped(t *testing.T) {
+	t.Parallel()
+	root := sizeTownRoot(t)
+	writeSizeTownFile(t, root, "mayor/rigs.json", `{"version":1,"rigs":{
+  "bare":{"git_url":"http://forgejo.test/sloan/bare.git","added_at":"2026-10-31T00:00:00Z"}
+}}`)
+	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"sloan/bare","size":7}]`})
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sloan/bare")
+	_, statErr := os.Stat(filepath.Join(ForgejoSizesDir(root), "2026-11-01.jsonl"))
+	assert.True(t, os.IsNotExist(statErr), "a refused report leaves no file")
+}
+
+// A day file the report cannot open is a failed run, not a silent one.
+func TestForgejoSizeUnopenableDayFileFails(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	w.openAppend = func(string) (io.WriteCloser, error) { return nil, errors.New("day file is locked") }
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "day file is locked")
+}
+
+// A write that fails leaves the run failed, so the caller retries instead of
+// trusting a file that stops mid-report.
+func TestForgejoSizeWriteFailureFails(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	sink := &sizeSink{writeErr: errors.New("no space left")}
+	w.openAppend = func(string) (io.WriteCloser, error) { return sink, nil }
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no space left")
+	assert.True(t, sink.closed, "a failed write still closes the file")
+}
+
+// A close that fails can mean the last bytes never landed, so the run reports
+// it rather than a clean night.
+func TestForgejoSizeCloseFailureFails(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	sink := &sizeSink{closeErr: errors.New("flush failed")}
+	w.openAppend = func(string) (io.WriteCloser, error) { return sink, nil }
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "flush failed")
+}
+
+// A metrics directory that cannot be made is a failed run.
+func TestForgejoSizeBlockedMetricsDirFails(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	// A regular file where the directory belongs makes MkdirAll fail.
+	writeSizeTownFile(t, w.townRoot, ".runtime/metrics/forgejo-sizes", "not a directory")
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creating")
+}
+
+// sizeSink is the day file a test drives: it records what was written, and
+// fails the write or the close on demand.
+type sizeSink struct {
+	body     bytes.Buffer
+	writeErr error
+	closeErr error
+	closed   bool
+}
+
+func (s *sizeSink) Write(p []byte) (int, error) {
+	if s.writeErr != nil {
+		return 0, s.writeErr
+	}
+	return s.body.Write(p)
+}
+
+func (s *sizeSink) Close() error {
+	s.closed = true
+	return s.closeErr
 }

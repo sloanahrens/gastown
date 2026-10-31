@@ -9,10 +9,10 @@ package dashboard
 // the tracker size job (gt-oujm5).
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -61,11 +61,19 @@ type ForgejoSizeWriter struct {
 	api      forgejoRepos
 	townRoot string
 	now      func() time.Time
+	// openAppend opens the day's file for appending. It is a field so a test
+	// drives the write and close failures a real disk will not offer on demand.
+	openAppend func(path string) (io.WriteCloser, error)
 }
 
 // NewForgejoSizeWriter builds a writer over api for the town at townRoot.
 func NewForgejoSizeWriter(api forgejoRepos, townRoot string) *ForgejoSizeWriter {
-	return &ForgejoSizeWriter{api: api, townRoot: townRoot, now: time.Now}
+	return &ForgejoSizeWriter{api: api, townRoot: townRoot, now: time.Now, openAppend: openAppendFile}
+}
+
+// openAppendFile opens path for appending, creating it when it is missing.
+func openAppendFile(path string) (io.WriteCloser, error) {
+	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G302: the report is non-sensitive operational data
 }
 
 // ForgejoSizesDir is <town>/.runtime/metrics/forgejo-sizes, the directory the
@@ -126,16 +134,16 @@ func (w *ForgejoSizeWriter) workspaceByRig() (map[string]string, error) {
 	}
 	out := make(map[string]string, len(rigs.Rigs))
 	for name, entry := range rigs.Rigs {
-		if entry.BeadsConfig == nil {
-			continue
+		var prefix string
+		if entry.BeadsConfig != nil {
+			prefix = strings.TrimSuffix(entry.BeadsConfig.Prefix, "-")
 		}
-		prefix := strings.TrimSuffix(entry.BeadsConfig.Prefix, "-")
-		if prefix == "" {
-			continue
-		}
+		// For answers ErrEmptyRigPrefix for a rig the registry holds without a
+		// beads prefix: it names no workspace, so it is left out of the map and
+		// its repositories are refused by name in repoWorkspace.
 		id, err := ids.For(prefix)
 		if err != nil {
-			return nil, fmt.Errorf("forgejo sizes: rig %q: %w", name, err)
+			continue
 		}
 		out[name] = id
 	}
@@ -163,25 +171,19 @@ func repoWorkspace(byRig map[string]string, fullName string) (string, error) {
 func (w *ForgejoSizeWriter) appendRows(rows []ForgejoSizeRow, now time.Time) error {
 	dir := ForgejoSizesDir(w.townRoot)
 	path := filepath.Join(dir, now.Format(sizeDayLayout)+".jsonl")
-	var buf bytes.Buffer
-	for _, row := range rows {
-		line, err := json.Marshal(row)
-		if err != nil {
-			return fmt.Errorf("forgejo sizes: encoding a row: %w", err)
-		}
-		buf.Write(line)
-		buf.WriteByte('\n')
-	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("forgejo sizes: creating %s: %w", dir, err)
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G302: the report is non-sensitive operational data
+	f, err := w.openAppend(path)
 	if err != nil {
 		return fmt.Errorf("forgejo sizes: opening %s: %w", path, err)
 	}
-	if _, err := f.Write(buf.Bytes()); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("forgejo sizes: writing %s: %w", path, err)
+	enc := json.NewEncoder(f)
+	for _, row := range rows {
+		if err := enc.Encode(row); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("forgejo sizes: writing %s: %w", path, err)
+		}
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("forgejo sizes: closing %s: %w", path, err)
