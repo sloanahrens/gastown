@@ -195,25 +195,30 @@ func TestRingVerbs(t *testing.T) {
 			setup func(t *testing.T, f *fake)
 			// noReader leaves the state with no key reader at all, not one that fails.
 			noReader bool
+			// emptyKey hands the state a reader that answers with no key and no error.
+			emptyKey bool
 			// noActor leaves the state with no session actor to forge under.
 			noActor bool
 		}{
-			{"tampered", func(t *testing.T, f *fake) {
+			{name: "tampered", setup: func(t *testing.T, f *fake) {
 				ringtest.Tampered(t, f.town, testRingKey, f.now)
-			}, false, false},
-			{"key unavailable", func(t *testing.T, f *fake) {
+			}},
+			{name: "key unavailable", setup: func(t *testing.T, f *fake) {
 				ringtest.Valid(t, f.town, testRingKey, f.now)
 				f.ringKey = nil
-			}, false, false},
-			{"no key reader configured", func(t *testing.T, f *fake) {
+			}},
+			{name: "empty key", emptyKey: true, setup: func(t *testing.T, f *fake) {
 				ringtest.Valid(t, f.town, testRingKey, f.now)
-			}, true, false},
-			{"unreadable config", func(t *testing.T, f *fake) {
+			}},
+			{name: "no key reader configured", noReader: true, setup: func(t *testing.T, f *fake) {
+				ringtest.Valid(t, f.town, testRingKey, f.now)
+			}},
+			{name: "unreadable config", setup: func(t *testing.T, f *fake) {
 				f.writeTownJSON(t, `{"type":"town"`)
-			}, false, false},
-			{"no session actor", func(t *testing.T, f *fake) {
+			}},
+			{name: "no session actor", noActor: true, setup: func(t *testing.T, f *fake) {
 				ringtest.Valid(t, f.town, testRingKey, f.now)
-			}, false, true},
+			}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
@@ -223,6 +228,9 @@ func TestRingVerbs(t *testing.T) {
 				o, out, _ := ringOptions(f, StateFull)
 				if tc.noReader {
 					o.RingKey = nil
+				}
+				if tc.emptyKey {
+					o.RingKey = func(string) ([]byte, error) { return nil, nil }
 				}
 				if tc.noActor {
 					o.Actor = ""
