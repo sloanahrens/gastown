@@ -108,6 +108,7 @@ func TestLoadRejectsMalformedEntries(t *testing.T) {
 		{"an empty wildcard", `{"hosts":["*."]}`},
 		{"an empty label", `{"hosts":["a..com"]}`},
 		{"a non-numeric port", `{"hosts":["a.com:https"]}`},
+		{"an entry that is only a port", `{"hosts":[":443"]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
