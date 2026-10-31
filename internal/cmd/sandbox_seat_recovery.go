@@ -18,6 +18,12 @@ type sandboxSeatEnv struct {
 	// remoteBranch reports whether branch exists on origin, asked of the rig's
 	// shared bare repo; nil means ls-remote there.
 	remoteBranch func(rigPath, branch string) (bool, error)
+	// survivingBranch reports the most recent generated polecat branch on
+	// origin that encodes issueID, "" when there is none; nil means the shared
+	// reader over the rig's repo. It answers a sandbox seat that recorded no
+	// branch, whose issue landed, whether a branch for that issue survives
+	// (gt-xhnn3).
+	survivingBranch func(rigPath, issueID string) (string, error)
 }
 
 func (e sandboxSeatEnv) branchOnOrigin(rigPath, branch string) (bool, error) {
@@ -25,6 +31,13 @@ func (e sandboxSeatEnv) branchOnOrigin(rigPath, branch string) (bool, error) {
 		return e.remoteBranch(rigPath, branch)
 	}
 	return git.NewGitWithDir(filepath.Join(rigPath, ".repo.git"), "").RemoteBranchExists("origin", branch)
+}
+
+func (e sandboxSeatEnv) branchForIssue(rigPath, issueID string) (string, error) {
+	if e.survivingBranch != nil {
+		return e.survivingBranch(rigPath, issueID)
+	}
+	return polecat.SurvivingBranchForIssue(rigPath, issueID)
 }
 
 // applySandboxLostWorkFacts gives the verdict what it needs to tell lost work
@@ -62,19 +75,34 @@ func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv
 		// record asks origin nothing and fails closed as unknown, the same
 		// answer the manager reaches for the same bead (gt-cu66c).
 		branch, unknownReason := polecat.SandboxSeatOriginBranch(fields)
-		if unknownReason != "" {
-			unknown(unknownReason)
-			return
+		switch {
+		case unknownReason != "":
+			// A seat that recorded no branch names nothing to ask origin
+			// about. It is judged by its issue instead, with the manager's
+			// rule and its answer: a closed issue carrying a landing record
+			// with no branch for it left on origin is finished, and every
+			// other answer is today's refusal (gt-xhnn3).
+			if reason := polecat.SandboxSeatLandedWithoutBranch(issue, workBead, func(issueID string) (string, error) {
+				return env.branchForIssue(rigPath, issueID)
+			}); reason != "" {
+				unknown(reason)
+				return
+			}
+			preserved = true
+		default:
+			onOrigin, err := env.branchOnOrigin(rigPath, branch)
+			if err != nil {
+				unknown(fmt.Sprintf("could not ask origin whether %s was pushed: %v", branch, err))
+				return
+			}
+			preserved = onOrigin
 		}
-		onOrigin, err := env.branchOnOrigin(rigPath, branch)
-		if err != nil {
-			unknown(fmt.Sprintf("could not ask origin whether %s was pushed: %v", branch, err))
-			return
-		}
-		preserved = onOrigin
 	}
 	facts.SandboxGone = true
 	facts.SandboxWorkBead = workBead
+	// Preserved means nothing here is at risk: the branch is on origin, a bead
+	// names a resume_branch, or — with no branch recorded at all — the issue
+	// landed and no branch for it survives (gt-xhnn3).
 	facts.SandboxBranchPreserved = preserved
 }
 

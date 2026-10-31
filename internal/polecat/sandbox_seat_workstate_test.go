@@ -400,3 +400,79 @@ func TestSandboxLostWorkFactsFailClosedWhenTheAnswerIsUnknown(t *testing.T) {
 		})
 	}
 }
+
+// A sandbox seat whose agent bead recorded no branch names nothing to ask
+// origin about, so the reuse gate judges it by its issue instead: an issue
+// closed with a landing record and no branch for it left on origin is finished,
+// with nothing at risk, and the seat is reusable; an open issue, a no-changes
+// close (closed with no landing record), a branch for the issue still on
+// origin, an unreadable issue and an origin that cannot be asked each keep
+// today's unknown git state (gt-xhnn3).
+func TestWorkstateDispositionOfASandboxSeatWithNoBranchTellsItsLanding(t *testing.T) {
+	t.Parallel()
+	const landingRecord = "LANDING RECORD\nlanded_commit: 0123456789abcdef\npatch_id: p1\n"
+	tests := []struct {
+		name      string
+		status    string // the work bead's status
+		notes     string // appended to the work bead
+		onOrigin  bool   // a generated polecat branch for the issue on origin
+		showFails bool   // the work bead cannot be read
+		noRepo    bool   // the rig has no repo, so origin cannot be asked
+		wantUnk   string // substring of the unknown reason; "" wants the safe case
+	}{
+		{name: "landed_no_branch_on_origin", status: string(beads.StatusClosed), notes: landingRecord},
+		{name: "no_changes_close_is_not_a_landing", status: string(beads.StatusClosed), wantUnk: "closed with no landing record"},
+		{name: "open_issue_that_landed", status: string(beads.StatusOpen), notes: landingRecord, wantUnk: "is open"},
+		{name: "branch_for_the_issue_on_origin", status: string(beads.StatusClosed), notes: landingRecord, onOrigin: true, wantUnk: "still exists on origin"},
+		{name: "origin_cannot_be_asked", status: string(beads.StatusClosed), notes: landingRecord, noRepo: true, wantUnk: "could not ask origin whether a branch for gt-work survived"},
+		{name: "issue_cannot_be_read", status: string(beads.StatusOpen), showFails: true, wantUnk: "could not read gt-work for a resume_branch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, mayorRig, bd, _, w := canonicalWithPolecats(t, true, "toast")
+			if tt.onOrigin {
+				w.SetRef(t, mayorRig, "refs/heads/polecat/toast/gt-work+zzz", w.rev(t, mayorRig, "main"))
+			}
+			if _, err := bd.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.showFails {
+				mgr.beads = showFailsBeads{mgr.beads, "gt-work"}
+			} else {
+				status := tt.status
+				if err := bd.Update("gt-work", beads.UpdateOptions{Status: &status, AppendNotes: tt.notes}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.noRepo {
+				mgr.rig.Path = t.TempDir()
+			}
+			// The agent bead records no branch: the seat left only its issue.
+			bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+				f.Agent, f.Branch, f.HookBead, f.LastSourceIssue = "deepseek-flash-sandbox", "", "", "gt-work"
+			})
+			mgr.sandboxSeat = func(string, string) (LiveGitState, bool) {
+				return SandboxSeatGitState("", false, nil, "sb"), true
+			}
+
+			d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+			if tt.wantUnk != "" {
+				if d.GitStateSource != GitStateSourceUnknown || !strings.Contains(d.GitStateReason, tt.wantUnk) {
+					t.Errorf("git state = %q %q, want unknown naming %q", d.GitStateSource, d.GitStateReason, tt.wantUnk)
+				}
+				if d.Reusable || d.SafeToNuke || d.Reason == "sandbox-work-lost" {
+					t.Errorf("an unknown answer decided %+v: want neither reusable, safe to nuke, nor lost work", d)
+				}
+				return
+			}
+			if d.GitStateSource != GitStateSourceLive {
+				t.Errorf("git state = %q %q, want live", d.GitStateSource, d.GitStateReason)
+			}
+			if !d.Reusable || !d.SafeToNuke {
+				t.Errorf("landed seat reusable=%v safe=%v (reason %s blockers %v), want a safe, reusable seat", d.Reusable, d.SafeToNuke, d.Reason, d.Blockers)
+			}
+		})
+	}
+}
