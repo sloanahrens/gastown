@@ -118,6 +118,10 @@ func (f *Fake) GetIssues(_ context.Context, ids []string) (map[string]api.Issue,
 	out := map[string]api.Issue{}
 	for _, id := range ids {
 		if is, ok := f.issues[id]; ok {
+			// A named read fills Dependents even when nothing depends on the
+			// issue: the contract case depsNoDependentsIsEmpty requires an empty
+			// list, not nil, and a client reads nil as an unfilled field.
+			is.Dependents = make([]api.IssueDep, 0)
 			out[id] = is
 		}
 	}
