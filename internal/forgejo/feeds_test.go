@@ -139,7 +139,7 @@ func TestListUserReposEndlessPagesFails(t *testing.T) {
 	})
 	_, err := newTestClient(t, h).ListUserRepos(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "still full")
+	assert.ErrorIs(t, err, ErrListNeverEnds)
 
 	mu.Lock()
 	gotCalls, gotWriteErr := calls, writeErr

@@ -3,6 +3,7 @@ package forgejo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -21,6 +22,10 @@ const userReposLimit = 100
 // town's repository count, and a server that served more is a fault to report,
 // not a list to truncate.
 const userReposMaxPages = 100
+
+// ErrListNeverEnds reports a repository list the server kept serving past the
+// paging bound, so the read cannot be trusted to be complete.
+var ErrListNeverEnds = errors.New("forgejo: repository list never ended")
 
 // Repository is the subset of a Forgejo repository the client reads: the
 // owner/name an activity feed addresses the repo by, the size the nightly
@@ -85,7 +90,9 @@ func (a Activity) HeadMessage() (string, bool) {
 // a server caps a page at its own maximum, so a short page may still have more
 // behind it, while an empty one cannot (gt-nlrpk). Reading that closing empty
 // page is why the panel's refresh makes one more call than the listing
-// strictly needs.
+// strictly needs. That call is accepted, not reduced: trusting a short page
+// would drop repositories from a billing report whenever the server's page cap
+// is below the requested limit.
 func (c *Client) ListUserRepos(ctx context.Context) ([]Repository, error) {
 	out := make([]Repository, 0, userReposLimit)
 	for page := 1; page <= userReposMaxPages; page++ {
@@ -101,7 +108,7 @@ func (c *Client) ListUserRepos(ctx context.Context) ([]Repository, error) {
 		}
 		out = append(out, rows...)
 	}
-	return nil, fmt.Errorf("still full after %d pages", userReposMaxPages)
+	return nil, fmt.Errorf("%w: still full after %d pages", ErrListNeverEnds, userReposMaxPages)
 }
 
 // ListRepoActivities returns a repository's recent activities, newest first.

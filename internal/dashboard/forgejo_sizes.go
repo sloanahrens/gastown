@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -80,8 +81,8 @@ func rigWorkspace(ids *workspaceid.Map, prefix string) (string, error) {
 	return ids.For(prefix)
 }
 
-// openTempFile creates path exclusively: a leftover temporary file from a
-// crashed run is refused rather than silently overwritten.
+// openTempFile creates path exclusively, so a second writer racing this one
+// fails instead of interleaving. writeRows clears a dead run's leftover first.
 func openTempFile(path string) (io.WriteCloser, error) {
 	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644) //nolint:gosec // G302: the report is non-sensitive operational data
 }
@@ -109,14 +110,14 @@ func (w *ForgejoSizeWriter) Write(ctx context.Context) ([]ForgejoSizeRow, error)
 	if err != nil {
 		return nil, fmt.Errorf("forgejo sizes: listing repositories: %w", err)
 	}
-	byRig, err := w.workspaceByRig()
+	byRepo, err := w.workspaceByRepo()
 	if err != nil {
 		return nil, err
 	}
 	now := w.now().UTC()
 	rows := make([]ForgejoSizeRow, 0, len(repos))
 	for _, repo := range repos {
-		workspace, err := repoWorkspace(byRig, repo.FullName)
+		workspace, err := repoWorkspace(byRepo, repo.FullName)
 		if err != nil {
 			return nil, err
 		}
@@ -133,12 +134,16 @@ func (w *ForgejoSizeWriter) Write(ctx context.Context) ([]ForgejoSizeRow, error)
 	return rows, nil
 }
 
-// workspaceByRig maps each registered rig's name to its workspace id: the rig's
-// beads prefix from the town registry gives the workspace (internal/workspaceid).
-// A rig registered without a prefix is left out, so a repository of its is
-// named as unmapped rather than charged to the town's default workspace, which
-// belongs to another customer's bill.
-func (w *ForgejoSizeWriter) workspaceByRig() (map[string]string, error) {
+// workspaceByRepo maps each registered rig's repository, as owner/name, to the
+// rig's workspace id: the rig's beads prefix from the town registry gives the
+// workspace (internal/workspaceid), and the registry's git_url gives the
+// repository the rig lives in. Keying by owner and name keeps a repository of
+// the same name under another owner, which the viewer can also see, from being
+// billed to this town's workspace. A rig registered without a beads prefix, or
+// without a git_url that names an owner and a repository, is left out, so its
+// repository is named as unmapped rather than charged to the town's default
+// workspace, which belongs to another customer's bill.
+func (w *ForgejoSizeWriter) workspaceByRepo() (map[string]string, error) {
 	rigsPath := filepath.Join(w.townRoot, "mayor", "rigs.json")
 	rigs, err := config.LoadRigsConfig(rigsPath)
 	if err != nil {
@@ -149,6 +154,7 @@ func (w *ForgejoSizeWriter) workspaceByRig() (map[string]string, error) {
 		return nil, fmt.Errorf("forgejo sizes: %w", err)
 	}
 	out := make(map[string]string, len(rigs.Rigs))
+	owner := make(map[string]string, len(rigs.Rigs))
 	for name, entry := range rigs.Rigs {
 		var prefix string
 		if entry.BeadsConfig != nil {
@@ -156,9 +162,9 @@ func (w *ForgejoSizeWriter) workspaceByRig() (map[string]string, error) {
 		}
 		// For answers ErrEmptyRigPrefix for a rig the registry holds without a
 		// beads prefix: it names no workspace, so that rig alone is left out of
-		// the map and its repositories are refused by name in repoWorkspace.
-		// Any other mapping error is the run's failure, never a rig quietly
-		// dropped from the bill.
+		// the map and its repository is refused by name in repoWorkspace. Any
+		// other mapping error is the run's failure, never a rig quietly dropped
+		// from the bill.
 		id, err := w.forRig(ids, prefix)
 		if err != nil {
 			if errors.Is(err, workspaceid.ErrEmptyRigPrefix) {
@@ -166,24 +172,54 @@ func (w *ForgejoSizeWriter) workspaceByRig() (map[string]string, error) {
 			}
 			return nil, fmt.Errorf("forgejo sizes: mapping rig %s: %w", name, err)
 		}
-		out[name] = id
+		key, ok := repoKey(entry.GitURL)
+		if !ok {
+			continue
+		}
+		if other, dup := owner[key]; dup {
+			return nil, fmt.Errorf("forgejo sizes: rigs %s and %s both name repository %s", other, name, strconv.Quote(key))
+		}
+		owner[key] = name
+		out[key] = id
 	}
 	return out, nil
 }
 
-// repoWorkspace is the workspace a repository belongs to: the repository's base
-// name names its rig (Forgejo serves a town's repositories as <owner>/<rig>),
-// and the rig's workspace is the registry's answer for it. A repository that
-// names no registered rig is an error rather than a guess at which customer it
-// bills.
-func repoWorkspace(byRig map[string]string, fullName string) (string, error) {
-	_, name, ok := strings.Cut(fullName, "/")
-	if !ok || name == "" {
+// repoKey is the lower-cased owner/name a git URL names: the last two path
+// segments, with a trailing .git dropped. It reads an http(s) URL and the
+// scp-like git@host:owner/name.git form. ok is false when the URL names no owner
+// and repository. Forgejo treats owner and repository names case-insensitively.
+func repoKey(gitURL string) (string, bool) {
+	path := gitURL
+	if u, err := url.Parse(gitURL); err == nil && u.Scheme != "" && u.Host != "" {
+		path = u.Path
+	} else if _, after, found := strings.Cut(gitURL, ":"); found {
+		path = after
+	}
+	var segs []string
+	for _, s := range strings.Split(strings.TrimSuffix(strings.Trim(path, "/"), ".git"), "/") {
+		if s != "" {
+			segs = append(segs, s)
+		}
+	}
+	if len(segs) < 2 {
+		return "", false
+	}
+	return strings.ToLower(segs[len(segs)-2] + "/" + segs[len(segs)-1]), true
+}
+
+// repoWorkspace is the workspace a repository belongs to: the registry names
+// each rig's repository as owner/name, and the rig's workspace is the registry's
+// answer for it. A repository whose owner and name match no registered rig is an
+// error rather than a guess at which customer it bills.
+func repoWorkspace(byRepo map[string]string, fullName string) (string, error) {
+	owner, name, ok := strings.Cut(fullName, "/")
+	if !ok || owner == "" || name == "" {
 		return "", fmt.Errorf("forgejo sizes: %w: %s", errRepoName, strconv.Quote(fullName))
 	}
-	workspace, ok := byRig[name]
+	workspace, ok := byRepo[strings.ToLower(fullName)]
 	if !ok {
-		return "", fmt.Errorf("forgejo sizes: repo %s names no registered rig with a beads prefix", strconv.Quote(fullName))
+		return "", fmt.Errorf("forgejo sizes: repo %s matches no registered rig's owner and name with a beads prefix", strconv.Quote(fullName))
 	}
 	return workspace, nil
 }
@@ -199,6 +235,10 @@ func (w *ForgejoSizeWriter) writeRows(rows []ForgejoSizeRow, now time.Time) erro
 		return fmt.Errorf("forgejo sizes: creating %s: %w", dir, err)
 	}
 	tmp := path + ".tmp"
+	// A run killed mid-write leaves its temporary file behind, and the exclusive
+	// create below would refuse every later run. The job has one writer at a
+	// time, so a temporary file found here is a dead run's: drop it.
+	removeTemp(tmp)
 	f, err := w.openTemp(tmp)
 	if err != nil {
 		return fmt.Errorf("forgejo sizes: opening %s: %w", tmp, err)

@@ -448,3 +448,95 @@ func (s *sizeFailAfter) Write(p []byte) (int, error) {
 func (s *sizeFailAfter) Close() error {
 	return s.f.Close()
 }
+
+// A repository the viewer can see under another owner, with a rig's name, is
+// not that rig's: billing it to the rig's workspace would charge another
+// customer's storage to this town.
+func TestForgejoSizeSameNameOtherOwnerIsRefused(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[
+	  {"full_name":"sloan/gastown","size":1280},
+	  {"full_name":"other-org/gastown","size":99}
+	]`)
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "other-org/gastown")
+	_, statErr := os.Stat(filepath.Join(ForgejoSizesDir(w.townRoot), "2026-11-01.jsonl"))
+	assert.True(t, os.IsNotExist(statErr), "a refused report leaves no file")
+}
+
+func TestForgejoSizeOwnerAndNameMatchIgnoringCase(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[{"full_name":"Sloan/GastOwn","size":5}]`)
+	rows, err := w.Write(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "workspace-a", rows[0].Workspace)
+}
+
+// The registry's git_url may be the scp-like form; it names the same owner and
+// repository as the http form.
+func TestForgejoSizeScpStyleGitURLMapsTheRepository(t *testing.T) {
+	t.Parallel()
+	root := sizeTownRoot(t)
+	writeSizeTownFile(t, root, "mayor/rigs.json", `{"version":1,"rigs":{
+  "gastown":{"git_url":"git@forgejo.test:sloan/gastown.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}}
+}}`)
+	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"sloan/gastown","size":7}]`})
+	rows, err := w.Write(context.Background())
+
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "workspace-a", rows[0].Workspace)
+}
+
+// A rig whose git_url names no owner and repository cannot say which
+// repository is its: that repository is unmapped, not guessed.
+func TestForgejoSizeRigWithoutAnOwnerInItsGitURLIsUnmapped(t *testing.T) {
+	t.Parallel()
+	root := sizeTownRoot(t)
+	writeSizeTownFile(t, root, "mayor/rigs.json", `{"version":1,"rigs":{
+  "gastown":{"git_url":"gastown","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}}
+}}`)
+	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"sloan/gastown","size":7}]`})
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sloan/gastown")
+}
+
+// Two rigs naming one repository would bill it twice or to the wrong one.
+func TestForgejoSizeTwoRigsOneRepositoryFails(t *testing.T) {
+	t.Parallel()
+	root := sizeTownRoot(t)
+	writeSizeTownFile(t, root, "mayor/rigs.json", `{"version":1,"rigs":{
+  "a":{"git_url":"http://forgejo.test/sloan/shared.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"gt"}},
+  "b":{"git_url":"http://forgejo.test/sloan/shared.git","added_at":"2026-10-31T00:00:00Z","beads":{"repo":"local","prefix":"bd"}}
+}}`)
+	w := newForgejoSizeWriterAt(t, root, forgejoReposStub{body: `[{"full_name":"sloan/shared","size":7}]`})
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sloan/shared")
+}
+
+// A run killed mid-write leaves its temporary file behind. The next run clears
+// it and writes its own complete snapshot instead of failing every night.
+func TestForgejoSizeStaleTempFromACrashedRunDoesNotBlock(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	dir := ForgejoSizesDir(w.townRoot)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	stale := filepath.Join(dir, "2026-11-01.jsonl.tmp")
+	require.NoError(t, os.WriteFile(stale, []byte("{\"half a row"), 0o644))
+
+	_, err := w.Write(context.Background())
+
+	require.NoError(t, err)
+	lines := sizeDayLines(t, w.townRoot)
+	require.Len(t, lines, 1, "the day holds this run's one row, none of the dead run's")
+	_, statErr := os.Stat(stale)
+	assert.True(t, os.IsNotExist(statErr), "the temporary file is gone after the run")
+}
