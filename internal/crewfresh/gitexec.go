@@ -5,11 +5,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
+
+// gitWaitDelay bounds how long Wait may keep waiting once the deadline has run
+// out. Git is not one process — a fetch forks a remote helper — so the kill
+// reaches the whole process group (util.SetProcessGroup), and this is the
+// backstop should a helper survive that kill and hold the output pipe.
+var gitWaitDelay = util.ProcessGroupKillGrace + 3*time.Second
+
+// gitEnv is the environment git runs in: the caller's own, with the terminal
+// prompt off. A prompt cannot be answered from a background fetch, and left on
+// it waits out the deadline instead of failing at once.
+func gitEnv() []string {
+	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+}
 
 // gitCommand runs git's argv and returns what it wrote to stdout.
 type gitCommand func(ctx context.Context, argv []string) (stdout string, err error)
@@ -20,6 +36,12 @@ type gitCommand func(ctx context.Context, argv []string) (stdout string, err err
 // makes the same choice).
 func realGit(ctx context.Context, argv []string) (string, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: fixed git subcommand; the directory came from NewGit
+	// The deadline has to reach git's helpers, and Wait has to stop when it
+	// does: killing git alone leaves a helper holding the output pipe, which
+	// held Wait well past the caller's timeout (gt-vpj84).
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = gitWaitDelay
+	cmd.Env = gitEnv()
 	cmd.Stderr = io.Discard
 	out, err := cmd.Output()
 	return gitOutput(out, err)
@@ -130,10 +152,11 @@ func (g *gitExec) run(ctx context.Context, args ...string) (string, error) {
 		command = realGit
 	}
 	stdout, err := command(ctx, argv)
-	if err == nil {
-		return stdout, nil
+	if err != nil {
+		// Nothing of a failed command's output is an answer (gitOutput).
+		return "", gitCommandError(args, err, ctx.Err())
 	}
-	return stdout, gitCommandError(args, err, ctx.Err())
+	return stdout, nil
 }
 
 // gitCommandError is the error for a git command that failed: what ran and

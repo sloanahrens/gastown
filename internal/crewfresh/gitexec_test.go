@@ -296,6 +296,21 @@ func TestGitOutputReportsStdoutOnSuccess(t *testing.T) {
 	}
 }
 
+// A failed command's partial output is not an answer, so run returns none of
+// it (gt-vpj84).
+func TestGitRunReturnsNoOutputWithAnError(t *testing.T) {
+	t.Parallel()
+	command := &fakeCommand{stdout: "partial answer\n", err: errors.New("boom")}
+
+	out, err := (&gitExec{dir: testDir, command: command.run}).run(context.Background(), "status", "--porcelain")
+	if err == nil {
+		t.Fatal("run = nil error, want the command's failure")
+	}
+	if out != "" {
+		t.Errorf("run = %q, want \"\": a failed command's output is not an answer", out)
+	}
+}
+
 // A failure names the command that failed and wraps the failure, so a caller
 // can tell a missing remote from a lock with errors.Is (gt-vpj84).
 func TestGitCommandErrorNamesTheCommandAndWrapsTheFailure(t *testing.T) {

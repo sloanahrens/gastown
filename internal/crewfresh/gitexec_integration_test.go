@@ -3,6 +3,8 @@
 package crewfresh
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
@@ -10,18 +12,53 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
+const (
+	// standInEnv puts the test binary in the role of a stand-in git: a process
+	// that leaves its process group and keeps the output pipe open.
+	standInEnv = "CREWFRESH_STAND_IN"
+	// standInHelperPIDEnv names the file the stand-in records its escaped
+	// child's pid in.
+	standInHelperPIDEnv = "CREWFRESH_STAND_IN_HELPER_PID"
+)
+
 // TestMain runs the integration tier, which drives real git, under the
 // hermetic harness: it gives the temporary repositories a git identity and
 // keeps them off the live town.
 func TestMain(m *testing.M) {
+	// Checked before the harness, which scrubs the environment this role is
+	// selected by.
+	if os.Getenv(standInEnv) == "1" {
+		standInWithEscapedHelper()
+	}
 	os.Exit(testutil.HermeticMain(m))
+}
+
+// standInWithEscapedHelper is the stand-in git: it starts a child in a new
+// session, which a process-group kill cannot reach, records that child's pid,
+// and then blocks holding the output pipe until it is killed.
+func standInWithEscapedHelper() {
+	helper := exec.Command("sleep", "300") //nolint:gosec // G204: a fixed argv built by the test
+	helper.Stdout = os.Stdout
+	helper.Stderr = os.Stderr
+	helper.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := helper.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "stand-in git: start the escaped helper: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(os.Getenv(standInHelperPIDEnv), []byte(strconv.Itoa(helper.Process.Pid)), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "stand-in git: record the helper's pid: %v\n", err)
+		os.Exit(1)
+	}
+	select {}
 }
 
 // gitT runs git in dir and returns its trimmed output, failing the test when
@@ -179,6 +216,168 @@ func TestIntegrationNewGitFastForwardsACleanMain(t *testing.T) {
 	}
 	if want := "v4\n"; string(body) != want {
 		t.Errorf("clone readme.txt = %q, want %q", body, want)
+	}
+}
+
+// writeStandInGit writes the executable realGit runs in place of git into dir,
+// so a test can put it first on PATH and spawn it for real.
+func writeStandInGit(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitForHelper polls until the stand-in git has recorded the pid of the child
+// that holds its output pipe, and returns it.
+func waitForHelper(t *testing.T, pidFile string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		body, err := os.ReadFile(pidFile)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+			if err != nil {
+				t.Fatalf("helper pid %q: %v", body, err)
+			}
+			return pid
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the stand-in git recorded no helper pid in %s after 10s: %v", pidFile, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForGone polls until pid is gone. A killed process stays visible to
+// kill(pid, 0) as a zombie until it is reaped, and a group member is
+// reparented before that, so "gone" is a state to wait for.
+func waitForGone(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("process %d is still there after 5s: kill(pid, 0) = %v", pid, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A deadline reaches git's whole process tree, and Wait stops with it: a
+// remote helper that outlives git holds the output pipe, and neither the
+// helper nor Wait may outlast the caller's timeout (gt-vpj84).
+func TestIntegrationRealGitStopsWhenItsDeadlineEnds(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "helper.pid")
+	// The stand-in's child inherits the output pipe, as a remote helper
+	// inherits git's, and the stand-in blocks until something signals it.
+	writeStandInGit(t, dir, `#!/bin/sh
+sleep 300 &
+echo $! > "$GT_STUB_PIDFILE"
+wait
+`)
+	t.Setenv("GT_STUB_PIDFILE", pidFile)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := (&gitExec{dir: dir}).run(ctx, "fetch", "origin", "main")
+		done <- err
+	}()
+
+	helper := waitForHelper(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(helper, syscall.SIGKILL) })
+
+	started := time.Now()
+	cancel()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(2 * gitWaitDelay):
+		t.Fatalf("run did not return within %s of the deadline", 2*gitWaitDelay)
+	}
+	if elapsed := time.Since(started); elapsed >= gitWaitDelay {
+		t.Errorf("run returned %s after the deadline, past gitWaitDelay %s: Wait outlived the kill", elapsed, gitWaitDelay)
+	}
+	if err == nil {
+		t.Fatal("run = nil error, want the ended deadline")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("run error = %q, want it to wrap context.Canceled", err)
+	}
+	if want := "git fetch origin main"; !strings.Contains(err.Error(), want) {
+		t.Errorf("run error = %q, want it to name %q", err, want)
+	}
+	waitForGone(t, helper)
+}
+
+// WaitDelay bounds Wait for a helper the process-group kill cannot reach: a
+// helper that left the group holds the output pipe, so only the delay ends the
+// wait (gt-vpj84).
+func TestIntegrationRealGitWaitDoesNotOutliveItsDelay(t *testing.T) {
+	dir := t.TempDir()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStandInGit(t, dir, "#!/bin/sh\nexec '"+self+"'\n")
+	pidFile := filepath.Join(dir, "helper.pid")
+	t.Setenv(standInEnv, "1")
+	t.Setenv(standInHelperPIDEnv, pidFile)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := (&gitExec{dir: dir}).run(ctx, "fetch", "origin", "main")
+		done <- err
+	}()
+
+	helper := waitForHelper(t, pidFile)
+	t.Cleanup(func() {
+		_ = syscall.Kill(helper, syscall.SIGKILL)
+		waitForGone(t, helper)
+	})
+
+	cancel()
+
+	select {
+	case err = <-done:
+	case <-time.After(2 * gitWaitDelay):
+		t.Fatalf("run did not return within %s of the deadline: Wait outlived WaitDelay", 2*gitWaitDelay)
+	}
+	if err == nil {
+		t.Fatal("run = nil error, want the ended deadline")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("run error = %q, want it to wrap context.Canceled", err)
+	}
+}
+
+// realGit turns git's terminal prompt off, so a private remote fails at once
+// instead of waiting out the deadline at a prompt no one can answer
+// (gt-vpj84).
+func TestIntegrationRealGitTurnsOffTheCredentialPrompt(t *testing.T) {
+	dir := t.TempDir()
+	writeStandInGit(t, dir, "#!/bin/sh\nprintf '%s' \"$GIT_TERMINAL_PROMPT\"\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	out, err := realGit(context.Background(), []string{"git", "-C", dir, "fetch", "origin", "main"})
+	if err != nil {
+		t.Fatalf("realGit = error %v, want nil", err)
+	}
+	if out != "0" {
+		t.Errorf("GIT_TERMINAL_PROMPT = %q, want %q", out, "0")
 	}
 }
 
