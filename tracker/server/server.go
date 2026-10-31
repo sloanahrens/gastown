@@ -50,6 +50,11 @@ type Config struct {
 	// ExportTimeout bounds one export, the time its read holds one snapshot
 	// open while a slow client reads; default 30 min.
 	ExportTimeout time.Duration
+	// Reap is the wisp age policy the purge route and the reaper loop apply;
+	// zero ages take the defaults.
+	Reap store.ReapPolicy
+	// Now is the clock the policy measures from; nil means the wall clock.
+	Now func() time.Time
 }
 
 // Server is trackerd's HTTP handler.

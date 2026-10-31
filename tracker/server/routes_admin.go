@@ -1,25 +1,30 @@
 package server
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/steveyegge/gastown/tracker/api"
+	"github.com/steveyegge/gastown/tracker/store"
 )
 
 // Authorization: any authenticated token may read configuration and statistics;
-// writing configuration, issuing a token and revoking one need an admin-scope
-// token (a seat token gets a 403). Admin tokens are held by the daemon and
-// operators, never by a seat.
+// writing configuration, issuing a token, revoking one and purging wisps need an
+// admin-scope token (a seat token gets a 403). Admin tokens are held by the
+// daemon and operators, never by a seat.
 //
 // registerAdminRoutes registers the maintenance reads and the configuration
 // routes: GET /v1/stats?rig=, GET /v1/config/{key} and PUT /v1/config/{key};
-// and the token routes POST /v1/tokens (issue) and POST /v1/tokens:revoke, so
-// a caller can hand a seat its token without holding the database password.
+// the token routes POST /v1/tokens (issue) and POST /v1/tokens:revoke, so
+// a caller can hand a seat its token without holding the database password;
+// and POST /v1/wisps:purge, which deletes the expired wisps among the ids named.
 func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/stats", s.stats)
 	mux.HandleFunc("GET /v1/config/{key}", s.configGet)
 	mux.HandleFunc("PUT /v1/config/{key}", requireAdmin(s.configSet))
 	mux.HandleFunc("POST /v1/tokens", requireAdmin(s.issueToken))
+	mux.HandleFunc("POST /v1/wisps:purge", requireAdmin(s.purgeWisps))
 	mux.HandleFunc("POST /v1/tokens:revoke", requireAdmin(s.revokeTokens))
 }
 
@@ -122,4 +127,90 @@ func (s *Server) configSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// reapPassTimeout bounds one reaper pass; a pass that outlives it is cut off
+// and the next tick starts a fresh one.
+const reapPassTimeout = 10 * time.Minute
+
+// purgeWisps deletes the expired wisps among the ids the body names, under the
+// wisp policy. Each id the policy keeps is reported with its reason, so a caller
+// can tell a refusal from a purge.
+func (s *Server) purgeWisps(w http.ResponseWriter, r *http.Request) {
+	var req api.PurgeWispsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	res, err := store.PurgeWisps(r.Context(), s.cfg.Store, req.IDs, s.now(), s.cfg.Reap)
+	if err != nil {
+		writeError(w, err, s.cfg.Log)
+		return
+	}
+	s.cfg.Log.Printf("wisp purge: admin=%q purged=%d kept=%d", api.ActorFrom(r.Context()), len(res.Purged), len(res.Kept))
+	writeJSON(w, http.StatusOK, res)
+}
+
+// StartReaper runs the wisp policy as a background pass every interval until ctx
+// ends, logging each pass's counts. The returned channel closes once the loop has
+// stopped. An interval of zero or less starts nothing and returns a closed
+// channel.
+func (s *Server) StartReaper(ctx context.Context, every time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	if every <= 0 {
+		close(done)
+		return done
+	}
+	ticker := time.NewTicker(every)
+	go func() {
+		defer close(done)
+		defer ticker.Stop()
+		s.reapLoop(ctx, ticker.C)
+	}()
+	return done
+}
+
+// reapLoop runs one pass for each tick until ctx ends. A failed pass is logged
+// and the loop goes on: the next tick is the retry. A tick that arrives after
+// ctx ends starts no pass.
+func (s *Server) reapLoop(ctx context.Context, ticks <-chan time.Time) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		s.reapOnce(ctx)
+	}
+}
+
+func (s *Server) reapOnce(ctx context.Context) {
+	passCtx, cancel := context.WithTimeout(ctx, reapPassTimeout)
+	defer cancel()
+	res, err := store.ReapPass(passCtx, s.cfg.Store, s.now(), s.cfg.Reap)
+	if err != nil {
+		if ctx.Err() != nil {
+			// Shutdown cut the pass short. Nothing failed, and the next start
+			// runs a fresh pass, so there is nothing to report.
+			return
+		}
+		s.cfg.Log.Printf("reaper pass: failed: %v", err)
+		return
+	}
+	s.cfg.Log.Printf("reaper pass: closed=%d purged=%d", res.Closed, res.Purged)
+}
+
+// now is the clock the policy measures from.
+func (s *Server) now() time.Time {
+	if s.cfg.Now != nil {
+		return s.cfg.Now()
+	}
+	return time.Now()
 }
