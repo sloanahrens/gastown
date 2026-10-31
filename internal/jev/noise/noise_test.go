@@ -1,6 +1,8 @@
 package noise
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -220,6 +222,49 @@ func TestNoiseWidthDropsTheTopFivePercent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rep.Rows, 1)
 	assertRow(t, rep.Rows[0], Row{Question: "q", Kind: KindNoul, Items: 20, Width90: fp(0.1)})
+}
+
+// TestNoiseCountsRepeatsWithNoEarlierOriginal: a repeat older than every original
+// of its key has nothing to pair with, so it is counted as unpaired and leaves
+// the rows alone. The repeats after the original still pair with it.
+func TestNoiseCountsRepeatsWithNoEarlierOriginal(t *testing.T) {
+	t.Parallel()
+	originals := []logtriage.Line{original("k", at(2), map[string]logtriage.Answer{"q": noulAns(0.2)})}
+	repeats := append(repeatsOfNoul("k", at(1), "q", 0.2, 0.2, 0.2), repeatsOfNoul("k", at(3), "q", 0.2, 0.2, 0.2)...)
+
+	rep, err := Compute(originals, repeats, Options{Cut: 0.5})
+	require.NoError(t, err)
+	assert.Equal(t, 3, rep.Unpaired, "unpaired repeats")
+	require.Len(t, rep.Rows, 1)
+	assertRow(t, rep.Rows[0], Row{Question: "q", Kind: KindNoul, Items: 1, MeanSD: fp(0), MaxSD: fp(0), CrossShare: fp(0), Width90: fp(0)})
+}
+
+// TestNoiseWriteTextReportsUnpairedRepeats: the text report says how many repeats
+// were left unpaired, so a reader can tell them from a sample that never repeated.
+func TestNoiseWriteTextReportsUnpairedRepeats(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	require.NoError(t, WriteText(&out, Report{Battery: "logtriage", Cut: 0.5, Unpaired: 3, Rows: []Row{}}))
+	assert.Contains(t, out.String(), "3 repeat(s) with no earlier original were not paired\n")
+}
+
+// unpairedLineWriter fails only the write that carries the unpaired line, so a
+// report that drops that write's error would still print the rest and return nil.
+type unpairedLineWriter struct{}
+
+func (unpairedLineWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("were not paired")) {
+		return 0, errors.New("disk full")
+	}
+	return len(p), nil
+}
+
+// TestNoiseWriteTextReturnsAFailedUnpairedLine: a write failure on the unpaired
+// line is returned to the caller.
+func TestNoiseWriteTextReturnsAFailedUnpairedLine(t *testing.T) {
+	t.Parallel()
+	err := WriteText(unpairedLineWriter{}, Report{Battery: "logtriage", Cut: 0.5, Unpaired: 2, Rows: []Row{}})
+	assert.ErrorContains(t, err, "disk full")
 }
 
 // TestNoiseRejectsAQuestionAnsweredAsTwoKinds: one question id holding a noul

@@ -137,6 +137,29 @@ func TestJevNoiseCommand(t *testing.T) {
 	})
 }
 
+// TestJevNoiseCutFlag runs the command through its flags, so --cut is parsed
+// the way a user passes it. The answers 0.43 and 0.53 straddle the default 0.5
+// cut, so the default reports a cross; at 0.6 both sit below the cut and none does.
+func TestJevNoiseCutFlag(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	noiseFixtureOriginal(t, town, "k", 0.43, 0.53, 0.43, 0.53)
+	deps := jevNoiseDeps{findTownRoot: func() (string, error) { return town, nil }}
+
+	cmd := newJevNoiseCmd(deps)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--cut", "0.6", "--json"})
+	require.NoError(t, cmd.Execute())
+
+	var rep noise.Report
+	require.NoError(t, json.Unmarshal(out.Bytes(), &rep), out.String())
+	assert.InDelta(t, 0.6, rep.Cut, 1e-9)
+	require.Len(t, rep.Rows, 1)
+	require.NotNil(t, rep.Rows[0].CrossShare)
+	assert.InDelta(t, 0, *rep.Rows[0].CrossShare, 1e-9)
+}
+
 // TestJevNoiseRefusals: a command that cannot find its town, read its window, read
 // its battery log or measure the repeats reports the failure and prints nothing.
 func TestJevNoiseRefusals(t *testing.T) {

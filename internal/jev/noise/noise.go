@@ -85,6 +85,9 @@ type Report struct {
 	// MinRepeats repeats.
 	Skipped int   `json:"skipped_items"`
 	Rows    []Row `json:"rows"`
+	// Unpaired counts repeats older than every original of their key and question
+	// version, so nothing measures them.
+	Unpaired int `json:"unpaired_repeats"`
 }
 
 // Logs is what Read loads for one battery log.
@@ -182,6 +185,7 @@ func Compute(originals []logtriage.Line, repeats []Repeat, opts Options) (Report
 		n := sort.Search(len(idx), func(i int) bool { return originals[idx[i]].TS.After(r.TS) })
 		if n == 0 {
 			// No original of this key before the repeat: nothing to measure it against.
+			rep.Unpaired++
 			continue
 		}
 		repeatsOf[idx[n-1]] = append(repeatsOf[idx[n-1]], r)
@@ -385,6 +389,11 @@ func WriteText(w io.Writer, rep Report) error {
 	if _, err := fmt.Fprintf(w, "battery %s, cut %.2f, %d sampled item(s) skipped (no original answer or fewer than %d repeats)\n",
 		rep.Battery, rep.Cut, rep.Skipped, MinRepeats); err != nil {
 		return err
+	}
+	if rep.Unpaired > 0 {
+		if _, err := fmt.Fprintf(w, "%d repeat(s) with no earlier original were not paired\n", rep.Unpaired); err != nil {
+			return err
+		}
 	}
 	if len(rep.Rows) == 0 {
 		_, err := fmt.Fprintln(w, "no sampled item has an original answer and enough repeats to count")
