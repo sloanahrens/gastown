@@ -4,8 +4,10 @@ package session
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -118,20 +120,21 @@ func (r *mainScriptRun) waitMonitoring() {
 }
 
 // sleepingInMonitor reports whether the script has a child sleeping for the poll
-// interval.
+// interval. pgrep answers through its exit status alone: 0 is a match and 1 is
+// no match. Any other failure fails the test, so a broken lookup is never read
+// as the script not yet sleeping.
 func (r *mainScriptRun) sleepingInMonitor() bool {
 	r.t.Helper()
-	out, err := exec.Command("ps", "-A", "-o", "ppid=,args=").Output()
-	if err != nil {
-		r.t.Fatalf("listing processes: %v", err)
+	pattern := "^sleep " + regexp.QuoteMeta(mainScriptPollInterval) + "$"
+	err := exec.Command("pgrep", "-P", strconv.Itoa(r.pid), "-f", pattern).Run()
+	if err == nil {
+		return true
 	}
-	parent := strconv.Itoa(r.pid)
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 3 && f[0] == parent && f[1] == "sleep" && f[2] == mainScriptPollInterval {
-			return true
-		}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false
 	}
+	r.t.Fatalf("looking for the script's monitor sleep: %v", err)
 	return false
 }
 
