@@ -1,6 +1,7 @@
 package omlessons
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,60 @@ var lessonFinding = map[string]land.ReviewFindingText{
 	"secret-in-output":     {Title: "the error echoes captured command output"},
 	"script-holds-logic":   {Title: "new parsing logic added to a shell script"},
 	"unverified-claim":     {Title: "the verification claim has no shown output"},
+}
+
+// pinnedKeywords spells out each row's keywords here rather than read them from
+// the table, so a keyword removed from the table is missing from this list and
+// fails TestPinnedKeywordsStayInTheirRow.
+var pinnedKeywords = map[string]struct{ Title, Claim []string }{
+	"fail-open": {
+		Title: []string{"fail-open", "fail open", "reads as clean", "as clean", "reads as success", "as success", "as approval", "does not apply", "treated as absent", "as if it succeeded", "suppresses escalation"},
+		Claim: []string{"fail-open", "fail open", "reads the error", "reads a failed", "treats the error", "cannot tell a failed", "suppresses the escalation"},
+	},
+	"silent-drop": {
+		Title: []string{"silently", "swallows", "discards", "drops the input", "ignores the error", "no error is returned"},
+		Claim: []string{"silently", "swallowed", "discarded", "no error is returned", "drops the"},
+	},
+	"missing-refusal-test": {
+		Title: []string{"refusal branch", "failing branch", "no assertion", "lacks a test", "lacks tests", "untested", "error path has no"},
+		Claim: []string{"no test drives", "only the success path", "is not tested", "no assertion", "the refusal branch"},
+	},
+	"no-red-when-removed": {
+		Title: []string{"passes with the", "passed with the", "passes without", "would still pass", "goes red", "fails without the", "test always passes"},
+		Claim: []string{"would still pass", "still passes", "went red", "goes red", "fails when removed", "would pass with"},
+	},
+	"wall-clock-wait": {
+		Title: []string{"sleep", "wall clock", "wall-clock", "polls until", "busy-wait", "a wait of"},
+		Claim: []string{"sleep", "wall clock", "wall-clock", "the real clock", "waits for the clock", "real time"},
+	},
+	"non-hermetic-test": {
+		Title: []string{"non-hermetic", "not hermetic", "hermetic", "host's", "hosts", "environment variable", "package-level", "global state", "live town", "tempdir"},
+		Claim: []string{"hermetic", "os.getenv", "the host's", "package-level", "global state", "developer's environment"},
+	},
+	"doc-contradicts-code": {
+		Title: []string{"contradicts", "stale doc", "documentation says", "the doc says"},
+		Claim: []string{"contradicts", "documentation says", "the doc says", "no longer true"},
+	},
+	"comment-claim": {
+		Title: []string{"comment", "line number", "misleading", "misstates"},
+		Claim: []string{"comment", "the code does not", "misstates", "line number"},
+	},
+	"scope-widened": {
+		Title: []string{"outside the scope", "out of scope", "scope", "unrelated", "unexplained"},
+		Claim: []string{"unrelated", "outside the stated scope", "widens the", "not part of the bead"},
+	},
+	"secret-in-output": {
+		Title: []string{"secret", "password", "credential", "token", "captured output", "echoes"},
+		Claim: []string{"secret", "password", "credential", "token", "captured"},
+	},
+	"script-holds-logic": {
+		Title: []string{"shell script", "script", ".sh", "python"},
+		Claim: []string{"script", "shell"},
+	},
+	"unverified-claim": {
+		Title: []string{"no shown output", "without output", "no output", "unfalsifiable", "verification claim", "says it passed"},
+		Claim: []string{"no output", "not shown", "without showing", "did not show", "unfalsifiable"},
+	},
 }
 
 // TestClassTableClaimsItsFindings pins the table from the outside: every
@@ -72,6 +127,41 @@ func TestEveryKeywordClassifiesToItsRow(t *testing.T) {
 		for _, keyword := range c.Claim {
 			if got := classify(land.ReviewFindingText{Claim: "om wrote: " + keyword}); got != c.ID {
 				t.Errorf("claim %q classified %q, want %q", keyword, got, c.ID)
+			}
+		}
+	}
+}
+
+// TestPinnedKeywordsStayInTheirRow: each keyword pinned above is still in its
+// row and still joins that row, so a keyword removed from the table fails here
+// instead of quietly shrinking the check above.
+func TestPinnedKeywordsStayInTheirRow(t *testing.T) {
+	t.Parallel()
+	for id, want := range pinnedKeywords {
+		var row *Class
+		for i := range classes {
+			if classes[i].ID == id {
+				row = &classes[i]
+			}
+		}
+		if row == nil {
+			t.Errorf("class %q is pinned but missing from the table", id)
+			continue
+		}
+		for _, keyword := range want.Title {
+			if !slices.Contains(row.Title, keyword) {
+				t.Errorf("class %q: title keyword %q is no longer in its row", id, keyword)
+			}
+			if got := classify(land.ReviewFindingText{Title: "om wrote: " + keyword}); got != id {
+				t.Errorf("title %q classified %q, want %q", keyword, got, id)
+			}
+		}
+		for _, keyword := range want.Claim {
+			if !slices.Contains(row.Claim, keyword) {
+				t.Errorf("class %q: claim keyword %q is no longer in its row", id, keyword)
+			}
+			if got := classify(land.ReviewFindingText{Claim: "om wrote: " + keyword}); got != id {
+				t.Errorf("claim %q classified %q, want %q", keyword, got, id)
 			}
 		}
 	}
