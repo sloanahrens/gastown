@@ -267,6 +267,35 @@ func TestGitFastForwardMergesOriginMainFastForwardOnly(t *testing.T) {
 	wantArgv(t, command, "git", "-C", testDir, "merge", "--ff-only", "origin/main")
 }
 
+// A finished process that failed reports the failure and none of the output
+// it managed to print, so partial output never passes as an answer
+// (gt-vpj84).
+func TestGitOutputReportsTheProcessFailure(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("exit status 128")
+
+	out, err := gitOutput([]byte("partial answer\n"), failure)
+	if !errors.Is(err, failure) {
+		t.Errorf("gitOutput = error %v, want the process's failure", err)
+	}
+	if out != "" {
+		t.Errorf("gitOutput = %q, want \"\": a failed process's output is not an answer", out)
+	}
+}
+
+// A finished process that succeeded reports what it printed (gt-vpj84).
+func TestGitOutputReportsStdoutOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	out, err := gitOutput([]byte("main\n"), nil)
+	if err != nil {
+		t.Fatalf("gitOutput = error %v, want nil", err)
+	}
+	if out != "main\n" {
+		t.Errorf("gitOutput = %q, want %q", out, "main\n")
+	}
+}
+
 // A failure names the command that failed and wraps the failure, so a caller
 // can tell a missing remote from a lock with errors.Is (gt-vpj84).
 func TestGitCommandErrorNamesTheCommandAndWrapsTheFailure(t *testing.T) {

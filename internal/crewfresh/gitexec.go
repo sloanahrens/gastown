@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -13,14 +14,27 @@ import (
 // gitCommand runs git's argv and returns what it wrote to stdout.
 type gitCommand func(ctx context.Context, argv []string) (stdout string, err error)
 
-// realGit runs git's argv as a process and returns its standard output. Git's
-// standard error is deliberately not returned: it can quote a remote URL that
-// carries a credential, so a failure is named by its command and exit status
-// only (internal/deploysource makes the same choice).
+// realGit runs git's argv as a process. Git's standard error is discarded at
+// the spawn: it can quote a remote URL that carries a credential, so a
+// failure is named by its command and exit status only (internal/deploysource
+// makes the same choice).
 func realGit(ctx context.Context, argv []string) (string, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: fixed git subcommand; the directory came from NewGit
+	cmd.Stderr = io.Discard
 	out, err := cmd.Output()
-	return string(out), err
+	return gitOutput(out, err)
+}
+
+// gitOutput is what a finished git process reported: its standard output when
+// it succeeded, and nothing but its failure when it did not. A failed
+// command's partial output must never pass as an answer. This is also where
+// the unit tier drives the process's failure, since a unit test starts no
+// process to fail.
+func gitOutput(out []byte, err error) (string, error) {
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 // gitExec is the Git of one clone, answered by running the git binary there.
