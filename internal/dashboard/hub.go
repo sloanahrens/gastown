@@ -47,6 +47,10 @@ type Hub struct {
 	// poll sends a list again only when it changed (gt-6ecd0).
 	listSent map[string][]byte
 
+	// lastState is the state frame that last encoded, which a page that
+	// connects while the state will not encode starts from (gt-hndxa).
+	lastState []byte
+
 	// alerts decides what needs the operator's attention, and prev is the
 	// snapshot it compares the next one against.
 	alerts *Alerter
@@ -305,7 +309,16 @@ func (h *Hub) Subscribe() (*Sub, [][]byte) {
 	// draws them, so a page that connects late has both lists in its first frames.
 	initial := h.listFramesLocked(true)
 	if f := frame("state", h.stateFrameLocked()); f != nil {
+		h.lastState = f
 		initial = append(initial, f)
+	} else {
+		// A state that will not encode goes out as the last one that did, so a
+		// page that connects while it is broken draws a state instead of none,
+		// and the alert says why the state it just got is the old one (gt-hndxa).
+		if h.lastState != nil {
+			initial = append(initial, h.lastState)
+		}
+		h.stateHeldLocked()
 	}
 	if len(h.ring) > 0 {
 		if f := frame("backlog", h.ring); f != nil {
@@ -478,7 +491,7 @@ func (h *Hub) publishLocked() {
 	for _, f := range h.listFramesLocked(false) {
 		h.broadcastLocked(f)
 	}
-	h.sendLocked("state", h.stateFrameLocked())
+	h.sendStateLocked()
 }
 
 // observeLocked runs the alert rules over the state change this poll just made,
@@ -546,8 +559,9 @@ func (h *Hub) pollAttention() {
 }
 
 // frame frames v as one event, and returns nil if v will not encode. A null in
-// its place would reach the page as an empty value, so the caller leaves the
-// event out and the next publish tries again (gt-utjwd).
+// its place would reach the page as an empty value, so every event framed here
+// — state, entry, alert and backlog alike — is left out instead, and the next
+// publish tries again (gt-utjwd, gt-hndxa).
 func frame(event string, v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -557,11 +571,42 @@ func frame(event string, v any) []byte {
 }
 
 // sendLocked frames v as event and sends it to every page, leaving it out when
-// v will not encode (frame).
+// v will not encode (frame). The state goes by sendStateLocked, which also tells
+// the page when it cannot be drawn.
 func (h *Hub) sendLocked(event string, v any) {
 	if f := frame(event, v); f != nil {
 		h.broadcastLocked(f)
 	}
+}
+
+// stateHeldKey is the alert key of a state that will not encode (gt-hndxa).
+const stateHeldKey = "state:encode"
+
+// sendStateLocked sends the state to every page. A state that will not encode
+// is not published — a null would draw as an empty state — but the drop is
+// raised as an alert rather than made silent, and the next poll tries the live
+// one again (gt-hndxa).
+func (h *Hub) sendStateLocked() {
+	f := frame("state", h.stateFrameLocked())
+	if f == nil {
+		h.stateHeldLocked()
+		return
+	}
+	h.lastState = f
+	h.broadcastLocked(f)
+}
+
+// stateHeldLocked raises the alert for a state that will not encode, once per
+// cooldown so a state that stays broken does not fill the feed with the same
+// line (gt-hndxa).
+func (h *Hub) stateHeldLocked() {
+	al, ok := h.alerts.fire(h.cfg.Now(), LevelWarn, stateHeldKey,
+		"the dashboard's state will not encode",
+		"the page keeps the last state it drew; the next poll tries the live one again")
+	if !ok {
+		return
+	}
+	h.addAlertLocked(al)
 }
 
 // rawFrame frames data, which is already JSON, as one event.
