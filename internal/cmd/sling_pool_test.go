@@ -740,11 +740,10 @@ func (b *seatReadBarrier) arrive() {
 	}
 	open := b.open
 	b.mu.Unlock()
-	timer := time.NewTimer(b.grace)
-	defer timer.Stop()
 	select {
 	case <-open:
-	case <-timer.C:
+	//testpolicy:allow no-sleep — the bound on a read whose peer the seat-decision lock is holding, which fails instead of hanging
+	case <-time.After(b.grace):
 		b.mu.Lock()
 		b.missed++
 		b.mu.Unlock()
@@ -804,12 +803,11 @@ func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool
 			out[i].agent, out[i].reason, out[i].err = r.route("", true)
 		}(i)
 	}
-	deadline := time.NewTimer(seatDecisionGrace)
-	defer deadline.Stop()
 	for range reads {
 		select {
 		case <-finished:
-		case <-deadline.C:
+		//testpolicy:allow no-sleep — bound the wait for the decisions, which fails instead of hanging when one holds the lock across its read
+		case <-time.After(seatDecisionGrace):
 			t.Fatalf("the decisions did not finish within %s: a decision is holding the seat-decision lock across its seat read", seatDecisionGrace)
 		}
 	}
