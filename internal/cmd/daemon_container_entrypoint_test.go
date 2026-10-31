@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1549,7 +1550,9 @@ func TestContainerEntrypointWithoutForgeFlagsSetsNoCredentialHelper(t *testing.T
 	}
 }
 
-// A flag no start could use is refused before the first command runs.
+// A flag no start could use is refused before the first command runs. The live
+// container takes the pair too, so the same flags are accepted without
+// --scratch-town; that row is red if the scratch check returns (gt-rpx80).
 func TestContainerEntrypointRefusesAForgeCredentialItCannotUse(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1559,21 +1562,22 @@ func TestContainerEntrypointRefusesAForgeCredentialItCannotUse(t *testing.T) {
 		hostSet   bool
 		token     string
 		tokenSet  bool
+		wantErr   bool
 		wantInErr string
 	}{
-		{"a host without a token file", scratchRig, forgeTestHost, true, "", false, "together or not at all"},
-		{"a token file without a host", scratchRig, "", false, forgeTestToken, true, "together or not at all"},
-		{"both without the scratch flag", townRig, forgeTestHost, true, forgeTestToken, true, "without --" + config.ScratchTownFlag},
-		{"an empty host", scratchRig, "", true, forgeTestToken, true, "not a bare host:port"},
-		{"a host with a scheme", scratchRig, "http://scratch-forgejo:3000", true, forgeTestToken, true, "not a bare host:port"},
-		{"a host with no port", scratchRig, "scratch-forgejo", true, forgeTestToken, true, "not a bare host:port"},
-		{"a host beginning with a dash", scratchRig, "-evil:3000", true, forgeTestToken, true, "not a bare host:port"},
-		{"a host with port zero", scratchRig, "scratch-forgejo:0", true, forgeTestToken, true, "not a port"},
-		{"a host with a port above 65535", scratchRig, "scratch-forgejo:99999", true, forgeTestToken, true, "not a port"},
-		{"a relative token file", scratchRig, forgeTestHost, true, "forge-tokens/forgejo-landing.env", true, "absolute path"},
-		{"an empty token file", scratchRig, forgeTestHost, true, "", true, "absolute path"},
-		{"a token file path with a shell metacharacter", scratchRig, forgeTestHost, true, "/towns/$(id)/forgejo-landing.env", true, "absolute path"},
-		{"a token file path with a space", scratchRig, forgeTestHost, true, "/towns/my town/forgejo-landing.env", true, "absolute path"},
+		{"both without the scratch flag", townRig, forgeTestHost, true, forgeTestToken, true, false, ""},
+		{"a host without a token file", scratchRig, forgeTestHost, true, "", false, true, "together or not at all"},
+		{"a token file without a host", scratchRig, "", false, forgeTestToken, true, true, "together or not at all"},
+		{"an empty host", scratchRig, "", true, forgeTestToken, true, true, "not a bare host:port"},
+		{"a host with a scheme", scratchRig, "http://scratch-forgejo:3000", true, forgeTestToken, true, true, "not a bare host:port"},
+		{"a host with no port", scratchRig, "scratch-forgejo", true, forgeTestToken, true, true, "not a bare host:port"},
+		{"a host beginning with a dash", scratchRig, "-evil:3000", true, forgeTestToken, true, true, "not a bare host:port"},
+		{"a host with port zero", scratchRig, "scratch-forgejo:0", true, forgeTestToken, true, true, "not a port"},
+		{"a host with a port above 65535", scratchRig, "scratch-forgejo:99999", true, forgeTestToken, true, true, "not a port"},
+		{"a relative token file", scratchRig, forgeTestHost, true, "forge-tokens/forgejo-landing.env", true, true, "absolute path"},
+		{"an empty token file", scratchRig, forgeTestHost, true, "", true, true, "absolute path"},
+		{"a token file path with a shell metacharacter", scratchRig, forgeTestHost, true, "/towns/$(id)/forgejo-landing.env", true, true, "absolute path"},
+		{"a token file path with a space", scratchRig, forgeTestHost, true, "/towns/my town/forgejo-landing.env", true, true, "absolute path"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1583,6 +1587,20 @@ func TestContainerEntrypointRefusesAForgeCredentialItCannotUse(t *testing.T) {
 
 			err := runContainerEntrypoint(r.entrypoint())
 
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("error = %v, want the live container to accept the pair", err)
+				}
+				helper := "!" + entrypointBin + " " + config.GitCredentialForgejoCommand + " --host " + tc.host + " --token-file " + tc.token
+				want := []string{"git", "config", "--global", "credential.http://" + tc.host + ".helper", helper}
+				if !slices.ContainsFunc(r.calls, func(c []string) bool { return reflect.DeepEqual(c, want) }) {
+					t.Errorf("commands = %v, want one running %v", r.calls, want)
+				}
+				if r.execCalls() != 1 {
+					t.Errorf("daemon execs = %d, want 1 after the helper was set", r.execCalls())
+				}
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantInErr) {
 				t.Fatalf("error = %v, want a refusal saying %q", err, tc.wantInErr)
 			}

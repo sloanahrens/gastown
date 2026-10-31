@@ -107,6 +107,13 @@ CLAUDE_CODE_OAUTH_TOKEN in the daemon's environment; an unreadable or empty file
 refuses. A container that sets ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is
 refused, since either outranks the token and bills API rates.
 
+With --forge-host and --forge-token-file, the container's git is told to ask
+'gt git-credential-forgejo' for that Forgejo's credentials, so the daemon's
+pushes carry the landing bot's token. The pair is taken together or not at all,
+by the live and the scratch container alike, and the config line names the token
+file's path and never a token: the helper reads the file when git asks, so the
+file need not exist yet at start.
+
 Every check runs before the first command, so a refusal runs nothing.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
@@ -127,7 +134,7 @@ Every check runs before the first command, so a refusal runs nothing.`,
 	cmd.Flags().IntVar(&flags.doltPort, config.DoltPortFlag, 0,
 		"Give this port of that Dolt host to the scratch town's install; accepted only with --"+config.DoltHostFlag)
 	cmd.Flags().StringVar(&flags.forgeHost, config.ForgeHostFlag, "",
-		"Make git ask the forge credential helper for this Forgejo host:port; accepted only with --"+config.ScratchTownFlag+" and --"+config.ForgeTokenFileFlag)
+		"Make git ask the forge credential helper for this Forgejo host:port; accepted only with --"+config.ForgeTokenFileFlag)
 	cmd.Flags().StringVar(&flags.forgeTokenFile, config.ForgeTokenFileFlag, "",
 		"The landing bot's token file the credential helper reads at push time (absolute path); accepted only with --"+config.ForgeHostFlag)
 	return cmd
@@ -676,16 +683,13 @@ func unescapeMountPoint(s string) string {
 // carries no space, quote or shell metacharacter.
 var forgeCredentialPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 
-// forgeCredentialHostRe is a bare host:port: DNS-name characters starting with a
-// letter or digit (so a leading dash cannot read as a flag), a colon and the
-// port's digits, which refuseForgeCredential then range-checks.
-var forgeCredentialHostRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*:([0-9]{1,5})$`)
-
 // refuseForgeCredential refuses a --forge-host or --forge-token-file no start
-// could use: one without the other, one without --scratch-town (the live
-// project's command line stays empty), an empty value, a host that is not a
-// bare host:port, and a token file path that is not absolute or holds a
-// character a shell would read. Every refusal runs before the first command.
+// could use: one without the other, an empty value, a host that is not a bare
+// host:port, and a token file path that is not absolute or holds a character a
+// shell would read. Both containers take the pair: the scratch project's git
+// pushes to its throwaway Forgejo, and the live container's landing worker
+// pushes to the live one (gt-rpx80). Every refusal runs before the first
+// command.
 func (e containerEntrypoint) refuseForgeCredential() error {
 	if !e.forgeHostSet && !e.forgeTokenFileSet {
 		return nil
@@ -694,12 +698,8 @@ func (e containerEntrypoint) refuseForgeCredential() error {
 		return fmt.Errorf("--%s and --%s are given together or not at all, so nothing was started",
 			config.ForgeHostFlag, config.ForgeTokenFileFlag)
 	}
-	if !e.scratch {
-		return fmt.Errorf("--%s is given without --%s; only the scratch town's git takes a forge credential helper, and the live project's command line stays empty, so nothing was started",
-			config.ForgeHostFlag, config.ScratchTownFlag)
-	}
 	host := strings.TrimSpace(e.forgeHost)
-	m := forgeCredentialHostRe.FindStringSubmatch(host)
+	m := config.ForgeHostPattern.FindStringSubmatch(host)
 	if m == nil {
 		return fmt.Errorf("--%s %q is not a bare host:port (no scheme, path, login, space or leading dash), so nothing was started",
 			config.ForgeHostFlag, e.forgeHost)
