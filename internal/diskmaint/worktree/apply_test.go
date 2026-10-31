@@ -84,15 +84,15 @@ func TestApplyDryRunRunsNothing(t *testing.T) {
 	}
 }
 
-// TestApplyRefusesPathsOutsideOverseerCrew checks that a path that is not an
-// overseer-* directory under <Town>/<rig>/crew is refused, that nothing runs for
-// it, and that the rest of the plan still runs.
-func TestApplyRefusesPathsOutsideOverseerCrew(t *testing.T) {
+// TestApplyRefusesPathsOutsideACrewDir checks that a path that is not an
+// <owner>-<topic> worktree under <Town>/<rig>/crew is refused, that nothing runs
+// for it, and that the rest of the plan still runs.
+func TestApplyRefusesPathsOutsideACrewDir(t *testing.T) {
 	t.Parallel()
 	for name, bad := range map[string]string{
-		"outside crew":       "rig-a/other/overseer-x",
-		"base not overseer":  "rig-a/crew/other-d",
-		"the clone":          "rig-a/crew/overseer",
+		"outside crew":       "rig-a/other/sloan-x",
+		"an owner's clone":   "rig-a/crew/sloan",
+		"an overseer clone":  "rig-a/crew/overseer",
 		"rig not configured": "rig-z/crew/overseer-z",
 		"nested below crew":  "rig-a/crew/sub/overseer-x",
 		"parent traversal":   "rig-a/crew/../../overseer-x",
@@ -248,6 +248,45 @@ func TestApplyRemovesWorktreeThenItsBranch(t *testing.T) {
 	}
 	if len(res.Done) != 2 || len(res.Failed) != 0 {
 		t.Fatalf("Done %d, Failed %d; want both done", len(res.Done), len(res.Failed))
+	}
+}
+
+// TestApplyRemovesAnotherOwnersLandedWorktree covers the widened path rule: an
+// <owner>-<topic> worktree that is not an overseer-* checkout is removed with
+// its landed branch, while the owner's clone and a path outside a configured
+// rig's crew directory are still refused before any command names them.
+func TestApplyRemovesAnotherOwnersLandedWorktree(t *testing.T) {
+	t.Parallel()
+	root := townRoot(t)
+	path := filepath.Join(root, "rig-a", "crew", "sloan-x")
+	const branch = "polecat/sloan-x/y"
+	clone := filepath.Join(root, "rig-a", "crew", "sloan")
+	outside := filepath.Join(root, "rig-a", "other", "sloan-y")
+	f := newFakeGit(t)
+	answerRemove(f, root, path, nil)
+	answerBranch(f, root, branch)
+
+	res, err := applyTarget(root, f, applyLedger(t)).Apply(context.Background(), diskmaint.Plan{Target: planTarget, Actions: []diskmaint.Action{
+		removeAction(clone),
+		removeAction(outside),
+		removeAction(path),
+		branchAction(path, branch),
+	}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// The exact call list proves the two refused paths ran nothing.
+	want := []string{
+		"git -C " + path + " rev-parse --git-common-dir",
+		"git --git-dir " + commonOf(root) + " worktree remove " + path,
+		"git --git-dir " + commonOf(root) + " branch --merged " + originMain + " --list " + branch,
+		"git --git-dir " + commonOf(root) + " branch -D " + branch,
+	}
+	if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls = %v, want only the other owner's worktree commands %v", f.calls, want)
+	}
+	if len(res.Done) != 2 || len(res.Failed) != 2 {
+		t.Fatalf("Done %d, Failed %d; want the other owner's pair done and the two refused paths failed", len(res.Done), len(res.Failed))
 	}
 }
 

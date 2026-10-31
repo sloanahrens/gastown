@@ -39,10 +39,10 @@ var (
 	// errPlanRefused reports a plan that could not read its inputs. Nothing runs,
 	// and the refusal is an error rather than an empty success.
 	errPlanRefused = errors.New("worktree apply: the plan is refused, so nothing was applied")
-	// errNotOverseer reports a path that is not an overseer-* directory directly
-	// under <Town>/<rig>/crew for a configured rig. It does not quote the path:
-	// the path is plan text no check has passed.
-	errNotOverseer = errors.New("path is not an overseer-* checkout under <Town>/<rig>/crew")
+	// errNotRemovable reports a path that is not an <owner>-<topic> worktree
+	// directly under <Town>/<rig>/crew for a configured rig. It does not quote
+	// the path: the path is plan text no check has passed.
+	errNotRemovable = errors.New("path is not an <owner>-<topic> worktree under <Town>/<rig>/crew")
 	// errBadRef reports a delete-branch ref that is not "<path>#<branch>".
 	errBadRef = errors.New("ref is not <path>#<branch>")
 	// errBadBranch reports a branch name that fails branchName, or starts with a
@@ -70,7 +70,7 @@ var (
 	errUnknownKind = errors.New("action kind is not remove-worktree or delete-branch")
 )
 
-// Apply removes what the plan names: each overseer-* worktree with git worktree
+// Apply removes what the plan names: each removable worktree with git worktree
 // remove, never with --force, and then the local branch of a landed worktree
 // once its removal has succeeded. Every path and branch is re-validated before a
 // command names it. One failed action is recorded and the rest still run, and
@@ -152,12 +152,12 @@ func (t *Target) runPlan(ctx context.Context, actions []diskmaint.Action, result
 	return errs, nil
 }
 
-// removeWorktree removes one overseer-* worktree. It returns the cleaned path
-// and the git dir its branch lives in. The removal runs without --force: git
-// refuses a dirty worktree, and that refusal is the action's failure. A refused
-// removal is not retried.
+// removeWorktree removes one worktree the plan names. It returns the cleaned
+// path and the git dir its branch lives in. The removal runs without --force:
+// git refuses a dirty worktree, and that refusal is the action's failure. A
+// refused removal is not retried.
 func (t *Target) removeWorktree(ctx context.Context, env []string, ref string) (string, string, error) {
-	path, err := overseerPath(t.cfg.Town, t.cfg.Rigs, ref)
+	path, err := removablePath(t.cfg.Town, t.cfg.Rigs, ref)
 	if err != nil {
 		return "", "", err
 	}
@@ -224,22 +224,23 @@ func mergedInto(out []byte, branch string) bool {
 	return false
 }
 
-// overseerPath returns ref cleaned when it is a path directly under
-// <town>/<rig>/crew, for one of rigs, whose base name starts with overseer-. The
-// clone, a directory under any other parent, and a path nested deeper are all
-// refused, so no command names them.
-func overseerPath(town string, rigs []string, ref string) (string, error) {
+// removablePath returns ref cleaned when it is an <owner>-<topic> worktree
+// directly under <town>/<rig>/crew, for one of rigs. It applies BuildPlan's
+// clone rule through isClone, so the owner's clone, which is not one of their
+// worktrees, is refused along with a directory under any other parent and a
+// path nested deeper: no command names them.
+func removablePath(town string, rigs []string, ref string) (string, error) {
 	path := filepath.Clean(ref)
-	if !strings.HasPrefix(filepath.Base(path), removePrefix) {
-		return "", errNotOverseer
+	if isClone(filepath.Base(path)) {
+		return "", errNotRemovable
 	}
 	crew := filepath.Dir(path)
 	if filepath.Base(crew) != crewDir {
-		return "", errNotOverseer
+		return "", errNotRemovable
 	}
 	rigDir := filepath.Dir(crew)
 	if filepath.Dir(rigDir) != filepath.Clean(town) || !slices.Contains(rigs, filepath.Base(rigDir)) {
-		return "", errNotOverseer
+		return "", errNotRemovable
 	}
 	return path, nil
 }
