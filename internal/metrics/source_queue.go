@@ -74,9 +74,25 @@ type queueSource struct{}
 // start. A column reads its rigs queueRigParallel at a time, so nine rigs cost
 // at most three deadlines (15 s) for a column, and the group's own deadline
 // (SourceTimeout) caps the whole group regardless. A bd hung on a dead Dolt
-// server costs its column rather than the whole group. A variable so a test
-// can shorten it.
-var queueBdTimeout = 5 * time.Second
+// server costs its column rather than the whole group.
+const queueBdTimeout = 5 * time.Second
+
+// bdTimeout is the deadline one store read runs under: Env.BeadTimeout when the
+// environment sets one, else queueBdTimeout.
+func (env Env) bdTimeout() time.Duration {
+	if env.BeadTimeout > 0 {
+		return env.BeadTimeout
+	}
+	return queueBdTimeout
+}
+
+// bdAfter arms a store read's deadline through Env.BeadAfter, or time.AfterFunc.
+func (env Env) bdAfter(d time.Duration, f func()) func() bool {
+	if env.BeadAfter != nil {
+		return env.BeadAfter(d, f)
+	}
+	return time.AfterFunc(d, f).Stop
+}
 
 // queueRigParallel is how many rigs one column reads at once. The four columns
 // run side by side, so at most four times this many store reads are alive.
@@ -408,7 +424,7 @@ func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.L
 			// A store holding several rigs answers the whole batch in the one
 			// request, which runs straight after the opens, so its deadline
 			// starts now. It is returned bare: ListAcross finds it by type.
-			time.AfterFunc(queueBdTimeout, cancel)
+			env.bdAfter(env.bdTimeout(), cancel)
 			return store, nil
 		}
 		return queueRigLister{Lister: store, cancel: cancel}, nil
@@ -418,8 +434,8 @@ func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.L
 		if !ok {
 			return read(l)
 		}
-		deadline := time.AfterFunc(queueBdTimeout, rl.cancel)
-		defer deadline.Stop()
+		stop := env.bdAfter(env.bdTimeout(), rl.cancel)
+		defer stop()
 		return read(rl.Lister)
 	}
 	res, err := beads.ListAcross(prefixes, open, opts, bounded, queueRigParallel)
@@ -460,7 +476,7 @@ func queueRigCountsOf(rigs []queueRig, res beads.AcrossResult) (map[string]int, 
 // the column asks. Only a column read with read takes it: a list column reads
 // through queueListCounts.
 func queueCount(ctx context.Context, env Env, rigPath string, col queueBeadColumn) (int, error) {
-	callCtx, cancel := context.WithTimeout(ctx, queueBdTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, env.bdTimeout())
 	defer cancel()
 	store := env.Beads(callCtx, rigPath)
 	if store == nil {

@@ -205,86 +205,94 @@ func TestSourceQueueLandingColumnNilWhenTheTrackerRefusesTheRequest(t *testing.T
 	queueWantColumns(t, cols, map[string]any{"waiting_to_land": nil, "ready": 6, "blocked": 0})
 }
 
-// queueHold holds the list of each rig that is not free to answer, and records
-// whether each rig's store context was still live when its list began.
-type queueHold struct {
-	started chan string   // a held rig's list began
-	release chan struct{} // closed to let the held lists answer
+// queueClock holds every deadline the batch arms until the test runs it, so a
+// test ends a deadline when it chooses and not when a timer happens to fire.
+type queueClock struct {
 	mu      sync.Mutex
-	live    map[string]bool
+	pending []func()
 }
 
-// queueHoldStore is one bd rig's store on a queueHold. A held rig's list waits
-// for the release; the others answer at once.
-type queueHoldStore struct {
+// after records f for the test to run, and the stop it returns does nothing.
+func (c *queueClock) after(_ time.Duration, f func()) func() bool {
+	c.mu.Lock()
+	c.pending = append(c.pending, f)
+	c.mu.Unlock()
+	return func() bool { return true }
+}
+
+// fireArmed runs every deadline armed so far and clears the list.
+func (c *queueClock) fireArmed() {
+	c.mu.Lock()
+	fire := c.pending
+	c.pending = nil
+	c.mu.Unlock()
+	for _, f := range fire {
+		f()
+	}
+}
+
+// queueLateStore is one bd rig's store for the queued-rig test. The rigs ahead
+// of the last one report that their list began and hold it until their own
+// context ends. The last rig answers at once and records whether its context
+// was still live when its list began.
+type queueLateStore struct {
 	BeadStore
-	hold *queueHold
-	rig  string
-	ctx  context.Context
-	held bool
+	rig     string
+	ctx     context.Context
+	started chan<- string
+	live    *bool
 }
 
-func (s *queueHoldStore) List(beads.ListOptions) ([]*beads.Issue, error) {
-	s.hold.mu.Lock()
-	s.hold.live[s.rig] = s.ctx.Err() == nil
-	s.hold.mu.Unlock()
-	if !s.held {
+func (s *queueLateStore) List(beads.ListOptions) ([]*beads.Issue, error) {
+	if s.rig != "delta" {
+		s.started <- s.rig
+		<-s.ctx.Done()
 		return nil, nil
 	}
-	s.hold.started <- s.rig
-	select {
-	case <-s.hold.release:
-		return nil, nil
-	case <-time.After(5 * time.Second):
-		return nil, fmt.Errorf("the test never released %s", s.rig)
-	}
+	*s.live = s.ctx.Err() == nil
+	return nil, nil
 }
 
-// A bd rig queued behind the parallel bound starts its read with its full
-// deadline. The batch's own clock must not run out while the rig waits for a
-// slot: here the three rigs ahead of it hold past one deadline, and the fourth
-// still reads on a live store. This shortens queueBdTimeout, which every read
-// takes, so the test is not parallel and restores it when it ends.
+// A bd rig queued behind the parallel bound starts its read on a live store,
+// because its deadline starts when its read does. The three rigs ahead of it
+// hold until the test fires their deadlines, and the batch has no deadline of
+// its own to fire for the fourth rig before it reads. The clock is the test's,
+// so nothing waits on real time: the test is parallel and sleeps nowhere.
 func TestQueueListCountsQueuedRigReadStartsWithItsFullDeadline(t *testing.T) {
-	saved := queueBdTimeout
-	queueBdTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { queueBdTimeout = saved })
-
+	t.Parallel()
+	// A guard for a broken deadline: the held reads would otherwise wait forever.
+	guard, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	rigs := []queueRig{{name: "alpha", prefix: "alpha"}, {name: "beta", prefix: "beta"}, {name: "gamma", prefix: "gamma"}, {name: "delta", prefix: "delta"}}
-	hold := &queueHold{started: make(chan string, len(rigs)), release: make(chan struct{}), live: map[string]bool{}}
-	env := Env{Town: queueTestTown, Beads: func(ctx context.Context, dir string) BeadStore {
-		rig := filepath.Base(dir)
-		return &queueHoldStore{hold: hold, rig: rig, ctx: ctx, held: rig != "delta"}
+	started := make(chan string, len(rigs))
+	live := false
+	clock := &queueClock{}
+	env := Env{Town: queueTestTown, BeadAfter: clock.after, Beads: func(ctx context.Context, dir string) BeadStore {
+		return &queueLateStore{rig: filepath.Base(dir), ctx: ctx, started: started, live: &live}
 	}}
-	type answer struct {
-		counts map[string]int
-		ok     bool
-	}
-	done := make(chan answer, 1)
+	done := make(chan bool, 1)
 	go func() {
-		counts, ok := queueListCounts(context.Background(), env, rigs, beads.ListOptions{Label: "gt:ready-to-land"}, queueLandingColumn().readAcross)
-		done <- answer{counts, ok}
+		_, ok := queueListCounts(guard, env, rigs, beads.ListOptions{Label: "gt:ready-to-land"}, queueLandingColumn().readAcross)
+		done <- ok
 	}()
 	for range 3 {
 		select {
-		case <-hold.started:
-		case <-time.After(5 * time.Second):
-			t.Fatal("fewer than three rigs' reads started; the bound is three")
+		case <-started:
+		case <-guard.Done():
+			t.Fatal("fewer than three rigs' lists began; the bound is three")
 		}
 	}
-	// The batch opened over a deadline ago by the time the held reads release.
-	<-time.After(2 * queueBdTimeout)
-	close(hold.release)
-	var got answer
+	clock.fireArmed()
+	var ok bool
 	select {
-	case got = <-done:
-	case <-time.After(5 * time.Second):
+	case ok = <-done:
+	case <-guard.Done():
 		t.Fatal("queueListCounts did not answer")
 	}
-	if !got.ok {
-		t.Fatalf("queueListCounts ok = false; every rig answered, so the column reads")
+	if !ok {
+		t.Error("queueListCounts ok = false; every rig answered, so the column reads")
 	}
-	if !hold.live["delta"] {
+	if !live {
 		t.Error("delta's read started on a store whose deadline had run out while it waited for a slot")
 	}
 }
