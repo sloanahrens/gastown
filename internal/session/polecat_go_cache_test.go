@@ -18,6 +18,13 @@ import (
 // module against go.sum when it downloads it, not on every build, so such a
 // change is not caught by the build. The read-only module cache this replaced
 // kept the seeded files unchanged; the trade-off is Sloan's to accept.
+//
+// One claim serves every sandbox of a town, read-write, so both caches are
+// shared across its rigs. That is the operator's decision of 2026-10-26 (one
+// shared gt-cache for all rigs, docs/plans/2026-10-26-k8s-shared-cache-design.md),
+// accepted as risk by the overseer: a town belongs to one operator, and the
+// hosted platform keeps a town per workspace, so no sandbox of one operator's
+// town shares a cache with another operator's.
 var goCacheGrants = []struct{ env, grant string }{
 	{"GOMODCACHE", "read_write"},
 	{"GOCACHE", "read_write"},

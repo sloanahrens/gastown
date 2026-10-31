@@ -1,9 +1,11 @@
 package session
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -34,27 +36,6 @@ func dockerfileInstructions(t *testing.T) []string {
 		}
 	}
 	return out
-}
-
-// dockerfileEnv returns the image environment as the Dockerfile's last
-// assignment of each key.
-func dockerfileEnv(t *testing.T) map[string]string {
-	t.Helper()
-	env := map[string]string{}
-	for _, in := range dockerfileInstructions(t) {
-		rest, ok := strings.CutPrefix(in, "ENV ")
-		if !ok {
-			continue
-		}
-		for _, kv := range strings.Fields(rest) {
-			k, v, ok := strings.Cut(kv, "=")
-			if !ok {
-				continue
-			}
-			env[k] = strings.Trim(v, `"`)
-		}
-	}
-	return env
 }
 
 // dockerfileWorkdir returns the image's working directory: the workspace the
@@ -151,19 +132,19 @@ func runGoCacheProblems(script string) []string {
 	// Where go writes: the directories the instruction names, or the image
 	// user's defaults (/root/.cache and /root/go for root).
 	caches := map[string]bool{"/root/.cache": true, "/root/go": true}
-	scripts := splitShellAnd(script)
-	for _, seg := range scripts {
-		for _, field := range strings.Fields(seg) {
+	commands := shellCommands(script)
+	for _, words := range commands {
+		for _, word := range words {
 			for _, key := range []string{"GOCACHE=", "GOMODCACHE="} {
-				if v, ok := strings.CutPrefix(field, key); ok && v != "" {
-					caches[strings.Trim(v, `"`)] = true
+				if v, ok := strings.CutPrefix(word, key); ok && v != "" {
+					caches[v] = true
 				}
 			}
 		}
 	}
 	var problems []string
-	for cache := range caches {
-		if !removed(scripts, cache) {
+	for _, cache := range slices.Sorted(maps.Keys(caches)) {
+		if !removed(commands, cache) {
 			problems = append(problems, "a RUN runs the go tool and leaves "+cache+" in the image: "+script)
 		}
 	}
@@ -173,12 +154,8 @@ func runGoCacheProblems(script string) []string {
 // runsGo reports whether the shell runs the go tool in command position, so
 // that an argument or a path that merely names go does not count.
 func runsGo(script string) bool {
-	for _, seg := range splitShellAnd(script) {
-		fields := strings.Fields(seg)
-		for len(fields) > 0 && strings.Contains(fields[0], "=") {
-			fields = fields[1:]
-		}
-		if len(fields) > 0 && filepath.Base(fields[0]) == "go" {
+	for _, words := range shellCommands(script) {
+		if words = commandWords(words); len(words) > 0 && filepath.Base(words[0]) == "go" {
 			return true
 		}
 	}
@@ -186,14 +163,13 @@ func runsGo(script string) bool {
 }
 
 // removed reports whether the shell removes dir: an rm whose own arguments name
-// it, in any segment of the same instruction.
-func removed(segments []string, dir string) bool {
-	for _, seg := range segments {
-		fields := strings.Fields(seg)
-		if len(fields) == 0 || filepath.Base(fields[0]) != "rm" {
+// it, in any command of the same instruction.
+func removed(commands [][]string, dir string) bool {
+	for _, words := range commands {
+		if words = commandWords(words); len(words) == 0 || filepath.Base(words[0]) != "rm" {
 			continue
 		}
-		for _, arg := range fields[1:] {
+		for _, arg := range words[1:] {
 			if arg == dir || strings.HasPrefix(arg, dir+"/") {
 				return true
 			}
@@ -202,18 +178,122 @@ func removed(segments []string, dir string) bool {
 	return false
 }
 
-// splitShellAnd splits a RUN's shell on && and ;, the boundaries at which one
-// command ends and the next starts.
-func splitShellAnd(script string) []string {
-	var out []string
-	for _, part := range strings.Split(script, "&&") {
-		for _, seg := range strings.Split(part, ";") {
-			if seg = strings.TrimSpace(seg); seg != "" {
-				out = append(out, seg)
-			}
+// shellCommands parses a RUN's shell into the commands it runs, each as its
+// words with the quotes dropped. A separator (&&, ; or a newline) ends a
+// command unless it sits inside a quote, so a script a shell is handed with -c
+// stays one word and is parsed as a script of its own: a go call behind sh -c
+// or bash -lc runs like any other.
+func shellCommands(script string) [][]string {
+	var commands [][]string
+	for _, seg := range shellSegments(script) {
+		words := shellWords(seg)
+		if len(words) == 0 {
+			continue
+		}
+		commands = append(commands, words)
+		if inner, ok := shellScript(words); ok {
+			commands = append(commands, shellCommands(inner)...)
 		}
 	}
+	return commands
+}
+
+// shellSegments splits a shell script at its command boundaries, leaving a
+// separator inside quotes in the word it belongs to.
+func shellSegments(script string) []string {
+	var out []string
+	var cur strings.Builder
+	var quote rune
+	flush := func() {
+		if seg := strings.TrimSpace(cur.String()); seg != "" {
+			out = append(out, seg)
+		}
+		cur.Reset()
+	}
+	for _, r := range script {
+		switch {
+		case quote != 0:
+			cur.WriteRune(r)
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+			cur.WriteRune(r)
+		case r == '&' || r == ';' || r == '\n':
+			flush()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
 	return out
+}
+
+// shellWords splits a command segment into its words, dropping the quotes
+// around a quoted word so the words read as the shell expands them and keeping
+// the spaces inside one.
+func shellWords(seg string) []string {
+	var words []string
+	var cur strings.Builder
+	var quote rune
+	flush := func() {
+		if cur.Len() > 0 {
+			words = append(words, cur.String())
+			cur.Reset()
+		}
+	}
+	for _, r := range seg {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == ' ' || r == '\t':
+			flush()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	flush()
+	return words
+}
+
+// shellScript returns the script a shell command runs with -c, as in
+// bash -lc 'go build ./...', so its commands can be read like any other.
+func shellScript(words []string) (string, bool) {
+	if len(words) < 3 || !shells[filepath.Base(words[0])] {
+		return "", false
+	}
+	for i := 1; i < len(words)-1; i++ {
+		if !strings.HasPrefix(words[i], "-") || strings.HasPrefix(words[i], "--") {
+			return "", false
+		}
+		if strings.HasSuffix(words[i], "c") {
+			return words[i+1], true
+		}
+	}
+	return "", false
+}
+
+// shells are the interpreters whose -c script runs another command.
+var shells = map[string]bool{"sh": true, "bash": true, "dash": true, "zsh": true, "ash": true, "ksh": true}
+
+// shellWrappers are the words a shell may put in front of a command without
+// changing which program runs, so go after export, env, command or exec counts.
+var shellWrappers = map[string]bool{"export": true, "env": true, "command": true, "exec": true, "time": true}
+
+// commandWords is a command's words with its leading variable assignments and
+// wrappers removed, leaving the program the command runs first.
+func commandWords(words []string) []string {
+	for len(words) > 0 && (strings.Contains(words[0], "=") || shellWrappers[words[0]]) {
+		words = words[1:]
+	}
+	return words
 }
 
 // The image carries no Go build or module cache (gt-nly1g). A sandbox's entries
@@ -248,6 +328,13 @@ func TestImageGoCacheProblemsRejectsACacheTheImageWouldCarry(t *testing.T) {
 		{"a go build that keeps its module cache", "RUN cd /src && go build ./...\n", "/root/go"},
 		{"a cache named inside the RUN", "RUN GOCACHE=/gocache go build ./... && rm -rf /root/go /root/.cache\n", "/gocache"},
 		{"a later RUN does not clean another's layer", "RUN go install example.invalid/tool@v1\nRUN rm -rf /root/go /root/.cache\n", "/root/.cache"},
+		{"a go build behind a shell's -c", "RUN bash -lc 'go build ./...'\n", "/root/.cache"},
+		{"a go build after an export", "RUN export PATH=\"/usr/local/go/bin:$PATH\" && go build ./...\n", "/root/.cache"},
+		{"a go build behind env", "RUN env GOFLAGS= go build ./...\n", "/root/.cache"},
+		{"a go build behind command", "RUN command go install example.invalid/tool@v1\n", "/root/go"},
+		{"a cache inside the shell's script", "RUN sh -c 'GOCACHE=/gocache go build ./...; rm -rf /root/go /root/.cache'\n", "/gocache"},
+		{"go only named in an argument", "RUN bash -c 'echo go build ./...'\n", ""},
+		{"go only named in a printf", "RUN printf 'go build ./...'\n", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -140,11 +140,16 @@ RUN groupadd -g 10001 polecat \
 # The image carries no Go build or module cache (gt-nly1g): baking one in costs
 # every node gigabytes and goes stale on each rebuild. A kubernetes profile that
 # sets kubernetes_cache_claim mounts the shared claim here at /sandbox/.cache,
-# `make polecat-caches` fills it and hands it to uid 10001, and the openshell
-# backend points GOCACHE and GOMODCACHE at its gocache and gomodcache
-# directories. Every other profile (no claim, or the docker driver's per-rig
-# volume) gets no seed: Go's defaults under /sandbox apply, so its caches start
-# empty in the sandbox's own layer or volume.
+# and `make polecat-caches` fills it and hands it to uid 10001; the openshell
+# backend points the sandbox's Go caches at the claim, and
+# docs/openshell-gateway.md, "What a sandbox polecat cannot do", names the
+# variables and the directories.
+#
+# A docker-driver sandbox, or one whose profile sets no claim, loses the seed
+# the image used to carry and has no replacement: Go's defaults under /sandbox
+# apply, so its caches start empty in the sandbox's own layer or per-rig volume.
+# That loss is accepted with the decision of 2026-10-26 that closed the Docker
+# volume path (gt-nly1g); a cold first build is its cost.
 
 # Town binaries, cross-compiled by `make polecat-image` (CGO_ENABLED=0 linux/arm64).
 COPY bin/gt /usr/local/bin/gt
