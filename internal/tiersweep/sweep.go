@@ -128,11 +128,16 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		src = gitSource{exec: exec, read: func(name string) ([]byte, error) { return read(filepath.Join(root, name)) }}
 	}
 	timings := OpenTimings(filepath.Join(opts.LogDir, TimingsName), stderr)
+	// The shard plan is read whole: a plan that cannot be read is the integration
+	// tier's RED, not a reason to run its packages whole (gt-rw118).
+	shards, shardErr := SeedShards()
 	// A parallel run starts the longest packages first, so it reads the last
-	// run's walls before the first package starts (gt-0rtgc).
+	// run's walls before the first package starts (gt-0rtgc). A sharded run reads
+	// them too, to balance each package's shards by its tests' walls.
 	var walls map[string]int64
-	if opts.Jobs > 1 && opts.TimingsFile != "" {
-		walls = readWalls(host, opts.TimingsFile, stderr)
+	var testWalls map[string]float64
+	if (opts.Jobs > 1 || len(shards) > 0) && opts.TimingsFile != "" {
+		walls, testWalls = readWalls(host, opts.TimingsFile, stderr)
 	}
 	resume := OpenResume(opts, host, stderr)
 	buildExec := d.BuildExec
@@ -140,7 +145,8 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		buildExec = inRootBuild(root, buildExec)
 	}
 	s := &Sweep{Opts: opts, Exec: exec, BuildExec: buildExec, Src: src, Environ: d.Environ, Stderr: stderr,
-		Now: now, Timings: timings, Walls: walls, Began: d.Began, Resume: resume}
+		Now: now, Timings: timings, Walls: walls, Began: d.Began, Resume: resume,
+		Shards: shards, ShardErr: shardErr, TestWalls: testWalls}
 	code := runTiers(s, opts.Tiers, stdout, stderr)
 	if code == UsageExit {
 		timings.Close()
@@ -172,20 +178,20 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 // readWalls reads the previous run's timings file. A file that is not there is
 // the first run, and no line is printed; any other failure is one stderr line.
 // Either way the run keeps its list order and goes on (gt-0rtgc).
-func readWalls(host Host, path string, stderr io.Writer) map[string]int64 {
+func readWalls(host Host, path string, stderr io.Writer) (map[string]int64, map[string]float64) {
 	read := host.ReadFile
 	if read == nil {
 		read = os.ReadFile
 	}
 	data, err := read(path)
 	if err == nil {
-		return ParseWalls(data)
+		return ParseWalls(data), ParseTestWalls(data)
 	}
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	fmt.Fprintf(stderr, "%s: timings: read %s: %v (%s)\n", Name, path, err, timingsGoesOn)
-	return nil
+	return nil, nil
 }
 
 // cleanupReady reports whether host can list a directory, describe an entry and

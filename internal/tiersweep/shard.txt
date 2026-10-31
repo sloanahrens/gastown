@@ -1,0 +1,11 @@
+# Packages the integration tier runs as K shards of one test binary, one per
+# line: the package name as the sweep prints it (./ and, for a nested module,
+# the module's path too: ./tracker/store/pgtest), then K. The package's test binary is built once, its tests are listed,
+# and each shard runs a disjoint part of that list. The package is RED when a
+# listed test did not run in any shard (gt-rw118).
+#
+# The seed is commented out: sharding ./internal/cmd waits for the overseer's
+# quiet live run, which is recorded in gt-rw118's bead comment. Enable it by
+# uncommenting the line in the same change that records that run.
+#
+# ./internal/cmd 3

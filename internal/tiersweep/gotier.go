@@ -93,6 +93,13 @@ type Runner struct {
 	// that took slowTest or longer is written to Timings as a test line
 	// (gt-juo5e). False keeps the command's own output as it comes.
 	JSON bool
+	// Shards is the package names (as printed) that run as K shards of one test
+	// binary, from shard.txt (gt-rw118). A package with no entry runs as one
+	// go test, as it always has.
+	Shards map[string]int
+	// TestWalls is the previous run's wall time per listed test, in seconds,
+	// keyed by TestWallKey. A shard partition reads it; nil partitions by count.
+	TestWalls map[string]float64
 	// stderr keeps the progress lines and the reports whole while a run of more
 	// than one job writes them from the dispatcher and the collector at once.
 	stderrMu sync.Mutex
@@ -138,6 +145,24 @@ type task struct {
 	resume  bool
 	refuse  bool
 	result  packageResult
+	// group is set on a package that runs as shards: it holds the shards and
+	// the package's verdict (shardrun.go). Nil for a package run as one command.
+	group *shardGroup
+	// shard is set on one shard of a group: its place and its command.
+	shard *shardPart
+	// cwd and argv are a shard's directory and command, built by the group.
+	cwd  string
+	argv []string
+	// text is a shard's plain output, which the group merges into the log.
+	text string
+}
+
+// label is the task's name as a progress line shows it: a shard names its place.
+func (t *task) label() string {
+	if t.shard == nil {
+		return t.name
+	}
+	return fmt.Sprintf("%s shard %d/%d", t.name, t.shard.index, t.shard.of)
 }
 
 // packageResult is what one package's command left behind: the log, the exit
@@ -174,6 +199,12 @@ func (r *Runner) tasks(tier, dir string, pkgs []string, passed map[string]bool) 
 			t.resume = true
 		default:
 			t.pattern = pattern
+			// A package with a partial skip runs whole: its -skip pattern is go
+			// test's to apply, and a shard could not tell a skipped test from one
+			// that never ran (gt-rw118).
+			if pattern == "" && r.Shards[t.name] > 0 {
+				t.group = &shardGroup{k: r.Shards[t.name]}
+			}
 		}
 		tasks = append(tasks, t)
 	}
@@ -189,17 +220,35 @@ func (r *Runner) runTasks(tier, dir string, prefix, args []string, tasks []*task
 		// package is announced, skipped or refused where it is listed, and the
 		// previous run's walls never reorder it (gt-0rtgc).
 		for _, t := range tasks {
-			if r.announce(tier, t) {
-				r.runOne(tier, dir, prefix, args, t)
+			if !r.announce(tier, t) {
+				continue
 			}
+			if t.group == nil {
+				r.runOne(tier, dir, prefix, args, t)
+				continue
+			}
+			r.prepareGroup(tier, dir, prefix, args, t)
+			for _, c := range t.group.children {
+				r.runOne(tier, dir, prefix, args, c)
+			}
+			r.finishGroup(tier, t)
 		}
 		return
 	}
-	var run []*task
+	var run, groups []*task
 	for _, t := range tasks {
-		if r.announce(tier, t) {
-			run = append(run, t)
+		if !r.announce(tier, t) {
+			continue
 		}
+		if t.group == nil {
+			run = append(run, t)
+			continue
+		}
+		// A sharded package is built and listed before the pool starts, so its
+		// shards join the pool like any package and its verdict follows them.
+		r.prepareGroup(tier, dir, prefix, args, t)
+		groups = append(groups, t)
+		run = append(run, t.group.children...)
 	}
 	// A serial package runs after the pool has drained, so it is the only child
 	// in flight while it runs (gt-0rtgc).
@@ -207,6 +256,9 @@ func (r *Runner) runTasks(tier, dir string, prefix, args []string, tasks []*task
 	r.pool(tier, dir, prefix, args, parallel)
 	for _, t := range serial {
 		r.runOne(tier, dir, prefix, args, t)
+	}
+	for _, g := range groups {
+		r.finishGroup(tier, g)
 	}
 }
 
@@ -247,7 +299,7 @@ func (r *Runner) runOne(tier, dir string, prefix, args []string, t *task) {
 func (r *Runner) start(tier string, t *task) {
 	r.stderrMu.Lock()
 	defer r.stderrMu.Unlock()
-	fmt.Fprintf(r.Stderr, "%s: %s %s ...\n", Name, tier, t.name)
+	fmt.Fprintf(r.Stderr, "%s: %s %s ...\n", Name, tier, t.label())
 }
 
 // runPackage creates one package's log, runs its command and closes the log.
@@ -256,6 +308,11 @@ func (r *Runner) start(tier string, t *task) {
 // order. A package whose log cannot be created calls it too, so the pool is
 // never left waiting on a command that never runs.
 func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task, begin func()) packageResult {
+	// A shard is one command of a sharded package, run in its own directory, and
+	// its command is built by the group (gt-rw118).
+	if t.shard != nil {
+		return r.runShard(t, begin)
+	}
 	began := false
 	beganOnce := func() {
 		if !began {
@@ -308,6 +365,14 @@ func (r *Runner) execLogged(dir string, argv []string, w io.Writer) (int, []Test
 	if !r.JSON {
 		return r.Exec(dir, r.Env, argv, w), nil, nil
 	}
+	return r.execJSON(dir, argv, w)
+}
+
+// execJSON runs one command whose output is a go test -json stream (or a test
+// binary run with -test.v=test2json): w gets the plain text the stream carries,
+// and the terminal events of its top-level tests come back. A shard always reads
+// its stream this way, whatever JSON the runner is set to (gt-rw118).
+func (r *Runner) execJSON(dir string, argv []string, w io.Writer) (int, []TestTime, error) {
 	pr, pw := io.Pipe()
 	type parsed struct {
 		tests []TestTime
@@ -339,6 +404,10 @@ func (r *Runner) execLogged(dir string, argv []string, w io.Writer) (int, []Test
 func (r *Runner) report(tier string, t *task) {
 	r.stderrMu.Lock()
 	defer r.stderrMu.Unlock()
+	if t.shard != nil {
+		r.reportShard(tier, t)
+		return
+	}
 	res := t.result
 	if res.createErr != nil {
 		fmt.Fprintf(r.Stderr, "    create log %s: %v\n", res.log, res.createErr)
@@ -346,6 +415,13 @@ func (r *Runner) report(tier string, t *task) {
 	}
 	r.addTiming(tier, t.name, res.start, res.code)
 	r.addSlowTests(tier, t.name, res.tests)
+	r.reportLog(tier, t)
+}
+
+// reportLog records a package that passed and writes the log's problems and its
+// failure excerpt. The caller holds stderrMu.
+func (r *Runner) reportLog(tier string, t *task) {
+	res := t.result
 	if res.passed() {
 		r.recordPass(tier, t.name)
 	}
