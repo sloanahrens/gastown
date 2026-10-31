@@ -156,10 +156,13 @@ func TestCostPanelDrawsGCPUnderTheProviderRows(t *testing.T) {
 		"cloud":          map[string]any{"state": "fresh", "findings": []any{budgetFinding("urgent")}},
 		"cost_providers": []any{map[string]any{"id": "deepseek", "label": "DeepSeek", "kind": "cash", "balance": 27.45}},
 	})
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c =>
-		c.className === "spendpart" ? "spendpart"
-			: c.textContent.indexOf("GCP") === 0 ? "gcp"
-			: c.className === "costscroll" ? "providers" : "other"))`)
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const table = ` + costProvidersTableJS + `;
+		return __byId["cost"].children.map(c =>
+			c.className === "spendpart" ? "spendpart"
+				: c.textContent.indexOf("GCP") === 0 ? "gcp"
+				: c === table || (table && c === table.parentNode) ? "providers" : "other");
+	})())`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
 	}
