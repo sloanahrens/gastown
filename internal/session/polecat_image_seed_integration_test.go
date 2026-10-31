@@ -41,7 +41,13 @@ func runSeedScript(t *testing.T, script string, files map[string]string) (out st
 	// /seed is the bind mount; /tmp/seed.log is the RUN's own log file. The
 	// image is linux/arm64, so its steps build for that target whatever host runs
 	// this test; a darwin step sets its own GOOS.
-	cmd := exec.Command("sh", "-c", strings.ReplaceAll(script, "find /seed ", "find "+seed+" "))
+	// The walk strips the mount point from each path it finds (${gomod#/seed/}) to
+	// name a module's rig, so the scratch tree replaces that prefix too: with only
+	// the find rewritten, every path kept its whole prefix, no module sat under a
+	// rig, and the examples skip never matched (gt-fik6v).
+	rewritten := strings.ReplaceAll(script, "find /seed ", "find "+seed+" ")
+	rewritten = strings.ReplaceAll(rewritten, "${gomod#/seed/}", "${gomod#"+seed+"/}")
+	cmd := exec.Command("sh", "-c", rewritten)
 	cmd.Env = append(os.Environ(), "GOCACHE="+cache, "GOMODCACHE="+mod, "GOFLAGS=", "GOTOOLCHAIN=local", "GOOS=linux", "GOARCH=arm64")
 	b, err := cmd.CombinedOutput()
 	return string(b), err, cache, mod
@@ -97,7 +103,8 @@ func TestIntegrationSeedRunFailsTheImageWhenTheBuildFails(t *testing.T) {
 // An example module that does not build is not the seed's problem: examples are
 // in no rig's presubmit build, and the beads rig's two nested ones failed every
 // install from 10:28 with a drifted go.sum (gt-9yqcc). The good root module must
-// still seed, so the RUN exits 0 and never names the example.
+// still seed, so the RUN exits 0, names the example once as skipped (gt-vvu6d)
+// and never builds it.
 func TestIntegrationSeedRunSkipsExampleModules(t *testing.T) {
 	t.Parallel()
 	out, err, cache, _ := runSeed(t, map[string]string{
@@ -109,8 +116,18 @@ func TestIntegrationSeedRunSkipsExampleModules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed RUN failed on an example module that does not build: examples are not part of any rig's presubmit (gt-9yqcc): %v\n%s", err, out)
 	}
-	if strings.Contains(out, "examples") {
-		t.Errorf("the seed RUN walked the example module at all:\n%s", out)
+	skipped := 0
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "/examples/demo") {
+			continue
+		}
+		if !strings.HasPrefix(line, "seed: skip ") {
+			t.Errorf("the seed RUN did more than skip the example module: %q\n%s", line, out)
+		}
+		skipped++
+	}
+	if skipped != 1 {
+		t.Errorf("the example module is named %d times, want once as skipped:\n%s", skipped, out)
 	}
 	// An exclusion wide enough to skip the whole walk would also exit 0, so the
 	// module outside examples/ has to have seeded.
