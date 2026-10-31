@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
 // SandboxRecord says that a polecat's session lives in an OpenShell sandbox.
@@ -22,9 +23,12 @@ import (
 // session. It is durable on purpose: a daemon restart must still route to
 // a sandbox that is running.
 type SandboxRecord struct {
-	Session   string    `json:"session"`
-	Rig       string    `json:"rig"`
-	Polecat   string    `json:"polecat"`
+	Session string `json:"session"`
+	Rig     string `json:"rig"`
+	Polecat string `json:"polecat"`
+	// Workspace is the id of the workspace the rig belongs to, so the seat's
+	// hours can be metered after its record is gone (plan row M5).
+	Workspace string    `json:"workspace,omitempty"`
 	Gateway   string    `json:"gateway,omitempty"`
 	Profile   string    `json:"profile"`
 	Image     string    `json:"image"`
@@ -43,6 +47,67 @@ func SandboxRegistryDir(townRoot string) string {
 
 func sandboxRecordPath(townRoot, session string) string {
 	return filepath.Join(SandboxRegistryDir(townRoot), session+".json")
+}
+
+// SandboxSeatLedgerPath is the seat-end ledger: one line per removed record,
+// so a seat's hours exist with or without the bead that named it (plan row M5).
+func SandboxSeatLedgerPath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "metrics", "sandbox-seats.jsonl")
+}
+
+// sandboxSeatEndLine is one line of the seat-end ledger: the record a removal
+// deleted, stamped with when it ended.
+type sandboxSeatEndLine struct {
+	Session   string    `json:"session"`
+	Rig       string    `json:"rig"`
+	Polecat   string    `json:"polecat"`
+	Workspace string    `json:"workspace"`
+	Profile   string    `json:"profile"`
+	CreatedAt time.Time `json:"created_at"`
+	EndedAt   time.Time `json:"ended_at"`
+}
+
+// appendSandboxSeatEnd appends rec's seat-end line to townRoot's ledger.
+func appendSandboxSeatEnd(townRoot string, rec SandboxRecord, now time.Time) error {
+	// The line holds only strings and times, so its JSON cannot fail to encode.
+	line, _ := json.Marshal(sandboxSeatEndLine{
+		Session:   rec.Session,
+		Rig:       rec.Rig,
+		Polecat:   rec.Polecat,
+		Workspace: rec.Workspace,
+		Profile:   rec.Profile,
+		CreatedAt: rec.CreatedAt.UTC(),
+		EndedAt:   now.UTC(),
+	})
+	path := SandboxSeatLedgerPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G302: operational metering data, not secrets
+	if err != nil {
+		return err
+	}
+	return writeSeatLine(f, line)
+}
+
+// writeSeatLine appends line and closes f; a failed write still closes it.
+func writeSeatLine(f *os.File, line []byte) error {
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// sandboxRecordWorkspace is the workspace id a record for rig carries: the
+// town's mapping for the rig, or its default. A map that cannot be read is an
+// error, never an empty or guessed id (plan rows M1 and M5).
+func sandboxRecordWorkspace(townRoot, rig string) (string, error) {
+	m, err := workspaceid.Load(townRoot)
+	if err != nil {
+		return "", err
+	}
+	return m.For(rig)
 }
 
 // WriteSandboxRecord records r for its session.
@@ -79,16 +144,35 @@ func ReadSandboxRecord(townRoot, session string) (r SandboxRecord, ok bool, err 
 	return r, true, nil
 }
 
-// RemoveSandboxRecord forgets session. Idempotent.
+// RemoveSandboxRecord forgets session, appending its seat-end line to the
+// ledger first. Idempotent: a record that does not exist writes no line, and a
+// ledger that cannot be written still lets the removal happen, its error joined
+// with the removal's (plan row M5).
 func RemoveSandboxRecord(townRoot, session string) error {
+	return removeSandboxRecord(townRoot, session, time.Now)
+}
+
+// removeSandboxRecord is RemoveSandboxRecord with its clock injected, so a
+// test pins the line's ended_at.
+func removeSandboxRecord(townRoot, session string, now func() time.Time) error {
 	if !validSessionName(session) {
 		return nil
 	}
-	err := os.Remove(sandboxRecordPath(townRoot, session))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	var ledgerErr error
+	rec, ok, err := ReadSandboxRecord(townRoot, session)
+	switch {
+	case err != nil:
+		// An unreadable record is not a missing one: the seat existed and
+		// its line cannot be written, so say so rather than meter nothing.
+		ledgerErr = fmt.Errorf("reading %s for its seat-end line: %w", session, err)
+	case ok:
+		ledgerErr = appendSandboxSeatEnd(townRoot, rec, now())
 	}
-	return err
+	removeErr := os.Remove(sandboxRecordPath(townRoot, session))
+	if errors.Is(removeErr, os.ErrNotExist) {
+		removeErr = nil
+	}
+	return errors.Join(ledgerErr, removeErr)
 }
 
 // ListSandboxSessions returns the recorded session names, sorted; a
