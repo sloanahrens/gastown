@@ -52,8 +52,10 @@ type Issue struct {
 	Dependencies []IssueDep `json:"dependencies,omitempty"`
 	// Dependents are the issues that depend on this one, with their relation:
 	// the other end of each link. Filled with Dependencies, by a read of named
-	// issues only.
-	Dependents []IssueDep `json:"dependents,omitempty"`
+	// issues only. The tag has no omitempty, so a named read sends [] when
+	// nothing depends on the issue; a client reads an absent or null field as
+	// unfilled and an empty array as no dependents.
+	Dependents []IssueDep `json:"dependents"`
 
 	// Counts the list endpoints fill in without loading the rows.
 	CommentCount    int `json:"comment_count,omitempty"`
