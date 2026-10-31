@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,19 +18,24 @@ const (
 	composeTestContainer = "gt-compose-daemon-1"
 	composeTestProject   = "gt-compose"
 	composeTestDoltHost  = "host.docker.internal"
+	composeTestTown      = "/fake/town"
 )
 
-// composeRig is a town root on disk and the deps the command reads it through.
-// The write seam is the production one over the root, recording each path it is
-// asked to write, so a test reads what landed and a refusal is proven to have
-// written nothing. There is no command seam at all: the command has no way to
-// start or run anything, which is what "starts nothing" means here.
+// composeRig is a town root and the deps the command reads it through. The
+// filesystem is in memory: disk holds each file the write seam was given, made
+// holds each directory the mkdir seam was asked for, so a test reads what landed
+// and a refusal is proven to have written nothing. There is no command seam at
+// all: the command has no way to start or run anything, which is what "starts
+// nothing" means here.
 type composeRig struct {
 	town  string
 	flags daemonComposeFlags
 	deps  daemonComposeDeps
 	out   *bytes.Buffer
 
+	disk     map[string][]byte
+	made     []string
+	mkdirErr error
 	writeErr error
 	wrote    []string
 }
@@ -40,7 +44,7 @@ type composeRig struct {
 // through the host the container resolves.
 func newComposeRig(t *testing.T) *composeRig {
 	t.Helper()
-	r := &composeRig{town: t.TempDir(), out: &bytes.Buffer{}}
+	r := &composeRig{town: composeTestTown, out: &bytes.Buffer{}, disk: map[string][]byte{}}
 	r.flags = daemonComposeFlags{image: daemonimage.ImageTag(composeTestRev)}
 	r.deps = daemonComposeDeps{
 		findTown: func() (string, error) { return r.town, nil },
@@ -51,12 +55,22 @@ func newComposeRig(t *testing.T) *composeRig {
 			}, nil
 		},
 		doltHost: func(string) (string, bool) { return composeTestDoltHost, true },
-		write: func(path string, content []byte) error {
-			r.wrote = append(r.wrote, path)
-			if r.writeErr != nil {
-				return r.writeErr
-			}
-			return writeDaemonComposeFile(path, content)
+		files: composeFiles{
+			mkdirAll: func(dir string) error {
+				if r.mkdirErr != nil {
+					return r.mkdirErr
+				}
+				r.made = append(r.made, dir)
+				return nil
+			},
+			write: func(path string, content []byte) error {
+				r.wrote = append(r.wrote, path)
+				if r.writeErr != nil {
+					return r.writeErr
+				}
+				r.disk[path] = content
+				return nil
+			},
 		},
 		out: r.out,
 	}
@@ -94,9 +108,12 @@ func TestDaemonComposeWriteWritesTheRender(t *testing.T) {
 	if len(r.wrote) != 1 || r.wrote[0] != r.composePath() {
 		t.Fatalf("wrote %v, want the live compose file %s once", r.wrote, r.composePath())
 	}
-	got, err := os.ReadFile(r.composePath())
-	if err != nil {
-		t.Fatalf("reading the compose file: %v", err)
+	if want := filepath.Dir(r.composePath()); len(r.made) != 1 || r.made[0] != want {
+		t.Errorf("made directories %v, want %s once", r.made, want)
+	}
+	got, ok := r.disk[r.composePath()]
+	if !ok {
+		t.Fatalf("no compose file written at %s", r.composePath())
 	}
 	if !bytes.Equal(got, r.render(t)) {
 		t.Errorf("compose file =\n%s\nwant the render of the town's settings:\n%s", got, r.render(t))
@@ -124,10 +141,7 @@ func TestDaemonComposeWriteTrimsTheImage(t *testing.T) {
 	if err := runDaemonCompose(r.flags, r.deps); err != nil {
 		t.Fatalf("runDaemonCompose: %v", err)
 	}
-	got, err := os.ReadFile(r.composePath())
-	if err != nil {
-		t.Fatalf("reading the compose file: %v", err)
-	}
+	got := r.disk[r.composePath()]
 	if want := []byte(`image: "` + tag + `"`); !bytes.Contains(got, want) {
 		t.Errorf("compose file does not carry %q:\n%s", want, got)
 	}
@@ -201,12 +215,7 @@ func TestDaemonComposeWriteRefusesAndLeavesTheFileAlone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			r := newComposeRig(t)
-			if err := os.MkdirAll(filepath.Dir(r.composePath()), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(r.composePath(), old, 0o644); err != nil {
-				t.Fatal(err)
-			}
+			r.disk[r.composePath()] = old
 			tc.mutate(r)
 			err := runDaemonCompose(r.flags, r.deps)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -215,11 +224,8 @@ func TestDaemonComposeWriteRefusesAndLeavesTheFileAlone(t *testing.T) {
 			if len(r.wrote) != 0 {
 				t.Errorf("a refusal wrote %v", r.wrote)
 			}
-			got, err := os.ReadFile(r.composePath())
-			if err != nil {
-				t.Fatalf("reading the compose file: %v", err)
-			}
-			if !bytes.Equal(got, old) {
+			got, ok := r.disk[r.composePath()]
+			if !ok || !bytes.Equal(got, old) {
 				t.Errorf("compose file = %q, want the old render %q kept", got, old)
 			}
 		})
@@ -231,7 +237,7 @@ func TestDaemonComposeWritePrint(t *testing.T) {
 	t.Parallel()
 	r := newComposeRig(t)
 	r.flags.print = true
-	r.deps.write = func(string, []byte) error {
+	r.deps.files.write = func(string, []byte) error {
 		t.Error("--print wrote a file")
 		return nil
 	}
@@ -241,8 +247,8 @@ func TestDaemonComposeWritePrint(t *testing.T) {
 	if got, want := r.out.Bytes(), r.render(t); !bytes.Equal(got, want) {
 		t.Errorf("--print output =\n%s\nwant the render:\n%s", got, want)
 	}
-	if _, err := os.Stat(r.composePath()); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("--print left a file at %s (%v)", r.composePath(), err)
+	if _, ok := r.disk[r.composePath()]; ok {
+		t.Errorf("--print left a file at %s", r.composePath())
 	}
 }
 
@@ -252,12 +258,13 @@ func TestDaemonComposeWriteRefusesADirectoryItCannotMake(t *testing.T) {
 	t.Parallel()
 	r := newComposeRig(t)
 	// daemon/ is a regular file, so daemon/container/ cannot be made.
-	if err := os.WriteFile(filepath.Join(r.town, "daemon"), []byte("not a directory"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	r.mkdirErr = errors.New("not a directory")
 	err := runDaemonCompose(r.flags, r.deps)
 	if err == nil || !strings.Contains(err.Error(), r.composePath()) {
 		t.Fatalf("error = %v, want it to name %s", err, r.composePath())
+	}
+	if len(r.wrote) != 0 {
+		t.Errorf("a directory it cannot make still wrote %v", r.wrote)
 	}
 }
 
@@ -267,7 +274,7 @@ func TestDaemonComposeWriteReportsAWriteFailure(t *testing.T) {
 	t.Parallel()
 	r := newComposeRig(t)
 	failure := errors.New("disk full")
-	r.deps.write = func(string, []byte) error { return failure }
+	r.writeErr = failure
 	err := runDaemonCompose(r.flags, r.deps)
 	if !errors.Is(err, failure) || !strings.Contains(err.Error(), r.composePath()) {
 		t.Errorf("error = %v, want it to wrap %v and name %s", err, failure, r.composePath())
@@ -309,6 +316,50 @@ func TestDaemonComposeWriteReportsReadFailures(t *testing.T) {
 			}
 			if len(r.wrote) != 0 {
 				t.Errorf("a refused read wrote %v", r.wrote)
+			}
+		})
+	}
+}
+
+// The Dolt host is the town's endpoint resolved in container mode, whichever
+// process asks: the resolver is asked for the town in container mode, and its
+// host and whether it names an endpoint pass through.
+func TestContainerDoltHostResolvesInContainerMode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		ep       config.DoltEndpoint
+		ok       bool
+		wantHost string
+		wantOK   bool
+	}{
+		{
+			name:     "a town with an endpoint",
+			ep:       config.DoltEndpoint{Host: composeTestDoltHost, Port: 3307},
+			ok:       true,
+			wantHost: composeTestDoltHost,
+			wantOK:   true,
+		},
+		{
+			name: "a town with no endpoint",
+			ok:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gotRoot string
+			var gotContainer bool
+			resolve := func(root string, inContainer bool) (config.DoltEndpoint, bool) {
+				gotRoot, gotContainer = root, inContainer
+				return tc.ep, tc.ok
+			}
+			host, ok := containerDoltHost(resolve)(composeTestTown)
+			if host != tc.wantHost || ok != tc.wantOK {
+				t.Errorf("host, ok = %q, %v; want %q, %v", host, ok, tc.wantHost, tc.wantOK)
+			}
+			if gotRoot != composeTestTown || !gotContainer {
+				t.Errorf("resolved %q in container mode %v; want %q in container mode", gotRoot, gotContainer, composeTestTown)
 			}
 		})
 	}
