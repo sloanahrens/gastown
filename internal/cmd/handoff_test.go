@@ -923,7 +923,10 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 		t.Parallel()
 		role := "gastown/witness"
 		tmpDir := t.TempDir()
-		now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+		// The injected clock sits an hour behind the real one, well past the
+		// cooldown, so a helper that ignores now and reads the wall clock sees
+		// the marker as old, skips the wait, and fails this case on any date.
+		now := time.Now().Add(-time.Hour)
 
 		// Create a last_handoff_ts file with very recent mtime
 		runtimeDir := filepath.Join(tmpDir, constants.DirRuntime)
