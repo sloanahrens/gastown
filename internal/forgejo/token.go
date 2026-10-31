@@ -69,12 +69,12 @@ func ReadCredentialFile(path string) (user, token string, err error) {
 		return "", "", err
 	}
 	token, ok := parseToken(data)
-	if !ok {
-		return "", "", fmt.Errorf("forgejo: token file %s has no %s line", path, EnvKey)
+	if !ok || token == "" {
+		return "", "", fmt.Errorf("forgejo: token file %s has no %s value", path, EnvKey)
 	}
 	user, ok = parseKey(data, UserKey)
 	if !ok || user == "" {
-		return "", "", fmt.Errorf("forgejo: token file %s has no %s line", path, UserKey)
+		return "", "", fmt.Errorf("forgejo: token file %s has no %s value", path, UserKey)
 	}
 	return user, token, nil
 }

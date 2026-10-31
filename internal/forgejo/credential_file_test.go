@@ -47,6 +47,9 @@ func TestReadCredentialFile(t *testing.T) {
 		{"an empty FORGEJO_USER", func(t *testing.T) string {
 			return writeCredentialFile(t, "FORGEJO_USER=\nFORGEJO_TOKEN="+credentialFileSecret+"\n", 0o600)
 		}},
+		{"an empty FORGEJO_TOKEN", func(t *testing.T) string {
+			return writeCredentialFile(t, "FORGEJO_USER=bot-landing\nFORGEJO_TOKEN=\n", 0o600)
+		}},
 		{"no FORGEJO_TOKEN", func(t *testing.T) string {
 			return writeCredentialFile(t, "FORGEJO_USER=bot-landing\n", 0o600)
 		}},
@@ -59,6 +62,26 @@ func TestReadCredentialFile(t *testing.T) {
 			}
 			if user != "" || token != "" {
 				t.Errorf("a refusal returned %q and %q, want both empty", user, token)
+			}
+			if strings.Contains(err.Error(), credentialFileSecret) {
+				t.Errorf("the error carries the token: %v", err)
+			}
+		})
+	}
+}
+
+// A refusal for a missing value names the key that is missing, never a value.
+func TestReadCredentialFileNamesTheMissingKey(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, body, wantKey string }{
+		{"an empty token", "FORGEJO_USER=bot-landing\nFORGEJO_TOKEN=\n", "FORGEJO_TOKEN"},
+		{"an empty login", "FORGEJO_USER=\nFORGEJO_TOKEN=" + credentialFileSecret + "\n", "FORGEJO_USER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := ReadCredentialFile(writeCredentialFile(t, tc.body, 0o600))
+			if err == nil || !strings.Contains(err.Error(), tc.wantKey+" value") {
+				t.Fatalf("error = %v, want one naming %s", err, tc.wantKey)
 			}
 			if strings.Contains(err.Error(), credentialFileSecret) {
 				t.Errorf("the error carries the token: %v", err)

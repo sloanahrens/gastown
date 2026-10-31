@@ -32,7 +32,7 @@ type gitCredentialForgejoFlags struct {
 // newGitCredentialForgejoCmd builds the command reading stdin and writing
 // stdout through in and out, so a test drives the real flags and the real
 // protocol without a process.
-func newGitCredentialForgejoCmd(in io.Reader, out io.Writer, readCredential func(path string) (user, token string, err error)) *cobra.Command {
+func newGitCredentialForgejoCmd(in io.Reader, out, errOut io.Writer, readCredential func(path string) (user, token string, err error)) *cobra.Command {
 	var flags gitCredentialForgejoFlags
 	cmd := &cobra.Command{
 		Use:   "git-credential-forgejo <operation>",
@@ -53,7 +53,15 @@ argument of this command.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runGitCredentialForgejo(args[0], flags, in, out, readCredential)
+			err := runGitCredentialForgejo(args[0], flags, in, out, readCredential)
+			if err != nil {
+				// SilenceErrors keeps cobra from printing it, so the refusal is
+				// printed here, to stderr, which git shows to the person pushing.
+				// No error this command returns carries a token, and stdout stays
+				// the credential answer alone.
+				fmt.Fprintf(errOut, "gt git-credential-forgejo: %v\n", err)
+			}
+			return err
 		},
 	}
 	cmd.Flags().StringArrayVar(&flags.hosts, "host", nil,
@@ -63,7 +71,7 @@ argument of this command.`,
 	return cmd
 }
 
-var gitCredentialForgejoCmd = newGitCredentialForgejoCmd(os.Stdin, os.Stdout, forgejo.ReadCredentialFile)
+var gitCredentialForgejoCmd = newGitCredentialForgejoCmd(os.Stdin, os.Stdout, os.Stderr, forgejo.ReadCredentialFile)
 
 func init() {
 	rootCmd.AddCommand(gitCredentialForgejoCmd)

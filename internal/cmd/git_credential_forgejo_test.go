@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,20 +30,17 @@ func credTokenFile(t *testing.T, mode os.FileMode) string {
 }
 
 // runCredentialCmd drives the real command: its flags parse from args and
-// stdin is request. It returns stdout, stderr (the error text) and the error.
-func runCredentialCmd(t *testing.T, request string, args ...string) (stdout, errText string, err error) {
+// stdin is request. It returns what the command wrote to stdout, what it wrote
+// to stderr (the diagnostic git would show) and the error it returned.
+func runCredentialCmd(t *testing.T, request string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	var out bytes.Buffer
-	c := newGitCredentialForgejoCmd(strings.NewReader(request), &out, forgejo.ReadCredentialFile)
+	var out, errOut bytes.Buffer
+	c := newGitCredentialForgejoCmd(strings.NewReader(request), &out, &errOut, forgejo.ReadCredentialFile)
 	c.SetArgs(args)
-	var errBuf bytes.Buffer
-	c.SetErr(&errBuf)
-	c.SetOut(&errBuf)
+	c.SetErr(io.Discard)
+	c.SetOut(io.Discard)
 	err = c.Execute()
-	if err != nil {
-		errText = err.Error()
-	}
-	return out.String(), errText + errBuf.String(), err
+	return out.String(), errOut.String(), err
 }
 
 const credRequest = "protocol=http\nhost=scratch-forgejo:3000\npath=scratch-admin/l2rig.git\n\n"
@@ -103,13 +101,22 @@ func TestGitCredentialForgejoGet(t *testing.T) {
 		if out != "" {
 			t.Errorf("stdout = %q, want empty", out)
 		}
+		// The diagnostic reaches stderr, names the mode and the file, and git
+		// shows it: a refusal that only returned an error would show a bare
+		// failure in production.
+		if !strings.Contains(errText, "mode 644") || !strings.Contains(errText, "gt git-credential-forgejo:") {
+			t.Errorf("stderr = %q, want the helper's name and the mode it refused", errText)
+		}
 	})
 
-	t.Run("a missing token file is refused", func(t *testing.T) {
+	t.Run("a missing token file is refused with a diagnostic on stderr", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := runCredentialCmd(t, credRequest, "--host", "scratch-forgejo:3000", "--token-file", filepath.Join(t.TempDir(), "absent.env"), "get")
+		out, errText, err := runCredentialCmd(t, credRequest, "--host", "scratch-forgejo:3000", "--token-file", filepath.Join(t.TempDir(), "absent.env"), "get")
 		if err == nil {
 			t.Error("get on a missing token file succeeded, want a refusal")
+		}
+		if out != "" || !strings.Contains(errText, "token file") {
+			t.Errorf("stdout = %q, stderr = %q; want empty stdout and a diagnostic naming the token file", out, errText)
 		}
 	})
 }
