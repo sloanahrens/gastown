@@ -20,7 +20,7 @@ func init() {
 	register(Case{Name: "opposite blocking links added at the same instant never both succeed", Run: depsCycleRace})
 	register(Case{Name: "an external target needs no row and is left out of the list", Run: depsExternal})
 	register(Case{Name: "a dependent of an external:<rig>:<id> target is listed by its id once, and a near-miss suffix is not", Fake: true, Run: depsExternalDependents})
-	register(Case{Name: "a named read of an issue nothing depends on sends an empty dependents list, not an unfilled one", Run: depsNoDependentsIsEmpty})
+	register(Case{Name: "a named read of an issue nothing depends on sends an empty dependents list, not an unfilled one", Fake: true, Run: depsNoDependentsIsEmpty})
 	register(Case{Name: "a parent-child link sets and clears the parent", Run: depsParentChild})
 	register(Case{Name: "an open blocker stops close unless forced", Run: depsBlockerFence})
 	register(Case{Name: "delete removes links to the deleted issue and list counts links", Run: depsDeleteAndCounts})
