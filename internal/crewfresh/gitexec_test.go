@@ -14,16 +14,39 @@ import (
 // name it in -C and never touch a real repository.
 const testDir = "/crew/clone"
 
+// errHungPastBound is what a hung fake reports when no deadline could end it.
+var errHungPastBound = errors.New("the call ran without a deadline that could end it")
+
 // fakeCommand is a git command a test scripts: it answers from the fields the
 // case set and records every argv it was given.
 type fakeCommand struct {
 	stdout string
 	err    error
 	argvs  [][]string
+	// bounded records, per command, whether it ran under a deadline.
+	bounded []bool
+	// live records, per command, whether its context was still open when the
+	// command started.
+	live []bool
+	// hang makes the command wait for its context to end, as a hung git does.
+	hang bool
 }
 
-func (f *fakeCommand) run(_ context.Context, argv []string) (string, error) {
+func (f *fakeCommand) run(ctx context.Context, argv []string) (string, error) {
 	f.argvs = append(f.argvs, argv)
+	_, hasDeadline := ctx.Deadline()
+	f.bounded = append(f.bounded, hasDeadline)
+	f.live = append(f.live, ctx.Err() == nil)
+	if f.hang {
+		// A context with no deadline can never end this wait, so the fake
+		// reports that at once instead of waiting for good: a call that lost
+		// its bound fails its test, it does not hang it.
+		if _, ok := ctx.Deadline(); !ok {
+			return "", errHungPastBound
+		}
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
 	return f.stdout, f.err
 }
 
@@ -38,7 +61,7 @@ func (e exitError) ExitCode() int { return int(e) }
 // scriptedGit is the Git over a scripted command, so a unit test reaches both
 // the answers and the failures without starting a process.
 func scriptedGit(f *fakeCommand) Git {
-	return &gitExec{dir: testDir, command: f.run}
+	return &gitExec{dir: testDir, command: f.run, localTimeout: time.Millisecond}
 }
 
 // wantArgv fails the test unless argv is the one git command the method was
@@ -326,5 +349,146 @@ func TestGitCommandErrorNamesTheCommandAndWrapsTheFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("FastForwardMain error = %q, want it to wrap the failure", err)
+	}
+}
+
+// Every method runs its git command under a deadline, so no call can stall the
+// caller on a hung git: the fetch under its caller's timeout and each other
+// call under localTimeout (gt-vpj84).
+func TestGitEveryCallRunsUnderADeadline(t *testing.T) {
+	t.Parallel()
+	for _, tc := range commandFailures {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			command := &fakeCommand{err: tc.command.err}
+			_ = tc.call(scriptedGit(command))
+			if len(command.bounded) != 1 || !command.bounded[0] {
+				t.Errorf("ran under a deadline = %v, want one command run under one", command.bounded)
+			}
+		})
+	}
+}
+
+// A git that never answers ends at the deadline with the deadline as the
+// error, at every method: the context ends the wait, not a clock the test
+// reads (gt-vpj84).
+func TestGitHungCallEndsWithTheDeadline(t *testing.T) {
+	t.Parallel()
+	hung := &gitExec{dir: testDir, command: (&fakeCommand{hang: true}).run, localTimeout: time.Millisecond}
+	calls := map[string]func() error{
+		// The fetch takes its own timeout from the caller.
+		"fetch":        func() error { return hung.Fetch(time.Millisecond) },
+		"branch":       func() error { _, err := hung.Branch(); return err },
+		"clean":        func() error { _, err := hung.Clean(); return err },
+		"behind":       func() error { _, err := hung.Behind(); return err },
+		"ancestor":     func() error { _, err := hung.HeadIsAncestorOfOriginMain(); return err },
+		"fast-forward": hung.FastForwardMain,
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if err := call(); !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("hung call error = %v, want it to wrap context.DeadlineExceeded", err)
+			}
+		})
+	}
+}
+
+// An unset localTimeout is the package default, never no deadline (gt-vpj84).
+func TestGitLocalCallsDefaultToTheLocalTimeout(t *testing.T) {
+	t.Parallel()
+	command := &fakeCommand{}
+	if _, err := (&gitExec{dir: testDir, command: command.run}).Branch(); err != nil {
+		t.Fatal(err)
+	}
+	if len(command.bounded) != 1 || !command.bounded[0] {
+		t.Errorf("ran under a deadline = %v, want one command run under one", command.bounded)
+	}
+	// A zero timeout is a deadline that has already passed, which would fail
+	// every call before git started.
+	if len(command.live) != 1 || !command.live[0] {
+		t.Errorf("deadline open when the command started = %v, want open", command.live)
+	}
+}
+
+// git is told never to stop and ask: no terminal prompt, no askpass helper and
+// no ssh question, and an ssh command the caller chose is left alone
+// (gt-vpj84).
+func TestGitEnvTurnsEveryPromptOff(t *testing.T) {
+	t.Parallel()
+	base := []string{"HOME=/h", "GIT_TERMINAL_PROMPT=1"}
+	got := gitEnv(base)
+	for _, want := range []string{"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true", "GIT_SSH_COMMAND=ssh -o BatchMode=yes"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("env lacks %q: %v", want, got)
+		}
+	}
+	if !slices.Equal(base, []string{"HOME=/h", "GIT_TERMINAL_PROMPT=1"}) {
+		t.Errorf("gitEnv changed its input: %v", base)
+	}
+	own := gitEnv([]string{"GIT_SSH_COMMAND=ssh -i key"})
+	if slices.Contains(own, "GIT_SSH_COMMAND=ssh -o BatchMode=yes") || !slices.Contains(own, "GIT_SSH_COMMAND=ssh -i key") {
+		t.Errorf("env replaced the caller's ssh command: %v", own)
+	}
+}
+
+// Git's standard error becomes a fixed reason of this package's wording, and
+// text outside the table becomes none (gt-vpj84).
+func TestGitReasonNamesOnlyKnownPhrases(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ stderr, want string }{
+		{"fatal: could not read Username for 'https://x@host': terminal prompts disabled", "authentication required"},
+		{"fatal: unable to access 'https://host/r.git/': Could not resolve host: host", "remote unreachable"},
+		{"fatal: couldn't find remote ref main", "remote ref not found"},
+		{"fatal: Not possible to fast-forward, aborting.", "not a fast-forward"},
+		{"fatal: Unable to create '/r/.git/index.lock': File exists.", "the index is locked by another git process"},
+		{"fatal: not a git repository (or any parent): .git", "not a git repository"},
+		{"fatal: something git has never said", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := gitReason([]byte(tc.stderr)); got != tc.want {
+			t.Errorf("gitReason(%q) = %q, want %q", tc.stderr, got, tc.want)
+		}
+	}
+}
+
+// A reasoned failure names the reason and nothing of git's text, and still
+// answers errors.As for the exit status (gt-vpj84).
+func TestGitWithReasonKeepsTheFailureAndOmitsGitsText(t *testing.T) {
+	t.Parallel()
+	const secret = "token-do-not-print-4f2a"
+	err := withReason(exitError(128), []byte("fatal: Authentication failed for 'https://"+secret+"@host/r.git'"))
+	if want := "exit status 128 (authentication required)"; err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("error repeats git's text: %q", err)
+	}
+	var exited exitCoder
+	if !errors.As(err, &exited) || exited.ExitCode() != 128 {
+		t.Errorf("errors.As exitCoder = %v, want status 128", exited)
+	}
+	if plain := exitError(1); withReason(plain, []byte("unknown")) != error(plain) {
+		t.Error("a failure with no known reason changed")
+	}
+	if withReason(nil, []byte("fatal: Authentication failed")) != nil {
+		t.Error("withReason(nil) is not nil")
+	}
+}
+
+// What a chatty git writes to standard error is kept only up to the cap
+// (gt-vpj84).
+func TestCappedWriterKeepsTheFirstBytesOnly(t *testing.T) {
+	t.Parallel()
+	w := &cappedWriter{limit: 5}
+	for _, chunk := range []string{"ab", "cdef", "gh"} {
+		n, err := w.Write([]byte(chunk))
+		if err != nil || n != len(chunk) {
+			t.Fatalf("Write(%q) = %d, %v, want the whole chunk taken", chunk, n, err)
+		}
+	}
+	if got := string(w.Bytes()); got != "abcde" {
+		t.Errorf("kept %q, want %q", got, "abcde")
 	}
 }

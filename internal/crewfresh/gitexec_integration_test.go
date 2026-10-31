@@ -3,9 +3,11 @@
 package crewfresh
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -25,9 +27,14 @@ const (
 	// standInEnv puts the test binary in the role of a stand-in git: a process
 	// that leaves its process group and keeps the output pipe open.
 	standInEnv = "CREWFRESH_STAND_IN"
-	// standInHelperPIDEnv names the file the stand-in records its escaped
-	// child's pid in.
-	standInHelperPIDEnv = "CREWFRESH_STAND_IN_HELPER_PID"
+	// aliveFIFOEnv names the FIFO the stand-in announces itself on: it writes
+	// its escaped child's pid there and keeps the write end open, as does the
+	// child, so the FIFO reads end-of-file exactly when both are gone.
+	aliveFIFOEnv = "CREWFRESH_ALIVE_FIFO"
+	// hangBound is how long a test waits for an event before it reports the
+	// hang. It is a detector, not a measurement: nothing asserts how long an
+	// event took.
+	hangBound = 30 * time.Second
 )
 
 // TestMain runs the integration tier, which drives real git, under the
@@ -43,22 +50,36 @@ func TestMain(m *testing.M) {
 }
 
 // standInWithEscapedHelper is the stand-in git: it starts a child in a new
-// session, which a process-group kill cannot reach, records that child's pid,
-// and then blocks holding the output pipe until it is killed.
+// session, which a process-group kill cannot reach, announces the child's pid
+// on the alive FIFO, and then blocks until it is killed. The block is a read
+// from a pipe whose write end stays open: a real syscall, which Go's deadlock
+// detector does not count as every goroutine asleep (select{} could).
 func standInWithEscapedHelper() {
+	alive, err := os.OpenFile(os.Getenv(aliveFIFOEnv), os.O_WRONLY, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "stand-in git: open the alive FIFO: %v\n", err)
+		os.Exit(1)
+	}
 	helper := exec.Command("sleep", "300") //nolint:gosec // G204: a fixed argv built by the test
 	helper.Stdout = os.Stdout
 	helper.Stderr = os.Stderr
+	helper.ExtraFiles = []*os.File{alive}
 	helper.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := helper.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "stand-in git: start the escaped helper: %v\n", err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(os.Getenv(standInHelperPIDEnv), []byte(strconv.Itoa(helper.Process.Pid)), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "stand-in git: record the helper's pid: %v\n", err)
+	if _, err := fmt.Fprintln(alive, helper.Process.Pid); err != nil {
+		fmt.Fprintf(os.Stderr, "stand-in git: announce the helper's pid: %v\n", err)
 		os.Exit(1)
 	}
-	select {}
+	var fds [2]int
+	if err := syscall.Pipe(fds[:]); err != nil {
+		fmt.Fprintf(os.Stderr, "stand-in git: make the pipe to block on: %v\n", err)
+		os.Exit(1)
+	}
+	_, _ = syscall.Read(fds[0], make([]byte, 1)) // nothing ever writes to fds[1]
+	os.Exit(1)
 }
 
 // gitT runs git in dir and returns its trimmed output, failing the test when
@@ -228,85 +249,145 @@ func writeStandInGit(t *testing.T, dir, body string) {
 	}
 }
 
-// waitForHelper polls until the stand-in git has recorded the pid of the child
-// that holds its output pipe, and returns it.
-func waitForHelper(t *testing.T, pidFile string) int {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		body, err := os.ReadFile(pidFile)
-		if err == nil {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
-			if err != nil {
-				t.Fatalf("helper pid %q: %v", body, err)
-			}
-			return pid
-		}
-		if !time.Now().Before(deadline) {
-			t.Fatalf("the stand-in git recorded no helper pid in %s after 10s: %v", pidFile, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+// aliveWatch reads the alive FIFO a stand-in git writes to: the pid it
+// announces, and the end-of-file that says every process holding the FIFO is
+// gone. Both are events the test waits on; none is polled.
+type aliveWatch struct {
+	pid  chan int
+	gone chan struct{}
+	err  chan error
 }
 
-// waitForGone polls until pid is gone. A killed process stays visible to
-// kill(pid, 0) as a zombie until it is reaped, and a group member is
-// reparented before that, so "gone" is a state to wait for.
-func waitForGone(t *testing.T, pid int) {
+// watchAlive makes the FIFO at path and starts reading it. Opening the read end
+// blocks until the stand-in opens the write end, so the read runs apart from
+// the test.
+func watchAlive(t *testing.T, path string) aliveWatch {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		err := syscall.Kill(pid, 0)
-		if errors.Is(err, syscall.ESRCH) {
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("make the alive FIFO: %v", err)
+	}
+	w := aliveWatch{pid: make(chan int, 1), gone: make(chan struct{}), err: make(chan error, 1)}
+	go func() {
+		f, err := os.Open(path)
+		if err != nil {
+			w.err <- err
 			return
 		}
-		if !time.Now().Before(deadline) {
-			t.Fatalf("process %d is still there after 5s: kill(pid, 0) = %v", pid, err)
+		defer f.Close()
+		r := bufio.NewReader(f)
+		line, err := r.ReadString('\n')
+		if err != nil {
+			w.err <- fmt.Errorf("read the announced pid: %w", err)
+			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil {
+			w.err <- fmt.Errorf("announced pid %q: %w", line, err)
+			return
+		}
+		w.pid <- pid
+		_, _ = io.Copy(io.Discard, r) // returns at end-of-file: every holder is gone
+		close(w.gone)
+	}()
+	return w
+}
+
+// announced waits for the stand-in to announce its escaped child and returns
+// the child's pid.
+func (w aliveWatch) announced(t *testing.T) int {
+	t.Helper()
+	select {
+	case pid := <-w.pid:
+		return pid
+	case err := <-w.err:
+		t.Fatalf("the stand-in git did not announce its helper: %v", err)
+	case <-time.After(hangBound):
+		t.Fatalf("the stand-in git announced no helper within %s", hangBound)
+	}
+	return 0
+}
+
+// awaitGone waits for every process holding the FIFO to be gone.
+func (w aliveWatch) awaitGone(t *testing.T) {
+	t.Helper()
+	select {
+	case <-w.gone:
+	case <-time.After(hangBound):
+		t.Fatalf("a process holding the alive FIFO is still there after %s", hangBound)
 	}
 }
 
-// A deadline reaches git's whole process tree, and Wait stops with it: a
-// remote helper that outlives git holds the output pipe, and neither the
-// helper nor Wait may outlast the caller's timeout (gt-vpj84).
-func TestIntegrationRealGitStopsWhenItsDeadlineEnds(t *testing.T) {
-	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "helper.pid")
-	// The stand-in's child inherits the output pipe, as a remote helper
-	// inherits git's, and the stand-in blocks until something signals it.
-	writeStandInGit(t, dir, `#!/bin/sh
-sleep 300 &
-echo $! > "$GT_STUB_PIDFILE"
-wait
-`)
-	t.Setenv("GT_STUB_PIDFILE", pidFile)
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+// stillHeld fails the test when everything holding the FIFO is already gone.
+func (w aliveWatch) stillHeld(t *testing.T, why string) {
+	t.Helper()
+	select {
+	case <-w.gone:
+		t.Fatalf("every process holding the alive FIFO is gone, but %s", why)
+	default:
+	}
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// setGitWaitDelay sets how long Wait may outlast the deadline for one test.
+func setGitWaitDelay(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := gitWaitDelay
+	gitWaitDelay = d
+	t.Cleanup(func() { gitWaitDelay = old })
+}
 
+// runUntilCancelled starts g.run in the background and returns the channel its
+// error arrives on.
+func runUntilCancelled(ctx context.Context, dir string) <-chan error {
 	done := make(chan error, 1)
 	go func() {
 		_, err := (&gitExec{dir: dir}).run(ctx, "fetch", "origin", "main")
 		done <- err
 	}()
+	return done
+}
 
-	helper := waitForHelper(t, pidFile)
+// awaitRun waits for a run to return and gives its error.
+func awaitRun(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(hangBound):
+		t.Fatalf("run did not return within %s of the deadline", hangBound)
+	}
+	return nil
+}
+
+// A deadline reaches git's whole process tree, and Wait stops with it: a
+// remote helper that outlives git holds the output pipe, and neither the
+// helper nor Wait may outlast the caller's deadline (gt-vpj84). gitWaitDelay
+// is an hour here, so a kill that missed the helper leaves Wait waiting and the
+// test reports the hang; the backstop cannot rescue it.
+func TestIntegrationRealGitStopsWhenItsDeadlineEnds(t *testing.T) {
+	dir := t.TempDir()
+	w := watchAlive(t, filepath.Join(dir, "alive.fifo"))
+	// The stand-in's child inherits the output pipe and the FIFO, as a remote
+	// helper inherits git's, and the stand-in blocks in wait until killed.
+	writeStandInGit(t, dir, `#!/bin/sh
+exec 3>"$GT_STUB_FIFO"
+sleep 300 &
+echo $! >&3
+wait
+`)
+	t.Setenv("GT_STUB_FIFO", filepath.Join(dir, "alive.fifo"))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	setGitWaitDelay(t, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runUntilCancelled(ctx, dir)
+
+	helper := w.announced(t)
 	t.Cleanup(func() { _ = syscall.Kill(helper, syscall.SIGKILL) })
 
-	started := time.Now()
 	cancel()
 
-	var err error
-	select {
-	case err = <-done:
-	case <-time.After(2 * gitWaitDelay):
-		t.Fatalf("run did not return within %s of the deadline", 2*gitWaitDelay)
-	}
-	if elapsed := time.Since(started); elapsed >= gitWaitDelay {
-		t.Errorf("run returned %s after the deadline, past gitWaitDelay %s: Wait outlived the kill", elapsed, gitWaitDelay)
-	}
+	err := awaitRun(t, done)
 	if err == nil {
 		t.Fatal("run = nil error, want the ended deadline")
 	}
@@ -316,52 +397,50 @@ wait
 	if want := "git fetch origin main"; !strings.Contains(err.Error(), want) {
 		t.Errorf("run error = %q, want it to name %q", err, want)
 	}
-	waitForGone(t, helper)
+	w.awaitGone(t)
 }
 
 // WaitDelay bounds Wait for a helper the process-group kill cannot reach: a
 // helper that left the group holds the output pipe, so only the delay ends the
-// wait (gt-vpj84).
+// wait (gt-vpj84). The delay is short here and nothing asserts how long Wait
+// took: without it Wait stays until the helper dies, 300 seconds on, and the
+// test reports the hang.
 func TestIntegrationRealGitWaitDoesNotOutliveItsDelay(t *testing.T) {
 	dir := t.TempDir()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
+	fifo := filepath.Join(dir, "alive.fifo")
+	w := watchAlive(t, fifo)
 	writeStandInGit(t, dir, "#!/bin/sh\nexec '"+self+"'\n")
-	pidFile := filepath.Join(dir, "helper.pid")
 	t.Setenv(standInEnv, "1")
-	t.Setenv(standInHelperPIDEnv, pidFile)
+	t.Setenv(aliveFIFOEnv, fifo)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	setGitWaitDelay(t, 50*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	done := runUntilCancelled(ctx, dir)
 
-	done := make(chan error, 1)
-	go func() {
-		_, err := (&gitExec{dir: dir}).run(ctx, "fetch", "origin", "main")
-		done <- err
-	}()
-
-	helper := waitForHelper(t, pidFile)
+	helper := w.announced(t)
 	t.Cleanup(func() {
 		_ = syscall.Kill(helper, syscall.SIGKILL)
-		waitForGone(t, helper)
+		w.awaitGone(t)
 	})
 
 	cancel()
 
-	select {
-	case err = <-done:
-	case <-time.After(2 * gitWaitDelay):
-		t.Fatalf("run did not return within %s of the deadline: Wait outlived WaitDelay", 2*gitWaitDelay)
-	}
+	err = awaitRun(t, done)
 	if err == nil {
 		t.Fatal("run = nil error, want the ended deadline")
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("run error = %q, want it to wrap context.Canceled", err)
 	}
+	// The premise of the test: the helper left the group, so the kill did not
+	// reach it and only the delay ended Wait.
+	w.stillHeld(t, "the helper was meant to outlive the kill")
 }
 
 // realGit turns git's terminal prompt off, so a private remote fails at once
