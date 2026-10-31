@@ -178,6 +178,10 @@ func trackerConfigured(townRoot string) bool {
 // readyzTracker is the tracker the handshake asks: its /readyz, which answers
 // without a token. The start gate's probe in internal/cmd reads the same
 // answer; doctor cannot import that package, so the read is repeated here.
+// It hand-parses the answer rather than calling tracker/client.Readyz: the
+// probe is token-less by design (the beads-binary check must pass before any
+// seat holds a credential), and client.New refuses an empty token, so the
+// client cannot make this read. The duplication is accepted.
 type readyzTracker struct {
 	url    string
 	client *http.Client
