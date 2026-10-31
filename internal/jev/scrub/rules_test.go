@@ -181,6 +181,26 @@ func ruleCases() []ruleCase {
 			want: "API_TOKEN=[REDACTED:assignment]", count: 1,
 		},
 		{
+			name: "url-userinfo marker mid-value", rule: RuleAssignment,
+			in:   "password=postgres://[REDACTED:url-userinfo]@host/db?x=hunter2",
+			want: "password=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "jwt marker mid-value", rule: RuleAssignment,
+			in:   "token=pre-[REDACTED:jwt]-tail",
+			want: "token=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "marker mid-value stops at the space", rule: RuleAssignment,
+			in:   "token=pre-[REDACTED:jwt]-tail next=kept",
+			want: "token=[REDACTED:assignment] next=kept", count: 1,
+		},
+		{
+			name: "bare marker keeps its earlier marker", rule: RuleAssignment,
+			in:   "token=[REDACTED:jwt]",
+			want: "token=[REDACTED:jwt]",
+		},
+		{
 			name: "fused suffix, one word", rule: RuleAssignment,
 			in:   "GITHUBTOKEN=abc123def456",
 			want: "GITHUBTOKEN=[REDACTED:assignment]", count: 1,
@@ -709,6 +729,34 @@ func TestScrubDefaultOneMarkerPerValue(t *testing.T) {
 			}
 			if n := report.Count(RuleAssignment); n != 0 {
 				t.Errorf("report counts %q %d times, want 0: the value was already a marker", RuleAssignment, n)
+			}
+		})
+	}
+}
+
+// TestScrubDefaultMarkerMidValue checks a value that holds an earlier rule's
+// marker in the middle: no byte of the value's tail may survive, and scrubbing
+// the output again must return it unchanged.
+func TestScrubDefaultMarkerMidValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, in, want string }{
+		{"url-userinfo probe", "password=postgres://u:pw@host/db?x=hunter2", "password=[REDACTED:assignment]"},
+		{"jwt mid-value", "password=pre-" + syntheticJWT + "-tail", "password=[REDACTED:assignment]"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, _ := Default().Scrub(c.in)
+			if got != c.want {
+				t.Errorf("Scrub(%q) = %q, want %q", c.in, got, c.want)
+			}
+			again, report := Default().Scrub(got)
+			if again != got {
+				t.Errorf("second Scrub(%q) = %q, want it unchanged", got, again)
+			}
+			if n := report.Count(RuleAssignment); n != 0 {
+				t.Errorf("report counts %q %d times on the second pass, want 0", RuleAssignment, n)
 			}
 		})
 	}
