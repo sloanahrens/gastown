@@ -526,12 +526,59 @@ func childSpecs(issues []*beads.Issue) []specdispatch.Child {
 	return out
 }
 
+// specChildrenRead is the children read of one rig's candidates: one ChildrenOf
+// for the ids, then one ShowMultiple for the ids ChildrenOf left out.
+// ChildrenOf drops a childless parent (beads.parseChildrenMapJSON), so an id it
+// leaves out is either childless or unresolved; ShowMultiple tells them apart,
+// since it returns exactly the ids that exist. A childless id that exists is
+// keyed with an empty list, and an id neither read answers has no key.
+func specChildrenRead(c beads.Client, ids []string) (map[string][]*beads.Issue, error) {
+	kids, err := c.ChildrenOf(ids...)
+	if err != nil {
+		return nil, err
+	}
+	if kids == nil {
+		kids = map[string][]*beads.Issue{}
+	}
+	var absent []string
+	for _, id := range ids {
+		if _, ok := kids[id]; !ok {
+			absent = append(absent, id)
+		}
+	}
+	if len(absent) == 0 {
+		return kids, nil
+	}
+	exist, err := c.ShowMultiple(absent)
+	if err != nil {
+		return nil, err
+	}
+	for id := range exist {
+		kids[id] = []*beads.Issue{}
+	}
+	return kids, nil
+}
+
+// specChildrenReader is the default children read of specCandidateChildren: the
+// rig's database at dir, read through stores. The tick passes the zero value,
+// which opens bd; a test passes a store that counts its reads.
+func specChildrenReader(stores slingStores) func(dir string, ids []string) (map[string][]*beads.Issue, error) {
+	return func(dir string, ids []string) (map[string][]*beads.Issue, error) {
+		return specChildrenRead(stores.pinnedAt(dir), ids)
+	}
+}
+
 // specCandidateChildren is the tick's children read for every candidate of a
 // board read: one bd view per rig the candidates live in, answered per bead,
 // with a per-bead fallback when the grouped read fails so one unreadable bead
 // does not cost the whole rig its children (gt-km9jt). The children are read
 // fresh every tick: a child's change does not move its parent's row, so a
 // remembered child set would hide a closure from the container hold.
+//
+// The default read keeps the childless parents a resolved answer names (see
+// specChildrenRead), so only an id with no key is read alone. Almost every
+// candidate is childless, and a read that drops those would cost each of them a
+// second bd call (gt-4u2gt).
 func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCandidate, read func(dir string, ids []string) (map[string][]*beads.Issue, error)) func(beadID string) ([]specdispatch.Child, error) {
 	byDir := map[string][]string{}
 	for _, c := range cands {
@@ -539,9 +586,7 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 		byDir[dir] = append(byDir[dir], c.Spec.ID)
 	}
 	if read == nil {
-		read = func(dir string, ids []string) (map[string][]*beads.Issue, error) {
-			return slingStores{}.pinnedAt(dir).ChildrenOf(ids...)
-		}
+		read = specChildrenReader(slingStores{})
 	}
 	var mu sync.Mutex
 	kids := map[string][]specdispatch.Child{}
@@ -562,7 +607,11 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 			if err != nil {
 				// One parent the grouped read could not answer fails the whole
 				// read, so each bead is read alone: the rest still get their
-				// children and only the unreadable bead reports.
+				// children and only the unreadable bead reports. With the default
+				// read each alone read is two bd calls, so a failed rig costs
+				// about two calls per candidate. A failure is rare, and the
+				// per-bead read keeps one unreadable bead from failing the rest
+				// (gt-4u2gt).
 				for _, id := range ids {
 					reads.call()
 					single, readErr := read(dir, []string{id})
@@ -577,9 +626,9 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 				kids[id] = childSpecs(is)
 			}
 			if err == nil {
-				// ChildrenOf drops a childless parent from its answer
-				// (beads.parseChildrenMapJSON), so a parent missing from the
-				// grouped read is either childless or was left out. It is read
+				// The grouped read keys a childless parent that exists with an
+				// empty list (specChildrenRead), so a parent missing from a
+				// successful answer is one bd did not resolve. It is read
 				// alone: a read of the one parent that succeeds and still has no
 				// entry for it means bd has no children for it, and a failed
 				// read is that bead's error. Reading the grouped absence as "no
