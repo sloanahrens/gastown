@@ -43,22 +43,30 @@ Run it from your own clone:
 }
 
 func runCrewFresh(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
+	return crewFresh(cmd.OutOrStdout(), os.Getwd, workspace.FindFromCwdOrError, crewFreshRun)
+}
+
+// crewFresh runs the freshness check for the clone that holds the caller's
+// directory and writes the report's one line. The lookups and the runner are
+// parameters so a test drives every branch without a process.
+//
+// Run's error is returned, so a clone that could not be read, or whose
+// fast-forward failed, is not reported as a clean one; a failed fetch arrives
+// as a message with no error, which is why it still exits 0.
+func crewFresh(
+	out io.Writer,
+	getwd func() (string, error),
+	findTownRoot func() (string, error),
+	run func(string) (crewfresh.Report, error),
+) error {
+	cwd, err := getwd()
 	if err != nil {
 		return fmt.Errorf("read the current directory: %w", err)
 	}
-	townRoot, err := workspace.FindFromCwdOrError()
+	townRoot, err := findTownRoot()
 	if err != nil {
 		return fmt.Errorf("find the town root: %w", err)
 	}
-	return crewFreshAt(cmd.OutOrStdout(), cwd, townRoot, crewFreshRun)
-}
-
-// crewFreshAt runs the freshness check for the clone that holds cwd and writes
-// the report's one line. Run's error is returned, so a clone that could not be
-// read, or whose fast-forward failed, is not reported as a clean one; a failed
-// fetch arrives as a message with no error, which is why it still exits 0.
-func crewFreshAt(out io.Writer, cwd, townRoot string, run func(string) (crewfresh.Report, error)) error {
 	root, err := crewCloneRoot(cwd, townRoot)
 	if err != nil {
 		return err
@@ -89,16 +97,16 @@ func crewCloneRoot(cwd, townRoot string) (string, error) {
 	}
 
 	cleanTown := filepath.Clean(townRoot)
-	rel, err := filepath.Rel(cleanTown, filepath.Clean(cwd))
-	if err != nil {
-		return "", fmt.Errorf("place %q under the town root: %w", cwd, err)
+	prefix := cleanTown
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
 	}
-
-	// The clone is <town>/<rig>/crew/<dir>, and anything below <dir> belongs to
-	// it. For a path outside the town, filepath.Rel answers one starting with
-	// "..", which the first part refuses.
+	rel, under := strings.CutPrefix(filepath.Clean(cwd), prefix)
+	// A clone is <town>/<rig>/crew/<dir>, and anything below <dir> belongs to
+	// it. The town root itself, a sibling whose name merely starts with the
+	// town's, and every path outside all fail the cut.
 	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) < 3 || parts[0] == "." || parts[0] == ".." || parts[1] != "crew" || parts[2] == "" {
+	if !under || len(parts) < 3 || parts[1] != "crew" || parts[2] == "" {
 		return "", fmt.Errorf("%q is not a crew clone under %s", cwd, cleanTown)
 	}
 	return filepath.Join(cleanTown, parts[0], "crew", parts[2]), nil

@@ -83,6 +83,18 @@ func TestCrewCloneRoot(t *testing.T) {
 			cwd:     filepath.Join(town, "gastown", "crew", "dunlin"),
 			wantErr: true,
 		},
+		{
+			name:    "a sibling whose name starts with the town's",
+			cwd:     town + "foo/gastown/crew/dunlin",
+			wantErr: true,
+		},
+		{
+			// Without the containment cut, this rootless path splits into
+			// ["" "crew" "dunlin" "x"], which passes the shape check alone.
+			name:    "a path outside the town whose first directory is named crew",
+			cwd:     filepath.Join(string(filepath.Separator), "crew", "dunlin", "x"),
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -109,6 +121,12 @@ func TestCrewCloneRoot(t *testing.T) {
 	}
 }
 
+// crewFreshLookups returns the two lookups crewFresh takes, answering with the
+// given paths.
+func crewFreshLookups(cwd, townRoot string) (func() (string, error), func() (string, error)) {
+	return func() (string, error) { return cwd, nil }, func() (string, error) { return townRoot, nil }
+}
+
 // TestCrewFreshPrintsTheReportAndExitsZeroOnFetchFailure drives the command's
 // own path with a fake runner: the fetch-failed line reaches the output and
 // the command still succeeds, because a failed fetch informs and never blocks
@@ -125,8 +143,9 @@ func TestCrewFreshPrintsTheReportAndExitsZeroOnFetchFailure(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := crewFreshAt(&out, cwd, town, run); err != nil {
-		t.Fatalf("crewFreshAt: %v, want nil for a failed fetch", err)
+	getwd, findTownRoot := crewFreshLookups(cwd, town)
+	if err := crewFresh(&out, getwd, findTownRoot, run); err != nil {
+		t.Fatalf("crewFresh: %v, want nil for a failed fetch", err)
 	}
 	if gotRoot != cwd {
 		t.Errorf("runner acted on %q, want the clone %q", gotRoot, cwd)
@@ -149,11 +168,64 @@ func TestCrewFreshRefusesOutsideACrewClone(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := crewFreshAt(&out, cwd, town, run); err == nil {
-		t.Fatal("crewFreshAt = nil, want an error for mayor/rig")
+	getwd, findTownRoot := crewFreshLookups(cwd, town)
+	if err := crewFresh(&out, getwd, findTownRoot, run); err == nil {
+		t.Fatal("crewFresh = nil, want an error for mayor/rig")
 	}
 	if out.Len() != 0 {
 		t.Errorf("output = %q, want nothing written", out.String())
+	}
+}
+
+// TestCrewFreshReturnsLookupErrors keeps a directory or town root that cannot
+// be read from passing as a clean clone, and stops the runner from running on
+// an unresolved path.
+func TestCrewFreshReturnsLookupErrors(t *testing.T) {
+	t.Parallel()
+	town := filepath.Join(string(filepath.Separator), "town")
+	cwd := filepath.Join(town, "gastown", "crew", "dunlin")
+	boom := errors.New("boom")
+
+	cases := []struct {
+		name         string
+		getwd        func() (string, error)
+		findTownRoot func() (string, error)
+		wantInError  string
+	}{
+		{
+			name:         "the current directory cannot be read",
+			getwd:        func() (string, error) { return "", boom },
+			findTownRoot: func() (string, error) { return town, nil },
+			wantInError:  "read the current directory",
+		},
+		{
+			name:         "the town root cannot be found",
+			getwd:        func() (string, error) { return cwd, nil },
+			findTownRoot: func() (string, error) { return "", boom },
+			wantInError:  "find the town root",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			run := func(string) (crewfresh.Report, error) {
+				t.Error("runner called without a resolved clone")
+				return crewfresh.Report{}, nil
+			}
+
+			var out bytes.Buffer
+			err := crewFresh(&out, tc.getwd, tc.findTownRoot, run)
+			if !errors.Is(err, boom) {
+				t.Fatalf("crewFresh error = %v, want %v", err, boom)
+			}
+			if !strings.Contains(err.Error(), tc.wantInError) {
+				t.Errorf("crewFresh error = %q, want it to name %q", err, tc.wantInError)
+			}
+			if out.Len() != 0 {
+				t.Errorf("output = %q, want nothing written", out.String())
+			}
+		})
 	}
 }
 
@@ -191,9 +263,10 @@ func TestCrewFreshReturnsRunErrors(t *testing.T) {
 			}
 
 			var out bytes.Buffer
-			err := crewFreshAt(&out, cwd, town, run)
+			getwd, findTownRoot := crewFreshLookups(cwd, town)
+			err := crewFresh(&out, getwd, findTownRoot, run)
 			if !errors.Is(err, tc.runErr) {
-				t.Fatalf("crewFreshAt error = %v, want %v", err, tc.runErr)
+				t.Fatalf("crewFresh error = %v, want %v", err, tc.runErr)
 			}
 			if got := strings.TrimSpace(out.String()); got != tc.wantOutput {
 				t.Errorf("output = %q, want %q", got, tc.wantOutput)
