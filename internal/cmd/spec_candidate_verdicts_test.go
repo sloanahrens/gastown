@@ -424,6 +424,33 @@ func TestSpecCandidateRefusalSkipsTheDetailsRead(t *testing.T) {
 	}
 }
 
+// A refused candidate never reaches the container hold, so an open child under
+// it holds nothing: the cycle skips it at the eligibility check, and its
+// children are not asked for (specCandidateChildren leaves it unread). The
+// refusal is named on every tick, not a container hold (gt-qcl61).
+func TestSpecCandidateRefusedCandidateNeverReachesTheChildrenHold(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 0)
+	id := "gt-held"
+	v.extra = []specCandidate{{Spec: cleanSpec(id, 2, "2026-09-29T10:00:00Z"), Rig: "gastown"}}
+	v.rows[id] = "2026-09-30T00:00:00Z"
+	v.db.Seed(beads.Issue{ID: id, Design: "do not redispatch"})
+	v.kids[id] = []*beads.Issue{{ID: id + ".1", Status: "open"}}
+
+	first := runSpecDispatchCycle(v.env)
+	if len(first.Skipped) != 1 || !strings.Contains(first.Skipped[0].Line, specdispatch.SkipNotEligible) {
+		t.Fatalf("first tick skipped %+v, want the hold's refusal", first.Skipped)
+	}
+
+	r := runSpecDispatchCycle(v.retown(v.f))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNotEligible) {
+		t.Errorf("the tick after the refusal skipped %+v, want the refusal and not the container hold", r.Skipped)
+	}
+	if len(r.Errors) != 0 {
+		t.Errorf("the tick after the refusal reported errors %v, want none", r.Errors)
+	}
+}
+
 // A child's change is seen by the very next tick: the container hold reads the
 // child set fresh each tick, never from a memory keyed on the parent's row
 // (gt-km9jt).
@@ -769,9 +796,9 @@ func TestSpecCandidateVerdictsReadAnEdgelessRecordAsUnremembered(t *testing.T) {
 	}
 }
 
-// A container whose children read fails is not remembered as childless: the
-// record goes with the read, and the next tick reads the children and holds the
-// container (gt-km9jt).
+// A container whose children read fails is not dispatched on that tick: the
+// read's error is reported, and the next tick reads the children again and holds
+// the container (gt-km9jt).
 func TestSpecCandidateChildrenAFailedReadIsReadAgainNextTick(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, 1)

@@ -1737,7 +1737,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// separate type, so the count is zero for a parent whose only children
 		// are parent-child ones (gt-603wu). The children view is the predicate,
 		// as it is on the peer path, and it is read every tick: the memory
-		// keeps no children (specCandidateChildren).
+		// keeps no children (specCandidateChildren). A refused candidate never
+		// reaches this line, since the eligibility check above skips it, so its
+		// children are left unread on purpose
+		// (TestSpecCandidateRefusedCandidateNeverReachesTheChildrenHold).
 		children, err := env.Children(id)
 		if err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot read children: %v", id, err))
