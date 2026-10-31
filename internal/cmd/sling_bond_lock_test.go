@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,45 @@ import (
 
 	"github.com/steveyegge/gastown/internal/lock"
 )
+
+// bondTestWait bounds each wait the serialization test makes on a bond: one
+// that never comes fails the test at the bound, naming the wait, instead of
+// hanging it. The bound is a context, not time.After, which unit tests may not
+// use.
+const bondTestWait = 10 * time.Second
+
+// awaitBondEvent blocks until ch delivers, or fails the test naming what it
+// waited for when bondTestWait passes.
+func awaitBondEvent(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), bondTestWait)
+	defer cancel()
+	select {
+	case <-ch:
+	case <-ctx.Done():
+		t.Fatalf("%s did not happen within %s", what, bondTestWait)
+	}
+}
+
+// bondLanding is how one bond of the serialization test ended.
+type bondLanding struct {
+	root string
+	err  error
+}
+
+// awaitBondLanding is awaitBondEvent for a bond's result.
+func awaitBondLanding(t *testing.T, ch <-chan bondLanding, what string) bondLanding {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), bondTestWait)
+	defer cancel()
+	select {
+	case l := <-ch:
+		return l
+	case <-ctx.Done():
+		t.Fatalf("%s did not happen within %s", what, bondTestWait)
+	}
+	return bondLanding{}
+}
 
 // bondFakeClock is the clock and sleep a bond's lock wait reads, spent in no
 // real time: every sleep advances it by its pause and records the pause.
@@ -88,6 +128,10 @@ func bondBD(fake *fakeCook, clock *bondFakeClock) formulaBD {
 // The two formulaBD values open the lock file separately, the way two sling
 // processes do: flock admits one holder per open file description, and that
 // is the contention it reports between processes too.
+//
+// Every wait here is bounded: the test's own waits carry bondTestWait, and the
+// two a bond sits on — releaseBond and held — are let go by the test's defers,
+// so a wait that never comes fails the test instead of hanging it.
 func TestBondSerializesAcrossProcesses(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -131,42 +175,45 @@ func TestBondSerializesAcrossProcesses(t *testing.T) {
 		<-held
 	}
 
-	var firstRoot, secondRoot string
-	var firstErr, secondErr error
-	done := make(chan struct{}, 2)
+	firstDone := make(chan bondLanding, 1)
+	secondDone := make(chan bondLanding, 1)
 
 	go func() {
-		defer func() { done <- struct{}{} }()
-		firstRoot, firstErr = bondBD(fake, firstClock).bond(
+		root, err := bondBD(fake, firstClock).bond(
 			"mol-polecat-work", "mol-polecat-work", "gt-first", townRoot, townRoot, []string{"feature=a"})
+		firstDone <- bondLanding{root: root, err: err}
 	}()
-	<-firstInBond
+	awaitBondEvent(t, firstInBond, "the first bond reaching bd")
 
 	go func() {
-		defer func() { done <- struct{}{} }()
-		secondRoot, secondErr = bondBD(fake, secondClock).bond(
+		root, err := bondBD(fake, secondClock).bond(
 			"mol-polecat-work", "mol-polecat-work", "gt-second", townRoot, townRoot, []string{"feature=b"})
+		secondDone <- bondLanding{root: root, err: err}
 	}()
 
 	// Either the second bond waits on the lock — the behaviour — or it reaches
-	// bd while the first is still inside, which is the mutation. Both are
-	// events, so this needs no timer: the first bond cannot finish before
-	// release, so a done here is the second, and it did not wait.
+	// bd while the first is still inside, which is the mutation. The first bond
+	// cannot finish before release, so a landing here is the second, and it did
+	// not wait.
+	ctx, cancel := context.WithTimeout(t.Context(), bondTestWait)
+	defer cancel()
 	select {
 	case <-contended:
-	case <-done:
-		t.Fatal("the second bond never waited for the town lock while the first held it")
+	case l := <-secondDone:
+		t.Fatalf("the second bond never waited for the town lock while the first held it (it landed with %v)", l.err)
+	case <-ctx.Done():
+		t.Fatalf("the second bond neither waited on the town lock nor returned within %s", bondTestWait)
 	}
 	release()
-	<-done // the first bond landed, and its lock went with it
+	first := awaitBondLanding(t, firstDone, "the first bond returning once the test released it")
 	letGo()
-	<-done
+	second := awaitBondLanding(t, secondDone, "the second bond returning once the first let the lock go")
 
-	if firstErr != nil || secondErr != nil {
-		t.Fatalf("bonds: first %v, second %v; want both to land", firstErr, secondErr)
+	if first.err != nil || second.err != nil {
+		t.Fatalf("bonds: first %v, second %v; want both to land", first.err, second.err)
 	}
-	if firstRoot != "gt-wisp-serial" || secondRoot != "gt-wisp-serial" {
-		t.Errorf("roots = %q, %q; want gt-wisp-serial both", firstRoot, secondRoot)
+	if first.root != "gt-wisp-serial" || second.root != "gt-wisp-serial" {
+		t.Errorf("roots = %q, %q; want gt-wisp-serial both", first.root, second.root)
 	}
 	if n := overlaps.Load(); n != 0 {
 		t.Errorf("%d bonds ran while another was in bd, want 0", n)
