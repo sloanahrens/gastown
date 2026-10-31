@@ -941,7 +941,9 @@ const (
 	// the claim directory — and one small file write. The count's bd-backed
 	// half (the seats' agent beads, their assigned work and the landing seats'
 	// work beads) is read before the lock and carried into it
-	// (poolRouter.seatSnapshot, gt-crkhv), so the lock spans no bd read.
+	// (poolRouter.seatSnapshot, gt-crkhv), so the lock spans no bd read. A
+	// picture that cannot be read degrades the count to the live sessions alone
+	// rather than reading it again under the lock (poolRouter.route).
 	poolDecisionLockTimeout = 5 * time.Second
 )
 
@@ -1102,7 +1104,8 @@ type poolSeatDecision struct {
 // What the read costs while the lock is held is the caller's choice, and it is
 // bounded by poolDecisionLockTimeout: a live sling passes snapshotOccupied over
 // a seat picture read before the lock (poolRouter.seatSnapshot), so the bd reads
-// of the whole count happen outside it (gt-crkhv).
+// of the whole count happen outside it (gt-crkhv) — and a picture that could not
+// be read leaves a count with no bd read in it at all (poolRouter.route).
 //
 // A dry run reads the same seats and claims — so it prints the route a real
 // sling would take — but neither cleans up nor claims: a preview must not
@@ -1491,10 +1494,9 @@ func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.
 // occupied is the count the pool decides from, read in full: the live sessions
 // and the seats mid-landing, read through this router's sources and the pool as
 // it is read now. A dry run decides from it — it takes no lock, so splitting the
-// read buys it nothing — and route keeps it for a town with no pool and for a
-// picture it could not take. route passes it to begin, not calling it, because
-// begin runs it under the seat-decision lock, which is where the count has to be
-// taken (gt-8o35b).
+// read buys it nothing — and route keeps it for a town with no pool. A live
+// sling never passes it to begin: begin runs it under the seat-decision lock,
+// and that would put the count's bd reads inside the lock (gt-crkhv).
 func (r *poolRouter) occupied() func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
 		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
@@ -1597,6 +1599,9 @@ func releasedSeatRecorder(disposition polecatDispositionFunc) (polecatDispositio
 // list it on a fresh read, and dropping it would count the seat nowhere while
 // its bead is still hooked (gt-0axfg). A seat the roster released is not
 // carried: the roster read its bead terminal and counts it free.
+//
+// A zero snapshot is the count of a live sling whose picture could not be read:
+// the live sessions alone, with nothing to release or carry (poolRouter.route).
 func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, deadSandbox sandboxSeatDeadFunc, now func() time.Time) func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
 		listed, err := listPolecatSessionsWith(lister(), nil, now())
@@ -1666,16 +1671,20 @@ func (s poolSession) seatKey() string {
 // carried by snapshotOccupied, so the lock covers no bd read (gt-crkhv). The
 // spec dispatcher passes its tick's roster to routeWith instead: the same split,
 // taken one tick earlier.
+//
+// A picture that cannot be read degrades the count to the live sessions alone
+// rather than reading it again under the lock: that count is the cheap half of
+// the same picture (snapshotOccupied over a zero snapshot), and the reason names
+// the failed picture so a degraded route never reads as a counted one.
 func (r *poolRouter) route(requested string, live bool) (agent, reason string, err error) {
 	if !live || r.pool() == nil {
 		return r.routeWith(requested, live, r.occupied())
 	}
-	snapshot, err := r.seatSnapshot()
-	if err != nil {
-		// A picture the decision cannot read is not one to decide from: the
-		// count runs in full under the lock, as it did before the split, and
-		// its failure is its own to report.
-		return r.routeWith(requested, true, r.occupied())
+	snapshot, snapErr := r.seatSnapshot()
+	if snapErr != nil {
+		return r.routeWithNotice(requested, true,
+			snapshotOccupied(poolSeatSnapshot{}, r.sessions, sandboxSeatDeathsFor(r.townRoot), r.now),
+			"pool: cannot read the seat picture ("+snapErr.Error()+"), counting live sessions only")
 	}
 	return r.routeWith(requested, true, snapshotOccupied(snapshot, r.sessions, sandboxSeatDeathsFor(r.townRoot), r.now))
 }
@@ -1683,8 +1692,16 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 // routeWith is route over a given occupancy read. The spec dispatcher passes
 // snapshotOccupied over the roster it already read, so a dispatched sling
 // spends no seat reads of its own; route passes snapshotOccupied over the
-// picture it read before the lock, or the router's full read.
+// picture it read before the lock.
 func (r *poolRouter) routeWith(requested string, live bool, occupied func() ([]poolSession, error)) (agent, reason string, err error) {
+	return r.routeWithNotice(requested, live, occupied, "")
+}
+
+// routeWithNotice is routeWith with a notice of a read the decision could not
+// make. The notice opens the reason, and the refusal message is built from that
+// reason, so a route taken from a degraded count says so wherever its decision
+// is read. An empty notice is routeWith.
+func (r *poolRouter) routeWithNotice(requested string, live bool, occupied func() ([]poolSession, error), notice string) (agent, reason string, err error) {
 	pool := r.pool()
 	if pool == nil {
 		return "", "", nil
@@ -1716,10 +1733,10 @@ func (r *poolRouter) routeWith(requested string, live bool, occupied func() ([]p
 				what = "list sessions"
 			}
 			return fallback,
-				"pool: cannot " + what + " (" + seatErr.Error() + "), using " + named, nil
+				withPoolNotice(notice, "pool: cannot "+what+" ("+seatErr.Error()+"), using "+named), nil
 		}
 		return fallback,
-			"pool: cannot read seat claims (" + seatErr.Error() + "), using " + named, nil
+			withPoolNotice(notice, "pool: cannot read seat claims ("+seatErr.Error()+"), using "+named), nil
 	}
 	agent, reason, refused, raise := choosePoolAgent(pool, requested, sessions, r.now())
 	if live && !refused {
@@ -1728,8 +1745,20 @@ func (r *poolRouter) routeWith(requested string, live bool, occupied func() ([]p
 	if seat.note != "" {
 		reason = fmt.Sprintf("%s [%s]", reason, seat.note)
 	}
+	reason = withPoolNotice(notice, reason)
 	if refused {
 		return agent, reason, &poolBackpressureError{Reason: reason, Raise: raise}
 	}
 	return agent, reason, nil
+}
+
+// withPoolNotice puts a decision's notice in front of its reason.
+func withPoolNotice(notice, reason string) string {
+	if notice == "" {
+		return reason
+	}
+	if reason == "" {
+		return notice
+	}
+	return notice + "; " + reason
 }
