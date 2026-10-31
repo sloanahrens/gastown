@@ -818,6 +818,32 @@ func TestSeatDecisionOverlapsOccupancyReads(t *testing.T) {
 	}
 }
 
+// A town whose pool names no seat has no seat state to read: the preload is the
+// count's own read moved earlier, so it walks where the count walks — nowhere,
+// here — and a sling the pool does not answer spends no bd read on it
+// (gt-crkhv).
+func TestPreloadSeatStateReadsNothingForAPoolWithoutSeats(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "p01")
+
+	reads := 0
+	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return beadsfake.New() })
+	r.pool = func() *config.PolecatPool { return &config.PolecatPool{} }
+	r.sessions = func() sessionLister { return &fakeLister{sessions: map[string]map[string]string{}} }
+	r.disposition = func(string, string) (poolSeatState, error) {
+		reads++
+		return poolSeatState{}, nil
+	}
+	if _, _, err := r.route("", true); err != nil {
+		t.Fatalf("an empty pool decides nothing rather than failing: %v", err)
+	}
+	if reads != 0 {
+		t.Fatalf("a pool with no seat read %d seat states, want none", reads)
+	}
+}
+
 // The occupancy read moved out of the lock; the count and the claim did not move
 // apart (gt-8o35b). Both decisions read the same empty pool before either takes
 // the lock, and the claim the first writes under the lock is what the second

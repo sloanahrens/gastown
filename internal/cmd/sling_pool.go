@@ -1521,7 +1521,10 @@ func (r *poolRouter) occupied() func() ([]poolSession, error) {
 // the lock and answers for it there, so this pass has no result of its own to
 // lose, and its failure costs the wall clock the count would have spent anyway.
 func (r *poolRouter) preloadSeatState() {
-	if r.disposition == nil || r.townRoot == "" {
+	// The same guard the count's reads make (poolDeadHookedSessions and
+	// poolLandingSessions): a town whose pool names no seat has no seat state to
+	// read, and a walk here would be bd reads the count never asked for.
+	if r.disposition == nil || r.townRoot == "" || !poolOwnsSeats(r.pool()) {
 		return
 	}
 	rigs, err := knownRigNames(r.townRoot)
