@@ -138,14 +138,9 @@ func valueAfter(argv []string, i int) string {
 	return ""
 }
 
-// WriteComposeFile replaces path with content in one rename, so a reader of the
-// file sees either the old render or the new one, never a partly written file.
-// The render is written to a temporary file beside path, because a rename is
-// atomic only within one filesystem; its unique name keeps concurrent writers
-// apart. The temporary file is removed unless the rename puts it in place.
-//
-// `gt daemon compose write` renders the live town's file through this too, so
-// every writer of a compose file replaces it the same way.
+// WriteComposeFile replaces path with content in one rename, so a reader sees
+// the old file or the new one, never a partial write. It is exported because
+// `gt daemon compose write` in internal/cmd must share this writer.
 func WriteComposeFile(path string, content []byte) error {
 	return writeComposeFileWith(path, content, createComposeTemp)
 }
@@ -179,6 +174,8 @@ func createComposeTemp(dir, pattern string) (composeTemp, error) {
 // writeComposeFileWith is WriteComposeFile with the temporary file's source
 // injected, so each step's failure can be driven.
 func writeComposeFileWith(path string, content []byte, create func(dir, pattern string) (composeTemp, error)) (err error) {
+	// Beside path, because a rename is atomic only within one filesystem; the
+	// unique name from CreateTemp keeps concurrent writers apart.
 	f, err := create(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
