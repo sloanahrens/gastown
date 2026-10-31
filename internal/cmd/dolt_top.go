@@ -19,17 +19,25 @@ import (
 
 // doltTopProcessListQuery is the one statement the command issues. It is a
 // read of the server's own connection table, so it names no database and
-// writes nothing.
-const doltTopProcessListQuery = "SELECT `USER`, `HOST`, `TIME`, `INFO` FROM information_schema.processlist"
+// writes nothing. Every row carries ID, and CONNECTION_ID() repeats the id of
+// the connection that ran the query: this query is itself in the process list
+// while it runs, so the reader drops the row whose ID equals that value, or the
+// command would rank its own read as the busiest statement.
+const doltTopProcessListQuery = "SELECT `ID`, `USER`, `HOST`, `TIME`, `INFO`, CONNECTION_ID() FROM information_schema.processlist"
 
 // doltTopMinInterval is the shortest gap between two reads. A shorter gap
 // samples the same statements again rather than a busier moment, and a zero
 // or negative one spins the loop against the server being measured.
 const doltTopMinInterval = 100 * time.Millisecond
 
-// doltTopDefaultStatementWidth is the room a statement gets when the output
-// width leaves less: enough to see the shape of a query, never zero.
-const doltTopDefaultStatementWidth = 40
+// doltTopMinStatementWidth is the room the statement column keeps while the
+// user and host columns are cut to fit a narrow output: enough to see the shape
+// of a query. When even that does not fit, each line is cut to the width.
+const doltTopMinStatementWidth = 20
+
+// doltTopMinNameWidth is the narrowest the user and host columns are cut to,
+// the width of their headers.
+const doltTopMinNameWidth = 4
 
 // doltTopLiteralListRE matches a run of placeholders separated by commas. An
 // IN list and a multi-row VALUES list are one shape whatever their length, so
@@ -192,9 +200,11 @@ func isDoltTopHexRune(c rune) bool {
 // server time it spends; the count of reads is what a caller's busy time looks
 // like from outside (gt-tesr3). A read counts once per shape, host and user
 // even when that host runs the shape on several connections, so a row's count
-// is out of the reads taken. Rows report the count, then user, host and
-// statement, so two runs over the same readings print the same order. An idle
-// connection has no statement to rank and is left out.
+// is out of the reads taken. Keyword case does not split a shape: "select 1"
+// and "SELECT 1" group together, and the row prints the spelling seen first.
+// Rows report the count, then user, host and statement, so two runs over the
+// same readings print the same order. An idle connection has no statement to
+// rank and is left out.
 func aggregateSamples(readings [][]doltTopSample) []doltTopRow {
 	type groupKey struct{ user, host, statement string }
 	groups := make(map[groupKey]*doltTopRow)
@@ -206,7 +216,7 @@ func aggregateSamples(readings [][]doltTopSample) []doltTopRow {
 			if stmt == "" {
 				continue
 			}
-			k := groupKey{user: s.User, host: s.Host, statement: stmt}
+			k := groupKey{user: s.User, host: s.Host, statement: strings.ToLower(stmt)}
 			if counted[k] {
 				continue
 			}
@@ -243,9 +253,10 @@ func aggregateSamples(readings [][]doltTopSample) []doltTopRow {
 // renderTop writes the sample window and then rows as a table whose last
 // column ends at width. Each row's SEEN cell says how many of the reads saw
 // it, and EST is that count times the interval, so the table never claims more
-// precision than whole-second sampling gives. A statement too long for the
-// column is cut and marked with an ellipsis, so the ranking stays readable on
-// a narrow terminal.
+// precision than whole-second sampling gives. No line is wider than width: a
+// statement too long for its column is cut and marked with an ellipsis, the
+// host and user columns give up room when the statement would get under
+// doltTopMinStatementWidth, and a line that still does not fit is cut.
 func renderTop(w io.Writer, rows []doltTopRow, width int, samples int, interval time.Duration) error {
 	clean := make([]doltTopRow, len(rows))
 	for i, row := range rows {
@@ -274,27 +285,50 @@ func renderTop(w io.Writer, rows []doltTopRow, width int, samples int, interval 
 			estWidth = n
 		}
 	}
-	statementWidth := width - (userWidth + 2 + hostWidth + 2 + seenWidth + 2 + estWidth + 2)
+	if width < 1 {
+		width = 80
+	}
+	// The five columns are separated by two spaces. The statement takes what is
+	// left; when that is under doltTopMinStatementWidth the host column, then the
+	// user column, give up room down to the width of their headers, and a cell
+	// that no longer fits is cut with an ellipsis.
+	const separators = 8
+	statementWidth := width - (userWidth + hostWidth + seenWidth + estWidth + separators)
+	if statementWidth < doltTopMinStatementWidth {
+		need := doltTopMinStatementWidth - statementWidth
+		cut := min(need, hostWidth-doltTopMinNameWidth)
+		hostWidth -= cut
+		need -= cut
+		cut = min(need, userWidth-doltTopMinNameWidth)
+		userWidth -= cut
+		statementWidth = width - (userWidth + hostWidth + seenWidth + estWidth + separators)
+	}
 	if statementWidth < 1 {
-		statementWidth = doltTopDefaultStatementWidth
+		statementWidth = 1
 	}
 
-	if _, err := fmt.Fprintf(w, "sampled %d times at %s; EST is reads seen x interval\n",
-		samples, interval); err != nil {
+	// Every line is cut to the width as a last step, so a terminal narrower
+	// than the fixed columns still gets lines that fit.
+	writeLine := func(user, host, seen, est, statement string) error {
+		line := fmt.Sprintf("%s  %s  %s  %s  %s",
+			padDoltTopCell(cutToWidth(user, userWidth), userWidth, false),
+			padDoltTopCell(cutToWidth(host, hostWidth), hostWidth, false),
+			padDoltTopCell(seen, seenWidth, true), padDoltTopCell(est, estWidth, true),
+			cutToWidth(statement, statementWidth))
+		_, err := fmt.Fprintln(w, cutToWidth(line, width))
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "%s  %s  %s  %s  %s\n",
-		padDoltTopCell("USER", userWidth, false), padDoltTopCell("HOST", hostWidth, false),
-		padDoltTopCell("SEEN", seenWidth, true), padDoltTopCell("EST", estWidth, true),
-		"STATEMENT"); err != nil {
+
+	if _, err := fmt.Fprintln(w, cutToWidth(fmt.Sprintf("sampled %d times at %s; EST is reads seen x interval",
+		samples, interval), width)); err != nil {
+		return err
+	}
+	if err := writeLine("USER", "HOST", "SEEN", "EST", "STATEMENT"); err != nil {
 		return err
 	}
 	for _, row := range clean {
-		if _, err := fmt.Fprintf(w, "%s  %s  %s  %s  %s\n",
-			padDoltTopCell(row.User, userWidth, false), padDoltTopCell(row.Host, hostWidth, false),
-			padDoltTopCell(seenText(row.Samples, samples), seenWidth, true),
-			padDoltTopCell(estText(row.Samples, interval), estWidth, true),
-			cutToWidth(row.Statement, statementWidth)); err != nil {
+		if err := writeLine(row.User, row.Host,
+			seenText(row.Samples, samples), estText(row.Samples, interval), row.Statement); err != nil {
 			return err
 		}
 	}
@@ -351,7 +385,11 @@ func cutToWidth(s string, width int) string {
 	return string(r[:width-1]) + "…"
 }
 
-// doltTopReader is one snapshot of the server's process list.
+// doltTopReader is one snapshot of the server's process list. ReadProcessList
+// returns every connection the server lists except the reader's own, which is
+// removed here because the query that reads the list is itself running and
+// would rank first. Idle connections come back with an empty Statement and are
+// left out later, by the aggregation. Close releases the connection.
 type doltTopReader interface {
 	ReadProcessList(ctx context.Context) ([]doltTopSample, error)
 	Close() error
@@ -374,8 +412,12 @@ func (r *mysqlTopReader) ReadProcessList(ctx context.Context) ([]doltTopSample, 
 	for rows.Next() {
 		var user, host, info sql.NullString
 		var elapsed sql.NullFloat64
-		if err := rows.Scan(&user, &host, &elapsed, &info); err != nil {
+		var id, self sql.NullInt64
+		if err := rows.Scan(&id, &user, &host, &elapsed, &info, &self); err != nil {
 			return nil, err
+		}
+		if isOwnConnection(id, self) {
+			continue
 		}
 		samples = append(samples, doltTopSample{
 			User:      user.String,
@@ -385,6 +427,13 @@ func (r *mysqlTopReader) ReadProcessList(ctx context.Context) ([]doltTopSample, 
 		})
 	}
 	return samples, rows.Err()
+}
+
+// isOwnConnection reports whether a process-list row belongs to the connection
+// that ran the query. A row whose ID or CONNECTION_ID() the server left NULL
+// is kept: dropping a row it cannot name would hide a real statement.
+func isOwnConnection(id, self sql.NullInt64) bool {
+	return id.Valid && self.Valid && id.Int64 == self.Int64
 }
 
 func (r *mysqlTopReader) Close() error { return r.db.Close() }

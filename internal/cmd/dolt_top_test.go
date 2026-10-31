@@ -228,8 +228,37 @@ func TestDoltTopRenderCutsToWidth(t *testing.T) {
 	}
 }
 
-// A terminal too narrow for the fixed columns still gets a readable statement
-// rather than one cut to nothing.
+// No line is wider than the output, whatever the width: the host and user
+// columns give up room to the statement, and a width under the fixed columns
+// cuts each line. Every width in the table fails if renderTop falls back to a
+// fixed statement width again.
+func TestDoltTopRenderNeverExceedsTheWidth(t *testing.T) {
+	t.Parallel()
+	rows := []doltTopRow{{
+		User:      "a_user_with_a_long_name",
+		Host:      "10.100.200.250:54321",
+		Statement: "SELECT id FROM issues WHERE title LIKE ? ORDER BY updated_at",
+		Samples:   1,
+	}}
+
+	for _, width := range []int{5, 10, 25, 40, 60, 80, 120} {
+		t.Run(fmt.Sprintf("width %d", width), func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			if err := renderTop(&out, rows, width, 1, time.Second); err != nil {
+				t.Fatalf("renderTop: %v", err)
+			}
+			for _, line := range strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n") {
+				if n := len([]rune(line)); n > width {
+					t.Errorf("line is %d runes wide, want at most %d: %q", n, width, line)
+				}
+			}
+		})
+	}
+}
+
+// A width that fits the columns after the host and user are cut still shows
+// the start of the statement, ending in an ellipsis.
 func TestDoltTopRenderAtNarrowWidthKeepsStatement(t *testing.T) {
 	t.Parallel()
 	rows := []doltTopRow{{
@@ -240,21 +269,16 @@ func TestDoltTopRenderAtNarrowWidthKeepsStatement(t *testing.T) {
 	}}
 
 	var out bytes.Buffer
-	if err := renderTop(&out, rows, 10, 1, time.Second); err != nil {
+	if err := renderTop(&out, rows, 40, 1, time.Second); err != nil {
 		t.Fatalf("renderTop: %v", err)
 	}
 
 	line := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")[2]
-	start := strings.Index(line, "  SELECT ")
-	if start < 0 {
-		t.Fatalf("output has no statement column:\n%s", line)
+	if !strings.Contains(line, "SELECT id FROM") {
+		t.Errorf("row %q lost the start of the statement", line)
 	}
-	statement := line[start+2:]
-	if got := len([]rune(statement)); got != doltTopDefaultStatementWidth {
-		t.Errorf("statement is %d runes at a narrow width, want %d: %q", got, doltTopDefaultStatementWidth, statement)
-	}
-	if !strings.HasSuffix(statement, "…") {
-		t.Errorf("cut statement %q has no ellipsis", statement)
+	if !strings.HasSuffix(line, "…") {
+		t.Errorf("cut row %q has no ellipsis", line)
 	}
 }
 
@@ -533,6 +557,10 @@ func TestDoltTopRenderStopsOnARowWriteError(t *testing.T) {
 // The SQL driver registry is global and keeps a driver forever, so the fake
 // registers one driver for the whole test binary and finds its server by DSN.
 // A registration per test would pile drivers up for the life of the process.
+// The package-level state is safe for parallel tests and for production code:
+// the driver is registered once under its own name, each test adds a server
+// under a DSN no other test shares and removes it in t.Cleanup, and no
+// production variable is swapped.
 const topFakeDriverName = "gt_dolt_top_fake"
 
 var (
@@ -619,7 +647,7 @@ func (c *topFakeConn) QueryContext(_ context.Context, query string, _ []driver.N
 	}
 	columns := c.server.columns
 	if columns == nil {
-		columns = []string{"USER", "HOST", "TIME", "INFO"}
+		columns = []string{"ID", "USER", "HOST", "TIME", "INFO", "CONNECTION_ID()"}
 	}
 	return &topFakeRows{columns: columns, rows: c.server.rows}, nil
 }
@@ -642,11 +670,20 @@ func (r *topFakeRows) Next(dest []driver.Value) error {
 	return nil
 }
 
+// topOwnQuery is what the sampler's own row carries in INFO: the command's own
+// read, which is running while the server answers it.
+const topOwnQuery = "SELECT `ID`, `USER`, `HOST`, `TIME`, `INFO`, CONNECTION_ID() FROM information_schema.processlist"
+
+// topSelfID is the connection id the fake server reports as the reader's own.
+const topSelfID = int64(99)
+
 func TestDoltTopReadsTheProcessList(t *testing.T) {
 	t.Parallel()
 	server := &topFakeServer{rows: [][]driver.Value{
-		{"root", "127.0.0.1:54321", int64(2), "SELECT 1"},
-		{"root", "127.0.0.1:54322", nil, ""},
+		{int64(10), "root", "127.0.0.1:54321", int64(2), "SELECT 1", topSelfID},
+		{int64(11), "root", "127.0.0.1:54322", nil, "", topSelfID},
+		// The sampler's own connection: its row is dropped.
+		{topSelfID, "root", "127.0.0.1:54399", int64(0), topOwnQuery, topSelfID},
 	}}
 
 	got, err := openFakeTopReader(t, server).ReadProcessList(context.Background())
@@ -675,7 +712,7 @@ func TestDoltTopReportsProcessListFailures(t *testing.T) {
 		server *topFakeServer
 	}{
 		{"the query fails", &topFakeServer{queryErr: errTopRead}},
-		// Three columns cannot fill the reader's four destinations.
+		// Three columns cannot fill the reader's six destinations.
 		{"a row does not scan", &topFakeServer{
 			columns: []string{"USER", "HOST", "TIME"},
 			rows:    [][]driver.Value{{"root", "a:1", int64(1)}},
@@ -750,7 +787,7 @@ func TestDoltTopOpensTheServer(t *testing.T) {
 func TestDoltTopOpensAWorkingServer(t *testing.T) {
 	t.Parallel()
 	server := &topFakeServer{rows: [][]driver.Value{
-		{"root", "127.0.0.1:54321", int64(2), "SELECT 1"},
+		{int64(10), "root", "127.0.0.1:54321", int64(2), "SELECT 1", topSelfID},
 	}}
 	opener := doltTopOpener{
 		findTownRoot: func() (string, error) { return t.TempDir(), nil },
@@ -777,6 +814,80 @@ func TestDoltTopOpensAWorkingServer(t *testing.T) {
 	}
 	if !server.closed {
 		t.Error("Close did not close the server connection")
+	}
+}
+
+// The command's own read is a running statement while the server answers it,
+// so the process list always holds it. It must never rank: through the real
+// reader and the sampling loop, a server that lists the sampler's own row on
+// every read yields a table without that statement. Dropping the filter in
+// isOwnConnection puts the sampler at the top with 3/3 and fails this test.
+func TestDoltTopOwnReadNeverRanks(t *testing.T) {
+	t.Parallel()
+	server := &topFakeServer{rows: [][]driver.Value{
+		{int64(10), "root", "127.0.0.1:54321", int64(0), "SELECT * FROM issues WHERE id = 7", topSelfID},
+		{topSelfID, "root", "127.0.0.1:54399", int64(0), topOwnQuery, topSelfID},
+	}}
+	var out bytes.Buffer
+	var sleeps []time.Duration
+	deps := topDeps(&out, openFakeTopReader(t, server), &sleeps)
+
+	if err := runDoltTop(context.Background(), deps, 3, time.Second, 10); err != nil {
+		t.Fatalf("runDoltTop: %v", err)
+	}
+
+	// The statement column is cut to the width, so the check is on the
+	// sampler's host and on the row count, which a cut cannot hide.
+	got := out.String()
+	if strings.Contains(got, "127.0.0.1:54399") {
+		t.Errorf("the sampler's own connection was ranked:\n%s", got)
+	}
+	if lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n"); len(lines) != 3 {
+		t.Errorf("table has %d lines, want the note, the header and one statement:\n%s", len(lines), got)
+	}
+	if !strings.Contains(got, "SELECT * FROM issues WHERE id = ?") || !strings.Contains(got, "3/3") {
+		t.Errorf("the real statement is missing from the table:\n%s", got)
+	}
+}
+
+// When the server does not name a row's connection, or its own, the row is
+// kept: dropping a row the reader cannot identify would hide a real statement.
+func TestDoltTopKeepsRowsItCannotIdentify(t *testing.T) {
+	t.Parallel()
+	server := &topFakeServer{rows: [][]driver.Value{
+		{nil, "root", "a:1", int64(0), "SELECT 1", topSelfID},
+		{int64(12), "root", "a:2", int64(0), "SELECT 2", nil},
+	}}
+
+	got, err := openFakeTopReader(t, server).ReadProcessList(context.Background())
+	if err != nil {
+		t.Fatalf("ReadProcessList: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ReadProcessList returned %d rows, want both kept: %+v", len(got), got)
+	}
+}
+
+// Keyword case does not make a new shape: "select" and "SELECT" are one row,
+// counted once per read, and the row prints the spelling seen first.
+func TestDoltTopAggregateFoldsKeywordCase(t *testing.T) {
+	t.Parallel()
+	readings := [][]doltTopSample{
+		{{User: "root", Host: "a:1", Statement: "SELECT id FROM issues WHERE id = 1"}},
+		{{User: "root", Host: "a:1", Statement: "select id from issues where id = 2"}},
+		{{User: "root", Host: "a:1", Statement: "Select id From issues Where id = 3"}},
+	}
+
+	rows := aggregateSamples(readings)
+
+	if len(rows) != 1 {
+		t.Fatalf("aggregateSamples returned %d rows, want one shape: %+v", len(rows), rows)
+	}
+	if rows[0].Samples != 3 {
+		t.Errorf("the shape was seen in %d reads, want 3", rows[0].Samples)
+	}
+	if want := "SELECT id FROM issues WHERE id = ?"; rows[0].Statement != want {
+		t.Errorf("row prints %q, want the first spelling %q", rows[0].Statement, want)
 	}
 }
 
