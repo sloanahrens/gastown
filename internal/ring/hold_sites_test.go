@@ -18,6 +18,8 @@ var holdSites = map[string]bool{
 	"dispatch/hold.go":         true,
 	"supervisor/supervisor.go": true,
 	"cmd/rig_helpers.go":       true,
+	// The daemon's standby check: heartbeat, tier sweep and gc read it (gt-6mlik.6).
+	"daemon/standby.go": true,
 }
 
 // siteRingSelectors are the ring package names a site may use: Hold, the key
