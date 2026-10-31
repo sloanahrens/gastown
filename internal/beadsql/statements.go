@@ -427,11 +427,11 @@ func JournalTail(since int64, limit int) Query {
 }
 
 // ExternalMoleculesAttachedTo reads the open molecule wisps that block, or are
-// parented under, beadID through an external:<rig>:<id> target. It stays for
-// bd-backed rigs: bd's dep list --direction=up returns only the dependents
-// whose target is the local id, so on bd this is the one read that finds an
-// external-target bond. The tracker answers external targets through DepListUp
-// (gt-etvxc), so a tracker store never runs this statement.
+// parented under, beadID through an external:<rig>:<id> target. Only a
+// bd-backed store runs it: nothing shows bd's dep list --direction=up returns
+// an external-target dependent, so sling keeps this read instead of trusting
+// the seam there (gt-ceunz). The tracker answers external targets through
+// DepListUp (gt-etvxc), so a tracker store never runs this statement.
 func ExternalMoleculesAttachedTo(beadID string) Query {
 	id := quote(beadID)
 	return declared(`SELECT DISTINCT wisp_dependencies.issue_id FROM wisp_dependencies JOIN wisps ON wisps.id = wisp_dependencies.issue_id WHERE wisps.issue_type = 'molecule' AND wisps.status NOT IN ('closed', 'tombstone') AND wisp_dependencies.type IN ('blocks', 'conditional-blocks', 'parent-child') AND (wisp_dependencies.depends_on_external = ` + id + ` OR depends_on_external LIKE ` + quote(externalSuffixPattern(beadID)) + ` ESCAPE '!')`)
