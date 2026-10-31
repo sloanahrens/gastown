@@ -141,7 +141,7 @@ the stale-binary warning on stderr when the `gt` is not at the tip of `main`
 failure. Expected in it,
 by the names of the rendered golden `internal/templates/testdata/daemon-compose-scratch.golden.yml`:
 the three services `daemon`, `scratch-dind` and `scratch-dolt`, the container
-name `gt-scratch-daemon-1`, the command `["--scratch-town"]`, a `scratch-dolt`
+name `gt-scratch-daemon-1`, the command `["--scratch-town", "--dolt-host", "scratch-dolt"]`, a `scratch-dolt`
 service with no published ports, and a bind mount of `<scratch-root>` and
 nothing of the live town.
 
