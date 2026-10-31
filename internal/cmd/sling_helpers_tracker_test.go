@@ -53,9 +53,14 @@ func (tr trackerRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // TestMoleculeDepsOnATrackerStoreReadsEveryBondThroughDepListUp: the tracker
-// answers a bead's dependents, external-target ones included, through
-// DepListUp, so sling reads every bond through the seam, runs no SQL, and
-// skips nothing (gt-etvxc). The tracks relation is not a bond.
+// answers a bead's dependents through DepListUp and offers no SQL, so sling
+// reads every bond through the seam and skips none of them (gt-etvxc). The
+// tracks relation is not a bond.
+//
+// A dependent the tracker matched through an external:<rig>:<id> target comes
+// back in this same Dependents answer under its own id, so a fixture here
+// cannot carry the edge; the match is the store's, pinned by the contract case
+// depsExternalDependents (tracker/contract/cases_deps.go).
 func TestMoleculeDepsOnATrackerStoreReadsEveryBondThroughDepListUp(t *testing.T) {
 	t.Parallel()
 	tc, err := client.New(client.Config{
@@ -66,12 +71,12 @@ func TestMoleculeDepsOnATrackerStoreReadsEveryBondThroughDepListUp(t *testing.T)
 		HTTP: &http.Client{Transport: trackerRoundTrip{issues: map[string]api.Issue{
 			"gt-work": {ID: "gt-work", Title: "work", Status: "open", Type: "task", Dependents: []api.IssueDep{
 				{ID: "gt-wisp-live", Title: "live", Status: "open", DependencyType: "blocks"},
-				{ID: "gt-wisp-ext", Title: "ext", Status: "open", DependencyType: "blocks"},
+				{ID: "gt-wisp-other", Title: "other", Status: "open", DependencyType: "blocks"},
 				{ID: "gt-wisp-done", Title: "done", Status: "closed", DependencyType: "parent-child"},
 				{ID: "gt-wisp-track", Title: "track", Status: "open", DependencyType: "tracks"},
 			}},
 			"gt-wisp-live":  {ID: "gt-wisp-live", Title: "live", Status: "open", Type: "molecule", Ephemeral: true},
-			"gt-wisp-ext":   {ID: "gt-wisp-ext", Title: "ext", Status: "open", Type: "molecule", Ephemeral: true},
+			"gt-wisp-other": {ID: "gt-wisp-other", Title: "other", Status: "open", Type: "molecule", Ephemeral: true},
 			"gt-wisp-done":  {ID: "gt-wisp-done", Title: "done", Status: "closed", Type: "molecule", Ephemeral: true},
 			"gt-wisp-track": {ID: "gt-wisp-track", Title: "track", Status: "open", Type: "molecule", Ephemeral: true},
 		}}},
@@ -89,7 +94,7 @@ func TestMoleculeDepsOnATrackerStoreReadsEveryBondThroughDepListUp(t *testing.T)
 	if err != nil {
 		t.Fatalf("moleculeDeps: %v", err)
 	}
-	if want := []string{"gt-wisp-live", "gt-wisp-ext"}; !slices.Equal(got, want) {
+	if want := []string{"gt-wisp-live", "gt-wisp-other"}; !slices.Equal(got, want) {
 		t.Errorf("moleculeDeps() = %v, want every open molecule bond %v", got, want)
 	}
 }
