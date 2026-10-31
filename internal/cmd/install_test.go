@@ -703,6 +703,122 @@ func TestRunInstallRefusesADoltHostThatNamesNoRemote(t *testing.T) {
 	}
 }
 
+// A local install is this machine's Dolt, so the remote host a town.json still
+// names is dropped: bd would otherwise dial that host on the local port. The
+// port is what the install writes, and the host is empty (gt-i3ywa).
+func TestRunInstallLocalDropsTheRemoteHostOfATown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		doltPort int
+		wantPort int
+	}{
+		{"the port the flag names", 4400, 4400},
+		{"no port flag, the town's port kept", 0, 3307},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			hqPath := filepath.Join(t.TempDir(), "hq")
+			townPath := filepath.Join(hqPath, "mayor", "town.json")
+			if err := os.MkdirAll(filepath.Dir(townPath), 0o755); err != nil {
+				t.Fatalf("create mayor/: %v", err)
+			}
+			if err := config.SaveTownConfig(townPath, &config.TownConfig{
+				Type: "town", Version: config.CurrentTownVersion, Name: "hq",
+				Dolt: &config.DoltEndpoint{Host: "scratch-dolt", Port: 3307},
+			}); err != nil {
+				t.Fatalf("write town.json: %v", err)
+			}
+			rec := &recordingSteps{}
+
+			opts := installOptions{force: true, doltPort: tt.doltPort, steps: rec.steps()}
+			if err := runInstallWith(opts, []string{hqPath}); err != nil {
+				t.Fatalf("gt install --force over a remote-stamped town: %v", err)
+			}
+
+			town, err := config.LoadTownConfig(townPath)
+			if err != nil {
+				t.Fatalf("load town.json: %v", err)
+			}
+			want := config.DoltEndpoint{Port: tt.wantPort}
+			if town.Dolt == nil || *town.Dolt != want {
+				t.Fatalf("town.json dolt = %+v, want %+v", town.Dolt, want)
+			}
+		})
+	}
+}
+
+// A local install that cannot clear the remote host from town.json fails rather
+// than reporting an endpoint it did not set (gt-i3ywa).
+func TestRunInstallFailsWhenItCannotClearTheRemoteHost(t *testing.T) {
+	t.Parallel()
+	hqPath := filepath.Join(t.TempDir(), "hq")
+	rec := &recordingSteps{}
+	steps := rec.steps()
+	steps.clearTownDoltHost = func(string) error { return errors.New("disk full") }
+
+	err := runInstallWith(installOptions{steps: steps}, []string{hqPath})
+	if err == nil || !strings.Contains(err.Error(), "writing the Dolt endpoint to town.json") || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("gt install with the host clear failing = %v, want an error naming the Dolt endpoint and the cause", err)
+	}
+}
+
+// A --dolt-host that is not a bare host name or IP address is refused before
+// the install writes anything. A port, a scheme or a path would otherwise go
+// into town.json as the host (gt-i3ywa).
+func TestRunInstallRefusesADoltHostThatIsNotAHost(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{
+		"scratch-dolt:3307",
+		"http://scratch-dolt",
+		"scratch-dolt/hq",
+		"scratch dolt",
+		"[2001:db8::5]",
+		"-scratch-dolt",
+		"scratch..dolt",
+	} {
+		t.Run(host, func(t *testing.T) {
+			t.Parallel()
+			hqPath := filepath.Join(t.TempDir(), "hq")
+
+			err := runInstallWith(installOptions{doltHost: host, doltHostSet: true}, []string{hqPath})
+			if err == nil || !strings.Contains(err.Error(), "not a host name or IP address") {
+				t.Fatalf("runInstallWith(--dolt-host %q) = %v, want an error naming the host form", host, err)
+			}
+			if _, statErr := os.Stat(hqPath); !os.IsNotExist(statErr) {
+				t.Errorf("refused install wrote %s (err = %v)", hqPath, statErr)
+			}
+		})
+	}
+}
+
+// A bare host name or IP address is a valid --dolt-host: the validation refuses
+// malformed hosts and lets these through (gt-i3ywa).
+func TestRunInstallAcceptsABareDoltHost(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{"scratch-dolt", "db.gt.example", "100.64.0.5", "2001:db8::5", "scratch_dolt"} {
+		t.Run(host, func(t *testing.T) {
+			t.Parallel()
+			hqPath := filepath.Join(t.TempDir(), "hq")
+			rec := &recordingSteps{}
+
+			opts := installOptions{doltHost: host, doltHostSet: true, doltPort: 3308, steps: rec.steps()}
+			if err := runInstallWith(opts, []string{hqPath}); err != nil {
+				t.Fatalf("gt install --dolt-host %q: %v", host, err)
+			}
+			town, err := config.LoadTownConfig(filepath.Join(hqPath, "mayor", "town.json"))
+			if err != nil {
+				t.Fatalf("load town.json: %v", err)
+			}
+			want := config.DoltEndpoint{Host: host, Port: 3308}
+			if town.Dolt == nil || *town.Dolt != want {
+				t.Fatalf("town.json dolt = %+v, want %+v", town.Dolt, want)
+			}
+		})
+	}
+}
+
 // The endpoint writer leaves a host the town already names alone when the
 // endpoint it is given has none, which is what keeps a local --force
 // re-install off the operator's endpoint. A local install cannot reach this

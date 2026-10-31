@@ -42,6 +42,13 @@ The town's Dolt endpoint (host, port) lives in `mayor/town.json`:
 "dolt": {"host": "100.64.0.5", "port": 3307}
 ```
 
+`gt install --dolt-host <host>` names a Dolt server that already runs elsewhere.
+The install writes that host into the endpoint, starts no local Dolt and
+creates the hq database on that server. The host is a bare host name or IP
+address (no port, scheme or path) and not a loopback address. A local install,
+which has no `--dolt-host`, drops a host the town names, so the endpoint is this
+machine's again.
+
 `gt install` writes it (`--dolt-port`, default 3307) and
 `gt config set dolt.port <port>` changes it. A town whose `town.json`
 predates the field reads the listener in `.dolt-data/config.yaml`. gt never

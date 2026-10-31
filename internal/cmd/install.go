@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,6 +65,7 @@ type installSteps struct {
 	startDolt          func(townRoot string) error
 	initTownBeads      func(townRoot string) error
 	configureTownBeads func(townRoot string)
+	clearTownDoltHost  func(townPath string) error
 }
 
 // resolved fills in every step the caller left nil.
@@ -91,6 +93,9 @@ func (s installSteps) resolved() installSteps {
 	}
 	if s.configureTownBeads == nil {
 		s.configureTownBeads = configureTownBeads
+	}
+	if s.clearTownDoltHost == nil {
+		s.clearTownDoltHost = clearTownDoltHost
 	}
 	return s
 }
@@ -390,6 +395,14 @@ func runInstallWith(opts installOptions, args []string) error {
 	}
 	if err := stampTownTrackerPort(townPath, config.DefaultTrackerPort); err != nil {
 		return fmt.Errorf("writing the tracker endpoint to town.json: %w", err)
+	}
+	// A local install's Dolt is this machine's: a remote host a town.json
+	// still names would be dialed with the local port (gt-i3ywa). This runs
+	// after the tracker write, so a torn town.json still reports that first.
+	if !remoteDolt {
+		if err := steps.clearTownDoltHost(townPath); err != nil {
+			return fmt.Errorf("writing the Dolt endpoint to town.json: %w", err)
+		}
 	}
 
 	// Create the rig registry (only if it doesn't already exist).
@@ -782,13 +795,39 @@ func installDoltHostRefusal(host string) error {
 	case "localhost", "127.0.0.1", "::1", "[::1]":
 		return fmt.Errorf("--dolt-host %q is a loopback address, so it names a local Dolt; name the server that runs it instead", host)
 	}
+	if net.ParseIP(host) == nil && !isDNSHostName(host) {
+		return fmt.Errorf("--dolt-host %q is not a host name or IP address: give the bare host, with no port, scheme or path", host)
+	}
 	return nil
+}
+
+// isDNSHostName reports whether host is a DNS name: labels of letters, digits,
+// hyphens and underscores (compose service names may carry underscores), none
+// empty, none starting or ending with a hyphen, 63 bytes at most each and 253
+// in all.
+func isDNSHostName(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // stampTownDoltEndpoint writes endpoint as the town's Dolt endpoint in
 // town.json, keeping the rest of the file (gt-y3pgh.3). An empty host is this
 // machine: it leaves a host the town already names alone, so a --force
 // re-install keeps the operator's endpoint.
+// A local install drops that host with clearTownDoltHost instead.
 func stampTownDoltEndpoint(townPath string, endpoint config.DoltEndpoint) error {
 	return config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
 		if town.Dolt == nil {
@@ -798,6 +837,19 @@ func stampTownDoltEndpoint(townPath string, endpoint config.DoltEndpoint) error 
 			town.Dolt.Host = endpoint.Host
 		}
 		town.Dolt.Port = endpoint.Port
+		return nil
+	})
+}
+
+// clearTownDoltHost drops the host town.json names, so the town's Dolt is the
+// one on this machine. Only a local install calls it: stampTownDoltEndpoint
+// keeps a host, so a remote host from an earlier install would otherwise
+// survive a local one (gt-i3ywa).
+func clearTownDoltHost(townPath string) error {
+	return config.UpdateConfigJSON(townPath, 0o600, func(town *config.TownConfig, _ bool) error {
+		if town.Dolt != nil {
+			town.Dolt.Host = ""
+		}
 		return nil
 	})
 }
