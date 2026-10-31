@@ -560,8 +560,8 @@ func TestWaitShadowChecksHoldsTheProcessUntilTheLineIsWritten(t *testing.T) {
 func TestWaitShadowsEndsWithItsContext(t *testing.T) {
 	t.Parallel()
 	c := &Client{}
-	c.shadows.Add(1)
-	defer c.shadows.Done()
+	c.shadows.start()
+	defer c.shadows.finish()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
@@ -583,4 +583,38 @@ func TestShadowCheckLogsAnEncodeFailure(t *testing.T) {
 	assert.Equal(t, outcomeFailed, lines[0]["outcome"])
 	assert.Equal(t, "encode", lines[0]["error_class"])
 	assert.Equal(t, 0, rt.count(), "no call is made for a state that cannot be encoded")
+}
+
+// TestInflightWaitMayOverlapAStartFromZero: a check may start from zero while
+// another goroutine waits, which a sync.WaitGroup forbids (its misuse panic is
+// what failed unrelated gates after gt-jb20i). Many goroutines start, finish
+// and wait together; the run must not panic, every wait returns once nothing is
+// running, and the counter ends at zero. Run under -race.
+func TestInflightWaitMayOverlapAStartFromZero(t *testing.T) {
+	t.Parallel()
+	var f inflight
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			f.start()
+			f.finish()
+		}()
+		go func() {
+			defer wg.Done()
+			if err := f.wait(t.Context()); err != nil {
+				t.Errorf("wait = %v, want nil: nothing stays running", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if err := f.wait(t.Context()); err != nil {
+		t.Errorf("wait after everything finished = %v, want nil", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.n != 0 {
+		t.Errorf("counter = %d after every check finished, want 0", f.n)
+	}
 }

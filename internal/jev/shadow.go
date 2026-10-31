@@ -66,34 +66,63 @@ func WithShadowScrub(percent int, allows func() (bool, error)) Option {
 	return func(c *Client) { c.shadowPercent, c.shadowAllows, c.shadowSet = percent, allows, true }
 }
 
-// shadowChecks counts the background checks every client in the process has
-// running, so the process can wait for them before it exits: a batteries'
-// command is a short-lived process, and a check still in flight when it ends
-// would lose its line. WaitShadowChecks is the one wait.
-var shadowChecks sync.WaitGroup
+// inflight counts running background checks and tells a waiter when none is.
+// It is not a sync.WaitGroup: a WaitGroup panics when an Add from zero races a
+// Wait in flight, and checks start in parallel with a process-wide wait.
+type inflight struct {
+	mu   sync.Mutex
+	n    int
+	idle chan struct{} // closed when n reaches zero; made when n leaves zero
+}
 
-// WaitShadowChecks blocks until every shadow check started in this process has
-// written its line, or ctx ends, and returns ctx's error in that case. The
-// command's exit path calls it so a sampled request's line is never lost to the
-// process ending first.
-func WaitShadowChecks(ctx context.Context) error { return waitGroup(ctx, &shadowChecks) }
+func (f *inflight) start() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.n == 0 {
+		f.idle = make(chan struct{})
+	}
+	f.n++
+}
 
-// WaitShadows is WaitShadowChecks for the checks this one client started.
-func (c *Client) WaitShadows(ctx context.Context) error { return waitGroup(ctx, &c.shadows) }
+func (f *inflight) finish() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.n--; f.n == 0 {
+		close(f.idle)
+	}
+}
 
-func waitGroup(ctx context.Context, wg *sync.WaitGroup) error {
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
+// wait blocks until no check is running, or ctx ends and its error is returned.
+func (f *inflight) wait(ctx context.Context) error {
+	f.mu.Lock()
+	if f.n == 0 {
+		f.mu.Unlock()
+		return nil
+	}
+	idle := f.idle
+	f.mu.Unlock()
 	select {
-	case <-done:
+	case <-idle:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
+
+// shadowChecks counts the background checks every client in the process has
+// running, so the process can wait for them before it exits: a batteries'
+// command is a short-lived process, and a check still in flight when it ends
+// would lose its line. WaitShadowChecks is the one wait.
+var shadowChecks inflight
+
+// WaitShadowChecks blocks until every shadow check started in this process has
+// written its line, or ctx ends, and returns ctx's error in that case. The
+// command's exit path calls it so a sampled request's line is never lost to the
+// process ending first.
+func WaitShadowChecks(ctx context.Context) error { return shadowChecks.wait(ctx) }
+
+// WaitShadows is WaitShadowChecks for the checks this one client started.
+func (c *Client) WaitShadows(ctx context.Context) error { return c.shadows.wait(ctx) }
 
 // ShadowScrubbing reports whether the client was built with WithShadowScrub.
 func (c *Client) ShadowScrubbing() bool { return c.shadowSet }
@@ -241,11 +270,11 @@ func (c *Client) shadowCheck(ctx context.Context, state any, qs map[string]Quest
 	// request's cancellation and its deadline, so a caller that gives up
 	// still gets its measurement, and post bounds the second call with the
 	// client's own timeout instead.
-	c.shadows.Add(1)
-	shadowChecks.Add(1)
+	c.shadows.start()
+	shadowChecks.start()
 	go func() {
-		defer shadowChecks.Done()
-		defer c.shadows.Done()
+		defer shadowChecks.finish()
+		defer c.shadows.finish()
 		c.finishShadow(context.WithoutCancel(ctx), rec, scrubbed, wire, qs)
 	}()
 }
