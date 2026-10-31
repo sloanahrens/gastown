@@ -663,7 +663,7 @@ func TestLooksLikeCredential(t *testing.T) {
 		"glpat-abcdefghijklmnopqrst",
 		"xoxb-fixture-not-a-real-token",
 		"AKIAIOSFODNN7EXAMPLE",
-		"AIzaSyA1234567890abcdefghijklmnopqrstuv",
+		"AIza" + strings.Repeat("x", 35), // built at runtime: a literal AIza + 35 is detector-shaped
 		"dckr_pat_abcdefghijklmnopqrstuvwx",
 		"hvs.abcdefghijklmnopqrstuvwx",
 		"-----BEGIN RSA PRIVATE KEY-----",
