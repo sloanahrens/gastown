@@ -571,6 +571,64 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	}
 }
 
+// A runner block moves the integration and race tiers off the host, so every
+// field is required and a key or value no run can use is refused at decode,
+// naming the key: a block the daemon half-understands would start a container
+// the operator never described (gt-z4ppb).
+func TestTierSweepRunnerConfigStrict(t *testing.T) {
+	t.Parallel()
+
+	const block = `{"backend": "docker", "image": "gt-polecat:main", "cpus": 8, "memory": 24, "jobs": 4, "output_root": "/tmp/gt-sweep", "context": "colima-gt-sbx", "dind": true}`
+	var p PatrolsConfig
+	if err := json.Unmarshal([]byte(`{"tier_sweep": {"enabled": true, "runner": `+block+`}}`), &p); err != nil {
+		t.Fatalf("a runner block does not decode: %v", err)
+	}
+	r := p.TierSweep.Runner
+	if r == nil {
+		t.Fatal("the runner block decoded as nil")
+	}
+	if r.Backend != TierSweepRunnerDocker || r.Image != "gt-polecat:main" || r.CPUs != 8 || r.Memory != 24 ||
+		r.Jobs != 4 || r.OutputRoot != "/tmp/gt-sweep" || r.Context != "colima-gt-sbx" || !r.Dind {
+		t.Fatalf("decoded %+v, want the block as written", r)
+	}
+
+	// The block also decodes through the config kernel's strict walk, which is
+	// the path a town's settings/config.json takes.
+	doc := `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"enabled":true,"runner":` + block + `}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("settings.json", []byte(doc), &cfg); err != nil {
+		t.Fatalf("settings.json with a runner block = %v", err)
+	}
+	if cfg.Patrols.TierSweep.Runner == nil {
+		t.Error("the kernel's decode dropped the runner block")
+	}
+
+	bad := map[string]struct{ block, wantKey string }{
+		"unknown key":      {`{"backend":"docker","image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c","backends":"docker"}`, "backends"},
+		"cpus below range": {`{"backend":"docker","image":"i","cpus":0,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.cpus"},
+		"cpus above range": {`{"backend":"docker","image":"i","cpus":17,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.cpus"},
+		"unknown backend":  {`{"backend":"podman","image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.backend"},
+		"no image":         {`{"backend":"docker","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.image"},
+		"memory too small": {`{"backend":"docker","image":"i","cpus":8,"memory":1,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.memory"},
+		"jobs too small":   {`{"backend":"docker","image":"i","cpus":8,"memory":24,"jobs":0,"output_root":"/tmp/o","context":"c"}`, "runner.jobs"},
+		"relative output":  {`{"backend":"docker","image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"out","context":"c"}`, "runner.output_root"},
+		"no context":       {`{"backend":"docker","image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o"}`, "runner.context"},
+	}
+	for name, tt := range bad {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			err := json.Unmarshal([]byte(`{"tier_sweep": {"runner": `+tt.block+`}}`), &p)
+			if err == nil {
+				t.Fatalf("decoded a runner block the daemon cannot launch: %+v", p.TierSweep.Runner)
+			}
+			if !strings.Contains(err.Error(), tt.wantKey) {
+				t.Errorf("error = %v, want it to name %q", err, tt.wantKey)
+			}
+		})
+	}
+}
+
 // TestDiskMaintenanceTargetEvery: a cadence is a Go duration of at least a
 // minute, and an empty one keeps the daily window.
 func TestDiskMaintenanceTargetEvery(t *testing.T) {

@@ -1477,6 +1477,126 @@ type TierSweepConfig struct {
 	// Default 90m. Past the bound the sweep runs and the restart waits for it
 	// (gt-zvqn8).
 	RestartStaleAfterStr string `json:"restart_stale_after,omitempty"`
+
+	// Runner, when set, runs the integration and race tiers off the host: the
+	// daemon renders the run through internal/sweeprunner, starts it detached,
+	// and reads the result.json it writes (gt-z4ppb). Nil runs them on the
+	// host, as before, and the shell stage always stays on the host.
+	Runner *TierSweepRunnerConfig `json:"runner,omitempty"`
+}
+
+// TierSweepRunnerConfig is where the sweep's integration and race tiers run
+// when they run off the host (gt-z4ppb). Every field is required: a runner
+// block that names no image, engine or output directory cannot render a run,
+// and a default would start a run the operator never asked for.
+type TierSweepRunnerConfig struct {
+	// Backend names the engine the run starts on: "docker" for a container
+	// through the Docker CLI's context, or "kubernetes" for a batch/v1 Job
+	// (the two internal/sweeprunner renders).
+	Backend string `json:"backend"`
+
+	// Image is the runner container: the polecat image tag, or the same
+	// reference pinned by digest.
+	Image string `json:"image"`
+
+	// CPUs is the run's CPU share, 1 to 16.
+	CPUs int `json:"cpus"`
+
+	// Memory is the run's memory limit in GB, 2 to 48.
+	Memory int `json:"memory"`
+
+	// Jobs is how many packages the run tests at once, 1 to 16.
+	Jobs int `json:"jobs"`
+
+	// OutputRoot is the host directory the run's output goes under: the
+	// daemon gives each run a directory of its own beneath it, and polls that
+	// directory for result.json. It must be absolute.
+	OutputRoot string `json:"output_root"`
+
+	// Context is the engine context the run's steps target: the Docker CLI
+	// context (desktop-linux, colima-gt-sbx) or the kubectl context. It is
+	// named rather than left to the environment, so a run reaches the engine
+	// the config means.
+	Context string `json:"context"`
+
+	// Dind starts a Docker-in-Docker sidecar for the packages whose tests need
+	// a Docker API (internal/testutil starts Dolt through testcontainers).
+	Dind bool `json:"dind"`
+}
+
+// The ranges TierSweepRunnerConfig accepts, matching sweeprunner.Spec.Validate.
+// The spec's own Validate is the authority: it runs on every rendered run, so a
+// config built in code rather than decoded cannot reach a backend with a value
+// the render would refuse. These checks only refuse a file at load, where the
+// error can name the key the operator typed (gt-z4ppb).
+const (
+	runnerCPUsMin   = 1
+	runnerCPUsMax   = 16
+	runnerMemoryMin = 2
+	runnerMemoryMax = 48
+	runnerJobsMin   = 1
+	runnerJobsMax   = 16
+)
+
+// The backends TierSweepRunnerConfig names, as sweeprunner's Backends spell
+// them.
+const (
+	TierSweepRunnerDocker     = "docker"
+	TierSweepRunnerKubernetes = "kubernetes"
+)
+
+// UnmarshalJSON decodes the runner block strictly, refusing a key it does not
+// declare and a value no run can use, naming each. A mistyped key here would
+// otherwise read as a default: the runner starts a container, so a block the
+// daemon half-understands must not run.
+//
+// The unknown-field check is repeated here because a type that decodes itself
+// is decoded by the config kernel's strict decoder opaquely.
+func (c *TierSweepRunnerConfig) UnmarshalJSON(data []byte) error {
+	type plain TierSweepRunnerConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.tier_sweep.runner: %w", err)
+	}
+	cfg := TierSweepRunnerConfig(p)
+	if err := cfg.validate(); err != nil {
+		return fmt.Errorf("patrols.tier_sweep.runner.%w", err)
+	}
+	*c = cfg
+	return nil
+}
+
+// validate refuses a block no run can use, naming the field that is wrong. The
+// error starts with the field so the caller's prefix completes a dotted key.
+func (c *TierSweepRunnerConfig) validate() error {
+	switch c.Backend {
+	case TierSweepRunnerDocker, TierSweepRunnerKubernetes:
+	case "":
+		return errors.New("backend: want " + TierSweepRunnerDocker + " or " + TierSweepRunnerKubernetes)
+	default:
+		return fmt.Errorf("backend = %q: want %s or %s", c.Backend, TierSweepRunnerDocker, TierSweepRunnerKubernetes)
+	}
+	if c.Image == "" {
+		return errors.New("image: want the runner image reference")
+	}
+	if c.CPUs < runnerCPUsMin || c.CPUs > runnerCPUsMax {
+		return fmt.Errorf("cpus = %d: want %d-%d", c.CPUs, runnerCPUsMin, runnerCPUsMax)
+	}
+	if c.Memory < runnerMemoryMin || c.Memory > runnerMemoryMax {
+		return fmt.Errorf("memory = %d: want %d-%d GB", c.Memory, runnerMemoryMin, runnerMemoryMax)
+	}
+	if c.Jobs < runnerJobsMin || c.Jobs > runnerJobsMax {
+		return fmt.Errorf("jobs = %d: want %d-%d", c.Jobs, runnerJobsMin, runnerJobsMax)
+	}
+	if !filepath.IsAbs(c.OutputRoot) {
+		return fmt.Errorf("output_root = %q: want an absolute path", c.OutputRoot)
+	}
+	if c.Context == "" {
+		return errors.New("context: want the engine context the run starts in")
+	}
+	return nil
 }
 
 // LandingWorkerConfig holds configuration for the landing_worker patrol.
