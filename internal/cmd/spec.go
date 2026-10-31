@@ -559,6 +559,15 @@ func specChildrenRead(c beads.Client, ids []string) (map[string][]*beads.Issue, 
 	return kids, nil
 }
 
+// specChildrenReader is the default children read of specCandidateChildren: the
+// rig's database at dir, read through stores. The tick passes the zero value,
+// which opens bd; a test passes a store that counts its reads.
+func specChildrenReader(stores slingStores) func(dir string, ids []string) (map[string][]*beads.Issue, error) {
+	return func(dir string, ids []string) (map[string][]*beads.Issue, error) {
+		return specChildrenRead(stores.pinnedAt(dir), ids)
+	}
+}
+
 // specCandidateChildren is the tick's children read for every candidate of a
 // board read: one bd view per rig the candidates live in, answered per bead,
 // with a per-bead fallback when the grouped read fails so one unreadable bead
@@ -577,9 +586,7 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 		byDir[dir] = append(byDir[dir], c.Spec.ID)
 	}
 	if read == nil {
-		read = func(dir string, ids []string) (map[string][]*beads.Issue, error) {
-			return specChildrenRead(slingStores{}.pinnedAt(dir), ids)
-		}
+		read = specChildrenReader(slingStores{})
 	}
 	var mu sync.Mutex
 	kids := map[string][]specdispatch.Child{}
@@ -600,7 +607,11 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 			if err != nil {
 				// One parent the grouped read could not answer fails the whole
 				// read, so each bead is read alone: the rest still get their
-				// children and only the unreadable bead reports.
+				// children and only the unreadable bead reports. With the default
+				// read each alone read is two bd calls, so a failed rig costs
+				// about two calls per candidate. A failure is rare, and the
+				// per-bead read keeps one unreadable bead from failing the rest
+				// (gt-4u2gt).
 				for _, id := range ids {
 					reads.call()
 					single, readErr := read(dir, []string{id})

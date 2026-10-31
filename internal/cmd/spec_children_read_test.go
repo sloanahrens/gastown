@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // childrenReadCounter counts the two reads specChildrenRead makes, so a test can
@@ -93,6 +94,33 @@ func TestSpecChildrenReadChildlessParentsCostTwoReads(t *testing.T) {
 	}
 	if _, ok := got[missing]; ok {
 		t.Errorf("unresolved %s has a key; want none, so it is read alone", missing)
+	}
+}
+
+// Fifty childless candidates of a rig cost one ChildrenOf and one ShowMultiple
+// through the production default read: specCandidateChildren is given
+// specChildrenReader, the function the tick's default read is, over a store that
+// counts its calls. The children read that runs is specChildrenRead itself, so
+// deleting its ShowMultiple step or reverting it to ChildrenOf turns this red
+// (gt-4u2gt).
+func TestSpecChildrenReadDefaultWiringCostsTwoReadsForChildless(t *testing.T) {
+	t.Parallel()
+	db, ids, _, _, _ := specChildrenFixture(t)
+	client := &childrenReadCounter{Client: db}
+	stores := slingStores{pinned: func(string) slingStore { return client }}
+
+	cands := make([]specCandidate, 0, 50)
+	for _, id := range ids[:50] {
+		cands = append(cands, specCandidate{Spec: specdispatch.Spec{ID: id}})
+	}
+	children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, specChildrenReader(stores))
+	for _, c := range cands {
+		if kids, err := children(c.Spec.ID); err != nil || len(kids) != 0 {
+			t.Fatalf("children(%s) = %v, %v; want no children and no error", c.Spec.ID, kids, err)
+		}
+	}
+	if client.childrenOf != 1 || client.showMultiple != 1 {
+		t.Errorf("fifty childless candidates cost %d ChildrenOf and %d ShowMultiple reads; want one of each", client.childrenOf, client.showMultiple)
 	}
 }
 
