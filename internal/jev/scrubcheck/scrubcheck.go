@@ -397,16 +397,14 @@ func WriteText(w io.Writer, rep Report) error {
 		_, err := fmt.Fprintln(w, "no checked request has both answer sets to count")
 		return err
 	}
+	// The tabwriter buffers every cell until Flush, so its writes cannot fail;
+	// a write error to w comes back from Flush.
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "CALLER\tQUESTION\tKIND\tPAIRS\tUNCHANGED\tMISSING\tMEAN CHANGE\tMAX CHANGE\tCROSSING\tBASELINE\tVERDICT\tRULES"); err != nil {
-		return err
-	}
+	fmt.Fprintln(tw, "CALLER\tQUESTION\tKIND\tPAIRS\tUNCHANGED\tMISSING\tMEAN CHANGE\tMAX CHANGE\tCROSSING\tBASELINE\tVERDICT\tRULES")
 	for _, r := range rep.Rows {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.Caller, r.Question, r.Kind, r.Pairs, r.Unchanged, r.Missing,
-			num(r.MeanChange), num(r.MaxChange), pct(r.Crossing), pct(r.Baseline), r.Verdict, rules(r.Rules)); err != nil {
-			return err
-		}
+			num(r.MeanChange), num(r.MaxChange), pct(r.Crossing), pct(r.Baseline), r.Verdict, rules(r.Rules))
 	}
 	return tw.Flush()
 }

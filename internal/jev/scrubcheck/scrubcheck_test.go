@@ -291,7 +291,7 @@ func TestScrubcheckRefusals(t *testing.T) {
 		assert.Nil(t, lines)
 	})
 
-	t.Run("absent log is not an error", func(t *testing.T) {
+	t.Run("absent log reports ErrNoLog", func(t *testing.T) {
 		t.Parallel()
 		lines, err := Read(filepath.Join(t.TempDir(), "scrubcheck.jsonl"))
 		assert.ErrorIs(t, err, ErrNoLog)
