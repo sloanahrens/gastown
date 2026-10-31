@@ -151,14 +151,17 @@ type overrunSeams struct {
 
 	// The stop's side effects, called in this order by overrunStop:
 	// pause writes the seat's pause marker, stopSession ends its session,
-	// checkpoint commits its worktree, endRun records the run the stop ended,
+	// removeSandbox pushes and removes the sandbox a sandboxed seat ran in
+	// (nil means none; a refusal holds the stop), checkpoint commits its
+	// worktree, endRun records the run the stop ended,
 	// handBack returns its bead to the pool after elapsed, with note added to
 	// its comment (empty unless the stop gave up on the checkpoint). clearPause
 	// removes the marker again when the session would not stop.
-	pause       func(seat overrunSeat) error
-	clearPause  func(seat overrunSeat) error
-	stopSession func(seat overrunSeat) error
-	checkpoint  func(seat overrunSeat) error
+	pause         func(seat overrunSeat) error
+	clearPause    func(seat overrunSeat) error
+	stopSession   func(seat overrunSeat) error
+	removeSandbox func(seat overrunSeat) error
+	checkpoint    func(seat overrunSeat) error
 	// stillOurs reports whether the bead is still hooked to the stopped seat:
 	// the stop reads again just before it ends the run, because a bead closed,
 	// or re-slung to another polecat, since the seat list was read is that

@@ -35,7 +35,10 @@ const (
 //
 //  1. pause the seat, so patrol_scan does not restart it;
 //  2. stop its session (a failed stop clears the pause again and does nothing
-//     else, the gt-fojqs ordering: a live seat must not stay parked);
+//     else, the gt-fojqs ordering: a live seat must not stay parked), then
+//     remove its sandbox, pushing the commits first: a refused push keeps the
+//     sandbox and holds the stop with the seat still paused, the next tick
+//     trying again;
 //  3. checkpoint the worktree;
 //  4. push the kept branch to origin; a failed push is retried every tick,
 //     and the hand-back waits for it, so its comment never names a branch that
@@ -240,6 +243,20 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			st.StoppedAt = now
 			save()
 			d.logger.Printf("overrun_guard: %s on %s: %s; abandoning the stop, bead not handed back", who, st.Bead, why)
+			return
+		}
+	}
+
+	// 2b. Remove the sandbox a sandboxed seat ran in, pushing its commits first.
+	// The session manager's stop did this on the kill until gt-6mlik.4 moved the
+	// kill to the supervisor, which does not. It runs after the resumed-stop
+	// check above, so a seat taken back is never swept. A refused push keeps the
+	// sandbox and its record, and the stop waits here with the pause still held,
+	// so nothing restarts the seat while its commits are unpushed. A host seat
+	// has no record and this does nothing.
+	if s.removeSandbox != nil {
+		if err := s.removeSandbox(seat); err != nil {
+			d.logger.Printf("overrun_guard: stop %s on %s waits, sandbox kept: %v", who, st.Bead, err)
 			return
 		}
 	}
@@ -540,6 +557,7 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		return agentpause.Resume(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat)
 	}
 	s.stopSession = d.overrunStopSession
+	s.removeSandbox = func(seat overrunSeat) error { return d.overrunRemoveSandbox(seat, nil, nil) }
 	s.submittedNow = d.overrunSubmittedNow
 	s.checkpoint = func(seat overrunSeat) error {
 		polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
@@ -978,6 +996,18 @@ func (d *Daemon) overrunSubmittedNow(seat overrunSeat) bool {
 func (d *Daemon) overrunStopSession(seat overrunSeat) error {
 	supSeat := supervisor.SeatIn(d.prefixRegistry(), seat.Rig, constants.RolePolecat, seat.Polecat)
 	return d.sup().KillOwnPark(supSeat, overrunStopReason(seat), overrunActor)
+}
+
+// overrunRemoveSandbox removes the sandbox a stopped seat ran in, pushing its
+// commits first (polecat.RemoveStoppedSandbox). pusher and deleter nil are the
+// linked openshell hooks. A refused step names the sandbox in its error, which
+// the stop logs.
+func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(townRoot string, rec session.SandboxRecord) error) error {
+	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat)
+	if err := polecat.RemoveStoppedSandbox(d.config.TownRoot, sessionName, pusher, deleter); err != nil {
+		return fmt.Errorf("sandbox %s: %w", sessionName, err)
+	}
+	return nil
 }
 
 // overrunStopReason is what the supervisor's action log records for the kill:

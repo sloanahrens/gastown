@@ -573,6 +573,205 @@ func TestStop_DryRunCallsNoStopSeam(t *testing.T) {
 	}
 }
 
+// seedStopSandbox pins the rig prefix the stop's sandbox lookup reads and writes
+// the record of stopSeat's sandboxed session.
+func seedStopSandbox(t *testing.T, d *Daemon) {
+	t.Helper()
+	reg := session.NewPrefixRegistry()
+	reg.Register(stopSeat.Rig, overrunStopPrefix)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	rec := session.SandboxRecord{Session: overrunStopSessionName, Rig: stopSeat.Rig, Polecat: stopSeat.Polecat, Branch: stopSeat.Branch}
+	if err := session.WriteSandboxRecord(d.config.TownRoot, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The sandbox of a stopped seat is removed after its session stop and before
+// the checkpoint, the order the session manager's stop ran it in (gt-ft2vg).
+func TestStop_SandboxRemovalIsOrderedAfterTheStopBeforeTheCheckpoint(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+
+	d.runOverrunGuard(f.seams())
+
+	want := []string{
+		"pause gastown/capable",
+		"stop gastown/capable",
+		"sandbox gastown/capable",
+		"checkpoint gastown/capable",
+		"push gastown/capable",
+		"hand-back gastown/capable",
+		"recheck gastown/capable",
+		"reset-agent-bead gastown/capable",
+		"record-cleanup gastown/capable",
+		"retire gastown/capable",
+	}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("call order = %q, want %q", f.calls, want)
+	}
+}
+
+// A refused sandbox push holds the stop: the sandbox and its record are kept,
+// the seat stays paused, the bead is not handed back, and the log names the
+// sandbox. The next tick retries the removal and finishes the stop (gt-ft2vg).
+func TestStop_RefusedSandboxPushHoldsTheStopAndNamesTheSandbox(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	var deleted []string
+	refuse := func(string, session.SandboxRecord) error { return errors.New("rejected by origin") }
+	f.removeSandbox = func(seat overrunSeat) error {
+		return d.overrunRemoveSandbox(seat, refuse, func(_ string, rec session.SandboxRecord) error {
+			deleted = append(deleted, rec.Session)
+			return nil
+		})
+	}
+
+	d.runOverrunGuard(f.seams())
+
+	want := []string{"pause gastown/capable", "stop gastown/capable", "sandbox gastown/capable"}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("calls = %q, want %q (no checkpoint, push or hand-back past a refused sandbox push)", f.calls, want)
+	}
+	if len(deleted) != 0 {
+		t.Errorf("sandbox deleted despite the refused push: %q", deleted)
+	}
+	if len(f.handedBack) != 0 {
+		t.Errorf("bead handed back with its sandbox unpushed: %q", f.handedBack)
+	}
+	if !strings.Contains(buf.String(), "waits, sandbox kept") || !strings.Contains(buf.String(), "sandbox "+overrunStopSessionName) {
+		t.Errorf("log does not name the kept sandbox:\n%s", buf.String())
+	}
+	if _, ok, _ := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); !ok {
+		t.Error("the sandbox record was removed despite the refused push")
+	}
+	st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if st.SessionStoppedAt.IsZero() || st.StopBeganAt.IsZero() || !st.StoppedAt.IsZero() {
+		t.Errorf("state %+v: want the session recorded stopped and the stop still under way", st)
+	}
+
+	// The seat is gone and the record carries the stop: the next tick pushes
+	// again, and the stop finishes without stopping the session a second time.
+	f.seats, f.calls = nil, nil
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+
+	want = []string{
+		"recheck gastown/capable",
+		"sandbox gastown/capable",
+		"checkpoint gastown/capable",
+		"push gastown/capable",
+		"hand-back gastown/capable",
+		"recheck gastown/capable",
+		"reset-agent-bead gastown/capable",
+		"record-cleanup gastown/capable",
+		"retire gastown/capable",
+	}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("retry calls = %q, want %q", f.calls, want)
+	}
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-back after the retry = %q, want one", f.handedBack)
+	}
+}
+
+// A stop of a sandboxed seat pushes its sandbox's commits, deletes the sandbox
+// and its record, and then hands the bead back (gt-ft2vg).
+func TestStop_SandboxedSeatIsPushedAndRemovedBeforeTheHandBack(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	var order []string
+	f.removeSandbox = func(seat overrunSeat) error {
+		return d.overrunRemoveSandbox(seat,
+			func(_ string, rec session.SandboxRecord) error {
+				order = append(order, "push "+rec.Branch)
+				return nil
+			},
+			func(_ string, rec session.SandboxRecord) error {
+				order = append(order, "delete "+rec.Session)
+				return nil
+			})
+	}
+
+	d.runOverrunGuard(f.seams())
+
+	want := []string{"push " + stopSeat.Branch, "delete " + overrunStopSessionName}
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("sandbox order = %q, want %q (push before delete)", order, want)
+	}
+	if _, ok, _ := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); ok {
+		t.Error("the sandbox record survived the stop")
+	}
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-back = %q, want the bead handed back once its sandbox is gone", f.handedBack)
+	}
+}
+
+// overrunRemoveSandbox is the production sandbox step: push, then delete; a
+// refused push keeps the sandbox, and a host seat (no record) does nothing.
+func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		sandboxed  bool
+		pushErr    error
+		wantCalls  []string
+		wantRecord bool
+		wantErr    string
+	}{
+		{name: "push_then_delete", sandboxed: true, wantCalls: []string{"push", "delete"}},
+		{name: "gone_sandbox_has_nothing_to_push_and_is_still_removed", sandboxed: true, pushErr: session.ErrNothingToPush, wantCalls: []string{"push", "delete"}},
+		{name: "refused_push_keeps_the_sandbox_and_names_it", sandboxed: true, pushErr: errors.New("rejected by origin"), wantCalls: []string{"push"}, wantRecord: true, wantErr: "sandbox " + overrunStopSessionName},
+		{name: "host_seat_has_no_sandbox", wantCalls: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			if tt.sandboxed {
+				seedStopSandbox(t, d)
+			} else {
+				reg := session.NewPrefixRegistry()
+				reg.Register(stopSeat.Rig, overrunStopPrefix)
+				d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+			}
+			var calls []string
+			push := func(string, session.SandboxRecord) error {
+				calls = append(calls, "push")
+				return tt.pushErr
+			}
+			del := func(string, session.SandboxRecord) error {
+				calls = append(calls, "delete")
+				return nil
+			}
+
+			err := d.overrunRemoveSandbox(stopSeat, push, del)
+
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("overrunRemoveSandbox = %v, want nil", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("overrunRemoveSandbox = %v, want an error naming %q", err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(calls, tt.wantCalls) {
+				t.Errorf("calls = %q, want %q", calls, tt.wantCalls)
+			}
+			if tt.sandboxed {
+				_, ok, _ := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName)
+				if ok != tt.wantRecord {
+					t.Errorf("record kept = %v, want %v", ok, tt.wantRecord)
+				}
+			}
+		})
+	}
+}
+
 func TestNudge_MessageAsksForSplitProposal(t *testing.T) {
 	t.Parallel()
 	for _, want := range []string{"split proposal", "bead notes"} {

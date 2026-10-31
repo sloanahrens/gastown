@@ -132,6 +132,10 @@ type overrunFake struct {
 	// "reset-worktree". nil leaves the seam unset, so the call lists of the
 	// stops that do not test the reset stay as they were.
 	resetWorktree func(seat overrunSeat) error
+	// removeSandbox, when set, is the stop's sandbox removal, logged as
+	// "sandbox". nil leaves the seam unset, so the call lists of the stops that
+	// do not test it stay as they were.
+	removeSandbox func(seat overrunSeat) error
 	// handedBack lists the beads handBack received, with the branch it was given.
 	handedBack []string
 	// pushed lists the bead and branch each push received; agentBeadsReset the
@@ -187,6 +191,12 @@ func (f *overrunFake) seams() overrunSeams {
 		s.resetWorktree = func(seat overrunSeat) error {
 			f.calls = append(f.calls, "reset-worktree "+seat.Rig+"/"+seat.Polecat)
 			return f.resetWorktree(seat)
+		}
+	}
+	if f.removeSandbox != nil {
+		s.removeSandbox = func(seat overrunSeat) error {
+			f.calls = append(f.calls, "sandbox "+seat.Rig+"/"+seat.Polecat)
+			return f.removeSandbox(seat)
 		}
 	}
 	if f.spanEnd != nil {

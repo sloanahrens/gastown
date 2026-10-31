@@ -1186,7 +1186,15 @@ func (m *SessionManager) removeSandbox(sessionID string) error {
 	if m.rig.Path == "" {
 		return nil
 	}
-	townRoot := filepath.Dir(m.rig.Path)
+	return RemoveStoppedSandbox(filepath.Dir(m.rig.Path), sessionID, m.sandboxPusher, m.sandboxDeleter)
+}
+
+// RemoveStoppedSandbox is removeSandbox for a session that something other than
+// a SessionManager stopped, such as the daemon's overrun stop, which kills
+// through the supervisor. pusher and deleter nil are the linked openshell hooks.
+// It is the same push-then-delete: a refused push keeps the sandbox and its
+// record, and the error wraps ErrSandboxNotRemoved.
+func RemoveStoppedSandbox(townRoot, sessionID string, pusher, deleter func(townRoot string, rec session.SandboxRecord) error) error {
 	rec, sandboxed, err := session.ReadSandboxRecord(townRoot, sessionID)
 	if err != nil {
 		return fmt.Errorf("%w: cannot tell whether %s ran in a sandbox: %w", ErrSandboxNotRemoved, sessionID, err)
@@ -1196,10 +1204,10 @@ func (m *SessionManager) removeSandbox(sessionID string) error {
 	}
 	// A sandbox already gone has no commits left to lose, so it is not a refused
 	// push; the delete below finds nothing to remove either.
-	if err := sandboxPusherOrLinked(m.sandboxPusher, session.SandboxPusher)(townRoot, rec); err != nil && !errors.Is(err, session.ErrNothingToPush) {
+	if err := sandboxPusherOrLinked(pusher, session.SandboxPusher)(townRoot, rec); err != nil && !errors.Is(err, session.ErrNothingToPush) {
 		return fmt.Errorf("%w: keeping its sandbox so its commits survive, their push was refused: %w", ErrSandboxNotRemoved, err)
 	}
-	if err := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), townRoot, sessionID); err != nil {
+	if err := session.CleanupSandboxWith(sandboxDeleterOrLinked(deleter), townRoot, sessionID); err != nil {
 		return fmt.Errorf("%w: removing its sandbox: %w", ErrSandboxNotRemoved, err)
 	}
 	return nil
