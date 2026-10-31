@@ -329,6 +329,26 @@ func TestWorkstateDispositionOfAGoneSandboxSeatTellsLostWork(t *testing.T) {
 	}
 }
 
+// A seat name the rule cannot establish is a refusal, not a match against any
+// seat's branch: the rule never clears a seat on a branch it cannot tell is its
+// own, and never asks origin about one.
+func TestSandboxSeatLandedWithoutBranchNeedsASeatName(t *testing.T) {
+	t.Parallel()
+	issue := &beads.Issue{ID: "gt-work", Status: string(beads.StatusClosed), Notes: "LANDING RECORD\nlanded_commit: 0123456789abcdef\n"}
+	asked := false
+	reason := SandboxSeatLandedWithoutBranch("  ", issue, "gt-work", func(string) ([]string, error) {
+		asked = true
+		return []string{"polecat/toast/gt-work+zzz"}, nil
+	})
+
+	if asked {
+		t.Error("origin was asked although no seat name could match a branch")
+	}
+	if !strings.Contains(reason, "no seat name to match a branch for gt-work") {
+		t.Errorf("reason = %q, want a refusal naming the issue", reason)
+	}
+}
+
 // showFailsBeads is a Manager beads handle whose Show fails for one bead with an
 // error that is not "not found".
 type showFailsBeads struct {
@@ -341,6 +361,20 @@ func (f showFailsBeads) Show(id string) (*beads.Issue, error) {
 		return nil, errors.New("dolt unreachable")
 	}
 	return f.polecatBeads.Show(id)
+}
+
+// missingBeads is a Manager beads handle that reports one bead as absent with
+// no error, the nil answer a gone bead is distinct from an unreadable one.
+type missingBeads struct {
+	polecatBeads
+	id string
+}
+
+func (m missingBeads) Show(id string) (*beads.Issue, error) {
+	if id == m.id {
+		return nil, nil
+	}
+	return m.polecatBeads.Show(id)
 }
 
 // With the sandbox gone, anything the lost-work check cannot establish leaves the
@@ -383,7 +417,7 @@ func TestSandboxLostWorkFactsFailClosedWhenTheAnswerIsUnknown(t *testing.T) {
 			fields := &beads.AgentFields{Agent: "deepseek-flash-sandbox", Branch: tt.branch, LastSourceIssue: "gt-work"}
 			facts := WorkstateFacts{State: StateIdle, CleanupStatus: CleanupClean, HookBeadSafe: true, GitStateSource: GitStateSourceLive, AgentBeadRead: true}
 
-			mgr.applySandboxLostWorkFacts(&facts, fields, "gt-work")
+			mgr.applySandboxLostWorkFacts(&facts, fields, "gt-work", "toast")
 
 			if (tt.wantUnk != "") != facts.GitCheckFailed || facts.SandboxGone != tt.wantGone {
 				t.Fatalf("facts = {GitCheckFailed:%v SandboxGone:%v}, want {%v %v}", facts.GitCheckFailed, facts.SandboxGone, tt.wantUnk != "", tt.wantGone)
@@ -396,6 +430,95 @@ func TestSandboxLostWorkFactsFailClosedWhenTheAnswerIsUnknown(t *testing.T) {
 				if d.Reusable || d.SafeToNuke || d.Reason == "sandbox-work-lost" {
 					t.Errorf("an unknown answer decided %+v: want neither reusable, safe to nuke, nor lost work", d)
 				}
+			}
+		})
+	}
+}
+
+// A sandbox seat whose agent bead recorded no branch names nothing to ask
+// origin about, so the reuse gate judges it by its issue instead: an issue
+// closed with a landing record and no branch named for the seat and issue left
+// on origin is finished, with nothing at risk, and the seat is reusable; an
+// open issue, a no-changes close (closed with no landing record), a branch for
+// the seat and issue still on origin, an unreadable issue and an origin that
+// cannot be asked each keep today's unknown git state (gt-xhnn3). A branch for
+// the issue naming another seat is not this seat's and does not refuse it.
+//
+// Mutation: dropping the landing-record check from SandboxSeatLandedWithoutBranch
+// makes the no_changes_close row below red, and the same row red in the three
+// cmd tests that drive the rule through check-recovery and the nuke gate.
+func TestWorkstateDispositionOfASandboxSeatWithNoBranchTellsItsLanding(t *testing.T) {
+	t.Parallel()
+	const landingRecord = "LANDING RECORD\nlanded_commit: 0123456789abcdef\npatch_id: p1\n"
+	tests := []struct {
+		name      string
+		status    string // the work bead's status
+		notes     string // appended to the work bead
+		seatOnRef string // seat a generated polecat branch for the issue on origin names
+		showFails bool   // the work bead cannot be read
+		missing   bool   // the work bead no longer exists, reported as nil, nil
+		noRepo    bool   // the rig has no repo, so origin cannot be asked
+		wantUnk   string // substring of the unknown reason; "" wants the safe case
+	}{
+		{name: "landed_no_branch_on_origin", status: string(beads.StatusClosed), notes: landingRecord},
+		{name: "no_changes_close_is_not_a_landing", status: string(beads.StatusClosed), wantUnk: "closed with no landing record"},
+		{name: "open_issue_that_landed", status: string(beads.StatusOpen), notes: landingRecord, wantUnk: "is open"},
+		{name: "branch_for_the_seat_and_issue_on_origin", status: string(beads.StatusClosed), notes: landingRecord, seatOnRef: "toast", wantUnk: "still exists on origin"},
+		{name: "another_seats_branch_for_the_issue_on_origin", status: string(beads.StatusClosed), notes: landingRecord, seatOnRef: "furiosa"},
+		{name: "issue_no_longer_exists", status: string(beads.StatusClosed), missing: true},
+		{name: "origin_cannot_be_asked", status: string(beads.StatusClosed), notes: landingRecord, noRepo: true, wantUnk: "could not ask origin whether a branch for gt-work survived"},
+		{name: "issue_cannot_be_read", status: string(beads.StatusOpen), showFails: true, wantUnk: "could not read gt-work for a resume_branch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, mayorRig, bd, _, w := canonicalWithPolecats(t, true, "toast")
+			if tt.seatOnRef != "" {
+				// The rig's origin is mayor/rig itself (canonicalRig points origin
+				// at it), so a refs/heads ref written there is a branch on origin.
+				w.SetRef(t, mayorRig, "refs/heads/polecat/"+tt.seatOnRef+"/gt-work+zzz", w.rev(t, mayorRig, "main"))
+			}
+			if _, err := bd.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case tt.showFails:
+				mgr.beads = showFailsBeads{mgr.beads, "gt-work"}
+			case tt.missing:
+				mgr.beads = missingBeads{mgr.beads, "gt-work"}
+			default:
+				status := tt.status
+				if err := bd.Update("gt-work", beads.UpdateOptions{Status: &status, AppendNotes: tt.notes}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.noRepo {
+				mgr.rig.Path = t.TempDir()
+			}
+			// The agent bead records no branch: the seat left only its issue.
+			bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+				f.Agent, f.Branch, f.HookBead, f.LastSourceIssue = "deepseek-flash-sandbox", "", "", "gt-work"
+			})
+			mgr.sandboxSeat = func(string, string) (LiveGitState, bool) {
+				return SandboxSeatGitState("", false, nil, "sb"), true
+			}
+
+			d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+			if tt.wantUnk != "" {
+				if d.GitStateSource != GitStateSourceUnknown || !strings.Contains(d.GitStateReason, tt.wantUnk) {
+					t.Errorf("git state = %q %q, want unknown naming %q", d.GitStateSource, d.GitStateReason, tt.wantUnk)
+				}
+				if d.Reusable || d.SafeToNuke || d.Reason == "sandbox-work-lost" {
+					t.Errorf("an unknown answer decided %+v: want neither reusable, safe to nuke, nor lost work", d)
+				}
+				return
+			}
+			if d.GitStateSource != GitStateSourceLive {
+				t.Errorf("git state = %q %q, want live", d.GitStateSource, d.GitStateReason)
+			}
+			if !d.Reusable || !d.SafeToNuke {
+				t.Errorf("landed seat reusable=%v safe=%v (reason %s blockers %v), want a safe, reusable seat", d.Reusable, d.SafeToNuke, d.Reason, d.Blockers)
 			}
 		})
 	}

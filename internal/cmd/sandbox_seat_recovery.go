@@ -18,6 +18,12 @@ type sandboxSeatEnv struct {
 	// remoteBranch reports whether branch exists on origin, asked of the rig's
 	// shared bare repo; nil means ls-remote there.
 	remoteBranch func(rigPath, branch string) (bool, error)
+	// survivingBranches reports every generated polecat branch on origin that
+	// encodes issueID, most recently generated first; nil means the shared
+	// reader over the rig's repo. It answers a sandbox seat that recorded no
+	// branch, whose issue landed, whether a branch for the seat and issue
+	// survives (gt-xhnn3).
+	survivingBranches func(rigPath, issueID string) ([]string, error)
 }
 
 func (e sandboxSeatEnv) branchOnOrigin(rigPath, branch string) (bool, error) {
@@ -27,13 +33,22 @@ func (e sandboxSeatEnv) branchOnOrigin(rigPath, branch string) (bool, error) {
 	return git.NewGitWithDir(filepath.Join(rigPath, ".repo.git"), "").RemoteBranchExists("origin", branch)
 }
 
+func (e sandboxSeatEnv) branchesForIssue(rigPath, issueID string) ([]string, error) {
+	if e.survivingBranches != nil {
+		return e.survivingBranches(rigPath, issueID)
+	}
+	return polecat.FindSurvivingBranchesForIssue(rigPath, issueID)
+}
+
 // applySandboxLostWorkFacts gives the verdict what it needs to tell lost work
 // from a finished seat when the sandbox is gone: the bead the seat was working
 // (its hook, else its source issue) and whether anything survives to continue
 // from, a resume_branch on that bead or the branch itself on origin, read from
 // the remote and never from the stale host worktree (gt-qq6rg.3). A remote that
 // cannot be asked leaves the git state unknown rather than claiming either.
-func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv, bd issueShower, rigPath string, fields *beads.AgentFields, hookBead, sourceHint string) {
+// seatName is the polecat's name, under which a seat that recorded no branch is
+// matched (gt-xhnn3).
+func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv, bd issueShower, rigPath string, fields *beads.AgentFields, hookBead, sourceHint, seatName string) {
 	workBead := hookBead
 	if workBead == "" {
 		workBead = sourceHint
@@ -62,19 +77,31 @@ func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv
 		// record asks origin nothing and fails closed as unknown, the same
 		// answer the manager reaches for the same bead (gt-cu66c).
 		branch, unknownReason := polecat.SandboxSeatOriginBranch(fields)
-		if unknownReason != "" {
-			unknown(unknownReason)
-			return
+		switch {
+		case unknownReason != "":
+			// A seat that recorded no branch is judged by its issue instead,
+			// with the manager's rule and its answer (gt-xhnn3).
+			if reason := polecat.SandboxSeatLandedWithoutBranch(seatName, issue, workBead, func(issueID string) ([]string, error) {
+				return env.branchesForIssue(rigPath, issueID)
+			}); reason != "" {
+				unknown(reason)
+				return
+			}
+			preserved = true
+		default:
+			onOrigin, err := env.branchOnOrigin(rigPath, branch)
+			if err != nil {
+				unknown(fmt.Sprintf("could not ask origin whether %s was pushed: %v", branch, err))
+				return
+			}
+			preserved = onOrigin
 		}
-		onOrigin, err := env.branchOnOrigin(rigPath, branch)
-		if err != nil {
-			unknown(fmt.Sprintf("could not ask origin whether %s was pushed: %v", branch, err))
-			return
-		}
-		preserved = onOrigin
 	}
 	facts.SandboxGone = true
 	facts.SandboxWorkBead = workBead
+	// Preserved means nothing here is at risk: the branch is on origin, a bead
+	// names a resume_branch, or — with no branch recorded at all — the issue
+	// landed and no branch for it survives (gt-xhnn3).
 	facts.SandboxBranchPreserved = preserved
 }
 
@@ -106,10 +133,10 @@ func sandboxSeatGitSafe(live polecat.LiveGitState) bool {
 // lost, or "" when nothing is, and an error when the answer is unknown (origin
 // or the work bead could not be read), which the caller fails closed on
 // (gt-qq6rg.3).
-func sandboxLostWork(env sandboxSeatEnv, bd issueShower, rigPath string, fields *beads.AgentFields, hookBead, sourceHint string, hook polecat.HookBeadDisposition, workTerminal bool) (string, error) {
+func sandboxLostWork(env sandboxSeatEnv, bd issueShower, rigPath string, fields *beads.AgentFields, hookBead, sourceHint, seatName string, hook polecat.HookBeadDisposition, workTerminal bool) (string, error) {
 	facts := polecat.WorkstateFacts{HookBeadSafe: true, AssignedBeadTerminal: workTerminal}
 	applyHookDispositionToWorkstateFacts(&facts, hookBead, hook)
-	applySandboxLostWorkFacts(&facts, env, bd, rigPath, fields, hookBead, sourceHint)
+	applySandboxLostWorkFacts(&facts, env, bd, rigPath, fields, hookBead, sourceHint, seatName)
 	if facts.GitCheckFailed {
 		return "", errors.New(facts.GitCheckFailedReason)
 	}
