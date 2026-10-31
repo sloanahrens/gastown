@@ -1,0 +1,4 @@
+-- Wire schema 3: a list may scope to several rigs (ListFilter.Rigs), and the
+-- answer names the rigs it refuses (IssuePage.RigErrors). No table changes. The
+-- level is what a client and a server must agree on before a cross-rig list is
+-- sent, so a server at level 2 refuses the request instead of ignoring the scope.
