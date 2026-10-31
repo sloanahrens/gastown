@@ -34,9 +34,8 @@ func readLines(t *testing.T, lines ...string) []Line {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "scrubcheck.jsonl")
 	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
-	got, found, err := Read(path)
+	got, err := Read(path)
 	require.NoError(t, err)
-	require.True(t, found)
 	return got
 }
 
@@ -268,18 +267,17 @@ func TestScrubcheckRefusals(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "scrubcheck.jsonl")
 		body := noulPair(caller, 0.3, 0.3) + "\nnot json\n"
 		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
-		lines, found, err := Read(path)
+		lines, err := Read(path)
 		assert.ErrorContains(t, err, "line 2 does not decode as a check line")
 		assert.NotContains(t, err.Error(), "not json", "the error names the line, never its text")
-		assert.True(t, found)
 		assert.Nil(t, lines)
 	})
 
 	t.Run("unreadable log refuses the read", func(t *testing.T) {
 		t.Parallel()
-		lines, found, err := Read(t.TempDir())
+		lines, err := Read(t.TempDir())
 		assert.ErrorContains(t, err, "reading the scrub check log")
-		assert.True(t, found)
+		assert.NotErrorIs(t, err, ErrNoLog)
 		assert.Nil(t, lines)
 	})
 
@@ -287,17 +285,16 @@ func TestScrubcheckRefusals(t *testing.T) {
 		t.Parallel()
 		file := filepath.Join(t.TempDir(), "not-a-directory")
 		require.NoError(t, os.WriteFile(file, nil, 0o600))
-		lines, found, err := Read(filepath.Join(file, "scrubcheck.jsonl"))
+		lines, err := Read(filepath.Join(file, "scrubcheck.jsonl"))
 		assert.ErrorContains(t, err, "opening the scrub check log")
-		assert.False(t, found)
+		assert.NotErrorIs(t, err, ErrNoLog)
 		assert.Nil(t, lines)
 	})
 
 	t.Run("absent log is not an error", func(t *testing.T) {
 		t.Parallel()
-		lines, found, err := Read(filepath.Join(t.TempDir(), "scrubcheck.jsonl"))
-		require.NoError(t, err)
-		assert.False(t, found)
+		lines, err := Read(filepath.Join(t.TempDir(), "scrubcheck.jsonl"))
+		assert.ErrorIs(t, err, ErrNoLog)
 		assert.Nil(t, lines)
 	})
 

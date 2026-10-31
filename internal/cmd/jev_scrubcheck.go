@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -99,15 +100,15 @@ func jevScrubcheckWithFlags(w io.Writer, townRoot, caller, since string, cut flo
 		return err
 	}
 	path := jev.ScrubCheckPath(townRoot)
-	lines, found, err := scrubcheck.Read(path)
-	if err != nil {
-		return err
-	}
-	if !found {
+	lines, err := scrubcheck.Read(path)
+	if errors.Is(err, scrubcheck.ErrNoLog) {
 		if asJSON {
 			return encodeScrubcheck(w, scrubcheck.Report{Cut: cut, Rows: []scrubcheck.Row{}})
 		}
 		_, err := fmt.Fprintf(w, "no scrub check log at %s: no sampled request has been checked yet\n", path)
+		return err
+	}
+	if err != nil {
 		return err
 	}
 	base, err := scrubcheck.Baseline(townRoot, cut, from)

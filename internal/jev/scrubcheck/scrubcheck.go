@@ -83,32 +83,37 @@ type Score struct {
 	Confidence float64 `json:"confidence"`
 }
 
-// Read loads the check log at path. found is false when no log exists yet. A
-// line that does not decode fails the read: a measurement that skips lines
+// ErrNoLog is what Read returns when no check log exists yet, so no sampled
+// request has been checked.
+var ErrNoLog = errors.New("no scrub check log")
+
+// Read loads the check log at path. It returns ErrNoLog when no log exists yet.
+// A line that does not decode fails the read: a measurement that skips lines
 // reads as cleaner than the traffic it measured.
-func Read(path string) (lines []Line, found bool, err error) {
+func Read(path string) ([]Line, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, nil
+		return nil, ErrNoLog
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("opening the scrub check log: %w", err)
+		return nil, fmt.Errorf("opening the scrub check log: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
+	var lines []Line
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for n := 1; sc.Scan(); n++ {
 		var l Line
 		if err := json.Unmarshal(sc.Bytes(), &l); err != nil {
-			return nil, true, fmt.Errorf("reading the scrub check log: line %d does not decode as a check line", n)
+			return nil, fmt.Errorf("reading the scrub check log: line %d does not decode as a check line", n)
 		}
 		lines = append(lines, l)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, true, fmt.Errorf("reading the scrub check log: %w", err)
+		return nil, fmt.Errorf("reading the scrub check log: %w", err)
 	}
-	return lines, true, nil
+	return lines, nil
 }
 
 // Baseline reads the repeat noise and returns, per caller and question, the
