@@ -1,11 +1,11 @@
 ## Changelog
 
-- 2026-10-31 gt-9ptn8: merged the scratch and shell-script pairs into their policy sections, rules 7 and 8 point at them, intro counts and repeated clauses dropped (sixteen rules, rules unchanged).
+- 2026-10-31 gt-9ptn8: merged the scratch and shell-script pairs into their policy sections; rules 7 and 8 point at them; intro counts dropped (sixteen rules).
 - 2026-10-30 gt-wfohy: added rule 16 (rework: answer every open finding, never loosen a test, limit or allowlist to land) and rewrote rule 9's flags from the 2026-10-28..30 findings, where scope was filed as an edit outside the bead's Constraints rather than a dependency bump or rename (sixteen rules).
 - 2026-10-30 gt-u3hr0: rules 1, 3, 10, 11 rewritten from the 2026-10-28..30 rejection record; rule 1 now names the forms om flags, old rule 11 (matcher and platform-file errors) merges into rule 1, the guard-mutation bullet moves from rule 10 to rule 3, and the rules after it renumber (fifteen rules).
 - 2026-10-30 gt-o87rv: added rules 13-16 (cloud authority, cloud previews, console-only steps, cost and credentials); rule 14 points at the no-new-scripts town policy instead of restating it.
 - 2026-10-28 gt-9j9vu: bead text is one single-quoted argument on every `gt bead` verb that takes text (create, update, claim, note, comment, close; town policy section).
-- 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree".
+- 2026-10-27 gt-vhyk9: files stay under the worktree — scratch files, trace logs, test data and build output included; /tmp, /private/tmp, HOME and a session scratchpad are out (gt-3n4e0, hq-wisp-dvrty). The 2026-10-14 scratch section is retitled "Scratch files stay out of the tracked tree" (merged into this section by gt-9ptn8).
 - 2026-10-27 gt-3vgbi: moved the town polecat policy into the repo from ~/gt/directives/polecat.md, with the twelve "What om rejects" rules from ~/gt/gastown/directives/polecat.md, text unchanged.
 - 2026-10-27 gt-3vgbi: removed a probe line that the overseer's probe bead had put in the rules file; it was not policy.
 - 2026-09-23 claude-9a8: an interrupt is a delivery artifact, not an operator stop (town policy section).
@@ -72,8 +72,9 @@ opens literally.
 
 Do not add tests to a package that `internal/testpolicy` lists as exempt (its baseline holds
 only the tests it had at seed time), and do not run a subprocess, create an executable file or
-run the Go tool inside a unit test: inject the runner and the filesystem and use fakes. Never
-edit the baseline; a policy failure means the test is the problem.
+run the Go tool inside a unit test: inject the runner and the filesystem and use fakes. A unit
+test never reads the live town tree (`~/gt`) or host state: it builds its tree under `t.TempDir()`
+or a fake. Never edit the baseline; a policy failure means the test is the problem.
 
 ## Keep files under the worktree (town policy, 2026-10-27)
 
@@ -87,11 +88,10 @@ has nobody to answer it (gt-3n4e0, hq-wisp-dvrty). Put scratch files in the
 worktree's `scratch/` directory, which the checkpoint dog leaves untracked
 (`internal/checkpoint/throwaway.go`).
 
-The checkpoint dog commits your working tree into your branch every few minutes
-("WIP: checkpoint (auto)"), so a scratch test, harness or half-finished file left in the
-worktree outside `scratch/` is committed within minutes. `gt done`'s squash rewrites commit
-messages only, so the file survives into the merge request even after you delete it. If one
-slipped into the tracked tree, delete it and commit the deletion before `gt done`.
+The checkpoint dog commits your working tree every few minutes ("WIP: checkpoint (auto)"), so
+a file left outside `scratch/` is committed within minutes. `gt done`'s squash rewrites commit
+messages only, so it survives into the merge request even after you delete it. If one slipped
+into the tracked tree, delete it and commit the deletion before `gt done`.
 
 ## Tests are engineered, not accumulated (town policy, 2026-10-23)
 
@@ -100,7 +100,7 @@ slipped into the tracked tree, delete it and commit the deletion before `gt done
 A badly engineered test is a liability; two repos had to be rebuilt after theirs piled up.
 Full standard: `~/.claude/docs/standards/test-engineering.md`. When you add or change a test:
 
-- Test behaviour a caller can see, not how the code is built. One reason to fail per test.
+- One reason to fail per test.
 - Give it a tier and a cost: unit is in-process and fast, integration is real processes or
   a sandbox. A test over its tier's cost moves up a tier or gets cheaper; it never gets a
   longer limit.
@@ -188,7 +188,7 @@ The rule is the town-policy section "Tests stay hermetic" above, which bars a te
 
 ## 8. Do not add a shell or Python script
 
-The rule is the town-policy section "No new scripts for testable logic" above; a new .sh or .py file is refused.
+The rule is the town-policy section "No new scripts for testable logic" above, which refuses a new shell or Python script when the logic is testable Go.
 - om flags: "new parsing and state logic added to a shell script". Before: a script that parses a file. After: the same parse as a Go function with a table test.
 
 ## 9. Stay in scope
