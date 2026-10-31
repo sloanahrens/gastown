@@ -501,11 +501,18 @@ func TestScrubCheckPathIsTheLogTheClientWrites(t *testing.T) {
 	)
 	_, err := c.Choice(context.Background(), scrubState(), "Which team?", shoeCriteria)
 	require.NoError(t, err)
-	waitShadows(t, c)
+
+	// A bounded wait: a shadow call that hangs fails this test, not the binary.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, c.WaitShadows(ctx), "the shadow call finishes within its bound")
 
 	lines := checkLines(t, want)
 	require.Len(t, lines, 1, "the one request writes one line at ScrubCheckPath")
 	assert.Equal(t, outcomeChecked, lines[0]["outcome"])
+	// The line holds the second call's answers, so the call ran and was logged.
+	assert.Equal(t, "returns", answerChoice(t, lines[0]["original_answers"]))
+	assert.Equal(t, "billing", answerChoice(t, lines[0]["scrubbed_answers"]))
 }
 
 // checkLines decodes the check log at path, one object per line.
