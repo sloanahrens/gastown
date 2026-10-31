@@ -55,6 +55,7 @@ COPY --chmod=0755 claude /usr/local/bin/claude
 # address. Each RUN writes the config of the user it builds as, which is root
 # while no USER instruction is set; the container runs as that same user, so a
 # USER added later would leave the identity in a home the container does not read.
+# TestDaemonDockerfileRunsAsRootWhereItsIdentityIs fails on any USER instruction.
 RUN git config --global user.name gt-daemon
 RUN git config --global user.email gt-daemon@gastown.local
 
