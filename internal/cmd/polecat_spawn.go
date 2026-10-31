@@ -1137,11 +1137,50 @@ func (s *SpawnedPolecatInfo) giveBackDriftRespawn(startErr error) {
 
 // giveBackDriftRespawnIn is giveBackDriftRespawn for the town at townRoot.
 func (s *SpawnedPolecatInfo) giveBackDriftRespawnIn(townRoot string, startErr error) {
-	if s.HookBead == "" || s.respawnMark.Count == 0 || !errors.Is(startErr, session.ErrImageDrift) {
+	if !errors.Is(startErr, session.ErrImageDrift) {
+		return
+	}
+	s.giveBackRespawn(townRoot, "an image-drift deferral")
+}
+
+// giveBackBondLockRespawn hands back the count this spawn recorded when the
+// sling could not bond its molecule because the town bond lock did not free
+// (ErrBondLockTimeout). The lock never reached bd, so that failure is the
+// town's load rather than a death of the bead: the dispatcher defers the bead
+// and slings it again next tick, and a count per tick spends the bead's
+// respawn budget on the queue in front of it (gt-8d38p). Every other sling
+// failure keeps its count.
+func (s *SpawnedPolecatInfo) giveBackBondLockRespawn(slingErr error) {
+	if s == nil || s.HookBead == "" {
+		return
+	}
+	townRoot, err := s.town()
+	if err != nil {
+		return
+	}
+	s.giveBackBondLockRespawnIn(townRoot, slingErr)
+}
+
+// giveBackBondLockRespawnIn is giveBackBondLockRespawn for the town at townRoot.
+func (s *SpawnedPolecatInfo) giveBackBondLockRespawnIn(townRoot string, slingErr error) {
+	if !errors.Is(slingErr, ErrBondLockTimeout) {
+		return
+	}
+	s.giveBackRespawn(townRoot, "a bond-lock deferral")
+}
+
+// giveBackRespawn removes this spawn's count from its bead, for a failure that
+// is the seat's precondition rather than the bead's death: the dispatcher
+// defers such a bead and slings it again, so the count must come back or a few
+// ticks reach the respawn limit on their own (gt-cjmt5, gt-8d38p). It runs
+// once per spawn: the mark is cleared after the count goes back, so a second
+// delivery gives nothing more.
+func (s *SpawnedPolecatInfo) giveBackRespawn(townRoot, why string) {
+	if s.HookBead == "" || s.respawnMark.Count == 0 {
 		return
 	}
 	if err := polecat.GiveBackBeadRespawn(townRoot, s.HookBead, s.respawnMark); err != nil {
-		style.PrintWarning("could not give back the respawn of %s for an image-drift deferral: %v", s.HookBead, err)
+		style.PrintWarning("could not give back the respawn of %s for %s: %v", s.HookBead, why, err)
 		return
 	}
 	s.respawnMark = polecat.RespawnMark{}

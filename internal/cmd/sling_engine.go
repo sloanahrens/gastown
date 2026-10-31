@@ -49,6 +49,7 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 		PriorAttempt:          d.priorAttempt,
 		Cook:                  d.cook,
 		InstantiateFormula:    d.instantiateFormula,
+		FormulaFailed:         d.engineFormulaFailed,
 		HookDir:               d.hookDir,
 		Hook:                  d.hook,
 		StoreFields:           d.storeFields,
@@ -167,4 +168,12 @@ func (d *slingDeps) engineSpanStart(townRoot, bead, seat string) error {
 
 func (d *slingDeps) engineRollbackArtifacts(spawn *sling.Spawn, townRoot, beadID, hookWorkDir string) {
 	d.rollbackArtifacts(cmdSpawn(spawn), townRoot, beadID, hookWorkDir)
+}
+
+// engineFormulaFailed gives back the respawn a spawn charged when the formula
+// step ended on a bond that never got the town lock: the spec dispatcher
+// defers that bead and slings it again, so the count must not stay spent
+// (gt-8d38p). Every other formula failure keeps its count.
+func (d *slingDeps) engineFormulaFailed(spawn *sling.Spawn, err error) {
+	cmdSpawn(spawn).giveBackBondLockRespawn(err)
 }

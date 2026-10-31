@@ -428,6 +428,12 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		formulaResult, err := d.InstantiateFormula(ctx, opts.FormulaName, opts.BeadID, info.Title, hookWorkDir, townRoot, allVars)
 		if err != nil {
 			if opts.FormulaFailFatal {
+				// The spawn is charged before this step, so report the cause
+				// now: a caller gives back what a failure the town caused did
+				// not spend (gt-8d38p).
+				if d.FormulaFailed != nil {
+					d.FormulaFailed(spawnInfo, err)
+				}
 				// Rollback spawned polecat on fatal formula failure
 				rollbackSpawnedPolecat(opts.BeadID, "Formula instantiation failed")
 				result.ErrMsg = fmt.Sprintf("formula failed: %v", err)

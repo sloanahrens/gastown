@@ -1496,6 +1496,57 @@ func TestSpecDispatchCacheVolumeIsADeferralNotAFailure(t *testing.T) {
 	}
 }
 
+// A bond that could not take the town bond lock within its wait never reached
+// bd, so it is not Dolt contention, but it defers the bead the way contention
+// does: the queue that outlasted the bound is the town's load, not the bead's,
+// and the sling gave back the respawn it charged for it (gt-8d38p). The
+// dispatcher adds no failed label and no note, and the next tick slings the
+// bead once the bond queue drains. A formula failure that is not the lock still
+// labels the bead.
+func TestSpecDispatchBondLockTimeoutIsADeferral(t *testing.T) {
+	t.Parallel()
+	// Wrapped the way the sling returns it: instantiating the formula, then
+	// the bond under it.
+	lockTimeout := fmt.Errorf("instantiating formula mol-polecat-work: %w",
+		fmt.Errorf("bonding: spawning and attaching proto: %w", ErrBondLockTimeout))
+	for _, tc := range []struct {
+		name         string
+		err          error
+		wantFailed   int
+		wantDeferred int
+		wantLabel    bool
+	}{
+		{"bond_lock_timeout_defers", lockTimeout, 0, 1, false},
+		{"another_formula_failure_labels", errors.New("instantiating formula mol-polecat-work: unknown var"), 1, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+			f.slingErrs["gt-a"] = []error{tc.err}
+			r := runSpecDispatchCycle(f.env())
+			if len(r.Failed) != tc.wantFailed || len(r.Deferred) != tc.wantDeferred || len(f.slung) != 0 {
+				t.Fatalf("failed %+v deferred %+v slung %v; want %d failed and %d deferred", r.Failed, r.Deferred, f.slung, tc.wantFailed, tc.wantDeferred)
+			}
+			if got := slices.Contains(f.labels["gt-a"], specdispatch.DispatchFailedLabel); got != tc.wantLabel {
+				t.Errorf("labels = %v, want %s added = %v", f.labels["gt-a"], specdispatch.DispatchFailedLabel, tc.wantLabel)
+			}
+			if tc.wantLabel {
+				return
+			}
+			if n := len(f.notes["gt-a"]); n != 0 {
+				t.Errorf("annotated %d times, want none: the bead is not held out of the queue", n)
+			}
+			if line := r.Deferred[0].Line; !strings.Contains(line, "town bond lock did not free") {
+				t.Errorf("deferral line = %q, want it to name the bond lock", line)
+			}
+			// Still a candidate: the next tick slings it once the queue drains.
+			if r := runSpecDispatchCycle(f.env()); len(r.Dispatched) != 1 || len(f.slung) != 1 {
+				t.Errorf("next tick: dispatched %+v, slung %v; want the bead slung", r.Dispatched, f.slung)
+			}
+		})
+	}
+}
+
 func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
