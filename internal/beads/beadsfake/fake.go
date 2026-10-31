@@ -1063,7 +1063,9 @@ func (f *Fake) DepList(id, depType string) ([]beads.IssueDep, error) {
 // DepListUp returns the issues that depend on id with relation depType ("" for
 // any), each with its relation in DependencyType, in creation order. The fake
 // keys durable issues and wisps alike in one table, so an ephemeral dependent
-// needs no special path.
+// needs no special path. A dependent whose edge names id as
+// external:<rig>:<id> is listed too, once, at its relation (the plain edge's
+// when it holds both), as the tracker lists it.
 func (f *Fake) DepListUp(id, depType string) ([]beads.IssueDep, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1077,8 +1079,8 @@ func (f *Fake) DepListUp(id, depType string) ([]beads.IssueDep, error) {
 	sort.Slice(records, func(i, j int) bool { return records[i].seq < records[j].seq })
 	var out []beads.IssueDep
 	for _, r := range records {
-		for _, e := range r.deps {
-			if e.to != id || (depType != "" && e.typ != depType) {
+		for _, e := range upEdges(r.deps, id) {
+			if depType != "" && e.typ != depType {
 				continue
 			}
 			out = append(out, beads.IssueDep{
@@ -1092,6 +1094,35 @@ func (f *Fake) DepListUp(id, depType string) ([]beads.IssueDep, error) {
 		}
 	}
 	return out, nil
+}
+
+// upEdges returns the edges of a dependent that name id: its plain edges when
+// it has any, otherwise one external:<rig>:<id> edge naming id. The choice is
+// made before any relation filter, so a dependent holding both kinds is listed
+// once, at the plain relation, as the tracker lists it.
+func upEdges(deps []edge, id string) []edge {
+	var plain, external []edge
+	for _, e := range deps {
+		switch {
+		case e.to == id:
+			plain = append(plain, e)
+		case externalNames(e.to, id):
+			external = append(external, e)
+		}
+	}
+	if len(plain) > 0 {
+		return plain
+	}
+	if len(external) > 0 {
+		return external[:1]
+	}
+	return nil
+}
+
+// externalNames reports whether ref is external:<rig>:<id> naming id, the rule
+// stated on the tracker contract case depsExternalDependents.
+func externalNames(ref, id string) bool {
+	return isExternalRef(ref) && strings.Count(ref, ":") >= 2 && ref[strings.LastIndex(ref, ":")+1:] == id
 }
 
 // isExternalRef reports whether id is a cross-database reference

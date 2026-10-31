@@ -56,7 +56,7 @@ func Status(ctx context.Context, o Options) error {
 	}
 	line("ESTOP file", yesNo(r.estop, "present", "absent"))
 	line("hold file", yesNo(r.hold, "present", "absent"))
-	fmt.Fprintln(o.Out, e.ringLine())
+	line("ring:", e.ringState())
 	line("landings pending", pending)
 	line("polecats working", r.workingCount())
 	line("dolt gc running", strconv.Itoa(boolInt(r.gc)))
@@ -66,36 +66,48 @@ func Status(ctx context.Context, o Options) error {
 	return nil
 }
 
-// ringLine is the Ring's line in the report: what its signed lease says at the
-// engine's clock, or why it cannot be trusted. It is information only, since
-// derive never reads it, so no power state changes with the Ring.
-func (e *engine) ringLine() string {
+// ringState is the Ring's value in the report: what its signed lease says at
+// the engine's clock, or why it cannot be trusted. It is information only,
+// since derive never reads it, so no power state changes with the Ring.
+func (e *engine) ringState() string {
 	var key []byte
 	if e.o.RingKey != nil {
-		key, _ = e.o.RingKey(e.o.TownRoot)
+		var err error
+		key, err = e.o.RingKey(e.o.TownRoot)
+		if err != nil {
+			// The Ring stays keyless, but the reader's reason is kept so the
+			// report says why the key is missing.
+			return fmt.Sprintf("key unavailable (%v)", err)
+		}
 	}
 	now := e.o.Now()
 	st, err := ring.Read(e.o.TownRoot, key, now)
 	switch {
 	case errors.Is(err, ring.ErrNoKey):
-		return "ring: key unavailable"
+		return "key unavailable"
 	case err != nil:
-		return fmt.Sprintf("ring: unreadable (%v)", err)
+		return fmt.Sprintf("unreadable (%v)", err)
 	case st.Kind == ring.Valid:
-		return "ring: valid, wanes in " + spanText(st.Record.ExpiresAt.Sub(now))
+		return "valid, wanes in " + spanText(st.Record.ExpiresAt.Sub(now))
 	case st.Kind == ring.Waned:
-		return "ring: waned " + spanText(now.Sub(st.Record.ExpiresAt)) + " ago"
+		return "waned " + spanText(now.Sub(st.Record.ExpiresAt)) + " ago"
 	default:
-		return "ring: " + st.String()
+		return st.String()
 	}
 }
 
-// spanText words a span for the ring line: whole hours, or minutes under one.
+// spanText words a span for the ring line: whole hours from an hour up,
+// minutes and seconds under one, and seconds under a minute, so a lease that
+// is about to wane is not shown as "0m".
 func spanText(d time.Duration) string {
-	if d < time.Hour {
-		return fmt.Sprintf("%dm", int(d.Minutes()))
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
 	}
-	return fmt.Sprintf("%dh", int(d.Hours()))
 }
 
 // trackerStatus is the tracker's part of the report. A town with no rig on

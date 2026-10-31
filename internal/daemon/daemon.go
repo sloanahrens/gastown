@@ -688,6 +688,14 @@ type Daemon struct {
 	// production.
 	landingPassFn func()
 
+	// landingPassWindowFn, when non-nil, is called by beginLandingPass after the
+	// in-flight count is taken and before the hold recheck, the window the
+	// recheck closes. Test seam, as landingPassFn is: a test puts a hold on in
+	// that window to drive the loop's refused-pass branch, which no other
+	// interleaving reaches deterministically. It must not block; nil in
+	// production.
+	landingPassWindowFn func()
+
 	// landingHolds is the set of holds on new landing passes (landing_hold.go).
 	// The upgrade restart takes one while a marker the daemon must act on
 	// exists, so it finds an idle moment (gt-nxvpe); rebuild_om takes one when

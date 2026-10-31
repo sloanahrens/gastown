@@ -3,9 +3,9 @@
 // get, the claim, release and transfer guards, the plain close those guards
 // refuse, the creates a Batch applies, the comments and links an export
 // reads, the counts a stats read reports, and the tokens an admin issues and
-// revokes. Every other method returns store.ErrUnimplemented, so a unit test
-// that reaches past them fails loudly rather than reading a store that only
-// looks modeled.
+// revokes. GetIssues also fills Dependents, as the real store does. Every
+// other method returns store.ErrUnimplemented, so a unit test that reaches
+// past them fails loudly rather than reading a store that only looks modeled.
 package storetest
 
 import (
@@ -121,7 +121,79 @@ func (f *Fake) GetIssues(_ context.Context, ids []string) (map[string]api.Issue,
 			out[id] = is
 		}
 	}
+	f.fillDependentsLocked(out)
 	return out, nil
+}
+
+// fillDependentsLocked sets Dependents on the issues in out from the links, in
+// the order Postgres lists them (link creation, then the dependent's id). The
+// link rule is stated on the contract case depsExternalDependents. f.mu is
+// held.
+func (f *Fake) fillDependentsLocked(out map[string]api.Issue) {
+	type pick struct {
+		dep   api.IssueDep
+		at    time.Time
+		plain bool
+	}
+	picks := map[string]map[string]pick{}
+	for _, l := range f.links {
+		dependent, ok := f.issues[l.IssueID]
+		if !ok {
+			continue
+		}
+		target, plain, ok := linkTarget(l.DependsOn, out)
+		if !ok {
+			continue
+		}
+		if have, dup := picks[target][l.IssueID]; dup && (have.plain || !plain) {
+			continue
+		}
+		if picks[target] == nil {
+			picks[target] = map[string]pick{}
+		}
+		picks[target][l.IssueID] = pick{
+			dep: api.IssueDep{
+				ID: dependent.ID, Title: dependent.Title, Status: dependent.Status, Priority: dependent.Priority,
+				Type: dependent.Type, DependencyType: l.Type, CloseReason: dependent.CloseReason,
+			},
+			at:    l.CreatedAt,
+			plain: plain,
+		}
+	}
+	for target, byDependent := range picks {
+		ps := make([]pick, 0, len(byDependent))
+		for _, p := range byDependent {
+			ps = append(ps, p)
+		}
+		slices.SortFunc(ps, func(a, b pick) int {
+			if c := a.at.Compare(b.at); c != 0 {
+				return c
+			}
+			return strings.Compare(a.dep.ID, b.dep.ID)
+		})
+		is := out[target]
+		is.Dependents = make([]api.IssueDep, 0, len(ps))
+		for _, p := range ps {
+			is.Dependents = append(is.Dependents, p.dep)
+		}
+		out[target] = is
+	}
+}
+
+// linkTarget reports which issue in out a link's depends_on names, and whether
+// it names it plainly.
+func linkTarget(dependsOn string, out map[string]api.Issue) (target string, plain, ok bool) {
+	if _, found := out[dependsOn]; found {
+		return dependsOn, true, true
+	}
+	if !strings.HasPrefix(dependsOn, "external:") || strings.Count(dependsOn, ":") < 2 {
+		return "", false, false
+	}
+	local := dependsOn[strings.LastIndex(dependsOn, ":")+1:]
+	if _, found := out[local]; found && local != "" {
+		return local, false, true
+	}
+	return "", false, false
 }
 
 func unimplemented(method string) error {
@@ -257,8 +329,9 @@ func (*Fake) Comments(context.Context, string) ([]api.Comment, error) {
 	return nil, unimplemented("Comments")
 }
 
-// AddDependency records a link from issue to dependsOn. Export reads the
-// links; Dependencies stays unimplemented.
+// AddDependency records a link from issue to dependsOn. Export and the
+// Dependents that GetIssues fills read the links; Dependencies stays
+// unimplemented.
 func (f *Fake) AddDependency(ctx context.Context, issue, dependsOn, depType string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

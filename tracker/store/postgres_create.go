@@ -266,13 +266,34 @@ WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, t.id`, ids)
 	return rows.Err()
 }
 
+// fillDependentsSQL reads the links that name each id in $1, plain or as an
+// external:<rig>:<id> reference (the rule is pinned by the contract case
+// depsExternalDependents). The two branches stay index-served: the plain one
+// is a lookup on dependencies_target_idx, and the external one matches the
+// predicate and expression of dependencies_external_target_idx (migration
+// 0004), a partial index over the external links only. DISTINCT ON keeps one
+// link per dependent and target, the plain one if any.
+const fillDependentsSQL = `WITH links AS (
+  SELECT d.depends_on AS target, d.issue_id, d.type, d.created_at, true AS plain
+  FROM tracker.dependencies d
+  WHERE d.depends_on = ANY($1)
+  UNION ALL
+  SELECT regexp_replace(d.depends_on, '^.*:', ''), d.issue_id, d.type, d.created_at, false
+  FROM tracker.dependencies d
+  WHERE d.depends_on LIKE 'external:%:%' AND regexp_replace(d.depends_on, '^.*:', '') = ANY($1)
+), one AS (
+  SELECT DISTINCT ON (target, issue_id) target, issue_id, type, created_at
+  FROM links ORDER BY target, issue_id, plain DESC, created_at
+)
+SELECT o.target, i.id, i.title, i.status, i.priority, i.issue_type, o.type, i.close_reason
+FROM one o JOIN tracker.issues i ON i.id = o.issue_id
+ORDER BY o.target, o.created_at, i.id`
+
 // fillDependents sets Dependents on the issues in out named by ids: the issues
 // that depend on each, with the relation. Links from other rigs' external
-// references are not issues here and do not appear.
+// references to ids not in out are not issues here and do not appear.
 func fillDependents(ctx context.Context, q querier, ids []string, out map[string]api.Issue) error {
-	rows, err := q.Query(ctx, `SELECT d.depends_on, i.id, i.title, i.status, i.priority, i.issue_type, d.type, i.close_reason
-FROM tracker.dependencies d JOIN tracker.issues i ON i.id = d.issue_id
-WHERE d.depends_on = ANY($1) ORDER BY d.depends_on, d.created_at, i.id`, ids)
+	rows, err := q.Query(ctx, fillDependentsSQL, ids)
 	if err != nil {
 		return fmt.Errorf("store: get dependents: %w", err)
 	}

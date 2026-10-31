@@ -568,20 +568,27 @@ func specChildrenReader(stores slingStores) func(dir string, ids []string) (map[
 	}
 }
 
-// specCandidateChildren is the tick's children read for every candidate of a
+// specCandidateChildren is the tick's children read for the candidates of a
 // board read: one bd view per rig the candidates live in, answered per bead,
 // with a per-bead fallback when the grouped read fails so one unreadable bead
-// does not cost the whole rig its children (gt-km9jt). The children are read
-// fresh every tick: a child's change does not move its parent's row, so a
-// remembered child set would hide a closure from the container hold.
+// does not cost the whole rig its children (gt-km9jt). A candidate the verdict
+// memory refuses is not read at all (see childrenWanted). Every other candidate
+// is read fresh each tick: a child's change does not move its parent's row, and
+// a child added to a childless parent does not move the parent's row either, so
+// no remembered child set could be trusted to hold the container hold.
 //
 // The default read keeps the childless parents a resolved answer names (see
 // specChildrenRead), so only an id with no key is read alone. Almost every
 // candidate is childless, and a read that drops those would cost each of them a
 // second bd call (gt-4u2gt).
-func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCandidate, read func(dir string, ids []string) (map[string][]*beads.Issue, error)) func(beadID string) ([]specdispatch.Child, error) {
+func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCandidate, verdicts *specCandidateVerdicts, read func(dir string, ids []string) (map[string][]*beads.Issue, error)) func(beadID string) ([]specdispatch.Child, error) {
 	byDir := map[string][]string{}
+	unread := map[string]bool{}
 	for _, c := range cands {
+		if !verdicts.childrenWanted(c) {
+			unread[c.Spec.ID] = true
+			continue
+		}
 		dir := resolveBeadDirFromTownRoot(townRoot, c.Spec.ID)
 		byDir[dir] = append(byDir[dir], c.Spec.ID)
 	}
@@ -595,6 +602,9 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 	return func(beadID string) ([]specdispatch.Child, error) {
 		mu.Lock()
 		defer mu.Unlock()
+		if unread[beadID] {
+			return nil, nil
+		}
 		dir := resolveBeadDirFromTownRoot(townRoot, beadID)
 		if !done[dir] {
 			done[dir] = true
@@ -1559,9 +1569,8 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// before the sling is what catches a bead that changed since the board.
 		full := c.Spec
 		// The shape and label verdicts of a candidate whose board row has not
-		// moved are the ones the last tick reached. An eligible candidate is
-		// still read each tick for its admission edges (specBoardDetails), so
-		// serving them here saves the decision, not the read; a refused
+		// moved are the ones the last tick reached, so it is decided from the
+		// record and its design is not read again (specBoardDetails). A refused
 		// candidate is not read at all, and its skip is all the tick knows
 		// (gt-km9jt).
 		remembered, served := env.Verdicts.lookUp(c)
@@ -1597,10 +1606,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// a skip, not a failure: the bead stays ready and the next tick asks
 		// again once the blocker closes.
 		//
-		// The edges are always this tick's read, never a served verdict: a
-		// blocker that closes or reopens does not move the dependent's row, so a
-		// remembered edge verdict would hold the bead after its blocker freed it
-		// or sling it over one that reopened (gt-km9jt).
+		// The edges are this tick's own read (specBoardDetails), never remembered.
 		blockers := c.Blockers
 		if why := specBlocked(sling.Admit(blockers)); why != "" {
 			// Not remembered: the bead stays ready and the next tick reads its
@@ -1726,7 +1732,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// incoming blocks edges there, while the parent-child edge is a
 		// separate type, so the count is zero for a parent whose only children
 		// are parent-child ones (gt-603wu). The children view is the predicate,
-		// as it is on the peer path, and every candidate gets the read.
+		// as it is on the peer path, and it is read every tick: the memory
+		// keeps no children (specCandidateChildren). A refused candidate never
+		// reaches this line, since the eligibility check above skips it, so its
+		// children are left unread on purpose.
 		children, err := env.Children(id)
 		if err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot read children: %v", id, err))
@@ -2678,7 +2687,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 			}, read, verdicts)
 			annotations.observe(read)
-			children = specCandidateChildren(townRoot, reads, read.Candidates, nil)
+			children = specCandidateChildren(townRoot, reads, read.Candidates, verdicts, nil)
 			return read
 		},
 		Verdicts: verdicts,
@@ -2686,9 +2695,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			return showSpecWith(reads, id, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 		},
 		ShowFresh: func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
-		// Every candidate's children in one bd view per rig, read fresh each
-		// tick: a child closed without moving its parent's row is still seen by
-		// the next tick's container hold (gt-km9jt).
+		// The children of every candidate in one bd view per rig, read fresh
+		// each tick: a child closed or added without moving its parent's row is
+		// still seen by the next tick's container hold (gt-km9jt, gt-qcl61).
 		Children: func(id string) ([]specdispatch.Child, error) {
 			if children == nil {
 				reads.call()
@@ -3148,32 +3157,44 @@ func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 // specBoardDetails fills the two things a board row cannot: the design the lint
 // reads, which a row may leave out, and the blocking edges the admission check
 // runs sling.Admit on, which a row never carries (gt-ndad8). The rig's own
-// store answers both, with one ShowMultiple per rig over every candidate —
-// never one show per candidate (gt-bqj8q). A design the row already carries is
-// kept as it is; the edges are always the read's, because a row that says
+// store answers both, with one ShowMultiple per rig over the candidates that
+// need them — never one show per candidate (gt-bqj8q). A design the row already
+// carries is kept as it is; the edges are the read's, because a row that says
 // nothing about dependencies is not a row that says there are none.
+//
+// A candidate the memory remembers needs no design: its shape and label verdict
+// are served. One with no blocking edge (dependency_count 0, most of the board)
+// reads nothing. One with an edge is read in full like a fresh candidate: a
+// blocker that closes or reopens, or an edge swapped for another of the same
+// count, moves neither the dependent's row nor its dependency_count, so the
+// edges are never remembered (gt-km9jt, gt-qcl61).
 //
 // A candidate the read does not answer is dropped with its error: the edges are
 // unread, and a bead with no list is not a bead with no blockers (gt-o70a9). It
 // waits for the next tick rather than dispatching blind.
 //
 // A candidate the board itself refuses — an excluded label, a status, an
-// assignee — costs no details read once its unchanged row's refusal is known:
-// it is never slung, so it needs neither the design nor the edges. Every other
-// candidate is read every tick, because the edges admission runs on are never
-// served from the verdict memory: a blocker that closes or reopens does not
-// move the dependent's row (gt-km9jt).
+// assignee — costs no read once its unchanged row's refusal is known: it is
+// never slung, so it needs neither the design nor the edges.
 func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Client, read specBoardRead, verdicts *specCandidateVerdicts) specBoardRead {
-	var rigs []string
-	byRig := map[string][]int{}
+	var fresh []int
 	for i, c := range read.Candidates {
-		if _, refused := verdicts.refusal(c); refused {
+		if verdicts.refused(c) {
 			continue
 		}
-		if _, seen := byRig[c.Rig]; !seen {
-			rigs = append(rigs, c.Rig)
+		if _, ok := verdicts.lookUp(c); ok && c.DepCount == 0 {
+			continue
 		}
-		byRig[c.Rig] = append(byRig[c.Rig], i)
+		fresh = append(fresh, i)
+	}
+	var rigs []string
+	byRig := map[string][]int{}
+	for _, i := range fresh {
+		rig := read.Candidates[i].Rig
+		if _, seen := byRig[rig]; !seen {
+			rigs = append(rigs, rig)
+		}
+		byRig[rig] = append(byRig[rig], i)
 	}
 	dropped := map[int]bool{}
 	for _, rig := range rigs {
