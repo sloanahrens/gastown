@@ -173,6 +173,105 @@ func TestGuardRunPassesAScratchThatOwnsItsWorkspace(t *testing.T) {
 	}
 }
 
+// TestGuardRunPassesAWorkingDirectoryBeneathAWorkspace: work lives under the town, so a recorder
+// started beneath a workspace passes as long as its scratch owns the workspace bd resolves there
+// (gt-p85pw.116).
+func TestGuardRunPassesAWorkingDirectoryBeneathAWorkspace(t *testing.T) {
+	t.Parallel()
+	town := tempDir(t)
+	townWorkspace := filepath.Join(town, ".beads")
+	mustWrite(t, filepath.Join(townWorkspace, "metadata.json"), `{"dolt_database":"hq"}`)
+	work := filepath.Join(town, "work")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatalf("make the working directory: %v", err)
+	}
+	bd := &guardBD{}
+	scratch := filepath.Join(work, "scratch")
+	if err := guardRun(cwdAt(work), scratch, pinnedChild(bd.Run, townWorkspace)); err != nil {
+		t.Fatalf("guardRun beneath a workspace = %v, want it accepted", err)
+	}
+	if len(bd.args) != 2 || bd.args[0][0] != "init" || bd.args[1][0] != "sql" {
+		t.Fatalf("bd ran %v, want the scratch's init and the drop of the database it made", bd.args)
+	}
+	for i, dir := range bd.dirs {
+		if dir != scratch {
+			t.Errorf("call %v ran in %s, want the scratch %s", bd.args[i], dir, scratch)
+		}
+	}
+}
+
+// TestGuardRunRefusesAWorkingDirectoryThatIsAWorkspaceRoot: a recorder whose working directory is
+// the workspace root itself is refused before any bd call, since that is where bd init would rewrite
+// the store the recorder did not make (gt-p85pw.116).
+func TestGuardRunRefusesAWorkingDirectoryThatIsAWorkspaceRoot(t *testing.T) {
+	t.Parallel()
+	tree := tempDir(t)
+	metadata := filepath.Join(tree, ".beads", "metadata.json")
+	mustWrite(t, metadata, `{"dolt_database":"hq"}`)
+	before := readFile(t, metadata)
+	bd := &guardBD{}
+	err := guardRun(cwdAt(tree), filepath.Join(tempDir(t), "scratch"), pinnedChild(bd.Run, filepath.Join(tree, ".beads")))
+	if err == nil || !strings.Contains(err.Error(), "workspace root") {
+		t.Fatalf("guardRun in a workspace root = %v, want it refused", err)
+	}
+	if len(bd.args) != 0 {
+		t.Errorf("bd ran %v, want no bd run attempted", bd.args)
+	}
+	if after := readFile(t, metadata); after != before {
+		t.Errorf("%s = %q after the refused run, want %q", metadata, after, before)
+	}
+}
+
+// TestGuardRunResolvesARelativeScratchAgainstTheWorkingDirectory: a relative -scratch names the
+// directory under the working directory, and the pass still needs bd to resolve a workspace inside
+// it; the same working directory is refused when bd answers with the town's workspace (gt-p85pw.116).
+func TestGuardRunResolvesARelativeScratchAgainstTheWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	town := tempDir(t)
+	townWorkspace := filepath.Join(town, ".beads")
+	mustWrite(t, filepath.Join(townWorkspace, "metadata.json"), `{"dolt_database":"hq"}`)
+	work := filepath.Join(town, "work")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatalf("make the working directory: %v", err)
+	}
+	tests := []struct {
+		name  string
+		where Resolver
+		want  string // empty: the guard accepts
+	}{
+		{"bd resolves a workspace inside the scratch", func(dir string, _ []string) (string, error) {
+			return filepath.Join(dir, ".beads"), nil
+		}, ""},
+		{"bd resolves the town's workspace", func(string, []string) (string, error) {
+			return townWorkspace, nil
+		}, "outside the scratch"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bd := &guardBD{}
+			child := childBD{
+				Run:   bd.Run,
+				Env:   func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
+				Where: tc.where,
+			}
+			err := guardRun(cwdAt(work), "scratch", child)
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("guardRun over %s = %v, want an error naming %q", tc.name, err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("guardRun over %s = %v, want it accepted", tc.name, err)
+			}
+			want := filepath.Join(work, "scratch")
+			if len(bd.dirs) == 0 || bd.dirs[0] != want {
+				t.Errorf("bd ran in %v, want the scratch resolved under the working directory %s", bd.dirs, want)
+			}
+		})
+	}
+}
+
 // TestGuardRunRefusesTheTownDoltServer: the scratch's bd init creates a database, so an environment
 // that aims it at the town's Dolt server, or at no server the guard can vouch for, is refused before
 // any bd call, and the scratch directory is not even made (gt-p85pw.115).
@@ -672,18 +771,14 @@ func TestRunRefusesASymlinkedScratch(t *testing.T) {
 	}
 }
 
-// TestRunRefusesAWorkingDirectoryUnderAWorkspace: the recorder's own working directory is checked
-// too, since a recorder started inside a beads worktree is where the incident began.
-func TestRunRefusesAWorkingDirectoryUnderAWorkspace(t *testing.T) {
+// TestRunRefusesAWorkingDirectoryThatIsAWorkspaceRoot: a recorder started in a workspace root is
+// where the incident began, so the run stops before bd runs and writes nothing (gt-p85pw.116).
+func TestRunRefusesAWorkingDirectoryThatIsAWorkspaceRoot(t *testing.T) {
 	t.Parallel()
 	tree := tempDir(t)
 	metadata := filepath.Join(tree, ".beads", "metadata.json")
 	mustWrite(t, metadata, `{"dolt_database":"hq"}`)
 	before := readFile(t, metadata)
-	work := filepath.Join(tree, "work")
-	if err := os.Mkdir(work, 0o755); err != nil {
-		t.Fatalf("make the working directory: %v", err)
-	}
 	bd := &fakeBD{out: okBD}
 	out := filepath.Join(tempDir(t), "golden")
 	var stdout, stderr bytes.Buffer
@@ -692,11 +787,11 @@ func TestRunRefusesAWorkingDirectoryUnderAWorkspace(t *testing.T) {
 		"-scratch", filepath.Join(tempDir(t), "scratch"),
 		"-out", out,
 	}
-	if code := runIn(cwdAt(work), childFor(passingChild(bd)), args, &stdout, &stderr); code != 1 {
-		t.Fatalf("run from a working directory under a workspace = %d, want 1\nstderr: %s", code, stderr.String())
+	if code := runIn(cwdAt(tree), childFor(passingChild(bd)), args, &stdout, &stderr); code != 1 {
+		t.Fatalf("run from a working directory that is a workspace root = %d, want 1\nstderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "beads workspace") {
-		t.Errorf("stderr = %q, want the workspace named", stderr.String())
+	if !strings.Contains(stderr.String(), "workspace root") {
+		t.Errorf("stderr = %q, want the workspace root named", stderr.String())
 	}
 	if len(bd.args) != 0 {
 		t.Errorf("bd ran %v, want no bd run attempted", bd.args)
