@@ -122,12 +122,10 @@ func bondBD(fake *fakeCook, clock *bondFakeClock) formulaBD {
 }
 
 // TestBondSerializesAcrossProcesses: two slings bonding at once take turns on
-// the town lock, so bd never runs two bonds against the same tables, which is
-// how the slings that started together all lost their commit (gt-40twy).
+// the town lock, so bd never runs two bonds at the same time (gt-40twy).
 //
-// The two formulaBD values open the lock file separately, the way two sling
-// processes do: flock admits one holder per open file description, and that
-// is the contention it reports between processes too.
+// The two formulaBD values open the lock file separately, as two sling
+// processes do: flock admits one holder per open file description.
 //
 // Every wait here is bounded: the test's own waits carry bondTestWait, and the
 // two a bond sits on — releaseBond and held — are let go by the test's defers,

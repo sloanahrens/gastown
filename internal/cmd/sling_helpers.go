@@ -857,7 +857,7 @@ type FormulaOnBeadResult = sling.FormulaResult
 // the clock that wait is bounded by, and jitter is the random source its
 // backoff draws from. InstantiateFormulaOnBead, CookFormula and
 // bondFormulaDirect are its methods on realFormulaBD. A nil seam takes the
-// real one, so a formulaBD built for a test that never bonds keeps working.
+// real one.
 type formulaBD struct {
 	open   func(formulaSite) formulaEngine
 	sleep  func(time.Duration)
@@ -976,17 +976,15 @@ const (
 )
 
 // ErrBondLockTimeout reports that a bond did not get the town bond lock within
-// bondLockWait. It is not Dolt contention — the lock never reached bd — so the
+// bondLockWait. The lock never reached bd, so this is not Dolt contention: the
 // retry loop does not take it again, and the sling fails naming the lock.
 //
-// The spec dispatcher reads that failure as the bead's, not the town's: it
-// defers and retries only a Dolt serialization failure (internal/cmd/spec.go:2199)
-// and labels every other sling error spec-dispatch-failed (spec.go:2210), which
-// holds the bead out of the queue until an operator clears it
-// (internal/specdispatch/dispatch.go:52). The spawn the bond followed has
-// already charged one of the bead's respawns (internal/cmd/polecat_spawn.go:1100),
-// and only an image-drift refusal gives a charge back (polecat_spawn.go:1140).
-// A retry-later classification for this error is gt-8d38p.
+// A queued sling can fail with it after bondLockWait. The spec dispatcher
+// treats it like any sling error that is not a Dolt serialization failure: it
+// labels the bead spec-dispatch-failed, which holds the bead out of the queue
+// until an operator clears the label, and the respawn the spawn already
+// charged is not given back. Retrying it later, without the label and without
+// the charge, is gt-8d38p.
 var ErrBondLockTimeout = errors.New("mol bond lock did not free in time")
 
 // bondLockPath is the town-wide file every sling's bond takes its turn on.
@@ -1609,9 +1607,8 @@ func slingBackoff(attempt int, base, max time.Duration) time.Duration { //nolint
 	return slingBackoffWith(attempt, base, max, rand.Float64)
 }
 
-// slingBackoffWith is slingBackoff drawing its jitter from jitter, so a caller
-// whose retries must not stay in step — the bond's, after several slings lost
-// the same commit — spreads them from a source it can also hand a test.
+// slingBackoffWith is slingBackoff drawing its jitter from jitter, a source in
+// [0,1) the caller supplies, so a test can fix it.
 func slingBackoffWith(attempt int, base, max time.Duration, jitter func() float64) time.Duration {
 	backoff := base
 	for i := 1; i < attempt; i++ {
