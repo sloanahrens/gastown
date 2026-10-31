@@ -2,6 +2,7 @@ package scrub
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -12,6 +13,9 @@ const (
 	RulePrivateKey = "private-key"
 	// RuleAuthHeader replaces an Authorization header value and a Bearer token.
 	RuleAuthHeader = "auth-header"
+	// RuleCookieHeader replaces the value of each cookie in a Cookie or
+	// Set-Cookie header and keeps the cookie's name.
+	RuleCookieHeader = "cookie-header"
 	// RuleURLUserInfo replaces the user:password part before a URL's host.
 	RuleURLUserInfo = "url-userinfo"
 	// RuleJWT replaces a JWT-shaped token.
@@ -47,6 +51,7 @@ func DefaultRules() []Rule {
 	return []Rule{
 		{Name: RulePrivateKey, Apply: scrubPrivateKeys},
 		{Name: RuleAuthHeader, Apply: scrubAuthHeaders},
+		{Name: RuleCookieHeader, Apply: scrubCookieHeaders},
 		{Name: RuleURLUserInfo, Apply: scrubURLUserInfo},
 		{Name: RuleJWT, Apply: scrubJWT},
 		{Name: RuleVendorKey, Apply: scrubVendorKeys},
@@ -115,6 +120,59 @@ func tokenish(v string) bool {
 	return upper && lower
 }
 
+// cookieHeader matches a Cookie or Set-Cookie header and its value, which runs
+// to the end of the line.
+var cookieHeader = regexp.MustCompile(`(?i)\b(set-cookie|cookie)([ \t]*:[ \t]*)([^\r\n]+)`)
+
+// cookiePair matches one name=value pair inside a cookie header's value. The
+// value ends at a ';', a space or a quote, so the text after a header quoted
+// inside a command line stays, and base64 padding inside a value is kept.
+var cookiePair = regexp.MustCompile(`([A-Za-z0-9_!#$%&*+.^` + "`" + `|~-]+)=("[^"]*"|[^; \t\r\n"']*)`)
+
+// cookieAttributes name a Set-Cookie attribute, whose value is not a secret, so
+// the line still says how long the cookie lives and where it applies.
+var cookieAttributes = map[string]bool{
+	"comment":     true,
+	"domain":      true,
+	"expires":     true,
+	"httponly":    true,
+	"max-age":     true,
+	"partitioned": true,
+	"path":        true,
+	"priority":    true,
+	"samesite":    true,
+	"secure":      true,
+	"version":     true,
+}
+
+// scrubCookieHeaders keeps the header and each cookie's name and replaces the
+// value, so the line still says which cookie was set.
+func scrubCookieHeaders(text string) (string, int) {
+	n := 0
+	out := cookieHeader.ReplaceAllStringFunc(text, func(m string) string {
+		sm := cookieHeader.FindStringSubmatch(m)
+		value, k := scrubCookieValue(sm[3])
+		n += k
+		return sm[1] + sm[2] + value
+	})
+	return out, n
+}
+
+// scrubCookieValue replaces the value of every cookie in a header value and
+// keeps a Set-Cookie attribute, which is not a secret.
+func scrubCookieValue(value string) (string, int) {
+	n := 0
+	out := cookiePair.ReplaceAllStringFunc(value, func(m string) string {
+		sm := cookiePair.FindStringSubmatch(m)
+		if sm[2] == "" || cookieAttributes[strings.ToLower(sm[1])] {
+			return m
+		}
+		n++
+		return sm[1] + "=" + marker(RuleCookieHeader)
+	})
+	return out, n
+}
+
 // urlUserInfo matches the user:password part between a URL scheme and its host.
 var urlUserInfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]+@`)
 
@@ -165,39 +223,99 @@ func scrubVendorKeys(text string) (string, int) {
 // swallow it.
 var assignmentStart = regexp.MustCompile("(^|[\\s;,&?(\\[{`\"'-])([\"']?)([A-Za-z0-9_][A-Za-z0-9_.\\-]*)([\"']?)([ \\t]*[:=][ \\t]*)")
 
+// flagValueStart matches a command-line flag whose value is the next word
+// (--pass hunter2), the form an = or : does not cover.
+var flagValueStart = regexp.MustCompile("(^|[\\s;,&?(\\[{`\"'])(--?)([A-Za-z0-9_][A-Za-z0-9_.\\-]*)([ \\t]+)")
+
+// assignmentSite is one place a name is followed by a value: valueStart is the
+// first byte of the value, name the field or flag, and flag reports whether a
+// dash run introduced the name.
+type assignmentSite struct {
+	valueStart int
+	name       string
+	flag       bool
+}
+
+// credentialSites returns the sites whose name names a credential, in the order
+// their values appear.
+func credentialSites(text string) []assignmentSite {
+	var sites []assignmentSite
+	for _, m := range assignmentStart.FindAllStringSubmatchIndex(text, -1) {
+		sites = append(sites, assignmentSite{
+			valueStart: m[1],
+			name:       text[m[6]:m[7]],
+			flag:       m[3]-m[2] == 1 && text[m[2]] == '-',
+		})
+	}
+	for _, m := range flagValueStart.FindAllStringSubmatchIndex(text, -1) {
+		sites = append(sites, assignmentSite{
+			valueStart: m[1],
+			name:       text[m[6]:m[7]],
+			flag:       true,
+		})
+	}
+	sort.Slice(sites, func(i, j int) bool { return sites[i].valueStart < sites[j].valueStart })
+	var out []assignmentSite
+	for _, site := range sites {
+		if credentialName(site.name) || (site.flag && barePassName(site.name)) {
+			out = append(out, site)
+		}
+	}
+	return out
+}
+
 // scrubAssignments replaces the value of an assignment whose name contains a
 // credential word, and keeps the name.
 func scrubAssignments(text string) (string, int) {
-	matches := assignmentStart.FindAllStringSubmatchIndex(text, -1)
-	if len(matches) == 0 {
+	sites := credentialSites(text)
+	if len(sites) == 0 {
 		return text, 0
 	}
 	var b strings.Builder
 	n := 0
 	last := 0
-	for _, m := range matches {
-		if m[0] < last {
+	for _, site := range sites {
+		if site.valueStart < last {
 			continue // inside a value this rule already replaced
 		}
-		b.WriteString(text[last:m[1]])
-		last = m[1]
-		if !credentialName(text[m[6]:m[7]]) {
+		b.WriteString(text[last:site.valueStart])
+		last = site.valueStart
+		if end := markerValue(text, last); end > last {
+			// An earlier rule already replaced this value; a second marker
+			// would put a stray bracket after the first one.
+			b.WriteString(text[last:end])
+			last = end
 			continue
 		}
-		if end, quoted := assignmentValue(text, last); end > last {
-			if quoted {
-				b.WriteString(text[last : last+1])
-				b.WriteString(marker(RuleAssignment))
-				b.WriteString(text[end-1 : end])
-			} else {
-				b.WriteString(marker(RuleAssignment))
-			}
-			n++
-			last = end
+		end, quoted := assignmentValue(text, last)
+		if end <= last {
+			continue
 		}
+		if quoted {
+			b.WriteString(text[last : last+1])
+			b.WriteString(marker(RuleAssignment))
+			b.WriteString(text[end-1 : end])
+		} else {
+			b.WriteString(marker(RuleAssignment))
+		}
+		n++
+		last = end
 	}
 	b.WriteString(text[last:])
 	return b.String(), n
+}
+
+// markerValue returns the end of the [REDACTED:rule] marker at pos, and pos
+// when no complete marker starts there.
+func markerValue(text string, pos int) int {
+	if !strings.HasPrefix(text[pos:], "[REDACTED:") {
+		return pos
+	}
+	i := strings.IndexByte(text[pos:], ']')
+	if i < 0 {
+		return pos
+	}
+	return pos + i + 1
 }
 
 // assignmentValue returns the end of the value that starts at pos and whether
@@ -280,6 +398,16 @@ var compoundCredentialNames = map[string]bool{
 	"userpassword":    true,
 }
 
+// passWords name a password, but each is also an ordinary word: "pass" counts
+// passing tests (pass=3 fail=1, "tests: pass: 12") and "pwd" is a directory in
+// a shell, so a name holding one is a credential only beside a second,
+// non-counter word (db_pass, mysql_pwd) or as a flag (--pass VALUE) (gt-3rq7v).
+var passWords = map[string]bool{"pass": true, "pwd": true}
+
+// credentialSuffixes end a run-together name whose vendor prefix would hide the
+// credential word itself (PGPASSWORD, GITHUBTOKEN).
+var credentialSuffixes = []string{"password", "passwd", "secret", "token"}
+
 // keyWords name a key: "key", "keys" and any name that holds one as a word
 // ("api_key", "secret-key") are credentials.
 var keyWords = map[string]bool{"key": true, "keys": true}
@@ -347,15 +475,50 @@ func credentialName(name string) bool {
 	if countedName(words) {
 		return false
 	}
-	if len(words) == 1 {
-		return compoundCredentialNames[words[0]] || credentialWords[words[0]] || keyWords[words[0]]
-	}
 	for _, w := range words {
-		if credentialWords[w] || keyWords[w] {
+		if credentialWord(w) {
+			return true
+		}
+	}
+	return len(words) > 1 && passWordName(words)
+}
+
+// credentialWord reports whether one word of a name names a credential: a
+// credential, key or run-together name, or a fused name ending in a whole
+// credential word after a vendor prefix.
+func credentialWord(word string) bool {
+	if credentialWords[word] || keyWords[word] || compoundCredentialNames[word] {
+		return true
+	}
+	for _, suffix := range credentialSuffixes {
+		if len(word) > len(suffix) && strings.HasSuffix(word, suffix) {
 			return true
 		}
 	}
 	return false
+}
+
+// passWordName reports whether words hold a pass word beside a word that is not
+// a counter.
+func passWordName(words []string) bool {
+	pass, other := false, false
+	for _, w := range words {
+		switch {
+		case passWords[w]:
+			pass = true
+		case counterWords[w]:
+		default:
+			other = true
+		}
+	}
+	return pass && other
+}
+
+// barePassName reports whether a flag's name is exactly a pass word, which in a
+// flag is the password it takes.
+func barePassName(name string) bool {
+	words := nameWords(name)
+	return len(words) == 1 && passWords[words[0]]
 }
 
 // nameWords splits a field name on non-alphanumeric runes and at camelCase
