@@ -173,29 +173,54 @@ type rigDockedRead struct {
 	reason  string
 }
 
+// rigDockedEntry is one rig's memoized docked-label read: the verdict, and the
+// dock stamp observed just before the read that produced it.
+type rigDockedEntry struct {
+	// mu is held across this rig's identity-bead read, so concurrent checks of
+	// one rig share its one read. Another rig takes its own entry, so one
+	// rig's slow bd call does not hold up the others (gt-ze7z5).
+	mu sync.Mutex
+	// known is set once a read answered; without it there is no verdict to
+	// serve and the next check reads again.
+	known bool
+	read  rigDockedRead
+	// stamp is the dock stamp observed before the read that answered: a newer
+	// one means gt docked or undocked the rig since (rig.DockStamp), so the
+	// verdict is dropped and read again.
+	stamp time.Time
+}
+
 // rigDockedMemo remembers one tick's docked-label reads per rig: the identity
 // bead is read at most once per rig per tick (gt-ze7z5), though the tick made
 // the same check for the board scan and again behind every candidate it slung.
+//
+// The memo is not frozen for the tick. `gt rig dock` and `gt rig undock` stamp
+// the rig (internal/rig.DockStamp), the tick compares the stamp with the one
+// its entry recorded, and a newer stamp drops the entry: a dock that lands
+// mid-tick stops the tick's later slings. A hand-edited label writes no stamp
+// and is seen at the next tick instead, the same bound the daemon's memo keeps.
 //
 // The tick makes it and passes it down, never a package variable
 // (internal/testpolicy's no-global-swap), so an operator's gt sling, a polecat
 // spawn and the daemon keep asking bd every time. A read that failed is not
 // remembered, so the failure stays fail-closed and the next check asks bd
-// again. Parallel slings share one read under mu.
+// again.
 type rigDockedMemo struct {
 	store beads.Client
+	// stamp reads a rig's dock stamp; rig.DockStamp unless a test replaces it.
+	stamp func(townRoot, rigName string) (time.Time, error)
 	mu    sync.Mutex
-	reads map[string]rigDockedRead
+	reads map[string]*rigDockedEntry
 }
 
 // newRigDockedMemo returns the memo of one tick's docked-label reads, made
 // against store (nil: bd in each rig's own database).
 func newRigDockedMemo(store beads.Client) *rigDockedMemo {
-	return &rigDockedMemo{store: store, reads: map[string]rigDockedRead{}}
+	return &rigDockedMemo{store: store, stamp: rig.DockStamp, reads: map[string]*rigDockedEntry{}}
 }
 
 // parkedOrDocked is IsRigParkedOrDocked answered from the memo when this tick
-// already read the rig's docked label.
+// already read the rig's docked label and no dock or undock has landed since.
 func (m *rigDockedMemo) parkedOrDocked(townRoot, rigName string) (bool, string) {
 	if m == nil {
 		return IsRigParkedOrDocked(townRoot, rigName)
@@ -206,18 +231,48 @@ func (m *rigDockedMemo) parkedOrDocked(townRoot, rigName string) (bool, string) 
 		return true, "parked"
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if read, ok := m.reads[rigName]; ok {
-		return read.blocked, read.reason
+	// The stamp is observed before the read, never after: a dock that lands
+	// while the read runs leaves a newer stamp, so the next check drops the
+	// entry rather than serving a verdict from before the dock.
+	stamp, err := m.stamp(townRoot, rigName)
+	if err != nil {
+		// A stamp that cannot be read vouches for no cached verdict, and
+		// nothing may be cached without it. This check reads the label fresh,
+		// as every check did before the memo: slower on a host that cannot
+		// stat the stamp, never stale.
+		return rigParkedOrDockedWith(townRoot, rigName, m.store)
+	}
+
+	entry := m.entry(rigName)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.known && !stamp.After(entry.stamp) {
+		return entry.read.blocked, entry.read.reason
 	}
 	blocked, reason := rigParkedOrDockedWith(townRoot, rigName, m.store)
-	if reason != sling.RigStatusUnverified {
-		// An answer is kept for the tick; the failure above is not, so the
+	if reason == sling.RigStatusUnverified {
+		// A failed read is not remembered, so it stays fail-closed and the
 		// next check asks bd again.
-		m.reads[rigName] = rigDockedRead{blocked: blocked, reason: reason}
+		entry.known = false
+		return blocked, reason
 	}
+	entry.read = rigDockedRead{blocked: blocked, reason: reason}
+	entry.stamp = stamp
+	entry.known = true
 	return blocked, reason
+}
+
+// entry returns rigName's memo slot, created empty. The lock guards only the
+// map, never a bd read.
+func (m *rigDockedMemo) entry(rigName string) *rigDockedEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.reads[rigName]
+	if !ok {
+		entry = &rigDockedEntry{}
+		m.reads[rigName] = entry
+	}
+	return entry
 }
 
 // rigParkedOrDockedWith is IsRigParkedOrDocked with the identity bead read
