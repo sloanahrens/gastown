@@ -141,3 +141,40 @@ func TestSpecSlingSpawnWithoutASnapshotLeavesTheReadToTheTown(t *testing.T) {
 		t.Error("occupied set with no snapshot: the pool would read an empty town instead of the real one")
 	}
 }
+
+// The spawn's pre-sling steps are named on the spec dispatcher's trace: the
+// backpressure check and the seat decision run before the spawner reports any
+// stage of its own, and the admission follows them, so a sling that waits 30 s
+// on a seat decision says so in the tick's log instead of hiding it in the
+// total (gt-7nctk).
+func TestSlingSeatSpawnNamesThePreSlingStepsOnTheTrace(t *testing.T) {
+	t.Parallel()
+	clock := time.Unix(1_000_000, 0)
+	now := func() time.Time { return clock }
+	trace := session.NewSandboxTrace(now)
+	s := slingSeatSpawn{
+		backpressure: func(string, string, SlingSpawnOptions) error {
+			clock = clock.Add(2 * time.Second)
+			return nil
+		},
+		resolvePool: func(_, requested string) (string, string, error) {
+			clock = clock.Add(30 * time.Second)
+			return "box", "", nil
+		},
+		releaseSeat: func() {},
+		prepare: func(_, rigName string, opts SlingSpawnOptions, _ slingStores) (*SpawnedPolecatInfo, error) {
+			clock = clock.Add(time.Second)
+			opts.step("admission")
+			return &SpawnedPolecatInfo{RigName: rigName, agent: opts.Agent}, nil
+		},
+	}
+
+	if _, err := s.spawn("/town", "gastown", SlingSpawnOptions{HookBead: "gt-a", trace: trace, Steps: trace.Steps()}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	want := "backpressure 2s, seat decision 30s, admission 1s, total 33s"
+	if got := trace.Summary(); got != want {
+		t.Fatalf("Summary() = %q, want %q: the steps before the spawner's own are named and add up", got, want)
+	}
+}
