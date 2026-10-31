@@ -99,10 +99,11 @@ func runIn(getwd func() (string, error), child func(bin string) childBD, args []
 		fmt.Fprintln(stderr, "bdshim-record: -fixture is required")
 		return 2
 	}
+	// A fixture the run refuses is an input the operator named, so it exits 2 as a missing -fixture does.
 	provision, keep, err := provisionFixtureFrom(getwd, bd.Run, opts.fixture, opts.scratch)
 	if err != nil {
 		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
-		return 1
+		return 2
 	}
 	if err := os.MkdirAll(opts.scratch, 0o755); err != nil {
 		fmt.Fprintf(stderr, "bdshim-record: make scratch directory %q: %v\n", opts.scratch, err)

@@ -228,8 +228,8 @@ func envEntries(env []string) map[string][]string {
 // okBD answers every call with exit 0.
 func okBD([]string) ([]byte, int, error) { return nil, 0, nil }
 
-// okRun answers every bd call with exit 0.
-func okRun(string, []string) ([]byte, int, error) { return nil, 0, nil }
+// okRun answers every bd call with exit 0, as okBD does.
+func okRun(_ string, args []string) ([]byte, int, error) { return okBD(args) }
 
 // mustWrite writes content to path, making its directory.
 func mustWrite(t *testing.T, path, content string) {
@@ -397,6 +397,78 @@ func TestProvisionFixtureReportsAFailedInit(t *testing.T) {
 	}
 	if left := fileNames(t, scratch); len(left) != 0 {
 		t.Errorf("scratch holds %v after a failed copy, want nothing left", left)
+	}
+}
+
+// TestProvisionFixtureDropsTheDatabaseOfAFailedInitWithAWorkspace: an init that fails after it left a
+// workspace in the copy still has its database dropped, from that workspace, and the copy removed.
+func TestProvisionFixtureDropsTheDatabaseOfAFailedInitWithAWorkspace(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: func(args []string) ([]byte, int, error) {
+		if args[0] == "init" {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}}
+	run := func(dir string, args []string) ([]byte, int, error) {
+		if args[0] == "init" {
+			// bd leaves its workspace in the copy before it fails.
+			if err := os.MkdirAll(beadsDirIn(dir), 0o755); err != nil {
+				t.Fatalf("leave the workspace of a failed init: %v", err)
+			}
+		}
+		return bd.Run(dir, args)
+	}
+	scratch := t.TempDir()
+	provision, _, err := provisionFixture(run, writeFixture(t, fixtureIDs...), scratch)
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	_, _, err = provision()
+	if err == nil || !strings.Contains(err.Error(), "init the database") {
+		t.Fatalf("provision over a failed init = %v, want the init named", err)
+	}
+	name := initName(t, bd.args[0])
+	drops := callIndices(bd, "sql")
+	if len(drops) != 1 {
+		t.Fatalf("bd ran %v, want the failed init's database dropped", bd.args)
+	}
+	if want := []string{"sql", "DROP DATABASE IF EXISTS `" + name + "`"}; !reflect.DeepEqual(bd.args[drops[0]], want) {
+		t.Errorf("drop ran %v, want %v", bd.args[drops[0]], want)
+	}
+	if got := bd.dirs[drops[0]]; filepath.Dir(got) != scratch {
+		t.Errorf("drop ran in %s, want the copy under %s", got, scratch)
+	}
+	if left := fileNames(t, scratch); len(left) != 0 {
+		t.Errorf("scratch holds %v after a failed init, want nothing left", left)
+	}
+}
+
+// TestProvisionFixtureNamesTheDatabaseOfAFailedInitWithNoWorkspace: an init that fails before it
+// leaves a workspace has nowhere for a drop to run, so the error names the database it may have made.
+func TestProvisionFixtureNamesTheDatabaseOfAFailedInitWithNoWorkspace(t *testing.T) {
+	t.Parallel()
+	bd := &fakeBD{out: func(args []string) ([]byte, int, error) {
+		if args[0] == "init" {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}}
+	scratch := t.TempDir()
+	provision, _, err := provisionFixture(bd.Run, writeFixture(t, fixtureIDs...), scratch)
+	if err != nil {
+		t.Fatalf("provisionFixture: %v", err)
+	}
+	_, _, err = provision()
+	name := initName(t, bd.args[0])
+	if err == nil || !strings.Contains(err.Error(), "database "+name+" may remain on the server") {
+		t.Fatalf("provision over a failed init with no workspace = %v, want the database %s reported as left on the server", err, name)
+	}
+	if drops := callIndices(bd, "sql"); len(drops) != 0 {
+		t.Errorf("bd ran %v, want no drop from a directory with no workspace", bd.args)
+	}
+	if left := fileNames(t, scratch); len(left) != 0 {
+		t.Errorf("scratch holds %v after a failed init, want nothing left", left)
 	}
 }
 
