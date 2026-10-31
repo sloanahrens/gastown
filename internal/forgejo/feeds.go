@@ -15,10 +15,15 @@ import (
 const userReposLimit = 100
 
 // Repository is the subset of a Forgejo repository the client reads: the
-// owner/name an activity feed addresses the repo by, and the reply to the
-// probe's existence check (Client.Repository).
+// owner/name an activity feed addresses the repo by, the size the nightly
+// report charges storage for, and the reply to the probe's existence check
+// (Client.Repository).
 type Repository struct {
 	FullName string `json:"full_name"`
+	// SizeKB is the repository's size in kilobytes. It is a pointer because a
+	// reply without the field is an unmeasured size, which is not zero bytes
+	// (gt-nlrpk).
+	SizeKB *int64 `json:"size"`
 }
 
 // Activity is one entry of a repository's activity feed, the list Forgejo's
