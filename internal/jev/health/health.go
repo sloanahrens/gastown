@@ -528,14 +528,16 @@ func ParseLog(data []byte) (lines []Line, unparsed int) {
 			continue
 		}
 		var rec struct {
-			TS      time.Time       `json:"ts"`
-			Answers json.RawMessage `json:"answers"`
+			TS       time.Time       `json:"ts"`
+			Answers  json.RawMessage `json:"answers"`
+			Sections json.RawMessage `json:"sections"`
 		}
 		if err := json.Unmarshal(raw, &rec); err != nil || rec.TS.IsZero() {
 			unparsed++
 			continue
 		}
-		lines = append(lines, Line{TS: rec.TS, HasAnswers: carriesAnswers(rec.Answers)})
+		hasAnswers := carriesAnswers(rec.Answers) || sectionsCarryAnswers(rec.Sections)
+		lines = append(lines, Line{TS: rec.TS, HasAnswers: hasAnswers})
 	}
 	return lines, unparsed
 }
@@ -552,4 +554,27 @@ func carriesAnswers(raw json.RawMessage) bool {
 		return false
 	}
 	return len(answers) > 0
+}
+
+// sectionsCarryAnswers reports whether a log line's sections field holds an
+// answer. The drift battery writes no top-level answers: it nests one answers
+// object per doc section it asked about, and a line whose sections are empty,
+// all null or all empty carries none.
+func sectionsCarryAnswers(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	var sections []struct {
+		Answers json.RawMessage `json:"answers"`
+	}
+	if err := json.Unmarshal(trimmed, &sections); err != nil {
+		return false
+	}
+	for _, s := range sections {
+		if carriesAnswers(s.Answers) {
+			return true
+		}
+	}
+	return false
 }
