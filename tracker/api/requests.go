@@ -213,6 +213,44 @@ type CountResponse struct {
 	Count int `json:"count"`
 }
 
+// MaxPurgeWisps bounds one purge batch: past it a caller should walk the wisp
+// list and send the expired ids in smaller batches.
+const MaxPurgeWisps = 500
+
+// PurgeWispsRequest names the wisps to purge. The wisp policy decides which of
+// them are expired; the rest are kept and reported with the reason.
+type PurgeWispsRequest struct {
+	IDs []string `json:"ids"`
+}
+
+// Validate refuses an empty batch, one past MaxPurgeWisps, and an empty id.
+func (r PurgeWispsRequest) Validate() error {
+	switch {
+	case len(r.IDs) == 0:
+		return Invalid("purge needs at least one id")
+	case len(r.IDs) > MaxPurgeWisps:
+		return Invalid("purge takes at most %d ids, got %d", MaxPurgeWisps, len(r.IDs))
+	}
+	for _, id := range r.IDs {
+		if id == "" {
+			return Invalid("purge ids must not be empty")
+		}
+	}
+	return nil
+}
+
+// PurgeWispsResult says which named wisps were deleted and which were kept.
+type PurgeWispsResult struct {
+	Purged []string   `json:"purged"`
+	Kept   []KeptWisp `json:"kept"`
+}
+
+// KeptWisp is a named wisp the purge left in place, with the policy's reason.
+type KeptWisp struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
 // DispatchBoardRequest asks for everything one dispatch tick reads about the
 // work board: per rig the ready issues, the issues a seat holds and the
 // children of the ready issues, plus the status of a few named issues.

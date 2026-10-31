@@ -63,3 +63,13 @@ func (c *Client) RevokeActorTokens(ctx context.Context, actor string) (int, erro
 func (c *Client) RevokeTokenID(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/v1/tokens:revoke", api.RevokeTokensRequest{TokenID: id}, nil, false)
 }
+
+// PurgeWisps deletes the expired wisps among ids (admin scope). The wisp policy
+// keeps the rest, and each kept id comes back with its reason. Not retried: a
+// purge that answered with an error may have landed, and a retry would then
+// report the deleted ids as not found.
+func (c *Client) PurgeWisps(ctx context.Context, ids []string) (api.PurgeWispsResult, error) {
+	var out api.PurgeWispsResult
+	err := c.do(ctx, http.MethodPost, "/v1/wisps:purge", api.PurgeWispsRequest{IDs: ids}, &out, false)
+	return out, err
+}
