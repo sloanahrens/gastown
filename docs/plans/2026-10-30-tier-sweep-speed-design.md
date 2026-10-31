@@ -2,7 +2,7 @@
 
 # Tier sweeps at half the time, in their own container (design)
 
-Author: dunlin. Date: 2026-10-30. Status: proposed (operator direction 2026-10-30; overseer decisions the same day). Evidence: `~/gt/.runtime/overseer/birds/tier-sweep-findings.md` (read it first; every number below is from it). Plan: `2026-10-30-tier-sweep-speed-plan.md`.
+Author: dunlin. Date: 2026-10-30. Proposed under operator direction 2026-10-30 (overseer decisions the same day); the status line above is current. Evidence: `~/gt/.runtime/overseer/birds/tier-sweep-findings.md` (read it first; every number below is from it). Plan: `2026-10-30-tier-sweep-speed-plan.md`.
 
 ## 1. Problem
 
