@@ -57,6 +57,43 @@ func RunDepListUpContract(t *testing.T, newClient func(t *testing.T) beads.Clien
 	})
 }
 
+// RunDepListUpExternalContract checks DepListUp for an external target: a
+// dependent whose edge names the id as external:<rig>:<id> is listed under
+// that id, once even when it also links plainly, and a reference whose last
+// part only ends with the id's characters is not listed. It is separate from
+// RunDepListUpContract so a store that answers only local targets can still
+// run that one; beadsql's ExternalMoleculesAttachedTo records that bd's read
+// does not answer external targets.
+func RunDepListUpExternalContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
+	t.Helper()
+	t.Run("dep list up external", func(t *testing.T) {
+		t.Parallel()
+		contractDepListUpExternal(t, newScope(t, newClient(t)))
+	})
+}
+
+// contractDepListUpExternal pins DepListUp for external targets; see
+// RunDepListUpExternalContract.
+func contractDepListUpExternal(t *testing.T, s *scope) {
+	target := s.mustCreate(t, beads.CreateOptions{Title: "target", Priority: -1})
+	both := s.mustCreate(t, beads.CreateOptions{Title: "plain and external", Priority: -1})
+	ext := s.mustCreate(t, beads.CreateOptions{Title: "external only", Priority: -1})
+	near := s.mustCreate(t, beads.CreateOptions{Title: "near miss", Priority: -1})
+	mustDo(t, "AddTypedDependency(both, target)", s.AddTypedDependency(both.ID, target.ID, "blocks"))
+	mustDo(t, "AddTypedDependency(both, external)", s.AddTypedDependency(both.ID, "external:om:"+target.ID, "tracks"))
+	mustDo(t, "AddTypedDependency(ext, external)", s.AddTypedDependency(ext.ID, "external:om:"+target.ID, "blocks"))
+	mustDo(t, "AddTypedDependency(near, external)", s.AddTypedDependency(near.ID, "external:om:wisp-"+target.ID, "blocks"))
+
+	deps, err := s.DepListUp(target.ID, "")
+	if got, want := depRows(deps), sorted(both.ID+" blocks", ext.ID+" blocks"); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("DepListUp(target) = %v, %v; want %v: both once at its plain relation, the external-only dependent, and no near miss", got, err, want)
+	}
+	tracks, err := s.DepListUp(target.ID, "tracks")
+	if err != nil || len(tracks) != 0 {
+		t.Errorf("DepListUp(target, tracks) = %v, %v; want none: both's plain relation is blocks, so its external tracks link is not listed", depRows(tracks), err)
+	}
+}
+
 // RunCreatorOptionContract checks that CreateOptions.Actor names the creator
 // recorded on the new issue (bd's --actor on create). It is separate from
 // RunClientContract because a store that records every write as the caller's

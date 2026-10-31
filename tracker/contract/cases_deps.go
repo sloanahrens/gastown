@@ -3,6 +3,7 @@ package contract
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ func init() {
 	register(Case{Name: "a cycle of blocking links is refused and other types may cycle", Run: depsCycles})
 	register(Case{Name: "opposite blocking links added at the same instant never both succeed", Run: depsCycleRace})
 	register(Case{Name: "an external target needs no row and is left out of the list", Run: depsExternal})
+	register(Case{Name: "a dependent of an external:<rig>:<id> target is listed by its id once, and a near-miss suffix is not", Fake: true, Run: depsExternalDependents})
 	register(Case{Name: "a parent-child link sets and clears the parent", Run: depsParentChild})
 	register(Case{Name: "an open blocker stops close unless forced", Run: depsBlockerFence})
 	register(Case{Name: "delete removes links to the deleted issue and list counts links", Run: depsDeleteAndCounts})
@@ -128,6 +130,35 @@ func depsExternal(t *testing.T, s store.Store) {
 	}
 	if err := s.CloseIssues(ctx(), []string{a.ID}, "r", false); err != nil {
 		t.Errorf("an external link must not block close: %v", err)
+	}
+}
+
+// depsExternalDependents pins the reverse read for an external target: a
+// dependent whose link names the id as external:<rig>:<id> is listed under
+// that id, once even when it also links plainly, and a target whose last part
+// merely ends with the id's characters is not named by it.
+func depsExternalDependents(t *testing.T, s store.Store) {
+	target := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "target"})
+	plain := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "plain"})
+	both := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "both"})
+	ext := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "external"})
+	near := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "near miss"})
+	mustDep(t, s, plain.ID, target.ID, "blocks")
+	mustDep(t, s, both.ID, target.ID, "blocks")
+	mustDep(t, s, both.ID, "external:om:"+target.ID, "tracks")
+	mustDep(t, s, ext.ID, "external:om:"+target.ID, "blocks")
+	mustDep(t, s, near.ID, "external:om:wisp-"+target.ID, "blocks")
+
+	got := mustGet(t, s, target.ID)
+	rows := make([]string, 0, len(got.Dependents))
+	for _, d := range got.Dependents {
+		rows = append(rows, d.ID+" "+d.DependencyType)
+	}
+	want := []string{plain.ID + " blocks", both.ID + " blocks", ext.ID + " blocks"}
+	slices.Sort(rows)
+	slices.Sort(want)
+	if !slices.Equal(rows, want) {
+		t.Errorf("Dependents of %s = %v, want %v (both listed once, at the plain relation; near miss absent)", target.ID, rows, want)
 	}
 }
 
