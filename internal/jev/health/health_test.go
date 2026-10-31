@@ -23,10 +23,10 @@ func answered(now time.Time, ago time.Duration) string {
 	return logLine(now.Add(-ago), `{"q":"a"}`)
 }
 
-// driftLine renders one drift battery log line: a stamp and the sections array
-// as written. A drift line nests its answers per doc section and carries no
-// top-level answers field.
-func driftLine(ts time.Time, sections string) string {
+// sectionLine renders one log line whose answers are nested per section rather
+// than written in a top-level answers field: a stamp and the sections array as
+// written.
+func sectionLine(ts time.Time, sections string) string {
 	return fmt.Sprintf(`{"ts":%q,"sections":%s}`, ts.UTC().Format(time.RFC3339), sections)
 }
 
@@ -332,8 +332,8 @@ func TestHealthRowCounts(t *testing.T) {
 }
 
 // TestParseLogCountsAnsweredLines checks what makes a line answered: a
-// top-level answers field, as every battery but drift writes, or an answer on
-// one of the doc sections a drift line nests.
+// top-level answers field, or an answer nested on one of the sections the line
+// asked about.
 func TestParseLogCountsAnsweredLines(t *testing.T) {
 	t.Parallel()
 	stamp := time.Date(2026, 10, 30, 11, 0, 0, 0, time.UTC)
@@ -360,22 +360,22 @@ func TestParseLogCountsAnsweredLines(t *testing.T) {
 		},
 		{
 			name: "a section with answers",
-			line: driftLine(stamp, `[{"doc":"docs/a.md","heading":"A","answers":{"q":{"noul":0.5}}}]`),
+			line: sectionLine(stamp, `[{"doc":"docs/a.md","heading":"A","answers":{"q":{"noul":0.5}}}]`),
 			want: true,
 		},
 		{
 			name: "sections all null or empty",
-			line: driftLine(stamp, `[{"doc":"docs/a.md","heading":"A","answers":null},{"doc":"docs/b.md","heading":"B","answers":{}}]`),
+			line: sectionLine(stamp, `[{"doc":"docs/a.md","heading":"A","answers":null},{"doc":"docs/b.md","heading":"B","answers":{}}]`),
 			want: false,
 		},
 		{
 			name: "one answered section among empty ones",
-			line: driftLine(stamp, `[{"answers":null},{"answers":{"q":{"noul":0.5}}}]`),
+			line: sectionLine(stamp, `[{"answers":null},{"answers":{"q":{"noul":0.5}}}]`),
 			want: true,
 		},
 		{
 			name: "an empty sections list",
-			line: driftLine(stamp, `[]`),
+			line: sectionLine(stamp, `[]`),
 			want: false,
 		},
 		{
@@ -385,7 +385,7 @@ func TestParseLogCountsAnsweredLines(t *testing.T) {
 		},
 		{
 			name: "a sections field that is not a list",
-			line: driftLine(stamp, `"oops"`),
+			line: sectionLine(stamp, `"oops"`),
 			want: false,
 		},
 	}
@@ -436,8 +436,8 @@ func TestDriftBatteryReadsSectionAnswers(t *testing.T) {
 	t.Run("sections answered", func(t *testing.T) {
 		t.Parallel()
 		drift := driftRow(t,
-			driftLine(now.Add(-time.Hour), answeredSections),
-			driftLine(now.Add(-2*time.Hour), answeredSections),
+			sectionLine(now.Add(-time.Hour), answeredSections),
+			sectionLine(now.Add(-2*time.Hour), answeredSections),
 		)
 		assert.Equal(t, 2, drift.Lines24)
 		assert.Zero(t, drift.NoAnswerShare, "every line answers through its sections")
@@ -447,8 +447,8 @@ func TestDriftBatteryReadsSectionAnswers(t *testing.T) {
 	t.Run("mixed", func(t *testing.T) {
 		t.Parallel()
 		drift := driftRow(t,
-			driftLine(now.Add(-time.Hour), answeredSections),
-			driftLine(now.Add(-2*time.Hour), emptySections),
+			sectionLine(now.Add(-time.Hour), answeredSections),
+			sectionLine(now.Add(-2*time.Hour), emptySections),
 		)
 		assert.InDelta(t, 0.5, drift.NoAnswerShare, 1e-9, "one of the two lines answers")
 		assert.Equal(t, health.OK, drift.Status, "exactly half unanswered is not over the share; reason %q", drift.Reason)
@@ -457,11 +457,59 @@ func TestDriftBatteryReadsSectionAnswers(t *testing.T) {
 	t.Run("sections unanswered", func(t *testing.T) {
 		t.Parallel()
 		drift := driftRow(t,
-			driftLine(now.Add(-time.Hour), emptySections),
-			driftLine(now.Add(-2*time.Hour), emptySections),
+			sectionLine(now.Add(-time.Hour), emptySections),
+			sectionLine(now.Add(-2*time.Hour), emptySections),
 		)
 		assert.InDelta(t, 1.0, drift.NoAnswerShare, 1e-9)
 		assert.Equal(t, health.Unanswered, drift.Status, "reason %q", drift.Reason)
+	})
+}
+
+// TestSectionsAnswerForEveryBattery checks that the sections rule is not
+// drift's alone: a battery other than drift whose lines answer only through
+// sections[].answers shows no unanswered share and judges ok, while the same
+// battery's lines with empty sections read unanswered.
+func TestSectionsAnswerForEveryBattery(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+
+	// nonDriftRow judges a battery that is not drift over the given log lines.
+	nonDriftRow := func(t *testing.T, lines ...string) health.Row {
+		t.Helper()
+		rows := health.Report(health.Config{Enabled: enabled("jev_dedupe")}, map[string]health.Input{
+			"dedupe": cursorInput(now, 5*time.Minute, lines...),
+		}, nil, now)
+		for _, r := range rows {
+			if r.Name == "dedupe" {
+				return r
+			}
+		}
+		t.Fatal("no dedupe row")
+		return health.Row{}
+	}
+
+	const answeredSections = `[{"doc":"docs/a.md","heading":"A","answers":{"q":{"noul":0.5}}}]`
+	const emptySections = `[{"doc":"docs/a.md","heading":"A","answers":null}]`
+
+	t.Run("sections answered", func(t *testing.T) {
+		t.Parallel()
+		row := nonDriftRow(t,
+			sectionLine(now.Add(-time.Hour), answeredSections),
+			sectionLine(now.Add(-2*time.Hour), answeredSections),
+		)
+		assert.Equal(t, 2, row.Lines24)
+		assert.Zero(t, row.NoAnswerShare, "every line answers through its sections")
+		assert.Equal(t, health.OK, row.Status, "reason %q", row.Reason)
+	})
+
+	t.Run("sections unanswered", func(t *testing.T) {
+		t.Parallel()
+		row := nonDriftRow(t,
+			sectionLine(now.Add(-time.Hour), emptySections),
+			sectionLine(now.Add(-2*time.Hour), emptySections),
+		)
+		assert.InDelta(t, 1.0, row.NoAnswerShare, 1e-9)
+		assert.Equal(t, health.Unanswered, row.Status, "reason %q", row.Reason)
 	})
 }
 
