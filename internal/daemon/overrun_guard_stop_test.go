@@ -714,31 +714,37 @@ func TestStop_SandboxedSeatIsPushedAndRemovedBeforeTheHandBack(t *testing.T) {
 }
 
 // overrunRemoveSandbox is the production sandbox step: push, then delete; a
-// refused push keeps the sandbox, and a host seat (no record) does nothing.
+// refused push keeps the sandbox. No record found (a host seat, or a rig the
+// registry does not list) has nothing to remove, so the stop proceeds.
 func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		sandboxed  bool
-		pushErr    error
-		wantCalls  []string
-		wantRecord bool
-		wantErr    string
+		name        string
+		sandboxed   bool
+		unknownRig  bool
+		pushErr     error
+		wantCalls   []string
+		wantRecord  bool
+		wantErr     string
+		wantWarning bool
 	}{
 		{name: "push_then_delete", sandboxed: true, wantCalls: []string{"push", "delete"}},
 		{name: "gone_sandbox_has_nothing_to_push_and_is_still_removed", sandboxed: true, pushErr: session.ErrNothingToPush, wantCalls: []string{"push", "delete"}},
 		{name: "refused_push_keeps_the_sandbox_and_names_it", sandboxed: true, pushErr: errors.New("rejected by origin"), wantCalls: []string{"push"}, wantRecord: true, wantErr: "sandbox " + overrunStopSessionName},
 		{name: "host_seat_has_no_sandbox", wantCalls: nil},
+		{name: "host_seat_on_unknown_rig_has_nothing_to_remove", unknownRig: true, wantCalls: nil, wantWarning: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			d, _ := newOverrunDaemon(t, false)
+			d, logBuf := newOverrunDaemon(t, false)
 			if tt.sandboxed {
 				seedStopSandbox(t, d)
 			} else {
 				reg := session.NewPrefixRegistry()
-				reg.Register(overrunStopPrefix, stopSeat.Rig)
+				if !tt.unknownRig {
+					reg.Register(overrunStopPrefix, stopSeat.Rig)
+				}
 				d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
 			}
 			var calls []string
@@ -768,44 +774,10 @@ func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *tes
 					t.Errorf("record kept = %v, want %v", ok, tt.wantRecord)
 				}
 			}
+			if warned := strings.Contains(logBuf.String(), "no beads prefix"); warned != tt.wantWarning {
+				t.Errorf("warning logged = %v, want %v; log:\n%s", warned, tt.wantWarning, logBuf.String())
+			}
 		})
-	}
-}
-
-// A rig the prefix registry does not know has no session name to look its
-// sandbox up by: the lookup would read the default prefix's name, find no
-// record and call the seat a host seat. The removal refuses instead, and the
-// sandbox that is there under the rig's real prefix is kept.
-func TestOverrunRemoveSandbox_UnregisteredRigRefusesInsteadOfSkipping(t *testing.T) {
-	t.Parallel()
-	d, _ := newOverrunDaemon(t, false)
-	const prefix = "gx"
-	sessionName := prefix + "-" + stopSeat.Polecat
-	rec := session.SandboxRecord{Session: sessionName, Rig: stopSeat.Rig, Polecat: stopSeat.Polecat, Branch: stopSeat.Branch}
-	if err := session.WriteSandboxRecord(d.config.TownRoot, rec); err != nil {
-		t.Fatal(err)
-	}
-	d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
-	var calls []string
-	push := func(string, session.SandboxRecord) error {
-		calls = append(calls, "push")
-		return nil
-	}
-	del := func(string, session.SandboxRecord) error {
-		calls = append(calls, "delete")
-		return nil
-	}
-
-	err := d.overrunRemoveSandbox(stopSeat, push, del)
-
-	if err == nil {
-		t.Fatal("overrunRemoveSandbox = nil for a rig the registry does not know, want a refusal")
-	}
-	if len(calls) != 0 {
-		t.Errorf("calls = %q, want none for a sandbox that was never looked up", calls)
-	}
-	if _, ok, _ := session.ReadSandboxRecord(d.config.TownRoot, sessionName); !ok {
-		t.Error("the sandbox record was removed for an unregistered rig")
 	}
 }
 

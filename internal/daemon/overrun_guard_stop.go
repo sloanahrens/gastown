@@ -257,8 +257,8 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// commits are unpushed. A record that does not parse cannot say whether the
 	// seat ran in a sandbox, and no retry changes the file: the sandbox is left
 	// as it is, and the stop goes on to hand the bead back with a note, the
-	// seat left paused (sandboxKept). A host seat has no record and this does
-	// nothing.
+	// seat left paused (sandboxKept). A host seat has no record, and a seat on a
+	// rig the registry does not list has none it can find: this does nothing.
 	sandboxKept := false
 	if s.removeSandbox != nil {
 		err := s.removeSandbox(seat)
@@ -1023,10 +1023,12 @@ var errSandboxRecordCorrupt = errors.New("sandbox record is corrupt")
 
 // overrunRemoveSandbox removes the sandbox a stopped seat ran in, pushing its
 // commits first (polecat.RemoveStoppedSandbox). pusher and deleter nil are the
-// linked openshell hooks. A refused step names the sandbox in its error, which
-// the stop logs. A rig the prefix registry does not know is refused, not read
-// as a host seat: its session name would be built from the default prefix, and
-// the record under the rig's real prefix would be left behind unseen.
+// linked openshell hooks. No record found means nothing to remove and the stop
+// proceeds: a host seat has no record, and a rig the prefix registry does not
+// list has no session name to look one up by, so its record cannot be found
+// (logged as a warning, so the sandbox an operator must check is visible). A
+// record that cannot be read holds the stop, as a refused push does, and a
+// refused step names the sandbox in its error, which the stop logs.
 func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(townRoot string, rec session.SandboxRecord) error) error {
 	reg := d.prefixRegistry()
 	var known map[string]string
@@ -1034,16 +1036,21 @@ func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(tow
 		known = reg.AllRigs()
 	}
 	if _, ok := known[seat.Rig]; !ok {
-		return fmt.Errorf("sandbox of %s: rig %s has no beads prefix in the registry (set it in mayor/rigs.json)", seat.Polecat, seat.Rig)
+		d.logger.Printf("overrun_guard: WARNING: sandbox of %s: rig %s has no beads prefix in the registry, so its sandbox record cannot be looked up; nothing removed (set the prefix in mayor/rigs.json)", seat.Polecat, seat.Rig)
+		return nil
 	}
 	sessionName := session.PolecatSessionName(reg.PrefixForRig(seat.Rig), seat.Polecat)
-	if _, _, err := session.ReadSandboxRecord(d.config.TownRoot, sessionName); err != nil {
+	_, sandboxed, err := session.ReadSandboxRecord(d.config.TownRoot, sessionName)
+	if err != nil {
 		var syntax *json.SyntaxError
 		var typ *json.UnmarshalTypeError
 		if errors.As(err, &syntax) || errors.As(err, &typ) {
 			return fmt.Errorf("sandbox %s: %w: %w", sessionName, errSandboxRecordCorrupt, err)
 		}
 		return fmt.Errorf("sandbox %s: %w", sessionName, err)
+	}
+	if !sandboxed {
+		return nil
 	}
 	if err := polecat.RemoveStoppedSandbox(d.config.TownRoot, sessionName, pusher, deleter); err != nil {
 		return fmt.Errorf("sandbox %s: %w", sessionName, err)
