@@ -1,9 +1,9 @@
 // Package workspaceid answers which workspace a rig belongs to, from the
 // optional town file settings/workspaces.json.
 //
-// Nothing calls this package yet: its callers are the beads that give the
-// events feed, usage records, resource sampler rows and the sandbox inventory
-// a workspace id (plan rows M2 to M5, gt-m7o6q).
+// Its callers are the beads that give the events feed, usage records, resource
+// sampler rows and the sandbox inventory a workspace id (plan rows M2 to M5,
+// gt-m7o6q).
 package workspaceid
 
 import (
@@ -78,6 +78,12 @@ func Load(townRoot string) (*Map, error) {
 		}
 	}
 	return &Map{defaultID: f.Default, rigs: f.Rigs}, nil
+}
+
+// Default is the workspace id a rig with no entry in the file belongs to.
+// It is CustomerZero for a town that has no file.
+func (m *Map) Default() string {
+	return m.defaultID
 }
 
 // For is the workspace id of rigPrefix: its entry in the file, or the file's

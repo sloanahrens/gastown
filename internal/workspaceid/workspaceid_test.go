@@ -34,6 +34,24 @@ func TestLoadMissingFileIsDefault(t *testing.T) {
 	}
 }
 
+func TestDefault(t *testing.T) {
+	t.Parallel()
+	m, err := Load(writeTownFile(t, `{"default":"town-default","rigs":{"gastown":"acme"}}`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := m.Default(); got != "town-default" {
+		t.Errorf("Default() = %q, want town-default", got)
+	}
+	missing, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("Load(missing): %v", err)
+	}
+	if got := missing.Default(); got != CustomerZero {
+		t.Errorf("Default() without a file = %q, want %q", got, CustomerZero)
+	}
+}
+
 func TestForMappedAndUnmapped(t *testing.T) {
 	t.Parallel()
 	m, err := Load(writeTownFile(t, `{"default":"customer-zero","rigs":{"gastown":"acme"}}`))
