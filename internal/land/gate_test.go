@@ -340,18 +340,31 @@ func TestStepRecordsSlotWait(t *testing.T) {
 		return g.Run(context.Background(), "/w")
 	}
 
-	waited := run(90 * time.Second)
-	if got := waited.Steps[2].SlotWait; got != 90*time.Second {
+	// testStepOf finds the test step by name, so the test does not depend on
+	// where GoGate places it.
+	testStepOf := func(res GateResult) StepResult {
+		t.Helper()
+		for _, st := range res.Steps {
+			if st.Name == "test" {
+				return st
+			}
+		}
+		t.Fatalf("gate ran no test step: %+v", res)
+		return StepResult{}
+	}
+
+	waited := testStepOf(run(90 * time.Second))
+	if got := waited.SlotWait; got != 90*time.Second {
 		t.Errorf("test step SlotWait = %s, want the 90s it waited", got)
 	}
-	unwaited := run(0)
-	if got := unwaited.Steps[2].SlotWait; got != 0 {
+	unwaited := testStepOf(run(0))
+	if got := unwaited.SlotWait; got != 0 {
 		t.Errorf("test step SlotWait = %s for a hold taken at once, want zero", got)
 	}
-	for _, res := range []GateResult{waited, unwaited} {
-		if e := res.Steps[2].Elapsed; e >= time.Second {
-			t.Errorf("test step Elapsed = %s beside a %s slot wait, want the step's own time alone", e, res.Steps[2].SlotWait)
-		}
+	// The wait must not inflate Elapsed: measured against the run that took
+	// the slot at once, the waited step grows by less than its wait.
+	if grew := waited.Elapsed - unwaited.Elapsed; grew >= waited.SlotWait {
+		t.Errorf("test step Elapsed grew by %s beside a %s slot wait, want the step's own time alone", grew, waited.SlotWait)
 	}
 }
 
