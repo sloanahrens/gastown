@@ -18,7 +18,12 @@ import (
 // daemonComposeFlags are the values `gt daemon compose write` parsed.
 type daemonComposeFlags struct {
 	image string // gt-daemon:<rev>, the image the rendered file names
-	print bool   // print the render and write no file
+	// omTokenFile is the om subscription token file's path on the host, which
+	// the render mounts read-only into the container; "" renders neither the
+	// mount nor the flag. The command never reads the file, so its contents are
+	// in no output and no error (gt-yaqct).
+	omTokenFile string
+	print       bool // print the render and write no file
 }
 
 // daemonComposeDeps is what the command takes from the host: where the town is
@@ -111,6 +116,12 @@ Dolt is resolved as the container reaches it: dolt.container_host when the town
 sets it, dolt.host when it does not, and a loopback or empty host is refused,
 because inside the container that host is the container itself.
 
+--om-token-file names the om subscription token file on the host, an absolute
+path. The render mounts it read-only into the container and passes its path to
+the entrypoint, which loads the token into the daemon's environment; the file is
+never read here, so its contents appear in no output, and without the flag the
+render carries neither the mount nor the flag.
+
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -118,6 +129,8 @@ because inside the container that host is the container itself.
 		},
 	}
 	write.Flags().StringVar(&f.image, "image", "", "daemon image tag, gt-daemon:<rev>")
+	write.Flags().StringVar(&f.omTokenFile, config.OMTokenFileFlag, "",
+		"om token file's absolute path on the host, mounted read-only into the container; unset renders neither the mount nor the flag")
 	write.Flags().BoolVar(&f.print, "print", false, "print the render and write no file")
 	parent.AddCommand(write)
 	return parent
@@ -139,6 +152,10 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	if _, err := daemonimage.ImageTagRev(image); err != nil {
 		return err
 	}
+	// The token file is passed to the render as the host's path, and the render
+	// refuses a relative one. The command never opens the file, so no contents
+	// reach its output or an error.
+	omTokenFile := strings.TrimSpace(f.omTokenFile)
 	townRoot, err := d.findTown()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
@@ -162,6 +179,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		TownRoot:      townRoot,
 		StopGrace:     templates.MinimumStopGrace,
 		DoltHost:      host,
+		OMTokenFile:   omTokenFile,
 	}
 	content, err := templates.RenderDaemonCompose(spec)
 	if err != nil {
