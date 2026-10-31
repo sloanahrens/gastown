@@ -965,11 +965,18 @@ func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot
 // only one committing at a time (gt-40twy).
 const (
 	// bondLockWait bounds the time one bond call spends waiting for the lock,
-	// counted across its retries rather than per attempt. The retry loop
-	// without the lock already spent bdContentionAttempts attempts of ~18s
-	// under load, so this bound adds nothing to the worst case a sling
-	// already had; it is there so a stuck holder reports itself instead of
-	// hanging the sling.
+	// counted across its retries rather than per attempt: the deadline is
+	// fixed once before the first attempt and every attempt shares it. It is
+	// not a bound on the bond itself — bd's attempt runs after the lock is
+	// taken — so the cost of a stuck holder is this wait plus the attempt the
+	// waiter eventually makes.
+	//
+	// A bond under load was measured at ~18s, so this wait lets a sling queue
+	// behind about five others before it gives up. That is the trade for
+	// serializing: a sling that waits past the bound now fails with
+	// ErrBondLockTimeout naming the lock, which is a clear error an operator
+	// can act on, instead of the Error 1213 it used to lose to when the same
+	// slings bonded together.
 	bondLockWait = 90 * time.Second
 	// bondLockRetryInterval is how often a waiter retries the flock: short
 	// enough that the bond behind a released lock starts at once, since the
@@ -978,7 +985,8 @@ const (
 )
 
 // ErrBondLockTimeout reports that a bond did not get the town bond lock within
-// bondLockWait.
+// bondLockWait. It is not Dolt contention — the lock never reached bd — so the
+// retry loop does not take it again, and the sling fails naming the lock.
 var ErrBondLockTimeout = errors.New("mol bond lock did not free in time")
 
 // bondLockPath is the town-wide file every sling's bond takes its turn on.

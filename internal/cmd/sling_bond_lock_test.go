@@ -14,13 +14,21 @@ import (
 
 // bondFakeClock is the clock and sleep a bond's lock wait reads, spent in no
 // real time: every sleep advances it by its pause and records the pause.
-// limit, when set, is the most the clock may advance before the test fails —
-// a bound is what the wait is supposed to have, and a wait without one never
-// returns, which a test would see as a hang rather than a failure.
+//
+// maxSleeps, when set, is the most pauses a wait may take before the test
+// fails. A wait with no bound does not sit in the kernel here, it spins, so
+// without this cap the test would hang rather than fail. Only a test that
+// drives the wait from its own goroutine may set it, since the failure comes
+// from t.Fatalf.
+//
+// onSleep runs after each pause. A contending bond spins on that pause, so a
+// test that blocks there holds the waiter still and decides when its time
+// moves; without it the spin would spend the whole bound between two lines of
+// the test, and the wait would time out before the test could free the lock.
 type bondFakeClock struct {
-	t       *testing.T
-	limit   time.Duration
-	onSleep func()
+	t         *testing.T
+	maxSleeps int
+	onSleep   func()
 
 	mu    sync.Mutex
 	zero  time.Time
@@ -44,10 +52,10 @@ func (c *bondFakeClock) Sleep(d time.Duration) {
 	c.mu.Lock()
 	c.now = c.now.Add(d)
 	c.slept = append(c.slept, d)
-	waited := c.now.Sub(c.zero)
+	n := len(c.slept)
 	c.mu.Unlock()
-	if c.limit > 0 && waited > c.limit {
-		c.t.Fatalf("bond waited %s, past its bound of %s", waited, c.limit)
+	if c.maxSleeps > 0 && n > c.maxSleeps {
+		c.t.Fatalf("bond took %d pauses, past the %d a bounded wait may take", n, c.maxSleeps)
 	}
 	if c.onSleep != nil {
 		c.onSleep()
@@ -106,12 +114,21 @@ func TestBondSerializesAcrossProcesses(t *testing.T) {
 
 	firstClock := newBondFakeClock(t)
 	secondClock := newBondFakeClock(t)
+	// The second bond's wait parks here once it has contended: onSleep holds it
+	// until the first bond has landed and let the lock go, so the fake clock
+	// cannot carry the waiter through its bound while the test is still
+	// arranging the release.
 	contended := make(chan struct{}, 1)
+	held := make(chan struct{})
+	var heldOnce sync.Once
+	letGo := func() { heldOnce.Do(func() { close(held) }) }
+	defer letGo()
 	secondClock.onSleep = func() {
 		select {
 		case contended <- struct{}{}:
 		default:
 		}
+		<-held
 	}
 
 	var firstRoot, secondRoot string
@@ -131,14 +148,18 @@ func TestBondSerializesAcrossProcesses(t *testing.T) {
 			"mol-polecat-work", "mol-polecat-work", "gt-second", townRoot, townRoot, []string{"feature=b"})
 	}()
 
+	// Either the second bond waits on the lock — the behaviour — or it reaches
+	// bd while the first is still inside, which is the mutation. Both are
+	// events, so this needs no timer: the first bond cannot finish before
+	// release, so a done here is the second, and it did not wait.
 	select {
 	case <-contended:
-	//testpolicy:allow no-sleep — bound the wait for a bond contending on the lock, which fails rather than hangs
-	case <-time.After(5 * time.Second):
+	case <-done:
 		t.Fatal("the second bond never waited for the town lock while the first held it")
 	}
 	release()
-	<-done
+	<-done // the first bond landed, and its lock went with it
+	letGo()
 	<-done
 
 	if firstErr != nil || secondErr != nil {
@@ -169,7 +190,9 @@ func TestBondLockWaitIsBounded(t *testing.T) {
 	defer held()
 
 	clock := newBondFakeClock(t)
-	clock.limit = bondLockWait + bondLockRetryInterval
+	// One pause per retry interval is the most a full wait may take; the cap
+	// is that count, so a wait that never ends fails here instead of spinning.
+	clock.maxSleeps = int(bondLockWait/bondLockRetryInterval) + 1
 	fake := formulaBDFake(`{"result_id":"gt-wisp-x"}`)
 
 	_, err = bondBD(fake, clock).bond(
