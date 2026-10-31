@@ -1202,12 +1202,19 @@ func RemoveStoppedSandbox(townRoot, sessionID string, pusher, deleter func(townR
 	if !sandboxed {
 		return nil
 	}
+	return RemoveStoppedSandboxWithRecord(townRoot, sessionID, rec, pusher, deleter)
+}
+
+// RemoveStoppedSandboxWithRecord is RemoveStoppedSandbox for a caller that
+// already read rec: the same push-then-delete over that record, without reading
+// it again, so the sandbox pushed and removed is the one the caller saw.
+func RemoveStoppedSandboxWithRecord(townRoot, sessionID string, rec session.SandboxRecord, pusher, deleter func(townRoot string, rec session.SandboxRecord) error) error {
 	// A sandbox already gone has no commits left to lose, so it is not a refused
 	// push; the delete below finds nothing to remove either.
 	if err := sandboxPusherOrLinked(pusher, session.SandboxPusher)(townRoot, rec); err != nil && !errors.Is(err, session.ErrNothingToPush) {
 		return fmt.Errorf("%w: keeping its sandbox so its commits survive, their push was refused: %w", ErrSandboxNotRemoved, err)
 	}
-	if err := session.CleanupSandboxWith(sandboxDeleterOrLinked(deleter), townRoot, sessionID); err != nil {
+	if err := session.CleanupSandboxWithRecord(sandboxDeleterOrLinked(deleter), townRoot, sessionID, rec); err != nil {
 		return fmt.Errorf("%w: removing its sandbox: %w", ErrSandboxNotRemoved, err)
 	}
 	return nil

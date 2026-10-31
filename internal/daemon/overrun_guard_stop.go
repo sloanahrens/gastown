@@ -1030,22 +1030,34 @@ var errSandboxRecordCorrupt = errors.New("sandbox record is corrupt")
 // stop, as a refused push does, and so does a lookup that cannot tell which
 // record is the seat's. A refused step names the sandbox in its error, which the
 // stop logs.
+//
+// The record is read once here and passed down, so the push and the delete act
+// on the record the stop classified rather than one read again after it.
 func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(townRoot string, rec session.SandboxRecord) error) error {
 	sessionName, err := d.overrunSandboxSession(seat)
 	if err != nil || sessionName == "" {
 		return err
 	}
-	_, sandboxed, err := session.ReadSandboxRecord(d.config.TownRoot, sessionName)
+	rec, sandboxed, err := d.readSandboxRecordFor(d.config.TownRoot, sessionName)
 	if err != nil {
 		return overrunRecordReadError(sessionName, err)
 	}
 	if !sandboxed {
 		return nil
 	}
-	if err := polecat.RemoveStoppedSandbox(d.config.TownRoot, sessionName, pusher, deleter); err != nil {
+	if err := polecat.RemoveStoppedSandboxWithRecord(d.config.TownRoot, sessionName, rec, pusher, deleter); err != nil {
 		return fmt.Errorf("sandbox %s: %w", sessionName, err)
 	}
 	return nil
+}
+
+// readSandboxRecordFor is the sandbox record read of the stop's sandbox step:
+// readSandboxRecord's when a test gave it one, else session.ReadSandboxRecord.
+func (d *Daemon) readSandboxRecordFor(townRoot, sessionName string) (session.SandboxRecord, bool, error) {
+	if d.readSandboxRecord != nil {
+		return d.readSandboxRecord(townRoot, sessionName)
+	}
+	return session.ReadSandboxRecord(townRoot, sessionName)
 }
 
 // overrunSandboxSession names the session whose record is the seat's sandbox,

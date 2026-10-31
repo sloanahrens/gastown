@@ -791,6 +791,57 @@ func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *tes
 	}
 }
 
+// The stop reads the sandbox record once, and the push and the delete act on
+// the record it read: a second read would see the record on disk, which the
+// counting reader below does not return.
+func TestOverrunRemoveSandbox_ReadsTheRecordOnceAndActsOnThatRecord(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	// What the stop read is not what the registry holds, so a push or delete
+	// that read the record again would act on the disk record instead.
+	counted := session.SandboxRecord{
+		Session: overrunStopSessionName,
+		Rig:     stopSeat.Rig,
+		Polecat: stopSeat.Polecat,
+		Branch:  "counted-branch",
+	}
+	reads := 0
+	d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+		reads++
+		if reads > 1 {
+			t.Errorf("the sandbox record was read %d times, want once", reads)
+		}
+		return counted, true, nil
+	}
+	var pushed, deleted []session.SandboxRecord
+	err := d.overrunRemoveSandbox(stopSeat,
+		func(_ string, rec session.SandboxRecord) error {
+			pushed = append(pushed, rec)
+			return nil
+		},
+		func(_ string, rec session.SandboxRecord) error {
+			deleted = append(deleted, rec)
+			return nil
+		})
+
+	if err != nil {
+		t.Fatalf("overrunRemoveSandbox = %v, want nil", err)
+	}
+	if reads != 1 {
+		t.Errorf("record reads = %d, want 1", reads)
+	}
+	if len(pushed) != 1 || pushed[0].Branch != "counted-branch" {
+		t.Errorf("push got %v, want the record the stop read", pushed)
+	}
+	if len(deleted) != 1 || deleted[0].Branch != "counted-branch" {
+		t.Errorf("delete got %v, want the record the stop read", deleted)
+	}
+	if _, ok, _ := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); ok {
+		t.Error("the sandbox record survived the stop")
+	}
+}
+
 // A sandbox record that does not parse cannot say whether its seat ran in a
 // sandbox, and no retry changes the file. The stop keeps the sandbox and its
 // record, hands the bead back with a note naming the unreadable record, and
