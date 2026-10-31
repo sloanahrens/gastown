@@ -113,13 +113,19 @@ func TestSchemaLevelClassifiesAStoreThatDidNotAnswer(t *testing.T) {
 // and the error names the budget that ended it rather than the seam's.
 func TestSchemaLevelEndsWithTheCallersBudget(t *testing.T) {
 	t.Parallel()
-	const budget = 20 * time.Millisecond
+	// The caller's budget is shorter than the seam's minute, so the two are told
+	// apart, and long enough that no wall clock spends it before the read starts.
+	const budget = 30 * time.Second
+	fire := make(chan struct{})
 	readCtx := make(chan context.Context, 1)
 	run := func(ctx context.Context, c bdCall) ([]byte, []byte, error) {
 		if len(c.args) == 2 && c.args[0] == "--allow-stale" {
 			return nil, []byte("Error: unknown flag: --allow-stale\n"), nil
 		}
 		readCtx <- ctx
+		// The runner ends the caller's budget as the read begins, standing in for
+		// the deadline firing, so the test waits on no real clock.
+		close(fire)
 		// A read that outlives the caller's budget is the failure under test,
 		// so the runner caps its own wait: a hang guard for a call no deadline
 		// ever ends, not the measurement.
@@ -130,8 +136,7 @@ func TestSchemaLevelEndsWithTheCallersBudget(t *testing.T) {
 		}
 		return nil, nil, errors.New("signal: killed")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
+	ctx := firedBudget{Context: context.Background(), deadline: time.Now().Add(budget), fired: fire}
 	callerDeadline, ok := ctx.Deadline()
 	if !ok {
 		t.Fatal("the test's own context has no deadline")
@@ -172,6 +177,29 @@ func TestSchemaLevelEndsWithTheCallersBudget(t *testing.T) {
 	}
 	if !deadline.Equal(callerDeadline) {
 		t.Errorf("the read's deadline is %s, want the caller's %s", deadline, callerDeadline)
+	}
+}
+
+// firedBudget is a caller's budget that the test ends on demand: its deadline is
+// fixed, and once fired its Done closes and its Err is context.DeadlineExceeded,
+// as an expired deadline leaves it. A cancel func would leave Err at
+// context.Canceled, which bd's classifier does not read as a deadline kill.
+type firedBudget struct {
+	context.Context
+	deadline time.Time
+	fired    <-chan struct{}
+}
+
+func (f firedBudget) Deadline() (time.Time, bool) { return f.deadline, true }
+
+func (f firedBudget) Done() <-chan struct{} { return f.fired }
+
+func (f firedBudget) Err() error {
+	select {
+	case <-f.fired:
+		return context.DeadlineExceeded
+	default:
+		return nil
 	}
 }
 
