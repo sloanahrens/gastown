@@ -3,6 +3,8 @@ package forgejo
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -10,15 +12,31 @@ import (
 	"time"
 )
 
-// userReposLimit bounds the viewer's repository list. The dashboard reads a
-// handful of repos, so one page is always the whole list.
+// userReposLimit bounds one page of the viewer's repository list. The list is
+// read page by page to its end: a report built from the first page alone would
+// silently leave every later repository out (gt-nlrpk).
 const userReposLimit = 100
 
+// userReposMaxPages bounds the paging loop. A server that serves a full page
+// forever fails the read instead of spinning; 100 pages reaches past any
+// town's repository count, and a server that served more is a fault to report,
+// not a list to truncate.
+const userReposMaxPages = 100
+
+// ErrListNeverEnds reports a repository list the server kept serving past the
+// paging bound, so the read cannot be trusted to be complete.
+var ErrListNeverEnds = errors.New("forgejo: repository list never ended")
+
 // Repository is the subset of a Forgejo repository the client reads: the
-// owner/name an activity feed addresses the repo by, and the reply to the
-// probe's existence check (Client.Repository).
+// owner/name an activity feed addresses the repo by, the size the nightly
+// report charges storage for, and the reply to the probe's existence check
+// (Client.Repository).
 type Repository struct {
 	FullName string `json:"full_name"`
+	// SizeKB is the repository's size in kilobytes. It is a pointer because a
+	// reply without the field is an unmeasured size, which is not zero bytes
+	// (gt-nlrpk).
+	SizeKB *int64 `json:"size"`
 }
 
 // Activity is one entry of a repository's activity feed, the list Forgejo's
@@ -67,15 +85,30 @@ func (a Activity) HeadMessage() (string, bool) {
 	return subject, subject != ""
 }
 
-// ListUserRepos returns the repositories the token's user can see.
+// ListUserRepos returns every repository the token's user can see, read page
+// by page. It stops when a page comes back empty rather than when it is short:
+// a server caps a page at its own maximum, so a short page may still have more
+// behind it, while an empty one cannot (gt-nlrpk). Reading that closing empty
+// page is why the panel's refresh makes one more call than the listing
+// strictly needs. That call is accepted, not reduced: trusting a short page
+// would drop repositories from a billing report whenever the server's page cap
+// is below the requested limit.
 func (c *Client) ListUserRepos(ctx context.Context) ([]Repository, error) {
-	q := url.Values{}
-	q.Set("limit", strconv.Itoa(userReposLimit))
-	var out []Repository
-	if err := c.call(ctx, http.MethodGet, "/user/repos", q, nil, &out); err != nil {
-		return nil, err
+	out := make([]Repository, 0, userReposLimit)
+	for page := 1; page <= userReposMaxPages; page++ {
+		q := url.Values{}
+		q.Set("limit", strconv.Itoa(userReposLimit))
+		q.Set("page", strconv.Itoa(page))
+		var rows []Repository
+		if err := c.call(ctx, http.MethodGet, "/user/repos", q, nil, &rows); err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			return out, nil
+		}
+		out = append(out, rows...)
 	}
-	return out, nil
+	return nil, fmt.Errorf("%w: still full after %d pages", ErrListNeverEnds, userReposMaxPages)
 }
 
 // ListRepoActivities returns a repository's recent activities, newest first.

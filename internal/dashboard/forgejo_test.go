@@ -91,6 +91,12 @@ func (s *forgejoStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == "/api/v1/user/repos":
+		// One page of repos, then the empty page that ends the client's paging
+		// (gt-nlrpk).
+		if r.URL.Query().Get("page") != "1" {
+			_, _ = io.WriteString(w, `[]`)
+			return
+		}
 		_, _ = io.WriteString(w, `[{"full_name":"sloan/beads"}]`)
 	case r.URL.Path == "/api/v1/repos/sloan/beads/activities/feeds":
 		_, _ = io.WriteString(w, forgejoFeedJSON)
@@ -242,7 +248,13 @@ func TestForgejoReaderMergesTheViewersRepos(t *testing.T) {
 	feed := newForgejoTestReader(t, stub, nil).Read()
 	require.Empty(t, feed.Error)
 	require.Len(t, feed.Events, 2)
-	assert.Equal(t, []string{"/api/v1/user/repos", "/api/v1/repos/sloan/beads/activities/feeds"}, activitiesAsked(stub))
+	// The list call appears twice: the repos are paged to their end, and the
+	// empty second page is what says the first was the whole list (gt-nlrpk).
+	assert.Equal(t, []string{
+		"/api/v1/user/repos",
+		"/api/v1/user/repos",
+		"/api/v1/repos/sloan/beads/activities/feeds",
+	}, activitiesAsked(stub))
 
 	// The stub echoes the feed's newest row first; the panel turns it the
 	// other way round so the newest line is the last one it appends.

@@ -3,7 +3,10 @@ package forgejo
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,13 +15,141 @@ import (
 
 func TestListUserRepos(t *testing.T) {
 	t.Parallel()
-	rec := &recorder{body: golden(t, "user_repos.json")}
-	repos, err := newTestClient(t, rec).ListUserRepos(context.Background())
+	// The handler runs on the server's own goroutine, so the slices it records
+	// are guarded by mu and read under it on the test goroutine.
+	var mu sync.Mutex
+	var paths, pages, limits []string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		pages = append(pages, r.URL.Query().Get("page"))
+		limits = append(limits, r.URL.Query().Get("limit"))
+		mu.Unlock()
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = w.Write(golden(t, "user_repos.json"))
+			return
+		}
+		_, _ = w.Write([]byte("[]"))
+	})
+	repos, err := newTestClient(t, h).ListUserRepos(context.Background())
 	require.NoError(t, err)
 
-	assert.Equal(t, "/api/v1/user/repos", rec.req.URL.Path)
-	assert.Equal(t, "100", rec.req.URL.Query().Get("limit"))
+	mu.Lock()
+	gotPaths, gotPages, gotLimits := paths, pages, limits
+	mu.Unlock()
+	assert.Equal(t, []string{"/api/v1/user/repos", "/api/v1/user/repos"}, gotPaths)
+	assert.Equal(t, []string{"1", "2"}, gotPages)
+	assert.Equal(t, []string{"100", "100"}, gotLimits)
 	assert.Equal(t, []Repository{{FullName: "sloan/beads"}, {FullName: "sloan/mango"}}, repos)
+}
+
+// A viewer with more repositories than one page holds is read to its end: a
+// report built from the first page alone would leave every later repository
+// out (gt-nlrpk).
+func TestListUserReposReadsEveryPage(t *testing.T) {
+	t.Parallel()
+	full := make([]Repository, userReposLimit)
+	for i := range full {
+		full[i] = Repository{FullName: fmt.Sprintf("sloan/repo-%d", i)}
+	}
+	// The handler runs on the server's own goroutine: pages is guarded by mu,
+	// and a handler write failure is recorded for the test goroutine to assert
+	// (a require there would abort only the handler's goroutine).
+	var mu sync.Mutex
+	var pages []string
+	var writeErr error
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		mu.Lock()
+		pages = append(pages, page)
+		mu.Unlock()
+		var err error
+		switch page {
+		case "1":
+			err = json.NewEncoder(w).Encode(full)
+		case "2":
+			err = json.NewEncoder(w).Encode([]Repository{{FullName: "sloan/last"}})
+		default:
+			_, err = w.Write([]byte("[]"))
+		}
+		if err != nil {
+			mu.Lock()
+			if writeErr == nil {
+				writeErr = err
+			}
+			mu.Unlock()
+		}
+	})
+	repos, err := newTestClient(t, h).ListUserRepos(context.Background())
+	require.NoError(t, err)
+
+	mu.Lock()
+	gotPages := pages
+	gotWriteErr := writeErr
+	mu.Unlock()
+	require.NoError(t, gotWriteErr, "the stub wrote its canned pages")
+	assert.Equal(t, []string{"1", "2", "3"}, gotPages, "a short page is not the end: the empty page is")
+	require.Len(t, repos, userReposLimit+1)
+	assert.Equal(t, "sloan/repo-0", repos[0].FullName)
+	assert.Equal(t, "sloan/last", repos[userReposLimit].FullName)
+}
+
+// A page the client cannot read fails the whole list: reporting the pages it
+// did read as the whole list is what the size report must not be built from
+// (gt-nlrpk).
+func TestListUserReposPageFailureFails(t *testing.T) {
+	t.Parallel()
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = w.Write(golden(t, "user_repos.json"))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"message":"boom"}`)
+	})
+	_, err := newTestClient(t, h).ListUserRepos(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+// A server that never runs out of repositories is a fault the read reports,
+// not a list it truncates at the guard without saying so (gt-nlrpk).
+func TestListUserReposEndlessPagesFails(t *testing.T) {
+	t.Parallel()
+	full := make([]Repository, userReposLimit)
+	for i := range full {
+		full[i] = Repository{FullName: fmt.Sprintf("sloan/repo-%d", i)}
+	}
+	// calls and writeErr are written on the handler's goroutine, so each is
+	// guarded by mu and read under it on the test goroutine.
+	var mu sync.Mutex
+	calls := 0
+	var writeErr error
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		if err := json.NewEncoder(w).Encode(full); err != nil {
+			mu.Lock()
+			if writeErr == nil {
+				writeErr = err
+			}
+			mu.Unlock()
+		}
+	})
+	_, err := newTestClient(t, h).ListUserRepos(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrListNeverEnds)
+
+	mu.Lock()
+	gotCalls, gotWriteErr := calls, writeErr
+	mu.Unlock()
+	require.NoError(t, gotWriteErr, "the stub wrote its canned pages")
+	// The guard is a bound, not a documented constant: assert the loop stops
+	// well before any list a real server would serve, without pinning the test
+	// to today's value of userReposMaxPages.
+	assert.Greater(t, gotCalls, 1, "the loop read more than one page")
+	assert.LessOrEqual(t, gotCalls, 1000, "the paging loop is bounded")
 }
 
 func TestListRepoActivities(t *testing.T) {
