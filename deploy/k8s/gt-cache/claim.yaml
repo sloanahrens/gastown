@@ -1,0 +1,20 @@
+# The shared Go cache claim. The default StorageClass is local-path with
+# WaitForFirstConsumer, so the claim binds on the node of its first consumer:
+# every pod that mounts it must be on the sandbox pool (nodeSelector
+# gt.dev/pool=sandbox, taint gt.dev/pool=sandbox:NoSchedule), the sandbox pods
+# already are, and the seed Job is the one pod that mounts it first. No binder
+# pod is needed while that holds (gt-27sh1).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gt-cache
+  namespace: openshell
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: gt-cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
