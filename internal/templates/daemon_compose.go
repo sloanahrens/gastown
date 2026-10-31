@@ -359,7 +359,7 @@ var scratchOperatorNote = []string{
 // the daemon container. When omTokenFile is set, --om-token-file <path> follows
 // them. The entrypoint is the image's ENTRYPOINT, so the command carries its
 // flags alone. The live project passes nothing.
-func scratchDaemonCommand(omTokenFile string, doltPort int) string {
+func scratchDaemonCommand(omTokenFile string, doltPort int, forgeTokenFile string) string {
 	var b strings.Builder
 	for _, line := range scratchOperatorNote {
 		b.WriteString("    # " + line + "\n")
@@ -368,6 +368,10 @@ func scratchDaemonCommand(omTokenFile string, doltPort int) string {
 		"--" + config.DoltPortFlag, strconv.Itoa(doltPort)}
 	if omTokenFile != "" {
 		argv = append(argv, "--"+config.OMTokenFileFlag, composeLiteral(omTokenFile))
+	}
+	if forgeTokenFile != "" {
+		argv = append(argv, "--"+config.ForgeHostFlag, ScratchForgejoService+":3000",
+			"--"+config.ForgeTokenFileFlag, composeLiteral(forgeTokenFile))
 	}
 	quoted := make([]string, len(argv))
 	for i, arg := range argv {
@@ -415,6 +419,20 @@ const scratchDoltBody = `  %[1]s:
     networks:
       - %[5]s
 `
+
+// ScratchForgeTokenDir is the directory, under the scratch town root, where the
+// runbook's provisioning step writes the bots' token files. The landing bot's
+// file in it is what the daemon's git credential helper reads (gt-2d6f2).
+const ScratchForgeTokenDir = "forge-tokens"
+
+// scratchForgeTokenFile is the landing bot's token file the daemon's git
+// credential helper reads, or "" when the scratch project has no forge.
+func (s ComposeSpec) scratchForgeTokenFile() string {
+	if !s.ScratchForge {
+		return ""
+	}
+	return filepath.Join(s.TownRoot, ScratchForgeTokenDir, "forgejo-landing.env")
+}
 
 // scratchDoltPort is the port the scratch Dolt server listens on: DoltPort, or
 // ScratchDoltPort when the spec leaves it zero.
@@ -528,7 +546,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 	var command, dolt, doltVolume, doltWait, forgeNetwork string
 	if s.Scratch {
 		names = scratchNames
-		command = scratchDaemonCommand(s.OMTokenFile, s.scratchDoltPort())
+		command = scratchDaemonCommand(s.OMTokenFile, s.scratchDoltPort(), s.scratchForgeTokenFile())
 		dolt = fmt.Sprintf(scratchDoltBody,
 			ScratchDoltService,
 			composeLiteral(s.ScratchDoltImage),

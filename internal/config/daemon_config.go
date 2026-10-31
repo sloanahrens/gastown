@@ -142,6 +142,20 @@ const (
 	// `gt install` as the same flag, and the scratch render passes it, so all
 	// three read one string. Without it the install dials Dolt's default 3307.
 	DoltPortFlag = "dolt-port"
+
+	// ForgeHostFlag and ForgeTokenFileFlag are the entrypoint flags, without
+	// their dashes, that make the container's git ask the forge credential
+	// helper (GitCredentialForgejoCommand) for the landing bot's login and
+	// token: the Forgejo's host:port, and the absolute path of the bot's token
+	// file. The entrypoint registers them and the scratch render passes them
+	// when the throwaway Forgejo is on, so both read one string (gt-2d6f2).
+	// Only --scratch-town takes them, and only together.
+	ForgeHostFlag      = "forge-host"
+	ForgeTokenFileFlag = "forge-token-file" //nolint:gosec // a flag name, not a credential
+
+	// GitCredentialForgejoCommand is the gt subcommand that answers git's
+	// credential protocol for a Forgejo from a bot's token file (gt-dhjz6).
+	GitCredentialForgejoCommand = "git-credential-forgejo" //nolint:gosec // a command name, not a credential
 )
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town
