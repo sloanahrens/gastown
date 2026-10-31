@@ -538,8 +538,8 @@ func TestRunRefusesAFixtureFileThatIsNotThere(t *testing.T) {
 	bd := &fakeBD{out: okBD}
 	missing := filepath.Join(tempDir(t), "missing.jsonl")
 	args := []string{"-fixture", missing, "-scratch", filepath.Join(tempDir(t), "scratch")}
-	if code := runIn(safeCwd(t), childFor(passingChild(bd)), args, &stdout, &stderr); code != 1 {
-		t.Errorf("run with a missing fixture file = %d, want 1", code)
+	if code := runIn(safeCwd(t), childFor(passingChild(bd)), args, &stdout, &stderr); code != 2 {
+		t.Errorf("run with a missing fixture file = %d, want 2", code)
 	}
 	if !strings.Contains(stderr.String(), "open the fixture") {
 		t.Errorf("stderr = %q, want the fixture failure reported", stderr.String())
@@ -556,8 +556,8 @@ func TestRunRefusesAFixtureMissingABead(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	fixture := writeFixture(t, fixtureID, fixtureParent)
 	args := []string{"-fixture", fixture, "-scratch", filepath.Join(tempDir(t), "scratch")}
-	if code := runIn(safeCwd(t), childFor(passingChild(&fakeBD{out: okBD})), args, &stdout, &stderr); code != 1 {
-		t.Errorf("run over a fixture missing %s = %d, want 1", fixtureDepID, code)
+	if code := runIn(safeCwd(t), childFor(passingChild(&fakeBD{out: okBD})), args, &stdout, &stderr); code != 2 {
+		t.Errorf("run over a fixture missing %s = %d, want 2", fixtureDepID, code)
 	}
 	if !strings.Contains(stderr.String(), fixtureDepID) {
 		t.Errorf("stderr = %q, want the missing bead named", stderr.String())

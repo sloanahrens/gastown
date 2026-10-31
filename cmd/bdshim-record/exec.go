@@ -253,10 +253,7 @@ func provisionCopy(run Runner, fixture, scratch string) (string, func() error, e
 		return "", nil, fmt.Errorf("make a copy in the scratch directory %s: %w", scratch, err)
 	}
 	if err := initDatabase(run, dir, name); err != nil {
-		// A failed init leaves no .beads, so there is nowhere for the drop to run from. A name
-		// under testdb's prefix is what lets a later `bd dolt clean-databases` remove a database
-		// an init made just before it failed.
-		return "", nil, errors.Join(err, os.RemoveAll(dir))
+		return "", nil, errors.Join(err, abandonCopy(run, dir, name))
 	}
 	remove := func() error {
 		return errors.Join(dropDatabase(run, dir, name), os.RemoveAll(dir))
@@ -265,6 +262,20 @@ func provisionCopy(run Runner, fixture, scratch string) (string, func() error, e
 		return "", nil, errors.Join(err, remove())
 	}
 	return dir, remove, nil
+}
+
+// abandonCopy clears a copy whose init failed, since an init can fail after it has made its database.
+// The drop runs from the workspace the init left in dir. With none there is nowhere to run it from,
+// so the error names the database: its name carries testdb's prefix, which a later
+// `bd dolt clean-databases` removes (gt-vs7a5).
+func abandonCopy(run Runner, dir, name string) error {
+	var stranded error
+	if _, err := os.Stat(beadsDirIn(dir)); err == nil {
+		stranded = dropDatabase(run, dir, name)
+	} else {
+		stranded = fmt.Errorf("database %s may remain on the server: the failed init left no workspace to drop it from", name)
+	}
+	return errors.Join(stranded, os.RemoveAll(dir))
 }
 
 // initDatabase makes the workspace in dir with bd init, for a copy and for the scratch the guard
