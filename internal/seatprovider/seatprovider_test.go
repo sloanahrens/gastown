@@ -93,6 +93,10 @@ func TestCreateNamesFromSeatAndHidesTokenFromArgv(t *testing.T) {
 	if !slices.Contains(creates[0].argv, name) {
 		t.Fatalf("create argv = %q, want it to name the provider %q", creates[0].argv, name)
 	}
+	credential := slices.Index(creates[0].argv, "--credential")
+	if credential < 0 || credential+1 >= len(creates[0].argv) || creates[0].argv[credential+1] != tokenEnv {
+		t.Fatalf("create argv = %q, want --credential %s, the variable that holds the token", creates[0].argv, tokenEnv)
+	}
 }
 
 func TestNameForIsStableForOneSeatAndDistinctForSeatsThatSanitiseAlike(t *testing.T) {

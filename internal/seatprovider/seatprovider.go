@@ -130,7 +130,9 @@ func createArgs(name string) []string {
 }
 
 // deleteArgs returns the argv that deletes name. The -- ends option parsing, so a
-// name is never read as a flag.
+// name is never read as a flag. openshell's positional-name form is unverified
+// until the design's live proof runs; Create's --name form is the one a profile
+// in this repo shows.
 func deleteArgs(name string) []string {
 	return []string{"provider", "delete", "--", name}
 }
