@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -162,17 +163,23 @@ func (f *crewWorktreeFake) WorktreeAddFromRef(path, branch, startPoint string) e
 
 // crewCloneFixture is a crew clone inside a temporary town, with every lookup
 // the command makes answered from the fixture, so no test reads the host or
-// the live town.
+// the live town. The error fields fail one lookup so its refusal is reached.
 type crewCloneFixture struct {
+	town string
 	root string // the crew clone the command runs in
 	role RoleInfo
 	g    crewWorktreeGit
+
+	getwdErr    error
+	findTownErr error
+	roleErr     error
 }
 
 func newCrewCloneFixture(t *testing.T, role RoleInfo, g crewWorktreeGit) *crewCloneFixture {
 	t.Helper()
 	town := t.TempDir()
 	return &crewCloneFixture{
+		town: town,
 		root: filepath.Join(town, "gastown", "crew", "dunlin"),
 		role: role,
 		g:    g,
@@ -182,11 +189,26 @@ func newCrewCloneFixture(t *testing.T, role RoleInfo, g crewWorktreeGit) *crewCl
 // run drives the production crewWorktree from the fixture's clone.
 func (f *crewCloneFixture) run(topic string) (string, error) {
 	deps := crewWorktreeDeps{
-		getwd:    func() (string, error) { return f.root, nil },
-		findTown: func() (string, error) { return filepath.Dir(filepath.Dir(filepath.Dir(f.root))), nil },
-		role:     func(string, string) (RoleInfo, error) { return f.role, nil },
-		repo:     func(string) crewWorktreeGit { return f.g },
-		timeout:  time.Second,
+		getwd: func() (string, error) {
+			if f.getwdErr != nil {
+				return "", f.getwdErr
+			}
+			return f.root, nil
+		},
+		findTown: func() (string, error) {
+			if f.findTownErr != nil {
+				return "", f.findTownErr
+			}
+			return f.town, nil
+		},
+		role: func(string, string) (RoleInfo, error) {
+			if f.roleErr != nil {
+				return RoleInfo{}, f.roleErr
+			}
+			return f.role, nil
+		},
+		repo:    func(string) crewWorktreeGit { return f.g },
+		timeout: time.Second,
 	}
 	var out bytes.Buffer
 	err := crewWorktree(&out, topic, deps)
@@ -250,6 +272,105 @@ func TestCrewWorktreeRefusesExistingPathOrBranch(t *testing.T) {
 			}
 			if out != "" {
 				t.Errorf("printed %q, want nothing on a refusal", out)
+			}
+		})
+	}
+}
+
+// TestCrewWorktreeReportsALookupFailure pins that a lookup the command cannot
+// complete is an error, never a guess at the clone it should act on: an
+// unreadable directory, town root or role, and a cwd that is not a crew clone,
+// all stop it before it asks git anything.
+func TestCrewWorktreeReportsALookupFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		setup      func(*crewCloneFixture)
+		wantErrSub string
+	}{
+		{
+			name:       "the current directory cannot be read",
+			setup:      func(f *crewCloneFixture) { f.getwdErr = errors.New("getwd failed") },
+			wantErrSub: "read the current directory",
+		},
+		{
+			name:       "the town root cannot be found",
+			setup:      func(f *crewCloneFixture) { f.findTownErr = errors.New("no town") },
+			wantErrSub: "find the town root",
+		},
+		{
+			name:       "the role cannot be read",
+			setup:      func(f *crewCloneFixture) { f.roleErr = errors.New("no role") },
+			wantErrSub: "read the crew role",
+		},
+		{
+			name: "the cwd is not a crew clone",
+			setup: func(f *crewCloneFixture) {
+				f.root = filepath.Join(f.town, "gastown", "polecats", "coma", "gastown")
+			},
+			wantErrSub: "not a crew clone",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := &crewWorktreeFake{}
+			fx := newCrewCloneFixture(t, crewRole, g)
+			tc.setup(fx)
+			out, err := fx.run("fix-flake")
+			if err == nil {
+				t.Fatalf("crewWorktree() = nil error; want a refusal naming %q", tc.wantErrSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Errorf("error = %q, want it to name %q", err, tc.wantErrSub)
+			}
+			if g.fetched || len(g.created) != 0 {
+				t.Errorf("git received a call (fetched=%t, created=%v), want none", g.fetched, g.created)
+			}
+			if out != "" {
+				t.Errorf("printed %q, want nothing on a refusal", out)
+			}
+		})
+	}
+}
+
+// TestCrewWorktreeRepoPathExists pins the three answers the production stat
+// gives: a path that is there, one that is not, and a stat that fails for a
+// reason other than absence, which is an error rather than a free name.
+func TestCrewWorktreeRepoPathExists(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a-file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("writing the fixture file: %v", err)
+	}
+	r := crewWorktreeRepo{}
+
+	cases := []struct {
+		name    string
+		path    string
+		want    bool
+		wantErr bool
+	}{
+		{name: "a path that is there", path: file, want: true},
+		{name: "a path that is not", path: filepath.Join(dir, "absent")},
+		{name: "a stat that fails", path: filepath.Join(file, "below-a-file"), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := r.PathExists(tc.path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("PathExists(%q) = %t, nil; want an error", tc.path, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PathExists(%q): %v", tc.path, err)
+			}
+			if got != tc.want {
+				t.Errorf("PathExists(%q) = %t, want %t", tc.path, got, tc.want)
 			}
 		})
 	}
