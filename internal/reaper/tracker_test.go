@@ -27,6 +27,8 @@ type fakeTrackerWisps struct {
 	countFails func(api.ListFilter) bool
 	listErr    error
 	purgeErr   error
+	// purgeFailsFrom, when set, fails the purge calls from that call on (1-based).
+	purgeFailsFrom int
 }
 
 var errTrackerRead = errors.New("tracker unreachable")
@@ -69,6 +71,9 @@ func (f *fakeTrackerWisps) PurgeWisps(_ context.Context, ids []string) (api.Purg
 	f.purged = append(f.purged, slices.Clone(ids))
 	if f.purgeErr != nil {
 		return api.PurgeWispsResult{}, f.purgeErr
+	}
+	if f.purgeFailsFrom > 0 && len(f.purged) >= f.purgeFailsFrom {
+		return api.PurgeWispsResult{}, errTrackerRead
 	}
 	res := api.PurgeWispsResult{Purged: []string{}, Kept: []api.KeptWisp{}}
 	for _, id := range ids {
@@ -114,14 +119,23 @@ func TestScanTrackerReportsTheExpiredWisps(t *testing.T) {
 	if got.OpenWisps != 3 {
 		t.Errorf("OpenWisps = %d, want 3 (old-open, old-hooked, new-open)", got.OpenWisps)
 	}
-	if got.ReapCandidates != 2 {
-		t.Errorf("ReapCandidates = %d, want 2: the open and hooked wisps past max-age", got.ReapCandidates)
+	if got.ReapCandidates != 0 {
+		t.Errorf("ReapCandidates = %d, want 0: the reap never closes an open wisp, so none is a reap candidate", got.ReapCandidates)
 	}
 	if got.PurgeCandidates != 1 {
 		t.Errorf("PurgeCandidates = %d, want 1: the closed wisp past purge-age, not the durable issue", got.PurgeCandidates)
 	}
-	if len(got.Anomalies) != 1 || got.Anomalies[0].Type != "tracker-scope" {
-		t.Errorf("Anomalies = %+v, want the tracker-scope note that mail and stale are not counted", got.Anomalies)
+	want := []Anomaly{
+		{Type: "tracker-scope", Message: "mail and stale issue candidates are not counted for a tracker rig"},
+		{Type: "tracker-open-stale", Message: "2 open wisps are past max-age; trackerd's loop closes them, the reap does not", Count: 2},
+	}
+	if len(got.Anomalies) != len(want) {
+		t.Fatalf("Anomalies = %+v, want the tracker-scope note and the open-stale count", got.Anomalies)
+	}
+	for i := range want {
+		if got.Anomalies[i] != want[i] {
+			t.Errorf("Anomalies[%d] = %+v, want %+v", i, got.Anomalies[i], want[i])
+		}
 	}
 	for _, flt := range fake.counted {
 		if flt.Rig != "gt" || !flt.Ephemeral || !flt.IncludeInfra {
@@ -228,8 +242,50 @@ func TestReapTrackerRefusesWhenThePurgeFails(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("ReapTracker error = %v, want it to wrap the purge failure", err)
 	}
-	if got != nil {
-		t.Errorf("ReapTracker result = %+v, want none when the purge failed", got)
+	if got == nil || got.Reaped != 0 || got.OpenRemain != 3 {
+		t.Errorf("ReapTracker result = %+v, want nothing reaped and the 3 open wisps counted with the error", got)
+	}
+}
+
+func TestReapTrackerKeepsThePurgedCountWhenAPurgeFailsPartWay(t *testing.T) {
+	t.Parallel()
+	const expired = api.MaxPurgeWisps + 1
+	var issues []api.Issue
+	for i := range expired {
+		closed := trackerNow.Add(-30 * 24 * time.Hour)
+		issues = append(issues, api.Issue{
+			ID: fmt.Sprintf("gt-%04d", i), Status: "closed",
+			Ephemeral: true, CreatedAt: closed, ClosedAt: &closed,
+		})
+	}
+	fake := &fakeTrackerWisps{issues: issues, purgeFailsFrom: 2}
+	rig := TrackerRig{Name: "gastown", Prefix: "gt"}
+
+	got, err := ReapTracker(context.Background(), fake, rig, 7*24*time.Hour, false, trackerNow)
+	if !errors.Is(err, errTrackerRead) {
+		t.Fatalf("ReapTracker error = %v, want it to wrap the second batch's purge failure", err)
+	}
+	if got == nil || got.Reaped != api.MaxPurgeWisps {
+		t.Fatalf("ReapTracker result = %+v, want the first batch's %d purged kept with the error", got, api.MaxPurgeWisps)
+	}
+}
+
+func TestReapTrackerNamesAnOpenCountThatFailsAfterAPurgeFailure(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("tracker unreachable")
+	fake := &fakeTrackerWisps{
+		issues:     trackerRigFixture(),
+		purgeErr:   boom,
+		countFails: func(f api.ListFilter) bool { return len(f.Statuses) > 0 && f.Statuses[0] == "open" },
+	}
+	rig := TrackerRig{Name: "gastown", Prefix: "gt"}
+
+	got, err := ReapTracker(context.Background(), fake, rig, 7*24*time.Hour, false, trackerNow)
+	if !errors.Is(err, boom) {
+		t.Fatalf("ReapTracker error = %v, want the purge failure, not the count", err)
+	}
+	if got == nil || len(got.Anomalies) != 1 || got.Anomalies[0].Type != "open-unknown" {
+		t.Errorf("ReapTracker result = %+v, want an open-unknown anomaly where the open count is missing", got)
 	}
 }
 

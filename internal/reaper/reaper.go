@@ -1410,14 +1410,18 @@ func trackerWispFilter(rig TrackerRig, statuses ...string) api.ListFilter {
 	return api.ListFilter{Rig: rig.Prefix, Ephemeral: true, IncludeInfra: true, Statuses: statuses}
 }
 
-// ScanTracker counts a tracker rig's reaper candidates without writing: open
-// wisps past maxAge are reap candidates, closed wisps past purgeAge are purge
-// candidates, and every open wisp counts as open. The counts come before the
-// tracker's protections (merge requests, open parents, live agent references)
-// take theirs out, so the purge can reap fewer than the scan reports.
+// ScanTracker counts a tracker rig's reaper candidates without writing. The
+// reap on a tracker purges closed wisps past purgeAge, so those are the
+// candidates the scan reports as purge candidates, and ReapCandidates stays
+// zero: the reap never closes an open wisp. Open wisps past maxAge are counted
+// into a tracker-open-stale anomaly, because trackerd's own loop closes them
+// and the scan must say so rather than report them as something the reap does.
+// Every open wisp counts as open. The counts come before the tracker's
+// protections (merge requests, open parents, live agent references) take theirs
+// out, so the purge can reap fewer than the scan reports.
 //
 // The tracker holds no mail and no stale issues in a rig's wisp reads, so those
-// are not counted; the anomaly on the result says so instead of a silent zero.
+// are not counted; the tracker-scope anomaly says so instead of a silent zero.
 func ScanTracker(ctx context.Context, t TrackerWisps, rig TrackerRig, maxAge, purgeAge time.Duration, now time.Time) (*ScanResult, error) {
 	result := &ScanResult{Database: rig.Name}
 
@@ -1429,7 +1433,8 @@ func ScanTracker(ctx context.Context, t TrackerWisps, rig TrackerRig, maxAge, pu
 
 	stale := trackerWispFilter(rig, trackerOpenStatuses...)
 	stale.CreatedBefore = now.Add(-maxAge)
-	if result.ReapCandidates, err = t.Count(ctx, stale); err != nil {
+	staleCount, err := t.Count(ctx, stale)
+	if err != nil {
 		return nil, fmt.Errorf("count stale wisps: %w", err)
 	}
 
@@ -1439,10 +1444,17 @@ func ScanTracker(ctx context.Context, t TrackerWisps, rig TrackerRig, maxAge, pu
 		return nil, fmt.Errorf("count expired wisps: %w", err)
 	}
 
-	result.Anomalies = []Anomaly{{
-		Type:    "tracker-scope",
-		Message: "mail and stale issue candidates are not counted for a tracker rig",
-	}}
+	result.Anomalies = []Anomaly{
+		{
+			Type:    "tracker-scope",
+			Message: "mail and stale issue candidates are not counted for a tracker rig",
+		},
+		{
+			Type:    "tracker-open-stale",
+			Message: fmt.Sprintf("%d open wisps are past max-age; trackerd's loop closes them, the reap does not", staleCount),
+			Count:   staleCount,
+		},
+	}
 	return result, nil
 }
 
@@ -1454,11 +1466,17 @@ func ScanTracker(ctx context.Context, t TrackerWisps, rig TrackerRig, maxAge, pu
 // max-age does not apply here.
 //
 // A dry run counts the same set and purges nothing.
+//
+// A purge that fails part way returns the result for the wisps purged before the
+// failure, with the error: those wisps stay purged, so their count is kept. The
+// open count is still taken; if that read fails too, the result carries an
+// open-unknown anomaly and the purge error is returned.
 func ReapTracker(ctx context.Context, t TrackerWisps, rig TrackerRig, purgeAge time.Duration, dryRun bool, now time.Time) (*ReapResult, error) {
 	result := &ReapResult{Database: rig.Name, DryRun: dryRun}
 	expired := trackerWispFilter(rig, "closed")
 	expired.ClosedBefore = now.Add(-purgeAge)
 
+	var purgeErr error
 	if dryRun {
 		n, err := t.Count(ctx, expired)
 		if err != nil {
@@ -1479,7 +1497,8 @@ func ReapTracker(ctx context.Context, t TrackerWisps, rig TrackerRig, purgeAge t
 			chunk := ids[start:min(start+api.MaxPurgeWisps, len(ids))]
 			purged, err := t.PurgeWisps(ctx, chunk)
 			if err != nil {
-				return nil, fmt.Errorf("purge expired wisps after %d purged: %w", result.Reaped, err)
+				purgeErr = fmt.Errorf("purge expired wisps after %d purged: %w", result.Reaped, err)
+				break
 			}
 			result.Reaped += len(purged.Purged)
 			kept += len(purged.Kept)
@@ -1495,8 +1514,15 @@ func ReapTracker(ctx context.Context, t TrackerWisps, rig TrackerRig, purgeAge t
 
 	open, err := t.Count(ctx, trackerWispFilter(rig, trackerOpenStatuses...))
 	if err != nil {
-		return nil, fmt.Errorf("count open wisps: %w", err)
+		if purgeErr == nil {
+			return nil, fmt.Errorf("count open wisps: %w", err)
+		}
+		result.Anomalies = append(result.Anomalies, Anomaly{
+			Type:    "open-unknown",
+			Message: "the open wisps could not be counted after the purge failed",
+		})
+		return result, purgeErr
 	}
 	result.OpenRemain = open
-	return result, nil
+	return result, purgeErr
 }

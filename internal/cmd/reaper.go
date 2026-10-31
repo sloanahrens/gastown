@@ -122,14 +122,21 @@ func reaperWriter(dbName string) (reaper.Writer, error) {
 	return reaper.WriterForDatabase(townRoot, dbName)
 }
 
-// reaperTownRoot is the town the cwd is in, or "" outside one: a town-less run
-// has no route table, so it has no tracker rigs.
-func reaperTownRoot() string {
-	townRoot, err := workspace.FindFromCwd()
+// reaperRunTargets resolves the tracker rigs a scan or reap covers, and the bd
+// databases its sweep keeps, from the town find locates. A town-less run ("" with
+// no error) has no route table, so it has no tracker rigs. A town lookup that
+// fails is an error, not a town-less run: a run that cannot find the town cannot
+// tell the tracker rigs apart, so it refuses rather than sweep them.
+func reaperRunTargets(find func() (string, error), wholeTown bool, databases []string) ([]reaper.TrackerRig, []string, error) {
+	townRoot, err := find()
 	if err != nil {
-		return ""
+		return nil, nil, fmt.Errorf("cannot find the tracker rigs: %w", err)
 	}
-	return townRoot
+	rigs, dbs, err := reaperTrackerTargets(townRoot, wholeTown, databases)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot find the tracker rigs: %w", err)
+	}
+	return rigs, dbs, nil
 }
 
 // reaperTrackerTargets splits a hand run's targets into the tracker rigs it
@@ -199,24 +206,37 @@ func scanTrackerRigs(ctx context.Context, t reaper.TrackerWisps, rigs []reaper.T
 }
 
 // reapTrackerRigs reaps each tracker rig through the tracker's purge. It returns
-// the results and how many rigs contributed none, which the open-wisp alert needs
-// to know. A purge the tracker kept wisps from is named on stderr.
+// the results and how many rigs did not reap cleanly, which the open-wisp alert
+// needs to know. A rig whose purge failed part way keeps the count of the wisps
+// it did purge: its partial result is returned and the rig counts as failed. A
+// purge the tracker kept wisps from is named on stderr.
 func reapTrackerRigs(ctx context.Context, t reaper.TrackerWisps, rigs []reaper.TrackerRig, purgeAge time.Duration, dryRun bool, now time.Time) ([]*reaper.ReapResult, int) {
 	var results []*reaper.ReapResult
 	failed := 0
 	for _, rig := range rigs {
 		result, err := reaper.ReapTracker(ctx, t, rig, purgeAge, dryRun, now)
+		if result != nil {
+			for _, a := range result.Anomalies {
+				fmt.Fprintf(os.Stderr, "%s: WARNING: %s\n", rig.Name, a.Message)
+			}
+			results = append(results, result)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: reap error: %v\n", rig.Name, err)
 			failed++
-			continue
 		}
-		for _, a := range result.Anomalies {
-			fmt.Fprintf(os.Stderr, "%s: WARNING: %s\n", rig.Name, a.Message)
-		}
-		results = append(results, result)
 	}
 	return results, failed
+}
+
+// reapTrackerPurgeAge is the purge age a reap applies to its tracker rigs. A reap
+// with no tracker rig among its targets never reads --purge-age, so a value that
+// does not parse is no error for a run over bd databases alone.
+func reapTrackerPurgeAge(rigs []reaper.TrackerRig, value string) (time.Duration, error) {
+	if len(rigs) == 0 {
+		return 0, nil
+	}
+	return parseReaperAge("--purge-age", value)
 }
 
 // scanTrackerTargets scans the tracker rigs a run covers. It reaches the tracker
@@ -511,9 +531,9 @@ Use this to understand the state before deciding what to reap.`,
 		}
 
 		databases := reaperDatabaseNames()
-		trackerRigs, databases, err := reaperTrackerTargets(reaperTownRoot(), reaperDB == "", databases)
+		trackerRigs, databases, err := reaperRunTargets(workspace.FindFromCwd, reaperDB == "", databases)
 		if err != nil {
-			return fmt.Errorf("cannot find the tracker rigs: %w", err)
+			return err
 		}
 
 		var results []*reaper.ScanResult
@@ -618,15 +638,14 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 		if err != nil {
 			return err
 		}
-		purgeAge, err := parseReaperAge("--purge-age", reaperPurgeAge)
+		databases := reaperDatabaseNames()
+		trackerRigs, databases, err := reaperRunTargets(workspace.FindFromCwd, reaperDB == "", databases)
 		if err != nil {
 			return err
 		}
-
-		databases := reaperDatabaseNames()
-		trackerRigs, databases, err := reaperTrackerTargets(reaperTownRoot(), reaperDB == "", databases)
+		purgeAge, err := reapTrackerPurgeAge(trackerRigs, reaperPurgeAge)
 		if err != nil {
-			return fmt.Errorf("cannot find the tracker rigs: %w", err)
+			return err
 		}
 
 		var results []*reaper.ReapResult

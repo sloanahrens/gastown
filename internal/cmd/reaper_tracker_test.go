@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/tracker/api"
 )
@@ -77,8 +77,8 @@ func TestScanTrackerRigsReportsTheExpiredWisps(t *testing.T) {
 		t.Fatalf("scanTrackerRigs = %d results, want 1", len(got))
 	}
 	r := got[0]
-	if r.Database != "gastown" || r.OpenWisps != 2 || r.ReapCandidates != 1 || r.PurgeCandidates != 1 {
-		t.Errorf("scan = %+v, want gastown with 2 open, 1 reap candidate and 1 purge candidate", r)
+	if r.Database != "gastown" || r.OpenWisps != 2 || r.ReapCandidates != 0 || r.PurgeCandidates != 1 {
+		t.Errorf("scan = %+v, want gastown with 2 open, no reap candidate (the reap never closes an open wisp) and 1 purge candidate", r)
 	}
 }
 
@@ -122,8 +122,45 @@ func TestReapTrackerRigsCountsARigThatFails(t *testing.T) {
 	rigs := []reaper.TrackerRig{{Name: "gastown", Prefix: "gt"}}
 
 	results, failed := reapTrackerRigs(context.Background(), fake, rigs, 7*24*time.Hour, false, trackerCmdNow)
-	if failed != 1 || len(results) != 0 {
-		t.Errorf("reapTrackerRigs = %d results, %d failed; want none and 1 failed", len(results), failed)
+	if failed != 1 {
+		t.Errorf("reapTrackerRigs failed = %d, want 1", failed)
+	}
+	if len(results) != 1 || results[0].Reaped != 0 {
+		t.Errorf("reapTrackerRigs results = %+v, want the failed rig's partial result with nothing purged", results)
+	}
+}
+
+// partialPurgeFake purges its first batch and refuses every batch after it.
+type partialPurgeFake struct{ trackerWispFake }
+
+func (f *partialPurgeFake) PurgeWisps(ctx context.Context, ids []string) (api.PurgeWispsResult, error) {
+	if len(f.purged) > 0 {
+		f.purged = append(f.purged, slices.Clone(ids))
+		return api.PurgeWispsResult{}, errors.New("tracker unreachable")
+	}
+	return f.trackerWispFake.PurgeWisps(ctx, ids)
+}
+
+func TestReapTrackerRigsKeepsTheCountOfAPartialPurge(t *testing.T) {
+	t.Parallel()
+	const expired = api.MaxPurgeWisps + 1
+	var issues []api.Issue
+	for i := range expired {
+		closed := trackerCmdNow.Add(-9 * 24 * time.Hour)
+		issues = append(issues, api.Issue{
+			ID: fmt.Sprintf("gt-%04d", i), Status: "closed", Ephemeral: true,
+			CreatedAt: closed, ClosedAt: &closed,
+		})
+	}
+	fake := &partialPurgeFake{trackerWispFake: trackerWispFake{issues: issues}}
+	rigs := []reaper.TrackerRig{{Name: "gastown", Prefix: "gt"}}
+
+	results, failed := reapTrackerRigs(context.Background(), fake, rigs, 7*24*time.Hour, false, trackerCmdNow)
+	if failed != 1 {
+		t.Errorf("reapTrackerRigs failed = %d, want 1: the purge stopped part way", failed)
+	}
+	if len(results) != 1 || results[0].Reaped != api.MaxPurgeWisps {
+		t.Errorf("reapTrackerRigs results = %+v, want the first batch's %d purged kept in the result", results, api.MaxPurgeWisps)
 	}
 }
 
@@ -291,57 +328,100 @@ func TestReaperTrackerTargetsRefusesAnUnreadableRouteTable(t *testing.T) {
 	}
 }
 
-// setReaperFlag sets a flag on a reaper command for one test and restores it.
-func setReaperFlag(t *testing.T, cmd *cobra.Command, name, value, restore string) {
-	t.Helper()
-	if err := cmd.Flags().Set(name, value); err != nil {
-		t.Fatal(err)
+// findTownAt is the town find a run gets from the cwd. It returns the town
+// root and error it was built with, so no test changes the working directory.
+func findTownAt(townRoot string, err error) func() (string, error) {
+	return func() (string, error) { return townRoot, err }
+}
+
+func TestReaperRunTargetsResolvesTheTownOrRefuses(t *testing.T) {
+	t.Parallel()
+	townRoot := writeCmdTownRoutes(t, `{"path":"gastown/mayor/rig","prefix":"gt-","backend":"tracker"}
+`)
+	gastown := reaper.TrackerRig{Name: "gastown", Prefix: "gt"}
+
+	tests := []struct {
+		name     string
+		find     func() (string, error)
+		wantRigs []reaper.TrackerRig
+		wantErr  bool
+	}{
+		{
+			name:     "a town lookup that finds the town covers its tracker rigs",
+			find:     findTownAt(townRoot, nil),
+			wantRigs: []reaper.TrackerRig{gastown},
+		},
+		{
+			name:     "a town-less cwd has no tracker rigs and is not an error",
+			find:     findTownAt("", nil),
+			wantRigs: nil,
+		},
+		{
+			name:    "a town lookup that fails refuses rather than read as no town",
+			find:    findTownAt("", errors.New("getting current directory: permission denied")),
+			wantErr: true,
+		},
 	}
-	t.Cleanup(func() { _ = cmd.Flags().Set(name, restore) })
-}
-
-// townWithRoutes is a town whose cwd the commands read, with the route table
-// body; the commands take no directory argument, so the cwd is the input.
-func townWithRoutes(t *testing.T, body string) {
-	t.Helper()
-	town := t.TempDir()
-	writeTownFile(t, filepath.Join(town, "mayor", "town.json"), `{"name":"test-town"}`)
-	writeTownFile(t, filepath.Join(town, ".beads", "routes.jsonl"), body)
-	//testpolicy:allow no-chdir — the town root is the input under test: the commands take no directory argument
-	t.Chdir(town)
-}
-
-// TestReaperTrackerRunsRefuseAnUnreadableRouteTable drives the scan and reap
-// commands in a town whose route table does not parse. They refuse before they
-// sweep: a tracker rig's Dolt database could be reached otherwise. --db names a
-// bd database so the refusal, not a Dolt discovery, is what ends the run.
-//
-//testpolicy:allow parallel — the commands read the process working directory (workspace.FindFromCwd), which t.Chdir sets for the whole process
-func TestReaperTrackerRunsRefuseAnUnreadableRouteTable(t *testing.T) {
-	townWithRoutes(t, "{not json\n")
-	setReaperFlag(t, reaperScanCmd, "db", "beads", "")
-
-	for name, run := range map[string]func() error{
-		"scan": func() error { return reaperScanCmd.RunE(reaperScanCmd, nil) },
-		"reap": func() error { return reaperReapCmd.RunE(reaperReapCmd, nil) },
-	} {
-		err := run()
-		if err == nil || !strings.Contains(err.Error(), "cannot find the tracker rigs") {
-			t.Errorf("%s = %v, want the refusal that names the tracker rigs", name, err)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rigs, _, err := reaperRunTargets(tt.find, true, []string{"beads"})
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "cannot find the tracker rigs") {
+					t.Fatalf("reaperRunTargets error = %v, want the refusal that names the tracker rigs", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("reaperRunTargets: %v", err)
+			}
+			if !slices.Equal(rigs, tt.wantRigs) {
+				t.Errorf("tracker rigs = %+v, want %+v", rigs, tt.wantRigs)
+			}
+		})
 	}
 }
 
-// TestReaperReapRefusesABadPurgeAge: reap parses --purge-age before it runs
-// anything, so a value that does not parse ends the run with a named error.
-//
-//testpolicy:allow parallel — the command reads the process working directory (workspace.FindFromCwd), which t.Chdir sets for the whole process
-func TestReaperReapRefusesABadPurgeAge(t *testing.T) {
-	townWithRoutes(t, "")
-	setReaperFlag(t, reaperReapCmd, "purge-age", "bogus", "168h")
+func TestReaperRunTargetsRefusesAnUnreadableRouteTable(t *testing.T) {
+	t.Parallel()
+	townRoot := writeCmdTownRoutes(t, "{not json\n")
 
-	err := reaperReapCmd.RunE(reaperReapCmd, nil)
-	if err == nil || !strings.Contains(err.Error(), "--purge-age") {
-		t.Errorf("reap with --purge-age=bogus = %v, want the refusal that names --purge-age", err)
+	_, _, err := reaperRunTargets(findTownAt(townRoot, nil), true, []string{"beads"})
+	if err == nil || !strings.Contains(err.Error(), "cannot find the tracker rigs") {
+		t.Fatalf("reaperRunTargets error = %v, want the refusal that names the tracker rigs: an unreadable route table must not fall through to the bd sweep", err)
+	}
+}
+
+func TestReapTrackerPurgeAgeIsReadOnlyForATrackerRig(t *testing.T) {
+	t.Parallel()
+	gastown := []reaper.TrackerRig{{Name: "gastown", Prefix: "gt"}}
+	tests := []struct {
+		name    string
+		rigs    []reaper.TrackerRig
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "a bd-only reap ignores a value that does not parse", rigs: nil, value: "bogus"},
+		{name: "a tracker rig reads the purge age", rigs: gastown, value: "168h", want: 7 * 24 * time.Hour},
+		{name: "a tracker rig refuses a purge age that does not parse", rigs: gastown, value: "bogus", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := reapTrackerPurgeAge(tt.rigs, tt.value)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "--purge-age") {
+					t.Fatalf("reapTrackerPurgeAge error = %v, want the refusal that names --purge-age", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("reapTrackerPurgeAge: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("reapTrackerPurgeAge = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
