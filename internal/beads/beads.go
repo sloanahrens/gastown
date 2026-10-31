@@ -4396,6 +4396,10 @@ func (b *Beads) DepList(id, depType string) ([]IssueDep, error) {
 // keeps every relation. A wisp dependent is included: measured on bd 1.2.2,
 // dep list up of a bead carrying a molecule bond listed the bonded wisp beside
 // the durable dependents, so the wisp-aware read needs no second call.
+// Cited run (2026-10-31, bd 1.2.2, read-only against the gastown rig database):
+// `bd dep list gt-r8n8z --direction=up --json` returned one dependent,
+// gt-wisp-1uf21r (issue_type molecule, ephemeral true, dependency_type blocks).
+// The fixture in dep_list_up_test.go records that answer shape.
 func (b *Beads) DepListUp(id, depType string) ([]IssueDep, error) {
 	return b.depList(id, "up", depType)
 }
