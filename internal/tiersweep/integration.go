@@ -65,6 +65,16 @@ type Sweep struct {
 	// and skip list. Run sets it from TIER_SWEEP_RESUME; nil resumes nothing
 	// (gt-loqew).
 	Resume *Resume
+	// Shards is the shard plan, from shard.txt: the packages the integration tier
+	// runs as K shards. Nil runs every package whole (gt-rw118).
+	Shards map[string]int
+	// ShardErr is the error reading the shard plan. The integration tier is RED
+	// with no names when it is set: a plan that cannot be read runs nothing.
+	ShardErr error
+	// TestWalls is the previous run's wall per listed test, which a shard
+	// partition balances by. Run sets it from TIER_SWEEP_TIMINGS; nil partitions
+	// by count.
+	TestWalls map[string]float64
 }
 
 // integrationPlan is what the integration tier runs.
@@ -90,6 +100,12 @@ type moduleRun struct {
 func (s *Sweep) Integration() (line string, red bool) {
 	start := s.Now()
 	elapsed := func() int { return int(s.Now().Sub(start) / time.Second) }
+	if s.ShardErr != nil {
+		// A shard plan that cannot be read runs nothing, so the tier fails closed,
+		// as a list that cannot be read does below (gt-rw118).
+		fmt.Fprintf(s.Stderr, "%s: %s: shard plan: %v\n", Name, TierIntegration, s.ShardErr)
+		return Summary(TierIntegration, s.Opts.LogDir, 0, 0, 0, "", elapsed())
+	}
 	tested := s.headCommit()
 	skipList := s.Opts.SkipList
 	// Without a commit to name, no container package can be shown as due, so
@@ -117,18 +133,20 @@ func (s *Sweep) Integration() (line string, red bool) {
 		}
 	}
 	runner := &Runner{
-		Exec:     s.Exec,
-		LogDir:   s.Opts.LogDir,
-		Timeout:  s.Opts.Timeout,
-		SkipList: skipList,
-		Env:      env,
-		Stderr:   s.Stderr,
-		Timings:  s.Timings,
-		Now:      s.Now,
-		Jobs:     s.Opts.Jobs,
-		Walls:    s.Walls,
-		Began:    s.Began,
-		Resume:   s.Resume,
+		Exec:      s.Exec,
+		LogDir:    s.Opts.LogDir,
+		Timeout:   s.Opts.Timeout,
+		SkipList:  skipList,
+		Env:       env,
+		Stderr:    s.Stderr,
+		Timings:   s.Timings,
+		Now:       s.Now,
+		Jobs:      s.Opts.Jobs,
+		Walls:     s.Walls,
+		Began:     s.Began,
+		Resume:    s.Resume,
+		Shards:    s.Shards,
+		TestWalls: s.TestWalls,
 	}
 	// The host-side tagged packages read go test's -json stream, so the slow tests
 	// inside them reach the next sweep's timings. The container list keeps the
@@ -137,7 +155,12 @@ func (s *Sweep) Integration() (line string, red bool) {
 	runner.JSON = true
 	root := runner.Tier(TierIntegration, ".", slotPrefix(s.Opts.Nice), taggedArgs, plan.root)
 	runner.JSON = false
+	// The container tier runs its packages whole, so the shard plan is lifted for
+	// that call and put back for the nested modules' calls (gt-rw118).
+	shards := runner.Shards
+	runner.Shards = nil
 	docker := runner.Tier(TierDocker, ".", slotPrefix(s.Opts.Nice), nil, plan.docker)
+	runner.Shards = shards
 	// Only a passing container run at a named commit earns the record. A red
 	// one leaves the state alone, so the next sweep runs those packages again,
 	// and a commit that cannot be named is never stamped.

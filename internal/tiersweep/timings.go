@@ -29,10 +29,20 @@ type Timing struct {
 	WallMS  int64  `json:"wall_ms"`
 	Exit    int    `json:"exit"`
 	Start   string `json:"start"`
+	// Shard is "i/K" on a shard's line, the shard's place in its package (gt-rw118).
+	Shard string `json:"shard,omitempty"`
 }
 
 // kindTest is the kind of a slow test's line in timings.jsonl.
 const kindTest = "test"
+
+// kindShard is the kind of a shard's line: one per shard of a package run as
+// shards, so the package has one line for each of its K shards (gt-rw118).
+const kindShard = "shard"
+
+// TestWallKey is the key a listed test's previous wall is held under: its
+// package's TimingsKey and the test's name, which a shard partition reads.
+func TestWallKey(tier, name, test string) string { return TimingsKey(tier, name) + " " + test }
 
 // TestTiming is one slow test's line in timings.jsonl: the package the sweep
 // ran, the test's own name and how long it took. It names no wall time, since
@@ -50,8 +60,10 @@ type TestTiming struct {
 func TimingsKey(tier, name string) string { return tier + " " + name }
 
 // ParseWalls reads timings lines, in timings.jsonl's format, into the wall time
-// each tier and package took, keyed by TimingsKey. A line that is not a timing
-// is dropped: the file is an instrument, and a torn line must not reorder a run.
+// each tier and package took, keyed by TimingsKey. A package run as shards takes
+// the widest of its shards' walls, since its shards ran beside each other. A
+// line that is not a timing is dropped: the file is an instrument, and a torn
+// line must not reorder a run.
 func ParseWalls(data []byte) map[string]int64 {
 	walls := make(map[string]int64)
 	for _, line := range strings.Split(string(data), "\n") {
@@ -62,12 +74,34 @@ func ParseWalls(data []byte) map[string]int64 {
 		if err := json.Unmarshal([]byte(line), &tm); err != nil {
 			continue
 		}
-		if tm.Kind != "" {
+		key := TimingsKey(tm.Tier, tm.Package)
+		switch tm.Kind {
+		case "":
+			walls[key] = tm.WallMS
+		case kindShard:
+			if cur, ok := walls[key]; !ok || tm.WallMS > cur {
+				walls[key] = tm.WallMS
+			}
+		default:
 			// A slow test's line names its package too, and its elapsed time is
 			// not the package's wall (gt-juo5e).
+		}
+	}
+	return walls
+}
+
+// ParseTestWalls reads the slow-test lines of timings.jsonl into each listed
+// test's wall in seconds, keyed by TestWallKey. A shard partition uses them to
+// balance a package's shards; a test below the slow threshold has no line and
+// takes the partition's default (gt-rw118).
+func ParseTestWalls(data []byte) map[string]float64 {
+	walls := make(map[string]float64)
+	for _, line := range strings.Split(string(data), "\n") {
+		var tt TestTiming
+		if json.Unmarshal([]byte(line), &tt) != nil || tt.Kind != kindTest {
 			continue
 		}
-		walls[TimingsKey(tm.Tier, tm.Package)] = tm.WallMS
+		walls[TestWallKey(tt.Tier, tt.Package, tt.Test)] = float64(tt.ElapsedMS) / 1000
 	}
 	return walls
 }
