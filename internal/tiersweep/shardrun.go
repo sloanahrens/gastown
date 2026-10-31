@@ -21,7 +21,8 @@ var shardText string
 
 // ParseShards reads shard.txt: one "./package K" per line, a # starts a comment,
 // and blank lines are dropped. The package is the name the runner prints, so it
-// keeps its ./ and a nested module's path is module-relative. A line that is not
+// keeps its ./ and a nested module's package carries the module's path too
+// (./tracker/store/pgtest). A line that is not
 // that shape, a count below one, or a package named twice is an error: a shard
 // plan that cannot be read runs nothing, so the tier fails closed.
 func ParseShards(text string) (map[string]int, error) {

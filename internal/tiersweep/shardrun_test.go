@@ -3,6 +3,7 @@ package tiersweep
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -25,21 +26,41 @@ var fixtureTests = []string{"TestA", "TestB", "TestC", "TestD", "TestE", "TestF"
 // prints the listed tests, and a -test.run command reports each listed test its
 // pattern selects, as a test binary does with -test.v=test2json. A dropped test
 // is never reported; a failing one is reported as failed, and its shard exits 1.
+// buildFails and listFails make the build or the list exit 1 instead. Every
+// command is recorded with the directory it ran in.
 type shardFake struct {
-	mu       sync.Mutex
-	listed   []string
-	dropped  map[string]bool
-	failing  map[string]bool
-	patterns []string
+	mu         sync.Mutex
+	listed     []string
+	dropped    map[string]bool
+	failing    map[string]bool
+	buildFails bool
+	listFails  bool
+	patterns   []string
+	calls      []shardCall
 }
 
-func (f *shardFake) exec(_ string, _ []string, argv []string, out io.Writer) int {
+// shardCall is one command the fake was asked to run, and where it ran.
+type shardCall struct {
+	dir  string
+	argv []string
+}
+
+func (f *shardFake) exec(dir string, _ []string, argv []string, out io.Writer) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls = append(f.calls, shardCall{dir: dir, argv: argv})
 	switch {
 	case slices.Contains(argv, "-c"):
+		if f.buildFails {
+			fmt.Fprintln(out, "build broke")
+			return 1
+		}
 		return 0
 	case slices.Contains(argv, "-test.list"):
+		if f.listFails {
+			fmt.Fprintln(out, "list broke")
+			return 1
+		}
 		for _, n := range f.listed {
 			fmt.Fprintln(out, n)
 		}
@@ -268,12 +289,145 @@ func TestParseShards(t *testing.T) {
 	}
 }
 
-// TestSeedShardsRunsNoPackageSharded: the seed line in shard.txt is commented
-// out, so landing this changes no live behaviour until the overseer enables it.
-func TestSeedShardsRunsNoPackageSharded(t *testing.T) {
+// TestShardPrepFailureIsRed: a build that fails, a list that fails, or a binary
+// that lists no tests makes the package RED before any shard runs, and the log
+// names the step that failed.
+func TestShardPrepFailureIsRed(t *testing.T) {
 	t.Parallel()
-	got, err := SeedShards()
-	if err != nil || len(got) != 0 {
-		t.Fatalf("SeedShards() = %v, %v; want no sharded package while the seed is commented out", got, err)
+	cases := []struct {
+		name  string
+		setup func(f *shardFake)
+		want  string
+	}{
+		{
+			name:  "the build fails",
+			setup: func(f *shardFake) { f.buildFails = true },
+			want:  "build the test binary: exit 1",
+		},
+		{
+			name:  "the list fails",
+			setup: func(f *shardFake) { f.listFails = true },
+			want:  "list the tests: exit 1",
+		},
+		{
+			name:  "the binary lists no tests",
+			setup: func(f *shardFake) { f.listed = nil },
+			want:  "the test binary lists no tests",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &shardFake{listed: fixtureTests}
+			tc.setup(f)
+			var stderr bytes.Buffer
+			r := shardRunner(t, f, &stderr)
+			counts := r.Tier(TierIntegration, ".", nil, taggedArgs, []string{fixturePkg})
+			if counts.Failed != 1 || !slices.Equal(counts.FailedNames, []string{fixturePkg}) {
+				t.Fatalf("counts = %+v, want the package failed; stderr:\n%s", counts, stderr.String())
+			}
+			if len(f.patterns) != 0 {
+				t.Errorf("shards ran %q after the step failed", f.patterns)
+			}
+			if log := readShardLog(t, r.LogDir); !strings.Contains(log, tc.want) {
+				t.Errorf("log does not name the failed step %q:\n%s", tc.want, log)
+			}
+		})
+	}
+}
+
+// TestShardsRunInThePackageDirectory: the build runs in the tier's directory, and
+// the list and every shard run in the package's own directory, as go test runs
+// a test binary there. A nested module's package is the module's path joined.
+func TestShardsRunInThePackageDirectory(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, dir, pkg, printed, pkgDir string
+	}{
+		{name: "the root", dir: ".", pkg: fixturePkg, printed: fixturePkg, pkgDir: "fixture"},
+		{name: "a nested module", dir: "tracker", pkg: "./store/pgtest", printed: "./tracker/store/pgtest", pkgDir: "tracker/store/pgtest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &shardFake{listed: fixtureTests}
+			var stderr bytes.Buffer
+			r := shardRunner(t, f, &stderr)
+			r.Shards = map[string]int{tc.printed: 3}
+			r.Tier(TierIntegration, tc.dir, nil, taggedArgs, []string{tc.pkg})
+			var builds, lists, shards int
+			for _, c := range f.calls {
+				switch {
+				case slices.Contains(c.argv, "-c"):
+					builds++
+					if c.dir != tc.dir {
+						t.Errorf("build ran in %q, want %q", c.dir, tc.dir)
+					}
+				case slices.Contains(c.argv, "-test.list"):
+					lists++
+					if c.dir != tc.pkgDir {
+						t.Errorf("list ran in %q, want %q", c.dir, tc.pkgDir)
+					}
+				case slices.Contains(c.argv, "-test.run"):
+					shards++
+					if c.dir != tc.pkgDir {
+						t.Errorf("shard ran in %q, want %q", c.dir, tc.pkgDir)
+					}
+				}
+			}
+			if builds != 1 || lists != 1 || shards != 3 {
+				t.Fatalf("builds, lists, shards = %d, %d, %d; want 1, 1, 3", builds, lists, shards)
+			}
+		})
+	}
+}
+
+// TestUnreadableShardPlanIsRed: a shard plan that cannot be read runs nothing,
+// and the integration tier is RED with no names, as an unreadable list is.
+func TestUnreadableShardPlanIsRed(t *testing.T) {
+	t.Parallel()
+	repo := baseRepo()
+	repo.lists[". *_test.go"] = []string{"x/x_test.go"}
+	repo.files["x/x_test.go"] = taggedTest
+	fake := &fakeTier{head: "abc123"}
+	s, stderr := newIntegration(t, repo, fake, "", "")
+	s.ShardErr = errors.New("shard.txt line 1: want a ./package name and a shard count")
+	line, red := s.Integration()
+	if !red || !strings.Contains(line, "integration RED passed=0 failed=0 skipped=0") {
+		t.Errorf("Integration() = %q, %v; want a RED summary with no names", line, red)
+	}
+	if !strings.Contains(stderr.String(), "shard plan") {
+		t.Errorf("stderr = %q, want it to name the shard plan", stderr.String())
+	}
+	if runs := fake.testRuns(); len(runs) != 0 {
+		t.Errorf("go test runs = %v, want none", runs)
+	}
+}
+
+// TestShardPlanNamingAContainerPackageRunsItWhole: the container tier does not
+// shard, so a shard.txt entry for a container package runs it whole and says so
+// on stderr, rather than dropping the entry without a word.
+func TestShardPlanNamingAContainerPackageRunsItWhole(t *testing.T) {
+	t.Parallel()
+	repo := baseRepo()
+	repo.files[dockerList] = "internal/beads\n"
+	fake := &fakeTier{head: "abc123"}
+	s, stderr := newIntegration(t, repo, fake, "", "")
+	s.Shards = map[string]int{"./internal/beads": 3}
+	s.Integration()
+	if !strings.Contains(stderr.String(), "./internal/beads runs whole") {
+		t.Errorf("stderr = %q, want it to name the container package that runs whole", stderr.String())
+	}
+	var runs int
+	for _, c := range fake.calls {
+		if c.argv[0] == "gt" && c.argv[len(c.argv)-1] == "./internal/beads" {
+			runs++
+			if slices.Contains(c.argv, "-test.run") || slices.Contains(c.argv, "-c") {
+				t.Errorf("container package ran sharded: %q", c.argv)
+			}
+		}
+	}
+	if runs != 1 {
+		t.Errorf("container package runs = %d, want 1 whole run", runs)
 	}
 }

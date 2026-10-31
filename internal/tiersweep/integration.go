@@ -159,6 +159,13 @@ func (s *Sweep) Integration() (line string, red bool) {
 	// that call and put back for the nested modules' calls (gt-rw118).
 	shards := runner.Shards
 	runner.Shards = nil
+	for _, pkg := range plan.docker {
+		if _, ok := shards[pkg]; ok {
+			// A shard.txt entry for a container package cannot take effect, so the
+			// package runs whole and the entry is named rather than dropped (gt-rw118).
+			fmt.Fprintf(s.Stderr, "%s: %s: shard plan: %s runs whole, the container tier does not shard\n", Name, TierDocker, pkg)
+		}
+	}
 	docker := runner.Tier(TierDocker, ".", slotPrefix(s.Opts.Nice), nil, plan.docker)
 	runner.Shards = shards
 	// Only a passing container run at a named commit earns the record. A red
