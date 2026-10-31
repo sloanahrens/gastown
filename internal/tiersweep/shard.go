@@ -1,6 +1,7 @@
 package tiersweep
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -10,10 +11,9 @@ import (
 // so a package's tests can run as k processes that finish at about the same
 // time. Every name lands in exactly one shard and the input's multiset is kept.
 // A name with no wall in walls takes the median of the known walls among names,
-// or 0 when none is known. Names are placed longest first, each on the shard
-// with the least wall so far, then the fewest names, then the lowest index, so
-// the same names and walls give the same shards in any input order. Shards with
-// no names are dropped. A k below 1 is read as 1, so no name is lost.
+// or 0 when none is known. Shards with no names are dropped. A k below 1 is
+// read as 1, so no name is lost. The same names and walls give the same shards
+// in any input order.
 func Partition(names []string, walls map[string]float64, k int) [][]string {
 	if len(names) == 0 {
 		return nil
@@ -84,17 +84,20 @@ func medianWall(names []string, walls map[string]float64) float64 {
 	return (known[mid-1] + known[mid]) / 2
 }
 
-// RunPattern is the -test.run pattern that selects exactly the tests named in
-// shard. Each name is regexp-escaped and the alternatives are anchored, so the
-// pattern for [TestA] matches TestA and no test that only contains it. An empty
-// shard gives ^$, which selects nothing: an empty pattern would select every
-// test. It covers top-level test names only, not subtests.
+// RunPattern is the -test.run pattern that selects exactly the top-level tests
+// named in shard. A name with a '/' panics, because -test.run reads the '/' as a
+// subtest level and no one pattern can select a subtest from a shard, so
+// dropping it would lose the test with no sign of the loss.
 func RunPattern(shard []string) string {
 	if len(shard) == 0 {
+		// An empty pattern would select every test; ^$ selects none.
 		return "^$"
 	}
 	quoted := make([]string, len(shard))
 	for i, n := range shard {
+		if strings.Contains(n, "/") {
+			panic(fmt.Sprintf("tiersweep: RunPattern given subtest name %q", n))
+		}
 		quoted[i] = regexp.QuoteMeta(n)
 	}
 	return "^(" + strings.Join(quoted, "|") + ")$"
