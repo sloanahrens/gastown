@@ -1318,8 +1318,22 @@ function queueHolder(b) {
   return c ? {rig: "", name: c[1]} : {rig: "", name: b.assignee || ""};
 }
 
+// Each poll redraws this pane, and the landings rows open in a new scroll box at
+// the top: landingsScroll reads where the old one was, and keepLandingsScroll sets
+// it on the new one once the rows are drawn (gt-tjlu6).
+function landingsScroll(box) {
+  const rows = box.querySelector(".lrows");
+  return rows ? rows.scrollTop : 0;
+}
+
+function keepLandingsScroll(box, top) {
+  const rows = box.querySelector(".lrows");
+  if (rows) rows.scrollTop = top;
+}
+
 function renderTrend(s) {
   const sec = $("trendsec"), box = $("trend");
+  const top = landingsScroll(box);
   const t = s.trend;
   const hours = (t && t.hours) || [];
   const recent = (t && t.recent) || [];
@@ -1337,6 +1351,7 @@ function renderTrend(s) {
     $("trendnote").textContent = "";
     const q = landingTable(s, names, recent, waiting);
     if (q) box.append(q);
+    keepLandingsScroll(box, top);
     return;
   }
   const hhmm = iso => new Date(iso).toLocaleTimeString([], {hour12: false}).slice(0, 5);
@@ -1397,6 +1412,7 @@ function renderTrend(s) {
 
   const tbl = landingTable(s, names, recent, waiting);
   if (tbl) box.append(tbl);
+  keepLandingsScroll(box, top);
 }
 
 // The Landings table: waiting-to-land beads first, then the rows the worker
