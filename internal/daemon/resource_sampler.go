@@ -95,7 +95,7 @@ func (d *Daemon) resourceSampler() *resourceSamplerPatrol {
 		build := d.newResourceSampler
 		if build == nil {
 			build = func(metricsDir string, clock resourcesampler.Clock, interval time.Duration) resourceTicker {
-				return resourcesampler.New(metricsDir, resourcesampler.PSLister{}, clock, interval)
+				return resourcesampler.New(metricsDir, d.config.TownRoot, resourcesampler.PSLister{}, clock, interval)
 			}
 		}
 		d.samplerPatrol = &resourceSamplerPatrol{
