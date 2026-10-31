@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -445,9 +446,11 @@ func TestShowTextRefusesAFlagWithoutARequest(t *testing.T) {
 // carries, narrowed to one relation when depType names one.
 func TestDepListUpReadsTheDependentsOfOneShowFilteredByRelation(t *testing.T) {
 	t.Parallel()
-	var asked int
+	// The handler runs on the goroutine that sends the request, so the count is
+	// atomic: a plain int would be a data race the moment a request moves.
+	var asked atomic.Int32
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
-		asked++
+		asked.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"gt-x","title":"target","status":"open","priority":2,"dependents":[` +
 			`{"id":"gt-b","title":"blocked","status":"open","priority":2,"issue_type":"task","dependency_type":"blocks"},` +
@@ -461,8 +464,31 @@ func TestDepListUpReadsTheDependentsOfOneShowFilteredByRelation(t *testing.T) {
 	if err != nil || len(blocks) != 1 || blocks[0].ID != "gt-b" {
 		t.Errorf("DepListUp(blocks) = %+v, %v; want only gt-b", blocks, err)
 	}
-	if asked != 2 {
-		t.Errorf("DepListUp sent %d requests for two reads, want one Show each", asked)
+	if n := asked.Load(); n != 2 {
+		t.Errorf("DepListUp sent %d requests for two reads, want one Show each", n)
+	}
+}
+
+// A wisp is an issue on the wire, so a wisp that depends on an issue is one of
+// its dependents and must come through the Show mapping with its relation, for
+// Show and for DepListUp alike.
+func TestWispDependentsSurviveTheShowMapping(t *testing.T) {
+	t.Parallel()
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"gt-x","title":"target","status":"open","priority":2,"dependents":[` +
+			`{"id":"gt-wisp-w1","title":"wisp","status":"open","priority":2,"issue_type":"task","dependency_type":"blocks"}]}`))
+	})
+	is, err := c.Show("gt-x")
+	if err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	if len(is.Dependents) != 1 || is.Dependents[0].ID != "gt-wisp-w1" || is.Dependents[0].DependencyType != "blocks" {
+		t.Errorf("Show(gt-x).Dependents = %+v, want the wisp gt-wisp-w1 with relation blocks", is.Dependents)
+	}
+	wisps, err := c.DepListUp("gt-x", "blocks")
+	if err != nil || len(wisps) != 1 || wisps[0].ID != "gt-wisp-w1" {
+		t.Errorf("DepListUp(blocks) = %+v, %v; want the wisp gt-wisp-w1", wisps, err)
 	}
 }
 
