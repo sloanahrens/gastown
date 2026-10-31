@@ -3,8 +3,10 @@ package session
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -298,7 +300,7 @@ func TestHostSeatTokenRefusesATownWithNoAdminCredential(t *testing.T) {
 	}
 }
 
-// A tracker-routed seat's token reaches the sandbox as one 0600 file in the
+// A tracker-routed seat's token reaches the sandbox as one 0400 file in the
 // runtime archive, and no other entry, no environment value the agent runs
 // with and no value the gateway's create process reads carries it.
 func TestOpenShellPrepareStagesTheSeatTokenAsOneFile(t *testing.T) {
@@ -347,8 +349,8 @@ func TestOpenShellPrepareStagesTheSeatTokenAsOneFile(t *testing.T) {
 	if !ok {
 		t.Fatalf("runtime archive entries = %v, want %s", entries, runtimeTrackerToken)
 	}
-	if token.mode != 0o600 {
-		t.Errorf("%s mode = %o, want 600", runtimeTrackerToken, token.mode)
+	if token.mode != 0o400 {
+		t.Errorf("%s mode = %o, want 400", runtimeTrackerToken, token.mode)
 	}
 	// Exactly the token: the seat's file ends in a newline, and staging that
 	// newline would hand a reader of the file's bytes a value the tracker never
@@ -379,6 +381,80 @@ func TestOpenShellPrepareStagesTheSeatTokenAsOneFile(t *testing.T) {
 			}
 		}
 	}
+}
+
+// openshellArchiveWithToken builds the runtime archive for a tracker-routed
+// seat: the test town's spawn, with a tracker that stages the test token.
+func openshellArchiveWithToken(t *testing.T) map[string]runtimeEntry {
+	t.Helper()
+	town, work := openshellTown(t)
+	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil,
+		sandboxTracker{URL: "http://tracker.test:7600", AllowHTTPHost: "tracker.test", token: []byte(openshellSeatTokenValue)})
+	if err != nil {
+		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
+	}
+	return untarRuntime(t, data)
+}
+
+// The seat token file is staged owner-read-only: the sandbox only ever reads
+// it, so no group or world bit is set and the owner has no write bit either
+// (gt-rh8ak).
+func TestTrackerTokenFileStagedOwnerReadOnly(t *testing.T) {
+	t.Parallel()
+	entry, ok := openshellArchiveWithToken(t)[runtimeTrackerToken]
+	if !ok {
+		t.Fatalf("the archive stages no %s; the sandbox would start without its seat token", runtimeTrackerToken)
+	}
+	if entry.mode != 0o400 {
+		t.Errorf("%s mode = %o, want 400 (owner read only, no group or world access)", runtimeTrackerToken, entry.mode)
+	}
+}
+
+// The runtime archive holds the seat token file and no other credential file:
+// the token travels in that one entry, and nothing shaped like a dotenv, a
+// netrc, a git credential store or a private key is staged beside it (gt-rh8ak).
+func TestRuntimeArchiveHoldsOnlyTheSeatToken(t *testing.T) {
+	t.Parallel()
+	entries := openshellArchiveWithToken(t)
+	token, ok := entries[runtimeTrackerToken]
+	if !ok {
+		t.Fatalf("the archive stages no %s; the sandbox would start without its seat token", runtimeTrackerToken)
+	}
+	if token.body != openshellSeatTokenValue {
+		t.Errorf("%s = %q, want exactly the seat's token", runtimeTrackerToken, token.body)
+	}
+	for name, entry := range entries {
+		if name == runtimeTrackerToken {
+			continue
+		}
+		if runtimeCredentialName(name) {
+			t.Errorf("the archive stages %s, a credential file; only %s may hold one", name, runtimeTrackerToken)
+		}
+		if strings.Contains(entry.body, openshellSeatTokenValue) {
+			t.Errorf("archive entry %s carries the seat token; only %s may", name, runtimeTrackerToken)
+		}
+	}
+}
+
+// runtimeCredentialName reports whether a runtime archive entry name is a file
+// that holds credentials or account data, or any file in the tracker's own
+// directory other than the token. A directory entry (a name ending in "/")
+// holds no data of its own.
+func runtimeCredentialName(name string) bool {
+	if strings.HasSuffix(name, "/") {
+		return false
+	}
+	base := path.Base(name)
+	switch {
+	case base == ".netrc", base == ".git-credentials", base == ".npmrc", base == ".pypirc",
+		base == "id_rsa", base == "id_ed25519", strings.HasPrefix(base, ".env"):
+		return true
+	}
+	if ext := path.Ext(base); ext == ".pem" || ext == ".key" {
+		return true
+	}
+	return strings.HasSuffix(name, ".docker/config.json") ||
+		strings.HasPrefix(name, path.Dir(runtimeTrackerToken)+"/")
 }
 
 // failingIssuer is an issuer that answers with an error while still returning a
