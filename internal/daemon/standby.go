@@ -34,8 +34,14 @@ func (d *Daemon) startStandbyBackup(window string) {
 	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
 		return
 	}
-	databases, err := d.maintenance().gcDatabases(d.maintenanceDataDir())
-	if err != nil || len(databases) == 0 {
+	dataDir := d.maintenanceDataDir()
+	databases, err := d.maintenance().gcDatabases(dataDir)
+	if err != nil {
+		d.maintenanceGCRunning.Store(false)
+		d.logger.Printf("scheduled_maintenance: standby backup for window %s skipped: discovering databases in %s: %v", window, dataDir, err)
+		return
+	}
+	if len(databases) == 0 {
 		d.maintenanceGCRunning.Store(false)
 		return
 	}
