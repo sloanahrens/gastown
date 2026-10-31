@@ -237,9 +237,9 @@ var moleculeBondTypes = map[string]bool{"blocks": true, "conditional-blocks": tr
 // ExternalMoleculesAttachedTo lists them, which has no ORDER BY. A molecule
 // bonded both ways is listed once, at its local position.
 //
-// External-target bonds cannot be matched on a tracker store until gt-etvxc;
-// the SQL store keeps the statement, and a store without SQL reads its local
-// bonds and warns once, naming the bead.
+// DepListUp answers external targets on a tracker store, so a store without
+// SQL needs no second read. A bd-backed store also reads external targets by
+// ExternalMoleculesAttachedTo, because bd's dependency read does not.
 func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	if beadID == "" {
 		return nil, nil
@@ -255,7 +255,6 @@ func (s slingStores) moleculeDeps(beadID, townRoot string) ([]string, error) {
 	}
 	sql, ok := store.(sqlStore)
 	if !ok {
-		s.warnTrackerBondSkipOnce(beadID)
 		return molecules, nil
 	}
 	external, err := externalMolecules(sql, beadID)
