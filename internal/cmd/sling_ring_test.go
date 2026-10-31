@@ -55,8 +55,8 @@ func TestSlingRing(t *testing.T) {
 				return
 			}
 			wantSlingErr(t, err, "the Ring waned at")
-			if res == nil || res.ErrMsg != "e-stop" {
-				t.Fatalf("result = %+v, want the e-stop label", res)
+			if res == nil || res.ErrMsg != "ring hold" {
+				t.Fatalf("result = %+v, want the Ring's own label, not the e-stop's", res)
 			}
 			h.wantNo("spawn")
 			h.wantNo("hook")

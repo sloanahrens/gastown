@@ -49,12 +49,14 @@ func TestBlockedRefusalsRoundTripThroughSlingRefusalLine(t *testing.T) {
 	}{
 		{
 			// A Waned Ring refuses the rig before the e-stop is read, and names
-			// its wane time so the operator knows what to renew.
+			// its wane time so the operator knows what to renew. The Ring holds
+			// the town, not the rig, so it carries its own label: the e-stop's
+			// would send the operator to thaw a rig the Ring refuses (gt-j6sur).
 			name:   "waned Ring",
 			ring:   "the Ring waned at 2026-10-31T06:00:00Z; the town stands by",
 			estop:  estopAnswer(false, nil),
 			parked: parkedAnswer(""),
-			label:  "e-stop",
+			label:  "ring hold",
 			detail: "the Ring waned at 2026-10-31T06:00:00Z",
 		},
 		{

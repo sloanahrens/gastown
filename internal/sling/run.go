@@ -719,10 +719,12 @@ const RigStatusUnverified = "unverified"
 // Blocked refuses a dispatch to a rig that is e-stopped, parked or docked, or
 // whose status cannot be verified, and a dispatch under a Waned Ring (ringHold
 // names the reason, "" when the Ring does not hold). It returns a short label
-// naming the state, and the refusal to hand back.
+// naming the state, and the refusal to hand back. The Ring holds the town, not
+// the rig, so its refusal carries its own label: "e-stop" would send the
+// operator to thaw a rig, which clears nothing here (gt-j6sur).
 func Blocked(townRoot, rigName string, ringHold func(townRoot string) string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) (string, error) {
 	if reason := ringHold(townRoot); reason != "" {
-		return "e-stop", &rigUnavailableError{msg: fmt.Sprintf(dispatch.RigUnavailableMarker+"rig %q: %s\nRenew the Ring with: gt ring renew", rigName, reason)}
+		return "ring hold", &rigUnavailableError{msg: fmt.Sprintf(dispatch.RigUnavailableMarker+"rig %q: %s\nRenew the Ring with: gt ring renew", rigName, reason)}
 	}
 	if on, err := estopOn(townRoot, rigName); on {
 		why := "E-stop active"
