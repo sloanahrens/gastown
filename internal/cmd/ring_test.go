@@ -213,8 +213,11 @@ func TestRingForgeWithoutAKeyExitsOneAndWritesNothing(t *testing.T) {
 // the key in the process environment, and checks the key value appears in none
 // of the stdout, stderr or error text it produces. It sets the environment, so
 // it cannot run in parallel.
+//
+//testpolicy:allow parallel — the signing key is read from the process environment, which this test sets
 func TestRingVerbsNeverPrintTheKey(t *testing.T) {
 	root := ringTestTown(t)
+	//testpolicy:allow no-env — GT_RING_KEY is the input under test: the verbs read the key from the process environment, and the test checks it never reaches their output
 	t.Setenv("GT_RING_KEY", ringTestKey)
 	find := func() (string, error) { return root, nil }
 	var all strings.Builder
@@ -249,8 +252,12 @@ func ringHelpStdout(t *testing.T) string {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	old := os.Stdout
+	//testpolicy:allow no-global-swap — the help func prints to os.Stdout and takes no writer; the test points it at a pipe for the one call
 	os.Stdout = w
-	t.Cleanup(func() { os.Stdout = old })
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores os.Stdout swapped above
+		os.Stdout = old
+	})
 	done := make(chan string)
 	go func() {
 		var b bytes.Buffer
@@ -258,6 +265,7 @@ func ringHelpStdout(t *testing.T) string {
 		done <- b.String()
 	}()
 	helpErr := ringCmd.Help()
+	//testpolicy:allow no-global-swap — restores os.Stdout swapped above
 	os.Stdout = old
 	_ = w.Close()
 	help := <-done
@@ -374,6 +382,8 @@ func TestRingRenewAndStatusRefuseAnUnreadableRing(t *testing.T) {
 // help the --help flag prints to stdout, so it swaps os.Stdout and cannot run in
 // parallel. The line must start with the verb name, so the Long text, which
 // names the verbs inside a sentence-like line, cannot satisfy it.
+//
+//testpolicy:allow parallel — the help func prints to os.Stdout, which the test swaps for the call
 func TestRingHelpListsEveryVerb(t *testing.T) {
 	help := ringHelpStdout(t)
 	for _, verb := range []struct{ name, short string }{
