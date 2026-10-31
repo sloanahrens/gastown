@@ -622,62 +622,6 @@ func TestOpenShellPrepareHandsBackTheSandboxEnv(t *testing.T) {
 	}
 }
 
-// A profile that mounts the shared cache claim points Go at the directories the
-// seed Job fills on it; a profile with no claim carries neither variable, so it
-// keeps Go's defaults in the sandbox's own layer (gt-nly1g). The paths are
-// written out here rather than read from the backend's constants: a constant the
-// seed Job and the contract share would pass whatever value it held.
-func TestOpenShellContractCarriesGoCachesOnlyWithACacheClaim(t *testing.T) {
-	t.Parallel()
-	claimProfile := openshellTestProfile
-	claimProfile.Driver = DriverKubernetes
-	claimProfile.KubernetesCacheClaim = "gt-cache"
-	// A docker profile cannot name a claim (Validate refuses it), but a backend
-	// built past validation must not point Go at a claim it never mounts.
-	dockerClaim := openshellTestProfile
-	dockerClaim.KubernetesCacheClaim = "gt-cache"
-	for _, c := range []struct {
-		name    string
-		profile Profile
-		want    map[string]string
-	}{
-		{"a claim-mounted sandbox", claimProfile, map[string]string{"GOCACHE": "/sandbox/.cache/gocache", "GOMODCACHE": "/sandbox/.cache/gomodcache"}},
-		{"a sandbox with no claim", openshellTestProfile, nil},
-		{"a docker profile that names an unmounted claim", dockerClaim, nil},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			town, work := openshellTown(t)
-			b, _ := openshellTestBackend(town, c.profile, &sandbox.Fake{})
-			spec := openshellSpawn(town, work)
-			tracker, err := b.trackerFor(context.Background(), spec)
-			if err != nil {
-				t.Fatalf("trackerFor: %v", err)
-			}
-			cs, err := b.createSpec(spec, tracker)
-			if err != nil {
-				t.Fatalf("createSpec: %v", err)
-			}
-			for _, key := range []string{"GOCACHE", "GOMODCACHE"} {
-				got, ok := cs.Env[key]
-				want, wantOK := c.want[key]
-				if ok != wantOK {
-					t.Errorf("%s set = %v, want %v (value %q)", key, ok, wantOK, got)
-					continue
-				}
-				if wantOK && got != want {
-					t.Errorf("%s = %q, want %q", key, got, want)
-				}
-			}
-			// The claim the driver config mounts is where the caches must be:
-			// an env path on a directory the sandbox never gets is a cold cache.
-			if c.want != nil && !strings.Contains(cs.DriverConfigJSON, `"mount_path":"/sandbox/.cache"`) {
-				t.Errorf("DriverConfigJSON = %s, want the claim mounted at the dir the Go caches name", cs.DriverConfigJSON)
-			}
-		})
-	}
-}
-
 // A profile that names a separate forgejo_host moves only the clone host: the
 // sandbox still reaches Dolt at the control-plane host (gt-k42fg).
 func TestOpenShellForgejoHostFallsBackToTheControlPlaneHost(t *testing.T) {

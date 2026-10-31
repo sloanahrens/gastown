@@ -28,7 +28,6 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
-	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/seattoken"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1029,21 +1028,10 @@ func (b *openshellBackend) usesDockerVolumes() bool {
 	}
 }
 
-// sandboxGoCacheDirs is where GOCACHE and GOMODCACHE sit in a sandbox whose
-// profile mounts the shared cache claim (gt-nly1g). The seed Job writes the two
-// directories into the claim (cachevol.SeedBuildCacheDir, cachevol.SeedModuleCacheDir)
-// and hands it to uid 10001, so the claim is mounted at sandboxCacheDir and Go
-// reads the entries the seed built.
-func sandboxGoCacheDirs() (build, module string) {
-	return path.Join(sandboxCacheDir, cachevol.SeedBuildCacheDir),
-		path.Join(sandboxCacheDir, cachevol.SeedModuleCacheDir)
-}
-
 // contract is the environment the sandbox carries for the gt and bd it runs:
 // the in-sandbox town root, the identity and Dolt endpoint of this polecat,
-// the Go cache paths on the shared claim when the profile mounts one, and, for
-// a rig the town routes to the tracker, that tracker's endpoint. A Dolt rig's
-// contract is unchanged.
+// and, for a rig the town routes to the tracker, that tracker's endpoint. A
+// Dolt rig's contract is unchanged.
 func (b *openshellBackend) contract(spec SpawnSpec, tracker sandboxTracker) map[string]string {
 	identity := spec.Rig + "/polecats/" + spec.Polecat
 	env := map[string]string{
@@ -1066,13 +1054,6 @@ func (b *openshellBackend) contract(spec SpawnSpec, tracker sandboxTracker) map[
 		"DO_NOT_TRACK":                             "1",
 		"DISABLE_AUTOUPDATER":                      "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-	}
-	if b.profile.Driver == DriverKubernetes && b.profile.KubernetesCacheClaim != "" {
-		// The claim the kubernetes driver config mounts at sandboxCacheDir is
-		// the only place the seeded entries live (gt-nly1g). A profile without
-		// a claim keeps Go's defaults, which put both caches in the sandbox's
-		// own layer.
-		env["GOCACHE"], env["GOMODCACHE"] = sandboxGoCacheDirs()
 	}
 	if tracker.on() {
 		// The token itself is a file the runtime archive stages, never a value
