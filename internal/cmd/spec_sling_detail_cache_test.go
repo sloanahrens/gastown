@@ -13,12 +13,9 @@ import (
 )
 
 // The sling child's duplicate check (gt-nebs9). A background sling runs as its
-// own `gt spec sling` process, which used to show every bead of the pool for
-// its design and notes: the tick's cache lived in the tick's process, so the
-// child passed none and the fetch fell back to one show of the whole pool,
-// 39 s a sling on average. The child now reads the cache file the tick that
-// planned it saved, through the env it runs its job with (specSlingEnv), and
-// writes nothing back.
+// own `gt spec sling` process. It reads the cache file the tick that planned it
+// saved, through the env it runs its job with (specSlingEnv), shows only the
+// beads that file does not cover, and writes nothing back.
 
 // slingChildEnv is the env a `gt spec sling` child runs with, on a town whose
 // cache file is whatever this test left there, and the cache the child's pool
