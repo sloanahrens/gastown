@@ -22,8 +22,9 @@ partial standby when one of the two brakes is set without the other.
 
 The `ring:` line beside the hold and ESTOP lines reports the One's signed lease.
 Read `gt power status` for what that line says; this page does not repeat it.
-It is read-only information until the Ring becomes the brake: no power state
-reads it yet, so a valid Ring changes nothing above.
+`status` only reads it; the states below move it. `standby` wanes the Ring,
+`full` renews it, and `off` removes it after the drain. A town with no ring
+section is left untouched and reports "no Ring forged; sentinels only".
 
 The **hold** (`seat-refill.hold` at the town root) parks every automatic
 dispatcher. The **ESTOP** parks dispatch and makes the supervisor refuse
