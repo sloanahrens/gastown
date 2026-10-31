@@ -103,7 +103,7 @@ type Client struct {
 	shadowPercent int
 	shadowAllows  func() (bool, error)
 	shadowSet     bool
-	shadows       sync.WaitGroup
+	shadows       inflight
 	shadowMu      sync.Mutex
 	capped        cappedWindow
 }
