@@ -11,6 +11,10 @@ import (
 // (forgejo-<role>.env), so one key serves every role.
 const EnvKey = "FORGEJO_TOKEN"
 
+// UserKey is the key a role's token file holds for the bot's login, which git
+// needs beside the token to authenticate a push over HTTP.
+const UserKey = "FORGEJO_USER"
+
 // TokenPath returns role's token file: <config home>/gt/forgejo-<role>.env,
 // where the config home is $XDG_CONFIG_HOME or ~/.config.
 func TokenPath(role string) (string, error) {
@@ -66,9 +70,32 @@ func ReadTokenFile(path string) (string, error) {
 	return token, nil
 }
 
+// ReadCredentialFile reads the bot's login and token from path, under the same
+// rules as ReadTokenFile: a regular file with no group or other permission bit.
+// Neither value appears in an error.
+func ReadCredentialFile(path string) (user, token string, err error) {
+	token, err = ReadTokenFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", fmt.Errorf("forgejo: read token file: %w", err)
+	}
+	user, ok := parseKey(string(data), UserKey)
+	if !ok || user == "" {
+		return "", "", fmt.Errorf("forgejo: token file %s has no %s line", path, UserKey)
+	}
+	return user, token, nil
+}
+
 // parseToken returns the value of the FORGEJO_TOKEN line: its first
 // KEY=value line, with a leading "export " and surrounding quotes stripped.
-func parseToken(data string) (string, bool) {
+func parseToken(data string) (string, bool) { return parseKey(data, EnvKey) }
+
+// parseKey returns the value of the first KEY=value line for key, with a
+// leading "export " and surrounding quotes stripped.
+func parseKey(data, wantKey string) (string, bool) {
 	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -76,7 +103,7 @@ func parseToken(data string) (string, bool) {
 		}
 		line = strings.TrimPrefix(line, "export ")
 		key, value, ok := strings.Cut(line, "=")
-		if !ok || strings.TrimSpace(key) != EnvKey {
+		if !ok || strings.TrimSpace(key) != wantKey {
 			continue
 		}
 		return unquote(strings.TrimSpace(value)), true

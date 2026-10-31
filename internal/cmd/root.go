@@ -75,6 +75,8 @@ var beadsExemptCommands = map[string]bool{
 	"report":      true, // Read-only summary; reports an unreachable bd per section and exits 0
 	"notify":      true, // Reads escalation config only; the pager test must work when bd does not
 	"bird":        true, // Starts claude, which must work when bd is missing or outdated (gt-qipl5)
+
+	"git-credential-forgejo": true, // Runs on every git push; reads one file, needs no bd (gt-dhjz6)
 }
 
 // Commands exempt from the town root branch warning.
@@ -91,6 +93,8 @@ var branchCheckExemptCommands = map[string]bool{
 	"install":     true, // Initial setup
 	"scheduler":   true, // Daemon hot path; scheduler handles beads internally
 	"bird":        true, // Runs claude; a branch warning before every session is noise (gt-qipl5)
+
+	"git-credential-forgejo": true, // Its stdout is git's credential answer; nothing else may reach it (gt-dhjz6)
 }
 
 // persistentPreRun runs before every command.
