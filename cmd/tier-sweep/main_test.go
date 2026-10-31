@@ -23,8 +23,10 @@ func TestMainProcessDepsAreWired(t *testing.T) {
 	if d.Host.Env == nil || d.Host.MkdirTemp == nil || d.Host.MkdirAll == nil {
 		t.Errorf("the host is not fully wired: %+v", d.Host)
 	}
-	if d.Exec == nil || d.ReadFile == nil || d.Now == nil {
-		t.Errorf("a seam is nil: exec %v, readFile %v, now %v", d.Exec != nil, d.ReadFile != nil, d.Now != nil)
+	if d.Exec == nil || d.BuildExec == nil || d.ReadFile == nil || d.Now == nil {
+		// A nil BuildExec would run the sweep's one go build with no deadline.
+		t.Errorf("a seam is nil: exec %v, buildExec %v, readFile %v, now %v",
+			d.Exec != nil, d.BuildExec != nil, d.ReadFile != nil, d.Now != nil)
 	}
 	if len(d.Environ) != len(os.Environ()) {
 		t.Errorf("environment has %d entries, the process has %d", len(d.Environ), len(os.Environ()))
@@ -47,6 +49,9 @@ func TestMainOutputStreams(t *testing.T) {
 		MkdirAll:  func(string, os.FileMode) error { return nil },
 	}
 	d.Now = func() time.Time { return time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC) }
+	// The sweep's go build goes through the fake Exec below: this test is about
+	// which stream each line reaches, and the real seam would start a build.
+	d.BuildExec = nil
 	d.ReadFile = func(name string) ([]byte, error) {
 		if strings.HasSuffix(name, "r/r_test.go") {
 			return []byte("//go:build integration\n\npackage r\n"), nil

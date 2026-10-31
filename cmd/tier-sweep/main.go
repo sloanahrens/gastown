@@ -38,10 +38,11 @@ func run(args []string, stdout, stderr io.Writer, d tiersweep.Deps) int {
 // processDeps is the real process behind the sweep's seams.
 func processDeps() tiersweep.Deps {
 	return tiersweep.Deps{
-		Host:     tiersweep.ProcessHost,
-		Exec:     tiersweep.ProcessExec,
-		ReadFile: os.ReadFile,
-		Environ:  os.Environ(),
-		Now:      time.Now,
+		Host:      tiersweep.ProcessHost,
+		Exec:      tiersweep.ProcessExec,
+		BuildExec: tiersweep.ProcessBuildExec,
+		ReadFile:  os.ReadFile,
+		Environ:   os.Environ(),
+		Now:       time.Now,
 	}
 }
