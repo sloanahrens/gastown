@@ -11,9 +11,25 @@ import (
 	"time"
 )
 
+// gitCommand runs git's argv and returns what it wrote to stdout and stderr.
+type gitCommand func(ctx context.Context, argv []string) (stdout, stderr string, err error)
+
+// realGit runs git's argv as a process.
+func realGit(ctx context.Context, argv []string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: fixed git subcommand; the directory came from NewGit
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
 // gitExec is the Git of one clone, answered by running the git binary there.
 type gitExec struct {
 	dir string
+	// command is nil for the real git; a test sets it to drive a failure the
+	// unit tier may not start a process to reach.
+	command gitCommand
 }
 
 // NewGit returns the Git for the clone at dir, running every command as
@@ -65,13 +81,18 @@ func (g *gitExec) Behind() (int, error) {
 	return behind, nil
 }
 
+// exitCoder is a command failure carrying the status it exited with.
+type exitCoder interface {
+	ExitCode() int
+}
+
 // HeadIsAncestorOfOriginMain is `git merge-base --is-ancestor HEAD
 // origin/main`: exit 1 is the answer "no", and every other failure is an unread
 // error rather than an answer.
 func (g *gitExec) HeadIsAncestorOfOriginMain() (bool, error) {
 	_, err := g.run(context.Background(), "merge-base", "--is-ancestor", "HEAD", "origin/main")
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+	var exited exitCoder
+	if errors.As(err, &exited) && exited.ExitCode() == 1 {
 		return false, nil
 	}
 	if err != nil {
@@ -90,21 +111,28 @@ func (g *gitExec) FastForwardMain() error {
 
 // run runs one git command in the clone and returns its standard output.
 func (g *gitExec) run(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...) //nolint:gosec // G204: fixed git subcommand; dir is the clone the caller named
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	argv := append([]string{"git", "-C", g.dir}, args...)
+	command := g.command
+	if command == nil {
+		command = realGit
+	}
+	stdout, stderr, err := command(ctx, argv)
 	if err == nil {
-		return stdout.String(), nil
+		return stdout, nil
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return stdout.String(), fmt.Errorf("git %s: %w", strings.Join(args, " "), ctxErr)
+	return stdout, gitCommandError(args, stderr, err, ctx.Err())
+}
+
+// gitCommandError is the error for a git command that failed: what ran, what
+// git said, and the failure itself, wrapped so errors.Is and errors.As still
+// read it.
+func gitCommandError(args []string, stderr string, err, ctxErr error) error {
+	name := "git " + strings.Join(args, " ")
+	if ctxErr != nil {
+		return fmt.Errorf("%s: %w", name, ctxErr)
 	}
-	// What git said is the only account of why it refused, and the wrapped
-	// error keeps errors.As able to read an exit code from it.
-	if detail := strings.TrimSpace(stderr.String()); detail != "" {
-		return stdout.String(), fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), detail, err)
+	if detail := strings.TrimSpace(stderr); detail != "" {
+		return fmt.Errorf("%s: %s: %w", name, detail, err)
 	}
-	return stdout.String(), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	return fmt.Errorf("%s: %w", name, err)
 }
