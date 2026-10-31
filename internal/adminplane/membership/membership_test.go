@@ -235,6 +235,9 @@ func TestSetEmailUnknownSubIsAnError(t *testing.T) {
 	if err := m.SetEmail(ctx, "sub-2", "new@example.com"); !errors.Is(err, ErrNoMember) {
 		t.Fatalf("SetEmail(unknown sub) returned %v, want ErrNoMember", err)
 	}
+	if err := m.SetEmail(ctx, "", "new@example.com"); !errors.Is(err, ErrEmptySub) {
+		t.Fatalf("SetEmail(no sub) returned %v, want ErrEmptySub", err)
+	}
 	members, err := m.MembersOf(ctx, "org-1")
 	if err != nil {
 		t.Fatalf("MembersOf: %v", err)
