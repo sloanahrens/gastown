@@ -3,6 +3,7 @@ package storetest
 import (
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -106,5 +107,45 @@ func TestTheFakeStatsCountsWispsApartFromDurableIssues(t *testing.T) {
 	}
 	if empty.Total != 0 || empty.Wisps != 0 || empty.ByStatus == nil {
 		t.Errorf("stats of a rig with nothing = %+v, want zero and a non-nil ByStatus", empty)
+	}
+}
+
+// The external-target reverse read follows the rule in the contract case
+// depsExternalDependents: a dependent is listed under the target it names,
+// once, at the plain relation when it also links plainly.
+func TestFakeDependentsOfExternalTargets(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := NewFake()
+	for _, id := range []string{"gt-2", "gt-12", "gt-3", "gt-4"} {
+		if _, err := f.CreateIssue(ctx, api.CreateParams{ID: id, Title: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, l := range []struct{ issue, on, typ string }{
+		{"gt-3", "external:om:gt-2", "blocks"},
+		{"gt-3", "gt-2", "tracks"},
+		{"gt-4", "external:om:gt-12", "blocks"},
+	} {
+		if err := f.AddDependency(ctx, l.issue, l.on, l.typ); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := f.GetIssues(ctx, []string{"gt-2", "gt-12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependents := func(id string) []string {
+		var rows []string
+		for _, d := range got[id].Dependents {
+			rows = append(rows, d.ID+" "+d.DependencyType)
+		}
+		return rows
+	}
+	if want := []string{"gt-3 tracks"}; !slices.Equal(dependents("gt-2"), want) {
+		t.Errorf("Dependents of gt-2 = %v, want %v: gt-3 once, at its plain relation; gt-4 names gt-12, not gt-2", dependents("gt-2"), want)
+	}
+	if want := []string{"gt-4 blocks"}; !slices.Equal(dependents("gt-12"), want) {
+		t.Errorf("Dependents of gt-12 = %v, want %v", dependents("gt-12"), want)
 	}
 }

@@ -4,4 +4,4 @@ package api
 // number of migrations in the store (store.SchemaLevel); TestAPISchemaLevelEqualsTheStoresMigrationCount
 // in the store package holds the two together. It lives here so a client can send it
 // without linking the database driver.
-const SchemaLevel = 3
+const SchemaLevel = 4

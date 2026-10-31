@@ -18,6 +18,13 @@ func TestFakeClientContract(t *testing.T) {
 	RunNotesFilterContract(t, func(t *testing.T) beads.Client { return New() })
 }
 
+// TestFakeClientDepListUpExternal runs the external-target DepListUp case on
+// its own: go test ./internal/beads/beadsfake -run DepListUpExternal.
+func TestFakeClientDepListUpExternal(t *testing.T) {
+	t.Parallel()
+	RunDepListUpExternalContract(t, func(t *testing.T) beads.Client { return New() })
+}
+
 // TestFakeClientContractSharedDatabase runs the contract the way the
 // integration tier does, every case on one database, so a case that
 // leaks into another's assertions fails here in milliseconds.

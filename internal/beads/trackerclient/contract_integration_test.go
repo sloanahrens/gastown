@@ -66,6 +66,12 @@ func TestIntegrationTrackerClientSatisfiesTheDepListUpContract(t *testing.T) {
 	beadsfake.RunDepListUpContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
 }
 
+// The external-target DepListUp case runs against the tracker too, so the
+// store's external match and the fake's agree (gt-etvxc).
+func TestIntegrationTrackerClientSatisfiesTheDepListUpExternalContract(t *testing.T) {
+	beadsfake.RunDepListUpExternalContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
+}
+
 // The show-text suite runs against the tracker: ShowText renders the id and
 // title, and a missing id is an error.
 func TestIntegrationTrackerClientShowText(t *testing.T) {
