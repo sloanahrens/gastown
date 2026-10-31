@@ -574,7 +574,14 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 	}
 	argv := []string{"sh", "-c", s.Command}
 	var buf bytes.Buffer
-	start := time.Now()
+	// A slot step is timed on the gate's clock, the one its SlotWait is measured
+	// on, so the wait can be shown to stay out of Elapsed. Other steps read no
+	// injected clock (gt-njgu2).
+	clock := time.Now
+	if s.SlotRole != "" {
+		clock = g.nowTime
+	}
+	start := clock()
 	attempt := func() (int, error) {
 		buf.Reset()
 		writers := []io.Writer{&buf}
@@ -617,7 +624,7 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 		Name:          s.Name,
 		Command:       s.Command,
 		ExitCode:      code,
-		Elapsed:       time.Since(start),
+		Elapsed:       clock().Sub(start),
 		SlotWait:      slotWait,
 		Tail:          lastLines(out, gateTailLines),
 		Packages:      pkgs,

@@ -361,10 +361,10 @@ func TestStepRecordsSlotWait(t *testing.T) {
 	if got := unwaited.SlotWait; got != 0 {
 		t.Errorf("test step SlotWait = %s for a hold taken at once, want zero", got)
 	}
-	// The wait must not inflate Elapsed: measured against the run that took
-	// the slot at once, the waited step grows by less than its wait.
-	if grew := waited.Elapsed - unwaited.Elapsed; grew >= waited.SlotWait {
-		t.Errorf("test step Elapsed grew by %s beside a %s slot wait, want the step's own time alone", grew, waited.SlotWait)
+	// The wait must not reach Elapsed: on the gate's clock the waited step runs
+	// for exactly as long as the run that took the slot at once.
+	if waited.Elapsed != unwaited.Elapsed {
+		t.Errorf("test step Elapsed = %s beside a %s slot wait, want the unwaited run's %s", waited.Elapsed, waited.SlotWait, unwaited.Elapsed)
 	}
 }
 
