@@ -2,14 +2,15 @@ package forgejocut
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/forgejotest"
@@ -235,31 +236,89 @@ func TestProvisionRefusesACommandLineTheProvisionerRejects(t *testing.T) {
 	}
 }
 
+// TestProvisionRefusesAnUnwiredEnvironment pins that a cutover whose ProvisionEnv has
+// no Getenv stops before the run and before any read of the process environment:
+// the admin token must resolve through the cutover's seam, never through a fallback.
+// Dropping the nil check turns it red, because the run is then called.
+func TestProvisionRefusesAnUnwiredEnvironment(t *testing.T) {
+	t.Parallel()
+	c, logs, calls := newProvisionCutover(false)
+	c.ProvisionEnv = forgejoprov.Env{}
+	err := c.Provision()
+	if !errors.Is(err, errProvisionEnvUnwired) {
+		t.Fatalf("Provision() = %v, want the unwired environment refused", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("the provisioner ran %d times with no environment seam, want none", len(*calls))
+	}
+	if len(*logs) != 0 {
+		t.Fatalf("the run logged %q with no environment seam, want nothing", *logs)
+	}
+}
+
+// provisionFiles is the in-memory filesystem a provisioning run writes its token
+// files through: each path written, with the data and the mode it was given.
+type provisionFiles struct {
+	written map[string][]byte
+	modes   map[string]fs.FileMode
+}
+
+func newProvisionFiles() *provisionFiles {
+	return &provisionFiles{written: map[string][]byte{}, modes: map[string]fs.FileMode{}}
+}
+
+func (f *provisionFiles) WriteFileAtomic(path string, data []byte, mode fs.FileMode) error {
+	f.written[path] = append([]byte(nil), data...)
+	f.modes[path] = mode
+	return nil
+}
+
+func (f *provisionFiles) Chmod(path string, mode fs.FileMode) error {
+	if _, ok := f.written[path]; !ok {
+		return &fs.PathError{Op: "chmod", Path: path, Err: fs.ErrNotExist}
+	}
+	f.modes[path] = mode
+	return nil
+}
+
+func (f *provisionFiles) Stat(path string) (fs.FileInfo, error) {
+	if _, ok := f.written[path]; !ok {
+		return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
+	}
+	return provisionInfo{mode: f.modes[path]}, nil
+}
+
+// provisionInfo is the fs.FileInfo of a token file the in-memory filesystem holds.
+type provisionInfo struct{ mode fs.FileMode }
+
+func (provisionInfo) Name() string        { return "" }
+func (provisionInfo) Size() int64         { return 0 }
+func (i provisionInfo) Mode() fs.FileMode { return i.mode }
+func (provisionInfo) ModTime() time.Time  { return time.Time{} }
+func (provisionInfo) IsDir() bool         { return false }
+func (provisionInfo) Sys() any            { return nil }
+
 // provisionFakeCutover is a cutover over an in-process Forgejo: the real
-// forgejoprov.Run, the fake's transport, a token file read through the seam, and a
-// config home under t.TempDir. The repository is one the fake holds, and the viewer
-// bot exists, so the dashboard's read grant is made.
-func provisionFakeCutover(t *testing.T, dryRun bool) (*Cutover, *forgejotest.Fake, *[]string, string) {
+// forgejoprov.Run, the fake's transport, and an in-memory filesystem for the token
+// files, with the config home at provisionConfig. The repository is one the fake
+// holds, and the viewer bot exists, so the dashboard's read grant is made.
+func provisionFakeCutover(t *testing.T, dryRun bool) (*Cutover, *forgejotest.Fake, *[]string, *provisionFiles) {
 	t.Helper()
 	fake := forgejotest.New()
 	fake.AddRepo(provisionRepoName)
 	fake.ViewerExists = true
-	configHome := t.TempDir()
+	files := newProvisionFiles()
 	logs := &[]string{}
 	return &Cutover{
 		Opts: provisionOptions(dryRun),
 		Log:  func(line string) { *logs = append(*logs, line) },
 		ProvisionEnv: forgejoprov.Env{
-			Getenv: func(name string) string {
-				if name == "XDG_CONFIG_HOME" {
-					return configHome
-				}
-				return ""
-			},
+			Getenv:   provisionGetenv,
 			ReadFile: provisionReadFile,
+			Files:    files,
 			HTTP:     &http.Client{Transport: fake},
 		},
-	}, fake, logs, configHome
+	}, fake, logs, files
 }
 
 // TestProvisionInProcessAgainstTheFake runs the real provisioner against the
@@ -270,7 +329,7 @@ func provisionFakeCutover(t *testing.T, dryRun bool) (*Cutover, *forgejotest.Fak
 // any log line.
 func TestProvisionInProcessAgainstTheFake(t *testing.T) {
 	t.Parallel()
-	c, fake, logs, configHome := provisionFakeCutover(t, false)
+	c, fake, logs, files := provisionFakeCutover(t, false)
 	if err := c.Provision(); err != nil {
 		t.Fatalf("Provision() = %v, want the fake provisioned and nil", err)
 	}
@@ -295,13 +354,16 @@ func TestProvisionInProcessAgainstTheFake(t *testing.T) {
 		t.Errorf("%d request(s) reached the fake without the admin token", len(violations))
 	}
 	for _, role := range []string{"polecat", "landing", "registry"} {
-		path := filepath.Join(configHome, "gt", "forgejo-"+role+".env")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("the %s token file: %v", role, err)
+		path := filepath.Join(provisionConfig, "gt", "forgejo-"+role+".env")
+		data, ok := files.written[path]
+		if !ok {
+			t.Fatalf("the %s token file was not written", role)
 		}
 		if !strings.Contains(string(data), "FORGEJO_TOKEN=") {
 			t.Errorf("the %s token file holds no FORGEJO_TOKEN line", role)
+		}
+		if mode := files.modes[path]; mode != 0o600 {
+			t.Errorf("the %s token file mode = %v, want 0600", role, mode)
 		}
 	}
 
@@ -324,7 +386,7 @@ func TestProvisionInProcessAgainstTheFake(t *testing.T) {
 // --dry-run from the provisioner's command line turns it red.
 func TestProvisionDryRunSendsNoWrite(t *testing.T) {
 	t.Parallel()
-	c, fake, logs, configHome := provisionFakeCutover(t, true)
+	c, fake, logs, files := provisionFakeCutover(t, true)
 	if err := c.Provision(); err != nil {
 		t.Fatalf("Provision() = %v, want a dry run that reads and returns nil", err)
 	}
@@ -334,13 +396,18 @@ func TestProvisionDryRunSendsNoWrite(t *testing.T) {
 	if got := fake.Permission(provisionRepoName, "bot-polecat"); got != "" {
 		t.Errorf("the dry run left the repository access at %q, want no access", got)
 	}
-	for _, role := range []string{"polecat", "landing", "registry"} {
-		path := filepath.Join(configHome, "gt", "forgejo-"+role+".env")
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("the dry run wrote the %s token file, want none", role)
+	if len(files.written) != 0 {
+		t.Errorf("the dry run wrote %d token file(s), want none", len(files.written))
+	}
+	// The provisioner reports what it would have done on its own progress lines,
+	// which carry its documented prefix; the cutover's line is not one of them.
+	var provisionerLines int
+	for _, line := range *logs {
+		if strings.HasPrefix(line, "forgejo-provision: ") {
+			provisionerLines++
 		}
 	}
-	if joined := strings.Join(*logs, "\n"); !strings.Contains(joined, "dry run: no write was sent") {
-		t.Fatalf("the dry run's log does not report what it skipped:\n%s", joined)
+	if provisionerLines == 0 {
+		t.Fatalf("the dry run reported nothing on the provisioner's lines:\n%s", strings.Join(*logs, "\n"))
 	}
 }
