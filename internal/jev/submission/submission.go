@@ -186,10 +186,9 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return sum, fmt.Errorf("listing submissions since %s: %w", cur.Time.Format(time.RFC3339), err)
 	}
-	asked, err := askedIn(p.LogPath)
-	if err != nil {
-		return sum, fmt.Errorf("reading the submission log: %w", err)
-	}
+	// The log is read at the first entry that needs deciding, not here, so a
+	// pass with nothing waiting does not read it (gt-ipgpu).
+	var asked map[string]bool
 	synced := false
 	fetch := func(ctx context.Context) error {
 		if synced {
@@ -204,6 +203,15 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	for _, e := range pending(all, cur) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
+		}
+		// Before the first entry is decided, and so before anything is asked:
+		// without the lines already there, a repeated submission cannot be told
+		// from a new one.
+		if asked == nil {
+			asked, err = askedIn(p.LogPath)
+			if err != nil {
+				return sum, fmt.Errorf("reading the submission log: %w", err)
+			}
 		}
 		key := land.SubmissionKey(e.Issue.ID, e.Work.Head)
 		if asked[key] {
