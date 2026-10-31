@@ -24,6 +24,10 @@ type ReadyOptions struct {
 // for unit tests, and beadsfake.RunClientContract pins the two to the same
 // behavior.
 //
+// Every implementer also carries a compile-time assertion: *Beads (below),
+// beadsfake's Fake (fake.go) and trackerclient's Client. A method added here
+// fails the build until each of them has it.
+//
 // The interface is deliberately small. A method joins it only when consumers
 // in several packages call it and the fake can model it faithfully. Consumers
 // that need less should declare their own narrower interface.
