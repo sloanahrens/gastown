@@ -22,7 +22,8 @@ import (
 // answer it from canned output, so the unit tier starts no process.
 type Runner func(argv []string) ([]byte, error)
 
-// Selection is what a diff selects: All means the caller runs every test, and
+// Selection is what a diff selects: All means the caller runs every test, All
+// false with no packages means the diff is empty and no test has to run, and
 // otherwise Packages holds the sorted import paths to test.
 type Selection struct {
 	Packages []string
@@ -34,7 +35,12 @@ type Selection struct {
 // through other packages. The Selection is All for the inputs that must run
 // everything, with an error naming the input it could not read or place
 // (gt-c3lp9).
-func Select(run Runner, base, head string) (Selection, error) {
+//
+// wd is the directory git and go list run in. The go list pattern is relative
+// to it, so a wd below the module root would list a subtree: the closure would
+// lose every importer outside it and select too little. Select therefore reads
+// the module root go list reports and returns All unless wd is that root.
+func Select(run Runner, wd, base, head string) (Selection, error) {
 	revs := base + "..." + head
 	out, err := run([]string{"git", "diff", "--name-only", "--no-renames", "-z", "--end-of-options", revs})
 	if err != nil {
@@ -50,11 +56,15 @@ func Select(run Runner, base, head string) (Selection, error) {
 		}
 	}
 	if len(files) == 0 {
+		// An empty diff selects no package; the caller prints NONE.
 		return Selection{}, nil
 	}
 	graph, err := readGraph(run)
 	if err != nil {
 		return Selection{All: true}, err
+	}
+	if !sameDir(wd, graph.root) {
+		return Selection{All: true}, fmt.Errorf("go list ran in %q, not the module root %q: run affected at the repository root", wd, graph.root)
 	}
 	return graph.selectFiles(files)
 }
@@ -100,6 +110,7 @@ func widensToAll(file string) bool {
 // main module path a package the graph does not know yet is named from.
 type pkgGraph struct {
 	module string
+	root   string
 	byDir  map[string]string
 	deps   map[string][]string
 }
@@ -168,6 +179,7 @@ func parseGraph(out []byte) (*pkgGraph, error) {
 	if graph.module == "" {
 		return nil, errors.New("go list named no main module")
 	}
+	graph.root = moduleDir
 	for _, rec := range records {
 		if isTestVariant(rec.ImportPath) {
 			continue
@@ -197,6 +209,19 @@ func repoDir(moduleDir, dir string) (string, bool) {
 		return "", false
 	}
 	return filepath.ToSlash(strings.TrimPrefix(dir, prefix)), true
+}
+
+// sameDir reports whether two paths name one directory. It compares the cleaned
+// paths first, then the filesystem's view, so a checkout reached through a
+// symlink (macOS /tmp, a linked worktree) still matches. A path it cannot
+// resolve is not the same directory: the caller then fails wide.
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && resolvedA == resolvedB
 }
 
 // isTestVariant reports whether go list named a test variant of a package

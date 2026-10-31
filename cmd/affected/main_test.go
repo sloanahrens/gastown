@@ -43,6 +43,9 @@ func names(files ...string) []byte {
 	return out
 }
 
+// moduleRoot is the directory the fixture stream names as the module root.
+const moduleRoot = "/repo"
+
 // onePackage is a go list stream for the single package internal/a.
 const onePackage = `{
 	"ImportPath": "example.com/m/internal/a",
@@ -57,6 +60,8 @@ func TestAffectedPrintsTheSelection(t *testing.T) {
 	cases := []struct {
 		name      string
 		args      []string
+		wd        string // the directory the command runs in; empty means moduleRoot
+		wdErr     error
 		diff      []byte
 		list      []byte
 		listErr   error
@@ -72,6 +77,12 @@ func TestAffectedPrintsTheSelection(t *testing.T) {
 			wantOut:   "example.com/m/internal/a\n",
 			wantCode:  0,
 			wantCalls: 2,
+		},
+		{
+			name:      "empty diff prints NONE",
+			wantOut:   "NONE\n",
+			wantCode:  0,
+			wantCalls: 1,
 		},
 		{
 			name:      "build input widens without reading the graph",
@@ -90,6 +101,24 @@ func TestAffectedPrintsTheSelection(t *testing.T) {
 			wantCalls: 2,
 		},
 		{
+			name:      "started below the module root widens instead of narrowing",
+			wd:        "/repo/internal/a",
+			diff:      names("internal/a/a.go"),
+			list:      []byte(onePackage),
+			wantOut:   "ALL\n",
+			wantCode:  0,
+			wantErr:   "module root",
+			wantCalls: 2,
+		},
+		{
+			name:      "unreadable working directory widens",
+			wdErr:     errors.New("getwd failed"),
+			wantOut:   "ALL\n",
+			wantCode:  0,
+			wantErr:   "working directory",
+			wantCalls: 0,
+		},
+		{
 			name:     "unexpected argument",
 			args:     []string{"extra"},
 			wantCode: 2,
@@ -106,15 +135,27 @@ func TestAffectedPrintsTheSelection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			r := &fakeRunner{diff: tc.diff, list: tc.list, listErr: tc.listErr}
+			wd := tc.wd
+			if wd == "" {
+				wd = moduleRoot
+			}
+			getwd := func() (string, error) { return wd, nil }
+			if tc.wdErr != nil {
+				getwd = func() (string, error) { return "", tc.wdErr }
+			}
 			var out, errw bytes.Buffer
-			code := run(tc.args, &out, &errw, r.run)
+			code := run(tc.args, getwd, &out, &errw, r.run)
 			if code != tc.wantCode {
 				t.Errorf("exit code = %d, want %d", code, tc.wantCode)
 			}
 			if out.String() != tc.wantOut {
 				t.Errorf("stdout = %q, want %q", out.String(), tc.wantOut)
 			}
-			if !strings.Contains(errw.String(), tc.wantErr) {
+			if tc.wantErr == "" {
+				if errw.Len() != 0 {
+					t.Errorf("stderr = %q, want nothing", errw.String())
+				}
+			} else if !strings.Contains(errw.String(), tc.wantErr) {
 				t.Errorf("stderr = %q, want it to name %q", errw.String(), tc.wantErr)
 			}
 			if len(r.calls) != tc.wantCalls {

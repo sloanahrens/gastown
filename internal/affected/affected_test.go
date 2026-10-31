@@ -3,6 +3,8 @@ package affected
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -41,81 +43,25 @@ func names(files ...string) []byte {
 	return out
 }
 
-// listGraph is a `go list -deps -test -json` stream for a module of seven
-// packages: b imports a, e imports b, and the tests of c and f import a, while
-// d, tools and the module root hold no dependency. c's test is in its own
-// package, which go list reports as the variant and the test binary; f's is an
-// external test package, whose variant is named after the parent in ForTest.
-// The fixture fails if a test-only import stops being an edge, and if the
-// external test package f_test is read as a package of its own.
-const listGraph = `{
-	"ImportPath": "example.com/m/internal/a",
-	"Dir": "/repo/internal/a",
-	"Deps": ["fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
+// fixtureRoot is the module directory the captured graph names: its Dir fields
+// were rewritten to it, so the fixture travels with the repository.
+const fixtureRoot = "/fixture"
+
+// listGraph is a real `go list -deps -test -json ./...` capture of the module
+// under testdata/modsrc, filtered to the main module's own records, with each
+// Dir rewritten to fixtureRoot. That module holds a leaf a; b imports a; e
+// imports b; c's tests import a from the package and f's tests import it from
+// an external test package; d and tools depend on nothing. Driving the graph
+// from the capture, not a hand-written stream, is what proves the selector
+// reads the record shapes go list actually writes.
+func listGraph(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "golist.json"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	return data
 }
-{
-	"ImportPath": "example.com/m/internal/b",
-	"Dir": "/repo/internal/b",
-	"Deps": ["example.com/m/internal/a", "fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-{
-	"ImportPath": "example.com/m/internal/c",
-	"Dir": "/repo/internal/c",
-	"Deps": ["fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-{
-	"ImportPath": "example.com/m/internal/c [example.com/m/internal/c.test]",
-	"Dir": "/repo/internal/c",
-	"Deps": ["example.com/m/internal/a", "fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-{
-	"ImportPath": "example.com/m/internal/c.test",
-	"Dir": "/repo/internal/c",
-	"Deps": ["example.com/m/internal/a", "example.com/m/internal/c [example.com/m/internal/c.test]"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-{
-	"ImportPath": "example.com/m/internal/d",
-	"Dir": "/repo/internal/d",
-	"Deps": ["fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-{
-	"ImportPath": "example.com/m/internal/e",
-	"Dir": "/repo/internal/e",
-	"Deps": ["example.com/m/internal/b", "fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-{
-	"ImportPath": "example.com/m/internal/f",
-	"Dir": "/repo/internal/f",
-	"Deps": ["fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-{
-	"ImportPath": "example.com/m/internal/f_test [example.com/m/internal/f.test]",
-	"Dir": "/repo/internal/f",
-	"ForTest": "example.com/m/internal/f",
-	"Deps": ["example.com/m/internal/a", "fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-{
-	"ImportPath": "example.com/m/internal/f.test",
-	"Dir": "/repo/internal/f",
-	"Deps": ["example.com/m/internal/f_test [example.com/m/internal/f.test]", "fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-{
-	"ImportPath": "example.com/m/tools",
-	"Dir": "/repo/tools",
-	"Deps": ["fmt"],
-	"Module": {"Path": "example.com/m", "Dir": "/repo", "Main": true}
-}
-`
 
 // dependentsOfA is every package the graph says a change to internal/a
 // reaches: a itself, b and e through imports, and c and f through their tests.
@@ -138,13 +84,12 @@ func TestAffectedReverseClosureSelectsDependents(t *testing.T) {
 		{"leaf and a file beside it", names("internal/a/a.go", "internal/a/data.json"), dependentsOfA},
 		{"file in a directory below the package", names("internal/a/sub/data.json"), dependentsOfA},
 		{"changed package no test imports", names("internal/d/d.go"), []string{"example.com/m/internal/d"}},
-		{"no change", nil, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := &fakeRunner{diff: tc.diff, list: []byte(listGraph)}
-			sel, err := Select(r.run, "origin/main", "HEAD")
+			r := &fakeRunner{diff: tc.diff, list: listGraph(t)}
+			sel, err := Select(r.run, fixtureRoot, "origin/main", "HEAD")
 			if err != nil {
 				t.Fatalf("Select: %v", err)
 			}
@@ -158,10 +103,61 @@ func TestAffectedReverseClosureSelectsDependents(t *testing.T) {
 	}
 }
 
+// TestAffectedEmptyDiffSelectsNothing pins the state the command prints NONE
+// for: an empty diff is not a read failure, and it is not ALL either.
+func TestAffectedEmptyDiffSelectsNothing(t *testing.T) {
+	t.Parallel()
+	r := &fakeRunner{}
+	sel, err := Select(r.run, fixtureRoot, "origin/main", "HEAD")
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if sel.All {
+		t.Fatal("Select = ALL, want no packages")
+	}
+	if len(sel.Packages) != 0 {
+		t.Errorf("Select = %v, want no packages", sel.Packages)
+	}
+	if len(r.calls) != 1 {
+		t.Errorf("ran %d commands, want only git diff: %q", len(r.calls), r.calls)
+	}
+}
+
+// TestAffectedOutsideModuleRootIsAll covers a selector started below the module
+// root: go list's ./... would cover the subtree alone, so the closure would
+// lose the importers outside it. The selector must fail wide rather than return
+// that short list.
+func TestAffectedOutsideModuleRootIsAll(t *testing.T) {
+	t.Parallel()
+	r := &fakeRunner{diff: names("internal/a/a.go"), list: listGraph(t)}
+	sel, err := Select(r.run, filepath.Join(fixtureRoot, "internal", "a"), "origin/main", "HEAD")
+	if !sel.All {
+		t.Fatalf("Select = %v, want ALL", sel.Packages)
+	}
+	if err == nil {
+		t.Error("Select error = nil, want the module root mismatch named")
+	}
+}
+
+func TestAffectedSameDirResolvesSymlinks(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if !sameDir(link, dir) {
+		t.Errorf("sameDir(%q, %q) = false, want true", link, dir)
+	}
+	if sameDir(dir, filepath.Join(dir, "sub")) {
+		t.Errorf("sameDir(%q, %q) = true, want false", dir, filepath.Join(dir, "sub"))
+	}
+}
+
 func TestAffectedAsksForTheDiffAndTheGraph(t *testing.T) {
 	t.Parallel()
-	r := &fakeRunner{diff: names("internal/a/a.go"), list: []byte(listGraph)}
-	if _, err := Select(r.run, "origin/main", "HEAD"); err != nil {
+	r := &fakeRunner{diff: names("internal/a/a.go"), list: listGraph(t)}
+	if _, err := Select(r.run, fixtureRoot, "origin/main", "HEAD"); err != nil {
 		t.Fatalf("Select: %v", err)
 	}
 	want := [][]string{
@@ -192,8 +188,8 @@ func TestAffectedWidensToAll(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := &fakeRunner{diff: tc.diff, list: []byte(listGraph)}
-			sel, err := Select(r.run, "origin/main", "HEAD")
+			r := &fakeRunner{diff: tc.diff, list: listGraph(t)}
+			sel, err := Select(r.run, fixtureRoot, "origin/main", "HEAD")
 			if !sel.All {
 				t.Fatalf("Select = %v, want ALL", sel.Packages)
 			}
@@ -238,7 +234,7 @@ func TestAffectedUnreadableDiffIsAll(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			r := &fakeRunner{diff: tc.diff, diffErr: tc.diffErr, list: tc.list, listErr: tc.listErr}
-			sel, err := Select(r.run, "origin/main", "HEAD")
+			sel, err := Select(r.run, fixtureRoot, "origin/main", "HEAD")
 			if !sel.All {
 				t.Fatalf("Select = %v, want ALL", sel.Packages)
 			}
@@ -262,8 +258,8 @@ func TestAffectedUnplacedFileIsSelected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := &fakeRunner{diff: tc.diff, list: []byte(listGraph)}
-			sel, err := Select(r.run, "origin/main", "HEAD")
+			r := &fakeRunner{diff: tc.diff, list: listGraph(t)}
+			sel, err := Select(r.run, fixtureRoot, "origin/main", "HEAD")
 			if err != nil {
 				t.Fatalf("Select: %v", err)
 			}
