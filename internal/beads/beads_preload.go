@@ -26,6 +26,11 @@ import (
 // A rig the town's route table puts on the tracker backend has no bd to warm:
 // every reader there takes its own per-call seam query, so the preload would
 // be one failed read and one warning per rig and warm nothing (gt-p85pw.108).
+//
+// The route check runs before any read, so an unreadable route table is an
+// error from PreloadBeads on every caller, not only on a tracker rig, and no
+// store is read. The production caller, preloadRigSeats, treats that error as
+// a warning and falls back to its per-call query.
 func (b *Beads) PreloadBeads(labels []string, statuses []IssueStatus) error {
 	onTracker, err := b.onTrackerRoute()
 	if err != nil {
