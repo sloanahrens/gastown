@@ -31,6 +31,8 @@ const (
 var noLogCommands = map[string]bool{
 	"tap":    true,
 	"signal": true,
+
+	"git-credential-forgejo": true, // git runs it on every push (gt-dhjz6)
 }
 
 // logCommandUsage appends one JSONL line to today's usage log.
