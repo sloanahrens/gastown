@@ -2,9 +2,11 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dop251/goja"
@@ -392,15 +394,45 @@ function __descend(id) {
 var pageIDRE = regexp.MustCompile(`\bid="([^"]+)"`)
 
 // pageScript is index.html's inline script, the text the browser runs.
-func pageScript(t *testing.T) string {
-	t.Helper()
+func pageScript() (string, error) {
 	page := string(indexHTML)
 	start := strings.Index(page, "<script>")
 	end := strings.LastIndex(page, "</script>")
 	if start < 0 || end < start {
-		t.Fatal("index.html has no inline script")
+		return "", fmt.Errorf("index.html has no inline script")
 	}
-	return page[start+len("<script>") : end]
+	return page[start+len("<script>") : end], nil
+}
+
+// pageStubProgram and pageScriptProgram are the page's two scripts, compiled
+// once for the whole run. index.html and the stub are embedded and fixed, and a
+// goja Program is not linked to a runtime, so every page runs the same compiled
+// code instead of re-parsing five thousand lines for each of the several
+// hundred pages a test run builds.
+var (
+	pageStubProgram   = sync.OnceValues(func() (*goja.Program, error) { return goja.Compile("stub.js", pageStubJS, false) })
+	pageScriptProgram = sync.OnceValues(func() (*goja.Program, error) {
+		src, err := pageScript()
+		if err != nil {
+			return nil, err
+		}
+		return goja.Compile("index.html", src, false)
+	})
+)
+
+// bootPage runs one of the page's compiled programs, failing the test when the
+// markup or the stub cannot be compiled or run: a page that cannot run is a
+// page the harness does not describe.
+func bootPage(t *testing.T, vm *goja.Runtime, what string, load func() (*goja.Program, error)) {
+	t.Helper()
+
+	prg, err := load()
+	if err != nil {
+		t.Fatalf("%s did not compile: %v", what, err)
+	}
+	if _, err := vm.RunProgram(prg); err != nil {
+		t.Fatalf("%s did not run: %v", what, err)
+	}
 }
 
 // foldSectionSpec is one section of index.html's grid as the stub builds it:
@@ -431,14 +463,26 @@ var (
 )
 
 // pageSections is the page's grid as the stub builds it: every section in
-// index.html's .grid, with the heading it folds under.
+// index.html's .grid, with the heading it folds under. The markup is embedded
+// and fixed, so it is parsed once and every page construction reads the same
+// list.
 func pageSections(t *testing.T) []foldSectionSpec {
 	t.Helper()
 
+	specs, err := pageSectionsOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return specs
+}
+
+var pageSectionsOnce = sync.OnceValues(parsePageSections)
+
+func parsePageSections() ([]foldSectionSpec, error) {
 	page := string(indexHTML)
 	start := strings.Index(page, `<div class="grid">`)
 	if start < 0 {
-		t.Fatal("index.html has no .grid holding the sections")
+		return nil, fmt.Errorf("index.html has no .grid holding the sections")
 	}
 	grid := page[start:]
 	if end := strings.Index(grid, "<script>"); end >= 0 {
@@ -453,7 +497,7 @@ func pageSections(t *testing.T) []foldSectionSpec {
 		at += i
 		open := strings.Index(grid[at:], ">")
 		if open < 0 {
-			t.Fatalf("index.html's section at offset %d has no end of tag", at)
+			return nil, fmt.Errorf("index.html's section at offset %d has no end of tag", at)
 		}
 		tag := grid[at : at+open+1]
 		body := grid[at+open+1:]
@@ -472,27 +516,29 @@ func pageSections(t *testing.T) []foldSectionSpec {
 		}
 		sp.DefaultCollapsed = strings.Contains(tag, "data-default-collapsed")
 		sp.Hidden = pageBareHidRE.MatchString(tag)
-		sp.Head = pageHeadParts(t, body[:next])
+		head, err := pageHeadParts(body[:next])
+		if err != nil {
+			return nil, err
+		}
+		sp.Head = head
 		out = append(out, sp)
 		i = at + open + 1 + next
 	}
-	return out
+	return out, nil
 }
 
 // pageHeadParts is one section's heading as the stub lays it out: the text
 // between its spans and each span with its class and id, which is where the
 // page finds the note it copies into a closed section's summary.
-func pageHeadParts(t *testing.T, body string) []foldHeadPart {
-	t.Helper()
-
+func pageHeadParts(body string) ([]foldHeadPart, error) {
 	open := strings.Index(body, "<h2>")
 	if open < 0 {
-		return nil
+		return nil, nil
 	}
 	inner := body[open+len("<h2>"):]
 	end := strings.Index(inner, "</h2>")
 	if end < 0 {
-		t.Fatalf("index.html's section heading has no end: %q", body)
+		return nil, fmt.Errorf("index.html's section heading has no end: %q", body)
 	}
 	inner = inner[:end]
 	var out []foldHeadPart
@@ -517,18 +563,19 @@ func pageHeadParts(t *testing.T, body string) []foldHeadPart {
 		out = append(out, p)
 		inner = inner[loc[1]:]
 	}
-	return out
+	return out, nil
 }
 
 // pageIDs is every element id index.html's markup declares, in the order the
-// file declares them.
-func pageIDs() []string {
+// file declares them. The regexp walks the whole file, so the answer is kept
+// from the first page rather than read again for every page a run builds.
+var pageIDs = sync.OnceValue(func() []string {
 	var ids []string
 	for _, m := range pageIDRE.FindAllStringSubmatch(string(indexHTML), -1) {
 		ids = append(ids, m[1])
 	}
 	return ids
-}
+})
 
 // pageDOM is one run of the page: its script executed in a fresh engine over
 // the stub DOM, so tests hold independent pages.
@@ -583,9 +630,7 @@ func newPage(t *testing.T, stored map[string]string, setUp string) *pageDOM {
 	if _, err := vm.RunString("var __sectionSpec = " + string(specs) + ";"); err != nil {
 		t.Fatalf("handing the page's sections to the stub: %v", err)
 	}
-	if _, err := vm.RunString(pageStubJS); err != nil {
-		t.Fatalf("the DOM stub did not load: %v", err)
-	}
+	bootPage(t, vm, "the DOM stub", pageStubProgram)
 	for k, v := range stored {
 		if _, err := vm.RunString("localStorage.setItem(" + strconv.Quote(k) + ", " + strconv.Quote(v) + ")"); err != nil {
 			t.Fatalf("handing the page its %s: %v", k, err)
@@ -596,9 +641,7 @@ func newPage(t *testing.T, stored map[string]string, setUp string) *pageDOM {
 			t.Fatalf("setting the page's browser up: %v", err)
 		}
 	}
-	if _, err := vm.RunString(pageScript(t)); err != nil {
-		t.Fatalf("index.html's script did not run: %v", err)
-	}
+	bootPage(t, vm, "index.html's script", pageScriptProgram)
 	return &pageDOM{vm: vm}
 }
 
