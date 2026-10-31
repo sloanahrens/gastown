@@ -389,15 +389,16 @@ func runInstallWith(opts installOptions, args []string) error {
 			return fmt.Errorf("writing the Dolt endpoint to town.json: %w", err)
 		}
 	}
+	if err := stampTownTrackerPort(townPath, config.DefaultTrackerPort); err != nil {
+		return fmt.Errorf("writing the tracker endpoint to town.json: %w", err)
+	}
 	// A local install's Dolt is this machine's: a remote host a town.json
-	// still names would be dialed with the local port (gt-i3ywa).
+	// still names would be dialed with the local port (gt-i3ywa). This runs
+	// after the tracker write, so a torn town.json still reports that first.
 	if !remoteDolt {
 		if err := clearTownDoltHost(townPath); err != nil {
 			return fmt.Errorf("writing the Dolt endpoint to town.json: %w", err)
 		}
-	}
-	if err := stampTownTrackerPort(townPath, config.DefaultTrackerPort); err != nil {
-		return fmt.Errorf("writing the tracker endpoint to town.json: %w", err)
 	}
 
 	// Create the rig registry (only if it doesn't already exist).
