@@ -25,6 +25,12 @@ type Git interface {
 
 // Run asks g about one crew clone, makes the move Decide allows, and returns
 // the report to show.
+//
+// Run returns an error, and the zero Report, only when the clone cannot be read
+// far enough to decide: Branch or Behind failing. A failed fetch, an unreadable
+// Clean or HeadIsAncestorOfOriginMain, and a refused FastForwardMain all come
+// back in the Report; a refused fast-forward is returned as an error too, with
+// Action set to ActionNone.
 func Run(g Git, timeout time.Duration) (Report, error) {
 	var state State
 
@@ -40,11 +46,12 @@ func Run(g Git, timeout time.Duration) (Report, error) {
 	}
 	state.Branch = branch
 
-	// A failed read here is not fatal, but it must not pass as a safe one:
-	// the zero value blocks the move in Decide, so a clone whose state cannot
+	// A failed read here is not fatal, but it must not pass as a safe one: the
+	// unreadable flag blocks the move in Decide, so a clone whose state cannot
 	// be read is left where it is.
 	clean, cleanErr := g.Clean()
 	state.Clean = cleanErr == nil && clean
+	state.CleanUnreadable = cleanErr != nil
 
 	behind, err := g.Behind()
 	if err != nil {
@@ -54,20 +61,9 @@ func Run(g Git, timeout time.Duration) (Report, error) {
 
 	ancestor, ancestorErr := g.HeadIsAncestorOfOriginMain()
 	state.HeadIsAncestor = ancestorErr == nil && ancestor
+	state.AncestryUnreadable = ancestorErr != nil
 
 	report := Decide(state)
-	// Decide's lines say what blocked the move; when the blocker was a failed
-	// read, say so rather than claim a state the read never saw. The checks
-	// follow Decide's order, so only the read that decided the block is
-	// named.
-	onMainBehind := state.FetchOK && state.Behind > 0 && state.Branch == mainBranch
-	switch {
-	case cleanErr != nil && onMainBehind:
-		report.Message = fmt.Sprintf("behind %d but the clone's changes could not be read so nothing moved", report.Behind)
-	case ancestorErr != nil && onMainBehind && state.Clean:
-		report.Message = fmt.Sprintf("behind %d but main's ancestry could not be read so nothing moved", report.Behind)
-	}
-
 	if report.Action != ActionFastForward {
 		return report, nil
 	}

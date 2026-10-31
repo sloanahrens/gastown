@@ -29,11 +29,17 @@ type State struct {
 	Branch string
 	// Clean reports whether the working tree has no changes.
 	Clean bool
+	// CleanUnreadable reports that Clean could not be read, so Clean holds no
+	// reading and the move is blocked.
+	CleanUnreadable bool
 	// Behind counts the commits origin/main has that HEAD lacks.
 	Behind int
 	// HeadIsAncestor reports whether HEAD is an ancestor of origin/main, so a
 	// fast-forward would lose no commit.
 	HeadIsAncestor bool
+	// AncestryUnreadable reports that HeadIsAncestor could not be read, so it
+	// holds no reading and the move is blocked.
+	AncestryUnreadable bool
 }
 
 // Report is the decision for one clone: the move it allows, and the line a
@@ -49,7 +55,8 @@ type Report struct {
 
 // Decide returns the report for a clone in state s, allowing a fast-forward
 // only when the fetch succeeded, the clone is on main and clean, and HEAD is a
-// strict ancestor of origin/main.
+// strict ancestor of origin/main; a state the clone could not report blocks the
+// move and is named.
 func Decide(s State) Report {
 	r := Report{Behind: s.Behind}
 	switch {
@@ -61,8 +68,12 @@ func Decide(s State) Report {
 		r.Message = "up to date"
 	case s.Branch != mainBranch:
 		r.Message = fmt.Sprintf("behind %d but on %s so main is left alone", s.Behind, branchPhrase(s.Branch))
+	case s.CleanUnreadable:
+		r.Message = fmt.Sprintf("behind %d but the clone's changes could not be read so nothing moved", s.Behind)
 	case !s.Clean:
 		r.Message = fmt.Sprintf("behind %d but the clone has local changes so nothing moved", s.Behind)
+	case s.AncestryUnreadable:
+		r.Message = fmt.Sprintf("behind %d but main's ancestry could not be read so nothing moved", s.Behind)
 	case !s.HeadIsAncestor:
 		r.Message = fmt.Sprintf("behind %d but main has local commits so nothing moved", s.Behind)
 	default:

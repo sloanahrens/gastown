@@ -59,8 +59,8 @@ func (f *fakeGit) FastForwardMain() error {
 	return f.ffErr
 }
 
-// fakeGitFor is a clone in state s, with a fetch that fails exactly when s says
-// the fetch failed.
+// fakeGitFor is a clone in state s, with the fetch and the two reads that can
+// fail failing exactly when s says so.
 func fakeGitFor(s State) *fakeGit {
 	g := &fakeGit{
 		branch:   s.Branch,
@@ -70,6 +70,12 @@ func fakeGitFor(s State) *fakeGit {
 	}
 	if !s.FetchOK {
 		g.fetchErr = errors.New("could not reach origin")
+	}
+	if s.CleanUnreadable {
+		g.cleanErr = errors.New("status failed")
+	}
+	if s.AncestryUnreadable {
+		g.ancestorErr = errors.New("merge-base failed")
 	}
 	return g
 }
@@ -104,8 +110,8 @@ func TestRunFetchFailureStillReportsAndReturnsNoError(t *testing.T) {
 	}
 }
 
-// FastForwardMain is called exactly once, and only for the one row Decide
-// allows it on; the report for every row is the decision itself (gt-0gscf).
+// FastForwardMain is called exactly once, and only for the one row the table
+// allows it on; every row's report is the one the table expects (gt-0gscf).
 func TestRunFastForwardsExactlyOnce(t *testing.T) {
 	t.Parallel()
 	for _, tc := range decideCases {
@@ -124,7 +130,8 @@ func TestRunFastForwardsExactlyOnce(t *testing.T) {
 			if g.ffCalls != wantFF {
 				t.Errorf("FastForwardMain called %d times, want %d", g.ffCalls, wantFF)
 			}
-			if want := Decide(tc.state); got != want {
+			want := Report{Action: tc.wantAction, Behind: tc.wantBehind, Message: tc.wantMessage}
+			if got != want {
 				t.Errorf("Run(%+v) = %+v, want %+v", tc.state, got, want)
 			}
 		})

@@ -69,6 +69,34 @@ var decideCases = []decideCase{
 		wantBehind:  6,
 		wantMessage: "behind 6 but on branch crew/sloan/gt-9 so main is left alone",
 	},
+	{
+		name:        "changes unreadable",
+		state:       State{FetchOK: true, Branch: "main", CleanUnreadable: true, Behind: 3, HeadIsAncestor: true},
+		wantAction:  ActionNone,
+		wantBehind:  3,
+		wantMessage: "behind 3 but the clone's changes could not be read so nothing moved",
+	},
+	{
+		name:        "ancestry unreadable",
+		state:       State{FetchOK: true, Branch: "main", Clean: true, Behind: 3, AncestryUnreadable: true},
+		wantAction:  ActionNone,
+		wantBehind:  3,
+		wantMessage: "behind 3 but main's ancestry could not be read so nothing moved",
+	},
+	{
+		name:        "changes unreadable on another branch keeps the branch line",
+		state:       State{FetchOK: true, Branch: "crew/sloan/gt-9", CleanUnreadable: true, Behind: 3, HeadIsAncestor: true},
+		wantAction:  ActionNone,
+		wantBehind:  3,
+		wantMessage: "behind 3 but on branch crew/sloan/gt-9 so main is left alone",
+	},
+	{
+		name:        "dirty clone keeps the changes line when ancestry is unreadable",
+		state:       State{FetchOK: true, Branch: "main", Clean: false, Behind: 3, AncestryUnreadable: true},
+		wantAction:  ActionNone,
+		wantBehind:  3,
+		wantMessage: "behind 3 but the clone has local changes so nothing moved",
+	},
 }
 
 // A fast-forward is the only ref move this package allows, and it needs every
