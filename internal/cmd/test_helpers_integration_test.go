@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/buildflags"
+	"github.com/steveyegge/gastown/internal/buildpaths"
 )
 
 // buildGT returns the path to a gt binary built from this checkout, with
@@ -52,9 +53,9 @@ var goBuild = func(dir string, env []string, args ...string) ([]byte, error) {
 var sweepNotice io.Writer = os.Stderr
 
 // sweepBuiltGT returns the sweep's prebuilt gt when TIER_SWEEP_GT_BIN names an
-// executable regular file no older than the Go sources under srcRoot. Any other
-// value is noted and ignored: a path the sweep did not hand over, or a binary
-// the sources have outrun, is not trusted, and the caller builds its own copy.
+// executable regular file no older than the build inputs under srcRoot. Any
+// other value is noted and ignored: a path the sweep did not hand over, or a
+// binary the inputs have outrun, is not trusted, and the caller builds its own.
 func sweepBuiltGT(srcRoot string) (string, bool) {
 	path := os.Getenv(sweepGTBinEnv)
 	if path == "" {
@@ -70,28 +71,34 @@ func sweepBuiltGT(srcRoot string) (string, bool) {
 
 // sweepBinaryUnusable returns why the binary at path is not one to trust, and
 // "" when it is. The freshness check compares its modification time with the
-// Go sources: a binary built before a source changed may predate the code under
-// test, the stale-gt failure this helper exists to avoid. Sources that cannot be
-// read are not trusted either.
+// build inputs: a binary built before one of them changed may predate the code
+// under test, the stale-gt failure this helper exists to avoid. Inputs that
+// cannot be read, or no inputs at all, are not trusted either.
 func sweepBinaryUnusable(path, srcRoot string) string {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		return "not an executable regular file"
 	}
-	newest, newestTime, err := newestGoSource(srcRoot)
+	newest, newestTime, err := newestBuildInput(srcRoot)
 	if err != nil {
-		return fmt.Sprintf("cannot read the Go sources under %s: %v", srcRoot, err)
+		return fmt.Sprintf("cannot read the build inputs under %s: %v", srcRoot, err)
+	}
+	if newest == "" {
+		return fmt.Sprintf("no build inputs under %s", srcRoot)
 	}
 	if newestTime.After(info.ModTime()) {
-		return "older than the Go source " + newest
+		return "older than the build input " + newest
 	}
 	return ""
 }
 
-// newestGoSource returns the Go source file or go.mod under root that was
-// modified last, and its modification time. Hidden directories such as .git
-// are skipped.
-func newestGoSource(root string) (string, time.Time, error) {
+// newestBuildInput returns the path, relative to root, of the file that
+// buildpaths.AffectsBuild counts as binary-affecting and that was modified last,
+// with its modification time. That covers Go sources, go.mod and what the
+// //go:embed directives compile in, the same rule the staleness check and the
+// daemon's rebuild job use (gt-p62ku). Hidden directories such as .git are
+// skipped. buildGT calls it once per test process, so the walk runs once.
+func newestBuildInput(root string) (string, time.Time, error) {
 	var newest string
 	var newestTime time.Time
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -104,7 +111,12 @@ func newestGoSource(root string) (string, time.Time, error) {
 			}
 			return nil
 		}
-		if d.Name() != "go.mod" && !strings.HasSuffix(d.Name(), ".go") {
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if !buildpaths.AffectsBuild(rel) {
 			return nil
 		}
 		info, err := d.Info()
@@ -112,7 +124,7 @@ func newestGoSource(root string) (string, time.Time, error) {
 			return err
 		}
 		if info.ModTime().After(newestTime) {
-			newest, newestTime = path, info.ModTime()
+			newest, newestTime = rel, info.ModTime()
 		}
 		return nil
 	})
@@ -334,8 +346,9 @@ type buildStub struct {
 // stubBuild isolates one buildGTBinary call. TMPDIR moves into t.TempDir so the
 // build directory lands there, the module root and the cgo preflight become
 // fakes so no host state is read, goBuild becomes a recorder that links nothing,
-// and the process's globals are restored afterwards. Its module root holds a
-// go.mod and one source file, both dated an hour back.
+// and the process's globals are restored afterwards. gtBinaryDir is among them
+// because buildGTBinary's fallback sets it to the build directory it made. Its
+// module root holds a go.mod and one source file, both dated an hour back.
 func stubBuild(t *testing.T) *buildStub {
 	t.Helper()
 	t.Setenv("TMPDIR", t.TempDir())
@@ -398,9 +411,10 @@ func TestIntegrationBuildGTUsesTheSweepBinary(t *testing.T) {
 }
 
 // TestIntegrationBuildGTIgnoresAnUnusableSweepBinary: a missing path, a
-// directory, a file without an execute bit, a file older than the Go sources,
-// and sources that cannot be read are not trusted. buildGTBinary builds gt as it
-// does with the variable unset, and its notice says why.
+// directory, a file without an execute bit, a file older than a build input (a
+// Go source or an embedded file), and build inputs that cannot be read are not
+// trusted. buildGTBinary builds gt as it does with the variable unset, and its
+// notice says why.
 func TestIntegrationBuildGTIgnoresAnUnusableSweepBinary(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -433,10 +447,20 @@ func TestIntegrationBuildGTIgnoresAnUnusableSweepBinary(t *testing.T) {
 				writeAt(t, p, "#!/bin/sh\nexit 0\n", 0o755, time.Now().Add(-2*time.Hour))
 				return p
 			},
-			wantReason: "older than the Go source",
+			wantReason: "older than the build input",
 		},
 		{
-			name: "sources unreadable",
+			name: "older than an embedded input",
+			path: func(t *testing.T, stub *buildStub) string {
+				writeAt(t, filepath.Join(stub.src, "internal", "config", "roles", "mayor.toml"), "name = \"mayor\"\n", 0o644, time.Now().Add(-10*time.Minute))
+				p := filepath.Join(t.TempDir(), "gt")
+				writeAt(t, p, "#!/bin/sh\nexit 0\n", 0o755, time.Now().Add(-30*time.Minute))
+				return p
+			},
+			wantReason: "older than the build input internal/config/roles/mayor.toml",
+		},
+		{
+			name: "build inputs unreadable",
 			path: func(t *testing.T, stub *buildStub) string {
 				if err := os.RemoveAll(stub.src); err != nil {
 					t.Fatalf("removing the module root: %v", err)
@@ -445,7 +469,7 @@ func TestIntegrationBuildGTIgnoresAnUnusableSweepBinary(t *testing.T) {
 				writeAt(t, p, "#!/bin/sh\nexit 0\n", 0o755, time.Now().Add(-30*time.Minute))
 				return p
 			},
-			wantReason: "cannot read the Go sources",
+			wantReason: "cannot read the build inputs",
 		},
 	}
 	for _, tc := range cases {
