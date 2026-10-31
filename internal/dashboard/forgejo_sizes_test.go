@@ -57,6 +57,12 @@ func (s forgejoReposStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"message":"boom"}`)
 		return
 	}
+	// The client pages the list to its end: answer the call with the canned
+	// page, then the empty page that says there is no more (gt-nlrpk).
+	if r.URL.Query().Get("page") != "1" {
+		_, _ = io.WriteString(w, `[]`)
+		return
+	}
 	_, _ = io.WriteString(w, s.body)
 }
 

@@ -2,8 +2,8 @@ package dashboard
 
 // The nightly Forgejo size report: one line per repository per run, the record
 // the monthly export charges storage from (gt-zg3qu). Forgejo reports a
-// repository's size in kilobytes on the same list call the panel already makes,
-// so the report costs no second request.
+// repository's size in kilobytes on the same repository list the panel already
+// reads, so the report needs no separate size endpoint.
 //
 // It has no scheduler yet: its caller is the bead that runs it nightly beside
 // the tracker size job (gt-oujm5).
@@ -21,13 +21,11 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
 const (
-	// sizeTSLayout is the report's timestamp: UTC, second precision, trailing Z,
-	// the shape the resource sampler's rows already use.
+	// sizeTSLayout is the report's timestamp: UTC, second precision, trailing Z.
 	sizeTSLayout = "2006-01-02T15:04:05Z"
 	// sizeDayLayout is the day a file holds, in UTC: one night's run appends to
 	// that day's file, so a re-run adds a second set of lines rather than
@@ -49,16 +47,10 @@ type ForgejoSizeRow struct {
 	SizeKB *int64 `json:"size_kb"`
 }
 
-// forgejoRepos is the part of the Forgejo client the size writer calls. The
-// size rides the repository list itself, so one call answers both.
-type forgejoRepos interface {
-	ListUserRepos(ctx context.Context) ([]forgejo.Repository, error)
-}
-
 // ForgejoSizeWriter appends the nightly size report to
 // <town>/.runtime/metrics/forgejo-sizes/<UTC date>.jsonl.
 type ForgejoSizeWriter struct {
-	api      forgejoRepos
+	api      forgejoFeeds
 	townRoot string
 	now      func() time.Time
 	// openAppend opens the day's file for appending. It is a field so a test
@@ -67,7 +59,7 @@ type ForgejoSizeWriter struct {
 }
 
 // NewForgejoSizeWriter builds a writer over api for the town at townRoot.
-func NewForgejoSizeWriter(api forgejoRepos, townRoot string) *ForgejoSizeWriter {
+func NewForgejoSizeWriter(api forgejoFeeds, townRoot string) *ForgejoSizeWriter {
 	return &ForgejoSizeWriter{api: api, townRoot: townRoot, now: time.Now, openAppend: openAppendFile}
 }
 
@@ -83,8 +75,10 @@ func ForgejoSizesDir(townRoot string) string {
 }
 
 // Write reads the viewer's repositories and appends one line per repository to
-// the day's file. A failed read, mapping or write returns an error and leaves
-// the file as it was: a partial report would be read as a complete one.
+// the day's file. A failed read or mapping returns an error before anything is
+// written. A failed write or close returns an error, and the lines already
+// appended stay in the day's file: the caller must treat any error as a failed
+// run and rerun it, not as a night whose report is complete.
 func (w *ForgejoSizeWriter) Write(ctx context.Context) ([]ForgejoSizeRow, error) {
 	if w.townRoot == "" {
 		return nil, fmt.Errorf("forgejo sizes: no town root to write under")

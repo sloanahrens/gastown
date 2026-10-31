@@ -3,6 +3,7 @@ package forgejo
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -10,9 +11,16 @@ import (
 	"time"
 )
 
-// userReposLimit bounds the viewer's repository list. The dashboard reads a
-// handful of repos, so one page is always the whole list.
+// userReposLimit bounds one page of the viewer's repository list. The list is
+// read page by page to its end: a report built from the first page alone would
+// silently leave every later repository out (gt-nlrpk).
 const userReposLimit = 100
+
+// userReposMaxPages bounds the paging loop. A server that serves a full page
+// forever fails the read instead of spinning; 100 pages reaches past any
+// town's repository count, and a server that served more is a fault to report,
+// not a list to truncate.
+const userReposMaxPages = 100
 
 // Repository is the subset of a Forgejo repository the client reads: the
 // owner/name an activity feed addresses the repo by, the size the nightly
@@ -72,15 +80,26 @@ func (a Activity) HeadMessage() (string, bool) {
 	return subject, subject != ""
 }
 
-// ListUserRepos returns the repositories the token's user can see.
+// ListUserRepos returns every repository the token's user can see, read page
+// by page. It stops when a page comes back empty rather than when it is short:
+// a server caps a page at its own maximum, so a short page may still have more
+// behind it, while an empty one cannot (gt-nlrpk).
 func (c *Client) ListUserRepos(ctx context.Context) ([]Repository, error) {
-	q := url.Values{}
-	q.Set("limit", strconv.Itoa(userReposLimit))
-	var out []Repository
-	if err := c.call(ctx, http.MethodGet, "/user/repos", q, nil, &out); err != nil {
-		return nil, err
+	out := make([]Repository, 0, userReposLimit)
+	for page := 1; page <= userReposMaxPages; page++ {
+		q := url.Values{}
+		q.Set("limit", strconv.Itoa(userReposLimit))
+		q.Set("page", strconv.Itoa(page))
+		var rows []Repository
+		if err := c.call(ctx, http.MethodGet, "/user/repos", q, nil, &rows); err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			return out, nil
+		}
+		out = append(out, rows...)
 	}
-	return out, nil
+	return nil, fmt.Errorf("still full after %d pages", userReposMaxPages)
 }
 
 // ListRepoActivities returns a repository's recent activities, newest first.

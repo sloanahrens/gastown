@@ -3,6 +3,7 @@ package forgejo
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -12,13 +13,74 @@ import (
 
 func TestListUserRepos(t *testing.T) {
 	t.Parallel()
-	rec := &recorder{body: golden(t, "user_repos.json")}
-	repos, err := newTestClient(t, rec).ListUserRepos(context.Background())
+	var paths, pages, limits []string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		pages = append(pages, r.URL.Query().Get("page"))
+		limits = append(limits, r.URL.Query().Get("limit"))
+		if r.URL.Query().Get("page") == "1" {
+			_, _ = w.Write(golden(t, "user_repos.json"))
+			return
+		}
+		_, _ = w.Write([]byte("[]"))
+	})
+	repos, err := newTestClient(t, h).ListUserRepos(context.Background())
 	require.NoError(t, err)
 
-	assert.Equal(t, "/api/v1/user/repos", rec.req.URL.Path)
-	assert.Equal(t, "100", rec.req.URL.Query().Get("limit"))
+	assert.Equal(t, []string{"/api/v1/user/repos", "/api/v1/user/repos"}, paths)
+	assert.Equal(t, []string{"1", "2"}, pages)
+	assert.Equal(t, []string{"100", "100"}, limits)
 	assert.Equal(t, []Repository{{FullName: "sloan/beads"}, {FullName: "sloan/mango"}}, repos)
+}
+
+// A viewer with more repositories than one page holds is read to its end: a
+// report built from the first page alone would leave every later repository
+// out (gt-nlrpk).
+func TestListUserReposReadsEveryPage(t *testing.T) {
+	t.Parallel()
+	full := make([]Repository, userReposLimit)
+	for i := range full {
+		full[i] = Repository{FullName: fmt.Sprintf("sloan/repo-%d", i)}
+	}
+	var pages []string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		switch page {
+		case "1":
+			require.NoError(t, json.NewEncoder(w).Encode(full))
+		case "2":
+			require.NoError(t, json.NewEncoder(w).Encode([]Repository{{FullName: "sloan/last"}}))
+		default:
+			_, _ = w.Write([]byte("[]"))
+		}
+	})
+	repos, err := newTestClient(t, h).ListUserRepos(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"1", "2", "3"}, pages, "a short page is not the end: the empty page is")
+	require.Len(t, repos, userReposLimit+1)
+	assert.Equal(t, "sloan/repo-0", repos[0].FullName)
+	assert.Equal(t, "sloan/last", repos[userReposLimit].FullName)
+}
+
+// A server that never runs out of repositories is a fault the read reports,
+// not a list it truncates at the guard without saying so (gt-nlrpk).
+func TestListUserReposEndlessPagesFails(t *testing.T) {
+	t.Parallel()
+	full := make([]Repository, userReposLimit)
+	for i := range full {
+		full[i] = Repository{FullName: fmt.Sprintf("sloan/repo-%d", i)}
+	}
+	calls := 0
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		require.NoError(t, json.NewEncoder(w).Encode(full))
+	})
+	_, err := newTestClient(t, h).ListUserRepos(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "still full")
+	assert.Equal(t, userReposMaxPages, calls)
 }
 
 func TestListRepoActivities(t *testing.T) {
