@@ -417,18 +417,19 @@ func (l *lockWatchingLister) add(name, agent string) {
 	l.fakeLister.created[name] = poolTestNow.Add(-time.Hour)
 }
 
-// listedUnderLock reports the listing the pool counted from: it must exist and
-// must have happened with the lock held. A fake lister that was never called
-// means the count came from somewhere else, which is a failure of its own.
+// listedUnderLock reports the listing the pool counted from: the count is taken
+// under the seat-decision lock (gt-8o35b), so the last listing must have
+// happened while it was held. A fake lister that was never called means the
+// count came from somewhere else, which is a failure of its own. An earlier
+// listing is the seat picture a live sling reads before the lock (gt-crkhv):
+// that read is not the count, and it is what keeps bd out of the lock.
 func (l *lockWatchingLister) listedUnderLock(t *testing.T) {
 	t.Helper()
 	if len(l.under) == 0 {
 		t.Fatal("the pool never listed the town's sessions")
 	}
-	for i, under := range l.under {
-		if !under {
-			t.Errorf("session listing %d of %d happened outside the seat-decision lock", i+1, len(l.under))
-		}
+	if !l.under[len(l.under)-1] {
+		t.Errorf("the listing the pool counted from, %d of %d, happened outside the seat-decision lock", len(l.under), len(l.under))
 	}
 }
 
@@ -699,31 +700,77 @@ func TestPoolListsUnderTheDecisionLockWhenTheListerFails(t *testing.T) {
 
 // ── The occupancy read, outside the decision lock (gt-crkhv) ────────────────
 
-// overlappingSeatReads hands out n seat-state reads, one per decision, and each
-// decision's read blocks on its first call until every one of them has made
-// that call. A decision that takes the state under the seat-decision lock never
-// makes its first call while another decision holds the lock blocked here, so
-// the barrier stays shut and the decisions do not finish — the package timeout
-// is what reports that. A decision that reads the state before the lock makes
-// the call alongside the others, and they go on together.
-func overlappingSeatReads(n int) func() polecatDispositionFunc {
-	var started sync.WaitGroup
-	started.Add(n)
-	all := make(chan struct{})
-	go func() {
-		started.Wait()
-		close(all)
-	}()
-	return func() polecatDispositionFunc {
+// seatReadGrace bounds a decision's wait for the other decisions' seat reads to
+// start. A decision whose read is serialized behind another's — the shape these
+// tests catch — spends it and records the miss; a decision that reads alongside
+// the others waits for nothing.
+const seatReadGrace = 2 * time.Second
+
+// seatDecisionGrace bounds the helper's wait for the decisions to finish, so a
+// decision that deadlocks fails with its own name rather than as the package
+// timeout.
+const seatDecisionGrace = 10 * time.Second
+
+// seatReadBarrier holds each decision's seat-state read until every decision has
+// started one, so the reads can only finish by overlapping. The read that
+// completes the set opens the barrier — no helper goroutine, so nothing is left
+// waiting when a decision never arrives — and a read still waiting after
+// seatReadGrace records the miss and goes on, which fails the test on that
+// record rather than by hanging.
+type seatReadBarrier struct {
+	want  int
+	grace time.Duration
+
+	mu      sync.Mutex
+	arrived int
+	open    chan struct{}
+	missed  int
+}
+
+func newSeatReadBarrier(want int) *seatReadBarrier {
+	return &seatReadBarrier{want: want, grace: seatReadGrace, open: make(chan struct{})}
+}
+
+// arrive records one decision's read and waits for the rest, bounded.
+func (b *seatReadBarrier) arrive() {
+	b.mu.Lock()
+	b.arrived++
+	if b.arrived == b.want {
+		close(b.open)
+	}
+	open := b.open
+	b.mu.Unlock()
+	timer := time.NewTimer(b.grace)
+	defer timer.Stop()
+	select {
+	case <-open:
+	case <-timer.C:
+		b.mu.Lock()
+		b.missed++
+		b.mu.Unlock()
+	}
+}
+
+// misses is how many reads waited for a peer the seat-decision lock was holding:
+// each is a decision that read the seat state with the lock held.
+func (b *seatReadBarrier) misses() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.missed
+}
+
+// reads hands out one seat-state read per decision, each blocked on its first
+// call until every decision has made one.
+func (b *seatReadBarrier) reads() []polecatDispositionFunc {
+	out := make([]polecatDispositionFunc, b.want)
+	for i := range out {
 		var once sync.Once
-		return func(string, string) (poolSeatState, error) {
-			once.Do(func() {
-				started.Done()
-				<-all
-			})
+		out[i] = func(string, string) (poolSeatState, error) {
+			once.Do(b.arrive)
 			return poolSeatState{}, nil
 		}
 	}
+	return out
 }
 
 // seatDecision is what one concurrent `gt sling` decided.
@@ -733,32 +780,42 @@ type seatDecision struct {
 	err    error
 }
 
-// concurrentSeatDecisions runs two live slings against one town, each its own
-// process (own claim store, own router), and returns what each decided. The two
-// read the town's seat state through overlappingSeatReads, so both are inside
-// their first read before either can decide.
-func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool, reads func() polecatDispositionFunc) []seatDecision {
+// concurrentSeatDecisions runs one live sling per barrier read against one town,
+// each its own process (own claim store, own router), and returns what each
+// decided. Every decision reads the town's seat state through the barrier, so
+// the reads overlap — or the barrier records that they could not, and the test
+// fails on that.
+func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool, barrier *seatReadBarrier) []seatDecision {
 	t.Helper()
 	db := beadsfake.New()
 	lister := &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
 	now := func() time.Time { return poolTestNow }
-	out := make([]seatDecision, 2)
-	var wg sync.WaitGroup
-	wg.Add(len(out))
-	for i := range out {
+	reads := barrier.reads()
+	out := make([]seatDecision, len(reads))
+	finished := make(chan struct{}, len(reads))
+	for i := range reads {
 		go func(i int) {
-			defer wg.Done()
+			defer func() { finished <- struct{}{} }()
 			r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return db })
 			r.pool = func() *config.PolecatPool { return pool }
 			r.sessions = func() sessionLister { return lister }
-			r.disposition = reads()
+			r.disposition = reads[i]
 			r.now = now
 			out[i].agent, out[i].reason, out[i].err = r.route("", true)
 		}(i)
 	}
-	// A decision that keeps the read under its lock never gets past this wait:
-	// the other one holds the lock blocked in the read, so neither finishes.
-	wg.Wait()
+	deadline := time.NewTimer(seatDecisionGrace)
+	defer deadline.Stop()
+	for range reads {
+		select {
+		case <-finished:
+		case <-deadline.C:
+			t.Fatalf("the decisions did not finish within %s: a decision is holding the seat-decision lock across its seat read", seatDecisionGrace)
+		}
+	}
+	if missed := barrier.misses(); missed != 0 {
+		t.Fatalf("%d of %d decisions read the seat state only after another had: the read is inside the seat-decision lock, which serializes concurrent slings (gt-crkhv)", missed, len(reads))
+	}
 	return out
 }
 
@@ -779,22 +836,19 @@ func townClaims(t *testing.T, town string) []poolSeatClaim {
 // slings behind each other: the ones that timed out routed unreserved, with no
 // claim, and could overfill the cap (gt-u0zq0).
 //
-// Both reads here block until the other has started. Read under the lock, the
-// first decision blocks holding it and the second's read never starts; read
-// before it, both start and both finish, each taking its own claim.
+// Both reads here wait for the other to start. Read under the lock, the first
+// decision blocks holding it and the second's read cannot start; read before it,
+// both start and both finish, each taking its own claim.
 func TestSeatDecisionOverlapsOccupancyReads(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "p01")
 
-	got := concurrentSeatDecisions(t, town, cappedPool(2), overlappingSeatReads(2))
+	got := concurrentSeatDecisions(t, town, cappedPool(2), newSeatReadBarrier(2))
 	for i, d := range got {
 		if d.err != nil || d.agent != claimAgent {
 			t.Fatalf("decision %d: want the seat, got %q (%s) %v", i+1, d.agent, d.reason, d.err)
-		}
-		if strings.Contains(d.reason, "seat not reserved") {
-			t.Errorf("decision %d decided without the lock: %q", i+1, d.reason)
 		}
 	}
 	if claims := townClaims(t, town); len(claims) != 2 {
@@ -806,29 +860,153 @@ func TestSeatDecisionOverlapsOccupancyReads(t *testing.T) {
 	}
 }
 
-// A town whose pool names no seat has no seat state to read: the preload is the
-// count's own read moved earlier, so it walks where the count walks — nowhere,
-// here — and a sling the pool does not answer spends no bd read on it
-// (gt-crkhv).
-func TestPreloadSeatStateReadsNothingForAPoolWithoutSeats(t *testing.T) {
+// lockWatchingSeatReader serves the seat picture's bd reads and records, for
+// each, whether the seat-decision lock was held. Those two reads — the seats'
+// own state and the landing seats' work beads — are the only bd the count makes,
+// so where they fall is where the lock's bd reads fall.
+type lockWatchingSeatReader struct {
+	mu    sync.Mutex
+	held  bool
+	reads int
+	under int
+}
+
+func (p *lockWatchingSeatReader) take() {
+	p.mu.Lock()
+	p.held = true
+	p.mu.Unlock()
+}
+
+func (p *lockWatchingSeatReader) release() {
+	p.mu.Lock()
+	p.held = false
+	p.mu.Unlock()
+}
+
+func (p *lockWatchingSeatReader) note() {
+	p.mu.Lock()
+	p.reads++
+	if p.held {
+		p.under++
+	}
+	p.mu.Unlock()
+}
+
+func (p *lockWatchingSeatReader) counts() (reads, under int, held bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reads, p.under, p.held
+}
+
+// A live sling's seat-decision lock holds no bd read (gt-crkhv): the seats'
+// state and the landing seats' beads are read before the lock, and the count
+// under it lists the town's sessions and carries that picture. A seat mid-landing
+// is the common case on a busy town, so the landing beads' read is on the
+// critical path of most decisions unless it happens outside the lock.
+func TestSeatDecisionHoldsTheLockAcrossNoBdRead(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "p01")
+	// A seat whose submission is waiting to land: the count has to read its bead.
+	writeLandingSeat(t, town, "gastown", "p02", "gt-landing")
 
-	reads := 0
+	reader := &lockWatchingSeatReader{}
 	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return beadsfake.New() })
-	r.pool = func() *config.PolecatPool { return &config.PolecatPool{} }
+	r.pool = func() *config.PolecatPool { return cappedPool(2) }
 	r.sessions = func() sessionLister { return &fakeLister{sessions: map[string]map[string]string{}} }
 	r.disposition = func(string, string) (poolSeatState, error) {
-		reads++
+		reader.note()
 		return poolSeatState{}, nil
 	}
-	if _, _, err := r.route("", true); err != nil {
-		t.Fatalf("an empty pool decides nothing rather than failing: %v", err)
+	r.work = func(ids []string) (map[string]*beads.Issue, error) {
+		reader.note()
+		out := make(map[string]*beads.Issue, len(ids))
+		for _, id := range ids {
+			out[id] = &beads.Issue{ID: id, Status: string(beads.StatusOpen), Labels: []string{land.LabelReadyToLand}}
+		}
+		return out, nil
 	}
-	if reads != 0 {
-		t.Fatalf("a pool with no seat read %d seat states, want none", reads)
+	r.now = func() time.Time { return poolTestNow }
+	// The decision's lock, watched rather than taken.
+	r.seats.lock = func() (func(), error) {
+		reader.take()
+		return reader.release, nil
+	}
+
+	agent, reason, err := r.route("", true)
+	if err != nil || agent != claimAgent {
+		t.Fatalf("the pool has room for one more: got %q (%s) %v", agent, reason, err)
+	}
+	if !strings.Contains(reason, "seat 2/2") {
+		t.Errorf("the seat waiting to land still holds one, so the sling takes seat 2 of 2: %q", reason)
+	}
+	reads, under, held := reader.counts()
+	if reads == 0 {
+		t.Fatal("the seat picture was never read")
+	}
+	if under != 0 {
+		t.Errorf("%d of %d seat reads happened with the seat-decision lock held", under, reads)
+	}
+	if held {
+		t.Error("the seat-decision lock is still held after the route was decided")
+	}
+}
+
+// A seat the picture read free is released only for the session it read. A
+// session that took the seat since is a new occupant, and by the time the count
+// lists it the claim it stood on has been dropped — the gt-8o35b window one
+// layer out, where a stale release would find the seat in neither the picture
+// nor the claims (gt-crkhv). The other case is the release the pool depends on:
+// the same session, present when the picture was read, is the done-with-an-open-
+// MR seat that is not spending one (gt-2nft).
+func TestSeatDecisionCountsTheSessionTheSeatPictureDidNotRead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		created time.Time
+		refused bool
+	}{
+		{"the session the picture read is released", poolTestNow.Add(-time.Hour), false},
+		{"a session that appeared since holds the seat", poolTestNow.Add(time.Minute), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			writeTownPolecatDir(t, town, "gastown", "p01")
+
+			lister := &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
+			r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return beadsfake.New() })
+			r.pool = func() *config.PolecatPool { return cappedPool(1) }
+			r.sessions = func() sessionLister { return lister }
+			// The seat's own state says done with an open MR, so the picture
+			// releases it.
+			r.disposition = func(string, string) (poolSeatState, error) {
+				return poolSeatState{Disposition: polecat.WorkstateDisposition{ReuseStatus: "idle-pr-open"}}, nil
+			}
+			r.now = func() time.Time { return poolTestNow }
+			// The session takes the seat as this decision reaches the lock, after
+			// the picture was read.
+			lock := r.seats.lock
+			r.seats.lock = func() (func(), error) {
+				lister.sessions["gt-session"] = map[string]string{"GT_ROLE": "gastown/polecats/p01", "GT_AGENT": claimAgent}
+				lister.created["gt-session"] = c.created
+				return lock()
+			}
+
+			agent, reason, err := r.route("", true)
+			if c.refused {
+				if !errors.Is(err, errPoolBackpressure) || !strings.Contains(reason, "pool: full (1/1)") {
+					t.Fatalf("the session that appeared after the picture read holds the seat: got %q (%s) %v", agent, reason, err)
+				}
+				return
+			}
+			if err != nil || agent != claimAgent || !strings.Contains(reason, "seat 1/1") {
+				t.Fatalf("the session the picture read is released, so the seat is free: got %q (%s) %v", agent, reason, err)
+			}
+		})
 	}
 }
 
@@ -842,7 +1020,7 @@ func TestSeatDecisionStillAtomicCountAndClaim(t *testing.T) {
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "p01")
 
-	got := concurrentSeatDecisions(t, town, cappedPool(1), overlappingSeatReads(2))
+	got := concurrentSeatDecisions(t, town, cappedPool(1), newSeatReadBarrier(2))
 	admitted, refused := 0, 0
 	for i, d := range got {
 		var bp *poolBackpressureError
