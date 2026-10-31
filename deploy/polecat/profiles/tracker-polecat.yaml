@@ -1,0 +1,73 @@
+# Provider profile: the tracker seat token for a polecat sandbox.
+#
+# trackerd runs on the Mac (127.0.0.1:7433) and is reached from Docker Desktop
+# sandboxes as host.docker.internal:7433 over plain HTTP. The sandbox sees only a
+# placeholder in TRACKER_TOKEN; the tracker client sends it as
+#   Authorization: Bearer <placeholder>
+# (tracker/client/client.go) and the supervisor substitutes the real token on the
+# routes below and nowhere else.
+#
+# The routes are the seat's own: issue reads and writes, comments, dependencies,
+# the board reads, claim, release, transfer, batch, events and whoami
+# (docs/research/tracker/K1b-seat-token-as-provider-placeholder.md, question 3).
+# The admin routes, and the four routes no seat has been shown to call, are left
+# out so a seat token that was ever minted with admin scope still could not reach
+# them from a sandbox.
+#
+# Import:  openshell profile lint -f deploy/polecat/profiles/tracker-polecat.yaml
+#          openshell profile import -f deploy/polecat/profiles/tracker-polecat.yaml --global
+# Provider: TRACKER_TOKEN=<token> openshell provider create --name tracker-polecat \
+#             --type tracker-polecat --credential TRACKER_TOKEN
+
+id: tracker-polecat
+display_name: Tracker (polecat seat)
+description: Issue reads and writes on the town's tracker as the seat's own actor
+category: issue_tracking
+credentials:
+  - name: seat_token
+    description: Tracker token of the seat whose sandbox carries this provider
+    env_vars: [TRACKER_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [seat_token]
+endpoints:
+  - host: host.docker.internal
+    port: 7433
+    protocol: rest
+    enforcement: enforce
+    rules:
+      # Reads. A single * is one path segment, as in the forgejo profile's
+      # /*/*.git/info/refs; the client escapes a slash in an id, so one segment
+      # holds any id (tracker/client/issues.go).
+      - allow: { method: GET, path: "/v1/issues/*" }
+      - allow: { method: POST, path: "/v1/issues:show-many" }
+      - allow: { method: POST, path: "/v1/issues:list" }
+      - allow: { method: POST, path: "/v1/issues:count" }
+      - allow: { method: POST, path: "/v1/assigned" }
+      - allow: { method: POST, path: "/v1/ready" }
+      - allow: { method: POST, path: "/v1/blocked" }
+      - allow: { method: POST, path: "/v1/issues:children-of" }
+      - allow: { method: GET, path: "/v1/issues/*/comments" }
+      - allow: { method: GET, path: "/v1/issues/*/dependencies" }
+      # The client asks for events from a cursor as ?after=N, so the rule has to
+      # cover the query the request carries.
+      - allow: { method: GET, path: "/v1/events*" }
+      - allow: { method: GET, path: "/v1/whoami" }
+      # Writes.
+      - allow: { method: POST, path: "/v1/issues" }
+      - allow: { method: PATCH, path: "/v1/issues/*" }
+      - allow: { method: POST, path: "/v1/issues:close" }
+      - allow: { method: POST, path: "/v1/issues:delete" }
+      - allow: { method: POST, path: "/v1/graphs" }
+      - allow: { method: POST, path: "/v1/issues/*/claim" }
+      - allow: { method: POST, path: "/v1/issues/*/release" }
+      - allow: { method: POST, path: "/v1/issues/*/transfer" }
+      - allow: { method: POST, path: "/v1/batch" }
+      - allow: { method: POST, path: "/v1/issues/*/comments" }
+      - allow: { method: POST, path: "/v1/issues/*/dependencies" }
+      - allow: { method: DELETE, path: "/v1/issues/*/dependencies/*" }
+binaries:
+  - /usr/local/bin/bd
+  - /usr/local/bin/gt
