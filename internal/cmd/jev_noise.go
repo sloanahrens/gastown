@@ -103,7 +103,7 @@ func jevNoiseWithFlags(w io.Writer, townRoot, name, since string, cut float64, a
 	}
 	if !logs.RepeatLogFound {
 		if asJSON {
-			return encodeNoise(w, noise.Report{Battery: name, Cut: cut, Rows: []noise.Row{}})
+			return encodeNoise(w, jevNoiseOutput{Report: noise.Report{Battery: name, Cut: cut, Rows: []noise.Row{}}})
 		}
 		_, err := fmt.Fprintf(w, "no repeat log at %s: no sampled group has been asked again yet\n", battery.ReaskPath(logPath))
 		return err
@@ -114,14 +114,22 @@ func jevNoiseWithFlags(w io.Writer, townRoot, name, since string, cut float64, a
 	}
 	rep.Battery = name
 	if asJSON {
-		return encodeNoise(w, rep)
+		return encodeNoise(w, jevNoiseOutput{Report: rep, RepeatLogFound: true})
 	}
 	return noise.WriteText(w, rep)
 }
 
-// encodeNoise prints the report as indented JSON.
-func encodeNoise(w io.Writer, rep noise.Report) error {
+// jevNoiseOutput is the JSON the command prints. RepeatLogFound tells a town with
+// no repeat log apart from one whose repeats measured no items, since both have
+// empty rows.
+type jevNoiseOutput struct {
+	noise.Report
+	RepeatLogFound bool `json:"repeat_log_found"`
+}
+
+// encodeNoise prints the output as indented JSON.
+func encodeNoise(w io.Writer, out jevNoiseOutput) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(rep)
+	return enc.Encode(out)
 }
