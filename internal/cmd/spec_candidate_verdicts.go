@@ -27,13 +27,17 @@ import (
 // remembered under.
 //
 // The record also keeps the candidate's blocking edges (the blocker's id and
-// the edge's type, which admission reads) and whether it is a container. A
-// blocker that closes or REOPENS does not move the dependent's row, so the
-// tick reads each remembered blocker's status again every tick, in one batch
-// per rig, and reads nothing for a candidate with no remembered edge
-// (specBoardDetails). The children of a candidate the record does not mark as
-// a container are not read at all; a container's children are read every tick,
-// because a child's change does not move its parent's row either.
+// the edge's type, which admission reads). A blocker that closes or REOPENS does
+// not move the dependent's row, so the tick reads each remembered blocker's
+// status again every tick, in one batch per rig, and reads nothing for a
+// candidate with no remembered edge (specBoardDetails).
+//
+// The children are never remembered. A child's change does not move its
+// parent's row, and a child added to a parent does not move the parent's row
+// either: the parent-child edge lives on the child, so a parent that had no
+// children keeps the row it had. A childless verdict kept in the record would
+// therefore hide a child added later, so every candidate the record does not
+// refuse has its children read each tick, in one grouped view per rig.
 //
 // A record written before the edges were kept has no edges field, and it is
 // not served: the tick decides that candidate fresh, as if it were unremembered.
@@ -64,14 +68,11 @@ type specRememberedBlocker struct {
 }
 
 // specCandidateEdges is what the record keeps of a candidate's edges: the
-// blocking edges its details read named, and whether it had children when they
-// were last read.
+// blocking edges its details read named. A candidate with none keeps an empty
+// edges record, which is how a record written after this change is told from
+// one written before it.
 type specCandidateEdges struct {
 	Blockers []specRememberedBlocker `json:"blockers,omitempty"`
-	// Parent is whether the candidate had children. It is set after the children
-	// read of the tick that decided the row, and a record whose children could
-	// not be read is forgotten rather than kept as childless.
-	Parent bool `json:"parent,omitempty"`
 }
 
 // specCandidateVerdict is one candidate's shape and label verdict, as the tick
@@ -169,15 +170,13 @@ func (v *specCandidateVerdicts) refusal(c specCandidate) (specCandidateVerdict, 
 	return entry, true
 }
 
-// childrenWanted reports whether c's children are read this tick: a candidate
-// the memory does not hold, or one it holds as a container. A refused candidate
-// never reaches the container hold, so it is not read either.
+// childrenWanted reports whether c's children are read this tick. Every
+// candidate but a refused one is read: a child's change, or a child added to a
+// childless parent, does not move the parent's row (see the file comment). A
+// refused candidate never reaches the container hold, so it is not read.
 func (v *specCandidateVerdicts) childrenWanted(c specCandidate) bool {
-	entry, ok := v.lookUp(c)
-	if !ok {
-		return true
-	}
-	return entry.Eligible && entry.Edges.Parent
+	_, refused := v.refusal(c)
+	return !refused
 }
 
 // record keeps the verdict the tick reached for c, at the row it decided from,
@@ -197,27 +196,9 @@ func (v *specCandidateVerdicts) record(c specCandidate, verdict specCandidateVer
 	v.memory.mu.Unlock()
 }
 
-// setParent keeps whether c has children, once they were read at the row the
-// record holds. A record the row has moved past is left alone.
-func (v *specCandidateVerdicts) setParent(c specCandidate, parent bool) {
-	if v == nil || v.memory == nil || c.UpdatedAt == "" {
-		return
-	}
-	v.memory.mu.Lock()
-	defer v.memory.mu.Unlock()
-	entry, ok := v.memory.verdicts[c.Spec.ID]
-	if !ok || entry.UpdatedAt != c.UpdatedAt || entry.DepCount != c.DepCount || entry.Edges == nil {
-		return
-	}
-	if entry.Edges.Parent != parent {
-		entry.Edges.Parent = parent
-		v.memory.dirty = true
-	}
-}
-
 // forget drops c's record, so the next tick decides c fresh. It is the answer
-// to a read that could not say what the record would have served: a failed
-// children read, or a blocker whose status could not be read.
+// to a blocker whose status could not be read: the record cannot say what the
+// edges are now.
 func (v *specCandidateVerdicts) forget(c specCandidate) {
 	if v == nil || v.memory == nil {
 		return

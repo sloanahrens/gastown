@@ -572,10 +572,10 @@ func specChildrenReader(stores slingStores) func(dir string, ids []string) (map[
 // board read: one bd view per rig the candidates live in, answered per bead,
 // with a per-bead fallback when the grouped read fails so one unreadable bead
 // does not cost the whole rig its children (gt-km9jt). A candidate the verdict
-// memory holds as childless is not read at all (see childrenWanted). The
-// children of every other candidate are read fresh each tick: a child's change
-// does not move its parent's row, so a remembered child set would hide a closure
-// from the container hold.
+// memory refuses is not read at all (see childrenWanted). Every other candidate
+// is read fresh each tick: a child's change does not move its parent's row, and
+// a child added to a childless parent does not move the parent's row either, so
+// no remembered child set could be trusted to hold the container hold.
 //
 // The default read keeps the childless parents a resolved answer names (see
 // specChildrenRead), so only an id with no key is read alone. Almost every
@@ -1736,17 +1736,13 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// incoming blocks edges there, while the parent-child edge is a
 		// separate type, so the count is zero for a parent whose only children
 		// are parent-child ones (gt-603wu). The children view is the predicate,
-		// as it is on the peer path; a candidate the memory holds as childless
-		// is not read (specCandidateChildren).
+		// as it is on the peer path, and it is read every tick: the memory
+		// keeps no children (specCandidateChildren).
 		children, err := env.Children(id)
 		if err != nil {
-			// The record goes with the read that failed: a childless verdict
-			// served from it would sling a container the read could not clear.
-			env.Verdicts.forget(c)
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot read children: %v", id, err))
 			continue
 		}
-		env.Verdicts.setParent(c, len(children) > 0)
 		full.Children = children
 		if why := specdispatch.OpenChildHold(full); why != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
@@ -2701,9 +2697,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			return showSpecWith(reads, id, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 		},
 		ShowFresh: func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
-		// The children of every container candidate in one bd view per rig,
-		// read fresh each tick: a child closed without moving its parent's row
-		// is still seen by the next tick's container hold (gt-km9jt).
+		// The children of every candidate in one bd view per rig, read fresh
+		// each tick: a child closed or added without moving its parent's row is
+		// still seen by the next tick's container hold (gt-km9jt, gt-qcl61).
 		Children: func(id string) ([]specdispatch.Child, error) {
 			if children == nil {
 				reads.call()

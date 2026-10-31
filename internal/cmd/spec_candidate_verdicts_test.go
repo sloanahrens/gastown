@@ -199,10 +199,12 @@ func (v *verdictTick) childRead(_ string, ids []string) (map[string][]*beads.Iss
 }
 
 // A tick over eighty candidates costs one details batch and one grouped
-// children view. A second tick over the unchanged rows reads nothing for them:
-// no candidate has a blocking edge or a child, so the memory serves each verdict
-// and no edge status or children read is needed (gt-km9jt).
-func TestSpecCandidateVerdictsSecondTickReadsNoEdgesOrChildren(t *testing.T) {
+// children view. A second tick over the unchanged rows reads no edge at all,
+// since no candidate has a blocking edge, and still reads the children of every
+// candidate in one grouped view: a child added to a childless parent does not
+// move the parent's row, so the memory cannot say the parent is still childless
+// (gt-km9jt, gt-qcl61).
+func TestSpecCandidateVerdictsSecondTickReadsNoEdgesButChildren(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, specCandidateFixtureSize)
 
@@ -227,11 +229,11 @@ func TestSpecCandidateVerdictsSecondTickReadsNoEdgesOrChildren(t *testing.T) {
 	if len(v.store.multis) != 1 {
 		t.Errorf("the second tick's details batches = %v, want none: no candidate has an edge to read", v.store.multis)
 	}
-	if v.groups != 1 {
-		t.Errorf("the second tick made %d children reads, want none: no candidate is a container", v.groups-1)
+	if v.groups != 2 || len(v.kidIDs[1]) != specCandidateFixtureSize {
+		t.Errorf("the second tick's children reads = %d calls, want one grouped view over the fixture", v.groups-1)
 	}
-	if got := v.reads.Calls(); got != 0 {
-		t.Errorf("the second tick counted %d bd reads, want none", got)
+	if got := v.reads.Calls(); got != 1 {
+		t.Errorf("the second tick counted %d bd reads, want its grouped children view only", got)
 	}
 	// The phase costs at most half the bd reads a tick made before this change,
 	// over the same fixture (gt-km9jt).
@@ -770,7 +772,7 @@ func TestSpecCandidateVerdictsReadAnEdgelessRecordAsUnremembered(t *testing.T) {
 // A container whose children read fails is not remembered as childless: the
 // record goes with the read, and the next tick reads the children and holds the
 // container (gt-km9jt).
-func TestSpecCandidateChildrenAFailedReadIsNotRememberedAsChildless(t *testing.T) {
+func TestSpecCandidateChildrenAFailedReadIsReadAgainNextTick(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, 1)
 	const id = "gt-cand-00"
@@ -789,10 +791,11 @@ func TestSpecCandidateChildrenAFailedReadIsNotRememberedAsChildless(t *testing.T
 	}
 }
 
-// Only a container's children are read once the memory holds the tick: the
-// grouped read names the container alone, and the container is still held while
-// its child is open (gt-km9jt).
-func TestSpecCandidateVerdictsReadOnlyAContainersChildrenAfterTheFirstTick(t *testing.T) {
+// A remembered eligible candidate's children are read every tick, not only a
+// container's: the memory keeps no childless verdict, so the grouped read names
+// all three candidates on the second tick too, and the container is still held
+// while its child is open (gt-qcl61).
+func TestSpecCandidateVerdictsReadEveryCandidatesChildrenEachTick(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, 3)
 	const parent = "gt-cand-01"
@@ -803,11 +806,49 @@ func TestSpecCandidateVerdictsReadOnlyAContainersChildrenAfterTheFirstTick(t *te
 	}
 
 	r := runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
-	if len(v.kidIDs) != 2 || strings.Join(v.kidIDs[1], ",") != parent {
-		t.Errorf("the second tick's children reads = %v, want one over the container alone", v.kidIDs)
+	if len(v.kidIDs) != 2 || len(v.kidIDs[1]) != 3 {
+		t.Errorf("the second tick's children reads = %v, want one over all three candidates", v.kidIDs)
 	}
 	if !strings.Contains(skipLines(r), parent+": "+specdispatch.SkipHeld) {
 		t.Errorf("the second tick skipped %q, want the container held while its child is open", skipLines(r))
+	}
+}
+
+// A child added to a candidate the memory remembers as childless is seen at the
+// next tick: the parent's row does not move when a child is added, so only a
+// read of its children can hold it (gt-qcl61).
+func TestSpecCandidateChildrenAddedToARememberedChildlessParentIsHeld(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	const id = "gt-cand-00"
+	if r := runSpecDispatchCycle(v.env); len(r.Skipped) != 1 || strings.Contains(r.Skipped[0].Line, specdispatch.SkipContainer) {
+		t.Fatalf("first tick skipped %+v, want the childless candidate held for lack of a seat only", r.Skipped)
+	}
+
+	v.kids[id] = []*beads.Issue{{ID: id + ".1", Status: "open"}}
+	r := runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipContainer) {
+		t.Errorf("the tick after a child was added skipped %+v, want the container held", r.Skipped)
+	}
+}
+
+// A container held by its open child, whose blocker then closes, is held as a
+// container and not dispatched: the blocked tick decides nothing to remember,
+// so the freed tick reads the children in full (gt-qcl61).
+func TestSpecCandidateBlockedContainerIsHeldOnceItsBlockerCloses(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	const id = "gt-cand-00"
+	v.kids[id] = []*beads.Issue{{ID: id + ".1", Status: "open"}}
+	v.setBlocker(t, id, "gt-blocker", string(beads.StatusOpen))
+	if r := runSpecDispatchCycle(v.env); len(r.Skipped) != 1 || strings.Contains(r.Skipped[0].Line, specdispatch.SkipContainer) {
+		t.Fatalf("first tick skipped %+v, want the blocked candidate held by its blocker", r.Skipped)
+	}
+
+	v.setBlockerStatus("gt-blocker", string(beads.StatusClosed))
+	r := runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipContainer) {
+		t.Errorf("the tick after the blocker closed skipped %+v, want the container held", r.Skipped)
 	}
 }
 
