@@ -265,3 +265,63 @@ func argValue(args []string, flag string) string {
 	}
 	return ""
 }
+
+// TestSeedJobSelectsAndToleratesThePool pins the placement the seed Job's pod carries: the node
+// label of the sandbox pool and the toleration that admits the pod to it (gt-5paez). Without them
+// the Job cannot schedule where its claim's storage binds, and the seed never runs.
+func TestSeedJobSelectsAndToleratesThePool(t *testing.T) {
+	t.Parallel()
+	in := seedInput()
+	in.NodeSelector = map[string]string{"gt.dev/pool": "sandbox"}
+	in.Tolerations = []Toleration{{Key: "gt.dev/pool", Operator: "Equal", Value: "sandbox", Effect: "NoSchedule"}}
+	job, err := BuildSeedJob(in)
+	if err != nil {
+		t.Fatalf("BuildSeedJob: %v", err)
+	}
+	pod := job.Spec.Template.Spec
+	if !reflect.DeepEqual(pod.NodeSelector, in.NodeSelector) {
+		t.Errorf("nodeSelector = %v, want %v", pod.NodeSelector, in.NodeSelector)
+	}
+	if !reflect.DeepEqual(pod.Tolerations, in.Tolerations) {
+		t.Errorf("tolerations = %+v, want %+v", pod.Tolerations, in.Tolerations)
+	}
+
+	// The document is what the cluster reads: a placement the encoder drops is a pod scheduled
+	// wherever the cluster likes.
+	var doc struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					NodeSelector map[string]string `json:"nodeSelector"`
+					Tolerations  []Toleration      `json:"tolerations"`
+				} `json:"spec"`
+			} `json:"template"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(job.JSON(), &doc); err != nil {
+		t.Fatalf("the document is not a Job: %v", err)
+	}
+	rendered := doc.Spec.Template.Spec
+	if !reflect.DeepEqual(rendered.NodeSelector, in.NodeSelector) {
+		t.Errorf("the document's nodeSelector = %v, want %v", rendered.NodeSelector, in.NodeSelector)
+	}
+	if !reflect.DeepEqual(rendered.Tolerations, in.Tolerations) {
+		t.Errorf("the document's tolerations = %+v, want %+v", rendered.Tolerations, in.Tolerations)
+	}
+}
+
+// TestSeedJobWithoutAPlacementRendersNone pins the other half of the same contract: a claim given
+// no pool renders no nodeSelector and no tolerations, so a plain cluster and the tests keep the
+// pod spec they had.
+func TestSeedJobWithoutAPlacementRendersNone(t *testing.T) {
+	t.Parallel()
+	job, err := BuildSeedJob(seedInput())
+	if err != nil {
+		t.Fatalf("BuildSeedJob: %v", err)
+	}
+	for _, key := range []string{`"nodeSelector"`, `"tolerations"`} {
+		if strings.Contains(string(job.JSON()), key) {
+			t.Errorf("the document carries %s, want none: the input names no placement", key)
+		}
+	}
+}

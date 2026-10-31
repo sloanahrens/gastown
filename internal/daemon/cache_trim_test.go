@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -188,6 +190,33 @@ func (f *cacheTrimFixture) applied(t *testing.T) []string {
 		applied = append(applied, doc.Kind+" "+doc.Metadata.Name)
 	}
 	return applied
+}
+
+// appliedTrimJob is the Job document the pass applied, decoded as the builder's
+// own type so a test reads the spec the cluster would.
+func (f *cacheTrimFixture) appliedTrimJob(t *testing.T) cachevol.SeedJob {
+	t.Helper()
+	for _, call := range f.cli.recorded() {
+		if !strings.HasPrefix(cacheTrimVerb(call.args), "apply -f -") {
+			continue
+		}
+		var header struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal([]byte(call.stdin), &header); err != nil {
+			t.Fatalf("an applied document is not JSON: %v (%q)", err, call.stdin)
+		}
+		if header.Kind != "Job" {
+			continue
+		}
+		var job cachevol.SeedJob
+		if err := json.Unmarshal([]byte(call.stdin), &job); err != nil {
+			t.Fatalf("the applied Job is not a Job document: %v", err)
+		}
+		return job
+	}
+	t.Fatal("the pass applied no Job")
+	return cachevol.SeedJob{}
 }
 
 // TestDiskMaintenanceAppliesTheShardsBeforeTheJob is the bead's gate: the
@@ -657,11 +686,80 @@ func TestCacheTrimClaimsPicksTheClaimsWithAManifest(t *testing.T) {
 
 	claims, errs := cacheTrimClaims(profiles)
 	want := []cacheTrimClaim{{ClaimName: cacheTrimClaimName, Image: "gastown-polecat:dev"}}
-	if !slices.Equal(claims, want) {
+	if !reflect.DeepEqual(claims, want) {
 		t.Errorf("claims = %+v, want %+v", claims, want)
 	}
 	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "gt-other-cache") {
 		t.Errorf("errs = %v, want the claim two profiles name with different images", errs)
+	}
+}
+
+// TestDiskMaintenancePlacesTheTrimJobOnTheClaimsPool pins the placement wiring
+// end to end: the node labels and tolerations of the profile that mounts the
+// claim reach the trim Job's applied pod spec, so the pod runs where the
+// claim's storage binds and not on a node that cannot mount it (gt-5paez).
+func TestDiskMaintenancePlacesTheTrimJobOnTheClaimsPool(t *testing.T) {
+	t.Parallel()
+	profile := agentconfig.SandboxProfile{
+		Driver:               agentconfig.SandboxDriverKubernetes,
+		Image:                "gastown-polecat:dev",
+		KubernetesCacheClaim: cacheTrimClaimName,
+		NodeSelector:         map[string]string{"gt.dev/pool": "sandbox"},
+		Tolerations: []agentconfig.SandboxToleration{
+			{Key: "gt.dev/pool", Operator: "Equal", Value: "sandbox", Effect: "NoSchedule"},
+		},
+	}
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	f.setProfiles(map[string]agentconfig.SandboxProfile{"polecat-k8s": profile})
+	f.d.runDiskMaintenance()
+
+	pod := f.appliedTrimJob(t).Spec.Template.Spec
+	if !maps.Equal(pod.NodeSelector, profile.NodeSelector) {
+		t.Errorf("nodeSelector = %v, want the profile's pool %v", pod.NodeSelector, profile.NodeSelector)
+	}
+	want := []cachevol.Toleration{{Key: "gt.dev/pool", Operator: "Equal", Value: "sandbox", Effect: "NoSchedule"}}
+	if !slices.Equal(pod.Tolerations, want) {
+		t.Errorf("tolerations = %+v, want the profile's %+v", pod.Tolerations, want)
+	}
+}
+
+// TestCacheTrimClaimsRefusesAClaimItsProfilesPlaceDifferently pins the other
+// ambiguity a claim can carry: two profiles that mount it on different pools
+// are refused, because the trim Job runs on one pool and picking either
+// profile's would schedule it where the other profile's storage does not bind.
+func TestCacheTrimClaimsRefusesAClaimItsProfilesPlaceDifferently(t *testing.T) {
+	t.Parallel()
+	profile := func(pool string) agentconfig.SandboxProfile {
+		return agentconfig.SandboxProfile{
+			Driver:               agentconfig.SandboxDriverKubernetes,
+			Image:                "gastown-polecat:dev",
+			KubernetesCacheClaim: cacheTrimClaimName,
+			NodeSelector:         map[string]string{"gt.dev/pool": pool},
+		}
+	}
+
+	claims, errs := cacheTrimClaims(map[string]agentconfig.SandboxProfile{
+		"k8s-a": profile("sandbox"),
+		"k8s-b": profile("core"),
+	})
+	if len(claims) != 0 {
+		t.Errorf("claims = %+v, want none: the profiles place the Job on two pools", claims)
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "k8s-a") || !strings.Contains(errs[0].Error(), "k8s-b") {
+		t.Errorf("errs = %v, want the two profiles that disagree named", errs)
+	}
+
+	// The same pool under both profiles is one placement, and the claim is
+	// trimmed.
+	claims, errs = cacheTrimClaims(map[string]agentconfig.SandboxProfile{
+		"k8s-a": profile("sandbox"),
+		"k8s-b": profile("sandbox"),
+	})
+	if len(errs) != 0 {
+		t.Errorf("errs = %v, want none: the profiles place the Job on one pool", errs)
+	}
+	if len(claims) != 1 || !maps.Equal(claims[0].NodeSelector, map[string]string{"gt.dev/pool": "sandbox"}) {
+		t.Errorf("claims = %+v, want the claim carrying the shared pool", claims)
 	}
 }
 

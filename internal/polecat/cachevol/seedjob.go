@@ -49,6 +49,12 @@ type SeedJobInput struct {
 	ClaimName string
 	// Pins is at least one rig and commit, in seed order.
 	Pins []Pin
+	// NodeSelector and Tolerations place the pod where the claim can be mounted: the sandbox pool
+	// the claim's consumer runs on, as the sandbox profile that owns the claim names it. A claim
+	// given with neither is seeded wherever the cluster schedules the pod, which is right only for
+	// a plain cluster (gt-5paez).
+	NodeSelector map[string]string
+	Tolerations  []Toleration
 }
 
 // SeedJob is the seed Job as the values kubectl applies. It is a copy of batch/v1's Job, so this
@@ -88,10 +94,21 @@ type TemplateMeta struct {
 // PodSpec is the subset of a pod's spec the seed sets.
 type PodSpec struct {
 	RestartPolicy   string              `json:"restartPolicy"`
+	NodeSelector    map[string]string   `json:"nodeSelector,omitempty"`
+	Tolerations     []Toleration        `json:"tolerations,omitempty"`
 	SecurityContext *PodSecurityContext `json:"securityContext,omitempty"`
 	InitContainers  []Container         `json:"initContainers,omitempty"`
 	Containers      []Container         `json:"containers"`
 	Volumes         []Volume            `json:"volumes"`
+}
+
+// Toleration is one taint a pod tolerates, in Kubernetes' own fields: the empty operator means
+// Equal, and the empty effect tolerates every effect.
+type Toleration struct {
+	Key      string `json:"key,omitempty"`
+	Operator string `json:"operator,omitempty"`
+	Value    string `json:"value,omitempty"`
+	Effect   string `json:"effect,omitempty"`
 }
 
 // PodSecurityContext is the Job's root identity: the pod runs as root so the seed can hand the
@@ -194,6 +211,8 @@ func BuildSeedJob(in SeedJobInput) (*SeedJob, error) {
 				Metadata: TemplateMeta{Labels: seedLabels()},
 				Spec: PodSpec{
 					RestartPolicy:   "Never",
+					NodeSelector:    in.NodeSelector,
+					Tolerations:     in.Tolerations,
 					SecurityContext: &PodSecurityContext{RunAsUser: int64Ptr(0), RunAsGroup: int64Ptr(0)},
 					InitContainers:  []Container{cloneContainer(in.Image, pins)},
 					Containers:      []Container{seedContainer(in.Image, pins)},

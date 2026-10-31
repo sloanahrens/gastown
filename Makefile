@@ -235,12 +235,17 @@ POLE_CACHE_CLAIM ?= gt-cache
 POLE_CACHE_NAMESPACE ?=
 POLE_CACHE_IMAGE ?= $(POLE_IMAGE):dev
 POLE_FORGEJO_HOST ?=
+# POLE_CACHE_SANDBOX is the sandbox profile that owns the claim: its
+# node_selector and tolerations place the seed Job's pod on the pool that
+# mounts the claim (gt-5paez). Empty places the pod nowhere itself, which is
+# right only for a plain cluster.
+POLE_CACHE_SANDBOX ?=
 
 # RIGS narrows the seed to the named pins: make polecat-caches RIGS="gastown
 # om". Empty seeds every pin in POLE_SEED_PINS. The Job's marker skips the
 # steps a rerun with the same pins would repeat.
 polecat-caches:
-	@go run ./cmd/polecatcaches -pins $(POLE_SEED_PINS) -town $(POLE_TOWN) -image $(POLE_CACHE_IMAGE) -claim $(POLE_CACHE_CLAIM) -namespace "$(POLE_CACHE_NAMESPACE)" -forgejo-host "$(POLE_FORGEJO_HOST)" $(RIGS)
+	@go run ./cmd/polecatcaches -pins $(POLE_SEED_PINS) -town $(POLE_TOWN) -image $(POLE_CACHE_IMAGE) -claim $(POLE_CACHE_CLAIM) -namespace "$(POLE_CACHE_NAMESPACE)" -sandbox "$(POLE_CACHE_SANDBOX)" -forgejo-host "$(POLE_FORGEJO_HOST)" $(RIGS)
 
 # Profiles are imported and the two providers created from the key files under
 # ~/.config/gt; a provider that already exists is left alone, so a rerun is a no-op.

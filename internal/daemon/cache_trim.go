@@ -84,48 +84,104 @@ const (
 // takes.
 var cacheTrimClaimRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
-// cacheTrimClaim is one shared cache claim a pass trims, and the image its
-// trim Job runs: the image the sandbox profiles that mount it run, since the
-// Job's containers are helpers of that image.
+// cacheTrimClaim is one shared cache claim a pass trims, the image its trim
+// Job runs, and where that Job's pod runs: the image and the placement the
+// sandbox profiles that mount it run and sit on, since the Job's containers are
+// helpers of that image and the claim's storage binds on that pool (gt-5paez).
 type cacheTrimClaim struct {
-	ClaimName string
-	Image     string
+	ClaimName    string
+	Image        string
+	NodeSelector map[string]string
+	Tolerations  []cachevol.Toleration
+}
+
+// cacheTrimOwner is one sandbox profile that mounts a claim, by the name the
+// settings give it, so a refusal can say which pair disagree.
+type cacheTrimOwner struct {
+	Name    string
+	Profile agentconfig.SandboxProfile
 }
 
 // cacheTrimClaims returns the claims the sandbox profiles mount, one per claim,
 // sorted by claim name, and the profiles that cannot be trimmed as they stand.
 //
 // Only a kubernetes profile mounts a claim at all. A claim two profiles name
-// with different images is refused: the trim Job runs one image's helpers, and
-// which one is the town's to say, not this pass's to pick.
+// with different images or different pod placement is refused: the trim Job runs
+// one image's helpers on one pool, and which one is the town's to say, not this
+// pass's to pick.
 func cacheTrimClaims(profiles map[string]agentconfig.SandboxProfile) ([]cacheTrimClaim, []error) {
-	images := map[string]map[string]bool{}
+	mounting := map[string][]cacheTrimOwner{}
 	for _, name := range slices.Sorted(maps.Keys(profiles)) {
 		profile := profiles[name]
 		if profile.Driver != agentconfig.SandboxDriverKubernetes || profile.KubernetesCacheClaim == "" {
 			continue
 		}
-		if images[profile.KubernetesCacheClaim] == nil {
-			images[profile.KubernetesCacheClaim] = map[string]bool{}
-		}
-		images[profile.KubernetesCacheClaim][profile.Image] = true
+		claim := profile.KubernetesCacheClaim
+		mounting[claim] = append(mounting[claim], cacheTrimOwner{Name: name, Profile: profile})
 	}
 
 	var claims []cacheTrimClaim
 	var errs []error
-	for _, claim := range slices.Sorted(maps.Keys(images)) {
-		names := slices.Sorted(maps.Keys(images[claim]))
-		if len(names) != 1 {
-			errs = append(errs, fmt.Errorf("the cache claim %s is mounted by sandbox profiles with %d images (%s); the trim Job runs one image, so none is chosen", claim, len(names), strings.Join(names, ", ")))
-			continue
-		}
+	for _, claim := range slices.Sorted(maps.Keys(mounting)) {
 		if !validTrimClaim(claim) {
 			errs = append(errs, fmt.Errorf("the cache claim %s: want a DNS-1123 label of at most 63 characters", claim))
 			continue
 		}
-		claims = append(claims, cacheTrimClaim{ClaimName: claim, Image: names[0]})
+		owners := mounting[claim]
+		var images []string
+		for _, owner := range owners {
+			if !slices.Contains(images, owner.Profile.Image) {
+				images = append(images, owner.Profile.Image)
+			}
+		}
+		slices.Sort(images)
+		if len(images) != 1 {
+			errs = append(errs, fmt.Errorf("the cache claim %s is mounted by sandbox profiles with %d images (%s); the trim Job runs one image, so none is chosen", claim, len(images), strings.Join(images, ", ")))
+			continue
+		}
+		if a, b, differ := placementMismatch(owners); differ {
+			errs = append(errs, fmt.Errorf("the cache claim %s is mounted by the sandbox profiles %s and %s, which place their pods differently; the trim Job runs on one pool, so none is chosen", claim, a, b))
+			continue
+		}
+		first := owners[0].Profile
+		claims = append(claims, cacheTrimClaim{
+			ClaimName:    claim,
+			Image:        images[0],
+			NodeSelector: first.NodeSelector,
+			Tolerations:  cacheTrimTolerations(first.Tolerations),
+		})
 	}
 	return claims, errs
+}
+
+// placementMismatch is the first pair of owners that place a pod differently:
+// on different node labels, or tolerating different taints. Two profiles
+// mounting one claim run two sandboxes on one pool, so a Job placed for one is
+// placed for both or for neither.
+func placementMismatch(owners []cacheTrimOwner) (string, string, bool) {
+	first := owners[0]
+	for _, other := range owners[1:] {
+		same := maps.Equal(first.Profile.NodeSelector, other.Profile.NodeSelector) &&
+			slices.Equal(cacheTrimTolerations(first.Profile.Tolerations), cacheTrimTolerations(other.Profile.Tolerations))
+		if !same {
+			return first.Name, other.Name, true
+		}
+	}
+	return "", "", false
+}
+
+// cacheTrimTolerations is a profile's tolerations as the Job's pod spec takes
+// them. The settings validate their fields before they reach here, so nothing
+// is checked again.
+func cacheTrimTolerations(tolerations []agentconfig.SandboxToleration) []cachevol.Toleration {
+	if len(tolerations) == 0 {
+		return nil
+	}
+	out := make([]cachevol.Toleration, 0, len(tolerations))
+	for _, t := range tolerations {
+		out = append(out, cachevol.Toleration{Key: t.Key, Operator: t.Operator, Value: t.Value, Effect: t.Effect})
+	}
+	return out
 }
 
 // validTrimClaim reports whether claim is a name a PersistentVolumeClaim takes:
@@ -257,6 +313,8 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		Listing:          listing,
 		CapBytes:         capBytes,
 		SandboxesRunning: sandboxes,
+		NodeSelector:     claim.NodeSelector,
+		Tolerations:      claim.Tolerations,
 	})
 	if err != nil {
 		d.logger.Printf("disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
