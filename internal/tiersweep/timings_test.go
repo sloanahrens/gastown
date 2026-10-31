@@ -321,6 +321,12 @@ func persistentWrites(writes []string, own string) []string {
 	return out
 }
 
+// failingReader is an entropy source that cannot be read, as a host with no
+// randomness would not be.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("no entropy") }
+
 // TestTimingsFailuresAreNamedOnce: a write that fails drops the file, so a
 // whole run of packages names it once and keeps every line for the persistent
 // file. A line added after Close is kept the same way and written nowhere.
@@ -472,6 +478,31 @@ func TestTimingsReplaceFailures(t *testing.T) {
 		}
 		if len(h.renames) != 0 {
 			t.Errorf("renames = %v, want none after a failed write", h.renames)
+		}
+	})
+	t.Run("a temp name that cannot be drawn is named and writes nothing", func(t *testing.T) {
+		t.Parallel()
+		stderr := &bytes.Buffer{}
+		dir := t.TempDir()
+		persistent := filepath.Join(dir, TimingsName)
+		earlier := []byte(`{"tier":"an earlier run"}` + "\n")
+		h := &memHost{}
+		h.files = map[string][]byte{persistent: earlier}
+		tm := OpenTimings(filepath.Join(dir, "log", TimingsName), h.host(), stderr)
+		tm.random = failingReader{}
+		tm.Replace(persistent, h.host())
+
+		if got := namingLines(stderr.String(), persistent); got != 1 {
+			t.Errorf("stderr names %s on %d lines, want once:\n%s", persistent, got, stderr)
+		}
+		if got := persistentWrites(h.writes, filepath.Join(dir, "log", TimingsName)); len(got) != 0 {
+			t.Errorf("writes = %v, want no temp file without a name", got)
+		}
+		if len(h.renames) != 0 || len(h.removes) != 0 {
+			t.Errorf("renames %v, removes %v, want none", h.renames, h.removes)
+		}
+		if got := h.files[persistent]; string(got) != string(earlier) {
+			t.Errorf("persistent file = %q, want the earlier run's %q", got, earlier)
 		}
 	})
 	t.Run("two replaces of one file never share a temp file", func(t *testing.T) {

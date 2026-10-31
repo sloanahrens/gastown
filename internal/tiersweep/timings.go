@@ -127,6 +127,9 @@ type Timings struct {
 	// lines holds every line this run wrote, in run order, so the persistent
 	// file (TIER_SWEEP_TIMINGS) can be replaced at the end.
 	lines []byte
+	// random is the entropy a replace's temp name is drawn from; OpenTimings
+	// sets it to crypto/rand, and a test swaps in a reader that fails.
+	random io.Reader
 }
 
 // OpenTimings creates the run's timings file at path through host, replacing
@@ -139,7 +142,7 @@ func OpenTimings(path string, host Host, stderr io.Writer) *Timings {
 	if host.AppendFile == nil {
 		host.AppendFile = appendToFile
 	}
-	t := &Timings{path: path, host: host, stderr: stderr}
+	t := &Timings{path: path, host: host, stderr: stderr, random: rand.Reader}
 	if err := host.WriteFile(path, nil, 0o644); err != nil {
 		t.report(err)
 		return t
@@ -192,7 +195,7 @@ func (t *Timings) Close() { t.open = false }
 // A failed replace is one stderr line and changes no verdict: the next run can
 // still read what it replaced.
 func (t *Timings) Replace(path string, host Host) {
-	tmp, err := tempBeside(path)
+	tmp, err := tempBeside(path, t.random)
 	if err != nil {
 		t.reportAt(path, "write", err)
 		return
@@ -209,10 +212,10 @@ func (t *Timings) Replace(path string, host Host) {
 }
 
 // tempBeside names a temp file beside path that no other run is using: path, a
-// random suffix and .tmp.
-func tempBeside(path string) (string, error) {
+// random suffix drawn from random, and .tmp.
+func tempBeside(path string, random io.Reader) (string, error) {
 	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	if _, err := io.ReadFull(random, b[:]); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%s.%x.tmp", path, b[:]), nil
