@@ -2655,6 +2655,10 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	// The revert beads the tick read, kept for the tick alone so a rig with an
 	// open revert costs it one bd read (gt-kuax8).
 	reverts := newSpecRevertBeads()
+	// Each rig's docked label, read once for the whole tick: the board scan and
+	// every sling behind it ask the same question of the same rig, and the
+	// answer cannot change before the tick ends (gt-ze7z5).
+	docked := newRigDockedMemo(nil)
 	// The pool's design and notes, kept across the daemon's ticks (gt-l0vlf).
 	details := specDetailCacheFor(townRoot, owner)
 	specDetailCache.Store(details)
@@ -2706,7 +2710,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			read := specCandidatesRetrying(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 				reads.call()
 				return specReadyBoard(rigPath)
-			}, IsRigParkedOrDocked, retry)
+			}, docked.parkedOrDocked, retry)
 			read = specBoardDetails(reads, func(rig string) beads.Client {
 				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 			}, read, verdicts)
@@ -2768,7 +2772,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			if seats := snapshot.Load(); seats != nil {
 				occupied = snapshotOccupied(*seats, newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)
 			}
-			name, err := slingSpec(townRoot, c, resumeBranch, seat, occupied, trace)
+			name, err := slingSpec(townRoot, c, resumeBranch, seat, occupied, trace, docked)
 			slingTraces.add(specSlingTraceLine(c.Spec.ID, seat.Agent, trace, err))
 			return name, err
 		},
@@ -3432,7 +3436,10 @@ func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, resume
 // set, is the seat occupancy read the pool decision uses (the tick's
 // snapshot); nil reads the town. trace times every stage of the sling, from the
 // seat picture it reads to the end of the session start; nil times nothing.
-func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice, occupied func() ([]poolSession, error), trace *session.SandboxTrace) (string, error) {
+// docked is the tick's memo of the rigs' docked labels, so the sling's guard
+// and its spawn's guard share the tick's one read of the rig (gt-ze7z5); nil
+// asks bd each time.
+func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice, occupied func() ([]poolSession, error), trace *session.SandboxTrace, docked *rigDockedMemo) (string, error) {
 	targetBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, c.Rig)
 	if !ok {
 		return "", fmt.Errorf("cannot resolve rig %q beads database for %s", c.Rig, c.Spec.ID)
@@ -3443,8 +3450,11 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 	// it (gt-7nctk).
 	params.Steps = trace.Steps()
 	d := realSlingDeps()
+	if docked != nil {
+		d.rigParked = docked.parkedOrDocked
+	}
 	d.beadInfoInTown = refuseOpenBlockers(d.beadInfoInTown)
-	d.spawnPolecat = specSlingSpawn(d.spawnPolecat, occupied, trace)
+	d.spawnPolecat = specSlingSpawn(d.spawnPolecat, occupied, trace, docked)
 	result, err := d.executeSling(params)
 	if err != nil {
 		return "", err
@@ -3458,12 +3468,17 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 // specSlingSpawn is the spawn a spec sling asks for: the tick's trace rides it
 // so the session start times the sandbox phases for the tick's log (gt-0uh64),
 // and the tick's seat snapshot, when it has one, is the occupancy read the pool
-// decision uses instead of listing every polecat again (gt-thy6r).
-func specSlingSpawn(spawn func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error), occupied func() ([]poolSession, error), trace *session.SandboxTrace) func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+// decision uses instead of listing every polecat again (gt-thy6r). The tick's
+// docked memo rides it too, so the spawn's own rig guard answers from the read
+// the tick already made (gt-ze7z5).
+func specSlingSpawn(spawn func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error), occupied func() ([]poolSession, error), trace *session.SandboxTrace, docked *rigDockedMemo) func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 	return func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		opts.trace = trace
 		if occupied != nil {
 			opts.occupied = occupied
+		}
+		if docked != nil {
+			opts.rigParked = docked.parkedOrDocked
 		}
 		return spawn(rigName, opts)
 	}
