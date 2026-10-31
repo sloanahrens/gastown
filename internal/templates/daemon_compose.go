@@ -77,11 +77,14 @@ type ComposeSpec struct {
 	// takes it: a live spec that sets it is refused.
 	DoltPort int
 
-	// OMTokenFile is the path, inside the container, of the file the om
-	// subscription token is read from. When set, the scratch render passes it to
-	// the entrypoint as --om-token-file beside --scratch-town. Only the scratch
-	// render takes it: the live project's command line stays empty, and a live
-	// spec that sets it is refused (gt-qpeei.36).
+	// OMTokenFile is the file the om subscription token is read from, and it is
+	// absolute on both renders; where it lives is the one thing that differs.
+	// The scratch render takes a path inside the container, which the scratch
+	// runbook mounts there, and passes it to the entrypoint as --om-token-file
+	// beside --scratch-town (gt-qpeei.36). The live render takes the file's path
+	// on the host, mounts it read-only at LiveOMTokenPath, and passes that path
+	// to the entrypoint, so the live container's om has a credential (gt-yaqct).
+	// Unset, neither render carries the flag or the mount.
 	OMTokenFile string
 
 	// LiveTownRoot is the live town's root, which a scratch spec must not
@@ -156,6 +159,15 @@ const ScratchDoltService = "scratch-dolt"
 // it and the daemon's command passes it to the entrypoint, so the install
 // dials the port the server serves rather than gt's own default, 3307.
 const ScratchDoltPort = 3306
+
+// LiveOMTokenPath is where the live render mounts the om token file inside the
+// container, and the path its command line passes to the entrypoint. It is one
+// fixed path because the host file's own path is the operator's: the mount's
+// target is the only place the container can name it, and the compose file then
+// carries no host path on the walk to the entrypoint. It sits under /run, so the
+// mount never shadows a file the image ships, and the token is on the container's
+// filesystem only for as long as the read-only mount exists.
+const LiveOMTokenPath = "/run/secrets/om-token" //nolint:gosec // a mount path, not a credential
 
 // The scratch project's Dolt server, which only the scratch render has. It
 // joins the internal network alone and publishes no port.
@@ -358,7 +370,8 @@ var scratchOperatorNote = []string{
 // endpoint of the Dolt server this project runs rather than starting one inside
 // the daemon container. When omTokenFile is set, --om-token-file <path> follows
 // them. The entrypoint is the image's ENTRYPOINT, so the command carries its
-// flags alone. The live project passes nothing.
+// flags alone. The live project passes only the om token flag, when it has a
+// token file (liveDaemonCommand).
 func scratchDaemonCommand(omTokenFile string, doltPort int, forgeTokenFile string) string {
 	var b strings.Builder
 	for _, line := range scratchOperatorNote {
@@ -379,6 +392,26 @@ func scratchDaemonCommand(omTokenFile string, doltPort int, forgeTokenFile strin
 	}
 	fmt.Fprintf(&b, "    command: [%s]\n", strings.Join(quoted, ", "))
 	return b.String()
+}
+
+// liveDaemonCommand is the live daemon's command when the render has an om token
+// file: the one flag the entrypoint reads it from, naming the path the render
+// mounts it at rather than the host's. The entrypoint turns the file's contents
+// into the daemon's environment, so the token itself never reaches this file or
+// an argv (gt-yaqct). Without a token file the live command is absent, as it was.
+func liveDaemonCommand() string {
+	return fmt.Sprintf("    command: [%s, %s]\n",
+		strconv.Quote("--"+config.OMTokenFileFlag), strconv.Quote(LiveOMTokenPath))
+}
+
+// liveOMTokenMount is the live daemon's second volume: the host's token file
+// bind-mounted read-only at LiveOMTokenPath. A read-only mount is what keeps the
+// container from writing the host file, and the file is the host's own: nothing
+// copies it into the image, the town or this file. The path is escaped as every
+// other spec value is, so a dollar sign in it is the literal the host has.
+func liveOMTokenMount(hostFile string) string {
+	return fmt.Sprintf("      - type: bind\n        source: %s\n        target: %s\n        read_only: true\n",
+		strconv.Quote(composeLiteral(hostFile)), strconv.Quote(LiveOMTokenPath))
 }
 
 // scratchDoltBody is the scratch project's Dolt server service. It has no
@@ -467,6 +500,12 @@ func (s ComposeSpec) scratchDoltPort() int {
 // The daemon service runs under docker's init so a finished child is reaped. The
 // daemon is PID 1 in its container and reaps nothing, so every dolt and sh it
 // spawns and finishes would stand as a defunct process for the daemon's life.
+//
+// %[12]s is the daemon's command: empty on the live project without an om token
+// file, the scratch flags on the scratch project, and the om token flag alone on
+// a live project that has one. %[17]s is the token file's read-only mount, which
+// only that live project carries, so both are the empty string where the file
+// has no such line and the golden is unchanged.
 const daemonComposeBody = `# Generated by gt for the container supervisor; every deploy rewrites this file.
 services:
   daemon:
@@ -489,7 +528,7 @@ services:
       - type: bind
         source: %[4]q
         target: %[4]q
-    networks:
+%[17]s    networks:
       - %[11]s
       - %[7]s
   %[5]s:
@@ -534,6 +573,12 @@ services:
 // GT_TOWN_ROOT both name the mount point, as the launchd plist and the systemd
 // unit do, so the process finds the town whichever of the two it reads.
 //
+// A live spec's OMTokenFile is the host's token file: the render mounts it
+// read-only at LiveOMTokenPath and passes that path to the entrypoint, which
+// loads it into the daemon's environment. The file's contents never enter this
+// file, an argv or an error; only its host path, and the fixed mount target,
+// do (gt-yaqct).
+//
 // It refuses a spec whose project or container name is empty rather than
 // falling back to the live town's defaults (gt-ix1kz): a scratch render that
 // inherited them could stop or replace the live daemon's container.
@@ -543,7 +588,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 	}
 
 	names := liveNames
-	var command, dolt, doltVolume, doltWait, forgeNetwork string
+	var command, dolt, doltVolume, doltWait, forgeNetwork, tokenMount string
 	if s.Scratch {
 		names = scratchNames
 		command = scratchDaemonCommand(s.OMTokenFile, s.scratchDoltPort(), s.scratchForgeTokenFile())
@@ -570,6 +615,9 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 			doltVolume += scratchForgeVolumeDecls
 			forgeNetwork = scratchForgeNetworkDecl
 		}
+	} else if s.OMTokenFile != "" {
+		command = liveDaemonCommand()
+		tokenMount = liveOMTokenMount(s.OMTokenFile)
 	}
 
 	out := fmt.Sprintf(daemonComposeBody,
@@ -589,6 +637,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		doltVolume,
 		doltWait,
 		forgeNetwork,
+		tokenMount,
 	)
 	return []byte(out), nil
 }
@@ -626,12 +675,10 @@ func (s ComposeSpec) validate() error {
 		return fmt.Errorf("compose spec: DoltPort is set on a live spec; only the scratch render runs a Dolt server of its own")
 	case s.DoltPort < 0 || s.DoltPort > 65535:
 		return fmt.Errorf("compose spec: DoltPort %d is not a port (1 to 65535)", s.DoltPort)
-	case s.OMTokenFile != "" && !s.Scratch:
-		return fmt.Errorf("compose spec: OMTokenFile is set on a live spec; only the scratch render passes --%s, and the live project's command line stays empty", config.OMTokenFileFlag)
 	case s.OMTokenFile != "" && !filepath.IsAbs(s.OMTokenFile):
-		return fmt.Errorf("compose spec: OMTokenFile %q is not absolute; it names a path inside the container", s.OMTokenFile)
+		return fmt.Errorf("compose spec: OMTokenFile %q is not absolute; the live render mounts it on the host, and the scratch render names a path inside the container", s.OMTokenFile)
 	case strings.ContainsFunc(s.OMTokenFile, func(r rune) bool { return r < 0x20 || r == 0x7f }):
-		return fmt.Errorf("compose spec: OMTokenFile %q holds a control character, which a command line entry cannot carry", s.OMTokenFile)
+		return fmt.Errorf("compose spec: OMTokenFile %q holds a control character, which neither a command line entry nor a mount can carry", s.OMTokenFile)
 	case !s.Scratch && s.DoltHost == "":
 		return fmt.Errorf("compose spec: DoltHost is empty; pass town.json's dolt.container_host or dolt.host resolved, and an empty dolt.host is the local machine, which inside the container is the container itself")
 	}

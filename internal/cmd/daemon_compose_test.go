@@ -3,7 +3,9 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -144,6 +146,54 @@ func TestDaemonComposeWriteTrimsTheImage(t *testing.T) {
 	got := r.disk[r.composePath()]
 	if want := []byte(`image: "` + tag + `"`); !bytes.Contains(got, want) {
 		t.Errorf("compose file does not carry %q:\n%s", want, got)
+	}
+}
+
+// --om-token-file puts the host's token file in the render: a read-only mount at
+// the one fixed path, and that path as the entrypoint's flag. The command never
+// reads the file, so its contents are in neither the compose file nor a line of
+// output; a relative path is refused and writes nothing (gt-yaqct).
+func TestDaemonComposeWriteOMToken(t *testing.T) {
+	t.Parallel()
+	secret := "a-marker-that-is-not-a-token"
+	tokenFile := filepath.Join(t.TempDir(), "om-token")
+	if err := os.WriteFile(tokenFile, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the token file: %v", err)
+	}
+
+	r := newComposeRig(t)
+	r.flags.omTokenFile = tokenFile
+	if err := runDaemonCompose(r.flags, r.deps); err != nil {
+		t.Fatalf("runDaemonCompose: %v", err)
+	}
+	got, ok := r.disk[r.composePath()]
+	if !ok {
+		t.Fatalf("no compose file written at %s", r.composePath())
+	}
+	for _, want := range []string{
+		fmt.Sprintf("      - type: bind\n        source: %q\n        target: %q\n        read_only: true\n",
+			tokenFile, templates.LiveOMTokenPath),
+		fmt.Sprintf("    command: [%q, %q]", "--"+config.OMTokenFileFlag, templates.LiveOMTokenPath),
+	} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("compose file does not carry %q:\n%s", want, got)
+		}
+	}
+	if bytes.Contains(got, []byte(secret)) {
+		t.Errorf("the compose file carries the token file's contents:\n%s", got)
+	}
+	if strings.Contains(r.out.String(), secret) {
+		t.Errorf("output carries the token file's contents: %q", r.out.String())
+	}
+
+	refused := newComposeRig(t)
+	refused.flags.omTokenFile = "secrets/om-token"
+	err := runDaemonCompose(refused.flags, refused.deps)
+	if err == nil || !strings.Contains(err.Error(), "is not absolute") {
+		t.Fatalf("error = %v, want a relative path refused as not absolute", err)
+	}
+	if len(refused.wrote) != 0 {
+		t.Errorf("a relative token path wrote %v", refused.wrote)
 	}
 }
 
@@ -365,8 +415,8 @@ func TestContainerDoltHostResolvesInContainerMode(t *testing.T) {
 	}
 }
 
-// The command is registered as `gt daemon compose write`, parses --image and
-// --print, and runs nothing without a subcommand.
+// The command is registered as `gt daemon compose write`, parses --image,
+// --om-token-file and --print, and runs nothing without a subcommand.
 func TestDaemonComposeCommandIsWired(t *testing.T) {
 	t.Parallel()
 	var got daemonComposeFlags
@@ -375,13 +425,14 @@ func TestDaemonComposeCommandIsWired(t *testing.T) {
 		got, ran = f, true
 		return nil
 	})
-	c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--print"})
+	c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--print",
+		"--" + config.OMTokenFileFlag, "/ops/om/token"})
 	c.SilenceUsage, c.SilenceErrors = true, true
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if !ran || got != (daemonComposeFlags{image: daemonimage.ImageTag(composeTestRev), print: true}) {
-		t.Errorf("ran %v flags %+v, want write with the image and --print", ran, got)
+	if want := (daemonComposeFlags{image: daemonimage.ImageTag(composeTestRev), omTokenFile: "/ops/om/token", print: true}); !ran || got != want {
+		t.Errorf("ran %v flags %+v, want write with the image, the token file and --print (%+v)", ran, got, want)
 	}
 
 	bare := newDaemonComposeCmd(func(_ io.Writer, _ daemonComposeFlags) error { return nil })

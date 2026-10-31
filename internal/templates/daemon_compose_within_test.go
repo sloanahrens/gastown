@@ -31,6 +31,48 @@ func TestWithin_ACannotComparePairCountsAsInside(t *testing.T) {
 	}
 }
 
+// A live spec takes the om token file: the refusal that kept the field off a
+// live spec is gone, and the checks that remain are the absolute path and the
+// control character, on the host path the live render mounts (gt-yaqct).
+func TestComposeSpecValidateLiveOMToken(t *testing.T) {
+	t.Parallel()
+	liveSpec := func() ComposeSpec {
+		return ComposeSpec{
+			Project:       "gt-town",
+			ContainerName: "gt-town-daemon-1",
+			Image:         "gt-daemon:4f2a1c9",
+			TownRoot:      "/towns/live",
+			StopGrace:     MinimumStopGrace,
+			DoltHost:      "host.docker.internal",
+		}
+	}
+	withToken := liveSpec()
+	withToken.OMTokenFile = "/ops/om/token"
+	if err := withToken.validate(); err != nil {
+		t.Fatalf("a live spec with an absolute token path = %v, want no error: the live render mounts it", err)
+	}
+
+	relative := liveSpec()
+	relative.OMTokenFile = "secrets/om-token"
+	control := liveSpec()
+	control.OMTokenFile = "/ops/om\ntoken"
+	for name, tc := range map[string]struct {
+		spec ComposeSpec
+		want string
+	}{
+		"a relative path": {relative, "is not absolute"},
+		"a control char":  {control, "control character"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.spec.validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("validate = %v, want an error naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // checkScratchRoot refuses a relative root on either side by name, before any
 // resolution: a relative scratch root (for example "." with the working directory
 // at the live root) must never read as clear.

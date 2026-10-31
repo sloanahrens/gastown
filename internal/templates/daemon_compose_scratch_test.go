@@ -427,13 +427,12 @@ func TestRenderDaemonCompose_ScratchEscapesADollarInTheTokenPath(t *testing.T) {
 	}
 }
 
-// The field is the scratch render's alone: a live spec that sets it is refused,
-// as are a relative path and a control character, and the live render carries
-// none of it.
+// The scratch render's token path is inside the container, so a relative one and
+// one with a control character are refused, and a live spec without a token file
+// carries neither the flag nor a mount (gt-yaqct: a live spec that sets one is
+// no longer refused; TestRenderDaemonCompose_LiveOMToken reads that render).
 func TestRenderDaemonCompose_OMTokenFileIsRefusedWhereItDoesNotBelong(t *testing.T) {
 	t.Parallel()
-	live := liveSpec()
-	live.OMTokenFile = "/run/secrets/om-token"
 	relative := scratchSpec()
 	relative.OMTokenFile = "secrets/om-token"
 	control := scratchSpec()
@@ -442,7 +441,6 @@ func TestRenderDaemonCompose_OMTokenFileIsRefusedWhereItDoesNotBelong(t *testing
 		spec templates.ComposeSpec
 		want string
 	}{
-		"a live spec":     {live, "OMTokenFile is set on a live spec"},
 		"a relative path": {relative, "is not absolute"},
 		"a control char":  {control, "control character"},
 	} {

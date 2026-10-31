@@ -86,9 +86,10 @@ type composeHealthcheck struct {
 }
 
 type composeVolume struct {
-	Type   string `yaml:"type"`
-	Source string `yaml:"source"`
-	Target string `yaml:"target"`
+	Type     string `yaml:"type"`
+	Source   string `yaml:"source"`
+	Target   string `yaml:"target"`
+	ReadOnly bool   `yaml:"read_only"`
 }
 
 // The engine's service and volume names are part of the file's contract, so the
@@ -110,6 +111,17 @@ func liveSpec() templates.ComposeSpec {
 		StopGrace:     templates.MinimumStopGrace,
 		DoltHost:      "host.docker.internal",
 	}
+}
+
+// tokenVolume is the daemon's om token mount, the volume at the one fixed path
+// the live render mounts the host's file at, and whether it is there at all.
+func tokenVolume(vols []composeVolume) (composeVolume, bool) {
+	for _, v := range vols {
+		if v.Target == templates.LiveOMTokenPath {
+			return v, true
+		}
+	}
+	return composeVolume{}, false
 }
 
 // render renders s and parses the result, so a file that is not valid YAML
@@ -242,6 +254,64 @@ func TestRenderDaemonCompose_BindMountsTheTownRootAtItsOwnPath(t *testing.T) {
 	}
 	if f.Services["daemon"].WorkingDir != spec.TownRoot {
 		t.Errorf("working_dir = %q, want the town root %s", f.Services["daemon"].WorkingDir, spec.TownRoot)
+	}
+}
+
+// A live spec with an om token file carries it into the container: the host's
+// file is bind-mounted read-only at the one fixed path, and that path, never the
+// host's, is the entrypoint's flag. A live spec without one renders the golden
+// byte for byte; the mount's absence is what this test is red on (gt-yaqct).
+func TestRenderDaemonCompose_LiveOMToken(t *testing.T) {
+	t.Parallel()
+	spec := liveSpec()
+	spec.OMTokenFile = "/ops/om/token"
+	out, f := render(t, spec)
+
+	daemon := f.Services["daemon"]
+	if got, want := daemon.Command, []string{"--" + config.OMTokenFileFlag, templates.LiveOMTokenPath}; !slices.Equal(got, want) {
+		t.Errorf("live daemon command = %q, want %q: the entrypoint reads the file the mount puts at that path", got, want)
+	}
+	if got := len(daemon.Volumes); got != 2 {
+		t.Fatalf("volumes = %+v, want the town root and the token file", daemon.Volumes)
+	}
+	v, ok := tokenVolume(daemon.Volumes)
+	if !ok {
+		t.Fatalf("volumes = %+v, want the host's token file at %s", daemon.Volumes, templates.LiveOMTokenPath)
+	}
+	if v.Type != "bind" || v.Source != spec.OMTokenFile || !v.ReadOnly {
+		t.Errorf("token volume = %+v, want a read-only bind of the host's %s", v, spec.OMTokenFile)
+	}
+	// The entrypoint is given the mount's path alone: the host's appears once,
+	// as the mount's source, and nowhere in the command line.
+	if got := strings.Count(out, spec.OMTokenFile); got != 1 {
+		t.Errorf("the host path appears %d times, want once as the mount's source:\n%s", got, out)
+	}
+
+	golden, err := os.ReadFile(filepath.Join("testdata", "daemon-compose.golden.yml"))
+	if err != nil {
+		t.Fatalf("reading golden file: %v", err)
+	}
+	withoutToken, _ := render(t, liveSpec())
+	if withoutToken != string(golden) {
+		t.Errorf("the live render without a token file differs from the golden\n got:\n%s\nwant:\n%s", withoutToken, golden)
+	}
+}
+
+// A dollar sign in the host's token path reaches the container as itself: the
+// mount's source is escaped as every other spec value is, or compose would
+// substitute whatever the environment names (gt-yaqct).
+func TestRenderDaemonCompose_LiveOMTokenEscapesADollarInTheHostPath(t *testing.T) {
+	t.Parallel()
+	spec := liveSpec()
+	spec.OMTokenFile = "/ops/$HOME/om-token"
+	_, f := render(t, spec)
+
+	v, ok := tokenVolume(f.Services["daemon"].Volumes)
+	if !ok {
+		t.Fatalf("volumes = %+v, want the host's token file at %s", f.Services["daemon"].Volumes, templates.LiveOMTokenPath)
+	}
+	if want := "/ops/$$HOME/om-token"; v.Source != want {
+		t.Errorf("token mount source = %q, want %q: compose would otherwise substitute $HOME", v.Source, want)
 	}
 }
 
