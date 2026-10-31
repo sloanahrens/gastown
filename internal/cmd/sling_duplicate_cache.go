@@ -143,6 +143,25 @@ func specDetailCacheFor(townRoot, owner string) *duplicateDetailCache {
 	return loadDuplicateDetailCache(dispatch.SpecDetailCachePath(townRoot), owner, duplicateDetailMissLimit)
 }
 
+// specSlingDetailCacheFor is the cache a `gt spec sling` child reads through:
+// the file the tick that planned its sling saved, served as it stands, never
+// written back. Without it the child's duplicate check shows every bead of the
+// pool for its design and notes, 39 s a sling (gt-nebs9). The child owns
+// nothing: the tick refills what it needs, and a child writing the file could
+// lose entries a newer tick had just saved.
+//
+// owner "" is a sling no daemon planned, which reads no cache and shows every
+// pool bead, as before.
+func specSlingDetailCacheFor(townRoot, owner string) *duplicateDetailCache {
+	if owner == "" {
+		return nil
+	}
+	c := loadDuplicateDetailCache(dispatch.SpecDetailCachePath(townRoot), owner, duplicateDetailMissLimit)
+	// "" keeps the loaded entries in memory: save writes nothing from here.
+	c.path = ""
+	return c
+}
+
 // Counts is how many beads this tick showed, answered from the cache, and left
 // unread for the limit.
 func (c *duplicateDetailCache) Counts() (fetched, cached, unread int) {

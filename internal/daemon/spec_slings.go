@@ -387,9 +387,13 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 	defer cancel()
 	// The sling reports its own bd census to a file of its own beside the
 	// tick's sink, which this daemon folds into its census line, so the sling's
-	// calls are named by the same log as the tick's (gt-3y319).
+	// calls are named by the same log as the tick's (gt-3y319). The owner names
+	// this daemon to the design/notes cache its tick filled, so the child's
+	// duplicate check reads that file instead of showing every pool bead
+	// (gt-nebs9). Both are flags, since the child reads no new GT_ variable.
 	censusPath := d.specSlingCensusPath()
-	cmd := exec.CommandContext(ctx, d.gtPath, "spec", "sling", "--job", string(f.job), "--census-path", censusPath) //nolint:gosec // G204: gtPath resolved at daemon init
+	cmd := exec.CommandContext(ctx, d.gtPath, "spec", "sling",
+		"--detail-cache-owner", specDetailOwner, "--job", string(f.job), "--census-path", censusPath) //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = daemonGTEnv(os.Environ())
 	start := d.clk().Now()
