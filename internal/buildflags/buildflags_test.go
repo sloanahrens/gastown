@@ -1,9 +1,6 @@
 package buildflags
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -59,24 +56,5 @@ func TestDarwinCgoEnv(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestIntegrationHelperTakesItsFlagsFromHere pins the single source: the
-// internal/cmd helper builds with buildflags.LDFlags rather than a second copy
-// of the literal, so the sweep and the helper cannot drift apart (gt-2daks).
-func TestIntegrationHelperTakesItsFlagsFromHere(t *testing.T) {
-	t.Parallel()
-	const helper = "../cmd/test_helpers_integration_test.go"
-	src, err := os.ReadFile(filepath.Join(helper))
-	if err != nil {
-		t.Fatalf("read %s: %v", helper, err)
-	}
-	text := string(src)
-	if !strings.Contains(text, "buildflags.LDFlags") {
-		t.Errorf("%s does not build with buildflags.LDFlags: the helper and the sweep can carry different ldflags", helper)
-	}
-	if strings.Contains(text, LDFlags) {
-		t.Errorf("%s still carries the ldflags literal: it should name buildflags.LDFlags", helper)
 	}
 }

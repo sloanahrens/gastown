@@ -1,7 +1,9 @@
 package tiersweep
 
 import (
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -206,6 +208,69 @@ func TestGTBuildFailureIsNotRed(t *testing.T) {
 	}
 	if len(gtTestEnvs(fake)) == 0 {
 		t.Fatal("no go test ran after the failed build")
+	}
+	if red || !strings.Contains(line, "integration GREEN passed=1 failed=0 skipped=0") {
+		t.Errorf("line = %q red = %v, want the tier GREEN with its package passed", line, red)
+	}
+}
+
+// TestGTBuildFailureKeepsItsOutput: a failed build's output is written to the
+// build log in the log directory, and the stderr line names that file instead
+// of quoting the output.
+func TestGTBuildFailureKeepsItsOutput(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{head: "abc123"}
+	s, stderr := newIntegration(t, taggedRootRepo(), fake, "", "")
+	s.BuildExec = func(dir string, env []string, argv []string, out io.Writer, timeout time.Duration) int {
+		fmt.Fprintln(out, "./x.go:3:2: undefined: y")
+		return 1
+	}
+	s.Integration()
+
+	logPath := filepath.Join(s.Opts.LogDir, buildLogName)
+	kept, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read build log: %v", err)
+	}
+	if !strings.Contains(string(kept), "undefined: y") {
+		t.Errorf("build log = %q, want the compiler output", kept)
+	}
+	if strings.Contains(stderr.String(), "undefined: y") {
+		t.Errorf("stderr = %q, want the output left out of it", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), logPath) {
+		t.Errorf("stderr = %q, want it to name %s", stderr.String(), logPath)
+	}
+}
+
+// TestGTBuildLogCannotBeCreated: a build whose log cannot be created does not
+// run; the sweep reports it once, leaves TIER_SWEEP_GT_BIN unset, and the tier
+// still runs GREEN. A directory in the log's place makes the create fail.
+func TestGTBuildLogCannotBeCreated(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{head: "abc123"}
+	s, stderr := newIntegration(t, taggedRootRepo(), fake, "", "")
+	if err := os.Mkdir(filepath.Join(s.Opts.LogDir, buildLogName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line, red := s.Integration()
+
+	if got := builds(fake); len(got) != 0 {
+		t.Errorf("go build calls = %v, want none when its log cannot be created", got)
+	}
+	var buildLines []string
+	for _, l := range strings.Split(stderr.String(), "\n") {
+		if strings.Contains(l, "build gt") {
+			buildLines = append(buildLines, l)
+		}
+	}
+	if len(buildLines) != 1 {
+		t.Errorf("build gt stderr lines = %d, want 1: %q", len(buildLines), stderr.String())
+	}
+	for i, env := range gtTestEnvs(fake) {
+		if anyEnvNamed(env, EnvGTBin) {
+			t.Errorf("go test %d environment names %s with no build", i, EnvGTBin)
+		}
 	}
 	if red || !strings.Contains(line, "integration GREEN passed=1 failed=0 skipped=0") {
 		t.Errorf("line = %q red = %v, want the tier GREEN with its package passed", line, red)
