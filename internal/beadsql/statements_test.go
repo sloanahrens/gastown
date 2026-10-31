@@ -33,6 +33,8 @@ func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 		"BackupIssues":                BackupIssues("hq", false, nil),
 		"BackupIssuesScrubbed":        BackupIssues("hq", true, []string{"testdb_"}),
 		"BackupTable":                 BackupTable("hq", "labels"),
+		"BackupEvents":                BackupEvents("hq", ""),
+		"BackupEventsSince":           BackupEvents("hq", "2026-10-31 16:53:07"),
 	} {
 		s, err := q.Inline()
 		if err != nil {
@@ -57,10 +59,12 @@ func TestDeclaredQueriesAreReadOnlyBdReads(t *testing.T) {
 func TestQueriesRefuseBadIdentifiers(t *testing.T) {
 	t.Parallel()
 	for name, q := range map[string]Query{
-		"TableProbe":    TableProbe("x`; DROP TABLE issues"),
-		"TableRowCount": TableRowCount("hq`", "issues"),
-		"BackupIssues":  BackupIssues("a b", true, nil),
-		"BackupTable":   BackupTable("hq", "labels;"),
+		"TableProbe":       TableProbe("x`; DROP TABLE issues"),
+		"TableRowCount":    TableRowCount("hq`", "issues"),
+		"BackupIssues":     BackupIssues("a b", true, nil),
+		"BackupTable":      BackupTable("hq", "labels;"),
+		"BackupEvents":     BackupEvents("hq; DROP TABLE events", ""),
+		"BackupEventBound": BackupEvents("hq", "2026-10-31' OR '1'='1"),
 	} {
 		if _, err := q.BdArgs(); err == nil {
 			t.Errorf("%s: BdArgs accepted %s", name, q)
@@ -272,4 +276,40 @@ func selectFields(t *testing.T, selectList string) []string {
 		}
 	}
 	return append(fields, selectList[start:])
+}
+
+// TestBackupEventsReadsFromItsBoundary: the events export appends from the
+// newest created_at it already holds, so the read is ordered created_at, id
+// and bounded at that value; a bound that is not a timestamp is refused rather
+// than sent as a literal Dolt would compare against nothing (gt-l7eeb).
+func TestBackupEventsReadsFromItsBoundary(t *testing.T) {
+	t.Parallel()
+	text, err := BackupEvents("hq", "2026-10-31 16:53:07").Inline()
+	if err != nil {
+		t.Fatalf("Inline: %v", err)
+	}
+	for _, want := range []string{
+		"FROM `hq`.events",
+		"created_at >= '2026-10-31 16:53:07'",
+		"ORDER BY created_at, id",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("BackupEvents lacks %q:\n%s", want, text)
+		}
+	}
+
+	whole, err := BackupEvents("hq", "").Inline()
+	if err != nil {
+		t.Fatalf("Inline (whole table): %v", err)
+	}
+	if strings.Contains(whole, "WHERE") {
+		t.Errorf("the whole-table read is filtered:\n%s", whole)
+	}
+	if !strings.Contains(whole, "ORDER BY created_at, id") {
+		t.Errorf("the whole-table read is not in the append's order:\n%s", whole)
+	}
+
+	if _, err := BackupEvents("hq", "yesterday").Inline(); err == nil {
+		t.Error("a bound that is not a timestamp was sent to Dolt")
+	}
 }

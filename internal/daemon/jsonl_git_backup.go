@@ -540,7 +540,7 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 
 	total := 0
 
-	exportTable := d.exportTableToJsonl
+	exportTable := jsonlTableExporter(d.exportTableToJsonl)
 	if d.jsonlTableExportFn != nil {
 		exportTable = d.jsonlTableExportFn
 	}
@@ -576,7 +576,16 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 		if budget < floor {
 			budget = min(floor, remaining)
 		}
-		tn, err := exportTable(table, beadsql.BackupTable(db, table), dbDir, dataDir, budget)
+		var tn int
+		var err error
+		if table == "events" {
+			// events is the one table read from a boundary rather than whole
+			// (jsonl_git_backup_events.go): it is the largest by far, and a
+			// full read of it outlasts the backup interval (gt-l7eeb).
+			tn, err = d.exportEventsToJsonl(db, dbDir, dataDir, budget, exportTable)
+		} else {
+			tn, err = exportTable(table, beadsql.BackupTable(db, table), dbDir, dataDir, budget)
+		}
 		if err != nil {
 			d.logger.Printf("jsonl_git_backup: %s/%s: export failed: %v", db, table, err)
 			tableErrs = append(tableErrs, fmt.Sprintf("%s: %v", table, err))
@@ -660,6 +669,10 @@ func jsonlExportFailure(ctx context.Context, err error, stderr, table string, ti
 	}
 	return err
 }
+
+// jsonlTableExporter exports one table of one database to the JSONL backup.
+// Daemon.jsonlTableExportFn is a test's replacement for exportTableToJsonl.
+type jsonlTableExporter func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error)
 
 // exportTableToJsonl runs a query and writes the result as JSONL to {dir}/{table}.jsonl,
 // continuing in {table}.2.jsonl, {table}.3.jsonl, ... when it outgrows one shard.

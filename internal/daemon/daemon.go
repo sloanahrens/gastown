@@ -22,7 +22,6 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -385,7 +384,7 @@ type Daemon struct {
 	// exportDatabaseToJsonl's handling of a failing table can be driven without
 	// running dolt; nil is the real export. budget is the time the export has
 	// been given, the shared supplemental bound included.
-	jsonlTableExportFn func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error)
+	jsonlTableExportFn jsonlTableExporter
 
 	// jsonlTrackerExportFn replaces the tracker client behind the JSONL
 	// backup's tracker branch in tests, so a tracker rig's export is driven
