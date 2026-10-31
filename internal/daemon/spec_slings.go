@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -238,7 +239,11 @@ func specSlingNotStartedEntry(bead, reason string) specDispatchTickEntry {
 func (d *Daemon) runSpecSling(f specSlingFlight) {
 	ctx, cancel := specSlingContext(d.ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, d.gtPath, "spec", "sling", "--job", string(f.job)) //nolint:gosec // G204: gtPath resolved at daemon init
+	// The sling reports its own bd census to a file of its own beside the
+	// tick's sink, which this daemon folds into its census line, so the sling's
+	// calls are named by the same log as the tick's (gt-3y319).
+	censusPath := d.specSlingCensusPath()
+	cmd := exec.CommandContext(ctx, d.gtPath, "spec", "sling", "--job", string(f.job), "--census-path", censusPath) //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = daemonGTEnv(os.Environ())
 	start := d.clk().Now()
@@ -273,6 +278,14 @@ func (d *Daemon) runSpecSling(f specSlingFlight) {
 	}
 	result, entry := specSlingResultOf(r, f.Bead)
 	d.feedSpecSlingOutcome(f, result, entry)
+}
+
+// specSlingCensusPath names the file this sling writes its bd census to: the
+// launch time and a sequence, so concurrent slings never share a file and a
+// restarted daemon never overwrites rows it left unfolded (gt-3y319).
+func (d *Daemon) specSlingCensusPath() string {
+	run := fmt.Sprintf("%d-%d", d.clk().Now().UnixNano(), d.specSlingCensusSeq.Add(1))
+	return dispatch.SpecSlingCensusPath(d.config.TownRoot, run)
 }
 
 // exitedOnItsOwn reports whether err says the process exited by itself with a

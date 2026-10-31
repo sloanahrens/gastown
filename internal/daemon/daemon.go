@@ -633,8 +633,11 @@ type Daemon struct {
 	specDispatchDeferLogged atomic.Bool
 
 	// specSlings is the slings the ticks planned and the daemon still has
-	// running in the background (spec_slings.go, gt-5h70s).
-	specSlings specSlings
+	// running in the background (spec_slings.go, gt-5h70s), and
+	// specSlingCensusSeq numbers each sling's census file within the launch
+	// instant it is named for (gt-3y319).
+	specSlings         specSlings
+	specSlingCensusSeq atomic.Uint64
 
 	// specSeats is the seat settings the ticker read last, and specSeatHold
 	// remembers the read error it last saw, so a seat file that does not parse

@@ -7,6 +7,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"log"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -99,7 +100,7 @@ type blockedSlings struct {
 
 func (b *blockedSlings) answer(args []string) cliReply {
 	if len(args) >= 2 && args[0] == "spec" && args[1] == "sling" {
-		b.started <- args[len(args)-1]
+		b.started <- cliFlagValue(args, "--job")
 		<-b.release
 		b.clock.Advance(slingTook)
 		return cliReply{stdout: string(wireOut(`{"dispatched":[{"bead":"gt-a","line":"gt-a: slung to gastown/p on claude-sonnet"}]}`))}
@@ -107,6 +108,15 @@ func (b *blockedSlings) answer(args []string) cliReply {
 	report := b.ticks[min(b.tick, len(b.ticks)-1)]
 	b.tick++
 	return cliReply{stdout: string(wireOut(report))}
+}
+
+// cliFlagValue is the value of --name in a fake CLI's argv, or "" when the flag
+// is absent.
+func cliFlagValue(args []string, name string) string {
+	if i := slices.Index(args, name); i >= 0 && i+1 < len(args) {
+		return args[i+1]
+	}
+	return ""
 }
 
 // newBlockedSlings is a blockedSlings and the daemon that runs against it, on
@@ -167,6 +177,58 @@ func TestNextTickStartsWhileAnEarlierSlingIsStillRunning(t *testing.T) {
 	// The fake answers both slings with the same report.
 	if n := countContaining(got, "spec_dispatch: dispatched: gt-a: slung to gastown/p", "sling took"); n != 2 {
 		t.Errorf("sling result lines = %d, want one per finished sling: %v", n, got)
+	}
+}
+
+// The daemon tells each background sling where to write its bd census: a
+// per-run file beside the tick's sink, which the daemon folds into its census
+// line (gt-3y319).
+func TestSpecSlingIsToldItsCensusPath(t *testing.T) {
+	t.Parallel()
+	b, fake, d, _ := newBlockedSlings(t, plannedTick(slingJob("gt-a", "claude-sonnet")))
+
+	d.runSpecDispatch()
+	recvSling(t, b.started)
+	close(b.release)
+	waitSlings(t, d)
+
+	calls := fake.argvs("spec", "sling")
+	if len(calls) != 1 {
+		t.Fatalf("slings run = %v, want one", calls)
+	}
+	path := cliFlagValue(calls[0], "--census-path")
+	if want := filepath.Join(d.config.TownRoot, "daemon"); path == "" || filepath.Dir(path) != want {
+		t.Errorf("--census-path = %q, want a per-run file in %s", path, want)
+	}
+}
+
+// A daemon restarted on the same town names its sling census files apart from
+// those the daemon before it left unfolded, so a restart never overwrites rows
+// no tick has folded (gt-3y319).
+func TestARestartedDaemonDoesNotReuseSlingCensusFiles(t *testing.T) {
+	t.Parallel()
+	b, fake, first, _ := newBlockedSlings(t, plannedTick(slingJob("gt-a", "claude-sonnet")))
+	first.runSpecDispatch()
+	recvSling(t, b.started)
+	close(b.release)
+	waitSlings(t, first)
+
+	// The daemon restarts on the same town, later, its sequence starting again.
+	logger, _ := lineLogger()
+	second := specDispatchFake(t, fake, logger)
+	second.config.TownRoot = first.config.TownRoot
+	second.clock = clockwork.NewFakeClockAt(newSlingClock().Now().Add(time.Minute))
+	second.runSpecDispatch()
+	recvSling(t, b.started)
+	waitSlings(t, second)
+
+	calls := fake.argvs("spec", "sling")
+	if len(calls) != 2 {
+		t.Fatalf("slings run = %v, want two", calls)
+	}
+	before, after := cliFlagValue(calls[0], "--census-path"), cliFlagValue(calls[1], "--census-path")
+	if before == "" || before == after {
+		t.Errorf("census paths %q and %q: a restarted daemon must name its sling apart", before, after)
 	}
 }
 
