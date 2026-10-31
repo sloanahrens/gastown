@@ -202,23 +202,65 @@ func TestGuardRunPassesAWorkingDirectoryBeneathAWorkspace(t *testing.T) {
 
 // TestGuardRunRefusesAWorkingDirectoryThatIsAWorkspaceRoot: a recorder whose working directory is
 // the workspace root itself is refused before any bd call, since that is where bd init would rewrite
-// the store the recorder did not make (gt-p85pw.116).
+// the store the recorder did not make. A root is either a marker the directory holds -- the .beads
+// tree or the metadata.json bd keeps beside it -- or one it reaches through a symlink, which the
+// guard resolves before it looks (gt-p85pw.116).
 func TestGuardRunRefusesAWorkingDirectoryThatIsAWorkspaceRoot(t *testing.T) {
 	t.Parallel()
-	tree := tempDir(t)
-	metadata := filepath.Join(tree, ".beads", "metadata.json")
-	mustWrite(t, metadata, `{"dolt_database":"hq"}`)
-	before := readFile(t, metadata)
-	bd := &guardBD{}
-	err := guardRun(cwdAt(tree), filepath.Join(tempDir(t), "scratch"), pinnedChild(bd.Run, filepath.Join(tree, ".beads")))
-	if err == nil || !strings.Contains(err.Error(), "workspace root") {
-		t.Fatalf("guardRun in a workspace root = %v, want it refused", err)
+	tests := []struct {
+		name     string
+		root     func(t *testing.T) (cwd, marker string) // marker is the store file the refusal must leave untouched
+		resolved bool                                    // the refusal also names the root the working directory resolves to
+	}{
+		{"the .beads it holds", func(t *testing.T) (string, string) {
+			tree := tempDir(t)
+			metadata := filepath.Join(tree, ".beads", "metadata.json")
+			mustWrite(t, metadata, `{"dolt_database":"hq"}`)
+			return tree, metadata
+		}, false},
+		{"the metadata.json it holds", func(t *testing.T) (string, string) {
+			tree := tempDir(t)
+			metadata := filepath.Join(tree, "metadata.json")
+			mustWrite(t, metadata, `{"dolt_database":"hq"}`)
+			return tree, metadata
+		}, false},
+		{"a working directory behind a symlink to a root", func(t *testing.T) (string, string) {
+			root := tempDir(t)
+			metadata := filepath.Join(root, ".beads", "metadata.json")
+			mustWrite(t, metadata, `{"dolt_database":"hq"}`)
+			link := filepath.Join(tempDir(t), "clean-looking")
+			if err := os.Symlink(root, link); err != nil {
+				t.Fatalf("make the symlink: %v", err)
+			}
+			return link, metadata
+		}, true},
 	}
-	if len(bd.args) != 0 {
-		t.Errorf("bd ran %v, want no bd run attempted", bd.args)
-	}
-	if after := readFile(t, metadata); after != before {
-		t.Errorf("%s = %q after the refused run, want %q", metadata, after, before)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cwd, marker := tc.root(t)
+			before := readFile(t, marker)
+			bd := &guardBD{}
+			err := guardRun(cwdAt(cwd), filepath.Join(tempDir(t), "scratch"), pinnedChild(bd.Run, "/nowhere/.beads"))
+			if err == nil || !strings.Contains(err.Error(), "workspace root") {
+				t.Fatalf("guardRun in %s = %v, want it refused", tc.name, err)
+			}
+			if tc.resolved {
+				real, rerr := filepath.EvalSymlinks(cwd)
+				if rerr != nil {
+					t.Fatalf("resolve %s: %v", cwd, rerr)
+				}
+				if !strings.Contains(err.Error(), real) {
+					t.Errorf("guardRun error = %q, want the root it resolves to, %s, named", err, real)
+				}
+			}
+			if len(bd.args) != 0 {
+				t.Errorf("bd ran %v, want no bd run attempted", bd.args)
+			}
+			if after := readFile(t, marker); after != before {
+				t.Errorf("%s = %q after the refused run, want %q", marker, after, before)
+			}
+		})
 	}
 }
 
