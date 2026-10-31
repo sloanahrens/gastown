@@ -155,7 +155,7 @@ const (
 
 	// GitCredentialForgejoCommand is the gt subcommand that answers git's
 	// credential protocol for a Forgejo from a bot's token file (gt-dhjz6).
-	GitCredentialForgejoCommand = "git-credential-forgejo"
+	GitCredentialForgejoCommand = "git-credential-forgejo" //nolint:gosec // a command name, not a credential
 )
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town
