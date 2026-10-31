@@ -320,6 +320,57 @@ func TestExportEventsAppendNeverDuplicatesTheBoundary(t *testing.T) {
 	}
 }
 
+// TestExportEventsKeepsTheBoundaryRowsWhenAnAppendStaysInTheSecond: a cycle
+// whose only new rows are stamped at the boundary second grows the run the file
+// ends in, and the ids that run already held stay known to the next cycle. A
+// boundary list replaced by the fresh rows alone reads them as new and appends
+// them a second time (gt-l7eeb).
+func TestExportEventsKeepsTheBoundaryRowsWhenAnAppendStaysInTheSecond(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 10, 31, 10, 5, 0, 0, time.UTC))
+	fake := &eventsTableFake{rows: []eventsTestRow{{"e1", "2026-10-31 10:00:00"}}}
+	d.jsonlTableExportFn = fake.exporter(t, nil)
+	gitRepo := t.TempDir()
+	dbDir := filepath.Join(gitRepo, "hq")
+	dataDir := t.TempDir()
+	export := func(cycle int) {
+		t.Helper()
+		if _, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false); err != nil {
+			t.Fatalf("cycle %d: %v", cycle, err)
+		}
+	}
+
+	export(1) // the whole table, ending at 10:00:00 with e1
+	fake.rows = append(fake.rows, eventsTestRow{"e2", "2026-10-31 10:01:00"})
+	export(2) // the boundary moves to 10:01:00, whose run holds e2
+	// Every row from here on is stamped at the boundary second the file ends
+	// on, so each cycle adds to the run the previous one recorded.
+	fake.rows = append(fake.rows, eventsTestRow{"e3", "2026-10-31 10:01:00"})
+	export(3)
+	export(4) // no new row: the boundary run read back must be recognised
+
+	want := []string{"e1", "e2", "e3"}
+	if got := eventsExportIDs(t, dbDir); !slices.Equal(got, want) {
+		t.Errorf("the export holds %v, want every row once in created_at, id order: %v", got, want)
+	}
+	state, err := readEventsExportState(dbDir)
+	if err != nil {
+		t.Fatalf("reading the state: %v", err)
+	}
+	if state.Rows != len(want) {
+		t.Errorf("state.Rows = %d, want the %d rows the file holds", state.Rows, len(want))
+	}
+	if state.LastCreatedAt != "2026-10-31 10:01:00" {
+		t.Errorf("state.LastCreatedAt = %q, want the second the file ends at", state.LastCreatedAt)
+	}
+	for i, q := range fake.queries[2:] {
+		if bound, ok := eventsQueryBound(q); !ok || bound != "2026-10-31 10:01:00" {
+			t.Errorf("cycle %d read from bound %q (bounded %v), want the boundary the file ends at", i+3, bound, ok)
+		}
+	}
+}
+
 // TestAppendEventRowsKeepsAShardedExportInOrder: the append merges the new
 // boundary rows into the run the file ends in and, when the last shard fills,
 // continues in a shard of its own without losing a row.

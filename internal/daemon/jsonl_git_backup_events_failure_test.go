@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,57 @@ func seedEventsExport(t *testing.T, dir string, rows ...eventsTestRow) {
 	}
 	if err := writeEventsExportState(dir, state); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// eventsExportSnapshot is what the events export in dir holds: each shard's
+// bytes and the state recorded beside it, so a test can show a failed append
+// changed neither.
+type eventsExportSnapshot struct {
+	shards map[string]string
+	state  string
+}
+
+// snapshotEventsExport reads dir's shards and its recorded state.
+func snapshotEventsExport(t *testing.T, dir string) eventsExportSnapshot {
+	t.Helper()
+	paths, err := jsonlShardPaths(dir, "events")
+	if err != nil {
+		t.Fatalf("listing the events export: %v", err)
+	}
+	snapshot := eventsExportSnapshot{shards: make(map[string]string, len(paths))}
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", filepath.Base(path), err)
+		}
+		snapshot.shards[filepath.Base(path)] = string(b)
+	}
+	state, err := os.ReadFile(eventsExportStatePath(dir))
+	if err != nil {
+		t.Fatalf("reading the state: %v", err)
+	}
+	snapshot.state = string(state)
+	return snapshot
+}
+
+// assertHeld fails when dir no longer holds the export the snapshot recorded,
+// shard for shard and state byte for byte.
+func (s eventsExportSnapshot) assertHeld(t *testing.T, dir string) {
+	t.Helper()
+	now := snapshotEventsExport(t, dir)
+	if len(now.shards) != len(s.shards) {
+		t.Errorf("the failed append changed the shard count: %d now, want the %d it started with", len(now.shards), len(s.shards))
+	}
+	for name, want := range s.shards {
+		if got, ok := now.shards[name]; !ok {
+			t.Errorf("the failed append removed %s", name)
+		} else if got != want {
+			t.Errorf("the failed append rewrote %s:\n got %s\nwant %s", name, got, want)
+		}
+	}
+	if now.state != s.state {
+		t.Errorf("the failed append changed the recorded state:\n got %s\nwant %s", now.state, s.state)
 	}
 }
 
@@ -404,17 +456,29 @@ func TestAppendEventRowsReportsItsFailures(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		seedEventsExport(t, dir, eventsTestRow{"e1", "2026-10-31 10:00:00"})
-		if _, err := appendEventRows(dir, []json.RawMessage{newRow}, state(1), jsonlShardMaxBytes, 1); err == nil {
+		before := snapshotEventsExport(t, dir)
+		st := state(1)
+		if _, err := appendEventRows(dir, []json.RawMessage{newRow}, st, jsonlShardMaxBytes, 1); err == nil {
 			t.Error("a shard over the hard limit was written")
+		}
+		before.assertHeld(t, dir)
+		if st.Rows != 1 || st.LastCreatedAt != "2026-10-31 10:00:00" || !slices.Equal(st.BoundaryIDs, []string{"e1"}) {
+			t.Errorf("the refused append advanced the state to %+v, want the boundary it started from", st)
 		}
 	})
 	t.Run("a shard cannot be written", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		seedEventsExport(t, dir, eventsTestRow{"e1", "2026-10-31 10:00:00"})
+		before := snapshotEventsExport(t, dir)
+		st := state(1)
 		readOnlyFile(t, filepath.Join(dir, "events.jsonl"))
-		if _, err := appendEventRows(dir, []json.RawMessage{newRow}, state(1), jsonlShardMaxBytes, jsonlShardHardLimit); err == nil {
+		if _, err := appendEventRows(dir, []json.RawMessage{newRow}, st, jsonlShardMaxBytes, jsonlShardHardLimit); err == nil {
 			t.Error("an append that could not write the shard reported success")
+		}
+		before.assertHeld(t, dir)
+		if st.Rows != 1 || st.LastCreatedAt != "2026-10-31 10:00:00" || !slices.Equal(st.BoundaryIDs, []string{"e1"}) {
+			t.Errorf("the failed append advanced the state to %+v, want the boundary it started from", st)
 		}
 	})
 	t.Run("the appended file fails its count", func(t *testing.T) {

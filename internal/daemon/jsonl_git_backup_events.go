@@ -420,15 +420,28 @@ func appendEventRows(dir string, rows []json.RawMessage, state *eventsExportStat
 		return 0, err
 	}
 
+	// The rows stamped at the second the file already ended on join the run it
+	// ends in, so the ids the entry state held for that second stay in the
+	// file. Kept only when the boundary moves on, they would be read as new by
+	// the next cycle, which reads from the same second, and appended again.
+	entryBoundary := state.LastCreatedAt
+	entryIDs := append([]string(nil), state.BoundaryIDs...)
+
 	state.Rows = total
 	newest := fresh[len(fresh)-1]
 	state.LastCreatedAt = newest.createdAt
-	state.BoundaryIDs = state.BoundaryIDs[:0]
+	var boundaryIDs []string
+	if newest.createdAt == entryBoundary {
+		// freshEventRows dropped every row the entry ids already named, so the
+		// union with the rows at that second holds each id once.
+		boundaryIDs = entryIDs
+	}
 	for _, row := range fresh {
 		if row.createdAt == newest.createdAt {
-			state.BoundaryIDs = append(state.BoundaryIDs, row.id)
+			boundaryIDs = append(boundaryIDs, row.id)
 		}
 	}
+	state.BoundaryIDs = boundaryIDs
 	return len(fresh), nil
 }
 
