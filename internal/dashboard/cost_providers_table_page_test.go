@@ -35,14 +35,27 @@ type costElem struct {
 	Text  string `json:"text"`
 }
 
+// costScrollWrapperJS finds the element costProviders draws the providers table
+// in: a .costscroll div, so a narrow panel scrolls the table's nine columns
+// sideways instead of clipping the Status cell. This is the one place its
+// traversal is written.
+const costScrollWrapperJS = `__byId["cost"].children.filter(c => c.className === "costscroll")[0]`
+
+// costProvidersTableJS finds the providers table inside that wrapper, or null
+// when the panel drew none. Every read-back below goes through this lookup, so
+// moving the table another level down changes this constant alone.
+const costProvidersTableJS = `(() => {
+	const wrap = ` + costScrollWrapperJS + `;
+	return wrap ? wrap.children.filter(c => c.tagName === "TABLE" && c.className === "costprov")[0] || null : null;
+})()`
+
 // costTable reads back the providers table the Cost panel drew: the header row,
 // then one row per provider. A panel that drew no table fails the test.
 func costTable(t *testing.T, dom *pageDOM) []costTableRow {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const wrap = __byId["cost"].children.filter(c => c.className === "costscroll")[0];
-		const tbl = wrap && wrap.children.filter(c => c.className === "costprov")[0];
+		const tbl = ` + costProvidersTableJS + `;
 		if (!tbl) return null;
 		return tbl.children.map(tr => ({
 			class: tr.className, title: tr.title || "",
@@ -112,7 +125,7 @@ func costFoldChildren(t *testing.T, dom *pageDOM, key string) []costElem {
 func costTableDrawn(t *testing.T, dom *pageDOM) bool {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`__byId["cost"].children.some(c => c.className === "costscroll" && c.children.some(t => t.className === "costprov"))`)
+	v, err := dom.vm.RunString(`Boolean(` + costProvidersTableJS + `)`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
 	}
@@ -456,9 +469,9 @@ func TestCostProvidersTableGreysOnlyTheDeepSeekRowForAStaleSpendRead(t *testing.
 		const cost = __byId["cost"];
 		const spend = cost.children.filter(c => c.className.split(" ").indexOf("spendpart") >= 0)[0];
 		return {
-			tableOnPanel: cost.children.some(c => c.className === "costscroll" && c.children.some(t => t.className === "costprov")),
+			tableOnPanel: Boolean(` + costProvidersTableJS + `),
 			spendGreyed: spend.className.split(" ").indexOf("stale") >= 0,
-			tableInSpend: spend.children.some(c => c.className === "costprov" || c.children.some(t => t.className === "costprov"))
+			tableInSpend: Boolean(spend.querySelector(".costprov"))
 		};
 	})())`)
 	if err != nil {
@@ -899,12 +912,11 @@ func TestCostProvidersTableScrollsSidewaysInsteadOfClipping(t *testing.T) {
 	dom := newPageDOM(t)
 	dom.call(t, "renderCost", costPanelState([]map[string]any{deepSeekProvider(), claudeProvider()}, map[string]any{"spend": spendReading()}))
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const cost = __byId["cost"];
-		const wrap = cost.children.filter(c => c.className === "costscroll")[0];
+		const wrap = ` + costScrollWrapperJS + `;
 		return {
 			wrapper: Boolean(wrap),
-			tableInWrapper: Boolean(wrap) && wrap.children.some(c => c.tagName === "TABLE" && c.className === "costprov"),
-			tableAtPanel: cost.children.some(c => c.className === "costprov")
+			tableInWrapper: Boolean(` + costProvidersTableJS + `),
+			tableAtPanel: __byId["cost"].children.some(c => c.className === "costprov")
 		};
 	})())`)
 	if err != nil {
