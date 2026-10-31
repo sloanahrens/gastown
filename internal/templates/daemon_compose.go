@@ -145,6 +145,12 @@ var (
 // and the only DoltHost a scratch spec may name: the live Dolt is on the Mac.
 const ScratchDoltService = "scratch-dolt"
 
+// ScratchDoltPort is the port the scratch Dolt server listens on: the pinned
+// image's default, which the service does not change. The healthcheck probes
+// it and the daemon's command passes it to the entrypoint, so the install
+// dials the port the server serves rather than gt's own default, 3307.
+const ScratchDoltPort = 3306
+
 // The scratch project's Dolt server, which only the scratch render has. It
 // joins the internal network alone and publishes no port.
 const (
@@ -352,7 +358,8 @@ func scratchDaemonCommand(omTokenFile string) string {
 	for _, line := range scratchOperatorNote {
 		b.WriteString("    # " + line + "\n")
 	}
-	argv := []string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, ScratchDoltService}
+	argv := []string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, ScratchDoltService,
+		"--" + config.DoltPortFlag, strconv.Itoa(ScratchDoltPort)}
 	if omTokenFile != "" {
 		argv = append(argv, "--"+config.OMTokenFileFlag, composeLiteral(omTokenFile))
 	}

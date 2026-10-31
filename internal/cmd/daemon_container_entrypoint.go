@@ -46,6 +46,11 @@ type entrypointFlags struct {
 	// not the same thing, since an empty host is refused.
 	doltHost    string
 	doltHostSet bool
+	// doltPort is --dolt-port, the port that Dolt server listens on; doltPortSet
+	// says the flag was given, since port 0 is refused and so must be told apart
+	// from no port at all.
+	doltPort    int
+	doltPortSet bool
 }
 
 // newDaemonContainerEntrypointCmd builds the command over run, which receives
@@ -98,6 +103,7 @@ Every check runs before the first command, so a refusal runs nothing.`,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			flags.doltHostSet = cmd.Flags().Changed(config.DoltHostFlag)
+			flags.doltPortSet = cmd.Flags().Changed(config.DoltPortFlag)
 			return run(flags)
 		},
 	}
@@ -107,6 +113,8 @@ Every check runs before the first command, so a refusal runs nothing.`,
 		"Read the om subscription token from this file and give it to the daemon; the file's mode is not checked")
 	cmd.Flags().StringVar(&flags.doltHost, config.DoltHostFlag, "",
 		"Give this Dolt host to the scratch town's install; accepted only with --"+config.ScratchTownFlag)
+	cmd.Flags().IntVar(&flags.doltPort, config.DoltPortFlag, 0,
+		"Give this port of that Dolt host to the scratch town's install; accepted only with --"+config.DoltHostFlag)
 	return cmd
 }
 
@@ -138,6 +146,10 @@ type containerEntrypoint struct {
 	// so must be told apart from no host at all.
 	doltHost    string
 	doltHostSet bool
+	// doltPort is --dolt-port, the port that server listens on; doltPortSet says
+	// the flag was given.
+	doltPort    int
+	doltPortSet bool
 }
 
 // entryKind is what a path is, as Lstat reports it. A symbolic link is
@@ -168,6 +180,8 @@ func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 		omTokenFile: flags.omTokenFile,
 		doltHost:    flags.doltHost,
 		doltHostSet: flags.doltHostSet,
+		doltPort:    flags.doltPort,
+		doltPortSet: flags.doltPortSet,
 	})
 }
 
@@ -298,6 +312,15 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 // empty too, as `gt install` reads it. Every refusal runs before the first
 // command.
 func (e containerEntrypoint) refuseDoltHost() error {
+	if e.doltPortSet {
+		if !e.doltHostSet {
+			return fmt.Errorf("--%s is given without --%s; the port belongs to the Dolt server the host names, so nothing was started",
+				config.DoltPortFlag, config.DoltHostFlag)
+		}
+		if e.doltPort < 1 || e.doltPort > 65535 {
+			return fmt.Errorf("--%s %d is not a port (1 to 65535), so nothing was started", config.DoltPortFlag, e.doltPort)
+		}
+	}
 	if !e.doltHostSet {
 		return nil
 	}
@@ -345,6 +368,10 @@ func (e containerEntrypoint) refuseDoltHostTheTownDoesNotName(townRoot string) e
 	}
 	host := strings.TrimSpace(e.doltHost)
 	if strings.EqualFold(named, host) {
+		if e.doltPortSet && (town.Dolt == nil || town.Dolt.Port != e.doltPort) {
+			return fmt.Errorf("--%s %d is not the port the town at %s already names for %q, and this start runs no install that would write it, so the flag would be ignored; nothing was started",
+				config.DoltPortFlag, e.doltPort, townRoot, named)
+		}
 		return nil
 	}
 	if named == "" {
@@ -463,6 +490,9 @@ func (e containerEntrypoint) installArgv(self, townRoot string) []string {
 	argv := []string{self, "install", townRoot, "--git"}
 	if e.doltHostSet {
 		argv = append(argv, "--"+config.DoltHostFlag, e.doltHost)
+	}
+	if e.doltPortSet {
+		argv = append(argv, "--"+config.DoltPortFlag, strconv.Itoa(e.doltPort))
 	}
 	return argv
 }

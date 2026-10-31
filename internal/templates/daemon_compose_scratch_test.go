@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -245,7 +246,8 @@ func TestRenderDaemonCompose_ScratchPassesTheEntrypointFlagsAndTheLiveOneDoesNot
 	t.Parallel()
 	_, scratch := render(t, scratchSpec())
 	if got, want := scratch.Services["daemon"].Command,
-		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService}; !slices.Equal(got, want) {
+		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService,
+			"--" + config.DoltPortFlag, strconv.Itoa(templates.ScratchDoltPort)}; !slices.Equal(got, want) {
 		t.Errorf("scratch daemon command = %q, want %q", got, want)
 	}
 
@@ -253,7 +255,7 @@ func TestRenderDaemonCompose_ScratchPassesTheEntrypointFlagsAndTheLiveOneDoesNot
 	if got := live.Services["daemon"].Command; len(got) != 0 {
 		t.Errorf("live daemon command = %q, want none", got)
 	}
-	for _, flag := range []string{config.ScratchTownFlag, config.DoltHostFlag} {
+	for _, flag := range []string{config.ScratchTownFlag, config.DoltHostFlag, config.DoltPortFlag} {
 		if strings.Contains(liveOut, flag) {
 			t.Errorf("live render carries %q, which only the scratch project passes:\n%s", flag, liveOut)
 		}
@@ -266,7 +268,8 @@ func TestRenderDaemonCompose_ScratchForgePassesTheDoltHost(t *testing.T) {
 	t.Parallel()
 	_, f := render(t, forgeSpec())
 	if got, want := f.Services["daemon"].Command,
-		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService}; !slices.Equal(got, want) {
+		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService,
+			"--" + config.DoltPortFlag, strconv.Itoa(templates.ScratchDoltPort)}; !slices.Equal(got, want) {
 		t.Errorf("scratch forge daemon command = %q, want %q", got, want)
 	}
 }
@@ -392,6 +395,7 @@ func TestRenderDaemonCompose_ScratchPassesTheOMTokenFile(t *testing.T) {
 	want := []string{
 		"--" + config.ScratchTownFlag,
 		"--" + config.DoltHostFlag, templates.ScratchDoltService,
+		"--" + config.DoltPortFlag, strconv.Itoa(templates.ScratchDoltPort),
 		"--" + config.OMTokenFileFlag, "/run/secrets/om-token",
 	}
 	if got := parsed.Services["daemon"].Command; !slices.Equal(got, want) {
@@ -441,5 +445,21 @@ func TestRenderDaemonCompose_OMTokenFileIsRefusedWhereItDoesNotBelong(t *testing
 	liveOut, _ := render(t, liveSpec())
 	if strings.Contains(liveOut, config.OMTokenFileFlag) {
 		t.Errorf("the live render carries --%s:\n%s", config.OMTokenFileFlag, liveOut)
+	}
+}
+
+// The scratch Dolt's healthcheck probes ScratchDoltPort, and the daemon's
+// command passes the same port to the entrypoint, so the install dials the
+// port the server serves. The image listens on 3306 while gt's own default is
+// 3307, which is the mismatch the L2 run of 2026-10-31 hit (gt-i2ekc).
+func TestRenderDaemonCompose_ScratchDoltPortIsOneValueInProbeAndCommand(t *testing.T) {
+	t.Parallel()
+	out, _ := render(t, scratchSpec())
+	port := strconv.Itoa(templates.ScratchDoltPort)
+	if !strings.Contains(out, "/dev/tcp/127.0.0.1/"+port) {
+		t.Errorf("the scratch Dolt healthcheck does not probe port %s:\n%s", port, out)
+	}
+	if !strings.Contains(out, `"--`+config.DoltPortFlag+`", "`+port+`"`) {
+		t.Errorf("the daemon command does not pass --%s %s:\n%s", config.DoltPortFlag, port, out)
 	}
 }
