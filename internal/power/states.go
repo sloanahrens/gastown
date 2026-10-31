@@ -183,14 +183,21 @@ func boolInt(b bool) int {
 
 // Full brings every part up, clears the ESTOP and the hold, and records the
 // state. The hold goes down first so nothing dispatches while the stack comes
-// up.
+// up. A Ring the town keeps is renewed once the infra is up; a Ring that cannot
+// be renewed refuses full before anything changes.
 func Full(ctx context.Context, o Options) error {
 	e := newEngine(o)
+	if err := e.checkRingRenewable(); err != nil {
+		return err
+	}
 	e.say("-> full")
 	if err := e.setHold(); err != nil {
 		return err
 	}
 	if err := e.ensureInfra(ctx); err != nil {
+		return err
+	}
+	if err := e.renewRing(); err != nil {
 		return err
 	}
 	if !o.DryRun {
@@ -255,9 +262,11 @@ func Standby(ctx context.Context, o Options) error {
 	if err := e.setEstop(ctx, StateStandby); err != nil {
 		return err
 	}
+	ringErr := e.waneRing()
 	e.stopSandboxes()
 	e.jobhostDown(ctx)
 	e.reportStrandedSandboxes()
+	e.reportRingLeft(ringErr)
 	if err := e.record(string(StateStandby)); err != nil {
 		return err
 	}
@@ -297,6 +306,7 @@ func Off(ctx context.Context, o Options) error {
 	if err := e.setEstop(ctx, StateOff); err != nil {
 		return err
 	}
+	ringErr := e.removeRing()
 	e.stopSandboxes()
 	for _, label := range append([]string{DaemonLabel}, WatcherLabels...) {
 		if !e.loaded(ctx, label) {
@@ -320,6 +330,7 @@ func Off(ctx context.Context, o Options) error {
 	}
 	e.jobhostDown(ctx)
 	e.reportStrandedSandboxes()
+	e.reportRingLeft(ringErr)
 	if probeErr != nil {
 		// The stop went out blind, so nothing confirms the stack is down. The
 		// Dolt stop and the jobhost hook above still ran: they do not depend on it.
