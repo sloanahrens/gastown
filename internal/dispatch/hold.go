@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/ring"
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
@@ -27,20 +29,27 @@ func HoldFilePath(townRoot string) string {
 }
 
 // OperatorHold reports why automatic dispatch must not run in this town right
-// now, or "" when it may. It answers for the operator's hold file and for a
-// town-wide ESTOP, the two hand brakes the seat-refill plugin checked and the
-// spec dispatcher checks now. It is the one dispatch choke point for e-stop
-// (gt-4k3fj.4); restarts and kills have theirs in internal/supervisor.
+// now, or "" when it may. It answers for the operator's hold file, for a
+// town-wide ESTOP and for the Ring when it is Waned, the holds the seat-refill
+// plugin checked and the spec dispatcher checks now. It is the one dispatch
+// choke point for e-stop (gt-4k3fj.4); restarts and kills have theirs in
+// internal/supervisor.
 //
 // Only automatic dispatchers consult it. An explicit `gt sling` typed by an
-// operator is the decision the hold file defers to; an e-stop refuses it too,
-// in the sling path itself.
+// operator is the decision the hold file defers to; an e-stop and a Waned
+// Ring refuse it too, in the sling path itself.
 //
 // A hold path or ESTOP sentinel that cannot be stat'ed for any reason other
 // than not existing fails closed: the hold cannot be ruled out, and
 // dispatching through a hold is the outcome it exists to prevent (gt-ifijm,
 // gt-e7lqk).
 func OperatorHold(townRoot string) string {
+	return operatorHold(townRoot, ring.TownKey(os.Getenv), time.Now())
+}
+
+// operatorHold is OperatorHold over the Ring's key resolver and clock, so a
+// test judges the Ring without reading the process environment.
+func operatorHold(townRoot string, key ring.KeyFunc, now time.Time) string {
 	if townRoot == "" {
 		return ""
 	}
@@ -50,7 +59,10 @@ func OperatorHold(townRoot string) string {
 	} else if !os.IsNotExist(err) {
 		return fmt.Sprintf("operator dispatch hold unreadable (%v); treating as held", err)
 	}
-	return estopHold(townRoot, "")
+	if reason := estopHold(townRoot, ""); reason != "" {
+		return reason
+	}
+	return ring.Hold(townRoot, key, now)
 }
 
 // estopHold reports the e-stop that covers rig ("" for the town sentinel

@@ -13,7 +13,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/ring"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -38,15 +37,7 @@ type ringDeps struct {
 // key resolves the signing key. A town with no resolvable key is refused
 // before any verb reads or writes the Ring.
 func (d ringDeps) key() ([]byte, error) {
-	settings, err := config.LoadTownSettings(config.TownSettingsPath(d.townRoot))
-	if err != nil {
-		return nil, fmt.Errorf("reading settings/config.json: %w", err)
-	}
-	key, err := settings.RingKeyFrom(d.getenv)
-	if err != nil {
-		return nil, err
-	}
-	return []byte(key), nil
+	return ring.TownKey(d.getenv)(d.townRoot)
 }
 
 // lease signs and stores a record forged now by the session actor, valid for

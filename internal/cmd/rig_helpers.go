@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/ring"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -133,12 +135,19 @@ func findCurrentRigWith(getenv func(string) string, cwd, townRoot string) (strin
 	return rigName, r, nil
 }
 
+// ringHoldNow is the Ring's hold on a dispatch at the wall clock, its key read
+// under the daemon environment. Every dispatch path passes it to slingBlocked
+// or the sling engine.
+func ringHoldNow(townRoot string) string {
+	return ring.Hold(townRoot, ring.TownKey(os.Getenv), time.Now())
+}
+
 // slingBlocked is why a sling into rigName must not run, or nil when it may.
 // The guards themselves are sling.Blocked's: the dispatch engine runs them for
 // the automatic dispatchers as well as for this command, and a second copy
 // here is a rule the two could drift apart on.
-func slingBlocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) error {
-	_, err := sling.Blocked(townRoot, rigName, estopOn, parked)
+func slingBlocked(townRoot, rigName string, ringHold func(townRoot string) string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) error {
+	_, err := sling.Blocked(townRoot, rigName, ringHold, estopOn, parked)
 	return err
 }
 

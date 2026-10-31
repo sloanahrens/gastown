@@ -7,8 +7,9 @@
 // Sign and Verify cover HMAC-SHA256 with a key the caller supplies; this
 // package never reads one from the environment or from config. The bytes the
 // signature covers are unambiguous: every signed field is length-prefixed,
-// so no two records share a signed form (canonical). Nothing reads the Ring
-// for behavior yet (gt-6mlik.5).
+// so no two records share a signed form (canonical). Hold is the one reader
+// that acts on the Ring: the dispatch hold, the sling path and the supervisor
+// call it (gt-6mlik.5).
 package ring
 
 import (
@@ -203,39 +204,56 @@ func read(townRoot string, hostOf func(key string) (host string, ok bool), key [
 	if len(key) == 0 {
 		return State{}, ErrNoKey
 	}
-	path, err := hostPath(townRoot, hostOf)
+	raw, err := section(townRoot, hostOf)
 	if err != nil {
 		return State{}, err
+	}
+	return classify(raw, key, now), nil
+}
+
+// section is the raw ring section of the town's machine config, empty when the
+// town has none.
+func section(townRoot string, hostOf func(key string) (host string, ok bool)) (json.RawMessage, error) {
+	path, err := hostPath(townRoot, hostOf)
+	if err != nil {
+		return nil, err
 	}
 	town, err := config.LoadTownConfig(path)
 	if err != nil {
 		// A town whose config cannot be read is not a town with no ring: the
 		// caller has to act on it, so it is an error and not Absent.
-		return State{}, fmt.Errorf("reading the ring: %w", err)
+		return nil, fmt.Errorf("reading the ring: %w", err)
 	}
-	if len(town.Ring) == 0 {
-		return absent(ReasonNoSection), nil
+	return town.Ring, nil
+}
+
+// classify is the State of a ring section's raw bytes at now, verified under
+// key. It never returns an error: every way the bytes cannot be trusted is
+// Absent with its reason.
+func classify(raw json.RawMessage, key []byte, now time.Time) State {
+	if len(raw) == 0 {
+		return absent(ReasonNoSection)
 	}
-	if bytes.Equal(bytes.TrimSpace(town.Ring), []byte("null")) {
-		return absent(ReasonUnparseable), nil
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return absent(ReasonUnparseable)
 	}
 	var rec Record
-	if err := json.Unmarshal(town.Ring, &rec); err != nil {
-		return absent(ReasonUnparseable), nil
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return absent(ReasonUnparseable)
 	}
 	if rec.ExpiresAt.IsZero() {
-		return absent(ReasonNoExpiry), nil
+		return absent(ReasonNoExpiry)
 	}
 	switch err := Verify(rec, key); {
 	case errors.Is(err, ErrUnsigned):
-		return absent(ReasonUnsigned), nil
+		return absent(ReasonUnsigned)
 	case err != nil:
-		return absent(ReasonBadSignature), nil
+		return absent(ReasonBadSignature)
 	}
 	if !now.Before(rec.ExpiresAt) {
-		return State{Kind: Waned, Record: &rec, Reason: ReasonExpired}, nil
+		return State{Kind: Waned, Record: &rec, Reason: ReasonExpired}
 	}
-	return State{Kind: Valid, Record: &rec}, nil
+	return State{Kind: Valid, Record: &rec}
 }
 
 // Write stores rec as the town's ring section through the config kernel's

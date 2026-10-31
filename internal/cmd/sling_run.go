@@ -130,6 +130,7 @@ type slingDeps struct {
 	lockBead           func(townRoot, beadID string) (func(), error)
 	lockAssignee       func(townRoot, targetAgent string) (func(), error)
 	rigParked          func(townRoot, rigName string) (bool, string)
+	ringHold           func(townRoot string) string
 	estopOn            func(townRoot, rigName string) (bool, error)
 	agentDead          func(assignee string) bool
 	survivingWorkGuard func(townRoot, beadID, holder string) error
@@ -255,6 +256,7 @@ func realSlingDeps() *slingDeps {
 		lockBead:           tryAcquireSlingBeadLock,
 		lockAssignee:       tryAcquireSlingAssigneeLock,
 		rigParked:          IsRigParkedOrDocked,
+		ringHold:           ringHoldNow,
 		estopOn:            estop.ActiveFor,
 		agentDead:          isHookedAgentDeadFn,
 		survivingWorkGuard: reslingSurvivingWorkGuard,

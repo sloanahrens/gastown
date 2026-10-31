@@ -23,6 +23,7 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 		Requester:   d.requester,
 		ReleaseSeat: d.engineReleaseSeat,
 
+		RingHold:           d.ringHold,
 		EstopOn:            d.estopOn,
 		RigParked:          d.rigParked,
 		BeadInfoInTown:     d.beadInfoInTown,

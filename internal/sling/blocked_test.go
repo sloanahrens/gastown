@@ -38,6 +38,7 @@ func TestBlockedRefusalsRoundTripThroughSlingRefusalLine(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
+		ring   string
 		estop  func(townRoot, rigName string) (bool, error)
 		parked func(townRoot, rigName string) (bool, string)
 		label  string
@@ -46,6 +47,16 @@ func TestBlockedRefusalsRoundTripThroughSlingRefusalLine(t *testing.T) {
 		// the states apart.
 		detail string
 	}{
+		{
+			// A Waned Ring refuses the rig before the e-stop is read, and names
+			// its wane time so the operator knows what to renew.
+			name:   "waned Ring",
+			ring:   "the Ring waned at 2026-10-31T06:00:00Z; the town stands by",
+			estop:  estopAnswer(false, nil),
+			parked: parkedAnswer(""),
+			label:  "e-stop",
+			detail: "the Ring waned at 2026-10-31T06:00:00Z",
+		},
 		{
 			name:   "e-stop active",
 			estop:  estopAnswer(true, nil),
@@ -87,7 +98,8 @@ func TestBlockedRefusalsRoundTripThroughSlingRefusalLine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			label, err := Blocked("/town", blockedTestRig, tt.estop, tt.parked)
+			ringHold := func(string) string { return tt.ring }
+			label, err := Blocked("/town", blockedTestRig, ringHold, tt.estop, tt.parked)
 			if err == nil {
 				t.Fatal("Blocked returned no refusal")
 			}
