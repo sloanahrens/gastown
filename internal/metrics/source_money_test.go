@@ -90,8 +90,19 @@ func planSample(at time.Time, fiveHour, sevenDay float64, resetsAt int64) string
 // usageRecord is one usage scan record, in the shape dashboard.UsageRecord
 // decodes. models maps a model to its input, output and cache-creation tokens.
 func usageRecord(end time.Time, complete bool, models map[string][3]int64) string {
+	return usageRecordIn("", end, complete, models)
+}
+
+// usageRecordIn is usageRecord with the record's workspace set. An empty
+// workspace writes no field, as a record the scan wrote before the field
+// existed carries none.
+func usageRecordIn(workspace string, end time.Time, complete bool, models map[string][3]int64) string {
+	ws := ""
+	if workspace != "" {
+		ws = fmt.Sprintf(`"workspace":%q,`, workspace)
+	}
 	var b []byte
-	b = append(b, fmt.Sprintf(`{"bead":"gt-a1","kind":"work","class":"polecat","end":%q,"complete":%t,"models":{`, end.UTC().Format(time.RFC3339), complete)...)
+	b = append(b, fmt.Sprintf(`{"bead":"gt-a1","kind":"work","class":"polecat",%s"end":%q,"complete":%t,"models":{`, ws, end.UTC().Format(time.RFC3339), complete)...)
 	first := true
 	for model, tokens := range models {
 		if !first {
@@ -456,6 +467,52 @@ func TestSourceMoneyWithNoReadDirLeavesTheTokenColumnsOut(t *testing.T) {
 		if strings.HasPrefix(key, "tokens_") {
 			t.Errorf("money = %v; want no token column from an Env that cannot list the directory", cols)
 		}
+	}
+}
+
+// A record that carries a workspace and one the scan wrote before the field
+// existed are the same measurement: the workspace changes none of the token
+// totals.
+func TestMoneySourceIgnoresMissingWorkspace(t *testing.T) {
+	t.Parallel()
+	_, _, usage := moneyTestPaths()
+	now := fixedNow()
+	dirs := map[string][]DirEntry{usage: {
+		{Name: "gt-tagged.work.json"},
+		{Name: "gt-plain.work.json"},
+	}}
+	// The same two records twice: once where one carries the workspace field
+	// and once where neither does.
+	tagged := map[string]string{
+		filepath.Join(usage, "gt-tagged.work.json"): usageRecordIn("w1", now.Add(-10*time.Minute), true, map[string][3]int64{
+			"claude-opus-4-6": {100, 50, 10},
+		}),
+		filepath.Join(usage, "gt-plain.work.json"): usageRecord(now.Add(-5*time.Minute), true, map[string][3]int64{
+			"claude-opus-4-6": {7, 3, 0},
+		}),
+	}
+	untagged := map[string]string{
+		filepath.Join(usage, "gt-tagged.work.json"): usageRecord(now.Add(-10*time.Minute), true, map[string][3]int64{
+			"claude-opus-4-6": {100, 50, 10},
+		}),
+		filepath.Join(usage, "gt-plain.work.json"): usageRecord(now.Add(-5*time.Minute), true, map[string][3]int64{
+			"claude-opus-4-6": {7, 3, 0},
+		}),
+	}
+	taggedCols, err := moneySource{}.Collect(context.Background(), moneyTestEnv(t, tagged, dirs, nil))
+	if err != nil {
+		t.Fatalf("Collect with a workspace: %v", err)
+	}
+	untaggedCols, err := moneySource{}.Collect(context.Background(), moneyTestEnv(t, untagged, dirs, nil))
+	if err != nil {
+		t.Fatalf("Collect without one: %v", err)
+	}
+	if !reflect.DeepEqual(taggedCols, untaggedCols) {
+		t.Errorf("money with a workspace = %#v, without one = %#v; want the same readings", taggedCols, untaggedCols)
+	}
+	// Both records counted, so the equality above is not two failed reads.
+	if taggedCols["tokens_claude-opus-4-6_1h"] != int64(170) {
+		t.Errorf("tokens_claude-opus-4-6_1h = %v, want 170 from both records", taggedCols["tokens_claude-opus-4-6_1h"])
 	}
 }
 

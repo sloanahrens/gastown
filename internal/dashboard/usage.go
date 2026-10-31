@@ -89,12 +89,15 @@ type UsageActivity struct {
 // scan's JSON names so the reader decodes a file into it directly, and a
 // file whose shape is wrong fails the decode rather than arriving half-filled.
 type UsageRecord struct {
-	Bead     string  `json:"bead"`
-	Kind     string  `json:"kind"`
-	Class    string  `json:"class"`
-	Rig      string  `json:"rig"`
-	Seat     *string `json:"seat"`
-	Complete bool    `json:"complete"`
+	Bead  string `json:"bead"`
+	Kind  string `json:"kind"`
+	Class string `json:"class"`
+	Rig   string `json:"rig"`
+	// Workspace is the workspace the run spent in, absent from records the
+	// scan wrote before it carried one and so read as the empty string then.
+	Workspace string  `json:"workspace,omitempty"`
+	Seat      *string `json:"seat"`
+	Complete  bool    `json:"complete"`
 	// Start and End are the run's RFC3339 bounds. A record without a parsable
 	// End cannot be placed in any window and is counted as Skipped.
 	Start      time.Time             `json:"start"`

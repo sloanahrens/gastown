@@ -359,3 +359,50 @@ func TestUsagePayloadAndRecordCarryTheAgreedJSONNames(t *testing.T) {
 		t.Errorf("the zero record was not skipped: %+v", u)
 	}
 }
+
+// The usage record names the workspace its run spent in, and a record the scan
+// wrote before the field existed reads exactly as it did then.
+func TestUsageRecordWorkspaceRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a record with a workspace reads it back", func(t *testing.T) {
+		t.Parallel()
+		rec := usageWorkRec("gt-abc", usageNow, 100)
+		rec.Workspace = "w1"
+		payload, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal a record with a workspace: %v", err)
+		}
+		var back UsageRecord
+		if err := json.Unmarshal(payload, &back); err != nil {
+			t.Fatalf("unmarshal the record that was written: %v", err)
+		}
+		if back.Workspace != "w1" {
+			t.Errorf("workspace = %q, want w1", back.Workspace)
+		}
+	})
+
+	t.Run("a record with no workspace reads empty and writes no field", func(t *testing.T) {
+		t.Parallel()
+		old := []byte(`{"bead":"gt-def","kind":"work","class":"polecat","rig":"gastown",` +
+			`"complete":true,"end":"2026-10-14T12:00:00Z"}`)
+		var rec UsageRecord
+		if err := json.Unmarshal(old, &rec); err != nil {
+			t.Fatalf("a record with no workspace does not decode: %v", err)
+		}
+		if rec.Workspace != "" {
+			t.Errorf("workspace = %q, want the empty string from a record with none", rec.Workspace)
+		}
+		payload, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal a record with no workspace: %v", err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			t.Fatalf("unmarshal the record that was written: %v", err)
+		}
+		if _, ok := fields["workspace"]; ok {
+			t.Errorf("a record with no workspace wrote one: %s", payload)
+		}
+	})
+}
