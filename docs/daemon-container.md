@@ -463,9 +463,9 @@ command that needs the scratch town's beads runs inside the container with
 `docker --context desktop-linux exec`, because the scratch Dolt is on an
 internal network and publishes no port, so the host cannot reach it. Every `gt`
 command run on the host runs from `<scratch-parent>`, never from the live town.
-Like L1, the outputs below are derived from the code and the live Forgejo
-compose file on `main`, not observed (see [What L2 has not
-observed](#what-l2-has-not-observed)).
+The outputs below were first derived from the code and the live Forgejo compose
+file on `main`, then corrected by the run of 2026-10-31 (see [What L2
+observed](#what-l2-observed)); where a step says "observed", it was seen.
 
 ### Before you start (L2)
 
@@ -649,9 +649,13 @@ mkdir -p <scratch-root>/forge-tokens && chmod 700 <scratch-root>/forge-tokens
   --gate-context "ci / gate (push)"
 ```
 
-Expected: one line per action, then `dry run: no write was sent`. Read it: every
-URL is the scratch Forgejo's, every path is under `<scratch-root>/forge-tokens`.
-Then run the same command without `--dry-run`. Expected: it ends with
+Expected, as observed on 2026-10-31: the lines for creating the two bot users and
+their tokens, each naming a path under `<scratch-root>/forge-tokens`, and then an
+abort at the collaborator check with `unexpected HTTP 422 ... user does not
+exist`. The dry run creates no user, so the check it makes for the grant fails;
+it does not reach `dry run: no write was sent`. Read what it printed (every URL
+is the scratch Forgejo's, every path is under `<scratch-root>/forge-tokens`),
+then run the same command without `--dry-run`. Expected: it ends with
 `provisioning complete`, and
 `ls -l <scratch-root>/forge-tokens` shows `forgejo-polecat.env` and
 `forgejo-landing.env`, each `-rw-------`. The only gate context required is the
@@ -714,9 +718,17 @@ gt daemon scratch up --live-root <live-town> --root <scratch-root> \
   --forge-http-port 3100 --forge-ssh-port 2322
 ```
 
-Expected: the container is recreated or left running, and
-`docker --context desktop-linux logs gt-scratch-daemon-1` shows the daemon
-starting again with owner `container "gt-scratch-daemon-1"`. Second, after Step 8
+Observed: `up` leaves the running container as it is, so the daemon has not read
+the change. Restart the scratch container itself (it is a `gt-scratch` container,
+not a live one):
+
+```
+docker --context desktop-linux restart gt-scratch-daemon-1
+grep -a -E 'Daemon owner|landing_worker: enabled' <scratch-root>/daemon/daemon.log | tail -3
+```
+
+Expected: the daemon starts again with owner `container "gt-scratch-daemon-1"`
+and `landing_worker: enabled (pass interval 1m0s, land timeout 30m0s)`. Second, after Step 8
 has created the rig, its settings file gets the Forgejo block; Step 8 gives it.
 
 **Step 8. Add the rig inside the container.**
@@ -738,13 +750,19 @@ that names the live town. Then, in `<scratch-root>/l2rig/settings/config.json`
       "remote_url": "http://scratch-forgejo:3000/scratch-admin/l2rig",
       "gate_workflow": "gate",
       "bots": { "polecat": "bot-polecat", "landing": "bot-landing" }
-    }
+    },
+    "test_command": "true"
   }
 }
 ```
 
 The block names roles and URLs and never a token; the token files are the ones
 from Step 5. This file is the operator-only place the setting is read from.
+`test_command` is needed because `gt done` builds a local gate first and the
+scratch rig has no Go module: without it `gt done` refuses with `no local gate
+could be built ... the rig sets no lint_command, build_command or test_command`
+(observed). `true` is the scratch rig's whole gate; the real gate is the
+workflow on the scratch runner.
 
 **Step 9. Submit one bead by hand and watch it land.**
 
@@ -758,15 +776,32 @@ docker --context desktop-linux exec -w <scratch-root>/l2rig gt-scratch-daemon-1 
 ```
 
 Expected: a bead id with the rig's prefix. Make the change on a branch of the
-rig's clone and submit it, with the bead id from the output:
+rig's clone and push it with the polecat bot's token, which is read inside the
+container from its token file and never printed (the header goes through git's
+environment, not argv):
 
 ```
 docker --context desktop-linux exec -w <scratch-root>/l2rig/mayor/rig gt-scratch-daemon-1 sh -c \
-  'git switch -c crew/l2/<bead> && echo l2 >> l2.txt && git add l2.txt && git commit -m "L2: add a line" && gt done --bead <bead>'
+  'git switch -c crew/l2/<bead> && echo l2 >> l2.txt && git add l2.txt && git commit -m "L2: add a line" \
+   && . <scratch-root>/forge-tokens/forgejo-polecat.env \
+   && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: token $FORGEJO_TOKEN" \
+      git push origin HEAD:crew/l2/<bead>'
 ```
 
-Expected: `gt done` pushes the branch to the scratch Forgejo and labels the bead
-`gt:ready-to-land`. Then watch the worker, from the host:
+Then submit it. `gt done` in the container needs the crew actor named for that
+one command (observed: without it, `gt done requires BD_ACTOR to identify the
+assigned polecat`), and it refuses a branch that is not already pushed (`origin/
+crew/l2/<bead> is not at HEAD ... push it first`):
+
+```
+docker --context desktop-linux exec -e BD_ACTOR=l2rig/crew/l2 -e BEADS_ACTOR=l2rig/crew/l2 \
+  -e GT_ROLE=l2rig/crew/l2 -w <scratch-root>/l2rig/mayor/rig gt-scratch-daemon-1 gt done --bead <bead>
+```
+
+Expected: `Local gate passed`, then `Submitted for landing`, and the bead labelled
+`gt:ready-to-land`. The landing worker's own pushes of `land/<bead>` use the
+daemon's git credential helper (see [Before you start (L2)](#before-you-start-l2)),
+not the token above. Then watch the worker, from the host:
 
 ```
 docker --context desktop-linux logs -f gt-scratch-daemon-1
@@ -782,10 +817,9 @@ curl -sS http://127.0.0.1:3100/api/v1/repos/scratch-admin/l2rig/commits?limit=3 
 ```
 
 Expected: the top commit on `main` is the landing of the bead, and `l2.txt` is in
-the tree. If `gt done` refuses (it is written for polecat and crew sessions, and
-a crew session in a container is untried), that is a finding about the
-container, not a failure of the landing worker: record the exact refusal and
-stop; do not work around it by pushing to `main`.
+the tree. If `gt done` refuses for a reason not listed above, that is a finding
+about the container, not a failure of the landing worker: record the exact
+refusal and stop; do not work around it by pushing to `main`.
 
 ### Checks that the live town was not touched
 
@@ -816,6 +850,15 @@ writes nothing; none runs a `gt` command in the live town.
       directories, because the live daemon writes `daemon/`, its logs and
       `.runtime` itself, and a find over the whole town is slow and proves
       nothing about them.
+
+These two boxes (the daemon state and the configuration find) assume a quiet
+live town. On 2026-10-31 the overseer tuned the pool and ran installs during the
+window, so the live daemon's pid and heartbeat count had changed (launchd
+restarts, owner unchanged) and the `find` printed `settings/config.json` and its
+timestamped backups. To tell that from L2, diff the backups structurally and read
+the daemon log's start lines: if only keys unrelated to landing, Forgejo and
+tokens changed (pool caps, patrol toggles) and every start is `launchd`, the
+cause is the town's own operation, not L2. Note it with the saved evidence.
 
 L2 is green when Steps 1 to 9 passed as described and every box above is
 true. Record each step and box on the program bead, with the time.
@@ -848,35 +891,35 @@ files are inside `<scratch-root>` and go with it. Run the checks above once more
 after Teardown: the live containers and volumes are the recorded ones and
 nothing named `gt-scratch*` is left.
 
-### What L2 has not observed
+### What L2 observed
 
-Every output above comes from reading the code on `main`, the landed compose
-render and the live Forgejo compose file; none has been seen in a live run. When
-L2 is run, correct this page with what was actually printed. The points most
-likely to differ:
+L2 was run on 2026-10-31 with image `gt-daemon:14dde2609`, built from `main`
+14dde260. It took four attempts, and each failure before it was a real defect,
+fixed on `main` before the next attempt: the scratch install dialled Dolt on 3307
+while the scratch Dolt serves 3306 (gt-i2ekc); the scratch Dolt refused root from
+another container (gt-sd4za, `DOLT_ROOT_HOST=%`); and the daemon container had no
+git credential for the Forgejo, so the landing worker could not push its
+candidate (gt-dhjz6 and gt-2d6f2, the `gt git-credential-forgejo` helper).
 
-- The Forgejo command lines of Steps 3 and 6 (`forgejo admin user create`,
-  `generate-access-token`, `forgejo actions generate-runner-token`) and their
-  flags are written from the Forgejo 16 command set, not run.
-- The runner registration of Step 6, including that the generated `config.yml`
-  needs no other edit for a gate that runs one echo; the live project edits more
-  (its labels, capacity, network and volumes) because its jobs build Go.
-- That the keys of Steps 7 and 8 sit where the runbook puts them. Their names
-  are read from the code (`patrols.landing_worker` with `enabled`, `rigs`,
-  `review` and `forgejo.token_dir` in `internal/config/daemon_config.go`;
-  `merge_queue.forgejo` with `remote_url`, `gate_workflow` and `bots` in
-  `internal/config/types.go`); which file holds each in a freshly installed
-  scratch town is not, and the daemon's settings parser is strict about daemon
-  keys, so a misplaced one is refused at boot.
-- Whether the scratch town needs more than Step 7 and Step 8 for the landing
-  worker to take the rig: a `merge_queue` key the rig's root `config.json` also
-  sets, or a daemon restart rather than the `up`.
-- Whether `gt rig add` and `gt done` run inside the container as written: both
-  were written for host sessions, and the container has git and tmux and no
-  `openshell`.
-- That `forgejo-provision.sh` run with these flags writes nothing outside
-  `<scratch-root>/forge-tokens`: the flags say so, and the dry run in Step 5 is
-  where to read it.
+Observed on the fourth attempt, and now written into the steps above: the render
+with the forge, the install against the scratch Dolt (`Created the hq database on
+the remote Dolt at scratch-dolt:3306`), the daemon owner `container
+"gt-scratch-daemon-1"`, the admin, repo and gate push, the bot provisioning, the
+runner registration (its only instance URL is the scratch Forgejo), the landing
+worker enabled after a container restart, `gt rig add`, and the landing: the
+worker merged the bead's branch onto `origin/main` as a candidate, pushed
+`land/<bead>`, the scratch runner's `ci / gate (push)` reported success, the
+worker merged through pull request #1 and deleted `land/<bead>`, and `main` of the
+scratch repo carried the landing commit and `l2.txt`. The live-untouched checks
+held, with the two quiet-town readings explained above. The evidence (landing
+log, scratch commits, the container's credential config, the baseline and the
+post-run readings) is in `~/gt/.runtime/seagull/l2/evidence-attempt4`.
+
+Not observed: **dispatch.** The scratch town has no polecat seat and the
+container has no `openshell`, so L2 proves the landing half only; Step 9 submits
+the work by hand. Also not observed: a gate that builds anything (the scratch
+gate runs one echo), the landing worker's om review (turned off), and a landing
+under load.
 
 ## L3: the live cutover window
 
