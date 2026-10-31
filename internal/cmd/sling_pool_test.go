@@ -699,18 +699,13 @@ func TestPoolListsUnderTheDecisionLockWhenTheListerFails(t *testing.T) {
 
 // ── The occupancy read, outside the decision lock (gt-crkhv) ────────────────
 
-// seatDecisionBound bounds how long two decisions are given to finish. It is a
-// failure bound, not a wait: a decision that blocks on another one's read never
-// finishes at all, and a test that hangs says nothing.
-const seatDecisionBound = 20 * time.Second
-
 // overlappingSeatReads hands out n seat-state reads, one per decision, and each
 // decision's read blocks on its first call until every one of them has made
 // that call. A decision that takes the state under the seat-decision lock never
 // makes its first call while another decision holds the lock blocked here, so
-// the barrier stays shut and the decisions do not finish. A decision that reads
-// the state before the lock makes the call alongside the others, and they go on
-// together.
+// the barrier stays shut and the decisions do not finish — the package timeout
+// is what reports that. A decision that reads the state before the lock makes
+// the call alongside the others, and they go on together.
 func overlappingSeatReads(n int) func() polecatDispositionFunc {
 	var started sync.WaitGroup
 	started.Add(n)
@@ -761,16 +756,9 @@ func concurrentSeatDecisions(t *testing.T, town string, pool *config.PolecatPool
 			out[i].agent, out[i].reason, out[i].err = r.route("", true)
 		}(i)
 	}
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(seatDecisionBound):
-		t.Fatalf("two seat decisions did not finish within %s: one is blocked reading the seat state the other holds the decision lock for", seatDecisionBound)
-	}
+	// A decision that keeps the read under its lock never gets past this wait:
+	// the other one holds the lock blocked in the read, so neither finishes.
+	wg.Wait()
 	return out
 }
 
