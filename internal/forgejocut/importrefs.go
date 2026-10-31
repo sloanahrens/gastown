@@ -54,10 +54,13 @@ var forgejoRefspecs = []string{"+refs/heads/*:refs/forgejo/heads/*", "+refs/tags
 // over has Forgejo ahead of a frozen GitHub, and a forced push would discard every
 // commit landed since (gt-fn9e6.51).
 //
-// Every URL this run prints goes through printedURL first: an operator-supplied
-// remote can carry a credential in its userinfo, and the log is read and pasted
-// into a bead.
-func (c *Cutover) ImportRefs() error {
+// Every URL this run prints goes through printedURL first, and every error it
+// returns is scrubbed on the way out: an operator-supplied remote can carry a
+// credential in its userinfo or its query, and the log and the refusal are both
+// read and pasted into a bead. The scrub runs once, in the deferred redact below,
+// because a git error prints the URL it was given wherever the call was made.
+func (c *Cutover) ImportRefs() (err error) {
+	defer func() { err = c.redact(err) }()
 	o := c.Opts
 	c.logf("importing every GitHub ref through %s without force", printedURL(o.AdminGitURL))
 
@@ -81,7 +84,7 @@ func (c *Cutover) ImportRefs() error {
 
 	plan, err := Plan(githubBefore, forgejoBefore, ExecRefGit{Dir: scratch, Run: c.git()})
 	if err != nil {
-		return c.redact(err)
+		return err
 	}
 	specs, diverged := c.importSpecs(plan)
 	if len(diverged) > 0 && !o.AcceptDiverged {
@@ -170,11 +173,11 @@ func (c *Cutover) listRefs(url string) ([]forgejoresync.Ref, error) {
 	c.logf("+ git ls-remote --heads --tags --refs %s", printedURL(url))
 	out, err := forgejoresync.ExecGit{Run: c.git()}.LsRemote(url)
 	if err != nil {
-		return nil, c.redact(fmt.Errorf("could not list the refs at %s: %w", printedURL(url), err))
+		return nil, fmt.Errorf("could not list the refs at %s: %w", printedURL(url), err)
 	}
 	refs, err := forgejoresync.ParseRefs(out)
 	if err != nil {
-		return nil, c.redact(fmt.Errorf("could not read the ref listing at %s: %w", printedURL(url), err))
+		return nil, fmt.Errorf("could not read the ref listing at %s: %w", printedURL(url), err)
 	}
 	return refs, nil
 }
@@ -186,7 +189,7 @@ func (c *Cutover) fetchBoth(scratch string) error {
 	git := forgejoresync.ExecGit{Run: c.git()}
 	c.logf("+ git init --bare --quiet %s", scratch)
 	if err := git.InitBare(scratch); err != nil {
-		return c.redact(fmt.Errorf("could not make the scratch repository %s: %w", scratch, err))
+		return fmt.Errorf("could not make the scratch repository %s: %w", scratch, err)
 	}
 	for _, side := range []struct {
 		url      string
@@ -197,7 +200,7 @@ func (c *Cutover) fetchBoth(scratch string) error {
 	} {
 		c.logf("+ git -C %s fetch --quiet -- %s %s", scratch, printedURL(side.url), strings.Join(side.refspecs, " "))
 		if err := git.Fetch(scratch, side.url, side.refspecs...); err != nil {
-			return c.redact(fmt.Errorf("could not fetch %s into the scratch repository: %w", printedURL(side.url), err))
+			return fmt.Errorf("could not fetch %s into the scratch repository: %w", printedURL(side.url), err)
 		}
 	}
 	return nil
@@ -206,50 +209,107 @@ func (c *Cutover) fetchBoth(scratch string) error {
 // pushRefs sends specs from the scratch repository to url as a plain push, so a
 // ref Forgejo is ahead on cannot move. The cutover installs no signal handler, so
 // the push runs under the background context (gt-csjwi).
+//
+// Its error is returned as git wrote it: ImportRefs is its only caller, and the
+// scrub there is what takes the URL out.
 func pushRefs(git forgejoresync.Runner, scratch, url string, specs []string) error {
 	argv := append([]string{"git", "-C", scratch, "push", "--quiet", "--", url}, specs...)
 	if _, err := git(context.Background(), argv); err != nil {
-		return redactErr(fmt.Errorf("the push of %d ref(s) to the admin base failed: %w", len(specs), err), url)
+		return fmt.Errorf("the push of %d ref(s) to the admin base failed: %w", len(specs), err)
 	}
 	return nil
 }
 
 // redactErr returns err with each URL, and each credential those URLs carry, taken
-// out of its text. A git error prints the URL it was given, and a URL can hold a
-// password in its userinfo or a token in its query, so the text is scrubbed here,
-// where the URL is in scope, not at each place a URL is formatted. The error it
-// was made from stays in the chain, so errors.Is and errors.As still match.
+// out of its text. It is called once, at the boundary of ImportRefs: a git error
+// prints the URL it was given, whichever call made it, and the boundary is the one
+// place both URLs are in scope.
 func redactErr(err error, urls ...string) error {
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
-	clean := msg
-	// Every URL goes first: a credential taken out early would stop a raw URL
-	// that holds it from matching.
-	for _, raw := range urls {
-		if raw != "" {
-			clean = strings.ReplaceAll(clean, raw, printedURL(raw))
-		}
-	}
-	for _, raw := range urls {
-		for _, secret := range urlSecrets(raw) {
-			clean = strings.ReplaceAll(clean, secret, "[redacted]")
-		}
-	}
+	clean := scrubURLs(msg, urls)
 	if clean == msg {
 		return err
 	}
 	return &redactedError{msg: clean, err: err}
 }
 
-// printedURL is how a URL reads in the run's log and its errors: without its userinfo
-// and without its query, since a query can carry a token as easily as userinfo can
-// carry a password. A URL that does not parse reads "[redacted]", as no part of it
-// can be told apart from a credential. Text with no scheme is returned as it is.
+// scrubURLs replaces each URL in msg with its printed form, then takes the
+// credentials those URLs carry out of every URL-shaped word of the message.
+func scrubURLs(msg string, urls []string) string {
+	clean := msg
+	// The whole URL goes first: a credential taken out on its own would stop the
+	// URL that holds it from matching.
+	for _, raw := range urls {
+		if raw != "" {
+			clean = strings.ReplaceAll(clean, raw, printedURL(raw))
+		}
+	}
+	forms := credentialForms(urls)
+	if len(forms) == 0 {
+		return clean
+	}
+	hosts := urlHosts(urls)
+	var b strings.Builder
+	b.Grow(len(clean))
+	start := 0
+	for i := 0; i <= len(clean); i++ {
+		if i < len(clean) && !isSpaceByte(clean[i]) {
+			continue
+		}
+		b.WriteString(scrubWord(clean[start:i], forms, hosts))
+		if i < len(clean) {
+			b.WriteByte(clean[i])
+		}
+		start = i + 1
+	}
+	return b.String()
+}
+
+// scrubWord takes every credential form out of one word, when the word is a URL.
+// A credential is matched only inside a URL word, so a one-letter query value
+// cannot rewrite the rest of the message.
+func scrubWord(word string, forms, hosts []string) string {
+	if !looksLikeURL(word, hosts) {
+		return word
+	}
+	for _, form := range forms {
+		word = strings.ReplaceAll(word, form, "[redacted]")
+	}
+	return word
+}
+
+// looksLikeURL reports whether one word of a message is a URL or an abbreviation of
+// one: either it names a scheme, or it carries a host this run knows, since git can
+// print a URL without its scheme.
+func looksLikeURL(word string, hosts []string) bool {
+	if strings.Contains(word, "://") {
+		return true
+	}
+	for _, host := range hosts {
+		if host != "" && strings.Contains(word, host) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSpaceByte reports whether b is the ASCII whitespace a message separates words
+// with. A multibyte character is never one, so its bytes stay in their word.
+func isSpaceByte(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\v' || b == '\f'
+}
+
+// printedURL is how a URL reads in the run's log and its errors: without its
+// userinfo, its query and its fragment, since each can carry a credential as the
+// other can. A URL that does not parse reads "[redacted]", as no part of it can be
+// told apart from a credential. A URL written without a scheme is taken apart as
+// text, because url.Parse cannot tell its userinfo from its path.
 func printedURL(raw string) string {
 	if !strings.Contains(raw, "://") {
-		return raw
+		return writtenURLWithoutCredentials(raw)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -257,32 +317,105 @@ func printedURL(raw string) string {
 	}
 	u.User = nil
 	u.RawQuery = ""
+	u.Fragment = ""
 	return u.String()
 }
 
-// urlSecrets are the credentials a URL carries: its password and every query value.
-// An unparsed URL has none to report, and printedURL already hides it whole.
-func urlSecrets(raw string) []string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil
+// writtenURLWithoutCredentials drops a scheme-less URL's userinfo, query and
+// fragment, which its text alone marks. Text that has none of those parts is
+// returned as it is.
+func writtenURLWithoutCredentials(raw string) string {
+	rest := raw
+	if i := strings.IndexByte(rest, '?'); i >= 0 {
+		rest = rest[:i]
 	}
-	var secrets []string
-	if pass, ok := u.User.Password(); ok && pass != "" {
-		secrets = append(secrets, pass)
+	if i := strings.IndexByte(rest, '#'); i >= 0 {
+		rest = rest[:i]
 	}
-	for _, values := range u.Query() {
-		for _, v := range values {
-			if v != "" {
-				secrets = append(secrets, v)
-			}
-		}
+	authority := rest
+	if i := strings.IndexByte(authority, '/'); i >= 0 {
+		authority = authority[:i]
 	}
-	return secrets
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		return rest[i+1:]
+	}
+	return rest
 }
 
-// redactedError is an error whose text has its credentials taken out. It keeps the
-// error it was made from, so errors.Is and errors.As still match through it.
+// credentialForms are every string a URL can print as a credential: its userinfo,
+// its password and each query value, as the URL writes them and percent-decoded.
+// git echoes a URL as written, so the written form is the one an error text holds,
+// and the decoded form is the one anything else compares.
+func credentialForms(urls []string) []string {
+	var forms []string
+	seen := make(map[string]bool)
+	add := func(form string) {
+		if form == "" || seen[form] {
+			return
+		}
+		seen[form] = true
+		forms = append(forms, form)
+	}
+	addBoth := func(form string, unescape func(string) (string, error)) {
+		add(form)
+		if decoded, err := unescape(form); err == nil {
+			add(decoded)
+		}
+	}
+	for _, raw := range urls {
+		userinfo, _, query := urlTextParts(raw)
+		for _, pair := range strings.FieldsFunc(query, func(r rune) bool { return r == '&' || r == ';' }) {
+			if _, value, ok := strings.Cut(pair, "="); ok {
+				addBoth(value, url.QueryUnescape)
+			}
+		}
+		add(userinfo)
+		if _, password, ok := strings.Cut(userinfo, ":"); ok {
+			addBoth(password, url.PathUnescape)
+		}
+	}
+	return forms
+}
+
+// urlHosts are the hosts the run's URLs name, as their text writes them, so a
+// credential search finds a URL printed without its scheme.
+func urlHosts(urls []string) []string {
+	var hosts []string
+	for _, raw := range urls {
+		if _, host, _ := urlTextParts(raw); host != "" {
+			hosts = append(hosts, host)
+		}
+	}
+	return hosts
+}
+
+// urlTextParts splits a URL, with or without a scheme, into the userinfo and the
+// host its text writes and the query it carries. Text parsing is what tells a
+// scheme-less URL's userinfo from its path, which url.Parse cannot.
+func urlTextParts(raw string) (userinfo, host, query string) {
+	rest := raw
+	if i := strings.IndexByte(rest, '#'); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.IndexByte(rest, '?'); i >= 0 {
+		query, rest = rest[i+1:], rest[:i]
+	}
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndexByte(rest, '@'); i >= 0 {
+		userinfo, rest = rest[:i], rest[i+1:]
+	}
+	return userinfo, rest, query
+}
+
+// redactedError is an error whose text has its credentials taken out. The error it
+// was made from is deliberately not reachable by unwrapping, since its text is the
+// leak this type exists to close. Is and As keep errors.Is and errors.As matching
+// through it.
 type redactedError struct {
 	msg string
 	err error
@@ -290,7 +423,9 @@ type redactedError struct {
 
 func (e *redactedError) Error() string { return e.msg }
 
-func (e *redactedError) Unwrap() error { return e.err }
+func (e *redactedError) Is(target error) bool { return errors.Is(e.err, target) }
+
+func (e *redactedError) As(target any) bool { return errors.As(e.err, target) }
 
 // redact is redactErr over the two git URLs this run reads and pushes through.
 func (c *Cutover) redact(err error) error {
