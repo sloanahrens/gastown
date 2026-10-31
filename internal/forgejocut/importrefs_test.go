@@ -144,6 +144,11 @@ func afterSeparator(t *testing.T, argv []string) []string {
 	return argv[i+1:]
 }
 
+// fakeScratchRoot is the scratch path the fake MkdirTemp answers. The import only
+// joins it into git argvs and the runner is a fake, so the unit tier writes
+// nothing to the filesystem.
+const fakeScratchRoot = "/fake-scratch/forgejo-cutover.unit"
+
 // newImportCutover is a Cutover over the fake, with the options an import reads
 // and a log that keeps every line.
 func newImportCutover(t *testing.T, git *importGitFake, opts Options) (*Cutover, *[]string) {
@@ -153,7 +158,7 @@ func newImportCutover(t *testing.T, git *importGitFake, opts Options) (*Cutover,
 		Opts:      &opts,
 		Git:       git.run,
 		Log:       func(line string) { *logs = append(*logs, line) },
-		MkdirTemp: func(_, _ string) (string, error) { return t.TempDir(), nil },
+		MkdirTemp: func(_, _ string) (string, error) { return fakeScratchRoot, nil },
 		RemoveAll: func(string) error { return nil },
 	}, logs
 }
@@ -237,8 +242,10 @@ func TestImportNeverForces(t *testing.T) {
 		t.Fatalf("the push carried %q, want %q", after[1:], want)
 	}
 
-	// Both sides are read and written through the admin base: --forgejo-url is the
-	// credential-helper form the bots cannot reach before provisioning.
+	// The import's own git work rides the admin base, the web root where the
+	// operator's admin credentials apply, and never --forgejo-url: that is the
+	// hostname form written to the rig, which the bots reach through their
+	// credential helper only once provisioning has run.
 	for _, argv := range git.calls {
 		if slices.Contains(argv, opts.ForgejoURL) {
 			t.Fatalf("the import used the hostname form: %q", argv)
@@ -416,6 +423,96 @@ func TestImportDryRunPushesNothingAndPrintsThePlan(t *testing.T) {
 		if strings.Contains(line, "imported every GitHub ref") {
 			t.Fatalf("the dry run claimed an import: %q", line)
 		}
+	}
+}
+
+// testToken stands in for the credential an operator-supplied remote can carry in
+// its userinfo.
+const testToken = "s3cr3t-admin-token"
+
+// tokenOpts is importOpts with that credential in both sides' git URLs, so a line
+// or a refusal that prints either side shows it unless it redacts the URL.
+func tokenOpts() Options {
+	opts := importOpts()
+	opts.GitHubURL = "https://x-access-token:" + testToken + "@github.example/acme/rig.git"
+	opts.AdminGitURL = "http://bot:" + testToken + "@127.0.0.1:3000/acme/rig.git"
+	return opts
+}
+
+// TestImportNeverPrintsTheToken pins that neither a log line nor a refusal carries
+// the credential a URL's userinfo holds, over the runs that print a URL and the
+// ones that refuse on it. Dropping a RedactURL call turns a case red.
+func TestImportNeverPrintsTheToken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		staged   func(Options) map[string][]lsReply
+		fail     string // the subcommand that fails, "" for none
+		wantErr  bool
+		wantLine string // a line the run must print, its URL redacted
+	}{
+		{
+			name:     "a run that imports",
+			staged:   convergedListings,
+			wantLine: "importing every GitHub ref through http://127.0.0.1:3000/acme/rig.git without force",
+		},
+		{
+			name: "a GitHub listing that fails",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{opts.GitHubURL: {lsFails(errExit)}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "the admin base's listing that fails",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{
+					opts.GitHubURL:   {lsOK(stagedAnswers().github)},
+					opts.AdminGitURL: {lsFails(errExit)},
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name:    "a fetch that fails",
+			staged:  convergedListings,
+			fail:    "fetch",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := tokenOpts()
+			git := newImportGitFake(tt.staged(opts))
+			git.ancestor = map[string]bool{shaMiddle + ">" + shaTip: true}
+			git.ahead = map[string]string{shaMiddle + ">" + shaTip: "2"}
+			if tt.fail != "" {
+				git.fail = map[string]error{tt.fail: errExit}
+			}
+			c, logs := newImportCutover(t, git, opts)
+
+			err := c.ImportRefs()
+			if tt.wantErr && err == nil {
+				t.Fatalf("the failing call did not refuse the run; %d log line(s)", len(*logs))
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatal("a healthy run was refused; want no error")
+			}
+			// Neither the line nor the error is printed on a failure: either one
+			// can hold the credential this test is about.
+			for i, line := range *logs {
+				if strings.Contains(line, testToken) {
+					t.Fatalf("log line %d carries the URL's credential", i)
+				}
+			}
+			if err != nil && strings.Contains(err.Error(), testToken) {
+				t.Fatal("the refusal carries the URL's credential")
+			}
+			if tt.wantLine != "" && !slices.Contains(*logs, tt.wantLine) {
+				t.Fatalf("the run did not print %q, its URL redacted; %d log line(s)", tt.wantLine, len(*logs))
+			}
+		})
 	}
 }
 

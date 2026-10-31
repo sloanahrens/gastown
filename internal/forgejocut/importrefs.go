@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/forgejoresync"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // Cutover is one cutover run: the options it was parsed with, the git it reads and
@@ -52,9 +53,13 @@ var forgejoRefspecs = []string{"+refs/heads/*:refs/forgejo/heads/*", "+refs/tags
 // The push is plain — no '+', no --force, no --prune — because a rig already cut
 // over has Forgejo ahead of a frozen GitHub, and a forced push would discard every
 // commit landed since (gt-fn9e6.51).
+//
+// Every URL this run prints goes through util.RedactURL first: an operator-supplied
+// remote can carry a credential in its userinfo, and the log is read and pasted
+// into a bead.
 func (c *Cutover) ImportRefs() error {
 	o := c.Opts
-	c.logf("importing every GitHub ref through %s without force", o.AdminGitURL)
+	c.logf("importing every GitHub ref through %s without force", util.RedactURL(o.AdminGitURL))
 
 	githubBefore, err := c.listRefs(o.GitHubURL)
 	if err != nil {
@@ -90,7 +95,7 @@ func (c *Cutover) ImportRefs() error {
 	if len(specs) == 0 {
 		c.logf("no GitHub ref needs importing")
 	} else {
-		c.logf("+ git -C %s push --quiet -- %s %s", scratch, o.AdminGitURL, strings.Join(specs, " "))
+		c.logf("+ git -C %s push --quiet -- %s %s", scratch, util.RedactURL(o.AdminGitURL), strings.Join(specs, " "))
 		if !o.DryRun {
 			if err := pushRefs(c.git(), scratch, o.AdminGitURL, specs); err != nil {
 				return err
@@ -162,14 +167,14 @@ func missingNames(github, forgejo []forgejoresync.Ref) []string {
 
 // listRefs logs and reads one side's branch and tag listing, sorted by ref name.
 func (c *Cutover) listRefs(url string) ([]forgejoresync.Ref, error) {
-	c.logf("+ git ls-remote --heads --tags --refs %s", url)
+	c.logf("+ git ls-remote --heads --tags --refs %s", util.RedactURL(url))
 	out, err := forgejoresync.ExecGit{Run: c.git()}.LsRemote(url)
 	if err != nil {
-		return nil, fmt.Errorf("could not list the refs at %s: %w", url, err)
+		return nil, fmt.Errorf("could not list the refs at %s: %w", util.RedactURL(url), err)
 	}
 	refs, err := forgejoresync.ParseRefs(out)
 	if err != nil {
-		return nil, fmt.Errorf("could not read the ref listing at %s: %w", url, err)
+		return nil, fmt.Errorf("could not read the ref listing at %s: %w", util.RedactURL(url), err)
 	}
 	return refs, nil
 }
@@ -190,9 +195,9 @@ func (c *Cutover) fetchBoth(scratch string) error {
 		{url: c.Opts.AdminGitURL, refspecs: forgejoRefspecs},
 		{url: c.Opts.GitHubURL, refspecs: forgejoresync.Refspecs},
 	} {
-		c.logf("+ git -C %s fetch --quiet -- %s %s", scratch, side.url, strings.Join(side.refspecs, " "))
+		c.logf("+ git -C %s fetch --quiet -- %s %s", scratch, util.RedactURL(side.url), strings.Join(side.refspecs, " "))
 		if err := git.Fetch(scratch, side.url, side.refspecs...); err != nil {
-			return fmt.Errorf("could not fetch %s into the scratch repository: %w", side.url, err)
+			return fmt.Errorf("could not fetch %s into the scratch repository: %w", util.RedactURL(side.url), err)
 		}
 	}
 	return nil
