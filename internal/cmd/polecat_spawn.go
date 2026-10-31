@@ -864,6 +864,12 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	if err := s.backpressure(townRoot, rigName, opts); err != nil {
 		return nil, err
 	}
+	// The three steps the spawn runs before it reports any stage of its own —
+	// this check, the pool's seat decision below and the admission inside
+	// prepare — are named on the spec dispatcher's sling trace, which is where
+	// part of a slow sling's untimed time sat (gt-7nctk). A nil trace times
+	// nothing: a hand-run gt sling keeps its output as it was.
+	opts.trace.Mark("backpressure")
 
 	// Polecat seat pool: the town's polecat_pool caps live polecats on its
 	// agent (see sling_pool.go). It is consulted on every spawn path, --agent
@@ -887,6 +893,7 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	if poolReason != "" {
 		fmt.Printf("%s %s\n", style.Dim.Render("→"), poolReason)
 	}
+	opts.trace.Mark("seat decision")
 	// Only a seat the pool named replaces the request: an empty agent is the
 	// pool saying it has no opinion, not one saying "the role default".
 	if poolAgent != "" {
