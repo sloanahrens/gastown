@@ -180,8 +180,24 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
 .lrows th{position:sticky;top:0;background:var(--panel)}
 .costchip{border:1px solid currentColor;border-radius:999px;padding:0 7px;font-size:11px;white-space:nowrap;color:var(--dim)}
 /* The providers table is nine columns wide, so a narrow panel scrolls it
-   sideways instead of clipping the Status cell against the panel edge. */
-.costscroll{overflow-x:auto}
+   sideways instead of clipping the Status cell against the panel edge. A
+   scrollbar is no cue on a host whose bars are overlay-style, so the cut edge
+   gets a fade: a dim gradient pinned to the panel's left and right edges, over
+   a panel-coloured cover that scrolls with the table (background-attachment:
+   local). While the table is wider than the panel the far cover sits off
+   screen and the fade shows at the cut edge; at either end of the scroll, and
+   for a table that fits, the cover sits over the fade and none shows. */
+.costscroll{
+  overflow-x:auto;
+  background:
+    linear-gradient(to left, var(--panel) 60%, transparent) right center,
+    linear-gradient(to right, var(--panel) 60%, transparent) left center,
+    radial-gradient(farthest-side at 100% 50%, var(--dim), transparent) right center,
+    radial-gradient(farthest-side at 0 50%, var(--dim), transparent) left center;
+  background-repeat:no-repeat;
+  background-size:40px 100%,40px 100%,16px 100%,16px 100%;
+  background-attachment:local,local,scroll,scroll;
+}
 .costprov tr.dimrow td{color:var(--dim)}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 /* The JEV panel's chips. A chip is inline-block, so a battery's questions wrap
