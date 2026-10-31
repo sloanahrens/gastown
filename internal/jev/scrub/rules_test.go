@@ -65,6 +65,38 @@ func ruleCases() []ruleCase {
 			want: "the authorization decision stands",
 		},
 
+		// cookie-header
+		{
+			name: "cookie header", rule: RuleCookieHeader,
+			in:   "Cookie: sid=abcdef1234567890",
+			want: "Cookie: sid=[REDACTED:cookie-header]", count: 1,
+		},
+		{
+			name: "set cookie keeps its attributes", rule: RuleCookieHeader,
+			in:   "Set-Cookie: sid=abcdef1234567890; Path=/; HttpOnly",
+			want: "Set-Cookie: sid=[REDACTED:cookie-header]; Path=/; HttpOnly", count: 1,
+		},
+		{
+			name: "two cookies", rule: RuleCookieHeader,
+			in:   "Cookie: sid=abcdef1234567890; theme=dark",
+			want: "Cookie: sid=[REDACTED:cookie-header]; theme=[REDACTED:cookie-header]", count: 2,
+		},
+		{
+			name: "cookie in a quoted command line", rule: RuleCookieHeader,
+			in:   "curl -H 'Cookie: sid=abcdef1234567890' https://example.com",
+			want: "curl -H 'Cookie: sid=[REDACTED:cookie-header]' https://example.com", count: 1,
+		},
+		{
+			name: "quoted cookie value", rule: RuleCookieHeader,
+			in:   `Set-Cookie: sid="abc def"; Path=/`,
+			want: "Set-Cookie: sid=[REDACTED:cookie-header]; Path=/", count: 1,
+		},
+		{
+			name: "prose", rule: RuleCookieHeader,
+			in:   "the cookie jar is on the table",
+			want: "the cookie jar is on the table",
+		},
+
 		// url-userinfo
 		{
 			name: "user info", rule: RuleURLUserInfo,
@@ -127,6 +159,11 @@ func ruleCases() []ruleCase {
 			name: "unterminated quote", rule: RuleAssignment,
 			in:   `password="abc123`,
 			want: "password=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "unterminated marker", rule: RuleAssignment,
+			in:   "token=[REDACTED:vendor-key",
+			want: "token=[REDACTED:assignment]", count: 1,
 		},
 		{
 			name: "keyboard is not a key", rule: RuleAssignment,
@@ -283,6 +320,71 @@ func ruleCases() []ruleCase {
 			in:   "apiKey=abc123",
 			want: "apiKey=[REDACTED:assignment]", count: 1,
 		},
+		{
+			name: "underscored pass", rule: RuleAssignment,
+			in:   "DB_PASS=hunter2hunter2",
+			want: "DB_PASS=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "dotted pass", rule: RuleAssignment,
+			in:   "db.pass: hunter2hunter2",
+			want: "db.pass: [REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "pwd", rule: RuleAssignment,
+			in:   "MYSQL_PWD=hunter2hunter2",
+			want: "MYSQL_PWD=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "fused password", rule: RuleAssignment,
+			in:   "PGPASSWORD=hunter2hunter2",
+			want: "PGPASSWORD=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "fused token", rule: RuleAssignment,
+			in:   "GITHUBTOKEN=abcd1234abcd1234",
+			want: "GITHUBTOKEN=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "flag with its value in the next word", rule: RuleAssignment,
+			in:   "mysql --pass hunter2hunter2 -u root",
+			want: "mysql --pass [REDACTED:assignment] -u root", count: 1,
+		},
+		{
+			name: "pass flag with a joined value", rule: RuleAssignment,
+			in:   "--pass=3",
+			want: "--pass=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "pass count pair", rule: RuleAssignment,
+			in:   "pass=3 fail=1",
+			want: "pass=3 fail=1",
+		},
+		{
+			name: "pass count in a test summary", rule: RuleAssignment,
+			in:   "tests: pass: 12",
+			want: "tests: pass: 12",
+		},
+		{
+			name: "pass count field", rule: RuleAssignment,
+			in:   "pass_count=3",
+			want: "pass_count=3",
+		},
+		{
+			name: "pass in a list item", rule: RuleAssignment,
+			in:   "- pass: 12",
+			want: "- pass: 12",
+		},
+		{
+			name: "password length still holds a secret", rule: RuleAssignment,
+			in:   "password_len=12",
+			want: "password_len=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "api key count still holds a key", rule: RuleAssignment,
+			in:   "api_key_count=3",
+			want: "api_key_count=[REDACTED:assignment]", count: 1,
+		},
 
 		// long-token
 		{
@@ -434,6 +536,104 @@ func ruleNamed(t *testing.T, name string) Rule {
 	}
 	t.Fatalf("no default rule named %q", name)
 	return Rule{}
+}
+
+// TestScrubDefaultCredentialShapes drives the nine credential shapes the
+// scrubber let through (gt-3rq7v) through Default, the rule list the jev
+// batteries run, and checks each value is replaced and its name kept.
+func TestScrubDefaultCredentialShapes(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, in, want string }{
+		{"env pass", "DB_PASS=hunter2hunter2", "DB_PASS=[REDACTED:assignment]"},
+		{"yaml pass", "REDIS_PASS: hunter2hunter2", "REDIS_PASS: [REDACTED:assignment]"},
+		{"dotted pass", "db.pass=hunter2hunter2", "db.pass=[REDACTED:assignment]"},
+		{"flag pass", "--pass hunter2hunter2", "--pass [REDACTED:assignment]"},
+		{"mysql pwd", "MYSQL_PWD=hunter2hunter2", "MYSQL_PWD=[REDACTED:assignment]"},
+		{"fused password", "PGPASSWORD=hunter2hunter2", "PGPASSWORD=[REDACTED:assignment]"},
+		{"fused token", "GITHUBTOKEN=abcd1234abcd1234", "GITHUBTOKEN=[REDACTED:assignment]"},
+		{"cookie", "Cookie: sid=abcdef1234567890", "Cookie: sid=[REDACTED:cookie-header]"},
+		{"set cookie", "Set-Cookie: sid=abcdef1234567890; Path=/", "Set-Cookie: sid=[REDACTED:cookie-header]; Path=/"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, report := Default().Scrub(c.in)
+			if got != c.want {
+				t.Errorf("Scrub(%q) = %q, want %q", c.in, got, c.want)
+			}
+			if report.Total() != 1 {
+				t.Errorf("Scrub(%q) made %d replacements, want 1", c.in, report.Total())
+			}
+		})
+	}
+}
+
+// TestScrubDefaultKeepsCounters checks that the pass word does not claim a
+// count, and that prose about a cookie is left alone, through Default.
+func TestScrubDefaultKeepsCounters(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{
+		"pass=3 fail=1",
+		"tests: pass: 12",
+		"pass_count=3",
+		"tokens_used=42",
+		"the cookie jar is on the table",
+		"cookie: a treat with no pairs",
+	} {
+		in := in
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			got, report := Default().Scrub(in)
+			if got != in {
+				t.Errorf("Scrub(%q) = %q, want it unchanged", in, got)
+			}
+			if report.Total() != 0 {
+				t.Errorf("Scrub(%q) made %d replacements, want 0", in, report.Total())
+			}
+		})
+	}
+}
+
+// TestScrubDefaultOneMarkerPerValue checks that a value an earlier rule already
+// replaced keeps that marker's bracket instead of gaining a second one.
+func TestScrubDefaultOneMarkerPerValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, in, want, rule string
+	}{
+		{
+			name: "vendor key under a credential name",
+			in:   "export DEEPSEEK_API_KEY=sk-0123456789abcdef0123456789abcdef",
+			want: "export DEEPSEEK_API_KEY=[REDACTED:vendor-key]",
+			rule: RuleVendorKey,
+		},
+		{
+			name: "jwt under a credential name",
+			in:   "API_TOKEN=" + syntheticJWT,
+			want: "API_TOKEN=[REDACTED:jwt]",
+			rule: RuleJWT,
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, report := Default().Scrub(c.in)
+			if got != c.want {
+				t.Errorf("Scrub(%q) = %q, want %q", c.in, got, c.want)
+			}
+			if strings.HasSuffix(got, "]]") {
+				t.Errorf("Scrub(%q) = %q ends with two brackets", c.in, got)
+			}
+			if n := report.Count(c.rule); n != 1 {
+				t.Errorf("report counts %q %d times, want 1", c.rule, n)
+			}
+			if n := report.Count(RuleAssignment); n != 0 {
+				t.Errorf("report counts %q %d times, want 0: the value was already a marker", RuleAssignment, n)
+			}
+		})
+	}
 }
 
 // TestScrubReport checks the per-rule counts, the sorted rule list, and that a
