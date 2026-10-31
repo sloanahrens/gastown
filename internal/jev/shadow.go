@@ -21,6 +21,17 @@ const shadowCaller = "-scrubcheck"
 // scrubCheckFile is the check log's name in the usage ledger's directory.
 const scrubCheckFile = "scrubcheck.jsonl"
 
+// ScrubCheckPath is the check log of the town at townRoot, the one that
+// WithShadowScrub writes beside the usage ledger.
+func ScrubCheckPath(townRoot string) string {
+	return scrubCheckBeside(UsageLedgerPath(townRoot))
+}
+
+// scrubCheckBeside is the check log's path beside the usage ledger at ledgerPath.
+func scrubCheckBeside(ledgerPath string) string {
+	return filepath.Join(filepath.Dir(ledgerPath), scrubCheckFile)
+}
+
 // SamplePercent is the share of requests the batteries' sampled measurements
 // take: the shadow scrub check here, and the re-ask helper, whose
 // battery.ReaskPercent is this value. The constant lives here because battery
@@ -387,7 +398,7 @@ func (c *Client) appendScrubCheck(rec scrubCheckRecord) {
 		c.warnShadow(err)
 		return
 	}
-	if err := appendLine(filepath.Join(filepath.Dir(c.ledgerPath), scrubCheckFile), line); err != nil {
+	if err := appendLine(scrubCheckBeside(c.ledgerPath), line); err != nil {
 		c.warnShadow(err)
 	}
 }
