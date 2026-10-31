@@ -31,8 +31,31 @@ type daemonComposeDeps struct {
 	// doltHost is the host the daemon in the container reaches the town's Dolt
 	// through, and whether the town names an endpoint at all.
 	doltHost func(townRoot string) (string, bool)
-	write    func(path string, content []byte) error
+	files    composeFiles
 	out      io.Writer
+}
+
+// composeFiles is the filesystem the compose file is written through: a
+// directory is made, then the file is written into it. The host's is the real
+// one; a test stands in its own, so no unit test touches the real filesystem.
+type composeFiles struct {
+	mkdirAll func(dir string) error
+	write    func(path string, content []byte) error
+}
+
+// doltEndpointResolver resolves a town's Dolt endpoint for a process in or out
+// of container mode. config.ResolveDoltEndpointFor is the host's.
+type doltEndpointResolver func(townRoot string, inContainer bool) (config.DoltEndpoint, bool)
+
+// containerDoltHost is the host the daemon in the container reaches Dolt
+// through. The process asking is not the container, but the daemon this file
+// starts is: the endpoint is resolved in container mode whichever process asks
+// (gt-qpeei.17).
+func containerDoltHost(resolve doltEndpointResolver) func(townRoot string) (string, bool) {
+	return func(townRoot string) (string, bool) {
+		ep, ok := resolve(townRoot, true)
+		return ep.Host, ok
+	}
 }
 
 // realDaemonComposeDeps is the host's.
@@ -42,26 +65,23 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 		// The settings are read through the control the supervisor and the
 		// cutover refuse from, so this command refuses the same towns they do.
 		daemonConfig: realDaemonControl().townDaemonConfig,
-		// The process asking is not the container, but the daemon this file
-		// starts is: container mode is what names the host it reaches Dolt
-		// through (gt-qpeei.17).
-		doltHost: func(townRoot string) (string, bool) {
-			ep, ok := config.ResolveDoltEndpointFor(townRoot, true)
-			return ep.Host, ok
+		doltHost:     containerDoltHost(config.ResolveDoltEndpointFor),
+		files: composeFiles{
+			mkdirAll: func(dir string) error { return os.MkdirAll(dir, 0o755) },
+			write:    daemonimage.WriteComposeFile,
 		},
-		write: writeDaemonComposeFile,
-		out:   out,
+		out: out,
 	}
 }
 
 // writeDaemonComposeFile writes content to path, making the compose file's
 // directory first: it lives under the town's daemon/ directory, which a town
 // that has never rendered it does not have.
-func writeDaemonComposeFile(path string, content []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+func writeDaemonComposeFile(files composeFiles, path string, content []byte) error {
+	if err := files.mkdirAll(filepath.Dir(path)); err != nil {
 		return err
 	}
-	return daemonimage.WriteComposeFile(path, content)
+	return files.write(path, content)
 }
 
 // newDaemonComposeCmd builds `gt daemon compose` over run, which receives the
@@ -152,7 +172,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		return err
 	}
 	path := config.ContainerComposeFile(townRoot)
-	if err := d.write(path, content); err != nil {
+	if err := writeDaemonComposeFile(d.files, path, content); err != nil {
 		return fmt.Errorf("cannot write %s, and the old file is as it was: %w", path, err)
 	}
 	fmt.Fprintf(d.out, "%s Wrote %s: container %s, compose project %s, image %s.\n",
