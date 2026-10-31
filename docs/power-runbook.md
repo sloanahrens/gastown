@@ -20,10 +20,10 @@ anywhere does that `cd` itself.
 `standby (draining: N polecat(s) working)` while workers finish, and names a
 partial standby when one of the two brakes is set without the other.
 
-The `ring:` line beside the hold and ESTOP lines reports the One's signed lease:
-valid with the time left, waned with the time since it ran out, absent with the
-reason, or key unavailable. It is read-only information until the Ring becomes
-the brake: no power state reads it yet, so a valid Ring changes nothing above.
+The `ring:` line beside the hold and ESTOP lines reports the One's signed lease.
+Read `gt power status` for what that line says; this page does not repeat it.
+It is read-only information until the Ring becomes the brake: no power state
+reads it yet, so a valid Ring changes nothing above.
 
 The **hold** (`seat-refill.hold` at the town root) parks every automatic
 dispatcher. The **ESTOP** parks dispatch and makes the supervisor refuse
