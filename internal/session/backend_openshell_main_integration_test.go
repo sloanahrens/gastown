@@ -122,11 +122,26 @@ func (r *mainScriptRun) exited(timeout time.Duration) (err error, ok bool) {
 	}
 }
 
-// wait blocks until the script exits. It carries no duration of its own: a script
-// that never exits ends the test with the go test timeout, and a loaded host
-// cannot fail it by the clock.
+// scriptExitSlack is how long before the test deadline wait gives up, so its
+// diagnostic prints before go test's own timeout panic fires at that deadline.
+const scriptExitSlack = time.Second
+
+// wait blocks until the script exits, bounded by the test's own deadline (the go
+// test -timeout) rather than a duration of its own: a loaded host cannot fail it
+// by the clock, and a script that never exits fails the test at that deadline.
 func (r *mainScriptRun) wait() error {
-	return <-r.done
+	r.t.Helper()
+	deadline, ok := r.t.Deadline()
+	if !ok {
+		r.t.Fatal("waiting for the script needs a test deadline: run with go test -timeout")
+	}
+	select {
+	case err := <-r.done:
+		return err
+	case <-time.After(time.Until(deadline.Add(-scriptExitSlack))):
+		r.t.Fatal("the script did not exit before the test deadline (go test -timeout)")
+		return nil
+	}
 }
 
 func TestIntegrationMainScriptExitsWhenTheAgentSessionIsKilled(t *testing.T) {
