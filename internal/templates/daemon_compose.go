@@ -71,6 +71,12 @@ type ComposeSpec struct {
 	// required when Scratch is set; the scratch spec passes DoltServerImage.
 	ScratchDoltImage string
 
+	// DoltPort is the port the scratch Dolt server listens on, which the
+	// healthcheck probes and the daemon's command passes to the entrypoint. Zero
+	// means ScratchDoltPort, the pinned image's default. Only the scratch render
+	// takes it: a live spec that sets it is refused.
+	DoltPort int
+
 	// OMTokenFile is the path, inside the container, of the file the om
 	// subscription token is read from. When set, the scratch render passes it to
 	// the entrypoint as --om-token-file beside --scratch-town. Only the scratch
@@ -144,6 +150,12 @@ var (
 // ScratchDoltService is the scratch Dolt server's name on the internal network,
 // and the only DoltHost a scratch spec may name: the live Dolt is on the Mac.
 const ScratchDoltService = "scratch-dolt"
+
+// ScratchDoltPort is the port the scratch Dolt server listens on: the pinned
+// image's default, which the service does not change. The healthcheck probes
+// it and the daemon's command passes it to the entrypoint, so the install
+// dials the port the server serves rather than gt's own default, 3307.
+const ScratchDoltPort = 3306
 
 // The scratch project's Dolt server, which only the scratch render has. It
 // joins the internal network alone and publishes no port.
@@ -347,12 +359,13 @@ var scratchOperatorNote = []string{
 // the daemon container. When omTokenFile is set, --om-token-file <path> follows
 // them. The entrypoint is the image's ENTRYPOINT, so the command carries its
 // flags alone. The live project passes nothing.
-func scratchDaemonCommand(omTokenFile string) string {
+func scratchDaemonCommand(omTokenFile string, doltPort int) string {
 	var b strings.Builder
 	for _, line := range scratchOperatorNote {
 		b.WriteString("    # " + line + "\n")
 	}
-	argv := []string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, ScratchDoltService}
+	argv := []string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, ScratchDoltService,
+		"--" + config.DoltPortFlag, strconv.Itoa(doltPort)}
 	if omTokenFile != "" {
 		argv = append(argv, "--"+config.OMTokenFileFlag, composeLiteral(omTokenFile))
 	}
@@ -368,7 +381,8 @@ func scratchDaemonCommand(omTokenFile string) string {
 // ports, so the only way in is the internal network the daemon also joins. Its
 // healthcheck holds the daemon until the server accepts a connection, which is
 // the wait the engine's own healthcheck gives the daemon (gt-3bp5q): the port
-// is the Dolt server's default, 3306, which the service does not change.
+// is ScratchDoltPort, the Dolt server's default, which the service does not
+// change; the probe reads the constant, so it cannot drift from the command.
 //
 // The probe runs bash's /dev/tcp, so it needs bash in the image. The pinned
 // DoltServerImage has it: a container run from that digest on 2026-10-30
@@ -379,7 +393,7 @@ const scratchDoltBody = `  %[1]s:
     image: %[2]q
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3306"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/%[6]d"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -391,6 +405,15 @@ const scratchDoltBody = `  %[1]s:
     networks:
       - %[5]s
 `
+
+// scratchDoltPort is the port the scratch Dolt server listens on: DoltPort, or
+// ScratchDoltPort when the spec leaves it zero.
+func (s ComposeSpec) scratchDoltPort() int {
+	if s.DoltPort != 0 {
+		return s.DoltPort
+	}
+	return ScratchDoltPort
+}
 
 // daemonComposeBody renders the daemon service and the Docker engine its sweep
 // drives. Every spec value takes a %q, quoted so a town root with a space or a
@@ -495,13 +518,14 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 	var command, dolt, doltVolume, doltWait, forgeNetwork string
 	if s.Scratch {
 		names = scratchNames
-		command = scratchDaemonCommand(s.OMTokenFile)
+		command = scratchDaemonCommand(s.OMTokenFile, s.scratchDoltPort())
 		dolt = fmt.Sprintf(scratchDoltBody,
 			ScratchDoltService,
 			composeLiteral(s.ScratchDoltImage),
 			scratchDoltVolume,
 			scratchDoltDataPath,
 			names.network,
+			s.scratchDoltPort(),
 		)
 		doltVolume = "  " + scratchDoltVolume + ":\n"
 		doltWait = "      " + ScratchDoltService + ":\n        condition: service_healthy\n"
@@ -570,6 +594,10 @@ func (s ComposeSpec) validate() error {
 			s.StopGrace, MinimumStopGrace)
 	case !s.Scratch && (s.ScratchForge || s.ScratchForgeHTTPPort != 0 || s.ScratchForgeSSHPort != 0):
 		return fmt.Errorf("compose spec: the scratch forge is set on a live spec; only the scratch render carries a throwaway Forgejo")
+	case s.DoltPort != 0 && !s.Scratch:
+		return fmt.Errorf("compose spec: DoltPort is set on a live spec; only the scratch render runs a Dolt server of its own")
+	case s.DoltPort < 0 || s.DoltPort > 65535:
+		return fmt.Errorf("compose spec: DoltPort %d is not a port (1 to 65535)", s.DoltPort)
 	case s.OMTokenFile != "" && !s.Scratch:
 		return fmt.Errorf("compose spec: OMTokenFile is set on a live spec; only the scratch render passes --%s, and the live project's command line stays empty", config.OMTokenFileFlag)
 	case s.OMTokenFile != "" && !filepath.IsAbs(s.OMTokenFile):

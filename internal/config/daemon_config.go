@@ -136,6 +136,12 @@ const (
 	// render passes it, so all three read one string (gt-4f3j2). Only
 	// --scratch-town takes it: the live project's command line stays empty.
 	DoltHostFlag = "dolt-host"
+
+	// DoltPortFlag is the entrypoint flag, without its dashes, that names the
+	// port of the Dolt server DoltHostFlag names; the entrypoint hands it to
+	// `gt install` as the same flag, and the scratch render passes it, so all
+	// three read one string. Without it the install dials Dolt's default 3307.
+	DoltPortFlag = "dolt-port"
 )
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town

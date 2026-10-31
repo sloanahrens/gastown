@@ -53,6 +53,8 @@ type entrypointRig struct {
 	// since an empty host is refused and differs from no flag.
 	doltHost    string
 	doltHostSet bool
+	doltPort    int
+	doltPortSet bool
 	calls       [][]string
 }
 
@@ -135,6 +137,8 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 		omTokenFile: r.omTokenFile,
 		doltHost:    r.doltHost,
 		doltHostSet: r.doltHostSet,
+		doltPort:    r.doltPort,
+		doltPortSet: r.doltPortSet,
 	}
 }
 
@@ -364,6 +368,7 @@ func TestContainerEntrypointTakesTheDoltHostTheInstalledTownNames(t *testing.T) 
 			r.kind[entrypointTownCfg] = entryRegular
 			r.files = map[string]string{entrypointTownCfg: townCfg}
 			r.doltHost, r.doltHostSet = "scratch-dolt", true
+			r.doltPort, r.doltPortSet = 3306, true
 
 			if err := runContainerEntrypoint(r.entrypoint()); err != nil {
 				t.Fatalf("runContainerEntrypoint: %v", err)
@@ -1314,5 +1319,172 @@ func TestMergeEnv(t *testing.T) {
 	}
 	if got := mergeEnv([]string{"A=1"}, nil); !reflect.DeepEqual(got, []string{"A=1"}) {
 		t.Errorf("mergeEnv with no additions = %v, want the base", got)
+	}
+}
+
+// The scratch Dolt serves a port other than gt's default 3307, so the install
+// is given the port beside the host. Dropping the append in installArgv turns
+// this red (gt-i2ekc).
+func TestContainerEntrypointInstallArgv(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	r.doltHost, r.doltHostSet = "scratch-dolt", true
+	r.doltPort, r.doltPortSet = 3306, true
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	want := []string{entrypointBin, "install", entrypointTown, "--git",
+		"--" + config.DoltHostFlag, "scratch-dolt", "--" + config.DoltPortFlag, "3306"}
+	var got []string
+	for _, c := range r.calls {
+		if len(c) > 1 && c[1] == "install" {
+			got = c
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("install command = %v, want %v", got, want)
+	}
+}
+
+// A port with no host to belong to, outside 1..65535, or without the scratch
+// flag is refused before the first command.
+func TestContainerEntrypointRefusesADoltPortItCannotUse(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		rig     func() *entrypointRig
+		host    bool
+		port    int
+		wantMsg string
+	}{
+		{"a port without a host", scratchRig, false, 3306, "without --" + config.DoltHostFlag},
+		{"port zero", scratchRig, true, 0, "is not a port"},
+		{"a port above 65535", scratchRig, true, 70000, "is not a port"},
+		{"a port with a host but no scratch flag", townRig, true, 3306, "without --" + config.ScratchTownFlag},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := tc.rig()
+			if tc.host {
+				r.doltHost, r.doltHostSet = "scratch-dolt", true
+			}
+			r.doltPort, r.doltPortSet = tc.port, true
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if err == nil || !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("error = %v, want a refusal saying %q", err, tc.wantMsg)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
+	}
+}
+
+// --dolt-port reaches the flags the entrypoint acts on, and port zero given on
+// purpose is told apart from no flag.
+func TestContainerEntrypointDoltPortFlagIsWired(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		want    int
+		wantSet bool
+	}{
+		{"no flag", []string{}, 0, false},
+		{"the flag", []string{"--dolt-port", "3306"}, 3306, true},
+		{"zero on purpose", []string{"--dolt-port=0"}, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got entrypointFlags
+			c := newDaemonContainerEntrypointCmd(func(flags entrypointFlags) error {
+				got = flags
+				return nil
+			})
+			c.SetArgs(tc.args)
+			c.SilenceUsage, c.SilenceErrors = true, true
+			if err := c.Execute(); err != nil {
+				t.Fatalf("execute container-entrypoint %v: %v", tc.args, err)
+			}
+			if got.doltPort != tc.want || got.doltPortSet != tc.wantSet {
+				t.Errorf("--dolt-port parsed as %d (set %v), want %d (set %v)", got.doltPort, got.doltPortSet, tc.want, tc.wantSet)
+			}
+		})
+	}
+}
+
+// The restart after the install passes --dolt-port again. The port the town
+// already names goes on; a different one, or none, is refused rather than
+// dropped in silence, as a different host is (gt-i2ekc).
+func TestContainerEntrypointChecksTheDoltPortTheInstalledTownNames(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		cfg     string
+		wantMsg string // "" means the start goes on
+	}{
+		{"the same port", `{"dolt":{"host":"scratch-dolt","port":3306}}`, ""},
+		{"another port", `{"dolt":{"host":"scratch-dolt","port":3307}}`, "is not the port"},
+		{"no port", `{"dolt":{"host":"scratch-dolt"}}`, "is not the port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			r.kind[entrypointTownCfg] = entryRegular
+			r.files = map[string]string{entrypointTownCfg: tc.cfg}
+			r.doltHost, r.doltHostSet = "scratch-dolt", true
+			r.doltPort, r.doltPortSet = 3306, true
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if tc.wantMsg == "" {
+				if err != nil {
+					t.Fatalf("runContainerEntrypoint: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), config.DoltPortFlag) || !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("error = %v, want a refusal naming --%s and saying %q", err, config.DoltPortFlag, tc.wantMsg)
+			}
+			if len(r.calls) != 0 {
+				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
+	}
+}
+
+// A restart that leaves --dolt-port out is checked against the port an install
+// would have used, gt's default 3307, so dropping the flag does not skip the
+// check (om finding on gt-i2ekc).
+func TestContainerEntrypointChecksTheDefaultDoltPortWhenTheFlagIsOmitted(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		cfg     string
+		wantErr bool
+	}{
+		{"the town names the default port", `{"dolt":{"host":"scratch-dolt","port":3307}}`, false},
+		{"the town names another port", `{"dolt":{"host":"scratch-dolt","port":3306}}`, true},
+		{"the town names no port", `{"dolt":{"host":"scratch-dolt"}}`, true},
+		{"the town names no dolt block", `{"type":"town"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			r.kind[entrypointTownCfg] = entryRegular
+			r.files = map[string]string{entrypointTownCfg: tc.cfg}
+			r.doltHost, r.doltHostSet = "scratch-dolt", true
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("error = %v, want error %v", err, tc.wantErr)
+			}
+			if tc.wantErr && len(r.calls) != 0 {
+				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
 	}
 }

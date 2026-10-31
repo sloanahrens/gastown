@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -245,7 +246,8 @@ func TestRenderDaemonCompose_ScratchPassesTheEntrypointFlagsAndTheLiveOneDoesNot
 	t.Parallel()
 	_, scratch := render(t, scratchSpec())
 	if got, want := scratch.Services["daemon"].Command,
-		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService}; !slices.Equal(got, want) {
+		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService,
+			"--" + config.DoltPortFlag, strconv.Itoa(templates.ScratchDoltPort)}; !slices.Equal(got, want) {
 		t.Errorf("scratch daemon command = %q, want %q", got, want)
 	}
 
@@ -253,7 +255,7 @@ func TestRenderDaemonCompose_ScratchPassesTheEntrypointFlagsAndTheLiveOneDoesNot
 	if got := live.Services["daemon"].Command; len(got) != 0 {
 		t.Errorf("live daemon command = %q, want none", got)
 	}
-	for _, flag := range []string{config.ScratchTownFlag, config.DoltHostFlag} {
+	for _, flag := range []string{config.ScratchTownFlag, config.DoltHostFlag, config.DoltPortFlag} {
 		if strings.Contains(liveOut, flag) {
 			t.Errorf("live render carries %q, which only the scratch project passes:\n%s", flag, liveOut)
 		}
@@ -266,7 +268,8 @@ func TestRenderDaemonCompose_ScratchForgePassesTheDoltHost(t *testing.T) {
 	t.Parallel()
 	_, f := render(t, forgeSpec())
 	if got, want := f.Services["daemon"].Command,
-		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService}; !slices.Equal(got, want) {
+		[]string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService,
+			"--" + config.DoltPortFlag, strconv.Itoa(templates.ScratchDoltPort)}; !slices.Equal(got, want) {
 		t.Errorf("scratch forge daemon command = %q, want %q", got, want)
 	}
 }
@@ -392,6 +395,7 @@ func TestRenderDaemonCompose_ScratchPassesTheOMTokenFile(t *testing.T) {
 	want := []string{
 		"--" + config.ScratchTownFlag,
 		"--" + config.DoltHostFlag, templates.ScratchDoltService,
+		"--" + config.DoltPortFlag, strconv.Itoa(templates.ScratchDoltPort),
 		"--" + config.OMTokenFileFlag, "/run/secrets/om-token",
 	}
 	if got := parsed.Services["daemon"].Command; !slices.Equal(got, want) {
@@ -441,5 +445,58 @@ func TestRenderDaemonCompose_OMTokenFileIsRefusedWhereItDoesNotBelong(t *testing
 	liveOut, _ := render(t, liveSpec())
 	if strings.Contains(liveOut, config.OMTokenFileFlag) {
 		t.Errorf("the live render carries --%s:\n%s", config.OMTokenFileFlag, liveOut)
+	}
+}
+
+// The scratch Dolt's healthcheck and the daemon's command read one port, the
+// spec's DoltPort. A value that is neither 3306 nor 3307 shows it: a probe or a
+// command with either number written in would carry it instead (gt-i2ekc).
+func TestRenderDaemonCompose_ScratchDoltPortIsOneValueInProbeAndCommand(t *testing.T) {
+	t.Parallel()
+	spec := scratchSpec()
+	spec.DoltPort = 4406
+	out, parsed := render(t, spec)
+
+	if !strings.Contains(out, "/dev/tcp/127.0.0.1/4406") {
+		t.Errorf("the scratch Dolt healthcheck does not probe port 4406:\n%s", out)
+	}
+	want := []string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService,
+		"--" + config.DoltPortFlag, "4406"}
+	if got := parsed.Services["daemon"].Command; !slices.Equal(got, want) {
+		t.Errorf("scratch daemon command = %q, want %q", got, want)
+	}
+}
+
+// A spec that leaves DoltPort zero gets the pinned image's default.
+func TestRenderDaemonCompose_ScratchDoltPortDefaultsToTheImagesPort(t *testing.T) {
+	t.Parallel()
+	out, _ := render(t, scratchSpec())
+	port := strconv.Itoa(templates.ScratchDoltPort)
+	if !strings.Contains(out, "/dev/tcp/127.0.0.1/"+port) {
+		t.Errorf("the default healthcheck does not probe port %s:\n%s", port, out)
+	}
+}
+
+// A DoltPort the render cannot honour is refused: one on a live spec, which
+// runs no Dolt of its own, and one that is not a port.
+func TestRenderDaemonCompose_RefusesADoltPortItCannotUse(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		spec func() templates.ComposeSpec
+		port int
+	}{
+		{"on a live spec", liveSpec, 3306},
+		{"above 65535", scratchSpec, 70000},
+		{"negative", scratchSpec, -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := tc.spec()
+			spec.DoltPort = tc.port
+			if _, err := templates.RenderDaemonCompose(spec); err == nil {
+				t.Errorf("RenderDaemonCompose with DoltPort %d = nil error, want a refusal", tc.port)
+			}
+		})
 	}
 }
