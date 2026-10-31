@@ -72,8 +72,9 @@ gt prime                    # Load role context
 gt hook               # Shows your pinned molecule and hook_bead
 bd show {{issue}}           # Validates Dolt connectivity + reads your assignment
 ```
-If `bd show` hangs or fails: run `gt dolt status` to check Dolt health.
-If Dolt is down: `gt escalate -s HIGH "Dolt: <symptom>"` — do NOT restart it yourself.
+If `bd show` hangs or fails: retry `bd list --limit 1` up to 3 times, about 10 seconds apart.
+Port 3307 from bash, nc or curl is denied by the sandbox policy and is not evidence of an outage; `bd` is the probe.
+If all 3 probes fail: `gt escalate -s HIGH "Dolt: <symptom>"` and say it failed 3 times — do NOT restart Dolt yourself.
 
 The hook_bead is your assigned issue. Read the output of `bd show` carefully.
 

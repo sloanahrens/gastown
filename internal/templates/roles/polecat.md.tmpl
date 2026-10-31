@@ -373,14 +373,27 @@ gt bead create --rig=beads "bd CLI bug"   # File in another rig (never bd --repo
 
 ## Dolt Connectivity
 
-Beads data is stored in **Dolt** (git-for-data) on port 3307. If `bd` commands hang or fail:
+Beads data is stored in **Dolt** (git-for-data) on port 3307. Probe it with `bd`, not with
+the network:
 
 ```bash
-{{ cmd }} dolt status               # Check server health + latency
+bd list --limit 1                   # the probe: succeeds if Dolt answers
 ```
 
-**Symptoms of Dolt trouble:** commands hang >5s, "connection refused", empty results.
-**Do NOT restart Dolt yourself.** Escalate:
+If it fails, retry it up to **3 times, about 10 seconds apart** (a first call right after
+a session starts can fail and the next succeed). Only a probe that fails all three
+times is a symptom worth reporting.
+
+**Port 3307 from a shell is not evidence.** In a sandboxed session the network policy lets
+only `bd` and `{{ cmd }}` reach Dolt; `bash /dev/tcp`, `nc` and `curl` to 3307 are denied by
+policy while Dolt is healthy. Do not poll the port with a shell loop, and do not read a
+refused shell connection, or a `{{ cmd }} dolt status` that disagrees with `bd`, as an outage.
+`bd` is the one authority.
+
+**Symptoms of Dolt trouble:** `bd list --limit 1` fails 3 times in a row, hangs >5s, or
+returns empty results it should not.
+**Do NOT restart Dolt yourself.** Escalate, and say in the escalation that the probe failed
+3 times with the error text:
 ```bash
 {{ cmd }} escalate -s HIGH "Dolt: <describe symptom>"
 ```

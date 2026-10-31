@@ -404,7 +404,9 @@ func hookQueryErrorBanner(err error) string {
 		"Hook query failed: " + err.Error() + "\n" +
 		"This is a database connectivity error, NOT an empty hook.\n" +
 		"Your work may still be assigned. Do NOT close any beads.\n" +
-		"Escalate and wait for resolution.\n\n"
+		"Probe with `bd list --limit 1`, retried up to 3 times about 10 seconds apart; a first call can fail and the next succeed.\n" +
+		"Port 3307 from bash, nc or curl is denied by the sandbox policy and is not evidence of an outage; do not poll it, `bd` is the probe.\n" +
+		"Escalate only if all 3 probes fail, and say so. Then wait for resolution.\n\n"
 }
 
 // primeStartupDirectiveAllowed reports whether the "no work on your hook" startup
