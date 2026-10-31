@@ -239,30 +239,61 @@ func TestGuardRunRefusesThePortTheTownItselfNames(t *testing.T) {
 
 // TestGuardRunRefusesAScratchItsInitMadeNoWorkspaceIn: bd where's answer is bd's own report, so a bd
 // that answers with the pinned workspace but wrote nothing to the scratch is refused before it is
-// asked, on the marker it did not make (gt-p85pw.115).
+// asked, on the marker it did not make. A marker above the scratch is the town's workspace, which the
+// scratch does not own, and a marker it cannot read is a refusal rather than an absent one
+// (gt-p85pw.115).
 func TestGuardRunRefusesAScratchItsInitMadeNoWorkspaceIn(t *testing.T) {
 	t.Parallel()
-	town := tempDir(t)
-	mustWrite(t, filepath.Join(town, ".beads", "metadata.json"), `{"dolt_database":"hq"}`)
-	bd := &guardBD{noWorkspace: true} // answers exit 0 to init, and makes nothing
-	asked := false
-	child := childBD{
-		Run: bd.Run,
-		Env: func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
-		Where: func(dir string, _ []string) (string, error) {
-			asked = true // the pin's answer, which a bd that ignored it would echo
-			return filepath.Join(dir, ".beads"), nil
-		},
+	tests := []struct {
+		name string
+		tree func(t *testing.T) string // the scratch to guard
+		want string
+	}{
+		{"no workspace anywhere above it", func(t *testing.T) string {
+			return filepath.Join(tempDir(t), "scratch")
+		}, "cannot prove the scratch owns"},
+		{"the town's workspace above it", func(t *testing.T) string {
+			town := tempDir(t)
+			mustWrite(t, filepath.Join(town, ".beads", "metadata.json"), `{"dolt_database":"hq"}`)
+			return filepath.Join(town, "scratch")
+		}, "which the scratch does not own"},
+		{"a marker it cannot read", func(t *testing.T) string {
+			scratch := filepath.Join(tempDir(t), "scratch")
+			if err := os.MkdirAll(scratch, 0o755); err != nil {
+				t.Fatalf("make the scratch: %v", err)
+			}
+			// A self-symlink fails the stat with ELOOP, which is neither a workspace nor a missing
+			// marker.
+			if err := os.Symlink(".beads", filepath.Join(scratch, ".beads")); err != nil {
+				t.Fatalf("make the marker loop: %v", err)
+			}
+			return scratch
+		}, "check for the workspace"},
 	}
-	err := guardRun(safeCwd(t), filepath.Join(town, "scratch"), child)
-	if err == nil || !strings.Contains(err.Error(), "made no workspace") {
-		t.Fatalf("guardRun over an init that made nothing = %v, want the missing workspace refused", err)
-	}
-	if asked {
-		t.Error("bd where was asked about a workspace the init never made")
-	}
-	if len(bd.args) != 1 || bd.args[0][0] != "init" {
-		t.Errorf("bd ran %v, want only the init that made nothing", bd.args)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &guardBD{noWorkspace: true} // answers exit 0 to init, and makes nothing
+			asked := false
+			child := childBD{
+				Run: bd.Run,
+				Env: func(dir string) []string { return childEnv(scratchServerEnv(), dir) },
+				Where: func(dir string, _ []string) (string, error) {
+					asked = true // the pin's answer, which a bd that ignored it would echo
+					return filepath.Join(dir, ".beads"), nil
+				},
+			}
+			err := guardRun(safeCwd(t), tc.tree(t), child)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("guardRun over an init that made nothing = %v, want an error naming %q", err, tc.want)
+			}
+			if asked {
+				t.Error("bd where was asked about a workspace the init never made")
+			}
+			if len(bd.args) != 1 || bd.args[0][0] != "init" {
+				t.Errorf("bd ran %v, want only the init that made nothing", bd.args)
+			}
+		})
 	}
 }
 
