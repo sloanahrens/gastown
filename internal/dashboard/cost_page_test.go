@@ -159,7 +159,7 @@ func TestCostPanelDrawsGCPUnderTheProviderRows(t *testing.T) {
 	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c =>
 		c.className === "spendpart" ? "spendpart"
 			: c.textContent.indexOf("GCP") === 0 ? "gcp"
-			: c.tagName === "TABLE" ? "providers" : "other"))`)
+			: c.className === "costscroll" ? "providers" : "other"))`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
 	}
