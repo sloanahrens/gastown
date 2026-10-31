@@ -348,3 +348,23 @@ func TestDepListRawIDsOnADoltRigIsNotHandledByTheSeam(t *testing.T) {
 		}
 	}
 }
+
+// A town with no route table at all has no tracker rig: the Dolt rig keeps the
+// Dolt answer it always had. Only a table that exists and cannot be read is a
+// refusal (TestDepListRawIDsRefusesWhenTheSeamCannotReadTheTownOrRoutes), because
+// then the seam cannot tell the two kinds of rig apart (gt-p85pw.109).
+func TestDepListRawIDsWithNoRouteTableKeepsTheDoltPath(t *testing.T) {
+	t.Parallel()
+	townRoot, _ := trackerTown(t)
+	if err := os.Remove(filepath.Join(townRoot, ".beads", beads.RoutesFileName)); err != nil {
+		t.Fatal(err)
+	}
+	rig := filepath.Join(townRoot, "gastown", "mayor", "rig")
+	if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := depListRawIDsOnTracker(rig, "gt-x", "down", "", backend.Config{}, workspace.Find)
+	if !errors.Is(err, errNotOnTracker) || ids != nil {
+		t.Errorf("depListRawIDsOnTracker = %v, %v; want errNotOnTracker for a town with no route table", ids, err)
+	}
+}
