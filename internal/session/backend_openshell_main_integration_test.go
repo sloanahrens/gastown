@@ -23,8 +23,13 @@ import (
 type mainScriptRun struct {
 	t    *testing.T
 	env  []string
+	pid  int
 	done chan error
 }
+
+// mainScriptPollInterval is the poll interval the tests pass to the script. The
+// script sleeps for it only in its monitor loop.
+const mainScriptPollInterval = "0.2"
 
 func startMainScript(t *testing.T, session string, waitSeconds string) *mainScriptRun {
 	t.Helper()
@@ -51,7 +56,7 @@ func startMainScriptWith(t *testing.T, session string, waitSeconds string, lostP
 	if prepare != nil {
 		prepare(r)
 	}
-	args := []string{"-c", sandboxMainScript, "sh", session, waitSeconds, "0.2", tmpdir}
+	args := []string{"-c", sandboxMainScript, "sh", session, waitSeconds, mainScriptPollInterval, tmpdir}
 	if lostPolls != "" {
 		args = append(args, lostPolls)
 	}
@@ -61,6 +66,7 @@ func startMainScriptWith(t *testing.T, session string, waitSeconds string, lostP
 		cancel()
 		t.Fatal(err)
 	}
+	r.pid = cmd.Process.Pid
 	t.Cleanup(func() {
 		cancel()
 		kill := exec.Command("tmux", "-L", SandboxTmuxSocket, "kill-server")
@@ -92,6 +98,41 @@ func (r *mainScriptRun) waitServer() {
 		time.Sleep(50 * time.Millisecond)
 	}
 	r.t.Fatal("the script never started its tmux server")
+}
+
+// waitMonitoring waits until the script is in its monitor loop. waitServer sees
+// the holder session, which the script creates before its first look for the
+// agent's session, so a test that acts on the server right after it can act
+// before the script has polled at all. Only the monitor loop sleeps for the poll
+// interval, so a child sleep with that interval marks it. The wait ends only
+// with the test's own context.
+func (r *mainScriptRun) waitMonitoring() {
+	r.t.Helper()
+	for !r.sleepingInMonitor() {
+		select {
+		case <-r.t.Context().Done():
+			r.t.Fatal("the script never reached its monitor loop")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// sleepingInMonitor reports whether the script has a child sleeping for the poll
+// interval.
+func (r *mainScriptRun) sleepingInMonitor() bool {
+	r.t.Helper()
+	out, err := exec.Command("ps", "-A", "-o", "ppid=,args=").Output()
+	if err != nil {
+		r.t.Fatalf("listing processes: %v", err)
+	}
+	parent := strconv.Itoa(r.pid)
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 3 && f[0] == parent && f[1] == "sleep" && f[2] == mainScriptPollInterval {
+			return true
+		}
+	}
+	return false
 }
 
 // serverPID is the pid of the tmux server the script started under the test's
@@ -213,7 +254,8 @@ func TestIntegrationMainScriptGivesUpWhenTheSessionNeverAppears(t *testing.T) {
 // unreachable has lost the agent with it, so the script exits after a bounded
 // number of unreachable polls. Killing the whole tmux server leaves every tmux
 // call failing, as a crashed server would. The agent's session exists before the
-// script starts, so it is in its monitor loop from the first poll.
+// script starts, but the script only reaches its monitor loop after its first
+// look for it, so the kill waits for that loop.
 func TestIntegrationMainScriptExitsOnlyAfterTmuxStaysUnreachable(t *testing.T) {
 	t.Parallel()
 	r := startMainScriptWith(t, "gt-agent", "30", "10", func(r *mainScriptRun) {
@@ -222,6 +264,7 @@ func TestIntegrationMainScriptExitsOnlyAfterTmuxStaysUnreachable(t *testing.T) {
 		}
 	})
 	r.waitServer()
+	r.waitMonitoring()
 	killed := time.Now()
 	if err := r.tmux("kill-server"); err != nil {
 		t.Fatal(err)
