@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/tracker/api"
 )
@@ -423,5 +424,66 @@ func TestReapTrackerPurgeAgeIsReadOnlyForATrackerRig(t *testing.T) {
 				t.Errorf("reapTrackerPurgeAge = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// setReaperFlag sets a flag on a reaper command for one test and restores it.
+func setReaperFlag(t *testing.T, cmd *cobra.Command, name, value string) {
+	t.Helper()
+	prev := cmd.Flags().Lookup(name).Value.String()
+	if err := cmd.Flags().Set(name, value); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Flags().Set(name, prev) })
+}
+
+// townWithRoutes is a town whose cwd the commands read, with the route table
+// body; the commands take no directory argument, so the cwd is the input.
+func townWithRoutes(t *testing.T, body string) {
+	t.Helper()
+	town := t.TempDir()
+	writeTownFile(t, filepath.Join(town, "mayor", "town.json"), `{"name":"test-town"}`)
+	writeTownFile(t, filepath.Join(town, ".beads", "routes.jsonl"), body)
+	//testpolicy:allow no-chdir — the town root is the input under test: the commands take no directory argument
+	t.Chdir(town)
+}
+
+// TestReaperTrackerRunsRefuseAnUnreadableRouteTable drives the scan and reap
+// commands in a town whose route table does not parse. They refuse before they
+// sweep: a tracker rig's Dolt database could be reached otherwise. --db names a
+// bd database so the refusal, not a Dolt discovery, is what ends the run.
+//
+//testpolicy:allow parallel — the commands read the process working directory (workspace.FindFromCwd) and the --db flag, which t.Chdir and setReaperFlag set for the whole process
+func TestReaperTrackerRunsRefuseAnUnreadableRouteTable(t *testing.T) {
+	townWithRoutes(t, "{not json\n")
+	setReaperFlag(t, reaperScanCmd, "db", "beads")
+	setReaperFlag(t, reaperReapCmd, "db", "beads")
+
+	for name, run := range map[string]func() error{
+		"scan": func() error { return reaperScanCmd.RunE(reaperScanCmd, nil) },
+		"reap": func() error { return reaperReapCmd.RunE(reaperReapCmd, nil) },
+	} {
+		err := run()
+		if err == nil || !strings.Contains(err.Error(), "cannot find the tracker rigs") {
+			t.Errorf("%s = %v, want the refusal that names the tracker rigs", name, err)
+		}
+	}
+}
+
+// TestReaperReapRefusesABadPurgeAgeForATrackerRig: reap reads --purge-age for
+// the tracker rig it covers, so a value that does not parse ends the run with a
+// named error before anything is swept. --db names the tracker rig, so it is
+// covered.
+//
+//testpolicy:allow parallel — the command reads the process working directory (workspace.FindFromCwd) and the --db and --purge-age flags, which t.Chdir and setReaperFlag set for the whole process
+func TestReaperReapRefusesABadPurgeAgeForATrackerRig(t *testing.T) {
+	townWithRoutes(t, `{"path":"gastown/mayor/rig","prefix":"gt-","backend":"tracker"}
+`)
+	setReaperFlag(t, reaperReapCmd, "db", "gastown")
+	setReaperFlag(t, reaperReapCmd, "purge-age", "bogus")
+
+	err := reaperReapCmd.RunE(reaperReapCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--purge-age") {
+		t.Errorf("reap with --purge-age=bogus over a tracker rig = %v, want the refusal that names --purge-age", err)
 	}
 }
