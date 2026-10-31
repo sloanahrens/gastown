@@ -292,6 +292,11 @@ func TestDeleteInChunks(t *testing.T) {
 	if want := DefaultBatchSize + 1; deleted != want {
 		t.Errorf("deleted = %d, want %d (chunks one and three)", deleted, want)
 	}
+	if len(w.batches) != 3 ||
+		!reflect.DeepEqual(w.batches[0], ids[:DefaultBatchSize]) ||
+		!reflect.DeepEqual(w.batches[2], ids[2*DefaultBatchSize:]) {
+		t.Errorf("batches = %v, want chunks one and three to be the deleted ones", w.batches)
+	}
 	if len(failed) != 1 {
 		t.Fatalf("failed chunks = %+v, want one", failed)
 	}
