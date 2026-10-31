@@ -416,9 +416,10 @@ func TestTheLandingsPaneDrawsThePolecatTimeColumn(t *testing.T) {
 	}
 }
 
-// A landing built on a crew session's branch has no polecat, so its Polecat
-// cell reads crew rather than a dash, which would read as missing data. A
-// polecat's landing with no reading keeps the dash (gt-kmp7c).
+// A landing built on a bird or crew branch has no polecat, so its Polecat cell
+// reads bird rather than a dash, which would read as missing data, and its
+// tooltip says there is no polecat time (gt-kmp7c, gt-rxs7w). A polecat's
+// landing with no reading keeps the dash.
 func TestTheLandingsPaneReadsCrewInThePolecatCellOfACrewBranchRow(t *testing.T) {
 	t.Parallel()
 
@@ -433,11 +434,16 @@ func TestTheLandingsPaneReadsCrewInThePolecatCellOfACrewBranchRow(t *testing.T) 
 	}})
 
 	got := map[string]string{}
+	titles := map[string]string{}
 	for _, c := range drawnPolecatColumn(t, dom) {
 		got[c.Bead] = c.Text
+		titles[c.Bead] = c.Title
 	}
-	if got["gt-crew"] != "crew" {
-		t.Errorf("crew branch row's Polecat cell reads %q, want crew", got["gt-crew"])
+	if got["gt-crew"] != "bird" {
+		t.Errorf("crew branch row's Polecat cell reads %q, want bird", got["gt-crew"])
+	}
+	if titles["gt-crew"] != "bird or crew branch: no polecat time exists" {
+		t.Errorf("crew branch row's Polecat cell tooltip reads %q, want the no-polecat-time reason", titles["gt-crew"])
 	}
 	if got["gt-polecat"] != "–" {
 		t.Errorf("polecat row with no reading reads %q, want the dash", got["gt-polecat"])
