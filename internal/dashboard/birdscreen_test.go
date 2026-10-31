@@ -29,6 +29,11 @@ var birdSecretRows = []struct {
 	{"apikey assignment", "apikey=" + strings.Repeat("n", 16), "credential-assignment"},
 	{"PGPASSWORD assignment", "PGPASSWORD=" + strings.Repeat("p", 16), "credential-assignment"},
 	{"Authorization Bearer header", "Authorization: Bearer " + strings.Repeat("z", 16), "credential-assignment"},
+	{"spaced credential with digits", "password " + "hunter2" + "hunter2", "credential-assignment"},
+	{"spaced credential of one all-letter word", "password " + "correcthorse" + "batterystaple", "credential-assignment"},
+	{"spaced credential of letters, more words after", "password " + "correcthorse" + "batterystaple" + " horse", "credential-assignment"},
+	{"REDACTED inside a real value", "password=" + strings.Repeat("k", 4) + "REDACTED" + strings.Repeat("k", 4), "credential-assignment"},
+	{"redaction marker inside a real value", "password=" + strings.Repeat("k", 4) + "[REDACTED:db-password]" + strings.Repeat("k", 4), "credential-assignment"},
 	{"URL with a password", "https://deploy:" + strings.Repeat("p", 12) + "@git.example.com", "url-credential"},
 	{"postgres URL with a password", "postgres://app:" + strings.Repeat("9", 12) + "@db.internal:5432/main", "url-credential"},
 }
@@ -50,6 +55,37 @@ var birdOrdinaryRows = []struct {
 	{"masked URL password", "https://deploy:***@git.example.com"},
 	{"sk- prefix one character short", "sk-" + strings.Repeat("a", 15)},
 	{"word that ends in sk-", "risk-assessment-framework"},
+	{"masked REDACTED value", "password=***REDACTED***"},
+	{"redaction marker value", "PGPASSWORD=[REDACTED:db-password]"},
+}
+
+// birdProseWithheldByDesign is prose the spaced rule withholds on purpose. A
+// keyword followed by a space and a long word cannot be told from a passphrase,
+// so the rule withholds it. These rows pin that trade-off; see birdSpaced.
+var birdProseWithheldByDesign = []struct {
+	name string
+	text string
+}{
+	{"keyword before a long word", "token authentication flow"},
+	{"keyword before a long word and a comma", "token authentication, then retry"},
+	{"keyword before a long word and a period", "token authentication."},
+	{"keyword before a hyphenated word", "token non-expiring-session"},
+	{"keyword before a word with an apostrophe", "secret author's-notebook"},
+	{"Bearer header before a prose word", "Authorization: Bearer authentication-flow"},
+}
+
+func TestBirdScreenWithholdsProseByDesign(t *testing.T) {
+	t.Parallel()
+
+	for _, row := range birdProseWithheldByDesign {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, withheld := screenSecret([]byte(row.text)); !withheld {
+				t.Errorf("screenSecret(%q) withheld = false, want true (accepted false positive)", row.text)
+			}
+		})
+	}
 }
 
 func TestBirdScreenWithholdsEachSecretShape(t *testing.T) {
@@ -84,6 +120,16 @@ func TestBirdScreenLeavesOrdinaryReportText(t *testing.T) {
 	}
 }
 
+// birdClasses is the closed set of labels screenSecret may return. Set membership
+// catches a label that carries any input bytes, because such a label is not in
+// the set.
+var birdClasses = map[string]bool{
+	"private-key":           true,
+	"token-prefix":          true,
+	"credential-assignment": true,
+	"url-credential":        true,
+}
+
 func TestBirdScreenNeverEchoesTheMatch(t *testing.T) {
 	t.Parallel()
 
@@ -93,6 +139,9 @@ func TestBirdScreenNeverEchoesTheMatch(t *testing.T) {
 			t.Parallel()
 
 			class, _ := screenSecret([]byte(row.text))
+			if !birdClasses[class] {
+				t.Errorf("screenSecret(%s) class = %q, not a known label; it may echo the input", row.name, class)
+			}
 			if strings.Contains(class, row.text) {
 				t.Fatalf("class %q contains the whole input", class)
 			}
