@@ -942,6 +942,43 @@ func TestCostProvidersTableScrollsSidewaysInsteadOfClipping(t *testing.T) {
 	}
 }
 
+// A narrow panel scrolls the providers table, but on a host whose scrollbars
+// are overlay-style a bare overflow-x:auto draws nothing until the reader
+// scrolls, so the cut Status column reads as the table's end. The wrapper fades
+// its clipped edge instead: a dim gradient at the panel's left and right edges,
+// under a panel-coloured cover that scrolls with the table. The cover is what
+// makes the cue conditional on overflow (the test names it: background-
+// attachment: local), so a table that fits shows no fade, while overflow-x:auto
+// keeps the fade from pinning to a non-scrolling box.
+func TestCostProvidersTableShowsItsSidewaysScroll(t *testing.T) {
+	t.Parallel()
+
+	decls := cssDecls(t, "costscroll")
+	if got := decls["overflow-x"]; got != "auto" {
+		t.Errorf("the .costscroll rule has overflow-x %q, want auto so a narrow panel scrolls the table", got)
+	}
+
+	fade := decls["background"]
+	if !strings.Contains(fade, "radial-gradient") || !strings.Contains(fade, "var(--dim)") {
+		t.Errorf("the .costscroll rule has background %q, want a dim radial gradient at each edge, so the cut column reads as more to the right", fade)
+	}
+	if !strings.Contains(fade, "var(--panel)") {
+		t.Errorf("the .costscroll rule has background %q, want a panel-coloured cover over the fade so it can be hidden when nothing is cut", fade)
+	}
+
+	// background-attachment: local is the declaration the cue's condition
+	// rests on: the covers scroll with the table, so they sit over the fade
+	// when the table fits or is scrolled to an end, and clear it while more is
+	// cut off. Without it the fade is always on.
+	attach := decls["background-attachment"]
+	if !strings.Contains(attach, "local") {
+		t.Errorf("the .costscroll rule has background-attachment %q, want local so the fade shows only while the table overflows", attach)
+	}
+	if !strings.Contains(decls["background-size"], "16px 100%") {
+		t.Errorf("the .costscroll rule has background-size %q, want the 16px fade band at each edge", decls["background-size"])
+	}
+}
+
 // cellTexts is the text of each cell of a row, in column order.
 func cellTexts(row costTableRow) []string {
 	out := make([]string, 0, len(row.Cells))
