@@ -479,6 +479,35 @@ func TestNewClientRefusesAShadowCheckItCannotHonor(t *testing.T) {
 	}
 }
 
+// TestScrubCheckPathIsTheLogTheClientWrites: ScrubCheckPath names the check log
+// the client writes beside the town's usage ledger. The location is pinned to the
+// literal .runtime/jev/scrubcheck.jsonl, so a path that moves fails here, and a
+// sampled call through the production client lands its line at that path.
+func TestScrubCheckPathIsTheLogTheClientWrites(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	want := filepath.Join(town, ".runtime", "jev", "scrubcheck.jsonl")
+	assert.Equal(t, want, ScrubCheckPath(town))
+
+	rt := &scriptedRT{replies: []scriptedReply{
+		{body: replyChoice("returns", 328)},
+		{body: replyChoice("billing", 300)},
+	}}
+	c := newTestClient(t, rt,
+		WithLedger(UsageLedgerPath(town)),
+		WithCaller("testcaller"),
+		WithWarnings(io.Discard),
+		WithShadowScrub(100, allowCap),
+	)
+	_, err := c.Choice(context.Background(), scrubState(), "Which team?", shoeCriteria)
+	require.NoError(t, err)
+	waitShadows(t, c)
+
+	lines := checkLines(t, want)
+	require.Len(t, lines, 1, "the one request writes one line at ScrubCheckPath")
+	assert.Equal(t, outcomeChecked, lines[0]["outcome"])
+}
+
 // checkLines decodes the check log at path, one object per line.
 func checkLines(t *testing.T, path string) []map[string]any {
 	t.Helper()
