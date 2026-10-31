@@ -152,6 +152,11 @@ func TestLandRefusesAnApproveWithABlockingFinding(t *testing.T) {
 	if len(comments) != 1 || !strings.Contains(comments[0].Text, "om approve 0.90") {
 		t.Errorf("comments = %+v, want the one line recording om's approve", comments)
 	}
+	// The findings refuse the landing before the candidate is pushed, so the
+	// gate never runs on it (gt-g0w49).
+	if len(f.gate.dirs) != 0 {
+		t.Errorf("the gate ran on %d tree(s) whose approving verdict carried a blocking finding", len(f.gate.dirs))
+	}
 }
 
 // TestLandRefusesAnApproveWithATooManyMinors: six minors is where the review

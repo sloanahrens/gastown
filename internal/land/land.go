@@ -1236,11 +1236,12 @@ func acceptedRiskMessage(w Work, used []AcceptedRisk) string {
 }
 
 // Land lands w: the declared head merged onto a throwaway worktree of the
-// target, the merged tree gated by CI on the pushed candidate, then om review,
-// then the target written through a Forgejo pull request — an om / review
-// status, a creator check on the candidate's required statuses, and a
-// land/<bead> PR merged with head_commit_id. The target's tip is read back,
-// then the landings file, the LANDING RECORD block and the close.
+// target, the merged tree reviewed by om before it is pushed, then gated by
+// CI as the pushed candidate, then the target written through a Forgejo pull
+// request — an om / review status, a creator check on the candidate's
+// required statuses, and a land/<bead> PR merged with head_commit_id. The
+// target's tip is read back, then the landings file, the LANDING RECORD block
+// and the close.
 //
 // A 409 from the PR merge means the target moved and the candidate is rebuilt
 // through the race path; a 405 is a refusal for a human, never a race; a
@@ -1439,59 +1440,31 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "patch-id", Err: err}
 	}
 
-	l.logf("%s: merged %s onto %s/%s (%s) as %s; pushing the merge candidate and waiting for its CI verdict, then om review", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(merged))
-	// The candidate's CI runs the same stages the gate always did (lint, then
-	// tests), and om runs only after it passes: om is the costly stage, and
-	// work that fails lint or tests never pays for it (gt-b5ugw).
-	l.stage(w, StageCI)
-	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, StageCI)
-	var (
-		gateRes   GateResult
-		gateErr   error
-		ciContext string
-		// candRes is the candidate gate's run: the branch it pushed is
-		// discarded if the gate ends the landing.
-		candRes *CandidateResult
-	)
+	l.logf("%s: merged %s onto %s/%s (%s) as %s; reviewing the merge candidate, then pushing it for its CI verdict", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(merged))
+	// om reviews the merge candidate before it is pushed, so a landing om
+	// refuses never spends a gate run. The cost this order accepts: a landing
+	// that fails the gate pays for one om run first (26 to 39 s). om refusals
+	// were the common case — 73 of 257 gate-running attempts on 2026-10-31,
+	// 29% of the CI stage wall, against 9 gate failures — so the rare one is
+	// the one that pays (gt-g0w49).
 	w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
-	run, ciVerdict, err := l.candidateGate(gateCtx, wt, dir, w, merged)
-	candRes, gateRes, gateErr = &run, ciVerdict, err
-	ciContext = ciGateContext(gateRes)
-	gateDone()
-	if gateErr != nil {
-		l.discardCandidate(ctx, w, candRes)
-		return Result{}, gateErr
-	}
-	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes,
-		RiskPaths: riskPaths, RiskPathReviewSkippedBy: skippedBy}
-	if gateRes.Err != nil {
-		return Result{}, &InfraError{Stage: "gate", Err: gateRes.Err}
-	}
-	if !gateRes.Passed {
-		reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
-		if len(gateRes.Steps) > 0 {
-			reason = fmt.Sprintf("the candidate gate %s failed on the merged tree", gateRes.Steps[0].Command)
-		}
-		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
-		l.discardCandidate(ctx, w, candRes)
-		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail, GateLog: candRes.GateLog}
-		return Result{}, l.reject(issue, w, rej, nil)
-	}
 	var (
 		verdict   Verdict
 		reviewErr error
 		comments  []beads.Comment
+		omTime    time.Duration
+		omRetried bool
 	)
 	// reviewStart opens the window the review leaves on the work bead: it
 	// covers the overseer check and the om attempt alike, so a waiver is
 	// timed like a review (gt-uebmq).
 	reviewStart := time.Now()
-	if OverseerReviewed(issue, w.Head) {
+	waived := OverseerReviewed(issue, w.Head)
+	if waived {
 		// The overseer reviewed this exact head in place of om, which could
 		// not return a verdict (gt-g8t3m): record that and do not pay for om
-		// again. The gate above still ran.
+		// again. The gate below still runs.
 		verdict = Verdict{Verdict: VerdictOverseerPrefix + shortSHA(w.Head)}
-		l.logf("%s: %s, om skipped (overseer-reviewed)", w.BeadID, stageTimes(gateRes, 0, false))
 	} else {
 		// A landing that edits the root .om.json changes the bar om judges
 		// the head against, so its head waits for the overseer before om runs
@@ -1515,7 +1488,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// that arrived are final, and so is an execution error on a tree past
 		// the size bound, which is deterministic and would fail the same way
 		// again.
-		omRetried := errors.Is(reviewErr, ErrOMExecution) && omCtx.Err() == nil && !l.omDiffPastBound(g, base, merged)
+		omRetried = errors.Is(reviewErr, ErrOMExecution) && omCtx.Err() == nil && !l.omDiffPastBound(g, base, merged)
 		if omRetried {
 			l.logf("%s: om review returned no verdict (%s); retrying once", w.BeadID, reviewErrorReason(reviewErr))
 			verdict, reviewErr = l.review(omCtx, in)
@@ -1524,25 +1497,29 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			verdict = l.rescoreBorderline(omCtx, verdict, in)
 		}
 		omDone()
+		omTime = time.Since(reviewStart)
 		l.recordAcceptedRisks(w, used)
-		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart), omRetried))
 	}
+	res := Result{LandedCommit: merged, PatchID: patchID, Base: base,
+		RiskPaths: riskPaths, RiskPathReviewSkippedBy: skippedBy}
 	res.Verdict = verdict
 	if reviewErr == nil && verdict.Verdict != VerdictApprove && verdict.Verdict != VerdictRequestChanges && verdict.Verdict != VerdictSkipped && !strings.HasPrefix(verdict.Verdict, VerdictOverseerPrefix) {
 		reviewErr = fmt.Errorf("reviewer returned no verdict (%q)", verdict.Verdict)
 	}
 	if reviewErr != nil {
 		if ctx.Err() != nil || (!l.ReviewErrorLands && !l.ReviewErrorRejects) {
+			l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omNoVerdictStage, omTime, omRetried))
 			return Result{}, &InfraError{Stage: "review", Err: reviewErr}
 		}
 		if !l.ReviewErrorLands && !l.landsUnreviewed(issue) {
+			l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried))
 			rej := &Rejection{Kind: RejectReview, Rework: false,
 				Reason: l.reviewErrorRejectionReason(wt, base, merged, reviewErr)}
 			return Result{}, l.reject(issue, w, rej, nil)
 		}
 		verdict = Verdict{Verdict: VerdictErrorPrefix + reviewErrorReason(reviewErr), Version: verdict.Version}
 		res.Verdict = verdict
-		l.logf("%s: WARNING om review did not run (%v); the merged tree is green, so it lands with om_verdict %q", w.BeadID, reviewErr, verdict.Verdict)
+		l.logf("%s: WARNING om review did not run (%v); the candidate goes on to its gate with om_verdict %q", w.BeadID, reviewErr, verdict.Verdict)
 	}
 	// The review is over and this is its verdict, whatever the branches below
 	// do with the landing: the work bead gets the one line that ties it to the
@@ -1554,17 +1531,60 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	l.logRounds(issue, w, verdict)
 	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	if verdict.Verdict == VerdictRequestChanges {
+		l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried))
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
 		return Result{}, l.reject(issue, w, rej, &verdict)
 	}
 	// An approving verdict is a score and a set of findings, and the findings
 	// refuse the landing too: a major inside the approving band would otherwise
-	// land on its score alone (gt-oi4je).
+	// land on its score alone (gt-oi4je). The candidate is never pushed for
+	// either refusal, so no gate run pays for it.
 	if rej := findingsRej; rej != nil {
+		l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried))
 		return Result{}, l.reject(issue, w, rej, &verdict)
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, &InfraError{Stage: "push", Err: err}
+	}
+
+	// om passed, so the candidate is pushed and its CI waited on. A red gate
+	// after an om pass is a gate refusal: the om verdict is already recorded
+	// on the bead, and it counts no review round.
+	l.stage(w, StageCI)
+	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, StageCI)
+	var (
+		gateRes   GateResult
+		gateErr   error
+		ciContext string
+		// candRes is the candidate gate's run: the branch it pushed is
+		// discarded if the gate ends the landing.
+		candRes *CandidateResult
+	)
+	run, ciVerdict, err := l.candidateGate(gateCtx, wt, dir, w, merged)
+	candRes, gateRes, gateErr = &run, ciVerdict, err
+	ciContext = ciGateContext(gateRes)
+	gateDone()
+	if gateErr != nil {
+		l.discardCandidate(ctx, w, candRes)
+		return Result{}, gateErr
+	}
+	res.Gate = gateRes
+	if gateRes.Err != nil {
+		return Result{}, &InfraError{Stage: "gate", Err: gateRes.Err}
+	}
+	stageLine := stageTimes(gateRes, omTime, omRetried)
+	if waived {
+		stageLine += ", om skipped (overseer-reviewed)"
+	}
+	l.logf("%s: %s", w.BeadID, stageLine)
+	if !gateRes.Passed {
+		reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
+		if len(gateRes.Steps) > 0 {
+			reason = fmt.Sprintf("the candidate gate %s failed on the merged tree", gateRes.Steps[0].Command)
+		}
+		l.discardCandidate(ctx, w, candRes)
+		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail, GateLog: candRes.GateLog}
+		return Result{}, l.reject(issue, w, rej, nil)
 	}
 
 	// The rig lands through Forgejo: the om status is posted and the PR merged
@@ -2054,6 +2074,13 @@ func (l *Lander) landsUnreviewed(issue *beads.Issue) bool {
 	return false
 }
 
+// The reasons a stage line names for a candidate gate that never ran: om
+// decides the landing before the candidate is pushed (gt-g0w49).
+const (
+	omRejectedStage  = "om rejected"
+	omNoVerdictStage = "om no verdict"
+)
+
 // stageTimes is one line naming each gate stage's wall time and, when om
 // ran, its own, under the host load the stages ran on: "stages: lint 18s,
 // gate 92s, om 2m31s (load1 7.4)". A host that reports no load leaves the
@@ -2075,6 +2102,21 @@ func stageTimesUnderLoad(g GateResult, om time.Duration, omRetried bool, load1 f
 		}
 		parts = append(parts, st.Name+" "+t)
 	}
+	return stageLine(parts, om, omRetried, load1)
+}
+
+// stageTimesCISkipped is stageTimes for a landing that never reached its
+// candidate gate: the skipped stage keeps its name and names the decision that
+// ended the landing ("stages: ci skipped (om rejected), om 12s"), so the line
+// still reads as two stages and a reader that parses the times reads no gate
+// time on it (gt-g0w49).
+func stageTimesCISkipped(reason string, om time.Duration, omRetried bool) string {
+	return stageLine([]string{"ci skipped (" + reason + ")"}, om, omRetried, hostLoad1)
+}
+
+// stageLine renders the stage parts, om's own time when it ran, and the host
+// load sample.
+func stageLine(parts []string, om time.Duration, omRetried bool, load1 func() (float64, bool)) string {
 	if om > 0 {
 		t := om.Round(time.Second).String()
 		if omRetried {

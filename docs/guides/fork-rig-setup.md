@@ -70,8 +70,9 @@ A rig added with `--upstream-url` is a fork rig. `gt prime` tells its
 polecats to push branches to the fork and open a PR against upstream by hand
 instead of using the landing worker for upstream changes.
 
-The daemon landing worker lands a rig's work through Forgejo (CI, then om
-review) and fails closed for a rig without a `merge_queue.forgejo` block in
+The daemon landing worker lands a rig's work through Forgejo (om review, then
+CI on the pushed candidate) and fails closed for a rig without a
+`merge_queue.forgejo` block in
 `<rig>/settings/config.json`. Before you point a fork rig at that path, read
 [the Forgejo runbook](../forgejo-runbook.md): it provisions the bots, cuts a
 rig over and names the block's keys. Fork rigs follow the Forgejo-primary
