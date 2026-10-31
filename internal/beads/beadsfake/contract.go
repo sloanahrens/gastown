@@ -58,10 +58,10 @@ func RunDepListUpContract(t *testing.T, newClient func(t *testing.T) beads.Clien
 }
 
 // RunDepListUpExternalContract checks DepListUp for an external target, under
-// the rule of the tracker contract case depsExternalDependents. It is separate from
-// RunDepListUpContract so a store that answers only local targets can still
-// run that one; beadsql's ExternalMoleculesAttachedTo records that bd's read
-// does not answer external targets.
+// the rule of the tracker contract case depsExternalDependents. It is separate
+// from RunDepListUpContract so a store that answers only local targets can
+// still run that one; beadsql's ExternalMoleculesAttachedTo records that bd's
+// read does not answer external targets.
 func RunDepListUpExternalContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
 	t.Helper()
 	t.Run("dep list up external", func(t *testing.T) {
