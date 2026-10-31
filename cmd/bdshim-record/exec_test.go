@@ -66,12 +66,16 @@ func TestExitResultKeepsAnExitAndRefusesARunThatNeverFinished(t *testing.T) {
 // machine, and every workspace variable the operator's shell sets is replaced by the workspace the
 // recorder made, each exactly once, so no inherited value can aim a run at another store
 // (gt-p85pw.103, gt-p85pw.115).
+//
+// The Dolt endpoint passes through unchanged: the recording runs against the throwaway server its
+// environment names, and the guard refuses the environment when it names the town's server instead
+// (TestGuardRunRefusesTheTownDoltServer).
 func TestRecordingEnvPinsTheIdentityAndTheWorkspace(t *testing.T) {
 	t.Parallel()
 	const beadsDir = "/scratch/.beads"
 	env := recordingEnv([]string{
 		"PATH=/usr/bin",
-		"BEADS_DOLT_SERVER_PORT=3307",
+		"BEADS_DOLT_SERVER_PORT=13307",
 		"BEADS_DIR=/home/operator/gt/.beads",
 		"BEADS_DB=/home/operator/gt/.beads/beads.db",
 		"BD_DB=/home/operator/gt/.beads/beads.db",
@@ -94,7 +98,7 @@ func TestRecordingEnvPinsTheIdentityAndTheWorkspace(t *testing.T) {
 		"GIT_COMMITTER_NAME":      "bdshim-record",
 		"GIT_COMMITTER_EMAIL":     "bdshim-record@example.invalid",
 		"PATH":                    "/usr/bin",
-		"BEADS_DOLT_SERVER_PORT":  "3307", // the server address still passes through
+		"BEADS_DOLT_SERVER_PORT":  "13307", // the scratch server's address passes through
 		"BEADS_DIR":               beadsDir,
 		"BEADS_DB":                beadsDir,
 		"BD_DB":                   beadsDir,

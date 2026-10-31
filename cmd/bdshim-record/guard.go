@@ -6,9 +6,26 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 )
+
+// productionDoltPort is the port a town's Dolt server listens on by default
+// (doltserver.DefaultPort; the constant is repeated here with this pointer because importing
+// doltserver pulls the daemon's packages into this command). No recording names it (gt-p85pw.115).
+const productionDoltPort = 3307
+
+// endpointHostVars and endpointPortVars are the variables bd reads to find the Dolt server a run
+// connects to: the three internal/config exports to the bd gt starts (DoltEndpointEnvKeys), and the
+// GT_DOLT_ pair the fork also reads (testutil's scratch Dolt names its container by GT_DOLT_PORT).
+// The recording environment passes them through untouched, so the guard refuses the town's server
+// here rather than trusting the operator's shell (gt-p85pw.115).
+var endpointHostVars = []string{"BEADS_DOLT_SERVER_HOST", "GT_DOLT_HOST"}
+var endpointPortVars = []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "GT_DOLT_PORT"}
 
 // workspaceMarkers are what a directory holds when a beads workspace sits in it: the .beads
 // directory itself, or the metadata.json bd keeps its store's settings in.
@@ -23,11 +40,16 @@ type Resolver func(dir string, env []string) (string, error)
 // under a tree that holds one changes that tree's store (gt-p85pw.103). Every directory under the
 // town root holds one, so a scratch is refused unless it owns a workspace of its own: the guard
 // makes one with bd init, then asks bd which workspace it resolves there, carrying the environment
-// every child is given, and passes only when the answer is inside the scratch (gt-p85pw.115).
+// every child is given, and passes only when the answer is inside the scratch and the workspace the
+// init made is on disk in it (gt-p85pw.115).
+//
+// The child environment is also refused when it aims the scratch's bd runs at the town's Dolt
+// server, whose database the init would then create as cruft no cleanup owns (gt-p85pw.115).
 //
 // The recorder's own working directory is checked as before, since a recorder started inside a
 // workspace is where the incident began. Every refusal comes before anything is recorded, and the
-// one bd call the guard makes is the init that gives the scratch its workspace.
+// bd calls the guard makes are the init that gives the scratch its workspace and the read-only
+// where that answers with it.
 func guardRun(getwd func() (string, error), scratch string, child childBD) error {
 	cwd, err := getwd()
 	if err != nil {
@@ -60,12 +82,18 @@ func guardRun(getwd func() (string, error), scratch string, child childBD) error
 	} else if found {
 		return fmt.Errorf("%s is behind the symlink %s; name a scratch directory whose path holds no symlink, since bd follows them and the workspace the recorder makes is then not the one it named", scratch, link)
 	}
+	if err := refuseTownServer(child.Env(scratch), townDoltPort(cwd)); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(scratch, 0o755); err != nil {
 		return fmt.Errorf("make the scratch directory %s: %w", scratch, err)
 	}
 	name := newDatabaseName()
 	if err := initDatabase(child.Run, scratch, name); err != nil {
 		return fmt.Errorf("give the scratch directory %s a workspace of its own: %w", scratch, err)
+	}
+	if err := scratchMadeWorkspace(scratch); err != nil {
+		return err
 	}
 	resolved, err := child.Where(scratch, child.Env(scratch))
 	if err != nil {
@@ -82,6 +110,96 @@ func guardRun(getwd func() (string, error), scratch string, child childBD) error
 		return fmt.Errorf("clean up the scratch workspace %s: %w", scratch, err)
 	}
 	return nil
+}
+
+// refuseTownServer refuses the environment a scratch's bd runs would get when it aims them at the
+// town's own Dolt server instead of a throwaway one. The guard's init creates the scratch's database,
+// so a run on the town's server leaves a database no cleanup owns, the orphan-test-database problem
+// (gt-p85pw.115). Each of these fails closed:
+//
+//   - a server named by the port the town serves Dolt on, or by the production port on any host;
+//   - a host that is not this machine, since the throwaway server a recording runs against is a
+//     container mapped onto this host's loopback;
+//   - no port named at all, since bd then falls back to its own default, the town's server here.
+func refuseTownServer(env []string, townPort int) error {
+	for _, key := range endpointHostVars {
+		if host, ok := envValue(env, key); ok && !isLocalHost(host) {
+			return fmt.Errorf("%s names a host that is not this machine; record against the throwaway Dolt server on this host, never a server the town runs", key)
+		}
+	}
+	named := ""
+	for _, key := range endpointPortVars {
+		value, ok := envValue(env, key)
+		if !ok {
+			continue
+		}
+		named = key
+		port, err := strconv.Atoi(value)
+		if err != nil || port <= 0 || port > 65535 {
+			return fmt.Errorf("%s does not name a port, so the recorder cannot tell that the scratch's database would be made on a throwaway server", key)
+		}
+		if port == productionDoltPort || port == townPort {
+			return fmt.Errorf("%s names port %d, the town's Dolt server; the scratch's database must be made on a throwaway server, never the town's", key, port)
+		}
+	}
+	if named == "" {
+		return fmt.Errorf("no Dolt server is named in BEADS_DOLT_SERVER_PORT, BEADS_DOLT_PORT or GT_DOLT_PORT, so bd would take its own default, the town's server on this machine; name the throwaway server the recording runs against")
+	}
+	return nil
+}
+
+// townDoltPort is the port the Dolt server of the town the recorder runs in listens on: the endpoint
+// mayor/town.json names, and the production port when the recorder runs outside a town or the town
+// names no endpoint. It is the address a scratch's init must never reach (gt-p85pw.115).
+func townDoltPort(cwd string) int {
+	if root := beads.FindTownRoot(cwd); root != "" {
+		if endpoint, ok := agentconfig.ResolveDoltEndpoint(root); ok && endpoint.Port > 0 {
+			return endpoint.Port
+		}
+	}
+	return productionDoltPort
+}
+
+// isLocalHost reports whether host names this machine, where a scratch Dolt container is reached
+// (testutil's DoltContainerAddr is 127.0.0.1 with the container's port). The guard resolves no
+// names, so one it does not recognize as local is not this machine.
+func isLocalHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "", "127.0.0.1", "localhost", "::1", "[::1]":
+		return true
+	}
+	return false
+}
+
+// envValue returns the value env gives key, as a child process would read it: the last entry wins.
+func envValue(env []string, key string) (string, bool) {
+	value, found := "", false
+	for _, entry := range env {
+		name, val, ok := strings.Cut(entry, "=")
+		if ok && name == key {
+			value, found = val, true
+		}
+	}
+	return value, found
+}
+
+// scratchMadeWorkspace refuses a scratch that does not hold the workspace the guard's own bd init
+// made in it. bd where's answer is bd's own report, so by itself it cannot tell a bd that wrote to the
+// pinned workspace from one that wrote elsewhere and answered with the pin; the marker on disk is the
+// independent proof, and an init that made nothing leaves the scratch without one (gt-p85pw.115). A
+// marker above the scratch is the town's workspace, which the scratch does not own.
+func scratchMadeWorkspace(scratch string) error {
+	workspace, found, err := enclosingWorkspace(scratch)
+	if err != nil {
+		return fmt.Errorf("check for the workspace bd init made in %s: %w", scratch, err)
+	}
+	if found && isWithin(scratch, workspace) {
+		return nil
+	}
+	if found {
+		return fmt.Errorf("bd init made no workspace in %s; the nearest one is %s, which the scratch does not own", scratch, workspace)
+	}
+	return fmt.Errorf("bd init made no workspace in %s, so the recorder cannot prove the scratch owns the store its bd runs would write", scratch)
 }
 
 // scratchOwnsWorkspace refuses an answer that is not an absolute path inside the scratch, after

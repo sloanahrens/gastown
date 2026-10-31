@@ -133,9 +133,10 @@ func childEnv(base []string, dir string) []string {
 
 // workspaceVars are the variables the beads fork reads to find the workspace a run works in: the
 // .beads directory, the database file, the shared server's directory and the Dolt data directory.
-// It is the list internal/beads strips as its bdTargetEnvKeys, and the one stripped list older here
-// went by. Each is pinned to the workspace the recorder made, so a value inherited from the
-// operator's shell cannot aim a run at another store (gt-p85pw.115).
+// The list is a copy of bdTargetEnvKeys, internal/beads's one list of the variables it strips from a
+// bd subprocess's environment (internal/beads/database.go); it is copied because that list is
+// unexported, so the two change together. Each is pinned to the workspace the recorder made, so a
+// value inherited from the operator's shell cannot aim a run at another store (gt-p85pw.115).
 var workspaceVars = []string{
 	"BEADS_DIR",
 	"BEADS_DB",
