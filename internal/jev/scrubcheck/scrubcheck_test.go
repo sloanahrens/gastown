@@ -1,6 +1,7 @@
 package scrubcheck
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -282,6 +283,16 @@ func TestScrubcheckRefusals(t *testing.T) {
 		assert.Nil(t, lines)
 	})
 
+	t.Run("log path under a file refuses the read", func(t *testing.T) {
+		t.Parallel()
+		file := filepath.Join(t.TempDir(), "not-a-directory")
+		require.NoError(t, os.WriteFile(file, nil, 0o600))
+		lines, found, err := Read(filepath.Join(file, "scrubcheck.jsonl"))
+		assert.ErrorContains(t, err, "opening the scrub check log")
+		assert.False(t, found)
+		assert.Nil(t, lines)
+	})
+
 	t.Run("absent log is not an error", func(t *testing.T) {
 		t.Parallel()
 		lines, found, err := Read(filepath.Join(t.TempDir(), "scrubcheck.jsonl"))
@@ -309,23 +320,97 @@ func TestScrubcheckRefusals(t *testing.T) {
 	})
 }
 
-// writeRepeats writes one original logtriage line for key with needs_action at
-// p, and a repeat line per value in repeats, beside the battery log of town.
-func writeRepeats(t *testing.T, town, key string, p float64, repeats ...float64) {
+// writeItem writes one original logtriage line for key, answering needs_action
+// as orig, and a repeat line per answer in repeats, beside the battery log of town.
+func writeItem(t *testing.T, town, key string, orig logtriage.Answer, repeats ...logtriage.Answer) {
 	t.Helper()
 	logPath := logtriage.LogPath(town)
 	ts := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	original := logtriage.Line{
 		TS: ts, Key: key, QuestionVersion: logtriage.Version, Model: "jev-test",
-		Answers: map[string]logtriage.Answer{qNeeds: {Noul: &p}},
+		Answers: map[string]logtriage.Answer{qNeeds: orig},
 	}
 	require.NoError(t, battery.Append(logPath, original))
-	for i, v := range repeats {
+	for i, a := range repeats {
 		require.NoError(t, battery.AppendReask(logPath, battery.ReaskLine{
 			TS: ts.Add(time.Duration(i+1) * time.Minute), Key: key, Repeat: i + 1,
 			QuestionVersion: logtriage.Version, Model: "jev-test",
-			Answers: map[string]logtriage.Answer{qNeeds: {Noul: &v}},
+			Answers: map[string]logtriage.Answer{qNeeds: a},
 		}))
+	}
+}
+
+// writeRepeats writes a noul item for key at p, with a repeat per value in repeats.
+func writeRepeats(t *testing.T, town, key string, p float64, repeats ...float64) {
+	t.Helper()
+	answers := make([]logtriage.Answer, 0, len(repeats))
+	for _, v := range repeats {
+		answers = append(answers, logtriage.Answer{Noul: &v})
+	}
+	writeItem(t, town, key, logtriage.Answer{Noul: &p}, answers...)
+}
+
+// TestBaselineRefusals: a battery log that cannot be read, or repeat data that
+// answers a question as two kinds, fails the baseline instead of reading as none.
+func TestBaselineRefusals(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unreadable battery log", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		require.NoError(t, os.MkdirAll(logtriage.LogPath(town), 0o700))
+		base, err := Baseline(town, 0.5, time.Time{})
+		assert.ErrorContains(t, err, "reading the repeat baseline")
+		assert.Nil(t, base)
+	})
+
+	t.Run("repeat data answers a question as two kinds", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		// Two items with three repeats each, one answering needs_action as a noul
+		// and the other as a score.
+		writeRepeats(t, town, "a", 0.3, 0.3, 0.3, 0.3)
+		one := 1.0
+		writeItem(t, town, "b", logtriage.Answer{Score: &one},
+			logtriage.Answer{Score: &one}, logtriage.Answer{Score: &one}, logtriage.Answer{Score: &one})
+		base, err := Baseline(town, 0.5, time.Time{})
+		assert.ErrorContains(t, err, "reading the repeat baseline")
+		assert.ErrorContains(t, err, "was answered as")
+		assert.Nil(t, base)
+	})
+}
+
+// failingWriter accepts n writes and then refuses every later one.
+type failingWriter struct{ n int }
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	if w.n == 0 {
+		return 0, errors.New("disk full")
+	}
+	w.n--
+	return len(p), nil
+}
+
+// TestScrubcheckWriteTextRefusesAFailingWriter: a report that cannot be written
+// reports the write error rather than returning as printed.
+func TestScrubcheckWriteTextRefusesAFailingWriter(t *testing.T) {
+	t.Parallel()
+	one := 0.5
+	rep := Report{Cut: 0.5, Rows: []Row{{Caller: "jev-logtriage", Question: qNeeds, Kind: "noul", Pairs: 1, Crossing: &one, Verdict: VerdictTooFew}}}
+	tests := []struct {
+		name   string
+		rep    Report
+		writes int
+	}{
+		{"the header line", rep, 0},
+		{"the no-rows line", Report{Cut: 0.5}, 1},
+		{"the table on flush", rep, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.ErrorContains(t, WriteText(&failingWriter{n: tc.writes}, tc.rep), "disk full")
+		})
 	}
 }
 

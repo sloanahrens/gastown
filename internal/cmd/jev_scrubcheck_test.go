@@ -177,6 +177,19 @@ func TestJevScrubcheckRefusals(t *testing.T) {
 		assert.Empty(t, out.String())
 	})
 
+	t.Run("check log answers a question as two kinds", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		score := checkedPairs(logtriage.Caller, 1)[0]
+		score.Original = &scrubcheck.Answers{Score: map[string]scrubcheck.Score{logtriage.QNeedsAction: {Score: 1}}}
+		score.Scrubbed = &scrubcheck.Answers{Score: map[string]scrubcheck.Score{logtriage.QNeedsAction: {Score: 1}}}
+		writeScrubChecks(t, town, checkedPairs(logtriage.Caller, 1)[0], score)
+		var out bytes.Buffer
+		err := jevScrubcheckWithFlags(&out, town, "", "", noise.DefaultCut, false, now)
+		assert.ErrorContains(t, err, "was answered as noul and as score")
+		assert.Empty(t, out.String())
+	})
+
 	t.Run("unreadable repeat log", func(t *testing.T) {
 		t.Parallel()
 		town := t.TempDir()
