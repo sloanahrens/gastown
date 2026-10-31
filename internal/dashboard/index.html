@@ -57,6 +57,13 @@ td.n,th.n{text-align:right}
 .hbar i{display:block;min-height:1px}
 .hok{background:var(--blue);border-radius:0 0 2px 2px}
 .hrej{background:var(--red);border-radius:2px 2px 0 0}
+/* The landings head folds the day's figures and the per-hour bars away
+   together, as the Actions feed folds under its own section; the table below
+   never folds (gt-q4cac). */
+.lheadbtn{display:flex;align-items:center;gap:6px;width:100%;background:none;border:0;padding:2px 0 3px;color:var(--dim);font:inherit;font-size:11px;letter-spacing:.04em;text-align:left;cursor:pointer}
+.lheadbtn:hover{color:var(--text)}
+.lheadbtn .caret{display:inline-block;width:10px}
+.lheadbody{margin-bottom:6px}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--dim);font-size:11px;margin-top:3px}
 .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 .kv{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:6px}#cost .kv{margin-bottom:2px}
@@ -1350,6 +1357,44 @@ function keepLandingsScroll(box, top) {
   if (rows) rows.scrollTop = top;
 }
 
+// The landings head — the day's figures and the per-hour bars — folds away for
+// a reader who wants the table alone. The choice is remembered per viewer, and
+// storage that throws (private mode, a locked-down browser) leaves it open and
+// folding still works for the session (gt-q4cac).
+const LANDINGS_HEAD_KEY = "gt-landings-head";
+let landingsHeadFolded = false;
+try { landingsHeadFolded = localStorage.getItem(LANDINGS_HEAD_KEY) === "folded"; } catch (e) {}
+
+// percentile is a reading's p-th percentile by nearest rank: the smallest value
+// at or above p of the sorted readings, so it is always one landing's own time
+// rather than an invented one. Nulls (a stage a landing did not run) are left
+// out, as median leaves them.
+function percentile(xs, p) {
+  const v = xs.filter(x => x != null).sort((a, b) => a - b);
+  if (!v.length) return null;
+  return v[Math.min(v.length - 1, Math.max(0, Math.ceil(p * v.length) - 1))];
+}
+
+// stageSummary is the gate or om part of the compact line that replaced its
+// chart: the median, 90th percentile and slowest wall time over the landings in
+// the window. A stage no landing ran has no reading, so the part is left out.
+function stageSummary(name, secs) {
+  const v = secs.filter(x => x != null);
+  if (!v.length) return null;
+  return name + " · median " + fmtDur(median(v)) + " · p90 " + fmtDur(percentile(v, 0.9)) + " · slowest " + fmtDur(Math.max(...v));
+}
+
+// loadSummary is the compact line that replaced the hourly load chart: the last
+// recorded reading ("now"), the average and peak over the hours on record, and
+// how many of the 24 hours were recorded, as the old chart's title said.
+function loadSummary(loads) {
+  if (!loads.length) return null;
+  const vals = loads.map(p => p.v);
+  const now = loads.reduce((a, b) => b.t > a.t ? b : a).v;
+  const avg = vals.reduce((n, v) => n + v, 0) / vals.length;
+  return "load · now " + now.toFixed(1) + " · 24 hour average " + avg.toFixed(1) + " · peak " + Math.max(...vals).toFixed(1) + " · " + vals.length + " of 24 hours recorded (only while a page is open)";
+}
+
 function renderTrend(s) {
   const sec = $("trendsec"), box = $("trend");
   const top = landingsScroll(box);
@@ -1367,7 +1412,7 @@ function renderTrend(s) {
   // Nothing has landed in the window: the pane is the queue alone, rather than
   // the day's figures and charts drawn from a reading nobody has made yet.
   if (!hours.length) {
-    $("trendnote").textContent = "";
+    $("trendnote").textContent = waiting.length + " queued";
     const q = landingTable(s, names, recent, waiting);
     if (q) box.append(q);
     keepLandingsScroll(box, top);
@@ -1379,7 +1424,27 @@ function renderTrend(s) {
   const stages = t.stages || [];
   const landed = hours.reduce((n, h) => n + h.landed, 0);
   const rejected = hours.reduce((n, h) => n + h.rejected, 0);
-  $("trendnote").textContent = landed + " landed · " + rejected + " rejected";
+  $("trendnote").textContent = landed + " landed · " + rejected + " rejected · " + waiting.length + " queued";
+
+  // The figures and the per-hour bars fold away together under a head the
+  // reader can close; the landings table below never folds (gt-q4cac).
+  const lhead = el("div", "lhead");
+  const lhbtn = el("button", "lheadbtn");
+  lhbtn.type = "button";
+  const lcaret = el("span", "caret", landingsHeadFolded ? "▸" : "▾");
+  lhbtn.append(lcaret, el("span", "", "figures and landings per hour"));
+  lhbtn.setAttribute("aria-expanded", landingsHeadFolded ? "false" : "true");
+  const lhbody = el("div", "lheadbody");
+  lhbody.hidden = landingsHeadFolded;
+  lhbtn.addEventListener("click", () => {
+    landingsHeadFolded = !landingsHeadFolded;
+    lhbody.hidden = landingsHeadFolded;
+    lcaret.textContent = landingsHeadFolded ? "▸" : "▾";
+    lhbtn.setAttribute("aria-expanded", landingsHeadFolded ? "false" : "true");
+    try { localStorage.setItem(LANDINGS_HEAD_KEY, landingsHeadFolded ? "folded" : "open"); } catch (e) {}
+  });
+  lhead.append(lhbtn, lhbody);
+  box.append(lhead);
 
   // the day in numbers
   const kv = el("div", "kv");
@@ -1395,7 +1460,7 @@ function renderTrend(s) {
   if (mt != null) add(fmtDur(mt), "median total", "lint + gate + om, per landing");
   const slow = stages.length ? Math.max(...stages.map(p => p.lint_secs + p.gate_secs + (p.om_secs || 0))) : null;
   if (slow != null) add(fmtDur(slow), "slowest", "the longest landing in the window", slow > 600 ? "warnc" : "");
-  box.append(kv);
+  lhbody.append(kv);
 
   // landings per hour: the blue part landed, the red part is rejections
   const max = Math.max(1, ...hours.map(h => h.landed + h.rejected));
@@ -1407,27 +1472,19 @@ function renderTrend(s) {
     if (h.landed) { const l = el("i", "hok"); l.style.height = h.landed / max * 100 + "%"; col.append(l); }
     bars.append(col);
   }
-  box.append(el("div", "k title", "landings per hour, red = rejected"), bars, timeAxis(t0, t1));
+  lhbody.append(el("div", "k title", "landings per hour, red = rejected"), bars, timeAxis(t0, t1));
 
-  // gate and om seconds per landing: dots are landings, lines join neighbours but not across a quiet spell
-  if (stages.length) {
-    const hasOM = stages.some(p => p.om_secs != null);
-    const series = [{color: "#d29922", pts: stages.map(p => ({t: new Date(p.at).getTime(), v: p.gate_secs}))}];
-    const key = [["#d29922", "gate"]];
-    if (hasOM) {
-      series.push({color: "#39c5bb", pts: stages.map(p => ({t: new Date(p.at).getTime(), v: p.om_secs}))});
-      key.push(["#39c5bb", "om"]);
-    }
-    const peak = Math.max(...series.flatMap(x => x.pts.map(p => p.v == null ? 0 : p.v)));
-    box.append(el("div", "k title", "gate and om time per landing · peak " + fmtDur(peak)), chartSVG(series, t0, t1, 600, 56), timeAxis(t0, t1), legend(key));
-  } else box.append(el("div", "empty", "no stage lines in the last 24 hours"));
+  // The two lower charts the operator did not read are one compact stats line
+  // each now, computed from the same reading; no new endpoint or data source.
+  const stageLines = [stageSummary("gate", stages.map(p => p.gate_secs)), stageSummary("om", stages.map(p => p.om_secs))].filter(Boolean);
+  if (stageLines.length) box.append(el("div", "k title", stageLines.join("  ")));
+  else box.append(el("div", "empty", "no stage lines in the last 24 hours"));
 
   // hourly load average (recorded only while a page is open)
   const loads = hours.filter(h => h.load_avg != null).map(h => ({t: new Date(h.hour).getTime() + 1800e3, v: h.load_avg}));
-  if (loads.length) {
-    const peak = Math.max(...loads.map(p => p.v));
-    box.append(el("div", "k title", "hourly load average · peak " + peak.toFixed(1) + " · " + loads.length + " of 24 hours recorded (only while a page is open)"), chartSVG([{color: "#58a6ff", pts: loads}], t0, t1, 600, 44, 90 * 60e3), timeAxis(t0, t1));
-  } else box.append(el("div", "empty", "no load history yet (it fills while a page is open)"));
+  const loadLine = loadSummary(loads);
+  if (loadLine) box.append(el("div", "k title", loadLine));
+  else box.append(el("div", "empty", "no load history yet (it fills while a page is open)"));
 
   const tbl = landingTable(s, names, recent, waiting);
   if (tbl) box.append(tbl);
