@@ -3,6 +3,7 @@ package tiersweep
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 )
@@ -33,12 +34,20 @@ type TestTime struct {
 // the FAIL and ok lines and any panic text survive. A line that is not a stream
 // event is kept in the text unchanged and does not stop the parse. A read error
 // is returned as is, with no text and no tests.
+// A JSON object line that is not a well-formed event is the one line that stops
+// the parse: it is an error with no text and no tests, so its text is never
+// echoed and a bad event never reads as a clean run.
 func ParseTestJSON(r io.Reader) (text string, tests []TestTime, err error) {
 	var out strings.Builder
 	br := bufio.NewReader(r)
+	lineNo := 0
 	for {
 		line, readErr := br.ReadString('\n')
 		if line != "" {
+			lineNo++
+			if isJSONObject(line) && !isEvent(line) {
+				return "", nil, fmt.Errorf("line %d: malformed go test -json event", lineNo)
+			}
 			var ev testEvent
 			if json.Unmarshal([]byte(line), &ev) != nil || ev.Action == "" {
 				out.WriteString(line)
@@ -61,6 +70,20 @@ func ParseTestJSON(r io.Reader) (text string, tests []TestTime, err error) {
 			return "", nil, readErr
 		}
 	}
+}
+
+// isJSONObject reports whether a line is one complete JSON object, the envelope
+// every stream event is written in.
+func isJSONObject(line string) bool {
+	t := strings.TrimSpace(line)
+	return strings.HasPrefix(t, "{") && json.Valid([]byte(t))
+}
+
+// isEvent reports whether a line decodes as a stream event: its fields have the
+// types testEvent declares, and it names an action.
+func isEvent(line string) bool {
+	var ev testEvent
+	return json.Unmarshal([]byte(line), &ev) == nil && ev.Action != ""
 }
 
 // isTopLevelTerminal reports whether an event ends a top-level test: a pass,
