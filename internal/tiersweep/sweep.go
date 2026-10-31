@@ -127,7 +127,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		}
 		src = gitSource{exec: exec, read: func(name string) ([]byte, error) { return read(filepath.Join(root, name)) }}
 	}
-	timings := OpenTimings(filepath.Join(opts.LogDir, TimingsName), stderr)
+	timings := OpenTimings(filepath.Join(opts.LogDir, TimingsName), host, stderr)
 	// The shard plan is read whole: a plan that cannot be read is the integration
 	// tier's RED, not a reason to run its packages whole (gt-rw118).
 	shards, shardErr := SeedShards()

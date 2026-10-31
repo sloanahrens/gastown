@@ -224,7 +224,7 @@ func TestShardedPackageWritesOneLinePerShard(t *testing.T) {
 	var stderr bytes.Buffer
 	r := shardRunner(t, f, &stderr)
 	path := filepath.Join(t.TempDir(), TimingsName)
-	timings := OpenTimings(path, &stderr)
+	timings := OpenTimings(path, ProcessHost, &stderr)
 	r.Timings = timings
 	r.Tier(TierIntegration, ".", nil, taggedArgs, []string{fixturePkg})
 	timings.Close()

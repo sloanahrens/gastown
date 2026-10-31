@@ -1,10 +1,12 @@
 package tiersweep
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"os"
+	"io/fs"
 	"strings"
 )
 
@@ -113,26 +115,38 @@ func ParseTestWalls(data []byte) map[string]float64 {
 type Timings struct {
 	// path is the run's own file, under the log directory.
 	path string
-	// out is the open file; nil once it could not be opened or written.
-	out *os.File
+	// host is the filesystem the file is created, appended to and replaced
+	// through, so a run's timings never reach past the host it was given.
+	host Host
+	// open is true while the file takes lines: false once it could not be
+	// created or written, and after Close.
+	open bool
 	// stderr receives the line a failure prints.
 	stderr io.Writer
 	// lines holds every line this run wrote, in run order, so the persistent
 	// file (TIER_SWEEP_TIMINGS) can be replaced at the end.
 	lines []byte
+	// random is the entropy a replace's temp name is drawn from; OpenTimings
+	// sets it to crypto/rand, and a test swaps in a reader that fails.
+	random io.Reader
 }
 
-// OpenTimings creates the run's timings file at path, replacing whatever an
-// earlier run left there. A file that cannot be created returns a Timings that
-// writes nothing and has already named the file on stderr.
-func OpenTimings(path string, stderr io.Writer) *Timings {
-	t := &Timings{path: path, stderr: stderr}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
+// OpenTimings creates the run's timings file at path through host, replacing
+// whatever an earlier run left there. A host with no WriteFile or AppendFile has
+// no seam to write through, so it writes nothing and names the omission on
+// stderr. A file that cannot be created returns a Timings that writes nothing
+// and has already named the file on stderr.
+func OpenTimings(path string, host Host, stderr io.Writer) *Timings {
+	t := &Timings{path: path, host: host, stderr: stderr, random: rand.Reader}
+	if host.WriteFile == nil || host.AppendFile == nil {
+		t.reportAt(path, "create", errors.New("skipped, host has no WriteFile or AppendFile"))
+		return t
+	}
+	if err := host.WriteFile(path, nil, 0o644); err != nil {
 		t.report(err)
 		return t
 	}
-	t.out = f
+	t.open = true
 	return t
 }
 
@@ -156,12 +170,11 @@ func (t *Timings) write(v any) {
 	}
 	line = append(line, '\n')
 	t.lines = append(t.lines, line...)
-	if t.out == nil {
+	if !t.open {
 		return
 	}
-	if _, err := t.out.Write(line); err != nil {
-		t.out.Close()
-		t.out = nil
+	if err := t.host.AppendFile(t.path, line); err != nil {
+		t.open = false
 		t.report(err)
 	}
 }
@@ -169,36 +182,58 @@ func (t *Timings) write(v any) {
 // Bytes is every line this run wrote, in run order.
 func (t *Timings) Bytes() []byte { return t.lines }
 
-// Close closes the run's file. A close that fails is named like any other
-// timings failure and changes no verdict.
-func (t *Timings) Close() {
-	if t.out == nil {
-		return
-	}
-	f := t.out
-	t.out = nil
-	if err := f.Close(); err != nil {
-		t.report(err)
-	}
-}
+// Close ends the run's writes to its file: a line added after it is kept for
+// the persistent file and written nowhere. Each line reaches the file as it is
+// added, so there is no handle left to close and Close cannot fail.
+func (t *Timings) Close() { t.open = false }
 
 // Replace replaces path with this run's lines: a temp file beside it, then a
 // rename over it, so a reader sees the earlier run's whole file or this one's,
-// never a torn file. A failed replace is one stderr line and changes no
-// verdict: the next run can still read what it replaced.
+// never a torn file. The temp name is random, so two runs replacing one file
+// never share a temp file, and a temp file a failed replace leaves is removed.
+// A failed replace is one stderr line and changes no verdict: the next run can
+// still read what it replaced.
 func (t *Timings) Replace(path string, host Host) {
-	tmp := path + ".tmp"
+	tmp, err := tempBeside(path, t.random)
+	if err != nil {
+		t.reportAt(path, "write", err)
+		return
+	}
 	if err := host.WriteFile(tmp, t.lines, 0o644); err != nil {
 		t.reportAt(path, "write", err)
+		t.removeTemp(tmp, host)
 		return
 	}
 	if err := host.Rename(tmp, path); err != nil {
 		t.reportAt(path, "replace", err)
+		t.removeTemp(tmp, host)
+	}
+}
+
+// tempBeside names a temp file beside path that no other run is using: path, a
+// random suffix drawn from random, and .tmp.
+func tempBeside(path string, random io.Reader) (string, error) {
+	var b [8]byte
+	if _, err := io.ReadFull(random, b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s.%x.tmp", path, b[:]), nil
+}
+
+// removeTemp deletes the temp file a failed replace left behind. A file that is
+// not there is nothing to remove; a host with no Remove keeps it, named once.
+func (t *Timings) removeTemp(tmp string, host Host) {
+	if host.Remove == nil {
+		t.reportAt(tmp, "remove", errors.New("skipped, host has no Remove"))
+		return
+	}
+	if err := host.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.reportAt(tmp, "remove", err)
 	}
 }
 
 // report names a failure of the run's own file on stderr. It is reached at most
-// once per kind: an open, a write that dropped the file, a close.
+// once per run: an open, or the write that drops the file.
 func (t *Timings) report(err error) {
 	t.reportAt(t.path, "", err)
 }
