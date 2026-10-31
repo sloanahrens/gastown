@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/buildflags"
 )
 
 // TestIntegrationBrewIcu4cPrefixSkipsUninstalledFormula covers a brew that
@@ -31,7 +33,7 @@ func TestIntegrationBrewIcu4cPrefixSkipsUninstalledFormula(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	if got := brewIcu4cPrefix(); got != installed {
-		t.Fatalf("brewIcu4cPrefix() = %q, want the installed keg %q", got, installed)
+	if got := buildflags.BrewICU4CPrefix(); got != installed {
+		t.Fatalf("BrewICU4CPrefix() = %q, want the installed keg %q", got, installed)
 	}
 }

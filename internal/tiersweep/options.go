@@ -35,6 +35,7 @@ const (
 	EnvResume  = "TIER_SWEEP_RESUME"
 	EnvTimings = "TIER_SWEEP_TIMINGS"
 	EnvJobs    = "TIER_SWEEP_JOBS"
+	EnvGTBin   = "TIER_SWEEP_GT_BIN"
 )
 
 // The values a name takes when the environment leaves it unset.

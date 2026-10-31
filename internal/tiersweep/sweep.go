@@ -32,6 +32,10 @@ type Deps struct {
 	// Exec runs go, gt and git from the repository root. ProcessExec in
 	// production.
 	Exec Exec
+	// BuildExec runs the sweep's one go build under a wall-clock bound.
+	// ProcessBuildExec in production. Nil runs the build through Exec, which
+	// takes no deadline.
+	BuildExec BuildExec
 	// Src lists and reads the repository's files. When nil, the run lists with
 	// `git ls-files` through Exec and reads files through ReadFile.
 	Src Source
@@ -131,7 +135,11 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		walls = readWalls(host, opts.TimingsFile, stderr)
 	}
 	resume := OpenResume(opts, host, stderr)
-	s := &Sweep{Opts: opts, Exec: exec, Src: src, Environ: d.Environ, Stderr: stderr,
+	buildExec := d.BuildExec
+	if buildExec != nil && root != DefaultRoot {
+		buildExec = inRootBuild(root, buildExec)
+	}
+	s := &Sweep{Opts: opts, Exec: exec, BuildExec: buildExec, Src: src, Environ: d.Environ, Stderr: stderr,
 		Now: now, Timings: timings, Walls: walls, Began: d.Began, Resume: resume}
 	code := runTiers(s, opts.Tiers, stdout, stderr)
 	if code == UsageExit {
@@ -259,6 +267,14 @@ func splitRoot(args []string) (root string, tiers []string, err error) {
 func inRoot(root string, exec Exec) Exec {
 	return func(dir string, env []string, argv []string, out io.Writer) int {
 		return exec(filepath.Join(root, dir), env, argv, out)
+	}
+}
+
+// inRootBuild is inRoot for the build seam, so a run started with --root builds
+// gt in that tree rather than where the sweep was started.
+func inRootBuild(root string, exec BuildExec) BuildExec {
+	return func(dir string, env []string, argv []string, out io.Writer, timeout time.Duration) int {
+		return exec(filepath.Join(root, dir), env, argv, out, timeout)
 	}
 }
 

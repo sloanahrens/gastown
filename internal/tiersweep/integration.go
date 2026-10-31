@@ -32,6 +32,13 @@ type Sweep struct {
 	Opts Options
 	// Exec runs every command. ProcessExec in production.
 	Exec Exec
+	// BuildExec runs the sweep's one go build under a wall-clock bound
+	// (buildGT). ProcessBuildExec in production. Nil runs the build through
+	// Exec, which takes no deadline.
+	BuildExec BuildExec
+	// CgoEnv returns the cgo entries the go build needs on top of the
+	// environment it is handed (buildGT). Nil takes buildflags.ICUCgoEnv.
+	CgoEnv func(base []string) []string
 	// Src lists and reads the repository's files, relative to the directory
 	// it is asked from.
 	Src Source
@@ -99,12 +106,22 @@ func (s *Sweep) Integration() (line string, red bool) {
 		fmt.Fprintf(s.Stderr, "%s: %s: %v\n", Name, TierIntegration, err)
 		return Summary(TierIntegration, s.Opts.LogDir, 0, 0, 0, "", elapsed())
 	}
+	// The sweep builds gt once, before any package runs, and every go test
+	// environment names the binary when the build worked (gt-2daks). Only the
+	// root's tagged packages have a helper that would build its own copy, so a
+	// plan without one is not worth a build.
+	env := s.exportEnv(tested, skipList)
+	if len(plan.root) > 0 {
+		if gtBin := s.buildGT(); gtBin != "" {
+			env = append(env, EnvGTBin+"="+gtBin)
+		}
+	}
 	runner := &Runner{
 		Exec:     s.Exec,
 		LogDir:   s.Opts.LogDir,
 		Timeout:  s.Opts.Timeout,
 		SkipList: skipList,
-		Env:      s.exportEnv(tested, skipList),
+		Env:      env,
 		Stderr:   s.Stderr,
 		Timings:  s.Timings,
 		Now:      s.Now,

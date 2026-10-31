@@ -9,9 +9,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/buildflags"
 )
 
 // buildGT returns the path to a gt binary built from this checkout, with
@@ -73,79 +74,19 @@ func buildGTBinary() (string, error) {
 	// `go build` below adds to its own environment; the probe checks flags
 	// with the same override applied, so a stale $GOENV that icuEnv would
 	// correct does not block a build that would otherwise succeed.
-	icuEnv := icuCgoEnv()
+	icuEnv := buildflags.ICUCgoEnv(os.Environ())
 	if err := verifyCgoIncludePath(icuEnv...); err != nil {
 		return "", err
 	}
 
 	// Must set BuiltProperly=1 via ldflags, otherwise binary refuses to run
-	ldflags := "-X github.com/steveyegge/gastown/internal/cmd.BuiltProperly=1"
-	cmd := exec.Command("go", "build", "-ldflags", ldflags, "-o", tmpBinary, "./cmd/gt")
+	cmd := exec.Command("go", "build", "-ldflags", buildflags.LDFlags, "-o", tmpBinary, "./cmd/gt")
 	cmd.Dir = projectRoot
 	cmd.Env = append(os.Environ(), icuEnv...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("%w\nOutput: %s", err, output)
 	}
 	return tmpBinary, nil
-}
-
-// icuCgoEnv returns CGO_CPPFLAGS/CGO_LDFLAGS additions pointing at a keg-only
-// Homebrew icu4c, which go-icu-regex (a dolt dependency) needs on macOS.
-//
-// The Makefile detects the prefix and exports these for `make build` and
-// `make test`, so a build under make works by inheritance; a bare `go test`
-// gets no such help and dies with "unicode/regex.h file not found", failing
-// every buildGT caller. Returns nil when the flags are already set, when not
-// on darwin, or when no icu4c headers can be found.
-//
-// `brew --prefix icu4c` names the formula brew currently resolves, which can
-// be a version that is not installed (a clean HOME resolves icu4c to icu4c@79
-// through the formula API while only icu4c@78 is installed). Only a prefix
-// that holds the header is used; otherwise the installed icu4c kegs under
-// brew's opt directory are searched, newest first.
-func icuCgoEnv() []string {
-	if runtime.GOOS != "darwin" || os.Getenv("CGO_CPPFLAGS") != "" || os.Getenv("CGO_LDFLAGS") != "" {
-		return nil
-	}
-	prefix := brewIcu4cPrefix()
-	if prefix == "" {
-		return nil
-	}
-	return []string{
-		"CGO_CPPFLAGS=-I" + filepath.Join(prefix, "include"),
-		"CGO_LDFLAGS=-L" + filepath.Join(prefix, "lib"),
-	}
-}
-
-// brewIcu4cPrefix returns the icu4c prefix that holds unicode/regex.h, or ""
-// when none is installed. It tries brew's own answer first, then the newest
-// installed icu4c keg under brew's opt directory.
-func brewIcu4cPrefix() string {
-	const header = "include/unicode/regex.h"
-	out, err := exec.Command("brew", "--prefix", "icu4c").Output()
-	if err != nil {
-		return ""
-	}
-	if named := strings.TrimSpace(string(out)); named != "" {
-		if _, statErr := os.Stat(filepath.Join(named, header)); statErr == nil {
-			return named
-		}
-	}
-	root, err := exec.Command("brew", "--prefix").Output()
-	if err != nil {
-		return ""
-	}
-	kegs, err := filepath.Glob(filepath.Join(strings.TrimSpace(string(root)), "opt", "icu4c*"))
-	if err != nil {
-		return ""
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(kegs)))
-	for _, keg := range kegs {
-		if _, statErr := os.Stat(filepath.Join(keg, header)); statErr == nil {
-			return keg
-		}
-	}
-	return ""
 }
 
 // verifyCgoIncludePath fails loud when the cgo include flags that would
