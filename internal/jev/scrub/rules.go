@@ -364,10 +364,25 @@ func assignmentValue(text string, pos int) (end int, quoted bool) {
 	}
 	for i := pos; i < len(text); i++ {
 		if strings.ContainsRune(" \t\r\n\"';&,)]}", rune(text[i])) {
+			if strings.Contains(text[pos:i], "[REDACTED:") {
+				// A bracket that closes an earlier marker does not end the value:
+				// the tail after it is still the credential, so take the whole word.
+				return wordEnd(text, i), false
+			}
 			return i, false
 		}
 	}
 	return len(text), false
+}
+
+// wordEnd returns the end of the whitespace-delimited word that runs on from pos.
+func wordEnd(text string, pos int) int {
+	for i := pos; i < len(text); i++ {
+		if strings.ContainsRune(" \t\r\n", rune(text[i])) {
+			return i
+		}
+	}
+	return len(text)
 }
 
 // credentialWords name a credential on their own; a field name that contains
