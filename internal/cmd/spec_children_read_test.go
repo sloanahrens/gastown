@@ -113,11 +113,15 @@ func TestSpecChildrenReadDefaultWiringCostsTwoReadsForChildless(t *testing.T) {
 	for _, id := range ids[:50] {
 		cands = append(cands, specCandidate{Spec: specdispatch.Spec{ID: id}})
 	}
-	children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, specChildrenReader(stores))
+	reads := newSpecTickReads()
+	children := specCandidateChildren(t.TempDir(), reads, cands, specChildrenReader(stores))
 	for _, c := range cands {
 		if kids, err := children(c.Spec.ID); err != nil || len(kids) != 0 {
 			t.Fatalf("children(%s) = %v, %v; want no children and no error", c.Spec.ID, kids, err)
 		}
+	}
+	if reads.Calls() != 1 {
+		t.Errorf("the tick made %d children reads for the rig; want one", reads.Calls())
 	}
 	if client.childrenOf != 1 || client.showMultiple != 1 {
 		t.Errorf("fifty childless candidates cost %d ChildrenOf and %d ShowMultiple reads; want one of each", client.childrenOf, client.showMultiple)
