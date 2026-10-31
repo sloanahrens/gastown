@@ -842,6 +842,62 @@ func TestOverrunRemoveSandbox_ReadsTheRecordOnceAndActsOnThatRecord(t *testing.T
 	}
 }
 
+// The same read-once rule holds for a seat on a rig the registry does not list:
+// the scan that finds the seat's record is its one read, and the push and the
+// delete act on that record rather than on one read afterwards. The record on
+// disk names another seat, so a scan that read the disk itself would find no
+// sandbox and remove nothing; only the scan's read through the counting seam
+// finds the seat's record, and a second read would trip the counter.
+func TestOverrunRemoveSandbox_UnlistedRigReadsTheRecordOnceAndActsOnThatRecord(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
+	disk := session.SandboxRecord{Session: overrunStopSessionName, Rig: "other-rig", Polecat: "other-polecat", Branch: "disk-branch"}
+	if err := session.WriteSandboxRecord(d.config.TownRoot, disk); err != nil {
+		t.Fatal(err)
+	}
+	counted := session.SandboxRecord{
+		Session: overrunStopSessionName,
+		Rig:     stopSeat.Rig,
+		Polecat: stopSeat.Polecat,
+		Branch:  "counted-branch",
+	}
+	reads := 0
+	d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+		reads++
+		if reads > 1 {
+			t.Errorf("the seat's sandbox record was read %d times, want once", reads)
+		}
+		return counted, true, nil
+	}
+	var pushed, deleted []session.SandboxRecord
+	err := d.overrunRemoveSandbox(stopSeat,
+		func(_ string, rec session.SandboxRecord) error {
+			pushed = append(pushed, rec)
+			return nil
+		},
+		func(_ string, rec session.SandboxRecord) error {
+			deleted = append(deleted, rec)
+			return nil
+		})
+
+	if err != nil {
+		t.Fatalf("overrunRemoveSandbox = %v, want nil", err)
+	}
+	if reads != 1 {
+		t.Errorf("record reads = %d, want 1", reads)
+	}
+	if len(pushed) != 1 || pushed[0].Branch != "counted-branch" {
+		t.Errorf("push got %v, want the record the scan read", pushed)
+	}
+	if len(deleted) != 1 || deleted[0].Branch != "counted-branch" {
+		t.Errorf("delete got %v, want the record the scan read", deleted)
+	}
+	if _, ok, _ := session.ReadSandboxRecord(d.config.TownRoot, overrunStopSessionName); ok {
+		t.Error("the sandbox record survived the stop")
+	}
+}
+
 // A sandbox record that does not parse cannot say whether its seat ran in a
 // sandbox, and no retry changes the file. The stop keeps the sandbox and its
 // record, hands the bead back with a note naming the unreadable record, and
