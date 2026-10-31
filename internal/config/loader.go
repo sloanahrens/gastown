@@ -965,9 +965,6 @@ func LoadOrCreateTownSettings(path string) (*TownSettings, error) {
 	if err := DecodeJSONFile(path, data, &settings); err != nil {
 		return nil, err
 	}
-	if err := settings.checkRingKey(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
 	return &settings, nil
 }
 
@@ -2881,9 +2878,6 @@ func LoadTownSettings(path string) (*TownSettings, error) {
 	var settings TownSettings
 	if err := DecodeJSONFile(path, data, &settings); err != nil {
 		return nil, err
-	}
-	if err := settings.checkRingKey(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &settings, nil
 }

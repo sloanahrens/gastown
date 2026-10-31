@@ -12,7 +12,8 @@ import (
 type RingConfig struct {
 	// Key is a reference to the signing key, "${VAR}" for a variable in the
 	// daemon environment (for example "${GT_RING_KEY}"). A literal value is
-	// refused when settings are loaded.
+	// refused by the Ring verbs when they resolve it; loading settings never
+	// fails over it, so one bad ring.key cannot break every settings reader.
 	Key string `json:"key,omitempty"`
 }
 
@@ -41,13 +42,4 @@ func (s *TownSettings) RingKeyFrom(getenv func(string) string) (string, error) {
 		return "", fmt.Errorf("ring.key names %s, which is unset or empty in the daemon environment", name)
 	}
 	return key, nil
-}
-
-// checkRingKey refuses a settings file whose ring.key is a literal. An unset
-// ring.key is not an error here: the Ring verbs refuse it when they need it.
-func (s *TownSettings) checkRingKey() error {
-	if s.Ring == nil || s.Ring.Key == "" {
-		return nil
-	}
-	return ValidateRingKey(s.Ring.Key)
 }

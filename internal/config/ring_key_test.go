@@ -93,9 +93,11 @@ func TestRingKeyRefusesAnUnsetVariableByName(t *testing.T) {
 	}
 }
 
-// TestRingKeyRefusesALiteralInSettingsFile: a literal ring.key is refused
-// wherever settings/config.json is loaded, and the refusal omits the value.
-func TestRingKeyRefusesALiteralInSettingsFile(t *testing.T) {
+// TestRingKeyLiteralInSettingsFileLoadsButVerbsRefuse: a literal ring.key does
+// not fail a settings load, so one bad field cannot break every reader of the
+// town. The Ring verb that resolves the key refuses the literal, and its error
+// omits the value.
+func TestRingKeyLiteralInSettingsFileLoadsButVerbsRefuse(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	path := TownSettingsPath(root)
@@ -114,13 +116,18 @@ func TestRingKeyRefusesALiteralInSettingsFile(t *testing.T) {
 		"LoadOrCreateTownSettings": LoadOrCreateTownSettings,
 	}
 	for name, load := range loaders {
-		_, err := load(path)
+		settings, err := load(path)
+		if err != nil {
+			t.Errorf("%s refused the file over a literal ring.key: %v", name, err)
+			continue
+		}
+		_, err = settings.RingKeyFrom(func(string) string { return ringLiteral })
 		if err == nil {
-			t.Errorf("%s accepted a literal ring.key", name)
+			t.Errorf("%s: RingKeyFrom resolved a literal ring.key", name)
 			continue
 		}
 		if strings.Contains(err.Error(), ringLiteral) {
-			t.Errorf("%s error echoes the literal: %v", name, err)
+			t.Errorf("%s: RingKeyFrom error echoes the literal: %v", name, err)
 		}
 	}
 }
