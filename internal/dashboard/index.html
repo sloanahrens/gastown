@@ -4739,6 +4739,19 @@ let dropped = false;      // a stream that opens again after a drop is a new bui
 let reconnecting = false; // a replacement is waiting out its delay
 let retryMs = 0;          // that delay, doubled per failed connect up to the cap
 let lastEvent = 0;        // when the live stream last sent a named event
+// The two queue lists and the landing rows the state frame leaves out come as
+// their own events, and only when they changed. lists keeps each one's last
+// value, and mergeLists puts them back into a state frame before it draws, so
+// the page shows what it showed when the whole state came in one frame (gt-6ecd0).
+let lists = {};
+function mergeLists(st) {
+  if (st.trend && "trend.recent" in lists) st.trend.recent = lists["trend.recent"];
+  if (st.queue) {
+    if ("queue.ready" in lists) st.queue.ready = lists["queue.ready"];
+    if ("queue.blocked" in lists) st.queue.blocked = lists["queue.blocked"];
+  }
+  return st;
+}
 
 function connect() {
   const es = new EventSource("/stream");
@@ -4762,7 +4775,10 @@ function connect() {
     if (es.readyState === EventSource.CLOSED) reconnectStream(es);
   };
   const seen = () => { lastEvent = Date.now(); };
-  es.addEventListener("state", ev => { seen(); state = JSON.parse(ev.data); renderAll(); });
+  es.addEventListener("state", ev => { seen(); state = mergeLists(JSON.parse(ev.data)); renderAll(); });
+  // A list event is only stored: the state frame the hub sends right after it is
+  // the one that draws it.
+  for (const name of ["trend.recent", "queue.ready", "queue.blocked"]) es.addEventListener(name, ev => { seen(); lists[name] = JSON.parse(ev.data); });
   es.addEventListener("backlog", ev => { seen(); $("feed").replaceChildren(); for (const k of Object.keys(counts)) delete counts[k]; JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
   es.addEventListener("entry", ev => { seen(); pushEntry(JSON.parse(ev.data)); });
   es.addEventListener("alert", ev => { seen(); onAlert(JSON.parse(ev.data)); });

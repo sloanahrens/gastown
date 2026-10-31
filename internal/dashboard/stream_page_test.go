@@ -2,7 +2,12 @@ package dashboard
 
 import (
 	"strconv"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The page keeps its own stream alive (gt-rpble): the operator's tab sat on
@@ -258,4 +263,74 @@ func TestANamedEventRestartsTheWatchdog(t *testing.T) {
 	if got := pageStreams(t, dom); got != 2 {
 		t.Fatalf("the page had %d streams 91 s after the event, want the stream replaced", got)
 	}
+}
+
+// deliverFrames sends each frame in frames, as the server wrote them, down the
+// live stream, in the order they were written.
+func deliverFrames(t *testing.T, dom *pageDOM, frames string) {
+	t.Helper()
+
+	for _, f := range strings.Split(strings.TrimSuffix(frames, "\n\n"), "\n\n") {
+		if f == "" {
+			continue
+		}
+		head, data, ok := strings.Cut(f, "\ndata: ")
+		if !ok {
+			t.Fatalf("a frame with no data line: %q", f)
+		}
+		deliverStream(t, dom, strings.TrimPrefix(head, "event: "), data)
+	}
+}
+
+// The page draws the same Landings and Work rows from the hub's list events and
+// state frame as from one whole state frame: on connect, and after a change that
+// moves one list while the other is left out of the frames (gt-6ecd0).
+func TestStreamListEventsDrawTheSameRowsAsTheWholeState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	ready := []QueueBead{{ID: "gt-1", Rig: "gastown", Title: "first ready bead", Priority: 2, Shape: "ok"}}
+	landed := []LandingRow{{At: now.Add(-time.Minute), Bead: "gt-9", Rig: "gastown", Title: "landed bead", Outcome: "landed"}}
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		Trend: func() *Trend {
+			return &Trend{Hours: []TrendHour{{Hour: now.Truncate(time.Hour), Landed: len(landed)}}, Recent: landed}
+		},
+		Queue: func() *Queue { return &Queue{At: now, Ready: ready, ReadyTotal: len(ready)} },
+	})
+	h.pollTrend()
+	h.pollQueue()
+
+	page, initial := h.Subscribe()
+	defer h.Unsubscribe(page)
+	var first strings.Builder
+	for _, f := range initial {
+		first.Write(f)
+	}
+
+	split := newPageDOM(t)
+	deliverFrames(t, split, first.String())
+	whole := newPageDOM(t)
+	deliverStream(t, whole, "state", mustJSONString(t, h.State()))
+
+	assertSameDrawing := func(when string) {
+		t.Helper()
+		for _, id := range []string{"trend", "work"} {
+			assert.Equal(t, whole.element(t, id), split.element(t, id), "#%s draws differently from the whole state %s", id, when)
+		}
+	}
+	assertSameDrawing("on connect")
+	require.Contains(t, split.element(t, "work").Text, "gt-1", "the Work pane drew no queue row to compare")
+	require.Contains(t, split.element(t, "trend").Text, "landed bead", "the Landings pane drew no landing to compare")
+
+	// Only the queue changes, so only queue.ready goes out. The page must keep the
+	// landings it already holds, and draw the new queue row beside them.
+	ready = append(ready, QueueBead{ID: "gt-2", Rig: "gastown", Title: "second ready bead", Priority: 2, Shape: "ok"})
+	h.pollQueue()
+	deliverFrames(t, split, drainFrames(page))
+	deliverStream(t, whole, "state", mustJSONString(t, h.State()))
+
+	assertSameDrawing("after the queue changed")
+	require.Contains(t, split.element(t, "work").Text, "gt-2", "the Work pane did not draw the changed queue")
+	require.Contains(t, split.element(t, "trend").Text, "landed bead", "the Landings pane lost its rows when only the queue changed")
 }
