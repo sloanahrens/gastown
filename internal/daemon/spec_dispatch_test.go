@@ -964,7 +964,7 @@ func TestSpecDispatchFoldsSlingCensus(t *testing.T) {
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
 
-	slingPath := dispatch.SpecSlingCensusPath(d.config.TownRoot, 1)
+	slingPath := dispatch.SpecSlingCensusPath(d.config.TownRoot, "test")
 	if err := beads.WriteCensusSink(slingPath, []beads.CensusRow{
 		{Verb: "show", Caller: "cmd.specSlingDuplicateCheck", Count: 7},
 	}); err != nil {
@@ -979,6 +979,87 @@ func TestSpecDispatchFoldsSlingCensus(t *testing.T) {
 	}
 	if _, err := os.Stat(slingPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the sling's census file is still at %s after folding: %v", slingPath, err)
+	}
+}
+
+// A sling census file the daemon cannot read is named once and kept for the
+// next tick: dropping it would drop the calls it holds (gt-3y319).
+func TestSpecDispatchKeepsASlingCensusItCannotRead(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply {
+		return cliReply{stdout: string(wireOut(`{"candidates": 0}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	slingPath := dispatch.SpecSlingCensusPath(d.config.TownRoot, "unreadable")
+	if err := os.MkdirAll(filepath.Dir(slingPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(slingPath, []byte("not-a-row\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runSpecDispatch()
+
+	if n := countContaining(lines(), "bd census (sling): unreadable at", slingPath, "kept for the next tick"); n != 1 {
+		t.Errorf("unreadable sling census lines = %d, want one naming the path: %v", n, lines())
+	}
+	if _, err := os.Stat(slingPath); err != nil {
+		t.Errorf("the unreadable sling census was not kept: %v", err)
+	}
+}
+
+// A sling census the daemon folds but cannot remove still counts in the line,
+// since its rows are real calls, and the failed removal is named (gt-3y319).
+func TestSpecDispatchReportsASlingCensusItCannotRemove(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLIFor(func(c cliCall) cliReply {
+		rows := []beads.CensusRow{{Verb: "show", Caller: "cmd.specRoster", Count: 3}}
+		if err := beads.WriteCensusSink(dispatch.SpecCensusPath(c.dir), rows); err != nil {
+			t.Errorf("writing the tick's census: %v", err)
+		}
+		return cliReply{stdout: string(wireOut(`{"candidates": 0}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	slingPath := dispatch.SpecSlingCensusPath(d.config.TownRoot, "remove-fails")
+	if err := beads.WriteCensusSink(slingPath, []beads.CensusRow{{Verb: "show", Caller: "cmd.specSling", Count: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	removeErr := errors.New("device busy")
+	d.specCensusRemove = func(path string) error {
+		if path == slingPath {
+			return removeErr
+		}
+		return os.Remove(path)
+	}
+
+	d.runSpecDispatch()
+
+	if n := countContaining(lines(), "bd census (sling): folded but not removed", slingPath, removeErr.Error()); n != 1 {
+		t.Errorf("failed removal lines = %d, want one naming the path: %v", n, lines())
+	}
+	if n := countContaining(lines(), "sling: show@cmd.specSling=2"); n != 1 {
+		t.Errorf("folded sling rows named %d times, want the line to count them: %v", n, lines())
+	}
+}
+
+// A town path the sling census glob cannot parse leaves its rows unfolded, and
+// the daemon says so once instead of passing over them (gt-3y319).
+func TestSpecDispatchReportsASlingCensusItCannotList(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply {
+		return cliReply{stdout: string(wireOut(`{"candidates": 0}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	// A bracket makes the glob's pattern malformed.
+	d.config.TownRoot = filepath.Join(t.TempDir(), "town[")
+
+	d.runSpecDispatch()
+
+	if n := countContaining(lines(), "bd census (sling): cannot list the sling census files"); n != 1 {
+		t.Errorf("unlistable sling census lines = %d, want one: %v", n, lines())
 	}
 }
 

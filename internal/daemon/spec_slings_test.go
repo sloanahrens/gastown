@@ -202,6 +202,36 @@ func TestSpecSlingIsToldItsCensusPath(t *testing.T) {
 	}
 }
 
+// A daemon restarted on the same town names its sling census files apart from
+// those the daemon before it left unfolded, so a restart never overwrites rows
+// no tick has folded (gt-3y319).
+func TestARestartedDaemonDoesNotReuseSlingCensusFiles(t *testing.T) {
+	t.Parallel()
+	b, fake, first, _ := newBlockedSlings(t, plannedTick(slingJob("gt-a", "claude-sonnet")))
+	first.runSpecDispatch()
+	recvSling(t, b.started)
+	close(b.release)
+	waitSlings(t, first)
+
+	// The daemon restarts on the same town, later, its sequence starting again.
+	logger, _ := lineLogger()
+	second := specDispatchFake(t, fake, logger)
+	second.config.TownRoot = first.config.TownRoot
+	second.clock = clockwork.NewFakeClockAt(newSlingClock().Now().Add(time.Minute))
+	second.runSpecDispatch()
+	recvSling(t, b.started)
+	waitSlings(t, second)
+
+	calls := fake.argvs("spec", "sling")
+	if len(calls) != 2 {
+		t.Fatalf("slings run = %v, want two", calls)
+	}
+	before, after := cliFlagValue(calls[0], "--census-path"), cliFlagValue(calls[1], "--census-path")
+	if before == "" || before == after {
+		t.Errorf("census paths %q and %q: a restarted daemon must name its sling apart", before, after)
+	}
+}
+
 // The tick is handed the running sling's bead, its seat and its start, and
 // nothing else: the job's file and test lists are the sling's, and the tick
 // never reads them (gt-mx656).

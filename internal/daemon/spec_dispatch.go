@@ -562,8 +562,8 @@ func (d *Daemon) specDispatchCensusPath() string {
 	return dispatch.SpecCensusPath(d.config.TownRoot)
 }
 
-// removeCensusFile removes the census file, replaced by a test whose clear
-// fails (gt-139dp).
+// removeCensusFile removes a census file, replaced by tests that drive a clear
+// or a fold that fails (gt-139dp, gt-3y319).
 func (d *Daemon) removeCensusFile(path string) error {
 	if d.specCensusRemove != nil {
 		return d.specCensusRemove(path)
@@ -636,7 +636,7 @@ func (d *Daemon) foldSpecSlingCensus() []beads.CensusRow {
 			continue
 		}
 		rows = append(rows, part...)
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := d.removeCensusFile(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			d.logger.Printf("spec_dispatch: bd census (sling): folded but not removed: %s: %v", path, err)
 		}
 	}
@@ -648,12 +648,11 @@ func (d *Daemon) foldSpecSlingCensus() []beads.CensusRow {
 // always shown them, then the rows folded from the background slings under the
 // sling label (gt-3y319).
 func specCensusLine(tickRows, slingRows []beads.CensusRow) string {
-	line := beads.CensusTopRows(tickRows)
-	top := beads.CensusTopRows(slingRows)
-	if top == "" {
-		return line
+	sling := beads.CensusTopLabeled("sling", slingRows)
+	if sling == "" {
+		return beads.CensusTopRows(tickRows)
 	}
-	sling := "sling: " + strings.TrimPrefix(top, "top: ")
+	line := beads.CensusTopRows(tickRows)
 	if line == "" {
 		return sling
 	}

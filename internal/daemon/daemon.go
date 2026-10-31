@@ -634,8 +634,8 @@ type Daemon struct {
 
 	// specSlings is the slings the ticks planned and the daemon still has
 	// running in the background (spec_slings.go, gt-5h70s), and
-	// specSlingCensusSeq numbers the per-run census file each one writes
-	// (gt-3y319).
+	// specSlingCensusSeq numbers each sling's census file within the launch
+	// instant it is named for (gt-3y319).
 	specSlings         specSlings
 	specSlingCensusSeq atomic.Uint64
 

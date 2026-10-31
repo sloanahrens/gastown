@@ -66,6 +66,13 @@ func CensusRowsTotal(rows []CensusRow) int {
 // CensusTopRows renders rows as the "top: verb@caller=count ..." text a census
 // line carries, naming the censusLogRows busiest; it is empty for no rows.
 func CensusTopRows(rows []CensusRow) string {
+	return CensusTopLabeled("top", rows)
+}
+
+// CensusTopLabeled renders the censusLogRows busiest rows as the
+// "label: verb@caller=count ..." text a census line carries, so a second set of
+// rows joins the line under its own label; it is empty for no rows.
+func CensusTopLabeled(label string, rows []CensusRow) string {
 	if len(rows) == 0 {
 		return ""
 	}
@@ -73,7 +80,8 @@ func CensusTopRows(rows []CensusRow) string {
 		rows = rows[:censusLogRows]
 	}
 	var b strings.Builder
-	b.WriteString("top:")
+	b.WriteString(label)
+	b.WriteString(":")
 	for _, row := range rows {
 		fmt.Fprintf(&b, " %s@%s=%d", row.Verb, row.Caller, row.Count)
 	}
