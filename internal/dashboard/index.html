@@ -313,8 +313,15 @@ button.jvfold:hover{color:var(--text)}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
 #events{max-height:40vh;overflow:auto;padding:4px 0}
-.evrow{display:grid;grid-template-columns:62px auto auto 1fr;gap:8px;padding:2px 12px;overflow-wrap:anywhere}
+/* The time column is as wide as the stamp it holds and no narrower, so a
+   narrow panel never breaks "14:28:28" across two lines (gt-y3fau). */
+.evrow{display:grid;grid-template-columns:max-content auto auto 1fr;gap:8px;padding:2px 12px;overflow-wrap:anywhere}
+.evrow .t{white-space:nowrap}
 .evrow .t,.evrow .b,.evrow .x{color:var(--dim)}
+/* The EVENTS header's last-hour stats, in the colours the feed's rows carry for
+   each level, so the header is read the way the rows are (gt-y3fau). */
+.echip{border:1px solid currentColor;border-radius:999px;padding:0 7px;font-size:11px;white-space:nowrap;color:var(--dim)}
+.echip.info{color:var(--blue)}.echip.warn{color:var(--amber)}.echip.crit{color:var(--red)}
 .evrow .k{font-weight:700}
 .evrow.info .k{color:var(--blue)}.evrow.warn .k{color:var(--amber)}.evrow.crit .k{color:var(--red)}
 .alvl{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid currentColor;margin-right:6px}
@@ -433,7 +440,7 @@ a.hrow:hover{background:#19212b}
 <div class="grid">
   <div class="col">
     <section data-fold="attention"><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
-    <section id="eventssec" data-fold="events" data-default-collapsed><h2>EVENTS <span class="r" id="eventsnote"></span></h2><div class="body" id="events"></div></section>
+    <section id="eventssec" data-fold="events" data-default-collapsed><h2>EVENTS <span class="chips" id="eventschips"></span> <span class="r" id="eventsnote"></span></h2><div class="body" id="events"></div></section>
     <section data-fold="overseer"><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
@@ -4490,13 +4497,58 @@ function eventRow(a) {
   r.append(el("span", "t", clock(a.at)), el("span", "k", a.title || "alert"), el("span", "b", a.bead || ""), el("span", "x", a.text || ""));
   return r;
 }
-// paintEvents draws the feed and its header count. The count sits in the header's
-// note, which the fold hides while the panel is shut and shows as its summary.
+// EVENT_STATS_WINDOW_MS is the window the header's stats count: the last hour,
+// measured from the clock each time the header is painted, with no timer of its
+// own. The stats come from the alerts the feed already holds.
+const EVENT_STATS_WINDOW_MS = 3600e3;
+// EVENT_LEVELS is the levels the header counts, in the page's severity order,
+// each drawn in the colour the feed's rows carry for it.
+const EVENT_LEVELS = ["info", "warn", "crit"];
+// eventStats is the feed's last hour: how many events of each level arrived in
+// the window ending at now — an event exactly an hour old is still inside it —
+// and how long ago the newest event of all arrived (ageSec, null while the feed
+// holds none). An event with no readable time is left out of both, and a level
+// the page has no colour for counts as info, the level the feed draws a row
+// without one in.
+function eventStats(lines, now) {
+  const counts = {};
+  for (const lvl of EVENT_LEVELS) counts[lvl] = 0;
+  const since = now - EVENT_STATS_WINDOW_MS;
+  let newest = null;
+  for (const a of lines || []) {
+    if (!a || !a.at) continue;
+    const t = new Date(a.at).getTime();
+    if (!isFinite(t)) continue;
+    if (newest === null || t > newest) newest = t;
+    if (t < since) continue;
+    counts[EVENT_LEVELS.indexOf(a.level) < 0 ? "info" : a.level]++;
+  }
+  // A clock that runs behind the hub dates its newest alert ahead of now; an age
+  // before now is no age at all, so it reads as just arrived.
+  return {counts: counts, ageSec: newest === null ? null : Math.max(0, Math.round((now - newest) / 1000))};
+}
+// paintEventStats draws the header's stats as chips beside the unread count. They
+// ride the heading rather than the body, so a shut panel — how the panel starts —
+// still says how busy and how bad the hour has been; a feed with nothing to count
+// draws none (gt-y3fau).
+function paintEventStats(now) {
+  const chips = [];
+  const st = eventStats(eventLines, now);
+  for (const lvl of EVENT_LEVELS) {
+    if (st.counts[lvl]) chips.push(el("span", "echip " + lvl, st.counts[lvl] + " " + lvl));
+  }
+  if (st.ageSec != null) chips.push(el("span", "echip", "newest " + fmtDur(st.ageSec) + " ago"));
+  $("eventschips").replaceChildren(...chips);
+}
+// paintEvents draws the feed, its header count and the header's stats. The count
+// sits in the header's note, which the fold hides while the panel is shut and
+// shows as its summary; the stats sit beside it in the heading, which stays.
 function paintEvents() {
   const box = $("events");
   box.replaceChildren(...eventLines.map(eventRow));
   if (!eventLines.length) box.append(el("div", "empty", "no events yet"));
   $("eventsnote").textContent = eventsUnread ? eventsUnread + " unread" : "";
+  paintEventStats(Date.now());
   paintFolds(state);
 }
 // renderEvents takes the state's recent alerts into the feed, oldest first so the

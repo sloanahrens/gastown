@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,46 @@ func eventsSummary(t *testing.T, dom *pageDOM) string {
 	t.Helper()
 
 	return pageExpr(t, dom, `__foldRead("events").summary`)
+}
+
+// chipLine is one of the stats chips the EVENTS header draws: its class, which
+// carries the level's colour, and the words on it.
+type chipLine struct {
+	Cls  string `json:"cls"`
+	Text string `json:"text"`
+}
+
+// eventChips reads the chips the EVENTS header holds, in the order the page
+// drew them.
+func eventChips(t *testing.T, dom *pageDOM) []chipLine {
+	t.Helper()
+
+	js := `JSON.stringify(__byId["eventschips"].children.map(c => ({cls: c.className, text: c.textContent})))`
+	var out []chipLine
+	if err := json.Unmarshal([]byte(pageExpr(t, dom, js)), &out); err != nil {
+		t.Fatalf("reading the EVENTS header's chips: %v", err)
+	}
+	return out
+}
+
+// pageNow is the clock the page reads, so a test dates an alert against it and
+// the header's age comes out exact rather than near.
+func pageNow(t *testing.T, dom *pageDOM) time.Time {
+	t.Helper()
+
+	ms, err := strconv.ParseInt(pageExpr(t, dom, "String(Date.now())"), 10, 64)
+	if err != nil {
+		t.Fatalf("reading the page's clock: %v", err)
+	}
+	return time.UnixMilli(ms).UTC()
+}
+
+// alertAt redates an alert to at and gives it the level the header counts it
+// under.
+func alertAt(a Alert, at time.Time, level string) Alert {
+	a.At = at
+	a.Level = level
+	return a
 }
 
 // rejectedAlert is a rejection the server would alert on. It is numbered so each
@@ -263,5 +304,189 @@ func TestAlertsFromARestartedHubAreNotTakenForRepeats(t *testing.T) {
 	lines := feedLines(t, dom)
 	if len(lines) != 2 {
 		t.Fatalf("the feed holds %d lines for one alert from each of two hubs, want 2: %+v", len(lines), lines)
+	}
+}
+
+// The EVENTS header says how busy and how bad the last hour has been: the
+// events of each level inside the hour, then how long ago the newest event of
+// all arrived. The count is taken from the alerts the feed holds, so an event
+// older than the hour is in the feed and out of the count, and one the page
+// cannot date is in neither (gt-y3fau).
+func TestEventsStatsCountTheLastHourByLevelAndAgeTheNewest(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) string { return now.Add(-d).Format(time.RFC3339) }
+	ev := func(id, level, when string) map[string]any {
+		return map[string]any{"id": id, "at": when, "level": level, "title": "a thing"}
+	}
+	none := map[string]int{"info": 0, "warn": 0, "crit": 0}
+
+	cases := []struct {
+		name  string
+		lines []map[string]any
+		want  map[string]int
+		age   string
+	}{
+		{
+			name:  "the hour's events are counted by level",
+			lines: []map[string]any{ev("a", "crit", at(5*time.Minute)), ev("b", "warn", at(30*time.Minute)), ev("c", "warn", at(50*time.Minute))},
+			want:  map[string]int{"info": 0, "warn": 2, "crit": 1},
+			age:   "5m",
+		},
+		{
+			name:  "an event older than the hour is not counted",
+			lines: []map[string]any{ev("a", "warn", at(61*time.Minute)), ev("b", "crit", at(90*time.Minute)), ev("c", "info", at(10*time.Minute))},
+			want:  map[string]int{"info": 1, "warn": 0, "crit": 0},
+			age:   "10m",
+		},
+		{
+			name:  "the hour ends at exactly an hour: that event counts and the second past it does not",
+			lines: []map[string]any{ev("a", "info", at(30*time.Minute)), ev("b", "warn", at(time.Hour)), ev("c", "crit", at(time.Hour+time.Second))},
+			want:  map[string]int{"info": 1, "warn": 1, "crit": 0},
+			age:   "30m",
+		},
+		{
+			name:  "a level the page has no colour for counts as info, as its row draws",
+			lines: []map[string]any{ev("a", "bad", at(5*time.Minute))},
+			want:  map[string]int{"info": 1, "warn": 0, "crit": 0},
+			age:   "5m",
+		},
+		{
+			name:  "an event with no readable time is counted in neither the window nor the age",
+			lines: []map[string]any{{"id": "a", "at": "not a time", "level": "warn"}},
+			want:  none,
+			age:   "–",
+		},
+		{
+			name:  "an event dated ahead of the clock is not an age before now",
+			lines: []map[string]any{ev("a", "crit", at(-5*time.Minute))},
+			want:  map[string]int{"info": 0, "warn": 0, "crit": 1},
+			age:   "0s",
+		},
+		{
+			name:  "an empty feed has nothing to count and no newest",
+			lines: nil,
+			want:  none,
+			age:   "–",
+		},
+	}
+
+	dom := newPageDOM(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.lines)
+			if err != nil {
+				t.Fatalf("encoding the alerts: %v", err)
+			}
+			js := fmt.Sprintf(`(function(){ const st = eventStats(%s, %d); return JSON.stringify({counts: st.counts, age: fmtDur(st.ageSec)}); })()`,
+				b, now.UnixMilli())
+			var got struct {
+				Counts map[string]int `json:"counts"`
+				Age    string         `json:"age"`
+			}
+			if err := json.Unmarshal([]byte(pageExpr(t, dom, js)), &got); err != nil {
+				t.Fatalf("reading eventStats: %v", err)
+			}
+			for lvl, n := range tc.want {
+				if got.Counts[lvl] != n {
+					t.Errorf("eventStats counted %d %s events, want %d: %+v", got.Counts[lvl], lvl, n, got.Counts)
+				}
+			}
+			if got.Age != tc.age {
+				t.Errorf("the newest event reads %q, want %q", got.Age, tc.age)
+			}
+		})
+	}
+}
+
+// The stats ride the EVENTS heading beside the unread count, so a shut panel —
+// how the panel starts — still says what the last hour brought. They redraw
+// when an alert lands on the stream and when a state reading carries one in,
+// with no timer of their own (gt-y3fau).
+func TestTheEventsHeaderShowsTheLastHourStatsBesideTheUnreadCount(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	if !foldClosed(t, dom, "events") {
+		t.Fatal("the EVENTS panel starts open, want it shut")
+	}
+	now := pageNow(t, dom)
+
+	// One alert from a reading, raised before the page opened, so it is history
+	// rather than news.
+	stateAlerts(t, dom, alertAt(rejectedAlert(1, "gt-old"), now.Add(-3*time.Hour), LevelWarn))
+
+	// Three from the stream, inside the hour, one of each level.
+	streamAlert(t, dom, alertAt(rejectedAlert(2, "gt-a"), now.Add(-20*time.Minute), LevelInfo))
+	streamAlert(t, dom, alertAt(rejectedAlert(3, "gt-b"), now.Add(-5*time.Minute), LevelWarn))
+	streamAlert(t, dom, alertAt(rejectedAlert(4, "gt-c"), now.Add(-10*time.Minute), LevelCrit))
+
+	want := []chipLine{
+		{Cls: "echip info", Text: "1 info"},
+		{Cls: "echip warn", Text: "1 warn"},
+		{Cls: "echip crit", Text: "1 crit"},
+		{Cls: "echip", Text: "newest 5m ago"},
+	}
+	if got := eventChips(t, dom); !slices.Equal(got, want) {
+		t.Errorf("the header's chips read %+v, want the hour's three levels and the newest age %+v", got, want)
+	}
+	// The three streamed alerts are unread while the panel is shut, and the
+	// header says so beside the chips.
+	if got := eventsSummary(t, dom); got != "3 unread" {
+		t.Errorf("the shut panel's summary reads %q with the chips, want the unread count %q", got, "3 unread")
+	}
+	// The chips sit in the heading, which stays while the panel is shut, and not
+	// among the rows the fold hides.
+	if c := dom.element(t, "eventschips"); c.Hidden {
+		t.Error("the chips are hidden while the panel is shut, want them in the header")
+	}
+	if got := pageExpr(t, dom, `__byId["eventschips"].parentNode.tagName`); got != "H2" {
+		t.Errorf("the chips sit under a %s, want the panel's heading", got)
+	}
+	if got := pageExpr(t, dom, `String(__byId["events"].textContent.indexOf("newest"))`); got != "-1" {
+		t.Error("the stats are drawn in the panel's body, want them in the header alone")
+	}
+
+	// A reading that carries a newer alert in redraws the stats it is made of.
+	stateAlerts(t, dom, alertAt(rejectedAlert(5, "gt-d"), now.Add(-2*time.Minute), LevelCrit))
+	want = []chipLine{
+		{Cls: "echip info", Text: "1 info"},
+		{Cls: "echip warn", Text: "1 warn"},
+		{Cls: "echip crit", Text: "2 crit"},
+		{Cls: "echip", Text: "newest 2m ago"},
+	}
+	if got := eventChips(t, dom); !slices.Equal(got, want) {
+		t.Errorf("after a reading with a newer alert the chips read %+v, want %+v", got, want)
+	}
+}
+
+// A feed with nothing in it has nothing to say about the hour, so the header
+// draws no chips at all (gt-y3fau).
+func TestTheEventsHeaderShowsNoStatsForAnEmptyFeed(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	stateAlerts(t, dom) // a reading that carries no alerts, so the page paints the empty feed
+
+	if chips := eventChips(t, dom); len(chips) != 0 {
+		t.Errorf("an empty feed drew %d stat chips, want none: %+v", len(chips), chips)
+	}
+}
+
+// The EVENTS rows' time cell never wraps: the column it sat in was 62px, less
+// than the page's monospace needs for "14:28:28", so the operator's screenshot
+// showed one stamp over two lines ("14:28:2" above "8"). The column is sized to
+// the stamp it holds and the cell is told not to break (gt-y3fau).
+func TestTheEventsTimeCellNeverWraps(t *testing.T) {
+	t.Parallel()
+
+	if rule := cssRule(t, ".evrow"); strings.Contains(rule, "62px") {
+		t.Errorf("the EVENTS row still sizes its time column at 62px, narrower than a stamp: %q", rule)
+	} else if !strings.Contains(rule, "grid-template-columns:max-content") {
+		t.Errorf("the EVENTS row does not size its time column to the stamp: %q", rule)
+	}
+	if rule := cssRule(t, ".evrow .t"); !strings.Contains(rule, "white-space:nowrap") {
+		t.Errorf("the EVENTS time cell may still wrap: %q", rule)
 	}
 }
