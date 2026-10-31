@@ -40,7 +40,6 @@ func NewStaleAgentBeadsCheck() *StaleAgentBeadsCheck {
 	}
 }
 
-// Run checks for agent beads that have no matching agent on disk.
 // agentWispsFromStore returns the agent beads among bd's wisps, keyed by ID. A
 // *beads.Beads keeps its bd read, so a bd rig's answer is unchanged. Any other
 // store reads its wisps through the Client seam, the read a tracker rig
@@ -57,6 +56,7 @@ func agentWispsFromStore(bd doctorBeads) (map[string]*beads.Issue, error) {
 	return beads.AgentBeadsFromWisps(wisps), nil
 }
 
+// Run checks for agent beads that have no matching agent on disk.
 func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Load routes to get prefixes
 	beadsDir := filepath.Join(ctx.TownRoot, ".beads")
