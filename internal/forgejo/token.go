@@ -81,7 +81,11 @@ func ReadCredentialFile(path string) (user, token string, err error) {
 
 // readPrivateFile returns the content of a regular file that group and other
 // cannot read, the only kind a token may live in.
-func readPrivateFile(path string) (string, error) {
+func readPrivateFile(path string) (string, error) { return readPrivateFileWith(path, os.ReadFile) }
+
+// readPrivateFileWith is readPrivateFile over an injected read, so a test can
+// fail the read of a file that passed the permission check.
+func readPrivateFileWith(path string, readFile func(string) ([]byte, error)) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", fmt.Errorf("forgejo: token file: %w", err)
@@ -92,7 +96,7 @@ func readPrivateFile(path string) (string, error) {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return "", fmt.Errorf("forgejo: token file %s is mode %o; it must be 600 so the token stays private", path, perm)
 	}
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if err != nil {
 		return "", fmt.Errorf("forgejo: read token file: %w", err)
 	}
