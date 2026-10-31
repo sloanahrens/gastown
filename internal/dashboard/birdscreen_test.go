@@ -3,7 +3,6 @@ package dashboard
 import (
 	"strings"
 	"testing"
-	"unicode"
 )
 
 // Positive inputs are joined from pieces so that no secret-looking literal sits
@@ -102,24 +101,10 @@ var birdClasses = map[string]bool{
 	"url-credential":        true,
 }
 
-// birdPayload returns the longest separated piece of a row's text: the value a
-// label would most plausibly echo. Keywords and scheme names are shorter than it.
-func birdPayload(text string) string {
-	fields := strings.FieldsFunc(text, func(r rune) bool {
-		return unicode.IsSpace(r) || strings.ContainsRune(`=:"'`, r)
-	})
-	longest := ""
-	for _, f := range fields {
-		if len(f) > len(longest) {
-			longest = f
-		}
-	}
-	return longest
-}
-
 func TestBirdScreenNeverEchoesTheMatch(t *testing.T) {
 	t.Parallel()
 
+	const runLen = 8
 	for _, row := range birdSecretRows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
@@ -128,8 +113,14 @@ func TestBirdScreenNeverEchoesTheMatch(t *testing.T) {
 			if !birdClasses[class] {
 				t.Errorf("screenSecret(%s) class = %q, not a known label; it may echo the input", row.name, class)
 			}
-			if payload := birdPayload(row.text); strings.Contains(class, payload) {
-				t.Errorf("screenSecret(%s) class = %q contains the matched value; a label must not echo the input", row.name, class)
+			if strings.Contains(class, row.text) {
+				t.Fatalf("class %q contains the whole input", class)
+			}
+			for i := 0; i+runLen <= len(row.text); i++ {
+				run := row.text[i : i+runLen]
+				if strings.Contains(class, run) {
+					t.Errorf("class %q contains the %d-byte run %q of the input", class, runLen, run)
+				}
 			}
 		})
 	}
