@@ -1404,6 +1404,14 @@ the clone cannot read, or that Jev returns an unusable response for, is skipped
 with no line and counted as skipped; any other failure stops the pass, leaves
 the cursor, and is retried next pass.
 
+A submission the log already holds a line for, at the current `question_version`,
+is passed over before the daily cap is checked and counted as Repeated, not
+Skipped: nothing is asked and no spend is charged. The key is the bead and its
+head, so a submission listed under two seen times is asked once. A repeat reaches
+a pass when the waiting bead is asked before the landing worker writes its
+first-sight record, and a later pass lists that record too (gt-v419b). The pass
+prints the count in `gt jev submission` output and the daemon log line.
+
 The landing worker writes `.runtime/jev/submissions-seen.jsonl`, one line per
 submission the first time it sees a bead's READY TO LAND block at a head:
 one `land.SubmissionRecord` as JSON.
