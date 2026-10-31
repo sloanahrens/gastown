@@ -7,8 +7,8 @@ import (
 
 // LandingQueueMaxAge bounds how old a published ready-to-land count may be and
 // still answer for the queue now: one landing pass (the worker's default
-// interval) plus the pass's own duration. A count older than this is what an
-// earlier pass saw, so a reader that finds one reads the board itself.
+// interval) plus the pass's own duration. Counts applies the bound, and its doc
+// says why a count past it is not read as an empty queue.
 const LandingQueueMaxAge = 3 * time.Minute
 
 // LandingQueueView holds the ready-to-land count each rig's worker published
