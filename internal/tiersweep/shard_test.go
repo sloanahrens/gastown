@@ -169,3 +169,28 @@ func TestRunPatternEmptyShardSelectsNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestRunPatternRefusesSubtestNames: a name with a '/' is a subtest path that no
+// shard pattern can select, so RunPattern panics for it, alone or beside a
+// top-level name. Dropping it would leave a shard that looks complete (gt-m1h7x).
+func TestRunPatternRefusesSubtestNames(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		shard []string
+	}{
+		{name: "subtest only", shard: []string{"TestB/sub"}},
+		{name: "mixed", shard: []string{"TestA", "TestB/sub"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("RunPattern(%v) returned a pattern instead of refusing", c.shard)
+				}
+			}()
+			RunPattern(c.shard)
+		})
+	}
+}
