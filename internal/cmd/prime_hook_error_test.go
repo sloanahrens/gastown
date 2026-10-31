@@ -22,6 +22,24 @@ func TestHookQueryErrorBannerNamesTheErrorAndForbidsDone(t *testing.T) {
 	}
 }
 
+// gt-0chpv: the banner is what a sandboxed polecat acts on. It must name the bd
+// probe and its retries, and say a shell connection to 3307 is not an outage,
+// or the polecat polls the port from bash (denied by policy) and parks.
+func TestHookQueryErrorBannerNamesTheBdProbeAndTheBashDenial(t *testing.T) {
+	t.Parallel()
+	banner := hookQueryErrorBanner(errors.New("lookup control-plane: i/o timeout"))
+	for _, want := range []string{
+		"bd list --limit 1",
+		"up to 3 times",
+		"Port 3307 from bash, nc or curl is denied by the sandbox policy and is not evidence of an outage",
+		"Escalate only if all 3 probes fail",
+	} {
+		if !strings.Contains(banner, want) {
+			t.Errorf("banner lacks %q:\n%s", want, banner)
+		}
+	}
+}
+
 func TestPrimePayloadPutsHookErrorFirstAndKeepsItUnderBudget(t *testing.T) {
 	t.Parallel()
 	big := strings.Repeat("x", 4000)
