@@ -68,8 +68,9 @@ var (
 	omRejectRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): rejected \((\w+)\): (.*)$`)
 	omScoreRe  = regexp.MustCompile(`\bscore ([0-9.]+)`)
 	// omMergeRe and omLandedRe bracket a landing: the merge line is logged when
-	// the worker starts gating the merged tree, the landed line when it is on
-	// the target. A merge with no landed or rejected line after it is in flight.
+	// the worker has the merged tree and starts on it, the landed line when it
+	// is on the target. A merge with no landed or rejected line after it is in
+	// flight.
 	//
 	// The merge line carries the landing's three commits — the branch head it
 	// merged, the target's tip it merged onto, and the merge candidate both

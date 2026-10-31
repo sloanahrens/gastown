@@ -783,7 +783,7 @@ func (d *Daemon) attentionLandingLimits() townhealth.Limits {
 // wait, om's review — plus one pass interval of slack. A landing that
 // outlives the stage it is running is wedged; one that is merely farther along
 // in a healthy pipeline is not (gt-84gcp). A stage the pipeline reports no
-// timeout for, the fast work before the CI wait, is judged against the whole
+// timeout for, the fast work before om runs, is judged against the whole
 // landing budget instead.
 func (d *Daemon) attentionLandingStuckBudget(stage string) time.Duration {
 	cfg := landingWorkerConfig(d.patrolConfig)
@@ -1256,10 +1256,10 @@ func attentionPIDAlive(pid int) bool {
 // STUCK-INFLIGHT check, read from the Active and Stage callbacks the worker
 // already makes rather than by tailing the log (gt-vsct7.3). A pass is judged
 // against its own stage's timeout plus one pass interval of slack, so a
-// landing that is legitimately gating — lint, then the gate, then om — is
-// never an item, however long the pipeline as a whole takes (gt-84gcp). A
-// pass on no reported stage, the fast work before the gate, is judged against
-// the whole landing budget instead. The item clears on its own: the next tick
+// landing that is legitimately working — om, then the gate — is never an
+// item, however long the pipeline as a whole takes (gt-84gcp). A pass on no
+// reported stage, the fast work before om runs, is judged against the whole
+// landing budget instead. The item clears on its own: the next tick
 // returns no item once the pass moves to another bead or ends.
 func (s *attentionSources) collectLandingStuck(ctx context.Context) ([]attention.Item, error) {
 	var out []attention.Item

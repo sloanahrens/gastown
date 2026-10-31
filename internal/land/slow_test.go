@@ -181,7 +181,17 @@ func TestLandSlowStageAlarmsOncePerStage(t *testing.T) {
 		done <- landed{res, err}
 	}()
 
-	// The gate stage, still running at 8 minutes.
+	// The om stage, still running at 8 minutes: om runs before the gate now.
+	r.awaitTimers(t, 1)
+	awaitClosed(t, r.omUp)
+	r.clock.Advance(8 * time.Minute)
+	om := r.awaitEscalation(t)
+	if om.stage != "om" || !strings.Contains(om.message, "Child pids: 5151") || !strings.Contains(om.message, "slow-om.txt") {
+		t.Errorf("om escalation = %+v", om)
+	}
+	close(r.omGo)
+
+	// The gate stage gets its own alarm.
 	r.awaitTimers(t, 1)
 	awaitClosed(t, r.gateUp)
 	r.clock.Advance(8 * time.Minute)
@@ -211,16 +221,6 @@ func TestLandSlowStageAlarmsOncePerStage(t *testing.T) {
 	}
 	close(r.gateGo)
 
-	// The om stage gets its own alarm.
-	r.awaitTimers(t, 1)
-	awaitClosed(t, r.omUp)
-	r.clock.Advance(8 * time.Minute)
-	om := r.awaitEscalation(t)
-	if om.stage != "om" || !strings.Contains(om.message, "Child pids: 5151") || !strings.Contains(om.message, "slow-om.txt") {
-		t.Errorf("om escalation = %+v", om)
-	}
-	close(r.omGo)
-
 	if got := <-done; got.err != nil {
 		t.Fatalf("Land: %v", got.err)
 	}
@@ -243,8 +243,8 @@ func TestLandSlowStageAlarmsOncePerStage(t *testing.T) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.lsofPID) != 2 || r.lsofPID[0] != "4242,4243" || r.lsofPID[1] != "5151" {
-		t.Errorf("lsof asked about %v, want [4242,4243 5151]", r.lsofPID)
+	if len(r.lsofPID) != 2 || r.lsofPID[0] != "5151" || r.lsofPID[1] != "4242,4243" {
+		t.Errorf("lsof asked about %v, want [5151 4242,4243]", r.lsofPID)
 	}
 }
 

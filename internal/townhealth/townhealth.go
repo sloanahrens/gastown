@@ -249,9 +249,9 @@ const DefaultDispatchWindow = 10 * time.Minute
 // first submission after an idle night is not instantly an alarm (gt-m36as).
 const (
 	// LandingStageBudget is the time one submission may legitimately spend in
-	// the landing pipeline: the candidate gate's CI wait (20m, the daemon's
-	// land.DefaultCandidateWaitTimeout), then om review (5m,
-	// land.DefaultOMTimeout), then the merge slack (5m, the daemon's
+	// the landing pipeline: om review (5m, land.DefaultOMTimeout), then the
+	// candidate gate's CI wait (20m, the daemon's
+	// land.DefaultCandidateWaitTimeout), then the merge slack (5m, the daemon's
 	// landingForgejoMergeSlack). It is the daemon's own landing deadline,
 	// 30m at the defaults (gt-fn9e6.26, gt-fn9e6.32), so a healthy landing in
 	// the 3-5 minute range never reads as stuck.

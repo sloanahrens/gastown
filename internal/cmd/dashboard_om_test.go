@@ -369,6 +369,13 @@ func TestOMStageTimes(t *testing.T) {
 	if l, g, o := omStageTimes("deploy 3s"); l != nil || g != nil || o != nil {
 		t.Errorf("unknown stage = %v %v %v", l, g, o)
 	}
+
+	// A landing om refused before the candidate was pushed names the skipped
+	// gate: neither a candidate-gate time nor an infrastructure failure, with
+	// om's own time still on the line (gt-g0w49).
+	if l, g, o := omStageTimes("ci skipped (om rejected), om 12s"); l != nil || g != nil || !is(o, 12*time.Second) {
+		t.Errorf("skipped ci line = %v %v %v, want only om 12s", l, g, o)
+	}
 }
 
 func TestOMParseLogLine(t *testing.T) {

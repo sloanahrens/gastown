@@ -739,8 +739,8 @@ func TestLandingRecordIsFoundByTheWorksBeadAndHead(t *testing.T) {
 
 // gt-84gcp: a landing reports each stage as it enters it, so the daemon's
 // landing-stuck alarm can judge the stage the pass is running rather than the
-// pipeline as a whole. The stages before the gate are reported by nothing:
-// they have no timeout of their own.
+// pipeline as a whole. The stages before om are reported by nothing: they have
+// no timeout of their own.
 func TestLandReportsItsStages(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -755,7 +755,7 @@ func TestLandReportsItsStages(t *testing.T) {
 	if _, err := l.Land(context.Background(), f.work); err != nil {
 		t.Fatalf("Land: %v", err)
 	}
-	if want := []string{StageCI, StageOM}; !slices.Equal(stages, want) {
+	if want := []string{StageOM, StageCI}; !slices.Equal(stages, want) {
 		t.Fatalf("stages = %v, want %v", stages, want)
 	}
 }
@@ -923,24 +923,12 @@ func conflictIsARejection(t *testing.T, f *landFixture) {
 	}
 }
 
-func TestLandRedGateNeverPushes(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	f.gate.fn = func(string) GateResult {
-		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2, Tail: "--- FAIL: TestB\nFAIL\tgithub.com/x/b\n"}}}
-	}
-	_, err := f.lander().Land(context.Background(), f.work)
-	f.assertRejected(t, err, RejectGate, LabelRework)
-	if !strings.Contains(f.bead().Notes, "\n  | FAIL\tgithub.com/x/b") {
-		t.Errorf("notes lack the gate tail:\n%s", f.bead().Notes)
-	}
-}
-
 // TestLandCapsTheReworkLoop is gt-28ibg: the review rejection at
 // MaxReworkAttempts goes to a human instead of back to a polecat, so a refusal
 // the author keeps reproducing ends in an escalation rather than another
 // redispatch. Two gate refusals before the first round move nothing: a gate
-// failure is fixed before om reviews, so it spends no attempt (gt-l3zak).
+// refusal spends no review attempt (gt-l3zak). The gate runs only once om
+// passes, so the gate loop's reviewer approves (gt-g0w49).
 func TestLandCapsTheReworkLoop(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -948,7 +936,7 @@ func TestLandCapsTheReworkLoop(t *testing.T) {
 		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
 	}
 	f.review.fn = func(string) (Verdict, error) {
-		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+		return Verdict{Verdict: VerdictApprove, Score: 0.9}, nil
 	}
 	l := f.lander()
 	f.gate.fn = redGate
@@ -969,6 +957,9 @@ func TestLandCapsTheReworkLoop(t *testing.T) {
 		f.resubmit()
 	}
 
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+	}
 	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
 		f.gate.fn = func(string) GateResult { return GateResult{Passed: true} }
 		_, err := l.Land(context.Background(), f.work)
@@ -1127,22 +1118,25 @@ func TestLandHeaderNumbersTheRoundEachKindIsOn(t *testing.T) {
 		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
 	}
 	greenGate := func(string) GateResult { return GateResult{Passed: true} }
-	f.review.fn = func(string) (Verdict, error) {
-		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
-	}
+	approve := Verdict{Verdict: VerdictApprove, Score: 0.9}
+	refuse := Verdict{Verdict: VerdictRequestChanges, Score: 0.4}
 	l := f.lander()
+	// A gate refusal comes after an om pass now, so its rounds approve; a
+	// review refusal is om's own (gt-g0w49).
 	for _, round := range []struct {
-		gate   func(string) GateResult
-		kind   RejectionKind
-		header string
+		gate    func(string) GateResult
+		verdict Verdict
+		kind    RejectionKind
+		header  string
 	}{
-		{redGate, RejectGate, "MERGE REJECTION (attempt 1): gate - "},
-		{redGate, RejectGate, "MERGE REJECTION (attempt 2): gate - "},
-		{greenGate, RejectReview, "MERGE REJECTION (attempt 1): review - "},
-		{greenGate, RejectReview, "MERGE REJECTION (attempt 2): review - "},
-		{redGate, RejectGate, "MERGE REJECTION (attempt 3): gate - "},
+		{redGate, approve, RejectGate, "MERGE REJECTION (attempt 1): gate - "},
+		{redGate, approve, RejectGate, "MERGE REJECTION (attempt 2): gate - "},
+		{greenGate, refuse, RejectReview, "MERGE REJECTION (attempt 1): review - "},
+		{greenGate, refuse, RejectReview, "MERGE REJECTION (attempt 2): review - "},
+		{redGate, approve, RejectGate, "MERGE REJECTION (attempt 3): gate - "},
 	} {
 		f.gate.fn = round.gate
+		f.review.fn = func(string) (Verdict, error) { return round.verdict, nil }
 		_, err := l.Land(context.Background(), f.work)
 		var rej *Rejection
 		if !errors.As(err, &rej) || rej.Kind != round.kind || rej.RecordErr != nil {
@@ -1501,13 +1495,25 @@ func TestLandRejectionAfterALegacyRequeueIsTheNextAttempt(t *testing.T) {
 	}
 }
 
-func TestLandRequestChangesRejectsWithFindings(t *testing.T) {
+// TestOMRejectionSkipsTheGate: om judges the merge candidate before it is
+// pushed, so a refusal om decides never spends a gate run (gt-g0w49): the
+// candidate is never pushed, the gate never runs, and the stage line names the
+// CI stage it skipped. Mutation: running the gate first again fails the test,
+// because the gate runs on a candidate om refused.
+func TestOMRejectionSkipsTheGate(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	f.review.fn = func(string) (Verdict, error) {
 		return Verdict{Verdict: VerdictRequestChanges, Score: 0.3, Summary: "b.txt is wrong.", Findings: []Finding{{ID: "abc123", Severity: "major", Path: "b.txt", Line: 1, Title: "wrong"}}}, nil
 	}
-	_, err := f.lander().Land(context.Background(), f.work)
+	var out strings.Builder
+	l := f.lander()
+	l.Candidate = stageCandidate(func(context.Context) CandidateResult {
+		t.Error("the candidate was pushed for a landing om refused")
+		return CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}
+	})
+	l.Out = &out
+	_, err := l.Land(context.Background(), f.work)
 	rej := f.assertRejected(t, err, RejectReview, LabelRework)
 	if !rej.Rework || rej.ReviewSummary != "b.txt is wrong." || rej.ReviewScore != 0.3 || len(rej.Findings) != 1 {
 		t.Errorf("rejection does not carry om's verdict: %+v", rej)
@@ -1515,6 +1521,12 @@ func TestLandRequestChangesRejectsWithFindings(t *testing.T) {
 	notes := f.bead().Notes
 	if !strings.Contains(notes, "- id:abc123 sev:major b.txt:1 — wrong") || !strings.Contains(notes, "Score: 0.3000") {
 		t.Errorf("notes lack the findings:\n%s", notes)
+	}
+	if len(f.gate.dirs) != 0 {
+		t.Errorf("the gate ran on %d tree(s) om refused", len(f.gate.dirs))
+	}
+	if want := "stages: ci skipped (om rejected), om "; !strings.Contains(out.String(), want) {
+		t.Errorf("landing log lacks %q:\n%s", want, out.String())
 	}
 }
 
@@ -1646,43 +1658,74 @@ func TestGateInfraErrorIsNotARejection(t *testing.T) {
 	f2.assertUntouched(t)
 }
 
-// TestLandReviewsOnlyAfterTheGatePasses: the gate's stages run first and om
-// only once they pass, so a red gate never pays for a review (gt-b5ugw).
-func TestLandReviewsOnlyAfterTheGatePasses(t *testing.T) {
+// TestGateFailureAfterOMPassRejectsAsGate: om passes the candidate and the
+// gate then fails it, so the refusal is the gate's — RejectGate with the job
+// log tail — while the om pass stands recorded on the bead at the candidate om
+// reviewed and spends no review round (gt-g0w49).
+func TestGateFailureAfterOMPassRejectsAsGate(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	var order []string
 	f.gate.fn = func(string) GateResult {
-		order = append(order, "gate")
-		return GateResult{Passed: true, Steps: []StepResult{{Name: "lint"}, {Name: "gate"}}}
+		return GateResult{Steps: []StepResult{{Name: StageCI, Command: "ci / gate (push)", ExitCode: 1,
+			Tail: "--- FAIL: TestB\nFAIL\tgithub.com/x/b\n"}}}
 	}
+	reviewed := 0
 	f.review.fn = func(string) (Verdict, error) {
-		order = append(order, "om")
-		return Verdict{Verdict: VerdictApprove}, nil
+		reviewed++
+		return Verdict{Verdict: VerdictApprove, Score: 0.9}, nil
 	}
-	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
-		t.Fatalf("Land: %v", err)
+	_, err := f.lander().Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectGate, LabelRework)
+	if reviewed != 1 {
+		t.Fatalf("om reviews = %d, want the one review before the gate", reviewed)
 	}
-	if !slices.Equal(order, []string{"gate", "om"}) {
-		t.Errorf("order = %v, want the gate then om", order)
+	if notes := f.bead().Notes; !strings.Contains(notes, "FAIL\tgithub.com/x/b") {
+		t.Errorf("rejection note lacks the gate tail:\n%s", notes)
 	}
-
-	red := newLandFixture(t)
-	red.gate.fn = func(string) GateResult {
-		return GateResult{Steps: []StepResult{{Name: "lint", ExitCode: 1}}}
+	// A gate refusal spends no review attempt: the rework's review is round 1
+	// again, whatever the gate block says.
+	if got := CountRejections(f.bead().Notes); got != 0 {
+		t.Errorf("%d review rejection(s) in the notes after a gate refusal, want none", got)
 	}
-	red.review.fn = func(string) (Verdict, error) {
-		t.Error("om ran on a tree that failed lint")
-		return Verdict{Verdict: VerdictApprove}, nil
+	// The approving verdict is on the bead, tied to the candidate commit om
+	// reviewed, even though that commit never landed.
+	comments, err := f.bd.Comments(f.work.BeadID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, err := red.lander().Land(context.Background(), red.work)
-	red.assertRejected(t, err, RejectGate, LabelRework)
+	head := f.review.calls[0][2]
+	if !verdictCommented(comments, verdictCommentHead(head), "om "+VerdictApprove+" ") {
+		t.Errorf("the bead carries no approving verdict for candidate %s; comments: %+v", shortSHA(head), comments)
+	}
 }
 
-// TestLandOverseerReviewedHeadSkipsOM: a bead whose exact head the overseer
-// reviewed lands after the gate without om, recording the overseer's verdict;
-// a review of another head runs om as usual (gt-g8t3m).
-func TestLandOverseerReviewedHeadSkipsOM(t *testing.T) {
+// TestStageLineStaysParseable: the stage line keeps its "stages: <stage>,
+// <stage>" shape on a landing that never reached its candidate gate. The
+// skipped CI stage keeps its name and the decision that ended the landing, and
+// om's time stays its own part, so the dashboard's reader still splits the
+// line into two stages and reads no gate time (gt-g0w49).
+func TestStageLineStaysParseable(t *testing.T) {
+	t.Parallel()
+	line := stageTimesCISkipped(omRejectedStage, 12*time.Second, false)
+	if !strings.HasPrefix(line, "stages: ci skipped (om rejected), om 12s") {
+		t.Fatalf("stageTimesCISkipped = %q, want the skipped CI stage and om's time", line)
+	}
+	stages := strings.TrimPrefix(line, "stages: ")
+	if i := strings.Index(stages, " (load1 "); i >= 0 {
+		stages = stages[:i]
+	}
+	parts := strings.Split(stages, ", ")
+	if len(parts) != 2 || parts[0] != "ci skipped (om rejected)" || parts[1] != "om 12s" {
+		t.Errorf("stage line splits into %q, want two stages: the skipped ci and om", parts)
+	}
+}
+
+// TestOverseerWaiverStillSkipsOMBeforeTheGate: a bead whose exact head the
+// overseer reviewed skips om — read before om runs — lands through the gate
+// it still gets, recording the overseer's verdict, and the stage line says
+// why no om time follows; a review of another head runs om as usual
+// (gt-g8t3m, gt-g0w49).
+func TestOverseerWaiverStillSkipsOMBeforeTheGate(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	if err := f.bd.AppendNotes("gt-abc", OverseerReviewedMarker+" "+f.work.Head); err != nil {
@@ -1700,7 +1743,10 @@ func TestLandOverseerReviewedHeadSkipsOM(t *testing.T) {
 		t.Error("om ran on a head the overseer reviewed")
 		return Verdict{}, errors.New("unreachable")
 	}
-	res, err := f.lander().Land(context.Background(), f.work)
+	var out strings.Builder
+	l := f.lander()
+	l.Out = &out
+	res, err := l.Land(context.Background(), f.work)
 	if err != nil {
 		t.Fatalf("Land: %v", err)
 	}
@@ -1709,6 +1755,9 @@ func TestLandOverseerReviewedHeadSkipsOM(t *testing.T) {
 	}
 	if !strings.HasPrefix(res.Verdict.Verdict, VerdictOverseerPrefix) || f.originMain() != res.LandedCommit {
 		t.Fatalf("verdict %q landed=%v, want overseer:<sha> and a landing", res.Verdict.Verdict, f.originMain() == res.LandedCommit)
+	}
+	if want := "om skipped (overseer-reviewed)"; !strings.Contains(out.String(), want) {
+		t.Errorf("landing log lacks %q:\n%s", want, out.String())
 	}
 
 	other := newLandFixture(t)
