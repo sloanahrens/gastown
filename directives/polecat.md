@@ -167,7 +167,7 @@ Every error or refusal branch in the diff needs a test that drives it.
 - om flags: "failing branch has no assertion", "alarm and refusal branches lack tests".
 - Example: a new error return in internal/cmd with only the success case tested.
 - Before: one test for the success path. After: one table row per refusal, each asserting the error.
-- Before gt done, mutate each new guard yourself: delete its branch or flip its condition, and confirm a test goes red. A guard no test turns red is the commonest reason a head is rejected (56 findings in three days); if no test goes red, write the test.
+- Mutate each new guard yourself before gt done: delete its branch or flip its condition, and confirm a test goes red. A guard no test turns red is the most common reason a head is rejected; if no test goes red, write the test.
 
 ## 4. Untrusted input is not trusted by its prefix or its text
 
