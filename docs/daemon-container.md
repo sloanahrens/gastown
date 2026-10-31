@@ -97,7 +97,12 @@ command refuses: make each with a local clone of the canonical repo's objects
 and never fetches in it) and check out the commit to build. `--om-src` has no
 commit flag: om is built at the checkout's `HEAD`. Observed: in the L1 run the
 running `bd` and `om` commits were not in those clones, so the clones' `HEAD`
-commits were built instead, which is fine for L1.
+commits were built instead. That is a provenance mismatch, and it is not a
+pass. The image's `bd` is stamped with the commit it was built from
+(`main.Commit`), so compare that stamp with the running `bd`'s commit before the
+image is used. `om` has no commit stamp to compare, so record the `om` commit
+the build used (the clone's `HEAD`) and treat it as unverified against the
+running `om`.
 
 Every flag is required. Each path must be absolute and an existing directory;
 `--rev` and `--bd-commit` are 7 or more hex characters. Without `--apply` it
@@ -131,8 +136,9 @@ gt daemon scratch up --live-root <live-town> --root <scratch-root> \
 ```
 
 `render` prints the compose file to stdout and writes nothing. It also prints
-a `gt binary is N commits behind origin/main` warning on stderr when the `gt`
-is not at the tip of `main`; that is not a failure. Expected in it,
+the stale-binary warning on stderr when the `gt` is not at the tip of `main`
+(its wording is `Describe` in `internal/version/stale.go`); that is not a
+failure. Expected in it,
 by the names of the rendered golden `internal/templates/testdata/daemon-compose-scratch.golden.yml`:
 the three services `daemon`, `scratch-dind` and `scratch-dolt`, the container
 name `gt-scratch-daemon-1`, the command `["--scratch-town"]`, a `scratch-dolt`
