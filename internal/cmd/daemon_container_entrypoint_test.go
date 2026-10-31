@@ -1567,6 +1567,9 @@ func TestContainerEntrypointRefusesAForgeCredentialItCannotUse(t *testing.T) {
 		{"an empty host", scratchRig, "", true, forgeTestToken, true, "not a bare host:port"},
 		{"a host with a scheme", scratchRig, "http://scratch-forgejo:3000", true, forgeTestToken, true, "not a bare host:port"},
 		{"a host with no port", scratchRig, "scratch-forgejo", true, forgeTestToken, true, "not a bare host:port"},
+		{"a host beginning with a dash", scratchRig, "-evil:3000", true, forgeTestToken, true, "not a bare host:port"},
+		{"a host with port zero", scratchRig, "scratch-forgejo:0", true, forgeTestToken, true, "not a port"},
+		{"a host with a port above 65535", scratchRig, "scratch-forgejo:99999", true, forgeTestToken, true, "not a port"},
 		{"a relative token file", scratchRig, forgeTestHost, true, "forge-tokens/forgejo-landing.env", true, "absolute path"},
 		{"an empty token file", scratchRig, forgeTestHost, true, "", true, "absolute path"},
 		{"a token file path with a shell metacharacter", scratchRig, forgeTestHost, true, "/towns/$(id)/forgejo-landing.env", true, "absolute path"},
@@ -1625,5 +1628,27 @@ func TestContainerEntrypointReportsAFailedCredentialHelperSetup(t *testing.T) {
 	err := runContainerEntrypoint(e)
 	if err == nil || !strings.Contains(err.Error(), "credential helper") {
 		t.Errorf("error = %v, want one naming the credential helper", err)
+	}
+}
+
+// The helper line is run by git through a shell, so a gt binary path with a
+// space or a metacharacter is refused rather than quoted into the config.
+func TestContainerEntrypointRefusesAGtPathAShellWouldRead(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	r.forgeHost, r.forgeHostSet = forgeTestHost, true
+	r.forgeTokenFile, r.forgeTokenFileSet = forgeTestToken, true
+	e := r.entrypoint()
+	e.self = func() (string, error) { return "/opt/my tools/gt", nil }
+
+	err := runContainerEntrypoint(e)
+
+	if err == nil || !strings.Contains(err.Error(), "path") || !strings.Contains(err.Error(), "shell") {
+		t.Fatalf("error = %v, want a refusal naming the gt path and the shell", err)
+	}
+	for _, c := range r.calls {
+		if strings.Contains(strings.Join(c, " "), "credential") {
+			t.Errorf("a credential helper was set despite the refusal: %v", c)
+		}
 	}
 }

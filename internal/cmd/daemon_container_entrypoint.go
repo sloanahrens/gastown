@@ -676,9 +676,10 @@ func unescapeMountPoint(s string) string {
 // carries no space, quote or shell metacharacter.
 var forgeCredentialPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 
-// forgeCredentialHostRe is a bare host:port: DNS-name characters, a colon and
-// digits.
-var forgeCredentialHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]+:[0-9]{1,5}$`)
+// forgeCredentialHostRe is a bare host:port: DNS-name characters starting with a
+// letter or digit (so a leading dash cannot read as a flag), a colon and the
+// port's digits, which refuseForgeCredential then range-checks.
+var forgeCredentialHostRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*:([0-9]{1,5})$`)
 
 // refuseForgeCredential refuses a --forge-host or --forge-token-file no start
 // could use: one without the other, one without --scratch-town (the live
@@ -698,9 +699,14 @@ func (e containerEntrypoint) refuseForgeCredential() error {
 			config.ForgeHostFlag, config.ScratchTownFlag)
 	}
 	host := strings.TrimSpace(e.forgeHost)
-	if !forgeCredentialHostRe.MatchString(host) {
-		return fmt.Errorf("--%s %q is not a bare host:port (no scheme, path, login or space), so nothing was started",
+	m := forgeCredentialHostRe.FindStringSubmatch(host)
+	if m == nil {
+		return fmt.Errorf("--%s %q is not a bare host:port (no scheme, path, login, space or leading dash), so nothing was started",
 			config.ForgeHostFlag, e.forgeHost)
+	}
+	if port, _ := strconv.Atoi(m[1]); port < 1 || port > 65535 {
+		return fmt.Errorf("--%s %q has port %s, which is not a port (1 to 65535), so nothing was started",
+			config.ForgeHostFlag, e.forgeHost, m[1])
 	}
 	if !forgeCredentialPathRe.MatchString(e.forgeTokenFile) {
 		return fmt.Errorf("--%s %q must be an absolute path of letters, digits, dot, dash, underscore and slash, since git runs the helper line through a shell, so nothing was started",
@@ -718,6 +724,9 @@ func (e containerEntrypoint) refuseForgeCredential() error {
 func (e containerEntrypoint) setForgeCredentialHelper(self string) error {
 	if !e.forgeHostSet {
 		return nil
+	}
+	if !forgeCredentialPathRe.MatchString(self) {
+		return fmt.Errorf("the gt binary's path %q holds a character a shell would read, and git runs the credential helper line through a shell, so nothing was started", self)
 	}
 	host := strings.TrimSpace(e.forgeHost)
 	helper := "!" + self + " " + config.GitCredentialForgejoCommand + " --host " + host + " --token-file " + e.forgeTokenFile

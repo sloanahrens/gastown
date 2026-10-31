@@ -482,6 +482,7 @@ observed](#what-l2-has-not-observed)).
   | forge ssh port | `2322` (`<forge-ssh>`), not the live 2222 |
   | forge directory | `<scratch-parent>/forge`, for the admin token files; never under `<scratch-root>` and never under the live town |
   | token directory | `<scratch-root>/forge-tokens`, where the bots' token files go; the container sees it at the same path |
+  | repo | `scratch-admin/l2rig`, and the rig is named `l2rig` |
 
   The daemon's git pushes (the landing worker's `land/<bead>` candidates) are
   authenticated by `gt git-credential-forgejo`, which the entrypoint sets as the
@@ -490,7 +491,6 @@ observed](#what-l2-has-not-observed)).
   helper reads `<scratch-root>/forge-tokens/forgejo-landing.env` when git asks, so
   the file need not exist at the first start; it refuses a file that group or
   others can read.
-  | repo | `scratch-admin/l2rig`, and the rig is named `l2rig` |
 
 - The two ports are free on the host. Expected: this prints nothing.
 
@@ -700,7 +700,11 @@ review off and the token directory inside the scratch root:
 }
 ```
 
-If the file already has a `patrols` block, add `landing_worker` to it. Restart
+The same directory holds `forgejo-landing.env`, the file the daemon's git
+credential helper reads at push time (see [Before you start
+(L2)](#before-you-start-l2)); the render passes its path as
+`--forge-token-file`. If the file already has a `patrols` block, add
+`landing_worker` to it. Restart
 the scratch daemon so it reads the change, from `<scratch-parent>`:
 
 ```
