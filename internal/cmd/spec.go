@@ -2631,6 +2631,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	}
 	// The tick's bd reads, kept for the tick alone (gt-u8rbh).
 	reads := newSpecTickReads()
+	// The revert beads the tick read, kept for the tick alone so a rig with an
+	// open revert costs it one bd read (gt-kuax8).
+	reverts := newSpecRevertBeads()
 	// The pool's design and notes, kept across the daemon's ticks (gt-l0vlf).
 	details := specDetailCacheFor(townRoot, owner)
 	specDetailCache.Store(details)
@@ -2708,8 +2711,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		RigHold: func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
 			return rigRevertInFlight(townRoot, rig, func(beadID string) bool {
-				reads.call()
-				return revertBeadOpen(townRoot, rig, beadID)
+				return revertBeadOpen(rig, beadID, reads, reverts, func(name string) beads.Client {
+					return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, name)))
+				})
 			})
 		},
 		// The same seat picture `gt daemon dispatch-check` nudges from:
@@ -2941,15 +2945,61 @@ func rigRevertInFlight(townRoot, rig string, beadOpen func(beadID string) bool) 
 }
 
 // revertBeadOpen reports whether the revert bead the state records is still
-// open in the rig's beads. Its complement — closed, missing, or unreadable,
-// the last fail-open like the state read above — is not an open revert.
-func revertBeadOpen(townRoot, rig, beadID string) bool {
-	b := beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
-	is, err := b.Show(beadID)
+// open in the rig's beads, read once per rig and bead in the tick (gt-kuax8).
+// Its complement — closed, missing, or unreadable, the last fail-open like the
+// state read above — is not an open revert.
+func revertBeadOpen(rig, beadID string, reads *specTickReads, reverts *specRevertBeads, storeFor func(rig string) beads.Client) bool {
+	is, err := reverts.show(rig, beadID, func() (*beads.Issue, error) {
+		reads.call()
+		return storeFor(rig).Show(beadID)
+	})
 	if err != nil || is == nil {
 		return false
 	}
 	return revertStatusOpen(is.Status)
+}
+
+// specRevertBeads is one tick's reads of the revert beads its RevertInFlight
+// hook asks about, keyed by rig and bead id so repeated calls in a tick spend
+// one bd read (gt-kuax8). A read that failed is not kept: the next call asks
+// again.
+type specRevertBeads struct {
+	mu     sync.Mutex
+	issues map[specRevertBeadKey]*beads.Issue
+}
+
+// specRevertBeadKey names one revert bead in the rig that holds it.
+type specRevertBeadKey struct {
+	rig    string
+	beadID string
+}
+
+func newSpecRevertBeads() *specRevertBeads {
+	return &specRevertBeads{issues: map[specRevertBeadKey]*beads.Issue{}}
+}
+
+// show returns beadID from the tick's reads, or runs read (one bd call) and
+// keeps what it returned. The lock is not held across the read, which is the
+// slow part.
+func (r *specRevertBeads) show(rig, beadID string, read func() (*beads.Issue, error)) (*beads.Issue, error) {
+	if r == nil {
+		return read()
+	}
+	key := specRevertBeadKey{rig: rig, beadID: beadID}
+	r.mu.Lock()
+	is, ok := r.issues[key]
+	r.mu.Unlock()
+	if ok {
+		return is, nil
+	}
+	is, err := read()
+	if err != nil || is == nil {
+		return is, err
+	}
+	r.mu.Lock()
+	r.issues[key] = is
+	r.mu.Unlock()
+	return is, nil
 }
 
 // revertStatusOpen reports whether a revert bead's status still counts as an
