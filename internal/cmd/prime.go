@@ -209,15 +209,20 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	// runtimes that have short hook timeouts (Gemini CLI).
 	staticDelivered := primeStaticTextDelivered()
 	compactResume := useCompactResumePath(primeHookSource, primeHandoffReason, staticDelivered)
-	if compactResume {
-		return runPrimeCompactResume(ctx)
-	}
 
 	// A crew clone falls behind origin/main quietly as other sessions land
 	// work, so the normal path prints the one line while the session still
-	// has time to act on it (gt-5dh3y).
-	if freshness := primeFreshnessAtStart(ctx, compactResume, primeFreshRun); freshness != "" {
+	// has time to act on it (gt-5dh3y). The decision that a compact resume
+	// and a dry run stay off the network lives in primeFreshnessAtStart, so
+	// this call is the only place that says when the check runs.
+	freshness, freshFailed := primeFreshnessAtStart(ctx, compactResume, primeDryRun, primeFreshRun)
+	if compactResume {
+		return runPrimeCompactResume(ctx)
+	}
+	if freshness != "" {
 		fmt.Println(freshness)
+	} else if freshFailed {
+		fmt.Println(primeFreshFailedLine)
 	}
 
 	primeContinuationMode = primeHookSource == "compact" || primeHandoffReason == "compaction"
