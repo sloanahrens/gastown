@@ -151,20 +151,21 @@ func scrubCookieHeaders(text string) (string, int) {
 	n := 0
 	out := cookieHeader.ReplaceAllStringFunc(text, func(m string) string {
 		sm := cookieHeader.FindStringSubmatch(m)
-		value, k := scrubCookieValue(sm[3])
+		value, k := scrubCookieValue(sm[3], strings.EqualFold(sm[1], "set-cookie"))
 		n += k
 		return sm[1] + sm[2] + value
 	})
 	return out, n
 }
 
-// scrubCookieValue replaces the value of every cookie in a header value and
-// keeps a Set-Cookie attribute, which is not a secret.
-func scrubCookieValue(value string) (string, int) {
+// scrubCookieValue replaces the value of every cookie in a header value. In a
+// Set-Cookie header it keeps an attribute, which is not a secret; a Cookie
+// request header holds only cookies, so a cookie named Path is still one.
+func scrubCookieValue(value string, setCookie bool) (string, int) {
 	n := 0
 	out := cookiePair.ReplaceAllStringFunc(value, func(m string) string {
 		sm := cookiePair.FindStringSubmatch(m)
-		if sm[2] == "" || cookieAttributes[strings.ToLower(sm[1])] {
+		if sm[2] == "" || (setCookie && cookieAttributes[strings.ToLower(sm[1])]) {
 			return m
 		}
 		n++
@@ -287,6 +288,12 @@ func scrubAssignments(text string) (string, int) {
 			last = end
 			continue
 		}
+		if end := quotedMarkerValue(text, last); end > last {
+			// A quoted value that holds an earlier rule's marker keeps it whole.
+			b.WriteString(text[last:end])
+			last = end
+			continue
+		}
 		end, quoted := assignmentValue(text, last)
 		if end <= last {
 			continue
@@ -305,17 +312,32 @@ func scrubAssignments(text string) (string, int) {
 	return b.String(), n
 }
 
+// markerPattern matches one complete marker: a lower-case rule name between the
+// prefix and the closing bracket, with nothing else in between.
+var markerPattern = regexp.MustCompile(`^\[REDACTED:[a-z-]+\]`)
+
 // markerValue returns the end of the [REDACTED:rule] marker at pos, and pos
 // when no complete marker starts there.
 func markerValue(text string, pos int) int {
-	if !strings.HasPrefix(text[pos:], "[REDACTED:") {
+	m := markerPattern.FindStringIndex(text[pos:])
+	if m == nil {
 		return pos
 	}
-	i := strings.IndexByte(text[pos:], ']')
-	if i < 0 {
+	return pos + m[1]
+}
+
+// quotedMarkerValue returns the end of a quoted value at pos that holds exactly
+// one marker, and pos when the value is not a quoted marker. The earlier rule's
+// marker stays whole, so the assignment rule does not write a second one.
+func quotedMarkerValue(text string, pos int) int {
+	if pos >= len(text) || (text[pos] != '"' && text[pos] != '\'') {
 		return pos
 	}
-	return pos + i + 1
+	inner := markerValue(text, pos+1)
+	if inner == pos+1 || inner >= len(text) || text[inner] != text[pos] {
+		return pos
+	}
+	return inner + 1
 }
 
 // assignmentValue returns the end of the value that starts at pos and whether
