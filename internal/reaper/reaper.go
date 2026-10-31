@@ -93,6 +93,17 @@ type PurgeResult struct {
 	MailPurged  int       `json:"mail_purged"`
 	DryRun      bool      `json:"dry_run,omitempty"`
 	Anomalies   []Anomaly `json:"anomalies,omitempty"`
+	// FailedChunks names each bd delete chunk that failed, so a purge that
+	// deleted part of its set reports the part it could not (gt-2wesb).
+	FailedChunks []PurgeChunkFailure `json:"failed_chunks,omitempty"`
+}
+
+// PurgeChunkFailure is one bd delete chunk that failed: the ids it covered and
+// bd's error. bd deletes a chunk all or nothing, so none of it was deleted.
+type PurgeChunkFailure struct {
+	FirstID string `json:"first_id"`
+	LastID  string `json:"last_id"`
+	Error   string `json:"error"`
 }
 
 // ClosedEntry records an individual issue closure with details for logging.
@@ -848,6 +859,10 @@ func selectIDs(ctx context.Context, db *beadsql.DB, query string, args ...interf
 // Purge deletes old closed wisps and mail from a database. Candidates are
 // selected with read-only SQL on db; every delete goes through w
 // (bd delete --force), which may be nil only for a dry run.
+//
+// A purge that fails part way still returns its result: the counts are what
+// was deleted and FailedChunks names each chunk bd refused, so a caller can
+// report the partial purge instead of a silent zero (gt-2wesb).
 func Purge(db *beadsql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time.Duration, dryRun bool) (*PurgeResult, error) {
 	if !dryRun && w == nil {
 		return nil, ErrNoWriter
@@ -855,24 +870,26 @@ func Purge(db *beadsql.DB, w Writer, dbName string, purgeAge, mailDeleteAge time
 	result := &PurgeResult{Database: dbName, DryRun: dryRun}
 
 	// Purge closed wisps.
-	purged, anomalies, err := purgeClosedWisps(db, w, purgeAge, dryRun)
-	if err != nil {
-		return nil, fmt.Errorf("purge wisps: %w", err)
-	}
+	purged, anomalies, failed, err := purgeClosedWisps(db, w, purgeAge, dryRun)
 	result.WispsPurged = purged
 	result.Anomalies = append(result.Anomalies, anomalies...)
+	result.FailedChunks = append(result.FailedChunks, failed...)
+	if err != nil {
+		return result, fmt.Errorf("purge wisps: %w", err)
+	}
 
 	// Purge old mail.
-	mailPurged, err := purgeOldMail(db, w, dbName, mailDeleteAge, dryRun)
+	mailPurged, failed, err := purgeOldMail(db, w, dbName, mailDeleteAge, dryRun)
+	result.MailPurged = mailPurged
+	result.FailedChunks = append(result.FailedChunks, failed...)
 	if err != nil {
 		return result, fmt.Errorf("purge mail: %w", err)
 	}
-	result.MailPurged = mailPurged
 
 	return result, nil
 }
 
-func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun bool) (int, []Anomaly, error) {
+func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun bool) (int, []Anomaly, []PurgeChunkFailure, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -885,7 +902,7 @@ func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun b
 	// these, so without this the same sweep deletes what the reap just protected.
 	referencedIDs, err := liveAgentReferencedWispIDs(ctx, db)
 	if err != nil {
-		return 0, nil, fmt.Errorf("compute live agent referenced ids: %w", err)
+		return 0, nil, nil, fmt.Errorf("compute live agent referenced ids: %w", err)
 	}
 	referencedClause, referencedArgs := wispExcludeClause(referencedIDs)
 
@@ -899,7 +916,7 @@ func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun b
 	digestArgs := append([]interface{}{deleteCutoff}, referencedArgs...)
 	rows, err := db.QueryContext(ctx, digestQuery, digestArgs...)
 	if err != nil {
-		return 0, nil, fmt.Errorf("digest query: %w", err)
+		return 0, nil, nil, fmt.Errorf("digest query: %w", err)
 	}
 	digestTotal := 0
 	for rows.Next() {
@@ -907,18 +924,18 @@ func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun b
 		var cnt int
 		if err := rows.Scan(&wtype, &cnt); err != nil {
 			rows.Close()
-			return 0, nil, fmt.Errorf("digest scan: %w", err)
+			return 0, nil, nil, fmt.Errorf("digest scan: %w", err)
 		}
 		digestTotal += cnt
 	}
 	rows.Close()
 
 	if digestTotal == 0 {
-		return 0, anomalies, nil
+		return 0, anomalies, nil, nil
 	}
 
 	if dryRun {
-		return digestTotal, anomalies, nil
+		return digestTotal, anomalies, nil, nil
 	}
 
 	// Status+age filter, plus the live-reference exclusion above.
@@ -927,16 +944,16 @@ func purgeClosedWisps(db *beadsql.DB, w Writer, purgeAge time.Duration, dryRun b
 		referencedClause) //nolint:gosec // G201: referencedClause is a parameterized NOT IN clause, never a value
 	ids, err := selectIDs(ctx, db, idQuery, digestArgs...)
 	if err != nil {
-		return 0, anomalies, fmt.Errorf("select closed wisps: %w", err)
+		return 0, anomalies, nil, fmt.Errorf("select closed wisps: %w", err)
 	}
-	totalDeleted, err := deleteInChunks(w, ids)
+	totalDeleted, failed, err := deleteInChunks(w, ids)
 	if err != nil {
-		return totalDeleted, anomalies, fmt.Errorf("delete closed wisps: %w", err)
+		return totalDeleted, anomalies, failed, fmt.Errorf("delete closed wisps: %w", err)
 	}
-	return totalDeleted, anomalies, nil
+	return totalDeleted, anomalies, nil, nil
 }
 
-func purgeOldMail(db *beadsql.DB, w Writer, dbName string, mailDeleteAge time.Duration, dryRun bool) (int, error) {
+func purgeOldMail(db *beadsql.DB, w Writer, dbName string, mailDeleteAge time.Duration, dryRun bool) (int, []PurgeChunkFailure, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -948,16 +965,16 @@ func purgeOldMail(db *beadsql.DB, w Writer, dbName string, mailDeleteAge time.Du
 	var count int
 	if err := db.QueryRowContext(ctx, countQuery, mailCutoff).Scan(&count); err != nil {
 		if isTableNotFound(err) {
-			return 0, nil // issues/labels not on this server
+			return 0, nil, nil // issues/labels not on this server
 		}
-		return 0, fmt.Errorf("count mail: %w", err)
+		return 0, nil, fmt.Errorf("count mail: %w", err)
 	}
 	if count == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	if dryRun {
-		return count, nil
+		return count, nil, nil
 	}
 
 	idQuery := fmt.Sprintf(
@@ -965,13 +982,13 @@ func purgeOldMail(db *beadsql.DB, w Writer, dbName string, mailDeleteAge time.Du
 		dbName, dbName)
 	ids, err := selectIDs(ctx, db, idQuery, mailCutoff)
 	if err != nil {
-		return 0, fmt.Errorf("select mail: %w", err)
+		return 0, nil, fmt.Errorf("select mail: %w", err)
 	}
-	totalDeleted, err := deleteInChunks(w, ids)
+	totalDeleted, failed, err := deleteInChunks(w, ids)
 	if err != nil {
-		return totalDeleted, fmt.Errorf("delete mail: %w", err)
+		return totalDeleted, failed, fmt.Errorf("delete mail: %w", err)
 	}
-	return totalDeleted, nil
+	return totalDeleted, nil, nil
 }
 
 // staleIssueEligibilityClause is the single definition of which open issues

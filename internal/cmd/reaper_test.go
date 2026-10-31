@@ -645,3 +645,74 @@ func TestReaperAutoCloseCommandRefusesAnUnreadableConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestReaperPurgeExitsNonZeroOnFailedChunk: a purge that deleted one chunk and
+// failed the next prints the count it deleted and the failed chunk, then
+// returns an error so the process exits non-zero instead of hiding the
+// failure behind a zero exit (gt-2wesb).
+//
+//testpolicy:allow parallel — the command reads package flag variables and writes the process stdout/stderr, all swapped below
+func TestReaperPurgeExitsNonZeroOnFailedChunk(t *testing.T) {
+	prevDB, prevJSON, prevDryRun := reaperDB, reaperJSON, reaperDryRun
+	prevPurge := reaperPurgeDatabase
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the flag variables swapped below
+		reaperDB, reaperJSON, reaperDryRun = prevDB, prevJSON, prevDryRun
+		//testpolicy:allow no-global-swap — restores the purge seam swapped below
+		reaperPurgeDatabase = prevPurge
+	})
+	//testpolicy:allow no-global-swap — RunE reads the --db, --json and --dry-run flag variables; they are not arguments
+	reaperDB, reaperJSON, reaperDryRun = "testdb", false, false
+	//testpolicy:allow no-global-swap — RunE calls the purge seam; a Dolt server is not available to the test
+	reaperPurgeDatabase = func(dbName string, _, _ time.Duration) (*reaper.PurgeResult, error) {
+		return &reaper.PurgeResult{
+			Database:     dbName,
+			WispsPurged:  3,
+			FailedChunks: []reaper.PurgeChunkFailure{{FirstID: "w-200", LastID: "w-299", Error: "bd delete: w-250 is still referenced"}},
+		}, errors.New("purge wisps: delete closed wisps: bd delete refused")
+	}
+
+	stdoutPath := filepath.Join(t.TempDir(), "stdout")
+	stderrPath := filepath.Join(t.TempDir(), "stderr")
+	stdoutFile, err := os.Create(stdoutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedStdout, savedStderr := os.Stdout, os.Stderr
+	//testpolicy:allow no-global-swap — RunE writes the counts with fmt.Printf to os.Stdout and the failures to os.Stderr; neither is an argument
+	os.Stdout, os.Stderr = stdoutFile, stderrFile
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores os.Stdout and os.Stderr swapped above
+		os.Stdout, os.Stderr = savedStdout, savedStderr
+	})
+
+	runErr := reaperPurgeCmd.RunE(reaperPurgeCmd, nil)
+	if cerr := stdoutFile.Close(); cerr != nil {
+		t.Fatal(cerr)
+	}
+	if cerr := stderrFile.Close(); cerr != nil {
+		t.Fatal(cerr)
+	}
+
+	if runErr == nil {
+		t.Fatal("gt reaper purge with a failed chunk = nil error, want the command to exit non-zero")
+	}
+	stdout, err := os.ReadFile(stdoutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stdout), "purged 3 wisps, 0 mail") {
+		t.Errorf("stdout = %q, want the count the purge did delete", stdout)
+	}
+	if !strings.Contains(string(stderr), "w-200..w-299") || !strings.Contains(string(stderr), "is still referenced") {
+		t.Errorf("stderr = %q, want the failed chunk's id range and error", stderr)
+	}
+}

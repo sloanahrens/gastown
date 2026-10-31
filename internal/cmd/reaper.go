@@ -814,65 +814,51 @@ Returns counts of purged rows. Use --dry-run to preview.`,
 
 		databases := reaperDatabaseNames()
 
-		var results []*reaper.PurgeResult
+		var outcomes []reaperPurgeOutcome
 		for i, dbName := range databases {
 			if err := waitBeforeReaperDatabase(clockwork.NewRealClock(), i, reaperDBDelay); err != nil {
 				return err
 			}
-			if err := reaper.ValidateDBName(dbName); err != nil {
-				fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
-				continue
-			}
+			result, err := reaperPurgeDatabase(dbName, purgeAge, mailAge)
+			outcomes = append(outcomes, reaperPurgeOutcome{db: dbName, result: result, err: err})
+		}
 
-			db, err := reaper.OpenDB(reaperUserInfo(), reaperHost, reaperPort, dbName, 30*time.Second, 30*time.Second)
-			if err != nil {
-				if errors.Is(err, beadsql.ErrNotBeads) {
-					continue
-				}
-				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
-				continue
+		var results []*reaper.PurgeResult
+		for _, o := range outcomes {
+			if o.result != nil {
+				results = append(results, o.result)
 			}
-
-			if ok, err := reaper.HasReaperSchema(db); err != nil {
-				fmt.Fprintf(os.Stderr, "%s: schema check error: %v\n", dbName, err)
-				db.Close()
-				continue
-			} else if !ok {
-				db.Close()
-				continue
-			}
-
-			w, err := reaperWriter(dbName)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s: %v\n", dbName, err)
-				db.Close()
-				continue
-			}
-			result, err := reaper.Purge(db, w, dbName, purgeAge, mailAge, reaperDryRun)
-			db.Close()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s: purge error: %v\n", dbName, err)
-				continue
-			}
-			results = append(results, result)
 		}
 
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(results))
 		} else {
 			var totalWisps, totalMail int
-			for _, r := range results {
-				prefix := ""
-				if r.DryRun {
-					prefix = "[DRY RUN] would "
+			for _, o := range outcomes {
+				if r := o.result; r != nil {
+					prefix := ""
+					if r.DryRun {
+						prefix = "[DRY RUN] would "
+					}
+					fmt.Printf("%s: %spurged %d wisps, %d mail\n",
+						r.Database, prefix, r.WispsPurged, r.MailPurged)
+					for _, a := range r.Anomalies {
+						fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+					}
+					totalWisps += r.WispsPurged
+					totalMail += r.MailPurged
 				}
-				fmt.Printf("%s: %spurged %d wisps, %d mail\n",
-					r.Database, prefix, r.WispsPurged, r.MailPurged)
-				for _, a := range r.Anomalies {
-					fmt.Printf("  %s %s\n", style.Warning.Render("ANOMALY:"), a.Message)
+				if o.err != nil {
+					// The count above is what this database did delete; the
+					// failures follow it, so a partial purge names both (gt-2wesb).
+					fmt.Fprintf(os.Stderr, "%s: purge error: %v\n", o.db, o.err)
+					if o.result != nil {
+						for _, c := range o.result.FailedChunks {
+							fmt.Fprintf(os.Stderr, "%s: failed chunk %s..%s: %s\n",
+								o.db, c.FirstID, c.LastID, c.Error)
+						}
+					}
 				}
-				totalWisps += r.WispsPurged
-				totalMail += r.MailPurged
 			}
 			if len(results) > 1 {
 				prefix := ""
@@ -883,8 +869,63 @@ Returns counts of purged rows. Use --dry-run to preview.`,
 					prefix, len(results), totalWisps, totalMail)
 			}
 		}
-		return nil
+
+		var purgeErrs []error
+		for _, o := range outcomes {
+			if o.err != nil {
+				purgeErrs = append(purgeErrs, fmt.Errorf("%s: %w", o.db, o.err))
+			}
+		}
+		return errors.Join(purgeErrs...)
 	},
+}
+
+// reaperPurgeOutcome is one database's purge for `gt reaper purge`: the result
+// to report (nil when the database is not a purge target) and the error that
+// must fail the command.
+type reaperPurgeOutcome struct {
+	db     string
+	result *reaper.PurgeResult
+	err    error
+}
+
+// reaperPurgeDatabase purges one database for `gt reaper purge`. It returns the
+// result even when the purge failed, so the command reports the deletion it did
+// make before exiting non-zero. A variable so the command's reporting can be
+// driven without a Dolt server.
+var reaperPurgeDatabase = purgeReaperDatabase
+
+// purgeReaperDatabase validates, opens and purges one database, returning no
+// result and no error for a database that is not a purge target.
+func purgeReaperDatabase(dbName string, purgeAge, mailAge time.Duration) (*reaper.PurgeResult, error) {
+	if err := reaper.ValidateDBName(dbName); err != nil {
+		fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
+		return nil, nil
+	}
+
+	db, err := reaper.OpenDB(reaperUserInfo(), reaperHost, reaperPort, dbName, 30*time.Second, 30*time.Second)
+	if err != nil {
+		if errors.Is(err, beadsql.ErrNotBeads) {
+			return nil, nil
+		}
+		fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
+		return nil, nil
+	}
+	defer db.Close()
+
+	if ok, err := reaper.HasReaperSchema(db); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: schema check error: %v\n", dbName, err)
+		return nil, nil
+	} else if !ok {
+		return nil, nil
+	}
+
+	w, err := reaperWriter(dbName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", dbName, err)
+		return nil, nil
+	}
+	return reaper.Purge(db, w, dbName, purgeAge, mailAge, reaperDryRun)
 }
 
 var reaperAutoCloseCmd = &cobra.Command{

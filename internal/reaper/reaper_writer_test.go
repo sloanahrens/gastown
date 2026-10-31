@@ -2,6 +2,7 @@ package reaper
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"regexp"
@@ -28,6 +29,9 @@ type fakeReaperWriter struct {
 	// refuse names ids bd refuses to close; a batch containing one reports a
 	// *beads.PartialCloseError, as bd's partial exit does.
 	refuse map[string]bool
+	// failDelete names ids whose delete chunk bd refuses. bd deletes a chunk
+	// all or nothing, so a chunk holding one deletes nothing.
+	failDelete map[string]bool
 }
 
 func (s *fakeReaperState) writer() *fakeReaperWriter {
@@ -75,6 +79,11 @@ func (w *fakeReaperWriter) DeleteIssues(ids ...string) error {
 	w.state.mu.Lock()
 	defer w.state.mu.Unlock()
 	w.calls = append(w.calls, writerCall{verb: "delete", ids: append([]string(nil), ids...)})
+	for _, id := range ids {
+		if w.failDelete[id] {
+			return fmt.Errorf("bd delete: %s is still referenced", id)
+		}
+	}
 	for _, id := range ids {
 		delete(w.state.wisps, id)
 	}
@@ -242,6 +251,90 @@ func TestPurgeDeletesThroughBd(t *testing.T) {
 	}
 	if got := idsOf(w.callsOf("delete")); !reflect.DeepEqual(got, []string{"done-a", "done-b"}) {
 		t.Errorf("deleted %v, want [done-a done-b]", got)
+	}
+}
+
+// chunkWriter records the delete batches it receives and fails the batch that
+// holds an id in failOn, as bd refuses a chunk all or nothing.
+type chunkWriter struct {
+	failOn  map[string]bool
+	batches [][]string
+}
+
+func (w *chunkWriter) CloseWithReason(string, ...string) error      { return nil }
+func (w *chunkWriter) ForceCloseWithReason(string, ...string) error { return nil }
+
+func (w *chunkWriter) DeleteIssues(ids ...string) error {
+	w.batches = append(w.batches, append([]string(nil), ids...))
+	for _, id := range ids {
+		if w.failOn[id] {
+			return fmt.Errorf("bd delete: %s refused", id)
+		}
+	}
+	return nil
+}
+
+// TestDeleteInChunks: a failed chunk keeps the count of the chunks that did
+// delete, names the failed chunk's id range and error, and returns the joined
+// error (gt-2wesb).
+func TestDeleteInChunks(t *testing.T) {
+	t.Parallel()
+	ids := make([]string, DefaultBatchSize*2+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("w-%03d", i)
+	}
+	w := &chunkWriter{failOn: map[string]bool{ids[DefaultBatchSize]: true}}
+
+	deleted, failed, err := deleteInChunks(w, ids)
+	if err == nil {
+		t.Fatal("deleteInChunks with a failed chunk = nil error, want the chunk's failure")
+	}
+	if want := DefaultBatchSize + 1; deleted != want {
+		t.Errorf("deleted = %d, want %d (chunks one and three)", deleted, want)
+	}
+	if len(failed) != 1 {
+		t.Fatalf("failed chunks = %+v, want one", failed)
+	}
+	failedChunk := failed[0]
+	if failedChunk.FirstID != ids[DefaultBatchSize] || failedChunk.LastID != ids[2*DefaultBatchSize-1] {
+		t.Errorf("failed chunk = %s..%s, want %s..%s",
+			failedChunk.FirstID, failedChunk.LastID, ids[DefaultBatchSize], ids[2*DefaultBatchSize-1])
+	}
+	if !strings.Contains(failedChunk.Error, "refused") {
+		t.Errorf("failed chunk error = %q, want the bd error text", failedChunk.Error)
+	}
+}
+
+// TestPurgeKeepsPartialCountOnFailure: a purge whose second delete chunk fails
+// returns the count the first chunk deleted together with the error, so the
+// caller reports a partial purge rather than nothing (gt-2wesb).
+func TestPurgeKeepsPartialCountOnFailure(t *testing.T) {
+	t.Parallel()
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	ids := make([]string, DefaultBatchSize+1)
+	wisps := make(map[string]*fakeWisp, len(ids))
+	for i := range ids {
+		ids[i] = fmt.Sprintf("done-%03d", i)
+		wisps[ids[i]] = &fakeWisp{id: ids[i], status: "closed", issueType: "task", createdAt: old, closedAt: old}
+	}
+	state := &fakeReaperState{wisps: wisps, ops: map[int][]string{}}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+	w := state.writer()
+	w.failDelete = map[string]bool{ids[DefaultBatchSize]: true}
+
+	res, err := Purge(db, w, "testdb", 7*24*time.Hour, 7*24*time.Hour, false)
+	if err == nil {
+		t.Fatal("Purge with a failed chunk = nil error, want the failure")
+	}
+	if res == nil {
+		t.Fatal("Purge with a failed chunk returned no result, want what it did delete")
+	}
+	if res.WispsPurged != DefaultBatchSize {
+		t.Errorf("WispsPurged = %d, want %d", res.WispsPurged, DefaultBatchSize)
+	}
+	if len(res.FailedChunks) != 1 || res.FailedChunks[0].FirstID != ids[DefaultBatchSize] {
+		t.Errorf("FailedChunks = %+v, want the chunk starting at %s", res.FailedChunks, ids[DefaultBatchSize])
 	}
 }
 
