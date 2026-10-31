@@ -420,7 +420,7 @@ func TestTheLandingsPaneDrawsThePolecatTimeColumn(t *testing.T) {
 // reads bird rather than a dash, which would read as missing data, and its
 // tooltip says there is no polecat time (gt-kmp7c, gt-rxs7w). A polecat's
 // landing with no reading keeps the dash.
-func TestTheLandingsPaneReadsCrewInThePolecatCellOfACrewBranchRow(t *testing.T) {
+func TestTheLandingsPaneReadsBirdInThePolecatCellOfACrewBranchRow(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 29, 14, 0, 0, 0, time.Local)

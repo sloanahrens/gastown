@@ -1495,7 +1495,7 @@ function landingTable(s, names, rows, waiting) {
     const pc = el("td", "n", r.crew ? "bird" : polecatDur(r.polecat_secs, r.polecat_lower_bound, r.polecat_upper_bound));
     const pa = r.polecat_attempts || [];
     if (r.crew) pc.title = "bird or crew branch: no polecat time exists";
-    else if (pa.length) pc.title = pa.length +(pa.length === 1 ? " attempt: " : " attempts: ") + pa.map(a => a.secs > 0 ? polecatDur(a.secs, a.lower_bound, a.upper_bound) : "open").join(" + ");
+    else if (pa.length) pc.title = pa.length + (pa.length === 1 ? " attempt: " : " attempts: ") + pa.map(a => a.secs > 0 ? polecatDur(a.secs, a.lower_bound, a.upper_bound) : "open").join(" + ");
     tr.append(pc);
     tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
     tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
