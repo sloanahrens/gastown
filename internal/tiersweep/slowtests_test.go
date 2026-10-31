@@ -90,12 +90,14 @@ func readKind(t *testing.T, path, kind string) []TestTiming {
 	return got
 }
 
-// TestIntegrationRunsWithJSON: the integration run of a host-side package reads
-// go test's -json stream, and the container list and the race run do not, since
-// their logs and their times are not the host sweep's timings.
+// TestIntegrationRunsWithJSON: the integration run of a host-side package, the
+// root's and a nested module's, reads go test's -json stream, and the container
+// list and the race run do not, since their logs and their times are not the
+// host sweep's timings.
 func TestIntegrationRunsWithJSON(t *testing.T) {
 	t.Parallel()
 	repo := baseRepo()
+	setTracker(repo)
 	oneTagged(repo)
 	repo.files[dockerList] = "internal/beads\n"
 	fake := &fakeTier{}
@@ -107,6 +109,10 @@ func TestIntegrationRunsWithJSON(t *testing.T) {
 	root := goTestCall(t, fake, ".", "./r")
 	if got := jsonFlags(root); got != 1 {
 		t.Errorf("integration argv %v has -json %d times, want once", root, got)
+	}
+	module := goTestCall(t, fake, "tracker", "./store/pgtest")
+	if got := jsonFlags(module); got != 1 {
+		t.Errorf("nested module argv %v has -json %d times, want once", module, got)
 	}
 	docker := goTestCall(t, fake, ".", "./internal/beads")
 	if got := jsonFlags(docker); got != 0 {
@@ -233,13 +239,13 @@ func TestBrokenStreamFailsThePackage(t *testing.T) {
 	t.Parallel()
 	const pkg = "./internal/broken"
 	stderr := &bytes.Buffer{}
-	exec := func(_ string, _ []string, _ []string, out io.Writer) int {
-		if pw, ok := out.(*io.PipeWriter); ok {
-			pw.CloseWithError(errors.New("copy from the child failed"))
-		}
-		return 0
+	exec := func(_ string, _ []string, _ []string, _ io.Writer) int { return 0 }
+	stream := func() (io.ReadCloser, io.WriteCloser) {
+		pr, pw := io.Pipe()
+		_ = pw.CloseWithError(errors.New("copy from the child failed"))
+		return pr, pw
 	}
-	r := &Runner{Exec: exec, LogDir: t.TempDir(), Timeout: "7m", Stderr: stderr, JSON: true}
+	r := &Runner{Exec: exec, LogDir: t.TempDir(), Timeout: "7m", Stderr: stderr, JSON: true, Stream: stream}
 	counts := r.Tier(TierIntegration, ".", nil, nil, []string{pkg})
 
 	if want := (Counts{Failed: 1, FailedNames: []string{pkg}}); !reflect.DeepEqual(counts, want) {
@@ -248,6 +254,37 @@ func TestBrokenStreamFailsThePackage(t *testing.T) {
 	logLine := "    log " + filepath.Join(r.LogDir, LogName(TierIntegration, pkg))
 	if !strings.Contains(stderr.String(), logLine) {
 		t.Errorf("stderr = %q, want it to name %q", stderr, logLine)
+	}
+}
+
+// unreadable is the read half of a stream whose capture has given up: every
+// read fails while the write half stays open, and close is the pipe's.
+type unreadable struct{ *io.PipeReader }
+
+func (unreadable) Read([]byte) (int, error) { return 0, errors.New("copy from the child failed") }
+
+// TestCaptureFailureReleasesTheCommand: when a -json capture gives up, a command
+// still writing gets its write refused, so the package ends rather than hanging
+// on a pipe nothing reads.
+func TestCaptureFailureReleasesTheCommand(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/stuck"
+	wrote := make(chan error, 1)
+	exec := func(_ string, _ []string, _ []string, out io.Writer) int {
+		_, err := out.Write([]byte("{\"Action\":\"output\"}\n"))
+		wrote <- err
+		return 0
+	}
+	stream := func() (io.ReadCloser, io.WriteCloser) {
+		pr, pw := io.Pipe()
+		return unreadable{pr}, pw
+	}
+	r := &Runner{Exec: exec, LogDir: t.TempDir(), Timeout: "7m", Stderr: &bytes.Buffer{}, JSON: true, Stream: stream}
+	finished := make(chan Counts, 1)
+	go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, []string{pkg}) }()
+	waitOrFail(t, finished, "the package to finish: its command blocked writing a stream nothing reads")
+	if err := waitOrFail(t, wrote, "the command's write to return"); err == nil {
+		t.Error("the command's write into the abandoned stream succeeded, want an error")
 	}
 }
 
