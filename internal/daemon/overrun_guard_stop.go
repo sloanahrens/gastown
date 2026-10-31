@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -38,7 +40,9 @@ const (
 //     else, the gt-fojqs ordering: a live seat must not stay parked), then
 //     remove its sandbox, pushing the commits first: a refused push keeps the
 //     sandbox and holds the stop with the seat still paused, the next tick
-//     trying again;
+//     trying again; a sandbox record that does not parse keeps the sandbox and
+//     the stop goes on to hand the bead back with a note, the seat left paused
+//     (step 6 is skipped);
 //  3. checkpoint the worktree;
 //  4. push the kept branch to origin; a failed push is retried every tick,
 //     and the hand-back waits for it, so its comment never names a branch that
@@ -248,14 +252,24 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	}
 
 	// 2b. Remove the sandbox a sandboxed seat ran in, pushing its commits first.
-	// The session manager's stop did this on the kill until gt-6mlik.4 moved the
-	// kill to the supervisor, which does not. It runs after the resumed-stop
-	// check above, so a seat taken back is never swept. A refused push keeps the
-	// sandbox and its record, and the stop waits here with the pause still held,
-	// so nothing restarts the seat while its commits are unpushed. A host seat
-	// has no record and this does nothing.
+	// It runs after the resumed-stop check above, so a seat taken back is never
+	// swept. A refused push keeps the sandbox and its record, and the stop waits
+	// here with the pause still held, so nothing restarts the seat while its
+	// commits are unpushed. A record that does not parse cannot say whether the
+	// seat ran in a sandbox, and no retry changes the file: the sandbox is left
+	// as it is, and the stop goes on to hand the bead back with a note, the
+	// seat left paused (sandboxKept). A host seat has no record and this does
+	// nothing; a seat on a rig the registry does not list is found by its
+	// record's rig and polecat, and a lookup that cannot tell holds the stop.
+	sandboxKept := false
 	if s.removeSandbox != nil {
-		if err := s.removeSandbox(seat); err != nil {
+		err := s.removeSandbox(seat)
+		switch {
+		case err == nil:
+		case errors.Is(err, errSandboxRecordCorrupt):
+			sandboxKept = true
+			d.logger.Printf("overrun_guard: WARNING: stop %s on %s: sandbox record unreadable, sandbox kept; handing the bead back with a note: %v", who, st.Bead, err)
+		default:
 			d.logger.Printf("overrun_guard: stop %s on %s waits, sandbox kept: %v", who, st.Bead, err)
 			return
 		}
@@ -361,10 +375,14 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// tick: failing open here would leave the handed-back bead unpoliced.
 	handed := seat
 	handed.Bead, handed.Branch = st.Bead, branch
-	if !st.CheckpointGaveUp && !st.PushGaveUp {
+	if !st.CheckpointGaveUp && !st.PushGaveUp && !sandboxKept {
 		handed.ReworkSHA = st.ReworkSHA
 	}
 	var notes []string
+	if sandboxKept {
+		notes = append(notes, fmt.Sprintf("The seat's sandbox could not be removed: its record is unreadable, so it may hold commits that were never pushed. "+
+			"The sandbox is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.", who))
+	}
 	if st.CheckpointGaveUp {
 		notes = append(notes, fmt.Sprintf("The worktree could not be checkpointed after %d attempts and may hold uncommitted work; "+
 			"it is left as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
@@ -430,9 +448,10 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			d.logger.Printf("overrun_guard: WARNING: %s: span not closed for %s: %v", who, st.Bead, err)
 		}
 	}
-	if st.CheckpointGaveUp || st.PushGaveUp {
+	if st.CheckpointGaveUp || st.PushGaveUp || sandboxKept {
 		// 6 is skipped: the park is what keeps the name, and the worktree
-		// under it, from taking new work while it holds state origin lacks.
+		// under it, from taking new work while it holds state origin lacks
+		// (or, for a kept sandbox, while its commits are unknown).
 		st.StoppedAt = now
 		if !save() {
 			d.logger.Printf("overrun_guard: WARNING: %s: %s handed back but state not saved — the hand-back will be repeated", who, st.Bead)
@@ -998,16 +1017,123 @@ func (d *Daemon) overrunStopSession(seat overrunSeat) error {
 	return d.sup().KillOwnPark(supSeat, overrunStopReason(seat), overrunActor)
 }
 
+// errSandboxRecordCorrupt is a sandbox record that does not parse. The stop
+// keeps the sandbox and hands the bead back with a note (overrunStop, step 2b);
+// an unreadable file (an I/O error) is not this, and holds the stop as a refused
+// push does, since a retry may read it.
+var errSandboxRecordCorrupt = errors.New("sandbox record is corrupt")
+
 // overrunRemoveSandbox removes the sandbox a stopped seat ran in, pushing its
 // commits first (polecat.RemoveStoppedSandbox). pusher and deleter nil are the
-// linked openshell hooks. A refused step names the sandbox in its error, which
-// the stop logs.
+// linked openshell hooks. No record found means nothing to remove and the stop
+// proceeds: a host seat has no record. A record that cannot be read holds the
+// stop, as a refused push does, and so does a lookup that cannot tell which
+// record is the seat's. A refused step names the sandbox in its error, which the
+// stop logs.
 func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(townRoot string, rec session.SandboxRecord) error) error {
-	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat)
+	sessionName, err := d.overrunSandboxSession(seat)
+	if err != nil || sessionName == "" {
+		return err
+	}
+	_, sandboxed, err := session.ReadSandboxRecord(d.config.TownRoot, sessionName)
+	if err != nil {
+		return overrunRecordReadError(sessionName, err)
+	}
+	if !sandboxed {
+		return nil
+	}
 	if err := polecat.RemoveStoppedSandbox(d.config.TownRoot, sessionName, pusher, deleter); err != nil {
 		return fmt.Errorf("sandbox %s: %w", sessionName, err)
 	}
 	return nil
+}
+
+// overrunSandboxSession names the session whose record is the seat's sandbox,
+// or "" when the seat has none to remove. A rig the prefix registry lists has
+// its session name built from the prefix. A rig it does not list has no prefix
+// to build one from, so its record is found by the rig and polecat it names.
+func (d *Daemon) overrunSandboxSession(seat overrunSeat) (string, error) {
+	reg := d.prefixRegistry()
+	var known map[string]string
+	if reg != nil {
+		known = reg.AllRigs()
+	}
+	if _, ok := known[seat.Rig]; !ok {
+		return d.overrunScanSandboxSession(seat)
+	}
+	name := session.PolecatSessionName(reg.PrefixForRig(seat.Rig), seat.Polecat)
+	if !session.ValidSandboxSessionName(name) {
+		d.logger.Printf("overrun_guard: WARNING: sandbox of %s: session name %q is not a sandbox record name, so the sandbox step is skipped", seat.Polecat, name)
+		return "", nil
+	}
+	return name, nil
+}
+
+// overrunScanSandboxSession finds the sandbox record of a seat on a rig the
+// registry does not list. One record naming the seat's rig and polecat is its
+// sandbox; none is a host seat, logged as a warning. Several records name it,
+// or a record that may be the seat's own (its name ends in the polecat's) cannot
+// be read, so the lookup cannot tell and holds: the seat's commits may be
+// unpushed. A record that cannot be read and is named for another polecat is
+// skipped with a warning.
+func (d *Daemon) overrunScanSandboxSession(seat overrunSeat) (string, error) {
+	entries, err := os.ReadDir(session.SandboxRegistryDir(d.config.TownRoot))
+	if errors.Is(err, os.ErrNotExist) {
+		entries = nil
+	} else if err != nil {
+		return "", fmt.Errorf("sandbox of %s/%s: cannot list the sandbox records: %w", seat.Rig, seat.Polecat, err)
+	}
+	var found []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".json")
+		rec, ok, err := session.ReadSandboxRecord(d.config.TownRoot, name)
+		if err != nil {
+			if !overrunMayBeSeatsRecord(name, seat) {
+				// Another seat's record that does not read cannot hold this
+				// seat's stop: its name is not this polecat's, so it is not
+				// this seat's sandbox. Holding on it would block every seat of
+				// an unlisted rig for as long as the file stays broken.
+				d.logger.Printf("overrun_guard: WARNING: sandbox of %s/%s: record %s cannot be read (%v) and its name is not the seat's, so it is skipped", seat.Rig, seat.Polecat, name, err)
+				continue
+			}
+			return "", overrunRecordReadError(name, err)
+		}
+		if ok && rec.Rig == seat.Rig && rec.Polecat == seat.Polecat {
+			found = append(found, name)
+		}
+	}
+	switch len(found) {
+	case 0:
+		d.logger.Printf("overrun_guard: WARNING: sandbox of %s: rig %s has no beads prefix in the registry and no sandbox record names it; nothing removed (set the prefix in mayor/rigs.json if this seat ran in a sandbox)", seat.Polecat, seat.Rig)
+		return "", nil
+	case 1:
+		return found[0], nil
+	default:
+		return "", fmt.Errorf("sandbox of %s/%s: %d records name it (%s), cannot tell which to remove", seat.Rig, seat.Polecat, len(found), strings.Join(found, ", "))
+	}
+}
+
+// overrunMayBeSeatsRecord reports whether a sandbox record named name could be
+// seat's: a session name is a rig prefix, a dash and the polecat's name. A
+// record whose name ends otherwise is another seat's.
+func overrunMayBeSeatsRecord(name string, seat overrunSeat) bool {
+	return name == seat.Polecat || strings.HasSuffix(name, "-"+seat.Polecat)
+}
+
+// overrunRecordReadError is the error for a sandbox record that cannot be read:
+// a record that does not parse is errSandboxRecordCorrupt, which the stop hands
+// back with a note and keeps the seat paused; any other failure (an I/O error)
+// is returned as it is, which holds the stop, since a retry may read it.
+func overrunRecordReadError(name string, err error) error {
+	var syntax *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	if errors.As(err, &syntax) || errors.As(err, &typ) {
+		return fmt.Errorf("sandbox %s: %w: %w", name, errSandboxRecordCorrupt, err)
+	}
+	return fmt.Errorf("sandbox %s: %w", name, err)
 }
 
 // overrunStopReason is what the supervisor's action log records for the kill:
