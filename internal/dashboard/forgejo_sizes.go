@@ -11,6 +11,7 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,9 +28,9 @@ import (
 const (
 	// sizeTSLayout is the report's timestamp: UTC, second precision, trailing Z.
 	sizeTSLayout = "2006-01-02T15:04:05Z"
-	// sizeDayLayout is the day a file holds, in UTC: one night's run appends to
-	// that day's file, so a re-run adds a second set of lines rather than
-	// dropping the first.
+	// sizeDayLayout is the day a file holds, in UTC. A day file is one run's
+	// snapshot of the town, so a rerun replaces it rather than adding a second
+	// set of lines to a record the monthly export charges from.
 	sizeDayLayout = "2006-01-02"
 )
 
@@ -47,25 +48,42 @@ type ForgejoSizeRow struct {
 	SizeKB *int64 `json:"size_kb"`
 }
 
-// ForgejoSizeWriter appends the nightly size report to
+// ForgejoSizeWriter writes the nightly size report to
 // <town>/.runtime/metrics/forgejo-sizes/<UTC date>.jsonl.
 type ForgejoSizeWriter struct {
 	api      forgejoFeeds
 	townRoot string
 	now      func() time.Time
-	// openAppend opens the day's file for appending. It is a field so a test
-	// drives the write and close failures a real disk will not offer on demand.
-	openAppend func(path string) (io.WriteCloser, error)
+	// openTemp opens the run's temporary file exclusively. It is a field so a
+	// test drives the write and close failures a real disk will not offer on
+	// demand.
+	openTemp func(path string) (io.WriteCloser, error)
+	// forRig is the workspace map's lookup for a rig prefix. It is a field so a
+	// test drives a mapping failure the real map cannot produce: its only error
+	// is the empty prefix, which workspaceByRig skips rather than reports.
+	forRig func(ids *workspaceid.Map, prefix string) (string, error)
 }
 
 // NewForgejoSizeWriter builds a writer over api for the town at townRoot.
 func NewForgejoSizeWriter(api forgejoFeeds, townRoot string) *ForgejoSizeWriter {
-	return &ForgejoSizeWriter{api: api, townRoot: townRoot, now: time.Now, openAppend: openAppendFile}
+	return &ForgejoSizeWriter{
+		api:      api,
+		townRoot: townRoot,
+		now:      time.Now,
+		openTemp: openTempFile,
+		forRig:   rigWorkspace,
+	}
 }
 
-// openAppendFile opens path for appending, creating it when it is missing.
-func openAppendFile(path string) (io.WriteCloser, error) {
-	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G302: the report is non-sensitive operational data
+// rigWorkspace is the workspace map's answer for a rig prefix.
+func rigWorkspace(ids *workspaceid.Map, prefix string) (string, error) {
+	return ids.For(prefix)
+}
+
+// openTempFile creates path exclusively: a leftover temporary file from a
+// crashed run is refused rather than silently overwritten.
+func openTempFile(path string) (io.WriteCloser, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644) //nolint:gosec // G302: the report is non-sensitive operational data
 }
 
 // ForgejoSizesDir is <town>/.runtime/metrics/forgejo-sizes, the directory the
@@ -74,11 +92,15 @@ func ForgejoSizesDir(townRoot string) string {
 	return filepath.Join(constants.TownRuntimePath(townRoot), "metrics", "forgejo-sizes")
 }
 
-// Write reads the viewer's repositories and appends one line per repository to
-// the day's file. A failed read or mapping returns an error before anything is
-// written. A failed write or close returns an error, and the lines already
-// appended stay in the day's file: the caller must treat any error as a failed
-// run and rerun it, not as a night whose report is complete.
+// Write reads the viewer's repositories and writes one line per repository to
+// the day's file. The day file is one run's snapshot: a run replaces whatever
+// the day held, so a rerun of a failed night produces a single set of lines,
+// never a second set the monthly export would charge twice.
+//
+// A failed read or mapping returns an error before anything is written, and
+// the day file keeps what it held. A failed write or close returns an error and
+// leaves no day file from that run: the rows are written to a temporary file
+// beside it and renamed over the day file only once every row is on disk.
 func (w *ForgejoSizeWriter) Write(ctx context.Context) ([]ForgejoSizeRow, error) {
 	if w.townRoot == "" {
 		return nil, fmt.Errorf("forgejo sizes: no town root to write under")
@@ -105,7 +127,7 @@ func (w *ForgejoSizeWriter) Write(ctx context.Context) ([]ForgejoSizeRow, error)
 			SizeKB:    repo.SizeKB,
 		})
 	}
-	if err := w.appendRows(rows, now); err != nil {
+	if err := w.writeRows(rows, now); err != nil {
 		return nil, err
 	}
 	return rows, nil
@@ -133,11 +155,16 @@ func (w *ForgejoSizeWriter) workspaceByRig() (map[string]string, error) {
 			prefix = strings.TrimSuffix(entry.BeadsConfig.Prefix, "-")
 		}
 		// For answers ErrEmptyRigPrefix for a rig the registry holds without a
-		// beads prefix: it names no workspace, so it is left out of the map and
-		// its repositories are refused by name in repoWorkspace.
-		id, err := ids.For(prefix)
+		// beads prefix: it names no workspace, so that rig alone is left out of
+		// the map and its repositories are refused by name in repoWorkspace.
+		// Any other mapping error is the run's failure, never a rig quietly
+		// dropped from the bill.
+		id, err := w.forRig(ids, prefix)
 		if err != nil {
-			continue
+			if errors.Is(err, workspaceid.ErrEmptyRigPrefix) {
+				continue
+			}
+			return nil, fmt.Errorf("forgejo sizes: mapping rig %s: %w", name, err)
 		}
 		out[name] = id
 	}
@@ -161,26 +188,43 @@ func repoWorkspace(byRig map[string]string, fullName string) (string, error) {
 	return workspace, nil
 }
 
-// appendRows writes the rows, one JSON line each, to the day's file.
-func (w *ForgejoSizeWriter) appendRows(rows []ForgejoSizeRow, now time.Time) error {
+// writeRows writes the rows, one JSON line each, to a temporary file beside the
+// day's file and renames it over the day's file once the whole set is on disk.
+// The rename is what makes a run all-or-nothing: a reader sees the previous
+// snapshot or this run's complete one, never a half-written report.
+func (w *ForgejoSizeWriter) writeRows(rows []ForgejoSizeRow, now time.Time) error {
 	dir := ForgejoSizesDir(w.townRoot)
 	path := filepath.Join(dir, now.Format(sizeDayLayout)+".jsonl")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("forgejo sizes: creating %s: %w", dir, err)
 	}
-	f, err := w.openAppend(path)
+	tmp := path + ".tmp"
+	f, err := w.openTemp(tmp)
 	if err != nil {
-		return fmt.Errorf("forgejo sizes: opening %s: %w", path, err)
+		return fmt.Errorf("forgejo sizes: opening %s: %w", tmp, err)
 	}
 	enc := json.NewEncoder(f)
 	for _, row := range rows {
 		if err := enc.Encode(row); err != nil {
 			_ = f.Close()
-			return fmt.Errorf("forgejo sizes: writing %s: %w", path, err)
+			removeTemp(tmp)
+			return fmt.Errorf("forgejo sizes: writing %s: %w", tmp, err)
 		}
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("forgejo sizes: closing %s: %w", path, err)
+		removeTemp(tmp)
+		return fmt.Errorf("forgejo sizes: closing %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		removeTemp(tmp)
+		return fmt.Errorf("forgejo sizes: replacing %s: %w", path, err)
 	}
 	return nil
+}
+
+// removeTemp drops a temporary file after a failed run, so the next run's
+// exclusive create is not refused by this one's leftovers. A removal that fails
+// is not reported over the failure that caused it.
+func removeTemp(path string) {
+	_ = os.Remove(path)
 }

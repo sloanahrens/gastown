@@ -83,7 +83,9 @@ func (a Activity) HeadMessage() (string, bool) {
 // ListUserRepos returns every repository the token's user can see, read page
 // by page. It stops when a page comes back empty rather than when it is short:
 // a server caps a page at its own maximum, so a short page may still have more
-// behind it, while an empty one cannot (gt-nlrpk).
+// behind it, while an empty one cannot (gt-nlrpk). Reading that closing empty
+// page is why the panel's refresh makes one more call than the listing
+// strictly needs.
 func (c *Client) ListUserRepos(ctx context.Context) ([]Repository, error) {
 	out := make([]Repository, 0, userReposLimit)
 	for page := 1; page <= userReposMaxPages; page++ {

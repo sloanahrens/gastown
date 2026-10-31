@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
 // sizeTownRoot writes a town whose registry maps two rigs to two workspaces,
@@ -257,11 +258,27 @@ func TestForgejoSizePrefixlessRigIsUnmapped(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "a refused report leaves no file")
 }
 
-// A day file the report cannot open is a failed run, not a silent one.
-func TestForgejoSizeUnopenableDayFileFails(t *testing.T) {
+// A rig whose workspace lookup fails for any reason other than its missing
+// prefix fails the run: dropping the rig would leave its repositories out of
+// the bill without saying so.
+func TestForgejoSizeWorkspaceLookupFailureFails(t *testing.T) {
 	t.Parallel()
 	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
-	w.openAppend = func(string) (io.WriteCloser, error) { return nil, errors.New("day file is locked") }
+	w.forRig = func(*workspaceid.Map, string) (string, error) { return "", errors.New("workspace map is unreadable") }
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workspace map is unreadable")
+	_, statErr := os.Stat(sizeDayPath(w.townRoot))
+	assert.True(t, os.IsNotExist(statErr), "a refused report leaves no file")
+}
+
+// The day file is written through a temporary file, so a run the disk refuses
+// is a failed run and never a day file that stops mid-report.
+func TestForgejoSizeUnopenableTempFileFails(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	w.openTemp = func(string) (io.WriteCloser, error) { return nil, errors.New("day file is locked") }
 	_, err := w.Write(context.Background())
 
 	require.Error(t, err)
@@ -274,7 +291,7 @@ func TestForgejoSizeWriteFailureFails(t *testing.T) {
 	t.Parallel()
 	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
 	sink := &sizeSink{writeErr: errors.New("no space left")}
-	w.openAppend = func(string) (io.WriteCloser, error) { return sink, nil }
+	w.openTemp = func(string) (io.WriteCloser, error) { return sink, nil }
 	_, err := w.Write(context.Background())
 
 	require.Error(t, err)
@@ -288,11 +305,94 @@ func TestForgejoSizeCloseFailureFails(t *testing.T) {
 	t.Parallel()
 	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
 	sink := &sizeSink{closeErr: errors.New("flush failed")}
-	w.openAppend = func(string) (io.WriteCloser, error) { return sink, nil }
+	w.openTemp = func(string) (io.WriteCloser, error) { return sink, nil }
 	_, err := w.Write(context.Background())
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "flush failed")
+}
+
+// sizeDayPath is the day file the fixed clock writes for.
+func sizeDayPath(root string) string {
+	return filepath.Join(ForgejoSizesDir(root), "2026-11-01.jsonl")
+}
+
+// twoRepoReply is a reply with one repository per town rig, so a complete run
+// writes two lines.
+const twoRepoReply = `[
+  {"id":12,"name":"gastown","full_name":"sloan/gastown","size":1280},
+  {"id":7,"name":"beads","full_name":"sloan/beads","size":4711}
+]`
+
+// A rerun that fails partway through must leave the earlier complete day file
+// byte-identical and no temporary file behind: the day file is billing data,
+// and a half-written snapshot would charge from a truncated record.
+func TestForgejoSizeFailedRerunKeepsEarlierDayFile(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, twoRepoReply)
+	_, err := w.Write(context.Background())
+	require.NoError(t, err)
+	before, err := os.ReadFile(sizeDayPath(w.townRoot))
+	require.NoError(t, err)
+
+	realOpen := w.openTemp
+	w.openTemp = func(path string) (io.WriteCloser, error) {
+		f, err := realOpen(path)
+		if err != nil {
+			return nil, err
+		}
+		return &sizeFailAfter{f: f.(*os.File), failAt: 2}, nil
+	}
+	_, err = w.Write(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no space left")
+
+	after, err := os.ReadFile(sizeDayPath(w.townRoot))
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "a failed rerun leaves the earlier day file untouched")
+	_, statErr := os.Stat(sizeDayPath(w.townRoot) + ".tmp")
+	assert.True(t, os.IsNotExist(statErr), "a failed rerun leaves no temporary file")
+}
+
+// A rerun after a failed night replaces the day's snapshot, so the monthly
+// export reading the day file charges one line per repository, not two sets.
+func TestForgejoSizeRerunWritesOneSetPerDay(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, twoRepoReply)
+	_, err := w.Write(context.Background())
+	require.NoError(t, err)
+
+	realOpen := w.openTemp
+	w.openTemp = func(path string) (io.WriteCloser, error) {
+		f, err := realOpen(path)
+		if err != nil {
+			return nil, err
+		}
+		return &sizeFailAfter{f: f.(*os.File), failAt: 2}, nil
+	}
+	_, err = w.Write(context.Background())
+	require.Error(t, err)
+
+	w.openTemp = realOpen
+	_, err = w.Write(context.Background())
+	require.NoError(t, err)
+
+	assert.Len(t, sizeDayLines(t, w.townRoot), 2, "one line per repository after the rerun")
+}
+
+// A day file that cannot be replaced (a directory holds its name) is a failed
+// run that leaves no temporary file behind, so the next run's exclusive create
+// is not refused by this one's leftovers.
+func TestForgejoSizeRenameFailureFails(t *testing.T) {
+	t.Parallel()
+	w := newForgejoSizeWriter(t, `[{"full_name":"sloan/gastown","size":1280}]`)
+	require.NoError(t, os.MkdirAll(sizeDayPath(w.townRoot), 0o755))
+	_, err := w.Write(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "replacing")
+	_, statErr := os.Stat(sizeDayPath(w.townRoot) + ".tmp")
+	assert.True(t, os.IsNotExist(statErr), "a failed replace leaves no temporary file")
 }
 
 // A metrics directory that cannot be made is a failed run.
@@ -326,4 +426,25 @@ func (s *sizeSink) Write(p []byte) (int, error) {
 func (s *sizeSink) Close() error {
 	s.closed = true
 	return s.closeErr
+}
+
+// sizeFailAfter is a real temporary file whose write fails after failAt rows,
+// the mid-run disk failure a test cannot ask a real filesystem for. Each
+// encoded row arrives as one Write, so failAt counts rows.
+type sizeFailAfter struct {
+	f      *os.File
+	writes int
+	failAt int
+}
+
+func (s *sizeFailAfter) Write(p []byte) (int, error) {
+	s.writes++
+	if s.writes >= s.failAt {
+		return 0, errors.New("no space left")
+	}
+	return s.f.Write(p)
+}
+
+func (s *sizeFailAfter) Close() error {
+	return s.f.Close()
 }
