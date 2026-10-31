@@ -165,6 +165,9 @@ type tickResult struct {
 // once per Tick. A Check whose own context ends returns that context's error and
 // leaves nothing in the Tick for the workspace, so a caller with a live context
 // checks it again.
+//
+// A typed-nil store or Provider (an interface holding a nil pointer) is not
+// caught by the == nil checks; pass real values.
 func Check(ctx context.Context, store keystore.Store, prov Provider, workspace string, tick *Tick) (Decision, error) {
 	if tick == nil {
 		return Decision{}, ErrNoTick
@@ -186,8 +189,9 @@ func Check(ctx context.Context, store keystore.Store, prov Provider, workspace s
 
 // check returns the workspace's result for this tick, running the check the
 // first time. A second call waits for a check already running rather than
-// verifying the key twice; it runs its own only when the check it waited for
-// was abandoned by a canceled caller.
+// verifying the key twice; it leaves that wait when its own context ends, so a
+// Provider that ignores its context cannot stall the caller, and it runs its own
+// check only when the one it waited for was abandoned by a canceled caller.
 func (t *Tick) check(ctx context.Context, store keystore.Store, prov Provider, workspace string) (Decision, error) {
 	for {
 		t.mu.Lock()
@@ -216,7 +220,11 @@ func (t *Tick) check(ctx context.Context, store keystore.Store, prov Provider, w
 		}
 		t.mu.Unlock()
 
-		<-res.done
+		select {
+		case <-res.done:
+		case <-ctx.Done():
+			return Decision{}, ctx.Err()
+		}
 		if res.canceled && ctx.Err() == nil {
 			continue
 		}

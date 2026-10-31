@@ -306,6 +306,21 @@ func await(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
+// awaitError is await for a channel of errors: it returns the value, or fails
+// the test if none arrives within waitBound.
+func awaitError(t *testing.T, ch <-chan error, what string) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), waitBound)
+	defer cancel()
+	select {
+	case err := <-ch:
+		return err
+	case <-ctx.Done():
+		t.Fatalf("waited %s for %s; it did not arrive", waitBound, what)
+		return nil
+	}
+}
+
 // blockingProvider holds every Verify until release is closed, so a test can
 // keep one check in flight.
 type blockingProvider struct {
@@ -445,5 +460,72 @@ func TestCanceledCallerDoesNotPoisonTheTick(t *testing.T) {
 	}
 	if n := prov.count(); n != 2 {
 		t.Errorf("Verify ran %d times, want the live caller's check to run (2)", n)
+	}
+}
+
+// waitObservable is a context that reports the first time the code under test
+// asks for its Done channel. A Check only asks once it has reached its wait on
+// another caller's result, so a test can order a cancellation after the wait
+// begins instead of racing Check's own preamble.
+type waitObservable struct {
+	context.Context
+	once   sync.Once
+	waited chan struct{}
+}
+
+func newWaitObservable(parent context.Context) *waitObservable {
+	return &waitObservable{Context: parent, waited: make(chan struct{})}
+}
+
+func (c *waitObservable) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waited) })
+	return c.Context.Done()
+}
+
+// TestWaiterReturnsOnItsOwnCancellation proves that a Check waiting on another
+// caller's Verify leaves the wait when its own context ends. The Provider
+// contract does not require Verify to honour its context, so a waiter that only
+// watches the shared result can stall the dispatch tick behind a hung provider.
+func TestWaiterReturnsOnItsOwnCancellation(t *testing.T) {
+	t.Parallel()
+	store := storeWith(t, "ws-a")
+	prov := newBlockingProvider()
+	tick := NewTick()
+
+	leader := make(chan error, 1)
+	t.Cleanup(func() {
+		prov.releaseAll()
+		ctx, cancel := context.WithTimeout(context.Background(), waitBound)
+		defer cancel()
+		select {
+		case <-leader:
+		case <-ctx.Done():
+			t.Errorf("leader did not return %s after its Verify was released", waitBound)
+		}
+	})
+	go func() {
+		_, err := Check(context.Background(), store, prov, "ws-a", tick)
+		leader <- err
+	}()
+	await(t, prov.entered, "the leader's Verify")
+
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := newWaitObservable(base)
+	waiter := make(chan error, 1)
+	go func() {
+		_, err := Check(ctx, store, prov, "ws-a", tick)
+		waiter <- err
+	}()
+	await(t, ctx.waited, "the waiter to reach its wait")
+	cancel()
+
+	err := awaitError(t, waiter, "the waiter to return after its own context ended")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiter error = %v, want context.Canceled", err)
+	}
+
+	if n := prov.count(); n != 1 {
+		t.Errorf("Verify ran %d times, want the waiter to start no check of its own while the leader's is in flight", n)
 	}
 }
