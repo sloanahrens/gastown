@@ -76,14 +76,14 @@ func (c *Client) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 }
 
 // ListAcross returns the issues matching opts for each rig of rigs, from one
-// request: the tracker holds every rig in one database, so a rig scope list
-// answers them together. Each rig asked for is in the answer, empty when it
-// matched nothing, or in Errors with why. That is a rig the tracker does not
-// hold, and a rig whose prefix has a dash: the store reads an id's rig as the
-// text before its first dash, so no id of such a rig can be filed or matched.
-// An opts filter the list query cannot express refuses the call. Each issue is
-// filed under the rig its id starts with, which is the rig the store holds it
-// under: newID mints "<rig>-", and a child keeps its parent's prefix.
+// request: the tracker holds every rig in one database, so a rig-scope list
+// answers them together. Each rig asked for is in Rigs, empty when it matched
+// nothing, or in Errors with why. A rig lands in Errors when the tracker does
+// not hold it, and when its prefix has a dash: the store reads an id's rig as
+// the text before its first dash, so no id of such a rig can be filed or
+// matched. An opts filter the list query cannot express refuses the call. Each
+// issue is filed under the rig its id starts with, which is the rig the store
+// holds it under: newID mints "<rig>-", and a child keeps its parent's prefix.
 func (c *Client) ListAcross(rigs []string, opts beads.ListOptions) (beads.AcrossResult, error) {
 	res := beads.AcrossResult{Rigs: map[string][]*beads.Issue{}, Errors: map[string]error{}}
 	if err := refusedListFilter(opts); err != nil {

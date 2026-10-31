@@ -38,8 +38,9 @@ type RigsOpen func(rig string) (Lister, error)
 
 // AcrossRead is a caller's own read of one rig's store, for the rigs no
 // AcrossStore answers. A caller whose reads must be attributed to itself passes
-// one (the census in census_budgets.go is keyed by the caller's name). It asks
-// for opts' list. nil reads l.List(opts).
+// one: the census names a bd call's caller from the frame that started the call,
+// and census_budgets.go keys its budgets by that name, so the read must be the
+// caller's own function. It asks for opts' list. nil reads l.List(opts).
 type AcrossRead func(l Lister) ([]*Issue, error)
 
 // errNoRigAnswer is a cross-rig store that left a rig out of its answer: a

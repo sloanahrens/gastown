@@ -94,10 +94,14 @@ func TestListAcrossReadsOwnRigsInParallelWithinTheBound(t *testing.T) {
 		open.stores[name] = &acrossRig{issues: issuesNamed(name + "-a")}
 	}
 	gate := newAcrossGate()
-	done := make(chan AcrossResult, 1)
+	type answer struct {
+		res AcrossResult
+		err error
+	}
+	done := make(chan answer, 1)
 	go func() {
-		res, _ := ListAcross(names, open.open, ListOptions{}, gate.read, acrossBound)
-		done <- res
+		res, err := ListAcross(names, open.open, ListOptions{}, gate.read, acrossBound)
+		done <- answer{res, err}
 	}()
 	for i := 0; i < acrossBound; i++ {
 		select {
@@ -110,7 +114,11 @@ func TestListAcrossReadsOwnRigsInParallelWithinTheBound(t *testing.T) {
 		t.Errorf("%d reads ran at once, want the bound of %d", got, acrossBound)
 	}
 	close(gate.release)
-	res := <-done
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("ListAcross: %v", got.err)
+	}
+	res := got.res
 	if len(res.Rigs) != len(names) || len(res.Errors) != 0 {
 		t.Fatalf("answer = %d rigs and %d errors, want %d and none:\n%v", len(res.Rigs), len(res.Errors), len(names), res.Errors)
 	}
@@ -124,11 +132,11 @@ func TestListAcrossKeepsTheRigsThatAnswerWhenOneFails(t *testing.T) {
 	open := &acrossOpen{
 		stores: map[string]Lister{
 			"gt": &acrossRig{issues: issuesNamed("gt-a")},
+			"dv": &acrossRig{err: dead},
 			"hm": &acrossRig{issues: issuesNamed("hm-a")},
 		},
-		errs: map[string]error{"dv": nil, "fr": errors.New("unreadable route table")},
+		errs: map[string]error{"fr": errors.New("unreadable route table")},
 	}
-	open.stores["dv"] = &acrossRig{err: dead}
 	res, err := ListAcross([]string{"gt", "dv", "hm", "fr"}, open.open, ListOptions{}, nil, acrossBound)
 	if err != nil {
 		t.Fatalf("ListAcross: %v", err)
