@@ -110,10 +110,9 @@ func TestTheFakeStatsCountsWispsApartFromDurableIssues(t *testing.T) {
 	}
 }
 
-// A dependent whose link names a target as external:<rig>:<id> is listed under
-// that target. A dependent holding a plain and an external link to one target
-// is listed once, at the plain relation. gt-12 does not name gt-2: the external
-// part must be the whole id, not a suffix of it.
+// The external-target reverse read follows the rule in the contract case
+// depsExternalDependents: a dependent is listed under the target it names,
+// once, at the plain relation when it also links plainly.
 func TestFakeDependentsOfExternalTargets(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()

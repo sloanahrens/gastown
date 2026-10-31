@@ -268,11 +268,11 @@ WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, t.id`, ids)
 
 // fillDependentsSQL reads the links that name each id in $1, plain or as an
 // external:<rig>:<id> reference (the rule is pinned by the contract case
-// depsExternalDependents). The two branches stay sargable: the plain one is an
-// index lookup on depends_on, and the external one ranges over the external:
-// prefix, which holds few rows, before it tests the last part. The range is
-// pinned to the C collation so it holds under any database collation.
-// DISTINCT ON keeps one link per dependent and target, the plain one if any.
+// depsExternalDependents). The two branches stay index-served: the plain one
+// is a lookup on dependencies_target_idx, and the external one matches the
+// predicate and expression of dependencies_external_target_idx (migration
+// 0004), a partial index over the external links only. DISTINCT ON keeps one
+// link per dependent and target, the plain one if any.
 const fillDependentsSQL = `WITH links AS (
   SELECT d.depends_on AS target, d.issue_id, d.type, d.created_at, true AS plain
   FROM tracker.dependencies d
@@ -280,8 +280,7 @@ const fillDependentsSQL = `WITH links AS (
   UNION ALL
   SELECT regexp_replace(d.depends_on, '^.*:', ''), d.issue_id, d.type, d.created_at, false
   FROM tracker.dependencies d
-  WHERE d.depends_on COLLATE "C" >= 'external:' AND d.depends_on COLLATE "C" < 'external;'
-    AND d.depends_on LIKE 'external:%:%' AND regexp_replace(d.depends_on, '^.*:', '') = ANY($1)
+  WHERE d.depends_on LIKE 'external:%:%' AND regexp_replace(d.depends_on, '^.*:', '') = ANY($1)
 ), one AS (
   SELECT DISTINCT ON (target, issue_id) target, issue_id, type, created_at
   FROM links ORDER BY target, issue_id, plain DESC, created_at
