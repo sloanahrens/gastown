@@ -233,6 +233,28 @@ func TestARestartedDaemonDoesNotReuseSlingCensusFiles(t *testing.T) {
 	}
 }
 
+// The sling the daemon starts names the daemon to the design/notes cache its
+// tick filled, so the child's duplicate check reads that file instead of
+// showing every pool bead itself (gt-nebs9). The owner is a flag, not a new
+// GT_ variable.
+func TestTheSlingChildIsToldTheCacheOwner(t *testing.T) {
+	t.Parallel()
+	b, fake, d, _ := newBlockedSlings(t, plannedTick(slingJob("gt-a", "claude-sonnet")))
+	d.runSpecDispatch()
+	recvSling(t, b.started)
+
+	slings := fake.argvs("spec", "sling")
+	if len(slings) != 1 {
+		t.Fatalf("slings = %v, want one", slings)
+	}
+	i := slices.Index(slings[0], "--detail-cache-owner")
+	if i < 0 || i+1 >= len(slings[0]) || slings[0][i+1] != specDetailOwner {
+		t.Errorf("sling argv = %v, want --detail-cache-owner %s", slings[0], specDetailOwner)
+	}
+	close(b.release)
+	waitSlings(t, d)
+}
+
 // The tick is handed the running sling's bead, its seat and its start, and
 // nothing else: the job's file and test lists are the sling's, and the tick
 // never reads them (gt-mx656).

@@ -122,16 +122,31 @@ func newDuplicateDetailCache(path, owner string, limit int) *duplicateDetailCach
 // owner holds nothing: the cache is the daemon's, dropped when it restarts.
 func loadDuplicateDetailCache(path, owner string, limit int) *duplicateDetailCache {
 	c := newDuplicateDetailCache(path, owner, limit)
+	c.rigs = keptDetailEntries(path, owner, c.rigs)
+	return c
+}
+
+// readDuplicateDetailCache is loadDuplicateDetailCache for a reader that must
+// not write: the entries path kept for owner, held in memory with no file to
+// save to, so save does nothing.
+func readDuplicateDetailCache(path, owner string, limit int) *duplicateDetailCache {
+	c := newDuplicateDetailCache("", owner, limit)
+	c.rigs = keptDetailEntries(path, owner, c.rigs)
+	return c
+}
+
+// keptDetailEntries is what the file at path holds for owner, or empty when the
+// file is missing, unreadable, malformed or written under another owner.
+func keptDetailEntries(path, owner string, empty map[string]map[string]cachedDetail) map[string]map[string]cachedDetail {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return c
+		return empty
 	}
 	var f duplicateDetailFile
 	if json.Unmarshal(data, &f) != nil || f.Owner != owner || f.Rigs == nil {
-		return c
+		return empty
 	}
-	c.rigs = f.Rigs
-	return c
+	return f.Rigs
 }
 
 // specDetailCacheFor is the cache a tick of the daemon named by owner reads
@@ -141,6 +156,20 @@ func specDetailCacheFor(townRoot, owner string) *duplicateDetailCache {
 		return nil
 	}
 	return loadDuplicateDetailCache(dispatch.SpecDetailCachePath(townRoot), owner, duplicateDetailMissLimit)
+}
+
+// specSlingDetailCacheFor is the cache a `gt spec sling` child reads through:
+// the file the tick that planned its sling saved, served as it stands and never
+// written back. The child owns nothing: the tick refills what it needs, and a
+// child writing the file could lose entries a newer tick had just saved.
+//
+// owner "" is a sling no daemon planned, which reads no cache and shows every
+// pool bead.
+func specSlingDetailCacheFor(townRoot, owner string) *duplicateDetailCache {
+	if owner == "" {
+		return nil
+	}
+	return readDuplicateDetailCache(dispatch.SpecDetailCachePath(townRoot), owner, duplicateDetailMissLimit)
 }
 
 // Counts is how many beads this tick showed, answered from the cache, and left

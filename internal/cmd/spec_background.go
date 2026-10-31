@@ -65,6 +65,11 @@ var (
 	// sling writes the bd calls it made, for the daemon to fold into its census
 	// line. Empty is a sling run by hand, which reports to no one (gt-3y319).
 	specSlingCensusPath string
+	// specSlingDetailCacheOwner is the daemon the sling's duplicate check reads
+	// the design/notes cache for: the daemon passes the owner it named its
+	// ticks with, since the tick that planned the sling is the one that filled
+	// the cache (gt-nebs9).
+	specSlingDetailCacheOwner string
 )
 
 var specSlingCmd = &cobra.Command{
@@ -87,6 +92,8 @@ func init() {
 	specDispatchCmd.Flags().StringVar(&specDispatchInFlight, "in-flight", "", "JSON list of the slings still running from earlier ticks ({bead, rig, agent})")
 	specSlingCmd.Flags().StringVar(&specSlingJobJSON, "job", "", "The sling job, as the tick's report printed it")
 	specSlingCmd.Flags().StringVar(&specSlingCensusPath, "census-path", "", "Write the sling's bd census rows to this file at exit")
+	specSlingCmd.Flags().StringVar(&specSlingDetailCacheOwner, "detail-cache-owner", "",
+		"The daemon whose design/notes cache the duplicate check reads (the daemon sets it)")
 	specCmd.AddCommand(specSlingCmd)
 }
 
@@ -252,7 +259,20 @@ func specSlingReport(townRoot string, job specSlingJob) specDispatchReport {
 		slingActor = specDispatchActor
 	}
 	traces := &specSlingTraces{}
-	env := specDispatchEnv{
+	env := specSlingEnv(townRoot, specSlingDetailCacheOwner, traces)
+	report := runSpecSlingJob(env, job)
+	report.Notices = append(report.Notices, traces.notices()...)
+	return report
+}
+
+// specSlingEnv is the env a `gt spec sling` child runs its job with, and where
+// the child becomes a reader of the tick's design/notes cache: cacheOwner is
+// the daemon whose tick wrote the file, so the duplicate check reads it instead
+// of showing every pool bead itself (gt-nebs9). An empty owner is a child no
+// daemon started, which reads no cache.
+func specSlingEnv(townRoot, cacheOwner string, traces *specSlingTraces) specDispatchEnv {
+	specDetailCache.Store(specSlingDetailCacheFor(townRoot, cacheOwner))
+	return specDispatchEnv{
 		Annotate: func(id, key, text string) error {
 			return annotateSpecOnce(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
 		},
@@ -269,9 +289,6 @@ func specSlingReport(townRoot string, job specSlingJob) specDispatchReport {
 			return installpending.StoreFor(townRoot).Pending(now)
 		},
 	}
-	report := runSpecSlingJob(env, job)
-	report.Notices = append(report.Notices, traces.notices()...)
-	return report
 }
 
 // specWriteSlingCensus writes the rows census hands to path, the per-run file
