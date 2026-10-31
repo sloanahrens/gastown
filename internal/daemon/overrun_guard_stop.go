@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -38,7 +39,9 @@ const (
 //     else, the gt-fojqs ordering: a live seat must not stay parked), then
 //     remove its sandbox, pushing the commits first: a refused push keeps the
 //     sandbox and holds the stop with the seat still paused, the next tick
-//     trying again;
+//     trying again; a sandbox record that does not parse keeps the sandbox and
+//     the stop goes on to hand the bead back with a note, the seat left paused
+//     (step 6 is skipped);
 //  3. checkpoint the worktree;
 //  4. push the kept branch to origin; a failed push is retried every tick,
 //     and the hand-back waits for it, so its comment never names a branch that
@@ -248,14 +251,23 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	}
 
 	// 2b. Remove the sandbox a sandboxed seat ran in, pushing its commits first.
-	// The session manager's stop did this on the kill until gt-6mlik.4 moved the
-	// kill to the supervisor, which does not. It runs after the resumed-stop
-	// check above, so a seat taken back is never swept. A refused push keeps the
-	// sandbox and its record, and the stop waits here with the pause still held,
-	// so nothing restarts the seat while its commits are unpushed. A host seat
-	// has no record and this does nothing.
+	// It runs after the resumed-stop check above, so a seat taken back is never
+	// swept. A refused push keeps the sandbox and its record, and the stop waits
+	// here with the pause still held, so nothing restarts the seat while its
+	// commits are unpushed. A record that does not parse cannot say whether the
+	// seat ran in a sandbox, and no retry changes the file: the sandbox is left
+	// as it is, and the stop goes on to hand the bead back with a note, the
+	// seat left paused (sandboxKept). A host seat has no record and this does
+	// nothing.
+	sandboxKept := false
 	if s.removeSandbox != nil {
-		if err := s.removeSandbox(seat); err != nil {
+		err := s.removeSandbox(seat)
+		switch {
+		case err == nil:
+		case errors.Is(err, errSandboxRecordCorrupt):
+			sandboxKept = true
+			d.logger.Printf("overrun_guard: WARNING: stop %s on %s: sandbox record unreadable, sandbox kept; handing the bead back with a note: %v", who, st.Bead, err)
+		default:
 			d.logger.Printf("overrun_guard: stop %s on %s waits, sandbox kept: %v", who, st.Bead, err)
 			return
 		}
@@ -361,10 +373,14 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// tick: failing open here would leave the handed-back bead unpoliced.
 	handed := seat
 	handed.Bead, handed.Branch = st.Bead, branch
-	if !st.CheckpointGaveUp && !st.PushGaveUp {
+	if !st.CheckpointGaveUp && !st.PushGaveUp && !sandboxKept {
 		handed.ReworkSHA = st.ReworkSHA
 	}
 	var notes []string
+	if sandboxKept {
+		notes = append(notes, fmt.Sprintf("The seat's sandbox could not be removed: its record is unreadable, so it may hold commits that were never pushed. "+
+			"The sandbox is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.", who))
+	}
 	if st.CheckpointGaveUp {
 		notes = append(notes, fmt.Sprintf("The worktree could not be checkpointed after %d attempts and may hold uncommitted work; "+
 			"it is left as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
@@ -430,9 +446,10 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			d.logger.Printf("overrun_guard: WARNING: %s: span not closed for %s: %v", who, st.Bead, err)
 		}
 	}
-	if st.CheckpointGaveUp || st.PushGaveUp {
+	if st.CheckpointGaveUp || st.PushGaveUp || sandboxKept {
 		// 6 is skipped: the park is what keeps the name, and the worktree
-		// under it, from taking new work while it holds state origin lacks.
+		// under it, from taking new work while it holds state origin lacks
+		// (or, for a kept sandbox, while its commits are unknown).
 		st.StoppedAt = now
 		if !save() {
 			d.logger.Printf("overrun_guard: WARNING: %s: %s handed back but state not saved — the hand-back will be repeated", who, st.Bead)
@@ -998,12 +1015,36 @@ func (d *Daemon) overrunStopSession(seat overrunSeat) error {
 	return d.sup().KillOwnPark(supSeat, overrunStopReason(seat), overrunActor)
 }
 
+// errSandboxRecordCorrupt is a sandbox record that does not parse. The stop
+// keeps the sandbox and hands the bead back with a note (overrunStop, step 2b);
+// an unreadable file (an I/O error) is not this, and holds the stop as a refused
+// push does, since a retry may read it.
+var errSandboxRecordCorrupt = errors.New("sandbox record is corrupt")
+
 // overrunRemoveSandbox removes the sandbox a stopped seat ran in, pushing its
 // commits first (polecat.RemoveStoppedSandbox). pusher and deleter nil are the
 // linked openshell hooks. A refused step names the sandbox in its error, which
-// the stop logs.
+// the stop logs. A rig the prefix registry does not know is refused, not read
+// as a host seat: its session name would be built from the default prefix, and
+// the record under the rig's real prefix would be left behind unseen.
 func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(townRoot string, rec session.SandboxRecord) error) error {
-	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat)
+	reg := d.prefixRegistry()
+	var known map[string]string
+	if reg != nil {
+		known = reg.AllRigs()
+	}
+	if _, ok := known[seat.Rig]; !ok {
+		return fmt.Errorf("sandbox of %s: rig %s has no beads prefix in the registry (set it in mayor/rigs.json)", seat.Polecat, seat.Rig)
+	}
+	sessionName := session.PolecatSessionName(reg.PrefixForRig(seat.Rig), seat.Polecat)
+	if _, _, err := session.ReadSandboxRecord(d.config.TownRoot, sessionName); err != nil {
+		var syntax *json.SyntaxError
+		var typ *json.UnmarshalTypeError
+		if errors.As(err, &syntax) || errors.As(err, &typ) {
+			return fmt.Errorf("sandbox %s: %w: %w", sessionName, errSandboxRecordCorrupt, err)
+		}
+		return fmt.Errorf("sandbox %s: %w", sessionName, err)
+	}
 	if err := polecat.RemoveStoppedSandbox(d.config.TownRoot, sessionName, pusher, deleter); err != nil {
 		return fmt.Errorf("sandbox %s: %w", sessionName, err)
 	}

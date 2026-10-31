@@ -578,7 +578,7 @@ func TestStop_DryRunCallsNoStopSeam(t *testing.T) {
 func seedStopSandbox(t *testing.T, d *Daemon) {
 	t.Helper()
 	reg := session.NewPrefixRegistry()
-	reg.Register(stopSeat.Rig, overrunStopPrefix)
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
 	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
 	rec := session.SandboxRecord{Session: overrunStopSessionName, Rig: stopSeat.Rig, Polecat: stopSeat.Polecat, Branch: stopSeat.Branch}
 	if err := session.WriteSandboxRecord(d.config.TownRoot, rec); err != nil {
@@ -738,7 +738,7 @@ func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *tes
 				seedStopSandbox(t, d)
 			} else {
 				reg := session.NewPrefixRegistry()
-				reg.Register(stopSeat.Rig, overrunStopPrefix)
+				reg.Register(overrunStopPrefix, stopSeat.Rig)
 				d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
 			}
 			var calls []string
@@ -769,6 +769,147 @@ func TestOverrunRemoveSandbox_PushesBeforeDeletingAndKeepsARefusedSandbox(t *tes
 				}
 			}
 		})
+	}
+}
+
+// A rig the prefix registry does not know has no session name to look its
+// sandbox up by: the lookup would read the default prefix's name, find no
+// record and call the seat a host seat. The removal refuses instead, and the
+// sandbox that is there under the rig's real prefix is kept.
+func TestOverrunRemoveSandbox_UnregisteredRigRefusesInsteadOfSkipping(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	const prefix = "gx"
+	sessionName := prefix + "-" + stopSeat.Polecat
+	rec := session.SandboxRecord{Session: sessionName, Rig: stopSeat.Rig, Polecat: stopSeat.Polecat, Branch: stopSeat.Branch}
+	if err := session.WriteSandboxRecord(d.config.TownRoot, rec); err != nil {
+		t.Fatal(err)
+	}
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
+	var calls []string
+	push := func(string, session.SandboxRecord) error {
+		calls = append(calls, "push")
+		return nil
+	}
+	del := func(string, session.SandboxRecord) error {
+		calls = append(calls, "delete")
+		return nil
+	}
+
+	err := d.overrunRemoveSandbox(stopSeat, push, del)
+
+	if err == nil {
+		t.Fatal("overrunRemoveSandbox = nil for a rig the registry does not know, want a refusal")
+	}
+	if len(calls) != 0 {
+		t.Errorf("calls = %q, want none for a sandbox that was never looked up", calls)
+	}
+	if _, ok, _ := session.ReadSandboxRecord(d.config.TownRoot, sessionName); !ok {
+		t.Error("the sandbox record was removed for an unregistered rig")
+	}
+}
+
+// A sandbox record that does not parse cannot say whether its seat ran in a
+// sandbox, and no retry changes the file. The stop keeps the sandbox and its
+// record, hands the bead back with a note naming the unreadable record, and
+// leaves the seat paused for an operator: the release is skipped.
+func TestStop_CorruptSandboxRecordHandsBackWithANoteAndKeepsSeatPaused(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	recPath := filepath.Join(session.SandboxRegistryDir(d.config.TownRoot), overrunStopSessionName+".json")
+	if err := os.WriteFile(recPath, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(seat overrunSeat) error {
+		return d.overrunRemoveSandbox(seat,
+			func(string, session.SandboxRecord) error {
+				t.Error("pushed a sandbox whose record is unreadable")
+				return nil
+			},
+			func(string, session.SandboxRecord) error {
+				t.Error("deleted a sandbox whose record is unreadable")
+				return nil
+			})
+	}
+	seams := f.seams()
+	// The branch is on origin, so without the kept sandbox the bead would be
+	// handed back as finished rework; its unpushed commits are unknown, so not.
+	seams.finishedOnOrigin = func(overrunSeat) string { return "abc1234" }
+	var notes []string
+	var reworkSHA string
+	handBack := seams.handBack
+	seams.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
+		notes = append(notes, note)
+		reworkSHA = seat.ReworkSHA
+		return handBack(seat, elapsed, note)
+	}
+
+	d.runOverrunGuard(seams)
+
+	want := []string{
+		"pause gastown/capable",
+		"stop gastown/capable",
+		"sandbox gastown/capable",
+		"checkpoint gastown/capable",
+		"push gastown/capable",
+		"hand-back gastown/capable",
+	}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("calls = %q, want %q (the release is skipped with the sandbox unread)", f.calls, want)
+	}
+	if len(f.handedBack) != 1 {
+		t.Fatalf("hand-back = %q, want the bead handed back once", f.handedBack)
+	}
+	if reworkSHA != "" {
+		t.Errorf("hand-back read as rework at %q, want needs-split with a sandbox kept", reworkSHA)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "unreadable") || !strings.Contains(notes[0], "gt agent resume") {
+		t.Errorf("hand-back note = %q, want one naming the unreadable record and the resume", notes)
+	}
+	if _, err := os.Stat(recPath); err != nil {
+		t.Errorf("the corrupt sandbox record was removed: %v", err)
+	}
+	st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if st.StoppedAt.IsZero() {
+		t.Errorf("state %+v: want the stop finished once the bead is handed back", st)
+	}
+}
+
+// A record that cannot be read at all (an I/O error, not a parse failure) may
+// read differently on the next tick, so the stop holds as it does for a refused
+// push: no hand-back, the seat still paused, nothing removed.
+func TestOverrunRemoveSandbox_UnreadableRecordHoldsInsteadOfGivingUp(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	recPath := filepath.Join(session.SandboxRegistryDir(d.config.TownRoot), overrunStopSessionName+".json")
+	if err := os.Remove(recPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(recPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	err := d.overrunRemoveSandbox(stopSeat,
+		func(string, session.SandboxRecord) error {
+			calls = append(calls, "push")
+			return nil
+		},
+		func(string, session.SandboxRecord) error {
+			calls = append(calls, "delete")
+			return nil
+		})
+
+	if err == nil {
+		t.Fatal("overrunRemoveSandbox = nil for an unreadable record, want a hold")
+	}
+	if errors.Is(err, errSandboxRecordCorrupt) {
+		t.Errorf("overrunRemoveSandbox = %v: an I/O error must not read as a corrupt record", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("calls = %q, want none for an unreadable record", calls)
 	}
 }
 
@@ -1909,7 +2050,7 @@ var overrunStopSessionName = overrunStopPrefix + "-" + stopSeat.Polecat
 func seedOverrunStopSession(t *testing.T, d *Daemon) *fakeTmux {
 	t.Helper()
 	reg := session.NewPrefixRegistry()
-	reg.Register(stopSeat.Rig, overrunStopPrefix)
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
 	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
 	tm := newFakeTmux(newFixedClock())
 	tm.addSession(overrunStopSessionName, "", overrunSlung)
