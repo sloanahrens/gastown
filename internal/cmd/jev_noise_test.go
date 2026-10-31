@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -103,5 +105,72 @@ func TestJevNoiseCommand(t *testing.T) {
 		var out bytes.Buffer
 		err := jevNoiseWithFlags(&out, t.TempDir(), "dedupe", "", noise.DefaultCut, false, now)
 		assert.ErrorContains(t, err, `battery "dedupe" writes no repeat log`)
+	})
+}
+
+// TestJevNoiseRefusals: a command that cannot find its town, read its window, read
+// its battery log or measure the repeats reports the failure and prints nothing.
+func TestJevNoiseRefusals(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+
+	t.Run("no town root", func(t *testing.T) {
+		t.Parallel()
+		deps := jevNoiseDeps{findTownRoot: func() (string, error) { return "", errors.New("no town here") }}
+		var out bytes.Buffer
+		err := runJevNoise(&out, deps, jevNoiseFlags{battery: "logtriage", cut: noise.DefaultCut}, now)
+		assert.ErrorContains(t, err, "finding the town root")
+		assert.Empty(t, out.String())
+	})
+
+	t.Run("bad since window", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		err := jevNoiseWithFlags(&out, t.TempDir(), "logtriage", "soon", noise.DefaultCut, false, now)
+		assert.ErrorContains(t, err, `--since "soon"`)
+		assert.Empty(t, out.String())
+	})
+
+	t.Run("unreadable battery log", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		// A directory where the battery log should be cannot be read as lines.
+		require.NoError(t, os.MkdirAll(logtriage.LogPath(town), 0o700))
+		var out bytes.Buffer
+		err := jevNoiseWithFlags(&out, town, "logtriage", "", noise.DefaultCut, false, now)
+		assert.ErrorContains(t, err, "reading the battery log")
+		assert.Empty(t, out.String())
+	})
+
+	t.Run("one question answered as two kinds", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		logPath := logtriage.LogPath(town)
+		ts := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+		p := 0.2
+		// k1 answers the question as a noul and k2 as a choice, so it has two kinds.
+		require.NoError(t, battery.Append(logPath, logtriage.Line{
+			TS: ts, Key: "k1", QuestionVersion: logtriage.Version,
+			Answers: map[string]logtriage.Answer{logtriage.QNeedsAction: {Noul: &p}},
+		}))
+		require.NoError(t, battery.Append(logPath, logtriage.Line{
+			TS: ts, Key: "k2", QuestionVersion: logtriage.Version,
+			Answers: map[string]logtriage.Answer{logtriage.QNeedsAction: {Choice: "a"}},
+		}))
+		// Each key's repeats answer the same kind as its original.
+		for i := range 3 {
+			require.NoError(t, battery.AppendReask(logPath, battery.ReaskLine{
+				TS: ts.Add(time.Duration(i+1) * time.Minute), Key: "k1", Repeat: i + 1, QuestionVersion: logtriage.Version,
+				Answers: map[string]logtriage.Answer{logtriage.QNeedsAction: {Noul: &p}},
+			}))
+			require.NoError(t, battery.AppendReask(logPath, battery.ReaskLine{
+				TS: ts.Add(time.Duration(i+1) * time.Minute), Key: "k2", Repeat: i + 1, QuestionVersion: logtriage.Version,
+				Answers: map[string]logtriage.Answer{logtriage.QNeedsAction: {Choice: "a"}},
+			}))
+		}
+		var out bytes.Buffer
+		err := jevNoiseWithFlags(&out, town, "logtriage", "", noise.DefaultCut, false, now)
+		assert.ErrorContains(t, err, "was answered as")
+		assert.Empty(t, out.String())
 	})
 }
