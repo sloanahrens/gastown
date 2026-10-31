@@ -286,6 +286,43 @@ func TestASlingKilledAtItsBoundNotesAFailedHandBack(t *testing.T) {
 	}
 }
 
+// An assignee that is not a polecat's seat address names nothing the daemon can
+// unsling, so the bead is left to a person and the note says why (gt-vaivp).
+func TestASlingKilledAtItsBoundLeavesAMalformedHolderToAPerson(t *testing.T) {
+	t.Parallel()
+	for _, holder := range []string{"gastown/polecats", "gastown/crew/alice", "alice"} {
+		t.Run(holder, func(t *testing.T) {
+			t.Parallel()
+			fake, d, _ := boundKilledSling(t)
+			bd := newWorkBD(t)
+			bd.db.Seed(beads.Issue{
+				ID:        "gt-z",
+				Status:    string(beads.IssueStatusHooked),
+				Assignee:  holder,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			})
+			d.openWorkBeads = bd.open
+
+			d.runSpecDispatch()
+			waitSlings(t, d)
+
+			if got := fake.argvs("unsling"); len(got) != 0 {
+				t.Errorf("unsling calls = %v, want the malformed holder %q left alone", got, holder)
+			}
+			if got := fake.argvs("bead", "update"); len(got) != 0 {
+				t.Errorf("bead updates = %v, want no label on a bead a person must release", got)
+			}
+			notes := fake.argvs("bead", "note", "gt-z")
+			if len(notes) != 1 {
+				t.Fatalf("notes = %v, want one recording the hook a person must release", notes)
+			}
+			if note := notes[0][len(notes[0])-1]; !strings.Contains(note, "is not a polecat seat") {
+				t.Errorf("note = %q, want it to say the holder is not a polecat seat", note)
+			}
+		})
+	}
+}
+
 // boundKilledSling is a daemon whose sling is killed at its bound: the fake
 // answers the tick, and the fake clock is carried past the sling's whole bound
 // while the sling's process is run and reports the kill the daemon's

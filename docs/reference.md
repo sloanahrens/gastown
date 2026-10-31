@@ -392,6 +392,12 @@ invisible to `gt config`, unvalidated, and applied to every session rather than
 to the dispatcher that reads it — which is how raising the ceiling to P3 took
 two tries (gt-y3pgh.12).
 
+`spec-dispatch-timeout` is the bead label a sling killed at its bound leaves
+beside `spec-dispatch-failed`; a failure that is not such a kill removes it, and
+it stays for an operator once the retries are spent (gt-vaivp).
+`spec_dispatch_timeout_attempts` is the bead metadata count of those kills; the
+dispatcher retries the bead while the count is below three (gt-vaivp).
+
 `docs/guides/spec-dispatcher.md` is the behavioral guide: candidates, the shape
 gate, the seat table and how to turn the ticker off.
 

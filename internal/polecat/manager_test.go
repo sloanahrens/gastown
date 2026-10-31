@@ -699,6 +699,47 @@ func TestReconcilePool_UnreadablePolecatsDirFreesNothing(t *testing.T) {
 	}
 }
 
+// TestReconcilePool_CountsDirectoriesTheRegistryDoesNotKnow: every non-dot
+// directory under polecats/ is in use, even one the name registry has never
+// drawn. A numeric name is where that shows: the overflow counter moves past
+// it, so allocation never hands the number out again. A dot directory is not a
+// polecat and leaves the counter alone.
+func TestReconcilePool_CountsDirectoriesTheRegistryDoesNotKnow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		dirName func(seq int) string
+		counts  bool
+	}{
+		{"unknown numeric directory counts", func(seq int) string { return fmt.Sprint(seq) }, true},
+		{"dot directory does not count", func(seq int) string { return "." + fmt.Sprint(seq) }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rigPath := t.TempDir()
+			m := newTestManager(&rig.Rig{Name: "myrig", Path: rigPath}, newWorld(), nil, newNoDatabaseDB())
+			seq := m.namePool.OverflowNext + 5
+			if err := os.MkdirAll(filepath.Join(rigPath, "polecats", tt.dirName(seq)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			before := m.namePool.OverflowNext
+			m.ReconcilePool()
+
+			want := before
+			if tt.counts {
+				want = seq + 1
+			}
+			if got := m.namePool.OverflowNext; got != want {
+				t.Errorf("OverflowNext = %d after reconcile, want %d", got, want)
+			}
+		})
+	}
+}
+
 func TestReconcilePoolWith_KeepsDirBackedStaleSession(t *testing.T) {
 	t.Parallel()
 

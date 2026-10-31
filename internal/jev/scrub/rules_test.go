@@ -433,6 +433,20 @@ func ruleCases() []ruleCase {
 			want: "a-long-lowercase-slug-with-no-digits-anywhere",
 		},
 		{
+			// Kept as designed: a lower-case run of short hyphenated segments
+			// reads as a slug, so the run is left as it is.
+			name: "short hyphenated segments are a slug", rule: RuleLongToken,
+			in:   "the-scrub-keeps-short-hyphenated-slugs-as-they-are",
+			want: "the-scrub-keeps-short-hyphenated-slugs-as-they-are",
+		},
+		{
+			// A segment past pathSegmentLimit (16) is a token that holds a
+			// separator, so the run redacts. 17 is the first length over it.
+			name: "hyphenated run with a long segment redacts", rule: RuleLongToken,
+			in:   "blob " + strings.Repeat("q", 17) + "-the-slug-keeps-going-on-and-on end",
+			want: "blob [REDACTED:long-token] end", count: 1,
+		},
+		{
 			name: "dated path", rule: RuleLongToken,
 			in:   "/2026/10/30/the-fix-for-the-dispatch-clock",
 			want: "/2026/10/30/the-fix-for-the-dispatch-clock",

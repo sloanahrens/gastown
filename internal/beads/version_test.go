@@ -145,8 +145,17 @@ func TestSchemaLevelEndsWithTheCallersBudget(t *testing.T) {
 	if !errors.Is(err, ErrStoreUnavailable) {
 		t.Errorf("a deadline-killed read must wrap ErrStoreUnavailable: %v", err)
 	}
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("error %q does not name the deadline that ended the read", err)
+	// The duration named is what the caller's deadline had left when the read
+	// began, so it is a little under the budget and never the seam's minute.
+	msg := err.Error()
+	const named = "timed out after "
+	at := strings.Index(msg, named)
+	if at < 0 {
+		t.Fatalf("error %q does not name the budget that ended the read", msg)
+	}
+	rest, _, _ := strings.Cut(msg[at+len(named):], ":")
+	if got, perr := time.ParseDuration(rest); perr != nil || got <= 0 || got > budget {
+		t.Errorf("error %q names %q, want a duration in (0, %s] (the caller's budget)", msg, rest, budget)
 	}
 	var readUnder context.Context
 	select {
