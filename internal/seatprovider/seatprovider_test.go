@@ -128,6 +128,20 @@ func TestCreateReplacesAProviderLeftAtTheSameName(t *testing.T) {
 	}
 }
 
+func TestCreateReportsAFailedReplace(t *testing.T) {
+	t.Parallel()
+	seat := "gastown/polecats/ace"
+	name := NameFor(seat)
+	r := &fakeRunner{listing: name + "\n", deleteErr: errors.New("exit status 1")}
+
+	if _, err := Create(context.Background(), r, seat, testToken); err == nil {
+		t.Fatal("Create returned no error when the stale provider could not be deleted, want the failure")
+	}
+	if creates := r.callsOf("create"); len(creates) != 0 {
+		t.Fatalf("create ran %d times after a failed delete, want none, so a new provider does not share the name", len(creates))
+	}
+}
+
 func TestCreateRefusesInputItCannotUse(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
