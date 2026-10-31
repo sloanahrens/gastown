@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -14,23 +15,37 @@ import (
 func TestMain(m *testing.M) { os.Exit(unittier.Main(m)) }
 
 // fakeRunner answers git and go list from canned output and records each argv,
-// so the command is tested without starting a process.
+// so the command is tested without starting a process. The two git diffs are
+// told apart by the range: the first names base...head, the second the head the
+// working tree is compared against.
 type fakeRunner struct {
-	diff    []byte
-	list    []byte
+	diff      []byte
+	treeDiff  []byte
+	untracked []byte
+	list      []byte
+	calls     [][]string
+
 	listErr error
-	calls   [][]string
 }
 
 func (f *fakeRunner) run(argv []string) ([]byte, error) {
 	f.calls = append(f.calls, slices.Clone(argv))
-	switch argv[0] {
-	case "git":
-		return f.diff, nil
-	case "go":
+	if argv[0] == "go" {
 		return f.list, f.listErr
 	}
-	return nil, errors.New("fake runner: unexpected program")
+	if argv[0] != "git" || len(argv) < 2 {
+		return nil, fmt.Errorf("fake runner: unexpected command %q", argv)
+	}
+	switch argv[1] {
+	case "diff":
+		if strings.Contains(argv[len(argv)-1], "...") {
+			return f.diff, nil
+		}
+		return f.treeDiff, nil
+	case "ls-files":
+		return f.untracked, nil
+	}
+	return nil, fmt.Errorf("fake runner: unexpected git command %q", argv[1])
 }
 
 // names renders `git diff --name-only -z` output: every path, NUL-terminated.
@@ -63,6 +78,8 @@ func TestAffectedPrintsTheSelection(t *testing.T) {
 		wd        string // the directory the command runs in; empty means moduleRoot
 		wdErr     error
 		diff      []byte
+		treeDiff  []byte
+		untracked []byte
 		list      []byte
 		listErr   error
 		wantOut   string
@@ -76,7 +93,7 @@ func TestAffectedPrintsTheSelection(t *testing.T) {
 			list:      []byte(onePackage),
 			wantOut:   "example.com/m/internal/a\n",
 			wantCode:  0,
-			wantCalls: 2,
+			wantCalls: 4,
 		},
 		{
 			name:      "empty diff prints NONE",
@@ -98,7 +115,7 @@ func TestAffectedPrintsTheSelection(t *testing.T) {
 			wantOut:   "ALL\n",
 			wantCode:  0,
 			wantErr:   "go list",
-			wantCalls: 2,
+			wantCalls: 4,
 		},
 		{
 			name:      "started below the module root widens instead of narrowing",
@@ -108,6 +125,16 @@ func TestAffectedPrintsTheSelection(t *testing.T) {
 			wantOut:   "ALL\n",
 			wantCode:  0,
 			wantErr:   "module root",
+			wantCalls: 4,
+		},
+		{
+			name:      "working tree outside head widens instead of narrowing",
+			diff:      names("internal/a/a.go"),
+			treeDiff:  names("internal/a/a.go"),
+			list:      []byte(onePackage),
+			wantOut:   "ALL\n",
+			wantCode:  0,
+			wantErr:   "working tree",
 			wantCalls: 2,
 		},
 		{
@@ -134,7 +161,7 @@ func TestAffectedPrintsTheSelection(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			r := &fakeRunner{diff: tc.diff, list: tc.list, listErr: tc.listErr}
+			r := &fakeRunner{diff: tc.diff, treeDiff: tc.treeDiff, untracked: tc.untracked, list: tc.list, listErr: tc.listErr}
 			wd := tc.wd
 			if wd == "" {
 				wd = moduleRoot

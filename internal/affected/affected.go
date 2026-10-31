@@ -40,6 +40,10 @@ type Selection struct {
 // to it, so a wd below the module root would list a subtree: the closure would
 // lose every importer outside it and select too little. Select therefore reads
 // the module root go list reports and returns All unless wd is that root.
+//
+// go list reads the working tree, so Select returns All unless that tree is
+// head's: the diff is base...head, and a diff that adds an import would
+// otherwise be resolved against a graph without the new edge.
 func Select(run Runner, wd, base, head string) (Selection, error) {
 	revs := base + "..." + head
 	out, err := run([]string{"git", "diff", "--name-only", "--no-renames", "-z", "--end-of-options", revs})
@@ -58,6 +62,9 @@ func Select(run Runner, wd, base, head string) (Selection, error) {
 	if len(files) == 0 {
 		// An empty diff selects no package; the caller prints NONE.
 		return Selection{}, nil
+	}
+	if err := requireHeadTree(run, head); err != nil {
+		return Selection{All: true}, err
 	}
 	graph, err := readGraph(run)
 	if err != nil {
@@ -103,6 +110,29 @@ func widensToAll(file string) bool {
 		}
 	}
 	return false
+}
+
+// requireHeadTree fails unless the working tree go list is about to read is
+// head's tree. A tracked change is caught by diffing the tree against head; a
+// file git does not track is caught by listing untracked build inputs, since a
+// .go, go.mod or go.sum file that go list reads but head lacks would edge the
+// graph away from the commit the diff ends at.
+func requireHeadTree(run Runner, head string) error {
+	out, err := run([]string{"git", "diff", "--name-only", "-z", "--end-of-options", head})
+	if err != nil {
+		return fmt.Errorf("git diff %s against the working tree: %w", head, err)
+	}
+	if len(out) > 0 {
+		return fmt.Errorf("the working tree differs from %s; check %s out before selecting", head, head)
+	}
+	untracked, err := run([]string{"git", "ls-files", "--others", "-z", "--", "*.go", "go.mod", "go.sum"})
+	if err != nil {
+		return fmt.Errorf("git ls-files: %w", err)
+	}
+	if len(untracked) > 0 {
+		return errors.New("the working tree holds files git does not track that go list would read; commit or remove them before selecting")
+	}
+	return nil
 }
 
 // pkgGraph is what one `go list -deps -test -json ./...` run reports: the
@@ -167,6 +197,7 @@ func parseGraph(out []byte) (*pkgGraph, error) {
 	}
 	graph := &pkgGraph{byDir: map[string]string{}, deps: map[string][]string{}}
 	forTest := map[string]string{}
+	known := map[string]bool{}
 	var moduleDir string
 	for _, rec := range records {
 		if graph.module == "" && rec.Module != nil && rec.Module.Main && rec.Module.Dir != "" {
@@ -174,6 +205,9 @@ func parseGraph(out []byte) (*pkgGraph, error) {
 		}
 		if rec.ForTest != "" {
 			forTest[rec.ImportPath] = rec.ForTest
+		}
+		if !isTestVariant(rec.ImportPath) {
+			known[rec.ImportPath] = true
 		}
 	}
 	if graph.module == "" {
@@ -189,9 +223,9 @@ func parseGraph(out []byte) (*pkgGraph, error) {
 		}
 	}
 	for _, rec := range records {
-		src := baseImportPath(rec.ImportPath, forTest)
+		src := baseImportPath(rec.ImportPath, forTest, known)
 		for _, dep := range rec.Deps {
-			graph.deps[src] = append(graph.deps[src], baseImportPath(dep, forTest))
+			graph.deps[src] = append(graph.deps[src], baseImportPath(dep, forTest, known))
 		}
 	}
 	return graph, nil
@@ -232,17 +266,24 @@ func isTestVariant(importPath string) bool {
 	return strings.ContainsRune(importPath, ' ') || strings.HasSuffix(importPath, ".test")
 }
 
-// baseImportPath names the package a go list id belongs to, so a test import is
-// an edge from the package whose tests make it. forTest maps a variant's id to
-// its parent, which the id alone cannot say: the external test package of p is
-// named p_test, and that is no importable path, so it belongs to p. A test
-// binary's id ("p.test") carries no ForTest and is p as well.
-func baseImportPath(id string, forTest map[string]string) string {
-	if parent, ok := forTest[id]; ok {
-		return parent
-	}
-	if i := strings.IndexRune(id, ' '); i >= 0 {
-		return id[:i]
+// baseImportPath names the importable package a go list id belongs to, so each
+// record's imports become edges from the package that compiles them. A
+// bracketed id ("x [p.test]") is a package rebuilt for a test binary, and its
+// leading path names the package: x itself for a recompiled dependency, and p
+// for a test variant of p. The exception is the external test package of p,
+// named p_test: no package answers to that path, so its ForTest, p, owns it.
+// known holds the ids go list reported as packages, which tells the two apart.
+// A test binary's id ("p.test") is p as well.
+func baseImportPath(id string, forTest map[string]string, known map[string]bool) string {
+	if i := strings.Index(id, " ["); i >= 0 {
+		leading := id[:i]
+		if known[leading] {
+			return leading
+		}
+		if parent, ok := forTest[id]; ok {
+			return parent
+		}
+		return leading
 	}
 	return strings.TrimSuffix(id, ".test")
 }
@@ -278,16 +319,18 @@ func packagesOfFiles(files []string, byDir map[string]string, module string) ([]
 	return pkgs, unplaced
 }
 
-// packageOfFile names the import path of the package that owns one file. A .go
-// file belongs to its directory's package, which the graph may not know yet: a
-// package the diff adds is named from the module path, so it is selected rather
-// than dropped. A file of any other kind belongs to the nearest ancestor
-// directory the graph knows, because that is the package whose build or tests
-// read it.
+// packageOfFile names the import path of the package that owns one file and
+// reports whether the graph can place it. A .go file belongs to its directory's
+// package, which the graph may not know yet: a package the diff adds is named
+// from the module path, so it is selected rather than dropped. A file of any
+// other kind narrows only when it sits directly in a package directory, which
+// is the only place that package's tests can read or embed it; a file anywhere
+// else is placed by nothing, so it widens the selection (gt-c3lp9).
 func packageOfFile(file string, byDir map[string]string, module string) (string, bool) {
 	dir := path.Dir(file)
+	importPath, inPackage := byDir[dir]
 	if strings.HasSuffix(file, ".go") {
-		if importPath, ok := byDir[dir]; ok {
+		if inPackage {
 			return importPath, true
 		}
 		if skippedDir(dir) {
@@ -295,15 +338,7 @@ func packageOfFile(file string, byDir map[string]string, module string) (string,
 		}
 		return joinImportPath(module, dir), true
 	}
-	for {
-		if importPath, ok := byDir[dir]; ok {
-			return importPath, true
-		}
-		if dir == "." || skippedDir(dir) {
-			return "", false
-		}
-		dir = path.Dir(dir)
-	}
+	return importPath, inPackage
 }
 
 // skippedDir reports whether the go tool ignores dir: it has an element that

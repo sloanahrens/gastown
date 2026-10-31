@@ -4,7 +4,8 @@
 // run and NONE when the diff is empty, exiting 0 either way; the caller reads
 // ALL as "run everything" and NONE as "nothing changed". It runs git and go
 // list in the directory it is started in, and prints ALL, never a short list,
-// when that directory is not the module root.
+// when that directory is not the module root or the working tree is not the
+// head commit's.
 package main
 
 import (
