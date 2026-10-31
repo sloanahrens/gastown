@@ -296,7 +296,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Only wait if Dolt was actually started (or detected running). If it failed or
 	// was skipped, polling the port would just burn the full timeout. (review finding #1)
 	if !doltSkipped && doltOK {
-		waitForDoltReady(townRoot, os.Stderr)
+		waitForDoltReady(townRoot, os.Stderr, doltserver.WaitForReady)
 	}
 
 	// 3. Crew (if --restore)
@@ -824,9 +824,13 @@ const doltReadyTimeout = 10 * time.Second
 // starting agents that depend on beads database access: a town with no
 // server-mode metadata has nothing to wait for and passes in silence, and a
 // failed wait is a warning on warn rather than a failed startup (gt-zou1n).
-// warn is a parameter so a test reads what startup would say.
-func waitForDoltReady(townRoot string, warn io.Writer) {
-	if err := doltserver.WaitForReady(townRoot, doltReadyTimeout); err != nil {
+// warn and probe are parameters so a test reads what startup would say and
+// sees whether the readiness probe ran at all.
+func waitForDoltReady(townRoot string, warn io.Writer, probe func(townRoot string, timeout time.Duration) error) {
+	if len(doltserver.HasServerModeMetadata(townRoot)) == 0 {
+		return
+	}
+	if err := probe(townRoot, doltReadyTimeout); err != nil {
 		fmt.Fprintf(warn, "Warning: %v (agents may see connection errors)\n", err)
 	}
 }

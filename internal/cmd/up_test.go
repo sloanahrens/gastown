@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -59,13 +60,20 @@ func TestMaxConcurrentAgentStarts_Constant(t *testing.T) {
 // =============================================================================
 
 // TestWaitForDoltReady_NoServerMode: a town with no server-mode metadata has
-// nothing to wait for, so the wait reports success and gt up says nothing. A
-// town with no configured endpoint is the case that pins it: had the wait gone
-// on to probe, it would have reported ErrNoEndpoint as a warning (gt-zou1n).
+// nothing to wait for, so the readiness probe is never run and gt up says
+// nothing. Had the wait gone on to probe, the probe would have reported
+// ErrNoEndpoint as a warning (gt-zou1n).
 func TestWaitForDoltReady_NoServerMode(t *testing.T) {
 	t.Parallel()
 	var warn bytes.Buffer
-	waitForDoltReady(t.TempDir(), &warn)
+	probed := false
+	waitForDoltReady(t.TempDir(), &warn, func(string, time.Duration) error {
+		probed = true
+		return errors.New("the probe ran")
+	})
+	if probed {
+		t.Fatal("a town with no server mode ran the readiness probe")
+	}
 	if warn.Len() != 0 {
 		t.Fatalf("a town with no server mode warned: %q", warn.String())
 	}
