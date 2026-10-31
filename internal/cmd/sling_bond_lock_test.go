@@ -133,6 +133,7 @@ func TestBondSerializesAcrossProcesses(t *testing.T) {
 
 	select {
 	case <-contended:
+	//testpolicy:allow no-sleep — bound the wait for a bond contending on the lock, which fails rather than hangs
 	case <-time.After(5 * time.Second):
 		t.Fatal("the second bond never waited for the town lock while the first held it")
 	}

@@ -997,7 +997,7 @@ func (f formulaBD) bondNow() time.Time {
 // bondSleep pauses the lock wait or the contention backoff.
 func (f formulaBD) bondSleep(d time.Duration) {
 	if f.sleep == nil {
-		time.Sleep(d)
+		bdContentionSleep(d)
 		return
 	}
 	f.sleep(d)
