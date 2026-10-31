@@ -659,6 +659,13 @@ func buildRigSeats(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Dura
 // uses it so the state it prints comes out of the same row builder `gt polecat
 // list` renders, not a second derivation that can disagree (gt-aj7).
 func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Duration, now time.Time, only string) []polecatSeat {
+	return buildRigSeatsOn(beads.New(r.Path), r, sessions, spawnWindow, now, only)
+}
+
+// buildRigSeatsOn is buildRigSeatsFor reading through bd, the rig's beads
+// wrapper. The build is the same; the caller passes the wrapper in so a test can
+// run every bd call of the build through the wrapper's runner.
+func buildRigSeatsOn(bd *beads.Beads, r *rig.Rig, sessions polecatSessionSet, spawnWindow time.Duration, now time.Time, only string) []polecatSeat {
 	// The filesystem read and the session filter are the two cheap facts that
 	// decide whether this rig has anything to report. Both are local (a
 	// directory listing, an in-memory lookup), so they come first: the
@@ -678,8 +685,6 @@ func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.D
 	if len(polecatNames) == 0 && len(sessionPolecats) == 0 {
 		return nil
 	}
-
-	bd := beads.New(r.Path)
 
 	preloadRigSeats(os.Stderr, bd, r.Name)
 

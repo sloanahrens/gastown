@@ -1,12 +1,17 @@
 package cmd
 
 import (
-	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // trackerRouteRig lays out a town whose one route puts rig gastown on the
@@ -41,21 +46,39 @@ func trackerRouteRig(t *testing.T) string {
 }
 
 // TestPolecatListTrackerRigWarnsNoPreload is gt-p85pw.108: on a rig the route
-// table puts on the tracker, `gt polecat list`'s preload used to fail and warn
-// once per rig, because the read behind it is a bd sql call and there is no bd
-// on a tracker rig. The preload now warms nothing there and says nothing.
+// table puts on the tracker, `gt polecat list`'s seat build used to run a bd sql
+// preload that failed and warned once per rig, because there is no bd on a
+// tracker rig. The preload now reads nothing there, so the build sends no sql
+// read to bd and warns nothing.
 //
-// The warning is the preload's error printed at its call site, so an empty
-// buffer is the whole claim: nothing failed. The Dolt-rig half — that the
-// preload still reads exactly as before — is pinned in internal/beads, where a
-// recorded bd can be watched without a store behind it.
+// It drives buildRigSeatsOn, the per-rig seat build `gt polecat list` runs
+// through buildRigSeats, with a beads wrapper whose runner records and refuses
+// every bd call. The build writes its warnings to os.Stderr, so the claim is
+// read off the calls: a preload that warns has first made a bd sql read. The
+// Dolt-rig half — that the preload still reads exactly as before — is pinned in
+// internal/beads.
 func TestPolecatListTrackerRigWarnsNoPreload(t *testing.T) {
 	t.Parallel()
-	var warn bytes.Buffer
+	rigPath := trackerRouteRig(t)
+	// One polecat directory, so the build does not return before its reads.
+	if err := os.MkdirAll(filepath.Join(rigPath, "polecats", "nux"), 0o755); err != nil {
+		t.Fatalf("lay out a polecat: %v", err)
+	}
 
-	preloadRigSeats(&warn, beads.New(trackerRouteRig(t)), "gastown")
+	var mu sync.Mutex
+	var calls [][]string
+	bd := beads.New(rigPath, beads.WithDirRunner(func(_ context.Context, _ string, args []string) ([]byte, []byte, error) {
+		mu.Lock()
+		calls = append(calls, args)
+		mu.Unlock()
+		return nil, nil, errors.New("bd must not run on a tracker rig")
+	}))
 
-	if got := warn.String(); got != "" {
-		t.Fatalf("gt polecat list warned on a tracker rig: %q, want no preload warning", got)
+	buildRigSeatsOn(bd, &rig.Rig{Name: "gastown", Path: rigPath}, nil, time.Minute, time.Now(), "")
+
+	for _, args := range calls {
+		if slices.Contains(args, "sql") {
+			t.Fatalf("gt polecat list read bd sql on a tracker rig: bd %v", args)
+		}
 	}
 }
