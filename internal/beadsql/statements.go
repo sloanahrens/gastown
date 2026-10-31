@@ -511,3 +511,31 @@ func BackupTable(database, table string) Query {
 	}
 	return declared(fmt.Sprintf("SELECT * FROM `%s`.`%s` ORDER BY 1", database, table))
 }
+
+// eventsTimestamp matches the forms Dolt emits for a datetime column (the two
+// internal/tracker/migrate/rows.go parses), so a boundary read back from an
+// exported row can be compared against the column as a literal.
+var eventsTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})?$`)
+
+// TimestampLiteral reports whether s is a created_at value BackupEvents accepts
+// as its bound.
+func TimestampLiteral(s string) bool { return eventsTimestamp.MatchString(s) }
+
+// BackupEvents reads every column of database's events table for the JSONL
+// backup, ordered by created_at, id: the indexed column, then the id, is the
+// order an appended export file holds (gt-l7eeb). A since that is not a
+// timestamp is refused rather than spliced in, because a literal Dolt cannot
+// compare would match no row and read as "nothing new".
+func BackupEvents(database, since string) Query {
+	if err := ident(database); err != nil {
+		return Query{err: err}
+	}
+	text := "SELECT * FROM `" + database + "`.events"
+	if since != "" {
+		if !TimestampLiteral(since) {
+			return Query{err: fmt.Errorf("beadsql: invalid events bound %q", since)}
+		}
+		text += " WHERE created_at >= " + quote(since)
+	}
+	return declared(text + " ORDER BY created_at, id")
+}
