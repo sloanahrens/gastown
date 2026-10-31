@@ -4,6 +4,7 @@ package forgejocut
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,12 +51,26 @@ func refMap(t *testing.T, dir, url string) map[string]string {
 }
 
 // isAncestorTest reports whether a is b or an ancestor of b in the repository at
-// dir, through real git.
-func isAncestorTest(dir, a, b string) bool {
+// dir, through real git under the test's git deadline. git answering "no" is exit
+// status 1; any other failure is a read git could not answer, which fails the test
+// instead of reading as a ref that moved.
+func isAncestorTest(t *testing.T, dir, a, b string) bool {
+	t.Helper()
 	if a == b {
 		return true
 	}
-	return exec.Command("git", "-C", dir, "merge-base", "--is-ancestor", a, b).Run() == nil
+	ctx, cancel := context.WithTimeout(context.Background(), gitTestTimeout)
+	defer cancel()
+	err := exec.CommandContext(ctx, "git", "-C", dir, "merge-base", "--is-ancestor", a, b).Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return true
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+		return false
+	}
+	t.Fatalf("git merge-base --is-ancestor %s %s: %v", a, b, err)
+	return false
 }
 
 // TestIntegrationImportFiveOutcomes runs the import with real git against two
@@ -143,7 +158,7 @@ func TestIntegrationImportFiveOutcomes(t *testing.T) {
 		t.Fatalf("Forgejo refs = %v, want %v", after, want)
 	}
 	for name, sha := range before {
-		if !isAncestorTest(fj, sha, after[name]) {
+		if !isAncestorTest(t, fj, sha, after[name]) {
 			t.Fatalf("%s moved backwards: it held %s and now holds %s", name, sha, after[name])
 		}
 	}

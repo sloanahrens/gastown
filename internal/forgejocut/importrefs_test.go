@@ -144,6 +144,11 @@ func afterSeparator(t *testing.T, argv []string) []string {
 	return argv[i+1:]
 }
 
+// fakeScratchRoot is the scratch path the fake MkdirTemp answers. The import only
+// joins it into git argvs and the runner is a fake, so the unit tier writes
+// nothing to the filesystem.
+const fakeScratchRoot = "/fake-scratch/forgejo-cutover.unit"
+
 // newImportCutover is a Cutover over the fake, with the options an import reads
 // and a log that keeps every line.
 func newImportCutover(t *testing.T, git *importGitFake, opts Options) (*Cutover, *[]string) {
@@ -153,7 +158,7 @@ func newImportCutover(t *testing.T, git *importGitFake, opts Options) (*Cutover,
 		Opts:      &opts,
 		Git:       git.run,
 		Log:       func(line string) { *logs = append(*logs, line) },
-		MkdirTemp: func(_, _ string) (string, error) { return t.TempDir(), nil },
+		MkdirTemp: func(_, _ string) (string, error) { return fakeScratchRoot, nil },
 		RemoveAll: func(string) error { return nil },
 	}, logs
 }
@@ -237,8 +242,10 @@ func TestImportNeverForces(t *testing.T) {
 		t.Fatalf("the push carried %q, want %q", after[1:], want)
 	}
 
-	// Both sides are read and written through the admin base: --forgejo-url is the
-	// credential-helper form the bots cannot reach before provisioning.
+	// The import's own git work rides the admin base, the web root where the
+	// operator's admin credentials apply, and never --forgejo-url: that is the
+	// hostname form written to the rig, which the bots reach through their
+	// credential helper only once provisioning has run.
 	for _, argv := range git.calls {
 		if slices.Contains(argv, opts.ForgejoURL) {
 			t.Fatalf("the import used the hostname form: %q", argv)
@@ -415,6 +422,362 @@ func TestImportDryRunPushesNothingAndPrintsThePlan(t *testing.T) {
 	for _, line := range *logs {
 		if strings.Contains(line, "imported every GitHub ref") {
 			t.Fatalf("the dry run claimed an import: %q", line)
+		}
+	}
+}
+
+// testToken stands in for the credential an operator-supplied remote can carry in
+// its userinfo.
+const testToken = "s3cr3t-admin-token"
+
+// tokenOpts is importOpts with that credential in both sides' git URLs, so a line
+// or a refusal that prints either side shows it unless it redacts the URL.
+func tokenOpts() Options {
+	opts := importOpts()
+	opts.GitHubURL = "https://x-access-token:" + testToken + "@github.example/acme/rig.git"
+	opts.AdminGitURL = "http://bot:" + testToken + "@127.0.0.1:3000/acme/rig.git"
+	return opts
+}
+
+// TestImportNeverPrintsTheToken pins that neither a log line nor a refusal carries
+// the credential a URL's userinfo holds, over the runs that print a URL and the
+// ones that refuse on it. A log line that prints its URL whole turns a case red.
+func TestImportNeverPrintsTheToken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		staged   func(Options) map[string][]lsReply
+		fail     string // the subcommand that fails, "" for none
+		wantErr  bool
+		wantLine string // a line the run must print, its URL redacted
+	}{
+		{
+			name:     "a run that imports",
+			staged:   convergedListings,
+			wantLine: "importing every GitHub ref through http://127.0.0.1:3000/acme/rig.git without force",
+		},
+		{
+			name: "a GitHub listing that fails",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{opts.GitHubURL: {lsFails(errExit)}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "a listing that is not ref pairs",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{opts.GitHubURL: {lsOK("refs/heads/main\n")}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "the admin base's listing that fails",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{
+					opts.GitHubURL:   {lsOK(stagedAnswers().github)},
+					opts.AdminGitURL: {lsFails(errExit)},
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name:    "a fetch that fails",
+			staged:  convergedListings,
+			fail:    "fetch",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := tokenOpts()
+			git := newImportGitFake(tt.staged(opts))
+			git.ancestor = map[string]bool{shaMiddle + ">" + shaTip: true}
+			git.ahead = map[string]string{shaMiddle + ">" + shaTip: "2"}
+			if tt.fail != "" {
+				git.fail = map[string]error{tt.fail: errExit}
+			}
+			c, logs := newImportCutover(t, git, opts)
+
+			err := c.ImportRefs()
+			if tt.wantErr && err == nil {
+				t.Fatalf("the failing call did not refuse the run; %d log line(s)", len(*logs))
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatal("a healthy run was refused; want no error")
+			}
+			// Neither the line nor the error is printed on a failure: either one
+			// can hold the credential this test is about.
+			for i, line := range *logs {
+				if strings.Contains(line, testToken) {
+					t.Fatalf("log line %d carries the URL's credential", i)
+				}
+			}
+			if err != nil && strings.Contains(err.Error(), testToken) {
+				t.Fatal("the refusal carries the URL's credential")
+			}
+			if tt.wantLine != "" && !slices.Contains(*logs, tt.wantLine) {
+				t.Fatalf("the run did not print %q, its URL redacted; %d log line(s)", tt.wantLine, len(*logs))
+			}
+		})
+	}
+}
+
+// queryToken stands in for a token an operator-supplied remote carries in its query
+// string, which printedURL drops with the query.
+const queryToken = "query-token-value"
+
+// redactionOpts is tokenOpts with the query token in both sides' git URLs.
+func redactionOpts() Options {
+	opts := tokenOpts()
+	opts.GitHubURL += "?token=" + queryToken
+	opts.AdminGitURL += "?token=" + queryToken
+	return opts
+}
+
+// errGitRefused is the sentinel a fake git call fails with. A test matches it
+// through errors.Is after the error is redacted.
+var errGitRefused = errors.New("git refused the call")
+
+// gitErrPrints is the error a git call fails with when git prints the URL it was
+// given, the way the binary does, wrapping errGitRefused.
+func gitErrPrints(raw string) error {
+	return fmt.Errorf("fatal: unable to access '%s': %w", raw, errGitRefused)
+}
+
+// TestImportRedactsGitErrorText pins that a git error which prints a URL with its
+// password and query token reaches neither the returned error nor the log, and that
+// the returned error still matches the git error it wraps. Each row drives one call
+// site a git error leaves through, so a call site that returns past the scrub turns
+// its row red.
+func TestImportRedactsGitErrorText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		staged func(Options) map[string][]lsReply
+		fail   string // the subcommand whose call fails with a URL-bearing error, "" for none
+	}{
+		{
+			name: "the GitHub listing's git error",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{opts.GitHubURL: {lsFails(gitErrPrints(opts.GitHubURL))}}
+			},
+		},
+		{
+			name: "the admin base listing's git error",
+			staged: func(opts Options) map[string][]lsReply {
+				return map[string][]lsReply{
+					opts.GitHubURL:   {lsOK(stagedAnswers().github)},
+					opts.AdminGitURL: {lsFails(gitErrPrints(opts.AdminGitURL))},
+				}
+			},
+		},
+		{
+			name:   "the scratch repository's git error",
+			staged: convergedListings,
+			fail:   "init",
+		},
+		{
+			name:   "the fetch's git error",
+			staged: convergedListings,
+			fail:   "fetch",
+		},
+		{
+			name:   "the push's git error",
+			staged: convergedListings,
+			fail:   "push",
+		},
+		{
+			name:   "the plan's git error",
+			staged: convergedListings,
+			fail:   "merge-base",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := redactionOpts()
+			git := newImportGitFake(tt.staged(opts))
+			git.ancestor = map[string]bool{shaMiddle + ">" + shaTip: true}
+			git.ahead = map[string]string{shaMiddle + ">" + shaTip: "2"}
+			if tt.fail != "" {
+				git.fail = map[string]error{tt.fail: gitErrPrints(opts.AdminGitURL)}
+			}
+			c, logs := newImportCutover(t, git, opts)
+
+			err := c.ImportRefs()
+			if err == nil {
+				t.Fatalf("the failing git call did not refuse the run; %d log line(s)", len(*logs))
+			}
+			if !errors.Is(err, errGitRefused) {
+				t.Fatal("the refusal no longer matches the git error it wraps")
+			}
+			secrets := []string{testToken, queryToken, opts.GitHubURL, opts.AdminGitURL}
+			for _, secret := range secrets {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("the refusal carries %q", secret)
+				}
+			}
+			for i, line := range *logs {
+				for _, secret := range secrets {
+					if strings.Contains(line, secret) {
+						t.Fatalf("log line %d carries %q", i, secret)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The credentials below hold characters a URL must percent-encode, beside what a
+// parse hands back for them. git echoes a URL as written, so an error text holds the
+// encoded form.
+const (
+	encodedPassword = "p%40ss%3Aword"
+	decodedPassword = "p@ss:word"
+	encodedQuery    = "tok%2Fen%3Dvalue"
+	decodedQuery    = "tok/en=value"
+)
+
+// restatedURL is a URL as a remote's own message can restate it, without its ".git"
+// suffix, so the raw URL is not in the text and the scrub has to find the credential
+// on its own.
+func restatedURL(raw string) string {
+	return strings.Replace(strings.TrimSuffix(raw, ".git"), ".git?", "?", 1)
+}
+
+// gitErrRestates is a git error that prints the URL it was given, restatedURL's
+// form, wrapping errGitRefused.
+func gitErrRestates(raw string) error {
+	return fmt.Errorf("fatal: unable to access '%s': %w", restatedURL(raw), errGitRefused)
+}
+
+// TestImportRedactsPercentEncodedCredential pins that a credential reaches neither
+// the refusal nor the log in the form a URL writes it, which is the form git echoes
+// and the form a percent-decoding scrub misses.
+func TestImportRedactsPercentEncodedCredential(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		url     string
+		secrets []string // the credential, as the URL writes it and as a parse hands it back
+	}{
+		{
+			name:    "a password in the userinfo",
+			url:     "https://bot:" + encodedPassword + "@github.example/acme/rig.git",
+			secrets: []string{encodedPassword, decodedPassword},
+		},
+		{
+			name:    "a value in the query",
+			url:     "https://github.example/acme/rig.git?token=" + encodedQuery,
+			secrets: []string{encodedQuery, decodedQuery},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := importOpts()
+			opts.GitHubURL = tt.url
+			git := newImportGitFake(map[string][]lsReply{
+				opts.GitHubURL: {lsFails(gitErrRestates(opts.GitHubURL))},
+			})
+			c, logs := newImportCutover(t, git, opts)
+
+			err := c.ImportRefs()
+			if err == nil {
+				t.Fatalf("the failing listing did not refuse the run; %d log line(s)", len(*logs))
+			}
+			for _, secret := range tt.secrets {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("the refusal carries %q as written in the URL", secret)
+				}
+				for i, line := range *logs {
+					if strings.Contains(line, secret) {
+						t.Fatalf("log line %d carries %q as written in the URL", i, secret)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestImportPrintsASchemeLessURLWithoutItsCredential pins that a URL written without
+// a scheme, the form a bare repository's origin can hold, loses its userinfo and its
+// query where the run prints it, as a URL with a scheme does.
+func TestImportPrintsASchemeLessURLWithoutItsCredential(t *testing.T) {
+	t.Parallel()
+	opts := importOpts()
+	opts.GitHubURL = "bot:" + testToken + "@github.example/acme/rig.git?token=" + queryToken
+	git := newImportGitFake(map[string][]lsReply{
+		opts.GitHubURL: {lsFails(gitErrPrints(opts.GitHubURL))},
+	})
+	c, logs := newImportCutover(t, git, opts)
+
+	err := c.ImportRefs()
+	if err == nil {
+		t.Fatalf("the failing listing did not refuse the run; %d log line(s)", len(*logs))
+	}
+	for i, line := range *logs {
+		for _, secret := range []string{testToken, queryToken} {
+			if strings.Contains(line, secret) {
+				t.Fatalf("log line %d carries %q", i, secret)
+			}
+		}
+	}
+	for _, secret := range []string{testToken, queryToken} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("the refusal carries %q", secret)
+		}
+	}
+}
+
+// TestImportKeepsProseWhenTheCredentialIsShort pins that a short query value is taken
+// out where it sits in a URL and nowhere else: substituting it through the whole
+// message would rewrite the words around it.
+func TestImportKeepsProseWhenTheCredentialIsShort(t *testing.T) {
+	t.Parallel()
+	const shortToken = "o"
+	opts := importOpts()
+	opts.GitHubURL = "https://github.example/acme/rig.git?t=" + shortToken
+	git := newImportGitFake(map[string][]lsReply{
+		opts.GitHubURL: {lsFails(fmt.Errorf("fatal: token looked wrong for '%s': %w",
+			restatedURL(opts.GitHubURL), errGitRefused))},
+	})
+	c, logs := newImportCutover(t, git, opts)
+
+	err := c.ImportRefs()
+	if err == nil {
+		t.Fatalf("the failing listing did not refuse the run; %d log line(s)", len(*logs))
+	}
+	if !strings.Contains(err.Error(), "token looked wrong") {
+		t.Fatalf("the scrub rewrote the message around the credential: %q", err)
+	}
+	if strings.Contains(err.Error(), "?t="+shortToken) {
+		t.Fatalf("the refusal carries the URL's query value: %q", err)
+	}
+}
+
+// TestImportRedactedRefusalKeepsNoUnredactedCause pins that the error a refusal was
+// made from is not reachable by unwrapping it, since its text is what the scrub took
+// out, and that errors.Is still matches the git error through the refusal.
+func TestImportRedactedRefusalKeepsNoUnredactedCause(t *testing.T) {
+	t.Parallel()
+	opts := redactionOpts()
+	git := newImportGitFake(map[string][]lsReply{
+		opts.GitHubURL: {lsFails(gitErrPrints(opts.GitHubURL))},
+	})
+	c, _ := newImportCutover(t, git, opts)
+
+	err := c.ImportRefs()
+	if err == nil {
+		t.Fatal("the failing listing did not refuse the run")
+	}
+	if !errors.Is(err, errGitRefused) {
+		t.Fatal("the refusal no longer matches the git error it wraps")
+	}
+	for cause := errors.Unwrap(err); cause != nil; cause = errors.Unwrap(cause) {
+		if strings.Contains(cause.Error(), testToken) {
+			t.Fatalf("unwrapping the refusal reaches an error that carries the credential: %q", cause)
 		}
 	}
 }
