@@ -182,6 +182,11 @@ type Daemon struct {
 	// routed bd. Tests answer from a beadsfake.
 	openOverrunBeads func() overrunHandBackStore
 
+	// readSandboxRecord reads the sandbox record of a session (see
+	// readSandboxRecordFor); nil reads session.ReadSandboxRecord. Tests
+	// inject a counting reader so a step that reads the record twice fails.
+	readSandboxRecord func(townRoot, session string) (session.SandboxRecord, bool, error)
+
 	// sandboxExists asks a gateway whether it has a sandbox of that name (see
 	// patrolScanHost.sandboxStillExists); nil asks the real gateway. Tests
 	// answer from a stub.

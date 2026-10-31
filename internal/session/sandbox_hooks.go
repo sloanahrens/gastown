@@ -45,6 +45,13 @@ func CleanupSandboxWith(deleter func(townRoot string, rec SandboxRecord) error, 
 	if !ok {
 		return nil
 	}
+	return CleanupSandboxWithRecord(deleter, townRoot, session, rec)
+}
+
+// CleanupSandboxWithRecord is CleanupSandboxWith for a caller that already read
+// the record: the same deletion over rec, without reading it again, so the
+// sandbox removed is the one the caller saw.
+func CleanupSandboxWithRecord(deleter func(townRoot string, rec SandboxRecord) error, townRoot, session string, rec SandboxRecord) error {
 	if deleter != nil {
 		if err := deleter(townRoot, rec); err != nil {
 			return fmt.Errorf("deleting sandbox %s: %w", session, err)
