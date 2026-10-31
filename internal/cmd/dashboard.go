@@ -418,6 +418,10 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	polecatTimes := spanPolecatTimes(townRoot)
 	om := newOMReader(townRoot, recs, polecatFor)
 	models := newModelsReader(townRoot)
+	// The operator's dispatch hold file, for the header's chip: it is a stat
+	// and the file's first line, so it keeps the minute clock the other slow
+	// readers use.
+	hold := dashboard.NewHoldReader(townRoot)
 	tierSweeps := newTierSweepReader(townRoot)
 	escalations := newDashEscalationReader(townRoot)
 	backoff := newDashBackoff(townRoot)
@@ -474,6 +478,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		NeedsHuman:     attentionScoreReader.Scores,
 		LandingRisk:    landingRiskReader.Risks,
 		Models:         models.read,
+		Hold:           func() *dashboard.Hold { return hold.Read(time.Now()) },
 		SeatRoster:     func() dashboard.SeatRoster { return dashboardSeatRoster(poolLiveFor(townRoot)) },
 		Queue:          func() *dashboard.Queue { return queue.read(time.Now()) },
 		Bead:           queue.detail,
