@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -228,4 +229,75 @@ func TestHubLateSubscriberGetsBothListsAndTheStateWithoutThem(t *testing.T) {
 	assert.Len(t, whole.Trend.Recent, 1, "/api/state lost trend.recent")
 	assert.Len(t, whole.Queue.Ready, 1, "/api/state lost queue.ready")
 	assert.Len(t, whole.Queue.Blocked, 1, "/api/state lost queue.blocked")
+}
+
+// fieldNames is the sorted keys of a JSON object.
+func fieldNames(m map[string]any) []string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// The list events carry every field a row has in /api/state, so a row loses no
+// information when it leaves the state frame. Each row is fully populated, so the
+// omitempty fields are in the comparison too (gt-6ecd0).
+func TestHubListEventRowsCarryEveryFieldOfTheirStateRows(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	score, secs := 0.9, 12.5
+	bead := QueueBead{
+		ID: "gt-1", Rig: "gastown", Title: "t", Type: "task", Status: "open",
+		Assignee: "warboy", Priority: 2, Labels: []string{"l"}, CreatedAt: now,
+		UpdatedAt: now, BlockedBy: []string{"gt-0"}, RigParked: true,
+	}
+	blocked := bead
+	blocked.Wisp = true
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		Trend: func() *Trend {
+			return &Trend{Recent: []LandingRow{{
+				At: now, Bead: "gt-9", Rig: "gastown", Title: "t", Polecat: "warboy", Crew: true,
+				Outcome: "rejected", Verdict: "error", Kind: "gate", Score: &score,
+				LintSecs: &secs, GateSecs: &secs, OMSecs: &secs, ShipSecs: &secs,
+			}}}
+		},
+		Queue: func() *Queue {
+			return &Queue{At: now, Ready: []QueueBead{bead}, ReadyTotal: 1, Blocked: []QueueBead{blocked}, BlockedTotal: 1}
+		},
+	})
+	h.pollTrend()
+	h.pollQueue()
+
+	page, initial := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	req := httptest.NewRequest("GET", "http://localhost/api/state", nil)
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var whole map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &whole))
+
+	for _, c := range []struct{ event, section, list string }{
+		{"trend.recent", "trend", "recent"},
+		{"queue.ready", "queue", "ready"},
+		{"queue.blocked", "queue", "blocked"},
+	} {
+		section, _ := whole[c.section].(map[string]any)
+		rows, _ := section[c.list].([]any)
+		require.NotEmpty(t, rows, "/api/state has no %s.%s row", c.section, c.list)
+		want := fieldNames(rows[0].(map[string]any))
+
+		data, ok := frameData(initial, c.event)
+		require.True(t, ok, "%s is not in the first frames", c.event)
+		var listed []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(data), &listed))
+		require.NotEmpty(t, listed, "%s carries no rows", c.event)
+
+		assert.Equal(t, want, fieldNames(listed[0]), "a %s row lost a field /api/state's %s.%s row has", c.event, c.section, c.list)
+	}
 }
