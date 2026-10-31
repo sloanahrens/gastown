@@ -367,6 +367,10 @@ func assignmentValue(text string, pos int) (end int, quoted bool) {
 			if strings.Contains(text[pos:i], "[REDACTED:") {
 				// A bracket that closes an earlier marker does not end the value:
 				// the tail after it is still the credential, so take the whole word.
+				// No terminator ends it either: a password may hold a comma, and a
+				// query string's & does not restart the value, so only whitespace
+				// stops the scan. A tail that was not credential text is therefore
+				// over-redacted, the accepted cost of never letting a secret out.
 				return wordEnd(text, i), false
 			}
 			return i, false
