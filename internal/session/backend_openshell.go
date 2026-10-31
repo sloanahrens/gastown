@@ -720,6 +720,13 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	if spec.Rig == "" || spec.Polecat == "" || spec.Branch == "" || spec.RepoURL == "" {
 		return nil, fmt.Errorf("sandbox %s: spec needs rig, polecat, branch and repo URL", spec.Session)
 	}
+	// The record's workspace id, resolved before anything is pushed or
+	// created: a workspace map this town cannot read leaves nothing behind
+	// (plan row M5).
+	workspaceID, err := sandboxRecordWorkspace(b.townRoot, spec.Rig)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
+	}
 	// Resolved before anything is pushed or created: a tracker-routed rig's seat
 	// has its token file by the time the runtime archive stages it, and a route
 	// that cannot be read or a token that cannot be issued leaves nothing behind
@@ -825,7 +832,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	}
 
 	workDir := path.Join(sandboxTownRoot, rel)
-	if err := b.populate(ctx, spec, workDir, redirectTarget(rel), staged); err != nil {
+	if err := b.populate(ctx, spec, workDir, redirectTarget(rel), workspaceID, staged); err != nil {
 		return nil, b.rollback(spec, err, spec.Trace)
 	}
 
@@ -842,7 +849,7 @@ type stagedArchives struct {
 // populate runs everything between the create and the record: wait for
 // Ready, extract the skeleton, clone, extract the runtime files, write the
 // redirect, and record the sandbox so the tmux router sends its commands here.
-func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir, redirect string, files stagedArchives) error {
+func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir, redirect, workspaceID string, files stagedArchives) error {
 	if err := spec.Trace.Phase("ready", func() error { return b.awaitReady(ctx, spec.Session) }); err != nil {
 		return err
 	}
@@ -892,6 +899,7 @@ func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir
 			Session:   spec.Session,
 			Rig:       spec.Rig,
 			Polecat:   spec.Polecat,
+			Workspace: workspaceID,
 			Gateway:   b.profile.Gateway,
 			Profile:   b.profile.Name,
 			Image:     b.profile.Image,
