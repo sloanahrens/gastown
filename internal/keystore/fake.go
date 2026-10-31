@@ -3,6 +3,7 @@ package keystore
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -113,6 +114,25 @@ func (f *Fake) Destroy(ctx context.Context, workspace, name string, rev Revision
 	}
 	delete(f.keys[keyRef{workspace: workspace, name: name}].revs, rev)
 	return nil
+}
+
+// Revisions lists the key's surviving revisions in ascending order.
+func (f *Fake) Revisions(ctx context.Context, workspace, name string) ([]RevisionInfo, error) {
+	if err := checkKey(ctx, workspace, name); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	entry := f.keys[keyRef{workspace: workspace, name: name}]
+	if entry == nil {
+		return []RevisionInfo{}, nil
+	}
+	infos := make([]RevisionInfo, 0, len(entry.revs))
+	for rev, r := range entry.revs {
+		infos = append(infos, RevisionInfo{Revision: rev, Enabled: r.enabled})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Revision < infos[j].Revision })
+	return infos, nil
 }
 
 // revision looks up one revision. The caller holds the lock.

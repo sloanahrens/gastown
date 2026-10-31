@@ -40,6 +40,19 @@ type Store interface {
 
 	// Destroy deletes revision rev, so no read returns it again.
 	Destroy(ctx context.Context, workspace, name string, rev Revision) error
+
+	// Revisions lists the revisions of workspace/name that Destroy has not
+	// deleted, lowest number first, each with whether Get may still read it. A
+	// key with no revision yields an empty list and no error. The state it
+	// reports is the store's own, so a process that did not write a revision, or
+	// one restarted since, reads the same answer.
+	Revisions(ctx context.Context, workspace, name string) ([]RevisionInfo, error)
+}
+
+// RevisionInfo is one surviving revision of a key and whether Get may read it.
+type RevisionInfo struct {
+	Revision Revision
+	Enabled  bool
 }
 
 var (
