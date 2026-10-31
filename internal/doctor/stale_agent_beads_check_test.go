@@ -2,6 +2,9 @@ package doctor
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +14,31 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
+
+// TestStaleAgentBeadsCheckRunDocComment reads the check's own source and
+// asserts the doc comment describing the check sits on Run, and not on the
+// helper agentWispsFromStore above which a stray copy of it used to sit.
+func TestStaleAgentBeadsCheckRunDocComment(t *testing.T) {
+	t.Parallel()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "stale_agent_beads_check.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse stale_agent_beads_check.go: %v", err)
+	}
+	docs := map[string]string{}
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			docs[fn.Name.Name] = fn.Doc.Text()
+		}
+	}
+	const runDoc = "Run checks for agent beads that have no matching agent on disk."
+	if got := docs["Run"]; !strings.HasPrefix(got, runDoc) {
+		t.Errorf("Run doc = %q, want it to open with %q", got, runDoc)
+	}
+	if got := docs["agentWispsFromStore"]; strings.Contains(got, runDoc) {
+		t.Errorf("agentWispsFromStore doc carries the Run description: %q", got)
+	}
+}
 
 func TestNewStaleAgentBeadsCheck(t *testing.T) {
 	t.Parallel()
