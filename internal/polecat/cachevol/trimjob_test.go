@@ -1055,3 +1055,58 @@ func TestTrimStaleTable(t *testing.T) {
 		})
 	}
 }
+
+// TestTrimJobSelectsAndToleratesThePool pins the placement both trim routes carry: the shard route's
+// Job and the claim route's Job render the sandbox pool's node label and its toleration, since a
+// trim's pod mounts the same claim a sandbox does and cannot run anywhere else (gt-5paez).
+func TestTrimJobSelectsAndToleratesThePool(t *testing.T) {
+	t.Parallel()
+	selector := map[string]string{"gt.dev/pool": "sandbox"}
+	tolerations := []Toleration{{Key: "gt.dev/pool", Operator: "Equal", Value: "sandbox", Effect: "NoSchedule"}}
+
+	shardInput := trimInput()
+	shardInput.NodeSelector = selector
+	shardInput.Tolerations = tolerations
+
+	claimInput := trimInput()
+	claimInput.CapBytes = 0
+	claimInput.Listing = shardPerPathListing(TrimMaxShards + 1)
+	claimInput.NodeSelector = selector
+	claimInput.Tolerations = tolerations
+
+	tests := []struct {
+		name  string
+		in    TrimJobInput
+		route TrimRoute
+	}{
+		{name: "shards", in: shardInput, route: TrimRouteShards},
+		{name: "claim", in: claimInput, route: TrimRouteClaim},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := buildTrim(t, tc.in)
+			if got := m.Route(); got != tc.route {
+				t.Fatalf("route = %v, want %v", got, tc.route)
+			}
+			pod := m.jobs()[0].Spec.Template.Spec
+			if !reflect.DeepEqual(pod.NodeSelector, selector) {
+				t.Errorf("nodeSelector = %v, want %v", pod.NodeSelector, selector)
+			}
+			if !reflect.DeepEqual(pod.Tolerations, tolerations) {
+				t.Errorf("tolerations = %+v, want %+v", pod.Tolerations, tolerations)
+			}
+			// The applied document has to carry them too: the spec alone proves nothing about what
+			// reaches the cluster.
+			var doc TrimJob
+			if err := json.Unmarshal(m.Documents()[len(m.Documents())-1], &doc); err != nil {
+				t.Fatalf("the last document is not the Job: %v", err)
+			}
+			if !reflect.DeepEqual(doc.Spec.Template.Spec.NodeSelector, selector) ||
+				!reflect.DeepEqual(doc.Spec.Template.Spec.Tolerations, tolerations) {
+				t.Errorf("the document's pod spec = nodeSelector %v tolerations %+v, want %v and %+v",
+					doc.Spec.Template.Spec.NodeSelector, doc.Spec.Template.Spec.Tolerations, selector, tolerations)
+			}
+		})
+	}
+}

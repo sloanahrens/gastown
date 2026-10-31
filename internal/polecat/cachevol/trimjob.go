@@ -72,6 +72,10 @@ type TrimJobInput struct {
 	// SandboxesRunning is the caller's count of running sandboxes: PlanTrim leaves the module cache
 	// alone while any runs, and nothing here asks the cluster how many there are.
 	SandboxesRunning int
+	// NodeSelector and Tolerations place the pod on the pool that mounts the claim, from the
+	// sandbox profile that owns it; empty leaves the placement to the cluster (gt-5paez).
+	NodeSelector map[string]string
+	Tolerations  []Toleration
 }
 
 // TrimJob is the trim Job as the values kubectl applies: a Job document, so it carries SeedJob's
@@ -271,6 +275,8 @@ func trimJobDocument(in TrimJobInput, name string, annotations map[string]string
 				Metadata: TemplateMeta{Labels: trimLabels()},
 				Spec: PodSpec{
 					RestartPolicy: "Never",
+					NodeSelector:  in.NodeSelector,
+					Tolerations:   in.Tolerations,
 					SecurityContext: &PodSecurityContext{
 						RunAsUser:  int64Ptr(SeedUserID),
 						RunAsGroup: int64Ptr(SeedUserID),

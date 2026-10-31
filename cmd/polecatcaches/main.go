@@ -28,11 +28,14 @@ func main() {
 }
 
 // deps is the command's outside world: the pins file, each rig's Forgejo
-// remote, and the kubectl call. Unit tests replace all three, so no test reads
-// a file, a town config or the cluster.
+// remote, the town's sandbox profiles, and the kubectl call. Unit tests replace
+// all four, so no test reads a file, a town config or the cluster.
 type deps struct {
 	readFile  func(path string) ([]byte, error)
 	remoteURL func(rigName string) (string, error)
+	// profiles returns the town's sandbox profiles, the source of the seed
+	// Job's pod placement.
+	profiles func(townRoot string) (map[string]config.SandboxProfile, error)
 	// kubectl runs kubectl with args, feeding stdin to it, and returns its
 	// standard output. A failure's error names the command and never its
 	// output, which goes straight to the terminal so nothing captured can
@@ -76,6 +79,7 @@ func runWith(args []string, out, errw io.Writer, d deps) int {
 	town := fs.String("town", "", "the town root whose rigs hold the Forgejo remotes the Job clones")
 	image := fs.String("image", "", "the polecat image tag the Job's containers run")
 	claim := fs.String("claim", "gt-cache", "the PersistentVolumeClaim the Job fills")
+	sandbox := fs.String("sandbox", "", "the sandbox profile that owns the claim: its node_selector and tolerations place the Job's pod; empty leaves the pod to the cluster, right only for a plain cluster")
 	namespace := fs.String("namespace", "", "the Job's namespace; empty uses the kubectl context's namespace")
 	name := fs.String("name", "", "the Job's name; empty uses the builder's default")
 	forgejoHost := fs.String("forgejo-host", "", "the host[:port] the Job clones from; empty keeps each rig's configured host")
@@ -93,18 +97,28 @@ func runWith(args []string, out, errw io.Writer, d deps) int {
 	if d.remoteURL == nil {
 		d.remoteURL = func(rigName string) (string, error) { return forgejoRemote(*town, rigName) }
 	}
+	if d.profiles == nil {
+		d.profiles = townSandboxProfiles
+	}
 
 	pins, code := resolvePins(fs.Args(), *pinsPath, *forgejoHost, errw, d)
 	if code != 0 {
 		return code
 	}
 
+	nodeSelector, tolerations, ok := seedPlacement(*town, *sandbox, *claim, errw, d)
+	if !ok {
+		return 1
+	}
+
 	job, err := cachevol.BuildSeedJob(cachevol.SeedJobInput{
-		Name:      *name,
-		Namespace: *namespace,
-		Image:     *image,
-		ClaimName: *claim,
-		Pins:      pins,
+		Name:         *name,
+		Namespace:    *namespace,
+		Image:        *image,
+		ClaimName:    *claim,
+		Pins:         pins,
+		NodeSelector: nodeSelector,
+		Tolerations:  tolerations,
 	})
 	if err != nil {
 		fmt.Fprintf(errw, "polecatcaches: %v\n", err)
@@ -195,6 +209,58 @@ func resolvePins(only []string, pinsPath, forgejoHost string, errw io.Writer, d 
 		}
 	}
 	return pins, 0
+}
+
+// seedPlacement is where the seed Job's pod runs, from the sandbox profile that
+// owns the claim: its node labels and tolerations, the pool the sandbox pods
+// and so the claim's storage are on. A run that names no profile places the pod
+// nowhere itself, which is right for a plain cluster and nowhere else; the real
+// callers name the profile (gt-5paez).
+//
+// A profile that is missing, is not a kubernetes profile, or mounts another
+// claim is refused rather than read as no placement: each would seed a claim
+// from a pool the claim's consumers never mount it on.
+func seedPlacement(town, name, claim string, errw io.Writer, d deps) (map[string]string, []cachevol.Toleration, bool) {
+	if name == "" {
+		return nil, nil, true
+	}
+	profiles, err := d.profiles(town)
+	if err != nil {
+		fmt.Fprintf(errw, "polecatcaches: -sandbox %s: the town's sandbox profiles could not be read: %v\n", name, err)
+		return nil, nil, false
+	}
+	profile, ok := profiles[name]
+	if !ok {
+		fmt.Fprintf(errw, "polecatcaches: -sandbox %s: the town's settings name no such sandbox profile\n", name)
+		return nil, nil, false
+	}
+	profile = profile.WithDefaults()
+	if profile.Driver != config.SandboxDriverKubernetes {
+		fmt.Fprintf(errw, "polecatcaches: -sandbox %s: its driver is %q, and only a kubernetes profile's pool places the seed Job's pod\n", name, profile.Driver)
+		return nil, nil, false
+	}
+	if profile.KubernetesCacheClaim != claim {
+		fmt.Fprintf(errw, "polecatcaches: -sandbox %s mounts the claim %q and -claim is %q: the profile that places the Job's pod has to be the one that owns the claim\n", name, profile.KubernetesCacheClaim, claim)
+		return nil, nil, false
+	}
+	tolerations := make([]cachevol.Toleration, 0, len(profile.Tolerations))
+	for _, t := range profile.Tolerations {
+		tolerations = append(tolerations, cachevol.Toleration{Key: t.Key, Operator: t.Operator, Value: t.Value, Effect: t.Effect})
+	}
+	return profile.NodeSelector, tolerations, true
+}
+
+// townSandboxProfiles reads the town's sandbox profiles. A town with no
+// settings file names none, and the caller that asked for a profile is refused.
+func townSandboxProfiles(townRoot string) (map[string]config.SandboxProfile, error) {
+	ts, err := config.LoadTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return nil, err
+	}
+	if ts == nil {
+		return nil, fmt.Errorf("there is no settings file at %s", config.TownSettingsPath(townRoot))
+	}
+	return ts.Sandboxes, nil
 }
 
 // forgejoRemote is a rig's configured Forgejo URL. A rig with no block cannot

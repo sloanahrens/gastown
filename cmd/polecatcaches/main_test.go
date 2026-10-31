@@ -6,9 +6,11 @@ import (
 	"errors"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
@@ -29,14 +31,17 @@ var pinsFile = []byte("# <rig> <commit>\n" +
 	"gastown " + gastownCommit + "\ndevops " + devopsCommit + "\n")
 
 // fake is the command's outside world: a pins document, one remote per rig,
-// and every kubectl call it was handed, with the manifest on its stdin.
+// the town's sandbox profiles, and every kubectl call it was handed, with the
+// manifest on its stdin.
 type fake struct {
-	pins      []byte
-	readErr   error
-	remotes   map[string]string
-	remoteErr map[string]error
-	failCall  int // the 1-based kubectl call that fails; 0 fails none
-	calls     []kubectlCall
+	pins       []byte
+	readErr    error
+	remotes    map[string]string
+	remoteErr  map[string]error
+	profiles   map[string]config.SandboxProfile
+	profileErr error
+	failCall   int // the 1-based kubectl call that fails; 0 fails none
+	calls      []kubectlCall
 }
 
 type kubectlCall struct {
@@ -60,6 +65,12 @@ func (f *fake) deps() deps {
 				return u, nil
 			}
 			return "", errors.New("rig " + rigName + " has no merge_queue.forgejo.remote_url")
+		},
+		profiles: func(string) (map[string]config.SandboxProfile, error) {
+			if f.profileErr != nil {
+				return nil, f.profileErr
+			}
+			return f.profiles, nil
 		},
 		kubectl: func(stdin io.Reader, args ...string) ([]byte, error) {
 			call := kubectlCall{args: args}
@@ -460,4 +471,86 @@ func seedPins(t *testing.T, job cachevol.SeedJob) []cachevol.Pin {
 	}
 	t.Fatalf("no container carries a --pins argument: %+v", job.Spec.Template.Spec.Containers)
 	return nil
+}
+
+// sandboxProfile is the profile that owns the fake town's claim: a kubernetes
+// profile whose pool is where the sandbox pods, and so the claim's storage,
+// live.
+func sandboxProfile() config.SandboxProfile {
+	return config.SandboxProfile{
+		Driver:               config.SandboxDriverKubernetes,
+		Image:                "gastown-polecat:dev",
+		KubernetesCacheClaim: "gt-cache",
+		NodeSelector:         map[string]string{"gt.dev/pool": "sandbox"},
+		Tolerations: []config.SandboxToleration{
+			{Key: "gt.dev/pool", Operator: "Equal", Value: "sandbox", Effect: "NoSchedule"},
+		},
+	}
+}
+
+// TestSandboxProfileSuppliesTheSelector pins the -sandbox wiring: the profile
+// that owns the claim places the seed Job's pod on its pool, so the Job can run
+// where the claim's consumers mount it (gt-5paez).
+func TestSandboxProfileSuppliesTheSelector(t *testing.T) {
+	t.Parallel()
+	f := newFake()
+	f.profiles = map[string]config.SandboxProfile{"polecat-k8s": sandboxProfile()}
+
+	code, _, stderr := run(t, f, baseArgs("-sandbox", "polecat-k8s")...)
+	if code != 0 {
+		t.Fatalf("run = %d, want 0; stderr: %s", code, stderr)
+	}
+	pod := appliedJob(t, f).Spec.Template.Spec
+	wantSelector := map[string]string{"gt.dev/pool": "sandbox"}
+	if !reflect.DeepEqual(pod.NodeSelector, wantSelector) {
+		t.Errorf("nodeSelector = %v, want %v", pod.NodeSelector, wantSelector)
+	}
+	wantTolerations := []cachevol.Toleration{{Key: "gt.dev/pool", Operator: "Equal", Value: "sandbox", Effect: "NoSchedule"}}
+	if !reflect.DeepEqual(pod.Tolerations, wantTolerations) {
+		t.Errorf("tolerations = %+v, want %+v", pod.Tolerations, wantTolerations)
+	}
+}
+
+// TestSandboxProfileRefusesOneThatCannotPlaceTheJob pins the refusals of
+// -sandbox: a profile that cannot be read, does not exist, is not a kubernetes
+// profile, or mounts another claim is refused rather than read as no placement,
+// because each would seed the claim from a pool it never mounts on.
+func TestSandboxProfileRefusesOneThatCannotPlaceTheJob(t *testing.T) {
+	t.Parallel()
+	docker := sandboxProfile()
+	docker.Driver = config.SandboxDriverDocker
+	docker.KubernetesCacheClaim = ""
+	otherClaim := sandboxProfile()
+	otherClaim.KubernetesCacheClaim = "gt-other-cache"
+
+	tests := []struct {
+		name       string
+		flag       string
+		profiles   map[string]config.SandboxProfile
+		profileErr error
+		want       string
+	}{
+		{name: "unknown profile", flag: "nope", profiles: map[string]config.SandboxProfile{"polecat-k8s": sandboxProfile()}, want: "name no such sandbox profile"},
+		{name: "docker profile", flag: "docker", profiles: map[string]config.SandboxProfile{"docker": docker}, want: `driver is "docker"`},
+		{name: "another claim", flag: "other", profiles: map[string]config.SandboxProfile{"other": otherClaim}, want: "has to be the one that owns the claim"},
+		{name: "unreadable settings", flag: "polecat-k8s", profileErr: errors.New("settings/config.json: bad JSON"), want: "could not be read"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFake()
+			f.profiles = tc.profiles
+			f.profileErr = tc.profileErr
+			code, _, stderr := run(t, f, baseArgs("-sandbox", tc.flag)...)
+			if code == 0 {
+				t.Fatalf("run = 0, want a refusal; stderr: %s", stderr)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("stderr = %q, want it to name %q", stderr, tc.want)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("kubectl calls = %+v, want none: a refused profile applies nothing", f.calls)
+			}
+		})
+	}
 }
