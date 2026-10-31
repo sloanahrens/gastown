@@ -47,10 +47,8 @@ func RunShowTextContract(t *testing.T, newClient func(t *testing.T) beads.Client
 
 // RunDepListUpContract checks DepListUp, the reverse-dependency read: the
 // issues that depend on one, with the relation that holds, a wisp dependent
-// counted like a durable one. It is separate from RunClientContract because a
-// store can answer the rest of the seam before it grows this read: the
-// tracker's backend is its own bead (gt-p85pw.105) and answers the named stub
-// error until then.
+// counted like a durable one. It is separate from RunClientContract so a
+// store can answer the rest of the seam without this read.
 func RunDepListUpContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
 	t.Helper()
 	t.Run("dep list up", func(t *testing.T) {
