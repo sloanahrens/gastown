@@ -20,11 +20,19 @@
 // no longer has, are listed on stdout; nothing is written, and the exit code is 1 when any are
 // listed.
 //
-// -scratch must sit outside any .beads tree. bd init walks up from the copy it runs in, refuses a
-// tree that already holds a workspace, and on the way rewrites the first store it finds, so the
-// recorder refuses to run when its working directory or the scratch directory sits in one, at the
-// path their symlinks lead to (gt-p85pw.103). A scratch directory that is its own git repository
-// works, since no directory above it holds a workspace.
+// The scratch must own a beads workspace. bd init walks up from the directory it runs in and
+// rewrites the first workspace it finds, so the recorder gives the scratch a workspace of its own
+// with bd init, checks that the workspace it made is on disk in the scratch, then asks bd which
+// workspace it resolves there, under the environment every child is given, and passes only when the
+// answer is inside the scratch. That workspace exists for the check alone: its database is dropped
+// and its directory removed as soon as the guard passes. A scratch behind a symlink is refused, and
+// so is a recorder whose working directory sits in a workspace: at that point its own tree is not one
+// the recorder made (gt-p85pw.103, gt-p85pw.115).
+//
+// The environment must name a throwaway Dolt server, and the recorder refuses one that names the
+// town's: the town's port, a host that is not this machine, or no port at all, which leaves bd with
+// its own default, the town's server. The scratch's database is made on the server that names, and
+// one made on the town's server is cruft no cleanup owns (gt-p85pw.115).
 package main
 
 import (
@@ -50,12 +58,13 @@ type options struct {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	return runIn(os.Getwd, args, stdout, stderr)
+	return runIn(os.Getwd, execChild, args, stdout, stderr)
 }
 
-// runIn is run with the working directory injected, so a test puts the recorder in a tree of its own
-// without changing the process's directory.
-func runIn(getwd func() (string, error), args []string, stdout, stderr io.Writer) int {
+// runIn is run with the working directory and the bd child injected, so a test puts the recorder in
+// a tree of its own and answers bd itself, neither changing the process's directory nor starting a
+// process.
+func runIn(getwd func() (string, error), child func(bin string) childBD, args []string, stdout, stderr io.Writer) int {
 	var opts options
 	flags := flag.NewFlagSet("bdshim-record", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -72,16 +81,16 @@ func runIn(getwd func() (string, error), args []string, stdout, stderr io.Writer
 	if opts.flags {
 		scratch = "" // a flags recording makes no copies, so it has no scratch directory to guard
 	}
-	if err := guardRun(getwd, scratch); err != nil {
+	bd := child(opts.bd)
+	if err := guardRun(getwd, scratch, bd); err != nil {
 		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
 		return 1
 	}
-	runner := execBD(opts.bd)
 	if opts.flags {
 		if opts.out == "" {
 			opts.out = filepath.Join("internal", "bdshim", "testdata", "bd-flags.txt")
 		}
-		return recordFlags(opts, runner, stderr)
+		return recordFlags(opts, bd.Run, stderr)
 	}
 	if opts.out == "" {
 		opts.out = filepath.Join("cmd", "bdshim", "testdata", "golden")
@@ -90,7 +99,7 @@ func runIn(getwd func() (string, error), args []string, stdout, stderr io.Writer
 		fmt.Fprintln(stderr, "bdshim-record: -fixture is required")
 		return 2
 	}
-	provision, keep, err := provisionFixtureFrom(getwd, runner, opts.fixture, opts.scratch)
+	provision, keep, err := provisionFixtureFrom(getwd, bd.Run, opts.fixture, opts.scratch)
 	if err != nil {
 		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
 		return 1
@@ -100,7 +109,7 @@ func runIn(getwd func() (string, error), args []string, stdout, stderr io.Writer
 		return 1
 	}
 	rc := Recorder{
-		Run:       runner,
+		Run:       bd.Run,
 		Copy:      provision,
 		Normalize: func(stdout []byte) []byte { return normalizeGolden(stdout, keep) },
 	}

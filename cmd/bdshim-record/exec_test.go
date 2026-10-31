@@ -61,15 +61,26 @@ func TestExitResultKeepsAnExitAndRefusesARunThatNeverFinished(t *testing.T) {
 	}
 }
 
-// TestRecordingEnvPinsTheIdentityAndDropsTheStoreSelectors: every bd run sees the recorder's actor
-// and git identity in place of the operator's, so a golden's owner and created_by read the same on
-// every machine, while the store selectors still go so bd works on the copy it runs in.
-func TestRecordingEnvPinsTheIdentityAndDropsTheStoreSelectors(t *testing.T) {
+// TestRecordingEnvPinsTheIdentityAndTheWorkspace: every bd run sees the recorder's actor and git
+// identity in place of the operator's, so a golden's owner and created_by read the same on every
+// machine, and every workspace variable the operator's shell sets is replaced by the workspace the
+// recorder made, each exactly once, so no inherited value can aim a run at another store
+// (gt-p85pw.103, gt-p85pw.115).
+//
+// The Dolt endpoint passes through unchanged: the recording runs against the throwaway server its
+// environment names, and the guard refuses the environment when it names the town's server instead
+// (TestGuardRunRefusesTheTownDoltServer).
+func TestRecordingEnvPinsTheIdentityAndTheWorkspace(t *testing.T) {
 	t.Parallel()
+	const beadsDir = "/scratch/.beads"
 	env := recordingEnv([]string{
 		"PATH=/usr/bin",
-		"BEADS_DOLT_SERVER_PORT=3307",
+		"BEADS_DOLT_SERVER_PORT=13307",
 		"BEADS_DIR=/home/operator/gt/.beads",
+		"BEADS_DB=/home/operator/gt/.beads/beads.db",
+		"BD_DB=/home/operator/gt/.beads/beads.db",
+		"BEADS_SHARED_SERVER_DIR=/home/operator/.beads/shared-server",
+		"GT_DOLT_DATA=/home/operator/gt/.dolt-data",
 		"BEADS_DOLT_SERVER_DATABASE=hq",
 		"BEADS_ACTOR=operator@example.com",
 		"BD_ACTOR=operator",
@@ -77,35 +88,38 @@ func TestRecordingEnvPinsTheIdentityAndDropsTheStoreSelectors(t *testing.T) {
 		"GIT_AUTHOR_EMAIL=operator@example.com",
 		"GIT_COMMITTER_NAME=Operator",
 		"GIT_COMMITTER_EMAIL=operator@example.com",
-	})
+	}, beadsDir)
 	got := envEntries(env)
 	want := map[string]string{
-		"BEADS_ACTOR":            "bdshim-record",
-		"BD_ACTOR":               "bdshim-record",
-		"GIT_AUTHOR_NAME":        "bdshim-record",
-		"GIT_AUTHOR_EMAIL":       "bdshim-record@example.invalid",
-		"GIT_COMMITTER_NAME":     "bdshim-record",
-		"GIT_COMMITTER_EMAIL":    "bdshim-record@example.invalid",
-		"PATH":                   "/usr/bin",
-		"BEADS_DOLT_SERVER_PORT": "3307", // the server address still passes through
+		"BEADS_ACTOR":             "bdshim-record",
+		"BD_ACTOR":                "bdshim-record",
+		"GIT_AUTHOR_NAME":         "bdshim-record",
+		"GIT_AUTHOR_EMAIL":        "bdshim-record@example.invalid",
+		"GIT_COMMITTER_NAME":      "bdshim-record",
+		"GIT_COMMITTER_EMAIL":     "bdshim-record@example.invalid",
+		"PATH":                    "/usr/bin",
+		"BEADS_DOLT_SERVER_PORT":  "13307", // the scratch server's address passes through
+		"BEADS_DIR":               beadsDir,
+		"BEADS_DB":                beadsDir,
+		"BD_DB":                   beadsDir,
+		"BEADS_SHARED_SERVER_DIR": beadsDir,
+		"GT_DOLT_DATA":            beadsDir,
 	}
 	for key, value := range want {
 		if values := got[key]; len(values) != 1 || values[0] != value {
 			t.Errorf("%s = %v, want exactly [%q]", key, values, value)
 		}
 	}
-	for _, key := range []string{"BEADS_DIR", "BEADS_DOLT_SERVER_DATABASE"} {
-		if values := got[key]; len(values) != 0 {
-			t.Errorf("%s = %v, want the store selector dropped", key, values)
-		}
+	if values := got["BEADS_DOLT_SERVER_DATABASE"]; len(values) != 0 {
+		t.Errorf("BEADS_DOLT_SERVER_DATABASE = %v, want the server database dropped so the copy's own is used", values)
 	}
 }
 
-// TestBDCommandCarriesTheRecordingEnvironment: the command execBD runs is the one that pins the
-// identity, so a golden's owner and created_by read the same on every machine rather than carrying
-// the operator's (gt-p85pw.103). It checks the command execBD builds, since a unit test may not
-// start bd.
-func TestBDCommandCarriesTheRecordingEnvironment(t *testing.T) {
+// TestBDCommandPinsTheWorkspaceBesideTheRun: the command execBD runs carries the identity pin and
+// the workspace the recorder made beside the directory it runs in, replacing any the operator's
+// shell set (gt-p85pw.103, gt-p85pw.115). It checks the command execBD builds, since a unit test
+// may not start bd.
+func TestBDCommandPinsTheWorkspaceBesideTheRun(t *testing.T) {
 	t.Parallel()
 	base := []string{
 		"PATH=/usr/bin",
@@ -123,8 +137,78 @@ func TestBDCommandCarriesTheRecordingEnvironment(t *testing.T) {
 	if values := got["BEADS_ACTOR"]; len(values) != 1 || values[0] != "bdshim-record" {
 		t.Errorf("BEADS_ACTOR = %v, want exactly [bdshim-record]", values)
 	}
-	if values := got["BEADS_DIR"]; len(values) != 0 {
-		t.Errorf("BEADS_DIR = %v, want the store selector dropped from the run", values)
+	if values := got["BEADS_DIR"]; len(values) != 1 || values[0] != "/tmp/copy/.beads" {
+		t.Errorf("BEADS_DIR = %v, want exactly [/tmp/copy/.beads]", values)
+	}
+}
+
+// TestWhereResultKeepsAWorkspaceAndRefusesARunThatNeverFinished: bd where's exit 0 answer is the
+// workspace, while a run that timed out or never started is an error, so no workspace is read out of
+// an answer bd did not give (gt-p85pw.115). A unit test may not start bd, so this drives the
+// converter whereBD hands each run's ending to.
+func TestWhereResultKeepsAWorkspaceAndRefusesARunThatNeverFinished(t *testing.T) {
+	t.Parallel()
+	answer := []byte(`{"data":{"path":"/scratch/.beads"}}`)
+	tests := []struct {
+		name     string
+		runErr   error
+		timedOut bool
+		want     string
+		wantErr  string
+	}{
+		{"ran to exit 0", nil, false, "/scratch/.beads", ""},
+		{"ran past the limit", exitError(0), true, "", "ran past"},
+		{"exited non-zero", exitError(2), false, "", "bd where:"},
+		{"never started", errors.New("exec: bd: not found"), false, "", "bd where:"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := whereResult(answer, tc.runErr, tc.timedOut)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("whereResult(%s) = %q, %v, want an error naming %q", tc.name, got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Errorf("whereResult(%s) = %q, %v, want %q", tc.name, got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestWorkspaceFromWhere: the workspace the guard compares is the one bd where names, and an answer
+// that does not parse is an error rather than a workspace that could compare inside by accident
+// (gt-p85pw.115).
+func TestWorkspaceFromWhere(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		answer  string
+		want    string
+		wantErr string
+	}{
+		{"the active workspace", `{"data":{"path":"/scratch/.beads"},"schema_version":1}`, "/scratch/.beads", ""},
+		{"a redirect", `{"data":{"path":"/town/.beads","redirected_from":"/scratch/.beads"}}`, "/town/.beads", ""},
+		{"no path", `{"data":{"prefix":"fx"},"schema_version":1}`, "", ""},
+		{"not JSON", "bd: no workspace\n", "", "did not answer with JSON"},
+		{"nothing at all", "", "", "did not answer with JSON"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := workspaceFromWhere([]byte(tc.answer))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("workspaceFromWhere(%s) = %q, %v, want an error naming %q", tc.name, got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Errorf("workspaceFromWhere(%s) = %q, %v, want %q", tc.name, got, err, tc.want)
+			}
+		})
 	}
 }
 
