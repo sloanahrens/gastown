@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -56,6 +59,9 @@ func runnerCycleDaemon(t *testing.T, now time.Time, cfg *config.TierSweepRunnerC
 	t.Helper()
 	d, _, bd, _ := newTierSweepDaemon(t, now, "gastown")
 	d.patrolConfig.Patrols.TierSweep.Runner = cfg
+	// The run's teardown goes through the daemon's command seam; no test here
+	// starts a process.
+	d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) { return nil, nil, nil }
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return runnerTestSHA, nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	d.tierSweepSeams.run = func(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult {
@@ -169,36 +175,142 @@ func TestTierSweepRunnerStageLaunchesAndReadsTheResult(t *testing.T) {
 	}
 }
 
-// A result that never arrives, or arrives torn, judged nothing: the integration
-// and race tiers are RED with the runner's own reason, never GREEN, and the
-// teardown still runs so the containers are not left behind (gt-z4ppb).
+// A stage whose own budget passes with no result judged nothing: it is RED with
+// the runner's own reason, never GREEN, and the run it waited on is taken down
+// so its containers, network and volume are not left behind (gt-z4ppb).
+func TestTierSweepRunnerBudgetWithNoResultTearsDown(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _ := runnerCycleDaemon(t, now, runnerTestConfig(t), "")
+	var stops int
+	d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+		return tierSweepLaunch{exitCode: 0, stop: func() { stops++ }}
+	}
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: 25 * time.Millisecond}
+
+	res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
+	if res.ran != true || res.reason != tierSweepRunnerNoResult {
+		t.Fatalf("stage result = %+v, want it run and RED with reason %q", res, tierSweepRunnerNoResult)
+	}
+	if !res.timedOut {
+		t.Error("the stage did not report its own budget as the end of the wait; the cycle would defer instead of taking the RED")
+	}
+	if res.exitCode == 0 {
+		t.Error("exit code 0 with no result; a tier with no verdict line must never read as GREEN")
+	}
+	if stops != 1 {
+		t.Errorf("the run's teardown ran %d times, want once: the budget is a verdict about the run", stops)
+	}
+}
+
+// A cycle that ends the wait takes no verdict: the run keeps going in its
+// containers, so the stage reports that it did not run and the cycle defers it.
+// Its teardown must not run, or the restart the cycle is preparing for would cut
+// the very run that is supposed to survive it (gt-z4ppb).
+func TestTierSweepRunnerCycleCancelLeavesTheRunAlive(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _ := runnerCycleDaemon(t, now, runnerTestConfig(t), "")
+	var launches, stops, commands int
+	d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) {
+		commands++
+		return nil, nil, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.tierSweepSeams.launch = func(_ context.Context, _ tierSweepStage, _ sweeprunner.Spec) tierSweepLaunch {
+		launches++
+		// The daemon begins its shutdown while the run is going.
+		cancel()
+		return tierSweepLaunch{exitCode: 0, stop: func() { stops++ }}
+	}
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Hour}
+
+	res := d.tierSweepRunStage(ctx, t.TempDir(), st)
+	if res.ran {
+		t.Errorf("stage result = %+v, want it not run: a canceled cycle judged nothing", res)
+	}
+	if !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("stage err = %v, want the cycle's own cancellation", res.err)
+	}
+	if launches != 1 {
+		t.Fatalf("launches = %d, want 1", launches)
+	}
+	if stops != 0 {
+		t.Error("the stage tore the run down on a cycle cancel; the containers are what keeps the run going")
+	}
+	if commands != 0 {
+		t.Errorf("commands ran %d times, want none: the run's teardown must not run on a cycle cancel", commands)
+	}
+}
+
+// The run survives the cycle, so the next cycle must adopt it: the same rig, sha
+// and tiers name the same run directory, a record there says it is going, and a
+// result written while no cycle was watching folds as a host stage's verdicts
+// would. Starting a second engine beside it would run the suite twice on one
+// host (gt-z4ppb).
+func TestTierSweepRunnerNextCycleAdoptsTheRunAndReadsItsResult(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _ := runnerCycleDaemon(t, now, runnerTestConfig(t), "")
+	var launches, fakeStops int
+	var teardowns []string
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		teardowns = append(teardowns, strings.Join(cmd.Args, " "))
+		return nil, nil, nil
+	}
+	var launched sweeprunner.Spec
+	ctx, cancel := context.WithCancel(context.Background())
+	d.tierSweepSeams.launch = func(_ context.Context, _ tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
+		launches++
+		launched = spec
+		cancel()
+		return tierSweepLaunch{exitCode: 0, stop: func() { fakeStops++ }}
+	}
+	// A short budget keeps the test quick if the run is not adopted: the wait
+	// it bounds would otherwise be a minute of nothing.
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: 50 * time.Millisecond}
+
+	if first := d.tierSweepRunStage(ctx, t.TempDir(), st); !errors.Is(first.err, context.Canceled) {
+		t.Fatalf("first cycle = %+v, want it canceled while the run went", first)
+	}
+	// The run finishes while no cycle is watching, writing into the directory
+	// every cycle for this sha names.
+	if err := sweeprunner.Write(launched.OutDir, runnerTestResult(launched, now)); err != nil {
+		t.Fatalf("writing the run's result: %v", err)
+	}
+
+	second := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
+	if launches != 1 {
+		t.Fatalf("launches = %d, want 1: the second cycle adopted the run instead of starting a second engine", launches)
+	}
+	if fakeStops != 0 {
+		t.Errorf("the adopted run's launcher teardown ran %d times; the second cycle launched nothing to tear down", fakeStops)
+	}
+	if !second.ran || second.exitCode != tierSweepRedExit {
+		t.Fatalf("second cycle = %+v, want it run and RED from the race tier's summary", second)
+	}
+	if !strings.Contains(second.output, "tier-sweep: integration GREEN") || !strings.Contains(second.output, "tier-sweep: race RED") {
+		t.Errorf("folded output does not hold the result's summary lines:\n%s", second.output)
+	}
+	// The run is taken down once, after its result was read.
+	if len(teardowns) != 4 {
+		t.Errorf("teardown steps = %d, want the plan's four: %q", len(teardowns), teardowns)
+	}
+	for _, argv := range teardowns {
+		if strings.Contains(argv, "run -d") {
+			t.Errorf("a start step (%q) ran in the adopting cycle", argv)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(launched.OutDir, tierSweepRunnerRecordName)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("launch record still present after the run was taken down (stat err = %v)", err)
+	}
+}
+
+// A result that arrives torn judged nothing: the integration and race tiers are
+// RED with the runner's own reason, never GREEN, and the teardown still runs so
+// the containers are not left behind (gt-z4ppb).
 func TestTierSweepRunnerMissingResultIsRed(t *testing.T) {
 	t.Parallel()
-
-	t.Run("no result after the budget", func(t *testing.T) {
-		t.Parallel()
-		now := atHour(time.Now(), 15)
-		d, _ := runnerCycleDaemon(t, now, runnerTestConfig(t), "")
-		stopped := false
-		d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
-			return tierSweepLaunch{exitCode: 0, stop: func() { stopped = true }}
-		}
-		st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: 25 * time.Millisecond}
-
-		res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
-		if res.ran != true || res.reason != tierSweepRunnerNoResult {
-			t.Fatalf("stage result = %+v, want it run and RED with reason %q", res, tierSweepRunnerNoResult)
-		}
-		if !res.timedOut {
-			t.Error("the stage did not report its own budget as the end of the wait; the cycle would defer instead of taking the RED")
-		}
-		if res.exitCode == 0 {
-			t.Error("exit code 0 with no result; a tier with no verdict line must never read as GREEN")
-		}
-		if !stopped {
-			t.Error("the run's teardown did not run; its containers would be left behind")
-		}
-	})
 
 	t.Run("a torn result", func(t *testing.T) {
 		t.Parallel()
@@ -297,6 +409,191 @@ func TestTierSweepRunnerRefusesWhatItCannotLaunch(t *testing.T) {
 	})
 }
 
+// A stage that asked for no tier judged nothing: it starts no run and folds no
+// result, and an empty fold never reads as a clean sweep of nothing (gt-z4ppb).
+func TestTierSweepRunnerNoTiersIsRed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the stage starts nothing", func(t *testing.T) {
+		t.Parallel()
+		d, _ := runnerCycleDaemon(t, atHour(time.Now(), 15), runnerTestConfig(t), "")
+		launched := false
+		d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+			launched = true
+			return tierSweepLaunch{exitCode: 0}
+		}
+		st := tierSweepStage{slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Second}
+
+		res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
+		if res.reason != tierSweepRunnerNoResult || !strings.Contains(res.output, "no tiers asked for") {
+			t.Fatalf("stage result = %+v, want RED with reason %q naming that no tier was asked for", res, tierSweepRunnerNoResult)
+		}
+		if launched {
+			t.Error("a stage that asked for no tier launched a run")
+		}
+		if res.exitCode == 0 {
+			t.Error("exit code 0 with no tier; the cycle would record a clean sweep of nothing")
+		}
+	})
+
+	t.Run("the fold refuses one", func(t *testing.T) {
+		t.Parallel()
+		now := atHour(time.Now(), 15)
+		d, _ := runnerCycleDaemon(t, now, runnerTestConfig(t), "")
+		spec, ok, err := d.tierSweepRunnerSpec(tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA})
+		if err != nil || !ok {
+			t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
+		}
+
+		res := d.tierSweepRunnerStageResult(tierSweepStage{rig: "gastown", tested: runnerTestSHA}, spec, runnerTestResult(spec, now), tierSweepLaunch{exitCode: -1})
+		if res.reason != tierSweepRunnerNoResult || !strings.Contains(res.output, "no tiers asked for") {
+			t.Fatalf("folded stage result = %+v, want RED naming that no tier was asked for", res)
+		}
+		if res.exitCode == 0 {
+			t.Error("exit code 0 for a fold of no tier; an empty fold must not read as GREEN")
+		}
+	})
+}
+
+// runnerFakeCmds answers the launcher's commands without starting a process. It
+// records each command's argv and whether the context it was bound to was
+// already canceled: exec calls Cancel when that context is done, so calling it
+// reports the same thing.
+type runnerFakeCmds struct {
+	ran     []string
+	ctxDone []bool
+	answer  func(argv []string) (stdout, stderr []byte, err error)
+}
+
+func (f *runnerFakeCmds) run(cmd *exec.Cmd) ([]byte, []byte, error) {
+	f.ran = append(f.ran, strings.Join(cmd.Args, " "))
+	f.ctxDone = append(f.ctxDone, cmd.Cancel != nil && cmd.Cancel() != nil)
+	if f.answer != nil {
+		return f.answer(cmd.Args)
+	}
+	return nil, nil, nil
+}
+
+// runnerLauncher is a daemon with a runner block whose launcher runs no
+// process: every step answers through cmds. It returns the Spec and stage the
+// launcher is driven with.
+func runnerLauncher(t *testing.T, cmds *runnerFakeCmds) (*Daemon, sweeprunner.Spec, tierSweepStage, *bytes.Buffer) {
+	t.Helper()
+	d, _, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.patrolConfig.Patrols.TierSweep.Runner = runnerTestConfig(t)
+	d.execCmd = cmds.run
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Hour}
+	spec, ok, err := d.tierSweepRunnerSpec(st)
+	if err != nil || !ok {
+		t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
+	}
+	return d, spec, st, logs
+}
+
+// The production launcher, driven step by step through the daemon's command
+// seam: a start that fails still hands back the teardown, a teardown that fails
+// is logged rather than returned, and the teardown outlives the context the run
+// was launched under (gt-z4ppb).
+func TestTierSweepRunnerLauncher(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a start step that fails still returns the teardown", func(t *testing.T) {
+		t.Parallel()
+		cmds := &runnerFakeCmds{answer: func(argv []string) ([]byte, []byte, error) {
+			if slices.Contains(argv, "network") {
+				return nil, []byte("Error: cannot create network\n"), errors.New("exit status 1")
+			}
+			return nil, nil, nil
+		}}
+		d, spec, st, _ := runnerLauncher(t, cmds)
+
+		started := d.tierSweepLaunchRunner(context.Background(), st, spec)
+		if started.err == nil || !strings.Contains(started.err.Error(), "did not start") {
+			t.Fatalf("launch = %+v, want the failed start reported", started)
+		}
+		if started.stop == nil {
+			t.Fatal("a failed start returned no teardown; a network or volume an earlier step made would be left behind")
+		}
+		if len(cmds.ran) != 1 {
+			t.Fatalf("steps run = %q, want only the one that failed", cmds.ran)
+		}
+		started.stop()
+		if len(cmds.ran) != 5 {
+			t.Fatalf("steps run = %q, want the failed start and the plan's four teardown steps", cmds.ran)
+		}
+		for _, argv := range cmds.ran[1:] {
+			if !strings.Contains(argv, "rm") {
+				t.Errorf("step %q ran after the failed start; only the plan's teardown may", argv)
+			}
+		}
+	})
+
+	t.Run("a teardown step that fails is logged, not returned", func(t *testing.T) {
+		t.Parallel()
+		cmds := &runnerFakeCmds{answer: func(argv []string) ([]byte, []byte, error) {
+			if slices.Contains(argv, "rm") {
+				return nil, []byte("Error: No such container: gt-sweep-gastown-x\n"), errors.New("exit status 1")
+			}
+			return nil, nil, nil
+		}}
+		d, spec, st, logs := runnerLauncher(t, cmds)
+
+		started := d.tierSweepLaunchRunner(context.Background(), st, spec)
+		if started.err != nil || started.stop == nil {
+			t.Fatalf("launch = %+v, want it started with a teardown", started)
+		}
+		started.stop()
+		if !strings.Contains(logs.String(), "removing the run's objects") {
+			t.Errorf("the failed teardown was not logged:\n%s", logs.String())
+		}
+		if !strings.Contains(logs.String(), "No such container") {
+			t.Errorf("the log does not hold the teardown's last lines:\n%s", logs.String())
+		}
+	})
+
+	t.Run("a nil runner block is refused", func(t *testing.T) {
+		t.Parallel()
+		cmds := &runnerFakeCmds{}
+		d, spec, st, _ := runnerLauncher(t, cmds)
+		d.patrolConfig.Patrols.TierSweep.Runner = nil
+
+		started := d.tierSweepLaunchRunner(context.Background(), st, spec)
+		if started.err == nil || !strings.Contains(started.err.Error(), "no runner is configured") {
+			t.Fatalf("launch = %+v, want it refused naming the missing runner block", started)
+		}
+		if started.stop != nil {
+			t.Error("nothing was made, so there is nothing to tear down")
+		}
+		if len(cmds.ran) != 0 {
+			t.Errorf("steps run = %q, want none: a runner that is not configured cannot launch", cmds.ran)
+		}
+	})
+
+	t.Run("the teardown outlives the context it was launched under", func(t *testing.T) {
+		t.Parallel()
+		cmds := &runnerFakeCmds{}
+		d, spec, st, _ := runnerLauncher(t, cmds)
+		ctx, cancel := context.WithCancel(context.Background())
+
+		started := d.tierSweepLaunchRunner(ctx, st, spec)
+		if started.err != nil || started.stop == nil {
+			t.Fatalf("launch = %+v, want it started with a teardown", started)
+		}
+		launched := len(cmds.ran)
+		// The cycle ends the wait; the containers still have to come down.
+		cancel()
+		started.stop()
+		if got := len(cmds.ran) - launched; got != 4 {
+			t.Fatalf("teardown steps = %d, want the plan's four after the caller's context was canceled: %q", got, cmds.ran[launched:])
+		}
+		for i, argv := range cmds.ran[launched:] {
+			if cmds.ctxDone[launched+i] {
+				t.Errorf("teardown step %q ran on a canceled context", argv)
+			}
+		}
+	})
+}
+
 // The two names the config declares are the names sweeprunner's backends
 // answer to, so a rename in either package cannot leave the config naming an
 // engine the daemon does not build (gt-z4ppb).
@@ -310,4 +607,88 @@ func TestTierSweepRunnerBackendNamesAgreeWithTheRunner(t *testing.T) {
 	if backend, err := tierSweepRunnerBackend(config.TierSweepRunnerDocker); err != nil || backend.Name() != config.TierSweepRunnerDocker {
 		t.Errorf("tierSweepRunnerBackend(%q) = %v, %v; want the backend named %q", config.TierSweepRunnerDocker, backend, err, config.TierSweepRunnerDocker)
 	}
+}
+
+// The launch record is what keeps a second cycle from starting a second engine
+// beside a live run, so every way it can fail to be written or read has an
+// answer: a record that cannot be read is an error, never "no run", and a stage
+// that finds one stops instead of launching (gt-z4ppb).
+func TestTierSweepRunnerLaunchRecord(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a write names its run", func(t *testing.T) {
+		t.Parallel()
+		err := tierSweepWriteRunnerRecord(t.TempDir(), tierSweepRunnerRecord{Started: time.Now()})
+		if err == nil || !strings.Contains(err.Error(), "names no run") {
+			t.Fatalf("writing a record with no run id = %v, want it refused", err)
+		}
+	})
+
+	t.Run("a write into a missing directory fails", func(t *testing.T) {
+		t.Parallel()
+		err := tierSweepWriteRunnerRecord(filepath.Join(t.TempDir(), "gone"), tierSweepRunnerRecord{RunID: "run", Started: time.Now()})
+		if err == nil || !strings.Contains(err.Error(), "writing") {
+			t.Fatalf("writing into a directory that is not there = %v, want the write error", err)
+		}
+	})
+
+	t.Run("a torn record is an error, not a missing one", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, tierSweepRunnerRecordName), []byte(`{"run_id":`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := tierSweepReadRunnerRecord(dir)
+		if err == nil || errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "reading") {
+			t.Fatalf("reading a torn record = %v, want a read error that is not \"no record\"", err)
+		}
+	})
+
+	t.Run("a record naming no run is refused", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, tierSweepRunnerRecordName), []byte(`{"run_id":""}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := tierSweepReadRunnerRecord(dir)
+		if err == nil || !strings.Contains(err.Error(), "names no run") {
+			t.Fatalf("reading a record that names no run = %v, want it refused", err)
+		}
+	})
+
+	t.Run("a missing record is not an error", func(t *testing.T) {
+		t.Parallel()
+		if _, err := tierSweepReadRunnerRecord(t.TempDir()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("reading a missing record = %v, want fs.ErrNotExist", err)
+		}
+	})
+
+	t.Run("the stage refuses a torn record instead of launching", func(t *testing.T) {
+		t.Parallel()
+		d, _ := runnerCycleDaemon(t, atHour(time.Now(), 15), runnerTestConfig(t), "")
+		launched := false
+		d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
+			launched = true
+			return tierSweepLaunch{exitCode: 0}
+		}
+		st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Second}
+		spec, ok, err := d.tierSweepRunnerSpec(st)
+		if err != nil || !ok {
+			t.Fatalf("spec = %+v, ok = %v, err = %v; want the runner to take the stage", spec, ok, err)
+		}
+		if err := os.MkdirAll(spec.OutDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(spec.OutDir, tierSweepRunnerRecordName), []byte(`{`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
+		if res.reason != tierSweepRunnerNoResult {
+			t.Fatalf("stage result = %+v, want RED with reason %q", res, tierSweepRunnerNoResult)
+		}
+		if launched {
+			t.Error("a stage that could not read the run's record launched a second engine beside it")
+		}
+	})
 }
