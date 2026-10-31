@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/polecat"
 	rigpkg "github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/sling"
@@ -851,17 +852,22 @@ func isPolecatTarget(target string) bool {
 type FormulaOnBeadResult = sling.FormulaResult
 
 // formulaBD is how formula instantiation reaches bd: open is the formula
-// engine at a site (nil: the bd on PATH) and sleep is the pause between
-// contention retries of the bond. InstantiateFormulaOnBead, CookFormula and
-// bondFormulaDirect are its methods on realFormulaBD.
+// engine at a site (nil: the bd on PATH), sleep is the pause between
+// contention retries of the bond and between tries of its lock wait, now is
+// the clock that wait is bounded by, and jitter is the random source its
+// backoff draws from. InstantiateFormulaOnBead, CookFormula and
+// bondFormulaDirect are its methods on realFormulaBD. A nil seam takes the
+// real one, so a formulaBD built for a test that never bonds keeps working.
 type formulaBD struct {
-	open  func(formulaSite) formulaEngine
-	sleep func(time.Duration)
+	open   func(formulaSite) formulaEngine
+	sleep  func(time.Duration)
+	now    func() time.Time
+	jitter func() float64
 }
 
 // realFormulaBD is the bd on PATH with the real retry backoff.
 func realFormulaBD() formulaBD {
-	return formulaBD{sleep: bdContentionSleep}
+	return formulaBD{sleep: bdContentionSleep, now: time.Now, jitter: rand.Float64}
 }
 
 // engine is the formula engine at site.
@@ -945,16 +951,111 @@ func (f formulaBD) varsForBead(formulaName, beadID, title, formulaWorkDir, townR
 // while bd reports contention. bd's storage layer owns the broad fix across its
 // write paths; this is the retry on top that keeps one contended commit from
 // failing a dispatch.
+//
+// The retry alone could not save a busy town: the bond commits a whole spawned
+// molecule across shared tables, takes seconds under load, and the slings that
+// started together collided and lost together (gt-40twy). So the bonds take
+// turns on a town-level flock instead, retried with jitter so the slings that
+// just failed do not come back in step.
 func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
 	return realFormulaBD().bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoot, vars)
+}
+
+// The bond lock: one flock for the whole town, so a mol bond in flight is the
+// only one committing at a time (gt-40twy).
+const (
+	// bondLockWait bounds the time one bond call spends waiting for the lock,
+	// counted across its retries rather than per attempt. The retry loop
+	// without the lock already spent bdContentionAttempts attempts of ~18s
+	// under load, so this bound adds nothing to the worst case a sling
+	// already had; it is there so a stuck holder reports itself instead of
+	// hanging the sling.
+	bondLockWait = 90 * time.Second
+	// bondLockRetryInterval is how often a waiter retries the flock: short
+	// enough that the bond behind a released lock starts at once, since the
+	// bond is the only thing this lock guards.
+	bondLockRetryInterval = 100 * time.Millisecond
+)
+
+// ErrBondLockTimeout reports that a bond did not get the town bond lock within
+// bondLockWait.
+var ErrBondLockTimeout = errors.New("mol bond lock did not free in time")
+
+// bondLockPath is the town-wide file every sling's bond takes its turn on.
+func bondLockPath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "locks", "mol-bond.flock")
+}
+
+// bondNow is the clock the lock wait reads.
+func (f formulaBD) bondNow() time.Time {
+	if f.now == nil {
+		return time.Now()
+	}
+	return f.now()
+}
+
+// bondSleep pauses the lock wait or the contention backoff.
+func (f formulaBD) bondSleep(d time.Duration) {
+	if f.sleep == nil {
+		time.Sleep(d)
+		return
+	}
+	f.sleep(d)
+}
+
+// bondJitter is the random fraction in [0,1) the backoff spreads by.
+func (f formulaBD) bondJitter() float64 {
+	if f.jitter == nil {
+		return rand.Float64()
+	}
+	return f.jitter()
+}
+
+// acquireBondLock waits until deadline for the town bond lock and returns its
+// release. A holder the kernel still has cannot be waited out past deadline,
+// so the wait ends in ErrBondLockTimeout rather than a hang.
+func (f formulaBD) acquireBondLock(townRoot string, deadline time.Time) (func(), error) {
+	path := bondLockPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, fmt.Errorf("creating the bond lock directory: %w", err)
+	}
+	for {
+		unlock, err := lock.FlockTryAcquireStable(path)
+		if err == nil {
+			return unlock, nil
+		}
+		if !errors.Is(err, lock.ErrFlockHeld) {
+			return nil, fmt.Errorf("acquiring %s: %w", path, err)
+		}
+		if !f.bondNow().Before(deadline) {
+			return nil, fmt.Errorf("%w: %s stayed locked for %s; another sling's bond is in flight", ErrBondLockTimeout, path, bondLockWait)
+		}
+		pause := bondLockRetryInterval
+		if remaining := deadline.Sub(f.bondNow()); remaining < pause {
+			pause = remaining
+		}
+		f.bondSleep(pause)
+	}
+}
+
+// bondUnderLock runs one bond attempt while holding the town bond lock, and
+// lets the lock go before the caller reads or waits on the result.
+func (f formulaBD) bondUnderLock(eng formulaEngine, townRoot, bondTarget, beadID string, vars []string, deadline time.Time) ([]byte, error) {
+	unlock, err := f.acquireBondLock(townRoot, deadline)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return eng.Bond(bondTarget, beadID, vars)
 }
 
 // bond is bondFormulaDirect with bd reached through f.
 func (f formulaBD) bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
 	eng := f.beadEngine(beadID, formulaWorkDir, townRoot)
+	deadline := f.bondNow().Add(bondLockWait)
 	var lastErr error
 	for attempt := 1; attempt <= bdContentionAttempts; attempt++ {
-		bondOut, err := eng.Bond(bondTarget, beadID, vars)
+		bondOut, err := f.bondUnderLock(eng, townRoot, bondTarget, beadID, vars, deadline)
 		if err == nil {
 			rootID := parseBondSpawnRootID(bondOut, formulaName, beadID, "")
 			if rootID == "" {
@@ -970,9 +1071,9 @@ func (f formulaBD) bond(bondTarget, formulaName, beadID, formulaWorkDir, townRoo
 			break
 		}
 
-		wait := slingBackoff(attempt, bdContentionBackoffMin, bdContentionBackoffMax)
+		wait := slingBackoffWith(attempt, bdContentionBackoffMin, bdContentionBackoffMax, f.bondJitter)
 		fmt.Printf("  %s Bond attempt %d lost to Dolt contention, retrying in %v...\n", style.Warning.Render("⚠"), attempt, wait)
-		f.sleep(wait)
+		f.bondSleep(wait)
 	}
 	return "", lastErr
 }
@@ -1497,6 +1598,13 @@ var hookBeadWithRetryWithTownRootFn = hookBeadWithRetryWithTownRoot
 // slingBackoff calculates exponential backoff with ±25% jitter for a given attempt (1-indexed).
 // Formula: base * 2^(attempt-1) * (1 ± 25% random), capped at max.
 func slingBackoff(attempt int, base, max time.Duration) time.Duration { //nolint:unparam // base is parameterized for testability
+	return slingBackoffWith(attempt, base, max, rand.Float64)
+}
+
+// slingBackoffWith is slingBackoff drawing its jitter from jitter, so a caller
+// whose retries must not stay in step — the bond's, after several slings lost
+// the same commit — spreads them from a source it can also hand a test.
+func slingBackoffWith(attempt int, base, max time.Duration, jitter func() float64) time.Duration {
 	backoff := base
 	for i := 1; i < attempt; i++ {
 		backoff *= 2
@@ -1506,8 +1614,8 @@ func slingBackoff(attempt int, base, max time.Duration) time.Duration { //nolint
 		}
 	}
 	// Apply ±25% jitter
-	jitter := 1.0 + (rand.Float64()-0.5)*0.5 // range [0.75, 1.25]
-	result := time.Duration(float64(backoff) * jitter)
+	factor := 1.0 + (jitter()-0.5)*0.5 // range [0.75, 1.25]
+	result := time.Duration(float64(backoff) * factor)
 	if result > max {
 		result = max
 	}
