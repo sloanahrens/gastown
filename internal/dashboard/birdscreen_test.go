@@ -29,6 +29,9 @@ var birdSecretRows = []struct {
 	{"apikey assignment", "apikey=" + strings.Repeat("n", 16), "credential-assignment"},
 	{"PGPASSWORD assignment", "PGPASSWORD=" + strings.Repeat("p", 16), "credential-assignment"},
 	{"Authorization Bearer header", "Authorization: Bearer " + strings.Repeat("z", 16), "credential-assignment"},
+	{"spaced credential with digits", "password " + "hunter2" + "hunter2", "credential-assignment"},
+	{"spaced credential of one all-letter word", "password " + "correcthorse" + "batterystaple", "credential-assignment"},
+	{"spaced credential of letters, more words after", "password " + "correcthorse" + "batterystaple" + " horse", "credential-assignment"},
 	{"REDACTED inside a real value", "password=" + strings.Repeat("k", 4) + "REDACTED" + strings.Repeat("k", 4), "credential-assignment"},
 	{"redaction marker inside a real value", "password=" + strings.Repeat("k", 4) + "[REDACTED:db-password]" + strings.Repeat("k", 4), "credential-assignment"},
 	{"URL with a password", "https://deploy:" + strings.Repeat("p", 12) + "@git.example.com", "url-credential"},
@@ -53,10 +56,36 @@ var birdOrdinaryRows = []struct {
 	{"sk- prefix one character short", "sk-" + strings.Repeat("a", 15)},
 	{"word that ends in sk-", "risk-assessment-framework"},
 	{"masked REDACTED value", "password=***REDACTED***"},
-	{"keyword before a plain word", "token authentication flow"},
+	{"redaction marker value", "PGPASSWORD=[REDACTED:db-password]"},
+}
+
+// birdProseWithheldByDesign is prose the spaced rule withholds on purpose. A
+// keyword followed by a space and a long word cannot be told from a passphrase,
+// so the rule withholds it. These rows pin that trade-off; see birdSpaced.
+var birdProseWithheldByDesign = []struct {
+	name string
+	text string
+}{
+	{"keyword before a long word", "token authentication flow"},
 	{"keyword before a long word and a comma", "token authentication, then retry"},
 	{"keyword before a long word and a period", "token authentication."},
-	{"redaction marker value", "PGPASSWORD=[REDACTED:db-password]"},
+	{"keyword before a hyphenated word", "token non-expiring-session"},
+	{"keyword before a word with an apostrophe", "secret author's-notebook"},
+	{"Bearer header before a prose word", "Authorization: Bearer authentication-flow"},
+}
+
+func TestBirdScreenWithholdsProseByDesign(t *testing.T) {
+	t.Parallel()
+
+	for _, row := range birdProseWithheldByDesign {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, withheld := screenSecret([]byte(row.text)); !withheld {
+				t.Errorf("screenSecret(%q) withheld = false, want true (accepted false positive)", row.text)
+			}
+		})
+	}
 }
 
 func TestBirdScreenWithholdsEachSecretShape(t *testing.T) {

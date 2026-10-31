@@ -3,7 +3,6 @@ package dashboard
 import (
 	"regexp"
 	"strings"
-	"unicode"
 )
 
 // screenSecret reports whether text a bird wrote looks like it holds a secret,
@@ -29,7 +28,7 @@ func screenSecret(b []byte) (class string, withheld bool) {
 		}
 	}
 	for _, m := range birdSpaced.FindAllSubmatch(b, -1) {
-		if hasNonLetter(m[1]) && !birdPlaceholder(m[1]) {
+		if !birdPlaceholder(m[1]) {
 			return "credential-assignment", true
 		}
 	}
@@ -58,13 +57,15 @@ var (
 		`(?i)(?:password|passwd|secret|token|api_key|apikey|pgpassword)` +
 			`["']?\s*[=:]\s*["']?(\S{12,})`)
 
-	// A keyword followed only by a space is credential-like only when the value
-	// holds a digit or symbol, so prose such as "token authentication flow" stays
-	// readable. See hasNonLetter.
+	// A keyword followed only by a space cannot be told from prose, so any value
+	// of 12 or more non-space characters is withheld, letters only included: a
+	// one-word passphrase is a credential. Accepted false positives: prose such as
+	// "token authentication flow" or "token non-expiring-session" is withheld too.
 	birdSpaced = regexp.MustCompile(
 		`(?i)(?:password|passwd|secret|token|api_key|apikey|pgpassword)` +
 			`["']?\s+["']?(\S{12,})`)
 
+	// Accepted false positive: "Authorization: Bearer" followed by prose is withheld.
 	birdBearer = regexp.MustCompile(`(?i)authorization:\s*bearer["']?[=: ]+["']?(\S{12,})`)
 
 	birdURLPassword = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://[^\s/:@]+:([^\s/@]+)@`)
@@ -85,11 +86,4 @@ func birdPlaceholder(v []byte) bool {
 		(strings.HasPrefix(s, "<") && strings.HasSuffix(s, ">")) ||
 		strings.EqualFold(strings.Trim(s, "*[]"), "REDACTED") ||
 		birdRedactedMarker.MatchString(s)
-}
-
-// hasNonLetter reports whether v holds a digit or a symbol. Trailing sentence
-// punctuation does not count, so the prose "authentication," is still a word.
-func hasNonLetter(v []byte) bool {
-	s := strings.TrimRight(string(v), `.,;:!?)]}"'`)
-	return strings.IndexFunc(s, func(r rune) bool { return !unicode.IsLetter(r) }) >= 0
 }
