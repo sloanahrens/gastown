@@ -448,38 +448,55 @@ func TestRenderDaemonCompose_OMTokenFileIsRefusedWhereItDoesNotBelong(t *testing
 	}
 }
 
-// The scratch Dolt's healthcheck probes ScratchDoltPort, and the daemon's
-// command passes the same port to the entrypoint, so the install dials the
-// port the server serves. The image listens on 3306 while gt's own default is
-// 3307, which is the mismatch the L2 run of 2026-10-31 hit (gt-i2ekc).
+// The scratch Dolt's healthcheck and the daemon's command read one port, the
+// spec's DoltPort. A value that is neither 3306 nor 3307 shows it: a probe or a
+// command with either number written in would carry it instead (gt-i2ekc).
 func TestRenderDaemonCompose_ScratchDoltPortIsOneValueInProbeAndCommand(t *testing.T) {
+	t.Parallel()
+	spec := scratchSpec()
+	spec.DoltPort = 4406
+	out, parsed := render(t, spec)
+
+	if !strings.Contains(out, "/dev/tcp/127.0.0.1/4406") {
+		t.Errorf("the scratch Dolt healthcheck does not probe port 4406:\n%s", out)
+	}
+	want := []string{"--" + config.ScratchTownFlag, "--" + config.DoltHostFlag, templates.ScratchDoltService,
+		"--" + config.DoltPortFlag, "4406"}
+	if got := parsed.Services["daemon"].Command; !slices.Equal(got, want) {
+		t.Errorf("scratch daemon command = %q, want %q", got, want)
+	}
+}
+
+// A spec that leaves DoltPort zero gets the pinned image's default.
+func TestRenderDaemonCompose_ScratchDoltPortDefaultsToTheImagesPort(t *testing.T) {
 	t.Parallel()
 	out, _ := render(t, scratchSpec())
 	port := strconv.Itoa(templates.ScratchDoltPort)
 	if !strings.Contains(out, "/dev/tcp/127.0.0.1/"+port) {
-		t.Errorf("the scratch Dolt healthcheck does not probe port %s:\n%s", port, out)
-	}
-	if !strings.Contains(out, `"--`+config.DoltPortFlag+`", "`+port+`"`) {
-		t.Errorf("the daemon command does not pass --%s %s:\n%s", config.DoltPortFlag, port, out)
+		t.Errorf("the default healthcheck does not probe port %s:\n%s", port, out)
 	}
 }
 
-// The healthcheck reads ScratchDoltPort. Rendering with the constant's value
-// in the probe is not enough to catch a literal that happens to match, so the
-// source must not carry the port as a literal inside the probe string.
-func TestScratchDoltProbeSourceDoesNotHardCodeThePort(t *testing.T) {
+// A DoltPort the render cannot honour is refused: one on a live spec, which
+// runs no Dolt of its own, and one that is not a port.
+func TestRenderDaemonCompose_RefusesADoltPortItCannotUse(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("daemon_compose.go")
-	if err != nil {
-		t.Fatalf("read daemon_compose.go: %v", err)
-	}
-	probe := "/dev/tcp/127.0.0.1/"
-	i := strings.Index(string(src), probe)
-	if i < 0 {
-		t.Fatalf("the scratch Dolt probe %q is gone from daemon_compose.go", probe)
-	}
-	rest := string(src[i+len(probe):])
-	if strings.HasPrefix(rest, strconv.Itoa(templates.ScratchDoltPort)) {
-		t.Errorf("the probe hard-codes %d; it must read ScratchDoltPort", templates.ScratchDoltPort)
+	for _, tc := range []struct {
+		name string
+		spec func() templates.ComposeSpec
+		port int
+	}{
+		{"on a live spec", liveSpec, 3306},
+		{"above 65535", scratchSpec, 70000},
+		{"negative", scratchSpec, -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := tc.spec()
+			spec.DoltPort = tc.port
+			if _, err := templates.RenderDaemonCompose(spec); err == nil {
+				t.Errorf("RenderDaemonCompose with DoltPort %d = nil error, want a refusal", tc.port)
+			}
+		})
 	}
 }

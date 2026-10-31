@@ -1467,6 +1467,8 @@ func TestContainerEntrypointChecksTheDefaultDoltPortWhenTheFlagIsOmitted(t *test
 	}{
 		{"the town names the default port", `{"dolt":{"host":"scratch-dolt","port":3307}}`, false},
 		{"the town names another port", `{"dolt":{"host":"scratch-dolt","port":3306}}`, true},
+		{"the town names no port", `{"dolt":{"host":"scratch-dolt"}}`, true},
+		{"the town names no dolt block", `{"type":"town"}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
