@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -591,11 +592,12 @@ func (d *Daemon) clearSpecDispatchCensus(path string) specCensus {
 }
 
 // logSpecDispatchCensus logs the rows the tick's census file holds, busiest
-// caller first. A file that could not be cleared is marked unavailable rather
-// than read, since its rows may be the last tick's. A file that cannot be read
-// is logged with its path and error: a clean tick was told where to write, so
-// losing it is a census lost, not a tick that read nothing; a failed tick that
-// left no file wrote no census, and says nothing (gt-139dp).
+// caller first, and folds in the rows the background slings wrote beside it
+// under the sling label (gt-3y319). A file that could not be cleared is marked
+// unavailable rather than read, since its rows may be the last tick's. A file
+// that cannot be read is logged with its path and error: a clean tick was told
+// where to write, so losing it is a census lost, not a tick that read nothing;
+// a failed tick that left no file wrote no census, and says nothing (gt-139dp).
 func (d *Daemon) logSpecDispatchCensus(c specCensus, tickOK bool) {
 	if c.clearErr != nil {
 		d.logger.Printf("spec_dispatch: bd census (spec dispatch): unavailable: the file at %s was not cleared, so its rows may be the last tick's: %v", c.path, c.clearErr)
@@ -607,11 +609,55 @@ func (d *Daemon) logSpecDispatchCensus(c specCensus, tickOK bool) {
 			return
 		}
 		d.logger.Printf("spec_dispatch: bd census (spec dispatch): unreadable at %s: %v", c.path, err)
-		return
+		rows = nil
 	}
-	if total := beads.CensusRowsTotal(rows); total > 0 {
-		d.logger.Printf("spec_dispatch: bd census (spec dispatch): total=%d %s", total, beads.CensusTopRows(rows))
+	slingRows := d.foldSpecSlingCensus()
+	if total := beads.CensusRowsTotal(rows) + beads.CensusRowsTotal(slingRows); total > 0 {
+		d.logger.Printf("spec_dispatch: bd census (spec dispatch): total=%d %s", total, specCensusLine(rows, slingRows))
 	}
+}
+
+// foldSpecSlingCensus reads and removes the census files the background slings
+// wrote beside the tick's sink, so their calls join this tick's census line and
+// no later tick counts them again (gt-3y319). A file that cannot be read is
+// logged and left for a later tick: WriteCensusSink renames a whole file into
+// place, so a file it wrote is not torn, and dropping it would drop real calls.
+func (d *Daemon) foldSpecSlingCensus() []beads.CensusRow {
+	paths, err := filepath.Glob(dispatch.SpecSlingCensusGlob(d.config.TownRoot))
+	if err != nil {
+		d.logger.Printf("spec_dispatch: bd census (sling): cannot list the sling census files: %v", err)
+		return nil
+	}
+	var rows []beads.CensusRow
+	for _, path := range paths {
+		part, err := beads.ReadCensusSink(path)
+		if err != nil {
+			d.logger.Printf("spec_dispatch: bd census (sling): unreadable at %s: %v; kept for the next tick", path, err)
+			continue
+		}
+		rows = append(rows, part...)
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			d.logger.Printf("spec_dispatch: bd census (sling): folded but not removed: %s: %v", path, err)
+		}
+	}
+	beads.SortCensusRows(rows)
+	return rows
+}
+
+// specCensusLine renders a census line's rows: the tick's own as the line has
+// always shown them, then the rows folded from the background slings under the
+// sling label (gt-3y319).
+func specCensusLine(tickRows, slingRows []beads.CensusRow) string {
+	line := beads.CensusTopRows(tickRows)
+	top := beads.CensusTopRows(slingRows)
+	if top == "" {
+		return line
+	}
+	sling := "sling: " + strings.TrimPrefix(top, "top: ")
+	if line == "" {
+		return sling
+	}
+	return line + " " + sling
 }
 
 // specSlingsHooked counts the slings a tick's output shows hooked before the

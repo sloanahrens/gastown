@@ -7,6 +7,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"log"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -99,7 +100,7 @@ type blockedSlings struct {
 
 func (b *blockedSlings) answer(args []string) cliReply {
 	if len(args) >= 2 && args[0] == "spec" && args[1] == "sling" {
-		b.started <- args[len(args)-1]
+		b.started <- cliFlagValue(args, "--job")
 		<-b.release
 		b.clock.Advance(slingTook)
 		return cliReply{stdout: string(wireOut(`{"dispatched":[{"bead":"gt-a","line":"gt-a: slung to gastown/p on claude-sonnet"}]}`))}
@@ -107,6 +108,15 @@ func (b *blockedSlings) answer(args []string) cliReply {
 	report := b.ticks[min(b.tick, len(b.ticks)-1)]
 	b.tick++
 	return cliReply{stdout: string(wireOut(report))}
+}
+
+// cliFlagValue is the value of --name in a fake CLI's argv, or "" when the flag
+// is absent.
+func cliFlagValue(args []string, name string) string {
+	if i := slices.Index(args, name); i >= 0 && i+1 < len(args) {
+		return args[i+1]
+	}
+	return ""
 }
 
 // newBlockedSlings is a blockedSlings and the daemon that runs against it, on
@@ -167,6 +177,28 @@ func TestNextTickStartsWhileAnEarlierSlingIsStillRunning(t *testing.T) {
 	// The fake answers both slings with the same report.
 	if n := countContaining(got, "spec_dispatch: dispatched: gt-a: slung to gastown/p", "sling took"); n != 2 {
 		t.Errorf("sling result lines = %d, want one per finished sling: %v", n, got)
+	}
+}
+
+// The daemon tells each background sling where to write its bd census: a
+// per-run file beside the tick's sink, which the daemon folds into its census
+// line (gt-3y319).
+func TestSpecSlingIsToldItsCensusPath(t *testing.T) {
+	t.Parallel()
+	b, fake, d, _ := newBlockedSlings(t, plannedTick(slingJob("gt-a", "claude-sonnet")))
+
+	d.runSpecDispatch()
+	recvSling(t, b.started)
+	close(b.release)
+	waitSlings(t, d)
+
+	calls := fake.argvs("spec", "sling")
+	if len(calls) != 1 {
+		t.Fatalf("slings run = %v, want one", calls)
+	}
+	path := cliFlagValue(calls[0], "--census-path")
+	if want := filepath.Join(d.config.TownRoot, "daemon"); path == "" || filepath.Dir(path) != want {
+		t.Errorf("--census-path = %q, want a per-run file in %s", path, want)
 	}
 }
 

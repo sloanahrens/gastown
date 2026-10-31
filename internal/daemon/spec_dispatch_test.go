@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -945,6 +946,53 @@ func TestSpecDispatchLogsItsCensus(t *testing.T) {
 	const want = "spec_dispatch: bd census (spec dispatch): total=42 top: show@cmd.specRoster=30 mol wisp@cmd.specBoard=12"
 	if n := countContaining(lines(), want); n != 1 {
 		t.Errorf("census lines = %d, want one %q: %v", n, want, lines())
+	}
+}
+
+// A background sling's rows are folded into the tick's census line under the
+// sling label, and its per-run file is removed so no later tick counts it again
+// (gt-3y319).
+func TestSpecDispatchFoldsSlingCensus(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLIFor(func(c cliCall) cliReply {
+		rows := []beads.CensusRow{{Verb: "show", Caller: "cmd.specRoster", Count: 30}}
+		if err := beads.WriteCensusSink(dispatch.SpecCensusPath(c.dir), rows); err != nil {
+			t.Errorf("writing the tick's census: %v", err)
+		}
+		return cliReply{stdout: string(wireOut(`{"candidates": 1}`))}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	slingPath := dispatch.SpecSlingCensusPath(d.config.TownRoot, 1)
+	if err := beads.WriteCensusSink(slingPath, []beads.CensusRow{
+		{Verb: "show", Caller: "cmd.specSlingDuplicateCheck", Count: 7},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runSpecDispatch()
+
+	const want = "spec_dispatch: bd census (spec dispatch): total=37 top: show@cmd.specRoster=30 sling: show@cmd.specSlingDuplicateCheck=7"
+	if n := countContaining(lines(), want); n != 1 {
+		t.Errorf("census lines = %d, want one %q: %v", n, want, lines())
+	}
+	if _, err := os.Stat(slingPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the sling's census file is still at %s after folding: %v", slingPath, err)
+	}
+}
+
+// A census line with no sling rows keeps the shape it had before slings
+// reported: no sling label, and the tick's rows named as always (gt-3y319).
+func TestSpecCensusLineOmitsAnEmptySlingSection(t *testing.T) {
+	t.Parallel()
+	tickRows := []beads.CensusRow{{Verb: "show", Caller: "cmd.specRoster", Count: 3}}
+	if got, want := specCensusLine(tickRows, nil), beads.CensusTopRows(tickRows); got != want {
+		t.Errorf("line = %q, want the tick's own rows %q", got, want)
+	}
+	slingRows := []beads.CensusRow{{Verb: "list", Caller: "cmd.specSlingOne", Count: 1}}
+	if got, want := specCensusLine(nil, slingRows), "sling: list@cmd.specSlingOne=1"; got != want {
+		t.Errorf("line = %q, want only the sling section %q", got, want)
 	}
 }
 

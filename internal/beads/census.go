@@ -66,6 +66,14 @@ func CensusSnapshotAndReset() []CensusRow {
 	censusTotal = 0
 	censusMu.Unlock()
 
+	SortCensusRows(rows)
+	return rows
+}
+
+// SortCensusRows orders rows as the census logs them, most frequent first, then
+// by verb and caller, so rows gathered from more than one sink line up as one
+// ranking.
+func SortCensusRows(rows []CensusRow) {
 	sort.Slice(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		if a.Count != b.Count {
@@ -76,7 +84,6 @@ func CensusSnapshotAndReset() []CensusRow {
 		}
 		return a.Caller < b.Caller
 	})
-	return rows
 }
 
 // CensusTotal returns how many bd subprocesses started since the last reset.

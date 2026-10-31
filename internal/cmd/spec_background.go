@@ -61,7 +61,15 @@ var (
 	specDispatchBackground bool
 	specDispatchInFlight   string
 	specSlingJobJSON       string
+	// specSlingCensusPath is the --census-path the daemon passes: where this
+	// sling writes the bd calls it made, for the daemon to fold into its census
+	// line. Empty is a sling run by hand, which reports to no one (gt-3y319).
+	specSlingCensusPath string
 )
+
+// specSlingCensus is the bd call census a sling writes at exit; a test replaces
+// it to hand the sling rows without running a bd subprocess (gt-3y319).
+var specSlingCensus = beads.CensusSnapshotAndReset
 
 var specSlingCmd = &cobra.Command{
 	Use:    "sling",
@@ -82,6 +90,7 @@ func init() {
 	specDispatchCmd.Flags().BoolVar(&specDispatchBackground, "background-slings", false, "Plan the slings and hand them back in the report instead of running them")
 	specDispatchCmd.Flags().StringVar(&specDispatchInFlight, "in-flight", "", "JSON list of the slings still running from earlier ticks ({bead, rig, agent})")
 	specSlingCmd.Flags().StringVar(&specSlingJobJSON, "job", "", "The sling job, as the tick's report printed it")
+	specSlingCmd.Flags().StringVar(&specSlingCensusPath, "census-path", "", "Write the sling's bd census rows to this file at exit")
 	specCmd.AddCommand(specSlingCmd)
 }
 
@@ -219,6 +228,19 @@ func runSpecSling(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	report := specSlingReport(townRoot, job)
+	// The census is written whatever the sling decided, held or made, since
+	// the bd calls it made are real either way. A write that fails costs the
+	// census and never the sling: the report carries it once (gt-3y319).
+	if censusErr := specWriteSlingCensus(specSlingCensusPath); censusErr != nil {
+		report.Errors = append(report.Errors, "bd census rows not written: "+censusErr.Error())
+	}
+	return printSpecSlingReport(cmd, report)
+}
+
+// specSlingReport makes the sling a job describes and returns its report. A
+// hold that covers the rig stops it before the sling, as it stops the tick.
+func specSlingReport(townRoot string, job specSlingJob) specDispatchReport {
 	if slingActor == "" {
 		slingActor = specDispatchActor
 	}
@@ -241,11 +263,21 @@ func runSpecSling(cmd *cobra.Command, _ []string) error {
 		},
 	}
 	if held := specSlingHold(townRoot, job.Rig); held != nil {
-		return printSpecSlingReport(cmd, *held)
+		return *held
 	}
 	report := runSpecSlingJob(env, job)
 	report.Notices = append(report.Notices, traces.notices()...)
-	return printSpecSlingReport(cmd, report)
+	return report
+}
+
+// specWriteSlingCensus writes the bd calls this sling made to path, the per-run
+// file the daemon named, for the daemon to fold into its census line. A sling
+// run by hand has no path and writes nothing (gt-3y319).
+func specWriteSlingCensus(path string) error {
+	if path == "" {
+		return nil
+	}
+	return beads.WriteCensusSink(path, specSlingCensus())
 }
 
 func printSpecSlingReport(cmd *cobra.Command, report specDispatchReport) error {
