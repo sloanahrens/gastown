@@ -100,6 +100,35 @@ func TestJevNoiseCommand(t *testing.T) {
 		assert.Contains(t, out.String(), "no sampled group has been asked again yet")
 	})
 
+	t.Run("json says whether the repeat log exists", func(t *testing.T) {
+		t.Parallel()
+		missing := t.TempDir()
+		require.NoError(t, battery.Append(logtriage.LogPath(missing), logtriage.Line{
+			TS: now, Key: "k", QuestionVersion: logtriage.Version,
+			Answers: map[string]logtriage.Answer{logtriage.QNeedsAction: {Noul: new(float64)}},
+		}))
+		// Two repeats is below the minimum, so the repeat log is read but measures no rows.
+		measuredEmpty := t.TempDir()
+		noiseFixtureOriginal(t, measuredEmpty, "k", 0.43, 0.53, 0.43)
+
+		for _, tc := range []struct {
+			name  string
+			town  string
+			found bool
+		}{
+			{name: "no repeat log", town: missing, found: false},
+			{name: "repeats measure no items", town: measuredEmpty, found: true},
+		} {
+			var out bytes.Buffer
+			require.NoError(t, jevNoiseWithFlags(&out, tc.town, "logtriage", "", noise.DefaultCut, true, now), tc.name)
+
+			var obj map[string]any
+			require.NoError(t, json.Unmarshal(out.Bytes(), &obj), out.String())
+			assert.Equal(t, tc.found, obj["repeat_log_found"], tc.name)
+			assert.Empty(t, obj["rows"], tc.name)
+		}
+	})
+
 	t.Run("unknown battery", func(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
