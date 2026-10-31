@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -247,6 +248,138 @@ func TestHubDoesNotSendAStateFrameThatFailsToEncodeOnPoll(t *testing.T) {
 	hours = []TrendHour{{Hour: now.Add(time.Minute), Landed: 2}}
 	h.pollTrend()
 	assert.Equal(t, 1, eventCount(drainFrames(page), "state"), "the state was not sent again once it encoded")
+}
+
+// The frame table takes the state, the entries, the alerts and the backlog
+// alike, so each of them that will not encode is left out rather than sent as
+// null, which the page reads as an empty entry, alert or feed (gt-hndxa).
+func TestHubDoesNotSendAnEntryThatFailsToEncode(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	// time.Time does not encode a year past 9999, so this entry fails to marshal.
+	unencodable := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	pending := []Entry{{At: unencodable, Rig: "gastown", Kind: "daemon", Text: "a line"}}
+	h := NewHub(Config{
+		Now:  func() time.Time { return now },
+		Feed: func() []Entry { out := pending; pending = nil; return out },
+	})
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	h.pollFeed()
+	got := drainFrames(page)
+	assert.Equal(t, 0, eventCount(got, "entry"), "an entry that fails to encode was sent")
+	assert.NotContains(t, got, "event: entry\ndata: null", "an entry that fails to encode was sent as null, which the page cannot draw")
+}
+
+// The backlog frame is framed by the same table, so a ring that will not encode
+// is left out too, and the page keeps the feed it drew (gt-hndxa).
+func TestHubDoesNotSendABacklogThatFailsToEncode(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	unencodable := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	// One entry past the burst cap, with one member that will not marshal.
+	entries := make([]Entry, feedBurstMax+1)
+	for i := range entries {
+		entries[i] = Entry{At: now, Rig: "gastown", Kind: "daemon", Text: fmt.Sprintf("line %d", i)}
+	}
+	entries[0].At = unencodable
+	h := NewHub(Config{
+		Now:  func() time.Time { return now },
+		Feed: func() []Entry { out := entries; entries = nil; return out },
+	})
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	h.pollFeed()
+	got := drainFrames(page)
+	assert.Equal(t, 0, eventCount(got, "backlog"), "a backlog that fails to encode was sent")
+	assert.NotContains(t, got, "event: backlog\ndata: null", "a backlog that fails to encode was sent as null, which the page reads as an empty feed")
+}
+
+// An alert takes the same table, so one whose reading will not encode is left
+// out rather than sent as null (gt-hndxa).
+func TestHubDoesNotSendAnAlertThatFailsToEncode(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	unencodable := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	// The attention line's own timestamp carries into the alert, so a bad one
+	// makes the alert frame fail to marshal while the clock stays sound.
+	pending := []attention.Event{{
+		TS: unencodable, Class: attention.KindRedMain, Severity: attention.SeverityHigh,
+		Text: "slot held 3h", Key: "slot:gastown", State: attention.EventNew,
+		Rule: attention.RuleSlotHeld, Handled: attention.HandledOperatorAction, Wake: true,
+	}}
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		Attention: func() ([]attention.Event, attention.Acks) {
+			out := pending
+			pending = nil
+			return out, attention.Acks{}
+		},
+	})
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	h.pollAttention()
+	got := drainFrames(page)
+	assert.NotContains(t, got, "slot:gastown", "an alert that fails to encode was sent")
+	assert.NotContains(t, got, "event: alert\ndata: null", "an alert that fails to encode was sent as null")
+}
+
+// A state the page cannot draw is not dropped in silence: the hub raises an
+// alert for it, once per cooldown, so a state that stays broken does not fill
+// the feed with the same line (gt-hndxa).
+func TestHubRaisesAnAlertWhenTheStateWillNotEncode(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	unencodable := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	hours := []TrendHour{{Hour: now, Landed: 1}}
+	h := NewHub(Config{
+		Now:   func() time.Time { return now },
+		Trend: func() *Trend { return &Trend{Hours: hours} },
+	})
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	hours = []TrendHour{{Hour: unencodable, Landed: 1}}
+	h.pollTrend()
+	assert.Equal(t, 1, strings.Count(drainFrames(page), `"key":"state:encode"`), "a state that fails to encode was dropped without an alert")
+
+	h.pollTrend()
+	assert.Equal(t, 0, strings.Count(drainFrames(page), `"key":"state:encode"`), "the same state failure was raised again inside the cooldown")
+}
+
+// A page that connects while the state will not encode starts from the last
+// state that did, so it draws a state instead of waiting for the poll that
+// makes the live one encode (gt-hndxa).
+func TestHubNewPageStartsWithTheLastStateThatEncoded(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	unencodable := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	hours := []TrendHour{{Hour: now, Landed: 1}}
+	h := NewHub(Config{
+		Now:   func() time.Time { return now },
+		Trend: func() *Trend { return &Trend{Hours: hours} },
+	})
+	page, initial := h.Subscribe()
+	defer h.Unsubscribe(page)
+	good, ok := frameData(initial, "state")
+	require.True(t, ok, "the state encodes, so the first page got one")
+
+	hours = []TrendHour{{Hour: unencodable, Landed: 1}}
+	h.pollTrend()
+	later, laterInitial := h.Subscribe()
+	defer h.Unsubscribe(later)
+
+	got, ok := frameData(laterInitial, "state")
+	require.True(t, ok, "a page that connected while the state was broken got no state")
+	assert.Equal(t, good, got, "the page did not start from the last state that encoded")
 }
 
 // framesText joins frames as one page would receive them.
