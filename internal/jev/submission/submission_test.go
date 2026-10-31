@@ -432,6 +432,25 @@ func TestJevSubmissionUnreadableLogStopsThePass(t *testing.T) {
 	}
 }
 
+// A pass with nothing waiting has no submission to decide, so it does not read
+// the log: an idle pass stays cheap however long the log grows (gt-ipgpu).
+func TestJevSubmissionIdlePassDoesNotReadTheLog(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	// A directory where the log belongs cannot be read, and nothing is waiting.
+	if err := os.Mkdir(r.pass.LogPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatalf("idle pass err = %v, want no read of the log", err)
+	}
+	if sum != (Summary{}) || len(r.asker.states) != 0 {
+		t.Errorf("idle pass summary = %+v, asked %d; want nothing done", sum, len(r.asker.states))
+	}
+}
+
 // The summary counts a submission the log already holds apart from one the
 // pass could not read, so the daemon line reports what each cost.
 func TestJevSubmissionSummaryCountsRepeated(t *testing.T) {
