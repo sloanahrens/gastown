@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
+	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
 // TestMain runs the unit tier's checks, which fail the run on a goroutine that
@@ -26,6 +27,7 @@ func TestMain(m *testing.M) {
 var rowKeys = []string{
 	"v", "ts", "interval_s", "source", "class", "component", "name",
 	"rig", "polecat", "bead", "cpu_pct", "mem_bytes", "mem_limit_bytes",
+	"workspace",
 }
 
 // fakeClock is the Clock a test moves by hand.
@@ -175,7 +177,7 @@ func TestFirstTick(t *testing.T) {
 		process(500, 900, 2, 7200, "/usr/libexec/kernel_task"),
 		process(600, 700, 0, 120, "XProtectService"),
 	}}
-	sampler := New(dir, lister, clock, 30*time.Second)
+	sampler := New(dir, dir, lister, clock, 30*time.Second)
 
 	lines := tick(t, sampler, clock.now)
 	rows := decodeRows(t, lines)
@@ -279,7 +281,7 @@ func TestCPUDeltaPerComponent(t *testing.T) {
 		process(300, 500, 1, 300, "/usr/local/go/bin/go test ./..."),
 		process(301, 4000, 1, 300, "make build"),
 	}}
-	sampler := New(dir, lister, clock, 30*time.Second)
+	sampler := New(dir, dir, lister, clock, 30*time.Second)
 
 	first := decodeRows(t, tick(t, sampler, clock.now))
 	if got := componentRow(t, first, "dolt")["name"]; got != "dolt-sql" {
@@ -373,7 +375,7 @@ func TestDeltaGuards(t *testing.T) {
 			lister := &fakeLister{processes: []Process{
 				process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
 			}}
-			sampler := New(dir, lister, clock, 30*time.Second)
+			sampler := New(dir, dir, lister, clock, 30*time.Second)
 			tick(t, sampler, clock.now)
 
 			clock.advance(30 * time.Second)
@@ -406,7 +408,7 @@ func TestCPURounding(t *testing.T) {
 	lister := &fakeLister{processes: []Process{
 		process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
 	}}
-	sampler := New(dir, lister, clock, 3*time.Second)
+	sampler := New(dir, dir, lister, clock, 3*time.Second)
 	tick(t, sampler, clock.now)
 
 	clock.advance(3 * time.Second)
@@ -437,7 +439,7 @@ func TestInterval(t *testing.T) {
 			lister := &fakeLister{processes: []Process{
 				process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
 			}}
-			sampler := New(dir, lister, clock, 30*time.Second)
+			sampler := New(dir, dir, lister, clock, 30*time.Second)
 
 			first := decodeRows(t, tick(t, sampler, clock.now))
 			if got := number(t, componentRow(t, first, "dolt"), "interval_s"); got != 30 {
@@ -467,7 +469,7 @@ func TestProcessListFailure(t *testing.T) {
 	lister := &fakeLister{processes: []Process{
 		process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
 	}}
-	sampler := New(dir, lister, clock, 30*time.Second)
+	sampler := New(dir, dir, lister, clock, 30*time.Second)
 	tick(t, sampler, clock.now)
 
 	clock.advance(30 * time.Second)
@@ -507,7 +509,7 @@ func TestEmptyProcessListWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
 	lister := &fakeLister{}
-	sampler := New(dir, lister, clock, 30*time.Second)
+	sampler := New(dir, dir, lister, clock, 30*time.Second)
 
 	rows, err := sampler.Tick(context.Background())
 	if err != nil {
@@ -533,7 +535,7 @@ func TestAppendAcrossTicksAndDays(t *testing.T) {
 	lister := &fakeLister{processes: []Process{
 		process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
 	}}
-	sampler := New(dir, lister, clock, 30*time.Second)
+	sampler := New(dir, dir, lister, clock, 30*time.Second)
 
 	tick(t, sampler, clock.now)
 	clock.advance(30 * time.Second)
@@ -562,7 +564,7 @@ func TestAppendFailureReturnsRows(t *testing.T) {
 	lister := &fakeLister{processes: []Process{
 		process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
 	}}
-	sampler := New(blocked, lister, clock, 30*time.Second)
+	sampler := New(blocked, t.TempDir(), lister, clock, 30*time.Second)
 
 	rows, err := sampler.Tick(context.Background())
 	if err == nil {
@@ -713,7 +715,7 @@ func TestCPUNullWhenAComponentHasAnUnmeasuredProcess(t *testing.T) {
 	lister := &fakeLister{processes: []Process{
 		process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
 	}}
-	sampler := New(dir, lister, clock, 30*time.Second)
+	sampler := New(dir, dir, lister, clock, 30*time.Second)
 	tick(t, sampler, clock.now)
 
 	clock.advance(30 * time.Second)
@@ -744,5 +746,86 @@ func TestParseProcessListRejectsOutputWithNoProcess(t *testing.T) {
 	got, err := parseProcessList("not a process line\n  100  1000 00:00:10 01:00:00 /usr/local/bin/dolt\n")
 	if err != nil || len(got) != 1 {
 		t.Fatalf("parseProcessList with one real process = %d processes, %v; want one and no error", len(got), err)
+	}
+}
+
+// writeWorkspaceMap puts a workspace map where workspaceid.Load reads it under
+// townRoot.
+func writeWorkspaceMap(t *testing.T, townRoot, body string) {
+	t.Helper()
+	path := filepath.Join(townRoot, workspaceid.File)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating settings directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", workspaceid.File, err)
+	}
+}
+
+// TestRowWorkspaceField covers plan row M4: a host row carries the town default
+// workspace id, a row naming a rig carries the id the map gives that rig, and
+// the field is last in the encoded JSON.
+func TestRowWorkspaceField(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeWorkspaceMap(t, townRoot, `{"default":"customer-zero","rigs":{"gastown":"acme"}}`)
+	metricsDir := filepath.Join(townRoot, ".runtime", "metrics")
+	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
+	lister := &fakeLister{processes: []Process{
+		process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
+	}}
+	sampler := New(metricsDir, townRoot, lister, clock, 30*time.Second)
+
+	lines := tick(t, sampler, clock.now)
+	dolt := componentRow(t, decodeRows(t, lines), "dolt")
+	if got := dolt["workspace"]; got != "customer-zero" {
+		t.Errorf("a host row's workspace = %v, want the town default customer-zero", got)
+	}
+	keys := jsonKeys(t, lines[0])
+	if got := keys[len(keys)-1]; got != "workspace" {
+		t.Errorf("row keys = %v, want workspace last", keys)
+	}
+
+	m, err := workspaceid.Load(townRoot)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rig, unmapped, empty := "gastown", "hq", ""
+	for _, tc := range []struct {
+		name string
+		rig  *string
+		want string
+	}{
+		{"a rig the map names", &rig, "acme"},
+		{"a rig the map does not name", &unmapped, "customer-zero"},
+		{"no rig at all", nil, "customer-zero"},
+		{"a rig that is present but empty", &empty, ""},
+	} {
+		row := Row{Rig: tc.rig}
+		row.SetWorkspace(m)
+		if row.Workspace != tc.want {
+			t.Errorf("%s: workspace = %q, want %q", tc.name, row.Workspace, tc.want)
+		}
+	}
+}
+
+// A workspace map that is present but malformed fails the tick instead of
+// stamping rows with an id the operator did not ask for.
+func TestWorkspaceMapErrorFailsTick(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeWorkspaceMap(t, townRoot, `{"default":""}`)
+	metricsDir := filepath.Join(townRoot, ".runtime", "metrics")
+	clock := &fakeClock{now: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)}
+	lister := &fakeLister{processes: []Process{
+		process(100, 1000, 10, 3600, "/usr/local/bin/dolt"),
+	}}
+	sampler := New(metricsDir, townRoot, lister, clock, 30*time.Second)
+
+	if rows, err := sampler.Tick(context.Background()); err == nil {
+		t.Fatalf("a malformed workspace map returned %d rows and no error", len(rows))
+	}
+	if _, err := os.Stat(filepath.Join(metricsDir, rowsSubdir)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a malformed workspace map still wrote rows: %v", err)
 	}
 }

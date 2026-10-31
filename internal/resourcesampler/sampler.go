@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
 const (
@@ -42,7 +44,8 @@ const (
 
 // Row is one host row of the schema's 30 s records, in the schema's field order:
 // encoding/json writes struct fields in order, so the samplers and the readers
-// agree on the shape as well as the names.
+// agree on the shape as well as the names. Workspace is appended after the
+// fields the schema shipped with, the position the plan gives it (gt-3mrzx).
 type Row struct {
 	V             int      `json:"v"`
 	TS            string   `json:"ts"`
@@ -57,6 +60,24 @@ type Row struct {
 	CPUPct        *float64 `json:"cpu_pct"`
 	MemBytes      int64    `json:"mem_bytes"`
 	MemLimitBytes *int64   `json:"mem_limit_bytes"`
+	Workspace     string   `json:"workspace"`
+}
+
+// SetWorkspace stamps the row with the workspace id the map gives the rig it
+// names, or the map's default when it names none. A rig that is present but
+// empty stays unresolved rather than taking the default, which would attribute
+// the row to a workspace it did not name (gt-3mrzx).
+func (r *Row) SetWorkspace(m *workspaceid.Map) {
+	if r.Rig == nil {
+		r.Workspace = m.Default()
+		return
+	}
+	id, err := m.For(*r.Rig)
+	if err != nil {
+		r.Workspace = ""
+		return
+	}
+	r.Workspace = id
 }
 
 // Process is one host process in a tick's process list.
@@ -93,6 +114,7 @@ func (SystemClock) Now() time.Time { return time.Now() }
 // Sampler appends one row per host component on each tick.
 type Sampler struct {
 	metricsDir string
+	townRoot   string
 	processes  ProcessLister
 	clock      Clock
 	interval   time.Duration
@@ -103,13 +125,16 @@ type Sampler struct {
 }
 
 // New returns a Sampler that appends its rows under metricsDir, measuring each
-// tick against the one before it.
-func New(metricsDir string, processes ProcessLister, clock Clock, interval time.Duration) *Sampler {
+// tick against the one before it. townRoot is where settings/workspaces.json
+// lives, the map each row's workspace id comes from: a town with no file gives
+// every row the customer-zero id.
+func New(metricsDir, townRoot string, processes ProcessLister, clock Clock, interval time.Duration) *Sampler {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
 	return &Sampler{
 		metricsDir: metricsDir,
+		townRoot:   townRoot,
 		processes:  processes,
 		clock:      clock,
 		interval:   interval,
@@ -122,6 +147,13 @@ func New(metricsDir string, processes ProcessLister, clock Clock, interval time.
 // the next tick reports null CPU, because the gap leaves no delta to divide.
 func (s *Sampler) Tick(ctx context.Context) ([]Row, error) {
 	now := s.clock.Now().UTC()
+	// Read the workspace map before the process list so a bad map costs no
+	// baseline and writes nothing, rather than stamping rows with an id the
+	// operator did not ask for (gt-3mrzx).
+	workspaces, err := workspaceid.Load(s.townRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resource sampler: %w", err)
+	}
 	interval := s.intervalAt(now)
 	s.lastTick, s.started = now, true
 
@@ -133,7 +165,7 @@ func (s *Sampler) Tick(ctx context.Context) ([]Row, error) {
 		s.previous = nil
 		return nil, fmt.Errorf("resource sampler: process list: %w", err)
 	}
-	rows := s.rows(processes, now, interval)
+	rows := s.rows(processes, now, interval, workspaces)
 	if err := s.append(rows, now); err != nil {
 		return rows, err
 	}
@@ -194,7 +226,7 @@ func (a *aggregate) add(p Process, name string, cpuPct float64, measured bool) {
 
 // rows folds a tick's process list into one row per component, in component
 // order, and keeps the tick's readings as the next tick's baseline.
-func (s *Sampler) rows(processes []Process, now time.Time, interval time.Duration) []Row {
+func (s *Sampler) rows(processes []Process, now time.Time, interval time.Duration, workspaces *workspaceid.Map) []Row {
 	current := make(map[int]baseline, len(processes))
 	aggregates := make(map[string]*aggregate, len(processes))
 	for _, p := range processes {
@@ -238,6 +270,7 @@ func (s *Sampler) rows(processes []Process, now time.Time, interval time.Duratio
 			cpu := math.Round(agg.cpu*100) / 100
 			row.CPUPct = &cpu
 		}
+		row.SetWorkspace(workspaces)
 		rows = append(rows, row)
 	}
 	return rows

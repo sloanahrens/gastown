@@ -8,10 +8,14 @@ mango's town_metrics reads the same files, so the record shape is fixed by
 the v1 schema agreed with snipe (gt-8zpjn):
 
     v, ts, interval_s, source, class, component, name, rig, polecat, bead,
-    cpu_pct, mem_bytes, mem_limit_bytes
+    cpu_pct, mem_bytes, mem_limit_bytes, workspace
 
 `cpu_pct` is percent of ONE core (100 = one full core), memory is bytes, and
-an unknown value is null, never "" or 0.
+an unknown value is null, never "" or 0. `workspace` is appended after the
+first thirteen fields (gt-3mrzx): the workspace id the row's `rig` maps to in
+`<town>/settings/workspaces.json` (`internal/workspaceid`), or the file's
+default for a row naming no rig. A file that has already shipped without the
+key still reads, because a reader takes the keys it knows by name.
 
 Sources: the host's `ps`, docker containers (each context named explicitly),
 and `kubectl top pod -A` when a kubeconfig is given. One failing source is

@@ -405,3 +405,43 @@ func TestSourceResourcesCollectJudgesSilenceNotTheHour(t *testing.T) {
 		})
 	}
 }
+
+// withWorkspace adds the schema's workspace field to a sampler row, in the
+// position the sampler appends it (gt-3mrzx).
+func withWorkspace(row, id string) string {
+	return strings.TrimSuffix(row, "}") + `,"workspace":"` + id + `"}`
+}
+
+// TestResourcesSourceReadsOldAndNewRows covers plan row M4's reader half: a day
+// file that mixes rows with and without the workspace field yields the same
+// columns as the same rows without it. The schema stays v1 because the source
+// decodes a row by name and never rejects a key it does not read.
+func TestResourcesSourceReadsOldAndNewRows(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 24, 17, 45, 0, 0, time.UTC)
+	oldRows := []string{
+		resourcesRow("2026-10-24T17:10:00Z", "sandbox", "supervisor", "10", "100"),
+		resourcesRow("2026-10-24T17:20:00Z", "sandbox", "supervisor", "30", "300"),
+		resourcesRow("2026-10-24T17:30:00Z", "control-plane", "dolt", "2", "500"),
+	}
+	mixedRows := []string{
+		withWorkspace(oldRows[0], "acme"),
+		oldRows[1],
+		withWorkspace(oldRows[2], "customer-zero"),
+	}
+	collect := func(rows []string) map[string]any {
+		t.Helper()
+		env := resourcesTestEnv(now, map[string][]byte{
+			resourcesTestPath("2026-10-24.jsonl"): resourcesLines(rows...),
+		}, nil, nil)
+		got, err := resourcesSource{}.Collect(context.Background(), env)
+		if err != nil {
+			t.Fatalf("Collect: %v", err)
+		}
+		return got
+	}
+	old, mixed := collect(oldRows), collect(mixedRows)
+	if !reflect.DeepEqual(old, mixed) {
+		t.Fatalf("rows with a workspace rolled up as %v, want the same as without it: %v", mixed, old)
+	}
+}
