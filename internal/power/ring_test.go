@@ -195,20 +195,30 @@ func TestRingVerbs(t *testing.T) {
 			setup func(t *testing.T, f *fake)
 			// noReader leaves the state with no key reader at all, not one that fails.
 			noReader bool
+			// emptyKey hands the state a reader that answers with no key and no error.
+			emptyKey bool
+			// noActor leaves the state with no session actor to forge under.
+			noActor bool
 		}{
-			{"tampered", func(t *testing.T, f *fake) {
+			{name: "tampered", setup: func(t *testing.T, f *fake) {
 				ringtest.Tampered(t, f.town, testRingKey, f.now)
-			}, false},
-			{"key unavailable", func(t *testing.T, f *fake) {
+			}},
+			{name: "key unavailable", setup: func(t *testing.T, f *fake) {
 				ringtest.Valid(t, f.town, testRingKey, f.now)
 				f.ringKey = nil
-			}, false},
-			{"no key reader configured", func(t *testing.T, f *fake) {
+			}},
+			{name: "empty key", emptyKey: true, setup: func(t *testing.T, f *fake) {
 				ringtest.Valid(t, f.town, testRingKey, f.now)
-			}, true},
-			{"unreadable config", func(t *testing.T, f *fake) {
+			}},
+			{name: "no key reader configured", noReader: true, setup: func(t *testing.T, f *fake) {
+				ringtest.Valid(t, f.town, testRingKey, f.now)
+			}},
+			{name: "unreadable config", setup: func(t *testing.T, f *fake) {
 				f.writeTownJSON(t, `{"type":"town"`)
-			}, false},
+			}},
+			{name: "no session actor", noActor: true, setup: func(t *testing.T, f *fake) {
+				ringtest.Valid(t, f.town, testRingKey, f.now)
+			}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
@@ -219,9 +229,15 @@ func TestRingVerbs(t *testing.T) {
 				if tc.noReader {
 					o.RingKey = nil
 				}
+				if tc.emptyKey {
+					o.RingKey = func(string) ([]byte, error) { return nil, nil }
+				}
+				if tc.noActor {
+					o.Actor = ""
+				}
 				err := Full(context.Background(), o)
 				if err == nil {
-					t.Fatalf("full with an unrenewable Ring = nil error, want a refusal (output:\n%s)", out)
+					t.Fatalf("full with a Ring it cannot renew = nil error, want a refusal (output:\n%s)", out)
 				}
 				if code := codeOf(t, err); code != ExitUsage {
 					t.Errorf("refusal exit code = %d, want %d", code, ExitUsage)
@@ -242,6 +258,69 @@ func TestRingVerbs(t *testing.T) {
 					t.Errorf("full recorded a state before refusing: %v", err)
 				}
 			})
+		}
+	})
+
+	t.Run("full forges nothing in a town with no Ring, so it needs no session actor", func(t *testing.T) {
+		t.Parallel()
+		f := startFor(t, StateFull)
+		o, out, _ := ringOptions(f, StateFull)
+		o.Actor = ""
+		if err := Full(context.Background(), o); err != nil {
+			t.Fatalf("full with no Ring and no actor = %v (output:\n%s)", err, out)
+		}
+		if !strings.Contains(out.String(), noRingLine) {
+			t.Errorf("full did not report that no Ring is forged:\n%s", out)
+		}
+		if data := readTownJSON(t, f); data != nil {
+			t.Errorf("full wrote mayor/town.json for a town with no Ring:\n%s", data)
+		}
+	})
+
+	t.Run("standby leaves a Ring it cannot verify alone and warns", func(t *testing.T) {
+		t.Parallel()
+		f := startFor(t, StateStandby)
+		ringtest.Tampered(t, f.town, testRingKey, f.now)
+		before := readTownJSON(t, f)
+		o, out, errOut := ringOptions(f, StateStandby)
+		if err := Standby(context.Background(), o); err != nil {
+			t.Fatalf("standby over a tampered Ring = %v, want the stop to proceed (output:\n%s)", err, out)
+		}
+		if !estop.IsActive(f.town) {
+			t.Error("standby did not set the ESTOP past the Ring")
+		}
+		if !strings.Contains(errOut.String(), "WARNING: the Ring was not changed") {
+			t.Errorf("standby did not warn that the Ring was left as it was:\n%s", errOut)
+		}
+		if got, want := string(readTownJSON(t, f)), string(before); got != want {
+			t.Errorf("standby overwrote the tampered Ring:\n%s", got)
+		}
+		if st := ringAt(t, f); st.Kind != ring.Absent {
+			t.Errorf("Ring after standby = %s, want the tampered section left as it was", st)
+		}
+	})
+
+	t.Run("standby forges no Ring with no session actor, and warns", func(t *testing.T) {
+		t.Parallel()
+		f := startFor(t, StateStandby)
+		ringtest.Valid(t, f.town, testRingKey, f.now)
+		before := readTownJSON(t, f)
+		o, out, errOut := ringOptions(f, StateStandby)
+		o.Actor = ""
+		if err := Standby(context.Background(), o); err != nil {
+			t.Fatalf("standby with no actor = %v, want the stop to proceed (output:\n%s)", err, out)
+		}
+		if !estop.IsActive(f.town) {
+			t.Error("standby did not set the ESTOP")
+		}
+		if !strings.Contains(errOut.String(), "WARNING: the Ring was not changed") {
+			t.Errorf("standby did not warn that the Ring was left as it was:\n%s", errOut)
+		}
+		if got, want := string(readTownJSON(t, f)), string(before); got != want {
+			t.Errorf("standby wrote a Ring it had no actor to forge:\n%s", got)
+		}
+		if st := ringAt(t, f); st.Kind != ring.Valid {
+			t.Errorf("Ring after standby = %s, want it left valid", st)
 		}
 	})
 
@@ -388,23 +467,16 @@ func TestRingVerbs(t *testing.T) {
 		run := o.Run
 		o.Run = func(ctx context.Context, dir, name string, args ...string) (string, error) {
 			if name == "gt" && len(args) >= 1 && args[0] == "estop" {
-				// The Ring can still be read, but its config directory no longer
-				// takes a write, so the removal fails. Root writes through the mode,
-				// so this test needs a non-root user, as the seattoken fixture does.
-				mayor := filepath.Dir(townJSONPath(f))
-				info, err := os.Stat(mayor)
-				if err != nil {
+				// The Ring can still be read, but its config lock cannot be
+				// opened, so the removal fails. A directory in the lock's place
+				// fails the open for every user, root included.
+				lock := townJSONPath(f) + ".lock"
+				if err := os.Remove(lock); err != nil && !os.IsNotExist(err) {
 					t.Fatal(err)
 				}
-				before := info.Mode().Perm()
-				//testpolicy:allow no-exec-files — a directory must keep its search bit to be entered, so the 0500 mode is the fixture's read-only state: the write bit is what it drops
-				if err := os.Chmod(mayor, 0o500); err != nil {
+				if err := os.Mkdir(lock, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() {
-					//testpolicy:allow no-exec-files — restores the directory's own mode, which keeps its search bit
-					_ = os.Chmod(mayor, before)
-				})
 			}
 			return run(ctx, dir, name, args...)
 		}

@@ -3,6 +3,7 @@ package power
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/ring"
@@ -25,6 +26,24 @@ func (e *engine) ringKey() ([]byte, error) {
 	return e.o.RingKey(e.o.TownRoot)
 }
 
+// ringUntrusted reports why the Ring the caller found present holds no record a
+// reader can trust; empty when it does. An error means its key or its config
+// could not be read.
+func (e *engine) ringUntrusted() (string, error) {
+	key, err := e.ringKey()
+	if err != nil {
+		return "", err
+	}
+	st, err := ring.Read(e.o.TownRoot, key, e.o.Now())
+	if err != nil {
+		return "", err
+	}
+	if st.Kind == ring.Absent {
+		return st.Reason, nil
+	}
+	return "", nil
+}
+
 // checkRingRenewable is full's refusal, run before any state changes. A ring
 // section that exists but cannot be renewed would leave a holding Ring behind a
 // full that reports success, so full refuses instead. A town with no section
@@ -37,16 +56,15 @@ func (e *engine) checkRingRenewable() error {
 	if !present {
 		return nil
 	}
-	key, err := e.ringKey()
-	if err != nil {
-		return exitError(ExitUsage, "full refuses: the Ring is set but its key is unavailable (%v); nothing was changed", err)
-	}
-	st, err := ring.Read(e.o.TownRoot, key, e.o.Now())
+	reason, err := e.ringUntrusted()
 	if err != nil {
 		return exitError(ExitUsage, "full refuses: the Ring cannot be read (%v); nothing was changed", err)
 	}
-	if st.Kind == ring.Absent {
-		return exitError(ExitUsage, "full refuses: the Ring cannot be verified (%s); nothing was changed. Replace it with 'gt ring forge' or drop it with 'gt ring remove'", st.Reason)
+	if reason != "" {
+		return exitError(ExitUsage, "full refuses: the Ring cannot be verified (%s); nothing was changed. Replace it with 'gt ring forge' or drop it with 'gt ring remove'", reason)
+	}
+	if _, err := e.ringActor(); err != nil {
+		return exitError(ExitUsage, "full refuses: %v; nothing was changed", err)
 	}
 	return nil
 }
@@ -90,6 +108,16 @@ func (e *engine) waneRing() error {
 		fmt.Fprintf(e.o.Out, "  [dry-run] wane the Ring: its lease ends now\n")
 		return nil
 	}
+	// Read before writing: a section that does not verify is left as it is, so
+	// a tampered or unsigned record stays the evidence it is instead of being
+	// replaced by a clean wane the town signed itself.
+	reason, err := e.ringUntrusted()
+	if err != nil {
+		return fmt.Errorf("reading the Ring: %w", err)
+	}
+	if reason != "" {
+		return fmt.Errorf("the Ring cannot be waned: it does not verify (%s); left as it is", reason)
+	}
 	if err := e.leaseRing(e.o.Now()); err != nil {
 		return err
 	}
@@ -124,14 +152,29 @@ func (e *engine) removeRing() error {
 	return nil
 }
 
+// ringActor is the session actor a forged record carries. A record that names
+// no actor cannot say who moved the Ring, so a state that would forge one
+// stops instead. "unknown" is let through: it is what role detection reports
+// for a session with no GT_ROLE, and it still names the caller.
+func (e *engine) ringActor() (string, error) {
+	if actor := strings.TrimSpace(e.o.Actor); actor != "" {
+		return actor, nil
+	}
+	return "", errors.New("no session actor is set to forge the Ring")
+}
+
 // leaseRing signs a record that expires at expires, forged now by the session
 // actor, and stores it as the Ring.
 func (e *engine) leaseRing(expires time.Time) error {
+	actor, err := e.ringActor()
+	if err != nil {
+		return fmt.Errorf("the Ring cannot be signed: %w", err)
+	}
 	key, err := e.ringKey()
 	if err != nil {
 		return fmt.Errorf("the Ring cannot be signed: %w", err)
 	}
-	rec, err := ring.Sign(ring.Record{ForgedAt: e.o.Now(), ExpiresAt: expires, ForgedBy: e.o.Actor}, key)
+	rec, err := ring.Sign(ring.Record{ForgedAt: e.o.Now(), ExpiresAt: expires, ForgedBy: actor}, key)
 	if err != nil {
 		return fmt.Errorf("the Ring cannot be signed: %w", err)
 	}
