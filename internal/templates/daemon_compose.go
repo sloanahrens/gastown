@@ -87,6 +87,18 @@ type ComposeSpec struct {
 	// Unset, neither render carries the flag or the mount.
 	OMTokenFile string
 
+	// ForgeHost and ForgeTokenFile give the live container's git the Forgejo
+	// credential helper: ForgeHost is the forge's bare host:port, and
+	// ForgeTokenFile is the host path of the landing bot's token file. A live
+	// spec carries both or neither. The render mounts the host file read-only at
+	// LiveForgeTokenPath and passes the pair to the entrypoint as --forge-host
+	// and --forge-token-file, so the landing worker's pushes carry the bot's
+	// token; the file's path, never its contents, reaches the compose file. A
+	// scratch spec sets neither: its render takes the forge credential from
+	// ScratchForge and the scratch token directory (gt-rpx80).
+	ForgeHost      string
+	ForgeTokenFile string
+
 	// LiveTownRoot is the live town's root, which a scratch spec must not
 	// mount, nor mount anything under. It is required when Scratch is set, and
 	// absolute, so a scratch render is always checked against the live town it
@@ -168,6 +180,14 @@ const ScratchDoltPort = 3306
 // mount never shadows a file the image ships, and the token is on the container's
 // filesystem only for as long as the read-only mount exists.
 const LiveOMTokenPath = "/run/secrets/om-token" //nolint:gosec // a mount path, not a credential
+
+// LiveForgeTokenPath is the same fixed path for the forge token file the live
+// render mounts read-only, and the path its command line passes to the
+// entrypoint as --forge-token-file. One fixed path, so the entrypoint's own
+// check on the path (a shell reads it in git's helper line) passes whatever the
+// host path is, and the host path is never spelled on the command line
+// (gt-rpx80).
+const LiveForgeTokenPath = "/run/secrets/forge-token" //nolint:gosec // a mount path, not a credential
 
 // The scratch project's Dolt server, which only the scratch render has. It
 // joins the internal network alone and publishes no port.
@@ -386,32 +406,67 @@ func scratchDaemonCommand(omTokenFile string, doltPort int, forgeTokenFile strin
 		argv = append(argv, "--"+config.ForgeHostFlag, ScratchForgejoService+":3000",
 			"--"+config.ForgeTokenFileFlag, composeLiteral(forgeTokenFile))
 	}
+	b.WriteString(composeCommand(argv))
+	return b.String()
+}
+
+// composeCommand renders the daemon's command entry: each flag quoted, so a
+// value cannot change the YAML's shape. The entrypoint is the image's
+// ENTRYPOINT, so the list carries the flags alone.
+func composeCommand(argv []string) string {
 	quoted := make([]string, len(argv))
 	for i, arg := range argv {
 		quoted[i] = strconv.Quote(arg)
 	}
-	fmt.Fprintf(&b, "    command: [%s]\n", strings.Join(quoted, ", "))
+	return fmt.Sprintf("    command: [%s]\n", strings.Join(quoted, ", "))
+}
+
+// liveDaemonCommand is the live daemon's command line: the flags the entrypoint
+// reads the container's credentials from, each naming the path the render
+// mounts the host file at rather than the host's own. --om-token-file carries
+// the om token file, whose contents the entrypoint turns into the daemon's
+// environment; --forge-host and --forge-token-file make git ask the forge
+// credential helper, and the helper reads the token file at push time. Either
+// credential may be absent, and a command line carrying neither is no command
+// line at all, so a live spec with neither renders as it always has (gt-yaqct,
+// gt-rpx80). No token reaches this file or an argv.
+func liveDaemonCommand(s ComposeSpec) string {
+	argv := make([]string, 0, 5)
+	if s.OMTokenFile != "" {
+		argv = append(argv, "--"+config.OMTokenFileFlag, LiveOMTokenPath)
+	}
+	if s.ForgeHost != "" {
+		argv = append(argv, "--"+config.ForgeHostFlag, s.ForgeHost,
+			"--"+config.ForgeTokenFileFlag, LiveForgeTokenPath)
+	}
+	if len(argv) == 0 {
+		return ""
+	}
+	return composeCommand(argv)
+}
+
+// liveTokenMounts is the live daemon's volumes beyond the town bind mount: each
+// credential file the spec names, bind-mounted read-only at the fixed path its
+// flag names. A read-only mount is what keeps the container from writing the
+// host file, and the file is the host's own: nothing copies it into the image,
+// the town or this file.
+func liveTokenMounts(s ComposeSpec) string {
+	var b strings.Builder
+	if s.OMTokenFile != "" {
+		b.WriteString(liveTokenMount(s.OMTokenFile, LiveOMTokenPath))
+	}
+	if s.ForgeTokenFile != "" {
+		b.WriteString(liveTokenMount(s.ForgeTokenFile, LiveForgeTokenPath))
+	}
 	return b.String()
 }
 
-// liveDaemonCommand is the live daemon's command when the render has an om token
-// file: the one flag the entrypoint reads it from, naming the path the render
-// mounts it at rather than the host's. The entrypoint turns the file's contents
-// into the daemon's environment, so the token itself never reaches this file or
-// an argv (gt-yaqct). Without a token file the live command is absent, as it was.
-func liveDaemonCommand() string {
-	return fmt.Sprintf("    command: [%s, %s]\n",
-		strconv.Quote("--"+config.OMTokenFileFlag), strconv.Quote(LiveOMTokenPath))
-}
-
-// liveOMTokenMount is the live daemon's second volume: the host's token file
-// bind-mounted read-only at LiveOMTokenPath. A read-only mount is what keeps the
-// container from writing the host file, and the file is the host's own: nothing
-// copies it into the image, the town or this file. The path is escaped as every
-// other spec value is, so a dollar sign in it is the literal the host has.
-func liveOMTokenMount(hostFile string) string {
+// liveTokenMount is one credential file mounted read-only at one path inside the
+// container. Both values are escaped as every other spec value is, so a dollar
+// sign in the host path is the literal the host has.
+func liveTokenMount(hostFile, containerPath string) string {
 	return fmt.Sprintf("      - type: bind\n        source: %s\n        target: %s\n        read_only: true\n",
-		strconv.Quote(composeLiteral(hostFile)), strconv.Quote(LiveOMTokenPath))
+		strconv.Quote(composeLiteral(hostFile)), strconv.Quote(containerPath))
 }
 
 // scratchDoltBody is the scratch project's Dolt server service. It has no
@@ -579,6 +634,11 @@ services:
 // file, an argv or an error; only its host path, and the fixed mount target,
 // do (gt-yaqct).
 //
+// When a live spec carries ForgeHost and ForgeTokenFile, the render mounts the
+// host's token file read-only at LiveForgeTokenPath and passes both to the
+// entrypoint, which sets the container's git credential helper from them; with
+// neither, the file carries no mount and no command line, as before (gt-rpx80).
+//
 // It refuses a spec whose project or container name is empty rather than
 // falling back to the live town's defaults (gt-ix1kz): a scratch render that
 // inherited them could stop or replace the live daemon's container.
@@ -588,7 +648,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 	}
 
 	names := liveNames
-	var command, dolt, doltVolume, doltWait, forgeNetwork, tokenMount string
+	var command, dolt, doltVolume, doltWait, forgeNetwork, tokenMounts string
 	if s.Scratch {
 		names = scratchNames
 		command = scratchDaemonCommand(s.OMTokenFile, s.scratchDoltPort(), s.scratchForgeTokenFile())
@@ -615,9 +675,9 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 			doltVolume += scratchForgeVolumeDecls
 			forgeNetwork = scratchForgeNetworkDecl
 		}
-	} else if s.OMTokenFile != "" {
-		command = liveDaemonCommand()
-		tokenMount = liveOMTokenMount(s.OMTokenFile)
+	} else {
+		command = liveDaemonCommand(s)
+		tokenMounts = liveTokenMounts(s)
 	}
 
 	out := fmt.Sprintf(daemonComposeBody,
@@ -637,7 +697,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		doltVolume,
 		doltWait,
 		forgeNetwork,
-		tokenMount,
+		tokenMounts,
 	)
 	return []byte(out), nil
 }
@@ -682,10 +742,56 @@ func (s ComposeSpec) validate() error {
 	case !s.Scratch && s.DoltHost == "":
 		return fmt.Errorf("compose spec: DoltHost is empty; pass town.json's dolt.container_host or dolt.host resolved, and an empty dolt.host is the local machine, which inside the container is the container itself")
 	}
+	if err := s.validateForge(); err != nil {
+		return err
+	}
 	if s.Scratch {
 		return s.validateScratch()
 	}
 	return checkDoltHost(s.DoltHost)
+}
+
+// validateForge checks the live container's forge credential: the pair is given
+// together, the token file is an absolute host path a compose value can carry,
+// and the host is the bare host:port the entrypoint accepts, since the render
+// writes both into its command line. A scratch spec sets neither: the scratch
+// render takes its forge credential from ScratchForge and the scratch town's own
+// token directory, so a spec that also named one would be dropped in silence.
+func (s ComposeSpec) validateForge() error {
+	if s.Scratch {
+		if s.ForgeHost != "" || s.ForgeTokenFile != "" {
+			return fmt.Errorf("compose spec: ForgeHost %q and ForgeTokenFile are set on a scratch spec; the scratch render takes its forge credential from ScratchForge, so it would drop them", s.ForgeHost)
+		}
+		return nil
+	}
+	switch {
+	case s.ForgeHost == "" && s.ForgeTokenFile == "":
+		return nil
+	case s.ForgeTokenFile == "":
+		return fmt.Errorf("compose spec: ForgeHost %q is set without ForgeTokenFile; the container's git needs the token file beside the host:port, so a live spec carries both or neither", s.ForgeHost)
+	case s.ForgeHost == "":
+		return fmt.Errorf("compose spec: ForgeTokenFile %q is set without ForgeHost; the container's git needs the host:port beside the token file, so a live spec carries both or neither", s.ForgeTokenFile)
+	case !filepath.IsAbs(s.ForgeTokenFile):
+		return fmt.Errorf("compose spec: ForgeTokenFile %q is not absolute; it is the host path the render mounts into the container", s.ForgeTokenFile)
+	case strings.ContainsFunc(s.ForgeTokenFile, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+		return fmt.Errorf("compose spec: ForgeTokenFile %q holds a control character, which a compose value cannot carry", s.ForgeTokenFile)
+	}
+	return checkForgeHost(s.ForgeHost)
+}
+
+// checkForgeHost refuses a host the container's entrypoint would refuse: the
+// command line carries it, and the entrypoint's own check reads the same
+// pattern (config.ForgeHostPattern), so the render cannot write a file that
+// starts a container which then refuses.
+func checkForgeHost(host string) error {
+	m := config.ForgeHostPattern.FindStringSubmatch(host)
+	if m == nil {
+		return fmt.Errorf("compose spec: ForgeHost %q is not a bare host:port (no scheme, path, login, space or leading dash)", host)
+	}
+	if port, _ := strconv.Atoi(m[1]); port < 1 || port > 65535 {
+		return fmt.Errorf("compose spec: ForgeHost %q has port %q, which is not a port (1 to 65535)", host, m[1])
+	}
+	return nil
 }
 
 // validateScratch refuses a scratch spec that could reach the live town: the

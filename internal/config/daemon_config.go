@@ -147,9 +147,10 @@ const (
 	// their dashes, that make the container's git ask the forge credential
 	// helper (GitCredentialForgejoCommand) for the landing bot's login and
 	// token: the Forgejo's host:port, and the absolute path of the bot's token
-	// file. The entrypoint registers them and the scratch render passes them
-	// when the throwaway Forgejo is on, so both read one string (gt-2d6f2).
-	// Only --scratch-town takes them, and only together.
+	// file. The entrypoint registers them, the scratch render passes them when
+	// the throwaway Forgejo is on, and the live render passes them when
+	// `gt daemon compose write` is given them, so every one reads one string
+	// (gt-2d6f2). They are taken together or not at all, in either container.
 	ForgeHostFlag      = "forge-host"
 	ForgeTokenFileFlag = "forge-token-file" //nolint:gosec // a flag name, not a credential
 
@@ -157,6 +158,13 @@ const (
 	// credential protocol for a Forgejo from a bot's token file (gt-dhjz6).
 	GitCredentialForgejoCommand = "git-credential-forgejo" //nolint:gosec // a command name, not a credential
 )
+
+// ForgeHostPattern is the shape of a forge host:port: DNS-name characters
+// starting with a letter or digit (so a leading dash cannot read as a flag), a
+// colon and the port's digits, which the caller range-checks. The container
+// entrypoint and the live compose render both read it, so the host a render
+// writes into the command line is one the entrypoint accepts (gt-rpx80).
+var ForgeHostPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*:([0-9]{1,5})$`)
 
 // SupervisorKind returns the configured supervisor kind, or "" when the town
 // sets none and the host's own detection answers, and an error for any value

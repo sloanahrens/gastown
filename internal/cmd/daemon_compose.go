@@ -18,12 +18,18 @@ import (
 // daemonComposeFlags are the values `gt daemon compose write` parsed.
 type daemonComposeFlags struct {
 	image string // gt-daemon:<rev>, the image the rendered file names
+	print bool   // print the render and write no file
 	// omTokenFile is the om subscription token file's path on the host, which
 	// the render mounts read-only into the container; "" renders neither the
 	// mount nor the flag. The command never reads the file, so its contents are
 	// in no output and no error (gt-yaqct).
 	omTokenFile string
-	print       bool // print the render and write no file
+	// forgeHost and forgeTokenFile are --forge-host and --forge-token-file: the
+	// Forgejo's host:port and the host path of the landing bot's token file,
+	// which the render mounts read-only into the container and passes to the
+	// entrypoint. Both or neither; the render refuses one alone (gt-rpx80).
+	forgeHost      string
+	forgeTokenFile string
 }
 
 // daemonComposeDeps is what the command takes from the host: where the town is
@@ -122,6 +128,12 @@ the entrypoint, which loads the token into the daemon's environment; the file is
 never read here, so its contents appear in no output, and without the flag the
 render carries neither the mount nor the flag.
 
+--forge-host and --forge-token-file give the container's git the Forgejo
+credential helper, so the landing worker's pushes carry the landing bot's token.
+The render mounts the token file read-only and passes the pair to the
+entrypoint, which writes the helper line; the file's path, never its contents,
+reaches the compose file. They are accepted only together.
+
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -132,6 +144,10 @@ render carries neither the mount nor the flag.
 	write.Flags().StringVar(&f.omTokenFile, config.OMTokenFileFlag, "",
 		"om token file's absolute path on the host, mounted read-only into the container; unset renders neither the mount nor the flag")
 	write.Flags().BoolVar(&f.print, "print", false, "print the render and write no file")
+	write.Flags().StringVar(&f.forgeHost, config.ForgeHostFlag, "",
+		"Give the container's git this Forgejo host:port; accepted only with --"+config.ForgeTokenFileFlag)
+	write.Flags().StringVar(&f.forgeTokenFile, config.ForgeTokenFileFlag, "",
+		"The host path of the landing bot's token file, mounted read-only into the container; accepted only with --"+config.ForgeHostFlag)
 	parent.AddCommand(write)
 	return parent
 }
@@ -156,6 +172,11 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	// refuses a relative one. The command never opens the file, so no contents
 	// reach its output or an error.
 	omTokenFile := strings.TrimSpace(f.omTokenFile)
+	// The forge pair is passed the same way: the render refuses a host that is
+	// not a bare host:port and a token file path it cannot mount, and the
+	// command opens neither.
+	forgeHost := strings.TrimSpace(f.forgeHost)
+	forgeTokenFile := strings.TrimSpace(f.forgeTokenFile)
 	townRoot, err := d.findTown()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
@@ -173,13 +194,15 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		return fmt.Errorf("the town's Dolt endpoint cannot be resolved, so the daemon in the container has no host to reach it on: set mayor/town.json's dolt.container_host (or dolt.host)")
 	}
 	spec := templates.ComposeSpec{
-		Project:       project,
-		ContainerName: cfg.ContainerName(),
-		Image:         image,
-		TownRoot:      townRoot,
-		StopGrace:     templates.MinimumStopGrace,
-		DoltHost:      host,
-		OMTokenFile:   omTokenFile,
+		Project:        project,
+		ContainerName:  cfg.ContainerName(),
+		Image:          image,
+		TownRoot:       townRoot,
+		StopGrace:      templates.MinimumStopGrace,
+		DoltHost:       host,
+		OMTokenFile:    omTokenFile,
+		ForgeHost:      forgeHost,
+		ForgeTokenFile: forgeTokenFile,
 	}
 	content, err := templates.RenderDaemonCompose(spec)
 	if err != nil {
