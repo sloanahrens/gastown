@@ -7,8 +7,8 @@ import (
 	"github.com/steveyegge/gastown/internal/spendcap"
 )
 
-// No case calls t.Parallel: the Limiter is documented safe for one goroutine at
-// a time, and subtests sharing one would race on its bucket map.
+// Each case builds its own Limiter and clock, so cases run in parallel; the
+// Limiter itself is safe for one goroutine at a time, so no case shares one.
 
 // fakeClock is the injected time the tests move by hand, so no case sleeps.
 type fakeClock struct{ now time.Time }
@@ -35,6 +35,7 @@ func spend(l *Limiter, workspace string, n int) (allowed int) {
 }
 
 func TestBurstThenRefillByClock(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	l := New(Config{DispatchRate: 1, DispatchBurst: 3}, clock)
 
@@ -57,6 +58,7 @@ func TestBurstThenRefillByClock(t *testing.T) {
 }
 
 func TestRefillStopsAtBurst(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	l := New(Config{DispatchRate: 1, DispatchBurst: 2}, clock)
 
@@ -72,6 +74,7 @@ func TestRefillStopsAtBurst(t *testing.T) {
 }
 
 func TestZeroIdleTTLKeepsBuckets(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	l := New(Config{DispatchRate: 1, DispatchBurst: 1}, clock)
 
@@ -90,6 +93,7 @@ func TestZeroIdleTTLKeepsBuckets(t *testing.T) {
 }
 
 func TestWorkspacesDoNotShareTokens(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	l := New(Config{DispatchRate: 0, DispatchBurst: 1}, clock)
 
@@ -102,6 +106,7 @@ func TestWorkspacesDoNotShareTokens(t *testing.T) {
 }
 
 func TestBucketsArePerKind(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	l := New(Config{DispatchBurst: 1, GatewayBurst: 1}, clock)
 
@@ -114,6 +119,7 @@ func TestBucketsArePerKind(t *testing.T) {
 }
 
 func TestCapAtOrOverRefusesDispatchOnly(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name         string
 		level        spendcap.Level
@@ -144,6 +150,7 @@ func TestCapAtOrOverRefusesDispatchOnly(t *testing.T) {
 }
 
 func TestCapRefusalSpendsNoToken(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	l := New(Config{DispatchBurst: 5}, clock)
 
@@ -158,6 +165,7 @@ func TestCapRefusalSpendsNoToken(t *testing.T) {
 }
 
 func TestIdleBucketsEvicted(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	l := New(Config{DispatchRate: 1, DispatchBurst: 1, IdleTTL: time.Second}, clock)
 
@@ -177,6 +185,7 @@ func TestIdleBucketsEvicted(t *testing.T) {
 }
 
 func TestEvictionNeverGrantsMoreTokens(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	// The burst takes 100s to refill, far longer than IdleTTL: dropping the
 	// bucket at IdleTTL would hand back ten tokens the rate has not granted.
@@ -195,6 +204,7 @@ func TestEvictionNeverGrantsMoreTokens(t *testing.T) {
 }
 
 func TestClockSteppingBackAddsNoTokens(t *testing.T) {
+	t.Parallel()
 	const back = 100 * time.Second
 	cases := []struct {
 		name string
@@ -236,6 +246,7 @@ func TestClockSteppingBackAddsNoTokens(t *testing.T) {
 }
 
 func TestSweepRunsOncePerIdleAge(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	l := New(Config{DispatchRate: 100, DispatchBurst: 100, IdleTTL: time.Second}, clock)
 
@@ -266,6 +277,7 @@ func TestSweepRunsOncePerIdleAge(t *testing.T) {
 }
 
 func TestUnknownKindRefused(t *testing.T) {
+	t.Parallel()
 	clock := newFakeClock()
 	l := New(Config{DispatchRate: 1, DispatchBurst: 1}, clock)
 
