@@ -88,6 +88,79 @@ func TestBuildPlanPushedOnlyWorktreeKeepsBranch(t *testing.T) {
 	}
 }
 
+// Another owner's finished worktree goes once its branch is landed, like an
+// overseer one, and its local branch goes with it.
+func TestBuildPlanRemovesOtherOwnersLandedCleanIdleWorktrees(t *testing.T) {
+	t.Parallel()
+	for _, dir := range []string{"sloan-x", "dipper-y"} {
+		t.Run(dir, func(t *testing.T) {
+			t.Parallel()
+			w := cleanWorktree()
+			w.Dir = dir
+			w.Path = "/town/repo-a/crew/" + dir
+			w.Branch = "crew/" + dir + "/feature"
+			w.Pushed = false
+			w.Landed = true
+
+			p := BuildPlan([]Worktree{w}, testNow, nil)
+			if len(p.Actions) != 2 {
+				t.Fatalf("actions = %+v, want remove-worktree then delete-branch", p.Actions)
+			}
+			if p.Actions[0].Kind != "remove-worktree" || p.Actions[0].Ref != w.Path {
+				t.Errorf("first action = %+v, want remove-worktree on %s", p.Actions[0], w.Path)
+			}
+			if want := w.Path + "#" + w.Branch; p.Actions[1].Kind != "delete-branch" || p.Actions[1].Ref != want {
+				t.Errorf("second action = %+v, want delete-branch on %s", p.Actions[1], want)
+			}
+			if want := "clean, landed"; !strings.Contains(p.Actions[0].Why, want) {
+				t.Errorf("Why = %q, want the landed rule %q", p.Actions[0].Why, want)
+			}
+		})
+	}
+}
+
+// Another owner's worktree needs the landing, not merely a push, and is never
+// its owner's clone: the clone, a dirty one, a pushed-but-unlanded one and a
+// fresh one are kept with the rule that kept each.
+func TestBuildPlanKeepsCloneDirtyUnpushedAndFreshOthers(t *testing.T) {
+	t.Parallel()
+	type row struct {
+		dir, path string
+		dirty     int
+		pushed    bool
+		landed    bool
+		last      time.Time
+		want      string
+	}
+	old := testNow.Add(-72 * time.Hour)
+	for name, c := range map[string]row{
+		// The clone is landed and old, so only being a clone keeps it.
+		"the clone": {dir: "sloan", path: "/town/repo-a/crew/sloan", landed: true, last: old, want: "clone"},
+		"a dirty worktree": {dir: "sloan-dirty", path: "/town/repo-a/crew/sloan-dirty",
+			dirty: 1, landed: true, last: old, want: "report-only: owner sloan, age 3d, dirty 1"},
+		"a pushed worktree": {dir: "sloan-pushed", path: "/town/repo-a/crew/sloan-pushed",
+			pushed: true, last: old, want: "report-only: owner sloan, age 3d, dirty 0"},
+		"a fresh worktree": {dir: "sloan-fresh", path: "/town/repo-a/crew/sloan-fresh",
+			landed: true, last: testNow.Add(-47 * time.Hour), want: "report-only: owner sloan, age 1d, dirty 0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			w := cleanWorktree()
+			w.Dir, w.Path = c.dir, c.path
+			w.Dirty, w.Pushed, w.Landed = c.dirty, c.pushed, c.landed
+			w.LastCommit = c.last
+
+			p := BuildPlan([]Worktree{w}, testNow, nil)
+			if len(p.Actions) != 0 {
+				t.Fatalf("actions = %+v, want none", p.Actions)
+			}
+			if len(p.Kept) != 1 || p.Kept[0].Ref != c.path || p.Kept[0].Rule != c.want {
+				t.Fatalf("kept = %+v, want %s kept with rule %q", p.Kept, c.path, c.want)
+			}
+		})
+	}
+}
+
 // A landed worktree gets delete-branch whatever its Branch field holds, as the
 // spec states; the apply step owns what to do with an empty branch name.
 func TestBuildPlanLandedWorktreeGetsBranchActionEvenWithoutBranchName(t *testing.T) {
