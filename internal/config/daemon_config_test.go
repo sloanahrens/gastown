@@ -607,6 +607,7 @@ func TestTierSweepRunnerConfigStrict(t *testing.T) {
 		"unknown key":      {`{"backend":"docker","image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c","backends":"docker"}`, "backends"},
 		"cpus below range": {`{"backend":"docker","image":"i","cpus":0,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.cpus"},
 		"cpus above range": {`{"backend":"docker","image":"i","cpus":17,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.cpus"},
+		"no backend":       {`{"image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.backend"},
 		"unknown backend":  {`{"backend":"podman","image":"i","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.backend"},
 		"no image":         {`{"backend":"docker","cpus":8,"memory":24,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.image"},
 		"memory too small": {`{"backend":"docker","image":"i","cpus":8,"memory":1,"jobs":4,"output_root":"/tmp/o","context":"c"}`, "runner.memory"},
