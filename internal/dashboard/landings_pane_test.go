@@ -77,3 +77,48 @@ func TestLandingsPaneDrawsEveryLandingInAScrollBox(t *testing.T) {
 		t.Errorf("header rows drawn in the scroll box = %d, want 1", got.Headers)
 	}
 }
+
+// Each poll rebuilds the landings rows in a scroll box that opens at the top; the
+// redraw must keep the reader's place (gt-tjlu6).
+func TestLandingsPaneKeepsItsScrollAcrossARedraw(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 25, 16, 0, 0, 0, time.Local)
+	var recent []map[string]any
+	for i := 0; i < 30; i++ {
+		recent = append(recent, map[string]any{
+			"at":      now.Add(-time.Duration(i+1) * time.Minute).Format(time.RFC3339),
+			"bead":    fmt.Sprintf("gt-%d", i),
+			"rig":     "gastown",
+			"outcome": "landed",
+		})
+	}
+	state := map[string]any{"trend": map[string]any{
+		"hours":  []map[string]any{{"hour": now.Truncate(time.Hour).Format(time.RFC3339), "landed": 30, "rejected": 0}},
+		"stages": []any{},
+		"recent": recent,
+	}}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st map[string]any
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatal(err)
+	}
+
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", st)
+	if _, err := p.vm.RunString(`document.getElementById("trend").querySelector(".lrows").scrollTop = 240`); err != nil {
+		t.Fatalf("scrolling the landings rows down: %v", err)
+	}
+	p.call(t, "renderTrend", st)
+
+	v, err := p.vm.RunString(`document.getElementById("trend").querySelector(".lrows").scrollTop`)
+	if err != nil {
+		t.Fatalf("reading the landings rows' scroll position: %v", err)
+	}
+	if got := v.ToInteger(); got != 240 {
+		t.Errorf("landings scroll position after a redraw = %d, want 240: the poll put the rows back at the top", got)
+	}
+}
