@@ -8,9 +8,8 @@ import (
 	"testing"
 )
 
-// dockerfileInstructions returns the polecat Dockerfile's instructions with
-// continuation lines joined, one string each.
-func dockerfileInstructions(t *testing.T) []string {
+// dockerfileText reads deploy/polecat/Dockerfile relative to this source file.
+func dockerfileText(t *testing.T) string {
 	t.Helper()
 	_, here, _, ok := runtime.Caller(0)
 	if !ok {
@@ -20,8 +19,15 @@ func dockerfileInstructions(t *testing.T) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return string(data)
+}
+
+// dockerfileInstructions returns the polecat Dockerfile's instructions with
+// continuation lines joined, one string each.
+func dockerfileInstructions(t *testing.T) []string {
+	t.Helper()
 	var out []string
-	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\\\n", " "), "\n") {
+	for _, line := range strings.Split(strings.ReplaceAll(dockerfileText(t), "\\\n", " "), "\n") {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "#") {
 			out = append(out, line)
@@ -51,148 +57,214 @@ func dockerfileEnv(t *testing.T) map[string]string {
 	return env
 }
 
-// seedRun returns the shell command of the Dockerfile's seed RUN.
-func seedRun(t *testing.T) string {
+// dockerfileWorkdir returns the image's working directory: the workspace the
+// policy's include_workdir grant makes writable for a sandbox.
+func dockerfileWorkdir(t *testing.T) string {
 	t.Helper()
-	const prefix = "RUN --mount=type=bind,source=seed,target=/seed "
-	var seed string
+	var workdir string
 	for _, in := range dockerfileInstructions(t) {
-		if cmd, ok := strings.CutPrefix(in, prefix); ok {
-			seed = cmd
+		if v, ok := strings.CutPrefix(in, "WORKDIR "); ok {
+			workdir = strings.TrimSpace(v)
 		}
 	}
-	if seed == "" {
-		t.Fatal("no seed RUN (RUN --mount=type=bind,source=seed,target=/seed ...) in deploy/polecat/Dockerfile")
+	if workdir == "" {
+		t.Fatal("deploy/polecat/Dockerfile sets no WORKDIR")
 	}
-	return seed
+	return workdir
 }
 
-// The seed builds every module it finds under /seed. A rig's example modules are
-// in no rig's presubmit build, so the seed does not need them, and a go.sum that
-// has drifted in one fails the whole image (gt-9yqcc). The walk therefore skips
-// testdata and the examples directory directly under a rig, and names each module
-// it skips so the skip is never silent. A module under an examples directory inside
-// the rig's own tree is still built.
-func TestPolecatImageSeedSkipsExampleModules(t *testing.T) {
-	t.Parallel()
-	seed := seedRun(t)
-	find := seed
-	i := strings.Index(find, "find /seed -name go.mod")
-	if i < 0 {
-		t.Fatalf("the seed RUN does not walk the modules with `find /seed -name go.mod`:\n%s", seed)
-	}
-	find = find[i:]
-	if j := strings.Index(find, "| sort"); j >= 0 {
-		find = find[:j]
-	}
-	if want := "-not -path '*/testdata/*'"; !strings.Contains(find, want) {
-		t.Errorf("the seed's walk lacks %q, so it builds the modules under testdata: one bad go.sum there fails every install (gt-9yqcc)\n%s", want, find)
-	}
-	// A path-name filter drops any module under a directory named examples,
-	// including one in the rig's own tree, and does so without a word in the log.
-	if strings.Contains(find, "*/examples/*") {
-		t.Errorf("the seed's walk excludes every path with an examples component, so it drops a module inside a rig's own tree without a trace (gt-vvu6d)\n%s", find)
-	}
-	for _, want := range []string{
-		`rel=${gomod#/seed/}`, // the rig is the first component under the seed root
-		`rig=${rel%%/*}`,
-		`case "$rel" in "$rig"/examples/*)`, // only that rig's own examples directory
-		`echo "seed: skip $gomod`,           // a skip is named in the install log
-	} {
-		if !strings.Contains(seed, want) {
-			t.Errorf("the seed RUN lacks %q, so its example-module skip is either too broad or silent (gt-vvu6d):\n%s", want, seed)
-		}
-	}
-}
-
-// The image carries seeded Go caches (gt-ieuvf) so a cold sandbox's presubmit
-// does not recompile its dependencies (devops: 967 compiles and a 4.8-10 GB peak
-// cold, 66 compiles and 1.2 GB seeded). The caches sit OUTSIDE /sandbox: the
-// sandbox's workspace-init container copies the image's /sandbox into each
-// sandbox's volume, so a seed under it would cost gigabytes of copy and disk per
-// sandbox, while a path outside is one shared image layer.
+// imageGoCacheProblems reports what a Dockerfile builds into the image that
+// would carry Go build or module cache files (gt-nly1g):
 //
-// Each path is also one the sandbox policy grants read_write (deploy/polecat/
-// policy.yaml, hq-gi754): both in /tmp, neither under the denied /opt. A writable
-// path is what lets a sandbox fetch a module the seed lacks (gt-pvudz).
-func TestPolecatImageSeedSetsCachesOutsideTheWorkspace(t *testing.T) {
-	t.Parallel()
-	ins := dockerfileInstructions(t)
-	env := dockerfileEnv(t)
-	for _, want := range []struct{ key, path string }{
-		{"GOMODCACHE", "/tmp/gomodcache"},
-		{"GOCACHE", "/tmp/gocache"},
-	} {
-		got := env[want.key]
-		if got != want.path {
-			t.Errorf("%s = %q, want %q: the seed must sit on a path the sandbox policy grants and outside /sandbox", want.key, got, want.path)
-		}
-		if got == "/sandbox" || strings.HasPrefix(got, "/sandbox/") {
-			t.Errorf("%s = %s is under /sandbox, which the sandbox copies into every volume; keep the seed outside it", want.key, got)
+//   - GOCACHE or GOMODCACHE in the image environment, whichever path it names:
+//     the sandbox's profile decides the caches, and an image value shadows it;
+//   - an instruction that copies the staged seed sources into the image, or
+//     bind-mounts them so its RUN writes a cache;
+//   - a RUN that runs the go tool and leaves a cache directory it wrote. A
+//     layer that keeps those files is in the image, whatever the instruction is
+//     spelled like, so the check reads each RUN's commands instead of looking
+//     for one RUN's text.
+func imageGoCacheProblems(dockerfile string) []string {
+	var problems []string
+	var instructions []string
+	for _, line := range strings.Split(strings.ReplaceAll(dockerfile, "\\\n", " "), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			instructions = append(instructions, line)
 		}
 	}
-	// The sandbox policy denies /opt (hq-gi754): no instruction may reach into it.
-	for _, in := range ins {
-		if strings.Contains(in, "/opt/") {
-			t.Errorf("instruction uses /opt, which the sandbox policy denies: %q", in)
-		}
-	}
-
-	seedAt, goAt := -1, -1
-	for i, in := range ins {
-		if strings.HasPrefix(in, "RUN ") && strings.Contains(in, "--mount=type=bind,source=seed,target=/seed") {
-			seedAt = i
-		}
-		if strings.HasPrefix(in, "RUN ") && strings.Contains(in, "go.dev/dl/go") {
-			goAt = i
-		}
-		if strings.HasPrefix(in, "COPY ") && strings.Contains(in, "seed") {
-			t.Errorf("%q copies the seed sources into the image; the seed RUN must bind-mount them instead", in)
-		}
-	}
-	if seedAt < 0 {
-		t.Fatal("no RUN bind-mounts the staged seed sources (--mount=type=bind,source=seed,target=/seed)")
-	}
-	if goAt < 0 || seedAt < goAt {
-		t.Errorf("the seed RUN (instruction %d) must come after the Go toolchain install (instruction %d)", seedAt, goAt)
-	}
-	seed := ins[seedAt]
-	// What each rig's presubmit runs, with the default flags: a -trimpath or a
-	// different CGO setting here would give every action a different key.
-	for _, want := range []string{"go build ./...", "go vet ./...", "go test -count=1 -run", "-modcacherw", "chmod -R a+rwX"} {
-		if !strings.Contains(seed, want) {
-			t.Errorf("the seed RUN lacks %q", want)
-		}
-	}
-	// A linux build fetches only the modules linux imports, so the seed runs go
-	// mod download first. Without it the sandbox finds its read-only module cache
-	// missing a module the seed never fetched.
-	if !strings.Contains(seed, "go mod download") {
-		t.Errorf("the seed RUN lacks %q", "go mod download")
-	}
-	// Before adding a platform step or a build flag to the seed RUN, read why it
-	// has no darwin build: the seed comment in deploy/polecat/Dockerfile (dv-0qre).
-	for _, bad := range []string{"-trimpath", "CGO_ENABLED", "GOOS=darwin"} {
-		if strings.Contains(seed, bad) {
-			t.Errorf("the seed RUN sets %q, which changes the cache keys the presubmits use", bad)
-		}
-	}
-	// The chmod is in the seed's own instruction (checked above); a later RUN
-	// that touches a cache would copy every file into another layer.
-	touches := []string{"$GOCACHE", "$GOMODCACHE"}
-	for _, key := range []string{"GOCACHE", "GOMODCACHE"} {
-		if v := env[key]; v != "" {
-			touches = append(touches, v)
-		}
-	}
-	for i, in := range ins {
-		if i <= seedAt || !strings.HasPrefix(in, "RUN ") {
-			continue
-		}
-		for _, path := range touches {
-			if strings.Contains(in, path) {
-				t.Errorf("instruction %d touches the seeded cache %s after the seed layer (it would duplicate it): %q", i, path, in)
+	for _, in := range instructions {
+		if rest, ok := strings.CutPrefix(in, "ENV "); ok {
+			for _, kv := range strings.Fields(rest) {
+				if k, _, ok := strings.Cut(kv, "="); ok && (k == "GOCACHE" || k == "GOMODCACHE") {
+					problems = append(problems, "the image environment sets "+k+": the sandbox profile sets the Go caches, so the image must set neither")
+				}
 			}
 		}
+		if copiedSeedSources(in) {
+			problems = append(problems, "the instruction brings the staged seed sources into the image: "+in)
+		}
+		if rest, ok := strings.CutPrefix(in, "RUN "); ok {
+			problems = append(problems, runGoCacheProblems(rest)...)
+		}
+	}
+	return problems
+}
+
+// copiedSeedSources reports whether an instruction copies seed/ from the build
+// context or bind-mounts it, either of which would let the image build a cache
+// from the staged sources.
+func copiedSeedSources(in string) bool {
+	if mount, ok := strings.CutPrefix(in, "RUN "); ok {
+		for _, field := range strings.Fields(mount) {
+			if !strings.Contains(field, "--mount=") {
+				continue
+			}
+			for _, opt := range strings.Split(field, ",") {
+				if opt == "source=seed" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, cmd := range []string{"COPY ", "ADD "} {
+		if rest, ok := strings.CutPrefix(in, cmd); ok {
+			fields := strings.Fields(rest)
+			for _, src := range fields[:len(fields)-1] {
+				if src == "seed" || strings.HasPrefix(src, "seed/") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// runGoCacheProblems reports the cache directories a RUN runs the go tool in
+// and does not remove in that same instruction. A later RUN that deletes them
+// would only add a layer on top, so the files still ship.
+func runGoCacheProblems(script string) []string {
+	if !runsGo(script) {
+		return nil
+	}
+	// Where go writes: the directories the instruction names, or the image
+	// user's defaults (/root/.cache and /root/go for root).
+	caches := map[string]bool{"/root/.cache": true, "/root/go": true}
+	scripts := splitShellAnd(script)
+	for _, seg := range scripts {
+		for _, field := range strings.Fields(seg) {
+			for _, key := range []string{"GOCACHE=", "GOMODCACHE="} {
+				if v, ok := strings.CutPrefix(field, key); ok && v != "" {
+					caches[strings.Trim(v, `"`)] = true
+				}
+			}
+		}
+	}
+	var problems []string
+	for cache := range caches {
+		if !removed(scripts, cache) {
+			problems = append(problems, "a RUN runs the go tool and leaves "+cache+" in the image: "+script)
+		}
+	}
+	return problems
+}
+
+// runsGo reports whether the shell runs the go tool in command position, so
+// that an argument or a path that merely names go does not count.
+func runsGo(script string) bool {
+	for _, seg := range splitShellAnd(script) {
+		fields := strings.Fields(seg)
+		for len(fields) > 0 && strings.Contains(fields[0], "=") {
+			fields = fields[1:]
+		}
+		if len(fields) > 0 && filepath.Base(fields[0]) == "go" {
+			return true
+		}
+	}
+	return false
+}
+
+// removed reports whether the shell removes dir: an rm whose own arguments name
+// it, in any segment of the same instruction.
+func removed(segments []string, dir string) bool {
+	for _, seg := range segments {
+		fields := strings.Fields(seg)
+		if len(fields) == 0 || filepath.Base(fields[0]) != "rm" {
+			continue
+		}
+		for _, arg := range fields[1:] {
+			if arg == dir || strings.HasPrefix(arg, dir+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// splitShellAnd splits a RUN's shell on && and ;, the boundaries at which one
+// command ends and the next starts.
+func splitShellAnd(script string) []string {
+	var out []string
+	for _, part := range strings.Split(script, "&&") {
+		for _, seg := range strings.Split(part, ";") {
+			if seg = strings.TrimSpace(seg); seg != "" {
+				out = append(out, seg)
+			}
+		}
+	}
+	return out
+}
+
+// The image carries no Go build or module cache (gt-nly1g). A sandbox's entries
+// live on the shared cache claim `make polecat-caches` fills, or, with no claim,
+// in the sandbox's own layer; the backend sets GOCACHE and GOMODCACHE. Caches
+// baked into the image would cost every node gigabytes and go stale on every
+// rebuild.
+func TestPolecatImageCarriesNoGoCaches(t *testing.T) {
+	t.Parallel()
+	for _, problem := range imageGoCacheProblems(dockerfileText(t)) {
+		t.Error(problem)
+	}
+}
+
+// The check must go red on each way a cache gets into the image: an ENV cache
+// path, a bind-mounted or copied seed, and a go command whose cache files stay
+// in the layer. Without these the test would pass over a Dockerfile that seeds.
+func TestImageGoCacheProblemsRejectsACacheTheImageWouldCarry(t *testing.T) {
+	t.Parallel()
+	const installs = "RUN GOBIN=/usr/local/bin /usr/local/go/bin/go install example.invalid/tool@v1 && rm -rf /root/go /root/.cache\n"
+	cases := []struct {
+		name       string
+		dockerfile string
+		want       string // text the problem must name; "" wants no problem
+	}{
+		{"a go install that removes its caches", installs, ""},
+		{"the environment names a build cache", "ENV GOCACHE=/tmp/gocache\n" + installs, "GOCACHE"},
+		{"the environment names a module cache", "ENV GOFLAGS= GOMODCACHE=/tmp/gomodcache\n" + installs, "GOMODCACHE"},
+		{"a seed bind mount", "RUN --mount=type=bind,source=seed,target=/seed go build ./...\n", "seed sources"},
+		{"a copied seed directory", "COPY seed /seed\n", "seed sources"},
+		{"a go build that keeps its build cache", "RUN cd /src && go build ./...\n", "/root/.cache"},
+		{"a go build that keeps its module cache", "RUN cd /src && go build ./...\n", "/root/go"},
+		{"a cache named inside the RUN", "RUN GOCACHE=/gocache go build ./... && rm -rf /root/go /root/.cache\n", "/gocache"},
+		{"a later RUN does not clean another's layer", "RUN go install example.invalid/tool@v1\nRUN rm -rf /root/go /root/.cache\n", "/root/.cache"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			problems := imageGoCacheProblems(tc.dockerfile)
+			if tc.want == "" {
+				if len(problems) != 0 {
+					t.Errorf("imageGoCacheProblems = %v, want none", problems)
+				}
+				return
+			}
+			for _, problem := range problems {
+				if strings.Contains(problem, tc.want) {
+					return
+				}
+			}
+			t.Errorf("imageGoCacheProblems = %v, want a problem naming %s", problems, tc.want)
+		})
 	}
 }
