@@ -367,7 +367,10 @@ toward `max_total`, and the tick names it: `roster: N polecat(s) record no agent
 and count under "(unrecorded)", on no seat: <names>`.
 `polecat_pool.min_spawn_gap` applies to the newest polecat on any seat. A tick
 slings as many beads as there are free seats, unless `max_per_tick` sets a
-lower ceiling. A full seat is skipped, never overfilled.
+lower ceiling. It runs at most `max_in_flight` of those slings at once
+(default 2): a candidate past the cap waits for a slot as one frees, in the
+same tick or the next, and is never dropped for it. A full seat is skipped,
+never overfilled.
 
 ### Names
 

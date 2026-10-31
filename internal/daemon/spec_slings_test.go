@@ -7,6 +7,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"log"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -267,6 +268,127 @@ func TestTheInFlightPayloadCarriesOnlyWhatTheTickReads(t *testing.T) {
 
 	close(b.release)
 	waitSlings(t, d)
+}
+
+// The daemon runs at most max_in_flight background slings at once (gt-16pqa).
+// A job past the cap waits in the queue, still counted as in flight so the next
+// tick leaves its bead and seat alone, and starts when a running sling frees
+// its slot; none is dropped.
+func TestSpecDispatchCapsBackgroundSlingsInFlight(t *testing.T) {
+	t.Parallel()
+	const inFlight = 2
+	b, fake, d, lines := newBlockedSlings(t, plannedTick(
+		slingJob("gt-a", "claude-sonnet"),
+		slingJob("gt-b", "deepseek-flash"),
+		slingJob("gt-c", "claude-haiku")))
+	if err := SavePatrolConfig(d.config.TownRoot, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		SpecDispatch: &SpecDispatchConfig{MaxInFlight: inFlight},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runSpecDispatch()
+
+	// The slots are claimed before the tick returns, so the queue is the state
+	// the test reads, not a race with the sling goroutines.
+	if n := countContaining(lines(), "1 sling(s) queued behind max_in_flight 2: gt-c"); n != 1 {
+		t.Fatalf("queued lines = %d, want one: %v", n, lines())
+	}
+	if in := d.specSlings.list(); len(in) != 3 {
+		t.Fatalf("in flight = %+v, want all three jobs counted", in)
+	}
+	// Two slings hold the slots and neither returns until released.
+	for range inFlight {
+		recvSling(t, b.started)
+	}
+
+	// One slot frees, and the queued job takes it.
+	b.release <- struct{}{}
+	if third := recvSling(t, b.started); !strings.Contains(third, `"bead":"gt-c"`) {
+		t.Fatalf("third sling = %s, want the queued gt-c", third)
+	}
+	close(b.release)
+	waitSlings(t, d)
+
+	if n := len(fake.argvs("spec", "sling")); n != 3 {
+		t.Fatalf("slings run = %d, want all three", n)
+	}
+	if in := d.specSlings.list(); len(in) != 0 {
+		t.Fatalf("in flight after the slings returned = %+v, want none", in)
+	}
+}
+
+// A queued background sling the daemon's shutdown never runs is reported back
+// as not started: the tick counted it as dispatched when it handed it over
+// (gt-pk2q8), and the tick's record must not keep that count. The bead stays
+// ready for the next daemon (gt-16pqa).
+func TestSpecDispatchShutdownReportsQueuedSling(t *testing.T) {
+	t.Parallel()
+	b, fake, d, lines := newBlockedSlings(t, plannedTick(
+		slingJob("gt-a", "claude-sonnet"),
+		slingJob("gt-b", "deepseek-flash"),
+		slingJob("gt-c", "claude-haiku")))
+	if err := SavePatrolConfig(d.config.TownRoot, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		SpecDispatch: &SpecDispatchConfig{MaxInFlight: 2},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.ctx = ctx
+
+	d.runSpecDispatch()
+	for range 2 {
+		recvSling(t, b.started)
+	}
+	// The daemon shuts down with gt-c still waiting for a slot.
+	cancel()
+	close(b.release)
+	waitSlings(t, d)
+
+	if n := len(fake.argvs("spec", "sling")); n != 2 {
+		t.Fatalf("slings run = %d, want the two the cap let start", n)
+	}
+	if n := countContaining(lines(), "gt-c: sling not started: the daemon shut down before the sling had a slot"); n != 1 {
+		t.Fatalf("gt-c not-started lines = %d, want one: %v", n, lines())
+	}
+	if in := d.specSlings.list(); len(in) != 0 {
+		t.Fatalf("in flight after the shutdown = %+v, want none", in)
+	}
+	d.dispatchTicksMu.Lock()
+	defer d.dispatchTicksMu.Unlock()
+	if len(d.dispatchTicks) != 1 {
+		t.Fatalf("tick records = %d, want one", len(d.dispatchTicks))
+	}
+	if t0 := d.dispatchTicks[0]; t0.Dispatched != 2 || t0.Skipped != 1 {
+		t.Fatalf("tick record dispatched %d skipped %d, want 2 dispatched and the queued sling skipped", t0.Dispatched, t0.Skipped)
+	}
+}
+
+// A patrol block the daemon cannot read is an error, not the default cap: the
+// daemon starts no sling under a bound it could not read, and each job is fed
+// back as not started so its bead stays ready (gt-16pqa).
+func TestSpecDispatchUnreadableCapStartsNoSling(t *testing.T) {
+	t.Parallel()
+	_, fake, d, lines := newBlockedSlings(t, plannedTick(slingJob("gt-a", "claude-sonnet")))
+	path := PatrolConfigFile(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runSpecDispatch()
+
+	if n := len(fake.argvs("spec", "sling")); n != 0 {
+		t.Fatalf("slings run = %d, want none under an unreadable cap", n)
+	}
+	if n := countContaining(lines(), "gt-a: sling not started: the patrol config could not be read, so max_in_flight is unknown"); n != 1 {
+		t.Fatalf("not-started lines = %d, want one naming the unreadable cap: %v", n, lines())
+	}
+	if in := d.specSlings.list(); len(in) != 0 {
+		t.Fatalf("in flight = %+v, want none", in)
+	}
 }
 
 func TestARunningBeadIsNeverSlungTwice(t *testing.T) {

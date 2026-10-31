@@ -184,6 +184,12 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	return f
 }
 
+// specDispatchTestInFlight is the fixture's sling cap: above every candidate
+// count a fake town is built with, so the fixture's tests that predate the cap
+// keep running their candidates at once. A test about the cap sets
+// env.MaxInFlight itself (gt-16pqa).
+const specDispatchTestInFlight = 64
+
 func (f *fakeSpecTown) env() specDispatchEnv {
 	seats := f.seats
 	if seats == nil {
@@ -195,7 +201,11 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 	// A fixed seed keeps the seat draw the same on every run.
 	budget := specdispatch.Budget{Seats: seats, MaxTotal: f.maxTotal, Rand: rand.New(rand.NewSource(1))}
 	return specDispatchEnv{
-		Hold: func() string { return f.hold },
+		// A cap no fixture candidate count reaches, so a test that is not
+		// about the cap runs its candidates as it always did. A test that
+		// measures the cap sets MaxInFlight itself (gt-16pqa).
+		MaxInFlight: specDispatchTestInFlight,
+		Hold:        func() string { return f.hold },
 		Candidates: func() specBoardRead {
 			var list []specdispatch.Spec
 			var skipped []specDispatchEntry

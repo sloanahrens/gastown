@@ -1398,13 +1398,33 @@ type SpecDispatchConfig struct {
 	MaxHookless   json.RawMessage `json:"max_hookless,omitempty"`
 
 	// MaxPerTick is a ceiling on slings per tick. Zero or absent means as
-	// many as there are free seats, which the tick slings concurrently; a set
-	// value still binds (the interim 5 of 2026-10-21 came off with the
-	// parallel slings).
+	// many as there are free seats; a set value still binds (the interim 5 of
+	// 2026-10-21 came off with the parallel slings). How many of those slings
+	// run at once is MaxInFlight, not this: a tick's candidates past the cap
+	// wait for a slot (gt-16pqa).
 	MaxPerTick int `json:"max_per_tick,omitempty"`
+
+	// MaxInFlight is how many slings run at once: a sling past it waits for a
+	// slot to free, in the tick or the daemon's background slings. Zero or
+	// negative means DefaultSpecMaxInFlight, never unbounded (gt-16pqa).
+	MaxInFlight int `json:"max_in_flight,omitempty"`
 
 	// Template overrides the spec template path.
 	Template string `json:"template,omitempty"`
+}
+
+// DefaultSpecMaxInFlight is the sling concurrency of a spec_dispatch block that
+// sets none. Above one it is what keeps concurrent slings off each other's
+// polecat pool lock and the Dolt writes behind it (gt-16pqa).
+const DefaultSpecMaxInFlight = 2
+
+// InFlightCap returns the sling concurrency, defaulting to
+// DefaultSpecMaxInFlight for zero or negative.
+func (c *SpecDispatchConfig) InFlightCap() int {
+	if c == nil || c.MaxInFlight <= 0 {
+		return DefaultSpecMaxInFlight
+	}
+	return c.MaxInFlight
 }
 
 // ScheduledSlingsConfig is the opt-in scheduled_slings patrol: each entry is a

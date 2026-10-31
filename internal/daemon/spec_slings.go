@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/session"
@@ -69,10 +70,13 @@ const (
 	specSlingNotStarted
 )
 
-// specSlings is the in-flight set, keyed by bead: one running sling per bead.
+// specSlings is the in-flight set, keyed by bead: one sling per bead, running
+// or queued for a slot (gt-16pqa).
 type specSlings struct {
 	mu      sync.Mutex
 	flights map[string]specSlingFlight
+	queue   []specSlingFlight // enqueued and waiting for a slot, oldest first
+	running map[string]bool   // beads a chain claimed and has not ended
 }
 
 // begin adds f to the set unless its bead already has a sling running, and
@@ -90,11 +94,72 @@ func (s *specSlings) begin(f specSlingFlight) bool {
 	return true
 }
 
-// end removes the bead's sling from the set.
+// enqueue adds f to the set and queues it for a slot; false when the bead
+// already has a sling in the set.
+func (s *specSlings) enqueue(f specSlingFlight) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, held := s.flights[f.Bead]; held {
+		return false
+	}
+	if s.flights == nil {
+		s.flights = map[string]specSlingFlight{}
+	}
+	s.flights[f.Bead] = f
+	s.queue = append(s.queue, f)
+	return true
+}
+
+// claim takes the oldest queued sling when fewer than limit slings run, and
+// reports whether it took one. The sling counts as running from now, so now is
+// its start: a queued sling has none (gt-vames).
+func (s *specSlings) claim(limit int, now time.Time) (specSlingFlight, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.running) >= limit || len(s.queue) == 0 {
+		return specSlingFlight{}, false
+	}
+	f := s.queue[0]
+	s.queue = s.queue[1:]
+	f.started = now
+	s.flights[f.Bead] = f
+	if s.running == nil {
+		s.running = map[string]bool{}
+	}
+	s.running[f.Bead] = true
+	return f, true
+}
+
+// dropQueued removes every sling waiting for a slot from the set and returns
+// them, so a shutdown that runs none of them can report each back (gt-16pqa).
+func (s *specSlings) dropQueued() []specSlingFlight {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]specSlingFlight(nil), s.queue...)
+	for _, f := range out {
+		delete(s.flights, f.Bead)
+	}
+	s.queue = nil
+	return out
+}
+
+// queuedBeads names the slings waiting for a slot, in the order they will run.
+func (s *specSlings) queuedBeads() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.queue))
+	for _, f := range s.queue {
+		out = append(out, f.Bead)
+	}
+	return out
+}
+
+// end removes the bead's sling from the set and frees the slot it held.
 func (s *specSlings) end(bead string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.flights, bead)
+	delete(s.running, bead)
 }
 
 // list is the running slings in bead order.
@@ -180,7 +245,15 @@ func (d *Daemon) specTickArgs() ([]string, error) {
 // mid-sling (gt-cbaoy), and the bead stays ready for the new daemon's first
 // tick. A job it does not run was counted as dispatched by the tick, so its
 // outcome is fed back as not started (gt-pk2q8).
+//
+// At most specSlingInFlightCap jobs run at once (gt-16pqa). A job past the cap
+// is queued, still in the in-flight set so the next tick leaves its bead and
+// seat alone, and runs when a running sling frees its slot; nothing is dropped.
 func (d *Daemon) startSpecSlings(jobs []json.RawMessage, tickSeq uint64) {
+	// A cap nothing can read starts nothing: the cap is the bound every sling
+	// runs under, and an unknown bound must not be guessed in its place
+	// (gt-16pqa).
+	limit, capErr := d.specSlingInFlightCap()
 	for _, raw := range jobs {
 		var f specSlingFlight
 		f.tickSeq = tickSeq
@@ -196,6 +269,12 @@ func (d *Daemon) startSpecSlings(jobs []json.RawMessage, tickSeq uint64) {
 				Line: "sling job unreadable, not run: " + reason})
 			continue
 		}
+		if capErr != nil {
+			reason := "the patrol config could not be read, so max_in_flight is unknown: " + capErr.Error()
+			d.logger.Printf("spec_dispatch: %s: sling not started: %s", f.Bead, reason)
+			d.feedSpecSlingOutcome(f, specSlingNotStarted, specSlingNotStartedEntry(f.Bead, reason))
+			continue
+		}
 		if d.upgradeRestartDrains() {
 			reason := "an upgrade restart is pending; the bead stays ready for the next tick after it"
 			d.logger.Printf("spec_dispatch: %s: sling not started: %s", f.Bead, reason)
@@ -203,20 +282,87 @@ func (d *Daemon) startSpecSlings(jobs []json.RawMessage, tickSeq uint64) {
 			continue
 		}
 		f.job = raw
-		f.started = d.clk().Now()
-		if !d.specSlings.begin(f) {
+		if !d.specSlings.enqueue(f) {
 			reason := "one is already running for it"
 			d.logger.Printf("spec_dispatch: %s: sling not started: %s", f.Bead, reason)
 			d.feedSpecSlingOutcome(f, specSlingNotStarted, specSlingNotStartedEntry(f.Bead, reason))
 			continue
 		}
-		d.specDispatchCycles.Add(1)
-		go func() {
-			defer d.specDispatchCycles.Done()
-			defer d.specSlings.end(f.Bead)
-			d.runSpecSling(f)
-		}()
+		d.startQueuedSpecSlings(limit)
 	}
+	if queued := d.specSlings.queuedBeads(); len(queued) > 0 {
+		d.logger.Printf("spec_dispatch: %d sling(s) queued behind max_in_flight %d: %s", len(queued), limit, strings.Join(queued, ", "))
+	}
+}
+
+// startQueuedSpecSlings starts a chain per free slot and returns once no slot
+// is free. Each chain runs its sling, frees the slot, and takes the next
+// queued one, so a queue left by this tick or an earlier one drains at the
+// cap's pace (gt-16pqa).
+func (d *Daemon) startQueuedSpecSlings(limit int) {
+	for {
+		f, ok := d.specSlings.claim(limit, d.clk().Now())
+		if !ok {
+			return
+		}
+		d.specDispatchCycles.Add(1)
+		go d.runSpecSlingChain(f, limit)
+	}
+}
+
+// runSpecSlingChain runs one claimed sling and each queued sling it can take
+// as it frees its slot. It stops when the daemon shuts down: a sling cut by
+// the shutdown is not a defect of its bead, so no queued sling starts under a
+// dead context. The slings still waiting for a slot are reported back as not
+// started instead (releaseQueuedSpecSlings).
+func (d *Daemon) runSpecSlingChain(f specSlingFlight, limit int) {
+	defer d.specDispatchCycles.Done()
+	for {
+		d.runSpecSling(f)
+		d.specSlings.end(f.Bead)
+		if d.ctx != nil && d.ctx.Err() != nil {
+			d.releaseQueuedSpecSlings()
+			return
+		}
+		next, ok := d.specSlings.claim(limit, d.clk().Now())
+		if !ok {
+			return
+		}
+		f = next
+	}
+}
+
+// releaseQueuedSpecSlings drops the slings still waiting for a slot when the
+// daemon shuts down, and feeds each back as not started: the tick counted every
+// job it handed over as dispatched (gt-pk2q8), and a shutdown ran none of them,
+// so their beads stay ready for the next daemon's tick (gt-16pqa).
+func (d *Daemon) releaseQueuedSpecSlings() {
+	for _, f := range d.specSlings.dropQueued() {
+		reason := "the daemon shut down before the sling had a slot"
+		d.logger.Printf("spec_dispatch: %s: sling not started: %s", f.Bead, reason)
+		d.feedSpecSlingOutcome(f, specSlingNotStarted, specSlingNotStartedEntry(f.Bead, reason))
+	}
+}
+
+// specSlingInFlightCap is how many background slings the daemon runs at once,
+// from the patrol block the tick reads. A town with no patrol block keeps the
+// code default. A block that cannot be read is an error and not the default:
+// the cap is the bound the setting exists to make, so the caller starts no
+// sling it cannot bound (gt-16pqa).
+func (d *Daemon) specSlingInFlightCap() (int, error) {
+	if d.config == nil || d.config.TownRoot == "" {
+		return agentconfig.DefaultSpecMaxInFlight, nil
+	}
+	pc, err := ReadPatrolConfig(d.config.TownRoot)
+	if err != nil {
+		// The default comes back with the error so a reader that ignored it
+		// still holds a safe bound; the caller refuses to start on it.
+		return agentconfig.DefaultSpecMaxInFlight, err
+	}
+	if pc == nil || pc.Patrols == nil || pc.Patrols.SpecDispatch == nil {
+		return agentconfig.DefaultSpecMaxInFlight, nil
+	}
+	return pc.Patrols.SpecDispatch.InFlightCap(), nil
 }
 
 // specSlingNotStartedReason heads the entry of a planned bead the daemon did
