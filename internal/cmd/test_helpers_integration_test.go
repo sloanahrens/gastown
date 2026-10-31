@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,7 +30,40 @@ func buildGT(t *testing.T) string {
 	return gtBinaryPath
 }
 
+// sweepGTBinEnv names the gt binary the tier sweep builds once per run and hands
+// to the tests (internal/tiersweep's EnvGTBin). It is not a GT_ name.
+const sweepGTBinEnv = "TIER_SWEEP_GT_BIN"
+
+// goBuild runs the `go build` that buildGTBinary makes and returns its combined
+// output. A test replaces it to observe the build without linking a binary.
+var goBuild = func(dir string, env []string, args ...string) ([]byte, error) {
+	cmd := exec.Command("go", args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	return cmd.CombinedOutput()
+}
+
+// sweepBuiltGT returns the sweep's prebuilt gt when TIER_SWEEP_GT_BIN names an
+// executable regular file. Any other value is logged and ignored: a path the
+// sweep did not hand over is not trusted, and the caller builds its own copy.
+func sweepBuiltGT() (string, bool) {
+	path := os.Getenv(sweepGTBinEnv)
+	if path == "" {
+		return "", false
+	}
+	info, err := os.Stat(path)
+	if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+		return path, true
+	}
+	fmt.Fprintf(os.Stderr, "buildGT: ignoring %s=%q: not an executable regular file; building gt here\n", sweepGTBinEnv, path)
+	return "", false
+}
+
 func buildGTBinary() (string, error) {
+	if path, ok := sweepBuiltGT(); ok {
+		return path, nil
+	}
+
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("getting working directory: %w", err)
@@ -80,10 +114,7 @@ func buildGTBinary() (string, error) {
 	}
 
 	// Must set BuiltProperly=1 via ldflags, otherwise binary refuses to run
-	cmd := exec.Command("go", "build", "-ldflags", buildflags.LDFlags, "-o", tmpBinary, "./cmd/gt")
-	cmd.Dir = projectRoot
-	cmd.Env = append(os.Environ(), icuEnv...)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := goBuild(projectRoot, append(os.Environ(), icuEnv...), "build", "-ldflags", buildflags.LDFlags, "-o", tmpBinary, "./cmd/gt"); err != nil {
 		return "", fmt.Errorf("%w\nOutput: %s", err, output)
 	}
 	return tmpBinary, nil
@@ -213,4 +244,85 @@ func firstLine(out []byte) string {
 		}
 	}
 	return "(no output)"
+}
+
+// stubGoBuild isolates one buildGTBinary call. TMPDIR moves into t.TempDir so
+// the build directory lands there, goBuild becomes a recorder that links
+// nothing, and gtBinaryDir is restored so the process's real build directory
+// is not forgotten. It returns the argument list of each go build the call made.
+func stubGoBuild(t *testing.T) *[][]string {
+	t.Helper()
+	t.Setenv("TMPDIR", t.TempDir())
+	prevDir, prevBuild := gtBinaryDir, goBuild
+	t.Cleanup(func() {
+		gtBinaryDir, goBuild = prevDir, prevBuild
+	})
+	var calls [][]string
+	goBuild = func(dir string, env []string, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		return nil, nil
+	}
+	return &calls
+}
+
+// TestIntegrationBuildGTUsesTheSweepBinary: with TIER_SWEEP_GT_BIN naming an
+// executable file, buildGTBinary returns that path and runs no go build.
+func TestIntegrationBuildGTUsesTheSweepBinary(t *testing.T) {
+	builds := stubGoBuild(t)
+	sweepBin := filepath.Join(t.TempDir(), "gt")
+	if err := os.WriteFile(sweepBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("writing sweep gt stand-in: %v", err)
+	}
+	t.Setenv(sweepGTBinEnv, sweepBin)
+
+	got, err := buildGTBinary()
+	if err != nil {
+		t.Fatalf("buildGTBinary: %v", err)
+	}
+	if got != sweepBin {
+		t.Errorf("buildGTBinary = %q, want the sweep's binary %q", got, sweepBin)
+	}
+	if len(*builds) != 0 {
+		t.Errorf("buildGTBinary ran go build %d time(s) with the sweep binary set; want none: %v", len(*builds), *builds)
+	}
+}
+
+// TestIntegrationBuildGTIgnoresAnUnusableSweepBinary: a missing path, a
+// directory and a file without an execute bit are not trusted, so
+// buildGTBinary builds gt as it does when the variable is unset.
+func TestIntegrationBuildGTIgnoresAnUnusableSweepBinary(t *testing.T) {
+	notExecutable := filepath.Join(t.TempDir(), "gt")
+	if err := os.WriteFile(notExecutable, []byte("not a program\n"), 0o644); err != nil {
+		t.Fatalf("writing non-executable stand-in: %v", err)
+	}
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"missing", filepath.Join(t.TempDir(), "gt")},
+		{"directory", t.TempDir()},
+		{"not executable", notExecutable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			builds := stubGoBuild(t)
+			t.Setenv(sweepGTBinEnv, tc.path)
+
+			got, err := buildGTBinary()
+			if err != nil {
+				t.Fatalf("buildGTBinary: %v", err)
+			}
+			if len(*builds) != 1 {
+				t.Fatalf("go build ran %d time(s); want 1, as when the variable is unset: %v", len(*builds), *builds)
+			}
+			args := (*builds)[0]
+			i := slices.Index(args, "-o")
+			if i < 0 || i+1 >= len(args) {
+				t.Fatalf("go build args name no -o output: %v", args)
+			}
+			if got != args[i+1] {
+				t.Errorf("buildGTBinary = %q, want the path go build wrote %q", got, args[i+1])
+			}
+		})
+	}
 }
