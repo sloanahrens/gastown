@@ -476,7 +476,11 @@ func TestUpgradeRestartHealWedgedLaunchctlIsBounded(t *testing.T) {
 	// starts an external tool: the unit tier refuses a PATH lookup of sleep.
 	// It writes its pid first so the test can look for the process afterwards.
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	const bound = 5 * time.Second
+	// The bound is what this test pins, not its value: the call must return at
+	// the deadline it was given and leave the child dead. Two seconds is still
+	// far longer than the child needs to record its pid, and it keeps the
+	// package from spending five seconds of every landing here (gt-2nh54).
+	const bound = 2 * time.Second
 	done := make(chan error, 1)
 	go func() {
 		done <- runUpgradeHealCommand(bound, []string{"/bin/sh", "-c", "echo $$ > " + pidFile + "; kill -STOP $$"})
