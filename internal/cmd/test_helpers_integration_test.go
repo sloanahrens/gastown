@@ -3,8 +3,11 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/buildflags"
 )
@@ -43,42 +47,114 @@ var goBuild = func(dir string, env []string, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
+// sweepNotice is where buildGTBinary reports a TIER_SWEEP_GT_BIN it did not
+// use. A test replaces it to read the notice.
+var sweepNotice io.Writer = os.Stderr
+
 // sweepBuiltGT returns the sweep's prebuilt gt when TIER_SWEEP_GT_BIN names an
-// executable regular file. Any other value is logged and ignored: a path the
-// sweep did not hand over is not trusted, and the caller builds its own copy.
-func sweepBuiltGT() (string, bool) {
+// executable regular file no older than the Go sources under srcRoot. Any other
+// value is noted and ignored: a path the sweep did not hand over, or a binary
+// the sources have outrun, is not trusted, and the caller builds its own copy.
+func sweepBuiltGT(srcRoot string) (string, bool) {
 	path := os.Getenv(sweepGTBinEnv)
 	if path == "" {
 		return "", false
 	}
-	info, err := os.Stat(path)
-	if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+	reason := sweepBinaryUnusable(path, srcRoot)
+	if reason == "" {
 		return path, true
 	}
-	fmt.Fprintf(os.Stderr, "buildGT: ignoring %s=%q: not an executable regular file; building gt here\n", sweepGTBinEnv, path)
+	fmt.Fprintf(sweepNotice, "buildGT: ignoring %s=%q: %s; building gt here\n", sweepGTBinEnv, path, reason)
 	return "", false
 }
 
-func buildGTBinary() (string, error) {
-	if path, ok := sweepBuiltGT(); ok {
-		return path, nil
+// sweepBinaryUnusable returns why the binary at path is not one to trust, and
+// "" when it is. The freshness check compares its modification time with the
+// Go sources: a binary built before a source changed may predate the code under
+// test, the stale-gt failure this helper exists to avoid. Sources that cannot be
+// read are not trusted either.
+func sweepBinaryUnusable(path, srcRoot string) string {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "not an executable regular file"
 	}
+	newest, newestTime, err := newestGoSource(srcRoot)
+	if err != nil {
+		return fmt.Sprintf("cannot read the Go sources under %s: %v", srcRoot, err)
+	}
+	if newestTime.After(info.ModTime()) {
+		return "older than the Go source " + newest
+	}
+	return ""
+}
 
+// newestGoSource returns the Go source file or go.mod under root that was
+// modified last, and its modification time. Hidden directories such as .git
+// are skipped.
+func newestGoSource(root string) (string, time.Time, error) {
+	var newest string
+	var newestTime time.Time
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != root && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != "go.mod" && !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().After(newestTime) {
+			newest, newestTime = path, info.ModTime()
+		}
+		return nil
+	})
+	return newest, newestTime, err
+}
+
+// moduleRoot returns the nearest directory at or above the working directory
+// that holds go.mod. A test replaces it with a tree it made.
+var moduleRoot = func() (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("getting working directory: %w", err)
 	}
-
-	projectRoot := wd
+	root := wd
 	for {
-		if _, err := os.Stat(filepath.Join(projectRoot, "go.mod")); err == nil {
-			break
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			return root, nil
 		}
-		parent := filepath.Dir(projectRoot)
-		if parent == projectRoot {
+		parent := filepath.Dir(root)
+		if parent == root {
 			return "", fmt.Errorf("could not find project root (go.mod) above %s", wd)
 		}
-		projectRoot = parent
+		root = parent
+	}
+}
+
+// buildEnv is the cgo setup buildGTBinary's go build runs under: the icu4c
+// flags buildflags.ICUCgoEnv adds, once verifyCgoIncludePath has confirmed the
+// header resolves under them. A test replaces it so no host state is read (brew,
+// the go env file, a C++ compiler).
+var buildEnv = func() ([]string, error) {
+	icuEnv := buildflags.ICUCgoEnv(os.Environ())
+	return icuEnv, verifyCgoIncludePath(icuEnv...)
+}
+
+func buildGTBinary() (string, error) {
+	projectRoot, err := moduleRoot()
+	if err != nil {
+		return "", err
+	}
+	if path, ok := sweepBuiltGT(projectRoot); ok {
+		return path, nil
 	}
 
 	// Link into a directory private to this test process. The output path
@@ -108,8 +184,8 @@ func buildGTBinary() (string, error) {
 	// `go build` below adds to its own environment; the probe checks flags
 	// with the same override applied, so a stale $GOENV that icuEnv would
 	// correct does not block a build that would otherwise succeed.
-	icuEnv := buildflags.ICUCgoEnv(os.Environ())
-	if err := verifyCgoIncludePath(icuEnv...); err != nil {
+	icuEnv, err := buildEnv()
+	if err != nil {
 		return "", err
 	}
 
@@ -246,33 +322,64 @@ func firstLine(out []byte) string {
 	return "(no output)"
 }
 
-// stubGoBuild isolates one buildGTBinary call. TMPDIR moves into t.TempDir so
-// the build directory lands there, goBuild becomes a recorder that links
-// nothing, and gtBinaryDir is restored so the process's real build directory
-// is not forgotten. It returns the argument list of each go build the call made.
-func stubGoBuild(t *testing.T) *[][]string {
+// buildStub isolates buildGTBinary calls from the host and records what they
+// do: src is the module root it sees, builds the argument list of each go build
+// it made, and notice what it wrote to sweepNotice.
+type buildStub struct {
+	src    string
+	builds [][]string
+	notice bytes.Buffer
+}
+
+// stubBuild isolates one buildGTBinary call. TMPDIR moves into t.TempDir so the
+// build directory lands there, the module root and the cgo preflight become
+// fakes so no host state is read, goBuild becomes a recorder that links nothing,
+// and the process's globals are restored afterwards. Its module root holds a
+// go.mod and one source file, both dated an hour back.
+func stubBuild(t *testing.T) *buildStub {
 	t.Helper()
 	t.Setenv("TMPDIR", t.TempDir())
-	prevDir, prevBuild := gtBinaryDir, goBuild
+	stub := &buildStub{src: t.TempDir()}
+	dated := time.Now().Add(-time.Hour)
+	writeAt(t, filepath.Join(stub.src, "go.mod"), "module example.com/gt\n", 0o644, dated)
+	writeAt(t, filepath.Join(stub.src, "cmd", "gt", "main.go"), "package main\n", 0o644, dated)
+
+	prevDir, prevBuild, prevRoot, prevEnv, prevNotice := gtBinaryDir, goBuild, moduleRoot, buildEnv, sweepNotice
 	t.Cleanup(func() {
-		gtBinaryDir, goBuild = prevDir, prevBuild
+		gtBinaryDir, goBuild, moduleRoot, buildEnv, sweepNotice = prevDir, prevBuild, prevRoot, prevEnv, prevNotice
 	})
-	var calls [][]string
+	moduleRoot = func() (string, error) { return stub.src, nil }
+	buildEnv = func() ([]string, error) { return nil, nil }
+	sweepNotice = &stub.notice
 	goBuild = func(dir string, env []string, args ...string) ([]byte, error) {
-		calls = append(calls, args)
+		stub.builds = append(stub.builds, args)
 		return nil, nil
 	}
-	return &calls
+	return stub
+}
+
+// writeAt writes a stand-in file and sets its modification time, so a test can
+// date a sweep binary against the sources it is checked against.
+func writeAt(t *testing.T, path, body string, mode os.FileMode, mtime time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(body), mode); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("dating %s: %v", path, err)
+	}
 }
 
 // TestIntegrationBuildGTUsesTheSweepBinary: with TIER_SWEEP_GT_BIN naming an
-// executable file, buildGTBinary returns that path and runs no go build.
+// executable file no older than the sources, buildGTBinary returns that path,
+// runs no go build and writes no notice.
 func TestIntegrationBuildGTUsesTheSweepBinary(t *testing.T) {
-	builds := stubGoBuild(t)
+	stub := stubBuild(t)
 	sweepBin := filepath.Join(t.TempDir(), "gt")
-	if err := os.WriteFile(sweepBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("writing sweep gt stand-in: %v", err)
-	}
+	writeAt(t, sweepBin, "#!/bin/sh\nexit 0\n", 0o755, time.Now().Add(-30*time.Minute))
 	t.Setenv(sweepGTBinEnv, sweepBin)
 
 	got, err := buildGTBinary()
@@ -282,46 +389,89 @@ func TestIntegrationBuildGTUsesTheSweepBinary(t *testing.T) {
 	if got != sweepBin {
 		t.Errorf("buildGTBinary = %q, want the sweep's binary %q", got, sweepBin)
 	}
-	if len(*builds) != 0 {
-		t.Errorf("buildGTBinary ran go build %d time(s) with the sweep binary set; want none: %v", len(*builds), *builds)
+	if len(stub.builds) != 0 {
+		t.Errorf("buildGTBinary ran go build %d time(s) with the sweep binary set; want none: %v", len(stub.builds), stub.builds)
+	}
+	if stub.notice.Len() != 0 {
+		t.Errorf("buildGTBinary wrote a notice for a usable sweep binary: %q", stub.notice.String())
 	}
 }
 
 // TestIntegrationBuildGTIgnoresAnUnusableSweepBinary: a missing path, a
-// directory and a file without an execute bit are not trusted, so
-// buildGTBinary builds gt as it does when the variable is unset.
+// directory, a file without an execute bit, a file older than the Go sources,
+// and sources that cannot be read are not trusted. buildGTBinary builds gt as it
+// does with the variable unset, and its notice says why.
 func TestIntegrationBuildGTIgnoresAnUnusableSweepBinary(t *testing.T) {
-	notExecutable := filepath.Join(t.TempDir(), "gt")
-	if err := os.WriteFile(notExecutable, []byte("not a program\n"), 0o644); err != nil {
-		t.Fatalf("writing non-executable stand-in: %v", err)
-	}
 	cases := []struct {
-		name string
-		path string
+		name       string
+		path       func(t *testing.T, stub *buildStub) string
+		wantReason string
 	}{
-		{"missing", filepath.Join(t.TempDir(), "gt")},
-		{"directory", t.TempDir()},
-		{"not executable", notExecutable},
+		{
+			name:       "missing",
+			path:       func(t *testing.T, _ *buildStub) string { return filepath.Join(t.TempDir(), "gt") },
+			wantReason: "not an executable regular file",
+		},
+		{
+			name:       "directory",
+			path:       func(t *testing.T, _ *buildStub) string { return t.TempDir() },
+			wantReason: "not an executable regular file",
+		},
+		{
+			name: "not executable",
+			path: func(t *testing.T, _ *buildStub) string {
+				p := filepath.Join(t.TempDir(), "gt")
+				writeAt(t, p, "not a program\n", 0o644, time.Now().Add(-30*time.Minute))
+				return p
+			},
+			wantReason: "not an executable regular file",
+		},
+		{
+			name: "older than the sources",
+			path: func(t *testing.T, _ *buildStub) string {
+				p := filepath.Join(t.TempDir(), "gt")
+				writeAt(t, p, "#!/bin/sh\nexit 0\n", 0o755, time.Now().Add(-2*time.Hour))
+				return p
+			},
+			wantReason: "older than the Go source",
+		},
+		{
+			name: "sources unreadable",
+			path: func(t *testing.T, stub *buildStub) string {
+				if err := os.RemoveAll(stub.src); err != nil {
+					t.Fatalf("removing the module root: %v", err)
+				}
+				p := filepath.Join(t.TempDir(), "gt")
+				writeAt(t, p, "#!/bin/sh\nexit 0\n", 0o755, time.Now().Add(-30*time.Minute))
+				return p
+			},
+			wantReason: "cannot read the Go sources",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			builds := stubGoBuild(t)
-			t.Setenv(sweepGTBinEnv, tc.path)
+			stub := stubBuild(t)
+			path := tc.path(t, stub)
+			t.Setenv(sweepGTBinEnv, path)
 
 			got, err := buildGTBinary()
 			if err != nil {
 				t.Fatalf("buildGTBinary: %v", err)
 			}
-			if len(*builds) != 1 {
-				t.Fatalf("go build ran %d time(s); want 1, as when the variable is unset: %v", len(*builds), *builds)
+			if len(stub.builds) != 1 {
+				t.Fatalf("go build ran %d time(s); want 1, as when the variable is unset: %v", len(stub.builds), stub.builds)
 			}
-			args := (*builds)[0]
+			args := stub.builds[0]
 			i := slices.Index(args, "-o")
 			if i < 0 || i+1 >= len(args) {
 				t.Fatalf("go build args name no -o output: %v", args)
 			}
 			if got != args[i+1] {
 				t.Errorf("buildGTBinary = %q, want the path go build wrote %q", got, args[i+1])
+			}
+			wantNotice := fmt.Sprintf("ignoring %s=%q: ", sweepGTBinEnv, path)
+			if !strings.Contains(stub.notice.String(), wantNotice) || !strings.Contains(stub.notice.String(), tc.wantReason) {
+				t.Errorf("notice = %q, want it to name %q and the reason %q", stub.notice.String(), wantNotice, tc.wantReason)
 			}
 		})
 	}
