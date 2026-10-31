@@ -75,6 +75,11 @@ func TestIntegrationRunDoneLeavesSourceBeadOpenAndReadableByItsConsumers(t *test
 	})
 
 	t.Run("supervisor refuses a restart", func(t *testing.T) {
+		// The Ring is read from mayor/town.json, and a town config that does
+		// not load holds the town (ring.Hold). The sentinel town.json the
+		// routed fixture writes is not a town config, so this subtest stands a
+		// real one in for it; the town has no ring section, so it holds nothing.
+		writeTownJSON(t, townRoot, `{"type":"town","name":"t"}`)
 		restarted := false
 		s := supervisor.New(supervisor.Options{
 			TownRoot: townRoot,
