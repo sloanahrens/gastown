@@ -99,12 +99,18 @@ func (s *Sweep) Integration() (line string, red bool) {
 		fmt.Fprintf(s.Stderr, "%s: %s: %v\n", Name, TierIntegration, err)
 		return Summary(TierIntegration, s.Opts.LogDir, 0, 0, 0, "", elapsed())
 	}
+	// The sweep builds gt once, before any package runs, and every go test
+	// environment names the binary when the build worked (gt-2daks).
+	env := s.exportEnv(tested, skipList)
+	if gtBin := s.buildGT(); gtBin != "" {
+		env = append(env, EnvGTBin+"="+gtBin)
+	}
 	runner := &Runner{
 		Exec:     s.Exec,
 		LogDir:   s.Opts.LogDir,
 		Timeout:  s.Opts.Timeout,
 		SkipList: skipList,
-		Env:      s.exportEnv(tested, skipList),
+		Env:      env,
 		Stderr:   s.Stderr,
 		Timings:  s.Timings,
 		Now:      s.Now,
