@@ -140,17 +140,33 @@ func ringSpan(d time.Duration) string {
 }
 
 // ringVerb is the cobra RunE for a Ring verb. It finds the town with find
-// (workspace.FindFromCwdOrError in production), takes the process environment,
-// the wall clock and the session's actor, and hands the verb the command's
-// stdout.
-func ringVerb(find func() (string, error), run func(ringDeps, io.Writer) error) func(*cobra.Command, []string) error {
+// (workspace.FindFromCwdOrError in production), resolves the key reference
+// through getenv (os.Getenv in production), takes the wall clock and the
+// session's actor, and hands the verb the command's stdout.
+func ringVerb(find func() (string, error), getenv func(string) string, run func(ringDeps, io.Writer) error) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
 		townRoot, err := find()
 		if err != nil {
 			return fmt.Errorf("not in a Gas Town workspace: %w", err)
 		}
-		d := ringDeps{townRoot: townRoot, getenv: os.Getenv, now: time.Now(), actor: detectActor()}
+		d := ringDeps{townRoot: townRoot, getenv: getenv, now: time.Now(), actor: detectActor()}
 		return run(d, cmd.OutOrStdout())
+	}
+}
+
+// newRingVerbs builds the four verb commands, forge, renew, status and remove,
+// over find and getenv. gt registers the set built over the working directory
+// and the process environment; a test builds its own over a town and an
+// environment it holds, and runs the same commands.
+func newRingVerbs(find func() (string, error), getenv func(string) string) []*cobra.Command {
+	verb := func(use, short string, run func(ringDeps, io.Writer) error) *cobra.Command {
+		return &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs, RunE: ringVerb(find, getenv, run)}
+	}
+	return []*cobra.Command{
+		verb("forge", "Forge a new Ring, valid for 36 hours", runRingForge),
+		verb("renew", "Extend the Ring by 36 hours from now, valid or waned", runRingRenew),
+		verb("status", "Print the Ring's state: exit 0 valid, 2 waned, 3 absent", runRingStatus),
+		verb("remove", "Remove the Ring from mayor/town.json", runRingRemove),
 	}
 }
 
@@ -171,35 +187,7 @@ example "${GT_RING_KEY}", resolved from the daemon environment. A verb that
 cannot resolve the key refuses and writes nothing. No verb prints the key.`,
 }
 
-var ringForgeCmd = &cobra.Command{
-	Use:   "forge",
-	Short: "Forge a new Ring, valid for 36 hours",
-	Args:  cobra.NoArgs,
-	RunE:  ringVerb(workspace.FindFromCwdOrError, runRingForge),
-}
-
-var ringRenewCmd = &cobra.Command{
-	Use:   "renew",
-	Short: "Extend the Ring by 36 hours from now, valid or waned",
-	Args:  cobra.NoArgs,
-	RunE:  ringVerb(workspace.FindFromCwdOrError, runRingRenew),
-}
-
-var ringStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Print the Ring's state: exit 0 valid, 2 waned, 3 absent",
-	Args:  cobra.NoArgs,
-	RunE:  ringVerb(workspace.FindFromCwdOrError, runRingStatus),
-}
-
-var ringRemoveCmd = &cobra.Command{
-	Use:   "remove",
-	Short: "Remove the Ring from mayor/town.json",
-	Args:  cobra.NoArgs,
-	RunE:  ringVerb(workspace.FindFromCwdOrError, runRingRemove),
-}
-
 func init() {
-	ringCmd.AddCommand(ringForgeCmd, ringRenewCmd, ringStatusCmd, ringRemoveCmd)
+	ringCmd.AddCommand(newRingVerbs(workspace.FindFromCwdOrError, os.Getenv)...)
 	rootCmd.AddCommand(ringCmd)
 }
