@@ -1,4 +1,4 @@
-> Status: current research (2026-10-31), gt-5dkxp. Build beads filed held; live proof owed by the overseer.
+> Status: historical (2026-10). Merged in: gt-5dkxp. Not maintained.
 
 # K1b: the tracker seat token as a provider placeholder
 
@@ -9,7 +9,7 @@ Facts below are from `origin/main` at the time of writing. Anything the code can
 ## What exists
 
 - The client sends `Authorization: Bearer <token>` (`tracker/client/client.go:317`). It reads the token from `TRACKER_TOKEN_FILE` or `TRACKER_TOKEN` (`client.go:69-72`), trims it, and refuses an empty file (`client.go:101-108`).
-- The client accepts plain http only to a literal loopback IP or to `AllowHTTPHost` (`client.go:39`, `client.go:168`). The older note `R7-seat-lifecycle.md` listed this as a blocker; `AllowHTTPHost` now answers it, so a sandbox can name the control-plane host.
+- The client accepts plain http only to a literal loopback IP or to `AllowHTTPHost` (`client.go:39`, `client.go:168`). The older note `docs/research/tracker/R7-seat-lifecycle.md` listed this as a blocker; `AllowHTTPHost` now answers it, so a sandbox can name the control-plane host.
 - A token is issued by `POST /v1/tokens` and revoked by `POST /v1/tokens:revoke`, both admin-only (`tracker/server/routes_admin.go:26,28`). The actor a request acts as is the token's actor; `GET /v1/whoami` returns it (`tracker/server/server.go:100`).
 - A sandbox attaches providers by name at create: `Profile.Providers []string` (`internal/session/backend.go:26`), passed through at `backend_openshell.go:990`. The list is per profile, not per seat.
 - The forgejo provider holds one credential for the bot, not one per seat (`forgejo-polecat.yaml`, `credentials: api_token`).
@@ -39,15 +39,16 @@ Derived from the route registrations in `tracker/server/routes_*.go` and `server
 - reads: `GET /v1/issues/{id}`, `POST /v1/issues:show-many`, `:list`, `:count`, `POST /v1/assigned`, `POST /v1/ready`, `POST /v1/blocked`, `POST /v1/issues:children-of`, `GET /v1/events`, `GET /v1/whoami`, `GET /v1/issues/{id}/comments`, `GET /v1/issues/{id}/dependencies`
 - writes: `POST /v1/issues`, `PATCH /v1/issues/{id}`, `POST /v1/issues:close`, `POST /v1/issues:delete`, `POST /v1/graphs`, `POST /v1/issues/{id}/claim`, `release`, `transfer`, `POST /v1/batch`, `POST /v1/issues/{id}/comments`, `POST /v1/issues/{id}/dependencies`, `DELETE /v1/issues/{id}/dependencies/{dependsOn}`
 
-Refuse in the profile (defence in depth; `requireAdmin` already refuses them for a non-admin token): `/v1/tokens`, `/v1/tokens:revoke`, `/v1/config/*`, `/v1/stats`, `/v1/wisps:purge`, `/v1/export`, `/v1/snapshot/town`, `/v1/board/dispatch`.
+Refuse in the profile, in two groups.
 
-Not verified: whether a polecat calls `POST /v1/board/dispatch` or `/v1/snapshot/town` today; a grep of the callers decides before the profile is written.
+- Admin-gated, read from the code: `POST /v1/tokens`, `POST /v1/tokens:revoke`, `PUT /v1/config/{key}` and `POST /v1/wisps:purge` are wrapped in `requireAdmin` (`tracker/server/routes_admin.go:25-28`), and `POST /v1/export` is too (`tracker/server/routes_export.go:16`). The profile refuses them as defence in depth: a seat token that was ever issued with admin scope still could not reach them through the sandbox.
+- Not seat routes by assumption, **not verified**: `GET /v1/stats`, `GET /v1/config/{key}`, `GET /v1/snapshot/town` and `POST /v1/board/dispatch` are not admin-gated in `routes_admin.go:23-24`, `routes_snapshot.go:12` and `routes_board.go:17`, so the server would answer a seat. I have not checked whether a polecat calls any of them today; a grep of the callers decides before the profile is written, and the first build bead below says so. Until then the allow list above does not include them.
 
 ## Build beads (filed held)
 
-1. The profile file `deploy/polecat/profiles/tracker-polecat.yaml` with the paths above, and the test that lints it (the pattern of `cmd/openshell-providers`): the test refuses any admin path in the allow list.
-2. The per-seat provider lifecycle behind an interface with a fake runner: create at seat start, delete at seat end, sweep of orphans by the reaper.
-3. The sandbox stages a placeholder in the token file instead of the real token, and the guard test proves the real token appears nowhere in the sandbox environment or staged files.
+1. gt-0f305: the profile file `deploy/polecat/profiles/tracker-polecat.yaml` with the paths above, and the test that lints it (the pattern of `cmd/openshell-providers`): the test refuses any admin path in the allow list.
+2. gt-2fj7e: the per-seat provider lifecycle behind an interface with a fake runner: create at seat start, delete at seat end, sweep of orphans by the reaper.
+3. gt-874y8: the sandbox stages a placeholder in the token file instead of the real token, and the guard test proves the real token appears nowhere in the sandbox environment or staged files.
 
 ## Live proof owed (overseer, one-shot, by hand)
 
