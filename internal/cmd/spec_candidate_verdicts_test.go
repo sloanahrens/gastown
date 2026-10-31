@@ -694,9 +694,9 @@ func skipLines(r specDispatchReport) string {
 	return strings.Join(lines, "\n")
 }
 
-// A memorised dependent whose blocker reopens is held at the next tick, and the
-// tick reads nothing for it but the blocker's status: its design is served with
-// the verdict (gt-km9jt).
+// A memorised dependent whose blocker reopens is held at the next tick: a
+// candidate with a blocking edge is read in full each tick, since the reopen
+// moves nothing in its row (gt-km9jt, gt-qcl61).
 func TestSpecCandidateVerdictsHoldAMemorisedDependentWhenItsBlockerReopens(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, 1)
@@ -711,14 +711,14 @@ func TestSpecCandidateVerdictsHoldAMemorisedDependentWhenItsBlockerReopens(t *te
 	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "blocked") {
 		t.Errorf("the tick after the blocker reopened skipped %+v, want the admission refusal", r.Skipped)
 	}
-	if len(v.store.multis) != 2 || v.lastBatch() != "gt-blocker" {
-		t.Errorf("the tick after the blocker reopened read %v, want its one batch to be the blocker's status", v.store.multis)
+	if len(v.store.multis) != 2 || v.lastBatch() != "gt-cand-00" {
+		t.Errorf("the tick after the blocker reopened read %v, want its one batch to be the candidate's own", v.store.multis)
 	}
 }
 
 // A memorised dependent is freed at the next tick once its blocker closes again,
-// after a reopen the memory also saw: both directions come from the memory's
-// edges and the blocker's status, never from a stale verdict (gt-km9jt).
+// after a reopen the memory also saw: both directions come from the tick's own
+// read of the edges, never from a stale verdict (gt-km9jt, gt-qcl61).
 func TestSpecCandidateVerdictsFreeAMemorisedDependentWhenItsBlockerCloses(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, 1)
@@ -735,8 +735,38 @@ func TestSpecCandidateVerdictsFreeAMemorisedDependentWhenItsBlockerCloses(t *tes
 	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNoSeat) {
 		t.Errorf("the tick after the blocker closed again skipped %+v, want the bead freed as far as the seat hold", r.Skipped)
 	}
-	if len(v.store.multis) != 3 || v.lastBatch() != "gt-blocker" {
-		t.Errorf("the tick after the blocker closed again read %v, want its one batch to be the blocker's status", v.store.multis)
+	if len(v.store.multis) != 3 || v.lastBatch() != "gt-cand-00" {
+		t.Errorf("the tick after the blocker closed again read %v, want its one batch to be the candidate's own", v.store.multis)
+	}
+}
+
+// An edge swapped for another of the same count moves neither the dependent's
+// updated_at (bd keeps it when an edge changes) nor its dependency_count, so the
+// memory cannot see it; the tick reads a candidate with a blocking edge in full
+// and holds the bead on the new blocker (gt-qcl61).
+func TestSpecCandidateVerdictsSeeASameCountEdgeSwap(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	const id = "gt-cand-00"
+	v.setBlocker(t, id, "gt-old", string(beads.StatusClosed))
+	if r := runSpecDispatchCycle(v.retown(v.f)); len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNoSeat) {
+		t.Fatalf("first tick skipped %+v, want the bead free of blockers as far as the seat hold", r.Skipped)
+	}
+
+	v.db.Seed(beads.Issue{ID: "gt-new", Status: string(beads.StatusOpen)})
+	if err := v.db.RemoveDependency(id, "gt-old"); err != nil {
+		t.Fatalf("removing the old edge: %v", err)
+	}
+	if err := v.db.AddDependency(id, "gt-new"); err != nil {
+		t.Fatalf("adding the new edge: %v", err)
+	}
+	r := runSpecDispatchCycle(v.retown(v.f))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "blocked") || !strings.Contains(r.Skipped[0].Line, "gt-new") {
+		t.Errorf("the tick after the swap skipped %+v, want the bead held on gt-new", r.Skipped)
+	}
+	fresh := runSpecDispatchCycle(v.wire(v.f, nil))
+	if got, want := skipLines(r), skipLines(fresh); got != want {
+		t.Errorf("after the swap the memory's skips %q, want the fresh read's %q", got, want)
 	}
 }
 
@@ -758,8 +788,8 @@ func TestSpecCandidateVerdictsMatchAFreshReadAcrossBlockerChanges(t *testing.T) 
 	}
 }
 
-// A record written before the edges were kept has no edges field: it is read as
-// unremembered and decided fresh, and the tick keeps the edges with the new record
+// A record written before the edges field existed has none: it is read as
+// unremembered and decided fresh, and the tick writes the new record with it
 // (gt-km9jt).
 func TestSpecCandidateVerdictsReadAnEdgelessRecordAsUnremembered(t *testing.T) {
 	t.Parallel()
@@ -876,52 +906,5 @@ func TestSpecCandidateBlockedContainerIsHeldOnceItsBlockerCloses(t *testing.T) {
 	r := runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
 	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipContainer) {
 		t.Errorf("the tick after the blocker closed skipped %+v, want the container held", r.Skipped)
-	}
-}
-
-// A remembered blocker the status read cannot answer forgets its record: the
-// candidate is read in full that tick, reported as unreadable, and decided fresh
-// at the next tick (gt-km9jt).
-func TestSpecCandidateVerdictsForgetAnEdgeItsStatusReadCannotAnswer(t *testing.T) {
-	t.Parallel()
-	v := newVerdictTick(t, 1)
-	const id = "gt-cand-00"
-	v.setBlocker(t, id, "gt-blocker", string(beads.StatusClosed))
-	runSpecDispatchCycle(v.retown(v.f))
-
-	v.store.failBatch = true
-	r := runSpecDispatchCycle(v.retown(v.f))
-	if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "cannot read design and blockers") {
-		t.Fatalf("the tick whose batch failed errors = %v, want the candidate reported unreadable", r.Errors)
-	}
-	if _, kept := v.env.Verdicts.memory.verdicts[id]; kept {
-		t.Errorf("the record of a candidate whose blockers could not be read was kept")
-	}
-
-	v.store.failBatch = false
-	r = runSpecDispatchCycle(v.retown(v.f))
-	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNoSeat) {
-		t.Errorf("the tick after the batch recovered skipped %+v, want the bead decided fresh", r.Skipped)
-	}
-	if v.lastBatch() != id {
-		t.Errorf("the tick after the batch recovered read %v last, want the candidate read in full", v.store.multis)
-	}
-}
-
-// An edge's type survives a save: admission refuses an edge whose type was never
-// read, so a reloaded record must refuse as the tick that wrote it did, by the
-// blocker, not as unread (gt-km9jt).
-func TestSpecCandidateVerdictsKeepAnEdgeTypeAcrossASave(t *testing.T) {
-	t.Parallel()
-	v := newVerdictTick(t, 1)
-	v.setBlocker(t, "gt-cand-00", "gt-blocker", string(beads.StatusClosed))
-	runSpecDispatchCycle(v.env)
-	v.env.Verdicts.memory.save()
-
-	v.setBlockerStatus("gt-blocker", string(beads.StatusOpen))
-	reloaded := newSpecAnnotatedTick(v.root, "daemon-1", func(string) beads.Client { return nil }).memory
-	r := runSpecDispatchCycle(v.wire(v.f, newSpecCandidateVerdicts(reloaded, v.env.Verdicts.inputs)))
-	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "blocked") || strings.Contains(r.Skipped[0].Line, "unread") {
-		t.Errorf("the reloaded tick skipped %+v, want the blocker's refusal", r.Skipped)
 	}
 }

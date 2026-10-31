@@ -1606,11 +1606,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// a skip, not a failure: the bead stays ready and the next tick asks
 		// again once the blocker closes.
 		//
-		// The edges are this tick's: a remembered candidate's are its remembered
-		// edges with each blocker's status read again (specBoardDetails), because
-		// a blocker that closes or reopens does not move the dependent's row, so
-		// a stale status would hold the bead after its blocker freed it or sling
-		// it over one that reopened (gt-km9jt).
+		// The edges are this tick's own read (specBoardDetails), never remembered.
 		blockers := c.Blockers
 		if why := specBlocked(sling.Admit(blockers)); why != "" {
 			// Not remembered: the bead stays ready and the next tick reads its
@@ -1739,8 +1735,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// as it is on the peer path, and it is read every tick: the memory
 		// keeps no children (specCandidateChildren). A refused candidate never
 		// reaches this line, since the eligibility check above skips it, so its
-		// children are left unread on purpose
-		// (TestSpecCandidateRefusedCandidateNeverReachesTheChildrenHold).
+		// children are left unread on purpose.
 		children, err := env.Children(id)
 		if err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot read children: %v", id, err))
@@ -3168,9 +3163,11 @@ func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 // nothing about dependencies is not a row that says there are none.
 //
 // A candidate the memory remembers needs no design: its shape and label verdict
-// are served. Its edges are the remembered ones, and only the status of each
-// remembered blocker is read again, in one batch per rig (specRefreshEdges). A
-// remembered candidate with no edge reads nothing (gt-km9jt).
+// are served. One with no blocking edge (dependency_count 0, most of the board)
+// reads nothing. One with an edge is read in full like a fresh candidate: a
+// blocker that closes or reopens, or an edge swapped for another of the same
+// count, moves neither the dependent's row nor its dependency_count, so the
+// edges are never remembered (gt-km9jt, gt-qcl61).
 //
 // A candidate the read does not answer is dropped with its error: the edges are
 // unread, and a bead with no list is not a bead with no blockers (gt-o70a9). It
@@ -3181,19 +3178,15 @@ func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 // never slung, so it needs neither the design nor the edges.
 func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Client, read specBoardRead, verdicts *specCandidateVerdicts) specBoardRead {
 	var fresh []int
-	remembered := map[int]specCandidateVerdict{}
 	for i, c := range read.Candidates {
 		if verdicts.refused(c) {
 			continue
 		}
-		if entry, ok := verdicts.lookUp(c); ok {
-			remembered[i] = entry
+		if _, ok := verdicts.lookUp(c); ok && c.DepCount == 0 {
 			continue
 		}
 		fresh = append(fresh, i)
 	}
-	fresh = append(fresh, specRefreshEdges(reads, storeFor, read.Candidates, remembered, verdicts)...)
-	sort.Ints(fresh)
 	var rigs []string
 	byRig := map[string][]int{}
 	for _, i := range fresh {
@@ -3240,80 +3233,6 @@ func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Clie
 	}
 	read.Candidates = kept
 	return read
-}
-
-// specRefreshEdges gives each remembered candidate its blocking edges: the
-// remembered edges, with each blocker's status read again in one batch per rig.
-// A candidate remembered with no edge gets none and reads nothing. It returns
-// the candidates whose blockers the batch did not answer, after forgetting their
-// records, so the caller reads them in full like any fresh candidate: a bead
-// whose edges cannot be read is never decided from a record that may be stale.
-func specRefreshEdges(reads *specTickReads, storeFor func(rig string) beads.Client, cands []specCandidate, remembered map[int]specCandidateVerdict, verdicts *specCandidateVerdicts) []int {
-	var rigs []string
-	byRig := map[string][]int{}
-	for i, c := range cands {
-		entry, ok := remembered[i]
-		if !ok {
-			continue
-		}
-		if len(entry.Edges.Blockers) == 0 {
-			cands[i].Blockers = nil
-			continue
-		}
-		if _, seen := byRig[c.Rig]; !seen {
-			rigs = append(rigs, c.Rig)
-		}
-		byRig[c.Rig] = append(byRig[c.Rig], i)
-	}
-	var unanswered []int
-	for _, rig := range rigs {
-		idx := byRig[rig]
-		var ids []string
-		listed := map[string]bool{}
-		for _, i := range idx {
-			for _, b := range remembered[i].Edges.Blockers {
-				if !listed[b.ID] {
-					listed[b.ID] = true
-					ids = append(ids, b.ID)
-				}
-			}
-		}
-		issues, err := reads.client(storeFor(rig)).ShowMultiple(ids)
-		for _, i := range idx {
-			deps, ok := rememberedDeps(remembered[i].Edges.Blockers, issues)
-			if err != nil || !ok {
-				verdicts.forget(cands[i])
-				unanswered = append(unanswered, i)
-				continue
-			}
-			cands[i].Blockers = deps
-		}
-	}
-	return unanswered
-}
-
-// rememberedDeps rebuilds a candidate's blocking edges from the remembered ones
-// and the blockers' status read. The edge's type is the remembered one, since
-// the status read does not carry it; every other field is the blocker's own. It
-// reports false when the read did not answer one of the remembered blockers.
-func rememberedDeps(remembered []specRememberedBlocker, issues map[string]*beads.Issue) ([]beads.IssueDep, bool) {
-	deps := make([]beads.IssueDep, 0, len(remembered))
-	for _, b := range remembered {
-		issue := issues[b.ID]
-		if issue == nil {
-			return nil, false
-		}
-		deps = append(deps, beads.IssueDep{
-			ID:             b.ID,
-			Title:          issue.Title,
-			Status:         issue.Status,
-			Priority:       issue.Priority,
-			Type:           issue.Type,
-			DependencyType: b.DependencyType,
-			CloseReason:    issue.CloseReason,
-		})
-	}
-	return deps, true
 }
 
 // specReadyOptions is the dispatcher's board query: unassigned work beads,

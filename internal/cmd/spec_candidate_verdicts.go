@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"sort"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -21,26 +20,19 @@ import (
 // was decided under (specCandidateInputs): a bead's own edit moves updated_at,
 // an edge added or removed moves dependency_count, and a change to the template,
 // the gate, the priority ceiling or the target branch decides the candidate
-// again. Staleness bound: a change to the bead is seen at the next tick,
-// because it moves updated_at. An edge swapped for another of the same count is
-// not seen until the row moves, because the count is the key the edges are
-// remembered under.
+// again.
 //
-// The record also keeps the candidate's blocking edges (the blocker's id and
-// the edge's type, which admission reads). A blocker that closes or REOPENS does
-// not move the dependent's row, so the tick reads each remembered blocker's
-// status again every tick, in one batch per rig, and reads nothing for a
-// candidate with no remembered edge (specBoardDetails).
+// Nothing about a candidate's edges or children is remembered, because neither
+// moves its row: bd keeps updated_at when an edge changes, a blocker that closes
+// or reopens is another bead's change, and a child added to a parent is an edge
+// on the child. So a candidate with a blocking edge (dependency_count above 0)
+// is read in full every tick, in the one batch per rig of a fresh candidate, and
+// every candidate the record does not refuse has its children read every tick in
+// one grouped view. What the record saves is the read of a candidate with no
+// blocking edge, which is most of the ready board.
 //
-// The children are never remembered. A child's change does not move its
-// parent's row, and a child added to a parent does not move the parent's row
-// either: the parent-child edge lives on the child, so a parent that had no
-// children keeps the row it had. A childless verdict kept in the record would
-// therefore hide a child added later, so every candidate the record does not
-// refuse has its children read each tick, in one grouped view per rig.
-//
-// A record written before the edges were kept has no edges field, and it is
-// not served: the tick decides that candidate fresh, as if it were unremembered.
+// A record written before the edges field existed has none, and it is not
+// served: the tick decides that candidate fresh, as if it were unremembered.
 
 // specCandidateInputs are the knobs a verdict was decided under. They are part
 // of the record, not the key alone, so a tick whose template, gate, ceiling or
@@ -58,26 +50,12 @@ type specCandidateInputs struct {
 	Target string `json:"target"`
 }
 
-// specRememberedBlocker is one blocking edge a tick read for a candidate. The
-// edge's type is kept because admission refuses an edge whose type was never
-// read; the blocker's status is not kept, because it changes without moving the
-// dependent's row and is read again each tick.
-type specRememberedBlocker struct {
-	ID             string `json:"id"`
-	DependencyType string `json:"dependency_type,omitempty"`
-}
-
-// specCandidateEdges is what the record keeps of a candidate's edges: the
-// blocking edges its details read named. A candidate with none keeps an empty
-// edges record, which is how a record written after this change is told from
-// one written before it.
-type specCandidateEdges struct {
-	Blockers []specRememberedBlocker `json:"blockers,omitempty"`
-}
+// specCandidateEdges marks a record written since a tick stopped remembering
+// edges: it carries no data. A record without it is from an earlier format.
+type specCandidateEdges struct{}
 
 // specCandidateVerdict is one candidate's shape and label verdict, as the tick
-// that read it decided, with the edges that decision read (see the file
-// comment).
+// that read it decided (see the file comment).
 type specCandidateVerdict struct {
 	// UpdatedAt and DepCount are the board row the verdict was decided from:
 	// the next tick serves it only while both still match.
@@ -96,8 +74,8 @@ type specCandidateVerdict struct {
 	Shaped bool `json:"shaped,omitempty"`
 	// Shape is specdispatch.Lint's verdict.
 	Shape specdispatch.LintVerdict `json:"shape"`
-	// Edges is nil in a record written before the edges were kept, and such a
-	// record is never served.
+	// Edges is nil in a record written in an earlier format, and such a record is
+	// never served.
 	Edges *specCandidateEdges `json:"edges,omitempty"`
 }
 
@@ -175,8 +153,7 @@ func (v *specCandidateVerdicts) childrenWanted(c specCandidate) bool {
 	return !v.refused(c)
 }
 
-// record keeps the verdict the tick reached for c, at the row it decided from,
-// with the blocking edges the tick read for it. A row with no updated_at is not
+// record keeps the verdict the tick reached for c, at the row it decided from. A row with no updated_at is not
 // remembered: the next tick would have nothing to compare it against.
 func (v *specCandidateVerdicts) record(c specCandidate, verdict specCandidateVerdict) {
 	if v == nil || v.memory == nil || c.UpdatedAt == "" {
@@ -185,38 +162,11 @@ func (v *specCandidateVerdicts) record(c specCandidate, verdict specCandidateVer
 	verdict.UpdatedAt = c.UpdatedAt
 	verdict.DepCount = c.DepCount
 	verdict.Inputs = v.inputs(c.Rig)
-	verdict.Edges = &specCandidateEdges{Blockers: rememberBlockers(c.Blockers)}
+	verdict.Edges = &specCandidateEdges{}
 	v.memory.mu.Lock()
 	v.memory.verdicts[c.Spec.ID] = verdict
 	v.memory.dirty = true
 	v.memory.mu.Unlock()
-}
-
-// forget drops c's record, so the next tick decides c fresh. It is the answer
-// to a blocker whose status could not be read: the record cannot say what the
-// edges are now.
-func (v *specCandidateVerdicts) forget(c specCandidate) {
-	if v == nil || v.memory == nil {
-		return
-	}
-	v.memory.mu.Lock()
-	defer v.memory.mu.Unlock()
-	if _, ok := v.memory.verdicts[c.Spec.ID]; ok {
-		delete(v.memory.verdicts, c.Spec.ID)
-		v.memory.dirty = true
-	}
-}
-
-// rememberBlockers keeps the id and edge type of each blocking edge a read named.
-func rememberBlockers(deps []beads.IssueDep) []specRememberedBlocker {
-	if len(deps) == 0 {
-		return nil
-	}
-	out := make([]specRememberedBlocker, 0, len(deps))
-	for _, dep := range deps {
-		out = append(out, specRememberedBlocker{ID: dep.ID, DependencyType: dep.DependencyType})
-	}
-	return out
 }
 
 // specTemplateKey digests the lint template: the sections it requires, and the
