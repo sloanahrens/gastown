@@ -16,13 +16,18 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/tracker/api"
 )
 
 // validDBName matches safe database names (alphanumeric, underscore, hyphen).
@@ -1293,4 +1298,205 @@ func FormatJSON(v interface{}) string {
 		return fmt.Sprintf(`{"error": %q}`, err.Error())
 	}
 	return string(data)
+}
+
+// TrackerWisps is the tracker surface a rig on the tracker is reaped through:
+// the wisp reads (Count, ListAll) and the purge by id. *tracker/client.Client
+// satisfies it; a test passes a fake.
+type TrackerWisps interface {
+	Count(ctx context.Context, f api.ListFilter) (int, error)
+	ListAll(ctx context.Context, f api.ListFilter) ([]api.Issue, error)
+	PurgeWisps(ctx context.Context, ids []string) (api.PurgeWispsResult, error)
+}
+
+// TrackerRig is a rig whose beads the route table puts on the tracker.
+type TrackerRig struct {
+	// Name is the rig's directory name, the first segment of its route path.
+	Name string
+	// Prefix is the rig's name on the tracker: its route prefix without the dash.
+	Prefix string
+	// Database is the Dolt database the rig's metadata names, or "" when none
+	// does. The bd sweep must not reach it.
+	Database string
+}
+
+// trackerOpenStatuses are the statuses an open tracker wisp carries.
+var trackerOpenStatuses = []string{"open", "hooked", "in_progress"}
+
+// TrackerRigs lists the rigs the route table puts on the tracker. A route table
+// that cannot be read is an error: a caller that cannot tell the tracker rigs
+// apart must not run the Dolt sweep over them.
+func TrackerRigs(townRoot string) ([]TrackerRig, error) {
+	routes, err := readTrackerRoutes(filepath.Join(beads.GetTownBeadsPath(townRoot), beads.RoutesFileName))
+	if err != nil {
+		return nil, fmt.Errorf("reading the route table: %w", err)
+	}
+	var rigs []TrackerRig
+	for _, r := range routes {
+		if r.BackendName() != beads.BackendTracker {
+			continue
+		}
+		name, _, _ := strings.Cut(r.Path, "/")
+		beadsDir := filepath.Join(townRoot, r.Path, ".beads")
+		rigs = append(rigs, TrackerRig{
+			Name:     name,
+			Prefix:   strings.TrimSuffix(r.Prefix, "-"),
+			Database: doltserver.DatabaseForBeadsDir(beadsDir),
+		})
+	}
+	return rigs, nil
+}
+
+// readTrackerRoutes reads a route file strictly. beads.LoadRoutes skips a line
+// that does not parse, which would hide a tracker route on that line and let the
+// bd sweep reach its rig. Here any such line is an error, and so is a tracker
+// route without its path or prefix. A missing file has no routes.
+func readTrackerRoutes(path string) ([]beads.Route, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var routes []beads.Route
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		var r beads.Route
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
+		}
+		if r.Prefix == "" || r.Path == "" {
+			if r.BackendName() == beads.BackendTracker {
+				return nil, fmt.Errorf("%s:%d: tracker route has no path or prefix", path, i+1)
+			}
+			continue
+		}
+		routes = append(routes, r)
+	}
+	return routes, nil
+}
+
+// WithoutTrackerDatabases drops the Dolt databases the tracker rigs own, so the
+// bd sweep never reaches a rig the tracker answers for. A rig owns the database
+// its metadata names and, when metadata names none, the database its own name
+// gives: rig names are unique in the town, so a database sharing one is that
+// rig's, and dropping it fails closed.
+func WithoutTrackerDatabases(databases []string, rigs []TrackerRig) []string {
+	owned := make(map[string]bool, 2*len(rigs))
+	for _, r := range rigs {
+		if r.Database != "" {
+			owned[r.Database] = true
+		}
+		if r.Name != "" {
+			owned[r.Name] = true
+		}
+	}
+	kept := make([]string, 0, len(databases))
+	for _, db := range databases {
+		if !owned[db] {
+			kept = append(kept, db)
+		}
+	}
+	return kept
+}
+
+// trackerWispFilter selects the rig's ephemeral wisps in statuses, including the
+// infra wisps the tracker hides by default, as the rig's own wisp reads do.
+func trackerWispFilter(rig TrackerRig, statuses ...string) api.ListFilter {
+	return api.ListFilter{Rig: rig.Prefix, Ephemeral: true, IncludeInfra: true, Statuses: statuses}
+}
+
+// ScanTracker counts a tracker rig's reaper candidates without writing: open
+// wisps past maxAge are reap candidates, closed wisps past purgeAge are purge
+// candidates, and every open wisp counts as open. The counts come before the
+// tracker's protections (merge requests, open parents, live agent references)
+// take theirs out, so the purge can reap fewer than the scan reports.
+//
+// The tracker holds no mail and no stale issues in a rig's wisp reads, so those
+// are not counted; the anomaly on the result says so instead of a silent zero.
+func ScanTracker(ctx context.Context, t TrackerWisps, rig TrackerRig, maxAge, purgeAge time.Duration, now time.Time) (*ScanResult, error) {
+	result := &ScanResult{Database: rig.Name}
+
+	open, err := t.Count(ctx, trackerWispFilter(rig, trackerOpenStatuses...))
+	if err != nil {
+		return nil, fmt.Errorf("count open wisps: %w", err)
+	}
+	result.OpenWisps = open
+
+	stale := trackerWispFilter(rig, trackerOpenStatuses...)
+	stale.CreatedBefore = now.Add(-maxAge)
+	if result.ReapCandidates, err = t.Count(ctx, stale); err != nil {
+		return nil, fmt.Errorf("count stale wisps: %w", err)
+	}
+
+	expired := trackerWispFilter(rig, "closed")
+	expired.ClosedBefore = now.Add(-purgeAge)
+	if result.PurgeCandidates, err = t.Count(ctx, expired); err != nil {
+		return nil, fmt.Errorf("count expired wisps: %w", err)
+	}
+
+	result.Anomalies = []Anomaly{{
+		Type:    "tracker-scope",
+		Message: "mail and stale issue candidates are not counted for a tracker rig",
+	}}
+	return result, nil
+}
+
+// ReapTracker reaps a tracker rig's expired wisps through the tracker's purge.
+// The ids of its closed wisps past purgeAge go to the purge in batches of
+// api.MaxPurgeWisps; the purge deletes the ones the policy still purges and
+// keeps the rest with a reason. The purge never closes an open wisp, so the
+// tracker's own loop (trackerd's hourly reap) keeps stale open wisps closed and
+// max-age does not apply here.
+//
+// A dry run counts the same set and purges nothing.
+func ReapTracker(ctx context.Context, t TrackerWisps, rig TrackerRig, purgeAge time.Duration, dryRun bool, now time.Time) (*ReapResult, error) {
+	result := &ReapResult{Database: rig.Name, DryRun: dryRun}
+	expired := trackerWispFilter(rig, "closed")
+	expired.ClosedBefore = now.Add(-purgeAge)
+
+	if dryRun {
+		n, err := t.Count(ctx, expired)
+		if err != nil {
+			return nil, fmt.Errorf("count expired wisps: %w", err)
+		}
+		result.Reaped = n
+	} else {
+		all, err := t.ListAll(ctx, expired)
+		if err != nil {
+			return nil, fmt.Errorf("list expired wisps: %w", err)
+		}
+		ids := make([]string, 0, len(all))
+		for _, w := range all {
+			ids = append(ids, w.ID)
+		}
+		kept := 0
+		for start := 0; start < len(ids); start += api.MaxPurgeWisps {
+			chunk := ids[start:min(start+api.MaxPurgeWisps, len(ids))]
+			purged, err := t.PurgeWisps(ctx, chunk)
+			if err != nil {
+				return nil, fmt.Errorf("purge expired wisps after %d purged: %w", result.Reaped, err)
+			}
+			result.Reaped += len(purged.Purged)
+			kept += len(purged.Kept)
+		}
+		if kept > 0 {
+			result.Anomalies = []Anomaly{{
+				Type:    "purge-kept",
+				Message: fmt.Sprintf("the tracker's purge kept %d of the %d expired wisps it was sent", kept, len(ids)),
+				Count:   kept,
+			}}
+		}
+	}
+
+	open, err := t.Count(ctx, trackerWispFilter(rig, trackerOpenStatuses...))
+	if err != nil {
+		return nil, fmt.Errorf("count open wisps: %w", err)
+	}
+	result.OpenRemain = open
+	return result, nil
 }

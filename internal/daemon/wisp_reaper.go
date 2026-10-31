@@ -198,6 +198,24 @@ func (d *Daemon) reapWisps() {
 	d.reapWispsInline(config, maxAge, deleteAge, staleIssueAge, cycle)
 }
 
+// skipTrackerRigs leaves the tracker rigs out of the Dolt sweep and logs each
+// one. trackerd runs the wisp reaper on its own loop for the rigs it holds
+// (gt-p85pw.112), so the daemon's pass must not reach their databases. It
+// returns the databases the sweep keeps and the number of tracker rigs found.
+//
+// The route table is read here, and a table that cannot be read is an error:
+// the caller refuses the pass rather than sweep a rig it could not tell apart.
+func (d *Daemon) skipTrackerRigs(databases []string) ([]string, int, error) {
+	rigs, err := reaper.TrackerRigs(d.config.TownRoot)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, rig := range rigs {
+		d.logger.Printf("wisp_reaper: %s: skipped — on the tracker, trackerd runs its own wisp reaper", rig.Name)
+	}
+	return reaper.WithoutTrackerDatabases(databases, rigs), len(rigs), nil
+}
+
 // reaperWriter returns the bd writer for a live run against dbName, pinned to
 // the beads dir whose metadata names that database, and nil for a dry run:
 // the reaper selects with SQL but writes only through bd (gt-fcxe9.12).
@@ -220,7 +238,18 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	if len(databases) == 0 {
 		databases = reaper.DiscoverDatabases(d.doltUserInfo(), host, d.doltServerPort())
 	}
+	databases, trackerRigs, err := d.skipTrackerRigs(databases)
+	if err != nil {
+		d.logger.Printf("wisp_reaper: refusing the sweep: the route table cannot be read to find the tracker rigs (%v)", err)
+		cycle.failStep("scan", "route table unreadable")
+		return
+	}
 	if len(databases) == 0 {
+		if trackerRigs > 0 {
+			d.logger.Printf("wisp_reaper: every database belongs to a tracker rig; trackerd reaps them")
+			cycle.closeStep("scan")
+			return
+		}
 		d.logger.Printf("wisp_reaper: no databases to reap")
 		cycle.failStep("scan", "no databases found")
 		return

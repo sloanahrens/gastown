@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
+	"github.com/steveyegge/gastown/tracker/client"
 )
 
 var (
@@ -118,6 +120,147 @@ func reaperWriter(dbName string) (reaper.Writer, error) {
 		return nil, fmt.Errorf("live reaper run needs the town root to reach bd: %w", err)
 	}
 	return reaper.WriterForDatabase(townRoot, dbName)
+}
+
+// reaperTownRoot is the town the cwd is in, or "" outside one: a town-less run
+// has no route table, so it has no tracker rigs.
+func reaperTownRoot() string {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return ""
+	}
+	return townRoot
+}
+
+// reaperTrackerTargets splits a hand run's targets into the tracker rigs it
+// covers and the Dolt databases the bd sweep still runs. A whole-town run covers
+// every tracker rig; a --db list covers the rigs it names, by rig or by
+// database. The bd sweep never gets a database a tracker rig owns.
+func reaperTrackerTargets(townRoot string, wholeTown bool, databases []string) ([]reaper.TrackerRig, []string, error) {
+	if townRoot == "" {
+		return nil, databases, nil
+	}
+	rigs, err := reaper.TrackerRigs(townRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	covered := rigs
+	if !wholeTown {
+		named := make(map[string]bool, len(databases))
+		for _, db := range databases {
+			named[db] = true
+		}
+		covered = nil
+		for _, r := range rigs {
+			if named[r.Name] || (r.Database != "" && named[r.Database]) {
+				covered = append(covered, r)
+			}
+		}
+	}
+	return covered, reaper.WithoutTrackerDatabases(databases, rigs), nil
+}
+
+// reaperTrackerWisps reaches the tracker the town's tracker rigs are on, from
+// the environment the tracker client reads. The token never comes from a flag.
+func reaperTrackerWisps() (reaper.TrackerWisps, error) {
+	return reaperTrackerWispsFrom(os.Getenv)
+}
+
+// reaperTrackerWispsFrom is reaperTrackerWisps reading its settings from getenv.
+func reaperTrackerWispsFrom(getenv func(string) string) (reaper.TrackerWisps, error) {
+	cfg := client.FromEnv(getenv)
+	if cfg.BaseURL == "" {
+		return nil, errors.New("tracker rigs need TRACKER_URL set")
+	}
+	if cfg.Token == "" && cfg.TokenFile == "" {
+		return nil, errors.New("tracker rigs need TRACKER_TOKEN or TRACKER_TOKEN_FILE set")
+	}
+	tc, err := client.New(cfg)
+	if err != nil {
+		// client.New never quotes the token; its message names the problem.
+		return nil, err
+	}
+	return tc, nil
+}
+
+// scanTrackerRigs scans each tracker rig through the tracker's wisp reads. A rig
+// that fails is named on stderr and left out, as a Dolt database that fails is.
+func scanTrackerRigs(ctx context.Context, t reaper.TrackerWisps, rigs []reaper.TrackerRig, maxAge, purgeAge time.Duration, now time.Time) []*reaper.ScanResult {
+	var results []*reaper.ScanResult
+	for _, rig := range rigs {
+		result, err := reaper.ScanTracker(ctx, t, rig, maxAge, purgeAge, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: scan error: %v\n", rig.Name, err)
+			continue
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
+// reapTrackerRigs reaps each tracker rig through the tracker's purge. It returns
+// the results and how many rigs contributed none, which the open-wisp alert needs
+// to know. A purge the tracker kept wisps from is named on stderr.
+func reapTrackerRigs(ctx context.Context, t reaper.TrackerWisps, rigs []reaper.TrackerRig, purgeAge time.Duration, dryRun bool, now time.Time) ([]*reaper.ReapResult, int) {
+	var results []*reaper.ReapResult
+	failed := 0
+	for _, rig := range rigs {
+		result, err := reaper.ReapTracker(ctx, t, rig, purgeAge, dryRun, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: reap error: %v\n", rig.Name, err)
+			failed++
+			continue
+		}
+		for _, a := range result.Anomalies {
+			fmt.Fprintf(os.Stderr, "%s: WARNING: %s\n", rig.Name, a.Message)
+		}
+		results = append(results, result)
+	}
+	return results, failed
+}
+
+// scanTrackerTargets scans the tracker rigs a run covers. It reaches the tracker
+// only when a rig is covered, and a tracker it cannot be reached through is named
+// on stderr with its rigs left out, as a Dolt database that cannot be reached is.
+func scanTrackerTargets(ctx context.Context, rigs []reaper.TrackerRig, newTracker func() (reaper.TrackerWisps, error), maxAge, purgeAge time.Duration, now time.Time) []*reaper.ScanResult {
+	if len(rigs) == 0 {
+		return nil
+	}
+	t, err := newTracker()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tracker rigs: %v\n", err)
+		return nil
+	}
+	return scanTrackerRigs(ctx, t, rigs, maxAge, purgeAge, now)
+}
+
+// reapTrackerTargets reaps the tracker rigs a run covers. A tracker it cannot be
+// reached through counts every covered rig as a failure, as a Dolt database that
+// cannot be reached is counted, so the open-wisp alert skips the reading.
+func reapTrackerTargets(ctx context.Context, rigs []reaper.TrackerRig, newTracker func() (reaper.TrackerWisps, error), purgeAge time.Duration, dryRun bool, now time.Time) ([]*reaper.ReapResult, int) {
+	if len(rigs) == 0 {
+		return nil, 0
+	}
+	t, err := newTracker()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tracker rigs: %v\n", err)
+		return nil, len(rigs)
+	}
+	return reapTrackerRigs(ctx, t, rigs, purgeAge, dryRun, now)
+}
+
+// reapResultLine is the one-line summary a reap prints for a database, whichever
+// store reaped it.
+func reapResultLine(r *reaper.ReapResult) string {
+	prefix := ""
+	if r.DryRun {
+		prefix = "[DRY RUN] would "
+	}
+	extra := ""
+	if r.MoleculeStepsClosed > 0 {
+		extra = fmt.Sprintf(" (+%d closed-molecule steps)", r.MoleculeStepsClosed)
+	}
+	return fmt.Sprintf("%s: %sreaped %d wisps%s, %d open remain", r.Database, prefix, r.Reaped, extra, r.OpenRemain)
 }
 
 // printAutoCloseCandidates lists the issues a sweep selected. Printed on every
@@ -368,6 +511,10 @@ Use this to understand the state before deciding what to reap.`,
 		}
 
 		databases := reaperDatabaseNames()
+		trackerRigs, databases, err := reaperTrackerTargets(reaperTownRoot(), reaperDB == "", databases)
+		if err != nil {
+			return fmt.Errorf("cannot find the tracker rigs: %w", err)
+		}
 
 		var results []*reaper.ScanResult
 		for i, dbName := range databases {
@@ -405,6 +552,7 @@ Use this to understand the state before deciding what to reap.`,
 			}
 			results = append(results, result)
 		}
+		results = append(results, scanTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps, maxAge, purgeAge, time.Now())...)
 
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(results))
@@ -470,8 +618,16 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 		if err != nil {
 			return err
 		}
+		purgeAge, err := parseReaperAge("--purge-age", reaperPurgeAge)
+		if err != nil {
+			return err
+		}
 
 		databases := reaperDatabaseNames()
+		trackerRigs, databases, err := reaperTrackerTargets(reaperTownRoot(), reaperDB == "", databases)
+		if err != nil {
+			return fmt.Errorf("cannot find the tracker rigs: %w", err)
+		}
 
 		var results []*reaper.ReapResult
 		// reapFailures counts the databases that contributed no reading, so the
@@ -524,6 +680,9 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 			}
 			results = append(results, result)
 		}
+		tracked, failed := reapTrackerTargets(context.Background(), trackerRigs, reaperTrackerWisps, purgeAge, reaperDryRun, time.Now())
+		results = append(results, tracked...)
+		reapFailures += failed
 
 		var totalReaped, totalMoleculeSteps, totalOpen int
 		for _, r := range results {
@@ -536,16 +695,7 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 			fmt.Println(reaper.FormatJSON(results))
 		} else {
 			for _, r := range results {
-				prefix := ""
-				if r.DryRun {
-					prefix = "[DRY RUN] would "
-				}
-				extra := ""
-				if r.MoleculeStepsClosed > 0 {
-					extra = fmt.Sprintf(" (+%d closed-molecule steps)", r.MoleculeStepsClosed)
-				}
-				fmt.Printf("%s: %sreaped %d wisps%s, %d open remain\n",
-					r.Database, prefix, r.Reaped, extra, r.OpenRemain)
+				fmt.Println(reapResultLine(r))
 			}
 			if len(results) > 1 {
 				prefix := ""
@@ -1108,6 +1258,10 @@ func init() {
 		cmd.Flags().StringVar(&reaperPurgeAge, "purge-age", "168h", "Max closed wisp age before purging (7d)")
 		cmd.Flags().StringVar(&reaperMailAge, "mail-age", "168h", "Max closed mail age before purging (7d)")
 	}
+	// reap's purge-age is only read for a tracker rig, whose reap is the tracker's
+	// purge of closed wisps; a bd rig's reap closes by max-age and ignores it.
+	reaperReapCmd.Flags().StringVar(&reaperPurgeAge, "purge-age", "168h",
+		"Max closed wisp age before a tracker rig's purge (7d); bd rigs ignore it")
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperAutoCloseCmd, reaperRunCmd} {
 		cmd.Flags().StringVar(&reaperStaleAge, "stale-age", "720h", "Max issue staleness before auto-close (30d; below 7d is a soft refusal that reports the set and closes nothing; --force lifts it)")
 	}
