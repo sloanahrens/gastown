@@ -281,7 +281,7 @@ func TestPermissionRequestEscalationFailureMessage(t *testing.T) {
 // appear at all (gt-8stz review, finding 36adb619b71a).
 func TestPermissionRequestEscalationBodyRedactsSecrets(t *testing.T) {
 	t.Parallel()
-	token := "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	token := "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaa"
 	command := `curl -H "Authorization: Bearer ` + token + `" https://example.com`
 	hook := payloadInput(t, bashPermissionPayload(command))
 

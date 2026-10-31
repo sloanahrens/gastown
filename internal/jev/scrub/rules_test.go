@@ -125,7 +125,7 @@ func ruleCases() []ruleCase {
 		// vendor-key
 		{
 			name: "github token", rule: RuleVendorKey,
-			in:   "key ghp_0123456789abcdefghijABCDEFGHIJ012345 here",
+			in:   "key ghp_fixturevaluenotarealtoken here",
 			want: "key [REDACTED:vendor-key] here", count: 1,
 		},
 		{
@@ -604,7 +604,7 @@ func TestScrubDefaultOneMarkerPerValue(t *testing.T) {
 	}{
 		{
 			name: "vendor key under a credential name",
-			in:   "export DEEPSEEK_API_KEY=sk-0123456789abcdef0123456789abcdef",
+			in:   "export DEEPSEEK_API_KEY=sk-fixture-value-not-a-real-credential",
 			want: "export DEEPSEEK_API_KEY=[REDACTED:vendor-key]",
 			rule: RuleVendorKey,
 		},
