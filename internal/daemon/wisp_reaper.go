@@ -198,6 +198,36 @@ func (d *Daemon) reapWisps() {
 	d.reapWispsInline(config, maxAge, deleteAge, staleIssueAge, cycle)
 }
 
+// errNoDatabases is the refusal for a pass that found no database to sweep.
+var errNoDatabases = errors.New("no databases found")
+
+// sweepTargets is the database list a pass sweeps: the configured databases, or
+// the ones discover finds when none are configured, with the tracker rigs'
+// databases left out. An empty discovery is errNoDatabases whether or not tracker
+// rigs exist: an empty discovery is also what a Dolt outage looks like, so the
+// pass must not read it as a clean sweep of the tracker rigs.
+//
+// The tracker rigs are logged as skipped (trackerd runs its own wisp reaper on
+// its loop for them, gt-p85pw.112). A route table that cannot be read is an
+// error, and the pass refuses rather than sweep a rig it could not tell apart.
+func (d *Daemon) sweepTargets(configured []string, discover func() []string) ([]string, error) {
+	databases := configured
+	if len(databases) == 0 {
+		databases = discover()
+	}
+	if len(databases) == 0 {
+		return nil, errNoDatabases
+	}
+	rigs, err := reaper.TrackerRigs(d.config.TownRoot)
+	if err != nil {
+		return nil, fmt.Errorf("the route table cannot be read to find the tracker rigs: %w", err)
+	}
+	for _, rig := range rigs {
+		d.logger.Printf("wisp_reaper: %s: skipped — on the tracker, trackerd runs its own wisp reaper", rig.Name)
+	}
+	return reaper.WithoutTrackerDatabases(databases, rigs), nil
+}
+
 // reaperWriter returns the bd writer for a live run against dbName, pinned to
 // the beads dir whose metadata names that database, and nil for a dry run:
 // the reaper selects with SQL but writes only through bd (gt-fcxe9.12).
@@ -215,14 +245,23 @@ func (d *Daemon) reaperWriter(dbName string, dryRun bool) (reaper.Writer, error)
 // cycle. Delegates to the
 // reaper package, which selects with SQL and writes through bd.
 func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, staleIssueAge time.Duration, cycle *dogCycle) {
-	databases := config.Databases
 	host := d.doltServerHost()
-	if len(databases) == 0 {
-		databases = reaper.DiscoverDatabases(d.doltUserInfo(), host, d.doltServerPort())
-	}
-	if len(databases) == 0 {
+	databases, err := d.sweepTargets(config.Databases, func() []string {
+		return reaper.DiscoverDatabases(d.doltUserInfo(), host, d.doltServerPort())
+	})
+	if errors.Is(err, errNoDatabases) {
 		d.logger.Printf("wisp_reaper: no databases to reap")
 		cycle.failStep("scan", "no databases found")
+		return
+	}
+	if err != nil {
+		d.logger.Printf("wisp_reaper: refusing the sweep: %v", err)
+		cycle.failStep("scan", "route table unreadable")
+		return
+	}
+	if len(databases) == 0 {
+		d.logger.Printf("wisp_reaper: every database belongs to a tracker rig; trackerd reaps them")
+		cycle.closeStep("scan")
 		return
 	}
 	d.logger.Printf("wisp_reaper: scanning %d databases", len(databases))
