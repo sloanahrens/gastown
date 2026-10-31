@@ -1543,6 +1543,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report.Candidates = len(read.Candidates)
 	report.LabeledFailed = read.LabeledFailed
 	report.Notices = append(report.Notices, read.Retried...)
+	if n := specRespawnHeldNotice(read.RespawnHeld); n != "" {
+		report.Notices = append(report.Notices, n)
+	}
 	// The read's own skips are the board-carried refusals: the tick and the
 	// dry run print them beside the ones the tick finds itself (gt-k1g3e).
 	report.Skipped = append(report.Skipped, read.Skipped...)
@@ -2714,7 +2717,8 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 						reads.call()
 						return specTimedOutRetriesIn(rigPath)
 					},
-					clear: specRetryTimedOutSling,
+					clear:          specRetryTimedOutSling,
+					respawnLimited: specRespawnLimitedIn(townRoot),
 				}
 			}
 			read := specCandidatesRetrying(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
@@ -3067,7 +3071,11 @@ type specBoardRead struct {
 	// Retried names the beads whose failure label the read cleared so they could
 	// be slung again (specTimedOutRetries). The tick logs them as notices.
 	Retried []string
-	Errors  []string
+	// RespawnHeld names the beads a kill at the bound left labeled whose retries
+	// remain but whose respawn budget is spent, so the read left them labeled
+	// instead of retrying them. The tick reports them once.
+	RespawnHeld []string
+	Errors      []string
 }
 
 // specCandidates reads every operational rig's ready work beads and keeps the
@@ -3149,6 +3157,11 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 					labeled[s.ID] = true
 					continue
 				}
+				if retry.respawnLimited != nil && retry.respawnLimited(s.ID) {
+					labeled[s.ID] = true
+					read.RespawnHeld = append(read.RespawnHeld, s.ID)
+					continue
+				}
 				if err := retry.clear(rigPath, s.ID); err != nil {
 					read.Errors = append(read.Errors, fmt.Sprintf("%s: %v", s.ID, err))
 					labeled[s.ID] = true
@@ -3196,6 +3209,12 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 type specTimeoutRetry struct {
 	due   func(rigPath string) (map[string]bool, error)
 	clear func(rigPath, beadID string) error
+	// respawnLimited reports whether the bead has spent its respawn budget. A
+	// bead that has is not retried: the spawn would refuse it after the sling
+	// had paid for its duplicate check and seat decision, and the label stays
+	// until a person resets the count (gt sling respawn-reset). nil holds no
+	// bead back.
+	respawnLimited func(beadID string) bool
 }
 
 // specTimedOutRetriesIn is the retry probe over the rig's own store.
@@ -3238,6 +3257,24 @@ func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 		return fmt.Errorf("clearing the failed label: %w", err)
 	}
 	return nil
+}
+
+// specRespawnLimitedIn answers specTimeoutRetry.respawnLimited from the town's
+// respawn state: the same count the spawn refuses on (admitSlingRespawn), so a
+// bead the spawn would refuse is not slung to be refused.
+func specRespawnLimitedIn(townRoot string) func(beadID string) bool {
+	return func(beadID string) bool { return polecat.ShouldBlockRespawn(townRoot, beadID) }
+}
+
+// specRespawnHeldNotice is the tick's one line for the beads a kill at the
+// bound left labeled whose respawn budget is spent: they are not slung again
+// until a person resets the count. "" when there are none.
+func specRespawnHeldNotice(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d bead(s) held by the respawn limit, not retried: %s; reset with gt sling respawn-reset <bead> once the cause is fixed",
+		len(ids), strings.Join(ids, " "))
 }
 
 // specBoardDetails fills the two things a board row cannot: the design the lint
