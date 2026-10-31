@@ -196,6 +196,37 @@ func ruleCases() []ruleCase {
 			want: "token=[REDACTED:assignment] next=kept", count: 1,
 		},
 		{
+			// A terminator after a mid-value marker may still be credential
+			// text, so the scan runs on to whitespace and the tail stays
+			// redacted. Over-redacting a non-credential tail is the accepted
+			// cost of never letting a secret out.
+			name: "ampersand after a mid-value marker stays redacted", rule: RuleAssignment,
+			in:   "token=pre-[REDACTED:jwt]&user=bob",
+			want: "token=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "comma after a mid-value marker stays redacted", rule: RuleAssignment,
+			in:   "token=pre-[REDACTED:jwt],and,more",
+			want: "token=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "semicolon after a mid-value marker stays redacted", rule: RuleAssignment,
+			in:   "token=pre-[REDACTED:jwt];x=1",
+			want: "token=[REDACTED:assignment]", count: 1,
+		},
+		{
+			name: "closing paren after a mid-value marker stays redacted", rule: RuleAssignment,
+			in:   "token=pre-[REDACTED:jwt])tail",
+			want: "token=[REDACTED:assignment]", count: 1,
+		},
+		{
+			// A quoted value ends at its own closing quote: the sentence after
+			// it is prose, not credential text, so it is kept.
+			name: "quoted value ends at the quote", rule: RuleAssignment,
+			in:   `token="pre-[REDACTED:jwt]" is set`,
+			want: `token="[REDACTED:assignment]" is set`, count: 1,
+		},
+		{
 			name: "bare marker keeps its earlier marker", rule: RuleAssignment,
 			in:   "token=[REDACTED:jwt]",
 			want: "token=[REDACTED:jwt]",
