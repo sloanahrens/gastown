@@ -283,6 +283,20 @@ func (f workShowFailsBeads) Show(id string) (*beads.Issue, error) {
 	return f.mrlessBeads.Show(id)
 }
 
+// workMissingBeads reports one bead as absent with no error, the nil answer
+// that is a gone bead rather than an unreadable one.
+type workMissingBeads struct {
+	mrlessBeads
+	id string
+}
+
+func (f workMissingBeads) Show(id string) (*beads.Issue, error) {
+	if id == f.id {
+		return nil, nil
+	}
+	return f.mrlessBeads.Show(id)
+}
+
 // The nuke safety check is the gate that deletes a seat, so it asks the same
 // lost-work question check-recovery does: a sandbox the gateway says is gone
 // reads clean, which is not finished. Unfinished work with no branch on origin
@@ -490,15 +504,18 @@ func TestCheckRecoveryOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *testi
 		name      string
 		status    string // the work bead's status
 		notes     string // appended to the work bead
-		onOrigin  bool   // a generated polecat branch for the issue on origin
+		seatOnRef string // seat a generated polecat branch for the issue on origin names
 		showFails bool   // the work bead cannot be read
+		missing   bool   // the work bead no longer exists, reported as nil, nil
 		originErr error  // origin cannot be asked
 		wantUnk   string // substring of the unknown reason; "" wants the safe case
 	}{
 		{name: "landed_no_branch_on_origin", status: string(beads.StatusClosed), notes: landingNote},
 		{name: "no_changes_close_is_not_a_landing", status: string(beads.StatusClosed), wantUnk: "closed with no landing record"},
 		{name: "open_issue_that_landed", status: string(beads.StatusOpen), notes: landingNote, wantUnk: "is open"},
-		{name: "branch_for_the_issue_on_origin", status: string(beads.StatusClosed), notes: landingNote, onOrigin: true, wantUnk: "still exists on origin"},
+		{name: "branch_for_the_seat_and_issue_on_origin", status: string(beads.StatusClosed), notes: landingNote, seatOnRef: "ember", wantUnk: "still exists on origin"},
+		{name: "another_seats_branch_for_the_issue_on_origin", status: string(beads.StatusClosed), notes: landingNote, seatOnRef: "furiosa"},
+		{name: "issue_no_longer_exists", status: string(beads.StatusClosed), missing: true},
 		{name: "origin_cannot_be_asked", status: string(beads.StatusClosed), notes: landingNote, originErr: errors.New("forgejo unreachable"), wantUnk: "could not ask origin whether a branch for gt-work survived"},
 		{name: "issue_cannot_be_read", status: string(beads.StatusOpen), showFails: true, wantUnk: "could not read gt-work for a resume_branch"},
 	}
@@ -509,8 +526,11 @@ func TestCheckRecoveryOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *testi
 			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
 			fake := mrlessBeads{beadsfake.New()}
 			var db recoveryBeads = fake
-			if tt.showFails {
+			switch {
+			case tt.showFails:
 				db = workShowFailsBeads{fake, "gt-work"}
+			case tt.missing:
+				db = workMissingBeads{fake, "gt-work"}
 			}
 			agentID := polecatBeadIDForRig(r, "gastown", "ember")
 			if _, err := fake.Create(beads.CreateOptions{
@@ -527,7 +547,7 @@ func TestCheckRecoveryOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *testi
 			if _, err := fake.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
 				t.Fatal(err)
 			}
-			if !tt.showFails {
+			if !tt.showFails && !tt.missing {
 				status := tt.status
 				if err := fake.Update("gt-work", beads.UpdateOptions{Status: &status, AppendNotes: tt.notes}); err != nil {
 					t.Fatal(err)
@@ -538,15 +558,15 @@ func TestCheckRecoveryOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *testi
 				probe: func(string, string) (polecat.LiveGitState, bool) {
 					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
 				},
-				survivingBranch: func(_, issueID string) (string, error) {
+				survivingBranches: func(_, issueID string) ([]string, error) {
 					asked = issueID
 					if tt.originErr != nil {
-						return "", tt.originErr
+						return nil, tt.originErr
 					}
-					if tt.onOrigin {
-						return "polecat/ember/gt-work+zzz", nil
+					if tt.seatOnRef != "" {
+						return []string{"polecat/" + tt.seatOnRef + "/gt-work+zzz"}, nil
 					}
-					return "", nil
+					return nil, nil
 				},
 			}
 			p := &polecat.Polecat{Name: "ember", State: polecat.StateIdle, ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown")}
@@ -554,8 +574,12 @@ func TestCheckRecoveryOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *testi
 			status := checkRecoveryForPolecatWith(env, db, nil, r, "gastown", "ember", p, false)
 
 			if tt.wantUnk == "" {
-				if asked != "gt-work" {
-					t.Errorf("origin asked about %q, want the issue the seat recorded", asked)
+				wantAsked := "gt-work"
+				if tt.missing {
+					wantAsked = "" // a bead that is gone never reaches origin
+				}
+				if asked != wantAsked {
+					t.Errorf("origin asked about %q, want %q", asked, wantAsked)
 				}
 				if status.GitStateSource != polecat.GitStateSourceLive {
 					t.Errorf("git state = %q %q, want live", status.GitStateSource, status.GitStateReason)
@@ -585,7 +609,7 @@ func TestCheckPolecatSafetyOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *
 		name      string
 		status    string
 		notes     string
-		onOrigin  bool
+		seatOnRef string // seat a generated polecat branch for the issue on origin names
 		showFails bool
 		originErr error
 		want      string // substring of a refusal reason; "" for a safe nuke
@@ -593,7 +617,8 @@ func TestCheckPolecatSafetyOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *
 		{name: "landed_no_branch_on_origin", status: string(beads.StatusClosed), notes: landingNote},
 		{name: "no_changes_close_is_not_a_landing", status: string(beads.StatusClosed), want: "closed with no landing record"},
 		{name: "open_issue_that_landed", status: string(beads.StatusOpen), notes: landingNote, want: "is open"},
-		{name: "branch_for_the_issue_on_origin", status: string(beads.StatusClosed), notes: landingNote, onOrigin: true, want: "still exists on origin"},
+		{name: "branch_for_the_seat_and_issue_on_origin", status: string(beads.StatusClosed), notes: landingNote, seatOnRef: "ember", want: "still exists on origin"},
+		{name: "another_seats_branch_for_the_issue_on_origin", status: string(beads.StatusClosed), notes: landingNote, seatOnRef: "furiosa"},
 		{name: "origin_cannot_be_asked", status: string(beads.StatusClosed), notes: landingNote, originErr: errors.New("forgejo unreachable"), want: "could not ask origin whether a branch for gt-work survived"},
 		{name: "issue_cannot_be_read", status: string(beads.StatusOpen), showFails: true, want: "could not read gt-work for a resume_branch"},
 	}
@@ -631,14 +656,14 @@ func TestCheckPolecatSafetyOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *
 				probe: func(string, string) (polecat.LiveGitState, bool) {
 					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
 				},
-				survivingBranch: func(_, _ string) (string, error) {
+				survivingBranches: func(_, _ string) ([]string, error) {
 					if tt.originErr != nil {
-						return "", tt.originErr
+						return nil, tt.originErr
 					}
-					if tt.onOrigin {
-						return "polecat/ember/gt-work+zzz", nil
+					if tt.seatOnRef != "" {
+						return []string{"polecat/" + tt.seatOnRef + "/gt-work+zzz"}, nil
 					}
-					return "", nil
+					return nil, nil
 				},
 			}
 			get := func(string) (*polecat.Polecat, error) {
@@ -701,7 +726,7 @@ func TestCheckRecoveryReconcilesCleanupOfALandedSandboxSeatWithNoBranch(t *testi
 				probe: func(string, string) (polecat.LiveGitState, bool) {
 					return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
 				},
-				survivingBranch: func(string, string) (string, error) { return "", nil },
+				survivingBranches: func(string, string) ([]string, error) { return nil, nil },
 			}
 			p := &polecat.Polecat{Name: "ember", State: polecat.StateIdle, ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown")}
 

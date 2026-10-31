@@ -137,26 +137,28 @@ func SandboxSeatOriginBranch(fields *beads.AgentFields) (branch, unknownReason s
 // SandboxSeatLandedWithoutBranch answers the lost-work question for a sandbox
 // seat whose agent bead recorded no branch, and so names nothing to ask origin
 // about. Such a seat is finished, and nothing it did is at risk, only when its
-// recorded issue is closed with a landing record and no branch encoding that
-// issue survives on origin (gt-xhnn3).
+// recorded issue is closed with a landing record and no branch named for the
+// seat and encoding that issue survives on origin (gt-xhnn3).
 //
 // It returns "" for that safe case and the fail-closed reason otherwise: an
 // issue that is not closed, an issue closed with no landing record (a
-// no-changes close is not a landing), an issue that cannot be read, an origin
-// that cannot be asked, or a branch for the issue still on origin. Every
-// caller reports a non-empty reason as an unknown git state, which is the
-// verdict this case got before the landed case was recognized.
+// no-changes close is not a landing), a seat name that cannot be established,
+// an origin that cannot be asked, or a branch for the seat and issue still on
+// origin. A nil issue is a bead that no longer exists, which leaves nothing at
+// risk, the answer both callers already give a Show that reported it missing
+// (gt-qq6rg.4). Every caller reports a non-empty reason as an unknown git
+// state, which is the verdict this case got before the landed case was
+// recognized.
 //
-// originBranch reports the most recent generated polecat branch on origin that
-// encodes issueID, "" when there is none. Such a branch is named for the seat
-// that worked the issue; a seat that recorded no branch of its own cannot be
-// matched by name, so any seat's branch for the issue counts, which refuses
-// more seats than the minimum and never fewer (fail closed). The seam itself
-// exists because the manager and check-recovery ask the same question through
-// their own git handles, and the two must reach the same verdict (gt-cu66c).
-func SandboxSeatLandedWithoutBranch(issue *beads.Issue, issueID string, originBranch func(issueID string) (string, error)) string {
+// seatName is the name the seat's branches are generated under
+// (polecat/<seat>/<issue>). originBranches reports every generated polecat
+// branch on origin that encodes issueID, most recently generated first; the
+// rule, not the seam, keeps only the ones named for seatName, so the manager
+// and check-recovery reach the same verdict through their own git handles
+// (gt-cu66c).
+func SandboxSeatLandedWithoutBranch(seatName string, issue *beads.Issue, issueID string, originBranches func(issueID string) ([]string, error)) string {
 	if issue == nil {
-		return sandboxSeatNoBranchReason + ": " + issueID + " could not be read"
+		return "" // the bead is gone: no unfinished work to lose
 	}
 	if beads.IssueStatus(issue.Status) != beads.StatusClosed {
 		status := string(beads.IssueStatus(issue.Status))
@@ -168,12 +170,18 @@ func SandboxSeatLandedWithoutBranch(issue *beads.Issue, issueID string, originBr
 	if _, landed := land.ParseLandingRecord(issue.Notes); !landed {
 		return sandboxSeatNoBranchReason + ": " + issueID + " is closed with no landing record"
 	}
-	survivor, err := originBranch(issueID)
+	seatName = strings.TrimSpace(seatName)
+	if seatName == "" {
+		return sandboxSeatNoBranchReason + ": no seat name to match a branch for " + issueID
+	}
+	branches, err := originBranches(issueID)
 	if err != nil {
 		return fmt.Sprintf("could not ask origin whether a branch for %s survived: %v", issueID, err)
 	}
-	if survivor != "" {
-		return sandboxSeatNoBranchReason + ": " + survivor + " still exists on origin"
+	for _, branch := range branches {
+		if meta, ok := ParseGeneratedBranchName(branch); ok && meta.Polecat == seatName {
+			return sandboxSeatNoBranchReason + ": " + branch + " still exists on origin"
+		}
 	}
 	return ""
 }
@@ -184,7 +192,9 @@ func SandboxSeatLandedWithoutBranch(issue *beads.Issue, issueID string, originBr
 // survives. Nothing is read from the stale host worktree. A bead, remote or
 // recorded branch that cannot be read or found leaves the git state unknown, never
 // lost or clean; a bead that no longer exists leaves nothing at risk (gt-qq6rg.4).
-func (m *Manager) applySandboxLostWorkFacts(facts *WorkstateFacts, fields *beads.AgentFields, sourceHint string) {
+// seatName is the polecat's name, which the branch of a seat that recorded none
+// is matched under (gt-xhnn3).
+func (m *Manager) applySandboxLostWorkFacts(facts *WorkstateFacts, fields *beads.AgentFields, sourceHint, seatName string) {
 	if fields == nil {
 		return
 	}
@@ -217,10 +227,11 @@ func (m *Manager) applySandboxLostWorkFacts(facts *WorkstateFacts, fields *beads
 		case unknownReason != "":
 			// A seat that recorded no branch names nothing to ask origin
 			// about. It is judged by its issue instead: one that landed with
-			// no branch left on origin has nothing at risk, and every other
-			// answer is the refusal this case always got (gt-xhnn3).
-			if reason := SandboxSeatLandedWithoutBranch(issue, workBead, func(issueID string) (string, error) {
-				return survivingBranchForIssue(m.gits, m.rig.Path, issueID)
+			// no branch of its own left on origin has nothing at risk, and
+			// every other answer is the refusal this case always got
+			// (gt-xhnn3).
+			if reason := SandboxSeatLandedWithoutBranch(seatName, issue, workBead, func(issueID string) ([]string, error) {
+				return findSurvivingBranchesForIssue(m.gits, m.rig.Path, issueID)
 			}); reason != "" {
 				unknown(reason)
 				return
