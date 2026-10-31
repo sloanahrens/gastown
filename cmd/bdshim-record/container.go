@@ -169,7 +169,7 @@ func parseBDBuild(line []byte) (bdBuild, error) {
 	}
 	schema, err := strconv.Atoi(string(m[5]))
 	if err != nil {
-		return bdBuild{}, fmt.Errorf("bd version printed the schema level %q, which is not a number", m[5])
+		return bdBuild{}, errors.New("bd version printed a schema level the recorder cannot read as a number")
 	}
 	return bdBuild{release: string(m[1]), build: string(m[2]), commit: string(m[4]), schema: schema}, nil
 }
@@ -185,8 +185,7 @@ func hostVersion() ([]byte, error) {
 	return execHost("bd", []string{"version"})
 }
 
-// execHost runs one bd command on this machine and returns its stdout. A non-zero exit is an error,
-// since the host bd is read only to be compared with the container's.
+// execHost runs one bd command on this machine and returns its stdout.
 func execHost(bin string, args []string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), runLimit)
 	defer cancel()
@@ -196,13 +195,20 @@ func execHost(bin string, args []string) ([]byte, error) {
 	c.Stderr = os.Stderr
 	c.WaitDelay = time.Second
 	err := c.Run()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return nil, fmt.Errorf("%s %s ran past %s", bin, strings.Join(args, " "), runLimit)
+	return hostResult(stdout.Bytes(), err, errors.Is(ctx.Err(), context.DeadlineExceeded))
+}
+
+// hostResult turns how one host bd run ended into its stdout. A run that did not finish, or exited
+// non-zero, is an error, since the host bd is read only to be compared with the container's and a
+// version the recorder could not read is no proof at all.
+func hostResult(stdout []byte, runErr error, timedOut bool) ([]byte, error) {
+	if timedOut {
+		return nil, fmt.Errorf("the host bd ran past %s", runLimit)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", bin, strings.Join(args, " "), err)
+	if runErr != nil {
+		return nil, fmt.Errorf("the host bd: %w", runErr)
 	}
-	return stdout.Bytes(), nil
+	return stdout, nil
 }
 
 // proveBDBuild refuses a container whose bd is not the build the host's bd is: a golden recorded

@@ -167,16 +167,22 @@ func TestProveBDBuildComparesTheBuild(t *testing.T) {
 		host      string
 		container string
 		hostErr   error
+		runErr    error
+		runExit   int
 		want      string // empty: the proof passes
 	}{
-		{"one build, the host's branch label", forkHostVersion, forkContainerVersion, nil, ""},
-		{"one build, no branch label on either", forkContainerVersion, forkContainerVersion, nil, ""},
-		{"another commit", forkHostVersion, "bd version 1.2.2 (688ff7d2: 1111111111) schema<=66\n", nil, "the container's bd is"},
-		{"another release", "bd version 1.2.3 (688ff7d2: master@688ff7d249e9) schema<=66\n", forkContainerVersion, nil, "the container's bd is"},
-		{"another build id", "bd version 1.2.2 (aaaaaaa: master@688ff7d249e9) schema<=66\n", forkContainerVersion, nil, "the container's bd is"},
-		{"another schema level", "bd version 1.2.2 (688ff7d2: master@688ff7d249e9) schema<=67\n", forkContainerVersion, nil, "the container's bd is"},
-		{"a line the recorder cannot read", forkHostVersion, "bd: no version here\n", nil, "the container's bd"},
-		{"a host bd it cannot read", "", "", errors.New("bd version: not found"), "read the version of the host bd"},
+		{"one build, the host's branch label", forkHostVersion, forkContainerVersion, nil, nil, 0, ""},
+		{"one build, no branch label on either", forkContainerVersion, forkContainerVersion, nil, nil, 0, ""},
+		{"another commit", forkHostVersion, "bd version 1.2.2 (688ff7d2: 1111111111) schema<=66\n", nil, nil, 0, "the container's bd is"},
+		{"another release", "bd version 1.2.3 (688ff7d2: master@688ff7d249e9) schema<=66\n", forkContainerVersion, nil, nil, 0, "the container's bd is"},
+		{"another build id", "bd version 1.2.2 (aaaaaaa: master@688ff7d249e9) schema<=66\n", forkContainerVersion, nil, nil, 0, "the container's bd is"},
+		{"another schema level", "bd version 1.2.2 (688ff7d2: master@688ff7d249e9) schema<=67\n", forkContainerVersion, nil, nil, 0, "the container's bd is"},
+		{"a line the recorder cannot read", forkHostVersion, "bd: no version here\n", nil, nil, 0, "the container's bd"},
+		{"a schema level that is not a number", forkHostVersion, "bd version 1.2.2 (688ff7d2: 688ff7d249e9) schema<=99999999999999999999\n", nil, nil, 0, "schema level"},
+		{"a host line the recorder cannot read", "bd: no version here\n", forkContainerVersion, nil, nil, 0, "the host bd"},
+		{"a host bd it cannot read", "", "", errors.New("bd version: not found"), nil, 0, "read the version of the host bd"},
+		{"a container run that never started", forkHostVersion, "", nil, errors.New("exec: docker: not found"), 0, "run bd version in the container"},
+		{"a container version that exited non-zero", forkHostVersion, forkContainerVersion, nil, nil, 2, "exited 2"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -184,7 +190,7 @@ func TestProveBDBuildComparesTheBuild(t *testing.T) {
 			child := testChild(okRun, atWork)
 			child.HostVersion = func() ([]byte, error) { return []byte(tc.host), tc.hostErr }
 			child.Run = func(string, []string) ([]byte, int, error) {
-				return []byte(tc.container), 0, nil
+				return []byte(tc.container), tc.runExit, tc.runErr
 			}
 			err := proveBDBuild(child)
 			if tc.want == "" {
@@ -195,6 +201,39 @@ func TestProveBDBuildComparesTheBuild(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("proveBDBuild over %s = %v, want an error naming %q", tc.name, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestHostResultKeepsAStdoutAndRefusesARunThatNeverFinished: the host bd's answer is the build the
+// container's is compared with, so a run that timed out or never started is an error rather than an
+// empty version (gt-p85pw.117).
+func TestHostResultKeepsAStdoutAndRefusesARunThatNeverFinished(t *testing.T) {
+	t.Parallel()
+	line := []byte(forkHostVersion)
+	tests := []struct {
+		name     string
+		runErr   error
+		timedOut bool
+		wantErr  string
+	}{
+		{"ran to exit 0", nil, false, ""},
+		{"ran past the limit", nil, true, "ran past"},
+		{"never started", errors.New("exec: bd: not found"), false, "the host bd:"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := hostResult(line, tc.runErr, tc.timedOut)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("hostResult(%s) = %v, want an error naming %q", tc.name, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || string(got) != string(line) {
+				t.Errorf("hostResult(%s) = %q, %v, want bd's line", tc.name, got, err)
 			}
 		})
 	}

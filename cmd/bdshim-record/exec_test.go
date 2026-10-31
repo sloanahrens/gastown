@@ -552,6 +552,48 @@ func TestProvisionFixtureFillsTheCopyFromARelativeFixture(t *testing.T) {
 	}
 }
 
+// TestImportFixtureReportsAFixtureTheCopyCannotCarry: the fixture reaches bd through a copy in the
+// mounted directory, so a fixture the recorder cannot read, or a copy it cannot write, fails the
+// import instead of running bd over a database nothing fills (gt-p85pw.117).
+func TestImportFixtureReportsAFixtureTheCopyCannotCarry(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		fixture func(t *testing.T) string
+		blocked bool // the copy's own fixture path is a directory, so the write fails
+	}{
+		{"a fixture that is not there", func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "missing.jsonl")
+		}, false},
+		{"a fixture that cannot be read", func(t *testing.T) string {
+			// A directory opens as a file but fails the first read, on Linux and macOS alike.
+			return t.TempDir()
+		}, false},
+		{"a copy that cannot be written", func(t *testing.T) string {
+			return writeFixture(t, fixtureIDs...)
+		}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if tc.blocked {
+				if err := os.Mkdir(filepath.Join(dir, fixtureInCopy), 0o755); err != nil {
+					t.Fatalf("make the copy's fixture path a directory: %v", err)
+				}
+			}
+			bd := &fakeBD{out: okBD}
+			err := importFixture(bd.Run, dir, tc.fixture(t))
+			if err == nil || !strings.Contains(err.Error(), "put the fixture") {
+				t.Fatalf("importFixture over %s = %v, want an error naming the copy", tc.name, err)
+			}
+			if len(bd.args) != 0 {
+				t.Errorf("bd ran %v, want no import over a fixture the copy never got", bd.args)
+			}
+		})
+	}
+}
+
 // TestCaptureGivesEachMutatingRowItsOwnDatabase: with the provisioner in place, the read rows share
 // one copy and each mutating row gets a database of its own.
 func TestCaptureGivesEachMutatingRowItsOwnDatabase(t *testing.T) {
