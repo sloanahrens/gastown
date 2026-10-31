@@ -225,8 +225,11 @@ gt daemon status
 ```
 
 Expected: a line `Supervised: container gt-scratch-daemon-1 running <image>`,
-where the image is `gt-daemon:<rev>` (observed). This is green condition 1. If it
-names the live container, stop: the settings were read from the wrong town.
+where the image is `gt-daemon:<rev>` (observed). This is green condition 1.
+
+If the line names the live container, stop: the settings were read from the wrong
+town.
+
 Observed, and a defect until gt-i2z9l lands: on the host, `gt daemon status`
 also prints `Daemon is not running` and exits 3 for a running container daemon,
 because it decides by the `daemon.lock` flock and a lock taken inside the
@@ -826,7 +829,10 @@ refusal and stop; do not work around it by pushing to `main`.
 
 Run these after Step 9, before Teardown, and compare each with what was
 recorded in [Before you start (L2)](#before-you-start-l2). Every one reads and
-writes nothing; none runs a `gt` command in the live town.
+writes nothing in the live town; none runs a `gt` command there. First close the
+window by writing the end marker next to the start marker (it is outside the
+live town): `touch <scratch-parent>/.l2-end`. The window is the time between
+`.l2-start` (Before you start) and `.l2-end`.
 
 - [ ] The live Forgejo's containers are the same, with the same status.
       `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
@@ -847,7 +853,7 @@ writes nothing; none runs a `gt` command in the live town.
 - [ ] The live town's configuration was not written during L2. This prints
       nothing, where `<scratch-parent>/.l2-start` is the marker from Before you
       start: `find <live-town>/settings <live-town>/mayor -maxdepth 2 -type f
-      -newer <scratch-parent>/.l2-start`. It looks only at the configuration
+      -newer <scratch-parent>/.l2-start ! -newer <scratch-parent>/.l2-end`. It looks only at the configuration
       directories, because the live daemon writes `daemon/`, its logs and
       `.runtime` itself, and a find over the whole town is slow and proves
       nothing about them.
@@ -859,15 +865,19 @@ from an L2 effect with these two commands; run them, keep the output with the
 rest of the evidence, and record which box fired and why:
 
 ```
-for b in $(find <live-town>/settings -maxdepth 1 -name 'config.json.bak-*' -newer <scratch-parent>/.l2-start | sort); do
+for b in $(find <live-town>/settings -maxdepth 1 -name 'config.json.bak-*' -newer <scratch-parent>/.l2-start ! -newer <scratch-parent>/.l2-end | sort); do
   diff <(jq -S . "$b") <(jq -S . <live-town>/settings/config.json); done | grep -i -E 'landing_worker|forgejo|token'
-grep -a 'Daemon owner' <live-town>/daemon/daemon.log | sed 's/^[^ ]* [^ ]* //' | sort -u
+s=$(date -r <scratch-parent>/.l2-start '+%Y/%m/%d %H:%M:%S'); e=$(date -r <scratch-parent>/.l2-end '+%Y/%m/%d %H:%M:%S')
+awk -v s="$s" -v e="$e" '$1" "$2 >= s && $1" "$2 <= e' <live-town>/daemon/daemon.log | grep -a 'Daemon owner' | sed 's/^[^ ]* [^ ]* //' | sort -u
 ```
 
 A pass is: the first command prints nothing (no changed key mentions the landing
 worker, a Forgejo or a token, so the edits are not L2's), and the second prints
-only `Daemon owner: launchd "com.gastown.daemon"` (every start since the window
-opened was the live supervisor's, none a container). Any other output means the
+only `Daemon owner: launchd "com.gastown.daemon"` (every start inside the window
+was the live supervisor's, none a container). The same two commands, without the window
+bounds, were run once, read-only, against the live town after the L2 run and
+printed exactly that; the window-scoped form was checked for syntax only. The
+output was observed once, not verified over time. Any other output means the
 live town may have been touched: take the steps below.
 
 L2 is green when Steps 1 to 9 passed as described and every box above is
@@ -923,12 +933,13 @@ Dolt serves (gt-i2ekc); the scratch Dolt accepts root from the daemon's containe
 Checks that the live town was not touched: the live containers, named volumes,
 listeners on 3000, 2222 and 3307, and `~/.config/gt/forgejo-*.env` matched the
 recorded baseline. **Two boxes read different from the baseline: the live
-daemon's state and the configuration `find`.** The cause was the live town's own
-operation, not L2: pool and patrol edits to `settings/config.json` (their
-backups are the files the `find` printed) and installs that restarted the live
-daemon under launchd. On a quiet town both boxes hold. The note under
-[Checks that the live town was not touched](#checks-that-the-live-town-was-not-touched)
-gives the commands that tell the two causes apart. The run's evidence (landing
+daemon's state and the configuration `find`.** What was seen: the `find` printed
+backups of `settings/config.json`; the diff of those backups showed the pool and
+patrol settings changed; and the live daemon was restarted twice by launchd, at
+times that match installs. That is consistent with the live town's own
+operation and not with L2, but it is not proven by these readings. The commands
+under [Checks that the live town was not touched](#checks-that-the-live-town-was-not-touched)
+are the way to prove it. On a quiet town both boxes hold. The run's evidence (landing
 log, scratch commits, the container's credential config, the baseline and the
 readings) is recorded on the program bead gt-qpeei.
 
