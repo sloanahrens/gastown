@@ -122,6 +122,28 @@ func (r *mainScriptRun) exited(timeout time.Duration) (err error, ok bool) {
 	}
 }
 
+// scriptExitSlack is how long before the test deadline wait gives up, so its
+// diagnostic prints before go test's own timeout panic fires at that deadline.
+const scriptExitSlack = time.Second
+
+// wait blocks until the script exits, bounded by the test's own deadline (the go
+// test -timeout) rather than a duration of its own: a loaded host cannot fail it
+// by the clock, and a script that never exits fails the test at that deadline.
+func (r *mainScriptRun) wait() error {
+	r.t.Helper()
+	deadline, ok := r.t.Deadline()
+	if !ok {
+		r.t.Fatal("waiting for the script needs a test deadline: run with go test -timeout")
+	}
+	select {
+	case err := <-r.done:
+		return err
+	case <-time.After(time.Until(deadline.Add(-scriptExitSlack))):
+		r.t.Fatal("the script did not exit before the test deadline (go test -timeout)")
+		return nil
+	}
+}
+
 func TestIntegrationMainScriptExitsWhenTheAgentSessionIsKilled(t *testing.T) {
 	t.Parallel()
 	r := startMainScript(t, "gt-agent", "30")
@@ -135,8 +157,8 @@ func TestIntegrationMainScriptExitsWhenTheAgentSessionIsKilled(t *testing.T) {
 	if err := r.tmux("kill-session", "-t", "=gt-agent"); err != nil {
 		t.Fatal(err)
 	}
-	if err, ok := r.exited(15 * time.Second); !ok || err != nil {
-		t.Fatalf("after the session was killed: exited = %v, err = %v; want exit 0", ok, err)
+	if err := r.wait(); err != nil {
+		t.Fatalf("after the session was killed: err = %v; want exit 0", err)
 	}
 }
 
@@ -150,8 +172,8 @@ func TestIntegrationMainScriptExitsWhenTheAgentProcessEnds(t *testing.T) {
 	if err := r.tmux("set-option", "-w", "-t", "gt-agent", "remain-on-exit", "on"); err != nil {
 		t.Fatal(err)
 	}
-	if err, ok := r.exited(15 * time.Second); !ok || err != nil {
-		t.Fatalf("after the agent process ended with remain-on-exit: exited = %v, err = %v; want exit 0", ok, err)
+	if err := r.wait(); err != nil {
+		t.Fatalf("after the agent process ended with remain-on-exit: err = %v; want exit 0", err)
 	}
 }
 
@@ -178,8 +200,8 @@ func TestIntegrationMainScriptGivesUpWhenTheSessionNeverAppears(t *testing.T) {
 	start := time.Now()
 	r := startMainScript(t, "gt-agent", "2")
 	r.waitServer()
-	if err, ok := r.exited(15 * time.Second); !ok || err == nil {
-		t.Fatalf("session never started: exited = %v, err = %v; want a nonzero exit", ok, err)
+	if err := r.wait(); err == nil {
+		t.Fatal("session never started: exit = nil; want a nonzero exit")
 	}
 	if waited := time.Since(start); waited < 1500*time.Millisecond {
 		t.Fatalf("the script gave up after %s, before its 2 s wait: it failed early instead of waiting", waited)
@@ -204,9 +226,8 @@ func TestIntegrationMainScriptExitsOnlyAfterTmuxStaysUnreachable(t *testing.T) {
 	if err := r.tmux("kill-server"); err != nil {
 		t.Fatal(err)
 	}
-	err, ok := r.exited(10 * time.Second)
-	if !ok || err != nil {
-		t.Fatalf("with tmux unreachable: exited = %v, err = %v; want exit 0 after the unreachable-poll limit", ok, err)
+	if err := r.wait(); err != nil {
+		t.Fatalf("with tmux unreachable: err = %v; want exit 0 after the unreachable-poll limit", err)
 	}
 	// Three positive "gone" polls take 0.6 s; ten unreachable polls take 2 s. An
 	// unreachable tmux that counted as gone would have ended it well before 1.2 s.
