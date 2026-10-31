@@ -1,5 +1,5 @@
-// Package membership is the admin plane's organisation and membership model
-// (plan row O1, gt-hqmhf): the organisations a hosted workspace belongs to, the
+// Package membership is the admin plane's organization and membership model
+// (plan row O1, gt-hqmhf): the organizations a hosted workspace belongs to, the
 // people in them, and which workspaces each person owns.
 //
 // A member is keyed on the Google subject, never on the email. The email is
@@ -21,11 +21,11 @@ import (
 	"github.com/steveyegge/gastown/internal/adminplane/registry"
 )
 
-// Role is what a member may do in an organisation: RoleOwner administers it and
+// Role is what a member may do in an organization: RoleOwner administers it and
 // RoleMember takes part in it.
 type Role string
 
-// The two roles. Every organisation keeps at least one RoleOwner.
+// The two roles. Every organization keeps at least one RoleOwner.
 const (
 	RoleOwner  Role = "owner"
 	RoleMember Role = "member"
@@ -37,14 +37,14 @@ func (r Role) known() bool {
 	return r == RoleOwner || r == RoleMember
 }
 
-// Org is an organisation: the tenant whose workspaces and membership are
+// Org is an organization: the tenant whose workspaces and membership are
 // managed together.
 type Org struct {
 	ID   string
 	Name string
 }
 
-// Member is one person's place in an organisation. Sub is the Google subject
+// Member is one person's place in an organization. Sub is the Google subject
 // and the key; Email is stored for display and identifies nobody.
 type Member struct {
 	Sub   string
@@ -53,22 +53,22 @@ type Member struct {
 }
 
 var (
-	// ErrEmptyOrgID refuses an organisation with no id, which nothing could name.
-	ErrEmptyOrgID = errors.New("membership: an organisation needs an id")
-	// ErrOrgExists refuses a second organisation with an id already stored.
-	ErrOrgExists = errors.New("membership: organisation already exists")
-	// ErrNoOrg reports a read or change naming an organisation the store does not hold.
-	ErrNoOrg = errors.New("membership: unknown organisation")
+	// ErrEmptyOrgID refuses an organization with no id, which nothing could name.
+	ErrEmptyOrgID = errors.New("membership: an organization needs an id")
+	// ErrOrgExists refuses a second organization with an id already stored.
+	ErrOrgExists = errors.New("membership: organization already exists")
+	// ErrNoOrg reports a read or change naming an organization the store does not hold.
+	ErrNoOrg = errors.New("membership: unknown organization")
 	// ErrEmptySub refuses a member with no subject, since the subject is the key.
 	ErrEmptySub = errors.New("membership: a member needs a sub")
-	// ErrMemberExists refuses a second membership for one subject in one organisation.
+	// ErrMemberExists refuses a second membership for one subject in one organization.
 	ErrMemberExists = errors.New("membership: that sub is already a member")
 	// ErrNoMember reports a change naming a subject that is not a member.
 	ErrNoMember = errors.New("membership: unknown member")
 	// ErrUnknownRole refuses a role this package does not define.
 	ErrUnknownRole = errors.New("membership: unknown role")
-	// ErrLastOwner refuses removing or demoting an organisation's last owner.
-	ErrLastOwner = errors.New("membership: an organisation keeps at least one owner")
+	// ErrLastOwner refuses removing or demoting an organization's last owner.
+	ErrLastOwner = errors.New("membership: an organization keeps at least one owner")
 	// ErrWorkspaceOwner refuses a change that would leave a workspace without
 	// the owner-role member it names as its owner.
 	ErrWorkspaceOwner = errors.New("membership: a workspace keeps the owner it names")
@@ -78,7 +78,7 @@ var (
 	ErrWorkspaceExists = errors.New("membership: workspace already exists")
 )
 
-// Store is where organisations, their members and their workspaces live. The
+// Store is where organizations, their members and their workspaces live. The
 // admin plane's implementation is its Postgres tables (a later bead); Memory is
 // the in-memory fake.
 //
@@ -89,10 +89,10 @@ var (
 type Store interface {
 	// AddOrg stores o. An error means it was not stored.
 	AddOrg(ctx context.Context, o Org) error
-	// AddMember adds m to the organisation orgID. An error means it was not added.
+	// AddMember adds m to the organization orgID. An error means it was not added.
 	AddMember(ctx context.Context, orgID string, m Member) error
-	// MembersOf returns the organisation's members ordered by sub. A missing
-	// organisation is an error, never an empty list.
+	// MembersOf returns the organization's members ordered by sub. A missing
+	// organization is an error, never an empty list.
 	MembersOf(ctx context.Context, orgID string) ([]Member, error)
 	// WorkspacesOf returns the workspaces owned by sub ordered by id. A subject
 	// that is not a member is an error, never an empty list.
@@ -101,15 +101,15 @@ type Store interface {
 	// sub. The subject, and so the membership, does not change.
 	SetEmail(ctx context.Context, sub, email string) error
 	// SetRole changes the role of the member sub in orgID. A change that would
-	// take the organisation's last owner, or the owner a workspace names, is an
+	// take the organization's last owner, or the owner a workspace names, is an
 	// error and leaves the role as it was.
 	SetRole(ctx context.Context, orgID, sub string, role Role) error
 	// RemoveMember removes sub from orgID. A change that would take the
-	// organisation's last owner, or the owner a workspace names, is an error and
+	// organization's last owner, or the owner a workspace names, is an error and
 	// leaves the member in place.
 	RemoveMember(ctx context.Context, orgID, sub string) error
 	// AddWorkspace stores w. Its owner must be an owner-role member of the
-	// organisation it names, so a stored workspace always has exactly one owner.
+	// organization it names, so a stored workspace always has exactly one owner.
 	AddWorkspace(ctx context.Context, w registry.Workspace) error
 }
 
@@ -118,7 +118,7 @@ type Store interface {
 // use.
 type Memory struct {
 	orgs    map[string]Org
-	members map[string]map[string]Member // organisation id -> sub -> member
+	members map[string]map[string]Member // organization id -> sub -> member
 	spaces  map[string]registry.Workspace
 }
 
@@ -159,7 +159,7 @@ func (m *Memory) AddOrg(_ context.Context, o Org) error {
 	return nil
 }
 
-// AddMember adds m to the organisation orgID.
+// AddMember adds m to the organization orgID.
 func (m *Memory) AddMember(_ context.Context, orgID string, member Member) error {
 	bySub, ok := m.members[orgID]
 	if !ok {
@@ -178,7 +178,7 @@ func (m *Memory) AddMember(_ context.Context, orgID string, member Member) error
 	return nil
 }
 
-// MembersOf returns the organisation's members ordered by sub.
+// MembersOf returns the organization's members ordered by sub.
 func (m *Memory) MembersOf(_ context.Context, orgID string) ([]Member, error) {
 	bySub, ok := m.members[orgID]
 	if !ok {
@@ -210,7 +210,7 @@ func (m *Memory) WorkspacesOf(_ context.Context, sub string) ([]registry.Workspa
 	return out, nil
 }
 
-// isMember reports whether sub holds a membership in any organisation, which is
+// isMember reports whether sub holds a membership in any organization, which is
 // what makes WorkspacesOf's empty answer a real answer rather than a typo.
 func (m *Memory) isMember(sub string) bool {
 	for _, bySub := range m.members {
@@ -284,7 +284,7 @@ func (m *Memory) RemoveMember(_ context.Context, orgID, sub string) error {
 	return nil
 }
 
-// refuseLossOfOwner is the owner rule for one departing owner: the organisation
+// refuseLossOfOwner is the owner rule for one departing owner: the organization
 // keeps at least one owner, and a workspace keeps the owner it names.
 func (m *Memory) refuseLossOfOwner(orgID, sub string) error {
 	owners := 0
@@ -318,7 +318,7 @@ func (m *Memory) AddWorkspace(_ context.Context, w registry.Workspace) error {
 	}
 	owner, ok := bySub[w.OwnerSub]
 	if !ok || owner.Role != RoleOwner {
-		return fmt.Errorf("%w: workspace %q names %q, who is not an owner-role member of organisation %q",
+		return fmt.Errorf("%w: workspace %q names %q, who is not an owner-role member of organization %q",
 			ErrWorkspaceOwner, w.ID, w.OwnerSub, w.OrgID)
 	}
 	m.spaces[w.ID] = w

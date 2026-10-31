@@ -12,7 +12,7 @@ import (
 // work to abandon.
 var ctx = context.Background()
 
-// newStore returns a Memory holding organisation "org-1" and the given members.
+// newStore returns a Memory holding organization "org-1" and the given members.
 func newStore(t *testing.T, members ...Member) *Memory {
 	t.Helper()
 	m := NewMemory()
@@ -133,7 +133,7 @@ func TestSameEmailDifferentSubAreTwoMembers(t *testing.T) {
 	}
 }
 
-func TestSetEmailUpdatesEveryOrganisation(t *testing.T) {
+func TestSetEmailUpdatesEveryOrganization(t *testing.T) {
 	t.Parallel()
 	m := newStore(t, Member{Sub: "sub-1", Email: "old@example.com", Role: RoleOwner})
 	if err := m.AddOrg(ctx, Org{ID: "org-2", Name: "Other"}); err != nil {
@@ -180,7 +180,7 @@ func TestAddMemberRefusals(t *testing.T) {
 		member Member
 		want   error
 	}{
-		{"unknown organisation", "org-2", Member{Sub: "sub-2", Role: RoleMember}, ErrNoOrg},
+		{"unknown organization", "org-2", Member{Sub: "sub-2", Role: RoleMember}, ErrNoOrg},
 		{"no sub", "org-1", Member{Email: "a@example.com", Role: RoleMember}, ErrEmptySub},
 		{"no role", "org-1", Member{Sub: "sub-2"}, ErrUnknownRole},
 		{"unknown role", "org-1", Member{Sub: "sub-2", Role: "admin"}, ErrUnknownRole},
@@ -252,7 +252,7 @@ func TestRemoveMemberRefusals(t *testing.T) {
 		sub   string
 		want  error
 	}{
-		{"unknown organisation", "org-2", "sub-1", ErrNoOrg},
+		{"unknown organization", "org-2", "sub-1", ErrNoOrg},
 		{"unknown member", "org-1", "sub-9", ErrNoMember},
 	}
 	for _, tc := range tests {
@@ -315,7 +315,7 @@ func TestSetRoleRefusals(t *testing.T) {
 		role  Role
 		want  error
 	}{
-		{"unknown organisation", "org-2", "sub-1", RoleMember, ErrNoOrg},
+		{"unknown organization", "org-2", "sub-1", RoleMember, ErrNoOrg},
 		{"unknown role", "org-1", "sub-1", "admin", ErrUnknownRole},
 		{"unknown member", "org-1", "sub-9", RoleMember, ErrNoMember},
 	}
@@ -334,7 +334,7 @@ func TestSetRoleRefusals(t *testing.T) {
 }
 
 // TestDemotingAnOwnerAWorkspaceNamesIsRefused holds a workspace to the owner it
-// names even where the organisation keeps another owner.
+// names even where the organization keeps another owner.
 func TestDemotingAnOwnerAWorkspaceNamesIsRefused(t *testing.T) {
 	t.Parallel()
 	m := newStore(t,
@@ -434,7 +434,7 @@ func TestAddWorkspaceRefusals(t *testing.T) {
 			want:  ErrWorkspaceExists,
 		},
 		{
-			name:  "unknown organisation",
+			name:  "unknown organization",
 			store: func(t *testing.T) *Memory { return newStore(t, Member{Sub: "sub-1", Role: RoleOwner}) },
 			space: registry.Workspace{ID: "ws-1", OrgID: "org-2", OwnerSub: "sub-1"},
 			want:  ErrNoOrg,
