@@ -2221,6 +2221,16 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 			entry.Line = fmt.Sprintf("%s: sling deferred, %v after %d attempts: %s", id, specdispatch.ErrRetriesExhausted, attempts, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 		}
+		// A bond that could not take the town bond lock within its wait never
+		// reached bd, so this is not Dolt contention and no retry of it can
+		// duplicate a write (gt-ye21). It is a deferral all the same: the queue
+		// that outlasted the bound is the town's load, not the bead's, and the
+		// sling gave the respawn it charged back (gt-8d38p). The next tick slings
+		// the bead again once the bond queue drains.
+		if errors.Is(err, ErrBondLockTimeout) {
+			entry.Line = fmt.Sprintf("%s: sling deferred, the town bond lock did not free: %s", id, firstErrLine(err))
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+		}
 		// A failed sling is not known to have spawned nothing: a hook or a
 		// session start can fail after it took effect, and the rollback is
 		// best-effort. Its seat stays charged for this tick (gt-pto2f).

@@ -906,6 +906,13 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		if slingCommitted || r.opts.dryRun {
 			return
 		}
+		// A bond that lost the town lock never reached bd: that is the town's
+		// load, not a death of the bead, and the dispatcher defers it instead of
+		// failing it (gt-8d38p). The count this spawn recorded goes back with
+		// the deferral, as an image-drift refusal's does, so a town that queues
+		// bonds past the bound does not spend the bead's respawn budget on its
+		// own queue.
+		newPolecatInfo.giveBackBondLockRespawn(retErr)
 		reason := rollbackReason
 		if reason == "" {
 			reason = "Sling did not complete"
