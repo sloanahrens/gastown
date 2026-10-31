@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/workspace"
+	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
 // Event represents an activity event in Gas Town.
@@ -23,7 +24,14 @@ type Event struct {
 	Actor      string                 `json:"actor"`
 	Payload    map[string]interface{} `json:"payload,omitempty"`
 	Visibility string                 `json:"visibility"`
+	// Workspace is the workspace id the town maps the event's rig to, omitted
+	// on lines written before the field existed.
+	Workspace string `json:"workspace,omitempty"`
 }
+
+// WorkspaceUnresolved is the workspace id stamped on an event whose town
+// workspace map cannot be read, so the event is still written (gt-91ty4).
+const WorkspaceUnresolved = "unresolved"
 
 // Visibility levels for events.
 const (
@@ -268,6 +276,8 @@ func writeTo(townRoot string, event Event) error {
 		return nil
 	}
 
+	event.Workspace = workspaceOf(townRoot, event.Payload)
+
 	eventsPath := filepath.Join(townRoot, EventsFile)
 
 	// Marshal event to JSON
@@ -299,6 +309,31 @@ func writeTo(townRoot string, event Event) error {
 	}
 
 	return nil
+}
+
+// workspaceOf is the workspace id an event written under townRoot carries: the
+// payload's "rig" mapped through internal/workspaceid, or the town default
+// when the payload names none. An unreadable or malformed map, and a rig that
+// is present but not a usable prefix, are WorkspaceUnresolved rather than a
+// dropped event or a guessed id (gt-91ty4).
+func workspaceOf(townRoot string, payload map[string]interface{}) string {
+	m, err := workspaceid.Load(townRoot)
+	if err != nil {
+		return WorkspaceUnresolved
+	}
+	rig, present := payload["rig"]
+	if !present {
+		return m.Default()
+	}
+	prefix, ok := rig.(string)
+	if !ok || prefix == "" {
+		return WorkspaceUnresolved
+	}
+	id, err := m.For(prefix)
+	if err != nil {
+		return WorkspaceUnresolved
+	}
+	return id
 }
 
 // Payload helpers for common event structures.

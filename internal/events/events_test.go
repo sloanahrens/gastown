@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
 // TestLogFeedTo_WritesToExplicitTownRoot verifies that the *To variants write
@@ -114,6 +116,146 @@ func TestLog_NoTownIsNoop(t *testing.T) {
 	}
 	if err := writeVia(ev, false, noEnv, func() (string, error) { return "", errors.New("getwd failed") }); err != nil {
 		t.Errorf("resolver error: %v", err)
+	}
+}
+
+// writeWorkspaceMap puts a workspace map where workspaceid.Load reads it under
+// townRoot.
+func writeWorkspaceMap(t *testing.T, townRoot, body string) {
+	t.Helper()
+	path := filepath.Join(townRoot, workspaceid.File)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("creating settings dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatalf("writing %s: %v", workspaceid.File, err)
+	}
+}
+
+// TestEventCarriesWorkspace covers plan row M2's resolution: an event whose
+// payload names a rig carries that rig's mapped workspace id, and one that
+// names no rig carries the town's default.
+func TestEventCarriesWorkspace(t *testing.T) {
+	t.Parallel()
+
+	t.Run("payload rig is mapped", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		writeWorkspaceMap(t, townRoot, `{"default":"town-default","rigs":{"fr":"fr-test"}}`)
+		if err := LogFeedTo(townRoot, TypeBoot, "fr/witness", BootPayload("fr", []string{"witness"})); err != nil {
+			t.Fatalf("LogFeedTo: %v", err)
+		}
+		assertSingleEventWorkspace(t, townRoot, "fr-test")
+	})
+
+	t.Run("no payload rig is the default", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		writeWorkspaceMap(t, townRoot, `{"default":"town-default","rigs":{"fr":"fr-test"}}`)
+		if err := LogFeedTo(townRoot, TypeDone, "gastown/polecats/shale", DonePayload("gt-1", "polecat/shale/gt-1")); err != nil {
+			t.Fatalf("LogFeedTo: %v", err)
+		}
+		assertSingleEventWorkspace(t, townRoot, "town-default")
+	})
+
+	t.Run("town without a map uses customer zero", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		if err := LogFeedTo(townRoot, TypeDone, "gastown/polecats/shale", DonePayload("gt-1", "polecat/shale/gt-1")); err != nil {
+			t.Fatalf("LogFeedTo: %v", err)
+		}
+		assertSingleEventWorkspace(t, townRoot, workspaceid.CustomerZero)
+	})
+}
+
+// TestEventUnreadableMappingIsUnresolved pins the best-effort contract: a
+// mapping file that is malformed or cannot be read still writes the event,
+// stamped WorkspaceUnresolved. Dropping the event would lose the feed record
+// M2 exists to attach a workspace id to.
+func TestEventUnreadableMappingIsUnresolved(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(t *testing.T, townRoot string){
+		"malformed": func(t *testing.T, townRoot string) {
+			writeWorkspaceMap(t, townRoot, `{"default":`)
+		},
+		"unreadable": func(t *testing.T, townRoot string) {
+			// A directory where the file belongs is present but cannot be
+			// read, so it must not pass as an absent file.
+			path := filepath.Join(townRoot, workspaceid.File)
+			if err := os.MkdirAll(path, 0755); err != nil {
+				t.Fatalf("mkdir %s: %v", workspaceid.File, err)
+			}
+		},
+	}
+	for name, stage := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			stage(t, townRoot)
+			if err := LogFeedTo(townRoot, TypeBoot, "fr/witness", BootPayload("fr", nil)); err != nil {
+				t.Fatalf("LogFeedTo: %v", err)
+			}
+			assertSingleEventWorkspace(t, townRoot, WorkspaceUnresolved)
+		})
+	}
+}
+
+// TestEventBadRigIsUnresolved covers a "rig" that is present but is not a
+// prefix the map can answer: an empty string or a non-string value must read
+// as unresolved, not as the default or as the rig's own text.
+func TestEventBadRigIsUnresolved(t *testing.T) {
+	t.Parallel()
+	for name, rig := range map[string]interface{}{
+		"empty string": "",
+		"not a string": 42,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			writeWorkspaceMap(t, townRoot, `{"default":"town-default","rigs":{}}`)
+			if err := LogFeedTo(townRoot, TypeBoot, "fr/witness", map[string]interface{}{"rig": rig}); err != nil {
+				t.Fatalf("LogFeedTo: %v", err)
+			}
+			assertSingleEventWorkspace(t, townRoot, WorkspaceUnresolved)
+		})
+	}
+}
+
+// TestReadOldLinesWithoutWorkspace covers the events log before M2: a line
+// with no workspace field still parses, as an empty Workspace rather than a
+// skipped line or an error.
+func TestReadOldLinesWithoutWorkspace(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	line := `{"ts":"2026-10-31T00:00:00Z","source":"gt","type":"sling","actor":"gt","visibility":"feed"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, EventsFile), []byte(line), 0644); err != nil {
+		t.Fatalf("writing events file: %v", err)
+	}
+	got, err := Read(townRoot)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Read returned %d events, want 1", len(got))
+	}
+	if got[0].Workspace != "" {
+		t.Errorf("workspace = %q, want empty for a line written without the field", got[0].Workspace)
+	}
+}
+
+// assertSingleEventWorkspace reads the town's log through the production
+// reader and checks the one event it holds carries want.
+func assertSingleEventWorkspace(t *testing.T, townRoot, want string) {
+	t.Helper()
+	got, err := Read(townRoot)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Read returned %d events, want 1", len(got))
+	}
+	if got[0].Workspace != want {
+		t.Errorf("workspace = %q, want %q", got[0].Workspace, want)
 	}
 }
 
