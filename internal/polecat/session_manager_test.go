@@ -745,6 +745,38 @@ func TestLaunchSizesTheSeatFromThePool(t *testing.T) {
 	}
 }
 
+// The production pool read takes the polecat_pool block from the town
+// settings, and a file it cannot parse is an error and not an empty pool
+// (gt-3ueid): an empty pool would hand every seat the default -p.
+func TestLaunchSeatPoolReadsTownSettings(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	path := config.TownSettingsPath(town)
+	cpus := 12
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{CPUs: &cpus, Seats: map[string]config.SeatConfig{"seat-a": {Cap: 2}}}
+	if err := config.SaveTownSettings(path, ts); err != nil {
+		t.Fatal(err)
+	}
+
+	var m SessionManager // nil seatPool reads the town settings
+	pool, err := m.launchSeatPool(town)
+	if err != nil {
+		t.Fatalf("launchSeatPool: %v", err)
+	}
+	if pool.GetCPUs() != cpus || pool.SeatTotal() != 2 {
+		t.Errorf("pool = %d cpus over %d seats, want %d over 2", pool.GetCPUs(), pool.SeatTotal(), cpus)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"type":"town-settings",`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.launchSeatPool(town); err == nil {
+		t.Fatal("a settings file that does not parse must be refused, not read as an empty pool")
+	}
+}
+
 // A pool that will not load refuses the launch before a session exists,
 // rather than starting the seat on the default -p the operator's cpus was
 // there to lower (gt-3ueid).
