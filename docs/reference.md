@@ -2099,10 +2099,18 @@ The labels come from the bead's `LANDING RECORD` note and the overrun guard's
 - `blocked_on_environment` true when the overrun record charged gate time seen
   at or after the nudge (`progress:gate-wait`). Network waits are not recorded,
   so no rule labels them.
+- `looping` true when the overrun guard stopped the seat at or after the nudge
+  and the stop was not charged to gate time (`progress:stopped-by-overrun`). A
+  stop charged to gate time is the environment's wait, not the seat repeating a
+  command. A bead the store no longer holds takes no `looping` label, and a
+  landing in the window labels it false.
+- `drifted_from_bead` true when a MERGE REJECTION block answering a submission
+  made at or after the nudge names scope, unrelated or beyond as a whole word in
+  its reason or a finding title (`progress:rejection-names-scope`). The block's
+  branch, target, MR and quoted gate tail are not read. A landing in the window
+  labels it false.
 
-`looping` and `drifted_from_bead` are not labeled: no record names a restart or
-a repeated command, and the guard's stop keeps no reason text. The rules are in
-`internal/jev/scorecard/progress.go`.
+The rules are in `internal/jev/scorecard/progress.go`.
 
 ### Stale-bead battery (`jev_stale`)
 
