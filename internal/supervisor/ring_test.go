@@ -22,7 +22,7 @@ func ringSup(h *harness) *Supervisor {
 }
 
 // A Waned Ring refuses Restart and KillStray with ErrEstop, names the wane, and
-// lets nothing run (ADR 0003, gt-6mlik.5).
+// lets nothing run (gt-6mlik.5).
 func TestRingWanedRefusesRestartAndKillStray(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
