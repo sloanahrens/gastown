@@ -2,15 +2,24 @@ package doctor
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/tracker/client"
 )
+
+// readyzBodyLimit bounds the readiness body read: the answer is a small JSON
+// object, and a probe is never a way to pull a large body through the check.
+const readyzBodyLimit = 64 << 10
 
 // readyzTimeout bounds the wait for the readiness answer, so a tracker that
 // does not answer reads as an error instead of stalling the doctor run.
@@ -133,4 +142,82 @@ func trackerRoutedRigs(townRoot string) ([]string, error) {
 		}
 	}
 	return rigs, nil
+}
+
+// townStoreOnTracker reports whether the route whose .beads directory is the
+// town's own names the tracker backend. A table with no such route is Dolt, as
+// the start gate reads it; an unreadable table is the error.
+func townStoreOnTracker(townRoot string) (bool, error) {
+	routes, err := beads.LoadRoutes(beads.GetTownBeadsPath(townRoot))
+	if err != nil {
+		return false, err
+	}
+	townBeads := filepath.Clean(beads.GetTownBeadsPath(townRoot))
+	for _, r := range routes {
+		if filepath.Clean(filepath.Join(townRoot, r.Path, ".beads")) == townBeads {
+			return r.BackendName() == beads.BackendTracker, nil
+		}
+	}
+	return false, nil
+}
+
+// trackerConfigured reports whether the town's town.json configures a tracker.
+// A town.json that does not read counts as configured, so an unreadable answer
+// never reads as "no tracker".
+func trackerConfigured(townRoot string) bool {
+	town, err := config.LoadTownConfig(filepath.Join(townRoot, "mayor", "town.json"))
+	if errors.Is(err, config.ErrNotFound) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	return town.Tracker != nil
+}
+
+// readyzTracker is the tracker the handshake asks: its /readyz, which answers
+// without a token. The start gate's probe in internal/cmd reads the same
+// answer; doctor cannot import that package, so the read is repeated here.
+type readyzTracker struct {
+	url    string
+	client *http.Client
+}
+
+// URL names the tracker in a refusal.
+func (t readyzTracker) URL() string { return t.url }
+
+// Readyz returns the schema level of a tracker that answers ready. Every other
+// answer, and every failure to get one, is an error naming the tracker.
+func (t readyzTracker) Readyz(ctx context.Context) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.url+"/readyz", nil)
+	if err != nil {
+		return 0, fmt.Errorf("the tracker at %s cannot be asked: %w", t.url, err)
+	}
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("the tracker at %s did not answer: %w", t.url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, readyzBodyLimit))
+	if err != nil {
+		return 0, fmt.Errorf("the tracker at %s answered, but the answer could not be read: %w", t.url, err)
+	}
+	var answer struct {
+		Status      string `json:"status"`
+		SchemaLevel int    `json:"schema_level"`
+		Message     string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
+		return 0, fmt.Errorf("the tracker at %s answered %d with a body that is not its readiness report", t.url, resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		if answer.Message != "" {
+			return 0, fmt.Errorf("the tracker at %s is not ready: %s", t.url, answer.Message)
+		}
+		return 0, fmt.Errorf("the tracker at %s answered %d to its readiness probe", t.url, resp.StatusCode)
+	}
+	if answer.Status != "ready" {
+		return 0, fmt.Errorf("the tracker at %s answered %q, not ready", t.url, answer.Status)
+	}
+	return answer.SchemaLevel, nil
 }
