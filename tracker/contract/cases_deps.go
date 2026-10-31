@@ -133,10 +133,12 @@ func depsExternal(t *testing.T, s store.Store) {
 	}
 }
 
-// depsExternalDependents pins the reverse read for an external target: a
-// dependent whose link names the id as external:<rig>:<id> is listed under
-// that id, once even when it also links plainly, and a target whose last part
-// merely ends with the id's characters is not named by it.
+// depsExternalDependents pins the reverse read for an external target. The rule,
+// stated once: an external:<rig>:<id> link names id when id is exactly the part
+// after its last colon, so a suffix match (gt-12 for gt-2) names nothing. Such a
+// dependent is listed under id once, even when it also links plainly, at the
+// plain link's relation. Every store and fake that answers the reverse read
+// follows this rule and the other comments refer here.
 func depsExternalDependents(t *testing.T, s store.Store) {
 	target := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "target"})
 	plain := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "plain"})

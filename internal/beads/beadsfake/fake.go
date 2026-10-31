@@ -1119,8 +1119,8 @@ func upEdges(deps []edge, id string) []edge {
 	return nil
 }
 
-// externalNames reports whether ref is external:<rig>:<id> with id as its last
-// colon-separated part. The match is exact, so gt-12 does not name gt-2.
+// externalNames reports whether ref is external:<rig>:<id> naming id, the rule
+// stated on the tracker contract case depsExternalDependents.
 func externalNames(ref, id string) bool {
 	return isExternalRef(ref) && strings.Count(ref, ":") >= 2 && ref[strings.LastIndex(ref, ":")+1:] == id
 }

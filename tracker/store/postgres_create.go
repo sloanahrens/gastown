@@ -266,26 +266,35 @@ WHERE d.issue_id = ANY($1) ORDER BY d.issue_id, d.created_at, t.id`, ids)
 	return rows.Err()
 }
 
-// fillDependents sets Dependents on the issues in out named by ids: the issues
-// that depend on each, with the relation. A link names its target plainly, or
-// as external:<rig>:<id> when the id is the reference's last colon-separated
-// part; that part must match exactly (gt-12 does not name gt-2). A dependent
-// holding both kinds of link to one id is listed once, at the plain link's
-// relation. Links from other rigs' external references to ids not in out are
-// not issues here and do not appear.
-func fillDependents(ctx context.Context, q querier, ids []string, out map[string]api.Issue) error {
-	rows, err := q.Query(ctx, `WITH links AS (
-  SELECT CASE WHEN d.depends_on = ANY($1) THEN d.depends_on ELSE regexp_replace(d.depends_on, '^.*:', '') END AS target,
-    d.issue_id, d.type, d.created_at, d.depends_on = ANY($1) AS plain
+// fillDependentsSQL reads the links that name each id in $1, plain or as an
+// external:<rig>:<id> reference (the rule is pinned by the contract case
+// depsExternalDependents). The two branches stay sargable: the plain one is an
+// index lookup on depends_on, and the external one ranges over the external:
+// prefix, which holds few rows, before it tests the last part. The range is
+// pinned to the C collation so it holds under any database collation.
+// DISTINCT ON keeps one link per dependent and target, the plain one if any.
+const fillDependentsSQL = `WITH links AS (
+  SELECT d.depends_on AS target, d.issue_id, d.type, d.created_at, true AS plain
   FROM tracker.dependencies d
-  WHERE d.depends_on = ANY($1) OR (d.depends_on LIKE 'external:%:%' AND regexp_replace(d.depends_on, '^.*:', '') = ANY($1))
+  WHERE d.depends_on = ANY($1)
+  UNION ALL
+  SELECT regexp_replace(d.depends_on, '^.*:', ''), d.issue_id, d.type, d.created_at, false
+  FROM tracker.dependencies d
+  WHERE d.depends_on COLLATE "C" >= 'external:' AND d.depends_on COLLATE "C" < 'external;'
+    AND d.depends_on LIKE 'external:%:%' AND regexp_replace(d.depends_on, '^.*:', '') = ANY($1)
 ), one AS (
   SELECT DISTINCT ON (target, issue_id) target, issue_id, type, created_at
   FROM links ORDER BY target, issue_id, plain DESC, created_at
 )
 SELECT o.target, i.id, i.title, i.status, i.priority, i.issue_type, o.type, i.close_reason
 FROM one o JOIN tracker.issues i ON i.id = o.issue_id
-ORDER BY o.target, o.created_at, i.id`, ids)
+ORDER BY o.target, o.created_at, i.id`
+
+// fillDependents sets Dependents on the issues in out named by ids: the issues
+// that depend on each, with the relation. Links from other rigs' external
+// references to ids not in out are not issues here and do not appear.
+func fillDependents(ctx context.Context, q querier, ids []string, out map[string]api.Issue) error {
+	rows, err := q.Query(ctx, fillDependentsSQL, ids)
 	if err != nil {
 		return fmt.Errorf("store: get dependents: %w", err)
 	}

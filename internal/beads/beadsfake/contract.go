@@ -57,10 +57,8 @@ func RunDepListUpContract(t *testing.T, newClient func(t *testing.T) beads.Clien
 	})
 }
 
-// RunDepListUpExternalContract checks DepListUp for an external target: a
-// dependent whose edge names the id as external:<rig>:<id> is listed under
-// that id, once even when it also links plainly, and a reference whose last
-// part only ends with the id's characters is not listed. It is separate from
+// RunDepListUpExternalContract checks DepListUp for an external target, under
+// the rule of the tracker contract case depsExternalDependents. It is separate from
 // RunDepListUpContract so a store that answers only local targets can still
 // run that one; beadsql's ExternalMoleculesAttachedTo records that bd's read
 // does not answer external targets.

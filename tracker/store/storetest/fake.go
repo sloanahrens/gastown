@@ -2,11 +2,10 @@
 // implements the methods its Fake-flagged contract cases cover: create and
 // get, the claim, release and transfer guards, the plain close those guards
 // refuse, the creates a Batch applies, the comments and links an export
-// reads, the Dependents a read of an issue names, the counts a stats read
-// reports, and the tokens an admin issues and revokes. Every other method
-// returns store.ErrUnimplemented, so a unit test
-// that reaches past them fails loudly rather than reading a store that only
-// looks modeled.
+// reads, the counts a stats read reports, and the tokens an admin issues and
+// revokes. GetIssues also fills Dependents, as the real store does. Every
+// other method returns store.ErrUnimplemented, so a unit test that reaches
+// past them fails loudly rather than reading a store that only looks modeled.
 package storetest
 
 import (
@@ -126,12 +125,10 @@ func (f *Fake) GetIssues(_ context.Context, ids []string) (map[string]api.Issue,
 	return out, nil
 }
 
-// fillDependentsLocked sets Dependents on the issues in out from the links:
-// the issues that depend on each, in the order Postgres lists them (link
-// creation, then the dependent's id). A link names its target plainly, or as
-// an external:<rig>:<id> reference whose last colon-separated part is the
-// target, matched exactly. A dependent with both kinds of link to one target
-// is listed once, at the plain link's relation. f.mu is held.
+// fillDependentsLocked sets Dependents on the issues in out from the links, in
+// the order Postgres lists them (link creation, then the dependent's id). The
+// link rule is stated on the contract case depsExternalDependents. f.mu is
+// held.
 func (f *Fake) fillDependentsLocked(out map[string]api.Issue) {
 	type pick struct {
 		dep   api.IssueDep
@@ -184,8 +181,7 @@ func (f *Fake) fillDependentsLocked(out map[string]api.Issue) {
 }
 
 // linkTarget reports which issue in out a link's depends_on names, and whether
-// it names it plainly. An external reference names its last colon-separated
-// part, and only when it has a rig and an id: external:<rig>:<id>.
+// it names it plainly.
 func linkTarget(dependsOn string, out map[string]api.Issue) (target string, plain, ok bool) {
 	if _, found := out[dependsOn]; found {
 		return dependsOn, true, true
