@@ -227,6 +227,21 @@ func section(townRoot string, hostOf func(key string) (host string, ok bool)) (j
 	return town.Ring, nil
 }
 
+// Present reports whether the town's ring section exists at all, whatever it
+// holds. A town with no ring section has no Ring to keep; a town whose config
+// cannot be read is an error, never "no Ring", so a caller cannot read an
+// unreadable Ring as an absent one.
+func Present(townRoot string) (bool, error) {
+	raw, err := section(townRoot, config.SectionHost)
+	if errors.Is(err, config.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return len(raw) > 0, nil
+}
+
 // classify is the State of a ring section's raw bytes at now, verified under
 // key. It never returns an error: every way the bytes cannot be trusted is
 // Absent with its reason.

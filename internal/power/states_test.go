@@ -407,10 +407,10 @@ func TestRingDoesNotChangeTheDerivedState(t *testing.T) {
 	}
 }
 
-// TestRealSeamsReportsTheRingKeyless: until gt ring names the key's reference,
-// the production wiring reads no key, so the report says so even when a valid
-// Ring is on disk.
-func TestRealSeamsReportsTheRingKeyless(t *testing.T) {
+// TestRealSeamsReadsTheKeyThroughTownKey: the production wiring resolves the
+// key through ring.TownKey, the resolver the gt ring verbs use, so a town that
+// names no ring.key reports that refusal.
+func TestRealSeamsReadsTheKeyThroughTownKey(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
 	f.setHealthy()
@@ -419,9 +419,7 @@ func TestRealSeamsReportsTheRingKeyless(t *testing.T) {
 	o.RingKey = nil
 	RealSeams(&o)
 	got := f.statusOutput(t, o)
-	if !slices.ContainsFunc(strings.Split(got, "\n"), func(l string) bool {
-		return strings.HasPrefix(l, statusLine("ring:", "key unavailable"))
-	}) {
-		t.Errorf("the production wiring read a key the report should not have:\n%s", got)
+	if want := statusLine("ring:", "key unavailable ("+ring.ErrKeyNotConfigured.Error()+")"); !slices.Contains(strings.Split(got, "\n"), want) {
+		t.Errorf("status output has no line %q:\n%s", want, got)
 	}
 }

@@ -249,6 +249,7 @@ func powerOptionsBase(townRoot string) (power.Options, error) {
 		WithDolt:   powerWithDolt,
 		Yes:        powerYes,
 		ForceCloud: powerForceCloud,
+		Actor:      detectActor(),
 	}
 	power.RealSeams(&o)
 	return o, nil
