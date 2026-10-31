@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
@@ -202,4 +203,104 @@ func TestSourceQueueLandingColumnNilWhenTheTrackerRefusesTheRequest(t *testing.T
 		t.Fatalf("Collect: %v", err)
 	}
 	queueWantColumns(t, cols, map[string]any{"waiting_to_land": nil, "ready": 6, "blocked": 0})
+}
+
+// queueHold holds the list of each rig that is not free to answer, and records
+// whether each rig's store context was still live when its list began.
+type queueHold struct {
+	started chan string   // a held rig's list began
+	release chan struct{} // closed to let the held lists answer
+	mu      sync.Mutex
+	live    map[string]bool
+}
+
+// queueHoldStore is one bd rig's store on a queueHold. A held rig's list waits
+// for the release; the others answer at once.
+type queueHoldStore struct {
+	BeadStore
+	hold *queueHold
+	rig  string
+	ctx  context.Context
+	held bool
+}
+
+func (s *queueHoldStore) List(beads.ListOptions) ([]*beads.Issue, error) {
+	s.hold.mu.Lock()
+	s.hold.live[s.rig] = s.ctx.Err() == nil
+	s.hold.mu.Unlock()
+	if !s.held {
+		return nil, nil
+	}
+	s.hold.started <- s.rig
+	select {
+	case <-s.hold.release:
+		return nil, nil
+	case <-time.After(5 * time.Second):
+		return nil, fmt.Errorf("the test never released %s", s.rig)
+	}
+}
+
+// A bd rig queued behind the parallel bound starts its read with its full
+// deadline. The batch's own clock must not run out while the rig waits for a
+// slot: here the three rigs ahead of it hold past one deadline, and the fourth
+// still reads on a live store. This shortens queueBdTimeout, which every read
+// takes, so the test is not parallel and restores it when it ends.
+func TestQueueListCountsQueuedRigReadStartsWithItsFullDeadline(t *testing.T) {
+	saved := queueBdTimeout
+	queueBdTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { queueBdTimeout = saved })
+
+	rigs := []queueRig{{name: "alpha", prefix: "alpha"}, {name: "beta", prefix: "beta"}, {name: "gamma", prefix: "gamma"}, {name: "delta", prefix: "delta"}}
+	hold := &queueHold{started: make(chan string, len(rigs)), release: make(chan struct{}), live: map[string]bool{}}
+	env := Env{Town: queueTestTown, Beads: func(ctx context.Context, dir string) BeadStore {
+		rig := filepath.Base(dir)
+		return &queueHoldStore{hold: hold, rig: rig, ctx: ctx, held: rig != "delta"}
+	}}
+	type answer struct {
+		counts map[string]int
+		ok     bool
+	}
+	done := make(chan answer, 1)
+	go func() {
+		counts, ok := queueListCounts(context.Background(), env, rigs, beads.ListOptions{Label: "gt:ready-to-land"}, queueLandingColumn().readAcross)
+		done <- answer{counts, ok}
+	}()
+	for range 3 {
+		select {
+		case <-hold.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("fewer than three rigs' reads started; the bound is three")
+		}
+	}
+	// The batch opened over a deadline ago by the time the held reads release.
+	<-time.After(2 * queueBdTimeout)
+	close(hold.release)
+	var got answer
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queueListCounts did not answer")
+	}
+	if !got.ok {
+		t.Fatalf("queueListCounts ok = false; every rig answered, so the column reads")
+	}
+	if !hold.live["delta"] {
+		t.Error("delta's read started on a store whose deadline had run out while it waited for a slot")
+	}
+}
+
+// A rig that a cross-rig answer neither names nor refuses was never read, so
+// the column fails: a count of zero for it would read as an empty queue.
+func TestQueueRigCountsOfFailsARigTheAnswerLeavesOut(t *testing.T) {
+	t.Parallel()
+	rigs := []queueRig{{name: "gastown", prefix: "gt"}, {name: "hm", prefix: "hm"}}
+	res := beads.AcrossResult{Rigs: map[string][]*beads.Issue{"gt": issues(2)}, Errors: map[string]error{}}
+	if counts, ok := queueRigCountsOf(rigs, res); ok {
+		t.Errorf("counts = %v, ok; want the column failed, because hm was never read", counts)
+	}
+	res.Rigs["hm"] = issues(0)
+	counts, ok := queueRigCountsOf(rigs, res)
+	if !ok || counts["gastown"] != 2 || counts["hm"] != 0 {
+		t.Errorf("counts = %v, ok = %v; want gastown 2 and hm 0 once hm is answered", counts, ok)
+	}
 }

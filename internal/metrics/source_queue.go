@@ -70,12 +70,13 @@ import (
 // everyone but the towns that do.
 type queueSource struct{}
 
-// queueBdTimeout is one store read's deadline. A column reads its rigs
-// queueRigParallel at a time, so nine rigs cost at most three deadlines (15 s)
-// for a column, and the group's own deadline (SourceTimeout) caps the whole
-// group regardless. A bd hung on a dead Dolt server costs its column rather
-// than the whole group.
-const queueBdTimeout = 5 * time.Second
+// queueBdTimeout is one store read's deadline, counted from the read's own
+// start. A column reads its rigs queueRigParallel at a time, so nine rigs cost
+// at most three deadlines (15 s) for a column, and the group's own deadline
+// (SourceTimeout) caps the whole group regardless. A bd hung on a dead Dolt
+// server costs its column rather than the whole group. A variable so a test
+// can shorten it.
+var queueBdTimeout = 5 * time.Second
 
 // queueRigParallel is how many rigs one column reads at once. The four columns
 // run side by side, so at most four times this many store reads are alive.
@@ -114,9 +115,8 @@ type queueBeadColumn struct {
 	// list is the column's query as a plain list (beads.ListAcross).
 	list *beads.ListOptions
 	// readAcross runs list in one rig's own store. It is the column's own
-	// function so a bd read stays attributed to the column that asks for it:
-	// internal/beads' census names the caller from the frame that started the
-	// call, and its budgets are keyed by that name (census_budgets.go).
+	// function, so the bd read stays attributed to the column (see
+	// beads.AcrossRead).
 	readAcross beads.AcrossRead
 	// published, when set, is where a count someone else read the same board
 	// for answers this column: the landing worker's own list, which the sample
@@ -366,12 +366,11 @@ func queueStoreCounts(ctx context.Context, env Env, rigs []queueRig, col queueBe
 // queueListCounts reads a column as a plain list through beads.ListAcross: the
 // rigs a store that holds several of them answers cost one request between
 // them, and every other rig is read from its own store, queueRigParallel at a
-// time. A rig left unanswered is a failed read. Each rig's store is opened with
-// a deadline of its own (queueBdTimeout), so one hung store costs its rig and
-// the rest still answer. That deadline is set when the batch opens, not when
-// the rig's read starts: a read has to reuse the store it was opened with, and
-// a second open per rig would double the store reads the census budgets. The
-// group's own deadline still caps the whole.
+// time. A rig left unanswered is a failed read. Each rig's store is opened once,
+// with a context that has no deadline yet. A rig's read arms queueBdTimeout
+// when it starts, so a rig queued behind the bound keeps its full deadline, and
+// one hung store costs its rig and the rest still answer. The group's own
+// deadline still caps the whole.
 func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.ListOptions, read beads.AcrossRead) (map[string]int, bool) {
 	if len(rigs) == 0 {
 		return map[string]int{}, true
@@ -390,9 +389,8 @@ func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.L
 		names[rig.prefix] = rig.name
 		prefixes[i] = rig.prefix
 	}
-	// Each rig's store is opened once, under a deadline of its own that is
-	// set when ListAcross opens the batch (it opens every rig before it reads
-	// one). The cancels run when the batch is answered.
+	// The cancels run when the batch is answered, which also stops any read
+	// timer still running.
 	var cancels []context.CancelFunc
 	defer func() {
 		for _, cancel := range cancels {
@@ -400,24 +398,59 @@ func queueListCounts(ctx context.Context, env Env, rigs []queueRig, opts beads.L
 		}
 	}()
 	open := func(prefix string) (beads.Lister, error) {
-		rigCtx, cancel := context.WithTimeout(ctx, queueBdTimeout)
+		rigCtx, cancel := context.WithCancel(ctx)
 		cancels = append(cancels, cancel)
 		store := env.Beads(rigCtx, filepath.Join(env.Town, names[prefix]))
 		if store == nil {
 			return nil, fmt.Errorf("queue: no bead store for %s", names[prefix])
 		}
-		return store, nil
+		if _, ok := store.(beads.AcrossStore); ok {
+			// A store holding several rigs answers the whole batch in the one
+			// request, which runs straight after the opens, so its deadline
+			// starts now. It is returned bare: ListAcross finds it by type.
+			time.AfterFunc(queueBdTimeout, cancel)
+			return store, nil
+		}
+		return queueRigLister{Lister: store, cancel: cancel}, nil
 	}
-	res, err := beads.ListAcross(prefixes, open, opts, read, queueRigParallel)
+	bounded := func(l beads.Lister) ([]*beads.Issue, error) {
+		rl, ok := l.(queueRigLister)
+		if !ok {
+			return read(l)
+		}
+		deadline := time.AfterFunc(queueBdTimeout, rl.cancel)
+		defer deadline.Stop()
+		return read(rl.Lister)
+	}
+	res, err := beads.ListAcross(prefixes, open, opts, bounded, queueRigParallel)
 	if err != nil {
 		return nil, false
 	}
+	return queueRigCountsOf(rigs, res)
+}
+
+// queueRigLister is one rig's own store as queueListCounts hands it to
+// beads.ListAcross: the store, and the cancel of the context it was opened
+// with, which the rig's read arms with queueBdTimeout when the read starts.
+type queueRigLister struct {
+	beads.Lister
+	cancel context.CancelFunc
+}
+
+// queueRigCountsOf reads each rig's count from a cross-rig answer, keyed by
+// name. A rig the answer refuses, or leaves out, is a failed read: a count of
+// zero for a rig nobody read would read as an empty queue.
+func queueRigCountsOf(rigs []queueRig, res beads.AcrossResult) (map[string]int, bool) {
 	counts := make(map[string]int, len(rigs))
 	for _, rig := range rigs {
 		if err := res.Errors[rig.prefix]; err != nil {
 			return nil, false
 		}
-		counts[rig.name] = len(res.Rigs[rig.prefix])
+		answer, ok := res.Rigs[rig.prefix]
+		if !ok {
+			return nil, false
+		}
+		counts[rig.name] = len(answer)
 	}
 	return counts, true
 }
