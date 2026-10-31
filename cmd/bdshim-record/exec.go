@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,13 +179,30 @@ func initDatabase(run Runner, dir, name string) error {
 // operator named (gt-p85pw.117).
 const fixtureInCopy = "fixture.jsonl"
 
-// importFixture fills the copy's database from the fixture file, copied into the copy first.
+// importFixture fills the copy's database from the fixture file, copied into the copy first. The
+// copy is removed once bd has read it, so a copy outlives the import holding only the database bd
+// made, never the operator's fixture data (gt-p85pw.117).
 func importFixture(run Runner, dir, fixture string) error {
-	if err := copyFile(fixture, filepath.Join(dir, fixtureInCopy)); err != nil {
-		return fmt.Errorf("put the fixture %s in the copy: %w", fixture, err)
+	path := filepath.Join(dir, fixtureInCopy)
+	err := copyFile(fixture, path)
+	if err != nil {
+		err = fmt.Errorf("put the fixture %s in the copy: %w", fixture, err)
+	} else {
+		inContainer := workDir + "/" + fixtureInCopy
+		err = expectExit(run, dir, []string{"import", "-i", inContainer}, "import the fixture "+filepath.Base(fixture))
 	}
-	inContainer := workDir + "/" + fixtureInCopy
-	return expectExit(run, dir, []string{"import", "-i", inContainer}, "import the fixture "+filepath.Base(fixture))
+	return errors.Join(err, removeFixtureCopy(path))
+}
+
+// removeFixtureCopy removes the fixture the recorder put in a copy. Leaving it there is reported
+// rather than shrugged off: the copy lives on for the rows, and a read of the fixture would then see
+// the operator's data where bd's database should be the only thing there. A path the copy never got
+// has nothing to remove (gt-p85pw.117).
+func removeFixtureCopy(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove the fixture copy %s: %w", path, err)
+	}
+	return nil
 }
 
 // copyFile copies src to dst, so a file outside the container's mounted directory reaches bd inside

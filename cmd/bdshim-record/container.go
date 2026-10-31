@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,22 +19,39 @@ import (
 // no beads workspace above it (gt-p85pw.117).
 const workDir = "/work"
 
-// doltEnvPrefix is the one family of the recording environment a child inside the container gets:
-// the names bd reads to reach its Dolt server. Nothing else crosses the boundary, so no BEADS_DIR,
-// identity or other host value can steer a run (gt-p85pw.117).
+// doltEnvPrefix is the family of the recording environment's names bd reads to reach its Dolt
+// server. Those names and the recorder's pinned identity are the only ones a child inside the
+// container gets, so no BEADS_DIR or other host value can steer a run (gt-p85pw.117).
 const doltEnvPrefix = "BEADS_DOLT_"
 
 // doltHostVar is the name bd reads the Dolt server's host from.
 const doltHostVar = doltEnvPrefix + "SERVER_HOST"
 
+// storeSelectors are the names of a store that is not the workspace the recorder made. They are
+// dropped from a child's environment rather than passed in: a copy's own .beads metadata names its
+// database, so a selector from the operator's shell would aim a run at another one (gt-p85pw.92).
+var storeSelectors = []string{"BEADS_DOLT_SERVER_DATABASE"}
+
+// pinnedIdentity is the environment every child gets, so the actor and the git identity bd records
+// are the recorder's own rather than the operator's: a golden's owner and created_by then read the
+// same on every machine (gt-p85pw.103).
+var pinnedIdentity = [][2]string{
+	{"BEADS_ACTOR", "bdshim-record"},
+	{"BD_ACTOR", "bdshim-record"},
+	{"GIT_AUTHOR_NAME", "bdshim-record"},
+	{"GIT_AUTHOR_EMAIL", "bdshim-record@example.invalid"},
+	{"GIT_COMMITTER_NAME", "bdshim-record"},
+	{"GIT_COMMITTER_EMAIL", "bdshim-record@example.invalid"},
+}
+
 // dockerBin is the docker command every child runs through.
 const dockerBin = "docker"
 
-// dockerRunner runs one docker command and returns what it wrote to stdout and its exit code. A
-// non-zero exit is a result the run keeps; an error means docker never ran to an exit. main wires
-// it to the docker binary; a unit test injects a fake, since a unit test may not start a process
-// (gt-p85pw.117).
-type dockerRunner func(argv []string) (stdout []byte, exit int, err error)
+// dockerRunner runs one docker command, with env as the docker client's environment, and returns
+// what the command wrote to stdout and its exit code. A non-zero exit is a result the run keeps; an
+// error means docker never ran to an exit. main wires it to the docker binary; a unit test injects a
+// fake, since a unit test may not start a process (gt-p85pw.117).
+type dockerRunner func(env []string, argv []string) (stdout []byte, exit int, err error)
 
 // container is the throwaway container every bd child runs in: docker run --rm, with the child's
 // directory mounted at workDir and nothing else, so the town's workspace cannot be reached from
@@ -47,8 +65,8 @@ type container struct {
 }
 
 // execChild returns the child bd the binary runs: every call inside the container opts names, whose
-// only environment is the endpoint names of the recording environment, and the bd on PATH as the
-// build the container's bd must be.
+// environment is the endpoint names of the recording environment and the recorder's pinned
+// identity, and the bd on PATH as the build the container's bd must be.
 func execChild(opts options) childBD {
 	c := container{
 		image:    opts.bdImage,
@@ -66,11 +84,13 @@ func execChild(opts options) childBD {
 }
 
 // execDocker runs one docker command, bounded by runLimit so a hung docker fails the recording
-// instead of stalling it.
-func execDocker(argv []string) ([]byte, int, error) {
+// instead of stalling it. env is the docker client's environment, where docker reads the value of
+// each -e name the command carries.
+func execDocker(env []string, argv []string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), runLimit)
 	defer cancel()
 	c := exec.CommandContext(ctx, dockerBin, argv...) //nolint:gosec // G204: argv is the container's fixed shape, and its arguments are the operator's own command line
+	c.Env = dockerClientEnv(os.Environ(), env)
 	var stdout bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = os.Stderr
@@ -79,45 +99,75 @@ func execDocker(argv []string) ([]byte, int, error) {
 	return exitResult(stdout.Bytes(), err, errors.Is(ctx.Err(), context.DeadlineExceeded))
 }
 
+// dockerClientEnv returns the environment the docker client runs with: the recorder's own, with
+// every name env sets replaced by env's value. docker reads a `-e NAME` value from the client's
+// environment, so an endpoint value or a secret stays out of the argv another process can read
+// (gt-p85pw.117).
+func dockerClientEnv(base, env []string) []string {
+	kept := make([]string, 0, len(base)+len(env))
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, set := envValue(env, key); set {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return append(kept, env...)
+}
+
 // run runs one bd call inside the container, in dir mounted at workDir.
 func (c container) run(dir string, args []string) ([]byte, int, error) {
-	return c.docker(c.args(dir, c.env(dir), args))
+	env := containerEnv(c.env(dir), c.doltHost)
+	return c.docker(env, c.args(dir, env, args))
 }
 
 // where asks bd which workspace it resolves in dir, inside the container.
 func (c container) where(dir string, env []string) (string, error) {
-	stdout, exit, err := c.docker(c.args(dir, env, []string{"where", "--json"}))
+	env = containerEnv(env, c.doltHost)
+	stdout, exit, err := c.docker(env, c.args(dir, env, []string{"where", "--json"}))
 	return whereResult(stdout, exit, err)
 }
 
 // args returns the docker arguments one bd call is: run --rm, dir mounted at workDir and nothing
-// else, the working directory there, env as the container's only environment, then the image, the
-// bd binary and the call. A call with no directory (the help walk names none) mounts nothing and
-// keeps the image's own working directory.
+// else, the working directory there, one -e per name in env, then the image, the bd binary and the
+// call. Each -e names a variable and carries no value: docker reads the value from the client's
+// environment, where the runner puts it, so a secret never appears in the argv (gt-p85pw.117). A
+// call with no directory (the help walk names none) mounts nothing and keeps the image's own working
+// directory.
 func (c container) args(dir string, env, args []string) []string {
 	argv := []string{"run", "--rm"}
 	if dir != "" {
 		argv = append(argv, "-v", dir+":"+workDir, "-w", workDir)
 	}
-	for _, entry := range containerEnv(endpointEnv(env), c.doltHost) {
-		argv = append(argv, "-e", entry)
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		argv = append(argv, "-e", key)
 	}
 	argv = append(argv, c.image, c.bin)
 	return append(argv, args...)
 }
 
 // env returns the environment a child inside the container gets: the recording environment's
-// endpoint names, before the host is mapped to the name the container reaches this machine on.
+// endpoint names, before the host is mapped to the name the container reaches this machine on, and
+// the recorder's pinned identity (gt-p85pw.103, gt-p85pw.117).
 func (c container) env(string) []string {
-	return endpointEnv(c.base)
+	env := endpointEnv(c.base)
+	for _, pinned := range pinnedIdentity {
+		env = append(env, pinned[0]+"="+pinned[1])
+	}
+	return env
 }
 
-// endpointEnv returns the BEADS_DOLT_* names of base and no others: the only environment that
-// crosses into the container (gt-p85pw.117).
+// endpointEnv returns the BEADS_DOLT_* names of base that name a server and no store selector: the
+// only inherited environment that crosses into the container (gt-p85pw.92, gt-p85pw.117).
 func endpointEnv(base []string) []string {
 	env := make([]string, 0, len(base))
 	for _, entry := range base {
-		if key, _, ok := strings.Cut(entry, "="); ok && strings.HasPrefix(key, doltEnvPrefix) {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && strings.HasPrefix(key, doltEnvPrefix) && !slices.Contains(storeSelectors, key) {
 			env = append(env, entry)
 		}
 	}

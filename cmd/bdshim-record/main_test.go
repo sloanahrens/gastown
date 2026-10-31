@@ -104,6 +104,18 @@ func childWith(run Runner, env []string, where Resolver) childBD {
 	}
 }
 
+// childWithRawEnv is childWith with env handed to the resolver as it stands, so a test drives a pin
+// the container filter would drop and proves the guard decides by the workspace resolved, never by
+// the pin (gt-p85pw.117).
+func childWithRawEnv(run Runner, env []string, where Resolver) childBD {
+	return childBD{
+		Run:         answerVersion(run),
+		Env:         func(string) []string { return env },
+		Where:       where,
+		HostVersion: func() ([]byte, error) { return []byte(forkHostVersion), nil },
+	}
+}
+
 // initMakesWorkspace returns run with the step a real bd init takes when it exits 0: the .beads
 // directory in the directory it runs in, which is the workspace the guard checks on disk before it
 // trusts bd's answer (gt-p85pw.115).

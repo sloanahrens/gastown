@@ -15,9 +15,12 @@
 // it; their defaults are gastown-polecat:dev, the image deploy/polecat/Dockerfile builds, and
 // /usr/local/bin/bd, where that image puts bd. The container reaches the throwaway Dolt server on
 // -dolt-host, host.docker.internal by default, since 127.0.0.1 inside it is the container itself.
-// The container's only environment is the BEADS_DOLT_* names of the recording environment, so the
-// recording names the throwaway server by BEADS_DOLT_SERVER_PORT or BEADS_DOLT_PORT, and every
-// other variable stays on this side of the boundary.
+// The container's environment is the BEADS_DOLT_* names of the recording environment, less the
+// BEADS_DOLT_SERVER_DATABASE selector a copy's own metadata must decide, plus the recorder's pinned
+// actor and git identity, so a golden's author reads the same on every machine; every other
+// variable stays on this side of the boundary. Each value reaches docker through the client's
+// environment rather than the command line, so an endpoint value or a secret never appears in the
+// process list.
 //
 // Every row runs in a copy of the fixture: a directory under -scratch holding a database of its
 // own, made with bd init and filled from -fixture, which is copied into each copy since nothing

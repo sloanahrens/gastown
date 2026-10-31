@@ -24,7 +24,7 @@ func containerChild(c container) childBD {
 // with the container's, leaves the workspace a bd init makes in the directory the command mounts,
 // and answers every other call with whereOut and whereExit.
 func dockerAnswer(argvLog *[][]string, whereOut []byte, whereExit int) dockerRunner {
-	return func(argv []string) ([]byte, int, error) {
+	return func(_ []string, argv []string) ([]byte, int, error) {
 		*argvLog = append(*argvLog, argv)
 		if slices.Contains(argv, "version") {
 			return []byte(forkContainerVersion), 0, nil
@@ -54,26 +54,35 @@ func mountOf(argv []string) string {
 
 // TestContainerArgsMountOnlyTheDirectoryAndPassOnlyTheDoltNames: one child's docker command mounts
 // the directory it works in at /work and nothing else, runs there, and carries no environment
-// beyond the BEADS_DOLT_ names, so the home directory, the town and every other inherited value
-// stay outside the container (gt-p85pw.117).
+// beyond the BEADS_DOLT_ names and the recorder's pinned identity, so the home directory, the town
+// and every other inherited value stay outside the container. Each -e names a variable and never
+// its value, so a secret cannot be read out of the command line (gt-p85pw.117).
 func TestContainerArgsMountOnlyTheDirectoryAndPassOnlyTheDoltNames(t *testing.T) {
 	t.Parallel()
-	c := container{image: "bd-image:test", bin: "/usr/local/bin/bd", doltHost: testDoltHost}
-	env := []string{
-		"BEADS_DOLT_SERVER_PORT=" + testScratchPort,
-		"BEADS_DIR=/home/operator/gt/.beads",
-		"BEADS_ACTOR=operator@example.com",
-		"GT_DOLT_PORT=3307",
+	c := container{
+		image:    "bd-image:test",
+		bin:      "/usr/local/bin/bd",
+		doltHost: testDoltHost,
+		base: []string{
+			"BEADS_DOLT_SERVER_PORT=" + testScratchPort,
+			"BEADS_DOLT_SERVER_DATABASE=town_db",
+			"BEADS_DIR=/home/operator/gt/.beads",
+			"BEADS_ACTOR=operator@example.com",
+			"GT_DOLT_PORT=3307",
+		},
 	}
+	env := containerEnv(c.env("/scratch/copy"), c.doltHost)
 	got := c.args("/scratch/copy", env, []string{"show", "fx-1"})
 	want := []string{
 		"run", "--rm",
 		"-v", "/scratch/copy:" + workDir,
 		"-w", workDir,
-		"-e", "BEADS_DOLT_SERVER_PORT=" + testScratchPort,
-		"-e", doltHostVar + "=" + testDoltHost,
-		"bd-image:test", "/usr/local/bin/bd", "show", "fx-1",
+		"-e", "BEADS_DOLT_SERVER_PORT",
 	}
+	for _, pinned := range pinnedIdentity {
+		want = append(want, "-e", pinned[0])
+	}
+	want = append(want, "-e", doltHostVar, "bd-image:test", "/usr/local/bin/bd", "show", "fx-1")
 	if !slices.Equal(got, want) {
 		t.Fatalf("docker arguments = %v, want %v", got, want)
 	}
@@ -84,9 +93,65 @@ func TestContainerArgsMountOnlyTheDirectoryAndPassOnlyTheDoltNames(t *testing.T)
 		if arg != "-e" {
 			continue
 		}
-		if key, _, _ := strings.Cut(got[i+1], "="); !strings.HasPrefix(key, doltEnvPrefix) {
-			t.Errorf("-e names %s, want only the %s names", key, doltEnvPrefix)
+		name := got[i+1]
+		if strings.Contains(name, "=") {
+			t.Errorf("-e %s carries a value on the command line, want only the name", name)
 		}
+		if !strings.HasPrefix(name, doltEnvPrefix) && !pinnedName(name) {
+			t.Errorf("-e names %s, want a %s name or a pinned identity name", name, doltEnvPrefix)
+		}
+	}
+	if value, ok := envValue(env, "BEADS_DOLT_SERVER_PORT"); !ok || value != testScratchPort {
+		t.Errorf("the client environment names the port %q, found=%v, want it to carry %s", value, ok, testScratchPort)
+	}
+}
+
+// pinnedName reports whether name is one of the identity variables the recorder pins.
+func pinnedName(name string) bool {
+	for _, pinned := range pinnedIdentity {
+		if pinned[0] == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestContainerEnvPinsTheIdentity: the actor and the git identity bd records are the recorder's own
+// rather than the operator's, so a golden's author reads the same on every machine (gt-p85pw.103).
+func TestContainerEnvPinsTheIdentity(t *testing.T) {
+	t.Parallel()
+	c := container{base: []string{
+		"BEADS_ACTOR=operator@example.com",
+		"BD_ACTOR=operator",
+		"GIT_AUTHOR_NAME=Operator",
+		"BEADS_DOLT_SERVER_PORT=" + testScratchPort,
+	}}
+	env := c.env("")
+	for _, pinned := range pinnedIdentity {
+		if got, ok := envValue(env, pinned[0]); !ok || got != pinned[1] {
+			t.Errorf("%s = %q, found=%v, want the recorder's %q", pinned[0], got, ok, pinned[1])
+		}
+	}
+	if got, _ := envValue(env, "GIT_AUTHOR_NAME"); got == "Operator" {
+		t.Errorf("GIT_AUTHOR_NAME = %q, want the recorder's identity, not the operator's", got)
+	}
+	if _, ok := envValue(env, "BEADS_DOLT_SERVER_PORT"); !ok {
+		t.Errorf("the endpoint name is missing from %v", env)
+	}
+}
+
+// TestEndpointEnvDropsTheStoreSelector: a database named in the operator's shell would aim a run at
+// a store the copy's own metadata does not name, so the selector is dropped rather than passed in
+// (gt-p85pw.92).
+func TestEndpointEnvDropsTheStoreSelector(t *testing.T) {
+	t.Parallel()
+	got := endpointEnv([]string{
+		"BEADS_DOLT_SERVER_DATABASE=town_db",
+		"BEADS_DOLT_SERVER_PORT=" + testScratchPort,
+	})
+	want := []string{"BEADS_DOLT_SERVER_PORT=" + testScratchPort}
+	if !slices.Equal(got, want) {
+		t.Errorf("endpointEnv = %v, want the selector dropped, %v", got, want)
 	}
 }
 
@@ -329,26 +394,38 @@ func TestGuardRunReachesTheInitWhenTheContainerResolvesUnderWork(t *testing.T) {
 }
 
 // TestGuardRunRefusesAPinnedWorkspaceOutsideWork: BEADS_DIR is not an isolation boundary, so an
-// environment that pins it is decided by the workspace bd resolves, never by the pin (gt-p85pw.117).
+// environment that pins it is decided by the workspace bd resolves, never by the pin. The resolver
+// is handed the pin itself, since the container filter would drop it, and the answer still decides
+// (gt-p85pw.117).
 func TestGuardRunRefusesAPinnedWorkspaceOutsideWork(t *testing.T) {
 	t.Parallel()
-	pinned := []string{"BEADS_DIR=/work/.beads", "BEADS_DOLT_SERVER_PORT=" + testScratchPort}
+	const pinnedDir = "/work/.beads"
+	pinned := []string{"BEADS_DIR=" + pinnedDir, "BEADS_DOLT_SERVER_PORT=" + testScratchPort}
 	tests := []struct {
 		name  string
-		where Resolver
+		where string
 		want  string // empty: the guard accepts
 	}{
-		{"bd resolves the town's workspace anyway", func(string, []string) (string, error) {
-			return "/town/.beads", nil
-		}, "outside /work"},
-		{"bd resolves the pinned workspace", atWork, ""},
+		{"bd resolves the town's workspace anyway", "/town/.beads", "outside /work"},
+		{"bd resolves the pinned workspace", filepath.Join(workDir, ".beads"), ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			var seen []string
 			bd := &guardBD{}
 			scratch := filepath.Join(tempDir(t), "scratch")
-			err := guardRun(safeCwd(t), scratch, childWith(bd.Run, pinned, tc.where))
+			child := childWithRawEnv(bd.Run, pinned, func(string, []string) (string, error) {
+				return tc.where, nil
+			})
+			child.Where = func(_ string, env []string) (string, error) {
+				seen = env
+				return tc.where, nil
+			}
+			err := guardRun(safeCwd(t), scratch, child)
+			if got, ok := envValue(seen, "BEADS_DIR"); !ok || got != pinnedDir {
+				t.Fatalf("the resolver was given BEADS_DIR=%q, found=%v, want the pin %s", got, ok, pinnedDir)
+			}
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("guardRun over %s = %v, want it accepted", tc.name, err)

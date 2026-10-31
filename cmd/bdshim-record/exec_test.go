@@ -202,7 +202,14 @@ func TestProvisionFixtureMakesADatabaseOfItsOwn(t *testing.T) {
 	fixture := writeFixture(t, fixtureIDs...)
 	scratch := t.TempDir()
 	bd := &fakeBD{out: okBD}
-	provision, _, err := provisionFixture(bd.Run, fixture, scratch)
+	var carried string
+	run := func(dir string, args []string) ([]byte, int, error) {
+		if len(args) > 0 && args[0] == "import" {
+			carried = readFile(t, filepath.Join(dir, fixtureInCopy))
+		}
+		return bd.Run(dir, args)
+	}
+	provision, _, err := provisionFixture(run, fixture, scratch)
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -227,8 +234,11 @@ func TestProvisionFixtureMakesADatabaseOfItsOwn(t *testing.T) {
 	if want := []string{"import", "-i", workDir + "/" + fixtureInCopy}; !reflect.DeepEqual(bd.args[1], want) {
 		t.Errorf("import ran %v, want the fixture inside the mounted copy, %v", bd.args[1], want)
 	}
-	if got, want := readFile(t, filepath.Join(dir, fixtureInCopy)), readFile(t, fixture); got != want {
-		t.Errorf("the copy holds %q, want the fixture's content", got)
+	if got, want := carried, readFile(t, fixture); got != want {
+		t.Errorf("the import read %q, want the fixture's content", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, fixtureInCopy)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the copy's fixture stat = %v, want it removed once bd read it", err)
 	}
 	for i, got := range bd.dirs {
 		if got != dir {
@@ -536,7 +546,14 @@ func TestProvisionFixtureFillsTheCopyFromARelativeFixture(t *testing.T) {
 		t.Fatalf("the fixture %s is named absolutely already", abs)
 	}
 	bd := &fakeBD{out: okBD}
-	provision, _, err := provisionFixture(bd.Run, rel, t.TempDir())
+	var carried string
+	run := func(dir string, args []string) ([]byte, int, error) {
+		if len(args) > 0 && args[0] == "import" {
+			carried = readFile(t, filepath.Join(dir, fixtureInCopy))
+		}
+		return bd.Run(dir, args)
+	}
+	provision, _, err := provisionFixture(run, rel, t.TempDir())
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
@@ -547,8 +564,11 @@ func TestProvisionFixtureFillsTheCopyFromARelativeFixture(t *testing.T) {
 	if want := []string{"import", "-i", workDir + "/" + fixtureInCopy}; !reflect.DeepEqual(bd.args[1], want) {
 		t.Errorf("import ran %v, want %v", bd.args[1], want)
 	}
-	if got, want := readFile(t, filepath.Join(dir, fixtureInCopy)), readFile(t, abs); got != want {
-		t.Errorf("the copy holds %q, want the fixture's content", got)
+	if got, want := carried, readFile(t, abs); got != want {
+		t.Errorf("the import read %q, want the fixture's content", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, fixtureInCopy)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the copy's fixture stat = %v, want it removed once bd read it", err)
 	}
 }
 
@@ -591,6 +611,28 @@ func TestImportFixtureReportsAFixtureTheCopyCannotCarry(t *testing.T) {
 				t.Errorf("bd ran %v, want no import over a fixture the copy never got", bd.args)
 			}
 		})
+	}
+}
+
+// TestImportFixtureReportsAFixtureItCannotRemove: a copy whose fixture path the recorder cannot
+// remove is refused rather than left holding the operator's data for the rows that follow
+// (gt-p85pw.117).
+func TestImportFixtureReportsAFixtureItCannotRemove(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, fixtureInCopy)
+	// A non-empty directory at the fixture's path cannot be copied into and cannot be removed
+	// either, so the run reports the copy it could not clear.
+	if err := os.MkdirAll(filepath.Join(path, "held"), 0o755); err != nil {
+		t.Fatalf("make the copy's fixture path a non-empty directory: %v", err)
+	}
+	bd := &fakeBD{out: okBD}
+	err := importFixture(bd.Run, dir, writeFixture(t, fixtureIDs...))
+	if err == nil || !strings.Contains(err.Error(), "remove the fixture copy") {
+		t.Fatalf("importFixture over a fixture it cannot remove = %v, want an error naming the removal", err)
+	}
+	if len(bd.args) != 0 {
+		t.Errorf("bd ran %v, want no import over a fixture the copy never got", bd.args)
 	}
 }
 
