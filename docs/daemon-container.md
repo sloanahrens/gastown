@@ -792,6 +792,9 @@ docker --context desktop-linux exec -w <scratch-root>/l2rig/mayor/rig gt-scratch
       git push origin HEAD:crew/l2/<bead>'
 ```
 
+The variable `FORGEJO_TOKEN` is the one the provisioned `forgejo-polecat.env`
+file holds (checked in the file `forgejo-provision.sh` wrote during L2).
+
 Then submit it. `gt done` in the container needs the crew actor named for that
 one command (observed: without it, `gt done requires BD_ACTOR to identify the
 assigned polecat`), and it refuses a branch that is not already pushed (`origin/
@@ -918,7 +921,8 @@ nothing named `gt-scratch*` is left.
 ### What L2 observed
 
 L2 ran with image `gt-daemon:14dde2609`, built from `main` at 14dde260, and the
-landing half passed. Observed, and written into the steps above: the render with
+landing half passed (test bead `l2-kpv`; the scratch repo's `main` carried the
+landing commit `f1e28064`). Observed, and written into the steps above: the render with
 the forge; the install against the scratch Dolt (`Created the hq database on the
 remote Dolt at scratch-dolt:3306`); the daemon owner `container
 "gt-scratch-daemon-1"`; the admin, repo and gate push; the bot provisioning; the
