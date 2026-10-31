@@ -568,20 +568,27 @@ func specChildrenReader(stores slingStores) func(dir string, ids []string) (map[
 	}
 }
 
-// specCandidateChildren is the tick's children read for every candidate of a
+// specCandidateChildren is the tick's children read for the candidates of a
 // board read: one bd view per rig the candidates live in, answered per bead,
 // with a per-bead fallback when the grouped read fails so one unreadable bead
-// does not cost the whole rig its children (gt-km9jt). The children are read
-// fresh every tick: a child's change does not move its parent's row, so a
-// remembered child set would hide a closure from the container hold.
+// does not cost the whole rig its children (gt-km9jt). A candidate the verdict
+// memory holds as childless is not read at all (see childrenWanted). The
+// children of every other candidate are read fresh each tick: a child's change
+// does not move its parent's row, so a remembered child set would hide a closure
+// from the container hold.
 //
 // The default read keeps the childless parents a resolved answer names (see
 // specChildrenRead), so only an id with no key is read alone. Almost every
 // candidate is childless, and a read that drops those would cost each of them a
 // second bd call (gt-4u2gt).
-func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCandidate, read func(dir string, ids []string) (map[string][]*beads.Issue, error)) func(beadID string) ([]specdispatch.Child, error) {
+func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCandidate, verdicts *specCandidateVerdicts, read func(dir string, ids []string) (map[string][]*beads.Issue, error)) func(beadID string) ([]specdispatch.Child, error) {
 	byDir := map[string][]string{}
+	unread := map[string]bool{}
 	for _, c := range cands {
+		if !verdicts.childrenWanted(c) {
+			unread[c.Spec.ID] = true
+			continue
+		}
 		dir := resolveBeadDirFromTownRoot(townRoot, c.Spec.ID)
 		byDir[dir] = append(byDir[dir], c.Spec.ID)
 	}
@@ -595,6 +602,9 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 	return func(beadID string) ([]specdispatch.Child, error) {
 		mu.Lock()
 		defer mu.Unlock()
+		if unread[beadID] {
+			return nil, nil
+		}
 		dir := resolveBeadDirFromTownRoot(townRoot, beadID)
 		if !done[dir] {
 			done[dir] = true
@@ -1559,9 +1569,8 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// before the sling is what catches a bead that changed since the board.
 		full := c.Spec
 		// The shape and label verdicts of a candidate whose board row has not
-		// moved are the ones the last tick reached. An eligible candidate is
-		// still read each tick for its admission edges (specBoardDetails), so
-		// serving them here saves the decision, not the read; a refused
+		// moved are the ones the last tick reached, so it is decided from the
+		// record and its design is not read again (specBoardDetails). A refused
 		// candidate is not read at all, and its skip is all the tick knows
 		// (gt-km9jt).
 		remembered, served := env.Verdicts.lookUp(c)
@@ -1597,10 +1606,11 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// a skip, not a failure: the bead stays ready and the next tick asks
 		// again once the blocker closes.
 		//
-		// The edges are always this tick's read, never a served verdict: a
-		// blocker that closes or reopens does not move the dependent's row, so a
-		// remembered edge verdict would hold the bead after its blocker freed it
-		// or sling it over one that reopened (gt-km9jt).
+		// The edges are this tick's: a remembered candidate's are its remembered
+		// edges with each blocker's status read again (specBoardDetails), because
+		// a blocker that closes or reopens does not move the dependent's row, so
+		// a stale status would hold the bead after its blocker freed it or sling
+		// it over one that reopened (gt-km9jt).
 		blockers := c.Blockers
 		if why := specBlocked(sling.Admit(blockers)); why != "" {
 			// Not remembered: the bead stays ready and the next tick reads its
@@ -1726,12 +1736,17 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// incoming blocks edges there, while the parent-child edge is a
 		// separate type, so the count is zero for a parent whose only children
 		// are parent-child ones (gt-603wu). The children view is the predicate,
-		// as it is on the peer path, and every candidate gets the read.
+		// as it is on the peer path; a candidate the memory holds as childless
+		// is not read (specCandidateChildren).
 		children, err := env.Children(id)
 		if err != nil {
+			// The record goes with the read that failed: a childless verdict
+			// served from it would sling a container the read could not clear.
+			env.Verdicts.forget(c)
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot read children: %v", id, err))
 			continue
 		}
+		env.Verdicts.setParent(c, len(children) > 0)
 		full.Children = children
 		if why := specdispatch.OpenChildHold(full); why != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
@@ -2678,7 +2693,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 			}, read, verdicts)
 			annotations.observe(read)
-			children = specCandidateChildren(townRoot, reads, read.Candidates, nil)
+			children = specCandidateChildren(townRoot, reads, read.Candidates, verdicts, nil)
 			return read
 		},
 		Verdicts: verdicts,
@@ -2686,9 +2701,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			return showSpecWith(reads, id, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 		},
 		ShowFresh: func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
-		// Every candidate's children in one bd view per rig, read fresh each
-		// tick: a child closed without moving its parent's row is still seen by
-		// the next tick's container hold (gt-km9jt).
+		// The children of every container candidate in one bd view per rig,
+		// read fresh each tick: a child closed without moving its parent's row
+		// is still seen by the next tick's container hold (gt-km9jt).
 		Children: func(id string) ([]specdispatch.Child, error) {
 			if children == nil {
 				reads.call()
@@ -3148,32 +3163,46 @@ func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
 // specBoardDetails fills the two things a board row cannot: the design the lint
 // reads, which a row may leave out, and the blocking edges the admission check
 // runs sling.Admit on, which a row never carries (gt-ndad8). The rig's own
-// store answers both, with one ShowMultiple per rig over every candidate —
-// never one show per candidate (gt-bqj8q). A design the row already carries is
-// kept as it is; the edges are always the read's, because a row that says
+// store answers both, with one ShowMultiple per rig over the candidates that
+// need them — never one show per candidate (gt-bqj8q). A design the row already
+// carries is kept as it is; the edges are the read's, because a row that says
 // nothing about dependencies is not a row that says there are none.
+//
+// A candidate the memory remembers needs no design: its shape and label verdict
+// are served. Its edges are the remembered ones, and only the status of each
+// remembered blocker is read again, in one batch per rig (specRefreshEdges). A
+// remembered candidate with no edge reads nothing (gt-km9jt).
 //
 // A candidate the read does not answer is dropped with its error: the edges are
 // unread, and a bead with no list is not a bead with no blockers (gt-o70a9). It
 // waits for the next tick rather than dispatching blind.
 //
 // A candidate the board itself refuses — an excluded label, a status, an
-// assignee — costs no details read once its unchanged row's refusal is known:
-// it is never slung, so it needs neither the design nor the edges. Every other
-// candidate is read every tick, because the edges admission runs on are never
-// served from the verdict memory: a blocker that closes or reopens does not
-// move the dependent's row (gt-km9jt).
+// assignee — costs no read once its unchanged row's refusal is known: it is
+// never slung, so it needs neither the design nor the edges.
 func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Client, read specBoardRead, verdicts *specCandidateVerdicts) specBoardRead {
-	var rigs []string
-	byRig := map[string][]int{}
+	var fresh []int
+	remembered := map[int]specCandidateVerdict{}
 	for i, c := range read.Candidates {
 		if _, refused := verdicts.refusal(c); refused {
 			continue
 		}
-		if _, seen := byRig[c.Rig]; !seen {
-			rigs = append(rigs, c.Rig)
+		if entry, ok := verdicts.lookUp(c); ok {
+			remembered[i] = entry
+			continue
 		}
-		byRig[c.Rig] = append(byRig[c.Rig], i)
+		fresh = append(fresh, i)
+	}
+	fresh = append(fresh, specRefreshEdges(reads, storeFor, read.Candidates, remembered, verdicts)...)
+	sort.Ints(fresh)
+	var rigs []string
+	byRig := map[string][]int{}
+	for _, i := range fresh {
+		rig := read.Candidates[i].Rig
+		if _, seen := byRig[rig]; !seen {
+			rigs = append(rigs, rig)
+		}
+		byRig[rig] = append(byRig[rig], i)
 	}
 	dropped := map[int]bool{}
 	for _, rig := range rigs {
@@ -3212,6 +3241,80 @@ func specBoardDetails(reads *specTickReads, storeFor func(rig string) beads.Clie
 	}
 	read.Candidates = kept
 	return read
+}
+
+// specRefreshEdges gives each remembered candidate its blocking edges: the
+// remembered edges, with each blocker's status read again in one batch per rig.
+// A candidate remembered with no edge gets none and reads nothing. It returns
+// the candidates whose blockers the batch did not answer, after forgetting their
+// records, so the caller reads them in full like any fresh candidate: a bead
+// whose edges cannot be read is never decided from a record that may be stale.
+func specRefreshEdges(reads *specTickReads, storeFor func(rig string) beads.Client, cands []specCandidate, remembered map[int]specCandidateVerdict, verdicts *specCandidateVerdicts) []int {
+	var rigs []string
+	byRig := map[string][]int{}
+	for i, c := range cands {
+		entry, ok := remembered[i]
+		if !ok {
+			continue
+		}
+		if len(entry.Edges.Blockers) == 0 {
+			cands[i].Blockers = nil
+			continue
+		}
+		if _, seen := byRig[c.Rig]; !seen {
+			rigs = append(rigs, c.Rig)
+		}
+		byRig[c.Rig] = append(byRig[c.Rig], i)
+	}
+	var unanswered []int
+	for _, rig := range rigs {
+		idx := byRig[rig]
+		var ids []string
+		listed := map[string]bool{}
+		for _, i := range idx {
+			for _, b := range remembered[i].Edges.Blockers {
+				if !listed[b.ID] {
+					listed[b.ID] = true
+					ids = append(ids, b.ID)
+				}
+			}
+		}
+		issues, err := reads.client(storeFor(rig)).ShowMultiple(ids)
+		for _, i := range idx {
+			deps, ok := rememberedDeps(remembered[i].Edges.Blockers, issues)
+			if err != nil || !ok {
+				verdicts.forget(cands[i])
+				unanswered = append(unanswered, i)
+				continue
+			}
+			cands[i].Blockers = deps
+		}
+	}
+	return unanswered
+}
+
+// rememberedDeps rebuilds a candidate's blocking edges from the remembered ones
+// and the blockers' status read. The edge's type is the remembered one, since
+// the status read does not carry it; every other field is the blocker's own. It
+// reports false when the read did not answer one of the remembered blockers.
+func rememberedDeps(remembered []specRememberedBlocker, issues map[string]*beads.Issue) ([]beads.IssueDep, bool) {
+	deps := make([]beads.IssueDep, 0, len(remembered))
+	for _, b := range remembered {
+		issue := issues[b.ID]
+		if issue == nil {
+			return nil, false
+		}
+		deps = append(deps, beads.IssueDep{
+			ID:             b.ID,
+			Title:          issue.Title,
+			Status:         issue.Status,
+			Priority:       issue.Priority,
+			Type:           issue.Type,
+			DependencyType: b.DependencyType,
+			CloseReason:    issue.CloseReason,
+		})
+	}
+	return deps, true
 }
 
 // specReadyOptions is the dispatcher's board query: unassigned work beads,

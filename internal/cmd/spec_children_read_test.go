@@ -114,7 +114,7 @@ func TestSpecChildrenReadDefaultWiringCostsTwoReadsForChildless(t *testing.T) {
 		cands = append(cands, specCandidate{Spec: specdispatch.Spec{ID: id}})
 	}
 	reads := newSpecTickReads()
-	children := specCandidateChildren(t.TempDir(), reads, cands, specChildrenReader(stores))
+	children := specCandidateChildren(t.TempDir(), reads, cands, nil, specChildrenReader(stores))
 	for _, c := range cands {
 		if kids, err := children(c.Spec.ID); err != nil || len(kids) != 0 {
 			t.Fatalf("children(%s) = %v, %v; want no children and no error", c.Spec.ID, kids, err)

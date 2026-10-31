@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -137,7 +138,7 @@ func (v *verdictTick) wire(f *fakeSpecTown, verdicts *specCandidateVerdicts) spe
 		if verdicts != nil && verdicts.memory != nil {
 			verdicts.memory.observe(read)
 		}
-		children = specCandidateChildren(v.root, reads, read.Candidates, v.childRead)
+		children = specCandidateChildren(v.root, reads, read.Candidates, verdicts, v.childRead)
 		return read
 	}
 	env.Children = func(id string) ([]specdispatch.Child, error) {
@@ -198,10 +199,10 @@ func (v *verdictTick) childRead(_ string, ids []string) (map[string][]*beads.Iss
 }
 
 // A tick over eighty candidates costs one details batch and one grouped
-// children view, and a second tick over unchanged rows costs the same: the
-// details are read every tick for the admission edges, and the shape verdicts
-// the memory serves save the decision, not the read (gt-km9jt).
-func TestSpecCandidateVerdictsSecondTickReadsOneBatchPerRig(t *testing.T) {
+// children view. A second tick over the unchanged rows reads nothing for them:
+// no candidate has a blocking edge or a child, so the memory serves each verdict
+// and no edge status or children read is needed (gt-km9jt).
+func TestSpecCandidateVerdictsSecondTickReadsNoEdgesOrChildren(t *testing.T) {
 	t.Parallel()
 	v := newVerdictTick(t, specCandidateFixtureSize)
 
@@ -219,16 +220,18 @@ func TestSpecCandidateVerdictsSecondTickReadsOneBatchPerRig(t *testing.T) {
 		t.Errorf("first tick counted %d bd reads, want the details view and the grouped children view", got)
 	}
 
-	runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
-
-	if len(v.store.multis) != 2 || len(v.store.multis[1]) != specCandidateFixtureSize {
-		t.Fatalf("the second tick's details batches = %v, want one more batch over the fixture for its edges", v.store.multis)
+	second := runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
+	if len(second.Skipped) != specCandidateFixtureSize {
+		t.Fatalf("second tick skipped %d candidates, want all %d held for lack of a seat", len(second.Skipped), specCandidateFixtureSize)
 	}
-	if v.groups != 2 {
-		t.Errorf("the second tick made %d children reads, want its one grouped view", v.groups-1)
+	if len(v.store.multis) != 1 {
+		t.Errorf("the second tick's details batches = %v, want none: no candidate has an edge to read", v.store.multis)
 	}
-	if got := v.reads.Calls(); got != 2 {
-		t.Errorf("the second tick counted %d bd reads, want its details batch and grouped children view", got)
+	if v.groups != 1 {
+		t.Errorf("the second tick made %d children reads, want none: no candidate is a container", v.groups-1)
+	}
+	if got := v.reads.Calls(); got != 0 {
+		t.Errorf("the second tick counted %d bd reads, want none", got)
 	}
 	// The phase costs at most half the bd reads a tick made before this change,
 	// over the same fixture (gt-km9jt).
@@ -449,7 +452,7 @@ func TestSpecCandidateChildrenReadGrouped(t *testing.T) {
 	reads := newSpecTickReads()
 
 	var groups int
-	grouped := specCandidateChildren(root, reads, read.Candidates, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+	grouped := specCandidateChildren(root, reads, read.Candidates, nil, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
 		groups++
 		// bd keys every parent it was asked about, an empty list for a childless one.
 		out := make(map[string][]*beads.Issue, len(ids))
@@ -469,7 +472,7 @@ func TestSpecCandidateChildrenReadGrouped(t *testing.T) {
 
 	// A grouped read that fails falls back per bead and reports only the bead it
 	// cannot answer.
-	failing := specCandidateChildren(root, reads, read.Candidates, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+	failing := specCandidateChildren(root, reads, read.Candidates, nil, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
 		if len(ids) > 1 {
 			return nil, fmt.Errorf("bd show: boom")
 		}
@@ -586,7 +589,7 @@ func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 	child := &beads.Issue{ID: "gt-child-1", Status: "open"}
 
 	var singles []string
-	children := specCandidateChildren(root, newSpecTickReads(), read.Candidates, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+	children := specCandidateChildren(root, newSpecTickReads(), read.Candidates, nil, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
 		out := make(map[string][]*beads.Issue, len(ids))
 		for _, id := range ids {
 			if id == parent && len(ids) > 1 {
@@ -614,7 +617,7 @@ func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 	// The read has nothing for the parent even alone, as beads.ChildrenOf answers
 	// for a childless parent: no children and no error. Without this the whole
 	// dispatcher stalls on every childless candidate (gt-k3me9).
-	silent := specCandidateChildren(root, newSpecTickReads(), read.Candidates, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+	silent := specCandidateChildren(root, newSpecTickReads(), read.Candidates, nil, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
 		out := make(map[string][]*beads.Issue, len(ids))
 		for _, id := range ids {
 			if id != parent {
@@ -628,7 +631,7 @@ func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 	}
 
 	// A failed single read is that bead's error, and only that bead's.
-	failing := specCandidateChildren(root, newSpecTickReads(), read.Candidates, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+	failing := specCandidateChildren(root, newSpecTickReads(), read.Candidates, nil, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
 		out := make(map[string][]*beads.Issue, len(ids))
 		for _, id := range ids {
 			if id == parent && len(ids) == 1 {
@@ -645,5 +648,212 @@ func TestSpecCandidateChildrenAbsentParentIsReadAloneNotEmpty(t *testing.T) {
 	}
 	if kids, err := failing("gt-cand-00"); err != nil || len(kids) != 0 {
 		t.Errorf("a neighbour of the failing parent = %v, %v; want the empty set", kids, err)
+	}
+}
+
+// lastBatch is the ids of the store's most recent batched read, joined.
+func (v *verdictTick) lastBatch() string {
+	return strings.Join(v.store.multis[len(v.store.multis)-1], ",")
+}
+
+// skipLines is a tick's skip lines in order, joined.
+func skipLines(r specDispatchReport) string {
+	lines := make([]string, 0, len(r.Skipped))
+	for _, s := range r.Skipped {
+		lines = append(lines, s.Line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// A memorised dependent whose blocker reopens is held at the next tick, and the
+// tick reads nothing for it but the blocker's status: its design is served with
+// the verdict (gt-km9jt).
+func TestSpecCandidateVerdictsHoldAMemorisedDependentWhenItsBlockerReopens(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	v.setBlocker(t, "gt-cand-00", "gt-blocker", string(beads.StatusClosed))
+
+	if r := runSpecDispatchCycle(v.retown(v.f)); len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNoSeat) {
+		t.Fatalf("first tick skipped %+v, want the bead free of blockers as far as the seat hold", r.Skipped)
+	}
+
+	v.setBlockerStatus("gt-blocker", string(beads.StatusOpen))
+	r := runSpecDispatchCycle(v.retown(v.f))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "blocked") {
+		t.Errorf("the tick after the blocker reopened skipped %+v, want the admission refusal", r.Skipped)
+	}
+	if len(v.store.multis) != 2 || v.lastBatch() != "gt-blocker" {
+		t.Errorf("the tick after the blocker reopened read %v, want its one batch to be the blocker's status", v.store.multis)
+	}
+}
+
+// A memorised dependent is freed at the next tick once its blocker closes again,
+// after a reopen the memory also saw: both directions come from the memory's
+// edges and the blocker's status, never from a stale verdict (gt-km9jt).
+func TestSpecCandidateVerdictsFreeAMemorisedDependentWhenItsBlockerCloses(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	v.setBlocker(t, "gt-cand-00", "gt-blocker", string(beads.StatusClosed))
+	runSpecDispatchCycle(v.retown(v.f))
+
+	v.setBlockerStatus("gt-blocker", string(beads.StatusOpen))
+	if r := runSpecDispatchCycle(v.retown(v.f)); len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "blocked") {
+		t.Fatalf("the tick after the blocker reopened skipped %+v, want the admission refusal", r.Skipped)
+	}
+
+	v.setBlockerStatus("gt-blocker", string(beads.StatusClosed))
+	r := runSpecDispatchCycle(v.retown(v.f))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNoSeat) {
+		t.Errorf("the tick after the blocker closed again skipped %+v, want the bead freed as far as the seat hold", r.Skipped)
+	}
+	if len(v.store.multis) != 3 || v.lastBatch() != "gt-blocker" {
+		t.Errorf("the tick after the blocker closed again read %v, want its one batch to be the blocker's status", v.store.multis)
+	}
+}
+
+// The memory's answer matches a fresh read at every blocker state, both
+// directions in turn (gt-km9jt): the same skip lines with the memory and with
+// none.
+func TestSpecCandidateVerdictsMatchAFreshReadAcrossBlockerChanges(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	v.setBlocker(t, "gt-cand-00", "gt-blocker", string(beads.StatusClosed))
+
+	for _, status := range []beads.IssueStatus{beads.StatusOpen, beads.StatusClosed, beads.StatusOpen, beads.StatusClosed} {
+		v.setBlockerStatus("gt-blocker", string(status))
+		remembered := runSpecDispatchCycle(v.retown(v.f))
+		fresh := runSpecDispatchCycle(v.wire(v.f, nil))
+		if got, want := skipLines(remembered), skipLines(fresh); got != want {
+			t.Errorf("blocker %s: the memory's skips %q, want the fresh read's %q", status, got, want)
+		}
+	}
+}
+
+// A record written before the edges were kept has no edges field: it is read as
+// unremembered and decided fresh, and the tick keeps the edges with the new record
+// (gt-km9jt).
+func TestSpecCandidateVerdictsReadAnEdgelessRecordAsUnremembered(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	const id = "gt-cand-00"
+	runSpecDispatchCycle(v.env)
+
+	// The file as an earlier tick wrote it: the same record with no edges field.
+	raw, err := json.Marshal(v.env.Verdicts.memory.verdicts[id])
+	if err != nil {
+		t.Fatalf("marshalling the record: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("reading the record back as fields: %v", err)
+	}
+	delete(fields, "edges")
+	old, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshalling the earlier record: %v", err)
+	}
+	var entry specCandidateVerdict
+	if err := json.Unmarshal(old, &entry); err != nil {
+		t.Fatalf("reading an earlier record: %v", err)
+	}
+	v.env.Verdicts.memory.verdicts[id] = entry
+
+	runSpecDispatchCycle(v.retown(v.f))
+	if len(v.store.multis) != 2 || v.lastBatch() != id {
+		t.Errorf("the tick after an edgeless record read %v, want the candidate read in full", v.store.multis)
+	}
+	if v.env.Verdicts.memory.verdicts[id].Edges == nil {
+		t.Errorf("the tick did not keep the edges of the candidate it decided fresh")
+	}
+}
+
+// A container whose children read fails is not remembered as childless: the
+// record goes with the read, and the next tick reads the children and holds the
+// container (gt-km9jt).
+func TestSpecCandidateChildrenAFailedReadIsNotRememberedAsChildless(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	const id = "gt-cand-00"
+	v.kids[id] = []*beads.Issue{{ID: id + ".1", Status: "open"}}
+	v.kidErr = errors.New("bd show: database locked")
+
+	r := runSpecDispatchCycle(v.env)
+	if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "cannot read children") {
+		t.Fatalf("first tick errors = %v, want the unreadable children named", r.Errors)
+	}
+
+	v.kidErr = nil
+	r = runSpecDispatchCycle(v.retown(v.f))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipContainer) {
+		t.Errorf("the tick after the failed read skipped %+v, want the container held", r.Skipped)
+	}
+}
+
+// Only a container's children are read once the memory holds the tick: the
+// grouped read names the container alone, and the container is still held while
+// its child is open (gt-km9jt).
+func TestSpecCandidateVerdictsReadOnlyAContainersChildrenAfterTheFirstTick(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 3)
+	const parent = "gt-cand-01"
+	v.kids[parent] = []*beads.Issue{{ID: parent + ".1", Status: "open"}}
+	runSpecDispatchCycle(v.env)
+	if len(v.kidIDs) != 1 || len(v.kidIDs[0]) != 3 {
+		t.Fatalf("first tick's children reads = %v, want one over the three fresh candidates", v.kidIDs)
+	}
+
+	r := runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
+	if len(v.kidIDs) != 2 || strings.Join(v.kidIDs[1], ",") != parent {
+		t.Errorf("the second tick's children reads = %v, want one over the container alone", v.kidIDs)
+	}
+	if !strings.Contains(skipLines(r), parent+": "+specdispatch.SkipHeld) {
+		t.Errorf("the second tick skipped %q, want the container held while its child is open", skipLines(r))
+	}
+}
+
+// A remembered blocker the status read cannot answer forgets its record: the
+// candidate is read in full that tick, reported as unreadable, and decided fresh
+// at the next tick (gt-km9jt).
+func TestSpecCandidateVerdictsForgetAnEdgeItsStatusReadCannotAnswer(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	const id = "gt-cand-00"
+	v.setBlocker(t, id, "gt-blocker", string(beads.StatusClosed))
+	runSpecDispatchCycle(v.retown(v.f))
+
+	v.store.failBatch = true
+	r := runSpecDispatchCycle(v.retown(v.f))
+	if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "cannot read design and blockers") {
+		t.Fatalf("the tick whose batch failed errors = %v, want the candidate reported unreadable", r.Errors)
+	}
+	if _, kept := v.env.Verdicts.memory.verdicts[id]; kept {
+		t.Errorf("the record of a candidate whose blockers could not be read was kept")
+	}
+
+	v.store.failBatch = false
+	r = runSpecDispatchCycle(v.retown(v.f))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specdispatch.SkipNoSeat) {
+		t.Errorf("the tick after the batch recovered skipped %+v, want the bead decided fresh", r.Skipped)
+	}
+	if v.lastBatch() != id {
+		t.Errorf("the tick after the batch recovered read %v last, want the candidate read in full", v.store.multis)
+	}
+}
+
+// An edge's type survives a save: admission refuses an edge whose type was never
+// read, so a reloaded record must refuse as the tick that wrote it did, by the
+// blocker, not as unread (gt-km9jt).
+func TestSpecCandidateVerdictsKeepAnEdgeTypeAcrossASave(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 1)
+	v.setBlocker(t, "gt-cand-00", "gt-blocker", string(beads.StatusClosed))
+	runSpecDispatchCycle(v.env)
+	v.env.Verdicts.memory.save()
+
+	v.setBlockerStatus("gt-blocker", string(beads.StatusOpen))
+	reloaded := newSpecAnnotatedTick(v.root, "daemon-1", func(string) beads.Client { return nil }).memory
+	r := runSpecDispatchCycle(v.wire(v.f, newSpecCandidateVerdicts(reloaded, v.env.Verdicts.inputs)))
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "blocked") || strings.Contains(r.Skipped[0].Line, "unread") {
+		t.Errorf("the reloaded tick skipped %+v, want the blocker's refusal", r.Skipped)
 	}
 }

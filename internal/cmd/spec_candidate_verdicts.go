@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"sort"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -21,17 +22,21 @@ import (
 // an edge added or removed moves dependency_count, and a change to the template,
 // the gate, the priority ceiling or the target branch decides the candidate
 // again. Staleness bound: a change to the bead is seen at the next tick,
-// because it moves updated_at.
+// because it moves updated_at. An edge swapped for another of the same count is
+// not seen until the row moves, because the count is the key the edges are
+// remembered under.
 //
-// The record holds no admission edges. A blocker that closes or REOPENS does
-// not move the dependent's row, so an edge verdict keyed on that row would go
-// stale in both directions — a bead held after its blocker closed, or slung
-// over a blocker that reopened. The edges are therefore read fresh every tick,
-// from the one batched details view per rig the scan already makes
-// (specBoardDetails); only a bead the board refuses on its own fields skips
-// that read, because it is never slung and needs no edges. The children are
-// read fresh every tick for the same reason (their change does not move the
-// parent's row either).
+// The record also keeps the candidate's blocking edges (the blocker's id and
+// the edge's type, which admission reads) and whether it is a container. A
+// blocker that closes or REOPENS does not move the dependent's row, so the
+// tick reads each remembered blocker's status again every tick, in one batch
+// per rig, and reads nothing for a candidate with no remembered edge
+// (specBoardDetails). The children of a candidate the record does not mark as
+// a container are not read at all; a container's children are read every tick,
+// because a child's change does not move its parent's row either.
+//
+// A record written before the edges were kept has no edges field, and it is
+// not served: the tick decides that candidate fresh, as if it were unremembered.
 
 // specCandidateInputs are the knobs a verdict was decided under. They are part
 // of the record, not the key alone, so a tick whose template, gate, ceiling or
@@ -49,10 +54,28 @@ type specCandidateInputs struct {
 	Target string `json:"target"`
 }
 
+// specRememberedBlocker is one blocking edge a tick read for a candidate. The
+// edge's type is kept because admission refuses an edge whose type was never
+// read; the blocker's status is not kept, because it changes without moving the
+// dependent's row and is read again each tick.
+type specRememberedBlocker struct {
+	ID             string `json:"id"`
+	DependencyType string `json:"dependency_type,omitempty"`
+}
+
+// specCandidateEdges is what the record keeps of a candidate's edges: the
+// blocking edges its details read named, and whether it had children when they
+// were last read.
+type specCandidateEdges struct {
+	Blockers []specRememberedBlocker `json:"blockers,omitempty"`
+	// Parent is whether the candidate had children. It is set after the children
+	// read of the tick that decided the row, and a record whose children could
+	// not be read is forgotten rather than kept as childless.
+	Parent bool `json:"parent,omitempty"`
+}
+
 // specCandidateVerdict is one candidate's shape and label verdict, as the tick
-// that read it decided. It holds only what the bead's own row decides; the
-// blocking edges are never kept, because a blocker's change does not move the
-// dependent's row and a stored edge verdict would go stale (see the file
+// that read it decided, with the edges that decision read (see the file
 // comment).
 type specCandidateVerdict struct {
 	// UpdatedAt and DepCount are the board row the verdict was decided from:
@@ -72,6 +95,9 @@ type specCandidateVerdict struct {
 	Shaped bool `json:"shaped,omitempty"`
 	// Shape is specdispatch.Lint's verdict.
 	Shape specdispatch.LintVerdict `json:"shape"`
+	// Edges is nil in a record written before the edges were kept, and such a
+	// record is never served.
+	Edges *specCandidateEdges `json:"edges,omitempty"`
 }
 
 // specCandidateVerdicts is the candidate scan's verdict memory: the annotated
@@ -107,8 +133,9 @@ func specCandidateInputsFor(tmpl specdispatch.Template, shapeGate string, maxPri
 
 // lookUp answers c's stored verdict when the tick's row and knobs still match
 // the ones it was decided from, and false otherwise: a changed bead, an edge
-// added or removed, a different template, gate, ceiling or target branch, or a
-// record with no shape, which is what a blocked read leaves.
+// added or removed, a different template, gate, ceiling or target branch, a
+// record with no edges (an earlier format), or a record with no shape, which is
+// what a blocked read leaves.
 func (v *specCandidateVerdicts) lookUp(c specCandidate) (specCandidateVerdict, bool) {
 	if v == nil || v.memory == nil || c.UpdatedAt == "" {
 		return specCandidateVerdict{}, false
@@ -116,7 +143,7 @@ func (v *specCandidateVerdicts) lookUp(c specCandidate) (specCandidateVerdict, b
 	v.memory.mu.Lock()
 	entry, ok := v.memory.verdicts[c.Spec.ID]
 	v.memory.mu.Unlock()
-	if !ok || entry.UpdatedAt != c.UpdatedAt || entry.DepCount != c.DepCount {
+	if !ok || entry.UpdatedAt != c.UpdatedAt || entry.DepCount != c.DepCount || entry.Edges == nil {
 		return specCandidateVerdict{}, false
 	}
 	// An eligible candidate's shape was decided with its labels, so a record
@@ -133,9 +160,7 @@ func (v *specCandidateVerdicts) lookUp(c specCandidate) (specCandidateVerdict, b
 
 // refusal answers c's stored label refusal when its board row and the tick's
 // knobs still match, and false otherwise. Only a refusal may skip the details
-// read: the bead is never slung, so it needs no admission edges. An eligible
-// candidate is always read, because the edges admission runs on are never
-// served from the memory.
+// read: the bead is never slung, so it needs neither its design nor its edges.
 func (v *specCandidateVerdicts) refusal(c specCandidate) (specCandidateVerdict, bool) {
 	entry, ok := v.lookUp(c)
 	if !ok || entry.Eligible {
@@ -144,9 +169,20 @@ func (v *specCandidateVerdicts) refusal(c specCandidate) (specCandidateVerdict, 
 	return entry, true
 }
 
-// record keeps the verdict the tick reached for c, at the row it decided from.
-// A row with no updated_at is not remembered: the next tick would have nothing
-// to compare it against.
+// childrenWanted reports whether c's children are read this tick: a candidate
+// the memory does not hold, or one it holds as a container. A refused candidate
+// never reaches the container hold, so it is not read either.
+func (v *specCandidateVerdicts) childrenWanted(c specCandidate) bool {
+	entry, ok := v.lookUp(c)
+	if !ok {
+		return true
+	}
+	return entry.Eligible && entry.Edges.Parent
+}
+
+// record keeps the verdict the tick reached for c, at the row it decided from,
+// with the blocking edges the tick read for it. A row with no updated_at is not
+// remembered: the next tick would have nothing to compare it against.
 func (v *specCandidateVerdicts) record(c specCandidate, verdict specCandidateVerdict) {
 	if v == nil || v.memory == nil || c.UpdatedAt == "" {
 		return
@@ -154,10 +190,56 @@ func (v *specCandidateVerdicts) record(c specCandidate, verdict specCandidateVer
 	verdict.UpdatedAt = c.UpdatedAt
 	verdict.DepCount = c.DepCount
 	verdict.Inputs = v.inputs(c.Rig)
+	verdict.Edges = &specCandidateEdges{Blockers: rememberBlockers(c.Blockers)}
 	v.memory.mu.Lock()
 	v.memory.verdicts[c.Spec.ID] = verdict
 	v.memory.dirty = true
 	v.memory.mu.Unlock()
+}
+
+// setParent keeps whether c has children, once they were read at the row the
+// record holds. A record the row has moved past is left alone.
+func (v *specCandidateVerdicts) setParent(c specCandidate, parent bool) {
+	if v == nil || v.memory == nil || c.UpdatedAt == "" {
+		return
+	}
+	v.memory.mu.Lock()
+	defer v.memory.mu.Unlock()
+	entry, ok := v.memory.verdicts[c.Spec.ID]
+	if !ok || entry.UpdatedAt != c.UpdatedAt || entry.DepCount != c.DepCount || entry.Edges == nil {
+		return
+	}
+	if entry.Edges.Parent != parent {
+		entry.Edges.Parent = parent
+		v.memory.dirty = true
+	}
+}
+
+// forget drops c's record, so the next tick decides c fresh. It is the answer
+// to a read that could not say what the record would have served: a failed
+// children read, or a blocker whose status could not be read.
+func (v *specCandidateVerdicts) forget(c specCandidate) {
+	if v == nil || v.memory == nil {
+		return
+	}
+	v.memory.mu.Lock()
+	defer v.memory.mu.Unlock()
+	if _, ok := v.memory.verdicts[c.Spec.ID]; ok {
+		delete(v.memory.verdicts, c.Spec.ID)
+		v.memory.dirty = true
+	}
+}
+
+// rememberBlockers keeps the id and edge type of each blocking edge a read named.
+func rememberBlockers(deps []beads.IssueDep) []specRememberedBlocker {
+	if len(deps) == 0 {
+		return nil
+	}
+	out := make([]specRememberedBlocker, 0, len(deps))
+	for _, dep := range deps {
+		out = append(out, specRememberedBlocker{ID: dep.ID, DependencyType: dep.DependencyType})
+	}
+	return out
 }
 
 // specTemplateKey digests the lint template: the sections it requires, and the
