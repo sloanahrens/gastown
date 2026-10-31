@@ -2,6 +2,7 @@ package forgejocut
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,10 @@ import (
 // ProvisionFunc is one provisioning run: forgejoprov.Run, and a test's stand-in
 // for it, which counts the call or forces its exit code.
 type ProvisionFunc func(ctx context.Context, opts *forgejoprov.Options, env forgejoprov.Env) int
+
+// errProvisionEnvUnwired is step 3's refusal of a cutover whose ProvisionEnv has no
+// Getenv: the admin token would resolve from the process environment, not the seam.
+var errProvisionEnvUnwired = errors.New("the provisioning environment is not wired: no Getenv seam for the admin token")
 
 // Provision is step 3: each role's bot and token, the repository's access, the
 // dashboard's viewer read grant and the protected main branch, provisioned in this
@@ -24,6 +29,13 @@ type ProvisionFunc func(ctx context.Context, opts *forgejoprov.Options, env forg
 // A dry run passes the provisioner's own --dry-run along, so it reads the server,
 // reports every change it would make, and writes nothing.
 func (c *Cutover) Provision() error {
+	// A cutover with no Getenv was not wired to the environment its admin token
+	// resolves from. Parse would fall back to the process environment, so refuse
+	// before any read rather than resolve the token from somewhere the cutover
+	// was never given.
+	if c.ProvisionEnv.Getenv == nil {
+		return errProvisionEnvUnwired
+	}
 	opts, err := forgejoprov.Parse(c.provisionArgs(), c.ProvisionEnv.Getenv)
 	if err != nil {
 		// The cutover's own parse validated every value the two commands share, so a
