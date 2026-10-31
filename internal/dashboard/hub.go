@@ -304,9 +304,13 @@ func (h *Hub) Subscribe() (*Sub, [][]byte) {
 	// Every list goes out whatever its bytes were, and ahead of the state that
 	// draws them, so a page that connects late has both lists in its first frames.
 	initial := h.listFramesLocked(true)
-	initial = append(initial, frame("state", h.stateFrameLocked()))
+	if f := frame("state", h.stateFrameLocked()); f != nil {
+		initial = append(initial, f)
+	}
 	if len(h.ring) > 0 {
-		initial = append(initial, frame("backlog", h.ring))
+		if f := frame("backlog", h.ring); f != nil {
+			initial = append(initial, f)
+		}
 	}
 	h.mu.Unlock()
 	// One close releases every worker, whatever race it is in; each re-checks
@@ -474,7 +478,7 @@ func (h *Hub) publishLocked() {
 	for _, f := range h.listFramesLocked(false) {
 		h.broadcastLocked(f)
 	}
-	h.broadcastLocked(frame("state", h.stateFrameLocked()))
+	h.sendLocked("state", h.stateFrameLocked())
 }
 
 // observeLocked runs the alert rules over the state change this poll just made,
@@ -501,7 +505,7 @@ func (h *Hub) addAlertLocked(al Alert) {
 	if n := len(h.state.Alerts); n > alertsKept {
 		h.state.Alerts = append([]Alert(nil), h.state.Alerts[n-alertsKept:]...)
 	}
-	h.broadcastLocked(frame("alert", al))
+	h.sendLocked("alert", al)
 }
 
 // pollAttention feeds the attention queue's wake events to the alerts, so the
@@ -541,12 +545,23 @@ func (h *Hub) pollAttention() {
 	}
 }
 
+// frame frames v as one event, and returns nil if v will not encode. A null in
+// its place would reach the page as an empty value, so the caller leaves the
+// event out and the next publish tries again (gt-utjwd).
 func frame(event string, v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
-		b = []byte(`null`)
+		return nil
 	}
 	return rawFrame(event, b)
+}
+
+// sendLocked frames v as event and sends it to every page, leaving it out when
+// v will not encode (frame).
+func (h *Hub) sendLocked(event string, v any) {
+	if f := frame(event, v); f != nil {
+		h.broadcastLocked(f)
+	}
 }
 
 // rawFrame frames data, which is already JSON, as one event.
@@ -1255,14 +1270,14 @@ func (h *Hub) pollFeed() {
 			changed = true
 		}
 		if !burst {
-			h.broadcastLocked(frame("entry", e))
+			h.sendLocked("entry", e)
 		}
 	}
 	if n := len(h.ring); n > h.cfg.RingSize {
 		h.ring = append([]Entry(nil), h.ring[n-h.cfg.RingSize:]...)
 	}
 	if burst {
-		h.broadcastLocked(frame("backlog", h.ring))
+		h.sendLocked("backlog", h.ring)
 	}
 	if alerts := h.observeLocked(entries); alerts > 0 {
 		changed = true

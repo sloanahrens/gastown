@@ -201,6 +201,63 @@ func TestHubDoesNotSendAListThatFailsToEncode(t *testing.T) {
 	assert.Equal(t, 1, eventCount(drainFrames(page), "trend.recent"), "the list was not sent again once it encoded")
 }
 
+// A state frame that will not encode is left out of the page's first frames: a
+// null in its place would read as an empty state (gt-utjwd).
+func TestHubDoesNotSendAStateFrameThatFailsToEncodeOnSubscribe(t *testing.T) {
+	t.Parallel()
+
+	// time.Time does not encode a year past 9999, so a State carrying this Now
+	// fails to marshal.
+	unencodable := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	h := NewHub(Config{Now: func() time.Time { return unencodable }})
+
+	page, initial := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	first := framesText(initial)
+	assert.Equal(t, 0, eventCount(first, "state"), "a state frame that fails to encode was sent")
+	assert.NotContains(t, first, "event: state\ndata: null", "a state frame that fails to encode was sent as null, which reads as empty")
+}
+
+// A state frame that will not encode is left out of a poll's frames too: the
+// page keeps the state it had, and the next poll sends the state once it encodes
+// again (gt-utjwd).
+func TestHubDoesNotSendAStateFrameThatFailsToEncodeOnPoll(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	// time.Time does not encode a year past 9999, so a Trend hour of this time
+	// fails to marshal inside the state frame.
+	unencodable := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	hours := []TrendHour{{Hour: now, Landed: 1}}
+	h := NewHub(Config{
+		Now:   func() time.Time { return now },
+		Trend: func() *Trend { return &Trend{Hours: hours} },
+	})
+	page, initial := h.Subscribe()
+	defer h.Unsubscribe(page)
+	assert.Equal(t, 1, eventCount(framesText(initial), "state"), "the state encodes, so it is sent")
+
+	hours = []TrendHour{{Hour: unencodable, Landed: 1}}
+	h.pollTrend()
+	broken := drainFrames(page)
+	assert.Equal(t, 0, eventCount(broken, "state"), "a state frame that fails to encode was sent")
+	assert.NotContains(t, broken, "event: state\ndata: null", "a state frame that fails to encode was sent as null, which reads as empty")
+
+	hours = []TrendHour{{Hour: now.Add(time.Minute), Landed: 2}}
+	h.pollTrend()
+	assert.Equal(t, 1, eventCount(drainFrames(page), "state"), "the state was not sent again once it encoded")
+}
+
+// framesText joins frames as one page would receive them.
+func framesText(frames [][]byte) string {
+	var b strings.Builder
+	for _, f := range frames {
+		b.Write(f)
+	}
+	return b.String()
+}
+
 // A page that connects late gets both lists in its first frames. The state frame
 // it gets keeps each list's parent, the queue's totals and landing list and the
 // trend's hours, but not the lists themselves, and /api/state still returns the
