@@ -267,6 +267,7 @@ type memHost struct {
 	writeErr  error
 	appendErr error
 	renameErr error
+	removeErr error
 }
 
 // host is the Host over m's files and calls.
@@ -302,6 +303,9 @@ func (m *memHost) host() Host {
 		},
 		Remove: func(name string) error {
 			m.removes = append(m.removes, name)
+			if m.removeErr != nil {
+				return m.removeErr
+			}
 			delete(m.files, name)
 			return nil
 		},
@@ -526,6 +530,110 @@ func TestTimingsReplaceFailures(t *testing.T) {
 			t.Errorf("removes = %v, want each temp file %v removed", h.removes, tmp)
 		}
 	})
+}
+
+// TestTimingsRemoveTempFailures: a failed replace removes the temp file it made.
+// A removal that fails names the temp file once; a temp file that is already
+// gone is nothing to name; a host with no Remove keeps the file and says so.
+func TestTimingsRemoveTempFailures(t *testing.T) {
+	t.Parallel()
+	t.Run("a remove that fails names the temp file once", func(t *testing.T) {
+		t.Parallel()
+		stderr := &bytes.Buffer{}
+		dir := t.TempDir()
+		persistent := filepath.Join(dir, TimingsName)
+		h := &memHost{removeErr: errors.New("permission denied")}
+		tm := OpenTimings(filepath.Join(dir, "log", TimingsName), h.host(), stderr)
+		h.writeErr = errors.New("disk full")
+		tm.Replace(persistent, h.host())
+
+		tmp := persistentWrites(h.writes, filepath.Join(dir, "log", TimingsName))
+		if len(tmp) != 1 {
+			t.Fatalf("temp writes = %v, want one temp file", tmp)
+		}
+		if got := namingLines(stderr.String(), tmp[0]); got != 1 {
+			t.Errorf("stderr names %s on %d lines, want once:\n%s", tmp[0], got, stderr)
+		}
+		if want := "timings: remove " + tmp[0] + ": permission denied"; !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+	})
+	t.Run("a temp file that is already gone is not named", func(t *testing.T) {
+		t.Parallel()
+		stderr := &bytes.Buffer{}
+		dir := t.TempDir()
+		persistent := filepath.Join(dir, TimingsName)
+		h := &memHost{removeErr: fs.ErrNotExist}
+		tm := OpenTimings(filepath.Join(dir, "log", TimingsName), h.host(), stderr)
+		h.writeErr = errors.New("disk full")
+		tm.Replace(persistent, h.host())
+
+		if len(h.removes) != 1 {
+			t.Errorf("removes = %v, want the temp file asked for once", h.removes)
+		}
+		if strings.Contains(stderr.String(), "timings: remove") {
+			t.Errorf("stderr = %q, want no remove failure for a file that is gone", stderr)
+		}
+	})
+	t.Run("a host with no Remove keeps the temp file and names it", func(t *testing.T) {
+		t.Parallel()
+		stderr := &bytes.Buffer{}
+		dir := t.TempDir()
+		persistent := filepath.Join(dir, TimingsName)
+		h := &memHost{}
+		tm := OpenTimings(filepath.Join(dir, "log", TimingsName), h.host(), stderr)
+		h.writeErr = errors.New("disk full")
+		host := h.host()
+		host.Remove = nil
+		tm.Replace(persistent, host)
+
+		tmp := persistentWrites(h.writes, filepath.Join(dir, "log", TimingsName))
+		if len(tmp) != 1 {
+			t.Fatalf("temp writes = %v, want one temp file", tmp)
+		}
+		if want := "timings: remove " + tmp[0] + ": skipped, host has no Remove"; !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+	})
+}
+
+// TestOpenTimingsNeedsItsSeams: a host with no WriteFile or no AppendFile has no
+// seam to write the run's file through. The file is not opened, nothing reaches
+// the real disk, the omission is named once, and the lines are still kept.
+func TestOpenTimingsNeedsItsSeams(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		strip func(*Host)
+	}{
+		{"no WriteFile", func(h *Host) { h.WriteFile = nil }},
+		{"no AppendFile", func(h *Host) { h.AppendFile = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stderr := &bytes.Buffer{}
+			path := filepath.Join(t.TempDir(), TimingsName)
+			h := &memHost{}
+			host := h.host()
+			tc.strip(&host)
+			tm := OpenTimings(path, host, stderr)
+			tm.Add(Timing{Tier: TierIntegration, Package: "./a"})
+			tm.Close()
+
+			if got := namingLines(stderr.String(), path); got != 1 {
+				t.Errorf("stderr names %s on %d lines, want once:\n%s", path, got, stderr)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the run's file reached the disk: %v", err)
+			}
+			if len(h.writes) != 0 || len(h.appends) != 0 {
+				t.Errorf("writes %v, appends %v, want none through a host with no seam", h.writes, h.appends)
+			}
+			if got := strings.Count(string(tm.Bytes()), "\n"); got != 1 {
+				t.Errorf("Bytes() has %d lines, want the one line kept", got)
+			}
+		})
+	}
 }
 
 // TestParseWalls: a timings file's lines become the wall each tier and package

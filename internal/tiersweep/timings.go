@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"strings"
 )
 
@@ -133,16 +132,16 @@ type Timings struct {
 }
 
 // OpenTimings creates the run's timings file at path through host, replacing
-// whatever an earlier run left there. A file that cannot be created returns a
-// Timings that writes nothing and has already named the file on stderr.
+// whatever an earlier run left there. A host with no WriteFile or AppendFile has
+// no seam to write through, so it writes nothing and names the omission on
+// stderr. A file that cannot be created returns a Timings that writes nothing
+// and has already named the file on stderr.
 func OpenTimings(path string, host Host, stderr io.Writer) *Timings {
-	if host.WriteFile == nil {
-		host.WriteFile = os.WriteFile
-	}
-	if host.AppendFile == nil {
-		host.AppendFile = appendToFile
-	}
 	t := &Timings{path: path, host: host, stderr: stderr, random: rand.Reader}
+	if host.WriteFile == nil || host.AppendFile == nil {
+		t.reportAt(path, "create", errors.New("skipped, host has no WriteFile or AppendFile"))
+		return t
+	}
 	if err := host.WriteFile(path, nil, 0o644); err != nil {
 		t.report(err)
 		return t

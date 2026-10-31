@@ -66,12 +66,7 @@ type Runner struct {
 	Env []string
 	// Stderr receives the progress lines and the failure excerpts.
 	Stderr io.Writer
-	// Timings receives one package line for each package whose command ran and
-	// whose log was created, in the order the commands finished, which is list
-	// order for a run of one. A sharded package writes a line per shard instead,
-	// and a JSON run also writes a test line for each slow test (gt-juo5e). A
-	// package it skips, resumes, refuses or cannot log writes none. Nil writes no
-	// timings.
+	// Timings receives the run's timing lines in the order they finish; nil writes none.
 	Timings *Timings
 	// Now is the clock a package's wall time is read from. Nil means time.Now.
 	Now func() time.Time
