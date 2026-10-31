@@ -3,10 +3,13 @@ package tiersweep
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -73,7 +76,7 @@ func TestTierWritesTimings(t *testing.T) {
 		Timeout:  "7m",
 		SkipList: "integration:./internal/c",
 		Stderr:   stderr,
-		Timings:  OpenTimings(filepath.Join(logDir, TimingsName), stderr),
+		Timings:  OpenTimings(filepath.Join(logDir, TimingsName), ProcessHost, stderr),
 		Now:      clock.now,
 	}
 	r.Tier(TierIntegration, ".", nil, nil, []string{"./internal/a", "./internal/b", "./internal/c"})
@@ -210,10 +213,11 @@ func TestTimingsFileIsReplacedAtTheEnd(t *testing.T) {
 		if got := readTimings(t, r.timingsFile); !reflect.DeepEqual(got, own) {
 			t.Errorf("persistent timings = %+v, want this run's %+v", got, own)
 		}
-		if len(r.writes) != 1 {
-			t.Fatalf("WriteFile calls = %v, want one temp file", r.writes)
+		persistent := persistentWrites(r.writes, filepath.Join(r.logDir, TimingsName))
+		if len(persistent) != 1 {
+			t.Fatalf("WriteFile calls = %v, want one temp file", persistent)
 		}
-		tmp := r.writes[0]
+		tmp := persistent[0]
 		if tmp == r.timingsFile || filepath.Dir(tmp) != filepath.Dir(r.timingsFile) {
 			t.Errorf("wrote %q, want a temp file beside %q", tmp, r.timingsFile)
 		}
@@ -228,8 +232,8 @@ func TestTimingsFileIsReplacedAtTheEnd(t *testing.T) {
 		if code, _, stderr := r.run(TierIntegration); code != 0 {
 			t.Fatalf("exit code = %d, stderr %q", code, stderr)
 		}
-		if len(r.writes) != 0 || len(r.renames) != 0 {
-			t.Errorf("writes %v, renames %v, want none", r.writes, r.renames)
+		if got := persistentWrites(r.writes, filepath.Join(r.logDir, TimingsName)); len(got) != 0 || len(r.renames) != 0 {
+			t.Errorf("writes %v, renames %v, want none", got, r.renames)
 		}
 	})
 	t.Run("a replace that fails is named once and changes no verdict", func(t *testing.T) {
@@ -251,21 +255,83 @@ func TestTimingsFileIsReplacedAtTheEnd(t *testing.T) {
 	})
 }
 
+// memHost is a Host that keeps its files in memory and records every call, so a
+// test sees each write a timings file makes and none reaches the disk. Each
+// error field fails the call it names, as a full disk or a refused rename would.
+type memHost struct {
+	files     map[string][]byte
+	writes    []string
+	appends   []string
+	renames   [][2]string
+	removes   []string
+	writeErr  error
+	appendErr error
+	renameErr error
+}
+
+// host is the Host over m's files and calls.
+func (m *memHost) host() Host {
+	if m.files == nil {
+		m.files = map[string][]byte{}
+	}
+	return Host{
+		WriteFile: func(name string, data []byte, _ fs.FileMode) error {
+			m.writes = append(m.writes, name)
+			if m.writeErr != nil {
+				return m.writeErr
+			}
+			m.files[name] = append([]byte(nil), data...)
+			return nil
+		},
+		AppendFile: func(name string, data []byte) error {
+			m.appends = append(m.appends, name)
+			if m.appendErr != nil {
+				return m.appendErr
+			}
+			m.files[name] = append(m.files[name], data...)
+			return nil
+		},
+		Rename: func(oldpath, newpath string) error {
+			m.renames = append(m.renames, [2]string{oldpath, newpath})
+			if m.renameErr != nil {
+				return m.renameErr
+			}
+			m.files[newpath] = m.files[oldpath]
+			delete(m.files, oldpath)
+			return nil
+		},
+		Remove: func(name string) error {
+			m.removes = append(m.removes, name)
+			delete(m.files, name)
+			return nil
+		},
+	}
+}
+
+// persistentWrites is the writes the rig saw that are not the run's own log
+// file: OpenTimings creates that file through the same host, but a replace of
+// the persistent file is the only write the test is counting.
+func persistentWrites(writes []string, own string) []string {
+	var out []string
+	for _, w := range writes {
+		if w != own {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // TestTimingsFailuresAreNamedOnce: a write that fails drops the file, so a
 // whole run of packages names it once and keeps every line for the persistent
-// file; a close that fails is named too. Both drive the production Add and
-// Close, with the open file closed out of band to make them fail the way a full
-// disk or an unmounted directory would.
+// file. A line added after Close is kept the same way and written nowhere.
 func TestTimingsFailuresAreNamedOnce(t *testing.T) {
 	t.Parallel()
 	t.Run("a failed write", func(t *testing.T) {
 		t.Parallel()
 		stderr := &bytes.Buffer{}
 		path := filepath.Join(t.TempDir(), TimingsName)
-		tm := OpenTimings(path, stderr)
-		if err := tm.out.Close(); err != nil {
-			t.Fatal(err)
-		}
+		h := &memHost{appendErr: errors.New("disk full")}
+		tm := OpenTimings(path, h.host(), stderr)
 		tm.Add(Timing{Tier: TierIntegration, Package: "./a"})
 		tm.Add(Timing{Tier: TierIntegration, Package: "./b"})
 		tm.Close()
@@ -273,22 +339,31 @@ func TestTimingsFailuresAreNamedOnce(t *testing.T) {
 		if got := namingLines(stderr.String(), path); got != 1 {
 			t.Errorf("stderr names %s on %d lines, want once:\n%s", path, got, stderr)
 		}
+		if len(h.appends) != 1 {
+			t.Errorf("appends = %v, want one attempt: the file is dropped after it fails", h.appends)
+		}
 		if got := strings.Count(string(tm.Bytes()), "\n"); got != 2 {
 			t.Errorf("Bytes() holds %d lines, want both:\n%s", got, tm.Bytes())
 		}
 	})
-	t.Run("a failed close", func(t *testing.T) {
+	t.Run("a line added after close is kept, not written", func(t *testing.T) {
 		t.Parallel()
 		stderr := &bytes.Buffer{}
 		path := filepath.Join(t.TempDir(), TimingsName)
-		tm := OpenTimings(path, stderr)
-		if err := tm.out.Close(); err != nil {
-			t.Fatal(err)
-		}
+		h := &memHost{}
+		tm := OpenTimings(path, h.host(), stderr)
+		tm.Add(Timing{Tier: TierIntegration, Package: "./a"})
 		tm.Close()
+		tm.Add(Timing{Tier: TierIntegration, Package: "./b"})
 
-		if got := namingLines(stderr.String(), path); got != 1 {
-			t.Errorf("stderr names %s on %d lines, want once:\n%s", path, got, stderr)
+		if len(h.appends) != 1 {
+			t.Errorf("appends = %v, want only the line before Close", h.appends)
+		}
+		if got := strings.Count(string(tm.Bytes()), "\n"); got != 2 {
+			t.Errorf("Bytes() holds %d lines, want both:\n%s", got, tm.Bytes())
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr = %q, want nothing: Close is not a failure", stderr)
 		}
 	})
 }
@@ -300,19 +375,126 @@ func TestOpenTimingsNamesAnUncreatableFile(t *testing.T) {
 	t.Parallel()
 	stderr := &bytes.Buffer{}
 	path := filepath.Join(t.TempDir(), TimingsName)
-	if err := os.Mkdir(path, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	tm := OpenTimings(path, stderr)
+	h := &memHost{writeErr: errors.New("is a directory")}
+	tm := OpenTimings(path, h.host(), stderr)
 	tm.Add(Timing{Tier: TierIntegration, Package: "./a"})
 	tm.Close()
 
 	if got := namingLines(stderr.String(), path); got != 1 {
 		t.Errorf("stderr names %s on %d lines, want once:\n%s", path, got, stderr)
 	}
+	if len(h.appends) != 0 {
+		t.Errorf("appends = %v, want none after a file that was not created", h.appends)
+	}
 	if want := 1; strings.Count(string(tm.Bytes()), "\n") != want {
 		t.Errorf("Bytes() = %q, want the line kept", tm.Bytes())
 	}
+}
+
+// TestTimingsGoThroughTheirHost: a run's timings file is created, appended to
+// and replaced through the host it was opened with, so a fake host sees every
+// write and no file reaches the disk.
+func TestTimingsGoThroughTheirHost(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, TimingsName)
+	h := &memHost{}
+	tm := OpenTimings(filepath.Join(dir, "log", TimingsName), h.host(), &bytes.Buffer{})
+	tm.Add(Timing{Tier: TierIntegration, Package: "./a"})
+	tm.Add(Timing{Tier: TierIntegration, Package: "./b"})
+	tm.Replace(path, h.host())
+
+	if _, err := os.Stat(filepath.Join(dir, "log", TimingsName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the run's own file reached the disk: %v", err)
+	}
+	if got := string(h.files[path]); got != string(tm.Bytes()) {
+		t.Errorf("replaced file = %q, want the run's lines %q", got, tm.Bytes())
+	}
+	if len(h.appends) != 2 {
+		t.Errorf("appends = %v, want one per line", h.appends)
+	}
+}
+
+// TestTimingsReplaceFailures: a replace whose rename or write fails names the
+// failure once, leaves the earlier persistent file as it was and removes the
+// temp file it made. Two replaces of one file never share a temp file, so a
+// run cannot overwrite another's in-flight temp.
+func TestTimingsReplaceFailures(t *testing.T) {
+	t.Parallel()
+	t.Run("a failed rename keeps the earlier file and removes the temp file", func(t *testing.T) {
+		t.Parallel()
+		stderr := &bytes.Buffer{}
+		dir := t.TempDir()
+		persistent := filepath.Join(dir, TimingsName)
+		earlier := []byte(`{"tier":"an earlier run"}` + "\n")
+		h := &memHost{renameErr: errors.New("rename refused")}
+		h.files = map[string][]byte{persistent: earlier}
+		tm := OpenTimings(filepath.Join(dir, "log", TimingsName), h.host(), stderr)
+		tm.Add(Timing{Tier: TierIntegration, Package: "./a"})
+		tm.Replace(persistent, h.host())
+
+		if got := namingLines(stderr.String(), persistent); got != 1 {
+			t.Errorf("stderr names %s on %d lines, want once:\n%s", persistent, got, stderr)
+		}
+		if !strings.Contains(stderr.String(), "timings: replace "+persistent) {
+			t.Errorf("stderr = %q, want the failure named as a replace", stderr)
+		}
+		if got := h.files[persistent]; string(got) != string(earlier) {
+			t.Errorf("persistent file = %q, want the earlier run's %q", got, earlier)
+		}
+		tmp := persistentWrites(h.writes, filepath.Join(dir, "log", TimingsName))
+		if len(tmp) != 1 || tmp[0] == persistent {
+			t.Fatalf("temp writes = %v, want one temp file beside %s", tmp, persistent)
+		}
+		if !slices.Equal(h.removes, tmp) {
+			t.Errorf("removes = %v, want the temp file %v removed", h.removes, tmp)
+		}
+		if _, ok := h.files[tmp[0]]; ok {
+			t.Errorf("temp file %s still exists after a failed rename", tmp[0])
+		}
+	})
+	t.Run("a failed write removes the temp file it could not finish", func(t *testing.T) {
+		t.Parallel()
+		stderr := &bytes.Buffer{}
+		dir := t.TempDir()
+		persistent := filepath.Join(dir, TimingsName)
+		h := &memHost{}
+		tm := OpenTimings(filepath.Join(dir, "log", TimingsName), h.host(), stderr)
+		h.writeErr = errors.New("disk full")
+		tm.Replace(persistent, h.host())
+
+		if got := namingLines(stderr.String(), persistent); got != 1 {
+			t.Errorf("stderr names %s on %d lines, want once:\n%s", persistent, got, stderr)
+		}
+		tmp := persistentWrites(h.writes, filepath.Join(dir, "log", TimingsName))
+		if len(tmp) != 1 || !slices.Equal(h.removes, tmp) {
+			t.Errorf("removes = %v, want the temp file %v removed", h.removes, tmp)
+		}
+		if len(h.renames) != 0 {
+			t.Errorf("renames = %v, want none after a failed write", h.renames)
+		}
+	})
+	t.Run("two replaces of one file never share a temp file", func(t *testing.T) {
+		t.Parallel()
+		stderr := &bytes.Buffer{}
+		dir := t.TempDir()
+		persistent := filepath.Join(dir, TimingsName)
+		h := &memHost{renameErr: errors.New("rename refused")}
+		tm := OpenTimings(filepath.Join(dir, "log", TimingsName), h.host(), stderr)
+		tm.Replace(persistent, h.host())
+		tm.Replace(persistent, h.host())
+
+		tmp := persistentWrites(h.writes, filepath.Join(dir, "log", TimingsName))
+		if len(tmp) != 2 {
+			t.Fatalf("temp writes = %v, want one per replace", tmp)
+		}
+		if tmp[0] == tmp[1] {
+			t.Errorf("both replaces wrote temp file %s", tmp[0])
+		}
+		if !slices.Equal(h.removes, tmp) {
+			t.Errorf("removes = %v, want each temp file %v removed", h.removes, tmp)
+		}
+	})
 }
 
 // TestParseWalls: a timings file's lines become the wall each tier and package

@@ -669,7 +669,7 @@ func TestWorkersKeepEachPackagesLogAndTiming(t *testing.T) {
 	at := time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC)
 	r := &Runner{
 		Exec: fake.exec, LogDir: logDir, Timeout: "7m", Stderr: feed,
-		Timings: OpenTimings(filepath.Join(logDir, TimingsName), feed),
+		Timings: OpenTimings(filepath.Join(logDir, TimingsName), ProcessHost, feed),
 		Now:     func() time.Time { return at }, Jobs: 3,
 		// The plan starts ./a, ./b, ./c in that order; the test finishes them
 		// the other way round, so the file's order is read as completion order.

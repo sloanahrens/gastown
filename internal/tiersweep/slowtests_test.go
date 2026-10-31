@@ -160,7 +160,7 @@ func TestSlowTestsReachTimings(t *testing.T) {
 		Stderr:  stderr,
 		JSON:    true,
 		Now:     clock.now,
-		Timings: OpenTimings(filepath.Join(logDir, TimingsName), stderr),
+		Timings: OpenTimings(filepath.Join(logDir, TimingsName), ProcessHost, stderr),
 	}
 	r.Tier(TierIntegration, ".", nil, nil, []string{pkg})
 	r.Timings.Close()
