@@ -369,6 +369,11 @@ exit /b 0
 			assertTargetRig("review-only metadata update", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
 		case strings.Contains(args, "update "+newBeadID) && strings.Contains(args, "--description="):
 			assertTargetRig("description update", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
+		case strings.Contains(args, "dep list "+newBeadID+" ") && strings.Contains(args, "--direction=up"):
+			// The existing-molecule check reads the bead's dependents through the
+			// seam's DepListUp, which is this bd call (gt-p85pw.106): it is a read
+			// of the target bead and must be pinned to the target rig like the rest.
+			assertTargetRig("dependents read", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
 		case args == "--version" || strings.HasPrefix(args, "version") || strings.Contains(args, " version") || strings.Contains(args, "show gt-rig-") || strings.Contains(args, "show mol-"):
 			// Explicitly exempt non-target-bead lookups; every gt-new123 operation
 			// above must still prove it is pinned to the gastown database.
