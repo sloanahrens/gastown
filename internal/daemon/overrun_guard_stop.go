@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -1024,12 +1023,6 @@ func (d *Daemon) overrunStopSession(seat overrunSeat) error {
 // push does, since a retry may read it.
 var errSandboxRecordCorrupt = errors.New("sandbox record is corrupt")
 
-// overrunSandboxNameRe is the rule a sandbox record's session name must pass: it
-// mirrors sessionNameRe in internal/session/sandbox_registry.go, which
-// WriteSandboxRecord enforces. A name it fails has no record, so the lookup
-// skips it, and overrunSandboxSession logs that skip.
-var overrunSandboxNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-
 // overrunRemoveSandbox removes the sandbox a stopped seat ran in, pushing its
 // commits first (polecat.RemoveStoppedSandbox). pusher and deleter nil are the
 // linked openshell hooks. No record found means nothing to remove and the stop
@@ -1044,12 +1037,7 @@ func (d *Daemon) overrunRemoveSandbox(seat overrunSeat, pusher, deleter func(tow
 	}
 	_, sandboxed, err := session.ReadSandboxRecord(d.config.TownRoot, sessionName)
 	if err != nil {
-		var syntax *json.SyntaxError
-		var typ *json.UnmarshalTypeError
-		if errors.As(err, &syntax) || errors.As(err, &typ) {
-			return fmt.Errorf("sandbox %s: %w: %w", sessionName, errSandboxRecordCorrupt, err)
-		}
-		return fmt.Errorf("sandbox %s: %w", sessionName, err)
+		return overrunRecordReadError(sessionName, err)
 	}
 	if !sandboxed {
 		return nil
@@ -1074,7 +1062,7 @@ func (d *Daemon) overrunSandboxSession(seat overrunSeat) (string, error) {
 		return d.overrunScanSandboxSession(seat)
 	}
 	name := session.PolecatSessionName(reg.PrefixForRig(seat.Rig), seat.Polecat)
-	if !overrunSandboxNameRe.MatchString(name) {
+	if !session.ValidSandboxSessionName(name) {
 		d.logger.Printf("overrun_guard: WARNING: sandbox of %s: session name %q is not a sandbox record name, so the sandbox step is skipped", seat.Polecat, name)
 		return "", nil
 	}
@@ -1084,8 +1072,10 @@ func (d *Daemon) overrunSandboxSession(seat overrunSeat) (string, error) {
 // overrunScanSandboxSession finds the sandbox record of a seat on a rig the
 // registry does not list. One record naming the seat's rig and polecat is its
 // sandbox; none is a host seat, logged as a warning. Several records name it,
-// or a record cannot be read (it may be the seat's own), so the lookup cannot
-// tell and holds: the seat's commits may be unpushed.
+// or a record that may be the seat's own (its name ends in the polecat's) cannot
+// be read, so the lookup cannot tell and holds: the seat's commits may be
+// unpushed. A record that cannot be read and is named for another polecat is
+// skipped with a warning.
 func (d *Daemon) overrunScanSandboxSession(seat overrunSeat) (string, error) {
 	entries, err := os.ReadDir(session.SandboxRegistryDir(d.config.TownRoot))
 	if errors.Is(err, os.ErrNotExist) {
@@ -1101,7 +1091,15 @@ func (d *Daemon) overrunScanSandboxSession(seat overrunSeat) (string, error) {
 		name := strings.TrimSuffix(e.Name(), ".json")
 		rec, ok, err := session.ReadSandboxRecord(d.config.TownRoot, name)
 		if err != nil {
-			return "", fmt.Errorf("sandbox of %s/%s: cannot read record %s: %w", seat.Rig, seat.Polecat, name, err)
+			if !overrunMayBeSeatsRecord(name, seat) {
+				// Another seat's record that does not read cannot hold this
+				// seat's stop: its name is not this polecat's, so it is not
+				// this seat's sandbox. Holding on it would block every seat of
+				// an unlisted rig for as long as the file stays broken.
+				d.logger.Printf("overrun_guard: WARNING: sandbox of %s/%s: record %s cannot be read (%v) and its name is not the seat's, so it is skipped", seat.Rig, seat.Polecat, name, err)
+				continue
+			}
+			return "", overrunRecordReadError(name, err)
 		}
 		if ok && rec.Rig == seat.Rig && rec.Polecat == seat.Polecat {
 			found = append(found, name)
@@ -1116,6 +1114,26 @@ func (d *Daemon) overrunScanSandboxSession(seat overrunSeat) (string, error) {
 	default:
 		return "", fmt.Errorf("sandbox of %s/%s: %d records name it (%s), cannot tell which to remove", seat.Rig, seat.Polecat, len(found), strings.Join(found, ", "))
 	}
+}
+
+// overrunMayBeSeatsRecord reports whether a sandbox record named name could be
+// seat's: a session name is a rig prefix, a dash and the polecat's name. A
+// record whose name ends otherwise is another seat's.
+func overrunMayBeSeatsRecord(name string, seat overrunSeat) bool {
+	return name == seat.Polecat || strings.HasSuffix(name, "-"+seat.Polecat)
+}
+
+// overrunRecordReadError is the error for a sandbox record that cannot be read:
+// a record that does not parse is errSandboxRecordCorrupt, which the stop hands
+// back with a note and keeps the seat paused; any other failure (an I/O error)
+// is returned as it is, which holds the stop, since a retry may read it.
+func overrunRecordReadError(name string, err error) error {
+	var syntax *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	if errors.As(err, &syntax) || errors.As(err, &typ) {
+		return fmt.Errorf("sandbox %s: %w: %w", name, errSandboxRecordCorrupt, err)
+	}
+	return fmt.Errorf("sandbox %s: %w", name, err)
 }
 
 // overrunStopReason is what the supervisor's action log records for the kill:

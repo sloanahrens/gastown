@@ -128,6 +128,11 @@ func validSessionName(session string) bool {
 	return session != "." && session != ".." && sessionNameRe.MatchString(session)
 }
 
+// ValidSandboxSessionName reports whether session may name a sandbox record,
+// the rule WriteSandboxRecord enforces. A caller that finds a record by name
+// asks it here and never keeps a copy of the pattern.
+func ValidSandboxSessionName(session string) bool { return validSessionName(session) }
+
 // SandboxExecPrefix is the wrapper argv that runs a command inside the
 // sandbox of session on gateway: the exec prefix a routed tmux client uses.
 func SandboxExecPrefix(gateway, session string) []string {

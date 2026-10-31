@@ -913,15 +913,6 @@ func TestOverrunRemoveSandbox_UnlistedRigHoldsWhenItCannotTellTheRecord(t *testi
 				t.Fatal(err)
 			}
 		}},
-		{name: "another_records_does_not_parse", setup: func(t *testing.T, townRoot string) {
-			dir := session.SandboxRegistryDir(townRoot)
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, "gt-other.json"), []byte("{not json"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}},
 		{name: "two_records_name_the_seat", setup: func(t *testing.T, townRoot string) {
 			for _, name := range []string{overrunStopSessionName, "old-" + stopSeat.Polecat} {
 				rec := session.SandboxRecord{Session: name, Rig: stopSeat.Rig, Polecat: stopSeat.Polecat}
@@ -954,6 +945,69 @@ func TestOverrunRemoveSandbox_UnlistedRigHoldsWhenItCannotTellTheRecord(t *testi
 				t.Errorf("calls = %q, want none while the seat's record is unknown", calls)
 			}
 		})
+	}
+}
+
+// A record that cannot be read and is named for another polecat is not this
+// seat's sandbox, so it does not hold this seat's stop: the seat's own record is
+// still found, pushed and removed. Holding on it would block every seat of an
+// unlisted rig for as long as the file stays broken.
+func TestOverrunRemoveSandbox_AnotherSeatsUnreadableRecordDoesNotHoldTheStop(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
+	seedStopSandboxRecord(t, d)
+	dir := session.SandboxRegistryDir(d.config.TownRoot)
+	if err := os.WriteFile(filepath.Join(dir, "gt-other.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	err := d.overrunRemoveSandbox(stopSeat,
+		func(string, session.SandboxRecord) error {
+			calls = append(calls, "push")
+			return nil
+		},
+		func(string, session.SandboxRecord) error {
+			calls = append(calls, "delete")
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("overrunRemoveSandbox = %v: another seat's broken record held this seat's stop", err)
+	}
+	if got, want := strings.Join(calls, ","), "push,delete"; got != want {
+		t.Errorf("calls = %q, want %q: the seat's own sandbox is pushed then removed", got, want)
+	}
+}
+
+// The seat's own record on an unlisted rig, when it does not parse, is handed
+// back with a note like a listed rig's: it is a corrupt record, not a hold that
+// repeats every tick, and nothing is pushed or removed.
+func TestOverrunRemoveSandbox_UnlistedRigSeatsOwnCorruptRecordIsHandedBack(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
+	dir := session.SandboxRegistryDir(d.config.TownRoot)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, overrunStopSessionName+".json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	err := d.overrunRemoveSandbox(stopSeat,
+		func(string, session.SandboxRecord) error {
+			calls = append(calls, "push")
+			return nil
+		},
+		func(string, session.SandboxRecord) error {
+			calls = append(calls, "delete")
+			return nil
+		})
+	if !errors.Is(err, errSandboxRecordCorrupt) {
+		t.Fatalf("overrunRemoveSandbox = %v, want errSandboxRecordCorrupt for the seat's own broken record", err)
+	}
+	if len(calls) != 0 {
+		t.Errorf("calls = %q, want none for a corrupt record", calls)
 	}
 }
 
