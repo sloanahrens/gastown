@@ -362,12 +362,14 @@ func TestWorkersOneJobKeepsTheSerialOutput(t *testing.T) {
 	}
 }
 
-// TestWorkersStartLongestFirst: a run given the previous walls starts the
-// longest packages first, and a run given none starts them in list order. The
-// first wave's workers start concurrently, so what the runner owes there is the
-// set of the longest packages, not the order their starts are recorded in; every
-// later start follows the plan one release at a time, and each place is the
-// fake's own record of the command's start (gt-br6gd).
+// TestWorkersStartLongestFirst: a run given the previous walls hands the
+// longest packages out first, in that order even inside the first wave, and a
+// run given none hands them out in list order. The order is read where the pool
+// hands each package to Exec, not where its goroutine enters it: the first
+// wave's workers start concurrently, so their start record has no order, and
+// the handout is the order the pool owes (gt-m4vhl, gt-br6gd). Every later
+// start follows the plan one release at a time, and each of those is the fake's
+// own record of the command's start.
 func TestWorkersStartLongestFirst(t *testing.T) {
 	t.Parallel()
 	const jobs = 3
@@ -403,21 +405,20 @@ func TestWorkersStartLongestFirst(t *testing.T) {
 				finished: make(chan string, len(tc.pkgs)),
 			}
 			r := newWorkerRunner(t, fake.exec, jobs)
+			r.Began = fake.began
 			r.Walls = tc.walls
 
 			finished := make(chan Counts, 1)
 			go func() { finished <- r.Tier(TierIntegration, ".", nil, nil, tc.pkgs) }()
 
-			first := make([]string, 0, jobs)
+			// Fill the first wave and hold it. The pool hands out no more than
+			// Jobs packages, and only after the one before it has begun, so its
+			// handoff record is the whole wave once every command has started.
 			for i := 0; i < jobs; i++ {
-				first = append(first, waitOrFail(t, fake.started, "a command of the first wave to start"))
+				waitOrFail(t, fake.started, "a command of the first wave to start")
 			}
-			sortedFirst := append([]string(nil), first...)
-			sort.Strings(sortedFirst)
-			wantFirst := append([]string(nil), tc.want[:jobs]...)
-			sort.Strings(wantFirst)
-			if !reflect.DeepEqual(sortedFirst, wantFirst) {
-				t.Errorf("the first wave started %q, want the longest %q (as a set: concurrent starts have no order)", first, tc.want[:jobs])
+			if got := fake.beginOrder(); !reflect.DeepEqual(got, tc.want[:jobs]) {
+				t.Errorf("the first wave handed out %q, want the longest %q in that order", got, tc.want[:jobs])
 			}
 
 			// Freeing a slot starts the next package the plan names, one at a
