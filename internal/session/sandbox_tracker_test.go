@@ -371,8 +371,8 @@ func TestOpenShellPrepareStagesTheSeatTokenAsOneFile(t *testing.T) {
 			t.Errorf("the agent's environment carries the seat token in %s", k)
 		}
 	}
-	if prepared.Env["TRACKER_TOKEN_FILE"] != sandboxTrackerTokenFile || prepared.Env["TRACKER_URL"] == "" {
-		t.Errorf("Prepared.Env tracker values = %q, want the token file %s and the URL", prepared.Env, sandboxTrackerTokenFile)
+	if prepared.Env["TRACKER_TOKEN_FILE"] != SandboxTrackerTokenFile || prepared.Env["TRACKER_URL"] == "" {
+		t.Errorf("Prepared.Env tracker values = %q, want the token file %s and the URL", prepared.Env, SandboxTrackerTokenFile)
 	}
 	for _, row := range fake.Envs() {
 		for _, kv := range row {
@@ -383,13 +383,19 @@ func TestOpenShellPrepareStagesTheSeatTokenAsOneFile(t *testing.T) {
 	}
 }
 
+// openshellTrackerRealToken is the tracker the tests hand the archive: the
+// test token, as trackerFor would pass it.
+func openshellTrackerRealToken() sandboxTracker {
+	return sandboxTracker{URL: "http://tracker.test:7600", AllowHTTPHost: "tracker.test", token: []byte(openshellSeatTokenValue)}
+}
+
 // openshellArchiveWithToken builds the runtime archive for a tracker-routed
 // seat: the test town's spawn, with a tracker that stages the test token.
 func openshellArchiveWithToken(t *testing.T) map[string]runtimeEntry {
 	t.Helper()
 	town, work := openshellTown(t)
 	data, err := buildRuntimeArchiveLogging(openshellSpawn(town, work), openshellTestGitEmail, io.Discard, openshellPromptRender, nil,
-		sandboxTracker{URL: "http://tracker.test:7600", AllowHTTPHost: "tracker.test", token: []byte(openshellSeatTokenValue)})
+		openshellTrackerRealToken())
 	if err != nil {
 		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
 	}
@@ -432,6 +438,102 @@ func TestRuntimeArchiveHoldsOnlyTheSeatToken(t *testing.T) {
 		}
 		if strings.Contains(entry.body, openshellSeatTokenValue) {
 			t.Errorf("archive entry %s carries the seat token; only %s may", name, runtimeTrackerToken)
+		}
+	}
+}
+
+// A spawn that asks for the placeholder stages SandboxTrackerPlaceholder in the
+// token file at 0400, and the real token reaches no archive entry (the settings
+// file included), no environment value and no settings value (gt-874y8).
+func TestTrackerPlaceholderArchiveHoldsNoRealToken(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	spec := openshellSpawn(town, work)
+	spec.TrackerTokenPlaceholder = true
+	tracker := openshellTrackerRealToken()
+
+	data, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil, tracker)
+	if err != nil {
+		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
+	}
+	entries := untarRuntime(t, data)
+	token, ok := entries[runtimeTrackerToken]
+	if !ok {
+		t.Fatalf("runtime archive entries = %v, want %s", entries, runtimeTrackerToken)
+	}
+	if token.body != SandboxTrackerPlaceholder {
+		t.Errorf("%s = %q, want the placeholder %q", runtimeTrackerToken, token.body, SandboxTrackerPlaceholder)
+	}
+	if token.mode != 0o400 {
+		t.Errorf("%s mode = %o, want 400", runtimeTrackerToken, token.mode)
+	}
+	for name, entry := range entries {
+		if strings.Contains(entry.body, openshellSeatTokenValue) {
+			t.Errorf("archive entry %s carries the real seat token; a placeholder spawn stages none", name)
+		}
+	}
+
+	b, _ := openshellTestBackend(town, openshellTestProfile, &sandbox.Fake{})
+	cs, err := b.createSpec(spec, tracker)
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	for k, v := range cs.Env {
+		if strings.Contains(v, openshellSeatTokenValue) {
+			t.Errorf("the environment carries the real seat token in %s", k)
+		}
+	}
+	if cs.Env["TRACKER_TOKEN_FILE"] != SandboxTrackerTokenFile {
+		t.Errorf("TRACKER_TOKEN_FILE = %q, want %s", cs.Env["TRACKER_TOKEN_FILE"], SandboxTrackerTokenFile)
+	}
+}
+
+// With the switch off the archive is today's: the token file holds the real
+// token at 0400, the placeholder appears nowhere, and no other entry differs
+// from the placeholder spawn's, so nothing changes before the per-seat
+// provider is wired (gt-874y8).
+func TestTrackerSwitchOffKeepsTheRealTokenFile(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	spec := openshellSpawn(town, work)
+	if spec.TrackerTokenPlaceholder {
+		t.Fatal("a spawn that was never asked for the placeholder has the switch on")
+	}
+	tracker := openshellTrackerRealToken()
+	off, err := buildRuntimeArchiveLogging(spec, openshellTestGitEmail, io.Discard, openshellPromptRender, nil, tracker)
+	if err != nil {
+		t.Fatalf("buildRuntimeArchiveLogging: %v", err)
+	}
+	entries := untarRuntime(t, off)
+	token, ok := entries[runtimeTrackerToken]
+	if !ok {
+		t.Fatalf("runtime archive entries = %v, want %s", entries, runtimeTrackerToken)
+	}
+	if token.body != openshellSeatTokenValue {
+		t.Errorf("%s = %q, want the real seat token", runtimeTrackerToken, token.body)
+	}
+	if token.mode != 0o400 {
+		t.Errorf("%s mode = %o, want 400", runtimeTrackerToken, token.mode)
+	}
+	for name, entry := range entries {
+		if strings.Contains(entry.body, SandboxTrackerPlaceholder) {
+			t.Errorf("archive entry %s carries the placeholder; the switch is off", name)
+		}
+	}
+
+	on := spec
+	on.TrackerTokenPlaceholder = true
+	onData, err := buildRuntimeArchiveLogging(on, openshellTestGitEmail, io.Discard, openshellPromptRender, nil, tracker)
+	if err != nil {
+		t.Fatalf("buildRuntimeArchiveLogging with the placeholder: %v", err)
+	}
+	onEntries := untarRuntime(t, onData)
+	for name, entry := range entries {
+		if name == runtimeTrackerToken {
+			continue
+		}
+		if want, ok := onEntries[name]; !ok || want != entry {
+			t.Errorf("archive entry %s differs from the placeholder spawn's; only the token may", name)
 		}
 	}
 }

@@ -63,7 +63,13 @@ type SpawnSpec struct {
 	// one. The spawn stamps it with the stored prompt's hash, joining a
 	// landing's rejection to the prompt version its author had (gt-2lu00).
 	WorkBeadID string
-	Profile    Profile
+	// TrackerTokenPlaceholder stages SandboxTrackerPlaceholder in a
+	// tracker-routed sandbox's token file instead of the seat's real token,
+	// so no archive, environment or settings value carries the real token.
+	// False keeps today's 0400 file holding the real token; nothing sets it
+	// true until the per-seat provider is wired (gt-874y8).
+	TrackerTokenPlaceholder bool
+	Profile                 Profile
 	// Env is the startup environment the backend must set on the sandbox
 	// (the GT_* identity, the Dolt endpoint, the agent preset's non-secret
 	// vars). The tmux backend ignores it: StartSession sets the same vars.
