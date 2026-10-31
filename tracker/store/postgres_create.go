@@ -225,6 +225,12 @@ func (p *Postgres) GetIssues(ctx context.Context, ids []string) (map[string]api.
 	if err := fillDependencies(ctx, p.pool, found, out); err != nil {
 		return nil, err
 	}
+	for id, is := range out {
+		// A named read answers an empty dependents list as [], so a client can
+		// tell it from a read that never filled the field.
+		is.Dependents = []api.IssueDep{}
+		out[id] = is
+	}
 	if err := fillDependents(ctx, p.pool, found, out); err != nil {
 		return nil, err
 	}

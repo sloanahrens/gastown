@@ -513,3 +513,41 @@ func TestDepListUpRefusesAMissingIssueAndAFailedRead(t *testing.T) {
 		t.Errorf("DepListUp on a failed read = %+v, %v; want nil and an error", deps, err)
 	}
 }
+
+// A named read sends dependents as an array, so a Dependents field that is
+// absent or null means the store never filled it. DepListUp must refuse that
+// with an error, not read it as "no dependents", and must not ask again.
+func TestDepListUpRefusesADependentsFieldTheStoreDidNotSend(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"absent": `{"id":"gt-x","title":"target","status":"open","priority":2}`,
+		"null":   `{"id":"gt-x","title":"target","status":"open","priority":2,"dependents":null}`,
+	} {
+		var asked atomic.Int32
+		c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+			asked.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		})
+		if deps, err := c.DepListUp("gt-x", ""); err == nil || deps != nil {
+			t.Errorf("DepListUp with dependents %s = %+v, %v; want nil and an error naming the gap", name, deps, err)
+		}
+		if n := asked.Load(); n != 1 {
+			t.Errorf("DepListUp with dependents %s sent %d requests, want one Show and no second read", name, n)
+		}
+	}
+}
+
+// An empty array is the store's answer that nothing depends on the issue, so
+// DepListUp returns an empty list and no error.
+func TestDepListUpReadsAnEmptyDependentsArrayAsNoDependents(t *testing.T) {
+	t.Parallel()
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"gt-x","title":"target","status":"open","priority":2,"dependents":[]}`))
+	})
+	deps, err := c.DepListUp("gt-x", "")
+	if err != nil || deps == nil || len(deps) != 0 {
+		t.Errorf("DepListUp with dependents [] = %+v, %v; want an empty list and no error", deps, err)
+	}
+}

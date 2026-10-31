@@ -238,13 +238,15 @@ func (c *Client) DepList(id, depType string) ([]beads.IssueDep, error) {
 // DepListUp returns the issues that depend on id with relation depType ("" for
 // any). The store fills Dependents on every issue it reads, wisps included, so
 // one Show answers the read; a missing issue is the error Show returns.
-// An empty answer and an unfilled one both decode as nil, because the wire tag
-// on Dependents is omitempty; the store fills Dependents on every issue it
-// reads, so an empty answer here means no dependents.
+// An empty array on the wire is no dependents. A Dependents field the tracker
+// did not send is an error, not an empty list: the answer is unknown.
 func (c *Client) DepListUp(id, depType string) ([]beads.IssueDep, error) {
 	a, err := c.tc.Show(ctx(), id)
 	if err != nil {
 		return nil, mapErr(err)
+	}
+	if a.Dependents == nil {
+		return nil, fmt.Errorf("trackerclient: DepListUp(%s): the tracker sent no dependents field, so the dependents are unknown, not none", id)
 	}
 	out := []beads.IssueDep{}
 	for _, d := range deps(a.Dependents) {

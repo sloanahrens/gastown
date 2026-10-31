@@ -20,6 +20,7 @@ func init() {
 	register(Case{Name: "opposite blocking links added at the same instant never both succeed", Run: depsCycleRace})
 	register(Case{Name: "an external target needs no row and is left out of the list", Run: depsExternal})
 	register(Case{Name: "a dependent of an external:<rig>:<id> target is listed by its id once, and a near-miss suffix is not", Fake: true, Run: depsExternalDependents})
+	register(Case{Name: "a named read of an issue nothing depends on sends an empty dependents list, not an unfilled one", Run: depsNoDependentsIsEmpty})
 	register(Case{Name: "a parent-child link sets and clears the parent", Run: depsParentChild})
 	register(Case{Name: "an open blocker stops close unless forced", Run: depsBlockerFence})
 	register(Case{Name: "delete removes links to the deleted issue and list counts links", Run: depsDeleteAndCounts})
@@ -161,6 +162,17 @@ func depsExternalDependents(t *testing.T, s store.Store) {
 	slices.Sort(want)
 	if !slices.Equal(rows, want) {
 		t.Errorf("Dependents of %s = %v, want %v (both listed once, at the plain relation; near miss absent)", target.ID, rows, want)
+	}
+}
+
+// depsNoDependentsIsEmpty pins the named read's answer for an issue nothing
+// depends on: Dependents is an empty list, not nil. A client reads nil as an
+// unfilled field (DepListUp refuses it), so the store must not send nil here.
+func depsNoDependentsIsEmpty(t *testing.T, s store.Store) {
+	a := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "nothing depends on me"})
+	got := mustGet(t, s, a.ID)
+	if got.Dependents == nil || len(got.Dependents) != 0 {
+		t.Errorf("Dependents of %s = %#v, want an empty list: a named read fills the field even when nothing depends on the issue", a.ID, got.Dependents)
 	}
 }
 
