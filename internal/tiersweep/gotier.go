@@ -91,6 +91,10 @@ type Runner struct {
 	// that took slowTest or longer is written to Timings as a test line
 	// (gt-juo5e). False keeps the command's own output as it comes.
 	JSON bool
+	// Stream, when not nil, makes the pipe a -json command writes into, as
+	// io.Pipe does by default. A test injects a stream whose read fails, the way
+	// a capture that breaks does (gt-juo5e).
+	Stream func() (io.ReadCloser, io.WriteCloser)
 	// Shards is the package names (as printed) that run as K shards of one test
 	// binary, from shard.txt (gt-rw118). A package with no entry runs as one
 	// go test, as it always has.
@@ -117,7 +121,17 @@ type Counts struct {
 // packages ran in; a run with Jobs of one or less prints each package's line
 // where the package is listed, as the sweep always has.
 func (r *Runner) Tier(tier, dir string, prefix, args, pkgs []string) Counts {
+	return r.TierJSON(r.JSON, tier, dir, prefix, args, pkgs)
+}
+
+// TierJSON is Tier with the -json choice named by the call instead of read from
+// r.JSON, so one Runner runs a tier with the stream and the next without it and
+// no caller toggles the shared field (gt-juo5e).
+func (r *Runner) TierJSON(json bool, tier, dir string, prefix, args, pkgs []string) Counts {
 	tasks := r.tasks(tier, dir, pkgs, r.passed())
+	for _, t := range tasks {
+		t.json = json
+	}
 	r.runTasks(tier, dir, prefix, args, tasks)
 	return tally(tasks)
 }
@@ -142,7 +156,10 @@ type task struct {
 	skip    bool
 	resume  bool
 	refuse  bool
-	result  packageResult
+	// json is whether the package's command prints the -json stream: set by the
+	// tier's call (Runner.TierJSON).
+	json   bool
+	result packageResult
 	// group is set on a package that runs as shards: it holds the shards and
 	// the package's verdict (shardrun.go). Nil for a package run as one command.
 	group *shardGroup
@@ -329,7 +346,7 @@ func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task, be
 		return packageResult{log: log, createErr: err}
 	}
 	argv := append(append([]string{}, prefix...), "go", "test", "-count=1", "-timeout", r.Timeout)
-	if r.JSON {
+	if t.json {
 		argv = append(argv, "-json")
 	}
 	argv = append(argv, args...)
@@ -339,7 +356,7 @@ func (r *Runner) runPackage(tier, dir string, prefix, args []string, t *task, be
 	argv = append(argv, t.pkg)
 	start := r.now()
 	beganOnce()
-	code, tests, logErr := r.execLogged(dir, argv, f)
+	code, tests, logErr := r.execLogged(t.json, dir, argv, f)
 	closeErr := f.Close()
 	return packageResult{ran: true, code: code, start: start, log: log, closeErr: closeErr, logErr: logErr, tests: tests}
 }
@@ -359,8 +376,8 @@ func (r *Runner) createLog(path string) (io.WriteCloser, error) {
 // events for the slow-test lines. A stream that cannot be read or captured
 // leaves the command's exit code alone and returns that error, so the caller can
 // fail a package whose log does not vouch for what ran (gt-juo5e).
-func (r *Runner) execLogged(dir string, argv []string, w io.Writer) (int, []TestTime, error) {
-	if !r.JSON {
+func (r *Runner) execLogged(json bool, dir string, argv []string, w io.Writer) (int, []TestTime, error) {
+	if !json {
 		return r.Exec(dir, r.Env, argv, w), nil, nil
 	}
 	return r.execJSON(dir, argv, w)
@@ -371,7 +388,7 @@ func (r *Runner) execLogged(dir string, argv []string, w io.Writer) (int, []Test
 // and the terminal events of its top-level tests come back. A shard always reads
 // its stream this way, whatever JSON the runner is set to (gt-rw118).
 func (r *Runner) execJSON(dir string, argv []string, w io.Writer) (int, []TestTime, error) {
-	pr, pw := io.Pipe()
+	pr, pw := r.pipe()
 	type parsed struct {
 		tests []TestTime
 		err   error
@@ -384,6 +401,9 @@ func (r *Runner) execJSON(dir string, argv []string, w io.Writer) (int, []TestTi
 		}
 		if err != nil {
 			err = fmt.Errorf("capture -json output: %w", err)
+			// Nothing reads the rest of the stream now, so the command's writes
+			// must fail rather than block on the pipe.
+			_ = pr.Close()
 		}
 		done <- parsed{tests: tests, err: err}
 	}()
@@ -396,6 +416,16 @@ func (r *Runner) execJSON(dir string, argv []string, w io.Writer) (int, []TestTi
 		return code, p.tests, p.err
 	}
 	return code, p.tests, nil
+}
+
+// pipe is the stream a -json command writes into: the injected one when a test
+// names one, an io.Pipe otherwise.
+func (r *Runner) pipe() (io.ReadCloser, io.WriteCloser) {
+	if r.Stream != nil {
+		return r.Stream()
+	}
+	pr, pw := io.Pipe()
+	return pr, pw
 }
 
 // report writes the failure a package's result names and records its timing.

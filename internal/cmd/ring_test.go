@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -208,31 +209,70 @@ func TestRingForgeWithoutAKeyExitsOneAndWritesNothing(t *testing.T) {
 	}
 }
 
-// TestRingVerbsNeverPrintTheKey runs every verb through a full cycle and
-// checks the key value appears in none of their stdout or error text.
+// ringRunVerb runs one verb of the set newRingVerbs builds, the constructor
+// gt's own registration uses, under a parent command as cobra runs it: cobra
+// prints a returned error to stderr. It returns what stdout and stderr got
+// together, and the error.
+func ringRunVerb(find func() (string, error), getenv func(string) string, verb string) (string, error) {
+	var out bytes.Buffer
+	parent := &cobra.Command{Use: "ring", SilenceUsage: true}
+	parent.AddCommand(newRingVerbs(find, getenv)...)
+	parent.SetOut(&out)
+	parent.SetErr(&out)
+	parent.SetArgs([]string{verb})
+	err := parent.Execute()
+	return out.String(), err
+}
+
+// TestRingVerbsNeverPrintTheKey runs every verb through the commands
+// newRingVerbs builds, with the key in the environment the verbs read, and
+// checks that each step printed what it should (so an empty capture cannot
+// pass) and that the key value appears in none of the output, stderr and
+// refusals included.
 func TestRingVerbsNeverPrintTheKey(t *testing.T) {
 	t.Parallel()
 	root := ringTestTown(t)
+	find := func() (string, error) { return root, nil }
+	steps := []struct{ verb, want string }{
+		{"status", "ring:"},
+		{"forge", "forged: the Ring is valid until"},
+		{"status", "wanes in"},
+		{"renew", "renewed: the Ring is valid until"},
+		{"remove", "removed the Ring"},
+		{"status", "ring:"},
+		{"renew", "no Ring; forge it"}, // no Ring left: refused, so the refusal reaches stderr
+	}
 	var all strings.Builder
-	steps := []struct {
-		run func(ringDeps, io.Writer) error
-		at  time.Time
-	}{
-		{runRingStatus, ringTestNow},
-		{runRingForge, ringTestNow},
-		{runRingStatus, ringTestNow},
-		{runRingStatus, ringTestNow.Add(37 * time.Hour)},
-		{runRingRenew, ringTestNow.Add(37 * time.Hour)},
-		{runRingRemove, ringTestNow.Add(37 * time.Hour)},
-		{runRingStatus, ringTestNow.Add(37 * time.Hour)},
-	}
-	for _, s := range steps {
-		out, err := ringRun(s.run, ringTestDeps(root, ringTestEnv, s.at))
-		all.WriteString(out)
-		if err != nil {
-			all.WriteString(err.Error())
+	for _, step := range steps {
+		out, _ := ringRunVerb(find, ringTestEnv, step.verb)
+		if !strings.Contains(out, step.want) {
+			t.Errorf("gt ring %s printed %q, want it to contain %q", step.verb, out, step.want)
 		}
+		all.WriteString(out)
 	}
+	// A waned Ring reports its state and the time since, and never the key.
+	waned := ringTestTown(t)
+	rec, err := ring.Sign(ring.Record{ForgedAt: ringTestNow.Add(-72 * time.Hour), ExpiresAt: ringTestNow.Add(-36 * time.Hour), ForgedBy: "test"}, []byte(ringTestKey))
+	if err != nil {
+		t.Fatalf("signing the waned Ring: %v", err)
+	}
+	if err := ring.Write(waned, rec); err != nil {
+		t.Fatalf("writing the waned Ring: %v", err)
+	}
+	wanedOut, _ := ringRunVerb(func() (string, error) { return waned, nil }, ringTestEnv, "status")
+	if !strings.Contains(wanedOut, "waned") || !strings.Contains(wanedOut, "ago") {
+		t.Errorf("gt ring status of a waned Ring printed %q, want it to say it waned and how long ago", wanedOut)
+	}
+	all.WriteString(wanedOut)
+	// A literal ring.key in settings is refused, and the refusal says so
+	// without echoing the literal.
+	literal := ringTestTown(t)
+	ringTestSettings(t, literal, ringTestKey)
+	out, err := ringRunVerb(func() (string, error) { return literal, nil }, ringTestEnv, "forge")
+	if err == nil || !strings.Contains(out, "Error:") {
+		t.Errorf("forge with a literal ring.key = %q, %v; want a refusal on stderr", out, err)
+	}
+	all.WriteString(out)
 	if strings.Contains(all.String(), ringTestKey) {
 		t.Fatalf("a verb printed the signing key (output redacted):\n%s", strings.ReplaceAll(all.String(), ringTestKey, "<key>"))
 	}
@@ -243,7 +283,7 @@ func TestRingVerbsNeverPrintTheKey(t *testing.T) {
 func TestRingVerbRefusesOutsideATown(t *testing.T) {
 	t.Parallel()
 	noTown := func() (string, error) { return "", errors.New("no mayor/town.json above the cwd") }
-	err := ringVerb(noTown, runRingForge)(&cobra.Command{}, nil)
+	err := ringVerb(noTown, ringTestEnv, runRingForge)(&cobra.Command{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
 		t.Fatalf("a verb outside a town = %v, want a refusal", err)
 	}
@@ -327,20 +367,38 @@ func TestRingRenewAndStatusRefuseAnUnreadableRing(t *testing.T) {
 	}
 }
 
-// TestRingHelpListsEveryVerb: gt ring --help names forge, renew, status and
-// remove, each with its one-line summary. The help func prints to the process
-// stdout, so the test reads the usage text it is built from.
+// TestRingHelpListsEveryVerb: gt ring --help lists forge, renew, status and
+// remove under Available Commands, each with its one-line summary. The verbs
+// are the ones newRingVerbs builds, under a parent that carries gt ring's own
+// short and long text, and cobra renders the help into a buffer. The line must
+// start with the verb name on its own line, so the Long text, which names the
+// verbs inside an indented sentence-like line, cannot satisfy it.
 func TestRingHelpListsEveryVerb(t *testing.T) {
 	t.Parallel()
-	help := ringCmd.UsageString()
-	for _, verb := range []struct{ name, short string }{
-		{ringForgeCmd.Name(), ringForgeCmd.Short},
-		{ringRenewCmd.Name(), ringRenewCmd.Short},
-		{ringStatusCmd.Name(), ringStatusCmd.Short},
-		{ringRemoveCmd.Name(), ringRemoveCmd.Short},
-	} {
-		if !strings.Contains(help, verb.name) || !strings.Contains(help, verb.short) {
-			t.Errorf("gt ring --help does not list %q with %q:\n%s", verb.name, verb.short, help)
+	var out bytes.Buffer
+	parent := &cobra.Command{Use: "ring", Short: ringCmd.Short, Long: ringCmd.Long}
+	verbs := newRingVerbs(func() (string, error) { return "", nil }, ringTestEnv)
+	parent.AddCommand(verbs...)
+	parent.SetOut(&out)
+	parent.SetErr(&out)
+	parent.SetArgs([]string{"--help"})
+	if err := parent.Execute(); err != nil {
+		t.Fatalf("gt ring --help: %v", err)
+	}
+	help := out.String()
+	short := map[string]string{}
+	for _, verb := range verbs {
+		short[verb.Name()] = verb.Short
+	}
+	for _, name := range []string{"forge", "renew", "status", "remove"} {
+		summary, built := short[name]
+		if !built {
+			t.Errorf("newRingVerbs builds no %q verb", name)
+			continue
+		}
+		listed := regexp.MustCompile(`(?m)^[ \t]+` + regexp.QuoteMeta(name) + `[ \t]+` + regexp.QuoteMeta(summary) + `$`)
+		if !listed.MatchString(help) {
+			t.Errorf("gt ring --help does not list %q with %q:\n%s", name, summary, help)
 		}
 	}
 }

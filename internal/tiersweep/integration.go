@@ -152,9 +152,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 	// inside them reach the next sweep's timings. The container list keeps the
 	// plain output it logs today: its wall is the container slot's, and the bead
 	// that added the test timings stops at this tier (gt-juo5e).
-	runner.JSON = true
-	root := runner.Tier(TierIntegration, ".", slotPrefix(s.Opts.Nice), taggedArgs, plan.root)
-	runner.JSON = false
+	root := runner.TierJSON(true, TierIntegration, ".", slotPrefix(s.Opts.Nice), taggedArgs, plan.root)
 	// The container tier runs its packages whole, so the shard plan is lifted for
 	// that call and put back for the nested modules' calls (gt-rw118).
 	shards := runner.Shards
@@ -166,7 +164,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 			fmt.Fprintf(s.Stderr, "%s: %s: shard plan: %s runs whole, the container tier does not shard\n", Name, TierDocker, pkg)
 		}
 	}
-	docker := runner.Tier(TierDocker, ".", slotPrefix(s.Opts.Nice), nil, plan.docker)
+	docker := runner.TierJSON(false, TierDocker, ".", slotPrefix(s.Opts.Nice), nil, plan.docker)
 	runner.Shards = shards
 	// Only a passing container run at a named commit earns the record. A red
 	// one leaves the state alone, so the next sweep runs those packages again,
@@ -180,8 +178,7 @@ func (s *Sweep) Integration() (line string, red bool) {
 	var names []string
 	names = append(names, root.FailedNames...)
 	for _, m := range plan.modules {
-		runner.JSON = true
-		c := runner.Tier(TierIntegration, m.dir, slotPrefix(s.Opts.Nice), taggedArgs, m.pkgs)
+		c := runner.TierJSON(true, TierIntegration, m.dir, slotPrefix(s.Opts.Nice), taggedArgs, m.pkgs)
 		passed += c.Passed
 		failed += c.Failed
 		skipped += c.Skipped

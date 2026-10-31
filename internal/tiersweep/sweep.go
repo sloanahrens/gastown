@@ -60,8 +60,9 @@ type Deps struct {
 // offer, reached after the tiers before it have printed their lines. The daemon
 // reads the lines byte for byte (internal/daemon/tier_sweep.go).
 //
-// Every run leaves <logdir>/timings.jsonl, one line per package it started, and
-// replaces TIER_SWEEP_TIMINGS with those lines when the environment names one.
+// Every run leaves <logdir>/timings.jsonl: one line per package it started, plus
+// one per slow test a -json package reports (gt-juo5e). It replaces
+// TIER_SWEEP_TIMINGS with those lines when the environment names one.
 // A timings file that cannot be written is named on stderr once and changes no
 // verdict. TIER_SWEEP_JOBS above 1 runs that many packages at once, longest
 // first by the file's walls, with each package serial.txt names run alone.

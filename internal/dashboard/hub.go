@@ -392,13 +392,15 @@ func (h *Hub) listEvents() []listEvent {
 
 // listFramesLocked returns the list events to send: every list when all is set,
 // otherwise only the lists whose bytes differ from what was last sent. What it
-// returns is recorded as sent, so the next call compares against it.
+// returns is recorded as sent, so the next call compares against it. A list that
+// will not encode is left out and not recorded, so the page keeps the list it had
+// and the next call tries again (gt-w346j).
 func (h *Hub) listFramesLocked(all bool) [][]byte {
 	var out [][]byte
 	for _, ev := range h.listEvents() {
 		b, err := json.Marshal(ev.value)
 		if err != nil {
-			b = []byte(`null`)
+			continue
 		}
 		if !all && bytes.Equal(b, h.listSent[ev.name]) {
 			continue

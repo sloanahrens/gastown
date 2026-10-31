@@ -169,9 +169,42 @@ func TestHubSendsTheListEventsOnlyWhenTheyChange(t *testing.T) {
 	assert.Equal(t, 1, eventCount(drainFrames(page), "trend.recent"), "trend.recent changed and was not sent")
 }
 
+// A list that will not encode is left out of its event: a null in its place would
+// read as an empty list. The page keeps the list it had, and the next poll sends
+// the list once it encodes again (gt-w346j).
+func TestHubDoesNotSendAListThatFailsToEncode(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	// time.Time does not encode a year past 9999, so this row fails to marshal.
+	unencodable := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	recent := []LandingRow{{At: now, Bead: "gt-9", Outcome: "landed"}}
+	h := NewHub(Config{
+		Now:   func() time.Time { return now },
+		Trend: func() *Trend { return &Trend{Recent: recent} },
+	})
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	h.pollTrend()
+	assert.Equal(t, 1, eventCount(drainFrames(page), "trend.recent"), "a list that encodes was not sent")
+
+	recent = []LandingRow{{At: unencodable, Bead: "gt-10", Outcome: "landed"}}
+	h.pollTrend()
+	broken := drainFrames(page)
+	assert.Equal(t, 0, eventCount(broken, "trend.recent"), "a list that fails to encode was sent")
+	assert.NotContains(t, broken, "event: trend.recent\ndata: null", "a list that fails to encode was sent as null, which reads as empty")
+	assert.Equal(t, 1, eventCount(broken, "state"), "the state frame did not go out while a list failed to encode")
+
+	recent = []LandingRow{{At: now, Bead: "gt-11", Outcome: "landed"}}
+	h.pollTrend()
+	assert.Equal(t, 1, eventCount(drainFrames(page), "trend.recent"), "the list was not sent again once it encoded")
+}
+
 // A page that connects late gets both lists in its first frames. The state frame
-// it gets keeps the rest of each list's parent but neither list, and /api/state
-// still returns the whole state, lists included (gt-6ecd0).
+// it gets keeps each list's parent, the queue's totals and landing list and the
+// trend's hours, but not the lists themselves, and /api/state still returns the
+// whole state, lists included (gt-6ecd0).
 func TestHubLateSubscriberGetsBothListsAndTheStateWithoutThem(t *testing.T) {
 	t.Parallel()
 
