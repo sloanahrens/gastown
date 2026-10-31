@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -164,6 +165,59 @@ func slingBlocked(townRoot, rigName string, ringHold func(townRoot string) strin
 // (ErrNotFound) is not blocked.
 func IsRigParkedOrDocked(townRoot, rigName string) (bool, string) {
 	return rigParkedOrDockedWith(townRoot, rigName, nil)
+}
+
+// rigDockedRead is one rig's docked-label verdict, as the memo remembered it.
+type rigDockedRead struct {
+	blocked bool
+	reason  string
+}
+
+// rigDockedMemo remembers one tick's docked-label reads per rig: the identity
+// bead is read at most once per rig per tick (gt-ze7z5), though the tick made
+// the same check for the board scan and again behind every candidate it slung.
+//
+// The tick makes it and passes it down, never a package variable
+// (internal/testpolicy's no-global-swap), so an operator's gt sling, a polecat
+// spawn and the daemon keep asking bd every time. A read that failed is not
+// remembered, so the failure stays fail-closed and the next check asks bd
+// again. Parallel slings share one read under mu.
+type rigDockedMemo struct {
+	store beads.Client
+	mu    sync.Mutex
+	reads map[string]rigDockedRead
+}
+
+// newRigDockedMemo returns the memo of one tick's docked-label reads, made
+// against store (nil: bd in each rig's own database).
+func newRigDockedMemo(store beads.Client) *rigDockedMemo {
+	return &rigDockedMemo{store: store, reads: map[string]rigDockedRead{}}
+}
+
+// parkedOrDocked is IsRigParkedOrDocked answered from the memo when this tick
+// already read the rig's docked label.
+func (m *rigDockedMemo) parkedOrDocked(townRoot, rigName string) (bool, string) {
+	if m == nil {
+		return IsRigParkedOrDocked(townRoot, rigName)
+	}
+	// The park state is the registry's, read through the config kernel: no bd
+	// call, so it is re-read on every check and a park inside the tick holds.
+	if IsRigParked(townRoot, rigName) {
+		return true, "parked"
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if read, ok := m.reads[rigName]; ok {
+		return read.blocked, read.reason
+	}
+	blocked, reason := rigParkedOrDockedWith(townRoot, rigName, m.store)
+	if reason != sling.RigStatusUnverified {
+		// An answer is kept for the tick; the failure above is not, so the
+		// next check asks bd again.
+		m.reads[rigName] = rigDockedRead{blocked: blocked, reason: reason}
+	}
+	return blocked, reason
 }
 
 // rigParkedOrDockedWith is IsRigParkedOrDocked with the identity bead read

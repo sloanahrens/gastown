@@ -259,7 +259,7 @@ func specSlingReport(townRoot string, job specSlingJob) specDispatchReport {
 		AddLabel: func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
 		Sling: func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
 			trace := session.NewSandboxTrace(time.Now)
-			name, err := slingSpec(townRoot, c, resume, seat, nil, trace)
+			name, err := slingSpec(townRoot, c, resume, seat, nil, trace, newRigDockedMemo(nil))
 			traces.add(specSlingTraceLine(c.Spec.ID, seat.Agent, trace, err))
 			return name, err
 		},

@@ -108,7 +108,7 @@ func TestSpecSlingSpawnRidesTheTicksTraceAndSeatSnapshot(t *testing.T) {
 		return &SpawnedPolecatInfo{}, nil
 	}
 
-	if _, err := specSlingSpawn(spawn, occupied, trace)("gastown", SlingSpawnOptions{Agent: "box"}); err != nil {
+	if _, err := specSlingSpawn(spawn, occupied, trace, nil)("gastown", SlingSpawnOptions{Agent: "box"}); err != nil {
 		t.Fatalf("spawn error = %v", err)
 	}
 	if got.trace != trace {
@@ -134,7 +134,7 @@ func TestSpecSlingSpawnWithoutASnapshotLeavesTheReadToTheTown(t *testing.T) {
 		return &SpawnedPolecatInfo{}, nil
 	}
 
-	if _, err := specSlingSpawn(spawn, nil, nil)("gastown", SlingSpawnOptions{}); err != nil {
+	if _, err := specSlingSpawn(spawn, nil, nil, nil)("gastown", SlingSpawnOptions{}); err != nil {
 		t.Fatalf("spawn error = %v", err)
 	}
 	if got.occupied != nil {

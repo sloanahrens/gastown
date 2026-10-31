@@ -154,6 +154,11 @@ type SlingSpawnOptions struct {
 	// trace times the sandbox phases of the session start this spawn leads to.
 	// The spec dispatcher sets it; nil times nothing.
 	trace *session.SandboxTrace
+	// rigParked answers the spawn's parked-or-docked guard. The spec dispatcher
+	// sets it to its tick's memo, so a spawn behind a sling the tick already
+	// checked does not read the rig's identity bead again (gt-ze7z5); nil asks
+	// bd through IsRigParkedOrDocked.
+	rigParked func(townRoot, rigName string) (bool, string)
 	// Name is the exact polecat a named sling targets (gt sling <bead>
 	// <rig>/<name>). Set, it is reused or — with Create — created by that
 	// name, or the sling is refused; the pool never substitutes another
@@ -977,7 +982,11 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 		return nil, fmt.Errorf("admission control: %w", err)
 	}
 
-	if err := slingBlocked(townRoot, rigName, ringHoldNow, estop.ActiveFor, IsRigParkedOrDocked); err != nil {
+	parked := opts.rigParked
+	if parked == nil {
+		parked = IsRigParkedOrDocked
+	}
+	if err := slingBlocked(townRoot, rigName, ringHoldNow, estop.ActiveFor, parked); err != nil {
 		return nil, err
 	}
 
