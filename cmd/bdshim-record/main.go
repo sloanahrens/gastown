@@ -3,31 +3,39 @@
 // <verb>-<flags>.exit holds its exit code. The bd shim is tested against these, so it answers the
 // way bd really does (gt-p85pw.87).
 //
-//	bdshim-record -fixture <JSONL file of beads> [-bd bd] [-out cmd/bdshim/testdata/golden] [-scratch scratch] [-check]
-//	bdshim-record -flags [-bd bd] [-out internal/bdshim/testdata/bd-flags.txt] [-check]
+//	bdshim-record -fixture <JSONL file of beads> [-bd-image gastown-polecat:dev] [-bd /usr/local/bin/bd] [-dolt-host host.docker.internal] [-out cmd/bdshim/testdata/golden] [-scratch scratch] [-check]
+//	bdshim-record -flags [-bd-image gastown-polecat:dev] [-bd /usr/local/bin/bd] [-dolt-host host.docker.internal] [-out internal/bdshim/testdata/bd-flags.txt] [-check]
 //
 // With -flags it records the value flags bd's help documents for each command, which the shim's
 // tables are checked against, instead of the golden rows.
 //
-// Every row runs in a copy of the fixture: a directory under -scratch holding a database of its
-// own, made with bd init and filled from -fixture. The read rows share one copy and each mutating
-// row gets one of its own, so no row sees another's writes; each copy's database is dropped and its
-// directory removed before the command exits. bd reaches the Dolt server through the environment
-// (BEADS_DOLT_SERVER_PORT and friends), which passes through to every run, and a container server
-// needs BEADS_TEST_SERVER=1 there as bd itself does. Before any row, bd is asked for each bead the
-// fixture must hold and each verb the table names, so a fixture or a table bd cannot answer fails
-// the run. With -check the table runs again and the goldens that differ, and those of rows the table
-// no longer has, are listed on stdout; nothing is written, and the exit code is 1 when any are
-// listed.
+// Every bd call runs in a throwaway container: docker run --rm, with the directory it works in
+// mounted at /work and nothing else, so bd finds no beads workspace above it however the
+// environment is set (gt-p85pw.117). -bd-image names the image and -bd the bd binary's path inside
+// it; their defaults are gastown-polecat:dev, the image deploy/polecat/Dockerfile builds, and
+// /usr/local/bin/bd, where that image puts bd. The container reaches the throwaway Dolt server on
+// -dolt-host, host.docker.internal by default, since 127.0.0.1 inside it is the container itself.
+// The container's only environment is the BEADS_DOLT_* names of the recording environment, so the
+// recording names the throwaway server by BEADS_DOLT_SERVER_PORT or BEADS_DOLT_PORT, and every
+// other variable stays on this side of the boundary.
 //
-// The scratch must own a beads workspace. bd init walks up from the directory it runs in and
-// rewrites the first workspace it finds, so the recorder gives the scratch a workspace of its own
-// with bd init, checks that the workspace it made is on disk in the scratch, then asks bd which
-// workspace it resolves there, under the environment every child is given, and passes only when the
-// answer is inside the scratch. That workspace exists for the check alone: its database is dropped
-// and its directory removed as soon as the guard passes. A scratch behind a symlink is refused, and
-// so is a recorder whose working directory is a workspace root itself; one that merely sits under a
-// workspace passes, since work lives under the town (gt-p85pw.103, gt-p85pw.116).
+// Every row runs in a copy of the fixture: a directory under -scratch holding a database of its
+// own, made with bd init and filled from -fixture, which is copied into each copy since nothing
+// outside the mounted directory is readable. The read rows share one copy and each mutating row
+// gets one of its own, so no row sees another's writes; each copy's database is dropped and its
+// directory removed before the command exits. Before any row, bd is asked for each bead the fixture
+// must hold and each verb the table names, so a fixture or a table bd cannot answer fails the run.
+// With -check the table runs again and the goldens that differ, and those of rows the table no
+// longer has, are listed on stdout; nothing is written, and the exit code is 1 when any are listed.
+//
+// Before anything is written, the guard proves the container is the one the goldens describe: its
+// bd must be the build the host's bd on PATH is (release, build id, commit and schema level, though
+// a checkout's build stamps its branch before the commit and a cross-compiled one need not), and bd
+// must resolve no workspace outside /work. Only then does the scratch's bd init run, and the
+// workspace it made must be on disk in the scratch. That workspace exists for the check alone: its
+// database is dropped and its directory removed as soon as the guard passes. A scratch behind a
+// symlink is refused, and so is a recorder whose working directory is a workspace root itself; one
+// that merely sits under a workspace passes, since work lives under the town (gt-p85pw.116).
 //
 // The environment must name a throwaway Dolt server, and the recorder refuses one that names the
 // town's: the town's port, a host that is not this machine, or no port at all, which leaves bd with
@@ -49,26 +57,30 @@ func main() {
 
 // options is the parsed command line.
 type options struct {
-	bd      string
-	fixture string
-	out     string
-	scratch string
-	check   bool
-	flags   bool
+	bd       string
+	bdImage  string
+	doltHost string
+	fixture  string
+	out      string
+	scratch  string
+	check    bool
+	flags    bool
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	return runIn(os.Getwd, execChild, args, stdout, stderr)
 }
 
-// runIn is run with the working directory and the bd child injected, so a test puts the recorder in
-// a tree of its own and answers bd itself, neither changing the process's directory nor starting a
-// process.
-func runIn(getwd func() (string, error), child func(bin string) childBD, args []string, stdout, stderr io.Writer) int {
+// runIn is run with the working directory and the child factory injected, so a test puts the
+// recorder in a tree of its own and answers bd itself, neither changing the process's directory nor
+// starting a process.
+func runIn(getwd func() (string, error), child func(options) childBD, args []string, stdout, stderr io.Writer) int {
 	var opts options
 	flags := flag.NewFlagSet("bdshim-record", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.StringVar(&opts.bd, "bd", "bd", "the bd binary to run")
+	flags.StringVar(&opts.bd, "bd", "/usr/local/bin/bd", "the bd binary's path inside the container image")
+	flags.StringVar(&opts.bdImage, "bd-image", "gastown-polecat:dev", "the image every bd child runs in, which carries the linux bd at -bd")
+	flags.StringVar(&opts.doltHost, "dolt-host", "host.docker.internal", "the host name the container reaches the throwaway Dolt server on")
 	flags.StringVar(&opts.fixture, "fixture", "", "the fixture file of beads, one JSONL line per bead, that every copy's database is imported from")
 	flags.StringVar(&opts.out, "out", "", "what the recording is written to: the goldens' directory, or the flags file with -flags (defaults are per mode)")
 	flags.StringVar(&opts.scratch, "scratch", "scratch", "the directory fresh fixture copies are made in and removed from")
@@ -81,7 +93,7 @@ func runIn(getwd func() (string, error), child func(bin string) childBD, args []
 	if opts.flags {
 		scratch = "" // a flags recording makes no copies, so it has no scratch directory to guard
 	}
-	bd := child(opts.bd)
+	bd := child(opts)
 	if err := guardRun(getwd, scratch, bd); err != nil {
 		fmt.Fprintf(stderr, "bdshim-record: %v\n", err)
 		return 1

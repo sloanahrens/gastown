@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,110 +60,28 @@ func TestExitResultKeepsAnExitAndRefusesARunThatNeverFinished(t *testing.T) {
 	}
 }
 
-// TestRecordingEnvPinsTheIdentityAndTheWorkspace: every bd run sees the recorder's actor and git
-// identity in place of the operator's, so a golden's owner and created_by read the same on every
-// machine, and every workspace variable the operator's shell sets is replaced by the workspace the
-// recorder made, each exactly once, so no inherited value can aim a run at another store
-// (gt-p85pw.103, gt-p85pw.115).
-//
-// The Dolt endpoint passes through unchanged: the recording runs against the throwaway server its
-// environment names, and the guard refuses the environment when it names the town's server instead
-// (TestGuardRunRefusesTheTownDoltServer).
-func TestRecordingEnvPinsTheIdentityAndTheWorkspace(t *testing.T) {
-	t.Parallel()
-	const beadsDir = "/scratch/.beads"
-	env := recordingEnv([]string{
-		"PATH=/usr/bin",
-		"BEADS_DOLT_SERVER_PORT=13307",
-		"BEADS_DIR=/home/operator/gt/.beads",
-		"BEADS_DB=/home/operator/gt/.beads/beads.db",
-		"BD_DB=/home/operator/gt/.beads/beads.db",
-		"BEADS_SHARED_SERVER_DIR=/home/operator/.beads/shared-server",
-		"GT_DOLT_DATA=/home/operator/gt/.dolt-data",
-		"BEADS_DOLT_SERVER_DATABASE=hq",
-		"BEADS_ACTOR=operator@example.com",
-		"BD_ACTOR=operator",
-		"GIT_AUTHOR_NAME=Operator",
-		"GIT_AUTHOR_EMAIL=operator@example.com",
-		"GIT_COMMITTER_NAME=Operator",
-		"GIT_COMMITTER_EMAIL=operator@example.com",
-	}, beadsDir)
-	got := envEntries(env)
-	want := map[string]string{
-		"BEADS_ACTOR":             "bdshim-record",
-		"BD_ACTOR":                "bdshim-record",
-		"GIT_AUTHOR_NAME":         "bdshim-record",
-		"GIT_AUTHOR_EMAIL":        "bdshim-record@example.invalid",
-		"GIT_COMMITTER_NAME":      "bdshim-record",
-		"GIT_COMMITTER_EMAIL":     "bdshim-record@example.invalid",
-		"PATH":                    "/usr/bin",
-		"BEADS_DOLT_SERVER_PORT":  "13307", // the scratch server's address passes through
-		"BEADS_DIR":               beadsDir,
-		"BEADS_DB":                beadsDir,
-		"BD_DB":                   beadsDir,
-		"BEADS_SHARED_SERVER_DIR": beadsDir,
-		"GT_DOLT_DATA":            beadsDir,
-	}
-	for key, value := range want {
-		if values := got[key]; len(values) != 1 || values[0] != value {
-			t.Errorf("%s = %v, want exactly [%q]", key, values, value)
-		}
-	}
-	if values := got["BEADS_DOLT_SERVER_DATABASE"]; len(values) != 0 {
-		t.Errorf("BEADS_DOLT_SERVER_DATABASE = %v, want the server database dropped so the copy's own is used", values)
-	}
-}
-
-// TestBDCommandPinsTheWorkspaceBesideTheRun: the command execBD runs carries the identity pin and
-// the workspace the recorder made beside the directory it runs in, replacing any the operator's
-// shell set (gt-p85pw.103, gt-p85pw.115). It checks the command execBD builds, since a unit test
-// may not start bd.
-func TestBDCommandPinsTheWorkspaceBesideTheRun(t *testing.T) {
-	t.Parallel()
-	base := []string{
-		"PATH=/usr/bin",
-		"BEADS_ACTOR=operator@example.com",
-		"BEADS_DIR=/home/operator/gt/.beads",
-	}
-	cmd := bdCommand(context.Background(), "bd", "/tmp/copy", []string{"show", "fx-1"}, base)
-	if cmd.Dir != "/tmp/copy" {
-		t.Errorf("command runs in %q, want the copy /tmp/copy", cmd.Dir)
-	}
-	if want := []string{"bd", "show", "fx-1"}; !reflect.DeepEqual(cmd.Args, want) {
-		t.Errorf("command = %v, want %v", cmd.Args, want)
-	}
-	got := envEntries(cmd.Env)
-	if values := got["BEADS_ACTOR"]; len(values) != 1 || values[0] != "bdshim-record" {
-		t.Errorf("BEADS_ACTOR = %v, want exactly [bdshim-record]", values)
-	}
-	if values := got["BEADS_DIR"]; len(values) != 1 || values[0] != "/tmp/copy/.beads" {
-		t.Errorf("BEADS_DIR = %v, want exactly [/tmp/copy/.beads]", values)
-	}
-}
-
 // TestWhereResultKeepsAWorkspaceAndRefusesARunThatNeverFinished: bd where's exit 0 answer is the
-// workspace, while a run that timed out or never started is an error, so no workspace is read out of
-// an answer bd did not give (gt-p85pw.115). A unit test may not start bd, so this drives the
-// converter whereBD hands each run's ending to.
+// workspace, while a run that did not reach an exit, or exited non-zero, is an error, so no
+// workspace is read out of an answer bd did not give (gt-p85pw.115).
 func TestWhereResultKeepsAWorkspaceAndRefusesARunThatNeverFinished(t *testing.T) {
 	t.Parallel()
-	answer := []byte(`{"data":{"path":"/scratch/.beads"}}`)
+	answer := []byte(`{"data":{"path":"/work/.beads"}}`)
 	tests := []struct {
-		name     string
-		runErr   error
-		timedOut bool
-		want     string
-		wantErr  string
+		name    string
+		exit    int
+		runErr  error
+		want    string
+		wantErr string
 	}{
-		{"ran to exit 0", nil, false, "/scratch/.beads", ""},
-		{"ran past the limit", exitError(0), true, "", "ran past"},
-		{"exited non-zero", exitError(2), false, "", "bd where:"},
-		{"never started", errors.New("exec: bd: not found"), false, "", "bd where:"},
+		{"ran to exit 0", 0, nil, "/work/.beads", ""},
+		{"ran past the limit", 0, errors.New("bd ran past 1m0s"), "", "ran past"},
+		{"exited non-zero", 2, nil, "", "exited 2"},
+		{"never started", 0, errors.New("exec: bd: not found"), "", "bd where:"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := whereResult(answer, tc.runErr, tc.timedOut)
+			got, err := whereResult(answer, tc.exit, tc.runErr)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("whereResult(%s) = %q, %v, want an error naming %q", tc.name, got, err, tc.wantErr)
@@ -307,8 +224,11 @@ func TestProvisionFixtureMakesADatabaseOfItsOwn(t *testing.T) {
 	if !strings.HasPrefix(name, testdb.MintPrefix) {
 		t.Errorf("database %q named, want one under the test prefix %q", name, testdb.MintPrefix)
 	}
-	if want := []string{"import", "-i", fixture}; !reflect.DeepEqual(bd.args[1], want) {
-		t.Errorf("import ran %v, want %v", bd.args[1], want)
+	if want := []string{"import", "-i", workDir + "/" + fixtureInCopy}; !reflect.DeepEqual(bd.args[1], want) {
+		t.Errorf("import ran %v, want the fixture inside the mounted copy, %v", bd.args[1], want)
+	}
+	if got, want := readFile(t, filepath.Join(dir, fixtureInCopy)), readFile(t, fixture); got != want {
+		t.Errorf("the copy holds %q, want the fixture's content", got)
 	}
 	for i, got := range bd.dirs {
 		if got != dir {
@@ -598,9 +518,10 @@ func TestProvisionFixtureRefusesAMissingFixture(t *testing.T) {
 	}
 }
 
-// TestProvisionFixtureNamesTheFixtureOutsideItsWorkingDirectory: bd import runs in the copy, so the
-// fixture has to reach it by a path that does not depend on the operator's working directory.
-func TestProvisionFixtureNamesTheFixtureOutsideItsWorkingDirectory(t *testing.T) {
+// TestProvisionFixtureFillsTheCopyFromARelativeFixture: a -fixture relative to the operator's
+// directory still reaches bd, since the recorder reads it by the path it resolves to and puts a copy
+// of it in the mounted directory the import runs in.
+func TestProvisionFixtureFillsTheCopyFromARelativeFixture(t *testing.T) {
 	t.Parallel()
 	abs := writeFixture(t, fixtureIDs...)
 	cwd, err := os.Getwd()
@@ -619,11 +540,15 @@ func TestProvisionFixtureNamesTheFixtureOutsideItsWorkingDirectory(t *testing.T)
 	if err != nil {
 		t.Fatalf("provisionFixture: %v", err)
 	}
-	if _, _, err := provision(); err != nil {
+	dir, _, err := provision()
+	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if want := []string{"import", "-i", abs}; !reflect.DeepEqual(bd.args[1], want) {
-		t.Errorf("import ran %v, want the fixture named absolutely: %v", bd.args[1], want)
+	if want := []string{"import", "-i", workDir + "/" + fixtureInCopy}; !reflect.DeepEqual(bd.args[1], want) {
+		t.Errorf("import ran %v, want %v", bd.args[1], want)
+	}
+	if got, want := readFile(t, filepath.Join(dir, fixtureInCopy)), readFile(t, abs); got != want {
+		t.Errorf("the copy holds %q, want the fixture's content", got)
 	}
 }
 
