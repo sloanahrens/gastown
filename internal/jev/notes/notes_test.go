@@ -30,7 +30,7 @@ const (
 
 	currentNote = "---\nname: stale-pass\n---\n\nThe stale pass lives in `internal/jev/stale/stale.go`; run `gt done --status=X`.\n"
 
-	prose = "---\nname: prefer-small-commits\n---\n\nSloan prefers small commits, with `nothing` checkable in them.\n"
+	prose = "---\nname: prefer-small-commits\n---\n\nThe operator prefers small commits, with `nothing` checkable in them.\n"
 )
 
 // fakeAsker answers every file with the same answers and records each state.
