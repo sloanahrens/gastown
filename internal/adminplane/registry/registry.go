@@ -6,7 +6,8 @@
 // actions (plan row V2) and the owner's pause and resume (plan row V4), which
 // are separate beads. The package holds no database and does no I/O, so the
 // rules are testable without either; the Postgres table that stores a
-// Workspace and its Events is plan row V1b.
+// Workspace and its Events is plan row V1b, which adds this package's embedded
+// schema files (Migrations).
 package registry
 
 import (
