@@ -122,3 +122,47 @@ func TestLandingsPaneKeepsItsScrollAcrossARedraw(t *testing.T) {
 		t.Errorf("landings scroll position after a redraw = %d, want 240: the poll put the rows back at the top", got)
 	}
 }
+
+// With nothing landed in the window the pane is the queue alone, and renderTrend
+// takes its own early return to draw it. That redraw must keep the reader's place
+// too (gt-tjlu6). Ten queued beads plus the header are 264px of rows in a 200px
+// viewport, so a scroll of 40 is inside the range the page can reach.
+func TestLandingsPaneKeepsItsScrollWhenOnlyTheQueueIsShown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 25, 16, 0, 0, 0, time.Local)
+	var queued []map[string]any
+	for i := 0; i < 10; i++ {
+		queued = append(queued, map[string]any{
+			"id":         fmt.Sprintf("gt-q%d", i),
+			"updated_at": now.Add(-time.Duration(i+1) * time.Minute).Format(time.RFC3339),
+		})
+	}
+	state := map[string]any{
+		"trend": map[string]any{"hours": []any{}, "stages": []any{}, "recent": []any{}},
+		"queue": map[string]any{"landing": queued},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st map[string]any
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatal(err)
+	}
+
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", st)
+	if _, err := p.vm.RunString(`document.getElementById("trend").querySelector(".lrows").scrollTop = 40`); err != nil {
+		t.Fatalf("scrolling the queued rows down: %v", err)
+	}
+	p.call(t, "renderTrend", st)
+
+	v, err := p.vm.RunString(`document.getElementById("trend").querySelector(".lrows").scrollTop`)
+	if err != nil {
+		t.Fatalf("reading the queued rows' scroll position: %v", err)
+	}
+	if got := v.ToInteger(); got != 40 {
+		t.Errorf("queue-only scroll position after a redraw = %d, want 40: the early return put the rows back at the top", got)
+	}
+}

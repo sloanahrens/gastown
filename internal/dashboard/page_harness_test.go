@@ -69,6 +69,13 @@ function __cls(e, c) { return (" " + (e.className || "") + " ").indexOf(" " + c 
 function __walk(e, fn) {
   for (var i = 0; i < (e.children || []).length; i++) { fn(e.children[i]); __walk(e.children[i], fn); }
 }
+// __rowCount is how many table rows sit under an element: the height a scroll
+// range is measured from, since the stub draws nothing.
+function __rowCount(e) {
+  var n = 0;
+  __walk(e, function (c) { if (c.tagName === "TR") n++; });
+  return n;
+}
 // __find answers the two selectors the page's fold asks of an element: a direct
 // child by tag (":scope > h2") and the first descendant with a class (".r",
 // ".caret", ".foldsum"). Anything else is null, so a selector the stub does not
@@ -106,7 +113,18 @@ function __el(tag) {
     // The Deploys block sets its ch-based column widths through style, so the
     // stub keeps what the page writes there.
     style: null,
-    scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+    // The stub has no layout, so the scroll range is modelled the way a browser
+    // clamps it: a row is 24px tall, the viewport is 200px, and a scrollTop write
+    // lands inside [0, scrollHeight - clientHeight]. A write past the end reads
+    // back at the end, and a write made before the rows are drawn reads back at 0.
+    _scrollTop: 0,
+    get scrollHeight() { return __rowCount(this) * 24; },
+    get clientHeight() { return 200; },
+    get scrollTop() { return this._scrollTop; },
+    set scrollTop(v) {
+      var max = Math.max(0, this.scrollHeight - this.clientHeight);
+      this._scrollTop = Math.min(Math.max(0, Math.round(Number(v) || 0)), max);
+    },
     // parentNode is what closest walks: the browser fills it in on append, and
     // the fold is the one handler that asks what a click landed on.
     parentNode: null,
@@ -707,4 +725,40 @@ func (p *pageDOM) descend(t *testing.T, id string, path ...int) drawn {
 		t.Fatalf("reading #%s%v: %v", id, path, err)
 	}
 	return d
+}
+
+// A scroll position the stub keeps is one a browser could hold: a write past the
+// end of the rows reads back at the end of the range, a write before the top
+// reads back at 0, and an element with nothing to scroll stays at 0. A test that
+// scrolls a rebuilt table would otherwise pass on a position no reader can reach
+// (gt-tjlu6).
+func TestPageHarnessKeepsAScrollWithinTheRangeItsRowsAllow(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		rows  int
+		write int
+		want  int
+	}{
+		{"past the end of thirty rows", 30, 9999, 30*24 - 200},
+		{"inside the range", 30, 240, 240},
+		{"before the top", 30, -5, 0},
+		{"nothing to scroll", 3, 240, 0},
+	}
+	p := newPageDOM(t)
+	for _, c := range cases {
+		v, err := p.vm.RunString(`(function () {
+  var box = document.createElement("div");
+  for (var i = 0; i < ` + strconv.Itoa(c.rows) + `; i++) box.append(document.createElement("tr"));
+  box.scrollTop = ` + strconv.Itoa(c.write) + `;
+  return box.scrollTop;
+})()`)
+		if err != nil {
+			t.Fatalf("%s: scrolling a stub box: %v", c.name, err)
+		}
+		if got := int(v.ToInteger()); got != c.want {
+			t.Errorf("%s: scrollTop after writing %d = %d, want %d", c.name, c.write, got, c.want)
+		}
+	}
 }
