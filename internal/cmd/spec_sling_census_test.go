@@ -18,6 +18,7 @@ import (
 //
 // The town holds the rig, so the sling stops at the hold without spawning a
 // session: these tests are about the census the sling writes on its way out.
+//
 //testpolicy:allow parallel — the test changes the process working directory, which runSpecSling reads
 func TestSlingWritesCensusSinkAtExit(t *testing.T) {
 	town := censusSlingTown(t)
@@ -44,6 +45,7 @@ func TestSlingWritesCensusSinkAtExit(t *testing.T) {
 
 // A census the sling cannot write costs the census and nothing else: the sling
 // still reports its outcome, and the failure is named once (gt-3y319).
+//
 //testpolicy:allow parallel — the test changes the process working directory, which runSpecSling reads
 func TestSlingCensusWriteFailureDoesNotFailSling(t *testing.T) {
 	town := censusSlingTown(t)
