@@ -606,9 +606,8 @@ func (m *DoltServerManager) EnsureRunning() error {
 				if killErr := m.killImposters(); killErr != nil {
 					m.logger("Warning: failed to kill imposters: %v", killErr)
 				}
-				// Through doSleep: a unit test stubs the manager's sleep seam,
-				// and a real 500ms here was half a second of every landing's
-				// daemon suite (gt-2nh54).
+				// Through doSleep, the seam a unit test replaces, so this
+				// pause costs the daemon suite no real time (gt-2nh54).
 				m.doSleep(500 * time.Millisecond)
 				return m.restartWithBackoff()
 			}
