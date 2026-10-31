@@ -43,7 +43,7 @@ type Runner interface {
 
 // NameFor returns the provider name of a seat's provider. The name depends on the
 // seat address alone, so a restart and the reaper compute the name the seat start
-// used. The suffix digests the exact address, so two addresses that sanitise to
+// used. The suffix digests the exact address, so two addresses that reduce to
 // the same characters still get different providers.
 func NameFor(seat string) string {
 	var b strings.Builder

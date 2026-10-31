@@ -99,7 +99,7 @@ func TestCreateNamesFromSeatAndHidesTokenFromArgv(t *testing.T) {
 	}
 }
 
-func TestNameForIsStableForOneSeatAndDistinctForSeatsThatSanitiseAlike(t *testing.T) {
+func TestNameForIsStableForOneSeatAndDistinctForLookalikeSeats(t *testing.T) {
 	t.Parallel()
 	seat := "gastown/polecats/ace"
 	if first, second := NameFor(seat), NameFor(seat); first != second {
