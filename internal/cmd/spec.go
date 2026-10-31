@@ -1359,7 +1359,11 @@ type specDispatchEnv struct {
 	Template      specdispatch.Template
 	Budget        specdispatch.Budget // agents, caps and preferences; live counts filled per tick
 	PerTick       int
-	DryRun        bool
+	// MaxInFlight is how many slings the tick runs at once
+	// (spec_dispatch.max_in_flight). Zero is the code default, never
+	// unbounded (gt-16pqa).
+	MaxInFlight int
+	DryRun      bool
 	// TownRoot is the town the tick runs on: its verdict ledger lives under
 	// that town's runtime directory (specdispatch.LedgerPath, gt-8thox). Empty
 	// records no ledger, which is what a test that checks only what the tick
@@ -1409,6 +1413,15 @@ type specDispatchEnv struct {
 type specLedgerFile struct {
 	Load func(path string) (*specdispatch.Ledger, error)
 	Save func(path string, ledger *specdispatch.Ledger) error
+}
+
+// inFlightCap is the number of slings the tick runs at once. An env that sets
+// none runs the code default rather than unbounded (gt-16pqa).
+func (e specDispatchEnv) inFlightCap() int {
+	if e.MaxInFlight > 0 {
+		return e.MaxInFlight
+	}
+	return config.DefaultSpecMaxInFlight
 }
 
 // ledgerFile is the env's ledger access, or the town's own file when it sets
@@ -2075,11 +2088,16 @@ const (
 )
 
 // specRunPendingSlings runs the tick's slings concurrently, one goroutine per
-// pending candidate, and applies their outcomes in candidate order. Two
-// slings cannot take one seat: each writes its in-flight claim under the pool
-// decision lock before its session exists (gt-t8q5), and the occupancy each
-// one reads is the tick's snapshot plus the live sessions and claims of the
-// moment (snapshotOccupied).
+// pending candidate, and applies their outcomes in candidate order. At most
+// env.MaxInFlight of them run at once (gt-16pqa): a sling past the cap waits
+// for a slot as one frees, and none is dropped. Each is a worktree and a
+// session, and the ones started together contend on the polecat pool lock and
+// the Dolt writes behind it.
+//
+// Two slings cannot take one seat: each writes its in-flight claim under the
+// pool decision lock before its session exists (gt-t8q5), and the occupancy
+// each one reads is the tick's snapshot plus the live sessions and claims of
+// the moment (snapshotOccupied).
 //
 // A refused sling gives its charged seat back (gt-9x16z): the tick charged the
 // seat when it collected the candidate, and the charge stays in the budget only
@@ -2090,11 +2108,14 @@ func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, repor
 		return
 	}
 	outcomes := make([]specSlingOutcome, len(pending))
+	slots := make(chan struct{}, env.inFlightCap())
 	var wg sync.WaitGroup
 	for i := range pending {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
 			outcomes[i] = specSlingOne(env, pending[i])
 		}(i)
 	}
@@ -2751,12 +2772,13 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			slingTraces.add(specSlingTraceLine(c.Spec.ID, seat.Agent, trace, err))
 			return name, err
 		},
-		Sleep:    time.Sleep,
-		Now:      time.Now,
-		Template: template,
-		Budget:   budget,
-		PerTick:  perTick,
-		DryRun:   dryRun,
+		Sleep:       time.Sleep,
+		Now:         time.Now,
+		Template:    template,
+		Budget:      budget,
+		PerTick:     perTick,
+		MaxInFlight: sd.InFlightCap(),
+		DryRun:      dryRun,
 		// The verdict ledger the dashboard reads, under this town's runtime
 		// directory (gt-8thox).
 		TownRoot: townRoot,

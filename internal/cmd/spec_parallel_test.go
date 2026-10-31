@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,10 @@ func TestSpecDispatchSlingsFreeSeatsInParallel(t *testing.T) {
 	f := nineSeatTown(t, 12)
 	env := f.env()
 	env.PerTick = 0 // the free seats: nine
+	// The in-flight cap is raised to those seats so this test measures the
+	// parallel design itself; the cap's own bound is
+	// TestSpecDispatchCapsSlingsInFlight (gt-16pqa).
+	env.MaxInFlight = 9
 	// Every sling waits until all nine have started: a serial tick would
 	// never get past the first one and the test would hang at the barrier,
 	// which the test binary's own deadline reports (the unit tier allows no
@@ -109,6 +114,122 @@ func TestSpecDispatchFailedSlingIsReportedInOrderAndLabeled(t *testing.T) {
 	}
 	if n := len(f.notes["gt-c01"]); n != 1 {
 		t.Fatalf("notes on the failed bead = %d, want the failure note once", n)
+	}
+}
+
+// A tick runs at most max_in_flight slings at once: the rest of its candidates
+// wait for a slot as one frees (gt-16pqa). Every fake sling holds its slot
+// until the test frees one, so a sling past the cap is kept at the cap's door
+// and cannot reach the starter until a slot frees.
+func TestSpecDispatchCapsSlingsInFlight(t *testing.T) {
+	t.Parallel()
+	const (
+		inFlight = 2
+		cands    = 5
+	)
+	f := nineSeatTown(t, cands)
+	env := f.env()
+	env.PerTick = 0 // the free seats: nine, so the in-flight cap is the bound
+	env.MaxInFlight = inFlight
+	starts := make(chan string, cands)
+	release := make(chan struct{})
+	var mu sync.Mutex
+	running, peak := 0, 0
+	inner := env.Sling
+	env.Sling = func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
+		mu.Lock()
+		running++
+		peak = max(peak, running)
+		mu.Unlock()
+		starts <- c.Spec.ID
+		<-release
+		mu.Lock()
+		running--
+		mu.Unlock()
+		return inner(c, resume, seat)
+	}
+	done := make(chan specDispatchReport, 1)
+	go func() { done <- runSpecDispatchCycle(env) }()
+	started := map[string]bool{}
+	// The first inFlight slings fill the slots and hold them.
+	for range inFlight {
+		id := <-starts
+		started[id] = true
+	}
+	// Let every goroutine the tick launched reach its blocking point. The ones
+	// past the cap wait for a slot, so a start here is the cap missing.
+	for range cands {
+		runtime.Gosched()
+	}
+	mu.Lock()
+	peakAtDoor := peak
+	mu.Unlock()
+	if peakAtDoor > inFlight {
+		t.Fatalf("the fake starter saw %d slings running at once, cap %d", peakAtDoor, inFlight)
+	}
+	// Each freed slot lets the next waiting sling start, until the tick has
+	// run them all.
+	for range cands - inFlight {
+		release <- struct{}{}
+		id := <-starts
+		if started[id] {
+			t.Fatalf("%s started twice", id)
+		}
+		started[id] = true
+	}
+	for range inFlight {
+		release <- struct{}{}
+	}
+	r := <-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > inFlight {
+		t.Errorf("the fake starter saw %d slings running at once, cap %d", peak, inFlight)
+	}
+	if len(r.Dispatched) != cands || r.SlingsRun != cands {
+		t.Fatalf("dispatched %d (slings run %d), want all %d candidates", len(r.Dispatched), r.SlingsRun, cands)
+	}
+	if len(r.Skipped) != 0 {
+		t.Fatalf("skipped = %+v, want none held out by the cap", r.Skipped)
+	}
+	// Every candidate was slung, and the record keeps candidate order whatever
+	// order the slots freed in.
+	if len(f.slung) != cands {
+		t.Fatalf("slung %v, want all %d", f.slung, cands)
+	}
+	for i, id := range f.slung {
+		if want := fmt.Sprintf("gt-c%02d", i); id != want || !started[want] {
+			t.Fatalf("record position %d: slung %s (started %v), want %s", i, id, started[want], want)
+		}
+	}
+}
+
+// The candidates past the in-flight cap are started as slots free, not dropped:
+// the cap bounds how many slings run, never how many the tick dispatches
+// (gt-16pqa).
+func TestSpecDispatchRemainderWaitsNotDropped(t *testing.T) {
+	t.Parallel()
+	const (
+		inFlight = 2
+		cands    = 5
+	)
+	f := nineSeatTown(t, cands)
+	env := f.env()
+	env.PerTick = 0
+	env.MaxInFlight = inFlight
+	r := runSpecDispatchCycle(env)
+
+	if len(r.Dispatched) != cands || len(f.slung) != cands || r.SlingsRun != cands {
+		t.Fatalf("dispatched %d (slung %d, run %d), want all %d candidates", len(r.Dispatched), len(f.slung), r.SlingsRun, cands)
+	}
+	if len(r.Failed) != 0 || len(r.Errors) != 0 {
+		t.Fatalf("failed = %+v errors = %v", r.Failed, r.Errors)
+	}
+	for i, id := range f.slung {
+		if want := fmt.Sprintf("gt-c%02d", i); id != want {
+			t.Fatalf("slung[%d] = %s, want %s", i, id, want)
+		}
 	}
 }
 

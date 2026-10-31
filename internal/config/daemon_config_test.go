@@ -888,3 +888,33 @@ func TestMayBeContainerTown(t *testing.T) {
 		}
 	}
 }
+
+// A spec_dispatch block that sets no max_in_flight runs the code default of
+// two slings at once, and a zero or negative value is the default too: the cap
+// never reads as unbounded (gt-16pqa).
+func TestSpecDispatchInFlightCapDefaults(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		json string
+		want int
+	}{
+		{"absent", `{}`, DefaultSpecMaxInFlight},
+		{"zero", `{"max_in_flight":0}`, DefaultSpecMaxInFlight},
+		{"negative", `{"max_in_flight":-3}`, DefaultSpecMaxInFlight},
+		{"one", `{"max_in_flight":1}`, 1},
+		{"set", `{"max_in_flight":7}`, 7},
+	} {
+		var sd SpecDispatchConfig
+		if err := json.Unmarshal([]byte(tc.json), &sd); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := sd.InFlightCap(); got != tc.want {
+			t.Errorf("%s: InFlightCap = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	var nilBlock *SpecDispatchConfig
+	if got := nilBlock.InFlightCap(); got != DefaultSpecMaxInFlight {
+		t.Errorf("nil block: InFlightCap = %d, want the default %d", got, DefaultSpecMaxInFlight)
+	}
+}
