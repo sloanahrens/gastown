@@ -19,9 +19,9 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// The overseer's questions for Sloan. The convention — the label, the body's
-// sections, the [overseer] comment prefix — is internal/question's, and the
-// dashboard's Attention panel and the daemon's question collector read the
+// The overseer's questions for the operator. The convention — the label, the
+// body's sections, the [overseer] comment prefix — is internal/question's, and
+// the dashboard's Attention panel and the daemon's question collector read the
 // beads these commands write.
 
 var (
@@ -34,9 +34,9 @@ var (
 var askCmd = &cobra.Command{
 	Use:     "ask <title>",
 	GroupID: GroupComm,
-	Short:   "File a question for Sloan and hold the work it blocks",
-	Long: `File a question for Sloan as a bead in the town database, under the
-overseer-question label, and hold the work it blocks until it is closed.
+	Short:   "File a question for the operator and hold the work it blocks",
+	Long: `File a question for the operator as a bead in the town database, under
+the overseer-question label, and hold the work it blocks until it is closed.
 
 The question is a bead like any other, so --priority files it at bd's 0-4
 (default 2) and a P0 question outranks one that can wait. A question at P0, P1
@@ -48,7 +48,7 @@ without one carries no tag.
 The body comes from stdin, in these sections:
 
   ## Question
-  What Sloan is asked to decide.
+  What the operator is asked to decide.
   ## Recommended answer
   What the overseer would do, so "yes" is an answer.
   ## Held work
@@ -56,7 +56,7 @@ The body comes from stdin, in these sections:
   - stub: <title>      (work with no bead yet: a stub bead is made first)
   none
   ## Facts
-  What Sloan needs to know to decide.
+  What the operator needs to know to decide.
 
 A body without a Question or a Recommended answer is refused. Held work and
 Facts are optional. A held bead is made to depend on the question, so it stays
@@ -84,10 +84,10 @@ var answerCmd = &cobra.Command{
 	Use:     "answer <question-id> [text]",
 	GroupID: GroupComm,
 	Short:   "Answer an overseer question with a comment on its bead",
-	Long: `Comment on an overseer question. Without a flag the comment is Sloan's answer,
-and the daemon wakes the overseer to act on it. With --overseer the comment
-carries the "[overseer]" prefix: the overseer's own note, which is how a
-question goes back to waiting on Sloan.
+	Long: `Comment on an overseer question. Without a flag the comment is the
+operator's answer, and the daemon wakes the overseer to act on it. With
+--overseer the comment carries the "[overseer]" prefix: the overseer's own
+note, which is how a question goes back to waiting on the operator.
 
 The text is the second argument, or stdin when there is none. gt answer does
 not close the question; the overseer does, once it has acted.
@@ -105,10 +105,10 @@ var questionsCmd = &cobra.Command{
 	Short:   "List the open overseer questions as a priority queue",
 	Long: `List every open overseer question as a priority queue: most urgent first and,
 within a priority, the longest wait first. A row is the question's id, how
-long it has waited, whether it awaits Sloan or Sloan has answered and the
-overseer is acting, its priority, how many beads it holds, the effort tag it
-was filed with, and its title. --json prints the dashboard's Questions payload
-instead.`,
+long it has waited, whether it awaits the operator or the operator has
+answered and the overseer is acting, its priority, how many beads it holds,
+the effort tag it was filed with, and its title. --json prints the
+dashboard's Questions payload instead.`,
 	Args: cobra.NoArgs,
 	RunE: runQuestions,
 }
@@ -298,9 +298,9 @@ func runAnswer(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// answerQuestion comments on a question: Sloan's answer, or with asOverseer the
-// overseer's own note. The comment's prefix is the whole difference, since both
-// are authored by the same committer.
+// answerQuestion comments on a question: the operator's answer, or with
+// asOverseer the overseer's own note. The comment's prefix is the whole
+// difference, since both are authored by the same committer.
 func answerQuestion(s questionStore, id, text string, asOverseer bool) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -318,7 +318,7 @@ func answerQuestion(s questionStore, id, text string, asOverseer bool) error {
 	case asOverseer && !hasPrefix:
 		text = question.OverseerPrefix + " " + text
 	case !asOverseer && hasPrefix:
-		// Sloan's answer that starts with the prefix would read as the
+		// The operator's answer that starts with the prefix would read as the
 		// overseer's own note, and the question would go on waiting.
 		return fmt.Errorf("gt answer: the text starts with %q, which marks an overseer note; use --overseer or reword it", question.OverseerPrefix)
 	}

@@ -62,8 +62,9 @@ var dashboardCmd = &cobra.Command{
 the health verdict, the queue waiting to land, the polecat seats and what they
 hold, the machine's load and what burns it, the cloud patrol's latest report
 when this machine runs one, the overseer's own hourly report, the questions the
-overseer has filed for Sloan, the DeepSeek spend, the recent activity of the
-Forgejo repos the viewer can see, and the same default-view feed gt tail prints.
+overseer has filed for the operator, the DeepSeek spend, the recent activity
+of the Forgejo repos the viewer can see, and the same default-view feed gt tail
+prints.
 
 It reads what gt tail reads — the events journals, the landings files, the
 daemon log, the watch feed, the daemon's health report — through the same
@@ -190,9 +191,9 @@ the town's open escalation beads, the open overseer questions and the attention
 queue's standing wake events, each row tagged with the owner who has to move and
 filtered by that tag. A question's row carries its question, the answer the
 overseer recommends, the work it holds up, how long it has waited and the bead
-id to answer — Sloan answers with gt answer, which comments on the bead. The
-page draws it and never writes: there is no form, and a question is closed from
-a terminal.
+id to answer — the operator answers with gt answer, which comments on the
+bead. The page draws it and never writes: there is no form, and a question is
+closed from a terminal.
 
 Lifecycle: the dashboard watches its own binary and the town registry. When make
 install replaces the binary, or a rig is added to or removed from the town, the

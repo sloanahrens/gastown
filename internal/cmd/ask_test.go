@@ -350,7 +350,7 @@ func TestAnswerAddsTheCommentTheConventionReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := store.comments["hq-t1"]; len(got) != 1 || got[0].Text != "yes, once" {
-		t.Fatalf("comments = %+v, want Sloan's answer with no prefix", got)
+		t.Fatalf("comments = %+v, want the operator's answer with no prefix", got)
 	}
 	if state := questionState(store.comments["hq-t1"]); state != dashboard.QuestionAnswered {
 		t.Errorf("state = %q, want answered", state)
@@ -490,5 +490,25 @@ func TestQuestionsListsPastThePaneCap(t *testing.T) {
 	all.all = true
 	if got := all.read(askNow); len(got.Rows) != dashQuestionRows+3 || got.More != 0 {
 		t.Errorf("gt questions rows %d more %d, want every question", len(got.Rows), got.More)
+	}
+}
+
+// TestHelpTextNamesTheOperator: the ask, answer, questions and dashboard help
+// says "the operator", never a personal name, because every agent that runs
+// --help reads it and copies what it says.
+func TestHelpTextNamesTheOperator(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ name, text string }{
+		{"gt ask", askCmd.Short + "\n" + askCmd.Long},
+		{"gt answer", answerCmd.Short + "\n" + answerCmd.Long},
+		{"gt questions", questionsCmd.Short + "\n" + questionsCmd.Long},
+		{"gt dashboard", dashboardCmd.Short + "\n" + dashboardCmd.Long},
+	} {
+		if strings.Contains(strings.ToLower(c.text), "sloan") {
+			t.Errorf("%s help names the operator by a personal name", c.name)
+		}
+		if !strings.Contains(c.text, "the operator") {
+			t.Errorf("%s help never says the operator", c.name)
+		}
 	}
 }
