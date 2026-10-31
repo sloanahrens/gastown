@@ -3,6 +3,7 @@ package dashboard
 import (
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // Positive inputs are joined from pieces so that no secret-looking literal sits
@@ -30,6 +31,7 @@ var birdSecretRows = []struct {
 	{"PGPASSWORD assignment", "PGPASSWORD=" + strings.Repeat("p", 16), "credential-assignment"},
 	{"Authorization Bearer header", "Authorization: Bearer " + strings.Repeat("z", 16), "credential-assignment"},
 	{"REDACTED inside a real value", "password=" + strings.Repeat("k", 4) + "REDACTED" + strings.Repeat("k", 4), "credential-assignment"},
+	{"redaction marker inside a real value", "password=" + strings.Repeat("k", 4) + "[REDACTED:db-password]" + strings.Repeat("k", 4), "credential-assignment"},
 	{"URL with a password", "https://deploy:" + strings.Repeat("p", 12) + "@git.example.com", "url-credential"},
 	{"postgres URL with a password", "postgres://app:" + strings.Repeat("9", 12) + "@db.internal:5432/main", "url-credential"},
 }
@@ -53,6 +55,9 @@ var birdOrdinaryRows = []struct {
 	{"word that ends in sk-", "risk-assessment-framework"},
 	{"masked REDACTED value", "password=***REDACTED***"},
 	{"keyword before a plain word", "token authentication flow"},
+	{"keyword before a long word and a comma", "token authentication, then retry"},
+	{"keyword before a long word and a period", "token authentication."},
+	{"redaction marker value", "PGPASSWORD=[REDACTED:db-password]"},
 }
 
 func TestBirdScreenWithholdsEachSecretShape(t *testing.T) {
@@ -87,14 +92,29 @@ func TestBirdScreenLeavesOrdinaryReportText(t *testing.T) {
 	}
 }
 
-// birdClasses is the closed set of labels screenSecret may return. The labels are
-// constants, so a substring check against the input can never fail; set
-// membership does, if a label ever carries input bytes.
+// birdClasses is the closed set of labels screenSecret may return. Set membership
+// catches a label that carries any input bytes, because such a label is not in
+// the set.
 var birdClasses = map[string]bool{
 	"private-key":           true,
 	"token-prefix":          true,
 	"credential-assignment": true,
 	"url-credential":        true,
+}
+
+// birdPayload returns the longest separated piece of a row's text: the value a
+// label would most plausibly echo. Keywords and scheme names are shorter than it.
+func birdPayload(text string) string {
+	fields := strings.FieldsFunc(text, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(`=:"'`, r)
+	})
+	longest := ""
+	for _, f := range fields {
+		if len(f) > len(longest) {
+			longest = f
+		}
+	}
+	return longest
 }
 
 func TestBirdScreenNeverEchoesTheMatch(t *testing.T) {
@@ -107,6 +127,9 @@ func TestBirdScreenNeverEchoesTheMatch(t *testing.T) {
 			class, _ := screenSecret([]byte(row.text))
 			if !birdClasses[class] {
 				t.Errorf("screenSecret(%s) class = %q, not a known label; it may echo the input", row.name, class)
+			}
+			if payload := birdPayload(row.text); strings.Contains(class, payload) {
+				t.Errorf("screenSecret(%s) class = %q contains the matched value; a label must not echo the input", row.name, class)
 			}
 		})
 	}

@@ -68,20 +68,28 @@ var (
 	birdBearer = regexp.MustCompile(`(?i)authorization:\s*bearer["']?[=: ]+["']?(\S{12,})`)
 
 	birdURLPassword = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.\-]*://[^\s/:@]+:([^\s/@]+)@`)
+
+	// birdRedactedMarker is the mask internal/jev/scrub writes in place of a value,
+	// [REDACTED:<rule>]. The rule name is lowercase letters and hyphens. The match
+	// is anchored, so a value that only contains the marker is still a secret.
+	birdRedactedMarker = regexp.MustCompile(`^\[REDACTED:[a-z-]+\]$`)
 )
 
 // birdPlaceholder reports whether a matched value is a mask rather than a secret:
-// asterisks, dots, a <...> token, or a bare REDACTED marker such as ***REDACTED***.
-// A value that merely contains REDACTED is still a secret.
+// asterisks, dots, a <...> token, or a REDACTED marker such as ***REDACTED***
+// or [REDACTED:<rule>]. A value that merely contains REDACTED is still a secret.
 func birdPlaceholder(v []byte) bool {
 	s := strings.Trim(string(v), `"',;`)
 	return strings.Trim(s, "*") == "" ||
 		strings.Trim(s, ".") == "" ||
 		(strings.HasPrefix(s, "<") && strings.HasSuffix(s, ">")) ||
-		strings.EqualFold(strings.Trim(s, "*[]"), "REDACTED")
+		strings.EqualFold(strings.Trim(s, "*[]"), "REDACTED") ||
+		birdRedactedMarker.MatchString(s)
 }
 
-// hasNonLetter reports whether v holds a digit or a symbol.
+// hasNonLetter reports whether v holds a digit or a symbol. Trailing sentence
+// punctuation does not count, so the prose "authentication," is still a word.
 func hasNonLetter(v []byte) bool {
-	return strings.IndexFunc(string(v), func(r rune) bool { return !unicode.IsLetter(r) }) >= 0
+	s := strings.TrimRight(string(v), `.,;:!?)]}"'`)
+	return strings.IndexFunc(s, func(r rune) bool { return !unicode.IsLetter(r) }) >= 0
 }
