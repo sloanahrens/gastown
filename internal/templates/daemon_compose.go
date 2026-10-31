@@ -375,7 +375,8 @@ func scratchDaemonCommand(omTokenFile string) string {
 // ports, so the only way in is the internal network the daemon also joins. Its
 // healthcheck holds the daemon until the server accepts a connection, which is
 // the wait the engine's own healthcheck gives the daemon (gt-3bp5q): the port
-// is the Dolt server's default, 3306, which the service does not change.
+// is ScratchDoltPort, the Dolt server's default, which the service does not
+// change; the probe reads the constant, so it cannot drift from the command.
 //
 // The probe runs bash's /dev/tcp, so it needs bash in the image. The pinned
 // DoltServerImage has it: a container run from that digest on 2026-10-30
@@ -386,7 +387,7 @@ const scratchDoltBody = `  %[1]s:
     image: %[2]q
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3306"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/%[6]d"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -509,6 +510,7 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 			scratchDoltVolume,
 			scratchDoltDataPath,
 			names.network,
+			ScratchDoltPort,
 		)
 		doltVolume = "  " + scratchDoltVolume + ":\n"
 		doltWait = "      " + ScratchDoltService + ":\n        condition: service_healthy\n"

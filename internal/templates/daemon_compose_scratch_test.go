@@ -463,3 +463,23 @@ func TestRenderDaemonCompose_ScratchDoltPortIsOneValueInProbeAndCommand(t *testi
 		t.Errorf("the daemon command does not pass --%s %s:\n%s", config.DoltPortFlag, port, out)
 	}
 }
+
+// The healthcheck reads ScratchDoltPort. Rendering with the constant's value
+// in the probe is not enough to catch a literal that happens to match, so the
+// source must not carry the port as a literal inside the probe string.
+func TestScratchDoltProbeSourceDoesNotHardCodeThePort(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("daemon_compose.go")
+	if err != nil {
+		t.Fatalf("read daemon_compose.go: %v", err)
+	}
+	probe := "/dev/tcp/127.0.0.1/"
+	i := strings.Index(string(src), probe)
+	if i < 0 {
+		t.Fatalf("the scratch Dolt probe %q is gone from daemon_compose.go", probe)
+	}
+	rest := string(src[i+len(probe):])
+	if strings.HasPrefix(rest, strconv.Itoa(templates.ScratchDoltPort)) {
+		t.Errorf("the probe hard-codes %d; it must read ScratchDoltPort", templates.ScratchDoltPort)
+	}
+}

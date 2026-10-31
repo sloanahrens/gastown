@@ -368,6 +368,7 @@ func TestContainerEntrypointTakesTheDoltHostTheInstalledTownNames(t *testing.T) 
 			r.kind[entrypointTownCfg] = entryRegular
 			r.files = map[string]string{entrypointTownCfg: townCfg}
 			r.doltHost, r.doltHostSet = "scratch-dolt", true
+			r.doltPort, r.doltPortSet = 3306, true
 
 			if err := runContainerEntrypoint(r.entrypoint()); err != nil {
 				t.Fatalf("runContainerEntrypoint: %v", err)
@@ -1448,6 +1449,38 @@ func TestContainerEntrypointChecksTheDoltPortTheInstalledTownNames(t *testing.T)
 				t.Fatalf("error = %v, want a refusal naming --%s and saying %q", err, config.DoltPortFlag, tc.wantMsg)
 			}
 			if len(r.calls) != 0 {
+				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
+			}
+		})
+	}
+}
+
+// A restart that leaves --dolt-port out is checked against the port an install
+// would have used, gt's default 3307, so dropping the flag does not skip the
+// check (om finding on gt-i2ekc).
+func TestContainerEntrypointChecksTheDefaultDoltPortWhenTheFlagIsOmitted(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		cfg     string
+		wantErr bool
+	}{
+		{"the town names the default port", `{"dolt":{"host":"scratch-dolt","port":3307}}`, false},
+		{"the town names another port", `{"dolt":{"host":"scratch-dolt","port":3306}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := scratchRig()
+			r.kind[entrypointTownCfg] = entryRegular
+			r.files = map[string]string{entrypointTownCfg: tc.cfg}
+			r.doltHost, r.doltHostSet = "scratch-dolt", true
+
+			err := runContainerEntrypoint(r.entrypoint())
+
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("error = %v, want error %v", err, tc.wantErr)
+			}
+			if tc.wantErr && len(r.calls) != 0 {
 				t.Errorf("a refusal ran %d commands, want none: %v", len(r.calls), r.calls)
 			}
 		})

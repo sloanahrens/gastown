@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // The environment the entrypoint reads beyond the container-mode flag.
@@ -368,9 +369,17 @@ func (e containerEntrypoint) refuseDoltHostTheTownDoesNotName(townRoot string) e
 	}
 	host := strings.TrimSpace(e.doltHost)
 	if strings.EqualFold(named, host) {
-		if e.doltPortSet && (town.Dolt == nil || town.Dolt.Port != e.doltPort) {
-			return fmt.Errorf("--%s %d is not the port the town at %s already names for %q, and this start runs no install that would write it, so the flag would be ignored; nothing was started",
-				config.DoltPortFlag, e.doltPort, townRoot, named)
+		// The port this start would have installed: --dolt-port, else the
+		// default `gt install` falls back to. A restart that omits the flag is
+		// checked against that default, so the flag cannot be dropped to skip
+		// the check.
+		want := doltserver.DefaultPort
+		if e.doltPortSet {
+			want = e.doltPort
+		}
+		if town.Dolt == nil || town.Dolt.Port != want {
+			return fmt.Errorf("--%s %d (the port this start would install) is not the port the town at %s already names for %q, and this start runs no install that would write it; nothing was started",
+				config.DoltPortFlag, want, townRoot, named)
 		}
 		return nil
 	}
