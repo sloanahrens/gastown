@@ -52,16 +52,26 @@ type Issue struct {
 	Dependencies []IssueDep `json:"dependencies,omitempty"`
 	// Dependents are the issues that depend on this one, with their relation:
 	// the other end of each link. Filled with Dependencies, by a read of named
-	// issues only. The tag has no omitempty, so a named read sends [] when
-	// nothing depends on the issue; a client reads an absent or null field as
-	// unfilled and an empty array as no dependents.
-	Dependents []IssueDep `json:"dependents"`
+	// issues only.
+	//
+	// A client tells an unfilled field (absent or null) from a filled, empty
+	// one ([]). DependentsList.IsZero keeps the first off the wire, which
+	// omitempty cannot do without dropping the second too.
+	Dependents DependentsList `json:"dependents,omitzero"`
 
 	// Counts the list endpoints fill in without loading the rows.
 	CommentCount    int `json:"comment_count,omitempty"`
 	DependencyCount int `json:"dependency_count,omitempty"`
 	DependentCount  int `json:"dependent_count,omitempty"`
 }
+
+// DependentsList is an issue's dependents: nil until a read fills it, empty
+// once a read found none.
+type DependentsList []IssueDep
+
+// IsZero reports an unfilled list, which omitzero keeps off the wire; a filled,
+// empty list marshals as [].
+func (d DependentsList) IsZero() bool { return d == nil }
 
 // Comment is one comment on an issue.
 type Comment struct {
