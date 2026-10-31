@@ -888,19 +888,20 @@ func runDoltInitRig(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	return doltInitRig(os.Stdout, townRoot, args[0])
+	return doltInitRig(os.Stdout, townRoot, args[0], doltserver.InitRig)
 }
 
 // doltInitRig initializes rigName's database in townRoot and writes the report
 // to out, so a test drives the command without moving the process's directory.
-func doltInitRig(out io.Writer, townRoot, rigName string) error {
-	result, err := doltserver.InitRig(townRoot, rigName)
+// initRig is doltserver.InitRig in the command; a test replaces it because a
+// town whose Dolt is on another host would otherwise reach the network.
+func doltInitRig(out io.Writer, townRoot, rigName string, initRig func(townRoot, rigName string) (doltserver.InitRigResult, error)) error {
+	result, err := initRig(townRoot, rigName)
 	if err != nil {
 		return err
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
-	rigDir := doltserver.RigDatabaseDir(townRoot, rigName)
 
 	if result.SkipReason != "" {
 		// The rig keeps its beads in the tracker, so it has no database here and
@@ -910,15 +911,29 @@ func doltInitRig(out io.Writer, townRoot, rigName string) error {
 		return nil
 	}
 
+	// A town whose Dolt is on another host keeps its rig databases there, so
+	// the location is that server's host:port. The path under .dolt-data names
+	// a directory this town never had (gt-pbp1k). InitRig draws the same
+	// remote/local line from the same config.
+	remote := config.IsRemote()
+	location := doltserver.RigDatabaseDir(townRoot, rigName)
+	if remote {
+		location = config.HostPort()
+	}
+
 	if !result.Created {
 		fmt.Fprintf(out, "%s Rig database %q already exists (no-op)\n", style.Bold.Render("✓"), rigName)
-		fmt.Fprintf(out, "  Location: %s\n", rigDir)
+		fmt.Fprintf(out, "  Location: %s\n", location)
 		return nil
 	}
 
 	fmt.Fprintf(out, "%s Initialized rig database %q\n", style.Bold.Render("✓"), rigName)
-	fmt.Fprintf(out, "  Location: %s\n", rigDir)
-	fmt.Fprintf(out, "  Data dir: %s\n", config.DataDir)
+	fmt.Fprintf(out, "  Location: %s\n", location)
+	if remote {
+		fmt.Fprintf(out, "  Data dir: %s\n", style.Dim.Render("none (databases live on the remote Dolt)"))
+	} else {
+		fmt.Fprintf(out, "  Data dir: %s\n", config.DataDir)
+	}
 
 	if result.ServerWasRunning {
 		fmt.Fprintf(out, "  Server: %s\n", style.Bold.Render("database registered with running server"))
