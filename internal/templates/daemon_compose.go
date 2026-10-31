@@ -384,6 +384,14 @@ func scratchDaemonCommand(omTokenFile string, doltPort int) string {
 // is ScratchDoltPort, the Dolt server's default, which the service does not
 // change; the probe reads the constant, so it cannot drift from the command.
 //
+// DOLT_ROOT_HOST is "%" because the image creates root only as root@localhost
+// otherwise, and the daemon reaches this server from its own container (L2,
+// 2026-10-31: Error 1045 Access denied for user 'root'). A wildcard root host is
+// acceptable here and only here: the service publishes no port, joins the
+// scratch internal network alone, holds throwaway data, and runs root with no
+// password as the live Dolt does. The live render has no such service. The %%
+// is doubled in the source because the body is a format string.
+//
 // The probe runs bash's /dev/tcp, so it needs bash in the image. The pinned
 // DoltServerImage has it: a container run from that digest on 2026-10-30
 // (linux/arm64) printed /usr/bin/bash and /usr/local/bin/dolt on a Debian 12
@@ -392,6 +400,8 @@ func scratchDaemonCommand(omTokenFile string, doltPort int) string {
 const scratchDoltBody = `  %[1]s:
     image: %[2]q
     restart: unless-stopped
+    environment:
+      DOLT_ROOT_HOST: "%%"
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/%[6]d"]
       interval: 5s

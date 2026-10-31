@@ -500,3 +500,36 @@ func TestRenderDaemonCompose_RefusesADoltPortItCannotUse(t *testing.T) {
 		})
 	}
 }
+
+// The scratch Dolt accepts root from the daemon's container: the image makes
+// root@localhost alone unless DOLT_ROOT_HOST says otherwise, and the L2 run of
+// 2026-10-31 failed with Error 1045 on that (gt-sd4za). A wildcard root host is
+// only safe because the service publishes no port and sits on the scratch
+// internal network alone, so the test holds all three at once.
+func TestRenderDaemonCompose_ScratchDoltRootHostIsAWildcardOnTheInternalNetworkAlone(t *testing.T) {
+	t.Parallel()
+	_, parsed := render(t, scratchSpec())
+	dolt := parsed.Services["scratch-dolt"]
+	if got := dolt.Environment["DOLT_ROOT_HOST"]; got != "%" {
+		t.Errorf("scratch-dolt DOLT_ROOT_HOST = %q, want %q so the daemon container can log in as root", got, "%")
+	}
+	if len(dolt.Ports) != 0 {
+		t.Errorf("scratch-dolt publishes %v; a wildcard root host is safe only with no published port", dolt.Ports)
+	}
+	if want := []string{"scratch-internal"}; !slices.Equal([]string(dolt.Networks), want) {
+		t.Errorf("scratch-dolt networks = %v, want %v", []string(dolt.Networks), want)
+	}
+}
+
+// Only the scratch render carries the wildcard: the live render has no
+// scratch-dolt service and no DOLT_ROOT_HOST anywhere.
+func TestRenderDaemonCompose_LiveCarriesNoScratchDoltRootHost(t *testing.T) {
+	t.Parallel()
+	out, parsed := render(t, liveSpec())
+	if strings.Contains(out, "DOLT_ROOT_HOST") {
+		t.Errorf("the live render carries DOLT_ROOT_HOST:\n%s", out)
+	}
+	if _, ok := parsed.Services["scratch-dolt"]; ok {
+		t.Errorf("the live render has a scratch-dolt service")
+	}
+}
