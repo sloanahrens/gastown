@@ -16,8 +16,13 @@
 # golangci-lint at the Makefile's pinned GOLANGCI_LINT_VERSION into the image's
 # PATH before the gate runs it (gt-fn9e6.17).
 #
-# fetch-depth: 0 matches this repo's GitHub gate job: parts of `make gate` read
-# the module history, and the default shallow clone turns that into a red run.
+# The fetch deepens two refs, the candidate and main, and creates no other.
+# The gate's history reader is `git describe --tags --always` (VERSION, hence
+# the build's ldflags): it needs the candidate's ancestry back to its nearest
+# tag, which a depth-1 checkout alone does not have. main is the base the
+# candidate is built on, kept for the ancestry and merge-base reads around the
+# landing. `fetch-depth: 0` fetched all 669 heads instead, 8s of a 49s job
+# (gt-ebco0).
 name: ci
 on:
   push:
@@ -28,7 +33,11 @@ jobs:
     runs-on: ci-base
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: fetch the candidate and main with history
+        run: |
+          git fetch --no-tags --prune --depth=2147483647 origin \
+            "+refs/heads/$GITHUB_REF_NAME:refs/remotes/origin/$GITHUB_REF_NAME" \
+            "+refs/heads/main:refs/remotes/origin/main"
+          git fetch --no-tags --prune origin "+refs/tags/*:refs/tags/*"
       - run: make lint-tools
       - run: make gate

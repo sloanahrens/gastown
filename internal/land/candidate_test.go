@@ -198,14 +198,14 @@ func TestParseGateWorkflowUsesJobNameContext(t *testing.T) {
 	}
 }
 
-// TestGastownGateWorkflowFixesTheRequiredContext pins this repo's committed
+// TestGateWorkflowContext pins this repo's committed
 // gate workflow to the contract the candidate gate derives from it. The file
 // is the single source of the required context "ci / gate (push)". The job
 // reports under its `name:` when it sets one, else its key, so this fails if the
 // workflow name, the job key or a job `name:` moves without the branch-protection rule moving too, the landing
 // waits on a context nobody posts and every candidate goes silently red
 // (gt-fn9e6.10).
-func TestGastownGateWorkflowFixesTheRequiredContext(t *testing.T) {
+func TestGateWorkflowContext(t *testing.T) {
 	t.Parallel()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -248,9 +248,11 @@ func TestGastownGateWorkflowRunsTheMergeQueueGate(t *testing.T) {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		t.Fatalf("parsing this repo's gate workflow: %v", err)
 	}
+	// The make invocations are the targets this test is about; the job's
+	// fetch step runs git, not the gate (gt-ebco0).
 	var runs []string
 	for _, step := range doc.Jobs["gate"].Steps {
-		if step.Run != "" {
+		if strings.HasPrefix(step.Run, "make ") {
 			runs = append(runs, step.Run)
 		}
 	}
