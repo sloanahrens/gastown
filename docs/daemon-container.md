@@ -437,19 +437,20 @@ and the live daemon stay exactly as they were. The result is five things:
 **What L2 does not prove, and what blocks a run.** One thing stands between this
 page and a full proof, and it is not hidden below.
 
-- **The scratch commands take the forge ports.** gt-t6rkn landed
-  (`74424317`): `gt daemon scratch render` and `up` take `--forge-http-port` and
-  `--forge-ssh-port`. Both together turn the throwaway Forgejo on, neither leaves
-  it off, and one alone is refused. `up` then names the four forge services
-  beside `daemon`, because they are not dependencies of it. Do not hand-edit the
-  compose file instead: the render's refusals (the live Forgejo's ports 3000 and
-  2222, the live names) are the point of rendering it.
 - **The dispatch half is not provable here.** The scratch town has no polecat
   seat, and the container has no `openshell`, which is how sandbox seats are
   reached. L2 therefore proves the landing half (Step 9 submits the work by
   hand) and records dispatch as not proven. Whether the scratch town gets a
   seat, or dispatch is proven another way, is the overseer's decision and is not
   made on this page.
+
+The forge ports are no longer a blocker. gt-t6rkn landed (`74424317`):
+`gt daemon scratch render` and `up` take `--forge-http-port` and
+`--forge-ssh-port`. Both together turn the throwaway Forgejo on, neither leaves
+it off, and one alone is refused. `up` then names the four forge services
+beside `daemon`, because they are not dependencies of it. Do not hand-edit the
+compose file instead: the render's refusals (the live Forgejo's ports 3000 and
+2222, the live names) are the point of rendering it.
 
 Docker commands name their context as in L1. Every `gt`
 command that needs the scratch town's beads runs inside the container with
@@ -1009,8 +1010,8 @@ it), set
 "daemon": { "supervisor": "container" }
 ```
 
-keeping the container name and compose project already there. Then, from
-`<live-town>`:
+keeping the container name and compose project already there. The rollback
+reverses this switch: see [Rollback](#rollback). Then, from `<live-town>`:
 
 ```
 gt daemon status
@@ -1024,8 +1025,11 @@ installed `gt` knows it (see the preconditions).
 
 ### Checks during the first 24 hours
 
-Take the first three at the start of the window and every hour for the first
-six hours, then at 12 and 24 hours. Each reads and changes nothing.
+Take checks 1 to 3 at the start of the window (T+0), at each hour from T+1 to
+T+6, and at T+12 and T+24. Take checks 4, 5 and 7 once, at T+0. Take check 6
+when the operator lifts the dispatch hold. Checks 1 to 5 and 7 only read. Check
+6 is the one operator action: the operator lifts the hold, and puts it back on
+at the first sign of trouble.
 
 - [ ] `gt doctor --check daemon --check daemon-liveness --check daemon-job
       --check daemon-respawn` report OK; for a container town they read the
@@ -1081,9 +1085,10 @@ Expected on success: `launchd owns the town and has beaten twice.` then
 left and the command to restore the other side, as it does going forward.
 
 **After the rollback, switch the setting back.** The rollback does not switch
-`daemon.supervisor` either: set `"supervisor": "launchd"` in the same live
-settings, keeping the container fields so a later window needs no edit, and run
-`gt daemon status`. Expected: a `Supervised:` line that names launchd. Then
+`daemon.supervisor` either. Make the switch described in the cutover section
+above, in the same live settings, with `"supervisor": "launchd"` in place of
+`container`, keeping the container fields so a later window needs no edit. Then
+run `gt daemon status`. Expected: a `Supervised:` line that names launchd. Then
 compare `docker --context desktop-linux ps` and `<live-town>/daemon/state.json`
 with the baseline recorded before the window. Leave the container's compose
 file and image in place; they cost nothing and the next window uses them.
