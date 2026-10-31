@@ -2,6 +2,7 @@ package noise
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -245,6 +246,25 @@ func TestNoiseWriteTextReportsUnpairedRepeats(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, WriteText(&out, Report{Battery: "logtriage", Cut: 0.5, Unpaired: 3, Rows: []Row{}}))
 	assert.Contains(t, out.String(), "3 repeat(s) with no earlier original were not paired\n")
+}
+
+// unpairedLineWriter fails only the write that carries the unpaired line, so a
+// report that drops that write's error would still print the rest and return nil.
+type unpairedLineWriter struct{}
+
+func (unpairedLineWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("were not paired")) {
+		return 0, errors.New("disk full")
+	}
+	return len(p), nil
+}
+
+// TestNoiseWriteTextReturnsAFailedUnpairedLine: a write failure on the unpaired
+// line is returned to the caller.
+func TestNoiseWriteTextReturnsAFailedUnpairedLine(t *testing.T) {
+	t.Parallel()
+	err := WriteText(unpairedLineWriter{}, Report{Battery: "logtriage", Cut: 0.5, Unpaired: 2, Rows: []Row{}})
+	assert.ErrorContains(t, err, "disk full")
 }
 
 // TestNoiseRejectsAQuestionAnsweredAsTwoKinds: one question id holding a noul
