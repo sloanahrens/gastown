@@ -56,6 +56,8 @@ func TestExactAndWildcardMatching(t *testing.T) {
 		{"x.a.com", true},
 		{"x.y.a.com", true},
 		{"X.Y.A.COM:8443", true},
+		{"api.example.com:1", true},
+		{"api.example.com:65535", true},
 		{"a.com", false},
 		{"A.COM:443", false},
 		{"xa.com", false},
@@ -65,6 +67,35 @@ func TestExactAndWildcardMatching(t *testing.T) {
 		if got := p.Allowed(tc.host); got != tc.want {
 			t.Errorf("Allowed(%q) = %v, want %v", tc.host, got, tc.want)
 		}
+	}
+}
+
+// A host argument that is not a host name is refused even when its suffix would
+// match a wildcard entry, so a wildcard cannot name a string no one can dial.
+func TestNonHostArgumentRefused(t *testing.T) {
+	t.Parallel()
+	p := mustLoad(t, `{"workspace":"w","hosts":["api.example.com","*.a.com"]}`)
+	for _, host := range []string{
+		"x/a.com",
+		"x y.a.com",
+		"x?a.com",
+		"x#a.com",
+		"*.a.com",
+		"*.example.com",
+		"https://x.a.com",
+		"x.a.com:99999",
+		"x.a.com:0",
+		"x.a.com:",
+		"x.a.com:https",
+		".a.com",
+		"x..a.com",
+	} {
+		t.Run(host, func(t *testing.T) {
+			t.Parallel()
+			if p.Allowed(host) {
+				t.Errorf("Allowed(%q) = true, want false", host)
+			}
+		})
 	}
 }
 
@@ -109,6 +140,10 @@ func TestLoadRejectsMalformedEntries(t *testing.T) {
 		{"an empty label", `{"hosts":["a..com"]}`},
 		{"a non-numeric port", `{"hosts":["a.com:https"]}`},
 		{"an entry that is only a port", `{"hosts":[":443"]}`},
+		{"an empty port", `{"hosts":["a.com:"]}`},
+		{"a port of zero", `{"hosts":["a.com:0"]}`},
+		{"a port above the range", `{"hosts":["a.com:65536"]}`},
+		{"a wildcard with a port out of range", `{"hosts":["*.a.com:99999"]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
