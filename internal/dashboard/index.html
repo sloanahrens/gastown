@@ -2696,7 +2696,9 @@ function renderOM(s) {
     $("omnote").textContent = "";
     return;
   }
-  $("omnote").textContent = readCaption(r, [om.model, om.depth, om.threshold != null ? "threshold " + om.threshold + (om.threshold_source ? " (" + om.threshold_source + ")" : "") : (om.threshold_source ? "threshold unknown (" + om.threshold_source + ")" : null), om.timeout_s ? om.timeout_s + "s timeout" : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
+  $("omnote").textContent = readCaption(r, [om.model, om.depth, om.threshold != null ? "threshold " + om.threshold : (om.threshold_source ? "threshold unknown (" + om.threshold_source + ")" : null), om.timeout_s ? om.timeout_s + "s timeout" : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
+  // Where the threshold came from is a hover, not header text (gt-7swd8).
+  $("omnote").title = om.threshold != null && om.threshold_source ? om.threshold_source : "";
 
   // Running now, then the last five om ran, above both folds. A server that
   // sends neither list draws neither block.
@@ -4993,7 +4995,11 @@ const FOLD_KEY = "gt-fold";
 // every other section starts closed. A pane that opts out with
 // data-default-collapsed starts closed whatever this holds. This list is the
 // operator's to edit.
-const FOLD_DEFAULT_OPEN = ["attention", "overseer", "cost", "work", "landings"];
+const FOLD_DEFAULT_OPEN = ["attention", "overseer", "work", "landings"];
+// FOLD_ALWAYS_CLOSED is the sections that start closed on every load, whatever
+// was saved: the operator opens them for a look, and a reload closes them
+// again. A toggle still works for the rest of the page session (gt-7swd8).
+const FOLD_ALWAYS_CLOSED = ["cost"];
 // FOLD_AGE_RE matches one part of a note that says only how long ago its pane
 // was read — "read 51s ago", "seats read 3m ago". A note that is only ages
 // tells a closed section nothing, which is what the summary line is for.
@@ -5071,6 +5077,7 @@ function paintFolds(s) { for (const f of folds) f.paint(s); }
 //   defaultOpen whether a reader with no saved choice sees it open
 //   legacy      the title its choice was saved under before keys existed, so
 //               an entry written then still applies
+//   alwaysClosed whether it starts closed on every load, a saved choice or not
 //   onToggle    called with the section's closed state after a reader opens or
 //               closes it
 //
@@ -5103,7 +5110,7 @@ function foldable(root, opts) {
   const fold = {
     el: root,
     key: key,
-    closed: remembered !== undefined ? !!remembered : !defaultOpen,
+    closed: opts.alwaysClosed || (remembered !== undefined ? !!remembered : !defaultOpen),
     summaryOf: opts.summary,
   };
   fold.paint = s => {
@@ -5153,6 +5160,7 @@ function setupCollapse() {
       head: head,
       summary: FOLD_SUMMARY[key],
       defaultOpen: FOLD_DEFAULT_OPEN.indexOf(key) >= 0,
+      alwaysClosed: FOLD_ALWAYS_CLOSED.indexOf(key) >= 0,
       legacy: foldLegacyTitle(head),
       onToggle: FOLD_ON_TOGGLE[key],
     });
