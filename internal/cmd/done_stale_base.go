@@ -40,10 +40,14 @@ func staleBaseWarning(behind, threshold int) string {
 // origin/main is refreshed first, bounded like every read-only remote query:
 // counted against the last fetch, the warning would understate a stale base —
 // or miss one entirely — because done.Run fetches only after this runs. A
-// fetch that fails leaves the existing ref in place, which is the best
-// question the branch can still be asked.
+// fetch that fails leaves the existing ref in place and says so before the
+// count is read: the count is then against an older origin/main, so it may
+// understate how far behind the branch is, and the operator asking why no
+// warning appeared is owed that answer rather than a silent clean read.
 func warnStaleBase(w io.Writer, g staleBaseGit) {
-	_ = g.FetchRefspecWithTimeout("origin", "+refs/heads/main:refs/remotes/origin/main", git.RemoteQueryTimeout)
+	if err := g.FetchRefspecWithTimeout("origin", "+refs/heads/main:refs/remotes/origin/main", git.RemoteQueryTimeout); err != nil {
+		fmt.Fprintf(w, "Warning: could not refresh origin/main before the stale-base check; the count may be out of date: %v\n", err)
+	}
 	behind, err := g.CountCommitsBehind("origin/main")
 	if err != nil {
 		return

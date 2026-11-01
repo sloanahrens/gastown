@@ -53,16 +53,8 @@ func TestDoltInitRigRemoteTownLocation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := townRootWithDoltEndpoint(t, "10.0.0.5", 3307)
-			// doltInitRig and InitRig draw the remote/local line from the same
-			// predicate on the same config, so pin that this town is remote by
-			// it. The fake result then stands for a real remote InitRig, which
-			// reports a running server and sends nothing to a local data
-			// directory (gt-l5s2m).
-			if !doltserver.DefaultConfig(townRoot).IsRemote() {
-				t.Fatal("the fixture town is not remote by the predicate InitRig branches on")
-			}
 			fakeInitRig := func(_, _ string) (doltserver.InitRigResult, error) {
-				return doltserver.InitRigResult{Created: created, ServerWasRunning: true}, nil
+				return doltserver.InitRigResult{Created: created, ServerWasRunning: true, Remote: true}, nil
 			}
 
 			var out bytes.Buffer
@@ -88,6 +80,59 @@ func TestDoltInitRigRemoteTownLocation(t *testing.T) {
 			}
 			if !strings.Contains(got, "Data dir: ") || !strings.Contains(got, "none (databases live on the remote Dolt)") {
 				t.Errorf("output = %q, want the Data dir line to say there is no local one", got)
+			}
+		})
+	}
+}
+
+// The report follows the path InitRig took, not a second reading of the town's
+// config: the same result type says where the database is, so the two can never
+// disagree about a town (gt-l5s2m). Each row gives the config and the result
+// opposite answers, and the result is what the report must print.
+func TestDoltInitRigReportsThePathInitRigTook(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// town is a local town, or a remote one when remoteTown is set.
+		remoteTown bool
+		// remote is the path the fake InitRig reports it took.
+		remote bool
+	}{
+		{name: "a remote result on a local town", remote: true},
+		{name: "a local result on a remote town", remoteTown: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			if tc.remoteTown {
+				townRoot = townRootWithDoltEndpoint(t, "10.0.0.5", 3307)
+			}
+			fakeInitRig := func(_, _ string) (doltserver.InitRigResult, error) {
+				return doltserver.InitRigResult{Created: true, ServerWasRunning: true, Remote: tc.remote}, nil
+			}
+
+			var out bytes.Buffer
+			if err := doltInitRig(&out, townRoot, "agrig", fakeInitRig); err != nil {
+				t.Fatalf("doltInitRig: %v", err)
+			}
+			got := out.String()
+			localDir := filepath.Join(townRoot, ".dolt-data")
+			const noLocalDir = "none (databases live on the remote Dolt)"
+			if tc.remote {
+				if !strings.Contains(got, noLocalDir) {
+					t.Fatalf("output = %q, want the remote Data dir line from the result", got)
+				}
+				if strings.Contains(got, localDir) {
+					t.Errorf("output = %q, want no local data directory for a remote result", got)
+				}
+				return
+			}
+			if !strings.Contains(got, "Data dir: "+localDir) {
+				t.Errorf("output = %q, want the local data directory the result names", got)
+			}
+			if strings.Contains(got, noLocalDir) {
+				t.Errorf("output = %q, want no remote Data dir line for a local result", got)
 			}
 		})
 	}

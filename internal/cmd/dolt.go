@@ -914,9 +914,10 @@ func doltInitRig(out io.Writer, townRoot, rigName string, initRig func(townRoot,
 
 	// A town whose Dolt is on another host keeps its rig databases there, so
 	// the location is that server's host:port. The path under .dolt-data names
-	// a directory this town never had (gt-pbp1k). InitRig draws the same
-	// remote/local line from the same config.
-	remote := config.IsRemote()
+	// a directory this town never had (gt-pbp1k). Remote is the path InitRig
+	// took, not a second reading of the config, so the report describes the
+	// database this run touched (gt-l5s2m).
+	remote := result.Remote
 	location := doltserver.RigDatabaseDir(townRoot, rigName)
 	if remote {
 		location = config.HostPort()

@@ -166,8 +166,8 @@ func TestInitRigRemoteCreatesTheDatabaseOnTheServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitRig over a remote Dolt: %v", err)
 	}
-	if !result.Created || !result.ServerWasRunning {
-		t.Errorf("InitRig result = %+v, want a created database on a running server", result)
+	if !result.Created || !result.ServerWasRunning || !result.Remote {
+		t.Errorf("InitRig result = %+v, want a created database on a running remote server", result)
 	}
 
 	got := server.snapshot()
@@ -204,8 +204,8 @@ func TestInitRigRemoteIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitRig over a database the server already has: %v", err)
 	}
-	if result.Created {
-		t.Errorf("InitRig result = %+v, want Created=false for a database the server already serves", result)
+	if result.Created || !result.Remote {
+		t.Errorf("InitRig result = %+v, want Created=false and Remote=true for a database the server already serves", result)
 	}
 	for _, stmt := range server.snapshot() {
 		if strings.HasPrefix(stmt, "CREATE DATABASE") {

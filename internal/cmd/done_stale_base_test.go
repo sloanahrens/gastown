@@ -123,7 +123,8 @@ func TestDoneStaleBaseWarnsAndCarriesOn(t *testing.T) {
 // TestDoneStaleBaseRefreshesOriginFirst pins gt-u7mtn: done.Run fetches only
 // after the warning is printed, so a count against the last fetch could
 // understate the branch's staleness. The warning refreshes origin/main itself,
-// before it reads the count.
+// before it reads the count, and a refresh that fails says so instead of
+// passing as a clean read.
 func TestDoneStaleBaseRefreshesOriginFirst(t *testing.T) {
 	t.Parallel()
 
@@ -154,10 +155,22 @@ func TestDoneStaleBaseRefreshesOriginFirst(t *testing.T) {
 					t.Fatalf("git calls = %v, want %v", repo.calls, want)
 				}
 			}
-			// The warning is advisory either way: a failed refresh leaves the
-			// existing ref, and the count still prints.
-			if !strings.Contains(out.String(), "400") {
-				t.Errorf("printed %q, want the warning to still name 400", out.String())
+			printed := out.String()
+			// The warning is advisory either way: the count still prints, and a
+			// failed refresh is reported rather than read as an up-to-date base.
+			if !strings.Contains(printed, "400") {
+				t.Errorf("printed %q, want the warning to still name 400", printed)
+			}
+			if tc.fetchErr == nil {
+				if strings.Contains(printed, "could not refresh origin/main") {
+					t.Errorf("printed %q, want no refresh failure for a fetch that succeeded", printed)
+				}
+				return
+			}
+			for _, want := range []string{"could not refresh origin/main", tc.fetchErr.Error()} {
+				if !strings.Contains(printed, want) {
+					t.Errorf("printed %q, want it to name %q", printed, want)
+				}
 			}
 		})
 	}

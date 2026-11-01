@@ -73,6 +73,66 @@ func TestSlingBondLockTimeoutGivesBackTheRespawn(t *testing.T) {
 	}
 }
 
+// TestExecuteSlingBondLockTimeoutGivesBackTheRespawn covers the callers that
+// never pass through runRigTarget: the spec dispatcher (slingSpec) and the
+// scheduler's capacity dispatch both call executeSling directly with
+// FormulaFailFatal. The give-back lives on that shared method, so their spawn
+// is charged and given back the same way gt sling's rig target is (gt-8d38p).
+// Every other formula failure keeps its count.
+func TestExecuteSlingBondLockTimeoutGivesBackTheRespawn(t *testing.T) {
+	t.Parallel()
+	const bead = slingBead
+	bondLock := fmt.Errorf("instantiating formula mol-polecat-work: %w",
+		fmt.Errorf("bonding: spawning and attaching proto: %w", ErrBondLockTimeout))
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "a bond-lock deferral", err: bondLock, want: 1},
+		{name: "another formula failure", err: errors.New("instantiating formula mol-polecat-work: unknown var"), want: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			// One count already on the bead, so a give-back that removes the
+			// wrong increment reads as a count of 0.
+			if _, err := polecat.RecordBeadRespawn(townRoot, bead); err != nil {
+				t.Fatalf("RecordBeadRespawn: %v", err)
+			}
+			mark, err := polecat.RecordBeadRespawnMark(townRoot, bead)
+			if err != nil {
+				t.Fatalf("RecordBeadRespawnMark: %v", err)
+			}
+
+			h := newSlingHarness(t)
+			h.addBead(bead, beadInfo{})
+			h.formulas["mol-polecat-work"] = true
+			h.run.spawnPolecat = func(rig string, _ SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+				s := h.newSpawn(rig)
+				s.HookBead = bead
+				s.townRoot = townRoot
+				s.respawnMark = mark
+				return s, nil
+			}
+			h.run.instantiateFormula = func(context.Context, string, string, string, string, string, []string) (*FormulaOnBeadResult, error) {
+				return nil, tc.err
+			}
+
+			// The params the spec dispatcher and the capacity dispatch make: a
+			// declared formula and a fatal formula failure.
+			params := executeParams()
+			params.FormulaName = "mol-polecat-work"
+			if _, err := h.run.executeSling(params); !errors.Is(err, tc.err) {
+				t.Fatalf("executeSling error = %v, want the formula failure", err)
+			}
+			if got := respawnCountOf(t, townRoot, bead); got != tc.want {
+				t.Errorf("respawn count after the failed sling = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestBondLockGiveBackResolvesTheTown pins gt-ymw7d: a spawn that recorded no
 // town — a reused seat, a forced sling — resolves it through the lookup the
 // production path passes, and a lookup that fails leaves the count spent with
