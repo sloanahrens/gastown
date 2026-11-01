@@ -230,9 +230,8 @@ gate workflow, one bot login per role, and the promote target and key file. Ever
 other key keeps its place; a block that already means the same thing is left
 alone with no backup; a missing file is created with its type and version. The
 file is copied to `config.json.bak-<yyyymmdd-hhmmss>` first, and the undo is
-copying that backup back over `config.json`. The daemon reads the block at start,
-so it is also a live step: after the promote key exists and the first L3 checks
-pass, never from a landing.
+copying that backup back over `config.json`. It is a live step on the same terms as
+the repoint above, since the daemon reads the block at start.
 
 When the rig's credential-helper hostname is not the admin base — the usual
 case, since it is the form every rig remote carries — pass `--forgejo-url` that

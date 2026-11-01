@@ -13,8 +13,8 @@ import (
 	"testing"
 )
 
-// The lint-lock-wait and empty-docker-list cases: one test per case in lines
-// 944 to 975 of scripts/makefile-gate_test.sh. The three lint-lock-wait cases
+// The lint-lock-wait and empty-docker-list cases, ported from the shell gate
+// fixture one test per case. The three lint-lock-wait cases
 // run scripts/lint-lock-wait.sh itself as the thing under test, against a lint
 // stub that reports the module lock held for its first STUB_CONTEND calls, so
 // the retry loop, its wait bound and its refusal to retry a real finding are
@@ -22,12 +22,11 @@ import (
 // recipe with DOCKER_PKGS= set empty, so the recipe's own guard is what decides
 // the exit status.
 //
-// Each test is named after its shell case and its comment names the mutation
+// Each test is named after the case it ports and its comment names the mutation
 // that turns it red. The script and make calls are processes, so this file is
 // integration tier (docs/standards/test-engineering.md, rule 2).
 
-// lintLockStub is the contended lint the shell fixture writes as
-// $TMP/contended-lint: it logs every call, exits 3 with golangci-lint's lock
+// lintLockStub is the contended lint: it logs every call, exits 3 with golangci-lint's lock
 // line while STUB_CONTEND calls have not yet been made, and reports a finding
 // when STUB_FINDING is set.
 const lintLockStub = `#!/usr/bin/env bash
@@ -169,7 +168,8 @@ func TestIntegrationLintLockWaitAtTheBoundExitsWithTheLintCode(t *testing.T) {
 // TestIntegrationLintLockWaitNeverRetriesALintWithFindings checks
 // "lint-lock-wait: a lint with findings is never retried".
 // Mutation: retry any non-zero attempt instead of only one whose output carries
-// the lock line, and the finding is linted twice (two calls) instead of once.
+// the lock line, and the finding is linted again and again until the wait bound
+// (five seconds here, with a zero poll), so the call count is far above one.
 func TestIntegrationLintLockWaitNeverRetriesALintWithFindings(t *testing.T) {
 	r := runLintLockWait(t, "5", "STUB_CONTEND=0", "STUB_FINDING=1")
 

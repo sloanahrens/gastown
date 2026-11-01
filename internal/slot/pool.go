@@ -1037,14 +1037,13 @@ func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
 	return rep, nil
 }
 
-// PoolBusyReadOnly answers Report.Busy for the pool while writing nothing: it
-// creates no lock file, removes no dead holder's owner file and leaves any
+// PoolBusyReadOnly says whether a gate job is running in the pool while writing
+// nothing: it creates no lock file, removes no dead holder's owner file and leaves any
 // stale marker alone, so a caller can ask the question and still leave the town
 // exactly as it found it. The held/free reading is the same flock truth
 // StatusPool reads, and the `docker ps` cross-check runs under the same rule —
 // only when no slot is held at all. The marker rows StatusPool appends are
-// left out: Busy does not count them, and sweeping them is the one thing a
-// read-only reader cannot do.
+// left out, since sweeping them is the one thing a read-only reader cannot do.
 //
 // A `docker ps` that cannot run is an error here, where Report.Busy folds it
 // into DockerUnknown=true: a caller that has to say why the town is not quiet
@@ -1052,8 +1051,9 @@ func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
 // Both answers stop the wait, so neither reads an unchecked host as free.
 //
 // The answer is busy when ANY slot is held (a gate job is running), not only
-// when every slot is. The daemon cutover's quiet gate (internal/cmd/daemon_quiet.go) is the
-// caller: it must be able to give up having changed nothing (gt-qpeei.22).
+// when every slot is, which is where it differs from Report.Busy (gt-zh3wx). The
+// daemon cutover's quiet gate (internal/cmd/daemon_quiet.go) is the caller: it
+// must be able to give up having changed nothing (gt-qpeei.22).
 func PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
 	return NewGate().PoolBusyReadOnly(townRoot, pool)
 }
@@ -1090,9 +1090,7 @@ func (g *Gate) PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
 			}
 		}
 	}
-	// Any held slot is a gate job running: a pool of 8 slots with one `go test`
-	// in it is busy, not "almost free" (the 2026-11-01 cutover read it free and
-	// stopped the live daemon under a running gate).
+	// Any held slot is a gate job running, however many slots are free (gt-zh3wx).
 	return held > 0, nil
 }
 

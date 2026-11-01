@@ -670,7 +670,7 @@ the compactor-dog and dolt-archive plugins are all gone. Nothing syncs
 
 The backup is local: scheduled_maintenance takes a nightly backup of every
 database in `~/gt/.dolt-data` into `~/gt-backups/dolt/<date>/` before its gc,
-keeping seven nights (gt-8z769.5; restore procedure in `docs/dolt-restore.md`),
+keeping fourteen nights (gt-8z769.5; restore procedure in `docs/dolt-restore.md`),
 and the JSONL export committed to each repo is the human-readable current
 state. The 15-minute `dolt_backup` patrol (`dolt backup sync` into
 `<town>/.dolt-backup` plus an iCloud rsync) is retired.

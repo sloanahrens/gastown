@@ -59,7 +59,8 @@ func ListOpenSlingContextRecords(townRoot string) ([]SlingContextRecord, error) 
 }
 
 // listOpenSlingContextRecords is ListOpenSlingContextRecords reading each
-// search directory's store through open (nil is bd at that directory).
+// database once through open (nil is bd at the first search directory that
+// resolves to it).
 func listOpenSlingContextRecords(townRoot string, open func(dir string) Client) ([]SlingContextRecord, error) {
 	var records []SlingContextRecord
 	seen := make(map[string]bool)
