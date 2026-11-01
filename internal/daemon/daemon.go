@@ -2434,7 +2434,7 @@ func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
 		d.setHeartbeatStep(step.name)
 		stepStart := d.clk().Now()
 		d.seams.runHeartbeatStep(d, step)
-		d.logStep(timing, step.name, d.clk().Since(stepStart))
+		timing.logStep(d.logger, step.name, d.clk().Since(stepStart))
 		d.setHeartbeatStep("")
 	}
 
