@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -220,6 +221,93 @@ func TestAnnounceRunsACommandWithNoArgvWithoutPanicking(t *testing.T) {
 	}
 	if !ran {
 		t.Fatal("announce did not hand the command to exec")
+	}
+}
+
+// jobsStartBound is the hang guard for the parallel start: a command that wired
+// --jobs starts both entries at once, and one that did not fails here rather
+// than hanging the suite.
+const jobsStartBound = 10 * time.Second
+
+// TestMainRunsParallelEntriesUpToJobs: --jobs reaches the pool. Two Parallel
+// entries with --jobs 2 start together; a command that did not wire the flag
+// runs them one at a time and never starts the second while the first is held.
+func TestMainRunsParallelEntriesUpToJobs(t *testing.T) {
+	t.Parallel()
+	entries := []shelltier.Entry{
+		{Path: "scripts/a_test.sh", Mode: shelltier.Parallel},
+		{Path: "scripts/b_test.sh", Mode: shelltier.Parallel},
+	}
+	started := make(chan string, len(entries))
+	release := make(chan struct{})
+	var errs bytes.Buffer
+	env := Env{
+		Err:     &errs,
+		Entries: entries,
+		Exec: func(ctx context.Context, c shelltier.Command) (int, error) {
+			started <- c.Argv[len(c.Argv)-1]
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		Now: func() time.Time { return time.Unix(0, 0) },
+		WithTimeout: func(ctx context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			return context.WithCancel(ctx)
+		},
+	}
+	var code int
+	done := make(chan struct{})
+	go func() {
+		code = Main([]string{"--all", "--logdir", "/logs", "--jobs", "2"}, &bytes.Buffer{}, env)
+		close(done)
+	}()
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		releaseAll()
+		<-done
+	})
+
+	var began []string
+	for range entries {
+		select {
+		case path := <-started:
+			began = append(began, path)
+		case <-time.After(jobsStartBound): //testpolicy:allow no-sleep — a hang guard only: both entries start at once on a wired --jobs, and a command that dropped the flag fails here rather than hanging the suite
+			t.Fatalf("waited %s for both Parallel entries to start: %q started", jobsStartBound, began)
+		}
+	}
+	releaseAll()
+	select {
+	case <-done:
+		if code != 0 {
+			t.Errorf("exit = %d, want 0: %s", code, errs.String())
+		}
+	case <-time.After(jobsStartBound): //testpolicy:allow no-sleep — a hang guard only: every held script is released, so a correct run returns at once and a stuck one fails here rather than hanging the suite
+		t.Fatalf("waited %s for the run to finish", jobsStartBound)
+	}
+}
+
+// TestMainRefusesJobsBelowOne: a pool of no workers starts no script, so the
+// command refuses the value instead of silently running one.
+func TestMainRefusesJobsBelowOne(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(nil, twoScripts()...)
+			if code := Main([]string{"--all", "--jobs", value}, &f.out, f.env); code != 2 {
+				t.Fatalf("exit = %d, want 2", code)
+			}
+			if !strings.Contains(f.err.String(), "usage: shelltier [--all]") {
+				t.Fatalf("stderr = %q, want the usage line", f.err.String())
+			}
+			if len(f.cmds) != 0 {
+				t.Fatalf("ran %d scripts with --jobs %s, want 0", len(f.cmds), value)
+			}
+		})
 	}
 }
 

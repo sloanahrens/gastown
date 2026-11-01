@@ -3,6 +3,7 @@ package shelltier
 import (
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -286,6 +287,9 @@ func TestRunSeparatesABudgetExpiryFromAParentCancel(t *testing.T) {
 				Exec:        exec,
 				Now:         twoInstants(time.Unix(0, 0), time.Unix(0, 0)),
 				WithTimeout: withTimeout,
+				// The skipped scripts' diagnostics are asserted in
+				// TestRunNamesEachScriptItNeverRuns; this table reads counts and names.
+				Err: io.Discard,
 			})
 			if ran != tc.wantRan {
 				t.Errorf("ran %d scripts, want %d", ran, tc.wantRan)
