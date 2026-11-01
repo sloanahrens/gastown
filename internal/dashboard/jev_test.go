@@ -624,7 +624,7 @@ func jevRowTexts(rows []jevRowDrawn) []string {
 // jevNoteChips reads the title line's chips in the order it drew them.
 func jevNoteChips(t *testing.T, dom *pageDOM) []jevDrawn {
 	t.Helper()
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["jevnote"].children.filter(c => c.className && c.className.indexOf("jvchip") === 0).map(c => ({tag: c.tagName, class: c.className, text: c.textContent, title: c.title})))`)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["jevnote"].children.__arr.filter(c => c.className && c.className.indexOf("jvchip") === 0).map(c => ({tag: c.tagName, class: c.className, text: c.textContent, title: c.title})))`)
 	if err != nil {
 		t.Fatalf("reading the JEV title line's chips: %v", err)
 	}

@@ -26,7 +26,7 @@ type headerPart struct {
 func spanParts(t *testing.T, dom *pageDOM, js string) []headerPart {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify((` + js + `).children.filter(c => c.nodeType !== 3).map(c => ({text: c.textContent, class: c.className, title: c.title})))`)
+	v, err := dom.vm.RunString(`JSON.stringify((` + js + `).children.__arr.filter(c => c.nodeType !== 3).map(c => ({text: c.textContent, class: c.className, title: c.title})))`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
 	}
@@ -49,7 +49,7 @@ func summaryLine(t *testing.T, dom *pageDOM) (string, []headerPart) {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`(() => {
-		const l = __byId["cost"].children.filter(c => c.className === "title")[0];
+		const l = __byId["cost"].children.__arr.filter(c => c.className === "title")[0];
 		return l ? JSON.stringify({text: l.textContent}) : "null";
 	})()`)
 	if err != nil {
@@ -64,7 +64,7 @@ func summaryLine(t *testing.T, dom *pageDOM) (string, []headerPart) {
 	if err := json.Unmarshal([]byte(v.String()), &line); err != nil {
 		t.Fatalf("reading the Cost summary: %v", err)
 	}
-	return line.Text, spanParts(t, dom, `__byId["cost"].children.filter(c => c.className === "title")[0]`)
+	return line.Text, spanParts(t, dom, `__byId["cost"].children.__arr.filter(c => c.className === "title")[0]`)
 }
 
 // partByText is the header span whose words contain want, failing when the

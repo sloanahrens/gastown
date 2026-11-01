@@ -62,7 +62,7 @@ func TestQueuedLandingRowAgesTheWaitFromTheBeadsLastUpdate(t *testing.T) {
 	tbl := pageFunc(t, "landingTable")
 	for _, want := range []string{
 		`el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting")`,
-		`when.title = "waiting since the bead's last update, which gt done moves";`,
+		`when.title = "submitted and waiting for the landing worker to take it; waiting since the bead's last update, which gt done moves";`,
 	} {
 		if !strings.Contains(tbl, want) {
 			t.Errorf("the queued row has no %q", want)
@@ -108,7 +108,7 @@ func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
 	}
 	got, err := dom.vm.RunString(`JSON.stringify((function () {
   var tbl = __find(document.getElementById("trend"), ".ltable");
-  return tbl.children.slice(1).map(function (tr) {
+  return tbl.children.__arr.slice(1).map(function (tr) {
     var main = tr.children[1], by = __find(main, ".by");
     return {main: main.textContent, by: by ? by.textContent : "", title: by ? by.title : ""};
   });
@@ -353,10 +353,10 @@ func drawnPolecatColumn(t *testing.T, dom *pageDOM) []polecatCell {
     for (const c of (n.children || [])) walk(c);
   })(document.getElementById("trend"));
   if (!tbl) return [];
-  const col = name => tbl.children[0].children.findIndex(th => th.textContent === name);
+  const col = name => tbl.children[0].children.__arr.findIndex(th => th.textContent === name);
   const beadCol = col("Landing"), polecatCol = col("Polecat");
   if (beadCol < 0 || polecatCol < 0) throw new Error("the table has no Landing and Polecat headings");
-  return tbl.children.slice(1).map(tr => ({
+  return tbl.children.__arr.slice(1).map(tr => ({
     bead: tr.children[beadCol].textContent,
     text: tr.children[polecatCol].textContent,
     title: tr.children[polecatCol].title,

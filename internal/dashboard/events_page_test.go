@@ -30,9 +30,9 @@ type feedLine struct {
 func feedLines(t *testing.T, dom *pageDOM) []feedLine {
 	t.Helper()
 
-	js := `JSON.stringify(__byId["events"].children.map(r => ({
+	js := `JSON.stringify(__byId["events"].children.__arr.map(r => ({
 		cls: r.className,
-		cells: r.children.map(c => c.textContent)})))`
+		cells: r.children.__arr.map(c => c.textContent)})))`
 	var out []feedLine
 	if err := json.Unmarshal([]byte(pageExpr(t, dom, js)), &out); err != nil {
 		t.Fatalf("reading the EVENTS rows: %v", err)
@@ -66,7 +66,7 @@ type chipLine struct {
 func eventChips(t *testing.T, dom *pageDOM) []chipLine {
 	t.Helper()
 
-	js := `JSON.stringify(__byId["eventschips"].children.map(c => ({cls: c.className, text: c.textContent})))`
+	js := `JSON.stringify(__byId["eventschips"].children.__arr.map(c => ({cls: c.className, text: c.textContent})))`
 	var out []chipLine
 	if err := json.Unmarshal([]byte(pageExpr(t, dom, js)), &out); err != nil {
 		t.Fatalf("reading the EVENTS header's chips: %v", err)

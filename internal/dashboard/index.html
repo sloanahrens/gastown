@@ -1630,7 +1630,7 @@ function landingTable(s, names, rows, waiting) {
   for (const b of shown) {
     const tr = el("tr");
     const when = el("td", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
-    when.title = "waiting since the bead's last update, which gt done moves";
+    when.title = "submitted and waiting for the landing worker to take it; waiting since the bead's last update, which gt done moves";
     tr.append(when);
     const main = el("td", "main");
     main.colSpan = cols.length - 1;
@@ -1707,7 +1707,7 @@ function landingTable(s, names, rows, waiting) {
     // A narrow page stacks each row (see the max-width rule on .ltable): the
     // title on a line of its own, then the other cells, each named by its
     // column's heading because the header row is hidden there.
-    tr.children.forEach((td, i) => { if (i !== 1) td.setAttribute("data-label", cols[i][0]); });
+    Array.from(tr.children).forEach((td, i) => { if (i !== 1) td.setAttribute("data-label", cols[i][0]); });
     tbl.append(tr);
   }
   // Every finished landing of the window is a row; the rows scroll inside a fixed
@@ -5649,6 +5649,8 @@ function foldSummaryLine(fold, s, note) {
 // setupCollapse makes every section of the page foldable, with the key its
 // markup declares.
 function setupCollapse() {
+  // section.wide is the Landings block below the grid, which no .grid section
+  // selector reaches; "main section" is not on the page and is kept as it was.
   document.querySelectorAll("main section, .grid section, section.wide").forEach(sec => {
     const head = sec.querySelector(":scope > h2");
     if (!head) return;

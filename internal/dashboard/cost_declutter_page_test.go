@@ -62,7 +62,7 @@ func foldCount(t *testing.T, dom *pageDOM, key string) int {
 func costFoldLines(t *testing.T, dom *pageDOM, key string) []costLine {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(costFolds[` + quoteJS(key) + `].body.children.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
+	v, err := dom.vm.RunString(`JSON.stringify(costFolds[` + quoteJS(key) + `].body.children.__arr.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
 	if err != nil {
 		t.Fatalf("reading the %s fold: %v", key, err)
 	}
@@ -78,8 +78,8 @@ func costFoldTables(t *testing.T, dom *pageDOM, key string) [][][]string {
 	t.Helper()
 
 	v, err := dom.vm.RunString(`JSON.stringify(costFolds[` + quoteJS(key) + `].body.children
-		.filter(c => c.tagName === "TABLE")
-		.map(tb => tb.children.map(r => r.children.map(x => x.textContent))))`)
+		.__arr.filter(c => c.tagName === "TABLE")
+		.map(tb => tb.children.__arr.map(r => r.children.__arr.map(x => x.textContent))))`)
 	if err != nil {
 		t.Fatalf("reading the %s tables: %v", key, err)
 	}
@@ -383,10 +383,10 @@ func TestCostJevFoldLeavesTheDollarsToTheProviderRow(t *testing.T) {
 	dom.call(t, "renderCost", usageReading(time.Now()))
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const wrap = __byId["cost"].children.filter(c => c.className === "costscroll")[0];
-		const t = wrap && wrap.children.filter(c => c.className === "costprov")[0];
+		const wrap = __byId["cost"].children.__arr.filter(c => c.className === "costscroll")[0];
+		const t = wrap && wrap.children.__arr.filter(c => c.className === "costprov")[0];
 		if (!t) return null;
-		return t.children.slice(1).map(r => r.children.map(c => c.textContent)).filter(r => r[0] === "Jev");
+		return t.children.__arr.slice(1).map(r => r.children.__arr.map(c => c.textContent)).filter(r => r[0] === "Jev");
 	})())`)
 	if err != nil {
 		t.Fatalf("reading the provider rows: %v", err)

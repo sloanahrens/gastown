@@ -25,8 +25,8 @@ func drawCostChildren(t *testing.T, s map[string]any) (kids []reworkChild, note 
 	t.Helper()
 	dom := newPageDOM(t)
 	dom.call(t, "renderCost", s)
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c => ({tag: c.tagName, class: c.className, text: c.textContent,
-		rows: c.tagName === "TABLE" ? c.children.map(r => r.children.map(x => x.textContent)) : null})))`)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.__arr.map(c => ({tag: c.tagName, class: c.className, text: c.textContent,
+		rows: c.tagName === "TABLE" ? c.children.__arr.map(r => r.children.__arr.map(x => x.textContent)) : null})))`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
 	}
@@ -356,8 +356,8 @@ func TestCostPanelHoversTheMeanOMTime(t *testing.T) {
 func omTimeHovers(t *testing.T, dom *pageDOM) []string {
 	t.Helper()
 	v, err := dom.vm.RunString(`JSON.stringify(costFolds["cost.rework"].body.children
-		.filter(c => c.tagName === "TABLE")
-		.reduce((all, tb) => all.concat(tb.children.slice(1).map(r => r.children[6].title)), []))`)
+		.__arr.filter(c => c.tagName === "TABLE")
+		.reduce((all, tb) => all.concat(tb.children.__arr.slice(1).map(r => r.children[6].title)), []))`)
 	if err != nil {
 		t.Fatalf("reading the column's hovers: %v", err)
 	}
@@ -450,8 +450,8 @@ func TestCostPanelHoversABarWithNoLandedOMTime(t *testing.T) {
 	}}
 	dom, _ := drawRework(t, s)
 	v, err := dom.vm.RunString(`JSON.stringify(costFolds["cost.rework"].body.children
-		.filter(c => c.tagName === "TABLE")
-		.reduce((all, tb) => all.concat(tb.children.slice(1).map(r => [r.children[6].textContent, r.children[6].title])), []))`)
+		.__arr.filter(c => c.tagName === "TABLE")
+		.reduce((all, tb) => all.concat(tb.children.__arr.slice(1).map(r => [r.children[6].textContent, r.children[6].title])), []))`)
 	if err != nil {
 		t.Fatalf("reading the column: %v", err)
 	}

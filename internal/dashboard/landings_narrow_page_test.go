@@ -42,7 +42,7 @@ func landingsRows(t *testing.T, p *pageDOM) []landingsBodyRow {
   var rows = [];
   __walk(document.getElementById("trend"), function (c) {
     if (c.tagName !== "TR" || !c.children.length || c.children[0].tagName === "TH") return;
-    rows.push({class: c.className || "", cells: c.children.map(function (td) {
+    rows.push({class: c.className || "", cells: c.children.__arr.map(function (td) {
       return {class: td.className || "", text: td.textContent, title: td.title || "", span: td.colSpan || 1};
     })});
   });
@@ -421,7 +421,7 @@ func TestAWaitingRowKeepsEveryFieldItsSpanCovers(t *testing.T) {
 	if got.When.Text != "waiting 12m" {
 		t.Errorf("the When cell reads %q, want the wait aged from the bead's last update", got.When.Text)
 	}
-	if !strings.Contains(got.When.Title, "waiting since the bead's last update") {
+	if !strings.Contains(got.When.Title, "submitted and waiting for the landing worker to take it") || !strings.Contains(got.When.Title, "waiting since the bead's last update") {
 		t.Errorf("the When cell's hover reads %q, want it to say what the wait is aged from", got.When.Title)
 	}
 	if got.Bead.Text != "gt-loqew" {
@@ -622,7 +622,7 @@ func TestLandingsFitsANarrowViewport(t *testing.T) {
   var out = [];
   __walk(document.getElementById("trend"), function (c) {
     if (c.tagName !== "TR" || !c.children.length || c.children[0].tagName === "TH") return;
-    out.push({title: c.title || "", labels: c.children.map(function (td) { return td["attr_data-label"] || ""; })});
+    out.push({title: c.title || "", labels: c.children.__arr.map(function (td) { return td["attr_data-label"] || ""; })});
   });
   return out;
 })())`)
@@ -650,5 +650,42 @@ func TestLandingsFitsANarrowViewport(t *testing.T) {
 	}
 	if rows[0].Title != "" {
 		t.Errorf("the waiting row carries the hover %q on the whole row", rows[0].Title)
+	}
+}
+
+// The stub's element.children answers what a browser's HTMLCollection does: a
+// length, an index and iteration, and no array methods. The Landings pane once
+// called children.forEach, which throws in a browser and stopped the table
+// drawing while every page test passed on an array-backed stub (gt-bqxpz).
+func TestStubChildrenIsACollectionWithNoArrayMethods(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	v, err := p.vm.RunString(`JSON.stringify((function () {
+  var d = document.createElement("div"), a = document.createElement("span"), b = document.createElement("i");
+  d.append(a, b);
+  var out = {len: d.children.length, first: d.children[0] === a, item: d.children.item(1) === b, iter: 0};
+  for (var c of d.children) out.iter++;
+  out.methods = ["forEach", "map", "filter", "find", "slice"].filter(function (m) { return typeof d.children[m] === "function"; });
+  return out;
+})())`)
+	if err != nil {
+		t.Fatalf("reading the stub's children: %v", err)
+	}
+	var got struct {
+		Len     int      `json:"len"`
+		First   bool     `json:"first"`
+		Item    bool     `json:"item"`
+		Iter    int      `json:"iter"`
+		Methods []string `json:"methods"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the stub's children: %v", err)
+	}
+	if got.Len != 2 || !got.First || !got.Item || got.Iter != 2 {
+		t.Errorf("the stub's children read %+v, want a length, an index, item() and iteration", got)
+	}
+	if len(got.Methods) != 0 {
+		t.Errorf("the stub's children carries the array methods %v, so a page that calls them passes here and throws in a browser", got.Methods)
 	}
 }
