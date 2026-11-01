@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -175,5 +176,24 @@ func TestRenderQuestionsListsAllTenInOrder(t *testing.T) {
 	}
 	if got := strings.Join(order, ","); got != "1,2,3,4,5,6,7,8,9,10" {
 		t.Errorf("question order %q, want 1..10:\n%s", got, buf.String())
+	}
+}
+
+func TestParseLedgerLandingsOfAnEmptyFileIsAnError(t *testing.T) {
+	t.Parallel()
+	if _, _, err := ParseLedgerLandings(nil, "gt-"); err == nil || !strings.Contains(err.Error(), "ledger header") {
+		t.Errorf("an empty ledger must be a header error, got %v", err)
+	}
+}
+
+type questionsRefusingWriter struct{}
+
+func (questionsRefusingWriter) Write([]byte) (int, error) { return 0, errors.New("write refused") }
+
+func TestRenderQuestionsReturnsAWriteError(t *testing.T) {
+	t.Parallel()
+	err := RenderQuestions(questionsRefusingWriter{}, QuestionsNotComputed())
+	if err == nil || !strings.Contains(err.Error(), "write refused") {
+		t.Errorf("a refused write must be returned, got %v", err)
 	}
 }

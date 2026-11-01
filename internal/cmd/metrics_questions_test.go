@@ -84,3 +84,49 @@ func TestMetricsQuestionsNamesAnUnreadableSourceAndKeepsGoing(t *testing.T) {
 		}
 	}
 }
+
+// questionsFailAfter is a writer that fails once n bytes have been written.
+type questionsFailAfter struct{ left int }
+
+func (w *questionsFailAfter) Write(p []byte) (int, error) {
+	if len(p) > w.left {
+		return 0, errors.New("write refused")
+	}
+	w.left -= len(p)
+	return len(p), nil
+}
+
+func TestMetricsQuestionsReportsAWriteFailureOfTheTable(t *testing.T) {
+	t.Parallel()
+	err := runMetricsQuestions(context.Background(), &questionsFailAfter{left: 0}, questionsFakeEnv(map[string]string{}), 7)
+	if err == nil || !strings.Contains(err.Error(), "write refused") {
+		t.Errorf("a refused write of the table must be returned, got %v", err)
+	}
+}
+
+func TestMetricsQuestionsReportsAWriteFailureOfTheNotes(t *testing.T) {
+	t.Parallel()
+	// Room for the whole table but not for the first note line: measure the table first.
+	var table bytes.Buffer
+	env := questionsFakeEnv(map[string]string{})
+	if err := runMetricsQuestions(context.Background(), &table, env, 7); err != nil {
+		t.Fatal(err)
+	}
+	idx := strings.Index(table.String(), "note: ")
+	if idx < 0 {
+		t.Fatalf("fixture must produce a note line:\n%s", table.String())
+	}
+	err := runMetricsQuestions(context.Background(), &questionsFailAfter{left: idx + 1}, env, 7)
+	if err == nil {
+		t.Error("a refused write of a note line must be returned")
+	}
+}
+
+func TestMetricsQuestionsInReturnsTheTownLookupError(t *testing.T) {
+	t.Parallel()
+	want := errors.New("not in a town")
+	err := runMetricsQuestionsIn(context.Background(), &bytes.Buffer{}, func() (string, error) { return "", want }, 7)
+	if !errors.Is(err, want) {
+		t.Errorf("got %v, want the lookup error", err)
+	}
+}

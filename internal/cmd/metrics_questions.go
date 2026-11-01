@@ -34,12 +34,19 @@ say what is held and what nobody records. Every number carries its n and
 window. It reads files and runs read-only git; it writes nothing.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		town, err := workspace.FindFromCwdOrError()
-		if err != nil {
-			return err
-		}
-		return runMetricsQuestions(cmd.Context(), cmd.OutOrStdout(), questionsOSEnv(town), metricsQuestionsDays)
+		return runMetricsQuestionsIn(cmd.Context(), cmd.OutOrStdout(), workspace.FindFromCwdOrError, metricsQuestionsDays)
 	},
+}
+
+// runMetricsQuestionsIn finds the town with find and prints the status with the
+// real files. find is workspace.FindFromCwdOrError in the command and a fake in
+// the tests.
+func runMetricsQuestionsIn(ctx context.Context, out io.Writer, find func() (string, error), days int) error {
+	town, err := find()
+	if err != nil {
+		return err
+	}
+	return runMetricsQuestions(ctx, out, questionsOSEnv(town), days)
 }
 
 // questionsEnv is every outside thing the status reads, so the command is a
