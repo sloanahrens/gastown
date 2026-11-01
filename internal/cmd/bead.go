@@ -70,10 +70,10 @@ kind as a gt:<type> label.
 --acceptance sets the criteria block on the new bead, so a follow-up that
 needs one is a single command rather than create-then-update.
 
-Before filing discovered work, copy the five-section shape in the
-mol-polecat-work formula's Discovered work step — run
-'gt prime --step 3 --formula mol-polecat-work' to print it in full — so the
-spec dispatcher slots the bead instead of holding it unshaped.
+A bead a work pass will dispatch carries five sections — Goal (what exists
+after it lands), Constraints (the files to change, and what must not change),
+Out of scope, Gate (what the landing gate runs) and Size — so the spec
+dispatcher slots it instead of holding it unshaped.
 
 Examples:
   gt bead create "Add --acceptance" --acceptance="- [ ] the flag sets the field"

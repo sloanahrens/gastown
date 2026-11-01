@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-01 gt-wguxe: a failing test outside the diff is reported with `gt done --finding`; the town files the Found bead and the polecat files nothing.
 - 2026-10-27 gt-3vgbi: moved the shared host-hygiene rules and the testing norms into the repo from ~/gt/gastown/directives/_common.md; the testing norms are the byte-identical 21-line text (md5 fc0141bd7290b193679763095c7a00dc) that five rigs carry, so "golden files for prompts" is now in the gastown norms too.
 - 2026-10-31 gt-pccx7: dropped the host-hygiene incident story, the CGO/ICU flags and the Test-load section (a polecat runs no full suite; the Makefile exports the flags).
 - 2026-10-27 gt-3vgbi: the introducing bead of each rule is not recorded in its source file; the rules are cited here by the bead that moved them.
@@ -36,7 +37,7 @@ Applies to every agent working this rig, whatever formula is running.
   Do not run `make test`, `make lint` or `make gate` yourself. om weighs test
   quality via the repo rubric (.om.json).
 - If `gt done` reports red, fix the failure it names and run `gt done` again.
-- A failing test your diff does not touch has a cause. File a P1 `Found:` bead
-  (test name, full output, how you ran it) and run `gt done --status DEFERRED`.
-  Do not retry it, and do not add retries, sleeps or longer timeouts to make
-  it pass.
+- A failing test your diff does not touch has a cause. Do not file a bead: run
+  `gt done --status DEFERRED --finding "<test name, full output, how you ran it>"`
+  and the town files the Found bead. Do not retry it, and do not add retries,
+  sleeps or longer timeouts to make it pass.

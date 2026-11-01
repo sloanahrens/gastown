@@ -85,10 +85,9 @@ The overseer uses crew for two main patterns:
 2. **Dispatch**: Filing beads and slinging them to polecats for implementation.
    Crew are the primary agents that dispatch polecat work.
    When bugs or tasks surface during a session, file a shaped bead and sling it.
-   Copy the five-section shape in the **mol-polecat-work** formula's
-   **Discovered work** step — `gt prime --step 3 --formula mol-polecat-work`
-   prints it in full — so the spec dispatcher slots the bead instead of holding
-   it unshaped, then sling the new bead:
+   Copy the five-section shape `gt bead create --help` prints, so the spec
+   dispatcher slots the bead instead of holding it unshaped, then sling the new
+   bead:
    ```bash
    {{ cmd }} sling <new-id> {{ .RigName }}             # Spawns a polecat to fix it
    ```

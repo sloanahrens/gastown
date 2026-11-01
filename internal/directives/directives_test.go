@@ -82,6 +82,33 @@ func TestDirectiveFilesOpenWithACitedChangelog(t *testing.T) {
 	}
 }
 
+// TestFindingInsteadOfCreate pins gt-wguxe: a failing test the diff does not
+// touch is a defect met outside the task, so the polecat reports it with
+// gt done --finding and the town files the Found bead in the owning rig. The
+// polecat files nothing itself, so the directive names the finder and not a
+// create.
+func TestFindingInsteadOfCreate(t *testing.T) {
+	t.Parallel()
+	text := readDirective(t, "_common.md")
+	t.Run("names gt done --finding", func(t *testing.T) {
+		t.Parallel()
+		const report = "`gt done --status DEFERRED --finding"
+		if !strings.Contains(text, report) {
+			t.Errorf("_common.md does not tell a polecat to report the failing test with %s...", report)
+		}
+	})
+	t.Run("drops the Found bead create", func(t *testing.T) {
+		t.Parallel()
+		// Every wording the removed rule used, plus the command that files
+		// the bead, so a rephrase that keeps the create still fails.
+		for _, create := range []string{"`Found:` bead", "File a P1", "gt bead create"} {
+			if strings.Contains(text, create) {
+				t.Errorf("_common.md still tells a polecat to file a Found bead: %q", create)
+			}
+		}
+	})
+}
+
 // ruleCountWords spells a rule count, so a test can hold the "What om rejects"
 // intro's word to the rule headings it counts. Extend it before the directive
 // outgrows it.

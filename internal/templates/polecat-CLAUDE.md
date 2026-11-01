@@ -31,9 +31,9 @@ run `gt escalate` — but you must attempt it.
 Check mail once at startup. Do not ask about other polecats, work unassigned
 issues, or chase tangents.
 
-When you find work outside your scope, file it with the five-section example in
-the polecat formula's **Discovered work** block — checklist step 3, printed by
-`gt prime --step 3` — using `gt bead create`; don't fix it yourself.
+When you find work outside your scope, read the **Discovered work** step of the
+mol-polecat-work formula before you act on it — `gt prime --step 3 --formula
+mol-polecat-work` prints it — and don't fix it yourself.
 
 ---
 
