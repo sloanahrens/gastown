@@ -451,6 +451,10 @@ type Daemon struct {
 	// om_skew.go).
 	omSkew omSkewMonitor
 
+	// hmSkew is the hm-skew monitor's start guard, its seams and alert state
+	// (see hm_skew.go).
+	hmSkew hmSkewMonitor
+
 	// lastDoltWarningTime is when Dolt health warnings were last reported.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	lastDoltWarningTime time.Time
