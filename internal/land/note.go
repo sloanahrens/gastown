@@ -350,23 +350,18 @@ func RejectionForAttempt(notes string, attempt int) (RejectionNote, bool) {
 }
 
 // priorReviewFindings is the previous round's findings for the next review over
-// a bead's diff: the findings of the newest refusal that answers for the round,
-// which is the newest review refusal or any refusal that carried findings
-// (gt-cz07b). om classifies each as resolved, unresolved or regressed,
-// so a rework round is scored on what is still wrong rather than on a fresh set
-// of minors invented about an unchanged diff.
+// a bead's diff. om classifies each as resolved, unresolved or regressed, so a
+// rework round is scored on what is still wrong rather than on a fresh set of
+// minors invented about an unchanged diff.
 //
-// It reads past the last block when that block is a non-review refusal: a gate,
-// conflict or policy refusal carries no om verdict, so the refusal before it is
-// still the round that sent the work back (gt-g8otg). A gate refusal after an
-// om approve answers itself, because that block carries the approve's findings.
-//
-// It stops at the newest review block whether or not that block raised
-// findings: a review that found nothing leaves the next round nothing to
-// classify, and an older round's findings must not outlive the round that
-// answered them. It stops at a gate refusal that followed an om approve too,
-// even one whose approve raised nothing, because that refusal is marked
-// Approved (gt-xal5q).
+// The walk runs newest block first and stops at the first one that answers the
+// round: a review block, whether or not it raised findings (a review that found
+// nothing leaves the next round nothing to classify, and an older round's
+// findings must not outlive the round that answered them), or a non-review
+// refusal that carries findings or follows an om approve, even one whose
+// approve raised nothing (gt-cz07b, gt-xal5q). A gate, conflict or policy
+// refusal with neither carries no om verdict, so the walk reads past it to the
+// round that sent the work back (gt-g8otg).
 //
 // Empty on a bead no refusal has rejected — which is exactly attempt 1 — and on
 // a refusal that raised none: that round has nothing for om to classify, and
