@@ -144,6 +144,12 @@ type Env struct {
 	Now func() time.Time
 	// ReadFile reads a whole file.
 	ReadFile func(string) ([]byte, error)
+	// RepoFile reads a repo-relative file as the named rig's repository main
+	// has it, falling back to the rig's mayor/rig clone. found is false when
+	// neither carries the file. A source that reads a repo-committed setting
+	// (the merge-queue gate tier) treats a nil seam as unwired and reports the
+	// gap, rather than reading the tier as absent.
+	RepoFile func(townRoot, rigName, relPath string) (data []byte, found bool, err error)
 	// ModTime returns a file's last write time, for a source that must tell a
 	// writer that stopped from an hour nothing happened in. An error means the
 	// time is unknown, not that the file is old: a source that needs the time

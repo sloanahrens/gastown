@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/battery"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // SourceTimeout is the deadline each source gets in a snapshot.
@@ -47,11 +48,22 @@ func OSEnv(town string) Env {
 		},
 		Now:      time.Now,
 		ReadFile: os.ReadFile,
+		RepoFile: repoFileAt,
 		ModTime:  modTime,
 		ReadDir:  listDir,
 		Tail:     tailFile,
 		Wait:     time.Sleep,
 	}
+}
+
+// repoFileAt is Env.RepoFile over the rig package's reader: the rig repo's
+// main, else its mayor/rig clone.
+func repoFileAt(townRoot, rigName, relPath string) ([]byte, bool, error) {
+	f, err := rig.RepoFileFor(townRoot, rigName, relPath)
+	if err != nil {
+		return nil, false, err
+	}
+	return f.Data, f.Found, nil
 }
 
 // modTime reports a file's last write time.

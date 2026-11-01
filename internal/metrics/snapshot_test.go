@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 func TestSnapshotAppendsExactlyOneParseableLine(t *testing.T) {
@@ -106,6 +108,10 @@ func regimeTestHash(text string) string {
 	return hex.EncodeToString(sum[:])[:12]
 }
 
+// regimeTestRepoGates is the repo-committed .gastown/settings.json the mango
+// rig's main carries: its only gate command lives in the repo tier.
+const regimeTestRepoGates = `{"merge_queue": {"test_command": "make repo-test"}}`
+
 // regimeTestTown is the town's files the four regime columns read.
 func regimeTestTown(town string) map[string]string {
 	return map[string]string{
@@ -114,23 +120,25 @@ func regimeTestTown(town string) map[string]string {
 				"claude-haiku": {"cap": 2}, "deepseek-flash": {"cap": 2},
 				"claude-sonnet": {"cap": 1}, "claude-opus": {"cap": 1}}},
 			"agents": {"claude-sonnet": {"command": "claude", "args": ["--model", "opus"]},
-				"claude-opus": {}}}`,
-		filepath.Join(town, "mayor", "rigs.json"):                                  `{"version": 1, "rigs": {"gastown": {}, "beads": {}, "docs": {}}}`,
-		filepath.Join(town, "daemon", "state.json"):                                `{"pid": 42, "commit": "abc1234def"}`,
+				"claude-opus": {"args": ["--model=haiku[1m]"]}}}`,
+		filepath.Join(town, "mayor", "rigs.json"): `{"version": 1, "rigs": {"gastown": {}, "beads": {}, "docs": {}, "mango": {}}}`,
+		// The installer's record names the build it put in place.
+		filepath.Join(town, "daemon", "install-receipts.jsonl"):                    `{"event": "installed", "commit": "abc1234def", "prev_commit": "fff0000"}` + "\n",
 		filepath.Join(town, "gastown", "mayor", "rig", "directives", "_common.md"): "shared policy\n",
 		filepath.Join(town, "gastown", "mayor", "rig", "directives", "polecat.md"): "role policy\n",
 		filepath.Join(town, "gastown", "settings", "config.json"): `{"type": "rig-settings", "version": 1,
 			"merge_queue": {"lint_command": "make lint", "build_command": "make build", "test_command": "make gate"}}`,
 		// docs sets a merge policy but names no gate command, so it has no gate
-		// id; beads has no settings file at all.
+		// id; beads has no settings file at all; mango's gate is in its repo.
 		filepath.Join(town, "docs", "settings", "config.json"): `{"type": "rig-settings", "version": 1,
 			"merge_queue": {"merge_strategy": "pr"}}`,
 	}
 }
 
 // regimeTestEnv serves the town's files (or the named read errors) through
-// Env.ReadFile and answers the parked-rigs probe, so no host is read.
-// overrides replace a fixture file, and errs make a read fail.
+// Env.ReadFile, the mango rig's repo-committed gates through Env.RepoFile, and
+// answers the parked-rigs probe, so no host is read. overrides replace a
+// fixture file, and errs make a read fail.
 func regimeTestEnv(t *testing.T, town string, overrides map[string]string, errs map[string]error) Env {
 	t.Helper()
 	files := regimeTestTown(town)
@@ -147,6 +155,12 @@ func regimeTestEnv(t *testing.T, town string, overrides map[string]string, errs 
 			return []byte(data), nil
 		}
 		return nil, fs.ErrNotExist
+	}
+	env.RepoFile = func(_ string, rigName, relPath string) ([]byte, bool, error) {
+		if rigName == "mango" && relPath == config.RepoSettingsPath {
+			return []byte(regimeTestRepoGates), true, nil
+		}
+		return nil, false, nil
 	}
 	env.RunDir = func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`[{"name": "gastown", "status": "operational"}]`), nil
@@ -189,23 +203,26 @@ func TestSnapshotCarriesTheRegimeFields(t *testing.T) {
 	cols := readSnapshotLine(t, regimeTestEnv(t, town, nil, nil))
 
 	if got := cols["gt_commit"]; got != "abc1234def" {
-		t.Errorf("gt_commit = %v, want the daemon's recorded commit", got)
+		t.Errorf("gt_commit = %v, want the commit the installer's receipt records", got)
 	}
 	if want := regimeTestHash("shared policy\nrole policy"); cols["directive_hash"] != want {
 		t.Errorf("directive_hash = %v, want %s", cols["directive_hash"], want)
 	}
-	// claude-sonnet's agent config names opus, claude-haiku and deepseek-flash
-	// are read from their names, and claude-opus is defined with no command, so
-	// it runs the claude CLI's default rather than the family its name carries.
-	wantSeats := map[string]any{
-		"claude-haiku": "haiku", "deepseek-flash": "flash",
-		"claude-sonnet": "opus", "claude-opus": "claude",
-	}
+	// claude-sonnet's agent config names opus, and claude-opus names
+	// haiku[1m] with the flag's equals spelling. claude-haiku and
+	// deepseek-flash have no agent config, so their model is not read from the
+	// seat's name: the map leaves them out.
+	wantSeats := map[string]any{"claude-sonnet": "opus", "claude-opus": "haiku[1m]"}
 	if !reflect.DeepEqual(cols["seat_models"], wantSeats) {
 		t.Errorf("seat_models = %#v, want %#v", cols["seat_models"], wantSeats)
 	}
-	wantGate := regimeTestHash("lint\tmake lint\nbuild\tmake build\ntest\tmake gate\n")
-	if want := map[string]any{"gastown": wantGate}; !reflect.DeepEqual(cols["gate_ids"], want) {
+	// gastown's gate is in its rig-local settings; mango's only gate command is
+	// the repo-committed one, so a source that skips that tier drops it.
+	want := map[string]any{
+		"gastown": regimeTestHash("lint\tmake lint\nbuild\tmake build\ntest\tmake gate\n"),
+		"mango":   regimeTestHash("test\tmake repo-test\n"),
+	}
+	if !reflect.DeepEqual(cols["gate_ids"], want) {
 		t.Errorf("gate_ids = %#v, want %#v", cols["gate_ids"], want)
 	}
 	if cols["config_probe_failures"] != float64(0) {
@@ -219,54 +236,80 @@ func TestSnapshotCarriesTheRegimeFields(t *testing.T) {
 func TestSnapshotRegimeFieldsMissingWhenUnreadable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		gaps    []string // fixture files whose read fails
-		garble  map[string]string
-		wantNil []string
+		name         string
+		gaps         []string // fixture files whose read fails
+		garble       map[string]string
+		repoErr      error  // the mango rig's repo file read fails
+		repoBad      string // the mango rig's repo file content
+		wantNil      []string
+		wantFailures int
 	}{
 		{
-			name:    "the daemon state cannot be read",
-			gaps:    []string{filepath.Join("daemon", "state.json")},
-			wantNil: []string{"gt_commit"},
+			name:         "the install receipts cannot be read",
+			gaps:         []string{filepath.Join("daemon", "install-receipts.jsonl")},
+			wantNil:      []string{"gt_commit"},
+			wantFailures: 1,
 		},
 		{
-			name:    "a directive file cannot be read",
-			gaps:    []string{filepath.Join("gastown", "mayor", "rig", "directives", "polecat.md")},
-			wantNil: []string{"directive_hash"},
+			name:         "a directive file cannot be read",
+			gaps:         []string{filepath.Join("gastown", "mayor", "rig", "directives", "polecat.md")},
+			wantNil:      []string{"directive_hash"},
+			wantFailures: 1,
 		},
 		{
-			name:    "a rig's gate config cannot be read",
-			gaps:    []string{filepath.Join("gastown", "settings", "config.json")},
-			wantNil: []string{"gate_ids"},
+			name:         "a rig's gate config cannot be read",
+			gaps:         []string{filepath.Join("gastown", "settings", "config.json")},
+			wantNil:      []string{"gate_ids"},
+			wantFailures: 1,
 		},
 		{
-			name:    "a rig's root gate config cannot be read",
-			gaps:    []string{filepath.Join("gastown", "config.json")},
-			wantNil: []string{"gate_ids"},
+			name:         "a rig's root gate config cannot be read",
+			gaps:         []string{filepath.Join("gastown", "config.json")},
+			wantNil:      []string{"gate_ids"},
+			wantFailures: 1,
 		},
 		{
-			name:    "the daemon state does not parse",
-			garble:  map[string]string{filepath.Join("daemon", "state.json"): `{"commit":`},
-			wantNil: []string{"gt_commit"},
+			name:         "a rig's repo-committed gate config cannot be read",
+			repoErr:      fs.ErrPermission,
+			wantNil:      []string{"gate_ids"},
+			wantFailures: 1,
 		},
 		{
-			name:    "a rig's gate config does not parse",
-			garble:  map[string]string{filepath.Join("gastown", "settings", "config.json"): `{"merge_queue":`},
-			wantNil: []string{"gate_ids"},
+			name:         "the install receipts do not parse",
+			garble:       map[string]string{filepath.Join("daemon", "install-receipts.jsonl"): `{"event":`},
+			wantNil:      []string{"gt_commit"},
+			wantFailures: 1,
 		},
 		{
-			name:    "a rig's root gate config does not parse",
-			garble:  map[string]string{filepath.Join("gastown", "config.json"): `{"merge_queue":`},
-			wantNil: []string{"gate_ids"},
+			name:         "a rig's gate config does not parse",
+			garble:       map[string]string{filepath.Join("gastown", "settings", "config.json"): `{"merge_queue":`},
+			wantNil:      []string{"gate_ids"},
+			wantFailures: 1,
+		},
+		{
+			name:         "a rig's root gate config does not parse",
+			garble:       map[string]string{filepath.Join("gastown", "config.json"): `{"merge_queue":`},
+			wantNil:      []string{"gate_ids"},
+			wantFailures: 1,
+		},
+		{
+			name:         "a rig's repo-committed gate config does not parse",
+			repoBad:      `{"merge_queue":`,
+			wantNil:      []string{"gate_ids"},
+			wantFailures: 1,
 		},
 		{
 			name: "every regime source at once",
 			gaps: []string{
-				filepath.Join("daemon", "state.json"),
+				filepath.Join("daemon", "install-receipts.jsonl"),
 				filepath.Join("gastown", "mayor", "rig", "directives", "polecat.md"),
 				filepath.Join("gastown", "settings", "config.json"),
 			},
+			repoErr: fs.ErrPermission,
 			wantNil: []string{"gt_commit", "directive_hash", "gate_ids"},
+			// One gap for the receipts, one for the directive, and one for the
+			// gate map, which is null as a whole however many rigs broke.
+			wantFailures: 3,
 		},
 	}
 	for _, tc := range tests {
@@ -281,14 +324,26 @@ func TestSnapshotRegimeFieldsMissingWhenUnreadable(t *testing.T) {
 			for rel, data := range tc.garble {
 				overrides[filepath.Join(town, rel)] = data
 			}
-			cols := readSnapshotLine(t, regimeTestEnv(t, town, overrides, errs))
+			env := regimeTestEnv(t, town, overrides, errs)
+			if tc.repoErr != nil || tc.repoBad != "" {
+				env.RepoFile = func(_ string, rigName, _ string) ([]byte, bool, error) {
+					if rigName != "mango" {
+						return nil, false, nil
+					}
+					if tc.repoErr != nil {
+						return nil, false, tc.repoErr
+					}
+					return []byte(tc.repoBad), true, nil
+				}
+			}
+			cols := readSnapshotLine(t, env)
 
 			for _, key := range tc.wantNil {
 				if value, ok := cols[key]; !ok || value != nil {
 					t.Errorf("%s = %v, want the missing marker null", key, value)
 				}
 			}
-			if got, want := cols["config_probe_failures"], float64(len(tc.gaps)+len(tc.garble)); got != want {
+			if got, want := cols["config_probe_failures"], float64(tc.wantFailures); got != want {
 				t.Errorf("config_probe_failures = %v, want %v, one gap line per unreadable source", got, want)
 			}
 			// The settings file is readable in every row, so the seat map still
