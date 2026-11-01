@@ -19,11 +19,12 @@ import (
 	"github.com/steveyegge/gastown/tracker/store/pgtest"
 )
 
-// newTracker runs the real tracker (Postgres store, HTTP server, Go client)
-// in-process on a fresh migrated database and returns a beads.Client over it
-// acting as actor. Integration tier: one clone of a template database, about
-// 70 ms, plus a loopback server.
-func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Client {
+// newTrackerServer runs the real tracker (Postgres store, HTTP server, Go
+// client) in-process on a fresh migrated database. It returns a function that
+// mints a beads.Client over that one server, acting as actor with scope, so
+// several roles can share one database. Integration tier: one clone of a
+// template database, about 70 ms, plus a loopback server.
+func newTrackerServer(t *testing.T) func(actor string, scope api.Scope) *trackerclient.Client {
 	t.Helper()
 	pool := pgtest.New(t, "migrated")
 	ctx := context.Background()
@@ -31,17 +32,41 @@ func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Clie
 		t.Fatal(err)
 	}
 	pg := store.NewPostgres(pool)
-	token, err := pg.IssueTokenScoped(ctx, actor, scope, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	srv := httptest.NewServer(server.New(server.Config{Store: pg, Auth: pg, Health: pg, SchemaLevel: store.SchemaLevel()}).Handler())
 	t.Cleanup(srv.Close)
-	tc, err := client.New(client.Config{BaseURL: srv.URL, Token: token, SchemaLevel: store.SchemaLevel()})
-	if err != nil {
-		t.Fatal(err)
+	return func(actor string, scope api.Scope) *trackerclient.Client {
+		t.Helper()
+		token, err := pg.IssueTokenScoped(ctx, actor, scope, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tc, err := client.New(client.Config{BaseURL: srv.URL, Token: token, SchemaLevel: store.SchemaLevel()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return trackerclient.New(tc, "gt")
 	}
-	return trackerclient.New(tc, "gt")
+}
+
+// newTracker returns a beads.Client over a fresh tracker acting as actor.
+func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Client {
+	t.Helper()
+	return newTrackerServer(t)(actor, scope)
+}
+
+// newTrackerRoles returns the roles one contract case acts through, all on one
+// tracker: the seat the suite runs as, the admin-scope daemon, and a seat for
+// each actor named as a holder. The tracker refuses a seat a reassignment of a
+// held issue and a delete (gt-26dvk), so those rows act through the role the
+// tracker grants them.
+func newTrackerRoles(t *testing.T) beadsfake.Roles {
+	t.Helper()
+	mint := newTrackerServer(t)
+	return beadsfake.Roles{
+		Seat:   mint("town/crew/dipper", api.ScopeSeat),
+		Admin:  mint("town/daemon", api.ScopeAdmin),
+		Holder: func(actor string) beads.Client { return mint(actor, api.ScopeSeat) },
+	}
 }
 
 // The adapter must behave like bd on every case the fake and bd are held to,
@@ -56,7 +81,56 @@ func newTracker(t *testing.T, actor string, scope api.Scope) *trackerclient.Clie
 // Postgres in the same sweep. The unit tier covers the mapping and the batch
 // close rules (unit_test.go).
 func TestIntegrationTrackerClientSatisfiesTheClientContract(t *testing.T) {
-	beadsfake.RunClientContract(t, func(t *testing.T) beads.Client { return newTracker(t, "town/crew/dipper", api.ScopeSeat) })
+	beadsfake.RunClientContract(t, newTrackerRoles)
+}
+
+// A seat is not the holder of an issue another actor holds, so the tracker
+// refuses it a reassignment, and the holder's own seat makes the same change
+// (gt-26dvk). The contract run acts through the holder for the reassign rows.
+func TestIntegrationASeatCannotReassignAnotherActorsIssue(t *testing.T) {
+	roles := newTrackerRoles(t)
+	is := heldByAlice(t, roles)
+	bob := "town/polecats/bob"
+	err := roles.Seat.Update(is.ID, beads.UpdateOptions{Assignee: &bob})
+	if !errors.Is(err, api.ErrGuardFailed) {
+		t.Fatalf("a seat reassigning alice's held issue = %v, want api.ErrGuardFailed", err)
+	}
+	got, err := roles.Admin.Show(is.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Assignee != "town/polecats/alice" {
+		t.Errorf("a refused reassign changed the assignee to %q, want town/polecats/alice", got.Assignee)
+	}
+}
+
+// Delete is admin-only: a seat is refused before the store, and the issue it
+// tried to delete is still there (gt-26dvk).
+func TestIntegrationASeatCannotDeleteIssues(t *testing.T) {
+	roles := newTrackerRoles(t)
+	is := heldByAlice(t, roles)
+	err := roles.Seat.DeleteIssues(is.ID)
+	if !errors.Is(err, api.ErrForbidden) {
+		t.Fatalf("a seat deleting %s = %v, want api.ErrForbidden", is.ID, err)
+	}
+	if _, err := roles.Admin.Show(is.ID); err != nil {
+		t.Errorf("the issue a seat tried to delete is gone: %v", err)
+	}
+}
+
+// heldByAlice creates an issue as the seat and has alice claim it, so another
+// seat is not its holder.
+func heldByAlice(t *testing.T, roles beadsfake.Roles) *beads.Issue {
+	t.Helper()
+	is, err := roles.Seat.Create(beads.CreateOptions{Title: "held by alice", Priority: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, inProgress := "town/polecats/alice", "in_progress"
+	if err := roles.Holder(alice).Update(is.ID, beads.UpdateOptions{Status: &inProgress, Assignee: &alice}); err != nil {
+		t.Fatal(err)
+	}
+	return is
 }
 
 // RunDepListUpContract names its own subtest, so the tracker run gets no

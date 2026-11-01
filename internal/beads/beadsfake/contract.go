@@ -19,19 +19,36 @@ import (
 // the refusals and missing-issue paths included, except the suites below that
 // a store without bd cannot run.
 //
-// newClient may return the same database to every case: cases run in
+// newRoles may return the same database to every case: cases run in
 // parallel and each asserts only on the issues it created, under its own
 // assignee names and labels (see scope). The integration tier shares one
 // database per run, so a run costs one bd init, not one per case.
-func RunClientContract(t *testing.T, newClient func(t *testing.T) beads.Client) {
+func RunClientContract(t *testing.T, newRoles func(t *testing.T) Roles) {
 	t.Helper()
 	for _, c := range contractCases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			c.run(t, newScope(t, newClient(t)))
+			c.run(t, newRoleScope(t, newRoles(t)))
 		})
 	}
+}
+
+// Roles are the clients one contract case acts through, all on one store. The
+// suite runs as Seat. A store that authorizes writes by role may refuse the seat
+// some writes, so those rows act through the role the store grants: Admin for a
+// batch delete and for a takeover of a held issue, and Holder(actor) for a
+// reassignment or transfer that actor's claim allows. A store with no such
+// rules returns its one client for every role (see OneRole).
+type Roles struct {
+	Seat   beads.Client
+	Admin  beads.Client
+	Holder func(actor string) beads.Client
+}
+
+// OneRole is the Roles of a store with no role rules: every role is c.
+func OneRole(c beads.Client) Roles {
+	return Roles{Seat: c, Admin: c, Holder: func(string) beads.Client { return c }}
 }
 
 // RunShowTextContract checks that ShowText renders the issue's id and title,
@@ -177,6 +194,7 @@ var contractCases = []contractCase{
 // created, and names (assignees, labels) no other case uses.
 type scope struct {
 	beads.Client
+	roles   Roles
 	tag     string
 	created map[string]bool
 }
@@ -184,11 +202,15 @@ type scope struct {
 var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
 
 func newScope(t *testing.T, c beads.Client) *scope {
+	return newRoleScope(t, OneRole(c))
+}
+
+func newRoleScope(t *testing.T, roles Roles) *scope {
 	name := t.Name()
 	if i := strings.LastIndex(name, "/"); i >= 0 {
 		name = name[i+1:]
 	}
-	return &scope{Client: c, tag: nonAlnum.ReplaceAllString(strings.ToLower(name), ""), created: map[string]bool{}}
+	return &scope{Client: roles.Seat, roles: roles, tag: nonAlnum.ReplaceAllString(strings.ToLower(name), ""), created: map[string]bool{}}
 }
 
 // who is an assignee name unique to the case.
@@ -437,8 +459,9 @@ func contractUpdateFields(t *testing.T, s *scope) {
 	if st := s.mustShow(t, is.ID).Status; st != beads.StatusHooked {
 		t.Errorf("status = %q, want hooked", st)
 	}
-	// A hooked issue is not an in_progress claim: reassigning it is allowed.
-	mustDo(t, "reassign hooked", s.Update(is.ID, beads.UpdateOptions{Assignee: ptr(s.who("bob"))}))
+	// A hooked issue is not an in_progress claim: reassigning it is allowed, by
+	// the holder it is assigned to.
+	mustDo(t, "reassign hooked", s.roles.Holder(s.who("alice")).Update(is.ID, beads.UpdateOptions{Assignee: ptr(s.who("bob"))}))
 	if a := s.mustShow(t, is.ID).Assignee; a != s.who("bob") {
 		t.Errorf("hooked reassign left assignee %q", a)
 	}
@@ -515,13 +538,13 @@ func contractClaimFence(t *testing.T, s *scope) {
 		t.Errorf("refused updates changed the claim to %q/%q", got.Assignee, got.Status)
 	}
 	mustDo(t, "same holder", s.Update(is.ID, beads.UpdateOptions{Assignee: ptr(alice), Priority: ptr(1)}))
-	mustDo(t, "forced reassign", s.Update(is.ID, beads.UpdateOptions{Assignee: ptr(bob), Force: true}))
+	mustDo(t, "forced reassign", s.roles.Admin.Update(is.ID, beads.UpdateOptions{Assignee: ptr(bob), Force: true}))
 	if a := s.mustShow(t, is.ID).Assignee; a != bob {
 		t.Errorf("forced reassign left assignee %q", a)
 	}
 	open := s.mustCreate(t, beads.CreateOptions{Title: "open, assigned", Priority: -1})
 	mustDo(t, "assign open", s.Update(open.ID, beads.UpdateOptions{Assignee: ptr(alice)}))
-	mustDo(t, "reassign open", s.Update(open.ID, beads.UpdateOptions{Assignee: ptr(bob)}))
+	mustDo(t, "reassign open", s.roles.Holder(alice).Update(open.ID, beads.UpdateOptions{Assignee: ptr(bob)}))
 }
 
 func contractCloseReopen(t *testing.T, s *scope) {
@@ -1156,7 +1179,7 @@ func contractRelease(t *testing.T, s *scope) {
 // live issue is left with no edge onto a deleted one, and an empty batch is a
 // no-op.
 func contractDeleteIssues(t *testing.T, s *scope) {
-	mustDo(t, "DeleteIssues()", s.DeleteIssues())
+	mustDo(t, "DeleteIssues()", s.roles.Admin.DeleteIssues())
 
 	a := s.mustCreate(t, beads.CreateOptions{Title: "doomed a", Priority: -1})
 	b := s.mustCreate(t, beads.CreateOptions{Title: "doomed b", Priority: -1})
@@ -1168,7 +1191,7 @@ func contractDeleteIssues(t *testing.T, s *scope) {
 	survivor := s.mustCreate(t, beads.CreateOptions{Title: "survivor", Priority: -1})
 	mustDo(t, "survivor dependency", s.AddDependency(survivor.ID, a.ID))
 
-	mustDo(t, "DeleteIssues", s.DeleteIssues(a.ID, b.ID))
+	mustDo(t, "DeleteIssues", s.roles.Admin.DeleteIssues(a.ID, b.ID))
 	for _, id := range []string{a.ID, b.ID} {
 		if _, err := s.Show(id); !errors.Is(err, beads.ErrNotFound) {
 			t.Errorf("Show(%s) after DeleteIssues = %v, want ErrNotFound", id, err)
@@ -1328,8 +1351,10 @@ func contractGuardedTransfer(t *testing.T, s *scope) {
 	mustDo(t, "claim", s.Update(is.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(alice)}))
 
 	// The guard names the holder, so it moves an in_progress claim that a
-	// plain update may not.
-	ok, err := s.TransferIfAssignee(is.ID, alice, beads.StatusHooked, bob)
+	// plain update may not. Alice holds the claim, so she makes the transfer;
+	// bob makes the release, since a seat that is not the holder is refused.
+	byAlice, byBob := s.roles.Holder(alice), s.roles.Holder(bob)
+	ok, err := byAlice.TransferIfAssignee(is.ID, alice, beads.StatusHooked, bob)
 	if err != nil || !ok {
 		t.Fatalf("TransferIfAssignee(alice -> bob) = %v, %v; want true, nil", ok, err)
 	}
@@ -1338,11 +1363,11 @@ func contractGuardedTransfer(t *testing.T, s *scope) {
 	}
 
 	// A guard that no longer holds writes nothing and is not an error.
-	ok, err = s.TransferIfAssignee(is.ID, alice, "open", alice)
+	ok, err = byAlice.TransferIfAssignee(is.ID, alice, "open", alice)
 	if err != nil || ok {
 		t.Errorf("TransferIfAssignee with a stale guard = %v, %v; want false, nil", ok, err)
 	}
-	ok, err = s.ReleaseIfAssignee(is.ID, alice)
+	ok, err = byAlice.ReleaseIfAssignee(is.ID, alice)
 	if err != nil || ok {
 		t.Errorf("ReleaseIfAssignee with a stale guard = %v, %v; want false, nil", ok, err)
 	}
@@ -1351,7 +1376,7 @@ func contractGuardedTransfer(t *testing.T, s *scope) {
 	}
 
 	mustDo(t, "bob starts", s.Update(is.ID, beads.UpdateOptions{Status: ptr("in_progress")}))
-	ok, err = s.ReleaseIfAssignee(is.ID, bob)
+	ok, err = byBob.ReleaseIfAssignee(is.ID, bob)
 	if err != nil || !ok {
 		t.Fatalf("ReleaseIfAssignee(bob) = %v, %v; want true, nil", ok, err)
 	}
