@@ -127,7 +127,11 @@ func newRebuildHMRig(t *testing.T, a rebuildHMAnswers) *rebuildHMRig {
 		if err != nil || !locked {
 			t.Fatalf("could not hold the install lock for the test: locked=%v err=%v", locked, err)
 		}
-		t.Cleanup(func() { _ = held.Unlock() })
+		t.Cleanup(func() {
+			if err := held.Unlock(); err != nil {
+				t.Errorf("releasing the test's install lock: %v", err)
+			}
+		})
 	}
 	return r
 }
