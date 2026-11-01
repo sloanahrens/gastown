@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -264,5 +265,40 @@ func TestUnverifiedEmailIsReported(t *testing.T) {
 		if id.Sub != "sub-1" || id.Email != "ann@town.example" {
 			t.Errorf("%s: identity = %+v", name, id)
 		}
+	}
+}
+
+func TestNewStaffRefusesABadConfig(t *testing.T) {
+	t.Parallel()
+	c := cfg(t, staffAud)
+	c.Issuer = ""
+	if s, err := NewStaff(c, staffDomain); !errors.Is(err, ErrConfig) || s != nil {
+		t.Errorf("NewStaff with no issuer = %v, %v, want ErrConfig and no verifier", s, err)
+	}
+}
+
+func TestMalformedSignatureAndClaimsAreRefused(t *testing.T) {
+	t.Parallel()
+	sk, _ := keys(t)
+	c := customer(t)
+	ctx := context.Background()
+	valid := mint(sk, "RS256", "k1", good(custAud))
+	parts := strings.Split(valid, ".")
+
+	badSig := parts[0] + "." + parts[1] + ".!!not-base64!!"
+	if _, err := c.Verify(ctx, badSig); !errors.Is(err, ErrMalformed) {
+		t.Errorf("signature that is not base64url = %v, want ErrMalformed", err)
+	}
+
+	// A correctly signed token whose payload is not JSON claims.
+	signing := parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte("not json"))
+	sum := sha256.Sum256([]byte(signing))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, sk, crypto.SHA256, sum[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	notJSON := signing + "." + base64.RawURLEncoding.EncodeToString(sig)
+	if _, err := c.Verify(ctx, notJSON); !errors.Is(err, ErrMalformed) {
+		t.Errorf("signed payload that is not JSON = %v, want ErrMalformed", err)
 	}
 }
