@@ -38,12 +38,14 @@ type ReapEnv interface {
 // so a sandbox seat whose work is finished and safe leaves the rig one short of
 // admitting new work for ever. A host that does not implement it never trims.
 type TrimEnv interface {
-	// TrimmableSeats names the rig's sandbox seats when the rig holds at least
-	// as many polecat directories as its cap, and returns nil when it is under
-	// the cap. Only sandbox seats are ever named: a tmux seat's reuse is what
-	// the pool is for. The order is the caller's business; an error means the
-	// cap or a seat's kind could not be read, and the tick trims nothing on it.
-	TrimmableSeats(rig string) ([]string, error)
+	// TrimmableSeats names the rig's sandbox seats, among the polecats the tick
+	// listed, when the rig holds at least as many polecat directories as its
+	// cap, and returns nil when it is under the cap. polecats is the tick's own
+	// listing, so the host lists nothing a second time. Only sandbox seats are
+	// ever named: a tmux seat's reuse is what the pool is for. The order is the
+	// caller's business; an error means the cap or a seat's kind could not be
+	// read, and the tick trims nothing on it.
+	TrimmableSeats(rig string, polecats []string) ([]string, error)
 }
 
 // trimSeat is a seat the directory cap may trim this tick: its name, and the
@@ -224,7 +226,7 @@ func (s *Scanner) trimAtDirCap(rig string, polecats []string) ([]trimSeat, error
 	if !ok {
 		return nil, nil
 	}
-	seats, err := te.TrimmableSeats(rig)
+	seats, err := te.TrimmableSeats(rig, polecats)
 	if err != nil {
 		return nil, err
 	}
