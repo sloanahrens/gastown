@@ -105,11 +105,37 @@ var (
 
 // Read returns the reporter's daily report as it stands at now. maxAge is the
 // age past which a report is stale; a report exactly maxAge old is fresh.
+//
+// It follows no symlink below the reporter name: the reporter directory, its
+// reports directory and the sidecar must each be the thing they name, as the
+// dashboard's reader also requires, so a link cannot put another path's report
+// in this reporter's place.
 func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Report {
 	report := Report{Reporter: reporter}
 	if !reporterNameRe.MatchString(reporter) {
 		report.Status, report.Note = Unreadable, "not a reporter name"
 		return report
+	}
+
+	// A path that is not there is Missing, as a missing sidecar is. A link, a
+	// file where a directory belongs, or a path that cannot be read is
+	// Unreadable: only a path the filesystem says is absent is absent.
+	for _, dir := range []struct{ path, label string }{
+		{filepath.Join(runtimeDir, reporter), "reporter directory"},
+		{filepath.Join(runtimeDir, reporter, ReportsSubdir), "reports directory"},
+	} {
+		fi, err := os.Lstat(dir.path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			report.Status, report.Note = Missing, "no "+SidecarName
+			return report
+		case err != nil:
+			report.Status, report.Note = Unreadable, dir.label+" could not be read"
+			return report
+		case !fi.IsDir():
+			report.Status, report.Note = Unreadable, dir.label+" is not a real directory"
+			return report
+		}
 	}
 
 	raw, err := readSidecar(filepath.Join(runtimeDir, reporter, ReportsSubdir, SidecarName))

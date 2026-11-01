@@ -172,7 +172,33 @@ func TestReadRefusesWhatItCannotUse(t *testing.T) {
 					t.Fatalf("writing the file: %v", err)
 				}
 			},
-			note: "daily.json could not be read",
+			note: "reporter directory is not a real directory",
+		},
+		{
+			name: "a symlinked reporter directory",
+			setup: func(t *testing.T, root string) {
+				t.Helper()
+				writeSidecar(t, root, "elsewhere", good(reporter, time.Hour))
+				if err := os.Symlink("elsewhere", filepath.Join(root, reporter)); err != nil {
+					t.Fatalf("linking the reporter directory: %v", err)
+				}
+			},
+			note: "reporter directory is not a real directory",
+		},
+		{
+			name: "a symlinked reports directory",
+			setup: func(t *testing.T, root string) {
+				t.Helper()
+				writeSidecar(t, root, "elsewhere", good(reporter, time.Hour))
+				if err := os.MkdirAll(filepath.Join(root, reporter), 0o755); err != nil {
+					t.Fatalf("making the reporter directory: %v", err)
+				}
+				link := filepath.Join(root, reporter, ReportsSubdir)
+				if err := os.Symlink(filepath.Join("..", "elsewhere", ReportsSubdir), link); err != nil {
+					t.Fatalf("linking the reports directory: %v", err)
+				}
+			},
+			note: "reports directory is not a real directory",
 		},
 	}
 	for _, tt := range tests {
@@ -199,6 +225,22 @@ func TestReadRefusesWhatItCannotUse(t *testing.T) {
 				t.Errorf("written = %v on an unreadable report, want zero", got.Written)
 			}
 		})
+	}
+}
+
+func TestReadNamesAPathItCannotRead(t *testing.T) {
+	t.Parallel()
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	if err := os.WriteFile(runtimeDir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing the runtime path: %v", err)
+	}
+
+	got := Read(runtimeDir, "dunlin", testNow, MaxAge)
+	if got.Status != Unreadable {
+		t.Fatalf("status = %q (%s), want unreadable: a runtime path that is a file says nothing about the report", got.Status, got.Note)
+	}
+	if want := "reporter directory could not be read"; got.Note != want {
+		t.Errorf("note = %q, want %q", got.Note, want)
 	}
 }
 
@@ -240,11 +282,11 @@ func TestEmbeddedRequestIsTheDocsCopy(t *testing.T) {
 	if strings.TrimSpace(string(docs)) == "" {
 		t.Fatalf("%s is empty; the request the command prints lives there", docsPath)
 	}
-	if string(docs) != dailyRequest {
-		t.Errorf("%s and internal/birdreports/daily-request.md differ; copy the docs file over the embedded one", docsPath)
+	request := copyBody(t)
+	if string(docs) != request {
+		t.Errorf("%s and internal/birdreports/daily-request.md differ below its pointer header; copy the docs file over the embedded one", docsPath)
 	}
 
-	request := dailyRequest
 	if got := len(numberedSection.FindAllStringIndex(request, -1)); got != 8 {
 		t.Errorf("the request has %d numbered sections, want the DAILY profile's eight", got)
 	}
@@ -269,6 +311,44 @@ func TestEmbeddedRequestIsTheDocsCopy(t *testing.T) {
 
 // numberedSection is one of the DAILY profile's eight numbered sections.
 var numberedSection = regexp.MustCompile(`(?m)^[1-8]\. `)
+
+// copyBody is the embedded copy without its pointer header, as Request cuts it.
+func copyBody(t *testing.T) string {
+	t.Helper()
+	i := strings.Index(dailyRequest, pointerClose)
+	if i < 0 {
+		t.Fatalf("internal/birdreports/daily-request.md has no pointer header closed by %q", pointerClose)
+	}
+	return dailyRequest[i+len(pointerClose):]
+}
+
+func TestEmbeddedCopyPointsAtTheDocsSource(t *testing.T) {
+	t.Parallel()
+	i := strings.Index(dailyRequest, pointerClose)
+	if i < 0 {
+		t.Fatalf("internal/birdreports/daily-request.md does not open with a pointer comment closed by %q; a reader of the copy has no source to go to", pointerClose)
+	}
+	header := dailyRequest[:i]
+	if !strings.HasPrefix(header, "<!--") {
+		t.Errorf("the copy opens with %q, want an HTML comment, which renders out of a markdown view", header)
+	}
+	if !strings.Contains(header, "docs/birds/daily-request.md") {
+		t.Errorf("the copy's pointer header does not name docs/birds/daily-request.md, the source: %q", header)
+	}
+}
+
+func TestRequestIsTheDocsTextWithTheNameFilled(t *testing.T) {
+	t.Parallel()
+	docsPath := filepath.Join("..", "..", "docs", "birds", "daily-request.md")
+	docs, err := os.ReadFile(docsPath)
+	if err != nil {
+		t.Fatalf("reading the source, %s: %v", docsPath, err)
+	}
+	want := strings.NewReplacer("<NAME>", "dunlin", "<RUNTIME_DIR>", "/town/.runtime").Replace(string(docs))
+	if got := Request("dunlin", "/town/.runtime"); got != want {
+		t.Errorf("Request(\"dunlin\") is not %s with the placeholders filled in; the copy's pointer header must not reach the request", docsPath)
+	}
+}
 
 func TestRequestNamesTheReporter(t *testing.T) {
 	t.Parallel()

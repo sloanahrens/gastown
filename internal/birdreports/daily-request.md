@@ -1,3 +1,5 @@
+<!-- Copied from docs/birds/daily-request.md, the source. Edit that file, copy it here, and put this line back: Request cuts it before the request is printed, and TestEmbeddedRequestIsTheDocsCopy fails if the two texts differ. -->
+
 <NAME>: it is time for your daily report. Write it, publish it, and tell the overseer it is in.
 
 Write the report in these eight sections, in this order:
