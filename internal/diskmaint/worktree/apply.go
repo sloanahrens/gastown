@@ -225,13 +225,13 @@ func mergedInto(out []byte, branch string) bool {
 }
 
 // removablePath returns ref cleaned when it is an <owner>-<topic> worktree
-// directly under <town>/<rig>/crew, for one of rigs. It applies BuildPlan's
-// clone rule through isClone, so the owner's clone, which is not one of their
-// worktrees, is refused along with a directory under any other parent and a
-// path nested deeper: no command names them.
+// directly under <town>/<rig>/crew, for one of rigs. Both halves of the name
+// must be non-empty, so the owner's clone (no dash), a name with no owner or no
+// topic, a directory under any other parent and a path nested deeper are all
+// refused: no command names them.
 func removablePath(town string, rigs []string, ref string) (string, error) {
 	path := filepath.Clean(ref)
-	if isClone(filepath.Base(path)) {
+	if !isOwnerTopic(filepath.Base(path)) {
 		return "", errNotRemovable
 	}
 	crew := filepath.Dir(path)
@@ -243,6 +243,13 @@ func removablePath(town string, rigs []string, ref string) (string, error) {
 		return "", errNotRemovable
 	}
 	return path, nil
+}
+
+// isOwnerTopic reports whether base is <owner>-<topic> with a non-empty owner
+// before its first dash and a non-empty topic after it.
+func isOwnerTopic(base string) bool {
+	owner, topic, found := strings.Cut(base, "-")
+	return found && owner != "" && topic != ""
 }
 
 // fail records one action that did not complete.

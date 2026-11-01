@@ -125,8 +125,15 @@ func TestRerunReplacesTheDayFile(t *testing.T) {
 	}
 }
 
-func TestParseTakesOneDsnWorkspaceAndOutDir(t *testing.T) {
-	opts, err := parse([]string{"-out", "/reports", "-workspace", "customer-zero", testDSN}, &bytes.Buffer{})
+// envOf returns a getenv over vars, so a parse test names its environment
+// without touching the process's.
+func envOf(vars map[string]string) func(string) string {
+	return func(key string) string { return vars[key] }
+}
+
+func TestParseReadsTheDsnFromTheEnvironment(t *testing.T) {
+	env := envOf(map[string]string{dsnEnv: testDSN})
+	opts, err := parse([]string{"-out", "/reports", "-workspace", "customer-zero"}, env, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -137,22 +144,29 @@ func TestParseTakesOneDsnWorkspaceAndOutDir(t *testing.T) {
 }
 
 func TestParseRejectsInvocationsThatNameNoDatabaseOrHome(t *testing.T) {
+	withDSN := envOf(map[string]string{dsnEnv: testDSN})
 	cases := []struct {
 		name string
 		args []string
+		env  func(string) string
 		want string
 	}{
-		{"no dsn", []string{"-out", "/reports", "-workspace", "w"}, "want exactly one DSN"},
-		{"two dsns", []string{"-out", "/reports", "-workspace", "w", testDSN, testDSN}, "want exactly one DSN"},
-		{"no workspace", []string{"-out", "/reports", testDSN}, "-workspace is required"},
-		{"no out", []string{"-workspace", "w", testDSN}, "-out is required"},
+		{"no dsn", []string{"-out", "/reports", "-workspace", "w"}, envOf(nil), "TRACKERSIZE_DSN is required"},
+		{"dsn as an argument", []string{"-out", "/reports", "-workspace", "w", testDSN}, withDSN, "the DSN is not an argument"},
+		{"no workspace", []string{"-out", "/reports"}, withDSN, "-workspace is required"},
+		{"no out", []string{"-workspace", "w"}, withDSN, "-out is required"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parse(tc.args, &bytes.Buffer{}); err == nil {
+			_, err := parse(tc.args, tc.env, &bytes.Buffer{})
+			if err == nil {
 				t.Fatalf("parse accepted %q", tc.args)
-			} else if !strings.Contains(err.Error(), tc.want) {
+			}
+			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("parse error %q does not name %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "s3cr3t-Pa55w0rd") {
+				t.Fatalf("parse error %q repeats the DSN's password", err)
 			}
 		})
 	}

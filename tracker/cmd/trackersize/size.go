@@ -25,6 +25,9 @@ const (
 	// its final name only once every line is in it.
 	partialSuffix = ".partial"
 	jsonlSuffix   = ".jsonl"
+	// dsnEnv names the variable a run reads its tracker DSN from. The DSN carries
+	// a password, and an argument would show in every process listing.
+	dsnEnv = "TRACKERSIZE_DSN"
 )
 
 // PrefixSize is one issue-id prefix's totals: its issue rows and the bytes of
@@ -68,7 +71,7 @@ type options struct {
 
 // run is trackersize.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	opts, err := parse(args, stderr)
+	opts, err := parse(args, os.Getenv, stderr)
 	if err != nil {
 		return err
 	}
@@ -150,14 +153,16 @@ func writeDay(path string, lines [][]byte) error {
 	return nil
 }
 
-// parse reads the flags: -out, -workspace and exactly one DSN argument. The
-// checks come before the read, so a report is only attempted from a run that
-// named where its database, its workspace and its files are.
-func parse(args []string, stderr io.Writer) (options, error) {
+// parse reads the flags -out and -workspace, and the DSN from the dsnEnv
+// variable that getenv returns. A DSN given as an argument is refused, and no
+// error repeats the DSN. The checks come before the read, so a report is only
+// attempted from a run that named where its database, its workspace and its
+// files are.
+func parse(args []string, getenv func(string) string, stderr io.Writer) (options, error) {
 	fs := flag.NewFlagSet("trackersize", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: trackersize -out DIR -workspace ID <dsn>")
+		fmt.Fprintf(stderr, "usage: %s=<dsn> trackersize -out DIR -workspace ID\n", dsnEnv)
 		fs.PrintDefaults()
 	}
 	out := fs.String("out", "", "directory that holds the day files; created 0700 when missing")
@@ -165,9 +170,13 @@ func parse(args []string, stderr io.Writer) (options, error) {
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
-	if fs.NArg() != 1 {
+	if fs.NArg() != 0 {
 		fs.Usage()
-		return options{}, fmt.Errorf("got %d arguments, want exactly one DSN: a run reads one tracker database", fs.NArg())
+		return options{}, fmt.Errorf("the DSN is not an argument: set %s instead, since an argument shows in process listings", dsnEnv)
+	}
+	dsn := getenv(dsnEnv)
+	if dsn == "" {
+		return options{}, fmt.Errorf("%s is required: it names the tracker database a run reads", dsnEnv)
 	}
 	if *workspace == "" {
 		return options{}, errors.New("-workspace is required: a report is filed under one workspace id")
@@ -175,5 +184,5 @@ func parse(args []string, stderr io.Writer) (options, error) {
 	if *out == "" {
 		return options{}, errors.New("-out is required: it names the directory the day files go in")
 	}
-	return options{dsn: fs.Arg(0), workspace: *workspace, out: *out}, nil
+	return options{dsn: dsn, workspace: *workspace, out: *out}, nil
 }

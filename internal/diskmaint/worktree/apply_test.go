@@ -93,6 +93,8 @@ func TestApplyRefusesPathsOutsideACrewDir(t *testing.T) {
 		"outside crew":       "rig-a/other/sloan-x",
 		"an owner's clone":   "rig-a/crew/sloan",
 		"an overseer clone":  "rig-a/crew/overseer",
+		"empty owner":        "rig-a/crew/-topic",
+		"empty topic":        "rig-a/crew/sloan-",
 		"rig not configured": "rig-z/crew/overseer-z",
 		"nested below crew":  "rig-a/crew/sub/overseer-x",
 		"parent traversal":   "rig-a/crew/../../overseer-x",
