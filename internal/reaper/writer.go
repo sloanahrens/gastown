@@ -61,17 +61,24 @@ func closeInChunks(ids []string, close func(ids ...string) error) (int, error) {
 }
 
 // deleteInChunks deletes ids DefaultBatchSize at a time and returns how many
-// were deleted. bd deletes a chunk all or nothing.
-func deleteInChunks(w Writer, ids []string) (int, error) {
+// were deleted, the chunks that failed, and every failure joined. bd deletes a
+// chunk all or nothing, so a failed chunk adds no count and the rest still run.
+func deleteInChunks(w Writer, ids []string) (int, []PurgeChunkFailure, error) {
 	deleted := 0
+	var failed []PurgeChunkFailure
 	var errs []error
 	for start := 0; start < len(ids); start += DefaultBatchSize {
 		chunk := ids[start:min(start+DefaultBatchSize, len(ids))]
 		if err := w.DeleteIssues(chunk...); err != nil {
+			failed = append(failed, PurgeChunkFailure{
+				FirstID: chunk[0],
+				LastID:  chunk[len(chunk)-1],
+				Error:   err.Error(),
+			})
 			errs = append(errs, err)
 			continue
 		}
 		deleted += len(chunk)
 	}
-	return deleted, errors.Join(errs...)
+	return deleted, failed, errors.Join(errs...)
 }

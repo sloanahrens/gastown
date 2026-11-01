@@ -645,3 +645,186 @@ func TestReaperAutoCloseCommandRefusesAnUnreadableConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestReaperPurgeReportsPartialCountAndFails: a purge that deleted one chunk
+// and failed the next prints the count it deleted and the failed chunk to the
+// writers it is given, then returns the database-named error that makes the
+// command exit non-zero instead of hiding the failure behind a zero exit
+// (gt-2wesb). reportPurgeResponse takes its streams and inputs as arguments,
+// so no package-level variable is swapped and the test can run in parallel.
+func TestReaperPurgeReportsPartialCountAndFails(t *testing.T) {
+	t.Parallel()
+	outcomes := []reaperPurgeOutcome{{
+		db: "testdb",
+		result: &reaper.PurgeResult{
+			Database:     "testdb",
+			WispsPurged:  3,
+			FailedChunks: []reaper.PurgeChunkFailure{{FirstID: "w-200", LastID: "w-299", Error: "bd delete: w-250 is still referenced"}},
+		},
+		err: errors.New("purge wisps: delete closed wisps: bd delete refused"),
+	}}
+
+	var stdout, stderr bytes.Buffer
+	runErr := reportPurgeResponse(reaperPurgeReport{
+		outcomes: outcomes,
+		stdout:   &stdout,
+		stderr:   &stderr,
+	})
+
+	if runErr == nil {
+		t.Fatal("reportPurgeResponse with a failed chunk = nil error, want the command to exit non-zero")
+	}
+	if !strings.Contains(runErr.Error(), "testdb") {
+		t.Errorf("joined error = %v, want it to name the database", runErr)
+	}
+	if !strings.Contains(stdout.String(), "purged 3 wisps, 0 mail") {
+		t.Errorf("stdout = %q, want the count the purge did delete", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "w-200..w-299") || !strings.Contains(stderr.String(), "is still referenced") {
+		t.Errorf("stderr = %q, want the failed chunk's id range and error", stderr.String())
+	}
+}
+
+// TestReaperPurgeCleanOutcomeReturnsNoError: a purge with nothing failed
+// prints its count and returns no error, so a clean run keeps exiting 0.
+func TestReaperPurgeCleanOutcomeReturnsNoError(t *testing.T) {
+	t.Parallel()
+	outcomes := []reaperPurgeOutcome{{
+		db:     "testdb",
+		result: &reaper.PurgeResult{Database: "testdb", WispsPurged: 2, MailPurged: 1},
+	}}
+
+	var stdout, stderr bytes.Buffer
+	runErr := reportPurgeResponse(reaperPurgeReport{outcomes: outcomes, stdout: &stdout, stderr: &stderr})
+
+	if runErr != nil {
+		t.Fatalf("reportPurgeResponse for a clean purge = %v, want nil", runErr)
+	}
+	if !strings.Contains(stdout.String(), "purged 2 wisps, 1 mail") {
+		t.Errorf("stdout = %q, want the deleted counts", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want no failure output", stderr.String())
+	}
+}
+
+// TestPurgeReaperDatabaseFailsOnPrePurgeErrors drives each branch that used to
+// print and return (nil, nil) on a live run. A connect, schema-check or writer
+// failure must come back as an error, and the command's join must name the
+// database, so a live purge that never ran exits non-zero (gt-2wesb).
+func TestPurgeReaperDatabaseFailsOnPrePurgeErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		sess   func() reaperPurgeSession
+		wantIn string
+	}{
+		{
+			name: "connect",
+			sess: func() reaperPurgeSession {
+				return reaperPurgeSession{
+					open: func() (*beadsql.DB, error) { return nil, errors.New("dial tcp: connection refused") },
+				}
+			},
+			wantIn: "connect error",
+		},
+		{
+			name: "schema",
+			sess: func() reaperPurgeSession {
+				return reaperPurgeSession{
+					open:      func() (*beadsql.DB, error) { return &beadsql.DB{}, nil },
+					hasSchema: func(*beadsql.DB) (bool, error) { return false, errors.New("schema read failed") },
+					close:     func(*beadsql.DB) error { return nil },
+				}
+			},
+			wantIn: "schema check error",
+		},
+		{
+			name: "writer",
+			sess: func() reaperPurgeSession {
+				return reaperPurgeSession{
+					open:      func() (*beadsql.DB, error) { return &beadsql.DB{}, nil },
+					hasSchema: func(*beadsql.DB) (bool, error) { return true, nil },
+					close:     func(*beadsql.DB) error { return nil },
+					writer:    func() (reaper.Writer, error) { return nil, errors.New("no beads dir claims the database") },
+				}
+			},
+			wantIn: "reaper writer",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var stderr bytes.Buffer
+			result, err := purgeReaperDatabaseWith("testdb", false, &stderr, tt.sess())
+			if err == nil {
+				t.Fatalf("purgeReaperDatabaseWith(%s) = nil error, want the live failure to fail the run", tt.name)
+			}
+			if result != nil {
+				t.Errorf("purgeReaperDatabaseWith(%s) result = %+v, want nil", tt.name, result)
+			}
+			if !strings.Contains(err.Error(), tt.wantIn) {
+				t.Errorf("error = %v, want it to name %q", err, tt.wantIn)
+			}
+
+			var stdoutBuffer, stderrBuffer bytes.Buffer
+			joined := reportPurgeResponse(reaperPurgeReport{
+				outcomes: []reaperPurgeOutcome{{db: "testdb", err: err}},
+				stdout:   &stdoutBuffer,
+				stderr:   &stderrBuffer,
+			})
+			if joined == nil || !strings.Contains(joined.Error(), "testdb") {
+				t.Errorf("joined error = %v, want it to name the database", joined)
+			}
+		})
+	}
+}
+
+// TestPurgeReaperDatabaseDryRunAndNonTargetsStaySilent pins the branches that
+// must keep returning no result and no error: a dry run's pre-purge failure, a
+// database the reaper does not own (ErrNotBeads), and an invalid name.
+func TestPurgeReaperDatabaseDryRunAndNonTargetsStaySilent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		dbName string
+		dryRun bool
+		sess   func() reaperPurgeSession
+	}{
+		{
+			name:   "dry run keeps the older silent failure",
+			dbName: "testdb",
+			dryRun: true,
+			sess: func() reaperPurgeSession {
+				return reaperPurgeSession{open: func() (*beadsql.DB, error) { return nil, errors.New("dial tcp: connection refused") }}
+			},
+		},
+		{
+			name:   "not a beads database",
+			dbName: "testdb",
+			sess: func() reaperPurgeSession {
+				return reaperPurgeSession{open: func() (*beadsql.DB, error) { return nil, beadsql.ErrNotBeads }}
+			},
+		},
+		{
+			name:   "invalid name",
+			dbName: "bad name!",
+			sess:   func() reaperPurgeSession { return reaperPurgeSession{} },
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var stderr bytes.Buffer
+			result, err := purgeReaperDatabaseWith(tt.dbName, tt.dryRun, &stderr, tt.sess())
+			if err != nil {
+				t.Errorf("purgeReaperDatabaseWith(%s) = %v, want no error", tt.name, err)
+			}
+			if result != nil {
+				t.Errorf("purgeReaperDatabaseWith(%s) result = %+v, want nil", tt.name, result)
+			}
+		})
+	}
+}
