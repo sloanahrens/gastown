@@ -2412,6 +2412,162 @@ func TestTierSweepRigCycleGoCommandDeclineExcusesNothing(t *testing.T) {
 	}
 }
 
+// gt-34r68: one stage runs integration and then race in a single process, so a
+// stage cut off in integration takes the race tier's verdict line with it. The
+// silence is not a race verdict: race leaves the results and files no bead, and
+// the cycle is Partial so the next one re-runs it. The tier the stage ended in
+// takes the RED. A stage that ended on its own terms (a clean exit) or carried a
+// reason instead of output starves nothing, and its missing tiers stay RED.
+func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
+	t.Parallel()
+	const (
+		shellSummary      = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
+		integrationGreen  = "tier-sweep: integration GREEN passed=4 failed=0 skipped=0 (logs /tmp/tier-sweep.y)\n"
+		integrationRed    = "tier-sweep: integration RED passed=3 failed=1 skipped=0 failed: ./internal/repoguard (logs /tmp/tier-sweep.y)\n"
+		integrationMarker = "tier-sweep: integration ./internal/cmd ...\n"
+		raceMarker        = "tier-sweep: race ./internal/cmd ...\n"
+	)
+	tests := []struct {
+		name     string
+		stage    string
+		exitCode int
+		timedOut bool
+		reason   string
+		// wantRace is the RED reason race takes; "" is no verdict at all.
+		wantRace string
+		// wantIntegration is the RED reason integration takes; "" is GREEN.
+		wantIntegration string
+		// wantPartial is true when the stage left a tier unjudged.
+		wantPartial bool
+	}{{
+		// Integration RED and the stage stops there: race never began, so it
+		// keeps no verdict and files no bead.
+		name:            "integration RED and race never printed",
+		stage:           integrationMarker + integrationRed,
+		exitCode:        tierSweepRedExit,
+		wantIntegration: "./internal/repoguard",
+		wantPartial:     true,
+	}, {
+		// A budget kill withholds the GREEN integration line, so integration is
+		// the RED the stage ended in. Race is still not RED.
+		name:            "integration GREEN but the stage timed out",
+		stage:           integrationMarker + integrationGreen,
+		exitCode:        -1,
+		timedOut:        true,
+		wantIntegration: "timeout",
+		wantPartial:     true,
+	}, {
+		name:            "a signal ended the stage",
+		stage:           integrationMarker + integrationGreen,
+		exitCode:        -1,
+		wantIntegration: "no verdict line (exit -1)",
+		wantPartial:     true,
+	}, {
+		// Race opened its first unit, so it is the tier that was cut off and
+		// takes the RED; integration was judged and keeps its own.
+		name:            "race started and printed no summary",
+		stage:           integrationMarker + integrationRed + raceMarker,
+		exitCode:        tierSweepRedExit,
+		timedOut:        true,
+		wantRace:        "timeout",
+		wantIntegration: "./internal/repoguard",
+	}, {
+		// Nothing printed: the stage's first tier is the one it is attributed to.
+		name:            "the stage printed no verdict at all",
+		exitCode:        -1,
+		timedOut:        true,
+		wantIntegration: "timeout",
+		wantPartial:     true,
+	}, {
+		// A clean exit reached the end it chose, so the missing race line is a
+		// contract failure, not a starvation.
+		name:            "a clean exit with no race line is still RED",
+		stage:           integrationGreen,
+		exitCode:        0,
+		wantRace:        "no verdict line",
+		wantIntegration: "",
+	}, {
+		// A result carrying a reason has no output to place the stage's end in,
+		// so that reason is the verdict of every tier the stage names.
+		name:            "a stage with a reason starves nothing",
+		stage:           integrationMarker + integrationGreen,
+		exitCode:        -1,
+		timedOut:        true,
+		reason:          tierSweepNoCommandReason,
+		wantRace:        tierSweepNoCommandReason,
+		wantIntegration: tierSweepNoCommandReason,
+	}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
+			d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+			rec.result = func(st tierSweepStage) tierSweepStageResult {
+				if st.slot {
+					return tierSweepStageResult{output: tc.stage, exitCode: tc.exitCode, timedOut: tc.timedOut, reason: tc.reason, ran: true}
+				}
+				return tierSweepStageResult{output: shellSummary, exitCode: 0, ran: true}
+			}
+			cycle := d.startDogCycle("tier_sweep")
+			defer cycle.close()
+			if !d.runTierSweepRig(context.Background(), cycle, "gastown", now) {
+				t.Fatal("the cycle deferred; the stage ran and reported a verdict")
+			}
+
+			st := tierSweepTestState(t, d, "gastown")
+			if st.LastSHA != "tips1" || st.Partial != tc.wantPartial {
+				t.Fatalf("record = %+v, want tip tips1 with Partial = %v", st, tc.wantPartial)
+			}
+			if st.LastGreenSHA != "" {
+				t.Errorf("LastGreenSHA = %q, want none: no cycle judged race", st.LastGreenSHA)
+			}
+			race, hasRace := st.Tiers["race"]
+			if tc.wantRace == "" {
+				if hasRace {
+					t.Errorf("race verdict = %+v, want none for a tier the stage never reached", race)
+				}
+				if want := "tier_sweep: gastown: race did not run: the stage ended in integration"; !strings.Contains(logs.String(), want) {
+					t.Errorf("log lacks %q:\n%s", want, logs.String())
+				}
+				if strings.Contains(logs.String(), "race RED") {
+					t.Errorf("the starved tier was logged RED:\n%s", logs.String())
+				}
+			} else if !hasRace || race.Verdict != tierSweepRed || !slices.Contains(race.FailedNames, tc.wantRace) {
+				t.Errorf("race = %+v (present = %v), want RED %q: the stage reached it or ended cleanly", race, hasRace, tc.wantRace)
+			}
+			in := st.Tiers["integration"]
+			if tc.wantIntegration == "" {
+				if in.Verdict != tierSweepGreen {
+					t.Errorf("integration = %+v, want GREEN: its own line stands", in)
+				}
+			} else if in.Verdict != tierSweepRed || !slices.Contains(in.FailedNames, tc.wantIntegration) {
+				t.Errorf("integration = %+v, want RED %q: the stage ended there or its reason stands", in, tc.wantIntegration)
+			}
+
+			var raceBeads, raceItems int
+			for _, c := range bd.created {
+				if strings.HasPrefix(c.Title, tierSweepBeadPrefix("gastown", "race")) {
+					raceBeads++
+				}
+			}
+			for _, it := range tierSweepItems(t, d, now, "gastown") {
+				if strings.Contains(it.Summary, "tier sweep gastown race ") {
+					raceItems++
+				}
+			}
+			want := 0
+			if tc.wantRace != "" {
+				want = 1
+			}
+			if raceBeads != want || raceItems != want {
+				t.Errorf("race beads = %d, attention items = %d, want %d each", raceBeads, raceItems, want)
+			}
+		})
+	}
+}
+
 // gt-zlcl6: the rig's script runs its tiers in an order of its own, and a
 // decline is read as ending the stage rather than as a position in the stage's
 // list. A script that declines the tier the stage lists last and exits 2 never
