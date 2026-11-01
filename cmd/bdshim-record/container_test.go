@@ -268,8 +268,8 @@ func TestContainerPinsTheTestServerOptIn(t *testing.T) {
 // TestTownServerRefusalPrecedesThePin: the pin is added when a call's environment is built, after
 // the guard has read the environment it refuses the town's server from, so a run aimed at the
 // town's Dolt server is still refused before any database is made and no database-making call ever
-// carries the pin. The version call the build proof runs first is not database-making and does carry
-// it (gt-czb3c).
+// carries the pin. That the version call the build proof runs first carries the pin is
+// TestContainerPinsTheTestServerOptIn's to say (gt-czb3c).
 func TestTownServerRefusalPrecedesThePin(t *testing.T) {
 	t.Parallel()
 	const townPort = "13399"
@@ -302,14 +302,9 @@ func TestTownServerRefusalPrecedesThePin(t *testing.T) {
 	if len(envs) == 0 {
 		t.Fatalf("docker ran no call, want the build proof's version call before the refusal")
 	}
-	for i, argv := range argvs {
+	for _, argv := range argvs {
 		if slices.Contains(argv, "init") {
 			t.Errorf("docker ran the database-making call %v, want the town's server refused before it", argv)
-		}
-		if slices.Contains(argv, "version") {
-			if got, ok := envValue(envs[i], testServerOptIn[0]); !ok || got != testServerOptIn[1] {
-				t.Errorf("the version call carries %s=%q, found=%v, want the recorder's %s", testServerOptIn[0], got, ok, testServerOptIn[1])
-			}
 		}
 	}
 }
