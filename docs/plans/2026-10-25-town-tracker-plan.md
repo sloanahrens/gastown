@@ -205,7 +205,7 @@ Each bead delivers the endpoint end to end: Postgres store method, handler, clie
 
 ## 12. Ops beads (track O)
 
-- **O1** the local database is the container `tracker-db` in `deploy/tracker/docker-compose.yml` (bead gt-n2z79: 127.0.0.1 port, limits, data in `~/gt/.pg-data` through `TRACKER_PG_DATA`, pool bound in the DSN). The one launchd job is `com.gastown.trackerd` (`KeepAlive`); the plist generator is Go with a golden test (no hand-written plist script). The container start is owed by the overseer and needs Docker. Removing the old `com.gastown.tracker-db` job is its own bead.
+- **O1** target: the local database is the container `tracker-db` in `deploy/tracker/docker-compose.yml` (bead gt-n2z79, landed; that file holds the settings). Target: the one launchd job is `com.gastown.trackerd` (`KeepAlive`), written by `trackerplist trackerd`, a Go generator with a golden test. Not yet true: the container is not started (the overseer owes that, and it needs Docker), and `trackerplist tracker-db` still writes the old `com.gastown.tracker-db` job, whose removal is its own bead.
 - **O2** nightly `pg_dump` at 03:00 to `~/gt-backups/tracker/<date>`, 7 kept, failure escalates; Go with a fake runner and clock.
 - **O3** restore runbook and proof: `docs/tracker-restore.md` plus a Go check that restores a dump into a scratch database and runs a contract subset. The live restore proof is in Gate, owed by the crew session.
 - **O4** doctor check `tracker` (readyz plus write probe) and `gt tracker status`.
