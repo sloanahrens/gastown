@@ -1438,7 +1438,7 @@ func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 	townRoot := b.getTownRoot()
 
 	if opts.Rig != "" {
-		if targetDir, ok := ResolveRepoAliasBeadsDir(townRoot, opts.Rig); ok {
+		if targetDir, ok := ResolveRepoAliasBeadsDirForCreate(townRoot, opts.Rig); ok {
 			if opts.Rig != "hq" && opts.Rig != "town" {
 				// A workspace this town does not hold (a sandbox seat's
 				// skeleton carries the seat's rig alone) is still the rig

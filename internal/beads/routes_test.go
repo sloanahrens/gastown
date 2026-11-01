@@ -559,21 +559,39 @@ func TestRepoAliasSkeletonTown(t *testing.T) {
 	t.Parallel()
 	townRoot := seatTownWithRoutes(t)
 
-	got, ok := ResolveRepoAliasBeadsDir(townRoot, "b")
+	got, ok := ResolveRepoAliasBeadsDirForCreate(townRoot, "b")
 	if !ok {
-		t.Fatalf("ResolveRepoAliasBeadsDir(%q, \"b\") did not resolve", townRoot)
+		t.Fatalf("ResolveRepoAliasBeadsDirForCreate(%q, \"b\") did not resolve", townRoot)
 	}
 	want := filepath.Join(townRoot, "b", "mayor", "rig", ".beads")
 	if got != want {
-		t.Fatalf("ResolveRepoAliasBeadsDir = %q, want %q", got, want)
+		t.Fatalf("ResolveRepoAliasBeadsDirForCreate = %q, want %q", got, want)
 	}
 	if _, err := os.Stat(want); !os.IsNotExist(err) {
 		t.Fatalf("resolving alias b touched %s (stat err = %v); resolution creates nothing", want, err)
 	}
 
-	// The rig whose workspace is on disk resolves as it always did.
+	// The rig whose workspace is on disk resolves as it always did, for both
+	// resolvers.
+	if got, ok := ResolveRepoAliasBeadsDirForCreate(townRoot, "a"); !ok || got != filepath.Join(townRoot, "a", "mayor", "rig", ".beads") {
+		t.Fatalf("ResolveRepoAliasBeadsDirForCreate(%q) = %q, %v; want rig a's workspace", got, got, ok)
+	}
 	if got, ok := ResolveRepoAliasBeadsDir(townRoot, "a"); !ok || got != filepath.Join(townRoot, "a", "mayor", "rig", ".beads") {
 		t.Fatalf("ResolveRepoAliasBeadsDir(%q) = %q, %v; want rig a's workspace", got, got, ok)
+	}
+}
+
+// TestRepoAliasAbsentWorkspaceIsCreateOnly: a rig whose workspace the town
+// does not hold resolves for a create, which pins bd to the rig's database by
+// name, and is refused to a caller that would open the workspace. Sling's
+// target-rig verification and dispatch are such callers: pinning them to an
+// absent directory would send bd at whatever it fell back to (gt-dmtmv).
+func TestRepoAliasAbsentWorkspaceIsCreateOnly(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTownWithRoutes(t)
+
+	if got, ok := ResolveRepoAliasBeadsDir(townRoot, "b"); ok {
+		t.Fatalf("the open-the-workspace resolver resolved an absent workspace to %q", got)
 	}
 }
 
@@ -617,6 +635,9 @@ func TestRepoAliasRigTheTownCannotPlace(t *testing.T) {
 
 	if got, ok := ResolveRepoAliasBeadsDir(townRoot, "b"); ok {
 		t.Fatalf("ResolveRepoAliasBeadsDir resolved rig b to %q with no database in the registry", got)
+	}
+	if got, ok := ResolveRepoAliasBeadsDirForCreate(townRoot, "b"); ok {
+		t.Fatalf("ResolveRepoAliasBeadsDirForCreate resolved rig b to %q with no database in the registry", got)
 	}
 	if _, err := os.Stat(filepath.Join(townRoot, "b")); !os.IsNotExist(err) {
 		t.Fatalf("rig b's tree exists (stat err = %v); the test needs it absent", err)

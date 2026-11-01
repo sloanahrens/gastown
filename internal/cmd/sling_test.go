@@ -359,6 +359,52 @@ func TestTargetRigDatabaseLookupFailsClosedWithoutTownRoot(t *testing.T) {
 	}
 }
 
+// TestTargetRigVerificationRefusesAnAbsentWorkspace: verification opens the
+// target rig's database, so a rig this town's routes name but whose workspace
+// it does not hold is refused before any store is pinned to that address. A
+// seat's skeleton leaves its sibling rigs out, and pinning bd to an absent
+// workspace would send it at whatever it fell back to (gt-dmtmv).
+func TestTargetRigVerificationRefusesAnAbsentWorkspace(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTestRoutes(t, townRoot, []beads.Route{
+		{Prefix: "bb-", Path: "b/mayor/rig"},
+		{Prefix: "hq-", Path: "."},
+	})
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The registry places rig b on a database, so the refusal can only be the
+	// absent workspace.
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{
+  "type": "town",
+  "version": 2,
+  "name": "seat",
+  "registry": {"version": 1, "rigs": {
+    "b": {"beads": {"prefix": "bb"}, "dolt_database": "bbdb"}
+  }}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var opened []string
+	stores := slingStores{
+		pinned: func(beadsDir string) slingStore {
+			opened = append(opened, beadsDir)
+			return slingFake{beadsfake.New()}
+		},
+		routed: func(string) slingStore { return slingFake{beadsfake.New()} },
+	}
+
+	err := stores.verifyInTargetRig("bb-1", "b", townRoot)
+	if err == nil || !strings.Contains(err.Error(), "cannot resolve target rig") {
+		t.Fatalf("verifyInTargetRig = %v, want the unresolvable-target refusal", err)
+	}
+	if len(opened) != 0 {
+		t.Fatalf("verification pinned a store to %q; the workspace is absent", opened)
+	}
+}
+
 // TestRestoreRollbackRawWorkflowFieldsRestoresOriginalValues: a rollback puts
 // the raw workflow fields back to their pre-sling values and keeps the
 // current metadata and body.
