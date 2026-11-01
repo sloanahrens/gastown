@@ -26,6 +26,7 @@ func TestAffectsBuild(t *testing.T) {
 		{"internal/bdshim/testdata/bd-flags.txt", true},
 		{"internal/cmdtree/bd-command-tree.json", true},
 		{"internal/config/roles/worker.toml", true},
+		{"internal/birdreports/daily-request.md", true},
 		{"internal/land/policy/om-policy.md", true},
 		// A test source is never compiled in, embed directory or not.
 		{"internal/templates/townroot_test.go", false},
