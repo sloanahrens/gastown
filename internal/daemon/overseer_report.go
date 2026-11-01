@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/crewfresh"
 	townreport "github.com/steveyegge/gastown/internal/report"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -49,6 +51,14 @@ const (
 	// it, so the lister and the previous-report lookup never read it as a
 	// digest.
 	overseerLatestName = "latest.md"
+
+	// overseerStaleCrewAge is how long a crew clone may go unfetched before the
+	// stale crew section lists it. It matches gt crew stale's day (gt-f1qng).
+	overseerStaleCrewAge = 24 * time.Hour
+
+	// overseerStaleCrewRows caps the stale crew section's rows, with the count
+	// it left out, so a town with many clones keeps the report short.
+	overseerStaleCrewRows = 10
 )
 
 // overseerReportNameRe is the whole name of a report file.
@@ -88,6 +98,18 @@ type overseerReportSeams struct {
 	// it could not refresh. Production takes the daemon's logger; a seam may
 	// leave it nil, and the report then drops the message.
 	logf func(format string, args ...any)
+	// staleCrewOn adds the stale crew clones section; off unless the patrol
+	// config says stale_crew (gt-t3mky).
+	staleCrewOn bool
+	// staleCrew lists the crew clones the section judges. It only reads.
+	staleCrew func() ([]crewfresh.Clone, error)
+}
+
+// overseerReportStaleCrewOn reads patrols.overseer_report.stale_crew, false
+// when the config does not set it.
+func overseerReportStaleCrewOn(config *DaemonPatrolConfig) bool {
+	return config != nil && config.Patrols != nil && config.Patrols.OverseerReport != nil &&
+		config.Patrols.OverseerReport.StaleCrew
 }
 
 // triggerOverseerReport starts one report on its own goroutine unless one is
@@ -158,6 +180,9 @@ func writeOverseerReport(townRoot string, interval time.Duration, s *overseerRep
 	}
 
 	text := s.digest(slot, since).Render()
+	if s.staleCrewOn {
+		text += overseerStaleCrewSection(s.staleCrew, now)
+	}
 	if prev.IsZero() || !prev.Truncate(time.Hour).Equal(slot.Truncate(time.Hour)) {
 		var hour bytes.Buffer
 		r := s.hour(slot)
@@ -310,6 +335,10 @@ func (d *Daemon) overseerReportProdSeams() *overseerReportSeams {
 	return &overseerReportSeams{
 		now:  time.Now,
 		logf: d.logger.Printf,
+		// staleCrew is left nil: the crew clone discovery is in internal/cmd,
+		// which imports this package, so the daemon cannot call it. The
+		// section says so while the option is on.
+		staleCrewOn: overseerReportStaleCrewOn(d.patrolConfig),
 		digest: func(slot, since time.Time) townreport.Digest {
 			return townreport.Digest{
 				Now:    d.clk().Now(),
@@ -442,4 +471,52 @@ func (d *Daemon) overseerReportHealth() (string, error) {
 		stale = townhealth.DefaultStaleAfter
 	}
 	return townhealth.Line(r, d.clk().Now(), stale), nil
+}
+
+// overseerStaleCrewSection is the stale crew clones section: the clones not
+// fetched within overseerStaleCrewAge before now, oldest fetch first, or the
+// reason the list could not be read. A failed list is one line, not an empty
+// section, since an empty section reads as every clone being fresh (gt-t3mky).
+func overseerStaleCrewSection(list func() ([]crewfresh.Clone, error), now time.Time) string {
+	var b strings.Builder
+	b.WriteString("\nSTALE CREW CLONES\n")
+	var clones []crewfresh.Clone
+	err := errors.New("no crew clone source is wired")
+	if list != nil {
+		clones, err = list()
+	}
+	if err != nil {
+		b.WriteString("  unavailable (" + townreport.Scrub(err.Error()) + ")\n")
+		return b.String()
+	}
+	stale := crewfresh.Stale(clones, now, overseerStaleCrewAge)
+	if len(stale) == 0 {
+		b.WriteString("  (none)\n")
+	}
+	for i, c := range stale {
+		if i == overseerStaleCrewRows {
+			fmt.Fprintf(&b, "  +%d more\n", len(stale)-i)
+			break
+		}
+		b.WriteString("  " + overseerStaleCrewLine(c, now) + "\n")
+	}
+	return b.String()
+}
+
+// overseerStaleCrewLine is one clone's row: rig/dir, branch, hours since its
+// last fetch and the commits it is behind origin/main. A clone that could not
+// be read shows the reason instead, since its zero fields would read as fresh.
+func overseerStaleCrewLine(c crewfresh.Clone, now time.Time) string {
+	if c.Err != "" {
+		return fmt.Sprintf("%s/%s  unreadable (%s)", c.Rig, c.Dir, c.Err)
+	}
+	branch := c.Branch
+	if branch == "" {
+		branch = "detached"
+	}
+	age := "never"
+	if !c.LastFetch.IsZero() {
+		age = fmt.Sprintf("fetched %dh ago", int(now.Sub(c.LastFetch).Hours()))
+	}
+	return fmt.Sprintf("%s/%s  %s  %s  %d behind origin/main", c.Rig, c.Dir, branch, age, c.Behind)
 }

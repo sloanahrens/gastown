@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/crewfresh"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/question"
@@ -901,5 +902,150 @@ func TestOverseerSeatWorkDatesTheBeadsDispatch(t *testing.T) {
 	}
 	if want := overseerAt("2026-10-27T09:00:00Z"); !got[0].Since.Equal(want) {
 		t.Errorf("row since = %v, want the bead's first dispatch %v, not the sling to rictus", got[0].Since, want)
+	}
+}
+
+// staleCrewWorld is a world with one earlier report, so the run is not a first
+// report and adds no hour sections, plus the stale crew source the test sets.
+func staleCrewWorld(t *testing.T, list func() ([]crewfresh.Clone, error)) (*overseerWorld, *overseerReportSeams) {
+	t.Helper()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	w.seedReport(t, "20261014T200000Z")
+	s := w.seams()
+	s.staleCrew = list
+	return w, s
+}
+
+// The stale crew section is off unless the patrol config turns it on, even when
+// its source would list a stale clone.
+func TestOverseerReportStaleCrewSectionOffByDefault(t *testing.T) {
+	t.Parallel()
+	stale := func() ([]crewfresh.Clone, error) {
+		return []crewfresh.Clone{{Rig: "gastown", Dir: "old", Branch: "main", LastFetch: overseerAt("2026-10-12T20:00:00Z")}}, nil
+	}
+	w, s := staleCrewWorld(t, stale)
+	path, err := writeOverseerReport(w.town, 15*time.Minute, s)
+	if err != nil || path == "" {
+		t.Fatalf("writeOverseerReport = %q, %v; want a report", path, err)
+	}
+	if text := readOverseerFile(t, path); strings.Contains(text, "STALE CREW CLONES") {
+		t.Errorf("the report has the stale crew section with the option unset:\n%s", text)
+	}
+}
+
+// With the option on, the section lists the stale clones oldest fetch first,
+// never fetched first, and leaves out the one fetched within the day.
+func TestOverseerReportStaleCrewSectionListsOldestFirst(t *testing.T) {
+	t.Parallel()
+	now := overseerAt("2026-10-14T20:17:33Z")
+	list := func() ([]crewfresh.Clone, error) {
+		return []crewfresh.Clone{
+			{Path: "/t/gastown/crew/two-days", Rig: "gastown", Dir: "two-days", Branch: "main", LastFetch: now.Add(-50 * time.Hour), Behind: 4},
+			{Path: "/t/gastown/crew/fresh", Rig: "gastown", Dir: "fresh", Branch: "main", LastFetch: now.Add(-time.Hour), Behind: 0},
+			{Path: "/t/hq/crew/never", Rig: "hq", Dir: "never", Branch: "", Behind: 1},
+			{Path: "/t/gastown/crew/three-days", Rig: "gastown", Dir: "three-days", Branch: "polecat/x", LastFetch: now.Add(-80 * time.Hour), Behind: 9},
+		}, nil
+	}
+	w, s := staleCrewWorld(t, list)
+	s.staleCrewOn = true
+	path, err := writeOverseerReport(w.town, 15*time.Minute, s)
+	if err != nil || path == "" {
+		t.Fatalf("writeOverseerReport = %q, %v; want a report", path, err)
+	}
+	want := "\nSTALE CREW CLONES\n" +
+		"  hq/never  detached  never  1 behind origin/main\n" +
+		"  gastown/three-days  polecat/x  fetched 80h ago  9 behind origin/main\n" +
+		"  gastown/two-days  main  fetched 50h ago  4 behind origin/main\n"
+	if text := readOverseerFile(t, path); !strings.HasSuffix(text, want) {
+		t.Errorf("stale crew section is wrong; want the tail\n%s\ngot\n%s", want, text)
+	}
+}
+
+// A source that cannot list the clones costs the section one line naming the
+// reason, never an empty section that would read as every clone being fresh.
+func TestOverseerReportStaleCrewSectionSourceFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		list func() ([]crewfresh.Clone, error)
+		want string
+	}{
+		{
+			name: "source errors",
+			list: func() ([]crewfresh.Clone, error) { return nil, errors.New("crew directory unreadable") },
+			want: "unavailable (crew directory unreadable)",
+		},
+		{
+			name: "no source is wired",
+			list: nil,
+			want: "unavailable (no crew clone source is wired)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w, s := staleCrewWorld(t, tc.list)
+			s.staleCrewOn = true
+			path, err := writeOverseerReport(w.town, 15*time.Minute, s)
+			if err != nil || path == "" {
+				t.Fatalf("writeOverseerReport = %q, %v; want a report", path, err)
+			}
+			want := "\nSTALE CREW CLONES\n  " + tc.want + "\n"
+			if text := readOverseerFile(t, path); !strings.HasSuffix(text, want) {
+				t.Errorf("section tail = %q, want %q", text, want)
+			}
+		})
+	}
+}
+
+// A clone that could not be read is listed with its reason whatever its fetch
+// time, and the section keeps ten rows and says how many it left out.
+func TestOverseerReportStaleCrewSectionRowsAndUnreadable(t *testing.T) {
+	t.Parallel()
+	list := func() ([]crewfresh.Clone, error) {
+		cs := []crewfresh.Clone{{Path: "/t/gastown/crew/a-broken", Rig: "gastown", Dir: "a-broken", Err: "FETCH_HEAD could not be read"}}
+		for i := 0; i < 12; i++ {
+			dir := fmt.Sprintf("c%02d", i)
+			cs = append(cs, crewfresh.Clone{Path: "/t/gastown/crew/" + dir, Rig: "gastown", Dir: dir, Branch: "main"})
+		}
+		return cs, nil
+	}
+	w, s := staleCrewWorld(t, list)
+	s.staleCrewOn = true
+	path, err := writeOverseerReport(w.town, 15*time.Minute, s)
+	if err != nil || path == "" {
+		t.Fatalf("writeOverseerReport = %q, %v; want a report", path, err)
+	}
+	want := "\nSTALE CREW CLONES\n" +
+		"  gastown/a-broken  unreadable (FETCH_HEAD could not be read)\n"
+	for i := 0; i < 9; i++ {
+		want += fmt.Sprintf("  gastown/c%02d  main  never  0 behind origin/main\n", i)
+	}
+	want += "  +3 more\n"
+	if text := readOverseerFile(t, path); !strings.HasSuffix(text, want) {
+		t.Errorf("section tail = %q, want %q", text, want)
+	}
+}
+
+// The production seams read the option from the patrol config, and an unset or
+// false option leaves the section off.
+func TestOverseerReportStaleCrewOptionReachesTheSeam(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		cfg  *DaemonPatrolConfig
+		want bool
+	}{
+		{name: "no patrol config", cfg: nil, want: false},
+		{name: "no overseer_report entry", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, want: false},
+		{name: "stale_crew unset", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{OverseerReport: &OverseerReportConfig{Enabled: true}}}, want: false},
+		{name: "stale_crew on", cfg: &DaemonPatrolConfig{Patrols: &PatrolsConfig{OverseerReport: &OverseerReportConfig{Enabled: true, StaleCrew: true}}}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: discardLogger, patrolConfig: tc.cfg}
+			if got := d.overseerReportProdSeams().staleCrewOn; got != tc.want {
+				t.Errorf("staleCrewOn = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
