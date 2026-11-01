@@ -215,3 +215,25 @@ func TestReadRepeatReportUnreadableInputFails(t *testing.T) {
 		t.Fatalf("error = %v, want a read failure", err)
 	}
 }
+
+// A line past the review log's length cap is counted as skipped and the lines
+// around it are still read, as the log's other readers read it (gt-kbm6w): the
+// reader follows land.ScanReviewLines instead of a cap-less copy of it.
+func TestReadRepeatReportSkipsAnOverlongLine(t *testing.T) {
+	t.Parallel()
+	good := repeatLine(t, repeatRound("gt-a", 1, 20,
+		land.ReviewFindingText{File: "a.go", Title: "one"}))
+	huge := strings.Repeat("x", 1<<20+100)
+	log := strings.Join([]string{good, huge, good, ""}, "\n")
+
+	got, err := ReadRepeatReport(strings.NewReader(log), time.Time{})
+	if err != nil {
+		t.Fatalf("ReadRepeatReport: %v", err)
+	}
+	if got.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1 (the overlong line)", got.Skipped)
+	}
+	if got.Findings != 2 {
+		t.Errorf("findings = %d, want 2: the lines around the overlong one are still the log", got.Findings)
+	}
+}

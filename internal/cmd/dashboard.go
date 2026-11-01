@@ -78,7 +78,12 @@ Host is not a loopback name.
 --spend-cmd names a command that prints the DeepSeek spend report as JSON
 (default: ~/.claude/tools/deepseek-spend.py --json when that file exists). It
 runs every five minutes while a page is open; with none, the spend panel is
-left out.
+left out. Each report it prints also rewrites the town's watch reading,
+<town>/.runtime/watch/spend.json, as {ts, per_hour, balance} — what the hourly
+snapshot, gt tail and gt report read as the live DeepSeek rate — with ts the
+instant of the read. A report that carries no balance leaves the file as it
+was, and a file that cannot be rewritten is marked on the Reads pane and
+leaves the panel drawing the report it read.
 
 --jev-spend-cmd names the command that prints the Jev ledger's spend as JSON
 (default: gt jev spend --json --hours 24). The command is split like a shell
@@ -317,6 +322,13 @@ func dashboardRuntimeDir(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime")
 }
 
+// dashboardWatchDir is the town's watch directory, where the hub keeps the
+// DeepSeek spend reading current for the hourly snapshot, gt tail and gt
+// report: <town>/.runtime/watch.
+func dashboardWatchDir(townRoot string) string {
+	return filepath.Join(dashboardRuntimeDir(townRoot), "watch")
+}
+
 // dashboardCloudChecksPath is where the devops rig's cloud-check plugin writes
 // its status inside the town: one JSON file per run, overwritten each time.
 func dashboardCloudChecksPath(townRoot string) string {
@@ -460,6 +472,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Cloud:          func() *dashboard.Cloud { return cloud.Read(time.Now()) },
 		Mango:          func() *dashboard.Mango { return dashboard.ReadMango(mango, time.Now()) },
 		Spend:          dashboardSpend(resolveSpendCmd(spendCmd)),
+		WatchDir:       dashboardWatchDir(townRoot),
 		SpendHours:     dashboardSpendHours(),
 		JevSpend:       dashboardJevSpend(jevSpendArgv),
 		JevScorecard:   dashboardJevScorecard(jevScorecardArgv),

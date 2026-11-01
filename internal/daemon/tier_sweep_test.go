@@ -2607,6 +2607,194 @@ func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 	}
 }
 
+// tierSweepShellGreenStage is the shell stage's own green summary line.
+const tierSweepShellGreenStage = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
+
+// tierSweepIntegrationRedStage is the integration/race stage cut off in
+// integration: it prints integration RED and exits 1, so race never begins.
+const tierSweepIntegrationRedStage = "tier-sweep: integration RED passed=3 failed=1 skipped=0 failed: ./internal/repoguard (logs /tmp/tier-sweep.y)\n"
+
+// tierSweepBothTiersGreenStage is the same stage judging every tier it names.
+const tierSweepBothTiersGreenStage = "tier-sweep: integration GREEN passed=4 failed=0 skipped=0 (logs /tmp/tier-sweep.y)\n" +
+	"tier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs /tmp/tier-sweep.z)\n"
+
+// tierSweepStarvedSeed writes the record of a cycle that judged every tier
+// green at tips0, so race starts with a verdict and a tip, as it does before an
+// earlier stage begins starving it.
+func tierSweepStarvedSeed(t *testing.T, d *Daemon) {
+	t.Helper()
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastSHA: "tips0",
+		Tiers: map[string]tierSweepTierResult{
+			"shell":       {Verdict: tierSweepGreen, SHA: "tips0"},
+			"integration": {Verdict: tierSweepGreen, SHA: "tips0"},
+			"race":        {Verdict: tierSweepGreen, SHA: "tips0"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// tierSweepStarvingDaemon is a daemon whose integration/race stage is cut off in
+// integration every cycle, starving race, and whose shell stage is green. Each
+// cycle sees the next tip in tips; a cycle past the last fails its main read.
+func tierSweepStarvingDaemon(t *testing.T, now time.Time, tips ...string) (*Daemon, *tierSweepRunRecorder) {
+	t.Helper()
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	swept := 0
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
+		if swept >= len(tips) {
+			return "", fmt.Errorf("cycle %d has no tip: the test asked for at most %d", swept+1, len(tips))
+		}
+		sha := tips[swept]
+		swept++
+		return sha, nil
+	}
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{output: tierSweepIntegrationRedStage, exitCode: tierSweepRedExit, ran: true}
+		}
+		return tierSweepStageResult{output: tierSweepShellGreenStage, exitCode: 0, ran: true}
+	}
+	return d, rec
+}
+
+// tierSweepCycle runs one gastown cycle and fails the test if it deferred.
+func tierSweepCycle(t *testing.T, d *Daemon, now time.Time) {
+	t.Helper()
+	cycle := d.startDogCycle("tier_sweep")
+	defer cycle.close()
+	if !d.runTierSweepRig(context.Background(), cycle, "gastown", now) {
+		t.Fatal("the cycle deferred; both stages ran to a verdict")
+	}
+}
+
+// tierSweepStarvedItems is the attention the tick raises for a tier starved
+// across cycles, read through the collector the tick itself runs.
+func tierSweepStarvedItems(t *testing.T, d *Daemon, now time.Time, tier string) []attention.Item {
+	t.Helper()
+	var out []attention.Item
+	for _, it := range tierSweepItems(t, d, now, "gastown") {
+		if it.Key == "sweep-starved:gastown:"+tier {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// gt-r2e0h: a stage that always ends in integration starves race cycle after
+// cycle, so race's last verdict is stale however old it is. The third cycle in
+// a row raises one attention item naming the rig and tier; the second raises
+// none, and a fourth raises no second item.
+func TestTierSweepStarvedThreeCyclesAlarms(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _ := tierSweepStarvingDaemon(t, now, "tips1", "tips2", "tips3", "tips4")
+	tierSweepStarvedSeed(t, d)
+
+	tierSweepCycle(t, d, now)
+	tierSweepCycle(t, d, now)
+	if st := tierSweepTestState(t, d, "gastown"); st.Starved["race"] != 2 {
+		t.Fatalf("race starved %d cycles after two, want 2 (counts %+v)", st.Starved["race"], st.Starved)
+	}
+	if items := tierSweepStarvedItems(t, d, now, "race"); len(items) != 0 {
+		t.Fatalf("items after two starved cycles = %+v, want none: the alarm is the third", items)
+	}
+
+	tierSweepCycle(t, d, now)
+	if st := tierSweepTestState(t, d, "gastown"); st.Starved["race"] != 3 {
+		t.Fatalf("race starved %d cycles after three, want 3 (counts %+v)", st.Starved["race"], st.Starved)
+	}
+	items := tierSweepStarvedItems(t, d, now, "race")
+	if len(items) != 1 {
+		t.Fatalf("items after three starved cycles = %+v, want exactly one", items)
+	}
+	it := items[0]
+	if it.Kind != attention.KindTierSweepRed || it.Severity != attention.SeverityHigh || it.Rig != "gastown" {
+		t.Errorf("item = %+v, want the sweep's RED kind at high severity for gastown", it)
+	}
+	if !strings.Contains(it.Summary, "gastown") || !strings.Contains(it.Summary, "race") {
+		t.Errorf("summary = %q, want it to name the rig and the tier", it.Summary)
+	}
+	if it.SHA != "tips0" {
+		t.Errorf("SHA = %q, want tips0, the tip race's last verdict was taken at", it.SHA)
+	}
+
+	tierSweepCycle(t, d, now)
+	if items := tierSweepStarvedItems(t, d, now, "race"); len(items) != 1 {
+		t.Errorf("items after four starved cycles = %+v, want the same single item", items)
+	}
+}
+
+// gt-r2e0h: the count is consecutive, so a cycle that judges the tier resets it
+// and the item the count raised clears.
+func TestTierSweepStarvedCountResets(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec := tierSweepStarvingDaemon(t, now, "tips1", "tips2", "tips3", "tips4")
+	tierSweepStarvedSeed(t, d)
+	for range 3 {
+		tierSweepCycle(t, d, now)
+	}
+	if items := tierSweepStarvedItems(t, d, now, "race"); len(items) != 1 {
+		t.Fatalf("items after three starved cycles = %+v, want one", items)
+	}
+
+	// The stage now reaches race and judges it: the tier has a verdict of this
+	// cycle, so its starvation count is over.
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{output: tierSweepBothTiersGreenStage, exitCode: 0, ran: true}
+		}
+		return tierSweepStageResult{output: tierSweepShellGreenStage, exitCode: 0, ran: true}
+	}
+	tierSweepCycle(t, d, now)
+
+	st := tierSweepTestState(t, d, "gastown")
+	if n, has := st.Starved["race"]; has {
+		t.Errorf("race starved count = %d (counts %+v), want the judged tier gone from the record", n, st.Starved)
+	}
+	if st.Partial {
+		t.Errorf("record is Partial after a cycle that ran every stage: %+v", st)
+	}
+	if ts, has := st.Tiers["race"]; !has || ts.Verdict != tierSweepGreen {
+		t.Errorf("race = %+v (present = %v), want the verdict this cycle took", ts, has)
+	}
+	if items := tierSweepStarvedItems(t, d, now, "race"); len(items) != 0 {
+		t.Errorf("items = %+v, want the judgment to clear the starved item", items)
+	}
+}
+
+// gt-r2e0h: the counter is additive, so a record written before it existed
+// loads with every count at zero and the next starved cycle starts from one.
+func TestTierSweepStateOldRecordLoads(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _ := tierSweepStarvingDaemon(t, now, "tips1")
+	path := tierSweepStatePath(d.config.TownRoot, "gastown")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"last_run":"2026-10-01T15:00:00Z","last_sha":"tips0","tiers":{"race":{"verdict":"GREEN","passed":2,"failed":0,"failed_names":null,"sha":"tips0"}},"owed_since":"0001-01-01T00:00:00Z"}`
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := tierSweepTestState(t, d, "gastown")
+	if len(st.Starved) != 0 {
+		t.Fatalf("starved counts = %+v, want none: the record has no such field", st.Starved)
+	}
+	if ts, has := st.Tiers["race"]; !has || ts.Verdict != tierSweepGreen {
+		t.Fatalf("race = %+v (present = %v), want the record's own verdict intact", ts, has)
+	}
+
+	tierSweepCycle(t, d, now)
+	if got := tierSweepTestState(t, d, "gastown").Starved["race"]; got != 1 {
+		t.Errorf("race starved %d cycles after one, want 1: the old record starts at zero", got)
+	}
+}
+
 // gt-zlcl6: the rig's script runs its tiers in an order of its own, and a
 // decline is read as ending the stage rather than as a position in the stage's
 // list. A script that declines the tier the stage lists last and exits 2 never

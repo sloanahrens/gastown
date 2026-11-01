@@ -314,7 +314,7 @@ func (f *ReviewsFile) Queued() ([]QueuedFollowup, error) {
 	}
 	defer func() { _ = fh.Close() }()
 	var queued []QueuedFollowup
-	err = scanReviewLines(fh, func(raw []byte) {
+	_, err = ScanReviewLines(fh, func(raw []byte) {
 		if !IsQueueLine(raw) {
 			return
 		}
@@ -331,17 +331,19 @@ func (f *ReviewsFile) Queued() ([]QueuedFollowup, error) {
 	return queued, nil
 }
 
-// scanReviewLines calls fn with each line of r, trimmed, and skips a line
+// ScanReviewLines calls fn with each line of r, trimmed, and skips a line
 // longer than maxReviewLineBytes rather than failing the read. A failed read
 // would be the same failure on every later read, so one bad line would stop the
 // queue for its rig for good; the lines around it are still the log, as with a
-// torn line (gt-3arxj). Only an I/O error is returned.
-func scanReviewLines(r io.Reader, fn func(line []byte)) error {
+// torn line (gt-3arxj). tooLong counts the lines skipped for their length, so a
+// reader that reports what it could not use can say so. Only an I/O error is
+// returned.
+func ScanReviewLines(r io.Reader, fn func(line []byte)) (tooLong int, err error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	buf := make([]byte, 0, 64*1024)
 	over := false
 	for {
-		chunk, err := br.ReadSlice('\n')
+		chunk, rerr := br.ReadSlice('\n')
 		if !over {
 			if len(buf)+len(chunk) > maxReviewLineBytes {
 				over = true
@@ -351,21 +353,25 @@ func scanReviewLines(r io.Reader, fn func(line []byte)) error {
 			}
 		}
 		switch {
-		case err == nil:
-			if !over {
+		case rerr == nil:
+			if over {
+				tooLong++
+			} else {
 				fn(bytes.TrimSpace(buf))
 			}
 			over, buf = false, buf[:0]
-		case errors.Is(err, bufio.ErrBufferFull):
+		case errors.Is(rerr, bufio.ErrBufferFull):
 			// The line runs past the read buffer; keep reading it.
-		case errors.Is(err, io.EOF):
+		case errors.Is(rerr, io.EOF):
 			// A file that does not end in a newline still ends in a line.
-			if !over {
+			if over {
+				tooLong++
+			} else {
 				fn(bytes.TrimSpace(buf))
 			}
-			return nil
+			return tooLong, nil
 		default:
-			return err
+			return tooLong, rerr
 		}
 	}
 }
@@ -386,7 +392,7 @@ func (f *ReviewsFile) Since(t time.Time) ([]ReviewRecord, error) {
 	}
 	defer func() { _ = fh.Close() }()
 	var recs []ReviewRecord
-	err = scanReviewLines(fh, func(raw []byte) {
+	_, err = ScanReviewLines(fh, func(raw []byte) {
 		if IsQueueLine(raw) {
 			return
 		}

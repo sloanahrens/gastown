@@ -187,29 +187,56 @@ const gateRunTimeout = 2 * time.Minute
 // a case can fail the tracker module alone or the root suite alone; the
 // `in tracker` line records the module a run happened in.
 const (
-	gateStubGo = `#!/bin/sh
+	// gateStubHead is the part of the go stub every variant shares: the call log,
+	// the GOFLAGS line and the module marker. The module is the stub's working
+	// directory relative to the checkout (STUB_REPO), not a directory name, so a
+	// checkout that happens to be called tracker is not a tracker module.
+	gateStubHead = `dir=$PWD
+if [ "$1" = -C ]; then dir=$2; shift 2; fi
+rel=$(cd "$dir" && pwd -P); rel=${rel#"$STUB_REPO"}; rel=${rel#/}
 echo "go $1 GT_TEST_DOCKER=${GT_TEST_DOCKER:-unset}" >>"$STUB_LOG"
 [ -n "${GOFLAGS:-}" ] && echo "go $1 GOFLAGS=$GOFLAGS" >>"$STUB_LOG"
-[ "${PWD##*/}" = tracker ] && echo "go $1 in tracker" >>"$STUB_LOG"
-dir_ok=1
+[ "$rel" = tracker ] && echo "go $1 in tracker" >>"$STUB_LOG"
+`
+	// gateStubTail is the failure switch: STUB_GO_FAIL_DIR limits the go failure
+	// to a run inside that module, or (with a leading !) to a run anywhere else.
+	gateStubTail = `dir_ok=1
 if [ -n "${STUB_GO_FAIL_DIR:-}" ]; then
 	if [ "${STUB_GO_FAIL_DIR#!}" != "$STUB_GO_FAIL_DIR" ]; then
-		[ "${PWD##*/}" != "${STUB_GO_FAIL_DIR#!}" ] || dir_ok=0
+		[ "$rel" != "${STUB_GO_FAIL_DIR#!}" ] || dir_ok=0
 	else
-		[ "${PWD##*/}" = "$STUB_GO_FAIL_DIR" ] || dir_ok=0
+		[ "$rel" = "$STUB_GO_FAIL_DIR" ] || dir_ok=0
 	fi
 fi
 [ "$1" = "${STUB_GO_FAIL:-}" ] && [ "$dir_ok" = 1 ] && exit 1
 exit 0
 `
+	gateStubGo = "#!/bin/sh\n" + gateStubHead + gateStubTail
+
+	// gateStubLint stands in for golangci-lint, including the one behaviour the
+	// gate relies on it for: with STUB_LINT_CONTEND=n another run holds the module
+	// lock for the first n runs, so each of those exits 3 with golangci-lint's
+	// lock line, as the real one does, and the gate's wait script has to retry.
 	gateStubLint = `#!/bin/sh
 echo "golangci-lint $*" >>"$STUB_LOG"
-[ "${PWD##*/}" = tracker ] && echo "golangci-lint in tracker" >>"$STUB_LOG"
+rel=$(pwd -P); rel=${rel#"$STUB_REPO"}; rel=${rel#/}
+[ "$rel" = tracker ] && echo "golangci-lint in tracker" >>"$STUB_LOG"
+if [ "$1" = run ] && [ -n "${STUB_LINT_CONTEND:-}" ]; then
+	n=$(grep -c '^golangci-lint run' "$STUB_LOG")
+	if [ "$n" -le "$STUB_LINT_CONTEND" ]; then
+		echo "Error: parallel golangci-lint is running"
+		exit 3
+	fi
+fi
 [ "$1" = run ] && [ -n "${STUB_LINT_FAIL:-}" ] && exit 1
-[ "$1" = run ] && [ "${PWD##*/}" = "${STUB_LINT_FAIL_DIR:-}" ] && exit 1
+[ "$1" = run ] && [ -n "${STUB_LINT_FAIL_DIR:-}" ] && [ "$rel" = "$STUB_LINT_FAIL_DIR" ] && exit 1
 exit 0
 `
+	// gateStubPreflight stands in for the exec-tax preflight: it logs that the
+	// gate ran it, and under EXEC_TAX_WARN it warns and still exits 0, as the real
+	// one does on a taxed host.
 	gateStubPreflight = `#!/bin/sh
+echo "preflight" >>"$STUB_LOG"
 if [ -n "${EXEC_TAX_WARN:-}" ]; then
 	echo "gate: WARNING exec tax 180 ms/exec in this process tree: a fresh executable here waits on a macOS scan or a throttled process, and the unit tier builds one per package (see gt-2ycne.1)" >&2
 fi
@@ -263,7 +290,11 @@ func (r GateRun) hasCallWithPrefix(prefix string) bool {
 func (r GateRun) callLog() string { return strings.Join(r.Calls, "\n") }
 
 // newGateSandbox returns a GateSandbox whose PATH leads with stub go,
-// golangci-lint, the exec-tax preflight and the shell-test script.
+// golangci-lint, the exec-tax preflight and the shell-test script, and whose
+// checkout is a scratch directory holding the checkout under test's Makefile,
+// a tracker module and the docker package list: the gate runs the real recipe
+// there, never in the live tree, so a stage that slipped past its stub could
+// not touch the checkout under test.
 func newGateSandbox(t *testing.T) *GateSandbox {
 	t.Helper()
 	s := newSandbox(t)
@@ -276,7 +307,28 @@ func newGateSandbox(t *testing.T) *GateSandbox {
 	} {
 		g.writeStub(stub.name, stub.body)
 	}
+	g.repo = s.Path("scratch")
+	for name, body := range gateScratchFiles(t) {
+		s.WriteFile(filepath.Join("scratch", name), body)
+	}
 	return g
+}
+
+// gateScratchFiles is what the gate recipes read from the tree: the checkout
+// under test's Makefile and lint-lock-wait script, a tracker module and the
+// docker package list.
+func gateScratchFiles(t *testing.T) map[string]string {
+	t.Helper()
+	wait, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "lint-lock-wait.sh"))
+	if err != nil {
+		t.Fatalf("read the lint-lock-wait script the gate runs lint through: %v", err)
+	}
+	return map[string]string{
+		"Makefile":                       makefileText(t, repoRoot(t)),
+		"scripts/lint-lock-wait.sh":      string(wait),
+		"tracker/go.mod":                 "module example.invalid/tracker\n\ngo 1.21\n",
+		"internal/testpolicy/docker.txt": "internal/cmd # scratch fixture\n",
+	}
 }
 
 // writeStub writes an executable stub named name into the sandbox's bin
@@ -296,21 +348,29 @@ func (g *GateSandbox) writeStub(name, body string) {
 	}
 }
 
-// Run runs the real gate recipe in the checkout under test against the stubs.
+// Run runs the real gate recipe in the sandbox's checkout against the stubs.
 // makeFlags go to make before the target, as the shell's run_gate takes its
 // flags; vars are environment assignments for the run (STUB_GO_FAIL and
-// friends). The inherited GT_TEST_DOCKER=1 is set too, so a recipe that
-// forgets to turn containers off is seen to pass it on. The call log is
-// truncated first, so a case reads only this run's calls; the recipe's stdout
-// and stderr come back on the GateRun.
+// friends).
 func (g *GateSandbox) Run(makeFlags []string, vars ...string) GateRun {
+	g.t.Helper()
+	return g.runTarget("gate", makeFlags, vars...)
+}
+
+// runTarget runs the named make goal in the sandbox's checkout against the
+// stubs, as the shell fixture's run_gate runs the goal its TARGET names: the
+// gate, presubmit, test-slow or test-integration. The inherited
+// GT_TEST_DOCKER=1 is set too, so a recipe that forgets to turn containers off
+// is seen to pass it on. The call log is truncated first, so a case reads only
+// this run's calls; the recipe's stdout and stderr come back on the GateRun.
+func (g *GateSandbox) runTarget(target string, makeFlags []string, vars ...string) GateRun {
 	g.t.Helper()
 	calls := g.Path("calls")
 	if err := os.WriteFile(calls, nil, 0o644); err != nil {
 		g.t.Fatalf("truncate the stub call log %s: %v", calls, err)
 	}
 	argv := append([]string{"-C", g.repo, "--no-print-directory"}, makeFlags...)
-	argv = append(argv, "gate",
+	argv = append(argv, target,
 		"SHELL_TESTS="+filepath.Join(g.bin, "shell-tests"),
 		"EXEC_TAX_PREFLIGHT="+filepath.Join(g.bin, "preflight"))
 	ctx, cancel := context.WithTimeout(context.Background(), gateRunTimeout)
@@ -324,12 +384,12 @@ func (g *GateSandbox) Run(makeFlags []string, vars ...string) GateRun {
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
-			g.t.Fatalf("run the gate: %v\n%s", err, stderr.String())
+			g.t.Fatalf("run make %s: %v\n%s", target, err, stderr.String())
 		}
 		code = exit.ExitCode()
 	}
 	if ctx.Err() != nil {
-		g.t.Fatalf("the gate did not finish within %s: %v\n%s", gateRunTimeout, ctx.Err(), stderr.String())
+		g.t.Fatalf("make %s did not finish within %s: %v\n%s", target, gateRunTimeout, ctx.Err(), stderr.String())
 	}
 	data, err := os.ReadFile(calls)
 	if err != nil {
@@ -350,7 +410,7 @@ func (g *GateSandbox) Run(makeFlags []string, vars ...string) GateRun {
 // below the stubs because the recipe itself runs bash, date, mktemp and find,
 // as the shell fixture's `PATH="$TMP/bin:$PATH"` leaves them.
 func (g *GateSandbox) gateEnv(vars []string) []string {
-	drop := map[string]bool{"PATH": true, "STUB_LOG": true, "GT_TEST_DOCKER": true, "CPU_CLASS": true, "GOFLAGS": true}
+	drop := map[string]bool{"PATH": true, "STUB_LOG": true, "STUB_REPO": true, "GT_TEST_DOCKER": true, "CPU_CLASS": true, "GOFLAGS": true}
 	for _, kv := range vars {
 		key, _, _ := strings.Cut(kv, "=")
 		drop[key] = true
@@ -362,7 +422,13 @@ func (g *GateSandbox) gateEnv(vars []string) []string {
 			env = append(env, kv)
 		}
 	}
-	env = append(env, "GT_TEST_DOCKER=1", "STUB_LOG="+g.Path("calls"))
+	// The stubs name a module by its path under the checkout, read physically
+	// (pwd -P), so the checkout is given the same way.
+	repo, err := filepath.EvalSymlinks(g.repo)
+	if err != nil {
+		g.t.Fatalf("resolve the checkout %s: %v", g.repo, err)
+	}
+	env = append(env, "GT_TEST_DOCKER=1", "STUB_LOG="+g.Path("calls"), "STUB_REPO="+repo)
 	return append(env, vars...)
 }
 

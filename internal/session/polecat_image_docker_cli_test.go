@@ -53,8 +53,8 @@ func TestPolecatImageInstallsDockerCLIPinned(t *testing.T) {
 	if stage == "" {
 		t.Fatal("the Dockerfile has no `FROM ... AS docker-cli` stage, so nothing offers the client to copy")
 	}
-	if got := strings.ReplaceAll(stage, "${DOCKER_CLI_DIGEST}", digest); got != templates.DindImage {
-		t.Errorf("the docker client stage is FROM %q, want %q (templates.DindImage): the client and the sidecar engine must be one image", got, templates.DindImage)
+	if got := strings.ReplaceAll(stage, "${DOCKER_CLI_DIGEST}", digest); got != templates.SweepDindImage {
+		t.Errorf("the docker client stage is FROM %q, want %q (templates.SweepDindImage): the client and the sweep sidecar's engine are one image", got, templates.SweepDindImage)
 	}
 
 	var copies []string

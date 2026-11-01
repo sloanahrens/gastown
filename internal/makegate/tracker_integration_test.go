@@ -3,6 +3,7 @@
 package makegate
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -138,5 +139,46 @@ func TestIntegrationTrackerLintFindingFailsTheGate(t *testing.T) {
 	}
 	if strings.Contains(r.Stderr, "gate: PASSED") {
 		t.Fatalf("the gate printed PASSED despite the tracker lint finding\nstderr:\n%s", r.Stderr)
+	}
+}
+
+// callCount is how many times the run logged call.
+func callCount(r GateRun, call string) int {
+	n := 0
+	for _, c := range r.Calls {
+		if c == call {
+			n++
+		}
+	}
+	return n
+}
+
+// TestIntegrationGateStubsNameTheModuleByPathNotBasename checks that a checkout
+// which is itself called tracker is not mistaken for the tracker module: the
+// stubs name a module by its path under the checkout, so the module's own run
+// is the only one logged `in tracker`, as in any other checkout.
+// Mutation: key the stubs' module marker on the working directory's basename
+// (`${PWD##*/}` = tracker), and every root run in this checkout logs `in
+// tracker`, so the counts differ.
+func TestIntegrationGateStubsNameTheModuleByPathNotBasename(t *testing.T) {
+	ordinary := newGateSandbox(t).Run([]string{"-o", "lint"})
+
+	g := newGateSandbox(t)
+	g.repo = g.Path("elsewhere", "tracker")
+	for name, body := range gateScratchFiles(t) {
+		g.WriteFile(filepath.Join("elsewhere", "tracker", name), body)
+	}
+	named := g.Run([]string{"-o", "lint"})
+
+	if ordinary.Code != 0 || named.Code != 0 {
+		t.Fatalf("the gate exited %d (ordinary) and %d (checkout named tracker), want 0 and 0\n%s\n---\n%s", ordinary.Code, named.Code, ordinary.Stderr, named.Stderr)
+	}
+	for _, call := range []string{"go build in tracker", "go vet in tracker", "go test in tracker"} {
+		if got, want := callCount(named, call), callCount(ordinary, call); got != want {
+			t.Errorf("a checkout named tracker logged %q %d times, an ordinary one %d: the stubs read the checkout's name as a module", call, got, want)
+		}
+	}
+	if callCount(ordinary, "go test in tracker") == 0 {
+		t.Fatalf("the ordinary gate never ran the tracker module's tests\ncalls:\n%s", ordinary.callLog())
 	}
 }

@@ -326,7 +326,15 @@ count_calls() { # count_calls METHOD [PATH_CONTAINS]
   printf '%s' "$n"
 }
 token_file() { printf '%s/gt/forgejo-%s.env' "$CFG" "$1"; }
-file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+# GNU stat reads the permission bits with -c '%a', BSD and macOS with -f '%Lp'.
+# The dialect is settled once, on /, because GNU accepts -f as --file-system: a
+# per-file "-f first" chain prints the file-system block and then appends the
+# mode from the fallback, so the mode never matches.
+if stat -c '%a' / >/dev/null 2>&1; then
+  file_mode() { stat -c '%a' "$1"; }
+else
+  file_mode() { stat -f '%Lp' "$1"; }
+fi
 
 echo "=== fresh provision ==="
 fresh_state
