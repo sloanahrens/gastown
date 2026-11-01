@@ -3,7 +3,6 @@ package bdshim
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -17,9 +16,9 @@ import (
 // unfiltered one. The store is opened through the backend seam, from the route
 // the router chose, so this package holds no second tracker client.
 
-// readFlags is the flag set each read verb answers, the flags its golden rows
-// cover. --flat and --no-pager choose how bd renders a list; the shim always
-// prints the flat JSON shape the goldens hold, so they are accepted and change
+// The flag set each read verb answers: the flags its golden rows cover.
+// --flat and --no-pager choose how bd renders a list; the shim always prints
+// the flat JSON shape the goldens hold, so they are accepted and change
 // nothing.
 var (
 	showFlags     = readFlagSpec{"--json": {}}
@@ -72,6 +71,9 @@ func parseReadArgs(command string, args []string) (parsedRead, error) {
 	for _, arg := range args {
 		switch {
 		case pending != "":
+			if arg == "" {
+				return out, fmt.Errorf("flag %s needs a value", pending)
+			}
 			out.flags[pending] = append(out.flags[pending], arg)
 			pending = ""
 		case pastSeparator:
@@ -86,6 +88,9 @@ func parseReadArgs(command string, args []string) (parsedRead, error) {
 			}
 			switch {
 			case takes && inline:
+				if value == "" {
+					return out, fmt.Errorf("flag %s needs a value", name)
+				}
 				out.flags[name] = append(out.flags[name], value)
 			case takes:
 				pending = name
@@ -118,30 +123,15 @@ func refuseUnknownFlags(fl parsedRead, spec readFlagSpec, prefix string) error {
 	return nil
 }
 
-// openTrackerStore opens the store the route names, through the backend seam.
-// The town root is found the way the router found it: the nearest .beads
-// directory holding the route table, above the working directory or BEADS_DIR.
+// openTrackerStore opens the store the route names, through the backend seam,
+// in the town the router found. The walk up to the town is Decide's, so this
+// reads no working directory of its own: a handler answers in the town the
+// command was routed in, whatever directory the process is in.
 func openTrackerStore(env Env, d Decision) (backend.Store, error) {
-	cwd, err := env.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("reading the working directory: %w", err)
+	if d.TownRoot == "" {
+		return nil, fmt.Errorf("the command reached tracker rig %s with no town root, so its store cannot be opened", d.Route.Prefix)
 	}
-	workdir := cwd
-	if dir := env.Getenv(beadsDirEnv); dir != "" {
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(cwd, dir)
-		}
-		workdir = dir
-	}
-	found, err := findTown(workdir)
-	if err != nil {
-		return nil, err
-	}
-	if found.table == "" {
-		return nil, fmt.Errorf("no route table above %s, so tracker rig %s cannot be opened", workdir, d.Route.Prefix)
-	}
-	townRoot := filepath.Dir(found.table)
-	return backend.Open(townRoot, routeBeadsDir(townRoot, d.Route), backend.FromEnv(env.Getenv))
+	return backend.Open(d.TownRoot, routeBeadsDir(d.TownRoot, d.Route), backend.FromEnv(env.Getenv))
 }
 
 // shimError prints one of the shim's own messages and returns its exit code.
@@ -169,13 +159,9 @@ func showHandler(env Env, d Decision) int {
 	if err != nil {
 		return shimError(env, err)
 	}
-	rows := make([]bdShowIssue, 0, len(fl.operands))
-	for _, id := range fl.operands {
-		row, err := showRow(st, id)
-		if err != nil {
-			return shimError(env, err)
-		}
-		rows = append(rows, row)
+	rows, err := showRows(st, fl.operands)
+	if err != nil {
+		return shimError(env, err)
 	}
 	if err := printBDAnswer(env.Stdout, bdShowAnswer{Data: rows, SchemaVersion: bdSchemaVersion}); err != nil {
 		return shimError(env, err)
@@ -187,32 +173,48 @@ func showHandler(env Env, d Decision) int {
 // the full backend.Store; the narrow interface lets a test drive each read's
 // failure without a tracker server.
 type readStore interface {
-	Show(id string) (*beads.Issue, error)
 	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
 	Children(parentID string) ([]*beads.Issue, error)
 	Comments(id string) ([]beads.Comment, error)
 }
 
-// showRow reads one issue and everything bd's show row prints about it.
-func showRow(st readStore, id string) (bdShowIssue, error) {
-	is, err := st.Show(id)
+// showRows answers every issue a show command names. The named beads are read
+// in one call and the beads they depend on in a second, so the answer costs two
+// reads however many ids the command names; only the comment count, which the
+// store answers per issue, is read per id.
+func showRows(st readStore, ids []string) ([]bdShowIssue, error) {
+	issues, err := st.ShowMultiple(ids)
 	if err != nil {
-		return bdShowIssue{}, fmt.Errorf("show %s: %w", id, err)
+		return nil, fmt.Errorf("show %s: %w", strings.Join(ids, " "), err)
 	}
-	depIDs := make([]string, 0, len(is.Dependencies))
-	for _, dep := range is.Dependencies {
-		depIDs = append(depIDs, dep.ID)
+	var depIDs []string
+	for _, id := range ids {
+		is, ok := issues[id]
+		if !ok {
+			return nil, fmt.Errorf("show %s: %w", id, beads.ErrNotFound)
+		}
+		for _, dep := range is.Dependencies {
+			depIDs = append(depIDs, dep.ID)
+		}
 	}
 	targets, err := st.ShowMultiple(depIDs)
 	if err != nil {
-		return bdShowIssue{}, fmt.Errorf("show %s: reading the beads it depends on: %w", id, err)
+		return nil, fmt.Errorf("show %s: reading the beads they depend on: %w", strings.Join(ids, " "), err)
 	}
-	comments, err := st.Comments(id)
-	if err != nil {
-		return bdShowIssue{}, fmt.Errorf("show %s: reading its comments: %w", id, err)
+	rows := make([]bdShowIssue, 0, len(ids))
+	for _, id := range ids {
+		comments, err := st.Comments(id)
+		if err != nil {
+			return nil, fmt.Errorf("show %s: reading its comments: %w", id, err)
+		}
+		row, err := bdShowRow(issues[id], targets, len(comments))
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
 	}
-	return bdShowRow(is, targets, len(comments))
+	return rows, nil
 }
 
 // listHandler answers bd list --json for a tracker rig.
@@ -275,7 +277,7 @@ func childrenHandler(env Env, d Decision) int {
 	if err != nil {
 		return shimError(env, fmt.Errorf("children of %s: %w", fl.operands[0], err))
 	}
-	rows, err := listRows(st, kids)
+	rows, err := childrenRows(st, kids)
 	if err != nil {
 		return shimError(env, err)
 	}
@@ -285,23 +287,60 @@ func childrenHandler(env Env, d Decision) int {
 	return 0
 }
 
-// listRows renders listed issues as bd's rows. Each issue is read again for
-// the dependencies and dependents its row counts, and its comments for the
-// count bd prints.
+// listRows renders the issues a list read answered as bd's rows. The list read
+// fills each row's comment count; one more read answers every row's links,
+// which bd prints as the dependencies array and counts itself.
 func listRows(st readStore, issues []*beads.Issue) ([]bdListIssue, error) {
+	full, err := rowDependencies(st, issues)
+	if err != nil {
+		return nil, err
+	}
 	rows := make([]bdListIssue, 0, len(issues))
 	for _, is := range issues {
-		full, err := st.Show(is.ID)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", is.ID, err)
-		}
+		rows = append(rows, bdListRow(full[is.ID], is.CommentCount))
+	}
+	return rows, nil
+}
+
+// childrenRows renders the children a children read answered as bd's rows. A
+// children read fills no comment count, and the store answers one only per
+// issue, so each child's comments are read once; its links come from the one
+// read rowDependencies makes for the whole page.
+func childrenRows(st readStore, kids []*beads.Issue) ([]bdListIssue, error) {
+	full, err := rowDependencies(st, kids)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]bdListIssue, 0, len(kids))
+	for _, is := range kids {
 		comments, err := st.Comments(is.ID)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s's comments: %w", is.ID, err)
 		}
-		rows = append(rows, bdListRow(full, len(comments)))
+		rows = append(rows, bdListRow(full[is.ID], len(comments)))
 	}
 	return rows, nil
+}
+
+// rowDependencies reads every listed issue by id in one call and returns the
+// full rows, which carry the links a list row prints. A listed issue the read
+// does not answer is refused rather than printed without its links, which
+// would undercount what the row's counts state.
+func rowDependencies(st readStore, issues []*beads.Issue) (map[string]*beads.Issue, error) {
+	ids := make([]string, len(issues))
+	for i, is := range issues {
+		ids[i] = is.ID
+	}
+	full, err := st.ShowMultiple(ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading the listed beads: %w", err)
+	}
+	for _, id := range ids {
+		if _, ok := full[id]; !ok {
+			return nil, fmt.Errorf("the store listed %s and then did not answer it", id)
+		}
+	}
+	return full, nil
 }
 
 // readListOptions maps the flags the handler answers to the store's list

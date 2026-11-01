@@ -35,6 +35,10 @@ type Decision struct {
 	Tracker bool
 	// Route is the tracker rig, set when Tracker is true.
 	Route beads.Route
+	// TownRoot is the town the walk found, set when Tracker is true. A handler
+	// opens the rig's store from it, so it never walks a second time and cannot
+	// disagree with the route it was handed.
+	TownRoot string
 }
 
 // Env is the process surface Main reads, so a test drives the real entry
@@ -158,7 +162,7 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 	}
 	for _, r := range named {
 		if r.BackendName() == beads.BackendTracker {
-			d.Tracker, d.Route = true, r
+			d.Tracker, d.Route, d.TownRoot = true, r, town
 			return d, nil
 		}
 	}
@@ -176,7 +180,7 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 	}
 	for _, r := range routes {
 		if r.BackendName() == beads.BackendTracker && samePath(routeBeadsDir(town, r)) == store {
-			d.Tracker, d.Route = true, r
+			d.Tracker, d.Route, d.TownRoot = true, r, town
 			return d, nil
 		}
 	}

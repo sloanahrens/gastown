@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -19,6 +20,7 @@ func init() {
 	register(Case{Name: "a cycle of blocking links is refused and other types may cycle", Run: depsCycles})
 	register(Case{Name: "opposite blocking links added at the same instant never both succeed", Run: depsCycleRace})
 	register(Case{Name: "an external target needs no row and is left out of the list", Run: depsExternal})
+	register(Case{Name: "a named read carries each link's own record: who wrote it and when", Fake: true, Run: depsReadCarriesTheLinkRecord})
 	register(Case{Name: "a dependent of an external:<rig>:<id> target is listed by its id once, and a near-miss suffix is not", Fake: true, Run: depsExternalDependents})
 	register(Case{Name: "a named read of an issue nothing depends on sends an empty dependents list, not an unfilled one", Fake: true, Run: depsNoDependentsIsEmpty})
 	register(Case{Name: "a parent-child link sets and clears the parent", Run: depsParentChild})
@@ -30,6 +32,33 @@ func mustDep(t *testing.T, s store.Store, issue, on, typ string) {
 	t.Helper()
 	if err := s.AddDependency(ctx(), issue, on, typ); err != nil {
 		t.Fatalf("AddDependency(%s, %s, %s): %v", issue, on, typ, err)
+	}
+}
+
+// depsReadCarriesTheLinkRecord: bd prints a listed issue's links from the
+// relation's own row, so a named read carries who wrote each link and when,
+// beside the target's fields. A link written with no metadata carries none.
+func depsReadCarriesTheLinkRecord(t *testing.T, s store.Store) {
+	const writer = "town/crew/fixture"
+	writeCtx := api.WithActor(context.Background(), writer)
+	owner := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "owner"})
+	target := mustCreate(t, s, api.CreateParams{Rig: "gt", Title: "target"})
+	if err := s.AddDependency(writeCtx, owner.ID, target.ID, "blocks"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	got := mustGet(t, s, owner.ID)
+	if len(got.Dependencies) != 1 {
+		t.Fatalf("Dependencies = %+v, want the one link", got.Dependencies)
+	}
+	dep := got.Dependencies[0]
+	if dep.CreatedBy != writer {
+		t.Errorf("link created_by = %q, want %q", dep.CreatedBy, writer)
+	}
+	if dep.CreatedAt.IsZero() {
+		t.Error("link created_at is zero, want the time the relation was written")
+	}
+	if len(dep.Metadata) != 0 {
+		t.Errorf("link metadata = %s, want none for a link written without one", dep.Metadata)
 	}
 }
 
