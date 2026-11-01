@@ -303,8 +303,12 @@ type Rejection struct {
 	GateTail string
 	// GateLog is where the rejected gate's whole job log is kept; the note
 	// names it so the excerpt can be checked against the full log (gt-wwqx8).
-	GateLog     string
-	Findings    []Finding
+	GateLog  string
+	Findings []Finding
+	// Approved is set on a gate refusal that followed an om approve, so the
+	// note records that om answered this round even when it raised no findings
+	// (gt-xal5q).
+	Approved    bool
 	Conflicting []string
 	// ReviewSummary and ReviewScore are om's, when om asked for changes.
 	ReviewSummary string
@@ -1588,10 +1592,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		l.discardCandidate(ctx, w, candRes)
 		// The refusal carries the verdict it followed, though that verdict
 		// approved: no block records an approval, so the next review reads the
-		// findings here or runs cold on the unchanged diff (gt-g8otg). A waived
-		// head and a review that reached no verdict leave it empty.
+		// findings here or runs cold on the unchanged diff (gt-g8otg). The
+		// approval is marked too, so a clean approve still answers its round
+		// and the walk does not reach an older review (gt-xal5q). A waived
+		// head and a review that reached no verdict leave both empty.
 		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail, GateLog: candRes.GateLog,
-			Findings: verdict.Findings}
+			Findings: verdict.Findings, Approved: verdict.Verdict == VerdictApprove}
 		return Result{}, l.reject(issue, w, rej, nil)
 	}
 
@@ -2356,6 +2362,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	// review's verdict findings, or the approve findings a gate refusal followed
 	// (gt-g8otg). A refusal that carries none writes none.
 	note.Findings = rej.Findings
+	note.Approved = rej.Approved
 	// The target tip rides the rejection line itself: a conflicted merge writes
 	// no merge line, so this is the only record of what the conflict was built
 	// on (gt-0nvhe).

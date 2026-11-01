@@ -163,6 +163,23 @@ func TestPriorReviewFindings(t *testing.T) {
 			},
 		},
 		{
+			// om approved the head and raised nothing, so the gate refusal that
+			// followed carries no finding. It answers its round anyway, and the
+			// review it followed is not read past it (gt-xal5q).
+			name: "a review refusal with findings, then a gate refusal after a clean approve",
+			notes: review + "\n" + FormatRejectionNote(RejectionNote{
+				Attempt: 2, Kind: string(RejectGate), Reason: "the candidate gate make gate failed on the merged tree",
+				MR: "gt-abc", Approved: true,
+			}),
+		},
+		{
+			name: "a gate refusal after a clean approve, before any review block",
+			notes: FormatRejectionNote(RejectionNote{
+				Attempt: 1, Kind: string(RejectGate), Reason: "the candidate gate make gate failed on the merged tree",
+				MR: "gt-abc", Approved: true,
+			}),
+		},
+		{
 			// A review that raised nothing answers for itself: the round before
 			// it is answered and must not outlive it.
 			name:  "a review refusal with no findings after one with them",
@@ -244,6 +261,58 @@ func TestGateFailureAfterApproveCarriesTheApprovedFindings(t *testing.T) {
 	}
 	if got := CountRejections(f.bead().Notes); got != 0 {
 		t.Errorf("the bead carries %d review rejection(s) after the rework, want 0", got)
+	}
+}
+
+// TestGateFailureAfterCleanApproveDoesNotResurrectAnOlderRound: om requests
+// changes with a major, the author fixes it, and om approves with nothing
+// left to say. The gate then fails on the approved head. Its refusal carries no
+// finding, but it answers the approve, so the resubmitted review runs with no
+// prior findings rather than the round-1 major the approve already answered
+// (gt-xal5q).
+func TestGateFailureAfterCleanApproveDoesNotResurrectAnOlderRound(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	rev := &sequenceReviewer{t: t, steps: []reviewStep{
+		{verdict: Verdict{Verdict: VerdictRequestChanges, Score: 0.5, Findings: []Finding{
+			{ID: "f-1a2b", Severity: "major", Path: "b.go", Line: 4, Title: "the retry ignores its own budget"},
+		}}},
+		{verdict: Verdict{Verdict: VerdictApprove, Score: 0.88}},
+		{verdict: Verdict{Verdict: VerdictApprove, Score: 0.88}},
+	}}
+	l := f.lander()
+	l.Reviewer = rev
+	runs := 0
+	f.gate.fn = func(string) GateResult {
+		runs++
+		if runs == 1 {
+			return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1, Tail: "--- FAIL: TestFirst\n"}}}
+		}
+		return GateResult{Passed: true, Steps: []StepResult{{Name: "test"}}}
+	}
+
+	var rej *Rejection
+	if _, err := l.Land(context.Background(), f.work); !errors.As(err, &rej) || rej.Kind != RejectReview {
+		t.Fatalf("the first landing = %v, want a review rejection", err)
+	}
+
+	f.resubmit()
+	if _, err := l.Land(context.Background(), f.work); !errors.As(err, &rej) || rej.Kind != RejectGate {
+		t.Fatalf("the approved landing = %v, want a gate rejection", err)
+	}
+	if note, ok := ParseRejectionNote(f.bead().Notes); !ok || !note.Approved || len(note.Findings) != 0 {
+		t.Fatalf("the gate refusal = %+v ok=%v, want an approved refusal with no findings:\n%s", note, ok, f.bead().Notes)
+	}
+
+	f.resubmit()
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("the rework round: %v", err)
+	}
+	if len(rev.inputs) != 3 {
+		t.Fatalf("reviewer calls = %d, want 3", len(rev.inputs))
+	}
+	if got := rev.inputs[2].PriorFindings; len(got) != 0 {
+		t.Errorf("the third review carried %+v, want no prior findings: the approve answered its round", got)
 	}
 }
 
