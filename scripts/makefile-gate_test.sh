@@ -1002,6 +1002,22 @@ else
   fail "the Docker volume script scripts/polecat-caches.sh is gone" "$ROOT/scripts/polecat-caches.sh still exists"
 fi
 
+# The nested-module steps pass go's -C after the subcommand (go build -C dir,
+# go vet -C dir, go test -C dir): this runs the REAL go, not a stub, on a
+# throwaway module so a toolchain that rejected that order would fail here
+# (gt-bhah3). The module and its build output live under $TMP.
+nm="$TMP/nestedmod"
+mkdir -p "$nm"
+printf 'module example.test/nested\n\ngo 1.21\n' >"$nm/go.mod"
+printf 'package main\n\nfunc main() {}\n' >"$nm/main.go"
+if realgo=$(command -v go) && "$realgo" build -C "$nm" -o "$TMP/nested-out" ./... >/dev/null 2>&1 \
+  && "$realgo" vet -C "$nm" ./... >/dev/null 2>&1 \
+  && "$realgo" test -C "$nm" ./... >/dev/null 2>&1 && [[ -x "$TMP/nested-out" ]]; then
+  pass "the real go accepts -C after build, vet and test (the nested-module step shape)"
+else
+  fail "the real go accepts -C after build, vet and test (the nested-module step shape)"
+fi
+
 echo ""
 echo "makefile-gate_test: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
