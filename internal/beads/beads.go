@@ -2494,6 +2494,12 @@ func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
 // "ephemeral" is deliberately absent from the expression: bd's filter treats
 // the absent predicate as "either table", and pinning it either way drops
 // half the union.
+//
+// A failed union query returns an error and no assignments. bd builds the union
+// by searching both tables, and that search can fail while the issues table
+// still answers (gt-osaep). Reading the issues table alone would return a
+// partial answer, with the wisps unread and no way for the caller to tell, so
+// the failure is reported instead, naming the query step.
 func (b *Beads) ListAssignedIssueStatuses(assignee string, statuses ...IssueStatus) ([]*Issue, error) {
 	if assignee == "" {
 		return nil, nil
@@ -2503,6 +2509,15 @@ func (b *Beads) ListAssignedIssueStatuses(assignee string, statuses ...IssueStat
 		return nil, nil
 	}
 
+	issues, err := b.queryAssignedAcrossTables(assignee, unique)
+	if err != nil {
+		return nil, fmt.Errorf("assigned-work query over issues and wisps failed, so no assignment for %s is established and an empty hook is not reported: %w", assignee, err)
+	}
+	return issues, nil
+}
+
+// queryAssignedAcrossTables is the single union query over both tables.
+func (b *Beads) queryAssignedAcrossTables(assignee string, unique []IssueStatus) ([]*Issue, error) {
 	statusClauses := make([]string, 0, len(unique))
 	for _, status := range unique {
 		statusClauses = append(statusClauses, "status="+quoteBDQueryValue(string(status)))

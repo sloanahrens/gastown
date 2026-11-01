@@ -218,6 +218,63 @@ func TestListAssignedIssueStatusesWithoutAssigneeSpawnsNothing(t *testing.T) {
 	}
 }
 
+// assigneeUnionQuery is the single union query ListAssignedIssueStatuses
+// sends, as the recorder sees it.
+const assigneeUnionQuery = `query --json assignee="gastown/polecats/toast" AND (status="hooked" OR status="in_progress") --all --limit=0`
+
+// The wisps search can fail while the issues table still answers (gt-osaep).
+// A failed union query must fail the lookup, naming the query step, and must
+// not return the durable rows as if they were the whole answer. The recorder
+// fails the test on any bd call past the union query, so a table retry is
+// caught too.
+func TestListAssignedIssueStatusesNamesFailedQueryStep(t *testing.T) {
+	t.Parallel()
+
+	r := newRecorder(func(args []string) reply {
+		switch strings.Join(args, " ") {
+		case assigneeUnionQuery:
+			return reply{stderr: "search count wisps: invalid connection\n", err: exitError{1}}
+		}
+		t.Fatalf("unexpected bd call: %v", args)
+		return reply{}
+	})
+	b := newRecordedBeads(t.TempDir(), r)
+
+	got, err := b.ListAssignedIssueStatuses("gastown/polecats/toast", IssueStatusHooked, StatusInProgress)
+	if err == nil {
+		t.Fatalf("ListAssignedIssueStatuses() = %d issues, nil; a failed union query must not read as an answer", len(got))
+	}
+	if got != nil {
+		t.Errorf("ListAssignedIssueStatuses() = %d issues with error; want no assignments", len(got))
+	}
+	for _, want := range []string{"assigned-work query over issues and wisps failed", "empty hook is not reported", "search count wisps"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// A union answer of the wrong JSON shape is a failed read, not an empty hook:
+// the parse error has to reach the caller.
+func TestListAssignedIssueStatusesReportsUnparsableQueryOutput(t *testing.T) {
+	t.Parallel()
+
+	r := newRecorder(func(args []string) reply {
+		switch strings.Join(args, " ") {
+		case assigneeUnionQuery:
+			return reply{stdout: `{"data":[]}`}
+		}
+		t.Fatalf("unexpected bd call: %v", args)
+		return reply{}
+	})
+	b := newRecordedBeads(t.TempDir(), r)
+
+	_, err := b.ListAssignedIssueStatuses("gastown/polecats/toast", IssueStatusHooked, StatusInProgress)
+	if err == nil || !strings.Contains(err.Error(), "parsing bd query output") {
+		t.Fatalf("err = %v, want the bd query parse failure", err)
+	}
+}
+
 func TestListDurableUsesBDListFilters(t *testing.T) {
 	ResetBdAllowStaleCacheForTest()
 	logPath := installMockBDRecorder(t)
