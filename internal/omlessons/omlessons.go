@@ -78,12 +78,12 @@ var classes = []Class{
 		Claim: []string{"hermetic", "os.getenv", "the host's", "package-level", "global state", "developer's environment"},
 	},
 	{
-		ID: "doc-contradicts-code", Name: "a doc says what the code does not do", Rule: 0,
+		ID: "doc-contradicts-code", Name: "a doc says what the code does not do", Rule: 14,
 		Title: []string{"contradicts", "stale doc", "documentation says", "the doc says"},
 		Claim: []string{"contradicts", "documentation says", "the doc says", "no longer true"},
 	},
 	{
-		ID: "comment-claim", Name: "a comment carries a line number or an untrue claim", Rule: 0,
+		ID: "comment-claim", Name: "a comment carries a line number or an untrue claim", Rule: 14,
 		Title: []string{"comment", "line number", "misleading", "misstates"},
 		Claim: []string{"comment", "the code does not", "misstates", "line number"},
 	},
@@ -93,7 +93,7 @@ var classes = []Class{
 		Claim: []string{"unrelated", "outside the stated scope", "widens the", "not part of the bead"},
 	},
 	{
-		ID: "secret-in-output", Name: "a secret reaches output", Rule: 12,
+		ID: "secret-in-output", Name: "a secret reaches output", Rule: 11,
 		Title: []string{"secret", "password", "credential", "token", "captured output", "echoes"},
 		Claim: []string{"secret", "password", "credential", "token", "captured"},
 	},

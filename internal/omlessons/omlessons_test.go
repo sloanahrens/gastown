@@ -180,8 +180,8 @@ func TestClassTableIsWellFormed(t *testing.T) {
 			t.Errorf("class %q appears twice", c.ID)
 		}
 		ids[c.ID] = true
-		if c.Rule < 0 || c.Rule > 12 {
-			t.Errorf("class %q carries rule %d, outside the directive's 12", c.ID, c.Rule)
+		if c.Rule < 0 || c.Rule > 15 {
+			t.Errorf("class %q carries rule %d, outside the directive's 15", c.ID, c.Rule)
 		}
 		if len(c.Title) == 0 || len(c.Claim) == 0 {
 			t.Errorf("class %q: want keywords for the title and for the claim both", c.ID)

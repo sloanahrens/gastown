@@ -105,6 +105,7 @@
     {
       "id": "doc-contradicts-code",
       "name": "a doc says what the code does not do",
+      "rule": 14,
       "current": {
         "findings": 0,
         "beads": 0,
@@ -119,6 +120,7 @@
     {
       "id": "comment-claim",
       "name": "a comment carries a line number or an untrue claim",
+      "rule": 14,
       "current": {
         "findings": 1,
         "beads": 1,
@@ -148,7 +150,7 @@
     {
       "id": "secret-in-output",
       "name": "a secret reaches output",
-      "rule": 12,
+      "rule": 11,
       "current": {
         "findings": 0,
         "beads": 0,

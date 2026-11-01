@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-10-31 gt-pccx7: one coherent revision from the 2026-10-28..31 rejection record (842 majors): a plan section first, town rules and tests merged to one copy each, rules 12-15 (cloud) leave for the devops layer, new rules 12-14 (finish and wire, state and locks, docs say what the code does), rule 16 becomes 15, and a closing pre-submit checklist ordered by rounds burned (fifteen rules).
 - 2026-11-01 gt-9givh: added a "Before gt done: five checks on your added lines" checklist after rule 16; it cites existing rules, so the count stays sixteen.
 - 2026-10-31 gt-9ptn8: merged the scratch and shell-script pairs into their policy sections; rules 7 and 8 point at them; intro counts dropped (sixteen rules).
 - 2026-10-30 gt-wfohy: added rule 16 (rework: answer every open finding, never loosen a test, limit or allowlist to land) and rewrote rule 9's flags from the 2026-10-28..30 findings, where scope was filed as an edit outside the bead's Constraints rather than a dependency bump or rename (sixteen rules).
@@ -17,238 +18,126 @@
 - 2026-10-24 gt-3vgbi: no new scripts for testable logic (town policy section, dated 2026-10-24).
 - 2026-10-26 gt-3vgbi: the twelve rules in "What om rejects" were written from the day's om rejections; each cites its example bead (rules 1-12, unchanged).
 
-## An interrupt is a delivery artifact, not an operator stop (town policy, 2026-09-23)
+## Before you write code
 
-> **Town Policy — overrides formula instructions where they conflict.**
+Read the bead's Goal, Constraints, Out of scope and Acceptance. Write a short plan in `scratch/plan.md`: for each acceptance box, what must be wired (the caller, flag or field that makes it real) and which test goes red without it; every refusal branch the design needs; the one way this design most likely fails in production. Check the diff against it before `gt done`.
 
-No human types into this pane. A tool call rejected with "The user doesn't
-want to proceed with this tool use" or "[Request interrupted by user for tool
-use]", with no instruction attached, is a nudge-delivery artifact (claude-9a8),
-not an order to stop. Re-run the interrupted command if you still need it and
-continue your loop.
+## Town rules that always apply
 
-Real orders arrive as text, from a named sender, and say what to stop. A
-"hold" covers only what it names ("no new slings" stops slings), never your
-patrol loop. Before replying "holding", cite the order: sender, time, and the
-words that name your loop. If you cannot cite one, there is no hold: resume.
+**An interrupt is not an operator stop.** A tool call rejected with "The user doesn't want to proceed with this tool use" or "[Request interrupted by user for tool use]" and no instruction is a nudge artifact (claude-9a8): re-run it if you still need it. A real order is text from a named sender saying what to stop, and a "hold" covers only what it names; if you cannot cite the order, there is no hold.
 
-## No subagents (town policy, 2026-10-12)
+**No subagents.** No Task or Agent tool, no helper sessions. If the work seems to need helpers it is too big: note it on your bead and file a bead that splits it. Only a bead labelled `scheduled:deep-review-slice` or `scheduled:deep-review-risk` spawns the read-only subagents its formula names.
 
-> **Town Policy — overrides formula instructions where they conflict.**
-
-Your work was sized for one agent. Do not spawn subagents: no Task or Agent tool, no
-parallel helper sessions, no "reviewer" or "verifier" sub-sessions. Read, edit and test
-in your own session. If the work seems to need helpers, it is too big: stop, say so in a
-note on your bead and file a bead that splits the work.
-
-Exception, and only this one: a bead labelled `scheduled:deep-review-slice` or
-`scheduled:deep-review-risk` is a scheduled deep review. Its formula orchestrates read-only
-reviewer and verifier subagents (at most the formula's caps), and it never edits, commits or
-pushes. Spawn them as the formula says.
-
-## Bead text is one single-quoted argument (town policy, 2026-10-28)
-
-> **Town Policy — overrides formula instructions where they conflict.**
-
-Pass a bead's text as a single-quoted argument on every `gt bead` verb that takes
-text (`create`, `update`, `claim`, `note`, `comment` and `close`), across as many lines
-as the text needs:
+**Bead text is one single-quoted argument** on every `gt bead` verb that takes text (`create`, `update`, `claim`, `note`, `comment`, `close`), across as many lines as needed, so backticks and `$(...)` survive and the tap guard reads the text as written. `bd` is for reads. A text holding a single quote takes double quotes; escape `$`, backticks and braces:
 
 ```bash
-gt bead note gt-abc 'the retry loop never resets its counter, so a second
-attempt spends the budget the first one started with'
+gt bead note gt-abc 'the retry never resets its counter'
 ```
 
-The shell runs nothing inside single quotes, so a note about code keeps its
-backticks and `$(...)` intact, and the tap guard reads the text exactly as
-written. Beads are written with the `gt bead` verbs; `bd` is for reads.
+**Files stay under the worktree.** Scratch files, logs, test data and build output go in `scratch/` (never committed by the checkpoint), not `/tmp`, `/private/tmp`, HOME or a session scratchpad. Any other stray file is committed within minutes: delete it and commit the deletion before `gt done`.
 
-When the text holds a single quote of its own it takes double quotes, where
-`$`, backticks and braces expand: escape them so the text the guard reads still
-opens literally.
+## Tests
 
-## Tests stay hermetic (town policy, 2026-10-26)
+Full standard: `~/.claude/docs/standards/test-engineering.md`. om flags a breach as major, a new slow test as a finding.
 
-> **Town Policy — overrides formula instructions where they conflict.**
-
-Do not add tests to a package that `internal/testpolicy` lists as exempt (its baseline holds
-only the tests it had at seed time), and do not run a subprocess, create an executable file or
-run the Go tool inside a unit test: inject the runner and the filesystem and use fakes. A unit
-test never reads the live town tree (`~/gt`) or host state: it builds its tree under `t.TempDir()`
-or a fake. Never edit the baseline; a policy failure means the test is the problem.
-
-## Keep files under the worktree (town policy, 2026-10-27)
-
-> **Town Policy — overrides formula instructions where they conflict.**
-
-Files you create for the work stay inside your rig worktree: scratch files, trace
-logs, test data and build output included. `/tmp`, `/private/tmp`, your HOME
-directory and a session scratchpad are out — a file written there is outside what
-the landing keeps, and the permission prompt its write raises in a parked session
-has nobody to answer it (gt-3n4e0, hq-wisp-dvrty). Put scratch files in the
-worktree's `scratch/` directory, which the checkpoint dog leaves untracked
-(`internal/checkpoint/throwaway.go`).
-
-The checkpoint dog commits your working tree every few minutes ("WIP: checkpoint (auto)"), so
-a file left outside `scratch/` is committed within minutes. `gt done`'s squash rewrites commit
-messages only, so it survives into the merge request even after you delete it. If one slipped
-into the tracked tree, delete it and commit the deletion before `gt done`.
-
-## Tests are engineered, not accumulated (town policy, 2026-10-23)
-
-> **Town Policy — overrides formula instructions where they conflict.**
-
-A badly engineered test is a liability; two repos had to be rebuilt after theirs piled up.
-Full standard: `~/.claude/docs/standards/test-engineering.md`. When you add or change a test:
-
-- One reason to fail per test.
-- Give it a tier and a cost: unit is in-process and fast, integration is real processes or
-  a sandbox. A test over its tier's cost moves up a tier or gets cheaper; it never gets a
-  longer limit.
-- Bound every wait and end every loop. No `sleep` to wait for something; use a fake clock or
-  a condition. Read a clock baseline BEFORE you launch what you time.
-- Never retry or skip a failing test to make it pass; find the cause.
-- A test that runs a script or binary in a subprocess must itself read those files, or the
-  result cache serves a stale pass after the script changes.
-- Stage a fixture once and copy it per case; do not rebuild it for every case.
-- Never raise a timeout, a budget or a ratchet to land your change. The lists only shrink.
-- A shell test must pass on macOS too: the gate runs it on Linux CI, but the post-land tier runs it on the Mac host (BSD tools). Never compare `wc -l` output as a string (BSD pads it: trim or use `$((...))`), and avoid `sed -i`, `date -d`, `stat -c` and `readlink -f` without a portable form.
-
-om flags the breaches above as major findings, and a new slow test as a finding even when it passes.
-
-## No new scripts for testable logic (town policy, Sloan 2026-10-24; shell files 2026-10-26)
-
-> **Town Policy — overrides formula instructions where they conflict.**
-
-Do not add a shell or Python script when the logic is testable Go. Do not create `.sh`,
-`.bash`, `.zsh`, `.pl` or `.rb` files, and do not extend an existing script with new
-logic. Write it as Go in the repo's module with unit tests (a seam for the clock, the
-filesystem and the process runner). Wizards stay outlawed. Allowed, with the reason in the
-bead: a thin wrapper that only execs a Go binary, Makefile glue, a bootstrap that must run
-before Go exists, or a file the platform dictates. If a bead asks for a script and gives no
-such reason, comment on the bead and ask before you write it. A procedure that is only a
-sequence of operator steps is a runbook, not a script. A new script that holds logic is a
-major finding in om review. Full text: the "Scripts are debt" section of
-`~/.claude/docs/standards/test-engineering.md`.
+- One reason to fail per test. Assert behaviour (outputs, errors, exit codes, files), not source text or an implementation field.
+- A unit test is in-process: no subprocess, executable file, Go tool, network or package-level variable set to steer behaviour; inject the runner, filesystem and clock. It never reads the live town tree (`~/gt`), the host environment or HOME: build under `t.TempDir()`.
+- Bound every wait and end every loop. No `sleep` and no wall-clock deadline: use a fake clock or a condition, and read a clock baseline before you launch what you time.
+- Never retry or skip a failing test, or raise a timeout, budget or ratchet to land. A test over its tier's cost moves up a tier or gets cheaper.
+- A test that runs a script or binary reads those files itself, or the result cache serves a stale pass. A shell test passes on macOS too (no `sed -i`, `date -d`, `stat -c`, `readlink -f`; BSD `wc -l` pads).
+- No `.sh`, `.bash`, `.zsh`, `.pl`, `.rb` or Python file for logic Go can test, and do not grow an existing script: write Go with unit tests. Allowed, with the reason in the bead: a thin exec wrapper, Makefile glue, a bootstrap that must run before Go exists, a file the platform dictates. If the bead asks for a script with no such reason, ask first.
 
 # What om rejects
 
-Read before you write code. Sixteen rules. Each rule names om's finding and one example.
+Read before you write code. Fifteen rules. Each names om's finding and an example.
 
 ## 1. Failure is not success (fail-open)
 
-A failed, unreadable or unwired input must stop, refuse or escalate, never pass as clean. This is the most common major finding. The forms om flags:
-- an unreadable file, record or status read as absent, empty or clean (also an error from a build-constraint matcher or parser read as "does not apply");
-- a refusal that returns the same value as a healthy answer (0, the base value, a nil error, exit 0): return a distinct error;
+A failed, unreadable or unwired input must stop, refuse or escalate, never pass as clean (the most common major finding). om flags:
+- an unreadable file, record or status read as absent, empty or clean, or a parser error read as "does not apply";
+- a refusal that returns what a healthy answer returns (0, nil, exit 0, SKIPPED, GREEN);
 - a guard whose input is not wired defaults to allow ("PushInFlight gate is a constant false"): unknown denies;
-- an error dropped silently, logged only, or reported as "skipped" where the caller has to act.
-- om flags: "unreadable main status suppresses escalation (fail-open gate)".
-- Example: gt-42ulv (critical). A missing red-main status read as green, so no escalation fired.
-- Before: `if err != nil { return nil }`. After: return the error, or record the state as unknown and escalate.
+- an error dropped (`_ =`), only logged, or reported as "skipped" where the caller has to act.
+- Example: gt-42ulv (critical). A missing red-main status read as green; gt-p85pw.73: an unreadable routes file reported SKIPPED. Fix: return the error, or record the state as unknown and escalate.
 
 ## 2. Each criterion needs a test that fails without it
 
-Every acceptance box needs a test that is red when the behaviour is removed.
+Every acceptance box needs a test that is red when the behaviour is removed. Mutate it yourself: delete the line or flip the condition, run the test, restore.
 - om flags: "criterion ... has no test".
-- Example: gt-smdcj (major). A box said an acked item stays counted as acked, and nothing tested it.
-- Before: the box ticked on reading the code. After: a test that fails when the ack check is deleted.
 
 ## 3. Test the branch that refuses, not only the happy path
 
-Every error or refusal branch in the diff needs a test that drives it.
-- om flags: "failing branch has no assertion", "alarm and refusal branches lack tests".
-- Example: a new error return in internal/cmd with only the success case tested.
-- Before: one test for the success path. After: one table row per refusal, each asserting the error.
-- Mutate each new guard yourself before gt done: delete its branch or flip its condition, and confirm a test goes red. A guard no test turns red is the most common reason a head is rejected; if no test goes red, write the test.
+Every error or refusal branch in the diff has a test that drives it: one table row per refusal, each asserting the error. Mutate each new guard before `gt done`; a guard no test turns red is the most common reason a head is rejected.
+- om flags: "failing branch has no assertion", "alarm and refusal branches lack tests". Example: gt-z6qre.12. No test for the unset-HOME failure the bead listed as a criterion.
 
-## 4. Untrusted input is not trusted by its prefix or its text
+## 4. Untrusted input is not trusted by its prefix, its text or its shape
 
-Anything an author writes (a comment, a note, a bead field) can be forged. Decide authority from something the author cannot write.
-- om flags: "decision authority is granted by prefix alone, so any commenter can forge a decision" (major).
-- Example: gt-0sztd. A decision comment granted authority by its prefix, so any commenter could forge one.
-- Before: `strings.HasPrefix(body, "DECIDED")` grants it. After: authority from the author's identity, checked on the record.
+Anything an author or caller writes (a comment, bead field, path, name) can be forged or hostile. Decide authority from something the writer cannot write; validate a value before it reaches a path, argv or request.
+- om flags: "decision authority is granted by prefix alone, so any commenter can forge a decision" (gt-0sztd); an owner/name spliced into a request path (gt-tpg0p.33).
 
 ## 5. An author cannot review or rebut their own work
 
-- om flags: "author under review can self-rebut its own findings" (major).
-- Example: gt-yphcl. A round's rebuttal was accepted from the author whose findings it answered.
-- Before: rebuttal accepted from any commenter. After: a rebuttal counts only from a reviewer or the overseer, not the author.
+om flags: "author under review can self-rebut its own findings". A rebuttal counts only from a reviewer or the overseer.
 
 ## 6. Verification claims show their output
 
-A claim that something passed must paste the command and its output, not just say so.
-- om flags: "verification claim has no shown output".
-- Example: gt-p85pw.60 (minor). A research note said a check passed without the run's output.
-- Before: "the gate passes". After: the command and its last lines of output.
+A claim that something passed pastes the command and its last lines of output. om flags: "verification claim has no shown output".
 
 ## 7. Hermetic tests
 
-The rule is the town-policy section "Tests stay hermetic" above, which bars a test from reading the live town tree. This is what om flags:
-- om flags: "test depends on the host's $SHELL and prompt style, so it is not hermetic".
-- Before: `os.Getenv("SHELL")` in the test. After: set the value in the test, or use a temporary directory.
+The Tests section is the rule. om flags: "test depends on the host's $SHELL and prompt style, so it is not hermetic"; a test that reads the live town tree (gt-qpeei.15).
 
 ## 8. Do not add a shell or Python script
 
-The rule is the town-policy section "No new scripts for testable logic" above, which refuses a new shell or Python script when the logic is testable Go.
-- om flags: "new parsing and state logic added to a shell script". Before: a script that parses a file. After: the same parse as a Go function with a table test.
+The Tests section is the rule. om flags: "new parsing and state logic added to a shell script"; "a new python script parses the config" (gt-r1up7).
 
 ## 9. Stay in scope
 
-Change only what the bead asks for. Unrelated files, dependency bumps and renames are findings.
-- om flags: "edit to a file outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency bumps". Earlier rounds quoted "change touches files outside the stated scope"; it still counts under this rule. Before: a fix that also rewrites an existing test. After: the fix alone, or a bead comment saying why the other file had to change.
+Change only what the bead asks for.
+- om flags: "edit to a file outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency bumps"; "change touches files outside the stated scope". If another file must change, say why in a bead comment.
 
 ## 10. Test the call site, not the helper
 
-A test must run the production function that makes the call, so deleting the call turns it red.
-- om flags: a test that passes with the logging call deleted.
-- Example: gt-uoo5j. The hash-line test passed with the logging call removed.
-- Before: a test that calls the helper directly. After: a test through the production caller, red when the call is deleted.
+A test runs the production function that makes the call, so deleting the call turns it red.
+- om flags: a test that calls the helper directly.
 
-## 11. Keep secrets out of errors; tick boxes last
+## 11. Keep secrets out of errors and logs
 
-Never put captured output in an error message: name the rule and the command instead, since output can hold a secret.
-- om flags: an error that echoes captured command output.
-- Example: a guard error that printed the whole command output.
-- Before: `fmt.Errorf("failed: %s", out)`. After: `fmt.Errorf("rule X: command failed")`.
-- Tick every acceptance box only after the named test exists. gt done and the landing policy refuse unticked boxes, and a box ticked early is a finding.
+Never put captured output in an error or log: name the rule and the command, since output can hold a secret. A credential is never on a command line or in a failure message.
+- om flags: an error that echoes captured command output (`fmt.Errorf("failed: %s", out)`). Example: gt-tpg0p.35.
 
-## 12. Cloud authority widens only through a reviewed, visible diff
+## 12. Finish what the bead names, and wire it
 
-Applies to any change that touches a cloud project, a role, a service account or an API list.
-- om flags: "role or permission added without a golden change", "role with an admin permission", "project-level grant", "enables an API the manifest does not list".
-- Reject outright: a role or permission list widened without the matching change to its reviewed golden — the test of rule 2, "Each criterion needs a test that fails without it" — and a bead comment saying why; any *.admin permission or roles/owner, roles/editor, or a predefined role where a custom role fits; serviceAccountTokenCreator, serviceAccountUser, actAs or impersonation granted on a project instead of one account, or with no named owner; a service account or key created with no owner, rotation and deletion path stated.
-- Before: a polecat adds iam.serviceAccounts.getAccessToken to a list. After: the permission is justified in the bead, the golden and the list change together, and dropping either one turns that test red.
+Every Goal clause and box is implemented and reachable: a new function, flag or field has a production caller, a table has every row the Goal lists, and a fix changes production code (a pin test alone is a finding).
+- om flags: "Goal's refusal conditions ... are not implemented"; "has no in-tree caller". Example: gt-gojo0 (a table named 9 callers, the Goal said 16).
 
-## 13. A cloud apply needs a preview the human reads
+## 13. State, order, locks and timeouts
 
-"Cloud calls in a shell script" is refused by the town-policy section "No new scripts for testable logic" and rule 8, "Do not add a shell or Python script"; this rule is what a cloud call adds on top of them.
-- om flags: "apply with confirmations disabled", "preview gated by a grep".
-- Reject outright: an apply, destroy or disable that runs without a preview step the code makes the human read; one that forces past that step (--yes, --force, --skip-preview, disableDependentServices); one with no typed confirmation; a destroy with no stated rollback.
-- Example: dv-honu.6 (apply with confirmations disabled; the red-flag preview gate is a weak grep).
+Anything cached, held or waited on has an owner and an end: state read once is re-read when it can change; a lock covers the whole critical section and is released on every path; a bound is shorter than the budget around it; a reset covers every field.
+- om flags: "go stale", "can release the lock while ... keeps running". (gt-km9jt, gt-dl4nv.13).
 
-## 14. A step the diff cannot show must say what it creates
+## 14. Docs and comments say what the code does
 
-- om flags: "console-only step with no reconciliation", "side effects outside the diff".
-- Reject outright: a bead or runbook that asks a human to click or run a provider flow (for example the console "add Firebase" step) without listing what the flow creates beyond the named result and the read-only command that reconciles it against the patrol.
-- Example: 2026-10-30, the console Firebase step enabled 28 APIs and created firebase-adminsdk-fbsvc with Token Creator.
+Re-read every comment, doc or help line you add against the code. No line numbers, no dated measured figure, no claim of a check or fallback the code does not make, no placeholder text.
+- om flags: "comment claims a walk that does not exist"; "placeholder template". Examples: gt-6fqye, gt-uljn1.
 
-## 15. Cost and credentials are part of the change
+## 15. Rework: answer every open finding
 
-- om flags: "billing plan or budget not stated", "key file or token on a command line".
-- Reject outright: a new billable resource (VM, disk, address, SQL, load balancer, Blaze-only feature) with no budget alert named; a cloud credential a test requires or reads from its environment (rule 7, "Hermetic tests"), or one that is printed (rule 11, "Keep secrets out of errors; tick boxes last").
+A bead that comes back has a MERGE REJECTION block in its notes. Fix every finding in it, including those marked "still open": om repeats them. Rework is where new defects appear (reject rate 33% on a first review, 55% on a third): after every edit re-read your added lines against rules 1 to 14, not only the lines a finding named. Never loosen a test or a limit to land the fix. If a finding is wrong, say why on the bead with evidence.
+- om flags: "still open", "claimed resolved but not changed by the diff", "ratchet floor lowered".
 
-## 16. Rework: answer every open finding
+# Before gt done
 
-A bead that comes back has a MERGE REJECTION block in its notes listing om's findings. Fix every one before you submit again, including any marked "still open" from an earlier round: om repeats them and the bead burns another round (35 findings in three days). Never loosen a test or a limit to land the fix (10 findings; the test-ratchet policy is in `~/.claude/docs/standards/test-engineering.md`). If a finding is wrong, say why on the bead with the evidence, and fix the others.
-- om flags: "still open", "claimed resolved but not changed by the diff", "ratchet floor lowered to land the change", "existing test edited to fit the new behaviour".
-- Before: delete the failing assertion, or lower the floor. After: fix the code, or comment on the bead why the finding is wrong.
+Run these on your added lines, in the order om rejects most. A hit is a question, not a verdict. `D` below stands for `git diff -U0 origin/main...HEAD`, run as written with the pipe after it.
 
-## Before gt done: five checks on your added lines
+1. Errors (rule 1): `D -- '*.go' | grep -nE '^\+.*(_ = |, _ :?= )'`, and read every added `if err != nil` branch. Each hit returns, wraps or escalates.
+2. Wiring (12): `D -- '*.go' | grep -E '^\+func '`, then `grep -rn <name>` for a caller outside tests. Compare with your plan.
+3. Red without the code (2, 3, 10): each added refusal branch and call has a test row; delete the guard or call, run its `-run` test, see it fail, restore.
+4. Docs and comments (14): `D | grep -nE '^\+\s*(//|#|\*|-)'`; read each line against the code.
+5. State and bounds (13): name what ends each cache, lock, retry, timeout or reset you added.
+6. Input (4): each caller or file value reaching a path, argv or request is validated first.
+7. Test hygiene (7, 8): `D -- '*_test.go' | grep -nE '^\+.*(time\.Sleep|time\.After|Setenv|Getenv|UserHomeDir|/tmp|exec\.Command)'` is empty or justified.
+8. Secrets (11): no added error or log line prints captured output, a token or a password.
+9. Scope (9): `git diff --stat origin/main...HEAD` lists only files your Constraints name; go.mod changes carry a Rationale line.
 
-Run these on the lines your branch's diff against its merge base adds, just before `gt done` and again after every rework edit.
-
-1. Return, wrap or log every error you add, and test the branch that fails — rules 1, 3.
-2. Keep secret, token and credential values out of errors, logs and captured output — rule 11.
-3. Delete the code a new test guards and confirm that test goes red — rule 2.
-4. Give each test its own env, temp dir and clock instead of reading the host's — rule 7.
-5. Re-read only the added lines, as om will, and once more after any rework edit — rule 16.
+Tick each acceptance box only after its test exists.
