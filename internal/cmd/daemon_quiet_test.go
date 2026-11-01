@@ -110,10 +110,10 @@ func TestWaitQuiet(t *testing.T) {
 			wantElapsed: budget,
 		},
 		{
-			name:        "the container-gate slot is busy",
+			name:        "a container-gate job is running",
 			held:        quietAnswer{value: true},
 			gate:        quietAnswer{value: true},
-			want:        "the container-gate slot is busy",
+			want:        "a container-gate job is running",
 			wantElapsed: budget,
 		},
 		{
@@ -510,7 +510,7 @@ func TestNewQuietProbesReadTheHost(t *testing.T) {
 			hold:       true,
 			pgrepExit:  1,
 			gateHeld:   true,
-			want:       "the container-gate slot is busy",
+			want:       "a container-gate job is running",
 			wantExited: true,
 		},
 		{
@@ -518,7 +518,7 @@ func TestNewQuietProbesReadTheHost(t *testing.T) {
 			hold:       true,
 			pgrepExit:  1,
 			gateLines:  []string{"dolt/dolt-sql-server:2.2.0 unwrapped-suite"},
-			want:       "the container-gate slot is busy",
+			want:       "a container-gate job is running",
 			wantExited: true,
 		},
 		{

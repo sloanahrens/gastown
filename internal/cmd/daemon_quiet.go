@@ -183,7 +183,7 @@ func (q QuietProbes) blocker() string {
 	case err != nil:
 		return fmt.Sprintf("the container-gate probe cannot answer (%v)", err)
 	case busy:
-		return "the container-gate slot is busy"
+		return "a container-gate job is running"
 	}
 	return ""
 }
