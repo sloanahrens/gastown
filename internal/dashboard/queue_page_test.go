@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -158,23 +159,27 @@ func TestWorkTownStoreChip(t *testing.T) {
 	if got := chipNamed(t, chips, "town store, not dispatched"); got.Count != "2" || got.On {
 		t.Errorf("the town store chip reads %+v, want count 2 and closed", got)
 	}
+	// The all-stores count is the ready tab's own view of the list, so it reads
+	// the rig stores' beads alone: the server's total covers the town store too
+	// (gt-50dkq).
+	if got := chipNamed(t, chips, "all stores"); got.Count != "1" || !got.On {
+		t.Errorf("the all stores chip reads %+v, want count 1 (the rig's bead) and open on a fresh page", got)
+	}
 	if got := workSummary(t, dom)["dispatchable"]; got != "1" {
 		t.Errorf("the dispatchable tile counts %q, want 1 (the rig's bead alone)", got)
 	}
-	rows := queueRows(t, dom)
-	if len(rows) != 1 || !strings.Contains(rows[0].Text, "gt-rig1") {
-		t.Fatalf("the dispatchable view draws %+v, want the rig's bead alone", rows)
+	if got := queueRowIDs(t, dom); !slices.Equal(got, []string{"gt-rig1"}) {
+		t.Fatalf("the dispatchable view lists %q, want the rig's bead alone", got)
 	}
 
 	// The town store's chip lists every ready bead it holds, the unshaped one
 	// included: no shape chip is offered there, since none of them is
 	// dispatched.
 	clickQueueChip(t, dom, "town store, not dispatched")
-	rows = queueRows(t, dom)
-	if len(rows) != 2 {
-		t.Fatalf("the town store chip draws %+v, want both of the town's beads", rows)
+	if got := queueRowIDs(t, dom); !slices.Equal(got, []string{"hq-town1", "hq-town2"}) {
+		t.Fatalf("the town store chip lists %q, want both of the town's beads", got)
 	}
-	for _, row := range rows {
+	for _, row := range queueRows(t, dom) {
 		if !strings.Contains(row.Text, "not dispatched") {
 			t.Errorf("the town store row reads %q, want it to say the bead is not dispatched", row.Text)
 		}
@@ -211,17 +216,31 @@ func TestWorkReadyCountRigsOnly(t *testing.T) {
 	if got := workSummary(t, dom)["dispatchable"]; got != "1" {
 		t.Errorf("the dispatchable tile counts %q, want 1 (the rig's shaped bead)", got)
 	}
-	var texts []string
-	for _, r := range queueRows(t, dom) {
-		texts = append(texts, r.Text)
+	// The rows are the two rig beads and nothing else: the town store's bead is
+	// under its own chip, and the one the tick passed over is still here
+	// (gt-50dkq).
+	if got := queueRowIDs(t, dom); !slices.Equal(got, []string{"gt-rig1", "gt-rig2"}) {
+		t.Errorf("the dispatchable view lists %q, want exactly the rig's two beads", got)
 	}
-	for _, id := range []string{"gt-rig1", "gt-rig2"} {
-		found := false
-		for _, text := range texts {
-			found = found || strings.Contains(text, id)
-		}
-		if !found {
-			t.Errorf("the dispatchable view %q does not list the rig's bead %s", texts, id)
-		}
+}
+
+// TestWorkReadyOverflowCountsOnlyDispatchable reads the line the ready list
+// draws when the server sent fewer rows than it counted (gt-50dkq). The count
+// behind "+N more" is the same total the all-stores chip reads, so the town
+// store's beads are not in it: they are listed under their own chip, and
+// counting them here would say rows the view cannot show are missing from it.
+func TestWorkReadyOverflowCountsOnlyDispatchable(t *testing.T) {
+	t.Parallel()
+
+	q := queueRead(readyRow("gt-rig1", "ok"), townRow("hq-town1", "ok"), townRow("hq-town2", "fix"))
+	// The server capped the rows it sent: 48 beads in the rig stores, 2 in the
+	// town store, of which 1 and 2 rows arrived.
+	q["ready_total"] = 50
+	q["ready_rigs"] = map[string]any{"gastown": 48, "hq": 2}
+	dom := drawQueuePage(t, q)
+
+	clickQueueChip(t, dom, "ready to dispatch") // the shape filter off: every rig row shows
+	if got, want := queueOverflow(t, dom), "+47 more"; !strings.HasPrefix(got, want) {
+		t.Errorf("the ready list overflows with %q, want %q (48 dispatchable beads less the 1 shown, not 50 less 1)", got, want)
 	}
 }

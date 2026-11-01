@@ -4961,7 +4961,9 @@ function skipClass(reason) {
 // TOWN_STORE is the town's own store. The spec dispatcher reads one store per
 // rig, so a bead here is never dispatched however well it is shaped, and the
 // ready view lists it under its own chip rather than as ready to dispatch
-// (gt-50dkq).
+// (gt-50dkq). "hq" is the store's name in the queue reader itself
+// (QueueBead.Rig in queue.go), and the reading carries no field naming which
+// store is the town's: this is that one name, in one place, for the page.
 const TOWN_STORE = "hq";
 const isTownStore = b => b.rig === TOWN_STORE;
 
@@ -5050,6 +5052,15 @@ function drawQueueList(box, s) {
   // store is not in it: its beads are listed under their own chip instead. The
   // landing and blocked views list it like any store (gt-50dkq).
   const inStore = b => qRig === "all" ? qTab !== "ready" || !isTownStore(b) : b.rig === qRig;
+  // listTotal is the count the all-stores view of this tab can draw: the
+  // server's total for the list, less the town store's beads on the ready tab,
+  // which that view leaves to the town's own chip. The per-store counts are
+  // exact even when the server capped the rows, so the town's share comes off
+  // the total the server sent rather than out of the rows (gt-50dkq). Both are
+  // counted in one pass over the list, so the town's share never exceeds it; a
+  // reading that carries no total counts the rows in that view instead.
+  const townTotal = qTab === "ready" ? (rigs[TOWN_STORE] || 0) : 0;
+  const listTotal = typeof q[totalKey] === "number" && Number.isFinite(q[totalKey]) ? q[totalKey] - townTotal : all.filter(b => qTab !== "ready" || !isTownStore(b)).length;
   // On the ready tab the town store gets a chip of its own even when it is the
   // only store with rows: its beads are listed there and nowhere else, so
   // without the chip a town of nothing but town-store beads would show no way
@@ -5059,7 +5070,7 @@ function drawQueueList(box, s) {
     const f = el("div", "qtabs");
     const chip = (label, count, on, fn, tip) => { const b = el("button", "chip" + (on ? " on" : ""), label); if (tip) b.title = tip; b.append(el("b", "", String(count))); b.onclick = fn; f.append(b); };
     if (rigNames.length > 1 || townListed) {
-      chip("all stores", q[totalKey] || all.length, qRig === "all", () => { qRig = "all"; renderWork(state, true); });
+      chip("all stores", listTotal, qRig === "all", () => { qRig = "all"; renderWork(state, true); });
       const parkedRigs = q.parked_rigs || [];
       // The town's store is named for what it means to the operator: its beads
       // are listed like any store's, and the dispatcher never takes them.
@@ -5189,7 +5200,10 @@ function drawQueueList(box, s) {
     rowsBox.append(row);
   });
   const shownInRig = rows.length;
-  const totalInRig = qRig === "all" ? (q[totalKey] || 0) : (rigs[qRig] || 0);
+  // The all-stores overflow counts what that view left off, so it reads the
+  // same total its chip does: the town store's beads are under their own chip,
+  // not rows this view withheld (gt-50dkq).
+  const totalInRig = qRig === "all" ? listTotal : (rigs[qRig] || 0);
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 

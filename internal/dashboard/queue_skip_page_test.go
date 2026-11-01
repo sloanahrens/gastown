@@ -57,6 +57,21 @@ function __qEmpty() {
   if (rows) for (const c of rows.children) if ((" " + c.className + " ").indexOf(" empty ") >= 0) return String(c.textContent);
   return "";
 }
+function __qOverflow() {
+  const box = __qBox();
+  if (box) for (const c of box.children) if ((" " + c.className + " ").indexOf(" empty ") >= 0) return String(c.textContent);
+  return "";
+}
+function __qRowIDs() {
+  const out = [], rows = __qRowsBox();
+  if (rows) for (const r of rows.children) {
+    if (r.className !== "qrow") continue;
+    let id = null;
+    __walk(r, n => { if (id === null && n.className === "bead") id = String(n.textContent); });
+    out.push(id === null ? "" : id.replace(/^[▸▾]/, ""));
+  }
+  return out;
+}
 function __qClick(label) {
   const box = __qBox();
   let hit = null;
@@ -176,6 +191,27 @@ func queueNotes(t *testing.T, dom *pageDOM) []string {
 
 	var out []string
 	queueReadBack(t, dom, "__qNotes()", &out)
+	return out
+}
+
+// queueRowIDs reads the bead id the page wrote into each row's bead cell, in
+// the order the rows are drawn: a test matches the id the page labels the row
+// with rather than finding that text somewhere in the row.
+func queueRowIDs(t *testing.T, dom *pageDOM) []string {
+	t.Helper()
+
+	var out []string
+	queueReadBack(t, dom, "__qRowIDs()", &out)
+	return out
+}
+
+// queueOverflow reads the "+N more" line the list draws when it withholds
+// rows, or "" when it draws none.
+func queueOverflow(t *testing.T, dom *pageDOM) string {
+	t.Helper()
+
+	var out string
+	queueReadBack(t, dom, "__qOverflow()", &out)
 	return out
 }
 
