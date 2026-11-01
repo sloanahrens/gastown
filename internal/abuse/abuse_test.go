@@ -83,12 +83,12 @@ func TestZeroIdleTTLKeepsBuckets(t *testing.T) {
 	}
 	clock.Advance(100 * time.Second)
 	// A second workspace asks now, which is what would trigger a sweep; with
-	// IdleTTL 0 there is none, so acme's bucket is still there.
+	// IdleTTL 0 there is none, so acme's bucket is still counted.
 	if v := l.Allow(Dispatch, "other", spendcap.Under); !v.Allowed {
 		t.Fatalf("the second workspace's request: refused (%s), want allowed", v.Reason)
 	}
-	if _, ok := l.buckets[bucketKey{kind: Dispatch, workspace: "acme"}]; !ok {
-		t.Fatalf("acme's bucket is gone with IdleTTL 0: want eviction disabled so the zero Config keeps buckets")
+	if got := l.Len(); got != 2 {
+		t.Fatalf("Len = %d with IdleTTL 0, want 2: eviction disabled so the zero Config keeps buckets", got)
 	}
 }
 
@@ -176,11 +176,8 @@ func TestIdleBucketsEvicted(t *testing.T) {
 	if v := l.Allow(Dispatch, "active", spendcap.Under); !v.Allowed {
 		t.Fatalf("the active workspace's request: refused (%s), want allowed", v.Reason)
 	}
-	if _, ok := l.buckets[bucketKey{kind: Dispatch, workspace: "idle"}]; ok {
-		t.Fatalf("the idle workspace's bucket is still in the map: want it evicted past IdleTTL")
-	}
-	if got := len(l.buckets); got != 1 {
-		t.Fatalf("len(buckets) = %d, want 1: only the active workspace's bucket", got)
+	if got := l.Len(); got != 1 {
+		t.Fatalf("Len = %d, want 1: the idle workspace's bucket evicted past IdleTTL, only the active one held", got)
 	}
 }
 
@@ -245,34 +242,62 @@ func TestClockSteppingBackAddsNoTokens(t *testing.T) {
 	}
 }
 
-func TestSweepRunsOncePerIdleAge(t *testing.T) {
+// The sweep is observed through Len: a bucket idle past IdleTTL is still held
+// until the next scan is due, and gone once it runs.
+func TestSweepRunsAtMostOncePerIdleAge(t *testing.T) {
 	t.Parallel()
+	const ttl = 10 * time.Second
 	clock := newFakeClock()
-	l := New(Config{DispatchRate: 100, DispatchBurst: 100, IdleTTL: time.Second}, clock)
-
-	first := clock.Now()
-	if !l.lastSweep.Equal(first) {
-		t.Fatalf("lastSweep = %v at construction, want %v", l.lastSweep, first)
-	}
-	for i := 0; i < 50; i++ {
-		l.Allow(Dispatch, "acme", spendcap.Under)
-	}
-	if !l.lastSweep.Equal(first) {
-		t.Fatalf("lastSweep moved to %v within the idle age, want it still %v: the sweep must not scan per request", l.lastSweep, first)
+	l := New(Config{DispatchRate: 100, DispatchBurst: 100, IdleTTL: ttl}, clock)
+	ask := func(workspace string) {
+		t.Helper()
+		if v := l.Allow(Dispatch, workspace, spendcap.Under); !v.Allowed {
+			t.Fatalf("%s: refused (%s), want allowed", workspace, v.Reason)
+		}
 	}
 
+	ask("a")
+	clock.Advance(ttl)
+	ask("b") // a scan is due and runs; a has been idle exactly ttl, not past it
+	if got := l.Len(); got != 2 {
+		t.Fatalf("after the first scan: Len = %d, want 2 (a not yet past the idle age)", got)
+	}
+	clock.Advance(ttl - time.Second)
+	ask("c") // a is now past the idle age, but the next scan is a second away
+	if got := l.Len(); got != 3 {
+		t.Fatalf("a scan ran within one idle age of the last: Len = %d, want 3 (a still held)", got)
+	}
 	clock.Advance(time.Second)
-	l.Allow(Dispatch, "other", spendcap.Under)
-	swept := clock.Now()
-	if !l.lastSweep.Equal(swept) {
-		t.Fatalf("lastSweep = %v a full idle age after the last sweep, want %v", l.lastSweep, swept)
+	ask("d") // the next scan runs: a goes, b has been idle exactly ttl and stays
+	if got := l.Len(); got != 3 {
+		t.Fatalf("after the second scan: Len = %d, want 3 (a evicted; b, c, d held)", got)
 	}
-	clock.Advance(time.Millisecond)
-	for i := 0; i < 50; i++ {
-		l.Allow(Dispatch, "acme", spendcap.Under)
+}
+
+// A clock that steps back past the last scan must not hold eviction off until
+// it catches up: the map would grow meanwhile.
+func TestBackwardClockStepDoesNotSuspendEviction(t *testing.T) {
+	t.Parallel()
+	const ttl = 10 * time.Second
+	clock := newFakeClock()
+	l := New(Config{DispatchRate: 100, DispatchBurst: 100, IdleTTL: ttl}, clock)
+
+	if v := l.Allow(Dispatch, "idle", spendcap.Under); !v.Allowed {
+		t.Fatalf("the idle workspace's request: refused (%s)", v.Reason)
 	}
-	if !l.lastSweep.Equal(swept) {
-		t.Fatalf("lastSweep moved to %v within the idle age, want it still %v", l.lastSweep, swept)
+	clock.Advance(-100 * time.Second)
+	for _, step := range []time.Duration{0, 6 * time.Second} { // "other" stays active after the step back
+		clock.Advance(step)
+		if v := l.Allow(Dispatch, "other", spendcap.Under); !v.Allowed {
+			t.Fatalf("a request after the step back: refused (%s)", v.Reason)
+		}
+	}
+	clock.Advance(5 * time.Second) // an idle age and a second after the step back
+	if v := l.Allow(Dispatch, "third", spendcap.Under); !v.Allowed {
+		t.Fatalf("a request an idle age after the step back: refused (%s)", v.Reason)
+	}
+	if got := l.Len(); got != 2 {
+		t.Fatalf("Len = %d, want 2: the workspace idle since the step back evicted, not held until the clock catches up", got)
 	}
 }
 

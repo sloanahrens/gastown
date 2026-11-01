@@ -139,6 +139,10 @@ func (l *Limiter) Allow(kind Kind, workspace string, capLevel spendcap.Level) Ve
 	return Verdict{Allowed: true}
 }
 
+// Len is how many buckets the Limiter holds, one per workspace and kind seen and
+// not yet evicted. A caller can export it to watch the memory the limiter uses.
+func (l *Limiter) Len() int { return len(l.buckets) }
+
 // limits returns kind's fill rate and burst, and false for a kind the Config
 // does not know.
 func (l *Limiter) limits(kind Kind) (rate float64, burst int, ok bool) {
@@ -157,11 +161,31 @@ func (l *Limiter) limits(kind Kind) (rate float64, burst int, ok bool) {
 // would hand back tokens the rate withheld, so the burst check is what keeps
 // eviction from being a bypass.
 //
-// The scan runs at most once per IdleTTL because no bucket can pass the idle
-// age sooner, so a busy workspace never pays a full scan per request.
+// The scan runs at most once per IdleTTL, so a busy workspace never pays a full
+// scan per request. A bucket that turns idle just after a scan waits for the
+// next one, so the map holds the buckets touched in roughly the last two idle
+// ages.
+//
+// A clock that stepped back past the last scan would otherwise hold every scan
+// off until it caught up again, and the map would grow meanwhile. The cadence
+// restarts from the stepped-back time instead, and buckets stamped in the
+// clock's future are re-dated to now, so idle ones age out from here.
 func (l *Limiter) evict(now time.Time) {
 	ttl := l.cfg.IdleTTL
-	if ttl <= 0 || now.Sub(l.lastSweep) < ttl {
+	if ttl <= 0 {
+		return
+	}
+	elapsed := now.Sub(l.lastSweep)
+	if elapsed < 0 {
+		l.lastSweep = now
+		for _, b := range l.buckets {
+			if b.lastSeen.After(now) {
+				b.lastSeen = now
+			}
+		}
+		return
+	}
+	if elapsed < ttl {
 		return
 	}
 	l.lastSweep = now
