@@ -7,9 +7,9 @@ import (
 )
 
 // registerWriteRoutes registers the write routes: POST /v1/issues,
-// PATCH /v1/issues/{id}, POST /v1/issues:close, POST /v1/issues:delete,
-// POST /v1/graphs (a set of issues and their links, all or none), POST
-// /v1/batch (ordered operations, all or none), and the assignment verbs
+// PATCH /v1/issues/{id}, POST /v1/issues:close, POST /v1/issues:delete (admin
+// token only), POST /v1/graphs (a set of issues and their links, all or none),
+// POST /v1/batch (ordered operations, all or none), and the assignment verbs
 // POST /v1/issues/{id}/claim, /release and /transfer.
 // Every write is attributed to the actor of the request's token; an actor
 // named in a body is ignored. A batch comment is the exception: it carries no
@@ -18,7 +18,7 @@ func (s *Server) registerWriteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/issues", s.createIssue)
 	mux.HandleFunc("PATCH /v1/issues/{id}", s.updateIssue)
 	mux.HandleFunc("POST /v1/issues:close", s.closeIssues)
-	mux.HandleFunc("POST /v1/issues:delete", s.deleteIssues)
+	mux.HandleFunc("POST /v1/issues:delete", requireAdmin(s.deleteIssues))
 	mux.HandleFunc("POST /v1/graphs", s.createGraph)
 	mux.HandleFunc("POST /v1/issues/{id}/claim", s.claimIssue)
 	mux.HandleFunc("POST /v1/issues/{id}/release", s.releaseIssue)
