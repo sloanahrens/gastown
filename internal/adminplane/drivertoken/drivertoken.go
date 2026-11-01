@@ -205,14 +205,6 @@ func (m *Memory) Put(_ context.Context, rec Record) error {
 	return nil
 }
 
-// Records returns a copy of the records the store holds, so a caller can read
-// what was stored without holding the store's own slice.
-func (m *Memory) Records() []Record {
-	out := make([]Record, len(m.records))
-	copy(out, m.records)
-	return out
-}
-
 // Lookup returns the record holding hash, or ErrUnknownToken.
 func (m *Memory) Lookup(_ context.Context, hash []byte) (Record, error) {
 	for _, rec := range m.records {
