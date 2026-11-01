@@ -67,8 +67,11 @@ func TestClaimManifest(t *testing.T) {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
 		}
 	}
-	spec := at(t, claim, "spec")
-	if v, ok := spec.(map[string]any)["storageClassName"]; ok {
+	spec, ok := at(t, claim, "spec").(map[string]any)
+	if !ok {
+		t.Fatalf("spec is not a map")
+	}
+	if v, ok := spec["storageClassName"]; ok {
 		t.Errorf("spec.storageClassName = %v, want none: the claim takes the cluster default", v)
 	}
 	wantLabels := map[string]any{
