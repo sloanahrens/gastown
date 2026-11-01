@@ -347,7 +347,7 @@ var treeWideGuards = []treeWideGuard{
 			"TestBdSubprocessPolicyInHardenedPackages",
 			"TestNoAdHocBdSubprocessesOutsideBeads",
 			"TestMachineModeOptOutsAreEnumerated",
-			"TestMigratedFilesImportNoBeadsLibrary",
+			"TestNoGoFileImportsBeadsLibrary",
 		},
 		judges:  underInternal,
 		removal: true,
