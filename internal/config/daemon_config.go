@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -630,6 +631,42 @@ type WispReaperConfig struct {
 	// pauses the whole patrol. nil means unset: the dog path keeps its default
 	// behavior while the inline fallback stays disarmed.
 	AutoClose *bool `json:"auto_close,omitempty"`
+
+	// EventsRetentionStr turns on events retention (e.g. "30d", "720h"): rows
+	// of the events table older than it are deleted in counted batches. Empty
+	// leaves the step off (gt-hk21d, opt-in because deleting audit rows is the
+	// operator's call).
+	EventsRetentionStr string `json:"events_retention,omitempty"`
+}
+
+// ParseAgeDuration parses an age string, accepting the day suffix the retired
+// mol-dog-reaper formula emitted for its 30d default (gt-2qzr). time.ParseDuration
+// rejects "30d" as "unknown unit d".
+func ParseAgeDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.Atoi(strings.TrimSpace(days))
+		if err != nil {
+			return 0, fmt.Errorf("invalid day suffix in %q: %w", s, err)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
+}
+
+// EventsRetention parses events_retention: zero (with no error) means the step
+// is off, and a value that is set but unusable is refused rather than read as
+// off or as a delete-everything pass.
+func (c *WispReaperConfig) EventsRetention() (time.Duration, error) {
+	if c == nil || strings.TrimSpace(c.EventsRetentionStr) == "" {
+		return 0, nil
+	}
+	d, err := ParseAgeDuration(c.EventsRetentionStr)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("patrols.wisp_reaper.events_retention = %q: want a positive age such as %q",
+			c.EventsRetentionStr, "30d")
+	}
+	return d, nil
 }
 
 // DoctorDogConfig holds configuration for the doctor_dog patrol.
