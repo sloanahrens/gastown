@@ -36,7 +36,8 @@
       "DOCKER_TLS_CERTDIR=",
       "--volume",
       "gt-sweep-dind-data-gastown-4f2a9c1e-mvv8asko:/var/lib/docker",
-      "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1",
+      "data.forgejo.org/oci/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977",
+      "dockerd",
       "--host=tcp://127.0.0.1:2375",
       "--tls=false"
     ]

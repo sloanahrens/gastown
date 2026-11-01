@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -84,7 +85,7 @@ func TestDockerRenderGolden(t *testing.T) {
 			t.Error("a run without dind rendered a network step")
 		}
 		for _, step := range plain.Steps {
-			if slices.Contains(step.Argv, templates.DindImage) {
+			if slices.Contains(step.Argv, templates.SweepDindImage) {
 				t.Errorf("a run without dind rendered the sidecar: %v", step.Argv)
 			}
 			if slices.Contains(step.Argv, "DOCKER_HOST=tcp://"+dindAddress+":"+dindPort) {
@@ -213,7 +214,7 @@ func TestDockerRenderNeverMountsTheSocketAndOnlyDindIsPrivileged(t *testing.T) {
 			}
 			if arg == "--privileged" {
 				privileged++
-				if !slices.Contains(step.Argv, templates.DindImage) {
+				if !slices.Contains(step.Argv, templates.SweepDindImage) {
 					t.Errorf("step %v is privileged but does not start the sidecar", step.Argv)
 				}
 			}
@@ -555,3 +556,32 @@ func TestRunnerArgvDropsToThePolecatUser(t *testing.T) {
 		t.Errorf("RunnerArgv() = %q does not end with %s", argv, RunnerCommand)
 	}
 }
+
+// The sweep sidecar runs SweepDindImage, followed by dockerd as its command (gt-2u79h).
+func TestDockerSidecarUsesTheSweepDindPinAndNamesDockerd(t *testing.T) {
+	t.Parallel()
+	if !sweepDindPinShape.MatchString(templates.SweepDindImage) {
+		t.Fatalf("SweepDindImage = %q, want a reference pinned by a lowercase 64 hex digit digest", templates.SweepDindImage)
+	}
+	if templates.SweepDindImage == templates.DindImage {
+		t.Error("the sweep sidecar uses the daemon engine's pin again, whose digest the registry no longer serves")
+	}
+	plan, err := Docker{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+	for _, step := range plan.Steps {
+		i := slices.Index(step.Argv, templates.SweepDindImage)
+		if i < 0 {
+			continue
+		}
+		if i+1 >= len(step.Argv) || step.Argv[i+1] != "dockerd" {
+			t.Errorf("sidecar argv %q: the image is not followed by dockerd", step.Argv)
+		}
+		return
+	}
+	t.Error("no step starts the sweep dind image")
+}
+
+// sweepDindPinShape is a repository pinned by a sha256 digest in lowercase hex.
+var sweepDindPinShape = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
