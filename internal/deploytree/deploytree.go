@@ -111,7 +111,7 @@ func contains(list []string, s string) bool {
 // and name. Same values, same bytes.
 func Render(v Values) ([]Resource, error) { return render(v, yaml.Marshal) }
 
-// render is Render over a marshal function, so a test can make marshalling
+// render is Render over a marshal function, so a test can make marshaling
 // fail.
 func render(v Values, marshal func(any) ([]byte, error)) ([]Resource, error) {
 	if err := v.Validate(); err != nil {
