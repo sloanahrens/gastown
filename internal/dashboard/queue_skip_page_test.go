@@ -17,7 +17,7 @@ import (
 const queuePageJS = `
 function __qBox() {
   let box = null;
-  __walk(__byId["work"], n => { if (!box && n.className === "qlist") box = n; });
+  __walk(__byId["beads"], n => { if (!box && n.className === "qlist") box = n; });
   return box;
 }
 function __qRowsBox() {
@@ -124,7 +124,7 @@ func drawQueuePage(t *testing.T, queue map[string]any) *pageDOM {
 		t.Fatalf("marshalling the reading: %v", err)
 	}
 	js := `state = {summary_at: "2026-10-29T12:00:00Z", summary: {ready_to_land: 0}, polecats: [], queue: ` + string(q) + `};
-		renderWork(state, true);`
+		renderBeads(state, true);`
 	if _, err := dom.vm.RunString(js); err != nil {
 		t.Fatalf("drawing the work panel over a queue: %v", err)
 	}
@@ -460,7 +460,7 @@ func TestQueueSkipPageStaleVerdicts(t *testing.T) {
 	dom := drawQueuePage(t, read)
 	// The harness froze the page's clock when the stub loaded, so a tick twelve
 	// minutes before it is a ledger the page can age exactly.
-	if _, err := dom.vm.RunString(`state.queue.verdicts_at = new Date(__epoch - 12*60000).toISOString(); renderWork(state, true);`); err != nil {
+	if _, err := dom.vm.RunString(`state.queue.verdicts_at = new Date(__epoch - 12*60000).toISOString(); renderBeads(state, true);`); err != nil {
 		t.Fatalf("stamping the verdicts' time: %v", err)
 	}
 

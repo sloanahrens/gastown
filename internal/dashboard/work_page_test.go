@@ -48,7 +48,7 @@ func workRows(t *testing.T, dom *pageDOM) [][]string {
 				}
 				walk(c);
 			}
-		})(__byId["work"]);
+		})(__byId["polecats"]);
 		return out;
 	})())`)
 	if err != nil {
@@ -61,25 +61,25 @@ func workRows(t *testing.T, dom *pageDOM) [][]string {
 	return out
 }
 
-// workChild reads the first child of #work wearing class, as the text it
-// reads and the classes beneath it.
+// workChild reads the first child of the Polecats or the Beads panel wearing
+// class, as the text it reads and the classes beneath it.
 func workChild(t *testing.T, dom *pageDOM, class string) drawn {
 	t.Helper()
 
 	js := `JSON.stringify((() => {
-		const x = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf(` + quoteJS(class) + `) >= 0);
+		const x = __byId["polecats"].children.__arr.concat(__byId["beads"].children.__arr).find(c => String(c.className).split(" ").indexOf(` + quoteJS(class) + `) >= 0);
 		return x ? {text: x.textContent, class: x.className, title: x.title, hidden: !!x.hidden, kids: x.children.length} : null;
 	})())`
 	v, err := dom.vm.RunString(js)
 	if err != nil {
-		t.Fatalf("reading #work's %s: %v", class, err)
+		t.Fatalf("reading the work panels' %s: %v", class, err)
 	}
 	if v.String() == "null" {
 		t.Fatalf("the panel drew no %s", class)
 	}
 	var d drawn
 	if err := json.Unmarshal([]byte(v.String()), &d); err != nil {
-		t.Fatalf("reading #work's %s: %v", class, err)
+		t.Fatalf("reading the work panels' %s: %v", class, err)
 	}
 	return d
 }
@@ -134,7 +134,7 @@ func TestTheWorkPanelDrawsARowPerSeat(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel replaces Polecats and Work queue", "deepseek-flash", 12*time.Minute),
 		seat("gastown", "furiosa", "idle", "", "", "deepseek-flash", 0),
 	}, workQueueReading(57, 1, 3, 118)))
@@ -208,7 +208,7 @@ func workSeatRowsDrawn(t *testing.T, dom *pageDOM) []workSeatRow {
 				}
 				walk(c, h);
 			}
-		})(__byId["work"], false);
+		})(__byId["polecats"], false);
 		return out;
 	})())`)
 	if err != nil {
@@ -262,7 +262,7 @@ func TestTheWorkPanelLeadsWithTheLiveSeatsAndFoldsTheOnesThatNeedALook(t *testin
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState(workSeatOfEveryState(), workQueueReading(1, 0, 0, 0)))
+	callWork(t, dom, workState(workSeatOfEveryState(), workQueueReading(1, 0, 0, 0)))
 
 	rows := workSeatRowsDrawn(t, dom)
 	if len(rows) != 11 || !rows[0].Head {
@@ -291,7 +291,7 @@ func TestTheWorkPanelLeadsWithTheLiveSeatsAndFoldsTheOnesThatNeedALook(t *testin
 
 	// Opening the fold shows the seats and their commands, in the same rows.
 	if _, err := dom.vm.RunString(`(() => {
-		const t = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+		const t = __byId["polecats"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
 		const d = t.children.__arr.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0);
 		__clickSummary(d);
 	})()`); err != nil {
@@ -339,7 +339,7 @@ func TestTheWorkPanelKeepsTheNeedsALookFoldAcrossPolls(t *testing.T) {
 	read := func(dom *pageDOM) foldState {
 		t.Helper()
 		v, err := dom.vm.RunString(`JSON.stringify((() => {
-			const t = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+			const t = __byId["polecats"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
 			if (!t) return null;
 			const d = t.children.__arr.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0);
 			const w = t.children.__arr.find(c => String(c.className).split(" ").indexOf("wfoldrows") >= 0);
@@ -360,7 +360,7 @@ func TestTheWorkPanelKeepsTheNeedsALookFoldAcrossPolls(t *testing.T) {
 	click := func(dom *pageDOM) {
 		t.Helper()
 		if _, err := dom.vm.RunString(`(() => {
-			const t = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+			const t = __byId["polecats"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
 			__clickSummary(t.children.__arr.find(c => c.tagName === "DETAILS" && c.textContent.indexOf("needs a look") === 0));
 		})()`); err != nil {
 			t.Fatal(err)
@@ -368,7 +368,7 @@ func TestTheWorkPanelKeepsTheNeedsALookFoldAcrossPolls(t *testing.T) {
 	}
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", first)
+	callWork(t, dom, first)
 	if got := read(dom); got.Open || !got.Hidden || got.Rows != 1 {
 		t.Fatalf("the fold reads open=%v hidden=%v over %d rows before an operator touches it, want it closed over its one seat", got.Open, got.Hidden, got.Rows)
 	}
@@ -378,7 +378,7 @@ func TestTheWorkPanelKeepsTheNeedsALookFoldAcrossPolls(t *testing.T) {
 		t.Fatalf("a click on the summary left the fold open=%v hidden=%v, want it open", got.Open, got.Hidden)
 	}
 
-	dom.call(t, "renderWork", next)
+	callWork(t, dom, next)
 	if text := workText(t, dom); !strings.Contains(text, "needs a look (2)") {
 		t.Fatalf("the second poll did not redraw the fold, so the test says nothing about the next poll: %q", text)
 	}
@@ -390,7 +390,7 @@ func TestTheWorkPanelKeepsTheNeedsALookFoldAcrossPolls(t *testing.T) {
 	if got := read(dom); got.Open || !got.Hidden {
 		t.Fatalf("a click on the open fold left it open=%v hidden=%v, want it closed", got.Open, got.Hidden)
 	}
-	dom.call(t, "renderWork", first)
+	callWork(t, dom, first)
 	if got := read(dom); got.Open || !got.Hidden {
 		t.Errorf("the fold reads open=%v hidden=%v after the operator closed it and a poll redrew the table, want it closed", got.Open, got.Hidden)
 	}
@@ -410,12 +410,12 @@ func TestTheWorkHeaderAndItsRowsShareOneColumnTemplate(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "dementus", "working", "gt-n7yb8", "one table", "deepseek-flash", time.Minute),
 		seat("gastown", "stall", "stalled", "gt-stall", "nothing is doing it", "deepseek-flash", time.Minute),
 	}, workQueueReading(1, 0, 0, 0)))
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const t = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
+		const t = __byId["polecats"].children.__arr.find(c => String(c.className).split(" ").indexOf("wtable") >= 0);
 		if (!t) return null;
 		const cls = n => String(n.className).split(" ");
 		const kind = c => c.tagName === "DETAILS" ? "fold"
@@ -532,7 +532,7 @@ func TestTheWorkPanelGivesASeatHoldingNoBeadItsRig(t *testing.T) {
 	working := seat("gastown", "dementus", "working", "gt-hnztc", "an idle seat names its rig", "deepseek-flash", time.Minute)
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{working, recorded, blank, parkedIdle, parkedBusy}, workQueueReading(1, 0, 0, 0)))
+	callWork(t, dom, workState([]any{working, recorded, blank, parkedIdle, parkedBusy}, workQueueReading(1, 0, 0, 0)))
 
 	// The rows come back in the panel's own order: the seats holding a bead,
 	// the parked fold (the working seat of it first), then the idle seats.
@@ -595,7 +595,7 @@ func TestTheWorkPanelNamesAModelOnlyForABeadASeatHolds(t *testing.T) {
 	parkedIdle["reason"] = "reusable"
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{held, reasoned, parkedIdle}, workQueueReading(0, 0, 0, 0)))
+	callWork(t, dom, workState([]any{held, reasoned, parkedIdle}, workQueueReading(0, 0, 0, 0)))
 
 	// The seats holding nothing, then the seat holding a bead, in the panel's
 	// own order: the busy fold, the parked fold, then the idle fold.
@@ -628,11 +628,19 @@ func TestTheWorkPanelNamesAModelOnlyForABeadASeatHolds(t *testing.T) {
 	}
 }
 
-// workText is the whole text the panel drew.
+// callWork draws both halves of what was the Work panel, the Polecats and the
+// Beads panels, over one reading.
+func callWork(t *testing.T, dom *pageDOM, state map[string]any) {
+	t.Helper()
+	dom.call(t, "renderPolecats", state)
+	dom.call(t, "renderBeads", state)
+}
+
+// workText is the whole text the two panels drew.
 func workText(t *testing.T, dom *pageDOM) string {
 	t.Helper()
 
-	return dom.element(t, "work").Text
+	return dom.element(t, "polecats").Text + dom.element(t, "beads").Text
 }
 
 // TestTheWorkPanelSummarisesTheQueueAndSplitsTheBlockedList drives the panel
@@ -645,7 +653,7 @@ func TestTheWorkPanelSummarisesTheQueueAndSplitsTheBlockedList(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
 	}, workQueueReading(57, 1, 3, 118)))
 
@@ -669,7 +677,7 @@ func TestTheWorkPanelSummarisesTheQueueAndSplitsTheBlockedList(t *testing.T) {
 	// A town with no wisps says so in the same line and wears no warning: the
 	// count is the reading, not a standing alarm.
 	dom = newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
 	}, workQueueReading(57, 1, 3, 0)))
 	line = workChild(t, dom, "wblocked")
@@ -687,7 +695,7 @@ func TestTheWorkPanelFoldsTheWholeQueueList(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
 	}, workQueueReading(57, 1, 2, 3)))
 
@@ -695,7 +703,7 @@ func TestTheWorkPanelFoldsTheWholeQueueList(t *testing.T) {
 	if list.Kids < 2 {
 		t.Fatalf("the queue list is not a disclosure with a summary and a list: %+v", list)
 	}
-	open, err := dom.vm.RunString(`String(__byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0).open)`)
+	open, err := dom.vm.RunString(`String(__byId["beads"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0).open)`)
 	if err != nil {
 		t.Fatalf("reading the list's fold: %v", err)
 	}
@@ -711,7 +719,7 @@ func TestTheWorkPanelFoldsTheWholeQueueList(t *testing.T) {
 func queueListOpen(t *testing.T, dom *pageDOM) string {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`String(__byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0).open)`)
+	v, err := dom.vm.RunString(`String(__byId["beads"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0).open)`)
 	if err != nil {
 		t.Fatalf("reading the list's fold: %v", err)
 	}
@@ -731,14 +739,14 @@ func TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt(t *testing.T)
 	st := workState(seats(), workQueueReading(57, 1, 2, 3))
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", st)
+	callWork(t, dom, st)
 	if got := queueListOpen(t, dom); got != "true" {
 		t.Fatalf("the list reads open = %s on the first render, want true", got)
 	}
 
 	// A click on the summary: the stub flips open and fires the page's handler.
 	if _, err := dom.vm.RunString(`(() => {
-		const d = __byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0);
+		const d = __byId["beads"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0);
 		globalThis.__queueList = d;
 		__clickSummary(d);
 	})()`); err != nil {
@@ -748,8 +756,8 @@ func TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt(t *testing.T)
 		t.Fatalf("a click on the open list left it open = %s, want false", got)
 	}
 
-	dom.call(t, "renderWork", st)
-	same, err := dom.vm.RunString(`String(__byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0) === globalThis.__queueList)`)
+	callWork(t, dom, st)
+	same, err := dom.vm.RunString(`String(__byId["beads"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0) === globalThis.__queueList)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,8 +766,8 @@ func TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt(t *testing.T)
 	}
 
 	next := workState(seats(), workQueueReading(58, 1, 2, 3))
-	dom.call(t, "renderWork", next)
-	redrawn, err := dom.vm.RunString(`String(__byId["work"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0) !== globalThis.__queueList)`)
+	callWork(t, dom, next)
+	redrawn, err := dom.vm.RunString(`String(__byId["beads"].children.__arr.find(c => String(c.className).indexOf("wqueue") >= 0) !== globalThis.__queueList)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,22 +779,22 @@ func TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt(t *testing.T)
 	}
 }
 
-// TestTheWorkPanelSaysOneLineBeforeTheTownHasBeenRead drives the panel with
-// nothing read yet: a panel with nothing to show is its header and one short
-// line, not a line per reader that has not come back (gt-vcr3z).
+// TestTheWorkPanelSaysOneLineBeforeTheTownHasBeenRead drives the two panels with
+// nothing read yet: each is its header and one short line, not a line per reader
+// that has not come back (gt-vcr3z).
 func TestTheWorkPanelSaysOneLineBeforeTheTownHasBeenRead(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", map[string]any{})
-	if kids, text := dom.element(t, "work").Kids, workText(t, dom); kids != 1 || text != "waiting for the town…" {
-		t.Errorf("the unread panel drew %d lines (%q), want one", kids, text)
+	callWork(t, dom, map[string]any{})
+	if p, b := dom.element(t, "polecats"), dom.element(t, "beads"); p.Kids != 1 || b.Kids != 1 || p.Text != "reading…" || b.Text != "reading the work queue…" {
+		t.Errorf("the unread panels drew %d lines (%q) and %d lines (%q), want one short line each", p.Kids, p.Text, b.Kids, b.Text)
 	}
 
 	// A town whose seats read and whose queue did not says which half is
 	// missing rather than drawing the queue as empty.
 	dom = newPageDOM(t)
-	dom.call(t, "renderWork", map[string]any{
+	callWork(t, dom, map[string]any{
 		"summary": map[string]any{"seats_cap": 4},
 		"polecats": []any{
 			seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
@@ -877,7 +885,7 @@ func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "alpha", "working", "gt-a1", "sandboxed", "deepseek-flash-sandbox", time.Minute),
 		seat("gastown", "bravo", "working", "gt-a2", "haiku", "claude-haiku", time.Minute),
 		seat("gastown", "charlie", "working", "gt-a3", "unprefixed", "gemini-pro", time.Minute),
@@ -932,7 +940,7 @@ func TestTheWorkQueueScrollsOnlyItsBeadRows(t *testing.T) {
 	}
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
 	}, workQueueReading(1, 0, 0, 0)))
 
@@ -943,7 +951,7 @@ func TestTheWorkQueueScrollsOnlyItsBeadRows(t *testing.T) {
 				if (String(c.className).split(" ").indexOf("qlist") >= 0) list = c;
 				walk(c);
 			}
-		})(__byId["work"]);
+		})(__byId["beads"]);
 		const isRow = c => String(c.className).split(" ").indexOf("qrow") >= 0;
 		region = list.children.__arr.find(c => String(c.className).split(" ").indexOf("qrows") >= 0);
 		return {
@@ -1008,7 +1016,7 @@ func workQueueHelp(t *testing.T, dom *pageDOM) queueHelp {
 		const cls = (e, c) => String(e.className).split(" ").indexOf(c) >= 0;
 		const under = (n, fn) => { for (const c of (n.children || [])) { fn(c); under(c, fn); } };
 		let list = null;
-		under(__byId["work"], c => { if (cls(c, "qlist")) list = c; });
+		under(__byId["beads"], c => { if (cls(c, "qlist")) list = c; });
 		if (!list) return {hints: 0, captions: 0};
 		const all = [];
 		under(list, c => all.push(c));
@@ -1050,7 +1058,7 @@ func TestWorkQueueHelpIsADisclosureClosedByDefault(t *testing.T) {
 	readyHelp := "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled. Beads in the town store are never taken: the dispatcher reads each rig's store only, so they wait under their own chip."
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
 	}, workQueueReading(57, 1, 3, 0)))
 
@@ -1091,7 +1099,7 @@ func TestWorkQueueHelpIsADisclosureClosedByDefault(t *testing.T) {
 		let hint = null;
 		(function walk(n) {
 			for (const c of (n.children || [])) { if (cls(c, "qhint")) hint = c; walk(c); }
-		})(__byId["work"]);
+		})(__byId["beads"]);
 		if (!hint) throw new Error("the queue list drew no help disclosure");
 		__clickSummary(hint);
 	})()`); err != nil {
@@ -1116,7 +1124,7 @@ func TestWorkQueueHelpStaysOpenAcrossRedraw(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
 	}, workQueueReading(57, 1, 3, 0)))
 	before := workChild(t, dom, "wsum")
@@ -1129,7 +1137,7 @@ func TestWorkQueueHelpStaysOpenAcrossRedraw(t *testing.T) {
 		let hint = null;
 		(function walk(n) {
 			for (const c of (n.children || [])) { if (cls(c, "qhint")) hint = c; walk(c); }
-		})(__byId["work"]);
+		})(__byId["beads"]);
 		if (!hint) throw new Error("the queue list drew no help disclosure");
 		__clickSummary(hint);
 	})()`); err != nil {
@@ -1138,7 +1146,7 @@ func TestWorkQueueHelpStaysOpenAcrossRedraw(t *testing.T) {
 
 	// A poll brings a new reading, so the panel redraws and builds the queue
 	// list and its help from scratch.
-	dom.call(t, "renderWork", workState([]any{
+	callWork(t, dom, workState([]any{
 		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
 	}, workQueueReading(58, 1, 3, 0)))
 	after := workChild(t, dom, "wsum")
@@ -1154,25 +1162,61 @@ func TestWorkQueueHelpStaysOpenAcrossRedraw(t *testing.T) {
 	}
 }
 
-// TestTheWorkPanelIsTheOnlyPanelForSeatsAndQueue reads the embedded page: the
-// Polecats and Work queue sections are gone, the Work section took their place
-// in the left column, and no renderer draws them any more (gt-vcr3z).
-func TestTheWorkPanelIsTheOnlyPanelForSeatsAndQueue(t *testing.T) {
+// TestWorkIsSplitIntoPolecatsAndBeads reads the embedded page: the Work panel is
+// two sections, Polecats and Beads, side by side directly above Landings and
+// outside the grid's columns, both open by default, and no Work section or
+// renderer remains (gt-sfpm6, gt-vcr3z).
+func TestWorkIsSplitIntoPolecatsAndBeads(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
-	for _, gone := range []string{`id="seats"`, `id="queuenote"`, `id="seatsnote"`, "<h2>Polecats", "<h2>Work queue", "renderSeats", "renderQueue"} {
+	for _, gone := range []string{`id="seats"`, `id="queuenote"`, `id="seatsnote"`, "<h2>Work", `data-fold="work"`, `id="work"`, `id="worknote"`, "<h2>Work queue", "renderSeats", "renderQueue", "function renderWork"} {
 		if strings.Contains(page, gone) {
 			t.Errorf("index.html still carries %q", gone)
 		}
 	}
-	if !strings.Contains(page, `<section data-fold="work"><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>`) {
-		t.Error("the left column has no Work section in the shape the page's panels take")
+	pair := `<div class="pair">
+  <section data-fold="polecats"><h2>Polecats <span class="r" id="polecatsnote"></span></h2><div class="body" id="polecats"></div></section>
+  <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
+</div>
+`
+	at := strings.Index(page, pair)
+	if at < 0 {
+		t.Fatal("the page has no Polecats and Beads pair in the shape the page's panels take")
 	}
-	// The pane draws both readings it is joined from, and redraws on the tick
-	// that moves its ages.
+	if rest := page[at+len(pair):]; !strings.HasPrefix(rest, `<section id="trendsec" class="wide" data-fold="landings"`) {
+		t.Errorf("the pair is not immediately before the Landings section: %.80q follows it", rest)
+	}
+	for _, key := range []string{"polecats", "beads"} {
+		tag := page[strings.Index(page, `data-fold="`+key+`"`):]
+		tag = tag[:strings.Index(tag, ">")]
+		if strings.Contains(tag, "data-default-collapsed") {
+			t.Errorf("the %s section starts collapsed by default: %s", key, tag)
+		}
+	}
+	if grid := page[strings.Index(page, `<div class="grid">`):at]; strings.Contains(grid, `data-fold="polecats"`) || strings.Contains(grid, `data-fold="beads"`) {
+		t.Error("Polecats or Beads is inside the grid's columns")
+	}
+	if css := cssDecls(t, "pair"); css["display"] != "grid" {
+		t.Errorf("the .pair rule has display %q, want grid", css["display"])
+	}
+	// Side by side on a wide screen, stacked on a narrow one by the page's
+	// existing max-width:1000px rule.
+	if tracks := declOf(t, topRule(t, ".pair"), "grid-template-columns"); len(strings.Fields(tracks)) != 2 {
+		t.Errorf("the .pair draws %d tracks (%q), want two side by side", len(strings.Fields(tracks)), tracks)
+	}
+	stacked := false
+	for _, rule := range landingsConditionalRules(t) {
+		if rule.Sel == ".pair" && strings.Contains(rule.At, "max-width:1000px") && rule.Decls["grid-template-columns"] == "1fr" {
+			stacked = true
+		}
+	}
+	if !stacked {
+		t.Error("no max-width:1000px rule stacks the .pair to one track, so a narrow page keeps two squeezed panels")
+	}
+	// Each panel draws its own half.
 	if !strings.Contains(page, "workSeats(box, s, pcs, rSeats);") || !strings.Contains(page, "workQueue(box, s, q, rQueue);") {
-		t.Error("the panel does not draw both the seats and the queue it replaced")
+		t.Error("the panels do not draw the seats and the queue they replaced")
 	}
 }
 
@@ -1201,7 +1245,7 @@ func workCells(t *testing.T, dom *pageDOM, cls string) []drawn {
 				}
 				walk(c);
 			}
-		})(__byId["work"]);
+		})(__byId["polecats"]);
 		return out;
 	})())`)
 	if err != nil {
@@ -1234,9 +1278,9 @@ func TestTheWorkPanelMovesItsAgesBetweenPolls(t *testing.T) {
 
 	dom := newPageDOM(t)
 	workClock(t, dom, base)
-	dom.call(t, "renderWork", st)
+	callWork(t, dom, st)
 	// The seat's row, the one after the header in the table.
-	if _, err := dom.vm.RunString(`globalThis.__seatRow = __byId["work"].children[0].children[1]`); err != nil {
+	if _, err := dom.vm.RunString(`globalThis.__seatRow = __byId["polecats"].children[0].children[1]`); err != nil {
 		t.Fatal(err)
 	}
 	if got := workCells(t, dom, "wnum"); len(got) != 1 || got[0].Text != "12m" || strings.Contains(got[0].Class, "warnc") {
@@ -1244,7 +1288,7 @@ func TestTheWorkPanelMovesItsAgesBetweenPolls(t *testing.T) {
 	}
 
 	workClock(t, dom, base.Add(10*time.Minute))
-	dom.call(t, "renderWork", st)
+	callWork(t, dom, st)
 	got := workCells(t, dom, "wnum")
 	if len(got) != 1 || got[0].Text != "22m" {
 		t.Errorf("the age cell reads %+v ten minutes on, want 22m", got)
@@ -1252,7 +1296,7 @@ func TestTheWorkPanelMovesItsAgesBetweenPolls(t *testing.T) {
 	if !strings.Contains(got[0].Class, "warnc") || !strings.Contains(got[0].Title, "last printed 11m ago") {
 		t.Errorf("the age cell reads %+v: want the warning and the silence in its title", got[0])
 	}
-	same, err := dom.vm.RunString(`String(__byId["work"].children[0].children[1] === globalThis.__seatRow)`)
+	same, err := dom.vm.RunString(`String(__byId["polecats"].children[0].children[1] === globalThis.__seatRow)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1288,7 +1332,7 @@ func TestTheQueuedRowAgesTheWaitTheLandingsPanelShows(t *testing.T) {
 
 	dom := newPageDOM(t)
 	workClock(t, dom, base)
-	dom.call(t, "renderWork", st)
+	callWork(t, dom, st)
 	dom.call(t, "renderTrend", st)
 
 	cells := workCells(t, dom, "wnum")
@@ -1324,7 +1368,7 @@ func TestTheWorkPanelWarnsASpawningRowPastFiveMinutes(t *testing.T) {
 
 	dom := newPageDOM(t)
 	workClock(t, dom, base)
-	dom.call(t, "renderWork", workState([]any{stuck, young}, workQueueReading(0, 0, 0, 0)))
+	callWork(t, dom, workState([]any{stuck, young}, workQueueReading(0, 0, 0, 0)))
 
 	cells := workCells(t, dom, "wnum")
 	if len(cells) != 2 {
@@ -1351,7 +1395,7 @@ func TestTheWorkPanelNamesTheLandingsAndOrdersTheIdleByThem(t *testing.T) {
 	busyIdle["landed_24h"], busyIdle["approved_24h"] = 2, 2
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{busy, quiet, busyIdle}, workQueueReading(1, 0, 0, 0)))
+	callWork(t, dom, workState([]any{busy, quiet, busyIdle}, workQueueReading(1, 0, 0, 0)))
 
 	names := workCells(t, dom, "wname")
 	if len(names) != 3 {
@@ -1401,7 +1445,7 @@ func TestTheWorkPanelBlockedLineIsNeverCleanOverAnIncompleteReading(t *testing.T
 			st := workState([]any{seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute)}, workQueueReading(57, 1, 3, 0))
 			tt.mutate(st)
 			dom := newPageDOM(t)
-			dom.call(t, "renderWork", st)
+			callWork(t, dom, st)
 			line := workChild(t, dom, "wblocked")
 			if !strings.Contains(line.Class, "warnc") {
 				t.Errorf("the blocked line wears %q, want the warning class", line.Class)
@@ -1420,29 +1464,35 @@ func TestTheWorkPanelBlockedLineIsNeverCleanOverAnIncompleteReading(t *testing.T
 	}
 }
 
-// TestTheWorkPanelWearsTheWorseOfItsTwoReads drives the panel over each
+// TestThePolecatsAndBeadsPanelsEachWearTheirOwnRead drives both panels over each
 // pairing of a fresh, an aged and a failed read of the seats and of the queue,
-// and reads back the note's words and colour and whether the panel is greyed:
-// a panel joined from two sources is only as current as the worse of them.
-func TestTheWorkPanelWearsTheWorseOfItsTwoReads(t *testing.T) {
+// and reads back each panel's note words, colour and greying: Polecats follows
+// the seats read alone and Beads the queue read alone, so one stale source does
+// not grey the other's panel (gt-sfpm6; it was the worse of the two when the
+// Work panel joined them).
+func TestThePolecatsAndBeadsPanelsEachWearTheirOwnRead(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	fresh := map[string]any{"at": now, "every_sec": 60}
 	aged := map[string]any{"at": now, "every_sec": 60, "stale": true}
 	failed := map[string]any{"at": now, "every_sec": 60, "stale": true, "error": true}
+	type want struct {
+		class  string
+		note   []string
+		greyed bool
+	}
 	tests := []struct {
 		name         string
 		seats, queue map[string]any
-		wantClass    string
-		wantNote     []string
-		greyed       bool
+		polecats     want
+		beads        want
 	}{
-		{"both fresh", fresh, fresh, "r", nil, false},
-		{"seats aged", aged, fresh, "r warnc", []string{"the seats read is old"}, true},
-		{"queue failed", fresh, failed, "r badc", []string{"the queue read failed"}, true},
-		{"seats aged and queue failed", aged, failed, "r badc", []string{"the seats read is old", "the queue read failed"}, true},
-		{"seats failed and queue aged", failed, aged, "r badc", []string{"the seats read failed", "the queue read is old"}, true},
+		{"both fresh", fresh, fresh, want{"r", nil, false}, want{"r", nil, false}},
+		{"seats aged", aged, fresh, want{"r warnc", []string{"the seats read is old"}, true}, want{"r", nil, false}},
+		{"queue failed", fresh, failed, want{"r", nil, false}, want{"r badc", []string{"the queue read failed"}, true}},
+		{"seats aged and queue failed", aged, failed, want{"r warnc", []string{"the seats read is old"}, true}, want{"r badc", []string{"the queue read failed"}, true}},
+		{"seats failed and queue aged", failed, aged, want{"r badc", []string{"the seats read failed"}, true}, want{"r warnc", []string{"the queue read is old"}, true}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1451,18 +1501,23 @@ func TestTheWorkPanelWearsTheWorseOfItsTwoReads(t *testing.T) {
 			st := workState([]any{seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute)}, workQueueReading(57, 1, 3, 0))
 			st["reads"] = map[string]any{"seats": tt.seats, "queue": tt.queue}
 			dom := newPageDOM(t)
-			dom.call(t, "renderWork", st)
-			note := dom.element(t, "worknote")
-			if note.Class != tt.wantClass {
-				t.Errorf("the note wears %q, want %q", note.Class, tt.wantClass)
-			}
-			for _, w := range tt.wantNote {
-				if !strings.Contains(note.Text, w) {
-					t.Errorf("the note reads %q, want %q in it", note.Text, w)
+			callWork(t, dom, st)
+			for _, p := range []struct {
+				id, note string
+				want     want
+			}{{"polecats", "polecatsnote", tt.polecats}, {"beads", "beadsnote", tt.beads}} {
+				note := dom.element(t, p.note)
+				if note.Class != p.want.class {
+					t.Errorf("%s: the note wears %q, want %q", p.id, note.Class, p.want.class)
 				}
-			}
-			if got := strings.Contains(dom.element(t, "work").Class, "stale"); got != tt.greyed {
-				t.Errorf("the panel greyed = %v, want %v", got, tt.greyed)
+				for _, w := range p.want.note {
+					if !strings.Contains(note.Text, w) {
+						t.Errorf("%s: the note reads %q, want %q in it", p.id, note.Text, w)
+					}
+				}
+				if got := strings.Contains(dom.element(t, p.id).Class, "stale"); got != p.want.greyed {
+					t.Errorf("%s: the panel greyed = %v, want %v", p.id, got, p.want.greyed)
+				}
 			}
 		})
 	}
@@ -1488,7 +1543,7 @@ func TestTheWorkPanelSaysWhyItHasNoSeats(t *testing.T) {
 			st := workState([]any{}, workQueueReading(1, 0, 0, 0))
 			st["reads"] = map[string]any{"seats": tc.seats, "queue": map[string]any{"at": now, "every_sec": 60}}
 			dom := newPageDOM(t)
-			dom.call(t, "renderWork", st)
+			callWork(t, dom, st)
 			if text := workText(t, dom); !strings.Contains(text, tc.want) {
 				t.Errorf("a panel with no seats reads %q, want %q in it", text, tc.want)
 			}
@@ -1510,7 +1565,7 @@ func beadTips(t *testing.T, dom *pageDOM) []string {
 				}
 				walk(c);
 			}
-		})(__byId["work"]);
+		})(__byId["polecats"]);
 		return out;
 	})())`)
 	if err != nil {
@@ -1535,7 +1590,7 @@ func TestTheWorkPanelShowsTheBeadsDescriptionOnHover(t *testing.T) {
 	bare := seat("gastown", "furiosa", "stalled", "gt-bare", "no description here", "", 0)
 
 	dom := newPageDOM(t)
-	dom.call(t, "renderWork", workState([]any{described, bare}, workQueueReading(1, 0, 0, 0)))
+	callWork(t, dom, workState([]any{described, bare}, workQueueReading(1, 0, 0, 0)))
 
 	tips := beadTips(t, dom)
 	if len(tips) != 3 {
@@ -1567,10 +1622,10 @@ func TestTheWorkPanelRedrawsWhenABeadsDescriptionChanges(t *testing.T) {
 	one["description"] = "first"
 	dom := newPageDOM(t)
 	s := workState([]any{one}, workQueueReading(1, 0, 0, 0))
-	dom.call(t, "renderWork", s)
+	callWork(t, dom, s)
 
 	one["description"] = "second"
-	dom.call(t, "renderWork", s)
+	callWork(t, dom, s)
 	if tips := beadTips(t, dom); len(tips) != 2 || !strings.HasSuffix(tips[1], "second") {
 		t.Errorf("after the description changed the bead cell hovers as %q, want it to end with the new text", tips)
 	}
@@ -1586,11 +1641,11 @@ func TestTheWorkPanelRedrawsWhenACommaMovesBetweenTitleAndDescription(t *testing
 	one["description"] = "c"
 	dom := newPageDOM(t)
 	s := workState([]any{one}, workQueueReading(1, 0, 0, 0))
-	dom.call(t, "renderWork", s)
+	callWork(t, dom, s)
 
 	one["title"] = "a"
 	one["description"] = "b,c"
-	dom.call(t, "renderWork", s)
+	callWork(t, dom, s)
 	if tips := beadTips(t, dom); len(tips) != 2 || tips[1] != "gt-noda1 a\n\nb,c" {
 		t.Errorf("after a comma moved from the title to the description the bead cell hovers as %q, want gt-noda1 a, a blank line and b,c", tips)
 	}
@@ -1607,20 +1662,20 @@ func TestTheWorkPanelRedrawsWhenASeatsRigIsParked(t *testing.T) {
 	held := seat("gastown", "dementus", "working", "gt-u53jg", "a park its reason does not mirror", "deepseek-flash", time.Minute)
 	dom := newPageDOM(t)
 	s := workState([]any{held}, workQueueReading(1, 0, 0, 0))
-	dom.call(t, "renderWork", s)
+	callWork(t, dom, s)
 	fold := "1 in parked rigs (stood down on purpose; not alerts)"
 	if text := workText(t, dom); strings.Contains(text, fold) {
 		t.Fatalf("the seat is folded as parked before its rig was parked: %q", text)
 	}
 
 	held["rig_parked"] = true
-	dom.call(t, "renderWork", s)
+	callWork(t, dom, s)
 	if text := workText(t, dom); !strings.Contains(text, fold) {
 		t.Errorf("after only the rig was parked the panel still draws %q, want the seat under %q", text, fold)
 	}
 
 	delete(held, "rig_parked")
-	dom.call(t, "renderWork", s)
+	callWork(t, dom, s)
 	if text := workText(t, dom); strings.Contains(text, fold) {
 		t.Errorf("after only the rig was unparked the panel still draws %q, want the seat back with the seats holding work", text)
 	}

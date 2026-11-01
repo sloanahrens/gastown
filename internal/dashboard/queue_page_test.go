@@ -126,7 +126,7 @@ func workSummary(t *testing.T, dom *pageDOM) map[string]string {
 
 	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const out = {};
-		const sum = __byId["work"].children.__arr.find(c => String(c.className).split(" ").indexOf("wsum") >= 0);
+		const sum = __byId["beads"].children.__arr.find(c => String(c.className).split(" ").indexOf("wsum") >= 0);
 		if (sum) for (const x of sum.children) out[String(x.children[1].textContent)] = String(x.children[0].textContent);
 		return out;
 	})())`)

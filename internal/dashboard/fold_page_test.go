@@ -19,7 +19,7 @@ import (
 // saved choice. The list is a constant in the page's script and the operator's
 // to edit; this test pins what the bead asked for, and the rest of this file
 // reads the page's own list rather than assuming it.
-var foldDefaultOpen = []string{"landings"}
+var foldDefaultOpen = []string{"polecats", "beads", "landings"}
 
 // newPageDOMOpening is a page whose reader has opened the named sections by
 // hand: a saved choice is the page's own way to start a section open, now that
@@ -301,16 +301,16 @@ func TestFoldCostStartsClosedOnEveryLoad(t *testing.T) {
 func TestFoldChoiceFromBeforeTheKeysStillApplies(t *testing.T) {
 	t.Parallel()
 
-	legacy := newPageDOMStoring(t, map[string]string{"gt-collapsed": `{"Work":true,"Rigs":false}`})
-	wantFold(t, legacy.fold(t, "work"), "work", true)  // the legacy entry read it closed
-	wantFold(t, legacy.fold(t, "rigs"), "rigs", false) // the legacy entry read it open
+	legacy := newPageDOMStoring(t, map[string]string{"gt-collapsed": `{"Polecats":true,"Rigs":false}`})
+	wantFold(t, legacy.fold(t, "polecats"), "polecats", true) // the legacy entry read it closed
+	wantFold(t, legacy.fold(t, "rigs"), "rigs", false)        // the legacy entry read it open
 
 	// A new key with a choice of its own is the one that counts.
 	both := newPageDOMStoring(t, map[string]string{
-		"gt-collapsed": `{"Work":true}`,
-		"gt-fold":      `{"work":false}`,
+		"gt-collapsed": `{"Polecats":true}`,
+		"gt-fold":      `{"polecats":false}`,
 	})
-	wantFold(t, both.fold(t, "work"), "work", false)
+	wantFold(t, both.fold(t, "polecats"), "polecats", false)
 }
 
 // Storage that throws — private mode, a locked-down browser — leaves the page
@@ -372,8 +372,9 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 
 	// The reader folds the sections first: the summary is what a closed section
 	// says when a reading arrives behind it, not something a toggle recomputes.
-	dom := newPageDOMOpening(t, "attention", "work")
-	dom.press(t, "work", "click")
+	dom := newPageDOMOpening(t, "attention")
+	dom.press(t, "polecats", "click")
+	dom.press(t, "beads", "click")
 	dom.press(t, "attention", "click")
 	// Cost starts closed on every load (gt-7swd8): no click needed.
 
@@ -393,8 +394,11 @@ func TestFoldSummaryComesFromTheReading(t *testing.T) {
 		t.Fatalf("rendering the page with a reading: %v", err)
 	}
 
-	if got, want := dom.fold(t, "work").Summary, "2 working · 1 waiting to land"; got != want {
-		t.Errorf("the closed work section reads %q, want %q", got, want)
+	if got, want := dom.fold(t, "polecats").Summary, "2 working"; got != want {
+		t.Errorf("the closed polecats section reads %q, want %q", got, want)
+	}
+	if got, want := dom.fold(t, "beads").Summary, "1 waiting to land"; got != want {
+		t.Errorf("the closed beads section reads %q, want %q", got, want)
 	}
 	// The summary's working count is the top strip's: both leave out the polecat
 	// on a parked rig, so the strip and the section agree on the same number.
@@ -427,31 +431,31 @@ func TestFoldClosedSectionKeepsUpWithTheReading(t *testing.T) {
 			},
 		}
 	}
-	dom := newPageDOMOpening(t, "work")
+	dom := newPageDOM(t)
 	requests := pageNumber(t, dom, "__fetches.length")
-	dom.press(t, "work", "click") // closed by the reader
-	dom.call(t, "renderWork", read("angharad"))
-	first := dom.element(t, "work")
+	dom.press(t, "polecats", "click") // closed by the reader
+	callWork(t, dom, read("angharad"))
+	first := dom.element(t, "polecats")
 	if first.Kids == 0 {
 		t.Fatal("a closed section's body was not drawn into")
 	}
-	dom.call(t, "renderWork", read("capable"))
-	second := dom.element(t, "work")
+	callWork(t, dom, read("capable"))
+	second := dom.element(t, "polecats")
 	if second.Text == first.Text {
 		t.Fatalf("a closed section's body stopped following the reading: %q", second.Text)
 	}
 
-	dom.press(t, "work", "click") // opened again
-	if dom.fold(t, "work").Collapsed {
-		t.Error("the work section did not open again")
+	dom.press(t, "polecats", "click") // opened again
+	if dom.fold(t, "polecats").Collapsed {
+		t.Error("the polecats section did not open again")
 	}
-	if got := dom.fold(t, "work").Summary; got != "" {
-		t.Errorf("the opened work section still shows the summary %q", got)
+	if got := dom.fold(t, "polecats").Summary; got != "" {
+		t.Errorf("the opened polecats section still shows the summary %q", got)
 	}
 	// Closing, drawing and opening the section asked the server for nothing: the
 	// last reading is what it shows.
 	if got := pageNumber(t, dom, "__fetches.length") - requests; got != 0 {
-		t.Errorf("closing, drawing and opening the work section sent %d request(s), want none", got)
+		t.Errorf("closing, drawing and opening the polecats section sent %d request(s), want none", got)
 	}
 }
 
@@ -461,21 +465,21 @@ func TestFoldClosedSectionKeepsUpWithTheReading(t *testing.T) {
 func TestFoldSetupRunTwiceFoldsOnce(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOMOpening(t, "work")
+	dom := newPageDOM(t)
 	if _, err := dom.vm.RunString("setupCollapse(); setupCollapse();"); err != nil {
 		t.Fatalf("running the page's setup a second time: %v", err)
 	}
 	carets := pageExpr(t, dom, `(function () {
-		var h = __find(__fold("work"), ":scope > h2"), n = 0;
+		var h = __find(__fold("polecats"), ":scope > h2"), n = 0;
 		__walk(h, function (c) { if (__cls(c, "caret")) n++; });
 		return String(n);
 	})()`)
 	if carets != "1" {
-		t.Fatalf("the work header holds %s carets after setup ran twice, want 1", carets)
+		t.Fatalf("the polecats header holds %s carets after setup ran twice, want 1", carets)
 	}
 
-	dom.press(t, "work", "click")
-	wantFold(t, dom.fold(t, "work"), "work", true)
+	dom.press(t, "polecats", "click")
+	wantFold(t, dom.fold(t, "polecats"), "polecats", true)
 }
 
 // With every owner chip switched off the Attention panel says so, and so does

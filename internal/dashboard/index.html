@@ -39,6 +39,8 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:12px}
 @media (max-width:1000px){.grid{grid-template-columns:1fr}}
 section.wide{margin-top:12px}
+.pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-top:12px}
+@media (max-width:1000px){.pair{grid-template-columns:1fr}}
 .col{display:flex;flex-direction:column;gap:12px;min-width:0}
 section{background:var(--panel);border:1px solid var(--line);border-radius:8px;min-width:0}
 section>h2{white-space:nowrap;margin:0;padding:9px 12px;border-bottom:1px solid var(--line);font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);display:flex;gap:10px;align-items:center}
@@ -465,7 +467,6 @@ a.hrow:hover{background:#19212b}
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
-    <section data-fold="work"><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>
   </div>
   <div class="col">
     <section id="newssec" data-fold="news" hidden><h2>Hacker News <span class="r" id="newsnote"></span></h2><div class="body" id="news"></div></section>
@@ -477,7 +478,11 @@ a.hrow:hover{background:#19212b}
     <section id="mangosec" data-fold="mango" data-default-collapsed hidden><h2>Mango · <span class="r" id="mangonote"></span></h2><div class="body" id="mango"></div></section>
   </div>
 </div>
-<!-- Landings is the pane the operator reads daily: it sits outside the grid, full width, and is the one panel that starts open. -->
+<!-- Below the grid, full width: Polecats and Beads side by side (the two halves of what was the Work panel), then Landings, the pane the operator reads daily. All three start open. -->
+<div class="pair">
+  <section data-fold="polecats"><h2>Polecats <span class="r" id="polecatsnote"></span></h2><div class="body" id="polecats"></div></section>
+  <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
+</div>
 <section id="trendsec" class="wide" data-fold="landings" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
 
 <script>
@@ -1292,42 +1297,62 @@ function workQueue(box, s, q, r) {
   box.append(d);
 }
 
-// workKey is what the panel's rows are drawn from. The panel is left alone
-// while it is unchanged, so a redraw never fights the operator's own clicks in
-// the list; the ages move through paintAges instead. A seat is keyed as JSON so
-// a comma inside a title or description cannot make two seats read as one key.
-function workKey(s) {
-  const q = s.queue;
+// polecatsKey and beadsKey are what each panel's rows are drawn from. A panel is
+// left alone while it is unchanged, so a redraw never fights the operator's own
+// clicks in the list; the ages move through paintAges instead. A seat is keyed as
+// JSON so a comma inside a title or description cannot make two seats read as one
+// key.
+function polecatsKey(s) {
   const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.rig_parked, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.state_since || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h])).join(";");
+  return [s.summary_at, seats].join("|");
+}
+function beadsKey(s) {
+  const q = s.queue;
   // The dispatcher's skips share a poll with the queue neither of them rides:
   // its own reader ticks six times as often, and it is what tags a row unshaped.
   const named = ((s.dispatch && s.dispatch.named) || []).map(n => n.bead + ":" + (n.reason || "")).join(",");
-  return [s.summary_at, q && q.at, q && q.ready_total, q && q.landing_total, q && q.blocked_total, q && q.blocked_work, q && q.blocked_wisps, q && (q.unreadable || []).join(","), seats, named,
+  return [q && q.at, q && q.ready_total, q && q.landing_total, q && q.blocked_total, q && q.blocked_work, q && q.blocked_wisps, q && (q.unreadable || []).join(","), named,
     qTab, qRig, qShape, qWisp, [...qOpen].join(","), Object.keys(qDetail).map(k => k + (qDetail[k].loading ? "L" : qDetail[k].error ? "E" : "D")).join(",")].join("|");
 }
 
-function renderWork(s, force) {
-  if (!force && pushSkip("work", s)) return;
-  const box = $("work");
-  const pcs = s.polecats || [], q = s.queue;
-  const rSeats = readOf(s, "seats"), rQueue = readOf(s, "queue");
-  paintsRead(box, $("worknote"), worseRead(rSeats, rQueue));
-  // The note and the ages are written on every call, above the unchanged-key
-  // early return, so they keep moving between polls (gt-q6h8e).
+// renderPolecats draws the Polecats panel: the seats table and its note. The note
+// and the ages are written on every call, above the unchanged-key early return,
+// so they keep moving between polls (gt-q6h8e).
+function renderPolecats(s, force) {
+  if (!force && pushSkip("polecats", s)) return;
+  const box = $("polecats");
+  const pcs = s.polecats || [];
+  const rSeats = readOf(s, "seats");
+  paintsRead(box, $("polecatsnote"), rSeats);
   const parts = [];
   if (s.summary_at) parts.push("seats read " + age(s.summary_at) + " ago");
-  if (q) parts.push("queue read " + age(q.at) + " ago");
   if (rSeats && rSeats.stale) parts.push(rSeats.error ? "the seats read failed" : "the seats read is old");
-  if (rQueue && rQueue.stale) parts.push(rQueue.error ? "the queue read failed" : "the queue read is old");
-  $("worknote").textContent = parts.join(" · ");
+  $("polecatsnote").textContent = parts.join(" · ");
 
-  const key = workKey(s);
-  if (!force && key === wKey) { const now = Date.now(); workSeatRows.forEach(r => paintAges(r, now)); return; }
-  wKey = key;
+  const key = polecatsKey(s);
+  if (!force && key === pKey) { const now = Date.now(); workSeatRows.forEach(r => paintAges(r, now)); return; }
+  pKey = key;
   box.replaceChildren();
-  // Nothing read yet: one line, not a line per reader that has not come back.
-  if (!pcs.length && !q && !s.summary) { workSeatRows = []; box.append(el("div", "empty", "waiting for the town…")); return; }
   workSeats(box, s, pcs, rSeats);
+}
+
+// renderBeads draws the Beads panel: what is waiting, the blocked line and the
+// queue list, with the queue read's own note.
+function renderBeads(s, force) {
+  if (!force && pushSkip("beads", s)) return;
+  const box = $("beads");
+  const q = s.queue;
+  const rQueue = readOf(s, "queue");
+  paintsRead(box, $("beadsnote"), rQueue);
+  const parts = [];
+  if (q) parts.push("queue read " + age(q.at) + " ago");
+  if (rQueue && rQueue.stale) parts.push(rQueue.error ? "the queue read failed" : "the queue read is old");
+  $("beadsnote").textContent = parts.join(" · ");
+
+  const key = beadsKey(s);
+  if (!force && key === bKey) return;
+  bKey = key;
+  box.replaceChildren();
   workQueue(box, s, q, rQueue);
 }
 
@@ -4455,7 +4480,7 @@ let qShape = DEFAULT_QSHAPE;
 let qWisp = DEFAULT_QWISP;
 const qOpen = new Set();
 const qDetail = {};
-let wKey = "";
+let pKey = "", bKey = "";
 const QTABS = [["ready", "Ready to build", "ready_total", "ready"], ["landing", "Waiting to land", "landing_total", "landing"], ["blocked", "Blocked", "blocked_total", "blocked"]];
 const isWisp = b => !!b.wisp;
 
@@ -4476,10 +4501,10 @@ function beadDetailFor(rig, id, store, done) {
 
 function openBead(b) {
   const id = b.rig + "/" + b.id;
-  if (qOpen.has(id)) { qOpen.delete(id); renderWork(state, true); return; }
+  if (qOpen.has(id)) { qOpen.delete(id); renderBeads(state, true); return; }
   qOpen.add(id);
-  beadDetailFor(b.rig, b.id, qDetail, () => renderWork(state, true));
-  renderWork(state, true);
+  beadDetailFor(b.rig, b.id, qDetail, () => renderBeads(state, true));
+  renderBeads(state, true);
 }
 
 function detailBlock(d) {
@@ -4582,7 +4607,7 @@ function drawQueueList(box, s) {
   QTABS.forEach(([k, label, totalKey]) => {
     const b = el("button", "chip" + (qTab === k ? " on" : ""), label);
     b.append(el("b", "", String(q[totalKey] || 0)));
-    b.onclick = () => { qTab = k; renderWork(state, true); };
+    b.onclick = () => { qTab = k; renderBeads(state, true); };
     tabs.append(b);
   });
   box.append(tabs);
@@ -4637,11 +4662,11 @@ function drawQueueList(box, s) {
     const f = el("div", "qtabs");
     const chip = (label, count, on, fn, tip) => { const b = el("button", "chip" + (on ? " on" : ""), label); if (tip) b.title = tip; b.append(el("b", "", String(count))); b.onclick = fn; f.append(b); };
     if (rigNames.length > 1 || townListed) {
-      chip("all stores", listTotal, qRig === "all", () => { qRig = "all"; renderWork(state, true); });
+      chip("all stores", listTotal, qRig === "all", () => { qRig = "all"; renderBeads(state, true); });
       const parkedRigs = q.parked_rigs || [];
       // The town's store is named for what it means to the operator: its beads
       // are listed like any store's, and the dispatcher never takes them.
-      rigNames.forEach(r => chip((r === TOWN_STORE ? (qTab === "ready" ? "town store, not dispatched" : "town store") : r) + (parkedRigs.indexOf(r) >= 0 ? " (parked)" : ""), rigs[r], qRig === r, () => { qRig = r; renderWork(state, true); },
+      rigNames.forEach(r => chip((r === TOWN_STORE ? (qTab === "ready" ? "town store, not dispatched" : "town store") : r) + (parkedRigs.indexOf(r) >= 0 ? " (parked)" : ""), rigs[r], qRig === r, () => { qRig = r; renderBeads(state, true); },
         r === TOWN_STORE ? "the town's own store (hq): the spec dispatcher reads each rig's store, never this one" : ""));
     }
     // No shape chip applies to the town store: none of its beads is dispatched,
@@ -4651,14 +4676,14 @@ function drawQueueList(box, s) {
       // One chip: a bead the last tick passed over lints clean exactly like
       // one it has not reached yet, so both are "ready to dispatch" and the
       // row's tag says which kind (gt-qt0ym, gt-e2cif).
-      chip("ready to dispatch", inRig.filter(isReadyToDispatch).length, qShape === "ok", () => { qShape = qShape === "ok" ? "all" : "ok"; renderWork(state, true); },
+      chip("ready to dispatch", inRig.filter(isReadyToDispatch).length, qShape === "ok", () => { qShape = qShape === "ok" ? "all" : "ok"; renderBeads(state, true); },
         "shaped, unassigned and in a rig that is not parked: the dispatcher takes these as seats free up");
-      chip("needs shaping", inRig.filter(b => b.shape === "fix").length, qShape === "fix", () => { qShape = qShape === "fix" ? "all" : "fix"; renderWork(state, true); });
-      chip("held", inRig.filter(b => b.shape === "held").length, qShape === "held", () => { qShape = qShape === "held" ? "all" : "held"; renderWork(state, true); });
+      chip("needs shaping", inRig.filter(b => b.shape === "fix").length, qShape === "fix", () => { qShape = qShape === "fix" ? "all" : "fix"; renderBeads(state, true); });
+      chip("held", inRig.filter(b => b.shape === "held").length, qShape === "held", () => { qShape = qShape === "held" ? "all" : "held"; renderBeads(state, true); });
     }
     if (qTab === "blocked") {
       const inRig = all.filter(inStore);
-      chip("wisps", inRig.filter(isWisp).length, qWisp, () => { qWisp = !qWisp; renderWork(state, true); });
+      chip("wisps", inRig.filter(isWisp).length, qWisp, () => { qWisp = !qWisp; renderBeads(state, true); });
     }
     box.append(f);
   }
@@ -4796,8 +4821,9 @@ const PANES = {
   rigs: {sec: "rigs", body: ["rigs"], read: s => [s.rigs, s.queue, readInput(s, "queue")], draw: s => renderRigs(s)},
   // The work pane's own key holds the list's filters and the rows a reader has
   // opened, so a section opened after a blind draw asks for the body it never
-  // drew rather than one renderWork's key says is current.
-  work: {sec: "work", body: ["work"], read: s => [s.polecats, s.queue, s.summary, s.summary_at, s.dispatch, readInput(s, "seats"), readInput(s, "queue")], draw: s => renderWork(s, true)},
+  // drew rather than one the panel's key says is current.
+  polecats: {sec: "polecats", body: ["polecats"], read: s => [s.polecats, s.summary, s.summary_at, readInput(s, "seats")], draw: s => renderPolecats(s, true)},
+  beads: {sec: "beads", body: ["beads"], read: s => [s.queue, s.dispatch, readInput(s, "queue")], draw: s => renderBeads(s, true)},
   trend: {sec: "landings", body: ["trend"], read: s => [s.trend, s.queue, s.polecats, s.om], draw: s => renderTrend(s)},
   news: {sec: "news", body: ["news"], read: s => s.news, draw: s => renderNews(s)},
   machine: {sec: "machine", body: ["machine"], read: s => [s.machine, s.loads, readInput(s, "machine")], draw: s => renderMachine(s)},
@@ -4872,7 +4898,7 @@ function openSection(key) {
 function renderAll() {
   if (!state) return;
   pushBegin(state);
-  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
   finally { pushEnd(); }
   paintFolds(state);
 }
@@ -4961,7 +4987,7 @@ const FOLD_KEY = "gt-fold";
 // every other section starts closed. A pane that opts out with
 // data-default-collapsed starts closed whatever this holds. This list is the
 // operator's to edit.
-const FOLD_DEFAULT_OPEN = ["landings"];
+const FOLD_DEFAULT_OPEN = ["polecats", "beads", "landings"];
 // FOLD_ALWAYS_CLOSED is the sections that start closed on every load, whatever
 // was saved: the operator opens them for a look, and a reload closes them
 // again. A toggle still works for the rest of the page session (gt-7swd8).
@@ -4981,12 +5007,10 @@ function foldNoteIsAge(text) {
 const FOLD_SUMMARY = {
   // The top strip's two counts: polecats holding work with a live session, and
   // what is submitted and waiting for the landing worker.
-  work: s => {
-    const out = [];
-    if (s && s.polecats) out.push(polecatsWorking(s.polecats) + " working");
+  polecats: s => (s && s.polecats ? polecatsWorking(s.polecats) + " working" : null),
+  beads: s => {
     const q = s && s.summary ? s.summary.ready_to_land : null;
-    if (q != null) out.push(q + " waiting to land");
-    return out.length ? out.join(" · ") : null;
+    return q != null ? q + " waiting to land" : null;
   },
   // The one attention list's split, exactly as the panel's own note counts it:
   // the rows that need a person, then the rows only waiting on work in flight.
@@ -5120,9 +5144,9 @@ function foldSummaryLine(fold, s, note) {
 // setupCollapse makes every section of the page foldable, with the key its
 // markup declares.
 function setupCollapse() {
-  // section.wide is the Landings block below the grid, which no .grid section
-  // selector reaches; "main section" is not on the page and is kept as it was.
-  document.querySelectorAll("main section, .grid section, section.wide").forEach(sec => {
+  // section.wide is the Landings block below the grid and .pair holds Polecats
+  // and Beads above it, which no .grid section selector reaches; "main section" is not on the page and is kept as it was.
+  document.querySelectorAll("main section, .grid section, .pair section, section.wide").forEach(sec => {
     const head = sec.querySelector(":scope > h2");
     if (!head) return;
     const key = sec.dataset.fold;
@@ -5215,7 +5239,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>

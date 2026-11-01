@@ -560,14 +560,15 @@ func TestLandingsIsFullWidthAndOnlyOpenPanel(t *testing.T) {
 	if m == nil {
 		t.Fatal("index.html has no FOLD_DEFAULT_OPEN list")
 	}
-	if got := strings.Join(strings.Fields(m[1]), " "); got != `"landings"` {
-		t.Errorf("FOLD_DEFAULT_OPEN is [%s], want only \"landings\"", got)
+	if got := strings.Join(strings.Fields(m[1]), " "); got != `"polecats", "beads", "landings"` {
+		t.Errorf("FOLD_DEFAULT_OPEN is [%s], want only the three panels below the grid: polecats, beads, landings", got)
 	}
 
 	dom := newPageDOM(t)
 	for _, sp := range pageSections(t) {
-		if closed := dom.fold(t, sp.Key).Collapsed; closed == (sp.Key == "landings") {
-			t.Errorf("the %s section starts collapsed=%v for a reader with no saved choice, want only landings open", sp.Key, closed)
+		below := sp.Key == "polecats" || sp.Key == "beads" || sp.Key == "landings"
+		if closed := dom.fold(t, sp.Key).Collapsed; closed == below {
+			t.Errorf("the %s section starts collapsed=%v for a reader with no saved choice, want only polecats, beads and landings open", sp.Key, closed)
 		}
 	}
 }

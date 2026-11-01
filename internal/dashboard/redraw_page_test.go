@@ -124,12 +124,12 @@ func TestPageRedrawsAPaneWhenOnlyItsReadStatusChanged(t *testing.T) {
 		}
 	})
 
-	t.Run("the Work pane", func(t *testing.T) {
+	t.Run("the Polecats pane", func(t *testing.T) {
 		t.Parallel()
 
-		dom := newPageDOMOpening(t, "work")
-		if dom.fold(t, "work").Collapsed {
-			t.Fatal("the work section is open here")
+		dom := newPageDOM(t)
+		if dom.fold(t, "polecats").Collapsed {
+			t.Fatal("the polecats section starts open")
 		}
 		// Every stamp is the test's, and the seat carries no age of its own, so
 		// the readings below differ in one field: the status of the seats read.
@@ -143,12 +143,12 @@ func TestPageRedrawsAPaneWhenOnlyItsReadStatusChanged(t *testing.T) {
 		}
 		pushState(t, dom, reading(fresh))
 		pushState(t, dom, reading(fresh))
-		if got := dom.element(t, "worknote").Text; strings.Contains(got, "failed") {
-			t.Fatalf("#worknote reads %q before any read failed", got)
+		if got := dom.element(t, "polecatsnote").Text; strings.Contains(got, "failed") {
+			t.Fatalf("#polecatsnote reads %q before any read failed", got)
 		}
 		pushState(t, dom, reading(failed))
-		if got := dom.element(t, "worknote").Text; !strings.Contains(got, "the seats read failed") {
-			t.Errorf("#worknote reads %q after the seats read failed, want it named", got)
+		if got := dom.element(t, "polecatsnote").Text; !strings.Contains(got, "the seats read failed") {
+			t.Errorf("#polecatsnote reads %q after the seats read failed, want it named", got)
 		}
 	})
 }

@@ -358,19 +358,19 @@ func TestStreamListEventsDrawTheSameRowsAsTheWholeState(t *testing.T) {
 		first.Write(f)
 	}
 
-	split := newPageDOMOpening(t, "work")
+	split := newPageDOM(t)
 	deliverFrames(t, split, first.String())
-	whole := newPageDOMOpening(t, "work")
+	whole := newPageDOM(t)
 	deliverStream(t, whole, "state", mustJSONString(t, h.State()))
 
 	assertSameDrawing := func(when string) {
 		t.Helper()
-		for _, id := range []string{"trend", "work"} {
+		for _, id := range []string{"trend", "polecats", "beads"} {
 			assert.Equal(t, whole.element(t, id), split.element(t, id), "#%s draws differently from the whole state %s", id, when)
 		}
 	}
 	assertSameDrawing("on connect")
-	require.Contains(t, split.element(t, "work").Text, "gt-1", "the Work pane drew no queue row to compare")
+	require.Contains(t, split.element(t, "beads").Text, "gt-1", "the Beads pane drew no queue row to compare")
 	require.Contains(t, split.element(t, "trend").Text, "landed bead", "the Landings pane drew no landing to compare")
 
 	// Only the queue changes, so only queue.ready goes out. The page must keep the
@@ -381,6 +381,6 @@ func TestStreamListEventsDrawTheSameRowsAsTheWholeState(t *testing.T) {
 	deliverStream(t, whole, "state", mustJSONString(t, h.State()))
 
 	assertSameDrawing("after the queue changed")
-	require.Contains(t, split.element(t, "work").Text, "gt-2", "the Work pane did not draw the changed queue")
+	require.Contains(t, split.element(t, "beads").Text, "gt-2", "the Beads pane did not draw the changed queue")
 	require.Contains(t, split.element(t, "trend").Text, "landed bead", "the Landings pane lost its rows when only the queue changed")
 }
