@@ -57,6 +57,12 @@ func Load(townRoot string) (*Map, error) {
 	if err != nil {
 		return nil, fmt.Errorf("workspaceid: reading %s: %w", path, err)
 	}
+	return Parse(path, data)
+}
+
+// Parse reads the workspace map held in data, the contents of the file at path,
+// which names the file in its errors. Load is Parse of the file's contents.
+func Parse(path string, data []byte) (*Map, error) {
 	var f file
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()

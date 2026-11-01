@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -22,13 +23,14 @@ func TestSecretNeverPrints(t *testing.T) {
 	}
 
 	printed := map[string]string{
-		"%v":          fmt.Sprintf("%v", secret),
-		"%s":          fmt.Sprintf("%s", secret),
-		"%+v":         fmt.Sprintf("%+v", secret),
-		"%#v":         fmt.Sprintf("%#v", secret),
-		"%q":          fmt.Sprintf("%q", secret),
-		"Sprint":      fmt.Sprint(secret),
-		"in a struct": fmt.Sprintf("%v", struct{ Key Secret }{secret}),
+		"%v":                     fmt.Sprintf("%v", secret),
+		"%s":                     fmt.Sprintf("%s", secret),
+		"%+v":                    fmt.Sprintf("%+v", secret),
+		"%#v":                    fmt.Sprintf("%#v", secret),
+		"%q":                     fmt.Sprintf("%q", secret),
+		"Sprint":                 fmt.Sprint(secret),
+		"in a struct":            fmt.Sprintf("%v", struct{ Key Secret }{secret}),
+		"in an unexported field": fmt.Sprintf("%+v", struct{ key Secret }{secret}),
 	}
 	encoded, err := json.Marshal(struct{ Key Secret }{secret})
 	if err != nil {
@@ -58,5 +60,65 @@ func TestSecretNeverPrints(t *testing.T) {
 
 	if got := fmt.Sprintf("%v", secret); got != "[redacted]" {
 		t.Errorf("fmt of a Secret = %q, want %q", got, "[redacted]")
+	}
+}
+
+// Destroy clears the value of a Secret a reader already holds, so the value is
+// not reachable through a copy read before the revision was destroyed.
+func TestDestroyClearsASecretAlreadyRead(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := NewFake()
+	rev := put(t, f, "ws", "api-key", "customer-key-value")
+	secret, err := f.Get(ctx, "ws", "api-key")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if err := f.Destroy(ctx, "ws", "api-key", rev); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if got := secret.Bytes(); len(got) != 0 {
+		t.Errorf("Bytes of a Secret read before Destroy = %q, want it cleared", got)
+	}
+}
+
+// Destroy wipes a value that readers hold while they read it. Each read must
+// return the whole value or nothing: a copy taken mid-wipe would hold a value
+// with some bytes already zeroed.
+func TestDestroyNeverShowsAPartlyWipedValue(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := NewFake()
+	value := strings.Repeat("k", 1<<16)
+	rev := put(t, f, "ws", "api-key", value)
+	secret, err := f.Get(ctx, "ws", "api-key")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	const readers = 8
+	const readsEach = 200
+	torn := make([]bool, readers)
+	var wg sync.WaitGroup
+	for i := range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range readsEach {
+				if got := string(secret.Bytes()); got != "" && got != value {
+					torn[i] = true
+					return
+				}
+			}
+		}()
+	}
+	if err := f.Destroy(ctx, "ws", "api-key", rev); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	wg.Wait()
+	for i, saw := range torn {
+		if saw {
+			t.Errorf("reader %d saw a partly wiped value", i)
+		}
 	}
 }

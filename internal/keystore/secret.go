@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // redacted is what every printing path shows in place of a value.
@@ -17,8 +18,10 @@ type Secret struct {
 }
 
 // secretValue is the value behind a pointer, so fmt's reflective printing of an
-// unexported Secret field shows an address rather than the value.
+// unexported Secret field shows an address rather than the value. mu guards
+// value: every copy of a Secret shares it, so a wipe can race a reader.
 type secretValue struct {
+	mu    sync.RWMutex
 	value []byte
 }
 
@@ -28,11 +31,26 @@ func newSecret(value []byte) Secret {
 	return Secret{v: &secretValue{value: append([]byte(nil), value...)}}
 }
 
-// Bytes returns a copy of the value.
+// wipe zeroes the value every copy of s shares and drops it, so a Secret that
+// was read before its revision was destroyed holds nothing afterwards.
+func (s Secret) wipe() {
+	if s.v == nil {
+		return
+	}
+	s.v.mu.Lock()
+	defer s.v.mu.Unlock()
+	clear(s.v.value)
+	s.v.value = nil
+}
+
+// Bytes returns a copy of the value. It holds the value's lock, so a copy taken
+// during a wipe is the whole value or nothing, never a part-zeroed one.
 func (s Secret) Bytes() []byte {
 	if s.v == nil {
 		return nil
 	}
+	s.v.mu.RLock()
+	defer s.v.mu.RUnlock()
 	return append([]byte(nil), s.v.value...)
 }
 

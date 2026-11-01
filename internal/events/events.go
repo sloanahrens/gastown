@@ -4,10 +4,12 @@
 package events
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -317,7 +319,7 @@ func writeTo(townRoot string, event Event) error {
 // is present but not a usable prefix, are WorkspaceUnresolved rather than a
 // dropped event or a guessed id (gt-91ty4).
 func workspaceOf(townRoot string, payload map[string]interface{}) string {
-	m, err := workspaceid.Load(townRoot)
+	m, err := loadWorkspaceMap(townRoot)
 	if err != nil {
 		return WorkspaceUnresolved
 	}
@@ -334,6 +336,55 @@ func workspaceOf(townRoot string, payload map[string]interface{}) string {
 		return WorkspaceUnresolved
 	}
 	return id
+}
+
+// workspaceMapRead is one parse of a town's workspace map: the file's contents
+// and the map parsed from exactly those contents.
+type workspaceMapRead struct {
+	raw []byte
+	m   *workspaceid.Map
+}
+
+// workspaceMapCache holds the last parse of each town's workspace map, keyed by
+// town root.
+type workspaceMapCache struct {
+	mu    sync.Mutex
+	towns map[string]workspaceMapRead
+}
+
+var cachedWorkspaceMaps workspaceMapCache
+
+// loadWorkspaceMap returns the town's workspace map. Every event write asks for
+// it. The file is read each time, and parsed again only when its contents differ
+// from the last parse, so an edit is never missed: the key is the content itself,
+// not a modification time or size that a rewrite can leave unchanged. A file that
+// cannot be read is not cached: workspaceid.Load decides the result, as it does
+// for an absent file.
+func loadWorkspaceMap(townRoot string) (*workspaceid.Map, error) {
+	if townRoot == "" {
+		return workspaceid.Load(townRoot)
+	}
+	path := filepath.Join(townRoot, workspaceid.File)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the town root the caller named
+	if err != nil {
+		return workspaceid.Load(townRoot)
+	}
+	c := &cachedWorkspaceMaps
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r, ok := c.towns[townRoot]; ok && bytes.Equal(r.raw, data) {
+		return r.m, nil
+	}
+	m, err := workspaceid.Parse(path, data)
+	if err != nil {
+		delete(c.towns, townRoot)
+		return nil, err
+	}
+	if c.towns == nil {
+		c.towns = make(map[string]workspaceMapRead)
+	}
+	c.towns[townRoot] = workspaceMapRead{raw: data, m: m}
+	return m, nil
 }
 
 // Payload helpers for common event structures.

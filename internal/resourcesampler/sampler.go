@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/workspaceid"
 )
 
@@ -65,8 +66,9 @@ type Row struct {
 
 // SetWorkspace stamps the row with the workspace id the map gives the rig it
 // names, or the map's default when it names none. A rig that is present but
-// empty stays unresolved rather than taking the default, which would attribute
-// the row to a workspace it did not name (gt-3mrzx).
+// empty is unresolved rather than the default, which would attribute the row to
+// a workspace it did not name, and an empty id would read as no id at all
+// (gt-3mrzx).
 func (r *Row) SetWorkspace(m *workspaceid.Map) {
 	if r.Rig == nil {
 		r.Workspace = m.Default()
@@ -74,7 +76,7 @@ func (r *Row) SetWorkspace(m *workspaceid.Map) {
 	}
 	id, err := m.For(*r.Rig)
 	if err != nil {
-		r.Workspace = ""
+		r.Workspace = events.WorkspaceUnresolved
 		return
 	}
 	r.Workspace = id

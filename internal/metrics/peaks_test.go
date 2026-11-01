@@ -371,3 +371,30 @@ func TestReadPeaksKeepsARowItCannotOrder(t *testing.T) {
 		})
 	}
 }
+
+// A peak row that carries the sampler's workspace id joins the same cells as one
+// without it: the reader takes the three peak values and ignores the id, which
+// the landing join has no column for (gt-3mrzx).
+func TestReadPeaksJoinsARowWithAWorkspaceField(t *testing.T) {
+	t.Parallel()
+	const bare = `{"v":1,"bead":"gt-q1","ended_at":"2026-10-24T17:33:15Z","peak_mem_bytes":5243572224,"peak_cpu_pct":272.57,"mem_limit_bytes":8589934592}`
+	const stamped = `{"v":1,"bead":"gt-q1","ended_at":"2026-10-24T17:33:15Z","workspace":"acme","peak_mem_bytes":5243572224,"peak_cpu_pct":272.57,"mem_limit_bytes":8589934592}`
+	want, wantHeader := peaksJoin(t, peaksEnv(map[string][]byte{peaksPath: []byte(bare + "\n")}), "gt-q1")
+	got, gotHeader := peaksJoin(t, peaksEnv(map[string][]byte{peaksPath: []byte(stamped + "\n")}), "gt-q1")
+	if !slices.Equal(gotHeader, wantHeader) {
+		t.Errorf("header with a workspace row = %v, want the header without it %v", gotHeader, wantHeader)
+	}
+	cells := map[string]string{
+		"sandbox_peak_mem_bytes":  "5243572224",
+		"sandbox_peak_cpu_pct":    "272.57",
+		"sandbox_mem_limit_bytes": "8589934592",
+	}
+	for column, value := range cells {
+		if got[column] != value {
+			t.Errorf("%s = %q, want %q", column, got[column], value)
+		}
+		if got[column] != want[column] {
+			t.Errorf("%s with a workspace row = %q, want %q as without it", column, got[column], want[column])
+		}
+	}
+}
