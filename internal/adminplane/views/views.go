@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/adminplane/registry"
-	"github.com/steveyegge/gastown/internal/metering/export"
 )
 
 // WorkspaceRow is one workspace as the list view shows it: its identity, its
@@ -46,9 +45,25 @@ type BeadRef struct {
 // export computes them: seat hours by profile, storage GB-months, and unpriced
 // token counts.
 type MeteringSummary struct {
-	SeatHours       []export.ProfileHours `json:"seat_hours"`
-	StorageGBMonths float64               `json:"storage_gb_months"`
-	Tokens          export.Tokens         `json:"tokens"`
+	SeatHours       []ProfileHours `json:"seat_hours"`
+	StorageGBMonths float64        `json:"storage_gb_months"`
+	Tokens          Tokens         `json:"tokens"`
+}
+
+// ProfileHours is one profile's seat hours for the month. It is the view's own
+// type, not the export's, so a field the export gains cannot reach a view.
+type ProfileHours struct {
+	Profile string
+	Hours   float64
+}
+
+// Tokens is a workspace's token counts for the month. It is the view's own
+// type, for the same reason as ProfileHours.
+type Tokens struct {
+	Input         int64
+	Output        int64
+	CacheCreation int64
+	CacheRead     int64
 }
 
 // WorkspaceDetail is one workspace as the detail view shows it. No field it
@@ -182,6 +197,6 @@ func beadRefs(beads []Bead) []BeadRef {
 // source's record cannot change a view already returned.
 func metering(m MeteringSummary) MeteringSummary {
 	out := MeteringSummary{StorageGBMonths: m.StorageGBMonths, Tokens: m.Tokens}
-	out.SeatHours = append([]export.ProfileHours(nil), m.SeatHours...)
+	out.SeatHours = append([]ProfileHours(nil), m.SeatHours...)
 	return out
 }
