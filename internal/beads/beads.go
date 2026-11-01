@@ -2494,6 +2494,12 @@ func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
 // "ephemeral" is deliberately absent from the expression: bd's filter treats
 // the absent predicate as "either table", and pinning it either way drops
 // half the union.
+//
+// bd builds that union by searching both tables, and the wisps search can fail
+// while the issues table still answers (gt-osaep). A failed union query is
+// therefore retried as a bd list read of the issues table alone. The retry
+// never returns an empty answer for a failed query: with no durable assignment
+// the wisps are still unread, so a hooked wisp cannot be ruled out.
 func (b *Beads) ListAssignedIssueStatuses(assignee string, statuses ...IssueStatus) ([]*Issue, error) {
 	if assignee == "" {
 		return nil, nil
@@ -2503,6 +2509,23 @@ func (b *Beads) ListAssignedIssueStatuses(assignee string, statuses ...IssueStat
 		return nil, nil
 	}
 
+	issues, err := b.queryAssignedAcrossTables(assignee, unique)
+	if err == nil {
+		return issues, nil
+	}
+
+	issues, tableErr := b.listAssignedFromIssuesTable(assignee, unique)
+	if tableErr != nil {
+		return nil, fmt.Errorf("assigned-work query failed (%v); reading assigned issues failed: %w", err, tableErr)
+	}
+	if len(issues) == 0 {
+		return nil, fmt.Errorf("assigned-work query failed (%v); the issues table holds no assignment for %s, so an empty hook is not established", err, assignee)
+	}
+	return issues, nil
+}
+
+// queryAssignedAcrossTables is the single union query over both tables.
+func (b *Beads) queryAssignedAcrossTables(assignee string, unique []IssueStatus) ([]*Issue, error) {
 	statusClauses := make([]string, 0, len(unique))
 	for _, status := range unique {
 		statusClauses = append(statusClauses, "status="+quoteBDQueryValue(string(status)))
@@ -2520,6 +2543,36 @@ func (b *Beads) ListAssignedIssueStatuses(assignee string, statuses ...IssueStat
 	var issues []*Issue
 	if err := json.Unmarshal(out, &issues); err != nil {
 		return nil, fmt.Errorf("parsing bd query output: %w", err)
+	}
+	return issues, nil
+}
+
+// listAssignedFromIssuesTable reads the durable assignments with bd list,
+// which reads the issues table and never the wisps table. It is the fallback
+// for a failed queryAssignedAcrossTables, and it leaves the wisps unread
+// rather than repeat the search the fallback exists to survive.
+//
+// The status list is comma-joined, the spelling bd list accepts; bd query
+// rejects it (statusQueryClause).
+func (b *Beads) listAssignedFromIssuesTable(assignee string, unique []IssueStatus) ([]*Issue, error) {
+	names := make([]string, 0, len(unique))
+	for _, status := range unique {
+		names = append(names, string(status))
+	}
+	out, err := b.run("list", "--json",
+		"--status="+strings.Join(names, ","),
+		"--assignee="+assignee,
+		"--limit=0")
+	if err != nil {
+		return nil, err
+	}
+	if err := RequireJSON(out, "bd list"); err != nil {
+		return nil, err
+	}
+
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 	return issues, nil
 }

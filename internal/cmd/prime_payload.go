@@ -399,10 +399,14 @@ func primeStepFormulaName(hookedBead *beads.Issue, explicit string) string {
 // hook query as an empty hook (GH#2638). It goes into the prime payload on
 // stdout: the SessionStart hook delivers stdout to the model and stderr only to
 // the user (gt-h7ntn).
+//
+// The banner does not call the failure a database outage: the issues table can
+// answer while the query over both tables fails (gt-osaep), so the failure
+// names the step in err and leaves the cause to the operator.
 func hookQueryErrorBanner(err error) string {
-	return "\n## \u26a0\ufe0f  DATABASE ERROR \u2014 DO NOT RUN " + cli.Name() + " done \u26a0\ufe0f\n" +
+	return "\n## \u26a0\ufe0f  HOOK LOOKUP FAILED \u2014 DO NOT RUN " + cli.Name() + " done \u26a0\ufe0f\n" +
 		"Hook query failed: " + err.Error() + "\n" +
-		"This is a database connectivity error, NOT an empty hook.\n" +
+		"This is a failed hook lookup, NOT an empty hook.\n" +
 		"Your work may still be assigned. Do NOT close any beads.\n" +
 		"Probe with `bd list --limit 1`, retried up to 3 times about 10 seconds apart; a first call can fail and the next succeed.\n" +
 		"Port 3307 from bash, nc or curl is denied by the sandbox policy and is not evidence of an outage; do not poll it, `bd` is the probe.\n" +
