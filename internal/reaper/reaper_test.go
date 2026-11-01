@@ -1393,6 +1393,12 @@ type fakeReaperState struct {
 	events        []fakeEvent
 	wispEvents    []fakeEvent
 	journalEvents []fakeEvent
+
+	// The errors the events queries fail with, so the retention tests can
+	// drive each failure path: the table probe, the dry-run count, the delete.
+	probeErr  error
+	countErr  error
+	deleteErr error
 }
 
 // fakeEvent is one row of an event table, by age.
@@ -1867,11 +1873,17 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 
 	switch {
 	case strings.Contains(normalized, "FROM information_schema.tables WHERE table_name = ?"):
+		if c.state.probeErr != nil {
+			return nil, c.state.probeErr
+		}
 		if c.state.hasTableLocked(namedString(args, 0)) {
 			return fakeCountRows(1), nil
 		}
 		return fakeCountRows(0), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) AS cnt FROM events WHERE created_at < ?"):
+		if c.state.countErr != nil {
+			return nil, c.state.countErr
+		}
 		return fakeCountRows(c.state.eventsOlderThanLocked(namedTime(args))), nil
 	case strings.Contains(normalized, "SELECT COUNT(DISTINCT w.id) FROM wisps w") && strings.Contains(normalized, "sib.type = 'blocks'"):
 		return fakeCountRows(c.state.orphanedStepCountLocked()), nil
@@ -1965,6 +1977,9 @@ func (c *fakeReaperConn) ExecContext(_ context.Context, query string, args []dri
 	if strings.Contains(normalized, "DELETE FROM events WHERE created_at <") {
 		if !strings.Contains(normalized, "ORDER BY created_at LIMIT ?") {
 			return nil, fmt.Errorf("events purge delete is not bounded by ORDER BY created_at LIMIT: %s", normalized)
+		}
+		if c.state.deleteErr != nil {
+			return nil, c.state.deleteErr
 		}
 		return fakeReaperResult(c.state.deleteEventsLocked(namedTime(args), namedInt(args, 1))), nil
 	}

@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+// TestParseAgeDurationRejectsANonIntegerDaySuffix: a day-suffix age whose
+// number is not a whole count of days is an error, not a silently shorter or
+// zero duration.
+func TestParseAgeDurationRejectsANonIntegerDaySuffix(t *testing.T) {
+	t.Parallel()
+	if _, err := ParseAgeDuration("1.5d"); err == nil || !strings.Contains(err.Error(), "invalid day suffix") {
+		t.Errorf("ParseAgeDuration(\"1.5d\") error = %v, want an invalid day suffix", err)
+	}
+}
+
 // TestWispReaperConfigDecodesEventsRetention: the key survives strict decoding
 // into the field EventsRetention reads.
 func TestWispReaperConfigDecodesEventsRetention(t *testing.T) {
@@ -39,6 +49,7 @@ func TestWispReaperEventsRetention(t *testing.T) {
 		{name: "day suffix", value: "30d", want: 30 * 24 * time.Hour},
 		{name: "hour syntax", value: "720h", want: 720 * time.Hour},
 		{name: "unparseable", value: "soon", wantErr: true},
+		{name: "day suffix is not a whole number", value: "1.5d", wantErr: true},
 		{name: "zero is refused", value: "0d", wantErr: true},
 		{name: "negative is refused", value: "-1h", wantErr: true},
 	}

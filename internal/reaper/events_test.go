@@ -2,6 +2,7 @@ package reaper
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -187,6 +188,65 @@ func TestPurgeEventsRefusesUnusableBounds(t *testing.T) {
 			}
 			if statements != 0 {
 				t.Errorf("a refused pass sent %d statements: %v", statements, state.ops)
+			}
+		})
+	}
+}
+
+// TestPurgeEventsReportsAFailedStep: each failing database call is returned,
+// never read as nothing to delete.
+func TestPurgeEventsReportsAFailedStep(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		fail   func(*fakeReaperState) error
+		dryRun bool
+		want   string
+	}{
+		{
+			name: "table probe",
+			fail: func(s *fakeReaperState) error {
+				s.probeErr = errors.New("probe failed")
+				return s.probeErr
+			},
+			want: "check events table",
+		},
+		{
+			name:   "dry-run count",
+			dryRun: true,
+			fail: func(s *fakeReaperState) error {
+				s.countErr = errors.New("count failed")
+				return s.countErr
+			},
+			want: "count failed",
+		},
+		{
+			name: "delete",
+			fail: func(s *fakeReaperState) error {
+				s.deleteErr = errors.New("delete failed")
+				return s.deleteErr
+			},
+			want: "delete failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := newEventsState()
+			state.addEvent(1, eventsNow, 31*24*time.Hour)
+			wantErr := tt.fail(state)
+			db := openFakeReaperDB(t, state)
+			t.Cleanup(func() { _ = db.Close() })
+
+			_, err := PurgeEvents(context.Background(), db, EventsPurgeOptions{
+				Now:        eventsNow,
+				Retain:     30 * 24 * time.Hour,
+				Batch:      10,
+				MaxBatches: 5,
+				DryRun:     tt.dryRun,
+			})
+			if err == nil || !errors.Is(err, wantErr) || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("PurgeEvents error = %v, want it to wrap %q", err, tt.want)
 			}
 		})
 	}
