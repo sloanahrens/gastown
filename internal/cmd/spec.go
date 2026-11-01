@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/imagedrift"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/lock"
@@ -1318,6 +1319,10 @@ type specDispatchEnv struct {
 	// (installpending, gt-2rp64). It is read at the tick's clock, so a test's
 	// Now judges the marker. Nil reads no marker.
 	PendingInstall func(now time.Time) (*installpending.Marker, error)
+	// Drift is the marker a sling refused for a lagging sandbox image leaves,
+	// shared with the background sling processes (internal/imagedrift, gt-uisom).
+	// The zero value records and holds nothing.
+	Drift imagedrift.Store
 	// StartupBackoff reports why an automatic sling of beadID must wait: its
 	// last sling failed at session start and the resting window has not
 	// elapsed (dispatch.StartupBackoff). Nil consults no record, which is what
@@ -1889,7 +1894,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report.CandidatesCalls = env.Reads.endPhase()
 	slingAt := env.Now()
 	if env.Background {
-		specHandOffPendingSlings(pending, &report)
+		specHandOffPendingSlings(env, pending, &report)
 	} else {
 		specRunPendingSlings(env, pending, &report, &budget)
 	}
@@ -2193,6 +2198,12 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 		o.took = env.Now().Sub(start)
 		return o
 	}
+	// A refusal for the lagging image stands for HoldFor: the slings behind it
+	// are not tried, so none creates a molecule it would burn (gt-uisom).
+	if held, line := env.imageDriftSkip(id, seat.Agent); held {
+		entry.Line = line
+		return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+	}
 	var polecat string
 	attempts, err := specdispatch.RetryOnContention(specdispatch.RetryAttempts, env.Sleep, rand.New(rand.NewSource(env.Now().UnixNano())), func() error { //nolint:gosec // G404: backoff jitter
 		var slingErr error
@@ -2207,6 +2218,9 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 		// charged for this tick (gt-pto2f), and the next tick slings it again.
 		if errors.Is(err, session.ErrImageDrift) {
 			entry.Line = fmt.Sprintf("%s: sling deferred, the sandbox image lags the installed gt (it is rebuilt after an install): %s", id, firstErrLine(err))
+			if markErr := env.Drift.Write(env.Now(), seat.Agent); markErr != nil {
+				entry.Line += fmt.Sprintf(" (image-drift marker not written: %v)", markErr)
+			}
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 		}
 		// A rig's cache volume that cannot be created is the seat's precondition
@@ -2251,6 +2265,10 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 	}
 	entry.Polecat = polecat
 	entry.Line = fmt.Sprintf("%s: slung to %s/%s on %s (%s)", id, c.Rig, polecat, seat.Agent, seat.Reason)
+	// A sling that reached a session proves this seat's image is current.
+	if clearErr := env.Drift.ClearFor(seat.Agent); clearErr != nil {
+		entry.Line += fmt.Sprintf(" (image-drift marker not cleared: %v)", clearErr)
+	}
 	entry.Line += specFormulaNote(c.Run) + specResumeNote(p.resume, p.gone)
 	if attempts > 1 {
 		entry.Line += fmt.Sprintf(" after %d attempts", attempts)
@@ -2711,6 +2729,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
 		PendingInstall: func(now time.Time) (*installpending.Marker, error) { return pendingInstall.Pending(now) },
+		Drift:          imagedrift.StoreFor(townRoot),
 		StartupBackoff: func(id string) string { return dispatch.StartupBackoff(townRoot, id) },
 		Candidates: func() specBoardRead {
 			// A dry run writes nothing, so it reports the labeled beads as
@@ -3620,4 +3639,16 @@ func refuseOpenBlockers(read func(townRoot, beadID string) (*beadInfo, error)) f
 		}
 		return info, nil
 	}
+}
+
+// imageDriftSkip reports whether a refusal of agent's seat for a lagging sandbox
+// image stands, and the skip line for bead when it does. A marker that cannot
+// be read holds nothing: the sling is tried as it was before the marker.
+func (e specDispatchEnv) imageDriftSkip(bead, agent string) (bool, string) {
+	held, m, err := e.Drift.Held(e.Now(), agent)
+	if err != nil || !held {
+		return false, ""
+	}
+	return true, fmt.Sprintf("%s: not tried, the sandbox image lags the installed gt (a sling to %s was refused for it %s ago)",
+		bead, agent, e.Now().Sub(m.At).Round(time.Second))
 }
