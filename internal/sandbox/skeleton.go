@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -397,30 +398,140 @@ func (r townReader) read(rel string) ([]byte, error) {
 	return data, nil
 }
 
-func (r townReader) readObject(rel string) (map[string]any, error) {
-	raw, err := r.read(rel)
-	if err != nil {
-		return nil, err
-	}
+// sandboxBeadsMetadata renders one beads metadata.json for the sandbox: the
+// document scrubbed, pointed at the control plane's Dolt server, and keeping
+// its project_id. bd compares that identity with the database's and refuses to
+// connect on a mismatch, so a stripped one would let a create land in a
+// database that is not this town's. It is an identity, not a credential, but
+// its UUID shape reads as a token, so only a UUID is kept: any other string
+// under that key could be a credential.
+func sandboxBeadsMetadata(rel string, raw []byte, controlPlaneHost string) ([]byte, error) {
 	doc, err := decodeObject(raw)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: %s: %w", rel, err)
 	}
-	return doc, nil
+	projectID, hasProjectID := doc["project_id"].(string)
+	doc = scrubDocument(doc)
+	if hasProjectID {
+		if !uuidShape.MatchString(projectID) {
+			return nil, fmt.Errorf("sandbox: %s: project_id is not a UUID", rel)
+		}
+		doc["project_id"] = projectID
+	}
+	doc["dolt_server_host"] = controlPlaneHost
+	out, err := encodeJSON(doc)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: %s: %w", rel, err)
+	}
+	return out, nil
+}
+
+// addRoutedRigBeads adds the beads metadata and config of every rig the
+// town's routes table names, at the workspace the seat resolves that rig to.
+// The seat's own rig is rendered by the caller and skipped here, and so is any
+// further route for a rig the table already named: the first is the one
+// ResolveRepoAliasBeadsDir finds, so the others are not addresses the seat
+// uses. A rig whose host workspace holds no metadata is skipped: it costs that
+// rig's alias in the seat, not the seat. A read that fails otherwise is
+// returned, as the rest of this render does (gt-dmtmv).
+func addRoutedRigBeads(town townReader, s SkeletonSpec, add func(string, []byte), addDir func(string)) error {
+	routes, err := beads.LoadRoutes(filepath.Join(s.TownRoot, ".beads"))
+	if err != nil {
+		return fmt.Errorf("sandbox: reading routes: %w", err)
+	}
+	carried := map[string]bool{}
+	for _, route := range routes {
+		if route.Path == "." {
+			continue // the town's own beads, added by the caller
+		}
+		// A route that leaves the town is one the seat cannot carry, and the
+		// seat's own ResolveRepoAliasBeadsDir refuses it: skip it here rather
+		// than fail a seat that would never resolve it anyway.
+		if path.IsAbs(route.Path) || route.Path != path.Clean(route.Path) || strings.HasPrefix(route.Path, "../") {
+			continue
+		}
+		rig, _, _ := strings.Cut(route.Path, "/")
+		if rig == "" || rig == s.Rig || carried[rig] {
+			continue
+		}
+		carried[rig] = true
+		raw, err := routedRigMetadata(town, rig, route.Path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		// The workspace exists here, so its directory is listed too: left
+		// implicit, tar extracts it 0755 and bd warns on every call.
+		addDir(path.Join(route.Path, ".beads"))
+		metadataRel := path.Join(route.Path, ".beads", "metadata.json")
+		out, err := sandboxBeadsMetadata(metadataRel, raw, s.ControlPlaneHost)
+		if err != nil {
+			return err
+		}
+		add(metadataRel, out)
+		// A rig with no config.yaml is still carried: bd opens the database
+		// without one, and the seat's own rig stays the only rig whose config
+		// the render requires (gt-z7ut1).
+		configRel, rawConfig, found, err := rigBeadsConfigFound(town, rig)
+		if err != nil {
+			return err
+		}
+		if !found {
+			continue
+		}
+		data, err := sanitizeFile(configRel, rawConfig)
+		if err != nil {
+			return fmt.Errorf("sandbox: %s: %w", configRel, err)
+		}
+		add(path.Join(route.Path, ".beads", "config.yaml"), data)
+	}
+	return nil
+}
+
+// routedRigMetadata reads rig's beads metadata.json as the host keeps it: the
+// workspace the route names, else the rig's own .beads, which on some rigs
+// holds the file beside a redirect (devops, fractals, beaver, agentlab).
+// fs.ErrNotExist says the host has no workspace for the rig.
+func routedRigMetadata(town townReader, rig, routePath string) ([]byte, error) {
+	for _, rel := range []string{routePath + "/.beads/metadata.json", rig + "/.beads/metadata.json"} {
+		raw, err := town.read(rel)
+		if err == nil {
+			return raw, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("sandbox: rig %s has no beads metadata.json: %w", rig, fs.ErrNotExist)
 }
 
 // rigBeadsConfig returns the town-relative path and the contents of the rig's
 // beads config.yaml: the first of the rig's beads directories that holds one.
 func rigBeadsConfig(town townReader, rig string) (string, []byte, error) {
+	rel, data, found, err := rigBeadsConfigFound(town, rig)
+	if err != nil {
+		return "", nil, err
+	}
+	if !found {
+		return "", nil, fmt.Errorf("sandbox: rig %s has no beads config.yaml in %s", rig, strings.Join(config.RigBeadsDirs(rig), " or "))
+	}
+	return rel, data, nil
+}
+
+// rigBeadsConfigFound is rigBeadsConfig that reports a missing config as not
+// found, for a caller that may go on without one.
+func rigBeadsConfigFound(town townReader, rig string) (string, []byte, bool, error) {
 	for _, dir := range config.RigBeadsDirs(rig) {
 		rel := dir + "/config.yaml"
 		if data, err := town.read(rel); err == nil {
-			return rel, data, nil
+			return rel, data, true, nil
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", nil, err
+			return "", nil, false, err
 		}
 	}
-	return "", nil, fmt.Errorf("sandbox: rig %s has no beads config.yaml in %s", rig, strings.Join(config.RigBeadsDirs(rig), " or "))
+	return "", nil, false, nil
 }
 
 func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
@@ -444,6 +555,9 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	}
 	add := func(rel string, data []byte) {
 		entries = append(entries, skeletonEntry{name: path.Join(skeletonRoot, rel), data: data})
+	}
+	addDir := func(rel string) {
+		entries = append(entries, skeletonEntry{name: path.Join(skeletonRoot, rel) + "/", dir: true})
 	}
 
 	// The rig's .beads holds only a pointer at the rig's shared beads, as on the
@@ -497,28 +611,26 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 
 	// Both beads metadata files point at the control plane's Dolt server.
 	for _, rel := range []string{".beads/metadata.json", s.Rig + "/mayor/rig/.beads/metadata.json"} {
-		doc, err := town.readObject(rel)
+		raw, err := town.read(rel)
 		if err != nil {
 			return nil, err
 		}
-		// bd compares project_id with the database's and refuses to connect on
-		// a mismatch. It is an identity, not a credential, but its UUID shape
-		// reads as a token, so keep the original string. Only a UUID is kept:
-		// any other string under that key could be a credential.
-		projectID, hasProjectID := doc["project_id"].(string)
-		doc = scrubDocument(doc)
-		if hasProjectID {
-			if !uuidShape.MatchString(projectID) {
-				return nil, fmt.Errorf("sandbox: %s: project_id is not a UUID", rel)
-			}
-			doc["project_id"] = projectID
-		}
-		doc["dolt_server_host"] = s.ControlPlaneHost
-		out, err := encodeJSON(doc)
+		out, err := sandboxBeadsMetadata(rel, raw, s.ControlPlaneHost)
 		if err != nil {
-			return nil, fmt.Errorf("sandbox: %s: %w", rel, err)
+			return nil, err
 		}
 		add(rel, out)
+	}
+
+	// A polecat files a bead in another rig with `gt bead create --rig <rig>`,
+	// and bd opens that rig's database only through a workspace whose
+	// metadata.json names it. The seat's town holds the seat's rig alone, so
+	// the other rigs the routes table names get theirs here; without them bd
+	// falls back to the seat's workspace, refuses the other database's
+	// identity, and the Found bead lands in hq, which the spec dispatcher
+	// never reads (gt-dmtmv).
+	if err := addRoutedRigBeads(town, s, add, addDir); err != nil {
+		return nil, err
 	}
 
 	townSettings, err := town.read("settings/config.json")

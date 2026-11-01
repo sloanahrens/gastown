@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // Route represents a prefix-to-path routing rule.
@@ -457,6 +458,16 @@ func GetRigDirForName(townRoot, rigName string) string {
 // .beads directory. Bare aliases are route names like "gastown" plus the
 // town aliases "hq" and "town"; path-like repo values are intentionally left
 // unresolved so callers can preserve bd's native --repo path semantics.
+//
+// A rig's workspace resolves even when it is not on disk. A sandbox seat's
+// town skeleton holds the seat's own rig alone while routes.jsonl names every
+// rig in the town, so a polecat there could not file a bead in another rig
+// and filed it in hq instead, which the spec dispatcher never reads
+// (gt-dmtmv). The absent case is narrower than the present one: the alias must
+// be a rig the routes name, and the town registry must name that rig's
+// database, so a create pinned to the result addresses that database and
+// nothing else. Nothing is created: callers treat the returned directory as an
+// address, and pin bd to the database the registry names for it.
 func ResolveRepoAliasBeadsDir(townRoot, repo string) (string, bool) {
 	if townRoot == "" || isRepoPathLike(repo) {
 		return "", false
@@ -473,10 +484,31 @@ func ResolveRepoAliasBeadsDir(townRoot, repo string) (string, bool) {
 	}
 
 	beadsDir := ResolveBeadsDir(rigDir)
-	if !validRepoAliasBeadsDir(townRoot, beadsDir) {
+	if !pathWithin(townRoot, beadsDir) {
 		return "", false
 	}
-	return beadsDir, true
+	if validRepoAliasBeadsDir(townRoot, beadsDir) {
+		return beadsDir, true
+	}
+	if absentRepoAliasBeadsDir(beadsDir) {
+		return beadsDir, true
+	}
+	return "", false
+}
+
+// absentRepoAliasBeadsDir reports whether beadsDir can be a rig route's beads
+// directory although it is not on disk. GetRigDirForName only hands back a
+// directory the routes name, and a directory the town registry cannot place on
+// a database is refused: a create aimed there would have no database to name
+// and would land in whatever bd fell back to, hq included.
+func absentRepoAliasBeadsDir(beadsDir string) bool {
+	if filepath.Base(filepath.Clean(beadsDir)) != ".beads" {
+		return false
+	}
+	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+		return false
+	}
+	return townconfig.DatabaseForBeadsDir(beadsDir) != ""
 }
 
 // RewriteBDCreateRepoAlias removes a single bd create --repo alias from argv

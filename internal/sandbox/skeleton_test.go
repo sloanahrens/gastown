@@ -932,6 +932,48 @@ func renderRigWithout(t *testing.T, drop []string, add map[string]string) (map[s
 	return renderTown(t, writeTown(t, files))
 }
 
+// TestSkeletonCarriesRoutedRigWorkspaces: a polecat files a bead in another rig
+// with `gt bead create --rig <rig>`, and bd opens that rig's database only
+// through a workspace whose metadata.json names it. Every rig the routes table
+// names therefore travels with the seat, pointed at the control plane and
+// keeping its identity; a rig the host has no workspace for is skipped rather
+// than failing the seat (gt-dmtmv).
+func TestSkeletonCarriesRoutedRigWorkspaces(t *testing.T) {
+	t.Parallel()
+
+	const beadsProjectID = "00000000-0000-4000-8000-0000000000be"
+	files := minimalTown()
+	files[".beads/routes.jsonl"] = `{"prefix":"gt-","path":"gastown"}` + "\n" +
+		`{"prefix":"be-","path":"beads/mayor/rig"}` + "\n" +
+		`{"prefix":"gh-","path":"ghost/mayor/rig"}` + "\n"
+	files["beads/mayor/rig/.beads/metadata.json"] = `{"dolt_database":"be","dolt_server_host":"127.0.0.1","dolt_server_port":3307,"project_id":"` + beadsProjectID + `"}`
+	files["beads/mayor/rig/.beads/config.yaml"] = "issue_prefix: be\n"
+	got, err := renderTown(t, writeTown(t, files))
+	if err != nil {
+		t.Fatalf("RenderSkeleton: %v", err)
+	}
+
+	if _, ok := got["gt/beads/mayor/rig/.beads/"]; !ok {
+		t.Error("rig b's beads directory is not listed, so it extracts 0755 and bd warns on every call")
+	}
+	meta := decodeJSON(t, got["gt/beads/mayor/rig/.beads/metadata.json"])
+	if meta["dolt_database"] != "be" {
+		t.Errorf("dolt_database = %v, want be", meta["dolt_database"])
+	}
+	if meta["dolt_server_host"] != "host.docker.internal" {
+		t.Errorf("dolt_server_host = %v, want the control plane", meta["dolt_server_host"])
+	}
+	if meta["project_id"] != beadsProjectID {
+		t.Errorf("project_id = %v, want it kept: bd refuses a database whose identity does not match", meta["project_id"])
+	}
+	if c := string(got["gt/beads/mayor/rig/.beads/config.yaml"]); !strings.Contains(c, "issue_prefix: be") {
+		t.Errorf("config = %q, want the rig's own config", c)
+	}
+	if _, ok := got["gt/ghost/mayor/rig/.beads/metadata.json"]; ok {
+		t.Error("the skeleton carries a workspace for a rig the host has none for")
+	}
+}
+
 // renderTown renders the skeleton for rig gastown from townRoot and returns the
 // archive's entries.
 func renderTown(t *testing.T, townRoot string) (map[string][]byte, error) {

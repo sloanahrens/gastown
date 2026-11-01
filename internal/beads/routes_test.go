@@ -509,6 +509,152 @@ func TestResolveRepoAliasBeadsDir(t *testing.T) {
 	}
 }
 
+// seatTownWithRoutes builds the town a sandbox seat gets (gt-dmtmv): a routes
+// table naming rigs a and b and the town, the town's and rig a's workspaces on
+// disk, and the registry that names both rigs' databases. Rig b's workspace is
+// the one the skeleton leaves out.
+func seatTownWithRoutes(t *testing.T) (townRoot string) {
+	t.Helper()
+	// pathWithin compares resolved roots, so a symlinked temp dir (macOS
+	// /var -> /private/var) must be resolved before the town is built.
+	townRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	townBeads := filepath.Join(townRoot, ".beads")
+	rigABeads := filepath.Join(townRoot, "a", "mayor", "rig", ".beads")
+	for _, dir := range []string{filepath.Join(townRoot, "mayor"), townBeads, rigABeads} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townBeads, "routes.jsonl"), []byte(
+		`{"prefix":"aa-","path":"a/mayor/rig"}`+"\n"+
+			`{"prefix":"bb-","path":"b/mayor/rig"}`+"\n"+
+			`{"prefix":"hq-","path":"."}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{
+  "type": "town",
+  "version": 2,
+  "name": "seat",
+  "registry": {"version": 1, "rigs": {
+    "a": {"beads": {"prefix": "aa"}, "dolt_database": "aa"},
+    "b": {"beads": {"prefix": "bb"}, "dolt_database": "bbdb"}
+  }}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigABeads, "metadata.json"), []byte(`{"dolt_database":"aa"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
+// TestRepoAliasSkeletonTown: a seat's town holds one rig's tree while its
+// routes table names every rig, and a polecat must still be able to name
+// another rig. Alias b resolves to the beads directory its route names, which
+// the resolution does not create.
+func TestRepoAliasSkeletonTown(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTownWithRoutes(t)
+
+	got, ok := ResolveRepoAliasBeadsDir(townRoot, "b")
+	if !ok {
+		t.Fatalf("ResolveRepoAliasBeadsDir(%q, \"b\") did not resolve", townRoot)
+	}
+	want := filepath.Join(townRoot, "b", "mayor", "rig", ".beads")
+	if got != want {
+		t.Fatalf("ResolveRepoAliasBeadsDir = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Fatalf("resolving alias b touched %s (stat err = %v); resolution creates nothing", want, err)
+	}
+
+	// The rig whose workspace is on disk resolves as it always did.
+	if got, ok := ResolveRepoAliasBeadsDir(townRoot, "a"); !ok || got != filepath.Join(townRoot, "a", "mayor", "rig", ".beads") {
+		t.Fatalf("ResolveRepoAliasBeadsDir(%q) = %q, %v; want rig a's workspace", got, got, ok)
+	}
+}
+
+// TestRepoAliasUnknown: an alias the routes table does not name is refused by
+// the create path, not guessed.
+func TestRepoAliasUnknown(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTownWithRoutes(t)
+	r := newRecorder(nil)
+	b := newBeads(beadsFields{workDir: filepath.Join(townRoot, "a", "mayor", "rig"), baseEnv: []string{"PATH=/usr/bin"}, exec: r.exec})
+
+	_, err := b.Create(CreateOptions{Title: "filed nowhere", Rig: "nowhere"})
+	if err == nil || !strings.Contains(err.Error(), `unknown repo/rig alias "nowhere"`) {
+		t.Fatalf("Create(--rig=nowhere) error = %v, want the unknown repo/rig alias refusal", err)
+	}
+	if calls := r.calls(); len(calls) != 0 {
+		t.Fatalf("bd ran %d time(s) for an unresolved alias: %v", len(calls), r.argvs())
+	}
+	if _, ok := ResolveRepoAliasBeadsDir(townRoot, "nowhere"); ok {
+		t.Error("ResolveRepoAliasBeadsDir resolved an alias the routes table does not name")
+	}
+}
+
+// TestRepoAliasRigTheTownCannotPlace: a rig the routes name but the town
+// registry gives no database is refused rather than left to bd's fallback,
+// which is the town's own database.
+func TestRepoAliasRigTheTownCannotPlace(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTownWithRoutes(t)
+	// Drop rig b from the registry, keeping its route.
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{
+  "type": "town",
+  "version": 2,
+  "name": "seat",
+  "registry": {"version": 1, "rigs": {
+    "a": {"beads": {"prefix": "aa"}, "dolt_database": "aa"}
+  }}
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, ok := ResolveRepoAliasBeadsDir(townRoot, "b"); ok {
+		t.Fatalf("ResolveRepoAliasBeadsDir resolved rig b to %q with no database in the registry", got)
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, "b")); !os.IsNotExist(err) {
+		t.Fatalf("rig b's tree exists (stat err = %v); the test needs it absent", err)
+	}
+}
+
+// TestRepoAliasCreatePinsAnAbsentWorkspace: creating in a rig whose workspace
+// the seat does not hold pins bd to that rig's database by name, and writes
+// nothing: no workspace directory, no config.yaml, and never the town's
+// database.
+func TestRepoAliasCreatePinsAnAbsentWorkspace(t *testing.T) {
+	t.Parallel()
+	townRoot := seatTownWithRoutes(t)
+	r := newRecorder(func([]string) reply {
+		return reply{stdout: `{"id":"bb-1","title":"found in b","status":"open"}`}
+	})
+	b := newBeads(beadsFields{workDir: filepath.Join(townRoot, "a", "mayor", "rig"), baseEnv: []string{"PATH=/usr/bin"}, exec: r.exec})
+
+	if _, err := b.Create(CreateOptions{Title: "found in b", Rig: "b"}); err != nil {
+		t.Fatalf("Create(--rig=b): %v", err)
+	}
+
+	calls := r.calls()
+	if len(calls) != 1 {
+		t.Fatalf("bd calls = %d, want one create: %v", len(calls), r.argvs())
+	}
+	wantDir := filepath.Join(townRoot, "b", "mayor", "rig", ".beads")
+	if got, _ := lastEnvValue(calls[0].env, "BEADS_DIR"); got != wantDir {
+		t.Errorf("BEADS_DIR = %q, want rig b's workspace %q", got, wantDir)
+	}
+	if got, _ := lastEnvValue(calls[0].env, "BEADS_DOLT_SERVER_DATABASE"); got != "bbdb" {
+		t.Errorf("BEADS_DOLT_SERVER_DATABASE = %q, want bbdb (rig b's database)", got)
+	}
+	if _, err := os.Stat(wantDir); !os.IsNotExist(err) {
+		t.Errorf("create made rig b's workspace (stat err = %v); it must not", err)
+	}
+}
+
 func TestRewriteBDCreateRepoAlias(t *testing.T) {
 	townRoot := t.TempDir()
 	townBeads := filepath.Join(townRoot, ".beads")
