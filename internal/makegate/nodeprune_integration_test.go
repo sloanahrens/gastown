@@ -37,6 +37,11 @@ case "$1" in
 esac
 `
 
+// outerMakeFlags are the variables an outer make exports to its recipes. A test
+// that runs make itself unsets them, so the flags of the make running the tests
+// (-n above all) do not reach the make under test.
+var outerMakeFlags = []string{"MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS"}
+
 // envMakeWithout returns a Make for the checkout at root with env appended to
 // the process environment and unset removed from it. Unlike envMake it can make
 // a variable absent, which a recipe default needs: make's `?=` applies only
@@ -101,7 +106,7 @@ func pruneMake(t *testing.T, root, stub, logPath string, failImages bool) Make {
 	if failImages {
 		env = append(env, "PRUNE_FAIL_IMAGES=1")
 	}
-	return envMakeWithout(root, false, nil, env...)
+	return envMakeWithout(root, false, outerMakeFlags, env...)
 }
 
 // TestIntegrationNodePrunePolecatImageLeavesNodesAloneByDefault checks
@@ -110,7 +115,7 @@ func pruneMake(t *testing.T, root, stub, logPath string, failImages bool) Make {
 // and the dry run prints the prune.
 func TestIntegrationNodePrunePolecatImageLeavesNodesAloneByDefault(t *testing.T) {
 	m := envMakeWithout(repoRoot(t), true,
-		[]string{"POLE_NODE_PRUNE", "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS"},
+		append([]string{"POLE_NODE_PRUNE"}, outerMakeFlags...),
 		"POLE_TOWN="+t.TempDir(), "POLE_SEED_DIR="+filepath.Join(t.TempDir(), "seed"))
 
 	out := dryTarget(t, m, "polecat-image", "BD_SRC=/somewhere/else")

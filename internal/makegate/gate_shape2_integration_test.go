@@ -3,11 +3,9 @@
 package makegate
 
 import (
-	"context"
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -321,25 +319,5 @@ func firstLineMatching(text string, re *regexp.Regexp) string {
 // that key is removed first, so an ambient export cannot override the value the
 // case means to test.
 func envMake(root string, env ...string) Make {
-	overridden := make(map[string]bool, len(env))
-	for _, kv := range env {
-		key, _, _ := strings.Cut(kv, "=")
-		overridden[key] = true
-	}
-	var base []string
-	for _, kv := range os.Environ() {
-		key, _, _ := strings.Cut(kv, "=")
-		if !overridden[key] {
-			base = append(base, kv)
-		}
-	}
-	childEnv := append(base, env...)
-	return func(args ...string) (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), makeTestTimeout)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "make", append([]string{"-C", root, "--no-print-directory", "-n"}, args...)...)
-		cmd.Env = childEnv
-		out, err := cmd.CombinedOutput()
-		return string(out), err
-	}
+	return envMakeWithout(root, true, nil, env...)
 }
