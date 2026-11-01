@@ -7,11 +7,9 @@ import (
 	"time"
 )
 
-// heartbeatSignalGrace is how long a shutdown signal waits for the running
-// heartbeat step to stop on the canceled daemon context before the daemon
-// shuts down around it (gt-lbqgz). A heartbeat takes 80 to 160 s under load;
-// the main loop used to read its signal channel only between heartbeats, so a
-// SIGTERM waited that long and launchd's 30 s stop ended in SIGKILL.
+// heartbeatSignalGrace bounds how long a shutdown signal waits for a heartbeat
+// step that does not stop on the canceled daemon context (gt-lbqgz). It stays
+// well inside launchd's 30 s stop.
 const heartbeatSignalGrace = 5 * time.Second
 
 // heartbeatRun is the state one heartbeat shares with the signal wait: the
@@ -40,15 +38,14 @@ func (d *Daemon) heartbeatStepName() string {
 	return ""
 }
 
-// runHeartbeat runs one heartbeat (run) beside the signal channel, so a
-// shutdown signal is read while the heartbeat is in flight. It returns nil
-// when the heartbeat finished, and the signal when a shutdown signal arrived
+// runHeartbeat runs one heartbeat (run) beside the signal channel. It returns
+// nil when the heartbeat finished and the signal when a shutdown signal came
 // first. On that signal it logs at once, names the step in flight, cancels the
-// daemon context every step and patrol stops on, and waits at most the grace
-// for the heartbeat to come back; a step that does not is abandoned and
-// named, and the caller shuts the daemon down around it. SIGUSR1 and the
-// reload-restart signal are answered as the main loop answers them and do not
-// end the wait.
+// daemon context, and waits at most the grace for the heartbeat; a step that
+// does not stop is named and abandoned. An abandoned heartbeat starts no
+// further step and writes no state (heartbeatWork checks the canceled context
+// before each step and under stateMu). SIGUSR1 and the reload-restart signal
+// are answered as the main loop answers them and do not end the wait.
 func (d *Daemon) runHeartbeat(sigChan <-chan os.Signal, run func()) os.Signal {
 	done := make(chan struct{})
 	go func() {
@@ -102,4 +99,14 @@ func (d *Daemon) logSignalDuringHeartbeat(sig os.Signal) {
 // is how a heartbeat that outlived its shutdown learns to stop writing.
 func (d *Daemon) heartbeatCanceled() bool {
 	return d.ctx != nil && d.ctx.Err() != nil
+}
+
+// stopOnSignal runs one heartbeat beside sigChan and, when a shutdown signal
+// ended it, runs the shutdown. stop is true when the daemon must return err.
+// Both heartbeat call sites in Run use it.
+func (d *Daemon) stopOnSignal(sigChan <-chan os.Signal, state *State, run func()) (stop bool, err error) {
+	if sig := d.runHeartbeat(sigChan, run); sig != nil {
+		return true, d.finishSignalShutdown(state)
+	}
+	return false, nil
 }

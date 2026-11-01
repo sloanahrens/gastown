@@ -7,10 +7,15 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// signalWait bounds every wait in these tests: a goroutine that never reaches
+// its signal fails the test with a message instead of hanging it.
+const signalWait = 10 * time.Second
 
 // signalTestDaemon is shutdownTestDaemon with a logger the test can read.
 func signalTestDaemon(t *testing.T) (*Daemon, *lockedBuffer) {
@@ -30,9 +35,29 @@ func within[T any](t *testing.T, bound time.Duration, what string, result <-chan
 	case v := <-result:
 		return v
 	case <-ctx.Done():
-		t.Fatalf("%s did not finish within %s", what, bound)
+		t.Fatalf("%s: %s did not finish within %s", t.Name(), what, bound)
 		panic("unreachable")
 	}
+}
+
+// blockUntil is the wait of a fake heartbeat running in its own goroutine,
+// where t.Fatalf is not allowed: it returns when ch delivers or the bound
+// passes, and reports the pass as an error.
+func blockUntil(t *testing.T, what string, ch <-chan struct{}) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), signalWait)
+	defer cancel()
+	select {
+	case <-ch:
+	case <-ctx.Done():
+		t.Errorf("%s: the fake heartbeat waited %s for %s", t.Name(), signalWait, what)
+	}
+}
+
+// reached waits for the fake heartbeat to say it is running.
+func reached(t *testing.T, what string, ch <-chan struct{}) {
+	t.Helper()
+	within(t, signalWait, what, ch)
 }
 
 // A SIGTERM during a heartbeat step that stops on the daemon context shuts the
@@ -49,36 +74,36 @@ func TestSignalDuringBlockedHeartbeatShutsDownWithinLimit(t *testing.T) {
 	run := func() {
 		d.setHeartbeatStep("plugins")
 		close(running)
-		<-d.ctx.Done()
+		blockUntil(t, "the daemon context to be canceled", d.ctx.Done())
 	}
 
 	result := make(chan error, 1)
 	go func() {
-		sig := d.runHeartbeat(sigChan, run)
-		if sig == nil {
-			result <- errors.New("runHeartbeat returned no signal")
+		stop, err := d.stopOnSignal(sigChan, state, run)
+		if !stop {
+			result <- errors.New("stopOnSignal did not stop")
 			return
 		}
-		result <- d.finishSignalShutdown(state)
+		result <- err
 	}()
-	<-running
+	reached(t, "the heartbeat step", running)
 	sigChan <- syscall.SIGTERM
 
 	if err := within(t, 5*time.Second, "shutdown after SIGTERM", result); err != nil && !errors.Is(err, ErrUnrequestedStop) {
-		t.Fatalf("shutdown: %v", err)
+		t.Fatalf("%s: shutdown: %v", t.Name(), err)
 	}
 	if state.Running {
-		t.Error("state.Running is still true after the shutdown")
+		t.Errorf("%s: state.Running is still true after the shutdown", t.Name())
 	}
 	saved, err := LoadState(d.config.TownRoot)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("%s: LoadState: %v", t.Name(), err)
 	}
 	if saved.Running {
-		t.Error("the saved state still says the daemon is running")
+		t.Errorf("%s: the saved state still says the daemon is running", t.Name())
 	}
 	if strings.Contains(logs.String(), "did not stop") {
-		t.Errorf("a step that stops on the canceled context was reported as abandoned:\n%s", logs)
+		t.Errorf("%s: a step that stops on the canceled context was reported as abandoned:\n%s", t.Name(), logs)
 	}
 }
 
@@ -95,16 +120,16 @@ func TestSignalDuringHeartbeatLogsAbandonedStep(t *testing.T) {
 	run := func() {
 		d.setHeartbeatStep("jev-rules")
 		close(running)
-		<-release
+		blockUntil(t, "the release", release)
 	}
 
 	result := make(chan os.Signal, 1)
 	go func() { result <- d.runHeartbeat(sigChan, run) }()
-	<-running
+	reached(t, "the heartbeat step", running)
 	sigChan <- syscall.SIGTERM
 
 	if sig := within(t, 5*time.Second, "runHeartbeat after SIGTERM", result); sig != syscall.SIGTERM {
-		t.Fatalf("runHeartbeat returned %v, want SIGTERM", sig)
+		t.Fatalf("%s: runHeartbeat returned %v, want SIGTERM", t.Name(), sig)
 	}
 	got := logs.String()
 	for _, want := range []string{
@@ -112,11 +137,11 @@ func TestSignalDuringHeartbeatLogsAbandonedStep(t *testing.T) {
 		`Heartbeat step "jev-rules" did not stop within 20ms of the cancel`,
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("log lacks %q:\n%s", want, got)
+			t.Errorf("%s: log lacks %q:\n%s", t.Name(), want, got)
 		}
 	}
 	if d.ctx.Err() == nil {
-		t.Error("the daemon context was not canceled by the signal")
+		t.Errorf("%s: the daemon context was not canceled by the signal", t.Name())
 	}
 }
 
@@ -128,13 +153,13 @@ func TestSignalWhileIdleUnchanged(t *testing.T) {
 	state := &State{Running: true}
 
 	if err := d.shutdownForSignal(syscall.SIGTERM, state); err != nil && !errors.Is(err, ErrUnrequestedStop) {
-		t.Fatalf("shutdownForSignal: %v", err)
+		t.Fatalf("%s: shutdownForSignal: %v", t.Name(), err)
 	}
 	if state.Running {
-		t.Error("state.Running is still true")
+		t.Errorf("%s: state.Running is still true", t.Name())
 	}
 	if !strings.Contains(logs.String(), "Received signal terminated, shutting down") {
-		t.Errorf("the signal line is missing:\n%s", logs)
+		t.Errorf("%s: the signal line is missing:\n%s", t.Name(), logs)
 	}
 }
 
@@ -148,51 +173,142 @@ func TestHeartbeatIgnoresLifecycleSignalAndFinishes(t *testing.T) {
 	finish := make(chan struct{})
 	run := func() {
 		close(running)
-		<-finish
+		blockUntil(t, "the test to let the heartbeat finish", finish)
 	}
 
 	result := make(chan os.Signal, 1)
 	go func() { result <- d.runHeartbeat(sigChan, run) }()
-	<-running
+	reached(t, "the heartbeat", running)
 	sigChan <- syscall.SIGUSR1
 	// Let the wait read the signal before the heartbeat is let go: the
 	// buffered channel is empty once it has.
-	drained, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	drained, cancel := context.WithTimeout(context.Background(), signalWait)
 	defer cancel()
 	for len(sigChan) > 0 {
 		if drained.Err() != nil {
-			t.Fatal("the wait never read SIGUSR1")
+			t.Fatalf("%s: the wait never read SIGUSR1", t.Name())
 		}
 		runtime.Gosched()
 	}
 	close(finish)
 
-	if sig := within(t, 5*time.Second, "runHeartbeat", result); sig != nil {
-		t.Fatalf("runHeartbeat returned %v for a finished heartbeat", sig)
+	if sig := within(t, signalWait, "runHeartbeat", result); sig != nil {
+		t.Fatalf("%s: runHeartbeat returned %v for a finished heartbeat", t.Name(), sig)
 	}
 	if !strings.Contains(logs.String(), "Received SIGUSR1: ignored") {
-		t.Errorf("SIGUSR1 was not logged as ignored:\n%s", logs)
+		t.Errorf("%s: SIGUSR1 was not logged as ignored:\n%s", t.Name(), logs)
 	}
 	if d.ctx.Err() != nil {
-		t.Error("an ignored signal canceled the daemon context")
+		t.Errorf("%s: an ignored signal canceled the daemon context", t.Name())
 	}
 }
 
-// A heartbeat that outlives the cancel writes no state: shutdown has recorded
-// the daemon as stopped and a late save would undo it.
+// stopOnSignal is what Run's two heartbeat sites call: a heartbeat that ends
+// by itself does not stop the daemon, and one ended by a shutdown signal
+// returns the shutdown's result with the state recorded as stopped.
+func TestStopOnSignalWiring(t *testing.T) {
+	t.Parallel()
+	t.Run("a finished heartbeat does not stop", func(t *testing.T) {
+		t.Parallel()
+		d, _ := signalTestDaemon(t)
+		stop, err := d.stopOnSignal(make(chan os.Signal), &State{Running: true}, func() {})
+		if stop || err != nil {
+			t.Errorf("%s: stop=%v err=%v for a heartbeat that finished", t.Name(), stop, err)
+		}
+	})
+	t.Run("a signal stops and shuts down", func(t *testing.T) {
+		t.Parallel()
+		d, _ := signalTestDaemon(t)
+		sigChan := make(chan os.Signal, 1)
+		sigChan <- syscall.SIGTERM
+		state := &State{Running: true}
+		stop, err := d.stopOnSignal(sigChan, state, func() { blockUntil(t, "the daemon context", d.ctx.Done()) })
+		if !stop || (err != nil && !errors.Is(err, ErrUnrequestedStop)) {
+			t.Errorf("%s: stop=%v err=%v after SIGTERM", t.Name(), stop, err)
+		}
+		if state.Running {
+			t.Errorf("%s: the state still says the daemon is running", t.Name())
+		}
+	})
+}
+
+// A heartbeat that outlives the cancel starts no further step and writes no
+// state: shutdown has recorded the daemon as stopped, and anything the late
+// heartbeat does to the state must not change what shutdown saved.
+func TestAbandonedHeartbeatDoesNotChangeWhatShutdownSaved(t *testing.T) {
+	t.Parallel()
+	d, logs := signalTestDaemon(t)
+	state := &State{Running: true}
+	inStep := make(chan struct{})
+	release := make(chan struct{})
+	var steps atomic.Int32
+	d.seams.heartbeatStep = func(_ *Daemon, _ heartbeatStep) {
+		if steps.Add(1) == 1 {
+			close(inStep)
+			blockUntil(t, "the release", release)
+		}
+	}
+
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		d.heartbeatWork(state, true)
+	}()
+	reached(t, "the first heartbeat step", inStep)
+
+	// The signal path: cancel, then shutdown records the daemon as stopped.
+	d.cancel()
+	if err := d.shutdown(state); err != nil {
+		t.Fatalf("%s: shutdown: %v", t.Name(), err)
+	}
+	before, err := LoadState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("%s: LoadState after shutdown: %v", t.Name(), err)
+	}
+
+	// The abandoned heartbeat wakes up and runs to its end.
+	close(release)
+	within(t, signalWait, "the abandoned heartbeat", finished)
+
+	if got := steps.Load(); got != 1 {
+		t.Errorf("%s: %d steps ran, want 1: a step started after the cancel", t.Name(), got)
+	}
+	after, err := LoadState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("%s: LoadState after the abandoned heartbeat: %v", t.Name(), err)
+	}
+	if after.Running || after.HeartbeatCount != before.HeartbeatCount || !after.LastHeartbeat.Equal(before.LastHeartbeat) {
+		t.Errorf("%s: state changed after shutdown saved it: before %+v, after %+v", t.Name(), before, after)
+	}
+	if !strings.Contains(logs.String(), "Heartbeat stopped before step") {
+		t.Errorf("%s: the stopped heartbeat was not logged:\n%s", t.Name(), logs)
+	}
+}
+
+// A heartbeat started after the cancel runs no step and saves no state.
 func TestHeartbeatAfterCancelDoesNotSaveState(t *testing.T) {
 	t.Parallel()
 	d, _ := signalTestDaemon(t)
-	d.seams.heartbeatStep = func(*Daemon, heartbeatStep) {}
+	var steps atomic.Int32
+	d.seams.heartbeatStep = func(*Daemon, heartbeatStep) { steps.Add(1) }
 	d.cancel()
 	state := &State{Running: true}
 
 	d.heartbeatWork(state, true)
 
-	if state.HeartbeatCount != 0 {
-		t.Errorf("HeartbeatCount = %d after a canceled heartbeat, want 0", state.HeartbeatCount)
+	if steps.Load() != 0 {
+		t.Errorf("%s: %d steps ran after the cancel, want 0", t.Name(), steps.Load())
 	}
-	if saved, err := LoadState(d.config.TownRoot); err == nil && saved.HeartbeatCount != 0 {
-		t.Errorf("a canceled heartbeat saved HeartbeatCount %d", saved.HeartbeatCount)
+	if state.HeartbeatCount != 0 {
+		t.Errorf("%s: HeartbeatCount = %d after a canceled heartbeat, want 0", t.Name(), state.HeartbeatCount)
+	}
+	// Nothing was saved, so there is no state file to load; any other failure
+	// is a broken read and fails the test.
+	saved, err := LoadState(d.config.TownRoot)
+	switch {
+	case err == nil && saved.HeartbeatCount != 0:
+		t.Errorf("%s: a canceled heartbeat saved HeartbeatCount %d", t.Name(), saved.HeartbeatCount)
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		t.Fatalf("%s: LoadState: %v", t.Name(), err)
 	}
 }

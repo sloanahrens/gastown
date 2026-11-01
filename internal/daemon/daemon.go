@@ -1850,8 +1850,8 @@ func (d *Daemon) Run() (err error) {
 	// heartbeat through the supervisor, within its budget (gt-4k3fj.3).
 
 	// Initial heartbeat, beside the signal channel like every later one.
-	if sig := d.runHeartbeat(sigChan, func() { d.heartbeat(state) }); sig != nil {
-		return d.finishSignalShutdown(state)
+	if stop, err := d.stopOnSignal(sigChan, state, func() { d.heartbeat(state) }); stop {
+		return err
 	}
 	startupComplete = true
 	if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
@@ -2024,8 +2024,8 @@ func (d *Daemon) Run() (err error) {
 			}
 
 		case <-timer.C:
-			if sig := d.runHeartbeat(sigChan, func() { d.heartbeat(state) }); sig != nil {
-				return d.finishSignalShutdown(state)
+			if stop, err := d.stopOnSignal(sigChan, state, func() { d.heartbeat(state) }); stop {
+				return err
 			}
 			if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
 				return err
@@ -2392,6 +2392,11 @@ func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
 		if step.lifecycle && !lifecycle {
 			continue
 		}
+		// A canceled context means shutdown has begun: start no further step.
+		if d.heartbeatCanceled() {
+			d.logger.Printf("Heartbeat stopped before step %q: the daemon context is canceled", step.name)
+			return
+		}
 		d.setHeartbeatStep(step.name)
 		d.seams.runHeartbeatStep(d, step)
 		d.setHeartbeatStep("")
@@ -2411,9 +2416,10 @@ func (d *Daemon) heartbeatWork(state *State, lifecycle bool) {
 	if err := d.saveState(state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
+	count := state.HeartbeatCount
 	d.hb.stateMu.Unlock()
 
-	d.logger.Printf("Heartbeat complete (#%d)", state.HeartbeatCount)
+	d.logger.Printf("Heartbeat complete (#%d)", count)
 }
 
 // rotateOversizedLogs checks Dolt server log files and rotates any that exceed
