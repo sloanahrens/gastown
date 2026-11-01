@@ -8,7 +8,7 @@ import "time"
 // scrolls past. A rule in repeatEvery is said again at most that often while
 // its item holds.
 var repeatEvery = map[string]time.Duration{
-	// Sloan's answer waits on the overseer; every 20 minutes until it comments.
+	// The operator's answer waits on the overseer; every 20 minutes until it comments.
 	RuleQuestionAnswered: 20 * time.Minute,
 	// A question open for a day is mentioned every 6 hours, as info.
 	RuleQuestionStale: 6 * time.Hour,

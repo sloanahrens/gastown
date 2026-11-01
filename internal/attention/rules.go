@@ -108,8 +108,8 @@ var ruleFlags = map[string]RuleFlags{
 	// Each risk-path item wakes on its own only after RiskPathPromoteAfter, so
 	// a pile of them goes unnoticed; this rule wakes on the total.
 	RuleReviewBacklog: flagsWake,
-	// A question is waiting on Sloan, or Sloan has answered and the overseer
-	// has yet to act; both are the overseer's to pick up.
+	// A question is waiting on the operator, or the operator has answered and
+	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
 	RuleQuestionAnswered: flagsWake,
 	// A day-old question is a record for the overseer's next look, not a

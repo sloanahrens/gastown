@@ -299,7 +299,7 @@ func TestRunTapGuardDangerous_AcceptedRiskRefusalText(t *testing.T) {
 	if err := tapGuardDangerous(strings.NewReader(input), &buf, attributionPolecat.proc); err == nil {
 		t.Fatal("a polecat's ACCEPTED-RISK note was allowed through the hook")
 	}
-	for _, want := range []string{"overseer or Sloan", "not by a polecat"} {
+	for _, want := range []string{"overseer or the operator", "not by a polecat"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("stderr missing %q:\n%s", want, buf.String())
 		}

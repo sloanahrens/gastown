@@ -11,7 +11,7 @@ import (
 // The accepted-risk gate (internal/land/criteria.go) trusts a comment's
 // free-text author, so the tool layer keeps a polecat from naming that author,
 // setting the acting identity, or recording an accepted risk at all: the
-// overseer or Sloan records one (gt-z71j0). A polecat's ordinary comment is
+// overseer or the operator records one (gt-z71j0). A polecat's ordinary comment is
 // untouched.
 const (
 	polecatAttributionReason = "polecat may not set a comment author or actor"
@@ -19,7 +19,7 @@ const (
 		"are refused for a polecat, and so is assigning BD_ACTOR or BEADS_ACTOR to another identity. " +
 		"Post the comment without them."
 	polecatAcceptedRiskReason = "polecat may not post an ACCEPTED-RISK: comment"
-	polecatAcceptedRiskAlt    = "An accepted risk is recorded by the overseer or Sloan, not by a polecat. " +
+	polecatAcceptedRiskAlt    = "An accepted risk is recorded by the overseer or the operator, not by a polecat. " +
 		"Describe the finding in a plain bead comment and let them decide whether to accept it."
 	polecatCommentInputReason = "polecat comment text must be inline"
 	polecatCommentInputAlt    = "Text read from a file or stdin cannot be checked for an ACCEPTED-RISK: record, " +
