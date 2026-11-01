@@ -458,6 +458,21 @@ func TestCommitAuthorship(t *testing.T) {
 	s.noUnscripted(t)
 }
 
+// A line that does not carry all four fields is an error: a partly parsed
+// identity is never read as an author who names nobody (gt-dvotr).
+func TestCommitAuthorshipMalformedLine(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"log -1 --format=%an%x00%ae%x00%cn%x00%ce cccc": ok("Seat Opal\x00opal@gastown.local\n"),
+	})
+	g := newTestGit(t, s)
+
+	if _, err := g.CommitAuthorship("cccc"); err == nil {
+		t.Fatal("want an error for an identity line with two fields, not four")
+	}
+	s.noUnscripted(t)
+}
+
 // An unknown commit is an error, never an empty identity a caller could read
 // as naming nobody (gt-dvotr).
 func TestCommitAuthorshipUnknownCommit(t *testing.T) {
