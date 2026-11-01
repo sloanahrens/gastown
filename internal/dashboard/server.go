@@ -35,8 +35,10 @@ func (h *Hub) Handler() http.Handler {
 	})
 	mux.HandleFunc("/api/bead", h.serveBead)
 	mux.HandleFunc("/api/report", h.serveReport)
+	mux.HandleFunc("/api/birds", h.serveBirds)
+	mux.HandleFunc(birdPagePrefix, h.serveBirdPage)
 	mux.HandleFunc("/stream", h.serveStream)
-	return guard(mux)
+	return guard(h.birdPathsToTheRoute(mux))
 }
 
 func guard(next http.Handler) http.Handler {

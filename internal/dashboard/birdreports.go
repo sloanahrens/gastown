@@ -103,6 +103,14 @@ var birdSidecarOversize = fmt.Sprintf("daily.json is larger than %d KiB", birdSi
 
 var birdReportsNameRe = regexp.MustCompile(birdReportsNameShape)
 
+// The errors ReadPage names. A refused name and a page that looks like a secret
+// are the two the route tells apart, answering the first 404 and the second
+// 403; neither carries any of the page's text.
+var (
+	errBirdPageRefused = errors.New("birds: page name is not one a bird writes")
+	errBirdPageSecret  = errors.New("birds: page looks like it holds a secret")
+)
+
 // BirdReport is one bird's daily report as the Reports page draws it: what the
 // bird's sidecar says, whether its page is there to open, and, when the reader
 // could not use the sidecar, what is wrong with it.
@@ -188,6 +196,36 @@ func (r *BirdReportsReader) Read(now time.Time) []BirdReport {
 		return a.Bird < b.Bird
 	})
 	return rows
+}
+
+// ReadPage returns the bytes of one of a bird's two pages, daily.html or
+// daily.prev.html, for the route that serves it. The bird and the file are
+// checked against the names a bird writes before the path is built from them,
+// so the route never reaches another file: a name of another shape is refused,
+// and the path is joined from the two validated parts, never from a URL. The
+// bird directory and its reports directory must be real directories, and the
+// page a regular file under birdPageMaxBytes, so a link is refused rather than
+// followed. A page whose text looks like it holds a secret is refused too, and
+// the error names no part of that text.
+func (r *BirdReportsReader) ReadPage(bird, file string) ([]byte, error) {
+	if !birdReportsNameRe.MatchString(bird) {
+		return nil, errBirdPageRefused
+	}
+	if file != birdPageName && file != birdPrevPageName {
+		return nil, errBirdPageRefused
+	}
+	reports := filepath.Join(r.runtimeDir, bird, birdReportsSubdir)
+	if !birdRealDir(filepath.Join(r.runtimeDir, bird)) || !birdRealDir(reports) {
+		return nil, fs.ErrNotExist
+	}
+	raw, err := readReportsFile(filepath.Join(reports, file), birdPageMaxBytes)
+	if err != nil {
+		return nil, err
+	}
+	if _, withheld := screenSecret(raw); withheld {
+		return nil, errBirdPageSecret
+	}
+	return raw, nil
 }
 
 // readBird returns the row for the bird directory name, and whether there is
