@@ -71,12 +71,18 @@ ARG GOLANGCI_LINT_VERSION=v2.13.2
 # re-read it if the base image tag moves or noble supersedes the candidate, since
 # the exact pin fails the build once superseded.
 ARG LIBICU_VERSION=74.2-1ubuntu3.1
+# lsof lets the sweep runner's doltserver integration test name the process that
+# holds a port (internal/doltserver TestIntegrationProcessIdentity); the image
+# has neither lsof nor ss otherwise. Version read with `apt-cache policy lsof` in
+# ubuntu:24.04 on 2026-11-01; re-read it if the base image tag moves or noble
+# supersedes the candidate, since the exact pin fails the build once superseded.
+ARG LSOF_VERSION=4.95.0-1build3
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential ca-certificates curl git gnupg jq openssh-client \
-    "libicu-dev=${LIBICU_VERSION}" \
+    "libicu-dev=${LIBICU_VERSION}" "lsof=${LSOF_VERSION}" \
     ripgrep shellcheck tmux unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 

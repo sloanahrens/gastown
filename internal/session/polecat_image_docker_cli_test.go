@@ -66,3 +66,36 @@ func TestPolecatImageInstallsDockerCLIPinned(t *testing.T) {
 		t.Errorf("the copies from the docker-cli stage are %q, want exactly %q: the client binary at a path on PATH, and no dockerd from the engine image", copies, want)
 	}
 }
+
+// TestPolecatImageInstallsLsofPinned pins the tool the sweep runner's doltserver
+// integration test needs to name the process holding a port: the image has no
+// lsof or ss otherwise, and the test reads 0 from findDoltServerOnPort without
+// one (gt-i109j). The package rides the same apt layer as the other base tools,
+// at the version the LSOF_VERSION ARG names, so a rebuild cannot pull another.
+//
+// Mutation: delete lsof from the install line, or drop or empty the ARG, and
+// this goes red.
+func TestPolecatImageInstallsLsofPinned(t *testing.T) {
+	t.Parallel()
+	ins := dockerfileInstructions(t)
+
+	version := ""
+	for _, in := range ins {
+		if rest, ok := strings.CutPrefix(in, "ARG LSOF_VERSION="); ok {
+			version = rest
+		}
+	}
+	if version == "" {
+		t.Fatal("the Dockerfile pins no LSOF_VERSION, so a rebuild could install any lsof")
+	}
+
+	installs := 0
+	for _, in := range ins {
+		if strings.HasPrefix(in, "RUN apt-get update") && strings.Contains(in, `"lsof=${LSOF_VERSION}"`) {
+			installs++
+		}
+	}
+	if installs != 1 {
+		t.Errorf("%d apt install lines name \"lsof=${LSOF_VERSION}\", want exactly 1: the image needs lsof pinned in the base-tools layer", installs)
+	}
+}
