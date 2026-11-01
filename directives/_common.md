@@ -1,6 +1,7 @@
 ## Changelog
 
 - 2026-10-27 gt-3vgbi: moved the shared host-hygiene rules and the testing norms into the repo from ~/gt/gastown/directives/_common.md; the testing norms are the byte-identical 21-line text (md5 fc0141bd7290b193679763095c7a00dc) that five rigs carry, so "golden files for prompts" is now in the gastown norms too.
+- 2026-10-31 gt-pccx7: dropped the host-hygiene incident story, the CGO/ICU flags and the Test-load section (a polecat runs no full suite; the Makefile exports the flags).
 - 2026-10-27 gt-3vgbi: the introducing bead of each rule is not recorded in its source file; the rules are cited here by the bead that moved them.
 
 ## Host Hygiene — shared workstation rules
@@ -11,27 +12,12 @@
 
 ### Never scan the filesystem from `/` or `$HOME`
 - `find / …`, `bfs / …`, `fd … /`, `grep -r / …`, `rg … /`, `du -s /`, `locate`-style walks
-  are FORBIDDEN. On 2026-09-09 one `bfs / -name regex.h` ran 8 minutes at 500% CPU,
-  took host load from 19 to 100 and made the operator's terminal unresponsive.
+  are FORBIDDEN: one such walk took host load from 19 to 100.
 - Root every search at the rig, the repo worktree, or a known prefix
   (`/opt/homebrew`, `$(go env GOROOT)`, `$(go env GOMODCACHE)`).
-- If you need a header or library location, ask the package manager:
-  `brew --prefix <pkg>`, `pkg-config --cflags <pkg>`, `go env`.
+- For a header or library location ask the package manager (`brew --prefix <pkg>`,
+  `pkg-config --cflags <pkg>`, `go env`), and build with the Makefile targets, which export the CGO flags.
 
-### CGO / ICU (the case that caused the incident)
-- `go test ./...` and `go build` in this repo fail on `unicode/regex.h` without ICU flags.
-- Do NOT search for the header. Use the Makefile targets (`make build`, `make test`),
-  which export the flags, or set them yourself:
-  `CGO_CPPFLAGS=-I$(brew --prefix icu4c)/include CGO_LDFLAGS=-L$(brew --prefix icu4c)/lib`
-
-### Test load
-- A polecat does not run the full suite (see Testing norms below). If a task truly
-  needs one, run it as `GOFLAGS=-p=6 make test`, never bare `go test ./...` at full parallelism.
-- Before a full suite: `top -l 3 -n 0 -s 2 | grep 'CPU usage' | tail -1` — proceed only if
-  idle >= 25%; otherwise wait 2 minutes and re-check.
-- Anything that outlives a tool call runs as a tracked background task, never `nohup … &`
-  inside a foreground call (it is killed when the turn ends).
-- One full suite per agent at a time.
 
 # Testing norms (rig directive)
 
