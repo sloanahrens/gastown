@@ -234,6 +234,7 @@ type heredoc struct {
 	delim  string
 	quoted bool // the delimiter is quoted, so the body is data the shell does not expand
 	strip  bool // <<- strips leading tabs from the terminator
+	runs   bool // a shell interpreter reads the body, so it runs the commands in it
 }
 
 // ends reports whether line is this heredoc's terminator.
@@ -261,8 +262,10 @@ func maskData(s string) string {
 
 // codeOnly returns text with the parts the shell reads as data blanked: a
 // comment, a single-quoted string, a double-quoted string (but not the
-// expansions and substitutions inside one) and a quoted heredoc body. An
-// unquoted heredoc body is scanned, since the shell expands it.
+// expansions and substitutions inside one) and a quoted heredoc body no shell
+// reads. An unquoted heredoc body is scanned, since the shell expands it, and
+// so is a quoted one an interpreter runs: sh <<'EOF' does not expand the body
+// but does execute the commands in it.
 func codeOnly(text string) string {
 	var out strings.Builder
 	var pending []heredoc
@@ -273,7 +276,7 @@ func codeOnly(text string) string {
 				out.WriteString(maskData(line))
 				continue
 			}
-			if pending[0].quoted {
+			if pending[0].quoted && !pending[0].runs {
 				out.WriteString(maskData(line))
 				continue
 			}
@@ -348,6 +351,7 @@ func maskLine(line string) (string, []heredoc) {
 				i++
 				continue
 			}
+			spec.runs = heredocRunsInShell(line)
 			b.WriteString(line[i : i+n])
 			specs = append(specs, spec)
 			i += n
@@ -510,6 +514,79 @@ func parseHeredoc(s string) (heredoc, int) {
 	return h, i
 }
 
+// heredocRunsInShell reports whether line hands a heredoc's body to a shell
+// interpreter: the interpreter is the command the redirection feeds
+// (sh <<'EOF'), or a later stage of the pipeline pipes the body into one
+// (cat <<'EOF' | bash). A quoted body is data the shell does not expand, but
+// an interpreter that reads it executes the commands in it.
+func heredocRunsInShell(line string) bool {
+	for _, stage := range strings.Split(line, "|") {
+		commandNext := true
+		for _, word := range strings.Fields(stripHeredocOps(stage)) {
+			if isCommandReset(word) {
+				commandNext = true
+				continue
+			}
+			if !commandNext || isCommandPrefix(word) {
+				continue
+			}
+			if isShellInterpreter(word) {
+				return true
+			}
+			commandNext = false
+		}
+	}
+	return false
+}
+
+// isCommandReset reports whether word starts a new command: a separator at the
+// end of a word (x; or a && b) or a keyword that follows one.
+func isCommandReset(word string) bool {
+	switch word {
+	case "then", "do", "else", "elif", "{", "(":
+		return true
+	}
+	return strings.HasSuffix(word, ";") || strings.HasSuffix(word, "&") || strings.HasSuffix(word, "||")
+}
+
+// stripHeredocOps returns s with its <<WORD redirections removed, so a
+// delimiter is not read as the command word.
+func stripHeredocOps(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if strings.HasPrefix(s[i:], "<<") && !strings.HasPrefix(s[i:], "<<<") {
+			if _, n := parseHeredoc(s[i:]); n > 0 {
+				i += n
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// isCommandPrefix reports whether word may precede the command itself without
+// being one: a shell keyword or a wrapper that runs its arguments.
+func isCommandPrefix(word string) bool {
+	switch word {
+	case "!", "if", "then", "do", "else", "elif", "while", "until",
+		"env", "sudo", "command", "exec", "nohup", "time":
+		return true
+	}
+	return false
+}
+
+// isShellInterpreter reports whether word names a shell that runs its standard
+// input as a script, written bare (sh) or as a path (/bin/bash).
+func isShellInterpreter(word string) bool {
+	switch path.Base(strings.Trim(word, `"'`)) {
+	case "sh", "bash", "zsh", "dash", "ksh":
+		return true
+	}
+	return false
+}
+
 func isDelimByte(b byte) bool {
 	return b == '_' || ('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') || ('0' <= b && b <= '9')
 }
@@ -533,15 +610,26 @@ func validDelim(s string) bool {
 }
 
 // goCommandRE matches a go tool in code: the word go (bare, or at the end of a
-// path such as /usr/local/go/bin/go) followed by a subcommand. It does not
-// care what precedes the word, so command, exec, xargs and ! cannot hide a
-// command behind their names; goCommand follows a variable assigned go or a
-// whole go command separately. cargo build is not a go command.
-var goCommandRE = regexp.MustCompile(`(?m)(?:[^\s;&|(){}<>'"]*/)?\bgo[ \t]+(build|run|test|vet|install)\b`)
+// path such as /usr/local/go/bin/go) followed by any global flags and their
+// arguments and then a subcommand, so go -C dir build and go -mod=vendor test
+// count. It does not care what precedes the word, so command, exec, xargs and
+// ! cannot hide a command behind their names; goCommand follows a variable
+// assigned go or a whole go command separately. cargo build is not a go command.
+var goCommandRE = regexp.MustCompile(`(?m)(?:[^\s;&|(){}<>'"]*/)?\bgo\b(?:[ \t]+-[^\s;&|(){}<>'"]*(?:[ \t]+[^\s;&|(){}<>'"]*)?)*[ \t]+(build|run|test|vet|install)\b`)
+
+// quotedGoRE matches a go command whose word is quoted. The data masking
+// blanks the quotes and their literal text, but the shell still runs
+// "go" build.
+var quotedGoRE = regexp.MustCompile(`(?m)(?:^|[\s;&|(])["']go["'][ \t]+(build|run|test|vet|install)\b`)
 
 // makeInstallRE matches make installing the tree in code, whatever flags it
 // carries between.
 var makeInstallRE = regexp.MustCompile(`(?m)\bmake\b[^\n;&|]*\binstall\b`)
+
+// pipedShellRE matches a quoted go command a pipeline hands to a shell:
+// printf 'go test ./...' | sh. The quotes make the text data to the masking,
+// but the shell that reads it runs it.
+var pipedShellRE = regexp.MustCompile(`(?m)["'][^"'\n]*\bgo[ \t]+(build|run|test|vet|install)\b[^"'\n]*["'][^\n]*\|[ \t]*(?:[A-Za-z0-9._/-]*/)?(?:sh|bash|zsh|dash|ksh)\b`)
 
 // shellEvalRE matches a go command inside a string a shell is handed to run:
 // eval, or sh/bash/zsh/dash/ksh -c. The string is quoted, so the masking above
@@ -551,8 +639,8 @@ var shellEvalRE = regexp.MustCompile(`\b(?:eval|sh|bash|zsh|dash|ksh)\b[^;&|\n]*
 // goAssignRE captures NAME=value at a word start.
 var goAssignRE = regexp.MustCompile(`(?m)(?:^|[^A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;&|]+))`)
 
-// goVar is a variable a script assigns a go command to: the word go alone, or
-// a whole command such as "go build ./...".
+// goVar is a variable a script assigns a go command to: the word go (bare or as
+// a path ending in /go), or a whole command such as "go build ./...".
 type goVar struct {
 	name  string
 	whole string // the go command it holds; empty when it holds only the word go
@@ -563,9 +651,15 @@ type goVar struct {
 // data counts as a command, so a wrong classification costs a spurious run,
 // never a missed one.
 func goCommand(text string) string {
-	code := codeOnly(text)
+	code := joinContinuations(codeOnly(text))
 	if cmd := goCommandInCode(code); cmd != "" {
 		return cmd
+	}
+	if m := quotedGoRE.FindStringSubmatch(text); m != nil {
+		return "go " + m[1]
+	}
+	if m := pipedShellRE.FindStringSubmatch(text); m != nil {
+		return "go " + m[1]
 	}
 	if m := shellEvalRE.FindStringSubmatch(text); m != nil {
 		return "go " + m[1]
@@ -583,6 +677,33 @@ func goCommand(text string) string {
 		}
 	}
 	return ""
+}
+
+// joinContinuations returns code with every backslash-newline replaced by a
+// space, the way the shell joins a command split across lines, so go \ build
+// is read as go build. code is already masked, so the join cannot move a
+// command out of a data context.
+func joinContinuations(code string) string {
+	var b strings.Builder
+	b.Grow(len(code))
+	for i := 0; i < len(code); i++ {
+		if code[i] != '\\' {
+			b.WriteByte(code[i])
+			continue
+		}
+		if i+1 < len(code) && code[i+1] == '\n' {
+			b.WriteByte(' ')
+			i++
+			continue
+		}
+		if i+2 < len(code) && code[i+1] == '\r' && code[i+2] == '\n' {
+			b.WriteByte(' ')
+			i += 2
+			continue
+		}
+		b.WriteByte(code[i])
+	}
+	return b.String()
 }
 
 // goCommandInCode returns the first go command in code, or "".
@@ -607,12 +728,12 @@ func goVars(text string) []goVar {
 		if value == "" {
 			value = m[4]
 		}
-		if value == "go" {
+		if path.Base(value) == "go" {
 			out = append(out, goVar{name: m[1]})
 			continue
 		}
 		if value != "" {
-			if cmd := goCommandInCode(codeOnly(value)); cmd != "" {
+			if cmd := goCommandInCode(joinContinuations(codeOnly(value))); cmd != "" {
 				out = append(out, goVar{name: m[1], whole: cmd})
 			}
 		}
@@ -620,10 +741,13 @@ func goVars(text string) []goVar {
 	return out
 }
 
-// stubCitationRE matches the file a stub: reason cites, with an optional line.
-var stubCitationRE = regexp.MustCompile(`^([A-Za-z0-9._/-]+)(?::([0-9]+))?$`)
+// stubCitationRE matches the file and line a stub: reason cites.
+var stubCitationRE = regexp.MustCompile(`^([A-Za-z0-9._/-]+):([0-9]+)$`)
 
-// stubCitation returns the file a stub: reason cites and its line, if any.
+// stubCitation returns the file a stub: reason cites and the line the fake go
+// is defined on. A citation without a line names the whole file as the source,
+// and any fake go anywhere in it would satisfy that, so the guard refuses one:
+// the reason must say file:line.
 func stubCitation(reason string) (file string, line int, ok bool) {
 	rest, found := strings.CutPrefix(reason, "stub:")
 	if !found {
@@ -634,11 +758,8 @@ func stubCitation(reason string) (file string, line int, ok bool) {
 		if m == nil || !strings.Contains(m[1], "/") {
 			continue
 		}
-		if m[2] == "" {
-			return m[1], 0, true
-		}
 		n, err := strconv.Atoi(m[2])
-		if err != nil {
+		if err != nil || n < 1 {
 			continue
 		}
 		return m[1], n, true
@@ -685,13 +806,11 @@ func goExemptionProblem(e Entry, text string, files func(string) (string, error)
 	if err != nil {
 		return fmt.Sprintf("%s carries %q, but %s cannot be read: %v", e.Path, e.StubsGo, file, err)
 	}
-	if line > 0 {
-		lines := strings.Split(evidence, "\n")
-		if line > len(lines) {
-			return fmt.Sprintf("%s carries %q, but %s has only %d lines", e.Path, e.StubsGo, file, len(lines))
-		}
-		evidence = lines[line-1]
+	lines := strings.Split(evidence, "\n")
+	if line > len(lines) {
+		return fmt.Sprintf("%s carries %q, but %s has only %d lines", e.Path, e.StubsGo, file, len(lines))
 	}
+	evidence = lines[line-1]
 	if !fakeGoRE.MatchString(evidence) {
 		return fmt.Sprintf("%s carries %q, but %s does not define a fake go", e.Path, e.StubsGo, file)
 	}
@@ -789,6 +908,18 @@ func TestEveryStubsGoExemptionIsSupportedByTheScript(t *testing.T) {
 			"runs \"go run\"",
 		},
 		{
+			"a none: script that runs go in a quoted heredoc a shell reads is named",
+			Entry{Path: "scripts/build_test.sh", StubsGo: "none: names no go command"},
+			map[string]string{"scripts/build_test.sh": "bash <<'EOF'\ngo test ./...\nEOF\n"},
+			"runs \"go test\"",
+		},
+		{
+			"a none: script that runs go with a global flag is named",
+			Entry{Path: "scripts/build_test.sh", StubsGo: "none: names no go command"},
+			map[string]string{"scripts/build_test.sh": "go -C \"$ROOT\" build ./...\n"},
+			"runs \"go build\"",
+		},
+		{
 			"a none: script that runs go through a path is named",
 			Entry{Path: "scripts/build_test.sh", StubsGo: "none: names no go command"},
 			map[string]string{"scripts/build_test.sh": "/usr/local/go/bin/go test ./...\n"},
@@ -840,8 +971,13 @@ func TestEveryStubsGoExemptionIsSupportedByTheScript(t *testing.T) {
 			map[string]string{"scripts/stub_test.sh": stubScript}, "scripts/stub_test.sh has only 3 lines",
 		},
 		{
+			"a stub: reason citing a file but no line fails",
+			Entry{Path: "scripts/stub_test.sh", StubsGo: "stub: scripts/stub_test.sh puts a fake go on PATH"},
+			map[string]string{"scripts/stub_test.sh": stubScript}, "cites no file:line",
+		},
+		{
 			"a stub: reason citing a file that does not exist fails",
-			Entry{Path: "scripts/stub_test.sh", StubsGo: "stub: scripts/absent_test.sh puts a fake go on PATH"},
+			Entry{Path: "scripts/stub_test.sh", StubsGo: "stub: scripts/absent_test.sh:1 puts a fake go on PATH"},
 			map[string]string{"scripts/stub_test.sh": ""}, "scripts/absent_test.sh",
 		},
 		{
@@ -851,7 +987,7 @@ func TestEveryStubsGoExemptionIsSupportedByTheScript(t *testing.T) {
 		},
 		{
 			"a stub: reason citing a path outside the repo fails",
-			Entry{Path: "scripts/stub_test.sh", StubsGo: "stub: /etc/passwd puts a fake go on PATH"},
+			Entry{Path: "scripts/stub_test.sh", StubsGo: "stub: /etc/passwd:1 puts a fake go on PATH"},
 			map[string]string{"scripts/stub_test.sh": ""}, "not a path under the repo root",
 		},
 		{
@@ -912,6 +1048,14 @@ func TestScanFindsGoCommandsTheShellRuns(t *testing.T) {
 		{"make install after a separator", "make lint && make install\n", "make install"},
 		{"make install with flags", "make -C deploy install\n", "make install"},
 		{"a go command in an unquoted heredoc body", "cat <<EOF > f\n$(go build ./...)\nEOF\n", "go build"},
+		{"a go command in a quoted heredoc a shell reads", "sh <<'EOF'\ngo test ./...\nEOF\n", "go test"},
+		{"a go command in a quoted heredoc piped to a shell", "cat <<'EOF' | bash\ngo build ./...\nEOF\n", "go build"},
+		{"a go command behind global flags", "go -C \"$ROOT\" build ./...\n", "go build"},
+		{"a go command behind a flag's value", "go -mod=vendor test ./...\n", "go test"},
+		{"a go command continued on the next line", "go \\\n  build ./...\n", "go build"},
+		{"a go command held in a variable naming its path", "GO=/usr/local/go/bin/go\n\"$GO\" test ./...\n", "go test"},
+		{"a quoted go command", "\"go\" build ./...\n", "go build"},
+		{"a quoted go command piped to a shell", "printf 'go test ./...\\n' | sh\n", "go test"},
 		{"a go command after a # in a parameter expansion", "name=\"${f#x}\" && go build ./...\n", "go build"},
 		{"a go command after an unterminated quoted heredoc", "cat > f <<'MD'\ngo build ./...\n", "go build"},
 	}
@@ -937,6 +1081,7 @@ func TestScanFindsNoGoCommandInData(t *testing.T) {
 		{"a comment", "# go build is slow\nset -euo pipefail\n"},
 		{"a trailing comment", "echo hi # go run ./cmd/gt\n"},
 		{"a quoted heredoc body", "cat > f <<'MD'\ngo test ./...\nMD\n"},
+		{"a quoted heredoc body a program other than a shell reads", "python3 - <<'PY'\ngo test ./...\nPY\n"},
 		{"a tab-stripped quoted heredoc body", "cat > f <<-'MD'\n\tgo test ./...\n\tMD\n"},
 		{"a quoted string ending the line", "fail \"the gate ran\" 'go build'\n"},
 	}

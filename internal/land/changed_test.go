@@ -215,6 +215,7 @@ var guardTriggers = []struct {
 	{"internal/repoguard", "M\x00internal/repoguard/shell-scripts.txt\x00"},
 	{"internal/session", "M\x00deploy/polecat/policy.yaml\x00"},
 	{"internal/shelltier", "M\x00scripts/install-local_test.sh\x00"},
+	{"internal/shelltier", "M\x00internal/shelltier/manifest.go\x00"},
 }
 
 // unguarded is a changed path no guard reads: a doc outside every guard's

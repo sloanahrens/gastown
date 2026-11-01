@@ -469,14 +469,17 @@ var treeWideGuards = []treeWideGuard{
 	{
 		// The shelltier reference guard reads every manifest script's text
 		// plus the Makefile, so a .sh edit that names a repo path the entry's
-		// triggers miss fails it. A deletion counts: the guard reads each
-		// script the manifest lists.
+		// triggers miss fails it. It also reads the manifest in manifest.go,
+		// so an edit there is its input too. A deletion counts: the guard
+		// reads each script the manifest lists.
 		pkg: "internal/shelltier",
 		tests: []string{
 			"TestEveryReferencedRepoPathIsATrigger",
 			"TestEveryStubsGoExemptionIsSupportedByTheScript",
 		},
-		judges:  func(rel string) bool { return strings.HasSuffix(rel, ".sh") || rel == "Makefile" },
+		judges: func(rel string) bool {
+			return strings.HasSuffix(rel, ".sh") || rel == "Makefile" || rel == "internal/shelltier/manifest.go"
+		},
 		removal: true,
 	},
 }
