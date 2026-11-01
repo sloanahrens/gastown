@@ -1,12 +1,9 @@
 // Package hostload attributes the host's CPU to the sessions and services
-// that used it (gt-nu89c).
+// that used it: one sample reads command lines, CPU over an interval and each
+// process's working directory, then sums the CPU per owner (gt-nu89c).
 //
-// A load average names no owner, and a single ps snapshot cannot say where the
-// CPU went: on 2026-11-01 a load of 62 was argued about from such snapshots.
-// One sample reads ps for command lines, top's interval sample for CPU and
-// lsof for the working directory each process runs in, then sums the CPU per
-// owner. A process that starts and exits between the two top samples is
-// invisible, because a sample reads one interval rather than tracing the host.
+// A process that starts and exits between two samples is invisible, because a
+// sample reads one interval rather than tracing the host.
 package hostload
 
 import (

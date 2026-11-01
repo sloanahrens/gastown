@@ -7,7 +7,7 @@ import (
 )
 
 // cannedPS is `ps -axo pid=,command=` for the processes the table test
-// attributes: one crew session's shell and build, a landing gate's build,
+// attributes: one crew session's shell and build, two landing gates' builds,
 // Dolt, a Docker VM, the installer, the daemon, the dashboard, a qemu VM, an
 // unclassified process and a second crew session.
 const cannedPS = `    1 /sbin/launchd
@@ -21,7 +21,8 @@ const cannedPS = `    1 /sbin/launchd
   107 /Users/op/.local/bin/gt dashboard
   108 qemu-system-aarch64 -m 8G
   109 claude
-  110 -zsh`
+  110 -zsh
+  111 go build ./...`
 
 // cannedTop is `top -l 2 -s 1 -o cpu -stats pid,cpu`. The first table is each
 // process's average since it started; the table the test reads is the second,
@@ -44,17 +45,18 @@ PID    %CPU
 107    3.0
 108    6.0
 109    2.0
-110    1.0`
+110    1.0
+111    2.0`
 
-// cannedLsof is `lsof -a -d cwd -Fpn` for the processes that used CPU, except
-// pid 108: lsof could not read the qemu process's working directory, so it is
-// classified by its command.
+// cannedLsof is `lsof -a -d cwd -Fpn` for the processes that used CPU. pid
+// 108 is the shape lsof prints for a working directory it cannot read, a "p"
+// record with no "n" line; pid 104 runs in the root directory.
 const cannedLsof = `p100
 n/Users/op/gt/gastown/crew/dunlin/gastown
 p101
 n/Users/op/gt/gastown/crew/dunlin/gastown
 p102
-n/private/tmp/gt-landing-501/gastown
+n/private/tmp/gt-landing.noindex/gastown
 p103
 n/Users/op/gt
 p104
@@ -65,15 +67,18 @@ p106
 n/Users/op/gt
 p107
 n/Users/op/gt
+p108
 p109
 n/Users/op/gt/gastown/polecats/capable/gastown
 p110
-n/Users/op/gt/gastown/crew/egret/gastown`
+n/Users/op/gt/gastown/crew/egret/gastown
+p111
+n/private/tmp/gt-landing-501/gastown`
 
-// TestClassifyOwners reads canned ps, top and lsof output and checks the CPU
+// TestHostLoadClassifyOwners reads canned ps, top and lsof output and checks the CPU
 // is credited to the owner that used it: a crew worktree, a landing gate tree,
 // the installer, Dolt and a VM, plus the daemon, the dashboard and the rest.
-func TestClassifyOwners(t *testing.T) {
+func TestHostLoadClassifyOwners(t *testing.T) {
 	t.Parallel()
 	rows, err := Table(cannedPS, cannedTop, cannedLsof)
 	if err != nil {
@@ -81,7 +86,7 @@ func TestClassifyOwners(t *testing.T) {
 	}
 	want := []Row{
 		{Owner: "crew/dunlin", CPU: 30, Procs: 2},
-		{Owner: OwnerLanding, CPU: 25, Procs: 1},
+		{Owner: OwnerLanding, CPU: 27, Procs: 2},
 		{Owner: OwnerDolt, CPU: 12, Procs: 1},
 		{Owner: "vm/com.docker.virtualization", CPU: 8, Procs: 1},
 		{Owner: "vm/qemu-system-aarch64", CPU: 6, Procs: 1},
@@ -96,9 +101,9 @@ func TestClassifyOwners(t *testing.T) {
 	}
 }
 
-// TestTableRefusesMalformedReadings checks the table reaches its parse errors:
+// TestHostLoadTableRefusesMalformedReadings checks the table reaches its parse errors:
 // a reading it cannot parse is an error, never a table built from the rest.
-func TestTableRefusesMalformedReadings(t *testing.T) {
+func TestHostLoadTableRefusesMalformedReadings(t *testing.T) {
 	t.Parallel()
 	const goodPS = "    1 /sbin/launchd\n"
 	const goodTop = "PID %CPU\n1 0.5\n"
@@ -122,9 +127,9 @@ func TestTableRefusesMalformedReadings(t *testing.T) {
 	}
 }
 
-// TestParsersRefuseMalformedOutput drives each parser's refusal: a reading
+// TestHostLoadParsersRefuseMalformedOutput drives each parser's refusal: a reading
 // this package cannot read is an error, never an empty table or a zero.
-func TestParsersRefuseMalformedOutput(t *testing.T) {
+func TestHostLoadParsersRefuseMalformedOutput(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
@@ -194,12 +199,12 @@ func TestParsersRefuseMalformedOutput(t *testing.T) {
 		{
 			name:  "negative load average",
 			parse: func() error { _, err := parseLoad([]string{"-1.0", "2.0", "3.0"}); return err },
-			want:  "is not a load average",
+			want:  "not a number",
 		},
 		{
 			name:  "load average that is not a number",
 			parse: func() error { _, err := parseLoad([]string{"nan", "2.0", "3.0"}); return err },
-			want:  "is not a load average",
+			want:  "not a number",
 		},
 	}
 	for _, tc := range cases {
@@ -215,9 +220,38 @@ func TestParsersRefuseMalformedOutput(t *testing.T) {
 	}
 }
 
-// TestParseTickTook reads the tick duration off the daemon's line, and
+// TestHostLoadParseErrorsCarryNoHostText checks a parse error names its rule
+// and location without quoting the host's line: the error becomes the sample
+// record's err field, and the host's process table does not belong there.
+func TestHostLoadParseErrorsCarryNoHostText(t *testing.T) {
+	t.Parallel()
+	const marker = "SENTINEL"
+	cases := []struct {
+		name  string
+		parse func() error
+	}{
+		{name: "ps", parse: func() error { _, err := ParsePS(marker + " " + marker + "\n"); return err }},
+		{name: "top", parse: func() error { _, err := ParseTop("PID %CPU\n" + marker + " 1.0\n"); return err }},
+		{name: "lsof", parse: func() error { _, err := ParseLsof("p10\n" + marker + "\n"); return err }},
+		{name: "load", parse: func() error { _, err := parseLoad([]string{marker, "2.0", "3.0"}); return err }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.parse()
+			if err == nil {
+				t.Fatalf("%s parser accepted %q", tc.name, marker)
+			}
+			if strings.Contains(err.Error(), marker) {
+				t.Errorf("error = %q, want it to carry none of the host's text", err)
+			}
+		})
+	}
+}
+
+// TestHostLoadParseTickTook reads the tick duration off the daemon's line, and
 // refuses text that carries none.
-func TestParseTickTook(t *testing.T) {
+func TestHostLoadParseTickTook(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string

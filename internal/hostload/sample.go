@@ -23,15 +23,13 @@ import (
 )
 
 const (
-	// SampleWindow is the interval top's two samples cover: the CPU a sample
-	// reports is what each process used over this window, not its average
-	// since it started.
+	// SampleWindow is the interval a sample's CPU reading covers: what each
+	// process used over this window, not its average since it started.
 	SampleWindow = time.Second
 	// DefaultEvery is the interval `gt host load --sample` appends at unless
 	// the operator sets another.
 	DefaultEvery = 10 * time.Second
-	// cmdTimeout bounds one host command. top's second sample costs about a
-	// second, so a command near this bound is not coming back.
+	// cmdTimeout bounds one host command.
 	cmdTimeout = 30 * time.Second
 	// bdTimeout bounds the one bd call a sample times.
 	bdTimeout = 10 * time.Second
@@ -49,10 +47,9 @@ const (
 	procLoadavg = "/proc/loadavg"
 )
 
-// The commands a sample runs. topArgv reads the CPU each process used over one
-// sample window: macOS batches two samples with -l 2, and Linux's top does the
-// same with -b -n 2. psArgv carries the command lines, since top cuts them
-// short.
+// The commands a sample runs. topArgv takes two samples so it reports the CPU
+// used over the window rather than the average since each process started;
+// psArgv carries the command lines top cuts short.
 var (
 	sysctlLoadArgv = []string{"sysctl", "-n", "vm.loadavg"}
 	psArgv         = []string{"ps", "-axo", "pid=,command="}
@@ -157,8 +154,8 @@ func (p *Prober) runBounded(ctx context.Context, bound time.Duration, argv []str
 }
 
 // owners reads the process table, the CPU each process used and the working
-// directory each runs in, and returns CPU by owner. A failed read is the
-// owners field's error: a table built without its working directories would
+// directory each runs in, and returns CPU by owner. A read that fails outright
+// is the owners field's error: a table built with no working directories would
 // charge every crew session to its programs and call the result complete.
 func (p *Prober) owners(ctx context.Context) ([]Row, error) {
 	if p.Run == nil {
@@ -185,6 +182,9 @@ func (p *Prober) owners(ctx context.Context) ([]Row, error) {
 
 // cwds asks lsof for the working directory of every process that used CPU,
 // a chunk of pids at a time, and returns the answers as one -Fpn stream.
+// lsof exits non-zero when any pid it was asked about has gone, while still
+// answering for the rest, so a chunk's answer is kept even when its call
+// failed (gt-nu89c); only a call that answered nothing fails the read.
 func (p *Prober) cwds(ctx context.Context, cpu map[int]float64) (string, error) {
 	var pids []int
 	for pid, pct := range cpu {
@@ -201,7 +201,7 @@ func (p *Prober) cwds(ctx context.Context, cpu map[int]float64) (string, error) 
 		chunk := pids[i:min(i+lsofChunk, len(pids))]
 		argv := append([]string{"lsof", "-a", "-d", "cwd", "-Fpn", "-p"}, joinInts(chunk))
 		got, err := p.runBounded(ctx, cmdTimeout, argv)
-		if err != nil {
+		if err != nil && len(got) == 0 {
 			return "", fmt.Errorf("lsof: %w", err)
 		}
 		out.Write(got)
@@ -251,8 +251,8 @@ func (p *Prober) tick(now time.Time) hostprobe.Field[float64] {
 	return hostprobe.Field[float64]{Value: took}
 }
 
-// parseTickTook reads the duration in milliseconds off the daemon's
-// "tick took 1.234s (roster ..." line (internal/daemon's specDispatchTookLine).
+// parseTickTook reads the milliseconds off a daemon line that says "tick took
+// 1.234s".
 func parseTickTook(text string) (float64, bool) {
 	const marker = "tick took "
 	i := strings.Index(text, marker)
@@ -303,7 +303,7 @@ func parseLoad(f []string) (Load, error) {
 	for i := range v {
 		x, err := strconv.ParseFloat(strings.TrimRight(f[i], ","), 64)
 		if err != nil || x < 0 || math.IsNaN(x) || math.IsInf(x, 0) {
-			return Load{}, fmt.Errorf("%q is not a load average", f[i])
+			return Load{}, errors.New("a load average is not a number")
 		}
 		v[i] = x
 	}
@@ -426,15 +426,17 @@ func tail(f tailReader, n int64) ([]byte, error) {
 	return buf[i+1:], nil
 }
 
-// townSeatCount reads the town's seat capacity from its settings; a town with
-// no settings file has no seats.
+// townSeatCount reads the town's seat capacity from its settings. A town with
+// no settings file reports an error: an unread file is not a reading of zero
+// seats.
 func townSeatCount(townRoot string) (int, error) {
-	ts, err := config.LoadTownSettings(config.TownSettingsPath(townRoot))
+	path := config.TownSettingsPath(townRoot)
+	ts, err := config.LoadTownSettings(path)
 	if err != nil {
 		return 0, fmt.Errorf("town settings: %w", err)
 	}
 	if ts == nil {
-		return 0, nil
+		return 0, fmt.Errorf("town settings: no file at %s", path)
 	}
 	return ts.PolecatPool.SeatTotal(), nil
 }

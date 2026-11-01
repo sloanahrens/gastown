@@ -20,9 +20,9 @@ import (
 // test's own timeout ends the package.
 const recorderWait = 10 * time.Second
 
-// TestSampleLoopAppends drives the sampling loop on a fake clock: one JSON
+// TestHostLoadSampleLoopAppends drives the sampling loop on a fake clock: one JSON
 // line appended per interval, in order, and a clean stop on the cancel.
-func TestSampleLoopAppends(t *testing.T) {
+func TestHostLoadSampleLoopAppends(t *testing.T) {
 	t.Parallel()
 	const interval = 10 * time.Second
 	clk := clockwork.NewFakeClockAt(sampleEpoch)
@@ -84,10 +84,10 @@ func TestSampleLoopAppends(t *testing.T) {
 	}
 }
 
-// TestRecorderRefusesUnusableSettings drives each way the recorder refuses to
+// TestHostLoadRecorderRefusesUnusableSettings drives each way the recorder refuses to
 // start or carry on: a bad interval, a missing seam, a sample it cannot
 // encode and a write that failed all end the loop with an error.
-func TestRecorderRefusesUnusableSettings(t *testing.T) {
+func TestHostLoadRecorderRefusesUnusableSettings(t *testing.T) {
 	t.Parallel()
 	okSample := func(context.Context) Sample { return Sample{} }
 	okAppend := func([]byte) error { return nil }

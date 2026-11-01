@@ -43,9 +43,9 @@ func (f fakeInfo) ModTime() time.Time { return time.Time{} }
 func (f fakeInfo) IsDir() bool        { return false }
 func (f fakeInfo) Sys() any           { return nil }
 
-// TestTailDropsThePartialFirstLine checks a tail read starts on a line
+// TestHostLoadTailDropsThePartialFirstLine checks a tail read starts on a line
 // boundary, so the parser never reads half a log line as a whole one.
-func TestTailDropsThePartialFirstLine(t *testing.T) {
+func TestHostLoadTailDropsThePartialFirstLine(t *testing.T) {
 	t.Parallel()
 	got, err := tail(fakeTail{file: []byte("0123456789\nabcdef\n")}, 10)
 	if err != nil {
@@ -56,9 +56,9 @@ func TestTailDropsThePartialFirstLine(t *testing.T) {
 	}
 }
 
-// TestTailReadsAFileShorterThanItsBound checks a log shorter than the bound is
+// TestHostLoadTailReadsAFileShorterThanItsBound checks a log shorter than the bound is
 // read whole, with no partial line to drop.
-func TestTailReadsAFileShorterThanItsBound(t *testing.T) {
+func TestHostLoadTailReadsAFileShorterThanItsBound(t *testing.T) {
 	t.Parallel()
 	got, err := tail(fakeTail{file: []byte("one line\n")}, 1<<20)
 	if err != nil {
@@ -69,9 +69,9 @@ func TestTailReadsAFileShorterThanItsBound(t *testing.T) {
 	}
 }
 
-// TestTailDropsATailWithNoCompleteLine checks a bound that lands inside one
+// TestHostLoadTailDropsATailWithNoCompleteLine checks a bound that lands inside one
 // long line returns no lines rather than half of one.
-func TestTailDropsATailWithNoCompleteLine(t *testing.T) {
+func TestHostLoadTailDropsATailWithNoCompleteLine(t *testing.T) {
 	t.Parallel()
 	got, err := tail(fakeTail{file: []byte("0123456789abcdef")}, 10)
 	if err != nil {
@@ -82,9 +82,9 @@ func TestTailDropsATailWithNoCompleteLine(t *testing.T) {
 	}
 }
 
-// TestTailRefusesAFailedRead drives the two failures a real file cannot be
+// TestHostLoadTailRefusesAFailedRead drives the two failures a real file cannot be
 // made to produce: a Stat and a ReadAt that fail.
-func TestTailRefusesAFailedRead(t *testing.T) {
+func TestHostLoadTailRefusesAFailedRead(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -105,9 +105,9 @@ func TestTailRefusesAFailedRead(t *testing.T) {
 	}
 }
 
-// TestReadTailReadsTheEndOfAFile checks the production reader: a real file is
+// TestHostLoadReadTailReadsTheEndOfAFile checks the production reader: a real file is
 // opened and only its end is read.
-func TestReadTailReadsTheEndOfAFile(t *testing.T) {
+func TestHostLoadReadTailReadsTheEndOfAFile(t *testing.T) {
 	t.Parallel()
 	path := t.TempDir() + "/daemon.log"
 	if err := os.WriteFile(path, []byte("old line\nnew line\n"), 0o644); err != nil {
@@ -122,9 +122,9 @@ func TestReadTailReadsTheEndOfAFile(t *testing.T) {
 	}
 }
 
-// TestReadTailRefusesAPathItCannotOpen checks a missing log is an error the
+// TestHostLoadReadTailRefusesAPathItCannotOpen checks a missing log is an error the
 // tick probe can report, not an empty log.
-func TestReadTailRefusesAPathItCannotOpen(t *testing.T) {
+func TestHostLoadReadTailRefusesAPathItCannotOpen(t *testing.T) {
 	t.Parallel()
 	if _, err := readTail(t.TempDir()+"/missing.log", 10); err == nil {
 		t.Fatal("readTail read a log that does not exist")

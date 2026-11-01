@@ -97,9 +97,9 @@ func sampleProber(t *testing.T, run hostprobe.Runner, readLog func(string, int64
 	}
 }
 
-// TestSampleRecordProbeFailure checks a sample carries its readings and that
+// TestHostLoadSampleRecordProbeFailure checks a sample carries its readings and that
 // one probe's failure sets that probe's error without taking the others.
-func TestSampleRecordProbeFailure(t *testing.T) {
+func TestHostLoadSampleRecordProbeFailure(t *testing.T) {
 	t.Parallel()
 	t.Run("a failed bd call leaves the rest of the record", func(t *testing.T) {
 		p := sampleProber(t, sampleRun("bd"), func(string, int64) ([]byte, error) {
@@ -156,10 +156,37 @@ func TestSampleRecordProbeFailure(t *testing.T) {
 	})
 }
 
-// TestSampleWithoutSeamsRefusesEachProbe drives the guards a Prober built
+// TestHostLoadOwnersKeepLsofPartialAnswer drives lsof's production failure
+// shape: it exits non-zero for a pid that vanished after top's sample while
+// still answering for the rest, and that answer is the owner table (gt-nu89c).
+func TestHostLoadOwnersKeepLsofPartialAnswer(t *testing.T) {
+	t.Parallel()
+	p := sampleProber(t, func(_ context.Context, argv []string) ([]byte, error) {
+		switch argv[0] {
+		case "ps":
+			return []byte(cannedPS), nil
+		case "top":
+			return []byte(cannedTop), nil
+		case "lsof":
+			return []byte(cannedLsof), errors.New("exit status 1")
+		}
+		return nil, fmt.Errorf("unexpected command %q", argv[0])
+	}, func(string, int64) ([]byte, error) { return []byte(tickLog), nil })
+	rec := record(t, p)
+	if rec.Owners.Err != "" {
+		t.Fatalf("owners = %q, want the answer lsof printed before it failed", rec.Owners.Err)
+	}
+	for _, owner := range []string{"crew/dunlin", OwnerLanding, "vm/qemu-system-aarch64"} {
+		if !hasOwner(rec.Owners.Value, owner) {
+			t.Errorf("owners = %+v, want the %s row", rec.Owners.Value, owner)
+		}
+	}
+}
+
+// TestHostLoadSampleWithoutSeamsRefusesEachProbe drives the guards a Prober built
 // without its seams hits: every probe reports its error, and none of them
 // reports an empty reading as a quiet host.
-func TestSampleWithoutSeamsRefusesEachProbe(t *testing.T) {
+func TestHostLoadSampleWithoutSeamsRefusesEachProbe(t *testing.T) {
 	t.Parallel()
 	rec := record(t, &Prober{TownRoot: t.TempDir()})
 	fields := map[string]string{
@@ -176,9 +203,9 @@ func TestSampleWithoutSeamsRefusesEachProbe(t *testing.T) {
 	}
 }
 
-// TestOwnersProbeRefusesAFailedRead drives each read the owners probe can lose:
+// TestHostLoadOwnersProbeRefusesAFailedRead drives each read the owners probe can lose:
 // a ps or top that failed, and a top that printed no table.
-func TestOwnersProbeRefusesAFailedRead(t *testing.T) {
+func TestHostLoadOwnersProbeRefusesAFailedRead(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -241,9 +268,9 @@ func TestOwnersProbeRefusesAFailedRead(t *testing.T) {
 	}
 }
 
-// TestLoadProbeRefusesBothReads checks a host that answers neither the kernel
+// TestHostLoadProbeRefusesBothReads checks a host that answers neither the kernel
 // file nor sysctl reports an error instead of an idle host.
-func TestLoadProbeRefusesBothReads(t *testing.T) {
+func TestHostLoadProbeRefusesBothReads(t *testing.T) {
 	t.Parallel()
 	p := &Prober{
 		ReadFile: func(string) ([]byte, error) { return nil, errors.New("no /proc/loadavg") },
@@ -264,18 +291,18 @@ func TestLoadProbeRefusesBothReads(t *testing.T) {
 	}
 }
 
-// TestRunArgvRefusesAnEmptyCommand checks the command runner refuses an empty
+// TestHostLoadRunArgvRefusesAnEmptyCommand checks the command runner refuses an empty
 // argv instead of starting nothing.
-func TestRunArgvRefusesAnEmptyCommand(t *testing.T) {
+func TestHostLoadRunArgvRefusesAnEmptyCommand(t *testing.T) {
 	t.Parallel()
 	if _, err := runArgv(context.Background(), t.TempDir(), nil); err == nil {
 		t.Fatal("runArgv ran an empty command")
 	}
 }
 
-// TestTownSeatCountReadsTheSeats reads the seat capacity from a town's
+// TestHostLoadTownSeatCountReadsTheSeats reads the seat capacity from a town's
 // settings file.
-func TestTownSeatCountReadsTheSeats(t *testing.T) {
+func TestHostLoadTownSeatCountReadsTheSeats(t *testing.T) {
 	t.Parallel()
 	town := writeTownSettings(t, `{"polecat_pool":{"seats":{"claude":{"cap":2},"codex":{"cap":3}}}}`)
 	got, err := townSeatCount(town)
@@ -287,9 +314,19 @@ func TestTownSeatCountReadsTheSeats(t *testing.T) {
 	}
 }
 
-// TestTownSeatCountRefusesBrokenSettings checks a settings file this package
+// TestHostLoadTownSeatCountRefusesAMissingFile checks a town with no settings
+// file reports an error, not a town with no seats.
+func TestHostLoadTownSeatCountRefusesAMissingFile(t *testing.T) {
+	t.Parallel()
+	_, err := townSeatCount(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "town settings") {
+		t.Errorf("townSeatCount = %v, want a town settings error", err)
+	}
+}
+
+// TestHostLoadTownSeatCountRefusesBrokenSettings checks a settings file this package
 // cannot read is an error, not a town with no seats.
-func TestTownSeatCountRefusesBrokenSettings(t *testing.T) {
+func TestHostLoadTownSeatCountRefusesBrokenSettings(t *testing.T) {
 	t.Parallel()
 	town := writeTownSettings(t, `{"polecat_pool":`)
 	_, err := townSeatCount(town)
