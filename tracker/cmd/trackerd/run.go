@@ -61,9 +61,13 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 		return errors.New("TRACKER_DSN is not set (a Postgres connection string)")
 	}
 
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := poolConfig(dsn)
 	if err != nil {
-		return errors.New("cannot use TRACKER_DSN as a connection string") // the parse error can echo the DSN
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return errBadDSN
 	}
 	defer pool.Close()
 	pg := store.NewPostgres(pool)
