@@ -41,6 +41,15 @@ func TestHoldChipDrawsTheReadersReading(t *testing.T) {
 			title: []string{"the hold path is not a regular file"},
 		},
 		{
+			// Neither present nor absent, and no error text: the reading ruled
+			// out nothing, so the chip says so rather than "dispatch on".
+			name:  "the reading says neither present nor absent",
+			hold:  map[string]any{"present": nil},
+			text:  "hold?",
+			class: "warn",
+			title: []string{"unknown"},
+		},
+		{
 			name:  "the reader has not reported",
 			hold:  nil,
 			text:  "dispatch ?",
@@ -101,8 +110,8 @@ func TestHoldChipCarriesTheNoteAsText(t *testing.T) {
 	}
 }
 
-// The chip sits in the header right after the verdict pill, in the two colours
-// the stylesheet gives it, and the page's redraw draws it (gt-zzkhh).
+// The chip sits in the header right after the verdict pill, and the page's
+// redraw draws it (gt-zzkhh).
 func TestHoldChipSitsInTheHeaderAfterTheVerdictPill(t *testing.T) {
 	t.Parallel()
 
@@ -118,14 +127,57 @@ func TestHoldChipSitsInTheHeaderAfterTheVerdictPill(t *testing.T) {
 	if chip < verdict {
 		t.Error("the hold chip sits before the verdict pill it belongs after")
 	}
-	// A class the stylesheet does not colour is a chip the operator cannot read
-	// at a glance, which is the whole of what it is for.
-	for _, rule := range []string{"#hold.warn{color:var(--amber)}", "#hold.quiet{color:var(--dim)}"} {
-		if !strings.Contains(page, rule) {
-			t.Errorf("the page has no %q", rule)
-		}
-	}
 	if !strings.Contains(pageFunc(t, "renderAll"), "renderHold(state)") {
 		t.Error("the page's redraw does not draw the hold chip, so it never moves")
 	}
+}
+
+// Each class the drawing puts on the chip is one the stylesheet colours for the
+// chip: the class is the one the drawn chip wears, and the colour is read from
+// the rule's declarations, not matched as text, so a reformatted rule still
+// counts and a class the stylesheet never colours does not (gt-zzkhh).
+func TestHoldChipClassesAreColouredByTheStylesheet(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		hold map[string]any
+		want string
+	}{
+		{"the hold is on", map[string]any{"present": true}, "var(--amber)"},
+		{"the town is dispatching", map[string]any{"present": false}, "var(--dim)"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			dom.call(t, "renderHold", map[string]any{"hold": tc.hold})
+			chip := dom.element(t, "hold")
+			if got := holdChipColor(t, chip.Class); got != tc.want {
+				t.Errorf("the chip wears %q, which the stylesheet colours %q, want %q", chip.Class, got, tc.want)
+			}
+		})
+	}
+}
+
+// holdChipColor is the colour the stylesheet sets on the chip when it wears
+// class: the declarations of the rule whose subject is the chip itself.
+func holdChipColor(t *testing.T, class string) string {
+	t.Helper()
+
+	for _, rule := range strings.Split(pageStyle(t), "}") {
+		sel, body, ok := strings.Cut(rule, "{")
+		if !ok || !strings.Contains(sel, "#hold") || !selectsClass(sel, class) {
+			continue
+		}
+		for _, decl := range strings.Split(body, ";") {
+			prop, val, ok := strings.Cut(decl, ":")
+			if ok && strings.TrimSpace(prop) == "color" {
+				return strings.TrimSpace(val)
+			}
+		}
+	}
+	return ""
 }

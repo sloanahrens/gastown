@@ -609,25 +609,32 @@ function renderHealthMark(s) {
 
 // renderHold draws the header's dispatch-hold chip: "hold" in amber while the
 // operator's hold file is present, a quiet "dispatch on" when it is not, and
-// "hold?" when the file could not be read. A failed read is never "dispatch
-// on": that would tell the operator a hold is off that nothing has ruled out
-// (gt-ifijm, gt-zzkhh). The note and the age sit in the title, where a long
-// note costs the header no width. A reader that has not reported yet draws
-// "dispatch ?" rather than no chip, since an absent chip would read as a town
-// that is dispatching.
+// "hold?" when the file could not be read. Only a reading that says the file
+// is absent draws "dispatch on": a failed read, and equally a reading that
+// says neither present nor absent, tells the operator nothing, and "dispatch
+// on" would claim a hold is off that nothing has ruled out (gt-ifijm,
+// gt-zzkhh). The note and the age sit in the title, where a long note costs the
+// header no width. A reader that has not reported yet draws "dispatch ?"
+// rather than no chip, since an absent chip would read as a town that is
+// dispatching.
 function renderHold(s) {
   const box = $("hold"), h = (s && s.hold) || null;
   box.hidden = false;
   if (!h) { box.className = "quiet"; box.textContent = "dispatch ?"; box.title = "the hold file has not been read yet"; return; }
   if (h.error) { box.className = "warn"; box.textContent = "hold?"; box.title = "the hold file could not be read: " + h.error; return; }
-  if (h.present) {
+  if (h.present === true) {
     const set = h.age_seconds == null ? "" : "set " + fmtDur(h.age_seconds) + " ago";
     box.className = "warn"; box.textContent = "hold";
     box.title = [set, h.note].filter(Boolean).join(": ");
     return;
   }
-  box.className = "quiet"; box.textContent = "dispatch on";
-  box.title = "no operator dispatch hold: automatic dispatch may run";
+  if (h.present === false) {
+    box.className = "quiet"; box.textContent = "dispatch on";
+    box.title = "no operator dispatch hold: automatic dispatch may run";
+    return;
+  }
+  box.className = "warn"; box.textContent = "hold?";
+  box.title = "the hold file's state is unknown: the reader reported neither a hold nor none";
 }
 
 // renderHealth shows the verdict and, when it is not green, the worst cause
