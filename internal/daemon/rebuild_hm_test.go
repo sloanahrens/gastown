@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -323,7 +325,7 @@ func TestRebuildHMInstallsWhenBehind(t *testing.T) {
 
 // TestRebuildHMRefusesABuildThatDoesNotReportItsSha: a new binary whose version
 // does not print the commit it was built from is not installed, the installed hm
-// is untouched, and the failure escalates under hm-skew (acceptance 2).
+// is untouched, and the failure escalates under the job's own key (acceptance 2).
 func TestRebuildHMRefusesABuildThatDoesNotReportItsSha(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -348,7 +350,7 @@ func TestRebuildHMRefusesABuildThatDoesNotReportItsSha(t *testing.T) {
 				t.Fatal("a refused install reached no verdict, so the interval would not hold")
 			}
 			r.wantNoRename()
-			r.wantEscalation(hmSkewAlertKey, "MEDIUM")
+			r.wantEscalation(rebuildHMAlertKey, "MEDIUM")
 		})
 	}
 }
@@ -505,8 +507,8 @@ func TestRebuildHMLeavesAForeignStageAlone(t *testing.T) {
 }
 
 // TestRebuildHMFailedInstallLeavesTheInstalledHMAndEscalates: a failure at any
-// step of the install escalates under hm-skew, and the installed hm is left in
-// place. A failed second rename is rolled back from hm.prev, and the escalation
+// step of the install escalates under the job's own key, and the installed hm is
+// left in place. A failed second rename is rolled back from hm.prev, and the escalation
 // says the installed hm stays in force. A failed rollback leaves the path empty:
 // it escalates at HIGH and names hm.prev, and never says the installed hm stays.
 func TestRebuildHMFailedInstallLeavesTheInstalledHMAndEscalates(t *testing.T) {
@@ -576,7 +578,7 @@ func TestRebuildHMFailedInstallLeavesTheInstalledHMAndEscalates(t *testing.T) {
 			if severity == "" {
 				severity = "MEDIUM"
 			}
-			r.wantEscalation(hmSkewAlertKey, severity)
+			r.wantEscalation(rebuildHMAlertKey, severity)
 			if len(r.rec.Escalations()) == 1 {
 				msg := r.rec.Escalations()[0].Escalation.Reason
 				if tc.wantInMsg != "" && !strings.Contains(msg, tc.wantInMsg) {
@@ -586,6 +588,119 @@ func TestRebuildHMFailedInstallLeavesTheInstalledHMAndEscalates(t *testing.T) {
 					t.Errorf("escalation %q says %q, which is false once the rollback failed", msg, tc.wantNotInMsg)
 				}
 			}
+		})
+	}
+}
+
+// TestRebuildHMFailedInstallEscalatesUnderItsOwnKey: a failed install escalates
+// once, at MEDIUM, under the job's own key. wantEscalation requires exactly one
+// escalation under that key, so none goes under hm-skew, whose hourly re-fire
+// would otherwise rewrite the failure text (acceptance 1).
+func TestRebuildHMFailedInstallEscalatesUnderItsOwnKey(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(*rebuildHMAnswers)
+	}{
+		{name: "checkout fails", mutate: func(a *rebuildHMAnswers) { a.checkoutErr = true }},
+		{name: "go install fails", mutate: func(a *rebuildHMAnswers) { a.buildErr = true }},
+		{name: "the build does not report its sha", mutate: func(a *rebuildHMAnswers) { a.builtOut = "hm dev\n" }},
+		{name: "keeping the installed hm fails", mutate: func(a *rebuildHMAnswers) { a.renameAsideErr = true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := rebuildHMBehindAnswers()
+			tc.mutate(&a)
+			r := newRebuildHMRig(t, a)
+
+			if !r.d.runRebuildHM() {
+				t.Fatal("a failed install reached no verdict, so the interval would not hold")
+			}
+			r.wantEscalation(rebuildHMAlertKey, "MEDIUM")
+		})
+	}
+}
+
+// TestRebuildHMHaltedSwapEscalatesHighUnderItsOwnKey: a swap whose rollback also
+// failed leaves the installed path empty. It escalates at HIGH under the job's own
+// key, and the message names hm.prev as the file to restore from (acceptance 2).
+func TestRebuildHMHaltedSwapEscalatesHighUnderItsOwnKey(t *testing.T) {
+	t.Parallel()
+	a := rebuildHMBehindAnswers()
+	a.renameIntoErr, a.rollbackErr = true, true
+	r := newRebuildHMRig(t, a)
+
+	if !r.d.runRebuildHM() {
+		t.Fatal("a halted swap reached no verdict, so the interval would not hold")
+	}
+	r.wantEscalation(rebuildHMAlertKey, "HIGH")
+	if reason := r.rec.Escalations()[0].Escalation.Reason; !strings.Contains(reason, "hm.prev") {
+		t.Errorf("escalation %q does not name hm.prev", reason)
+	}
+}
+
+// TestRebuildHMClearsItsKeyOnlyAfterAVerdict: a cycle that installs, and a cycle
+// that finds hm current, each clear the job's key once. A cycle that defers clears
+// nothing, since it learned nothing. A clear that does not reach the town is logged
+// and not escalated, and the cycle still reports its verdict (acceptance 3).
+func TestRebuildHMClearsItsKeyOnlyAfterAVerdict(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		mutate      func(*rebuildHMAnswers)
+		clearErr    bool   // the clear never reaches the town
+		wantVerdict bool   // the cycle reports a verdict
+		wantClears  int    // clears under the job's key
+		wantLog     string // what the log names, when set
+	}{
+		{name: "installs", mutate: func(*rebuildHMAnswers) {}, wantVerdict: true, wantClears: 1},
+		{
+			name:        "finds hm current",
+			mutate:      func(a *rebuildHMAnswers) { a.installedSHA = rebuildHMHeadSHA },
+			wantVerdict: true,
+			wantClears:  1,
+		},
+		{
+			name:        "installs, and the clear does not reach the town",
+			mutate:      func(*rebuildHMAnswers) {},
+			clearErr:    true,
+			wantVerdict: true,
+			wantClears:  1,
+			wantLog:     "did not reach the town",
+		},
+		{name: "the installed hm cannot be read", mutate: func(a *rebuildHMAnswers) { a.installedErr = true }},
+		{name: "origin/main cannot be read in the clone", mutate: func(a *rebuildHMAnswers) { a.headErr = true }},
+		{name: "the install lock is busy", mutate: func(a *rebuildHMAnswers) { a.lockBusy = true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := rebuildHMBehindAnswers()
+			tc.mutate(&a)
+			r := newRebuildHMRig(t, a)
+			var logs bytes.Buffer
+			r.d.logger = log.New(&logs, "", 0)
+			if tc.clearErr {
+				r.rec.Fail(notifyfake.KindClear, errors.New("gt escalate: Dolt is unreachable"))
+			}
+
+			if got := r.d.runRebuildHM(); got != tc.wantVerdict {
+				t.Errorf("verdict = %v, want %v", got, tc.wantVerdict)
+			}
+			clears := r.rec.Clears()
+			if len(clears) != tc.wantClears {
+				t.Fatalf("clears = %+v, want %d under %s", clears, tc.wantClears, rebuildHMAlertKey)
+			}
+			for _, c := range clears {
+				if !slices.Contains(c.Fingerprints, rebuildHMAlertKey) {
+					t.Errorf("clear %+v is not under %s", c, rebuildHMAlertKey)
+				}
+			}
+			if tc.wantLog != "" && !strings.Contains(logs.String(), tc.wantLog) {
+				t.Errorf("log = %q, want it to name %q", logs.String(), tc.wantLog)
+			}
+			r.wantNoEscalation()
 		})
 	}
 }
